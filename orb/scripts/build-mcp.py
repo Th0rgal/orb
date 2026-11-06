@@ -1,35 +1,26 @@
 #!/usr/bin/env python3
-"""Build and stage the native MCP companion for Tauri (always a debug build)."""
-import json
+"""Build and stage the native Lean 4 MCP companion (`sandboxed-mcp`) for Orb desktop shells."""
+import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 
 root = Path(__file__).resolve().parents[2]
-metadata = json.loads(subprocess.check_output(
-    ["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=root))
-target = Path(metadata["target_directory"])
+target = Path(os.environ.get("CARGO_TARGET_DIR", str(root / "target"))) / "debug"
 subprocess.run(
-    [str(root / "scripts/build_orb_bins.sh"), "--ensure-lean", "--out-dir", str(target / "debug"), "--only", "sandboxed-mcp"],
+    [str(root / "scripts/build_orb_bins.sh"), "--ensure-lean", "--out-dir", str(target), "--only", "sandboxed-mcp"],
     cwd=root,
     check=True,
 )
-host = next(line.removeprefix("host: ") for line in subprocess.check_output(
-    ["rustc", "-vV"], text=True).splitlines() if line.startswith("host: "))
-suffix = ".exe" if "windows" in host else ""
-source = target / "debug" / f"sandboxed-mcp{suffix}"
-destination = root / "orb/src-tauri/binaries" / f"sandboxed-mcp-{host}{suffix}"
-destination.parent.mkdir(parents=True, exist_ok=True)
-shutil.copy2(source, destination)
-# In development the native app is unbundled. Resolve the same companion next
-# to its executable, without relying on a repository-controlled PATH entry.
-native_metadata = json.loads(subprocess.check_output([
-    "cargo", "metadata", "--format-version", "1", "--no-deps",
-    "--manifest-path", str(root / "orb/src-tauri/Cargo.toml")], cwd=root))
-native_target = Path(native_metadata["target_directory"]) / "debug"
-native_target.mkdir(parents=True, exist_ok=True)
-native_companion = native_target / f"sandboxed-mcp{suffix}"
-# CARGO_TARGET_DIR may intentionally share the Core and Orb build cache.
-if source.resolve() != native_companion.resolve():
-    shutil.copy2(source, native_companion)
-print(f"Staged sandboxed-mcp for {host}")
+sys_name = platform.system().lower()
+mach = platform.machine().lower()
+suffix = ".exe" if "windows" in sys_name else ""
+source = target / f"sandboxed-mcp{suffix}"
+
+shell_dir = root / ("macos_shell" if sys_name == "darwin" else "linux_shell") / "build"
+shell_dir.mkdir(parents=True, exist_ok=True)
+dest = shell_dir / f"sandboxed-mcp{suffix}"
+if source.resolve() != dest.resolve():
+    shutil.copy2(source, dest)
+print(f"Staged sandboxed-mcp ({sys_name}/{mach}) at {dest}")

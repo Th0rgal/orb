@@ -1,12 +1,12 @@
 /-
   OrbCore.SelfTest: End-to-End Verification Suite for Wave 4 `OrbCore` (`orb-core-test`):
-  1. All 5 `OrbCore.Spec` `MetaGateSpec` gates (fail-closed `DEV_MODE=false` secrets, `DEV_MODE=true` non-loopback rejection, `:80/api/console/ws` JWT auth, transfer fence, proxy failover, deploy unit allowlist).
-  2. Live SQLite `CoreStore` (`missions.db`, `projects.db`, `ask.db`, `idempotency_keys.db`), parameterized queries, machine-transfer fencing, automations & routing chains.
-  3. `OrbCore.Search` conversation indexing & trigram SST lookup.
+  1. All 5 `OrbCore.Spec` `MetaGateSpec` gates (fail-closed `DEV_MODE=false` secrets, `DEV_MODE=true` non-loopback rejection, `:80/api/console/ws` JWT auth + conflicting-credential rejection, transfer fence, proxy failover, deploy unit allowlist).
+  2. Live SQLite `CoreStore` (`missions.db`, `projects.db`, `ask.db`, `idempotency_keys.db`), parameterized queries, `BEGIN IMMEDIATE` machine-transfer fencing, privilege leases & audit log, automations & routing chains.
+  3. `OrbCore.Search` conversation indexing & in-memory trigram SST lookup.
   4. All 9 `OrbCore.Harness` contract tests.
-  5. `/v1/*` `OrbCore.Proxy` pre-first-byte `429`/`503` failover.
-  6. Live loopback HTTP/1.1 + WebSocket dispatch (`/api/health`, `/api/auth/login`, `/api/console/ws` `401` without JWT and `101` with `jwt.<token>`).
-  7. All 78 `OrbCore.HostTests` & optional `--emit-evidence-log <path>` receipt generation.
+  5. `/v1/*` `OrbCore.Proxy` pre-first-byte `429`/`503` failover + hop-by-hop header sanitization.
+  6. Live HTTP/1.1 + WebSocket dispatch (`/api/health`, `/api/auth/login` with `SANDBOXED_USERS`, `/v1/*` auth, `/api/privilege-access/verify-and-log` fail-closed vs valid lease, `/api/console/ws` `401` without JWT and `101` echoing `Sec-WebSocket-Protocol: jwt.<token>`).
+  7. All 82 `OrbCore.HostTests` & optional `--emit-evidence-log <path>` receipt generation.
 -/
 import OrbCore
 
@@ -14,6 +14,7 @@ namespace OrbCore.SelfTest
 
 open LeanSys.Posix
 open LeanSys.Http
+open LeanSys.Auth
 open OrbCore.Spec
 open OrbCore.Store
 open OrbCore.Search
@@ -36,7 +37,7 @@ private def exceptStrEq (a b : Except String String) : Bool :=
   | _, _ => false
 
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
-  -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`)
+  -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
   let prodNoSecrets : CoreConfig := { devMode := false, host := "127.0.0.1" }
   let prodPlaceholder : CoreConfig := {
     devMode := false, host := "127.0.0.1",
@@ -49,7 +50,14 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let prodValid : CoreConfig := {
     devMode := false, host := "127.0.0.1",
     dashboardPassword := "ci-test-strong-passphrase",
-    jwtSecret := "ci-test-random-jwt-secret-0123456789abcdef"
+    jwtSecret := "ci-test-random-jwt-secret-0123456789abcdef",
+    usersJson := "[{\"username\":\"alice\",\"password\":\"alice-strong-pass-99\"}]",
+    proxySecret := "proxy-secret-0123456789abcdef0123456789"
+  }
+  let prodUsersOnly : CoreConfig := {
+    devMode := false, host := "127.0.0.1",
+    jwtSecret := "ci-test-random-jwt-secret-0123456789abcdef",
+    usersJson := "[{\"username\":\"bob\",\"password\":\"bob-strong-pass-9999\"}]"
   }
   let devNonLoopback : CoreConfig := { devMode := true, host := "0.0.0.0" }
   let devLoopback : CoreConfig := { devMode := true, host := "127.0.0.1" }
@@ -57,18 +65,22 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
      (validateRuntimeSecurity prodPlaceholder).isOk ||
      (validateRuntimeSecurity prodShortJwt).isOk ||
      !(validateRuntimeSecurity prodValid).isOk ||
+     !(validateRuntimeSecurity prodUsersOnly).isOk ||
      (validateRuntimeSecurity devNonLoopback).isOk ||
-     !(validateRuntimeSecurity devLoopback).isOk then
-    IO.eprintln "[orb-core-test] FAIL: validateRuntimeSecurity fail-closed checks failed"
+     !(validateRuntimeSecurity devLoopback).isOk ||
+     verifyConsoleWsAuth 1 1 1 0 1700000000 1700003600 != 0 ||
+     verifyConsoleWsAuth 1 1 0 0 1700000000 1700003600 != 1 then
+    IO.eprintln "[orb-core-test] FAIL: validateRuntimeSecurity or verifyConsoleWsAuth checks failed"
     return 1
 
-  -- 2. Service-scoped VM prefix & deploy unit confinement
+  -- 2. Service-scoped VM prefix & deploy unit confinement (including path traversal rejection)
   if sandboxNamePrefixFor "/usr/local/bin/sandboxed-sh" != "orb-managed-" ||
      sandboxNamePrefixFor "/usr/local/bin/sandboxed-sh-prod" != "orb-managed-" ||
      sandboxNamePrefixFor "/usr/local/bin/sandboxed-sh-dev" != "orb-managed-dev-" ||
      !exceptStrEq (validateDeployServiceUnit "sandboxed-sh") (.ok "sandboxed-sh.service") ||
      !exceptStrEq (validateDeployServiceUnit "orb-node") (.ok "sandboxed-node.service") ||
      !exceptStrEq (validateDeployServiceUnit "orb-privd.service") (.ok "orb-privd.service") ||
+     (validateDeployServiceUnit "../sandboxed-sh").isOk ||
      (validateDeployServiceUnit "../evil").isOk ||
      (validateDeployServiceUnit "sshd").isOk then
     IO.eprintln "[orb-core-test] FAIL: managed prefix or deploy unit confinement failed"
@@ -81,12 +93,13 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     | do IO.eprintln "[orb-core-test] FAIL: openCoreStore failed"; return 1
   let m1 : MissionRecord := {
     id := "m-alpha", title := "Verify Lean 4 Core", status := "awaiting_user",
-    backend := "codex", modelOverride := "", workingDirectory := tmpRoot,
+    backend := "codex", modelOverride := "", modelEffort := "high", workingDirectory := tmpRoot,
     updatedAt := "2026-11-06T00:00:00Z", totalCostCents := 42
   }
   let .ok () ← upsertMission store m1 | do closeCoreStore store; return 1
   let .ok missionsJson ← listMissionsJson store | do closeCoreStore store; return 1
-  if (missionsJson.splitOn "\"total_cost_cents\":42").length != 2 then
+  if (missionsJson.splitOn "\"total_cost_cents\":42").length != 2 ||
+     (missionsJson.splitOn "\"model_effort\":\"high\"").length != 2 then
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: listMissionsJson mismatch: {missionsJson}"
     return 1
@@ -126,7 +139,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln "[orb-core-test] FAIL: runAllHarnessContractTests failed"
     return 1
 
-  -- 5. `/v1/*` Proxy pre-first-byte failover (`429` on primary -> `200` on backup)
+  -- 5. `/v1/*` Proxy pre-first-byte failover (`429` on primary -> `200` on backup) + header sanitization
   let chain : RoutingChain := {
     id := "c1", name := "primary-backup",
     targets := #[
@@ -138,18 +151,24 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     if tgt.accountId == "acct-1" then
       return .ok { status := 429, headers := #[], body := "rate_limited".toUTF8 }
     else
-      return .ok { status := 200, headers := #[], body := "{\"id\":\"resp_ok\"}".toUTF8 })
-  if proxyOut.status != 200 || proxyOut.selectedAccount != "acct-2" || proxyOut.attemptsUsed != 2 then
+      return .ok {
+        status := 200,
+        headers := #[("Transfer-Encoding", "chunked"), ("Content-Type", "application/json"), ("X-Provider", "anthropic")],
+        body := "{\"id\":\"resp_ok\"}".toUTF8
+      })
+  if proxyOut.status != 200 || proxyOut.selectedAccount != "acct-2" || proxyOut.attemptsUsed != 2 ||
+     proxyOut.headers.any (fun (k, _) => k.toLower == "transfer-encoding") then
     closeCoreStore store
-    IO.eprintln "[orb-core-test] FAIL: forwardProxyChain failover mismatch"
+    IO.eprintln "[orb-core-test] FAIL: forwardProxyChain failover or header sanitization mismatch"
     return 1
 
-  -- 6. HTTP/WS Dispatch checks (`/api/health`, `/api/console/ws` 401 unauthenticated vs 101 with `jwt.<token>`)
+  -- 6. HTTP/WS Dispatch checks (`/api/health`, `SANDBOXED_USERS` login, `/v1/*` auth, privilege lease verification, WS subprotocol echo)
   let managedRef ← IO.mkRef ({ enabled := true, boatEnabled := true } : ManagedFleetState)
-  let chainsRef ← IO.mkRef #[chain]
+  let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
+  let seqRef ← IO.mkRef (1 : UInt64)
   let appSt : CoreAppState := {
     cfg := prodValid, store := store, searchIdx? := some sIdx1,
-    managedRef := managedRef, chainsRef := chainsRef
+    managedRef := managedRef, chainsRef := chainsRef, seqRef := seqRef
   }
   let nowSec : UInt64 := 1700001000
   let .ok healthReq := parseRequest "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".toUTF8 none | do closeCoreStore store; return 1
@@ -162,6 +181,54 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln s!"[orb-core-test] FAIL: /api/health contract mismatch: {healthStr}"
     return 1
 
+  -- Login with `SANDBOXED_USERS` account (`alice`)
+  let loginBody := "{\"username\":\"alice\",\"password\":\"alice-strong-pass-99\"}"
+  let loginRaw := s!"POST /api/auth/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {loginBody.utf8ByteSize}\r\n\r\n{loginBody}".toUTF8
+  let .ok loginReq := parseRequest loginRaw none | do closeCoreStore store; return 1
+  let .ok loginResp ← dispatchCoreRequest appSt loginReq nowSec | do closeCoreStore store; return 1
+  if loginResp.status != 200 then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: SANDBOXED_USERS login failed"
+    return 1
+
+  -- Unauthenticated `/v1/responses` MUST return 401; authenticated with `SANDBOXED_PROXY_SECRET` proceeds to chain (503 on empty chain)
+  let v1UnauthRaw := "POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{}".toUTF8
+  let .ok v1UnauthReq := parseRequest v1UnauthRaw none | do closeCoreStore store; return 1
+  let .ok v1UnauthResp ← dispatchCoreRequest appSt v1UnauthReq nowSec | do closeCoreStore store; return 1
+  let v1AuthRaw := (s!"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {prodValid.proxySecret}\r\nContent-Length: 2\r\n\r\n" ++ "{}").toUTF8
+  let .ok v1AuthReq := parseRequest v1AuthRaw none | do closeCoreStore store; return 1
+  let .ok v1AuthResp ← dispatchCoreRequest appSt v1AuthReq nowSec | do closeCoreStore store; return 1
+  if v1UnauthResp.status != 401 || v1AuthResp.status != 503 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: /v1/* auth gate mismatch ({v1UnauthResp.status}, {v1AuthResp.status})"
+    return 1
+
+  -- Privilege lease verification: unknown lease -> 403; valid stored lease -> 200
+  let validJwt := mintSessionToken prodValid.jwtSecret (nowSec + 3600)
+  let forgedPrivBody := "{\"mission_id\":\"m-alpha\",\"lease_token\":\"forged-lease-000\",\"target_host\":\"ashur\",\"executing_host\":\"ashur\",\"command\":\"systemctl status sandboxed-sh.service\"}"
+  let forgedPrivRaw := s!"POST /api/privilege-access/verify-and-log HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {forgedPrivBody.utf8ByteSize}\r\n\r\n{forgedPrivBody}".toUTF8
+  let .ok forgedPrivReq := parseRequest forgedPrivRaw none | do closeCoreStore store; return 1
+  let .ok forgedPrivResp ← dispatchCoreRequest appSt forgedPrivReq nowSec | do closeCoreStore store; return 1
+  if forgedPrivResp.status != 403 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: forged privilege lease was not rejected (got {forgedPrivResp.status})"
+    return 1
+
+  let .ok () ← upsertPrivilegeLease store {
+    grantId := "grant-1", leaseToken := "lease-live-1234567890", missionId := "m-alpha",
+    targetHost := "ashur", scope := "ops_admin", allowedUnitsJson := "[\"sandboxed-sh.service\"]",
+    requireForceCmd := false, biometricSigned := true, revoked := false, expiresAtEpoch := nowSec + 300
+  } | do closeCoreStore store; return 1
+  let validPrivBody := "{\"mission_id\":\"m-alpha\",\"lease_token\":\"lease-live-1234567890\",\"target_host\":\"ashur\",\"executing_host\":\"ashur\",\"command\":\"systemctl restart sandboxed-sh.service\"}"
+  let validPrivRaw := s!"POST /api/privilege-access/verify-and-log HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {validPrivBody.utf8ByteSize}\r\n\r\n{validPrivBody}".toUTF8
+  let .ok validPrivReq := parseRequest validPrivRaw none | do closeCoreStore store; return 1
+  let .ok validPrivResp ← dispatchCoreRequest appSt validPrivReq nowSec | do closeCoreStore store; return 1
+  if validPrivResp.status != 200 || ((String.fromUTF8! validPrivResp.body).splitOn "\"allow_exec\":true").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: valid privilege lease rejected: {String.fromUTF8! validPrivResp.body}"
+    return 1
+
+  -- WebSocket upgrade: 401 without JWT; 101 with `Sec-WebSocket-Protocol: jwt.<tok>` echoed in response!
   let wsUnauthRaw := "GET /api/console/ws HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n".toUTF8
   let .ok wsUnauthReq := parseRequest wsUnauthRaw none | do closeCoreStore store; return 1
   let .ok wsUnauthResp ← dispatchCoreRequest appSt wsUnauthReq nowSec | do closeCoreStore store; return 1
@@ -170,14 +237,15 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln s!"[orb-core-test] FAIL: unauthenticated /api/console/ws returned {wsUnauthResp.status} instead of 401"
     return 1
 
-  let validJwt := mintSessionToken prodValid.jwtSecret (nowSec + 3600)
   let wsAuthRaw := s!"GET /api/console/ws HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: jwt.{validJwt}\r\n\r\n".toUTF8
   let .ok wsAuthReq := parseRequest wsAuthRaw none | do closeCoreStore store; return 1
   match ← dispatchCoreRequest appSt wsAuthReq nowSec with
   | .error raw101 =>
-    if ((String.fromUTF8! raw101).splitOn "101 Switching Protocols").length != 2 then
+    let resp101 := String.fromUTF8! raw101
+    if (resp101.splitOn "101 Switching Protocols").length != 2 ||
+       (resp101.splitOn s!"Sec-WebSocket-Protocol: jwt.{validJwt}").length != 2 then
       closeCoreStore store
-      IO.eprintln "[orb-core-test] FAIL: authenticated /api/console/ws did not upgrade to 101"
+      IO.eprintln s!"[orb-core-test] FAIL: authenticated /api/console/ws missing 101 or echoed subprotocol: {resp101}"
       return 1
   | .ok r =>
     closeCoreStore store

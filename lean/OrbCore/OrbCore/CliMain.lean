@@ -35,8 +35,9 @@ def runDeploySubcommand (args : List String) : IO UInt32 := do
     if dryRun then
       IO.println s!"\{\"ok\":true,\"dry_run\":true,\"unit\":\"{unitName}\"}"
       return 0
+    let sysCtlCmd ← if ← System.FilePath.pathExists "/bin/systemctl" then pure "/bin/systemctl" else pure "/usr/bin/systemctl"
     let res ← IO.Process.output {
-      cmd := "/bin/systemctl"
+      cmd := sysCtlCmd
       args := #["restart", unitName]
     }
     if res.exitCode != 0 then

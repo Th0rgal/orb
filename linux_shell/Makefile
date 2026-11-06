@@ -3,9 +3,13 @@ PKG_CONFIG ?= pkg-config
 WEBKIT_PKGS := gtk+-3.0 webkit2gtk-4.1
 
 HAS_WEBKIT := $(shell $(PKG_CONFIG) --exists $(WEBKIT_PKGS) 2>/dev/null && echo 1 || echo 0)
+UNAME_S := $(shell uname -s)
 
-CFLAGS := -std=gnu11 -O2 -Wall -Wextra -Werror
+CFLAGS := -std=gnu11 -O2 -Wall -Wextra -Werror -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE
 LDFLAGS :=
+ifeq ($(UNAME_S),Linux)
+  LDFLAGS += -pie -Wl,-z,relro,-z,now
+endif
 
 ifeq ($(HAS_WEBKIT),1)
   CFLAGS += -DORB_HAS_WEBKITGTK $(shell $(PKG_CONFIG) --cflags $(WEBKIT_PKGS))

@@ -5,11 +5,11 @@ import OrbLocald.Spec
 
 /-
   OrbLocald.Rpc — Loopback JSON-RPC & transport proxy bridge for Orb desktop:
-    - All 88 desktop IPC commands + `plugin:app|version`
-    - `transport_bridge_configure` with 6 dedicated SSE stream shard URLs,
+    - All 88 desktop IPC commands (`87` commands + `plugin:app|version`)
+    - `transport_bridge_configure` with 6 dedicated live SSE stream shard sockets,
       0ms local OPTIONS CORS preflight, DoH (`1.1.1.1` / `8.8.8.8`), and
       3-way failover (`orbcore.thomas.md` <-> `agent-backend.nico-best-pc-ever.ovh` <-> `agent-backend.thomas.md`)
-    - `Channel<T>` subscription token registry (`*_subscribe` / `*_unsubscribe`)
+    - `Channel<T>` subscription token & queued event delivery (`*_subscribe` / `*_unsubscribe` / `__orb_poll_events`)
     - Paloma Secure Enclave approval signer delegation (`orb-signer`) & grace gate
 -/
 
@@ -30,11 +30,11 @@ def defaultDohEndpoints : Array String := #[
 ]
 
 structure TransportBridgeState where
-  proxyPort           : UInt16 := 19480
-  bridgeUuid          : String := "00000000-0000-4000-8000-000000000001"
-  shardPorts          : Array UInt16 := #[19481, 19482, 19483, 19484, 19485, 19486]
-  failoverOrigins     : Array String := defaultFailoverOrigins
-  dohEndpoints        : Array String := defaultDohEndpoints
+  proxyPort       : UInt16 := 19480
+  bridgeUuid      : String := "00000000-0000-4000-8000-000000000001"
+  shardPorts      : Array UInt16 := #[19481, 19482, 19483, 19484, 19485, 19486]
+  failoverOrigins : Array String := defaultFailoverOrigins
+  dohEndpoints    : Array String := defaultDohEndpoints
   deriving Repr, Inhabited
 
 def TransportBridgeState.proxyBaseUrl (st : TransportBridgeState) : String :=
@@ -51,6 +51,32 @@ def TransportBridgeState.toJson (st : TransportBridgeState) : JVal :=
     ("doh_endpoints", .arr (st.dohEndpoints.map .str))
   ]
 
+/-- Read `n` CSPRNG bytes from `/dev/urandom` as lowercase hex (`2*n` chars). -/
+def randomHexBytes (nBytes : Nat := 16) : IO String := do
+  let h ← IO.FS.Handle.mk "/dev/urandom" .read
+  let bs ← h.read nBytes.toUSize
+  return LeanSys.Auth.bytesToHexLower bs
+
+/-- Generate a RFC 4122 v4 random UUID (`8-4-4-4-12` lowercase hex) from `/dev/urandom`. -/
+def randomUuidV4 : IO String := do
+  let h ← IO.FS.Handle.mk "/dev/urandom" .read
+  let raw ← h.read 16
+  if raw.size < 16 then
+    return "550e8400-e29b-41d4-a716-446655440000"
+  let b6 := ((raw.get! 6) &&& 0x0F) ||| 0x40
+  let b8 := ((raw.get! 8) &&& 0x3F) ||| 0x80
+  let mut patched := ByteArray.emptyWithCapacity 16
+  for i in [0:16] do
+    if i == 6 then patched := patched.push b6
+    else if i == 8 then patched := patched.push b8
+    else patched := patched.push (raw.get! i)
+  let hex := LeanSys.Auth.bytesToHexLower patched
+  return (hex.take 8).toString ++ "-" ++
+         ((hex.drop 8).take 4).toString ++ "-" ++
+         ((hex.drop 12).take 4).toString ++ "-" ++
+         ((hex.drop 16).take 4).toString ++ "-" ++
+         (hex.drop 20).toString
+
 /-- Check if an HTTP method is safe to retry across failover origins without Idempotency-Key. -/
 def isSafeHttpMethod (m : String) : Bool :=
   let u := m.toUpper
@@ -65,22 +91,39 @@ def canFailoverRequest (method : String) (hasIdempotencyKey : Bool)
   let countU8 : UInt8 := UInt8.ofNat (min origins.size 255)
   verifyTransportWriteRetry safeFlag idemFlag nextU8 countU8 == 1
 
-/-- Check whether a Paloma approval payload is eligible to reuse Touch ID grace. -/
+private def isHexChar (c : Char) : Bool :=
+  ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f') || ('A' ≤ c && c ≤ 'F')
+
+/-- Strict canonical `8-4-4-4-12` hex UUID check matching `macos_shell/signer/main.swift`. -/
+def isCanonicalUuid (s : String) : Bool :=
+  if s.utf8ByteSize != 36 then false
+  else
+    match s.splitOn "-" with
+    | [p1, p2, p3, p4, p5] =>
+      p1.utf8ByteSize == 8 && p2.utf8ByteSize == 4 && p3.utf8ByteSize == 4 &&
+      p4.utf8ByteSize == 4 && p5.utf8ByteSize == 12 &&
+      [p1, p2, p3, p4, p5].all (fun part => part.toList.all isHexChar)
+    | _ => false
+
+/-- Check whether a Paloma approval payload is eligible to reuse Touch ID grace
+    (matches `macos_shell/signer/main.swift` line-by-line: `paloma-approval-v1`, non-empty summary,
+    exact `/api/bitwarden/requests/<canonical-uuid>/approve|reject` without `//` collapse). -/
 def isPalomaPayloadGraceEligible (payload : String) : Bool :=
   let lines := (payload.splitOn "\n").toArray
-  if lines.size >= 6 then
+  if lines.size >= 6 && lines[0]! == "paloma-approval-v1" && !(lines[5]!).trimAscii.toString.isEmpty then
     let routeParts := ((lines[2]!).splitOn " ").toArray
     if routeParts.size == 2 then
       let isPost : UInt8 := if routeParts[0]! == "POST" then 1 else 0
-      let segs := ((routeParts[1]!).splitOn "/").filter (· != "") |>.toArray
-      if segs.size == 5 then
+      let rawPath := routeParts[1]!
+      let segs := (rawPath.splitOn "/").toArray
+      if rawPath.startsWith "/" && segs.size == 6 && segs[0]! == "" then
         let isBw : UInt8 :=
-          if segs[0]! == "api" && segs[1]! == "bitwarden" && segs[2]! == "requests" then 1 else 0
-        let u := segs[3]!
-        let uuidLen : UInt32 := if (u.splitOn "-").length == 5 then UInt32.ofNat u.utf8ByteSize else 0
-        let act := segs[4]!
-        let isAct : UInt8 := if act == "approve" || act == "reject" then 1 else 0
-        verifyPalomaGraceEligible isPost isBw uuidLen isAct == 1
+          if segs[1]! == "api" && segs[2]! == "bitwarden" && segs[3]! == "requests" then 1 else 0
+        let u := segs[4]!
+        let uuidLen : UInt32 := if isCanonicalUuid u then UInt32.ofNat u.utf8ByteSize else 0
+        let act := segs[5]!
+        let actCode : UInt8 := if act == "approve" then 1 else if act == "reject" then 2 else 0
+        verifyPalomaGraceEligible isPost isBw uuidLen actCode == 1
       else false
     else false
   else false
@@ -92,14 +135,18 @@ structure SubscriptionEntry where
   deriving Repr, Inhabited
 
 structure LocaldState where
-  launchToken     : String
-  bridge          : TransportBridgeState := {}
-  nextSubToken    : Nat := 1
-  subscriptions   : Array SubscriptionEntry := #[]
+  launchToken         : String
+  rpcPort             : UInt16 := 19479
+  bridge              : TransportBridgeState := {}
+  nextSubToken        : Nat := 1
+  subscriptions       : Array SubscriptionEntry := #[]
+  queuedChannelEvents : Array (Nat × JVal) := #[]
   clientLinkConnected : Bool := false
   approvalGraceSecs   : Nat := 300
   grantedFolders      : Array String := #[]
   connectionJson      : JVal := .obj #[("url", .str ""), ("token", .str "")]
+  hostOs              : String := "linux"
+  signerBin?          : Option String := none
   deriving Inhabited
 
 def LocaldState.subscribe (st : LocaldState) (channel : String) : (Nat × LocaldState) :=
@@ -112,14 +159,28 @@ def LocaldState.unsubscribe (st : LocaldState) (tok : Nat) : LocaldState :=
       if e.token == tok then { e with active := false } else e }
 
 def LocaldState.clearAllSubscriptions (st : LocaldState) : LocaldState :=
-  { st with subscriptions := #[] }
+  { st with subscriptions := #[], queuedChannelEvents := #[] }
 
-/-- Validate loopback host + per-launch bearer token via `verifyLocaldRpcAuth`. -/
+/-- Validate loopback host + ≥32-byte non-placeholder per-launch bearer token via `verifyLocaldRpcAuth`. -/
 def checkRpcAuth (remoteHost : String) (providedToken : String) (expectedToken : String) : Bool :=
-  let isLoop : UInt8 := if remoteHost == "127.0.0.1" || remoteHost == "localhost" then 1 else 0
-  let tokLen : UInt32 := UInt32.ofNat (min expectedToken.utf8ByteSize 65535)
-  let tokOk : UInt8 := if LeanSys.Auth.ctEqString providedToken expectedToken then 1 else 0
+  let isLoop : UInt8 :=
+    if remoteHost == "127.0.0.1" || remoteHost == "localhost" || remoteHost == "::1" then 1 else 0
+  let isPlaceholder : Bool :=
+    expectedToken == "orb-locald-default-token" || expectedToken == "dev-token" || expectedToken == "default"
+  let tokLen : UInt32 :=
+    if isPlaceholder then 0 else UInt32.ofNat (min expectedToken.utf8ByteSize 65535)
+  let tokOk : UInt8 := if !isPlaceholder && LeanSys.Auth.ctEqString providedToken expectedToken then 1 else 0
   verifyLocaldRpcAuth isLoop tokOk tokLen == 1
+
+/-- Check whether an HTTP `Origin` header is an allowed local desktop shell origin (never wildcard `*`). -/
+def isAllowedLocaldOrigin (origin? : Option String) : Bool :=
+  match origin? with
+  | none => true
+  | some raw =>
+    let o := raw.trimAscii.toString
+    o.isEmpty || o == "null" || o == "file://" || o == "tauri://localhost" ||
+    o.startsWith "http://127.0.0.1:" || o.startsWith "http://localhost:" ||
+    o == "http://127.0.0.1" || o == "http://localhost"
 
 /-- Canonical list of all 88 desktop IPC commands (`87` commands + `plugin:app|version`). -/
 def supportedDesktopCommands : Array String := #[
@@ -152,7 +213,36 @@ def supportedDesktopCommands : Array String := #[
   "voice_capability", "voice_prewarm", "voice_transcribe", "voice_cancel"
 ]
 
-/-- Pure/IO dispatcher for all 89 desktop IPC commands. -/
+private def runOrbSigner (signerBin : String) (subArgs : Array String) (stdinText? : Option String := none) :
+    IO (Except String JVal) := do
+  if !(← System.FilePath.pathExists signerBin) then
+    return .error "orb-signer binary not found"
+  let child ← IO.Process.spawn {
+    cmd := signerBin
+    args := subArgs
+    stdin := .piped
+    stdout := .piped
+    stderr := .piped
+  }
+  let (stdinH, child') ← child.takeStdin
+  if let some txt := stdinText? then
+    stdinH.putStr txt
+    stdinH.flush
+  let outTask ← IO.asTask child'.stdout.readToEnd Task.Priority.dedicated
+  let errStr ← child'.stderr.readToEnd
+  let code ← child'.wait
+  let outStr ← IO.ofExcept outTask.get
+  if code != 0 then
+    return .error (if errStr.trimAscii.toString.isEmpty then s!"orb-signer exited {code}" else errStr.trimAscii.toString)
+  match OrbBin.Json.parse outStr.trimAscii.toString with
+  | .ok jv => return .ok jv
+  | .error e => return .error s!"orb-signer JSON parse error: {e}"
+
+private def allShardPortsValid (rpcPort proxyPort : UInt16) (shardPorts : Array UInt16) : Bool :=
+  shardPorts.all (fun p => p ≥ 1024 && p != rpcPort && p != proxyPort) &&
+  (shardPorts.toList.eraseDups.length == shardPorts.size)
+
+/-- Pure/IO dispatcher for all desktop IPC commands plus internal `__orb_poll_events`. -/
 def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal) : IO (Except String JVal) := do
   let st ← stRef.get
   match cmd with
@@ -160,9 +250,16 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     return .ok (.str "0.13.0")
   | "transport_bridge_configure" =>
     let shardCountU8 : UInt8 := UInt8.ofNat st.bridge.shardPorts.size
-    if verifySseShardConfig shardCountU8 st.bridge.proxyPort != 1 then
+    if verifySseShardConfig shardCountU8 st.bridge.proxyPort != 1 ||
+       !allShardPortsValid st.rpcPort st.bridge.proxyPort st.bridge.shardPorts then
       return .error "invalid SSE shard configuration"
     return .ok st.bridge.toJson
+  | "__orb_poll_events" =>
+    let evs ← stRef.modifyGet fun s =>
+      let items := s.queuedChannelEvents.map fun (tok, payload) =>
+        JVal.obj #[("token", JVal.nat tok), ("payload", payload)]
+      (JVal.arr items, { s with queuedChannelEvents := #[] })
+    return .ok evs
   | "desktop_connection_load" =>
     return .ok st.connectionJson
   | "desktop_connection_save" =>
@@ -175,11 +272,32 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "paloma_ssh_pubkey" =>
     return .ok .null
   | "approval_key_status" =>
-    return .ok (.obj #[("available", .bool false), ("enrolled", .bool false)])
+    match st.signerBin? with
+    | some bin =>
+      if st.hostOs == "macos" && (← System.FilePath.pathExists bin) then
+        match ← runOrbSigner bin #["public"] with
+        | .ok jv =>
+          let pk := (jv.fieldStr? "public_key").getD ""
+          return .ok (.obj #[("available", .bool true), ("enrolled", .bool (!pk.isEmpty)), ("public_key", .str pk)])
+        | .error _ =>
+          return .ok (.obj #[("available", .bool true), ("enrolled", .bool false)])
+      else
+        return .ok (.obj #[("available", .bool false), ("enrolled", .bool false)])
+    | none =>
+      return .ok (.obj #[("available", .bool false), ("enrolled", .bool false)])
   | "approval_key_create" =>
-    return .error "Secure Enclave is only available on macOS"
+    match st.signerBin? with
+    | some bin =>
+      if st.hostOs == "macos" then runOrbSigner bin #["create"]
+      else return .error "Secure Enclave is only available on macOS"
+    | none => return .error "Secure Enclave is only available on macOS"
   | "approval_sign" =>
-    return .error "Secure Enclave signing unavailable on this host"
+    let payload := (args.fieldStr? "payload").getD ""
+    match st.signerBin? with
+    | some bin =>
+      if st.hostOs == "macos" then runOrbSigner bin #["sign"] (some payload)
+      else return .error "Secure Enclave signing unavailable on this host"
+    | none => return .error "Secure Enclave signing unavailable on this host"
   | "approval_grace_until" =>
     return .ok .null
   | "set_approval_grace" =>
@@ -187,7 +305,8 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     stRef.modify fun s => { s with approvalGraceSecs := min secs 3600 }
     return .ok .null
   | "biometric_status" =>
-    return .ok (.obj #[("available", .bool false), ("biometry_type", .str "none")])
+    let avail := st.hostOs == "macos"
+    return .ok (.obj #[("available", .bool avail), ("biometry_type", .str (if avail then "touch_id" else "none"))])
   | "biometric_authenticate" =>
     return .ok (.bool false)
   | "client_link_active" =>
@@ -236,32 +355,48 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "local_skill_source_files" =>
     return .ok (.arr #[])
   | "local_machine_identity" =>
-    return .ok (.obj #[("hostname", .str "localhost"), ("os", .str "linux")])
+    return .ok (.obj #[("hostname", .str "localhost"), ("os", .str st.hostOs)])
   | _ =>
     if supportedDesktopCommands.contains cmd then
       return .ok (.obj #[("ok", .bool true), ("command", .str cmd)])
     else
       return .error s!"unknown desktop command: {cmd}"
 
-/-- WebView initialization JavaScript injecting `window.__TAURI__` and `window.__TAURI_INTERNALS__`. -/
+/-- Escape a string safely as a JSON string literal (`"..."`) for JS embedding. -/
+def jsStringLiteral (s : String) : String :=
+  renderCompact (.str s)
+
+/-- WebView initialization JavaScript injecting `window.__TAURI__` and `window.__TAURI_INTERNALS__`
+    with captured `_fetch` / `_jsonStringify` closures (preventing `window.fetch` token theft)
+    and active `Channel` callback registration. -/
 def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :=
+  let urlLit := jsStringLiteral s!"http://127.0.0.1:{rpcPort}/__orb_rpc"
+  let tokLit := jsStringLiteral launchToken
   "(() => {\n" ++
-  s!"  const ORB_LOCALD_URL = 'http://127.0.0.1:{rpcPort}/__orb_rpc';\n" ++
-  s!"  const ORB_TOKEN = '{launchToken}';\n" ++
+  "  const _fetch = window.fetch.bind(window);\n" ++
+  "  const _jsonStringify = JSON.stringify;\n" ++
+  s!"  const ORB_LOCALD_URL = {urlLit};\n" ++
+  s!"  const ORB_TOKEN = {tokLit};\n" ++
   "  const listeners = new Map();\n" ++
+  "  const channels = new Map();\n" ++
   "  class Channel {\n" ++
   "    constructor() { this.onmessage = () => {}; }\n" ++
   "  }\n" ++
   "  async function invoke(command, args = {}, _options = {}) {\n" ++
   "    const cleanArgs = { ...(args || {}) };\n" ++
-  "    if (cleanArgs.onEvent instanceof Channel) delete cleanArgs.onEvent;\n" ++
-  "    const res = await fetch(ORB_LOCALD_URL, {\n" ++
+  "    let boundChan = null;\n" ++
+  "    if (cleanArgs.onEvent instanceof Channel) {\n" ++
+  "      boundChan = cleanArgs.onEvent;\n" ++
+  "      delete cleanArgs.onEvent;\n" ++
+  "    }\n" ++
+  "    const res = await _fetch(ORB_LOCALD_URL, {\n" ++
   "      method: 'POST',\n" ++
   "      headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN },\n" ++
-  "      body: JSON.stringify({ command, args: cleanArgs })\n" ++
+  "      body: _jsonStringify({ command, args: cleanArgs })\n" ++
   "    });\n" ++
   "    const body = await res.json();\n" ++
   "    if (!res.ok || body.error) throw new Error(body.error || `RPC ${command} failed`);\n" ++
+  "    if (boundChan && typeof body.result === 'number') channels.set(body.result, boundChan);\n" ++
   "    return body.result;\n" ++
   "  }\n" ++
   "  async function listen(name, handler) {\n" ++

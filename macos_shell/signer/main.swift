@@ -18,8 +18,10 @@
 // The context is invalidated when the grace ends; the key never leaves the
 // enclave.
 import CryptoKit
+import Darwin
 import Foundation
 import LocalAuthentication
+import Security
 
 func fail(_ message: String, code: Int32 = 1) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
@@ -111,7 +113,25 @@ case "create":
     do {
         let key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: access)
         try FileManager.default.createDirectory(at: keyURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: keyPath, contents: key.dataRepresentation, attributes: [.posixPermissions: 0o600])
+        let rep = key.dataRepresentation
+        let fd = open(keyPath, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { fail("Could not securely open \(keyPath): errno \(errno)") }
+        guard fchmod(fd, 0o600) == 0 else { close(fd); fail("Could not set 0600 permissions on \(keyPath)") }
+        let wroteOk = rep.withUnsafeBytes { rawBuf -> Bool in
+            guard let base = rawBuf.baseAddress else { return rep.isEmpty }
+            var written = 0
+            while written < rawBuf.count {
+                let n = write(fd, base.advanced(by: written), rawBuf.count - written)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    return false
+                }
+                written += n
+            }
+            return true
+        }
+        guard wroteOk && fsync(fd) == 0 else { close(fd); fail("Could not persist Secure Enclave key handle to \(keyPath)") }
+        close(fd)
         emit(["public_key": key.publicKey.derRepresentation.base64EncodedString()])
     } catch {
         fail("Could not create the Secure Enclave key: \(error)")

@@ -27,7 +27,7 @@ structure HarnessParserState where
   deriving Repr, DecidableEq
 
 private def lookupToolName (calls : Array (String × String)) (callId : String) : String :=
-  match calls.find? (fun p => p.1 == callId) with
+  match calls.findRev? (fun p => p.1 == callId) with
   | some (_, nm) => nm
   | none => "unknown_tool"
 
@@ -56,13 +56,15 @@ def stepHarnessJsonLine (st : HarnessParserState) (line : String) : HarnessParse
     else if evType == "tool_call" || evType == "tool_use" then
       let callId := (JsonTape.lookupString? tape "id").getD ((JsonTape.lookupString? tape "call_id").getD "")
       let name := (JsonTape.lookupString? tape "name").getD "tool"
-      let calls' := st.pendingCalls.push (callId, name)
+      let baseCalls := if st.pendingCalls.size ≥ 1024 then st.pendingCalls.extract 1 st.pendingCalls.size else st.pendingCalls
+      let calls' := baseCalls.push (callId, name)
       { st with pendingCalls := calls', emittedEvents := st.emittedEvents.push (.ToolCall st.missionId callId name) }
     else if evType == "tool_result" then
       let callId := (JsonTape.lookupString? tape "tool_use_id").getD ((JsonTape.lookupString? tape "call_id").getD "")
       let toolName := lookupToolName st.pendingCalls callId
+      let calls' := st.pendingCalls.filter (fun p => p.1 != callId)
       let out := (JsonTape.lookupString? tape "output").getD ((JsonTape.lookupString? tape "content").getD "")
-      { st with emittedEvents := st.emittedEvents.push (.ToolResult st.missionId callId toolName out) }
+      { st with pendingCalls := calls', emittedEvents := st.emittedEvents.push (.ToolResult st.missionId callId toolName out) }
     else if evType == "assistant" then
       let txt := (JsonTape.lookupString? tape "text").getD ((JsonTape.lookupString? tape "message").getD "")
       { st with emittedEvents := st.emittedEvents.push (.AssistantMessage st.missionId txt) }

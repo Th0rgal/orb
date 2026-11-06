@@ -4,11 +4,12 @@
 # `target/debug` and `target/release` directories.
 #
 # Usage:
-#   ./scripts/build_orb_bins.sh [--ensure-lean] [--out-dir <dir>]... [--only <bin>]...
+#   ./scripts/build_orb_bins.sh [--ensure-lean] [--with-tests] [--out-dir <dir>]... [--only <bin>]...
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 ENSURE_LEAN=0
+WITH_TESTS=0
 OUT_DIRS=()
 ONLY_BINS=()
 
@@ -16,6 +17,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --ensure-lean)
       ENSURE_LEAN=1
+      shift
+      ;;
+    --with-tests)
+      WITH_TESTS=1
       shift
       ;;
     --out-dir)
@@ -54,21 +59,41 @@ if ! command -v lake >/dev/null 2>&1; then
   if [[ "$ENSURE_LEAN" == "1" ]]; then
     os_name="$(uname -s)"
     arch_name="$(uname -m)"
-    if [[ "$os_name" != "Linux" || "$arch_name" != "x86_64" ]]; then
-      echo "error: --ensure-lean automatic bootstrap only supports Linux x86_64 (got $os_name/$arch_name)" >&2
-      exit 1
-    fi
     lean_dest="${HOME:-/tmp}/.local/lean-4.35.0"
     if [[ ! -x "$lean_dest/bin/lake" ]]; then
-      lean_archive="$(mktemp /tmp/lean-4.35.0-XXXXXX.tar.zst)"
-      lean_sha256="7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d"
-      curl --retry 5 --retry-all-errors -fsSL \
-        "https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-linux.tar.zst" \
-        -o "$lean_archive"
-      echo "${lean_sha256}  ${lean_archive}" | sha256sum -c -
-      mkdir -p "$lean_dest"
-      tar --zstd -xf "$lean_archive" --strip-components=1 -C "$lean_dest"
+      if [[ "$os_name" == "Linux" && "$arch_name" == "x86_64" ]]; then
+        lean_url="https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-linux.tar.zst"
+        lean_sha256="7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d"
+        lean_ext=".tar.zst"
+      elif [[ "$os_name" == "Darwin" && "$arch_name" == "arm64" ]]; then
+        lean_url="https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-darwin_aarch64.tar.zst"
+        lean_sha256=""
+        lean_ext=".tar.zst"
+      elif [[ "$os_name" == "Darwin" && "$arch_name" == "x86_64" ]]; then
+        lean_url="https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-darwin.tar.zst"
+        lean_sha256=""
+        lean_ext=".tar.zst"
+      else
+        echo "error: --ensure-lean automatic bootstrap unsupported on $os_name/$arch_name" >&2
+        exit 1
+      fi
+      lean_archive="$(mktemp "/tmp/lean-4.35.0-XXXXXX${lean_ext}")"
+      lean_stage="$(mktemp -d "${lean_dest}.stage.XXXXXX")"
+      cleanup_bootstrap() {
+        rm -f "$lean_archive"
+        rm -rf "$lean_stage"
+      }
+      trap cleanup_bootstrap EXIT
+      curl --retry 5 --retry-all-errors -fsSL "$lean_url" -o "$lean_archive"
+      if [[ -n "$lean_sha256" ]]; then
+        echo "${lean_sha256}  ${lean_archive}" | sha256sum -c -
+      fi
+      mkdir -p "$(dirname "$lean_dest")"
+      tar --zstd -xf "$lean_archive" --strip-components=1 -C "$lean_stage"
+      rm -rf "$lean_dest"
+      mv "$lean_stage" "$lean_dest"
       rm -f "$lean_archive"
+      trap - EXIT
     fi
     export PATH="$lean_dest/bin:$PATH"
   else
@@ -169,6 +194,22 @@ for out_dir in "${OUT_DIRS[@]}"; do
       echo "error: expected built binary missing at $src" >&2
       exit 1
     fi
+    elab_syms="$(nm -u "$src" 2>/dev/null | grep -c lean_elab || true)"
+    if [[ "$elab_syms" -ne 0 ]]; then
+      echo "error: production binary $src links lean_elab ($elab_syms symbols)" >&2
+      exit 1
+    fi
     install -m 0755 "$src" "$out_dir/$bin"
   done
 done
+
+if [[ "$WITH_TESTS" == "1" ]]; then
+  (cd "$ROOT_DIR/lean/OrbNetLeaf" && SANDBOXED_ALLOW_RAW_LAKE=1 lake build -- -DwarningAsError=true && ./.lake/build/bin/orb-net-leaf-test)
+  (cd "$ROOT_DIR/lean/OrbBin" && SANDBOXED_ALLOW_RAW_LAKE=1 lake build orb-bin-test -- -DwarningAsError=true && ./.lake/build/bin/orb-bin-test)
+  (cd "$ROOT_DIR/lean/OrbNode" && SANDBOXED_ALLOW_RAW_LAKE=1 lake build orb-node-test -- -DwarningAsError=true && ./.lake/build/bin/orb-node-test)
+  (cd "$ROOT_DIR/lean/OrbClient" && SANDBOXED_ALLOW_RAW_LAKE=1 lake build -- -DwarningAsError=true && ./.lake/build/bin/orb-client-test)
+  (cd "$ROOT_DIR/lean/OrbCore" && SANDBOXED_ALLOW_RAW_LAKE=1 lake build orb-core-test orb-spec-runner -- -DwarningAsError=true)
+  "$ROOT_DIR/lean/OrbCore/.lake/build/bin/orb-core-test"
+  "$ROOT_DIR/lean/OrbCore/.lake/build/bin/orb-spec-runner" --fixtures "$ROOT_DIR/shared/orb-spec/fixtures"
+  (cd "$ROOT_DIR/lean/OrbLocald" && SANDBOXED_ALLOW_RAW_LAKE=1 lake build orb-locald-test -- -DwarningAsError=true && ./.lake/build/bin/orb-locald-test)
+fi

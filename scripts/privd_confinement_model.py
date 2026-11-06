@@ -388,7 +388,7 @@ def check_scope_restrictions(
         cwd_path = Path(raw_cwd)
         if not cwd_path.is_absolute() or ".." in cwd_path.parts or cwd_path.is_symlink():
             cwd_bad = True
-        elif scope == "ops_read":
+        elif scope in ("ops_read", "service_deploy"):
             if not _is_canonical_absolute_path_str(raw_cwd):
                 cwd_bad = True
             elif cwd_path.exists() or any(p.is_symlink() for p in cwd_path.parents):
@@ -625,12 +625,14 @@ def handle_exec(req: dict) -> dict:
             "SYSTEMD_PAGER": "cat",
             "SYSTEMD_PAGERSECURE": "1",
         }
+    raw_timeout = int(req.get("timeout_secs", 600))
+    bounded_timeout = max(1, min(raw_timeout, 600))
     t0 = time.monotonic()
     proc = subprocess.run(
         exec_argv,
         cwd=execution_cwd,
         capture_output=True,
-        timeout=int(req.get("timeout_secs", 600)),
+        timeout=bounded_timeout,
         env=exec_env,
     )
     duration_ms = int((time.monotonic() - t0) * 1000)
@@ -669,6 +671,7 @@ def handle_exec(req: dict) -> dict:
 
 def serve_conn(conn: socket.socket) -> None:
     try:
+        conn.settimeout(10.0)
         # SO_PEERCRED on Linux: struct ucred { pid_t pid; uid_t uid; gid_t gid; }
         creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
         pid, uid, gid = struct.unpack("3i", creds)
@@ -681,7 +684,28 @@ def serve_conn(conn: socket.socket) -> None:
         req = json.loads(raw.decode("utf-8"))
         action = req.get("action", "exec")
         if action == "update_harness":
-            resp = handle_update_harness(req)
+            lease_tok = str(req.get("lease_token", "")).strip()
+            if uid != 0:
+                if not lease_tok:
+                    resp = {"ok": False, "exit_code": 126, "stderr": "update_harness requires root peer UID or an active Core lease_token"}
+                else:
+                    verdict = call_core_verify(
+                        {
+                            "mission_id": str(req.get("mission_id") or "system-harness-update").strip(),
+                            "lease_token": lease_tok,
+                            "target_host": "self",
+                            "executing_host": HOST_LABEL,
+                            "command": "[update_harness]",
+                            "argv": ["orb-update-harness"],
+                            "cwd": "/root",
+                        }
+                    )
+                    if not verdict.get("allow_exec"):
+                        resp = {"ok": False, "exit_code": 126, "stderr": "Lease denied by Core"}
+                    else:
+                        resp = handle_update_harness(req)
+            else:
+                resp = handle_update_harness(req)
         elif action == "exec":
             resp = handle_exec(req)
         elif action == "ping":
@@ -704,7 +728,11 @@ def main() -> None:
     SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
     SOCKET_PATH.unlink(missing_ok=True)
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(str(SOCKET_PATH))
+    old_umask = os.umask(0o177)
+    try:
+        srv.bind(str(SOCKET_PATH))
+    finally:
+        os.umask(old_umask)
     os.chmod(SOCKET_PATH, 0o660)
     try:
         import grp

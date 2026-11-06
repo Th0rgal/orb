@@ -211,9 +211,17 @@ structure ConsoleWsAuthCheck where
   deriving Repr, DecidableEq
 
 /-- Independent WebSocket upgrade authentication domain model (`ScopedAuthority`):
+    all boolean flags are canonical (`0` or `1`), no invalid credential is supplied on either
+    channel (`hasJwtSubproto = 1 → jwtVerified = 1` and `hasBearerHeader = 1 → bearerVerified = 1`),
     credential expiry lies strictly in the future (`now + 1 ≤ exp`), and there exists a
     verified `WsAuthChannel` (either `Sec-WebSocket-Protocol` JWT or `Authorization: Bearer`). -/
 def ConsoleWsAuthDomainSafe (c : ConsoleWsAuthCheck) : Prop :=
+  (c.auth.1.toNat = 0 ∨ c.auth.1.toNat = 1) ∧
+  (c.auth.2.toNat = 0 ∨ c.auth.2.toNat = 1) ∧
+  (c.bearer.1.toNat = 0 ∨ c.bearer.1.toNat = 1) ∧
+  (c.bearer.2.toNat = 0 ∨ c.bearer.2.toNat = 1) ∧
+  (c.auth.1.toNat = 1 → c.auth.2.toNat = 1) ∧
+  (c.bearer.1.toNat = 1 → c.bearer.2.toNat = 1) ∧
   c.exp.1.toNat + 1 ≤ c.exp.2.toNat ∧
   ∃ ch : WsAuthChannel,
     match ch with
@@ -224,7 +232,10 @@ def ConsoleWsAuthDomainSafe (c : ConsoleWsAuthCheck) : Prop :=
 def verifyConsoleWsAuth
     (hasJwtSubproto jwtVerified hasBearerHeader bearerVerified : UInt8)
     (nowEpochSec expEpochSec : UInt64) : UInt8 :=
-  if nowEpochSec < expEpochSec &&
+  if hasJwtSubproto ≤ 1 && jwtVerified ≤ 1 && hasBearerHeader ≤ 1 && bearerVerified ≤ 1 &&
+     (hasJwtSubproto == 0 || jwtVerified == 1) &&
+     (hasBearerHeader == 0 || bearerVerified == 1) &&
+     nowEpochSec < expEpochSec &&
      ((hasJwtSubproto == 1 && jwtVerified == 1) ||
       (hasBearerHeader == 1 && bearerVerified == 1)) then 1 else 0
 
@@ -237,14 +248,29 @@ def consoleWsAuthMetaGate : MetaGateSpec ConsoleWsAuthCheck ConsoleWsAuthDomainS
     dsimp [ConsoleWsAuthDomainSafe]
     unfold verifyConsoleWsAuth at h
     have hc :
-        (nowS < expS && ((hj == 1 && jv == 1) || (hb == 1 && bv == 1))) = true := by
-      cases hcond : (nowS < expS && ((hj == 1 && jv == 1) || (hb == 1 && bv == 1)))
+        (hj ≤ 1 && jv ≤ 1 && hb ≤ 1 && bv ≤ 1 &&
+         (hj == 0 || jv == 1) && (hb == 0 || bv == 1) &&
+         nowS < expS && ((hj == 1 && jv == 1) || (hb == 1 && bv == 1))) = true := by
+      cases hcond :
+          (hj ≤ 1 && jv ≤ 1 && hb ≤ 1 && bv ≤ 1 &&
+           (hj == 0 || jv == 1) && (hb == 0 || bv == 1) &&
+           nowS < expS && ((hj == 1 && jv == 1) || (hb == 1 && bv == 1)))
       · rw [hcond] at h; contradiction
       · rfl
     simp only [Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
-    rcases hc with ⟨hlt, hch⟩
+    rcases hc with ⟨⟨⟨⟨⟨⟨⟨hhj1, hjv1⟩, hhb1⟩, hbv1⟩, hjImp⟩, hbImp⟩, hlt⟩, hch⟩
     have hltN : nowS.toNat < expS.toNat := UInt64.lt_iff_toNat_lt.mp hlt
-    refine ⟨by omega, ?_⟩
+    have hjOk : hj.toNat = 1 → jv.toNat = 1 := by
+      intro h1; rcases hjImp with h0 | hv
+      · subst h0; simp at h1
+      · subst hv; rfl
+    have hbOk : hb.toNat = 1 → bv.toNat = 1 := by
+      intro h1; rcases hbImp with h0 | hv
+      · subst h0; simp at h1
+      · subst hv; rfl
+    refine ⟨u8_le_one_cases hj hhj1, u8_le_one_cases jv hjv1,
+            u8_le_one_cases hb hhb1, u8_le_one_cases bv hbv1,
+            hjOk, hbOk, by omega, ?_⟩
     rcases hch with ⟨hhj, hjv⟩ | ⟨hhb, hbv⟩
     · exact ⟨.secWebsocketProtocolJwt, by subst hhj; rfl, by subst hjv; rfl⟩
     · exact ⟨.authorizationBearer, by subst hhb; rfl, by subst hbv; rfl⟩
@@ -252,22 +278,40 @@ def consoleWsAuthMetaGate : MetaGateSpec ConsoleWsAuthCheck ConsoleWsAuthDomainS
     rcases c with ⟨⟨hj, jv⟩, ⟨hb, bv⟩, ⟨nowS, expS⟩⟩
     change (verifyConsoleWsAuth hj jv hb bv nowS expS == 1) = true
     dsimp [ConsoleWsAuthDomainSafe] at h
-    rcases h with ⟨hlt, ch, hch⟩
+    rcases h with ⟨hhj1, hjv1, hhb1, hbv1, hjImp, hbImp, hlt, ch, hch⟩
     unfold verifyConsoleWsAuth
+    have hhjLe : hj ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change hj.toNat ≤ 1; omega
+    have hjvLe : jv ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change jv.toNat ≤ 1; omega
+    have hhbLe : hb ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change hb.toNat ≤ 1; omega
+    have hbvLe : bv ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change bv.toNat ≤ 1; omega
+    have hjDisj : (hj == 0 || jv == 1) = true := by
+      rcases hhj1 with h0 | h1
+      · have hB : (hj == 0) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat hj 0 (by omega) h0
+        simp [hB]
+      · have hv1 := hjImp h1
+        have hB : (jv == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat jv 1 (by omega) hv1
+        simp [hB]
+    have hbDisj : (hb == 0 || bv == 1) = true := by
+      rcases hhb1 with h0 | h1
+      · have hB : (hb == 0) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat hb 0 (by omega) h0
+        simp [hB]
+      · have hv1 := hbImp h1
+        have hB : (bv == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat bv 1 (by omega) hv1
+        simp [hB]
     have hltB : nowS < expS := by apply UInt64.lt_iff_toNat_lt.mpr; omega
     cases ch with
     | secWebsocketProtocolJwt =>
       rcases hch with ⟨hhj, hjv⟩
       have hhjB : (hj == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat hj 1 (by omega) hhj
       have hjvB : (jv == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat jv 1 (by omega) hjv
-      simp [hltB, hhjB, hjvB]
+      simp [hhjLe, hjvLe, hhbLe, hbvLe, hbDisj, hltB, hhjB, hjvB]
     | authorizationBearer =>
       rcases hch with ⟨hhb, hbv⟩
       have hhbB : (hb == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat hb 1 (by omega) hhb
       have hbvB : (bv == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat bv 1 (by omega) hbv
-      simp [hltB, hhbB, hbvB]
+      simp [hhjLe, hjvLe, hhbLe, hbvLe, hjDisj, hltB, hhbB, hbvB]
   posWitness := { auth := (1, 1), bearer := (0, 0), exp := (1700000000, 1700003600) }
-  negWitness := { auth := (1, 0), bearer := (0, 0), exp := (1700000000, 1700003600) }
+  negWitness := { auth := (1, 1), bearer := (1, 0), exp := (1700000000, 1700003600) }
   nonVacuous := by decide
   tight := by decide
 
@@ -465,6 +509,18 @@ def ManagedSystemdUnit.decode? : Nat → Option ManagedSystemdUnit
   | 3 => some .orbPrivd
   | _ => none
 
+/-- Accepted alias length bounds for each `ManagedSystemdUnit` (e.g. `"orb-core"` = 8 ..
+    `"sandboxed-node.service"` = 22). -/
+def ManagedSystemdUnit.minAliasBytes : ManagedSystemdUnit → Nat
+  | .sandboxedSh   => 8  -- "orb-core"
+  | .sandboxedNode => 8  -- "orb-node"
+  | .orbPrivd      => 9  -- "orb-privd"
+
+def ManagedSystemdUnit.maxAliasBytes : ManagedSystemdUnit → Nat
+  | .sandboxedSh   => 20 -- "sandboxed-sh.service"
+  | .sandboxedNode => 22 -- "sandboxed-node.service"
+  | .orbPrivd      => 17 -- "orb-privd.service"
+
 structure DeployUnitCheck where
   unitCode         : UInt8
   hasPathTraversal : UInt8
@@ -472,17 +528,21 @@ structure DeployUnitCheck where
   deriving Repr, DecidableEq
 
 /-- Independent `ScopedAuthority` allowlist model for `sandboxed-sh deploy --service`:
-    the requested unit code decodes to one of the 3 managed systemd units, contains zero
-    path-traversal characters (`/` or `..`), and has identifier length in `[3, 64]`. -/
+    there exists a `ManagedSystemdUnit` matching `unitCode`, zero path-traversal characters
+    (`/` or `..`) are present, and `unitLen` falls within that unit's exact alias bounds. -/
 def DeployUnitDomainSafe (c : DeployUnitCheck) : Prop :=
-  (ManagedSystemdUnit.decode? c.unitCode.toNat).isSome = true ∧
   c.hasPathTraversal.toNat = 0 ∧
-  3 ≤ c.unitLen.toNat ∧
-  c.unitLen.toNat ≤ 64
+  ∃ u : ManagedSystemdUnit,
+    ManagedSystemdUnit.decode? c.unitCode.toNat = some u ∧
+    u.minAliasBytes ≤ c.unitLen.toNat ∧
+    c.unitLen.toNat ≤ u.maxAliasBytes
 
 @[inline, export orb_core_verify_deploy_unit]
 def verifyDeployUnitName (unitCode hasPathTraversal : UInt8) (unitLen : UInt32) : UInt8 :=
-  if unitCode ≥ 1 && unitCode ≤ 3 && hasPathTraversal == 0 && unitLen ≥ 3 && unitLen ≤ 64 then 1 else 0
+  if hasPathTraversal == 0 &&
+     ((unitCode == 1 && unitLen ≥ 8 && unitLen ≤ 20) ||
+      (unitCode == 2 && unitLen ≥ 8 && unitLen ≤ 22) ||
+      (unitCode == 3 && unitLen ≥ 9 && unitLen ≤ 17)) then 1 else 0
 
 def deployUnitMetaGate : MetaGateSpec DeployUnitCheck DeployUnitDomainSafe where
   gate c := verifyDeployUnitName c.unitCode c.hasPathTraversal c.unitLen == 1
@@ -491,45 +551,66 @@ def deployUnitMetaGate : MetaGateSpec DeployUnitCheck DeployUnitDomainSafe where
     change (verifyDeployUnitName uc pt uL == 1) = true at h
     dsimp [DeployUnitDomainSafe]
     unfold verifyDeployUnitName at h
-    have hc : (uc ≥ 1 && uc ≤ 3 && pt == 0 && uL ≥ 3 && uL ≤ 64) = true := by
-      cases hb : (uc ≥ 1 && uc ≤ 3 && pt == 0 && uL ≥ 3 && uL ≤ 64)
+    have hc :
+        (pt == 0 &&
+         ((uc == 1 && uL ≥ 8 && uL ≤ 20) ||
+          (uc == 2 && uL ≥ 8 && uL ≤ 22) ||
+          (uc == 3 && uL ≥ 9 && uL ≤ 17))) = true := by
+      cases hb :
+          (pt == 0 &&
+           ((uc == 1 && uL ≥ 8 && uL ≤ 20) ||
+            (uc == 2 && uL ≥ 8 && uL ≤ 22) ||
+            (uc == 3 && uL ≥ 9 && uL ≤ 17)))
       · rw [hb] at h; contradiction
       · rfl
-    simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
-    rcases hc with ⟨⟨⟨⟨huc1, huc2⟩, hpt⟩, hl1⟩, hl2⟩
-    have hucN1 : 1 ≤ uc.toNat := UInt8.le_iff_toNat_le.mp huc1
-    have hucN2 : uc.toNat ≤ 3 := UInt8.le_iff_toNat_le.mp huc2
-    have hdec : (ManagedSystemdUnit.decode? uc.toNat).isSome = true := by
-      have hcases : uc.toNat = 1 ∨ uc.toNat = 2 ∨ uc.toNat = 3 := by omega
-      rcases hcases with h1 | h2 | h3
-      · simp [ManagedSystemdUnit.decode?, h1]
-      · simp [ManagedSystemdUnit.decode?, h2]
-      · simp [ManagedSystemdUnit.decode?, h3]
-    exact ⟨hdec, by subst hpt; rfl, UInt32.le_iff_toNat_le.mp hl1, UInt32.le_iff_toNat_le.mp hl2⟩
+    simp only [Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
+    rcases hc with ⟨hpt, (⟨⟨h1, hl1⟩, hl2⟩ | ⟨⟨h2, hl1⟩, hl2⟩) | ⟨⟨h3, hl1⟩, hl2⟩⟩
+    · subst hpt; subst h1
+      exact ⟨rfl, .sandboxedSh, rfl, UInt32.le_iff_toNat_le.mp hl1, UInt32.le_iff_toNat_le.mp hl2⟩
+    · subst hpt; subst h2
+      exact ⟨rfl, .sandboxedNode, rfl, UInt32.le_iff_toNat_le.mp hl1, UInt32.le_iff_toNat_le.mp hl2⟩
+    · subst hpt; subst h3
+      exact ⟨rfl, .orbPrivd, rfl, UInt32.le_iff_toNat_le.mp hl1, UInt32.le_iff_toNat_le.mp hl2⟩
   complete c h := by
     rcases c with ⟨uc, pt, uL⟩
     change (verifyDeployUnitName uc pt uL == 1) = true
     dsimp [DeployUnitDomainSafe] at h
-    rcases h with ⟨hdec, hpt, hl1, hl2⟩
+    rcases h with ⟨hpt, u, hdec, hl1, hl2⟩
     unfold verifyDeployUnitName
-    have hucBounds : 1 ≤ uc.toNat ∧ uc.toNat ≤ 3 := by
-      cases hu : uc.toNat with
-      | zero => simp [ManagedSystemdUnit.decode?, hu] at hdec
-      | succ n =>
-        rcases n with _ | _ | _ | _
-        · omega
-        · omega
-        · omega
-        · simp [ManagedSystemdUnit.decode?, hu] at hdec
-    have hucGe : uc ≥ 1 := UInt8.le_iff_toNat_le.mpr hucBounds.1
-    have hucLe : uc ≤ 3 := UInt8.le_iff_toNat_le.mpr hucBounds.2
     have hptB : (pt == 0) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat pt 0 (by omega) hpt
-    have hlGe : uL ≥ 3 := UInt32.le_iff_toNat_le.mpr hl1
-    have hlLe : uL ≤ 64 := UInt32.le_iff_toNat_le.mpr hl2
-    simp [hucGe, hucLe, hptB, hlGe, hlLe]
+    cases hu : uc.toNat with
+    | zero => simp [ManagedSystemdUnit.decode?, hu] at hdec
+    | succ n =>
+      rcases n with _ | _ | _ | _
+      · simp [ManagedSystemdUnit.decode?, hu] at hdec
+        subst hdec
+        have hucB : (uc == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat uc 1 (by omega) hu
+        have hge : uL ≥ 8 := UInt32.le_iff_toNat_le.mpr hl1
+        have hle : uL ≤ 20 := UInt32.le_iff_toNat_le.mpr hl2
+        simp [hptB, hucB, hge, hle]
+      · simp [ManagedSystemdUnit.decode?, hu] at hdec
+        subst hdec
+        have hucB : (uc == 2) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat uc 2 (by omega) hu
+        have hge : uL ≥ 8 := UInt32.le_iff_toNat_le.mpr hl1
+        have hle : uL ≤ 22 := UInt32.le_iff_toNat_le.mpr hl2
+        simp [hptB, hucB, hge, hle]
+      · simp [ManagedSystemdUnit.decode?, hu] at hdec
+        subst hdec
+        have hucB : (uc == 3) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat uc 3 (by omega) hu
+        have hge : uL ≥ 9 := UInt32.le_iff_toNat_le.mpr hl1
+        have hle : uL ≤ 17 := UInt32.le_iff_toNat_le.mpr hl2
+        simp [hptB, hucB, hge, hle]
+      · simp [ManagedSystemdUnit.decode?, hu] at hdec
   posWitness := { unitCode := 1, hasPathTraversal := 0, unitLen := 12 }
-  negWitness := { unitCode := 9, hasPathTraversal := 0, unitLen := 12 }
+  negWitness := { unitCode := 1, hasPathTraversal := 0, unitLen := 3 }
   nonVacuous := by decide
   tight := by decide
+
+def deployUnitScopedAuthority : ScopedAuthority DeployUnitCheck where
+  admit := deployUnitMetaGate.gate
+  scopeValid c := (ManagedSystemdUnit.decode? c.unitCode.toNat).isSome = true ∧ c.hasPathTraversal.toNat = 0
+  sound c h := by
+    rcases deployUnitMetaGate.sound c h with ⟨hpt, u, hdec, _, _⟩
+    exact ⟨by simp [hdec], hpt⟩
 
 end OrbCore.Spec

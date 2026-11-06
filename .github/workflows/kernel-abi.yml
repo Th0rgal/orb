@@ -189,7 +189,7 @@ jobs:
       - name: Build and self-test OrbNetLeaf foundation (<= 220 C LOC, zero lean_elab)
         run: |
           set -euo pipefail
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev libsqlite3-dev
           c_lines=$(wc -l < lean/OrbNetLeaf/c/orb_net_leaf.c)
           echo "orb_net_leaf.c LOC: $c_lines"
           test "$c_lines" -le 220

@@ -1,10 +1,12 @@
 /*
- * orb_core_sqlite.c — Minimal parameterized libsqlite3 leaf shim for OrbCore (<= 118 LOC).
+ * orb_core_sqlite.c — Minimal parameterized libsqlite3 leaf shim for OrbCore (<= 160 LOC).
  * Uses dlopen("libsqlite3.so.0" / ".dylib") so Lake's bundled sysroot linker needs no host -L flags.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <lean/lean.h>
+#include <limits.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <time.h>
 
@@ -33,13 +35,13 @@ static struct {
     int (*step)(sqlite3_stmt *);
     int (*finalize)(sqlite3_stmt *);
 } sq;
+static pthread_once_t sq_once = PTHREAD_ONCE_INIT;
 
-static int ensure_sqlite(void) {
-    if (sq.loaded) return sq.loaded > 0;
+static void init_sqlite_once(void) {
     const char *libs[] = {"libsqlite3.so.0", "libsqlite3.so", "libsqlite3.dylib"};
     void *h = NULL;
     for (int i = 0; i < 3 && !h; i++) h = dlopen(libs[i], RTLD_LAZY | RTLD_LOCAL);
-    if (!h) { sq.loaded = -1; return 0; }
+    if (!h) { sq.loaded = -1; return; }
     #define LOAD_SYM(fld, sym) *(void **)(&sq.fld) = dlsym(h, sym)
     LOAD_SYM(open_v2, "sqlite3_open_v2"); LOAD_SYM(close_v2, "sqlite3_close_v2");
     LOAD_SYM(busy_timeout, "sqlite3_busy_timeout"); LOAD_SYM(exec, "sqlite3_exec");
@@ -49,7 +51,12 @@ static int ensure_sqlite(void) {
     LOAD_SYM(column_text, "sqlite3_column_text"); LOAD_SYM(step, "sqlite3_step");
     LOAD_SYM(finalize, "sqlite3_finalize");
     #undef LOAD_SYM
-    sq.loaded = (sq.open_v2 && sq.close_v2 && sq.exec && sq.prepare_v2 && sq.step && sq.finalize) ? 1 : -1;
+    sq.loaded = (sq.open_v2 && sq.close_v2 && sq.exec && sq.prepare_v2 && sq.bind_text &&
+                 sq.column_count && sq.column_name && sq.column_text && sq.step && sq.finalize) ? 1 : -1;
+}
+
+static int ensure_sqlite(void) {
+    pthread_once(&sq_once, init_sqlite_once);
     return sq.loaded > 0;
 }
 
@@ -102,8 +109,15 @@ LEAN_EXPORT lean_obj_res orb_sqlite_query_rows(uint64_t handle, b_lean_obj_arg s
     if (db == NULL || !ensure_sqlite()) return mk_sql_err(NULL, "null_sqlite_handle");
     sqlite3_stmt *stmt = NULL;
     if (sq.prepare_v2(db, lean_string_cstr(sql_obj), -1, &stmt, NULL) != SQLITE_OK) return mk_sql_err(db, "sqlite_prepare_failed");
+    if (stmt == NULL) {
+        lean_object *ok = lean_alloc_ctor(1, 1, 0);
+        lean_ctor_set(ok, 0, lean_mk_empty_array());
+        return lean_io_result_mk_ok(ok);
+    }
     for (size_t i = 0, n = lean_array_size(params_arr); i < n; i++) {
-        if (sq.bind_text(stmt, (int)(i + 1), lean_string_cstr(lean_array_get_core(params_arr, i)), -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+        b_lean_obj_arg p = lean_array_get_core(params_arr, i);
+        size_t slen = lean_string_size(p) > 0 ? lean_string_size(p) - 1 : 0;
+        if (slen > (size_t)INT_MAX || sq.bind_text(stmt, (int)(i + 1), lean_string_cstr(p), (int)slen, SQLITE_TRANSIENT) != SQLITE_OK) {
             sq.finalize(stmt); return mk_sql_err(db, "sqlite_bind_failed");
         }
     }
@@ -111,16 +125,16 @@ LEAN_EXPORT lean_obj_res orb_sqlite_query_rows(uint64_t handle, b_lean_obj_arg s
     lean_object *rows = lean_mk_empty_array();
     if (ncols > 0) {
         lean_object *hdr = lean_mk_empty_array_with_capacity(lean_usize_to_nat((size_t)ncols));
-        for (int c = 0; c < ncols; c++) hdr = lean_array_push(hdr, lean_mk_string(sq.column_name(stmt, c) ? sq.column_name(stmt, c) : ""));
+        for (int c = 0; c < ncols; c++) { const char *nm = sq.column_name(stmt, c); hdr = lean_array_push(hdr, lean_mk_string(nm ? nm : "")); }
         rows = lean_array_push(rows, hdr);
     }
     while ((rc = sq.step(stmt)) == SQLITE_ROW) {
         lean_object *row = lean_mk_empty_array_with_capacity(lean_usize_to_nat((size_t)ncols));
-        for (int c = 0; c < ncols; c++) row = lean_array_push(row, lean_mk_string(sq.column_text(stmt, c) ? (const char *)sq.column_text(stmt, c) : ""));
+        for (int c = 0; c < ncols; c++) { const unsigned char *tx = sq.column_text(stmt, c); row = lean_array_push(row, lean_mk_string(tx ? (const char *)tx : "")); }
         rows = lean_array_push(rows, row);
     }
     sq.finalize(stmt);
-    if (rc != SQLITE_DONE) return mk_sql_err(db, "sqlite_step_failed");
+    if (rc != SQLITE_DONE) { lean_dec(rows); return mk_sql_err(db, "sqlite_step_failed"); }
     lean_object *ok = lean_alloc_ctor(1, 1, 0);
     lean_ctor_set(ok, 0, rows);
     return lean_io_result_mk_ok(ok);

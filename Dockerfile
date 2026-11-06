@@ -14,7 +14,7 @@
 FROM debian:bookworm-slim AS lean-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential git libssl-dev zstd ca-certificates curl \
+    build-essential git libssl-dev libsqlite3-dev zstd ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && LEAN_ARCHIVE="/tmp/lean-4.35.0-linux.tar.zst" \
     && LEAN_SHA256="7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d" \

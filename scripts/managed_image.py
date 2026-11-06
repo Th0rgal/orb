@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -293,11 +294,14 @@ def node_version_for(repo, treeish, sha):
         m = re.search(r'version\s*:=\s*v!"([^"]+)"', lakefile)
         if m:
             return f'{m.group(1)}+{sha[:9]}'
-    except Exception:
+    except subprocess.CalledProcessError:
         pass
-    cargo = git(repo, 'show', f'{treeish}:Cargo.toml')
-    version = next(line.split('"')[1] for line in cargo.splitlines() if line.startswith('version'))
-    return f'{version}+{sha[:9]}'
+    try:
+        cargo = git(repo, 'show', f'{treeish}:Cargo.toml')
+        version = next(line.split('"')[1] for line in cargo.splitlines() if line.startswith('version'))
+        return f'{version}+{sha[:9]}'
+    except (subprocess.CalledProcessError, StopIteration) as err:
+        raise RuntimeError(f'unable to resolve OrbNode version from {treeish} (neither lean/OrbNode/lakefile.lean nor Cargo.toml matched)') from err
 
 
 BUILD_SCRIPT = r'''set -euo pipefail

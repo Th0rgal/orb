@@ -4,6 +4,8 @@ root, mission, generation = pathlib.Path(sys.argv[1]), sys.argv[2], int(sys.argv
 if generation < 0: raise ValueError("Invalid run generation")
 
 def schedule(name, args):
+    if not isinstance(args, dict):
+        raise ValueError('arguments must be a JSON object')
     key = str(args.get('request_id') or uuid.uuid4())
     if not key.strip() or len(key) > 200: raise ValueError('Invalid request_id')
     dest = root / (hashlib.sha256(key.encode()).hexdigest() + '.json')
@@ -14,9 +16,11 @@ def schedule(name, args):
     if dest.exists() or dest.with_suffix('.acked').exists():
         return {'request_id': key, 'state': 'persisted', 'owner': 'sandboxed'}
     prompt = args.get('prompt', '')
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise ValueError('A nonempty prompt is required')
+    if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 65536:
+        raise ValueError('A nonempty prompt (<= 65536 chars) is required')
     reason = str(args.get('reason', ''))
+    if len(reason) > 4096:
+        raise ValueError('reason exceeds 4096 chars')
     variables = {'__wakeup_source': 'orb-local', '__wakeup_request_id': key, '__wakeup_reason': reason, '__wakeup_local': 'true', '__wakeup_run_generation': str(generation)}
     if name == 'schedule_job_wakeup':
         trigger = {'type': 'durable_job_terminal', 'job_id': str(uuid.UUID(args['job_id']))}
@@ -61,21 +65,39 @@ tools = [{'name': 'schedule_wakeup', 'description': 'Save one durable wake-up fo
 if len(sys.argv) > 4:
     print(json.dumps(schedule(sys.argv[4], json.loads(sys.argv[5]))))
 else:
-    for line in sys.stdin:
+    while True:
+        line = sys.stdin.readline(131073)
+        if not line:
+            break
+        if len(line) > 131072:
+            print(json.dumps({'jsonrpc': '2.0', 'id': None, 'error': {'code': -32600, 'message': 'Request too large'}}), flush=True)
+            continue
+        req_id = None
         try:
             req = json.loads(line)
-            if 'id' not in req: continue
+            if not isinstance(req, dict):
+                raise TypeError('Request must be an object')
+            if 'id' not in req:
+                continue
+            req_id = req['id']
             method = req.get('method')
-            if method == 'initialize': result = {'protocolVersion': req.get('params', {}).get('protocolVersion', '2024-11-05'), 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'orb-wakeups', 'version': '1'}}
+            params = req.get('params')
+            if params is not None and not isinstance(params, dict):
+                print(json.dumps({'jsonrpc': '2.0', 'id': req_id, 'error': {'code': -32602, 'message': 'Invalid params'}}), flush=True)
+                continue
+            params = params or {}
+            if method == 'initialize': result = {'protocolVersion': params.get('protocolVersion', '2024-11-05'), 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'orb-wakeups', 'version': '1'}}
             elif method == 'tools/list': result = {'tools': tools}
             elif method == 'ping': result = {}
             elif method == 'tools/call':
                 try:
-                    value = schedule(req['params']['name'], req['params'].get('arguments', {}))
+                    value = schedule(params['name'], params.get('arguments', {}))
                     result = {'content': [{'type': 'text', 'text': json.dumps(value)}]}
                 except Exception as e: result = {'isError': True, 'content': [{'type': 'text', 'text': str(e)}]}
             else:
-                print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'error': {'code': -32601, 'message': 'Method not found'}}), flush=True); continue
-            print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': result}), flush=True)
+                print(json.dumps({'jsonrpc': '2.0', 'id': req_id, 'error': {'code': -32601, 'message': 'Method not found'}}), flush=True); continue
+            print(json.dumps({'jsonrpc': '2.0', 'id': req_id, 'result': result}), flush=True)
+        except json.JSONDecodeError:
+            print(json.dumps({'jsonrpc': '2.0', 'id': None, 'error': {'code': -32700, 'message': 'Parse error'}}), flush=True)
         except (ValueError, KeyError, TypeError):
-            print(json.dumps({'jsonrpc': '2.0', 'id': None, 'error': {'code': -32700, 'message': 'Invalid request'}}), flush=True)
+            print(json.dumps({'jsonrpc': '2.0', 'id': req_id, 'error': {'code': -32600, 'message': 'Invalid request'}}), flush=True)

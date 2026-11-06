@@ -256,6 +256,27 @@ jobs:
           make -C linux_shell test
           python3 -m unittest -v orb/tests/wakeup_mcp_test.py
 
+  orb-macos-shell:
+    name: Orb macOS Shell & Signer (Swift)
+    runs-on: macos-26
+    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Compile macos_shell, orb-signer, and macOS app icon
+        run: |
+          set -euo pipefail
+          mkdir -p macos_shell/build
+          swiftc -O -framework AppKit -framework WebKit -framework Security \
+            macos_shell/main.swift -o macos_shell/build/orb-desktop
+          python3 orb/scripts/build-signer.py
+          node orb/scripts/build-macos-icon.mjs
+          test -x macos_shell/build/orb-desktop
+          test -x macos_shell/build/orb-signer
+          test -f macos_shell/gen/app-icon/Assets.car
+
   docker:
     name: Docker image
     runs-on: ubuntu-latest

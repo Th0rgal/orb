@@ -33,7 +33,7 @@ timeout_secs = 600
 
 [[gates]]
 id = "kernel-abi-check"
-description = "Verify generated C-ABI/WASM/JNI/Swift/Rust kernel bindings and coverage registry"
+description = "Verify generated C-ABI/WASM/JNI/Swift kernel bindings and coverage registry"
 command = ["python3", "scripts/gen_kernel_bindings.py", "--check"]
 dependencies = ["state-inventory"]
 required = true
@@ -54,7 +54,7 @@ timeout_secs = 300
 [[gates]]
 id = "lean-workspace-tests"
 description = "Certifying pure-Lean workspace binary build and self-test suite"
-command = ["bash", "scripts/build_orb_bins.sh", "--ensure-lean", "--out-dir", "target/debug"]
+command = ["bash", "scripts/build_orb_bins.sh", "--ensure-lean", "--with-tests", "--out-dir", "target/debug"]
 dependencies = ["fmt", "policy-scripts", "kernel-abi-check", "capability-matrix"]
 required = true
 mode = "clean"

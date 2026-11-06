@@ -444,7 +444,7 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, terminate)
     manifest = load_manifest(ORB / "shared/orb-spec/kernel_abi.json")
     functions = public_export_functions(manifest)
-    if run(["git", "rev-parse", "HEAD"], SYS).strip() != "c089f3e31dbd36f2bde2219913d5b9c90da670be":
+    if run(["git", "rev-parse", "HEAD"], SYS).strip() != "d658cb2450743434d255e59ea4225bd651681177":
         raise ValueError("unexpected LeanSys revision")
     sources = [(ORB / "lean/Orb/Kernel.lean", "Orb.Kernel"),
                (SYS / "LeanSys/Spec.lean", "LeanSys.Spec")]
@@ -499,12 +499,14 @@ def main(argv=None):
     report["tools"] = {}
     for name, path in [(n, TOOLS / n) for n in ("lean", "leanc", "clang", "ld.lld")] + [
         (n, TURBO / "lean/.lake/build/bin" / n) for n in ("lean-native", "lean-native-core")
-    ] + [("python", Path(sys.executable))] + [(n, Path(shutil.which(n) or n)) for n in ("cc", "node", "rustc", "cargo", "ar")]:
-        path = Path(EXECUTABLES.get(name, str(path))).resolve()
-        report["tools"][name] = {"path": str(path), "sha256": digest(path) if path.is_file() else None}
-        if path.is_file():
+    ] + [("python", Path(sys.executable))] + [(n, Path(shutil.which(n) or "")) for n in ("cc", "node", "rustc", "cargo", "ar")]:
+        raw_exec = EXECUTABLES.get(name) or (str(path) if str(path) else "")
+        resolved = Path(raw_exec).resolve() if raw_exec else None
+        is_present = bool(resolved and resolved.is_file())
+        report["tools"][name] = {"path": str(resolved) if resolved else None, "sha256": digest(resolved) if is_present else None}
+        if is_present:
             try:
-                version = run([path, "--version"])
+                version = run([resolved, "--version"])
                 report["tools"][name]["version"] = version
             except CommandFailure as error:
                 report["tools"][name]["version_unavailable"] = str(error)

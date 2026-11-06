@@ -49,6 +49,32 @@ def replyError (cfd : LeanSys.Posix.Fd) (msg : String) (code : Int := 1) : IO Un
   ]
 
 def handleUpdateHarness (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (req : JVal) : IO Unit := do
+  let leaseToken := ((req.fieldStr? "lease_token").getD "").trimAscii.toString
+  if peer.uid != some 0 then
+    if leaseToken.isEmpty then
+      return (← replyError cfd "update_harness requires root peer UID or an active Core lease_token" 126)
+    let missionId := ((req.fieldStr? "mission_id").getD "system-harness-update").trimAscii.toString
+    let verifyUrl := stripTrailingSlash cfg.apiUrl ++ "/api/privilege-access/verify-and-log"
+    let verifyBody := JVal.obj #[
+      ("mission_id", .str missionId),
+      ("lease_token", .str leaseToken),
+      ("target_host", .str "self"),
+      ("executing_host", .str cfg.hostLabel),
+      ("command", .str "[update_harness]"),
+      ("argv", .arr #[.str "orb-update-harness"]),
+      ("cwd", .str "/root")
+    ]
+    match (← sendJsonRequest "POST" verifyUrl cfg.apiToken (some verifyBody) #[("User-Agent", "orb-privd/1.0")] 15000) with
+    | .ok (status, text, j?) =>
+      let valid := match j? with
+        | some j =>
+          (j.fieldBool? "allow_exec").orElse (fun _ =>
+            (j.fieldBool? "valid").orElse (fun _ => j.fieldBool? "allowed")) |>.getD false
+        | none => false
+      if !(200 ≤ status && status < 300) || !valid then
+        return (← replyError cfd s!"Core rejected update_harness lease ({status}): {text}" 126)
+    | .error err =>
+      return (← replyError cfd s!"Failed contacting Core privilege verifier: {err}" 126)
   let rawHarness := ((req.fieldStr? "name").orElse (fun _ => req.fieldStr? "harness")).getD ""
   let version := (req.fieldStr? "version").getD ""
   let some harness := normalizeHarnessName? rawHarness
@@ -163,11 +189,17 @@ def handleExec (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (r
     | return (← replyError cfd s!"Executable `{argv[0]!}` not found in trusted system directories" 127)
   let cwdStat ← statPath cwdStr
   let execCwd := if cwdStat.exists_ && cwdStat.isDir then cwdStr else "/root"
+  let rawTimeout := (req.fieldNat? "timeout_secs").getD 600
+  let boundedTimeoutSecs := Nat.max 1 (Nat.min rawTimeout 600)
+  let timeoutBin ← resolveTrustedBinary? "timeout"
+  let (execCmd, execArgs) := match timeoutBin with
+    | some tb => (tb, #[s!"{boundedTimeoutSecs}s", resolvedBin] ++ argv.extract 1 argv.size)
+    | none => (resolvedBin, argv.extract 1 argv.size)
   let t0Ms ← IO.monoMsNow
   let out ← try
     IO.Process.output {
-      cmd := resolvedBin
-      args := argv.extract 1 argv.size
+      cmd := execCmd
+      args := execArgs
       cwd := some (System.FilePath.mk execCwd)
       env := #[
         ("PATH", some trustedExecPath),

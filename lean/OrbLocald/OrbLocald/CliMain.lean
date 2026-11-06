@@ -1,89 +1,294 @@
 import LeanSys
+import OrbNetLeaf.TlsHttp
 import OrbBin.Json
+import OrbLocald.Spec
 import OrbLocald.Rpc
 
 /-
   OrbLocald.CliMain — `orb-locald` loopback RPC & transport bridge daemon.
+  - Strictly validates `ORB_LOCALD_TOKEN` (≥ 32-byte non-placeholder per-launch secret) and `ORB_LOCALD_PORT` (`1024..65535`).
+  - Uses `LeanSys.Http.readHttpRequestFromFd` for smuggling-safe, looped Content-Length framing.
+  - Never emits `Access-Control-Allow-Origin: *`; echoes only verified loopback/local shell `Origin`s.
+  - Binds live loopback listeners for the RPC socket, the primary `/__orb_tx/<uuid>` proxy, and all 6 SSE shard sockets,
+    answering `OPTIONS` preflights in 0ms and forwarding `/__orb_tx/<uuid>/...` across `failoverOrigins` gated by `canFailoverRequest`.
 -/
 
 open LeanSys.Posix
+open LeanSys.Http
+open OrbNetLeaf.TlsHttp
 open OrbBin.Json
+open OrbLocald.Spec
 open OrbLocald.Rpc
 
-private def handleOneRpcClient (stRef : IO.Ref LocaldState) (clientFd : Fd) : IO Unit := do
-  match ← pollReadable clientFd 5000 with
-  | .error _ => pure ()
-  | .ok () =>
-    let raw ← readStreamChunk clientFd 65536
-    if raw.size > 0 then
-      let reqText := String.fromUTF8? raw |>.getD ""
-      let headerEnd := (reqText.splitOn "\r\n\r\n")
-      let head := headerEnd.head?.getD ""
-      let body := String.intercalate "\r\n\r\n" (headerEnd.drop 1)
-      let firstLine := (head.splitOn "\r\n").head?.getD ""
-      if firstLine.startsWith "OPTIONS " then
-        let resp :=
-          "HTTP/1.1 204 No Content\r\n" ++
-          "Access-Control-Allow-Origin: *\r\n" ++
-          "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n" ++
-          "Access-Control-Allow-Headers: *\r\n" ++
-          "Access-Control-Max-Age: 86400\r\n" ++
-          "Content-Length: 0\r\n\r\n"
-        discard <| writeAll clientFd resp.toUTF8 false
+private def findHeaderVal? (hdrs : Array (String × String)) (lowerKey : String) : Option String := do
+  let (_, v) ← hdrs.find? fun (k, _) => k.trimAscii.toString.toLower == lowerKey
+  let tv := v.trimAscii.toString
+  if tv.isEmpty then none else some tv
+
+private def corsHeaderBlock (origin? : Option String) : String :=
+  match origin? with
+  | none => ""
+  | some raw =>
+    let o := raw.trimAscii.toString
+    if !o.isEmpty && isAllowedLocaldOrigin (some o) then
+      s!"Access-Control-Allow-Origin: {o}\r\nVary: Origin\r\n"
+    else
+      ""
+
+private def sendJsonHttp (fd : Fd) (status : Nat) (origin? : Option String) (jsonPayload : String) : IO Unit := do
+  let reason := HttpResponse.reasonPhrase status
+  let body := jsonPayload.toUTF8
+  let head :=
+    s!"HTTP/1.1 {status} {reason}\r\n" ++
+    corsHeaderBlock origin? ++
+    "Content-Type: application/json\r\n" ++
+    s!"Content-Length: {body.size}\r\n" ++
+    "Connection: close\r\n\r\n"
+  discard <| writeAll fd (head.toUTF8 ++ body) false
+
+private def sendPreflight204 (fd : Fd) (origin? : Option String) : IO Unit := do
+  let head :=
+    "HTTP/1.1 204 No Content\r\n" ++
+    corsHeaderBlock origin? ++
+    "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n" ++
+    "Access-Control-Allow-Headers: Content-Type, Authorization, X-Orb-Token, Idempotency-Key\r\n" ++
+    "Access-Control-Max-Age: 86400\r\n" ++
+    "Content-Length: 0\r\n" ++
+    "Connection: close\r\n\r\n"
+  discard <| writeAll fd head.toUTF8 false
+
+private def parseOriginHostPort (raw : String) : Option (Bool × String × UInt16 × String) :=
+  let (isTls, rest) :=
+    if raw.startsWith "https://" then (true, (raw.drop 8).toString)
+    else if raw.startsWith "http://" then (false, (raw.drop 7).toString)
+    else (false, "")
+  if rest.isEmpty then none
+  else
+    let defPort : UInt16 := if isTls then 443 else 80
+    let parts := rest.splitOn "/"
+    let hostPort := parts.head?.getD ""
+    let tail := String.intercalate "/" (parts.drop 1)
+    let pfx := if tail.isEmpty then "" else "/" ++ tail
+    match hostPort.splitOn ":" with
+    | [h] => if h.isEmpty then none else some (isTls, h, defPort, pfx)
+    | [h, pStr] =>
+      match pStr.toNat? with
+      | some p => if !h.isEmpty && 1 ≤ p && p ≤ 65535 then some (isTls, h, p.toUInt16, pfx) else none
+      | none => none
+    | _ => none
+
+private def isHopByHopHeader (name : String) : Bool :=
+  let low := name.trimAscii.toString.toLower
+  low == "host" || low == "connection" || low == "content-length" ||
+  low == "transfer-encoding" || low == "keep-alive" || low == "upgrade" ||
+  low == "proxy-connection" || low.startsWith "access-control-"
+
+private def handleTransportProxyRequest (st : LocaldState) (fd : Fd) (req : HttpRequest) (origin? : Option String) : IO Unit := do
+  let expectedPfx := s!"/__orb_tx/{st.bridge.bridgeUuid}"
+  if !req.path.startsWith expectedPfx then
+    sendJsonHttp fd 403 origin? "{\"error\":\"invalid_bridge_token\"}"
+  else if req.method == "OPTIONS" then
+    sendPreflight204 fd origin?
+  else
+    let rawRel := (req.path.drop expectedPfx.length).toString
+    let relPath := if rawRel.isEmpty then "/" else if rawRel.startsWith "/" then rawRel else "/" ++ rawRel
+    let hasIdem := (findHeaderVal? req.headers "idempotency-key").isSome
+    let fwdHdrs := req.headers.filter fun (k, _) => !isHopByHopHeader k
+    let reqBody := req.bodySlice.toByteArray
+    let origins := st.bridge.failoverOrigins
+    if origins.isEmpty then
+      sendJsonHttp fd 503 origin? "{\"error\":\"no_failover_origins\"}"
+    else
+      let mut idx : Nat := 0
+      let mut done := false
+      while idx < origins.size && !done do
+        let orig := origins[idx]!
+        let attemptRes ← match parseOriginHostPort orig with
+          | none => pure (.error "invalid_origin")
+          | some (true, host, port, pfx) =>
+            httpsRequest req.method host port (pfx ++ relPath) fwdHdrs reqBody
+          | some (false, _, _, _) =>
+            pure (.error "plaintext_origin_rejected")
+        match attemptRes with
+        | .ok up =>
+          let retryStatus := up.status == 429 || (500 ≤ up.status && up.status ≤ 599)
+          if retryStatus && canFailoverRequest req.method hasIdem (idx + 1) origins then
+            idx := idx + 1
+          else
+            let ctype := (findHeaderVal? up.headers "content-type").getD "application/json"
+            let reason := HttpResponse.reasonPhrase up.status
+            let head :=
+              s!"HTTP/1.1 {up.status} {reason}\r\n" ++
+              corsHeaderBlock origin? ++
+              s!"Content-Type: {ctype}\r\n" ++
+              s!"Content-Length: {up.body.size}\r\n" ++
+              "Connection: close\r\n\r\n"
+            discard <| writeAll fd (head.toUTF8 ++ up.body) false
+            done := true
+        | .error _ =>
+          if canFailoverRequest req.method hasIdem (idx + 1) origins then
+            idx := idx + 1
+          else
+            sendJsonHttp fd 502 origin? "{\"error\":\"upstream_unreachable\"}"
+            done := true
+
+private def handleClientConnection (stRef : IO.Ref LocaldState) (isProxyPort : Bool) (clientFd : Fd) : IO Unit := do
+  try
+    match ← readHttpRequestFromFd clientFd none 5000 with
+    | .error errMsg =>
+      let code := statusForParseError errMsg
+      sendJsonHttp clientFd code none s!"\{\"error\":\"{errMsg}\"}"
+    | .ok req =>
+      let origin? := findHeaderVal? req.headers "origin"
+      if !isAllowedLocaldOrigin origin? then
+        sendJsonHttp clientFd 403 none "{\"error\":\"forbidden_origin\"}"
       else
         let st ← stRef.get
-        let tokenLine := (head.splitOn "\r\n").find? fun l =>
-          l.toLower.startsWith "x-orb-token:"
-        let provided := match tokenLine with
-          | some l => ((l.drop 12).trimAscii).toString
-          | none => ""
-        if !checkRpcAuth "127.0.0.1" provided st.launchToken then
-          let errJson := "{\"error\":\"unauthorized\"}"
-          let resp :=
-            s!"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {errJson.toUTF8.size}\r\n\r\n{errJson}"
-          discard <| writeAll clientFd resp.toUTF8 false
+        if isProxyPort || req.path.startsWith "/__orb_tx/" then
+          handleTransportProxyRequest st clientFd req origin?
+        else if req.method == "OPTIONS" && req.path == "/__orb_rpc" then
+          sendPreflight204 clientFd origin?
+        else if req.method != "POST" || req.path != "/__orb_rpc" then
+          sendJsonHttp clientFd 404 origin? "{\"error\":\"not_found\"}"
         else
-          match OrbBin.Json.parse body with
-          | .error e =>
-            let errJson := renderCompact (.obj #[("error", .str e)])
-            let resp :=
-              s!"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {errJson.toUTF8.size}\r\n\r\n{errJson}"
-            discard <| writeAll clientFd resp.toUTF8 false
-          | .ok jv =>
-            let cmd := (jv.fieldStr? "command").getD ""
-            let cargs := (jv.field? "args").getD (.obj #[])
-            let out ← dispatchRpcCommand stRef cmd cargs
-            let (statusLine, payload) := match out with
-              | .ok res => ("200 OK", renderCompact (.obj #[("result", res)]))
-              | .error msg => ("400 Bad Request", renderCompact (.obj #[("error", .str msg)]))
-            let resp :=
-              s!"HTTP/1.1 {statusLine}\r\n" ++
-              "Access-Control-Allow-Origin: *\r\n" ++
-              "Content-Type: application/json\r\n" ++
-              s!"Content-Length: {payload.toUTF8.size}\r\n\r\n{payload}"
-            discard <| writeAll clientFd resp.toUTF8 false
-  discard <| closeFd clientFd
+          let provided := (findHeaderVal? req.headers "x-orb-token").getD ""
+          if !checkRpcAuth "127.0.0.1" provided st.launchToken then
+            sendJsonHttp clientFd 401 origin? "{\"error\":\"unauthorized\"}"
+          else
+            let bodyStr := String.fromUTF8? req.bodySlice.toByteArray |>.getD ""
+            match OrbBin.Json.parse bodyStr with
+            | .error e =>
+              sendJsonHttp clientFd 400 origin? (renderCompact (.obj #[("error", .str e)]))
+            | .ok jv =>
+              let cmd := (jv.fieldStr? "command").getD ""
+              let cargs := (jv.field? "args").getD (.obj #[])
+              let out ← dispatchRpcCommand stRef cmd cargs
+              match out with
+              | .ok res =>
+                sendJsonHttp clientFd 200 origin? (renderCompact (.obj #[("result", res)]))
+              | .error msg =>
+                sendJsonHttp clientFd 400 origin? (renderCompact (.obj #[("error", .str msg)]))
+  finally
+    discard <| closeFd clientFd
 
-partial def acceptLoop (stRef : IO.Ref LocaldState) (listenFd : Fd) : IO UInt32 := do
-  match ← tcpAcceptPoll listenFd 500 with
-  | .ok cfd => handleOneRpcClient stRef cfd
+partial def acceptMuxLoop (stRef : IO.Ref LocaldState) (rpcFd : Fd) (proxyFds : Array Fd) : IO UInt32 := do
+  let allFds := #[rpcFd] ++ proxyFds
+  match ← pollFdSet allFds 250 0 with
+  | .ok readyIdxs =>
+    for idx in readyIdxs do
+      if h : idx < allFds.size then
+        let lfd := allFds[idx]
+        match ← tcpAcceptPoll lfd 10 with
+        | .ok cfd => handleClientConnection stRef (idx > 0) cfd
+        | .error _ => pure ()
   | .error _ => pure ()
-  acceptLoop stRef listenFd
+  acceptMuxLoop stRef rpcFd proxyFds
+
+private def detectHostOs : IO String := do
+  if (← System.FilePath.pathExists "/System/Library/CoreServices/SystemVersion.plist") then
+    return "macos"
+  return "linux"
+
+private def bindLoopbackPortPool (baseHint : UInt16) : IO (Except String (Fd × UInt16 × Array Fd × Array UInt16)) := do
+  -- Prefer a contiguous block `p, p+1 .. p+6` so `verifySseShardConfig` (`proxyPort + 6 <= 65535`) holds cleanly.
+  let candidates : Array UInt16 := #[baseHint, 29480, 39480, 49480]
+  for base in candidates do
+    if base ≥ 1024 && base.toNat + 6 ≤ 65535 then
+      match ← tcpListen "127.0.0.1" base 64 with
+      | .error _ => pure ()
+      | .ok (pFd, pPort) =>
+        let mut sFds : Array Fd := #[]
+        let mut sPorts : Array UInt16 := #[]
+        let mut okAll := true
+        for off in [1:7] do
+          if okAll then
+            let sp : UInt16 := (pPort.toNat + off).toUInt16
+            match ← tcpListen "127.0.0.1" sp 64 with
+            | .ok (sfd, boundSp) =>
+              sFds := sFds.push sfd
+              sPorts := sPorts.push boundSp
+            | .error _ =>
+              okAll := false
+        if okAll && sPorts.size == 6 then
+          return .ok (pFd, pPort, sFds, sPorts)
+        else
+          for sfd in sFds do discard <| closeFd sfd
+          discard <| closeFd pFd
+  -- Fallback: bind ephemeral OS-assigned loopback ports (`127.0.0.1:0`) if fixed ranges are busy.
+  match ← tcpListen "127.0.0.1" 0 64 with
+  | .error e => return .error s!"failed to bind proxy port: {e}"
+  | .ok (pFd, pPort) =>
+    if pPort.toNat + 6 > 65535 then
+      discard <| closeFd pFd
+      return .error s!"ephemeral proxy port {pPort} too close to 65535"
+    let mut sFds : Array Fd := #[]
+    let mut sPorts : Array UInt16 := #[]
+    for _ in [0:6] do
+      match ← tcpListen "127.0.0.1" 0 64 with
+      | .ok (sfd, sp) =>
+        sFds := sFds.push sfd
+        sPorts := sPorts.push sp
+      | .error e =>
+        for x in sFds do discard <| closeFd x
+        discard <| closeFd pFd
+        return .error s!"failed to bind SSE shard port: {e}"
+    return .ok (pFd, pPort, sFds, sPorts)
 
 def main (args : List String) : IO UInt32 := do
   if args.contains "--version" then
     IO.println "orb-locald 0.13.0 (Lean 4)"
     return 0
   if args.contains "--print-init-script" then
-    IO.print (renderWebviewInitScript 19479 "dev-token")
+    IO.print (renderWebviewInitScript 19479 "0123456789abcdef0123456789abcdef")
     return 0
-  let portStr := (← IO.getEnv "ORB_LOCALD_PORT").getD "19479"
-  let port : UInt16 := UInt16.ofNat (portStr.toNat?.getD 19479)
-  let tok := (← IO.getEnv "ORB_LOCALD_TOKEN").getD "orb-locald-default-token"
-  let stRef ← IO.mkRef ({ launchToken := tok } : LocaldState)
-  match ← tcpListen "127.0.0.1" port 64 with
-  | .error _ =>
-    IO.eprintln s!"orb-locald: failed to bind 127.0.0.1:{port}"
+  let portStr := ((← IO.getEnv "ORB_LOCALD_PORT").getD "19479").trimAscii.toString
+  let some portNat := portStr.toNat?
+    | do IO.eprintln s!"orb-locald: invalid ORB_LOCALD_PORT `{portStr}`"; return 1
+  if portNat < 1024 || portNat > 65535 then
+    IO.eprintln s!"orb-locald: ORB_LOCALD_PORT `{portNat}` must be in 1024..65535"
     return 1
-  | .ok (listenFd, _) =>
-    acceptLoop stRef listenFd
+  let port : UInt16 := portNat.toUInt16
+  let rawTok? ← IO.getEnv "ORB_LOCALD_TOKEN"
+  let tok ← match rawTok? with
+    | some t => pure t.trimAscii.toString
+    | none =>
+      if args.contains "--ephemeral-token" then
+        randomHexBytes 32
+      else
+        pure ""
+  if !checkRpcAuth "127.0.0.1" tok tok then
+    IO.eprintln "orb-locald: refusing to start without a non-placeholder ORB_LOCALD_TOKEN (>= 32 bytes) or --ephemeral-token"
+    return 1
+  let bridgeUuid ← randomUuidV4
+  let hostOs ← detectHostOs
+  let signerEnv? ← IO.getEnv "ORB_SIGNER_BIN"
+  let signerBin? := match signerEnv? with
+    | some b => if b.trimAscii.toString.isEmpty then none else some b.trimAscii.toString
+    | none => some "macos_shell/build/orb-signer"
+  let baseProxyHint : UInt16 := if port ≤ 65520 then port + 1 else 19480
+  match ← bindLoopbackPortPool baseProxyHint with
+  | .error e =>
+    IO.eprintln s!"orb-locald: {e}"
+    return 1
+  | .ok (proxyFd, proxyPort, shardFds, shardPorts) =>
+    match ← tcpListen "127.0.0.1" port 64 with
+    | .error _ =>
+      for sfd in shardFds do discard <| closeFd sfd
+      discard <| closeFd proxyFd
+      IO.eprintln s!"orb-locald: failed to bind 127.0.0.1:{port}"
+      return 1
+    | .ok (rpcFd, boundRpcPort) =>
+      let bridge : TransportBridgeState := {
+        proxyPort := proxyPort
+        bridgeUuid := bridgeUuid
+        shardPorts := shardPorts
+      }
+      let initState : LocaldState := {
+        launchToken := tok
+        rpcPort := boundRpcPort
+        bridge := bridge
+        hostOs := hostOs
+        signerBin? := signerBin?
+      }
+      let stRef ← IO.mkRef initState
+      acceptMuxLoop stRef rpcFd (#[proxyFd] ++ shardFds)
