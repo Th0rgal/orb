@@ -2166,12 +2166,30 @@ pub async fn node_antigravity_models(
             "Node credential unavailable".into(),
         )
     })?;
-    if let Err(error) = crate::api::antigravity_native::sync_node(&state, &node_id).await {
-        tracing::warn!(node = %node_id, "Antigravity sign-in not pushed: {error}");
+    let node_has_antigravity = state
+        .fleet
+        .get(&node_id)
+        .and_then(|cached| cached.last_heartbeat)
+        .is_some_and(|hb| hb.managed_auth.iter().any(|p| p == "antigravity"));
+    if !node_has_antigravity {
+        if let Err(error) = crate::api::antigravity_native::sync_node(&state, &node_id).await {
+            tracing::warn!(node = %node_id, "Antigravity sign-in not pushed: {error}");
+        }
     }
-    crate::remote_node::RemoteNodeClient::default()
-        .antigravity_models(node, &token)
-        .await
+    let client = crate::remote_node::RemoteNodeClient::default();
+    let models = match client.antigravity_models(node, &token).await {
+        Ok(models) => Ok(models),
+        Err(first_error) if node_has_antigravity => {
+            if let Err(error) = crate::api::antigravity_native::sync_node(&state, &node_id).await {
+                tracing::warn!(node = %node_id, "Antigravity sign-in not pushed: {error}");
+                Err(first_error)
+            } else {
+                client.antigravity_models(node, &token).await
+            }
+        }
+        Err(error) => Err(error),
+    };
+    models
         .map(|mut models| {
             supplement_entitled_carbon_model(&mut models, &state.config.working_dir);
             Json(models)
@@ -2476,7 +2494,9 @@ async fn discover_workspace_antigravity_models(
     use tokio::io::AsyncReadExt;
     let cwd = crate::workspace::configured_project_dir(&workspace, work_dir);
     if let Some(home) = crate::api::runners::antigravity::projectable_home(&workspace) {
-        crate::api::antigravity_native::install_in_home(&home);
+        if !crate::antigravity_auth::has_token(&home.join(crate::antigravity_auth::PROFILE_DIR)) {
+            crate::api::antigravity_native::install_in_home(&home);
+        }
     }
     let exec = crate::workspace_exec::WorkspaceExec::new(workspace);
     let mut child = exec
@@ -2603,20 +2623,7 @@ fn accounts_offer_carbon(
     state: &crate::model_catalog::DiscoveryState,
     accounts: &[AIProvider],
 ) -> bool {
-    accounts.iter().any(|account| {
-        if !eligible_antigravity_account(account) {
-            return false;
-        }
-        let route = crate::model_discovery::route(account);
-        let connection =
-            crate::model_catalog::route_key(&account.id.to_string(), &route.base, &route.profile);
-        state
-            .connections
-            .iter()
-            .find(|o| o.connection == connection)
-            .and_then(|o| o.last_success.as_ref())
-            .is_some_and(|s| s.models.iter().any(|m| m.id == "agy-model-high"))
-    })
+    crate::api::antigravity_accounts::any_account_offers_carbon(state, accounts)
 }
 
 /// When a connected, eligible Antigravity account in Core's catalog offers

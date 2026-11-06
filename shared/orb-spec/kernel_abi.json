@@ -4926,6 +4926,64 @@
         "method": "orbUtf8Utf16WindowStep",
         "ret": "jlong"
       }
+    },
+    {
+      "name": "orb_model_account_admit",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "candId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "ineligible",
+          "type": "uint8_t"
+        },
+        {
+          "name": "entitlement",
+          "type": "uint8_t"
+        },
+        {
+          "name": "requireEntitled",
+          "type": "uint8_t"
+        }
+      ],
+      "internal": true
+    },
+    {
+      "name": "orb_model_account_score",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "candId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "ineligible",
+          "type": "uint8_t"
+        },
+        {
+          "name": "entitlement",
+          "type": "uint8_t"
+        },
+        {
+          "name": "requireEntitled",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasPoolQuota",
+          "type": "uint8_t"
+        },
+        {
+          "name": "priorityRank",
+          "type": "uint32_t"
+        },
+        {
+          "name": "usableInSecs",
+          "type": "uint32_t"
+        }
+      ],
+      "internal": true
     }
   ]
 }

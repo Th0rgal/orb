@@ -253,15 +253,37 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Default, Deserialize)]
+struct AntigravitySlotQuery {
+    slot: Option<String>,
+    default: Option<bool>,
+}
+
 async fn antigravity_models(
     State(state): State<Arc<NodeState>>,
     headers: HeaderMap,
+    Query(query): Query<AntigravitySlotQuery>,
 ) -> Result<Json<Vec<(String, String)>>, (StatusCode, String)> {
     check_auth(&headers, &state)?;
     let auth = state.managed_auth.clone();
+    let profile = match query
+        .slot
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(slot) if !sandboxed_sh::antigravity_auth::valid_slot_id(slot) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid Antigravity slot identifier".into(),
+            ));
+        }
+        Some(slot) => format!("antigravity:{slot}"),
+        None => "antigravity".to_string(),
+    };
     let models = tokio::task::spawn_blocking(move || {
         let home = tempfile::tempdir().map_err(|_| "Cannot prepare model discovery".to_string())?;
-        auth.prepare_workspace(&["antigravity".into()], home.path())?;
+        auth.prepare_workspace(&[profile], home.path())?;
         sandboxed_sh::antigravity::models_in_home(Path::new("agy"), Some(home.path()))
     })
     .await
@@ -280,6 +302,7 @@ async fn antigravity_models(
 async fn install_antigravity_auth(
     State(state): State<Arc<NodeState>>,
     headers: HeaderMap,
+    Query(query): Query<AntigravitySlotQuery>,
     Json(credential): Json<sandboxed_sh::antigravity_auth::Credential>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     check_auth(&headers, &state)?;
@@ -289,16 +312,33 @@ async fn install_antigravity_auth(
             "This node keeps its own Antigravity sign-in".into(),
         ));
     }
+    if let Some(slot) = query
+        .slot
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if !sandboxed_sh::antigravity_auth::valid_slot_id(slot) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid Antigravity slot identifier".into(),
+            ));
+        }
+    }
     let auth = state.managed_auth.clone();
-    let changed = tokio::task::spawn_blocking(move || auth.install_antigravity(&credential))
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Antigravity sign-in failed".to_string(),
-            )
-        })?
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let slot = query.slot;
+    let update_default = query.default.unwrap_or(true);
+    let changed = tokio::task::spawn_blocking(move || {
+        auth.install_antigravity_slot(&credential, slot.as_deref(), update_default)
+    })
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Antigravity sign-in failed".to_string(),
+        )
+    })?
+    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
     Ok(Json(serde_json::json!({
         "changed": changed,
         "managed_auth": state.managed_auth.advertised(),

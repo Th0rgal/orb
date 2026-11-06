@@ -178,24 +178,39 @@ pub(crate) async fn require_node_managed_auth(
     let Some(node) = state.config.remote_nodes.node(node_id) else {
         return Ok(());
     };
+    let mut expected_profile = profile.to_string();
     if profile == "antigravity" {
         let requested_model = match plan {
-            RemoteHarnessPlan::Antigravity { model, .. } => model.as_deref(),
+            RemoteHarnessPlan::Antigravity { model, effort, .. } => {
+                crate::antigravity::effective_cli_model(model.as_deref(), effort.as_deref())
+            }
             _ => None,
         };
         // Hand the node the login suited to the requested model (switching to
-        // the only account offering Gemini 4 Carbon when requested). Older
+        // an entitled account slot when requested, e.g. Gemini 4 Carbon). Older
         // nodes and nodes keeping their own sign-in fall back to the heartbeat.
         match crate::api::antigravity_native::sync_node_for_model(state, node_id, requested_model)
             .await
         {
-            Ok(crate::api::antigravity_native::NodeSync::Ready) => {
+            Ok(crate::api::antigravity_native::NodeSync::Ready {
+                profile: synced_profile,
+                ..
+            }) => {
+                expected_profile = synced_profile;
                 let client = RemoteNodeClient::default();
                 remote_node::probe_node(&state.fleet, &client, node).await;
             }
-            Ok(_) => {}
+            Ok(
+                crate::api::antigravity_native::NodeSync::NoLogin
+                | crate::api::antigravity_native::NodeSync::Unsupported,
+            ) => {}
             Err(error) => {
-                tracing::warn!(node = %node_id, "Antigravity sign-in not pushed: {error}")
+                if requested_model.is_some_and(crate::api::antigravity_accounts::is_eap_gated_model)
+                    || error.starts_with("No connected Google Antigravity account")
+                {
+                    return Err(format!("{REMOTE_AUTH_REQUIRED}: {error}"));
+                }
+                tracing::warn!(node = %node_id, "Antigravity sign-in not pushed: {error}");
             }
         }
     }
@@ -217,7 +232,11 @@ pub(crate) async fn require_node_managed_auth(
     };
     if profile == "grok" {
         heartbeat_supports_grok(&heartbeat.managed_auth, node_id)
-    } else if heartbeat.managed_auth.iter().any(|p| p == profile) {
+    } else if heartbeat
+        .managed_auth
+        .iter()
+        .any(|p| p == &expected_profile || p == profile)
+    {
         Ok(())
     } else {
         Err(format!("{REMOTE_AUTH_REQUIRED}: remote node '{node_id}' has no verified {profile} login; authenticate the CLI as the node execution user and configure its managed-auth profile"))
