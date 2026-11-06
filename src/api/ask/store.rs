@@ -11,9 +11,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use dashmap::DashMap;
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use uuid::Uuid;
 
 /// A conversation thread between the operator and the Ask assistant, scoped to
@@ -75,6 +76,38 @@ pub enum SaveInboxStateOutcome {
 /// SQLite-backed Ask store.
 pub struct AskStore {
     conn: Arc<Mutex<Connection>>,
+    delivery_locks: DashMap<Uuid, Arc<Mutex<()>>>,
+    turn_locks: DashMap<Uuid, Arc<Mutex<()>>>,
+}
+
+pub struct AskTurnGuard {
+    guard: Option<OwnedMutexGuard<()>>,
+    store: Arc<AskStore>,
+    thread_id: Uuid,
+}
+
+impl Drop for AskTurnGuard {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        self.store
+            .turn_locks
+            .remove_if(&self.thread_id, |_, arc| Arc::strong_count(arc) == 1);
+    }
+}
+
+pub struct OperatorNoteDeliveryGuard<'a> {
+    guard: Option<OwnedMutexGuard<()>>,
+    store: &'a AskStore,
+    mission_id: Uuid,
+}
+
+impl Drop for OperatorNoteDeliveryGuard<'_> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        self.store
+            .delivery_locks
+            .remove_if(&self.mission_id, |_, arc| Arc::strong_count(arc) == 1);
+    }
 }
 
 impl std::fmt::Debug for AskStore {
@@ -234,7 +267,57 @@ impl AskStore {
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            delivery_locks: DashMap::new(),
+            turn_locks: DashMap::new(),
         })
+    }
+
+    pub fn try_lock_turn(self: &Arc<Self>, thread_id: Uuid) -> Option<AskTurnGuard> {
+        let mutex = self
+            .turn_locks
+            .entry(thread_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let mut guard = AskTurnGuard {
+            guard: None,
+            store: Arc::clone(self),
+            thread_id,
+        };
+        guard.guard = Some(mutex.try_lock_owned().ok()?);
+        Some(guard)
+    }
+
+    pub async fn lock_operator_note_delivery(
+        &self,
+        mission_id: Uuid,
+    ) -> OperatorNoteDeliveryGuard<'_> {
+        let mutex = self
+            .delivery_locks
+            .entry(mission_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let mut guard = OperatorNoteDeliveryGuard {
+            guard: None,
+            store: self,
+            mission_id,
+        };
+        guard.guard = Some(mutex.lock_owned().await);
+        guard
+    }
+
+    #[cfg(test)]
+    pub(crate) fn turn_locks_len(&self) -> usize {
+        self.turn_locks.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_turn_lock(&self, thread_id: &Uuid) -> bool {
+        self.turn_locks.contains_key(thread_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delivery_locks_len(&self) -> usize {
+        self.delivery_locks.len()
     }
 
     pub async fn inbox_digest(&self, key: &str, revision: &str) -> Result<Option<String>, String> {
@@ -282,9 +365,19 @@ impl AskStore {
         mission_id: Uuid,
         model: Option<String>,
     ) -> Result<AskThread, String> {
+        self.create_thread_with_id(Uuid::new_v4(), mission_id, model)
+            .await
+    }
+
+    pub async fn create_thread_with_id(
+        &self,
+        id: Uuid,
+        mission_id: Uuid,
+        model: Option<String>,
+    ) -> Result<AskThread, String> {
         let conn = self.conn.clone();
         let thread = AskThread {
-            id: Uuid::new_v4(),
+            id,
             mission_id,
             title: None,
             model,
@@ -506,25 +599,89 @@ impl AskStore {
         .map_err(|e| e.to_string())?
     }
 
-    /// Atomically return all pending (un-flushed) operator notes for a mission
-    /// and mark them flushed. Used by the working-agent turn-prep path.
-    pub async fn take_pending_operator_notes(
+    pub async fn peek_unflushed_operator_notes(
         &self,
         mission_id: Uuid,
     ) -> Result<Vec<OperatorNote>, String> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<OperatorNote>, String> {
             let conn = conn.blocking_lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, mission_id, body, source_thread_id, created_at \
+                     FROM operator_notes WHERE mission_id = ?1 AND flushed_at IS NULL \
+                     ORDER BY created_at ASC, rowid ASC",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![mission_id.to_string()], row_to_note)
+                .map_err(|e| e.to_string())?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(|e| e.to_string())?);
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    pub async fn mark_operator_notes_flushed(
+        &self,
+        mission_id: Uuid,
+        note_ids: &[Uuid],
+        flushed_at: &str,
+    ) -> Result<(), String> {
+        if note_ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.clone();
+        let ids = note_ids.to_vec();
+        let flushed_at = flushed_at.to_string();
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let mut conn = conn.blocking_lock();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+            let mission_str = mission_id.to_string();
+            for id in ids {
+                tx.execute(
+                    "UPDATE operator_notes SET flushed_at = ?3 \
+                     WHERE mission_id = ?1 AND id = ?2 AND flushed_at IS NULL",
+                    params![&mission_str, id.to_string(), &flushed_at],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// Atomically return all pending (un-flushed) operator notes for a mission
+    /// and mark them flushed. Used by the working-agent turn-prep path.
+    pub async fn take_pending_operator_notes(
+        &self,
+        mission_id: Uuid,
+    ) -> Result<Vec<OperatorNote>, String> {
+        let _delivery_guard = self.lock_operator_note_delivery(mission_id).await;
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<OperatorNote>, String> {
+            let mut conn = conn.blocking_lock();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+            let mission_str = mission_id.to_string();
             let notes = {
-                let mut stmt = conn
+                let mut stmt = tx
                     .prepare(
                         "SELECT id, mission_id, body, source_thread_id, created_at \
                          FROM operator_notes WHERE mission_id = ?1 AND flushed_at IS NULL \
-                         ORDER BY created_at ASC",
+                         ORDER BY created_at ASC, rowid ASC",
                     )
                     .map_err(|e| e.to_string())?;
                 let rows = stmt
-                    .query_map(params![mission_id.to_string()], row_to_note)
+                    .query_map(params![&mission_str], row_to_note)
                     .map_err(|e| e.to_string())?;
                 let mut out = Vec::new();
                 for r in rows {
@@ -533,13 +690,17 @@ impl AskStore {
                 out
             };
             if !notes.is_empty() {
-                conn.execute(
-                    "UPDATE operator_notes SET flushed_at = ?2 \
-                     WHERE mission_id = ?1 AND flushed_at IS NULL",
-                    params![mission_id.to_string(), now()],
-                )
-                .map_err(|e| e.to_string())?;
+                let flushed_at = now();
+                for note in &notes {
+                    tx.execute(
+                        "UPDATE operator_notes SET flushed_at = ?3 \
+                         WHERE mission_id = ?1 AND id = ?2 AND flushed_at IS NULL",
+                        params![&mission_str, note.id.to_string(), &flushed_at],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
             }
+            tx.commit().map_err(|e| e.to_string())?;
             Ok(notes)
         })
         .await
@@ -696,6 +857,47 @@ mod tests {
         // Second take returns nothing — notes flush exactly once.
         let second = store.take_pending_operator_notes(mission).await.unwrap();
         assert!(second.is_empty());
+        assert_eq!(store.delivery_locks_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn delivery_locks_evict_idle_entries_after_contention() {
+        let store = Arc::new(temp_store().await);
+        for _ in 0..8 {
+            let mission = Uuid::new_v4();
+            let g1 = store.lock_operator_note_delivery(mission).await;
+            assert_eq!(store.delivery_locks_len(), 1);
+
+            let store2 = Arc::clone(&store);
+            let waiter = tokio::spawn(async move {
+                let _g2 = store2.lock_operator_note_delivery(mission).await;
+                assert_eq!(store2.delivery_locks_len(), 1);
+            });
+            tokio::task::yield_now().await;
+            drop(g1);
+            waiter.await.unwrap();
+            assert_eq!(store.delivery_locks_len(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_locks_evict_when_contending_waiter_is_cancelled() {
+        let store = Arc::new(temp_store().await);
+        let mission = Uuid::new_v4();
+        let g1 = store.lock_operator_note_delivery(mission).await;
+        assert_eq!(store.delivery_locks_len(), 1);
+
+        let store2 = Arc::clone(&store);
+        let waiter = tokio::spawn(async move {
+            let _g2 = store2.lock_operator_note_delivery(mission).await;
+        });
+        tokio::task::yield_now().await;
+        waiter.abort();
+        let _ = waiter.await;
+        assert_eq!(store.delivery_locks_len(), 1);
+
+        drop(g1);
+        assert_eq!(store.delivery_locks_len(), 0);
     }
 
     #[tokio::test]
@@ -761,5 +963,28 @@ mod tests {
                 .unwrap(),
             SaveInboxStateOutcome::Applied { revision: 2 }
         );
+    }
+
+    #[tokio::test]
+    async fn turn_locks_reject_concurrent_turns_and_evict_when_idle() {
+        let store = Arc::new(temp_store().await);
+        let thread_id = Uuid::new_v4();
+
+        let guard = Arc::new(store.try_lock_turn(thread_id).expect("first turn locks"));
+        assert_eq!(store.turn_locks_len(), 1);
+        assert!(store.try_lock_turn(thread_id).is_none());
+        assert_eq!(store.turn_locks_len(), 1);
+
+        let stream_clone = Arc::clone(&guard);
+        drop(guard);
+        assert!(store.try_lock_turn(thread_id).is_none());
+        assert_eq!(store.turn_locks_len(), 1);
+
+        drop(stream_clone);
+        assert_eq!(store.turn_locks_len(), 0);
+
+        let next = store.try_lock_turn(thread_id).expect("re-locks after drop");
+        drop(next);
+        assert_eq!(store.turn_locks_len(), 0);
     }
 }

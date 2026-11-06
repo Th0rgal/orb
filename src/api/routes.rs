@@ -597,6 +597,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // Open the privilege broker now so a mission that ends before anyone
     // touches it still has its session-scoped grants reaped.
     super::privilege_broker::store(&state);
+    super::ask::initialize_on_startup(&state.config).await;
 
     // Persisted node state (operator cordons) survives restarts.
     state

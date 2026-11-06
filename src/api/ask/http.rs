@@ -313,20 +313,24 @@ pub async fn ask_send(
         .map_err(|e| (StatusCode::CONFLICT, e))?
     };
 
+    let thread_id = req.thread_id.unwrap_or_else(Uuid::new_v4);
+    let _turn_guard = ask_store.try_lock_turn(thread_id).ok_or((
+        StatusCode::CONFLICT,
+        "Ask thread already has an active turn".to_string(),
+    ))?;
+
     // Optional sandbox-copy isolation: writes go to a throwaway worktree/copy.
     let setup_exec = crate::workspace_exec::WorkspaceExec::new(workspace.clone());
-    let mut remote_sandbox_dir: Option<String> = None;
-    let sandbox_dir = if req.sandbox {
+    let sandbox_guard = if req.sandbox {
         if let Some(rt) = &base_remote_target {
-            remote_sandbox_dir = super::prepare_remote_sandbox(rt).await;
-            remote_sandbox_dir.as_deref().map(std::path::PathBuf::from)
+            super::prepare_remote_sandbox(rt).await
         } else {
             super::prepare_sandbox(&setup_exec, &base_work_dir).await
         }
     } else {
         None
     };
-    if req.sandbox && sandbox_dir.is_none() {
+    if req.sandbox && sandbox_guard.is_none() {
         return Err((
             StatusCode::BAD_REQUEST,
             "sandbox_unavailable: could not create an isolated git worktree or temp-copy sandbox"
@@ -338,16 +342,24 @@ pub async fn ask_send(
     let is_new_thread = req.thread_id.is_none();
     let thread = match req.thread_id {
         Some(tid) => {
-            let t = ask_store
-                .get_thread(tid)
-                .await
-                .map_err(internal)?
-                .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
+            let t = match ask_store.get_thread(tid).await {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    if let Some(guard) = sandbox_guard {
+                        guard.cleanup().await;
+                    }
+                    return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
+                }
+                Err(e) => {
+                    if let Some(guard) = sandbox_guard {
+                        guard.cleanup().await;
+                    }
+                    return Err(internal(e));
+                }
+            };
             if t.mission_id != mission_id {
-                if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
-                    super::cleanup_remote_sandbox(rt, sdir).await;
-                } else if let Some(dir) = &sandbox_dir {
-                    super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
+                if let Some(guard) = sandbox_guard {
+                    guard.cleanup().await;
                 }
                 return Err((
                     StatusCode::BAD_REQUEST,
@@ -356,29 +368,27 @@ pub async fn ask_send(
             }
             t
         }
-        None => {
-            match ask_store
-                .create_thread(mission_id, Some(cfg.model.clone()))
-                .await
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
-                        super::cleanup_remote_sandbox(rt, sdir).await;
-                    } else if let Some(dir) = &sandbox_dir {
-                        super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
-                    }
-                    return Err(internal(e));
+        None => match ask_store
+            .create_thread_with_id(thread_id, mission_id, Some(cfg.model.clone()))
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                if let Some(guard) = sandbox_guard {
+                    guard.cleanup().await;
                 }
+                return Err(internal(e));
             }
-        }
+        },
     };
+    let sandbox_dir = sandbox_guard.as_ref().map(|g| g.path().to_path_buf());
     let used_sandbox = sandbox_dir.is_some();
     let work_dir = sandbox_dir.clone().unwrap_or_else(|| base_work_dir.clone());
     let turn_remote_target = base_remote_target.clone().map(|mut rt| {
-        if let Some(sdir) = &remote_sandbox_dir {
-            rt.cwd_override = Some(sdir.clone());
-            rt.display_cwd = sdir.clone();
+        if let Some(sdir) = &sandbox_dir {
+            let sdir_str = sdir.to_string_lossy().into_owned();
+            rt.cwd_override = Some(sdir_str.clone());
+            rt.display_cwd = sdir_str;
         }
         rt
     });
@@ -408,10 +418,8 @@ pub async fn ask_send(
     let answer_result = run_ask_turn(&turn, &req.content).await;
 
     // Tear down the sandbox regardless of how the turn ended.
-    if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
-        super::cleanup_remote_sandbox(rt, sdir).await;
-    } else if let Some(dir) = &sandbox_dir {
-        super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
+    if let Some(guard) = sandbox_guard {
+        guard.cleanup().await;
     }
     let answer = answer_result.map_err(internal)?;
 
@@ -489,21 +497,26 @@ pub async fn ask_send_stream(
         .map_err(|e| (StatusCode::CONFLICT, e))?
     };
 
+    let thread_id = req.thread_id.unwrap_or_else(Uuid::new_v4);
+    let turn_guard = ask_store.try_lock_turn(thread_id).ok_or((
+        StatusCode::CONFLICT,
+        "Ask thread already has an active turn".to_string(),
+    ))?;
+
     // Optional sandbox-copy isolation (same as the synchronous path): set up a
     // throwaway worktree, run the streamed turn in it, tear it down after.
     let setup_exec = crate::workspace_exec::WorkspaceExec::new(workspace.clone());
-    let mut remote_sandbox_dir: Option<String> = None;
-    let sandbox_dir = if req.sandbox {
+    let sandbox_guard = if req.sandbox {
         if let Some(rt) = &base_remote_target {
-            remote_sandbox_dir = super::prepare_remote_sandbox(rt).await;
-            remote_sandbox_dir.as_deref().map(std::path::PathBuf::from)
+            super::prepare_remote_sandbox(rt).await
         } else {
             super::prepare_sandbox(&setup_exec, &base_work_dir).await
         }
     } else {
         None
     };
-    if req.sandbox && sandbox_dir.is_none() {
+    if req.sandbox && sandbox_guard.is_none() {
+        drop(turn_guard);
         return Err((
             StatusCode::BAD_REQUEST,
             "sandbox_unavailable: could not create an isolated git worktree or temp-copy sandbox"
@@ -514,17 +527,28 @@ pub async fn ask_send_stream(
     let is_new_thread = req.thread_id.is_none();
     let thread = match req.thread_id {
         Some(tid) => {
-            let t = ask_store
-                .get_thread(tid)
-                .await
-                .map_err(internal)?
-                .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
-            if t.mission_id != mission_id {
-                if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
-                    super::cleanup_remote_sandbox(rt, sdir).await;
-                } else if let Some(dir) = &sandbox_dir {
-                    super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
+            let t = match ask_store.get_thread(tid).await {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    if let Some(guard) = sandbox_guard {
+                        guard.cleanup().await;
+                    }
+                    drop(turn_guard);
+                    return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
                 }
+                Err(e) => {
+                    if let Some(guard) = sandbox_guard {
+                        guard.cleanup().await;
+                    }
+                    drop(turn_guard);
+                    return Err(internal(e));
+                }
+            };
+            if t.mission_id != mission_id {
+                if let Some(guard) = sandbox_guard {
+                    guard.cleanup().await;
+                }
+                drop(turn_guard);
                 return Err((
                     StatusCode::BAD_REQUEST,
                     "Thread does not belong to this mission".to_string(),
@@ -532,29 +556,28 @@ pub async fn ask_send_stream(
             }
             t
         }
-        None => {
-            match ask_store
-                .create_thread(mission_id, Some(cfg.model.clone()))
-                .await
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
-                        super::cleanup_remote_sandbox(rt, sdir).await;
-                    } else if let Some(dir) = &sandbox_dir {
-                        super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
-                    }
-                    return Err(internal(e));
+        None => match ask_store
+            .create_thread_with_id(thread_id, mission_id, Some(cfg.model.clone()))
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                if let Some(guard) = sandbox_guard {
+                    guard.cleanup().await;
                 }
+                drop(turn_guard);
+                return Err(internal(e));
             }
-        }
+        },
     };
+    let sandbox_dir = sandbox_guard.as_ref().map(|g| g.path().to_path_buf());
     let used_sandbox = sandbox_dir.is_some();
     let work_dir = sandbox_dir.clone().unwrap_or_else(|| base_work_dir.clone());
     let turn_remote_target = base_remote_target.clone().map(|mut rt| {
-        if let Some(sdir) = &remote_sandbox_dir {
-            rt.cwd_override = Some(sdir.clone());
-            rt.display_cwd = sdir.clone();
+        if let Some(sdir) = &sandbox_dir {
+            let sdir_str = sdir.to_string_lossy().into_owned();
+            rt.cwd_override = Some(sdir_str.clone());
+            rt.display_cwd = sdir_str;
         }
         rt
     });
@@ -584,10 +607,13 @@ pub async fn ask_send_stream(
     let content = req.content.clone();
     let thread_id = thread.id;
     let title_store = Arc::clone(&ask_store);
-    let cleanup_base = base_work_dir.clone();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<super::AskStreamEvent>(128);
+    let turn_guard = Arc::new(turn_guard);
+    let stream_turn_guard = Arc::clone(&turn_guard);
     tokio::spawn(async move {
+        let _turn_guard = turn_guard;
+        let sandbox_guard = sandbox_guard;
         let ok = run_ask_turn_streaming(&turn, &content, tx).await;
         // Only title a new thread if the turn actually produced an answer
         // (matches the synchronous path, which titles after success).
@@ -596,14 +622,13 @@ pub async fn ask_send_stream(
                 .set_thread_title(thread_id, &derive_title(&content))
                 .await;
         }
-        if let (Some(rt), Some(sdir)) = (&base_remote_target, &remote_sandbox_dir) {
-            super::cleanup_remote_sandbox(rt, sdir).await;
-        } else if let Some(dir) = &sandbox_dir {
-            super::cleanup_sandbox(&setup_exec, &cleanup_base, dir).await;
+        if let Some(guard) = sandbox_guard {
+            guard.cleanup().await;
         }
     });
 
     let sse = async_stream::stream! {
+        let _turn_guard = stream_turn_guard;
         while let Some(ev) = rx.recv().await {
             // On the (practically impossible) serialize failure, emit a real
             // error event so the client still receives a terminal frame rather
@@ -681,6 +706,10 @@ pub async fn delete_ask_thread(
         .ok_or((StatusCode::NOT_FOUND, "Mission not found".to_string()))?;
 
     let ask_store = super::ask_store(&state.config).await.map_err(internal)?;
+    let _turn_guard = ask_store.try_lock_turn(thread_id).ok_or((
+        StatusCode::CONFLICT,
+        "Ask thread already has an active turn".to_string(),
+    ))?;
     // Only delete if the thread belongs to this mission.
     if let Some(thread) = ask_store.get_thread(thread_id).await.map_err(internal)? {
         if thread.mission_id == mission_id {
@@ -841,5 +870,461 @@ mod tests {
         let (status, err) = resolve_remote_ask_cwd(mid, None, Some("relative/subdir")).unwrap_err();
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(err, "Remote working_directory must be absolute");
+    }
+
+    #[tokio::test]
+    async fn ask_http_rejects_concurrent_turns_and_deletes_across_stream_lifetime() {
+        use crate::ai_providers::{AIProvider, ProviderType};
+        use crate::api::control::ControlHub;
+        use crate::api::projects_store::ProjectsStore;
+        use crate::config::Config;
+        use crate::mcp::McpRegistry;
+        use axum::routing::post;
+        use axum::Router;
+        use tokio::sync::RwLock;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let finish_llm = Arc::new(tokio::sync::Notify::new());
+        let started_srv = Arc::clone(&started);
+        let finish_srv = Arc::clone(&finish_llm);
+        let llm_app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let started_srv = Arc::clone(&started_srv);
+                let finish_srv = Arc::clone(&finish_srv);
+                async move {
+                    started_srv.notify_one();
+                    finish_srv.notified().await;
+                    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"stream-ok\"},\"finish_reason\":null}]}\n\n\
+                                data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                                data: [DONE]\n\n";
+                    ([(axum::http::header::CONTENT_TYPE, "text/event-stream")], body)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm_addr = listener.local_addr().unwrap();
+        let llm_server = tokio::spawn(async move {
+            let _ = axum::serve(listener, llm_app).await;
+        });
+
+        let mut config = Config::new(path.to_path_buf());
+        config.automations_enabled = false;
+        let root_agent: crate::agents::AgentRef =
+            Arc::new(crate::agents::OpenCodeAgent::new(config.clone()));
+        let mcp = Arc::new(McpRegistry::new(path).await);
+        let workspaces = Arc::new(crate::workspace::WorkspaceStore::new(path.to_path_buf()).await);
+        let library = Arc::new(RwLock::new(None));
+        let hub = ControlHub::new(
+            config.clone(),
+            root_agent.clone(),
+            mcp.clone(),
+            workspaces.clone(),
+            library.clone(),
+            None,
+        );
+        let user = AuthUser {
+            id: "ask-http-test".into(),
+            username: "ask-http-test".into(),
+        };
+        let control = hub.get_or_spawn(&user).await;
+        let mission_store = Arc::clone(&control.mission_store);
+
+        let ai_providers =
+            Arc::new(crate::ai_providers::AIProviderStore::new(path.join("providers.json")).await);
+        let mut cerebras = AIProvider::new(ProviderType::Cerebras, "Test Cerebras".into());
+        cerebras.api_key = Some("sk-test-key".into());
+        cerebras.base_url = Some(format!("http://{llm_addr}/v1"));
+        cerebras.enabled = true;
+        ai_providers.add(cerebras).await;
+
+        let projects = Arc::new(ProjectsStore::open(path.join("projects.db")).unwrap());
+        let state = Arc::new(AppState {
+            config: config.clone(),
+            root_agent,
+            mcp,
+            workspaces: workspaces.clone(),
+            library,
+            control: hub,
+            tasks: Default::default(),
+            opencode_connections: Arc::new(
+                crate::opencode_config::OpenCodeStore::new(path.join("connections.json")).await,
+            ),
+            opencode_agents_cache: Default::default(),
+            ai_providers,
+            pending_oauth: Default::default(),
+            pending_github_oauth: Default::default(),
+            pending_github_integration: Default::default(),
+            github_connection: Arc::new(
+                crate::github_connection::GithubConnectionStore::new(path.join("github.json"))
+                    .await,
+            ),
+            secrets: None,
+            console_pool: Arc::new(crate::api::console::SessionPool::new()),
+            settings: Arc::new(crate::settings::SettingsStore::new(path).await),
+            backend_registry: Arc::new(RwLock::new(
+                crate::backend::registry::BackendRegistry::new("opencode"),
+            )),
+            backend_configs: Arc::new(
+                crate::backend_config::BackendConfigStore::new(path.join("backends.json"), vec![])
+                    .await,
+            ),
+            model_catalog: Default::default(),
+            health_tracker: Arc::new(crate::provider_health::ProviderHealthTracker::new()),
+            chain_store: Arc::new(
+                crate::provider_health::ModelChainStore::new(path.join("chains.json")).await,
+            ),
+            http_client: reqwest::Client::new(),
+            proxy_secret: "test-only".into(),
+            proxy_api_keys: Arc::new(
+                crate::api::proxy_keys::ProxyApiKeyStore::new(path.join("keys.json")).await,
+            ),
+            deferred_requests: Arc::new(
+                crate::api::deferred_proxy::DeferredRequestStore::new(path.join("requests.json"))
+                    .await,
+            ),
+            telegram_bridge: Arc::new(crate::api::telegram::TelegramBridge::new()),
+            fido_hub: Arc::new(crate::api::fido::FidoSigningHub::new()),
+            control_metrics: Arc::new(crate::api::control_metrics::ControlMetrics::new()),
+            provider_usage_cache: crate::api::provider_usage_cache::ProviderUsageCache::new(),
+            codex_usage: crate::api::codex_usage::CodexUsageStore::new(),
+            fleet: Arc::new(crate::remote_node::FleetMonitor::new()),
+            validation: Arc::new(
+                crate::api::validation::ValidationStore::open(path.join("validation.db")).unwrap(),
+            ),
+            projects,
+            attention_snapshot: Default::default(),
+            managed: Default::default(),
+        });
+
+        let mission = mission_store
+            .create_mission(
+                Some("ask-test"),
+                Some(crate::workspace::DEFAULT_WORKSPACE_ID),
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        let default_ws =
+            crate::workspace::resolve_workspace(&workspaces, &config, Some(mission.workspace_id))
+                .await;
+        let mission_dir =
+            crate::workspace::mission_workspace_dir_for_workspace(&default_ws, mission.id);
+        std::fs::create_dir_all(&mission_dir).unwrap();
+
+        let store = super::super::ask_store(&config).await.unwrap();
+        let thread = store
+            .create_thread(mission.id, Some("gpt-oss-120b".into()))
+            .await
+            .unwrap();
+
+        let sse = ask_send_stream(
+            State(Arc::clone(&state)),
+            Extension(user.clone()),
+            Path(mission.id),
+            Json(AskSendRequest {
+                thread_id: Some(thread.id),
+                content: "first stream".into(),
+                sandbox: false,
+            }),
+        )
+        .await
+        .expect("stream accepted");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+            .await
+            .unwrap();
+
+        let sync_err = ask_send(
+            State(Arc::clone(&state)),
+            Extension(user.clone()),
+            Path(mission.id),
+            Json(AskSendRequest {
+                thread_id: Some(thread.id),
+                content: "concurrent sync".into(),
+                sandbox: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(sync_err.0, StatusCode::CONFLICT);
+
+        let stream_err = match ask_send_stream(
+            State(Arc::clone(&state)),
+            Extension(user.clone()),
+            Path(mission.id),
+            Json(AskSendRequest {
+                thread_id: Some(thread.id),
+                content: "concurrent stream".into(),
+                sandbox: false,
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("expected concurrent stream on same thread_id to fail with 409"),
+            Err(err) => err,
+        };
+        assert_eq!(stream_err.0, StatusCode::CONFLICT);
+
+        let del_err = delete_ask_thread(
+            State(Arc::clone(&state)),
+            Extension(user.clone()),
+            Path((mission.id, thread.id)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(del_err.0, StatusCode::CONFLICT);
+
+        finish_llm.notify_one();
+        let resp = axum::response::IntoResponse::into_response(sse);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body_text = String::from_utf8_lossy(&bytes);
+        assert!(
+            body_text.contains("stream-ok"),
+            "unexpected sse body: {body_text}"
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while store.has_turn_lock(&thread.id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let deleted = delete_ask_thread(
+            State(Arc::clone(&state)),
+            Extension(user),
+            Path((mission.id, thread.id)),
+        )
+        .await
+        .expect("delete succeeds once SSE stream and turn guard drop");
+        assert_eq!(deleted.0["ok"], true);
+        assert!(!store.has_turn_lock(&thread.id));
+
+        llm_server.abort();
+    }
+
+    #[tokio::test]
+    async fn ask_send_stream_releases_turn_lock_on_early_sandbox_error() {
+        use crate::ai_providers::{AIProvider, ProviderType};
+        use crate::api::control::ControlHub;
+        use crate::api::projects_store::ProjectsStore;
+        use crate::config::Config;
+        use crate::mcp::McpRegistry;
+        use tokio::sync::RwLock;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let mut config = Config::new(path.to_path_buf());
+        config.automations_enabled = false;
+        let root_agent: crate::agents::AgentRef =
+            Arc::new(crate::agents::OpenCodeAgent::new(config.clone()));
+        let mcp = Arc::new(McpRegistry::new(path).await);
+        let workspaces = Arc::new(crate::workspace::WorkspaceStore::new(path.to_path_buf()).await);
+        let library = Arc::new(RwLock::new(None));
+        let hub = ControlHub::new(
+            config.clone(),
+            root_agent.clone(),
+            mcp.clone(),
+            workspaces.clone(),
+            library.clone(),
+            None,
+        );
+        let user = AuthUser {
+            id: "ask-early-error".into(),
+            username: "ask-early-error".into(),
+        };
+        let control = hub.get_or_spawn(&user).await;
+        let mission_store = Arc::clone(&control.mission_store);
+        let ai_providers =
+            Arc::new(crate::ai_providers::AIProviderStore::new(path.join("providers.json")).await);
+        let mut cerebras = AIProvider::new(ProviderType::Cerebras, "Test Cerebras".into());
+        cerebras.api_key = Some("dummy-provider-cred".into());
+        cerebras.enabled = true;
+        ai_providers.add(cerebras).await;
+        let projects = Arc::new(ProjectsStore::open(path.join("projects.db")).unwrap());
+        let state = Arc::new(AppState {
+            config: config.clone(),
+            root_agent,
+            mcp,
+            workspaces: workspaces.clone(),
+            library,
+            control: hub,
+            tasks: Default::default(),
+            opencode_connections: Arc::new(
+                crate::opencode_config::OpenCodeStore::new(path.join("connections.json")).await,
+            ),
+            opencode_agents_cache: Default::default(),
+            ai_providers,
+            pending_oauth: Default::default(),
+            pending_github_oauth: Default::default(),
+            pending_github_integration: Default::default(),
+            github_connection: Arc::new(
+                crate::github_connection::GithubConnectionStore::new(path.join("github.json"))
+                    .await,
+            ),
+            secrets: None,
+            console_pool: Arc::new(crate::api::console::SessionPool::new()),
+            settings: Arc::new(crate::settings::SettingsStore::new(path).await),
+            backend_registry: Arc::new(RwLock::new(
+                crate::backend::registry::BackendRegistry::new("opencode"),
+            )),
+            backend_configs: Arc::new(
+                crate::backend_config::BackendConfigStore::new(path.join("backends.json"), vec![])
+                    .await,
+            ),
+            model_catalog: Default::default(),
+            health_tracker: Arc::new(crate::provider_health::ProviderHealthTracker::new()),
+            chain_store: Arc::new(
+                crate::provider_health::ModelChainStore::new(path.join("chains.json")).await,
+            ),
+            http_client: reqwest::Client::new(),
+            proxy_secret: "test-only".into(),
+            proxy_api_keys: Arc::new(
+                crate::api::proxy_keys::ProxyApiKeyStore::new(path.join("keys.json")).await,
+            ),
+            deferred_requests: Arc::new(
+                crate::api::deferred_proxy::DeferredRequestStore::new(path.join("requests.json"))
+                    .await,
+            ),
+            telegram_bridge: Arc::new(crate::api::telegram::TelegramBridge::new()),
+            fido_hub: Arc::new(crate::api::fido::FidoSigningHub::new()),
+            control_metrics: Arc::new(crate::api::control_metrics::ControlMetrics::new()),
+            provider_usage_cache: crate::api::provider_usage_cache::ProviderUsageCache::new(),
+            codex_usage: crate::api::codex_usage::CodexUsageStore::new(),
+            fleet: Arc::new(crate::remote_node::FleetMonitor::new()),
+            validation: Arc::new(
+                crate::api::validation::ValidationStore::open(path.join("validation.db")).unwrap(),
+            ),
+            projects,
+            attention_snapshot: Default::default(),
+            managed: Default::default(),
+        });
+        let mission = mission_store
+            .create_mission(
+                Some("ask-early"),
+                Some(crate::workspace::DEFAULT_WORKSPACE_ID),
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        let default_ws =
+            crate::workspace::resolve_workspace(&workspaces, &config, Some(mission.workspace_id))
+                .await;
+        let mission_dir =
+            crate::workspace::mission_workspace_dir_for_workspace(&default_ws, mission.id);
+        std::fs::create_dir_all(&mission_dir).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&mission_dir)
+            .status()
+            .unwrap();
+
+        let store = super::super::ask_store(&config).await.unwrap();
+        let thread = store
+            .create_thread(mission.id, Some("gpt-oss-120b".into()))
+            .await
+            .unwrap();
+        let other_mission = mission_store
+            .create_mission(
+                Some("other-mission"),
+                Some(crate::workspace::DEFAULT_WORKSPACE_ID),
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        let other_thread = store
+            .create_thread(other_mission.id, Some("gpt-oss-120b".into()))
+            .await
+            .unwrap();
+
+        let err = match ask_send_stream(
+            State(Arc::clone(&state)),
+            Extension(user.clone()),
+            Path(mission.id),
+            Json(AskSendRequest {
+                thread_id: Some(thread.id),
+                content: "sandbox please".into(),
+                sandbox: true,
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("unborn git HEAD sandbox setup should fail with sandbox_unavailable"),
+            Err(err) => err,
+        };
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("sandbox_unavailable"));
+        assert!(!store.has_turn_lock(&thread.id));
+        drop(
+            store
+                .try_lock_turn(thread.id)
+                .expect("sandbox error released lock"),
+        );
+
+        let not_found_tid = Uuid::new_v4();
+        let err_missing = match ask_send_stream(
+            State(Arc::clone(&state)),
+            Extension(user.clone()),
+            Path(mission.id),
+            Json(AskSendRequest {
+                thread_id: Some(not_found_tid),
+                content: "missing thread".into(),
+                sandbox: false,
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("missing thread should return 404"),
+            Err(err) => err,
+        };
+        assert_eq!(err_missing.0, StatusCode::NOT_FOUND);
+        assert!(!store.has_turn_lock(&not_found_tid));
+        drop(
+            store
+                .try_lock_turn(not_found_tid)
+                .expect("404 released lock"),
+        );
+
+        let err_wrong_mission = match ask_send_stream(
+            State(state),
+            Extension(user),
+            Path(mission.id),
+            Json(AskSendRequest {
+                thread_id: Some(other_thread.id),
+                content: "wrong mission thread".into(),
+                sandbox: false,
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("thread from another mission should return 400"),
+            Err(err) => err,
+        };
+        assert_eq!(err_wrong_mission.0, StatusCode::BAD_REQUEST);
+        assert!(!store.has_turn_lock(&other_thread.id));
+        drop(
+            store
+                .try_lock_turn(other_thread.id)
+                .expect("wrong-mission error released lock"),
+        );
     }
 }
