@@ -994,7 +994,7 @@ impl WorkspaceStore {
             let persisted_generation = workspace.config["build_generation"].as_u64().unwrap_or(0);
             let previous_generation = lock_generation.max(persisted_generation);
             let generation = match previous_generation.checked_add(1) {
-                Some(gen) => gen,
+                Some(next_gen) => next_gen,
                 None => {
                     drop(lock);
                     return Err(conflict(
@@ -1028,7 +1028,9 @@ impl WorkspaceStore {
             let claimed = workspace.clone();
             workspace.error_message = None;
             if let Err(error) = write_workspace_snapshot(&storage_path, &next) {
-                *workspace = pre_claim;
+                if let Some(workspace) = next.get_mut(&id) {
+                    *workspace = pre_claim;
+                }
                 if let Err(rollback_error) =
                     sync_build_lock_generation(&mut lock, previous_generation)
                 {
@@ -8284,6 +8286,16 @@ mod managed_library_skill_tests {
     async fn claim_workspace_build_snapshot_write_failure_rolls_back_lock_and_does_not_burn_generation(
     ) {
         use std::os::unix::fs::PermissionsExt;
+
+        let probe_dir = tempfile::tempdir().unwrap();
+        let probe_sub = probe_dir.path().join("ro-probe");
+        std::fs::create_dir(&probe_sub).unwrap();
+        std::fs::set_permissions(&probe_sub, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let ro_enforced = tempfile::NamedTempFile::new_in(&probe_sub).is_err();
+        let _ = std::fs::set_permissions(&probe_sub, std::fs::Permissions::from_mode(0o700));
+        if !ro_enforced {
+            return;
+        }
 
         let directory = tempfile::tempdir().unwrap();
         let store = Arc::new(WorkspaceStore::new(directory.path().to_path_buf()).await);
