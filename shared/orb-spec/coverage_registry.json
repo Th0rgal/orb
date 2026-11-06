@@ -2021,21 +2021,21 @@
           },
           {
             "path": "src/remote_node/job_ledger.rs",
-            "sha256": "247fb40dfef5bcf19c25252f7f19630cbad2abc7cb79cc47512a62dd509518de"
+            "sha256": "b5d0d2c53965fa44b240dfb172e608a6e0f37e5ece342ac0a526bd705157a321"
           },
           {
-            "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "9ec95bbfd0aa74311e1c3608a06d5ad6d16eaabd19bca90d069dc1167642e614"
+            "path": "shared/orb-spec/evidence/p0-job-ledger-tests.log",
+            "sha256": "d928b3e093bba6666db63dbc06bb94cce7b0d8e1f4062b077c00bc75b9c47798"
           }
         ],
         "execution": {
-          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+          "path": "shared/orb-spec/evidence/p0-job-ledger-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib stateful_tests::wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1",
           "exit_code": 0,
           "result": "TESTED_LOCAL"
         },
         "assumptions": [
-          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "The receipt records local execution against the listed source hashes.",
           "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
           "No native mobile or WASM target execution is established by this receipt."
         ],
@@ -8872,20 +8872,20 @@
           },
           {
             "path": "src/remote_node/job_ledger.rs",
-            "sha256": "247fb40dfef5bcf19c25252f7f19630cbad2abc7cb79cc47512a62dd509518de"
+            "sha256": "b5d0d2c53965fa44b240dfb172e608a6e0f37e5ece342ac0a526bd705157a321"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
             "sha256": "f1d1e3d1acbe1c92b228bc92afbc4262d54bb4bb39b282db935244b1dd680c6a"
           },
           {
-            "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "72790f20c06dcc82bd344d3ea1edc027679e3c3f2d4428abc1978a8e95bf4aec"
+            "path": "shared/orb-spec/evidence/p0-job-ledger-tests.log",
+            "sha256": "d928b3e093bba6666db63dbc06bb94cce7b0d8e1f4062b077c00bc75b9c47798"
           }
         ],
         "execution": {
-          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+          "path": "shared/orb-spec/evidence/p0-job-ledger-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib stateful_tests::wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1",
           "exit_code": 0,
           "result": "TESTED_LOCAL"
         },
