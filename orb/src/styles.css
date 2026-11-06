@@ -1703,11 +1703,10 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
 button.fork-trigger { color: inherit; cursor: pointer; }
 button.fork-trigger:hover { color: var(--fg); }
 
-/* Shared inline errors sit beside the action that failed, without competing with the draft. */
-.error-notice { display: flex; align-items: flex-start; gap: 10px; min-width: 0; margin-top: 10px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--red) 28%, var(--stroke)); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--red) 3%, var(--bg)); color: var(--fg-2); text-align: left; font-size: 13px; line-height: 1.5; }
+/* Timeline/modal error cards share the same neutral surface as floating toasts; only the alert glyph carries red/amber. */
+.error-notice { display: flex; align-items: flex-start; gap: 10px; min-width: 0; margin-top: 10px; padding: 10px 10px 10px 14px; border: 1px solid var(--overlay-border, var(--stroke)); border-radius: var(--radius-md); background: var(--overlay-surface, var(--bg-elev)); color: var(--fg-2); text-align: left; font-size: 12.5px; line-height: 1.5; }
 .error-notice-icon { flex: none; color: var(--red); margin-top: 2px; }
 /* Provider limits are a wait, not a failure: amber instead of red. */
-.error-notice.warning { border-color: color-mix(in srgb, var(--amber) 32%, var(--stroke)); background: color-mix(in srgb, var(--amber) 4%, var(--bg)); }
 .error-notice.warning .error-notice-icon { color: var(--amber); }
 .error-notice-link { padding: 3px 10px; border: 1px solid var(--stroke-strong); border-radius: var(--radius-sm); background: var(--bg-btn); color: var(--fg); font: inherit; font-size: 12px; cursor: pointer; }
 .error-notice-link:hover { background: var(--hover-1); }
@@ -3682,18 +3681,20 @@ select.orb-select-native:disabled { cursor: default; }
   gap: 4px;
 }
 
-/* Bottom notifications (toast.tsx). Same surface as the Inbox undo bar. */
-.toaster { position: fixed; left: 50%; transform: translateX(-50%); z-index: 90; display: flex; flex-direction: column; align-items: center; gap: 8px; width: max-content; max-width: min(560px, calc(100vw - 32px)); pointer-events: none; }
-.toaster.fit:has(.secret) .toast { align-self: stretch; }
+/* Bottom notifications (toast.tsx). Workspace-centered across active panels; shared by errors, approvals, and undo. */
+.toaster { position: fixed; left: 50%; transform: translateX(-50%); z-index: 90; display: flex; flex-direction: column; align-items: center; gap: 8px; width: max-content; max-width: min(580px, calc(100vw - 32px)); pointer-events: none; }
+.toaster.fit .toast.secret, .toaster.fit .toast.error { align-self: stretch; }
 .toast { pointer-events: auto; display: flex; align-items: center; gap: 10px; max-width: 100%; padding: 8px 8px 8px 14px; border-radius: 8px; background: var(--overlay-surface); border: 1px solid var(--overlay-border); box-shadow: var(--shadow-lg); color: var(--fg-2); font-size: 12px; animation: toast-in 140ms ease-out; }
+.toast.error { align-items: flex-start; padding-top: 10px; padding-bottom: 10px; }
 .toast-icon { flex: none; align-self: flex-start; margin-top: 2px; color: var(--red); }
+.toast.warning .toast-icon { color: var(--amber); }
 .toast-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; overflow-wrap: anywhere; }
 .toast-title { color: var(--fg); font-weight: 500; }
 .toast-message { color: var(--fg-2); }
-.toast-details { color: var(--fg-3); }
+.toast-details { margin-top: 4px; color: var(--fg-3); }
 .toast-details summary { cursor: pointer; width: fit-content; }
-.toast-details pre { margin: 6px 0 0; max-height: 160px; overflow: auto; padding: 8px; border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--fg-2); font: 11px/1.5 var(--mono); white-space: pre-wrap; }
-.toast-btn { flex: none; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 8px; border-radius: 6px; background: var(--bg-active); color: var(--fg); font-size: 12px; }
+.toast-details pre { margin: 6px 0 0; max-height: 160px; overflow: auto; padding: 8px; border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--fg-2); font: 11px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.toast-btn { flex: none; align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 9px; border-radius: 6px; background: var(--bg-active); color: var(--fg); font-size: 12px; }
 .toast-btn:hover { background: var(--overlay-hover); }
 .toast-actions { display: contents; }
 .toast.secret { align-items: flex-start; align-self: stretch; }

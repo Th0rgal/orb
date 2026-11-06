@@ -1,4 +1,3 @@
-import { ErrorNotice } from "./ErrorNotice";
 import { ErrorToast } from "./toast";
 import { Show, createSignal, onCleanup } from "solid-js";
 import { pollWhileVisible } from "./poll";
@@ -77,9 +76,7 @@ export function ExecutionSettings(p: { onOpenPage?: (id: string) => void; inline
           <h2>Execution</h2>
         </div>
         <p class="s-lead">Limits that apply to the whole backend, across every project.</p></Show>
-        <Show when={error()}>
-          <ErrorNotice error={error()!} />
-        </Show>
+        <ErrorToast error={error()} title="Couldn’t load execution settings" background action={{ label: "Retry", run: () => load() }} />
         <Show when={loaded()} fallback={<ControllerSkeleton />}>
           <section class={p.inline ? "" : "s-sec"}>
             <Show when={!p.inline}><h3>Concurrency</h3></Show>

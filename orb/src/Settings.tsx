@@ -4,7 +4,6 @@ import { ErrorToast } from "./toast";
 import { ExecutionSettings } from "./ExecutionSettings";
 import { MachineProvidersCard } from "./ManagedMachines";
 import { Select } from "./Select";
-import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createEffect, createSignal, on, onMount, type JSX } from "solid-js";
 import * as Ic from "./icons";
 import { clearConnection, connectionVersion, getApiUrl, getJwt, isConnected, login, setApiUrl } from "./api";
@@ -201,9 +200,7 @@ function BackendTab() {
           </Show>
         </Row>
       </Card>
-      <Show when={error()}>
-        <ErrorNotice error={error()!} />
-      </Show>
+      <ErrorToast error={error()} title="Couldn’t connect to the backend" onDismiss={() => setError("")} />
     </>
   );
 }

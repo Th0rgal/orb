@@ -19,7 +19,7 @@ test('archive is immediate, preserves the project, and rolls back a failed reque
  await row.click({button:'right'});await page.getByRole('menuitem',{name:'Archive',exact:true}).click();
  await expect(row).not.toBeVisible();
  await expect(project).toHaveAttribute('aria-expanded','true');expect(projects).toBe(reads);
- release();await page.getByRole("dialog").getByRole("button",{name:"Close",exact:true}).last().click();await expect(row).toBeVisible();expect(projects).toBe(reads);
+ release();const alert=page.getByRole("alert");await expect(alert).toContainText("Archive failed");await alert.getByRole("button",{name:"Dismiss",exact:true}).click();await expect(row).toBeVisible();expect(projects).toBe(reads);
 });
 
 test('one collapsed archive spans projects, while completion stays in place; restore reveals the original folder',async({page})=>{
@@ -112,8 +112,10 @@ test('archives load older pages on demand and a rejected restore leaves the sess
  await expect(archive.getByRole('button')).toHaveCount(102);expect(offsets).toEqual([0,100]);
  const row=archive.getByRole('button',{name:/Old conversation 100/});await row.click({button:'right'});
  await page.getByRole('menuitem',{name:'Restore',exact:true}).click();
- await expect(page.getByRole('alert')).toContainText('Restore failed');
- await page.getByRole('dialog').getByRole('button',{name:'Close',exact:true}).last().click();
+ const alert=page.getByRole('alert');
+ await expect(alert).toContainText('Restore failed');
+ await alert.getByRole('button',{name:'Dismiss',exact:true}).click();
+ await expect(alert).toHaveCount(0);
  await expect(row).toBeVisible();
  await expect(page.getByRole('tree',{name:'Projects',exact:true}).getByRole('button',{name:'Test project',exact:true})).toHaveAttribute('aria-expanded','false');
 });

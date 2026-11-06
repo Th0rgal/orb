@@ -26,10 +26,11 @@ w.loadFromLegacyCore=async()=>{localStorage.setItem('orb.apiUrl',location.origin
 w.items={one:[at(0,0)],many:[at(0,0),at(1,1),at(2,2),at(3,3),at(7,4)]};
 w.show=(k:'one'|'many')=>syncApprovalQueue(w.items[k],()=>{w.opened=true;});
 w.addDock=()=>{
- const dock=document.createElement('div');dock.className='dock';dock.style.cssText='position:fixed;left:300px;right:40px;bottom:0;margin:0;padding:10px 34px 16px';
+ const main=document.createElement('main');main.className='main';main.style.cssText='position:fixed;left:220px;right:200px;top:35px;bottom:0';document.body.appendChild(main);
+ const dock=document.createElement('div');dock.className='dock';dock.style.cssText='position:fixed;left:300px;right:240px;bottom:0;margin:0;padding:10px 34px 16px';
  dock.innerHTML='<div class="col"><div class="composer" style="height:80px"></div></div>';document.body.appendChild(dock);
- const side=document.createElement('div');side.style.cssText='position:fixed;right:0;bottom:0;width:200px';
- side.innerHTML='<div class="composer" style="height:40px"></div>';document.body.appendChild(side);
+ const side=document.createElement('aside');side.className='btw-sidebar';side.style.cssText='position:fixed;right:0;top:35px;bottom:0;width:200px';
+ side.innerHTML='<div class="composer" style="position:absolute;left:0;right:0;bottom:0;height:40px"></div>';document.body.appendChild(side);
 };
 w.addSettings=()=>{
  const main=document.createElement('main');main.className='main';main.style.cssText='position:fixed;left:220px;right:0;top:35px;bottom:0';

@@ -45,7 +45,7 @@ import {
 } from "./fileReferenceContext";
 import { MdView, ReadOnlySource } from "./Markdown";
 import { FileSkeleton } from "./Skeleton";
-import { ErrorNotice } from "./ErrorNotice";
+import { ErrorToast } from "./toast";
 import { connectionVersion } from "./api";
 import * as Ic from "./icons";
 
@@ -1161,19 +1161,20 @@ export function FilePanelProvider(p: {
                   if (t && viewer) t.scroll = viewer.scrollTop;
                 }}
               >
-                <Show when={error()}>
-                  <ErrorNotice error={error()!} title="Couldn’t open files">
-                    <button
-                      onClick={() => {
-                        rootPromise = undefined;
-                        void ensureRoots().catch(swallow("filePanel.ensureRoots"));
-                        void readSelected();
-                      }}
-                    >
-                      Retry
-                    </button>
-                  </ErrorNotice>
-                </Show>
+                <ErrorToast
+                  error={error()}
+                  title="Couldn’t open files"
+                  onDismiss={() => setError(undefined)}
+                  action={{
+                    label: "Retry",
+                    run: () => {
+                      setError(undefined);
+                      rootPromise = undefined;
+                      if (selected()) return readSelected();
+                      return ensureRoots().catch((e) => setError(e instanceof Error ? e.message : String(e)));
+                    },
+                  }}
+                />
                 <Show when={placeholder()}>
                   <FileSkeleton />
                 </Show>

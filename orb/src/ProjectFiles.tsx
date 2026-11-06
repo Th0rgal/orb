@@ -20,7 +20,6 @@ import { readProjectFileVersion } from "./projectContext";
 import { makeCutMission, moveMissions, planMissionMoves, readCutMission } from "./missionMove";
 import { RunningWorkers, deleteDescendants, descendantsSentence, pausedMissionIds, requiresDescendantOptIn, runningWorkerIds } from "./deleteRunning";
 import { ForkMission } from "./ForkMission";
-import { ErrorNotice, ErrorDialog } from "./ErrorNotice";
 import { For, Show, Suspense, createMemo, createSignal, onCleanup, onMount, createEffect, on, batch, lazy } from "solid-js";
 import { mergeById, pollWhileVisible } from "./poll";
 import { createStore, reconcile } from "solid-js/store";
@@ -2486,7 +2485,7 @@ export function LiveProjectsSection(p: {
         <div class="row note">{error()} <button class="text-btn" onClick={() => refresh(true)}>Retry</button></div>
       </Show>
       <ErrorToast error={cronWarning()} onDismiss={() => setCronWarning(null)} />
-      <Show when={!deleteTargets().length && actionError()}>{error => <ErrorDialog error={error()} onClose={() => setActionError(null)} />}</Show>
+      <ErrorToast error={!deleteTargets().length ? actionError() : null} title="This action couldn’t be completed" onDismiss={() => setActionError(null)} />
       <Show when={importStatus()}><div class="row note" role="status">{importStatus()}</div></Show>
       <For each={backgroundUploads().filter(t => t.scope?.startsWith("project:"))}>
         {task => {
@@ -2802,25 +2801,26 @@ export function ProjectFileView(p: { slug: string; path: string }) {
 export function FileDocument(p: { text: string | null; name: string; error?: string | null; onInput: (text: string) => void; readOnly?: boolean; markdown?: boolean }) {
   const markdown = () => p.markdown ?? /\.(md|markdown)$/i.test(p.name);
   return (
-    <Show
-      when={mdSource() || !markdown()}
-      fallback={
-        <div class="scroll">
-          <div class="col">
-            <Show when={p.error}><ErrorNotice error={p.error!} /></Show>
-            <Show when={p.text !== null} fallback={<FileSkeleton />}>
-              <MdView text={p.text ?? ""} />
-            </Show>
+    <>
+      <ErrorToast error={p.error} title={`Couldn’t save ${p.name}`} />
+      <Show
+        when={mdSource() || !markdown()}
+        fallback={
+          <div class="scroll">
+            <div class="col">
+              <Show when={p.text !== null} fallback={<FileSkeleton />}>
+                <MdView text={p.text ?? ""} />
+              </Show>
+            </div>
           </div>
+        }
+      >
+        <div class="file-view">
+          <Show when={p.text !== null} fallback={<p class="s-lead shimmer">Loading {p.name}…</p>}>
+            <MdSource text={p.text ?? ""} onInput={p.onInput} readOnly={p.readOnly} />
+          </Show>
         </div>
-      }
-    >
-      <div class="file-view">
-        <Show when={p.error}><ErrorNotice error={p.error!}/></Show>
-        <Show when={p.text !== null} fallback={<p class="s-lead shimmer">Loading {p.name}…</p>}>
-          <MdSource text={p.text ?? ""} onInput={p.onInput} readOnly={p.readOnly} />
-        </Show>
-      </div>
-    </Show>
+      </Show>
+    </>
   );
 }
