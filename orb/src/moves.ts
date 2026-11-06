@@ -72,9 +72,48 @@ type Placed = {
   placement_revision?: number;
   parent_mission_id?: string | null;
   callback_parent_mission_id?: string | null;
+  updated_at?: string | null;
+  created_at?: string | null;
   tags?: string[] | null;
   [PROJECTED_MOVE]?: true;
 };
+
+const missionSortMs = (row: Pick<Placed, "updated_at" | "created_at">) =>
+  (row.updated_at ? Date.parse(row.updated_at) || 0 : 0)
+  || (row.created_at ? Date.parse(row.created_at) || 0 : 0);
+
+/**
+ * Patch `updated` in place if its `id` is already in `rows`, or insert a newly
+ * arriving row at its descending `updated_at` (fallback `created_at`) position
+ * so moves never cause older conversations to jump above newer ones.
+ */
+export function upsertMissionPreservingOrder<T extends Placed>(rows: readonly T[], updated: T): T[] {
+  const existingIdx = rows.findIndex(r => r.id === updated.id);
+  if (existingIdx >= 0) {
+    if (rows[existingIdx] === updated) return rows as T[];
+    const next = rows.slice();
+    next[existingIdx] = updated;
+    return next;
+  }
+  const ts = missionSortMs(updated);
+  if (ts > 0) {
+    const insertIdx = rows.findIndex(r => missionSortMs(r) < ts);
+    if (insertIdx < 0) return [...rows, updated];
+    return [...rows.slice(0, insertIdx), updated, ...rows.slice(insertIdx)];
+  }
+  return [updated, ...rows];
+}
+
+/** Merge newly `arriving` cross-project rows into `own` in recency order. */
+export function mergeArrivingMissions<T extends Placed>(own: readonly T[], arriving: readonly T[]): T[] {
+  if (!arriving.length) return own as T[];
+  let out = own as T[];
+  for (const row of arriving) {
+    if (out.some(r => r.id === row.id)) continue;
+    out = upsertMissionPreservingOrder(out, row);
+  }
+  return out;
+}
 
 /** `mission` at its pending destination, if it is being moved. */
 export function movedMission<T extends Placed>(mission: T): T {

@@ -1,4 +1,4 @@
-import { deleteFileOptimistically, fileMoveKey, isFilePathPending, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, waitForFilePathSettled, withMovedMissions } from "./moves";
+import { deleteFileOptimistically, fileMoveKey, isFilePathPending, mergeArrivingMissions, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, upsertMissionPreservingOrder, waitForFilePathSettled, withMovedMissions } from "./moves";
 import { renameOptimistically } from "./renames";
 import { isArchivable, isReopenable, isRunning, isLive, isWorking, presentedStatus } from "./missionStatus";
 import { swallow } from "./log";
@@ -162,7 +162,7 @@ export function LiveProjectsSection(p: {
     // Pending moves: rows leave their old project and appear in the new one at once.
     const own = (missions[slug] ?? []).filter(m => !movingOutOf(m.id, slug) && (!m.project || m.project === slug));
     const arriving = pendingPlaceMoves().size ? missionsMovedInto(slug, [...Object.values(missions).flat(), ...(p.activityMissions ?? [])]).filter(m => !own.some(o => o.id === m.id)) : [];
-    const rows = withMovedMissions([...arriving, ...own]).map(withHierarchy);
+    const rows = withMovedMissions(mergeArrivingMissions(own, arriving)).map(withHierarchy);
     const current = currentMission();
     // A paginated project list may not contain an older open conversation, and
     // the open conversation's live status updates ahead of the project poll.
@@ -941,7 +941,7 @@ export function LiveProjectsSection(p: {
               placement_revision: item.placement_revision,
             }, "partial");
             if (!isArchived(updated) || (missions[targetSlug] ?? []).some(m => m.id === item.mission_id)) {
-              setMissions(targetSlug, rows => [updated, ...(rows ?? []).filter(m => m.id !== item.mission_id)]);
+              setMissions(targetSlug, rows => upsertMissionPreservingOrder(rows ?? [], updated));
             }
           } else if ((missions[targetSlug] ?? []).some(m => m.id === item.mission_id)) {
             setMissions(targetSlug, rows => (rows ?? []).map(m => m.id === item.mission_id

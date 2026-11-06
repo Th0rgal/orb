@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createMemo, createRoot } from "solid-js";
 import { ApprovalTransferConfirmationRequiredError } from "../src/api";
 import { commitAuthoritativePlacements, resetMissionHierarchy, withHierarchy } from "../src/missionHierarchy";
-import { MOVE_CONFIRM_MS, deleteFileOptimistically, fileMoveKey, filesMovedAway, filesMovedInto, isFilePathPending, missionMoveKey, missionsMovedInto, moveOptimistically, movedMission, movingOutOf, previewMove, resetMoves, settleMove, waitForFilePathSettled, withMovedMissions } from "../src/moves";
+import { MOVE_CONFIRM_MS, deleteFileOptimistically, fileMoveKey, filesMovedAway, filesMovedInto, isFilePathPending, mergeArrivingMissions, missionMoveKey, missionsMovedInto, moveOptimistically, movedMission, movingOutOf, previewMove, resetMoves, settleMove, upsertMissionPreservingOrder, waitForFilePathSettled, withMovedMissions } from "../src/moves";
 
 beforeEach(() => { resetMoves(); resetMissionHierarchy(); });
 afterEach(() => { vi.useRealTimers(); resetMoves(); resetMissionHierarchy(); });
@@ -143,4 +143,21 @@ it("resolves waitForFilePathSettled when an optimistic file rename settles", asy
   settleMove(fileMoveKey("alpha", "context.md"));
   await waiter;
   expect(settled).toBe(true);
+});
+
+it("patches intra-project placement updates in place and inserts cross-project arrivals in recency order", () => {
+  const newer = { id: "m-new", project: "beta", folder: "", updated_at: "2026-11-06T01:30:00Z" };
+  const middle = { id: "m-mid", project: "beta", folder: "old", updated_at: "2026-11-06T01:20:00Z" };
+  const older = { id: "m-old", project: "beta", folder: "", updated_at: "2026-11-06T01:10:00Z" };
+  const patchedInPlace = upsertMissionPreservingOrder(
+    [newer, middle, older],
+    { ...middle, folder: "renamed", placement_revision: 3 },
+  );
+  expect(patchedInPlace.map(m => m.id)).toEqual(["m-new", "m-mid", "m-old"]);
+  expect(patchedInPlace[1]?.folder).toBe("renamed");
+
+  const arrivingBetween = { id: "m-arrive", project: "beta", folder: "docs", updated_at: "2026-11-06T01:15:00Z" };
+  const arrivedOldest = { id: "m-oldest", project: "beta", folder: "docs", updated_at: "2026-11-06T01:00:00Z" };
+  const merged = mergeArrivingMissions([newer, middle, older], [arrivedOldest, arrivingBetween]);
+  expect(merged.map(m => m.id)).toEqual(["m-new", "m-mid", "m-arrive", "m-old", "m-oldest"]);
 });
