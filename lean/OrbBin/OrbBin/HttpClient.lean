@@ -106,7 +106,7 @@ def sendRequest
     | .ok p => pure p
     | .error e => return .error e
   if parsed.isHttps then
-    httpsRequest method parsed.host parsed.port parsed.pathQuery headers body maxRespBytes true
+    httpsRequest method parsed.host parsed.port parsed.pathQuery headers body maxRespBytes true timeoutMs
   else
     let reqWire ← match buildOutboundHttp11Request method parsed.hostHeader parsed.pathQuery headers body with
       | .ok w => pure w

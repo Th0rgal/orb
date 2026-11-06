@@ -112,12 +112,15 @@ private def idKey (v : JVal) : String :=
   renderCompact v
 
 structure ActiveRequestEntry where
+  token     : UInt64
   key       : String
   idVal     : JVal
   cancelled : IO.Ref Bool
 
 private structure ServerState where
-  active : Array ActiveRequestEntry := #[]
+  nextToken : UInt64 := 1
+  inFlight  : Nat := 0
+  active    : Array ActiveRequestEntry := #[]
 
 private def writeJsonLine (outLock : Std.Mutex Unit) (outFd : Int32) (v : JVal) : IO Unit := do
   outLock.atomically do
@@ -126,7 +129,8 @@ private def writeJsonLine (outLock : Std.Mutex Unit) (outFd : Int32) (v : JVal) 
 
 /-- Serve concurrent JSON-RPC 2.0 requests from `inFd` to `outFd` (default stdin `0` -> stdout `1`).
     Each `handler req cancelFlag` receives a cancellation `IO.Ref Bool` so slow or cancelled requests
-    release cleanly on `notifications/cancelled`. -/
+    release cleanly on `notifications/cancelled` while keeping the 8-slot concurrency budget reserved
+    until the handler task finishes. -/
 def serveFd
     (inFd : Int32)
     (outFd : Int32)
@@ -178,26 +182,43 @@ def serveFd
                 if st.active.any (fun e => e.key == key) then
                   return Except.error (-32600, "Duplicate active request id")
                 let gateOk := OrbBin.Spec.verifyStdioJsonRpcFrame
-                  rawLine.size.toUInt64 1 st.active.size.toUInt32 maxConcurrentRequests
+                  rawLine.size.toUInt64 1 st.inFlight.toUInt32 maxConcurrentRequests
                 if gateOk != 1 then
                   return Except.error (-32001, "At most eight concurrent requests are allowed")
-                let entry : ActiveRequestEntry := { key, idVal, cancelled := cancelRef }
-                set { st with active := st.active.push entry }
-                return Except.ok ()
+                let entry : ActiveRequestEntry := { token := st.nextToken, key, idVal, cancelled := cancelRef }
+                set {
+                  st with
+                  nextToken := st.nextToken + 1
+                  inFlight := st.inFlight + 1
+                  active := st.active.push entry
+                }
+                return Except.ok entry.token
               match admitRes with
               | .error (code, msg) =>
                 writeJsonLine outLock outFd (jsonRpcError idVal code msg)
-              | .ok () =>
+              | .ok reqToken =>
                 let t ← IO.asTask do
-                  let resp ← handler req cancelRef
+                  let outcome ←
+                    try
+                      Except.ok <$> handler req cancelRef
+                    catch e =>
+                      pure (Except.error e)
+                  let wasCancelled ← cancelRef.get
                   let stillOwned ← stateMutex.atomically do
                     let st ← get
-                    let present := st.active.any (fun e => e.key == key)
-                    if present then
-                      set { st with active := st.active.filter (fun e => e.key != key) }
+                    let present := !wasCancelled && st.active.any (fun e => e.token == reqToken)
+                    let nextActive :=
+                      if present then st.active.filter (fun e => e.token != reqToken)
+                      else st.active
+                    set { st with inFlight := st.inFlight - 1, active := nextActive }
                     return present
-                  if stillOwned then
-                    writeJsonLine outLock outFd resp
+                  match outcome with
+                  | .ok resp =>
+                    if stillOwned then
+                      writeJsonLine outLock outFd resp
+                  | .error _ =>
+                    if stillOwned then
+                      writeJsonLine outLock outFd (jsonRpcError idVal (-32603) "Internal handler error")
                 tasks := tasks.push t
   for t in tasks do
     let _ ← IO.wait t

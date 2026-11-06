@@ -5,6 +5,7 @@
 import LeanSys.Posix
 import LeanSys.Auth
 import OrbNetLeaf.Crypto
+import OrbNetLeaf.TlsHttp
 import OrbBin.Spec
 
 namespace OrbBin.PosixExt
@@ -340,19 +341,33 @@ def ensurePrivateDir0700 (dir : System.FilePath) : IO (Except String Unit) := do
     return .error s!"Failed setting 0700 on `{ds}`"
   return .ok ()
 
-/-- Atomically write `content` with mode `0600` inside `path`'s parent directory and rename into `path`. -/
+/-- Atomically write `content` into a newly-created exclusive `0600` (`O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC`)
+    temporary file inside `path`'s parent directory BEFORE writing any secret bytes, then rename into `path`. -/
 def writeAtomicPrivate0600 (path : System.FilePath) (content : ByteArray) : IO (Except String Unit) := do
   let parent := path.parent.getD (System.FilePath.mk ".")
   IO.FS.createDirAll parent
+  let pst ← statPath parent.toString
+  if pst.isSymlink || !pst.isDir then
+    return .error s!"Refusing symlinked or non-directory parent `{parent}`"
   let nonce ← newUuidV4
   let fileName := path.fileName.getD "secret"
   let tmp := parent / s!".{fileName}.tmp-{nonce}"
   let ts := tmp.toString
-  IO.FS.writeBinFile tmp content
+  if let .error e ← OrbNetLeaf.TlsHttp.createExclFile0600 tmp then
+    return .error e
+  let tst ← statPath ts
+  if !tst.exists_ || tst.isSymlink || !tst.isReg || !tst.ownedByEuid || (tst.mode &&& 0o777) != 0o600 then
+    try IO.FS.removeFile tmp catch _ => pure ()
+    return .error s!"Temporary file `{ts}` failed 0600 exclusive verification"
+  try
+    IO.FS.writeBinFile tmp content
+  catch e =>
+    try IO.FS.removeFile tmp catch _ => pure ()
+    return .error s!"Failed writing `{ts}`: {e}"
   let rc ← chmod ts 0o600
   if rc != 0 then
     try IO.FS.removeFile tmp catch _ => pure ()
-    return .error s!"Failed setting 0600 on `{ts}`"
+    return .error s!"Failed verifying 0600 on `{ts}`"
   try
     IO.FS.rename tmp path
     return .ok ()

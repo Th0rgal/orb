@@ -361,77 +361,268 @@ def validateMatrixJson (m : JVal) : Except String JVal := do
     visited ← checkGateCycle gid gates [] visited
   return m
 
-/-! ### `models`: Catalog Validate / Export / Diff / Discover -/
+/-! ### `models`: Snapshot-Directory Catalog Validate / Export / Diff / Discover / Update -/
+
+private def isSafeSnapshotSlug (s : String) : Bool :=
+  !s.isEmpty && s.length < 100 && s.all (fun c => c.isAlphanum || c == '-' || c == '_')
+
+private def validateSnapshotJson (v : JVal) : Except String (String × String × String × Array JVal) := do
+  let some obj := v.asObj?
+    | throw "snapshot must be a JSON object"
+  let allowedKeys := #["schema_version", "provider_id", "access_profile", "source", "observed_at", "completeness", "models"]
+  for (k, _) in obj do
+    if !allowedKeys.contains k then
+      throw s!"unknown snapshot field: {k}"
+  let some schemaVer := v.fieldNat? "schema_version"
+    | throw "missing schema_version"
+  if schemaVer != 1 then
+    throw "unsupported snapshot schema"
+  let providerId := (v.fieldStr? "provider_id").getD ""
+  let accessProfile := (v.fieldStr? "access_profile").getD ""
+  if !isSafeSnapshotSlug providerId || !isSafeSnapshotSlug accessProfile then
+    throw "invalid provider/profile"
+  let source := (v.fieldStr? "source").getD ""
+  if source != "curated" && source != "discovery" then
+    throw "invalid snapshot source"
+  let obsOpt := v.field? "observed_at"
+  let hasObs := match obsOpt with
+    | some (.str s) => !s.isEmpty
+    | _ => false
+  if source == "discovery" && !hasObs then
+    throw "discovery snapshot needs observed_at"
+  let completeness := (v.fieldStr? "completeness").getD ""
+  if completeness != "complete" && completeness != "partial" then
+    throw "invalid snapshot completeness"
+  let some models := v.fieldArr? "models"
+    | throw "missing snapshot models array"
+  if models.isEmpty then
+    throw "empty snapshot cannot replace fallback models"
+  let mut seenIds : Array String := #[]
+  for m in models do
+    let mid := (m.fieldStr? "id").getD ""
+    let hasCtrl := mid.toList.any (fun c => c.toNat < 0x20 || c.toNat == 0x7F)
+    if mid.trimAscii.toString != mid || mid.isEmpty || mid.length > 256 || hasCtrl ||
+       (mid.splitOn "://").length > 1 || mid.contains '@' || seenIds.contains mid then
+      throw s!"invalid or duplicate model ID: {mid}"
+    if providerId == "zai" && mid == "glm-5.3[1m]" then
+      throw "use glm-5.3; context size is metadata, not an API ID"
+    seenIds := seenIds.push mid
+  return (providerId, accessProfile, completeness, models)
+
+private def snapshotFilename (providerId accessProfile : String) : String :=
+  s!"{providerId}-{accessProfile}.json"
+
+def loadSnapshotDir (dir : System.FilePath) : IO (Except String (Array (String × JVal))) := do
+  if !(← dir.isDir) then
+    return .error s!"read {dir}: not a directory"
+  let entries ← try dir.readDir catch e => return .error s!"read {dir}: {e}"
+  let mut out : Array (String × JVal) := #[]
+  for entry in entries do
+    let p := entry.path
+    if p.extension == some "json" then
+      let raw ← try IO.FS.readFile p catch e => return .error s!"read {p}: {e}"
+      let parsed ← match Json.parse raw with
+        | .ok j => pure j
+        | .error e => return .error s!"parse {p}: {e}"
+      match validateSnapshotJson parsed with
+      | .error e => return .error s!"{p}: {e}"
+      | .ok (prov, prof, _, _) =>
+        let expected := snapshotFilename prov prof
+        if entry.fileName != expected then
+          return .error s!"snapshot filename must match {expected}"
+        if out.any (fun (k, _) => k == expected) then
+          return .error "duplicate snapshot profile"
+        out := out.push (expected, parsed)
+  if out.isEmpty then
+    return .error s!"no snapshots in {dir}"
+  return .ok (out.qsort (fun a b => a.1 < b.1))
+
+def writeSnapshotsToDir (dir : System.FilePath) (snapshots : Array JVal) : IO (Except String Nat) := do
+  if snapshots.isEmpty then
+    return .error "no successful exportable discoveries; no files changed"
+  let mut validated : Array (String × JVal) := #[]
+  for s in snapshots do
+    match validateSnapshotJson s with
+    | .error e => return .error e
+    | .ok (prov, prof, _, _) =>
+      validated := validated.push (snapshotFilename prov prof, s)
+  IO.FS.createDirAll dir
+  let pid ← getpid
+  let mut seq : Nat := 0
+  for (fname, snap) in validated do
+    seq := seq + 1
+    let tmp := dir / s!".{fname}.{pid}.{seq}.tmp"
+    let dest := dir / fname
+    IO.FS.writeFile tmp ((renderPretty snap) ++ "\n")
+    IO.FS.rename tmp dest
+  return .ok validated.size
+
+def mergeSnapshotJson (existing incoming : JVal) : Except String JVal := do
+  let (eProv, eProf, _, eModels) ← validateSnapshotJson existing
+  let (iProv, iProf, iComp, iModels) ← validateSnapshotJson incoming
+  if eProv != iProv || eProf != iProf then
+    throw "snapshot profile mismatch"
+  if iComp != "partial" then
+    return incoming
+  let mut byId : Array (String × JVal) := #[]
+  for m in eModels do
+    let mid := (m.fieldStr? "id").getD ""
+    byId := byId.push (mid, m)
+  for m in iModels do
+    let mid := (m.fieldStr? "id").getD ""
+    match byId.findIdx? (fun (k, _) => k == mid) with
+    | some idx => byId := byId.set! idx (mid, m)
+    | none => byId := byId.push (mid, m)
+  let sortedModels := (byId.qsort (fun a b => a.1 < b.1)).map Prod.snd
+  let merged := incoming.setField "models" (.arr sortedModels)
+  let _ ← validateSnapshotJson merged
+  return merged
+
+def snapshotDiffJson (oldSnap newSnap : JVal) : JVal := Id.run do
+  let newProv := (newSnap.fieldStr? "provider_id").getD ""
+  let newProf := (newSnap.fieldStr? "access_profile").getD ""
+  let newComp := (newSnap.fieldStr? "completeness").getD "partial"
+  let oldModels := (oldSnap.fieldArr? "models").getD #[]
+  let newModels := (newSnap.fieldArr? "models").getD #[]
+  let mut added : Array JVal := #[]
+  let mut absent : Array JVal := #[]
+  let mut changed : Array JVal := #[]
+  let sortedNew := newModels.qsort (fun a b => ((a.fieldStr? "id").getD "") < ((b.fieldStr? "id").getD ""))
+  let sortedOld := oldModels.qsort (fun a b => ((a.fieldStr? "id").getD "") < ((b.fieldStr? "id").getD ""))
+  for nm in sortedNew do
+    let nid := (nm.fieldStr? "id").getD ""
+    match sortedOld.find? (fun om => (om.fieldStr? "id").getD "" == nid) with
+    | none => added := added.push (.str nid)
+    | some om =>
+      let oldName := (om.fieldStr? "name").getD ""
+      let newName := (nm.fieldStr? "name").getD ""
+      let oldDesc := om.fieldStr? "description"
+      let newDesc := nm.fieldStr? "description"
+      if oldName != newName || oldDesc != newDesc then
+        changed := changed.push (.str nid)
+  for om in sortedOld do
+    let oid := (om.fieldStr? "id").getD ""
+    if !sortedNew.any (fun nm => (nm.fieldStr? "id").getD "" == oid) then
+      absent := absent.push (.str oid)
+  return .obj #[
+    ("provider_id", .str newProv),
+    ("access_profile", .str newProf),
+    ("completeness", .str newComp),
+    ("added", .arr added),
+    ("absent", .arr absent),
+    ("removals_authoritative", .bool (newComp == "complete")),
+    ("changed", .arr changed)
+  ]
+
+private def resolveDir (root : System.FilePath) (raw : String) : System.FilePath :=
+  let p := System.FilePath.mk raw
+  if p.isAbsolute then p else root / p
 
 def runModelsCmd (root : System.FilePath) (args : List String) : IO (Except String Unit) := do
-  let catalogDir := (valueAfterFlag? args "--catalog-dir").map System.FilePath.mk
-    |>.getD (root / "catalog")
-  let modelsFile := catalogDir / "models.json"
   match args with
-  | "validate" :: _ =>
-    if !(← modelsFile.pathExists) then
-      return .error s!"catalog file not found: {modelsFile}"
-    let raw ← IO.FS.readFile modelsFile
-    match Json.parse raw with
-    | .ok j =>
-      IO.println s!"validated {modelsFile} (ok)"
-      let _ := j
-      return .ok ()
-    | .error e => return .error s!"invalid JSON in {modelsFile}: {e}"
-  | "export" :: _ =>
-    if !(← modelsFile.pathExists) then
-      return .error s!"catalog file not found: {modelsFile}"
-    let raw ← IO.FS.readFile modelsFile
-    match Json.parse raw with
-    | .ok j =>
-      IO.println (renderPretty j)
-      return .ok ()
-    | .error e => return .error e
-  | "diff" :: rest =>
-    let otherPath := (valueAfterFlag? rest "--against").orElse (fun _ => rest.head?)
-    let some op := otherPath | return .error "models diff requires <path> or --against <path>"
-    let rawA ← IO.FS.readFile modelsFile
-    let rawB ← IO.FS.readFile op
-    let equal := rawA.trimAscii == rawB.trimAscii
-    IO.println <| renderPretty <| JVal.obj #[
-      ("equal", .bool equal),
-      ("catalog", .str modelsFile.toString),
-      ("against", .str op)
-    ]
-    return .ok ()
   | "discover" :: rest =>
     let api? ← match valueAfterFlag? rest "--api" with
       | some u => pure (some u)
       | none => firstEnvNonEmpty ["SANDBOXED_API_URL", "HERMES_SANDBOXED_API_URL", "API_URL"]
-    match api? with
-    | some api =>
-      let tok? ← match valueAfterFlag? rest "--token" with
-        | some t => pure (some t)
-        | none => firstEnvNonEmpty ["SANDBOXED_API_TOKEN", "HERMES_SANDBOXED_API_TOKEN", "API_TOKEN"]
-      let url := stripTrailingSlash api ++ "/api/providers/models"
-      match (← sendJsonRequest "GET" url tok?) with
-      | .ok (200, _, some j) =>
-        IO.println (renderPretty j)
-        return .ok ()
-      | .ok (st, body, _) => return .error s!"HTTP {st}: {body}"
-      | .error e => return .error e
-    | none =>
-      if (← modelsFile.pathExists) then
-        IO.println (← IO.FS.readFile modelsFile)
-        return .ok ()
-      return .error "missing --api <url> or local catalog/models.json"
-  | "snapshot" :: "update" :: _ =>
-    if !(← modelsFile.pathExists) then
-      return .error s!"catalog file not found: {modelsFile}"
-    let raw ← IO.FS.readFile modelsFile
-    match Json.parse raw with
-    | .ok j =>
-      IO.FS.writeFile modelsFile ((renderPretty j) ++ "\n")
-      IO.println s!"updated {modelsFile}"
+    let some api := api? | return .error "missing --api or SANDBOXED_API_URL"
+    let tok? ← match valueAfterFlag? rest "--token" with
+      | some t => pure (some t)
+      | none => firstEnvNonEmpty ["SANDBOXED_API_TOKEN", "HERMES_SANDBOXED_API_TOKEN", "API_TOKEN"]
+    let base := stripTrailingSlash api
+    match (← sendJsonRequest "POST" (base ++ "/api/providers/catalog/refresh") tok? none #[] 300000) with
+    | .ok (st, _, _) =>
+      if st < 200 || st >= 300 then
+        return .error s!"catalog API returned HTTP {st}"
+    | .error _ => return .error "catalog API transport error"
+    match (← sendJsonRequest "GET" (base ++ "/api/providers/discovery") tok? none #[] 300000) with
+    | .ok (st, _, some j) =>
+      if st < 200 || st >= 300 then
+        return .error s!"catalog API returned HTTP {st}"
+      IO.println (renderPretty j)
       return .ok ()
+    | .ok (st, _, none) => return .error s!"catalog API returned HTTP {st}"
+    | .error _ => return .error "catalog API transport error"
+  | "export" :: rest =>
+    if let some src := valueAfterFlag? rest "--source" then
+      if src != "last-success" then
+        return .error "only --source last-success is supported"
+    let some outRaw := valueAfterFlag? rest "--output"
+      | return .error "missing --output DIR"
+    let api? ← match valueAfterFlag? rest "--api" with
+      | some u => pure (some u)
+      | none => firstEnvNonEmpty ["SANDBOXED_API_URL", "HERMES_SANDBOXED_API_URL", "API_URL"]
+    let some api := api? | return .error "missing --api or SANDBOXED_API_URL"
+    let tok? ← match valueAfterFlag? rest "--token" with
+      | some t => pure (some t)
+      | none => firstEnvNonEmpty ["SANDBOXED_API_TOKEN", "HERMES_SANDBOXED_API_TOKEN", "API_TOKEN"]
+    let base := stripTrailingSlash api
+    match (← sendJsonRequest "GET" (base ++ "/api/providers/snapshots") tok? none #[] 300000) with
+    | .ok (st, _, some (.arr snaps)) =>
+      if st < 200 || st >= 300 then
+        return .error s!"catalog API returned HTTP {st}"
+      let outDir := resolveDir root outRaw
+      match (← writeSnapshotsToDir outDir snaps) with
+      | .error e => return .error e
+      | .ok cnt =>
+        IO.println <| renderCompact <| JVal.obj #[("written", .nat cnt), ("directory", .str outRaw)]
+        return .ok ()
+    | .ok (st, _, _) => return .error s!"catalog API returned HTTP {st}"
+    | .error _ => return .error "catalog API transport error"
+  | "validate" :: rest =>
+    let some dirArg := rest.find? (fun s => !s.startsWith "--")
+      | return .error "models validate DIR"
+    match (← loadSnapshotDir (resolveDir root dirArg)) with
     | .error e => return .error e
+    | .ok snaps =>
+      IO.println <| renderCompact <| JVal.obj #[("valid", .bool true), ("snapshots", .nat snaps.size)]
+      return .ok ()
+  | "diff" :: rest =>
+    let baseRaw := (valueAfterFlag? rest "--snapshot-dir").getD "catalog/snapshots"
+    let incoming? := (valueAfterFlag? rest "--from").orElse (fun _ => rest.find? (fun s => !s.startsWith "--"))
+    let some incRaw := incoming?
+      | return .error "models diff --snapshot-dir DIR --from DIR"
+    let oldSnaps ← match (← loadSnapshotDir (resolveDir root baseRaw)) with
+      | .ok s => pure s
+      | .error e => return .error e
+    let newSnaps ← match (← loadSnapshotDir (resolveDir root incRaw)) with
+      | .ok s => pure s
+      | .error e => return .error e
+    let changes := newSnaps.map fun (fname, newS) =>
+      match oldSnaps.find? (fun (k, _) => k == fname) with
+      | some (_, oldS) => snapshotDiffJson oldS newS
+      | none =>
+        let mCount := ((newS.fieldArr? "models").getD #[]).size
+        JVal.obj #[("file", .str fname), ("new_profile", .bool true), ("models", .nat mCount)]
+    IO.println <| renderPretty <| JVal.obj #[
+      ("changes", .arr changes),
+      ("missing_profiles_are_preserved", .bool true)
+    ]
+    return .ok ()
+  | "snapshot" :: "update" :: rest =>
+    let some fromRaw := valueAfterFlag? rest "--from"
+      | return .error "missing --from DIR"
+    let destRaw := (valueAfterFlag? rest "--snapshot-dir").getD "catalog/snapshots"
+    let oldSnaps ← match (← loadSnapshotDir (resolveDir root destRaw)) with
+      | .ok s => pure s
+      | .error e => return .error e
+    let newSnaps ← match (← loadSnapshotDir (resolveDir root fromRaw)) with
+      | .ok s => pure s
+      | .error e => return .error e
+    let mut prepared : Array JVal := #[]
+    for (fname, inc) in newSnaps do
+      match oldSnaps.find? (fun (k, _) => k == fname) with
+      | some (_, prev) =>
+        match mergeSnapshotJson prev inc with
+        | .ok m => prepared := prepared.push m
+        | .error e => return .error e
+      | none => prepared := prepared.push inc
+    match (← writeSnapshotsToDir (resolveDir root destRaw) prepared) with
+    | .error e => return .error e
+    | .ok cnt =>
+      IO.println <| renderCompact <| JVal.obj #[("updated", .nat cnt), ("directory", .str destRaw)]
+      return .ok ()
   | _ =>
-    return .error "expected: palomactl models discover|export|diff|validate|snapshot update"
+    return .error "models: discover --connected [--api URL] | export --source last-success --output DIR | validate DIR | diff --snapshot-dir DIR --from DIR | snapshot update --from DIR [--snapshot-dir DIR]"
 
 /-! ### `status`, `reconcile`, `set-mode`, `dispatch-plan`, `import-trackers`, `repair-borrowed-tracks` -/
 
@@ -487,6 +678,266 @@ def renderStatusMd (state : JVal) : String := Id.run do
   out := out ++ "\n## Drift\n\n- none\n"
   return out
 
+/-! ### `import-trackers`, `set-mode`, and `dispatch-plan` Helpers -/
+
+private def positionalSlugs (rest : List String) : Array String := Id.run do
+  let mut out : Array String := #[]
+  let mut skip := false
+  for arg in rest do
+    if skip then
+      skip := false
+    else if arg == "--api" || arg == "--token" || arg == "--dir" then
+      skip := true
+    else if !arg.startsWith "--" then
+      out := out.push arg
+  return out
+
+private def resolveTrackersDir (root : System.FilePath) (rest : List String) : IO (Except String System.FilePath) := do
+  let dirRaw? ← match valueAfterFlag? rest "--dir" with
+    | some d => pure (some d)
+    | none => getEnvNonEmpty "HERMES_PROJECTS_DIR"
+  let some dirRaw := dirRaw?
+    | return .error "missing --dir <trackers> (or HERMES_PROJECTS_DIR)"
+  let dir := resolveDir root dirRaw
+  if !(← dir.isDir) then
+    return .error s!"tracker directory {dir} is not a directory"
+  return .ok dir
+
+private def listTrackerFiles (dir : System.FilePath) (only : Array String) : IO (Except String (Array (String × System.FilePath))) := do
+  let entries ← try dir.readDir catch e => return .error s!"read {dir}: {e}"
+  let mut files : Array (String × System.FilePath) := #[]
+  for entry in entries do
+    let p := entry.path
+    if p.extension == some "md" then
+      if let some stem := p.fileStem then
+        if (validateProjectSlug stem).isOk then
+          if only.isEmpty || only.contains stem then
+            files := files.push (stem, p)
+  return .ok (files.qsort (fun a b => a.1 < b.1))
+
+def runImportTrackers (root : System.FilePath) (rest : List String) : IO (Except String Unit) := do
+  let api? ← match valueAfterFlag? rest "--api" with
+    | some u => pure (some u)
+    | none => firstEnvNonEmpty ["SANDBOXED_API_URL", "HERMES_SANDBOXED_API_URL", "API_URL"]
+  let some api := api? | return .error "missing --api <url> (or SANDBOXED_API_URL)"
+  let tok? ← match valueAfterFlag? rest "--token" with
+    | some t => pure (some t)
+    | none => firstEnvNonEmpty ["SANDBOXED_API_TOKEN", "HERMES_SANDBOXED_API_TOKEN", "API_TOKEN"]
+  let dir ← match (← resolveTrackersDir root rest) with
+    | .ok d => pure d
+    | .error e => return .error e
+  let dryRun := rest.contains "--dry-run"
+  let only := positionalSlugs rest
+  let files ← match (← listTrackerFiles dir only) with
+    | .ok f => pure f
+    | .error e => return .error e
+  let mut reports : Array JVal := #[]
+  let base := stripTrailingSlash api
+  for (slug, path) in files do
+    let content ← try IO.FS.readFile path catch e => return .error s!"read {path}: {e}"
+    let payload := JVal.obj #[
+      ("source_path", .str path.toString),
+      ("content", .str content),
+      ("dry_run", .bool dryRun),
+      ("actor", .str "palomactl")
+    ]
+    match (← sendJsonRequest "POST" s!"{base}/api/projects/{slug}/imports" tok? (some payload) #[] 60000) with
+    | .error e => return .error e
+    | .ok (200, _, body?) =>
+      let b := body?.getD (.obj #[])
+      let itemsCount : JVal := match b.fieldArr? "items" with
+        | some xs => .nat xs.size
+        | none => .null
+      reports := reports.push <| JVal.obj #[
+        ("slug", .str slug),
+        ("path", .str path.toString),
+        ("created", (b.field? "created").getD .null),
+        ("claims", (b.field? "claims").getD .null),
+        ("already_imported", (b.field? "already_imported").getD .null),
+        ("ambiguities", (b.field? "ambiguities").getD .null),
+        ("receipt_id", (b.field? "receipt_id").getD .null),
+        ("items", itemsCount)
+      ]
+    | .ok (404, _, _) =>
+      reports := reports.push <| JVal.obj #[
+        ("slug", .str slug),
+        ("path", .str path.toString),
+        ("skipped", .str "not a roster project")
+      ]
+    | .ok (other, rawBody, _) =>
+      reports := reports.push <| JVal.obj #[
+        ("slug", .str slug),
+        ("path", .str path.toString),
+        ("error", .str s!"HTTP {other}: {rawBody}")
+      ]
+  IO.println <| renderPretty <| JVal.obj #[
+    ("dry_run", .bool dryRun),
+    ("reports", .arr reports)
+  ]
+  return .ok ()
+
+private def explorationLimitForMode (mode : String) : Option Nat :=
+  match mode with
+  | "conservative" => some 0
+  | "normal" => some 1
+  | "aggressive" => some 3
+  | "very_aggressive" => some 5
+  | _ => none
+
+private def isLeapYear (y : Nat) : Bool :=
+  (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+
+private def daysInMonth (y m : Nat) : Nat :=
+  match m with
+  | 1 | 3 | 5 | 7 | 8 | 10 | 12 => 31
+  | 4 | 6 | 9 | 11 => 30
+  | 2 => if isLeapYear y then 29 else 28
+  | _ => 0
+
+/-- Parse an RFC3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM)`) into UTC epoch seconds. -/
+def parseRfc3339Epoch? (raw : String) : Option Int := do
+  let s := raw.trimAscii.toString
+  let (datePart, rest0) ← match s.splitOn "T" with
+    | [d, t] => some (d, t)
+    | _ => match s.splitOn "t" with
+      | [d, t] => some (d, t)
+      | _ => none
+  let [yStr, mStr, dStr] := datePart.splitOn "-" | none
+  if yStr.length != 4 || mStr.length != 2 || dStr.length != 2 then none
+  let y ← yStr.toNat?
+  let mo ← mStr.toNat?
+  let da ← dStr.toNat?
+  if y < 1970 || mo < 1 || mo > 12 || da < 1 || da > daysInMonth y mo then none
+  let (timePart, tzOffsetSec) ←
+    if rest0.endsWith "Z" || rest0.endsWith "z" then
+      some ((rest0.dropEnd 1).toString, (0 : Int))
+    else if rest0.length > 6 then
+      let tzSignPos := rest0.length - 6
+      let pfx := (rest0.take tzSignPos).toString
+      let sfx := (rest0.drop tzSignPos).toString
+      let signChar := sfx.toList.headD ' '
+      if signChar != '+' && signChar != '-' then none
+      else
+        match (sfx.drop 1).toString.splitOn ":" with
+        | [ohS, omS] =>
+          if ohS.length != 2 || omS.length != 2 then none
+          else
+            let oh ← ohS.toNat?
+            let om ← omS.toNat?
+            if oh > 23 || om > 59 then none
+            else
+              let mag : Int := Int.ofNat (oh * 3600 + om * 60)
+              some (pfx, if signChar == '+' then mag else -mag)
+        | _ => none
+    else none
+  let baseTime := match timePart.splitOn "." with
+    | h :: _ => h
+    | [] => timePart
+  let [hhS, mmS, ssS] := baseTime.splitOn ":" | none
+  if hhS.length != 2 || mmS.length != 2 || ssS.length != 2 then none
+  let hh ← hhS.toNat?
+  let mm ← mmS.toNat?
+  let ss ← ssS.toNat?
+  if hh > 23 || mm > 59 || ss > 60 then none
+  let mut days : Nat := 0
+  for yr in [1970:y] do
+    days := days + (if isLeapYear yr then 366 else 365)
+  for mn in [1:mo] do
+    days := days + daysInMonth y mn
+  days := days + (da - 1)
+  let utcSec : Int := Int.ofNat (days * 86400 + hh * 3600 + mm * 60 + ss) - tzOffsetSec
+  return utcSec
+
+private def loadProjectModePolicy (root : System.FilePath) (project : String) : IO (String × String × Nat) := do
+  let modeFile := root / ".paloma" / "modes" / s!"{project}.json"
+  let nowSec := Int.ofNat (← nowEpoch).toNat
+  if (← modeFile.pathExists) then
+    if let .ok j := Json.parse (← IO.FS.readFile modeFile) then
+      let m := (j.fieldStr? "mode").getD "normal"
+      let u := (j.fieldStr? "until").getD "unset"
+      if let some expLimit := explorationLimitForMode m then
+        if let some untilSec := parseRfc3339Epoch? u then
+          if untilSec > nowSec then
+            return (m, u, expLimit)
+  return ("normal", "unset", 1)
+
+private def loadFixtureTasks (root : System.FilePath) : IO (Except String (Array JVal)) := do
+  let p := root / ".paloma" / "fixtures" / "tasks.json"
+  if !(← p.pathExists) then return .ok #[]
+  let raw ← IO.FS.readFile p
+  match Json.parse raw with
+  | .ok (.arr xs) => return .ok xs
+  | .ok v => return .ok ((v.fieldArr? "tasks").getD #[])
+  | .error e => return .error s!"parse {p}: {e}"
+
+private def intentRequestsExploration (intent : String) : Bool := Id.run do
+  let toks := (intent.splitToList (fun c => !c.isAlphanum)).filter (!·.isEmpty)
+  let keywords := #["proof", "prove", "explore", "explores", "explored", "exploring", "exploration", "exploratory"]
+  for tok in toks do
+    if keywords.contains tok.toLower then
+      return true
+  return false
+
+private def isExplorationTask (t : JVal) : Bool :=
+  (t.fieldStr? "lane").getD "" == "exploration" ||
+  match t.fieldStr? "intent" with
+  | some intent => intentRequestsExploration intent
+  | none => false
+
+private def taskFixtureId (t : JVal) : String :=
+  (t.fieldStr? "id").orElse (fun _ => t.fieldStr? "task_key") |>.getD ""
+
+def buildDispatchPlanJson (root : System.FilePath) (project : String) : IO (Except String JVal) := do
+  let (modeName, _, expLimit) ← loadProjectModePolicy root project
+  let tasks ← match (← loadFixtureTasks root) with
+    | .ok ts => pure ts
+    | .error e => return .error e
+  let ready := tasks.filter fun t =>
+    let proj := (t.fieldStr? "project").getD ""
+    let st := (t.fieldStr? "status").getD ""
+    proj == project && (st == "ready" || st == "pending")
+  if ready.isEmpty then
+    return .ok <| JVal.obj #[
+      ("project", .str project),
+      ("mode", .str modeName),
+      ("safe_lane_max_workers", .nat 1),
+      ("exploration_lane_max_workers", .nat expLimit),
+      ("dispatch", .arr #[]),
+      ("reason", .str "no_ready_tasks")
+    ]
+  let mut safe : Array JVal := #[]
+  let mut exploration : Array JVal := #[]
+  for t in ready do
+    if isExplorationTask t then exploration := exploration.push t
+    else safe := safe.push t
+  let sortedSafe := safe.qsort (fun a b => taskFixtureId a < taskFixtureId b)
+  let sortedExp := exploration.qsort (fun a b => taskFixtureId a < taskFixtureId b)
+  let mut dispatch : Array JVal := #[]
+  if sortedSafe.size > 0 then
+    dispatch := dispatch.push <| JVal.obj #[
+      ("task_id", .str (taskFixtureId sortedSafe[0]!)),
+      ("lane", .str "safe"),
+      ("max_workers", .nat 1),
+      ("gate_protected", .bool true)
+    ]
+  let expTake := Nat.min expLimit sortedExp.size
+  for i in [0:expTake] do
+    dispatch := dispatch.push <| JVal.obj #[
+      ("task_id", .str (taskFixtureId sortedExp[i]!)),
+      ("lane", .str "exploration"),
+      ("max_workers", .nat 1),
+      ("isolated_branch", .bool true)
+    ]
+  let reasonVal : JVal := if dispatch.isEmpty then .str "no_schedulable_tasks" else .null
+  return .ok <| JVal.obj #[
+    ("project", .str project),
+    ("mode", .str modeName),
+    ("safe_lane_max_workers", .nat 1),
+    ("exploration_lane_max_workers", .nat expLimit),
+    ("dispatch", .arr dispatch),
+    ("reason", reasonVal)
+  ]
+
 def runPalomaCtl (args : List String) : IO (Except String Unit) := do
   let rootEnv ← getEnvNonEmpty "PALOMACTL_ROOT"
   let cwd ← IO.currentDir
@@ -528,24 +979,7 @@ def runPalomaCtl (args : List String) : IO (Except String Unit) := do
       IO.println s!"wrote {sj}\nwrote {sm}\ndrift={driftLen}"
       return .ok ()
   | "import-trackers" :: rest =>
-    let api? ← match valueAfterFlag? rest "--api" with
-      | some u => pure (some u)
-      | none => firstEnvNonEmpty ["SANDBOXED_API_URL", "HERMES_SANDBOXED_API_URL", "API_URL"]
-    let some api := api? | return .error "missing --api <url> (or SANDBOXED_API_URL)"
-    let tok? ← match valueAfterFlag? rest "--token" with
-      | some t => pure (some t)
-      | none => firstEnvNonEmpty ["SANDBOXED_API_TOKEN", "HERMES_SANDBOXED_API_TOKEN", "API_TOKEN"]
-    let dryRun := rest.contains "--dry-run"
-    let url := stripTrailingSlash api ++ "/api/control/projects"
-    match (← sendJsonRequest "GET" url tok?) with
-    | .ok (200, _, j?) =>
-      IO.println <| renderPretty <| JVal.obj #[
-        ("dry_run", .bool dryRun),
-        ("projects", j?.getD (.arr #[]))
-      ]
-      return .ok ()
-    | .ok (st, body, _) => return .error s!"HTTP {st}: {body}"
-    | .error e => return .error e
+    runImportTrackers root rest
   | "pr-gates" :: repo :: numStr :: rest =>
     let some num := numStr.toNat? | return .error "PR number must be numeric"
     let workerHead? := valueAfterFlag? rest "--worker-head"
@@ -562,12 +996,21 @@ def runPalomaCtl (args : List String) : IO (Except String Unit) := do
   | "set-mode" :: project :: mode :: rest =>
     if let .error e := validateProjectSlug project then return .error e
     let some untilIso := valueAfterFlag? rest "--until" | return .error "missing --until <iso>"
+    let some untilSec := parseRfc3339Epoch? untilIso
+      | return .error "--until must be RFC3339/ISO timestamp"
+    let nowSec := Int.ofNat (← nowEpoch).toNat
+    if untilSec <= nowSec then
+      return .error "--until must be in the future"
+    let some expLimit := explorationLimitForMode mode
+      | return .error "mode must be conservative|normal|aggressive|very_aggressive"
     let mdir := root / ".paloma" / "modes"
     IO.FS.createDirAll mdir
     let policy := JVal.obj #[
       ("project", .str project),
       ("mode", .str mode),
-      ("until", .str untilIso)
+      ("until", .str untilIso),
+      ("safe_lane_max_workers", .nat 1),
+      ("exploration_lane_max_workers", .nat expLimit)
     ]
     IO.FS.writeFile (mdir / s!"{project}.json") ((renderPretty policy) ++ "\n")
     IO.println (renderPretty policy)
@@ -577,23 +1020,11 @@ def runPalomaCtl (args : List String) : IO (Except String Unit) := do
   | "dispatch-plan" :: rest =>
     let some project := valueAfterFlag? rest "--project" | return .error "missing --project <slug>"
     if let .error e := validateProjectSlug project then return .error e
-    let modeFile := root / ".paloma" / "modes" / s!"{project}.json"
-    let modeVal ← if (← modeFile.pathExists) then
-      match Json.parse (← IO.FS.readFile modeFile) with
-      | .ok j => pure j
-      | .error _ => pure (.obj #[("mode", .str "supervised")])
-    else
-      pure (.obj #[("mode", .str "supervised")])
-    let missions ← loadFixtureMissions root
-    let projMissions := missions.filter (fun m => m.fieldStr? "project" == some project)
-    let plan := JVal.obj #[
-      ("project", .str project),
-      ("policy", modeVal),
-      ("active_missions", .nat projMissions.size),
-      ("missions", .arr projMissions)
-    ]
-    IO.println (renderPretty plan)
-    return .ok ()
+    match (← buildDispatchPlanJson root project) with
+    | .ok plan =>
+      IO.println (renderPretty plan)
+      return .ok ()
+    | .error e => return .error e
   | "repair-borrowed-tracks" :: rest =>
     let api? ← match valueAfterFlag? rest "--api" with
       | some u => pure (some u)

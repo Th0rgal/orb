@@ -184,6 +184,98 @@ def runAllTests : IO UInt32 := do
   let jwt ← OrbBin.AutomationMcp.mintServiceJwt "unit-test-secret"
   assertEq "HS256 JWT has 3 dot-separated segments" (jwt.splitOn ".").length 3
 
+  -- 9. `palomactl` snapshot-directory models, RFC3339 validation & task-based `dispatch-plan`
+  let snapDir := tmpDir / "snaps"
+  IO.FS.createDirAll snapDir
+  let snapBase := JVal.obj #[
+    ("schema_version", .nat 1),
+    ("provider_id", .str "openai"),
+    ("access_profile", .str "api_key"),
+    ("source", .str "curated"),
+    ("completeness", .str "complete"),
+    ("models", .arr #[
+      .obj #[("id", .str "gpt-5"), ("name", .str "GPT-5")],
+      .obj #[("id", .str "gpt-4o"), ("name", .str "GPT-4o")]
+    ])
+  ]
+  IO.FS.writeFile (snapDir / "openai-api_key.json") (renderPretty snapBase ++ "\n")
+  let loadedSnaps ← loadSnapshotDir snapDir
+  assertTrue "loadSnapshotDir validates matching filename" loadedSnaps.isOk
+  let snapPartial := JVal.obj #[
+    ("schema_version", .nat 1),
+    ("provider_id", .str "openai"),
+    ("access_profile", .str "api_key"),
+    ("source", .str "discovery"),
+    ("observed_at", .str "2026-11-06T08:00:00Z"),
+    ("completeness", .str "partial"),
+    ("models", .arr #[
+      .obj #[("id", .str "gpt-5-mini"), ("name", .str "GPT-5 Mini")]
+    ])
+  ]
+  match mergeSnapshotJson snapBase snapPartial with
+  | .error e => throw <| IO.userError s!"mergeSnapshotJson failed: {e}"
+  | .ok mergedSnap =>
+    assertEq "partial snapshot merge preserves existing + adds incoming"
+      ((mergedSnap.fieldArr? "models").getD #[]).size 3
+  let diffJ := snapshotDiffJson snapBase snapPartial
+  assertEq "partial diff marks removals non-authoritative"
+    (diffJ.fieldBool? "removals_authoritative") (some false)
+
+  IO.FS.writeFile (snapDir / "mismatch-name.json") (renderPretty snapBase ++ "\n")
+  let badSnapLoad ← loadSnapshotDir snapDir
+  assertTrue "loadSnapshotDir rejects filename/provider mismatch" (isErr badSnapLoad)
+
+  assertTrue "parseRfc3339Epoch? accepts UTC Z" (parseRfc3339Epoch? "2099-01-01T00:00:00Z").isSome
+  assertTrue "parseRfc3339Epoch? accepts +02:00" (parseRfc3339Epoch? "2099-01-01T02:00:00+02:00").isSome
+  assertTrue "parseRfc3339Epoch? rejects invalid timestamp" (parseRfc3339Epoch? "not-a-timestamp").isNone
+
+  let palomaWs := tmpDir / "paloma-ws"
+  IO.FS.createDirAll (palomaWs / ".paloma" / "fixtures")
+  IO.FS.createDirAll (palomaWs / ".paloma" / "modes")
+  IO.FS.writeFile (palomaWs / ".paloma" / "modes" / "orb.json")
+    "{\"project\":\"orb\",\"mode\":\"conservative\",\"until\":\"2099-01-01T00:00:00Z\"}\n"
+  IO.FS.writeFile (palomaWs / ".paloma" / "fixtures" / "tasks.json")
+    "[{\"id\":\"t-exp\",\"project\":\"orb\",\"status\":\"ready\",\"intent\":\"explore alternative proof\"},{\"id\":\"t-std\",\"project\":\"orb\",\"status\":\"ready\",\"intent\":\"fix bug\"}]\n"
+  match (← buildDispatchPlanJson palomaWs "orb") with
+  | .error e => throw <| IO.userError s!"buildDispatchPlanJson failed: {e}"
+  | .ok plan =>
+    assertEq "conservative mode selects standard task over exploration"
+      (plan.fieldStr? "task_id") (some "t-std")
+    assertEq "dispatch-plan reports exploration_budget_exhausted"
+      (plan.fieldStr? "reason") (some "exploration_budget_exhausted")
+
+  -- 10. `StdioMcpServer` cancel + reused ID ownership & 8-slot `inFlight` retention
+  let inPath := tmpDir / "rpc-in.jsonl"
+  let outPath := tmpDir / "rpc-out.jsonl"
+  let rpcFrames :=
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"slow\"}\n" ++
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":1}}\n" ++
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fast\"}\n"
+  IO.FS.writeFile inPath rpcFrames
+  IO.FS.writeFile outPath ""
+  let inFd ← match (← LeanSys.Posix.openFile inPath.toString 0 0) with
+    | .ok fd => pure fd.raw
+    | .error e => throw <| IO.userError s!"open inPath: {e}"
+  let outFd ← match (← LeanSys.Posix.openFile outPath.toString (0x41) 0o600) with
+    | .ok fd => pure fd.raw
+    | .error e => throw <| IO.userError s!"open outPath: {e}"
+  serveFd inFd outFd (fun req cancelRef => do
+    let m := (req.fieldStr? "method").getD ""
+    let idv := req.fieldOrNull "id"
+    if m == "slow" then
+      IO.sleep 60
+      let _ ← cancelRef.get
+      return jsonRpcSuccess idv (.str "stale-slow")
+    else
+      IO.sleep 15
+      return jsonRpcSuccess idv (.str "fresh-fast"))
+  closeFdRaw inFd
+  closeFdRaw outFd
+  let outLines := ((← IO.FS.readFile outPath).splitOn "\n").filter (!·.trimAscii.toString.isEmpty)
+  assertEq "cancel + reused ID emits exactly 2 responses (-32800 + fresh-fast)" outLines.length 2
+  assertTrue "reused ID never emits stale-slow response" (!outLines.any (fun l => (l.splitOn "stale-slow").length > 1))
+  assertTrue "reused ID emits fresh-fast response" (outLines.any (fun l => (l.splitOn "fresh-fast").length > 1))
+
   try IO.FS.removeDirAll tmpDir catch _ => pure ()
   IO.println "=== ALL ORB-BIN WAVE 1 SELF-TESTS PASSED ==="
   return 0

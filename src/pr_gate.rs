@@ -164,6 +164,9 @@ mod tests {
         )
         .unwrap();
         apply_pr_gate_recommendation(&mut gates);
-        assert_eq!(gates.recommendation.as_deref(), Some("stale_worker_head"));
+        assert_eq!(
+            gates.recommendation.as_deref(),
+            Some("head_changed_since_worker")
+        );
     }
 }

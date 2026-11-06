@@ -58,13 +58,39 @@ private def isSafeSecretFileName (name : String) : Bool :=
   !name.isEmpty && name.all (fun c =>
     ('A' ≤ c && c ≤ 'Z') || ('a' ≤ c && c ≤ 'z') || ('0' ≤ c && c ≤ '9') || c == '_' || c == '-')
 
-/-- Persist a renewed `mcp1.*` credential atomically (`0600`), guarded by `verifyMcpSecretPersistence`. -/
+/-- Persist a renewed `mcp1.*` credential atomically (`0600`), guarded by `verifyMcpSecretPersistence`
+    over real filesystem observations (private non-symlink parent directory + exclusive `0600` file). -/
 def persistScopedCredential (path : System.FilePath) (token : String) : IO (Except String Unit) := do
   let hasPrefix : UInt8 := if token.startsWith "mcp1." then 1 else 0
-  let gate := OrbBin.Spec.verifyMcpSecretPersistence hasPrefix 1 1 1 1
-  if gate != 1 then
+  if hasPrefix != 1 then
     return .error "Core returned an invalid scoped credential"
-  writeAtomicPrivate0600 path token.toUTF8
+  let parent := path.parent.getD (System.FilePath.mk ".")
+  let ps := parent.toString
+  if ps != "." && ps != "/" && ps != "/tmp" && ps != "/var/tmp" && ps != "/private/tmp" then
+    let _ ← ensurePrivateDir0700 parent
+  else
+    IO.FS.createDirAll parent
+  let pst ← statPath ps
+  let isStickySharedTmp := ps == "/tmp" || ps == "/var/tmp" || ps == "/private/tmp"
+  let dirPriv : UInt8 :=
+    if pst.exists_ && pst.isDir && ((pst.ownedByEuid && (pst.mode &&& 0o077) == 0) || isStickySharedTmp) then 1 else 0
+  let dirNotSym : UInt8 := if !pst.isSymlink then 1 else 0
+  let fileName := path.fileName.getD ""
+  let safeName : UInt8 := if !fileName.isEmpty && !fileName.contains '/' && fileName != "." && fileName != ".." then 1 else 0
+  let preGate := OrbBin.Spec.verifyMcpSecretPersistence hasPrefix dirPriv dirNotSym 1 safeName
+  if preGate != 1 then
+    return .error "Credential parent directory failed verified private confinement check"
+  match (← writeAtomicPrivate0600 path token.toUTF8) with
+  | .error e => return .error e
+  | .ok () =>
+    let fst ← statPath path.toString
+    let fileMode0600 : UInt8 :=
+      if fst.exists_ && !fst.isSymlink && fst.isReg && fst.ownedByEuid && (fst.mode &&& 0o777) == 0o600 then 1 else 0
+    let postGate := OrbBin.Spec.verifyMcpSecretPersistence hasPrefix dirPriv dirNotSym fileMode0600 safeName
+    if postGate != 1 then
+      try IO.FS.removeFile path catch _ => pure ()
+      return .error "Persisted credential failed post-write 0600 verification"
+    return .ok ()
 
 /-- Compute per-session private secrets directory (`SANDBOXED_SECRETS_DIR`, `XDG_RUNTIME_DIR/paloma-secrets`, or `$HOME/.paloma-secrets`). -/
 def secretsDirFor (missionId? sessionId? overrideDir? : Option String) : IO System.FilePath := do
@@ -117,6 +143,13 @@ def deliverSecretIn (dir : System.FilePath) (result : JVal) : IO JVal := do
     | .error e =>
       return stripped.setField "error" (.str s!"Could not write the secret file: {e}")
     | .ok () =>
+      let fst ← statPath target.toString
+      let fileMode0600 : UInt8 :=
+        if fst.exists_ && !fst.isSymlink && fst.isReg && fst.ownedByEuid && (fst.mode &&& 0o777) == 0o600 then 1 else 0
+      let postGate := OrbBin.Spec.verifyMcpSecretPersistence 1 dirPriv dirNoSym fileMode0600 safeNameFlag
+      if postGate != 1 then
+        try IO.FS.removeFile target catch _ => pure ()
+        return stripped.setField "error" (.str "Delivered secret file failed post-write 0600 verification")
       let shown := target.toString
       let s1 := stripped.setField "path" (.str shown)
       let s2 := s1.setField "export" (.str s!"export {name}=\"$(cat '{shown}')\"")
@@ -254,11 +287,21 @@ def McpClient.getToken (c : McpClient) : IO (Except String String) := do
       set (some (newTok, exp))
       return .ok newTok
 
-def McpClient.request (c : McpClient) (path : String) (body? : Option JVal := none) : IO (Except String JVal) := do
+def McpClient.request
+    (c : McpClient)
+    (path : String)
+    (body? : Option JVal := none)
+    (cancelled? : Option (IO.Ref Bool) := none) : IO (Except String JVal) := do
   for attempt in [0:2] do
+    if let some cRef := cancelled? then
+      if (← cRef.get) then
+        return .error "Request cancelled; accepted actions continue"
     let tok ← match (← c.getToken) with
       | .ok t => pure t
       | .error e => return .error e
+    if let some cRef := cancelled? then
+      if (← cRef.get) then
+        return .error "Request cancelled; accepted actions continue"
     let method := if body?.isSome then "POST" else "GET"
     match (← sendJsonRequest method s!"{c.apiUrl}{path}" (some tok) body?) with
     | .error _ =>
@@ -276,8 +319,10 @@ def McpClient.request (c : McpClient) (path : String) (body? : Option JVal := no
         | none => return .error "Invalid Core response"
   return .error "Core rejected the renewed scoped session; check mission authorization"
 
-def McpClient.preflight (c : McpClient) : IO (Except String JVal) := do
-  match (← c.request "/api/mcp/capabilities" none) with
+def McpClient.preflight
+    (c : McpClient)
+    (cancelled? : Option (IO.Ref Bool) := none) : IO (Except String JVal) := do
+  match (← c.request "/api/mcp/capabilities" none cancelled?) with
   | .error e => return .error e
   | .ok v =>
     if let some ident := v.field? "identity" then
@@ -354,12 +399,14 @@ def McpClient.fetchSecretFile
       return .error s!"Unexpected response from secret_get for `{trimmed}`: {st}"
   return .error "unreachable"
 
-def McpClient.handleRpc (c : McpClient) (req : JVal) (_cancelled : IO.Ref Bool) : IO JVal := do
+def McpClient.handleRpc (c : McpClient) (req : JVal) (cancelled : IO.Ref Bool) : IO JVal := do
   let idVal := req.fieldOrNull "id"
   let method := (req.fieldStr? "method").getD ""
+  if (← cancelled.get) then
+    return jsonRpcError idVal (-32800) "Request cancelled; accepted actions continue"
   match method with
   | "initialize" =>
-    match (← c.preflight) with
+    match (← c.preflight (some cancelled)) with
     | .ok _ =>
       return jsonRpcSuccess idVal (.obj #[
         ("protocolVersion", .str "2024-11-05"),
@@ -370,7 +417,7 @@ def McpClient.handleRpc (c : McpClient) (req : JVal) (_cancelled : IO.Ref Bool) 
   | "ping" =>
     return jsonRpcSuccess idVal (.obj #[])
   | "tools/list" =>
-    match (← c.preflight) with
+    match (← c.preflight (some cancelled)) with
     | .ok v => return jsonRpcSuccess idVal (.obj #[("tools", v.fieldOrNull "tools")])
     | .error e => return jsonRpcError idVal (-32000) e
   | "tools/call" =>
@@ -380,7 +427,7 @@ def McpClient.handleRpc (c : McpClient) (req : JVal) (_cancelled : IO.Ref Bool) 
     | some toolName =>
       let arguments := (params.field? "arguments").getD (.obj #[])
       let callBody := JVal.obj #[("name", .str toolName), ("arguments", arguments)]
-      let reply ← match (← c.request "/api/mcp/call" (some callBody)) with
+      let reply ← match (← c.request "/api/mcp/call" (some callBody) (some cancelled)) with
         | .ok r => pure r
         | .error message =>
           pure <| JVal.obj #[
@@ -897,8 +944,8 @@ def runLaunch (args : Array String) : IO (Except String UInt32) := do
   let tmpBase := (← firstEnvNonEmpty ["TMPDIR"]).getD "/tmp"
   let nonce ← newUuidV4
   let runtimeDir := System.FilePath.mk tmpBase / s!"sandboxed-mcp-{nonce}"
-  IO.FS.createDirAll runtimeDir
-  let _ ← chmod runtimeDir.toString 0o700
+  if let .error e ← ensurePrivateDir0700 runtimeDir then
+    return .error e
   let credPath := runtimeDir / "credential"
   if let .error e ← persistScopedCredential credPath scopedToken then
     cleanupRuntimeDir runtimeDir
