@@ -160,5 +160,51 @@ final class OrbClientParityTests: XCTestCase {
             ),
             []
         )
+
+        // Script-only controller edits omit unchanged empty `prompt` so Core's `edit_args` does not reject `prompt: ""`.
+        let scriptView: OrbJSON = .object([
+            "job": .object([
+                "id": .string("job-1"),
+                "name": .string("script controller"),
+                "schedule": .string("every 30m")
+            ]),
+            "settings": .object([
+                "script": .string("scripts/check.py"),
+                "prompt": .string(""),
+                "skills": .array([.string("ops")]),
+                "deliver": .string("project:demo"),
+                "model": .string(""),
+                "reasoning_effort": .string(""),
+                "continuity": .bool(false)
+            ])
+        ])
+        let scheduleOnlyPatch = OrbControllerModel.buildCronPatch(
+            existingView: scriptView,
+            defaultDeliver: "project:demo",
+            name: "script controller",
+            schedule: "every 15m",
+            prompt: "",
+            skills: ["ops"],
+            deliver: "project:demo",
+            model: "",
+            reasoningEffort: "",
+            continuity: false
+        )
+        XCTAssertEqual(scheduleOnlyPatch, ["schedule": .string("every 15m")])
+        XCTAssertNil(scheduleOnlyPatch["prompt"])
+
+        let unchangedPatch = OrbControllerModel.buildCronPatch(
+            existingView: scriptView,
+            defaultDeliver: "project:demo",
+            name: "script controller",
+            schedule: "every 30m",
+            prompt: "",
+            skills: ["ops"],
+            deliver: "project:demo",
+            model: "",
+            reasoningEffort: "",
+            continuity: false
+        )
+        XCTAssertTrue(unchangedPatch.isEmpty)
     }
 }

@@ -295,6 +295,7 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
     var cleanupOrphans by remember { mutableStateOf(false) }
     var cleanupDirty by remember { mutableStateOf(false) }
     var cleanupSaving by remember { mutableStateOf(false) }
+    var cleanupSaveSeq by remember { mutableStateOf(0) }
     var cleanupNotice by remember { mutableStateOf<String?>(null) }
     var cleanupError by remember { mutableStateOf<String?>(null) }
 
@@ -304,10 +305,11 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
     var pendingDownloadBytes by remember { mutableStateOf<ByteArray?>(null) }
     var pendingRestore by remember { mutableStateOf<Pair<String, ByteArray>?>(null) }
 
-    suspend fun loadCleanupSettings() {
+    suspend fun loadCleanupSettings(expectedScope: String = "${core.baseURL}|${core.token}") {
         if (!core.isConfigured) return
         try {
             val s = core.fetchDict("/api/settings")
+            if ("${core.baseURL}|${core.token}" != expectedScope) return
             if (!cleanupDirty) {
                 cleanupEnabled = OrbJSON.bool(s, "auto_cleanup_enabled") == true
                 cleanupDays = (OrbJSON.int(s, "auto_cleanup_days") ?: 7).toString()
@@ -373,9 +375,14 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
     }
 
     LaunchedEffect(endpoint, signedInToken) {
+        val reqScope = "$endpoint|$signedInToken"
         backendVersion = null
+        cleanupSaveSeq += 1
+        cleanupSaving = false
         cleanupLoaded = false
         cleanupDirty = false
+        cleanupError = null
+        cleanupNotice = null
         if (endpoint.isBlank()) return@LaunchedEffect
         val health = try {
             core.request("/api/health", allowAuthRetry = false)
@@ -384,10 +391,11 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
         } catch (_: Throwable) {
             null
         }
+        if ("${core.baseURL}|${core.token}" != reqScope) return@LaunchedEffect
         backendVersion = OrbDiagnostics.backendVersion(health)
         val healthDict = OrbJSON.dict(health)
         authRequired = OrbJSON.bool(healthDict, "auth_required") ?: true
-        loadCleanupSettings()
+        loadCleanupSettings(reqScope)
     }
     val rows = OrbDiagnostics.build(context, endpoint, core.token, lastRefresh, errors, backendVersion, perf)
     val channelRows = rows.filter { it.first.startsWith("Channel ") }
@@ -594,6 +602,9 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
                             cleanupError = err.message
                             return@TextButton
                         }
+                        val reqScope = "${core.baseURL}|${core.token}"
+                        cleanupSaveSeq += 1
+                        val seq = cleanupSaveSeq
                         cleanupSaving = true
                         cleanupError = null
                         cleanupNotice = null
@@ -611,18 +622,24 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
                                         )
                                     )
                                 )
-                                cleanupEnabled = OrbJSON.bool(updated, "auto_cleanup_enabled") ?: cleanupEnabled
-                                cleanupDays = (OrbJSON.int(updated, "auto_cleanup_days") ?: days).toString()
-                                cleanupStoppedDays = (OrbJSON.int(updated, "auto_cleanup_stopped_days") ?: stoppedDays).toString()
-                                cleanupOrphans = OrbJSON.bool(updated, "auto_cleanup_orphans_enabled") ?: cleanupOrphans
-                                cleanupDirty = false
-                                cleanupNotice = "Saved workspace cleanup policy."
+                                if (cleanupSaveSeq == seq && "${core.baseURL}|${core.token}" == reqScope) {
+                                    cleanupEnabled = OrbJSON.bool(updated, "auto_cleanup_enabled") ?: cleanupEnabled
+                                    cleanupDays = (OrbJSON.int(updated, "auto_cleanup_days") ?: days).toString()
+                                    cleanupStoppedDays = (OrbJSON.int(updated, "auto_cleanup_stopped_days") ?: stoppedDays).toString()
+                                    cleanupOrphans = OrbJSON.bool(updated, "auto_cleanup_orphans_enabled") ?: cleanupOrphans
+                                    cleanupDirty = false
+                                    cleanupNotice = "Saved workspace cleanup policy."
+                                }
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Throwable) {
-                                cleanupError = e.message ?: "Failed to save cleanup policy"
+                                if (cleanupSaveSeq == seq && "${core.baseURL}|${core.token}" == reqScope) {
+                                    cleanupError = e.message ?: "Failed to save cleanup policy"
+                                }
                             } finally {
-                                cleanupSaving = false
+                                if (cleanupSaveSeq == seq && "${core.baseURL}|${core.token}" == reqScope) {
+                                    cleanupSaving = false
+                                }
                             }
                         }
                     }

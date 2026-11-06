@@ -109,6 +109,51 @@ class OrbClientParityTest {
             emptyList<String>(),
             OrbControllerModel.skillsOf(mapOf("skills" to emptyList<String>(), "skill" to "stale-skill"), null)
         )
+
+        val scriptView: OrbDict = mapOf(
+            "job" to mapOf(
+                "id" to "job-1",
+                "name" to "script controller",
+                "schedule" to "every 30m"
+            ),
+            "settings" to mapOf(
+                "script" to "scripts/check.py",
+                "prompt" to "",
+                "skills" to listOf("ops"),
+                "deliver" to "project:demo",
+                "model" to "",
+                "reasoning_effort" to "",
+                "continuity" to false
+            )
+        )
+        val scheduleOnlyPatch = OrbControllerModel.buildCronPatch(
+            existingView = scriptView,
+            defaultDeliver = "project:demo",
+            name = "script controller",
+            schedule = "every 15m",
+            prompt = "",
+            skills = listOf("ops"),
+            deliver = "project:demo",
+            model = "",
+            reasoningEffort = "",
+            continuity = false
+        )
+        assertEquals(mapOf<String, Any?>("schedule" to "every 15m"), scheduleOnlyPatch)
+        assertFalse(scheduleOnlyPatch.containsKey("prompt"))
+
+        val unchangedPatch = OrbControllerModel.buildCronPatch(
+            existingView = scriptView,
+            defaultDeliver = "project:demo",
+            name = "script controller",
+            schedule = "every 30m",
+            prompt = "",
+            skills = listOf("ops"),
+            deliver = "project:demo",
+            model = "",
+            reasoningEffort = "",
+            continuity = false
+        )
+        assertTrue(unchangedPatch.isEmpty())
     }
 
     @Test

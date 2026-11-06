@@ -61,6 +61,65 @@ enum OrbControllerModel {
         return []
     }
 
+    /// Builds either a full cron creation payload or a changed-fields edit patch (`orb/src/ControllerSettings.tsx`).
+    /// Omitting unchanged fields prevents script-only controllers (`prompt == ""`) from failing Core's `prompt cannot be empty` check.
+    static func buildCronPatch(
+        existingView: OrbJSON?,
+        defaultDeliver: String,
+        name: String,
+        schedule: String,
+        prompt: String,
+        skills: [String],
+        deliver: String,
+        model: String,
+        reasoningEffort: String,
+        continuity: Bool
+    ) -> [String: OrbJSON] {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedSchedule = schedule.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDeliver = deliver.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedEffort = reasoningEffort.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let view = existingView, view["job"] != .null else {
+            var create: [String: OrbJSON] = [
+                "name": .string(trimmedName),
+                "schedule": .string(trimmedSchedule),
+                "prompt": .string(prompt),
+                "skills": .array(skills.map(OrbJSON.string)),
+                "deliver": .string(trimmedDeliver.isEmpty ? defaultDeliver : trimmedDeliver)
+            ]
+            if !trimmedModel.isEmpty { create["model"] = .string(trimmedModel) }
+            if !trimmedEffort.isEmpty { create["reasoning_effort"] = .string(trimmedEffort) }
+            if continuity { create["continuity"] = .bool(true) }
+            return create
+        }
+
+        let j = view["job"]
+        let s = view["settings"] == .null ? j : view["settings"]
+        let baseName = j["name"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawSchedule = scheduleExpression(j["schedule"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseSchedule = rawSchedule.isEmpty ? "every 30m" : rawSchedule
+        let basePrompt = s["prompt"].text
+        let baseSkills = skillsOf(settings: s, job: j)
+        let baseDeliver = (s["deliver"].text.isEmpty ? j["deliver"].text : s["deliver"].text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseModel = s["model"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseEffort = s["reasoning_effort"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseContinuity = continuityEnabled(settings: s, job: j)
+
+        var out: [String: OrbJSON] = [:]
+        if trimmedName != baseName { out["name"] = .string(trimmedName) }
+        if trimmedSchedule != baseSchedule { out["schedule"] = .string(trimmedSchedule) }
+        if prompt != basePrompt { out["prompt"] = .string(prompt) }
+        if skills != baseSkills { out["skills"] = .array(skills.map(OrbJSON.string)) }
+        if trimmedDeliver != baseDeliver { out["deliver"] = .string(trimmedDeliver) }
+        if trimmedModel != baseModel { out["model"] = .string(trimmedModel) }
+        if trimmedEffort != baseEffort { out["reasoning_effort"] = .string(trimmedEffort) }
+        if continuity != baseContinuity { out["continuity"] = .bool(continuity) }
+        return out
+    }
+
     /// Translates `continuity` into Hermes `context_from` without dropping sibling context refs.
     static func hermesPatch(_ patch: [String: OrbJSON], existingJob: OrbJSON? = nil) -> OrbJSON {
         var out = patch
@@ -1036,33 +1095,43 @@ struct OrbCronEditorSheet: View {
     private func save() async {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedSchedule = schedule.trimmingCharacters(in: .whitespacesAndNewlines)
-        let hasScript = !(existingView?["settings"]["script"].text ?? "").isEmpty
-        if trimmedName.isEmpty || trimmedSchedule.isEmpty || (prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !hasScript) {
+        let isEditing = existingView != nil && existingView?["job"] != .null
+        let existingSettings: OrbJSON? = {
+            guard let view = existingView else { return nil }
+            return view["settings"] == .null ? view["job"] : view["settings"]
+        }()
+        let hasScript = !(existingSettings?["script"].text ?? "").isEmpty
+        let basePrompt = existingSettings?["prompt"].text ?? ""
+        if trimmedName.isEmpty
+            || trimmedSchedule.isEmpty
+            || (prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (!hasScript || prompt != basePrompt))
+        {
             error = "Name, schedule, and instruction are required."
+            return
+        }
+        let skills = skillsText
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let patch = OrbControllerModel.buildCronPatch(
+            existingView: existingView,
+            defaultDeliver: defaultDeliver,
+            name: trimmedName,
+            schedule: trimmedSchedule,
+            prompt: prompt,
+            skills: skills,
+            deliver: deliver,
+            model: model,
+            reasoningEffort: reasoningEffort,
+            continuity: continuity
+        )
+        if isEditing && patch.isEmpty {
+            dismiss()
             return
         }
         saving = true
         error = nil
         defer { saving = false }
-        let skills = skillsText
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        var patch: [String: OrbJSON] = [
-            "name": .string(trimmedName),
-            "schedule": .string(trimmedSchedule),
-            "prompt": .string(prompt),
-            "skills": .array(skills.map(OrbJSON.string)),
-            "deliver": .string(deliver.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? defaultDeliver : deliver.trimmingCharacters(in: .whitespacesAndNewlines)),
-            "continuity": .bool(continuity)
-        ]
-        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedModel.isEmpty || existingView != nil {
-            patch["model"] = .string(trimmedModel)
-        }
-        if !reasoningEffort.isEmpty || existingView != nil {
-            patch["reasoning_effort"] = .string(reasoningEffort)
-        }
         do {
             try await onSave(patch)
             dismiss()

@@ -5,10 +5,11 @@ import { Settings } from "../src/Settings";
 import { SkillsSettings } from "../src/SkillsSettings";
 import {
   buildRestoreMultipartBody,
+  changeServerPassword,
   interpretRestoreResponse,
   parseCleanupDays,
 } from "../src/accountAdmin";
-import { clearConnection, setConnection } from "../src/api";
+import { clearConnection, isConnected, setConnection } from "../src/api";
 import {
   GITHUB_OAUTH_STATE_TTL_MS,
   beginGitHubOAuthAttempt,
@@ -215,6 +216,87 @@ describe("Backup multipart & cleanup helpers", () => {
       expect(daysInput.disabled).toBe(false);
       expect(daysInput.value).toBe("30");
     });
+  });
+
+  it("resets cleanup saving state if connection changes while save is pending", async () => {
+    setConnection("http://core-a.test", "jwt-a");
+    let resolveSaveA: ((res: Response) => void) | undefined;
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "http://core-a.test/api/settings" && init?.method === "PUT") {
+        return new Promise<Response>((resolve) => {
+          resolveSaveA = resolve;
+        });
+      }
+      if (url === "http://core-a.test/api/settings") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              auto_cleanup_enabled: true,
+              auto_cleanup_days: 14,
+              auto_cleanup_stopped_days: 3,
+              auto_cleanup_orphans_enabled: true,
+            }),
+          ),
+        );
+      }
+      if (url === "http://core-b.test/api/settings") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              auto_cleanup_enabled: true,
+              auto_cleanup_days: 21,
+              auto_cleanup_stopped_days: 5,
+              auto_cleanup_orphans_enabled: false,
+            }),
+          ),
+        );
+      }
+      return Promise.resolve(new Response(JSON.stringify({})));
+    });
+
+    render(() => <Settings />);
+    const details = document.querySelector("details.settings-advanced") as HTMLDetailsElement;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+
+    const daysInput = (await screen.findByLabelText("Completed retention days")) as HTMLInputElement;
+    await waitFor(() => {
+      expect(daysInput.disabled).toBe(false);
+      expect(daysInput.value).toBe("14");
+    });
+    daysInput.value = "15";
+    fireEvent.input(daysInput);
+
+    const saveBtn = await screen.findByRole("button", { name: "Save" });
+    await waitFor(() => expect((saveBtn as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(saveBtn);
+    await waitFor(() => expect(daysInput.disabled).toBe(true));
+
+    // Switch servers while PUT /api/settings on core-a is still pending.
+    setConnection("http://core-b.test", "jwt-b");
+    await waitFor(() => {
+      expect(daysInput.disabled).toBe(false);
+      expect(daysInput.value).toBe("21");
+    });
+
+    // Stale completion from core-a must not overwrite core-b state.
+    resolveSaveA?.(new Response(JSON.stringify({ auto_cleanup_days: 15 })));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(daysInput.value).toBe("21");
+  });
+
+  it("preserves session when POST /api/auth/change-password rejects current_password with 401", async () => {
+    setConnection("http://core.test", "valid-jwt");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("Current password is incorrect", { status: 401 })),
+    );
+
+    await expect(changeServerPassword("wrong-old", "new-password-123")).rejects.toThrow(
+      "Current password is incorrect",
+    );
+    expect(isConnected()).toBe(true);
   });
 });
 

@@ -1858,7 +1858,7 @@ class OrbCore private constructor(context: Context) {
         }
         if (lastIoError != null) throw lastIoError
 
-        if (code == 401 && allowAuthRetry && path != "/api/auth/login") {
+        if (code == 401 && allowAuthRetry && path != "/api/auth/login" && path != "/api/auth/change-password") {
             if (renewSessionFromSavedCredentials()) {
                 return@withContext request(
                     path = path,

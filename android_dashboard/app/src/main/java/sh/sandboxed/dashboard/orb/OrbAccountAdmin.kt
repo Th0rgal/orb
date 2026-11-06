@@ -195,7 +195,14 @@ fun OrbChangePasswordDialog(
                                 put("new_password", newPassword)
                                 if (requiresCurrent) put("current_password", currentPassword)
                             }
-                            val res = OrbJSON.dict(core.request("/api/auth/change-password", "POST", body = body))
+                            val res = OrbJSON.dict(
+                                core.request(
+                                    "/api/auth/change-password",
+                                    "POST",
+                                    body = body,
+                                    allowAuthRetry = false
+                                )
+                            )
                             core.configureSession(core.baseURL, core.token, newPassword, core.savedUsername())
                             val msg = OrbJSON.str(res, "message") ?: "Server password updated."
                             onSaved(msg)

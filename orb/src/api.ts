@@ -448,6 +448,10 @@ async function sendRequestOnce<T>(path: string, init?: RequestInit, text = false
     throw error;
   }
   if (res.status === 401) {
+    const detail = (await res.text().catch(() => "")).trim();
+    if (path === "/api/auth/change-password" && /current password/i.test(detail)) {
+      throw new ApiError(401, detail);
+    }
     if (connectionVersion() === version) clearConnection();
     throw new Error("401 Unauthorized — reconnect in Settings → Backend");
   }

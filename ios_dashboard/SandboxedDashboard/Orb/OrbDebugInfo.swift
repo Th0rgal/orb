@@ -30,6 +30,7 @@ struct OrbDebugInfoView: View {
     @State private var cleanupOrphans = false
     @State private var cleanupDirty = false
     @State private var cleanupSaving = false
+    @State private var cleanupSaveSeq = 0
     @State private var cleanupNotice: String?
     @State private var cleanupError: String?
     @State private var backupBusy = false
@@ -230,8 +231,12 @@ struct OrbDebugInfoView: View {
             Text("Restoring \(pendingRestore?.name ?? "this archive") overwrites server settings, provider credentials, and workspaces stored in the backup.")
         }
         .task(id: "\(OrbCore.shared.endpoint)|\(OrbInboxAccount.current)") {
+            cleanupSaveSeq += 1
+            cleanupSaving = false
             cleanupLoaded = false
             cleanupDirty = false
+            cleanupError = nil
+            cleanupNotice = nil
             _ = try? await OrbCore.shared.checkHealth()
             await OrbNotificationCenter.shared.refreshAuthorizationStatus()
             notificationStatus = OrbNotificationCenter.shared.authorizationStatus
@@ -325,8 +330,10 @@ struct OrbDebugInfoView: View {
 
     private func loadCleanupSettings() async {
         guard OrbCore.shared.isConfigured else { return }
+        let scopeKey = "\(OrbCore.shared.endpoint)|\(OrbInboxAccount.current)"
         do {
             let s = try await OrbCore.shared.call("/api/settings")
+            guard "\(OrbCore.shared.endpoint)|\(OrbInboxAccount.current)" == scopeKey else { return }
             if !cleanupDirty {
                 cleanupEnabled = s["auto_cleanup_enabled"].flag
                 cleanupDays = String(Int(s["auto_cleanup_days"].number ?? 7))
@@ -350,10 +357,17 @@ struct OrbDebugInfoView: View {
             cleanupError = err.localizedDescription
             return
         }
+        let scopeKey = "\(OrbCore.shared.endpoint)|\(OrbInboxAccount.current)"
+        cleanupSaveSeq += 1
+        let seq = cleanupSaveSeq
         cleanupSaving = true
         cleanupError = nil
         cleanupNotice = nil
-        defer { cleanupSaving = false }
+        defer {
+            if cleanupSaveSeq == seq, "\(OrbCore.shared.endpoint)|\(OrbInboxAccount.current)" == scopeKey {
+                cleanupSaving = false
+            }
+        }
         do {
             let updated = try await OrbCore.shared.call(
                 "/api/settings",
@@ -365,6 +379,7 @@ struct OrbDebugInfoView: View {
                     "auto_cleanup_orphans_enabled": .bool(cleanupOrphans)
                 ])
             )
+            guard cleanupSaveSeq == seq, "\(OrbCore.shared.endpoint)|\(OrbInboxAccount.current)" == scopeKey else { return }
             cleanupEnabled = updated["auto_cleanup_enabled"].flag
             cleanupDays = String(Int(updated["auto_cleanup_days"].number ?? Double(days)))
             cleanupStoppedDays = String(Int(updated["auto_cleanup_stopped_days"].number ?? Double(stoppedDays)))
@@ -372,7 +387,9 @@ struct OrbDebugInfoView: View {
             cleanupDirty = false
             cleanupNotice = "Saved workspace cleanup policy."
         } catch {
-            cleanupError = error.localizedDescription
+            if cleanupSaveSeq == seq, "\(OrbCore.shared.endpoint)|\(OrbInboxAccount.current)" == scopeKey {
+                cleanupError = error.localizedDescription
+            }
         }
     }
 

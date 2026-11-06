@@ -1202,6 +1202,11 @@ final class OrbCore {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw OrbHTTPError.invalidResponse }
         if http.statusCode == 401 {
+            let text = (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if request.url?.path.hasSuffix("/api/auth/change-password") == true,
+               text.localizedCaseInsensitiveContains("current password") {
+                throw OrbHTTPError(status: 401, detail: text)
+            }
             // A rejected login or an old in-flight request must not clear a newer session.
             let candidates = OrbConnection.candidateEndpoints(for: currentEndpoint)
             let matchesEndpoint = candidates.contains { request.url?.absoluteString.hasPrefix($0 + "/") == true }

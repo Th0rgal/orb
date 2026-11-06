@@ -135,6 +135,65 @@ object OrbControllerModel {
         return emptyList()
     }
 
+    /**
+     * Builds either a full cron creation payload or a changed-fields edit patch (`orb/src/ControllerSettings.tsx`).
+     * Omitting unchanged fields prevents script-only controllers (`prompt == ""`) from failing Core's `prompt cannot be empty` check.
+     */
+    fun buildCronPatch(
+        existingView: OrbDict?,
+        defaultDeliver: String,
+        name: String,
+        schedule: String,
+        prompt: String,
+        skills: List<String>,
+        deliver: String,
+        model: String,
+        reasoningEffort: String,
+        continuity: Boolean
+    ): Map<String, Any?> {
+        val trimmedName = name.trim()
+        val trimmedSchedule = schedule.trim()
+        val trimmedDeliver = deliver.trim()
+        val trimmedModel = model.trim()
+        val trimmedEffort = reasoningEffort.trim()
+
+        val existingJob = OrbJSON.dict(existingView?.get("job"))
+        if (existingJob == null) {
+            return LinkedHashMap<String, Any?>().apply {
+                put("name", trimmedName)
+                put("schedule", trimmedSchedule)
+                put("prompt", prompt)
+                put("skills", skills)
+                put("deliver", trimmedDeliver.ifEmpty { defaultDeliver })
+                if (trimmedModel.isNotEmpty()) put("model", trimmedModel)
+                if (trimmedEffort.isNotEmpty()) put("reasoning_effort", trimmedEffort)
+                if (continuity) put("continuity", true)
+            }
+        }
+
+        val existingSettings = OrbJSON.dict(existingView?.get("settings")) ?: existingJob
+        val baseName = OrbJSON.str(existingJob, "name").orEmpty()
+        val rawSchedule = scheduleExpression(existingJob["schedule"]).trim()
+        val baseSchedule = rawSchedule.ifEmpty { "every 30m" }
+        val basePrompt = OrbJSON.rawStr(existingSettings, "prompt").orEmpty()
+        val baseSkills = skillsOf(existingSettings, existingJob)
+        val baseDeliver = (OrbJSON.str(existingSettings, "deliver") ?: OrbJSON.str(existingJob, "deliver")).orEmpty()
+        val baseModel = OrbJSON.str(existingSettings, "model").orEmpty()
+        val baseEffort = OrbJSON.str(existingSettings, "reasoning_effort").orEmpty()
+        val baseContinuity = continuityEnabled(existingSettings, existingJob)
+
+        return LinkedHashMap<String, Any?>().apply {
+            if (trimmedName != baseName) put("name", trimmedName)
+            if (trimmedSchedule != baseSchedule) put("schedule", trimmedSchedule)
+            if (prompt != basePrompt) put("prompt", prompt)
+            if (skills != baseSkills) put("skills", skills)
+            if (trimmedDeliver != baseDeliver) put("deliver", trimmedDeliver)
+            if (trimmedModel != baseModel) put("model", trimmedModel)
+            if (trimmedEffort != baseEffort) put("reasoning_effort", trimmedEffort)
+            if (continuity != baseContinuity) put("continuity", continuity)
+        }
+    }
+
     /** Translates `continuity` into Hermes `context_from` without dropping sibling context refs. */
     fun hermesPatch(patch: Map<String, Any?>, existingJob: OrbDict? = null): Map<String, Any?> {
         val out = LinkedHashMap<String, Any?>(patch)
@@ -1334,9 +1393,11 @@ private fun OrbCronEditorDialog(
     }
     var deliver by remember {
         mutableStateOf(
-            OrbJSON.str(existingSettings, "deliver")
-                ?: OrbJSON.str(existingJob, "deliver")
-                ?: defaultDeliver
+            if (existingJob != null) {
+                (OrbJSON.str(existingSettings, "deliver") ?: OrbJSON.str(existingJob, "deliver")).orEmpty()
+            } else {
+                defaultDeliver
+            }
         )
     }
     var skillsText by remember {
@@ -1469,25 +1530,31 @@ private fun OrbCronEditorDialog(
                     val trimmedName = name.trim()
                     val trimmedSchedule = schedule.trim()
                     val hasScript = !OrbJSON.str(existingSettings, "script").isNullOrEmpty()
-                    if (trimmedName.isEmpty() || trimmedSchedule.isEmpty() || (prompt.trim().isEmpty() && !hasScript)) {
+                    val basePrompt = OrbJSON.rawStr(existingSettings, "prompt").orEmpty()
+                    if (
+                        trimmedName.isEmpty()
+                        || trimmedSchedule.isEmpty()
+                        || (prompt.trim().isEmpty() && (!hasScript || prompt != basePrompt))
+                    ) {
                         error = "Name, schedule, and instruction are required."
                         return@TextButton
                     }
                     val skills = skillsText.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-                    val patch = LinkedHashMap<String, Any?>().apply {
-                        put("name", trimmedName)
-                        put("schedule", trimmedSchedule)
-                        put("prompt", prompt)
-                        put("skills", skills)
-                        put("deliver", deliver.trim().ifEmpty { defaultDeliver })
-                        put("continuity", continuity)
-                        val trimmedModel = model.trim()
-                        if (trimmedModel.isNotEmpty() || existingView != null) {
-                            put("model", trimmedModel)
-                        }
-                        if (reasoningEffort.isNotEmpty() || existingView != null) {
-                            put("reasoning_effort", reasoningEffort)
-                        }
+                    val patch = OrbControllerModel.buildCronPatch(
+                        existingView = existingView,
+                        defaultDeliver = defaultDeliver,
+                        name = trimmedName,
+                        schedule = trimmedSchedule,
+                        prompt = prompt,
+                        skills = skills,
+                        deliver = deliver,
+                        model = model,
+                        reasoningEffort = reasoningEffort,
+                        continuity = continuity
+                    )
+                    if (existingJob != null && patch.isEmpty()) {
+                        onDismiss()
+                        return@TextButton
                     }
                     saving = true
                     error = null

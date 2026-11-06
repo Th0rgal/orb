@@ -307,7 +307,11 @@ function WorkspaceCleanupCard() {
   const [error, setError] = createSignal<string | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
 
+  let saveSeq = 0;
+
   const load = async () => {
+    saveSeq += 1;
+    setSaving(false);
     setLoaded(false);
     setDirty(false);
     setError(null);
@@ -343,6 +347,7 @@ function WorkspaceCleanupCard() {
       return;
     }
     const version = connectionVersion();
+    const seq = ++saveSeq;
     setSaving(true);
     setError(null);
     setNotice(null);
@@ -353,7 +358,7 @@ function WorkspaceCleanupCard() {
         auto_cleanup_stopped_days: stoppedDays,
         auto_cleanup_orphans_enabled: orphansEnabled(),
       });
-      if (connectionVersion() !== version) return;
+      if (seq !== saveSeq || connectionVersion() !== version) return;
       setEnabled(Boolean(updated.auto_cleanup_enabled));
       setDaysDraft(String(updated.auto_cleanup_days ?? days));
       setStoppedDaysDraft(String(updated.auto_cleanup_stopped_days ?? stoppedDays));
@@ -361,11 +366,11 @@ function WorkspaceCleanupCard() {
       setDirty(false);
       setNotice("Saved workspace cleanup policy.");
     } catch (e) {
-      if (connectionVersion() === version) {
+      if (seq === saveSeq && connectionVersion() === version) {
         setError(e instanceof Error ? e.message : String(e));
       }
     } finally {
-      if (connectionVersion() === version) {
+      if (seq === saveSeq && connectionVersion() === version) {
         setSaving(false);
       }
     }
