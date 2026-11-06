@@ -444,7 +444,7 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, terminate)
     manifest = load_manifest(ORB / "shared/orb-spec/kernel_abi.json")
     functions = public_export_functions(manifest)
-    if run(["git", "rev-parse", "HEAD"], SYS).strip() != "d658cb2450743434d255e59ea4225bd651681177":
+    if run(["git", "rev-parse", "HEAD"], SYS).strip() != "bbe3183d3fd57ee662405f0c63fde890fb878324":
         raise ValueError("unexpected LeanSys revision")
     sources = [(ORB / "lean/Orb/Kernel.lean", "Orb.Kernel"),
                (SYS / "LeanSys/Spec.lean", "LeanSys.Spec")]

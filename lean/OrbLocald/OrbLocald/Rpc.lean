@@ -502,11 +502,174 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "  };\n" ++
   "})();\n"
 
-/-- Extract `(status, headers, rawBodyTail)` from a raw byte buffer, skipping up to 8 `1xx`
-    informational blocks (`100..199` except `101`) without splitting `\r\n\r\n` SSE body frames
-    or corrupting multi-byte UTF-8 sequences split across `read` chunks. -/
-def extractStreamingResponseHead? (buf : ByteArray) :
-    Except String (Option (Nat × Array (String × String) × ByteArray)) := do
+/-- Parse an origin URL (`https://host[:port][/pfx]` or bracketed IPv6 `https://[::1][:port][/pfx]`)
+    into `(isTls, bareHost, port, pathPrefix)`. -/
+def parseOriginHostPort (raw : String) : Option (Bool × String × UInt16 × String) :=
+  let (isTls, rest) :=
+    if raw.startsWith "https://" then (true, (raw.drop 8).toString)
+    else if raw.startsWith "http://" then (false, (raw.drop 7).toString)
+    else (false, "")
+  if rest.isEmpty then none
+  else
+    let defPort : UInt16 := if isTls then 443 else 80
+    let parts := rest.splitOn "/"
+    let hostPort := parts.head?.getD ""
+    let tail := String.intercalate "/" (parts.drop 1)
+    let pfx := if tail.isEmpty then "" else "/" ++ tail
+    if hostPort.startsWith "[" then
+      match hostPort.splitOn "]" with
+      | [brack, afterBrack] =>
+        let ipv6 := (brack.drop 1).toString
+        if !ipv6.contains ':' || !OrbNetLeaf.TlsHttp.isValidBareHost ipv6 then none
+        else if afterBrack.isEmpty then
+          some (isTls, ipv6, defPort, pfx)
+        else if afterBrack.startsWith ":" then
+          match LeanSys.Http.parseStrictContentLength? (afterBrack.drop 1).toString with
+          | some p => if 1 ≤ p && p ≤ 65535 then some (isTls, ipv6, p.toUInt16, pfx) else none
+          | none => none
+        else none
+      | _ => none
+    else
+      match hostPort.splitOn ":" with
+      | [h] =>
+        if !OrbNetLeaf.TlsHttp.isValidBareHost h then none
+        else some (isTls, h, defPort, pfx)
+      | [h, pStr] =>
+        if !OrbNetLeaf.TlsHttp.isValidBareHost h then none
+        else
+          match LeanSys.Http.parseStrictContentLength? pStr with
+          | some p => if 1 ≤ p && p ≤ 65535 then some (isTls, h, p.toUInt16, pfx) else none
+          | none => none
+      | _ => none
+
+/-- Incremental Sans-I/O RFC 9112 §7.1 HTTP/1.1 `Transfer-Encoding: chunked` stream decoder state. -/
+inductive ChunkedStreamState where
+  | readSizeLine (lineBuf : ByteArray := ByteArray.empty)
+  | readData (remaining : Nat)
+  | readPostDataCr
+  | readPostDataLf
+  | readTrailers (trlBuf : ByteArray := ByteArray.empty)
+  | finished
+  deriving Inhabited
+
+private def parseChunkHexLine? (lineBytes : ByteArray) : Option Nat := do
+  -- Line ends just before `\r\n`; strip optional `;chunk-ext` (RFC 9112 §7.1.1)
+  let mut semiIdx := lineBytes.size
+  for i in [0:lineBytes.size] do
+    let c := lineBytes.get! i
+    guard (c != 0x00 && c != 0x0A && c != 0x0D)
+    if c == 0x3B && semiIdx == lineBytes.size then
+      semiIdx := i
+  let mut s := 0
+  let mut e := semiIdx
+  while s < e && (lineBytes.get! s == 0x20 || lineBytes.get! s == 0x09) do
+    s := s + 1
+  while e > s && (lineBytes.get! (e - 1) == 0x20 || lineBytes.get! (e - 1) == 0x09) do
+    e := e - 1
+  if s >= e || e - s > 8 then
+    none
+  else Id.run do
+    let mut val : Nat := 0
+    for i in [s:e] do
+      let c := lineBytes.get! i
+      let nib? : Option Nat :=
+        if 0x30 ≤ c && c ≤ 0x39 then some (c - 0x30).toNat
+        else if 0x41 ≤ c && c ≤ 0x46 then some ((c - 0x41).toNat + 10)
+        else if 0x61 ≤ c && c ≤ 0x66 then some ((c - 0x61).toNat + 10)
+        else none
+      match nib? with
+      | some d => val := (val <<< 4) ||| d
+      | none => return none
+    if val > 16777216 then
+      return none
+    return some val
+
+/-- Feed one raw wire `chunk` into `ChunkedStreamState`, emitting `(decodedPayload, nextState, isFinished)`
+    or failing closed on malformed chunk framing / trailers. -/
+def stepChunkedStream (st0 : ChunkedStreamState) (input : ByteArray) :
+    Except String (ByteArray × ChunkedStreamState × Bool) := do
+  let mut st := st0
+  let mut out := ByteArray.empty
+  let mut pos : Nat := 0
+  while pos < input.size do
+    match st with
+    | .finished =>
+      pos := input.size
+    | .readSizeLine lineBuf =>
+      let b := input.get! pos
+      pos := pos + 1
+      let lb := lineBuf.push b
+      if lb.size > 256 then
+        throw "chunked size line exceeds 256-byte cap"
+      if lb.size >= 2 && lb.get! (lb.size - 2) == 0x0D && lb.get! (lb.size - 1) == 0x0A then
+        let rawLine := lb.extract 0 (lb.size - 2)
+        let some sz := parseChunkHexLine? rawLine
+          | throw "malformed hexadecimal HTTP/1.1 chunk size"
+        if sz == 0 then
+          st := .readTrailers ByteArray.empty
+        else
+          st := .readData sz
+      else
+        st := .readSizeLine lb
+    | .readData rem =>
+      let avail := input.size - pos
+      let take := Nat.min rem avail
+      out := out ++ input.extract pos (pos + take)
+      pos := pos + take
+      if rem == take then
+        st := .readPostDataCr
+      else
+        st := .readData (rem - take)
+    | .readPostDataCr =>
+      if input.get! pos != 0x0D then
+        throw "missing CR after HTTP/1.1 chunk payload"
+      pos := pos + 1
+      st := .readPostDataLf
+    | .readPostDataLf =>
+      if input.get! pos != 0x0A then
+        throw "missing LF after HTTP/1.1 chunk payload"
+      pos := pos + 1
+      st := .readSizeLine ByteArray.empty
+    | .readTrailers trlBuf =>
+      let b := input.get! pos
+      pos := pos + 1
+      if b == 0x0A && (trlBuf.isEmpty || trlBuf.get! (trlBuf.size - 1) != 0x0D) then
+        throw "bare LF in HTTP/1.1 chunked trailer block"
+      if !trlBuf.isEmpty && trlBuf.get! (trlBuf.size - 1) == 0x0D && b != 0x0A then
+        throw "bare CR in HTTP/1.1 chunked trailer block"
+      let tb := trlBuf.push b
+      if tb.size > 16384 then
+        throw "HTTP/1.1 chunked trailer section exceeds 16 KiB cap"
+      if tb.size == 2 && tb.get! 0 == 0x0D && tb.get! 1 == 0x0A then
+        st := .finished
+      else
+        match LeanSys.Http.findHeaderEnd? tb with
+        | none => st := .readTrailers tb
+        | some endIdx =>
+          let trlBytes := tb.extract 0 (endIdx - 4)
+          let some trlStr := String.fromUTF8? trlBytes
+            | throw "non-UTF8 HTTP/1.1 chunked trailers"
+          for ln in trlStr.splitOn "\r\n" do
+            if !ln.isEmpty then
+              if OrbNetLeaf.TlsHttp.hasNoCrLfOrNul ln != 1 || LeanSys.Http.hasHttpFieldControlByte ln then
+                throw "HTTP/1.1 trailer line contains bare CR/LF or control bytes"
+              match ln.splitOn ":" with
+              | [] | [_] => throw "malformed HTTP/1.1 trailer line"
+              | hk :: rest =>
+                let k := hk
+                let v := OrbNetLeaf.TlsHttp.trimHttpOws (String.intercalate ":" rest)
+                if k.isEmpty || !LeanSys.Http.isHttpToken k ||
+                   OrbNetLeaf.TlsHttp.hasNoCrLfOrNul v != 1 || LeanSys.Http.hasHttpFieldControlByte v then
+                  throw "invalid HTTP/1.1 trailer field"
+          st := .finished
+  let isDone := match st with | .finished => true | _ => false
+  return (out, st, isDone)
+
+/-- Extract `(status, headers, isChunked, contentLen?, rawBodyTail)` from a raw byte buffer,
+    validating headers via `OrbNetLeaf.TlsHttp.parseHttpHeaderBlock` (`allowNonChunkedTe = false`),
+    skipping up to 8 `1xx` informational blocks, and rejecting `101 Switching Protocols` or colon-less headers. -/
+def extractStreamingResponseHeadEx? (buf : ByteArray) :
+    Except String (Option (Nat × Array (String × String) × Bool × Option Nat × ByteArray)) := do
   let mut cursor := buf
   let mut infoCount : Nat := 0
   while true do
@@ -521,26 +684,25 @@ def extractStreamingResponseHead? (buf : ByteArray) :
       let hdrBytes := cursor.extract 0 (bodyStart - 4)
       let some hdrStr := String.fromUTF8? hdrBytes
         | throw "non-UTF8 upstream HTTP response headers"
-      let lines := hdrStr.splitOn "\r\n"
-      let firstLine := lines.head?.getD ""
-      let toks := (firstLine.splitOn " ").filter (fun s => !s.isEmpty)
-      let statusNat ← match toks[1]?.bind String.toNat? with
-        | some code =>
-          if (firstLine.startsWith "HTTP/") && 100 ≤ code && code ≤ 599 then pure code
-          else throw "malformed upstream HTTP status line"
-        | none => throw "malformed upstream HTTP status line"
+      let (statusNat, parsedHdrs, _hasTe, isPureChunked, contentLen?) ←
+        OrbNetLeaf.TlsHttp.parseHttpHeaderBlock hdrStr false
       let rest := cursor.extract bodyStart cursor.size
-      if 100 ≤ statusNat && statusNat < 200 && statusNat != 101 then
+      if statusNat == 101 then
+        throw "unexpected 101 Switching Protocols in upstream stream"
+      else if 100 ≤ statusNat && statusNat < 200 then
         if infoCount ≥ 8 then
           throw "too many 1xx informational HTTP responses"
         infoCount := infoCount + 1
         cursor := rest
       else
-        let parsedHdrs : Array (String × String) := ((lines.drop 1).filterMap fun ln =>
-          match ln.splitOn ":" with
-          | [] => none
-          | k :: vs => some (k.trimAscii.toString, (String.intercalate ":" vs).trimAscii.toString)).toArray
-        return some (statusNat, parsedHdrs, rest)
+        return some (statusNat, parsedHdrs, isPureChunked, contentLen?, rest)
   return none
+
+/-- Extract `(status, headers, rawBodyTail)` from a raw byte buffer. -/
+def extractStreamingResponseHead? (buf : ByteArray) :
+    Except String (Option (Nat × Array (String × String) × ByteArray)) := do
+  match ← extractStreamingResponseHeadEx? buf with
+  | none => return none
+  | some (statusNat, parsedHdrs, _, _, rest) => return some (statusNat, parsedHdrs, rest)
 
 end OrbLocald.Rpc

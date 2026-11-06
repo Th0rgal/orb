@@ -150,5 +150,51 @@ def main : IO UInt32 := do
     | _ => false
   if (← assertTrue "sse_streaming_head_preserves_crlf_frames_and_split_utf8" sseOk) then passed := passed + 1
 
+  -- 9. Streaming header parser rejects colon-less header lines and non-chunked Transfer-Encoding
+  let badColonHead := "HTTP/1.1 200 OK\r\nMalformedHeaderWithoutColon\r\n\r\n".toUTF8
+  let badTeHead := "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n".toUTF8
+  total := total + 1
+  if (← assertTrue "sse_streaming_head_rejects_colonless_and_bad_te"
+      ((extractStreamingResponseHeadEx? badColonHead).isOk.not &&
+       (extractStreamingResponseHeadEx? badTeHead).isOk.not)) then passed := passed + 1
+
+  -- 10. Incremental HTTP/1.1 `Transfer-Encoding: chunked` decoder reassembles split SSE events 1-byte-at-a-time
+  let rawChunkedSse := ("7;ext=1\r\ndata: {\r\n10\r\n\"ok\":true}\r\n\r\n:k\r\n0\r\nX-Trl: 1\r\n\r\n").toUTF8
+  let chunkedRes : Except String (ByteArray × Bool) := Id.run do
+    let mut st : ChunkedStreamState := .readSizeLine ByteArray.empty
+    let mut acc := ByteArray.empty
+    let mut done := false
+    for i in [0:rawChunkedSse.size] do
+      match stepChunkedStream st (rawChunkedSse.extract i (i + 1)) with
+      | .error e => return .error e
+      | .ok (dec, st', d) =>
+        acc := acc ++ dec
+        st := st'
+        done := d
+    return .ok (acc, done)
+  total := total + 1
+  let chunkedOk := match chunkedRes with
+    | .ok (dec, true) => dec == "data: {\"ok\":true}\r\n\r\n:k".toUTF8
+    | _ => false
+  if (← assertTrue "chunked_sse_decoder_reassembles_split_events_and_trailers" chunkedOk) then passed := passed + 1
+
+  total := total + 1
+  let badChunkOk :=
+    (stepChunkedStream (.readSizeLine ByteArray.empty) ("ZZ\r\n".toUTF8)).isOk.not &&
+    (stepChunkedStream (.readSizeLine ByteArray.empty) ("0\r\n\n\r\n".toUTF8)).isOk.not &&
+    (stepChunkedStream (.readSizeLine ByteArray.empty) ("0\r\n\nX-Ok: 1\r\n\r\n".toUTF8)).isOk.not &&
+    (stepChunkedStream (.readSizeLine ByteArray.empty) ("0\r\nX-Ok: 1\n\r\n\r\n".toUTF8)).isOk.not &&
+    (stepChunkedStream (.readSizeLine ByteArray.empty) ("0\r\nX-Ok : 1\r\n\r\n".toUTF8)).isOk.not
+  if (← assertTrue "chunked_sse_decoder_rejects_bad_hex_and_bare_lf_trailers" badChunkOk) then passed := passed + 1
+
+  -- 11. Bracketed IPv6 & IPv4/DNS `parseOriginHostPort`
+  total := total + 1
+  let ipv6Ok :=
+    parseOriginHostPort "https://[::1]:8443/api/v1" == some (true, "::1", 8443, "/api/v1") &&
+    parseOriginHostPort "https://[2001:db8::1]" == some (true, "2001:db8::1", 443, "") &&
+    parseOriginHostPort "https://orbcore.thomas.md:9443/tx" == some (true, "orbcore.thomas.md", 9443, "/tx") &&
+    (parseOriginHostPort "https://[:::]").isNone
+  if (← assertTrue "parse_origin_host_port_supports_bracketed_ipv6" ipv6Ok) then passed := passed + 1
+
   IO.println s!"orb-locald-test: {passed}/{total} checks passed"
   return if passed == total then 0 else 1

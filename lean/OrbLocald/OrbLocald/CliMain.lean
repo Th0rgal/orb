@@ -57,26 +57,6 @@ private def sendPreflight204 (fd : Fd) (origin? : Option String) : IO Unit := do
     "Connection: close\r\n\r\n"
   discard <| writeAll fd head.toUTF8 false
 
-private def parseOriginHostPort (raw : String) : Option (Bool × String × UInt16 × String) :=
-  let (isTls, rest) :=
-    if raw.startsWith "https://" then (true, (raw.drop 8).toString)
-    else if raw.startsWith "http://" then (false, (raw.drop 7).toString)
-    else (false, "")
-  if rest.isEmpty then none
-  else
-    let defPort : UInt16 := if isTls then 443 else 80
-    let parts := rest.splitOn "/"
-    let hostPort := parts.head?.getD ""
-    let tail := String.intercalate "/" (parts.drop 1)
-    let pfx := if tail.isEmpty then "" else "/" ++ tail
-    match hostPort.splitOn ":" with
-    | [h] => if h.isEmpty then none else some (isTls, h, defPort, pfx)
-    | [h, pStr] =>
-      match pStr.toNat? with
-      | some p => if !h.isEmpty && 1 ≤ p && p ≤ 65535 then some (isTls, h, p.toUInt16, pfx) else none
-      | none => none
-    | _ => none
-
 private def isHopByHopHeader (name : String) : Bool :=
   let low := name.trimAscii.toString.toLower
   low == "host" || low == "connection" || low == "content-length" ||
@@ -84,6 +64,7 @@ private def isHopByHopHeader (name : String) : Bool :=
   low == "proxy-connection" || low.startsWith "access-control-"
 
 private def isHeaderValueClean (s : String) : Bool :=
+  !LeanSys.Http.hasHttpFieldControlByte s &&
   !(s.toList.any (fun c => c == '\r' || c == '\n' || c.toNat == 0))
 
 private def sanitizeUpstreamHeaders (hdrs : Array (String × String)) : String := Id.run do
@@ -91,16 +72,10 @@ private def sanitizeUpstreamHeaders (hdrs : Array (String × String)) : String :
   for (k, v) in hdrs do
     let tk := k.trimAscii.toString
     let tv := v.trimAscii.toString
-    if !tk.isEmpty && !isHopByHopHeader tk && tk.toLower != "content-type" &&
-       isHeaderValueClean tk && isHeaderValueClean tv then
+    if !tk.isEmpty && LeanSys.Http.isHttpToken tk && !isHopByHopHeader tk &&
+       tk.toLower != "content-type" && isHeaderValueClean tv then
       out := out ++ s!"{tk}: {tv}\r\n"
   return out
-
-private def findCurlBin? : IO (Option String) := do
-  for cand in #["/usr/bin/curl", "/bin/curl", "/opt/homebrew/bin/curl"] do
-    if (← System.FilePath.pathExists cand) then
-      return some cand
-  return none
 
 private def isSseStreamRequest (isShardPort : Bool) (req : HttpRequest) : Bool :=
   if isShardPort && req.method.toUpper == "GET" then true
@@ -108,65 +83,114 @@ private def isSseStreamRequest (isShardPort : Bool) (req : HttpRequest) : Bool :
     let acc := (findHeaderVal? req.headers "accept").getD ""
     acc.toLower.splitOn "text/event-stream" |>.length > 1
 
-private def streamSseViaCurl (fd : Fd) (origin? : Option String) (url : String)
-    (method : String) (fwdHdrs : Array (String × String)) : IO Bool := do
-  let some curlBin ← findCurlBin? | return false
-  let mut cargs : Array String := #[
-    "--disable", "--globoff", "--path-as-is", "--disallow-username-in-url",
-    "--silent", "--show-error", "--no-buffer", "-N", "--http1.1",
-    "--proto", "=https", "--connect-timeout", "10", "-i", "-X", method
-  ]
-  for (hk, hv) in fwdHdrs do
-    if isHeaderValueClean hk && isHeaderValueClean hv then
-      cargs := cargs.push "-H"
-      cargs := cargs.push s!"{hk}: {hv}"
-  cargs := cargs.push "--url"
-  cargs := cargs.push url
-  let child ← IO.Process.spawn {
-    cmd := curlBin
-    args := cargs
-    stdin := .null
-    stdout := .piped
-    stderr := .null
-  }
+/-- Stream Server-Sent Events and shard-port `GET` responses directly over a verified native OpenSSL
+    WebPKI TLS 1.3/1.2 session (`openHttps11Stream`, zero external `curl` subprocesses), transparently
+    de-chunking `Transfer-Encoding: chunked`, honoring `Content-Length`, and clearing `SO_RCVTIMEO`
+    after response headers arrive so long-lived SSE keepalive intervals (>30s) never drop. -/
+private def streamSseNativeTls (fd : Fd) (origin? : Option String)
+    (host : String) (port : UInt16) (path method : String)
+    (fwdHdrs : Array (String × String)) : IO Bool := do
+  let cleanHdrs := fwdHdrs.filter fun (hk, hv) =>
+    !hk.isEmpty && LeanSys.Http.isHttpToken hk && isHeaderValueClean hv
+  let sess ← match ← openHttps11Stream method host port path cleanHdrs ByteArray.empty true 10000 with
+    | .ok s => pure s
+    | .error _ => return false
   let mut hdrAcc := ByteArray.empty
   let mut headerSent := false
+  let mut isChunked := false
+  let mut chunkState : ChunkedStreamState := .readSizeLine ByteArray.empty
+  let mut remContentLen? : Option Nat := none
+  let mut idleCleared := false
   let mut aborted := false
   let mut eof := false
-  while !eof && !aborted do
-    let chunk ← child.stdout.read 4096
-    if chunk.isEmpty then
-      eof := true
-    else if !headerSent then
-      hdrAcc := hdrAcc ++ chunk
-      match extractStreamingResponseHead? hdrAcc with
-      | .error _ =>
+  try
+    while !eof && !aborted do
+      let rcvTmo : UInt32 :=
+        if headerSent && !idleCleared then 0xFFFFFFFF else 0
+      if rcvTmo == 0xFFFFFFFF then
+        idleCleared := true
+      match ← readTlsSessionChunk sess 4096 rcvTmo with
+      | .closeNotify | .tcpEof =>
+        eof := true
+      | .transportError =>
         aborted := true
-      | .ok none =>
-        pure ()
-      | .ok (some (statusNat, parsedHdrs, bodyTail)) =>
-        if statusNat == 429 || (500 ≤ statusNat && statusNat ≤ 599) then
-          aborted := true
-        else
-          let ctype := (findHeaderVal? parsedHdrs "content-type").getD "text/event-stream"
-          let extra := sanitizeUpstreamHeaders parsedHdrs
-          let reason := HttpResponse.reasonPhrase statusNat
-          let outHead :=
-            s!"HTTP/1.1 {statusNat} {reason}\r\n" ++
-            corsHeaderBlock origin? ++
-            s!"Content-Type: {ctype}\r\n" ++
-            "Cache-Control: no-cache\r\n" ++
-            extra ++
-            "Connection: close\r\n\r\n"
-          match ← writeAll fd (outHead.toUTF8 ++ bodyTail) false with
-          | .ok _ => headerSent := true
+      | .chunk chunk =>
+        if chunk.isEmpty then
+          eof := true
+        else if !headerSent then
+          hdrAcc := hdrAcc ++ chunk
+          match extractStreamingResponseHeadEx? hdrAcc with
+          | .error _ =>
+            aborted := true
+          | .ok none =>
+            pure ()
+          | .ok (some (statusNat, parsedHdrs, chunkedFlag, cl?, bodyTail)) =>
+            if statusNat == 429 || (500 ≤ statusNat && statusNat ≤ 599) then
+              aborted := true
+            else
+              isChunked := chunkedFlag
+              remContentLen? := cl?
+              let ctype := (findHeaderVal? parsedHdrs "content-type").getD "text/event-stream"
+              let extra := sanitizeUpstreamHeaders parsedHdrs
+              let reason := HttpResponse.reasonPhrase statusNat
+              let outHead :=
+                s!"HTTP/1.1 {statusNat} {reason}\r\n" ++
+                corsHeaderBlock origin? ++
+                s!"Content-Type: {ctype}\r\n" ++
+                "Cache-Control: no-cache\r\n" ++
+                extra ++
+                "Connection: close\r\n\r\n"
+              if isChunked then
+                match stepChunkedStream chunkState bodyTail with
+                | .error _ =>
+                  aborted := true
+                | .ok (decTail, st', doneFlag) =>
+                  chunkState := st'
+                  match ← writeAll fd (outHead.toUTF8 ++ decTail) false with
+                  | .ok _ =>
+                    headerSent := true
+                    if doneFlag then eof := true
+                  | .error _ => eof := true
+              else
+                let initBody :=
+                  match remContentLen? with
+                  | some cl =>
+                    let take := Nat.min cl bodyTail.size
+                    bodyTail.extract 0 take
+                  | none => bodyTail
+                if let some cl := remContentLen? then
+                  let rem := cl - initBody.size
+                  remContentLen? := some rem
+                  if rem == 0 then eof := true
+                match ← writeAll fd (outHead.toUTF8 ++ initBody) false with
+                | .ok _ => headerSent := true
+                | .error _ => eof := true
+        else if isChunked then
+          match stepChunkedStream chunkState chunk with
           | .error _ => eof := true
-    else
-      match ← writeAll fd chunk false with
-      | .ok _ => pure ()
-      | .error _ => eof := true
-  try child.kill catch _ => pure ()
-  discard <| child.wait
+          | .ok (decBytes, st', doneFlag) =>
+            chunkState := st'
+            if !decBytes.isEmpty then
+              match ← writeAll fd decBytes false with
+              | .ok _ => pure ()
+              | .error _ => eof := true
+            if doneFlag then
+              eof := true
+        else
+          let outPayload :=
+            match remContentLen? with
+            | some rem => chunk.extract 0 (Nat.min rem chunk.size)
+            | none => chunk
+          if let some rem := remContentLen? then
+            let nextRem := rem - outPayload.size
+            remContentLen? := some nextRem
+            if nextRem == 0 then eof := true
+          if !outPayload.isEmpty then
+            match ← writeAll fd outPayload false with
+            | .ok _ => pure ()
+            | .error _ => eof := true
+  finally
+    closeTlsSession sess
   return headerSent
 
 private def handleTransportProxyRequest (st : LocaldState) (isShardPort : Bool) (fd : Fd) (req : HttpRequest) (origin? : Option String) : IO Unit := do
@@ -193,9 +217,7 @@ private def handleTransportProxyRequest (st : LocaldState) (isShardPort : Bool) 
         if wantSse then
           match parseOriginHostPort orig with
           | some (true, host, port, pfx) =>
-            let auth := if port == 443 then host else s!"{host}:{port}"
-            let fullUrl := s!"https://{auth}{pfx}{relPath}"
-            if (← streamSseViaCurl fd origin? fullUrl req.method fwdHdrs) then
+            if (← streamSseNativeTls fd origin? host port (pfx ++ relPath) req.method fwdHdrs) then
               done := true
             else if canFailoverRequest req.method hasIdem (idx + 1) origins then
               idx := idx + 1
