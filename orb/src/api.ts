@@ -1667,6 +1667,14 @@ export async function listQueuedMessages(missionId: string): Promise<QueuedMessa
   return rows.filter(row => row.mission_id === missionId);
 }
 
+export async function editQueuedMessage(id: string, content: string): Promise<void> {
+  await api(`/api/control/queue/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+}
+
 /** Attempt to inject a queued message live into a running turn without cancelling it. */
 export class MessageRejectedError extends Error {}
 

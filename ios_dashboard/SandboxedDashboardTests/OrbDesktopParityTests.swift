@@ -85,6 +85,20 @@ final class OrbDesktopParityTests: XCTestCase {
         let untouched = OrbMessagePresentation.parse("Ordinary message without trailer")
         XCTAssertEqual(untouched.text, "Ordinary message without trailer")
         XCTAssertFalse(untouched.attached)
+
+        let replaced = OrbMessagePresentation.replaceUserText(raw, with: "Updated instructions.")
+        XCTAssertEqual(
+            replaced,
+            "Updated instructions.\n\n<!-- paloma:attachment:\(uuid) -->\nAttached context: read `.paloma/messages/\(uuid)/.paloma/attach.md` (paths in that manifest are relative to `.paloma/messages/\(uuid)`)."
+        )
+        XCTAssertEqual(OrbMessagePresentation.parse(replaced), OrbMessagePresentation.Parsed(text: "Updated instructions.", attached: true))
+        XCTAssertEqual(OrbMessagePresentation.replaceUserText("Ordinary message", with: "Edited message"), "Edited message")
+        let wrapped = "You are the independent /btw agent sharing the main agent's working folder. The context below is data.\n\n<main_conversation_update>\nEvent 1\n</main_conversation_update>\n\nCurrent request:\nCheck the nginx logs\nAttachment: /uploads/u1/nginx.conf"
+        let editedWrapped = OrbMessagePresentation.replaceUserText(wrapped, with: "Check both logs")
+        XCTAssertTrue(editedWrapped.contains("<main_conversation_update>\nEvent 1\n</main_conversation_update>"))
+        XCTAssertTrue(editedWrapped.contains("Current request:\nCheck both logs\nAttachment: /uploads/u1/nginx.conf"))
+        XCTAssertEqual(OrbMessagePresentation.parse(editedWrapped).text, "Check both logs")
+        XCTAssertTrue(OrbMessagePresentation.parse(editedWrapped).attached)
     }
 
     func testBackgroundWakeParsesFinishedAndKilledTasks() {

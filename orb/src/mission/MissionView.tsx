@@ -574,6 +574,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   // Live events that arrive while a replay is in flight would be clobbered
   // by the replay's setItems; hold them and fold them in afterwards.
   const [remoteQueuedIds,setRemoteQueuedIds]=createSignal<string[]>([]);
+  const [remoteLiveEdits,setRemoteLiveEdits]=createSignal<{id:string;content:string;at:number}[]>([]);
+  let remoteLiveClock=0;
   const reconcileRemoteQueue=(ids:string[])=>{
     const removed=new Set(remoteQueuedIds().filter(id=>!ids.includes(id)));
     setRemoteQueuedIds(ids);
@@ -590,6 +592,13 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   let liveEvents:StreamEvent[]=[];
   const applyLiveBatch = (evs: StreamEvent[]) => {
     if (!evs.length) return;
+    const queuedUpdates: { id: string; content: string; at: number }[] = [];
+    for (const ev of evs) {
+      if (ev.type === "user_message" && ev.data?.queued === true && typeof ev.data.id === "string" && typeof ev.data.content === "string" && ev.data.id && ev.data.content) {
+        queuedUpdates.push({ id: ev.data.id, content: ev.data.content, at: ++remoteLiveClock });
+      }
+    }
+    if (queuedUpdates.length) setRemoteLiveEdits(previous => [...previous, ...queuedUpdates]);
     liveEvents.push(...evs);
     setItems((cur) => {
       const next = timed("reduce event", () => applyStreamEvents(cur, evs));
@@ -689,6 +698,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   }));
 
   createEffect(on(()=>p.id, id => {
+    setRemoteLiveEdits([]);
     if(!id)return;
     const reload = async () => {
       if (refreshing()) return;
@@ -1409,6 +1419,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             onSendImmediate={sendRemoteImmediate}
             pending={!clientPlaced() && !sendError() ? optimisticList().filter(item => item.waiting && !item.failed).map(item => ({id:item.id,content:item.text})) : undefined}
             confirmed={confirmedRemote()}
+            liveEdit={remoteLiveEdits()}
             delivered={deliveredRemote()}
             onRetract={id=>{
               endHandoff(p.id,id);
@@ -1436,7 +1447,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             picker={false}
             busy={busy()}
             onPending={beginSend}
-            retainFailedMessage
+             retainFailedMessage={!editingQueued()}
             onSendError={setSendError}
             onSend={async (text,images)=>{
               const id=editingQueued();
@@ -1450,10 +1461,31 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
                 // an edit is not one.
                 const projected=sendingIds.shift();
                 if(projected)drafts.remove(projected);
-                const edit=images.length?Promise.resolve("unsupported" as const):queue.editInPlace(id,text);
-                queuedEdit.finish(false);
-                const result=await edit;
+                if(images.length){
+                  const saved=await queue.replaceEdited(
+                    id,
+                    ()=>sendMsg(text,images,followAttach()),
+                    async after=>{
+                      const project=mission()?.project;
+                      const attachItems=project?await loadAttachItems(project).catch(()=>[]):[];
+                      for(const r of after){
+                        const cleanText=messagePresentation(r.content).text;
+                        const chips=project?mentionedChips(cleanText,attachItems):[];
+                        await sendMsg(cleanText,[],chips,crypto.randomUUID());
+                      }
+                    },
+                  );
+                  if(saved)queuedEdit.finish(false);
+                  return saved;
+                }
+                const revertFinish=queuedEdit.finish(false);
+                const result=await queue.editInPlace(id,text);
+                if(result==="failed"){
+                  revertFinish();
+                  return false;
+                }
                 if(result!=="unsupported")return true;
+                revertFinish();
                 const saved=await queue.replaceEdited(
                   id,
                   ()=>sendMsg(text,images,followAttach()),
@@ -1467,6 +1499,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
                     }
                   },
                 );
+                if(saved)queuedEdit.finish(false);
                 return saved;
               }
               const saved=await sendMsg(text,images,followAttach(),id as ReturnType<typeof crypto.randomUUID>,true);

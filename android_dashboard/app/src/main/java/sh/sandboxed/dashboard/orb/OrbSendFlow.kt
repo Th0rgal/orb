@@ -15,7 +15,14 @@ data class OrbQueuedRow(
     /** Optimistic: posted, Core has not listed it yet. Not actionable. */
     val sending: Boolean = false,
     /** Core could not deliver it yet (shown under the row). */
-    val queueError: String? = null
+    val queueError: String? = null,
+    val postedAtMs: Long? = null
+)
+
+data class OrbDeliveredMessage(
+    val id: String?,
+    val content: String,
+    val sequence: Long
 )
 
 /**
@@ -30,7 +37,9 @@ data class OrbFollowUpQueue(
     /** Removed or sent now locally; hidden even if a stale poll still lists them. */
     val hidden: Set<String> = emptySet(),
     /** Ids already shown as delivered in the transcript. */
-    val delivered: Set<String> = emptySet()
+    val delivered: Set<String> = emptySet(),
+    val seenAfter: Map<String, Long> = emptyMap(),
+    val consumedSequences: Set<Long> = emptySet()
 ) {
     /** Rows in Core's FIFO order, then optimistic ones; edits applied. */
     val rows: List<OrbQueuedRow>
@@ -47,25 +56,70 @@ data class OrbFollowUpQueue(
     val count: Int get() = rows.size
 
     /** A fresh poll: Core is authoritative for what it lists; optimistic rows it now lists stop being "sending". */
-    fun withServer(rows: List<OrbQueuedRow>): OrbFollowUpQueue {
+    fun withServer(
+        rows: List<OrbQueuedRow>,
+        fetchedAtMs: Long = Long.MIN_VALUE,
+        lastSequence: Long? = null
+    ): OrbFollowUpQueue {
         val listed = rows.map { it.id }.toSet()
+        val remaining = pending.filterNot { row ->
+            row.id in listed || (!row.sending && row.postedAtMs?.let { it < fetchedAtMs } == true)
+        }
+        val baselines = seenAfter.toMutableMap()
+        if (lastSequence != null) {
+            for (row in rows) baselines.putIfAbsent(row.id, lastSequence)
+        }
+        val live = listed + remaining.map { it.id }
         return copy(
             server = rows.map { it.copy(sending = false) },
-            pending = pending.filterNot { it.id in listed },
-            // A hidden id Core no longer lists is settled.
-            hidden = hidden.filter { it in listed }.toSet()
+            pending = remaining,
+            hidden = hidden.filter { it in listed }.toSet(),
+            seenAfter = baselines.filterKeys { it in live }
         )
     }
 
-    fun withDelivered(ids: Set<String>): OrbFollowUpQueue = copy(delivered = ids)
+    fun withDelivered(ids: Set<String>): OrbFollowUpQueue = copy(delivered = delivered + ids)
+
+    fun reconciled(messages: List<OrbDeliveredMessage>): OrbFollowUpQueue {
+        if (messages.isEmpty()) return this
+        val ids = messages.mapNotNull { it.id }.toSet()
+        val nextDelivered = delivered.toMutableSet()
+        for (row in rows) {
+            if (row.id in ids) {
+                nextDelivered.add(row.id)
+            }
+        }
+        val used = consumedSequences.toMutableSet()
+        for (message in messages) {
+            if (message.id != null && message.id in nextDelivered) {
+                used.add(message.sequence)
+            }
+        }
+        val known = (server + pending).map { it.id }.toSet()
+        for (row in rows) {
+            if (row.id in nextDelivered) continue
+            val after = seenAfter[row.id] ?: continue
+            val message = messages.firstOrNull {
+                it.sequence !in used && it.sequence > after && it.id !in known &&
+                    it.content.trim() == row.content.trim()
+            }
+            if (message != null) {
+                used.add(message.sequence)
+                nextDelivered.add(row.id)
+            }
+        }
+        return copy(delivered = nextDelivered, consumedSequences = used)
+    }
 
     /** Optimistic send while a turn runs: the row appears at once with a spinner. */
-    fun enqueue(id: String, content: String): OrbFollowUpQueue =
-        copy(pending = pending.filterNot { it.id == id } + OrbQueuedRow(id, content, sending = true))
+    fun enqueue(id: String, content: String, lastSequence: Long? = null): OrbFollowUpQueue = copy(
+        pending = pending.filterNot { it.id == id } + OrbQueuedRow(id, content, sending = true),
+        seenAfter = if (lastSequence != null) seenAfter + (id to lastSequence) else seenAfter - id
+    )
 
     /** POST /api/control/message answered: queued (keep) or delivered (drop the row). */
-    fun posted(id: String, queued: Boolean): OrbFollowUpQueue =
-        if (queued) copy(pending = pending.map { if (it.id == id) it.copy(sending = false) else it })
+    fun posted(id: String, queued: Boolean, atMs: Long = System.currentTimeMillis()): OrbFollowUpQueue =
+        if (queued) copy(pending = pending.map { if (it.id == id) it.copy(sending = false, postedAtMs = atMs) else it })
         else copy(pending = pending.filterNot { it.id == id })
 
     fun postFailed(id: String): OrbFollowUpQueue = copy(pending = pending.filterNot { it.id == id })
@@ -112,9 +166,9 @@ object OrbSendFlow {
 
     fun editOutcome(httpStatus: Int?): OrbEditOutcome {
         if (httpStatus == null) return OrbEditOutcome.Failed
+        if (httpStatus == 404) return OrbEditOutcome.AlreadySent
         return when (OrbKernel.sendFlowStep(httpStatus = httpStatus).editOutcome) {
             1 -> OrbEditOutcome.Edited
-            // Older Core without the PATCH route, or a row outside the durable inbox: replace instead.
             2 -> OrbEditOutcome.Unsupported
             3 -> OrbEditOutcome.AlreadySent
             else -> OrbEditOutcome.Failed

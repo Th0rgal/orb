@@ -616,6 +616,7 @@ export function Composer(p: {
     const originalMode = mode();
     const originalUploads = uploaded;
     const draftScope = p.scope;
+    const retainFailed = Boolean(p.retainFailedMessage);
     const project = p.projectSlug;
     const destination = attachmentTarget();
     setPendingSend({text:original,images:sentImages});
@@ -659,7 +660,7 @@ export function Composer(p: {
     finally {
       setSendingCount(c => Math.max(0, c - 1));
       const keep = staleFiles().length > 0 && restoreText !== original;
-      if (!accepted && (!p.retainFailedMessage || keep) && draftScope === p.scope && !text() && !images().length) {
+      if (!accepted && (!retainFailed || keep) && draftScope === p.scope && !text() && !images().length) {
         uploaded = restoreUploads; bumpUploads(n => n + 1);
         setMode(originalMode);setText(restoreText);setImages(sentImages);
         ta.value=restoreText;resize();

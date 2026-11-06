@@ -96,7 +96,9 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  const [sideSessionId,setSideSessionId]=createSignal('');
  const [sideSessionLocal,setSideSessionLocal]=createSignal(false);
  const [pendingQueued,setPendingQueued]=createSignal<PendingRemoteQueueItem[]>([]);
- const [confirmedQueued,setConfirmedQueued]=createSignal<(QueuedMessage&{attached?:boolean})[]>([]);
+  const [confirmedQueued,setConfirmedQueued]=createSignal<(QueuedMessage&{attached?:boolean})[]>([]);
+  const [sideLiveEdits,setSideLiveEdits]=createSignal<{id:string;content:string;at:number}[]>([]);
+  let sideLiveClock=0;
  const [deliveredQueuedIds,setDeliveredQueuedIds]=createSignal<string[]>([]);
  const [remoteQueuedIds,setRemoteQueuedIds]=createSignal<string[]>([]);
  const [handoffId,setHandoffId]=createSignal<string>();
@@ -137,7 +139,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   pendingBaselineHistory=[];
   setLoadedKey('');setBusy(false);setHistory([]);setError('');setQueue([]);setQueueToast('');setStartedAt(undefined);
   setSideSessionId('');setSideSessionLocal(false);
-  setPendingQueued([]);setConfirmedQueued([]);setDeliveredQueuedIds([]);setRemoteQueuedIds([]);setHandoffId(undefined);
+  setPendingQueued([]);setConfirmedQueued([]);setSideLiveEdits([]);setDeliveredQueuedIds([]);setRemoteQueuedIds([]);setHandoffId(undefined);
   let stale=false;onCleanup(()=>{stale=true;});
   const missionId=p.mission;
   const warmInitial='peekWarmBtwState' in btwMod && typeof btwMod.peekWarmBtwState==='function'?btwMod.peekWarmBtwState(missionId):undefined;
@@ -399,8 +401,12 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    const follow=(id:string|undefined)=>{
     if(!id||id===following||stale)return;
     stopFollow?.();following=id;
-    stopFollow=streamMission(id,event=>{
-     if(!['user_message','assistant_message','assistant_message_canonical','mission_status_changed'].includes(event.type))return;
+     stopFollow=streamMission(id,event=>{
+      if(event.type==='user_message'&&event.data?.queued&&typeof event.data.id==='string'&&typeof event.data.content==='string'){
+       const qid=event.data.id,qcontent=event.data.content;
+       setSideLiveEdits(rows=>[...rows,{id:qid,content:qcontent,at:++sideLiveClock}]);
+      }
+      if(!['user_message','assistant_message','assistant_message_canonical','mission_status_changed'].includes(event.type))return;
      if(isMultiplexSyncActive()&&'peekWarmBtwState' in btwMod&&typeof btwMod.peekWarmBtwState==='function'){
       queueMicrotask(()=>{
        if(stale||key()!==current)return;
@@ -664,7 +670,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  };
  onMount(()=>window.addEventListener('keydown',escape));
  onCleanup(()=>window.removeEventListener('keydown',escape));
- const cancel=()=>{launchAbort?.abort();void stopBtw(p.mission).then(()=>{abort?.abort();setConfirmedQueued([]);setPendingQueued([]);setBusy(false);setStartedAt(undefined);setRunStatus('');setError('Side agent stopped.');}).catch(e=>setError(String(e)));};
+ const cancel=()=>{launchAbort?.abort();void stopBtw(p.mission).then(()=>{abort?.abort();setConfirmedQueued([]);setSideLiveEdits([]);setPendingQueued([]);setBusy(false);setStartedAt(undefined);setRunStatus('');setError('Side agent stopped.');}).catch(e=>setError(String(e)));};
  const retry=()=>{const asked=question(),files=pendingAttachments();void ask(asked,[],[],files,true);};
  const dismiss=()=>{pendingBaselineHistory=[];setError('');setNotSent(false);setStartedAt(undefined);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);queueMicrotask(sendNext);};
  // Reconcile the same turn through preparation, streaming and persistence.
@@ -739,7 +745,8 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
        onEdit={row=>void queuedEdit.start(row)}
        onSendImmediate={sendSideImmediate}
        pending={!editingQueued()?pendingQueued():undefined}
-       confirmed={confirmedQueued()}
+        confirmed={confirmedQueued()}
+        liveEdit={sideLiveEdits()}
        delivered={deliveredQueuedIds()}
        onRetract={id=>{if(handoffId()===id)setHandoffId(undefined);}}
        onSendNowAccepted={(id,live)=>{if(live&&handoffId()===id)setHandoffId(undefined);}}
@@ -771,23 +778,43 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
       const id=editingQueued();
       if(!id)return ask(text,images,files);
       usageTelemetry.action('message_edit','queue');
-      if(queuedEdit.editingRemote()&&remoteQueue){
-       const queueRef=remoteQueue;
-       const edit=(images.length||files?.length)?Promise.resolve('unsupported' as const):queueRef.editInPlace(id,text);
-       queuedEdit.finish(false);
-       const result=await edit;
-       if(result!=='unsupported')return true;
-       return queueRef.replaceEdited(
-        id,
-        ()=>submitQueuedFollowUp(text,images,files??[],undefined),
-        async after=>{
-         for(const r of after){
-          const target=sideSessionId()||btwSession(p.mission)?.id;
-          if(target)await sendMissionMessage(target,r.content,undefined,crypto.randomUUID());
-         }
-        },
-       );
-      }
+       if(queuedEdit.editingRemote()&&remoteQueue){
+        const queueRef=remoteQueue;
+        if(images.length||files?.length){
+         const saved=await queueRef.replaceEdited(
+          id,
+          ()=>submitQueuedFollowUp(text,images,files??[],undefined),
+          async after=>{
+           for(const r of after){
+            const target=sideSessionId()||btwSession(p.mission)?.id;
+            if(target)await sendMissionMessage(target,r.content,undefined,crypto.randomUUID());
+           }
+          },
+         );
+         if(saved)queuedEdit.finish(false);
+         return saved;
+        }
+        const revertFinish=queuedEdit.finish(false);
+        const result=await queueRef.editInPlace(id,text);
+        if(result==='failed'){
+         revertFinish();
+         return false;
+        }
+        if(result!=='unsupported')return true;
+        revertFinish();
+        const saved=await queueRef.replaceEdited(
+         id,
+         ()=>submitQueuedFollowUp(text,images,files??[],undefined),
+         async after=>{
+          for(const r of after){
+           const target=sideSessionId()||btwSession(p.mission)?.id;
+           if(target)await sendMissionMessage(target,r.content,undefined,crypto.randomUUID());
+          }
+         },
+        );
+        if(saved)queuedEdit.finish(false);
+        return saved;
+       }
       const saved=await submitQueuedFollowUp(text,images,files??[],undefined,id as ReturnType<typeof crypto.randomUUID>,true);
       if(saved)queuedEdit.finish(false);
       return saved;

@@ -5,10 +5,12 @@
   in-place with WAL journaling and positional `?1..?N` bindings.
 -/
 import Std.Sync.Mutex
+import OrbBin.Json
 import OrbCore.Spec
 
 namespace OrbCore.Store
 
+open OrbBin.Json
 open OrbCore.Spec
 
 @[extern "orb_sqlite_open"]
@@ -123,6 +125,8 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS model_routing_chains (id TEXT PRIMARY KEY, name TEXT NOT NULL, models_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS privilege_leases (grant_id TEXT PRIMARY KEY, lease_token TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, scope TEXT NOT NULL, allowed_units_json TEXT NOT NULL DEFAULT '[]', require_force_cmd INTEGER NOT NULL DEFAULT 0, biometric_signed INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0, expires_at_epoch INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS privilege_audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, grant_id TEXT NOT NULL, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, executing_host TEXT NOT NULL, command TEXT NOT NULL, allowed INTEGER NOT NULL, created_at TEXT NOT NULL);" ++
+  "CREATE TABLE IF NOT EXISTS remote_message_queue (sequence INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, message_id TEXT NOT NULL, mission_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'waiting', UNIQUE(user_id,message_id));" ++
+  "CREATE INDEX IF NOT EXISTS remote_message_pending ON remote_message_queue(state,sequence);" ++
   transferSchemaSql ++ "\n" ++ transferCleanupSql
 
 def projectsSchemaSql : String :=
@@ -213,7 +217,7 @@ private def isIntegerCol (col : String) : Bool :=
   col == "enabled" || col == "revision" || col == "total_cost_cents" || col == "generation" || col == "parallel_missions"
 
 private def isRawJsonCol (col : String) : Bool :=
-  col == "models_json" || col == "data" || col == "history_json" || col == "tags" || col == "allowed_units_json"
+  col == "models_json" || col == "data" || col == "history_json" || col == "tags" || col == "allowed_units_json" || col == "payload"
 
 /-- Convert `(headerRow + dataRows)` from `sqliteQueryRowsRaw` into a JSON array of objects,
     preserving integer and raw JSON columns where applicable. -/
@@ -440,5 +444,90 @@ def checkOrStoreIdempotency (st : CoreStore) (scope reqKey responseJson createdA
       match ins with
       | .error e => return .error e
       | .ok _ => return .ok responseJson
+
+/-- Durable remote follow-up edit. Same id and FIFO sequence; content changes only while waiting and unbound. -/
+inductive QueueEditOutcome where
+  | Edited (missionId : String) (source? : Option String)
+  | AlreadyDelivered
+  | NotFound
+  deriving Repr, DecidableEq
+
+private def queuePayload (content missionId : String) (source? : Option String) : String :=
+  let sourceJson := match source? with | some s => jsonEscape s | none => "null"
+  s!"\{\"message\":\{\"id\":\"\",\"content\":{jsonEscape content},\"mission_id\":{jsonEscape missionId},\"source\":{sourceJson}},\"job_id\":null}"
+
+private def payloadContent? (payload : String) : Option String :=
+  (OrbBin.Json.parse payload).toOption.bind (·.field? "message") |>.bind (·.fieldStr? "content")
+
+private def payloadSource? (payload : String) : Option String :=
+  (OrbBin.Json.parse payload).toOption.bind (·.field? "message") |>.bind (·.fieldStr? "source")
+
+/-- Enqueue a waiting remote follow-up. Replaying the same id returns its current content without moving it. -/
+def enqueueRemoteMessage (st : CoreStore) (userId messageId missionId content : String)
+    (source? : Option String := some "remote-queue") : IO (Except String String) :=
+  withImmediateTx st.missionsDb do
+    let existing ← execParamQueryUnlocked st.missionsDb
+      "SELECT payload FROM remote_message_queue WHERE user_id=?1 AND message_id=?2;" #[userId, messageId]
+    match existing with
+    | .error e => return .error e
+    | .ok rows =>
+      if rows.size > 1 then
+        return .ok ((payloadContent? ((rows[1]?.bind (·[0]?)).getD "")).getD "")
+      let ins ← execParamQueryUnlocked st.missionsDb
+        "INSERT INTO remote_message_queue(user_id,message_id,mission_id,payload,state) VALUES(?1,?2,?3,?4,'waiting');"
+        #[userId, messageId, missionId, queuePayload content missionId source?]
+      match ins with
+      | .error e => return .error e
+      | .ok _ => return .ok content
+
+/-- List one mission's waiting queue in FIFO order (`sequence ASC`). -/
+def listRemoteQueueJson (st : CoreStore) (userId missionId : String) : IO (Except String String) := do
+  let rows ← execParamQuery st.missionsDb
+    "SELECT sequence,message_id,mission_id,payload,state FROM remote_message_queue WHERE user_id=?1 AND mission_id=?2 AND state='waiting' AND json_extract(payload,'$.job_id') IS NULL ORDER BY sequence ASC;"
+    #[userId, missionId]
+  match rows with
+  | .error e => return .error e
+  | .ok rs =>
+    if rs.size ≤ 1 then return .ok "[]"
+    let mut items : Array String := #[]
+    for i in [1:rs.size] do
+      let r := rs[i]!
+      let id := (r[1]?).getD ""
+      let mid := (r[2]?).getD ""
+      let payload := (r[3]?).getD ""
+      let content := (payloadContent? payload).getD ""
+      let sourceJson := match payloadSource? payload with | some s => jsonEscape s | none => "null"
+      items := items.push s!"\{\"id\":{jsonEscape id},\"mission_id\":{jsonEscape mid},\"content\":{jsonEscape content},\"source\":{sourceJson},\"inflight\":false}"
+    return .ok ("[" ++ String.intercalate "," items.toList ++ "]")
+
+/-- Edit a waiting unbound row in place. Bound or non-waiting rows are `AlreadyDelivered`; missing ids are `NotFound`. -/
+def editRemoteMessage (st : CoreStore) (userId messageId content : String) : IO (Except String QueueEditOutcome) :=
+  withImmediateTx st.missionsDb do
+    let found ← execParamQueryUnlocked st.missionsDb
+      "SELECT mission_id,payload,state,json_extract(payload,'$.job_id') FROM remote_message_queue WHERE user_id=?1 AND message_id=?2;"
+      #[userId, messageId]
+    match found with
+    | .error e => return .error e
+    | .ok rows =>
+      if rows.size ≤ 1 then return .ok .NotFound
+      let missionId := ((rows[1]?.bind (·[0]?)).getD "")
+      let payload := ((rows[1]?.bind (·[1]?)).getD "")
+      let state := ((rows[1]?.bind (·[2]?)).getD "")
+      let job := ((rows[1]?.bind (·[3]?)).getD "")
+      let source? := payloadSource? payload
+      if state != "waiting" || !job.isEmpty then return .ok .AlreadyDelivered
+      let updated ← execParamQueryUnlocked st.missionsDb
+        "UPDATE remote_message_queue SET payload=json_set(payload,'$.message.content',?3) WHERE user_id=?1 AND message_id=?2 AND state='waiting' AND json_extract(payload,'$.job_id') IS NULL;"
+        #[userId, messageId, content]
+      match updated with
+      | .error e => return .error e
+      | .ok _ =>
+        let changed ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
+        match changed with
+        | .error e => return .error e
+        | .ok crs =>
+          let n := ((crs[1]?.bind (·[0]?)).bind String.toNat?).getD 0
+          if n == 0 then return .ok .AlreadyDelivered
+          return .ok (.Edited missionId source?)
 
 end OrbCore.Store

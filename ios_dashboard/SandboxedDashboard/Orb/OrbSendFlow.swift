@@ -33,6 +33,7 @@ struct OrbFollowUpQueue: Equatable {
     /// Last event sequence known when a row first appeared locally; a content-only
     /// match must come from a later `user_message` (an older identical message does not count).
     var seenAfter: [String: Int64] = [:]
+    var consumedSequences: Set<Int64> = []
 
     var rows: [OrbQueuedRow] {
         var seen = Set<String>()
@@ -62,29 +63,33 @@ struct OrbFollowUpQueue: Equatable {
             return true
         }
         next.hidden = hidden.filter { listed.contains($0) }
-        for row in rows where next.seenAfter[row.id] == nil { next.seenAfter[row.id] = lastSequence ?? 0 }
+        if let lastSequence {
+            for row in rows where next.seenAfter[row.id] == nil { next.seenAfter[row.id] = lastSequence }
+        }
         let live = Set(next.server.map(\.id) + next.pending.map(\.id))
         next.seenAfter = next.seenAfter.filter { live.contains($0.key) }
         return next
     }
 
-    /// A queued row becomes the transcript bubble once Core delivers it: matched by
-    /// client_message_id (the event id), else by content in a later user_message.
     func reconciled(with messages: [OrbDeliveredMessage]) -> OrbFollowUpQueue {
         guard !messages.isEmpty else { return self }
         var next = self
         let ids = Set(messages.compactMap(\.id))
-        var used = Set<Int64>()
+        var used = consumedSequences
         for row in rows {
             if ids.contains(row.id) {
                 next.delivered.insert(row.id)
-                if let m = messages.first(where: { $0.id == row.id }) { used.insert(m.sequence) }
+            }
+        }
+        for message in messages {
+            if let id = message.id, next.delivered.contains(id) {
+                used.insert(message.sequence)
             }
         }
         let known = Set(server.map(\.id) + pending.map(\.id))
         let content = { (s: String) in s.trimmingCharacters(in: .whitespacesAndNewlines) }
         for row in rows where !next.delivered.contains(row.id) {
-            let after = seenAfter[row.id] ?? Int64.max
+            guard let after = seenAfter[row.id] else { continue }
             if let m = messages.first(where: { m in
                 !used.contains(m.sequence) && m.sequence > after && !(m.id.map(known.contains) ?? false) && content(m.content) == content(row.content)
             }) {
@@ -92,13 +97,14 @@ struct OrbFollowUpQueue: Equatable {
                 next.delivered.insert(row.id)
             }
         }
+        next.consumedSequences = used
         return next
     }
 
     func enqueue(_ id: String, _ content: String, lastSequence: Int64? = nil) -> OrbFollowUpQueue {
         var next = self
         next.pending = pending.filter { $0.id != id } + [OrbQueuedRow(id: id, content: content, sending: true)]
-        next.seenAfter[id] = lastSequence ?? 0
+        if let lastSequence { next.seenAfter[id] = lastSequence } else { next.seenAfter.removeValue(forKey: id) }
         return next
     }
 
@@ -194,6 +200,7 @@ enum OrbSendFlow {
 
     static func editOutcome(status: Int?) -> OrbEditOutcome {
         guard let status else { return .failed }
+        if status == 404 { return .alreadySent }
         let step = OrbKernel.sendFlowStep(
             isBusy: false,
             hasNonEmptyText: false,

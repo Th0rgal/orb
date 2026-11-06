@@ -365,9 +365,10 @@ extension OrbConversation {
     func queuedRow(_ row: OrbQueuedRow) -> some View {
         let editing = editingQueuedID == row.id
         let enabled = !row.sending && editingQueuedID == nil
+        let shown = OrbMessagePresentation.parse(row.content).text
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 2) {
-                Text(row.content.trimmingCharacters(in: .whitespacesAndNewlines))
+                Text(shown.trimmingCharacters(in: .whitespacesAndNewlines))
                     .font(.caption)
                     .foregroundStyle(editing ? OrbStyle.textMuted : .primary.opacity(0.9))
                     .lineLimit(1)
@@ -377,7 +378,7 @@ extension OrbConversation {
                 } else {
                     queueAction("pencil", label: "Edit queued message", enabled: enabled) {
                         editingQueuedID = row.id
-                        text = row.content
+                        text = shown
                         composerFocused = true
                     }
                     queueAction("arrow.up", label: "Send now", enabled: enabled) {

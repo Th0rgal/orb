@@ -900,6 +900,47 @@ fun OrbConversationPage(
         return sorted
     }
 
+    fun targetMissionEvents(evs: List<OrbRow>, targetId: String): List<OrbRow> =
+        if (evs.any { !it.str("mission_id").isNullOrEmpty() }) {
+            OrbConversationHistory.forMission(evs, targetId)
+        } else {
+            evs
+        }
+
+    fun lastMissionSequence(evs: List<OrbRow>, targetId: String): Long? {
+        val target = targetMissionEvents(evs, targetId)
+        return target.mapNotNull { row ->
+            (row.raw["sequence"] as? Number)?.toLong()
+                ?: (row.raw["seq"] as? Number)?.toLong()
+                ?: row.int("sequence", "seq")?.toLong()
+        }.maxOrNull()
+    }
+
+    fun deliveredMessagesFrom(messages: List<OrbRow>, events: List<OrbRow>, targetId: String): List<OrbDeliveredMessage> {
+        val combined = mergeMissionEvents(
+            targetMissionEvents(messages, targetId),
+            targetMissionEvents(events, targetId)
+        )
+        return combined.mapNotNull { ev ->
+            if ((ev.str("event_type", "type") ?: "").lowercase() != "user_message") return@mapNotNull null
+            val data = ev.dict("data") ?: ev.raw
+            val meta = ev.dict("metadata") ?: OrbJSON.dict(data["metadata"]) ?: emptyMap()
+            if (OrbJSON.bool(meta, "queued") == true || OrbJSON.bool(data, "queued") == true) return@mapNotNull null
+            val seq = (ev.raw["sequence"] as? Number)?.toLong()
+                ?: (ev.raw["seq"] as? Number)?.toLong()
+                ?: ev.int("sequence", "seq")?.toLong()
+                ?: return@mapNotNull null
+            val cid = listOf("client_message_id", "message_id", "event_id").firstNotNullOfOrNull { key ->
+                (OrbJSON.str(meta, key) ?: OrbJSON.str(data, key) ?: ev.str(key))?.takeIf { it.isNotEmpty() }
+            }
+            val content = (ev.raw["content"] as? String)
+                ?: OrbJSON.str(data, "content", "text", "message")
+                ?: ev.str("content", "text", "message")
+                ?: ""
+            OrbDeliveredMessage(id = cid, content = content, sequence = seq)
+        }
+    }
+
     suspend fun loadHistory(targetId: String) = historyLoadMutex.withLock {
         val account = OrbDisk.currentScope()
         val streamEpochBefore = live.streamEpoch
@@ -1044,6 +1085,7 @@ fun OrbConversationPage(
             val effectiveMission = latestDetailForTarget ?: liveRow
             val effectiveWorking = isSending || handoffActive || (effectiveMission != null && OrbMissionTree.isLive(effectiveMission))
             val targetEvents = OrbConversationHistory.forMission(events, targetId).ifEmpty { events }
+            if (targetId == missionId) followUps = followUps.reconciled(deliveredMessagesFrom(messages, events, targetId))
             live.reconcileStored(targetEvents, working = effectiveWorking, streamAdvanced = live.streamEpoch != streamEpochBefore)
             OrbWarmSyncCoordinator.markMissionSynced(core, targetId, targetEvents.lastOrNull()?.int("sequence", "seq")?.toLong())
             liveRow?.let { OrbMissionUnreadStore.markSeen(it) }
@@ -1068,6 +1110,22 @@ fun OrbConversationPage(
             coalescedEventRefreshJob = null
             if (targetId == missionId) loadHistory(targetId)
         }
+    }
+
+    suspend fun refreshFollowUps(id: String) {
+        val fetchedAtMs = System.currentTimeMillis()
+        val lastSequence = maxOf(
+            lastMissionSequence(events, id) ?: Long.MIN_VALUE,
+            lastMissionSequence(messages, id) ?: Long.MIN_VALUE
+        ).takeIf { it != Long.MIN_VALUE }
+        val rows = orbTry(OrbLog.Category.Network, "/api/control/queue") {
+            OrbJSON.dictList(core.request("/api/control/queue?mission_id=${core.encodeComponent(id)}"))
+        }.getOrNull()
+        if (id != missionId) return
+        if (rows != null) {
+            followUps = followUps.withServer(OrbFollowUpQueue.parse(rows, id), fetchedAtMs = fetchedAtMs, lastSequence = lastSequence)
+        }
+        followUps = followUps.reconciled(deliveredMessagesFrom(messages, events, id))
     }
 
     var streamConnected by remember(missionId) { mutableStateOf(false) }
@@ -1110,10 +1168,6 @@ fun OrbConversationPage(
                         val epochBefore = live.streamEpoch
                         if (evType == "user_message" && OrbJSON.bool(parsed, "queued") != true) {
                             live.resetTurn()
-                            val cid = OrbJSON.str(parsed, "id")
-                            if (!cid.isNullOrEmpty()) {
-                                followUps = followUps.withDelivered(setOf(cid))
-                            }
                         }
                         events = mergeMissionEvents(events, listOf(storedRow))
                         val sType = storedRow.str("event_type", "type") ?: ""
@@ -1121,6 +1175,7 @@ fun OrbConversationPage(
                             messages = OrbConversationHistory.merge(messages, listOf(storedRow))
                         }
                         val targetEvents = OrbConversationHistory.forMission(events, id).ifEmpty { events }
+                        followUps = followUps.reconciled(deliveredMessagesFrom(messages, events, id))
                         live.reconcileStored(targetEvents, working = isLive, streamAdvanced = live.streamEpoch != epochBefore)
                     }
                     evType == "mission_settings_updated" -> {
@@ -1162,10 +1217,17 @@ fun OrbConversationPage(
                         scope.launch(Dispatchers.Main) { loadHistory(id) }
                     }
                     evType in setOf("user_message", "assistant_message", "assistant_message_canonical", "tool_call", "tool_result", "thinking") -> {
-                        if (evType == "user_message" && OrbJSON.bool(parsed, "queued") != true) {
-                            live.resetTurn()
+                        if (evType == "user_message" && OrbJSON.bool(parsed, "queued") == true) {
+                            scope.launch(Dispatchers.Main) { refreshFollowUps(id) }
+                        } else {
+                            if (evType == "user_message") {
+                                live.resetTurn()
+                                OrbJSON.str(parsed, "id")?.takeIf { it.isNotEmpty() }?.let { cid ->
+                                    followUps = followUps.withDelivered(setOf(cid))
+                                }
+                            }
+                            scheduleCoalescedHistoryRefresh(id)
                         }
-                        scheduleCoalescedHistoryRefresh(id)
                     }
                 }
             }
@@ -1232,13 +1294,6 @@ fun OrbConversationPage(
                 }
             }
         }
-    }
-
-    suspend fun refreshFollowUps(id: String) {
-        val rows = orbTry(OrbLog.Category.Network, "/api/control/queue") {
-            OrbJSON.dictList(core.request("/api/control/queue?mission_id=${core.encodeComponent(id)}"))
-        }.getOrNull() ?: return
-        if (id == missionId) followUps = followUps.withServer(OrbFollowUpQueue.parse(rows, id))
     }
 
     LaunchedEffect(missionId, lifecycleOwner) {
@@ -1328,7 +1383,11 @@ fun OrbConversationPage(
     /** Optimistic follow-up while a turn runs: the row shows now, Core queues it durably. */
     fun queueFollowUp(id: String, content: String) {
         val clientId = UUID.randomUUID().toString()
-        followUps = followUps.enqueue(clientId, content)
+        val lastSequence = maxOf(
+            lastMissionSequence(events, id) ?: Long.MIN_VALUE,
+            lastMissionSequence(messages, id) ?: Long.MIN_VALUE
+        ).takeIf { it != Long.MIN_VALUE }
+        followUps = followUps.enqueue(clientId, content, lastSequence = lastSequence)
         UsageTelemetry.trackAction(UsageTelemetry.Action.Queue, "composer")
         scope.launch {
             try {
@@ -1343,8 +1402,9 @@ fun OrbConversationPage(
                 if (receipt?.get("message_accepted") == false) throw OrbError("Message was not accepted.")
                 val queued = receipt?.get("queued") == true
                 val receiptId = OrbJSON.str(receipt, "id") ?: clientId
-                followUps = if (receiptId == clientId) followUps.posted(clientId, queued)
-                else followUps.postFailed(clientId).let { if (queued) it.enqueue(receiptId, content).posted(receiptId, true) else it }
+                val postedAtMs = System.currentTimeMillis()
+                followUps = if (receiptId == clientId) followUps.posted(clientId, queued, atMs = postedAtMs)
+                else followUps.postFailed(clientId).let { if (queued) it.enqueue(receiptId, content, lastSequence = lastSequence).posted(receiptId, true, atMs = postedAtMs) else it }
                 if (!queued) loadHistory(id)
                 refreshFollowUps(id)
             } catch (e: Throwable) {
@@ -1355,7 +1415,6 @@ fun OrbConversationPage(
         }
     }
 
-    /** Edit in place (PATCH, same id and position); falls back to replace on 404/405. */
     fun editQueued(queueId: String, content: String) {
         val id = missionId ?: return
         editingQueuedId = null
@@ -1365,10 +1424,11 @@ fun OrbConversationPage(
             errorMessage = "This message was already sent. Your edit was not applied."
             return
         }
-        followUps = followUps.edit(queueId, content)
+        val wireContent = OrbMessagePresentation.replaceUserText(before.content, content)
+        followUps = followUps.edit(queueId, wireContent)
         scope.launch {
             val status = try {
-                core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "PATCH", body = mapOf("content" to content))
+                core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "PATCH", body = mapOf("content" to wireContent))
                 200
             } catch (e: OrbError) {
                 e.status ?: -1
@@ -1377,26 +1437,24 @@ fun OrbConversationPage(
             }
             when (OrbSendFlow.editOutcome(status.takeIf { it >= 0 })) {
                 OrbEditOutcome.Edited -> {
-                    followUps = followUps.editConfirmed(queueId, content)
+                    followUps = followUps.editConfirmed(queueId, wireContent)
                     UsageTelemetry.trackAction(UsageTelemetry.Action.MessageEdit, "followup_queue")
                 }
                 OrbEditOutcome.Unsupported -> {
-                    // Older Core: replace (remove, then queue the new text at the end).
-                    followUps = followUps.editReverted(queueId).hide(queueId)
-                    orbTry(OrbLog.Category.Network, "/api/control/queue") {
-                        core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "DELETE")
-                    }
-                    queueFollowUp(id, content)
+                    followUps = followUps.editReverted(queueId)
+                    errorMessage = "This edit cannot be saved atomically. The queued messages have not been changed."
                 }
                 OrbEditOutcome.AlreadySent -> {
                     followUps = followUps.editReverted(queueId)
                     errorMessage = "This message was already sent, so the edit was not applied."
+                    loadHistory(id)
                 }
                 OrbEditOutcome.Failed -> {
                     followUps = followUps.editReverted(queueId)
                     errorMessage = "Couldn't save the edit."
                 }
             }
+            refreshFollowUps(id)
         }
     }
 
@@ -1624,7 +1682,7 @@ fun OrbConversationPage(
         followUps = followUps.hide(queueId)
         messages = messages + OrbRow(
             localId,
-            mapOf("role" to "user", "content" to row.content.trim(), "created_at" to java.time.Instant.now().toString())
+            mapOf("role" to "user", "content" to OrbMessagePresentation.parse(row.content).text.trim(), "created_at" to java.time.Instant.now().toString())
         )
         handoff = OrbHandoff(queueId, System.currentTimeMillis())
         scope.launch {
@@ -1644,7 +1702,7 @@ fun OrbConversationPage(
                         orbTry(OrbLog.Category.Network, "/api/control/missions") {
                             core.request("/api/control/missions/$id/cancel", method = "POST")
                         }
-                        sendTurn(row.content)
+                        sendTurn(OrbMessagePresentation.parse(row.content).text)
                     }
                 }
                 core.refreshMissionsQuietly()
@@ -2886,7 +2944,7 @@ fun OrbConversationPage(
                 reducedMotion = reducedMotion,
                 onEdit = { row ->
                     editingQueuedId = row.id
-                    inputText = row.content
+                    inputText = OrbMessagePresentation.parse(row.content).text
                 },
                 onSendNow = { row -> sendQueuedNow(row.id) },
                 onRemove = { row -> removeQueued(row.id) }
@@ -3408,19 +3466,20 @@ private fun OrbUserBubble(
     core: OrbCore,
     onPreviewFile: (String) -> Unit
 ) {
-    val parsed = remember(turn.text) {
-        val trimmed = turn.text.trim()
+    val presentation = remember(turn.text) { OrbMessagePresentation.parse(turn.text) }
+    val parsed = remember(presentation.text) {
+        val trimmed = presentation.text.trim()
         val strippedMode = when {
             trimmed.startsWith("[MODE: GOAL]") -> trimmed.removePrefix("[MODE: GOAL]").trim()
             trimmed.startsWith("[MODE: PLAN]") -> trimmed.removePrefix("[MODE: PLAN]").trim()
             trimmed.lowercase().startsWith("/goal ") -> trimmed.drop(6).trim()
             trimmed.lowercase().startsWith("/plan ") -> trimmed.drop(6).trim()
-            else -> turn.text
+            else -> presentation.text
         }
         OrbUserPromptParser.parse(strippedMode)
     }
-    val modeBadge = remember(turn.text) {
-        val trimmed = turn.text.trim()
+    val modeBadge = remember(presentation.text) {
+        val trimmed = presentation.text.trim()
         when {
             trimmed.startsWith("[MODE: GOAL]") || trimmed.lowercase().startsWith("/goal ") || trimmed.equals("/goal", ignoreCase = true) -> "Goal"
             trimmed.startsWith("[MODE: PLAN]") || trimmed.lowercase().startsWith("/plan ") || trimmed.equals("/plan", ignoreCase = true) -> "Plan"
@@ -3442,19 +3501,46 @@ private fun OrbUserBubble(
                 .orbShimmer(active = turn.isPending),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            if (modeBadge != null) {
-                Text(
-                    text = modeBadge,
-                    color = OrbStyle.textSecondary,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    softWrap = false,
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(OrbStyle.elevated)
-                        .padding(horizontal = 7.dp, vertical = 2.dp)
-                )
+            if (modeBadge != null || presentation.attached) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (modeBadge != null) {
+                        Text(
+                            text = modeBadge,
+                            color = OrbStyle.textSecondary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(OrbStyle.elevated)
+                                .padding(horizontal = 7.dp, vertical = 2.dp)
+                        )
+                    }
+                    if (presentation.attached) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AttachFile,
+                                contentDescription = null,
+                                tint = OrbStyle.textSecondary,
+                                modifier = Modifier.size(11.dp)
+                            )
+                            Text(
+                                text = "Attached context",
+                                color = OrbStyle.textSecondary,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+                }
             }
             if (parsed.images.isNotEmpty()) {
                 OrbImageStrip(
@@ -5030,7 +5116,7 @@ private fun OrbFollowUpRow(
             horizontalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             Text(
-                text = row.content.trim(),
+                text = OrbMessagePresentation.parse(row.content).text.trim(),
                 color = if (editing) OrbStyle.textMuted else Color.White,
                 fontSize = 13.sp,
                 maxLines = 1,

@@ -31,11 +31,23 @@ final class OrbSendFlowTests: XCTestCase {
 
     func testEditOutcomes() {
         XCTAssertEqual(OrbSendFlow.editOutcome(status: 200), .edited)
-        XCTAssertEqual(OrbSendFlow.editOutcome(status: 404), .unsupported)
+        XCTAssertEqual(OrbSendFlow.editOutcome(status: 404), .alreadySent)
         XCTAssertEqual(OrbSendFlow.editOutcome(status: 405), .unsupported)
         XCTAssertEqual(OrbSendFlow.editOutcome(status: 409), .alreadySent)
         XCTAssertEqual(OrbSendFlow.editOutcome(status: 500), .failed)
         XCTAssertEqual(OrbSendFlow.editOutcome(status: nil), .failed)
+        let initial = OrbFollowUpQueue().withServer(
+            [OrbQueuedRow(id: "a", content: "first"), OrbQueuedRow(id: "b", content: "second"), OrbQueuedRow(id: "c", content: "third")],
+            lastSequence: 10
+        )
+        for status: Int? in [404, 405, 409, 500, nil] {
+            XCTAssertNotEqual(OrbSendFlow.editOutcome(status: status), .edited)
+            let reverted = initial.edit("b", "mutated").editReverted("b")
+            XCTAssertEqual(ids(reverted), ["a", "b", "c"])
+            XCTAssertEqual(reverted.rows.map(\.content), ["first", "second", "third"])
+            XCTAssertTrue(reverted.hidden.isEmpty)
+            XCTAssertTrue(reverted.pending.isEmpty)
+        }
     }
 
     func testHideSurvivesStalePollAndRollsBack() {
@@ -114,7 +126,25 @@ final class OrbSendFlowTests: XCTestCase {
         XCTAssertEqual(q.reconciled(with: [OrbDeliveredMessage(id: "server-id", content: " ok ", sequence: 21)]).count, 0)
         // One event delivers one row.
         let two = q.enqueue("c2", "ok", lastSequence: 20).posted("c2", queued: true)
-        XCTAssertEqual(ids(two.reconciled(with: [OrbDeliveredMessage(id: nil, content: "ok", sequence: 21)])), ["c2"])
+        let afterFirst = two.reconciled(with: [OrbDeliveredMessage(id: nil, content: "ok", sequence: 21)])
+        XCTAssertEqual(ids(afterFirst), ["c2"])
+        XCTAssertEqual(ids(afterFirst.reconciled(with: [OrbDeliveredMessage(id: nil, content: "ok", sequence: 21)])), ["c2"])
+        let noCursor = OrbFollowUpQueue().enqueue("c3", "yes").posted("c3", queued: true)
+        XCTAssertNil(noCursor.seenAfter["c3"])
+        XCTAssertEqual(ids(noCursor.reconciled(with: [OrbDeliveredMessage(id: nil, content: "yes", sequence: 5)])), ["c3"])
+        XCTAssertEqual(ids(noCursor.reconciled(with: [OrbDeliveredMessage(id: nil, content: "yes", sequence: Int64.max)])), ["c3"])
+        XCTAssertEqual(noCursor.reconciled(with: [OrbDeliveredMessage(id: "c3", content: "yes", sequence: 21)]).count, 0)
+
+        // Cold-start server queue read with nil cursor leaves baseline unset until events load,
+        // then arms seenAfter on the first poll with a real cursor so later content fallback works.
+        let rows = [OrbQueuedRow(id: "s1", content: "yes")]
+        let cold = OrbFollowUpQueue().withServer(rows)
+        XCTAssertNil(cold.seenAfter["s1"])
+        XCTAssertEqual(ids(cold.reconciled(with: [OrbDeliveredMessage(id: nil, content: "yes", sequence: 20)])), ["s1"])
+        let armed = cold.withServer(rows, lastSequence: 20)
+        XCTAssertEqual(armed.seenAfter["s1"], 20)
+        XCTAssertEqual(ids(armed.reconciled(with: [OrbDeliveredMessage(id: nil, content: "yes", sequence: 20)])), ["s1"])
+        XCTAssertEqual(armed.reconciled(with: [OrbDeliveredMessage(id: nil, content: "yes", sequence: 21)]).count, 0)
     }
 
     func testQueueReadWithoutAcceptedRowRemovesIt() {

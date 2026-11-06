@@ -772,6 +772,36 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     let mf ← st.managedRef.get
     return .ok (mkJson 200 s!"\{\"nodes\":[],\"managed_compute\":{renderManagedBudgetJson mf}}")
 
+  -- Durable follow-up queue (`GET /api/control/queue`, `PATCH /api/control/queue/:id`)
+  if req.method == "GET" && cleanPath == "/api/control/queue" then
+    let missionId := ((parseQueryParams rawTarget).find? (fun p => p.1 == "mission_id")).map Prod.snd |>.getD ""
+    if missionId.isEmpty then
+      return .ok (mkJson 400 "{\"error\":\"missing_mission_id\"}")
+    match ← listRemoteQueueJson st.store "core" missionId with
+    | .ok body => return .ok (mkJson 200 body)
+    | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
+  if let some params := matchRoutePattern? "/api/control/queue/:id" rawTarget then
+    if req.method == "PATCH" then
+      let messageId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let content := ((JsonTape.lookupString? (JsonTape.indexJsonObject req.bodySlice) "content").getD "").trimAscii.toString
+      if content.isEmpty then
+        return .ok (mkJson 400 "{\"error\":\"A queued message cannot be empty; remove it instead\"}")
+      match ← editRemoteMessage st.store "core" messageId content with
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      | .ok .NotFound => return .ok (mkJson 404 "{\"error\":\"message not in queue\"}")
+      | .ok .AlreadyDelivered =>
+        return .ok (mkJson 409 "{\"error\":\"This message was already sent; it can no longer be edited\"}")
+      | .ok (.Edited missionId source?) =>
+        let sourceJson := match source? with | some s => jsonEscape s | none => "null"
+        let eventPayload := s!"\{\"type\":\"user_message\",\"id\":{jsonEscape messageId},\"content\":{jsonEscape content},\"queued\":true,\"mission_id\":{jsonEscape missionId},\"source\":{sourceJson}}"
+        let seq ← st.seqRef.modifyGet fun n => (n + 1, n + 1)
+        match ← execParamQuery st.store.missionsDb
+          "INSERT INTO mission_events(mission_id,seq,event_type,payload,created_at) VALUES(?1,?2,'user_message',?3,?4);"
+          #[missionId, s!"{seq}", eventPayload, s!"{nowEpochSec}"] with
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+        | .ok _ => return .ok (mkJson 200 s!"\{\"ok\":true,\"id\":{jsonEscape messageId},\"content\":{jsonEscape content}}")
+
   return .ok (mkJson 404 s!"\{\"error\":\"not_found\",\"path\":{jsonEscape cleanPath}}")
 
 /-- Bounded RFC 6455 WebSocket session loop after `101 Switching Protocols`:
