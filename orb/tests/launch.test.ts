@@ -187,3 +187,80 @@ it("refuses launches onto a node quarantined for the selected harness while allo
   expect(msg).toContain("draft is kept");
   expect(remoteLaunchPreflight(f, "nimrud", { backend: "codex", model: "gpt-6" })).toBeNull();
 });
+
+import { missionActivity, presentedStatus, remoteJobFailed } from "../src/missionStatus";
+import { destinationStartupOutcome } from "../src/ForkMission";
+import { mergeIncomingMission } from "../src/mission/MissionView";
+
+describe("neutral remote_job completion tags and stale poll reconciliation", () => {
+  it.each(["remote_node_job", "remote_job_succeeded", "superseded", "idle_wait_exhausted"])(
+    "treats neutral terminal_reason %s on a succeeded remote job as finished, never failed",
+    (terminal_reason) => {
+      const m = mission({
+        status: "active",
+        remote_job: {
+          job_id: "job-1",
+          node_id: "ashur",
+          phase: "finished",
+          node_state: "succeeded",
+          exit_code: 0,
+          terminal_reason,
+        },
+      });
+      expect(remoteJobFailed(m.remote_job)).toBe(false);
+      const phase = missionPhase(m, true);
+      expect(phase).toMatchObject({ label: "Remote job finished", moving: false });
+      expect(Boolean(phase.failed)).toBe(false);
+      expect(missionActivity(m)).toEqual({ working: false, reason: "idle" });
+      expect(presentedStatus(m)).toBe("completed");
+      expect(destinationStartupOutcome(m)).toBe("pending");
+      expect(destinationStartupOutcome({ ...m, status: "completed" })).toBe("running");
+    },
+  );
+
+  it("prevents a lagging active poll from reverting a settled mission back to active", () => {
+    const settled = mission({
+      id: "6b4ff957-2d94-4fcf-bc89-59e07557a186",
+      status: "completed",
+      updated_at: "2026-11-06T08:47:10.000Z",
+      remote_job: {
+        job_id: "job-1",
+        node_id: "ashur",
+        phase: "finished",
+        node_state: "succeeded",
+        exit_code: 0,
+        terminal_reason: "remote_node_job",
+      },
+    });
+    // Case 1: older updated_at snapshot from listMissions
+    const olderActive = mission({
+      ...settled,
+      status: "active",
+      updated_at: "2026-11-06T08:47:05.000Z",
+    });
+    expect(mergeIncomingMission(settled, olderActive).status).toBe("completed");
+
+    // Case 2: equal updated_at (e.g. SSE mission_status_changed settled status before updated_at advanced)
+    // while incoming poll still carries status="active" with an already-ended remote_job.
+    const sameTsLaggingActive = mission({
+      ...settled,
+      status: "active",
+      updated_at: "2026-11-06T08:47:10.000Z",
+    });
+    expect(mergeIncomingMission(settled, sameTsLaggingActive).status).toBe("completed");
+
+    // Case 3: a genuinely new turn with a live remote_job DOES transition back to active.
+    const nextTurnActive = mission({
+      ...settled,
+      status: "active",
+      updated_at: "2026-11-06T08:48:00.000Z",
+      remote_job: {
+        job_id: "job-2",
+        node_id: "ashur",
+        phase: "observed",
+        node_state: "running",
+      },
+    });
+    expect(mergeIncomingMission(settled, nextTurnActive).status).toBe("active");
+  });
+});

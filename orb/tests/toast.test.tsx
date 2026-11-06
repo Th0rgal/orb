@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { clearConnection, setConnection } from "../src/api";
 import { CloudConversation } from "../src/CloudAgents";
 import { CloudProviders } from "../src/CloudProviders";
-import { ErrorToast, notify } from "../src/toast";
+import { ErrorToast, StatusToast, notify } from "../src/toast";
 
 const rect = (left: number, top: number, right: number, bottom: number): DOMRect => ({
   x: left,
@@ -259,5 +259,99 @@ describe("unified workspace ErrorToast & Toaster", () => {
       clearConnection();
       vi.useRealTimers();
     }
+  });
+
+  it("renders StatusToast as role=status (never role=alert) with warning tone, action, and dismiss callback", async () => {
+    const onDismiss = vi.fn();
+    const onReattach = vi.fn();
+    const [msg, setMsg] = createSignal<string | null>("File no longer available — re-attach: notes.pdf");
+    render(() => (
+      <StatusToast
+        tone="warning"
+        message={msg()}
+        detail="Removed from the message; your text is kept."
+        onDismiss={() => {
+          onDismiss();
+          setMsg(null);
+        }}
+        action={{ label: "Re-attach", primary: true, run: onReattach }}
+      />
+    ));
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    const status = screen.getByRole("status");
+    expect(status.classList.contains("warning")).toBe(true);
+    expect(status.textContent).toContain("File no longer available — re-attach: notes.pdf");
+    expect(status.textContent).toContain("Removed from the message; your text is kept.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Re-attach" }));
+    expect(onReattach).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("status")).toBeNull();
+
+    setMsg("Synced Library skills");
+    expect(screen.getByRole("status").textContent).toContain("Synced Library skills");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(onDismiss).toHaveBeenCalledOnce();
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+  });
+
+  it("isolates concurrent StatusToast instances showing identical messages", async () => {
+    const onDismissMain = vi.fn();
+    const onDismissSide = vi.fn();
+    const onReattachMain = vi.fn();
+    const onReattachSide = vi.fn();
+    const [mainMsg, setMainMsg] = createSignal<string | null>("File no longer available — re-attach: notes.pdf");
+    const [sideMsg, setSideMsg] = createSignal<string | null>("File no longer available — re-attach: notes.pdf");
+
+    render(() => (
+      <>
+        <StatusToast
+          tone="warning"
+          message={mainMsg()}
+          onDismiss={() => {
+            onDismissMain();
+            setMainMsg(null);
+          }}
+          action={{
+            label: "Re-attach",
+            primary: true,
+            run: () => {
+              onReattachMain();
+              setMainMsg(null);
+            },
+          }}
+        />
+        <StatusToast
+          tone="warning"
+          message={sideMsg()}
+          onDismiss={() => {
+            onDismissSide();
+            setSideMsg(null);
+          }}
+          action={{
+            label: "Re-attach",
+            primary: true,
+            run: () => {
+              onReattachSide();
+              setSideMsg(null);
+            },
+          }}
+        />
+      </>
+    ));
+
+    expect(screen.getAllByRole("status")).toHaveLength(2);
+    const buttons = screen.getAllByRole("button", { name: "Re-attach" });
+    expect(buttons).toHaveLength(2);
+
+    fireEvent.click(buttons[0]!);
+    expect(onReattachMain).toHaveBeenCalledOnce();
+    expect(onReattachSide).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getAllByRole("status")).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(onDismissSide).toHaveBeenCalledOnce();
+    expect(onDismissMain).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
   });
 });

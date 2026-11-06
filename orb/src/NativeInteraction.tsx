@@ -112,7 +112,7 @@ export function NativeInteraction(p:{mission:string;active:boolean;remote?:boole
   }
   catch(e){setError(String(e));}finally{setSending(false);}
  };
- return <><Show when={subscriptionError()}><section class="native-question" role="alert"><p>{subscriptionError()}</p><button class="s-btn" onClick={()=>setRetry(n=>n+1)}>Retry</button></section></Show><Show when={request()}>{r=><section class="native-question" aria-label="Waiting for your response">
+ return <><ErrorToast error={subscriptionError()} title="Couldn’t subscribe to interaction requests" background action={{ label: "Retry", run: () => setRetry(n => n + 1) }} /><Show when={request()}>{r=><section class="native-question" aria-label="Waiting for your response">
   <div class="native-question-heading">{r().method==='plan'?'Review the plan':r().method==='permission'?'Permission requested':'Questions'}</div>
   <Show when={r().method==='plan'||r().method==='permission'} fallback={<For each={r().params.questions}>{(q,i)=>{
    const key=()=>q.id??String(i());

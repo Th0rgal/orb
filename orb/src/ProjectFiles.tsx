@@ -2531,7 +2531,8 @@ export function LiveProjectsSection(p: {
         <div id="sidebar-archives" aria-busy={archivesLoading()} onKeyDown={moveKey} onContextMenu={e => openArchiveMenu(e)}>
           <SidebarTree nodes={archiveNodes()} label="Archived conversations" selected={p.selected()} selectedIds={selectedRowIds()} render={renderRow} />
           <Show when={archivesLoading()}><span class="archive-loading-announcement" role="status">Loading archives</span></Show>
-          <Show when={archivesError()}><div class="row note" role="alert">Couldn’t load archives. <button onClick={() => void loadArchives()}>Retry</button></div></Show>
+          <ErrorToast error={archivesOpen() && archivesError() ? `Couldn’t load archives: ${archivesError()}` : null} title="Couldn’t load archives" background action={{ label: "Retry", run: () => loadArchives() }} />
+          <Show when={archivesError()}><div class="row note">Archives could not be loaded.</div></Show>
           <Show when={!archivesLoading() && !archivesError() && !archiveNodes().length}><div class="row note">No archived conversations.</div></Show>
           <Show when={archivesMore()}><button class="row note" disabled={archivesLoading()} onClick={() => void loadArchives(true)}>Load older conversations</button></Show>
         </div>

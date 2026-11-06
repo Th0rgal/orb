@@ -177,7 +177,7 @@ test('Antigravity effort saves, survives reopening and retains the previous valu
  await expect(page.getByRole('option',{name:'Low',exact:true})).toBeFocused();
  await page.keyboard.press('End');await page.keyboard.press('Enter');
  await expect(trigger()).toHaveAccessibleName('Reasoning effort: High');
- expect(patches).toEqual([{model_effort:'high'}]);
+ expect(patches).toEqual([{model_effort:'high',resume:false}]);
  await trigger().click();
  await expect(page.getByRole('option',{name:'High',exact:true})).toHaveAttribute('aria-selected','true');
  await page.keyboard.press('Escape');
@@ -188,7 +188,7 @@ test('Antigravity effort saves, survives reopening and retains the previous valu
  fail=false;
  await trigger().click();await page.getByRole('option',{name:'Default (High)',exact:true}).click();
  await expect(trigger()).toHaveAccessibleName('Reasoning effort: Default (High)');
- expect(patches.at(-1)).toEqual({model_effort:''});
+ expect(patches.at(-1)).toEqual({model_effort:'',resume:false});
 });
 
 for(const theme of ["dark","light"]) test(`menu focus stays quiet and keyboard navigation works: ${theme}`,async({page})=>{

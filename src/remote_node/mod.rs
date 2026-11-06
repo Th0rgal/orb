@@ -386,9 +386,11 @@ pub(crate) fn prepare_shared_mission_caches(
     let caches = work_root.join("caches");
     let elan = caches.join("elan");
     let turbo_lean = caches.join("turbo-lean");
+    let library_skills = caches.join("library-skills");
     let bin = caches.join("bin");
     std::fs::create_dir_all(&elan)?;
     std::fs::create_dir_all(&turbo_lean)?;
+    std::fs::create_dir_all(&library_skills)?;
     std::fs::create_dir_all(&bin)?;
 
     let lake_shim = bin.join("lake");
@@ -425,6 +427,10 @@ pub(crate) fn prepare_shared_mission_caches(
         (
             "TURBO_LEAN_HOME".to_string(),
             turbo_lean.display().to_string(),
+        ),
+        (
+            "SANDBOXED_LIBRARY_SKILL_CACHE".to_string(),
+            library_skills.display().to_string(),
         ),
         ("PATH".to_string(), path_entries.join(":")),
     ];

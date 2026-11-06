@@ -112,7 +112,15 @@ def safe_members(archive):
         yield member
 
 
-def cache_root():
+def cache_root(archive_path=""):
+    override = os.environ.get("SANDBOXED_LIBRARY_SKILL_CACHE")
+    if override:
+        return Path(override)
+    if archive_path:
+        archive = Path(archive_path)
+        uploads = archive.parent.parent
+        if archive.name.startswith("library-skills-") and uploads.name == "uploads":
+            return uploads.parent / "caches" / "library-skills"
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
     return Path(base) / "sandboxed-sh" / "library-skills"
 
@@ -120,7 +128,7 @@ def cache_root():
 def extract(archive_path, sha):
     if not re.fullmatch(r"[0-9a-f]{64}", sha):
         raise ValueError("invalid archive hash")
-    root = cache_root()
+    root = cache_root(archive_path)
     final = root / sha
     if final.is_dir() and not final.is_symlink():
         return final

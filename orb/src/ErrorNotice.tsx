@@ -121,17 +121,19 @@ export function ErrorNotice(p: { error: string; title?: string; backend?: string
   };
   const info = createMemo(() => describeError(p.error, p.title, p.backend));
   return <section class="error-notice" classList={{ warning: info().tone === "warning" }} role="alert">
-    <svg class="error-notice-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 4.5v4M8 10.5v1" /></svg>
+    <svg class="error-notice-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 4.5v4M8 10.5v1" /></svg>
     <div class="error-notice-body"><strong>{info().title}</strong><p>{info().message}</p>
-      <Show when={p.children || info().link}><div class="error-notice-actions">
-        <Show when={info().link}>{link => <button type="button" class="error-notice-link" onClick={() => void import("./api").then(m => m.openExternalUrl(link().url)).catch(swallow("errorNotice.openLink"))}>{link().label}</button>}</Show>
+      <Show when={info().link}>{link => <div class="toast-links">
+        <button type="button" class="toast-link" onClick={() => void import("./api").then(m => m.openExternalUrl(link().url)).catch(swallow("errorNotice.openLink"))}>{link().label}</button>
+      </div>}</Show>
+      <Show when={p.children}><div class="error-notice-actions">
         {p.children}
       </div></Show>
       <Show when={info().message !== p.error}><details><summary>Technical details</summary><pre>{p.error}</pre></details></Show>
       <Show when={copyError()}><p class="error-copy-status" role="status">{copyError()}</p></Show>
     </div>
-    <button type="button" class="icon-btn error-copy" aria-label={copied() ? "Error copied" : "Copy error"} title={copied() ? "Copied" : "Copy error"} onClick={() => void copy()}><Show when={copied()} fallback={<CopyIcon size={14} />}><CheckIcon size={14} /></Show></button>
-    <Show when={p.onDismiss}><button type="button" class="icon-btn" aria-label="Dismiss error" onClick={() => p.onDismiss?.()}><CloseIcon size={14} /></button></Show>
+    <button type="button" class="icon-btn toast-icon-btn error-copy" aria-label={copied() ? "Error copied" : "Copy error"} title={copied() ? "Copied" : "Copy error"} onClick={() => void copy()}><Show when={copied()} fallback={<CopyIcon size={13} />}><CheckIcon size={13} /></Show></button>
+    <Show when={p.onDismiss}><button type="button" class="icon-btn toast-icon-btn" aria-label="Dismiss error" onClick={() => p.onDismiss?.()}><CloseIcon size={13} /></button></Show>
   </section>;
 }
 

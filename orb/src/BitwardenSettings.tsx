@@ -33,7 +33,7 @@ import { copyText } from "./clipboard";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
 import * as Ic from "./icons";
 import { Select } from "./Select";
-import { ErrorToast } from "./toast";
+import { ErrorToast, StatusToast } from "./toast";
 
 const UNLOCK_TTL_MS = 5 * 60 * 1000;
 
@@ -513,14 +513,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
           onDismiss={() => setToastError("")}
         />
 
-        <Show when={notice()}>
-          <div class="bw-notice" role="status">
-            <span>{notice()}</span>
-            <button class="bw-notice-close" onClick={() => setNotice(null)} aria-label="Dismiss">
-              <Ic.CloseIcon size={12} />
-            </button>
-          </div>
-        </Show>
+        <StatusToast message={notice()} icon={<Ic.CheckIcon size={14} />} timeout={4000} onDismiss={() => setNotice(null)} />
 
         <ErrorToast error={error()} title="Bitwarden Secrets Manager" background action={{ label: "Retry", run: () => refreshAll() }} />
 

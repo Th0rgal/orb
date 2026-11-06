@@ -7,7 +7,7 @@ import * as Ic from "./icons";
 import { Select } from "./Select";
 import { ConfirmDialog, Dialog, DialogButton, Field, NameDialog } from "./Dialog";
 import { ErrorNotice } from "./ErrorNotice";
-import { ErrorToast } from "./toast";
+import { ErrorToast, StatusToast } from "./toast";
 import { readJson, writeJson } from "./storage";
 import { PopupMenu, type MenuEntry } from "./Menu";
 import {
@@ -718,17 +718,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   return (
     <div class="s-body settings-body">
       <div class="s-inner skills-settings-page">
-        <Show when={syncNotice()}>
-          {(msg) => (
-            <div class="skills-banner ok" role="status">
-              <Ic.CheckIcon size={14} />
-              <span>{msg()}</span>
-              <button type="button" class="icon-btn" aria-label="Dismiss notice" onClick={() => setSyncNotice(null)}>
-                <Ic.CloseIcon size={12} />
-              </button>
-            </div>
-          )}
-        </Show>
+        <StatusToast message={syncNotice()} icon={<Ic.CheckIcon size={14} />} timeout={4000} onDismiss={() => setSyncNotice(null)} />
 
         <ErrorToast error={syncError()} title="Couldn’t sync Library skills" onDismiss={() => setSyncError(null)} />
 
