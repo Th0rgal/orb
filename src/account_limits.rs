@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Weak};
 
 use arc_swap::ArcSwapOption;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
@@ -531,17 +531,31 @@ pub struct AccountCooldowns {
     flushed_notify: Notify,
     writer_started: AtomicBool,
     persist_lock: AsyncMutex<()>,
+    weak: Weak<Self>,
+}
+
+struct WriterRunningGuard(Weak<AccountCooldowns>);
+
+impl Drop for WriterRunningGuard {
+    fn drop(&mut self) {
+        if let Some(cooldowns) = self.0.upgrade() {
+            cooldowns.writer_started.store(false, Ordering::Release);
+        }
+    }
 }
 
 impl AccountCooldowns {
     /// A registry that lives only in memory.
     pub fn in_memory() -> Arc<Self> {
-        Arc::new(Self::default())
+        Arc::new_cyclic(|weak| Self {
+            weak: weak.clone(),
+            ..Self::default()
+        })
     }
 
     /// A registry backed by `path`, loaded from it when it exists.
     pub fn load(path: PathBuf) -> Arc<Self> {
-        let registry = Arc::new(Self::default());
+        let registry = Self::in_memory();
         registry.attach_arc(path);
         registry
     }
@@ -575,8 +589,11 @@ impl AccountCooldowns {
         self.schedule_persist();
     }
 
-    fn ensure_background_writer(self: &Arc<Self>) {
-        if tokio::runtime::Handle::try_current().is_err() {
+    fn ensure_background_writer(&self) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if self.weak.strong_count() == 0 {
             return;
         }
         if self
@@ -586,27 +603,34 @@ impl AccountCooldowns {
         {
             return;
         }
-        let weak = Arc::downgrade(self);
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                loop {
-                    let Some(this) = weak.upgrade() else {
-                        break;
-                    };
-                    if this.flushed_seq.load(Ordering::Acquire)
-                        >= this.dirty_seq.load(Ordering::Acquire)
-                    {
-                        let notify = Arc::clone(&this.persist_notify);
-                        drop(this);
-                        notify.notified().await;
-                        // Coalesce bursty transient 429 updates into a single write.
-                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                        continue;
-                    }
-                    let _ = this.flush_now_async().await;
+        let weak = self.weak.clone();
+        let notify = Arc::clone(&self.persist_notify);
+        let guard = WriterRunningGuard(weak.clone());
+        handle.spawn(async move {
+            let _guard = guard;
+            loop {
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let Some(this) = weak.upgrade() else {
+                    break;
+                };
+                if this.flushed_seq.load(Ordering::Acquire)
+                    >= this.dirty_seq.load(Ordering::Acquire)
+                {
+                    drop(this);
+                    notified.await;
+                    // Coalesce bursty transient 429 updates into a single write.
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    continue;
                 }
-            });
-        }
+                let flush_failed = this.flush_now_async().await.is_err();
+                drop(this);
+                if flush_failed {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            }
+        });
     }
 
     /// Park `key` until `cooldown.until`. A newer announcement replaces the
@@ -744,35 +768,46 @@ impl AccountCooldowns {
                 );
                 return Err(error);
             }
-            self.flushed_seq.store(target, Ordering::Release);
+            self.flushed_seq.fetch_max(target, Ordering::AcqRel);
             self.flushed_notify.notify_waiters();
         }
         Ok(())
     }
 
-    /// Schedule persistence without holding any lock. Under Tokio, wakes the
-    /// coalesced `tokio::fs` background writer; in synchronous unit tests with
-    /// no Tokio runtime, writes off-lock on a short-lived OS helper thread.
+    /// Schedule persistence without holding any shard lock. Under Tokio,
+    /// ensures and wakes the coalesced background writer; outside Tokio,
+    /// acquires `persist_lock` and flushes synchronously until this caller's
+    /// sequence is durable on disk.
     fn schedule_persist(&self) {
         let Some(path) = self.path.load_full() else {
             return;
         };
-        let seq = self.dirty_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        let caller_seq = self.dirty_seq.fetch_add(1, Ordering::AcqRel) + 1;
         if tokio::runtime::Handle::try_current().is_ok() {
             self.persist_notify.notify_one();
+            self.ensure_background_writer();
             return;
         }
-        // Non-Tokio synchronous unit tests: snapshot outside all locks and write
-        // atomically without holding any guard.
-        let file = self.build_snapshot();
-        if let Err(error) = write_cooldowns(&path, &file) {
-            tracing::warn!(
-                path = %path.display(),
-                error = %error,
-                "Could not persist account usage-limit cooldowns"
-            );
-        } else {
-            self.flushed_seq.fetch_max(seq, Ordering::AcqRel);
+        let _guard = self.persist_lock.blocking_lock();
+        loop {
+            if self.flushed_seq.load(Ordering::Acquire) >= caller_seq
+                && self.flushed_seq.load(Ordering::Acquire)
+                    >= self.dirty_seq.load(Ordering::Acquire)
+            {
+                break;
+            }
+            let target = self.dirty_seq.load(Ordering::Acquire).max(caller_seq);
+            let file = self.build_snapshot();
+            if let Err(error) = write_cooldowns(&path, &file) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "Could not persist account usage-limit cooldowns"
+                );
+                break;
+            }
+            self.flushed_seq.fetch_max(target, Ordering::AcqRel);
+            self.flushed_notify.notify_waiters();
         }
     }
 }
@@ -805,12 +840,8 @@ fn read_cooldowns(path: &Path) -> HashMap<String, LimitCooldown> {
 }
 
 fn write_cooldowns(path: &Path, file: &CooldownsFile) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(file)?)?;
-    std::fs::rename(&tmp, path)
+    let bytes = serde_json::to_vec_pretty(file).map_err(std::io::Error::other)?;
+    crate::concurrency::write_atomic(path, &bytes, None)
 }
 
 static SHARED: LazyLock<Arc<AccountCooldowns>> = LazyLock::new(AccountCooldowns::in_memory);
@@ -1505,5 +1536,172 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(!on_disk.cooldowns.contains_key(&key));
         assert!(!on_disk.transient_cooldowns.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn persist_failure_keeps_dirty_and_recovers_on_flush() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "file").unwrap();
+        let path = blocker.join(COOLDOWNS_FILE);
+        let registry = AccountCooldowns::in_memory();
+        registry.path.store(Some(Arc::new(path.clone())));
+        let key = account_key(Uuid::new_v4());
+        registry.set(&key, cooldown(Utc::now() + Duration::hours(1)));
+        assert!(registry.flush_now_async().await.is_err());
+        assert_eq!(registry.flushed_seq.load(Ordering::Acquire), 0);
+        assert!(registry.dirty_seq.load(Ordering::Acquire) > 0);
+        std::fs::remove_file(&blocker).unwrap();
+        registry.flush_now_async().await.unwrap();
+        assert_eq!(
+            registry.flushed_seq.load(Ordering::Acquire),
+            registry.dirty_seq.load(Ordering::Acquire)
+        );
+        assert!(read_cooldowns(&path).contains_key(&key));
+    }
+
+    #[test]
+    fn sync_persist_outside_tokio_waits_for_contended_lock_until_durable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(COOLDOWNS_FILE);
+        let registry = AccountCooldowns::load(path.clone());
+        let key_set = account_key(Uuid::new_v4());
+        let key_clear = account_key(Uuid::new_v4());
+        let until = Utc::now() + Duration::hours(1);
+        registry.set(&key_clear, cooldown(until));
+        assert!(read_cooldowns(&path).contains_key(&key_clear));
+
+        let guard = registry.persist_lock.blocking_lock();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let reg_set = Arc::clone(&registry);
+        let key_set_clone = key_set.clone();
+        let set_thread = std::thread::spawn(move || {
+            entered_tx.send(()).unwrap();
+            reg_set.set(&key_set_clone, cooldown(until));
+        });
+        entered_rx.recv().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !registry.entries.contains_key(&key_set) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(!set_thread.is_finished());
+        assert!(!read_cooldowns(&path).contains_key(&key_set));
+        drop(guard);
+        set_thread.join().unwrap();
+        assert!(read_cooldowns(&path).contains_key(&key_set));
+
+        let guard = registry.persist_lock.blocking_lock();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let reg_clear = Arc::clone(&registry);
+        let key_clear_clone = key_clear.clone();
+        let clear_thread = std::thread::spawn(move || {
+            entered_tx.send(()).unwrap();
+            assert!(reg_clear.clear(&key_clear_clone));
+        });
+        entered_rx.recv().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while registry.entries.contains_key(&key_clear) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(!clear_thread.is_finished());
+        assert!(read_cooldowns(&path).contains_key(&key_clear));
+        drop(guard);
+        clear_thread.join().unwrap();
+        assert!(!read_cooldowns(&path).contains_key(&key_clear));
+    }
+
+    #[test]
+    fn load_outside_tokio_lazily_starts_background_writer_inside_tokio() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(COOLDOWNS_FILE);
+        let registry = AccountCooldowns::load(path.clone());
+        assert!(!registry.writer_started.load(Ordering::Acquire));
+
+        let key1 = account_key(Uuid::new_v4());
+        let until = Utc::now() + Duration::hours(1);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            registry.set(&key1, cooldown(until));
+            assert!(registry.writer_started.load(Ordering::Acquire));
+            let target = registry.dirty_seq.load(Ordering::Acquire);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let notified = registry.flushed_notify.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if registry.flushed_seq.load(Ordering::Acquire) >= target {
+                        break;
+                    }
+                    notified.await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        assert!(read_cooldowns(&path).contains_key(&key1));
+
+        drop(runtime);
+        assert!(!registry.writer_started.load(Ordering::Acquire));
+
+        let key2 = account_key(Uuid::new_v4());
+        let runtime2 = tokio::runtime::Runtime::new().unwrap();
+        runtime2.block_on(async {
+            registry.set(&key2, cooldown(until));
+            assert!(registry.writer_started.load(Ordering::Acquire));
+            let target = registry.dirty_seq.load(Ordering::Acquire);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let notified = registry.flushed_notify.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if registry.flushed_seq.load(Ordering::Acquire) >= target {
+                        break;
+                    }
+                    notified.await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        assert!(read_cooldowns(&path).contains_key(&key2));
+    }
+
+    #[test]
+    fn newly_spawned_writer_flushes_preexisting_dirty_sequence_immediately() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "file").unwrap();
+        let path = blocker.join(COOLDOWNS_FILE);
+        let registry = AccountCooldowns::in_memory();
+        registry.path.store(Some(Arc::new(path.clone())));
+        let key = account_key(Uuid::new_v4());
+        registry.set(&key, cooldown(Utc::now() + Duration::hours(1)));
+        assert_eq!(registry.flushed_seq.load(Ordering::Acquire), 0);
+        let target = registry.dirty_seq.load(Ordering::Acquire);
+        assert!(target > 0);
+        assert!(!registry.writer_started.load(Ordering::Acquire));
+        std::fs::remove_file(&blocker).unwrap();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            registry.ensure_background_writer();
+            assert!(registry.writer_started.load(Ordering::Acquire));
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let notified = registry.flushed_notify.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if registry.flushed_seq.load(Ordering::Acquire) >= target {
+                        break;
+                    }
+                    notified.await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        assert!(read_cooldowns(&path).contains_key(&key));
     }
 }
