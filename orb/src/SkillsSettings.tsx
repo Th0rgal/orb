@@ -37,7 +37,7 @@ import {
 import { refreshSoftware, softwareMachines } from "./softwareInventory";
 import { effectiveAudience, newSkillTemplate, normalizeSkillName, parseSkillMeta, setSandboxedMeta } from "./skillModel";
 import { SKILL_BADGE_LABEL, buildSkillRows, isOldCopy, needsAttention, skillBadge, type ProjectContextSkill, type SkillRow } from "./skillRows";
-import { commitAndPush, deleteLibrarySkill, fetchLibrarySkill, forcePushLibrary, forceSyncLibrary, getLibraryStatus, isDivergedLibraryError, putLibrarySkill, putSkillFile, readSkillFile, repoLabel, syncLibrary, updateLibraryRemote, type LibraryStatus } from "./skillsApi";
+import { commitAndPush, deleteLibrarySkill, fetchLibrarySkill, forcePushLibrary, forceSyncLibrary, getLibraryStatus, isDivergedLibraryError, needsLibraryRemoteInit, putLibrarySkill, putSkillFile, readSkillFile, repoLabel, sameLibraryRemote, syncLibrary, updateLibraryRemote, type LibraryStatus } from "./skillsApi";
 import { orbRelativeTimeString } from "./orbKernel";
 import { cachedSkillsReport, rememberSkillsReport } from "./skillCache";
 import { deleteMessage, dropsSandboxedMetadata, middleTruncate } from "./SkillPage";
@@ -165,6 +165,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const [remoteDraft, setRemoteDraft] = createSignal("");
   const [remoteBusy, setRemoteBusy] = createSignal(false);
   const [remoteError, setRemoteError] = createSignal<string | null>(null);
+  const [failedRemoteInit, setFailedRemoteInit] = createSignal<string | null>(null);
   const [divergedDetail, setDivergedDetail] = createSignal<string | null>(null);
   const [divergedBusy, setDivergedBusy] = createSignal<"sync" | "push" | null>(null);
   const [divergedError, setDivergedError] = createSignal<string | null>(null);
@@ -291,7 +292,10 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   });
 
   // The one load on open (and on reconnect); online it also reads the Library.
-  createEffect(on(connectionVersion, () => void loadAll(false)));
+  createEffect(on(connectionVersion, () => {
+    setFailedRemoteInit(null);
+    void loadAll(false);
+  }));
 
   const machineOptions = createMemo(() => {
     const opts = [{ id: "local", label: "This Mac (Local Harnesses)" }];
@@ -495,27 +499,47 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   };
 
   const openRemoteEditor = () => {
-    setRemoteDraft(repo()?.remote ?? configuredRemote() ?? "");
+    setRemoteDraft(failedRemoteInit() ?? repo()?.remote ?? configuredRemote() ?? "");
     setRemoteError(null);
     setEditingRemote(true);
   };
 
+  const retryingFailedRemote = () =>
+    Boolean(failedRemoteInit() && sameLibraryRemote(remoteDraft(), failedRemoteInit()));
+
   const saveRemoteUrl = async (clear = false) => {
     if (remoteBusy()) return;
+    const next = clear ? null : remoteDraft().trim() || null;
+    const needsInit = needsLibraryRemoteInit(next, repo()?.remote, failedRemoteInit());
     setRemoteBusy(true);
     setRemoteError(null);
     try {
-      const next = clear ? null : remoteDraft().trim() || null;
-      const res = await updateLibraryRemote(next);
-      setConfiguredRemote(res.library_remote ?? "");
+      const res = await updateLibraryRemote(next, needsInit);
       if (res.library_error) {
+        if (next) setFailedRemoteInit(next);
         setRemoteError(res.library_error);
         return;
       }
+      // Older Core builds persist `library_remote` before initializing and only
+      // reinitialize when the stored setting changes, returning `library_reinitialized: false`
+      // on a retry. Calling `/api/library/status` drives `ensure_library` to initialize
+      // or surface the underlying clone/fetch error.
+      if (next && needsInit && !res.library_reinitialized) {
+        const status = await getLibraryStatus();
+        if (!sameLibraryRemote(status.remote, next)) {
+          setFailedRemoteInit(next);
+          setRemoteError("Library repository was not initialized for this remote. Check the URL and retry.");
+          return;
+        }
+        setRepo(status);
+      }
+      setFailedRemoteInit(null);
+      setConfiguredRemote(res.library_remote ?? next ?? "");
       setEditingRemote(false);
       await loadAll(true);
-      setSyncNotice(res.library_remote ? `Library connected to ${repoLabel(res.library_remote)}.` : "Library repository disconnected.");
+      setSyncNotice(next ? `Library connected to ${repoLabel(res.library_remote ?? next)}.` : "Library repository disconnected.");
     } catch (e) {
+      if (next) setFailedRemoteInit(next);
       setRemoteError(errorText(e));
     } finally {
       setRemoteBusy(false);
@@ -980,7 +1004,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
           value={remoteDraft()}
           onInput={setRemoteDraft}
           allowEmpty
-          action="Save"
+          action={retryingFailedRemote() ? "Retry" : "Save"}
           busy={remoteBusy()}
           error={remoteError()}
           onAction={() => void saveRemoteUrl(false)}

@@ -16,7 +16,7 @@ import {
   verifyGitHubOAuthCallback,
   verifyIssuedAuthToken,
 } from "../src/githubSignIn";
-import { isDivergedLibraryError } from "../src/skillsApi";
+import { isDivergedLibraryError, needsLibraryRemoteInit, sameLibraryRemote } from "../src/skillsApi";
 
 afterEach(() => {
   cleanup();
@@ -459,5 +459,102 @@ describe("SkillsSettings diverged history recovery", () => {
     await waitFor(() => {
       expect(calls.some((c) => c.endsWith("/api/library/force-sync"))).toBe(true);
     });
+  });
+
+  it("retries Library initialization after a failed remote update instead of treating a no-op second save as success", async () => {
+    expect(sameLibraryRemote("git@github.com:Org/Skills.git/", "git@github.com:org/skills")).toBe(true);
+    expect(needsLibraryRemoteInit(null, "git@github.com:org/skills.git", null)).toBe(false);
+    expect(needsLibraryRemoteInit("git@github.com:org/skills.git", "git@github.com:org/skills", null)).toBe(false);
+    expect(
+      needsLibraryRemoteInit(
+        "git@github.com:org/new-skills.git",
+        "git@github.com:org/old-skills.git",
+        null,
+      ),
+    ).toBe(true);
+    expect(
+      needsLibraryRemoteInit(
+        "git@github.com:org/new-skills.git",
+        "git@github.com:org/new-skills.git",
+        "git@github.com:org/new-skills.git",
+      ),
+    ).toBe(true);
+
+    setConnection("http://core.test", "jwt-token");
+    let putCount = 0;
+    let statusHealthy = false;
+    const putBodies: Array<Record<string, unknown>> = [];
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/settings/library-remote") && init?.method === "PUT") {
+        putCount += 1;
+        putBodies.push(JSON.parse(String(init.body)));
+        if (putCount === 1) {
+          return new Response(
+            JSON.stringify({
+              library_remote: "git@github.com:org/new-skills.git",
+              library_reinitialized: false,
+              library_error: "git clone failed: temporary network outage",
+            }),
+          );
+        }
+        // Simulate an older Core server where `library_remote` was persisted on the
+        // first attempt so the retry returns `library_reinitialized: false` with no error.
+        return new Response(
+          JSON.stringify({
+            library_remote: "git@github.com:org/new-skills.git",
+            library_reinitialized: false,
+          }),
+        );
+      }
+      if (url.endsWith("/api/library/status")) {
+        if (!statusHealthy && putCount >= 2) {
+          return new Response("Failed to initialize library: ssh timeout", { status: 500 });
+        }
+        return new Response(
+          JSON.stringify({
+            remote: statusHealthy
+              ? "git@github.com:org/new-skills.git"
+              : "git@github.com:org/old-skills.git",
+            branch: "main",
+            clean: true,
+            ahead: 0,
+            behind: 0,
+            modified_files: [],
+          }),
+        );
+      }
+      if (url.endsWith("/api/library/skill") || url.endsWith("/api/library/skills")) {
+        return new Response(JSON.stringify([]));
+      }
+      if (url.endsWith("/api/remote-nodes")) return new Response(JSON.stringify({ nodes: [] }));
+      if (url.endsWith("/api/projects")) return new Response(JSON.stringify([]));
+      if (url.endsWith("/api/software")) return new Response(JSON.stringify({ machines: [] }));
+      return new Response(JSON.stringify({}));
+    });
+
+    render(() => <SkillsSettings />);
+    const repoBtn = await screen.findByRole("button", { name: "Repo…" });
+    fireEvent.click(repoBtn);
+
+    const urlInput = (await screen.findByLabelText("Git remote URL")) as HTMLInputElement;
+    fireEvent.input(urlInput, { target: { value: "git@github.com:org/new-skills.git" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // Attempt 1 fails: dialog stays open, surfaces error, and offers Retry.
+    expect(await screen.findByText("git clone failed: temporary network outage")).toBeTruthy();
+    const retryBtn = await screen.findByRole("button", { name: "Retry" });
+
+    // Attempt 2: PUT returns no-op `library_reinitialized: false`, status init still fails -> must NOT close or claim connected.
+    fireEvent.click(retryBtn);
+    expect(await screen.findByText(/Failed to initialize library: ssh timeout/)).toBeTruthy();
+    expect(screen.queryByText(/Library connected to/)).toBeNull();
+
+    // Attempt 3: status initialization succeeds -> dialog closes and reports connected.
+    statusHealthy = true;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Library connected to org/new-skills.")).toBeTruthy();
+    expect(putBodies.every((b) => b.force_reinitialize === true)).toBe(true);
   });
 });

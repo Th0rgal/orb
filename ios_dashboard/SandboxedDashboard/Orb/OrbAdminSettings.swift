@@ -501,6 +501,7 @@ struct OrbSkillsSettings: View {
     @State private var repoDraft = ""
     @State private var repoBusy = false
     @State private var repoError = ""
+    @State private var failedRepoRemote: String?
     @State private var unconfigured = false
     @State private var divergedMessage: String?
     @State private var divergedBusy = false
@@ -522,6 +523,33 @@ struct OrbSkillsSettings: View {
     static func libraryRemoteUpdateError(_ res: OrbJSON) -> String? {
         let err = res["library_error"].text.trimmingCharacters(in: .whitespacesAndNewlines)
         return err.isEmpty ? nil : err
+    }
+
+    static func normalizeLibraryRemote(_ remote: String?) -> String {
+        var s = (remote ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        while s.hasSuffix("/") { s.removeLast() }
+        if s.hasSuffix(".git") { s.removeLast(4) }
+        return s
+    }
+
+    static func sameLibraryRemote(_ a: String?, _ b: String?) -> Bool {
+        let na = normalizeLibraryRemote(a)
+        let nb = normalizeLibraryRemote(b)
+        return !na.isEmpty && na == nb
+    }
+
+    static func needsLibraryRemoteInit(
+        nextRemote: String?,
+        activeRepoRemote: String?,
+        failedInitRemote: String?
+    ) -> Bool {
+        guard let nextRemote, !nextRemote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        if let failedInitRemote, sameLibraryRemote(nextRemote, failedInitRemote) {
+            return true
+        }
+        return !sameLibraryRemote(nextRemote, activeRepoRemote)
     }
 
     /// Plain words for a failed delete (desktop: deleteMessage in SkillsSettings.tsx).
@@ -557,7 +585,7 @@ struct OrbSkillsSettings: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     Button("Configure repository…") {
-                        repoDraft = repo?["remote"].text ?? ""
+                        repoDraft = failedRepoRemote ?? repo?["remote"].text ?? ""
                         repoError = ""
                         repoSheetOpen = true
                     }
@@ -589,7 +617,7 @@ struct OrbSkillsSettings: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
-                    repoDraft = repo?["remote"].text ?? ""
+                    repoDraft = failedRepoRemote ?? repo?["remote"].text ?? ""
                     repoError = ""
                     repoSheetOpen = true
                 } label: { Image(systemName: "link") }
@@ -599,6 +627,7 @@ struct OrbSkillsSettings: View {
             ToolbarItem(placement: .topBarTrailing) { Button { creating = true } label: { Image(systemName: "plus") }.accessibilityLabel("New skill") }
         }
         .sheet(isPresented: $repoSheetOpen) {
+            let retryingFailed = failedRepoRemote != nil && Self.sameLibraryRemote(repoDraft, failedRepoRemote)
             NavigationStack {
                 Form {
                     if !repoError.isEmpty {
@@ -632,7 +661,7 @@ struct OrbSkillsSettings: View {
                         Button("Cancel") { repoSheetOpen = false }.disabled(repoBusy)
                     }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button(repoBusy ? "Saving…" : "Save") {
+                        Button(repoBusy ? (retryingFailed ? "Retrying…" : "Saving…") : (retryingFailed ? "Retry" : "Save")) {
                             let trimmed = repoDraft.trimmingCharacters(in: .whitespacesAndNewlines)
                             Task { await saveRepoRemote(trimmed.isEmpty ? nil : trimmed) }
                         }
@@ -718,21 +747,46 @@ struct OrbSkillsSettings: View {
     }
 
     private func saveRepoRemote(_ url: String?) async {
+        let trimmed = url?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedNext = (trimmed?.isEmpty == false) ? trimmed : nil
+        let needsInit = Self.needsLibraryRemoteInit(
+            nextRemote: normalizedNext,
+            activeRepoRemote: repo?["remote"].text,
+            failedInitRemote: failedRepoRemote
+        )
         repoBusy = true; defer { repoBusy = false }
         repoError = ""
         do {
+            var payload: [String: OrbJSON] = [
+                "library_remote": normalizedNext.map(OrbJSON.string) ?? .null
+            ]
+            if needsInit {
+                payload["force_reinitialize"] = .bool(true)
+            }
             let res = try await client.call(
                 "/api/settings/library-remote",
                 method: "PUT",
-                body: .object(["library_remote": url.map(OrbJSON.string) ?? .null])
+                body: .object(payload)
             )
             if let err = Self.libraryRemoteUpdateError(res) {
+                if let normalizedNext { failedRepoRemote = normalizedNext }
                 repoError = err
                 return
             }
+            if let normalizedNext, needsInit, !res["library_reinitialized"].flag {
+                let status = try await client.call("/api/library/status")
+                guard Self.sameLibraryRemote(status["remote"].text, normalizedNext) else {
+                    failedRepoRemote = normalizedNext
+                    repoError = "Library repository was not initialized for this remote. Check the URL and retry."
+                    return
+                }
+                repo = status
+            }
+            failedRepoRemote = nil
             repoSheetOpen = false
             await load()
         } catch is CancellationError {} catch {
+            if let normalizedNext { failedRepoRemote = normalizedNext }
             repoError = error.localizedDescription
         }
     }

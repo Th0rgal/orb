@@ -99,6 +99,11 @@ final class OrbClientParityTests: XCTestCase {
             ])),
             "Failed to clone git@github.com:org/private.git"
         )
+        XCTAssertTrue(OrbSkillsSettings.sameLibraryRemote("git@github.com:Org/Skills.git/", "git@github.com:org/skills"))
+        XCTAssertFalse(OrbSkillsSettings.needsLibraryRemoteInit(nextRemote: nil, activeRepoRemote: "git@github.com:org/skills.git", failedInitRemote: nil))
+        XCTAssertFalse(OrbSkillsSettings.needsLibraryRemoteInit(nextRemote: "git@github.com:org/skills.git", activeRepoRemote: "git@github.com:org/skills", failedInitRemote: nil))
+        XCTAssertTrue(OrbSkillsSettings.needsLibraryRemoteInit(nextRemote: "git@github.com:org/new.git", activeRepoRemote: "git@github.com:org/old.git", failedInitRemote: nil))
+        XCTAssertTrue(OrbSkillsSettings.needsLibraryRemoteInit(nextRemote: "git@github.com:org/new.git", activeRepoRemote: "git@github.com:org/new.git", failedInitRemote: "git@github.com:org/new.git"))
     }
 
     func testControllerModelScheduleTimelineAndGrantNormalization() {

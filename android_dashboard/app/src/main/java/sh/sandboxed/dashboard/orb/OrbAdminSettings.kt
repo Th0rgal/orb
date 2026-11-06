@@ -131,6 +131,29 @@ object OrbAdminFormatting {
     fun libraryRemoteUpdateError(res: OrbDict?): String? =
         OrbJSON.str(res, "library_error")?.takeIf { it.isNotEmpty() }
 
+    fun normalizeLibraryRemote(remote: String?): String {
+        var s = remote.orEmpty().trim().lowercase()
+        while (s.endsWith("/")) s = s.dropLast(1)
+        if (s.endsWith(".git")) s = s.dropLast(4)
+        return s
+    }
+
+    fun sameLibraryRemote(a: String?, b: String?): Boolean {
+        val na = normalizeLibraryRemote(a)
+        val nb = normalizeLibraryRemote(b)
+        return na.isNotEmpty() && na == nb
+    }
+
+    fun needsLibraryRemoteInit(
+        nextRemote: String?,
+        activeRepoRemote: String?,
+        failedInitRemote: String?
+    ): Boolean {
+        if (nextRemote.isNullOrBlank()) return false
+        if (failedInitRemote != null && sameLibraryRemote(nextRemote, failedInitRemote)) return true
+        return !sameLibraryRemote(nextRemote, activeRepoRemote)
+    }
+
     fun hermesRuntime(runtime: OrbDict?): List<Pair<String, String>> {
         if (runtime == null) return listOf("Status" to "Unavailable")
         val rows = mutableListOf<Pair<String, String>>()
@@ -1076,6 +1099,7 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var repoRemoteDraft by remember { mutableStateOf("") }
     var repoBusy by remember { mutableStateOf(false) }
     var repoError by remember { mutableStateOf<String?>(null) }
+    var failedRepoRemote by remember(core.baseURL, core.token) { mutableStateOf<String?>(null) }
     var divergedMessage by remember { mutableStateOf<String?>(null) }
     var divergedBusy by remember { mutableStateOf(false) }
 
@@ -1115,26 +1139,49 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     }
 
     suspend fun saveRepoRemote(remote: String?) {
+        val normalizedNext = remote?.trim()?.takeIf { it.isNotEmpty() }
+        val needsInit = OrbAdminFormatting.needsLibraryRemoteInit(
+            nextRemote = normalizedNext,
+            activeRepoRemote = OrbJSON.str(repoStatus, "remote"),
+            failedInitRemote = failedRepoRemote
+        )
         repoBusy = true
         repoError = null
         try {
+            val payload = if (needsInit) {
+                mapOf("library_remote" to normalizedNext, "force_reinitialize" to true)
+            } else {
+                mapOf("library_remote" to normalizedNext)
+            }
             val res = OrbJSON.dict(
                 core.request(
                     "/api/settings/library-remote",
                     "PUT",
-                    body = mapOf("library_remote" to remote)
+                    body = payload
                 )
             )
             val libErr = OrbAdminFormatting.libraryRemoteUpdateError(res)
             if (libErr != null) {
+                if (normalizedNext != null) failedRepoRemote = normalizedNext
                 repoError = libErr
                 return
             }
+            if (normalizedNext != null && needsInit && res?.get("library_reinitialized") != true) {
+                val status = core.fetchDict("/api/library/status")
+                if (!OrbAdminFormatting.sameLibraryRemote(OrbJSON.str(status, "remote"), normalizedNext)) {
+                    failedRepoRemote = normalizedNext
+                    repoError = "Library repository was not initialized for this remote. Check the URL and retry."
+                    return
+                }
+                repoStatus = status
+            }
+            failedRepoRemote = null
             repoDialogOpen = false
             load()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
+            if (normalizedNext != null) failedRepoRemote = normalizedNext
             repoError = e.message ?: "Couldn’t update Library repository."
         } finally {
             repoBusy = false
@@ -1191,7 +1238,7 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
             trailing = {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OrbAdminCircleAction(Icons.Default.Link, "Library repository") {
-                        repoRemoteDraft = OrbJSON.str(repoStatus, "remote").orEmpty()
+                        repoRemoteDraft = failedRepoRemote ?: OrbJSON.str(repoStatus, "remote").orEmpty()
                         repoError = null
                         repoDialogOpen = true
                     }
@@ -1257,7 +1304,7 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                             )
                             TextButton(
                                 onClick = {
-                                    repoRemoteDraft = ""
+                                    repoRemoteDraft = failedRepoRemote.orEmpty()
                                     repoError = null
                                     repoDialogOpen = true
                                 }
@@ -1339,6 +1386,7 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
 
     if (repoDialogOpen) {
         val currentRemote = OrbJSON.str(repoStatus, "remote").orEmpty()
+        val retryingFailed = failedRepoRemote != null && OrbAdminFormatting.sameLibraryRemote(repoRemoteDraft, failedRepoRemote)
         AlertDialog(
             onDismissRequest = { if (!repoBusy) repoDialogOpen = false },
             containerColor = OrbStyle.elevated,
@@ -1368,7 +1416,17 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 TextButton(
                     enabled = repoRemoteDraft.isNotBlank() && !repoBusy,
                     onClick = { scope.launch { saveRepoRemote(repoRemoteDraft.trim()) } }
-                ) { Text(if (repoBusy) "Saving…" else "Save") }
+                ) {
+                    Text(
+                        if (repoBusy) {
+                            if (retryingFailed) "Retrying…" else "Saving…"
+                        } else if (retryingFailed) {
+                            "Retry"
+                        } else {
+                            "Save"
+                        }
+                    )
+                }
             },
             dismissButton = {
                 TextButton(enabled = !repoBusy, onClick = { repoDialogOpen = false }) { Text("Cancel") }

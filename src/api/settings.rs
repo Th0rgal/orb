@@ -108,6 +108,9 @@ pub struct UpdateSettingsRequest {
 pub struct UpdateLibraryRemoteRequest {
     /// Git remote URL. Set to null or empty string to clear.
     pub library_remote: Option<String>,
+    /// Force repository reinitialization even if `library_remote` matches the stored setting.
+    #[serde(default)]
+    pub force_reinitialize: bool,
 }
 
 /// Response after updating library remote.
@@ -333,39 +336,73 @@ async fn update_library_remote(
     Json(req): Json<UpdateLibraryRemoteRequest>,
 ) -> Result<Json<UpdateLibraryRemoteResponse>, (StatusCode, String)> {
     // Normalize empty string to None
-    let new_remote = req.library_remote.filter(|s| !s.trim().is_empty());
+    let new_remote = req
+        .library_remote
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
-    // Update the setting
-    let (changed, _previous) = state
-        .settings
-        .set_library_remote(new_remote.clone())
+    let configured_remote = state.settings.get_library_remote().await;
+    let active_remote = state
+        .library
+        .read()
         .await
-        .map_err(internal_error)?;
+        .as_ref()
+        .map(|lib| lib.remote().to_string());
 
-    // If the value actually changed, reinitialize the library
-    let (library_reinitialized, library_error) = if changed {
-        if let Some(ref remote) = new_remote {
-            // Reinitialize with new remote
+    if let Some(ref remote) = new_remote {
+        let needs_reinit = req.force_reinitialize
+            || configured_remote.as_deref() != Some(remote.as_str())
+            || active_remote.as_deref() != Some(remote.as_str());
+        if needs_reinit {
             match reinitialize_library(&state, remote).await {
-                Ok(()) => (true, None),
-                Err(e) => (false, Some(e)),
+                Ok(()) => {
+                    state
+                        .settings
+                        .set_library_remote(new_remote.clone())
+                        .await
+                        .map_err(internal_error)?;
+                    Ok(Json(UpdateLibraryRemoteResponse {
+                        library_remote: new_remote,
+                        library_reinitialized: true,
+                        library_error: None,
+                    }))
+                }
+                Err(e) => Ok(Json(UpdateLibraryRemoteResponse {
+                    library_remote: configured_remote,
+                    library_reinitialized: false,
+                    library_error: Some(e),
+                })),
             }
         } else {
-            // Clear the library
-            *state.library.write().await = None;
-            tracing::info!("Library cleared (remote set to None)");
-            (true, None)
+            Ok(Json(UpdateLibraryRemoteResponse {
+                library_remote: new_remote,
+                library_reinitialized: false,
+                library_error: None,
+            }))
         }
     } else {
-        // No change in value
-        (false, None)
-    };
-
-    Ok(Json(UpdateLibraryRemoteResponse {
-        library_remote: new_remote,
-        library_reinitialized,
-        library_error,
-    }))
+        let (changed, _) = state
+            .settings
+            .set_library_remote(None)
+            .await
+            .map_err(internal_error)?;
+        let had_active = active_remote.is_some();
+        if changed || had_active || req.force_reinitialize {
+            *state.library.write().await = None;
+            tracing::info!("Library cleared (remote set to None)");
+            Ok(Json(UpdateLibraryRemoteResponse {
+                library_remote: None,
+                library_reinitialized: true,
+                library_error: None,
+            }))
+        } else {
+            Ok(Json(UpdateLibraryRemoteResponse {
+                library_remote: None,
+                library_reinitialized: false,
+                library_error: None,
+            }))
+        }
+    }
 }
 
 /// Reinitialize the library with a new remote URL.

@@ -119,10 +119,37 @@ export interface UpdateLibraryRemoteResult {
   library_error?: string;
 }
 
-export function updateLibraryRemote(libraryRemote: string | null): Promise<UpdateLibraryRemoteResult> {
+export function normalizeLibraryRemote(remote?: string | null): string {
+  return (remote ?? "").trim().replace(/\/+$/, "").replace(/\.git$/i, "").toLowerCase();
+}
+
+export function sameLibraryRemote(a?: string | null, b?: string | null): boolean {
+  const na = normalizeLibraryRemote(a);
+  const nb = normalizeLibraryRemote(b);
+  return na.length > 0 && na === nb;
+}
+
+export function needsLibraryRemoteInit(
+  nextRemote: string | null,
+  activeRepoRemote?: string | null,
+  failedInitRemote?: string | null,
+): boolean {
+  if (!nextRemote || !nextRemote.trim()) return false;
+  if (failedInitRemote && sameLibraryRemote(nextRemote, failedInitRemote)) return true;
+  return !sameLibraryRemote(nextRemote, activeRepoRemote);
+}
+
+export function updateLibraryRemote(
+  libraryRemote: string | null,
+  forceReinitialize = false,
+): Promise<UpdateLibraryRemoteResult> {
   return api<UpdateLibraryRemoteResult>("/api/settings/library-remote", {
     method: "PUT",
-    ...json({ library_remote: libraryRemote }),
+    ...json(
+      forceReinitialize
+        ? { library_remote: libraryRemote, force_reinitialize: true }
+        : { library_remote: libraryRemote },
+    ),
   });
 }
 

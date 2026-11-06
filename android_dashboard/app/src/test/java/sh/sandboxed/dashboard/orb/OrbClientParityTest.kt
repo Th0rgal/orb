@@ -180,5 +180,10 @@ class OrbClientParityTest {
                 )
             )
         )
+        assertTrue(OrbAdminFormatting.sameLibraryRemote("git@github.com:Org/Skills.git/", "git@github.com:org/skills"))
+        assertFalse(OrbAdminFormatting.needsLibraryRemoteInit(null, "git@github.com:org/skills.git", null))
+        assertFalse(OrbAdminFormatting.needsLibraryRemoteInit("git@github.com:org/skills.git", "git@github.com:org/skills", null))
+        assertTrue(OrbAdminFormatting.needsLibraryRemoteInit("git@github.com:org/new.git", "git@github.com:org/old.git", null))
+        assertTrue(OrbAdminFormatting.needsLibraryRemoteInit("git@github.com:org/new.git", "git@github.com:org/new.git", "git@github.com:org/new.git"))
     }
 }
