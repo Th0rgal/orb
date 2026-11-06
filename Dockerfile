@@ -9,9 +9,23 @@
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Stage 1: Rust builder
+# Stage 1: Rust + Lean 4 builder
 # ---------------------------------------------------------------------------
 FROM rust:1.91-bookworm AS rust-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libssl-dev zstd ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && LEAN_ARCHIVE="/tmp/lean-4.35.0-linux.tar.zst" \
+    && LEAN_SHA256="7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d" \
+    && curl --retry 5 --retry-all-errors -fsSL \
+       "https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-linux.tar.zst" \
+       -o "$LEAN_ARCHIVE" \
+    && echo "${LEAN_SHA256}  ${LEAN_ARCHIVE}" | sha256sum -c - \
+    && mkdir -p /opt/lean-4.35.0 \
+    && tar --zstd -xf "$LEAN_ARCHIVE" --strip-components=1 -C /opt/lean-4.35.0 \
+    && rm -f "$LEAN_ARCHIVE"
+ENV PATH="/opt/lean-4.35.0/bin:${PATH}"
 
 WORKDIR /build
 
@@ -25,12 +39,14 @@ COPY shared/ shared/
 COPY catalog/ catalog/
 COPY scripts/ scripts/
 
-ARG BINARIES="sandboxed-sh desktop-mcp workspace-mcp automation-manager-mcp sandboxed-mcp"
+ARG RUST_BINARIES="sandboxed-sh"
+ARG LEAN_BINARIES="desktop-mcp workspace-mcp automation-manager-mcp sandboxed-mcp"
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --release --locked $(printf -- '--bin %s ' $BINARIES) \
+    cargo build --release --locked $(printf -- '--bin %s ' $RUST_BINARIES) \
+    && ./scripts/build_orb_bins.sh --out-dir /out $(printf -- '--only %s ' $LEAN_BINARIES) \
     && mkdir -p /out \
-    && for bin in $BINARIES; do cp "target/release/$bin" /out/; done
+    && for bin in $RUST_BINARIES; do cp "target/release/$bin" /out/; done
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime (Ubuntu 24.04 for native debootstrap support)

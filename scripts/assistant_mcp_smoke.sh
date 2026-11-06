@@ -73,8 +73,8 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 if [[ "$MCP_COMMAND" == "$ROOT_DIR/target/debug/sandboxed-mcp" && ! -x "$MCP_COMMAND" ]]; then
-  echo "Building sandboxed-mcp debug binary..."
-  cargo build --bin sandboxed-mcp --manifest-path "$ROOT_DIR/Cargo.toml"
+  echo "Building sandboxed-mcp native Lean companion..."
+  "$ROOT_DIR/scripts/build_orb_bins.sh" --ensure-lean --out-dir "$ROOT_DIR/target/debug" --only sandboxed-mcp
 fi
 
 if [[ ! -x "$MCP_COMMAND" && -z "$(command -v "$MCP_COMMAND" 2>/dev/null)" ]]; then

@@ -11,4 +11,4 @@ package «lean-mesh» where
 @[default_target]
 lean_lib «LeanMesh» where
   globs := #[.submodules `LeanMesh]
-  precompileModules := true
+  precompileModules := false

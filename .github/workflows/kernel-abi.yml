@@ -201,6 +201,19 @@ jobs:
           (cd lean/OrbNetLeaf && lake build -- -DwarningAsError=true && ./.lake/build/bin/orb-net-leaf-test)
           elab_syms=$(nm -u lean/OrbNetLeaf/.lake/build/bin/orb-net-leaf-test | grep -c lean_elab || true)
           test "$elab_syms" -eq 0
+      - name: Build and self-test Wave 1 OrbBin companion binaries (<= 220 C LOC, zero lean_elab)
+        run: |
+          set -euo pipefail
+          c_lines=$(wc -l < lean/OrbBin/c/orb_bin_posix.c)
+          echo "orb_bin_posix.c LOC: $c_lines"
+          test "$c_lines" -le 220
+          ./scripts/build_orb_bins.sh --out-dir target/debug
+          (cd lean/OrbBin && lake build orb-bin-test -- -DwarningAsError=true && ./.lake/build/bin/orb-bin-test)
+          for bin in fido-agent-proxy orb-privd orb-sudo lean-mesh palomactl sandboxed-mcp workspace-mcp desktop-mcp automation-manager-mcp; do
+            test -x "target/debug/$bin"
+            elab_syms=$(nm -u "target/debug/$bin" | grep -c lean_elab || true)
+            test "$elab_syms" -eq 0
+          done
       - name: Fresh turbo-lean tightness and horizontal-packing gate
         env:
           TURBO_LEAN_NO_AUDIT_CACHE: "1"
@@ -222,6 +235,10 @@ jobs:
           python3 scripts/check_spec_audit.py audit-results/orb-net-leaf-spec-audit.json
           .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbNetLeaf/OrbNetLeaf/MutantSuite.lean > audit-results/orb-net-leaf-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-net-leaf-mutant-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbBin/OrbBin/Spec.lean > audit-results/orb-bin-spec-audit.json
+          python3 scripts/check_spec_audit.py audit-results/orb-bin-spec-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbBin/OrbBin/MutantSuite.lean > audit-results/orb-bin-mutant-audit.json
+          python3 scripts/check_spec_audit.py audit-results/orb-bin-mutant-audit.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
