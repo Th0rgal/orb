@@ -14,6 +14,31 @@ enum OrbResourcesModel {
         var id: String { rawValue }
     }
 
+    enum HeaderTier: Equatable {
+        case fullSingleRow
+        case compactSingleRow
+        case twoClusterWrap
+        case individualWrap
+    }
+
+    static func chooseHeaderTier(
+        availableWidthPx: Int,
+        minGapPx: Int,
+        leftWidthPx: Int,
+        rightFullWidthPx: Int,
+        rightCompactWidthPx: Int
+    ) -> HeaderTier {
+        if leftWidthPx + minGapPx + rightFullWidthPx <= availableWidthPx {
+            return .fullSingleRow
+        } else if leftWidthPx + minGapPx + rightCompactWidthPx <= availableWidthPx {
+            return .compactSingleRow
+        } else if max(leftWidthPx, rightCompactWidthPx) <= availableWidthPx {
+            return .twoClusterWrap
+        } else {
+            return .individualWrap
+        }
+    }
+
     struct SankeyInputNode: Equatable {
         var id: String
         var column: Int
@@ -684,6 +709,9 @@ struct OrbResourcesView: View {
         }
     }
 
+    @ScaledMetric(relativeTo: .caption2) private var pillFontSize: CGFloat = 11.5
+    @ScaledMetric(relativeTo: .subheadline) private var navTitleFontSize: CGFloat = 15
+
     private var timelineMenuPill: some View {
         Menu {
             if selectedMissionId != nil {
@@ -725,14 +753,15 @@ struct OrbResourcesView: View {
         } label: {
             HStack(spacing: 3) {
                 Text(activeTimelineShortLabel)
-                    .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                    .font(.system(size: min(17, pillFontSize), weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8.5, weight: .bold))
                     .foregroundStyle(OrbStyle.textSecondary)
             }
             .padding(.horizontal, 8)
-            .frame(height: 28)
+            .padding(.vertical, 3)
+            .frame(minHeight: 28)
             .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(OrbStyle.border))
         }
@@ -753,7 +782,7 @@ struct OrbResourcesView: View {
         return range
     }
 
-    @ViewBuilder private var headerBar: some View {
+    @ViewBuilder private var headerLeftCluster: some View {
         HStack(spacing: 5) {
             if selectedMissionId != nil {
                 Button {
@@ -765,7 +794,7 @@ struct OrbResourcesView: View {
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(OrbStyle.textSecondary)
                         Text("Fleet")
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(.system(size: min(20, navTitleFontSize - 1), weight: .semibold))
                             .foregroundStyle(.white)
                             .lineLimit(1)
                     }
@@ -791,7 +820,7 @@ struct OrbResourcesView: View {
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(OrbStyle.textSecondary)
                         Text("Resources")
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(.system(size: min(21, navTitleFontSize), weight: .semibold))
                             .foregroundStyle(.white)
                             .lineLimit(1)
                     }
@@ -803,19 +832,35 @@ struct OrbResourcesView: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .accessibilityIdentifier("resources.back")
             }
+        }
+    }
 
-            Spacer(minLength: 4)
-
-            ViewThatFits(in: .horizontal) {
+    @ViewBuilder private var headerBar: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 5) {
+                headerLeftCluster
+                Spacer(minLength: 4)
+                lensSegmentGroup(compact: false)
+                unitSegmentGroup
+                timelineMenuPill
+            }
+            HStack(spacing: 5) {
+                headerLeftCluster
+                Spacer(minLength: 4)
+                lensSegmentGroup(compact: true)
+                unitSegmentGroup
+                timelineMenuPill
+            }
+            VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 5) {
-                    lensSegmentGroup(compact: false)
-                    unitSegmentGroup
+                    headerLeftCluster
+                    Spacer(minLength: 4)
                     timelineMenuPill
                 }
                 HStack(spacing: 5) {
+                    Spacer(minLength: 0)
                     lensSegmentGroup(compact: true)
                     unitSegmentGroup
-                    timelineMenuPill
                 }
             }
         }
@@ -855,11 +900,12 @@ struct OrbResourcesView: View {
                     selection.wrappedValue = item.0
                 } label: {
                     Text(item.1)
-                        .font(.system(size: 11.5, weight: active ? .semibold : .medium))
+                        .font(.system(size: min(17, pillFontSize), weight: active ? .semibold : .medium))
                         .foregroundStyle(active ? Color.white : OrbStyle.textSecondary)
                         .lineLimit(1)
                         .padding(.horizontal, 8)
-                        .frame(height: 24)
+                        .padding(.vertical, 2)
+                        .frame(minHeight: 24)
                         .background(
                             active ? Color.white.opacity(0.12) : Color.clear,
                             in: RoundedRectangle(cornerRadius: 6, style: .continuous)

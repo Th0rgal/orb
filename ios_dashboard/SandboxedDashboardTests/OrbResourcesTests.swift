@@ -151,4 +151,47 @@ final class OrbResourcesTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(curr.labelY - currHalf, prev.labelY + prevHalf + 3.0 - 1e-6)
         }
     }
+
+    func testChooseHeaderTierAdaptsForWidthAndFontScale() {
+        XCTAssertEqual(
+            OrbResourcesModel.chooseHeaderTier(
+                availableWidthPx: 381,
+                minGapPx: 6,
+                leftWidthPx: 100,
+                rightFullWidthPx: 255,
+                rightCompactWidthPx: 190
+            ),
+            .fullSingleRow
+        )
+        XCTAssertEqual(
+            OrbResourcesModel.chooseHeaderTier(
+                availableWidthPx: 381,
+                minGapPx: 6,
+                leftWidthPx: 155,
+                rightFullWidthPx: 255,
+                rightCompactWidthPx: 190
+            ),
+            .compactSingleRow
+        )
+        XCTAssertEqual(
+            OrbResourcesModel.chooseHeaderTier(
+                availableWidthPx: 381,
+                minGapPx: 6,
+                leftWidthPx: 210,
+                rightFullWidthPx: 340,
+                rightCompactWidthPx: 265
+            ),
+            .twoClusterWrap
+        )
+        XCTAssertEqual(
+            OrbResourcesModel.chooseHeaderTier(
+                availableWidthPx: 250,
+                minGapPx: 6,
+                leftWidthPx: 210,
+                rightFullWidthPx: 340,
+                rightCompactWidthPx: 265
+            ),
+            .individualWrap
+        )
+    }
 }

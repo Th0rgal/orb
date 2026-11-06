@@ -8,11 +8,14 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -52,11 +55,13 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.layout.SubcomposeLayout
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -90,6 +95,26 @@ object OrbResourcesModel {
         companion object {
             fun parse(raw: String): Metric = if (raw == "usd") Usd else Raw
         }
+    }
+
+    enum class HeaderTier {
+        FullSingleRow,
+        CompactSingleRow,
+        TwoClusterWrap,
+        IndividualWrap,
+    }
+
+    fun chooseHeaderTier(
+        availableWidthPx: Int,
+        minGapPx: Int,
+        leftWidthPx: Int,
+        rightFullWidthPx: Int,
+        rightCompactWidthPx: Int,
+    ): HeaderTier = when {
+        leftWidthPx + minGapPx + rightFullWidthPx <= availableWidthPx -> HeaderTier.FullSingleRow
+        leftWidthPx + minGapPx + rightCompactWidthPx <= availableWidthPx -> HeaderTier.CompactSingleRow
+        max(leftWidthPx, rightCompactWidthPx) <= availableWidthPx -> HeaderTier.TwoClusterWrap
+        else -> HeaderTier.IndividualWrap
     }
 
     data class SankeyInputNode(
@@ -731,7 +756,6 @@ fun OrbResourcesSettingsPage(
         val ratio = if (selectedMissionId != null) 0.54f else 0.48f
         max(330, min(460, (config.screenHeightDp * ratio).roundToInt())).dp
     }
-    val useFullLensLabels = selectedMissionId == null && config.screenWidthDp >= 375
     var timelineMenuOpen by remember { mutableStateOf(false) }
 
     val activeTimelineShort = if (selectedMissionId != null) {
@@ -742,103 +766,187 @@ fun OrbResourcesSettingsPage(
         range
     }
 
+    val backButton: @Composable () -> Unit = {
+        Row(
+            modifier = Modifier
+                .heightIn(min = 28.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .orbPressClickable {
+                    if (selectedMissionId != null) {
+                        selectedMissionId = null
+                        detail = null
+                    } else {
+                        onBack()
+                    }
+                }
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                contentDescription = "Back",
+                tint = OrbStyle.textSecondary,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                text = if (selectedMissionId != null) "Fleet" else "Resources",
+                color = Color.White,
+                fontSize = if (selectedMissionId != null) 14.sp else 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
+        }
+    }
+
+    val submodeGroup: @Composable () -> Unit = {
+        CompactPillGroup(
+            options = listOf("flow" to "Flow", "dag" to "DAG"),
+            selected = submode,
+            onSelect = { submode = it },
+        )
+    }
+
+    val lensGroup: @Composable (Boolean) -> Unit = { fullLabels ->
+        CompactPillGroup(
+            options = listOf(
+                OrbResourcesModel.Lens.Inference to if (fullLabels) "Inference" else "Inf",
+                OrbResourcesModel.Lens.Compute to if (fullLabels) "Compute" else "CPU",
+            ),
+            selected = lens,
+            onSelect = { lens = it },
+        )
+    }
+
+    val metricGroup: @Composable () -> Unit = {
+        CompactPillGroup(
+            options = listOf(
+                OrbResourcesModel.Metric.Raw to if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "tok",
+                OrbResourcesModel.Metric.Usd to "$",
+            ),
+            selected = metric,
+            onSelect = { metric = it },
+        )
+    }
+
+    val timelinePill: @Composable () -> Unit = {
+        Row(
+            modifier = Modifier
+                .heightIn(min = 28.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(OrbStyle.surface)
+                .border(1.dp, OrbStyle.border, RoundedCornerShape(8.dp))
+                .orbPressClickable { timelineMenuOpen = true }
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = activeTimelineShort,
+                color = Color.White,
+                fontSize = 11.5.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowDown,
+                contentDescription = "Timeline window",
+                tint = OrbStyle.textSecondary,
+                modifier = Modifier.size(13.dp),
+            )
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(OrbStyle.background),
     ) {
-        // Unified single-row header: left back/title (+ Flow|DAG in mission mode), right Lens + Unit + Timeline
-        Row(
+        // Measured adaptive header: single row (full or compact lens labels) when controls fit,
+        // wrapping cleanly via FlowRow at large font scales or narrow widths so controls never clip.
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 6.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
         ) {
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .orbPressClickable {
+            AdaptiveResourcesHeader(
+                leftCluster = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        backButton()
                         if (selectedMissionId != null) {
-                            selectedMissionId = null
-                            detail = null
-                        } else {
-                            onBack()
+                            submodeGroup()
                         }
                     }
-                    .padding(horizontal = 4.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
-                    contentDescription = "Back",
-                    tint = OrbStyle.textSecondary,
-                    modifier = Modifier.size(18.dp),
-                )
-                Text(
-                    text = if (selectedMissionId != null) "Fleet" else "Resources",
-                    color = Color.White,
-                    fontSize = if (selectedMissionId != null) 14.sp else 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                )
-            }
-
-            if (selectedMissionId != null) {
-                CompactPillGroup(
-                    options = listOf("flow" to "Flow", "dag" to "DAG"),
-                    selected = submode,
-                    onSelect = { submode = it },
-                )
-            }
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            CompactPillGroup(
-                options = listOf(
-                    OrbResourcesModel.Lens.Inference to if (useFullLensLabels) "Inference" else "Inf",
-                    OrbResourcesModel.Lens.Compute to if (useFullLensLabels) "Compute" else "CPU",
-                ),
-                selected = lens,
-                onSelect = { lens = it },
+                },
+                rightFullCluster = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        lensGroup(true)
+                        metricGroup()
+                        timelinePill()
+                    }
+                },
+                rightCompactCluster = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        lensGroup(false)
+                        metricGroup()
+                        timelinePill()
+                    }
+                },
+                wrappedContent = {
+                    @OptIn(ExperimentalLayoutApi::class)
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            backButton()
+                            if (selectedMissionId != null) {
+                                submodeGroup()
+                            }
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            lensGroup(false)
+                            metricGroup()
+                            timelinePill()
+                        }
+                    }
+                },
+                ultraNarrowWrappedContent = {
+                    @OptIn(ExperimentalLayoutApi::class)
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        backButton()
+                        if (selectedMissionId != null) {
+                            submodeGroup()
+                        }
+                        lensGroup(false)
+                        metricGroup()
+                        timelinePill()
+                    }
+                },
             )
-            CompactPillGroup(
-                options = listOf(
-                    OrbResourcesModel.Metric.Raw to if (lens == OrbResourcesModel.Lens.Compute) "vCPU" else "tok",
-                    OrbResourcesModel.Metric.Usd to "$",
-                ),
-                selected = metric,
-                onSelect = { metric = it },
-            )
 
-            Box {
-                Row(
-                    modifier = Modifier
-                        .height(28.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(OrbStyle.surface)
-                        .border(1.dp, OrbStyle.border, RoundedCornerShape(8.dp))
-                        .orbPressClickable { timelineMenuOpen = true }
-                        .padding(horizontal = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    Text(
-                        text = activeTimelineShort,
-                        color = Color.White,
-                        fontSize = 11.5.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                    )
-                    Icon(
-                        imageVector = Icons.Default.KeyboardArrowDown,
-                        contentDescription = "Timeline window",
-                        tint = OrbStyle.textSecondary,
-                        modifier = Modifier.size(13.dp),
-                    )
-                }
+            Box(modifier = Modifier.align(Alignment.BottomEnd)) {
                 DropdownMenu(
                     expanded = timelineMenuOpen,
                     onDismissRequest = { timelineMenuOpen = false },
@@ -973,6 +1081,70 @@ fun OrbResourcesSettingsPage(
 }
 
 @Composable
+private fun AdaptiveResourcesHeader(
+    leftCluster: @Composable () -> Unit,
+    rightFullCluster: @Composable () -> Unit,
+    rightCompactCluster: @Composable () -> Unit,
+    wrappedContent: @Composable () -> Unit,
+    ultraNarrowWrappedContent: @Composable () -> Unit,
+) {
+    SubcomposeLayout(modifier = Modifier.fillMaxWidth()) { constraints ->
+        val unbounded = Constraints()
+        val leftPlaceable = subcompose("left", leftCluster).first().measure(unbounded)
+        val rightFullPlaceable = subcompose("rightFull", rightFullCluster).first().measure(unbounded)
+        val rightCompactPlaceable = subcompose("rightCompact", rightCompactCluster).first().measure(unbounded)
+        val minGapPx = 6.dp.roundToPx()
+
+        val tier = OrbResourcesModel.chooseHeaderTier(
+            availableWidthPx = constraints.maxWidth,
+            minGapPx = minGapPx,
+            leftWidthPx = leftPlaceable.width,
+            rightFullWidthPx = rightFullPlaceable.width,
+            rightCompactWidthPx = rightCompactPlaceable.width,
+        )
+
+        when (tier) {
+            OrbResourcesModel.HeaderTier.FullSingleRow -> {
+                val h = max(leftPlaceable.height, rightFullPlaceable.height)
+                layout(constraints.maxWidth, h) {
+                    leftPlaceable.placeRelative(0, (h - leftPlaceable.height) / 2)
+                    rightFullPlaceable.placeRelative(
+                        constraints.maxWidth - rightFullPlaceable.width,
+                        (h - rightFullPlaceable.height) / 2,
+                    )
+                }
+            }
+            OrbResourcesModel.HeaderTier.CompactSingleRow -> {
+                val h = max(leftPlaceable.height, rightCompactPlaceable.height)
+                layout(constraints.maxWidth, h) {
+                    leftPlaceable.placeRelative(0, (h - leftPlaceable.height) / 2)
+                    rightCompactPlaceable.placeRelative(
+                        constraints.maxWidth - rightCompactPlaceable.width,
+                        (h - rightCompactPlaceable.height) / 2,
+                    )
+                }
+            }
+            OrbResourcesModel.HeaderTier.TwoClusterWrap -> {
+                val wrapped = subcompose("wrapped", wrappedContent).first().measure(
+                    constraints.copy(minWidth = constraints.maxWidth, minHeight = 0),
+                )
+                layout(constraints.maxWidth, wrapped.height) {
+                    wrapped.placeRelative(0, 0)
+                }
+            }
+            OrbResourcesModel.HeaderTier.IndividualWrap -> {
+                val ultra = subcompose("ultra", ultraNarrowWrappedContent).first().measure(
+                    constraints.copy(minWidth = constraints.maxWidth, minHeight = 0),
+                )
+                layout(constraints.maxWidth, ultra.height) {
+                    ultra.placeRelative(0, 0)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun <T> CompactPillGroup(
     options: List<Pair<T, String>>,
     selected: T,
@@ -981,7 +1153,7 @@ private fun <T> CompactPillGroup(
 ) {
     Row(
         modifier = modifier
-            .height(28.dp)
+            .heightIn(min = 28.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(OrbStyle.surface)
             .border(1.dp, OrbStyle.border, RoundedCornerShape(8.dp))
@@ -993,11 +1165,11 @@ private fun <T> CompactPillGroup(
             val active = value == selected
             Box(
                 modifier = Modifier
-                    .height(24.dp)
+                    .heightIn(min = 24.dp)
                     .clip(RoundedCornerShape(6.dp))
                     .background(if (active) Color.White.copy(alpha = 0.12f) else Color.Transparent)
                     .orbPressClickable { onSelect(value) }
-                    .padding(horizontal = 8.dp),
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(

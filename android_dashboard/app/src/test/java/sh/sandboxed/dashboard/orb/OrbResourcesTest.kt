@@ -182,4 +182,48 @@ class OrbResourcesTest {
             )
         }
     }
+
+    @Test
+    fun `chooseHeaderTier adapts from full single row to compact and wrapped at large font scales`() {
+        assertEquals(
+            OrbResourcesModel.HeaderTier.FullSingleRow,
+            OrbResourcesModel.chooseHeaderTier(
+                availableWidthPx = 1080,
+                minGapPx = 18,
+                leftWidthPx = 300,
+                rightFullWidthPx = 720,
+                rightCompactWidthPx = 540,
+            ),
+        )
+        assertEquals(
+            OrbResourcesModel.HeaderTier.CompactSingleRow,
+            OrbResourcesModel.chooseHeaderTier(
+                availableWidthPx = 980,
+                minGapPx = 18,
+                leftWidthPx = 410,
+                rightFullWidthPx = 720,
+                rightCompactWidthPx = 540,
+            ),
+        )
+        assertEquals(
+            OrbResourcesModel.HeaderTier.TwoClusterWrap,
+            OrbResourcesModel.chooseHeaderTier(
+                availableWidthPx = 980,
+                minGapPx = 18,
+                leftWidthPx = 580,
+                rightFullWidthPx = 960,
+                rightCompactWidthPx = 760,
+            ),
+        )
+        assertEquals(
+            OrbResourcesModel.HeaderTier.IndividualWrap,
+            OrbResourcesModel.chooseHeaderTier(
+                availableWidthPx = 720,
+                minGapPx = 18,
+                leftWidthPx = 580,
+                rightFullWidthPx = 980,
+                rightCompactWidthPx = 780,
+            ),
+        )
+    }
 }
