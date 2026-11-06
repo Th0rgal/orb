@@ -37,7 +37,7 @@ import {
   sidebarShortcutLabel,
 } from "./keyboardShortcuts";
 import {preferSparkAdministration} from "./machineDestinations";
-import { CloudAgentPage } from "./CloudAgents";
+import { LazyCloudAgentPage as CloudAgentPage } from "./cloudAgentsLoader";
 import { monitorSoftware } from "./softwareInventory";
 import {startLocalQueueWorker} from "./localMessageQueue";
 const BtwSettings = lazy(() => import("./btwSettings").then(module => ({ default: module.BtwSettings })));
@@ -1597,11 +1597,13 @@ export default function App() {
               />
             </Match>
             <Match when={selected() === "cloud-agent"}>
-            <CloudAgentPage project={effectiveNewProject() ?? ""} path={newFolder()?.project === effectiveNewProject() ? newFolder()?.path : undefined}
-              projects={projectChoices(liveProjects())} onProject={id => { setNewProject(id); setNewFolder(null); }}
-              onCreateProject={isConnected() ? () => { setProjectCreationAnchor(undefined); setNewProjectDraft(true); } : undefined}
-              onPending={seed => setCloudLaunchTitle(seed?.prompt.trim() || null)}
-              onCreated={m => { setCloudLaunchTitle(null); setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }} />
+            <Suspense>
+              <CloudAgentPage project={effectiveNewProject() ?? ""} path={newFolder()?.project === effectiveNewProject() ? newFolder()?.path : undefined}
+                projects={projectChoices(liveProjects())} onProject={id => { setNewProject(id); setNewFolder(null); }}
+                onCreateProject={isConnected() ? () => { setProjectCreationAnchor(undefined); setNewProjectDraft(true); } : undefined}
+                onPending={seed => setCloudLaunchTitle(seed?.prompt.trim() || null)}
+                onCreated={m => { setCloudLaunchTitle(null); setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }} />
+            </Suspense>
           </Match>
           <Match when={skillPageName(selected())}>
             {(sk) => <Show when={sk().name} keyed>{(name) => <SkillPage name={name} initialView={sk().history ? "history" : "edit"} onBack={() => open("skills-settings")} onOpenPage={open} />}</Show>}

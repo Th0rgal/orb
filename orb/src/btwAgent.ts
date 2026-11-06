@@ -915,30 +915,51 @@ export function updateWarmBtwHistory(
  reconcileWarmBtwFollows();
 }
 
+function setBounded<K, V>(map: Map<K, V>, key: K, val: V, max: number): void {
+ map.set(key, val);
+ while (map.size > max) {
+  const oldest = map.keys().next().value;
+  if (oldest === undefined) break;
+  map.delete(oldest);
+ }
+}
+
+function makeBtwMissionMeta(
+ id: string,
+ parent: string,
+ prev: Mission | undefined,
+ session: BtwSession | undefined,
+ status: string,
+): Mission {
+ const now = new Date().toISOString();
+ return {
+  ...(prev?.id === id
+   ? prev
+   : {
+      id,
+      title: null,
+      history: [],
+      backend: session?.harness || "opencode",
+      model_override: session?.model || "builtin/smart",
+      tags: [`btw-parent:${parent}`, ...(session?.local ? ["placement:client"] : [])],
+      created_at: session?.startedAt || now,
+      updated_at: now,
+     }),
+  status,
+  ...(session ? { backend: session.harness, model_override: session.model } : {}),
+  updated_at: now,
+ };
+}
+
 function noteWarmBtwSessionStarted(parent: string, session: BtwSession): void {
  const ver = connectionVersion();
  const k = `${ver}:${parent}`;
  const existing = warmBtwByParent.get(k);
+ const status = session.active ? "active" : "completed";
  if (existing) {
-  if (existing.latest && existing.latest !== session.id) {
-   existing.baseHistory = [...existing.history];
-  }
+  if (existing.latest && existing.latest !== session.id) existing.baseHistory = [...existing.history];
   existing.latest = session.id;
-  existing.latestMission = {
-   ...(existing.latestMission?.id === session.id
-    ? existing.latestMission
-    : {
-       id: session.id,
-       title: null,
-       history: [],
-       created_at: session.startedAt || new Date().toISOString(),
-       updated_at: new Date().toISOString(),
-      }),
-   status: session.active ? "active" : "completed",
-   backend: session.harness,
-   model_override: session.model,
-   tags: [`btw-parent:${parent}`, ...(session.local ? ["placement:client"] : [])],
-  };
+  existing.latestMission = makeBtwMissionMeta(session.id, parent, existing.latestMission, session, status);
   if (session.active) existing.activeSession = session;
   existing.dirty = true;
  } else {
@@ -948,17 +969,7 @@ function noteWarmBtwSessionStarted(parent: string, session: BtwSession): void {
    history: [],
    activeSession: session.active ? session : undefined,
    latest: session.id,
-   latestMission: {
-    id: session.id,
-    status: session.active ? "active" : "completed",
-    title: null,
-    history: [],
-    backend: session.harness,
-    model_override: session.model,
-    tags: [`btw-parent:${parent}`, ...(session.local ? ["placement:client"] : [])],
-    created_at: session.startedAt || new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-   },
+   latestMission: makeBtwMissionMeta(session.id, parent, undefined, session, status),
    baseHistory: [],
    caughtUp: false,
    dirty: true,
@@ -976,10 +987,7 @@ function recordWarmBtwTurnCompleted(
  const existing = warmBtwByParent.get(warmBtwKey(parent));
  if (!existing) return;
  const { sortAt: _sortAt, ...cleanTurn } = turn;
- const alreadyPresent = existing.history.some(
-  row => row.question.trim() === cleanTurn.question.trim() && row.answer.trim() === cleanTurn.answer.trim(),
- );
- if (!alreadyPresent) {
+ if (!existing.history.some(r => r.question.trim() === cleanTurn.question.trim() && r.answer.trim() === cleanTurn.answer.trim())) {
   existing.history = [...existing.history, cleanTurn].slice(-BTW_HISTORY_LIMIT);
  }
  existing.activeSession = nextActive;
@@ -1011,12 +1019,7 @@ function reduceLiveBtwStreamEvents(
  let known = liveThreadEventCache.get(cacheKey);
  if (!known) {
   known = new Map<number, StoredEvent>();
-  liveThreadEventCache.set(cacheKey, known);
-  while (liveThreadEventCache.size > 64) {
-   const oldest = liveThreadEventCache.keys().next().value;
-   if (oldest === undefined) break;
-   liveThreadEventCache.delete(oldest);
-  }
+  setBounded(liveThreadEventCache, cacheKey, known, 64);
  }
 
  let relevant = false;
@@ -1034,7 +1037,7 @@ function reduceLiveBtwStreamEvents(
    let prevDeltaSeq: number | undefined;
    let prevDeltaContent = "";
    for (const [seq, row] of known) {
-    if (row.event_type === "text_delta") {
+    if (row.event_type === "text_delta" && row.event_id === "text_delta_latest") {
      prevDeltaSeq = seq;
      prevDeltaContent = row.content;
     }
@@ -1075,13 +1078,17 @@ function reduceLiveBtwStreamEvents(
      : canonical
        ? "assistant_message_canonical"
        : "assistant_message";
-   const content = typeof ev.data.content === "string" ? ev.data.content : "";
-   if (eventType !== "user_message" && !content.trim()) continue;
-   if (ev.data.queued !== true) {
-    for (const [kSeq, row] of [...known]) {
-     if (row.event_type === "text_delta") known.delete(kSeq);
+   const rawContent = typeof ev.data.content === "string" ? ev.data.content : "";
+   if (eventType !== "user_message" && !rawContent.trim()) continue;
+   let liveDeltaContent: string | undefined;
+   for (const [kSeq, row] of [...known]) {
+    if (row.event_type === "text_delta" && row.event_id === "text_delta_latest") {
+     liveDeltaContent = row.content;
+     if (ev.data.queued !== true) known.delete(kSeq);
     }
    }
+   const content =
+    eventType === "assistant_message" ? repairedFinal(rawContent, liveDeltaContent) : rawContent;
    known.set(seq, {
     id: ev.storedId ?? seq,
     sequence: seq,
@@ -1108,29 +1115,20 @@ function reduceLiveBtwStreamEvents(
  if (!relevant) return;
 
  const existingSession = btwSession(entry.parent);
- const missionMeta: Mission = {
-  ...(entry.latestMission?.id === childMissionId
-   ? entry.latestMission
-   : {
-      id: childMissionId,
-      status: existingSession?.id === childMissionId && existingSession.active ? "active" : "completed",
-      title: null,
-      history: [],
-      backend: existingSession?.harness || "opencode",
-      model_override: existingSession?.model || "builtin/smart",
-      tags: [`btw-parent:${entry.parent}`, ...(existingSession?.local ? ["placement:client"] : [])],
-      created_at: existingSession?.startedAt || new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-     }),
-  ...(statusChangedTo ? { status: statusChangedTo } : {}),
-  updated_at: new Date().toISOString(),
- };
+ const fallbackStatus =
+  existingSession?.id === childMissionId && existingSession.active ? "active" : "completed";
+ const missionMeta = makeBtwMissionMeta(
+  childMissionId,
+  entry.parent,
+  entry.latestMission,
+  existingSession?.id === childMissionId ? existingSession : undefined,
+  statusChangedTo ?? entry.latestMission?.status ?? fallbackStatus,
+ );
  entry.latestMission = missionMeta;
  entry.latest = childMissionId;
 
  const events = [...known.values()].sort((a, b) => a.sequence - b.sequence);
  if (!events.some(e => e.event_type === "user_message" && !isQueuedUserEvent(e))) {
-  // Missing initial user_message (e.g. cold entry seeded mid-turn): reconcile once via HTTP.
   if (statusChangedTo && !ACTIVE.includes(statusChangedTo) && existingSession?.id === childMissionId && existingSession.active) {
    const cleared: BtwSession = { ...existingSession, active: false };
    delete cleared.startedAt;
@@ -1145,15 +1143,27 @@ function reduceLiveBtwStreamEvents(
  const live = ACTIVE.includes(missionMeta.status);
  if (!live) {
   const stamp = `${btwActivity(missionMeta)}\u0000${missionMeta.status}`;
-  terminalThreadCache.set(cacheKey, { stamp, ...parsed });
+  setBounded(terminalThreadCache, cacheKey, { stamp, ...parsed }, 256);
  } else {
   terminalThreadCache.delete(cacheKey);
  }
 
- const base = entry.baseHistory ?? entry.history.filter(row => !row.id?.startsWith(`btw:${childMissionId}:`));
- entry.baseHistory = base;
- const childTurns: SideExchange[] = parsed.turns.map(({ sortAt: _sortAt, ...turn }) => turn);
- entry.history = [...base, ...childTurns].slice(-BTW_HISTORY_LIMIT);
+ const childPrefix = `btw:${childMissionId}:`;
+ const priorById = new Map<string, SideExchange>();
+ for (const row of entry.history) {
+  if (row.id) priorById.set(row.id, row);
+ }
+ const childTurns: SideExchange[] = parsed.turns.map(({ sortAt: _sortAt, ...turn }) => {
+  const prev = turn.id ? priorById.get(turn.id) : undefined;
+  return prev && prev.answer.length > turn.answer.length && prev.answer.endsWith(turn.answer)
+   ? { ...turn, answer: prev.answer, ...(prev.narration ? { narration: prev.narration } : {}) }
+   : turn;
+ });
+ const childTurnIds = new Set(childTurns.map(t => t.id));
+ const preserved = entry.history.filter(
+  row => !row.id?.startsWith(childPrefix) || !childTurnIds.has(row.id),
+ );
+ entry.history = [...preserved, ...childTurns].slice(-BTW_HISTORY_LIMIT);
  entry.activeSession = parsed.active;
  if (entry.caughtUp && !pendingDirtyBtwParents.has(`${ver}:${entry.parent}`)) {
   entry.dirty = false;
@@ -1557,12 +1567,7 @@ export async function reconcileBtwServerHistory(
       for (const ev of await getMissionEvents(m.id, { view: 'history', types: BTW_EVENT_TYPES })) known.set(ev.sequence, ev);
      }
      events = [...known.values()].sort((a, b) => a.sequence - b.sequence);
-     liveThreadEventCache.set(cacheKey, known);
-     while (liveThreadEventCache.size > 64) {
-      const oldest = liveThreadEventCache.keys().next().value;
-      if (oldest === undefined) break;
-      liveThreadEventCache.delete(oldest);
-     }
+     setBounded(liveThreadEventCache, cacheKey, known, 64);
     } catch {
      authoritative = false;
      continue;
@@ -1571,12 +1576,7 @@ export async function reconcileBtwServerHistory(
     const parsed = parseBtwThread(m, events);
     byId.set(m.id, parsed);
     if (!live) {
-     terminalThreadCache.set(cacheKey, { stamp, ...parsed });
-     while (terminalThreadCache.size > 256) {
-      const oldest = terminalThreadCache.keys().next().value;
-      if (oldest === undefined) break;
-      terminalThreadCache.delete(oldest);
-     }
+     setBounded(terminalThreadCache, cacheKey, { stamp, ...parsed }, 256);
     }
    }
   }),

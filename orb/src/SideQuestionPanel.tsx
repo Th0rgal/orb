@@ -240,14 +240,11 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   try{if('reconcileBtwServerHistory' in btwMod)reconcileServer=btwMod.reconcileBtwServerHistory;}catch{}
   const hasReconcile=typeof reconcileServer==='function';
   let agent=refreshSideSession(missionId,warmNow?.activeSession);
-  if(agent?.active&&warmNow&&warmNow.clean&&!warmNow.activeSession&&(!warmNow.latest||warmNow.latest===agent.id)){
-   try{
-    if('clearStaleBtwSessionActive' in btwMod&&typeof btwMod.clearStaleBtwSessionActive==='function'){
-     btwMod.clearStaleBtwSessionActive(missionId);
-    }
-   }catch{}
-   agent={...agent,active:false,startedAt:undefined};
-  }
+  const clearStaleActive=()=>{
+   try{if('clearStaleBtwSessionActive' in btwMod&&typeof btwMod.clearStaleBtwSessionActive==='function')btwMod.clearStaleBtwSessionActive(missionId);}catch{}
+   if(agent)agent={...agent,active:false,startedAt:undefined};
+  };
+  if(agent?.active&&warmNow&&warmNow.clean&&!warmNow.activeSession&&(!warmNow.latest||warmNow.latest===agent.id))clearStaleActive();
   const warmAnsweredPending=Boolean(
    saved?.pending&&
    !saved.pending.notSent&&
@@ -256,14 +253,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    warmNow&&
    doesTurnAnswerPending(saved.pending,warmNow.history,cleanHistory,BTW_HISTORY_LIMIT),
   );
-  if(warmAnsweredPending&&agent?.active){
-   try{
-    if('clearStaleBtwSessionActive' in btwMod&&typeof btwMod.clearStaleBtwSessionActive==='function'){
-     btwMod.clearStaleBtwSessionActive(missionId);
-    }
-   }catch{}
-   agent={...agent,active:false,startedAt:undefined};
-  }
+  if(warmAnsweredPending&&agent?.active)clearStaleActive();
   setHistory(initialHistory);setBusy(false);setOpen(shouldOpen);
   const interruptedError='Side question interrupted. Retry to request a complete answer.';
   const rawSavedError=saved?.pending?.error||'';

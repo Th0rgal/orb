@@ -9,7 +9,7 @@ import { Popover } from "../Popover";
 import { RemoteQueue, type RemoteQueueHandle } from "../RemoteQueue";
 import { MissionCyber } from "../cyberAccess";
 import {NextReminder} from "../AutomaticReminder";
-import { CloudConversation } from "../CloudAgents";
+import { LazyCloudConversation, peekCloudAgentsModule } from "../cloudAgentsLoader";
 import {QueuedMessages} from "../QueuedMessages";
 import {enqueueLocalMessage,queuedLocalMessages,acceptedLocalMessages,forgetAcceptedLocalMessages,sendQueuedNow,resumePrompt} from "../localMessageQueue";
 import {createQueuedEdit} from "../queuedEdit";
@@ -27,7 +27,7 @@ import { ErrorToast } from "../toast";
 import { MissionFailure, LaunchStatus, MissionPending, missionPhase, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, missionGoal, dockModelLabel, type LaunchReceipt } from "../missionLaunch";
 import { chipToAttachment, loadAttachItems, mentionedChips, type AttachChip } from "../attach";
 import { shallowEqual } from "../poll";
-import { Show, batch, createMemo, createSignal, createEffect, lazy, on, onCleanup, onMount } from "solid-js";
+import { Show, Suspense, batch, createMemo, createSignal, createEffect, lazy, on, onCleanup, onMount } from "solid-js";
 import { Portal } from "solid-js/web";
 import * as Ic from "../icons";
 import { ForkMission, observeTransferDestination, stopSource, transferForDestination } from "../ForkMission";
@@ -395,7 +395,7 @@ export function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
     if (p.id) void loadTranscript(p.id).catch(swallow("mission.loadTranscript", { mission: p.id }));
     if (!resolved()) void getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e)));
   });
-  return <Show when={Boolean(resolved())} fallback={<><ErrorToast error={error()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(""); return getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e))); } }} onDismiss={() => setError("")} /><ConversationSkeleton /></>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} onMission={handleMission} />}><CloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /></Show></Show>;
+  return <Show when={Boolean(resolved())} fallback={<><ErrorToast error={error()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(""); return getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e))); } }} onDismiss={() => setError("")} /><ConversationSkeleton /></>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} onMission={handleMission} />}>{(() => { const mod = peekCloudAgentsModule(); return mod ? <mod.CloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /> : <Suspense fallback={<ConversationSkeleton />}><LazyCloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /></Suspense>; })()}</Show></Show>;
 }
 
 export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null, authoritative?: boolean) => void; onFork?: (mission: Mission) => void }) {

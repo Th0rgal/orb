@@ -547,4 +547,191 @@ describe("warm background sync & off-mode quickness", () => {
       model_effort: "high",
     });
   });
+
+  it("preserves repairedFinal answers on prior turns when a subsequent /btw turn streams live", async () => {
+    setConnection("http://repaired.test", "jwt-tok");
+    setMultiplexSyncEnabledForTest(true);
+    vi.stubGlobal("WebSocket", FakeSyncSocket as unknown as typeof WebSocket);
+
+    const parentId = "repaired-parent-01";
+    const childId = "repaired-side-01";
+    const closingLine = "Everything has been explained.";
+    const fullTurn1Answer =
+      "Detailed explanation covering root cause, reproduction steps, invariant proof, and rollout checklist across every client platform in full detail.\n\n" +
+      "Additional verification details ensuring the delta exceeds the 200-char and 3x threshold required by repairedFinal.\n\n" +
+      closingLine;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/queue?")) return Response.json([]);
+        if (url.includes("/snapshot?")) return new Response("none", { status: 404 });
+        if (url.includes("tag=btw-parent")) {
+          return Response.json([
+            {
+              id: childId,
+              status: "awaiting_user",
+              created_at: "2026-11-06T11:00:00Z",
+              updated_at: "2026-11-06T11:05:00Z",
+              backend: "opencode",
+              model_override: "builtin/smart",
+              tags: [`btw-parent:${parentId}`],
+              history: [],
+              title: null,
+            },
+          ]);
+        }
+        if (url.includes(`/missions/${childId}/events?`)) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: 1,
+                mission_id: childId,
+                sequence: 1,
+                event_type: "user_message",
+                event_id: "u1",
+                content: "Explain the bug",
+                timestamp: "2026-11-06T11:00:01Z",
+                metadata: {},
+              },
+              {
+                id: 2,
+                mission_id: childId,
+                sequence: 2,
+                event_type: "text_delta",
+                event_id: "server-delta-turn-1",
+                content: fullTurn1Answer,
+                timestamp: "2026-11-06T11:00:10Z",
+                metadata: {},
+              },
+              {
+                id: 3,
+                mission_id: childId,
+                sequence: 3,
+                event_type: "assistant_message",
+                event_id: "a1",
+                content: closingLine,
+                timestamp: "2026-11-06T11:00:11Z",
+                metadata: {},
+              },
+            ]),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orb-Events-Protocol": "1",
+                "X-Has-More": "false",
+                "X-Next-Cursor": "3",
+                "X-Page-Max-Sequence": "3",
+                "X-Max-Sequence": "3",
+              },
+            },
+          );
+        }
+        if (url.includes(`/missions/${parentId}/events?`)) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: 1,
+                mission_id: parentId,
+                sequence: 1,
+                event_type: "user_message",
+                event_id: "u-main-1",
+                content: "Parent turn",
+                timestamp: "2026-11-06T10:55:00Z",
+                metadata: {},
+              },
+            ]),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orb-Events-Protocol": "1",
+                "X-Has-More": "false",
+                "X-Next-Cursor": "1",
+                "X-Page-Max-Sequence": "1",
+                "X-Max-Sequence": "1",
+              },
+            },
+          );
+        }
+        return Response.json({ id: parentId, tags: [] });
+      }),
+    );
+
+    const releaseParent = retainTranscript(parentId);
+    await loadTranscript(parentId);
+    const detachParent = attachMissionStream(parentId, {
+      onEvent: () => {},
+      onBatch: () => {},
+      onLagged: () => {},
+      onReady: () => {},
+      onDisconnected: () => {},
+    });
+
+    await vi.waitFor(() => expect(FakeSyncSocket.instances).toHaveLength(1));
+    const sock = FakeSyncSocket.instances[0];
+
+    const initial = await reconcileBtwServerHistory(parentId, []);
+    expect(initial.history).toHaveLength(1);
+    expect(initial.history[0]?.answer).toBe(fullTurn1Answer);
+
+    await vi.waitFor(() =>
+      expect(sock.sent).toContainEqual(
+        expect.objectContaining({ op: "subscribe", mission_id: childId, since_seq: 3 }),
+      ),
+    );
+
+    detachParent();
+    releaseParent();
+
+    // Now Turn 2 streams live on the same side mission (user_message -> text_delta -> assistant_message):
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "user_message",
+        mission_id: childId,
+        id: "u2",
+        sequence: 4,
+        content: "Any follow-up?",
+        at: "2026-11-06T11:06:00Z",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "text_delta",
+        mission_id: childId,
+        sequence: 5,
+        content: "Short follow-up answer.",
+        at: "2026-11-06T11:06:02Z",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "assistant_message",
+        mission_id: childId,
+        id: "a2",
+        sequence: 6,
+        content: "Short follow-up answer.",
+        success: true,
+        at: "2026-11-06T11:06:03Z",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "mission_status_changed",
+        mission_id: childId,
+        status: "awaiting_user",
+      }),
+    });
+
+    await new Promise((r) => setTimeout(r, 20));
+
+    const warmAfterTurn2 = peekWarmBtwState(parentId);
+    expect(warmAfterTurn2?.clean).toBe(true);
+    expect(warmAfterTurn2?.history).toHaveLength(2);
+    // Turn 1's repairedFinal answer MUST remain intact (never shrunk back to `closingLine`):
+    expect(warmAfterTurn2?.history[0]?.answer).toBe(fullTurn1Answer);
+    expect(warmAfterTurn2?.history[1]?.answer).toBe("Short follow-up answer.");
+  });
 });
