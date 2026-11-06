@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -140,6 +141,15 @@ pub struct SessionStatus {
     pub receipt: Option<Receipt>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct PendingFinalize {
+    receipt: Receipt,
+    source_dev: u64,
+    source_ino: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stage_path: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SessionMeta {
     upload_id: String,
@@ -150,7 +160,7 @@ struct SessionMeta {
     #[serde(default)]
     receipt: Option<Receipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    finalizing: Option<Receipt>,
+    finalizing: Option<PendingFinalize>,
     /// Never holds `batch_token`; see `batch_token_digest`.
     #[serde(flatten)]
     placement: Placement,
@@ -264,7 +274,6 @@ impl Drop for SessionLock {
 }
 
 fn lock_session(dir: &Path) -> Result<SessionLock, String> {
-    use std::os::unix::fs::MetadataExt;
     for _ in 0..8 {
         let lock_path = dir.join("session.lock");
         let file = OpenOptions::new()
@@ -294,6 +303,27 @@ fn lock_existing_session(dir: &Path) -> Result<SessionLock, String> {
         return Err("Upload session not found; reinitialize the upload".into());
     }
     lock_session(dir)
+}
+
+fn try_lock_session(dir: &Path) -> Option<SessionLock> {
+    let lock_path = dir.join("session.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .ok()?;
+    if fs2::FileExt::try_lock_exclusive(&file).is_err() {
+        return None;
+    }
+    if let (Ok(open_meta), Ok(path_meta)) = (file.metadata(), fs::metadata(&lock_path)) {
+        if open_meta.dev() == path_meta.dev() && open_meta.ino() == path_meta.ino() {
+            return Some(SessionLock(file));
+        }
+    }
+    let _ = fs2::FileExt::unlock(&file);
+    None
 }
 
 fn sync_directory(dir: &Path) -> Result<(), String> {
@@ -348,7 +378,7 @@ fn verify_receipt(receipt: &Receipt, size: u64) -> Result<(), String> {
     Ok(())
 }
 
-fn cleanup_session_payload(dir: &Path) -> Result<(), String> {
+fn cleanup_session_payload(dir: &Path, stage_path: Option<&Path>) -> Result<(), String> {
     for name in ["payload.part", "bitmap.bin"] {
         match fs::remove_file(dir.join(name)) {
             Ok(()) => {}
@@ -356,7 +386,134 @@ fn cleanup_session_payload(dir: &Path) -> Result<(), String> {
             Err(e) => return Err(format!("Clean upload session: {e}")),
         }
     }
+    if let Some(stage) = stage_path {
+        remove_stage_file(stage);
+    }
     sync_directory(dir)
+}
+
+fn remove_stage_file(stage: &Path) {
+    if fs::remove_file(stage).is_ok() {
+        if let Some(parent) = stage.parent() {
+            let _ = sync_directory(parent);
+        }
+    }
+}
+
+fn verify_and_validate_final_parent(
+    final_path: &Path,
+    canonical_root: &Path,
+) -> Result<PathBuf, String> {
+    let parent = final_path.parent().ok_or("Invalid upload path")?;
+    let canonical = parent.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical.starts_with(canonical_root) || canonical != parent {
+        return Err("Invalid upload path".into());
+    }
+    Ok(canonical)
+}
+
+fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c_from = CString::new(from.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let c_to = CString::new(to.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let rc = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                c_from.as_ptr(),
+                libc::AT_FDCWD,
+                c_to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (from, to);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "atomic non-replacing rename unsupported",
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HardLinkPolicy {
+    AllowDirect,
+    #[cfg(test)]
+    ForceCopyFallback,
+    ForceRenameNoReplace,
+}
+
+fn stage_sibling_copy(
+    part_path: &Path,
+    parent: &Path,
+    upload_id: &str,
+) -> Result<(PathBuf, u64, u64), String> {
+    let stage = parent.join(format!(
+        ".orb-upload-tmp-{upload_id}-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let mut dst = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&stage)
+        .map_err(|e| format!("Stage uploaded file: {e}"))?;
+    let result = (|| {
+        let mut src = fs::File::open(part_path)?;
+        std::io::copy(&mut src, &mut dst)?;
+        dst.sync_all()?;
+        let meta = dst.metadata()?;
+        sync_directory(parent).map_err(std::io::Error::other)?;
+        Ok::<_, std::io::Error>((meta.dev(), meta.ino()))
+    })();
+    match result {
+        Ok((dev, ino)) => Ok((stage, dev, ino)),
+        Err(e) => {
+            remove_stage_file(&stage);
+            Err(format!("Stage uploaded file: {e}"))
+        }
+    }
+}
+
+fn atomic_publish_source(
+    source: &Path,
+    final_path: &Path,
+    policy: HardLinkPolicy,
+) -> std::io::Result<()> {
+    if policy != HardLinkPolicy::ForceRenameNoReplace {
+        match fs::hard_link(source, final_path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
+            Err(e) => {
+                if source.parent() != final_path.parent() {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    rename_no_replace(source, final_path)
+}
+
+fn finalize_published_file(final_path: &Path) -> Result<(), String> {
+    let final_file =
+        fs::File::open(final_path).map_err(|e| format!("Open finalized upload: {e}"))?;
+    final_file
+        .sync_all()
+        .map_err(|e| format!("Sync finalized upload: {e}"))?;
+    if let Some(parent) = final_path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
 }
 
 fn read_bitmap(dir: &Path, total_chunks: usize) -> Vec<usize> {
@@ -464,9 +621,18 @@ pub fn init_or_status_session(root: &Path, req: SessionInit) -> Result<SessionSt
         .open(&part_path)
         .map_err(|e| format!("Create upload staging file: {e}"))?;
     part.set_len(req.size)
+        .and_then(|()| part.sync_all())
         .map_err(|e| format!("Allocate upload staging file: {e}"))?;
     let bitmap = vec![0u8; total_chunks];
-    fs::write(dir.join("bitmap.bin"), &bitmap)
+    let mut bitmap_file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(dir.join("bitmap.bin"))
+        .map_err(|e| format!("Initialize upload bitmap: {e}"))?;
+    bitmap_file
+        .write_all(&bitmap)
+        .and_then(|()| bitmap_file.sync_all())
         .map_err(|e| format!("Initialize upload bitmap: {e}"))?;
     let meta = SessionMeta {
         upload_id: req.upload_id.clone(),
@@ -565,21 +731,58 @@ fn commit_session_receipt(
     dir: &Path,
     meta: &mut SessionMeta,
     receipt: Receipt,
+    stage_path: Option<&Path>,
 ) -> Result<Receipt, String> {
     meta.receipt = Some(receipt.clone());
     meta.finalizing = None;
     write_session_meta(dir, meta)?;
-    cleanup_session_payload(dir)?;
+    cleanup_session_payload(dir, stage_path)?;
     Ok(receipt)
 }
 
-pub fn complete_session(root: &Path, upload_id: &str) -> Result<Receipt, String> {
-    complete_session_with_hook(root, upload_id, || Ok(()))
+fn reject_conflicting_upload(
+    dir: &Path,
+    meta: &mut SessionMeta,
+    stage_path: Option<&Path>,
+    final_path: &Path,
+    canonical_root: &Path,
+) -> Result<Receipt, String> {
+    if let Some(stage) = stage_path {
+        remove_stage_file(stage);
+    }
+    if meta.placement.batch_id.is_none() {
+        let _ = fs::remove_dir(final_path.parent().unwrap_or(canonical_root));
+    }
+    meta.finalizing = None;
+    let _ = write_session_meta(dir, meta);
+    Err("A file with this path was already uploaded".into())
 }
 
+pub fn complete_session(root: &Path, upload_id: &str) -> Result<Receipt, String> {
+    complete_session_with_options(root, upload_id, HardLinkPolicy::AllowDirect, || Ok(()))
+}
+
+#[cfg(test)]
 fn complete_session_with_hook<F>(
     root: &Path,
     upload_id: &str,
+    before_meta_commit: F,
+) -> Result<Receipt, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    complete_session_with_options(
+        root,
+        upload_id,
+        HardLinkPolicy::AllowDirect,
+        before_meta_commit,
+    )
+}
+
+fn complete_session_with_options<F>(
+    root: &Path,
+    upload_id: &str,
+    policy: HardLinkPolicy,
     before_meta_commit: F,
 ) -> Result<Receipt, String>
 where
@@ -595,26 +798,14 @@ where
 
     if let Some(receipt) = meta.receipt.clone() {
         verify_receipt(&receipt, meta.size)?;
-        cleanup_session_payload(&dir)?;
+        cleanup_session_payload(&dir, None)?;
         return Ok(receipt);
     }
 
     let part_path = dir.join("payload.part");
     let canonical_root = root.canonicalize().map_err(|e| e.to_string())?;
 
-    if let Some(pending) = meta.finalizing.clone() {
-        let final_path = Path::new(&pending.path);
-        let parent = final_path.parent().ok_or("Invalid upload path")?;
-        if final_path.is_file() {
-            let canonical = parent.canonicalize().map_err(|e| e.to_string())?;
-            if !canonical.starts_with(&canonical_root) || canonical != parent {
-                return Err("Invalid upload path".into());
-            }
-            verify_receipt(&pending, meta.size)?;
-            sync_directory(parent)?;
-            before_meta_commit()?;
-            return commit_session_receipt(&dir, &mut meta, pending);
-        }
+    if meta.finalizing.is_none() {
         let received = read_bitmap(&dir, meta.total_chunks);
         if received.len() != meta.total_chunks {
             return Err(format!(
@@ -624,61 +815,66 @@ where
             ));
         }
         let sha256 = payload_digest(&part_path, meta.size)?;
-        if sha256 != pending.sha256 {
-            return Err("Staged upload digest mismatch".into());
+        let final_path = destination(
+            &canonical_root,
+            &meta.name,
+            &meta.placement,
+            meta.batch_token_digest.as_deref(),
+        )?;
+        let part_meta =
+            fs::metadata(&part_path).map_err(|e| format!("Stat upload staging payload: {e}"))?;
+        let receipt = Receipt {
+            name: nfc(&meta.name),
+            path: final_path.to_string_lossy().into_owned(),
+            size: meta.size as usize,
+            sha256,
+        };
+        meta.finalizing = Some(PendingFinalize {
+            receipt,
+            source_dev: part_meta.dev(),
+            source_ino: part_meta.ino(),
+            stage_path: None,
+        });
+        if let Err(e) = write_session_meta(&dir, &meta) {
+            if meta.placement.batch_id.is_none() {
+                let _ = fs::remove_dir(final_path.parent().unwrap_or(&canonical_root));
+            }
+            return Err(e);
         }
-        let parent = final_path.parent().ok_or("Invalid upload path")?;
-        fs::create_dir_all(parent).map_err(|e| format!("Create upload folder: {e}"))?;
-        let canonical = parent.canonicalize().map_err(|e| e.to_string())?;
-        if !canonical.starts_with(&canonical_root) || canonical != parent {
-            return Err("Invalid upload path".into());
-        }
-        publish_final_payload(&part_path, final_path, &canonical_root, &meta.placement)?;
-        before_meta_commit()?;
-        return commit_session_receipt(&dir, &mut meta, pending);
     }
 
-    if let (Some(batch), Some(relative)) = (&meta.placement.batch_id, &meta.placement.relative_path)
-    {
-        if let (Ok(batch_uuid), Ok(norm_rel)) = (
-            uuid::Uuid::parse_str(batch),
-            validate_relative_upload_path(relative),
-        ) {
-            if let Some(digest) = meta.batch_token_digest.as_deref() {
-                claim_batch(
-                    &canonical_root,
-                    &batch_uuid.hyphenated().to_string(),
-                    digest,
-                )?;
-            } else {
-                return Err("Folder uploads need a batch token".into());
+    let mut pending = meta
+        .finalizing
+        .clone()
+        .ok_or("Missing upload finalization state")?;
+    let final_path = PathBuf::from(&pending.receipt.path);
+    let parent = final_path
+        .parent()
+        .ok_or("Invalid upload path")?
+        .to_path_buf();
+    if !parent.exists() {
+        fs::create_dir_all(&parent).map_err(|e| format!("Create upload folder: {e}"))?;
+    }
+    verify_and_validate_final_parent(&final_path, &canonical_root)?;
+
+    let stage_buf = pending.stage_path.as_deref().map(PathBuf::from);
+    if let Ok(existing_meta) = fs::symlink_metadata(&final_path) {
+        if existing_meta.dev() == pending.source_dev && existing_meta.ino() == pending.source_ino {
+            if !existing_meta.is_file() {
+                return Err("Invalid upload path".into());
             }
-            let candidate = canonical_root
-                .join(batch_uuid.hyphenated().to_string())
-                .join(norm_rel);
-            let valid_parent = candidate
-                .parent()
-                .and_then(|p| p.canonicalize().ok().map(|c| (p, c)))
-                .is_some_and(|(p, c)| c.starts_with(&canonical_root) && c == p);
-            if valid_parent
-                && candidate.is_file()
-                && !part_path.exists()
-                && !dir.join("bitmap.bin").exists()
-            {
-                let sha256 = payload_digest(&candidate, meta.size)?;
-                if let Some(parent) = candidate.parent() {
-                    sync_directory(parent)?;
-                }
-                let receipt = Receipt {
-                    name: nfc(&meta.name),
-                    path: candidate.to_string_lossy().into_owned(),
-                    size: meta.size as usize,
-                    sha256,
-                };
-                before_meta_commit()?;
-                return commit_session_receipt(&dir, &mut meta, receipt);
-            }
+            verify_receipt(&pending.receipt, meta.size)?;
+            finalize_published_file(&final_path)?;
+            before_meta_commit()?;
+            return commit_session_receipt(&dir, &mut meta, pending.receipt, stage_buf.as_deref());
         }
+        return reject_conflicting_upload(
+            &dir,
+            &mut meta,
+            stage_buf.as_deref(),
+            &final_path,
+            &canonical_root,
+        );
     }
 
     let received = read_bitmap(&dir, meta.total_chunks);
@@ -690,87 +886,144 @@ where
         ));
     }
     let sha256 = payload_digest(&part_path, meta.size)?;
-    let final_path = destination(
+    if sha256 != pending.receipt.sha256 {
+        return Err("Staged upload digest mismatch".into());
+    }
+
+    publish_final_payload(
+        &dir,
+        &mut meta,
+        &mut pending,
+        &part_path,
+        &final_path,
         &canonical_root,
-        &meta.name,
-        &meta.placement,
-        meta.batch_token_digest.as_deref(),
+        policy,
     )?;
-    let receipt = Receipt {
-        name: nfc(&meta.name),
-        path: final_path.to_string_lossy().into_owned(),
-        size: meta.size as usize,
-        sha256,
-    };
-    meta.finalizing = Some(receipt.clone());
-    if let Err(e) = write_session_meta(&dir, &meta) {
-        if meta.placement.batch_id.is_none() {
-            let _ = fs::remove_dir(final_path.parent().unwrap_or(&canonical_root));
-        }
-        return Err(e);
-    }
-    if let Err(e) = publish_final_payload(&part_path, &final_path, &canonical_root, &meta.placement)
-    {
-        meta.finalizing = None;
-        let _ = write_session_meta(&dir, &meta);
-        return Err(e);
-    }
+    let final_stage = pending.stage_path.as_deref().map(PathBuf::from);
+    verify_receipt(&pending.receipt, meta.size)?;
     before_meta_commit()?;
-    commit_session_receipt(&dir, &mut meta, receipt)
+    commit_session_receipt(&dir, &mut meta, pending.receipt, final_stage.as_deref())
 }
 
 fn publish_final_payload(
+    dir: &Path,
+    meta: &mut SessionMeta,
+    pending: &mut PendingFinalize,
     part_path: &Path,
     final_path: &Path,
     canonical_root: &Path,
-    placement: &Placement,
+    policy: HardLinkPolicy,
 ) -> Result<(), String> {
-    match fs::hard_link(part_path, final_path) {
-        Ok(()) => {}
+    let parent = final_path.parent().ok_or("Invalid upload path")?;
+
+    let existing_stage = pending
+        .stage_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|stage| {
+            fs::symlink_metadata(stage).is_ok_and(|m| {
+                m.is_file() && m.dev() == pending.source_dev && m.ino() == pending.source_ino
+            })
+        });
+
+    if existing_stage.is_none() && policy == HardLinkPolicy::AllowDirect {
+        let part_meta =
+            fs::metadata(part_path).map_err(|e| format!("Stat upload staging payload: {e}"))?;
+        if (part_meta.dev(), part_meta.ino()) != (pending.source_dev, pending.source_ino)
+            || pending.stage_path.is_some()
+        {
+            if let Some(old_stage) = pending.stage_path.as_deref() {
+                remove_stage_file(Path::new(old_stage));
+            }
+            pending.source_dev = part_meta.dev();
+            pending.source_ino = part_meta.ino();
+            pending.stage_path = None;
+            meta.finalizing = Some(pending.clone());
+            write_session_meta(dir, meta)?;
+        }
+        match fs::hard_link(part_path, final_path) {
+            Ok(()) => {
+                return finalize_published_file(final_path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Ok(m) = fs::symlink_metadata(final_path) {
+                    if m.is_file() && m.dev() == pending.source_dev && m.ino() == pending.source_ino
+                    {
+                        return finalize_published_file(final_path);
+                    }
+                }
+                let _ = reject_conflicting_upload(dir, meta, None, final_path, canonical_root)?;
+                return Ok(());
+            }
+            Err(_) => {}
+        }
+    }
+
+    let stage_path = if let Some(stage) = existing_stage {
+        if payload_digest(&stage, meta.size).ok().as_deref()
+            == Some(pending.receipt.sha256.as_str())
+        {
+            stage
+        } else {
+            remove_stage_file(&stage);
+            let (new_stage, dev, ino) = stage_sibling_copy(part_path, parent, &meta.upload_id)?;
+            pending.source_dev = dev;
+            pending.source_ino = ino;
+            pending.stage_path = Some(new_stage.to_string_lossy().into_owned());
+            meta.finalizing = Some(pending.clone());
+            if let Err(e) = write_session_meta(dir, meta) {
+                remove_stage_file(&new_stage);
+                return Err(e);
+            }
+            new_stage
+        }
+    } else {
+        if let Some(old_stage) = pending.stage_path.as_deref() {
+            remove_stage_file(Path::new(old_stage));
+        }
+        let (new_stage, dev, ino) = stage_sibling_copy(part_path, parent, &meta.upload_id)?;
+        pending.source_dev = dev;
+        pending.source_ino = ino;
+        pending.stage_path = Some(new_stage.to_string_lossy().into_owned());
+        meta.finalizing = Some(pending.clone());
+        if let Err(e) = write_session_meta(dir, meta) {
+            remove_stage_file(&new_stage);
+            return Err(e);
+        }
+        new_stage
+    };
+
+    match atomic_publish_source(&stage_path, final_path, policy) {
+        Ok(()) => {
+            remove_stage_file(&stage_path);
+            finalize_published_file(final_path)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            if placement.batch_id.is_none() {
+            if let Ok(m) = fs::symlink_metadata(final_path) {
+                if m.is_file() && m.dev() == pending.source_dev && m.ino() == pending.source_ino {
+                    remove_stage_file(&stage_path);
+                    return finalize_published_file(final_path);
+                }
+            }
+            let _ = reject_conflicting_upload(
+                dir,
+                meta,
+                Some(&stage_path),
+                final_path,
+                canonical_root,
+            )?;
+            Ok(())
+        }
+        Err(e) => {
+            remove_stage_file(&stage_path);
+            if meta.placement.batch_id.is_none() {
                 let _ = fs::remove_dir(final_path.parent().unwrap_or(canonical_root));
             }
-            return Err("A file with this path was already uploaded".into());
-        }
-        Err(_) => {
-            let mut dst = match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(final_path)
-            {
-                Ok(file) => file,
-                Err(e) => {
-                    if placement.batch_id.is_none() {
-                        let _ = fs::remove_dir(final_path.parent().unwrap_or(canonical_root));
-                    }
-                    return Err(if e.kind() == std::io::ErrorKind::AlreadyExists {
-                        "A file with this path was already uploaded".into()
-                    } else {
-                        format!("Finalize uploaded file: {e}")
-                    });
-                }
-            };
-            let mut src =
-                fs::File::open(part_path).map_err(|e| format!("Open staged upload: {e}"))?;
-            if let Err(e) = std::io::copy(&mut src, &mut dst).and_then(|_| dst.sync_all()) {
-                let _ = fs::remove_file(final_path);
-                if placement.batch_id.is_none() {
-                    let _ = fs::remove_dir(final_path.parent().unwrap_or(canonical_root));
-                }
-                return Err(format!("Finalize uploaded file: {e}"));
-            }
+            meta.finalizing = None;
+            let _ = write_session_meta(dir, meta);
+            Err(format!("Finalize uploaded file: {e}"))
         }
     }
-    let final_file =
-        fs::File::open(final_path).map_err(|e| format!("Open finalized upload: {e}"))?;
-    final_file
-        .sync_all()
-        .map_err(|e| format!("Sync finalized upload: {e}"))?;
-    if let Some(parent) = final_path.parent() {
-        sync_directory(parent)?;
-    }
-    Ok(())
 }
 
 pub fn cancel_session(root: &Path, upload_id: &str) -> Result<(), String> {
@@ -871,6 +1124,20 @@ pub fn prune_expired_uploads(root: &Path, max_age: std::time::Duration) {
             .and_then(|t| t.elapsed().ok())
             .is_some_and(|age| age > max_age)
     };
+    let is_session_expired = |dir: &Path| -> bool {
+        let newest = [
+            dir.to_path_buf(),
+            dir.join("meta.json"),
+            dir.join("payload.part"),
+            dir.join("bitmap.bin"),
+        ]
+        .into_iter()
+        .filter_map(|p| fs::metadata(p).and_then(|m| m.modified()).ok())
+        .max();
+        newest
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > max_age)
+    };
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
@@ -879,7 +1146,25 @@ pub fn prune_expired_uploads(root: &Path, max_age: std::time::Duration) {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if name == ".sessions" || name == ".batches" {
+        if name == ".sessions" {
+            if let Ok(sub) = fs::read_dir(&path) {
+                for item in sub.flatten() {
+                    let sub_path = item.path();
+                    if sub_path.is_dir() {
+                        let Some(_lock) = try_lock_session(&sub_path) else {
+                            continue;
+                        };
+                        if is_session_expired(&sub_path) {
+                            let _ = fs::remove_dir_all(&sub_path);
+                        }
+                    } else if is_expired(&sub_path) {
+                        let _ = fs::remove_file(&sub_path);
+                    }
+                }
+            }
+            continue;
+        }
+        if name == ".batches" {
             if let Ok(sub) = fs::read_dir(&path) {
                 for item in sub.flatten() {
                     let sub_path = item.path();
@@ -1268,6 +1553,11 @@ mod tests {
         write_session_chunk(root.path(), "sess_recover_folder", 0, b"0123").unwrap();
         write_session_chunk(root.path(), "sess_recover_folder", 1, b"45").unwrap();
 
+        let err = complete_session_with_hook(root.path(), "sess_recover_folder", || {
+            Err("simulated crash after folder publish".into())
+        })
+        .unwrap_err();
+        assert_eq!(err, "simulated crash after folder publish");
         let folder_session = root.path().join(".sessions/sess_recover_folder");
         let target = root
             .path()
@@ -1275,14 +1565,272 @@ mod tests {
             .unwrap()
             .join(BATCH)
             .join("Set/dataset.bin");
-        fs::create_dir_all(target.parent().unwrap()).unwrap();
-        fs::rename(folder_session.join("payload.part"), &target).unwrap();
+        fs::remove_file(folder_session.join("payload.part")).unwrap();
         fs::remove_file(folder_session.join("bitmap.bin")).unwrap();
 
         let recovered = complete_session(root.path(), "sess_recover_folder").unwrap();
         assert_eq!(Path::new(&recovered.path), target);
         assert_eq!(fs::read(&recovered.path).unwrap(), b"012345");
         assert_eq!(recovered.sha256, hex::encode(Sha256::digest(b"012345")));
+    }
+
+    #[test]
+    fn session_without_finalizing_never_adopts_preexisting_batch_file() {
+        let root = tempfile::tempdir().unwrap();
+        init_or_status_session(
+            root.path(),
+            SessionInit {
+                upload_id: "sess_legit".into(),
+                name: "shared.bin".into(),
+                size: 6,
+                chunk_size: Some(4),
+                placement: folder(BATCH, "Set/shared.bin"),
+            },
+        )
+        .unwrap();
+        write_session_chunk(root.path(), "sess_legit", 0, b"secret").unwrap_err();
+        write_session_chunk(root.path(), "sess_legit", 0, b"secr").unwrap();
+        write_session_chunk(root.path(), "sess_legit", 1, b"et").unwrap();
+        let legit = complete_session(root.path(), "sess_legit").unwrap();
+        assert_eq!(fs::read(&legit.path).unwrap(), b"secret");
+
+        init_or_status_session(
+            root.path(),
+            SessionInit {
+                upload_id: "sess_impostor".into(),
+                name: "shared.bin".into(),
+                size: 6,
+                chunk_size: Some(4),
+                placement: folder(BATCH, "Set/shared.bin"),
+            },
+        )
+        .unwrap();
+        let impostor_dir = root.path().join(".sessions/sess_impostor");
+        fs::remove_file(impostor_dir.join("payload.part")).unwrap();
+        fs::remove_file(impostor_dir.join("bitmap.bin")).unwrap();
+
+        let err = complete_session(root.path(), "sess_impostor").unwrap_err();
+        assert!(err.contains("Upload incomplete"), "unexpected error: {err}");
+        let status = init_or_status_session(
+            root.path(),
+            SessionInit {
+                upload_id: "sess_impostor".into(),
+                name: "shared.bin".into(),
+                size: 6,
+                chunk_size: Some(4),
+                placement: folder(BATCH, "Set/shared.bin"),
+            },
+        )
+        .unwrap();
+        assert!(status.receipt.is_none());
+    }
+
+    #[test]
+    fn atomic_copy_fallback_and_pre_publish_crash_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        for (idx, policy) in [
+            HardLinkPolicy::ForceCopyFallback,
+            HardLinkPolicy::ForceRenameNoReplace,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("sess_copy_mode_{idx}");
+            init_or_status_session(
+                root.path(),
+                SessionInit {
+                    upload_id: id.clone(),
+                    name: format!("mode_{idx}.bin"),
+                    size: 7,
+                    chunk_size: Some(4),
+                    placement: folder(BATCH, &format!("Copy/mode_{idx}.bin")),
+                },
+            )
+            .unwrap();
+            write_session_chunk(root.path(), &id, 0, b"abcd").unwrap();
+            write_session_chunk(root.path(), &id, 1, b"efg").unwrap();
+
+            let err = complete_session_with_options(root.path(), &id, policy, || {
+                Err("crash after copy publish".into())
+            })
+            .unwrap_err();
+            assert_eq!(err, "crash after copy publish");
+
+            let copy_dir = root.path().canonicalize().unwrap().join(BATCH).join("Copy");
+            for entry in fs::read_dir(&copy_dir).unwrap() {
+                let name = entry.unwrap().file_name().into_string().unwrap();
+                assert!(
+                    !name.starts_with(".orb-upload-tmp-"),
+                    "leftover temp stage file: {name}"
+                );
+            }
+
+            let session_dir = root.path().join(".sessions").join(&id);
+            fs::remove_file(session_dir.join("payload.part")).unwrap();
+            fs::remove_file(session_dir.join("bitmap.bin")).unwrap();
+
+            let recovered =
+                complete_session_with_options(root.path(), &id, policy, || Ok(())).unwrap();
+            assert_eq!(fs::read(&recovered.path).unwrap(), b"abcdefg");
+        }
+
+        init_or_status_session(
+            root.path(),
+            SessionInit {
+                upload_id: "sess_pre_publish_crash".into(),
+                name: "prepub.bin".into(),
+                size: 5,
+                chunk_size: Some(4),
+                placement: folder(BATCH, "Copy/prepub.bin"),
+            },
+        )
+        .unwrap();
+        write_session_chunk(root.path(), "sess_pre_publish_crash", 0, b"1234").unwrap();
+        write_session_chunk(root.path(), "sess_pre_publish_crash", 1, b"5").unwrap();
+
+        let sess_dir = root.path().join(".sessions/sess_pre_publish_crash");
+        let canonical = root.path().canonicalize().unwrap();
+        let target = canonical.join(BATCH).join("Copy/prepub.bin");
+        let part_meta = fs::metadata(sess_dir.join("payload.part")).unwrap();
+        let mut meta: SessionMeta =
+            serde_json::from_slice(&fs::read(sess_dir.join("meta.json")).unwrap()).unwrap();
+        meta.finalizing = Some(PendingFinalize {
+            receipt: Receipt {
+                name: "prepub.bin".into(),
+                path: target.to_string_lossy().into_owned(),
+                size: 5,
+                sha256: hex::encode(Sha256::digest(b"12345")),
+            },
+            source_dev: part_meta.dev(),
+            source_ino: part_meta.ino(),
+            stage_path: None,
+        });
+        write_session_meta(&sess_dir, &meta).unwrap();
+        assert!(!target.exists());
+
+        let recovered = complete_session_with_options(
+            root.path(),
+            "sess_pre_publish_crash",
+            HardLinkPolicy::ForceCopyFallback,
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(Path::new(&recovered.path), target);
+        assert_eq!(fs::read(&recovered.path).unwrap(), b"12345");
+    }
+
+    #[test]
+    fn identical_bytes_folder_collision_enforces_single_winner_across_crash_retry() {
+        let root = tempfile::tempdir().unwrap();
+        for id in ["sess_race_a", "sess_race_b"] {
+            init_or_status_session(
+                root.path(),
+                SessionInit {
+                    upload_id: id.into(),
+                    name: "identical.bin".into(),
+                    size: 8,
+                    chunk_size: Some(4),
+                    placement: folder(BATCH, "Race/identical.bin"),
+                },
+            )
+            .unwrap();
+            write_session_chunk(root.path(), id, 0, b"same").unwrap();
+            write_session_chunk(root.path(), id, 1, b"byte").unwrap();
+        }
+
+        let canonical = root.path().canonicalize().unwrap();
+        let target = canonical.join(BATCH).join("Race/identical.bin");
+        let dir_b = root.path().join(".sessions/sess_race_b");
+        let part_b_meta = fs::metadata(dir_b.join("payload.part")).unwrap();
+        let mut meta_b: SessionMeta =
+            serde_json::from_slice(&fs::read(dir_b.join("meta.json")).unwrap()).unwrap();
+        meta_b.finalizing = Some(PendingFinalize {
+            receipt: Receipt {
+                name: "identical.bin".into(),
+                path: target.to_string_lossy().into_owned(),
+                size: 8,
+                sha256: hex::encode(Sha256::digest(b"samebyte")),
+            },
+            source_dev: part_b_meta.dev(),
+            source_ino: part_b_meta.ino(),
+            stage_path: None,
+        });
+        write_session_meta(&dir_b, &meta_b).unwrap();
+
+        let winner = complete_session(root.path(), "sess_race_a").unwrap();
+        assert_eq!(Path::new(&winner.path), target);
+        assert_eq!(fs::read(&target).unwrap(), b"samebyte");
+
+        let loser_err = complete_session(root.path(), "sess_race_b").unwrap_err();
+        assert_eq!(loser_err, "A file with this path was already uploaded");
+
+        let updated_meta_b: SessionMeta =
+            serde_json::from_slice(&fs::read(dir_b.join("meta.json")).unwrap()).unwrap();
+        assert!(updated_meta_b.finalizing.is_none());
+        assert!(updated_meta_b.receipt.is_none());
+
+        let retry_loser_err = complete_session(root.path(), "sess_race_b").unwrap_err();
+        assert_eq!(
+            retry_loser_err,
+            "A file with this path was already uploaded"
+        );
+    }
+
+    #[test]
+    fn prune_expired_uploads_skips_locked_and_actively_written_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        for id in ["sess_locked", "sess_fresh_chunk", "sess_stale"] {
+            init_or_status_session(
+                root.path(),
+                SessionInit {
+                    upload_id: id.into(),
+                    name: format!("{id}.bin"),
+                    size: 8,
+                    chunk_size: Some(4),
+                    placement: Placement::default(),
+                },
+            )
+            .unwrap();
+        }
+
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let age_session = |dir: &Path| {
+            for name in ["meta.json", "payload.part", "bitmap.bin"] {
+                OpenOptions::new()
+                    .write(true)
+                    .open(dir.join(name))
+                    .unwrap()
+                    .set_modified(old)
+                    .unwrap();
+            }
+        };
+        let locked_dir = root.path().join(".sessions/sess_locked");
+        let held_lock = lock_session(&locked_dir).unwrap();
+        let fresh_dir = root.path().join(".sessions/sess_fresh_chunk");
+        let stale_dir = root.path().join(".sessions/sess_stale");
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        for dir in [&locked_dir, &fresh_dir, &stale_dir] {
+            age_session(dir);
+        }
+
+        write_session_chunk(root.path(), "sess_fresh_chunk", 0, b"live").unwrap();
+
+        prune_expired_uploads(root.path(), std::time::Duration::from_millis(50));
+
+        assert!(locked_dir.is_dir(), "locked session must not be pruned");
+        assert!(
+            fresh_dir.is_dir(),
+            "session with fresh chunk/bitmap writes must not be pruned"
+        );
+        assert!(!stale_dir.exists(), "idle expired session must be pruned");
+
+        drop(held_lock);
+        age_session(&locked_dir);
+        age_session(&fresh_dir);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        prune_expired_uploads(root.path(), std::time::Duration::from_millis(50));
+        assert!(!locked_dir.exists());
+        assert!(!fresh_dir.exists());
     }
 
     #[test]
