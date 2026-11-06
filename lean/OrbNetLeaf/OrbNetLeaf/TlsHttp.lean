@@ -419,7 +419,7 @@ def http2Or3RequestViaCurl
     | .http2 => "--http2"
     | .http3 => "--http3"
   let mut args : Array String := #[
-    "--globoff", "--path-as-is", "--disallow-username-in-url", "--proto", "=https",
+    "--disable", "--globoff", "--path-as-is", "--disallow-username-in-url", "--proto", "=https",
     "--silent", "--show-error", "--dump-header", hdrFile.toString,
     "--max-time", toString (if timeoutSecs == 0 then 1 else timeoutSecs),
     verFlag
