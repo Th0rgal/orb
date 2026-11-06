@@ -37,6 +37,150 @@ private def assertTrue (label : String) (cond : Bool) : IO Unit := do
   if !cond then
     throw (IO.userError s!"FAIL: {label}")
 
+/-- Section 12: Round-2 regression checks (split UTF-8 log slicing, >150 KiB SQLite stdin,
+    pure-Lean tar+zstd `-C` / newline filename safety, timeout shrinkDebt repayment, and
+    saturated-queue cold archive-backed `lean_build` execution). -/
+private def runRound2RegressionTests
+    (check : String → Bool → IO Unit)
+    (tmpRoot missionId submitLease : String)
+    (nowEp : UInt64)
+    (authHdrs : Array (String × String))
+    (rt0 : NodeRuntime) : IO NodeRuntime := do
+  let mut rt := rt0
+  -- 12a. Multi-byte UTF-8 partial log boundary (`ab€\n`, 6 bytes, sliced with `max_bytes = 4`)
+  let utf8Log := "ab€\n".toUTF8 -- [97, 98, 226, 130, 172, 10]
+  let utf8S1 := sliceJobLogBytes utf8Log 0 4
+  let utf8S2 := sliceJobLogBytes utf8Log utf8S1.nextOffset.toNat 4
+  check "sliceJobLogBytes preserves split multi-byte UTF-8 across chunk polls without '?' corruption"
+    (utf8S1.data == "ab" && utf8S1.nextOffset == 2 && utf8S2.data == "€\n" && utf8S2.nextOffset == 6)
+
+  -- 12b. >150 KiB SQLite `jobs.db` stdin persistence (no Linux argv `E2BIG`)
+  let bigStr := String.ofList (List.replicate 160000 'X')
+  let bigRec : JobRecord := {
+    jobId := "77777777-7777-4777-8777-777777777777"
+    missionId := missionId
+    payloadJson := renderCompact (.obj #[("kind", .str "raw_command"), ("blob", .str bigStr)])
+    state := .queued
+    createdAt := "2026-11-06T00:05:00Z"
+  }
+  let bigIns ← rt.ledger.insertQueued bigRec
+  check "insertQueued persists >160 KiB SQL payload via stdin without E2BIG"
+    (match bigIns with | .ok _ => true | .error _ => false)
+
+  -- 12c. Pure-Lean `tar+zstd` pack/unpack with `-C` and newline in workspace filename
+  let weirdWs := System.FilePath.mk tmpRoot / "weird-tar-ws"
+  let weirdSub := weirdWs / "-C_dir"
+  IO.FS.createDirAll weirdSub
+  let weirdRel := "-C_dir/line1\nline2.txt"
+  IO.FS.writeFile (weirdWs / "-C_dir" / "line1\nline2.txt") "tar-safe-bytes"
+  let weirdSrcArea := System.FilePath.mk tmpRoot / ".transfers" / "88888888-8888-4888-8888-888888888888" / "source"
+  let weirdDstArea := System.FilePath.mk tmpRoot / ".transfers" / "88888888-8888-4888-8888-888888888888" / "destination"
+  let .ok weirdManifest ← operateTransfer weirdSrcArea (some weirdWs) (.obj #[("op", .str "snapshot")])
+    | throw (IO.userError "weird tar snapshot failed")
+  let .ok packedWeird ← packTransferArchive weirdSrcArea
+    | throw (IO.userError "packTransferArchive failed on newline/-C filename")
+  let .ok _ ← operateTransfer weirdDstArea none (.obj #[("op", .str "stage"), ("manifest", weirdManifest)])
+    | throw (IO.userError "weird tar stage failed")
+  let .ok unpackedBytes ← unpackTransferArchive weirdDstArea packedWeird
+    | throw (IO.userError "unpackTransferArchive failed on newline/-C filename")
+  let .ok _ ← operateTransfer weirdDstArea none (.obj #[("op", .str "verify")])
+    | throw (IO.userError "weird tar verify failed")
+  let weirdReadBack ← IO.FS.readFile (weirdDstArea / "workspace" / weirdRel)
+  check "packTransferArchive/unpackTransferArchive safely roundtrips filenames with leading '-' and newline"
+    (unpackedBytes == 14 && weirdReadBack == "tar-safe-bytes")
+
+  -- 12d. Queued archive-backed `lean_build` retains unsanitized `source.archive` across saturated ticks,
+  --      and timed-out regular jobs repay `shrinkDebt`!
+  let packRepoDir := System.FilePath.mk tmpRoot / "archive-pack-src"
+  IO.FS.createDirAll packRepoDir
+  let _ ← IO.Process.output { cmd := "git", args := #["init", "--quiet"], cwd := some packRepoDir.toString }
+  let _ ← IO.Process.output { cmd := "git", args := #["config", "user.email", "test@orb.dev"], cwd := some packRepoDir.toString }
+  let _ ← IO.Process.output { cmd := "git", args := #["config", "user.name", "Orb Test"], cwd := some packRepoDir.toString }
+  IO.FS.writeFile (packRepoDir / "lean-toolchain") "leanprover/lean4:v4.35.0\n"
+  IO.FS.writeFile (packRepoDir / "Main.lean") "def x := 42\n#eval x\n"
+  let _ ← IO.Process.output { cmd := "git", args := #["add", "lean-toolchain", "Main.lean"], cwd := some packRepoDir.toString }
+  let _ ← IO.Process.output { cmd := "git", args := #["commit", "-m", "init", "--quiet"], cwd := some packRepoDir.toString }
+  let packHead ← IO.Process.output { cmd := "git", args := #["rev-parse", "HEAD"], cwd := some packRepoDir.toString }
+  let packCommit := packHead.stdout.trimAscii.toString
+  let packOutFile := System.FilePath.mk tmpRoot / "test.pack"
+  let _ ← IO.Process.output {
+    cmd := "sh"
+    args := #["-c", s!"git rev-list --objects {packCommit} | cut -d' ' -f1 | git pack-objects --stdout > {shellSingleQuote packOutFile.toString}"]
+    cwd := some packRepoDir.toString
+  }
+  let rawPackBytes ← IO.FS.readBinFile packOutFile
+  let packSha := sourceArchiveSha256 packCommit rawPackBytes
+  let packB64 := base64Encode rawPackBytes false true
+
+  -- Set capacity=2, start two 1s timeout regular jobs, shrink capacity to 1 (`shrinkDebt = 1`), let both time out,
+  -- and submit a queued archive-backed `lean_build` while saturated so it launches on a LATER tick!
+  let cap2Lease := signLeaseToken "sec-primary-123" {
+    missionId := "00000000-0000-0000-0000-000000000000", nodeId := "test-node", scope := .nodeCapacity, expiresAt := nowEp + 600
+  }
+  let (rtC2, _) ← handleRequest rt {
+    method := "POST", rawPath := "/capacity", path := "/capacity", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[("lease_token", .str cap2Lease), ("capacity", JVal.nat 2)])).toUTF8
+  }
+  rt := rtC2
+  for k in [1, 2] do
+    let tid := s!"99999999-9999-4999-8999-99999999999{k}"
+    let tb := renderCompact (.obj #[
+      ("job_id", .str tid), ("mission_id", .str missionId), ("lease_token", .str submitLease),
+      ("payload", .obj #[("kind", .str "raw_command"), ("command", .str "sleep 10"), ("timeout_secs", JVal.uint64 1)])
+    ])
+    let (rtT, _) ← handleRequest rt { method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs, body := tb.toUTF8 }
+    rt := rtT
+  -- Shrink capacity 2 -> 1 while both regular jobs are running (`shrinkDebt == 1`)
+  let (rtShrink, _) ← handleRequest rt {
+    method := "POST", rawPath := "/capacity", path := "/capacity", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[("lease_token", .str cap2Lease), ("capacity", JVal.nat 1)])).toUTF8
+  }
+  rt := rtShrink
+  check "live shrink from 2 -> 1 with 2 running regular jobs records shrinkDebt=1" (rt.shrinkDebt == 1)
+
+  -- Submit archive-backed `lean_build` while capacity is full (must queue in `queuedPayloads`, persisted payload has blank `data_base64`)
+  let archJobId := "99999999-9999-4999-8999-999999999993"
+  let archBody := renderCompact (.obj #[
+    ("job_id", .str archJobId),
+    ("mission_id", .str missionId),
+    ("lease_token", .str submitLease),
+    ("payload", .obj #[
+      ("kind", .str "lean_build"),
+      ("source", .obj #[
+        ("repo", .str "https://github.com/Th0rgal/cold-archive-queue-test.git"),
+        ("commit", .str packCommit),
+        ("archive", .obj #[
+          ("sha256", .str packSha),
+          ("size_bytes", JVal.uint64 rawPackBytes.size.toUInt64),
+          ("data_base64", .str packB64)
+        ])
+      ]),
+      ("command", .arr #[.str "lean", .str "Main.lean"])
+    ])
+  ])
+  let (rtArchQ, rArchQ) ← handleRequest rt {
+    method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs, body := archBody.toUTF8
+  }
+  rt := rtArchQ
+  let persistedHasB64 := match rt.ledger.jobs.get? archJobId with
+    | some jr => (jr.payloadJson.splitOn packB64).length > 1
+    | none => true
+  check "archive-backed lean_build queues while saturated and redacts persisted data_base64"
+    (rArchQ.status == 202 &&
+     (rt.ledger.jobs.get? archJobId).map (·.state) == some .queued &&
+     !persistedHasB64)
+
+  -- Wait for the two 1s jobs to time out (`nowEp > startedEp + 1`), repay `shrinkDebt`, and admit `archJobId` from `queuedPayloads`!
+  for _ in [0:45] do
+    IO.sleep 100
+    rt ← tickRuntime rt
+    if (rt.ledger.jobs.get? archJobId).map (·.state) == some .succeeded then
+      break
+  check "timed-out regular jobs repay shrinkDebt=0 and queued archive-backed lean_build succeeds on cold seed"
+    (rt.shrinkDebt == 0 && (rt.ledger.jobs.get? archJobId).map (·.state) == some .succeeded)
+  return rt
+
+set_option maxRecDepth 2048 in
 def runTests : IO UInt32 := do
   let passedRef ← IO.mkRef (0 : Nat)
   let check (label : String) (cond : Bool) : IO Unit := do
@@ -176,8 +320,12 @@ def runTests : IO UInt32 := do
     query := #[], headers := authHdrs, body := execBody.toUTF8
   }
   rt := rt4
+  if rExec.status != 200 then
+    throw (IO.userError s!"execute status={rExec.status} body={String.fromUTF8? rExec.body}")
   let .ok execJson := OrbBin.Json.parse (String.fromUTF8! rExec.body)
-    | throw (IO.userError "execute invalid JSON")
+    | throw (IO.userError s!"execute invalid JSON: {String.fromUTF8? rExec.body}")
+  if execJson.fieldStr? "stdout" != some "exec-ok:clean" then
+    throw (IO.userError s!"execute json={renderCompact execJson}")
   check "POST /execute runs command in cleared env without leaking SANDBOXED_NODE_TOKEN"
     (rExec.status == 200 && execJson.fieldStr? "stdout" == some "exec-ok:clean")
 
@@ -667,6 +815,9 @@ def runTests : IO UInt32 := do
      (pcManifest?.bind (·.fieldUInt64? "revision")).isSome &&
      (pcManifest?.bind (·.field? "entries") >>= JVal.asObj?).isSome)
 
+  -- 12. Round-2 regression checks
+  rt ← runRound2RegressionTests check tmpRoot missionId submitLease nowEp authHdrs rt
+
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get
   IO.println s!"OrbNode self-test: {passed}/{passed} assertions PASSED"
@@ -674,5 +825,8 @@ def runTests : IO UInt32 := do
 
 end OrbNode.SelfTest
 
-def main : IO UInt32 :=
-  OrbNode.SelfTest.runTests
+def main (args : List String) : IO UInt32 := do
+  if args.head? == some "--sandboxed-scope-exec-cleared-env" then
+    OrbNode.Main.runCli args
+  else
+    OrbNode.SelfTest.runTests

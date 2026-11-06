@@ -151,12 +151,13 @@ def ContextOperation.fromJson? (v : JVal) : Option ContextOperation := do
   return { id, path, base?, hash?, directory, delete, source, confirmedLarge }
 
 structure ReplicaState where
-  initialized : Bool := false
-  ready       : Bool := false
-  baseline    : ContextManifest := {}
-  pending     : Array ContextOperation := #[]
-  conflicts   : Array (String × String) := #[]
-  error?      : Option String := none
+  initialized      : Bool := false
+  ready            : Bool := false
+  baseline         : ContextManifest := {}
+  pending          : Array ContextOperation := #[]
+  conflicts        : Array (String × String) := #[]
+  conflictVersions : Array (String × Option String) := #[]
+  error?           : Option String := none
   deriving Repr, Inhabited
 
 def ReplicaState.toJson (s : ReplicaState) : JVal :=
@@ -166,6 +167,8 @@ def ReplicaState.toJson (s : ReplicaState) : JVal :=
     ("baseline", s.baseline.toJson),
     ("pending", .arr (s.pending.map ContextOperation.toJson)),
     ("conflicts", .obj (s.conflicts.map fun (k, v) => (k, .str v))),
+    ("conflict_versions", .obj (s.conflictVersions.map fun (k, v) =>
+      (k, match v with | some h => .str h | none => .null))),
     ("error", match s.error? with | some e => .str e | none => .null)
   ]
 
@@ -178,8 +181,12 @@ def ReplicaState.fromJson? (v : JVal) : Option ReplicaState := do
     match (v.field? "conflicts") >>= JVal.asObj? with
     | some kvs => kvs.filterMap (fun (k, cv) => cv.asStr?.map (fun s => (k, s)))
     | none => #[]
+  let conflictVersions :=
+    match (v.field? "conflict_versions") >>= JVal.asObj? with
+    | some kvs => kvs.map (fun (k, cv) => (k, cv.asStr?))
+    | none => #[]
   let error? := v.fieldStr? "error"
-  return { initialized, ready, baseline, pending, conflicts, error? }
+  return { initialized, ready, baseline, pending, conflicts, conflictVersions, error? }
 
 private def writeAtomicFile (dest : System.FilePath) (bytes : ByteArray) : IO (Except String Unit) := do
   if let some par := dest.parent then
@@ -343,9 +350,18 @@ private def applyLocalOperation
     let st ← statPath target.toString
     if st.exists_ then
       if st.isDir then
-        let _ ← IO.Process.output { cmd := "rm", args := #["-rf", target.toString] }
+        let children ← match ← target.readDir |>.toBaseIO with
+          | .ok cs => pure cs
+          | .error e => return .error (toString e)
+        if !children.isEmpty then
+          return .error "delete directory contents first"
+        match ← (IO.FS.removeDir target).toBaseIO with
+        | .ok () => pure ()
+        | .error e => return .error (toString e)
       else
-        try IO.FS.removeFile target catch _ => pure ()
+        match ← (IO.FS.removeFile target).toBaseIO with
+        | .ok () => pure ()
+        | .error e => return .error (toString e)
   else if op.directory then
     IO.FS.createDirAll target
   else
@@ -442,7 +458,7 @@ private def synchronizeReplicaInner
           st := { st with pending := st.pending.push op }
     let sortedPending := st.pending.qsort fun a b =>
       if a.delete != b.delete then a.delete
-      else if a.delete then b.path.length > a.path.length
+      else if a.delete then a.path.length > b.path.length
       else a.path.length < b.path.length
     st := { st with pending := sortedPending }
     let _ ← saveReplicaState stateDir st
@@ -476,7 +492,11 @@ private def synchronizeReplicaInner
     let isConflict := (rcptJv.fieldBool? "conflict").getD false
     let rcptRev := (rcptJv.fieldUInt64? "revision").getD 0
     if isConflict then
-      st := { st with conflicts := (st.conflicts.filter (fun (k, _) => k != op.path)).push (op.path, op.id) }
+      st := {
+        st with
+        conflicts := (st.conflicts.filter (fun (k, _) => k != op.path)).push (op.path, op.id)
+        conflictVersions := (st.conflictVersions.filter (fun (k, _) => k != op.path)).push (op.path, op.hash?)
+      }
     else if op.delete then
       st := { st with baseline := st.baseline.erase op.path }
     else
@@ -505,6 +525,30 @@ private def synchronizeReplicaInner
   let curM ← match ← reconcileLocalStore filesDir stateDir with
     | .ok m => pure m
     | .error e => return .error e
+  if !st.conflicts.isEmpty then
+    let openBytes ← match ← contextHttpRequest endpoint token project "GET" "conflicts" with
+      | .ok b => pure b
+      | .error e => return .error e
+    let .ok openJv := OrbBin.Json.parseBytes openBytes
+      | return .error "invalid open conflicts JSON"
+    let openIds : Array String :=
+      match openJv.asObj? with
+      | some kvs => kvs.map (·.1)
+      | none => #[]
+    let resolvedPaths := (st.conflicts.filter (fun (_, cid) => !openIds.contains cid)).map (·.1)
+    for path in resolvedPaths do
+      let existing? := curM.get? path
+      let recordedVer? := (st.conflictVersions.find? (fun (k, _) => k == path)).bind (·.2)
+      if existing?.bind (·.hash?) == recordedVer? then
+        match existing? with
+        | some exE => st := { st with baseline := st.baseline.upsert path exE }
+        | none => st := { st with baseline := st.baseline.erase path }
+      st := {
+        st with
+        conflicts := st.conflicts.filter (fun (k, _) => k != path)
+        conflictVersions := st.conflictVersions.filter (fun (k, _) => k != path)
+      }
+    let _ ← saveReplicaState stateDir st
   let mut syncPaths : Array String := #[]
   for (p, _) in remoteM.entries do
     if !syncPaths.contains p then syncPaths := syncPaths.push p
@@ -514,7 +558,7 @@ private def synchronizeReplicaInner
     let da := (remoteM.get? a).isNone
     let db := (remoteM.get? b).isNone
     if da != db then da
-    else if da then b.length > a.length
+    else if da then a.length > b.length
     else a.length < b.length
   for path in orderedPaths do
     if !(st.conflicts.any (fun (cp, _) => cp == path)) then
@@ -591,7 +635,8 @@ def tickProjectReplica
     match ← synchronizeReplicaInner filesDir stateDir endpoint token project st0 with
     | .ok st' => return .ok st'
     | .error errMsg =>
-      let errSt := { st0 with error? := some errMsg }
+      let latest ← loadReplicaState stateDir
+      let errSt := { latest with error? := some errMsg }
       let _ ← saveReplicaState stateDir errSt
       return .ok errSt
   finally

@@ -93,6 +93,7 @@ def runCli (args : List String) : IO UInt32 := do
       IO.eprintln s!"failed to open OrbNode ledger: {msg}"
       return 1
     | .ok ledger =>
+      reapPreviousScopesOnStart cfg
       let rt : NodeRuntime := { cfg := cfg, ledger := ledger }
       runServerLoop rt dialCred?
 

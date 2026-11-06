@@ -180,15 +180,8 @@ def readHttpRequest (cfd : UInt32) (maxBodyBytes : Nat := 134217728) : IO (Excep
     body := body
   }
 
-private def readLogTail64K (logPath? : Option String) : IO (Option String) := do
-  let some lp := logPath? | return none
-  let p := System.FilePath.mk lp
-  if !(← p.pathExists) then return none
-  let .ok bytes ← IO.FS.readBinFile p |>.toBaseIO
-    | return none
-  let start := if bytes.size > 65536 then bytes.size - 65536 else 0
-  let sub := bytes.extract start bytes.size
-  return some (String.fromUTF8? sub |>.getD "")
+private def readLogTail64K (logPath? : Option String) : IO (Option String) :=
+  readJobLogTailBounded logPath? 65536
 
 private def scanSoftwareInventory : IO JVal := do
   let candidates := #[
@@ -338,9 +331,13 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
       | .error "duplicate_job_id" => return (rt, textResp 409 s!"job {jobId} already exists", preLaunches, #[])
       | .error msg => return (rt, textResp 503 msg, preLaunches, #[])
       | .ok l' =>
-        let rtQueued := { rt with ledger := l', queueOrder := rt.queueOrder.push jobId }
-        let hints : Std.HashMap String JVal := ({} : Std.HashMap String JVal).insert jobId payloadVal
-        let (rtReserved, postLaunches) ← tickRuntimeReserve rtQueued hints
+        let rtQueued := {
+          rt with
+          ledger := l'
+          queuedPayloads := rt.queuedPayloads.insert jobId payloadVal
+          queueOrder := rt.queueOrder.push jobId
+        }
+        let (rtReserved, postLaunches) ← tickRuntimeReserve rtQueued
         return (rtReserved, jsonResp 202 (.obj #[("job_id", .str jobId), ("state", .str "queued")]),
           preLaunches ++ postLaunches, #[])
   | "GET", ["jobs"] =>
@@ -359,15 +356,7 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
       | return (rt, textResp 404 "job not found", preLaunches, #[])
     let off := (req.query? "offset" >>= String.toNat?).getD 0
     let maxB := (req.query? "max_bytes" >>= String.toNat?).getD 262144
-    let rawBytes ← match rec.logPath? with
-      | some lp =>
-        if ← (System.FilePath.mk lp).pathExists then
-          match ← IO.FS.readBinFile lp |>.toBaseIO with
-          | .ok b => pure b
-          | .error _ => pure ByteArray.empty
-        else pure ByteArray.empty
-      | none => pure ByteArray.empty
-    let sl := sliceJobLogBytes rawBytes off maxB
+    let sl ← readJobLogSliceBounded rec.logPath? off.toUInt64 maxB
     return (rt, jsonResp 200 (.obj #[
       ("job_id", .str key),
       ("offset", JVal.uint64 sl.offset),
@@ -629,8 +618,10 @@ def handleNonExecRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRunti
 private partial def spawnAsyncLaunches (mtx : Std.Mutex NodeRuntime) (launches : Array PendingAsyncLaunch) : IO Unit := do
   for item in launches do
     let _ ← IO.asTask do
-      let prepRes ← prepareJobOutsideLock item.cfg item.jid item.missionId item.payload item.logPath
-        item.forced item.sideLane item.coordLane
+      let prepRes ← match ← (prepareJobOutsideLock item.cfg item.jid item.missionId item.payload item.logPath
+          item.forced item.sideLane item.coordLane).toBaseIO with
+        | .ok r => pure r
+        | .error e => pure (.error s!"unexpected launch exception: {e}")
       let more ← mtx.atomically do
         let rt ← get
         let rtCommitted ← commitPreparedJob rt item.jid prepRes
@@ -648,15 +639,15 @@ private def spawnSteerWatchers (mtx : Std.Mutex NodeRuntime) (watchers : Array (
       let mut done := false
       while !done do
         IO.sleep 100
-        let stillActive ← mtx.atomically do
+        let (stillActive, scopeUnit?) ← mtx.atomically do
           let rt ← get
           match rt.liveProcs.get? jid with
-          | some lp => return (lp.pid == rootPid && lp.steerAfterTool)
-          | none => return false
+          | some lp => return (lp.pid == rootPid && lp.steerAfterTool, lp.systemdScope?.map (·.unit))
+          | none => return (false, none)
         if !stillActive then
           done := true
         else
-          let inflight ← collectInflightChildToolPids rootPid
+          let inflight ← collectInflightChildToolPids rootPid scopeUnit?
           if inflight.isEmpty then
             IO.sleep 120
             let nextLaunches ← mtx.atomically do
@@ -733,14 +724,14 @@ def handleRequestConcurrent (mtx : Std.Mutex NodeRuntime) (req : HttpRequest) : 
           if activeRegularCount rt + rt.shrinkDebt >= rt.cfg.capacityTotal then
             return (Except.error (textResp 429 "node capacity exhausted"), preL)
           set { rt with activeExecMain := rt.activeExecMain + 1 }
-        return (Except.ok (rt.cfg.workDir, rt.ledger.hasSqlite3, missionId, command, rt.cfg.maxJobSecs, sideLane), preL)
+        return (Except.ok (rt.cfg, rt.ledger.hasSqlite3, missionId, command, sideLane), preL)
     if !preLaunches.isEmpty then
       spawnAsyncLaunches mtx preLaunches
     match prep with
     | .error errResp => return errResp
-    | .ok (workDir, hasSqlite3, missionId, command, maxJobSecs, sideLane) =>
+    | .ok (cfg, hasSqlite3, missionId, command, sideLane) =>
       try
-        match ← execClearedLeaseCommand workDir hasSqlite3 missionId command maxJobSecs with
+        match ← execClearedLeaseCommand cfg hasSqlite3 missionId command with
         | .ok outVal => return jsonResp 200 outVal
         | .error fenceErr => return textResp 503 fenceErr
       finally
@@ -758,6 +749,51 @@ def handleRequestConcurrent (mtx : Std.Mutex NodeRuntime) (req : HttpRequest) : 
           return nextL
         if !postLaunches.isEmpty then
           spawnAsyncLaunches mtx postLaunches
+  else if req.method == "GET" && segs.length == 3 && segs[0]? == some "jobs" && segs[2]? == some "log" then
+    let jid := segs[1]!
+    let key := (parseUuidCanonical? jid).getD jid
+    let (lookupRes, preLaunches) ← mtx.atomically do
+      let (rt, preL) ← tickRuntimeReserve (← get)
+      set rt
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return (Except.error (textResp 401 "invalid node token"), preL)
+      let some rec := rt.ledger.jobs.get? key
+        | return (Except.error (textResp 404 "job not found"), preL)
+      return (Except.ok (rec.logPath?, rec.state.asString), preL)
+    if !preLaunches.isEmpty then
+      spawnAsyncLaunches mtx preLaunches
+    match lookupRes with
+    | .error errResp => return errResp
+    | .ok (logPath?, stateStr) =>
+      let off := (req.query? "offset" >>= String.toNat?).getD 0
+      let maxB := (req.query? "max_bytes" >>= String.toNat?).getD 262144
+      let sl ← readJobLogSliceBounded logPath? off.toUInt64 maxB
+      return jsonResp 200 (.obj #[
+        ("job_id", .str key),
+        ("offset", JVal.uint64 sl.offset),
+        ("next_offset", JVal.uint64 sl.nextOffset),
+        ("log_len", JVal.uint64 sl.logLen),
+        ("data", .str sl.data),
+        ("state", .str stateStr)
+      ])
+  else if req.method == "GET" && segs.length == 2 && segs[0]? == some "jobs" then
+    let jid := segs[1]!
+    let key := (parseUuidCanonical? jid).getD jid
+    let (lookupRes, preLaunches) ← mtx.atomically do
+      let (rt, preL) ← tickRuntimeReserve (← get)
+      set rt
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return (Except.error (textResp 401 "invalid node token"), preL)
+      let some rec := rt.ledger.jobs.get? key
+        | return (Except.error (textResp 404 "job not found"), preL)
+      return (Except.ok rec, preL)
+    if !preLaunches.isEmpty then
+      spawnAsyncLaunches mtx preLaunches
+    match lookupRes with
+    | .error errResp => return errResp
+    | .ok rec =>
+      let tail? ← readLogTail64K rec.logPath?
+      return jsonResp 200 (rec.toStatusJson tail?)
   else if req.method == "POST" && segs == ["project-context", "prepare"] then
     let authCheck ← mtx.atomically do
       let rt ← get

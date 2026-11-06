@@ -211,6 +211,17 @@ private def detectSqlite3 : IO Bool := do
   | .ok out => return out.exitCode == 0
   | .error _ => return false
 
+private def runSqliteStdin (dbPath sql : String) (timeoutMs : Nat := 5000) : IO (Except String Unit) := do
+  let res ← (IO.Process.output {
+    cmd := "sqlite3"
+    args := #["-cmd", s!".timeout {timeoutMs}", dbPath]
+  } (input? := some (sql ++ "\n"))).toBaseIO
+  match res with
+  | .error e => return .error (toString e)
+  | .ok out =>
+    if out.exitCode == 0 then return .ok ()
+    else return .error s!"jobs.db write locked or failed: {out.stderr.trimAscii}"
+
 private def ensureLegacySqliteSchema (workDir : String) (hasSqlite3 : Bool) : IO Unit := do
   if !hasSqlite3 then return
   let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
@@ -218,7 +229,7 @@ private def ensureLegacySqliteSchema (workDir : String) (hasSqlite3 : Bool) : IO
     "PRAGMA journal_mode=WAL; " ++
     "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, log_path TEXT, error TEXT, artifacts_json TEXT, cancellation_json TEXT); " ++
     "CREATE TABLE IF NOT EXISTS node_scratch (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, job_id TEXT, parent_identity TEXT NOT NULL, directory_identity TEXT NOT NULL, retired_at TEXT);"
-  discard <| (IO.Process.output { cmd := "sqlite3", args := #["-cmd", ".timeout 5000", dbPath, ddl] }).toBaseIO
+  discard <| runSqliteStdin dbPath ddl 5000
 
 private def syncJobToLegacySqlite
     (workDir : String) (hasSqlite3 : Bool) (r : JobRecord) (timeoutMs : Nat := 5000) :
@@ -236,14 +247,7 @@ private def syncJobToLegacySqlite
   let sql :=
     "INSERT OR REPLACE INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json) VALUES (" ++
     s!"{sqlEsc r.jobId}, {sqlEsc r.missionId}, {sqlEsc r.payloadJson}, {sqlEsc r.state.asString}, {exitSql}, {sqlEsc r.createdAt}, {sqlOptStr r.startedAt?}, {sqlOptStr r.finishedAt?}, {sqlOptStr r.logPath?}, {sqlOptStr r.error?}, {artsSql}, {cancSql});"
-  match ← (IO.Process.output {
-      cmd := "sqlite3",
-      args := #["-cmd", s!".timeout {timeoutMs}", dbPath, sql]
-    }).toBaseIO with
-  | .error e => return .error (toString e)
-  | .ok out =>
-    if out.exitCode == 0 then return .ok ()
-    else return .error s!"jobs.db write locked or failed: {out.stderr.trimAscii}"
+  runSqliteStdin dbPath sql timeoutMs
 
 /-- Import legacy SQLite `<work_dir>/jobs.db` rows idempotently when `sqlite3` and `jobs.db` exist. -/
 private def importLegacySqliteJobs (workDir : String) (hasSqlite3 : Bool) : IO (Array JobRecord) := do
@@ -447,6 +451,6 @@ def releaseExecFenceReceipt (workDir : String) (hasSqlite3 : Bool) (execId missi
   if !hasSqlite3 then return
   let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
   let sql := s!"DELETE FROM jobs WHERE id = {sqlEsc execId} AND mission_id = {sqlEsc missionId};"
-  discard <| (IO.Process.output { cmd := "sqlite3", args := #["-cmd", ".timeout 5000", dbPath, sql] }).toBaseIO
+  discard <| runSqliteStdin dbPath sql 5000
 
 end OrbNode.Store
