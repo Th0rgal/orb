@@ -68,7 +68,7 @@ view or edit shared Markdown context, and manage backend, machines and providers
 ## Bring your subscriptions
 
 Sign in to supported subscription accounts directly from **Providers** in Orb
-(macOS, web and iOS) or connect them through **CLIProxyAPI Plus**. You can
+(desktop, iOS, and Android) or connect them through **CLIProxyAPI Plus**. You can
 authenticate via OAuth, renew tokens, enable or disable individual accounts,
 and inspect live plan/quota status; the proxy handles routing and rotation
 across eligible accounts while Orb lets you choose the harness and model.

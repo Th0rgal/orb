@@ -1500,6 +1500,7 @@ struct OrbProjectPage: View {
             }
             Button { newFolderParent = ""; folderName = ""; newFolder = true } label: { Label("New folder", systemImage: "folder.badge.plus") }
             OrbProjectColorMenu(project: project.id)
+            NavigationLink { OrbProjectAutomationView(project: project) } label: { Label("Controller & crons", systemImage: "clock.arrow.2.circlepath") }
             NavigationLink { OrbDocuments(project: project.id, path: "") } label: { Label("Project context", systemImage: "doc.text") }
             NavigationLink { OrbProjectSecretAccess(slug: project.id) } label: { Label("Secret access", systemImage: "lock.shield") }
         } label: {

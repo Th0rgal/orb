@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.AlertDialog
@@ -109,6 +110,9 @@ sealed class OrbNavScreen {
     data class DocumentViewer(
         val project: OrbRow,
         val entry: OrbRow
+    ) : OrbNavScreen()
+    data class Controller(
+        val project: OrbRow
     ) : OrbNavScreen()
 }
 
@@ -313,6 +317,7 @@ fun OrbAppRoot(
             is OrbNavScreen.Conversation -> "conversation"
             is OrbNavScreen.Documents -> "documents"
             is OrbNavScreen.DocumentViewer -> "document_viewer"
+            is OrbNavScreen.Controller -> "controller"
         },
         surface = UsageTelemetry.Surface.Screen
     )
@@ -487,6 +492,9 @@ fun OrbAppRoot(
                             },
                             onOpenDocuments = { dirPath ->
                                 push(OrbNavScreen.Documents(currentScreen.project, dirPath))
+                            },
+                            onOpenController = {
+                                push(OrbNavScreen.Controller(currentScreen.project))
                             }
                         )
                     }
@@ -521,6 +529,13 @@ fun OrbAppRoot(
                             core = core,
                             project = currentScreen.project,
                             entry = currentScreen.entry,
+                            onBack = { pop() }
+                        )
+                    }
+                    is OrbNavScreen.Controller -> {
+                        OrbProjectAutomationPage(
+                            core = core,
+                            project = currentScreen.project,
                             onBack = { pop() }
                         )
                     }
@@ -1210,7 +1225,8 @@ fun OrbProjectPage(
     onBack: () -> Unit,
     onOpenMission: (OrbRow) -> Unit,
     onNewAgent: (folder: String?) -> Unit,
-    onOpenDocuments: (directoryPath: String) -> Unit
+    onOpenDocuments: (directoryPath: String) -> Unit,
+    onOpenController: () -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     val missions by core.missions.collectAsState()
@@ -1798,6 +1814,16 @@ fun OrbProjectPage(
                                 onClick = {
                                     showMenu = false
                                     onOpenDocuments("")
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Controller & crons", color = Color.White) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Schedule, contentDescription = null, tint = Color.White)
+                                },
+                                onClick = {
+                                    showMenu = false
+                                    onOpenController()
                                 }
                             )
                         }

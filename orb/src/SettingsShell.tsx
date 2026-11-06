@@ -45,7 +45,6 @@ export function SettingsShell(p: { page: string; onOpen: (id: string) => void; c
     </div>
   );
 }
-
 /** Security → Access: approval devices, Fleet Bunker Mode and privileged access. */
 export function SecuritySettings() {
   const [error, setError] = createSignal("");

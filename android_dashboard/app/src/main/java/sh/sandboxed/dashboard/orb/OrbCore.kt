@@ -1920,7 +1920,7 @@ class OrbCore private constructor(context: Context) {
         startLiveRefreshLoop()
     }
 
-    fun configureSession(baseURL: String, token: String?, password: String? = null) {
+    fun configureSession(baseURL: String, token: String?, password: String? = null, username: String? = null) {
         val cleanBase = baseURL.trim().trimEnd('/')
         val cleanToken = token?.trim()?.takeIf { it.isNotEmpty() }
         val previousBase = _baseURL.value.trim().trimEnd('/')
@@ -1939,16 +1939,24 @@ class OrbCore private constructor(context: Context) {
         _token.value = cleanToken
         if (!password.isNullOrEmpty() && cleanBase.isNotEmpty()) {
             OrbKeychain.write(CREDENTIALS_SERVICE, cleanBase, password)
+            val cleanUser = username?.trim()?.takeIf { it.isNotEmpty() }
+            prefs.edit().apply {
+                if (cleanUser != null) putString("orb.username.$cleanBase", cleanUser)
+                else remove("orb.username.$cleanBase")
+            }.apply()
         }
         persistSession()
     }
+
+    fun savedUsername(baseURL: String = _baseURL.value): String =
+        prefs.getString("orb.username.${baseURL.trim().trimEnd('/')}", null).orEmpty()
 
     fun clearSession() {
         val cleanBase = _baseURL.value.trim().trimEnd('/')
         if (cleanBase.isNotEmpty()) {
             OrbKeychain.write(KEYCHAIN_SERVICE, cleanBase, null)
             OrbKeychain.write(CREDENTIALS_SERVICE, cleanBase, null)
-            prefs.edit().remove("$TOKEN_FALLBACK_KEY.$cleanBase").apply()
+            prefs.edit().remove("$TOKEN_FALLBACK_KEY.$cleanBase").remove("orb.username.$cleanBase").apply()
         }
         OrbDisk.clearCurrentScope()
         OrbReadCache.clearMemory()
@@ -2421,7 +2429,9 @@ class OrbCore private constructor(context: Context) {
         headers: Map<String, String> = emptyMap(),
         allowAuthRetry: Boolean = true,
         /** Exact JSON text to send (device-signed requests hash these bytes). */
-        rawBody: String? = null
+        rawBody: String? = null,
+        explicitBaseURL: String? = null,
+        explicitToken: String? = null
     ): Any? = withContext(Dispatchers.IO) {
         val upperMethod = method.uppercase()
         val effectiveHeaders = LinkedHashMap<String, String>(headers)
@@ -2434,11 +2444,11 @@ class OrbCore private constructor(context: Context) {
             it.key.equals("Idempotency-Key", ignoreCase = true) && it.value.isNotBlank()
         }
         val idempotent = upperMethod == "GET" || upperMethod == "HEAD" || hasIdemKey
-        val primaryBase = _baseURL.value.trim().trimEnd('/')
+        val primaryBase = (explicitBaseURL ?: _baseURL.value).trim().trimEnd('/')
         if (primaryBase.isEmpty()) throw OrbError("No server URL configured")
         val candidates = if (idempotent) orderedCandidateEndpoints(primaryBase) else listOf(primaryBase)
 
-        val cleanToken = _token.value?.trim()?.takeIf { it.isNotEmpty() }
+        val cleanToken = (explicitToken ?: _token.value)?.trim()?.takeIf { it.isNotEmpty() }
         val requestBody = when {
             rawBody != null -> rawBody.toRequestBody("application/json; charset=utf-8".toMediaType())
             body != null -> {
@@ -2505,7 +2515,10 @@ class OrbCore private constructor(context: Context) {
         }
         if (lastIoError != null) throw lastIoError
 
-        if (code == 401 && allowAuthRetry && path != "/api/auth/login") {
+        val sameConnectionForRetry =
+            (explicitBaseURL == null || _baseURL.value.trim().trimEnd('/') == primaryBase) &&
+                (explicitToken == null || _token.value == explicitToken)
+        if (code == 401 && allowAuthRetry && sameConnectionForRetry && path != "/api/auth/login" && path != "/api/auth/change-password") {
             if (renewSessionFromSavedCredentials()) {
                 return@withContext request(
                     path = path,
@@ -2513,7 +2526,8 @@ class OrbCore private constructor(context: Context) {
                     body = body,
                     headers = effectiveHeaders,
                     allowAuthRetry = false,
-                    rawBody = rawBody
+                    rawBody = rawBody,
+                    explicitBaseURL = explicitBaseURL
                 )
             }
         }
@@ -2535,9 +2549,14 @@ class OrbCore private constructor(context: Context) {
         if (cleanBase.isEmpty()) return@withContext false
         val password = OrbKeychain.read(CREDENTIALS_SERVICE, cleanBase)?.trim()?.takeIf { it.isNotEmpty() }
             ?: return@withContext false
+        val savedUser = prefs.getString("orb.username.$cleanBase", null)?.trim()?.takeIf { it.isNotEmpty() }
         try {
             val url = makeURL("/api/auth/login")
-            val body = OrbJSON.stringify(mapOf("password" to password))
+            val loginMap = LinkedHashMap<String, Any?>().apply {
+                put("password", password)
+                if (savedUser != null) put("username", savedUser)
+            }
+            val body = OrbJSON.stringify(loginMap)
                 .toRequestBody("application/json; charset=utf-8".toMediaType())
             val req = Request.Builder()
                 .url(url)
@@ -2561,6 +2580,58 @@ class OrbCore private constructor(context: Context) {
             if (t !is CancellationException) OrbLog.w(OrbLog.Category.Auth, "session renewal failed", t)
             false
         }
+    }
+
+    suspend fun requestBytes(
+        path: String,
+        method: String = "GET",
+        headers: Map<String, String> = emptyMap(),
+        rawBytes: ByteArray? = null,
+        contentType: String? = null,
+        allowAuthRetry: Boolean = true,
+        explicitBaseURL: String? = null,
+        explicitToken: String? = null
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val upperMethod = method.uppercase()
+        val targetBase = (explicitBaseURL ?: _baseURL.value).trim().trimEnd('/')
+        val url = makeURL(path, explicitBase = targetBase)
+        val cleanToken = (explicitToken ?: _token.value)?.trim()?.takeIf { it.isNotEmpty() }
+        val reqBody = rawBytes?.toRequestBody((contentType ?: "application/octet-stream").toMediaType())
+        val reqBuilder = Request.Builder().url(url)
+        if (cleanToken != null) {
+            reqBuilder.header("Authorization", "Bearer $cleanToken")
+        }
+        for ((k, v) in headers) {
+            reqBuilder.header(k, v)
+        }
+        reqBuilder.method(upperMethod, reqBody)
+        val resp = httpClient.newCall(reqBuilder.build()).execute()
+        val code = resp.code
+        val bytes = resp.body?.bytes() ?: ByteArray(0)
+        resp.close()
+        val sameConnectionForRetry =
+            (explicitBaseURL == null || _baseURL.value.trim().trimEnd('/') == targetBase) &&
+                (explicitToken == null || _token.value == explicitToken)
+        if (code == 401 && allowAuthRetry && sameConnectionForRetry && renewSessionFromSavedCredentials()) {
+            return@withContext requestBytes(
+                path = path,
+                method = method,
+                headers = headers,
+                rawBytes = rawBytes,
+                contentType = contentType,
+                allowAuthRetry = false,
+                explicitBaseURL = explicitBaseURL
+            )
+        }
+        if (code !in 200..299) {
+            val raw = bytes.decodeToString()
+            val parsed = OrbJSON.dict(OrbJSON.parse(bytes))
+            val message = OrbJSON.str(parsed, "error", "message", "detail")
+                ?: if (raw.isEmpty()) "HTTP $code" else raw.take(240)
+            recordErrorLog("$method $path -> HTTP $code\n${raw.take(2000)}", "$method $path -> HTTP $code")
+            throw OrbError(message, status = code, body = raw.take(2000))
+        }
+        bytes
     }
 
     suspend fun fetchDict(path: String): OrbDict {
