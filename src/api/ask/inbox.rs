@@ -628,11 +628,37 @@ pub async fn get_state(
             )
         })
 }
+fn versioned_save_response(
+    entry_key: &str,
+    outcome: super::store::SaveInboxStateOutcome,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match outcome {
+        super::store::SaveInboxStateOutcome::Applied { .. }
+        | super::store::SaveInboxStateOutcome::DuplicateOrOlder => {
+            StatusCode::NO_CONTENT.into_response()
+        }
+        super::store::SaveInboxStateOutcome::Conflict {
+            revision,
+            current_value,
+        } => {
+            let mut body = serde_json::Map::new();
+            if let Some(value) = current_value {
+                body.insert(entry_key.to_string(), value);
+            }
+            let mut versions = serde_json::Map::new();
+            versions.insert(entry_key.to_string(), json!(revision));
+            body.insert("_versions".into(), Value::Object(versions));
+            (StatusCode::CONFLICT, Json(Value::Object(body))).into_response()
+        }
+    }
+}
+
 pub async fn save_preferences(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Json(mut prefs): Json<Preferences>,
-) -> Result<StatusCode, Error> {
+) -> Result<axum::response::Response, Error> {
     validate_mutation(&prefs.client_id, prefs.mutation_seq, prefs.expected_version)?;
     prefs.model = prefs.model.trim().to_string();
     prefs.summary_mode = normalize_summary_mode(&prefs.summary_mode).into();
@@ -645,7 +671,7 @@ pub async fn save_preferences(
             "Could not open Inbox state".into(),
         )
     })?;
-    store
+    let outcome = store
         .save_inbox_state_versioned(
             &user.id.to_string(),
             "preferences",
@@ -661,14 +687,14 @@ pub async fn save_preferences(
                 "Could not save preferences".into(),
             )
         })?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(versioned_save_response("preferences", outcome))
 }
 pub async fn save_seen(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
     Json(seen): Json<Seen>,
-) -> Result<StatusCode, Error> {
+) -> Result<axum::response::Response, Error> {
     validate_mutation(&seen.client_id, seen.mutation_seq, seen.expected_version)?;
     if seen.stamp == 0 || seen.stamp.unsigned_abs() > 8_640_000_000_000_000 {
         return Err((StatusCode::BAD_REQUEST, "Invalid read receipt".into()));
@@ -694,10 +720,11 @@ pub async fn save_seen(
             "Could not open Inbox state".into(),
         )
     })?;
-    store
+    let entry_key = format!("seen:{id}");
+    let outcome = store
         .save_inbox_state_versioned(
             &user.id.to_string(),
-            &format!("seen:{id}"),
+            &entry_key,
             &json!(seen.stamp),
             seen.expected_version,
             &seen.client_id,
@@ -710,7 +737,7 @@ pub async fn save_seen(
                 "Could not save read receipt".into(),
             )
         })?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(versioned_save_response(&entry_key, outcome))
 }
 
 #[cfg(test)]
@@ -934,30 +961,61 @@ mod tests {
         drop(store);
         let store = super::super::store::AskStore::open(path).await.unwrap();
         for key in ["preferences", "seen:mission"] {
-            store
+            let conflict = store
                 .save_inbox_state_versioned("alice", key, &json!("old offline A"), 1, "A", 2)
                 .await
                 .unwrap();
+            assert_eq!(
+                conflict,
+                super::super::store::SaveInboxStateOutcome::Conflict {
+                    revision: 2,
+                    current_value: Some(json!("device B")),
+                }
+            );
+            let resp = versioned_save_response(key, conflict);
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+            let body: Value = serde_json::from_slice(
+                &axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(body[key], "device B");
+            assert_eq!(body["_versions"][key], 2);
             assert_eq!(store.inbox_state("alice").await.unwrap()[key], "device B");
-            store
-                .save_inbox_state_versioned("alice", key, &json!("fresh A"), 2, "A", 3)
-                .await
-                .unwrap();
-            store
-                .save_inbox_state_versioned(
-                    "alice",
-                    key,
-                    &json!("next A without a poll"),
-                    2,
-                    "A",
-                    4,
-                )
-                .await
-                .unwrap();
-            store
+            assert_eq!(
+                store
+                    .save_inbox_state_versioned("alice", key, &json!("fresh A"), 2, "A", 3)
+                    .await
+                    .unwrap(),
+                super::super::store::SaveInboxStateOutcome::Applied { revision: 3 }
+            );
+            assert_eq!(
+                store
+                    .save_inbox_state_versioned(
+                        "alice",
+                        key,
+                        &json!("next A without a poll"),
+                        2,
+                        "A",
+                        4,
+                    )
+                    .await
+                    .unwrap(),
+                super::super::store::SaveInboxStateOutcome::Applied { revision: 4 }
+            );
+            let dup = store
                 .save_inbox_state_versioned("alice", key, &json!("duplicate older A"), 4, "A", 3)
                 .await
                 .unwrap();
+            assert_eq!(
+                dup,
+                super::super::store::SaveInboxStateOutcome::DuplicateOrOlder
+            );
+            assert_eq!(
+                versioned_save_response(key, dup).status(),
+                StatusCode::NO_CONTENT
+            );
             assert_eq!(
                 store.inbox_state("alice").await.unwrap()[key],
                 "next A without a poll"
@@ -1136,5 +1194,100 @@ mod tests {
             now
         ));
         assert!(!eco_quiet_satisfied("", now));
+    }
+
+    #[tokio::test]
+    async fn handlers_return_409_with_current_revision_on_other_client_mismatch_and_204_on_same_client_retry(
+    ) {
+        use axum::response::IntoResponse;
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::super::store::AskStore::open(dir.path().join("ask.db"))
+            .await
+            .unwrap();
+        let client_a = "00000000-0000-0000-0000-00000000000a";
+        let client_b = "00000000-0000-0000-0000-00000000000b";
+        let mission_id = Uuid::new_v4();
+        let seen_key = format!("seen:{mission_id}");
+
+        let first_pref = store
+            .save_inbox_state_versioned(
+                "alice",
+                "preferences",
+                &json!({"inboxEnabled":true,"aiSummary":true,"summaryMode":"standard","includeAutonomous":false,"model":"builtin/smart"}),
+                0,
+                client_a,
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            versioned_save_response("preferences", first_pref).status(),
+            StatusCode::NO_CONTENT
+        );
+
+        let retry_pref = store
+            .save_inbox_state_versioned(
+                "alice",
+                "preferences",
+                &json!({"inboxEnabled":true,"aiSummary":true,"summaryMode":"standard","includeAutonomous":false,"model":"builtin/smart"}),
+                0,
+                client_a,
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            retry_pref,
+            super::super::store::SaveInboxStateOutcome::DuplicateOrOlder
+        );
+        assert_eq!(
+            versioned_save_response("preferences", retry_pref).status(),
+            StatusCode::NO_CONTENT
+        );
+
+        let stale_pref = store
+            .save_inbox_state_versioned(
+                "alice",
+                "preferences",
+                &json!({"inboxEnabled":true,"aiSummary":false,"summaryMode":"eco","includeAutonomous":true,"model":"builtin/fast"}),
+                0,
+                client_b,
+                1,
+            )
+            .await
+            .unwrap();
+        let resp = versioned_save_response("preferences", stale_pref).into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let payload: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload["_versions"]["preferences"], 1);
+        assert_eq!(payload["preferences"]["model"], "builtin/smart");
+
+        let first_seen = store
+            .save_inbox_state_versioned("alice", &seen_key, &json!(500), 0, client_a, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            versioned_save_response(&seen_key, first_seen).status(),
+            StatusCode::NO_CONTENT
+        );
+        let stale_seen = store
+            .save_inbox_state_versioned("alice", &seen_key, &json!(300), 0, client_b, 2)
+            .await
+            .unwrap();
+        let seen_resp = versioned_save_response(&seen_key, stale_seen).into_response();
+        assert_eq!(seen_resp.status(), StatusCode::CONFLICT);
+        let seen_payload: Value = serde_json::from_slice(
+            &axum::body::to_bytes(seen_resp.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(seen_payload["_versions"][&seen_key], 1);
+        assert_eq!(seen_payload[&seen_key], 500);
     }
 }
