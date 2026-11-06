@@ -278,8 +278,26 @@ impl<const N: usize> AtomicRingSamples<N> {
 /// Coalesces rapid state mutations into asynchronous atomic file writes
 /// (`tmp` + `rename` via `tokio::fs`) without blocking callers or holding locks.
 pub struct CoalescedAsyncWriter {
-    dirty: AtomicBool,
-    notify: Notify,
+    requested_seq: AtomicU64,
+    flushed_seq: AtomicU64,
+    running: AtomicBool,
+    notify: Arc<Notify>,
+    persist_lock: AsyncMutex<()>,
+    min_interval: Duration,
+    flush: Box<dyn Fn() -> FlushFuture + Send + Sync>,
+    weak: Weak<Self>,
+}
+
+type FlushFuture = std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>>;
+
+struct WriterRunningGuard(Weak<CoalescedAsyncWriter>);
+
+impl Drop for WriterRunningGuard {
+    fn drop(&mut self) {
+        if let Some(writer) = self.0.upgrade() {
+            writer.running.store(false, Ordering::Release);
+        }
+    }
 }
 
 impl CoalescedAsyncWriter {
@@ -287,39 +305,95 @@ impl CoalescedAsyncWriter {
     where
         F: Fn() -> Option<Vec<u8>> + Send + Sync + 'static,
     {
-        let writer = Arc::new(Self {
-            dirty: AtomicBool::new(false),
-            notify: Notify::new(),
-        });
-        let runner = Arc::clone(&writer);
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
+        Self::spawn_with_flush(min_interval, move || {
+            let bytes = build_bytes();
+            let path = path.clone();
+            async move {
+                let bytes = bytes.ok_or_else(|| std::io::Error::other("snapshot unavailable"))?;
+                write_atomic_async(&path, &bytes, None).await
+            }
+        })
+    }
+
+    pub fn spawn_with_flush<F, Fut>(min_interval: Duration, flush: F) -> Arc<Self>
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = std::io::Result<()>> + Send + 'static,
+    {
+        Arc::new_cyclic(|weak| Self {
+            requested_seq: AtomicU64::new(0),
+            flushed_seq: AtomicU64::new(0),
+            running: AtomicBool::new(false),
+            notify: Arc::new(Notify::new()),
+            persist_lock: AsyncMutex::new(()),
+            min_interval,
+            flush: Box::new(move || Box::pin(flush())),
+            weak: weak.clone(),
+        })
+    }
+
+    pub fn trigger(&self) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        self.notify.notify_one();
+        if self
+            .running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let weak = self.weak.clone();
+        let notify = Arc::clone(&self.notify);
+        let interval = self.min_interval;
+        let guard = WriterRunningGuard(weak.clone());
+        handle.spawn(async move {
+            let _guard = guard;
+            let mut backoff = Duration::from_millis(25);
+            loop {
+                notify.notified().await;
+                if !interval.is_zero() {
+                    tokio::time::sleep(interval).await;
+                }
                 loop {
-                    runner.notify.notified().await;
-                    if !min_interval.is_zero() {
-                        tokio::time::sleep(min_interval).await;
-                    }
-                    while runner.dirty.swap(false, Ordering::AcqRel) {
-                        if let Some(bytes) = build_bytes() {
-                            if let Err(err) = write_atomic_async(&path, &bytes, None).await {
-                                tracing::warn!(
-                                    path = %path.display(),
-                                    error = %err,
-                                    "coalesced async persistence failed"
-                                );
-                            }
+                    let Some(writer) = weak.upgrade() else {
+                        return;
+                    };
+                    let result = writer.flush_now().await;
+                    drop(writer);
+                    match result {
+                        Ok(()) => {
+                            backoff = Duration::from_millis(25);
+                            break;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "coalesced async persistence failed");
+                            tokio::time::sleep(backoff).await;
+                            backoff = (backoff * 2).min(Duration::from_secs(1));
                         }
                     }
                 }
-            });
-        }
-        writer
+            }
+        });
     }
 
     #[inline]
     pub fn mark_dirty(&self) {
-        self.dirty.store(true, Ordering::Release);
-        self.notify.notify_one();
+        let _ = self.requested_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        self.trigger();
+    }
+
+    pub async fn flush_now(&self) -> std::io::Result<()> {
+        let _guard = self.persist_lock.lock().await;
+        loop {
+            let target_seq = self.requested_seq.load(Ordering::Acquire);
+            if self.flushed_seq.load(Ordering::Acquire) >= target_seq {
+                return Ok(());
+            }
+            (self.flush)().await?;
+            self.flushed_seq.store(target_seq, Ordering::Release);
+        }
     }
 }
 
@@ -330,53 +404,191 @@ pub async fn write_atomic_async(
     bytes: &[u8],
     unix_mode: Option<u32>,
 ) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-    }
+    let path = path.to_path_buf();
+    let bytes = bytes.to_vec();
+    tokio::task::spawn_blocking(move || write_atomic(&path, &bytes, unix_mode))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+pub(crate) fn write_atomic(
+    path: &std::path::Path,
+    bytes: &[u8],
+    unix_mode: Option<u32>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
     let unique = uuid::Uuid::new_v4().simple();
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("state");
     let tmp_path = path.with_file_name(format!(".{file_name}.{unique}.tmp"));
-
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use tokio::io::AsyncWriteExt;
-        let mut opts = tokio::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
+        use std::os::unix::fs::OpenOptionsExt;
         if let Some(mode) = unix_mode {
             opts.mode(mode);
         }
-        let mut file = opts.open(&tmp_path).await?;
-        if let Err(err) = file.write_all(bytes).await {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(err);
-        }
-        if let Err(err) = file.sync_all().await {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(err);
-        }
     }
-
     #[cfg(not(unix))]
-    {
-        let _ = unix_mode;
-        if let Err(err) = tokio::fs::write(&tmp_path, bytes).await {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(err);
-        }
+    let _ = unix_mode;
+    let mut file = opts.open(&tmp_path)?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp_path, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
     }
-
-    if let Err(err) = tokio::fs::rename(&tmp_path, path).await {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
-        return Err(err);
-    }
-    Ok(())
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn wait_until_flushed(writer: &CoalescedAsyncWriter, seq: u64) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while writer.flushed_seq.load(Ordering::Acquire) < seq {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn coalesced_failure_preserves_pending_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let attempts = Arc::new(AtomicU64::new(0));
+        let writer = CoalescedAsyncWriter::spawn_with_flush(Duration::ZERO, {
+            let attempts = attempts.clone();
+            let path = path.clone();
+            move || {
+                let attempt = attempts.fetch_add(1, Ordering::AcqRel);
+                let path = path.clone();
+                async move {
+                    if attempt == 0 {
+                        Err(std::io::Error::other("transient failure"))
+                    } else {
+                        write_atomic_async(&path, b"state", None).await
+                    }
+                }
+            }
+        });
+        writer.mark_dirty();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            assert_eq!(
+                writer.flush_now().await.unwrap_err().kind(),
+                std::io::ErrorKind::Other
+            );
+            assert_eq!(writer.requested_seq.load(Ordering::Acquire), 1);
+            assert_eq!(writer.flushed_seq.load(Ordering::Acquire), 0);
+            writer.trigger();
+            wait_until_flushed(&writer, 1).await;
+        });
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+        assert_eq!(std::fs::read(path).unwrap(), b"state");
+    }
+
+    #[tokio::test]
+    async fn coalesced_mutation_mid_flush_converges() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let attempts = Arc::new(AtomicU64::new(0));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let writer = CoalescedAsyncWriter::spawn_with_flush(Duration::ZERO, {
+            let entered = entered.clone();
+            let release = release.clone();
+            let attempts = attempts.clone();
+            let path = path.clone();
+            move || {
+                let attempt = attempts.fetch_add(1, Ordering::AcqRel) + 1;
+                let entered = entered.clone();
+                let release = release.clone();
+                let path = path.clone();
+                async move {
+                    if attempt == 1 {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                    write_atomic_async(&path, attempt.to_string().as_bytes(), None).await
+                }
+            }
+        });
+        writer.mark_dirty();
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        writer.mark_dirty();
+        assert_eq!(writer.flushed_seq.load(Ordering::Acquire), 0);
+        release.notify_one();
+        wait_until_flushed(&writer, 2).await;
+        assert_eq!(writer.requested_seq.load(Ordering::Acquire), 2);
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+        assert_eq!(std::fs::read(path).unwrap(), b"2");
+    }
+
+    #[test]
+    fn coalesced_mark_outside_runtime_remains_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let writer =
+            CoalescedAsyncWriter::spawn(path.clone(), Duration::ZERO, || Some(b"state".to_vec()));
+        writer.mark_dirty();
+        assert_eq!(writer.requested_seq.load(Ordering::Acquire), 1);
+        assert_eq!(writer.flushed_seq.load(Ordering::Acquire), 0);
+        assert!(!writer.running.load(Ordering::Acquire));
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(writer.flush_now())
+            .unwrap();
+        assert_eq!(writer.flushed_seq.load(Ordering::Acquire), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), b"state");
+        writer.mark_dirty();
+        assert_eq!(writer.requested_seq.load(Ordering::Acquire), 2);
+        assert_eq!(writer.flushed_seq.load(Ordering::Acquire), 1);
+        assert!(!writer.running.load(Ordering::Acquire));
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            writer.trigger();
+            wait_until_flushed(&writer, 2).await;
+        });
+    }
+
+    #[tokio::test]
+    async fn coalesced_background_retries_without_mutation() {
+        let attempts = Arc::new(AtomicU64::new(0));
+        let writer = CoalescedAsyncWriter::spawn_with_flush(Duration::ZERO, {
+            let attempts = attempts.clone();
+            move || {
+                let attempt = attempts.fetch_add(1, Ordering::AcqRel);
+                async move {
+                    if attempt == 0 {
+                        Err(std::io::Error::other("transient"))
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+        });
+        writer.mark_dirty();
+        wait_until_flushed(&writer, 1).await;
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+        assert_eq!(writer.requested_seq.load(Ordering::Acquire), 1);
+    }
 
     #[test]
     fn monotonic_clock_never_returns_zero_and_advances() {

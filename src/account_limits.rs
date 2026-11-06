@@ -603,7 +603,9 @@ impl AccountCooldowns {
                         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                         continue;
                     }
-                    let _ = this.flush_now_async().await;
+                    if this.flush_now_async().await.is_err() {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
                 }
             });
         }
@@ -757,22 +759,29 @@ impl AccountCooldowns {
         let Some(path) = self.path.load_full() else {
             return;
         };
-        let seq = self.dirty_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        self.dirty_seq.fetch_add(1, Ordering::AcqRel);
         if tokio::runtime::Handle::try_current().is_ok() {
             self.persist_notify.notify_one();
             return;
         }
-        // Non-Tokio synchronous unit tests: snapshot outside all locks and write
-        // atomically without holding any guard.
-        let file = self.build_snapshot();
-        if let Err(error) = write_cooldowns(&path, &file) {
-            tracing::warn!(
-                path = %path.display(),
-                error = %error,
-                "Could not persist account usage-limit cooldowns"
-            );
-        } else {
-            self.flushed_seq.fetch_max(seq, Ordering::AcqRel);
+        let Ok(_guard) = self.persist_lock.try_lock() else {
+            return;
+        };
+        loop {
+            let target = self.dirty_seq.load(Ordering::Acquire);
+            if self.flushed_seq.load(Ordering::Acquire) >= target {
+                break;
+            }
+            let file = self.build_snapshot();
+            if let Err(error) = write_cooldowns(&path, &file) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "Could not persist account usage-limit cooldowns"
+                );
+                break;
+            }
+            self.flushed_seq.fetch_max(target, Ordering::AcqRel);
         }
     }
 }
@@ -805,12 +814,8 @@ fn read_cooldowns(path: &Path) -> HashMap<String, LimitCooldown> {
 }
 
 fn write_cooldowns(path: &Path, file: &CooldownsFile) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(file)?)?;
-    std::fs::rename(&tmp, path)
+    let bytes = serde_json::to_vec_pretty(file).map_err(std::io::Error::other)?;
+    crate::concurrency::write_atomic(path, &bytes, None)
 }
 
 static SHARED: LazyLock<Arc<AccountCooldowns>> = LazyLock::new(AccountCooldowns::in_memory);
@@ -1505,5 +1510,27 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(!on_disk.cooldowns.contains_key(&key));
         assert!(!on_disk.transient_cooldowns.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn persist_failure_keeps_dirty_and_recovers_on_flush() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "file").unwrap();
+        let path = blocker.join(COOLDOWNS_FILE);
+        let registry = AccountCooldowns::in_memory();
+        registry.path.store(Some(Arc::new(path.clone())));
+        let key = account_key(Uuid::new_v4());
+        registry.set(&key, cooldown(Utc::now() + Duration::hours(1)));
+        assert!(registry.flush_now_async().await.is_err());
+        assert_eq!(registry.flushed_seq.load(Ordering::Acquire), 0);
+        assert!(registry.dirty_seq.load(Ordering::Acquire) > 0);
+        std::fs::remove_file(&blocker).unwrap();
+        registry.flush_now_async().await.unwrap();
+        assert_eq!(
+            registry.flushed_seq.load(Ordering::Acquire),
+            registry.dirty_seq.load(Ordering::Acquire)
+        );
+        assert!(read_cooldowns(&path).contains_key(&key));
     }
 }
