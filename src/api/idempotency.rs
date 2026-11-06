@@ -520,7 +520,7 @@ impl BufferedRequestBody {
 async fn read_and_hash_request_body(
     body: Body,
     max_bytes: usize,
-) -> Result<(String, BufferedRequestBody), Response> {
+) -> Result<(String, BufferedRequestBody), (StatusCode, &'static str)> {
     let mut stream = body.into_data_stream();
     let mut hasher = Sha256::new();
     let mut mem = BytesMut::new();
@@ -528,9 +528,8 @@ async fn read_and_hash_request_body(
     let mut total: usize = 0;
 
     while let Some(chunk_res) = stream.next().await {
-        let chunk = chunk_res.map_err(|_| {
-            (StatusCode::BAD_REQUEST, "Failed to read request body").into_response()
-        })?;
+        let chunk =
+            chunk_res.map_err(|_| (StatusCode::BAD_REQUEST, "Failed to read request body"))?;
         total = total.saturating_add(chunk.len());
         if total > max_bytes {
             let msg = if max_bytes == MAX_BUFFERED_REQUEST_BYTES {
@@ -538,7 +537,7 @@ async fn read_and_hash_request_body(
             } else {
                 "Request with Idempotency-Key exceeds maximum body limit"
             };
-            return Err((StatusCode::PAYLOAD_TOO_LARGE, msg).into_response());
+            return Err((StatusCode::PAYLOAD_TOO_LARGE, msg));
         }
         hasher.update(&chunk);
         if let Some(file) = spilled.take() {
@@ -553,14 +552,12 @@ async fn read_and_hash_request_body(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Failed to buffer large request body",
                 )
-                    .into_response()
             })?
             .map_err(|_| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Failed to write large request body",
                 )
-                    .into_response()
             })?;
             spilled = Some(file);
         } else if mem.len().saturating_add(chunk.len()) <= MAX_BUFFERED_REQUEST_BYTES {
@@ -581,14 +578,12 @@ async fn read_and_hash_request_body(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Failed to create request spool",
                 )
-                    .into_response()
             })?
             .map_err(|_| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Failed to spill large request body",
                 )
-                    .into_response()
             })?;
             spilled = Some(file);
         }
@@ -607,14 +602,12 @@ async fn read_and_hash_request_body(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to rewind large request body",
             )
-                .into_response()
         })?
         .map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to seek large request body",
             )
-                .into_response()
         })?;
         Ok((request_sha256, BufferedRequestBody::Spilled(file)))
     } else {
@@ -732,7 +725,7 @@ async fn handle_idempotency_with_store(
     let (request_sha256, buffered_body) =
         match read_and_hash_request_body(body, max_req_bytes).await {
             Ok(pair) => pair,
-            Err(err_resp) => return err_resp,
+            Err(err_resp) => return err_resp.into_response(),
         };
     let scope_key = format!("{user_id}\n{method_str}\n{full_uri}\n{key}");
 
