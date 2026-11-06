@@ -304,7 +304,8 @@ private def toolScreenshot (args : JVal) : IO (Except String (String × Option S
   if let some waitSec := args.fieldNat? "wait_seconds" then
     if waitSec > 0 then IO.sleep (waitSec * 1000).toUInt32
   let epoch ← nowEpoch
-  let filename := (args.fieldStr? "filename").getD s!"screenshot_{epoch}.png"
+  let shotId ← newUuidV4
+  let filename := (args.fieldStr? "filename").getD s!"screenshot_{epoch}_{shotId}.png"
   let wd ← getWorkingDir
   let screenshotsDir := wd / "screenshots"
   try IO.FS.createDirAll screenshotsDir catch e => return .error s!"Failed to create screenshots dir: {e}"

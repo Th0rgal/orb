@@ -313,6 +313,16 @@ def runAllTests : IO UInt32 := do
     (isErr (parseValidationMatrixText "project = \"orb\"\ngates = [{ id = \"g\", command = [\"true\"], timeout_secs = -1 }]\n" >>= validateMatrixJson))
   assertTrue "validateMatrixJson rejects non-string dependencies"
     (isErr (parseValidationMatrixText "project = \"orb\"\ngates = [{ id = \"g\", command = [\"true\"], dependencies = [123] }]\n" >>= validateMatrixJson))
+  assertTrue "validateMatrixJson rejects timeout_secs > u64::MAX"
+    (isErr (parseValidationMatrixText "project = \"orb\"\ngates = [{ id = \"g\", command = [\"true\"], timeout_secs = 18446744073709551616 }]\n" >>= validateMatrixJson))
+  assertTrue "validateMatrixJson detects cycle through JSON depends_on alias"
+    (isErr (parseValidationMatrixText "{\"project\":\"orb\",\"gates\":[{\"id\":\"a\",\"command\":[\"true\"],\"depends_on\":[\"b\"]},{\"id\":\"b\",\"command\":[\"true\"],\"depends_on\":[\"a\"]}]}" >>= validateMatrixJson))
+  assertTrue "validateMatrixJson rejects duplicate dependencies + depends_on"
+    (isErr (parseValidationMatrixText "{\"project\":\"orb\",\"gates\":[{\"id\":\"a\",\"command\":[\"true\"],\"dependencies\":[],\"depends_on\":[]}]}" >>= validateMatrixJson))
+  assertEq "parseRfc3339Epoch? accepts pre-1970 timestamp"
+    (parseRfc3339Epoch? "1969-12-31T23:59:59Z") (some (-1))
+  assertTrue "parseRfc3339Epoch? rejects padded whitespace"
+    (parseRfc3339Epoch? " 2026-01-01T00:00:00Z ").isNone
   let badModelSnap :=
     "{\"schema_version\":1,\"provider_id\":\"openai\",\"access_profile\":\"api\",\"source\":\"curated\",\"observed_at\":null,\"completeness\":\"complete\",\"models\":[{\"id\":\"gpt-5\"}]}"
   let parsedBadModel ← match Json.parse badModelSnap with

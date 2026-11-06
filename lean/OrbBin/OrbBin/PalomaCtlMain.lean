@@ -472,7 +472,7 @@ private partial def tomlParseValue (s0 : TomlLexer) : Except String (JVal × Tom
           return (JVal.int (-(Int.ofNat n)), { s with pos := p })
       throw s!"invalid TOML scalar value `{rawTok}`"
 
-private def normalizeGateTableFields (fields : Array (String × JVal)) : JVal := Id.run do
+private def normalizeGateTableFields (fields : Array (String × JVal)) : Except String JVal := do
   let mut g : JVal := .obj #[
     ("dependencies", .arr #[]),
     ("required", .bool true),
@@ -480,9 +480,15 @@ private def normalizeGateTableFields (fields : Array (String × JVal)) : JVal :=
     ("reuse", .bool true),
     ("artifacts", .arr #[])
   ]
+  let mut sawDeps := false
   for (k, v) in fields do
-    let normKey := if k == "depends_on" then "dependencies" else k
-    g := g.setField normKey v
+    if k == "dependencies" || k == "depends_on" then
+      if sawDeps then
+        throw "duplicate field `dependencies` / `depends_on` in validation gate"
+      sawDeps := true
+      g := g.setField "dependencies" v
+    else
+      g := g.setField k v
   return g
 
 def parseValidationMatrixText (raw : String) : Except String JVal := do
@@ -510,7 +516,7 @@ def parseValidationMatrixText (raw : String) : Except String JVal := do
         throw "cannot redefine static `gates` array with `[[gates]]`"
       gatesStyle? := some "aot"
       if let some g := curGate then
-        gates := gates.push (normalizeGateTableFields g)
+        gates := gates.push (← normalizeGateTableFields g)
       curGate := some #[]
       lex := { sClose with pos := sClose.pos + 2 }
     else if lex.cs[lex.pos]! == '[' then
@@ -540,15 +546,17 @@ def parseValidationMatrixText (raw : String) : Except String JVal := do
           let mut normArr : Array JVal := Array.mkEmpty gArr.size
           for item in gArr do
             let some fields := item.asObj? | throw "each element of `gates` must be a table"
-            normArr := normArr.push (normalizeGateTableFields fields)
+            normArr := normArr.push (← normalizeGateTableFields fields)
           gates := normArr
           gatesStyle? := some "inline"
         else
           throw s!"unknown top-level validation matrix key `{k}`"
       | some g =>
-        curGate := some ((g.filter (fun (ek, _) => ek != k)).push (k, vParsed))
+        if g.any (fun (ek, _) => ek == k) then
+          throw s!"duplicate TOML key `{k}` in validation gate"
+        curGate := some (g.push (k, vParsed))
   if let some g := curGate then
-    gates := gates.push (normalizeGateTableFields g)
+    gates := gates.push (← normalizeGateTableFields g)
   let some project := project? | throw "missing required top-level `project` field"
   return .obj #[
     ("version", .nat version),
@@ -625,59 +633,71 @@ def validateMatrixJson (m : JVal) : Except String JVal := do
     "required", "mode", "reuse", "toolchain", "timeout_secs", "artifacts"
   ]
   let mut seen : List String := []
+  let mut normGates : Array JVal := Array.mkEmpty gates.size
   for g in gates do
     let some gFields := g.asObj?
       | throw "each validation gate must be a table/object"
-    for (gk, _) in gFields do
-      if !allowedGate.contains gk then
-        throw s!"unknown validation gate field `{gk}`"
     let some gid := g.fieldStr? "id"
       | throw "validation gate `id` must be a string"
     if !validGateId gid then throw s!"invalid gate id '{gid}'"
     if seen.contains gid then throw s!"duplicate gate id '{gid}'"
     seen := gid :: seen
-    let _ ← requireOptStringField g "description" s!"gate '{gid}'"
-    let _ ← requireOptStringField g "cwd" s!"gate '{gid}'"
-    let _ ← requireOptStringField g "toolchain" s!"gate '{gid}'"
-    let cmd ← requireStringArrayField g "command" gid (defaultEmpty := false)
+    let mut fieldsNorm : Array (String × JVal) := #[]
+    let mut sawDeps := false
+    for (gk, gv) in gFields do
+      if !allowedGate.contains gk then
+        throw s!"unknown validation gate field `{gk}`"
+      if gk == "dependencies" || gk == "depends_on" then
+        if sawDeps then
+          throw s!"gate '{gid}' specifies both `dependencies` and `depends_on`"
+        sawDeps := true
+        fieldsNorm := (fieldsNorm.filter (fun (ek, _) => ek != "dependencies")).push ("dependencies", gv)
+      else
+        if fieldsNorm.any (fun (ek, _) => ek == gk) then
+          throw s!"duplicate validation gate field `{gk}`"
+        fieldsNorm := fieldsNorm.push (gk, gv)
+    let gNorm : JVal := .obj fieldsNorm
+    let _ ← requireOptStringField gNorm "description" s!"gate '{gid}'"
+    let _ ← requireOptStringField gNorm "cwd" s!"gate '{gid}'"
+    let _ ← requireOptStringField gNorm "toolchain" s!"gate '{gid}'"
+    let cmd ← requireStringArrayField gNorm "command" gid (defaultEmpty := false)
     if cmd.isEmpty || cmd.any (fun a => a.any (· == '\x00')) then
       throw s!"gate '{gid}' requires a safe, non-empty argv"
-    let _ ← requireStringArrayField g "dependencies" gid (defaultEmpty := true)
-    let _ ← requireStringArrayField g "depends_on" gid (defaultEmpty := true)
-    let _ ← requireStringArrayField g "artifacts" gid (defaultEmpty := true)
-    let _ ← requireBoolField g "required" gid true
-    let _ ← requireBoolField g "reuse" gid true
-    let mode ← match g.field? "mode" with
+    let _ ← requireStringArrayField gNorm "dependencies" gid (defaultEmpty := true)
+    let _ ← requireStringArrayField gNorm "artifacts" gid (defaultEmpty := true)
+    let _ ← requireBoolField gNorm "required" gid true
+    let _ ← requireBoolField gNorm "reuse" gid true
+    let mode ← match gNorm.field? "mode" with
       | none => pure "incremental"
       | some (.str s) => pure s
       | some _ => throw s!"gate '{gid}' field `mode` must be a string"
     if mode != "incremental" && mode != "clean" then
       throw s!"gate '{gid}' invalid mode '{mode}' (expected 'incremental' or 'clean')"
-    match g.field? "timeout_secs" with
+    match gNorm.field? "timeout_secs" with
     | none | some .null => pure ()
     | some v =>
       match v.asNat? with
       | some n =>
-        if n == 0 then throw s!"gate '{gid}' timeout_secs must be positive"
-      | none => throw s!"gate '{gid}' timeout_secs must be a positive integer"
-  for g in gates do
+        if n == 0 || n > 18446744073709551615 then
+          throw s!"gate '{gid}' timeout_secs must be in 1..=u64::MAX"
+      | none => throw s!"gate '{gid}' timeout_secs must be a positive u64 integer"
+    normGates := normGates.push gNorm
+  for g in normGates do
     let gid := (g.fieldStr? "id").getD ""
     let req ← requireBoolField g "required" gid true
-    let depsA ← requireStringArrayField g "dependencies" gid
-    let depsB ← requireStringArrayField g "depends_on" gid
-    let deps := if !depsA.isEmpty then depsA else depsB
+    let deps ← requireStringArrayField g "dependencies" gid
     for dep in deps do
       if dep == gid then throw s!"gate '{gid}' has invalid dependency '{dep}'"
-      let some dg := gates.find? (fun x => x.fieldStr? "id" == some dep)
+      let some dg := normGates.find? (fun x => x.fieldStr? "id" == some dep)
         | throw s!"gate '{gid}' has invalid dependency '{dep}'"
       let depReq ← requireBoolField dg "required" dep true
       if req && !depReq then
         throw s!"required gate '{gid}' depends on optional gate '{dep}'"
   let mut visited : List String := []
-  for g in gates do
+  for g in normGates do
     let gid := (g.fieldStr? "id").getD ""
-    visited ← checkGateCycle gid gates [] visited
-  return m
+    visited ← checkGateCycle gid normGates [] visited
+  return m.setField "gates" (.arr normGates)
 
 /-! ### `models`: Snapshot-Directory Catalog Validate / Export / Diff / Discover / Update -/
 
@@ -691,9 +711,9 @@ private def daysInMonth (y m : Nat) : Nat :=
   | 2 => if isLeapYear y then 29 else 28
   | _ => 0
 
-/-- Parse an RFC3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM)`) into UTC epoch seconds. -/
-def parseRfc3339Epoch? (raw : String) : Option Int := do
-  let s := raw.trimAscii.toString
+/-- Parse an RFC3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM)`) into signed UTC epoch seconds (`1970-01-01T00:00:00Z = 0`). -/
+def parseRfc3339Epoch? (s : String) : Option Int := do
+  if s.trimAscii.toString != s then none
   let (datePart, rest0) ← match s.splitOn "T" with
     | [d, t] => some (d, t)
     | _ => match s.splitOn "t" with
@@ -701,10 +721,11 @@ def parseRfc3339Epoch? (raw : String) : Option Int := do
       | _ => none
   let [yStr, mStr, dStr] := datePart.splitOn "-" | none
   if yStr.length != 4 || mStr.length != 2 || dStr.length != 2 then none
+  if !yStr.all Char.isDigit || !mStr.all Char.isDigit || !dStr.all Char.isDigit then none
   let y ← yStr.toNat?
   let mo ← mStr.toNat?
   let da ← dStr.toNat?
-  if y < 1970 || mo < 1 || mo > 12 || da < 1 || da > daysInMonth y mo then none
+  if mo < 1 || mo > 12 || da < 1 || da > daysInMonth y mo then none
   let (timePart, tzOffsetSec) ←
     if rest0.endsWith "Z" || rest0.endsWith "z" then
       some ((rest0.dropEnd 1).toString, (0 : Int))
@@ -717,7 +738,7 @@ def parseRfc3339Epoch? (raw : String) : Option Int := do
       else
         match (sfx.drop 1).toString.splitOn ":" with
         | [ohS, omS] =>
-          if ohS.length != 2 || omS.length != 2 then none
+          if ohS.length != 2 || omS.length != 2 || !ohS.all Char.isDigit || !omS.all Char.isDigit then none
           else
             let oh ← ohS.toNat?
             let om ← omS.toNat?
@@ -734,17 +755,23 @@ def parseRfc3339Epoch? (raw : String) : Option Int := do
     | _ => none
   let [hhS, mmS, ssS] := baseTime.splitOn ":" | none
   if hhS.length != 2 || mmS.length != 2 || ssS.length != 2 then none
+  if !hhS.all Char.isDigit || !mmS.all Char.isDigit || !ssS.all Char.isDigit then none
   let hh ← hhS.toNat?
   let mm ← mmS.toNat?
   let ss ← ssS.toNat?
   if hh > 23 || mm > 59 || ss > 60 then none
-  let mut days : Nat := 0
-  for yr in [1970:y] do
-    days := days + (if isLeapYear yr then 366 else 365)
+  let mut yearDays : Int := 0
+  if y ≥ 1970 then
+    for yr in [1970:y] do
+      yearDays := yearDays + (if isLeapYear yr then 366 else 365)
+  else
+    for yr in [y:1970] do
+      yearDays := yearDays - (if isLeapYear yr then 366 else 365)
+  let mut monthDays : Nat := 0
   for mn in [1:mo] do
-    days := days + daysInMonth y mn
-  days := days + (da - 1)
-  let utcSec : Int := Int.ofNat (days * 86400 + hh * 3600 + mm * 60 + ss) - tzOffsetSec
+    monthDays := monthDays + daysInMonth y mn
+  let totalDays : Int := yearDays + Int.ofNat (monthDays + (da - 1))
+  let utcSec : Int := totalDays * 86400 + Int.ofNat (hh * 3600 + mm * 60 + ss) - tzOffsetSec
   return utcSec
 
 private def isSafeSnapshotSlug (s : String) : Bool :=
