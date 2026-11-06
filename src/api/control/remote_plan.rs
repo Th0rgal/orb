@@ -805,5 +805,9 @@ mod vision_tests {
         assert_eq!(model["attachment"], true);
         assert_eq!(model["modalities"]["input"], json!(["text", "image"]));
         assert_eq!(model["modalities"]["output"], json!(["text"]));
+        assert_eq!(
+            config["provider"]["builtin"]["options"]["timeout"],
+            crate::harness_attribution::OPENCODE_PROXY_PROVIDER_TIMEOUT_MS
+        );
     }
 }
