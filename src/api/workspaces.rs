@@ -2095,7 +2095,7 @@ async fn update_workspace_resources(
                     .map(|val| ((*k).to_string(), val.trim().to_string()))
             })
             .collect();
-        let _ = state
+        state
             .workspaces
             .update_with(id, move |ws| {
                 for (key, val) in updates_owned {
@@ -2107,7 +2107,8 @@ async fn update_workspace_resources(
                 }
                 Ok(())
             })
-            .await;
+            .await
+            .map_err(|conflict| (conflict.status, conflict.message))?;
     }
 
     tracing::info!(
@@ -2938,5 +2939,180 @@ mod tests {
 
         drop(held_storage_lock);
         drop(held_build_lock);
+    }
+
+    #[tokio::test]
+    async fn cancelling_try_claim_workspace_build_mid_claim_settles_abort_and_allows_retry() {
+        use fs2::FileExt;
+
+        let root = TempDir::new().unwrap();
+        let store = Arc::new(workspace::WorkspaceStore::new(root.path().to_path_buf()).await);
+        let ws_path = root.path().join(".sandboxed-sh/containers/cancel-claim");
+        let id = store
+            .add(Workspace::new_container(
+                "cancel-claim".into(),
+                ws_path.clone(),
+            ))
+            .await;
+
+        let storage_lock_path = root.path().join(".sandboxed-sh/workspaces.json.lock");
+        let held_storage_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&storage_lock_path)
+            .unwrap();
+        held_storage_lock.try_lock_exclusive().unwrap();
+
+        let build_lock_path = workspace::workspace_build_lock_path(&ws_path);
+        let claim_store = Arc::clone(&store);
+        let mut claim_fut = Box::pin(async move {
+            claim_store
+                .try_claim_workspace_build(id, Some("ubuntu-noble".into()))
+                .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(5), &mut claim_fut)
+                        .await
+                        .is_err()
+                );
+                if let Ok(probe) = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&build_lock_path)
+                {
+                    if probe.try_lock_exclusive().is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("claim must acquire build lock while blocked on storage lock");
+
+        drop(claim_fut);
+        drop(held_storage_lock);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let in_mem = store.get(id).await.unwrap();
+                let probe = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&build_lock_path)
+                    .unwrap();
+                let lock_free = probe.try_lock_exclusive().is_ok();
+                if in_mem.status == WorkspaceStatus::Error
+                    && in_mem.config["build_generation"].as_u64() == Some(1)
+                    && lock_free
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled claim must settle abort and release build lock");
+
+        let storage_path = root.path().join(".sandboxed-sh/workspaces.json");
+        let persisted: Vec<Workspace> =
+            serde_json::from_slice(&std::fs::read(&storage_path).unwrap()).unwrap();
+        let disk_ws = persisted.into_iter().find(|w| w.id == id).unwrap();
+        assert_eq!(disk_ws.status, WorkspaceStatus::Error);
+        assert_eq!(
+            disk_ws.error_message.as_deref(),
+            Some("Workspace build aborted before completion")
+        );
+        assert_eq!(disk_ws.config["build_generation"].as_u64(), Some(1));
+
+        let next_claim = store
+            .try_claim_workspace_build(id, Some("debian-bookworm".into()))
+            .await
+            .unwrap();
+        assert_eq!(next_claim.generation(), 2);
+        let mut ready = next_claim.workspace.clone();
+        ready.status = WorkspaceStatus::Ready;
+        next_claim.settle(ready).await.unwrap();
+        assert_eq!(store.get(id).await.unwrap().status, WorkspaceStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn update_workspace_resources_propagates_persistence_error_instead_of_reporting_persisted(
+    ) {
+        let root = TempDir::new().unwrap();
+        let state = test_state(root.path()).await;
+        let id = state
+            .workspaces
+            .add(Workspace::new_container(
+                "resource-persist-fail".into(),
+                root.path()
+                    .join(".sandboxed-sh/containers/resource-persist-fail"),
+            ))
+            .await;
+
+        let storage_path = root.path().join(".sandboxed-sh/workspaces.json");
+        let saved = std::fs::read(&storage_path).unwrap();
+        std::fs::remove_file(&storage_path).unwrap();
+        std::fs::create_dir_all(&storage_path).unwrap();
+
+        let err = update_workspace_resources(
+            AxumPath(id),
+            State(Arc::clone(&state)),
+            Json(UpdateWorkspaceResourcesRequest {
+                memory_max: Some("8G".into()),
+                memory_high: None,
+                memory_swap_max: None,
+                cpu_weight: None,
+                cpu_quota: None,
+                persist: true,
+                apply_live: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!state
+            .workspaces
+            .get(id)
+            .await
+            .unwrap()
+            .env_vars
+            .contains_key("MISSION_MEMORY_MAX"));
+
+        std::fs::remove_dir_all(&storage_path).unwrap();
+        std::fs::write(&storage_path, saved).unwrap();
+
+        let ok = update_workspace_resources(
+            AxumPath(id),
+            State(Arc::clone(&state)),
+            Json(UpdateWorkspaceResourcesRequest {
+                memory_max: Some("8G".into()),
+                memory_high: None,
+                memory_swap_max: None,
+                cpu_weight: None,
+                cpu_quota: None,
+                persist: true,
+                apply_live: false,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(ok.persisted);
+        assert_eq!(
+            state
+                .workspaces
+                .get(id)
+                .await
+                .unwrap()
+                .env_vars
+                .get("MISSION_MEMORY_MAX")
+                .map(String::as_str),
+            Some("8G")
+        );
     }
 }

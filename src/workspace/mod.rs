@@ -863,6 +863,23 @@ impl WorkspaceStore {
         id: Uuid,
         distro: Option<String>,
     ) -> Result<BuildClaimGuard, BuildConflict> {
+        let store = Arc::clone(self);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = store.claim_workspace_build(id, distro).await;
+            let _ = tx.send(result);
+        });
+        rx.await.map_err(|error| BuildConflict {
+            status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("Build claim task failed: {error}"),
+        })?
+    }
+
+    async fn claim_workspace_build(
+        self: &Arc<Self>,
+        id: Uuid,
+        distro: Option<String>,
+    ) -> Result<BuildClaimGuard, BuildConflict> {
         use axum::http::StatusCode;
         use std::io::{Read, Seek, Write};
 
