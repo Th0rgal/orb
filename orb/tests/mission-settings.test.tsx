@@ -493,8 +493,8 @@ it("matches the shared cross-client mission-budget fixture", () => {
   expect(immediateFleetFc.leaseCliffSecs).toBe(0);
   expect(immediateFleetFc.subline).toContain("VM auto-extensions paused ($2.50 left across 10 VMs)");
 
-  // Two staggered $5/h VMs with per-VM `live_leases` (15m and 25m remaining) and $2.50 available:
-  // VM 0 extends at 5m (300s), consuming the $2.50, and VM 1 hits the cliff at 15m (900s).
+  // Two staggered $5/h VMs with per-VM `live_leases` (15m and 25m remaining) and $2.50 available at 23:00Z
+  // (60m before midnight reset): VM 0 extends at 5m (300s), consuming the $2.50, and VM 1 hits the cliff at 15m (900s).
   const staggeredCliff: MissionBudget = {
     ...dailySust,
     pool: {
@@ -506,23 +506,23 @@ it("matches the shared cross-client mission-budget fixture", () => {
       ],
       reserved_usd: 3.3333,
       available_usd: 2.5,
-      spent_usd: 254.1667,
-      carved_usd: 40.0,
+      spent_usd: 246.6667,
+      carved_usd: 47.5,
     },
   };
   const staggeredFc = computeRunwayForecast({
     budget: staggeredCliff,
     budgetEnabled: true,
     bandwidthEnabled: true,
-    nowMs: Date.parse("2026-11-05T23:45:00Z"),
+    nowMs: Date.parse("2026-11-05T23:00:00Z"),
   });
-  expect(staggeredFc.sustainsUntilReset).toBe(true);
   expect(staggeredFc.leaseCliffSecs).toBeCloseTo(900, 0);
   expect(staggeredFc.subline).toContain("VM extensions pause in ~15m");
 
   // Single $10/h VM, 30m left ($5 reserved), $5 available ($5 30m step):
-  // first trigger in 20m (1,200s) is admitted (+1,800s) and the first rejected trigger is at 50m (3,000s).
-  const singleVmStep: MissionBudget = {
+  // - On a non-resetting (`total`) pool, first trigger in 20m (1,200s) is admitted (+1,800s) and the second at 50m (3,000s) is rejected.
+  // - On a `daily` pool at 23:45Z (reset in 15m = 900s), midnight clears the $290 spend before the 20m trigger so there is no near-term cliff!
+  const singleVmDaily: MissionBudget = {
     ...dailySust,
     pool: {
       ...dailySust.pool!,
@@ -534,11 +534,46 @@ it("matches the shared cross-client mission-budget fixture", () => {
       carved_usd: 0.0,
     },
   };
-  const singleVmFc = computeRunwayForecast({
-    budget: singleVmStep,
+  const singleVmDailyFc = computeRunwayForecast({
+    budget: singleVmDaily,
     budgetEnabled: true,
     bandwidthEnabled: true,
     nowMs: Date.parse("2026-11-05T23:45:00Z"),
   });
-  expect(singleVmFc.leaseCliffSecs).toBeCloseTo(3000, 0);
+  expect(singleVmDailyFc.leaseCliffSecs).toBeGreaterThan(86_400);
+  expect(singleVmDailyFc.subline).not.toContain("VM extensions pause");
+  expect(singleVmDailyFc.tone).toBe("ok");
+
+  const singleVmTotalFc = computeRunwayForecast({
+    budget: singleVmDaily,
+    draftResetPeriod: "total",
+    budgetEnabled: true,
+    bandwidthEnabled: true,
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
+  });
+  expect(singleVmTotalFc.leaseCliffSecs).toBeCloseTo(3000, 0);
+
+  // Lowering a compute bandwidth ceiling (`$2/h`) paces new spawns/resumes, NOT existing VM rates (`$10/h`),
+  // so a `$10/h` VM at 10m remaining with `$1` available still needs a `$5` 30m step and pauses immediately (`0s`).
+  const cappedBandwidthVm: MissionBudget = {
+    ...dailySust,
+    pool: {
+      ...dailySust.pool!,
+      live_machines: 1,
+      live_leases: [{ remaining_secs: 600, usd_per_hour: 10.0 }],
+      reserved_usd: 1.6667,
+      available_usd: 1.0,
+      spent_usd: 297.3333,
+      carved_usd: 0.0,
+    },
+  };
+  const cappedBwFc = computeRunwayForecast({
+    budget: cappedBandwidthVm,
+    draftComputeUsdPerH: "2.0",
+    budgetEnabled: true,
+    bandwidthEnabled: true,
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
+  });
+  expect(cappedBwFc.leaseCliffSecs).toBe(0);
+  expect(cappedBwFc.subline).toContain("VM auto-extensions paused ($1.00 < $5.00 30m step)");
 });

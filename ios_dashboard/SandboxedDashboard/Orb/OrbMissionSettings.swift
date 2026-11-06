@@ -880,19 +880,27 @@ struct OrbMissionBudget: Equatable {
             guard let e = etaSecs else { return true }
             return e >= rSecs
         }()
-        let simLeases = Self.buildSimulatedLeases(pool: pool, reservedUsd: reservedUsd, shapedCompute: shapedCompute)
+        let simLeases = Self.buildSimulatedLeases(pool: pool, reservedUsd: reservedUsd, actualCompute: obsCompute)
         let liveMachineCount = max(1, simLeases.isEmpty ? (pool?.liveMachines ?? 1) : simLeases.count)
         let minExtensionStepUsd: Double = {
             if let minUsdH = simLeases.map(\.usdPerHour).min() {
                 return minUsdH * 0.5
             }
-            return (shapedCompute / Double(liveMachineCount)) * 0.5
+            return (obsCompute / Double(liveMachineCount)) * 0.5
         }()
         let leaseCliffSecs: Double? = {
-            guard capUsd != nil, runwayUsd > 0, reservedUsd > 0.005, shapedCompute > 0.005, availableUsd < runwayUsd - 0.005 else {
+            guard let capUsd, runwayUsd > 0, reservedUsd > 0.005, !simLeases.isEmpty, availableUsd < runwayUsd - 0.005 else {
                 return nil
             }
-            return Self.simulateLeaseCliffSecs(leases: simLeases, availableUsd: availableUsd)
+            return Self.simulateLeaseCliffSecs(
+                leases: simLeases,
+                capUsd: capUsd,
+                spentUsd: spentUsd,
+                carvedUsd: carvedUsd,
+                availableUsd: availableUsd,
+                resetsInSecs: resetsInSecs,
+                resetPeriod: resetPeriod
+            )
         }()
         let unshapedEtaSecs: Double? = (capUsd != nil && runwayUsd > 0 && obsCompute > 0.005)
             ? (runwayUsd / obsCompute) * 3600.0 : nil
@@ -995,27 +1003,61 @@ struct OrbMissionBudget: Equatable {
 
     static func money(_ v: Double) -> String { v < 10 ? String(format: "$%.2f", v) : String(format: "$%.0f", v) }
 
-    private static func buildSimulatedLeases(pool: Pool?, reservedUsd: Double, shapedCompute: Double) -> [LiveLease] {
+    private static func buildSimulatedLeases(pool: Pool?, reservedUsd: Double, actualCompute: Double) -> [LiveLease] {
         let raw = (pool?.liveLeases ?? []).filter { $0.usdPerHour > 0 }
         if !raw.isEmpty {
-            let rawSum = raw.reduce(0.0) { $0 + $1.usdPerHour }
-            let scale = (rawSum > 0.005 && shapedCompute > 0) ? (shapedCompute / rawSum) : 1.0
             return raw.map {
-                LiveLease(remainingSecs: max(0, $0.remainingSecs), usdPerHour: $0.usdPerHour * scale)
+                LiveLease(remainingSecs: max(0, $0.remainingSecs), usdPerHour: $0.usdPerHour)
             }.sorted { $0.remainingSecs < $1.remainingSecs }
         }
-        guard shapedCompute > 0.005 else { return [] }
+        guard actualCompute > 0.005 else { return [] }
         let count = max(1, pool?.liveMachines ?? 1)
-        let perVmUsdPerH = shapedCompute / Double(count)
-        let avgRemainingSecs = max(0, ((reservedUsd / shapedCompute) * 3600.0).rounded())
+        let perVmUsdPerH = actualCompute / Double(count)
+        let avgRemainingSecs = max(0, ((reservedUsd / actualCompute) * 3600.0).rounded())
         return Array(repeating: LiveLease(remainingSecs: avgRemainingSecs, usdPerHour: perVmUsdPerH), count: count)
     }
 
-    private static func simulateLeaseCliffSecs(leases: [LiveLease], availableUsd: Double) -> Double? {
+    private static func simulateLeaseCliffSecs(
+        leases: [LiveLease],
+        capUsd: Double,
+        spentUsd: Double,
+        carvedUsd: Double,
+        availableUsd: Double,
+        resetsInSecs: Double?,
+        resetPeriod: BudgetResetPeriod
+    ) -> Double? {
         guard !leases.isEmpty else { return nil }
         var remSecs = leases.map(\.remainingSecs)
         var remAvail = max(0.0, availableUsd)
         var elapsed = 0.0
+        var nextResetAt: Double? = (resetPeriod != .total && (resetsInSecs ?? 0) > 0) ? resetsInSecs : nil
+        let periodLenSecs: Double = resetPeriod == .daily ? 86_400.0 : (resetPeriod == .weekly ? 604_800.0 : 0.0)
+
+        func advanceTime(_ dt: Double) {
+            guard dt > 0 else { return }
+            for i in 0..<remSecs.count {
+                let unreservedSecs = max(0.0, min(dt, remSecs[i] - 3600.0))
+                if unreservedSecs > 0 {
+                    remAvail -= (unreservedSecs / 3600.0) * leases[i].usdPerHour
+                }
+                remSecs[i] = max(0.0, remSecs[i] - dt)
+            }
+            elapsed += dt
+        }
+
+        func refreshAtResetBoundary() {
+            var curReserved = 0.0
+            for i in 0..<remSecs.count {
+                curReserved += (min(3600.0, max(0.0, remSecs[i])) / 3600.0) * leases[i].usdPerHour
+            }
+            remAvail = max(0.0, capUsd - carvedUsd - curReserved)
+        }
+
+        if resetPeriod != .total, let r = resetsInSecs, r <= 0, spentUsd > 0 {
+            refreshAtResetBoundary()
+            nextResetAt = periodLenSecs > 0 ? periodLenSecs : nil
+        }
+
         let maxSteps = min(4096, max(64, leases.count * 16))
         for _ in 0..<maxSteps {
             var bestIdx = 0
@@ -1027,15 +1069,16 @@ struct OrbMissionBudget: Equatable {
                     bestIdx = i
                 }
             }
+            while let nr = nextResetAt, elapsed + bestWait >= nr {
+                let toReset = max(0.0, nr - elapsed)
+                advanceTime(toReset)
+                bestWait = max(0.0, bestWait - toReset)
+                refreshAtResetBoundary()
+                nextResetAt = periodLenSecs > 0 ? (nr + periodLenSecs) : nil
+                if elapsed > 86_400.0 { return elapsed }
+            }
             if bestWait > 0 {
-                for i in 0..<remSecs.count {
-                    let unreservedSecs = max(0.0, min(bestWait, remSecs[i] - 3600.0))
-                    if unreservedSecs > 0 {
-                        remAvail -= (unreservedSecs / 3600.0) * leases[i].usdPerHour
-                    }
-                    remSecs[i] = max(0.0, remSecs[i] - bestWait)
-                }
-                elapsed += bestWait
+                advanceTime(bestWait)
             }
             if elapsed > 86_400.0 { return elapsed }
             let stepUsd = leases[bestIdx].usdPerHour * 0.5

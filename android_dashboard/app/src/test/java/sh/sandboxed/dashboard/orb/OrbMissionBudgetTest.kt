@@ -134,8 +134,8 @@ class OrbMissionBudgetTest {
                     OrbMissionBudget.LiveLease(remainingSecs = 900.0, usdPerHour = 5.0),
                     OrbMissionBudget.LiveLease(remainingSecs = 1500.0, usdPerHour = 5.0),
                 ),
-                spent = 254.1667,
-                carved = 40.0,
+                spent = 246.6667,
+                carved = 47.5,
                 reserved = 3.3333,
                 available = 2.5,
             ),
@@ -143,13 +143,12 @@ class OrbMissionBudgetTest {
         val staggeredFc = staggeredCliff.computeRunwayForecast(
             bandwidthEnabled = true,
             budgetEnabled = true,
-            nowMs = 1_793_922_300_000L,
+            nowMs = 1_793_919_600_000L,
         )
-        assertTrue(staggeredFc.sustainsUntilReset)
         assertEquals(900.0, staggeredFc.leaseCliffSecs ?: 0.0, 1.0)
         assertTrue(staggeredFc.subline.contains("VM extensions pause in ~15m"))
 
-        val singleVmStep = dailySust.copy(
+        val singleVmDaily = dailySust.copy(
             pool = dailySust.pool!!.copy(
                 liveMachines = 1,
                 liveLeases = listOf(OrbMissionBudget.LiveLease(remainingSecs = 1800.0, usdPerHour = 10.0)),
@@ -159,12 +158,41 @@ class OrbMissionBudgetTest {
                 available = 5.0,
             ),
         )
-        val singleVmFc = singleVmStep.computeRunwayForecast(
+        val singleVmDailyFc = singleVmDaily.computeRunwayForecast(
             bandwidthEnabled = true,
             budgetEnabled = true,
             nowMs = 1_793_922_300_000L,
         )
-        assertEquals(3_000.0, singleVmFc.leaseCliffSecs ?: 0.0, 1.0)
+        assertTrue((singleVmDailyFc.leaseCliffSecs ?: 0.0) > 86_400.0)
+        assertTrue(!singleVmDailyFc.subline.contains("VM extensions pause"))
+        assertEquals(OrbMissionBudget.RunwayForecast.Tone.OK, singleVmDailyFc.tone)
+
+        val singleVmTotalFc = singleVmDaily.computeRunwayForecast(
+            draftResetPeriod = OrbMissionBudget.BudgetResetPeriod.TOTAL,
+            bandwidthEnabled = true,
+            budgetEnabled = true,
+            nowMs = 1_793_922_300_000L,
+        )
+        assertEquals(3_000.0, singleVmTotalFc.leaseCliffSecs ?: 0.0, 1.0)
+
+        val cappedBandwidthVm = dailySust.copy(
+            pool = dailySust.pool!!.copy(
+                liveMachines = 1,
+                liveLeases = listOf(OrbMissionBudget.LiveLease(remainingSecs = 600.0, usdPerHour = 10.0)),
+                spent = 297.3333,
+                carved = 0.0,
+                reserved = 1.6667,
+                available = 1.0,
+            ),
+        )
+        val cappedBwFc = cappedBandwidthVm.computeRunwayForecast(
+            draftComputeUsdPerH = "2.0",
+            bandwidthEnabled = true,
+            budgetEnabled = true,
+            nowMs = 1_793_922_300_000L,
+        )
+        assertEquals(0.0, cappedBwFc.leaseCliffSecs ?: -1.0, 1e-6)
+        assertTrue(cappedBwFc.subline.contains("VM auto-extensions paused ($1.00 < $5.00 30m step)"))
     }
 
     @Test fun validatesVmAndBandwidthInputsAndForecast() {

@@ -115,24 +115,49 @@ final class OrbMissionBudgetTests: XCTestCase {
             .init(remainingSecs: 900, usdPerHour: 5.0),
             .init(remainingSecs: 1500, usdPerHour: 5.0),
         ]
-        staggeredCliff.pool?.spent = 254.1667
-        staggeredCliff.pool?.carved = 40.0
+        staggeredCliff.pool?.spent = 246.6667
+        staggeredCliff.pool?.carved = 47.5
         staggeredCliff.pool?.reserved = 3.3333
         staggeredCliff.pool?.available = 2.5
-        let staggeredFc = staggeredCliff.computeRunwayForecast(bandwidthEnabled: true, budgetEnabled: true, nowMs: 1_793_922_300_000)
-        XCTAssertTrue(staggeredFc.sustainsUntilReset)
+        let staggeredFc = staggeredCliff.computeRunwayForecast(bandwidthEnabled: true, budgetEnabled: true, nowMs: 1_793_919_600_000)
         XCTAssertEqual(staggeredFc.leaseCliffSecs ?? 0, 900, accuracy: 1)
         XCTAssertTrue(staggeredFc.subline.contains("VM extensions pause in ~15m"))
 
-        var singleVmStep = dailySust
-        singleVmStep.pool?.liveMachines = 1
-        singleVmStep.pool?.liveLeases = [.init(remainingSecs: 1800, usdPerHour: 10.0)]
-        singleVmStep.pool?.spent = 290.0
-        singleVmStep.pool?.carved = 0.0
-        singleVmStep.pool?.reserved = 5.0
-        singleVmStep.pool?.available = 5.0
-        let singleVmFc = singleVmStep.computeRunwayForecast(bandwidthEnabled: true, budgetEnabled: true, nowMs: 1_793_922_300_000)
-        XCTAssertEqual(singleVmFc.leaseCliffSecs ?? 0, 3_000, accuracy: 1)
+        var singleVmDaily = dailySust
+        singleVmDaily.pool?.liveMachines = 1
+        singleVmDaily.pool?.liveLeases = [.init(remainingSecs: 1800, usdPerHour: 10.0)]
+        singleVmDaily.pool?.spent = 290.0
+        singleVmDaily.pool?.carved = 0.0
+        singleVmDaily.pool?.reserved = 5.0
+        singleVmDaily.pool?.available = 5.0
+        let singleVmDailyFc = singleVmDaily.computeRunwayForecast(bandwidthEnabled: true, budgetEnabled: true, nowMs: 1_793_922_300_000)
+        XCTAssertGreaterThan(singleVmDailyFc.leaseCliffSecs ?? 0, 86_400)
+        XCTAssertFalse(singleVmDailyFc.subline.contains("VM extensions pause"))
+        XCTAssertEqual(singleVmDailyFc.tone, .ok)
+
+        let singleVmTotalFc = singleVmDaily.computeRunwayForecast(
+            draftResetPeriod: .total,
+            bandwidthEnabled: true,
+            budgetEnabled: true,
+            nowMs: 1_793_922_300_000
+        )
+        XCTAssertEqual(singleVmTotalFc.leaseCliffSecs ?? 0, 3_000, accuracy: 1)
+
+        var cappedBandwidthVm = dailySust
+        cappedBandwidthVm.pool?.liveMachines = 1
+        cappedBandwidthVm.pool?.liveLeases = [.init(remainingSecs: 600, usdPerHour: 10.0)]
+        cappedBandwidthVm.pool?.spent = 297.3333
+        cappedBandwidthVm.pool?.carved = 0.0
+        cappedBandwidthVm.pool?.reserved = 1.6667
+        cappedBandwidthVm.pool?.available = 1.0
+        let cappedBwFc = cappedBandwidthVm.computeRunwayForecast(
+            draftComputeUsdPerH: "2.0",
+            bandwidthEnabled: true,
+            budgetEnabled: true,
+            nowMs: 1_793_922_300_000
+        )
+        XCTAssertEqual(cappedBwFc.leaseCliffSecs ?? -1, 0, accuracy: 1e-6)
+        XCTAssertTrue(cappedBwFc.subline.contains("VM auto-extensions paused ($1.00 < $5.00 30m step)"))
     }
 
     func testValidatesVmAndBandwidthInputsAndForecast() throws {

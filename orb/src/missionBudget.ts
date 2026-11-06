@@ -715,23 +715,21 @@ type SimLease = { remainingSecs: number; usdPerHour: number };
 function buildSimulatedLeases(
   pool: PoolUsage | null,
   reservedUsd: number,
-  shapedComputeBurnUsdPerH: number,
+  actualComputeBurnUsdPerH: number,
 ): SimLease[] {
   const raw = pool?.live_leases?.filter((l) => l.usd_per_hour > 0) ?? [];
   if (raw.length > 0) {
-    const rawSum = raw.reduce((acc, l) => acc + l.usd_per_hour, 0);
-    const scale = rawSum > 0.005 && shapedComputeBurnUsdPerH > 0 ? shapedComputeBurnUsdPerH / rawSum : 1;
     return raw
       .map((l) => ({
         remainingSecs: Math.max(0, l.remaining_secs),
-        usdPerHour: l.usd_per_hour * scale,
+        usdPerHour: l.usd_per_hour,
       }))
       .sort((a, b) => a.remainingSecs - b.remainingSecs);
   }
-  if (shapedComputeBurnUsdPerH <= 0.005) return [];
+  if (actualComputeBurnUsdPerH <= 0.005) return [];
   const count = Math.max(1, pool?.live_machines ?? 1);
-  const perVmUsdPerH = shapedComputeBurnUsdPerH / count;
-  const avgRemainingSecs = Math.max(0, Math.round((reservedUsd / shapedComputeBurnUsdPerH) * 3600));
+  const perVmUsdPerH = actualComputeBurnUsdPerH / count;
+  const avgRemainingSecs = Math.max(0, Math.round((reservedUsd / actualComputeBurnUsdPerH) * 3600));
   return Array.from({ length: count }, () => ({
     remainingSecs: avgRemainingSecs,
     usdPerHour: perVmUsdPerH,
@@ -741,13 +739,56 @@ function buildSimulatedLeases(
 /**
  * Discrete simulation of `ManagedManager::auto_extend` (`<= 600s` trigger,
  * `1,800s` extension step). Multiple VMs hitting `<= 600s` together attempt
- * extensions in the same reaper sweep rather than staggering across 30m.
+ * extensions in the same reaper sweep rather than staggering across 30m, and
+ * periodic (`daily`/`weekly`) resets clear window spend `spentUsd` at the reset
+ * boundary while keeping active reservations and open sub-budget carvings.
  */
-function simulateLeaseCliffSecs(leases: SimLease[], availableUsd: number): number | null {
+function simulateLeaseCliffSecs(
+  leases: SimLease[],
+  capUsd: number,
+  spentUsd: number,
+  carvedUsd: number,
+  availableUsd: number,
+  resetsInSecs: number | null,
+  resetPeriod: BudgetResetPeriod,
+): number | null {
   if (leases.length === 0) return null;
   const remSecs = leases.map((l) => l.remainingSecs);
   let remAvail = Math.max(0, availableUsd);
   let elapsed = 0;
+  let nextResetAt =
+    resetPeriod !== "total" && resetsInSecs != null && resetsInSecs > 0 ? resetsInSecs : null;
+  const periodLenSecs =
+    resetPeriod === "daily" ? 86_400 : resetPeriod === "weekly" ? 604_800 : 0;
+
+  const advanceTime = (dt: number) => {
+    if (dt <= 0) return;
+    for (let i = 0; i < remSecs.length; i++) {
+      // Above the 60m (`3,600s`) reservation cap, burn reduces `availableUsd`;
+      // once `<= 3,600s`, shrinking reservation offsets incurred spend 1:1.
+      const unreservedSecs = Math.max(0, Math.min(dt, remSecs[i] - 3600));
+      if (unreservedSecs > 0) {
+        remAvail -= (unreservedSecs / 3600) * leases[i].usdPerHour;
+      }
+      remSecs[i] = Math.max(0, remSecs[i] - dt);
+    }
+    elapsed += dt;
+  };
+
+  const refreshAtResetBoundary = () => {
+    let curReserved = 0;
+    for (let i = 0; i < remSecs.length; i++) {
+      curReserved += (Math.min(3600, Math.max(0, remSecs[i])) / 3600) * leases[i].usdPerHour;
+    }
+    remAvail = Math.max(0, capUsd - carvedUsd - curReserved);
+  };
+
+  // If a periodic reset happens right at `t = 0`, clear `spentUsd` immediately.
+  if (resetPeriod !== "total" && resetsInSecs != null && resetsInSecs <= 0 && spentUsd > 0) {
+    refreshAtResetBoundary();
+    nextResetAt = periodLenSecs > 0 ? periodLenSecs : null;
+  }
+
   const maxSteps = Math.min(4096, Math.max(64, leases.length * 16));
   for (let step = 0; step < maxSteps; step++) {
     let bestIdx = 0;
@@ -759,17 +800,16 @@ function simulateLeaseCliffSecs(leases: SimLease[], availableUsd: number): numbe
         bestIdx = i;
       }
     }
+    while (nextResetAt != null && elapsed + bestWait >= nextResetAt) {
+      const toReset = Math.max(0, nextResetAt - elapsed);
+      advanceTime(toReset);
+      bestWait = Math.max(0, bestWait - toReset);
+      refreshAtResetBoundary();
+      nextResetAt = periodLenSecs > 0 ? nextResetAt + periodLenSecs : null;
+      if (elapsed > 86_400) return elapsed;
+    }
     if (bestWait > 0) {
-      for (let i = 0; i < remSecs.length; i++) {
-        // Above the 60m (`3,600s`) reservation cap, burn reduces `availableUsd`;
-        // once `<= 3,600s`, shrinking reservation offsets incurred spend 1:1.
-        const unreservedSecs = Math.max(0, Math.min(bestWait, remSecs[i] - 3600));
-        if (unreservedSecs > 0) {
-          remAvail -= (unreservedSecs / 3600) * leases[i].usdPerHour;
-        }
-        remSecs[i] = Math.max(0, remSecs[i] - bestWait);
-      }
-      elapsed += bestWait;
+      advanceTime(bestWait);
     }
     if (elapsed > 86_400) return elapsed;
     const stepUsd = leases[bestIdx].usdPerHour * 0.5;
@@ -928,21 +968,29 @@ export function computeRunwayForecast(opts: {
   // `ManagedManager::auto_extend` runs when a live VM has `<= 10m` (600s) remaining
   // on its lease and requests a `30m` (1,800s) extension (`0.5h * usd_per_hour`),
   // checked against `available_usd` (`reservation_for(30, usd_per_hour)`).
-  // When multiple VMs reach the `<= 10m` threshold together, the reaper attempts
-  // their extensions in the same sweep rather than spacing them across 30 minutes.
-  const simLeases = buildSimulatedLeases(pool, reservedUsd, shapedComputeBurnUsdPerH);
+  // Compute bandwidth caps pace new spawn/resume admission (`evaluate_compute_bandwidth`),
+  // not existing VM hourly rates or extension reservations, so use unscaled VM rates.
+  const simLeases = buildSimulatedLeases(pool, reservedUsd, observedComputeBurnUsdPerH);
   const liveMachineCount = Math.max(1, simLeases.length || (pool?.live_machines ?? 1));
   const minExtensionStepUsd =
     simLeases.length > 0
       ? Math.min(...simLeases.map((l) => l.usdPerHour * 0.5))
-      : (shapedComputeBurnUsdPerH / liveMachineCount) * 0.5;
+      : (observedComputeBurnUsdPerH / liveMachineCount) * 0.5;
   const leaseCliffSecs =
     capUsd != null &&
     runwayUsd > 0 &&
     reservedUsd > 0.005 &&
-    shapedComputeBurnUsdPerH > 0.005 &&
+    simLeases.length > 0 &&
     availableUsd < runwayUsd - 0.005
-      ? simulateLeaseCliffSecs(simLeases, availableUsd)
+      ? simulateLeaseCliffSecs(
+          simLeases,
+          capUsd,
+          spentUsd,
+          carvedUsd,
+          availableUsd,
+          resetsInSecs,
+          resetPeriod,
+        )
       : null;
 
   const unshapedEtaSecs =
