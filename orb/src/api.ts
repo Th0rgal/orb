@@ -531,6 +531,8 @@ export interface RemoteNodeView {
   id: string;
   /** Human name for managed machines ("small-a"); `id` stays immutable. */
   display_name?: string | null;
+  /** Managed VM ownership kind ("user" | "mission") when projected by Core. */
+  owner_kind?: string | null;
   base_url: string;
   token_env: string;
   status: "online" | "degraded" | "offline" | "unknown" | string;
@@ -564,10 +566,19 @@ export interface RemoteLaunchCapability {
   error_prefixes?: string[];
 }
 
+export interface ManagedComputeFleetSummary {
+  enabled: boolean;
+  boat_enabled?: boolean;
+  default_subagent_target?: string;
+  active_machines?: number;
+  max_concurrent?: number | null;
+}
+
 export interface RemoteNodesResponse {
   enabled: boolean;
   nodes: RemoteNodeView[];
   remote_launch?: RemoteLaunchCapability | null;
+  managed_compute?: ManagedComputeFleetSummary | null;
 }
 
 export interface AIProvider {
@@ -690,6 +701,8 @@ export interface CreateMissionBody {
   title?: string;
   prompt?: string;
   remote_node_id?: string;
+  managed_allow_24h_commitment?: boolean;
+  managed_ttl_minutes?: number;
   /** Stable project identifier — groups the mission under the project. */
   project?: string;
   /** Normalized folder path inside the project ("" for project root). */

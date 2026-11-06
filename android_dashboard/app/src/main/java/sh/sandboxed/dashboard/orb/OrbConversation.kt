@@ -675,6 +675,18 @@ fun OrbConversationPage(
                 !project.str("remote_node_id").isNullOrEmpty()
         )
     }
+    var allow24hCommitment by remember(currentMission?.id) { mutableStateOf(false) }
+    var managedCatalog by remember { mutableStateOf<ManagedMachinesResponse?>(null) }
+    LaunchedEffect(showAgentPicker, currentMission?.id) {
+        if (currentMission == null && (showAgentPicker || managedCatalog == null)) {
+            val raw = orbTry(OrbLog.Category.Network, OrbManagedMachines.PATH) {
+                core.fetchDict(OrbManagedMachines.PATH)
+            }.getOrNull()
+            if (raw != null) {
+                managedCatalog = OrbManagedMachines.parse(raw)
+            }
+        }
+    }
     LaunchedEffect(currentMission?.id, nodes, selectedBackend, selectedModel, selectedWorkspaceId, nodePinnedByUser) {
         val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
         if (currentMission == null && !isCloudService && selectedWorkspaceId.isEmpty() && !nodePinnedByUser) {
@@ -1504,12 +1516,18 @@ fun OrbConversationPage(
                     if (selectedWorkspaceId.isNotEmpty()) body["workspace_id"] = selectedWorkspaceId
                     val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
                     if (!isCloudService && selectedWorkspaceId.isEmpty() && selectedNodeId.isNotEmpty() && selectedNodeId != "core") {
+                        if (OrbManagedMachines.isAutoManagedTarget(selectedNodeId) && selectedBackend in setOf("grok", "vibe")) {
+                            throw OrbError("${OrbAgentCatalog.backendLabel(selectedBackend, backends)} is not supported on managed cloud VMs. Choose Claude Code, Codex, OpenCode, or Antigravity, or select Core.")
+                        }
                         if (selectedBackend == "opencode" && selectedModel.isBlank()) {
                             if (nodePinnedByUser) {
                                 throw OrbError("Choose an explicit model to run OpenCode on a remote machine, or select Core.")
                             }
                         } else {
                             body["remote_node_id"] = selectedNodeId
+                            if (allow24hCommitment && OrbManagedMachines.isAutoManagedTarget(selectedNodeId)) {
+                                body["managed_allow_24h_commitment"] = true
+                            }
                         }
                     }
                     if (selectedAccount.isNotEmpty()) body["account_id"] = selectedAccount
@@ -3027,9 +3045,12 @@ fun OrbConversationPage(
                                 when {
                                     isCloudService -> null
                                     !selectedWorkspaceName.isNullOrEmpty() -> selectedWorkspaceName
-                                    selectedNodeId.isNotEmpty() && selectedNodeId != "core" ->
-                                        nodes.firstOrNull { (it.str("id") ?: it.id) == selectedNodeId }
-                                            ?.str("name", "id") ?: selectedNodeId
+                                    OrbManagedMachines.isAutoManagedTarget(selectedNodeId) ->
+                                        OrbManagedMachines.autoManagedLabel(selectedNodeId)
+                                    selectedNodeId.isNotEmpty() && selectedNodeId != "core" -> {
+                                        val found = nodes.firstOrNull { (it.str("id") ?: it.id) == selectedNodeId }
+                                        found?.str("display_name", "name", "id") ?: selectedNodeId
+                                    }
                                     selectedNodeId == "core" -> "Core"
                                     else -> null
                                 }
@@ -3181,6 +3202,7 @@ fun OrbConversationPage(
             backendModels = backendModels,
             workspaces = workspaces,
             nodes = nodes,
+            managedCatalog = managedCatalog,
             providers = providers,
             repositories = repositories,
             selectedBackend = selectedBackend,
@@ -3193,12 +3215,14 @@ fun OrbConversationPage(
                 if (it.isNotEmpty()) {
                     selectedNodeId = ""
                     nodePinnedByUser = false
+                    allow24hCommitment = false
                 }
             },
             selectedNodeId = selectedNodeId,
-            onSelectNodeId = {
-                selectedNodeId = it
+            onSelectNodeId = { nodeId, allow24h ->
+                selectedNodeId = nodeId
                 nodePinnedByUser = true
+                allow24hCommitment = allow24h
                 selectedWorkspaceId = ""
             },
             selectedAccount = selectedAccount,
@@ -3890,6 +3914,7 @@ fun OrbAgentPickerSheet(
     backendModels: OrbDict = emptyMap(),
     workspaces: List<OrbRow>,
     nodes: List<OrbRow> = emptyList(),
+    managedCatalog: ManagedMachinesResponse? = null,
     providers: List<OrbRow>,
     repositories: List<OrbRow>,
     selectedBackend: String,
@@ -3899,7 +3924,7 @@ fun OrbAgentPickerSheet(
     selectedWorkspaceId: String,
     onSelectWorkspaceId: (String) -> Unit,
     selectedNodeId: String = "",
-    onSelectNodeId: (String) -> Unit = {},
+    onSelectNodeId: (String, Boolean) -> Unit = { _, _ -> },
     selectedAccount: String,
     onSelectAccount: (String) -> Unit,
     selectedRepo: String,
@@ -3925,6 +3950,17 @@ fun OrbAgentPickerSheet(
         OrbAgentCatalog.modelsForBackend(selectedBackend, backendModels)
     }
     var workspaceQuery by remember { mutableStateOf("") }
+    val managedOwners = remember(managedCatalog) {
+        OrbManagedMachines.ownerByNodeId(managedCatalog?.machines.orEmpty())
+    }
+    val usableCloudProviders = remember(managedCatalog) {
+        OrbManagedMachines.usableProviders(managedCatalog)
+    }
+    var expandedCloudProvider by remember {
+        mutableStateOf(OrbManagedMachines.parseAutoManagedTarget(selectedNodeId)?.provider)
+    }
+    var pending24hPick by remember { mutableStateOf<Pair<ManagedProviderInfo, ManagedSize>?>(null) }
+
     val sortedNodes = remember(nodes) {
         OrbComputePlacement.sortedComputeNodes(nodes)
     }
@@ -3935,15 +3971,33 @@ fun OrbAgentPickerSheet(
         } else {
             sortedNodes.filter { node ->
                 val nid = (node.str("id") ?: node.id).lowercase()
-                val nName = (node.str("name") ?: nid).lowercase()
+                val nName = (node.str("display_name", "name") ?: nid).lowercase()
                 val nStatus = (node.str("status") ?: "online").lowercase()
                 nid.contains(q) || nName.contains(q) || nStatus.contains(q) || "remote".contains(q)
             }
         }
     }
-    val showCoreRow = remember(sortedNodes, workspaceQuery) {
+    val staticFilteredNodes = remember(filteredNodes) {
+        filteredNodes.filter { !OrbManagedMachines.isManagedNode(it) }
+    }
+    val userManagedNodes = remember(filteredNodes, managedOwners) {
+        filteredNodes.filter { OrbManagedMachines.isUserManagedNode(it, managedOwners) }
+    }
+    val agentManagedNodes = remember(filteredNodes, managedOwners) {
+        filteredNodes.filter { OrbManagedMachines.isAgentSpawnedManagedNode(it, managedOwners) }
+    }
+    var agentVmsExpanded by remember {
+        mutableStateOf(
+            nodes.any {
+                (it.str("id") ?: it.id) == selectedNodeId &&
+                    OrbManagedMachines.isAgentSpawnedManagedNode(it, managedOwners)
+            }
+        )
+    }
+    val showCoreRow = remember(sortedNodes, usableCloudProviders, workspaceQuery) {
         val q = workspaceQuery.trim().lowercase()
-        sortedNodes.isNotEmpty() && (q.isEmpty() || "core".contains(q) || "host".contains(q))
+        (sortedNodes.isNotEmpty() || usableCloudProviders.isNotEmpty()) &&
+            (q.isEmpty() || "core".contains(q) || "host".contains(q))
     }
     val filteredWorkspaces = remember(workspaces, workspaceQuery, selectedWorkspaceId) {
         val q = workspaceQuery.trim().lowercase()
@@ -4073,7 +4127,7 @@ fun OrbAgentPickerSheet(
             }
 
             // Machine / Workspace
-            if (!existing && !isCloudService && (sortedNodes.isNotEmpty() || workspaces.isNotEmpty())) {
+            if (!existing && !isCloudService && (sortedNodes.isNotEmpty() || workspaces.isNotEmpty() || usableCloudProviders.isNotEmpty())) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -4087,7 +4141,7 @@ fun OrbAgentPickerSheet(
                             letterSpacing = 0.7.sp,
                             modifier = Modifier.weight(1f)
                         )
-                        val totalMachines = (if (sortedNodes.isNotEmpty()) 1 else 0) + sortedNodes.size + workspaces.size
+                        val totalMachines = (if (sortedNodes.isNotEmpty() || usableCloudProviders.isNotEmpty()) 1 else 0) + sortedNodes.size + workspaces.size
                         val matchedMachines = (if (showCoreRow) 1 else 0) + filteredNodes.size + filteredWorkspaces.size
                         if (totalMachines > 6) {
                             Text(
@@ -4148,8 +4202,9 @@ fun OrbAgentPickerSheet(
                             .background(OrbStyle.surface)
                             .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
                     ) {
-                        val visibleNodes = filteredNodes.take(10)
-                        if (!showCoreRow && visibleNodes.isEmpty() && filteredWorkspaces.isEmpty()) {
+                        val visibleStaticNodes = staticFilteredNodes
+                        val hasBelowStatic = filteredWorkspaces.isNotEmpty() || userManagedNodes.isNotEmpty() || agentManagedNodes.isNotEmpty()
+                        if (!showCoreRow && visibleStaticNodes.isEmpty() && !hasBelowStatic && usableCloudProviders.isEmpty()) {
                             Text(
                                 text = "No matching workspaces",
                                 color = OrbStyle.textMuted,
@@ -4162,7 +4217,7 @@ fun OrbAgentPickerSheet(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .orbPressClickable { if (!locked) onSelectNodeId("core") }
+                                        .orbPressClickable { if (!locked) onSelectNodeId("core", false) }
                                         .padding(horizontal = 14.dp, vertical = 11.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
@@ -4192,11 +4247,11 @@ fun OrbAgentPickerSheet(
                                         )
                                     }
                                 }
-                                if (visibleNodes.isNotEmpty() || filteredWorkspaces.isNotEmpty()) {
+                                if (visibleStaticNodes.isNotEmpty() || hasBelowStatic) {
                                     HorizontalDivider(color = OrbStyle.border)
                                 }
                             }
-                            visibleNodes.forEachIndexed { idx, node ->
+                            visibleStaticNodes.forEachIndexed { idx, node ->
                                 val nid = node.str("id") ?: node.id
                                 val nName = node.str("name")?.takeIf { it.isNotEmpty() } ?: nid
                                 val nStatus = node.str("status") ?: "online"
@@ -4204,7 +4259,7 @@ fun OrbAgentPickerSheet(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .orbPressClickable { if (!locked) onSelectNodeId(nid) }
+                                        .orbPressClickable { if (!locked) onSelectNodeId(nid, false) }
                                         .padding(horizontal = 14.dp, vertical = 11.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
@@ -4234,7 +4289,7 @@ fun OrbAgentPickerSheet(
                                         )
                                     }
                                 }
-                                if (idx < visibleNodes.size - 1 || filteredWorkspaces.isNotEmpty()) {
+                                if (idx < visibleStaticNodes.size - 1 || hasBelowStatic) {
                                     HorizontalDivider(color = OrbStyle.border)
                                 }
                             }
@@ -4276,7 +4331,272 @@ fun OrbAgentPickerSheet(
                                         )
                                     }
                                 }
-                                if (idx < filteredWorkspaces.size - 1) {
+                                if (idx < filteredWorkspaces.size - 1 || userManagedNodes.isNotEmpty() || agentManagedNodes.isNotEmpty()) {
+                                    HorizontalDivider(color = OrbStyle.border)
+                                }
+                            }
+                            if (userManagedNodes.isNotEmpty()) {
+                                Text(
+                                    text = "YOUR VMS",
+                                    color = OrbStyle.textMuted,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 0.6.sp,
+                                    modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 4.dp)
+                                )
+                                userManagedNodes.forEachIndexed { idx, node ->
+                                    val nid = node.str("id") ?: node.id
+                                    val nName = OrbManagedMachines.nodeTitle(nid, node)
+                                    val nStatus = node.str("status") ?: "online"
+                                    val provLabel = OrbManagedMachines.nodeProvider(OrbManagedMachines.nodeLabels(node))
+                                        ?.let { OrbManagedMachines.providerLabel(it) }
+                                    val selected = selectedWorkspaceId.isEmpty() && selectedNodeId == nid
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .orbPressClickable { if (!locked) onSelectNodeId(nid, false) }
+                                            .padding(horizontal = 14.dp, vertical = 11.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = nName,
+                                                color = Color.White,
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = listOfNotNull(provLabel, nStatus).joinToString(" · "),
+                                                color = OrbStyle.textMuted,
+                                                fontSize = 11.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        if (selected) {
+                                            Icon(
+                                                imageVector = Icons.Default.Check,
+                                                contentDescription = null,
+                                                tint = Color.White,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                    if (idx < userManagedNodes.size - 1 || agentManagedNodes.isNotEmpty()) {
+                                        HorizontalDivider(color = OrbStyle.border)
+                                    }
+                                }
+                            }
+                            if (agentManagedNodes.isNotEmpty()) {
+                                val expanded = agentVmsExpanded || workspaceQuery.isNotBlank()
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .orbPressClickable { agentVmsExpanded = !agentVmsExpanded }
+                                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = "Agent-spawned VMs (${agentManagedNodes.size})",
+                                        color = OrbStyle.textSecondary,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Icon(
+                                        imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                        contentDescription = null,
+                                        tint = OrbStyle.textMuted,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                                if (expanded) {
+                                    HorizontalDivider(color = OrbStyle.border)
+                                    agentManagedNodes.forEachIndexed { idx, node ->
+                                        val nid = node.str("id") ?: node.id
+                                        val nName = OrbManagedMachines.nodeTitle(nid, node)
+                                        val nStatus = node.str("status") ?: "online"
+                                        val provLabel = OrbManagedMachines.nodeProvider(OrbManagedMachines.nodeLabels(node))
+                                            ?.let { OrbManagedMachines.providerLabel(it) }
+                                        val selected = selectedWorkspaceId.isEmpty() && selectedNodeId == nid
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .orbPressClickable { if (!locked) onSelectNodeId(nid, false) }
+                                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = nName,
+                                                    color = Color.White,
+                                                    fontSize = 14.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                Text(
+                                                    text = listOfNotNull(provLabel, nStatus).joinToString(" · "),
+                                                    color = OrbStyle.textMuted,
+                                                    fontSize = 11.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                            if (selected) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Check,
+                                                    contentDescription = null,
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                        }
+                                        if (idx < agentManagedNodes.size - 1) {
+                                            HorizontalDivider(color = OrbStyle.border)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (usableCloudProviders.isNotEmpty() && workspaceQuery.isBlank()) {
+                        Text(
+                            text = "CLOUD VMS (START ON SEND)",
+                            color = OrbStyle.textMuted,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.7.sp,
+                            modifier = Modifier.padding(top = 6.dp)
+                        )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(OrbStyle.surface)
+                                .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
+                        ) {
+                            val parsedAuto = OrbManagedMachines.parseAutoManagedTarget(selectedNodeId)
+                            usableCloudProviders.forEachIndexed { pIdx, prov ->
+                                val provKey = OrbManagedMachines.machineProviderKey(prov.provider)
+                                val sizes = OrbManagedMachines.allowedSizes(prov.sizes, managedCatalog?.budget?.maxSize)
+                                val isExpanded = expandedCloudProvider == provKey
+                                val selectedSizeForProv = if (selectedWorkspaceId.isEmpty() && parsedAuto?.provider == provKey) parsedAuto.size else null
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .orbPressClickable {
+                                            expandedCloudProvider = if (isExpanded) null else provKey
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Cloud,
+                                        contentDescription = null,
+                                        tint = OrbStyle.textSecondary,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Text(
+                                        text = OrbManagedMachines.providerDisplayLabel(prov.provider, usableCloudProviders),
+                                        color = Color.White,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (!selectedSizeForProv.isNullOrEmpty()) {
+                                        Text(
+                                            text = OrbManagedMachines.sizeLabel(selectedSizeForProv),
+                                            color = OrbStyle.textSecondary,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                    Icon(
+                                        imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ChevronRight,
+                                        contentDescription = null,
+                                        tint = OrbStyle.textMuted,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                                if (isExpanded) {
+                                    HorizontalDivider(color = OrbStyle.border)
+                                    sizes.forEachIndexed { sIdx, s ->
+                                        val target = OrbManagedMachines.formatAutoManagedTarget(prov.provider, s.size)
+                                        val sizeSelected = selectedWorkspaceId.isEmpty() && selectedNodeId.equals(target, ignoreCase = true)
+                                        val is24h = OrbManagedMachines.is24hCommitmentSize(s)
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .orbPressClickable {
+                                                    if (!locked) {
+                                                        if (is24h) {
+                                                            pending24hPick = prov to s
+                                                        } else {
+                                                            onSelectNodeId(target, false)
+                                                        }
+                                                    }
+                                                }
+                                                .padding(start = 36.dp, end = 14.dp, top = 10.dp, bottom = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    Text(
+                                                        text = OrbManagedMachines.sizeLabel(s.size),
+                                                        color = Color.White,
+                                                        fontSize = 13.sp,
+                                                        fontWeight = FontWeight.Medium
+                                                    )
+                                                    if (is24h) {
+                                                        Text(
+                                                            text = "24h min",
+                                                            color = OrbStyle.textSecondary,
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.SemiBold,
+                                                            modifier = Modifier
+                                                                .clip(CircleShape)
+                                                                .background(OrbStyle.elevated)
+                                                                .border(1.dp, OrbStyle.border, CircleShape)
+                                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                        )
+                                                    }
+                                                }
+                                                Text(
+                                                    text = OrbManagedMachines.compactSizeSpec(s),
+                                                    color = OrbStyle.textMuted,
+                                                    fontSize = 11.sp
+                                                )
+                                            }
+                                            Text(
+                                                text = OrbManagedMachines.usdPerHour(s.usdPerHour),
+                                                color = OrbStyle.textSecondary,
+                                                fontSize = 12.sp,
+                                                fontFamily = FontFamily.Monospace
+                                            )
+                                            if (sizeSelected) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Check,
+                                                    contentDescription = null,
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(15.dp)
+                                                )
+                                            }
+                                        }
+                                        if (sIdx < sizes.size - 1) {
+                                            HorizontalDivider(color = OrbStyle.border)
+                                        }
+                                    }
+                                }
+                                if (pIdx < usableCloudProviders.size - 1) {
                                     HorizontalDivider(color = OrbStyle.border)
                                 }
                             }
@@ -4425,6 +4745,38 @@ fun OrbAgentPickerSheet(
 
             Spacer(modifier = Modifier.height(24.dp))
         }
+    }
+
+    pending24hPick?.let { (prov, size) ->
+        val hours = size.minBillingHours ?: 24
+        val minCost = OrbManagedMachines.usd(size.usdPerHour * hours)
+        AlertDialog(
+            onDismissRequest = { pending24hPick = null },
+            containerColor = OrbStyle.elevated,
+            titleContentColor = Color.White,
+            title = { Text("24-hour minimum commitment", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    text = "${OrbManagedMachines.providerDisplayLabel(prov.provider)} ${OrbManagedMachines.sizeLabel(size.size)} carries a $hours-hour minimum lease ($minCost total) once started on prompt send.",
+                    color = OrbStyle.textSecondary,
+                    fontSize = 14.sp
+                )
+            },
+            dismissButton = {
+                TextButton(onClick = { pending24hPick = null }) {
+                    Text("Cancel", color = OrbStyle.textSecondary)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val target = OrbManagedMachines.formatAutoManagedTarget(prov.provider, size.size)
+                    pending24hPick = null
+                    onSelectNodeId(target, true)
+                }) {
+                    Text("Select ($minCost min)", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        )
     }
 }
 

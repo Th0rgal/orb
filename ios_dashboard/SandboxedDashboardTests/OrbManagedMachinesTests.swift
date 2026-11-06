@@ -259,4 +259,30 @@ final class OrbManagedMachinesTests: XCTestCase {
         let updated = OrbNodeCapacity.applyOptimisticCapacity([queued], id: "babylon", capacity: 10)
         XCTAssertEqual(OrbNodeCapacity.slotSummary(updated[0]), "6 / 10 active · 2 queued")
     }
+
+    func testAutoManagedTargetsAndAgentSpawnedClassification() throws {
+        XCTAssertEqual(OrbManaged.formatAutoManagedTarget(provider: "boat", size: "large"), "auto-managed:boat:large")
+        XCTAssertTrue(OrbManaged.isAutoManagedTarget("auto-managed:boat:large"))
+        XCTAssertTrue(OrbManaged.isAutoManagedTarget("auto-managed"))
+        XCTAssertFalse(OrbManaged.isAutoManagedTarget("managed-abc"))
+        XCTAssertEqual(OrbManaged.autoManagedLabel("auto-managed:boat:large"), "boat.dev · large")
+        XCTAssertEqual(OrbManaged.autoManagedLabel("auto-managed:hetzner:default"), "Hetzner · medium")
+
+        let data = try Data(contentsOf: OrbSpec.url("fixtures/managed-machines-response.json"))
+        let r = try OrbManaged.decode(data)
+        XCTAssertEqual(OrbManaged.usableProviders(r).map(\.provider), ["boat", "boost", "hetzner"])
+
+        let missionNode: OrbJSON = .object(["id": .string("managed-m1"), "labels": .array([.string("managed")]), "owner_kind": .string("mission")])
+        let userNode: OrbJSON = .object(["id": .string("managed-u1"), "labels": .array([.string("managed")]), "owner_kind": .string("user")])
+        XCTAssertTrue(OrbManaged.isAgentSpawnedManagedNode(missionNode))
+        XCTAssertFalse(OrbManaged.isUserManagedNode(missionNode))
+        XCTAssertTrue(OrbManaged.isUserManagedNode(userNode))
+        XCTAssertFalse(OrbManaged.isAgentSpawnedManagedNode(userNode))
+
+        var sel = OrbSelection(backend: "grok", node: "auto-managed:boat:large")
+        XCTAssertEqual(sel.machinePillLabel, "boat.dev · large")
+        XCTAssertThrowsError(try sel.validate())
+        sel.backend = "claudecode"
+        XCTAssertNoThrow(try sel.validate())
+    }
 }

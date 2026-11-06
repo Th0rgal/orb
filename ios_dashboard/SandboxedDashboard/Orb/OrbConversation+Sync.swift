@@ -465,9 +465,10 @@ extension OrbConversation {
                         rebuildHistory()
                     }
                 }
-                let targetNode = id != nil
+                let rawTargetNode = id != nil
                     ? (isCloud ? "core" : OrbContinuation.remoteNodeID(for: mission, fallback: selection.node))
                     : (selection.cloud || selection.node.isEmpty ? "core" : selection.node)
+                let targetNode = OrbManaged.isAutoManagedTarget(rawTargetNode) ? "core" : rawTargetNode
                 for file in attachments {
                     let receipt = try await api.call("/api/uploads", method: "POST", body: .object(["node_id": .string(targetNode), "name": .string(file.name), "data_base64": .string(file.data.base64EncodedString())]))
                     guard !receipt["path"].text.isEmpty else { throw URLError(.cannotParseResponse) }
@@ -529,7 +530,16 @@ extension OrbConversation {
                     if !uploaded.isEmpty { body["attachments"] = .array(uploaded) }
                     if selection.cloud { body["cloud"] = selection.wire }
                     else if selection.backend == "codex" { try await OrbCodexSpeed.require(model: selection.model, tier: selection.serviceTier); body["service_tier"] = .string(selection.serviceTier) }
-                    if !selection.cloud { body["backend"] = .string(selection.backend); body["model_override"] = .string(selection.model); if !selection.node.isEmpty && selection.node != "core" { body["remote_node_id"] = .string(selection.node) } }
+                    if !selection.cloud {
+                        body["backend"] = .string(selection.backend)
+                        body["model_override"] = .string(selection.model)
+                        if !selection.node.isEmpty && selection.node != "core" {
+                            body["remote_node_id"] = .string(selection.node)
+                            if selection.allow24hCommitment && OrbManaged.isAutoManagedTarget(selection.node) {
+                                body["managed_allow_24h_commitment"] = .bool(true)
+                            }
+                        }
+                    }
                     pending = OrbPending(path: "/api/control/missions", body: .object(body))
                 }
                 try OrbDisk.save(pending, key: pendingKey)

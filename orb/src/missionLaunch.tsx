@@ -1,5 +1,6 @@
 import { isRecord, readJson, writeJson } from "./storage";
-import { missionNode, nodeLabel } from "./machines/nodes";
+import { isAutoManagedTarget, missionNode, nodeLabel } from "./machines/nodes";
+import { managedCatalog } from "./managedMachineModel";
 import { REMOTE_PROXY_HARNESSES } from "./harnesses";
 import { canForceSlot, isQueued, queueWaitLabel } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
@@ -120,12 +121,34 @@ export function remoteHarnessSupport(capability: RemoteLaunchCapability | null |
  */
 export function remoteLaunchPreflight(fleet: RemoteNodesResponse, nodeId: string, pick: { backend: string; model: string }, harnessName: (id: string) => string = id => id): string | null {
   const destination = nodeLabel(nodeId);
+  const capability = fleet.remote_launch;
+  if (isAutoManagedTarget(nodeId)) {
+    if (fleet.managed_compute && !fleet.managed_compute.enabled) {
+      return `${destination} is unavailable because managed cloud VMs are disabled. Choose an available machine; your draft is kept.`;
+    }
+    if (!capability || capability.typed !== true) return TYPED_LAUNCH_UNSUPPORTED;
+    if (pick.backend === "grok" || pick.backend === "vibe") {
+      return `${harnessName(pick.backend)} is not supported on managed cloud VMs (${destination}). Choose Claude Code, Codex, OpenCode, or Antigravity, or pick Core; your draft is kept.`;
+    }
+    const cat = managedCatalog();
+    if (pick.backend === "antigravity" && cat.loaded && cat.settings?.antigravity_on_managed === false) {
+      return `Antigravity is disabled on managed cloud VMs. Enable it in Manage machines or choose another harness; your draft is kept.`;
+    }
+    const harnesses = Array.isArray(capability.harnesses) ? capability.harnesses : [];
+    if (!harnesses.includes(pick.backend)) {
+      const supported = harnesses.length ? `This backend currently runs ${harnesses.map(harnessName).join(", ")} on remote nodes.` : "This backend has not enabled any harness on remote nodes yet.";
+      return `Remote launch for ${pick.backend} (${pick.model}) is not supported on ${destination}. ${supported} Your draft and selection are kept; no mission was submitted.`;
+    }
+    if (capability.proxy_url_configured === false && remoteHarnessNeedsProxy(capability, pick.backend)) {
+      return `${destination} cannot reach this backend's model proxy. Your draft and selection are kept; no mission was submitted.`;
+    }
+    return null;
+  }
   const node = fleet.nodes?.find(n => n.id === nodeId);
   if (!fleet.enabled || !node || (node.cordoned && !isAdministrationNode(node)) || !["online","degraded"].includes(node.status)) return `${destination} is unavailable. Choose an available machine; your draft is kept.`;
   if (node.quarantined_harnesses?.includes(pick.backend)) {
     return `${harnessName(pick.backend)} is temporarily unavailable on ${destination} after a provider region or egress rejection. Choose Core or another machine; your draft is kept.`;
   }
-  const capability = fleet.remote_launch;
   if (!capability || capability.typed !== true) return TYPED_LAUNCH_UNSUPPORTED;
   const harnesses = Array.isArray(capability.harnesses) ? capability.harnesses : [];
   if (!harnesses.includes(pick.backend)) {

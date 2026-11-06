@@ -167,6 +167,18 @@ impl RemoteHarnessPlan {
         )
     }
 
+    pub(crate) fn set_prompt(&mut self, next: String) {
+        match self {
+            RemoteHarnessPlan::Vibe { prompt, .. }
+            | RemoteHarnessPlan::Antigravity { prompt, .. }
+            | RemoteHarnessPlan::Codex { prompt, .. }
+            | RemoteHarnessPlan::Grok { prompt, .. }
+            | RemoteHarnessPlan::ClaudeCode { prompt, .. }
+            | RemoteHarnessPlan::OpenCode { prompt, .. } => *prompt = next,
+            RemoteHarnessPlan::Raw { .. } => {}
+        }
+    }
+
     pub(crate) fn label(&self) -> String {
         match self {
             RemoteHarnessPlan::Antigravity { model, .. } => format!(

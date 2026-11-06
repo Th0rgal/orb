@@ -1806,7 +1806,13 @@ enum OrbReadCache {
             async let backends = OrbCore.shared.call("/api/backends")
             async let nodes = OrbCore.shared.call("/api/remote-nodes")
             async let models = OrbCore.shared.call("/api/providers/backend-models")
-            return try await .object(["backends": backends, "nodes": nodes, "models": models])
+            async let managed = try? OrbCore.shared.call("/api/managed-machines")
+            return try await .object([
+                "backends": backends,
+                "nodes": nodes,
+                "models": models,
+                "managed": (await managed) ?? .null
+            ])
         }
     }
     static func cloudAccounts(force: Bool = false) async throws -> OrbJSON {

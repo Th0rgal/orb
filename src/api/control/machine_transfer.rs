@@ -284,7 +284,7 @@ async fn node_request(
     let node = state
         .config
         .remote_nodes
-        .static_node(node_id)
+        .node(node_id)
         .ok_or_else(|| conflict("Machine is no longer configured"))?;
     let token = crate::remote_node::node_token(&node.token_env)
         .map_err(|_| conflict("Machine authentication unavailable"))?;
@@ -428,11 +428,13 @@ type NodeCapabilities = Vec<(String, Result<Value, Error>)>;
 
 /// What each configured node supports, for listings only: a transfer always
 /// asks its destination again. Availability and cordons are not cached.
-async fn listed_node_capabilities(state: &AppState) -> Vec<Result<Value, Error>> {
+async fn listed_node_capabilities(
+    state: &AppState,
+    nodes: &[crate::remote_node::RemoteNodeConfig],
+) -> Vec<Result<Value, Error>> {
     static CACHE: std::sync::OnceLock<
         tokio::sync::Mutex<Option<(std::time::Instant, NodeCapabilities)>>,
     > = std::sync::OnceLock::new();
-    let nodes = &state.config.remote_nodes.nodes;
     let mut cache = CACHE.get_or_init(Default::default).lock().await;
     let fresh = cache.as_ref().is_some_and(|(at, answers)| {
         at.elapsed() < NODE_CAPABILITIES_TTL
@@ -519,12 +521,19 @@ async fn core_vibe_ready(state: &AppState) -> bool {
 }
 
 async fn capabilities(state: &AppState) -> Vec<Value> {
+    let mut all_nodes: Vec<crate::remote_node::RemoteNodeConfig> =
+        state.config.remote_nodes.nodes.clone();
+    for managed in crate::managed::node_configs() {
+        if !all_nodes.iter().any(|n| n.id == managed.id) {
+            all_nodes.push(managed.clone());
+        }
+    }
     let (registry_guard, default_workspace, vibe_ready, vibe_auth, answers) = tokio::join!(
         state.backend_registry.read(),
         state.workspaces.get(Uuid::nil()),
         core_vibe_ready(state),
         crate::backend::vibe::core_auth_configured(&state.config.working_dir),
-        listed_node_capabilities(state),
+        listed_node_capabilities(state, &all_nodes),
     );
     let mut harnesses: Vec<_> = registry_guard.list().into_iter().map(|b| b.id).collect();
     drop(registry_guard);
@@ -549,7 +558,9 @@ async fn capabilities(state: &AppState) -> Vec<Value> {
     let mut rows = vec![
         json!({"machine":{"kind":"core"},"label":"Core","available":true,"harnesses":harnesses}),
     ];
-    for (node, result) in state.config.remote_nodes.nodes.iter().zip(answers) {
+    for (node, result) in all_nodes.iter().zip(answers) {
+        let label = crate::managed::display_name(&node.id).unwrap_or_else(|| node.id.clone());
+        let owner_kind = crate::managed::owner_kind(&node.id);
         rows.push(match result {
             Ok(mut capabilities) => {
                 if !vibe_auth {
@@ -557,9 +568,30 @@ async fn capabilities(state: &AppState) -> Vec<Value> {
                         harnesses.retain(|harness| harness.as_str() != Some("vibe"));
                     }
                 }
-                json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":state.config.remote_nodes.enabled && !state.fleet.is_cordoned(&node.id),"reason":if state.fleet.is_cordoned(&node.id){Some("Machine is cordoned")}else{None},"harnesses":capabilities["harnesses"]})
+                let mut row = json!({
+                    "machine": {"kind": "node", "id": node.id},
+                    "label": label,
+                    "available": state.config.remote_nodes.enabled && !state.fleet.is_cordoned(&node.id),
+                    "reason": if state.fleet.is_cordoned(&node.id) { Some("Machine is cordoned") } else { None },
+                    "harnesses": capabilities["harnesses"],
+                });
+                if let Some(kind) = owner_kind {
+                    row["owner_kind"] = json!(kind);
+                }
+                row
             }
-            Err((_, error)) => json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":false,"reason":error}),
+            Err((_, error)) => {
+                let mut row = json!({
+                    "machine": {"kind": "node", "id": node.id},
+                    "label": label,
+                    "available": false,
+                    "reason": error,
+                });
+                if let Some(kind) = owner_kind {
+                    row["owner_kind"] = json!(kind);
+                }
+                row
+            }
         });
     }
     rows
@@ -847,7 +879,7 @@ fn node_endpoint(state: &AppState, id: &str) -> Result<(String, String), Error> 
     let node = state
         .config
         .remote_nodes
-        .static_node(id)
+        .node(id)
         .ok_or_else(|| conflict("Machine is no longer configured"))?;
     let token = crate::remote_node::node_token(&node.token_env)
         .map_err(|_| conflict("Machine authentication unavailable"))?;

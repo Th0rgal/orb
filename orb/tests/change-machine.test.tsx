@@ -252,3 +252,112 @@ it("defaults to light mode and moves conversation in one click without scanning 
   expect(prepare).toHaveBeenCalledWith("source", expect.objectContaining({ op: "prepare", light: true }));
   expect(inventory).not.toHaveBeenCalled();
 });
+
+import * as managedModel from "../src/managedMachineModel";
+
+it("collapses agent-spawned VMs and provisions a new Cloud VM only when Move is confirmed", async () => {
+  managedModel.resetManagedCatalog();
+  vi.spyOn(transfers, "inspectTransfer").mockResolvedValue({
+    version: 1,
+    features: ["links", "selection", "light", "bulk_copy"],
+    actions: [],
+    destinations: [
+      { machine: { kind: "core" }, label: "Core", available: true },
+      { machine: { kind: "node", id: "managed-usr1" }, label: "my-box", available: true, harnesses: ["codex"], labels: ["managed", "boat"], owner_kind: "user" },
+      { machine: { kind: "node", id: "managed-ag1" }, label: "xlarge-a", available: true, harnesses: ["codex"], labels: ["managed", "boat"], owner_kind: "mission" },
+      { machine: { kind: "node", id: "managed-ag2" }, label: "xlarge-b", available: true, harnesses: ["codex"], labels: ["managed", "boat"], owner_kind: "mission" },
+    ],
+  });
+  const createVm = vi.fn().mockResolvedValue({
+    id: "vm99",
+    name: "large-z",
+    provider: "boat",
+    provider_id: "p99",
+    node_id: "managed-vm99",
+    image: "img",
+    size: "large",
+    cpu: 8,
+    ram_gb: 16,
+    state: "online",
+    created_at: "",
+    expires_at: "",
+    cost_usd: 0,
+    usd_per_hour: 0.288,
+    ledger_closed: false,
+  });
+  vi.spyOn(api, "api").mockImplementation((async (path: string, init?: RequestInit) => {
+    if (path === "/api/managed-machines" && init?.method === "POST") {
+      return createVm(JSON.parse(String(init.body ?? "{}")));
+    }
+    if (path === "/api/managed-machines") {
+      return {
+        enabled: true,
+        provider: "boat",
+        machines: [],
+        budget: { spent_today_usd: 0, daily_cap_usd: null, active: 3, max_concurrent: null, default_ttl_minutes: 120, max_ttl_minutes: 720 },
+        sizes: [],
+        providers: [
+          {
+            provider: "boat",
+            display_name: "boat.dev",
+            configured: true,
+            enabled: true,
+            supports_snapshots: true,
+            supports_free_stop: true,
+            sizes: [{ size: "large", cpu: 8, ram_gb: 16, disk_gb: 80, usd_per_hour: 0.288 }],
+          },
+        ],
+      };
+    }
+    if (path === "/api/managed-machines/settings") {
+      return { antigravity_on_managed: true };
+    }
+    return {};
+  }) as any);
+  const lightAction: transfers.TransferAction = {
+    id: "cloud-move-1",
+    mission_id: "source",
+    phase: "copying",
+    light: true,
+    source: { kind: "core" },
+    destination: { kind: "node", id: "managed-vm99" },
+    backend: "codex",
+    model: "model",
+    created_at: "",
+    manifest: { bytes: 0, files: [], excluded: [] },
+  };
+  const prepare = vi.spyOn(transfers, "transferRequest").mockResolvedValue(lightAction as any);
+  vi.spyOn(transfers, "copyTransfer").mockResolvedValue(lightAction);
+  vi.spyOn(transfers, "verifyTransfer").mockResolvedValue({ ...lightAction, phase: "verified" });
+  const movedMission: Mission = { ...mission, machine_transfer: { ...lightAction, phase: "activated" } };
+  vi.spyOn(transfers, "activateTransfer").mockResolvedValue(movedMission);
+  const moved = vi.fn();
+
+  render(() => <ChangeMachine mission={mission} choices={choices} onClose={() => {}} onMoved={moved} />);
+  await waitFor(() => expect(screen.getByRole("menuitem", { name: /my-box/ })).toBeTruthy());
+  expect(screen.queryByRole("menuitem", { name: /xlarge-a/ })).toBeNull();
+  const agentToggle = screen.getByRole("menuitem", { name: /Agent-spawned VMs/ });
+  expect(agentToggle.textContent).toContain("2");
+
+  // Open boat.dev submenu and select "large" — does NOT call createManagedMachine yet!
+  await waitFor(() => expect(screen.getByRole("menuitem", { name: /boat\.dev/ })).toBeTruthy());
+  fireEvent.click(screen.getByRole("menuitem", { name: /boat\.dev/ }));
+  await waitFor(() => expect(screen.getByRole("menuitem", { name: /large/ })).toBeTruthy());
+  fireEvent.click(screen.getByRole("menuitem", { name: /large/ }));
+  expect(createVm).not.toHaveBeenCalled();
+
+  const moveBtn = screen.getByRole("button", { name: /Move to boat\.dev · large/ });
+  fireEvent.click(moveBtn);
+  await waitFor(() => expect(moved).toHaveBeenCalledWith(movedMission));
+  expect(createVm).toHaveBeenCalledWith(expect.objectContaining({
+    provider: "boat",
+    size: "large",
+    wait: true,
+    owner_mission_id: "source",
+  }));
+  expect(prepare).toHaveBeenCalledWith("source", expect.objectContaining({
+    op: "prepare",
+    destination: { kind: "node", id: "managed-vm99" },
+    light: true,
+  }));
+});

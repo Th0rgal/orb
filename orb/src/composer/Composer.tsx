@@ -12,6 +12,7 @@ import { BATCH_MAX_BYTES, BATCH_MAX_FILES, BATCH_WARN_BYTES, BATCH_WARN_FILES, b
 import { FolderUploadChip } from "./FolderUploadChip";
 import { readImagePaste, IMAGE_COUNT, type DraftImage } from "../imageAttachments";
 import { ErrorToast } from "../toast";
+import { isAutoManagedTarget } from "../machines/nodes";
 import { type RemoteSupport } from "../missionLaunch";
 import { absorbGoalPrefix, composerModes, filterSlash, slashQuery, modePrompt, ModeChip, type ComposerMode } from "../goal";
 import { atQuery, browseAttachItems, filterAttach, folderPrefixFromQuery, insertMention, loadAttachItems, mentionedChips, type AttachChip, type AttachItem } from "../attach";
@@ -106,7 +107,7 @@ export function Composer(p: {
   onCleanup(() => { disposed = true; });
   let fileInput!: HTMLInputElement;
   const uploadTarget = () => p.uploadTarget ?? "core";
-  const attachmentTarget = () => uploadTarget();
+  const attachmentTarget = () => isAutoManagedTarget(uploadTarget()) ? "core" : uploadTarget();
   const insertUploadedFile = (file: UploadedFile) => {
     uploaded.push(file); bumpUploads(n => n + 1);
     const current = ta ? (ta.selectionStart ?? text().length) : text().length;

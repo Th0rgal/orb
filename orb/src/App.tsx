@@ -78,7 +78,35 @@ const RoutingSettings = lazy(() =>
   }),
 );
 const Machines = lazy(() => import("./Machines").then(module => ({ default: module.Machines })));
-import { MACHINES, isManagedNode, managedFleetLabel, nodeSize } from "./machines/nodes";
+import {
+  MACHINES,
+  formatAutoManagedTarget,
+  isAgentSpawnedManagedNode,
+  isAutoManagedTarget,
+  isManagedNode,
+  isUserManagedNode,
+  nodeSize,
+  parseAutoManagedTarget,
+} from "./machines/nodes";
+import {
+  findManagedSize,
+  is24hCommitmentSize,
+  managedCatalog,
+  providerLabel,
+  refreshManagedCatalog,
+  sizeLabel,
+  usableManagedProviders,
+  usd,
+  type ManagedProviderInfo,
+  type ManagedSize,
+} from "./managedMachineModel";
+import {
+  AgentSpawnedVmsToggle,
+  CloudVmProviderRows,
+  dismissSubmenuOnSiblingHover,
+  type ActiveProviderSubmenu,
+} from "./MachineCloudMenu";
+import { ConfirmDialog } from "./Dialog";
 const Providers=lazy(()=>import("./Providers").then(module=>({default:module.Providers})));
 const Resources = lazy(() => import("./Resources"));
 import { PopupMenu, type MenuEntry } from "./Menu";
@@ -240,11 +268,18 @@ export default function App() {
   let launchAttempt: { signature: string; key: string } | undefined;
   const MACHINE_KEY = "orb.machine";
   const [explicitMachine, setExplicitMachine] = createSignal(false);
-  const [newMachine, setNewMachine] = createSignal((readString(MACHINE_KEY) === "dgx-spark-admin" ? "core" : readString(MACHINE_KEY)) || "core");
+  const initialStoredMachine = readString(MACHINE_KEY);
+  const [newMachine, setNewMachine] = createSignal(
+    (initialStoredMachine === "dgx-spark-admin" || isAutoManagedTarget(initialStoredMachine) ? "core" : initialStoredMachine) || "core",
+  );
+  const [providerSubmenu, setProviderSubmenu] = createSignal<ActiveProviderSubmenu | undefined>();
+  const [agentVmsOpen, setAgentVmsOpen] = createSignal(false);
+  const [pending24hPick, setPending24hPick] = createSignal<{ provider: ManagedProviderInfo; size: ManagedSize } | null>(null);
+  const [confirmed24hTarget, setConfirmed24hTarget] = createSignal<string | null>(null);
   const chooseMachine = (id: string) => {
     setExplicitMachine(true);
     setNewMachine(id);
-    writeString(MACHINE_KEY, id === "dgx-spark-admin" ? "core" : id);
+    writeString(MACHINE_KEY, id === "dgx-spark-admin" || isAutoManagedTarget(id) ? "core" : id);
     if (id === "local") void refreshLocalAgents(false);
   };
   const [workingDirectory, setWorkingDirectory] = createSignal("");
@@ -323,6 +358,13 @@ export default function App() {
   const remoteSupport = (backend: string): { state: RemoteSupport; note: string } => {
     const machine = newMachine();
     if (!isConnected() || machine === "core" || machine === "local") return { state: "unknown", note: "" };
+    if (isAutoManagedTarget(machine)) {
+      if (backend === "grok" || backend === "vibe") return { state: "unsupported", note: "not on Cloud VMs" };
+      const cat = managedCatalog();
+      if (backend === "antigravity" && cat.loaded && cat.settings?.antigravity_on_managed === false) {
+        return { state: "unsupported", note: "disabled on Cloud VMs" };
+      }
+    }
     const rl = remoteLaunch();
     if (rl.state === "loading") return { state: "unknown", note: `checking ${nodeLabel(machine)}…` };
     const support = remoteHarnessSupport(rl.capability, backend);
@@ -604,6 +646,7 @@ export default function App() {
     if (connected) {
       void refreshMissions();
       void refreshFleet();
+      void refreshManagedCatalog();
       void refreshHarnessChoices();
       listProjects()
         .then(setLiveProjects)
@@ -818,14 +861,19 @@ export default function App() {
         const attachments = attachChips().map(chipToAttachment);
         const sentPrompt = imagePrompt(prompt, await stageRemoteImages(images, undefined, machine), images);
         const folder = newFolderPath(projectSlug);
-        const body = {...(pick.backend === "codex" ? {cyber_access:selectedCyber,service_tier:pick.service_tier??"standard"} : {}),...(pick.backend === "vibe" && planObjective(prompt) !== null ? {agent:"plan"} : {}),title,prompt:sentPrompt,working_directory:workingDirectory().trim() || undefined,project:projectSlug,...(folder ? {folder} : {}),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(attachments.length ? {attachments} : {})};
+        const autoTarget = parseAutoManagedTarget(machine);
+        const chosenSize = autoTarget ? findManagedSize(autoTarget.provider, autoTarget.size) : undefined;
+        const allow24h = autoTarget && (is24hCommitmentSize(chosenSize) || confirmed24hTarget() === machine);
+        const body = {...(pick.backend === "codex" ? {cyber_access:selectedCyber,service_tier:pick.service_tier??"standard"} : {}),...(pick.backend === "vibe" && planObjective(prompt) !== null ? {agent:"plan"} : {}),title,prompt:sentPrompt,working_directory:autoTarget ? undefined : (workingDirectory().trim() || undefined),project:projectSlug,...(folder ? {folder} : {}),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(allow24h ? {managed_allow_24h_commitment:true} : {}),...(attachments.length ? {attachments} : {})};
         const signature = JSON.stringify(body);
         if (launchAttempt?.signature !== signature) launchAttempt = {signature,key:crypto.randomUUID()};
         const m = await createMission({...body,idempotency_key:launchAttempt.key});
         launchAttempt = undefined;
         setDraftCyber("standard");
         setAttachChips([]);
-        rememberLaunch(m.id, {...receipt,prompt:sentPrompt});
+        if (autoTarget) void refreshManagedCatalog(true);
+        const resolvedNode = m.remote_node_id ?? machine;
+        rememberLaunch(m.id, {...receipt,nodeId:resolvedNode,destination:nodeLabel(resolvedNode === machine ? machine : resolvedNode),prompt:sentPrompt});
         if (machine === "dgx-spark-admin") chooseMachine("core");
         launchedViewKeys.set(m.id, activeViewKey);
         setMissions(prev => [m, ...prev.filter(old => old.id !== m.id)]);
@@ -1375,21 +1423,59 @@ export default function App() {
                         onSelect={(id) => { setNewFolder(null); setNewProject(id); setEnvOpen(null); }}
                         onClose={() => setEnvOpen(null)}
                         onCreate={() => { setProjectCreationAnchor(undefined); setEnvOpen(null); setNewProjectDraft(true); }}
-                        onMachine={() => setEnvOpen("machine")} />
+                        onMachine={() => {
+                          setProviderSubmenu(undefined);
+                          setAgentVmsOpen(sortedNodes().filter(isAgentSpawnedManagedNode).some(n => n.id === newMachine()));
+                          void refreshManagedCatalog();
+                          setEnvOpen("machine");
+                        }} />
                     </Show>
                   </div>
 
                   <div class="na-drop" onPointerDown={(e) => e.stopPropagation()}>
-                    <button class="na-drop-btn" onClick={() => setEnvOpen(envOpen() === "machine" ? null : "machine")}>
+                    <button
+                      class="na-drop-btn"
+                      onClick={() => {
+                        if (envOpen() === "machine") {
+                          setProviderSubmenu(undefined);
+                          setEnvOpen(null);
+                        } else {
+                          setProviderSubmenu(undefined);
+                          setAgentVmsOpen(sortedNodes().filter(isAgentSpawnedManagedNode).some(n => n.id === newMachine()));
+                          void refreshManagedCatalog();
+                          setEnvOpen("machine");
+                        }
+                      }}
+                    >
                       <Show when={newMachine() !== "local"} fallback={<Ic.LaptopIcon size={14} />}>
-                        <Show when={newMachine() === "core"} fallback={<Ic.ComputeNodeIcon size={14} />}><Ic.CoreServerIcon size={14} /></Show>
+                        <Show
+                          when={newMachine() === "core"}
+                          fallback={
+                            <Show when={isAutoManagedTarget(newMachine())} fallback={<Ic.ComputeNodeIcon size={14} />}>
+                              <Ic.CloudIcon size={14} />
+                            </Show>
+                          }
+                        >
+                          <Ic.CoreServerIcon size={14} />
+                        </Show>
                       </Show>
                       {machineLabel()}
                       <Ic.ChevronDown size={12} />
                     </button>
                     <Show when={envOpen() === "machine"}>
-                      <Menu class="na-menu machine-menu" label="Choose machine" width={340} onClose={() => setEnvOpen(null)}>
-                        <div class="na-menu-list">
+                      <Menu
+                        class="na-menu machine-menu"
+                        label="Choose machine"
+                        width={340}
+                        onClose={() => {
+                          setProviderSubmenu(undefined);
+                          setEnvOpen(null);
+                        }}
+                      >
+                        <div
+                          class="na-menu-list"
+                          onMouseOver={(e) => dismissSubmenuOnSiblingHover(e, providerSubmenu(), () => setProviderSubmenu(undefined))}
+                        >
                         <Show
                           when={isConnected()}
                           fallback={
@@ -1471,63 +1557,117 @@ export default function App() {
                             </span>
                             <MachineLoadBadge machine="core" />
                           </button>
-                          <div class="menu-sep" />
-                          <div class="machine-section-label machine-nodes-label">Compute nodes</div>
-                          <For each={sortedNodes().filter(n => !isManagedNode(n))}>
-                            {(n) => (
-                              <button
-                                class={`menu-item machine-node-option ${n.id === newMachine() ? "on" : ""}`}
-                                    aria-pressed={n.id === newMachine()}
-                                title={isAdministrationNode(n) ? `Administration · Full sudo · Manual selection only. ${nodeLaunchNote() ?? ""}` : nodeLaunchNote()}
-                                onClick={() => {
-                                  chooseMachine(n.id);
-                                  setEnvOpen(null);
-                                }}
-                              >
-                                <span class="menu-ico">
-                                  <Ic.ComputeNodeIcon />
-                                </span>
-                                <span class="menu-col">
-                                  <span class="menu-title" title={n.display_name ? n.id : undefined}>{isAdministrationNode(n) ? "DGX Spark · Admin" : n.display_name || n.id}</span><Show when={isManagedNode(n) && nodeSize(n)}><span class="machine-inline-note">{nodeSize(n)}</span></Show>
-                                </span>
-                                <MachineLoadBadge machine={n.id} />
-                                <span class="machine-node-state"><span class={`machine-state-dot ${n.status === "online" && (!n.cordoned || isAdministrationNode(n)) ? "online" : ""}`} />{isAdministrationNode(n) && n.status === "online" ? "Manual" : n.cordoned ? "Cordoned" : n.status}</span>
-                              </button>
-                            )}
-                          </For>
-                          <Show when={sortedNodes().some(isManagedNode)}>
+                          <Show when={sortedNodes().some(n => !isManagedNode(n))}>
                             <div class="menu-sep" />
-                            <div class="machine-section-label machine-managed-label">{managedFleetLabel(sortedNodes())}</div>
-                            <For each={sortedNodes().filter(isManagedNode)}>
-                            {(n) => (
-                              <button
-                                class={`menu-item machine-node-option ${n.id === newMachine() ? "on" : ""}`}
-                                    aria-pressed={n.id === newMachine()}
-                                title={isAdministrationNode(n) ? `Administration · Full sudo · Manual selection only. ${nodeLaunchNote() ?? ""}` : nodeLaunchNote()}
-                                onClick={() => {
-                                  chooseMachine(n.id);
-                                  setEnvOpen(null);
-                                }}
-                              >
-                                <span class="menu-ico">
-                                  <Ic.ComputeNodeIcon />
-                                </span>
-                                <span class="menu-col">
-                                  <span class="menu-title" title={n.display_name ? n.id : undefined}>{isAdministrationNode(n) ? "DGX Spark · Admin" : n.display_name || n.id}</span><Show when={isManagedNode(n) && nodeSize(n)}><span class="machine-inline-note">{nodeSize(n)}</span></Show>
-                                </span>
-                                <MachineLoadBadge machine={n.id} />
-                                <span class="machine-node-state"><span class={`machine-state-dot ${n.status === "online" && (!n.cordoned || isAdministrationNode(n)) ? "online" : ""}`} />{isAdministrationNode(n) && n.status === "online" ? "Manual" : n.cordoned ? "Cordoned" : n.status}</span>
-                              </button>
-                            )}
-                          </For>
+                            <div class="machine-section-label machine-nodes-label">Compute nodes</div>
+                            <For each={sortedNodes().filter(n => !isManagedNode(n))}>
+                              {(n) => (
+                                <button
+                                  class={`menu-item machine-node-option ${n.id === newMachine() ? "on" : ""}`}
+                                      aria-pressed={n.id === newMachine()}
+                                  title={isAdministrationNode(n) ? `Administration · Full sudo · Manual selection only. ${nodeLaunchNote() ?? ""}` : nodeLaunchNote()}
+                                  onClick={() => {
+                                    chooseMachine(n.id);
+                                    setEnvOpen(null);
+                                  }}
+                                >
+                                  <span class="menu-ico">
+                                    <Ic.ComputeNodeIcon />
+                                  </span>
+                                  <span class="menu-col">
+                                    <span class="menu-title" title={n.display_name ? n.id : undefined}>{isAdministrationNode(n) ? "DGX Spark · Admin" : n.display_name || n.id}</span>
+                                  </span>
+                                  <MachineLoadBadge machine={n.id} />
+                                  <span class="machine-node-state"><span class={`machine-state-dot ${n.status === "online" && (!n.cordoned || isAdministrationNode(n)) ? "online" : ""}`} />{isAdministrationNode(n) && n.status === "online" ? "Manual" : n.cordoned ? "Cordoned" : n.status}</span>
+                                </button>
+                              )}
+                            </For>
+                          </Show>
+                          <CloudVmProviderRows
+                            providers={usableManagedProviders()}
+                            catalog={managedCatalog()}
+                            selectedTarget={newMachine()}
+                            subtitle="starts on send"
+                            activeSubmenu={providerSubmenu()}
+                            onSubmenuChange={setProviderSubmenu}
+                            onSelectSize={(prov, size) => {
+                              const target = formatAutoManagedTarget(prov.provider, size.size);
+                              setProviderSubmenu(undefined);
+                              setEnvOpen(null);
+                              if (is24hCommitmentSize(size) && confirmed24hTarget() !== target) {
+                                setPending24hPick({ provider: prov, size });
+                              } else {
+                                chooseMachine(target);
+                              }
+                            }}
+                          />
+                          <Show when={sortedNodes().some(isUserManagedNode)}>
+                            <div class="menu-sep" />
+                            <div class="machine-section-label machine-managed-label">Your VMs</div>
+                            <For each={sortedNodes().filter(isUserManagedNode)}>
+                              {(n) => (
+                                <button
+                                  class={`menu-item machine-node-option ${n.id === newMachine() ? "on" : ""}`}
+                                      aria-pressed={n.id === newMachine()}
+                                  title={nodeLaunchNote()}
+                                  onClick={() => {
+                                    chooseMachine(n.id);
+                                    setEnvOpen(null);
+                                  }}
+                                >
+                                  <span class="menu-ico">
+                                    <Ic.ComputeNodeIcon />
+                                  </span>
+                                  <span class="menu-col">
+                                    <span class="menu-title" title={n.display_name ? n.id : undefined}>{n.display_name || n.id}</span><Show when={nodeSize(n)}><span class="machine-inline-note">{nodeSize(n)}</span></Show>
+                                  </span>
+                                  <MachineLoadBadge machine={n.id} />
+                                  <span class="machine-node-state"><span class={`machine-state-dot ${n.status === "online" && !n.cordoned ? "online" : ""}`} />{n.cordoned ? "Cordoned" : n.status}</span>
+                                </button>
+                              )}
+                            </For>
+                          </Show>
+                          <Show when={sortedNodes().some(isAgentSpawnedManagedNode)}>
+                            <div class="menu-sep" />
+                            <AgentSpawnedVmsToggle
+                              count={sortedNodes().filter(isAgentSpawnedManagedNode).length}
+                              expanded={agentVmsOpen()}
+                              hasSelected={sortedNodes().filter(isAgentSpawnedManagedNode).some(n => n.id === newMachine())}
+                              onToggle={() => setAgentVmsOpen(v => !v)}
+                            />
+                            <Show when={agentVmsOpen()}>
+                              <For each={sortedNodes().filter(isAgentSpawnedManagedNode)}>
+                                {(n) => (
+                                  <button
+                                    class={`menu-item machine-node-option machine-agent-vm-row ${n.id === newMachine() ? "on" : ""}`}
+                                        aria-pressed={n.id === newMachine()}
+                                    title={nodeLaunchNote()}
+                                    onClick={() => {
+                                      chooseMachine(n.id);
+                                      setEnvOpen(null);
+                                    }}
+                                  >
+                                    <span class="menu-ico">
+                                      <Ic.ComputeNodeIcon />
+                                    </span>
+                                    <span class="menu-col">
+                                      <span class="menu-title" title={n.display_name ? n.id : undefined}>{n.display_name || n.id}</span><Show when={nodeSize(n)}><span class="machine-inline-note">{nodeSize(n)}</span></Show>
+                                    </span>
+                                    <MachineLoadBadge machine={n.id} />
+                                    <span class="machine-node-state"><span class={`machine-state-dot ${n.status === "online" && !n.cordoned ? "online" : ""}`} />{n.cordoned ? "Cordoned" : n.status}</span>
+                                  </button>
+                                )}
+                              </For>
+                            </Show>
                           </Show>
                         </Show>
                         </div>
-                        <div class="na-menu-foot">
+                        <div class="na-menu-foot" onMouseEnter={() => setProviderSubmenu(undefined)}>
                           <div class="menu-sep" />
                           <button
                             class="menu-item"
                             onClick={() => {
+                              setProviderSubmenu(undefined);
                               setEnvOpen(null);
                               open("machines");
                             }}
@@ -1539,6 +1679,23 @@ export default function App() {
                           </button>
                         </div>
                       </Menu>
+                    </Show>
+                    <Show when={pending24hPick()}>
+                      {(pick) => (
+                        <ConfirmDialog
+                          title="24-hour minimum lease"
+                          description={`${providerLabel(pick().provider.provider)} ${sizeLabel(pick().size.size)} requires a ${pick().size.min_billing_hours ?? 24}-hour minimum billing commitment (${usd(pick().size.usd_per_hour * (pick().size.min_billing_hours ?? 24))} minimum) once the VM starts on send.`}
+                          action={`Select ${sizeLabel(pick().size.size)}`}
+                          destructive={false}
+                          onConfirm={() => {
+                            const target = formatAutoManagedTarget(pick().provider.provider, pick().size.size);
+                            setConfirmed24hTarget(target);
+                            chooseMachine(target);
+                            setPending24hPick(null);
+                          }}
+                          onClose={() => setPending24hPick(null)}
+                        />
+                      )}
                     </Show>
                   </div><WorkingDirectoryPicker machine={newMachine()} machineName={machineLabel()} missions={missions()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/>
                 </div>

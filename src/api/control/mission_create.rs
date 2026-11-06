@@ -2987,7 +2987,20 @@ pub(in crate::api) async fn create_mission_inner(
             // Canonicalise `/goal\n…` to the space form before storing: the
             // deferred goal is later re-injected verbatim, and the backend goal
             // drivers only recognise `/goal <objective>` with a space.
-            let prompt = canonical_goal_message(&prompt).unwrap_or(prompt);
+            let mut prompt = canonical_goal_message(&prompt).unwrap_or(prompt);
+            // If the client staged files/images on Core before the concrete
+            // remote node was known (for example `auto-managed:<provider>:<size>`
+            // or mobile first-turn uploads), forward them to the resolved worker
+            // node and rewrite prompt paths before persisting and dispatching.
+            if let Some(node_id) = remote_node_id.as_deref().filter(|_| remote_launch) {
+                prompt = crate::api::uploads::forward_core_uploads_in_prompt(
+                    &state, node_id, &prompt,
+                )
+                .await?;
+                if let Some(plan) = remote_plan.as_mut() {
+                    plan.set_prompt(prompt.clone());
+                }
+            }
             let prompt_event_id = if worker_location::client_owner(&mission).is_some() {
                 worker_location::initial_delivery_id(mission.id)
             } else {
