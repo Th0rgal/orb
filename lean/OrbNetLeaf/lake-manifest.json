@@ -1,0 +1,16 @@
+{"version": "1.3.0",
+ "packagesDir": ".lake/packages",
+ "packages":
+ [{"url": "https://github.com/Th0rgal/lean-sys.git",
+   "type": "git",
+   "subDir": null,
+   "scope": "",
+   "rev": "d658cb2450743434d255e59ea4225bd651681177",
+   "name": "«lean-sys»",
+   "manifestFile": "lake-manifest.json",
+   "inputRev": "d658cb2450743434d255e59ea4225bd651681177",
+   "inherited": false,
+   "configFile": "lakefile.lean"}],
+ "name": "«orb-net-leaf»",
+ "lakeDir": ".lake",
+ "fixedToolchain": false}
