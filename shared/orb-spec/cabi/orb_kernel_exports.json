@@ -168,6 +168,13 @@
     "orb_effect_outbox_step",
     "orb_crash_boundary_step",
     "orb_activation_rollback_admit",
-    "orb_remote_replay_step"
+    "orb_remote_replay_step",
+    "orb_memory_tool_gate",
+    "orb_upload_cleanup_gate",
+    "orb_proxy_exhaustion_step",
+    "orb_composer_default_step",
+    "orb_cloud_handoff_step",
+    "orb_fast_poll_delay_ms",
+    "orb_mcp_preflight_cache_gate"
   ]
 }

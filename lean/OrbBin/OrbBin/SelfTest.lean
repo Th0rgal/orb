@@ -145,13 +145,54 @@ def runAllTests : IO UInt32 := do
   assertEq "prGateRecommendation 8" (prGateRecommendation 8) "ready_for_review_or_merge"
 
   -- 7. `sandboxed-mcp` catalogue, overlays, ACP injection & Antigravity lock
-  for (role, expectedMin) in [("executor", 40), ("coordinator", 70), ("operator", 85)] do
+  for (role, expectedMin) in [("executor", 44), ("coordinator", 74), ("operator", 89)] do
     let some catTxt := OrbBin.McpCatalog.catalogPrettyJsonForRole role
       | throw <| IO.userError s!"Missing catalog for {role}"
     match Json.parse catTxt with
     | .ok (.arr tools) =>
       assertTrue s!"Catalog {role} count ({tools.size} >= {expectedMin})" (tools.size ≥ expectedMin)
+      for memTool in ["memory_search_knowledge", "memory_get_knowledge_page", "memory_get_knowledge_tree", "memory_recall"] do
+        assertTrue s!"Catalog {role} includes {memTool}"
+          (tools.any (fun t => (t.fieldStr? "name") == some memTool))
     | _ => throw <| IO.userError s!"Failed parsing catalog JSON for {role}"
+
+  -- 7b. `sandboxed-mcp` `--preflight-cache` zero-RTT hit & fail-closed rejection
+  let cacheMission ← newUuidV4
+  let cacheFile := tmpDir / "preflight.json"
+  let expFuture : Int := Int.ofNat (← nowEpoch).toNat + 3600
+  let mockCaps := JVal.obj #[
+    ("contract_version", .str OrbBin.McpCatalog.contractVersion),
+    ("identity", .obj #[("mission_id", .str cacheMission), ("role", .str "executor")]),
+    ("limits", .obj #[("session_expires_at", .int expFuture)]),
+    ("tools", .arr #[.obj #[("name", .str "memory_search_knowledge")]])
+  ]
+  let wrCache ← writePreflightCache cacheFile cacheMission "executor" "mcp1.cached-token" expFuture mockCaps
+  assertTrue "writePreflightCache 0600 succeeds" wrCache.isOk
+  let unreachableUrl := "http://127.0.0.1:9"
+  let cachedClient ← match (← McpClient.create unreachableUrl "mcp1.cached-token" none "executor" (some cacheMission) none none none none (some cacheFile)) with
+    | .ok c => pure c
+    | .error e => throw <| IO.userError s!"McpClient.create failed: {e}"
+  let cancelRef0 ← IO.mkRef false
+  let initResp ← cachedClient.handleRpc (.obj #[("jsonrpc", .str "2.0"), ("id", .nat 1), ("method", .str "initialize")]) cancelRef0
+  assertTrue "preflight-cache serves initialize in 0 HTTP RTTs" ((initResp.field? "result").isSome)
+  let listResp ← cachedClient.handleRpc (.obj #[("jsonrpc", .str "2.0"), ("id", .nat 2), ("method", .str "tools/list")]) cancelRef0
+  assertEq "preflight-cache serves tools/list in 0 HTTP RTTs"
+    ((((listResp.fieldOrNull "result").fieldArr? "tools").getD #[]).size) 1
+  -- Wrong mission_id must fail closed to live HTTP (and fail against 127.0.0.1:9)
+  let otherMission ← newUuidV4
+  let mismatchClient ← match (← McpClient.create unreachableUrl "mcp1.cached-token" none "executor" (some otherMission) none none none none (some cacheFile)) with
+    | .ok c => pure c
+    | .error e => throw <| IO.userError s!"McpClient.create mismatch failed: {e}"
+  let mismatchPreflight ← mismatchClient.preflight
+  assertTrue "preflight-cache fails closed on mission_id mismatch" (isErr mismatchPreflight)
+  -- World-readable 0644 mode must fail closed
+  let chmodOut ← IO.Process.output { cmd := "chmod", args := #["0644", cacheFile.toString] }
+  assertEq "chmod 0644 preflight.json" chmodOut.exitCode 0
+  let insecureClient ← match (← McpClient.create unreachableUrl "mcp1.cached-token" none "executor" (some cacheMission) none none none none (some cacheFile)) with
+    | .ok c => pure c
+    | .error e => throw <| IO.userError s!"McpClient.create insecure failed: {e}"
+  let insecurePreflight ← insecureClient.preflight
+  assertTrue "preflight-cache fails closed when mode != 0600" (isErr insecurePreflight)
 
   let srvDummy := JVal.obj #[("name", .str "sandboxed"), ("command", .str "/bin/sandboxed-mcp"), ("args", .arr #[]), ("env", .arr #[])]
   let acpNew := "{\"id\":2,\"method\":\"session/new\",\"params\":{\"cwd\":\"/work\",\"mcpServers\":[{\"name\":\"other\"},{\"name\":\"sandboxed\",\"command\":\"stale\"}]}}".toUTF8

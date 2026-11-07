@@ -1245,6 +1245,33 @@ def runTests : IO UInt32 := do
   check "POST /jobs rejects >512 GiB / 2^34 wraparound reserved_disk_gib with 422"
     (rWrapJob.status == 422 && !rt.ledger.jobs.contains wrapDiskJobId)
 
+  -- Shared Library skills archive retention (`Orb.Kernel.uploadCleanupGate`) & adaptive fast poll (`Orb.Kernel.fastPollDelayMs`)
+  let libUid ← newUuidV4
+  let attUid ← newUuidV4
+  let libDir := System.FilePath.mk tmpRoot / "uploads" / libUid
+  let attDir := System.FilePath.mk tmpRoot / "uploads" / attUid
+  IO.FS.createDirAll libDir
+  IO.FS.createDirAll attDir
+  IO.FS.writeFile (libDir / "library-skills-0123456789abcdef.tar.gz") "skills-tarball"
+  IO.FS.writeFile (attDir / "screenshot.png") "temp-attachment"
+  let removedPerJob ← cleanupUploadDirectories tmpRoot #[libUid, attUid, "../escape"] false
+  check "cleanupUploadDirectories retains shared library-skills-*.tar.gz across per-job cleanup while removing prompt attachments"
+    (removedPerJob == 1 &&
+     (← (libDir / "library-skills-0123456789abcdef.tar.gz").pathExists) &&
+     !(← (attDir / "screenshot.png").pathExists) &&
+     !shouldCleanupUploadEntry "../escape" "screenshot.png" true &&
+     !isSharedLibrarySkillsArchive "library-skills-../evil.tar.gz")
+  let removedTtl ← cleanupUploadDirectories tmpRoot #[libUid] true
+  check "cleanupUploadDirectories reaps shared library-skills-*.tar.gz once TTL expired"
+    (removedTtl == 1 && !(← (libDir / "library-skills-0123456789abcdef.tar.gz").pathExists))
+  check "computeFastPollDelayMs matches adaptive burst cadence (80 -> 200 -> 500 -> backoff)"
+    (computeFastPollDelayMs false 500 0 == 80 &&
+     computeFastPollDelayMs false 4000 0 == 200 &&
+     computeFastPollDelayMs false 15000 0 == 500 &&
+     computeFastPollDelayMs true 500 0 == 500 &&
+     computeFastPollDelayMs false 500 2 == 2000 &&
+     computeFastPollDelayMs false 500 5 == 5000)
+
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get
   IO.println s!"OrbNode self-test: {passed}/{passed} assertions PASSED"

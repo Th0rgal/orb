@@ -656,10 +656,12 @@ fun OrbConversationPage(
     var sideAgentSession by remember(initialMission?.id) { mutableStateOf<OrbSideAgentSession?>(null) }
     var commandBanner by remember { mutableStateOf<String?>(null) }
 
+    var userExplicitlyPickedAgent by remember(currentMission?.id) { mutableStateOf(false) }
+    var cloudAccounts by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
     // Agent configuration state
     var selectedBackend by remember(currentMission?.id, backends) {
         mutableStateOf(
-            currentMission?.str("backend", "harness", "backend_id")
+            currentMission?.str("backend", "harness", "backend_id")?.removePrefix("cloud_")
                 ?: backends.firstOrNull()?.str("id", "name")
                 ?: "claudecode"
         )
@@ -712,6 +714,29 @@ fun OrbConversationPage(
     val fileScope = remember(missionId, selectedWorkspaceId) { OrbFileScope(missionId, selectedWorkspaceId.takeIf { it.isNotEmpty() }) }
     var selectedAccount by remember(currentMission?.id) {
         mutableStateOf(currentMission?.str("account_id", "account", "provider_account") ?: "")
+    }
+    LaunchedEffect(currentMission?.id, initialFolder, selectedWorkspaceId, nodePinnedByUser, backends.size, userExplicitlyPickedAgent) {
+        if (currentMission != null) return@LaunchedEffect
+        val loaded = if (cloudAccounts.isNotEmpty()) {
+            cloudAccounts
+        } else {
+            runCatching { core.fetchRows("/api/cloud/accounts", "items") }.getOrDefault(emptyList()).also {
+                if (it.isNotEmpty()) cloudAccounts = it
+            }
+        }
+        val hermesAccount = loaded.firstOrNull {
+            it.str("provider") == "hermes" && it.bool("available") == true && !it.str("id").isNullOrEmpty()
+        }
+        val step = OrbKernel.composerDefaultStep(
+            hasExplicitChoice = userExplicitlyPickedAgent,
+            hasPinnedContext = !initialFolder.isNullOrEmpty() || nodePinnedByUser || selectedWorkspaceId.isNotEmpty(),
+            hermesAvailable = hermesAccount != null,
+            hasNativeHarness = backends.isNotEmpty()
+        )
+        if (step == OrbKernel.ComposerDefaultStepResult.DEFAULT_PALOMA_HERMES && hermesAccount != null) {
+            selectedBackend = "hermes"
+            selectedAccount = hermesAccount.str("id").orEmpty()
+        }
     }
     var selectedRepo by remember(currentMission?.id, project.id) {
         mutableStateOf(currentMission?.str("repo", "repository") ?: project.str("repo", "repository") ?: "")
@@ -811,8 +836,8 @@ fun OrbConversationPage(
     }
     val slotWait = remember(liveRow) { orbSlotWaitInfo(liveRow) }
     val isCloudMission = remember(liveRow) {
-        val cloud = liveRow?.dict("cloud")
-        !OrbJSON.str(cloud, "provider").isNullOrEmpty()
+        liveRow?.str("backend", "harness", "backend_id")?.startsWith("cloud_") == true ||
+            !OrbJSON.str(liveRow?.dict("cloud"), "provider").isNullOrEmpty()
     }
     val canForceSlot = missionId != null && !isCloudMission && slotWait?.canForce == true
 
@@ -983,7 +1008,34 @@ fun OrbConversationPage(
                         val conversation = conversationDef.await()
                         if (conversation != null) anyFetchOk = true
                         if (account != OrbDisk.currentScope()) throw kotlinx.coroutines.CancellationException()
-                        val histRows = if (!conversation.isNullOrEmpty()) {
+                        val isCloudCid = (detail?.get("backend") as? String)?.startsWith("cloud_") == true ||
+                            allMissions.firstOrNull { it.id == cid }?.str("backend")?.startsWith("cloud_") == true
+                        val cloudExec = if (isCloudCid) {
+                            orbTry(OrbLog.Category.Network, "/api/control/missions/cloud") {
+                                core.fetchDict("/api/control/missions/${core.encodeComponent(cid)}/cloud")
+                            }.getOrNull()?.also { anyFetchOk = true }
+                        } else null
+                        val cloudHistRows = if (cloudExec != null) {
+                            OrbJSON.dictList(cloudExec["turns"]).flatMapIndexed { idx, turn ->
+                                val key = OrbJSON.str(turn, "key") ?: "turn-$idx"
+                                val prompt = OrbJSON.str(turn, "prompt")?.trim().orEmpty()
+                                val result = OrbJSON.str(turn, "result")?.trim().orEmpty()
+                                val detailErr = OrbJSON.str(turn, "detail")?.trim().orEmpty()
+                                val phase = OrbJSON.str(turn, "phase").orEmpty()
+                                buildList {
+                                    if (prompt.isNotEmpty()) {
+                                        add(OrbRow("$cid:$key:user", mapOf("role" to "user", "content" to prompt, "mission_id" to cid)))
+                                    }
+                                    val assistantBody = result.ifEmpty { if (phase == "failed" && detailErr.isNotEmpty()) detailErr else "" }
+                                    if (assistantBody.isNotEmpty()) {
+                                        add(OrbRow("$cid:$key:assistant", mapOf("role" to "assistant", "content" to assistantBody, "mission_id" to cid)))
+                                    }
+                                }
+                            }
+                        } else emptyList()
+                        val histRows = if (cloudHistRows.isNotEmpty()) {
+                            cloudHistRows
+                        } else if (!conversation.isNullOrEmpty()) {
                             OrbConversationHistory.merge(if (conversationCursor == null) emptyList() else savedHistory, conversation)
                         } else if (conversationCursor != null) {
                             savedHistory
@@ -1339,17 +1391,26 @@ fun OrbConversationPage(
                         UsageTelemetry.trackAction(UsageTelemetry.Action.Btw, "composer")
                     }
                     OrbMissionCommand.Fork -> {
+                        val nativeFallback = backends.firstOrNull()?.str("id", "slug") ?: "claudecode"
+                        val targetBackend = if (isCloudMission || selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes") || selectedBackend.startsWith("cloud_")) {
+                            nativeFallback
+                        } else {
+                            selectedBackend
+                        }
                         val body = mutableMapOf<String, Any?>(
-                            "backend" to selectedBackend,
-                            "model_override" to selectedModel,
+                            "backend" to targetBackend,
+                            "model_override" to if (isCloudMission) "" else selectedModel,
                             "model_effort" to null,
                             "idempotency_key" to UUID.randomUUID().toString()
                         )
+                        if (isCloudMission && selectedNodeId.isNotEmpty() && selectedNodeId != "core") {
+                            body["remote_node_id"] = selectedNodeId
+                        }
                         val created = OrbJSON.dict(core.request("$base/fork", method = "POST", body = body))
                             ?: throw OrbError("Fork failed.")
                         core.refreshMissionsQuietly()
                         currentMission = OrbRow(created)
-                        commandBanner = "Forked into a new conversation"
+                        commandBanner = if (isCloudMission) "Continued in workspace" else "Forked into a new conversation"
                         UsageTelemetry.trackAction(UsageTelemetry.Action.Fork, "composer")
                     }
                     OrbMissionCommand.Clone -> {
@@ -1561,11 +1622,23 @@ fun OrbConversationPage(
                             core.upsertMissionInMemory(savedRow)
                         }
                     }
-                    core.request(
-                        path = "/api/control/missions/$existingId/message",
-                        method = "POST",
-                        body = mapOf("content" to finalPrompt)
-                    )
+                    if (rowBackend.startsWith("cloud_")) {
+                        core.request(
+                            path = "/api/control/message",
+                            method = "POST",
+                            body = mapOf(
+                                "mission_id" to existingId,
+                                "content" to finalPrompt,
+                                "client_message_id" to UUID.randomUUID().toString()
+                            )
+                        )
+                    } else {
+                        core.request(
+                            path = "/api/control/missions/$existingId/message",
+                            method = "POST",
+                            body = mapOf("content" to finalPrompt)
+                        )
+                    }
                     loadHistory(existingId)
                     core.refreshMissionsQuietly()
                 } else {
@@ -1574,36 +1647,76 @@ fun OrbConversationPage(
                     if (composeMode == OrbComposeMode.Goal) tags.add("orb-mode:goal")
                     val cleanFolder = OrbMissionTree.normalizeFolder(initialFolder)
 
-                    val body = mutableMapOf<String, Any?>(
-                        "prompt" to finalPrompt,
-                        "title" to OrbJSON.cleanTitle(baseText).take(72),
-                        "project" to slug,
-                        "folder" to cleanFolder,
-                        "backend" to selectedBackend
-                    )
-                    if (tags.isNotEmpty()) body["tags"] = tags
-                    if (selectedModel.isNotEmpty()) body["model_override"] = selectedModel
-                    if (selectedWorkspaceId.isNotEmpty()) body["workspace_id"] = selectedWorkspaceId
                     val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
-                    if (!isCloudService && selectedWorkspaceId.isEmpty() && selectedNodeId.isNotEmpty() && selectedNodeId != "core") {
-                        if (OrbManagedMachines.isAutoManagedTarget(selectedNodeId) && selectedBackend in setOf("grok", "vibe")) {
-                            throw OrbError("${OrbAgentCatalog.backendLabel(selectedBackend, backends)} is not supported on managed cloud VMs. Choose Claude Code, Codex, OpenCode, or Antigravity, or select Core.")
-                        }
-                        if (selectedBackend == "opencode" && selectedModel.isBlank()) {
-                            if (nodePinnedByUser) {
-                                throw OrbError("Choose an explicit model to run OpenCode on a remote machine, or select Core.")
-                            }
+                    val body = if (isCloudService) {
+                        val accounts = if (cloudAccounts.isNotEmpty()) {
+                            cloudAccounts
                         } else {
-                            body["remote_node_id"] = selectedNodeId
-                            if (allow24hCommitment && OrbManagedMachines.isAutoManagedTarget(selectedNodeId)) {
-                                body["managed_allow_24h_commitment"] = true
+                            runCatching { core.fetchRows("/api/cloud/accounts", "items") }.getOrDefault(emptyList()).also {
+                                if (it.isNotEmpty()) cloudAccounts = it
                             }
                         }
+                        val resolvedAccount = selectedAccount.ifEmpty {
+                            accounts.firstOrNull { it.str("provider") == selectedBackend && it.bool("available") == true }?.str("id")
+                                ?: accounts.firstOrNull { it.str("provider") == selectedBackend }?.str("id")
+                                ?: when (selectedBackend) {
+                                    "hermes" -> "hermes-default"
+                                    "cursor_cloud" -> "cursor-default"
+                                    else -> "grok-default"
+                                }
+                        }
+                        if (selectedBackend == "cursor_cloud" && (selectedRepo.isBlank() || selectedGitRef.isBlank())) {
+                            throw OrbError("Choose a repository and Git reference for Cursor Cloud.")
+                        }
+                        val cloudSpec = mutableMapOf<String, Any?>(
+                            "provider" to selectedBackend,
+                            "account" to resolvedAccount
+                        )
+                        if (selectedModel.isNotEmpty()) cloudSpec["model"] = selectedModel
+                        if (selectedRepo.isNotEmpty()) cloudSpec["repository"] = selectedRepo
+                        if (selectedGitRef.isNotEmpty()) cloudSpec["git_ref"] = selectedGitRef
+                        val cloudBody = mutableMapOf<String, Any?>(
+                            "prompt" to finalPrompt,
+                            "title" to OrbJSON.cleanTitle(baseText).take(72),
+                            "project" to slug,
+                            "folder" to cleanFolder,
+                            "idempotency_key" to UUID.randomUUID().toString(),
+                            "cloud" to cloudSpec
+                        )
+                        if (tags.isNotEmpty()) cloudBody["tags"] = tags
+                        cloudBody
+                    } else {
+                        val nativeBody = mutableMapOf<String, Any?>(
+                            "prompt" to finalPrompt,
+                            "title" to OrbJSON.cleanTitle(baseText).take(72),
+                            "project" to slug,
+                            "folder" to cleanFolder,
+                            "backend" to selectedBackend
+                        )
+                        if (tags.isNotEmpty()) nativeBody["tags"] = tags
+                        if (selectedModel.isNotEmpty()) nativeBody["model_override"] = selectedModel
+                        if (selectedWorkspaceId.isNotEmpty()) nativeBody["workspace_id"] = selectedWorkspaceId
+                        if (selectedWorkspaceId.isEmpty() && selectedNodeId.isNotEmpty() && selectedNodeId != "core") {
+                            if (OrbManagedMachines.isAutoManagedTarget(selectedNodeId) && selectedBackend in setOf("grok", "vibe")) {
+                                throw OrbError("${OrbAgentCatalog.backendLabel(selectedBackend, backends)} is not supported on managed cloud VMs. Choose Claude Code, Codex, OpenCode, or Antigravity, or select Core.")
+                            }
+                            if (selectedBackend == "opencode" && selectedModel.isBlank()) {
+                                if (nodePinnedByUser) {
+                                    throw OrbError("Choose an explicit model to run OpenCode on a remote machine, or select Core.")
+                                }
+                            } else {
+                                nativeBody["remote_node_id"] = selectedNodeId
+                                if (allow24hCommitment && OrbManagedMachines.isAutoManagedTarget(selectedNodeId)) {
+                                    nativeBody["managed_allow_24h_commitment"] = true
+                                }
+                            }
+                        }
+                        if (selectedAccount.isNotEmpty()) nativeBody["account_id"] = selectedAccount
+                        if (selectedRepo.isNotEmpty()) nativeBody["repo"] = selectedRepo
+                        if (selectedGitRef.isNotEmpty()) nativeBody["git_ref"] = selectedGitRef
+                        if (selectedConfigProfile.isNotEmpty()) nativeBody["config_profile"] = selectedConfigProfile
+                        nativeBody
                     }
-                    if (selectedAccount.isNotEmpty()) body["account_id"] = selectedAccount
-                    if (selectedRepo.isNotEmpty()) body["repo"] = selectedRepo
-                    if (selectedGitRef.isNotEmpty()) body["git_ref"] = selectedGitRef
-                    if (selectedConfigProfile.isNotEmpty()) body["config_profile"] = selectedConfigProfile
 
                     val created = core.request("/api/control/missions", method = "POST", body = body)
                     val dict = OrbJSON.dict(created) ?: OrbJSON.dict(OrbJSON.dict(created)?.get("mission"))
@@ -1632,10 +1745,14 @@ fun OrbConversationPage(
         handoff = null
         scope.launch {
             try {
-                orbTry(OrbLog.Category.Network, "/api/control/missions") {
-                    core.request("/api/control/missions/$id/cancel", method = "POST")
-                }.onFailure {
-                    core.request("/api/control/missions/$id/stop", method = "POST")
+                if (isCloudMission) {
+                    core.request("/api/control/missions/${core.encodeComponent(id)}/cloud/cancel", method = "POST")
+                } else {
+                    orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                        core.request("/api/control/missions/$id/cancel", method = "POST")
+                    }.onFailure {
+                        core.request("/api/control/missions/$id/stop", method = "POST")
+                    }
                 }
                 core.refreshMissionsQuietly()
             } catch (e: Throwable) {
@@ -2264,15 +2381,32 @@ fun OrbConversationPage(
                                     commandBanner = "Ready to move — open destination project or folder"
                                 }
                             )
-                            if (!isCloudMission) {
+                            val canCloudHandoff = isCloudMission && OrbKernel.cloudHandoffStep(
+                                sourceIsCloud = true,
+                                isSideQuestion = false,
+                                targetIsNative = true,
+                                hasHistoryTurns = turns.isNotEmpty(),
+                                targetPlacementValid = true
+                            ) == OrbKernel.CloudHandoffStepResult.ALLOW_HANDOFF
+                            if (!isCloudMission || canCloudHandoff) {
                                 DropdownMenuItem(
-                                    text = { Text("Fork", color = Color.White) },
+                                    text = { Text(if (isCloudMission) "Continue in workspace" else "Fork", color = Color.White) },
                                     leadingIcon = { Icon(Icons.Default.CallSplit, contentDescription = null, tint = Color.White) },
                                     onClick = {
                                         showHeaderMenu = false
-                                        runMissionCommand(OrbMissionCommand.Fork, "")
+                                        if (isCloudMission) {
+                                            if (selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes") || selectedBackend.startsWith("cloud_")) {
+                                                selectedBackend = backends.firstOrNull()?.str("id", "slug") ?: "claudecode"
+                                                selectedModel = ""
+                                            }
+                                            showAgentPicker = true
+                                        } else {
+                                            runMissionCommand(OrbMissionCommand.Fork, "")
+                                        }
                                     }
                                 )
+                            }
+                            if (!isCloudMission) {
                                 DropdownMenuItem(
                                     text = { Text("Clone", color = Color.White) },
                                     leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, tint = Color.White) },
@@ -3288,6 +3422,14 @@ fun OrbConversationPage(
     var transferRequest by remember(missionId) { mutableStateOf<Map<String, Any?>?>(null) }
     var transferredMission by remember(missionId) { mutableStateOf<OrbRow?>(null) }
     if (showAgentPicker) {
+        val isCloudHandoffSheet = currentMission?.str("backend")?.startsWith("cloud_") == true
+        val canCloudHandoff = isCloudHandoffSheet && OrbKernel.cloudHandoffStep(
+            sourceIsCloud = true,
+            isSideQuestion = false,
+            targetIsNative = selectedBackend !in setOf("cursor_cloud", "grok_bot", "hermes") && !selectedBackend.startsWith("cloud_"),
+            hasHistoryTurns = latestTurns.isNotEmpty() || messages.isNotEmpty(),
+            targetPlacementValid = true
+        ) == OrbKernel.CloudHandoffStepResult.ALLOW_HANDOFF
         OrbAgentPickerSheet(
             backends = backends,
             backendModels = backendModels,
@@ -3297,7 +3439,11 @@ fun OrbConversationPage(
             providers = providers,
             repositories = repositories,
             selectedBackend = selectedBackend,
-            onSelectBackend = { if (it != selectedBackend) selectedModel = ""; selectedBackend = it },
+            onSelectBackend = {
+                userExplicitlyPickedAgent = true
+                if (it != selectedBackend) selectedModel = ""
+                selectedBackend = it
+            },
             selectedModel = selectedModel,
             onSelectModel = { selectedModel = it },
             selectedWorkspaceId = selectedWorkspaceId,
@@ -3325,11 +3471,17 @@ fun OrbConversationPage(
             selectedConfigProfile = selectedConfigProfile,
             onSelectConfigProfile = { selectedConfigProfile = it },
             existing = currentMission != null,
+            cloudHandoff = isCloudHandoffSheet,
             locked = isSending || transferRequest != null,
             busy = isSending,
             transferError = errorMessage,
-            onTransfer = if (currentMission != null && currentMission?.str("backend")?.startsWith("cloud_") != true) ({
-                if (!isSending && selectedBackend.isNotEmpty()) {
+            onTransfer = if (currentMission != null && (!isCloudHandoffSheet || canCloudHandoff)) ({
+                val targetBackend = if (selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes") || selectedBackend.startsWith("cloud_")) {
+                    backends.firstOrNull()?.str("id", "slug") ?: "claudecode"
+                } else {
+                    selectedBackend
+                }
+                if (!isSending && targetBackend.isNotEmpty()) {
                     isSending = true
                     errorMessage = null
                     scope.launch {
@@ -3338,13 +3490,30 @@ fun OrbConversationPage(
                             val base = "/api/control/missions/${core.encodeComponent(source.id)}"
                             var next = transferredMission
                             if (next == null) {
-                                OrbHarnessTransfer.stopSource(core, base)
-                                if (transferRequest == null) transferRequest = mapOf("backend" to selectedBackend, "model_override" to selectedModel, "idempotency_key" to transferKey)
+                                if (!isCloudHandoffSheet) {
+                                    OrbHarnessTransfer.stopSource(core, base)
+                                }
+                                if (transferRequest == null) {
+                                    val req = mutableMapOf<String, Any?>(
+                                        "backend" to targetBackend,
+                                        "model_override" to selectedModel,
+                                        "idempotency_key" to transferKey
+                                    )
+                                    if (isCloudHandoffSheet && selectedNodeId.isNotEmpty() && selectedNodeId != "core") {
+                                        req["remote_node_id"] = selectedNodeId
+                                    }
+                                    if (isCloudHandoffSheet && selectedWorkspaceId.isNotEmpty()) {
+                                        req["workspace_id"] = selectedWorkspaceId
+                                    }
+                                    transferRequest = req
+                                }
                                 val value = OrbJSON.dict(core.request("$base/fork", method = "POST", body = transferRequest)) ?: throw OrbError("Transfer response unavailable. Retry to recover it.")
                                 next = OrbRow(value)
                                 transferredMission = next
                             }
-                            core.request("$base/status", method = "POST", body = mapOf("status" to "acknowledged"))
+                            if (!isCloudHandoffSheet) {
+                                core.request("$base/status", method = "POST", body = mapOf("status" to "acknowledged"))
+                            }
                             showAgentPicker = false
                             currentMission = next
                             core.refreshMissionsQuietly()
@@ -4053,6 +4222,7 @@ fun OrbAgentPickerSheet(
     selectedConfigProfile: String,
     onSelectConfigProfile: (String) -> Unit,
     existing: Boolean = false,
+    cloudHandoff: Boolean = false,
     locked: Boolean = false,
     busy: Boolean = false,
     transferError: String? = null,
@@ -4062,8 +4232,8 @@ fun OrbAgentPickerSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true, confirmValueChange = { !busy || it != androidx.compose.material3.SheetValue.Hidden })
     val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
 
-    val backendOptions = remember(backends, existing) {
-        OrbAgentCatalog.backendOptions(backends, existing)
+    val backendOptions = remember(backends, existing, cloudHandoff) {
+        OrbAgentCatalog.backendOptions(backends, existing || cloudHandoff)
     }
     val modelChoices = remember(selectedBackend, backendModels) {
         OrbAgentCatalog.modelsForBackend(selectedBackend, backendModels)
@@ -4180,9 +4350,18 @@ fun OrbAgentPickerSheet(
             }
 
             if (onTransfer != null) {
-                Text("Continues with the selected agent and history in the same workspace, then archives the original.", color = OrbStyle.textMuted)
-                androidx.compose.material3.Button(onClick = onTransfer, enabled = !busy && selectedBackend.isNotEmpty()) {
-                    Text(if (busy) "Transferring…" else if (locked) "Retry transfer" else "Transfer conversation")
+                Text(
+                    if (cloudHandoff) "Starts a workspace agent with this cloud conversation's history on the selected machine."
+                    else "Continues with the selected agent and history in the same workspace, then archives the original.",
+                    color = OrbStyle.textMuted
+                )
+                androidx.compose.material3.Button(onClick = onTransfer, enabled = !busy && selectedBackend.isNotEmpty() && (!cloudHandoff || !isCloudService)) {
+                    Text(
+                        if (busy) (if (cloudHandoff) "Handing off…" else "Transferring…")
+                        else if (locked) (if (cloudHandoff) "Retry handoff" else "Retry transfer")
+                        else if (cloudHandoff) "Continue in workspace"
+                        else "Transfer conversation"
+                    )
                 }
                 if (!transferError.isNullOrEmpty()) Text(transferError, color = OrbStyle.textMuted)
             }
@@ -4246,7 +4425,7 @@ fun OrbAgentPickerSheet(
             }
 
             // Machine / Workspace
-            if (!existing && !isCloudService && (sortedNodes.isNotEmpty() || workspaces.isNotEmpty() || usableCloudProviders.isNotEmpty())) {
+            if ((!existing || cloudHandoff) && !isCloudService && (sortedNodes.isNotEmpty() || workspaces.isNotEmpty() || usableCloudProviders.isNotEmpty())) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),

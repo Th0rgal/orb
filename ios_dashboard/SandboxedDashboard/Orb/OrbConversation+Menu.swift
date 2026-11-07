@@ -7,6 +7,13 @@ extension OrbConversation {
         let currentStatus = mission["status"].text
         let state = MissionState(rawValue: currentStatus)
         let statusLabel = !turns.isEmpty ? status.capitalized : (currentStatus == "unknown" ? "" : OrbStyle.statusLabel(currentStatus))
+        let canCloudHandoff = isCloud && OrbKernel.cloudHandoffStep(
+            sourceIsCloud: true,
+            isSideQuestion: false,
+            targetIsNative: true,
+            hasHistoryTurns: !turns.isEmpty,
+            targetPlacementValid: true
+        ) == .allowHandoff
         return OrbConversationMenu(
             hasMission: id != nil && !unavailable,
             summary: OrbConversationMenu.summaryText(agentLabel: selection.compactLabel, status: statusLabel),
@@ -17,6 +24,8 @@ extension OrbConversation {
             canStop: working && (!isCloud || selection.canCancel),
             externalURL: safeURL(execution["external_url"].text),
             local: !isCloud,
+            canFork: !isCloud || canCloudHandoff,
+            forkTitle: isCloud ? "Continue in workspace" : "Fork",
             hasProject: !effectiveProjectSlug.isEmpty
         ) { action in
             switch action {

@@ -3,6 +3,7 @@
   Replaces `src/bin/sandboxed_mcp.rs` + `src/control_mcp/{client,launch,protocol,antigravity}.rs` in native Lean 4.
 -/
 import Std.Sync.Mutex
+import Orb.Kernel
 import OrbBin.Spec
 import OrbBin.PosixExt
 import OrbBin.Json
@@ -165,6 +166,7 @@ structure McpClient where
   clientLabel?       : Option String
   hostHint?          : Option String
   secretsDirOverride : Option String
+  preflightCache?    : Option System.FilePath
   sessionLock        : Std.Mutex (Option (String × Int))
   resolvedSessionId  : Std.Mutex (Option String)
 
@@ -176,7 +178,8 @@ def McpClient.create
     (project? : Option String := none)
     (clientLabel? : Option String := none)
     (hostHint? : Option String := none)
-    (secretsDirOverride : Option String := none) : IO (Except String McpClient) := do
+    (secretsDirOverride : Option String := none)
+    (preflightCache? : Option System.FilePath := none) : IO (Except String McpClient) := do
   match validateCoreUrl rawApiUrl with
   | .error e => return .error e
   | .ok apiUrl =>
@@ -192,6 +195,7 @@ def McpClient.create
       clientLabel?
       hostHint?
       secretsDirOverride
+      preflightCache?
       sessionLock
       resolvedSessionId
     }
@@ -333,9 +337,83 @@ def McpClient.request
         | none => return .error "Invalid Core response"
   return .error "Core rejected the renewed scoped session; check mission authorization"
 
+def preflightCacheMaxTtlSecs : UInt64 := 300
+
+/-- Write a verified `/api/mcp/capabilities` preflight snapshot atomically (`0600`) for zero-RTT child stdio startup. -/
+def writePreflightCache
+    (path : System.FilePath)
+    (missionId role scopedToken : String)
+    (sessionExpiresAt : Int)
+    (capabilities : JVal) : IO (Except String Unit) := do
+  let nowSec ← nowEpoch
+  let payload := JVal.obj #[
+    ("cached_at", .nat nowSec.toNat),
+    ("capabilities", capabilities),
+    ("mission_id", .str missionId),
+    ("role", .str role),
+    ("scoped_token", .str scopedToken),
+    ("session_expires_at", .int sessionExpiresAt)
+  ]
+  writeAtomicPrivate0600 path (renderCompact payload).toUTF8
+
+/-- Attempt to satisfy `McpClient.preflight` from a private `0600` cache file gated by `Orb.Kernel.mcpPreflightCacheGate`.
+    Fails closed (`none`) on any permission, symlink, ownership, identity, contract, or TTL violation. -/
+private def tryLoadPreflightCache (c : McpClient) : IO (Option JVal) := do
+  let some cachePath := c.preflightCache? | return none
+  let st ← statPath cachePath.toString
+  if !(st.exists_ && !st.isSymlink && st.isReg && st.ownedByEuid && (st.mode &&& 0o777) == 0o600) then
+    return none
+  let rawBytes ←
+    try IO.FS.readBinFile cachePath
+    catch _ => return none
+  let .ok root := Json.parseBytes rawBytes | return none
+  let some cachedAtNat := root.fieldNat? "cached_at" | return none
+  let some sessionExp := root.fieldInt? "session_expires_at" | return none
+  let some cachedMission := root.fieldStr? "mission_id" | return none
+  let some cachedRole := root.fieldStr? "role" | return none
+  let some scopedTok := root.fieldStr? "scoped_token" | return none
+  if !scopedTok.startsWith "mcp1." then
+    return none
+  let some caps := root.field? "capabilities" | return none
+  let nowSec ← nowEpoch
+  let cachedAt := cachedAtNat.toUInt64
+  if nowSec < cachedAt then
+    return none
+  let ageSecs : UInt64 := nowSec - cachedAt
+  let ident := caps.fieldOrNull "identity"
+  let idMatch : UInt8 :=
+    if c.missionId? == some cachedMission &&
+       (ident.fieldStr? "mission_id") == some cachedMission &&
+       c.role == cachedRole &&
+       (ident.fieldStr? "role") == some cachedRole then 1
+    else 0
+  let contractMatch : UInt8 :=
+    if (caps.fieldStr? "contract_version") == some contractVersion then 1 else 0
+  let nowInt : Int := Int.ofNat nowSec.toNat
+  let sessionUnexpired : UInt8 := if sessionExp > nowInt + 120 then 1 else 0
+  let gate :=
+    Orb.Kernel.mcpPreflightCacheGate 1 idMatch contractMatch sessionUnexpired ageSecs preflightCacheMaxTtlSecs
+  if gate != 1 then
+    return none
+  if let some sidStr := ident.fieldStr? "session_id" then
+    if let some sid := parseUuidCanonical? sidStr then
+      c.resolvedSessionId.atomically (set (some sid))
+  else if let some sid := decodeMcpTokenSessionId? scopedTok then
+    c.resolvedSessionId.atomically (set (some sid))
+  c.sessionLock.atomically do
+    let cur ← get
+    if cur.isNone then
+      set (some (scopedTok, sessionExp))
+  return some caps
+
 def McpClient.preflight
     (c : McpClient)
     (cancelled? : Option (IO.Ref Bool) := none) : IO (Except String JVal) := do
+  if let some cRef := cancelled? then
+    if (← cRef.get) then
+      return .error "Request cancelled; accepted actions continue"
+  if let some cachedCaps ← tryLoadPreflightCache c then
+    return .ok cachedCaps
   match (← c.request "/api/mcp/capabilities" none cancelled?) with
   | .error e => return .error e
   | .ok v =>
@@ -488,7 +566,7 @@ inductive SecretSubcmd where
 
 private def isGlobalValFlag (f : String) : Bool :=
   f == "--api-url" || f == "--token-file" || f == "--mission-id" || f == "--profile" ||
-  f == "--project" || f == "--client-label" || f == "--host-hint"
+  f == "--project" || f == "--client-label" || f == "--host-hint" || f == "--preflight-cache"
 
 def parseSecretSubcommand (args : Array String) : Except String (Option SecretSubcmd) := Id.run do
   let mut i := 0
@@ -661,13 +739,18 @@ structure OverlayPlan where
 
 def buildHarnessOverlays
     (harness binary apiUrl credential missionId settingsFile : String)
-    (existingEnv : Array (String × String)) : Except String OverlayPlan := do
-  let srvArgs : Array JVal := #[
+    (existingEnv : Array (String × String))
+    (preflightCache? : Option String := none) : Except String OverlayPlan := do
+  let baseSrvArgs : Array JVal := #[
     .str "--api-url", .str apiUrl,
     .str "--token-file", .str credential,
     .str "--mission-id", .str missionId,
     .str "--profile", .str "executor"
   ]
+  let srvArgs : Array JVal :=
+    match preflightCache? with
+    | some pc => baseSrvArgs ++ #[.str "--preflight-cache", .str pc]
+    | none => baseSrvArgs
   let serverObj := JVal.obj #[("command", .str binary), ("args", .arr srvArgs)]
   let lookupEnv := fun (k : String) => (existingEnv.find? (fun (ek, _) => ek == k)).map Prod.snd
   match harness with
@@ -896,7 +979,7 @@ private def forwardGrokAcpStdin (childStdinFd : Int32) (server : JVal) (failedRe
   closeFdRaw childStdinFd
 
 private def cleanupRuntimeDir (dir : System.FilePath) : IO Unit := do
-  for f in ["credential", "settings.json", "agent.md"] do
+  for f in ["credential", "preflight.json", "settings.json", "agent.md"] do
     try IO.FS.removeFile (dir / f) catch _ => pure ()
   try IO.FS.removeDirAll dir catch _ => pure ()
 
@@ -964,10 +1047,19 @@ def runLaunch (args : Array String) : IO (Except String UInt32) := do
   if let .error e ← persistScopedCredential credPath scopedToken then
     cleanupRuntimeDir runtimeDir
     return .error e
+  let sessionExpOpt ← client.sessionLock.atomically do
+    let s ← get
+    return s.map Prod.snd
+  let sessionExp :=
+    sessionExpOpt.getD (((caps.fieldOrNull "limits").fieldInt? "session_expires_at").getD (Int.ofNat (← nowEpoch).toNat + 900))
+  let preflightPath := runtimeDir / "preflight.json"
+  let preflightCacheArg? ← match (← writePreflightCache preflightPath missionId "executor" scopedToken sessionExp caps) with
+    | .ok () => pure (some preflightPath.toString)
+    | .error _ => pure none
   let settingsPath := runtimeDir / "settings.json"
   let selfExe ← IO.appPath
   let existingEnv ← currentEnvPairs
-  let overlayPlan ← match buildHarnessOverlays harness selfExe.toString apiUrl credPath.toString missionId settingsPath.toString existingEnv with
+  let overlayPlan ← match buildHarnessOverlays harness selfExe.toString apiUrl credPath.toString missionId settingsPath.toString existingEnv preflightCacheArg? with
     | .ok p => pure p
     | .error e =>
       cleanupRuntimeDir runtimeDir
@@ -1144,7 +1236,8 @@ def runMain (args : List String) : IO UInt32 := do
   let hostHint? ← match findOptionValue? headArgs "--host-hint" with
     | some h => pure (some h)
     | none => getEnvNonEmpty "SANDBOXED_MCP_HOST_HINT"
-  let client ← match (← McpClient.create apiUrl inlineTok (tokenFileStr?.map System.FilePath.mk) roleRaw missionId? project? clientLabel? hostHint?) with
+  let preflightCache? := (findOptionValue? headArgs "--preflight-cache").map System.FilePath.mk
+  let client ← match (← McpClient.create apiUrl inlineTok (tokenFileStr?.map System.FilePath.mk) roleRaw missionId? project? clientLabel? hostHint? none preflightCache?) with
     | .ok c => pure c
     | .error e =>
       IO.eprintln s!"sandboxed-mcp: {e}"

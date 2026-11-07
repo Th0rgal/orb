@@ -38,6 +38,7 @@ import {
 } from "./keyboardShortcuts";
 import {preferSparkAdministration} from "./machineDestinations";
 import { LazyCloudAgentPage as CloudAgentPage } from "./cloudAgentsLoader";
+import { orbComposerDefaultStep } from "./orbKernel";
 import { monitorSoftware } from "./softwareInventory";
 import {startLocalQueueWorker} from "./localMessageQueue";
 const BtwSettings = lazy(() => import("./btwSettings").then(module => ({ default: module.BtwSettings })));
@@ -284,6 +285,28 @@ export default function App() {
     setWorkingDirectory(value);
     writeString(directoryKey(), value); // Kept in memory when storage refuses it.
   };
+  const [palomaAvailable, setPalomaAvailable] = createSignal(false);
+  createEffect(() => {
+    connectionVersion();
+    if (!isConnected()) {
+      setPalomaAvailable(false);
+      return;
+    }
+    import("./cloudAgentApi")
+      .then((m) => m.cloudAccounts())
+      .then((rows) => setPalomaAvailable(rows.some((row) => row.provider === "hermes" && row.available)))
+      .catch(() => setPalomaAvailable(false));
+  });
+  const showAskPaloma = createMemo(
+    () =>
+      isConnected() &&
+      orbComposerDefaultStep({
+        hasExplicitChoice: Boolean(harnessPick()),
+        hasPinnedContext: Boolean(newFolder() || workingDirectory().trim() || explicitMachine()),
+        hermesAvailable: palomaAvailable(),
+        hasNativeHarness: harnessChoices(newMachine()).length > 0,
+      }) === "default_paloma_hermes",
+  );
   const [envOpen, setEnvOpen] = createSignal<"machine" | "project" | null>(null);
   const [history, setHistory] = createSignal<(string | null)[]>([selected()]);
   const [hIdx, setHIdx] = createSignal(0);
@@ -1690,6 +1713,21 @@ export default function App() {
                       )}
                     </Show>
                   </div><WorkingDirectoryPicker machine={newMachine()} machineName={machineLabel()} missions={missions()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/>
+                  <Show when={showAskPaloma()}>
+                    <button
+                      type="button"
+                      class="na-drop-btn"
+                      aria-label="Ask Paloma"
+                      title="Switch to Paloma for instant memory and fleet answers"
+                      onClick={() => {
+                        writeString("orb.cloud.provider", "hermes");
+                        open("cloud-agent");
+                      }}
+                    >
+                      <ProviderLogo type="hermes" />
+                      <span>Ask Paloma</span>
+                    </button>
+                  </Show>
                 </div>
 
                 {/* NativeMissionView owns the preview through acceptance; failures restore this composer. */}
