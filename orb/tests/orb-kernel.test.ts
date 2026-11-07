@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { kernelAbi } from "../src/orbKernelAbi";
 import { ensureKernelLinearScratch, kernelScratchBaseOffset } from "../src/orbKernelRuntime";
@@ -17,6 +19,7 @@ import {
   orbMissionFlags, orbMissionInboxSection, orbMissionSortRank, orbMissionStateClassify,
   orbNumericCellScan, orbSendFlowStep, orbTurnOutcomeStep, orbUtf8Utf16WindowStep,
   orbWorkedDurationBucket,
+  orbFollowupQueueStep, orbTransportEpochStep, orbStreamOpenTailCapStep,
 } from "../src/orbKernel";
 import { mergeMission, reparentMission, resetMissionHierarchy } from "../src/missionHierarchy";
 import { normalizeLoosePipeTables } from "../src/pipeTables";
@@ -800,5 +803,243 @@ describe("orb kernel gates mirror lean-sys", () => {
       hoverTargetOrd: 7, springTargetOrd: 0, edgeTopDistPx: 999, edgeBottomDistPx: 999,
     });
     expect(cancelled).toMatchObject({ nextPhase: 0, effectCode: 6, eatClick: false });
+  });
+
+  it("evaluates R6-A follow-up queue, transport epoch, and stream open-tail cap wrappers", () => {
+    expect(orbFollowupQueueStep({
+      op: 1,
+      serverRev: 5,
+      incomingServerRev: 5,
+      expectedServerRev: 5,
+      clientMsgId: 42n,
+      trackedMsgId: 42n,
+      deliveredMsgId: 0n,
+      postedAfterSeq: 10n,
+      turnSeq: 10n,
+      optimisticSending: false,
+      serverListed: false,
+      contentMatched: false,
+      alreadyDelivered: false,
+    })).toEqual({
+      reasonCode: 1,
+      admitted: true,
+      optimisticLiveNext: true,
+      retiredNow: false,
+      nextServerRev: 6,
+    });
+    expect(orbFollowupQueueStep({
+      op: 3,
+      serverRev: 5,
+      incomingServerRev: 5,
+      expectedServerRev: 5,
+      clientMsgId: 42n,
+      trackedMsgId: 42n,
+      deliveredMsgId: 0n,
+      postedAfterSeq: 10n,
+      turnSeq: 10n,
+      optimisticSending: false,
+      serverListed: false,
+      contentMatched: true,
+      alreadyDelivered: false,
+    })).toEqual({
+      reasonCode: 4,
+      admitted: false,
+      optimisticLiveNext: true,
+      retiredNow: false,
+      nextServerRev: 5,
+    });
+    expect(orbFollowupQueueStep({
+      op: 3,
+      serverRev: 5,
+      incomingServerRev: 5,
+      expectedServerRev: 5,
+      clientMsgId: 0x1234n,
+      trackedMsgId: 0x1234n,
+      deliveredMsgId: 0x9000_0000_0000_0001n,
+      postedAfterSeq: 10n,
+      turnSeq: 11n,
+      optimisticSending: false,
+      serverListed: false,
+      contentMatched: true,
+      alreadyDelivered: false,
+    })).toEqual({
+      reasonCode: 4,
+      admitted: false,
+      optimisticLiveNext: true,
+      retiredNow: false,
+      nextServerRev: 5,
+    });
+    expect(orbFollowupQueueStep({
+      op: 3,
+      serverRev: 0x8000_0001,
+      incomingServerRev: 0x8000_0001,
+      expectedServerRev: 0x8000_0001,
+      clientMsgId: -1,
+      trackedMsgId: 0x8000_0001,
+      deliveredMsgId: 0xffff_ffff_ffff_ffffn,
+      postedAfterSeq: 10n,
+      turnSeq: 11n,
+      optimisticSending: false,
+      serverListed: false,
+      contentMatched: true,
+      alreadyDelivered: false,
+    })).toEqual({
+      reasonCode: 1,
+      admitted: true,
+      optimisticLiveNext: false,
+      retiredNow: true,
+      nextServerRev: 0x8000_0001,
+    });
+
+    expect(orbTransportEpochStep({
+      mode: 0,
+      eventKind: 1,
+      everReady: true,
+      stickyUnsupported: false,
+      endpointClass: 0,
+      prevEndpointClass: 0,
+      hasSinceSeq: true,
+      failureStreak: 1,
+      failThreshold: 2,
+      httpStatus: 0,
+      sinceSeq32: 40,
+      nowMs: 1000n,
+      cooldownUntilMs: 0n,
+    })).toEqual({
+      nextMode: 1,
+      admitted: true,
+      stickyUnsupportedNext: false,
+      fallbackActiveNext: true,
+      reprobeTriggered: false,
+      hasPreservedSinceSeq: true,
+      nextFailureStreak: 2,
+      preservedSinceSeq32: 40,
+    });
+    expect(orbTransportEpochStep({
+      mode: 0,
+      eventKind: 1,
+      everReady: true,
+      stickyUnsupported: false,
+      endpointClass: 0,
+      prevEndpointClass: 0,
+      hasSinceSeq: true,
+      failureStreak: 1,
+      failThreshold: 2,
+      httpStatus: 0,
+      sinceSeq32: -1,
+      nowMs: -1,
+      cooldownUntilMs: 0n,
+    })).toEqual({
+      nextMode: 1,
+      admitted: true,
+      stickyUnsupportedNext: false,
+      fallbackActiveNext: true,
+      reprobeTriggered: false,
+      hasPreservedSinceSeq: true,
+      nextFailureStreak: 2,
+      preservedSinceSeq32: 0xffff_ffff,
+    });
+
+    expect(orbStreamOpenTailCapStep(20, 5, 12, 40, 5, 8, true)).toEqual({
+      admitted: true,
+      checkpointForced: true,
+      openFenceCapped: true,
+      nextCheckpoint: 32,
+    });
+    expect(orbStreamOpenTailCapStep(20, 5, 12, 40, 5, 0, true)).toEqual({
+      admitted: false,
+      checkpointForced: false,
+      openFenceCapped: false,
+      nextCheckpoint: 12,
+    });
+    expect(orbStreamOpenTailCapStep(0x8000_0001, 0x8000_0000, 0x8000_0000, -1, 0x8000_0000, 8, true)).toEqual({
+      admitted: true,
+      checkpointForced: true,
+      openFenceCapped: true,
+      nextCheckpoint: 0xffff_fff7,
+    });
+
+    const fixturePath = resolve(__dirname, "../../shared/orb-spec/fixtures/r6a-client-kernel.json");
+    const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
+      cases: Array<Record<string, unknown>>;
+    };
+    expect(fixture.cases.length).toBeGreaterThanOrEqual(12);
+    for (const item of fixture.cases) {
+      const label = String(item.name);
+      if (item.op === "followupQueue") {
+        expect(
+          orbFollowupQueueStep({
+            op: Number(item.queueOp),
+            serverRev: BigInt(String(item.serverRev)),
+            incomingServerRev: BigInt(String(item.incomingServerRev)),
+            expectedServerRev: BigInt(String(item.expectedServerRev)),
+            clientMsgId: BigInt(String(item.clientMsgId)),
+            trackedMsgId: BigInt(String(item.trackedMsgId)),
+            deliveredMsgId: BigInt(String(item.deliveredMsgId)),
+            postedAfterSeq: BigInt(String(item.postedAfterSeq)),
+            turnSeq: BigInt(String(item.turnSeq)),
+            optimisticSending: Boolean(item.optimisticSending),
+            serverListed: Boolean(item.serverListed),
+            contentMatched: Boolean(item.contentMatched),
+            alreadyDelivered: Boolean(item.alreadyDelivered),
+          }),
+          label,
+        ).toEqual({
+          reasonCode: Number(item.expectedReasonCode),
+          admitted: Boolean(item.expectedAdmitted),
+          optimisticLiveNext: Boolean(item.expectedOptimisticLiveNext),
+          retiredNow: Boolean(item.expectedRetiredNow),
+          nextServerRev: Number(item.expectedNextServerRev),
+        });
+      } else if (item.op === "transportEpoch") {
+        expect(
+          orbTransportEpochStep({
+            mode: Number(item.mode),
+            eventKind: Number(item.eventKind),
+            everReady: Boolean(item.everReady),
+            stickyUnsupported: Boolean(item.stickyUnsupported),
+            endpointClass: Number(item.endpointClass),
+            prevEndpointClass: Number(item.prevEndpointClass),
+            hasSinceSeq: Boolean(item.hasSinceSeq),
+            failureStreak: BigInt(String(item.failureStreak)),
+            failThreshold: BigInt(String(item.failThreshold)),
+            httpStatus: BigInt(String(item.httpStatus)),
+            sinceSeq32: BigInt(String(item.sinceSeq32)),
+            nowMs: BigInt(String(item.nowMs)),
+            cooldownUntilMs: BigInt(String(item.cooldownUntilMs)),
+          }),
+          label,
+        ).toEqual({
+          nextMode: Number(item.expectedNextMode),
+          admitted: Boolean(item.expectedAdmitted),
+          stickyUnsupportedNext: Boolean(item.expectedStickyUnsupportedNext),
+          fallbackActiveNext: Boolean(item.expectedFallbackActiveNext),
+          reprobeTriggered: Boolean(item.expectedReprobeTriggered),
+          hasPreservedSinceSeq: Boolean(item.expectedHasPreservedSinceSeq),
+          nextFailureStreak: Number(item.expectedNextFailureStreak),
+          preservedSinceSeq32: Number(item.expectedPreservedSinceSeq32),
+        });
+      } else if (item.op === "streamOpenTailCap") {
+        expect(
+          orbStreamOpenTailCapStep(
+            BigInt(String(item.prevLen)),
+            BigInt(String(item.prevCommit)),
+            BigInt(String(item.prevCheckpoint)),
+            BigInt(String(item.newLen)),
+            BigInt(String(item.rawCommit)),
+            BigInt(String(item.maxOpenTailBytes)),
+            Boolean(item.openFenceActive),
+          ),
+          label,
+        ).toEqual({
+          admitted: Boolean(item.expectedAdmitted),
+          checkpointForced: Boolean(item.expectedCheckpointForced),
+          openFenceCapped: Boolean(item.expectedOpenFenceCapped),
+          nextCheckpoint: Number(item.expectedNextCheckpoint),
+        });
+      } else {
+        throw new Error(`Unexpected R6-A fixture op: ${String(item.op)}`);
+      }
+    }
   });
 });

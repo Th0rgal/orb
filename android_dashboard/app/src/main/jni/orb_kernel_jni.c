@@ -475,3 +475,18 @@ JNIEXPORT jlong JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_orbRepoDiffBudgetStep(JNIEnv *env, jclass clazz, jint isGitRepo, jint pathSafe, jint hasUntracked, jint modifiedCount, jint stagedCount, jint aheadCount, jint behindCount, jint diffBytes, jint maxFiles, jint maxBytes) {
     return (jlong)orb_repo_diff_budget_step((uint8_t)isGitRepo, (uint8_t)pathSafe, (uint8_t)hasUntracked, (uint32_t)modifiedCount, (uint32_t)stagedCount, (uint32_t)aheadCount, (uint32_t)behindCount, (uint32_t)diffBytes, (uint32_t)maxFiles, (uint32_t)maxBytes);
 }
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbFollowupQueueStep(JNIEnv *env, jclass clazz, jint op, jint serverRev, jint incomingServerRev, jint expectedServerRev, jlong clientMsgId, jlong trackedMsgId, jlong deliveredMsgId, jlong postedAfterSeq, jlong turnSeq, jint optimisticSending, jint serverListed, jint contentMatched, jint alreadyDelivered) {
+    return (jlong)orb_followup_queue_step((uint8_t)op, (uint32_t)serverRev, (uint32_t)incomingServerRev, (uint32_t)expectedServerRev, (uint64_t)clientMsgId, (uint64_t)trackedMsgId, (uint64_t)deliveredMsgId, (uint64_t)postedAfterSeq, (uint64_t)turnSeq, (uint8_t)optimisticSending, (uint8_t)serverListed, (uint8_t)contentMatched, (uint8_t)alreadyDelivered);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbTransportEpochStep(JNIEnv *env, jclass clazz, jint mode, jint eventKind, jint everReady, jint stickyUnsupported, jint endpointClass, jint prevEndpointClass, jint hasSinceSeq, jint failureStreak, jint failThreshold, jint httpStatus, jint sinceSeq32, jlong nowMs, jlong cooldownUntilMs) {
+    return (jlong)orb_transport_epoch_step((uint8_t)mode, (uint8_t)eventKind, (uint8_t)everReady, (uint8_t)stickyUnsupported, (uint8_t)endpointClass, (uint8_t)prevEndpointClass, (uint8_t)hasSinceSeq, (uint32_t)failureStreak, (uint32_t)failThreshold, (uint32_t)httpStatus, (uint32_t)sinceSeq32, (uint64_t)nowMs, (uint64_t)cooldownUntilMs);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbStreamOpenTailCapStep(JNIEnv *env, jclass clazz, jint prevLen, jint prevCommit, jint prevCheckpoint, jint newLen, jint rawCommit, jint maxOpenTailBytes, jint openFenceActive) {
+    return (jlong)orb_stream_open_tail_cap_step((uint32_t)prevLen, (uint32_t)prevCommit, (uint32_t)prevCheckpoint, (uint32_t)newLen, (uint32_t)rawCommit, (uint32_t)maxOpenTailBytes, (uint8_t)openFenceActive);
+}

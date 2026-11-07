@@ -1,14 +1,14 @@
 # Shared-kernel conformance: implementation and limits
 
 `scripts/run_shared_kernel_conformance.py` executes every public symbol in
-`shared/orb-spec/kernel_abi.json`: 141 Orb exports and 41 LeanSys exports (182
-public exports across the 183-entry manifest after `#1488` added
+`shared/orb-spec/kernel_abi.json`: 144 Orb exports and 41 LeanSys exports (185
+public exports across the 186-entry manifest after `#1488` added
 `orb_slot_bypass_step`, live node resize / coordinator lane added
 `orb_node_resize_step` and `orb_node_lane_step`, Phase R2b added
 `orb_wire_verify_slice_io`, `orb_wire_encode_slice_step`, and
 `orb_wire_decode_slice_step`, the `dgx-spark` / `lean-sys` `c8449e0` bump added 8 `leansys_*` gates plus `orb_fleet_endpoint_gate` and `orb_prefill_deadline_ms`, Phase R4 added `orb_scroll_policy_gap`,
 `orb_scroll_policy_correct`, `orb_scroll_policy_step`, `orb_wire_scroll_slice_step`,
-`orb_wire_stream_slice_step`, and `orb_wire_transcript_slice_step`, mission placement monotonicity added `orb_placement_merge_step`, Wave 4 added the 10 hot-path scanner, rate-limit, fleet-argmin, pool-pacer, confinement, 256-bit job-identity, validation-DAG, FTS5-lexer, and UTF-8/UTF-16 window steppers, Antigravity EAP account routing added `orb_model_account_admit` and `orb_model_account_score`, Phase R2-A added `orb_epoch_fence_step`, `orb_effect_outbox_step`, and `orb_crash_boundary_step`, remote replay rollback / stranded-pending recovery added `orb_activation_rollback_admit` and `orb_remote_replay_step`, fast memory / Paloma handoff added `orb_memory_tool_gate`, `orb_upload_cleanup_gate`, `orb_proxy_exhaustion_step`, `orb_composer_default_step`, `orb_cloud_handoff_step`, `orb_fast_poll_delay_ms`, and `orb_mcp_preflight_cache_gate`, Codex Cyber `/goal` (`#1497`), `/skill:<name>` delivery (`#1553`), occupied-worktree (`#1552`), and bounded-diff (`#352`) gates added `orb_codex_goal_launch_step`, `orb_codex_goal_preact_filter`, `orb_skill_slash_step`, `orb_worktree_decision_step`, and `orb_repo_diff_budget_step`, and sidebar long-press / drag move added `orb_sidebar_move_target_admit` and `orb_sidebar_drag_step`). The inventoried compiler helper is excluded from the
+`orb_wire_stream_slice_step`, and `orb_wire_transcript_slice_step`, mission placement monotonicity added `orb_placement_merge_step`, Wave 4 added the 10 hot-path scanner, rate-limit, fleet-argmin, pool-pacer, confinement, 256-bit job-identity, validation-DAG, FTS5-lexer, and UTF-8/UTF-16 window steppers, Antigravity EAP account routing added `orb_model_account_admit` and `orb_model_account_score`, Phase R2-A added `orb_epoch_fence_step`, `orb_effect_outbox_step`, and `orb_crash_boundary_step`, remote replay rollback / stranded-pending recovery added `orb_activation_rollback_admit` and `orb_remote_replay_step`, fast memory / Paloma handoff added `orb_memory_tool_gate`, `orb_upload_cleanup_gate`, `orb_proxy_exhaustion_step`, `orb_composer_default_step`, `orb_cloud_handoff_step`, `orb_fast_poll_delay_ms`, and `orb_mcp_preflight_cache_gate`, Codex Cyber `/goal` (`#1497`), `/skill:<name>` delivery (`#1553`), occupied-worktree (`#1552`), and bounded-diff (`#352`) gates added `orb_codex_goal_launch_step`, `orb_codex_goal_preact_filter`, `orb_skill_slash_step`, `orb_worktree_decision_step`, and `orb_repo_diff_budget_step`, sidebar long-press / drag move added `orb_sidebar_move_target_admit` and `orb_sidebar_drag_step`, and Phase R6-A added `orb_followup_queue_step`, `orb_transport_epoch_step`, and `orb_stream_open_tail_cap_step`). The inventoried compiler helper is excluded from the
 public surface. The complete [P0–P7 roadmap](TRUSTWORTHY_SHARED_LEAN_ROADMAP.md)
 and acceptance gates still apply. No phase is accepted by this harness.
 
@@ -39,10 +39,10 @@ of command logs bind the supplied local receipts; dynamic libraries, operating
 system, compiler correctness and hardware execution remain assumptions.
 
 For each export the corpus includes six boundary vectors (0, 1, 2, 3, maximum,
-maximum minus one) and two reproducibly seeded random vectors: 1456 base cases
-across the current 182 public exports (1024 base / 1044 total at the 128-export
+maximum minus one) and two reproducibly seeded random vectors: 1480 base cases
+across the current 185 public exports (1024 base / 1044 total at the 128-export
 execution head `3c70e5ada` recorded below). Lean-witnessed domain mutation
-vectors extend a current 182-export run to 1485 cases.
+vectors extend a current 185-export run to 1516 cases.
 This small scalar corpus is not exhaustive fuzzing. Stock Lean executes wrappers
 calling the actual exported Lean definitions. Those wrappers also compile via
 stock `lean -c` and `leanc`. Native C is compiled from the vendored artifact;
@@ -75,8 +75,8 @@ production host adapters (`rust_orb_spec` via `crates/orb-spec`,
 `liborb_kernel.so`) agree with `stock_lean`, the 3-way loop/alias/RC corpus
 (`scripts/conformance_loop_alias_rc.lean`) agrees across `stock_lean`,
 `stock_extracted_c`, `lnir`, and `lnir --opt` with `live_objects == 0` and
-passing `validate-tv`, and all 30 Lean-witnessed domain mutants (`lean/Orb/MutantSuite.lean`,
-3 per family across all 10 roadmap families) plus the low-bit scalar shims are
+passing `validate-tv`, and all 39 Lean-witnessed domain mutants (`lean/Orb/MutantSuite.lean`,
+3 per family across all 13 roadmap families) plus the low-bit scalar shims are
 killed in both native C and WebAssembly. Otherwise any missing engine or
 unqualified stage exits `2` (`INCOMPLETE`) and any mismatch or surviving mutant
 exits `1` (`FAIL`). Physical iPhone 13 mini and Pixel 8 hardware remain
@@ -182,8 +182,8 @@ Evidence directory: `/srv/sandboxed-storage/host-tmp/opencode/p1-final-e585ba9-2
 | `case-receipts.jsonl` | `c34b6a17857a35845ad8d6ec3c925fac7e8afb252dd216f0cc88cef19dd16939` |
 
 These are local unsigned receipts, not durable public artifact hosting or proof
-of complete host wiring. On current `master` (183 manifest entries including
-`orb_slot_bypass_step`, `orb_node_resize_step`, `orb_node_lane_step`, the Phase R2b `orb_wire_*_slice_*` exports, Phase R3 Cluster 1–4 partial evidence, the `dgx-spark` / `lean-sys` `c8449e0` gates, Phase R4 Scroll / Stream / Transcript zero-copy slice ABI exports, `orb_placement_merge_step`, Wave 3.2 / Wave 4 scanner, pacer, confinement, DAG, FTS5, UTF-16, and `LeanSys` host-gate evidence, `orb_model_account_{admit,score}`, the Phase R2-A `orb_epoch_fence_step`, `orb_effect_outbox_step`, and `orb_crash_boundary_step` exports, `orb_activation_rollback_admit` / `orb_remote_replay_step`, the fast memory / Paloma handoff exports, the `#1497` / `#1553` / `#1552` / `#352` gates, and `orb_sidebar_{move_target_admit,drag_step}`), the coverage registry remains **110 partial / 73
+of complete host wiring. On current `master` (186 manifest entries including
+`orb_slot_bypass_step`, `orb_node_resize_step`, `orb_node_lane_step`, the Phase R2b `orb_wire_*_slice_*` exports, Phase R3 Cluster 1–4 partial evidence, the `dgx-spark` / `lean-sys` `c8449e0` gates, Phase R4 Scroll / Stream / Transcript zero-copy slice ABI exports, `orb_placement_merge_step`, Wave 3.2 / Wave 4 scanner, pacer, confinement, DAG, FTS5, UTF-16, and `LeanSys` host-gate evidence, `orb_model_account_{admit,score}`, the Phase R2-A `orb_epoch_fence_step`, `orb_effect_outbox_step`, and `orb_crash_boundary_step` exports, `orb_activation_rollback_admit` / `orb_remote_replay_step`, the fast memory / Paloma handoff exports, the `#1497` / `#1553` / `#1552` / `#352` gates, `orb_sidebar_{move_target_admit,drag_step}`, and the Phase R6-A `orb_followup_queue_step`, `orb_transport_epoch_step`, and `orb_stream_open_tail_cap_step` exports), the coverage registry remains **110 partial / 76
 unconnected** (`acceptance: INCOMPLETE`; 23 partial / 106 unconnected across the
 129 entries at execution head `3c70e5ada`). Physical iPhone/Pixel execution
 remains blocked. See [P3 target qualification](P3_TARGET_QUALIFICATION_REPORT.md)

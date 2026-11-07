@@ -182,6 +182,9 @@
     "orb_worktree_decision_step",
     "orb_repo_diff_budget_step",
     "orb_sidebar_move_target_admit",
-    "orb_sidebar_drag_step"
+    "orb_sidebar_drag_step",
+    "orb_followup_queue_step",
+    "orb_transport_epoch_step",
+    "orb_stream_open_tail_cap_step"
   ]
 }

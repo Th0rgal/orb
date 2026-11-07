@@ -332,4 +332,161 @@ class OrbKernelTest {
         assertEquals(0L, (badTranscriptAction ushr 8) and 1L)
         assertEquals(5L, (badTranscriptAction ushr 32) and 0xFFFF_FFFFL)
     }
+
+    @Test
+    fun r6aClientSteppersPreserveHighBitUnsignedWordsAndMatchLeanFixtures() {
+        val highDelivered = OrbKernel.followupQueueStep(
+            op = 3,
+            serverRev = 5,
+            incomingServerRev = 5,
+            expectedServerRev = 5,
+            clientMsgId = 0x1234L,
+            trackedMsgId = 0x1234L,
+            deliveredMsgId = 0x9000_0000_0000_0001uL.toLong(),
+            postedAfterSeq = 10L,
+            turnSeq = 11L,
+            optimisticSending = false,
+            serverListed = false,
+            contentMatched = true,
+            alreadyDelivered = false
+        )
+        assertEquals(
+            OrbKernel.FollowupQueueVerdict(
+                reasonCode = 4,
+                admitted = false,
+                optimisticLiveNext = true,
+                retiredNow = false,
+                nextServerRev = 5L
+            ),
+            highDelivered
+        )
+
+        val allOnesMatch = OrbKernel.followupQueueStep(
+            op = 3,
+            serverRev = 0x8000_0001u.toInt(),
+            incomingServerRev = 0x8000_0001u.toInt(),
+            expectedServerRev = 0x8000_0001u.toInt(),
+            clientMsgId = -1L,
+            trackedMsgId = 0x8000_0001L,
+            deliveredMsgId = -1L,
+            postedAfterSeq = 10L,
+            turnSeq = 11L,
+            optimisticSending = false,
+            serverListed = false,
+            contentMatched = true,
+            alreadyDelivered = false
+        )
+        assertEquals(
+            OrbKernel.FollowupQueueVerdict(
+                reasonCode = 1,
+                admitted = true,
+                optimisticLiveNext = false,
+                retiredNow = true,
+                nextServerRev = 0x8000_0001L
+            ),
+            allOnesMatch
+        )
+
+        val cases = OrbJSON.dictList(OrbSpec.dict("fixtures/r6a-client-kernel.json")["cases"])
+        assertTrue(cases.size >= 12)
+
+        fun u32Int(item: OrbDict, key: String): Int =
+            (OrbJSON.str(item, key) ?: error("missing $key")).toULong().toUInt().toInt()
+
+        fun u32Long(item: OrbDict, key: String): Long =
+            (OrbJSON.str(item, key) ?: error("missing $key")).toULong().toLong()
+
+        fun u64Long(item: OrbDict, key: String): Long =
+            (OrbJSON.str(item, key) ?: error("missing $key")).toULong().toLong()
+
+        for ((idx, item) in cases.withIndex()) {
+            val label = OrbJSON.str(item, "name") ?: "case-$idx"
+            when (val op = OrbJSON.str(item, "op")) {
+                "followupQueue" -> {
+                    val got = OrbKernel.followupQueueStep(
+                        op = OrbJSON.int(item, "queueOp") ?: 0,
+                        serverRev = u32Int(item, "serverRev"),
+                        incomingServerRev = u32Int(item, "incomingServerRev"),
+                        expectedServerRev = u32Int(item, "expectedServerRev"),
+                        clientMsgId = u64Long(item, "clientMsgId"),
+                        trackedMsgId = u64Long(item, "trackedMsgId"),
+                        deliveredMsgId = u64Long(item, "deliveredMsgId"),
+                        postedAfterSeq = u64Long(item, "postedAfterSeq"),
+                        turnSeq = u64Long(item, "turnSeq"),
+                        optimisticSending = OrbJSON.bool(item, "optimisticSending") ?: false,
+                        serverListed = OrbJSON.bool(item, "serverListed") ?: false,
+                        contentMatched = OrbJSON.bool(item, "contentMatched") ?: false,
+                        alreadyDelivered = OrbJSON.bool(item, "alreadyDelivered") ?: false
+                    )
+                    assertEquals(
+                        label,
+                        OrbKernel.FollowupQueueVerdict(
+                            reasonCode = OrbJSON.int(item, "expectedReasonCode") ?: -1,
+                            admitted = OrbJSON.bool(item, "expectedAdmitted") ?: false,
+                            optimisticLiveNext = OrbJSON.bool(item, "expectedOptimisticLiveNext") ?: false,
+                            retiredNow = OrbJSON.bool(item, "expectedRetiredNow") ?: false,
+                            nextServerRev = u32Long(item, "expectedNextServerRev")
+                        ),
+                        got
+                    )
+                }
+
+                "transportEpoch" -> {
+                    val got = OrbKernel.transportEpochStep(
+                        mode = OrbJSON.int(item, "mode") ?: 0,
+                        eventKind = OrbJSON.int(item, "eventKind") ?: 0,
+                        everReady = OrbJSON.bool(item, "everReady") ?: false,
+                        stickyUnsupported = OrbJSON.bool(item, "stickyUnsupported") ?: false,
+                        endpointClass = OrbJSON.int(item, "endpointClass") ?: 0,
+                        prevEndpointClass = OrbJSON.int(item, "prevEndpointClass") ?: 0,
+                        hasSinceSeq = OrbJSON.bool(item, "hasSinceSeq") ?: false,
+                        failureStreak = u32Int(item, "failureStreak"),
+                        failThreshold = u32Int(item, "failThreshold"),
+                        httpStatus = u32Int(item, "httpStatus"),
+                        sinceSeq32 = u32Int(item, "sinceSeq32"),
+                        nowMs = u64Long(item, "nowMs"),
+                        cooldownUntilMs = u64Long(item, "cooldownUntilMs")
+                    )
+                    assertEquals(
+                        label,
+                        OrbKernel.TransportEpochVerdict(
+                            nextMode = OrbJSON.int(item, "expectedNextMode") ?: -1,
+                            admitted = OrbJSON.bool(item, "expectedAdmitted") ?: false,
+                            stickyUnsupportedNext = OrbJSON.bool(item, "expectedStickyUnsupportedNext") ?: false,
+                            fallbackActiveNext = OrbJSON.bool(item, "expectedFallbackActiveNext") ?: false,
+                            reprobeTriggered = OrbJSON.bool(item, "expectedReprobeTriggered") ?: false,
+                            hasPreservedSinceSeq = OrbJSON.bool(item, "expectedHasPreservedSinceSeq") ?: false,
+                            nextFailureStreak = OrbJSON.int(item, "expectedNextFailureStreak") ?: -1,
+                            preservedSinceSeq32 = u32Long(item, "expectedPreservedSinceSeq32")
+                        ),
+                        got
+                    )
+                }
+
+                "streamOpenTailCap" -> {
+                    val got = OrbKernel.streamOpenTailCapStep(
+                        prevLen = u32Int(item, "prevLen"),
+                        prevCommit = u32Int(item, "prevCommit"),
+                        prevCheckpoint = u32Int(item, "prevCheckpoint"),
+                        newLen = u32Int(item, "newLen"),
+                        rawCommit = u32Int(item, "rawCommit"),
+                        maxOpenTailBytes = u32Int(item, "maxOpenTailBytes"),
+                        openFenceActive = OrbJSON.bool(item, "openFenceActive") ?: false
+                    )
+                    assertEquals(
+                        label,
+                        OrbKernel.StreamOpenTailCapVerdict(
+                            admitted = OrbJSON.bool(item, "expectedAdmitted") ?: false,
+                            checkpointForced = OrbJSON.bool(item, "expectedCheckpointForced") ?: false,
+                            openFenceCapped = OrbJSON.bool(item, "expectedOpenFenceCapped") ?: false,
+                            nextCheckpoint = u32Long(item, "expectedNextCheckpoint")
+                        ),
+                        got
+                    )
+                }
+
+                else -> error("unexpected R6-A fixture op $op in $label")
+            }
+        }
+    }
 }

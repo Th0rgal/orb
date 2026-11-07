@@ -789,4 +789,159 @@ theorem kill_m30_crashBoundary_dualWriterSteal :
       crashBoundaryStep 5 2 1 0 9 9 4 7 := by
   decide
 
+-- Phase R6-A Domain Mutants (`orb_mut_m31`..`orb_mut_m39`)
+
+/-- Mutant 11.1 (`orb_followup_queue_step`): Stale `expectedServerRev` still advances edit CAS. -/
+@[inline, export orb_mut_m31]
+def m31_followupQueue_staleRevisionAccepted
+    (op : UInt8)
+    (serverRev incomingServerRev expectedServerRev : UInt32)
+    (clientMsgId trackedMsgId deliveredMsgId : UInt64)
+    (postedAfterSeq turnSeq : UInt64)
+    (optimisticSending serverListed contentMatched alreadyDelivered : UInt8) : UInt64 :=
+  let effExpected : UInt32 :=
+    if op == 1 && expectedServerRev != serverRev then serverRev else expectedServerRev
+  followupQueueStep op serverRev incomingServerRev effExpected
+    clientMsgId trackedMsgId deliveredMsgId postedAfterSeq turnSeq
+    optimisticSending serverListed contentMatched alreadyDelivered
+
+theorem kill_m31_followupQueue_staleRevisionAccepted :
+    m31_followupQueue_staleRevisionAccepted 1 5 5 4 42 42 0 10 10 0 0 0 0 ≠
+      followupQueueStep 1 5 5 4 42 42 0 10 10 0 0 0 0 := by
+  decide
+
+/-- Mutant 11.2 (`orb_followup_queue_step`): Historical `turnSeq` retires optimistic row. -/
+@[inline, export orb_mut_m32]
+def m32_followupQueue_historicalSeqRetires
+    (op : UInt8)
+    (serverRev incomingServerRev expectedServerRev : UInt32)
+    (clientMsgId trackedMsgId deliveredMsgId : UInt64)
+    (postedAfterSeq turnSeq : UInt64)
+    (optimisticSending serverListed contentMatched alreadyDelivered : UInt8) : UInt64 :=
+  let bumpedTurn : UInt64 := if turnSeq == postedAfterSeq then turnSeq + 1 else turnSeq
+  followupQueueStep op serverRev incomingServerRev expectedServerRev
+    clientMsgId trackedMsgId deliveredMsgId postedAfterSeq bumpedTurn
+    optimisticSending serverListed contentMatched alreadyDelivered
+
+theorem kill_m32_followupQueue_historicalSeqRetires :
+    m32_followupQueue_historicalSeqRetires 3 5 5 5 42 42 0 10 10 0 0 1 0 ≠
+      followupQueueStep 3 5 5 5 42 42 0 10 10 0 0 1 0 := by
+  decide
+
+/-- Mutant 11.3 (`orb_followup_queue_step`): Duplicate `clientMsgId` double-applies enqueue. -/
+@[inline, export orb_mut_m33]
+def m33_followupQueue_duplicateClientMsgDoubleApplies
+    (op : UInt8)
+    (serverRev incomingServerRev expectedServerRev : UInt32)
+    (clientMsgId trackedMsgId deliveredMsgId : UInt64)
+    (postedAfterSeq turnSeq : UInt64)
+    (optimisticSending serverListed contentMatched alreadyDelivered : UInt8) : UInt64 :=
+  let effTracked : UInt64 :=
+    if op == 2 && clientMsgId == trackedMsgId then 0 else trackedMsgId
+  followupQueueStep op serverRev incomingServerRev expectedServerRev
+    clientMsgId effTracked deliveredMsgId postedAfterSeq turnSeq
+    optimisticSending serverListed contentMatched alreadyDelivered
+
+theorem kill_m33_followupQueue_duplicateClientMsgDoubleApplies :
+    m33_followupQueue_duplicateClientMsgDoubleApplies 2 5 5 5 42 42 0 10 10 0 0 0 0 ≠
+      followupQueueStep 2 5 5 5 42 42 0 10 10 0 0 0 0 := by
+  decide
+
+/-- Mutant 12.1 (`orb_transport_epoch_step`): `everReady == 1` blocks SSE fallback. -/
+@[inline, export orb_mut_m34]
+def m34_transportEpoch_everReadyBlocksFallback
+    (mode eventKind everReady stickyUnsupported endpointClass prevEndpointClass hasSinceSeq : UInt8)
+    (failureStreak failThreshold httpStatus sinceSeq32 : UInt32)
+    (nowMs cooldownUntilMs : UInt64) : UInt64 :=
+  let w := transportEpochStep mode eventKind everReady stickyUnsupported endpointClass prevEndpointClass hasSinceSeq
+    failureStreak failThreshold httpStatus sinceSeq32 nowMs cooldownUntilMs
+  if everReady == 1 && eventKind == 1 then
+    let lo := ((w &&& 0xFFFFFFFF).toUInt32 &&& (0xFFFFFB00 : UInt32))
+    lo.toUInt64 ||| (w &&& 0xFFFFFFFF00000000)
+  else w
+
+theorem kill_m34_transportEpoch_everReadyBlocksFallback :
+    m34_transportEpoch_everReadyBlocksFallback 0 1 1 0 0 0 1 1 2 0 40 0 0 ≠
+      transportEpochStep 0 1 1 0 0 0 1 1 2 0 40 0 0 := by
+  decide
+
+/-- Mutant 12.2 (`orb_transport_epoch_step`): SSE fallback resets `sinceSeq32` and presence bit to `0`. -/
+@[inline, export orb_mut_m35]
+def m35_transportEpoch_fallbackDropsSinceSeq
+    (mode eventKind everReady stickyUnsupported endpointClass prevEndpointClass hasSinceSeq : UInt8)
+    (failureStreak failThreshold httpStatus sinceSeq32 : UInt32)
+    (nowMs cooldownUntilMs : UInt64) : UInt64 :=
+  let w := transportEpochStep mode eventKind everReady stickyUnsupported endpointClass prevEndpointClass hasSinceSeq
+    failureStreak failThreshold httpStatus sinceSeq32 nowMs cooldownUntilMs
+  if ((w &&& 0xFFFFFFFF).toUInt32 &&& 1024) != 0 then
+    ((w &&& 0xFFFFFFFF) &&& (0xFFFFEFFF : UInt64))
+  else w
+
+theorem kill_m35_transportEpoch_fallbackDropsSinceSeq :
+    m35_transportEpoch_fallbackDropsSinceSeq 0 1 1 0 0 0 1 1 2 0 40 0 0 ≠
+      transportEpochStep 0 1 1 0 0 0 1 1 2 0 40 0 0 := by
+  decide
+
+/-- Mutant 12.3 (`orb_transport_epoch_step`): Transient WS failure sets sticky unsupported bit. -/
+@[inline, export orb_mut_m36]
+def m36_transportEpoch_transientSetsStickyUnsupported
+    (mode eventKind everReady stickyUnsupported endpointClass prevEndpointClass hasSinceSeq : UInt8)
+    (failureStreak failThreshold httpStatus sinceSeq32 : UInt32)
+    (nowMs cooldownUntilMs : UInt64) : UInt64 :=
+  let w := transportEpochStep mode eventKind everReady stickyUnsupported endpointClass prevEndpointClass hasSinceSeq
+    failureStreak failThreshold httpStatus sinceSeq32 nowMs cooldownUntilMs
+  if eventKind == 1 then w ||| (512 : UInt64) else w
+
+theorem kill_m36_transportEpoch_transientSetsStickyUnsupported :
+    m36_transportEpoch_transientSetsStickyUnsupported 0 1 1 0 0 0 1 1 2 0 40 0 0 ≠
+      transportEpochStep 0 1 1 0 0 0 1 1 2 0 40 0 0 := by
+  decide
+
+/-- Mutant 13.1 (`orb_stream_open_tail_cap_step`): Unclosed fence freezes `prevCheckpoint`. -/
+@[inline, export orb_mut_m37]
+def m37_streamOpenTailCap_openFenceFreezesCheckpoint
+    (prevLen prevCommit prevCheckpoint : UInt32)
+    (newLen rawCommit maxOpenTailBytes : UInt32)
+    (openFenceActive : UInt8) : UInt64 :=
+  if openFenceActive == 1 then
+    (257 : UInt64) ||| (prevCheckpoint.toUInt64 <<< 32)
+  else
+    streamOpenTailCapStep prevLen prevCommit prevCheckpoint newLen rawCommit maxOpenTailBytes openFenceActive
+
+theorem kill_m37_streamOpenTailCap_openFenceFreezesCheckpoint :
+    m37_streamOpenTailCap_openFenceFreezesCheckpoint 20 5 12 40 5 8 1 ≠
+      streamOpenTailCapStep 20 5 12 40 5 8 1 := by
+  decide
+
+/-- Mutant 13.2 (`orb_stream_open_tail_cap_step`): Zero cap (`maxOpenTailBytes == 0`) admitted. -/
+@[inline, export orb_mut_m38]
+def m38_streamOpenTailCap_zeroCapAdmitted
+    (prevLen prevCommit prevCheckpoint : UInt32)
+    (newLen rawCommit maxOpenTailBytes : UInt32)
+    (openFenceActive : UInt8) : UInt64 :=
+  let effCap := if maxOpenTailBytes == 0 then 1 else maxOpenTailBytes
+  streamOpenTailCapStep prevLen prevCommit prevCheckpoint newLen rawCommit effCap openFenceActive
+
+theorem kill_m38_streamOpenTailCap_zeroCapAdmitted :
+    m38_streamOpenTailCap_zeroCapAdmitted 20 5 12 40 5 0 1 ≠
+      streamOpenTailCapStep 20 5 12 40 5 0 1 := by
+  decide
+
+/-- Mutant 13.3 (`orb_stream_open_tail_cap_step`): Checkpoint regresses behind `prevCheckpoint`. -/
+@[inline, export orb_mut_m39]
+def m39_streamOpenTailCap_checkpointRegresses
+    (prevLen prevCommit prevCheckpoint : UInt32)
+    (newLen rawCommit maxOpenTailBytes : UInt32)
+    (openFenceActive : UInt8) : UInt64 :=
+  let w := streamOpenTailCapStep prevLen prevCommit prevCheckpoint newLen rawCommit maxOpenTailBytes openFenceActive
+  let capFloor : UInt32 := if maxOpenTailBytes ≤ newLen then newLen - maxOpenTailBytes else 0
+  if ((w &&& 0xFFFFFFFF).toUInt32 &&& (256 : UInt32)) != 0 then
+    ((w &&& 0xFFFFFFFF).toUInt32).toUInt64 ||| (capFloor.toUInt64 <<< 32)
+  else w
+
+theorem kill_m39_streamOpenTailCap_checkpointRegresses :
+    m39_streamOpenTailCap_checkpointRegresses 20 5 18 22 5 8 1 ≠
+      streamOpenTailCapStep 20 5 18 22 5 8 1 := by
+  decide
+
 end Orb.MutantSuite
