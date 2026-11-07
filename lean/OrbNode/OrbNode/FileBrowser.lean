@@ -9,6 +9,7 @@ import Orb.Kernel
 import OrbBin.PosixExt
 import OrbBin.Json
 import OrbNode.Posix
+import OrbNode.Spec
 
 namespace OrbNode.FileBrowser
 
@@ -276,16 +277,35 @@ private def batchTokenDigest (tok : String) : Except String String := do
 private def claimUploadBatch (uploadsRoot : System.FilePath) (batchUuid digest : String) : IO (Except String Unit) := do
   let owners := uploadsRoot / ".batches"
   IO.FS.createDirAll owners
-  let ownerFile := owners / batchUuid
-  if ← ownerFile.pathExists then
-    let .ok stored ← IO.FS.readFile ownerFile |>.toBaseIO
-      | return .error "This folder upload belongs to someone else"
-    if !ctEqString stored.trimAscii.toString digest then
-      return .error "This folder upload belongs to someone else"
-    return .ok ()
-  else
-    IO.FS.writeFile ownerFile digest
-    return .ok ()
+  let ost ← statPath owners.toString
+  if !ost.exists_ || ost.isSymlink || !ost.isDir then
+    return .error "Invalid folder upload batch directory"
+  let lockPath := (owners / ".claim.lock").toString
+  match ← LeanSys.Posix.withDirLock lockPath false fun _ => do
+    let ownerFile := owners / batchUuid
+    if ← ownerFile.pathExists then
+      let .ok stored ← IO.FS.readFile ownerFile |>.toBaseIO
+        | return .ok (.error "This folder upload belongs to someone else")
+      if !ctEqString stored.trimAscii.toString digest then
+        return .ok (.error "This folder upload belongs to someone else")
+      return .ok (.ok ())
+    else
+      let pid ← OrbBin.PosixExt.getpid
+      let nonce ← newUuidV4
+      let tmp := owners / s!".{batchUuid}.tmp.{pid}.{nonce}"
+      match ← LeanSys.Posix.withFd tmp.toString 1 (fun fd => LeanSys.Posix.writeAll fd digest.toUTF8 true) (exclusive := 2) with
+      | .error _ =>
+        try IO.FS.removeFile tmp catch _ => pure ()
+        return .ok (.error "Record batch owner failed")
+      | .ok (_ : Nat) => pure ()
+      match ← LeanSys.Posix.atomicRename tmp.toString ownerFile.toString with
+      | .error _ =>
+        try IO.FS.removeFile tmp catch _ => pure ()
+        return .ok (.error "Record batch owner failed")
+      | .ok () => return .ok (.ok ())
+  with
+  | .ok inner => return inner
+  | .error _ => return .error "Batch claim lock failed"
 
 private def resolveUploadDest
     (uploadsRoot : System.FilePath) (name : String)
@@ -334,19 +354,96 @@ def storeSingleUpload (workDir : String) (jv : JVal) : IO (Except String JVal) :
       | .error e => return .error e
     | none => pure none
   let uploadsRoot := System.FilePath.mk workDir / "uploads"
-  let dest ← match ← resolveUploadDest uploadsRoot name batchId? relPath? digest? with
-    | .ok d => pure d
-    | .error e => return .error e
-  if ← dest.pathExists then
-    return .error "A file with this path was already uploaded"
-  IO.FS.writeBinFile dest bytes
-  let sha := bytesToHexLower (sha256Bytes bytes)
-  return .ok (.obj #[
-    ("name", .str name),
-    ("path", .str dest.toString),
-    ("size", JVal.nat bytes.size),
-    ("sha256", .str sha)
-  ])
+  IO.FS.createDirAll uploadsRoot
+  let urst ← statPath uploadsRoot.toString
+  if !urst.exists_ || urst.isSymlink || !urst.isDir then
+    return .error "Invalid uploads root"
+  match ← LeanSys.Posix.withDirLock (uploadsRoot / ".dest-claim.lock").toString false fun _ => do
+    let dest ← match ← resolveUploadDest uploadsRoot name batchId? relPath? digest? with
+      | .ok d => pure d
+      | .error e => return .ok (.error e)
+    let mut conflict := ← dest.pathExists
+    if !conflict then
+      let destStr := dest.toString
+      if let .ok entries ← (uploadsRoot / ".sessions").readDir |>.toBaseIO then
+        for e in entries do
+          if let .ok raw ← IO.FS.readFile (e.path / "meta.json") |>.toBaseIO then
+            if let .ok other := OrbBin.Json.parse raw then
+              if let some rec := other.field? "receipt" then
+                if rec != JVal.null && rec.fieldStr? "path" == some destStr then
+                  conflict := true
+              if (other.fieldStr? "dest_path").getD "" == destStr then
+                conflict := true
+    if conflict then
+      return .ok (.error "A file with this path was already uploaded")
+    let pid ← OrbBin.PosixExt.getpid
+    let nonce ← newUuidV4
+    let tmp := System.FilePath.mk (s!"{dest.toString}.tmp.{pid}.{nonce}")
+    match ← LeanSys.Posix.withFd tmp.toString 1 (fun fd => LeanSys.Posix.writeAll fd bytes true) (exclusive := 2) with
+    | .error _ =>
+      try IO.FS.removeFile tmp catch _ => pure ()
+      return .ok (.error "Write uploaded file failed")
+    | .ok (_ : Nat) => pure ()
+    match ← LeanSys.Posix.atomicRename tmp.toString dest.toString with
+    | .error _ =>
+      try IO.FS.removeFile tmp catch _ => pure ()
+      return .ok (.error "Commit uploaded file failed")
+    | .ok () => pure ()
+    if let some parent := dest.parent then
+      let _ ← LeanSys.Posix.withFd parent.toString 0 (fun fd => LeanSys.Posix.writeAll fd ByteArray.empty true)
+    let sha := bytesToHexLower (sha256Bytes bytes)
+    return .ok (.ok (.obj #[
+      ("name", .str name),
+      ("path", .str dest.toString),
+      ("size", JVal.nat bytes.size),
+      ("sha256", .str sha)
+    ]))
+  with
+  | .ok inner => return inner
+  | .error _ => return .error "upload destination claim lock failed"
+
+private def liftSys {α : Type} (r : LeanSys.Posix.SysResult α) (msg : String) : Except String α :=
+  match r with
+  | .ok v => .ok v
+  | .error _ => .error msg
+
+private def writeFileDurableAtomic (dst : System.FilePath) (bytes : ByteArray) : IO (Except String Unit) := do
+  let some parent := dst.parent | return .error "missing parent directory"
+  IO.FS.createDirAll parent
+  let pst ← statPath parent.toString
+  if !pst.exists_ || pst.isSymlink || !pst.isDir then
+    return .error "parent is not a directory"
+  let pid ← OrbBin.PosixExt.getpid
+  let nonce ← newUuidV4
+  let tmp := System.FilePath.mk (s!"{dst.toString}.tmp.{pid}.{nonce}")
+  match liftSys (← LeanSys.Posix.withFd tmp.toString 1 (fun fd => LeanSys.Posix.writeAll fd bytes true) (exclusive := 2)) "durable write failed" with
+  | .error e =>
+    try IO.FS.removeFile tmp catch _ => pure ()
+    return .error e
+  | .ok (_ : Nat) => pure ()
+  match liftSys (← LeanSys.Posix.atomicRename tmp.toString dst.toString) "atomic rename failed" with
+  | .error e =>
+    try IO.FS.removeFile tmp catch _ => pure ()
+    return .error e
+  | .ok () => pure ()
+  match liftSys (← LeanSys.Posix.withFd parent.toString 0 (fun fd => LeanSys.Posix.writeAll fd ByteArray.empty true)) "parent fsync failed" with
+  | .error e => return .error e
+  | .ok (_ : Nat) => return .ok ()
+
+private def destBytesMatch (dest : System.FilePath) (size : UInt64) (sha : String) : IO Bool := do
+  let st ← statPath dest.toString
+  if !st.exists_ || st.isSymlink || !st.isReg then
+    return false
+  let .ok bytes ← IO.FS.readBinFile dest |>.toBaseIO | return false
+  return bytes.size.toUInt64 == size && bytesToHexLower (sha256Bytes bytes) == sha
+
+private def verifyCompletedReceipt (rec : JVal) (expectedSize : UInt64) : IO Bool := do
+  let some pathStr := rec.fieldStr? "path" | return false
+  let some recSize := rec.fieldUInt64? "size" | return false
+  let some recSha := rec.fieldStr? "sha256" | return false
+  if pathStr.isEmpty || recSize != expectedSize then
+    return false
+  destBytesMatch (System.FilePath.mk pathStr) expectedSize recSha
 
 def initOrStatusUploadSession (workDir : String) (jv : JVal) : IO (Except String JVal) := do
   let some uid := jv.fieldStr? "upload_id" | return .error "missing upload_id"
@@ -373,49 +470,70 @@ def initOrStatusUploadSession (workDir : String) (jv : JVal) : IO (Except String
     let some dig := digest? | return .error "Folder uploads need a batch token"
     if let .error e ← claimUploadBatch uploadsRoot batch dig then return .error e
   let sessDir := uploadsRoot / ".sessions" / uid
-  IO.FS.createDirAll (sessDir / "chunks")
+  IO.FS.createDirAll sessDir
+  let sdst ← statPath sessDir.toString
+  if !sdst.exists_ || sdst.isSymlink || !sdst.isDir then
+    return .error "Invalid upload session directory"
   let metaPath := sessDir / "meta.json"
-  if ← metaPath.pathExists then
-    let .ok raw ← IO.FS.readFile metaPath |>.toBaseIO | return .error "Read session metadata failed"
-    let .ok ex := OrbBin.Json.parse raw | return .error "Parse session metadata failed"
-    if ex.fieldStr? "name" != some name || ex.fieldUInt64? "size" != some size ||
-       ex.fieldNat? "chunk_size" != some chunkSize ||
-       ex.fieldStr? "batch_id" != batchId? || ex.fieldStr? "relative_path" != relPath? ||
-       ex.fieldStr? "batch_token_digest" != digest? then
-      return .error "Upload session parameters do not match existing session"
-    if let some rec := ex.field? "receipt" then
-      if rec != .null then
-        let mut allIdx : Array JVal := #[]
-        for i in [0 : totalChunks] do allIdx := allIdx.push (JVal.nat i)
-        return .ok (.obj #[
-          ("upload_id", .str uid), ("name", .str name), ("size", JVal.uint64 size),
-          ("chunk_size", JVal.nat chunkSize), ("total_chunks", JVal.nat totalChunks),
-          ("received_chunks", .arr allIdx), ("receipt", rec)
-        ])
-    let mut recvd : Array Nat := #[]
-    if let .ok cEntries ← (sessDir / "chunks").readDir |>.toBaseIO then
-      for ce in cEntries do
-        if let some idx := ce.fileName.toNat? then
-          if idx < totalChunks then recvd := recvd.push idx
-    let sorted := (recvd.qsort (· < ·)).map JVal.nat
-    return .ok (.obj #[
+  match ← LeanSys.Posix.withDirLock (sessDir / "finalize.lock").toString false fun _ => do
+    if ← metaPath.pathExists then
+      let .ok raw ← IO.FS.readFile metaPath |>.toBaseIO
+        | return .ok (.error "Read session metadata failed")
+      let .ok ex := OrbBin.Json.parse raw
+        | return .ok (.error "Parse session metadata failed")
+      if ex.fieldStr? "name" != some name || ex.fieldUInt64? "size" != some size ||
+         ex.fieldNat? "chunk_size" != some chunkSize ||
+         ex.fieldStr? "batch_id" != batchId? || ex.fieldStr? "relative_path" != relPath? ||
+         ex.fieldStr? "batch_token_digest" != digest? then
+        return .ok (.error "Upload session parameters do not match existing session")
+      if let some rec := ex.field? "receipt" then
+        if rec != .null then
+          if !(← verifyCompletedReceipt rec size) then
+            return .ok (.error "Finalized upload artifact missing or corrupted")
+          let mut allIdx : Array JVal := #[]
+          for i in [0 : totalChunks] do allIdx := allIdx.push (JVal.nat i)
+          return .ok (.ok (.obj #[
+            ("upload_id", .str uid), ("name", .str name), ("size", JVal.uint64 size),
+            ("chunk_size", JVal.nat chunkSize), ("total_chunks", JVal.nat totalChunks),
+            ("received_chunks", .arr allIdx), ("receipt", rec)
+          ]))
+      if ex.fieldStr? "status" == some "completed" then
+        return .ok (.error "Finalized upload artifact missing or corrupted")
+      IO.FS.createDirAll (sessDir / "chunks")
+      let mut recvd : Array Nat := #[]
+      if let .ok cEntries ← (sessDir / "chunks").readDir |>.toBaseIO then
+        for ce in cEntries do
+          if let some idx := ce.fileName.toNat? then
+            if idx < totalChunks then recvd := recvd.push idx
+      let sorted := (recvd.qsort (· < ·)).map JVal.nat
+      return .ok (.ok (.obj #[
+        ("upload_id", .str uid), ("name", .str name), ("size", JVal.uint64 size),
+        ("chunk_size", JVal.nat chunkSize), ("total_chunks", JVal.nat totalChunks),
+        ("received_chunks", .arr sorted)
+      ]))
+    IO.FS.createDirAll (sessDir / "chunks")
+    let mut metaFields : Array (String × JVal) := #[
       ("upload_id", .str uid), ("name", .str name), ("size", JVal.uint64 size),
       ("chunk_size", JVal.nat chunkSize), ("total_chunks", JVal.nat totalChunks),
-      ("received_chunks", .arr sorted)
-    ])
-  let mut metaFields : Array (String × JVal) := #[
-    ("upload_id", .str uid), ("name", .str name), ("size", JVal.uint64 size),
-    ("chunk_size", JVal.nat chunkSize), ("total_chunks", JVal.nat totalChunks)
-  ]
-  if let some b := batchId? then metaFields := metaFields.push ("batch_id", .str b)
-  if let some r := relPath? then metaFields := metaFields.push ("relative_path", .str r)
-  if let some d := digest? then metaFields := metaFields.push ("batch_token_digest", .str d)
-  IO.FS.writeFile metaPath (renderCompact (.obj metaFields))
-  return .ok (.obj #[
-    ("upload_id", .str uid), ("name", .str name), ("size", JVal.uint64 size),
-    ("chunk_size", JVal.nat chunkSize), ("total_chunks", JVal.nat totalChunks),
-    ("received_chunks", .arr #[])
-  ])
+      ("status", .str "staging")
+    ]
+    if let some b := batchId? then metaFields := metaFields.push ("batch_id", .str b)
+    if let some r := relPath? then metaFields := metaFields.push ("relative_path", .str r)
+    if let some d := digest? then metaFields := metaFields.push ("batch_token_digest", .str d)
+    if batchId?.isNone then
+      let destUid ← newUuidV4
+      metaFields := metaFields.push ("dest_uid", .str destUid)
+    match ← writeFileDurableAtomic metaPath (renderCompact (.obj metaFields)).toUTF8 with
+    | .ok () => pure ()
+    | .error e => return .ok (.error e)
+    return .ok (.ok (.obj #[
+      ("upload_id", .str uid), ("name", .str name), ("size", JVal.uint64 size),
+      ("chunk_size", JVal.nat chunkSize), ("total_chunks", JVal.nat totalChunks),
+      ("received_chunks", .arr #[])
+    ]))
+  with
+  | .ok inner => return inner
+  | .error _ => return .error "upload session lock failed"
 
 def writeUploadSessionChunk (workDir uid : String) (index : Nat) (bytes : ByteArray) : IO (Except String JVal) := do
   if let .error e := validateUploadId uid then return .error e
@@ -423,91 +541,266 @@ def writeUploadSessionChunk (workDir uid : String) (index : Nat) (bytes : ByteAr
   let metaPath := sessDir / "meta.json"
   if !(← metaPath.pathExists) then
     return .error "Upload session not found; reinitialize the upload"
-  let .ok raw ← IO.FS.readFile metaPath |>.toBaseIO | return .error "Read session metadata failed"
-  let .ok metaJv := OrbBin.Json.parse raw | return .error "Invalid session metadata"
-  let name := (metaJv.fieldStr? "name").getD ""
-  let size := (metaJv.fieldUInt64? "size").getD 0
-  let chunkSize := (metaJv.fieldNat? "chunk_size").getD defaultChunkBytes
-  let totalChunks := (metaJv.fieldNat? "total_chunks").getD 1
-  if let some rec := metaJv.field? "receipt" then
-    if rec != .null then
-      let mut allIdx : Array JVal := #[]
-      for i in [0 : totalChunks] do allIdx := allIdx.push (JVal.nat i)
-      return .ok (.obj #[
-        ("upload_id", .str uid), ("name", .str name), ("size", JVal.uint64 size),
-        ("chunk_size", JVal.nat chunkSize), ("total_chunks", JVal.nat totalChunks),
-        ("received_chunks", .arr allIdx), ("receipt", rec)
-      ])
-  if index >= totalChunks then return .error "Chunk index out of bounds"
-  let offset := index * chunkSize
-  let expectedLen :=
-    if size == 0 then 0
-    else if index + 1 == totalChunks then size.toNat - offset
-    else chunkSize
-  if bytes.size != expectedLen then
-    return .error s!"Chunk {index} size mismatch: expected {expectedLen} bytes, got {bytes.size}"
-  IO.FS.writeBinFile (sessDir / "chunks" / toString index) bytes
-  let mut recvd : Array Nat := #[]
-  if let .ok cEntries ← (sessDir / "chunks").readDir |>.toBaseIO then
-    for ce in cEntries do
-      if let some idx := ce.fileName.toNat? then
-        if idx < totalChunks then recvd := recvd.push idx
-  let sorted := (recvd.qsort (· < ·)).map JVal.nat
-  return .ok (.obj #[
-    ("upload_id", .str uid), ("name", .str name), ("size", JVal.uint64 size),
-    ("chunk_size", JVal.nat chunkSize), ("total_chunks", JVal.nat totalChunks),
-    ("received_chunks", .arr sorted)
-  ])
+  let sdst ← statPath sessDir.toString
+  if !sdst.exists_ || sdst.isSymlink || !sdst.isDir then
+    return .error "Invalid upload session directory"
+  match ← LeanSys.Posix.withDirLock (sessDir / "finalize.lock").toString false fun _ => do
+    if !(← metaPath.pathExists) then
+      return .ok (.error "Upload session not found; reinitialize the upload")
+    let .ok raw ← IO.FS.readFile metaPath |>.toBaseIO
+      | return .ok (.error "Read session metadata failed")
+    let .ok metaJv := OrbBin.Json.parse raw
+      | return .ok (.error "Invalid session metadata")
+    let name := (metaJv.fieldStr? "name").getD ""
+    let size := (metaJv.fieldUInt64? "size").getD 0
+    let chunkSize := (metaJv.fieldNat? "chunk_size").getD defaultChunkBytes
+    let totalChunks := (metaJv.fieldNat? "total_chunks").getD 1
+    if let some rec := metaJv.field? "receipt" then
+      if rec != .null then
+        return .ok (.error "Upload session is already finalized")
+    if metaJv.fieldStr? "status" == some "completed" then
+      return .ok (.error "Upload session is already finalized")
+    if index >= totalChunks then return .ok (.error "Chunk index out of bounds")
+    let offset := index * chunkSize
+    let expectedLen :=
+      if size == 0 then 0
+      else if index + 1 == totalChunks then size.toNat - offset
+      else chunkSize
+    if bytes.size != expectedLen then
+      return .ok (.error s!"Chunk {index} size mismatch: expected {expectedLen} bytes, got {bytes.size}")
+    let chunksDir := sessDir / "chunks"
+    IO.FS.createDirAll chunksDir
+    let cdst ← statPath chunksDir.toString
+    if !cdst.exists_ || cdst.isSymlink || !cdst.isDir then
+      return .ok (.error "Invalid upload chunks directory")
+    let chunkPath := chunksDir / toString index
+    let pid ← OrbBin.PosixExt.getpid
+    let nonce ← newUuidV4
+    let tmp := System.FilePath.mk (s!"{chunkPath.toString}.tmp.{pid}.{nonce}")
+    match ← LeanSys.Posix.withFd tmp.toString 1 (fun fd => LeanSys.Posix.writeAll fd bytes true) (exclusive := 2) with
+    | .error _ =>
+      try IO.FS.removeFile tmp catch _ => pure ()
+      return .ok (.error "Write chunk failed")
+    | .ok (_ : Nat) => pure ()
+    match ← LeanSys.Posix.atomicRename tmp.toString chunkPath.toString with
+    | .error _ =>
+      try IO.FS.removeFile tmp catch _ => pure ()
+      return .ok (.error "Commit chunk failed")
+    | .ok () => pure ()
+    let mut recvd : Array Nat := #[]
+    if let .ok cEntries ← (sessDir / "chunks").readDir |>.toBaseIO then
+      for ce in cEntries do
+        if let some idx := ce.fileName.toNat? then
+          if idx < totalChunks then recvd := recvd.push idx
+    let sorted := (recvd.qsort (· < ·)).map JVal.nat
+    return .ok (.ok (.obj #[
+      ("upload_id", .str uid), ("name", .str name), ("size", JVal.uint64 size),
+      ("chunk_size", JVal.nat chunkSize), ("total_chunks", JVal.nat totalChunks),
+      ("received_chunks", .arr sorted)
+    ]))
+  with
+  | .ok inner => return inner
+  | .error _ => return .error "upload session lock failed"
 
-def completeUploadSession (workDir uid : String) : IO (Except String JVal) := do
+private def readUploadMeta (metaPath : System.FilePath) : IO (Except String JVal) := do
+  if !(← metaPath.pathExists) then
+    return .error "Upload session not found; reinitialize the upload"
+  let .ok raw ← IO.FS.readFile metaPath |>.toBaseIO | return .error "Read session metadata failed"
+  match OrbBin.Json.parse raw with
+  | .ok jv => return .ok jv
+  | .error _ => return .error "Invalid session metadata"
+
+private def completedReceipt? (metaJv : JVal) : Option JVal :=
+  match metaJv.field? "receipt" with
+  | some rec => if rec == .null then none else some rec
+  | none => none
+
+private def receiptMatchesDest (rec : JVal) (dest : System.FilePath) (size : UInt64) (sha : String) : Bool :=
+  rec.fieldStr? "path" == some dest.toString &&
+  rec.fieldUInt64? "size" == some size &&
+  rec.fieldStr? "sha256" == some sha
+
+private def unlinkUploadChunks (sessDir : System.FilePath) : IO Unit := do
+  let chunks := sessDir / "chunks"
+  if let .ok entries ← chunks.readDir |>.toBaseIO then
+    for e in entries do
+      try IO.FS.removeFile e.path catch _ => pure ()
+  try IO.FS.removeDir chunks catch _ => pure ()
+
+private def removeSessionContents (sessDir : System.FilePath) : IO Unit := do
+  if let .ok entries ← sessDir.readDir |>.toBaseIO then
+    for e in entries do
+      if e.fileName != "finalize.lock" then
+        try IO.FS.removeFile e.path catch _ => pure ()
+        try IO.FS.removeDirAll e.path catch _ => pure ()
+
+private def sessionOwnsDest (uploadsRoot : System.FilePath) (uid : String) (metaJv : JVal) (dest : System.FilePath) : IO Bool := do
+  let destStr := dest.toString
+  let sessRoot := uploadsRoot / ".sessions"
+  if let .ok entries ← sessRoot.readDir |>.toBaseIO then
+    for e in entries do
+      if e.fileName != uid then
+        if let .ok raw ← IO.FS.readFile (e.path / "meta.json") |>.toBaseIO then
+          if let .ok other := OrbBin.Json.parse raw then
+            if let some rec := completedReceipt? other then
+              if rec.fieldStr? "path" == some destStr then
+                return false
+            if (other.fieldStr? "dest_path").getD "" == destStr then
+              return false
+  if (metaJv.fieldStr? "dest_path").getD "" == destStr then
+    return true
+  if ← dest.pathExists then
+    return (metaJv.fieldStr? "batch_id").isNone && (metaJv.fieldStr? "dest_uid").isSome
+  return true
+
+private def resolveSessionDest
+    (uploadsRoot sessDir : System.FilePath) (uid : String) (metaJv : JVal) :
+    IO (Except String (System.FilePath × JVal)) := do
+  let name := (metaJv.fieldStr? "name").getD ""
+  match metaJv.fieldStr? "batch_id", metaJv.fieldStr? "relative_path" with
+  | some rawBatch, some rawRel =>
+    let dst ← match ← resolveUploadDest uploadsRoot name (some rawBatch) (some rawRel) (metaJv.fieldStr? "batch_token_digest") with
+      | .ok d => pure d
+      | .error e => return .error e
+    let owned ← sessionOwnsDest uploadsRoot uid metaJv dst
+    if !owned then
+      return .error "A file with this path was already uploaded"
+    if ← dst.pathExists then
+      return .ok (dst, metaJv)
+    let fields := (metaJv.asObj?.getD #[]).filter (fun kv => kv.1 != "dest_path")
+    let next := JVal.obj (fields.push ("dest_path", .str dst.toString))
+    match ← writeFileDurableAtomic (sessDir / "meta.json") (renderCompact next).toUTF8 with
+    | .ok () => return .ok (dst, next)
+    | .error e => return .error e
+  | none, none =>
+    let destUid ← match metaJv.fieldStr? "dest_uid" with
+      | some u =>
+        match parseUuidCanonical? u with
+        | some c => pure c
+        | none => return .error "Invalid dest_uid"
+      | none => newUuidV4
+    let dir := uploadsRoot / destUid
+    IO.FS.createDirAll dir
+    let dst := dir / name
+    let owned ← sessionOwnsDest uploadsRoot uid metaJv dst
+    if !owned then
+      return .error "A file with this path was already uploaded"
+    let fields := (metaJv.asObj?.getD #[]).filter (fun kv => kv.1 != "dest_uid" && kv.1 != "dest_path")
+    let next := JVal.obj (fields.push ("dest_uid", .str destUid) |>.push ("dest_path", .str dst.toString))
+    match ← writeFileDurableAtomic (sessDir / "meta.json") (renderCompact next).toUTF8 with
+    | .ok () => return .ok (dst, next)
+    | .error e => return .error e
+  | _, _ => return .error "Folder uploads need both batch_id and relative_path"
+
+def completeUploadSession (workDir uid : String) (crashAfterDestDurable : Bool := false) : IO (Except String JVal) := do
   if let .error e := validateUploadId uid then return .error e
   let uploadsRoot := System.FilePath.mk workDir / "uploads"
   let sessDir := uploadsRoot / ".sessions" / uid
   let metaPath := sessDir / "meta.json"
-  if !(← metaPath.pathExists) then
+  if !(← sessDir.pathExists) || !(← metaPath.pathExists) then
     return .error "Upload session not found; reinitialize the upload"
-  let .ok raw ← IO.FS.readFile metaPath |>.toBaseIO | return .error "Read session metadata failed"
-  let .ok metaJv := OrbBin.Json.parse raw | return .error "Invalid session metadata"
-  if let some rec := metaJv.field? "receipt" then
-    if rec != .null then return .ok rec
-  let name := (metaJv.fieldStr? "name").getD ""
-  let size := (metaJv.fieldUInt64? "size").getD 0
-  let totalChunks := (metaJv.fieldNat? "total_chunks").getD 1
-  let mut assembled := ByteArray.emptyWithCapacity size.toNat
-  for i in [0 : totalChunks] do
-    let cf := sessDir / "chunks" / toString i
-    if !(← cf.pathExists) then
-      return .error s!"Upload incomplete: missing chunk {i}/{totalChunks}"
-    let .ok cb ← IO.FS.readBinFile cf |>.toBaseIO
-      | return .error s!"Failed reading chunk {i}"
-    assembled := assembled ++ cb
-  if assembled.size.toUInt64 != size then
-    return .error "Staged upload size mismatch"
-  let sha := bytesToHexLower (sha256Bytes assembled)
-  let dest ← match ← resolveUploadDest uploadsRoot name
-      (metaJv.fieldStr? "batch_id") (metaJv.fieldStr? "relative_path") (metaJv.fieldStr? "batch_token_digest") with
-    | .ok d => pure d
-    | .error e => return .error e
-  if ← dest.pathExists then
-    return .error "A file with this path was already uploaded"
-  IO.FS.writeBinFile dest assembled
-  let _ ← IO.Process.output { cmd := "rm", args := #["-rf", (sessDir / "chunks").toString] }
-  let receipt := JVal.obj #[
-    ("name", .str name),
-    ("path", .str dest.toString),
-    ("size", JVal.uint64 size),
-    ("sha256", .str sha)
-  ]
-  if let some fields := metaJv.asObj? then
-    IO.FS.writeFile metaPath (renderCompact (.obj (fields.push ("receipt", receipt))))
-  return .ok receipt
+  let sdst ← statPath sessDir.toString
+  if !sdst.exists_ || sdst.isSymlink || !sdst.isDir then
+    return .error "Invalid upload session directory"
+  let lockPath := (sessDir / "finalize.lock").toString
+  match ← LeanSys.Posix.withDirLock lockPath false fun _ => do
+    if !(← metaPath.pathExists) then
+      return .ok (.error "Upload session not found; reinitialize the upload")
+    let .ok meta0 ← readUploadMeta metaPath | return .ok (.error "Invalid session metadata")
+    let size := (meta0.fieldUInt64? "size").getD 0
+    if let some rec := completedReceipt? meta0 then
+      if ← verifyCompletedReceipt rec size then
+        if OrbNode.Spec.verifyUploadFinalizeOrder 1 1 1 3 == 1 then
+          unlinkUploadChunks sessDir
+        return .ok (.ok rec)
+      else
+        return .ok (.error "Finalized upload artifact missing or corrupted")
+    if meta0.fieldStr? "status" == some "completed" then
+      return .ok (.error "Finalized upload artifact missing or corrupted")
+    let name := (meta0.fieldStr? "name").getD ""
+    let totalChunks := (meta0.fieldNat? "total_chunks").getD 1
+    let mut assembled := ByteArray.emptyWithCapacity size.toNat
+    for i in [0 : totalChunks] do
+      let cf := sessDir / "chunks" / toString i
+      if !(← cf.pathExists) then
+        return .ok (.error s!"Upload incomplete: missing chunk {i}/{totalChunks}")
+      let .ok cb ← IO.FS.readBinFile cf |>.toBaseIO
+        | return .ok (.error s!"Failed reading chunk {i}")
+      assembled := assembled ++ cb
+    if assembled.size.toUInt64 != size then
+      return .ok (.error "Staged upload size mismatch")
+    let sha := bytesToHexLower (sha256Bytes assembled)
+    IO.FS.createDirAll uploadsRoot
+    let urst ← statPath uploadsRoot.toString
+    if !urst.exists_ || urst.isSymlink || !urst.isDir then
+      return .ok (.error "Invalid uploads root")
+    let claimRes : LeanSys.Posix.SysResult (Except String (System.FilePath × JVal)) ←
+      LeanSys.Posix.withDirLock (uploadsRoot / ".dest-claim.lock").toString false fun _ => do
+        let (dest, metaJv) ← match ← resolveSessionDest uploadsRoot sessDir uid meta0 with
+          | .ok pair => pure pair
+          | .error e => return .ok (.error e)
+        let owned ← sessionOwnsDest uploadsRoot uid metaJv dest
+        if !owned then
+          return .ok (.error "A file with this path was already uploaded")
+        if ← dest.pathExists then
+          let bytesOk ← destBytesMatch dest size sha
+          if !bytesOk then
+            return .ok (.error "A file with this path was already uploaded")
+        else
+          match ← writeFileDurableAtomic dest assembled with
+          | .ok () => pure ()
+          | .error e => return .ok (.error e)
+        return .ok (.ok (dest, metaJv))
+    let (dest, metaJv) ← match claimRes with
+      | .ok (.ok pair) => pure pair
+      | .ok (.error e) => return .ok (.error e)
+      | .error _ => return .ok (.error "upload destination claim lock failed")
+    if OrbNode.Spec.verifyUploadFinalizeOrder 1 1 0 1 != 1 then
+      return .ok (.error "upload finalize gate rejected dest durability")
+    if crashAfterDestDurable then
+      return .ok (.error "injected_crash_after_dest_durable")
+    let receipt := JVal.obj #[
+      ("name", .str name),
+      ("path", .str dest.toString),
+      ("size", JVal.uint64 size),
+      ("sha256", .str sha)
+    ]
+    let fields := (metaJv.asObj?.getD #[]).filter (fun kv => kv.1 != "status" && kv.1 != "receipt" && kv.1 != "dest_path")
+    let completed := JVal.obj (fields.push ("dest_path", .str dest.toString) |>.push ("status", .str "completed") |>.push ("receipt", receipt))
+    match ← writeFileDurableAtomic metaPath (renderCompact completed).toUTF8 with
+    | .ok () => pure ()
+    | .error e => return .ok (.error e)
+    if OrbNode.Spec.verifyUploadFinalizeOrder 1 1 1 3 != 1 then
+      return .ok (.error "upload finalize gate rejected chunk unlink")
+    unlinkUploadChunks sessDir
+    if receiptMatchesDest receipt dest size sha then
+      return .ok (.ok receipt)
+    return .ok (.error "receipt mismatch")
+  with
+  | .ok inner => return inner
+  | .error _ => return .error "upload finalize lock failed"
 
 def cancelUploadSession (workDir uid : String) : IO (Except String Unit) := do
   if let .error e := validateUploadId uid then return .error e
   let sessDir := System.FilePath.mk workDir / "uploads" / ".sessions" / uid
-  if ← sessDir.pathExists then
-    let _ ← IO.Process.output { cmd := "rm", args := #["-rf", sessDir.toString] }
-  return .ok ()
+  if !(← sessDir.pathExists) then
+    return .ok ()
+  let sdst ← statPath sessDir.toString
+  if !sdst.exists_ || sdst.isSymlink || !sdst.isDir then
+    return .error "Invalid upload session directory"
+  let lockPath := (sessDir / "finalize.lock").toString
+  match ← LeanSys.Posix.withDirLock lockPath false fun _ => do
+    if !(← (sessDir / "meta.json").pathExists) then
+      removeSessionContents sessDir
+      return .ok (.ok ())
+    let .ok metaJv ← readUploadMeta (sessDir / "meta.json") | return .ok (.error "Invalid session metadata")
+    if (completedReceipt? metaJv).isSome || metaJv.fieldStr? "status" == some "completed" then
+      return .ok (.error "Upload session is already finalized")
+    removeSessionContents sessDir
+    return .ok (.ok ())
+  with
+  | .ok inner => return inner
+  | .error _ => return .error "upload cancel lock failed"
 
 /-- Content-addressed shared Library skills archive (`library-skills-<hex>.tar.gz`) uploaded once per
     content digest and reused across remote worker missions. Strictly rejects any path separators,

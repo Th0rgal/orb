@@ -502,4 +502,246 @@ theorem log_chunk_frame_bounded
     out.size ≤ 262144 :=
   logChunkFrameParserSpec.bounded raw out h
 
+/-! ### 5. Flock-Ordered Durable Upload Finalizer (`SM-22`, `R1-04`) -/
+
+inductive UploadFinalizePhase where
+  | staging
+  | destDurable
+  | metaReceiptDurable
+  | chunksUnlinked
+  deriving Repr, DecidableEq
+
+/-- Decode a finalize phase code: `0` staging, `1` dest durable, `2` meta receipt durable, `3` chunks unlinked. -/
+def UploadFinalizePhase.decode? : Nat → Option UploadFinalizePhase
+  | 0 => some .staging
+  | 1 => some .destDurable
+  | 2 => some .metaReceiptDurable
+  | 3 => some .chunksUnlinked
+  | _ => none
+
+structure UploadFinalizeCheck where
+  flags : UInt8 × UInt8 × UInt8
+  phase : UInt8
+  deriving Repr, DecidableEq
+
+/-- Independent durable-upload resource specification (`ConservedResource`):
+    chunks may be unlinked only while the exclusive session lock is held, the destination
+    bytes are durable, and the `meta.json` receipt is durable. Every earlier phase conserves
+    the chunk set. -/
+def UploadFinalizeDomainSafe (c : UploadFinalizeCheck) : Prop :=
+  ∃ phase : UploadFinalizePhase,
+    UploadFinalizePhase.decode? c.phase.toNat = some phase ∧
+    (phase = .chunksUnlinked →
+      c.flags.1.toNat = 1 ∧ c.flags.2.1.toNat = 1 ∧ c.flags.2.2.toNat = 1)
+
+@[inline, export orb_node_verify_upload_finalize]
+def verifyUploadFinalizeOrder
+    (sessionLockHeld : UInt8)
+    (destDurable : UInt8)
+    (metaReceiptDurable : UInt8)
+    (phaseCode : UInt8) : UInt8 :=
+  if phaseCode ≤ 2 ||
+     (phaseCode == 3 && sessionLockHeld == 1 && destDurable == 1 && metaReceiptDurable == 1) then 1 else 0
+
+def uploadFinalizeMetaGate : MetaGateSpec UploadFinalizeCheck UploadFinalizeDomainSafe where
+  gate c :=
+    verifyUploadFinalizeOrder c.flags.1 c.flags.2.1 c.flags.2.2 c.phase == 1
+  sound c h := by
+    rcases c with ⟨⟨lk, dest, metaDur⟩, ph⟩
+    change (verifyUploadFinalizeOrder lk dest metaDur ph == 1) = true at h
+    dsimp [UploadFinalizeDomainSafe]
+    unfold verifyUploadFinalizeOrder at h
+    have hc : (ph ≤ 2 || (ph == 3 && lk == 1 && dest == 1 && metaDur == 1)) = true := by
+      cases hb : (ph ≤ 2 || (ph == 3 && lk == 1 && dest == 1 && metaDur == 1))
+      · rw [hb] at h; contradiction
+      · rfl
+    simp only [Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
+    rcases hc with hle | ⟨⟨⟨hph, hlk⟩, hdest⟩, hmeta⟩
+    · have hpn : ph.toNat ≤ 2 := UInt8.le_iff_toNat_le.mp hle
+      have hcases : ph.toNat = 0 ∨ ph.toNat = 1 ∨ ph.toNat = 2 := by omega
+      rcases hcases with h0 | h1 | h2
+      · exact ⟨.staging, by simp [UploadFinalizePhase.decode?, h0], by intro hp; cases hp⟩
+      · exact ⟨.destDurable, by simp [UploadFinalizePhase.decode?, h1], by intro hp; cases hp⟩
+      · exact ⟨.metaReceiptDurable, by simp [UploadFinalizePhase.decode?, h2], by intro hp; cases hp⟩
+    · subst hph
+      refine ⟨.chunksUnlinked, by simp [UploadFinalizePhase.decode?], fun _ => ?_⟩
+      refine ⟨?_, ?_, ?_⟩
+      · subst hlk
+        rfl
+      · subst hdest
+        rfl
+      · subst hmeta
+        rfl
+  complete c h := by
+    rcases c with ⟨⟨lk, dest, metaDur⟩, ph⟩
+    change (verifyUploadFinalizeOrder lk dest metaDur ph == 1) = true
+    dsimp [UploadFinalizeDomainSafe] at h
+    rcases h with ⟨phase, hdec, hunlink⟩
+    unfold verifyUploadFinalizeOrder
+    unfold UploadFinalizePhase.decode? at hdec
+    split at hdec
+    · injection hdec with hp; subst hp
+      have hp0 : ph = 0 := u8_eq_of_toNat ph 0 (by omega) ‹_›
+      subst hp0; simp
+    · injection hdec with hp; subst hp
+      have hp1 : ph = 1 := u8_eq_of_toNat ph 1 (by omega) ‹_›
+      subst hp1; simp
+    · injection hdec with hp; subst hp
+      have hp2 : ph = 2 := u8_eq_of_toNat ph 2 (by omega) ‹_›
+      subst hp2; simp
+    · injection hdec with hp; subst hp
+      have hp3 : ph = 3 := u8_eq_of_toNat ph 3 (by omega) ‹_›
+      rcases hunlink rfl with ⟨hlk, hdest, hmeta⟩
+      have hlkB : (lk == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat lk 1 (by omega) hlk
+      have hdestB : (dest == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat dest 1 (by omega) hdest
+      have hmetaB : (metaDur == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat metaDur 1 (by omega) hmeta
+      subst hp3; simp [hlkB, hdestB, hmetaB]
+    · contradiction
+  posWitness := { flags := (1, 1, 1), phase := 3 }
+  negWitness := { flags := (1, 1, 0), phase := 3 }
+  nonVacuous := by decide
+  tight := by decide
+
+def uploadFinalizeConserved : ConservedResource UploadFinalizeCheck where
+  admit := uploadFinalizeMetaGate.gate
+  withinBudget c :=
+    c.phase.toNat ≠ 3 ∨ (c.flags.1.toNat = 1 ∧ c.flags.2.1.toNat = 1 ∧ c.flags.2.2.toNat = 1)
+  conserved c h := by
+    rcases uploadFinalizeMetaGate.sound c h with ⟨phase, hdec, hunlink⟩
+    cases phase with
+    | staging =>
+      left
+      intro hp
+      simp [UploadFinalizePhase.decode?, hp] at hdec
+    | destDurable =>
+      left
+      intro hp
+      simp [UploadFinalizePhase.decode?, hp] at hdec
+    | metaReceiptDurable =>
+      left
+      intro hp
+      simp [UploadFinalizePhase.decode?, hp] at hdec
+    | chunksUnlinked =>
+      right
+      exact hunlink rfl
+
+theorem upload_finalize_rejects_unlink_before_receipt
+    (sessionLockHeld destDurable : UInt8) :
+    verifyUploadFinalizeOrder sessionLockHeld destDurable 0 3 = 0 := by
+  have hbad : ¬ UploadFinalizeDomainSafe ⟨(sessionLockHeld, destDurable, 0), 3⟩ := by
+    rintro ⟨phase, hdec, hunlink⟩
+    cases phase <;> simp [UploadFinalizePhase.decode?] at hdec hunlink
+  have hf := uploadFinalizeMetaGate.rejects_unsafe ⟨(sessionLockHeld, destDurable, 0), 3⟩ hbad
+  unfold uploadFinalizeMetaGate at hf; dsimp at hf
+  unfold verifyUploadFinalizeOrder at hf ⊢
+  exact bit_gate_eq_zero hf
+
+/-! ### 6. CAS Workspace Build Admission (`SM-22`, `R1-05`) -/
+
+structure WorkspaceBuildAdmitCheck where
+  activeBuilds : UInt32
+  gens         : UInt64 × UInt64
+  validId      : UInt8
+  deriving Repr, DecidableEq
+
+/-- Independent single-flight workspace-build specification (`ConservedResource`):
+    a build is admitted only for a valid workspace id, only when no build is already active,
+    and only for the non-wrapping successor generation `currentGen + 1`. -/
+def WorkspaceBuildAdmitDomainSafe (c : WorkspaceBuildAdmitCheck) : Prop :=
+  c.activeBuilds.toNat = 0 ∧
+  c.gens.2.toNat + 1 = c.gens.1.toNat ∧
+  c.validId.toNat = 1
+
+@[inline, export orb_node_verify_workspace_build_admit]
+def verifyWorkspaceBuildAdmit
+    (activeBuildsForWorkspace : UInt32)
+    (presentedGen : UInt64)
+    (currentGen : UInt64)
+    (validWorkspaceId : UInt8) : UInt8 :=
+  if activeBuildsForWorkspace == 0 &&
+     currentGen < 0xFFFFFFFFFFFFFFFF &&
+     presentedGen == currentGen + 1 &&
+     validWorkspaceId == 1 then 1 else 0
+
+def workspaceBuildAdmitMetaGate : MetaGateSpec WorkspaceBuildAdmitCheck WorkspaceBuildAdmitDomainSafe where
+  gate c :=
+    verifyWorkspaceBuildAdmit c.activeBuilds c.gens.1 c.gens.2 c.validId == 1
+  sound c h := by
+    rcases c with ⟨active, ⟨pres, cur⟩, valid⟩
+    change (verifyWorkspaceBuildAdmit active pres cur valid == 1) = true at h
+    dsimp [WorkspaceBuildAdmitDomainSafe]
+    unfold verifyWorkspaceBuildAdmit at h
+    have hc : (active == 0 && cur < 0xFFFFFFFFFFFFFFFF && pres == cur + 1 && valid == 1) = true := by
+      cases hb : (active == 0 && cur < 0xFFFFFFFFFFFFFFFF && pres == cur + 1 && valid == 1)
+      · rw [hb] at h; contradiction
+      · rfl
+    simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
+    rcases hc with ⟨⟨⟨hact, hcurLt⟩, hgen⟩, hvalid⟩
+    refine ⟨?_, ?_, ?_⟩
+    · have h0 : active = 0 := hact
+      change active.toNat = 0
+      rw [h0]; rfl
+    · have hlt : cur.toNat < 18446744073709551615 := UInt64.lt_iff_toNat_lt.mp hcurLt
+      have hsucc : pres = cur + 1 := hgen
+      have hnat : pres.toNat = cur.toNat + 1 := by
+        have hwrap : (cur + 1).toNat = cur.toNat + 1 := by
+          change (cur.toNat + 1) % 18446744073709551616 = cur.toNat + 1
+          exact Nat.mod_eq_of_lt (by omega)
+        rw [hsucc, hwrap]
+      omega
+    · subst hvalid; rfl
+  complete c h := by
+    rcases c with ⟨active, ⟨pres, cur⟩, valid⟩
+    change (verifyWorkspaceBuildAdmit active pres cur valid == 1) = true
+    dsimp [WorkspaceBuildAdmitDomainSafe] at h
+    rcases h with ⟨hact, hgen, hvalid⟩
+    unfold verifyWorkspaceBuildAdmit
+    have hactB : (active == 0) = true := by
+      rw [beq_iff_eq]
+      apply UInt32.eq_of_toBitVec_eq
+      apply BitVec.eq_of_toNat_eq
+      change active.toNat = 0
+      exact hact
+    have hpresLt : pres.toNat < 18446744073709551616 := UInt64.toNat_lt pres
+    have hcurLt : cur < 0xFFFFFFFFFFFFFFFF := by
+      apply UInt64.lt_iff_toNat_lt.mpr
+      change cur.toNat < 18446744073709551615
+      omega
+    have hpres : pres = cur + 1 := by
+      apply UInt64.eq_of_toBitVec_eq
+      apply BitVec.eq_of_toNat_eq
+      have hwrap : (cur + 1).toNat = cur.toNat + 1 := by
+        change (cur.toNat + 1) % 18446744073709551616 = cur.toNat + 1
+        exact Nat.mod_eq_of_lt (by omega)
+      change pres.toNat = (cur + 1).toNat
+      rw [hwrap]
+      omega
+    have hvalidB : (valid == 1) = true := by
+      rw [beq_iff_eq]; exact u8_eq_of_toNat valid 1 (by omega) hvalid
+    simp [hactB, hcurLt, hpres, hvalidB]
+  posWitness := { activeBuilds := 0, gens := (1, 0), validId := 1 }
+  negWitness := { activeBuilds := 1, gens := (1, 0), validId := 1 }
+  nonVacuous := by decide
+  tight := by decide
+
+def workspaceBuildConserved : ConservedResource WorkspaceBuildAdmitCheck where
+  admit := workspaceBuildAdmitMetaGate.gate
+  withinBudget c := c.activeBuilds.toNat = 0
+  conserved c h := (workspaceBuildAdmitMetaGate.sound c h).1
+
+theorem workspace_build_rejects_active
+    (activeBuilds : UInt32)
+    (presentedGen currentGen : UInt64) (validWorkspaceId : UInt8)
+    (h_busy : activeBuilds.toNat ≠ 0) :
+    verifyWorkspaceBuildAdmit activeBuilds presentedGen currentGen validWorkspaceId = 0 := by
+  have hbad : ¬ WorkspaceBuildAdmitDomainSafe ⟨activeBuilds, (presentedGen, currentGen), validWorkspaceId⟩ := by
+    rintro ⟨hact, _, _⟩
+    exact h_busy hact
+  have hf :=
+    workspaceBuildAdmitMetaGate.rejects_unsafe
+      ⟨activeBuilds, (presentedGen, currentGen), validWorkspaceId⟩ hbad
+  unfold workspaceBuildAdmitMetaGate at hf; dsimp at hf
+  unfold verifyWorkspaceBuildAdmit at hf ⊢
+  exact bit_gate_eq_zero hf
+
 end OrbNode.Spec

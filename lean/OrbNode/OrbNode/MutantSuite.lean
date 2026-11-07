@@ -37,6 +37,37 @@ def m2_node_forceWithoutJobMatch
      nowSecs < expiresAt &&
      (scopeCode != 3 || jobIdMatches ≤ 1) then 1 else 0
 
+/-- Mutant 4: Unlinks upload chunks (`phaseCode == 3`) before the durable `meta.json` receipt
+    (`metaReceiptDurable ≤ 1` weakened guard). -/
+def m4_node_unlinkBeforeReceipt
+    (sessionLockHeld : UInt8)
+    (destDurable : UInt8)
+    (metaReceiptDurable : UInt8)
+    (phaseCode : UInt8) : UInt8 :=
+  if phaseCode ≤ 2 ||
+     (phaseCode == 3 && sessionLockHeld == 1 && destDurable == 1 && metaReceiptDurable ≤ 1) then 1 else 0
+
+/-- Mutant 5: Admits a workspace build while another build is already active
+    (`activeBuildsForWorkspace ≤ 1`). -/
+def m5_node_admitBusyWorkspaceBuild
+    (activeBuildsForWorkspace : UInt32)
+    (presentedGen : UInt64)
+    (currentGen : UInt64)
+    (validWorkspaceId : UInt8) : UInt8 :=
+  if activeBuildsForWorkspace ≤ 1 &&
+     currentGen < 0xFFFFFFFFFFFFFFFF &&
+     presentedGen == currentGen + 1 &&
+     validWorkspaceId == 1 then 1 else 0
+
+/-- Mutant 6: Finalizes an upload without holding the exclusive session lock (`sessionLockHeld ≤ 1`). -/
+def m6_node_skipSessionLock
+    (sessionLockHeld : UInt8)
+    (destDurable : UInt8)
+    (metaReceiptDurable : UInt8)
+    (phaseCode : UInt8) : UInt8 :=
+  if phaseCode ≤ 2 ||
+     (phaseCode == 3 && sessionLockHeld ≤ 1 && destDurable == 1 && metaReceiptDurable == 1) then 1 else 0
+
 /-- Mutant 3: Admits unforced non-resize job submissions even when `freeBytes < floorBytes`
     (disk-pressure pin bypass bug). -/
 def m3_node_ignoreDiskFloor
@@ -63,6 +94,27 @@ theorem kill_m2_node_forceWithoutJobMatch :
 theorem kill_m3_node_ignoreDiskFloor :
     m3_node_ignoreDiskFloor 8 2 5000000000 10000000000 0 0 ≠
       verifyNodeCapacityDisk 8 2 5000000000 10000000000 0 0 := by
+  decide
+
+theorem kill_m4_node_unlinkBeforeReceipt :
+    m4_node_unlinkBeforeReceipt 1 1 0 3 ≠
+      verifyUploadFinalizeOrder 1 1 0 3 ∧
+    m4_node_unlinkBeforeReceipt 1 1 1 3 =
+      verifyUploadFinalizeOrder 1 1 1 3 := by
+  decide
+
+theorem kill_m5_node_admitBusyWorkspaceBuild :
+    m5_node_admitBusyWorkspaceBuild 1 1 0 1 ≠
+      verifyWorkspaceBuildAdmit 1 1 0 1 ∧
+    m5_node_admitBusyWorkspaceBuild 0 1 0 1 =
+      verifyWorkspaceBuildAdmit 0 1 0 1 := by
+  decide
+
+theorem kill_m6_node_skipSessionLock :
+    m6_node_skipSessionLock 0 1 1 3 ≠
+      verifyUploadFinalizeOrder 0 1 1 3 ∧
+    m6_node_skipSessionLock 1 1 1 3 =
+      verifyUploadFinalizeOrder 1 1 1 3 := by
   decide
 
 end OrbNode.MutantSuite

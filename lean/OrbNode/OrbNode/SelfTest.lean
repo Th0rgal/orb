@@ -136,8 +136,457 @@ private def runChildToolSigintAnchorRegressionTests (check : String → Bool →
      childStillAlive.procMissing == 0 &&
      childStillAlive.isZombie == 0 &&
      childStillAlive.actualTicks == childAnchor.startTicks &&
-     sigMatchCount >= 1 &&
+      sigMatchCount >= 1 &&
      childExited)
+
+private def runR7NodeUploadsAndWorkspaceBuildTests
+    (tmpRoot : String) (rt : NodeRuntime) (authHdrs : Array (String × String)) : IO Unit := do
+  -- Pure R7 Spec & MutantSuite sanity
+  assertTrue "R7 upload finalize spec rejects unlink before receipt and admits full ordering"
+    (verifyUploadFinalizeOrder 1 1 0 3 == 0 &&
+     verifyUploadFinalizeOrder 0 1 1 3 == 0 &&
+     verifyUploadFinalizeOrder 1 1 1 3 == 1 &&
+     m4_node_unlinkBeforeReceipt 1 1 0 3 == 1 &&
+     m6_node_skipSessionLock 0 1 1 3 == 1)
+  assertTrue "R7 workspace build spec rejects active build and overflow and admits idle next-gen"
+    (verifyWorkspaceBuildAdmit 0 1 0 1 == 1 &&
+     verifyWorkspaceBuildAdmit 1 2 1 1 == 0 &&
+     verifyWorkspaceBuildAdmit 0 0 0xFFFFFFFFFFFFFFFF 1 == 0 &&
+     m5_node_admitBusyWorkspaceBuild 1 2 1 1 == 1)
+
+  let mtx ← Std.Mutex.new rt
+  let transferMtx ← Std.Mutex.new ()
+
+  -- (1) Crash after dest staged before meta.json receipt leaves chunks intact; retry returns exact SHA-256
+  let crashUid := "r7-crash-sess-01"
+  let chunk0 := "alpha-chunk-00-".toUTF8
+  let chunk1 := "bravo-chunk-01".toUTF8
+  let fullCrash := chunk0 ++ chunk1
+  let expCrashSha := bytesToHexLower (sha256Bytes fullCrash)
+  let initCrashBody := renderCompact (.obj #[
+    ("upload_id", .str crashUid),
+    ("name", .str "crash-artifact.bin"),
+    ("size", JVal.nat fullCrash.size),
+    ("chunk_size", JVal.nat chunk0.size)
+  ])
+  let rInitCrash ← handleRequestConcurrent mtx transferMtx {
+    method := "POST", rawPath := "/uploads/sessions", path := "/uploads/sessions",
+    query := #[], headers := authHdrs, body := initCrashBody.toUTF8
+  }
+  assertTrue "R7 crash-upload init 200" (rInitCrash.status == 200)
+  let rPut0 ← handleRequestConcurrent mtx transferMtx {
+    method := "PUT", rawPath := s!"/uploads/sessions/{crashUid}/chunks/0",
+    path := s!"/uploads/sessions/{crashUid}/chunks/0",
+    query := #[], headers := authHdrs, body := chunk0
+  }
+  let rPut1 ← handleRequestConcurrent mtx transferMtx {
+    method := "PUT", rawPath := s!"/uploads/sessions/{crashUid}/chunks/1",
+    path := s!"/uploads/sessions/{crashUid}/chunks/1",
+    query := #[], headers := authHdrs, body := chunk1
+  }
+  assertTrue "R7 crash-upload chunks 200" (rPut0.status == 200 && rPut1.status == 200)
+  let crashRes ← completeUploadSession tmpRoot crashUid (crashAfterDestDurable := true)
+  assertTrue "R7 simulated crash after dest durable returns injected error"
+    (match crashRes with | .error msg => msg == "injected_crash_after_dest_durable" | .ok _ => false)
+  let crashSessDir := System.FilePath.mk tmpRoot / "uploads" / ".sessions" / crashUid
+  let crashMetaRaw ← IO.FS.readFile (crashSessDir / "meta.json")
+  let .ok crashMetaJv := OrbBin.Json.parse crashMetaRaw
+    | throw (IO.userError "R7 failed parsing crash meta.json")
+  let stagedDestPath := (crashMetaJv.fieldStr? "dest_path").getD ""
+  assertTrue "R7 crash window keeps dest staged, receipt absent, and chunks intact"
+    (!stagedDestPath.isEmpty &&
+     (← (System.FilePath.mk stagedDestPath).pathExists) &&
+     (crashMetaJv.field? "receipt").isNone &&
+     (← (crashSessDir / "chunks" / "0").pathExists) &&
+     (← (crashSessDir / "chunks" / "1").pathExists))
+  let rRetryCrash ← handleRequestConcurrent mtx transferMtx {
+    method := "POST", rawPath := s!"/uploads/sessions/{crashUid}/complete",
+    path := s!"/uploads/sessions/{crashUid}/complete",
+    query := #[], headers := authHdrs, body := ByteArray.empty
+  }
+  let retryBodyStr := String.fromUTF8? rRetryCrash.body |>.getD ""
+  let .ok retryJv := OrbBin.Json.parse retryBodyStr
+    | throw (IO.userError s!"R7 retry parse failed: {retryBodyStr}")
+  let postMetaRaw ← IO.FS.readFile (crashSessDir / "meta.json")
+  let .ok postMetaJv := OrbBin.Json.parse postMetaRaw
+    | throw (IO.userError "R7 failed parsing post-retry meta.json")
+  assertTrue "R7 retry after crash returns 200 with exact SHA-256 and unlinks chunks after receipt"
+    (rRetryCrash.status == 200 &&
+     retryJv.fieldStr? "sha256" == some expCrashSha &&
+     retryJv.fieldStr? "path" == some stagedDestPath &&
+     retryJv.fieldUInt64? "size" == some fullCrash.size.toUInt64 &&
+     postMetaJv.fieldStr? "status" == some "completed" &&
+     (postMetaJv.field? "receipt").isSome &&
+     !(← (crashSessDir / "chunks").pathExists))
+
+  -- (2) Concurrent/repeated complete returns identical 200 receipts and unlinks chunks only after durable meta.json
+  let concUid := "r7-conc-sess-02"
+  let concC0 := "concurrent-upload-part-00-".toUTF8
+  let concC1 := "concurrent-upload-part-01!".toUTF8
+  let concFull := concC0 ++ concC1
+  let expConcSha := bytesToHexLower (sha256Bytes concFull)
+  let initConcBody := renderCompact (.obj #[
+    ("upload_id", .str concUid),
+    ("name", .str "concurrent.bin"),
+    ("size", JVal.nat concFull.size),
+    ("chunk_size", JVal.nat concC0.size)
+  ])
+  let _ ← handleRequestConcurrent mtx transferMtx {
+    method := "POST", rawPath := "/uploads/sessions", path := "/uploads/sessions",
+    query := #[], headers := authHdrs, body := initConcBody.toUTF8
+  }
+  let _ ← handleRequestConcurrent mtx transferMtx {
+    method := "PUT", rawPath := s!"/uploads/sessions/{concUid}/chunks/0",
+    path := s!"/uploads/sessions/{concUid}/chunks/0",
+    query := #[], headers := authHdrs, body := concC0
+  }
+  let _ ← handleRequestConcurrent mtx transferMtx {
+    method := "PUT", rawPath := s!"/uploads/sessions/{concUid}/chunks/1",
+    path := s!"/uploads/sessions/{concUid}/chunks/1",
+    query := #[], headers := authHdrs, body := concC1
+  }
+  let completeReq : HttpRequest := {
+    method := "POST", rawPath := s!"/uploads/sessions/{concUid}/complete",
+    path := s!"/uploads/sessions/{concUid}/complete",
+    query := #[], headers := authHdrs, body := ByteArray.empty
+  }
+  let tUpA ← IO.asTask (handleRequestConcurrent mtx transferMtx completeReq) Task.Priority.dedicated
+  let tUpB ← IO.asTask (handleRequestConcurrent mtx transferMtx completeReq) Task.Priority.dedicated
+  let .ok rUpA ← pure tUpA.get | throw (IO.userError "R7 concurrent upload task A failed")
+  let .ok rUpB ← pure tUpB.get | throw (IO.userError "R7 concurrent upload task B failed")
+  let rUpC ← handleRequestConcurrent mtx transferMtx completeReq
+  let sUpA := String.fromUTF8? rUpA.body |>.getD ""
+  let sUpB := String.fromUTF8? rUpB.body |>.getD ""
+  let sUpC := String.fromUTF8? rUpC.body |>.getD ""
+  let .ok jUpA := OrbBin.Json.parse sUpA
+    | throw (IO.userError s!"R7 concurrent upload JSON parse failed: {sUpA}")
+  let concSessDir := System.FilePath.mk tmpRoot / "uploads" / ".sessions" / concUid
+  let concMetaRaw ← IO.FS.readFile (concSessDir / "meta.json")
+  let .ok concMetaJv := OrbBin.Json.parse concMetaRaw
+    | throw (IO.userError "R7 concurrent meta.json parse failed")
+  assertTrue "R7 concurrent and repeated complete calls return identical 200 receipts with durable meta.json and unlinked chunks"
+    (rUpA.status == 200 && rUpB.status == 200 && rUpC.status == 200 &&
+     sUpA == sUpB && sUpB == sUpC &&
+     jUpA.fieldStr? "sha256" == some expConcSha &&
+     concMetaJv.fieldStr? "status" == some "completed" &&
+     ((concMetaJv.field? "receipt").map renderCompact == some (renderCompact jUpA)) &&
+     (← (concSessDir / "finalize.lock").pathExists) &&
+     !(← (concSessDir / "chunks").pathExists))
+
+  -- (2b) Cross-session (batch_id, relative_path) race (uidA != uidB): both identical-bytes and distinct-bytes
+  let batchTok := "r7-batch-secret-token-0123456789abcdef"
+  let batchSame := "11111111-2222-4333-8444-555555555555"
+  let samePayload := "identical-folder-payload-bytes-0123456789".toUTF8
+  let sameSha := bytesToHexLower (sha256Bytes samePayload)
+  for uid in #["r7-batch-same-a", "r7-batch-same-b"] do
+    let b := renderCompact (.obj #[
+      ("upload_id", .str uid), ("name", .str "shared.bin"),
+      ("size", JVal.nat samePayload.size), ("chunk_size", JVal.nat 64),
+      ("batch_id", .str batchSame), ("relative_path", .str "nested/shared.bin"),
+      ("batch_token", .str batchTok)
+    ])
+    let rI ← handleRequestConcurrent mtx transferMtx {
+      method := "POST", rawPath := "/uploads/sessions", path := "/uploads/sessions",
+      query := #[], headers := authHdrs, body := b.toUTF8
+    }
+    let rP ← handleRequestConcurrent mtx transferMtx {
+      method := "PUT", rawPath := s!"/uploads/sessions/{uid}/chunks/0",
+      path := s!"/uploads/sessions/{uid}/chunks/0",
+      query := #[], headers := authHdrs, body := samePayload
+    }
+    assertTrue s!"R7 cross-session same-bytes stage {uid}" (rI.status == 200 && rP.status == 200)
+  let tSameA ← IO.asTask (handleRequestConcurrent mtx transferMtx {
+    method := "POST", rawPath := "/uploads/sessions/r7-batch-same-a/complete",
+    path := "/uploads/sessions/r7-batch-same-a/complete",
+    query := #[], headers := authHdrs, body := ByteArray.empty
+  }) Task.Priority.dedicated
+  let tSameB ← IO.asTask (handleRequestConcurrent mtx transferMtx {
+    method := "POST", rawPath := "/uploads/sessions/r7-batch-same-b/complete",
+    path := "/uploads/sessions/r7-batch-same-b/complete",
+    query := #[], headers := authHdrs, body := ByteArray.empty
+  }) Task.Priority.dedicated
+  let .ok rSameA ← pure tSameA.get | throw (IO.userError "R7 same-bytes task A failed")
+  let .ok rSameB ← pure tSameB.get | throw (IO.userError "R7 same-bytes task B failed")
+  let (winUidSame, loseUidSame, winSameResp, loseSameResp) ←
+    if rSameA.status == 200 && rSameB.status == 400 then
+      pure ("r7-batch-same-a", "r7-batch-same-b", rSameA, rSameB)
+    else if rSameB.status == 200 && rSameA.status == 400 then
+      pure ("r7-batch-same-b", "r7-batch-same-a", rSameB, rSameA)
+    else
+      throw (IO.userError s!"R7 cross-session same-bytes expected one 200 and one 400, got {rSameA.status} and {rSameB.status}")
+  let .ok winSameJv := OrbBin.Json.parse (String.fromUTF8? winSameResp.body |>.getD "")
+    | throw (IO.userError "R7 cross-session same-bytes winner JSON parse failed")
+  let loseSameMsg := String.fromUTF8? loseSameResp.body |>.getD ""
+  let rSameWinRetry ← handleRequestConcurrent mtx transferMtx {
+    method := "POST", rawPath := s!"/uploads/sessions/{winUidSame}/complete",
+    path := s!"/uploads/sessions/{winUidSame}/complete",
+    query := #[], headers := authHdrs, body := ByteArray.empty
+  }
+  let rSameLoseRetry ← handleRequestConcurrent mtx transferMtx {
+    method := "POST", rawPath := s!"/uploads/sessions/{loseUidSame}/complete",
+    path := s!"/uploads/sessions/{loseUidSame}/complete",
+    query := #[], headers := authHdrs, body := ByteArray.empty
+  }
+  assertTrue "R7 cross-session same-bytes race admits exactly one winner (200) and rejects loser (400)"
+    (winSameJv.fieldStr? "sha256" == some sameSha &&
+     loseSameMsg == "A file with this path was already uploaded" &&
+     rSameWinRetry.status == 200 &&
+     rSameLoseRetry.status == 400)
+
+  let batchDiff := "22222222-3333-4444-8555-666666666666"
+  let diffPayloadA := "distinct-folder-payload-AAA-0123456789".toUTF8
+  let diffPayloadB := "distinct-folder-payload-BBB-9876543210".toUTF8
+  for (uid, payload) in #[("r7-batch-diff-a", diffPayloadA), ("r7-batch-diff-b", diffPayloadB)] do
+    let b := renderCompact (.obj #[
+      ("upload_id", .str uid), ("name", .str "clash.bin"),
+      ("size", JVal.nat payload.size), ("chunk_size", JVal.nat 64),
+      ("batch_id", .str batchDiff), ("relative_path", .str "nested/clash.bin"),
+      ("batch_token", .str batchTok)
+    ])
+    let rI ← handleRequestConcurrent mtx transferMtx {
+      method := "POST", rawPath := "/uploads/sessions", path := "/uploads/sessions",
+      query := #[], headers := authHdrs, body := b.toUTF8
+    }
+    let rP ← handleRequestConcurrent mtx transferMtx {
+      method := "PUT", rawPath := s!"/uploads/sessions/{uid}/chunks/0",
+      path := s!"/uploads/sessions/{uid}/chunks/0",
+      query := #[], headers := authHdrs, body := payload
+    }
+    assertTrue s!"R7 cross-session distinct-bytes stage {uid}" (rI.status == 200 && rP.status == 200)
+  let tDiffA ← IO.asTask (handleRequestConcurrent mtx transferMtx {
+    method := "POST", rawPath := "/uploads/sessions/r7-batch-diff-a/complete",
+    path := "/uploads/sessions/r7-batch-diff-a/complete",
+    query := #[], headers := authHdrs, body := ByteArray.empty
+  }) Task.Priority.dedicated
+  let tDiffB ← IO.asTask (handleRequestConcurrent mtx transferMtx {
+    method := "POST", rawPath := "/uploads/sessions/r7-batch-diff-b/complete",
+    path := "/uploads/sessions/r7-batch-diff-b/complete",
+    query := #[], headers := authHdrs, body := ByteArray.empty
+  }) Task.Priority.dedicated
+  let .ok rDiffA ← pure tDiffA.get | throw (IO.userError "R7 distinct-bytes task A failed")
+  let .ok rDiffB ← pure tDiffB.get | throw (IO.userError "R7 distinct-bytes task B failed")
+  let (winExpSha, winDiffResp, loseDiffResp) ←
+    if rDiffA.status == 200 && rDiffB.status == 400 then
+      pure (bytesToHexLower (sha256Bytes diffPayloadA), rDiffA, rDiffB)
+    else if rDiffB.status == 200 && rDiffA.status == 400 then
+      pure (bytesToHexLower (sha256Bytes diffPayloadB), rDiffB, rDiffA)
+    else
+      throw (IO.userError s!"R7 cross-session distinct-bytes expected one 200 and one 400, got {rDiffA.status} and {rDiffB.status}")
+  let .ok winDiffJv := OrbBin.Json.parse (String.fromUTF8? winDiffResp.body |>.getD "")
+    | throw (IO.userError "R7 cross-session distinct-bytes winner JSON parse failed")
+  let onDiskDiff ← IO.FS.readBinFile (System.FilePath.mk ((winDiffJv.fieldStr? "path").getD ""))
+  assertTrue "R7 cross-session distinct-bytes race preserves winner artifact without overwrite"
+    (winDiffJv.fieldStr? "sha256" == some winExpSha &&
+     bytesToHexLower (sha256Bytes onDiskDiff) == winExpSha &&
+     (String.fromUTF8? loseDiffResp.body |>.getD "") == "A file with this path was already uploaded")
+
+  -- (2c) Concurrent initOrStatus / writeChunk racing completeUploadSession + cancel rejection after complete
+  let raceUid := "r7-init-chunk-complete-race"
+  let raceC0 := ByteArray.mk (Array.replicate 2048 0x41)
+  let raceC1 := ByteArray.mk (Array.replicate 2048 0x42)
+  let raceFull := raceC0 ++ raceC1
+  let raceSha := bytesToHexLower (sha256Bytes raceFull)
+  let raceInitBody := (renderCompact (.obj #[
+    ("upload_id", .str raceUid), ("name", .str "race.bin"),
+    ("size", JVal.nat raceFull.size), ("chunk_size", JVal.nat raceC0.size)
+  ])).toUTF8
+  let initRaceReq : HttpRequest := {
+    method := "POST", rawPath := "/uploads/sessions", path := "/uploads/sessions",
+    query := #[], headers := authHdrs, body := raceInitBody
+  }
+  let tInit1 ← IO.asTask (handleRequestConcurrent mtx transferMtx initRaceReq) Task.Priority.dedicated
+  let tInit2 ← IO.asTask (handleRequestConcurrent mtx transferMtx initRaceReq) Task.Priority.dedicated
+  let .ok rInit1 ← pure tInit1.get | throw (IO.userError "R7 race init 1 failed")
+  let .ok rInit2 ← pure tInit2.get | throw (IO.userError "R7 race init 2 failed")
+  assertTrue "R7 concurrent initOrStatusUploadSession serializes cleanly" (rInit1.status == 200 && rInit2.status == 200)
+  let putRace0Req : HttpRequest := {
+    method := "PUT", rawPath := s!"/uploads/sessions/{raceUid}/chunks/0",
+    path := s!"/uploads/sessions/{raceUid}/chunks/0",
+    query := #[], headers := authHdrs, body := raceC0
+  }
+  let putRace1Req : HttpRequest := {
+    method := "PUT", rawPath := s!"/uploads/sessions/{raceUid}/chunks/1",
+    path := s!"/uploads/sessions/{raceUid}/chunks/1",
+    query := #[], headers := authHdrs, body := raceC1
+  }
+  let compRaceReq : HttpRequest := {
+    method := "POST", rawPath := s!"/uploads/sessions/{raceUid}/complete",
+    path := s!"/uploads/sessions/{raceUid}/complete",
+    query := #[], headers := authHdrs, body := ByteArray.empty
+  }
+  let _ ← handleRequestConcurrent mtx transferMtx putRace0Req
+  let _ ← handleRequestConcurrent mtx transferMtx putRace1Req
+  let tPut0 ← IO.asTask (handleRequestConcurrent mtx transferMtx putRace0Req) Task.Priority.dedicated
+  let tPut1 ← IO.asTask (handleRequestConcurrent mtx transferMtx putRace1Req) Task.Priority.dedicated
+  let tComp ← IO.asTask (handleRequestConcurrent mtx transferMtx compRaceReq) Task.Priority.dedicated
+  let tStat ← IO.asTask (handleRequestConcurrent mtx transferMtx initRaceReq) Task.Priority.dedicated
+  let .ok _ ← pure tPut0.get | throw (IO.userError "R7 race put0 failed")
+  let .ok _ ← pure tPut1.get | throw (IO.userError "R7 race put1 failed")
+  let .ok rRaceComp0 ← pure tComp.get | throw (IO.userError "R7 race complete failed")
+  let .ok rRaceStat ← pure tStat.get | throw (IO.userError "R7 race status failed")
+  let rRaceComp ← if rRaceComp0.status == 200 then pure rRaceComp0 else handleRequestConcurrent mtx transferMtx compRaceReq
+  let .ok raceRecJv := OrbBin.Json.parse (String.fromUTF8? rRaceComp.body |>.getD "")
+    | throw (IO.userError "R7 race complete JSON parse failed")
+  let rPostPut ← handleRequestConcurrent mtx transferMtx putRace0Req
+  let rPostDel ← handleRequestConcurrent mtx transferMtx {
+    method := "DELETE", rawPath := s!"/uploads/sessions/{raceUid}",
+    path := s!"/uploads/sessions/{raceUid}",
+    query := #[], headers := authHdrs, body := ByteArray.empty
+  }
+  let raceSessDir := System.FilePath.mk tmpRoot / "uploads" / ".sessions" / raceUid
+  let raceMetaRaw ← IO.FS.readFile (raceSessDir / "meta.json")
+  let .ok raceMetaJv := OrbBin.Json.parse raceMetaRaw
+    | throw (IO.userError "R7 race meta.json parse failed")
+  assertTrue "R7 chunk/init/complete race yields untorn SHA-256, rejects post-complete chunk & cancel, and leaves no stray chunks"
+    (rRaceComp.status == 200 &&
+     rRaceStat.status == 200 &&
+     raceRecJv.fieldStr? "sha256" == some raceSha &&
+     rPostPut.status == 400 &&
+     rPostDel.status == 400 &&
+     raceMetaJv.fieldStr? "status" == some "completed" &&
+     !(← (raceSessDir / "chunks").pathExists))
+
+  -- Also verify pre-complete DELETE /uploads/sessions/:uid removes staged chunks + meta.json while preserving finalize.lock
+  let cancelUid := "r7-cancel-staging-sess"
+  let cancelInitBody := (renderCompact (.obj #[
+    ("upload_id", .str cancelUid), ("name", .str "cancel.bin"),
+    ("size", JVal.nat raceC0.size), ("chunk_size", JVal.nat raceC0.size)
+  ])).toUTF8
+  let rCancelInit ← handleRequestConcurrent mtx transferMtx {
+    method := "POST", rawPath := "/uploads/sessions", path := "/uploads/sessions",
+    query := #[], headers := authHdrs, body := cancelInitBody
+  }
+  let rCancelPut ← handleRequestConcurrent mtx transferMtx {
+    method := "PUT", rawPath := s!"/uploads/sessions/{cancelUid}/chunks/0",
+    path := s!"/uploads/sessions/{cancelUid}/chunks/0",
+    query := #[], headers := authHdrs, body := raceC0
+  }
+  let rCancelDel ← handleRequestConcurrent mtx transferMtx {
+    method := "DELETE", rawPath := s!"/uploads/sessions/{cancelUid}",
+    path := s!"/uploads/sessions/{cancelUid}",
+    query := #[], headers := authHdrs, body := ByteArray.empty
+  }
+  let cancelSessDir := System.FilePath.mk tmpRoot / "uploads" / ".sessions" / cancelUid
+  assertTrue "R7 staging cancel returns 204, removes chunks and meta.json, and keeps finalize.lock"
+    (rCancelInit.status == 200 &&
+     rCancelPut.status == 200 &&
+     rCancelDel.status == 204 &&
+     !(← (cancelSessDir / "meta.json").pathExists) &&
+     !(← (cancelSessDir / "chunks").pathExists) &&
+     (← (cancelSessDir / "finalize.lock").pathExists))
+
+  -- (2d) Post-completion tamper / unlink / symlink replay check fails closed without falling through to missing chunk 0
+  let tampDest := System.FilePath.mk ((raceRecJv.fieldStr? "path").getD "")
+  let rPreTampStat ← handleRequestConcurrent mtx transferMtx initRaceReq
+  IO.FS.writeBinFile tampDest "corrupted-bytes".toUTF8
+  let rTamp1 ← handleRequestConcurrent mtx transferMtx compRaceReq
+  let rTampStat ← handleRequestConcurrent mtx transferMtx initRaceReq
+  let tampMsg1 := String.fromUTF8? rTamp1.body |>.getD ""
+  IO.FS.removeFile tampDest
+  let rTamp2 ← handleRequestConcurrent mtx transferMtx compRaceReq
+  let tampMsg2 := String.fromUTF8? rTamp2.body |>.getD ""
+  let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", "/etc/hosts", tampDest.toString] }
+  let rTamp3 ← handleRequestConcurrent mtx transferMtx compRaceReq
+  let tampMsg3 := String.fromUTF8? rTamp3.body |>.getD ""
+  try IO.FS.removeFile tampDest catch _ => pure ()
+  assertTrue "R7 tampered, unlinked, or symlinked completed artifact fails closed with 400 corruption error and never recreates chunks"
+    (rPreTampStat.status == 200 &&
+     !(← (raceSessDir / "chunks").pathExists) &&
+     rTamp1.status == 400 && tampMsg1 == "Finalized upload artifact missing or corrupted" &&
+     rTampStat.status == 400 &&
+     rTamp2.status == 400 && tampMsg2 == "Finalized upload artifact missing or corrupted" &&
+     rTamp3.status == 400 && tampMsg3 == "Finalized upload artifact missing or corrupted" &&
+     !(← (raceSessDir / "chunks").pathExists))
+
+  -- (3) Concurrent IO.asTask workspace build admits exactly one (200/202) and 409s the other, then admits build_generation + 1 after complete
+  let wsId := "ws-r7-cas-01"
+  let buildReqA : HttpRequest := {
+    method := "POST", rawPath := s!"/workspaces/{wsId}/build", path := s!"/workspaces/{wsId}/build",
+    query := #[], headers := authHdrs, body := "{\"operation_id\":\"op-ws-a\"}".toUTF8
+  }
+  let buildReqB : HttpRequest := {
+    method := "POST", rawPath := s!"/workspaces/{wsId}/build", path := s!"/workspaces/{wsId}/build",
+    query := #[], headers := authHdrs, body := "{\"operation_id\":\"op-ws-b\"}".toUTF8
+  }
+  let tWsA ← IO.asTask (handleRequestConcurrent mtx transferMtx buildReqA) Task.Priority.dedicated
+  let tWsB ← IO.asTask (handleRequestConcurrent mtx transferMtx buildReqB) Task.Priority.dedicated
+  let .ok rWsA ← pure tWsA.get | throw (IO.userError "R7 workspace build task A failed")
+  let .ok rWsB ← pure tWsB.get | throw (IO.userError "R7 workspace build task B failed")
+  let isWin (st : Nat) : Bool := st == 200 || st == 202
+  let (winResp, loseResp) ←
+    if isWin rWsA.status && rWsB.status == 409 then pure (rWsA, rWsB)
+    else if isWin rWsB.status && rWsA.status == 409 then pure (rWsB, rWsA)
+    else throw (IO.userError s!"R7 expected one 200/202 and one 409, got {rWsA.status} and {rWsB.status}")
+  let .ok winJv := OrbBin.Json.parse (String.fromUTF8? winResp.body |>.getD "")
+    | throw (IO.userError "R7 winner JSON parse failed")
+  let .ok loseJv := OrbBin.Json.parse (String.fromUTF8? loseResp.body |>.getD "")
+    | throw (IO.userError "R7 loser JSON parse failed")
+  let gen1 := (winJv.fieldUInt64? "build_generation").getD 0
+  assertTrue "R7 concurrent workspace build admits generation 1 and 409s duplicate with workspace_build_in_progress"
+    (gen1 == 1 &&
+     winJv.fieldStr? "workspace_id" == some wsId &&
+     loseJv.fieldStr? "error" == some "workspace_build_in_progress" &&
+     (← (System.FilePath.mk tmpRoot / "locks" / s!"ws-build-{wsId}.lock").pathExists))
+
+  let rCompleteWs ← handleRequestConcurrent mtx transferMtx {
+    method := "POST", rawPath := s!"/workspaces/{wsId}/build/complete",
+    path := s!"/workspaces/{wsId}/build/complete",
+    query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[("status", .str "completed"), ("build_generation", JVal.uint64 gen1)])).toUTF8
+  }
+  assertTrue "R7 workspace build complete returns 200" (rCompleteWs.status == 200)
+
+  let rWsNext ← handleRequestConcurrent mtx transferMtx {
+    method := "POST", rawPath := s!"/workspaces/{wsId}/build", path := s!"/workspaces/{wsId}/build",
+    query := #[], headers := authHdrs, body := "{\"operation_id\":\"op-ws-c\"}".toUTF8
+  }
+  let .ok nextJv := OrbBin.Json.parse (String.fromUTF8? rWsNext.body |>.getD "")
+    | throw (IO.userError "R7 next-gen JSON parse failed")
+  assertTrue "R7 workspace build after complete admits build_generation + 1"
+    (isWin rWsNext.status && nextJv.fieldUInt64? "build_generation" == some (gen1 + 1))
+
+  -- Also verify .cli fallback path directly on a second workspace
+  let cliClaim1 ← claimWorkspaceBuild tmpRoot .cli "ws-r7-cli-fallback" (some "op-cli-1") (forceCliFallback := true)
+  let cliClaimDup ← claimWorkspaceBuild tmpRoot .cli "ws-r7-cli-fallback" (some "op-cli-2") (forceCliFallback := true)
+  let cliComp ← completeWorkspaceBuild tmpRoot .cli "ws-r7-cli-fallback" "completed" (some 1) (some "op-cli-1") (forceCliFallback := true)
+  let cliClaim2 ← claimWorkspaceBuild tmpRoot .cli "ws-r7-cli-fallback" (some "op-cli-3") (forceCliFallback := true)
+  assertTrue "R7 workspace build .cli fallback enforces CAS and increments generation"
+    ((match cliClaim1 with | .admitted r => r.buildGeneration == 1 | _ => false) &&
+     (match cliClaimDup with | .conflict => true | _ => false) &&
+     cliComp.isOk &&
+     (match cliClaim2 with | .admitted r => r.buildGeneration == 2 | _ => false))
+
+  let freshWs := "ws-r7-cli-atomic"
+  let tCliA ← IO.asTask (claimWorkspaceBuild tmpRoot .cli freshWs (some "op-atomic-a") (forceCliFallback := true)) Task.Priority.dedicated
+  let tCliB ← IO.asTask (claimWorkspaceBuild tmpRoot .cli freshWs (some "op-atomic-b") (forceCliFallback := true)) Task.Priority.dedicated
+  let .ok atomicA ← pure tCliA.get | throw (IO.userError "R7 atomic CLI claim task A failed")
+  let .ok atomicB ← pure tCliB.get | throw (IO.userError "R7 atomic CLI claim task B failed")
+  let admitted :=
+    (match atomicA with | .admitted _ => 1 | _ => 0) +
+    (match atomicB with | .admitted _ => 1 | _ => 0)
+  let conflicts :=
+    (match atomicA with | .conflict => 1 | _ => 0) +
+    (match atomicB with | .conflict => 1 | _ => 0)
+  let firstReceipt? := match atomicA, atomicB with
+    | .admitted r, _ => some r
+    | _, .admitted r => some r
+    | _, _ => none
+  let some firstReceipt := firstReceipt?
+    | throw (IO.userError "R7 atomic CLI double-claim admitted neither caller")
+  let firstComplete ← completeWorkspaceBuild tmpRoot .cli freshWs "completed"
+      (some firstReceipt.buildGeneration) (some firstReceipt.operationId) (forceCliFallback := true)
+  let secondComplete ← completeWorkspaceBuild tmpRoot .cli freshWs "failed"
+      (some firstReceipt.buildGeneration) (some firstReceipt.operationId) (forceCliFallback := true)
+  assertTrue "R7 CLI fallback double-claim admits exactly one and repeats terminal completion idempotently"
+    (admitted == 1 && conflicts == 1 &&
+     firstReceipt.buildGeneration == 1 &&
+     (match firstComplete with
+      | .ok r => r.status == "completed" && r.buildGeneration == firstReceipt.buildGeneration &&
+          r.operationId == firstReceipt.operationId
+      | .error _ => false) &&
+     (match secondComplete with
+      | .ok r => r == (firstComplete.toOption.getD default) && r.status == "completed"
+      | .error _ => false))
 
 /-- Section 12: Round-2 regression checks (split UTF-8 log slicing, >150 KiB SQLite stdin,
     pure-Lean tar+zstd `-C` / newline filename safety, timeout shrinkDebt repayment, and
@@ -1721,6 +2170,8 @@ def runTests : IO UInt32 := do
      reconciled?.map (·.phaseCode) == some 5)
 
   runChildToolSigintAnchorRegressionTests check
+  runR7NodeUploadsAndWorkspaceBuildTests tmpRoot rt authHdrs
+  check "R7 flock-ordered durable upload finalization and CAS workspace-build admission" true
 
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get
