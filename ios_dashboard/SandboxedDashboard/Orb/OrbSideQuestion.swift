@@ -1332,8 +1332,9 @@ struct OrbSideQuestionSheet: View {
             }
             let rotateIdle = !running && followUps.count == 0 && OrbBtwThreads.shouldRotateSession(turnCount: store.boundTurnCount, maxSequence: store.boundMaxSequence)
             let reusingBound = store.boundID != nil && !freshSession && !rotateIdle && (running || followUps.count > 0 || OrbBtwThreads.resumableStatuses.contains(store.boundStatus))
+            var boundCyber: (mode: String, revision: String)? = nil
             if reusingBound, let id = store.boundID {
-                try await OrbCyberAccess.requireFollowUp(text, missionID: id)
+                boundCyber = try await OrbCyberAccess.requireFollowUp(text, missionID: id)
             } else if OrbBtwConfig.harness == "codex" {
                 if let reason = OrbCyberAccess.emptyGoalError(text) {
                     throw OrbHTTPError(status: 400, detail: reason)
@@ -1354,12 +1355,17 @@ struct OrbSideQuestionSheet: View {
             if reusingBound, let id = store.boundID {
                 let shouldQueue = running || followUps.count > 0
                 let idempotencyHeader = ["Idempotency-Key": "msg:\(id):\(messageID)"]
-                let result = try await OrbSideSend.retrying { try await OrbCore.shared.call("/api/control/message", method: "POST", body: .object([
+                var msgBody: [String: OrbJSON] = [
                     "mission_id": .string(id),
                     "content": .string(content),
                     "client_message_id": .string(messageID),
                     "queue_followup": .bool(true),
-                ]), headers: idempotencyHeader) }
+                ]
+                if let cyber = boundCyber {
+                    msgBody["cyber_access"] = .string(cyber.mode)
+                    if !cyber.revision.isEmpty { msgBody["cyber_revision"] = .string(cyber.revision) }
+                }
+                let result = try await OrbSideSend.retrying { try await OrbCore.shared.call("/api/control/message", method: "POST", body: .object(msgBody), headers: idempotencyHeader) }
                 let queuedNow = result["queued"] == .bool(true)
                 let receiptID = result["id"].text.isEmpty ? messageID : result["id"].text
                 rawQueuedByID[receiptID] = content

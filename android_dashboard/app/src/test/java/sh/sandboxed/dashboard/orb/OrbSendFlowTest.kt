@@ -414,4 +414,44 @@ class OrbSendFlowTest {
         )
         assertEquals(OrbSlotWaitInfo("Waiting for a free slot (4/4 in use)…", canForce = true), orbSlotWaitInfo(coreQueued))
     }
+
+    @Test fun skillSlashParserAndKernelValidation() {
+        val skills = listOf(
+            OrbSkillChoice(name = "rust-audit", description = "Audit Rust and FFI boundaries"),
+            OrbSkillChoice(name = "lean-proof", description = "Check Lean 4 invariants")
+        )
+        val available = skills.mapTo(LinkedHashSet()) { it.name }
+
+        val q1 = OrbSkillSlash.skillQuery("Please run /ru", caret = 14)
+        assertTrue(q1.open)
+        assertEquals("ru", q1.query)
+        assertEquals(11, q1.start)
+        assertEquals(listOf("rust-audit"), OrbSkillSlash.filterSkills(skills, q1.query, emptyList()).map { it.name })
+
+        assertFalse(OrbSkillSlash.skillQuery("/skill:rust-audit", caret = 17).open)
+        assertFalse(OrbSkillSlash.skillQuery("src/foo/bar", caret = 11).open)
+
+        val inserted = OrbSkillSlash.insertSkill("Please run /ru now", caret = 14, name = "rust-audit")
+        assertEquals("Please run /skill:rust-audit  now", inserted.first)
+        assertEquals(listOf("rust-audit"), OrbSkillSlash.selectedSkillNames(inserted.first, available))
+        assertEquals("Please run now", OrbSkillSlash.removeSkill(inserted.first, "rust-audit"))
+        assertEquals("Use /rust-audit and /lean-proof", OrbSkillSlash.skillPreview("Use /skill:rust-audit and /skill:lean-proof"))
+        assertEquals("/rust-audit inspect kernel", OrbJSON.cleanTitle("/skill:rust-audit inspect kernel"))
+
+        org.junit.Assert.assertNull(OrbSkillSlash.validateSkillSelection("/skill:rust-audit /skill:rust-audit check", "codex", available))
+        assertEquals(
+            "Selected skill is not delivered to this mission: missing",
+            OrbSkillSlash.validateSkillSelection("/skill:missing check", "opencode", available)
+        )
+        assertEquals(
+            "Invalid /skill: identifier (use at most 64 ASCII letters, numbers, '.', '_' or '-', without '..')",
+            OrbSkillSlash.validateSkillSelection("/skill:../escape check", "claudecode", available + "../escape")
+        )
+        val nine = (1..9).map { "s$it" }
+        val ninePrompt = nine.joinToString(" ") { "/skill:$it" }
+        assertEquals(
+            "Select at most 8 distinct skills",
+            OrbSkillSlash.validateSkillSelection(ninePrompt, "codex", nine.toSet())
+        )
+    }
 }

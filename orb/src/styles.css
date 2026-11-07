@@ -776,10 +776,10 @@ code {
 .composer.has-skills > .picks,
 .composer.has-skills > .voice-slot,
 .composer.has-skills > .send-slot { grid-row: 2; }
-.composer.has-skills.tall { grid-template-rows: auto auto auto; }
-.composer.has-skills.tall > .skill-chips,
-.composer.has-skills.tall > .composer-field { grid-row: 1; }
-.composer.has-skills.tall > .plus-wrap,
+.composer.has-skills.tall { grid-template-rows: auto 1fr auto; }
+.composer.has-skills.tall > .skill-chips { grid-row: 1; }
+.composer.has-skills.tall > .composer-field { grid-row: 2; }
+.composer.has-skills.tall > .plus-wrap { grid-column: 1; grid-row: 3; }
 .composer.has-skills.tall > .mode-chip,
 .composer.has-skills.tall > .picks,
 .composer.has-skills.tall > .voice-slot,
@@ -1585,7 +1585,6 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
 .skill-chips, .user-skills { display: flex; flex-wrap: wrap; gap: 4px; }
 .user-skills { margin: 0 0 6px; }
 .skill-chip { color: var(--fg-2); background: var(--bg-inset); border-color: var(--stroke); }
-.user-skills { display: flex; flex-wrap: wrap; gap: 4px; }
 .slash-chevron {
   flex: none; display: grid; place-items: center; color: var(--fg-4); margin-left: auto;
 }

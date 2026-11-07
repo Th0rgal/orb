@@ -67,6 +67,8 @@ struct OrbConversation: View {
     @State var expandedUserMessageIDs: Set<String> = []
     @State var queueExpanded = true
     @State var contextItems: [OrbContextItem] = []
+    @State var skillItems: [OrbSkillChoice] = []
+    @State var skillCatalogError: String?
     @State var contextBrowseFolder = ""
     @State var dismissedAtToken: String?
     @State var forking = false
@@ -481,10 +483,9 @@ struct OrbConversation: View {
         }
         let targetProject = effectiveProjectSlug
         if !targetProject.isEmpty {
-            Task {
-                contextItems = await OrbContextTagging.loadItems(for: targetProject)
-            }
+            Task { contextItems = await OrbContextTagging.loadItems(for: targetProject) }
         }
+        Task { await loadSkillCatalog() }
         if fastReopen && !isCloud && mission != .null && OrbRow(mission).mobile {
             loading = false
             lastRefresh = Date()
@@ -496,6 +497,7 @@ struct OrbConversation: View {
         if contextItems.isEmpty && !effectiveProjectSlug.isEmpty {
             contextItems = await OrbContextTagging.loadItems(for: effectiveProjectSlug)
         }
+        if skillItems.isEmpty && skillCatalogError == nil { await loadSkillCatalog() }
         if let id {
             let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
             OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts, status: mission["status"].text, hasInteraction: !pendingQuestionEvents.isEmpty)
@@ -539,6 +541,15 @@ struct OrbConversation: View {
         if let prompt = pendingMoveApproval {
             Text(prompt.summaryText)
         }
+    }
+
+    func loadSkillCatalog() async {
+        guard !isCloud else { skillItems = []; skillCatalogError = nil; return }
+        let workspace = mission["workspace_id"].text
+        let loaded = await OrbSkillSlash.loadDelivery(project: effectiveProjectSlug, workspaceID: workspace.isEmpty ? nil : workspace)
+        guard !Task.isCancelled else { return }
+        skillItems = loaded.skills
+        skillCatalogError = loaded.error
     }
 
     func scrollToBottomOnOpen(scroll: ScrollViewProxy) {

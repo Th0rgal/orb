@@ -333,6 +333,19 @@ def selectLocalSkillsIn (home cwd : System.FilePath) (harness prompt : String) :
     selected := selected.push (name, sk.path, ((lo >>> 16) &&& 255).toUInt8)
   return .ok selected
 
+def withLocalSkillDirective (prompt : String) (selected : Array (String × String × UInt8)) : String :=
+  if selected.isEmpty then prompt
+  else Id.run do
+    let mut result := prompt ++ "\n\nSelected skills (load before performing the current request):\n"
+    for (rawName, rawPath, strategy) in selected do
+      let name := renderCompact (.str rawName)
+      let path := renderCompact (.str rawPath)
+      if strategy == 1 then
+        result := result ++ s!"- Invoke the Skill tool with name {name}. If unavailable, read {path} and follow its instructions.\n"
+      else
+        result := result ++ s!"- Read {path} and follow the instructions for skill {name}.\n"
+    return result
+
 def validateLocalCodexLaunch (prompt model cyberMode : String) (hasImages : Bool) : Except String Unit := do
   let bare := (model.splitOn "/").getLast?.getD model
   let hasRetired := bare == "gpt-daybreak-blue-latest" || bare == "gpt-daybreak-red-latest"
@@ -364,7 +377,7 @@ def validateLocalCodexLaunch (prompt model cyberMode : String) (hasImages : Bool
     (if hasRetired then 1 else 0)
   if verdict == 1 then throw "invalid_access_program: the selected model alias is retired."
   if verdict == 2 then throw "invalid_access_program: explicit cyber selection is incompatible with this model."
-  if verdict == 5 then throw "unsupported_access_program: native goal continuations do not confirm per-turn cyber selection. Choose Automatic explicitly for this goal."
+  if verdict == 5 then throw "unsupported_access_program: native goal continuations cannot confirm a per-turn cyber selection. Choose Automatic explicitly for this goal."
   if verdict == 6 then throw "/goal requires a non-empty objective."
   if verdict == 7 then throw "Goal launches with images are not supported yet; include file paths in the objective."
   if explicitCyber && bare.isEmpty then
@@ -1033,17 +1046,20 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let model := (reqObj.fieldStr? "model").getD ""
     let cyber := (reqObj.fieldStr? "cyberAccess").getD ((reqObj.fieldStr? "cyber_access").getD "automatic")
     let hasImgs := (((reqObj.fieldArr? "image_paths").orElse (fun _ => reqObj.fieldArr? "imagePaths")).map (fun xs => !xs.isEmpty)).getD false
+    let mut selectedSkills : Array (String × String × UInt8) := #[]
     if !harness.isEmpty then
       let home? ← do
         match ← OrbBin.PosixExt.firstEnvNonEmpty ["ORB_SKILLS_TEST_HOME", "HOME"] with
         | some h => pure (some h)
         | none => pure (if st.homeDir.isEmpty then none else some st.homeDir)
       if let some home := home? then
-        if let .error e ← selectLocalSkillsIn (System.FilePath.mk home) (System.FilePath.mk cwd) harness prompt then
-          return .error e
+        match ← selectLocalSkillsIn (System.FilePath.mk home) (System.FilePath.mk cwd) harness prompt with
+        | .error e => return .error e
+        | .ok sel => selectedSkills := sel
       if harness == "codex" then
         if let .error e := validateLocalCodexLaunch prompt model cyber hasImgs then
           return .error e
+    let deliveredPrompt := withLocalSkillDirective prompt selectedSkills
     if cmd == "local_origin_launch" then
       let rawId ← randomUuidV4
       let mid := (OrbBin.PosixExt.parseUuidCanonical? rawId).getD rawId
@@ -1054,9 +1070,10 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         ("status", .str "active"),
         ("backend", .str (if harness.isEmpty then "opencode" else harness)),
         ("working_directory", .str cwd),
+        ("delivered_prompt", .str deliveredPrompt),
         ("total_cost_cents", JVal.nat 0)
       ])
-    return .ok (.obj #[("ok", .bool true), ("command", .str cmd)])
+    return .ok (.obj #[("ok", .bool true), ("command", .str cmd), ("delivered_prompt", .str deliveredPrompt)])
   | _ =>
     if supportedDesktopCommands.contains cmd then
       return .error s!"{cmd} is not supported in this local runtime"

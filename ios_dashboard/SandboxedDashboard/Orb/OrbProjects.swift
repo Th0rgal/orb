@@ -63,18 +63,18 @@ enum OrbStyle {
 
     static func displayTitle(_ title: String) -> String {
         guard !title.isEmpty else { return title }
-        if let g = goalObjective(title), !g.isEmpty { return g }
-        if let p = planObjective(title), !p.isEmpty { return p }
-        return title
+        if let g = goalObjective(title), !g.isEmpty { return OrbSkillSlash.skillPreview(g) }
+        if let p = planObjective(title), !p.isEmpty { return OrbSkillSlash.skillPreview(p) }
+        return OrbSkillSlash.skillPreview(title)
     }
 
     static func missionTitle(_ text: String) -> String {
-        let base = goalObjective(text) ?? planObjective(text).flatMap({ $0.isEmpty ? nil : $0 }) ?? text
+        let base = OrbSkillSlash.skillPreview(goalObjective(text) ?? planObjective(text).flatMap({ $0.isEmpty ? nil : $0 }) ?? text)
         let line = base.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines).first?.trimmingCharacters(in: .whitespaces) ?? ""
         if line.count > 42 {
             return String(line.prefix(41)).trimmingCharacters(in: .whitespaces) + "…"
         }
-        return line.isEmpty ? String(text.prefix(42)) : line
+        return line.isEmpty ? String(OrbSkillSlash.skillPreview(text).prefix(42)) : line
     }
 }
 

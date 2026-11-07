@@ -107,6 +107,12 @@ structure Selection where
 
 def Selection.automatic : Selection := { mode := .automatic, revision := nilRevision }
 
+/-- Safe mission identifier (`[A-Za-z0-9_-]{1,128}`) preventing path traversal outside `mission-cyber/`. -/
+def isSafeMissionId (mid : String) : Bool :=
+  !mid.isEmpty && mid.length ≤ 128 &&
+    mid.toList.all fun c =>
+      ('a' ≤ c && c ≤ 'z') || ('A' ≤ c && c ≤ 'Z') || ('0' ≤ c && c ≤ '9') || c == '_' || c == '-'
+
 private def cyberDir (workingDir : String) : System.FilePath :=
   System.FilePath.mk workingDir / "mission-cyber"
 
@@ -141,8 +147,19 @@ private def readSelectionFile? (path : System.FilePath) : IO (Except String (Opt
   | some sel => return .ok (some sel)
   | none => return .error "corrupt"
 
+/-- Committed selection only (`{missionId}.json`, ignoring `.next.json`) for in-flight `/v1/*` proxy enforcement. -/
+def readCommittedSelection (workingDir missionId : String) : IO (Except String Selection) := do
+  if !isSafeMissionId missionId then
+    return .error "invalid_mission_id"
+  match ← readSelectionFile? (selectionPath workingDir missionId) with
+  | .error _ => return .error "The mission cyber setting is unreadable; refusing to guess a program."
+  | .ok (some sel) => return .ok sel
+  | .ok none => return .ok Selection.automatic
+
 /-- Pending next-turn selection wins; missing files are Automatic. Corrupt JSON fails closed. -/
 def readSelection (workingDir missionId : String) : IO (Except String Selection) := do
+  if !isSafeMissionId missionId then
+    return .error "invalid_mission_id"
   match ← readSelectionFile? (pendingPath workingDir missionId) with
   | .error _ => return .error "The next-turn cyber setting is unreadable."
   | .ok (some sel) => return .ok sel
@@ -153,11 +170,15 @@ def readSelection (workingDir missionId : String) : IO (Except String Selection)
     | .ok none => return .ok Selection.automatic
 
 def writePending (workingDir missionId : String) (sel : Selection) : IO (Except String Unit) := do
+  if !isSafeMissionId missionId then
+    return .error "invalid_mission_id"
   match ← ensureCyberDir workingDir with
   | .error e => return .error e
   | .ok () => writeAtomicPrivate0600 (pendingPath workingDir missionId) (selectionToJson sel).toUTF8
 
 def writeCommitted (workingDir missionId : String) (sel : Selection) : IO (Except String Unit) := do
+  if !isSafeMissionId missionId then
+    return .error "invalid_mission_id"
   match ← ensureCyberDir workingDir with
   | .error e => return .error e
   | .ok () =>
@@ -169,6 +190,8 @@ def writeCommitted (workingDir missionId : String) (sel : Selection) : IO (Excep
 
 /-- Promote the pending selection only when the client still agrees with what was saved. -/
 def promote (workingDir missionId : String) (mode : Mode) (revision : String) : IO (Except String Selection) := do
+  if !isSafeMissionId missionId then
+    return .error "invalid_mission_id"
   match ← readSelection workingDir missionId with
   | .error e => return .error e
   | .ok saved =>
@@ -208,6 +231,8 @@ def parseBinding? (raw : String) : Option Binding := do
     if key.isEmpty then none else some { revision := rev, key := key, model := model }
 
 def writeBinding (workingDir missionId : String) (b : Binding) : IO (Except String Unit) := do
+  if !isSafeMissionId missionId then
+    return .error "invalid_mission_id"
   match ← ensureCyberDir workingDir with
   | .error e => return .error e
   | .ok () =>
@@ -215,6 +240,7 @@ def writeBinding (workingDir missionId : String) (b : Binding) : IO (Except Stri
     writeAtomicPrivate0600 (bindingPath workingDir missionId) body.toUTF8
 
 def readBinding? (workingDir missionId : String) : IO (Option Binding) := do
+  if !isSafeMissionId missionId then return none
   let path := bindingPath workingDir missionId
   if !(← path.pathExists) then return none
   let raw ← IO.FS.readFile path
@@ -236,12 +262,15 @@ def parseReceipt? (raw : String) : Option Receipt := do
   some { revision := rev, requestedModel := requested, program := program, model := model }
 
 def readReceipt? (workingDir missionId : String) : IO (Option Receipt) := do
+  if !isSafeMissionId missionId then return none
   let path := receiptPath workingDir missionId
   if !(← path.pathExists) then return none
   let raw ← IO.FS.readFile path
   return parseReceipt? raw
 
 def writeReceipt (workingDir missionId : String) (r : Receipt) : IO (Except String Unit) := do
+  if !isSafeMissionId missionId then
+    return .error "invalid_mission_id"
   match ← ensureCyberDir workingDir with
   | .error e => return .error e
   | .ok () =>

@@ -243,11 +243,13 @@ extension OrbConversation {
                 let images = OrbMessageImages.parse(presentation.text)
                 let goalObj = OrbStyle.goalObjective(images.text)
                 let planObj = goalObj == nil ? OrbStyle.planObjective(images.text) : nil
-                let displayBody = goalObj ?? planObj ?? images.text
+                let rawBody = goalObj ?? planObj ?? images.text
+                let displayBody = OrbSkillSlash.skillPreview(rawBody)
+                let skillNames = Array(NSOrderedSet(array: OrbSkillSlash.skillTokens(rawBody).map(\.name))) as? [String] ?? []
                 let isPendingTurn = working && item.0 == lastUserItemID
                 OrbUserBubble(copyText: displayBody, pending: isPendingTurn) {
                     if !images.paths.isEmpty { OrbImageStrip(images: images, missionID: id) }
-                    if goalObj != nil || planObj != nil || presentation.attached {
+                    if goalObj != nil || planObj != nil || !skillNames.isEmpty || presentation.attached {
                         HStack(spacing: 6) {
                             if goalObj != nil {
                                 HStack(spacing: 4) {
@@ -275,6 +277,16 @@ extension OrbConversation {
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 3)
                                 .background(Color.white.opacity(0.1), in: Capsule())
+                            }
+                            ForEach(skillNames, id: \.self) { name in
+                                Text("/\(name)")
+                                    .font(.system(.caption2, design: .monospaced, weight: .semibold))
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .foregroundStyle(.primary.opacity(0.9))
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3)
+                                    .background(Color.white.opacity(0.1), in: Capsule())
                             }
                             if presentation.attached {
                                 HStack(spacing: 4) {

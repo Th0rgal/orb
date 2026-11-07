@@ -365,4 +365,44 @@ final class OrbSendFlowTests: XCTestCase {
         }
         XCTAssertEqual(nonCodexCalls, 0)
     }
+
+    func testSkillSlashParserAndKernelValidation() {
+        let skills = [
+            OrbSkillChoice(name: "rust-audit", description: "Audit Rust and FFI boundaries"),
+            OrbSkillChoice(name: "lean-proof", description: "Check Lean 4 invariants"),
+        ]
+        let available = Set(skills.map(\.name))
+
+        let q1 = OrbSkillSlash.skillQuery("Please run /ru", caret: 14)
+        XCTAssertTrue(q1.open)
+        XCTAssertEqual(q1.query, "ru")
+        XCTAssertEqual(q1.start, 11)
+        XCTAssertEqual(OrbSkillSlash.filterSkills(skills, query: q1.query, selected: []).map(\.name), ["rust-audit"])
+
+        XCTAssertFalse(OrbSkillSlash.skillQuery("/skill:rust-audit", caret: 17).open)
+        XCTAssertFalse(OrbSkillSlash.skillQuery("src/foo/bar", caret: 11).open)
+
+        let inserted = OrbSkillSlash.insertSkill("Please run /ru now", caret: 14, name: "rust-audit")
+        XCTAssertEqual(inserted.text, "Please run /skill:rust-audit  now")
+        XCTAssertEqual(OrbSkillSlash.selectedSkillNames(inserted.text, available: available), ["rust-audit"])
+        XCTAssertEqual(OrbSkillSlash.removeSkill(inserted.text, name: "rust-audit"), "Please run now")
+        XCTAssertEqual(OrbSkillSlash.skillPreview("Use /skill:rust-audit and /skill:lean-proof"), "Use /rust-audit and /lean-proof")
+        XCTAssertEqual(OrbStyle.missionTitle("/goal /skill:rust-audit inspect kernel"), "/rust-audit inspect kernel")
+
+        XCTAssertNil(OrbSkillSlash.validateSkillSelection("/skill:rust-audit /skill:rust-audit check", harness: "codex", available: available))
+        XCTAssertEqual(
+            OrbSkillSlash.validateSkillSelection("/skill:missing check", harness: "opencode", available: available),
+            "Selected skill is not delivered to this mission: missing"
+        )
+        XCTAssertEqual(
+            OrbSkillSlash.validateSkillSelection("/skill:../escape check", harness: "claudecode", available: available.union(["../escape"])),
+            "Invalid /skill: identifier (use at most 64 ASCII letters, numbers, '.', '_' or '-', without '..')"
+        )
+        let nine = (1...9).map { "s\($0)" }
+        let ninePrompt = nine.map { "/skill:\($0)" }.joined(separator: " ")
+        XCTAssertEqual(
+            OrbSkillSlash.validateSkillSelection(ninePrompt, harness: "codex", available: Set(nine)),
+            "Select at most 8 distinct skills"
+        )
+    }
 }

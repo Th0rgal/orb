@@ -1080,7 +1080,7 @@ fun OrbSideAgentSheet(
             val canReuse = !freshSession && !rotateIdle && (isTargetLive || followUps.count > 0 || currentStatus in OrbSideAgent.resumableStatuses)
 
             if (targetId != null && canReuse) {
-                OrbCyberAccess.requireFollowUp(core, targetId, text)
+                val cyber = OrbCyberAccess.requireFollowUp(core, targetId, text)
                 val queueing = isTargetLive || followUps.count > 0
                 if (queueing) {
                     followUps = followUps.enqueue(clientId, text, lastSequence = boundSeqCursor)
@@ -1092,17 +1092,22 @@ fun OrbSideAgentSheet(
                 }
                 OrbWarmSyncCoordinator.markBtwDirty(core, session.parentId)
                 val idempotencyHeaders = mapOf("Idempotency-Key" to "msg:$targetId:$clientId")
+                val msgBody = mutableMapOf<String, Any?>(
+                    "mission_id" to targetId,
+                    "content" to wrapped,
+                    "client_message_id" to clientId,
+                    "queue_followup" to true
+                )
+                if (cyber != null) {
+                    msgBody["cyber_access"] = cyber.mode.wire
+                    if (!cyber.revision.isNullOrEmpty()) msgBody["cyber_revision"] = cyber.revision
+                }
                 val receipt = OrbJSON.dict(
                     OrbSideAgent.retrying {
                         core.request(
                             "/api/control/message",
                             method = "POST",
-                            body = mapOf(
-                                "mission_id" to targetId,
-                                "content" to wrapped,
-                                "client_message_id" to clientId,
-                                "queue_followup" to true
-                            ),
+                            body = msgBody,
                             headers = idempotencyHeaders
                         )
                     }

@@ -3019,13 +3019,17 @@ struct OrbInboxView: View {
         do {
             let latest = try await api.call("/api/control/missions/\(OrbCore.escape(item.id))?include_history=false")
             let current = latest["id"].text.isEmpty ? item.row.raw : latest
-            try await OrbCyberAccess.requireFollowUp("Continue from where you left off.", mission: current)
+            let cyber = try await OrbCyberAccess.requireFollowUp("Continue from where you left off.", mission: current)
             var body: [String: OrbJSON] = [
                 "mission_id": .string(item.id),
                 "content": .string("Continue from where you left off."),
                 "queue_followup": .bool(true),
                 "client_message_id": .string(UUID().uuidString.lowercased()),
             ]
+            if let cyber {
+                body["cyber_access"] = .string(cyber.mode)
+                if !cyber.revision.isEmpty { body["cyber_revision"] = .string(cyber.revision) }
+            }
             if let identity = OrbContinuation.identity(for: current) {
                 body["continue_identity"] = identity
             }
@@ -3049,13 +3053,17 @@ struct OrbInboxView: View {
         do {
             let latest = item.row.cloud ? item.row.raw : try await api.call("/api/control/missions/\(OrbCore.escape(item.id))?include_history=false")
             let current = latest["id"].text.isEmpty ? item.row.raw : latest
-            try await OrbCyberAccess.requireFollowUp(text, mission: current)
+            let cyber = try await OrbCyberAccess.requireFollowUp(text, mission: current)
             var body: [String: OrbJSON] = [
                 "mission_id": .string(item.id),
                 "content": .string(text),
                 "queue_followup": .bool(true),
                 "client_message_id": .string(UUID().uuidString.lowercased()),
             ]
+            if let cyber {
+                body["cyber_access"] = .string(cyber.mode)
+                if !cyber.revision.isEmpty { body["cyber_revision"] = .string(cyber.revision) }
+            }
             if let identity = OrbContinuation.identity(for: current) {
                 body["continue_identity"] = identity
             }

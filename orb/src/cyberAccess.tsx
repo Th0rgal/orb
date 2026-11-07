@@ -24,7 +24,7 @@ export function cyberError(error:unknown):string {
  return text;
 }
 export const getCyber=async(id:string)=>{await requireCyberSupport();return api<CyberSelection>(`/api/control/missions/${id}/cyber`,{cache:"no-store"});};
-export const saveCyber=(id:string,mode:CyberMode)=>api<CyberSelection>(`/api/control/missions/${id}/cyber`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+export const saveCyber=(id:string,mode:CyberMode,expected_revision?:string)=>api<CyberSelection>(`/api/control/missions/${id}/cyber`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode,...(expected_revision?{expected_revision}:{})})});
 export function CyberPicker(p:{value:CyberMode;model:string;disabled?:boolean;remote?:boolean;goal?:boolean;note?:string;confirmed?:boolean;onChange:(mode:CyberMode)=>void}) {
  const [open,setOpen]=createSignal(false);let root:HTMLDivElement|undefined;
  const [route,{refetch:refetchRoute}]=createResource(()=>p.remote?[connectionVersion(),p.model] as const:false,async([,model])=>{
@@ -57,7 +57,7 @@ export function MissionCyber(p:{mission:Mission;onError?:(message:string)=>void}
  createEffect(()=>{if(p.mission.status==='active')onCleanup(pollWhileVisible(()=>{void refetch();},8000,'cyber.refetch'));});
  const update=async(mode:CyberMode)=>{
   const id=p.mission.id;setSaving(true);
-  try {const saved=await saveCyber(id,mode);if(id===p.mission.id)mutate(saved);}
+  try {const saved=await saveCyber(id,mode,selection()?.revision);if(id===p.mission.id)mutate(saved);}
   catch(e){p.onError?.(cyberError(e));}finally{setSaving(false);}
  };
  return <><span class="under-sep">·</span><Show when={!selection.error} fallback={<span class="under-model" title="The connected backend does not expose cyber settings, or the request failed. Update or reconnect before changing this option.">Cyber: unavailable</span>}>

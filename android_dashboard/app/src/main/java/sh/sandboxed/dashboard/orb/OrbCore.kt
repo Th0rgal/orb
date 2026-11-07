@@ -227,7 +227,7 @@ object OrbJSON {
         OrbKernel.relativeTimeString(elapsed.coerceIn(0L, Int.MAX_VALUE.toLong()))
 
     fun cleanTitle(raw: String?): String {
-        val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return "Untitled"
+        val value = raw?.trim()?.takeIf { it.isNotEmpty() }?.let { OrbSkillSlash.skillPreview(it) } ?: return "Untitled"
         val firstLine = value.lineSequence()
             .map { it.trim() }
             .firstOrNull { it.isNotEmpty() } ?: "Untitled"

@@ -158,7 +158,9 @@ struct OrbCyberSection: View {
         saving = true; defer { saving = false }
         do {
             try await OrbCyberAccess.require(model: model, mode: next, remote: remote, goal: goal)
-            let saved = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(missionID))/cyber", method: "PATCH", body: .object(["mode": .string(next)]))
+            var patchBody: [String: OrbJSON] = ["mode": .string(next)]
+            if !state["revision"].text.isEmpty { patchBody["expected_revision"] = .string(state["revision"].text) }
+            let saved = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(missionID))/cyber", method: "PATCH", body: .object(patchBody))
             guard OrbCyberAccess.modes.contains(saved["mode"].text) else {
                 throw OrbHTTPError(status: 400, detail: "The backend did not return a Cyber selection. Reopen settings to verify it.")
             }

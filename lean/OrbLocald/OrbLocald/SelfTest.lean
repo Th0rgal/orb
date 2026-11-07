@@ -295,7 +295,15 @@ def main : IO UInt32 := do
   let selBadId ← selectLocalSkillsIn homeRoot projRoot "codex" "run /skill:../escape"
   total := total + 1
   let localSkillGateOk :=
-    (match selOk with | .ok #[("shared-skill", _, 2)] => true | _ => false) &&
+    (match selOk with
+      | .ok sel =>
+        match sel with
+        | #[("shared-skill", _, 2)] =>
+          let dir := withLocalSkillDirective "please run /skill:shared-skill" sel
+          (dir.splitOn "Selected skills (load before performing the current request):").length == 2 &&
+          (dir.splitOn "SKILL.md").length == 2
+        | _ => false
+      | _ => false) &&
     selMissing.isOk.not &&
     selBadId.isOk.not
   if (← assertTrue "select_local_skills_dedups_and_rejects_missing_or_invalid" localSkillGateOk) then passed := passed + 1

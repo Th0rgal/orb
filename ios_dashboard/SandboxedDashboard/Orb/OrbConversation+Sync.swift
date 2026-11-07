@@ -373,9 +373,21 @@ extension OrbConversation {
         id != nil && !isCloud && attachments.isEmpty && editingQueuedID == nil && Self.btwQuestion(text) == nil
     }
 
-    func requireCyberForFollowUp(_ content: String) async throws {
-        guard !isCloud, id != nil, mission["backend"].text == "codex" else { return }
-        try await OrbCyberAccess.requireFollowUp(content, mission: mission, model: selection.model.isEmpty ? nil : selection.model, node: selection.node)
+    @discardableResult
+    func requireCyberForFollowUp(_ content: String) async throws -> (mode: String, revision: String)? {
+        guard !isCloud, id != nil, mission["backend"].text == "codex" else { return nil }
+        return try await OrbCyberAccess.requireFollowUp(content, mission: mission, model: selection.model.isEmpty ? nil : selection.model, node: selection.node)
+    }
+
+    func validateSkillSelection(_ content: String) async -> String? {
+        guard !isCloud, !OrbSkillSlash.skillTokens(content).isEmpty else { return nil }
+        if skillItems.isEmpty && skillCatalogError == nil { await loadSkillCatalog() }
+        if let err = skillCatalogError { return "\(err). Your draft is kept." }
+        let harness = id != nil ? mission["backend"].text : selection.backend
+        if let err = OrbSkillSlash.validateSkillSelection(content, harness: harness, available: availableSkillNames) {
+            return "\(err). Your draft is kept."
+        }
+        return nil
     }
 
     @discardableResult func send() async -> Bool {
@@ -386,6 +398,10 @@ extension OrbConversation {
         case .deferToQueue:
             var content = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if supportsMode && mode != "Message" { content = "/" + mode.lowercased() + " " + content }
+            if let skillErr = await validateSkillSelection(content) {
+                self.error = skillErr
+                return false
+            }
             do { try await requireCyberForFollowUp(content) }
             catch {
                 self.error = "Message kept. \(OrbCyberAccess.error(error))"
@@ -417,8 +433,13 @@ extension OrbConversation {
         while !deferredSends.isEmpty {
             let next = deferredSends.removeFirst()
             do {
-                try await requireCyberForFollowUp(next.content)
-                let result = try await api.call("/api/control/message", method: "POST", body: .object(["mission_id": .string(id), "content": .string(next.content), "client_message_id": .string(next.id), "queue_followup": .bool(true)]))
+                let cyber = try await requireCyberForFollowUp(next.content)
+                var msgBody: [String: OrbJSON] = ["mission_id": .string(id), "content": .string(next.content), "client_message_id": .string(next.id), "queue_followup": .bool(true)]
+                if let cyber {
+                    msgBody["cyber_access"] = .string(cyber.mode)
+                    if !cyber.revision.isEmpty { msgBody["cyber_revision"] = .string(cyber.revision) }
+                }
+                let result = try await api.call("/api/control/message", method: "POST", body: .object(msgBody))
                 guard !result["id"].text.isEmpty, result["message_accepted"] != .bool(false) else { throw OrbHTTPError(status: 409, detail: "Core has not confirmed acceptance.") }
                 followUps = followUps.posted(next.id, queued: result["queued"] == .bool(true))
                 if result["queued"] != .bool(true) { localTurnStart = Date() }
@@ -485,6 +506,10 @@ extension OrbConversation {
                 // optimistic bubble is recognised and replaced, not shown twice.
                 var prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if supportsMode && mode != "Message" { prompt = "/" + mode.lowercased() + " " + prompt }
+                if let skillErr = await validateSkillSelection(prompt) {
+                    self.error = skillErr
+                    return false
+                }
                 if !isCloud && (id != nil ? mission["backend"].text : selection.backend) == "codex", let goalErr = OrbCyberAccess.emptyGoalError(prompt) { throw OrbHTTPError(status: 400, detail: goalErr) }
                 if id == nil && !selection.cloud && !selection.nodePinnedByUser {
                     if selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -499,6 +524,7 @@ extension OrbConversation {
                     : (selection.cloud || selection.node.isEmpty ? "core" : selection.node)
                 let uploadTargetNode = OrbManaged.isAutoManagedTarget(rawTargetNode) ? "core" : rawTargetNode
                 let goalRequest = OrbCyberAccess.isGoal(prompt)
+                var followUpCyberAssertion: (mode: String, revision: String)? = nil
                 if !isCloud && (id != nil ? mission["backend"].text : selection.backend) == "codex" {
                     let effectiveModel = id != nil && selection.model.isEmpty ? mission["model_override"].text : selection.model
                     let effectiveCyber: String
@@ -509,6 +535,7 @@ extension OrbConversation {
                         }
                         effectiveCyber = current["mode"].text
                         selection.cyberMode = effectiveCyber
+                        followUpCyberAssertion = (mode: effectiveCyber, revision: current["revision"].text)
                     } else {
                         effectiveCyber = selection.cyberMode
                     }
@@ -548,6 +575,10 @@ extension OrbConversation {
                 if let id {
                     body = ["mission_id": .string(id), "content": .string(prompt), "client_message_id": .string(clientID)]
                     if queueing { body["queue_followup"] = .bool(true) }
+                    if let cyber = followUpCyberAssertion {
+                        body["cyber_access"] = .string(cyber.mode)
+                        if !cyber.revision.isEmpty { body["cyber_revision"] = .string(cyber.revision) }
+                    }
                     if !uploaded.isEmpty { body["attachments"] = .array(uploaded) }
                     if let identity = OrbContinuation.identity(for: mission) {
                         body["continue_identity"] = identity
@@ -744,6 +775,10 @@ extension OrbConversation {
 
     func editQueued(_ queueID: String, content: String) async {
         guard let id else { return }
+        if let skillErr = await validateSkillSelection(content) {
+            self.error = skillErr
+            return
+        }
         do { try await requireCyberForFollowUp(content) }
         catch {
             self.error = "Message kept. \(OrbCyberAccess.error(error))"

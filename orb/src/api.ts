@@ -1831,11 +1831,17 @@ export async function sendMissionMessage(
   const continue_identity = mission.track?.trim() && !mission.remote_node_id && !mission.remote_job
     ? { project: mission.project ?? null, track: mission.track, github_pr: mission.github_pr ?? null }
     : undefined;
+  let cyberAssertion: { cyber_access: string; cyber_revision: string } | undefined;
+  if (mission.backend === "codex" && !mission.tags?.includes("placement:client") && !isWorking(mission.status)) {
+    const sel = await api<{ mode: string; revision: string }>(`/api/control/missions/${encodeURIComponent(id)}/cyber`, { cache: "no-store" });
+    if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
+    cyberAssertion = { cyber_access: sel.mode, cyber_revision: sel.revision };
+  }
   let receipt: MessageReceipt;
   const post = () => api<MessageReceipt>("/api/control/message", withIdempotencyKey({
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content: text, mission_id: id, queue_followup: true, client_message_id: clientMessageId, ...(continue_identity ? { continue_identity } : {}), ...(attachments?.length ? { attachments } : {}) }),
+    body: JSON.stringify({ content: text, mission_id: id, queue_followup: true, client_message_id: clientMessageId, ...(continue_identity ? { continue_identity } : {}), ...(cyberAssertion ?? {}), ...(attachments?.length ? { attachments } : {}) }),
   }, `msg:${id}:${clientMessageId}`));
   try {
     receipt = await postWhileTurnRuns(post, () => connectionVersion() !== version);
