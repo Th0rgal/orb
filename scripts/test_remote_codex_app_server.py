@@ -87,23 +87,65 @@ class NativeGoalTests(unittest.TestCase):
         self.assertEqual(output.getvalue().count('turn.completed'), 1)
 
     def test_followup_after_completed_goal_reports_ordinary_execution(self):
+        for status in ('complete', 'paused'):
+            session = NativeSession.__new__(NativeSession)
+            session.config = {'model':'test-model', 'session':'same-thread', 'prompt':'What were the results?'}
+            session.inbound = queue.Queue()
+            session.deferred = []
+            session.goal_status = None
+            session.pending_hint = None
+            calls = []
+            goal = {'status':status, 'objective':'original task', 'tokensUsed':123}
+            def rpc(method, params):
+                calls.append((method, params))
+                if method == 'thread/resume':
+                    return {'thread':{'id':'same-thread','cwd':os.getcwd(),'turns':[]}}
+                if method == 'thread/goal/get':
+                    session.deferred.append({'method':'thread/goal/updated','params':{'threadId':'same-thread','goal':goal}})
+                    return {'goal':goal}
+                if method == 'turn/start':
+                    session.deferred += [
+                        {'method':'turn/started','params':{'turn':{'id':'followup'}}},
+                        {'method':'turn/completed','params':{'turn':{'id':'followup','status':'completed'}}},
+                    ]
+                return {}
+            session.rpc = rpc
+            session.send = lambda message: None
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                session.run()
+            events = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertIn({'type':'execution.mode', 'mode':'turn'}, events, status)
+            self.assertEqual(events[-1], {'type':'turn.completed'}, status)
+            self.assertFalse(any(event['type'] == 'goal.status' for event in events), status)
+            self.assertEqual([params for method, params in calls if method == 'turn/start'], [{
+                'threadId':'same-thread', 'input':[{'type':'text','text':'What were the results?'}],
+                'collaborationMode':{'mode':'default','settings':{'model':'test-model','reasoning_effort':None,'developer_instructions':None}}}], status)
+            self.assertFalse(any(method == 'thread/goal/set' for method, _ in calls), status)
+
+    def test_first_goal_after_ordinary_turn_ignores_restored_cleared_snapshot(self):
         session = NativeSession.__new__(NativeSession)
-        session.config = {'model':'test-model', 'session':'same-thread', 'prompt':'What were the results?'}
+        session.config = {'model':'test-model', 'session':'same-thread', 'prompt':'/goal ship it'}
         session.inbound = queue.Queue()
         session.deferred = []
         session.goal_status = None
+        session.iteration = 0
+        session.seen_turns = set()
         session.pending_hint = None
         calls = []
-        goal = {'status':'complete', 'objective':'original task', 'tokensUsed':123}
         def rpc(method, params):
             calls.append((method, params))
             if method == 'thread/resume':
                 return {'thread':{'id':'same-thread','cwd':os.getcwd(),'turns':[]}}
-            if method == 'thread/goal/get': return {'goal':goal}
-            if method == 'turn/start':
+            if method == 'thread/goal/get':
+                if not any(m == 'thread/goal/set' for m, _ in calls):
+                    session.deferred.append({'method':'thread/goal/cleared','params':{'threadId':'same-thread'}})
+                    return {'goal':None}
+                return {'goal':{'status':'active','objective':'ship it','tokenBudget':None,'tokensUsed':0,'timeUsedSeconds':0}}
+            if method == 'thread/goal/set':
                 session.deferred += [
-                    {'method':'turn/started','params':{'turn':{'id':'followup'}}},
-                    {'method':'turn/completed','params':{'turn':{'id':'followup','status':'completed'}}},
+                    {'method':'turn/started','params':{'turn':{'id':'goal-turn-1'}}},
+                    {'method':'turn/completed','params':{'turn':{'id':'goal-turn-1','status':'completed'}}},
+                    {'method':'thread/goal/updated','params':{'threadId':'same-thread','goal':{'status':'complete','objective':'ship it'}}},
                 ]
             return {}
         session.rpc = rpc
@@ -111,13 +153,10 @@ class NativeGoalTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as output:
             session.run()
         events = [json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertIn({'type':'execution.mode', 'mode':'turn'}, events)
+        self.assertIn({'type':'execution.mode','mode':'goal'}, events)
+        self.assertFalse(any(e.get('type') == 'goal.status' and e.get('status') == 'cleared' for e in events))
+        self.assertEqual(session.iteration, 1)
         self.assertEqual(events[-1], {'type':'turn.completed'})
-        self.assertFalse(any(event['type'] == 'goal.status' for event in events))
-        self.assertEqual([params for method, params in calls if method == 'turn/start'], [{
-            'threadId':'same-thread', 'input':[{'type':'text','text':'What were the results?'}],
-            'collaborationMode':{'mode':'default','settings':{'model':'test-model','reasoning_effort':None,'developer_instructions':None}}}])
-        self.assertFalse(any(method == 'thread/goal/set' for method, _ in calls))
 
     def test_goal_controls_act_on_the_native_goal_without_objective_check(self):
         for word, expected_calls, status in (
@@ -149,6 +188,16 @@ class NativeGoalTests(unittest.TestCase):
             self.assertIn(f'"status": "{status}"', output.getvalue(), word)
             self.assertEqual(output.getvalue().count('turn.completed'), 1, word)
             self.assertNotIn('turn/start', [m for m, _ in calls])
+
+    def test_plain_followup_does_not_resume_stopped_goal_or_reset_budget(self):
+        for status in ('paused', 'blocked', 'budgetLimited', 'usageLimited', 'complete'):
+            goal = {'status': status, 'objective': 'original task', 'tokenBudget': 100, 'tokensUsed': 100}
+            before = dict(goal)
+            self.assertIsNone(goal_action(goal, 'What were the results?'), status)
+            self.assertEqual(goal, before)
+        goal = {'status': 'paused', 'objective': 'original task', 'tokenBudget': 100, 'tokensUsed': 20}
+        self.assertEqual(goal_action(goal, '/goal resume'), {'status': 'active'})
+        self.assertEqual(goal['tokensUsed'], 20)
 
     def test_resume_preserves_native_goal_and_budget(self):
         goal = {'status': 'active', 'objective': 'all roadmap criteria', 'tokenBudget': None, 'tokensUsed': 11314410}

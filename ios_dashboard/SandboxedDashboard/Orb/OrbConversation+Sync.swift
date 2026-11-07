@@ -300,6 +300,10 @@ extension OrbConversation {
                     selection.serviceTier = OrbCodexSpeed.of(value)
                 }
                 selection.node = OrbContinuation.remoteNodeID(for: value) == "core" ? value["remote_node_id"].text : OrbContinuation.remoteNodeID(for: value)
+                if selection.model.isEmpty { selection.model = value["model_override"].text; selection.serviceTier = OrbCodexSpeed.of(value) }
+                if value["backend"].text == "codex", let cyber = try? await api.call("/api/control/missions/\(OrbCore.escape(id))/cyber"), OrbCyberAccess.modes.contains(cyber["mode"].text) {
+                    selection.cyberMode = cyber["mode"].text
+                }
                 if let batch = await batchTask,
                    let merged = await fetchCaughtUpEvents(id: id, existing: events, initialBatch: batch) {
                     events = merged
@@ -369,17 +373,45 @@ extension OrbConversation {
         id != nil && !isCloud && attachments.isEmpty && editingQueuedID == nil && Self.btwQuestion(text) == nil
     }
 
+    @discardableResult
+    func requireCyberForFollowUp(_ content: String) async throws -> (mode: String, revision: String)? {
+        guard !isCloud, id != nil, mission["backend"].text == "codex" else { return nil }
+        return try await OrbCyberAccess.requireFollowUp(content, mission: mission, model: selection.model.isEmpty ? nil : selection.model, node: selection.node)
+    }
+
+    func validateSkillSelection(_ content: String) async -> String? {
+        guard !isCloud, !OrbSkillSlash.skillTokens(content).isEmpty else { return nil }
+        if skillItems.isEmpty && skillCatalogError == nil { await loadSkillCatalog() }
+        if let err = skillCatalogError { return "\(err). Your draft is kept." }
+        let harness = id != nil ? mission["backend"].text : selection.backend
+        if let err = OrbSkillSlash.validateSkillSelection(content, harness: harness, available: availableSkillNames) {
+            return "\(err). Your draft is kept."
+        }
+        return nil
+    }
+
     @discardableResult func send() async -> Bool {
         guard !cloudBlocked else { return false }
         switch OrbSendFlow.tapAction(busy: busy, content: text, canQueue: canDeferSend) {
         case .ignore: if busy { return false }
         case .send: break
         case .deferToQueue:
-            let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            var content = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if supportsMode && mode != "Message" { content = "/" + mode.lowercased() + " " + content }
+            if let skillErr = await validateSkillSelection(content) {
+                self.error = skillErr
+                return false
+            }
+            do { try await requireCyberForFollowUp(content) }
+            catch {
+                self.error = "Message kept. \(OrbCyberAccess.error(error))"
+                return false
+            }
             let clientID = UUID().uuidString
             withAnimation(reduceMotion ? nil : .snappy(duration: 0.18)) {
                 followUps = followUps.enqueue(clientID, content, lastSequence: events.last?.sequence)
                 text = ""
+                if supportsMode && mode != "Message" { mode = "Message" }
             }
             deferredSends.append((clientID, content))
             OrbUsageTelemetry.shared.trackAction(.queue, surface: "composer")
@@ -401,7 +433,13 @@ extension OrbConversation {
         while !deferredSends.isEmpty {
             let next = deferredSends.removeFirst()
             do {
-                let result = try await api.call("/api/control/message", method: "POST", body: .object(["mission_id": .string(id), "content": .string(next.content), "client_message_id": .string(next.id), "queue_followup": .bool(true)]))
+                let cyber = try await requireCyberForFollowUp(next.content)
+                var msgBody: [String: OrbJSON] = ["mission_id": .string(id), "content": .string(next.content), "client_message_id": .string(next.id), "queue_followup": .bool(true)]
+                if let cyber {
+                    msgBody["cyber_access"] = .string(cyber.mode)
+                    if !cyber.revision.isEmpty { msgBody["cyber_revision"] = .string(cyber.revision) }
+                }
+                let result = try await api.call("/api/control/message", method: "POST", body: .object(msgBody))
                 guard !result["id"].text.isEmpty, result["message_accepted"] != .bool(false) else { throw OrbHTTPError(status: 409, detail: "Core has not confirmed acceptance.") }
                 followUps = followUps.posted(next.id, queued: result["queued"] == .bool(true))
                 if result["queued"] != .bool(true) { localTurnStart = Date() }
@@ -409,7 +447,7 @@ extension OrbConversation {
             } catch {
                 followUps = followUps.postFailed(next.id)
                 if text.isEmpty { text = next.content }
-                self.error = "Message kept. \(error.localizedDescription)"
+                self.error = "Message kept. \(OrbCyberAccess.error(error))"
                 for rest in deferredSends { followUps = followUps.postFailed(rest.id); text += (text.isEmpty ? "" : "\n") + rest.content }
                 deferredSends.removeAll()
                 return
@@ -451,6 +489,14 @@ extension OrbConversation {
             let pending: OrbPending
             if let saved = OrbDisk.read(pendingKey, as: OrbPending.self) {
                 pending = saved
+                if !isCloud {
+                    if saved.path == "/api/control/message" {
+                        try await requireCyberForFollowUp(saved.body["content"].text)
+                    } else if saved.body["backend"].text == "codex" {
+                        let cyber = saved.body["cyber_access"].text
+                        try await OrbCyberAccess.require(model: saved.body["model_override"].text, mode: cyber.isEmpty ? "automatic" : cyber, remote: !saved.body["remote_node_id"].text.isEmpty, goal: OrbCyberAccess.isGoal(saved.body["prompt"].text))
+                    }
+                }
                 OrbUsageTelemetry.shared.trackAction(.messageResend, surface: "composer")
                 optimisticPrompt = saved.body["content"].text.isEmpty ? saved.body["prompt"].text : saved.body["content"].text
                 rebuildHistory()
@@ -460,6 +506,47 @@ extension OrbConversation {
                 // optimistic bubble is recognised and replaced, not shown twice.
                 var prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if supportsMode && mode != "Message" { prompt = "/" + mode.lowercased() + " " + prompt }
+                if let skillErr = await validateSkillSelection(prompt) {
+                    self.error = skillErr
+                    return false
+                }
+                if !isCloud && (id != nil ? mission["backend"].text : selection.backend) == "codex", let goalErr = OrbCyberAccess.emptyGoalError(prompt) { throw OrbHTTPError(status: 400, detail: goalErr) }
+                if id == nil && !selection.cloud && !selection.nodePinnedByUser {
+                    if selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        selection.node = "core"
+                    } else if let cached = OrbReadCache.read("catalog:agent") {
+                        selection.node = OrbSelection.firstAvailableNodeID(cached["nodes"]["nodes"].items, backend: selection.backend) ?? "core"
+                    }
+                }
+                if id == nil { try selection.validate() }
+                let rawTargetNode = id != nil
+                    ? (isCloud ? "core" : OrbContinuation.remoteNodeID(for: mission, fallback: selection.node))
+                    : (selection.cloud || selection.node.isEmpty ? "core" : selection.node)
+                let uploadTargetNode = OrbManaged.isAutoManagedTarget(rawTargetNode) ? "core" : rawTargetNode
+                let goalRequest = OrbCyberAccess.isGoal(prompt)
+                var followUpCyberAssertion: (mode: String, revision: String)? = nil
+                if !isCloud && (id != nil ? mission["backend"].text : selection.backend) == "codex" {
+                    let effectiveModel = id != nil && selection.model.isEmpty ? mission["model_override"].text : selection.model
+                    let effectiveCyber: String
+                    if let id {
+                        let current = try await api.call("/api/control/missions/\(OrbCore.escape(id))/cyber")
+                        guard OrbCyberAccess.modes.contains(current["mode"].text) else {
+                            throw OrbHTTPError(status: 400, detail: "The backend did not return a Cyber selection. Your draft is kept.")
+                        }
+                        effectiveCyber = current["mode"].text
+                        selection.cyberMode = effectiveCyber
+                        followUpCyberAssertion = (mode: effectiveCyber, revision: current["revision"].text)
+                    } else {
+                        effectiveCyber = selection.cyberMode
+                    }
+                    try await OrbCyberAccess.require(model: effectiveModel, mode: effectiveCyber, remote: rawTargetNode != "core", goal: goalRequest)
+                    if id == nil || selection.serviceTier != OrbCodexSpeed.of(mission) {
+                        try await OrbCodexSpeed.require(model: effectiveModel, tier: selection.serviceTier, missionID: id)
+                    }
+                }
+                if let id, !isCloud && !selection.model.isEmpty && selection.model != mission["model_override"].text {
+                    guard !working || queueing else { throw OrbHTTPError(status: 409, detail: "Wait for this turn to finish before changing its model.") }
+                }
                 // Optimistic UI: show the user bubble immediately and clear composer text while sending.
                 withAnimation(reduceMotion ? nil : .snappy(duration: 0.18)) {
                     if queueing {
@@ -475,12 +562,8 @@ extension OrbConversation {
                         rebuildHistory()
                     }
                 }
-                let rawTargetNode = id != nil
-                    ? (isCloud ? "core" : OrbContinuation.remoteNodeID(for: mission, fallback: selection.node))
-                    : (selection.cloud || selection.node.isEmpty ? "core" : selection.node)
-                let targetNode = OrbManaged.isAutoManagedTarget(rawTargetNode) ? "core" : rawTargetNode
                 for file in attachments {
-                    let receipt = try await api.call("/api/uploads", method: "POST", body: .object(["node_id": .string(targetNode), "name": .string(file.name), "data_base64": .string(file.data.base64EncodedString())]))
+                    let receipt = try await api.call("/api/uploads", method: "POST", body: .object(["node_id": .string(uploadTargetNode), "name": .string(file.name), "data_base64": .string(file.data.base64EncodedString())]))
                     guard !receipt["path"].text.isEmpty else { throw URLError(.cannotParseResponse) }
                     prompt += "\n[Uploaded: " + receipt["path"].text + "]"
                 }
@@ -492,6 +575,10 @@ extension OrbConversation {
                 if let id {
                     body = ["mission_id": .string(id), "content": .string(prompt), "client_message_id": .string(clientID)]
                     if queueing { body["queue_followup"] = .bool(true) }
+                    if let cyber = followUpCyberAssertion {
+                        body["cyber_access"] = .string(cyber.mode)
+                        if !cyber.revision.isEmpty { body["cyber_revision"] = .string(cyber.revision) }
+                    }
                     if !uploaded.isEmpty { body["attachments"] = .array(uploaded) }
                     if let identity = OrbContinuation.identity(for: mission) {
                         body["continue_identity"] = identity
@@ -507,7 +594,6 @@ extension OrbConversation {
                         }
                     }
                     if !isCloud && selection.backend == "codex" && selection.serviceTier != OrbCodexSpeed.of(mission) {
-                        try await OrbCodexSpeed.require(model: selection.model.isEmpty ? mission["model_override"].text : selection.model, tier: selection.serviceTier, missionID: id)
                         let updated = try await api.call("/api/control/missions/\(OrbCore.escape(id))/settings", method: "PATCH", body: .object(["service_tier": .string(selection.serviceTier), "resume": .bool(false)]))
                         if updated != .null {
                             let merged = Self.mergeConfirmedSettings(updated, into: mission)
@@ -517,17 +603,6 @@ extension OrbConversation {
                     }
                     pending = OrbPending(path: "/api/control/message", body: .object(body))
                 } else {
-                    // Re-verify unpinned auto-placement against the chosen backend/model so
-                    // selecting a quarantined harness or OpenCode without an explicit model
-                    // never submits a stale initial node selection.
-                    if !selection.cloud && !selection.nodePinnedByUser {
-                        if selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            selection.node = "core"
-                        } else if let cached = OrbReadCache.read("catalog:agent") {
-                            selection.node = OrbSelection.firstAvailableNodeID(cached["nodes"]["nodes"].items, backend: selection.backend) ?? "core"
-                        }
-                    }
-                    try selection.validate()
                     let normalizedFolder = OrbRow.normalizeFolder(folder)
                     body = [
                         "title": .string(OrbStyle.missionTitle(prompt)),
@@ -539,7 +614,10 @@ extension OrbConversation {
                     ]
                     if !uploaded.isEmpty { body["attachments"] = .array(uploaded) }
                     if selection.cloud { body["cloud"] = selection.wire }
-                    else if selection.backend == "codex" { try await OrbCodexSpeed.require(model: selection.model, tier: selection.serviceTier); body["service_tier"] = .string(selection.serviceTier) }
+                    else if selection.backend == "codex" {
+                        body["service_tier"] = .string(selection.serviceTier)
+                        body["cyber_access"] = .string(selection.cyberMode)
+                    }
                     if !selection.cloud {
                         body["backend"] = .string(selection.backend)
                         body["model_override"] = .string(selection.model)
@@ -610,7 +688,7 @@ extension OrbConversation {
             attachments = savedAttachments
             mode = savedMode
             if let http = error as? OrbHTTPError, [400, 422].contains(http.status) { OrbDisk.remove(pendingKey) }
-            self.error = "Message kept. \(error.localizedDescription)"
+            self.error = "Message kept. \(OrbCyberAccess.error(error))"
             return false
         }
     }
@@ -696,7 +774,16 @@ extension OrbConversation {
     }
 
     func editQueued(_ queueID: String, content: String) async {
-        guard id != nil else { return }
+        guard let id else { return }
+        if let skillErr = await validateSkillSelection(content) {
+            self.error = skillErr
+            return
+        }
+        do { try await requireCyberForFollowUp(content) }
+        catch {
+            self.error = "Message kept. \(OrbCyberAccess.error(error))"
+            return
+        }
         editingQueuedID = nil
         text = ""
         guard let before = followUps.row(queueID) else {
@@ -731,6 +818,11 @@ extension OrbConversation {
     /// message (stop, then it next under the same id) or injects it live.
     func sendQueuedNow(_ queueID: String) async {
         guard let id, editingQueuedID == nil, let row = followUps.row(queueID), !row.sending else { return }
+        do { try await requireCyberForFollowUp(row.content) }
+        catch {
+            self.error = "Couldn’t send now. \(OrbCyberAccess.error(error))"
+            return
+        }
         let started = OrbHandoff(id: queueID, at: Date())
         withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) {
             followUps = followUps.hide(queueID)

@@ -1,5 +1,6 @@
 import { GOAL_HARNESSES } from "./harnesses";
 import * as Ic from "./icons";
+import { skillPreview } from "./skillSlash";
 
 /**
  * Client-side mirror of the server's `parse_goal_objective` (control/goal.rs):
@@ -45,7 +46,8 @@ function shortTitle(text: string): string {
 
 /** Mission title for a composer draft: the objective for goals, never the raw `/goal` command. */
 export function missionTitle(text: string): string {
-  return shortTitle(goalObjective(text) ?? planObjective(text) ?? text);
+  const body = goalObjective(text) ?? planObjective(text) ?? text;
+  return shortTitle(skillPreview(body));
 }
 
 /** Stored titles from older clients can be the raw `/goal …` prompt; show the objective instead. */

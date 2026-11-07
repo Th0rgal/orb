@@ -1,6 +1,6 @@
 /-
   OrbCore.HostTests: Pure-Lean Host Evidence Test Suite (`0 import Lean`, `0 sorryAx`)
-   verifying all 83 host-evidence test invariants over `OrbCore.HostObservers` and `OrbCore.ConformanceRunner`
+   verifying all 85 host-evidence test invariants over `OrbCore.HostObservers` and `OrbCore.ConformanceRunner`
   with concrete expected C-ABI outputs on distinct admit vs. reject witness vectors (zero reflexive tautologies).
 -/
 import OrbCore.ConformanceRunner
@@ -665,6 +665,24 @@ def remote_replay_rollback_and_stranded_pending_gates_diverge_on_enospc_and_arch
   (observe_activation_rollback_shadow 0 != observe_activation_rollback_shadow 1) &&
   (observe_remote_replay_shadow 0 != observe_remote_replay_shadow 1)
 
+def codex_goal_skills_worktree_and_repo_diff_kernel_steps_roundtrip (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_codex_goal_launch_step" #[1, 1, 0, 1, 1, 1, 1, 0, 0] == some 5) &&
+  (callExportU64? "orb_codex_goal_launch_step" #[1, 1, 0, 0, 1, 1, 1, 0, 0] == some 768) &&
+  (callExportU64? "orb_codex_goal_preact_filter" #[2, 0, 1, 0, 0, 1, 0] == some 1) &&
+  (callExportU64? "orb_codex_goal_preact_filter" #[2, 0, 1, 1, 0, 1, 0] == some 0) &&
+  (callExportU64? "orb_skill_slash_step" #[1, 1, 0, 1, 15, 64, 0, 8] == some 4295033088) &&
+  (callExportU64? "orb_skill_slash_step" #[3, 1, 0, 1, 15, 64, 1, 8] == some 8590065920) &&
+  (callExportU64? "orb_skill_slash_step" #[1, 0, 0, 1, 15, 64, 0, 8] == some 3) &&
+  (callExportU64? "orb_worktree_decision_step" #[0, 1, 1, 1, 0, 1, 0, 64, 1, 16] == some 513) &&
+  (callExportU64? "orb_worktree_decision_step" #[1, 1, 1, 1, 0, 1, 14, 64, 1, 16] == some 257) &&
+  (callExportU64? "orb_repo_diff_budget_step" #[1, 1, 0, 3, 1, 2, 1, 500000, 200, 262144] == some 1125899907042048) &&
+  (callExportU64? "orb_repo_diff_budget_step" #[0, 1, 0, 3, 1, 2, 1, 500000, 200, 262144] == some 1) &&
+  (evaluate_host_codex_goal_launch 0 != evaluate_host_codex_goal_launch 1) &&
+  (evaluate_host_codex_goal_preact_strip 0 != evaluate_host_codex_goal_preact_strip 1) &&
+  (evaluate_host_skill_slash_step 0 != evaluate_host_skill_slash_step 1) &&
+  (evaluate_host_worktree_decision 0 != evaluate_host_worktree_decision 1) &&
+  (evaluate_host_repo_diff_budget 0 != evaluate_host_repo_diff_budget 1)
+
 def runAllHostTests (emitLogPath? : Option String := none) : IO Bool := do
   let cases : Array (String × Bool) := #[
     ("shadow_state_observation_detects_independent_host_poststate_and_effect_divergences", shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ()),
@@ -750,7 +768,8 @@ def runAllHostTests (emitLogPath? : Option String := none) : IO Bool := do
     ("placement_merge_step_fences_stale_polls_and_advances_monotonically", placement_merge_step_fences_stale_polls_and_advances_monotonically ()),
     ("wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts", wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts ()),
     ("r2a_epoch_fence_effect_outbox_and_crash_boundary_diverge_on_stale_and_corrupt_inputs", r2a_epoch_fence_effect_outbox_and_crash_boundary_diverge_on_stale_and_corrupt_inputs ()),
-    ("remote_replay_rollback_and_stranded_pending_gates_diverge_on_enospc_and_archive", remote_replay_rollback_and_stranded_pending_gates_diverge_on_enospc_and_archive ())
+    ("remote_replay_rollback_and_stranded_pending_gates_diverge_on_enospc_and_archive", remote_replay_rollback_and_stranded_pending_gates_diverge_on_enospc_and_archive ()),
+    ("codex_goal_skills_worktree_and_repo_diff_kernel_steps_roundtrip", codex_goal_skills_worktree_and_repo_diff_kernel_steps_roundtrip ())
   ]
   let mut passed : Nat := 0
   let mut failed : Nat := 0

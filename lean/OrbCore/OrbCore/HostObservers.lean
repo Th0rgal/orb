@@ -544,4 +544,24 @@ def observe_remote_replay_shadow (seed : UInt64 := 0) : UInt64 :=
   if (seed &&& 1) == 0 then (callExportU64? "orb_remote_replay_step" #[0, 1, 1, 0, 1, 0, 1, 0, 10]).getD 0
   else (callExportU64? "orb_remote_replay_step" #[1, 1, 1, 1, 1, 0, 0, 0, 0]).getD 0
 
+def evaluate_host_codex_goal_launch (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_codex_goal_launch_step" #[1, 1, 0, 1, 1, 1, 1, 0, 0]).getD 0
+  else (callExportU64? "orb_codex_goal_launch_step" #[1, 1, 0, 0, 1, 1, 1, 0, 0]).getD 0
+
+def evaluate_host_codex_goal_preact_strip (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_codex_goal_preact_filter" #[2, 0, 1, 0, 0, 1, 0]).getD 0
+  else (callExportU64? "orb_codex_goal_preact_filter" #[2, 0, 1, 1, 0, 1, 0]).getD 0
+
+def evaluate_host_skill_slash_step (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_skill_slash_step" #[1, 1, 0, 1, 15, 64, 0, 8]).getD 0
+  else (callExportU64? "orb_skill_slash_step" #[1, 0, 0, 1, 15, 64, 0, 8]).getD 0
+
+def evaluate_host_worktree_decision (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_worktree_decision_step" #[0, 1, 1, 1, 0, 1, 0, 64, 1, 16]).getD 0
+  else (callExportU64? "orb_worktree_decision_step" #[1, 1, 1, 1, 0, 1, 14, 64, 1, 16]).getD 0
+
+def evaluate_host_repo_diff_budget (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_repo_diff_budget_step" #[1, 1, 0, 3, 1, 2, 1, 500000, 200, 262144]).getD 0
+  else (callExportU64? "orb_repo_diff_budget_step" #[0, 1, 0, 3, 1, 2, 1, 500000, 200, 262144]).getD 0
+
 end OrbCore.HostObservers

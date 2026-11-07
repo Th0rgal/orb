@@ -25,14 +25,39 @@ extension OrbConversation {
         OrbContextTagging.mentionedItems(in: text, items: contextItems)
     }
 
+    var availableSkillNames: Set<String> { Set(skillItems.map(\.name)) }
+
+    var selectedSkillNames: [String] {
+        isCloud ? [] : OrbSkillSlash.selectedSkillNames(text, available: availableSkillNames)
+    }
+
+    var activeSlashState: (query: String, start: Int, modes: [String], skills: [OrbSkillChoice], error: String?)? {
+        guard !isCloud else { return nil }
+        let q = OrbSkillSlash.skillQuery(text, caret: (text as NSString).length)
+        guard q.open else { return nil }
+        let modes = supportsMode && mode == "Message" && q.start == 0
+            ? ["Message", "Plan", "Goal"].filter { q.query.isEmpty || $0.lowercased().hasPrefix(q.query) }
+            : []
+        let skills = OrbSkillSlash.filterSkills(skillItems, query: q.query, selected: selectedSkillNames)
+        guard !modes.isEmpty || !skills.isEmpty || skillCatalogError != nil else { return nil }
+        return (q.query, q.start, modes, skills, skillCatalogError)
+    }
+
     var modeQuery: String? {
-        guard supportsMode else { return nil }
-        let trimmed = text.trimmingCharacters(in: .whitespaces)
-        if trimmed.hasPrefix("/") && !trimmed.contains(" ") {
-            let query = String(trimmed.dropFirst()).lowercased()
-            if ["message", "plan", "goal"].contains(where: { $0.hasPrefix(query) }) { return query }
-        }
-        return nil
+        guard let slash = activeSlashState, !slash.modes.isEmpty else { return nil }
+        return slash.query
+    }
+
+    func pickSkill(_ choice: OrbSkillChoice) {
+        text = OrbSkillSlash.insertSkill(text, caret: (text as NSString).length, name: choice.name).text
+        OrbHaptics.selection()
+        composerFocused = true
+    }
+
+    func clearSkill(_ name: String) {
+        text = OrbSkillSlash.removeSkill(text, name: name)
+        OrbHaptics.selection()
+        composerFocused = true
     }
 
     func chooseMode(_ value: String) {
@@ -266,43 +291,96 @@ extension OrbConversation {
     }
 
     var modePicker: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("MODES")
-                .font(.system(.caption2, weight: .semibold))
-                .foregroundStyle(OrbStyle.textMuted)
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
-                .padding(.bottom, 2)
-            ForEach(["Message", "Plan", "Goal"].filter { modeQuery?.isEmpty != false || $0.lowercased().hasPrefix(modeQuery ?? "") }, id: \.self) { value in
-                let subtitle = value == "Goal" ? "Keep iterating until this objective is met" : (value == "Plan" ? "Plan before making changes" : "Standard conversation turn")
-                Button { chooseMode(value) } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: value == "Goal" ? "target" : value == "Plan" ? "list.bullet.clipboard" : "bubble.left")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(mode == value ? .primary : OrbStyle.textSecondary)
-                            .frame(width: 22)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(value)
-                                .font(.subheadline.weight(.medium))
-                                .foregroundStyle(.primary)
-                            Text(subtitle)
-                                .font(.caption2)
-                                .foregroundStyle(OrbStyle.textMuted)
+        let slash = activeSlashState
+        let modes = slash?.modes ?? []
+        let skills = slash?.skills ?? []
+        return VStack(alignment: .leading, spacing: 2) {
+            if !modes.isEmpty {
+                Text("MODES")
+                    .font(.system(.caption2, weight: .semibold))
+                    .foregroundStyle(OrbStyle.textMuted)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                    .padding(.bottom, 2)
+                ForEach(modes, id: \.self) { value in
+                    let subtitle = value == "Goal" ? "Keep iterating until this objective is met" : (value == "Plan" ? "Plan before making changes" : "Standard conversation turn")
+                    Button { chooseMode(value) } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: value == "Goal" ? "target" : value == "Plan" ? "list.bullet.clipboard" : "bubble.left")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(mode == value ? .primary : OrbStyle.textSecondary)
+                                .frame(width: 22)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(value)
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(.primary)
+                                Text(subtitle)
+                                    .font(.caption2)
+                                    .foregroundStyle(OrbStyle.textMuted)
+                            }
+                            Spacer()
+                            if mode == value {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                            }
                         }
-                        Spacer()
-                        if mode == value {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.primary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(mode == value ? Color.white.opacity(0.06) : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("mode-option-" + value.lowercased())
+                }
+            }
+            if !skills.isEmpty || slash?.error != nil {
+                Text("SKILLS")
+                    .font(.system(.caption2, weight: .semibold))
+                    .foregroundStyle(OrbStyle.textMuted)
+                    .padding(.horizontal, 12)
+                    .padding(.top, modes.isEmpty ? 8 : 6)
+                    .padding(.bottom, 2)
+                if let err = slash?.error {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundStyle(OrbStyle.warning)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(skills) { skill in
+                            Button { pickSkill(skill) } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "sparkles")
+                                        .font(.system(size: 13, weight: .medium))
+                                        .foregroundStyle(OrbStyle.textSecondary)
+                                        .frame(width: 22)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(skill.name)
+                                            .font(.system(.subheadline, design: .monospaced, weight: .medium))
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(1)
+                                        if let description = skill.description, !description.isEmpty {
+                                            Text(description)
+                                                .font(.caption2)
+                                                .foregroundStyle(OrbStyle.textMuted)
+                                                .lineLimit(1)
+                                        }
+                                    }
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("skill-option-\(skill.name)")
                         }
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(mode == value ? Color.white.opacity(0.06) : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("mode-option-" + value.lowercased())
+                .frame(maxHeight: 190)
             }
         }
         .padding(6)
@@ -365,7 +443,8 @@ extension OrbConversation {
     func queuedRow(_ row: OrbQueuedRow) -> some View {
         let editing = editingQueuedID == row.id
         let enabled = !row.sending && editingQueuedID == nil
-        let shown = OrbMessagePresentation.parse(row.content).text
+        let rawShown = OrbMessagePresentation.parse(row.content).text
+        let shown = OrbSkillSlash.skillPreview(rawShown)
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 2) {
                 Text(shown.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -378,7 +457,7 @@ extension OrbConversation {
                 } else {
                     queueAction("pencil", label: "Edit queued message", enabled: enabled) {
                         editingQueuedID = row.id
-                        text = shown
+                        text = rawShown
                         composerFocused = true
                     }
                     queueAction("arrow.up", label: "Send now", enabled: enabled) {
@@ -420,7 +499,7 @@ extension OrbConversation {
         VStack(spacing: 0) {
             if activeAtMentionQuery != nil {
                 contextMentionPicker
-            } else if modeQuery != nil {
+            } else if activeSlashState != nil {
                 modePicker
             }
             if followUps.count > 0 || editingQueuedID != nil { queuedDrawer }
@@ -444,7 +523,8 @@ extension OrbConversation {
         ) {
             if !attachments.isEmpty { OrbAttachments(files: $attachments, error: $error, canAdd: false) }
             let mentioned = mentionedContextItems
-            if (mode != "Message" && supportsMode) || !mentioned.isEmpty {
+            let skills = selectedSkillNames
+            if (mode != "Message" && supportsMode) || !skills.isEmpty || !mentioned.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         if mode != "Message" && supportsMode {
@@ -470,6 +550,27 @@ extension OrbConversation {
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Clear " + mode + " mode")
+                        }
+                        ForEach(skills, id: \.self) { name in
+                            Button { clearSkill(name) } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "sparkles")
+                                        .font(.system(size: 10, weight: .semibold))
+                                    Text("/\(name)")
+                                        .font(.system(.caption, design: .monospaced, weight: .medium))
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundStyle(OrbStyle.textSecondary)
+                                }
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .background(.white.opacity(0.09), in: Capsule())
+                                .overlay(Capsule().stroke(OrbStyle.borderStrong))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Remove skill \(name)")
                         }
                         ForEach(mentioned) { item in
                             HStack(spacing: 4) {

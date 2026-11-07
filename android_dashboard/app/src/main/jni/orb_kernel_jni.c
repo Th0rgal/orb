@@ -450,3 +450,28 @@ JNIEXPORT jint JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_orbCloudHandoffStep(JNIEnv *env, jclass clazz, jint sourceIsCloud, jint isSideQuestion, jint targetIsNative, jint hasHistoryTurns, jint targetPlacementValid) {
     return (jint)orb_cloud_handoff_step((uint8_t)sourceIsCloud, (uint8_t)isSideQuestion, (uint8_t)targetIsNative, (uint8_t)hasHistoryTurns, (uint8_t)targetPlacementValid);
 }
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbCodexGoalLaunchStep(JNIEnv *env, jclass clazz, jint isGoalRequest, jint hasNonEmptyObjective, jint hasImages, jint hasExplicitCyber, jint hasChatGptAuth, jint modelCompatible, jint accountSupportsProgram, jint resumedGoalActive, jint hasRetiredAlias) {
+    return (jint)orb_codex_goal_launch_step((uint8_t)isGoalRequest, (uint8_t)hasNonEmptyObjective, (uint8_t)hasImages, (uint8_t)hasExplicitCyber, (uint8_t)hasChatGptAuth, (uint8_t)modelCompatible, (uint8_t)accountSupportsProgram, (uint8_t)resumedGoalActive, (uint8_t)hasRetiredAlias);
+}
+
+JNIEXPORT jbyte JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbCodexGoalPreactFilter(JNIEnv *env, jclass clazz, jint msgKind, jint isRequest, jint sameThread, jint hasTurnId, jint threadAlreadyActive, jint goalGetWasNull, jint snapshotMatchesGoalGet) {
+    return (jbyte)orb_codex_goal_preact_filter((uint8_t)msgKind, (uint8_t)isRequest, (uint8_t)sameThread, (uint8_t)hasTurnId, (uint8_t)threadAlreadyActive, (uint8_t)goalGetWasNull, (uint8_t)snapshotMatchesGoalGet);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbSkillSlashStep(JNIEnv *env, jclass clazz, jint harnessKind, jint isDelivered, jint alreadySelected, jint nameCharsValid, jint nameLen, jint maxNameLen, jint selectedCount, jint maxSelected) {
+    return (jlong)orb_skill_slash_step((uint8_t)harnessKind, (uint8_t)isDelivered, (uint8_t)alreadySelected, (uint8_t)nameCharsValid, (uint32_t)nameLen, (uint32_t)maxNameLen, (uint32_t)selectedCount, (uint32_t)maxSelected);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWorktreeDecisionStep(JNIEnv *env, jclass clazz, jint opKind, jint isOccupied, jint isGitRepo, jint branchCharsValid, jint targetPathExists, jint parentDirValid, jint slugLen, jint maxSlugLen, jint activeWorktrees, jint maxWorktrees) {
+    return (jint)orb_worktree_decision_step((uint8_t)opKind, (uint8_t)isOccupied, (uint8_t)isGitRepo, (uint8_t)branchCharsValid, (uint8_t)targetPathExists, (uint8_t)parentDirValid, (uint32_t)slugLen, (uint32_t)maxSlugLen, (uint32_t)activeWorktrees, (uint32_t)maxWorktrees);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbRepoDiffBudgetStep(JNIEnv *env, jclass clazz, jint isGitRepo, jint pathSafe, jint hasUntracked, jint modifiedCount, jint stagedCount, jint aheadCount, jint behindCount, jint diffBytes, jint maxFiles, jint maxBytes) {
+    return (jlong)orb_repo_diff_budget_step((uint8_t)isGitRepo, (uint8_t)pathSafe, (uint8_t)hasUntracked, (uint32_t)modifiedCount, (uint32_t)stagedCount, (uint32_t)aheadCount, (uint32_t)behindCount, (uint32_t)diffBytes, (uint32_t)maxFiles, (uint32_t)maxBytes);
+}

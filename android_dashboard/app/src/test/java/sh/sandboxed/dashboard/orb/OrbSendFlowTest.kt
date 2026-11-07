@@ -6,6 +6,110 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OrbSendFlowTest {
+    @Test fun nonCodexAndCloudFollowUpsNeverRequestCyber() = kotlinx.coroutines.runBlocking {
+        for (mission in listOf(
+            mapOf("id" to "m", "backend" to "opencode"),
+            mapOf("id" to "m", "backend" to "codex", "cloud" to mapOf("provider" to "chatgpt"))
+        )) {
+            val calls = mutableListOf<String>()
+            OrbCyberAccess.requireFollowUp("m", "/goal") { path -> calls += path; mission }
+            assertEquals(listOf("/api/control/missions/m?include_history=false"), calls)
+        }
+    }
+
+    @Test fun sideQuestionExtractionKeepsActualGoalRequest() {
+        val wrapped = OrbSideAgent.prompt("Earlier context", "/goal fix tests")
+        assertFalse(OrbCyberAccess.nativeGoal("codex", wrapped))
+        assertTrue(OrbCyberAccess.nativeGoal("codex", OrbSideAgent.extractQuestion(wrapped)))
+    }
+
+    @Test fun freshFollowUpRejectsActualGoalBeforeMutationButAllowsPausedGoalText() = kotlinx.coroutines.runBlocking {
+        for (content in listOf("/goal implement", "/goal", "continue working")) {
+            val calls = mutableListOf<String>()
+            var draft = content
+            try {
+                OrbCyberAccess.requireFollowUp("mission", content) { path ->
+                    calls += path
+                    when {
+                        path.endsWith("include_history=false") -> mapOf("id" to "mission", "backend" to "codex", "goal_mode" to true,
+                            "model_override" to "gpt-6.1-sol")
+                        path.endsWith("/cyber") -> mapOf("mode" to "standard", "status" to "requested", "revision" to "2")
+                        else -> mapOf("version" to 2, "native_goals_explicit" to false)
+                    }
+                }
+                calls += "mutation"
+                draft = ""
+            } catch (e: OrbError) {
+                assertTrue(e.message.orEmpty().contains("draft is kept"))
+            }
+            assertEquals(content == "continue working", calls.contains("mutation"))
+            assertEquals(if (content == "continue working") "" else content, draft)
+            assertTrue(calls.first().endsWith("include_history=false"))
+        }
+    }
+
+    @Test fun cyberRefusalPrecedesMutationsAndPreservesDraft() = kotlinx.coroutines.runBlocking {
+        for (mode in listOf(OrbCyberMode.Standard, OrbCyberMode.Daybreak)) {
+            for (capabilities in listOf(
+                mapOf("version" to 2, "native_goals_explicit" to false, "route_supported" to true),
+                mapOf("version" to 1), emptyMap()
+            )) {
+                var draft = "/goal implement the feature"
+                var model = "gpt-6.1-sol"
+                var program = mode
+                val calls = mutableListOf<String>()
+                try {
+                    OrbCyberAccess.requireSupport(model, program, true, OrbCyberAccess.nativeGoal("codex", draft)) {
+                        calls += it
+                        capabilities
+                    }
+                    calls += "upload/create/send/PATCH"
+                    draft = ""
+                    model = ""
+                    program = OrbCyberMode.Automatic
+                    throw AssertionError("Expected Cyber refusal")
+                } catch (e: OrbError) {
+                    assertTrue(e.message.orEmpty().contains("draft is kept"))
+                }
+                assertEquals(1, calls.size)
+                assertTrue(calls.single().startsWith("/api/control/cyber-capabilities?"))
+                assertEquals("/goal implement the feature", draft)
+                assertEquals("gpt-6.1-sol", model)
+                assertEquals(mode, program)
+            }
+        }
+    }
+
+    @Test fun explicitRemoteCyberFailsClosedAndOmitsBlankModel() = kotlinx.coroutines.runBlocking {
+        for (supported in listOf(null, false, true)) {
+            var accepted = false
+            try {
+                OrbCyberAccess.requireSupport("  ", OrbCyberMode.Daybreak, true, false) { path ->
+                    assertFalse(path.contains("model="))
+                    mapOf("version" to 2, "route_supported" to supported)
+                }
+                accepted = true
+            } catch (_: OrbError) { }
+            assertEquals(supported == true, accepted)
+        }
+    }
+
+    @Test fun pausedGoalHistoryDoesNotTurnPlainTextIntoNativeGoal() {
+        assertFalse(OrbCyberAccess.nativeGoal("codex", "continue working"))
+        assertFalse(OrbCyberAccess.nativeGoal("codex", "/goals are useful"))
+        assertTrue(OrbCyberAccess.nativeGoal("codex", " /goal continue working"))
+        assertFalse(OrbCyberAccess.nativeGoal("opencode", "/goal continue working"))
+    }
+
+    @Test fun cyberConfirmationRequiresProviderStatusAndProgram() {
+        assertEquals("Daybreak · requested", OrbCyberSelection(OrbCyberMode.Daybreak, "confirmed", "1", " ").summary)
+        assertEquals("Daybreak · requested", OrbCyberSelection(OrbCyberMode.Daybreak, "requested", "1", "daybreak").summary)
+        assertEquals("Daybreak · confirmed: daybreak", OrbCyberSelection(OrbCyberMode.Daybreak, "confirmed", "2", "daybreak").summary)
+        assertTrue(OrbCyberAccess.compatibility(OrbCyberMode.Standard, "openai/gpt-5.6-cyber") != null)
+        assertTrue(OrbCyberAccess.compatibility(OrbCyberMode.Automatic, "gpt-daybreak-blue-latest")!!.contains("retired"))
+        assertTrue(OrbCyberAccess.error(OrbError("access_program_not_enabled")).contains("model was not changed"))
+    }
+
     private fun ids(q: OrbFollowUpQueue) = q.rows.map { it.id }
 
     @Test fun optimisticSendShowsAtOnceThenSettlesWithoutJump() {
@@ -309,5 +413,45 @@ class OrbSendFlowTest {
             )!!
         )
         assertEquals(OrbSlotWaitInfo("Waiting for a free slot (4/4 in use)…", canForce = true), orbSlotWaitInfo(coreQueued))
+    }
+
+    @Test fun skillSlashParserAndKernelValidation() {
+        val skills = listOf(
+            OrbSkillChoice(name = "rust-audit", description = "Audit Rust and FFI boundaries"),
+            OrbSkillChoice(name = "lean-proof", description = "Check Lean 4 invariants")
+        )
+        val available = skills.mapTo(LinkedHashSet()) { it.name }
+
+        val q1 = OrbSkillSlash.skillQuery("Please run /ru", caret = 14)
+        assertTrue(q1.open)
+        assertEquals("ru", q1.query)
+        assertEquals(11, q1.start)
+        assertEquals(listOf("rust-audit"), OrbSkillSlash.filterSkills(skills, q1.query, emptyList()).map { it.name })
+
+        assertFalse(OrbSkillSlash.skillQuery("/skill:rust-audit", caret = 17).open)
+        assertFalse(OrbSkillSlash.skillQuery("src/foo/bar", caret = 11).open)
+
+        val inserted = OrbSkillSlash.insertSkill("Please run /ru now", caret = 14, name = "rust-audit")
+        assertEquals("Please run /skill:rust-audit  now", inserted.first)
+        assertEquals(listOf("rust-audit"), OrbSkillSlash.selectedSkillNames(inserted.first, available))
+        assertEquals("Please run now", OrbSkillSlash.removeSkill(inserted.first, "rust-audit"))
+        assertEquals("Use /rust-audit and /lean-proof", OrbSkillSlash.skillPreview("Use /skill:rust-audit and /skill:lean-proof"))
+        assertEquals("/rust-audit inspect kernel", OrbJSON.cleanTitle("/skill:rust-audit inspect kernel"))
+
+        org.junit.Assert.assertNull(OrbSkillSlash.validateSkillSelection("/skill:rust-audit /skill:rust-audit check", "codex", available))
+        assertEquals(
+            "Selected skill is not delivered to this mission: missing",
+            OrbSkillSlash.validateSkillSelection("/skill:missing check", "opencode", available)
+        )
+        assertEquals(
+            "Invalid /skill: identifier (use at most 64 ASCII letters, numbers, '.', '_' or '-', without '..')",
+            OrbSkillSlash.validateSkillSelection("/skill:../escape check", "claudecode", available + "../escape")
+        )
+        val nine = (1..9).map { "s$it" }
+        val ninePrompt = nine.joinToString(" ") { "/skill:$it" }
+        assertEquals(
+            "Select at most 8 distinct skills",
+            OrbSkillSlash.validateSkillSelection(ninePrompt, "codex", nine.toSet())
+        )
     }
 }

@@ -16,6 +16,8 @@ import OrbCore.Store
 import OrbCore.Search
 import OrbCore.Harness
 import OrbCore.Proxy
+import OrbCore.Cyber
+import OrbCore.Skills
 import OrbCore.Managed
 import OrbCore.CloudAgents
 import OrbCore.MemoryAndCloud

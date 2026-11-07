@@ -106,6 +106,27 @@ describe('cyber selection',()=>{
   expect(cyberCompatibility('automatic','openai/gpt-daybreak-red-latest')).toContain('gpt-5.6-cyber');
   expect(cyberCompatibility('daybreak','gpt-6-astra')).toBeUndefined();
  });
+ it('refuses explicit Cyber programs on native goals without mutating the requested selection',async()=>{
+  setDraftCyber('daybreak');
+  vi.mocked(api).mockResolvedValue({version:2,native_goals_explicit:false,route_supported:true});
+  await expect(requireCyberSupport({model:'gpt-6.1-sol',mode:'daybreak',remote:false,goal:true})).rejects.toThrow('native goals');
+  expect(draftCyber()).toBe('daybreak');
+  await expect(requireCyberSupport({model:'gpt-6.1-sol',mode:'automatic',remote:false,goal:true})).resolves.toBeUndefined();
+  let selected='';render(()=><CyberPicker value="daybreak" model="gpt-6.1-sol" goal onChange={v=>selected=v}/>);
+  await fireEvent.click(screen.getByRole('button',{name:'Cyber program: Daybreak'}));
+  expect((screen.getByRole('menuitemradio',{name:/Standard/}) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).disabled).toBe(true);
+  await fireEvent.click(screen.getByRole('menuitemradio',{name:/Automatic/}));
+  expect(selected).toBe('automatic');
+ });
+ it('allows explicit Cyber selection on paused historical goal missions for plain follow-up turns',async()=>{
+  vi.mocked(api).mockImplementation(async path=>String(path).endsWith('/cyber')
+   ?{mode:'automatic',status:'requested',revision:'saved'}:{version:2,route_supported:true});
+  render(()=><MissionCyber mission={{id:'paused-goal',status:'paused',goal_mode:true,title:'Paused goal',history:[],backend:'codex',model_override:'gpt-6.1-sol'}}/>);
+  await fireEvent.click(await screen.findByRole('button',{name:'Cyber program: Automatic'}));
+  await waitFor(()=>expect((screen.getByRole('menuitemradio',{name:/Standard/}) as HTMLButtonElement).disabled).toBe(false));
+  expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).disabled).toBe(false);
+ });
  it('preserves access denial and cyber policy as distinct errors',()=>{
   expect(describeError('403 access_program_not_enabled').title).toBe('Cyber access is not enabled');
   expect(describeError("unexpected status 403 Forbidden: Daybreak isn't available for this model. Turn off Daybreak or choose another model.").title).toBe('Daybreak is unavailable for this account or model');

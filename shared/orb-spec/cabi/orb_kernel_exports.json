@@ -175,6 +175,11 @@
     "orb_composer_default_step",
     "orb_cloud_handoff_step",
     "orb_fast_poll_delay_ms",
-    "orb_mcp_preflight_cache_gate"
+    "orb_mcp_preflight_cache_gate",
+    "orb_codex_goal_launch_step",
+    "orb_codex_goal_preact_filter",
+    "orb_skill_slash_step",
+    "orb_worktree_decision_step",
+    "orb_repo_diff_budget_step"
   ]
 }

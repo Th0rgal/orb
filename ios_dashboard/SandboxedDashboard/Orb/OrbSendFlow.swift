@@ -148,6 +148,79 @@ struct OrbFollowUpQueue: Equatable {
     }
 }
 
+enum OrbCyberAccess {
+    static let modes = ["automatic", "standard", "daybreak"]
+    static func label(_ mode: String) -> String { mode.capitalized }
+    static func isGoal(_ text: String, mode: String = "Message") -> Bool {
+        if mode == "Goal" { return true }
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = value.prefix(5).lowercased()
+        return prefix == "/goal" && (value.count == 5 || value.dropFirst(5).first?.isWhitespace == true)
+    }
+    static func emptyGoalError(_ text: String, mode: String = "Message") -> String? {
+        guard isGoal(text, mode: mode) else { return nil }
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if mode == "Goal" && value.prefix(5).lowercased() != "/goal" {
+            return value.isEmpty ? "Add an objective after /goal, for example “/goal Make the test suite pass”. Your draft is kept." : nil
+        }
+        let rest = value.dropFirst(5).trimmingCharacters(in: .whitespacesAndNewlines)
+        return rest.isEmpty ? "Add an objective after /goal, for example “/goal Make the test suite pass”. Your draft is kept." : nil
+    }
+    static func compatibility(mode: String, model: String) -> String? {
+        let id = model.components(separatedBy: "/").last ?? model
+        if ["gpt-daybreak-blue-latest", "gpt-daybreak-red-latest"].contains(id) {
+            return "OpenAI retired the \(id) alias on 2026-10-28. Choose a specific model ID such as \(id.contains("red") ? "gpt-5.6-cyber" : "gpt-6.1-sol")."
+        }
+        if mode == "standard" && (id.hasPrefix("gpt-daybreak-") || id == "gpt-5.6-cyber") { return "This model requires Daybreak. Choose Daybreak or Automatic, or change the model." }
+        if mode == "daybreak" && !["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-cyber"].contains(id) { return "Daybreak support has not been established for this model." }
+        return nil
+    }
+    static func capabilityPath(model: String, mode: String, remote: Bool) -> String {
+        let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "/api/control/cyber-capabilities?" + (model.isEmpty ? "" : "model=\(OrbCore.escape(model))&") + "mode=\(mode)&remote=\(remote)"
+    }
+    static func refusal(_ value: OrbJSON, mode: String, remote: Bool, goal: Bool) -> String? {
+        if value["version"].doubleValue != 2 { return "Update or reconnect to a backend supporting cyber selection before launching. Your draft is kept." }
+        if goal && mode != "automatic" && value["native_goals_explicit"] != .bool(true) { return "This connection cannot confirm an explicit Cyber program for native goals. Choose Automatic explicitly. Your draft is kept." }
+        if remote && mode != "automatic" && value["route_supported"] != .bool(true) {
+            return value["refusal"].text.isEmpty ? "This backend cannot confirm the selected Cyber route. Choose Automatic explicitly. Your draft is kept." : value["refusal"].text
+        }
+        return nil
+    }
+    static func confirmed(_ value: OrbJSON) -> Bool { value["status"].text == "confirmed" && !value["confirmed_program"].text.isEmpty }
+    static func error(_ error: Error) -> String {
+        let text = error.localizedDescription
+        if text.contains("access_program_not_enabled") { return "Daybreak is not enabled for this account and model. Check the account’s approved access, or explicitly select Standard. The model was not changed." }
+        if text.contains("unsupported_access_program") { return "This connection cannot apply the requested cyber program. Choose another supported connection, or explicitly select Automatic. " + text }
+        if text.contains("invalid_access_program") { return "The selected cyber program is incompatible with this model. Choose another program or model." }
+        if text.contains("cyberPolicy") || text.contains("cyber_policy") { return "OpenAI rejected this request under its cyber policy. This can also happen with Daybreak enabled. " + text }
+        return text
+    }
+    @discardableResult
+    @MainActor static func requireFollowUp(_ content: String, missionID: String) async throws -> (mode: String, revision: String)? {
+        let mission = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(missionID))?include_history=false")
+        return try await requireFollowUp(content, mission: mission)
+    }
+    @discardableResult
+    @MainActor static func requireFollowUp(_ content: String, mission: OrbJSON, model: String? = nil, node: String = "", call: (String) async throws -> OrbJSON = { try await OrbCore.shared.call($0) }) async throws -> (mode: String, revision: String)? {
+        guard !OrbRow(mission).cloud, mission["backend"].text == "codex" else { return nil }
+        if let reason = emptyGoalError(content) { throw OrbHTTPError(status: 400, detail: reason) }
+        let current = try await call("/api/control/missions/\(OrbCore.escape(mission["id"].text))/cyber")
+        guard modes.contains(current["mode"].text) else {
+            throw OrbHTTPError(status: 400, detail: "The backend did not return a Cyber selection. Your draft is kept.")
+        }
+        try await require(model: model ?? mission["model_override"].text, mode: current["mode"].text, remote: OrbContinuation.remoteNodeID(for: mission, fallback: node) != "core", goal: isGoal(content), call: call)
+        return (mode: current["mode"].text, revision: current["revision"].text)
+    }
+    @MainActor static func require(model: String, mode: String, remote: Bool, goal: Bool, call: (String) async throws -> OrbJSON = { try await OrbCore.shared.call($0) }) async throws {
+        if let reason = (remote && model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : compatibility(mode: mode, model: model)) { throw OrbHTTPError(status: 400, detail: reason) }
+        let value: OrbJSON
+        do { value = try await call(capabilityPath(model: model, mode: mode, remote: remote)) }
+        catch { throw OrbHTTPError(status: 400, detail: "Update or reconnect to a backend supporting cyber selection before launching. Your draft is kept; the requested program was not silently omitted.") }
+        if let reason = refusal(value, mode: mode, remote: remote, goal: goal) { throw OrbHTTPError(status: 400, detail: reason) }
+    }
+}
+
 enum OrbEditOutcome: Equatable { case edited, unsupported, alreadySent, failed }
 enum OrbSendNowOutcome: Equatable { case live, promoted, fallback }
 
@@ -290,5 +363,158 @@ struct OrbHandoffTracker {
         if !running { stopSeen = true; return false }
         let newJob = jobID != nil && oldJob != nil && jobID != oldJob
         return stopSeen || newJob
+    }
+}
+
+/// `/skill:<name>` composer contract (`orb/src/skillSlash.ts`). Admission goes through `OrbKernel.skillSlashStep`.
+struct OrbSkillChoice: Equatable, Identifiable, Sendable {
+    var name: String
+    var description: String?
+    var id: String { name }
+}
+
+struct OrbSkillToken: Equatable, Sendable {
+    var name: String
+    var start: Int
+    var end: Int
+}
+
+enum OrbSkillSlash {
+    static let maxName = 64
+    static let maxSelected = 8
+    private static let token = try! NSRegularExpression(pattern: #"(^|[\s])/skill:([^\s]*)"#)
+
+    static func skillToken(_ name: String) -> String { "/skill:\(name)" }
+
+    static func isValidSkillIdentifier(_ name: String) -> Bool {
+        if name.isEmpty || name.contains("..") { return false }
+        for scalar in name.unicodeScalars {
+            let c = scalar.value
+            let ok = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 45 || c == 95 || c == 46
+            if !ok { return false }
+        }
+        return true
+    }
+
+    static func skillTokens(_ text: String) -> [OrbSkillToken] {
+        let ns = text as NSString
+        return token.matches(in: text, range: NSRange(location: 0, length: ns.length)).map { match in
+            let lead = match.range(at: 1)
+            let start = match.range.location + lead.length
+            return OrbSkillToken(name: ns.substring(with: match.range(at: 2)), start: start, end: match.range.location + match.range.length)
+        }
+    }
+
+    /// Open slash query at `caret` (UTF-16). Closed once the token contains `/` or starts with `skill:`.
+    static func skillQuery(_ text: String, caret: Int) -> (open: Bool, query: String, start: Int) {
+        let ns = text as NSString
+        let end = min(max(caret, 0), ns.length)
+        let before = ns.substring(to: end)
+        let regex = try! NSRegularExpression(pattern: #"(^|[\s])/([^\s]*)$"#)
+        guard let match = regex.firstMatch(in: before, range: NSRange(location: 0, length: (before as NSString).length)) else {
+            return (false, "", -1)
+        }
+        let queryRange = match.range(at: 2)
+        let query = (before as NSString).substring(with: queryRange)
+        if query.contains("/") || query.hasPrefix("skill:") { return (false, "", -1) }
+        let start = end - queryRange.length - 1
+        return (true, query.lowercased(), start)
+    }
+
+    static func filterSkills(_ skills: [OrbSkillChoice], query: String, selected: [String]) -> [OrbSkillChoice] {
+        let used = Set(selected)
+        return Array(skills.filter { skill in
+            !used.contains(skill.name) && (query.isEmpty || skill.name.lowercased().contains(query) || (skill.description ?? "").lowercased().contains(query))
+        }.prefix(50))
+    }
+
+    static func insertSkill(_ text: String, caret: Int, name: String) -> (text: String, caret: Int) {
+        let query = skillQuery(text, caret: caret)
+        let ns = text as NSString
+        let start = query.open && query.start >= 0 ? query.start : min(max(caret, 0), ns.length)
+        let token = skillToken(name) + " "
+        let next = (ns.substring(to: start) as NSString).appending(token).appending(ns.substring(from: min(max(caret, 0), ns.length)))
+        return (next, start + (token as NSString).length)
+    }
+
+    static func removeSkill(_ text: String, name: String) -> String {
+        guard let token = skillTokens(text).first(where: { $0.name == name }) else { return text }
+        let ns = text as NSString
+        let next = (ns.substring(to: token.start) as NSString).appending(ns.substring(from: token.end))
+        return next.replacingOccurrences(of: #"[^\S\n]{2,}"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"^[^\S\n]+|[^\S\n]+$"#, with: "", options: .regularExpression)
+    }
+
+    static func selectedSkillNames(_ text: String, available: Set<String>) -> [String] {
+        var names: [String] = []
+        for token in skillTokens(text) where available.contains(token.name) && !names.contains(token.name) {
+            names.append(token.name)
+        }
+        return names
+    }
+
+    static func harnessKind(_ harness: String?) -> Int {
+        harness == "opencode" ? 1 : harness == "claudecode" ? 2 : 0
+    }
+
+    static func validateSkillSelection(_ text: String, harness: String?, available: Set<String>) -> String? {
+        let kind = harnessKind(harness)
+        var selected: [String] = []
+        for token in skillTokens(text) {
+            if selected.contains(token.name) { continue }
+            let verdict = OrbKernel.skillSlashStep(
+                harnessKind: kind,
+                isDelivered: available.contains(token.name),
+                alreadySelected: false,
+                nameCharsValid: isValidSkillIdentifier(token.name),
+                nameLen: (token.name as NSString).length,
+                maxNameLen: maxName,
+                selectedCount: selected.count,
+                maxSelected: maxSelected
+            )
+            if !verdict.admitted {
+                if verdict.rejectCode == 1 || verdict.rejectCode == 2 { return "Invalid /skill: identifier (use at most 64 ASCII letters, numbers, '.', '_' or '-', without '..')" }
+                if verdict.rejectCode == 3 { return "Selected skill is not delivered to this mission: \(token.name)" }
+                if verdict.rejectCode == 5 { return "Select at most 8 distinct skills" }
+                return "Skill selection rejected"
+            }
+            selected.append(token.name)
+        }
+        return nil
+    }
+
+    static func skillDisplayText(_ text: String, available: Set<String>) -> String {
+        var current = text
+        for token in skillTokens(text).reversed() where available.contains(token.name) {
+            let ns = current as NSString
+            guard token.end <= ns.length else { continue }
+            current = (ns.substring(to: token.start) as NSString).appending("/\(token.name)").appending(ns.substring(from: token.end))
+        }
+        return current
+    }
+
+    static func skillPreview(_ text: String) -> String {
+        skillDisplayText(text, available: Set(skillTokens(text).map(\.name)))
+    }
+
+    @MainActor static func loadDelivery(project: String, workspaceID: String? = nil) async -> (skills: [OrbSkillChoice], error: String?) {
+        var parts: [String] = []
+        if let workspaceID, !workspaceID.isEmpty { parts.append("workspace_id=\(OrbCore.escape(workspaceID))") }
+        if !project.isEmpty { parts.append("project=\(OrbCore.escape(project))") }
+        guard !parts.isEmpty else { return ([], nil) }
+        do {
+            let res = try await OrbCore.shared.call("/api/library/skill-delivery?\(parts.joined(separator: "&"))")
+            let skills = res["skills"].items.compactMap { row -> OrbSkillChoice? in
+                let name = row["name"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else { return nil }
+                let desc = row["description"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+                return OrbSkillChoice(name: name, description: desc.isEmpty ? nil : desc)
+            }
+            return (skills, nil)
+        } catch let e as OrbHTTPError where e.status == 404 {
+            return ([], nil)
+        } catch {
+            return ([], error.localizedDescription)
+        }
     }
 }

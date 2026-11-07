@@ -1,5 +1,109 @@
 package sh.sandboxed.dashboard.orb
 
+enum class OrbCyberMode(val wire: String, val label: String) {
+    Automatic("automatic", "Automatic"), Standard("standard", "Standard"), Daybreak("daybreak", "Daybreak")
+}
+
+data class OrbCyberSelection(val mode: OrbCyberMode, val status: String?, val revision: String?, val confirmedProgram: String?) {
+    val summary: String get() = if (status == "confirmed" && !confirmedProgram.isNullOrBlank())
+        "${mode.label} · confirmed: $confirmedProgram" else "${mode.label} · requested"
+
+    companion object {
+        fun parse(value: OrbDict): OrbCyberSelection = OrbCyberSelection(
+            OrbCyberMode.entries.firstOrNull { it.wire == OrbJSON.str(value, "mode") }
+                ?: throw OrbError("Cyber selection unavailable. Update or reconnect before changing this option."),
+            OrbJSON.str(value, "status"), OrbJSON.str(value, "revision"), OrbJSON.str(value, "confirmed_program")
+        )
+    }
+}
+
+object OrbCyberAccess {
+    fun nativeCodex(backend: String?, cloud: OrbDict? = null): Boolean = backend == "codex" &&
+        OrbJSON.str(cloud, "provider").isNullOrBlank()
+
+    const val EMPTY_GOAL = "Add an objective after /goal, for example “/goal Make the test suite pass”. Your draft is kept."
+
+    suspend fun requireFollowUp(core: OrbCore, missionId: String, content: String): OrbCyberSelection? =
+        requireFollowUp(missionId, content, core::encodeComponent) { path -> OrbJSON.dict(core.request(path)) ?: emptyMap() }
+
+    suspend fun requireFollowUp(missionId: String, content: String, encode: (String) -> String = { it },
+        get: suspend (String) -> OrbDict): OrbCyberSelection? {
+        val base = "/api/control/missions/${encode(missionId)}"
+        val value = get("$base?include_history=false")
+        val mission = OrbRow(OrbJSON.dict(value["mission"]) ?: value)
+        val backend = mission.str("backend") ?: throw OrbError("Mission settings unavailable. Your draft is kept.")
+        if (!nativeCodex(backend, mission.dict("cloud"))) return null
+        val goal = nativeGoal(backend, content)
+        if (goal && content.trim().equals("/goal", ignoreCase = true))
+            throw OrbError(EMPTY_GOAL)
+        val cyber = OrbCyberSelection.parse(get("$base/cyber"))
+        requireSupport(mission.str("model_override") ?: "", cyber.mode, remote(mission), goal, get)
+        return cyber
+    }
+
+    suspend fun requireInherited(core: OrbCore, sourceId: String, backend: String, model: String, content: String) {
+        if (!nativeCodex(backend)) return
+        val base = "/api/control/missions/${core.encodeComponent(sourceId)}"
+        val value = OrbJSON.dict(core.request("$base?include_history=false")) ?: throw OrbError("Mission settings unavailable. Your draft is kept.")
+        val source = OrbRow(OrbJSON.dict(value["mission"]) ?: value)
+        val cyber = OrbCyberSelection.parse(OrbJSON.dict(core.request("$base/cyber")) ?: emptyMap())
+        if (content.trim().equals("/goal", ignoreCase = true)) throw OrbError(EMPTY_GOAL)
+        requireSupport(model, cyber.mode, remote(source), nativeGoal(backend, content)) { path ->
+            OrbJSON.dict(core.request(path)) ?: emptyMap()
+        }
+    }
+
+    fun nativeGoal(backend: String, prompt: String): Boolean = backend == "codex" &&
+        Regex("^/goal(?:\\s|$)", RegexOption.IGNORE_CASE).containsMatchIn(prompt.trimStart())
+
+    fun remote(mission: OrbRow): Boolean {
+        mission.dict("machine_transfer")?.let { transfer ->
+            OrbJSON.dict(transfer["destination"])?.let { return OrbJSON.str(it, "kind") == "node" }
+        }
+        val tags = mission.raw["tags"] as? List<*>
+        return tags?.contains("placement:client") != true && mission.bool("local_run_active") != true &&
+            (!mission.str("remote_node_id").isNullOrBlank() || !OrbJSON.str(mission.dict("remote_job"), "node_id").isNullOrBlank())
+    }
+
+    fun compatibility(mode: OrbCyberMode, model: String): String? {
+        val id = model.substringAfterLast('/')
+        if (id == "gpt-daybreak-blue-latest" || id == "gpt-daybreak-red-latest")
+            return "OpenAI retired the $id alias on 2026-10-28. Choose a specific model ID such as ${if (id.contains("red")) "gpt-5.6-cyber" else "gpt-6.1-sol"}."
+        if (mode == OrbCyberMode.Standard && (id.startsWith("gpt-daybreak-") || id == "gpt-5.6-cyber"))
+            return "This model requires Daybreak. Choose Daybreak or Automatic, or change the model."
+        if (mode == OrbCyberMode.Daybreak && id !in setOf("gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-cyber"))
+            return "Daybreak support has not been established for this model."
+        return null
+    }
+
+    fun error(error: Throwable): String {
+        val text = error.message ?: "Cyber request failed"
+        return when {
+            "access_program_not_enabled" in text -> "Daybreak is not enabled for this account and model. Check the account’s approved access, or explicitly select Standard. The model was not changed."
+            "unsupported_access_program" in text -> "This connection cannot apply the requested cyber program. Choose another supported connection, or explicitly select Automatic. $text"
+            "invalid_access_program" in text -> "The selected cyber program is incompatible with this model. Choose another program or model."
+            "cyberPolicy" in text || "cyber_policy" in text -> "OpenAI rejected this request under its cyber policy. This can also happen with Daybreak enabled. $text"
+            else -> text
+        }
+    }
+
+    suspend fun requireSupport(model: String, mode: OrbCyberMode, remote: Boolean, goal: Boolean,
+        get: suspend (String) -> OrbDict) {
+        if (!remote || model.isNotBlank()) compatibility(mode, model)?.let { throw OrbError(it) }
+        val query = (if (model.isNotBlank()) "model=${java.net.URLEncoder.encode(model, "UTF-8")}&" else "") +
+            "mode=${mode.wire}&remote=$remote"
+        val value = try { get("/api/control/cyber-capabilities?$query") } catch (e: Exception) {
+            throw OrbError("Update or reconnect to a backend supporting cyber selection before launching. Your draft is kept; the requested program was not silently omitted.")
+        }
+        if ((value["version"] as? Number)?.toInt() != 2)
+            throw OrbError("Update or reconnect to a backend supporting cyber selection before launching. Your draft is kept.")
+        if (goal && mode != OrbCyberMode.Automatic && value["native_goals_explicit"] != true)
+            throw OrbError("This connection cannot confirm an explicit Cyber program for native goals. Choose Automatic explicitly. Your draft is kept.")
+        if (remote && mode != OrbCyberMode.Automatic && value["route_supported"] != true)
+            throw OrbError(OrbJSON.str(value, "refusal") ?: "This backend cannot confirm the selected Cyber route. Choose Automatic explicitly. Your draft is kept.")
+    }
+}
+
 /**
  * Smooth sending on mobile, mirroring the desktop work in PR #1174
  * (orb/src/RemoteQueue.tsx, orb/src/mission/handoff.ts, orb/src/missionStatus.ts).
@@ -273,5 +377,166 @@ class OrbHandoffTracker {
         }
         val newJob = jobId != null && oldJobKnown && oldJob != null && jobId != oldJob
         return stopSeen || newJob
+    }
+}
+
+data class OrbSkillChoice(
+    val name: String,
+    val description: String? = null
+)
+
+data class OrbSkillToken(
+    val name: String,
+    val start: Int,
+    val end: Int
+)
+
+data class OrbSkillQuery(
+    val open: Boolean,
+    val query: String,
+    val start: Int
+)
+
+/** `/skill:<name>` composer contract (`orb/src/skillSlash.ts`). Admission goes through `OrbKernel.skillSlashStep`. */
+object OrbSkillSlash {
+    const val MAX_SKILL_NAME = 64
+    const val MAX_SELECTED_SKILLS = 8
+    private val TOKEN = Regex("(^|[\\s])/skill:([^\\s]*)")
+    private val QUERY = Regex("(^|[\\s])/([^\\s]*)$")
+    private val COLLAPSE_SPACES = Regex("[^\\S\\n]{2,}")
+    private val TRIM_LINE_SPACES = Regex("^[^\\S\\n]+|[^\\S\\n]+$")
+
+    fun skillToken(name: String): String = "/skill:$name"
+
+    fun isValidSkillIdentifier(name: String): Boolean {
+        if (name.isEmpty() || name.contains("..")) return false
+        for (ch in name) {
+            val c = ch.code
+            val ok = (c in 48..57) || (c in 65..90) || (c in 97..122) || c == 45 || c == 95 || c == 46
+            if (!ok) return false
+        }
+        return true
+    }
+
+    fun skillTokens(text: String): List<OrbSkillToken> =
+        TOKEN.findAll(text).map { match ->
+            val leadLen = match.groups[1]?.value?.length ?: 0
+            val start = match.range.first + leadLen
+            val name = match.groups[2]?.value.orEmpty()
+            OrbSkillToken(name = name, start = start, end = match.range.last + 1)
+        }.toList()
+
+    fun skillQuery(text: String, caret: Int): OrbSkillQuery {
+        val end = caret.coerceIn(0, text.length)
+        val before = text.substring(0, end)
+        val match = QUERY.find(before) ?: return OrbSkillQuery(open = false, query = "", start = -1)
+        val raw = match.groups[2]?.value.orEmpty()
+        if (raw.contains("/") || raw.startsWith("skill:")) return OrbSkillQuery(open = false, query = "", start = -1)
+        val start = before.length - raw.length - 1
+        return OrbSkillQuery(open = true, query = raw.lowercase(), start = start)
+    }
+
+    fun filterSkills(skills: List<OrbSkillChoice>, query: String, selected: List<String>): List<OrbSkillChoice> {
+        val used = selected.toHashSet()
+        return skills.filter { skill ->
+            skill.name !in used &&
+                (query.isEmpty() ||
+                    skill.name.lowercase().contains(query) ||
+                    (skill.description ?: "").lowercase().contains(query))
+        }.take(50)
+    }
+
+    fun insertSkill(text: String, caret: Int, name: String): Pair<String, Int> {
+        val clamped = caret.coerceIn(0, text.length)
+        val query = skillQuery(text, clamped)
+        val start = if (query.open && query.start >= 0) query.start else clamped
+        val token = "${skillToken(name)} "
+        return "${text.substring(0, start)}$token${text.substring(clamped)}" to (start + token.length)
+    }
+
+    fun removeSkill(text: String, name: String): String {
+        val token = skillTokens(text).firstOrNull { it.name == name } ?: return text
+        val next = "${text.substring(0, token.start)}${text.substring(token.end)}"
+        return next.replace(COLLAPSE_SPACES, " ").replace(TRIM_LINE_SPACES, "")
+    }
+
+    fun selectedSkillNames(text: String, available: Set<String>): List<String> {
+        val names = ArrayList<String>()
+        for (token in skillTokens(text)) {
+            if (token.name in available && token.name !in names) names.add(token.name)
+        }
+        return names
+    }
+
+    fun harnessKind(harness: String?): Int = when (harness) {
+        "opencode" -> 1
+        "claudecode" -> 2
+        else -> 0
+    }
+
+    fun validateSkillSelection(text: String, harness: String?, available: Set<String>): String? {
+        val kind = harnessKind(harness)
+        val selected = ArrayList<String>()
+        for (token in skillTokens(text)) {
+            if (token.name in selected) continue
+            val verdict = OrbKernel.skillSlashStep(
+                harnessKind = kind,
+                isDelivered = token.name in available,
+                alreadySelected = false,
+                nameCharsValid = isValidSkillIdentifier(token.name),
+                nameLen = token.name.length,
+                maxNameLen = MAX_SKILL_NAME,
+                selectedCount = selected.size,
+                maxSelected = MAX_SELECTED_SKILLS
+            )
+            if (!verdict.admitted) {
+                if (verdict.rejectCode == 1 || verdict.rejectCode == 2) {
+                    return "Invalid /skill: identifier (use at most 64 ASCII letters, numbers, '.', '_' or '-', without '..')"
+                }
+                if (verdict.rejectCode == 3) {
+                    return "Selected skill is not delivered to this mission: ${token.name}"
+                }
+                if (verdict.rejectCode == 5) {
+                    return "Select at most 8 distinct skills"
+                }
+                return "Skill selection rejected"
+            }
+            selected.add(token.name)
+        }
+        return null
+    }
+
+    fun skillDisplayText(text: String, available: Set<String>): String {
+        var current = text
+        for (token in skillTokens(text).asReversed()) {
+            if (token.name in available && token.end <= current.length) {
+                current = "${current.substring(0, token.start)}/${token.name}${current.substring(token.end)}"
+            }
+        }
+        return current
+    }
+
+    fun skillPreview(text: String): String =
+        skillDisplayText(text, skillTokens(text).mapTo(LinkedHashSet()) { it.name })
+
+    suspend fun loadDelivery(core: OrbCore, project: String, workspaceId: String? = null): Pair<List<OrbSkillChoice>, String?> {
+        val parts = ArrayList<String>(2)
+        if (!workspaceId.isNullOrBlank()) parts.add("workspace_id=${core.encodeComponent(workspaceId)}")
+        if (project.isNotBlank()) parts.add("project=${core.encodeComponent(project)}")
+        if (parts.isEmpty()) return emptyList<OrbSkillChoice>() to null
+        return try {
+            val raw = core.fetchDict("/api/library/skill-delivery?${parts.joinToString("&")}")
+            val skills = OrbJSON.dictList(raw["skills"]).mapNotNull { row ->
+                val name = OrbJSON.str(row, "name")?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                val desc = OrbJSON.str(row, "description")?.trim()?.takeIf { it.isNotEmpty() }
+                OrbSkillChoice(name = name, description = desc)
+            }
+            skills to null
+        } catch (e: OrbError) {
+            if (e.status == 404) emptyList<OrbSkillChoice>() to null
+            else emptyList<OrbSkillChoice>() to e.message
+        } catch (e: Throwable) {
+            emptyList<OrbSkillChoice>() to (e.message ?: "Couldn't load delivered skills")
+        }
     }
 }

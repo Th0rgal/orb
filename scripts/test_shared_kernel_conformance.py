@@ -337,8 +337,8 @@ class Harness(unittest.TestCase):
     def test_public_export_inventory_matches_current_manifest_and_rejects_drift(self):
         manifest = conformance.load_manifest(conformance.ORB / "shared/orb-spec/kernel_abi.json")
         functions = conformance.public_export_functions(manifest)
-        self.assertEqual(len(manifest["functions"]), 176)
-        self.assertEqual(len(functions), 175)
+        self.assertEqual(len(manifest["functions"]), 181)
+        self.assertEqual(len(functions), 180)
         self.assertIn("orb_slot_bypass_step", {f["name"] for f in functions})
         self.assertIn("orb_node_resize_step", {f["name"] for f in functions})
         self.assertIn("orb_node_lane_step", {f["name"] for f in functions})
@@ -369,14 +369,19 @@ class Harness(unittest.TestCase):
         self.assertIn("orb_cloud_handoff_step", {f["name"] for f in functions})
         self.assertIn("orb_fast_poll_delay_ms", {f["name"] for f in functions})
         self.assertIn("orb_mcp_preflight_cache_gate", {f["name"] for f in functions})
+        self.assertIn("orb_codex_goal_launch_step", {f["name"] for f in functions})
+        self.assertIn("orb_codex_goal_preact_filter", {f["name"] for f in functions})
+        self.assertIn("orb_skill_slash_step", {f["name"] for f in functions})
+        self.assertIn("orb_worktree_decision_step", {f["name"] for f in functions})
+        self.assertIn("orb_repo_diff_budget_step", {f["name"] for f in functions})
         self.assertNotIn("lp_orb_x2dspec_Orb_Kernel_accessStep___redArg", {f["name"] for f in functions})
         shrunk = copy.deepcopy(manifest)
         shrunk["functions"] = [f for f in shrunk["functions"] if f["name"] != "orb_slot_bypass_step"]
         with self.assertRaises(ValueError):
             conformance.public_export_functions(shrunk)
         cases, witness_cases = conformance.build_corpus(functions)
-        self.assertEqual(len(functions) * 8, 1400)
-        self.assertEqual(len(cases), 1429)
+        self.assertEqual(len(functions) * 8, 1440)
+        self.assertEqual(len(cases), 1469)
         self.assertEqual(len(witness_cases), 30)
 
 

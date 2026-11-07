@@ -6,6 +6,7 @@ struct OrbSelection {
     var nodePinnedByUser = false
     var allow24hCommitment = false
     var serviceTier = "standard"
+    var cyberMode = "automatic"
     var params: OrbJSON = .array([])
     var canCancel = false
     var cloud: Bool { provider != "agent" }
@@ -146,6 +147,8 @@ struct OrbAgentPicker: View {
     @Binding var selection: OrbSelection
     let existing: Bool
     var onTransfer: (() -> Void)? = nil
+    var missionID: String? = nil
+    var goal = false
     @Environment(\.dismiss) private var dismiss
     @State private var accounts: [OrbJSON] = []
     @State private var models: [OrbJSON] = []
@@ -343,7 +346,10 @@ struct OrbAgentPicker: View {
                     }
                 }
                 if !selection.cloud && selection.backend == "codex" && !selection.model.isEmpty {
-                    OrbCodexSpeedSection(model: selection.model, tier: $selection.serviceTier)
+                    OrbCodexSpeedSection(model: selection.model, missionID: missionID, tier: $selection.serviceTier)
+                }
+                if !selection.cloud && selection.backend == "codex" {
+                    OrbCyberSection(model: selection.model, remote: !selection.node.isEmpty && selection.node != "core", goal: goal, missionID: missionID, mode: $selection.cyberMode)
                 }
                 if loadingOptions && models.isEmpty {
                     HStack(spacing: 8) {

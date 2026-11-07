@@ -669,6 +669,25 @@ fun OrbConversationPage(
     var selectedModel by remember(currentMission?.id) {
         mutableStateOf(currentMission?.str("model_override", "model", "model_id") ?: "")
     }
+    var selectedCyber by remember(currentMission?.id) { mutableStateOf(OrbCyberMode.Automatic) }
+    var cyberSelection by remember(currentMission?.id) { mutableStateOf<OrbCyberSelection?>(null) }
+    var cyberLoading by remember(currentMission?.id) { mutableStateOf(currentMission != null) }
+    LaunchedEffect(currentMission?.id, showAgentPicker, currentMission?.str("status")) {
+        val id = currentMission?.id ?: return@LaunchedEffect
+        if (!OrbCyberAccess.nativeCodex(currentMission?.str("backend"), currentMission?.dict("cloud"))) {
+            cyberLoading = false
+            return@LaunchedEffect
+        }
+        cyberLoading = true
+        try {
+            val value = OrbJSON.dict(core.request("/api/control/missions/${core.encodeComponent(id)}/cyber"))
+                ?: throw OrbError("Cyber settings unavailable")
+            cyberSelection = OrbCyberSelection.parse(value)
+            selectedCyber = cyberSelection!!.mode
+        } catch (e: Exception) {
+            errorMessage = OrbCyberAccess.error(e)
+        } finally { cyberLoading = false }
+    }
     var selectedWorkspaceId by remember(currentMission?.id, project.id) {
         mutableStateOf(
             currentMission?.str("workspace_id", "workspaceId")
@@ -838,6 +857,40 @@ fun OrbConversationPage(
     val isCloudMission = remember(liveRow) {
         liveRow?.str("backend", "harness", "backend_id")?.startsWith("cloud_") == true ||
             !OrbJSON.str(liveRow?.dict("cloud"), "provider").isNullOrEmpty()
+    }
+    val isCloudComposer = isCloudMission || selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes") || selectedBackend.startsWith("cloud_")
+    val effectiveProjectSlug = remember(currentMission, project) {
+        currentMission?.str("project")?.takeIf { it.isNotEmpty() } ?: project.str("slug", "id") ?: project.id
+    }
+    var skillItems by remember(effectiveProjectSlug, selectedWorkspaceId) { mutableStateOf<List<OrbSkillChoice>>(emptyList()) }
+    var skillCatalogError by remember(effectiveProjectSlug, selectedWorkspaceId) { mutableStateOf<String?>(null) }
+    var skillCatalogLoaded by remember(effectiveProjectSlug, selectedWorkspaceId) { mutableStateOf(false) }
+    suspend fun ensureSkillCatalog() {
+        if (isCloudComposer) {
+            skillItems = emptyList()
+            skillCatalogError = null
+            skillCatalogLoaded = true
+            return
+        }
+        val (loaded, err) = OrbSkillSlash.loadDelivery(core, effectiveProjectSlug, selectedWorkspaceId.takeIf { it.isNotEmpty() })
+        skillItems = loaded
+        skillCatalogError = err
+        skillCatalogLoaded = true
+    }
+    LaunchedEffect(effectiveProjectSlug, selectedWorkspaceId, isCloudComposer) {
+        ensureSkillCatalog()
+    }
+    val availableSkillNames = remember(skillItems) { skillItems.mapTo(LinkedHashSet()) { it.name } }
+    val selectedSkillNames = remember(inputText, availableSkillNames, isCloudComposer) {
+        if (isCloudComposer) emptyList() else OrbSkillSlash.selectedSkillNames(inputText, availableSkillNames)
+    }
+    suspend fun validateComposerSkills(content: String): String? {
+        if (isCloudComposer || OrbSkillSlash.skillTokens(content).isEmpty()) return null
+        if (!skillCatalogLoaded || (skillItems.isEmpty() && skillCatalogError != null)) ensureSkillCatalog()
+        skillCatalogError?.let { return "$it. Your draft is kept." }
+        val harness = currentMission?.str("backend", "harness", "backend_id") ?: selectedBackend
+        return OrbSkillSlash.validateSkillSelection(content, harness, skillItems.mapTo(LinkedHashSet()) { it.name })
+            ?.let { "$it. Your draft is kept." }
     }
     val canForceSlot = missionId != null && !isCloudMission && slotWait?.canForce == true
 
@@ -1453,11 +1506,22 @@ fun OrbConversationPage(
         scope.launch {
             try {
                 settingsSaveJob?.join()
+                val cyber = OrbCyberAccess.requireFollowUp(core, id, content)
+                val msgBody = mutableMapOf<String, Any?>(
+                    "content" to content,
+                    "mission_id" to id,
+                    "queue_followup" to true,
+                    "client_message_id" to clientId
+                )
+                if (cyber != null) {
+                    msgBody["cyber_access"] = cyber.mode.wire
+                    if (!cyber.revision.isNullOrEmpty()) msgBody["cyber_revision"] = cyber.revision
+                }
                 val receipt = OrbJSON.dict(
                     core.request(
                         "/api/control/message",
                         method = "POST",
-                        body = mapOf("content" to content, "mission_id" to id, "queue_followup" to true, "client_message_id" to clientId)
+                        body = msgBody
                     )
                 )
                 if (receipt?.get("message_accepted") == false) throw OrbError("Message was not accepted.")
@@ -1471,7 +1535,7 @@ fun OrbConversationPage(
             } catch (e: Throwable) {
                 followUps = followUps.postFailed(clientId)
                 inputText = inputText.ifEmpty { content }
-                errorMessage = e.message ?: "Couldn't queue the message. Your text is back in the composer."
+                errorMessage = OrbCyberAccess.error(e)
             }
         }
     }
@@ -1488,6 +1552,15 @@ fun OrbConversationPage(
         val wireContent = OrbMessagePresentation.replaceUserText(before.content, content)
         followUps = followUps.edit(queueId, wireContent)
         scope.launch {
+            try {
+                OrbCyberAccess.requireFollowUp(core, id, content)
+            } catch (e: Exception) {
+                followUps = followUps.editReverted(queueId)
+                inputText = content
+                editingQueuedId = queueId
+                errorMessage = OrbCyberAccess.error(e)
+                return@launch
+            }
             val status = try {
                 core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "PATCH", body = mapOf("content" to wireContent))
                 200
@@ -1544,7 +1617,7 @@ fun OrbConversationPage(
     var followPinned by remember(missionId) { mutableStateOf(true) }
     fun syncFollow() { followPinned = transcriptFollow.pinned }
 
-    fun sendTurn(rawInput: String? = null) {
+    fun performSendTurn(rawInput: String? = null, cyberAssertion: OrbCyberSelection? = null) {
         val baseText = (rawInput ?: inputText).trim()
         if (baseText.isEmpty() && pendingAttachments.isEmpty()) return
         transcriptFollow.pin(); syncFollow()
@@ -1559,7 +1632,7 @@ fun OrbConversationPage(
             editQueued(editingId, baseText)
             return
         }
-        if (isLive && rawInput == null && missionId != null && pendingAttachments.isEmpty()) {
+        if ((handoffActive || liveRow?.let { OrbMissionTree.isLive(it) } == true) && rawInput == null && missionId != null && pendingAttachments.isEmpty()) {
             queueFollowUp(missionId, composeMode.wrapPrompt(baseText))
             inputText = ""
             return
@@ -1633,10 +1706,20 @@ fun OrbConversationPage(
                             )
                         )
                     } else {
+                        val msgBody = mutableMapOf<String, Any?>(
+                            "mission_id" to existingId,
+                            "content" to finalPrompt,
+                            "client_message_id" to UUID.randomUUID().toString()
+                        )
+                        val cyber = cyberAssertion ?: cyberSelection
+                        if (rowBackend == "codex" && cyber != null) {
+                            msgBody["cyber_access"] = cyber.mode.wire
+                            if (!cyber.revision.isNullOrEmpty()) msgBody["cyber_revision"] = cyber.revision
+                        }
                         core.request(
-                            path = "/api/control/missions/$existingId/message",
+                            path = "/api/control/message",
                             method = "POST",
-                            body = mapOf("content" to finalPrompt)
+                            body = msgBody
                         )
                     }
                     loadHistory(existingId)
@@ -1694,6 +1777,7 @@ fun OrbConversationPage(
                             "backend" to selectedBackend
                         )
                         if (tags.isNotEmpty()) nativeBody["tags"] = tags
+                        if (OrbCyberAccess.nativeCodex(selectedBackend)) nativeBody["cyber_access"] = selectedCyber.wire
                         if (selectedModel.isNotEmpty()) nativeBody["model_override"] = selectedModel
                         if (selectedWorkspaceId.isNotEmpty()) nativeBody["workspace_id"] = selectedWorkspaceId
                         if (selectedWorkspaceId.isEmpty() && selectedNodeId.isNotEmpty() && selectedNodeId != "core") {
@@ -1729,8 +1813,55 @@ fun OrbConversationPage(
                     }
                 }
             } catch (e: Throwable) {
-                errorMessage = e.message ?: "Failed to send message"
+                errorMessage = OrbCyberAccess.error(e)
             } finally {
+                isSending = false
+            }
+        }
+    }
+
+    fun sendTurn(rawInput: String? = null) {
+        if (isSending) return
+        val text = (rawInput ?: inputText).trim()
+        if (text.isEmpty() && pendingAttachments.isEmpty()) return
+        isSending = true
+        scope.launch {
+            try {
+                validateComposerSkills(composeMode.wrapPrompt(text))?.let { err ->
+                    errorMessage = err
+                    isSending = false
+                    return@launch
+                }
+                val mission = currentMission
+                if (mission != null) {
+                    val cyber = OrbCyberAccess.requireFollowUp(core, mission.id, composeMode.wrapPrompt(text))
+                    isSending = false
+                    performSendTurn(rawInput, cyber)
+                    return@launch
+                }
+                if (!OrbCyberAccess.nativeCodex(selectedBackend)) {
+                    isSending = false
+                    performSendTurn(rawInput)
+                    return@launch
+                }
+                val selection = selectedCyber
+                val backend = selectedBackend
+                val model = selectedModel
+                if (OrbCyberAccess.nativeGoal(backend, composeMode.wrapPrompt(text)) &&
+                    composeMode.wrapPrompt(text).trim().equals("/goal", ignoreCase = true))
+                    throw OrbError(OrbCyberAccess.EMPTY_GOAL)
+                val remote = (selectedWorkspaceId.isEmpty() &&
+                    selectedNodeId.isNotEmpty() && selectedNodeId != "core" &&
+                    selectedBackend !in setOf("cursor_cloud", "grok_bot", "hermes") &&
+                    !(selectedBackend == "opencode" && selectedModel.isBlank() && !nodePinnedByUser))
+                OrbCyberAccess.requireSupport(model, selection, remote,
+                    OrbCyberAccess.nativeGoal(backend, composeMode.wrapPrompt(text))) { path ->
+                    OrbJSON.dict(core.request(path)) ?: emptyMap()
+                }
+                isSending = false
+                performSendTurn(rawInput)
+            } catch (e: Exception) {
+                errorMessage = OrbCyberAccess.error(e)
                 isSending = false
             }
         }
@@ -1804,6 +1935,7 @@ fun OrbConversationPage(
         handoff = OrbHandoff(queueId, System.currentTimeMillis())
         scope.launch {
             try {
+                OrbCyberAccess.requireFollowUp(core, id, row.content)
                 val resp = OrbJSON.dict(
                     core.request("/api/control/queue/${core.encodeComponent(queueId)}/send-now?interrupt=true", method = "POST")
                 )
@@ -1811,6 +1943,7 @@ fun OrbConversationPage(
                     OrbSendFlow.SendNow.Live -> handoff = null
                     OrbSendFlow.SendNow.Promoted -> Unit // handoff ends when the new turn runs
                     OrbSendFlow.SendNow.Fallback -> {
+                        OrbCyberAccess.requireFollowUp(core, id, row.content)
                         // Older Core without promote: stop the turn, then send this message.
                         messages = messages.filterNot { it.id == localId }
                         orbTry(OrbLog.Category.Network, "/api/control/queue") {
@@ -1828,7 +1961,7 @@ fun OrbConversationPage(
                 messages = messages.filterNot { it.id == localId }
                 followUps = followUps.unhide(queueId)
                 handoff = null
-                errorMessage = e.message ?: "Couldn't send now."
+                errorMessage = OrbCyberAccess.error(e)
             }
         }
     }
@@ -2928,8 +3061,31 @@ fun OrbConversationPage(
                 }
             }
 
-            // Slash mode menu popup
-            if (showModePicker || (inputText.startsWith("/") && !inputText.contains(' '))) {
+            // Slash mode & skill menu popup
+            val slashQuery = remember(inputText, isCloudComposer) {
+                if (isCloudComposer) OrbSkillQuery(open = false, query = "", start = -1)
+                else OrbSkillSlash.skillQuery(inputText, inputText.length)
+            }
+            val slashModes = remember(showModePicker, slashQuery, composeMode) {
+                when {
+                    showModePicker -> OrbComposeMode.entries
+                    slashQuery.open && slashQuery.start == 0 && composeMode == OrbComposeMode.Message ->
+                        OrbComposeMode.entries.filter { slashQuery.query.isEmpty() || it.id.startsWith(slashQuery.query) }
+                    else -> emptyList()
+                }
+            }
+            val slashCommands = remember(showModePicker, slashQuery, missionId) {
+                if (missionId == null || (!showModePicker && !(slashQuery.open && slashQuery.start == 0))) emptyList()
+                else OrbMissionCommand.entries.filter {
+                    showModePicker || slashQuery.query.isEmpty() || it.trigger.removePrefix("/").startsWith(slashQuery.query)
+                }
+            }
+            val slashSkills = remember(slashQuery, skillItems, selectedSkillNames, isCloudComposer) {
+                if (isCloudComposer || !slashQuery.open) emptyList()
+                else OrbSkillSlash.filterSkills(skillItems, slashQuery.query, selectedSkillNames)
+            }
+            val showSlashMenu = showModePicker || (slashQuery.open && (slashModes.isNotEmpty() || slashCommands.isNotEmpty() || slashSkills.isNotEmpty() || skillCatalogError != null))
+            if (showSlashMenu) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2939,81 +3095,77 @@ fun OrbConversationPage(
                         .padding(10.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text(
-                        text = "MODES",
-                        color = OrbStyle.textMuted,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.7.sp,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                    )
-                    OrbComposeMode.entries.forEach { mode ->
-                        val active = composeMode == mode
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(if (active) OrbStyle.card else Color.Transparent)
-                                .orbPressClickable {
-                                    composeMode = mode
-                                    showModePicker = false
-                                    if (inputText.startsWith("/")) {
-                                        inputText = ""
+                    if (slashModes.isNotEmpty()) {
+                        Text(
+                            text = "MODES",
+                            color = OrbStyle.textMuted,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.7.sp,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                        slashModes.forEach { mode ->
+                            val active = composeMode == mode
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (active) OrbStyle.card else Color.Transparent)
+                                    .orbPressClickable {
+                                        composeMode = mode
+                                        showModePicker = false
+                                        if (inputText.startsWith("/")) {
+                                            inputText = ""
+                                        }
                                     }
-                                }
-                                .padding(horizontal = 10.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Icon(
-                                imageVector = when (mode) {
-                                    OrbComposeMode.Message -> Icons.Default.Code
-                                    OrbComposeMode.Plan -> Icons.Default.ListAlt
-                                    OrbComposeMode.Goal -> Icons.Default.Flag
-                                },
-                                contentDescription = null,
-                                tint = if (active) Color.White else OrbStyle.icon,
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = mode.label,
-                                    color = Color.White,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.SemiBold
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = when (mode) {
+                                        OrbComposeMode.Message -> Icons.Default.Code
+                                        OrbComposeMode.Plan -> Icons.Default.ListAlt
+                                        OrbComposeMode.Goal -> Icons.Default.Flag
+                                    },
+                                    contentDescription = null,
+                                    tint = if (active) Color.White else OrbStyle.icon,
+                                    modifier = Modifier.size(15.dp)
                                 )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = mode.label,
+                                        color = Color.White,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = mode.subtitle,
+                                        color = OrbStyle.textMuted,
+                                        fontSize = 11.sp
+                                    )
+                                }
                                 Text(
-                                    text = mode.subtitle,
+                                    text = mode.slashTrigger,
                                     color = OrbStyle.textMuted,
-                                    fontSize = 11.sp
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             }
-                            Text(
-                                text = mode.slashTrigger,
-                                color = OrbStyle.textMuted,
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace,
-                                maxLines = 1,
-                                softWrap = false
-                            )
                         }
                     }
-                    if (missionId != null) {
-                        val typed = inputText.trim().lowercase()
-                        val commands = OrbMissionCommand.entries.filter {
-                            typed.length <= 1 || it.trigger.startsWith(typed)
-                        }
-                        if (commands.isNotEmpty()) {
-                            Text(
-                                text = "COMMANDS",
-                                color = OrbStyle.textMuted,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 0.7.sp,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                            )
-                        }
-                        commands.forEach { command ->
+                    if (slashCommands.isNotEmpty()) {
+                        Text(
+                            text = "COMMANDS",
+                            color = OrbStyle.textMuted,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.7.sp,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                        slashCommands.forEach { command ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -3053,6 +3205,44 @@ fun OrbConversationPage(
                                     maxLines = 1,
                                     softWrap = false
                                 )
+                            }
+                        }
+                    }
+                    if (slashSkills.isNotEmpty() || skillCatalogError != null) {
+                        Text(
+                            text = "SKILLS",
+                            color = OrbStyle.textMuted,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.7.sp,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                        skillCatalogError?.let { err ->
+                            Text(err, color = OrbStyle.warning, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+                        }
+                        Column(modifier = Modifier.heightIn(max = 190.dp).verticalScroll(rememberScrollState())) {
+                            slashSkills.forEach { skill ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .orbPressClickable {
+                                            val inserted = OrbSkillSlash.insertSkill(inputText, inputText.length, skill.name)
+                                            inputText = inserted.first
+                                            showModePicker = false
+                                        }
+                                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(Icons.Default.Terminal, contentDescription = null, tint = OrbStyle.icon, modifier = Modifier.size(14.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(skill.name, color = Color.White, fontSize = 13.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        skill.description?.takeIf { it.isNotEmpty() }?.let {
+                                            Text(it, color = OrbStyle.textMuted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -3257,6 +3447,21 @@ fun OrbConversationPage(
                                 )
                             }
                         }
+                        selectedSkillNames.forEach { name ->
+                            Row(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(OrbStyle.card)
+                                    .border(1.dp, OrbStyle.borderStrong, CircleShape)
+                                    .orbPressClickable { inputText = OrbSkillSlash.removeSkill(inputText, name) }
+                                    .padding(horizontal = 9.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text("/$name", color = Color.White, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                                Icon(Icons.Default.Close, contentDescription = "Remove skill $name", tint = OrbStyle.textMuted, modifier = Modifier.size(11.dp))
+                            }
+                        }
 
                         // Compact Agent / Harness + Machine selector pill (matching iOS)
                         Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
@@ -3446,6 +3651,43 @@ fun OrbConversationPage(
             },
             selectedModel = selectedModel,
             onSelectModel = { selectedModel = it },
+            cyberMode = selectedCyber,
+            showCyber = OrbCyberAccess.nativeCodex(selectedBackend, currentMission?.dict("cloud")),
+            cyberSummary = if (currentMission == null) "Uses the account’s default access unless explicitly selected." else
+                cyberSelection?.summary ?: "Cyber: unavailable",
+            cyberEnabled = !cyberLoading && (currentMission == null || cyberSelection != null),
+            cyberRemote = currentMission?.let { OrbCyberAccess.remote(it) } ?: (selectedWorkspaceId.isEmpty() &&
+                selectedNodeId.isNotEmpty() && selectedNodeId != "core"),
+            onSelectCyber = { mode ->
+                if (!isSending) {
+                    val mission = currentMission
+                    val model = selectedModel
+                    val prompt = composeMode.wrapPrompt(inputText)
+                    val remote = mission?.let { OrbCyberAccess.remote(it) } ?: (selectedWorkspaceId.isEmpty() &&
+                        selectedNodeId.isNotEmpty() && selectedNodeId != "core")
+                    isSending = true
+                    scope.launch {
+                        try {
+                            if (prompt.trim().equals("/goal", ignoreCase = true))
+                                throw OrbError(OrbCyberAccess.EMPTY_GOAL)
+                            OrbCyberAccess.requireSupport(model, mode, remote,
+                                OrbCyberAccess.nativeGoal(selectedBackend, prompt)) { path ->
+                                OrbJSON.dict(core.request(path)) ?: emptyMap()
+                            }
+                            if (mission == null) selectedCyber = mode
+                            else {
+                                val patchBody = mutableMapOf<String, Any?>("mode" to mode.wire)
+                                cyberSelection?.revision?.takeIf { it.isNotEmpty() }?.let { patchBody["expected_revision"] = it }
+                                val value = OrbJSON.dict(core.request("/api/control/missions/${core.encodeComponent(mission.id)}/cyber",
+                                    method = "PATCH", body = patchBody)) ?: throw OrbError("Cyber settings unavailable")
+                                cyberSelection = OrbCyberSelection.parse(value)
+                                selectedCyber = cyberSelection!!.mode
+                            }
+                        } catch (e: Exception) { errorMessage = OrbCyberAccess.error(e) }
+                        finally { isSending = false }
+                    }
+                }
+            },
             selectedWorkspaceId = selectedWorkspaceId,
             onSelectWorkspaceId = {
                 selectedWorkspaceId = it
@@ -3487,6 +3729,7 @@ fun OrbConversationPage(
                     scope.launch {
                         try {
                             val source = currentMission ?: throw OrbError("Conversation unavailable.")
+                            OrbCyberAccess.requireInherited(core, source.id, selectedBackend, selectedModel, "")
                             val base = "/api/control/missions/${core.encodeComponent(source.id)}"
                             var next = transferredMission
                             if (next == null) {
@@ -3655,6 +3898,8 @@ private fun OrbUserBubble(
             else -> null
         }
     }
+    val skillNames = remember(parsed.body) { OrbSkillSlash.skillTokens(parsed.body).map { it.name }.distinct() }
+    val visibleBody = remember(parsed.body) { OrbSkillSlash.skillPreview(parsed.body) }
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -3670,7 +3915,7 @@ private fun OrbUserBubble(
                 .orbShimmer(active = turn.isPending),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            if (modeBadge != null || presentation.attached) {
+            if (modeBadge != null || skillNames.isNotEmpty() || presentation.attached) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -3680,6 +3925,21 @@ private fun OrbUserBubble(
                             text = modeBadge,
                             color = OrbStyle.textSecondary,
                             fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(OrbStyle.elevated)
+                                .padding(horizontal = 7.dp, vertical = 2.dp)
+                        )
+                    }
+                    skillNames.forEach { name ->
+                        Text(
+                            text = "/$name",
+                            color = OrbStyle.textSecondary,
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             softWrap = false,
@@ -3747,9 +4007,9 @@ private fun OrbUserBubble(
                     }
                 }
             }
-            if (parsed.body.isNotEmpty()) {
+            if (visibleBody.isNotEmpty()) {
                 Text(
-                    text = parsed.body,
+                    text = visibleBody,
                     color = Color.White,
                     fontSize = 15.sp,
                     lineHeight = 21.sp
@@ -4209,6 +4469,12 @@ fun OrbAgentPickerSheet(
     onSelectBackend: (String) -> Unit,
     selectedModel: String,
     onSelectModel: (String) -> Unit,
+    cyberMode: OrbCyberMode = OrbCyberMode.Automatic,
+    showCyber: Boolean = false,
+    cyberRemote: Boolean = false,
+    cyberSummary: String = "",
+    cyberEnabled: Boolean = true,
+    onSelectCyber: (OrbCyberMode) -> Unit = {},
     selectedWorkspaceId: String,
     onSelectWorkspaceId: (String) -> Unit,
     selectedNodeId: String = "",
@@ -4903,6 +5169,23 @@ fun OrbAgentPickerSheet(
                 }
             }
 
+            if (showCyber) {
+                Text("Cyber program", color = OrbStyle.textMuted, fontSize = 12.sp)
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    OrbCyberMode.entries.forEach { mode ->
+                        TextButton(enabled = !locked && cyberEnabled, onClick = { onSelectCyber(mode) }) {
+                            Text("${if (mode == cyberMode) "✓ " else ""}${mode.label}", color = Color.White)
+                        }
+                    }
+                    Text(cyberSummary, color = OrbStyle.textMuted, fontSize = 12.sp)
+                    if (!cyberRemote || selectedModel.isNotBlank()) {
+                        OrbCyberAccess.compatibility(cyberMode, selectedModel)?.let {
+                            Text(it, color = OrbStyle.textMuted, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+
             // Model override
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
@@ -5295,7 +5578,7 @@ private fun OrbFollowUpRow(
             horizontalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             Text(
-                text = OrbMessagePresentation.parse(row.content).text.trim(),
+                text = OrbSkillSlash.skillPreview(OrbMessagePresentation.parse(row.content).text.trim()),
                 color = if (editing) OrbStyle.textMuted else Color.White,
                 fontSize = 13.sp,
                 maxLines = 1,

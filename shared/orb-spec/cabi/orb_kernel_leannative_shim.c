@@ -190,6 +190,11 @@ extern uint64_t probe_orb_composer_default_step(uint64_t, uint64_t, uint64_t, ui
 extern uint64_t probe_orb_cloud_handoff_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 extern uint64_t probe_orb_fast_poll_delay_ms(uint64_t, uint64_t, uint64_t);
 extern uint64_t probe_orb_mcp_preflight_cache_gate(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+extern uint64_t probe_orb_codex_goal_launch_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+extern uint64_t probe_orb_codex_goal_preact_filter(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+extern uint64_t probe_orb_skill_slash_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+extern uint64_t probe_orb_worktree_decision_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+extern uint64_t probe_orb_repo_diff_budget_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 uint8_t orb_verify_writer_reuse(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5) { return (uint8_t)probe_orb_verify_writer_reuse((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5); }
 uint8_t orb_verify_lease_mode(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3) { return (uint8_t)probe_orb_verify_lease_mode((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3); }
@@ -367,3 +372,8 @@ uint8_t orb_composer_default_step(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3
 uint32_t orb_cloud_handoff_step(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4) { return (uint32_t)probe_orb_cloud_handoff_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4); }
 uint64_t orb_fast_poll_delay_ms(uint8_t a0, uint64_t a1, uint32_t a2) { return (uint64_t)probe_orb_fast_poll_delay_ms((uint64_t)a0, (uint64_t)a1, (uint64_t)a2); }
 uint8_t orb_mcp_preflight_cache_gate(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint64_t a4, uint64_t a5) { return (uint8_t)probe_orb_mcp_preflight_cache_gate((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5); }
+uint32_t orb_codex_goal_launch_step(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5, uint8_t a6, uint8_t a7, uint8_t a8) { return (uint32_t)probe_orb_codex_goal_launch_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6, (uint64_t)a7, (uint64_t)a8); }
+uint8_t orb_codex_goal_preact_filter(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5, uint8_t a6) { return (uint8_t)probe_orb_codex_goal_preact_filter((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6); }
+uint64_t orb_skill_slash_step(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7) { return (uint64_t)probe_orb_skill_slash_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6, (uint64_t)a7); }
+uint32_t orb_worktree_decision_step(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5, uint32_t a6, uint32_t a7, uint32_t a8, uint32_t a9) { return (uint32_t)probe_orb_worktree_decision_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6, (uint64_t)a7, (uint64_t)a8, (uint64_t)a9); }
+uint64_t orb_repo_diff_budget_step(uint8_t a0, uint8_t a1, uint8_t a2, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8, uint32_t a9) { return (uint64_t)probe_orb_repo_diff_budget_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6, (uint64_t)a7, (uint64_t)a8, (uint64_t)a9); }

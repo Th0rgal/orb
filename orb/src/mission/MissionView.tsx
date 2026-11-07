@@ -7,7 +7,8 @@ import {CodexSpeedPicker, missionSpeed} from '../CodexSpeedPicker';
 import { Picker } from "../Picker";
 import { Popover } from "../Popover";
 import { RemoteQueue, type RemoteQueueHandle } from "../RemoteQueue";
-import { MissionCyber } from "../cyberAccess";
+import { MissionCyber, getCyber, requireCyberSupport } from "../cyberAccess";
+import { EMPTY_GOAL_ERROR, goalDraft } from "../goal";
 import {NextReminder} from "../AutomaticReminder";
 import { LazyCloudConversation, peekCloudAgentsModule } from "../cloudAgentsLoader";
 import {QueuedMessages} from "../QueuedMessages";
@@ -1045,10 +1046,15 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         return false;
       }
       try {
-        // After a project move, the next turn runs in the new project's folder.
         const next = await followProjectFolder(sendMission, project);
         const binding = next?.binding;
         if (!binding) throw new Error("This session runs on the computer that started it. Your draft is kept.");
+        if (binding.harness === "codex") {
+          const goal = goalDraft(text);
+          if (goal.kind === "empty") throw new Error(EMPTY_GOAL_ERROR);
+          const cyber = await getCyber(sendMission);
+          await requireCyberSupport({ model: mission()?.model_override ?? binding.model ?? "", mode: cyber.mode, remote: false, goal: goal.kind === "goal" });
+        }
         const [plan, , imagePaths] = await Promise.all([
           materializeMentions(project, text, chips).then(async plan => {
             if (plan.files.length) await writeLocalFiles(binding.cwd, plan.files);
@@ -1515,6 +1521,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             uploadTarget={clientPlaced() ? "local" : missionAssignedNode(mission()) ?? "core"}
             backend={mission()?.backend}
             projectSlug={mission()?.project ?? undefined}
+            workspaceId={mission()?.workspace_id && mission()?.workspace_id !== "00000000-0000-0000-0000-000000000000" ? mission()?.workspace_id : undefined}
+            missionId={p.id}
             onAttachments={setFollowAttach}
           />
           <ErrorToast title="Couldn’t send your message" error={p.launchError} action={p.onRetryLaunch ? { label: "Retry", run: p.onRetryLaunch } : undefined} />

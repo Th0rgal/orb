@@ -234,4 +234,175 @@ final class OrbSendFlowTests: XCTestCase {
         XCTAssertEqual(c?.label, "Waiting for a free slot (4/4 in use)…")
         XCTAssertEqual(c?.canForce, true)
     }
+
+    func testCyberGoalDetectionAndDefaultAutomatic() {
+        XCTAssertEqual(OrbSelection().cyberMode, "automatic")
+        XCTAssertTrue(OrbCyberAccess.isGoal("/goal ship tests"))
+        XCTAssertTrue(OrbCyberAccess.isGoal(" /GOAL\tship tests"))
+        XCTAssertTrue(OrbCyberAccess.isGoal("  /goal"))
+        XCTAssertTrue(OrbCyberAccess.isGoal("ship tests", mode: "Goal"))
+        XCTAssertFalse(OrbCyberAccess.isGoal("Continue from where you left off."))
+        XCTAssertFalse(OrbCyberAccess.isGoal("/goals are listed"))
+        XCTAssertNotNil(OrbCyberAccess.emptyGoalError("/goal   "))
+        XCTAssertNotNil(OrbCyberAccess.emptyGoalError("   ", mode: "Goal"))
+        XCTAssertNil(OrbCyberAccess.emptyGoalError("/goal Make the suite pass"))
+    }
+
+    func testCyberCapabilityPathAndConfirmationEvidence() {
+        XCTAssertEqual(OrbCyberAccess.capabilityPath(model: "  ", mode: "standard", remote: true), "/api/control/cyber-capabilities?mode=standard&remote=true")
+        XCTAssertEqual(OrbCyberAccess.capabilityPath(model: "gpt-6.1-sol", mode: "daybreak", remote: false), "/api/control/cyber-capabilities?model=gpt-6.1-sol&mode=daybreak&remote=false")
+        XCTAssertFalse(OrbCyberAccess.confirmed(.object(["status": .string("requested"), "confirmed_program": .string("daybreak_blue")])))
+        XCTAssertFalse(OrbCyberAccess.confirmed(.object(["status": .string("confirmed"), "confirmed_program": .null])))
+        XCTAssertTrue(OrbCyberAccess.confirmed(.object(["status": .string("confirmed"), "confirmed_program": .string("daybreak_blue")])))
+    }
+
+    func testCyberModelCompatibilityAndErrorsMirrorDesktop() {
+        XCTAssertTrue(OrbCyberAccess.compatibility(mode: "automatic", model: "gpt-daybreak-blue-latest")?.contains("retired") == true)
+        XCTAssertTrue(OrbCyberAccess.compatibility(mode: "automatic", model: "openai/gpt-daybreak-red-latest")?.contains("gpt-5.6-cyber") == true)
+        XCTAssertEqual(OrbCyberAccess.compatibility(mode: "standard", model: "gpt-5.6-cyber"), "This model requires Daybreak. Choose Daybreak or Automatic, or change the model.")
+        XCTAssertEqual(OrbCyberAccess.compatibility(mode: "daybreak", model: "gpt-4o"), "Daybreak support has not been established for this model.")
+        XCTAssertNil(OrbCyberAccess.compatibility(mode: "daybreak", model: "gpt-6.1-sol"))
+        XCTAssertTrue(OrbCyberAccess.error(OrbHTTPError(status: 400, detail: "access_program_not_enabled")).contains("The model was not changed."))
+        XCTAssertTrue(OrbCyberAccess.error(OrbHTTPError(status: 400, detail: "unsupported_access_program")).contains("explicitly select Automatic"))
+    }
+
+    @MainActor
+    func testCyberFollowUpSkipsOtherBackendsAndCloud() async throws {
+        for mission in [
+            OrbJSON.object(["id": .string("m"), "backend": .string("opencode")]),
+            OrbJSON.object(["id": .string("m"), "backend": .string("codex"), "cloud": .object(["provider": .string("chatgpt")])]),
+        ] {
+            try await OrbCyberAccess.requireFollowUp("/goal", mission: mission) { _ in
+                XCTFail("Only native Codex may request Cyber settings")
+                return .null
+            }
+        }
+    }
+
+    @MainActor
+    func testCyberCapabilityRejectsBeforeMutationAndPreservesDraftAndSelection() async {
+        var selection = OrbSelection(backend: "codex", model: "gpt-6.1-sol", node: "nippur", cyberMode: "daybreak")
+        var draft = "/goal audit harness"
+        var mutations = 0
+
+        do {
+            try await OrbCyberAccess.require(model: selection.model, mode: selection.cyberMode, remote: true, goal: OrbCyberAccess.isGoal(draft)) { _ in
+                .object(["version": .number(2), "native_goals_explicit": .bool(false), "route_supported": .bool(true)])
+            }
+            mutations += 1
+            XCTFail("Expected explicit cyber + native goal to be rejected")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("native goals"))
+        }
+        XCTAssertEqual(mutations, 0)
+        XCTAssertEqual(draft, "/goal audit harness")
+        XCTAssertEqual(selection.cyberMode, "daybreak")
+        XCTAssertEqual(selection.model, "gpt-6.1-sol")
+
+        do {
+            try await OrbCyberAccess.require(model: "", mode: "standard", remote: true, goal: false) { path in
+                XCTAssertEqual(path, "/api/control/cyber-capabilities?mode=standard&remote=true")
+                return .object(["version": .number(2), "native_goals_explicit": .bool(false)])
+            }
+            mutations += 1
+            XCTFail("Expected missing route_supported on remote explicit mode to fail closed")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("Cyber route"))
+        }
+        XCTAssertEqual(mutations, 0)
+        do {
+            try await OrbCyberAccess.require(model: "  ", mode: "daybreak", remote: true, goal: false) { path in
+                XCTAssertFalse(path.contains("model="))
+                return .object(["version": .number(2), "route_supported": .bool(true)])
+            }
+        } catch {
+            XCTFail("Core must resolve the default model for an explicit remote program: \(error)")
+        }
+
+        selection.cyberMode = "standard"
+        draft = "Plain follow-up on a paused historical goal"
+        do {
+            try await OrbCyberAccess.require(model: selection.model, mode: selection.cyberMode, remote: false, goal: OrbCyberAccess.isGoal(draft)) { _ in
+                .object(["version": .number(2), "native_goals_explicit": .bool(false), "route_supported": .bool(true)])
+            }
+        } catch {
+            XCTFail("Plain follow-up text must not be treated as a native /goal request: \(error)")
+        }
+
+        let historicalGoalMission = OrbJSON.object([
+            "id": .string("m-goal"),
+            "backend": .string("codex"),
+            "goal_mode": .bool(true),
+            "model_override": .string("gpt-6.1-sol"),
+        ])
+        do {
+            try await OrbCyberAccess.requireFollowUp("Continue from where you left off.", mission: historicalGoalMission) { path in
+                if path.hasSuffix("/cyber") { return .object(["mode": .string("daybreak"), "status": .string("requested"), "revision": .string("r1")]) }
+                return .object(["version": .number(2), "native_goals_explicit": .bool(false), "route_supported": .bool(true)])
+            }
+        } catch {
+            XCTFail("Historical goal_mode must not reject a plain follow-up turn: \(error)")
+        }
+
+        do {
+            try await OrbCyberAccess.requireFollowUp("/goal run full verification", mission: historicalGoalMission) { path in
+                if path.hasSuffix("/cyber") { return .object(["mode": .string("daybreak"), "status": .string("requested"), "revision": .string("r1")]) }
+                return .object(["version": .number(2), "native_goals_explicit": .bool(false), "route_supported": .bool(true)])
+            }
+            XCTFail("Explicit /goal follow-up with explicit Cyber must reject before message POST")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("native goals"))
+        }
+
+        var nonCodexCalls = 0
+        do {
+            try await OrbCyberAccess.requireFollowUp("/goal   ", mission: .object(["id": .string("m-claude"), "backend": .string("claudecode")])) { _ in
+                nonCodexCalls += 1
+                return .null
+            }
+        } catch {
+            XCTFail("Non-Codex follow-up must not call Cyber endpoints or native Codex goal validation: \(error)")
+        }
+        XCTAssertEqual(nonCodexCalls, 0)
+    }
+
+    func testSkillSlashParserAndKernelValidation() {
+        let skills = [
+            OrbSkillChoice(name: "rust-audit", description: "Audit Rust and FFI boundaries"),
+            OrbSkillChoice(name: "lean-proof", description: "Check Lean 4 invariants"),
+        ]
+        let available = Set(skills.map(\.name))
+
+        let q1 = OrbSkillSlash.skillQuery("Please run /ru", caret: 14)
+        XCTAssertTrue(q1.open)
+        XCTAssertEqual(q1.query, "ru")
+        XCTAssertEqual(q1.start, 11)
+        XCTAssertEqual(OrbSkillSlash.filterSkills(skills, query: q1.query, selected: []).map(\.name), ["rust-audit"])
+
+        XCTAssertFalse(OrbSkillSlash.skillQuery("/skill:rust-audit", caret: 17).open)
+        XCTAssertFalse(OrbSkillSlash.skillQuery("src/foo/bar", caret: 11).open)
+
+        let inserted = OrbSkillSlash.insertSkill("Please run /ru now", caret: 14, name: "rust-audit")
+        XCTAssertEqual(inserted.text, "Please run /skill:rust-audit  now")
+        XCTAssertEqual(OrbSkillSlash.selectedSkillNames(inserted.text, available: available), ["rust-audit"])
+        XCTAssertEqual(OrbSkillSlash.removeSkill(inserted.text, name: "rust-audit"), "Please run now")
+        XCTAssertEqual(OrbSkillSlash.skillPreview("Use /skill:rust-audit and /skill:lean-proof"), "Use /rust-audit and /lean-proof")
+        XCTAssertEqual(OrbStyle.missionTitle("/goal /skill:rust-audit inspect kernel"), "/rust-audit inspect kernel")
+
+        XCTAssertNil(OrbSkillSlash.validateSkillSelection("/skill:rust-audit /skill:rust-audit check", harness: "codex", available: available))
+        XCTAssertEqual(
+            OrbSkillSlash.validateSkillSelection("/skill:missing check", harness: "opencode", available: available),
+            "Selected skill is not delivered to this mission: missing"
+        )
+        XCTAssertEqual(
+            OrbSkillSlash.validateSkillSelection("/skill:../escape check", harness: "claudecode", available: available.union(["../escape"])),
+            "Invalid /skill: identifier (use at most 64 ASCII letters, numbers, '.', '_' or '-', without '..')"
+        )
+        let nine = (1...9).map { "s\($0)" }
+        let ninePrompt = nine.map { "/skill:\($0)" }.joined(separator: " ")
+        XCTAssertEqual(
+            OrbSkillSlash.validateSkillSelection(ninePrompt, harness: "codex", available: Set(nine)),
+            "Select at most 8 distinct skills"
+        )
+    }
 }

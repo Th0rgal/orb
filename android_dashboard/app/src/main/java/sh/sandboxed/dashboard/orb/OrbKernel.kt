@@ -840,6 +840,70 @@ object OrbKernel {
         targetPlacementValid: Int
     ): Int
 
+    @JvmStatic
+    external fun orbCodexGoalLaunchStep(
+        isGoalRequest: Int,
+        hasNonEmptyObjective: Int,
+        hasImages: Int,
+        hasExplicitCyber: Int,
+        hasChatGptAuth: Int,
+        modelCompatible: Int,
+        accountSupportsProgram: Int,
+        resumedGoalActive: Int,
+        hasRetiredAlias: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbCodexGoalPreactFilter(
+        msgKind: Int,
+        isRequest: Int,
+        sameThread: Int,
+        hasTurnId: Int,
+        threadAlreadyActive: Int,
+        goalGetWasNull: Int,
+        snapshotMatchesGoalGet: Int
+    ): Byte
+
+    @JvmStatic
+    external fun orbSkillSlashStep(
+        harnessKind: Int,
+        isDelivered: Int,
+        alreadySelected: Int,
+        nameCharsValid: Int,
+        nameLen: Int,
+        maxNameLen: Int,
+        selectedCount: Int,
+        maxSelected: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbWorktreeDecisionStep(
+        opKind: Int,
+        isOccupied: Int,
+        isGitRepo: Int,
+        branchCharsValid: Int,
+        targetPathExists: Int,
+        parentDirValid: Int,
+        slugLen: Int,
+        maxSlugLen: Int,
+        activeWorktrees: Int,
+        maxWorktrees: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbRepoDiffBudgetStep(
+        isGitRepo: Int,
+        pathSafe: Int,
+        hasUntracked: Int,
+        modifiedCount: Int,
+        stagedCount: Int,
+        aheadCount: Int,
+        behindCount: Int,
+        diffBytes: Int,
+        maxFiles: Int,
+        maxBytes: Int
+    ): Long
+
     data class WorkfoldVerdict(val foldItem: Boolean, val foldHasToolNext: Boolean)
 
     private fun bInt(v: Boolean): Int = if (v) 1 else 0
@@ -1645,5 +1709,189 @@ object OrbKernel {
         )
         if ((raw and 1) == 0) return CloudHandoffStepResult.DENY
         return if (((raw ushr 24) and 1) != 0) CloudHandoffStepResult.ALLOW_HANDOFF else CloudHandoffStepResult.ALLOW_NATIVE_FORK
+    }
+
+    data class CodexGoalLaunchVerdict(
+        val admitted: Boolean,
+        val goalMode: Boolean,
+        val rejectCode: Int
+    )
+
+    fun codexGoalLaunchStep(
+        isGoalRequest: Boolean,
+        hasNonEmptyObjective: Boolean,
+        hasImages: Boolean,
+        hasExplicitCyber: Boolean,
+        hasChatGptAuth: Boolean,
+        modelCompatible: Boolean,
+        accountSupportsProgram: Boolean,
+        resumedGoalActive: Boolean,
+        hasRetiredAlias: Boolean
+    ): CodexGoalLaunchVerdict {
+        requireNative()
+        val raw = orbCodexGoalLaunchStep(
+            bInt(isGoalRequest),
+            bInt(hasNonEmptyObjective),
+            bInt(hasImages),
+            bInt(hasExplicitCyber),
+            bInt(hasChatGptAuth),
+            bInt(modelCompatible),
+            bInt(accountSupportsProgram),
+            bInt(resumedGoalActive),
+            bInt(hasRetiredAlias)
+        )
+        val admitted = (raw and 256) != 0
+        return CodexGoalLaunchVerdict(
+            admitted = admitted,
+            goalMode = (raw and 512) != 0,
+            rejectCode = if (admitted) 0 else (raw and 0xFF)
+        )
+    }
+
+    fun codexGoalPreactFilter(
+        msgKind: Int,
+        isRequest: Boolean,
+        sameThread: Boolean,
+        hasTurnId: Boolean,
+        threadAlreadyActive: Boolean,
+        goalGetWasNull: Boolean,
+        snapshotMatchesGoalGet: Boolean
+    ): Boolean {
+        requireNative()
+        return orbCodexGoalPreactFilter(
+            enum8(msgKind),
+            bInt(isRequest),
+            bInt(sameThread),
+            bInt(hasTurnId),
+            bInt(threadAlreadyActive),
+            bInt(goalGetWasNull),
+            bInt(snapshotMatchesGoalGet)
+        ).toInt() == 1
+    }
+
+    data class SkillSlashVerdict(
+        val admitted: Boolean,
+        val strategy: Int,
+        val rejectCode: Int,
+        val nextSelectedCount: Int
+    )
+
+    fun skillSlashStep(
+        harnessKind: Int,
+        isDelivered: Boolean,
+        alreadySelected: Boolean,
+        nameCharsValid: Boolean,
+        nameLen: Int,
+        maxNameLen: Int,
+        selectedCount: Int,
+        maxSelected: Int
+    ): SkillSlashVerdict {
+        requireNative()
+        val raw = orbSkillSlashStep(
+            enum8(harnessKind),
+            bInt(isDelivered),
+            bInt(alreadySelected),
+            bInt(nameCharsValid),
+            maxOf(0, nameLen),
+            maxOf(0, maxNameLen),
+            maxOf(0, selectedCount),
+            maxOf(0, maxSelected)
+        )
+        val lo32 = (raw and 0xFFFF_FFFFL).toInt()
+        val hi32 = ((raw ushr 32) and 0xFFFF_FFFFL).toInt()
+        val admitted = (lo32 and 256) != 0
+        return SkillSlashVerdict(
+            admitted = admitted,
+            strategy = (lo32 ushr 16) and 0xFF,
+            rejectCode = if (admitted) 0 else (lo32 and 0xFF),
+            nextSelectedCount = hi32
+        )
+    }
+
+    data class WorktreeDecisionVerdict(
+        val admitted: Boolean,
+        val offerWorktree: Boolean,
+        val actionOrRejectCode: Int
+    )
+
+    fun worktreeDecisionStep(
+        opKind: Int,
+        isOccupied: Boolean,
+        isGitRepo: Boolean,
+        branchCharsValid: Boolean,
+        targetPathExists: Boolean,
+        parentDirValid: Boolean,
+        slugLen: Int,
+        maxSlugLen: Int,
+        activeWorktrees: Int,
+        maxWorktrees: Int
+    ): WorktreeDecisionVerdict {
+        requireNative()
+        val raw = orbWorktreeDecisionStep(
+            enum8(opKind),
+            bInt(isOccupied),
+            bInt(isGitRepo),
+            bInt(branchCharsValid),
+            bInt(targetPathExists),
+            bInt(parentDirValid),
+            maxOf(0, slugLen),
+            maxOf(0, maxSlugLen),
+            maxOf(0, activeWorktrees),
+            maxOf(0, maxWorktrees)
+        )
+        return WorktreeDecisionVerdict(
+            admitted = (raw and 256) != 0,
+            offerWorktree = (raw and 512) != 0,
+            actionOrRejectCode = raw and 0xFF
+        )
+    }
+
+    data class RepoDiffBudgetVerdict(
+        val admitted: Boolean,
+        val dirty: Boolean,
+        val truncatedFiles: Boolean,
+        val truncatedBytes: Boolean,
+        val syncState: Int,
+        val rejectCode: Int,
+        val clampedBytes: Int
+    )
+
+    fun repoDiffBudgetStep(
+        isGitRepo: Boolean,
+        pathSafe: Boolean,
+        hasUntracked: Boolean,
+        modifiedCount: Int,
+        stagedCount: Int,
+        aheadCount: Int,
+        behindCount: Int,
+        diffBytes: Int,
+        maxFiles: Int,
+        maxBytes: Int
+    ): RepoDiffBudgetVerdict {
+        requireNative()
+        val raw = orbRepoDiffBudgetStep(
+            bInt(isGitRepo),
+            bInt(pathSafe),
+            bInt(hasUntracked),
+            maxOf(0, modifiedCount),
+            maxOf(0, stagedCount),
+            maxOf(0, aheadCount),
+            maxOf(0, behindCount),
+            maxOf(0, diffBytes),
+            maxOf(0, maxFiles),
+            maxOf(0, maxBytes)
+        )
+        val lo32 = (raw and 0xFFFF_FFFFL).toInt()
+        val hi32 = ((raw ushr 32) and 0xFFFF_FFFFL).toInt()
+        val admitted = (lo32 and 256) != 0
+        return RepoDiffBudgetVerdict(
+            admitted = admitted,
+            dirty = (lo32 and 512) != 0,
+            truncatedFiles = (lo32 and 1024) != 0,
+            truncatedBytes = (lo32 and 2048) != 0,
+            syncState = (lo32 ushr 16) and 0xFF,
+            rejectCode = if (admitted) 0 else (lo32 and 0xFF),
+            clampedBytes = hi32
+        )
     }
 }

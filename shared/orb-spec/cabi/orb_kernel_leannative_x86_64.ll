@@ -588,7 +588,7 @@ ite_else_374.i:                                   ; preds = %ite_else_333.i
   %spec.select81.i = select i1 %cmp_lt_420.not.i, i64 %a1, i64 %alu_431.i
   br label %probe_orb_account_cooldown_secs.exit
 
-probe_orb_account_cooldown_secs.exit:             ; preds = %ite_then_23.i, %ite_else_37.i, %ite_then_55.i, %ite_else_24.i, %ite_then_138.i, %ite_else_139.i, %ite_then_203.i, %ite_else_219.i, %ite_then_259.i, %ite_else_204.i, %ite_then_373.i, %ite_else_374.i
+probe_orb_account_cooldown_secs.exit:             ; preds = %ite_else_374.i, %ite_then_373.i, %ite_else_204.i, %ite_then_259.i, %ite_else_219.i, %ite_then_203.i, %ite_else_139.i, %ite_then_138.i, %ite_else_24.i, %ite_then_55.i, %ite_else_37.i, %ite_then_23.i
   %common.ret.op.i = phi i64 [ 600, %ite_then_23.i ], [ 600, %ite_else_37.i ], [ 600, %ite_else_24.i ], [ %.arg_v1.i, %ite_else_139.i ], [ %a0, %ite_then_203.i ], [ %a0, %ite_else_219.i ], [ %spec.select.i, %ite_then_55.i ], [ %spec.select78.i, %ite_then_138.i ], [ %spec.select79.i, %ite_then_259.i ], [ %spec.select80.i, %ite_then_373.i ], [ %spec.select81.i, %ite_else_374.i ], [ %a0, %ite_else_204.i ]
   ret i64 %common.ret.op.i
 }
@@ -612,7 +612,7 @@ ite_else_11.i:                                    ; preds = %entry
   %alu_49.i = mul i64 %a6, %a2
   br label %probe_orb_cost_cents_step.exit
 
-probe_orb_cost_cents_step.exit:                   ; preds = %ite_then_10.i, %ite_else_11.i
+probe_orb_cost_cents_step.exit:                   ; preds = %ite_else_11.i, %ite_then_10.i
   %alu_49.sink.i = phi i64 [ %alu_49.i, %ite_else_11.i ], [ %alu_15.i, %ite_then_10.i ]
   %alu_46.sink.i = phi i64 [ %alu_46.i, %ite_else_11.i ], [ %alu_19.i, %ite_then_10.i ]
   %alu_55.i = mul i64 %a7, %a3
@@ -764,7 +764,7 @@ ite_then_255.i:                                   ; preds = %ite_then_242.i
   %.18.i = select i1 %cmp_eq_261.not.i, i32 33554690, i32 50331906
   br label %probe_orb_turn_summary_step.exit
 
-probe_orb_turn_summary_step.exit:                 ; preds = %ite_then_44.i, %ite_then_57.i, %ite_then_70.i, %ite_else_45.i, %ite_then_113.i, %ite_then_126.i, %ite_else_32.i, %ite_then_199.i, %ite_then_212.i, %ite_else_19.i, %ite_then_242.i, %ite_then_255.i
+probe_orb_turn_summary_step.exit:                 ; preds = %ite_then_255.i, %ite_then_242.i, %ite_else_19.i, %ite_then_212.i, %ite_then_199.i, %ite_else_32.i, %ite_then_126.i, %ite_then_113.i, %ite_else_45.i, %ite_then_70.i, %ite_then_57.i, %ite_then_44.i
   %common.ret.op.i = phi i32 [ %..i, %ite_then_70.i ], [ 16777216, %ite_then_57.i ], [ 0, %ite_then_44.i ], [ %.16.i, %ite_then_126.i ], [ 16777216, %ite_then_113.i ], [ 65537, %ite_else_45.i ], [ %.17.i, %ite_then_212.i ], [ 16777219, %ite_then_199.i ], [ 3, %ite_else_32.i ], [ %.18.i, %ite_then_255.i ], [ 16777474, %ite_then_242.i ], [ 258, %ite_else_19.i ]
   ret i32 %common.ret.op.i
 }
@@ -861,7 +861,7 @@ ite_else_737.i:                                   ; preds = %ite_else_623.i
 ite_else_13.i:                                    ; preds = %entry
   br label %probe_orb_usage_limit_status.exit
 
-probe_orb_usage_limit_status.exit:                ; preds = %entry, %ite_else_39.i, %ite_then_117.i, %ite_then_130.i, %ite_then_242.i, %ite_else_290.i, %ite_then_367.i, %ite_else_26.i, %ite_then_635.i, %ite_else_636.i, %ite_else_679.i, %ite_else_623.i, %ite_else_737.i, %ite_else_13.i
+probe_orb_usage_limit_status.exit:                ; preds = %ite_else_13.i, %ite_else_737.i, %ite_else_623.i, %ite_else_679.i, %ite_else_636.i, %ite_then_635.i, %ite_else_26.i, %ite_then_367.i, %ite_else_290.i, %ite_then_242.i, %ite_then_130.i, %ite_then_117.i, %ite_else_39.i, %entry
   %common.ret.op.i = phi i64 [ %alu_137.i, %ite_then_130.i ], [ %alu_249.i, %ite_then_242.i ], [ %alu_374.i, %ite_then_367.i ], [ %alu_642.i, %ite_then_635.i ], [ %alu_702.i, %ite_else_679.i ], [ %alu_760.i, %ite_else_737.i ], [ 0, %ite_else_13.i ], [ 3, %entry ], [ 2, %ite_else_39.i ], [ -1086626725886, %ite_then_117.i ], [ 1103806595074, %ite_else_290.i ], [ 1, %ite_else_26.i ], [ 513, %ite_else_636.i ], [ 257, %ite_else_623.i ]
   ret i64 %common.ret.op.i
 }
@@ -922,7 +922,7 @@ ite_else_95.i:                                    ; preds = %ite_else_22.i
   %alu_102.i = zext nneg i16 %5 to i64
   br label %probe_orb_relative_time_bucket.exit
 
-probe_orb_relative_time_bucket.exit:              ; preds = %entry, %ite_then_45.i, %ite_then_59.i, %ite_else_46.i, %ite_else_34.i, %ite_else_22.i, %ite_else_95.i
+probe_orb_relative_time_bucket.exit:              ; preds = %ite_else_95.i, %ite_else_22.i, %ite_else_34.i, %ite_else_46.i, %ite_then_59.i, %ite_then_45.i, %entry
   %common.ret.op.i = phi i64 [ %alu_66.i, %ite_then_59.i ], [ %alu_74.i, %ite_else_46.i ], [ %alu_81.i, %ite_else_34.i ], [ %alu_102.i, %ite_else_95.i ], [ 1099511627524, %ite_then_45.i ], [ 257, %ite_else_22.i ], [ 0, %entry ]
   ret i64 %common.ret.op.i
 }
@@ -2563,7 +2563,7 @@ ite_else_8014.i:                                  ; preds = %ite_else_7434.i
   %alu_8243.i = or disjoint i64 %alu_8241.i, 256
   br label %probe_orb_stream_commit_step.exit
 
-probe_orb_stream_commit_step.exit:                ; preds = %ite_then_97.i, %ite_else_128.i, %ite_else_115.i, %ite_then_166.i, %ite_else_197.i, %ite_else_184.i, %ite_then_272.i, %ite_else_305.i, %ite_else_292.i, %ite_then_343.i, %ite_else_376.i, %ite_else_363.i, %ite_then_501.i, %ite_else_532.i, %ite_else_519.i, %ite_then_570.i, %ite_else_601.i, %ite_else_588.i, %ite_then_676.i, %ite_else_709.i, %ite_else_696.i, %ite_then_747.i, %ite_else_780.i, %ite_else_767.i, %ite_then_903.i, %ite_else_934.i, %ite_else_921.i, %ite_then_972.i, %ite_else_1003.i, %ite_else_990.i, %ite_then_1078.i, %ite_else_1111.i, %ite_else_1098.i, %ite_then_1149.i, %ite_else_1182.i, %ite_else_1169.i, %ite_then_1277.i, %ite_then_1318.i, %ite_else_1319.i, %ite_then_1379.i, %ite_then_1420.i, %ite_else_1421.i, %ite_then_1468.i, %ite_then_1509.i, %ite_else_1510.i, %ite_else_1456.i, %ite_then_1946.i, %ite_then_1987.i, %ite_else_1988.i, %ite_else_1934.i, %ite_then_2484.i, %ite_else_2485.i, %ite_else_2472.i, %ite_then_2541.i, %ite_else_2542.i, %ite_else_2529.i, %ite_then_2619.i, %ite_else_2620.i, %ite_else_2607.i, %ite_then_2678.i, %ite_else_2679.i, %ite_else_2666.i, %ite_then_2778.i, %ite_else_2779.i, %ite_else_2766.i, %ite_then_2835.i, %ite_else_2836.i, %ite_else_2823.i, %ite_then_2913.i, %ite_else_2914.i, %ite_else_2901.i, %ite_then_2972.i, %ite_else_2973.i, %ite_else_2960.i, %ite_then_3070.i, %ite_else_3071.i, %ite_else_3058.i, %ite_then_3127.i, %ite_else_3128.i, %ite_else_3115.i, %ite_then_3205.i, %ite_else_3206.i, %ite_else_3193.i, %ite_then_3264.i, %ite_else_3265.i, %ite_else_3252.i, %ite_else_3013.i, %ite_then_3405.i, %ite_then_3506.i, %ite_else_3507.i, %ite_then_3886.i, %ite_else_3887.i, %ite_then_4352.i, %ite_else_4353.i, %ite_else_4340.i, %ite_then_4409.i, %ite_else_4410.i, %ite_else_4397.i, %ite_then_4487.i, %ite_else_4488.i, %ite_else_4475.i, %ite_then_4546.i, %ite_else_4547.i, %ite_else_4534.i, %ite_then_4646.i, %ite_else_4647.i, %ite_else_4634.i, %ite_then_4703.i, %ite_else_4704.i, %ite_else_4691.i, %ite_then_4781.i, %ite_else_4782.i, %ite_else_4769.i, %ite_then_4840.i, %ite_else_4841.i, %ite_else_4828.i, %ite_then_4938.i, %ite_else_4939.i, %ite_else_4926.i, %ite_then_4995.i, %ite_else_4996.i, %ite_else_4983.i, %ite_then_5073.i, %ite_else_5074.i, %ite_else_5061.i, %ite_then_5132.i, %ite_else_5133.i, %ite_else_5120.i, %ite_else_4881.i, %ite_then_5273.i, %ite_then_5374.i, %ite_else_5375.i, %ite_then_5754.i, %ite_else_5755.i, %ite_then_6177.i, %ite_else_6208.i, %ite_else_6195.i, %ite_then_6246.i, %ite_else_6277.i, %ite_else_6264.i, %ite_then_6352.i, %ite_else_6385.i, %ite_else_6372.i, %ite_then_6423.i, %ite_else_6456.i, %ite_else_6443.i, %ite_then_6581.i, %ite_else_6612.i, %ite_else_6599.i, %ite_then_6650.i, %ite_else_6681.i, %ite_else_6668.i, %ite_then_6756.i, %ite_else_6789.i, %ite_else_6776.i, %ite_then_6827.i, %ite_else_6860.i, %ite_else_6847.i, %ite_then_6983.i, %ite_else_7014.i, %ite_else_7001.i, %ite_then_7052.i, %ite_else_7083.i, %ite_else_7070.i, %ite_then_7158.i, %ite_else_7191.i, %ite_else_7178.i, %ite_then_7229.i, %ite_else_7262.i, %ite_else_7249.i, %ite_then_7357.i, %ite_then_7398.i, %ite_else_7399.i, %ite_then_7459.i, %ite_then_7500.i, %ite_else_7501.i, %ite_then_7548.i, %ite_then_7589.i, %ite_else_7590.i, %ite_else_7536.i, %ite_then_8026.i, %ite_then_8067.i, %ite_else_8068.i, %ite_else_8014.i
+probe_orb_stream_commit_step.exit:                ; preds = %ite_else_8014.i, %ite_else_8068.i, %ite_then_8067.i, %ite_then_8026.i, %ite_else_7536.i, %ite_else_7590.i, %ite_then_7589.i, %ite_then_7548.i, %ite_else_7501.i, %ite_then_7500.i, %ite_then_7459.i, %ite_else_7399.i, %ite_then_7398.i, %ite_then_7357.i, %ite_else_7249.i, %ite_else_7262.i, %ite_then_7229.i, %ite_else_7178.i, %ite_else_7191.i, %ite_then_7158.i, %ite_else_7070.i, %ite_else_7083.i, %ite_then_7052.i, %ite_else_7001.i, %ite_else_7014.i, %ite_then_6983.i, %ite_else_6847.i, %ite_else_6860.i, %ite_then_6827.i, %ite_else_6776.i, %ite_else_6789.i, %ite_then_6756.i, %ite_else_6668.i, %ite_else_6681.i, %ite_then_6650.i, %ite_else_6599.i, %ite_else_6612.i, %ite_then_6581.i, %ite_else_6443.i, %ite_else_6456.i, %ite_then_6423.i, %ite_else_6372.i, %ite_else_6385.i, %ite_then_6352.i, %ite_else_6264.i, %ite_else_6277.i, %ite_then_6246.i, %ite_else_6195.i, %ite_else_6208.i, %ite_then_6177.i, %ite_else_5755.i, %ite_then_5754.i, %ite_else_5375.i, %ite_then_5374.i, %ite_then_5273.i, %ite_else_4881.i, %ite_else_5120.i, %ite_else_5133.i, %ite_then_5132.i, %ite_else_5061.i, %ite_else_5074.i, %ite_then_5073.i, %ite_else_4983.i, %ite_else_4996.i, %ite_then_4995.i, %ite_else_4926.i, %ite_else_4939.i, %ite_then_4938.i, %ite_else_4828.i, %ite_else_4841.i, %ite_then_4840.i, %ite_else_4769.i, %ite_else_4782.i, %ite_then_4781.i, %ite_else_4691.i, %ite_else_4704.i, %ite_then_4703.i, %ite_else_4634.i, %ite_else_4647.i, %ite_then_4646.i, %ite_else_4534.i, %ite_else_4547.i, %ite_then_4546.i, %ite_else_4475.i, %ite_else_4488.i, %ite_then_4487.i, %ite_else_4397.i, %ite_else_4410.i, %ite_then_4409.i, %ite_else_4340.i, %ite_else_4353.i, %ite_then_4352.i, %ite_else_3887.i, %ite_then_3886.i, %ite_else_3507.i, %ite_then_3506.i, %ite_then_3405.i, %ite_else_3013.i, %ite_else_3252.i, %ite_else_3265.i, %ite_then_3264.i, %ite_else_3193.i, %ite_else_3206.i, %ite_then_3205.i, %ite_else_3115.i, %ite_else_3128.i, %ite_then_3127.i, %ite_else_3058.i, %ite_else_3071.i, %ite_then_3070.i, %ite_else_2960.i, %ite_else_2973.i, %ite_then_2972.i, %ite_else_2901.i, %ite_else_2914.i, %ite_then_2913.i, %ite_else_2823.i, %ite_else_2836.i, %ite_then_2835.i, %ite_else_2766.i, %ite_else_2779.i, %ite_then_2778.i, %ite_else_2666.i, %ite_else_2679.i, %ite_then_2678.i, %ite_else_2607.i, %ite_else_2620.i, %ite_then_2619.i, %ite_else_2529.i, %ite_else_2542.i, %ite_then_2541.i, %ite_else_2472.i, %ite_else_2485.i, %ite_then_2484.i, %ite_else_1934.i, %ite_else_1988.i, %ite_then_1987.i, %ite_then_1946.i, %ite_else_1456.i, %ite_else_1510.i, %ite_then_1509.i, %ite_then_1468.i, %ite_else_1421.i, %ite_then_1420.i, %ite_then_1379.i, %ite_else_1319.i, %ite_then_1318.i, %ite_then_1277.i, %ite_else_1169.i, %ite_else_1182.i, %ite_then_1149.i, %ite_else_1098.i, %ite_else_1111.i, %ite_then_1078.i, %ite_else_990.i, %ite_else_1003.i, %ite_then_972.i, %ite_else_921.i, %ite_else_934.i, %ite_then_903.i, %ite_else_767.i, %ite_else_780.i, %ite_then_747.i, %ite_else_696.i, %ite_else_709.i, %ite_then_676.i, %ite_else_588.i, %ite_else_601.i, %ite_then_570.i, %ite_else_519.i, %ite_else_532.i, %ite_then_501.i, %ite_else_363.i, %ite_else_376.i, %ite_then_343.i, %ite_else_292.i, %ite_else_305.i, %ite_then_272.i, %ite_else_184.i, %ite_else_197.i, %ite_then_166.i, %ite_else_115.i, %ite_else_128.i, %ite_then_97.i
   %common.ret.op.i = phi i64 [ %alu_145.i, %ite_else_128.i ], [ %alu_154.i, %ite_else_115.i ], [ %alu_214.i, %ite_else_197.i ], [ %alu_223.i, %ite_else_184.i ], [ %alu_322.i, %ite_else_305.i ], [ %alu_331.i, %ite_else_292.i ], [ %alu_393.i, %ite_else_376.i ], [ %alu_402.i, %ite_else_363.i ], [ %alu_549.i, %ite_else_532.i ], [ %alu_558.i, %ite_else_519.i ], [ %alu_618.i, %ite_else_601.i ], [ %alu_627.i, %ite_else_588.i ], [ %alu_726.i, %ite_else_709.i ], [ %alu_735.i, %ite_else_696.i ], [ %alu_797.i, %ite_else_780.i ], [ %alu_806.i, %ite_else_767.i ], [ %alu_951.i, %ite_else_934.i ], [ %alu_960.i, %ite_else_921.i ], [ %alu_1020.i, %ite_else_1003.i ], [ %alu_1029.i, %ite_else_990.i ], [ %alu_1128.i, %ite_else_1111.i ], [ %alu_1137.i, %ite_else_1098.i ], [ %alu_1199.i, %ite_else_1182.i ], [ %alu_1208.i, %ite_else_1169.i ], [ %alu_1329.i, %ite_then_1318.i ], [ %alu_1341.i, %ite_else_1319.i ], [ %alu_1431.i, %ite_then_1420.i ], [ %alu_1443.i, %ite_else_1421.i ], [ %alu_1520.i, %ite_then_1509.i ], [ %alu_1532.i, %ite_else_1510.i ], [ %alu_1998.i, %ite_then_1987.i ], [ %alu_2010.i, %ite_else_1988.i ], [ %alu_2494.i, %ite_then_2484.i ], [ %alu_2503.i, %ite_else_2485.i ], [ %alu_2512.i, %ite_else_2472.i ], [ %alu_2551.i, %ite_then_2541.i ], [ %alu_2560.i, %ite_else_2542.i ], [ %alu_2569.i, %ite_else_2529.i ], [ %alu_2629.i, %ite_then_2619.i ], [ %alu_2638.i, %ite_else_2620.i ], [ %alu_2647.i, %ite_else_2607.i ], [ %alu_2688.i, %ite_then_2678.i ], [ %alu_2697.i, %ite_else_2679.i ], [ %alu_2706.i, %ite_else_2666.i ], [ %alu_2788.i, %ite_then_2778.i ], [ %alu_2797.i, %ite_else_2779.i ], [ %alu_2806.i, %ite_else_2766.i ], [ %alu_2845.i, %ite_then_2835.i ], [ %alu_2854.i, %ite_else_2836.i ], [ %alu_2863.i, %ite_else_2823.i ], [ %alu_2923.i, %ite_then_2913.i ], [ %alu_2932.i, %ite_else_2914.i ], [ %alu_2941.i, %ite_else_2901.i ], [ %alu_2982.i, %ite_then_2972.i ], [ %alu_2991.i, %ite_else_2973.i ], [ %alu_3000.i, %ite_else_2960.i ], [ %alu_3080.i, %ite_then_3070.i ], [ %alu_3089.i, %ite_else_3071.i ], [ %alu_3098.i, %ite_else_3058.i ], [ %alu_3137.i, %ite_then_3127.i ], [ %alu_3146.i, %ite_else_3128.i ], [ %alu_3155.i, %ite_else_3115.i ], [ %alu_3215.i, %ite_then_3205.i ], [ %alu_3224.i, %ite_else_3206.i ], [ %alu_3233.i, %ite_else_3193.i ], [ %alu_3274.i, %ite_then_3264.i ], [ %alu_3283.i, %ite_else_3265.i ], [ %alu_3292.i, %ite_else_3252.i ], [ %alu_4362.i, %ite_then_4352.i ], [ %alu_4371.i, %ite_else_4353.i ], [ %alu_4380.i, %ite_else_4340.i ], [ %alu_4419.i, %ite_then_4409.i ], [ %alu_4428.i, %ite_else_4410.i ], [ %alu_4437.i, %ite_else_4397.i ], [ %alu_4497.i, %ite_then_4487.i ], [ %alu_4506.i, %ite_else_4488.i ], [ %alu_4515.i, %ite_else_4475.i ], [ %alu_4556.i, %ite_then_4546.i ], [ %alu_4565.i, %ite_else_4547.i ], [ %alu_4574.i, %ite_else_4534.i ], [ %alu_4656.i, %ite_then_4646.i ], [ %alu_4665.i, %ite_else_4647.i ], [ %alu_4674.i, %ite_else_4634.i ], [ %alu_4713.i, %ite_then_4703.i ], [ %alu_4722.i, %ite_else_4704.i ], [ %alu_4731.i, %ite_else_4691.i ], [ %alu_4791.i, %ite_then_4781.i ], [ %alu_4800.i, %ite_else_4782.i ], [ %alu_4809.i, %ite_else_4769.i ], [ %alu_4850.i, %ite_then_4840.i ], [ %alu_4859.i, %ite_else_4841.i ], [ %alu_4868.i, %ite_else_4828.i ], [ %alu_4948.i, %ite_then_4938.i ], [ %alu_4957.i, %ite_else_4939.i ], [ %alu_4966.i, %ite_else_4926.i ], [ %alu_5005.i, %ite_then_4995.i ], [ %alu_5014.i, %ite_else_4996.i ], [ %alu_5023.i, %ite_else_4983.i ], [ %alu_5083.i, %ite_then_5073.i ], [ %alu_5092.i, %ite_else_5074.i ], [ %alu_5101.i, %ite_else_5061.i ], [ %alu_5142.i, %ite_then_5132.i ], [ %alu_5151.i, %ite_else_5133.i ], [ %alu_5160.i, %ite_else_5120.i ], [ %alu_6225.i, %ite_else_6208.i ], [ %alu_6234.i, %ite_else_6195.i ], [ %alu_6294.i, %ite_else_6277.i ], [ %alu_6303.i, %ite_else_6264.i ], [ %alu_6402.i, %ite_else_6385.i ], [ %alu_6411.i, %ite_else_6372.i ], [ %alu_6473.i, %ite_else_6456.i ], [ %alu_6482.i, %ite_else_6443.i ], [ %alu_6629.i, %ite_else_6612.i ], [ %alu_6638.i, %ite_else_6599.i ], [ %alu_6698.i, %ite_else_6681.i ], [ %alu_6707.i, %ite_else_6668.i ], [ %alu_6806.i, %ite_else_6789.i ], [ %alu_6815.i, %ite_else_6776.i ], [ %alu_6877.i, %ite_else_6860.i ], [ %alu_6886.i, %ite_else_6847.i ], [ %alu_7031.i, %ite_else_7014.i ], [ %alu_7040.i, %ite_else_7001.i ], [ %alu_7100.i, %ite_else_7083.i ], [ %alu_7109.i, %ite_else_7070.i ], [ %alu_7208.i, %ite_else_7191.i ], [ %alu_7217.i, %ite_else_7178.i ], [ %alu_7279.i, %ite_else_7262.i ], [ %alu_7288.i, %ite_else_7249.i ], [ %alu_7409.i, %ite_then_7398.i ], [ %alu_7421.i, %ite_else_7399.i ], [ %alu_7511.i, %ite_then_7500.i ], [ %alu_7523.i, %ite_else_7501.i ], [ %alu_7600.i, %ite_then_7589.i ], [ %alu_7612.i, %ite_else_7590.i ], [ %alu_8078.i, %ite_then_8067.i ], [ %alu_8090.i, %ite_else_8068.i ], [ %spec.select.i, %ite_then_1277.i ], [ %spec.select1563.i, %ite_then_1379.i ], [ %spec.select1564.i, %ite_then_1468.i ], [ %spec.select1565.i, %ite_then_1946.i ], [ %spec.select1566.i, %ite_then_7357.i ], [ %spec.select1567.i, %ite_then_7459.i ], [ %spec.select1568.i, %ite_then_7548.i ], [ %spec.select1569.i, %ite_then_8026.i ], [ %alu_204.i, %ite_then_97.i ], [ %alu_204.i, %ite_then_166.i ], [ %alu_204.i, %ite_then_272.i ], [ %alu_204.i, %ite_then_343.i ], [ %alu_608.i, %ite_then_501.i ], [ %alu_608.i, %ite_then_570.i ], [ %alu_608.i, %ite_then_676.i ], [ %alu_608.i, %ite_then_747.i ], [ %alu_1010.i, %ite_then_903.i ], [ %alu_1010.i, %ite_then_972.i ], [ %alu_1010.i, %ite_then_1078.i ], [ %alu_1010.i, %ite_then_1149.i ], [ %alu_6284.i, %ite_then_6177.i ], [ %alu_6284.i, %ite_then_6246.i ], [ %alu_6284.i, %ite_then_6352.i ], [ %alu_6284.i, %ite_then_6423.i ], [ %alu_6688.i, %ite_then_6581.i ], [ %alu_6688.i, %ite_then_6650.i ], [ %alu_6688.i, %ite_then_6756.i ], [ %alu_6688.i, %ite_then_6827.i ], [ %alu_7090.i, %ite_then_6983.i ], [ %alu_7090.i, %ite_then_7052.i ], [ %alu_7090.i, %ite_then_7158.i ], [ %alu_7090.i, %ite_then_7229.i ], [ %alu_1676.i, %ite_else_1456.i ], [ %alu_2163.i, %ite_else_1934.i ], [ %alu_3338.i, %ite_else_3013.i ], [ %alu_3452.i, %ite_then_3405.i ], [ %alu_3553.i, %ite_then_3506.i ], [ %alu_3728.i, %ite_else_3507.i ], [ %alu_3933.i, %ite_then_3886.i ], [ %alu_4117.i, %ite_else_3887.i ], [ %alu_5206.i, %ite_else_4881.i ], [ %alu_5320.i, %ite_then_5273.i ], [ %alu_5421.i, %ite_then_5374.i ], [ %alu_5596.i, %ite_else_5375.i ], [ %alu_5801.i, %ite_then_5754.i ], [ %alu_5985.i, %ite_else_5755.i ], [ %alu_7756.i, %ite_else_7536.i ], [ %alu_8243.i, %ite_else_8014.i ]
   ret i64 %common.ret.op.i
 }
@@ -2681,7 +2681,7 @@ ite_else_39.i:                                    ; preds = %ite_then_25.i
   %2 = select i1 %switch.selectcmp101.i, i32 12, i32 4
   br label %probe_orb_mission_flags.exit
 
-probe_orb_mission_flags.exit:                     ; preds = %entry, %ite_then_38.i, %ite_then_77.i, %ite_then_90.i, %ite_then_103.i, %ite_then_728.i, %ite_then_829.i, %ite_else_39.i
+probe_orb_mission_flags.exit:                     ; preds = %ite_else_39.i, %ite_then_829.i, %ite_then_728.i, %ite_then_103.i, %ite_then_90.i, %ite_then_77.i, %ite_then_38.i, %entry
   %common.ret.op.i = phi i32 [ 8, %ite_then_77.i ], [ %..i, %ite_then_728.i ], [ 60, %ite_then_38.i ], [ 1, %entry ], [ %spec.select.i, %ite_then_103.i ], [ %0, %ite_then_829.i ], [ %2, %ite_else_39.i ], [ 202, %ite_then_90.i ]
   ret i32 %common.ret.op.i
 }
@@ -2809,7 +2809,7 @@ ite_else_10.i:                                    ; preds = %entry
   %alu_105.i = shl nuw nsw i64 %a0, 32
   br label %probe_orb_worked_duration_bucket.exit
 
-probe_orb_worked_duration_bucket.exit:            ; preds = %ite_then_49.i, %ite_else_50.i, %ite_else_34.i, %ite_else_22.i, %ite_else_10.i
+probe_orb_worked_duration_bucket.exit:            ; preds = %ite_else_10.i, %ite_else_22.i, %ite_else_34.i, %ite_else_50.i, %ite_then_49.i
   %common.ret.op.i = phi i64 [ %alu_59.i, %ite_then_49.i ], [ %alu_72.i, %ite_else_50.i ], [ %alu_88.i, %ite_else_34.i ], [ %alu_102.i, %ite_else_22.i ], [ %alu_105.i, %ite_else_10.i ]
   ret i64 %common.ret.op.i
 }
@@ -3239,7 +3239,7 @@ ite_then_48454.i:                                 ; preds = %ite_else_46556.i
   %alu_48463.i = or disjoint i64 %alu_48461.i, 65793
   br label %probe_orb_provider_pool_step.exit
 
-probe_orb_provider_pool_step.exit:                ; preds = %ite_then_84.i, %ite_then_168.i, %ite_else_85.i, %ite_then_1468.i, %ite_else_70.i, %ite_then_3446.i, %ite_then_4037.i, %ite_else_3447.i, %ite_then_5337.i, %ite_else_55.i, %ite_then_7655.i, %ite_then_7949.i, %ite_else_7656.i, %ite_then_9249.i, %ite_else_7641.i, %ite_then_11017.i, %ite_then_11818.i, %ite_else_11018.i, %ite_then_13118.i, %ite_else_28667.i, %ite_then_43161.i, %ite_then_43245.i, %ite_else_43162.i, %ite_then_44553.i, %ite_else_43147.i, %ite_then_46555.i, %ite_then_47146.i, %ite_else_46556.i, %ite_then_48454.i
+probe_orb_provider_pool_step.exit:                ; preds = %ite_then_48454.i, %ite_else_46556.i, %ite_then_47146.i, %ite_then_46555.i, %ite_else_43147.i, %ite_then_44553.i, %ite_else_43162.i, %ite_then_43245.i, %ite_then_43161.i, %ite_else_28667.i, %ite_then_13118.i, %ite_else_11018.i, %ite_then_11818.i, %ite_then_11017.i, %ite_else_7641.i, %ite_then_9249.i, %ite_else_7656.i, %ite_then_7949.i, %ite_then_7655.i, %ite_else_55.i, %ite_then_5337.i, %ite_else_3447.i, %ite_then_4037.i, %ite_then_3446.i, %ite_else_70.i, %ite_then_1468.i, %ite_else_85.i, %ite_then_168.i, %ite_then_84.i
   %common.ret.op.i = phi i64 [ %alu_177.i, %ite_then_168.i ], [ %alu_1477.i, %ite_then_1468.i ], [ %alu_4046.i, %ite_then_4037.i ], [ %alu_5346.i, %ite_then_5337.i ], [ %alu_7958.i, %ite_then_7949.i ], [ %alu_9258.i, %ite_then_9249.i ], [ %alu_11827.i, %ite_then_11818.i ], [ %alu_13127.i, %ite_then_13118.i ], [ %alu_43254.i, %ite_then_43245.i ], [ %alu_44562.i, %ite_then_44553.i ], [ %alu_47155.i, %ite_then_47146.i ], [ %alu_48463.i, %ite_then_48454.i ], [ 0, %ite_then_84.i ], [ 0, %ite_else_85.i ], [ 0, %ite_else_70.i ], [ 0, %ite_then_3446.i ], [ 0, %ite_else_3447.i ], [ 4, %ite_else_55.i ], [ 0, %ite_then_7655.i ], [ 0, %ite_else_7656.i ], [ 0, %ite_else_7641.i ], [ 0, %ite_then_11017.i ], [ 0, %ite_else_11018.i ], [ 65536, %ite_then_43161.i ], [ 65536, %ite_else_43162.i ], [ 65536, %ite_else_43147.i ], [ 65536, %ite_then_46555.i ], [ 65536, %ite_else_46556.i ], [ 65539, %ite_else_28667.i ]
   ret i64 %common.ret.op.i
 }
@@ -3825,8 +3825,8 @@ entry:
   %8 = or i64 %alu_342.i, %alu_326.i
   %alu_348.i = or i64 %8, %alu_54.i
   %alu_358.i = and i64 %alu_36.i, %alu_23.i
-  %alu_370.i = and i64 %alu_308.i, %alu_92.i
-  %alu_376.i = and i64 %alu_370.i, %alu_276.i
+  %alu_370.i = and i64 %alu_276.i, %alu_92.i
+  %alu_376.i = and i64 %alu_370.i, %alu_308.i
   %.demorgan.i = or i64 %alu_376.i, %alu_358.i
   %9 = xor i64 %.demorgan.i, -1
   %alu_396.i = and i64 %alu_320.i, %9
@@ -4042,7 +4042,7 @@ ite_then_2722.i:                                  ; preds = %ite_else_1688.i
   %alu_2732.i = or disjoint i64 %alu_2730.i, 3
   br label %probe_orb_outbox_crash_reconcile_step.exit
 
-probe_orb_outbox_crash_reconcile_step.exit:       ; preds = %entry, %ite_else_318.i, %ite_else_905.i, %ite_then_1037.i, %ite_then_1386.i, %ite_then_1779.i, %ite_then_2088.i, %ite_else_2220.i, %ite_then_2461.i, %ite_else_2529.i, %ite_then_2675.i, %ite_then_2722.i
+probe_orb_outbox_crash_reconcile_step.exit:       ; preds = %ite_then_2722.i, %ite_then_2675.i, %ite_else_2529.i, %ite_then_2461.i, %ite_else_2220.i, %ite_then_2088.i, %ite_then_1779.i, %ite_then_1386.i, %ite_then_1037.i, %ite_else_905.i, %ite_else_318.i, %entry
   %common.ret.op.i = phi i64 [ %alu_944.i, %ite_else_905.i ], [ %alu_1047.i, %ite_then_1037.i ], [ %alu_1789.i, %ite_then_1779.i ], [ %alu_2098.i, %ite_then_2088.i ], [ %alu_2259.i, %ite_else_2220.i ], [ %alu_2471.i, %ite_then_2461.i ], [ %alu_2568.i, %ite_else_2529.i ], [ %alu_2685.i, %ite_then_2675.i ], [ %alu_2732.i, %ite_then_2722.i ], [ 514, %ite_else_318.i ], [ %spec.select.i, %ite_then_1386.i ], [ 0, %entry ]
   ret i64 %common.ret.op.i
 }
@@ -4739,7 +4739,7 @@ ite_else_10377.i:                                 ; preds = %ite_else_10363.i
   %alu_10392.i = or disjoint i64 %alu_10390.i, 769
   br label %probe_orb_stream_bounded_commit_step.exit
 
-probe_orb_stream_bounded_commit_step.exit:        ; preds = %ite_then_28.i, %ite_then_3491.i, %ite_then_6978.i, %ite_then_7844.i, %ite_then_8335.i, %ite_else_8336.i, %ite_else_8412.i, %ite_then_8515.i, %ite_then_8529.i, %ite_else_8530.i, %ite_then_8609.i, %ite_then_8623.i, %ite_else_8624.i, %ite_then_8647.i, %ite_then_8661.i, %ite_else_8662.i, %ite_else_8810.i, %ite_else_8957.i, %ite_else_9004.i, %ite_then_9097.i, %ite_then_9111.i, %ite_else_9112.i, %ite_then_9201.i, %ite_else_9202.i, %ite_then_9381.i, %ite_then_9395.i, %ite_else_9396.i, %ite_then_9475.i, %ite_then_9489.i, %ite_else_9490.i, %ite_then_9513.i, %ite_then_9527.i, %ite_else_9528.i, %ite_else_9659.i, %ite_else_9806.i, %ite_else_9853.i, %ite_then_9946.i, %ite_then_9960.i, %ite_else_9961.i, %ite_then_10050.i, %ite_else_10051.i, %ite_else_10127.i, %ite_then_10230.i, %ite_then_10244.i, %ite_else_10245.i, %ite_then_10324.i, %ite_then_10338.i, %ite_else_10339.i, %ite_then_10362.i, %ite_then_10376.i, %ite_else_10377.i
+probe_orb_stream_bounded_commit_step.exit:        ; preds = %ite_else_10377.i, %ite_then_10376.i, %ite_then_10362.i, %ite_else_10339.i, %ite_then_10338.i, %ite_then_10324.i, %ite_else_10245.i, %ite_then_10244.i, %ite_then_10230.i, %ite_else_10127.i, %ite_else_10051.i, %ite_then_10050.i, %ite_else_9961.i, %ite_then_9960.i, %ite_then_9946.i, %ite_else_9853.i, %ite_else_9806.i, %ite_else_9659.i, %ite_else_9528.i, %ite_then_9527.i, %ite_then_9513.i, %ite_else_9490.i, %ite_then_9489.i, %ite_then_9475.i, %ite_else_9396.i, %ite_then_9395.i, %ite_then_9381.i, %ite_else_9202.i, %ite_then_9201.i, %ite_else_9112.i, %ite_then_9111.i, %ite_then_9097.i, %ite_else_9004.i, %ite_else_8957.i, %ite_else_8810.i, %ite_else_8662.i, %ite_then_8661.i, %ite_then_8647.i, %ite_else_8624.i, %ite_then_8623.i, %ite_then_8609.i, %ite_else_8530.i, %ite_then_8529.i, %ite_then_8515.i, %ite_else_8412.i, %ite_else_8336.i, %ite_then_8335.i, %ite_then_7844.i, %ite_then_6978.i, %ite_then_3491.i, %ite_then_28.i
   %common.ret.op.i = phi i64 [ %alu_8342.i, %ite_then_8335.i ], [ %alu_8351.i, %ite_else_8336.i ], [ %alu_8522.i, %ite_then_8515.i ], [ %alu_8536.i, %ite_then_8529.i ], [ %alu_8545.i, %ite_else_8530.i ], [ %alu_8616.i, %ite_then_8609.i ], [ %alu_8630.i, %ite_then_8623.i ], [ %alu_8639.i, %ite_else_8624.i ], [ %alu_8654.i, %ite_then_8647.i ], [ %alu_8668.i, %ite_then_8661.i ], [ %alu_8677.i, %ite_else_8662.i ], [ %alu_9104.i, %ite_then_9097.i ], [ %alu_9118.i, %ite_then_9111.i ], [ %alu_9127.i, %ite_else_9112.i ], [ %alu_9208.i, %ite_then_9201.i ], [ %alu_9217.i, %ite_else_9202.i ], [ %alu_9388.i, %ite_then_9381.i ], [ %alu_9402.i, %ite_then_9395.i ], [ %alu_9411.i, %ite_else_9396.i ], [ %alu_9482.i, %ite_then_9475.i ], [ %alu_9496.i, %ite_then_9489.i ], [ %alu_9505.i, %ite_else_9490.i ], [ %alu_9520.i, %ite_then_9513.i ], [ %alu_9534.i, %ite_then_9527.i ], [ %alu_9543.i, %ite_else_9528.i ], [ %alu_9953.i, %ite_then_9946.i ], [ %alu_9967.i, %ite_then_9960.i ], [ %alu_9976.i, %ite_else_9961.i ], [ %alu_10057.i, %ite_then_10050.i ], [ %alu_10066.i, %ite_else_10051.i ], [ %alu_10237.i, %ite_then_10230.i ], [ %alu_10251.i, %ite_then_10244.i ], [ %alu_10260.i, %ite_else_10245.i ], [ %alu_10331.i, %ite_then_10324.i ], [ %alu_10345.i, %ite_then_10338.i ], [ %alu_10354.i, %ite_else_10339.i ], [ %alu_10369.i, %ite_then_10362.i ], [ %alu_10383.i, %ite_then_10376.i ], [ %alu_10392.i, %ite_else_10377.i ], [ %spec.select1699.i, %ite_else_8412.i ], [ %spec.select1702.i, %ite_else_10127.i ], [ %spec.select.i, %ite_else_8810.i ], [ %alu_9010.i, %ite_else_8957.i ], [ %spec.select1703.i, %ite_else_9004.i ], [ %spec.select1704.i, %ite_else_9659.i ], [ %alu_9859.i, %ite_else_9806.i ], [ %spec.select1705.i, %ite_else_9853.i ], [ %alu_7964.i, %ite_then_7844.i ], [ %alu_7115.i, %ite_then_6978.i ], [ %alu_576.i, %ite_then_28.i ], [ %alu_3661.i, %ite_then_3491.i ]
   ret i64 %common.ret.op.i
 }
@@ -4988,7 +4988,7 @@ ite_else_76.i:                                    ; preds = %ite_else_13.i
   %4 = zext i1 %cmp_le_82.not.not.i to i8
   br label %probe_leansys_verify_mmap_seqlock.exit
 
-probe_leansys_verify_mmap_seqlock.exit:           ; preds = %entry, %ite_else_13.i, %ite_else_76.i
+probe_leansys_verify_mmap_seqlock.exit:           ; preds = %ite_else_76.i, %ite_else_13.i, %entry
   %common.ret.op.i = phi i8 [ 0, %entry ], [ 0, %ite_else_13.i ], [ %4, %ite_else_76.i ]
   ret i8 %common.ret.op.i
 }
@@ -5463,7 +5463,7 @@ ite_then_16227.i:                                 ; preds = %ite_else_11.i
   %spec.select3224.i = select i1 %cmp_lt_17.not.i, i64 25769804033, i64 1283
   br label %probe_orb_node_gc_step.exit
 
-probe_orb_node_gc_step.exit:                      ; preds = %entry, %ite_then_50.i, %ite_then_68.i, %ite_else_5160.i, %ite_else_7728.i, %ite_then_16227.i
+probe_orb_node_gc_step.exit:                      ; preds = %ite_then_16227.i, %ite_else_7728.i, %ite_else_5160.i, %ite_then_68.i, %ite_then_50.i, %entry
   %common.ret.op.i = phi i64 [ 309237645312, %entry ], [ %.mux.i, %ite_then_68.i ], [ %spec.select.i, %ite_else_5160.i ], [ %spec.select3224.i, %ite_then_16227.i ], [ 1795, %ite_then_50.i ], [ %spec.select3226.i, %ite_else_7728.i ]
   ret i64 %common.ret.op.i
 }
@@ -6037,7 +6037,7 @@ ite_then_63.i:                                    ; preds = %ite_then_36.i
   %alu_71.i = add i64 %alu_68.i, %a1
   br label %probe_orb_prefill_deadline_ms.exit
 
-probe_orb_prefill_deadline_ms.exit:               ; preds = %entry, %ite_then_22.i, %ite_then_36.i, %ite_then_63.i
+probe_orb_prefill_deadline_ms.exit:               ; preds = %ite_then_63.i, %ite_then_36.i, %ite_then_22.i, %entry
   %common.ret.op.i = phi i64 [ %alu_71.i, %ite_then_63.i ], [ %a3, %ite_then_36.i ], [ %a1, %ite_then_22.i ], [ %a1, %entry ]
   ret i64 %common.ret.op.i
 }
@@ -6421,7 +6421,7 @@ entry:
   %alu_1367.i = and i64 %alu_1181.i, %alu_1199.i
   %42 = icmp eq i64 %alu_1325.i, 0
   %alu_1379.i = select i1 %42, i64 %alu_1355.i, i64 0
-  %alu_1386.i = or i64 %alu_1367.i, %alu_1379.i
+  %alu_1386.i = or i64 %alu_1379.i, %alu_1367.i
   %alu_1392.i = and i64 %alu_827.neg.i, 8388607
   %alu_1397.i = and i64 %alu_39.i, %alu_827.neg.i
   %alu_1403.i = xor i64 %alu_1392.i, 8388607
@@ -6797,7 +6797,7 @@ entry:
   %alu_2220.i = and i64 %alu_2034.i, %alu_2052.i
   %69 = icmp eq i64 %alu_2178.i, 0
   %alu_2232.i = select i1 %69, i64 %alu_2208.i, i64 0
-  %alu_2239.i = or i64 %alu_2220.i, %alu_2232.i
+  %alu_2239.i = or i64 %alu_2232.i, %alu_2220.i
   %alu_2245.i = and i64 %alu_1680.neg.i, 8388607
   %alu_2250.i = and i64 %alu_869.i, %alu_1680.neg.i
   %alu_2256.i = xor i64 %alu_2245.i, 8388607
@@ -7583,7 +7583,7 @@ ite_else_15744.i:                                 ; preds = %ite_else_14959.i
   %alu_16281.i = or disjoint i64 %alu_16279.i, 3
   br label %probe_orb_placement_merge_step.exit
 
-probe_orb_placement_merge_step.exit:              ; preds = %ite_then_18.i, %ite_else_31.i, %ite_then_830.i, %ite_else_843.i, %ite_then_1642.i, %ite_then_2302.i, %ite_then_2430.i, %ite_then_3113.i, %ite_then_3216.i, %ite_then_3920.i, %ite_else_3217.i, %ite_else_4694.i, %ite_then_4788.i, %ite_else_5436.i, %ite_then_5576.i, %ite_else_6224.i, %ite_else_5577.i, %ite_else_6997.i, %ite_else_4776.i, %ite_else_7770.i, %ite_then_7921.i, %ite_then_8662.i, %ite_then_8707.i, %ite_else_9449.i, %ite_else_8708.i, %ite_else_10222.i, %ite_then_10266.i, %ite_then_11007.i, %ite_else_10267.i, %ite_else_11781.i, %ite_then_11840.i, %ite_else_11853.i, %ite_else_11841.i, %ite_else_12626.i, %ite_else_11826.i, %ite_else_13399.i, %ite_then_14172.i, %ite_else_14185.i, %ite_then_14958.i, %ite_else_14971.i, %ite_else_14959.i, %ite_else_15744.i
+probe_orb_placement_merge_step.exit:              ; preds = %ite_else_15744.i, %ite_else_14959.i, %ite_else_14971.i, %ite_then_14958.i, %ite_else_14185.i, %ite_then_14172.i, %ite_else_13399.i, %ite_else_11826.i, %ite_else_12626.i, %ite_else_11841.i, %ite_else_11853.i, %ite_then_11840.i, %ite_else_11781.i, %ite_else_10267.i, %ite_then_11007.i, %ite_then_10266.i, %ite_else_10222.i, %ite_else_8708.i, %ite_else_9449.i, %ite_then_8707.i, %ite_then_8662.i, %ite_then_7921.i, %ite_else_7770.i, %ite_else_4776.i, %ite_else_6997.i, %ite_else_5577.i, %ite_else_6224.i, %ite_then_5576.i, %ite_else_5436.i, %ite_then_4788.i, %ite_else_4694.i, %ite_else_3217.i, %ite_then_3920.i, %ite_then_3216.i, %ite_then_3113.i, %ite_then_2430.i, %ite_then_2302.i, %ite_then_1642.i, %ite_else_843.i, %ite_then_830.i, %ite_else_31.i, %ite_then_18.i
   %common.ret.op.i = phi i64 [ %alu_2311.i, %ite_then_2302.i ], [ %alu_3122.i, %ite_then_3113.i ], [ %alu_3929.i, %ite_then_3920.i ], [ %alu_4710.i, %ite_else_4694.i ], [ %alu_5517.i, %ite_else_5436.i ], [ %alu_6305.i, %ite_else_6224.i ], [ %alu_7078.i, %ite_else_6997.i ], [ %alu_7851.i, %ite_else_7770.i ], [ %alu_8671.i, %ite_then_8662.i ], [ %alu_9465.i, %ite_else_9449.i ], [ %alu_10238.i, %ite_else_10222.i ], [ %alu_11016.i, %ite_then_11007.i ], [ %alu_11797.i, %ite_else_11781.i ], [ -4294967294, %ite_then_18.i ], [ -4294967293, %ite_then_830.i ], [ -4294967291, %ite_then_1642.i ], [ -4294967291, %ite_then_2430.i ], [ -4294967291, %ite_then_3216.i ], [ -4294967292, %ite_then_7921.i ], [ -4294967292, %ite_then_10266.i ], [ -4294967290, %ite_then_11840.i ], [ -4294965503, %ite_else_11841.i ], [ -4294967290, %ite_else_11826.i ], [ -4294967293, %ite_then_14172.i ], [ -4294966015, %ite_then_14958.i ], [ -4294967293, %ite_else_14959.i ], [ -4294965503, %ite_else_3217.i ], [ -4294965503, %ite_then_4788.i ], [ -4294965503, %ite_then_5576.i ], [ -4294966015, %ite_else_5577.i ], [ -4294966015, %ite_else_4776.i ], [ -4294967039, %ite_then_8707.i ], [ -4294966015, %ite_else_8708.i ], [ -4294966015, %ite_else_10267.i ], [ %alu_390.i, %ite_else_31.i ], [ %alu_1249.i, %ite_else_843.i ], [ %alu_12382.i, %ite_else_11853.i ], [ %alu_13155.i, %ite_else_12626.i ], [ %alu_13928.i, %ite_else_13399.i ], [ %alu_14722.i, %ite_else_14185.i ], [ %alu_15508.i, %ite_else_14971.i ], [ %alu_16281.i, %ite_else_15744.i ]
   ret i64 %common.ret.op.i
 }
@@ -8085,7 +8085,7 @@ ite_else_2207.i:                                  ; preds = %ite_then_2179.i
   %alu_2219.i = or disjoint i64 %alu_2217.i, 258
   br label %probe_orb_http_rate_limit_classify_step.exit
 
-probe_orb_http_rate_limit_classify_step.exit:     ; preds = %ite_then_77.i, %ite_then_146.i, %ite_else_160.i, %ite_else_147.i, %ite_else_186.i, %ite_else_132.i, %ite_else_225.i, %ite_else_118.i, %ite_then_250.i, %ite_else_278.i, %ite_then_332.i, %ite_else_346.i, %ite_else_333.i, %ite_else_372.i, %ite_else_318.i, %ite_else_411.i, %ite_else_304.i, %ite_then_436.i, %ite_else_464.i, %ite_then_518.i, %ite_else_532.i, %ite_else_519.i, %ite_else_558.i, %ite_else_504.i, %ite_else_597.i, %ite_else_490.i, %ite_then_622.i, %ite_else_650.i, %ite_else_52.i, %ite_then_1331.i, %ite_else_1345.i, %ite_else_1332.i, %ite_else_1370.i, %ite_else_1317.i, %ite_else_1408.i, %ite_else_1303.i, %ite_then_1432.i, %ite_else_1460.i, %ite_then_1513.i, %ite_else_1527.i, %ite_else_1514.i, %ite_else_1552.i, %ite_else_1499.i, %ite_else_1590.i, %ite_else_1485.i, %ite_then_1614.i, %ite_else_1642.i, %ite_then_1695.i, %ite_else_1709.i, %ite_else_1696.i, %ite_else_1734.i, %ite_else_1681.i, %ite_else_1772.i, %ite_else_1667.i, %ite_then_1796.i, %ite_else_1824.i, %ite_then_1892.i, %ite_else_1906.i, %ite_else_1893.i, %ite_else_1932.i, %ite_else_1878.i, %ite_else_1971.i, %ite_else_1864.i, %ite_then_1996.i, %ite_else_2024.i, %ite_then_2078.i, %ite_else_2092.i, %ite_else_2079.i, %ite_else_2117.i, %ite_else_2064.i, %ite_else_2155.i, %ite_else_2050.i, %ite_then_2179.i, %ite_else_2207.i
+probe_orb_http_rate_limit_classify_step.exit:     ; preds = %ite_else_2207.i, %ite_then_2179.i, %ite_else_2050.i, %ite_else_2155.i, %ite_else_2064.i, %ite_else_2117.i, %ite_else_2079.i, %ite_else_2092.i, %ite_then_2078.i, %ite_else_2024.i, %ite_then_1996.i, %ite_else_1864.i, %ite_else_1971.i, %ite_else_1878.i, %ite_else_1932.i, %ite_else_1893.i, %ite_else_1906.i, %ite_then_1892.i, %ite_else_1824.i, %ite_then_1796.i, %ite_else_1667.i, %ite_else_1772.i, %ite_else_1681.i, %ite_else_1734.i, %ite_else_1696.i, %ite_else_1709.i, %ite_then_1695.i, %ite_else_1642.i, %ite_then_1614.i, %ite_else_1485.i, %ite_else_1590.i, %ite_else_1499.i, %ite_else_1552.i, %ite_else_1514.i, %ite_else_1527.i, %ite_then_1513.i, %ite_else_1460.i, %ite_then_1432.i, %ite_else_1303.i, %ite_else_1408.i, %ite_else_1317.i, %ite_else_1370.i, %ite_else_1332.i, %ite_else_1345.i, %ite_then_1331.i, %ite_else_52.i, %ite_else_650.i, %ite_then_622.i, %ite_else_490.i, %ite_else_597.i, %ite_else_504.i, %ite_else_558.i, %ite_else_519.i, %ite_else_532.i, %ite_then_518.i, %ite_else_464.i, %ite_then_436.i, %ite_else_304.i, %ite_else_411.i, %ite_else_318.i, %ite_else_372.i, %ite_else_333.i, %ite_else_346.i, %ite_then_332.i, %ite_else_278.i, %ite_then_250.i, %ite_else_118.i, %ite_else_225.i, %ite_else_132.i, %ite_else_186.i, %ite_else_147.i, %ite_else_160.i, %ite_then_146.i, %ite_then_77.i
   %common.ret.op.i = phi i64 [ %alu_173.i, %ite_else_160.i ], [ %alu_199.i, %ite_else_186.i ], [ %alu_238.i, %ite_else_225.i ], [ %alu_291.i, %ite_else_278.i ], [ %alu_359.i, %ite_else_346.i ], [ %alu_385.i, %ite_else_372.i ], [ %alu_424.i, %ite_else_411.i ], [ %alu_477.i, %ite_else_464.i ], [ %alu_545.i, %ite_else_532.i ], [ %alu_571.i, %ite_else_558.i ], [ %alu_610.i, %ite_else_597.i ], [ %alu_663.i, %ite_else_650.i ], [ %alu_1357.i, %ite_else_1345.i ], [ %alu_1382.i, %ite_else_1370.i ], [ %alu_1420.i, %ite_else_1408.i ], [ %alu_1472.i, %ite_else_1460.i ], [ %alu_1539.i, %ite_else_1527.i ], [ %alu_1564.i, %ite_else_1552.i ], [ %alu_1602.i, %ite_else_1590.i ], [ %alu_1654.i, %ite_else_1642.i ], [ %alu_1721.i, %ite_else_1709.i ], [ %alu_1746.i, %ite_else_1734.i ], [ %alu_1784.i, %ite_else_1772.i ], [ %alu_1836.i, %ite_else_1824.i ], [ %alu_1919.i, %ite_else_1906.i ], [ %alu_1945.i, %ite_else_1932.i ], [ %alu_1984.i, %ite_else_1971.i ], [ %alu_2037.i, %ite_else_2024.i ], [ %alu_2104.i, %ite_else_2092.i ], [ %alu_2129.i, %ite_else_2117.i ], [ %alu_2167.i, %ite_else_2155.i ], [ %alu_2219.i, %ite_else_2207.i ], [ 0, %ite_then_77.i ], [ -4294966523, %ite_then_146.i ], [ -4294966523, %ite_else_147.i ], [ 64424510213, %ite_else_132.i ], [ 15461882266373, %ite_then_250.i ], [ 64424510213, %ite_else_118.i ], [ -4294966524, %ite_then_332.i ], [ -4294966524, %ite_else_333.i ], [ 64424510212, %ite_else_318.i ], [ 15461882266372, %ite_then_436.i ], [ 64424510212, %ite_else_304.i ], [ -4294966524, %ite_then_518.i ], [ -4294966524, %ite_else_519.i ], [ 64424510212, %ite_else_504.i ], [ 15461882266372, %ite_then_622.i ], [ 64424510212, %ite_else_490.i ], [ 0, %ite_else_52.i ], [ -4294967037, %ite_then_1331.i ], [ -4294967037, %ite_else_1332.i ], [ 64424509699, %ite_else_1317.i ], [ 15461882265859, %ite_then_1432.i ], [ 64424509699, %ite_else_1303.i ], [ -4294967037, %ite_then_1513.i ], [ -4294967037, %ite_else_1514.i ], [ 64424509699, %ite_else_1499.i ], [ 15461882265859, %ite_then_1614.i ], [ 64424509699, %ite_else_1485.i ], [ -4294967038, %ite_then_1695.i ], [ -4294967038, %ite_else_1696.i ], [ 1288490189058, %ite_else_1681.i ], [ 15461882265858, %ite_then_1796.i ], [ 1288490189058, %ite_else_1667.i ], [ -4294966527, %ite_then_1892.i ], [ -4294966527, %ite_else_1893.i ], [ 64424510209, %ite_else_1878.i ], [ 15461882266369, %ite_then_1996.i ], [ 64424510209, %ite_else_1864.i ], [ -4294967038, %ite_then_2078.i ], [ -4294967038, %ite_else_2079.i ], [ 1288490189058, %ite_else_2064.i ], [ 15461882265858, %ite_then_2179.i ], [ 1288490189058, %ite_else_2050.i ]
   ret i64 %common.ret.op.i
 }
@@ -9053,7 +9053,7 @@ ite_then_37960.i:                                 ; preds = %ite_then_37945.i
   %or.cond4062.i = and i1 %cmp_eq_37983.not.i, %cmp_lt_37968.not.i
   br label %probe_orb_fleet_place_argmin_step.exit
 
-probe_orb_fleet_place_argmin_step.exit:           ; preds = %ite_then_38.i, %ite_then_101.i, %ite_then_183.i, %ite_then_210.i, %ite_then_238.i, %ite_then_286.i, %ite_then_299.i, %ite_then_312.i, %ite_then_327.i, %ite_else_239.i, %ite_then_672.i, %ite_then_685.i, %ite_then_700.i, %ite_else_184.i, %ite_then_775.i, %ite_then_803.i, %ite_then_851.i, %ite_then_864.i, %ite_then_877.i, %ite_then_892.i, %ite_else_804.i, %ite_then_1237.i, %ite_then_1250.i, %ite_then_1265.i, %ite_then_1332.i, %ite_then_1359.i, %ite_then_1387.i, %ite_then_1435.i, %ite_then_1448.i, %ite_then_1461.i, %ite_then_1476.i, %ite_else_1388.i, %ite_then_1821.i, %ite_then_1834.i, %ite_then_1849.i, %ite_else_1333.i, %ite_then_1924.i, %ite_then_1952.i, %ite_then_2000.i, %ite_then_2013.i, %ite_then_2026.i, %ite_then_2041.i, %ite_else_1953.i, %ite_then_2386.i, %ite_then_2399.i, %ite_then_2414.i, %ite_else_102.i, %ite_then_7252.i, %ite_then_7279.i, %ite_then_7307.i, %ite_then_7355.i, %ite_then_7368.i, %ite_then_7381.i, %ite_then_7396.i, %ite_else_7308.i, %ite_then_7741.i, %ite_then_7754.i, %ite_then_7769.i, %ite_else_7253.i, %ite_then_7844.i, %ite_then_7872.i, %ite_then_7920.i, %ite_then_7933.i, %ite_then_7946.i, %ite_then_7961.i, %ite_else_7873.i, %ite_then_8306.i, %ite_then_8319.i, %ite_then_8334.i, %ite_then_8401.i, %ite_then_8428.i, %ite_then_8456.i, %ite_then_8504.i, %ite_then_8517.i, %ite_then_8530.i, %ite_then_8545.i, %ite_else_8457.i, %ite_then_8890.i, %ite_then_8903.i, %ite_then_8918.i, %ite_else_8402.i, %ite_then_8993.i, %ite_then_9021.i, %ite_then_9069.i, %ite_then_9082.i, %ite_then_9095.i, %ite_then_9110.i, %ite_else_9022.i, %ite_then_9455.i, %ite_then_9468.i, %ite_then_9483.i, %ite_else_39.i, %ite_then_28578.i, %ite_then_28660.i, %ite_then_28687.i, %ite_then_28715.i, %ite_then_28763.i, %ite_then_28776.i, %ite_then_28789.i, %ite_then_28804.i, %ite_else_28716.i, %ite_then_29149.i, %ite_then_29162.i, %ite_then_29177.i, %ite_else_28661.i, %ite_then_29252.i, %ite_then_29280.i, %ite_then_29328.i, %ite_then_29341.i, %ite_then_29354.i, %ite_then_29369.i, %ite_else_29281.i, %ite_then_29714.i, %ite_then_29727.i, %ite_then_29742.i, %ite_then_29809.i, %ite_then_29836.i, %ite_then_29864.i, %ite_then_29912.i, %ite_then_29925.i, %ite_then_29938.i, %ite_then_29953.i, %ite_else_29865.i, %ite_then_30298.i, %ite_then_30311.i, %ite_then_30326.i, %ite_else_29810.i, %ite_then_30401.i, %ite_then_30429.i, %ite_then_30477.i, %ite_then_30490.i, %ite_then_30503.i, %ite_then_30518.i, %ite_else_30430.i, %ite_then_30863.i, %ite_then_30876.i, %ite_then_30891.i, %ite_else_28579.i, %ite_then_35729.i, %ite_then_35756.i, %ite_then_35784.i, %ite_then_35832.i, %ite_then_35845.i, %ite_then_35858.i, %ite_then_35873.i, %ite_else_35785.i, %ite_then_36218.i, %ite_then_36231.i, %ite_then_36246.i, %ite_else_35730.i, %ite_then_36321.i, %ite_then_36349.i, %ite_then_36397.i, %ite_then_36410.i, %ite_then_36423.i, %ite_then_36438.i, %ite_else_36350.i, %ite_then_36783.i, %ite_then_36796.i, %ite_then_36811.i, %ite_then_36878.i, %ite_then_36905.i, %ite_then_36933.i, %ite_then_36981.i, %ite_then_36994.i, %ite_then_37007.i, %ite_then_37022.i, %ite_else_36934.i, %ite_then_37367.i, %ite_then_37380.i, %ite_then_37395.i, %ite_else_36879.i, %ite_then_37470.i, %ite_then_37498.i, %ite_then_37546.i, %ite_then_37559.i, %ite_then_37572.i, %ite_then_37587.i, %ite_else_37499.i, %ite_then_37932.i, %ite_then_37945.i, %ite_then_37960.i
+probe_orb_fleet_place_argmin_step.exit:           ; preds = %ite_then_37960.i, %ite_then_37945.i, %ite_then_37932.i, %ite_else_37499.i, %ite_then_37587.i, %ite_then_37572.i, %ite_then_37559.i, %ite_then_37546.i, %ite_then_37498.i, %ite_then_37470.i, %ite_else_36879.i, %ite_then_37395.i, %ite_then_37380.i, %ite_then_37367.i, %ite_else_36934.i, %ite_then_37022.i, %ite_then_37007.i, %ite_then_36994.i, %ite_then_36981.i, %ite_then_36933.i, %ite_then_36905.i, %ite_then_36878.i, %ite_then_36811.i, %ite_then_36796.i, %ite_then_36783.i, %ite_else_36350.i, %ite_then_36438.i, %ite_then_36423.i, %ite_then_36410.i, %ite_then_36397.i, %ite_then_36349.i, %ite_then_36321.i, %ite_else_35730.i, %ite_then_36246.i, %ite_then_36231.i, %ite_then_36218.i, %ite_else_35785.i, %ite_then_35873.i, %ite_then_35858.i, %ite_then_35845.i, %ite_then_35832.i, %ite_then_35784.i, %ite_then_35756.i, %ite_then_35729.i, %ite_else_28579.i, %ite_then_30891.i, %ite_then_30876.i, %ite_then_30863.i, %ite_else_30430.i, %ite_then_30518.i, %ite_then_30503.i, %ite_then_30490.i, %ite_then_30477.i, %ite_then_30429.i, %ite_then_30401.i, %ite_else_29810.i, %ite_then_30326.i, %ite_then_30311.i, %ite_then_30298.i, %ite_else_29865.i, %ite_then_29953.i, %ite_then_29938.i, %ite_then_29925.i, %ite_then_29912.i, %ite_then_29864.i, %ite_then_29836.i, %ite_then_29809.i, %ite_then_29742.i, %ite_then_29727.i, %ite_then_29714.i, %ite_else_29281.i, %ite_then_29369.i, %ite_then_29354.i, %ite_then_29341.i, %ite_then_29328.i, %ite_then_29280.i, %ite_then_29252.i, %ite_else_28661.i, %ite_then_29177.i, %ite_then_29162.i, %ite_then_29149.i, %ite_else_28716.i, %ite_then_28804.i, %ite_then_28789.i, %ite_then_28776.i, %ite_then_28763.i, %ite_then_28715.i, %ite_then_28687.i, %ite_then_28660.i, %ite_then_28578.i, %ite_else_39.i, %ite_then_9483.i, %ite_then_9468.i, %ite_then_9455.i, %ite_else_9022.i, %ite_then_9110.i, %ite_then_9095.i, %ite_then_9082.i, %ite_then_9069.i, %ite_then_9021.i, %ite_then_8993.i, %ite_else_8402.i, %ite_then_8918.i, %ite_then_8903.i, %ite_then_8890.i, %ite_else_8457.i, %ite_then_8545.i, %ite_then_8530.i, %ite_then_8517.i, %ite_then_8504.i, %ite_then_8456.i, %ite_then_8428.i, %ite_then_8401.i, %ite_then_8334.i, %ite_then_8319.i, %ite_then_8306.i, %ite_else_7873.i, %ite_then_7961.i, %ite_then_7946.i, %ite_then_7933.i, %ite_then_7920.i, %ite_then_7872.i, %ite_then_7844.i, %ite_else_7253.i, %ite_then_7769.i, %ite_then_7754.i, %ite_then_7741.i, %ite_else_7308.i, %ite_then_7396.i, %ite_then_7381.i, %ite_then_7368.i, %ite_then_7355.i, %ite_then_7307.i, %ite_then_7279.i, %ite_then_7252.i, %ite_else_102.i, %ite_then_2414.i, %ite_then_2399.i, %ite_then_2386.i, %ite_else_1953.i, %ite_then_2041.i, %ite_then_2026.i, %ite_then_2013.i, %ite_then_2000.i, %ite_then_1952.i, %ite_then_1924.i, %ite_else_1333.i, %ite_then_1849.i, %ite_then_1834.i, %ite_then_1821.i, %ite_else_1388.i, %ite_then_1476.i, %ite_then_1461.i, %ite_then_1448.i, %ite_then_1435.i, %ite_then_1387.i, %ite_then_1359.i, %ite_then_1332.i, %ite_then_1265.i, %ite_then_1250.i, %ite_then_1237.i, %ite_else_804.i, %ite_then_892.i, %ite_then_877.i, %ite_then_864.i, %ite_then_851.i, %ite_then_803.i, %ite_then_775.i, %ite_else_184.i, %ite_then_700.i, %ite_then_685.i, %ite_then_672.i, %ite_else_239.i, %ite_then_327.i, %ite_then_312.i, %ite_then_299.i, %ite_then_286.i, %ite_then_238.i, %ite_then_210.i, %ite_then_183.i, %ite_then_101.i, %ite_then_38.i
   %common.ret.op.shrunk.i = phi i1 [ true, %ite_then_312.i ], [ false, %ite_then_299.i ], [ true, %ite_then_286.i ], [ false, %ite_then_238.i ], [ true, %ite_else_239.i ], [ true, %ite_then_685.i ], [ false, %ite_then_672.i ], [ false, %ite_then_210.i ], [ true, %ite_then_183.i ], [ true, %ite_then_877.i ], [ false, %ite_then_864.i ], [ true, %ite_then_851.i ], [ false, %ite_then_803.i ], [ true, %ite_else_804.i ], [ true, %ite_then_1250.i ], [ false, %ite_then_1237.i ], [ false, %ite_then_775.i ], [ true, %ite_else_184.i ], [ true, %ite_then_1461.i ], [ false, %ite_then_1448.i ], [ true, %ite_then_1435.i ], [ false, %ite_then_1387.i ], [ true, %ite_else_1388.i ], [ true, %ite_then_1834.i ], [ false, %ite_then_1821.i ], [ false, %ite_then_1359.i ], [ true, %ite_then_1332.i ], [ true, %ite_then_2026.i ], [ false, %ite_then_2013.i ], [ true, %ite_then_2000.i ], [ false, %ite_then_1952.i ], [ true, %ite_else_1953.i ], [ true, %ite_then_2399.i ], [ false, %ite_then_2386.i ], [ false, %ite_then_1924.i ], [ true, %ite_else_1333.i ], [ false, %ite_then_101.i ], [ true, %ite_else_102.i ], [ true, %ite_then_7381.i ], [ false, %ite_then_7368.i ], [ true, %ite_then_7355.i ], [ false, %ite_then_7307.i ], [ true, %ite_else_7308.i ], [ true, %ite_then_7754.i ], [ false, %ite_then_7741.i ], [ false, %ite_then_7279.i ], [ true, %ite_then_7252.i ], [ true, %ite_then_7946.i ], [ false, %ite_then_7933.i ], [ true, %ite_then_7920.i ], [ false, %ite_then_7872.i ], [ true, %ite_else_7873.i ], [ true, %ite_then_8319.i ], [ false, %ite_then_8306.i ], [ false, %ite_then_7844.i ], [ true, %ite_else_7253.i ], [ true, %ite_then_8530.i ], [ false, %ite_then_8517.i ], [ true, %ite_then_8504.i ], [ false, %ite_then_8456.i ], [ true, %ite_else_8457.i ], [ true, %ite_then_8903.i ], [ false, %ite_then_8890.i ], [ false, %ite_then_8428.i ], [ true, %ite_then_8401.i ], [ true, %ite_then_9095.i ], [ false, %ite_then_9082.i ], [ true, %ite_then_9069.i ], [ false, %ite_then_9021.i ], [ true, %ite_else_9022.i ], [ true, %ite_then_9468.i ], [ false, %ite_then_9455.i ], [ false, %ite_then_8993.i ], [ true, %ite_else_8402.i ], [ false, %ite_then_38.i ], [ true, %ite_else_39.i ], [ true, %ite_then_28789.i ], [ false, %ite_then_28776.i ], [ true, %ite_then_28763.i ], [ false, %ite_then_28715.i ], [ true, %ite_else_28716.i ], [ true, %ite_then_29162.i ], [ false, %ite_then_29149.i ], [ false, %ite_then_28687.i ], [ true, %ite_then_28660.i ], [ true, %ite_then_29354.i ], [ false, %ite_then_29341.i ], [ true, %ite_then_29328.i ], [ false, %ite_then_29280.i ], [ true, %ite_else_29281.i ], [ true, %ite_then_29727.i ], [ false, %ite_then_29714.i ], [ false, %ite_then_29252.i ], [ true, %ite_else_28661.i ], [ true, %ite_then_29938.i ], [ false, %ite_then_29925.i ], [ true, %ite_then_29912.i ], [ false, %ite_then_29864.i ], [ true, %ite_else_29865.i ], [ true, %ite_then_30311.i ], [ false, %ite_then_30298.i ], [ false, %ite_then_29836.i ], [ true, %ite_then_29809.i ], [ true, %ite_then_30503.i ], [ false, %ite_then_30490.i ], [ true, %ite_then_30477.i ], [ false, %ite_then_30429.i ], [ true, %ite_else_30430.i ], [ true, %ite_then_30876.i ], [ false, %ite_then_30863.i ], [ false, %ite_then_30401.i ], [ true, %ite_else_29810.i ], [ false, %ite_then_28578.i ], [ true, %ite_else_28579.i ], [ true, %ite_then_35858.i ], [ false, %ite_then_35845.i ], [ true, %ite_then_35832.i ], [ false, %ite_then_35784.i ], [ true, %ite_else_35785.i ], [ true, %ite_then_36231.i ], [ false, %ite_then_36218.i ], [ false, %ite_then_35756.i ], [ true, %ite_then_35729.i ], [ true, %ite_then_36423.i ], [ false, %ite_then_36410.i ], [ true, %ite_then_36397.i ], [ false, %ite_then_36349.i ], [ true, %ite_else_36350.i ], [ true, %ite_then_36796.i ], [ false, %ite_then_36783.i ], [ false, %ite_then_36321.i ], [ true, %ite_else_35730.i ], [ true, %ite_then_37007.i ], [ false, %ite_then_36994.i ], [ true, %ite_then_36981.i ], [ false, %ite_then_36933.i ], [ true, %ite_else_36934.i ], [ true, %ite_then_37380.i ], [ false, %ite_then_37367.i ], [ false, %ite_then_36905.i ], [ true, %ite_then_36878.i ], [ true, %ite_then_37572.i ], [ false, %ite_then_37559.i ], [ true, %ite_then_37546.i ], [ false, %ite_then_37498.i ], [ true, %ite_else_37499.i ], [ true, %ite_then_37945.i ], [ false, %ite_then_37932.i ], [ false, %ite_then_37470.i ], [ true, %ite_else_36879.i ], [ %or.cond.i, %ite_then_327.i ], [ %or.cond4017.i, %ite_then_700.i ], [ %or.cond4018.i, %ite_then_892.i ], [ %or.cond4020.i, %ite_then_1265.i ], [ %or.cond4021.i, %ite_then_1476.i ], [ %or.cond4023.i, %ite_then_1849.i ], [ %or.cond4024.i, %ite_then_2041.i ], [ %or.cond4026.i, %ite_then_2414.i ], [ %or.cond4027.i, %ite_then_7396.i ], [ %or.cond4029.i, %ite_then_7769.i ], [ %or.cond4030.i, %ite_then_7961.i ], [ %or.cond4032.i, %ite_then_8334.i ], [ %or.cond4033.i, %ite_then_8545.i ], [ %or.cond4035.i, %ite_then_8918.i ], [ %or.cond4036.i, %ite_then_9110.i ], [ %or.cond4038.i, %ite_then_9483.i ], [ %or.cond4039.i, %ite_then_28804.i ], [ %or.cond4041.i, %ite_then_29177.i ], [ %or.cond4042.i, %ite_then_29369.i ], [ %or.cond4044.i, %ite_then_29742.i ], [ %or.cond4045.i, %ite_then_29953.i ], [ %or.cond4047.i, %ite_then_30326.i ], [ %or.cond4048.i, %ite_then_30518.i ], [ %or.cond4050.i, %ite_then_30891.i ], [ %or.cond4051.i, %ite_then_35873.i ], [ %or.cond4053.i, %ite_then_36246.i ], [ %or.cond4054.i, %ite_then_36438.i ], [ %or.cond4056.i, %ite_then_36811.i ], [ %or.cond4057.i, %ite_then_37022.i ], [ %or.cond4059.i, %ite_then_37395.i ], [ %or.cond4060.i, %ite_then_37587.i ], [ %or.cond4062.i, %ite_then_37960.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
@@ -9761,7 +9761,7 @@ ite_then_3639.i:                                  ; preds = %ite_then_3627.i
   %arg_v5.sel_3657.i = tail call i64 @llvm.umin.i64(i64 %div_raw_3655.i, i64 %a5)
   br label %probe_orb_pool_pacer_step.exit
 
-probe_orb_pool_pacer_step.exit:                   ; preds = %entry, %ite_then_59.i, %ite_then_72.i, %ite_else_60.i, %ite_then_145.i, %ite_then_157.i, %ite_then_354.i, %ite_then_367.i, %ite_else_355.i, %ite_then_410.i, %ite_then_450.i, %ite_then_463.i, %ite_else_451.i, %ite_then_495.i, %ite_then_507.i, %ite_then_566.i, %ite_then_579.i, %ite_else_567.i, %ite_then_652.i, %ite_then_664.i, %ite_else_716.i, %ite_then_771.i, %ite_else_812.i, %ite_then_856.i, %ite_then_868.i, %ite_then_918.i, %ite_then_931.i, %ite_else_919.i, %ite_then_1004.i, %ite_then_1016.i, %ite_then_1068.i, %ite_then_1081.i, %ite_else_1069.i, %ite_then_1112.i, %ite_then_1124.i, %ite_then_1164.i, %ite_then_1177.i, %ite_else_1165.i, %ite_then_1209.i, %ite_then_1221.i, %ite_then_1601.i, %ite_then_1628.i, %ite_else_1602.i, %ite_then_1690.i, %ite_then_1745.i, %ite_then_1772.i, %ite_else_1746.i, %ite_then_1823.i, %ite_then_1835.i, %ite_then_1917.i, %ite_then_1944.i, %ite_else_1918.i, %ite_then_1991.i, %ite_then_2041.i, %ite_then_2068.i, %ite_else_2042.i, %ite_then_2117.i, %ite_then_2129.i, %ite_then_2198.i, %ite_then_2225.i, %ite_else_2199.i, %ite_then_2287.i, %ite_then_2342.i, %ite_then_2369.i, %ite_else_2343.i, %ite_then_2420.i, %ite_then_2432.i, %ite_then_2527.i, %ite_then_2554.i, %ite_else_2528.i, %ite_then_2601.i, %ite_then_2651.i, %ite_then_2678.i, %ite_else_2652.i, %ite_then_2727.i, %ite_then_2739.i, %ite_then_2808.i, %ite_then_2835.i, %ite_else_2809.i, %ite_then_2897.i, %ite_then_2952.i, %ite_then_2979.i, %ite_else_2953.i, %ite_then_3030.i, %ite_then_3042.i, %ite_then_3124.i, %ite_then_3151.i, %ite_else_3125.i, %ite_then_3198.i, %ite_then_3248.i, %ite_then_3275.i, %ite_else_3249.i, %ite_then_3324.i, %ite_then_3336.i, %ite_then_3405.i, %ite_then_3432.i, %ite_else_3406.i, %ite_then_3482.i, %ite_then_3494.i, %ite_then_3549.i, %ite_then_3576.i, %ite_else_3550.i, %ite_then_3627.i, %ite_then_3639.i
+probe_orb_pool_pacer_step.exit:                   ; preds = %ite_then_3639.i, %ite_then_3627.i, %ite_else_3550.i, %ite_then_3576.i, %ite_then_3549.i, %ite_then_3494.i, %ite_then_3482.i, %ite_else_3406.i, %ite_then_3432.i, %ite_then_3405.i, %ite_then_3336.i, %ite_then_3324.i, %ite_else_3249.i, %ite_then_3275.i, %ite_then_3248.i, %ite_then_3198.i, %ite_else_3125.i, %ite_then_3151.i, %ite_then_3124.i, %ite_then_3042.i, %ite_then_3030.i, %ite_else_2953.i, %ite_then_2979.i, %ite_then_2952.i, %ite_then_2897.i, %ite_else_2809.i, %ite_then_2835.i, %ite_then_2808.i, %ite_then_2739.i, %ite_then_2727.i, %ite_else_2652.i, %ite_then_2678.i, %ite_then_2651.i, %ite_then_2601.i, %ite_else_2528.i, %ite_then_2554.i, %ite_then_2527.i, %ite_then_2432.i, %ite_then_2420.i, %ite_else_2343.i, %ite_then_2369.i, %ite_then_2342.i, %ite_then_2287.i, %ite_else_2199.i, %ite_then_2225.i, %ite_then_2198.i, %ite_then_2129.i, %ite_then_2117.i, %ite_else_2042.i, %ite_then_2068.i, %ite_then_2041.i, %ite_then_1991.i, %ite_else_1918.i, %ite_then_1944.i, %ite_then_1917.i, %ite_then_1835.i, %ite_then_1823.i, %ite_else_1746.i, %ite_then_1772.i, %ite_then_1745.i, %ite_then_1690.i, %ite_else_1602.i, %ite_then_1628.i, %ite_then_1601.i, %ite_then_1221.i, %ite_then_1209.i, %ite_else_1165.i, %ite_then_1177.i, %ite_then_1164.i, %ite_then_1124.i, %ite_then_1112.i, %ite_else_1069.i, %ite_then_1081.i, %ite_then_1068.i, %ite_then_1016.i, %ite_then_1004.i, %ite_else_919.i, %ite_then_931.i, %ite_then_918.i, %ite_then_868.i, %ite_then_856.i, %ite_else_812.i, %ite_then_771.i, %ite_else_716.i, %ite_then_664.i, %ite_then_652.i, %ite_else_567.i, %ite_then_579.i, %ite_then_566.i, %ite_then_507.i, %ite_then_495.i, %ite_else_451.i, %ite_then_463.i, %ite_then_450.i, %ite_then_410.i, %ite_else_355.i, %ite_then_367.i, %ite_then_354.i, %ite_then_157.i, %ite_then_145.i, %ite_else_60.i, %ite_then_72.i, %ite_then_59.i, %entry
   %common.ret.op.i = phi i64 [ %arg_v5..i, %ite_then_72.i ], [ 12000000000000000, %ite_then_59.i ], [ %arg_v5.alu_163.i, %ite_then_157.i ], [ 0, %ite_then_145.i ], [ %alu_92.i, %ite_else_60.i ], [ %arg_v5.614.i, %ite_then_367.i ], [ 12000000000000000, %ite_then_354.i ], [ %arg_v5.615.i, %ite_then_410.i ], [ %arg_v5.616.i, %ite_then_463.i ], [ 12000000000000000, %ite_then_450.i ], [ %arg_v5.alu_513.i, %ite_then_507.i ], [ 0, %ite_then_495.i ], [ %alu_483.i, %ite_else_451.i ], [ %arg_v5.617.i, %ite_then_579.i ], [ 12000000000000000, %ite_then_566.i ], [ %arg_v5.alu_670.i, %ite_then_664.i ], [ 0, %ite_then_652.i ], [ %alu_599.i, %ite_else_567.i ], [ %arg_v5.618.i, %ite_then_771.i ], [ 12000000000000000, %ite_else_716.i ], [ %arg_v5.alu_874.i, %ite_then_868.i ], [ 0, %ite_then_856.i ], [ %alu_798.i, %ite_else_812.i ], [ %arg_v5.619.i, %ite_then_931.i ], [ 12000000000000000, %ite_then_918.i ], [ %arg_v5.alu_1022.i, %ite_then_1016.i ], [ 0, %ite_then_1004.i ], [ %alu_951.i, %ite_else_919.i ], [ %arg_v5.620.i, %ite_then_1081.i ], [ 12000000000000000, %ite_then_1068.i ], [ %arg_v5.alu_1130.i, %ite_then_1124.i ], [ 0, %ite_then_1112.i ], [ %alu_1100.i, %ite_else_1069.i ], [ %arg_v5.621.i, %ite_then_1177.i ], [ 12000000000000000, %ite_then_1164.i ], [ %arg_v5.alu_1227.i, %ite_then_1221.i ], [ 0, %ite_then_1209.i ], [ %alu_1197.i, %ite_else_1165.i ], [ %arg_v5.sel_1646.i, %ite_then_1628.i ], [ %alu_1247.i, %ite_then_1601.i ], [ %arg_v5.alu_1703.i, %ite_then_1690.i ], [ 12000000000000000, %ite_else_1602.i ], [ %arg_v5.sel_1790.i, %ite_then_1772.i ], [ %alu_1247.i, %ite_then_1745.i ], [ %arg_v5.sel_1853.i, %ite_then_1835.i ], [ 0, %ite_then_1823.i ], [ %alu_1731.i, %ite_else_1746.i ], [ %arg_v5.sel_1962.i, %ite_then_1944.i ], [ %alu_1247.i, %ite_then_1917.i ], [ %arg_v5.alu_2003.i, %ite_then_1991.i ], [ 12000000000000000, %ite_else_1918.i ], [ %arg_v5.sel_2086.i, %ite_then_2068.i ], [ %alu_1247.i, %ite_then_2041.i ], [ %arg_v5.sel_2147.i, %ite_then_2129.i ], [ 0, %ite_then_2117.i ], [ %alu_2029.i, %ite_else_2042.i ], [ %arg_v5.sel_2243.i, %ite_then_2225.i ], [ %alu_1247.i, %ite_then_2198.i ], [ %arg_v5.sel_2305.i, %ite_then_2287.i ], [ %alu_2262.i, %ite_else_2199.i ], [ %arg_v5.sel_2387.i, %ite_then_2369.i ], [ %alu_1247.i, %ite_then_2342.i ], [ %arg_v5.sel_2450.i, %ite_then_2432.i ], [ 0, %ite_then_2420.i ], [ %alu_2407.i, %ite_else_2343.i ], [ %arg_v5.sel_2572.i, %ite_then_2554.i ], [ %alu_1247.i, %ite_then_2527.i ], [ %arg_v5.alu_2613.i, %ite_then_2601.i ], [ 12000000000000000, %ite_else_2528.i ], [ %arg_v5.sel_2696.i, %ite_then_2678.i ], [ %alu_1247.i, %ite_then_2651.i ], [ %arg_v5.sel_2757.i, %ite_then_2739.i ], [ 0, %ite_then_2727.i ], [ %alu_2639.i, %ite_else_2652.i ], [ %arg_v5.sel_2853.i, %ite_then_2835.i ], [ %alu_1247.i, %ite_then_2808.i ], [ %arg_v5.sel_2915.i, %ite_then_2897.i ], [ %alu_2872.i, %ite_else_2809.i ], [ %arg_v5.sel_2997.i, %ite_then_2979.i ], [ %alu_1247.i, %ite_then_2952.i ], [ %arg_v5.sel_3060.i, %ite_then_3042.i ], [ 0, %ite_then_3030.i ], [ %alu_3017.i, %ite_else_2953.i ], [ %arg_v5.sel_3169.i, %ite_then_3151.i ], [ %alu_1247.i, %ite_then_3124.i ], [ %arg_v5.alu_3210.i, %ite_then_3198.i ], [ 12000000000000000, %ite_else_3125.i ], [ %arg_v5.sel_3293.i, %ite_then_3275.i ], [ %alu_1247.i, %ite_then_3248.i ], [ %arg_v5.sel_3354.i, %ite_then_3336.i ], [ 0, %ite_then_3324.i ], [ %alu_3236.i, %ite_else_3249.i ], [ %arg_v5.sel_3450.i, %ite_then_3432.i ], [ %alu_1247.i, %ite_then_3405.i ], [ %arg_v5.sel_3512.i, %ite_then_3494.i ], [ 0, %ite_then_3482.i ], [ %alu_3469.i, %ite_else_3406.i ], [ %arg_v5.sel_3594.i, %ite_then_3576.i ], [ %alu_1247.i, %ite_then_3549.i ], [ %arg_v5.sel_3657.i, %ite_then_3639.i ], [ 0, %ite_then_3627.i ], [ %alu_3614.i, %ite_else_3550.i ], [ 0, %entry ], [ 12000000000000000, %ite_else_355.i ]
   ret i64 %common.ret.op.i
 }
@@ -10064,7 +10064,7 @@ ite_then_30187.i:                                 ; preds = %ite_else_28118.i
   br label %probe_orb_effect_outbox_step.exit
 
 ite_else_29251.i:                                 ; preds = %ite_else_28118.i
-  switch i8 %a2, label %ite_then_31408.i [
+  switch i8 %a2, label %default.unreachable [
     i8 0, label %ite_else_30390.i
     i8 1, label %ite_else_30403.i
     i8 2, label %ite_else_30416.i
@@ -10073,10 +10073,8 @@ ite_else_29251.i:                                 ; preds = %ite_else_28118.i
     i8 5, label %ite_else_30455.i
   ]
 
-ite_then_31408.i:                                 ; preds = %ite_else_29251.i
-  %alu_31417.i = shl nuw nsw i64 %ext1, 32
-  %alu_31419.i = or disjoint i64 %alu_31417.i, 2
-  br label %probe_orb_effect_outbox_step.exit
+default.unreachable:                              ; preds = %ite_else_29251.i
+  unreachable
 
 ite_else_30455.i:                                 ; preds = %ite_else_29251.i
   %cmp_eq_31586.not.i = icmp eq i8 %a0, 4
@@ -10164,8 +10162,8 @@ ite_else_41495.i:                                 ; preds = %ite_else_13839.i
   %alu_41860.i = or disjoint i64 %alu_41858.i, 4
   br label %probe_orb_effect_outbox_step.exit
 
-probe_orb_effect_outbox_step.exit:                ; preds = %ite_else_57.i, %ite_else_13877.i, %ite_else_28136.i, %ite_then_30187.i, %ite_then_31408.i, %ite_then_32547.i, %ite_then_32808.i, %ite_then_34185.i, %ite_then_34446.i, %ite_else_30429.i, %ite_then_35823.i, %ite_else_30416.i, %ite_then_37423.i, %ite_else_37424.i, %ite_then_39023.i, %ite_else_39024.i, %ite_then_39280.i, %ite_else_30390.i, %ite_else_30390.i, %ite_then_40522.i, %ite_else_41495.i
-  %common.ret.op.i = phi i64 [ %alu_30197.i, %ite_then_30187.i ], [ %alu_31419.i, %ite_then_31408.i ], [ %alu_32558.i, %ite_then_32547.i ], [ %alu_32819.i, %ite_then_32808.i ], [ %alu_34196.i, %ite_then_34185.i ], [ %alu_34457.i, %ite_then_34446.i ], [ %alu_35834.i, %ite_then_35823.i ], [ %alu_37434.i, %ite_then_37423.i ], [ %alu_37444.i, %ite_else_37424.i ], [ %alu_39034.i, %ite_then_39023.i ], [ %alu_39044.i, %ite_else_39024.i ], [ %alu_39291.i, %ite_then_39280.i ], [ %alu_40533.i, %ite_then_40522.i ], [ 196865, %ite_else_30429.i ], [ 4295098625, %ite_else_30416.i ], [ 257, %ite_else_30390.i ], [ 257, %ite_else_30390.i ], [ %alu_422.i, %ite_else_57.i ], [ %alu_14242.i, %ite_else_13877.i ], [ %alu_29047.i, %ite_else_28136.i ], [ %alu_41860.i, %ite_else_41495.i ]
+probe_orb_effect_outbox_step.exit:                ; preds = %ite_else_41495.i, %ite_then_40522.i, %ite_else_30390.i, %ite_else_30390.i, %ite_then_39280.i, %ite_else_39024.i, %ite_then_39023.i, %ite_else_37424.i, %ite_then_37423.i, %ite_else_30416.i, %ite_then_35823.i, %ite_else_30429.i, %ite_then_34446.i, %ite_then_34185.i, %ite_then_32808.i, %ite_then_32547.i, %ite_then_30187.i, %ite_else_28136.i, %ite_else_13877.i, %ite_else_57.i
+  %common.ret.op.i = phi i64 [ %alu_30197.i, %ite_then_30187.i ], [ %alu_32558.i, %ite_then_32547.i ], [ %alu_32819.i, %ite_then_32808.i ], [ %alu_34196.i, %ite_then_34185.i ], [ %alu_34457.i, %ite_then_34446.i ], [ %alu_35834.i, %ite_then_35823.i ], [ %alu_37434.i, %ite_then_37423.i ], [ %alu_37444.i, %ite_else_37424.i ], [ %alu_39034.i, %ite_then_39023.i ], [ %alu_39044.i, %ite_else_39024.i ], [ %alu_39291.i, %ite_then_39280.i ], [ %alu_40533.i, %ite_then_40522.i ], [ 196865, %ite_else_30429.i ], [ 4295098625, %ite_else_30416.i ], [ 257, %ite_else_30390.i ], [ 257, %ite_else_30390.i ], [ %alu_422.i, %ite_else_57.i ], [ %alu_14242.i, %ite_else_13877.i ], [ %alu_29047.i, %ite_else_28136.i ], [ %alu_41860.i, %ite_else_41495.i ]
   ret i64 %common.ret.op.i
 }
 
@@ -10263,7 +10261,7 @@ ite_then_4820.i:                                  ; preds = %ite_else_3746.i
   %alu_4830.i = or disjoint i64 %alu_4828.i, 3
   br label %probe_orb_crash_boundary_step.exit
 
-probe_orb_crash_boundary_step.exit:               ; preds = %entry, %ite_else_2641.i, %ite_else_3095.i, %ite_then_3232.i, %ite_then_3434.i, %ite_then_3841.i, %ite_then_4162.i, %ite_else_4299.i, %ite_then_4549.i, %ite_else_4620.i, %ite_then_4771.i, %ite_then_4820.i
+probe_orb_crash_boundary_step.exit:               ; preds = %ite_then_4820.i, %ite_then_4771.i, %ite_else_4620.i, %ite_then_4549.i, %ite_else_4299.i, %ite_then_4162.i, %ite_then_3841.i, %ite_then_3434.i, %ite_then_3232.i, %ite_else_3095.i, %ite_else_2641.i, %entry
   %common.ret.op.i = phi i64 [ %alu_3134.i, %ite_else_3095.i ], [ %alu_3242.i, %ite_then_3232.i ], [ %alu_3851.i, %ite_then_3841.i ], [ %alu_4172.i, %ite_then_4162.i ], [ %alu_4338.i, %ite_else_4299.i ], [ %alu_4559.i, %ite_then_4549.i ], [ %alu_4659.i, %ite_else_4620.i ], [ %alu_4781.i, %ite_then_4771.i ], [ %alu_4830.i, %ite_then_4820.i ], [ 514, %ite_else_2641.i ], [ %spec.select.i, %ite_then_3434.i ], [ 0, %entry ]
   ret i64 %common.ret.op.i
 }
@@ -10495,7 +10493,7 @@ ite_else_6035.i:                                  ; preds = %ite_else_5183.i
   %spec.select695.i = and i1 %or.cond650.i, %cmp_le_6112.not.not.i
   br label %probe_orb_memory_tool_gate.exit
 
-probe_orb_memory_tool_gate.exit:                  ; preds = %entry, %ite_then_1085.i, %ite_else_1461.i, %ite_else_1591.i, %ite_then_2120.i, %ite_else_2993.i, %ite_else_3123.i, %ite_else_3155.i, %ite_else_4007.i, %ite_then_4168.i, %ite_else_4524.i, %ite_else_4646.i, %ite_else_4169.i, %ite_else_5021.i, %ite_then_5182.i, %ite_else_5538.i, %ite_else_5660.i, %ite_else_5183.i, %ite_else_6035.i
+probe_orb_memory_tool_gate.exit:                  ; preds = %ite_else_6035.i, %ite_else_5183.i, %ite_else_5660.i, %ite_else_5538.i, %ite_then_5182.i, %ite_else_5021.i, %ite_else_4169.i, %ite_else_4646.i, %ite_else_4524.i, %ite_then_4168.i, %ite_else_4007.i, %ite_else_3155.i, %ite_else_3123.i, %ite_else_2993.i, %ite_then_2120.i, %ite_else_1591.i, %ite_else_1461.i, %ite_then_1085.i, %entry
   %common.ret.op.shrunk.i = phi i1 [ false, %ite_else_1461.i ], [ false, %ite_else_2993.i ], [ false, %ite_else_4524.i ], [ false, %ite_else_5538.i ], [ %narrow.i, %ite_else_1591.i ], [ %narrow686.i, %ite_else_3123.i ], [ %narrow689.i, %ite_else_4646.i ], [ %narrow692.i, %ite_else_5660.i ], [ false, %ite_then_1085.i ], [ false, %ite_then_2120.i ], [ false, %ite_else_3155.i ], [ false, %ite_then_4168.i ], [ false, %ite_else_4169.i ], [ false, %ite_then_5182.i ], [ false, %ite_else_5183.i ], [ false, %entry ], [ %spec.select.i, %ite_else_4007.i ], [ %spec.select694.i, %ite_else_5021.i ], [ %spec.select695.i, %ite_else_6035.i ]
   %res = zext i1 %common.ret.op.shrunk.i to i8
   ret i8 %res
@@ -10578,7 +10576,7 @@ ite_then_55694.i:                                 ; preds = %ite_then_55662.i
   %spec.select8348.i = select i1 %cmp_eq_55702.not.i, i8 3, i8 6
   br label %probe_orb_proxy_exhaustion_step.exit
 
-probe_orb_proxy_exhaustion_step.exit:             ; preds = %ite_then_24.i, %ite_then_18570.i, %ite_then_18602.i, %ite_then_37116.i, %ite_then_37148.i, %ite_else_39446.i, %ite_else_37117.i, %ite_then_55662.i, %ite_then_55694.i
+probe_orb_proxy_exhaustion_step.exit:             ; preds = %ite_then_55694.i, %ite_then_55662.i, %ite_else_37117.i, %ite_else_39446.i, %ite_then_37148.i, %ite_then_37116.i, %ite_then_18602.i, %ite_then_18570.i, %ite_then_24.i
   %common.ret.op.i = phi i8 [ 2, %ite_then_18570.i ], [ 3, %ite_then_37148.i ], [ 2, %ite_then_37116.i ], [ 2, %ite_then_55662.i ], [ 1, %ite_else_37117.i ], [ %spec.select8347.i, %ite_else_39446.i ], [ %spec.select8348.i, %ite_then_55694.i ], [ %spec.select8349.i, %ite_then_24.i ], [ %spec.select8346.i, %ite_then_18602.i ]
   ret i8 %common.ret.op.i
 }
@@ -10652,29 +10650,482 @@ entry:
   ret i8 %res
 }
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define dso_local i32 @orb_codex_goal_launch_step(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3, i8 zeroext %a4, i8 zeroext %a5, i8 zeroext %a6, i8 zeroext %a7, i8 zeroext %a8) local_unnamed_addr #0 {
+entry:
+  %cmp_eq_19.not.i = icmp eq i8 %a0, 0
+  %cmp_eq_28.not.i = icmp eq i8 %a8, 0
+  %cmp_eq_37.not.i = icmp eq i8 %a5, 0
+  %cmp_eq_46.not.i = icmp eq i8 %a3, 0
+  %cmp_eq_55.not.i = icmp eq i8 %a1, 0
+  %cmp_eq_64.not.i = icmp eq i8 %a2, 0
+  %sel_72.i = select i1 %cmp_eq_55.not.i, i32 7, i32 768
+  %sel_76.i = select i1 %cmp_eq_64.not.i, i32 %sel_72.i, i32 7
+  %sel_80.i = select i1 %cmp_eq_55.not.i, i32 6, i32 %sel_76.i
+  %cmp_eq_85.not.i = icmp eq i8 %a4, 0
+  %cmp_eq_94.not.i = icmp eq i8 %a6, 0
+  %sel_102.i = select i1 %cmp_eq_94.not.i, i32 4, i32 5
+  %sel_106.i = select i1 %cmp_eq_85.not.i, i32 3, i32 %sel_102.i
+  %sel_111.i = select i1 %cmp_eq_28.not.i, i32 %sel_106.i, i32 %sel_80.i
+  %sel_116.i = select i1 %cmp_eq_37.not.i, i32 %sel_106.i, i32 %sel_80.i
+  %sel_121.i = select i1 %cmp_eq_46.not.i, i32 %sel_116.i, i32 %sel_111.i
+  %sel_125.i = select i1 %cmp_eq_37.not.i, i32 2, i32 %sel_121.i
+  %sel_129.i = select i1 %cmp_eq_28.not.i, i32 %sel_125.i, i32 1
+  %cmp_eq_135.not.i = icmp eq i8 %a7, 0
+  %sel_143.i = select i1 %cmp_eq_19.not.i, i32 5, i32 768
+  %sel_147.i = select i1 %cmp_eq_94.not.i, i32 4, i32 %sel_143.i
+  %sel_151.i = select i1 %cmp_eq_85.not.i, i32 3, i32 %sel_147.i
+  %sel_155.i = select i1 %cmp_eq_28.not.i, i32 %sel_151.i, i32 768
+  %sel_159.i = select i1 %cmp_eq_37.not.i, i32 %sel_151.i, i32 768
+  %sel_164.i = select i1 %cmp_eq_46.not.i, i32 %sel_159.i, i32 %sel_155.i
+  %sel_168.i = select i1 %cmp_eq_37.not.i, i32 2, i32 %sel_164.i
+  %sel_172.i = select i1 %cmp_eq_28.not.i, i32 %sel_168.i, i32 1
+  %sel_186.i = select i1 %cmp_eq_94.not.i, i32 4, i32 256
+  %sel_190.i = select i1 %cmp_eq_85.not.i, i32 3, i32 %sel_186.i
+  %sel_194.i = select i1 %cmp_eq_28.not.i, i32 %sel_190.i, i32 256
+  %sel_198.i = select i1 %cmp_eq_37.not.i, i32 %sel_190.i, i32 256
+  %sel_203.i = select i1 %cmp_eq_46.not.i, i32 %sel_198.i, i32 %sel_194.i
+  %sel_207.i = select i1 %cmp_eq_37.not.i, i32 2, i32 %sel_203.i
+  %sel_211.i = select i1 %cmp_eq_28.not.i, i32 %sel_207.i, i32 1
+  %sel_216.i = select i1 %cmp_eq_135.not.i, i32 %sel_211.i, i32 %sel_172.i
+  %sel_221.i = select i1 %cmp_eq_19.not.i, i32 %sel_216.i, i32 %sel_129.i
+  ret i32 %sel_221.i
+}
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define dso_local zeroext i8 @orb_codex_goal_preact_filter(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3, i8 zeroext %a4, i8 zeroext %a5, i8 zeroext %a6) local_unnamed_addr #0 {
+entry:
+  %cmp_eq_5.not.i = icmp eq i8 %a1, 0
+  %cmp_eq_16.not.i = icmp eq i8 %a2, 0
+  %cmp_eq_51.not.i = icmp eq i8 %a0, 2
+  %cmp_eq_60.not.i = icmp eq i8 %a0, 1
+  %cmp_eq_69.not.i = icmp ne i8 %a6, 0
+  %narrow.i = or i1 %cmp_eq_16.not.i, %cmp_eq_69.not.i
+  %narrow4.i = and i1 %cmp_eq_60.not.i, %narrow.i
+  %sel_85.i = zext i1 %narrow4.i to i8
+  %cmp_eq_91.not.i = icmp eq i8 %a5, 0
+  %sel_100.i = select i1 %cmp_eq_91.not.i, i8 %sel_85.i, i8 1
+  %sel_105.i = select i1 %cmp_eq_51.not.i, i8 %sel_100.i, i8 %sel_85.i
+  %0 = or i8 %a4, %a3
+  %1 = icmp eq i8 %0, 0
+  %2 = select i1 %1, i8 %sel_105.i, i8 0
+  %3 = select i1 %cmp_eq_16.not.i, i8 0, i8 %2
+  %res = select i1 %cmp_eq_5.not.i, i8 %3, i8 0
+  ret i8 %res
+}
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define dso_local i64 @orb_skill_slash_step(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3, i32 %a4, i32 %a5, i32 %a6, i32 %a7) local_unnamed_addr #0 {
+entry:
+  %ext0 = zext i8 %a0 to i64
+  %ext4 = zext i32 %a4 to i64
+  %ext5 = zext i32 %a5 to i64
+  %ext6 = zext i32 %a6 to i64
+  %cmp_eq_40.not.i = icmp eq i8 %a3, 0
+  %cmp_eq_51.not.i = icmp eq i8 %a1, 0
+  %cmp_eq_62.not.i = icmp eq i8 %a2, 0
+  %alu_71.i = shl nuw i64 %ext6, 32
+  %alu_73.i = or disjoint i64 %alu_71.i, 4
+  %cmp_eq_79.not.i = icmp eq i32 %a7, 0
+  %cmp_le_90.not.not.i = icmp ugt i32 %a7, %a6
+  %alu_119.i = add i64 %alu_71.i, 4294967296
+  %0 = add nsw i64 %ext0, -1
+  %1 = icmp ult i64 %0, 2
+  %sel_137.v.i = select i1 %1, i64 65792, i64 131328
+  %sel_137.i = or disjoint i64 %alu_119.i, %sel_137.v.i
+  %alu_139.i = or disjoint i64 %alu_71.i, 5
+  %sel_144.i = select i1 %cmp_le_90.not.not.i, i64 %sel_137.i, i64 %alu_139.i
+  %sel_149.i = select i1 %cmp_eq_79.not.i, i64 %alu_139.i, i64 %sel_144.i
+  %sel_154.i = select i1 %cmp_eq_62.not.i, i64 %sel_149.i, i64 %alu_73.i
+  %alu_156.i = or disjoint i64 %alu_71.i, 3
+  %sel_161.i = select i1 %cmp_eq_51.not.i, i64 %alu_156.i, i64 %sel_154.i
+  %alu_163.i = or disjoint i64 %alu_71.i, 2
+  %sel_168.i = select i1 %cmp_eq_40.not.i, i64 %alu_163.i, i64 %sel_161.i
+  %alu_170.i = or disjoint i64 %alu_71.i, 1
+  %2 = add nsw i64 %ext4, -1
+  %.not.i = icmp ult i64 %2, %ext5
+  %sel_185.i = select i1 %.not.i, i64 %sel_168.i, i64 %alu_170.i
+  ret i64 %sel_185.i
+}
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define dso_local i32 @orb_worktree_decision_step(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3, i8 zeroext %a4, i8 zeroext %a5, i32 %a6, i32 %a7, i32 %a8, i32 %a9) local_unnamed_addr #0 {
+entry:
+  %ext6 = zext i32 %a6 to i64
+  %ext7 = zext i32 %a7 to i64
+  %cmp_eq_9.not.i = icmp eq i8 %a0, 0
+  %cmp_eq_18.not.i = icmp eq i8 %a0, 1
+  %cmp_eq_27.not.i = icmp eq i8 %a2, 0
+  %cmp_eq_36.not.i = icmp eq i8 %a5, 0
+  %cmp_eq_47.not.i = icmp eq i8 %a3, 0
+  %cmp_eq_91.not.i = icmp eq i8 %a4, 0
+  %cmp_eq_102.not.i = icmp eq i32 %a9, 0
+  %cmp_le_115.not.not.i = icmp ugt i32 %a9, %a8
+  %sel_123.i = select i1 %cmp_le_115.not.not.i, i32 257, i32 6
+  %sel_127.i = select i1 %cmp_eq_102.not.i, i32 6, i32 %sel_123.i
+  %sel_131.i = select i1 %cmp_eq_91.not.i, i32 %sel_127.i, i32 5
+  %0 = add nsw i64 %ext6, -1
+  %.not.i = icmp ult i64 %0, %ext7
+  %sel_143.i = select i1 %.not.i, i32 %sel_131.i, i32 4
+  %sel_147.i = select i1 %cmp_eq_47.not.i, i32 4, i32 %sel_143.i
+  %sel_151.i = select i1 %cmp_eq_36.not.i, i32 3, i32 %sel_147.i
+  %sel_155.i = select i1 %cmp_eq_27.not.i, i32 2, i32 %sel_151.i
+  %sel_159.i = select i1 %cmp_eq_18.not.i, i32 %sel_155.i, i32 7
+  %cmp_eq_165.not.i = icmp eq i8 %a1, 0
+  %1 = or i1 %cmp_eq_27.not.i, %cmp_eq_36.not.i
+  %sel_177.i = select i1 %1, i32 1, i32 513
+  %sel_181.i = select i1 %cmp_eq_165.not.i, i32 256, i32 %sel_177.i
+  %sel_186.i = select i1 %cmp_eq_9.not.i, i32 %sel_181.i, i32 %sel_159.i
+  ret i32 %sel_186.i
+}
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define dso_local i64 @orb_repo_diff_budget_step(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i32 %a3, i32 %a4, i32 %a5, i32 %a6, i32 %a7, i32 %a8, i32 %a9) local_unnamed_addr #0 {
+entry:
+  %ext3 = zext i32 %a3 to i64
+  %ext4 = zext i32 %a4 to i64
+  %ext7 = zext i32 %a7 to i64
+  %ext8 = zext i32 %a8 to i64
+  %ext9 = zext i32 %a9 to i64
+  %cmp_eq_5.not.i = icmp eq i8 %a0, 0
+  br i1 %cmp_eq_5.not.i, label %probe_orb_repo_diff_budget_step.exit, label %ite_then_12.i
+
+ite_then_12.i:                                    ; preds = %entry
+  %cmp_eq_20.not.i = icmp eq i8 %a1, 0
+  br i1 %cmp_eq_20.not.i, label %probe_orb_repo_diff_budget_step.exit, label %ite_then_27.i
+
+ite_then_27.i:                                    ; preds = %ite_then_12.i
+  %cmp_eq_35.not.i = icmp eq i32 %a8, 0
+  %cmp_eq_50.not.i = icmp eq i32 %a9, 0
+  %or.cond = select i1 %cmp_eq_35.not.i, i1 true, i1 %cmp_eq_50.not.i
+  br i1 %or.cond, label %probe_orb_repo_diff_budget_step.exit, label %ite_then_57.i
+
+ite_then_57.i:                                    ; preds = %ite_then_27.i
+  %alu_78.i = add nuw nsw i64 %ext4, %ext3
+  %cmp_eq_82.not.i = icmp eq i8 %a2, 0
+  br i1 %cmp_eq_82.not.i, label %ite_else_90.i, label %ite_else_104.i
+
+ite_else_104.i:                                   ; preds = %ite_then_57.i
+  %cmp_lt_1298.not.not.i = icmp ult i64 %alu_78.i, %ext8
+  %cmp_lt_1313.not.i = icmp ult i32 %a9, %a7
+  %cmp_lt_1611.not.not.i = icmp eq i32 %a5, 0
+  %cmp_lt_1632.not.not.i = icmp eq i32 %a6, 0
+  br i1 %cmp_lt_1298.not.not.i, label %ite_then_1305.i, label %ite_else_1306.i
+
+ite_then_1305.i:                                  ; preds = %ite_else_104.i
+  br i1 %cmp_lt_1313.not.i, label %ite_else_1321.i, label %ite_then_1320.i
+
+ite_then_1320.i:                                  ; preds = %ite_then_1305.i
+  %alu_1384.i = shl nuw i64 %ext7, 32
+  br i1 %cmp_lt_1611.not.not.i, label %ite_then_1341.i, label %ite_else_1334.i
+
+ite_then_1341.i:                                  ; preds = %ite_then_1320.i
+  br i1 %cmp_lt_1632.not.not.i, label %ite_else_1370.i, label %ite_else_1401.i
+
+ite_else_1370.i:                                  ; preds = %ite_then_1341.i
+  %alu_1386.i = or disjoint i64 %alu_1384.i, 768
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_1401.i:                                  ; preds = %ite_then_1341.i
+  %alu_1417.i = or disjoint i64 %alu_1384.i, 131840
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_1334.i:                                  ; preds = %ite_then_1320.i
+  br i1 %cmp_lt_1632.not.not.i, label %ite_else_1559.i, label %ite_else_1590.i
+
+ite_else_1559.i:                                  ; preds = %ite_else_1334.i
+  %alu_1575.i = or disjoint i64 %alu_1384.i, 66304
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_1590.i:                                  ; preds = %ite_else_1334.i
+  %alu_1606.i = or disjoint i64 %alu_1384.i, 197376
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_1321.i:                                  ; preds = %ite_then_1305.i
+  %alu_1661.i = shl nuw i64 %ext9, 32
+  br i1 %cmp_lt_1611.not.not.i, label %ite_then_1626.i, label %ite_else_1619.i
+
+ite_then_1626.i:                                  ; preds = %ite_else_1321.i
+  br i1 %cmp_lt_1632.not.not.i, label %ite_then_1654.i, label %ite_then_1685.i
+
+ite_then_1654.i:                                  ; preds = %ite_then_1626.i
+  %alu_1663.i = or disjoint i64 %alu_1661.i, 2816
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_then_1685.i:                                  ; preds = %ite_then_1626.i
+  %alu_1694.i = or disjoint i64 %alu_1661.i, 133888
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_1619.i:                                  ; preds = %ite_else_1321.i
+  br i1 %cmp_lt_1632.not.not.i, label %ite_then_1843.i, label %ite_then_1874.i
+
+ite_then_1843.i:                                  ; preds = %ite_else_1619.i
+  %alu_1852.i = or disjoint i64 %alu_1661.i, 68352
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_then_1874.i:                                  ; preds = %ite_else_1619.i
+  %alu_1883.i = or disjoint i64 %alu_1661.i, 199424
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_1306.i:                                  ; preds = %ite_else_104.i
+  br i1 %cmp_lt_1313.not.i, label %ite_else_1906.i, label %ite_then_1905.i
+
+ite_then_1905.i:                                  ; preds = %ite_else_1306.i
+  %alu_1969.i = shl nuw i64 %ext7, 32
+  br i1 %cmp_lt_1611.not.not.i, label %ite_then_1926.i, label %ite_else_1919.i
+
+ite_then_1926.i:                                  ; preds = %ite_then_1905.i
+  br i1 %cmp_lt_1632.not.not.i, label %ite_else_1955.i, label %ite_else_1986.i
+
+ite_else_1955.i:                                  ; preds = %ite_then_1926.i
+  %alu_1971.i = or disjoint i64 %alu_1969.i, 1792
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_1986.i:                                  ; preds = %ite_then_1926.i
+  %alu_2002.i = or disjoint i64 %alu_1969.i, 132864
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_1919.i:                                  ; preds = %ite_then_1905.i
+  br i1 %cmp_lt_1632.not.not.i, label %ite_else_2144.i, label %ite_else_2175.i
+
+ite_else_2144.i:                                  ; preds = %ite_else_1919.i
+  %alu_2160.i = or disjoint i64 %alu_1969.i, 67328
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_2175.i:                                  ; preds = %ite_else_1919.i
+  %alu_2191.i = or disjoint i64 %alu_1969.i, 198400
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_1906.i:                                  ; preds = %ite_else_1306.i
+  %alu_2246.i = shl nuw i64 %ext9, 32
+  br i1 %cmp_lt_1611.not.not.i, label %ite_then_2211.i, label %ite_else_2204.i
+
+ite_then_2211.i:                                  ; preds = %ite_else_1906.i
+  br i1 %cmp_lt_1632.not.not.i, label %ite_then_2239.i, label %ite_then_2270.i
+
+ite_then_2239.i:                                  ; preds = %ite_then_2211.i
+  %alu_2248.i = or disjoint i64 %alu_2246.i, 3840
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_then_2270.i:                                  ; preds = %ite_then_2211.i
+  %alu_2279.i = or disjoint i64 %alu_2246.i, 134912
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_2204.i:                                  ; preds = %ite_else_1906.i
+  br i1 %cmp_lt_1632.not.not.i, label %ite_then_2428.i, label %ite_then_2459.i
+
+ite_then_2428.i:                                  ; preds = %ite_else_2204.i
+  %alu_2437.i = or disjoint i64 %alu_2246.i, 69376
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_then_2459.i:                                  ; preds = %ite_else_2204.i
+  %alu_2468.i = or disjoint i64 %alu_2246.i, 200448
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_90.i:                                    ; preds = %ite_then_57.i
+  %cmp_lt_2481.not.not.i = icmp eq i64 %alu_78.i, 0
+  br i1 %cmp_lt_2481.not.not.i, label %ite_then_2504.i, label %ite_else_2489.i
+
+ite_then_2504.i:                                  ; preds = %ite_else_90.i
+  %cmp_lt_2512.not.i = icmp ult i32 %a9, %a7
+  %cmp_lt_2810.not.not.i = icmp eq i32 %a5, 0
+  %cmp_lt_2831.not.not.i = icmp eq i32 %a6, 0
+  br i1 %cmp_lt_2512.not.i, label %ite_else_2520.i, label %ite_then_2519.i
+
+ite_then_2519.i:                                  ; preds = %ite_then_2504.i
+  %alu_2583.i = shl nuw i64 %ext7, 32
+  br i1 %cmp_lt_2810.not.not.i, label %ite_then_2540.i, label %ite_else_2533.i
+
+ite_then_2540.i:                                  ; preds = %ite_then_2519.i
+  br i1 %cmp_lt_2831.not.not.i, label %ite_else_2569.i, label %ite_else_2600.i
+
+ite_else_2569.i:                                  ; preds = %ite_then_2540.i
+  %alu_2585.i = or disjoint i64 %alu_2583.i, 256
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_2600.i:                                  ; preds = %ite_then_2540.i
+  %alu_2616.i = or disjoint i64 %alu_2583.i, 131328
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_2533.i:                                  ; preds = %ite_then_2519.i
+  br i1 %cmp_lt_2831.not.not.i, label %ite_else_2758.i, label %ite_else_2789.i
+
+ite_else_2758.i:                                  ; preds = %ite_else_2533.i
+  %alu_2774.i = or disjoint i64 %alu_2583.i, 65792
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_2789.i:                                  ; preds = %ite_else_2533.i
+  %alu_2805.i = or disjoint i64 %alu_2583.i, 196864
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_2520.i:                                  ; preds = %ite_then_2504.i
+  %alu_2860.i = shl nuw i64 %ext9, 32
+  br i1 %cmp_lt_2810.not.not.i, label %ite_then_2825.i, label %ite_else_2818.i
+
+ite_then_2825.i:                                  ; preds = %ite_else_2520.i
+  br i1 %cmp_lt_2831.not.not.i, label %ite_then_2853.i, label %ite_then_2884.i
+
+ite_then_2853.i:                                  ; preds = %ite_then_2825.i
+  %alu_2862.i = or disjoint i64 %alu_2860.i, 2304
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_then_2884.i:                                  ; preds = %ite_then_2825.i
+  %alu_2893.i = or disjoint i64 %alu_2860.i, 133376
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_2818.i:                                  ; preds = %ite_else_2520.i
+  br i1 %cmp_lt_2831.not.not.i, label %ite_then_3042.i, label %ite_then_3073.i
+
+ite_then_3042.i:                                  ; preds = %ite_else_2818.i
+  %alu_3051.i = or disjoint i64 %alu_2860.i, 67840
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_then_3073.i:                                  ; preds = %ite_else_2818.i
+  %alu_3082.i = or disjoint i64 %alu_2860.i, 198912
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_2489.i:                                  ; preds = %ite_else_90.i
+  %cmp_lt_3683.not.i = icmp ugt i64 %alu_78.i, %ext8
+  %cmp_lt_4283.not.i = icmp ult i32 %a9, %a7
+  %cmp_lt_4581.not.not.i = icmp eq i32 %a5, 0
+  %cmp_lt_4602.not.not.i = icmp eq i32 %a6, 0
+  br i1 %cmp_lt_3683.not.i, label %ite_else_3691.i, label %ite_then_3690.i
+
+ite_then_3690.i:                                  ; preds = %ite_else_2489.i
+  br i1 %cmp_lt_4283.not.i, label %ite_else_3706.i, label %ite_then_3705.i
+
+ite_then_3705.i:                                  ; preds = %ite_then_3690.i
+  %alu_3769.i = shl nuw i64 %ext7, 32
+  br i1 %cmp_lt_4581.not.not.i, label %ite_then_3726.i, label %ite_else_3719.i
+
+ite_then_3726.i:                                  ; preds = %ite_then_3705.i
+  br i1 %cmp_lt_4602.not.not.i, label %ite_else_3755.i, label %ite_else_3786.i
+
+ite_else_3755.i:                                  ; preds = %ite_then_3726.i
+  %alu_3771.i = or disjoint i64 %alu_3769.i, 768
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_3786.i:                                  ; preds = %ite_then_3726.i
+  %alu_3802.i = or disjoint i64 %alu_3769.i, 131840
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_3719.i:                                  ; preds = %ite_then_3705.i
+  br i1 %cmp_lt_4602.not.not.i, label %ite_else_3944.i, label %ite_else_3975.i
+
+ite_else_3944.i:                                  ; preds = %ite_else_3719.i
+  %alu_3960.i = or disjoint i64 %alu_3769.i, 66304
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_3975.i:                                  ; preds = %ite_else_3719.i
+  %alu_3991.i = or disjoint i64 %alu_3769.i, 197376
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_3706.i:                                  ; preds = %ite_then_3690.i
+  %alu_4046.i = shl nuw i64 %ext9, 32
+  br i1 %cmp_lt_4581.not.not.i, label %ite_then_4011.i, label %ite_else_4004.i
+
+ite_then_4011.i:                                  ; preds = %ite_else_3706.i
+  br i1 %cmp_lt_4602.not.not.i, label %ite_then_4039.i, label %ite_then_4070.i
+
+ite_then_4039.i:                                  ; preds = %ite_then_4011.i
+  %alu_4048.i = or disjoint i64 %alu_4046.i, 2816
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_then_4070.i:                                  ; preds = %ite_then_4011.i
+  %alu_4079.i = or disjoint i64 %alu_4046.i, 133888
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_4004.i:                                  ; preds = %ite_else_3706.i
+  br i1 %cmp_lt_4602.not.not.i, label %ite_then_4228.i, label %ite_then_4259.i
+
+ite_then_4228.i:                                  ; preds = %ite_else_4004.i
+  %alu_4237.i = or disjoint i64 %alu_4046.i, 68352
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_then_4259.i:                                  ; preds = %ite_else_4004.i
+  %alu_4268.i = or disjoint i64 %alu_4046.i, 199424
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_3691.i:                                  ; preds = %ite_else_2489.i
+  br i1 %cmp_lt_4283.not.i, label %ite_else_4291.i, label %ite_then_4290.i
+
+ite_then_4290.i:                                  ; preds = %ite_else_3691.i
+  %alu_4354.i = shl nuw i64 %ext7, 32
+  br i1 %cmp_lt_4581.not.not.i, label %ite_then_4311.i, label %ite_else_4304.i
+
+ite_then_4311.i:                                  ; preds = %ite_then_4290.i
+  br i1 %cmp_lt_4602.not.not.i, label %ite_else_4340.i, label %ite_else_4371.i
+
+ite_else_4340.i:                                  ; preds = %ite_then_4311.i
+  %alu_4356.i = or disjoint i64 %alu_4354.i, 1792
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_4371.i:                                  ; preds = %ite_then_4311.i
+  %alu_4387.i = or disjoint i64 %alu_4354.i, 132864
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_4304.i:                                  ; preds = %ite_then_4290.i
+  br i1 %cmp_lt_4602.not.not.i, label %ite_else_4529.i, label %ite_else_4560.i
+
+ite_else_4529.i:                                  ; preds = %ite_else_4304.i
+  %alu_4545.i = or disjoint i64 %alu_4354.i, 67328
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_4560.i:                                  ; preds = %ite_else_4304.i
+  %alu_4576.i = or disjoint i64 %alu_4354.i, 198400
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_4291.i:                                  ; preds = %ite_else_3691.i
+  %alu_4631.i = shl nuw i64 %ext9, 32
+  br i1 %cmp_lt_4581.not.not.i, label %ite_then_4596.i, label %ite_else_4589.i
+
+ite_then_4596.i:                                  ; preds = %ite_else_4291.i
+  br i1 %cmp_lt_4602.not.not.i, label %ite_then_4624.i, label %ite_then_4655.i
+
+ite_then_4624.i:                                  ; preds = %ite_then_4596.i
+  %alu_4633.i = or disjoint i64 %alu_4631.i, 3840
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_then_4655.i:                                  ; preds = %ite_then_4596.i
+  %alu_4664.i = or disjoint i64 %alu_4631.i, 134912
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_else_4589.i:                                  ; preds = %ite_else_4291.i
+  br i1 %cmp_lt_4602.not.not.i, label %ite_then_4813.i, label %ite_then_4844.i
+
+ite_then_4813.i:                                  ; preds = %ite_else_4589.i
+  %alu_4822.i = or disjoint i64 %alu_4631.i, 69376
+  br label %probe_orb_repo_diff_budget_step.exit
+
+ite_then_4844.i:                                  ; preds = %ite_else_4589.i
+  %alu_4853.i = or disjoint i64 %alu_4631.i, 200448
+  br label %probe_orb_repo_diff_budget_step.exit
+
+probe_orb_repo_diff_budget_step.exit:             ; preds = %ite_then_4844.i, %ite_then_4813.i, %ite_then_4655.i, %ite_then_4624.i, %ite_else_4560.i, %ite_else_4529.i, %ite_else_4371.i, %ite_else_4340.i, %ite_then_4259.i, %ite_then_4228.i, %ite_then_4070.i, %ite_then_4039.i, %ite_else_3975.i, %ite_else_3944.i, %ite_else_3786.i, %ite_else_3755.i, %ite_then_3073.i, %ite_then_3042.i, %ite_then_2884.i, %ite_then_2853.i, %ite_else_2789.i, %ite_else_2758.i, %ite_else_2600.i, %ite_else_2569.i, %ite_then_2459.i, %ite_then_2428.i, %ite_then_2270.i, %ite_then_2239.i, %ite_else_2175.i, %ite_else_2144.i, %ite_else_1986.i, %ite_else_1955.i, %ite_then_1874.i, %ite_then_1843.i, %ite_then_1685.i, %ite_then_1654.i, %ite_else_1590.i, %ite_else_1559.i, %ite_else_1401.i, %ite_else_1370.i, %ite_then_27.i, %ite_then_12.i, %entry
+  %common.ret.op.i = phi i64 [ %alu_1386.i, %ite_else_1370.i ], [ %alu_1417.i, %ite_else_1401.i ], [ %alu_1575.i, %ite_else_1559.i ], [ %alu_1606.i, %ite_else_1590.i ], [ %alu_1663.i, %ite_then_1654.i ], [ %alu_1694.i, %ite_then_1685.i ], [ %alu_1852.i, %ite_then_1843.i ], [ %alu_1883.i, %ite_then_1874.i ], [ %alu_1971.i, %ite_else_1955.i ], [ %alu_2002.i, %ite_else_1986.i ], [ %alu_2160.i, %ite_else_2144.i ], [ %alu_2191.i, %ite_else_2175.i ], [ %alu_2248.i, %ite_then_2239.i ], [ %alu_2279.i, %ite_then_2270.i ], [ %alu_2437.i, %ite_then_2428.i ], [ %alu_2468.i, %ite_then_2459.i ], [ %alu_2585.i, %ite_else_2569.i ], [ %alu_2616.i, %ite_else_2600.i ], [ %alu_2774.i, %ite_else_2758.i ], [ %alu_2805.i, %ite_else_2789.i ], [ %alu_2862.i, %ite_then_2853.i ], [ %alu_2893.i, %ite_then_2884.i ], [ %alu_3051.i, %ite_then_3042.i ], [ %alu_3082.i, %ite_then_3073.i ], [ %alu_3771.i, %ite_else_3755.i ], [ %alu_3802.i, %ite_else_3786.i ], [ %alu_3960.i, %ite_else_3944.i ], [ %alu_3991.i, %ite_else_3975.i ], [ %alu_4048.i, %ite_then_4039.i ], [ %alu_4079.i, %ite_then_4070.i ], [ %alu_4237.i, %ite_then_4228.i ], [ %alu_4268.i, %ite_then_4259.i ], [ %alu_4356.i, %ite_else_4340.i ], [ %alu_4387.i, %ite_else_4371.i ], [ %alu_4545.i, %ite_else_4529.i ], [ %alu_4576.i, %ite_else_4560.i ], [ %alu_4633.i, %ite_then_4624.i ], [ %alu_4664.i, %ite_then_4655.i ], [ %alu_4822.i, %ite_then_4813.i ], [ %alu_4853.i, %ite_then_4844.i ], [ 3, %ite_then_27.i ], [ 2, %ite_then_12.i ], [ 1, %entry ]
+  ret i64 %common.ret.op.i
+}
+
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i64 @llvm.fshl.i64(i64, i64, i64) #1
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i64 @llvm.uadd.sat.i64(i64, i64) #1
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i64 @llvm.umin.i64(i64, i64) #1
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i64 @llvm.usub.sat.i64(i64, i64) #1
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i64 @llvm.umax.i64(i64, i64) #1
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i32 @llvm.umin.i32(i32, i32) #1
 
-; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i64 @llvm.vector.reduce.or.v4i64(<4 x i64>) #1
 
 attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable }
-attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
-
-
-!0 = !{!"lean-native LLVM 18 verified backend"}
+attributes #1 = { mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none) }

@@ -118,6 +118,8 @@ def goal_action(goal, prompt):
     requested = prompt.startswith('/goal ')
     objective = prompt[6:].strip() if requested else None
     if goal is not None:
+        if not requested and goal['status'] != 'active':
+            return None
         if requested and objective not in ('resume', goal['objective']):
             raise RuntimeError('Native goal objective differs; refusing to replace its identity or counters')
         if goal['status'] == 'complete':

@@ -760,7 +760,8 @@ export default function App() {
   /** `remote`: a start requested from another device over the client link.
    * It never reads or clears this window's draft and never navigates. */
   const launchLocal = async (typed: string, prompt: string, title: string, projectSlug: string | undefined, pick: HarnessPick, images: DraftImage[], launchNavigation: number, remote?: { key: string; cwd?: string | null }) => {
-    const selectedCyber = remote ? "standard" : draftCyber();
+    const selectedCyber = remote ? "automatic" : draftCyber();
+    if (pick.backend === "codex") await requireCyberSupport({model:pick.model,mode:selectedCyber,remote:false,goal:goalDraft(prompt).kind === "goal"});
     if (!projectSlug) throw new Error("Choose a project before starting on this computer. Your draft is kept.");
     const [, row, plan] = await Promise.all([
       pick.backend === "codex" ? requireSpeedSupport(pick.model,pick.service_tier??"standard",undefined,true) : Promise.resolve(),
@@ -789,7 +790,7 @@ export default function App() {
     if (launchAttempt?.signature !== signature) launchAttempt = { signature, key: crypto.randomUUID() };
     const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,...(folder ? {folder} : {}),prompt:body.prompt,tags:body.tags});
     launchAttempt = undefined;
-    setDraftCyber("standard");
+    setDraftCyber("automatic");
     setAttachChips([]);
     rememberLaunch(m.id, {messageKey:launchPreview()?.messageKey,prompt:imagePrompt(typed,imagePaths,images),images,nodeId:"local",destination:"This computer"});
     launchedViewKeys.set(m.id, launchViewKey());
@@ -870,7 +871,7 @@ export default function App() {
         }
         // `effectivePick` already dropped an effort this harness can't take, so
         // an omitted field means "backend default" rather than a stale level.
-        if(pick.backend === "codex") { await Promise.all([requireCyberSupport({model:pick.model,mode:selectedCyber,remote:machine !== "core"}), requireSpeedSupport(pick.model,pick.service_tier??"standard")]); }
+        if(pick.backend === "codex") { await Promise.all([requireCyberSupport({model:pick.model,mode:selectedCyber,remote:machine !== "core",goal:goal.kind === "goal"}), requireSpeedSupport(pick.model,pick.service_tier??"standard")]); }
         const effort = normalizeEffort(pick.effort, pick.backend);
         const attachments = attachChips().map(chipToAttachment);
         const sentPrompt = imagePrompt(prompt, await stageRemoteImages(images, undefined, machine), images);
@@ -885,7 +886,7 @@ export default function App() {
         if (launchAttempt?.signature !== signature) launchAttempt = {signature,key:crypto.randomUUID()};
         const m = await createMission({...body,idempotency_key:launchAttempt.key});
         launchAttempt = undefined;
-        setDraftCyber("standard");
+        setDraftCyber("automatic");
         setAttachChips([]);
         if (autoTarget) warmManagedCatalog(true);
         const resolvedNode = m.remote_node_id ?? machine;
@@ -1747,6 +1748,7 @@ export default function App() {
                   remoteSupport={remoteSupport}
                   harnessIds={newMachine() === "local" ? installedIds() : undefined}
                   projectSlug={liveProjects().some(project => project.slug === effectiveNewProject()) ? effectiveNewProject() : undefined}
+                  localCwd={newMachine() === "local" ? workingDirectory() : undefined}
                   onAttachments={setAttachChips}
                 />
                 <Show when={newMachine() === "local" && localAgentsScanning()}><div class="local-scan-status" role="status"><Ic.Spinner size={12} /> Checking local agents…</div></Show>

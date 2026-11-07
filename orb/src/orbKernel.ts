@@ -1133,3 +1133,155 @@ export function orbCloudHandoffStep(input: {
   };
 }
 
+export function orbCodexGoalLaunchStep(input: {
+  isGoalRequest: boolean;
+  hasNonEmptyObjective: boolean;
+  hasImages: boolean;
+  hasExplicitCyber: boolean;
+  hasChatGptAuth: boolean;
+  modelCompatible: boolean;
+  accountSupportsProgram: boolean;
+  resumedGoalActive: boolean;
+  hasRetiredAlias: boolean;
+}): { admitted: boolean; goalMode: boolean; rejectCode: number } {
+  const raw = kernel.orb_codex_goal_launch_step(
+    b8(input.isGoalRequest),
+    b8(input.hasNonEmptyObjective),
+    b8(input.hasImages),
+    b8(input.hasExplicitCyber),
+    b8(input.hasChatGptAuth),
+    b8(input.modelCompatible),
+    b8(input.accountSupportsProgram),
+    b8(input.resumedGoalActive),
+    b8(input.hasRetiredAlias),
+  );
+  const admitted = (raw & 256) !== 0;
+  return {
+    admitted,
+    goalMode: (raw & 512) !== 0,
+    rejectCode: admitted ? 0 : raw & 0xff,
+  };
+}
+
+export function isValidSkillIdentifier(name: string): boolean {
+  if (!name || name.includes("..")) return false;
+  for (let i = 0; i < name.length; i++) {
+    const c = name.charCodeAt(i);
+    const ok =
+      (c >= 48 && c <= 57) ||
+      (c >= 65 && c <= 90) ||
+      (c >= 97 && c <= 122) ||
+      c === 45 ||
+      c === 95 ||
+      c === 46;
+    if (!ok) return false;
+  }
+  return true;
+}
+
+export function orbSkillSlashStep(input: {
+  harnessKind: number;
+  isDelivered: boolean;
+  alreadySelected: boolean;
+  nameCharsValid: boolean;
+  nameLen: number;
+  maxNameLen: number;
+  selectedCount: number;
+  maxSelected: number;
+}): { admitted: boolean; strategy: number; rejectCode: number; nextSelectedCount: number } {
+  const raw = kernel.orb_skill_slash_step(
+    enum8(input.harnessKind),
+    b8(input.isDelivered),
+    b8(input.alreadySelected),
+    b8(input.nameCharsValid),
+    sat32(input.nameLen),
+    sat32(input.maxNameLen),
+    sat32(input.selectedCount),
+    sat32(input.maxSelected),
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  const admitted = (lo32 & 256) !== 0;
+  return {
+    admitted,
+    strategy: (lo32 >>> 16) & 0xff,
+    rejectCode: admitted ? 0 : lo32 & 0xff,
+    nextSelectedCount: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+export function orbWorktreeDecisionStep(input: {
+  opKind: number;
+  isOccupied: boolean;
+  isGitRepo: boolean;
+  branchCharsValid: boolean;
+  targetPathExists: boolean;
+  parentDirValid: boolean;
+  slugLen: number;
+  maxSlugLen: number;
+  activeWorktrees: number;
+  maxWorktrees: number;
+}): { admitted: boolean; offerWorktree: boolean; actionOrRejectCode: number } {
+  const raw = kernel.orb_worktree_decision_step(
+    enum8(input.opKind),
+    b8(input.isOccupied),
+    b8(input.isGitRepo),
+    b8(input.branchCharsValid),
+    b8(input.targetPathExists),
+    b8(input.parentDirValid),
+    sat32(input.slugLen),
+    sat32(input.maxSlugLen),
+    sat32(input.activeWorktrees),
+    sat32(input.maxWorktrees),
+  );
+  return {
+    admitted: (raw & 256) !== 0,
+    offerWorktree: (raw & 512) !== 0,
+    actionOrRejectCode: raw & 0xff,
+  };
+}
+
+export function orbRepoDiffBudgetStep(input: {
+  isGitRepo: boolean;
+  pathSafe: boolean;
+  hasUntracked: boolean;
+  modifiedCount: number;
+  stagedCount: number;
+  aheadCount: number;
+  behindCount: number;
+  diffBytes: number;
+  maxFiles: number;
+  maxBytes: number;
+}): {
+  admitted: boolean;
+  dirty: boolean;
+  truncatedFiles: boolean;
+  truncatedBytes: boolean;
+  syncState: number;
+  rejectCode: number;
+  clampedBytes: number;
+} {
+  const raw = kernel.orb_repo_diff_budget_step(
+    b8(input.isGitRepo),
+    b8(input.pathSafe),
+    b8(input.hasUntracked),
+    sat32(input.modifiedCount),
+    sat32(input.stagedCount),
+    sat32(input.aheadCount),
+    sat32(input.behindCount),
+    sat32(input.diffBytes),
+    sat32(input.maxFiles),
+    sat32(input.maxBytes),
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  const admitted = (lo32 & 256) !== 0;
+  return {
+    admitted,
+    dirty: (lo32 & 512) !== 0,
+    truncatedFiles: (lo32 & 1024) !== 0,
+    truncatedBytes: (lo32 & 2048) !== 0,
+    syncState: (lo32 >>> 16) & 0xff,
+    rejectCode: admitted ? 0 : lo32 & 0xff,
+    clampedBytes: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+

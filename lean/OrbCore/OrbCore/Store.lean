@@ -947,6 +947,28 @@ def mark_mission_opened (st : CoreStore) (missionId openedAt : String) : IO (Exc
     "UPDATE missions SET opened_at=?2, updated_at=?2 WHERE id=?1;" #[missionId, openedAt]
   return res.map (fun _ => ())
 
+/-- Fetch one mission row, or `none` when it does not exist. -/
+def getMission? (st : CoreStore) (missionId : String) : IO (Option MissionRecord) := do
+  if missionId.isEmpty then return none
+  match ← execParamQuery st.missionsDb
+    "SELECT id,title,status,backend,COALESCE(model_override,''),COALESCE(model_effort,''),working_directory,COALESCE(project,''),updated_at,total_cost_cents FROM missions WHERE id=?1;" #[missionId] with
+  | .error _ => return none
+  | .ok rows =>
+    if rows.size ≤ 1 then return none
+    let r := rows[1]!
+    return some {
+      id               := (r[0]?).getD ""
+      title            := (r[1]?).getD ""
+      status           := (r[2]?).getD ""
+      backend          := (r[3]?).getD ""
+      modelOverride    := (r[4]?).getD ""
+      modelEffort      := (r[5]?).getD ""
+      workingDirectory := (r[6]?).getD ""
+      project          := (r[7]?).getD ""
+      updatedAt        := (r[8]?).getD ""
+      totalCostCents   := (((r[9]?).bind String.toNat?).getD 0).toUInt64
+    }
+
 /-- List all mission status strings currently persisted in `missions.db`. -/
 def listMissionStatuses (st : CoreStore) : IO (Except String (Array String)) := do
   let rows ← execParamQuery st.missionsDb "SELECT status FROM missions;" #[]

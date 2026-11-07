@@ -6,7 +6,7 @@
   4. All 9 `OrbCore.Harness` contract tests.
   5. `/v1/*` `OrbCore.Proxy` pre-first-byte `429`/`503` failover + hop-by-hop header sanitization.
   6. Live HTTP/1.1 + WebSocket dispatch (`/api/health`, `/api/auth/login` with `SANDBOXED_USERS`, `/v1/*` auth, `/api/privilege-access/verify-and-log` fail-closed vs valid lease, `/api/console/ws` `401` without JWT and `101` echoing `Sec-WebSocket-Protocol: jwt.<token>`).
-  7. All 84 `OrbCore.HostTests` & optional `--emit-evidence-log <path>` receipt generation.
+  7. All 85 `OrbCore.HostTests` & optional `--emit-evidence-log <path>` receipt generation.
 -/
 import OrbCore
 
@@ -23,6 +23,8 @@ open OrbCore.Proxy
 open OrbCore.Managed
 open OrbCore.CloudAgents
 open OrbCore.MemoryAndCloud
+open OrbCore.Cyber
+open OrbCore.Skills
 open OrbCore.Control
 open OrbCore.HostTests
 
@@ -597,6 +599,187 @@ private def runCloudHandoffTests
      (handoffStr.splitOn "fork-workspace:").length != 1 then
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: cloud-to-workspace handoff response mismatch: status={validHandoffResp.status} body={handoffStr}"
+    return 1
+  return 0
+
+private def runCyberAndSkillDeliveryTests
+    (tmpRoot : String) (store : CoreStore) (appSt0 : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
+  let appSt := { appSt0 with cfg := { appSt0.cfg with workingDir := tmpRoot } }
+  -- 1. `#1497` Codex Cyber Access + `/goal` fail-closed HTTP gates
+  let capsRaw := s!"GET /api/control/cyber-capabilities?model=gpt-6.1-sol&mode=daybreak HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
+  let .ok capsReq := parseRequest capsRaw none | do closeCoreStore store; return 1
+  let .ok capsResp ← dispatchCoreRequest appSt capsReq nowSec | do closeCoreStore store; return 1
+  let capsStr := String.fromUTF8! capsResp.body
+  if capsResp.status != 200 ||
+     (capsStr.splitOn "\"version\":2").length != 2 ||
+     (capsStr.splitOn "\"route_supported\":true").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: /api/control/cyber-capabilities mismatch: {capsStr}"
+    return 1
+
+  -- `/goal` + explicit `daybreak` MUST fail closed (400) before creating a mission row
+  let badGoalBody := "{\"id\":\"m-cyber-goal-bad\",\"backend\":\"codex\",\"model_override\":\"gpt-6.1-sol\",\"cyber_access\":\"daybreak\",\"prompt\":\"/goal audit kernel\"}"
+  let badGoalRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {badGoalBody.utf8ByteSize}\r\n\r\n{badGoalBody}".toUTF8
+  let .ok badGoalReq := parseRequest badGoalRaw none | do closeCoreStore store; return 1
+  let .ok badGoalResp ← dispatchCoreRequest appSt badGoalReq nowSec | do closeCoreStore store; return 1
+  if badGoalResp.status != 400 || (← getMission? store "m-cyber-goal-bad").isSome then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: /goal with explicit cyber should fail closed without persisting mission, got {badGoalResp.status}"
+    return 1
+
+  -- Retired Daybreak alias MUST fail closed (400)
+  let retiredBody := "{\"id\":\"m-cyber-retired\",\"backend\":\"codex\",\"model_override\":\"gpt-daybreak-blue-latest\",\"prompt\":\"hello\"}"
+  let retiredRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {retiredBody.utf8ByteSize}\r\n\r\n{retiredBody}".toUTF8
+  let .ok retiredReq := parseRequest retiredRaw none | do closeCoreStore store; return 1
+  let .ok retiredResp ← dispatchCoreRequest appSt retiredReq nowSec | do closeCoreStore store; return 1
+  if retiredResp.status != 400 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: retired Daybreak alias should return 400, got {retiredResp.status}"
+    return 1
+
+  -- Path traversal mission id MUST fail closed (400) before creating a mission row or sidecar
+  let badMidBody := "{\"id\":\"../escape\",\"backend\":\"codex\",\"model_override\":\"gpt-6.1-sol\",\"cyber_access\":\"daybreak\",\"prompt\":\"hello\"}"
+  let badMidRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {badMidBody.utf8ByteSize}\r\n\r\n{badMidBody}".toUTF8
+  let .ok badMidReq := parseRequest badMidRaw none | do closeCoreStore store; return 1
+  let .ok badMidResp ← dispatchCoreRequest appSt badMidReq nowSec | do closeCoreStore store; return 1
+  if badMidResp.status != 400 || !(isSafeMissionId "m-cyber-ok") || isSafeMissionId "../escape" ||
+     (← writePending tmpRoot "../escape" { mode := .daybreak, revision := nilRevision }).isOk then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: unsafe missionId did not fail closed, got {badMidResp.status}"
+    return 1
+
+  -- Create Codex mission, PATCH cyber to `daybreak`, verify GET + conflicting `/api/control/message` (409) + `/goal` resume refusal (400)
+  let okCodexBody := "{\"id\":\"m-cyber-ok\",\"backend\":\"codex\",\"model_override\":\"gpt-6.1-sol\",\"working_directory\":\"" ++ tmpRoot ++ "\"}"
+  let okCodexRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {okCodexBody.utf8ByteSize}\r\n\r\n{okCodexBody}".toUTF8
+  let .ok okCodexReq := parseRequest okCodexRaw none | do closeCoreStore store; return 1
+  let .ok okCodexResp ← dispatchCoreRequest appSt okCodexReq nowSec | do closeCoreStore store; return 1
+  if okCodexResp.status != 201 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: codex mission create failed: {okCodexResp.status}"
+    return 1
+
+  let patchCyberBody := "{\"mode\":\"daybreak\"}"
+  let patchCyberRaw := s!"PATCH /api/control/missions/m-cyber-ok/cyber HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {patchCyberBody.utf8ByteSize}\r\n\r\n{patchCyberBody}".toUTF8
+  let .ok patchCyberReq := parseRequest patchCyberRaw none | do closeCoreStore store; return 1
+  let .ok patchCyberResp ← dispatchCoreRequest appSt patchCyberReq nowSec | do closeCoreStore store; return 1
+  let getCyberRaw := s!"GET /api/control/missions/m-cyber-ok/cyber HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
+  let .ok getCyberReq := parseRequest getCyberRaw none | do closeCoreStore store; return 1
+  let .ok getCyberResp ← dispatchCoreRequest appSt getCyberReq nowSec | do closeCoreStore store; return 1
+  let getCyberStr := String.fromUTF8! getCyberResp.body
+  let cyberRev := ((OrbBin.Json.parse getCyberStr).toOption.bind (·.fieldStr? "revision")).getD ""
+  if patchCyberResp.status != 200 || getCyberResp.status != 200 || cyberRev.isEmpty ||
+     (getCyberStr.splitOn "\"mode\":\"daybreak\"").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: PATCH/GET /cyber mismatch: patch={patchCyberResp.status} get={getCyberStr}"
+    return 1
+
+  -- Idle Codex follow-up omitting `cyber_access`/`cyber_revision` when explicit Daybreak is saved MUST return 409; stale `PATCH /cyber` `expected_revision` MUST return 409
+  let omitCyberMsgBody := "{\"mission_id\":\"m-cyber-ok\",\"content\":\"ping\"}"
+  let omitCyberMsgRaw := s!"POST /api/control/message HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {omitCyberMsgBody.utf8ByteSize}\r\n\r\n{omitCyberMsgBody}".toUTF8
+  let .ok omitCyberMsgReq := parseRequest omitCyberMsgRaw none | do closeCoreStore store; return 1
+  let .ok omitCyberMsgResp ← dispatchCoreRequest appSt omitCyberMsgReq nowSec | do closeCoreStore store; return 1
+  let stalePatchBody := "{\"mode\":\"standard\",\"expected_revision\":\"00000000-0000-0000-0000-000000000001\"}"
+  let stalePatchRaw := s!"PATCH /api/control/missions/m-cyber-ok/cyber HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {stalePatchBody.utf8ByteSize}\r\n\r\n{stalePatchBody}".toUTF8
+  let .ok stalePatchReq := parseRequest stalePatchRaw none | do closeCoreStore store; return 1
+  let .ok stalePatchResp ← dispatchCoreRequest appSt stalePatchReq nowSec | do closeCoreStore store; return 1
+  if omitCyberMsgResp.status != 409 || stalePatchResp.status != 409 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: cyber omission/stale-patch CAS mismatch: omit={omitCyberMsgResp.status} stalePatch={stalePatchResp.status}"
+    return 1
+
+  let conflictMsgBody := "{\"mission_id\":\"m-cyber-ok\",\"content\":\"ping\",\"cyber_access\":\"standard\"}"
+  let conflictMsgRaw := s!"POST /api/control/message HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {conflictMsgBody.utf8ByteSize}\r\n\r\n{conflictMsgBody}".toUTF8
+  let .ok conflictMsgReq := parseRequest conflictMsgRaw none | do closeCoreStore store; return 1
+  let .ok conflictMsgResp ← dispatchCoreRequest appSt conflictMsgReq nowSec | do closeCoreStore store; return 1
+  let resumeGoalBody := "{\"goal_mode\":true}"
+  let resumeGoalRaw := s!"POST /api/control/missions/m-cyber-ok/resume HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {resumeGoalBody.utf8ByteSize}\r\n\r\n{resumeGoalBody}".toUTF8
+  let .ok resumeGoalReq := parseRequest resumeGoalRaw none | do closeCoreStore store; return 1
+  let .ok resumeGoalResp ← dispatchCoreRequest appSt resumeGoalReq nowSec | do closeCoreStore store; return 1
+  if conflictMsgResp.status != 409 || resumeGoalResp.status != 400 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: cyber follow-up conflict/goal-resume mismatch: msg={conflictMsgResp.status} resume={resumeGoalResp.status}"
+    return 1
+
+  -- 2. `#1553` `/api/library/skill-delivery` + `/skill:<name>` validation
+  let globalSkillDir := System.FilePath.mk tmpRoot / "library" / "skills" / "lean-audit"
+  let ctxSkillDir := System.FilePath.mk tmpRoot / "project-files" / "orb" / "skills" / "orb-release"
+  IO.FS.createDirAll globalSkillDir
+  IO.FS.createDirAll ctxSkillDir
+  IO.FS.writeFile (globalSkillDir / "SKILL.md") "---\ndescription: \"Audit formal Lean specs\"\n---\nCheck specs.\n"
+  IO.FS.writeFile (ctxSkillDir / "SKILL.md") "Context-scoped release checklist.\n"
+
+  let delivRaw := s!"GET /api/library/skill-delivery?project=orb HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
+  let .ok delivReq := parseRequest delivRaw none | do closeCoreStore store; return 1
+  let .ok delivResp ← dispatchCoreRequest appSt delivReq nowSec | do closeCoreStore store; return 1
+  let delivStr := String.fromUTF8! delivResp.body
+  if delivResp.status != 200 ||
+     (delivStr.splitOn "\"lean-audit\"").length != 2 ||
+     (delivStr.splitOn "\"orb-release\"").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: /api/library/skill-delivery mismatch: {delivStr}"
+    return 1
+
+  -- Path traversal project slug rejected with 400
+  let badProjRaw := s!"GET /api/library/skill-delivery?project=../etc HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
+  let .ok badProjReq := parseRequest badProjRaw none | do closeCoreStore store; return 1
+  let .ok badProjResp ← dispatchCoreRequest appSt badProjReq nowSec | do closeCoreStore store; return 1
+  -- Undelivered skill rejected with 400; delivered skill accepted with 200
+  let undelivMsgBody := s!"\{\"mission_id\":\"m-cyber-ok\",\"content\":\"run /skill:not-installed now\",\"cyber_access\":\"daybreak\",\"cyber_revision\":\"{cyberRev}\"}"
+  let undelivMsgRaw := s!"POST /api/control/message HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {undelivMsgBody.utf8ByteSize}\r\n\r\n{undelivMsgBody}".toUTF8
+  let .ok undelivMsgReq := parseRequest undelivMsgRaw none | do closeCoreStore store; return 1
+  let .ok undelivMsgResp ← dispatchCoreRequest appSt undelivMsgReq nowSec | do closeCoreStore store; return 1
+  let delivMsgBody := s!"\{\"mission_id\":\"m-cyber-ok\",\"content\":\"run /skill:lean-audit now\",\"cyber_access\":\"daybreak\",\"cyber_revision\":\"{cyberRev}\"}"
+  let delivMsgRaw := s!"POST /api/control/message HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {delivMsgBody.utf8ByteSize}\r\n\r\n{delivMsgBody}".toUTF8
+  let .ok delivMsgReq := parseRequest delivMsgRaw none | do closeCoreStore store; return 1
+  let .ok delivMsgResp ← dispatchCoreRequest appSt delivMsgReq nowSec | do closeCoreStore store; return 1
+  let delivMsgStr := String.fromUTF8! delivMsgResp.body
+  if badProjResp.status != 400 || undelivMsgResp.status != 400 || delivMsgResp.status != 200 ||
+     (delivMsgStr.splitOn "Selected skills (load before performing the current request):").length != 2 ||
+     (delivMsgStr.splitOn ".agents/skills/lean-audit/SKILL.md").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: skill-delivery gate/directive mismatch: badProj={badProjResp.status} undeliv={undelivMsgResp.status} deliv={delivMsgResp.status} body={delivMsgStr}"
+    return 1
+
+  -- Idle follow-up MUST have promoted `.next.json` to `{mid}.json` and written execution binding (`remote-launch:m-cyber-ok`)
+  let .ok committedSel ← readCommittedSelection tmpRoot "m-cyber-ok" | do closeCoreStore store; return 1
+  let boundKey? ← readBinding? tmpRoot "m-cyber-ok"
+  if committedSel.mode != .daybreak || boundKey?.map (·.key) != some "remote-launch:m-cyber-ok" then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: cyber pending selection was not promoted/bound on idle launch"
+    return 1
+
+  -- Active mission MUST reject `PATCH /api/control/missions/:id/cyber` with 409
+  discard <| execParamQuery store.missionsDb "UPDATE missions SET status='active' WHERE id='m-cyber-ok';" #[]
+  let patchActiveBody := "{\"mode\":\"standard\"}"
+  let patchActiveRaw := s!"PATCH /api/control/missions/m-cyber-ok/cyber HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {patchActiveBody.utf8ByteSize}\r\n\r\n{patchActiveBody}".toUTF8
+  let .ok patchActiveReq := parseRequest patchActiveRaw none | do closeCoreStore store; return 1
+  let .ok patchActiveResp ← dispatchCoreRequest appSt patchActiveReq nowSec | do closeCoreStore store; return 1
+  if patchActiveResp.status != 409 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: active mission PATCH /cyber should return 409, got {patchActiveResp.status}"
+    return 1
+
+  -- `/v1/responses` proxy enforcement: non-existent mission key -> 403; unsupported intermediary target -> 400
+  let proxyTok := if appSt.cfg.proxySecret.isEmpty then validJwt else appSt.cfg.proxySecret
+  let ghostProxyBody := "{\"model\":\"gpt-6.1-sol\",\"input\":\"hi\"}"
+  let ghostProxyRaw := s!"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {proxyTok}\r\nX-Sandboxed-Execution-Key: remote-launch:m-ghost-nonexistent\r\nContent-Length: {ghostProxyBody.utf8ByteSize}\r\n\r\n{ghostProxyBody}".toUTF8
+  let .ok ghostProxyReq := parseRequest ghostProxyRaw none | do closeCoreStore store; return 1
+  let .ok ghostProxyResp ← dispatchCoreRequest appSt ghostProxyReq nowSec | do closeCoreStore store; return 1
+  let prevChains ← appSt.chainsRef.get
+  appSt.chainsRef.set #[{
+    id := "codex-bad-intermediary", name := "Bad Intermediary",
+    targets := #[{
+      accountId := "intermediary-1", provider := "openai",
+      baseUrl := "https://proxy.example.invalid/v1", apiKey := "sk-test", modelId := "gpt-6.1-sol"
+    }]
+  }]
+  let boundProxyRaw := s!"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {proxyTok}\r\nX-Sandboxed-Execution-Key: remote-launch:m-cyber-ok\r\nContent-Length: {ghostProxyBody.utf8ByteSize}\r\n\r\n{ghostProxyBody}".toUTF8
+  let .ok boundProxyReq := parseRequest boundProxyRaw none | do closeCoreStore store; return 1
+  let .ok boundProxyResp ← dispatchCoreRequest appSt boundProxyReq nowSec | do closeCoreStore store; return 1
+  appSt.chainsRef.set prevChains
+  if ghostProxyResp.status != 403 || boundProxyResp.status != 400 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: proxy execution-key / intermediary cyber gating mismatch: ghost={ghostProxyResp.status} intermediary={boundProxyResp.status}"
     return 1
   return 0
 
@@ -1197,10 +1380,11 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runCustomProviderRateLimitTests store appSt validJwt nowSec) != 0 then return 1
   if (← runFastMemoryBrokerTests store appSt validJwt nowSec) != 0 then return 1
   if (← runCloudHandoffTests tmpRoot store appSt validJwt nowSec) != 0 then return 1
+  if (← runCyberAndSkillDeliveryTests tmpRoot store appSt validJwt nowSec) != 0 then return 1
   if (← runPostCrashAndReconcileExtras store tmpRoot) != 0 then return 1
   IO.FS.removeDirAll tmpRoot
 
-  -- 7. Host evidence suite (`84/84` host tests) + R3-A / R4-A / R5-A composition gates
+  -- 7. Host evidence suite (`85/85` host tests) + R3-A / R4-A / R5-A composition gates
   if (← runLifecycleCompositionTests) != 0 then return 1
   if (← runHarnessCloudCompositionTests) != 0 then return 1
   if (← runManagedNodeCompositionTests) != 0 then return 1
@@ -1687,7 +1871,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln "[orb-core-test] FAIL: OrbCore.HostTests failed"
     return 1
 
-  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":7,\"harness_contracts\":9,\"host_tests\":84}"
+  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":7,\"harness_contracts\":9,\"host_tests\":85}"
   return 0
 
 end OrbCore.SelfTest

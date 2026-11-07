@@ -768,6 +768,22 @@ code {
 .composer.has-mode.tall .picks { grid-column: 3; }
 .composer.has-mode.tall .voice-slot { grid-column: 4; }
 .composer.has-mode.tall .send-slot { grid-column: 5; }
+.composer.has-skills { grid-template-rows: auto auto; }
+.composer.has-skills > .skill-chips { grid-column: 1 / -1; grid-row: 1; }
+.composer.has-skills > .plus-wrap,
+.composer.has-skills > .mode-chip,
+.composer.has-skills > .composer-field,
+.composer.has-skills > .picks,
+.composer.has-skills > .voice-slot,
+.composer.has-skills > .send-slot { grid-row: 2; }
+.composer.has-skills.tall { grid-template-rows: auto 1fr auto; }
+.composer.has-skills.tall > .skill-chips { grid-row: 1; }
+.composer.has-skills.tall > .composer-field { grid-row: 2; }
+.composer.has-skills.tall > .plus-wrap { grid-column: 1; grid-row: 3; }
+.composer.has-skills.tall > .mode-chip,
+.composer.has-skills.tall > .picks,
+.composer.has-skills.tall > .voice-slot,
+.composer.has-skills.tall > .send-slot { grid-row: 3; }
 .composer.voice-on > .mode-chip { display: none; }
 .composer.voice-on {
   grid-template-columns: auto 1fr;
@@ -1563,6 +1579,12 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
 .slash-item-label {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.slash-item-copy { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.slash-item-detail { color: var(--fg-4); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slash-empty { padding: 6px 8px; color: var(--fg-3); font-size: 12px; }
+.skill-chips, .user-skills { display: flex; flex-wrap: wrap; gap: 4px; }
+.user-skills { margin: 0 0 6px; }
+.skill-chip { color: var(--fg-2); background: var(--bg-inset); border-color: var(--stroke); }
 .slash-chevron {
   flex: none; display: grid; place-items: center; color: var(--fg-4); margin-left: auto;
 }
