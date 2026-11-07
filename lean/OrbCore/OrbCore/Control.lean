@@ -15,9 +15,11 @@ import OrbCore.Harness
 import OrbCore.Proxy
 import OrbCore.Cyber
 import OrbCore.Skills
+import OrbCore.AuthSidecar
 import OrbCore.Managed
 import OrbCore.MemoryAndCloud
 import OrbCore.HarnessSessionRegistry
+import OrbNetLeaf.TlsHttp
 
 namespace OrbCore.Control
 
@@ -36,9 +38,11 @@ open OrbCore.Harness
 open OrbCore.Proxy
 open OrbCore.Cyber
 open OrbCore.Skills
+open OrbCore.AuthSidecar
 open OrbCore.Managed
 open OrbCore.MemoryAndCloud
 open OrbCore.HarnessSessionRegistry
+open OrbNetLeaf.TlsHttp
 
 /-- Core runtime configuration parsed from environment variables (`HOST`, `PORT`, `WORKING_DIR`,
     `DEV_MODE`, `DASHBOARD_PASSWORD`, `JWT_SECRET`, `SANDBOXED_USERS`, `ALLOW_INSECURE_REMOTE_DEV_AUTH`). -/
@@ -68,10 +72,35 @@ structure CoreAppState where
   proxyCooldownsRef : IO.Ref (Array AccountCooldown)
   seqRef         : IO.Ref UInt64
   pacingTracker?  : Option ProxyPacingTracker := none
+  healthTracker?  : Option ProviderHealthTracker := none
+  proxyMockTransport? : Option (ProviderTarget → IO (Except String HttpsResponse)) := none
+  authRoot        : String := ""
+  authRotation?   : Option AuthRotationHandle := none
+  cliProxySessionsRef? : Option (IO.Ref (Array CliProxyLoginSession)) := none
   memTokenCache?  : Option MemoryTokenCache := none
   cloudWakeup?    : Option CloudWorkerWakeup := none
   bunkerStateRef? : Option (IO.Ref UInt8) := none
   managedStore?   : Option ManagedComputeStore := none
+
+/-- Maximum concurrent unexpired CLIProxy login sessions held in `cliProxySessionsRef?`. -/
+def maxCliProxyLoginSessions : Nat := 64
+
+/-- Publish a live routing-chain update to `st.chainsRef` and advance `ProviderHealthTracker.routeGeneration`
+    whenever the published chain snapshot actually changes (or `forceBump == true` on explicit write endpoints)
+    so any concurrent in-flight `/v1/*` attempt planned under an older `routeGeneration` fails closed (`0`). -/
+def publishRoutingChainsUpdate
+    (st : CoreAppState)
+    (chains : Array RoutingChain)
+    (forceBump : Bool := true) : IO UInt64 := do
+  let prev ← st.chainsRef.get
+  st.chainsRef.set chains
+  match st.healthTracker? with
+  | some htr =>
+    if forceBump || prev != chains then
+      bumpRouteGeneration htr
+    else
+      currentRouteGeneration htr
+  | none => pure 1
 
 def isLoopbackHostStr (h : String) : Bool :=
   let t := h.trimAscii.toString
@@ -661,11 +690,34 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   let expected? ← match enforceProxySelection selection? requestedModel headerProgram? bodyProgram? with
     | .ok p => pure p
     | .error e => return mkJson 400 s!"\{\"error\":\"unsupported_access_program\",\"detail\":{jsonEscape e}}"
+  let snapRouteGen? ← match st.healthTracker? with
+    | some htr => some <$> currentRouteGeneration htr
+    | none => pure none
   let chains ← st.chainsRef.get
   let activeChain := selectRoutingChainForBody chains req.bodySlice.toByteArray
-  let cooldowns ← st.proxyCooldownsRef.get
-  let plan := planChain activeChain cooldowns nowEpochSec
-  if plan.eligible.isEmpty && !plan.cooling.isEmpty then
+  let headersAlreadyCommitted :=
+    (lookupHeaderCI req.headers "x-orb-first-byte-committed").map (fun v =>
+      let low := v.trimAscii.toString.toLower
+      low == "1" || low == "true") |>.getD false
+  let explicitAttemptGen? : Option UInt64 :=
+    (lookupHeaderCI req.headers "x-orb-attempt-generation").bind (fun v =>
+      (v.trimAscii.toString.toNat?).map Nat.toUInt64)
+  let attemptGen? : Option UInt64 := explicitAttemptGen?.orElse (fun _ => snapRouteGen?)
+  let pinnedAcctHdr :=
+    (lookupHeaderCI req.headers "x-orb-pinned-account").map (·.trimAscii.toString) |>.getD ""
+  let plan ← match st.healthTracker? with
+    | some htr =>
+      let hPlan ← planChainFromHealth htr activeChain nowEpochSec
+      let extra := activeCooldowns (← st.proxyCooldownsRef.get) nowEpochSec
+      if extra.isEmpty then
+        pure hPlan
+      else
+        let mergedCooling := coolingFor activeChain.targets (hPlan.cooling ++ extra)
+        pure { eligible := capProxyTargets (eligibleTargets activeChain.targets mergedCooling), cooling := mergedCooling }
+    | none =>
+      let cooldowns ← st.proxyCooldownsRef.get
+      pure (planChain activeChain cooldowns nowEpochSec)
+  if !headersAlreadyCommitted && plan.eligible.isEmpty && !plan.cooling.isEmpty then
     if plan.allUsageLimited then
       let limit := (soonestCooldown? plan.cooling).getD
         { accountId := "", untilEpoch := nowEpochSec + 60, reason := .usageLimit, label := "" }
@@ -684,22 +736,42 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
         pure { activeChain with targets := activeChain.targets.filter (fun t => targetSupportsExplicitCyber t requestedModel cleanPath) }
     else
       pure activeChain
+  let dispatchChain : RoutingChain :=
+    if headersAlreadyCommitted && !pinnedAcctHdr.isEmpty then
+      let pinnedFirst := effectiveChain.targets.filter (fun t => t.accountId == pinnedAcctHdr)
+      let others := effectiveChain.targets.filter (fun t => t.accountId != pinnedAcctHdr)
+      { effectiveChain with targets := pinnedFirst ++ others }
+    else
+      effectiveChain
   let forwardBody ← match expected? with
     | none => pure req.bodySlice.toByteArray
     | some program =>
       match injectAccessProgram req.bodySlice.toByteArray program with
       | .ok b => pure b
       | .error e => return mkJson 400 s!"\{\"error\":\"unsupported_access_program\",\"detail\":{jsonEscape e}}"
-  let skipAccountIds := plan.cooling.map (fun c => c.accountId)
-  let out ← forwardProxyChain effectiveChain req.method cleanPath #[] forwardBody none false st.pacingTracker?
+  let skipAccountIds := if headersAlreadyCommitted then #[] else plan.cooling.map (fun c => c.accountId)
+  let explicitPinned? : Option String :=
+    if headersAlreadyCommitted then some pinnedAcctHdr else none
+  let out ← forwardProxyChain dispatchChain req.method cleanPath #[] forwardBody
+    st.proxyMockTransport? headersAlreadyCommitted st.pacingTracker?
     (skipAccountIds := skipAccountIds)
-  let stillActive := activeCooldowns cooldowns nowEpochSec
-  let withoutSelected := stillActive.filter (fun c => c.accountId != out.selectedAccount)
-  let refreshed :=
-    match cooldownForOutcome out nowEpochSec with
-    | some c => withoutSelected.push c
-    | none => withoutSelected
-  st.proxyCooldownsRef.set refreshed
+    (healthTracker? := st.healthTracker?)
+    (attemptGeneration? := attemptGen?)
+    (nowEpoch? := some nowEpochSec)
+    (pinnedAccount? := explicitPinned?)
+  match st.healthTracker? with
+  | some htr =>
+    let active ← snapshotActiveHealthCooldowns htr nowEpochSec
+    st.proxyCooldownsRef.set active
+  | none =>
+    let cooldowns ← st.proxyCooldownsRef.get
+    let stillActive := activeCooldowns cooldowns nowEpochSec
+    let withoutSelected := stillActive.filter (fun c => c.accountId != out.selectedAccount)
+    let refreshed :=
+      match cooldownForOutcome out nowEpochSec with
+      | some c => withoutSelected.push c
+      | none => withoutSelected
+    st.proxyCooldownsRef.set refreshed
   if let (some program, some mid, some sel) := (expected?, boundMid?, selection?) then
     let text := String.fromUTF8? out.body |>.getD ""
     for line in text.splitOn "\n" do
@@ -710,7 +782,13 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
           discard <| writeReceipt st.cfg.workingDir mid {
             revision := sel.revision, requestedModel := requestedModel, program := confirmed, model := model
           }
-  return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := out.headers, body := out.body }
+  let diagHdrs := out.headers ++ #[
+    ("X-Orb-Selected-Account", out.selectedAccount),
+    ("X-Orb-Attempts-Used", s!"{out.attemptsUsed}"),
+    ("X-Orb-Verdict-Code", s!"{out.verdictCode}"),
+    ("X-Orb-First-Byte-Committed", if out.firstByteCommitted then "true" else "false")
+  ]
+  return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs, body := out.body }
 
 /-- Dispatch a parsed `HttpRequest` against `CoreAppState` (`routes` capability parity:
     `"/api/control/missions/:id/automations"`, `"/api/model-routing"`). -/
@@ -754,7 +832,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     | some raw101 => return .error raw101
     | none => return .ok (mkJson 400 "{\"error\":\"invalid_websocket_upgrade\"}")
 
-  -- 4. Authenticated `/v1/*` LLM Proxy (`SANDBOXED_PROXY_SECRET` or Core Bearer Auth)
+  -- 4. Authenticated `/v1/*` LLM Proxy (`SANDBOXED_PROXY_SECRET` or Core Bearer Auth, unified `ProviderHealthTracker`, `SM-21`)
   if cleanPath.startsWith "/v1/" then
     if !authenticateProxyRequest st.cfg req.headers nowEpochSec then
       return .ok (mkJson 401 "{\"error\":\"unauthorized_proxy\"}")
@@ -1491,7 +1569,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       | .error e => return .ok (mkJson 400 s!"\{\"error\":\"invalid_provider_limits\",\"detail\":{jsonEscape e}}")
       | .ok () =>
         let refreshed ← loadRoutingChainsFromStore st.store
-        st.chainsRef.set refreshed
+        discard <| publishRoutingChainsUpdate st refreshed
         return .ok (mkJson 201 (renderAIProviderJson provRec none))
     else if let some params := matchRoutePattern? "/api/ai/providers/:id" rawTarget then
       let pid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
@@ -1545,7 +1623,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         | .error e => return .ok (mkJson 400 s!"\{\"error\":\"invalid_provider_limits\",\"detail\":{jsonEscape e}}")
         | .ok () =>
           let refreshed ← loadRoutingChainsFromStore st.store
-          st.chainsRef.set refreshed
+          discard <| publishRoutingChainsUpdate st refreshed
           let obs? ← match st.pacingTracker? with
             | some tr => lookupObservedKeyRpm? tr updated.id
             | none => pure none
@@ -1555,7 +1633,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         | .ok () =>
           let refreshed ← loadRoutingChainsFromStore st.store
-          st.chainsRef.set refreshed
+          discard <| publishRoutingChainsUpdate st refreshed
           return .ok (mkJson 200 "{\"ok\":true}")
 
   -- Model Routing Controls (`"/api/model-routing"` / `/api/model-routing/chains`)
@@ -1564,7 +1642,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       if req.method == "GET" then
         let cid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
         let chains ← loadRoutingChainsFromStore st.store
-        st.chainsRef.set chains
+        discard <| publishRoutingChainsUpdate st chains (forceBump := false)
         match chains.find? (fun c => c.id == cid) with
         | none => return .ok (mkJson 404 "{\"error\":\"chain_not_found\"}")
         | some ch =>
@@ -1592,7 +1670,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok _ =>
         let refreshed ← loadRoutingChainsFromStore st.store
-        st.chainsRef.set refreshed
+        discard <| publishRoutingChainsUpdate st refreshed
         return .ok (mkJson (if req.method == "POST" then 201 else 200) s!"\{\"id\":{jsonEscape cid},\"name\":{jsonEscape nm}}")
     else
       return .ok (mkJson 200 "{\"ok\":true,\"router\":\"/api/model-routing\"}")
@@ -1856,6 +1934,230 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     | .error e => return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
     | .ok plan => return .ok (mkJson 200 (planToJson plan))
 
+  -- Nonce-bound CLIProxy OAuth login & generation-fenced credential rotation (`SM-21`, `R1-02`, `R1-03`)
+  if cleanPath.startsWith "/api/control/auth/" then
+    let effAuthRoot :=
+      if !st.authRoot.trimAscii.toString.isEmpty then st.authRoot
+      else
+        let normWork := trimTrailingSlashes st.cfg.workingDir.trimAscii.toString
+        if normWork.endsWith "/.sandboxed-sh" || normWork == ".sandboxed-sh" then s!"{normWork}/auth"
+        else s!"{normWork}/.sandboxed-sh/auth"
+
+    if req.method == "POST" && cleanPath == "/api/control/auth/cliproxy/login" then
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let provider := (jv.fieldStr? "provider").getD ""
+      let nonce := ((jv.fieldNat? "attempt_nonce").getD 0).toUInt64
+      let ttlSecs := ((jv.fieldNat? "ttl_secs").getD 300).toUInt64
+      let expiresAt :=
+        match jv.fieldNat? "expires_at" with
+        | some e => e.toUInt64
+        | none => nowEpochSec + (if ttlSecs == 0 then 300 else ttlSecs)
+      match validateCliProxyLoginParams effAuthRoot provider nonce nowEpochSec expiresAt with
+      | .error reason =>
+        return .ok (mkJson 400 s!"\{\"error\":{jsonEscape reason}}")
+      | .ok candSess =>
+        let admission ← match st.cliProxySessionsRef? with
+          | none => pure CliProxySessionAdmission.admittedNew
+          | some sRef =>
+            sRef.modifyGet fun xs =>
+              admitOrRefreshCliProxySession xs candSess nowEpochSec maxCliProxyLoginSessions
+        match admission with
+        | .duplicateNonceProviderConflict =>
+          return .ok (mkJson 409 "{\"error\":\"duplicate_attempt_nonce\"}")
+        | .capacityExceeded =>
+          return .ok (mkJson 429 "{\"error\":\"too_many_active_login_sessions\"}")
+        | .admittedNew =>
+          match ← beginCliProxyLogin effAuthRoot provider nonce nowEpochSec expiresAt with
+          | .error reason =>
+            if let some sRef := st.cliProxySessionsRef? then
+              sRef.modify fun xs =>
+                xs.filter (fun s => !(s.attemptNonce == candSess.attemptNonce && s.provider == candSess.provider && s.startedAtEpoch == candSess.startedAtEpoch && s.expiresAtEpoch == candSess.expiresAtEpoch))
+            return .ok (mkJson 400 s!"\{\"error\":{jsonEscape reason}}")
+          | .ok sess =>
+            return .ok (mkJson 201 s!"\{\"ok\":true,\"attempt_nonce\":{sess.attemptNonce},\"provider\":{jsonEscape sess.provider},\"attempt_dir\":{jsonEscape sess.attemptDir},\"credential_path\":{jsonEscape (sess.credentialPath sess.provider)},\"started_at\":{sess.startedAtEpoch},\"expires_at\":{sess.expiresAtEpoch}}")
+        | .refreshedSameProvider prevSess =>
+          match ← beginCliProxyLogin effAuthRoot provider nonce nowEpochSec expiresAt with
+          | .error reason =>
+            if let some sRef := st.cliProxySessionsRef? then
+              sRef.modify fun xs =>
+                xs.map (fun s => if s.attemptNonce == prevSess.attemptNonce then prevSess else s)
+            return .ok (mkJson 400 s!"\{\"error\":{jsonEscape reason}}")
+          | .ok sess =>
+            return .ok (mkJson 201 s!"\{\"ok\":true,\"attempt_nonce\":{sess.attemptNonce},\"provider\":{jsonEscape sess.provider},\"attempt_dir\":{jsonEscape sess.attemptDir},\"credential_path\":{jsonEscape (sess.credentialPath sess.provider)},\"started_at\":{sess.startedAtEpoch},\"expires_at\":{sess.expiresAtEpoch}}")
+
+    if req.method == "POST" && cleanPath == "/api/control/auth/cliproxy/stage" then
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let sessNonce := ((jv.fieldNat? "session_nonce").orElse (fun _ => jv.fieldNat? "attempt_nonce") |>.getD 0).toUInt64
+      let presentedNonce := ((jv.fieldNat? "presented_nonce").orElse (fun _ => jv.fieldNat? "attempt_nonce") |>.getD 0).toUInt64
+      let provider := (jv.fieldStr? "provider").getD ""
+      let credJson :=
+        match jv.field? "credential" with
+        | some obj@(.obj _) => renderCompact obj
+        | _ => (jv.fieldStr? "credential_json").getD ""
+      let sess? ← match st.cliProxySessionsRef? with
+        | some sRef =>
+          sRef.modifyGet fun xs =>
+            let live := xs.filter (fun s => nowEpochSec < s.expiresAtEpoch)
+            (live.find? (fun s => s.attemptNonce == sessNonce), live)
+        | none => pure none
+      let some sess := sess?
+        | return .ok (mkJson 404 "{\"error\":\"login_session_not_found\"}")
+      match ← stageCliProxyCredential sess presentedNonce provider credJson nowEpochSec with
+      | .error reason =>
+        return .ok (mkJson 409 s!"\{\"error\":{jsonEscape reason}}")
+      | .ok stagedPath =>
+        return .ok (mkJson 200 s!"\{\"ok\":true,\"attempt_nonce\":{sess.attemptNonce},\"provider\":{jsonEscape provider},\"staged_path\":{jsonEscape stagedPath}}")
+
+    if req.method == "GET" && cleanPath == "/api/control/auth/cliproxy/staged" then
+      let qParams := parseQueryParams rawTarget
+      let sessNonce := ((qParams.find? (fun p => p.1 == "session_nonce" || p.1 == "attempt_nonce")).bind (fun p => p.2.toNat?) |>.getD 0).toUInt64
+      let presentedNonce := ((qParams.find? (fun p => p.1 == "presented_nonce" || p.1 == "attempt_nonce")).bind (fun p => p.2.toNat?) |>.getD 0).toUInt64
+      let provider := ((qParams.find? (fun p => p.1 == "provider")).map Prod.snd).getD ""
+      let sess? ← match st.cliProxySessionsRef? with
+        | some sRef =>
+          sRef.modifyGet fun xs =>
+            let live := xs.filter (fun s => nowEpochSec < s.expiresAtEpoch)
+            (live.find? (fun s => s.attemptNonce == sessNonce), live)
+        | none => pure none
+      let some sess := sess?
+        | return .ok (mkJson 404 "{\"error\":\"login_session_not_found\"}")
+      match ← readStagedCliProxyCredential sess presentedNonce provider with
+      | .error reason =>
+        return .ok (mkJson 409 s!"\{\"error\":{jsonEscape reason}}")
+      | .ok rawCred =>
+        return .ok (mkJson 200 s!"\{\"ok\":true,\"attempt_nonce\":{sess.attemptNonce},\"provider\":{jsonEscape provider},\"credential_json\":{jsonEscape rawCred}}")
+
+    if req.method == "POST" && cleanPath == "/api/control/auth/cliproxy/promote" then
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let sessNonce := ((jv.fieldNat? "session_nonce").orElse (fun _ => jv.fieldNat? "attempt_nonce") |>.getD 0).toUInt64
+      let presentedNonce := ((jv.fieldNat? "presented_nonce").orElse (fun _ => jv.fieldNat? "attempt_nonce") |>.getD 0).toUInt64
+      let provider := (jv.fieldStr? "provider").getD ""
+      let sess? ← match st.cliProxySessionsRef? with
+        | some sRef =>
+          sRef.modifyGet fun xs =>
+            let live := xs.filter (fun s => nowEpochSec < s.expiresAtEpoch)
+            (live.find? (fun s => s.attemptNonce == sessNonce), live)
+        | none => pure none
+      let some sess := sess?
+        | return .ok (mkJson 404 "{\"error\":\"login_session_not_found\"}")
+      match ← promoteCliProxyCredential sess presentedNonce provider nowEpochSec with
+      | .error reason =>
+        return .ok (mkJson 409 s!"\{\"error\":{jsonEscape reason}}")
+      | .ok promotedPath =>
+        if let some sRef := st.cliProxySessionsRef? then
+          sRef.modify fun xs =>
+            xs.filter (fun s => nowEpochSec < s.expiresAtEpoch && !(s.attemptNonce == sess.attemptNonce && s.provider == sess.provider))
+        return .ok (mkJson 200 s!"\{\"ok\":true,\"attempt_nonce\":{sess.attemptNonce},\"provider\":{jsonEscape provider},\"promoted_path\":{jsonEscape promotedPath}}")
+
+    if cleanPath.startsWith "/api/control/auth/rotation" then
+      let some rotH := st.authRotation?
+        | return .ok (mkJson 503 "{\"error\":\"auth_rotation_unavailable\"}")
+      let renderLedger (led : AuthRotationLedger) (drained : Array String := #[]) : String :=
+        let drainedJson := String.intercalate "," (drained.toList.map jsonEscape)
+        let pendingJson := String.intercalate "," (led.rotation.pendingRotations.toList.map (fun r =>
+          s!"\{\"applied_gen\":{r.appliedGen},\"record_path\":{jsonEscape r.recordPath}}"))
+        s!"\{\"ok\":true,\"phase_code\":{led.rotation.phaseCode.toNat},\"dirty_pending\":{led.rotation.dirtyPending.toNat},\"durable_auth_generation\":{led.rotation.durableAuthGeneration},\"active_login_nonce\":{led.rotation.activeLoginNonce},\"token_expiry\":{led.rotation.tokenExpiryEpoch},\"writer_dirty\":{if led.writer.dirty then "true" else "false"},\"dirty_seq\":{led.writer.dirtySeq},\"flushed_seq\":{led.writer.flushedSeq},\"pending_rotations\":[{pendingJson}],\"drained_paths\":[{drainedJson}]}"
+
+      if req.method == "GET" && cleanPath == "/api/control/auth/rotation" then
+        let led ← snapshotRotationLedger rotH
+        return .ok (mkJson 200 (renderLedger led))
+
+      if req.method == "POST" && cleanPath == "/api/control/auth/rotation/claim" then
+        let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+          | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+        let nonce := ((jv.fieldNat? "attempt_nonce").getD 0).toUInt64
+        let leaseDl := ((jv.fieldNat? "lease_deadline").getD 0).toUInt64
+        match ← claimAuthRefreshLive rotH nonce nowEpochSec leaseDl with
+        | .error reason => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape reason}}")
+        | .ok _ =>
+          let led ← snapshotRotationLedger rotH
+          return .ok (mkJson 200 (renderLedger led))
+
+      if req.method == "POST" && cleanPath == "/api/control/auth/rotation/stage" then
+        let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+          | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+        let candGen := ((jv.fieldNat? "candidate_gen").getD 0).toUInt64
+        let presNonce := ((jv.fieldNat? "presented_nonce").orElse (fun _ => jv.fieldNat? "attempt_nonce") |>.getD 0).toUInt64
+        let recName := (jv.fieldStr? "record_name").getD s!"pending-gen-{candGen}.json"
+        if recName.trimAscii.toString.isEmpty || hasSegmentTraversal recName then
+          return .ok (mkJson 400 "{\"error\":\"invalid_record_name\"}")
+        let recPath := s!"{effAuthRoot}/rotations/{recName}"
+        let payloadStr? : Option String :=
+          match jv.field? "payload" with
+          | some obj@(.obj _) => some (renderCompact obj)
+          | _ => jv.fieldStr? "payload_json"
+        let seq? := (jv.fieldNat? "seq").map Nat.toUInt64
+        let payloadBytes? := payloadStr?.map String.toUTF8
+        match ← stageAuthRotationLive rotH candGen presNonce nowEpochSec recPath payloadBytes? seq? payloadBytes? with
+        | .error reason => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape reason}}")
+        | .ok _ =>
+          let led ← snapshotRotationLedger rotH
+          return .ok (mkJson 200 (renderLedger led))
+
+      if req.method == "POST" && cleanPath == "/api/control/auth/rotation/record-pending" then
+        let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+          | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+        let appGen := ((jv.fieldNat? "applied_gen").getD 0).toUInt64
+        let recName := (jv.fieldStr? "record_name").getD s!"pending-gen-{appGen}.json"
+        if recName.trimAscii.toString.isEmpty || hasSegmentTraversal recName then
+          return .ok (mkJson 400 "{\"error\":\"invalid_record_name\"}")
+        let recPath := s!"{effAuthRoot}/rotations/{recName}"
+        let payloadStr :=
+          match jv.field? "payload" with
+          | some obj@(.obj _) => renderCompact obj
+          | _ => (jv.fieldStr? "payload_json").getD s!"\{\"gen\":{appGen}}"
+        let coalesceWriter := (jv.fieldBool? "coalesce_writer").getD false
+        let seq? := (jv.fieldNat? "seq").map Nat.toUInt64
+        match ← recordPendingRotationLive rotH appGen recPath (some payloadStr.toUTF8) coalesceWriter seq? with
+        | .error reason => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape reason}}")
+        | .ok _ =>
+          let led ← snapshotRotationLedger rotH
+          return .ok (mkJson 200 (renderLedger led))
+
+      if req.method == "POST" && cleanPath == "/api/control/auth/rotation/commit" then
+        let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+          | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+        let candGen := ((jv.fieldNat? "candidate_gen").getD 0).toUInt64
+        let newExpiry : UInt64 := ((jv.fieldNat? "new_expiry").map Nat.toUInt64).getD (nowEpochSec + 3600)
+        let simFsync := (jv.fieldBool? "simulate_fsync_fail").getD false
+        let simRename := (jv.fieldBool? "simulate_rename_fail").getD false
+        let snap ← snapshotRotationLedger rotH
+        let expectedSeq := ((jv.fieldNat? "expected_seq").map Nat.toUInt64).getD snap.writer.dirtySeq
+        let wArg := { snap.writer with dirtySeq := expectedSeq }
+        let stArg :=
+          match jv.fieldNat? "expected_gen" with
+          | some g => { snap.rotation with durableAuthGeneration := g.toUInt64 }
+          | none => snap.rotation
+        match ← commitAndDrainRotation stArg wArg candGen nowEpochSec newExpiry simFsync simRename (some rotH) with
+        | .error reason =>
+          return .ok (mkJson 409 s!"\{\"error\":{jsonEscape reason}}")
+        | .ok (_, _, drainedPaths, _) =>
+          let led ← snapshotRotationLedger rotH
+          return .ok (mkJson 200 (renderLedger led drainedPaths))
+
+      if req.method == "POST" && cleanPath == "/api/control/auth/rotation/abort" then
+        let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+          | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+        let candGen := ((jv.fieldNat? "candidate_gen").getD 0).toUInt64
+        match ← abortAuthRefreshLive rotH candGen nowEpochSec with
+        | .error reason => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape reason}}")
+        | .ok _ =>
+          let led ← snapshotRotationLedger rotH
+          return .ok (mkJson 200 (renderLedger led))
+
+      if req.method == "POST" && cleanPath == "/api/control/auth/rotation/revoke" then
+        let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+          | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+        let candGen := ((jv.fieldNat? "candidate_gen").getD 0).toUInt64
+        match ← revokeAuthCredentialLive rotH candGen nowEpochSec with
+        | .error reason => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape reason}}")
+        | .ok _ =>
+          let led ← snapshotRotationLedger rotH
+          return .ok (mkJson 200 (renderLedger led))
+
   return .ok (mkJson 404 s!"\{\"error\":\"not_found\",\"path\":{jsonEscape cleanPath}}")
 
 /-- Bounded RFC 6455 WebSocket session loop after `101 Switching Protocols`:
@@ -1954,7 +2256,11 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let chainsRef ← IO.mkRef initialChains
     let proxyCooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
     let seqRef ← IO.mkRef (0 : UInt64)
-    let pacingTracker ← newProxyPacingTracker
+    let healthTracker ← newProviderHealthTracker 1 2
+    let authRootDir := s!"{dataRoot}/auth"
+    discard <| (IO.FS.createDirAll authRootDir).toBaseIO
+    let authRotation ← newAuthRotationHandle s!"{authRootDir}/oauth_credentials.json"
+    let cliProxySessionsRef ← IO.mkRef (#[] : Array CliProxyLoginSession)
     let memTokenCache ← newMemoryTokenCache
     let cloudWakeup ← newCloudWorkerWakeup
     let bunkerRef ← IO.mkRef (0 : UInt8)
@@ -1966,7 +2272,11 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       chainsRef := chainsRef
       proxyCooldownsRef := proxyCooldownsRef
       seqRef := seqRef
-      pacingTracker? := some pacingTracker
+      pacingTracker? := some healthTracker.pacing
+      healthTracker? := some healthTracker
+      authRoot := authRootDir
+      authRotation? := some authRotation
+      cliProxySessionsRef? := some cliProxySessionsRef
       memTokenCache? := some memTokenCache
       cloudWakeup? := some cloudWakeup
       bunkerStateRef? := some bunkerRef
