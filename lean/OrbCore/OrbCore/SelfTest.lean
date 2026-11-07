@@ -1141,6 +1141,172 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
 
   -- 7. Host evidence suite (`84/84` host tests) + R3-A lifecycle composition gates
   if (← runLifecycleCompositionTests) != 0 then return 1
+  if (← do
+    let base := OrbCore.RunCoordinator.fresh "m-r3b" 7
+    let .ok supMarked := OrbCore.RunCoordinator.markSuperseded base 7
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator markSuperseded failed"; return 1
+    if (OrbCore.RunCoordinator.startRun supMarked 7 1).isOk ||
+       (OrbCore.RunCoordinator.startRun base 6 1).isOk then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator admitted superseded or stale owner"
+      return 1
+    let .ok claimed := OrbCore.RunCoordinator.startRun base 7 1
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator failed initial claim"; return 1
+    if claimed.missionPhase != 1 then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator claim did not step mission to active"
+      return 1
+    let .ok running := OrbCore.RunCoordinator.confirmSpawned claimed 7
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator failed spawn confirm"; return 1
+    let busy := OrbCore.RunCoordinator.pushReceipt
+      (OrbCore.RunCoordinator.noteToolCall running "call-live" "bash")
+      { toolName := "finish", ok := false, messageId := "msg-sup", missionId := "m-r3b" }
+    let .ok supBusy := OrbCore.RunCoordinator.markSuperseded busy 7
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator supersede during tools failed"; return 1
+    if supBusy.ownerSuperseded == 0 ||
+       OrbCore.RunCoordinator.liveToolCount supBusy.activeToolCalls != 1 ||
+       supBusy.pendingReceipts.size != 1 ||
+       supBusy.crashTombstones != 0 || supBusy.runPhase != 2 ||
+       (OrbCore.RunCoordinator.enterToolDrain supBusy 7).isOk ||
+       (OrbCore.RunCoordinator.reconcileMissingToolResult supBusy 7).isOk ||
+       (OrbCore.RunCoordinator.failTurn supBusy 7).isOk then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator supersede wiped or kept admitting in-flight calls"
+      return 1
+    if (OrbCore.RunCoordinator.completeTurn running 7).isOk then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator completed without structured receipt"
+      return 1
+    let badId := OrbCore.RunCoordinator.pushReceipt running
+      { toolName := "finish", ok := true, messageId := "m-r3b", missionId := "m-r3b" }
+    if badId.pendingReceipts.size != 0 || (OrbCore.RunCoordinator.completeTurn badId 7).isOk then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator accepted messageId == missionId"
+      return 1
+    let notOk := OrbCore.RunCoordinator.pushReceipt running
+      { toolName := "finish", ok := false, messageId := "msg-fail", missionId := "m-r3b" }
+    if (OrbCore.RunCoordinator.completeTurn notOk 7).isOk then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator completeTurn accepted ok = false"
+      return 1
+    let .ok (failedRec, failRecPoll) := OrbCore.RunCoordinator.failTurn notOk 7
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator failTurn on ok = false receipt failed"; return 1
+    if failedRec.runPhase != 5 || failedRec.missionPhase != 6 ||
+       failRecPoll.ok || failRecPoll.messageId != "msg-fail" || failRecPoll.messageId == failedRec.missionId then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator ok = false receipt did not surface on failTurn"
+      return 1
+    let busyNoRec := OrbCore.RunCoordinator.noteToolCall running "call-live-2" "bash"
+    let .ok (failedSt, failPoll) := OrbCore.RunCoordinator.failTurn busyNoRec 7
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator failTurn with live tools failed"; return 1
+    if failedSt.runPhase != 5 || failedSt.missionPhase != 6 ||
+       OrbCore.RunCoordinator.liveToolCount failedSt.activeToolCalls != 0 ||
+       failedSt.activeToolCalls.size != 1 || failedSt.crashTombstones != 1 ||
+       failPoll.messageId != "" || failPoll.messageId == "m-r3b" then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator failTurn without receipt dropped live tools or leaked missionId"
+      return 1
+    let .ok (abortedSt, abortPoll) := OrbCore.RunCoordinator.abortTurn busyNoRec 7 true
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator abortTurn with live tools failed"; return 1
+    if abortedSt.runPhase != 6 || abortedSt.missionPhase != 7 ||
+       OrbCore.RunCoordinator.liveToolCount abortedSt.activeToolCalls != 0 ||
+       abortedSt.activeToolCalls.size != 1 || abortedSt.crashTombstones != 1 ||
+       abortPoll.messageId != "" || abortPoll.messageId == abortedSt.missionId then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator abortTurn dropped live tools without a tombstone"
+      return 1
+    let twoCalls := OrbCore.RunCoordinator.noteToolCall
+      (OrbCore.RunCoordinator.noteToolCall running "call-1" "bash") "call-2" "read"
+    let .ok draining := OrbCore.RunCoordinator.enterToolDrain twoCalls 7
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator failed enterToolDrain"; return 1
+    let cleared := (OrbCore.RunCoordinator.finishToolCall draining "call-1") |>
+      (OrbCore.RunCoordinator.finishToolCall · "call-2")
+    let .ok drained := OrbCore.RunCoordinator.finishDrainedTools cleared 7
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator normal drain did not exit"; return 1
+    if drained.runPhase != 2 || drained.crashTombstones != 0 ||
+       OrbCore.RunCoordinator.liveToolCount drained.activeToolCalls != 0 then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator normal drain recorded a crash tombstone"
+      return 1
+    let .ok recRun := OrbCore.RunCoordinator.reconcileMissingToolResult twoCalls 7
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator reconcile from running failed"; return 1
+    let .ok recDrain := OrbCore.RunCoordinator.reconcileMissingToolResult draining 7
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator reconcile from drainingTools failed"; return 1
+    let .ok recAgain := OrbCore.RunCoordinator.reconcileMissingToolResult recDrain 7
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator second reconcile failed"; return 1
+    let proj := OrbCore.RunCoordinator.projectControl recAgain
+    if recRun.runPhase != 2 || recDrain.runPhase != 2 || recRun != recDrain || recDrain != recAgain ||
+       proj.activeToolCalls != 0 || proj.crashTombstones != 2 || recDrain.activeToolCalls.size != 2 then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator missing ToolResult reconcile not zero/idempotent"
+      return 1
+    let withRec := OrbCore.RunCoordinator.pushReceipt recDrain
+      { toolName := "finish", ok := true, messageId := "msg-42", missionId := "m-r3b" }
+    let .ok (done, poll) := OrbCore.RunCoordinator.completeTurn withRec 7
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator completeTurn with receipt failed"; return 1
+    if !poll.completed || !poll.ok || poll.messageId != "msg-42" || poll.messageId == done.missionId ||
+       done.runPhase != 4 || done.missionPhase != 5 then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator completion poll mismatch"
+      return 1
+    if (OrbCore.RunCoordinator.claimNextGeneration done 7 1).isOk ||
+       (OrbCore.RunCoordinator.claimNextGeneration done 7 2).isOk ||
+       (OrbCore.RunCoordinator.confirmSpawned done 7).isOk ||
+       done.missionPhase != 5 || done.runPhase != 4 then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator reopened completed terminal mission"
+      return 1
+    let .ok (parkedDone, parkedPoll) := OrbCore.RunCoordinator.completeTurn withRec 7 (parkMission := true)
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator completeTurn (parkMission := true) failed"; return 1
+    if !parkedPoll.completed || parkedDone.runPhase != 4 || parkedDone.missionPhase != 0 then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator parked turn state mismatch"
+      return 1
+    if (OrbCore.RunCoordinator.claimNextGeneration parkedDone 7 1).isOk ||
+       (OrbCore.RunCoordinator.confirmSpawned parkedDone 7).isOk then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator re-entered running without incremented generation"
+      return 1
+    let .ok nextClaim := OrbCore.RunCoordinator.claimNextGeneration parkedDone 7 2
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator rejected generation + 1 on parked mission"; return 1
+    let .ok nextRun := OrbCore.RunCoordinator.confirmSpawned nextClaim 7
+      | do IO.eprintln "[orb-core-test] FAIL: RunCoordinator rejected confirm on generation + 1"; return 1
+    if nextRun.runPhase != 2 || nextRun.runGeneration != 2 || nextRun.missionPhase != 1 then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator generation + 1 state mismatch"
+      return 1
+    let abortClaimRes := OrbCore.RunCoordinator.claimNextGeneration abortedSt 7 2
+    let failClaimRes := OrbCore.RunCoordinator.claimNextGeneration failedSt 7 2
+    if abortClaimRes.isOk || failClaimRes.isOk || abortedSt.missionPhase != 7 || abortedSt.runPhase != 6 ||
+       failedSt.missionPhase != 6 || failedSt.runPhase != 5 then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator reopened cancelled or failed terminal mission"
+      return 1
+    let isOutOfDomain {α : Type} : Except String α → Bool
+      | .error "phase_out_of_domain" => true
+      | _ => false
+    let corruptMission := { base with missionPhase := 99 }
+    let corruptRun := { running with runPhase := 99 }
+    if !isOutOfDomain (OrbCore.RunCoordinator.startRun corruptMission 7 1) ||
+       !isOutOfDomain (OrbCore.RunCoordinator.markSuperseded corruptMission 7) ||
+       !isOutOfDomain (OrbCore.RunCoordinator.confirmSpawned corruptMission 7) ||
+       !isOutOfDomain (OrbCore.RunCoordinator.enterToolDrain corruptMission 7) ||
+       !isOutOfDomain (OrbCore.RunCoordinator.finishDrainedTools corruptMission 7) ||
+       !isOutOfDomain (OrbCore.RunCoordinator.reconcileMissingToolResult corruptMission 7) ||
+       !isOutOfDomain (OrbCore.RunCoordinator.completeTurn corruptMission 7) ||
+       !isOutOfDomain (OrbCore.RunCoordinator.failTurn corruptMission 7) ||
+       !isOutOfDomain (OrbCore.RunCoordinator.abortTurn corruptMission 7 true) ||
+       !isOutOfDomain (OrbCore.RunCoordinator.claimNextGeneration corruptMission 7 1) ||
+       !isOutOfDomain (OrbCore.RunCoordinator.startRun corruptRun 7 2) ||
+       !isOutOfDomain (OrbCore.RunCoordinator.markSuperseded corruptRun 7) ||
+       OrbCore.RunCoordinator.noteToolCall corruptMission "c-bad" "bash" != corruptMission ||
+       OrbCore.RunCoordinator.finishToolCall corruptMission "c-bad" != corruptMission ||
+       OrbCore.RunCoordinator.pushReceipt corruptMission
+         { toolName := "finish", ok := true, messageId := "msg-bad", missionId := "m-r3b" } != corruptMission ||
+       OrbCore.RunCoordinator.noteToolCall corruptRun "c-bad" "bash" != corruptRun ||
+       OrbCore.RunCoordinator.finishToolCall corruptRun "c-bad" != corruptRun ||
+       OrbCore.RunCoordinator.pushReceipt corruptRun
+         { toolName := "finish", ok := true, messageId := "msg-bad", missionId := "m-r3b" } != corruptRun then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator accepted out-of-domain phase code"
+      return 1
+    let supAfterNote := OrbCore.RunCoordinator.noteToolCall supBusy "call-after-sup" "bash"
+    let supAfterFinish := OrbCore.RunCoordinator.finishToolCall supBusy "call-live"
+    let supAfterReceipt := OrbCore.RunCoordinator.pushReceipt supBusy
+      { toolName := "finish", ok := true, messageId := "msg-after-sup", missionId := "m-r3b" }
+    let termAfterNote := OrbCore.RunCoordinator.noteToolCall done "call-after-done" "bash"
+    let termAfterReceipt := OrbCore.RunCoordinator.pushReceipt done
+      { toolName := "finish", ok := true, messageId := "msg-after-done", missionId := "m-r3b" }
+    if supAfterNote.activeToolCalls != supBusy.activeToolCalls ||
+       supAfterFinish.activeToolCalls != supBusy.activeToolCalls ||
+       supAfterReceipt.pendingReceipts != supBusy.pendingReceipts ||
+       termAfterNote.activeToolCalls != done.activeToolCalls ||
+       termAfterReceipt.pendingReceipts != done.pendingReceipts then
+      IO.eprintln "[orb-core-test] FAIL: RunCoordinator mutated activeToolCalls or pendingReceipts while superseded or terminal"
+      return 1
+    pure (0 : UInt32)) != 0 then return 1
   let hostOk ← runAllHostTests emitLogPath?
   if !hostOk then
     IO.eprintln "[orb-core-test] FAIL: OrbCore.HostTests failed"
