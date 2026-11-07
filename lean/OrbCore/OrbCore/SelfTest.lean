@@ -36,6 +36,79 @@ private def exceptStrEq (a b : Except String String) : Bool :=
   | .error x, .error y => x == y
   | _, _ => false
 
+private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
+  -- Same-boot orphan mission cleanup: if a mission row is deleted while an intent/lease exists at the current boot,
+  -- `recoverDispatchLeases` rolls back the orphaned reservation so the track is never wedged.
+  let .ok () ← releaseDispatchTrackLease store "rsv-post-crash" "t5b"
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: release rsv-post-crash failed"; return 1
+  let _ ← execParamQuery store.missionsDb
+    "INSERT INTO dispatch_lease_intents(reservation_id,mission_id,project_slug,track,repo,authority_mode,reserved_disk_gib,phase,boot_epoch,created_at,updated_at) VALUES('rsv-ghost','m-deleted-ghost','orb','r2-track','Th0rgal/orb','writer',4,'active',2,'t5c','t5c');" #[]
+  let _ ← execParamQuery store.projectsDb
+    "INSERT INTO project_track_leases(project_slug,track,reservation_id,mission_id,repo,authority_mode,phase,boot_epoch,updated_at) VALUES('orb','r2-track','rsv-ghost','m-deleted-ghost','Th0rgal/orb','writer','active',2,'t5c');" #[]
+  let .ok () ← recoverDispatchLeases store.missionsDb store.projectsDb 2
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: ghost-mission recoverDispatchLeases failed"; return 1
+  let .ok () ← acquireDispatchTrackLease store {
+    reservationId := "rsv-after-ghost", missionId := "m-w1", projectSlug := "orb",
+    track := "r2-track", repo := "Th0rgal/orb", authorityMode := "writer",
+    reservedDiskGib := 3, bootEpoch := 2, nowAt := "t5d"
+  } | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: ghost mission wedged track lease"; return 1
+  -- Duplicate caller-supplied mission `id` on `POST /api/control/missions` returns 409 without deleting or overwriting `m-w1`
+  let dupCreateBody := "{\"id\":\"m-w1\",\"title\":\"Attempt overwrite\",\"project\":\"orb\",\"track\":\"r2-track\",\"repo\":\"Th0rgal/orb\",\"writer\":true}"
+  let dupCreateRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {dupCreateBody.utf8ByteSize}\r\n\r\n{dupCreateBody}".toUTF8
+  let .ok dupCreateReq := parseRequest dupCreateRaw none | do closeCoreStore store; return 1
+  let .ok dupCreateResp ← dispatchCoreRequest appSt dupCreateReq nowSec | do closeCoreStore store; return 1
+  let mW1Rows ← execParamQuery store.missionsDb "SELECT title,tags FROM missions WHERE id='m-w1';" #[]
+  let .ok mW1Rs := mW1Rows
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: duplicate POST /api/control/missions deleted existing m-w1"; return 1
+  let mW1Title := (mW1Rs[1]?.bind (·[0]?)).getD ""
+  let mW1Tags := (mW1Rs[1]?.bind (·[1]?)).getD ""
+  if dupCreateResp.status != 409 || mW1Title == "Attempt overwrite" || (mW1Tags.splitOn "disk-gib:3").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: duplicate mission id guard or lease tags projection failed: status={dupCreateResp.status} title={mW1Title} tags={mW1Tags}"
+    return 1
+  -- Cross-project repository/PR writer split-brain (`SM-08`): `m-w1` holds active writer lease on `Th0rgal/orb` under `orb`;
+  -- a writer under a different project (`other-proj`) targeting the same `Th0rgal/orb` MUST fail with `repo_writer_conflict:m-w1` (HTTP 409),
+  -- while a `readonly` consultant on the same repo under `other-proj` succeeds!
+  let crossProjConflictBody := "{\"id\":\"m-cross-proj-w\",\"title\":\"Cross-project PR writer\",\"project\":\"other-proj\",\"track\":\"t-other\",\"github_pr\":\"Th0rgal/orb\",\"writer\":true}"
+  let crossProjConflictRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {crossProjConflictBody.utf8ByteSize}\r\n\r\n{crossProjConflictBody}".toUTF8
+  let .ok crossProjConflictReq := parseRequest crossProjConflictRaw none | do closeCoreStore store; return 1
+  let .ok crossProjConflictResp ← dispatchCoreRequest appSt crossProjConflictReq nowSec | do closeCoreStore store; return 1
+  let crossProjConflictStr := String.fromUTF8! crossProjConflictResp.body
+  if crossProjConflictResp.status != 409 || (crossProjConflictStr.splitOn "repo_writer_conflict:m-w1").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: cross-project repo writer split-brain not blocked: status={crossProjConflictResp.status} body={crossProjConflictStr}"
+    return 1
+  let crossProjRoBody := "{\"id\":\"m-cross-proj-ro\",\"title\":\"Cross-project readonly\",\"project\":\"other-proj\",\"track\":\"t-other-ro\",\"github_pr\":\"Th0rgal/orb\",\"writer\":false,\"estimated_disk_gib\":2,\"tags\":[\"custom:keep-me\"]}"
+  let crossProjRoRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {crossProjRoBody.utf8ByteSize}\r\n\r\n{crossProjRoBody}".toUTF8
+  let .ok crossProjRoReq := parseRequest crossProjRoRaw none | do closeCoreStore store; return 1
+  let .ok crossProjRoResp ← dispatchCoreRequest appSt crossProjRoReq nowSec | do closeCoreStore store; return 1
+  if crossProjRoResp.status != 201 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: cross-project readonly mission rejected: status={crossProjRoResp.status}"
+    return 1
+  -- Verify custom non-system tag (`custom:keep-me`) survives lease acquisition and release
+  let roTagRows ← execParamQuery store.missionsDb "SELECT tags FROM missions WHERE id='m-cross-proj-ro';" #[]
+  let roTags := match roTagRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  if (roTags.splitOn "custom:keep-me").length != 2 || (roTags.splitOn "disk-gib:2").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: custom mission tag lost on lease acquisition: {roTags}"
+    return 1
+  -- 64-bit wraparound disk-budget bypass (`2^34 + 1 = 17179869185`) MUST fail closed on both HTTP (`400`) and store (`invalid_reserved_disk_gib`)!
+  let wrapDiskBody := "{\"id\":\"m-disk-wrap\",\"title\":\"Disk wrap\",\"project\":\"other-proj\",\"track\":\"t-wrap\",\"estimated_disk_gib\":17179869185,\"writer\":false}"
+  let wrapDiskRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {wrapDiskBody.utf8ByteSize}\r\n\r\n{wrapDiskBody}".toUTF8
+  let .ok wrapDiskReq := parseRequest wrapDiskRaw none | do closeCoreStore store; return 1
+  let .ok wrapDiskResp ← dispatchCoreRequest appSt wrapDiskReq nowSec | do closeCoreStore store; return 1
+  let wrapStoreLease ← acquireDispatchTrackLease store {
+    reservationId := "rsv-wrap-direct", missionId := "m-cross-proj-ro", projectSlug := "other-proj",
+    track := "t-wrap-2", repo := "", authorityMode := "readonly",
+    reservedDiskGib := 17179869185, bootEpoch := 2, nowAt := "t5e"
+  }
+  if wrapDiskResp.status != 400 || wrapStoreLease.isOk then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: 64-bit disk wraparound was not rejected: http={wrapDiskResp.status}"
+    return 1
+  return 0
+
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
   let prodNoSecrets : CoreConfig := { devMode := false, host := "127.0.0.1" }
@@ -427,7 +500,166 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln s!"[orb-core-test] FAIL: job-bound PATCH returned {boundPatchResp.status}"
     return 1
 
+  -- 6b. Phase R2-B & R2-C regressions (`SM-01`, `SM-02`, `SM-08`, `SM-12`)
+  -- SM-01: fail-closed persistent DB open (rejects `:memory:`, `mode=memory`, and non-directory file collisions)
+  if (← openSqliteDb ":memory:" missionsSchemaSql).isOk ||
+     (← openSqliteDb "file:memdb1?mode=memory" missionsSchemaSql).isOk ||
+     (← openCoreStore ":memory:").isOk then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: openSqliteDb/openCoreStore permitted memory fallback"
+    return 1
+  let blockedRoot := s!"{tmpRoot}/not-a-directory"
+  IO.FS.writeFile blockedRoot "file-blocking-dir"
+  if (← openCoreStore blockedRoot).isOk then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: openCoreStore succeeded on file-blocked root"
+    return 1
+
+  -- SM-01: `mission_terminal_evidence` join in `listMissionsJson` + unified `GET /api/control/missions/:id/health`
+  let .ok () ← upsertTerminalEvidence store {
+    missionId := "m-alpha"
+    terminalReason := "completed_verified"
+    summary := "all checks green"
+    artifactRef := "sha256:deadbeef"
+    verified := true
+    recordedAt := "2026-11-06T00:02:00Z"
+  } | do closeCoreStore store; return 1
+  let .ok rev2 ← commitTransitionWithIntents store "m-alpha" 1 1 1 1 1
+      "completed" "readonly" "client" "" "" 16 "2026-11-06T00:03:00Z"
+      #[{ effectId := "eff-r2c-1", intentKind := "notify_completion", payloadJson := "{\"ok\":true}", attemptEpoch := 1 }]
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: commitTransitionWithIntents failed"; return 1
+  if rev2 != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: expected state_revision=2, got {rev2}"
+    return 1
+  -- SM-02: stale `expectedRev` CAS update and contradictory authority tags MUST be rejected!
+  let staleCas ← commitTransitionWithIntents store "m-alpha" 1 1 1 1 1
+      "completed" "writer" "managed" "m-beta" "" 0 "2026-11-06T00:04:00Z" #[]
+  if staleCas.isOk || (classifyAuthorityMode none #["pr-writer", "pr-readonly"] false).isOk then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: stale CAS or contradictory tags were not rejected"
+    return 1
+  -- R2-C outbox StickyFence: Claim -> MarkUncertain blocks fresh Claim/Accept until Reconcile!
+  let .ok (phClaim, _) ← transitionOutboxEffect store "eff-r2c-1" 1 1 1 "t1"
+    | do closeCoreStore store; return 1
+  let .ok (phUnc, _) ← transitionOutboxEffect store "eff-r2c-1" 4 1 1 "t2"
+    | do closeCoreStore store; return 1
+  let retryOnUncertain ← transitionOutboxEffect store "eff-r2c-1" 1 1 1 "t3"
+  let acceptOnUncertain ← transitionOutboxEffect store "eff-r2c-1" 2 1 1 "t3"
+  let .ok (phRec, _) ← transitionOutboxEffect store "eff-r2c-1" 5 1 1 "t4"
+    | do closeCoreStore store; return 1
+  if phClaim != 1 || phUnc != 4 || retryOnUncertain.isOk || acceptOnUncertain.isOk || phRec != 5 then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: outbox StickyFence transition invariant violated"
+    return 1
+
+  let .ok listJoined ← listMissionsJson store | do closeCoreStore store; return 1
+  if (listJoined.splitOn "\"artifact_ref\":\"sha256:deadbeef\"").length != 2 ||
+     (listJoined.splitOn "\"health_verdict\":\"completed\"").length != 2 ||
+     (listJoined.splitOn "\"authority_mode\":\"readonly\"").length != 2 ||
+     (listJoined.splitOn "\"reserved_disk_gib\":16").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: listMissionsJson terminal_evidence/typed columns missing: {listJoined}"
+    return 1
+  let healthRaw := s!"GET /api/control/missions/m-alpha/health HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
+  let .ok healthReq := parseRequest healthRaw none | do closeCoreStore store; return 1
+  let .ok healthResp ← dispatchCoreRequest appSt healthReq nowSec | do closeCoreStore store; return 1
+  let healthStr := String.fromUTF8! healthResp.body
+  if healthResp.status != 200 || (healthStr.splitOn "\"health_verdict\":\"completed\"").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: GET /api/control/missions/m-alpha/health mismatch: {healthStr}"
+    return 1
+
+  -- SM-08: two-phase cross-DB track/repo lease reservation + conflict rejection + crash recovery
+  let .ok () ← upsertMission store {
+    id := "m-w1", title := "Writer 1", status := "active", backend := "opencode",
+    modelOverride := "", workingDirectory := tmpRoot, project := "orb", updatedAt := "t1"
+  } | do closeCoreStore store; return 1
+  let .ok () ← upsertMission store {
+    id := "m-w2", title := "Writer 2", status := "active", backend := "opencode",
+    modelOverride := "", workingDirectory := tmpRoot, project := "orb", updatedAt := "t1"
+  } | do closeCoreStore store; return 1
+  let .ok () ← acquireDispatchTrackLease store {
+    reservationId := "rsv-w1", missionId := "m-w1", projectSlug := "orb",
+    track := "r2-track", repo := "Th0rgal/orb", authorityMode := "writer",
+    reservedDiskGib := 8, nowAt := "t1"
+  } | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: first writer lease rejected"; return 1
+  let dupWriter ← acquireDispatchTrackLease store {
+    reservationId := "rsv-w2", missionId := "m-w2", projectSlug := "orb",
+    track := "r2-track", repo := "Th0rgal/orb", authorityMode := "writer",
+    reservedDiskGib := 4, nowAt := "t2"
+  }
+  if dupWriter.isOk then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: conflicting track writer lease was not rejected"
+    return 1
+  -- Cross-track writer on the SAME repo MUST also be rejected (`verifyRepoDisjoint`)!
+  let sameRepoOtherTrack ← acquireDispatchTrackLease store {
+    reservationId := "rsv-w2-repo", missionId := "m-w2", projectSlug := "orb",
+    track := "different-track", repo := "Th0rgal/orb", authorityMode := "writer",
+    reservedDiskGib := 2, nowAt := "t2b"
+  }
+  if sameRepoOtherTrack.isOk then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: cross-track same-repo writer lease was not rejected"
+    return 1
+  let .ok () ← releaseDispatchTrackLease store "rsv-w1" "t3" | do closeCoreStore store; return 1
+  -- Simulate same-boot Phase-3 failure (intent `preparing`, projects row `active` at boot 1)
+  let _ ← execParamQuery store.missionsDb
+    "INSERT INTO dispatch_lease_intents(reservation_id,mission_id,project_slug,track,repo,authority_mode,reserved_disk_gib,phase,boot_epoch,created_at,updated_at) VALUES('rsv-sameboot','m-w2','orb','r2-track','Th0rgal/orb','writer',6,'preparing',1,'t3b','t3b');" #[]
+  let _ ← execParamQuery store.projectsDb
+    "INSERT INTO project_track_leases(project_slug,track,reservation_id,mission_id,repo,authority_mode,phase,boot_epoch,updated_at) VALUES('orb','r2-track','rsv-sameboot','m-w2','Th0rgal/orb','writer','active',1,'t3b');" #[]
+  let .ok () ← recoverDispatchLeases store.missionsDb store.projectsDb 1
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: same-boot recoverDispatchLeases failed"; return 1
+  -- Simulate mid-flight crash leaving `preparing` rows in both `missions.db` and `projects.db`
+  let _ ← execParamQuery store.missionsDb
+    "INSERT INTO dispatch_lease_intents(reservation_id,mission_id,project_slug,track,repo,authority_mode,reserved_disk_gib,phase,boot_epoch,created_at,updated_at) VALUES('rsv-crash','m-w2','orb','r2-track','Th0rgal/orb','writer',12,'preparing',1,'t4','t4');" #[]
+  let _ ← execParamQuery store.projectsDb
+    "INSERT INTO project_track_leases(project_slug,track,reservation_id,mission_id,repo,authority_mode,phase,boot_epoch,updated_at) VALUES('orb','r2-track','rsv-crash','m-w2','Th0rgal/orb','writer','preparing',1,'t4');" #[]
+  let .ok () ← recoverDispatchLeases store.missionsDb store.projectsDb 2
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: recoverDispatchLeases failed"; return 1
+  -- After startup recovery on boot 2, `m-w1` can acquire `r2-track` immediately without waiting 6h TTL!
+  let .ok () ← acquireDispatchTrackLease store {
+    reservationId := "rsv-post-crash", missionId := "m-w1", projectSlug := "orb",
+    track := "r2-track", repo := "Th0rgal/orb", authorityMode := "writer",
+    reservedDiskGib := 4, bootEpoch := 2, nowAt := "t5"
+  } | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: post-crash lease acquisition blocked"; return 1
+  if (← runR2bRound2Extras store appSt validJwt nowSec) != 0 then return 1
+
+  -- SM-12: pre-effect in-flight idempotency reservation + committed `2xx` > 512 KiB `committed_oversize` sentinel
+  let .ok .Claimed ← claimIdempotencySlot store "missions_create" "idem-inflight-1" "t5"
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: claimIdempotencySlot initial claim failed"; return 1
+  let .ok .InFlight ← claimIdempotencySlot store "missions_create" "idem-inflight-1" "t5"
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: concurrent claimIdempotencySlot did not return InFlight"; return 1
+  let .ok _ ← recordOrReplayIdempotency store "missions_create" "idem-inflight-1" 201 "{\"id\":\"m-idem-1\"}" "t5"
+    | do closeCoreStore store; return 1
+  let .ok (.Replayed repRec) ← claimIdempotencySlot store "missions_create" "idem-inflight-1" "t6"
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: finalized slot did not replay"; return 1
+  if repRec.statusCode != 201 || repRec.bodyJson != "{\"id\":\"m-idem-1\"}" then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: finalized slot replay mismatch"
+    return 1
+  let bigPayload := "{\"blob\":\"" ++ String.ofList (List.replicate 530000 'x') ++ "\"}"
+  let .ok over1 ← recordOrReplayIdempotency store "missions_create" "idem-oversize-1" 201 bigPayload "t5"
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: oversize idempotency write failed"; return 1
+  let .ok over2 ← recordOrReplayIdempotency store "missions_create" "idem-oversize-1" 201 "{\"second\":\"mutation\"}" "t6"
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: oversize idempotency replay failed"; return 1
+  if !over1.committedOversize || over1.replayed || !over2.committedOversize || !over2.replayed ||
+     over1.statusCode != 201 || over2.statusCode != 201 || over1.bodyJson != over2.bodyJson ||
+     (over2.bodyJson.splitOn "\"committed_oversize\":true").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: SM-12 committed_oversize sentinel invariant violated: {over2.bodyJson}"
+    return 1
+
   closeCoreStore store
+  -- Re-opening `openCoreStore tmpRoot` MUST auto-increment persistent `bootEpoch` (`1 -> 2`) and recover stale boot-1 leases!
+  let .ok storeBoot2 ← openCoreStore tmpRoot
+    | do IO.eprintln "[orb-core-test] FAIL: second openCoreStore failed"; return 1
+  if storeBoot2.bootEpoch != 2 then
+    closeCoreStore storeBoot2
+    IO.eprintln s!"[orb-core-test] FAIL: expected persistent bootEpoch=2 on reopen, got {storeBoot2.bootEpoch}"
+    return 1
+  closeCoreStore storeBoot2
   IO.FS.removeDirAll tmpRoot
 
   -- 7. Host evidence suite (`83/83` host tests)

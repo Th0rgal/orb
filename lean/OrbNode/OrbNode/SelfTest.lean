@@ -1148,6 +1148,103 @@ def runTests : IO UInt32 := do
   -- 13. Round-3 regression checks
   rt ← runRound3RegressionTests check tmpRoot missionId nowEp authHdrs rt
 
+  -- 14. R2-B (`SM-02`) typed authority/placement/supersession/orphan/disk columns + `state_revision` CAS on `OrbNode.Store`
+  let casRoot := s!"{tmpRoot}/r2b-cas-ledger"
+  let .ok l0 ← OrbNode.Store.openLedger casRoot
+    | throw (IO.userError "openLedger failed on r2b-cas-ledger")
+  let seedJob : OrbNode.Store.JobRecord := {
+    jobId := "job-r2b-1"
+    missionId := missionId
+    payloadJson := "{}"
+    state := .queued
+    createdAt := "2026-11-06T00:00:00Z"
+    authorityMode := "readonly"
+    placementKind := "client"
+    reservedDiskGib := 24
+    stateRevision := 1
+  }
+  let .ok l1 ← l0.insertQueued seedJob
+    | throw (IO.userError "insertQueued failed on job-r2b-1")
+  let .ok (l2, jAfterCas) ← l1.updateJobAuthorityCas "job-r2b-1" 1 "writer" "managed" "m-super-9" "" 0
+    | throw (IO.userError "valid updateJobAuthorityCas rejected")
+  let staleNodeCas ← l2.updateJobAuthorityCas "job-r2b-1" 1 "readonly" "client" "" "2026-11-06T00:01:00Z" 24
+  let badModeCas ← l2.updateJobAuthorityCas "job-r2b-1" jAfterCas.stateRevision "invalid_mode" "managed" "" "" 0
+  -- Transition `job-r2b-1` to terminal `succeeded` with reserved_disk_gib=8, then run post-terminal `updateJobAuthorityCas`
+  -- to release `reserved_disk_gib` -> 0 and set `orphaned_at`, verifying `jobs.db` SQLite row reflects the post-terminal CAS!
+  let .ok (l3, jTerm) ← l2.updateJob "job-r2b-1" (fun r => .ok {
+    r with state := .succeeded, exitCode? := some 0, finishedAt? := some "2026-11-06T00:02:00Z", reservedDiskGib := 8
+  }) | throw (IO.userError "terminal updateJob failed on job-r2b-1")
+  let .ok (_l4, jPostTermCas) ← l3.updateJobAuthorityCas "job-r2b-1" jTerm.stateRevision "writer" "managed" "m-super-post" "2026-11-06T00:03:00Z" 0
+    | throw (IO.userError "post-terminal updateJobAuthorityCas failed on job-r2b-1")
+  let sqliteRowOut ← IO.Process.output {
+    cmd := "python3"
+    args := #["-c",
+      "import sqlite3, sys; conn = sqlite3.connect(sys.argv[1]); r = conn.execute(\"SELECT state, COALESCE(CAST(exit_code AS TEXT),''), superseded_by_mission_id, orphaned_at, reserved_disk_gib, state_revision FROM jobs WHERE id='job-r2b-1'\").fetchone(); print('|'.join(str(x) for x in r) if r else '')",
+      (System.FilePath.mk casRoot / "jobs.db").toString]
+  }
+  let sqliteRowTrim := sqliteRowOut.stdout.trimAscii.toString
+  let .ok lReopened ← OrbNode.Store.openLedger casRoot
+    | throw (IO.userError "reopen openLedger failed on r2b-cas-ledger")
+  let reopenedJob? := lReopened.jobs.get? "job-r2b-1"
+  check "SM-02 OrbNode.Store persists typed columns and post-terminal CAS into jobs.db while rejecting stale state_revision"
+    (jAfterCas.stateRevision == 2 &&
+     jAfterCas.authorityMode == "writer" &&
+     jAfterCas.supersededById == "m-super-9" &&
+     jAfterCas.reservedDiskGib == 0 &&
+     !staleNodeCas.isOk &&
+     !badModeCas.isOk &&
+     jPostTermCas.state == .succeeded &&
+     jPostTermCas.stateRevision == 4 &&
+     sqliteRowTrim == "succeeded|0|m-super-post|2026-11-06T00:03:00Z|0|4" &&
+     reopenedJob?.map (·.supersededById) == some "m-super-post" &&
+     reopenedJob?.map (·.reservedDiskGib) == some 0 &&
+     reopenedJob?.map (·.stateRevision) == some 4)
+  let httpAuthJobId := "77777777-7777-4777-8777-777777777777"
+  let httpAuthBody := renderCompact (.obj #[
+    ("job_id", .str httpAuthJobId),
+    ("mission_id", .str missionId),
+    ("lease_token", .str submitLease),
+    ("authority_mode", .str "readonly"),
+    ("placement_kind", .str "client"),
+    ("reserved_disk_gib", JVal.uint64 12),
+    ("payload", .obj #[
+      ("kind", .str "raw_command"),
+      ("command", .str "true"),
+      ("long_running", .bool true)
+    ])
+  ])
+  let (rtHttpAuth, rHttpAuth) ← handleRequest rt {
+    method := "POST", rawPath := "/jobs", path := "/jobs",
+    query := #[], headers := authHdrs, body := httpAuthBody.toUTF8
+  }
+  rt := rtHttpAuth
+  let storedHttpJob? := rt.ledger.jobs.get? httpAuthJobId
+  check "POST /jobs persists typed authority_mode, placement_kind, and reserved_disk_gib"
+    (rHttpAuth.status == 202 &&
+     storedHttpJob?.map (·.authorityMode) == some "readonly" &&
+     storedHttpJob?.map (·.placementKind) == some "client" &&
+     storedHttpJob?.map (·.reservedDiskGib) == some 12)
+  let wrapDiskJobId := "88888888-8888-4888-8888-888888888888"
+  let wrapDiskJobBody := renderCompact (.obj #[
+    ("job_id", .str wrapDiskJobId),
+    ("mission_id", .str missionId),
+    ("lease_token", .str submitLease),
+    ("authority_mode", .str "readonly"),
+    ("reserved_disk_gib", .num "17179869185"),
+    ("payload", .obj #[
+      ("kind", .str "raw_command"),
+      ("command", .str "true"),
+      ("long_running", .bool true)
+    ])
+  ])
+  let (rtWrapJob, rWrapJob) ← handleRequest rt {
+    method := "POST", rawPath := "/jobs", path := "/jobs",
+    query := #[], headers := authHdrs, body := wrapDiskJobBody.toUTF8
+  }
+  rt := rtWrapJob
+  check "POST /jobs rejects >512 GiB / 2^34 wraparound reserved_disk_gib with 422"
+    (rWrapJob.status == 422 && !rt.ledger.jobs.contains wrapDiskJobId)
+
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get
   IO.println s!"OrbNode self-test: {passed}/{passed} assertions PASSED"

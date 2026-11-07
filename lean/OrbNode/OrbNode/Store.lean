@@ -94,19 +94,25 @@ def JobCancellation.fromJson? (v : JVal) : Option JobCancellation := do
   return { actor := actor, reason := reason, requestedAt := reqAt }
 
 structure JobRecord where
-  jobId         : String
-  missionId     : String
-  payloadJson   : String
-  state         : JobState
-  exitCode?     : Option Int := none
-  createdAt     : String
-  startedAt?    : Option String := none
-  finishedAt?   : Option String := none
-  logPath?      : Option String := none
-  error?        : Option String := none
-  artifacts     : Array ArtifactEntry := #[]
-  cancellation? : Option JobCancellation := none
-  forced        : Bool := false
+  jobId           : String
+  missionId       : String
+  payloadJson     : String
+  state           : JobState
+  exitCode?       : Option Int := none
+  createdAt       : String
+  startedAt?      : Option String := none
+  finishedAt?     : Option String := none
+  logPath?        : Option String := none
+  error?          : Option String := none
+  artifacts       : Array ArtifactEntry := #[]
+  cancellation?   : Option JobCancellation := none
+  forced          : Bool := false
+  authorityMode   : String := "writer"
+  placementKind   : String := "managed"
+  supersededById  : String := ""
+  orphanedAt      : String := ""
+  reservedDiskGib : UInt64 := 0
+  stateRevision   : UInt32 := 1
   deriving Repr, Inhabited
 
 def JobRecord.toJson (r : JobRecord) (logTail? : Option String := none) : JVal :=
@@ -121,7 +127,13 @@ def JobRecord.toJson (r : JobRecord) (logTail? : Option String := none) : JVal :
      , ("error", match r.error? with | some s => .str s | none => .null)
      , ("log_tail", match logTail? with | some s => .str s | none => .null)
      , ("artifacts", .arr (r.artifacts.map ArtifactEntry.toJson))
-     , ("forced", .bool r.forced) ]
+     , ("forced", .bool r.forced)
+     , ("authority_mode", .str r.authorityMode)
+     , ("placement_kind", .str r.placementKind)
+     , ("superseded_by_mission_id", .str r.supersededById)
+     , ("orphaned_at", .str r.orphanedAt)
+     , ("reserved_disk_gib", JVal.uint64 r.reservedDiskGib)
+     , ("state_revision", JVal.uint64 r.stateRevision.toUInt64) ]
   let extra : Array (String × JVal) :=
     (match r.cancellation? with
      | some c => #[("cancellation", c.toJson)]
@@ -169,6 +181,12 @@ def JobRecord.fromStoreJson? (v : JVal) : Option JobRecord := do
     | some xs => xs.filterMap ArtifactEntry.fromJson?
     | none => #[]
   let cancellation? := (v.field? "cancellation") >>= JobCancellation.fromJson?
+  let authorityMode := (v.fieldStr? "authority_mode").getD "writer"
+  let placementKind := (v.fieldStr? "placement_kind").getD "managed"
+  let supersededById := (v.fieldStr? "superseded_by_mission_id").getD ""
+  let orphanedAt := (v.fieldStr? "orphaned_at").getD ""
+  let reservedDiskGib := (v.fieldUInt64? "reserved_disk_gib").getD 0
+  let stateRevision := ((v.fieldUInt64? "state_revision").getD 1).toUInt32
   return {
     jobId := jobId
     missionId := missionId
@@ -183,6 +201,12 @@ def JobRecord.fromStoreJson? (v : JVal) : Option JobRecord := do
     artifacts := artifacts
     cancellation? := cancellation?
     forced := forced
+    authorityMode := authorityMode
+    placementKind := placementKind
+    supersededById := supersededById
+    orphanedAt := orphanedAt
+    reservedDiskGib := reservedDiskGib
+    stateRevision := if stateRevision == 0 then 1 else stateRevision
   }
 
 def formatEpochIso (epochSecs : UInt64) : String :=
@@ -273,13 +297,30 @@ private def runSqliteStdinWithRetry
         IO.sleep ((i + 1) * 150).toUInt32
   return .error lastErr
 
+private def legacyJobAdditiveAlters : Array String := #[
+  "ALTER TABLE jobs ADD COLUMN authority_mode TEXT NOT NULL DEFAULT 'writer';",
+  "ALTER TABLE jobs ADD COLUMN placement_kind TEXT NOT NULL DEFAULT 'managed';",
+  "ALTER TABLE jobs ADD COLUMN superseded_by_mission_id TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE jobs ADD COLUMN orphaned_at TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE jobs ADD COLUMN reserved_disk_gib INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE jobs ADD COLUMN state_revision INTEGER NOT NULL DEFAULT 1;"
+]
+
 private def ensureLegacySqliteSchema (workDir : String) (backend : SqliteBackend) : IO (Except String Unit) := do
   let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
   let ddl :=
     "PRAGMA journal_mode=WAL; " ++
-    "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, log_path TEXT, error TEXT, artifacts_json TEXT, cancellation_json TEXT); " ++
+    "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, log_path TEXT, error TEXT, artifacts_json TEXT, cancellation_json TEXT, authority_mode TEXT NOT NULL DEFAULT 'writer', placement_kind TEXT NOT NULL DEFAULT 'managed', superseded_by_mission_id TEXT NOT NULL DEFAULT '', orphaned_at TEXT NOT NULL DEFAULT '', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, state_revision INTEGER NOT NULL DEFAULT 1); " ++
     "CREATE TABLE IF NOT EXISTS node_scratch (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, job_id TEXT, parent_identity TEXT NOT NULL, directory_identity TEXT NOT NULL, retired_at TEXT);"
-  runSqliteStdinWithRetry backend dbPath ddl 5000 3
+  if let .error e ← runSqliteStdinWithRetry backend dbPath ddl 5000 3 then
+    return .error e
+  for alt in legacyJobAdditiveAlters do
+    match ← runSqliteStdin backend dbPath alt 5000 with
+    | .ok () => pure ()
+    | .error e =>
+      if (e.toLower.splitOn "duplicate column name").length ≤ 1 then
+        return .error e
+  return .ok ()
 
 private def jobUpsertSql (r : JobRecord) : String :=
   let exitSql := match r.exitCode? with | some c => toString c | none => "NULL"
@@ -290,13 +331,22 @@ private def jobUpsertSql (r : JobRecord) : String :=
     match r.cancellation? with
     | some c => sqlEsc (renderCompact c.toJson)
     | none => "NULL"
-  "INSERT INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json) VALUES (" ++
-  s!"{sqlEsc r.jobId}, {sqlEsc r.missionId}, {sqlEsc r.payloadJson}, {sqlEsc r.state.asString}, {exitSql}, {sqlEsc r.createdAt}, {sqlOptStr r.startedAt?}, {sqlOptStr r.finishedAt?}, {sqlOptStr r.logPath?}, {sqlOptStr r.error?}, {artsSql}, {cancSql}) " ++
+  let rev := if r.stateRevision == 0 then 1 else r.stateRevision
+  "INSERT INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json, authority_mode, placement_kind, superseded_by_mission_id, orphaned_at, reserved_disk_gib, state_revision) VALUES (" ++
+  s!"{sqlEsc r.jobId}, {sqlEsc r.missionId}, {sqlEsc r.payloadJson}, {sqlEsc r.state.asString}, {exitSql}, {sqlEsc r.createdAt}, {sqlOptStr r.startedAt?}, {sqlOptStr r.finishedAt?}, {sqlOptStr r.logPath?}, {sqlOptStr r.error?}, {artsSql}, {cancSql}, {sqlEsc r.authorityMode}, {sqlEsc r.placementKind}, {sqlEsc r.supersededById}, {sqlEsc r.orphanedAt}, {r.reservedDiskGib}, {rev}) " ++
   "ON CONFLICT(id) DO UPDATE SET " ++
-  "state = excluded.state, exit_code = excluded.exit_code, started_at = excluded.started_at, " ++
-  "finished_at = excluded.finished_at, log_path = excluded.log_path, error = excluded.error, " ++
-  "artifacts_json = excluded.artifacts_json, cancellation_json = excluded.cancellation_json " ++
-  "WHERE jobs.state NOT IN ('succeeded', 'failed', 'cancelled');"
+  "state = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN jobs.state ELSE excluded.state END, " ++
+  "exit_code = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN COALESCE(jobs.exit_code, excluded.exit_code) ELSE excluded.exit_code END, " ++
+  "started_at = COALESCE(excluded.started_at, jobs.started_at), " ++
+  "finished_at = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN COALESCE(jobs.finished_at, excluded.finished_at) ELSE excluded.finished_at END, " ++
+  "log_path = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN COALESCE(jobs.log_path, excluded.log_path) ELSE excluded.log_path END, " ++
+  "error = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN COALESCE(jobs.error, excluded.error) ELSE excluded.error END, " ++
+  "artifacts_json = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN COALESCE(jobs.artifacts_json, excluded.artifacts_json) ELSE excluded.artifacts_json END, " ++
+  "cancellation_json = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN COALESCE(jobs.cancellation_json, excluded.cancellation_json) ELSE excluded.cancellation_json END, " ++
+  "authority_mode = excluded.authority_mode, placement_kind = excluded.placement_kind, " ++
+  "superseded_by_mission_id = excluded.superseded_by_mission_id, orphaned_at = excluded.orphaned_at, " ++
+  "reserved_disk_gib = excluded.reserved_disk_gib, state_revision = excluded.state_revision " ++
+  "WHERE excluded.state_revision >= jobs.state_revision;"
 
 private def syncJobToLegacySqlite
     (workDir : String) (backend : SqliteBackend) (r : JobRecord)
@@ -310,7 +360,7 @@ private def importLegacySqliteJobs (workDir : String) (backend : SqliteBackend) 
   let dbPath : System.FilePath := System.FilePath.mk workDir / "jobs.db"
   if !(← dbPath.pathExists) then return .ok #[]
   let query :=
-    "SELECT id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json FROM jobs ORDER BY created_at ASC;"
+    "SELECT id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json, authority_mode, placement_kind, superseded_by_mission_id, orphaned_at, reserved_disk_gib, state_revision FROM jobs ORDER BY created_at ASC;"
   let res ← match backend with
     | .cli =>
       (IO.Process.output {
@@ -349,6 +399,7 @@ private def importLegacySqliteJobs (workDir : String) (backend : SqliteBackend) 
           | .ok cv => JobCancellation.fromJson? cv
           | _ => none
         | none => none
+      let revRaw := ((row.fieldUInt64? "state_revision").getD 1).toUInt32
       out := out.push {
         jobId := id
         missionId := missionId
@@ -362,6 +413,12 @@ private def importLegacySqliteJobs (workDir : String) (backend : SqliteBackend) 
         error? := row.fieldStr? "error"
         artifacts := artifacts
         cancellation? := cancellation?
+        authorityMode := (row.fieldStr? "authority_mode").getD "writer"
+        placementKind := (row.fieldStr? "placement_kind").getD "managed"
+        supersededById := (row.fieldStr? "superseded_by_mission_id").getD ""
+        orphanedAt := (row.fieldStr? "orphaned_at").getD ""
+        reservedDiskGib := (row.fieldUInt64? "reserved_disk_gib").getD 0
+        stateRevision := if revRaw == 0 then 1 else revRaw
       }
   return .ok out
 
@@ -446,7 +503,13 @@ def flushPendingSqlite (l : Ledger) : IO Ledger := do
   | .ok () => return { l with pendingSqliteSync := {} }
   | .error _ => return l
 
+def maxReservedDiskGib : UInt64 := 512
+
 def insertQueued (l0 : Ledger) (rec : JobRecord) : IO (Except String Ledger) := do
+  if rec.authorityMode != "readonly" && rec.authorityMode != "writer" then
+    return .error s!"invalid_authority_mode:{rec.authorityMode}"
+  if rec.reservedDiskGib > maxReservedDiskGib then
+    return .error s!"invalid_reserved_disk_gib:{rec.reservedDiskGib}"
   let l ← flushPendingSqlite l0
   if l.jobs.contains rec.jobId then
     return .error "duplicate_job_id"
@@ -466,7 +529,8 @@ def insertQueued (l0 : Ledger) (rec : JobRecord) : IO (Except String Ledger) := 
       order := l.order.push rec.jobId
     }
 
-/-- Transition `jobId` to `nextState` under `Orb.Kernel.verifyJobTransition` (first terminal wins). -/
+/-- Transition `jobId` to `nextState` under `Orb.Kernel.verifyJobTransition` (first terminal wins)
+    and monotone `Orb.Kernel.epochFenceStep` revision bump (`SM-02`). -/
 def updateJob
     (l0 : Ledger) (jobId : String)
     (mutate : JobRecord → Except String JobRecord) : IO (Except String (Ledger × JobRecord)) := do
@@ -475,9 +539,13 @@ def updateJob
     | return .error "not_found"
   match mutate cur with
   | .error msg => return .error msg
-  | .ok next =>
-    if next.state != cur.state && !canTransitionTo cur.state next.state then
+  | .ok next0 =>
+    if next0.state != cur.state && !canTransitionTo cur.state next0.state then
       return .ok (l, cur)
+    let curRev := if cur.stateRevision == 0 then 1 else cur.stateRevision
+    let fenceWord := Orb.Kernel.epochFenceStep 1 1 1 1 1 1 curRev curRev 1
+    let bumpedRev := if (fenceWord &&& 256) != 0 then (fenceWord >>> 32).toUInt32 else curRev + 1
+    let next := { next0 with stateRevision := bumpedRev }
     let serialized := renderCompact (next.toJson none)
     match ← LeanSys.Store.putString l.store (jobKey jobId) serialized with
     | .error e => return .error s!"WAL write failed: {repr e}"
@@ -491,6 +559,49 @@ def updateJob
         jobs := l.jobs.insert jobId next
         pendingSqliteSync := nextPending
       }, next)
+
+/-- Atomic compare-and-swap update on typed authority/placement/supersession/orphan/disk columns (`SM-02`),
+    gated by `Orb.Kernel.epochFenceStep` so stale `expectedRev` callers never clobber concurrent disk release
+    or supersession updates. -/
+def updateJobAuthorityCas
+    (l0 : Ledger) (jobId : String) (expectedRev : UInt32)
+    (nextAuthorityMode nextPlacementKind nextSupersededBy nextOrphanedAt : String)
+    (nextReservedDiskGib : UInt64) : IO (Except String (Ledger × JobRecord)) := do
+  if nextAuthorityMode != "readonly" && nextAuthorityMode != "writer" then
+    return .error s!"invalid_authority_mode:{nextAuthorityMode}"
+  if nextReservedDiskGib > maxReservedDiskGib then
+    return .error s!"invalid_reserved_disk_gib:{nextReservedDiskGib}"
+  let l ← flushPendingSqlite l0
+  let some cur := l.jobs.get? jobId
+    | return .error "not_found"
+  let durRev := if cur.stateRevision == 0 then 1 else cur.stateRevision
+  let fenceWord := Orb.Kernel.epochFenceStep 1 1 1 1 1 1 durRev expectedRev 1
+  let lo32 := (fenceWord &&& 0xFFFFFFFF).toUInt32
+  if (lo32 &&& 256) == 0 then
+    return .error s!"cas_fence_rejected:{lo32 &&& 0xFF}:expected={expectedRev}:actual={durRev}"
+  let nextRev := (fenceWord >>> 32).toUInt32
+  let next : JobRecord := {
+    cur with
+    authorityMode := nextAuthorityMode
+    placementKind := nextPlacementKind
+    supersededById := nextSupersededBy
+    orphanedAt := nextOrphanedAt
+    reservedDiskGib := nextReservedDiskGib
+    stateRevision := nextRev
+  }
+  let serialized := renderCompact (next.toJson none)
+  match ← LeanSys.Store.putString l.store (jobKey jobId) serialized with
+  | .error e => return .error s!"WAL write failed: {repr e}"
+  | .ok h' =>
+    let nextPending ← match ← syncJobToLegacySqlite l.workDir l.sqliteBackend next 500 1 with
+      | .ok () => pure (l.pendingSqliteSync.erase jobId)
+      | .error _ => pure (l.pendingSqliteSync.insert jobId next)
+    return .ok ({
+      l with
+      store := h'
+      jobs := l.jobs.insert jobId next
+      pendingSqliteSync := nextPending
+    }, next)
 
 def listRecent (l : Ledger) (limit : Nat) : Array JobRecord := Id.run do
   let clamped := max 1 (min 200 limit)

@@ -683,6 +683,50 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       | .ok out => return .ok (mkJson 201 s!"\{\"id\":{jsonEscape out.id},\"generation\":{out.generation},\"phase\":\"preparing\"}")
       | .error e => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
 
+  -- Mission Health Verdict (`GET /api/control/missions/:id/health`, `SM-01`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/health" rawTarget then
+    if req.method == "GET" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let sql :=
+        "SELECT m.status,COALESCE(m.terminal_reason,''),m.orphaned_at,m.superseded_by_mission_id," ++
+        "m.placement_kind,m.node_boot_epoch,m.state_revision," ++
+        "COALESCE(e.terminal_reason,''),COALESCE(e.summary,''),COALESCE(e.artifact_ref,''),COALESCE(e.recorded_at,'')," ++
+        "(SELECT COUNT(*) FROM mission_runs r WHERE r.mission_id=m.id AND r.execution_state<>'terminal')," ++
+        "(SELECT COUNT(*) FROM mission_events ev WHERE ev.mission_id=m.id) " ++
+        "FROM missions m LEFT JOIN mission_terminal_evidence e ON e.mission_id = m.id WHERE m.id=?1;"
+      match ← execParamQuery st.store.missionsDb sql #[mid] with
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      | .ok rs =>
+        if rs.size ≤ 1 then
+          return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+        let r := rs[1]!
+        let status := r[0]?.getD ""
+        let mReason := r[1]?.getD ""
+        let orphAt := r[2]?.getD ""
+        let superBy := r[3]?.getD ""
+        let placeKind := r[4]?.getD "managed"
+        let rowBoot := ((r[5]?.bind String.toNat?).getD 1).toUInt64
+        let stateRev := (r[6]?.bind String.toNat?).getD 1
+        let evReason := r[7]?.getD ""
+        let evSummary := r[8]?.getD ""
+        let evArtifact := r[9]?.getD ""
+        let evRecorded := r[10]?.getD ""
+        let liveRuns := (r[11]?.bind String.toNat?).getD 0
+        let evCnt := (r[12]?.bind String.toNat?).getD 0
+        let effReason := if !evReason.isEmpty then evReason else mReason
+        let hasEv := !evRecorded.isEmpty || !evReason.isEmpty
+        let verdict := deriveMissionHealthVerdict
+          status effReason orphAt superBy placeKind
+          (rowBoot == st.store.bootEpoch) false (liveRuns > 0) (evCnt > 0) false hasEv
+        let evJson :=
+          if hasEv then
+            s!"\{\"terminal_reason\":{jsonEscape evReason},\"summary\":{jsonEscape evSummary},\"artifact_ref\":{jsonEscape evArtifact},\"recorded_at\":{jsonEscape evRecorded}}"
+          else "null"
+        return .ok (mkJson 200 (
+          s!"\{\"mission_id\":{jsonEscape mid},\"status\":{jsonEscape status},\"health_verdict\":{jsonEscape verdict}," ++
+          s!"\"state_revision\":{stateRev},\"terminal_evidence\":{evJson}}"
+        ))
+
   -- Missions Collection (`GET|POST /api/control/missions`)
   if cleanPath == "/api/control/missions" then
     if req.method == "GET" then
@@ -690,6 +734,18 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       | .ok j => return .ok (mkJson 200 j)
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
     else if req.method == "POST" then
+      let bodyVal? := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption
+      let hdrIdemKey := (lookupHeaderCI req.headers "idempotency-key").map (·.trimAscii.toString) |>.getD ""
+      let bodyIdemKey := (bodyVal?.bind (·.fieldStr? "idempotency_key")).map (·.trimAscii.toString) |>.getD ""
+      let idemKey := if !hdrIdemKey.isEmpty then hdrIdemKey else bodyIdemKey
+      if !idemKey.isEmpty then
+        match ← claimIdempotencySlot st.store "missions_create" idemKey s!"{nowEpochSec}" with
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+        | .ok (.Replayed rec) => return .ok (mkJson rec.statusCode rec.bodyJson)
+        | .ok .InFlight => return .ok (mkJson 409 "{\"error\":\"idempotency_key_in_flight\"}")
+        | .ok .Claimed => pure ()
+      let abortIdem : IO Unit :=
+        if !idemKey.isEmpty then discard <| abortIdempotencySlot st.store "missions_create" idemKey else pure ()
       let tape := JsonTape.indexJsonObject req.bodySlice
       let defMid ← nextUniqueId st "m" nowEpochSec
       let mid := (JsonTape.lookupString? tape "id").getD defMid
@@ -702,29 +758,86 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
           | some eff => pure eff
           | none => pure "__REJECT_EFFORT__"
       if normEffort == "__REJECT_EFFORT__" then
+        abortIdem
         return .ok (mkJson 400 s!"\{\"error\":\"unsupported_model_effort\",\"backend\":{jsonEscape backend},\"effort\":{jsonEscape rawEffort}}")
       let rawWorkDir := (JsonTape.lookupString? tape "working_directory").getD st.cfg.workingDir
       let .ok safeWorkDir ← confineWorkingDirectory st.cfg.workingDir rawWorkDir
-        | return .ok (mkJson 400 "{\"error\":\"invalid_working_directory\"}")
+        | do abortIdem; return .ok (mkJson 400 "{\"error\":\"invalid_working_directory\"}")
       let projSlug := ((JsonTape.lookupString? tape "project_slug").orElse (fun _ => JsonTape.lookupString? tape "project")).getD ""
+      let track := (JsonTape.lookupString? tape "track").getD ""
+      let repo := ((JsonTape.lookupString? tape "github_pr").orElse (fun _ => JsonTape.lookupString? tape "repo")).getD ""
+      let placeKind := (JsonTape.lookupString? tape "placement_kind").getD "managed"
+      let rawDiskNat := (JsonTape.lookupNat? tape "estimated_disk_gib").getD 0
+      if rawDiskNat > maxReservedDiskGib.toNat then
+        abortIdem
+        return .ok (mkJson 400 "{\"error\":\"invalid_estimated_disk_gib\"}")
+      let diskGib := rawDiskNat.toUInt64
+      let writerFlag? := bodyVal?.bind (·.fieldBool? "writer")
+      let reqTags : Array String :=
+        match bodyVal?.bind (·.fieldArr? "tags") with
+        | some xs => xs.filterMap (fun v => match v with | .str s => some s | _ => none)
+        | none => #[]
+      let intentStr := (JsonTape.lookupString? tape "intent").getD ""
+      let .ok authMode := classifyAuthorityMode writerFlag? reqTags (intentStr == "review_only" || intentStr == "readonly")
+        | do abortIdem; return .ok (mkJson 400 "{\"error\":\"contradictory_authority_tags\"}")
       if !projSlug.isEmpty then
         let rawCap? ← queryProjectParallelMissions? st.store projSlug
         if let some cap := enforcedProjectParallelCap? rawCap? then
           if let .ok statuses ← listProjectMissionStatuses st.store projSlug then
             let held := (statuses.filter campaignSlotHeldBy).size
             if held ≥ cap then
+              abortIdem
               return .ok (mkJson 429 s!"\{\"error\":\"parallel_missions_cap\",\"cap\":{cap},\"active\":{held}}")
+      let initTagsJson := projectCompatibilityTagsJson authMode placeKind "" "" diskGib reqTags
       let mRec : MissionRecord := {
-        id := mid, title := title, status := "awaiting_user", backend := backend,
+        id := mid,         title := title, status := "awaiting_user", backend := backend,
         modelOverride := "", modelEffort := normEffort, workingDirectory := safeWorkDir,
-        project := projSlug, updatedAt := s!"{nowEpochSec}", totalCostCents := 0
+        project := projSlug, updatedAt := s!"{nowEpochSec}", totalCostCents := 0,
+        authorityMode := authMode, placementKind := placeKind, reservedDiskGib := diskGib,
+        nodeBootEpoch := st.store.bootEpoch, tagsJson := initTagsJson, track := track, repo := repo
       }
-      match ← upsertMission st.store mRec with
-      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      match ← insertNewMission st.store mRec with
+      | .error "mission_already_exists" =>
+        abortIdem
+        return .ok (mkJson 409 "{\"error\":\"mission_already_exists\"}")
+      | .error e =>
+        abortIdem
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok () =>
+        let mut leaseReservationId := ""
+        if !projSlug.isEmpty && !track.isEmpty then
+          let resId ← nextUniqueId st "rsv" nowEpochSec
+          leaseReservationId := resId
+          let leaseReq : DispatchLeaseRequest := {
+            reservationId := resId, missionId := mid, projectSlug := projSlug,
+            track := track, repo := repo, authorityMode := authMode,
+            reservedDiskGib := diskGib, bootEpoch := st.store.bootEpoch, nowAt := s!"{nowEpochSec}"
+          }
+          if let .error leaseErr ← acquireDispatchTrackLease st.store leaseReq then
+            discard <| execParamQuery st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
+            discard <| recoverDispatchLeases st.store.missionsDb st.store.projectsDb st.store.bootEpoch
+            abortIdem
+            return .ok (mkJson 409 s!"\{\"error\":{jsonEscape leaseErr}}")
+        let respBody :=
+          s!"\{\"id\":{jsonEscape mid},\"status\":\"awaiting_user\",\"model_effort\":{jsonEscape normEffort}," ++
+          s!"\"authority_mode\":{jsonEscape authMode},\"placement_kind\":{jsonEscape placeKind}," ++
+          s!"\"state_revision\":1,\"total_cost_cents\":0}"
+        if !idemKey.isEmpty then
+          match ← recordOrReplayIdempotency st.store "missions_create" idemKey 201 respBody s!"{nowEpochSec}" with
+          | .ok rec =>
+            if let some sIdx := st.searchIdx? then
+              discard <| indexConversation sIdx mid title
+            return .ok (mkJson rec.statusCode rec.bodyJson)
+          | .error e =>
+            if !leaseReservationId.isEmpty then
+              discard <| releaseDispatchTrackLease st.store leaseReservationId s!"{nowEpochSec}"
+            discard <| execParamQuery st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
+            discard <| recoverDispatchLeases st.store.missionsDb st.store.projectsDb st.store.bootEpoch
+            abortIdem
+            return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         if let some sIdx := st.searchIdx? then
           discard <| indexConversation sIdx mid title
-        return .ok (mkJson 201 s!"\{\"id\":{jsonEscape mid},\"status\":\"awaiting_user\",\"model_effort\":{jsonEscape normEffort},\"total_cost_cents\":0}")
+        return .ok (mkJson 201 respBody)
 
   -- Mission Search (`GET /api/control/missions/search`)
   if req.method == "GET" && cleanPath == "/api/control/missions/search" then
