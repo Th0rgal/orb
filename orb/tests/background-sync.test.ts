@@ -1536,4 +1536,50 @@ describe("warm background sync & off-mode quickness", () => {
     expect(getBackgroundSyncVerdict()).toMatchObject({ active: false, reason: "lagged" });
     expect(sock.sent).toContainEqual({ op: "unsubscribe", mission_id: "m-healthy" });
   });
+
+  it("shares a single multiplexed stream subscription across multiple attachMissionStream views (MissionView + Inbox Peek / SideQuestionPanel)", async () => {
+    setConnection("http://warm.test", "jwt-tok");
+    setMultiplexSyncEnabledForTest(true);
+    vi.stubGlobal("WebSocket", FakeSyncSocket as unknown as typeof WebSocket);
+
+    const view1Events: string[] = [];
+    const view2Events: string[] = [];
+    const detach1 = attachMissionStream("m-shared-peek", {
+      onEvent: (ev) => view1Events.push(ev.type),
+      onBatch: (evs) => view1Events.push(...evs.map((e) => e.type)),
+      onLagged: () => {},
+      onReady: () => {},
+      onDisconnected: () => {},
+    });
+    const detach2 = attachMissionStream("m-shared-peek", {
+      onEvent: (ev) => view2Events.push(ev.type),
+      onBatch: (evs) => view2Events.push(...evs.map((e) => e.type)),
+      onLagged: () => {},
+      onReady: () => {},
+      onDisconnected: () => {},
+    });
+
+    await vi.waitFor(() => expect(FakeSyncSocket.instances).toHaveLength(1));
+    const sock = FakeSyncSocket.instances[0];
+    const subscribes = sock.sent.filter(
+      (op) => op.op === "subscribe" && op.mission_id === "m-shared-peek",
+    );
+    expect(subscribes).toHaveLength(1);
+
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "assistant_message",
+        mission_id: "m-shared-peek",
+        id: "a-1",
+        sequence: 5,
+        content: "Live reply",
+        success: true,
+      }),
+    });
+    await vi.waitFor(() => expect(view1Events).toContain("assistant_message"));
+    expect(view2Events).toContain("assistant_message");
+
+    detach1();
+    detach2();
+  });
 });

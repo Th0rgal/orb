@@ -3,7 +3,8 @@ import {createStore, reconcile} from "solid-js/store";
 import {NativeInteraction} from "./NativeInteraction";
 import * as btwMod from "./btwAgent";
 import {askBtwAgent,watchBtw,stopBtw,btwSession,btwActivities,btwItems,btwThoughts,isSyntheticRemoteAssistantNote,dropBtwQueuedCursor} from "./btwAgent";
-import {isMultiplexSyncActive, streamMission} from "./stream";
+import {isMultiplexSyncActive, type StreamEvent} from "./stream";
+import {attachMissionStream} from "./missionCache";
 import {btwConfig} from "./btwSettings";
 import {AgentActivity} from "./AgentActivity";
 import { Composer, floatingDock } from "./composer/Composer";
@@ -427,30 +428,37 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      }
     }
    };
-   const follow=(id:string|undefined)=>{
-    if(!id||id===following||stale)return;
-    stopFollow?.();following=id;
-     stopFollow=streamMission(id,event=>{
+    const follow=(id:string|undefined)=>{
+     if(!id||id===following||stale)return;
+     stopFollow?.();following=id;
+     const onFollowEvent=(event:StreamEvent)=>{
       if(event.type==='user_message'&&event.data?.queued&&typeof event.data.id==='string'&&typeof event.data.content==='string'){
        const qid=event.data.id,qcontent=event.data.content;
        setSideLiveEdits(rows=>[...rows,{id:qid,content:qcontent,at:++sideLiveClock}]);
       }
       if(!['user_message','assistant_message','assistant_message_canonical','mission_status_changed'].includes(event.type))return;
-     if(isMultiplexSyncActive()&&'peekWarmBtwState' in btwMod&&typeof btwMod.peekWarmBtwState==='function'){
-      queueMicrotask(()=>{
-       if(stale||key()!==current)return;
-       const warmCurrent=btwMod.peekWarmBtwState(missionId);
-       if(warmCurrent&&warmCurrent.clean){
-        applyReconciled({...warmCurrent,authoritative:true});
-        return;
-       }
-       clearTimeout(again);again=setTimeout(()=>{if(!stale)sync(history(),true);},300);
-      });
-      return;
-     }
-     clearTimeout(again);again=setTimeout(()=>{if(!stale)sync(history(),true);},300);
-    },()=>{if(!stale)sync(history(),true);});
-   };
+      if(isMultiplexSyncActive()&&'peekWarmBtwState' in btwMod&&typeof btwMod.peekWarmBtwState==='function'){
+       queueMicrotask(()=>{
+        if(stale||key()!==current)return;
+        const warmCurrent=btwMod.peekWarmBtwState(missionId);
+        if(warmCurrent&&warmCurrent.clean){
+         applyReconciled({...warmCurrent,authoritative:true});
+         return;
+        }
+        clearTimeout(again);again=setTimeout(()=>{if(!stale)sync(history(),true);},300);
+       });
+       return;
+      }
+      clearTimeout(again);again=setTimeout(()=>{if(!stale)sync(history(),true);},300);
+     };
+     stopFollow=attachMissionStream(id,{
+      onEvent:onFollowEvent,
+      onBatch:evs=>{for(const ev of evs)onFollowEvent(ev);},
+      onLagged:()=>{if(!stale)sync(history(),true);},
+      onReady:()=>{},
+      onDisconnected:()=>{},
+     });
+    };
    let generation=0;
    // Only the newest read applies: an older, slower one never rolls back history.
    const sync=(local:Parameters<typeof reconcile>[1],force=false)=>{

@@ -203,6 +203,7 @@ object OrbBackgroundSyncPolicy {
         is OrbBackgroundSyncEvent.StreamLagged -> state.copy(
             pausedByLink = true,
             linkPauseReason = OrbBackgroundSyncPauseReason.StreamLagged,
+            slowRttStreak = 0,
             fastRttStreak = 0,
             cooldownUntilMs = maxOf(state.cooldownUntilMs, event.atMs + RESUME_COOLDOWN_MS),
         )

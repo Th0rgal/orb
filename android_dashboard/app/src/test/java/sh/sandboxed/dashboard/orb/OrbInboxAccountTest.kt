@@ -51,4 +51,69 @@ class OrbInboxAccountTest {
         assertEquals(pending, consumed)
         assertNull(OrbNotifications.pendingInboxFocus)
     }
+
+    @Test fun outboxPersistenceCapAnd409ConflictRebaseMatchDesktopAndIos() {
+        assertTrue(OrbSharedInboxState.shouldPersistEncodedOutbox("x".repeat(OrbSharedInboxState.MAX_PERSISTED_OUTBOX_BYTES)))
+        assertFalse(OrbSharedInboxState.shouldPersistEncodedOutbox("x".repeat(OrbSharedInboxState.MAX_PERSISTED_OUTBOX_BYTES + 1)))
+
+        val conflictPrefs = mapOf(
+            "preferences" to mapOf("model" to "builtin/fast"),
+            "_versions" to mapOf("preferences" to 4L, "seen:m-1" to 8L),
+        )
+        val prefsBody = mapOf(
+            "model" to "builtin/smart",
+            "clientId" to "client-1",
+            "mutationSeq" to 2L,
+            "expectedVersion" to 0L,
+        )
+        assertEquals(
+            OrbSharedInboxState.ConflictResolution.Rebase(expectedVersion = 4L, mutationSeq = 6L),
+            OrbSharedInboxState.resolveConflict(
+                path = "preferences",
+                currentBody = prefsBody,
+                conflictState = conflictPrefs,
+                alreadyRebased = false,
+                currentRevision = 0L,
+                storedSeq = 5L,
+            )
+        )
+        assertEquals(
+            OrbSharedInboxState.ConflictResolution.Retire,
+            OrbSharedInboxState.resolveConflict(
+                path = "preferences",
+                currentBody = prefsBody,
+                conflictState = conflictPrefs,
+                alreadyRebased = true,
+                currentRevision = 4L,
+                storedSeq = 6L,
+            )
+        )
+
+        val subsumedState = mapOf(
+            "seen:m-1" to 500L,
+            "_versions" to mapOf("seen:m-1" to 8L),
+        )
+        assertEquals(
+            OrbSharedInboxState.ConflictResolution.Retire,
+            OrbSharedInboxState.resolveConflict(
+                path = "seen/m-1",
+                currentBody = mapOf("stamp" to 300L, "mutationSeq" to 3L),
+                conflictState = subsumedState,
+                alreadyRebased = false,
+                currentRevision = 0L,
+                storedSeq = 3L,
+            )
+        )
+        assertEquals(
+            OrbSharedInboxState.ConflictResolution.Rebase(expectedVersion = 8L, mutationSeq = 4L),
+            OrbSharedInboxState.resolveConflict(
+                path = "seen/m-1",
+                currentBody = mapOf("stamp" to -500L, "mutationSeq" to 3L),
+                conflictState = subsumedState,
+                alreadyRebased = false,
+                currentRevision = 0L,
+                storedSeq = 3L,
+            )
+        )
+    }
 }

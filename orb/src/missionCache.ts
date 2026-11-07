@@ -21,7 +21,6 @@ import {
   getMissionEventPreview,
   heldAfterHistory,
   storedToStream,
-  streamMission,
   type StoredEvent,
   type StreamEvent,
 } from "./stream";
@@ -552,7 +551,7 @@ function ensureWarmSub(id: string, initialSinceSeq?: number): WarmMissionSub {
     if (ev.type === "mission_settings_updated") {
       const extracted = extractMissionSettingsPatch(ev.data);
       const parsedUpdated = Date.parse(extracted.updated_at || "");
-      const parsedAt = typeof ev.data.at === "string" ? Date.parse(ev.data.at) : Number.NaN;
+      const parsedAt = typeof ev.data?.at === "string" ? Date.parse(ev.data.at) : Number.NaN;
       sub.lastSettingsAtMs = !Number.isNaN(parsedUpdated)
         ? parsedUpdated
         : !Number.isNaN(parsedAt)
@@ -568,11 +567,11 @@ function ensureWarmSub(id: string, initialSinceSeq?: number): WarmMissionSub {
       return;
     }
     if (ev.type === "mission_status_changed" || ev.type === "status") {
-      if (ev.type === "mission_status_changed" && typeof ev.data.status === "string") {
+      if (ev.type === "mission_status_changed" && typeof ev.data?.status === "string") {
         sub.lastStatus = ev.data.status;
         sub.lastStatusSummary =
-          typeof ev.data.summary === "string" ? ev.data.summary : undefined;
-        const parsedAt = typeof ev.data.at === "string" ? Date.parse(ev.data.at) : Number.NaN;
+          typeof ev.data?.summary === "string" ? ev.data.summary : undefined;
+        const parsedAt = typeof ev.data?.at === "string" ? Date.parse(ev.data.at) : Number.NaN;
         sub.lastStatusAtMs = !Number.isNaN(parsedAt) ? parsedAt : Date.now();
       }
       if (sub.views.size > 0) {
@@ -586,7 +585,7 @@ function ensureWarmSub(id: string, initialSinceSeq?: number): WarmMissionSub {
     handleBatch([ev]);
   };
 
-  sub.stop = streamMission(
+  sub.stop = streamModule.streamMission(
     id,
     handleEvent,
     () => {
