@@ -143,32 +143,65 @@ for bin in "${BINS_TO_STAGE[@]}"; do
   fi
 done
 
-if [[ ${#ORB_BIN_TARGETS[@]} -gt 0 ]]; then
+ensure_lean_sys_pkg() {
+  local pkg_parent="$1"
+  local manifest="$pkg_parent/lake-manifest.json"
+  local pkg_dir="$pkg_parent/.lake/packages/lean-sys"
+  if [[ -f "$pkg_dir/lakefile.lean" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$manifest" ]]; then
+    return 0
+  fi
+  local rev
+  rev="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(next((p.get("rev","") for p in m.get("packages",[]) if p.get("name")=="lean-sys"), ""))' "$manifest" 2>/dev/null || true)"
+  if [[ -z "$rev" ]]; then
+    return 0
+  fi
+  mkdir -p "$pkg_parent/.lake/packages"
+  rm -rf "$pkg_dir"
+  local seed=""
+  for cand in "$ROOT_DIR/lean/.lake/packages/lean-sys" "$ROOT_DIR/lean/OrbCore/.lake/packages/lean-sys"; do
+    if [[ -d "$cand/.git" ]]; then
+      seed="$cand"
+      break
+    fi
+  done
+  if [[ -n "$seed" ]]; then
+    git clone --quiet "$seed" "$pkg_dir"
+  else
+    git clone --quiet https://github.com/Th0rgal/lean-sys.git "$pkg_dir"
+  fi
+  (cd "$pkg_dir" && git checkout --quiet "$rev")
+}
+
+run_lean_pkg_build() {
+  local pkg_dir="$1"
+  shift
+  ensure_lean_sys_pkg "$pkg_dir"
   (
-    cd "$ROOT_DIR/lean/OrbBin"
-    SANDBOXED_ALLOW_RAW_LAKE=1 lake build "${ORB_BIN_TARGETS[@]}" -- -DwarningAsError=true
+    cd "$pkg_dir"
+    if [[ "${ORB_SKIP_TURBO_LEAN:-0}" != "1" ]] && command -v turbo-lean >/dev/null 2>&1; then
+      turbo-lean build --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}" || true
+    fi
+    SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
   )
+}
+
+if [[ ${#ORB_BIN_TARGETS[@]} -gt 0 ]]; then
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbBin" "${ORB_BIN_TARGETS[@]}"
 fi
 
 if [[ "$BUILD_ORB_NODE" == "1" ]]; then
-  (
-    cd "$ROOT_DIR/lean/OrbNode"
-    SANDBOXED_ALLOW_RAW_LAKE=1 lake build orb-node -- -DwarningAsError=true
-  )
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbNode" orb-node
 fi
 
 if [[ "$BUILD_ORB_CORE" == "1" ]]; then
-  (
-    cd "$ROOT_DIR/lean/OrbCore"
-    SANDBOXED_ALLOW_RAW_LAKE=1 lake build sandboxed-sh -- -DwarningAsError=true
-  )
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbCore" sandboxed-sh
 fi
 
 if [[ "$BUILD_ORB_LOCALD" == "1" ]]; then
-  (
-    cd "$ROOT_DIR/lean/OrbLocald"
-    SANDBOXED_ALLOW_RAW_LAKE=1 lake build orb-locald -- -DwarningAsError=true
-  )
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbLocald" orb-locald
 fi
 
 if [[ ${#OUT_DIRS[@]} -eq 0 ]]; then

@@ -80,6 +80,7 @@ const SidePanelContext = createContext<{
   target: () => HTMLDivElement | undefined;
   available: () => boolean;
   visible: () => boolean;
+  standalone?: boolean;
   show: (opts?: { focus?: boolean }) => void;
   hide: () => void;
   register: (open: (() => void) | undefined) => void;
@@ -186,7 +187,9 @@ export function FilePanelProvider(p: {
   // The side-question column is only for an open mission. Leaving that view
   // (Resources, Inbox, …) must drop it even if the panel unmounted without
   // clearing sideVisible, otherwise the grid keeps the empty right half.
-  const onMission = () => !!p.missionOpen;
+  // When `missionOpen` is omitted (standalone fixtures), fall back to whether
+  // a `SideQuestions` instance is currently registered via `openSide()`.
+  const onMission = () => p.missionOpen === undefined ? !!openSide() : !!p.missionOpen;
   const sideOpen = () => sideVisible() && !!openSide() && onMission();
   createEffect(() => {
     if (!onMission()) {
@@ -198,7 +201,7 @@ export function FilePanelProvider(p: {
     const side = sideOpen();
     // A mission-scoped file pane must not keep the right column after the
     // conversation is gone (Resources, Inbox, and the other top-level pages).
-    const files = opened() && (onMission() ? !!p.scope.mission : !!p.scope.project);
+    const files = opened() && (p.missionOpen !== undefined && onMission() ? !!p.scope.mission : !!(p.scope.mission || p.scope.project));
     if (app) { app.dataset.filesOpen = String(files || side); app.dataset.editorExpanded=String((files || side)&&maximized()); app.dataset.filesSplit=String((files || side)&&split()); }
   });
   onCleanup(() => {
@@ -940,6 +943,7 @@ export function FilePanelProvider(p: {
       target: sideTarget,
       available: () => !!openSide(),
       visible: sideVisible,
+      standalone: p.missionOpen === undefined,
       show: (opts?: { focus?: boolean }) => {
         if (!openSide()) return;
         zenRestore = null;
@@ -979,7 +983,7 @@ export function FilePanelProvider(p: {
         <span ref={layoutMarker} hidden />
         {p.children}
         <aside ref={el => { sideAside = el; }} class="btw-sidebar" classList={{ "file-panel": sideOpen(), maximized: sideOpen() && maximized() }} style={{ display: sideOpen() ? undefined : "none" }} aria-label="Side question panel"><div class="file-panel-resize" role="separator" aria-label="Resize side question panel" aria-orientation="vertical" onPointerDown={e=>resize(e)} /><div ref={setSideTarget} class="btw-sidebar-content" /></aside>
-        <Show when={opened() && (onMission() ? !!p.scope.mission : !!p.scope.project)}>
+        <Show when={opened() && (p.missionOpen !== undefined && onMission() ? !!p.scope.mission : !!(p.scope.mission || p.scope.project))}>
           <aside
             ref={(el) => {
               panel = el;
@@ -1006,7 +1010,7 @@ export function FilePanelProvider(p: {
               aria-label="Resize file panel"
               onPointerDown={(e) => resize(e)}
             />
-            <div class="file-tabs file-header" data-tauri-drag-region>
+            <div class="file-tabs file-header" data-orb-drag-region>
               
               <button aria-label={maximized()?"Restore conversation":"Expand file editor"} title={maximized()?`Restore conversation (${expandShortcutLabel()})`:`Expand file editor (${expandShortcutLabel()})`} aria-keyshortcuts="Meta+\\" aria-pressed={maximized()} onClick={()=>{setSplit(false);setMaximized(v=>!v);}}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d={maximized()?"M4 9h5V4m6 0v5h5M4 15h5v5m6 0v-5h5":"M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5"}/></svg>
@@ -1032,9 +1036,9 @@ export function FilePanelProvider(p: {
               >
                 <Ic.SearchIcon size={16} />
               </button>
-              <div class="file-tab-list" data-tauri-drag-region>
+              <div class="file-tab-list" data-orb-drag-region>
                 <Show when={!tabs().length}>
-                  <span class="file-header-title" data-tauri-drag-region>Files</span>
+                  <span class="file-header-title" data-orb-drag-region>Files</span>
                 </Show>
                 <For each={tabs()}>
                   {(tab) => (

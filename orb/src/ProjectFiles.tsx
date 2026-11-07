@@ -1126,7 +1126,7 @@ export function LiveProjectsSection(p: {
     if (force) dirGenerations.set(key, gen);
     setDirErrors(key, null);
     return requests.read(`files:${version}:${key}`, () => listProjectFiles(slug, path), force)
-      .then((entries) => { if (currentConnection(version) && (dirGenerations.get(key) ?? 0) === gen) setDirs(key, reconcile(entries, {key: "name"})); })
+      .then((entries) => { if (currentConnection(version) && (dirGenerations.get(key) ?? 0) === gen) setDirs(key, reconcile(Array.isArray(entries) ? entries : [], {key: "name"})); })
       .catch((e) => { if (currentConnection(version) && (dirGenerations.get(key) ?? 0) === gen) setDirErrors(key, e instanceof Error ? e.message : String(e)); });
   };
 
@@ -2163,16 +2163,14 @@ export function LiveProjectsSection(p: {
     if (!row) return;
     // Project rows are buttons inside the tree. WebKit drops their click after
     // this pointerdown, so open the project from the pointerup that follows.
-    if (row.kind === "project" || row.kind === "folder") {
-      const x = e.clientX, y = e.clientY, slug = row.slug, path = row.path ?? "";
-      const kind = row.kind;
+    if (row.kind === "project") {
+      const x = e.clientX, y = e.clientY, slug = row.slug;
       const up = (ev: PointerEvent) => {
         window.removeEventListener("pointerup", up, true);
         window.removeEventListener("pointercancel", up, true);
         if (ev.button !== 0 || Math.hypot(ev.clientX - x, ev.clientY - y) >= 6) return;
         entry.dataset.toggled = "1";
-        if (kind === "project") toggleProject(slug);
-        else toggleDir(slug, path);
+        toggleProject(slug);
         setTimeout(() => { delete entry.dataset.toggled; }, 0);
       };
       window.addEventListener("pointerup", up, true);
@@ -2218,7 +2216,14 @@ export function LiveProjectsSection(p: {
       const wasDragging = dragging;
       const dropEl = wasDragging ? dropAt(ue.clientX, ue.clientY) : undefined;
       finish();
-      if (!wasDragging) return;
+      if (!wasDragging) {
+        if (row.kind === "folder" && ue.button === 0 && Math.hypot(ue.clientX - startX, ue.clientY - startY) < 6) {
+          entry.dataset.toggled = "1";
+          toggleDir(row.slug, row.path ?? "");
+          setTimeout(() => { delete entry.dataset.toggled; }, 0);
+        }
+        return;
+      }
       const eatClick = (ce: MouseEvent) => { ce.preventDefault(); ce.stopPropagation(); };
       window.addEventListener("click", eatClick, true);
       setTimeout(() => window.removeEventListener("click", eatClick, true), 0);

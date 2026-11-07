@@ -1,4 +1,4 @@
-import { nativeInvoke } from "./native";
+import { nativeInvoke, nativeWindow } from "./native";
 /** Records why the app felt slow: stalls of the page's thread, slow requests,
  * stream load and a window the page does not fill. Entries are appended to
  * `~/.orb/logs/orb-<date>.jsonl` by the native side, which also notices when
@@ -72,8 +72,8 @@ async function checkWindow(): Promise<void> {
   const shape: Record<string, unknown> = { page, document: { width: document.documentElement.clientWidth, height: document.documentElement.clientHeight }, root: root && { width: round(root.width), height: round(root.height) } };
   let wrong = !!root && (root.height < page.height - 2 || root.width < page.width - 2);
   try {
-    const native = (window as unknown as { __TAURI__?: { window?: { getCurrentWindow?: () => { innerSize: () => Promise<{ width: number; height: number }>; scaleFactor: () => Promise<number> } } } }).__TAURI__?.window?.getCurrentWindow?.();
-    if (native) {
+    const native = nativeWindow();
+    if (native?.innerSize && native?.scaleFactor) {
       const [size, scale] = await Promise.all([native.innerSize(), native.scaleFactor()]);
       const expected = { width: round(size.width / scale), height: round(size.height / scale) };
       shape.window = expected;

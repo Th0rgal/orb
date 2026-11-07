@@ -371,6 +371,10 @@ export class InvalidApiResponseError extends Error {
  * timeout as the same "AbortError: Fetch is aborted" as an explicit abort, so
  * every abort is logged with its reason (`noteAbort`). */
 export const REQUEST_TIMEOUT_MS = 30_000;
+/** Managed-VM cold boot + enrollment (`auto-managed:*` / `/api/managed-machines`)
+ * is bounded on Core by a 360–480 s wall deadline (`src/managed/mod.rs`); keep
+ * the desktop client deadline above Core's so provisioning never aborts early. */
+export const MANAGED_PROVISION_TIMEOUT_MS = 540_000;
 /** Core did not answer before the deadline. Still an abort for `isAbortError`
  * and `isTransientNetworkError`, so polls retry and keep what they show. */
 export class RequestTimeoutError extends Error {
@@ -1408,7 +1412,7 @@ export async function listProjectMissions(slug: string): Promise<Mission[]> {
 }
 
 export async function listProjectFiles(slug: string, path: string): Promise<ProjectFileEntry[]> {
-  const local=await import("./projectContext").then(m=>m.localContextFile<{entries:ProjectFileEntry[]}>(slug,"list",path));if(local)return local.entries;
+  const local=await import("./projectContext").then(m=>m.localContextFile<{entries?:ProjectFileEntry[]}>(slug,"list",path));if(local&&Array.isArray(local.entries))return local.entries;
   const data = await api<{ entries?: ProjectFileEntry[] }>(
     `/api/projects/${encodeURIComponent(slug)}/files?path=${encodeURIComponent(path)}`,
   );
@@ -1653,10 +1657,12 @@ export async function createMission(body: CreateMissionBody): Promise<Mission> {
   // provisioning on the server. Send the exact selection; never generate shell
   // or proxy credentials here. Unsupported/older servers reject explicitly
   // without client fallback.
+  const autoProvision = typeof body.remote_node_id === "string" && /^auto-managed(?::|$)/i.test(body.remote_node_id.trim());
   const init: RequestInit = {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    ...(autoProvision ? { signal: AbortSignal.timeout(MANAGED_PROVISION_TIMEOUT_MS) } : {}),
   };
   return api("/api/control/missions", body.idempotency_key ? withIdempotencyKey(init, body.idempotency_key) : init);
 }

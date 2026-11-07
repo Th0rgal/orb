@@ -231,10 +231,16 @@ private def handleTransportProxyRequest (st : LocaldState) (isShardPort : Bool) 
               sendJsonHttp fd 502 origin? "{\"error\":\"invalid_stream_origin\"}"
               done := true
         else
+          let isLongProvision :=
+            req.method.toUpper == "POST" &&
+            (relPath == "/api/control/missions" || relPath.startsWith "/api/control/missions?" ||
+             relPath == "/api/managed-machines" || relPath.startsWith "/api/managed-machines?" ||
+             relPath.startsWith "/api/managed-machines/")
+          let upTimeoutMs : UInt32 := if isLongProvision then 540000 else 65000
           let attemptRes ← match parseOriginHostPort orig with
             | none => pure (.error "invalid_origin")
             | some (true, host, port, pfx) =>
-              httpsRequest req.method host port (pfx ++ relPath) fwdHdrs reqBody
+              httpsRequest req.method host port (pfx ++ relPath) fwdHdrs reqBody 16777216 true upTimeoutMs
             | some (false, _, _, _) =>
               pure (.error "plaintext_origin_rejected")
           match attemptRes with
@@ -262,6 +268,47 @@ private def handleTransportProxyRequest (st : LocaldState) (isShardPort : Bool) 
               sendJsonHttp fd 502 origin? "{\"error\":\"upstream_unreachable\"}"
               done := true
 
+private def streamLocalEventsSse (stRef : IO.Ref LocaldState) (clientFd : Fd) (origin? : Option String) : IO Unit := do
+  let head :=
+    "HTTP/1.1 200 OK\r\n" ++
+    corsHeaderBlock origin? ++
+    "Content-Type: text/event-stream\r\n" ++
+    "Cache-Control: no-cache\r\n" ++
+    "Connection: close\r\n\r\n: ready\n\n"
+  match ← writeAll clientFd head.toUTF8 false with
+  | .error _ => return ()
+  | .ok _ =>
+    let mut alive := true
+    let mut idleTicks : Nat := 0
+    while alive do
+      let evs ← stRef.modifyGet fun s =>
+        if s.queuedChannelEvents.isEmpty then
+          (#[], s)
+        else
+          let items := s.queuedChannelEvents.map fun (tok, payload) =>
+            JVal.obj #[("token", JVal.nat tok), ("payload", payload)]
+          (items, { s with queuedChannelEvents := #[] })
+      if !evs.isEmpty then
+        idleTicks := 0
+        let frame := "data: " ++ renderCompact (.arr evs) ++ "\n\n"
+        match ← writeAll clientFd frame.toUTF8 false with
+        | .ok _ => pure ()
+        | .error _ => alive := false
+      else
+        match ← pollReadable clientFd 500 with
+        | .ok () =>
+          let chunk ← readStreamChunk clientFd 64
+          if chunk.isEmpty then alive := false
+        | .error .eagain =>
+          idleTicks := idleTicks + 1
+          if idleTicks ≥ 30 then
+            idleTicks := 0
+            match ← writeAll clientFd ": keepalive\n\n".toUTF8 false with
+            | .ok _ => pure ()
+            | .error _ => alive := false
+        | .error _ =>
+          alive := false
+
 private def handleClientConnection (stRef : IO.Ref LocaldState) (portIdx : Nat) (clientFd : Fd) : IO Unit := do
   try
     match ← readHttpRequestFromFd clientFd none 5000 with
@@ -276,8 +323,14 @@ private def handleClientConnection (stRef : IO.Ref LocaldState) (portIdx : Nat) 
         let st ← stRef.get
         if portIdx > 0 || req.path.startsWith "/__orb_tx/" then
           handleTransportProxyRequest st (portIdx ≥ 2) clientFd req origin?
-        else if req.method == "OPTIONS" && req.path == "/__orb_rpc" then
+        else if req.method == "OPTIONS" && (req.path == "/__orb_rpc" || req.path == "/__orb_events") then
           sendPreflight204 clientFd origin?
+        else if req.method == "GET" && req.path == "/__orb_events" then
+          let provided := (findHeaderVal? req.headers "x-orb-token").getD ""
+          if !checkRpcAuth "127.0.0.1" provided st.launchToken then
+            sendJsonHttp clientFd 401 origin? "{\"error\":\"unauthorized\"}"
+          else
+            streamLocalEventsSse stRef clientFd origin?
         else if req.method != "POST" || req.path != "/__orb_rpc" then
           sendJsonHttp clientFd 404 origin? "{\"error\":\"not_found\"}"
         else
@@ -407,6 +460,8 @@ def main (args : List String) : IO UInt32 := do
       else
         pure (some "macos_shell/build/orb-signer")
   let homeDir := ((← IO.getEnv "HOME").getD "/tmp").trimAscii.toString
+  let rawStateEnv := ((← IO.getEnv "ORB_STATE_DIR").getD "").trimAscii.toString
+  let orbStateDir := if rawStateEnv.isEmpty then s!"{homeDir}/.orb" else rawStateEnv
   let defaultKeyPath :=
     if hostOs == "macos" then s!"{homeDir}/Library/Application Support/sh.sandboxed.orb/approval-key.bin"
     else s!"{homeDir}/.config/orb/approval-key.bin"
@@ -435,6 +490,8 @@ def main (args : List String) : IO UInt32 := do
         rpcPort := boundRpcPort
         bridge := bridge
         approvalKeyPath := approvalKeyPath
+        orbStateDir := orbStateDir
+        homeDir := homeDir
         hostOs := hostOs
         signerBin? := signerBin?
       }

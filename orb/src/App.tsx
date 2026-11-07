@@ -1180,7 +1180,7 @@ export default function App() {
       <FilePanelProvider missionOpen={currentMissionId()} scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }} sidebar={sidebar} onSetSidebar={setSidebar}>
       <button class="sidebar-backdrop" aria-label="Close sidebar" onClick={() => setSidebar(false)} tabIndex={-1} />
       <aside id="orb-sidebar" class="sidebar">
-        <div class="sb-top" data-tauri-drag-region />
+        <div class="sb-top" data-orb-drag-region />
         <nav class="sb-scroll" onContextMenu={(e) => e.preventDefault()}>
           <Show
             when={onSettings()}
@@ -1321,7 +1321,7 @@ export default function App() {
         <div class="sb-resize" onPointerDown={startResize} />
       </aside>
 
-      <header class="titlebar" data-tauri-drag-region>
+      <header class="titlebar" data-orb-drag-region>
         <div class="tb-left">
           <button class="icon-btn" aria-label="Toggle sidebar" aria-expanded={sidebar()} aria-controls="orb-sidebar" title={`Toggle sidebar (${sidebarShortcutLabel()})`} onClick={() => setSidebar(!sidebar())}>
             <Ic.SidebarIcon />
@@ -1337,7 +1337,7 @@ export default function App() {
             <Ic.ArrowRight />
           </button>
         </div>
-        <div class="tb-title" data-tauri-drag-region>
+        <div class="tb-title" data-orb-drag-region>
           <Switch>
             <Match when={skillPageName(selected())}>{(sk) => <span>Skills · {sk().name}</span>}</Match>
             <Match when={settingsSectionFor(selected())}>{(sec) => <span>Settings · {sec().label}</span>}</Match>

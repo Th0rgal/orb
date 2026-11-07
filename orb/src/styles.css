@@ -160,9 +160,10 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -
 
 .app {
   display: grid;
-  grid-template-columns: var(--sb-w) 1fr;
-  grid-template-rows: var(--tb-h) 1fr;
+  grid-template-columns: var(--sb-w) minmax(0, 1fr);
+  grid-template-rows: var(--tb-h) minmax(0, 1fr);
   height: 100%;
+  overflow: hidden;
 }
 /* A faint native wallpaper tint carries across the shell. */
 .titlebar, .main { background: color-mix(in srgb, var(--bg) var(--surface-opacity), transparent); }
@@ -177,12 +178,11 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -
 /* Narrow windows use an overlay drawer controlled by the same sidebar toggle. */
 .sidebar-backdrop { display: none; }
 @media (max-width: 720px) {
-  .app { grid-template-columns: 0 1fr; }
+  .app { grid-template-columns: 0 minmax(0, 1fr); }
   .app:not(.sb-hidden) .sidebar { display: flex; position: fixed; top: var(--tb-h); bottom: 0; left: 0; width: min(var(--sb-w), 85vw); z-index: 20; background: var(--bg); box-shadow: 8px 0 24px #0003; }
   .sidebar .sb-top, .sidebar .sb-resize { display: none; }
   .app:not(.sb-hidden) .sidebar-backdrop { display: block; position: fixed; inset: var(--tb-h) 0 0; z-index: 19; background: #0005; }
   .titlebar, .main { grid-column: 2; }
-  .app:not(.sb-hidden) .titlebar .tb-left { position: static; width: auto; margin-left: 0; }
   .scroll { padding: 0 14px; }
 }
 
@@ -197,6 +197,8 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -
   flex-direction: column;
   position: relative;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 .sb-top { height: 0; flex: none; }
 /* Keyboard focus only (mouse clicks stay quiet). */
@@ -222,7 +224,7 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
   flex: none; width: 16px; height: 16px; display: grid; place-items: center;
   color: color-mix(in srgb, var(--fg) 62%, transparent);
 }
-.row:hover:not(.active):not(:disabled) { background: var(--bg-hover); }
+.row:hover:not(.active):not(:disabled):not(.note) { background: var(--bg-hover); }
 .row.active { background: var(--bg-active); color: var(--fg-strong); }
 .row.mission-deleting { opacity: .42; cursor: default; }
 .row.project.contains-current { color: var(--fg-strong); }
@@ -467,20 +469,33 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
   height: var(--tb-h); box-sizing: border-box;
   padding: 0 10px 0 14px; min-width: 0;
   position: relative; z-index: 2;
-  /* Opaque fill: WebKit only drags painted pixels, so a translucent bar
-     moved only where the title glyphs were. */
-  background: var(--bg);
   -webkit-app-region: drag;
 }
 /* The title strip is the whole top row, including above the sidebar, so the
-   sidebar controls sit in that header and the empty space still drags. */
+   sidebar controls sit in that header and the empty space drags via the native
+   shell's mouseDown bridge without sacrificing vibrancy translucency. */
 .app > .titlebar { grid-column: 1 / -1; grid-row: 1; }
+.app:not(.sb-hidden) > .titlebar {
+  padding-left: 0;
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--bg-sidebar) var(--sidebar-opacity), transparent) 0,
+    color-mix(in srgb, var(--bg-sidebar) var(--sidebar-opacity), transparent) var(--sb-w),
+    color-mix(in srgb, var(--bg) var(--surface-opacity), transparent) var(--sb-w),
+    color-mix(in srgb, var(--bg) var(--surface-opacity), transparent) 100%
+  );
+}
 .main { grid-row: 2; }
 .app:not(.sb-hidden) .tb-left {
-  position: static; width: var(--sb-w); margin-left: 0; padding-left: 78px;
-  box-sizing: border-box; flex: none; height: auto; z-index: 6;
+  position: static; width: var(--sb-w); margin-left: 0; padding-left: 78px; padding-right: 8px;
+  box-sizing: border-box; flex: none; align-self: stretch; height: 100%; z-index: 6;
+  border-right: 1px solid var(--stroke-soft);
 }
 .app.sb-hidden .tb-left { margin-left: 70px; }
+@media (max-width: 720px) {
+  .app:not(.sb-hidden) > .titlebar { padding-left: 14px; background: color-mix(in srgb, var(--bg) var(--surface-opacity), transparent); }
+  .app:not(.sb-hidden) .titlebar .tb-left { position: static; width: auto; margin-left: 0; padding-left: 70px; padding-right: 0; border-right: 0; height: auto; align-self: center; }
+}
 .tb-left svg, .tb-title > svg { width: 15px; height: 15px; }
 .tb-left { padding-bottom: 1px; display: flex; align-items: center; gap: 2px; }
 .tb-gap { flex: 1; min-width: 8px; max-width: 40px; }
@@ -704,15 +719,12 @@ code {
 .dock .error-notice { position: relative; z-index: 1; }
 /* Fade the transcript out beneath the controls with a mask rather than a painted
    layer: a second --bg fill over the translucent .main made the area behind the
-   queue and composer darker and opaque. Works in every theme and opacity. */
-.scroll {
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px);
-  mask-image: linear-gradient(to bottom, transparent 0, #000 14px);
-}
+   queue and composer darker and opaque. Keep the top edge crisp under the
+   translucent titlebar so the first visible line never looks washed out. */
 .scroll:has(+ .dock) {
   --dock-fade: calc(100% - var(--dock-height, 110px));
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(var(--dock-fade) - 16px), transparent calc(var(--dock-fade) + 10px));
-  mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(var(--dock-fade) - 16px), transparent calc(var(--dock-fade) + 10px));
+  -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 calc(var(--dock-fade) - 16px), transparent calc(var(--dock-fade) + 10px));
+  mask-image: linear-gradient(to bottom, #000 0, #000 calc(var(--dock-fade) - 16px), transparent calc(var(--dock-fade) + 10px));
 }
 
 .actions { display: flex; gap: 4px; margin-bottom: 8px; }
@@ -1298,8 +1310,8 @@ button.under-model { color: inherit; }
 .row-tip { pointer-events:none; white-space:normal; }
 .row-tip-title { color: var(--fg-strong); font-size: 12.5px; line-height: 16px; }
 .row-tip-meta { color: var(--fg-3); font-size: 11.5px; line-height: 15px; margin-top: 3px; }
-.row.note { font-size: 12px; color: var(--fg-3); height: auto; min-height: 24px; white-space: normal; line-height: 15px; padding-top: 3px; padding-bottom: 3px; }
-.row.note:hover { background: transparent; }
+.row.note { font-size: 12px; color: var(--fg-3); height: auto; min-height: 24px; white-space: normal; line-height: 15px; padding-top: 3px; padding-bottom: 3px; cursor: default; }
+.row.note:hover, .row.note:active { background: transparent; }
 .row.file svg { color: var(--fg-3); }
 
 .attach-pills { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 4px 8px; }
@@ -1834,7 +1846,7 @@ button.fork-trigger:hover { color: var(--fg); }
 .file-panel { grid-column:3;grid-row:2 / 3;position:relative;min-width:0;min-height:0;display:flex;flex-direction:column;border-left:1px solid var(--stroke);background:var(--bg);font-size:13px; }
 .file-panel.maximized { position:fixed;inset:var(--tb-h) 0 0 var(--sb-w);z-index:30; }
 .file-panel-resize { position:absolute;left:-4px;top:0;bottom:0;width:8px;cursor:col-resize;z-index:4; }
-.file-tabs { display:flex;align-items:center;min-height:var(--tb-h);gap:3px;padding:0 10px;border-bottom:1px solid var(--stroke);overflow-x:auto; -webkit-app-region: drag; background: var(--bg); }
+.file-tabs { display:flex;align-items:center;min-height:var(--tb-h);gap:3px;padding:0 10px;border-bottom:1px solid var(--stroke);overflow-x:auto; -webkit-app-region: drag; background: color-mix(in srgb, var(--bg) var(--surface-opacity), transparent); }
 .file-tabs button, .file-header button, .file-header summary { -webkit-app-region: no-drag; }
 .file-tab { display:flex;align-items:center;flex:none;max-width:240px;border-radius: var(--radius-sm); }
 .file-tab.selected { background:var(--bg-active); }
@@ -2647,7 +2659,7 @@ select.orb-select-native:disabled { cursor: default; }
 .btw-panel .btw-composer-dock form { margin-left:0; margin-right:0; }
 .btw-sidebar .btw-panel header { display:none; }
 /* Same soft fade as the main transcript above its composer; padding keeps the last line clear of it. */
-.btw-sidebar .btw-thread { --btw-dock-fade:calc(100% - var(--btw-dock-height, 0px)); padding-top:max(12px, var(--tb-h, 35px)); padding-bottom:calc(var(--btw-dock-height, 96px) + 24px); -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(var(--btw-dock-fade) - 16px), transparent calc(var(--btw-dock-fade) + 10px)); mask-image:linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(var(--btw-dock-fade) - 16px), transparent calc(var(--btw-dock-fade) + 10px)); }
+.btw-sidebar .btw-thread { --btw-dock-fade:calc(100% - var(--btw-dock-height, 0px)); padding-top:max(12px, var(--tb-h, 35px)); padding-bottom:calc(var(--btw-dock-height, 96px) + 24px); -webkit-mask-image:linear-gradient(to bottom, #000 0, #000 calc(var(--btw-dock-fade) - 16px), transparent calc(var(--btw-dock-fade) + 10px)); mask-image:linear-gradient(to bottom, #000 0, #000 calc(var(--btw-dock-fade) - 16px), transparent calc(var(--btw-dock-fade) + 10px)); }
 /* The side composer floats over its thread like the main dock, so the transcript fades out behind it.
    Never apply min-height: var(--btw-dock-height) here: --btw-dock-height is measured from this box,
    so a self-referential min-height ratchets to the tallest draft/queue and never lets the dock shrink. */
@@ -3065,7 +3077,7 @@ select.orb-select-native:disabled { cursor: default; }
 .tree-entry > .launched-toggle:hover:not(:disabled) { background: var(--bg-active); color: var(--fg); }
 .tree-entry > .launched-toggle:disabled { opacity: .42; cursor: default; }
 .tree-entry > .launched-toggle.live .launched-count { color: var(--fg-2); }
-.tree-entry:has(> .launched-toggle) > .row { padding-right: 52px; }
+.tree-entry:has(> .launched-toggle) > .row { padding-right: 70px; }
 .tree-entry > .launched-toggle .launched-history { color: var(--fg-3); }
 .row .row-version-tag { flex: none; margin-left: 6px; font-size: 11px; color: var(--fg-3); }
 .launched-chevron { transition: transform 140ms ease; }

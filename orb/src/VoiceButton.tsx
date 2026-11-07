@@ -16,7 +16,7 @@ import {
   probeVoice,
   setVoiceLanguage,
   startRecording,
-  tauriVoiceBridge,
+  nativeVoiceBridge,
   toVoiceError,
   voiceLanguage,
   type Recorder,
@@ -35,7 +35,7 @@ let probed = false;
 export function ensureVoiceProbe(bridge?: VoiceBridge | null) {
   if (probed) return;
   probed = true;
-  void probeVoice(bridge === undefined ? tauriVoiceBridge() : bridge).then((cap) => {
+  void probeVoice(bridge === undefined ? nativeVoiceBridge() : bridge).then((cap) => {
     setCapability(cap);
     setAvailable(!!cap);
   });
@@ -95,7 +95,7 @@ export function VoiceButton(p: {
   bridge?: VoiceBridge | null;
   recorder?: RecorderFactory;
 }) {
-  const bridge = () => (p.bridge === undefined ? tauriVoiceBridge() : p.bridge);
+  const bridge = () => (p.bridge === undefined ? nativeVoiceBridge() : p.bridge);
   const record = () => p.recorder ?? startRecording;
   const [status, setStatus] = createSignal<VoiceStatus>("idle");
   const [elapsed, setElapsed] = createSignal(0);
