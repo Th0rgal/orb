@@ -1179,8 +1179,33 @@ def runTests : IO UInt32 := do
      jAfterCas.reservedDiskGib == 0 &&
      !staleNodeCas.isOk &&
      !badModeCas.isOk &&
-     reopenedJob?.map (·.supersededById) == some "m-super-9" &&
-     reopenedJob?.map (·.stateRevision) == some 2)
+      reopenedJob?.map (·.supersededById) == some "m-super-9" &&
+      reopenedJob?.map (·.stateRevision) == some 2)
+  let httpAuthJobId := "77777777-7777-4777-8777-777777777777"
+  let httpAuthBody := renderCompact (.obj #[
+    ("job_id", .str httpAuthJobId),
+    ("mission_id", .str missionId),
+    ("lease_token", .str submitLease),
+    ("authority_mode", .str "readonly"),
+    ("placement_kind", .str "client"),
+    ("reserved_disk_gib", JVal.uint64 12),
+    ("payload", .obj #[
+      ("kind", .str "raw_command"),
+      ("command", .str "true"),
+      ("long_running", .bool true)
+    ])
+  ])
+  let (rtHttpAuth, rHttpAuth) ← handleRequest rt {
+    method := "POST", rawPath := "/jobs", path := "/jobs",
+    query := #[], headers := authHdrs, body := httpAuthBody.toUTF8
+  }
+  rt := rtHttpAuth
+  let storedHttpJob? := rt.ledger.jobs.get? httpAuthJobId
+  check "POST /jobs persists typed authority_mode, placement_kind, and reserved_disk_gib"
+    (rHttpAuth.status == 202 &&
+     storedHttpJob?.map (·.authorityMode) == some "readonly" &&
+     storedHttpJob?.map (·.placementKind) == some "client" &&
+     storedHttpJob?.map (·.reservedDiskGib) == some 12)
 
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get

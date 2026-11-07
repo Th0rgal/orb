@@ -611,6 +611,20 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
         return (rt, textResp 409 s!"job {jobId} already exists", preLaunches, #[])
       if rt.queueOrder.size >= rt.cfg.maxQueued then
         return (rt, textResp 429 "node job queue full", preLaunches, #[])
+      let rawAuthMode :=
+        match (jv.fieldStr? "authority_mode").orElse (fun _ => payloadVal.fieldStr? "authority_mode") with
+        | some m => m
+        | none =>
+          match (jv.fieldBool? "writer").orElse (fun _ => payloadVal.fieldBool? "writer") with
+          | some false => "readonly"
+          | _ => "writer"
+      if rawAuthMode != "readonly" && rawAuthMode != "writer" then
+        return (rt, textResp 422 s!"invalid authority_mode '{rawAuthMode}'", preLaunches, #[])
+      let placeKind := ((jv.fieldStr? "placement_kind").orElse (fun _ => payloadVal.fieldStr? "placement_kind")).getD "managed"
+      let diskGib :=
+        match (jv.fieldUInt64? "reserved_disk_gib").orElse (fun _ => payloadVal.fieldUInt64? "reserved_disk_gib") with
+        | some g => g
+        | none => ((payloadVal.fieldUInt64? "estimated_disk_bytes").getD 0) / 1073741824
       let nowTs ← nowRfc3339
       let logPath := (System.FilePath.mk rt.cfg.workDir / "logs" / s!"{jobId}.log").toString
       let persistedPayload := sanitizePersistedPayload payloadVal
@@ -621,6 +635,9 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
         state := .queued
         createdAt := nowTs
         logPath? := some logPath
+        authorityMode := rawAuthMode
+        placementKind := placeKind
+        reservedDiskGib := diskGib
       }
       match ← rt.ledger.insertQueued jobRec with
       | .error "duplicate_job_id" => return (rt, textResp 409 s!"job {jobId} already exists", preLaunches, #[])

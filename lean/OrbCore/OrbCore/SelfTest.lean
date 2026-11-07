@@ -520,7 +520,24 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     closeCoreStore store
     IO.eprintln "[orb-core-test] FAIL: conflicting track writer lease was not rejected"
     return 1
+  -- Cross-track writer on the SAME repo MUST also be rejected (`verifyRepoDisjoint`)!
+  let sameRepoOtherTrack ← acquireDispatchTrackLease store {
+    reservationId := "rsv-w2-repo", missionId := "m-w2", projectSlug := "orb",
+    track := "different-track", repo := "Th0rgal/orb", authorityMode := "writer",
+    reservedDiskGib := 2, nowAt := "t2b"
+  }
+  if sameRepoOtherTrack.isOk then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: cross-track same-repo writer lease was not rejected"
+    return 1
   let .ok () ← releaseDispatchTrackLease store "rsv-w1" "t3" | do closeCoreStore store; return 1
+  -- Simulate same-boot Phase-3 failure (intent `preparing`, projects row `active` at boot 1)
+  let _ ← execParamQuery store.missionsDb
+    "INSERT INTO dispatch_lease_intents(reservation_id,mission_id,project_slug,track,repo,authority_mode,reserved_disk_gib,phase,boot_epoch,created_at,updated_at) VALUES('rsv-sameboot','m-w2','orb','r2-track','Th0rgal/orb','writer',6,'preparing',1,'t3b','t3b');" #[]
+  let _ ← execParamQuery store.projectsDb
+    "INSERT INTO project_track_leases(project_slug,track,reservation_id,mission_id,repo,authority_mode,phase,boot_epoch,updated_at) VALUES('orb','r2-track','rsv-sameboot','m-w2','Th0rgal/orb','writer','active',1,'t3b');" #[]
+  let .ok () ← recoverDispatchLeases store.missionsDb store.projectsDb 1
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: same-boot recoverDispatchLeases failed"; return 1
   -- Simulate mid-flight crash leaving `preparing` rows in both `missions.db` and `projects.db`
   let _ ← execParamQuery store.missionsDb
     "INSERT INTO dispatch_lease_intents(reservation_id,mission_id,project_slug,track,repo,authority_mode,reserved_disk_gib,phase,boot_epoch,created_at,updated_at) VALUES('rsv-crash','m-w2','orb','r2-track','Th0rgal/orb','writer',12,'preparing',1,'t4','t4');" #[]
@@ -535,7 +552,19 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     reservedDiskGib := 4, bootEpoch := 2, nowAt := "t5"
   } | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: post-crash lease acquisition blocked"; return 1
 
-  -- SM-12: committed `2xx` exceeding 512 KiB persists durable `committed_oversize` sentinel and replays idempotently
+  -- SM-12: pre-effect in-flight idempotency reservation + committed `2xx` > 512 KiB `committed_oversize` sentinel
+  let .ok .Claimed ← claimIdempotencySlot store "missions_create" "idem-inflight-1" "t5"
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: claimIdempotencySlot initial claim failed"; return 1
+  let .ok .InFlight ← claimIdempotencySlot store "missions_create" "idem-inflight-1" "t5"
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: concurrent claimIdempotencySlot did not return InFlight"; return 1
+  let .ok _ ← recordOrReplayIdempotency store "missions_create" "idem-inflight-1" 201 "{\"id\":\"m-idem-1\"}" "t5"
+    | do closeCoreStore store; return 1
+  let .ok (.Replayed repRec) ← claimIdempotencySlot store "missions_create" "idem-inflight-1" "t6"
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: finalized slot did not replay"; return 1
+  if repRec.statusCode != 201 || repRec.bodyJson != "{\"id\":\"m-idem-1\"}" then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: finalized slot replay mismatch"
+    return 1
   let bigPayload := "{\"blob\":\"" ++ String.ofList (List.replicate 530000 'x') ++ "\"}"
   let .ok over1 ← recordOrReplayIdempotency store "missions_create" "idem-oversize-1" 201 bigPayload "t5"
     | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: oversize idempotency write failed"; return 1
@@ -549,6 +578,14 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     return 1
 
   closeCoreStore store
+  -- Re-opening `openCoreStore tmpRoot` MUST auto-increment persistent `bootEpoch` (`1 -> 2`) and recover stale boot-1 leases!
+  let .ok storeBoot2 ← openCoreStore tmpRoot
+    | do IO.eprintln "[orb-core-test] FAIL: second openCoreStore failed"; return 1
+  if storeBoot2.bootEpoch != 2 then
+    closeCoreStore storeBoot2
+    IO.eprintln s!"[orb-core-test] FAIL: expected persistent bootEpoch=2 on reopen, got {storeBoot2.bootEpoch}"
+    return 1
+  closeCoreStore storeBoot2
   IO.FS.removeDirAll tmpRoot
 
   -- 7. Host evidence suite (`83/83` host tests)

@@ -175,6 +175,7 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS model_routing_chains (id TEXT PRIMARY KEY, name TEXT NOT NULL, models_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS privilege_leases (grant_id TEXT PRIMARY KEY, lease_token TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, scope TEXT NOT NULL, allowed_units_json TEXT NOT NULL DEFAULT '[]', require_force_cmd INTEGER NOT NULL DEFAULT 0, biometric_signed INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0, expires_at_epoch INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS privilege_audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, grant_id TEXT NOT NULL, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, executing_host TEXT NOT NULL, command TEXT NOT NULL, allowed INTEGER NOT NULL, created_at TEXT NOT NULL);" ++
+  "CREATE TABLE IF NOT EXISTS core_boot_state (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1), boot_epoch INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS remote_message_queue (sequence INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, message_id TEXT NOT NULL, mission_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'waiting', UNIQUE(user_id,message_id));" ++
   "CREATE INDEX IF NOT EXISTS remote_message_pending ON remote_message_queue(state,sequence);" ++
   transferSchemaSql ++ "\n" ++ transferCleanupSql
@@ -201,7 +202,7 @@ def askSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS ask_requests (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, question TEXT NOT NULL, answer TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT '');"
 
 def idempotencySchemaSql : String :=
-  "CREATE TABLE IF NOT EXISTS idempotency_keys (scope TEXT NOT NULL, request_key TEXT NOT NULL, response_json TEXT NOT NULL, status_code INTEGER NOT NULL DEFAULT 200, committed_oversize INTEGER NOT NULL DEFAULT 0, body_bytes INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(scope, request_key));"
+  "CREATE TABLE IF NOT EXISTS idempotency_keys (scope TEXT NOT NULL, request_key TEXT NOT NULL, response_json TEXT NOT NULL, status_code INTEGER NOT NULL DEFAULT 200, committed_oversize INTEGER NOT NULL DEFAULT 0, body_bytes INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT 'committed', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(scope, request_key));"
 
 private def isIgnorableDuplicateColErr (msg : String) : Bool :=
   (msg.toLower.splitOn "duplicate column name").length > 1
@@ -235,7 +236,8 @@ def missionsAdditiveAlters : Array String := #[
 def idempotencyAdditiveAlters : Array String := #[
   "ALTER TABLE idempotency_keys ADD COLUMN status_code INTEGER NOT NULL DEFAULT 200;",
   "ALTER TABLE idempotency_keys ADD COLUMN committed_oversize INTEGER NOT NULL DEFAULT 0;",
-  "ALTER TABLE idempotency_keys ADD COLUMN body_bytes INTEGER NOT NULL DEFAULT 0;"
+  "ALTER TABLE idempotency_keys ADD COLUMN body_bytes INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE idempotency_keys ADD COLUMN phase TEXT NOT NULL DEFAULT 'committed';"
 ]
 
 /-- Open a persistent SQLite database file and verify write durability (`BEGIN IMMEDIATE; ROLLBACK;`).
@@ -302,30 +304,56 @@ def recoverDispatchLeases (mDb pDb : SqliteDb) (bootEpoch : UInt64 := 1) : IO (E
       if let .error e := diskRel then return .error e
   let orphanProjs ← pDb.mu.atomically <|
     sqliteQueryRowsRaw pDb.handle
-      "SELECT reservation_id FROM project_track_leases WHERE phase='preparing' OR boot_epoch<>?1;"
-      #[bootStr]
+      "SELECT reservation_id,phase,boot_epoch FROM project_track_leases;"
+      #[]
   let .ok ors := orphanProjs
     | return .error (match orphanProjs with | .error e => e | .ok _ => "project_lease_recovery_failed")
   for i in [1:ors.size] do
     let rid := (ors[i]![0]?).getD ""
+    let projPhase := (ors[i]![1]?).getD ""
     let chk ← mDb.mu.atomically <|
       sqliteQueryRowsRaw mDb.handle
         "SELECT phase,boot_epoch FROM dispatch_lease_intents WHERE reservation_id=?1;" #[rid]
-    let keepActive :=
-      match chk with
-      | .ok crs =>
-        crs.size > 1 && ((crs[1]?.bind (·[0]?)).getD "") == "active" &&
-        ((crs[1]?.bind (·[1]?)).getD "") == bootStr
-      | .error _ => false
-    if !keepActive then
+    let intentPhase := match chk with | .ok crs => (crs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+    let intentBoot := match chk with | .ok crs => (crs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+    if intentPhase == "active" && intentBoot == bootStr then
+      if projPhase != "active" then
+        let pProm ← pDb.mu.atomically <|
+          sqliteQueryRowsRaw pDb.handle
+            "UPDATE project_track_leases SET phase='active',boot_epoch=?2 WHERE reservation_id=?1;" #[rid, bootStr]
+        if let .error e := pProm then return .error e
+    else
       let pDel ← pDb.mu.atomically <|
         sqliteQueryRowsRaw pDb.handle "DELETE FROM project_track_leases WHERE reservation_id=?1;" #[rid]
       if let .error e := pDel then return .error e
   return .ok ()
 
+/-- Atomically allocate and persist the next monotonic `boot_epoch` in `core_boot_state` (`missions.db`),
+    ensuring every `runCoreServer` / auto-epoch `openCoreStore` start increments `node_boot_epoch`. -/
+private def allocateNextBootEpoch (mDb : SqliteDb) : IO (Except String UInt64) :=
+  mDb.mu.atomically do
+    if let .error e ← sqliteExecRaw mDb.handle "BEGIN IMMEDIATE;" then
+      return .error s!"boot_epoch_begin_failed:{e}"
+    if let .error e ← sqliteExecRaw mDb.handle
+      "INSERT INTO core_boot_state(singleton_id,boot_epoch) VALUES(1,1) ON CONFLICT(singleton_id) DO UPDATE SET boot_epoch=core_boot_state.boot_epoch+1;" then
+      discard <| sqliteExecRaw mDb.handle "ROLLBACK;"
+      return .error s!"boot_epoch_bump_failed:{e}"
+    let q ← sqliteQueryRowsRaw mDb.handle "SELECT boot_epoch FROM core_boot_state WHERE singleton_id=1;" #[]
+    match q with
+    | .error qe =>
+      discard <| sqliteExecRaw mDb.handle "ROLLBACK;"
+      return .error s!"boot_epoch_select_failed:{qe}"
+    | .ok rs =>
+      let ep := ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 1
+      if let .error ce ← sqliteExecRaw mDb.handle "COMMIT;" then
+        discard <| sqliteExecRaw mDb.handle "ROLLBACK;"
+        return .error s!"boot_epoch_commit_failed:{ce}"
+      return .ok ep.toUInt64
+
 /-- Open or initialize the full `CoreStore` SQLite bundle in `rootDir` (preserving existing DB files in-place
-    and failing closed on any persistent open/schema/recovery failure without in-memory fallback). -/
-def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 1) : IO (Except String CoreStore) := do
+    and failing closed on any persistent open/schema/recovery failure without in-memory fallback).
+    When `bootEpoch == 0` (the default), atomically increments and persists `boot_epoch` in `core_boot_state`. -/
+def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) : IO (Except String CoreStore) := do
   let trimmedRoot := rootDir.trimAscii.toString
   if trimmedRoot.isEmpty || trimmedRoot == ":memory:" then
     return .error "core_store_invalid_root"
@@ -334,6 +362,11 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 1) : IO (Except Stri
     return .error s!"core_store_mkdir_failed:{ioErr}"
   let mRes ← openSqliteDb s!"{trimmedRoot}/missions.db" missionsSchemaSql missionsAdditiveAlters
   let .ok mDb := mRes | return .error (match mRes with | .error e => e | .ok _ => "err")
+  let effBootRes : Except String UInt64 ←
+    if bootEpoch == 0 then allocateNextBootEpoch mDb else pure (.ok bootEpoch)
+  let .ok effBoot := effBootRes | do
+    sqliteCloseRaw mDb.handle
+    return .error (match effBootRes with | .error e => e | .ok _ => "boot_epoch_failed")
   let pRes ← openSqliteDb s!"{trimmedRoot}/projects.db" projectsSchemaSql
   let .ok pDb := pRes | do sqliteCloseRaw mDb.handle; return .error (match pRes with | .error e => e | .ok _ => "err")
   let aRes ← openSqliteDb s!"{trimmedRoot}/ask.db" askSchemaSql
@@ -342,13 +375,16 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 1) : IO (Except Stri
   let .ok iDb := iRes | do
     sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle
     return .error (match iRes with | .error e => e | .ok _ => "err")
-  match ← recoverDispatchLeases mDb pDb bootEpoch with
+  if let .error cleanErr ← iDb.mu.atomically (sqliteExecRaw iDb.handle "DELETE FROM idempotency_keys WHERE phase='in_progress';") then
+    sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
+    return .error s!"core_store_idempotency_recovery_failed:{cleanErr}"
+  match ← recoverDispatchLeases mDb pDb effBoot with
   | .error recErr =>
     sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
     return .error s!"core_store_lease_recovery_failed:{recErr}"
   | .ok () =>
     let closedRef ← IO.mkRef false
-    return .ok { rootDir := trimmedRoot, bootEpoch := bootEpoch, missionsDb := mDb, projectsDb := pDb, askDb := aDb, idempotencyDb := iDb, closedRef := closedRef }
+    return .ok { rootDir := trimmedRoot, bootEpoch := effBoot, missionsDb := mDb, projectsDb := pDb, askDb := aDb, idempotencyDb := iDb, closedRef := closedRef }
 
 /-- Idempotently close all SQLite handles in `CoreStore` (prevents double-close). -/
 def closeCoreStore (st : CoreStore) : IO Unit := do
@@ -542,7 +578,7 @@ def upsertMission (st : CoreStore) (m : MissionRecord) : IO (Except String Unit)
     "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,updated_at,total_cost_cents,authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,reserved_disk_gib,state_revision,owner_epoch,run_generation,node_boot_epoch,tags,track,repo) " ++
     "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22) " ++
     "ON CONFLICT(id) DO UPDATE SET title=excluded.title,status=excluded.status,backend=excluded.backend,model_override=excluded.model_override,model_effort=excluded.model_effort,working_directory=excluded.working_directory,project=excluded.project,updated_at=excluded.updated_at,total_cost_cents=excluded.total_cost_cents," ++
-    "authority_mode=excluded.authority_mode,placement_kind=excluded.placement_kind,superseded_by_mission_id=excluded.superseded_by_mission_id,orphaned_at=excluded.orphaned_at,reserved_disk_gib=excluded.reserved_disk_gib,tags=excluded.tags,track=excluded.track,repo=excluded.repo,state_revision=missions.state_revision+1;"
+    "track=excluded.track,repo=excluded.repo;"
   let res ← execParamQuery st.missionsDb sql #[
     m.id, m.title, m.status, m.backend, m.modelOverride, m.modelEffort, m.workingDirectory, m.project,
     m.updatedAt, s!"{m.totalCostCents}", m.authorityMode, m.placementKind, m.supersededById, m.orphanedAt,
@@ -671,18 +707,22 @@ def acquireDispatchTrackLease (st : CoreStore) (req : DispatchLeaseRequest) : IO
       let otherTrack := (r[1]?).getD ""
       let otherRepo := (r[2]?).getD ""
       let otherMode := (r[3]?).getD "writer"
+      let otherPhase := (r[4]?).getD "active"
       if otherMid != req.missionId then
-        let holds := Orb.Kernel.verifyTrackHold 1 0 1 0
-        if otherTrack == req.track && holds == 1 && (req.authorityMode == "writer" || otherMode == "writer") then
-          return .error s!"track_writer_conflict:{otherMid}"
-        if req.authorityMode == "writer" && otherMode == "writer" && (!req.repo.isEmpty || !otherRepo.isEmpty) then
-          let hKnown : UInt8 := if otherRepo.isEmpty then 0 else 1
-          let tKnown : UInt8 := if req.repo.isEmpty then 0 else 1
-          let sameRepo : UInt8 := if otherRepo == req.repo then 1 else 0
-          if Orb.Kernel.verifyRepoDisjoint hKnown tKnown sameRepo == 0 && otherTrack == req.track then
-            return .error s!"repo_writer_conflict:{otherMid}"
+        let inUnresolved : UInt8 := if otherPhase == "preparing" then 1 else 0
+        let hasLiveOwner : UInt8 := if otherPhase == "active" then 1 else 0
+        let holds := Orb.Kernel.verifyTrackHold inUnresolved 0 hasLiveOwner 0
+        if holds == 1 then
+          if otherTrack == req.track && (req.authorityMode == "writer" || otherMode == "writer") then
+            return .error s!"track_writer_conflict:{otherMid}"
+          if req.authorityMode == "writer" && otherMode == "writer" && (!req.repo.isEmpty || !otherRepo.isEmpty) then
+            let hKnown : UInt8 := if otherRepo.isEmpty then 0 else 1
+            let tKnown : UInt8 := if req.repo.isEmpty then 0 else 1
+            let sameRepo : UInt8 := if otherRepo == req.repo then 1 else 0
+            if Orb.Kernel.verifyRepoDisjoint hKnown tKnown sameRepo == 0 then
+              return .error s!"repo_writer_conflict:{otherMid}"
     let ins ← execParamQueryUnlocked st.projectsDb
-      "INSERT INTO project_track_leases(project_slug,track,reservation_id,mission_id,repo,authority_mode,phase,boot_epoch,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'active',?7,?8) ON CONFLICT(project_slug,track,mission_id) DO UPDATE SET reservation_id=excluded.reservation_id,repo=excluded.repo,authority_mode=excluded.authority_mode,phase='active',boot_epoch=excluded.boot_epoch,updated_at=excluded.updated_at;"
+      "INSERT INTO project_track_leases(project_slug,track,reservation_id,mission_id,repo,authority_mode,phase,boot_epoch,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'preparing',?7,?8) ON CONFLICT(project_slug,track,mission_id) DO UPDATE SET reservation_id=excluded.reservation_id,repo=excluded.repo,authority_mode=excluded.authority_mode,phase='preparing',boot_epoch=excluded.boot_epoch,updated_at=excluded.updated_at;"
       #[req.projectSlug, req.track, req.reservationId, req.missionId, req.repo, req.authorityMode, s!"{req.bootEpoch}", req.nowAt]
     return ins.map (fun _ => ())
   match projRes with
@@ -693,7 +733,7 @@ def acquireDispatchTrackLease (st : CoreStore) (req : DispatchLeaseRequest) : IO
         #[req.reservationId, req.nowAt]
     return .error conflictErr
   | .ok () =>
-    -- Phase 3: Promote intent to `active` and record typed columns + CAS bump on `missions`
+    -- Phase 3: Promote intent to `active` in `missions.db` (source of truth), then promote `projects.db` row
     let actRes ← withImmediateTx st.missionsDb do
       let u1 ← execParamQueryUnlocked st.missionsDb
         "UPDATE dispatch_lease_intents SET phase='active',updated_at=?2 WHERE reservation_id=?1;"
@@ -706,6 +746,14 @@ def acquireDispatchTrackLease (st : CoreStore) (req : DispatchLeaseRequest) : IO
     if let .error e := actRes then
       discard <| recoverDispatchLeases st.missionsDb st.projectsDb req.bootEpoch
       return .error e
+    let projActRes ← withImmediateTx st.projectsDb do
+      let pu ← execParamQueryUnlocked st.projectsDb
+        "UPDATE project_track_leases SET phase='active',updated_at=?2 WHERE reservation_id=?1;"
+        #[req.reservationId, req.nowAt]
+      return pu.map (fun _ => ())
+    if let .error pe := projActRes then
+      discard <| recoverDispatchLeases st.missionsDb st.projectsDb req.bootEpoch
+      return .error pe
     return .ok ()
 
 /-- Release an active cross-DB dispatch track lease cleanly across `projects.db` and `missions.db`. -/
@@ -941,9 +989,65 @@ structure IdempotencyReceipt where
   committedOversize : Bool
   deriving Repr, DecidableEq
 
+/-- Outcome of `claimIdempotencySlot` (pre-effect reservation preventing concurrent duplicate mutation). -/
+inductive IdempotencySlotClaim where
+  | Claimed
+  | Replayed (receipt : IdempotencyReceipt)
+  | InFlight
+  deriving Repr, DecidableEq
+
+/-- Atomically reserve an in-flight `(scope, reqKey)` slot in `idempotency_keys.db` BEFORE performing side effects.
+    - If already `committed`, returns `.Replayed` with the durable receipt (gated by `effectOutboxStep`).
+    - If `in_progress`, returns `.InFlight` (`409 idempotency_key_in_flight`), preventing concurrent duplicate creation.
+    - Otherwise inserts a `phase='in_progress'` reservation row (`Planned -> Claimed` via `effectOutboxStep`). -/
+def claimIdempotencySlot (st : CoreStore) (scope reqKey createdAt : String) : IO (Except String IdempotencySlotClaim) :=
+  withImmediateTx st.idempotencyDb do
+    let existing ← execParamQueryUnlocked st.idempotencyDb
+      "SELECT response_json,status_code,committed_oversize,phase FROM idempotency_keys WHERE scope=?1 AND request_key=?2;"
+      #[scope, reqKey]
+    match existing with
+    | .error e => return .error e
+    | .ok rows =>
+      if rows.size > 1 then
+        let r := rows[1]!
+        let storedBody := (r[0]?).getD "{}"
+        let storedCode := ((r[1]?.bind String.toNat?).getD 200)
+        let storedOver := (((r[2]?.bind String.toNat?).getD 0) != 0)
+        let storedPhase := (r[3]?).getD "committed"
+        if storedPhase == "in_progress" then
+          let claimConflict := Orb.Kernel.effectOutboxStep 1 0 1 1 1 1
+          if (claimConflict &&& 256) != 0 then
+            return .error "idempotency_inflight_fence_broken"
+          return .ok .InFlight
+        let fenceWord := Orb.Kernel.effectOutboxStep (if storedOver then 4 else 2) 1 1 1 1 1
+        if (fenceWord &&& 256) != 0 then
+          return .error "idempotency_sticky_fence_broken"
+        return .ok (.Replayed {
+          statusCode := storedCode
+          bodyJson := storedBody
+          replayed := true
+          committedOversize := storedOver
+        })
+      let planWord := Orb.Kernel.effectOutboxStep 0 0 1 1 1 1
+      if (planWord &&& 256) == 0 then
+        return .error "idempotency_claim_fence_rejected"
+      let ins ← execParamQueryUnlocked st.idempotencyDb
+        "INSERT INTO idempotency_keys(scope,request_key,response_json,status_code,committed_oversize,body_bytes,phase,created_at) VALUES(?1,?2,'{}',202,0,0,'in_progress',?3);"
+        #[scope, reqKey, createdAt]
+      return ins.map (fun _ => .Claimed)
+
+/-- Release an uncommitted `in_progress` idempotency reservation when pre-commit admission fails (`4xx`/`5xx`). -/
+def abortIdempotencySlot (st : CoreStore) (scope reqKey : String) : IO (Except String Unit) :=
+  withImmediateTx st.idempotencyDb do
+    let d ← execParamQueryUnlocked st.idempotencyDb
+      "DELETE FROM idempotency_keys WHERE scope=?1 AND request_key=?2 AND phase='in_progress';"
+      #[scope, reqKey]
+    return d.map (fun _ => ())
+
 /-- Durable HTTP idempotency guard (`SM-12`, `R1-01` / `R2-C`):
-    - If `(scope, reqKey)` already exists, replays the stored `statusCode` and `response_json`
+    - If `(scope, reqKey)` is already `committed`, replays the stored `statusCode` and `response_json`
       (including `committed_oversize = 1` sentinel receipts, preventing duplicate mutation on retry!).
+    - If `(scope, reqKey)` is `in_progress` (reserved by `claimIdempotencySlot`), finalizes it to `committed`.
     - If committed `2xx` exceeds `512 KiB` (`maxIdempotencyResponseBytes`), persists a compact
       `committed_oversize = 1` durable sentinel receipt (never dropping the key or returning `500`),
       gated by `Orb.Kernel.effectOutboxStep` (`StickyFence`). -/
@@ -952,12 +1056,14 @@ def recordOrReplayIdempotency
     (statusCode : Nat) (responseJson createdAt : String) : IO (Except String IdempotencyReceipt) :=
   withImmediateTx st.idempotencyDb do
     let existing ← execParamQueryUnlocked st.idempotencyDb
-      "SELECT response_json,status_code,committed_oversize FROM idempotency_keys WHERE scope=?1 AND request_key=?2;"
+      "SELECT response_json,status_code,committed_oversize,phase FROM idempotency_keys WHERE scope=?1 AND request_key=?2;"
       #[scope, reqKey]
     match existing with
     | .error e => return .error e
     | .ok rows =>
-      if rows.size > 1 then
+      let hasInProgress :=
+        rows.size > 1 && ((rows[1]?.bind (·[3]?)).getD "committed") == "in_progress"
+      if rows.size > 1 && !hasInProgress then
         let r := rows[1]!
         let storedBody := (r[0]?).getD "{}"
         let storedCode := ((r[1]?.bind String.toNat?).getD 200)
@@ -980,10 +1086,16 @@ def recordOrReplayIdempotency
         else
           responseJson
       let overFlag := if isOversizeCommitted then "1" else "0"
-      let ins ← execParamQueryUnlocked st.idempotencyDb
-        "INSERT INTO idempotency_keys(scope,request_key,response_json,status_code,committed_oversize,body_bytes,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7);"
-        #[scope, reqKey, persistedBody, s!"{statusCode}", overFlag, s!"{rawBytes}", createdAt]
-      match ins with
+      let writeRes ←
+        if hasInProgress then
+          execParamQueryUnlocked st.idempotencyDb
+            "UPDATE idempotency_keys SET response_json=?3,status_code=?4,committed_oversize=?5,body_bytes=?6,phase='committed',created_at=?7 WHERE scope=?1 AND request_key=?2;"
+            #[scope, reqKey, persistedBody, s!"{statusCode}", overFlag, s!"{rawBytes}", createdAt]
+        else
+          execParamQueryUnlocked st.idempotencyDb
+            "INSERT INTO idempotency_keys(scope,request_key,response_json,status_code,committed_oversize,body_bytes,phase,created_at) VALUES(?1,?2,?3,?4,?5,?6,'committed',?7);"
+            #[scope, reqKey, persistedBody, s!"{statusCode}", overFlag, s!"{rawBytes}", createdAt]
+      match writeRes with
       | .error e => return .error e
       | .ok _ =>
         return .ok {
