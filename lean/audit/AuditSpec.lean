@@ -29,6 +29,9 @@ import Orb.LifecycleMutants
 import Orb.HarnessCloud
 import Orb.HarnessCloudSpec
 import Orb.HarnessCloudMutants
+import Orb.ManagedNode
+import Orb.ManagedNodeSpec
+import Orb.ManagedNodeMutants
 
 open Lean Elab Command
 
@@ -111,12 +114,15 @@ private def runAdversarialSelfTest : CommandElabM Unit := do
   let harnessCloud ← moduleConsts env `Orb.HarnessCloud
   let harnessCloudSpec ← moduleConsts env `Orb.HarnessCloudSpec
   let harnessCloudMutants ← moduleConsts env `Orb.HarnessCloudMutants
-  let allMutants := mutants ++ statefulMutants ++ lifecycleMutants ++ harnessCloudMutants
+  let managedNode ← moduleConsts env `Orb.ManagedNode
+  let managedNodeSpec ← moduleConsts env `Orb.ManagedNodeSpec
+  let managedNodeMutants ← moduleConsts env `Orb.ManagedNodeMutants
+  let allMutants := mutants ++ statefulMutants ++ lifecycleMutants ++ harnessCloudMutants ++ managedNodeMutants
   let mut errors : Array String := #[]
   for req in requiredMetaSpecs do
     unless env.contains req do
       errors := errors.push s!"missing required Meta-Spec in Orb.Spec: {req}"
-  for n in kernel ++ spec ++ lifecycle ++ lifecycleSpec ++ harnessCloud ++ harnessCloudSpec ++ allMutants do
+  for n in kernel ++ spec ++ lifecycle ++ lifecycleSpec ++ harnessCloud ++ harnessCloudSpec ++ managedNode ++ managedNodeSpec ++ allMutants do
     let some ci := env.find? n | continue
     if ci matches .axiomInfo _ then
       errors := errors.push s!"{n}: declares an axiom"
@@ -125,7 +131,7 @@ private def runAdversarialSelfTest : CommandElabM Unit := do
       unless allowedAxioms.contains a do
         errors := errors.push s!"{n}: depends on {a}"
   let mut theorems : Nat := 0
-  for n in spec ++ lifecycleSpec ++ harnessCloudSpec ++ allMutants do
+  for n in spec ++ lifecycleSpec ++ harnessCloudSpec ++ managedNodeSpec ++ allMutants do
     let some (.thmInfo t) := env.find? n | continue
     theorems := theorems + 1
     if let some reason := checkTheoremVacuity t.type then
@@ -151,8 +157,8 @@ private def runAdversarialSelfTest : CommandElabM Unit := do
     if ci.type.isAppOf ``Orb.Spec.MetaStepSpec then
       metaStepSpecs := metaStepSpecs + 1
   if theorems == 0 || exports == 0 || metaStepSpecs < 15 || mutantKills < 36 ||
-      statefulMutants.isEmpty || lifecycleMutants.isEmpty || harnessCloudMutants.isEmpty then
+      statefulMutants.isEmpty || lifecycleMutants.isEmpty || harnessCloudMutants.isEmpty || managedNodeMutants.isEmpty then
     errors := errors.push s!"audit found {theorems} theorems / {exports} exports / {metaStepSpecs} MetaStepSpecs / {mutantKills} mutant kills; expected theorems > 0, exports > 0, metaStepSpecs >= 15, mutantKills >= 36"
   unless errors.isEmpty do
     throwError "Orb spec audit failed:\n{String.intercalate "\n" errors.toList}"
-  logInfo m!"Orb spec audit OK: {kernel.size + spec.size + lifecycle.size + lifecycleSpec.size + harnessCloud.size + harnessCloudSpec.size + allMutants.size} declarations, {theorems} theorems ({mutantKills} mutant kills), {exports} exports, {metaStepSpecs} MetaStepSpec instances, 10 Meta-Specs + adversarial self-test verified, axioms ⊆ {allowedAxioms}"
+  logInfo m!"Orb spec audit OK: {kernel.size + spec.size + lifecycle.size + lifecycleSpec.size + harnessCloud.size + harnessCloudSpec.size + managedNode.size + managedNodeSpec.size + allMutants.size} declarations, {theorems} theorems ({mutantKills} mutant kills), {exports} exports, {metaStepSpecs} MetaStepSpec instances, 10 Meta-Specs + adversarial self-test verified, axioms ⊆ {allowedAxioms}"

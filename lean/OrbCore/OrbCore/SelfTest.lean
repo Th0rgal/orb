@@ -311,6 +311,39 @@ private def runHarnessCloudCompositionTests : IO UInt32 := do
     return 1
   return 0
 
+private def runManagedNodeCompositionTests : IO UInt32 := do
+  let vmResSameBootRej := Orb.ManagedNode.verifyVmLifecycleAdmit 2 2 0 0 4 4 10 10 == 0
+  let vmResNextBootOk := Orb.ManagedNode.verifyVmLifecycleAdmit 2 2 0 0 4 5 10 10 == 1
+  let vmRepRunningOk := Orb.ManagedNode.verifyVmLifecycleAdmit 1 3 0 0 4 5 10 10 == 1
+  let vmRepStoppedOk := Orb.ManagedNode.verifyVmLifecycleAdmit 2 3 0 0 4 5 10 10 == 1
+  let vmDelMinLeaseRej := Orb.ManagedNode.verifyVmLifecycleAdmit 1 4 0 1 4 4 5 10 == 0
+  let vmDelExpiredOk := Orb.ManagedNode.verifyVmLifecycleAdmit 1 4 0 1 4 4 10 10 == 1
+  let vmStopIneligible := (Orb.ManagedNode.stepVmSlice
+    { phaseCode := 1, activeComputeEligible := 1, nodeBootEpoch := 4, deletableAt := 10 }
+    { opCode := 1, ownerLive := 0, idleElapsed := 0, presentedBootEpoch := 4, nowEpoch := 6 }).1.activeComputeEligible == 0
+  let claimStoppedRej := Orb.ManagedNode.verifyVmClaimAdmit 0 0 1 0 0 0 0 7 4 4 == 0
+  let claimRunningOk := Orb.ManagedNode.verifyVmClaimAdmit 0 0 1 0 1 1 0 7 4 4 == 1
+  let relStoppedOk := Orb.ManagedNode.verifyVmClaimAdmit 1 1 1 0 0 0 7 7 4 4 == 1
+  let jobCrossBootRej := Orb.ManagedNode.verifyRemoteJobAdmit 1 2 9 9 3 4 == 0
+  let jobUncertainSticky := Orb.ManagedNode.verifyRemoteJobAdmit 2 5 9 9 4 4 == 0
+  let procTicksRej := Orb.ManagedNode.verifyProcLivenessAdmit 1 2 0 0 42 42 1000 1001 == 0
+  let relayLeaseNoPop := (Orb.ManagedNode.stepRelaySlice
+    { phaseCode := 0, retired := 0, heldLeaseId := 0, leaseEpoch := 0, nodeBootEpoch := 4 }
+    { opCode := 0, presentedLeaseId := 9, presentedBootEpoch := 4, nowEpoch := 12 }).1.retired == 0
+  let relayAckRetires := (Orb.ManagedNode.stepRelaySlice
+    { phaseCode := 1, retired := 0, heldLeaseId := 9, leaseEpoch := 12, nodeBootEpoch := 4 }
+    { opCode := 1, presentedLeaseId := 9, presentedBootEpoch := 4, nowEpoch := 13 }).1.retired == 1
+  let relayUncertainRetryRej := Orb.ManagedNode.verifyRelayCommandAdmit 3 4 9 9 4 4 == 0
+  let relayUncertainReconcileOk := Orb.ManagedNode.verifyRelayCommandAdmit 3 3 9 9 4 4 == 1
+  if !(vmResSameBootRej && vmResNextBootOk && vmRepRunningOk && vmRepStoppedOk &&
+       vmDelMinLeaseRej && vmDelExpiredOk && vmStopIneligible &&
+       claimStoppedRej && claimRunningOk && relStoppedOk &&
+       jobCrossBootRej && jobUncertainSticky && procTicksRej &&
+       relayLeaseNoPop && relayAckRetires && relayUncertainRetryRej && relayUncertainReconcileOk) then
+    IO.eprintln "[orb-core-test] FAIL: Orb.ManagedNode R5-A gate invariants failed"
+    return 1
+  return 0
+
 private def runCustomProviderRateLimitTests
     (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
   -- Custom provider rate-limit CRUD, out-of-range rejection, `/resolve` projection & proactive proxy pacing spillover
@@ -1167,9 +1200,10 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runPostCrashAndReconcileExtras store tmpRoot) != 0 then return 1
   IO.FS.removeDirAll tmpRoot
 
-  -- 7. Host evidence suite (`84/84` host tests) + R3-A lifecycle & R4-A harness/cloud composition gates
+  -- 7. Host evidence suite (`84/84` host tests) + R3-A / R4-A / R5-A composition gates
   if (← runLifecycleCompositionTests) != 0 then return 1
   if (← runHarnessCloudCompositionTests) != 0 then return 1
+  if (← runManagedNodeCompositionTests) != 0 then return 1
   if (← do
     let base := OrbCore.RunCoordinator.fresh "m-r3b" 7
     let .ok supMarked := OrbCore.RunCoordinator.markSuperseded base 7
