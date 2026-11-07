@@ -22,4 +22,23 @@ def catalogPrettyJsonForRole (role : String) : Option String :=
   | "operator" => some operatorCatalogPrettyJson
   | _ => none
 
+def mutatingControlToolNames : Array String := #[
+  "accept_project_track", "accept_project_track_evidence", "accept_task", "acknowledge_mission",
+  "add_project_steer", "adopt_mission", "answer_mission_question", "answer_project_decision",
+  "ask_mission", "cancel_action", "cancel_mission", "cancel_project_task", "cancel_workspace_job",
+  "consult_model", "create_workspace", "create_worktree", "delete_managed_snapshot",
+  "delete_workspace", "delete_workspace_template", "deploy_sandboxed_sh", "destroy_managed_machine",
+  "extend_managed_machine", "fork_managed_machine", "invalidate_project_track_evidence",
+  "link_mission_to_project", "merge_branch", "plan_project_tasks", "plan_tasks",
+  "rebuild_workspace_from_template", "reconcile_action", "record_project_decision", "reject_task",
+  "remove_worktree", "reopen_project_track", "resume_managed_machine", "resume_mission",
+  "review_task", "save_workspace_template", "schedule_job_wakeup", "schedule_wakeup",
+  "send_message_to_mission", "set_project_grant", "set_project_track", "snapshot_managed_machine",
+  "spawn_managed_machine", "start_mission", "start_workspace_job", "stop_managed_machine",
+  "update_mission_settings", "update_project_status", "update_project_task", "update_workspace"
+]
+
+def isMutatingControlTool (name : String) : Bool :=
+  mutatingControlToolNames.contains name
+
 end OrbBin.McpCatalog

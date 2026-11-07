@@ -7,9 +7,11 @@ import OrbBin.PosixExt
 import OrbBin.Json
 import OrbBin.HttpClient
 import OrbBin.McpCatalog
+import OrbBin.McpRegistry
 import OrbBin.StdioMcpServer
 import OrbBin.FidoAgentProxyMain
 import OrbBin.PrivdShared
+import OrbBin.PrivdMain
 import OrbBin.MeshCli
 import OrbBin.PalomaCtlMain
 import OrbBin.SandboxedMcpMain
@@ -26,6 +28,7 @@ open OrbBin.HttpClient
 open OrbBin.StdioMcpServer
 open OrbBin.FidoAgentProxy
 open OrbBin.PrivdShared
+open OrbBin.Privd
 open OrbBin.MeshCli
 open OrbBin.PalomaCtl
 open OrbBin.SandboxedMcp
@@ -44,6 +47,624 @@ private def assertTrue (label : String) (cond : Bool) : IO Unit := do
   if !cond then
     throw <| IO.userError s!"FAIL [{label}]: expected true"
   IO.println s!"  [OK] {label}"
+
+def runR7bMcpAndPrivdTests (tmpDir : System.FilePath) : IO Unit := do
+  IO.println "--- R7-B / R7-C: SM-22 Control MCP Outcome, Stdio MCP Lifecycle & orb-privd TOCTOU ---"
+
+  -- 1. SM-22 Control MCP `receipt_settled` vs `action_outcome`
+  assertEq "verifyMcpActionOutcome reconciliation_required is settled (259) and never accepted"
+    (verifyMcpActionOutcome 4 1 4 0 0) 259
+  assertEq "verifyMcpActionOutcome transportDropped forces reconciliation_required (259)"
+    (verifyMcpActionOutcome 2 1 2 1 1) 259
+  assertEq "verifyMcpActionOutcome accepted:\"unknown\" forces reconciliation_required (259)"
+    (verifyMcpActionOutcome 2 3 2 0 1) 259
+  assertEq "verifyMcpActionOutcome pre-commit rejected permits fresh retry (16777474)"
+    (verifyMcpActionOutcome 3 2 3 0 0) 16777474
+  assertEq "verifyMcpActionOutcome accepted completed with result is 65793"
+    (verifyMcpActionOutcome 2 0 2 0 1) 65793
+
+  let recReceipt := JVal.obj #[
+    ("action_id", .str "11111111-1111-4111-8111-111111111111"),
+    ("state", .str "reconciliation_required"),
+    ("accepted", .str "unknown")
+  ]
+  let clsRec := classifyMcpActionReceipt recReceipt false
+  assertEq "classifyMcpActionReceipt reconciliation_required settled=true" clsRec.receiptSettled true
+  assertEq "classifyMcpActionReceipt reconciliation_required durableSuccess=false" clsRec.durableSuccess false
+  assertEq "classifyMcpActionReceipt reconciliation_required mayRetryFreshKey=false" clsRec.mayRetryFreshKey false
+  assertEq "classifyMcpActionReceipt reconciliation_required outcome" clsRec.outcome .uncertainReconciliationRequired
+
+  let dropReceipt := JVal.obj #[
+    ("error", .obj #[("code", .str "transport_unavailable"), ("accepted", .str "unknown")])
+  ]
+  let clsDrop := classifyMcpActionReceipt dropReceipt true
+  assertEq "classifyMcpActionReceipt dropped mutation outcome" clsDrop.outcome .uncertainReconciliationRequired
+  assertEq "classifyMcpActionReceipt dropped mutation mayRetryFreshKey=false" clsDrop.mayRetryFreshKey false
+
+  let okReceipt := JVal.obj #[
+    ("action_id", .str "22222222-2222-4222-8222-222222222222"),
+    ("state", .str "completed"),
+    ("result", .obj #[("mission_id", .str "33333333-3333-4333-8333-333333333333")])
+  ]
+  let clsOk := classifyMcpActionReceipt okReceipt false
+  assertEq "classifyMcpActionReceipt Core completed receipt outcome" clsOk.outcome .accepted
+  assertEq "classifyMcpActionReceipt Core completed receipt durableSuccess=true" clsOk.durableSuccess true
+
+  let batchPayload := JVal.obj #[("receipts", .arr #[okReceipt, recReceipt])]
+  let normBatch := normalizeWaitActionsResult batchPayload false
+  assertEq "normalizeWaitActionsResult batch receipt_settled=true"
+    (normBatch.fieldBool? "receipt_settled") (some true)
+  assertEq "normalizeWaitActionsResult batch all_succeeded=false when any needs reconciliation"
+    (normBatch.fieldBool? "all_succeeded") (some false)
+  assertEq "normalizeWaitActionsResult batch reconciliation_required=true"
+    (normBatch.fieldBool? "reconciliation_required") (some true)
+  assertEq "normalizeWaitActionsResult batch action_outcome"
+    (normBatch.fieldStr? "action_outcome") (some "reconciliation_required")
+
+  -- 1b. Boolean / non-string `accepted` tags never count as durable acceptance
+  let boolFalseReceipt := JVal.obj #[
+    ("accepted", .bool false),
+    ("result", .obj #[])
+  ]
+  let clsBoolFalse := classifyMcpActionReceipt boolFalseReceipt false
+  assertEq "parseAcceptedTag bool false is rejected tag 2" (parseAcceptedTag boolFalseReceipt) 2
+  assertEq "classifyMcpActionReceipt accepted:false + result is rejected" clsBoolFalse.outcome .rejected
+  assertEq "classifyMcpActionReceipt accepted:false durableSuccess=false" clsBoolFalse.durableSuccess false
+  let boolTrueReceipt := JVal.obj #[
+    ("accepted", .bool true),
+    ("result", .obj #[("ok", .bool true)])
+  ]
+  let clsBoolTrue := classifyMcpActionReceipt boolTrueReceipt false
+  assertEq "parseAcceptedTag bool true is accepted tag 1" (parseAcceptedTag boolTrueReceipt) 1
+  assertEq "classifyMcpActionReceipt accepted:true + result is accepted" clsBoolTrue.outcome .accepted
+  let numAcceptedReceipt := JVal.obj #[("accepted", .nat 1), ("result", .obj #[])]
+  assertEq "parseAcceptedTag numeric accepted is non-canonical tag 4" (parseAcceptedTag numAcceptedReceipt) 4
+  assertEq "classifyMcpActionReceipt numeric accepted is rejected"
+    (classifyMcpActionReceipt numAcceptedReceipt false).outcome .rejected
+  let errBoolReceipt := JVal.obj #[("error", .obj #[("accepted", .bool false), ("message", .str "no")])]
+  assertEq "parseAcceptedTag error.accepted bool false is tag 2" (parseAcceptedTag errBoolReceipt) 2
+  assertEq "classifyMcpActionReceipt error.accepted=false is rejected"
+    (classifyMcpActionReceipt errBoolReceipt false).outcome .rejected
+  let core400 := JVal.obj #[
+    ("ok", .bool false),
+    ("error", .obj #[
+      ("code", .str "invalid_json"),
+      ("message", .str "Malformed JSON body"),
+      ("accepted", .str "no"),
+      ("retryable", .bool false)
+    ])
+  ]
+  let cls400 := classifyMcpActionReceipt (JVal.obj #[("error", core400.fieldOrNull "error")]) false
+  assertEq "Core HTTP 400 JSON stays rejected pre-commit" cls400.outcome .rejected
+  assertEq "Core HTTP 400 JSON mayRetryFreshKey=true" cls400.mayRetryFreshKey true
+  let preflightErr := JVal.obj #[("error", .obj #[("code", .str "preflight_failed"), ("accepted", .str "no")])]
+  let clsPre := classifyMcpActionReceipt preflightErr false
+  assertEq "pre-send token failure accepted:no is rejected" clsPre.outcome .rejected
+  assertTrue "pre-send token failure is not reconciliation_required"
+    (clsPre.outcome != .uncertainReconciliationRequired)
+  let midFlight := JVal.obj #[("error", .obj #[("code", .str "transport_unavailable"), ("accepted", .str "unknown")])]
+  let clsMid := classifyMcpActionReceipt midFlight true
+  assertEq "mid-flight socket drop is reconciliation_required" clsMid.outcome .uncertainReconciliationRequired
+  assertEq "mid-flight socket drop may_retry_fresh_key=false" clsMid.mayRetryFreshKey false
+
+  -- 1c. Live `McpClient.handleRpc` end-to-end tests: HTTP 400 vs pre-send failure vs mid-flight socket drop
+  let (coreListenFd, corePort) ← match (← LeanSys.Posix.tcpListen "127.0.0.1" 0 16) with
+    | .ok pair => pure pair
+    | .error e => throw <| IO.userError s!"tcpListen mock core failed: {e}"
+  let coreBaseUrl := s!"http://127.0.0.1:{corePort}"
+  let validTok := "mcp1.01234567-89ab-4def-8123-456789abcdef.secret"
+  let futureExp : Int := Int.ofNat ((← nowEpoch).toNat + 3600)
+  let mkLiveClient (tok : String) (tokenFile? : Option System.FilePath) (primeCache : Bool) : IO McpClient := do
+    match (← McpClient.create coreBaseUrl tok tokenFile? "executor" none none none none (some (tmpDir / "mcp-secrets").toString) none) with
+    | .error e => throw <| IO.userError s!"McpClient.create failed: {e}"
+    | .ok c =>
+      if primeCache then
+        c.sessionLock.atomically (set (some (tok, futureExp)))
+      pure c
+
+  -- (a) Core HTTP 400 JSON error on mutating `tools/call` -> accepted:"no", action_outcome=="rejected"
+  let srv400Task ← IO.asTask do
+    match (← LeanSys.Posix.tcpAcceptPoll coreListenFd 5000) with
+    | .error _ => pure false
+    | .ok cfd =>
+      let _ ← LeanSys.Posix.readStreamChunk cfd 8192
+      let body400 := "{\"ok\":false,\"error\":{\"code\":\"invalid_json\",\"message\":\"Bad args\",\"accepted\":\"no\",\"retryable\":false}}"
+      let resp400 := s!"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {body400.utf8ByteSize}\r\nConnection: close\r\n\r\n{body400}"
+      let _ ← LeanSys.Posix.writeAll cfd resp400.toUTF8
+      let _ ← LeanSys.Posix.closeFd cfd
+      pure true
+  let liveClient ← mkLiveClient validTok none true
+  let cancelRef1 ← IO.mkRef false
+  let rpc400 ← liveClient.handleRpc (.obj #[
+    ("jsonrpc", .str "2.0"),
+    ("id", .nat 10),
+    ("method", .str "tools/call"),
+    ("params", .obj #[
+      ("name", .str "start_mission"),
+      ("arguments", .obj #[("title", .str "t"), ("prompt", .str "p"), ("idempotency_key", .str "k-400")])
+    ])
+  ]) cancelRef1
+  let _ ← IO.ofExcept srv400Task.get
+  let res400 := rpc400.fieldOrNull "result"
+  let sc400 := res400.fieldOrNull "structuredContent"
+  assertEq "Live mutating HTTP 400 sets isError=true" (res400.fieldBool? "isError") (some true)
+  assertEq "Live mutating HTTP 400 error.accepted == no" ((sc400.fieldOrNull "error").fieldStr? "accepted") (some "no")
+  assertEq "Live mutating HTTP 400 action_outcome == rejected" (sc400.fieldStr? "action_outcome") (some "rejected")
+  assertEq "Live mutating HTTP 400 may_retry_fresh_key == true" (sc400.fieldBool? "may_retry_fresh_key") (some true)
+
+  -- (b) Pre-send token/preflight failure on mutating `tools/call` -> accepted:"no" (NOT reconciliation_required),
+  --     and read-only tool failure never synthesizes mutation lockout fields
+  let missingClient ← mkLiveClient "" (some (tmpDir / "does-not-exist.tok")) false
+  let cancelRef2 ← IO.mkRef false
+  let rpcPreMut ← missingClient.handleRpc (.obj #[
+    ("jsonrpc", .str "2.0"),
+    ("id", .nat 11),
+    ("method", .str "tools/call"),
+    ("params", .obj #[
+      ("name", .str "start_mission"),
+      ("arguments", .obj #[("title", .str "t"), ("prompt", .str "p"), ("idempotency_key", .str "k-pre")])
+    ])
+  ]) cancelRef2
+  let scPreMut := (rpcPreMut.fieldOrNull "result").fieldOrNull "structuredContent"
+  assertEq "Live mutating pre-send failure error.accepted == no"
+    ((scPreMut.fieldOrNull "error").fieldStr? "accepted") (some "no")
+  assertEq "Live mutating pre-send failure action_outcome == rejected"
+    (scPreMut.fieldStr? "action_outcome") (some "rejected")
+  assertTrue "Live mutating pre-send failure is never reconciliation_required"
+    ((scPreMut.fieldStr? "action_outcome") != some "reconciliation_required")
+
+  let rpcPreRo ← missingClient.handleRpc (.obj #[
+    ("jsonrpc", .str "2.0"),
+    ("id", .nat 12),
+    ("method", .str "tools/call"),
+    ("params", .obj #[
+      ("name", .str "get_mission"),
+      ("arguments", .obj #[("mission_id", .str "01234567-89ab-4def-8123-456789abcdef")])
+    ])
+  ]) cancelRef2
+  let scPreRo := (rpcPreRo.fieldOrNull "result").fieldOrNull "structuredContent"
+  assertTrue "Read-only preflight failure omits mutation action_outcome"
+    (scPreRo.fieldStr? "action_outcome").isNone
+  assertTrue "Read-only preflight failure omits accepted lockout tag"
+    ((scPreRo.fieldOrNull "error").field? "accepted").isNone
+
+  -- (c) Mid-flight socket drop after request write on mutating `tools/call` -> reconciliation_required
+  let srvDropTask ← IO.asTask do
+    match (← LeanSys.Posix.tcpAcceptPoll coreListenFd 5000) with
+    | .error _ => pure false
+    | .ok cfd =>
+      let _ ← LeanSys.Posix.readStreamChunk cfd 8192
+      let _ ← LeanSys.Posix.closeFd cfd
+      pure true
+  let rpcDrop ← liveClient.handleRpc (.obj #[
+    ("jsonrpc", .str "2.0"),
+    ("id", .nat 13),
+    ("method", .str "tools/call"),
+    ("params", .obj #[
+      ("name", .str "start_mission"),
+      ("arguments", .obj #[("title", .str "t"), ("prompt", .str "p"), ("idempotency_key", .str "k-drop")])
+    ])
+  ]) cancelRef1
+  let _ ← IO.ofExcept srvDropTask.get
+  let scDrop := (rpcDrop.fieldOrNull "result").fieldOrNull "structuredContent"
+  assertEq "Live mutating mid-flight socket drop action_outcome == reconciliation_required"
+    (scDrop.fieldStr? "action_outcome") (some "reconciliation_required")
+  assertEq "Live mutating mid-flight socket drop error.accepted == unknown"
+    ((scDrop.fieldOrNull "error").fieldStr? "accepted") (some "unknown")
+  assertEq "Live mutating mid-flight socket drop may_retry_fresh_key == false"
+    (scDrop.fieldBool? "may_retry_fresh_key") (some false)
+
+  let _ ← LeanSys.Posix.closeFd coreListenFd
+
+  -- 2. Generation-fenced external stdio MCP lifecycle + `/proc/<pid>/stat` start-ticks reaping
+  assertEq "verifyMcpStdioLifecycleStep stale generation event ignored without reap"
+    (verifyMcpStdioLifecycleStep 2 5 4 0 1) (65536 + 2)
+  assertEq "verifyMcpStdioLifecycleStep current child exit transitions Connected->Disconnected + mustReap"
+    (verifyMcpStdioLifecycleStep 2 5 5 1 1) 256
+  assertEq "verifyMcpStdioLifecycleStep Connecting handshake failure transitions Connecting->Errored + mustReap"
+    (verifyMcpStdioLifecycleStep 1 5 5 0 0) (256 + 3)
+  let parsedStat := OrbBin.McpRegistry.parseProcStatContent
+    "4242 (mcp server (v2)) S 1 4242 4242 0 -1 4194304 10 0 0 0 1 2 0 0 20 0 1 0 987654321 1234 56\n"
+  assertEq "parseProcStatContent handles spaces & parens in comm (actualStartTicks)"
+    parsedStat.actualStartTicks 987654321
+  assertEq "parseProcStatContent handles spaces & parens in comm (procReadError=0)"
+    parsedStat.procReadError 0
+  let obsLive2000 : OrbBin.McpRegistry.ProcStatObservation :=
+    { procMissing := 0, procReadError := 0, isZombieOrDeadState := 0, fieldsAfterComm := 22, actualStartTicks := 2000 }
+  let obsLive1000 : OrbBin.McpRegistry.ProcStatObservation :=
+    { procMissing := 0, procReadError := 0, isZombieOrDeadState := 0, fieldsAfterComm := 22, actualStartTicks := 1000 }
+  assertEq "classifyChildLiveness refuses PID-reused foreign startTicks"
+    (OrbBin.McpRegistry.classifyChildLiveness 4242 1000 obsLive2000) 0
+  assertEq "classifyChildLiveness confirms matching live startTicks"
+    (OrbBin.McpRegistry.classifyChildLiveness 4242 1000 obsLive1000) 1
+
+  let mcpGoodScript := tmpDir / "mock-mcp-good.sh"
+  IO.FS.writeFile mcpGoodScript
+    "#!/bin/sh\nread init_line\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\"}}'\nread list_line\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"demo_tool\"}]}}'\nsleep 5\n"
+  let mcpBadScript := tmpDir / "mock-mcp-bad.sh"
+  IO.FS.writeFile mcpBadScript
+    "#!/bin/sh\nread init_line\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\"}}'\nread list_line\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32000,\"message\":\"boom\"}}'\n"
+
+  let reg ← OrbBin.McpRegistry.McpStdioRegistry.new
+  let st1 ← OrbBin.McpRegistry.connect reg "ext" "/bin/sh" #[mcpGoodScript.toString]
+  assertEq "McpStdioRegistry connect 1 reaches connected" st1 OrbBin.McpRegistry.McpConnState.connected
+  let (gen1, pid1?, ticks1) ← match (← OrbBin.McpRegistry.getEntry? reg "ext") with
+    | some ent =>
+      assertEq "McpStdioRegistry gen1 == 1" ent.generation 1
+      assertEq "McpStdioRegistry entry connected" ent.state OrbBin.McpRegistry.McpConnState.connected
+      pure (ent.generation, ent.child?.map (·.pid), (ent.child?.map (·.startTicks)).getD 0)
+    | none => throw <| IO.userError "missing ext entry"
+  -- Reconnect increments generation and reaps gen1's process group
+  let st2 ← OrbBin.McpRegistry.connect reg "ext" "/bin/sh" #[mcpGoodScript.toString]
+  assertEq "McpStdioRegistry connect 2 reaches connected" st2 OrbBin.McpRegistry.McpConnState.connected
+  let gen2 ← match (← OrbBin.McpRegistry.getEntry? reg "ext") with
+    | some ent =>
+      assertEq "McpStdioRegistry gen2 == 2" ent.generation 2
+      pure ent.generation
+    | none => throw <| IO.userError "missing ext entry after reconnect"
+  -- Late child-exit callback from stale gen1 must be fenced (ignored)
+  OrbBin.McpRegistry.noteChildExit reg "ext" gen1
+  match (← OrbBin.McpRegistry.getEntry? reg "ext") with
+  | some ent => assertEq "Stale generation exit leaves gen2 connected" ent.state OrbBin.McpRegistry.McpConnState.connected
+  | none => throw <| IO.userError "missing ext entry after stale exit"
+  if let some p1 := pid1? then
+    let obs1 ← OrbBin.McpRegistry.observeProcStat p1
+    let live1 := OrbBin.McpRegistry.classifyChildLiveness p1 ticks1 obs1
+    assertEq "Replaced gen1 child was reaped" live1 0
+  -- Current-generation exit transitions Connected -> Disconnected & reaps child
+  OrbBin.McpRegistry.noteChildExit reg "ext" gen2
+  match (← OrbBin.McpRegistry.getEntry? reg "ext") with
+  | some ent =>
+    assertEq "Current generation exit transitions to disconnected" ent.state OrbBin.McpRegistry.McpConnState.disconnected
+    assertTrue "Current generation exit clears child reference" ent.child?.isNone
+  | none => throw <| IO.userError "missing ext entry after active exit"
+
+  let stBad ← OrbBin.McpRegistry.connect reg "bad" "/bin/sh" #[mcpBadScript.toString]
+  assertEq "Handshake tools/list error moves entry to errored" stBad OrbBin.McpRegistry.McpConnState.errored
+  match (← OrbBin.McpRegistry.getEntry? reg "bad") with
+  | some ent =>
+    assertEq "Failed handshake leaves entry in errored state" ent.state OrbBin.McpRegistry.McpConnState.errored
+    assertTrue "Failed handshake reaps child reference" ent.child?.isNone
+  | none => throw <| IO.userError "missing bad entry"
+
+  -- (e) Wedged stdio MCP child (partial bytes without `\n`, sleeps) times out promptly and is reaped (`killSig pid 0 != 0`)
+  let wedgePidFile := tmpDir / "wedge-mcp.pid"
+  let mcpWedgeScript := tmpDir / "mock-mcp-wedge.sh"
+  IO.FS.writeFile mcpWedgeScript (
+    "#!/bin/sh\necho $$ > '" ++ wedgePidFile.toString ++ "'\n" ++
+    "read init_line\nprintf '%s' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":'\nsleep 30\n"
+  )
+  let tWedge0 ← IO.monoMsNow
+  let stWedge ← OrbBin.McpRegistry.connect reg "wedged" "/bin/sh" #[mcpWedgeScript.toString] 180
+  let tWedge1 ← IO.monoMsNow
+  assertTrue "Wedged stdio MCP connect times out promptly (< 2500ms)" (tWedge1 - tWedge0 < 2500)
+  assertTrue "Wedged stdio MCP connect is non-connected" (stWedge != OrbBin.McpRegistry.McpConnState.connected)
+  match (← OrbBin.McpRegistry.getEntry? reg "wedged") with
+  | some ent =>
+    assertTrue "Wedged stdio MCP entry clears child reference" ent.child?.isNone
+  | none => throw <| IO.userError "missing wedged entry"
+  let wedgePidStr := (← IO.FS.readFile wedgePidFile).trimAscii.toString
+  let some wedgePidNat := wedgePidStr.toNat?
+    | throw <| IO.userError s!"invalid wedge pid: {wedgePidStr}"
+  let wedgeAliveRc ← killSig (Int64.ofNat wedgePidNat) 0
+  assertTrue "Wedged stdio MCP child process was deterministically reaped" (wedgeAliveRc != 0)
+
+  -- (f) Concurrent `McpRegistry.connect` calls on same server name serialize cleanly without orphan processes
+  let concLogFile := tmpDir / "conc-mcp.pids"
+  IO.FS.writeFile concLogFile ""
+  let mcpConcScript := tmpDir / "mock-mcp-conc.sh"
+  IO.FS.writeFile mcpConcScript (
+    "#!/bin/sh\necho $$ >> '" ++ concLogFile.toString ++ "'\n" ++
+    "read init_line\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\"}}'\n" ++
+    "read list_line\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"echo_val\",\"description\":\"echo\"}]}}'\n" ++
+    "while read req_line; do\n  printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"echoed\":\"ok-from-stdio\"}}'\ndone\n"
+  )
+  let concT1 ← IO.asTask (OrbBin.McpRegistry.connect reg "conc" "/bin/sh" #[mcpConcScript.toString] 2000)
+  let concT2 ← IO.asTask (OrbBin.McpRegistry.connect reg "conc" "/bin/sh" #[mcpConcScript.toString] 2000)
+  let concR1 ← IO.ofExcept concT1.get
+  let concR2 ← IO.ofExcept concT2.get
+  assertEq "Concurrent connect 1 reaches connected" concR1 OrbBin.McpRegistry.McpConnState.connected
+  assertEq "Concurrent connect 2 reaches connected" concR2 OrbBin.McpRegistry.McpConnState.connected
+  let activeConcPid ← match (← OrbBin.McpRegistry.getEntry? reg "conc") with
+    | some ent =>
+      assertEq "Concurrent connect reaches generation 2" ent.generation 2
+      assertEq "Concurrent connect final state connected" ent.state OrbBin.McpRegistry.McpConnState.connected
+      match ent.child? with
+      | some ch => pure ch.rawPid
+      | none => throw <| IO.userError "missing active child after concurrent connect"
+    | none => throw <| IO.userError "missing conc entry"
+  let spawnedLines := ((← IO.FS.readFile concLogFile).splitOn "\n").filterMap (fun l => l.trimAscii.toString.toNat?)
+  assertEq "Concurrent connects spawned 2 sequential generations" spawnedLines.length 2
+  for spPid in spawnedLines do
+    let p64 := Int64.ofNat spPid
+    if p64 != activeConcPid then
+      let rc ← killSig p64 0
+      assertTrue "Superseded concurrent child process was reaped" (rc != 0)
+  OrbBin.McpRegistry.shutdownAll reg
+  let postShutRc ← killSig activeConcPid 0
+  assertTrue "shutdownAll reaped active concurrent child" (postShutRc != 0)
+
+  -- Live `McpClient.handleRpc` stdio MCP integration (`tools/list` + namespaced `tools/call` + `shutdown`)
+  let missionUuid := "11111111-2222-4333-8444-555555555555"
+  let cacheFile := tmpDir / "mcp-preflight-cache.json"
+  let capsPayload := JVal.obj #[
+    ("contract_version", .str contractVersion),
+    ("identity", .obj #[("mission_id", .str missionUuid), ("role", .str "executor"), ("session_id", .str missionUuid)]),
+    ("tools", .arr #[.obj #[("name", .str "get_mission"), ("description", .str "core tool")]])
+  ]
+  let wrCache ← writePreflightCache cacheFile missionUuid "executor" validTok futureExp capsPayload
+  assertTrue "writePreflightCache succeeds" wrCache.isOk
+  let extClient ← match (← McpClient.create "http://127.0.0.1:1" validTok none "executor" (some missionUuid) none none none (some (tmpDir / "ext-sec").toString) (some cacheFile)) with
+    | .ok c => pure c
+    | .error e => throw <| IO.userError s!"extClient create: {e}"
+  let stExtLive ← OrbBin.McpRegistry.connect extClient.stdioRegistry "helper" "/bin/sh" #[mcpConcScript.toString] 2000
+  assertEq "extClient.stdioRegistry connect connected" stExtLive OrbBin.McpRegistry.McpConnState.connected
+  let extPid ← match (← OrbBin.McpRegistry.getEntry? extClient.stdioRegistry "helper") with
+    | some ent =>
+      match ent.child? with
+      | some ch => pure ch.rawPid
+      | none => throw <| IO.userError "missing helper child"
+    | none => throw <| IO.userError "missing helper entry"
+  let cancelExt ← IO.mkRef false
+  let listRpc ← extClient.handleRpc (.obj #[("jsonrpc", .str "2.0"), ("id", .nat 20), ("method", .str "tools/list")]) cancelExt
+  let listedTools := ((listRpc.fieldOrNull "result").fieldArr? "tools").getD #[]
+  assertTrue "McpClient tools/list includes namespaced helper.echo_val"
+    (listedTools.any (fun t => t.fieldStr? "name" == some "helper.echo_val"))
+  let callExtRpc ← extClient.handleRpc (.obj #[
+    ("jsonrpc", .str "2.0"),
+    ("id", .nat 21),
+    ("method", .str "tools/call"),
+    ("params", .obj #[("name", .str "helper.echo_val"), ("arguments", .obj #[("x", .nat 1)])])
+  ]) cancelExt
+  let callExtRes := callExtRpc.fieldOrNull "result"
+  assertEq "Namespaced stdio tools/call isError=false" (callExtRes.fieldBool? "isError") (some false)
+  assertEq "Namespaced stdio tools/call returns structuredContent"
+    ((callExtRes.fieldOrNull "structuredContent").fieldStr? "echoed") (some "ok-from-stdio")
+  extClient.shutdown
+  let extAfterShut ← killSig extPid 0
+  assertTrue "extClient.shutdown reaps stdio child" (extAfterShut != 0)
+
+  -- 3. `orb-privd` TOCTOU (`verifyPrivdToctouStep`) & reply enforcement tests
+  let tSelf := targetIdWord (normalizeTargetLabel "self" "node-alpha")
+  let tHost := targetIdWord (normalizeTargetLabel "node-alpha" "node-alpha")
+  let tOther := targetIdWord (normalizeTargetLabel "node-beta" "node-alpha")
+  assertEq "normalizeTargetLabel maps self to hostLabel" tSelf tHost
+  let d1 := commandDigestU64 #["/bin/ls", "-la"] "/root"
+  let d2 := commandDigestU64 #["/bin/rm", "-rf", "/tmp/x"] "/root"
+  let l1 := leaseEpochWord "orb-jit-tok-1" "grant-1"
+  assertEq "verifyPrivdToctouStep admits matching lease/target/digest"
+    (verifyPrivdToctouStep 3 0 tSelf tHost l1 l1 100 200 d1 d1 1 1) 257
+  assertEq "verifyPrivdToctouStep blocks bunker mode (513)"
+    (verifyPrivdToctouStep 3 1 tSelf tHost l1 l1 100 200 d1 d1 1 1) 513
+  assertEq "verifyPrivdToctouStep blocks expired lease (515)"
+    (verifyPrivdToctouStep 3 0 tSelf tHost l1 l1 200 200 d1 d1 1 1) 515
+  assertEq "verifyPrivdToctouStep blocks swapped lease epoch (516)"
+    (verifyPrivdToctouStep 3 0 tSelf tHost l1 (l1 + 1) 100 200 d1 d1 1 1) 516
+  assertEq "verifyPrivdToctouStep blocks target drift (517)"
+    (verifyPrivdToctouStep 3 0 tSelf tOther l1 l1 100 200 d1 d1 1 1) 517
+  assertEq "verifyPrivdToctouStep blocks command digest swap (518)"
+    (verifyPrivdToctouStep 3 0 tSelf tHost l1 l1 100 200 d1 d2 1 1) 518
+  assertEq "verifyPrivdToctouStep blocks missing grant or allow_exec=false (519)"
+    (verifyPrivdToctouStep 3 0 tSelf tHost l1 l1 100 200 d1 d1 0 1) 519
+
+  -- End-to-end `handleUpdateHarness` & `handleExec` rejection when non-root / Core unreachable
+  let auditPath := (tmpDir / "privd-audit.jsonl").toString
+  let privCfg : PrivdConfig := {
+    socketPath := (tmpDir / "privd.sock").toString
+    groupName := "sandboxed-node"
+    apiUrl := "http://127.0.0.1:1"
+    apiToken := some "test-token"
+    auditLog := auditPath
+    hostLabel := "node-alpha"
+  }
+  let nonRootPeer : PeerCred := { uid := some 1000, gid := some 1000, pid := some 4242 }
+  let repPath1 := tmpDir / "privd-reply-1.json"
+  IO.FS.writeFile repPath1 ""
+  let repFd1 ← match (← LeanSys.Posix.openFd repPath1.toString 4 0 0) with
+    | .ok fd => pure fd
+    | .error e => throw <| IO.userError s!"open repPath1: {e}"
+  handleUpdateHarness repFd1 privCfg nonRootPeer (.obj #[("name", .str "codex"), ("version", .str "1.2.3")])
+  let _ ← LeanSys.Posix.closeFd repFd1
+  match Json.parse (← IO.FS.readFile repPath1) with
+  | .ok rj =>
+    assertEq "Non-root update_harness without lease rejected (ok=false)" (rj.fieldBool? "ok") (some false)
+    assertEq "Non-root update_harness without lease returns exit_code 126" (rj.fieldInt? "exit_code") (some 126)
+  | .error e => throw <| IO.userError s!"parse privd reply 1: {e}"
+
+  let repPath2 := tmpDir / "privd-reply-2.json"
+  IO.FS.writeFile repPath2 ""
+  let repFd2 ← match (← LeanSys.Posix.openFd repPath2.toString 4 0 0) with
+    | .ok fd => pure fd
+    | .error e => throw <| IO.userError s!"open repPath2: {e}"
+  handleExec repFd2 privCfg nonRootPeer (.obj #[
+    ("mission_id", .str "m-1"),
+    ("lease_token", .str "orb-jit-dead"),
+    ("target_host", .str "self"),
+    ("argv", .arr #[.str "/bin/true"])
+  ])
+  let _ ← LeanSys.Posix.closeFd repFd2
+  match Json.parse (← IO.FS.readFile repPath2) with
+  | .ok rj2 =>
+    assertEq "Unverified Core lease handleExec rejected (ok=false)" (rj2.fieldBool? "ok") (some false)
+    assertEq "Unverified Core lease handleExec returns exit_code 126" (rj2.fieldInt? "exit_code") (some 126)
+  | .error e => throw <| IO.userError s!"parse privd exec reply: {e}"
+
+  -- (g) & (h) Live `Privd.handleExec` TOCTOU binary/cwd swap & deadline/bunker rejection tests
+  assertEq "verifyExecWindowAndToctou rejects stalled execution past 30s window (515)"
+    (verifyExecWindowAndToctou 3 0 tSelf tHost l1 l1 1000 1030 none d1 d1 1 1) 515
+  assertEq "verifyExecWindowAndToctou rejects expired Core lease before 30s window (515)"
+    (verifyExecWindowAndToctou 3 0 tSelf tHost l1 l1 1000 1010 (some 1005) d1 d1 1 1) 515
+  assertEq "verifyExecWindowAndToctou admits execution within window and Core expiry (257)"
+    (verifyExecWindowAndToctou 3 0 tSelf tHost l1 l1 1000 1010 (some 1050) d1 d1 1 1) 257
+
+  let privTrustedDir := tmpDir / "privd-trusted-bin"
+  let privWorkDirA := tmpDir / "privd-cwd-a"
+  let privWorkDirB := tmpDir / "privd-cwd-b"
+  let markerSwap := tmpDir / "swap-executed.marker"
+  IO.FS.createDirAll privTrustedDir
+  IO.FS.createDirAll privWorkDirA
+  IO.FS.createDirAll privWorkDirB
+  let _ ← chmod privTrustedDir.toString 0o755
+  let _ ← chmod privWorkDirA.toString 0o755
+  let _ ← chmod privWorkDirB.toString 0o755
+  let safeBin := privTrustedDir / "safe-cmd"
+  let evilBin := privTrustedDir / "evil-cmd"
+  let runLink := privTrustedDir / "run-cmd"
+  IO.FS.writeFile safeBin "#!/bin/sh\nprintf 'SAFE_OK'\n"
+  IO.FS.writeFile evilBin s!"#!/bin/sh\necho PWN > '{markerSwap}'\n"
+  let _ ← chmod safeBin.toString 0o755
+  let _ ← chmod evilBin.toString 0o755
+  let lnSafe ← IO.Process.output { cmd := "ln", args := #["-sfn", safeBin.toString, runLink.toString] }
+  assertEq "ln -sfn safe-cmd -> run-cmd" lnSafe.exitCode 0
+
+  let (privHttpFd, privHttpPort) ← match (← LeanSys.Posix.tcpListen "127.0.0.1" 0 16) with
+    | .ok pair => pure pair
+    | .error e => throw <| IO.userError s!"tcpListen mock privd core failed: {e}"
+  let livePrivCfg : PrivdConfig := {
+    socketPath  := (tmpDir / "privd-live.sock").toString
+    groupName   := "sandboxed-node"
+    apiUrl      := s!"http://127.0.0.1:{privHttpPort}"
+    apiToken    := some "privd-core-tok"
+    auditLog    := auditPath
+    hostLabel   := "node-alpha"
+    trustedDirs := #[privTrustedDir.toString]
+  }
+  let serveOneCoreVerify (respBody : String) : IO (Task (Except IO.Error Bool)) := do
+    IO.asTask do
+      match (← LeanSys.Posix.tcpAcceptPoll privHttpFd 5000) with
+      | .error _ => pure false
+      | .ok cfd =>
+        let _ ← LeanSys.Posix.readStreamChunk cfd 8192
+        let wire := s!"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {respBody.utf8ByteSize}\r\nConnection: close\r\n\r\n{respBody}"
+        let _ ← LeanSys.Posix.writeAll cfd wire.toUTF8
+        let _ ← LeanSys.Posix.closeFd cfd
+        pure true
+
+  let nowSecPriv ← nowEpoch
+  let validGrantJson := renderCompact <| JVal.obj #[
+    ("allowed", .bool true),
+    ("allow_exec", .bool true),
+    ("scope", .str "root_exec"),
+    ("grant_id", .str "grant-live-1"),
+    ("bunker_state", .nat 0),
+    ("expires_at", .uint64 (nowSecPriv + 120))
+  ]
+
+  -- (g1) Binary symlink/inode swap between Core HTTP verify and exec is rejected (exit_code=126) without executing evilBin
+  let tVerifySwap ← serveOneCoreVerify validGrantJson
+  let repSwapPath := tmpDir / "privd-reply-swap.json"
+  IO.FS.writeFile repSwapPath ""
+  let repSwapFd ← match (← LeanSys.Posix.openFd repSwapPath.toString 4 0 0) with
+    | .ok fd => pure fd
+    | .error e => throw <| IO.userError s!"open repSwapPath: {e}"
+  let swapHook : IO Unit := do
+    let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", evilBin.toString, runLink.toString] }
+  handleExec repSwapFd livePrivCfg nonRootPeer (.obj #[
+    ("mission_id", .str "m-swap"),
+    ("lease_token", .str "orb-jit-live-1"),
+    ("target_host", .str "self"),
+    ("cwd", .str privWorkDirA.toString),
+    ("argv", .arr #[.str runLink.toString])
+  ]) (some swapHook)
+  let _ ← LeanSys.Posix.closeFd repSwapFd
+  let _ ← IO.ofExcept tVerifySwap.get
+  match Json.parse (← IO.FS.readFile repSwapPath) with
+  | .ok rSwap =>
+    assertEq "Binary swap between verify and exec rejected (ok=false)" (rSwap.fieldBool? "ok") (some false)
+    assertEq "Binary swap between verify and exec exit_code == 126" (rSwap.fieldInt? "exit_code") (some 126)
+  | .error e => throw <| IO.userError s!"parse repSwapPath: {e}"
+  let markerSt ← statPath markerSwap.toString
+  assertTrue "Swapped evil binary was never executed" (!markerSt.exists_)
+
+  -- Restore runLink -> safeBin, then test (g2) cwd swap to symlink between verify and exec
+  let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", safeBin.toString, runLink.toString] }
+  let tVerifyCwd ← serveOneCoreVerify validGrantJson
+  let repCwdPath := tmpDir / "privd-reply-cwd.json"
+  IO.FS.writeFile repCwdPath ""
+  let repCwdFd ← match (← LeanSys.Posix.openFd repCwdPath.toString 4 0 0) with
+    | .ok fd => pure fd
+    | .error e => throw <| IO.userError s!"open repCwdPath: {e}"
+  let cwdSwapHook : IO Unit := do
+    try IO.FS.removeDirAll privWorkDirA catch _ => pure ()
+    let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", privWorkDirB.toString, privWorkDirA.toString] }
+  handleExec repCwdFd livePrivCfg nonRootPeer (.obj #[
+    ("mission_id", .str "m-cwd"),
+    ("lease_token", .str "orb-jit-live-2"),
+    ("target_host", .str "self"),
+    ("cwd", .str privWorkDirA.toString),
+    ("argv", .arr #[.str runLink.toString])
+  ]) (some cwdSwapHook)
+  let _ ← LeanSys.Posix.closeFd repCwdFd
+  let _ ← IO.ofExcept tVerifyCwd.get
+  match Json.parse (← IO.FS.readFile repCwdPath) with
+  | .ok rCwd =>
+    assertEq "Cwd symlink swap between verify and exec rejected (ok=false)" (rCwd.fieldBool? "ok") (some false)
+    assertEq "Cwd symlink swap between verify and exec exit_code == 126" (rCwd.fieldInt? "exit_code") (some 126)
+  | .error e => throw <| IO.userError s!"parse repCwdPath: {e}"
+
+  -- (h) Expired lease / past-deadline response from Core is rejected by handleExec TOCTOU gate (515 -> exit_code 126)
+  let expiredGrantJson := renderCompact <| JVal.obj #[
+    ("allowed", .bool true),
+    ("allow_exec", .bool true),
+    ("scope", .str "root_exec"),
+    ("grant_id", .str "grant-expired-1"),
+    ("bunker_state", .nat 0),
+    ("expires_at", .uint64 (nowSecPriv - 1))
+  ]
+  let tVerifyExp ← serveOneCoreVerify expiredGrantJson
+  let repExpPath := tmpDir / "privd-reply-exp.json"
+  IO.FS.writeFile repExpPath ""
+  let repExpFd ← match (← LeanSys.Posix.openFd repExpPath.toString 4 0 0) with
+    | .ok fd => pure fd
+    | .error e => throw <| IO.userError s!"open repExpPath: {e}"
+  handleExec repExpFd livePrivCfg nonRootPeer (.obj #[
+    ("mission_id", .str "m-exp"),
+    ("lease_token", .str "orb-jit-exp-1"),
+    ("target_host", .str "self"),
+    ("cwd", .str privWorkDirB.toString),
+    ("argv", .arr #[.str runLink.toString])
+  ])
+  let _ ← LeanSys.Posix.closeFd repExpFd
+  let _ ← IO.ofExcept tVerifyExp.get
+  match Json.parse (← IO.FS.readFile repExpPath) with
+  | .ok rExp =>
+    assertEq "Expired lease rejected at exec gate (ok=false)" (rExp.fieldBool? "ok") (some false)
+    assertEq "Expired lease returns exit_code == 126" (rExp.fieldInt? "exit_code") (some 126)
+    assertTrue "Expired lease stderr mentions TOCTOU gate 515"
+      ((((rExp.fieldStr? "stderr").getD "").splitOn "515").length > 1)
+  | .error e => throw <| IO.userError s!"parse repExpPath: {e}"
+
+  -- Unmodified execution within window succeeds end-to-end (sanity positive check)
+  let tVerifyOk ← IO.asTask do
+    -- Accept pre-exec verify AND post-exec audit log
+    for _ in [0:2] do
+      if let .ok cfd ← LeanSys.Posix.tcpAcceptPoll privHttpFd 5000 then
+        let _ ← LeanSys.Posix.readStreamChunk cfd 8192
+        let wire := s!"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {validGrantJson.utf8ByteSize}\r\nConnection: close\r\n\r\n{validGrantJson}"
+        let _ ← LeanSys.Posix.writeAll cfd wire.toUTF8
+        let _ ← LeanSys.Posix.closeFd cfd
+    pure true
+  let repOkPath := tmpDir / "privd-reply-ok.json"
+  IO.FS.writeFile repOkPath ""
+  let repOkFd ← match (← LeanSys.Posix.openFd repOkPath.toString 4 0 0) with
+    | .ok fd => pure fd
+    | .error e => throw <| IO.userError s!"open repOkPath: {e}"
+  handleExec repOkFd livePrivCfg nonRootPeer (.obj #[
+    ("mission_id", .str "m-ok"),
+    ("lease_token", .str "orb-jit-ok-1"),
+    ("target_host", .str "self"),
+    ("cwd", .str privWorkDirB.toString),
+    ("argv", .arr #[.str runLink.toString])
+  ])
+  let _ ← LeanSys.Posix.closeFd repOkFd
+  let _ ← IO.ofExcept tVerifyOk.get
+  match Json.parse (← IO.FS.readFile repOkPath) with
+  | .ok rOk =>
+    assertEq "Unmodified verified exec succeeds (ok=true)" (rOk.fieldBool? "ok") (some true)
+    assertEq "Unmodified verified exec stdout == SAFE_OK" (rOk.fieldStr? "stdout") (some "SAFE_OK")
+  | .error e => throw <| IO.userError s!"parse repOkPath: {e}"
+
+  let _ ← LeanSys.Posix.closeFd privHttpFd
 
 def runAllTests : IO UInt32 := do
   IO.println "=== OrbBin Wave 1 Companion Binaries Self-Test ==="
@@ -444,6 +1065,9 @@ def runAllTests : IO UInt32 := do
   assertEq "cancel + reused ID emits exactly 2 responses (-32800 + fresh-fast)" outLines.length 2
   assertTrue "reused ID never emits stale-slow response" (!outLines.any (fun l => (l.splitOn "stale-slow").length > 1))
   assertTrue "reused ID emits fresh-fast response" (outLines.any (fun l => (l.splitOn "fresh-fast").length > 1))
+
+  -- 11. R7-B / R7-C SM-22 + G-ORB-7 MCP & orb-privd lifecycle / TOCTOU tests
+  runR7bMcpAndPrivdTests tmpDir
 
   try IO.FS.removeDirAll tmpDir catch _ => pure ()
   IO.println "=== ALL ORB-BIN WAVE 1 SELF-TESTS PASSED ==="

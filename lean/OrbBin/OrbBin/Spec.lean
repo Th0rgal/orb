@@ -390,4 +390,652 @@ theorem stdio_jsonrpc_rejects_saturated_pool (lB : UInt64) (neT : UInt8) (cap : 
   unfold verifyStdioJsonRpcFrame at hf ⊢
   exact bit_gate_eq_zero hf
 
+/-! ### 4. Control MCP Receipt Settlement vs Action Outcome (`SM-22`) -/
+
+/-- Durable action outcome, distinct from whether `wait_actions` may wake. -/
+inductive McpActionOutcomeKind where
+  | pending
+  | accepted
+  | rejected
+  | uncertainReconciliationRequired
+  deriving Repr, DecidableEq
+
+def McpActionOutcomeKind.toWire : McpActionOutcomeKind → String
+  | .pending => "pending"
+  | .accepted => "accepted"
+  | .rejected => "rejected"
+  | .uncertainReconciliationRequired => "reconciliation_required"
+
+structure McpActionOutcomeCheck where
+  receiptStatus    : UInt8
+  acceptedTag      : UInt8
+  stateTag         : UInt8
+  transportDropped : UInt8
+  hasResult        : UInt8
+  deriving Repr, DecidableEq
+
+/-- Receipt status independent of the packed gate: queued and running/dispatching are not yet settled. -/
+def receiptIsOpen (status : Nat) : Bool :=
+  status == 0 || status == 1
+
+/-- `accepted:"unknown"`, `state:"reconciliation_required"`, or a dropped mutation transport. -/
+def receiptNeedsReconcile (status accepted state drop : Nat) : Bool :=
+  drop == 1 || accepted == 3 || state == 4 || status == 4
+
+/-- Independent durable outcome. Success is only an explicit completed result without rejection or
+    reconciliation; reconciliation is never success and is distinct from a rejected result. -/
+def classifyMcpActionOutcome (c : McpActionOutcomeCheck) : McpActionOutcomeKind :=
+  if receiptNeedsReconcile c.receiptStatus.toNat c.acceptedTag.toNat c.stateTag.toNat c.transportDropped.toNat then
+    .uncertainReconciliationRequired
+  else if receiptIsOpen c.receiptStatus.toNat then
+    .pending
+  else if c.receiptStatus.toNat == 2 && c.hasResult.toNat == 1 &&
+          decide (c.acceptedTag.toNat ≤ 1) && c.stateTag.toNat != 3 then
+    .accepted
+  else
+    .rejected
+
+/-- A canonical observation whose durable outcome is `Accepted`: the wait may wake, a fresh retry
+    is forbidden, and reconciliation evidence is absent. -/
+def McpActionOutcomeDomainSafe (c : McpActionOutcomeCheck) : Prop :=
+  c.receiptStatus.toNat ≤ 5 ∧ c.acceptedTag.toNat ≤ 3 ∧ c.stateTag.toNat ≤ 4 ∧
+  c.transportDropped.toNat ≤ 1 ∧ c.hasResult.toNat ≤ 1 ∧
+  classifyMcpActionOutcome c = .accepted
+
+@[inline, export orb_bin_verify_mcp_action_outcome]
+def verifyMcpActionOutcome
+    (receiptStatus acceptedTag stateTag transportDropped hasResult : UInt8) : UInt32 :=
+  let canonical : Bool :=
+    receiptStatus ≤ 5 && acceptedTag ≤ 3 && stateTag ≤ 4 &&
+    transportDropped ≤ 1 && hasResult ≤ 1
+  let reconciliation : Bool :=
+    transportDropped == 1 || acceptedTag == 3 || stateTag == 4 || receiptStatus == 4
+  let pending : Bool := receiptStatus == 0 || receiptStatus == 1
+  let acceptedOk : Bool :=
+    receiptStatus == 2 && hasResult == 1 && acceptedTag ≤ 1 && stateTag != 3
+  let outcome : UInt32 :=
+    if !canonical then 2
+    else if reconciliation then 3
+    else if pending then 0
+    else if acceptedOk then 1
+    else 2
+  let settled : UInt32 :=
+    if canonical && (reconciliation || !pending) then 256 else 0
+  let success : UInt32 := if outcome == 1 then 65536 else 0
+  let freshRetry : UInt32 :=
+    if canonical && outcome == 2 && transportDropped == 0 && acceptedTag != 3 then 16777216 else 0
+  outcome ||| settled ||| success ||| freshRetry
+
+private theorem u8_le_of_toNat_le (a b : UInt8) (h : a.toNat ≤ b.toNat) : a ≤ b :=
+  UInt8.le_iff_toNat_le.mpr h
+
+private def mcpWord (rs acc st drop res : UInt8) : UInt32 :=
+  verifyMcpActionOutcome rs acc st drop res
+
+private theorem mcpWord_noncanonical (rs acc st drop res : UInt8)
+    (hc : (decide (rs ≤ 5) && decide (acc ≤ 3) && decide (st ≤ 4) &&
+      decide (drop ≤ 1) && decide (res ≤ 1)) = false) :
+    mcpWord rs acc st drop res = 2 := by
+  unfold mcpWord verifyMcpActionOutcome
+  simp [hc]
+
+private theorem mcpWord_reconcile (rs acc st drop res : UInt8)
+    (hc : (decide (rs ≤ 5) && decide (acc ≤ 3) && decide (st ≤ 4) &&
+      decide (drop ≤ 1) && decide (res ≤ 1)) = true)
+    (hrec : (drop == 1 || acc == 3 || st == 4 || rs == 4) = true) :
+    mcpWord rs acc st drop res = 259 := by
+  unfold mcpWord verifyMcpActionOutcome
+  simp [hc, hrec]; decide
+
+private theorem mcpWord_pending (rs acc st drop res : UInt8)
+    (hc : (decide (rs ≤ 5) && decide (acc ≤ 3) && decide (st ≤ 4) &&
+      decide (drop ≤ 1) && decide (res ≤ 1)) = true)
+    (hrec : (drop == 1 || acc == 3 || st == 4 || rs == 4) = false)
+    (hpend : (rs == 0 || rs == 1) = true) :
+    mcpWord rs acc st drop res = 0 := by
+  unfold mcpWord verifyMcpActionOutcome
+  simp [hc, hrec, hpend]
+
+private theorem mcpWord_rejected (rs acc st drop res : UInt8)
+    (hc : (decide (rs ≤ 5) && decide (acc ≤ 3) && decide (st ≤ 4) &&
+      decide (drop ≤ 1) && decide (res ≤ 1)) = true)
+    (hrec : (drop == 1 || acc == 3 || st == 4 || rs == 4) = false)
+    (hpend : (rs == 0 || rs == 1) = false)
+    (hok : (rs == 2 && res == 1 && decide (acc ≤ 1) && st != 3) = false)
+    (hd0 : (drop == 0 && acc != 3) = true) :
+    mcpWord rs acc st drop res = 16777474 := by
+  unfold mcpWord verifyMcpActionOutcome
+  simp [hc, hrec, hpend, hok, hd0]; decide
+
+private theorem mcpWord_rejected_no_retry (rs acc st drop res : UInt8)
+    (hc : (decide (rs ≤ 5) && decide (acc ≤ 3) && decide (st ≤ 4) &&
+      decide (drop ≤ 1) && decide (res ≤ 1)) = true)
+    (hrec : (drop == 1 || acc == 3 || st == 4 || rs == 4) = false)
+    (hpend : (rs == 0 || rs == 1) = false)
+    (hok : (rs == 2 && res == 1 && decide (acc ≤ 1) && st != 3) = false)
+    (hd0 : (drop == 0 && acc != 3) = false) :
+    mcpWord rs acc st drop res = 258 := by
+  unfold mcpWord verifyMcpActionOutcome
+  simp [hc, hrec, hpend, hok, hd0]; decide
+
+private theorem mcpWord_accepted (rs acc st drop res : UInt8)
+    (hc : (decide (rs ≤ 5) && decide (acc ≤ 3) && decide (st ≤ 4) &&
+      decide (drop ≤ 1) && decide (res ≤ 1)) = true)
+    (hrec : (drop == 1 || acc == 3 || st == 4 || rs == 4) = false)
+    (hpend : (rs == 0 || rs == 1) = false)
+    (hok : (rs == 2 && res == 1 && decide (acc ≤ 1) && st != 3) = true) :
+    mcpWord rs acc st drop res = 65793 := by
+  unfold mcpWord verifyMcpActionOutcome
+  simp [hc, hrec, hpend, hok]; decide
+
+def mcpActionOutcomeMetaGate : MetaGateSpec McpActionOutcomeCheck McpActionOutcomeDomainSafe where
+  gate c :=
+    let w := mcpWord c.receiptStatus c.acceptedTag c.stateTag c.transportDropped c.hasResult
+    (w &&& 255) == 1 && ((w >>> 8) &&& 1) == 1 && ((w >>> 16) &&& 1) == 1 && ((w >>> 24) &&& 1) == 0
+  sound c h := by
+    rcases c with ⟨rs, acc, st, drop, res⟩
+    change ((mcpWord rs acc st drop res &&& 255) == 1 &&
+      ((mcpWord rs acc st drop res >>> 8) &&& 1) == 1 &&
+      ((mcpWord rs acc st drop res >>> 16) &&& 1) == 1 &&
+      ((mcpWord rs acc st drop res >>> 24) &&& 1) == 0) = true at h
+    dsimp [McpActionOutcomeDomainSafe]
+    cases hc : (decide (rs ≤ 5) && decide (acc ≤ 3) && decide (st ≤ 4) && decide (drop ≤ 1) && decide (res ≤ 1))
+    · rw [mcpWord_noncanonical rs acc st drop res hc] at h
+      exact absurd h (by decide)
+    · cases hrec : (drop == 1 || acc == 3 || st == 4 || rs == 4) with
+      | true =>
+        rw [mcpWord_reconcile rs acc st drop res hc hrec] at h
+        exact absurd h (by decide)
+      | false =>
+        cases hpend : (rs == 0 || rs == 1) with
+        | true =>
+          rw [mcpWord_pending rs acc st drop res hc hrec hpend] at h
+          exact absurd h (by decide)
+        | false =>
+          cases hok : (rs == 2 && res == 1 && decide (acc ≤ 1) && st != 3) with
+          | false =>
+            cases hd0 : (drop == 0 && acc != 3) with
+            | false =>
+              rw [mcpWord_rejected_no_retry rs acc st drop res hc hrec hpend hok hd0] at h
+              exact absurd h (by decide)
+            | true =>
+              rw [mcpWord_rejected rs acc st drop res hc hrec hpend hok hd0] at h
+              exact absurd h (by decide)
+          | true =>
+            rw [mcpWord_accepted rs acc st drop res hc hrec hpend hok] at h
+            simp only [Bool.and_eq_true, decide_eq_true_eq] at hc
+            rcases hc with ⟨⟨⟨⟨hrs, hacc⟩, hst⟩, hdrop⟩, hres⟩
+            refine ⟨UInt8.le_iff_toNat_le.mp hrs, UInt8.le_iff_toNat_le.mp hacc,
+              UInt8.le_iff_toNat_le.mp hst, UInt8.le_iff_toNat_le.mp hdrop,
+              UInt8.le_iff_toNat_le.mp hres, ?_⟩
+            simp only [Bool.or_eq_false_iff, beq_eq_false_iff_ne, ne_eq] at hrec hpend
+            simp only [Bool.and_eq_true, beq_iff_eq, bne_iff_ne, decide_eq_true_eq] at hok
+            rcases hrec with ⟨⟨⟨hdN, haN⟩, hsN⟩, _⟩
+            rcases hpend with ⟨_, _⟩
+            rcases hok with ⟨⟨⟨hr2, hres1⟩, hacc1⟩, hst3⟩
+            unfold classifyMcpActionOutcome receiptNeedsReconcile receiptIsOpen
+            subst hr2; subst hres1
+            have hdNat : drop.toNat ≠ 1 := fun e => hdN (u8_eq_of_toNat drop 1 (by decide) e)
+            have haNat : acc.toNat ≠ 3 := fun e => haN (u8_eq_of_toNat acc 3 (by decide) e)
+            have hsNat : st.toNat ≠ 4 := fun e => hsN (u8_eq_of_toNat st 4 (by decide) e)
+            have hst3Nat : st.toNat ≠ 3 := fun e => hst3 (u8_eq_of_toNat st 3 (by decide) e)
+            have haccNat : acc.toNat ≤ 1 := UInt8.le_iff_toNat_le.mp hacc1
+            simp [beq_iff_eq, bne_iff_ne, hdNat, haNat, hsNat, hst3Nat, haccNat]
+  complete c h := by
+    rcases c with ⟨rs, acc, st, drop, res⟩
+    dsimp [McpActionOutcomeDomainSafe] at h
+    rcases h with ⟨hrs, hacc, hst, hdrop, hres, hkind⟩
+    change ((mcpWord rs acc st drop res &&& 255) == 1 &&
+      ((mcpWord rs acc st drop res >>> 8) &&& 1) == 1 &&
+      ((mcpWord rs acc st drop res >>> 16) &&& 1) == 1 &&
+      ((mcpWord rs acc st drop res >>> 24) &&& 1) == 0) = true
+    have hrsB : rs ≤ 5 := u8_le_of_toNat_le rs 5 (by change rs.toNat ≤ 5; omega)
+    have haccB : acc ≤ 3 := u8_le_of_toNat_le acc 3 (by change acc.toNat ≤ 3; omega)
+    have hstB : st ≤ 4 := u8_le_of_toNat_le st 4 (by change st.toNat ≤ 4; omega)
+    have hdropB : drop ≤ 1 := u8_le_of_toNat_le drop 1 (by change drop.toNat ≤ 1; omega)
+    have hresB : res ≤ 1 := u8_le_of_toNat_le res 1 (by change res.toNat ≤ 1; omega)
+    have hc : (decide (rs ≤ 5) && decide (acc ≤ 3) && decide (st ≤ 4) && decide (drop ≤ 1) && decide (res ≤ 1)) = true := by
+      simp [hrsB, haccB, hstB, hdropB, hresB]
+    unfold classifyMcpActionOutcome receiptNeedsReconcile receiptIsOpen at hkind
+    cases hrecN : (drop.toNat == 1 || acc.toNat == 3 || st.toNat == 4 || rs.toNat == 4)
+    · rw [hrecN] at hkind; dsimp at hkind
+      cases hpendN : (rs.toNat == 0 || rs.toNat == 1)
+      · rw [hpendN] at hkind; dsimp at hkind
+        cases hokN : (rs.toNat == 2 && res.toNat == 1 && decide (acc.toNat ≤ 1) && st.toNat != 3)
+        · rw [hokN] at hkind; contradiction
+        · simp only [Bool.or_eq_false_iff, beq_eq_false_iff_ne, ne_eq] at hrecN hpendN
+          simp only [Bool.and_eq_true, beq_iff_eq, bne_iff_ne, decide_eq_true_eq] at hokN
+          rcases hrecN with ⟨⟨⟨hdN, haN⟩, hsN⟩, hr4⟩
+          rcases hpendN with ⟨hr0, hr1⟩
+          rcases hokN with ⟨⟨⟨hr2, hres1⟩, hacc1⟩, hst3⟩
+          have hrecB : (drop == 1 || acc == 3 || st == 4 || rs == 4) = false := by
+            simp [beq_eq_false_iff_ne, ne_eq]
+            exact ⟨⟨⟨fun e => hdN (congrArg UInt8.toNat e), fun e => haN (congrArg UInt8.toNat e)⟩,
+              fun e => hsN (congrArg UInt8.toNat e)⟩, fun e => hr4 (congrArg UInt8.toNat e)⟩
+          have hpendB : (rs == 0 || rs == 1) = false := by
+            simp [beq_eq_false_iff_ne, ne_eq]
+            exact ⟨fun e => hr0 (congrArg UInt8.toNat e), fun e => hr1 (congrArg UInt8.toNat e)⟩
+          have hacc1B : acc ≤ 1 := u8_le_of_toNat_le acc 1 (by change acc.toNat ≤ 1; omega)
+          have hokB : (rs == 2 && res == 1 && decide (acc ≤ 1) && st != 3) = true := by
+            have hr2E : rs = 2 := u8_eq_of_toNat rs 2 (by decide) hr2
+            have hres1E : res = 1 := u8_eq_of_toNat res 1 (by decide) hres1
+            have hst3B : (st != 3) = true := bne_iff_ne.mpr (fun e => hst3 (congrArg UInt8.toNat e))
+            simp [hr2E, hres1E, hacc1B, hst3B]
+          rw [mcpWord_accepted rs acc st drop res hc hrecB hpendB hokB]
+          decide
+      · rw [hpendN] at hkind; contradiction
+    · rw [hrecN] at hkind; contradiction
+  posWitness := { receiptStatus := 2, acceptedTag := 1, stateTag := 2, transportDropped := 0, hasResult := 1 }
+  negWitness := { receiptStatus := 2, acceptedTag := 3, stateTag := 4, transportDropped := 0, hasResult := 1 }
+  nonVacuous := by decide
+  tight := by decide
+
+theorem mcp_outcome_reconciliation_not_accepted
+    (rs acc st drop res : UInt8)
+    (h : drop == 1 || acc == 3 || st == 4 || rs == 4) :
+    (verifyMcpActionOutcome rs acc st drop res &&& 255) ≠ 1 := by
+  change (mcpWord rs acc st drop res &&& 255) ≠ 1
+  cases hc : (decide (rs ≤ 5) && decide (acc ≤ 3) && decide (st ≤ 4) && decide (drop ≤ 1) && decide (res ≤ 1))
+  · rw [mcpWord_noncanonical rs acc st drop res hc]; decide
+  · rw [mcpWord_reconcile rs acc st drop res hc h]; decide
+
+/-! ### 5. Generation-Fenced External Stdio MCP Lifecycle (`SM-22`) -/
+
+/-- External MCP child connection state. -/
+inductive McpConnState where
+  | disconnected
+  | connecting
+  | connected
+  | errored
+  deriving Repr, DecidableEq
+
+def McpConnState.toNat : McpConnState → Nat
+  | .disconnected => 0
+  | .connecting => 1
+  | .connected => 2
+  | .errored => 3
+
+structure McpStdioLifecycleCheck where
+  connState   : UInt8
+  activeGen   : UInt64
+  eventGen    : UInt64
+  toolsListOk : UInt8
+  childExited : UInt8
+  deriving Repr, DecidableEq
+
+/-- Generation fence: an event older than the active generation, or from another generation, is ignored. -/
+def stdioEventIgnored (active event : Nat) : Bool :=
+  decide (event < active) || event != active
+
+/-- Next connection after one lifecycle event. Stale generations keep the current state. A matching
+    child exit leaves `Connecting`/`Connected`. A failed tools/list while `Connecting` becomes `Error`. -/
+def stepMcpStdio (c : McpStdioLifecycleCheck) : McpConnState :=
+  if stdioEventIgnored c.activeGen.toNat c.eventGen.toNat then
+    match c.connState.toNat with
+    | 1 => .connecting
+    | 2 => .connected
+    | 3 => .errored
+    | _ => .disconnected
+  else if c.childExited.toNat == 1 && (c.connState.toNat == 1 || c.connState.toNat == 2) then
+    .disconnected
+  else if c.connState.toNat == 1 && c.toolsListOk.toNat == 0 && c.childExited.toNat == 0 then
+    .errored
+  else
+    match c.connState.toNat with
+    | 1 => .connecting
+    | 2 => .connected
+    | 3 => .errored
+    | _ => .disconnected
+
+/-- The child must be reaped exactly when the active generation exits or its refresh handshake fails. -/
+def stdioMustReap (c : McpStdioLifecycleCheck) : Bool :=
+  !stdioEventIgnored c.activeGen.toNat c.eventGen.toNat &&
+    ((c.childExited.toNat == 1 && (c.connState.toNat == 1 || c.connState.toNat == 2)) ||
+      (c.connState.toNat == 1 && c.toolsListOk.toNat == 0 && c.childExited.toNat == 0))
+
+/-- Canonical observations whose next state is not `Connected`: either the generation is stale, or
+    the active generation has exited or failed its tools/list handshake and must be reaped. -/
+def McpStdioLifecycleDomainSafe (c : McpStdioLifecycleCheck) : Prop :=
+  c.connState.toNat ≤ 3 ∧ c.toolsListOk.toNat ≤ 1 ∧ c.childExited.toNat ≤ 1 ∧
+  (stepMcpStdio c).toNat ≠ McpConnState.connected.toNat ∧
+  (stdioMustReap c = true ∨ stdioEventIgnored c.activeGen.toNat c.eventGen.toNat = true)
+
+@[inline, export orb_bin_verify_mcp_stdio_step]
+def verifyMcpStdioLifecycleStep
+    (connState : UInt8) (activeGen eventGen : UInt64) (toolsListOk childExited : UInt8) : UInt32 :=
+  let canonical : Bool := connState ≤ 3 && toolsListOk ≤ 1 && childExited ≤ 1
+  let current : Bool := eventGen == activeGen
+  let stale : Bool := eventGen < activeGen
+  let exitNow : Bool := current && childExited == 1 && (connState == 1 || connState == 2)
+  let refreshFail : Bool := current && connState == 1 && toolsListOk == 0 && childExited == 0
+  let nextState : UInt32 :=
+    if !canonical then 3
+    else if stale || !current then connState.toUInt32
+    else if exitNow then 0
+    else if refreshFail then 3
+    else connState.toUInt32
+  let reap : UInt32 := if canonical && (exitNow || refreshFail) then 256 else 0
+  let ignore : UInt32 := if canonical && (stale || !current) then 65536 else 0
+  nextState ||| reap ||| ignore
+
+private def stdioWord (cs : UInt8) (ag eg : UInt64) (ok ex : UInt8) : UInt32 :=
+  verifyMcpStdioLifecycleStep cs ag eg ok ex
+
+private theorem stdioWord_noncanonical (cs : UInt8) (ag eg : UInt64) (ok ex : UInt8)
+    (hc : (decide (cs ≤ 3) && decide (ok ≤ 1) && decide (ex ≤ 1)) = false) :
+    stdioWord cs ag eg ok ex = 3 := by
+  unfold stdioWord verifyMcpStdioLifecycleStep; simp [hc]
+
+private def stdioOfNat : Nat → UInt8
+  | 0 => 0 | 1 => 1 | 2 => 2 | 3 => 3 | _ => 0
+
+private theorem stdio_ofNat_eq (cs : UInt8) (h : cs.toNat ≤ 3) : stdioOfNat cs.toNat = cs := by
+  have hEq : cs = UInt8.ofNat cs.toNat := u8_eq_of_toNat cs cs.toNat cs.toNat_lt rfl
+  cases hN : cs.toNat
+  · rw [hN] at hEq; exact hEq.symm
+  · rename_i n; cases n
+    · rw [hN] at hEq; exact hEq.symm
+    · rename_i n; cases n
+      · rw [hN] at hEq; exact hEq.symm
+      · rename_i n; cases n
+        · rw [hN] at hEq; exact hEq.symm
+        · omega
+
+private theorem stdioWord_stale (cs : UInt8) (ag eg : UInt64) (ok ex : UInt8)
+    (hcs : cs.toNat ≤ 3) (hok : ok.toNat ≤ 1) (hex : ex.toNat ≤ 1)
+    (hstale : (eg == ag) = false) :
+    stdioWord cs ag eg ok ex = cs.toUInt32 ||| 65536 := by
+  have hc : (decide (cs ≤ 3) && decide (ok ≤ 1) && decide (ex ≤ 1)) = true := by
+    simp [u8_le_of_toNat_le cs 3 (by change cs.toNat ≤ 3; exact hcs),
+      u8_le_of_toNat_le ok 1 (by change ok.toNat ≤ 1; exact hok),
+      u8_le_of_toNat_le ex 1 (by change ex.toNat ≤ 1; exact hex)]
+  unfold stdioWord verifyMcpStdioLifecycleStep
+  simp [hc, hstale]
+
+private theorem stdioWord_current_table
+    (cs : UInt8) (ag : UInt64) (ok ex : UInt8)
+    (hcs : cs.toNat ≤ 3) (hok : ok.toNat ≤ 1) (hex : ex.toNat ≤ 1) :
+    stdioWord cs ag ag ok ex =
+      if ex == 1 && (cs == 1 || cs == 2) then 256
+      else if cs == 1 && ok == 0 && ex == 0 then 259
+      else cs.toUInt32 := by
+  have hc : (decide (cs ≤ 3) && decide (ok ≤ 1) && decide (ex ≤ 1)) = true := by
+    simp [u8_le_of_toNat_le cs 3 (by change cs.toNat ≤ 3; exact hcs),
+      u8_le_of_toNat_le ok 1 (by change ok.toNat ≤ 1; exact hok),
+      u8_le_of_toNat_le ex 1 (by change ex.toNat ≤ 1; exact hex)]
+  have hlt : decide (ag < ag) = false := by
+    simp [UInt64.lt_irrefl]
+  unfold stdioWord verifyMcpStdioLifecycleStep
+  simp only [hc, hlt, beq_self_eq_true, Bool.not_true, Bool.true_and, Bool.false_or]
+  have hcsE := stdio_ofNat_eq cs hcs
+  have hokE := stdio_ofNat_eq ok (by omega)
+  have hexE := stdio_ofNat_eq ex (by omega)
+  rcases (by omega : cs.toNat = 0 ∨ cs.toNat = 1 ∨ cs.toNat = 2 ∨ cs.toNat = 3) with h0 | h1 | h2 | h3 <;>
+  rcases (by omega : ok.toNat = 0 ∨ ok.toNat = 1) with hk0 | hk1 <;>
+  rcases (by omega : ex.toNat = 0 ∨ ex.toNat = 1) with hx0 | hx1
+  all_goals
+    (try rw [h0] at hcsE)
+    (try rw [h1] at hcsE)
+    (try rw [h2] at hcsE)
+    (try rw [h3] at hcsE)
+    (try rw [hk0] at hokE)
+    (try rw [hk1] at hokE)
+    (try rw [hx0] at hexE)
+    (try rw [hx1] at hexE)
+    subst hcsE hokE hexE
+    decide
+
+def mcpStdioLifecycleMetaGate : MetaGateSpec McpStdioLifecycleCheck McpStdioLifecycleDomainSafe where
+  gate c :=
+    let w := stdioWord c.connState c.activeGen c.eventGen c.toolsListOk c.childExited
+    (w &&& 255) != 2 && (((w >>> 8) &&& 1) == 1 || ((w >>> 16) &&& 1) == 1)
+  sound c h := by
+    rcases c with ⟨cs, ag, eg, ok, ex⟩
+    change ((stdioWord cs ag eg ok ex &&& 255) != 2 &&
+      (((stdioWord cs ag eg ok ex >>> 8) &&& 1) == 1 ||
+        ((stdioWord cs ag eg ok ex >>> 16) &&& 1) == 1)) = true at h
+    dsimp [McpStdioLifecycleDomainSafe]
+    cases hcanon : (decide (cs ≤ 3) && decide (ok ≤ 1) && decide (ex ≤ 1))
+    · rw [stdioWord_noncanonical cs ag eg ok ex hcanon] at h
+      exact absurd h (by decide)
+    · simp only [Bool.and_eq_true, decide_eq_true_eq] at hcanon
+      rcases hcanon with ⟨⟨hcsB, hokB⟩, hexB⟩
+      have hcs : cs.toNat ≤ 3 := UInt8.le_iff_toNat_le.mp hcsB
+      have hok : ok.toNat ≤ 1 := UInt8.le_iff_toNat_le.mp hokB
+      have hex : ex.toNat ≤ 1 := UInt8.le_iff_toNat_le.mp hexB
+      refine ⟨hcs, hok, hex, ?_⟩
+      unfold stepMcpStdio stdioMustReap
+      cases hcur : (eg == ag)
+      · rw [stdioWord_stale cs ag eg ok ex hcs hok hex hcur] at h
+        have hne : eg.toNat ≠ ag.toNat := fun e => beq_eq_false_iff_ne.mp hcur
+          (UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq e))
+        have hign : stdioEventIgnored ag.toNat eg.toNat = true := by
+          unfold stdioEventIgnored
+          exact Bool.or_eq_true_iff.mpr (Or.inr (bne_iff_ne.mpr hne))
+        rw [hign]
+        simp only [ite_true, or_true, and_true]
+        have hcsE := stdio_ofNat_eq cs hcs
+        rcases (by omega : cs.toNat = 0 ∨ cs.toNat = 1 ∨ cs.toNat = 2 ∨ cs.toNat = 3) with h0 | h1 | h2 | h3
+        · rw [h0] at hcsE; subst hcsE; decide
+        · rw [h1] at hcsE; subst hcsE; decide
+        · rw [h2] at hcsE; subst hcsE; exact absurd h (by decide)
+        · rw [h3] at hcsE; subst hcsE; decide
+      · have heq : eg = ag := beq_iff_eq.mp hcur
+        rw [heq, stdioWord_current_table cs ag ok ex hcs hok hex] at h
+        rw [heq]
+        have hign : stdioEventIgnored ag.toNat ag.toNat = false := by
+          unfold stdioEventIgnored
+          simp [Nat.lt_irrefl]
+        rw [hign]
+        simp only [Bool.not_false, Bool.true_and]
+        have hcsE := stdio_ofNat_eq cs hcs
+        have hokE := stdio_ofNat_eq ok (by omega)
+        have hexE := stdio_ofNat_eq ex (by omega)
+        revert h
+        rcases (by omega : cs.toNat = 0 ∨ cs.toNat = 1 ∨ cs.toNat = 2 ∨ cs.toNat = 3) with h0 | h1 | h2 | h3 <;>
+        rcases (by omega : ok.toNat = 0 ∨ ok.toNat = 1) with hk0 | hk1 <;>
+        rcases (by omega : ex.toNat = 0 ∨ ex.toNat = 1) with hx0 | hx1
+        all_goals
+          (try rw [h0] at hcsE)
+          (try rw [h1] at hcsE)
+          (try rw [h2] at hcsE)
+          (try rw [h3] at hcsE)
+          (try rw [hk0] at hokE)
+          (try rw [hk1] at hokE)
+          (try rw [hx0] at hexE)
+          (try rw [hx1] at hexE)
+          subst hcsE hokE hexE
+          decide
+  complete c h := by
+    rcases c with ⟨cs, ag, eg, ok, ex⟩
+    dsimp [McpStdioLifecycleDomainSafe] at h
+    rcases h with ⟨hcs, hok, hex, hrest⟩
+    change ((stdioWord cs ag eg ok ex &&& 255) != 2 &&
+      (((stdioWord cs ag eg ok ex >>> 8) &&& 1) == 1 ||
+        ((stdioWord cs ag eg ok ex >>> 16) &&& 1) == 1)) = true
+    unfold stepMcpStdio stdioMustReap at hrest
+    cases hcur : (eg == ag)
+    · rw [stdioWord_stale cs ag eg ok ex hcs hok hex hcur]
+      have hne : eg.toNat ≠ ag.toNat := fun e => beq_eq_false_iff_ne.mp hcur
+        (UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq e))
+      have hign : stdioEventIgnored ag.toNat eg.toNat = true := by
+        unfold stdioEventIgnored
+        exact Bool.or_eq_true_iff.mpr (Or.inr (bne_iff_ne.mpr hne))
+      rw [hign] at hrest
+      simp only [ite_true, or_true, and_true] at hrest
+      have hcsE := stdio_ofNat_eq cs hcs
+      revert hrest
+      rcases (by omega : cs.toNat = 0 ∨ cs.toNat = 1 ∨ cs.toNat = 2 ∨ cs.toNat = 3) with h0 | h1 | h2 | h3
+      · rw [h0] at hcsE; subst hcsE; decide
+      · rw [h1] at hcsE; subst hcsE; decide
+      · rw [h2] at hcsE; subst hcsE; decide
+      · rw [h3] at hcsE; subst hcsE; decide
+    · have heq : eg = ag := beq_iff_eq.mp hcur
+      rw [heq] at hrest
+      have hign : stdioEventIgnored ag.toNat ag.toNat = false := by
+        unfold stdioEventIgnored
+        simp [Nat.lt_irrefl]
+      rw [hign] at hrest
+      simp only [Bool.not_false, Bool.true_and] at hrest
+      rw [heq, stdioWord_current_table cs ag ok ex hcs hok hex]
+      have hcsE := stdio_ofNat_eq cs hcs
+      have hokE := stdio_ofNat_eq ok (by omega)
+      have hexE := stdio_ofNat_eq ex (by omega)
+      revert hrest
+      rcases (by omega : cs.toNat = 0 ∨ cs.toNat = 1 ∨ cs.toNat = 2 ∨ cs.toNat = 3) with h0 | h1 | h2 | h3 <;>
+      rcases (by omega : ok.toNat = 0 ∨ ok.toNat = 1) with hk0 | hk1 <;>
+      rcases (by omega : ex.toNat = 0 ∨ ex.toNat = 1) with hx0 | hx1
+      all_goals
+        (try rw [h0] at hcsE)
+        (try rw [h1] at hcsE)
+        (try rw [h2] at hcsE)
+        (try rw [h3] at hcsE)
+        (try rw [hk0] at hokE)
+        (try rw [hk1] at hokE)
+        (try rw [hx0] at hexE)
+        (try rw [hx1] at hexE)
+        subst hcsE hokE hexE
+        decide
+  posWitness := { connState := 2, activeGen := 7, eventGen := 7, toolsListOk := 1, childExited := 1 }
+  negWitness := { connState := 2, activeGen := 8, eventGen := 7, toolsListOk := 1, childExited := 0 }
+  nonVacuous := by decide
+  tight := by decide
+
+/-! ### 6. Privilege Lease TOCTOU Execute Gate (`G-ORB-7`) -/
+
+structure PrivdToctouCheck where
+  principalKind : UInt8
+  bunkerState   : UInt8
+  targetLease   : UInt32 × UInt32 × UInt64 × UInt64
+  ticks         : UInt64 × UInt64
+  digests       : UInt64 × UInt64
+  grantPresent  : UInt8
+  allowExec     : UInt8
+  deriving Repr, DecidableEq
+
+/-- Independent observe→gate→execute model: the live target, lease epoch, and command digest still
+    equal the observed evidence, the lease is unexpired outside bunker, and Core presented a
+    nonempty grant with `allow_exec`. -/
+def PrivdToctouDomainSafe (c : PrivdToctouCheck) : Prop :=
+  1 ≤ c.principalKind.toNat ∧ c.principalKind.toNat ≤ 3 ∧
+  c.bunkerState.toNat = 0 ∧
+  c.targetLease.1.toNat ≠ 0 ∧ c.targetLease.1.toNat = c.targetLease.2.1.toNat ∧
+  c.targetLease.2.2.1.toNat ≠ 0 ∧ c.targetLease.2.2.1.toNat = c.targetLease.2.2.2.toNat ∧
+  c.ticks.1.toNat < c.ticks.2.toNat ∧
+  c.digests.1.toNat ≠ 0 ∧ c.digests.1.toNat = c.digests.2.toNat ∧
+  c.grantPresent.toNat = 1 ∧ c.allowExec.toNat = 1
+
+@[inline, export orb_bin_verify_privd_toctou_step]
+def verifyPrivdToctouStep
+    (principalKind bunkerState : UInt8)
+    (observedTargetId execTargetId : UInt32)
+    (observedLeaseEpoch liveLeaseEpoch nowTick expiryTick observedDigest execDigest : UInt64)
+    (grantPresent allowExec : UInt8) : UInt32 :=
+  if bunkerState != 0 then 513
+  else if !(principalKind ≥ 1 && principalKind ≤ 3) then 514
+  else if !(nowTick < expiryTick) then 515
+  else if !(observedLeaseEpoch != 0 && observedLeaseEpoch == liveLeaseEpoch) then 516
+  else if !(observedTargetId != 0 && observedTargetId == execTargetId) then 517
+  else if !(observedDigest != 0 && observedDigest == execDigest) then 518
+  else if !(grantPresent == 1 && allowExec == 1) then 519
+  else 257
+
+def privdToctouMetaGate : MetaGateSpec PrivdToctouCheck PrivdToctouDomainSafe where
+  gate c :=
+    verifyPrivdToctouStep c.principalKind c.bunkerState c.targetLease.1 c.targetLease.2.1
+      c.targetLease.2.2.1 c.targetLease.2.2.2 c.ticks.1 c.ticks.2 c.digests.1 c.digests.2
+      c.grantPresent c.allowExec == 257
+  sound c h := by
+    rcases c with ⟨pk, bk, ⟨tgt, execT, obsL, liveL⟩, ⟨nowT, expT⟩, ⟨obsD, execD⟩, gp, ae⟩
+    change (verifyPrivdToctouStep pk bk tgt execT obsL liveL nowT expT obsD execD gp ae == 257) = true at h
+    dsimp [PrivdToctouDomainSafe]
+    unfold verifyPrivdToctouStep at h
+    cases hbk : (bk != 0)
+    · cases hpk : (pk ≥ 1 && pk ≤ 3)
+      · simp [hbk, hpk] at h
+      · cases hexp : decide (nowT < expT)
+        · simp [hbk, hpk, decide_eq_false_iff_not.mp hexp] at h
+        · cases hlease : (obsL != 0 && obsL == liveL)
+          · simp [hbk, hpk, decide_eq_true_eq.mp hexp, hlease] at h
+          · cases htgt : (tgt != 0 && tgt == execT)
+            · simp [hbk, hpk, decide_eq_true_eq.mp hexp, hlease, htgt] at h
+            · cases hdig : (obsD != 0 && obsD == execD)
+              · simp [hbk, hpk, decide_eq_true_eq.mp hexp, hlease, htgt, hdig] at h
+              · cases hgrant : (gp == 1 && ae == 1)
+                · simp [hbk, hpk, decide_eq_true_eq.mp hexp, hlease, htgt, hdig, hgrant] at h
+                · simp only [bne_eq_false_iff_eq] at hbk
+                  simp only [Bool.and_eq_true, decide_eq_true_eq, bne_iff_ne, beq_iff_eq] at hpk hlease htgt hdig hgrant
+                  rcases hgrant with ⟨hgp1, hae1⟩
+                  have hexpN : nowT.toNat < expT.toNat := UInt64.lt_iff_toNat_lt.mp (decide_eq_true_eq.mp hexp)
+                  refine ⟨UInt8.le_iff_toNat_le.mp hpk.1, UInt8.le_iff_toNat_le.mp hpk.2,
+                    by subst hbk; rfl,
+                    fun e => htgt.1 (by apply UInt32.eq_of_toBitVec_eq; apply BitVec.eq_of_toNat_eq; exact e),
+                    congrArg UInt32.toNat htgt.2,
+                    fun e => hlease.1 (by apply UInt64.eq_of_toBitVec_eq; apply BitVec.eq_of_toNat_eq; exact e),
+                    congrArg UInt64.toNat hlease.2,
+                    hexpN,
+                    fun e => hdig.1 (by apply UInt64.eq_of_toBitVec_eq; apply BitVec.eq_of_toNat_eq; exact e),
+                    congrArg UInt64.toNat hdig.2,
+                    by subst hgp1; rfl,
+                    by subst hae1; rfl⟩
+    · simp [hbk] at h
+  complete c h := by
+    rcases c with ⟨pk, bk, ⟨tgt, execT, obsL, liveL⟩, ⟨nowT, expT⟩, ⟨obsD, execD⟩, gp, ae⟩
+    dsimp [PrivdToctouDomainSafe] at h
+    rcases h with ⟨hpk1, hpk3, hbk, htgt0, htgteq, hlease0, hleaseeq, hexp, hdig0, hdigeq, hgp, hae⟩
+    change (verifyPrivdToctouStep pk bk tgt execT obsL liveL nowT expT obsD execD gp ae == 257) = true
+    have hbkB : (bk != 0) = false := bne_eq_false_iff_eq.mpr (u8_eq_of_toNat bk 0 (by omega) hbk)
+    have hpk1B : 1 ≤ pk := u8_le_of_toNat_le 1 pk (by change 1 ≤ pk.toNat; omega)
+    have hpk3B : pk ≤ 3 := u8_le_of_toNat_le pk 3 (by change pk.toNat ≤ 3; omega)
+    have hpkB : (decide (pk ≥ 1) && decide (pk ≤ 3)) = true := by
+      simp [hpk1B, hpk3B]
+    have hexpB : nowT < expT := UInt64.lt_iff_toNat_lt.mpr hexp
+    have hleaseB : (obsL != 0 && obsL == liveL) = true := by
+      simp [bne_iff_ne, beq_iff_eq]
+      exact ⟨fun e => hlease0 (congrArg UInt64.toNat e),
+        by apply UInt64.eq_of_toBitVec_eq; apply BitVec.eq_of_toNat_eq; exact hleaseeq⟩
+    have htgtB : (tgt != 0 && tgt == execT) = true := by
+      simp [bne_iff_ne, beq_iff_eq]
+      exact ⟨fun e => htgt0 (congrArg UInt32.toNat e),
+        by apply UInt32.eq_of_toBitVec_eq; apply BitVec.eq_of_toNat_eq; exact htgteq⟩
+    have hdigB : (obsD != 0 && obsD == execD) = true := by
+      simp [bne_iff_ne, beq_iff_eq]
+      exact ⟨fun e => hdig0 (congrArg UInt64.toNat e),
+        by apply UInt64.eq_of_toBitVec_eq; apply BitVec.eq_of_toNat_eq; exact hdigeq⟩
+    have hgrantB : (gp == 1 && ae == 1) = true := by
+      simp [u8_eq_of_toNat gp 1 (by omega) hgp, u8_eq_of_toNat ae 1 (by omega) hae]
+    unfold verifyPrivdToctouStep
+    simp [hbkB, hpkB, hexpB, hleaseB, htgtB, hdigB, hgrantB]
+  posWitness := {
+    principalKind := 2, bunkerState := 0, targetLease := (9, 9, 4, 4), ticks := (10, 20),
+    digests := (11, 11), grantPresent := 1, allowExec := 1 }
+  negWitness := {
+    principalKind := 2, bunkerState := 0, targetLease := (9, 9, 4, 4), ticks := (10, 20),
+    digests := (11, 12), grantPresent := 1, allowExec := 1 }
+  nonVacuous := by decide
+  tight := by decide
+
+def privdToctouScopedAuthority : ScopedAuthority PrivdToctouCheck where
+  admit := privdToctouMetaGate.gate
+  scopeValid c := c.grantPresent.toNat = 1 ∧ c.allowExec.toNat = 1 ∧ c.bunkerState.toNat = 0
+  sound c h := by
+    rcases privdToctouMetaGate.sound c h with ⟨_, _, hbk, _, _, _, _, _, _, _, hgp, hae⟩
+    exact ⟨hgp, hae, hbk⟩
+
+theorem privd_toctou_rejects_digest_swap (pk bk : UInt8) (t1 t2 : UInt32) (l1 l2 n e d g : UInt64) (gp ae : UInt8)
+    (hswap : d ≠ g) :
+    verifyPrivdToctouStep pk bk t1 t2 l1 l2 n e d g gp ae ≠ 257 := by
+  have hbad : ¬ PrivdToctouDomainSafe
+      ⟨pk, bk, (t1, t2, l1, l2), (n, e), (d, g), gp, ae⟩ := by
+    intro hsafe
+    rcases hsafe with ⟨_, _, _, _, _, _, _, _, _, hdigeq, _, _⟩
+    apply hswap
+    apply UInt64.eq_of_toBitVec_eq
+    apply BitVec.eq_of_toNat_eq
+    exact hdigeq
+  have hf := privdToctouMetaGate.rejects_unsafe
+    ⟨pk, bk, (t1, t2, l1, l2), (n, e), (d, g), gp, ae⟩ hbad
+  unfold privdToctouMetaGate at hf
+  simpa [beq_eq_false_iff_ne] using hf
+
 end OrbBin.Spec

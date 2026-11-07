@@ -96,7 +96,7 @@ def hasShellMetacharOrBypass (scopeStr : String) (argv : Array String) : UInt8 :
         return 1
   return 0
 
-def isTrustedExecutableToken (rawExe : String) : IO Bool := do
+def isTrustedExecutableToken (rawExe : String) (execDirs : Array String := trustedExecDirs) : IO Bool := do
   if rawExe.isEmpty || rawExe == "." || rawExe == ".." then return false
   if !(rawExe.any (· == '/')) && !(rawExe.any (· == '\\')) then
     return true
@@ -104,13 +104,13 @@ def isTrustedExecutableToken (rawExe : String) : IO Bool := do
      containsSubstr rawExe "/./" || containsSubstr rawExe "/../" || !rawExe.startsWith "/" then
     return false
   let dir := ((System.FilePath.mk rawExe).parent.map toString).getD ""
-  if !trustedExecDirs.contains dir then return false
+  if !execDirs.contains dir then return false
   let st ← statPath rawExe
   if st.exists_ && st.isSymlink then
     try
       let real ← IO.FS.realPath (System.FilePath.mk rawExe)
       let realDir := (real.parent.map toString).getD ""
-      if !trustedExecDirs.contains realDir then return false
+      if !execDirs.contains realDir then return false
     catch _ =>
       return false
   return true
@@ -161,14 +161,15 @@ def checkScopeRestrictions
     (argv : Array String)
     (cwd? : Option String := none)
     (envPairs : Array (String × String) := #[])
-    (requireForceCmd : Bool := false) : IO (Except String UInt64) := do
+    (requireForceCmd : Bool := false)
+    (execDirs : Array String := trustedExecDirs) : IO (Except String UInt64) := do
   if argv.isEmpty then
     return .error "Empty command argv"
   let gs : UInt8 := (parseGrantScope? scopeStr).getD 255
   let unsafeEnv := hasUnsafeClientEnv envPairs argv
   let cwdBad ← hasCwdTraversalOrSymlink cwd?
   let argvBad := hasArgvTraversal argv
-  let exeTrusted ← isTrustedExecutableToken argv[0]!
+  let exeTrusted ← isTrustedExecutableToken argv[0]! execDirs
   let pathTrav : UInt8 := if cwdBad || argvBad || !exeTrusted then 1 else 0
   let metaByp := hasShellMetacharOrBypass scopeStr argv
   let reqForce : UInt8 := if requireForceCmd then 1 else 0
@@ -240,14 +241,14 @@ def checkScopeRestrictions
     return .error "Rejected by orb_privd_command_step confinement gate"
   return .ok packed
 
-private def isTrustedResolvedBinary (cand : String) : IO (Option String) := do
+private def isTrustedResolvedBinary (cand : String) (execDirs : Array String := trustedExecDirs) : IO (Option String) := do
   let st ← statPath cand
   if !st.exists_ then return none
   if st.isSymlink then
     try
       let real ← IO.FS.realPath (System.FilePath.mk cand)
       let realDir := (real.parent.map toString).getD ""
-      if !trustedExecDirs.contains realDir then return none
+      if !execDirs.contains realDir then return none
       let rst ← statPath real.toString
       if rst.exists_ && rst.isReg then return some real.toString
       return none
@@ -258,14 +259,14 @@ private def isTrustedResolvedBinary (cand : String) : IO (Option String) := do
   else
     return none
 
-def resolveTrustedBinary? (bin : String) : IO (Option String) := do
+def resolveTrustedBinary? (bin : String) (execDirs : Array String := trustedExecDirs) : IO (Option String) := do
   if bin.any (· == '/') then
-    if (← isTrustedExecutableToken bin) then
-      return (← isTrustedResolvedBinary bin)
+    if (← isTrustedExecutableToken bin execDirs) then
+      return (← isTrustedResolvedBinary bin execDirs)
     return none
-  for dir in trustedExecDirs do
+  for dir in execDirs do
     let cand := s!"{dir}/{bin}"
-    if let some resolved ← isTrustedResolvedBinary cand then
+    if let some resolved ← isTrustedResolvedBinary cand execDirs then
       return some resolved
   return none
 

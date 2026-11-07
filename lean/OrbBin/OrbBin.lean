@@ -9,6 +9,7 @@ import OrbBin.Json
 import OrbBin.HttpClient
 import OrbBin.McpCatalog
 import OrbBin.StdioMcpServer
+import OrbBin.McpRegistry
 import OrbBin.FidoAgentProxyMain
 import OrbBin.PrivdShared
 import OrbBin.PrivdMain

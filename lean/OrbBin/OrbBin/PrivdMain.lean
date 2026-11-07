@@ -6,6 +6,7 @@
 -/
 import LeanSys.Posix
 import LeanSys.Auth
+import OrbBin.Spec
 import OrbBin.PosixExt
 import OrbBin.Json
 import OrbBin.HttpClient
@@ -19,12 +20,13 @@ open OrbBin.HttpClient
 open OrbBin.PrivdShared
 
 structure PrivdConfig where
-  socketPath : String
-  groupName  : String
-  apiUrl     : String
-  apiToken   : Option String
-  auditLog   : String
-  hostLabel  : String
+  socketPath  : String
+  groupName   : String
+  apiUrl      : String
+  apiToken    : Option String
+  auditLog    : String
+  hostLabel   : String
+  trustedDirs : Array String := trustedExecDirs
 
 def appendAuditLine (auditLog : String) (entry : JVal) : IO Unit := do
   try
@@ -48,54 +50,172 @@ def replyError (cfd : LeanSys.Posix.Fd) (msg : String) (code : Int := 1) : IO Un
     ("stderr", .str msg)
   ]
 
+def normalizeTargetLabel (raw hostLabel : String) : String :=
+  let low := raw.trimAscii.toString.toLower
+  let hLow := hostLabel.trimAscii.toString.toLower
+  if low.isEmpty || low == "self" || low == "local" || low == "localhost" || low == hLow then
+    hLow
+  else
+    low
+
+def targetIdWord (label : String) : UInt32 := Id.run do
+  let digest := LeanSys.Auth.sha256Bytes label.toUTF8
+  let mut w : UInt32 := 0
+  for i in [0:4] do
+    w := w ||| ((digest.get! i).toUInt32 <<< (i * 8).toUInt32)
+  return if w == 0 then 1 else w
+
+def commandSha256Hex (argv : Array String) (cwd : String := "") : String :=
+  let joined := cwd ++ "\x00" ++ String.intercalate "\x00" argv.toList
+  LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes joined.toUTF8)
+
+def commandDigestU64 (argv : Array String) (cwd : String := "") : UInt64 := Id.run do
+  let joined := cwd ++ "\x00" ++ String.intercalate "\x00" argv.toList
+  let digest := LeanSys.Auth.sha256Bytes joined.toUTF8
+  let mut w : UInt64 := 0
+  for i in [0:8] do
+    w := w ||| ((digest.get! i).toUInt64 <<< (i * 8).toUInt64)
+  return if w == 0 then 1 else w
+
+def maxVerifyToExecWindowSecs : UInt64 := 30
+
+def leaseEpochWord (leaseToken grantId : String) : UInt64 := Id.run do
+  let digest := LeanSys.Auth.sha256Bytes (leaseToken ++ "\x00" ++ grantId).toUTF8
+  let mut w : UInt64 := 0
+  for i in [0:8] do
+    w := w ||| ((digest.get! i).toUInt64 <<< (i * 8).toUInt64)
+  return if w == 0 then 1 else w
+
+def principalKindForScope (scopeStr : String) : UInt8 :=
+  match parseGrantScope? scopeStr with
+  | some s => s + 1
+  | none => 0
+
+private def statIdentityTag (id : StatIdentity) : String :=
+  if !id.exists_ then "missing"
+  else s!"{id.dev}:{id.ino}:{id.size}:{id.mtime}:{id.uid}:{id.gid}:{id.mode}"
+
+def validateExecCwd (cwdRaw : String) : IO (Except String (String × StatIdentity)) := do
+  let s := cwdRaw.trimAscii.toString
+  if s.isEmpty || !s.startsWith "/" then
+    return .error s!"Invalid non-absolute working directory `{cwdRaw}`"
+  if (s.splitOn "/").any (· == "..") then
+    return .error s!"Working directory traversal rejected: `{cwdRaw}`"
+  let st ← statPath s
+  if !st.exists_ || st.isSymlink || !st.isDir then
+    return .error s!"Working directory `{s}` does not exist or is a symlink/non-directory"
+  let id ← statIdentity s false
+  if !id.exists_ then
+    return .error s!"Working directory `{s}` stat identity unavailable"
+  return .ok (s, id)
+
+def validateTrustedHelperFile (path : String) : IO (Option StatIdentity) := do
+  let st ← statPath path
+  if !st.exists_ || st.isSymlink || !st.isReg || !st.ownedByRoot then
+    return none
+  if (st.mode &&& 0o022) != 0 || (st.mode &&& 0o111) == 0 then
+    return none
+  let id ← statIdentity path false
+  if !id.exists_ || id.uid != 0 then
+    return none
+  return some id
+
+def validateExecBinaryIdentity
+    (binPath : String)
+    (requireTrustedDir : Bool := true)
+    (execDirs : Array String := trustedExecDirs) : IO (Except String (String × StatIdentity × StatIdentity)) := do
+  let stLink ← statPath binPath
+  if !stLink.exists_ then
+    return .error s!"Executable `{binPath}` not found"
+  let resolved ←
+    if stLink.isSymlink then
+      try
+        let rp ← IO.FS.realPath (System.FilePath.mk binPath)
+        pure rp.toString
+      catch _ =>
+        return .error s!"Executable symlink `{binPath}` could not be resolved"
+    else
+      pure binPath
+  if requireTrustedDir then
+    let dir := ((System.FilePath.mk resolved).parent.map toString).getD ""
+    if !execDirs.contains dir then
+      return .error s!"Executable `{resolved}` is outside trusted system directories"
+  let stTarget ← statPath resolved
+  if !stTarget.exists_ || stTarget.isSymlink || !stTarget.isReg then
+    return .error s!"Executable `{resolved}` is not a regular file"
+  if (stTarget.mode &&& 0o022) != 0 || (stTarget.mode &&& 0o111) == 0 then
+    return .error s!"Executable `{resolved}` has unsafe permissions or is not executable"
+  let linkId ← statIdentity binPath false
+  let targetId ← statIdentity resolved true
+  if !linkId.exists_ || !targetId.exists_ then
+    return .error s!"Executable `{binPath}` stat identity unavailable"
+  return .ok (resolved, linkId, targetId)
+
+def executionEvidenceDigestU64
+    (resolvedBin : String)
+    (argv : Array String)
+    (execCwd normTarget : String)
+    (binLinkId binTargetId cwdId : StatIdentity)
+    (auxId? : Option StatIdentity := none) : UInt64 := Id.run do
+  let auxTag := match auxId? with | some a => statIdentityTag a | none => "no-aux"
+  let material :=
+    String.intercalate "\x00" ([
+      resolvedBin,
+      execCwd,
+      normTarget,
+      statIdentityTag binLinkId,
+      statIdentityTag binTargetId,
+      statIdentityTag cwdId,
+      auxTag
+    ] ++ argv.toList)
+  let digest := LeanSys.Auth.sha256Bytes material.toUTF8
+  let mut w : UInt64 := 0
+  for i in [0:8] do
+    w := w ||| ((digest.get! i).toUInt64 <<< (i * 8).toUInt64)
+  return if w == 0 then 1 else w
+
+private def parseCoreBunkerState (j : JVal) (coreAllowed : Bool) : UInt8 :=
+  match j.field? "bunker_state" with
+  | none | some .null => if coreAllowed then 0 else 1
+  | some (.bool false) => 0
+  | some (.bool true) => 1
+  | some v =>
+    match v.asNat? with
+    | some 0 => 0
+    | some n => if n < 256 then n.toUInt8 else 1
+    | none => 1
+
+def verifyExecWindowAndToctou
+    (principalKind bunkerState : UInt8)
+    (obsTarget execTarget : UInt32)
+    (obsLease liveLease obsTick execNowTick : UInt64)
+    (coreExpiryTick? : Option UInt64)
+    (obsDigest execDigest : UInt64)
+    (grantPresent allowExec : UInt8)
+    (maxWindowSecs : UInt64 := maxVerifyToExecWindowSecs) : UInt32 :=
+  let windowCap := obsTick + maxWindowSecs
+  let deadlineTick := match coreExpiryTick? with
+    | some ce => if ce < windowCap then ce else windowCap
+    | none => windowCap
+  let effNowTick := if execNowTick < obsTick then deadlineTick else execNowTick
+  OrbBin.Spec.verifyPrivdToctouStep
+    principalKind bunkerState obsTarget execTarget obsLease liveLease effNowTick deadlineTick obsDigest execDigest grantPresent allowExec
+
 def handleUpdateHarness (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (req : JVal) : IO Unit := do
-  let leaseToken := ((req.fieldStr? "lease_token").getD "").trimAscii.toString
-  if peer.uid != some 0 then
-    if leaseToken.isEmpty then
-      return (← replyError cfd "update_harness requires root peer UID or an active Core lease_token" 126)
-    let missionId := ((req.fieldStr? "mission_id").getD "system-harness-update").trimAscii.toString
-    let verifyUrl := stripTrailingSlash cfg.apiUrl ++ "/api/privilege-access/verify-and-log"
-    let verifyBody := JVal.obj #[
-      ("mission_id", .str missionId),
-      ("lease_token", .str leaseToken),
-      ("target_host", .str "self"),
-      ("executing_host", .str cfg.hostLabel),
-      ("command", .str "[update_harness]"),
-      ("argv", .arr #[.str "orb-update-harness"]),
-      ("cwd", .str "/root")
-    ]
-    match (← sendJsonRequest "POST" verifyUrl cfg.apiToken (some verifyBody) #[("User-Agent", "orb-privd/1.0")] 15000) with
-    | .ok (status, text, j?) =>
-      let (valid, scopeStr) := match j? with
-        | some j =>
-          let v := (j.fieldBool? "allow_exec").orElse (fun _ =>
-            (j.fieldBool? "valid").orElse (fun _ => j.fieldBool? "allowed")) |>.getD false
-          (v, (j.fieldStr? "scope").getD "")
-        | none => (false, "")
-      let scopeAllowed := scopeStr == "service_deploy" || scopeStr == "root_exec" || scopeStr == "host_admin"
-      if !(200 ≤ status && status < 300) || !valid || !scopeAllowed then
-        return (← replyError cfd s!"Core rejected update_harness lease ({status}, scope={scopeStr}): {text}" 126)
-    | .error err =>
-      return (← replyError cfd s!"Failed contacting Core privilege verifier: {err}" 126)
   let rawHarness := ((req.fieldStr? "name").orElse (fun _ => req.fieldStr? "harness")).getD ""
   let version := (req.fieldStr? "version").getD ""
   let some harness := normalizeHarnessName? rawHarness
     | return (← replyError cfd "Invalid harness name or semantic version" 2)
   if !isStrictSemver version then
     return (← replyError cfd "Invalid harness name or semantic version" 2)
-  let ts ← nowEpoch
-  appendAuditLine cfg.auditLog <| JVal.obj #[
-    ("ts", .uint64 ts),
-    ("action", .str "update_harness"),
-    ("name", .str harness),
-    ("version", .str version),
-    ("peer_uid", match peer.uid with | some u => .nat u.toNat | none => .null),
-    ("peer_pid", match peer.pid with | some p => .nat p.toNat | none => .null)
-  ]
+  let execCwdRaw := ((req.fieldStr? "cwd").filter (!·.isEmpty)).getD "/root"
+  let (execCwd, obsCwdId) ← match (← validateExecCwd execCwdRaw) with
+    | .ok pair => pure pair
+    | .error err => return (← replyError cfd err 126)
   let helperPath := "/usr/local/sbin/orb-update-harness"
-  let helperStat ← statPath helperPath
-  let (cmd, args) : String × Array String :=
-    if helperStat.exists_ && helperStat.isReg then
+  let obsHelperId? ← validateTrustedHelperFile helperPath
+  let (rawCmd, args) : String × Array String :=
+    if obsHelperId?.isSome then
       ("/usr/bin/python3", #[helperPath, harness, version])
     else
       match harness with
@@ -104,26 +224,158 @@ def handleUpdateHarness (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : Pee
       | "opencode" => ("/usr/local/bin/bun", #["install", "-g", s!"opencode-ai@{version}"])
       | "grok"     => ("/usr/local/bin/bun", #["install", "-g", s!"@xai/grok@{version}"])
       | _          => ("/opt/mistral-vibe/bin/pip", #["install", "--no-cache-dir", s!"mistral-vibe=={version}"])
+  let leaseToken := ((req.fieldStr? "lease_token").getD "").trimAscii.toString
+  let missionId := ((req.fieldStr? "mission_id").getD "system-harness-update").trimAscii.toString
+  if peer.uid != some 0 && leaseToken.isEmpty then
+    return (← replyError cfd "update_harness requires root peer UID or an active Core lease_token" 126)
+  let (resolvedCmd, obsLinkId, obsTargetId) ← match (← validateExecBinaryIdentity rawCmd false) with
+    | .ok triple => pure triple
+    | .error err => return (← replyError cfd err 127)
+  let fullArgv := #[resolvedCmd] ++ args
+  let normTarget := normalizeTargetLabel "self" cfg.hostLabel
+  let obsTarget := targetIdWord normTarget
+  let obsDigest := executionEvidenceDigestU64 resolvedCmd fullArgv execCwd normTarget obsLinkId obsTargetId obsCwdId obsHelperId?
+  let obsTick ← nowEpoch
+  let obsLeaseReq := leaseEpochWord leaseToken missionId
+  let verifyUrl := stripTrailingSlash cfg.apiUrl ++ "/api/privilege-access/verify-and-log"
+  let mut verifiedGrantId := "root-peer"
+  if peer.uid != some 0 then
+    let verifyBody := JVal.obj #[
+      ("mission_id", .str missionId),
+      ("lease_token", .str leaseToken),
+      ("target_host", .str "self"),
+      ("executing_host", .str cfg.hostLabel),
+      ("command", .str "[update_harness]"),
+      ("argv", .arr #[.str "orb-update-harness", .str harness, .str version]),
+      ("cwd", .str execCwd)
+    ]
+    match (← sendJsonRequest "POST" verifyUrl cfg.apiToken (some verifyBody) #[("User-Agent", "orb-privd/1.0")] 15000) with
+    | .ok (status, text, j?) =>
+      if !(200 ≤ status && status < 300) then
+        return (← replyError cfd s!"Core rejected update_harness lease ({status}): {text}" 126)
+      let some j := j?
+        | return (← replyError cfd "Core returned non-JSON update_harness verification response" 126)
+      let allowExec := (j.fieldBool? "allow_exec") == some true
+      let coreAllowed := ((j.fieldBool? "allowed").getD allowExec) && allowExec
+      let scopeStr := (j.fieldStr? "scope").getD ""
+      let gid := ((j.fieldStr? "grant_id").getD "").trimAscii.toString
+      let scopeAllowed := scopeStr == "service_deploy" || scopeStr == "root_exec" || scopeStr == "host_admin"
+      let bunkerState := parseCoreBunkerState j coreAllowed
+      let coreExp? := j.fieldUInt64? "expires_at"
+      let pk := principalKindForScope scopeStr
+      let liveLease : UInt64 :=
+        if coreAllowed && scopeAllowed && !gid.isEmpty then
+          match j.fieldUInt64? "lease_epoch" with
+          | some 0 => 0
+          | some _ => obsLeaseReq
+          | none => obsLeaseReq
+        else 0
+      let (_, execCwdId) ← match (← validateExecCwd execCwd) with
+        | .ok pair => pure pair
+        | .error err => return (← replyError cfd s!"TOCTOU working directory check failed: {err}" 126)
+      let (execResolvedCmd, execLinkId, execTargetId) ← match (← validateExecBinaryIdentity rawCmd false) with
+        | .ok triple => pure triple
+        | .error err => return (← replyError cfd s!"TOCTOU executable check failed: {err}" 126)
+      let execHelperId? ←
+        if obsHelperId?.isSome then validateTrustedHelperFile helperPath
+        else pure none
+      if obsHelperId?.isSome && execHelperId?.isNone then
+        return (← replyError cfd "TOCTOU helper script check failed" 126)
+      let execNormTarget := normalizeTargetLabel cfg.hostLabel cfg.hostLabel
+      let execTarget := targetIdWord execNormTarget
+      let execDigest := executionEvidenceDigestU64 execResolvedCmd (#[execResolvedCmd] ++ args) execCwd execNormTarget execLinkId execTargetId execCwdId execHelperId?
+      let execNowTick ← nowEpoch
+      let grantPresent : UInt8 := if !gid.isEmpty then 1 else 0
+      let allowFlag : UInt8 := if coreAllowed && scopeAllowed then 1 else 0
+      let gate := verifyExecWindowAndToctou
+        pk bunkerState obsTarget execTarget obsLeaseReq liveLease obsTick execNowTick coreExp? obsDigest execDigest grantPresent allowFlag
+      if gate != 257 then
+        return (← replyError cfd s!"Core rejected update_harness lease ({status}, scope={scopeStr}, gate={gate}): {text}" 126)
+      verifiedGrantId := gid
+    | .error err =>
+      return (← replyError cfd s!"Failed contacting Core privilege verifier: {err}" 126)
+  else
+    let (_, execCwdId) ← match (← validateExecCwd execCwd) with
+      | .ok pair => pure pair
+      | .error err => return (← replyError cfd s!"Root update_harness TOCTOU cwd check failed: {err}" 126)
+    let (execResolvedCmd, execLinkId, execTargetId) ← match (← validateExecBinaryIdentity rawCmd false) with
+      | .ok triple => pure triple
+      | .error err => return (← replyError cfd s!"Root update_harness TOCTOU binary check failed: {err}" 126)
+    let execHelperId? ←
+      if obsHelperId?.isSome then validateTrustedHelperFile helperPath
+      else pure none
+    if obsHelperId?.isSome && execHelperId?.isNone then
+      return (← replyError cfd "Root update_harness TOCTOU helper check failed" 126)
+    let execNormTarget := normalizeTargetLabel cfg.hostLabel cfg.hostLabel
+    let execTarget := targetIdWord execNormTarget
+    let execDigest := executionEvidenceDigestU64 execResolvedCmd (#[execResolvedCmd] ++ args) execCwd execNormTarget execLinkId execTargetId execCwdId execHelperId?
+    let execNowTick ← nowEpoch
+    let rootGate := verifyExecWindowAndToctou
+      3 0 obsTarget execTarget 1 1 obsTick execNowTick none obsDigest execDigest 1 1
+    if rootGate != 257 then
+      return (← replyError cfd s!"Root update_harness failed TOCTOU verification (gate={rootGate})" 126)
+  let cmdSha := commandSha256Hex fullArgv execCwd
+  let ts ← nowEpoch
+  appendAuditLine cfg.auditLog <| JVal.obj #[
+    ("ts", .uint64 ts),
+    ("action", .str "update_harness"),
+    ("name", .str harness),
+    ("version", .str version),
+    ("grant_id", .str verifiedGrantId),
+    ("command_sha256", .str cmdSha),
+    ("peer_uid", match peer.uid with | some u => .nat u.toNat | none => .null),
+    ("peer_pid", match peer.pid with | some p => .nat p.toNat | none => .null)
+  ]
   try
     let out ← IO.Process.output {
-      cmd := cmd
+      cmd := resolvedCmd
       args := args
+      cwd := some (System.FilePath.mk execCwd)
       env := #[
         ("PATH", some "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
         ("HOME", some "/root"),
         ("LANG", some "C.UTF-8")
       ]
     }
+    let postTs ← nowEpoch
+    appendAuditLine cfg.auditLog <| JVal.obj #[
+      ("ts", .uint64 postTs),
+      ("action", .str "update_harness_complete"),
+      ("name", .str harness),
+      ("version", .str version),
+      ("grant_id", .str verifiedGrantId),
+      ("exit_code", .nat out.exitCode.toNat),
+      ("command_sha256", .str cmdSha)
+    ]
+    if peer.uid != some 0 && !leaseToken.isEmpty then
+      let postBody := JVal.obj #[
+        ("mission_id", .str missionId),
+        ("lease_token", .str leaseToken),
+        ("target_host", .str "self"),
+        ("executing_host", .str cfg.hostLabel),
+        ("command", .str "[update_harness]"),
+        ("argv", .arr #[.str "orb-update-harness", .str harness, .str version]),
+        ("cwd", .str execCwd),
+        ("exit_code", .nat out.exitCode.toNat),
+        ("command_sha256", .str cmdSha)
+      ]
+      let _ ← sendJsonRequest "POST" verifyUrl cfg.apiToken (some postBody) #[("User-Agent", "orb-privd/1.0")] 10000
     replyJson cfd <| JVal.obj #[
       ("ok", .bool (out.exitCode == 0)),
       ("exit_code", .nat out.exitCode.toNat),
+      ("command_sha256", .str cmdSha),
       ("stdout", .str out.stdout),
       ("stderr", .str out.stderr)
     ]
   catch e =>
     replyError cfd s!"Harness update failed: {e}" 1
 
-def handleExec (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (req : JVal) : IO Unit := do
+def handleExec
+    (cfd : LeanSys.Posix.Fd)
+    (cfg : PrivdConfig)
+    (peer : PeerCred)
+    (req : JVal)
+    (betweenVerifyAndExecHook? : Option (IO Unit) := none) : IO Unit := do
   if (req.field? "api_url").isSome || (req.field? "api_token").isSome then
     return (← replyError cfd "Client-supplied api_url/api_token are forbidden; orb-privd uses its pinned Core endpoint" 2)
   let targetHost := ((req.fieldStr? "target_host").getD "self").trimAscii.toString
@@ -142,10 +394,30 @@ def handleExec (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (r
   if leaseToken.isEmpty || missionId.isEmpty || argv.isEmpty then
     return (← replyError cfd "mission_id, lease_token, and argv are required" 2)
   let cwdStr := ((req.fieldStr? "cwd").filter (!·.isEmpty)).getD "/root"
+  let (execCwd, obsCwdId) ← match (← validateExecCwd cwdStr) with
+    | .ok pair => pure pair
+    | .error err => return (← replyError cfd err 126)
   let mut envPairs : Array (String × String) := #[]
   if let some envObj := (req.field? "env") >>= JVal.asObj? then
     for (ek, ev) in envObj do
       envPairs := envPairs.push (ek, (ev.asStr?).getD "")
+  let some resolvedBin0 ← resolveTrustedBinary? argv[0]! cfg.trustedDirs
+    | return (← replyError cfd s!"Executable `{argv[0]!}` not found in trusted system directories" 127)
+  let (resolvedBin, obsBinLinkId, obsBinTargetId) ← match (← validateExecBinaryIdentity resolvedBin0 true cfg.trustedDirs) with
+    | .ok triple => pure triple
+    | .error err => return (← replyError cfd err 127)
+  let timeoutBin? ← resolveTrustedBinary? "timeout" cfg.trustedDirs
+  let obsTimeoutId? ← match timeoutBin? with
+    | some tb =>
+      match (← validateExecBinaryIdentity tb true cfg.trustedDirs) with
+      | .ok (_, _, tid) => pure (some tid)
+      | .error _ => pure none
+    | none => pure none
+  let normTarget := normalizeTargetLabel targetHost cfg.hostLabel
+  let obsTarget := targetIdWord normTarget
+  let obsDigest := executionEvidenceDigestU64 resolvedBin argv execCwd normTarget obsBinLinkId obsBinTargetId obsCwdId obsTimeoutId?
+  let obsLeaseReq := leaseEpochWord leaseToken missionId
+  let obsTick ← nowEpoch
   let commandStr := String.intercalate " " argv.toList
   let verifyUrl := stripTrailingSlash cfg.apiUrl ++ "/api/privilege-access/verify-and-log"
   let preBody := JVal.obj #[
@@ -155,9 +427,9 @@ def handleExec (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (r
     ("executing_host", .str cfg.hostLabel),
     ("command", .str s!"[pre-exec] {commandStr}"),
     ("argv", .arr (argv.map .str)),
-    ("cwd", .str cwdStr)
+    ("cwd", .str execCwd)
   ]
-  let (scopeStr, allowedUnits, reqForceCmd, grantId) ←
+  let (scopeStr, allowedUnits, reqForceCmd, grantId, allowExecFlag, bunkerState, expTickOpt, liveLease) ←
     match (← sendJsonRequest "POST" verifyUrl cfg.apiToken (some preBody) #[("User-Agent", "orb-privd/1.0")] 15000) with
     | .ok (status, text, j?) =>
       if !(200 ≤ status && status < 300) then
@@ -165,11 +437,11 @@ def handleExec (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (r
       match j? with
       | none => return (← replyError cfd "Core returned non-JSON privilege verification response" 126)
       | some j =>
-        let valid := (j.fieldBool? "allow_exec").orElse (fun _ =>
-          (j.fieldBool? "valid").orElse (fun _ => j.fieldBool? "allowed")) |>.getD false
-        if !valid then
+        let allowExec := (j.fieldBool? "allow_exec") == some true
+        let coreAllowed := ((j.fieldBool? "allowed").getD allowExec) && allowExec
+        if !coreAllowed then
           return (← replyError cfd "Lease denied by Core" 126)
-        let sc := (j.fieldStr? "scope").getD "root_exec"
+        let sc := ((j.fieldStr? "scope").getD "").trimAscii.toString
         let unitsArr := match j.fieldArr? "allowed_units" with
           | some arr => arr.filterMap JVal.asStr?
           | none => #[]
@@ -177,26 +449,60 @@ def handleExec (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (r
           | some u => if u.isEmpty then unitsArr else unitsArr.push u
           | none => unitsArr
         let rf := (j.fieldBool? "require_force_cmd").getD false
-        let gid := (j.fieldStr? "grant_id").getD ""
-        pure (sc, units, rf, gid)
+        let gid := ((j.fieldStr? "grant_id").getD "").trimAscii.toString
+        if gid.isEmpty then
+          return (← replyError cfd "Core privilege response missing grant_id" 126)
+        let bk := parseCoreBunkerState j coreAllowed
+        let expOpt := j.fieldUInt64? "expires_at"
+        let liveL : UInt64 :=
+          if coreAllowed && !gid.isEmpty && (parseGrantScope? sc).isSome then
+            match j.fieldUInt64? "lease_epoch" with
+            | some 0 => 0
+            | some _ => obsLeaseReq
+            | none => obsLeaseReq
+          else 0
+        pure (sc, units, rf, gid, (if coreAllowed then (1 : UInt8) else 0), bk, expOpt, liveL)
     | .error err =>
       return (← replyError cfd s!"Failed contacting Core privilege verifier: {err}" 126)
 
-  match (← checkScopeRestrictions scopeStr allowedUnits argv (some cwdStr) envPairs reqForceCmd) with
+  match (← checkScopeRestrictions scopeStr allowedUnits argv (some execCwd) envPairs reqForceCmd cfg.trustedDirs) with
   | .error err =>
     return (← replyError cfd err 126)
   | .ok _ => pure ()
 
-  let some resolvedBin ← resolveTrustedBinary? argv[0]!
-    | return (← replyError cfd s!"Executable `{argv[0]!}` not found in trusted system directories" 127)
-  let cwdStat ← statPath cwdStr
-  let execCwd := if cwdStat.exists_ && cwdStat.isDir then cwdStr else "/root"
+  if let some hook := betweenVerifyAndExecHook? then
+    hook
+
+  let (_, execCwdId) ← match (← validateExecCwd execCwd) with
+    | .ok pair => pure pair
+    | .error err => return (← replyError cfd s!"Rejected by orb-privd TOCTOU cwd check: {err}" 126)
+  let some resolvedBinPost0 ← resolveTrustedBinary? argv[0]! cfg.trustedDirs
+    | return (← replyError cfd s!"Rejected by orb-privd TOCTOU binary resolution (`{argv[0]!}`)" 126)
+  let (resolvedBinPost, execBinLinkId, execBinTargetId) ← match (← validateExecBinaryIdentity resolvedBinPost0 true cfg.trustedDirs) with
+    | .ok triple => pure triple
+    | .error err => return (← replyError cfd s!"Rejected by orb-privd TOCTOU binary check: {err}" 126)
+  let (useTimeoutBin?, execTimeoutId?) ← match timeoutBin?, obsTimeoutId? with
+    | some tb, some _ =>
+      match (← validateExecBinaryIdentity tb true cfg.trustedDirs) with
+      | .ok (rtb, _, tid) => pure (some rtb, some tid)
+      | .error _ => pure (none, none)
+    | _, _ => pure (none, none)
+  let pk := principalKindForScope scopeStr
+  let execNormTarget := normalizeTargetLabel cfg.hostLabel cfg.hostLabel
+  let execTarget := targetIdWord execNormTarget
+  let execDigest := executionEvidenceDigestU64 resolvedBinPost argv execCwd execNormTarget execBinLinkId execBinTargetId execCwdId execTimeoutId?
+  let execNowTick ← nowEpoch
+  let grantPresent : UInt8 := if !grantId.isEmpty then 1 else 0
+  let toctouGate := verifyExecWindowAndToctou
+    pk bunkerState obsTarget execTarget obsLeaseReq liveLease obsTick execNowTick expTickOpt obsDigest execDigest grantPresent allowExecFlag
+  if toctouGate != 257 then
+    return (← replyError cfd s!"Rejected by orb-privd TOCTOU gate ({toctouGate})" 126)
+  let cmdSha := commandSha256Hex argv execCwd
   let rawTimeout := (req.fieldNat? "timeout_secs").getD 600
   let boundedTimeoutSecs := Nat.max 1 (Nat.min rawTimeout 600)
-  let timeoutBin ← resolveTrustedBinary? "timeout"
-  let (execCmd, execArgs) := match timeoutBin with
-    | some tb => (tb, #[s!"{boundedTimeoutSecs}s", resolvedBin] ++ argv.extract 1 argv.size)
-    | none => (resolvedBin, argv.extract 1 argv.size)
+  let (execCmd, execArgs) := match useTimeoutBin? with
+    | some tb => (tb, #[s!"{boundedTimeoutSecs}s", resolvedBinPost] ++ argv.extract 1 argv.size)
+    | none => (resolvedBinPost, argv.extract 1 argv.size)
   let t0Ms ← IO.monoMsNow
   let out ← try
     IO.Process.output {
@@ -221,10 +527,12 @@ def handleExec (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (r
     ("ts", .uint64 ts),
     ("action", .str "exec"),
     ("mission_id", .str missionId),
+    ("grant_id", .str grantId),
     ("scope", .str scopeStr),
     ("argv", .arr (argv.map .str)),
     ("exit_code", .nat out.exitCode.toNat),
     ("duration_ms", .nat durationMs),
+    ("command_sha256", .str cmdSha),
     ("stdout_sha256", .str stdoutSha),
     ("peer_uid", match peer.uid with | some u => .nat u.toNat | none => .null)
   ]
@@ -235,9 +543,10 @@ def handleExec (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (r
     ("executing_host", .str cfg.hostLabel),
     ("command", .str commandStr),
     ("argv", .arr (argv.map .str)),
-    ("cwd", .str cwdStr),
+    ("cwd", .str execCwd),
     ("exit_code", .nat out.exitCode.toNat),
     ("duration_ms", .nat durationMs),
+    ("command_sha256", .str cmdSha),
     ("stdout_sha256", .str stdoutSha)
   ]
   let _ ← sendJsonRequest "POST" verifyUrl cfg.apiToken (some postBody) #[("User-Agent", "orb-privd/1.0")] 10000
@@ -245,6 +554,7 @@ def handleExec (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (r
     ("ok", .bool (out.exitCode == 0)),
     ("exit_code", .nat out.exitCode.toNat),
     ("duration_ms", .nat durationMs),
+    ("command_sha256", .str cmdSha),
     ("stdout_sha256", .str stdoutSha),
     ("stdout", .str out.stdout),
     ("stderr", .str out.stderr)
