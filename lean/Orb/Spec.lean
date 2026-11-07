@@ -11571,4 +11571,737 @@ theorem repo_diff_budget_clamps_output_bytes
         · simp [hd]
         · simp only [hd, ↓reduceIte]; exact UInt32.le_refl maxB
 
+-- ===========================================================================
+-- Sidebar Long-Press / Drag / Spring-Load & Move-Target Admission
+-- (`orb_sidebar_move_target_admit` & `orb_sidebar_drag_step`)
+-- ===========================================================================
+
+structure SidebarMoveTargetCheck where
+  itemKind           : UInt8
+  dstIsSelfOrSubtree : UInt8
+  srcProjectOrd      : UInt32
+  srcPathOrd         : UInt32
+  srcParentOrd       : UInt32
+  dstProjectOrd      : UInt32
+  dstPathOrd         : UInt32
+  deriving Repr, DecidableEq
+
+def SidebarMoveTargetCheck.Admissible (c : SidebarMoveTargetCheck) : Bool :=
+  (decide (c.itemKind ≤ 3) && c.srcProjectOrd != 0 && c.dstProjectOrd != 0) &&
+  !(c.itemKind == 1 && c.dstIsSelfOrSubtree == 1) &&
+  !(c.srcProjectOrd == c.dstProjectOrd &&
+    (if c.itemKind == 1 || c.itemKind == 2 then c.srcParentOrd else c.srcPathOrd) == c.dstPathOrd)
+
+theorem sidebarMoveTarget_admit_eq (c : SidebarMoveTargetCheck) :
+    (sidebarMoveTargetAdmit
+      c.itemKind
+      c.dstIsSelfOrSubtree
+      c.srcProjectOrd
+      c.srcPathOrd
+      c.srcParentOrd
+      c.dstProjectOrd
+      c.dstPathOrd == 1) = c.Admissible := by
+  unfold SidebarMoveTargetCheck.Admissible sidebarMoveTargetAdmit
+  cases hm : (
+    (decide (c.itemKind ≤ 3) && c.srcProjectOrd != 0 && c.dstProjectOrd != 0) &&
+    !(c.itemKind == 1 && c.dstIsSelfOrSubtree == 1) &&
+    !(c.srcProjectOrd == c.dstProjectOrd &&
+      (if c.itemKind == 1 || c.itemKind == 2 then c.srcParentOrd else c.srcPathOrd) == c.dstPathOrd)
+  )
+  · simp only [hm, Bool.false_eq_true, ↓reduceIte]
+    decide
+  · simp only [hm, ↓reduceIte]
+    decide
+
+def sidebarMoveTargetMetaGate : MetaGateSpec SidebarMoveTargetCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    sidebarMoveTargetAdmit
+      c.itemKind
+      c.dstIsSelfOrSubtree
+      c.srcProjectOrd
+      c.srcPathOrd
+      c.srcParentOrd
+      c.dstProjectOrd
+      c.dstPathOrd == 1
+  sound c hg := by
+    rw [← sidebarMoveTarget_admit_eq c]
+    exact hg
+  complete c hadm := by
+    rw [sidebarMoveTarget_admit_eq c]
+    exact hadm
+  posWitness := ⟨0, 0, 1, 0, 0, 2, 0⟩
+  negWitness := ⟨1, 1, 1, 5, 0, 1, 5⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def sidebarMoveTargetScopedAuthority : ScopedAuthority SidebarMoveTargetCheck where
+  admit c :=
+    sidebarMoveTargetAdmit
+      c.itemKind
+      c.dstIsSelfOrSubtree
+      c.srcProjectOrd
+      c.srcPathOrd
+      c.srcParentOrd
+      c.dstProjectOrd
+      c.dstPathOrd == 1
+  scopeValid c := c.Admissible
+  sound c h := sidebarMoveTargetMetaGate.sound c h
+
+/-- Corollary (`ScopedAuthority` — `orb_sidebar_move_target_admit`):
+    1. Folder self-drop and subtree-cycle drops (`itemKind = 1, dstIsSelfOrSubtree = 1`)
+       are unconditionally rejected (`0`) regardless of project/path ordinals.
+    2. Same-project drops into the item's current parent/folder are rejected (`0`) as no-ops:
+       - missions (`itemKind = 0`) and crons (`itemKind = 3`) when `srcPathOrd = dstPathOrd`,
+       - folders (`itemKind = 1`) and files (`itemKind = 2`) when `srcParentOrd = dstPathOrd`.
+    3. Cross-project moves (`srcProjectOrd != dstProjectOrd`, both non-zero) with
+       `dstIsSelfOrSubtree = 0` are admitted (`1`) even when `srcPathOrd = dstPathOrd`
+       and `srcParentOrd = dstPathOrd` (same relative folder path in another project). -/
+theorem sidebar_move_rejects_folder_cycle_and_noop
+    (srcProj srcPath srcParent dstProj dstPath : UInt32)
+    (h_src_nz : srcProj != 0)
+    (h_dst_nz : dstProj != 0)
+    (h_diff_proj : (srcProj == dstProj) = false) :
+    sidebarMoveTargetAdmit 1 1 srcProj srcPath srcParent dstProj dstPath = 0 ∧
+    sidebarMoveTargetAdmit 0 0 srcProj dstPath srcParent srcProj dstPath = 0 ∧
+    sidebarMoveTargetAdmit 3 0 srcProj dstPath srcParent srcProj dstPath = 0 ∧
+    sidebarMoveTargetAdmit 1 0 srcProj srcPath dstPath srcProj dstPath = 0 ∧
+    sidebarMoveTargetAdmit 2 0 srcProj srcPath dstPath srcProj dstPath = 0 ∧
+    sidebarMoveTargetAdmit 1 0 srcProj dstPath dstPath dstProj dstPath = 1 := by
+  have hp_refl : (srcProj == srcProj) = true := beq_self_eq_true srcProj
+  have hd_refl : (dstPath == dstPath) = true := beq_self_eq_true dstPath
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+  · unfold sidebarMoveTargetAdmit
+    have hk : ((1 : UInt8) == 1) = true := rfl
+    simp [hk]
+  · unfold sidebarMoveTargetAdmit
+    have hk1 : ((0 : UInt8) == 1) = false := rfl
+    have hk2 : ((0 : UInt8) == 2) = false := rfl
+    simp [hk1, hk2, hp_refl, hd_refl]
+  · unfold sidebarMoveTargetAdmit
+    have hk1 : ((3 : UInt8) == 1) = false := rfl
+    have hk2 : ((3 : UInt8) == 2) = false := rfl
+    simp [hk1, hk2, hp_refl, hd_refl]
+  · unfold sidebarMoveTargetAdmit
+    have hk1 : ((1 : UInt8) == 1) = true := rfl
+    simp [hk1, hp_refl, hd_refl]
+  · unfold sidebarMoveTargetAdmit
+    have hk1 : ((2 : UInt8) == 1) = false := rfl
+    have hk2 : ((2 : UInt8) == 2) = true := rfl
+    simp [hk1, hk2, hp_refl, hd_refl]
+  · unfold sidebarMoveTargetAdmit
+    have hk_le : decide ((1 : UInt8) ≤ 3) = true := rfl
+    have hk1 : ((1 : UInt8) == 1) = true := rfl
+    have hsub : ((0 : UInt8) == 1) = false := rfl
+    simp [hk_le, hk1, hsub, h_src_nz, h_dst_nz, h_diff_proj]
+
+structure SidebarDragCheck where
+  phase            : UInt8
+  eventKind        : UInt8
+  rowMovable       : UInt8
+  targetCollapsed  : UInt8
+  targetAdmitted   : UInt8
+  distSq           : UInt32
+  elapsedMs        : UInt32
+  springElapsedMs  : UInt32
+  hoverTargetOrd   : UInt32
+  springTargetOrd  : UInt32
+  edgeTopDistPx    : UInt32
+  edgeBottomDistPx : UInt32
+  deriving Repr, DecidableEq
+
+def SidebarDragCheck.Eval (d : SidebarDragCheck) : UInt64 :=
+  sidebarDragStep
+    d.phase
+    d.eventKind
+    d.rowMovable
+    d.targetCollapsed
+    d.targetAdmitted
+    d.distSq
+    d.elapsedMs
+    d.springElapsedMs
+    d.hoverTargetOrd
+    d.springTargetOrd
+    d.edgeTopDistPx
+    d.edgeBottomDistPx
+
+def SidebarDragCheck.DropAdmissible (d : SidebarDragCheck) : Bool :=
+  d.phase == 3 &&
+  d.eventKind == 4 &&
+  d.hoverTargetOrd != 0 &&
+  d.targetAdmitted == 1
+
+theorem sidebarScrollDirBits_cases (edgeTop edgeBot : UInt32) :
+    sidebarScrollDirBits edgeTop edgeBot = 0 ∨
+    sidebarScrollDirBits edgeTop edgeBot = 131072 ∨
+    sidebarScrollDirBits edgeTop edgeBot = 262144 := by
+  unfold sidebarScrollDirBits
+  split
+  · right; left; decide
+  · split
+    · right; right; decide
+    · left; rfl
+
+theorem sidebarScrollStepPx_le_10 (edgeTop edgeBot : UInt32) :
+    sidebarScrollStepPx edgeTop edgeBot ≤ 10 := by
+  unfold sidebarScrollStepPx
+  dsimp only [GT.gt]
+  generalize
+    (if 0 < if edgeTop < 36 then (((36 - edgeTop).toUInt64 * 10 + 35) / 36).toUInt32 else 0 then
+       if edgeTop < 36 then (((36 - edgeTop).toUInt64 * 10 + 35) / 36).toUInt32 else 0
+     else if (!decide (edgeTop < 36) && decide (edgeBot < 36)) = true then
+       (((36 - edgeBot).toUInt64 * 10 + 35) / 36).toUInt32
+     else 0) = rawPx
+  split
+  · decide
+  · next hnot =>
+    exact UInt32.le_iff_toNat_le.mpr (Nat.not_lt.mp fun hlt =>
+      hnot (UInt32.lt_iff_toNat_lt.mpr hlt))
+
+theorem sidebarScrollStepPx_cases (edgeTop edgeBot : UInt32) :
+    sidebarScrollStepPx edgeTop edgeBot = 0 ∨
+    sidebarScrollStepPx edgeTop edgeBot = 1 ∨
+    sidebarScrollStepPx edgeTop edgeBot = 2 ∨
+    sidebarScrollStepPx edgeTop edgeBot = 3 ∨
+    sidebarScrollStepPx edgeTop edgeBot = 4 ∨
+    sidebarScrollStepPx edgeTop edgeBot = 5 ∨
+    sidebarScrollStepPx edgeTop edgeBot = 6 ∨
+    sidebarScrollStepPx edgeTop edgeBot = 7 ∨
+    sidebarScrollStepPx edgeTop edgeBot = 8 ∨
+    sidebarScrollStepPx edgeTop edgeBot = 9 ∨
+    sidebarScrollStepPx edgeTop edgeBot = 10 := by
+  have hn : (sidebarScrollStepPx edgeTop edgeBot).toNat ≤ 10 := by
+    simpa using UInt32.le_iff_toNat_le.mp (sidebarScrollStepPx_le_10 edgeTop edgeBot)
+  generalize hk : (sidebarScrollStepPx edgeTop edgeBot).toNat = k at hn
+  have heq : sidebarScrollStepPx edgeTop edgeBot = UInt32.ofNat k :=
+    UInt32.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq (by
+      change (sidebarScrollStepPx edgeTop edgeBot).toNat = k % UInt32.size
+      rw [hk]
+      exact (Nat.mod_eq_of_lt (by unfold UInt32.size; omega)).symm))
+  rcases (show k = 0 ∨ k = 1 ∨ k = 2 ∨ k = 3 ∨ k = 4 ∨ k = 5 ∨
+      k = 6 ∨ k = 7 ∨ k = 8 ∨ k = 9 ∨ k = 10 by omega) with
+    rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;>
+    simp [heq]
+
+theorem u8_nonzero_le3_cases (p : UInt8) (h_not_gt : ¬(3 < p)) (hp0 : (p == 0) = false) :
+    p = 1 ∨ p = 2 ∨ p = 3 := by
+  have hp_le : p.toNat ≤ 3 := by
+    have hlt := Nat.not_lt.mp fun h => h_not_gt (UInt8.lt_iff_toNat_lt.mpr h)
+    simpa using hlt
+  have hn0 : p.toNat ≠ 0 := fun h => by
+    have hpz : p = 0 := UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h)
+    rw [hpz] at hp0
+    contradiction
+  generalize hk : p.toNat = k at hp_le hn0
+  rcases (show k = 1 ∨ k = 2 ∨ k = 3 by omega) with rfl | rfl | rfl
+  · left; exact UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq hk)
+  · right; left; exact UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq hk)
+  · right; right; exact UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq hk)
+
+theorem sidebarDrag_commitDrop_eq (d : SidebarDragCheck) :
+    (((d.Eval &&& 0xFFFFFFFF) >>> 8 &&& 0xFF) == 4) = d.DropAdmissible := by
+  unfold SidebarDragCheck.Eval SidebarDragCheck.DropAdmissible sidebarDragStep
+  rw [pack32_lo]
+  dsimp only [GT.gt, GE.ge]
+  split
+  · next hp_oob =>
+    have hnot34 : (d.phase == 3 && d.eventKind == 4) = false := by
+      cases hp3 : (d.phase == 3)
+      · rfl
+      · cases he4 : (d.eventKind == 4)
+        · rfl
+        · rw [beq_iff_eq.mp hp3, beq_iff_eq.mp he4] at hp_oob
+          exact absurd hp_oob (by decide)
+    rw [hnot34]
+    simp only [Bool.false_and]
+    decide
+  · next hp_ok =>
+    have hp_not_gt : ¬(3 < d.phase) := fun h =>
+      hp_ok (Bool.or_eq_true_iff.mpr (Or.inl (decide_eq_true h)))
+    have he_not_gt : ¬(5 < d.eventKind) := fun h =>
+      hp_ok (Bool.or_eq_true_iff.mpr (Or.inr (decide_eq_true h)))
+    split
+    · next he5 =>
+      have he4_f : (d.eventKind == 4) = false := by rw [beq_iff_eq.mp he5]; rfl
+      rw [he4_f]
+      simp only [Bool.and_false, Bool.false_and]
+      split <;> decide
+    · next he5 =>
+      split
+      · next he0 =>
+        have he4_f : (d.eventKind == 4) = false := by rw [beq_iff_eq.mp he0]; rfl
+        rw [he4_f]
+        simp only [Bool.and_false, Bool.false_and]
+        split <;> decide
+      · next he0 =>
+        split
+        · next hp0 =>
+          have hp3_f : (d.phase == 3) = false := by rw [beq_iff_eq.mp hp0]; rfl
+          rw [hp3_f]
+          simp only [Bool.false_and]
+          decide
+        · next hp0 =>
+          have hp0_f : (d.phase == 0) = false := Bool.eq_false_iff.mpr hp0
+          split
+          · next he1 =>
+            have he4_f : (d.eventKind == 4) = false := by rw [beq_iff_eq.mp he1]; rfl
+            rw [he4_f]
+            simp only [Bool.and_false, Bool.false_and]
+            split
+            · decide
+            · rcases u8_nonzero_le3_cases d.phase hp_not_gt hp0_f with hp_eq | hp_eq | hp_eq <;>
+                (rw [hp_eq]; decide)
+          · next he1 =>
+            split
+            · next he2 =>
+              have he4_f : (d.eventKind == 4) = false := by rw [beq_iff_eq.mp he2]; rfl
+              rw [he4_f]
+              simp only [Bool.and_false, Bool.false_and]
+              generalize hnp :
+                (if (d.phase == 3 || (d.phase == 1 || d.phase == 2) && decide (36 ≤ d.distSq)) = true
+                  then (3 : UInt8)
+                  else if (d.phase == 2 && decide (d.distSq < 36)) = true then 2 else 1) = np
+              generalize hef :
+                (if ((d.phase == 1 || d.phase == 2) && decide (36 ≤ d.distSq)) = true then (2 : UInt8) else 0) = ef
+              have hnp_cases : np = 1 ∨ np = 2 ∨ np = 3 := by
+                subst hnp
+                split
+                · right; right; rfl
+                · split
+                  · right; left; rfl
+                  · left; rfl
+              have hef_cases : ef = 0 ∨ ef = 2 := by
+                subst hef
+                split
+                · right; rfl
+                · left; rfl
+              rcases sidebarScrollDirBits_cases d.edgeTopDistPx d.edgeBottomDistPx with hdir | hdir | hdir <;>
+                rcases sidebarScrollStepPx_cases d.edgeTopDistPx d.edgeBottomDistPx with
+                  hst | hst | hst | hst | hst | hst | hst | hst | hst | hst | hst <;>
+                rcases hnp_cases with rfl | rfl | rfl <;>
+                rcases hef_cases with rfl | rfl <;>
+                (rw [hdir, hst]; decide)
+            · next he2 =>
+              split
+              · next he3 =>
+                have he4_f : (d.eventKind == 4) = false := by rw [beq_iff_eq.mp he3]; rfl
+                rw [he4_f]
+                simp only [Bool.and_false, Bool.false_and]
+                split
+                · decide
+                · rcases u8_nonzero_le3_cases d.phase hp_not_gt hp0_f with hp_eq | hp_eq | hp_eq <;>
+                    (rw [hp_eq]; decide)
+              · next he3 =>
+                have he4_t : (d.eventKind == 4) = true := by
+                  have he_le : d.eventKind.toNat ≤ 5 := by
+                    have hlt := Nat.not_lt.mp fun h => he_not_gt (UInt8.lt_iff_toNat_lt.mpr h)
+                    simpa using hlt
+                  have hn5 : d.eventKind.toNat ≠ 5 := fun h =>
+                    he5 (beq_iff_eq.mpr (UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h)))
+                  have hn0 : d.eventKind.toNat ≠ 0 := fun h =>
+                    he0 (beq_iff_eq.mpr (UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h)))
+                  have hn1 : d.eventKind.toNat ≠ 1 := fun h =>
+                    he1 (beq_iff_eq.mpr (UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h)))
+                  have hn2 : d.eventKind.toNat ≠ 2 := fun h =>
+                    he2 (beq_iff_eq.mpr (UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h)))
+                  have hn3 : d.eventKind.toNat ≠ 3 := fun h =>
+                    he3 (beq_iff_eq.mpr (UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h)))
+                  generalize hk : d.eventKind.toNat = k at he_le hn5 hn0 hn1 hn2 hn3
+                  have hk4 : k = 4 := by omega
+                  subst hk4
+                  exact beq_iff_eq.mpr (UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq hk))
+                rw [he4_t]
+                simp only [Bool.and_true]
+                split
+                · next hp1 =>
+                  have hp3_f : (d.phase == 3) = false := by rw [beq_iff_eq.mp hp1]; rfl
+                  rw [hp3_f]
+                  simp only [Bool.false_and]
+                  decide
+                · next hp1 =>
+                  split
+                  · next hp2 =>
+                    have hp3_f : (d.phase == 3) = false := by rw [beq_iff_eq.mp hp2]; rfl
+                    rw [hp3_f]
+                    simp only [Bool.false_and]
+                    decide
+                  · next hp2 =>
+                    have hp3_t : (d.phase == 3) = true := by
+                      rcases u8_nonzero_le3_cases d.phase hp_not_gt hp0_f with h1 | h2 | h3
+                      · exact absurd (beq_iff_eq.mpr h1) hp1
+                      · exact absurd (beq_iff_eq.mpr h2) hp2
+                      · exact beq_iff_eq.mpr h3
+                    rw [hp3_t]
+                    simp only [Bool.true_and]
+                    cases hhov : (d.hoverTargetOrd != 0) <;>
+                      cases hadm : (d.targetAdmitted == 1) <;>
+                      (simp only [hhov, hadm, Bool.false_and, Bool.true_and, Bool.false_eq_true, ↓reduceIte];
+                       decide)
+
+def sidebarDragDropMetaGate : MetaGateSpec SidebarDragCheck
+    (fun d => d.DropAdmissible = true) where
+  gate d :=
+    (((d.Eval &&& 0xFFFFFFFF) >>> 8 &&& 0xFF) == 4)
+  sound d hg := by
+    rw [← sidebarDrag_commitDrop_eq d]
+    exact hg
+  complete d hadm := by
+    rw [sidebarDrag_commitDrop_eq d]
+    exact hadm
+  posWitness := ⟨3, 4, 1, 0, 1, 100, 300, 0, 7, 0, 100, 100⟩
+  negWitness := ⟨3, 4, 1, 0, 0, 100, 300, 0, 7, 0, 100, 100⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def effectiveSidebarDragCheck (phase : UInt8) (e : SidebarDragCheck) : SidebarDragCheck :=
+  { e with phase := phase }
+
+def sidebarDragDropMachineStep (phase : UInt8) (e : SidebarDragCheck) :
+    UInt8 × List UInt32 :=
+  let e' := effectiveSidebarDragCheck phase e
+  let w := e'.Eval
+  let lo32 : UInt32 := (w &&& 0xFFFFFFFF).toUInt32
+  let nextPhase : UInt8 := (lo32 &&& 0xFF).toUInt8
+  let commit := sidebarDragDropMetaGate.gate e'
+  (nextPhase, if commit then [e.hoverTargetOrd] else [])
+
+def sidebarDragMetaStepSpec : MetaStepSpec UInt8 SidebarDragCheck UInt32 where
+  safety := {
+    step := sidebarDragDropMachineStep
+    authorized := fun s e eff =>
+      eff == e.hoverTargetOrd && (effectiveSidebarDragCheck s e).DropAdmissible
+    sound := fun s e eff h_in => by
+      dsimp [sidebarDragDropMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := sidebarDragDropMetaGate.sound (effectiveSidebarDragCheck s e) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := 0
+    step := sidebarDragDropMachineStep
+    progressRequired := fun s e => (effectiveSidebarDragCheck s e).DropAdmissible
+    expectedEffect := fun e eff => eff == e.hoverTargetOrd
+    live := fun s e h_req => by
+      have h_gate := sidebarDragDropMetaGate.complete (effectiveSidebarDragCheck s e) h_req
+      dsimp [sidebarDragDropMachineStep]
+      simp [h_gate]
+    traceEvents := [
+      ⟨0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 100, 100⟩,
+      ⟨1, 1, 1, 0, 0, 4, 260, 0, 0, 0, 100, 100⟩,
+      ⟨2, 2, 1, 0, 1, 64, 300, 0, 7, 0, 100, 100⟩
+    ]
+    posEvent := ⟨3, 4, 1, 0, 1, 64, 350, 0, 7, 0, 100, 100⟩
+    negEvent := ⟨3, 4, 1, 0, 0, 64, 350, 0, 7, 0, 100, 100⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := sidebarDragDropMachineStep
+    cpuFuel := fun s e => 10 + ((sidebarDragDropMachineStep s e).2).length
+    inputBytes := fun _ => 36
+    outputBytes := fun s e => 4 + 4 * ((sidebarDragDropMachineStep s e).2).length
+    c0 := 11
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 8
+    fuel_bound := fun s e => by
+      dsimp [sidebarDragDropMachineStep]
+      split <;> simp
+    eff_bound := fun s e => by
+      dsimp [sidebarDragDropMachineStep]
+      split <;> simp
+    out_bound := fun s e => by
+      dsimp [sidebarDragDropMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- Corollary 1 (`ClockDiscipline` — Quick-Click Preservation & Long-Press Lift):
+    1. While `phase = 1 (pressing)` with `elapsedMs < 260` and `distSq < 36`, `holdTick`
+       never arms (`nextPhase = 1, effectCode = 0`) and `pointerUp` cleanly returns `0`
+       (`nextPhase = 0, effectCode = 0, eatClickBit = 0`) so normal row clicks navigate/toggle
+       without latency or click suppression.
+    2. Once `elapsedMs ≥ 260` with `distSq < 36`, `holdTick` transitions `1 → 2 (armed)`
+       with `effectCode = 1 (armLift)`, and releasing (`pointerUp`) in `phase = 2` emits
+       `effectCode = 5 (openMovePicker)` with `eatClickBit = 1` (`bit 16`) so the synthetic
+       trailing click never navigates the underlying row. -/
+theorem sidebar_drag_quick_click_vs_long_press_picker
+    (rowMovable targetCollapsed targetAdmitted : UInt8)
+    (distSq shortMs holdMs springMs hoverOrd edgeTop edgeBot : UInt32)
+    (h_short : decide (260 ≤ shortMs) = false)
+    (h_hold : decide (260 ≤ holdMs) = true)
+    (h_still : decide (distSq < 36) = true) :
+    let tickShort := sidebarDragStep
+      1 1 rowMovable targetCollapsed targetAdmitted
+      distSq shortMs springMs hoverOrd 0 edgeTop edgeBot
+    let upQuick := sidebarDragStep
+      1 4 rowMovable targetCollapsed targetAdmitted
+      distSq shortMs springMs hoverOrd 0 edgeTop edgeBot
+    let tickHold := sidebarDragStep
+      1 1 rowMovable targetCollapsed targetAdmitted
+      distSq holdMs springMs hoverOrd 0 edgeTop edgeBot
+    let upArmed := sidebarDragStep
+      2 4 rowMovable targetCollapsed targetAdmitted
+      distSq holdMs springMs hoverOrd 0 edgeTop edgeBot
+    (tickShort &&& 0xFFFFFFFF) = 1 ∧
+    upQuick = 0 ∧
+    (tickHold &&& 0xFFFFFFFF) = 258 ∧
+    (upArmed &&& 0xFFFFFFFF) = 66816 := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · change (sidebarDragStep 1 1 rowMovable targetCollapsed targetAdmitted
+      distSq shortMs springMs hoverOrd 0 edgeTop edgeBot &&& 0xFFFFFFFF) = 1
+    unfold sidebarDragStep
+    rw [pack32_lo]
+    dsimp only [GT.gt, GE.ge]
+    simp only [
+      show (decide ((1 : UInt8) > 3) || decide ((1 : UInt8) > 5)) = false by decide,
+      show ((1 : UInt8) == 5) = false by decide,
+      show ((1 : UInt8) == 0) = false by decide,
+      show ((1 : UInt8) == 1) = true by decide,
+      h_short, Bool.and_false, Bool.false_and, Bool.false_eq_true, ↓reduceIte
+    ]
+    decide
+  · change sidebarDragStep 1 4 rowMovable targetCollapsed targetAdmitted
+      distSq shortMs springMs hoverOrd 0 edgeTop edgeBot = 0
+    unfold sidebarDragStep
+    dsimp only [GT.gt, GE.ge]
+    simp only [
+      show decide ((1 : UInt8) > 3) = false by decide,
+      show decide ((4 : UInt8) > 5) = false by decide,
+      show ((4 : UInt8) == 5) = false by decide,
+      show ((4 : UInt8) == 0) = false by decide,
+      show ((1 : UInt8) == 0) = false by decide,
+      show ((4 : UInt8) == 1) = false by decide,
+      show ((4 : UInt8) == 2) = false by decide,
+      show ((4 : UInt8) == 3) = false by decide,
+      show ((1 : UInt8) == 1) = true by decide,
+      Bool.false_or, Bool.false_eq_true, ↓reduceIte
+    ]
+    decide
+  · change (sidebarDragStep 1 1 rowMovable targetCollapsed targetAdmitted
+      distSq holdMs springMs hoverOrd 0 edgeTop edgeBot &&& 0xFFFFFFFF) = 258
+    unfold sidebarDragStep
+    rw [pack32_lo]
+    dsimp only [GT.gt, GE.ge]
+    simp only [
+      show (decide ((1 : UInt8) > 3) || decide ((1 : UInt8) > 5)) = false by decide,
+      show ((1 : UInt8) == 5) = false by decide,
+      show ((1 : UInt8) == 0) = false by decide,
+      show ((1 : UInt8) == 1) = true by decide,
+      h_hold, h_still, Bool.true_and, Bool.false_eq_true, ↓reduceIte
+    ]
+    decide
+  · change (sidebarDragStep 2 4 rowMovable targetCollapsed targetAdmitted
+      distSq holdMs springMs hoverOrd 0 edgeTop edgeBot &&& 0xFFFFFFFF) = 66816
+    unfold sidebarDragStep
+    rw [pack32_lo]
+    dsimp only [GT.gt, GE.ge]
+    simp only [
+      show (decide ((2 : UInt8) > 3) || decide ((4 : UInt8) > 5)) = false by decide,
+      show ((4 : UInt8) == 5) = false by decide,
+      show ((4 : UInt8) == 0) = false by decide,
+      show ((2 : UInt8) == 0) = false by decide,
+      show ((4 : UInt8) == 1) = false by decide,
+      show ((4 : UInt8) == 2) = false by decide,
+      show ((4 : UInt8) == 3) = false by decide,
+      show ((2 : UInt8) == 1) = false by decide,
+      show ((2 : UInt8) == 2) = true by decide,
+      Bool.false_eq_true, ↓reduceIte
+    ]
+    decide
+
+/-- Corollary 2 (`StickyFence` / Anti-Oscillation — Spring-Loaded Folder Dwell Fires Once):
+    When dragging (`phase = 3`) over a collapsed project/folder (`targetCollapsed = 1`,
+    `hoverTargetOrd != 0`) for `springElapsedMs ≥ 450` (`eventKind = 3`), `sidebarDragStep`
+    emits `effectCode = 3 (expandTarget)` (`lo32 = 771 = 3 | (3 << 8)`) and clears
+    `nextSpringTargetOrd = 0` (`bits 32..63`), staying in `phase = 3`. Consequently, an
+    immediate second `springTick` with the cleared `springTargetOrd = 0` emits `effectCode = 0`
+    (`lo32 = 3`), preventing double-toggle oscillation. -/
+theorem sidebar_drag_spring_load_fires_once_per_dwell
+    (rowMovable targetAdmitted : UInt8)
+    (distSq elapsedMs springMs hoverOrd edgeTop edgeBot : UInt32)
+    (h_hov_nz : hoverOrd != 0)
+    (h_dwell : decide (450 ≤ springMs) = true) :
+    let w1 := sidebarDragStep
+      3 3 rowMovable 1 targetAdmitted
+      distSq elapsedMs springMs hoverOrd hoverOrd edgeTop edgeBot
+    let nextSpring := (w1 >>> 32).toUInt32
+    let w2 := sidebarDragStep
+      3 3 rowMovable 1 targetAdmitted
+      distSq elapsedMs springMs hoverOrd nextSpring edgeTop edgeBot
+    (w1 &&& 0xFFFFFFFF) = 771 ∧
+    nextSpring = 0 ∧
+    (w2 &&& 0xFFFFFFFF) = 3 := by
+  have h_eq : (hoverOrd == hoverOrd) = true := beq_self_eq_true hoverOrd
+  have hw1 :
+      sidebarDragStep 3 3 rowMovable 1 targetAdmitted
+        distSq elapsedMs springMs hoverOrd hoverOrd edgeTop edgeBot = 771 := by
+    unfold sidebarDragStep
+    dsimp only [GT.gt, GE.ge]
+    simp only [
+      show decide ((3 : UInt8) > 3) = false by decide,
+      show decide ((3 : UInt8) > 5) = false by decide,
+      show ((3 : UInt8) == 5) = false by decide,
+      show ((3 : UInt8) == 0) = false by decide,
+      show ((3 : UInt8) == 1) = false by decide,
+      show ((3 : UInt8) == 2) = false by decide,
+      show ((3 : UInt8) == 3) = true by decide,
+      show ((1 : UInt8) == 1) = true by decide,
+      h_hov_nz, h_eq, h_dwell,
+      Bool.false_or, Bool.not_true, Bool.and_false, Bool.true_and, Bool.false_eq_true, ↓reduceIte
+    ]
+    decide
+  have h_neq0 : (hoverOrd == 0) = false := by
+    cases h0 : (hoverOrd == 0)
+    · rfl
+    · simp [bne, h0] at h_hov_nz
+  refine ⟨?_, ?_, ?_⟩
+  · change (sidebarDragStep 3 3 rowMovable 1 targetAdmitted
+      distSq elapsedMs springMs hoverOrd hoverOrd edgeTop edgeBot &&& 0xFFFFFFFF) = 771
+    rw [hw1]
+    decide
+  · change (sidebarDragStep 3 3 rowMovable 1 targetAdmitted
+      distSq elapsedMs springMs hoverOrd hoverOrd edgeTop edgeBot >>> 32).toUInt32 = 0
+    rw [hw1]
+    decide
+  · change (sidebarDragStep 3 3 rowMovable 1 targetAdmitted distSq elapsedMs springMs hoverOrd
+      (sidebarDragStep 3 3 rowMovable 1 targetAdmitted
+        distSq elapsedMs springMs hoverOrd hoverOrd edgeTop edgeBot >>> 32).toUInt32
+      edgeTop edgeBot &&& 0xFFFFFFFF) = 3
+    rw [hw1]
+    have hsp0 : ((771 : UInt64) >>> 32).toUInt32 = 0 := by decide
+    rw [hsp0]
+    unfold sidebarDragStep
+    rw [pack32_lo]
+    dsimp only [GT.gt, GE.ge]
+    simp only [
+      show (decide ((3 : UInt8) > 3) || decide ((3 : UInt8) > 5)) = false by decide,
+      show ((3 : UInt8) == 5) = false by decide,
+      show ((3 : UInt8) == 0) = false by decide,
+      show ((3 : UInt8) == 1) = false by decide,
+      show ((3 : UInt8) == 2) = false by decide,
+      show ((3 : UInt8) == 3) = true by decide,
+      show ((1 : UInt8) == 1) = true by decide,
+      h_hov_nz, h_neq0, Bool.and_false, Bool.false_and, Bool.false_eq_true, ↓reduceIte
+    ]
+    decide
+
+/-- Corollary 3 (`ProjectionStability` — Edge Auto-Scroll Velocity Clamping & Mutual Exclusion):
+    On any `pointerMove` (`eventKind = 2`), auto-scroll flags (`bit 17 = scrollUp`,
+    `bit 18 = scrollDown`) are mutually exclusive, `scrollStepPx` (`bits 24..31`) is bounded
+    by `≤ 10`, and when holding in `armed` without crossing `moveThresholdSq` (`distSq < 36`)
+    both scroll bits and `scrollStepPx` are identically `0` (`lo32 = 2`). -/
+theorem sidebar_drag_edge_scroll_bounded_and_exclusive
+    (rowMovable targetCollapsed targetAdmitted : UInt8)
+    (distSq elapsedMs springMs hoverOrd springOrd edgeTop edgeBot : UInt32)
+    (h_still : decide (distSq < 36) = true)
+    (h_not_drag_dist : decide (36 ≤ distSq) = false) :
+    let wArmedStill := sidebarDragStep
+      2 2 rowMovable targetCollapsed targetAdmitted
+      distSq elapsedMs springMs hoverOrd springOrd edgeTop edgeBot
+    let wDrag := sidebarDragStep
+      3 2 rowMovable targetCollapsed targetAdmitted
+      distSq elapsedMs springMs hoverOrd springOrd edgeTop edgeBot
+    let loDrag := (wDrag &&& 0xFFFFFFFF).toUInt32
+    (wArmedStill &&& 0xFFFFFFFF) = 2 ∧
+    ((loDrag >>> 24) ≤ 10) ∧
+    ¬(((loDrag &&& 131072) != 0) = true ∧ ((loDrag &&& 262144) != 0) = true) := by
+  refine ⟨?_, ?_, ?_⟩
+  · change (sidebarDragStep 2 2 rowMovable targetCollapsed targetAdmitted
+      distSq elapsedMs springMs hoverOrd springOrd edgeTop edgeBot &&& 0xFFFFFFFF) = 2
+    unfold sidebarDragStep
+    rw [pack32_lo]
+    dsimp only [GT.gt, GE.ge]
+    simp only [
+      show (decide ((2 : UInt8) > 3) || decide ((2 : UInt8) > 5)) = false by decide,
+      show ((2 : UInt8) == 5) = false by decide,
+      show ((2 : UInt8) == 0) = false by decide,
+      show ((2 : UInt8) == 1) = false by decide,
+      show ((2 : UInt8) == 2) = true by decide,
+      show ((2 : UInt8) == 3) = false by decide,
+      h_still, h_not_drag_dist,
+      Bool.and_false, Bool.false_or, Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte
+    ]
+    decide
+  · change (((sidebarDragStep 3 2 rowMovable targetCollapsed targetAdmitted
+      distSq elapsedMs springMs hoverOrd springOrd edgeTop edgeBot &&& 0xFFFFFFFF).toUInt32 >>> 24) ≤ 10)
+    unfold sidebarDragStep
+    rw [pack32_lo, toUInt32_toUInt64]
+    dsimp only [GT.gt, GE.ge]
+    simp only [
+      show (decide ((3 : UInt8) > 3) || decide ((2 : UInt8) > 5)) = false by decide,
+      show ((2 : UInt8) == 5) = false by decide,
+      show ((2 : UInt8) == 0) = false by decide,
+      show ((3 : UInt8) == 0) = false by decide,
+      show ((2 : UInt8) == 1) = false by decide,
+      show ((2 : UInt8) == 2) = true by decide,
+      show ((3 : UInt8) == 1 || (3 : UInt8) == 2) = false by decide,
+      show ((3 : UInt8) == 3) = true by decide,
+      Bool.false_and, Bool.true_or, Bool.true_and, Bool.false_eq_true, ↓reduceIte
+    ]
+    rcases sidebarScrollDirBits_cases edgeTop edgeBot with hdir | hdir | hdir <;>
+      rcases sidebarScrollStepPx_cases edgeTop edgeBot with
+        hst | hst | hst | hst | hst | hst | hst | hst | hst | hst | hst <;>
+      (rw [hdir, hst]; decide)
+  · change ¬((((sidebarDragStep 3 2 rowMovable targetCollapsed targetAdmitted
+        distSq elapsedMs springMs hoverOrd springOrd edgeTop edgeBot &&& 0xFFFFFFFF).toUInt32 &&& 131072) != 0) = true ∧
+      (((sidebarDragStep 3 2 rowMovable targetCollapsed targetAdmitted
+        distSq elapsedMs springMs hoverOrd springOrd edgeTop edgeBot &&& 0xFFFFFFFF).toUInt32 &&& 262144) != 0) = true)
+    unfold sidebarDragStep
+    rw [pack32_lo, toUInt32_toUInt64]
+    dsimp only [GT.gt, GE.ge]
+    simp only [
+      show (decide ((3 : UInt8) > 3) || decide ((2 : UInt8) > 5)) = false by decide,
+      show ((2 : UInt8) == 5) = false by decide,
+      show ((2 : UInt8) == 0) = false by decide,
+      show ((3 : UInt8) == 0) = false by decide,
+      show ((2 : UInt8) == 1) = false by decide,
+      show ((2 : UInt8) == 2) = true by decide,
+      show ((3 : UInt8) == 1 || (3 : UInt8) == 2) = false by decide,
+      show ((3 : UInt8) == 3) = true by decide,
+      Bool.false_and, Bool.true_or, Bool.true_and, Bool.false_eq_true, ↓reduceIte
+    ]
+    rcases sidebarScrollDirBits_cases edgeTop edgeBot with hdir | hdir | hdir <;>
+      rcases sidebarScrollStepPx_cases edgeTop edgeBot with
+        hst | hst | hst | hst | hst | hst | hst | hst | hst | hst | hst <;>
+      (rw [hdir, hst]; decide)
+
+/-- Corollary 4 (`StickyFence` — Escape / Cancel Resets Any Active Gesture Without Committing):
+    Whenever `eventKind = 5 (cancel)` arrives in any active phase (`phase ∈ {1, 2, 3}`),
+    `sidebarDragStep` resets `nextPhase = 0`, clears `nextSpringTargetOrd = 0`, and emits
+    `effectCode = 6 (cancelGesture)` (`lo32 = 1536`), never `commitDrop (4)` or `openMovePicker (5)`. -/
+theorem sidebar_drag_cancel_resets_any_active_phase
+    (rowMovable targetCollapsed targetAdmitted : UInt8)
+    (distSq elapsedMs springMs hoverOrd springOrd edgeTop edgeBot : UInt32) :
+    sidebarDragStep 1 5 rowMovable targetCollapsed targetAdmitted
+      distSq elapsedMs springMs hoverOrd springOrd edgeTop edgeBot = 1536 ∧
+    sidebarDragStep 2 5 rowMovable targetCollapsed targetAdmitted
+      distSq elapsedMs springMs hoverOrd springOrd edgeTop edgeBot = 1536 ∧
+    sidebarDragStep 3 5 rowMovable targetCollapsed targetAdmitted
+      distSq elapsedMs springMs hoverOrd springOrd edgeTop edgeBot = 1536 ∧
+    sidebarDragStep 0 5 rowMovable targetCollapsed targetAdmitted
+      distSq elapsedMs springMs hoverOrd springOrd edgeTop edgeBot = 0 := by
+  refine ⟨?_, ?_, ?_, ?_⟩ <;> (
+    unfold sidebarDragStep
+    dsimp only [GT.gt, GE.ge]
+    simp only [
+      show decide ((1 : UInt8) > 3) = false by decide,
+      show decide ((2 : UInt8) > 3) = false by decide,
+      show decide ((3 : UInt8) > 3) = false by decide,
+      show decide ((0 : UInt8) > 3) = false by decide,
+      show decide ((5 : UInt8) > 5) = false by decide,
+      show ((5 : UInt8) == 5) = true by decide,
+      show ((5 : UInt8) == 0) = false by decide,
+      show ((1 : UInt8) == 0) = false by decide,
+      show ((2 : UInt8) == 0) = false by decide,
+      show ((3 : UInt8) == 0) = false by decide,
+      show ((0 : UInt8) == 0) = true by decide,
+      Bool.false_or, Bool.true_or, Bool.or_false, Bool.or_true, Bool.false_eq_true, ↓reduceIte
+    ]
+    decide
+  )
+
 end Orb.Spec

@@ -1285,3 +1285,75 @@ export function orbRepoDiffBudgetStep(input: {
   };
 }
 
+export type SidebarMoveItemKind = 0 | 1 | 2 | 3; // 0=mission, 1=folder, 2=file, 3=cron
+export type SidebarDragPhase = 0 | 1 | 2 | 3;    // 0=idle, 1=pressing, 2=armed, 3=dragging
+export type SidebarDragEffect = 0 | 1 | 2 | 3 | 4 | 5 | 6;
+
+export function orbSidebarMoveTargetAdmit(input: {
+  itemKind: SidebarMoveItemKind;
+  dstIsSelfOrSubtree: boolean;
+  srcProjectOrd: number;
+  srcPathOrd: number;
+  srcParentOrd: number;
+  dstProjectOrd: number;
+  dstPathOrd: number;
+}): boolean {
+  return kernel.orb_sidebar_move_target_admit(
+    enum8(input.itemKind),
+    b8(input.dstIsSelfOrSubtree),
+    sat32(input.srcProjectOrd),
+    sat32(input.srcPathOrd),
+    sat32(input.srcParentOrd),
+    sat32(input.dstProjectOrd),
+    sat32(input.dstPathOrd),
+  ) === 1;
+}
+
+export function orbSidebarDragStep(input: {
+  phase: SidebarDragPhase;
+  eventKind: 0 | 1 | 2 | 3 | 4 | 5;
+  rowMovable: boolean;
+  targetCollapsed: boolean;
+  targetAdmitted: boolean;
+  distSq: number;
+  elapsedMs: number;
+  springElapsedMs: number;
+  hoverTargetOrd: number;
+  springTargetOrd: number;
+  edgeTopDistPx: number;
+  edgeBottomDistPx: number;
+}): {
+  nextPhase: SidebarDragPhase;
+  effectCode: SidebarDragEffect;
+  eatClick: boolean;
+  scrollDir: -1 | 0 | 1;
+  scrollStepPx: number;
+  nextSpringTargetOrd: number;
+} {
+  const raw = kernel.orb_sidebar_drag_step(
+    enum8(input.phase),
+    enum8(input.eventKind),
+    b8(input.rowMovable),
+    b8(input.targetCollapsed),
+    b8(input.targetAdmitted),
+    sat32(input.distSq),
+    sat32(input.elapsedMs),
+    sat32(input.springElapsedMs),
+    sat32(input.hoverTargetOrd),
+    sat32(input.springTargetOrd),
+    sat32(input.edgeTopDistPx),
+    sat32(input.edgeBottomDistPx),
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  const up = ((lo32 >>> 17) & 1) !== 0;
+  const down = ((lo32 >>> 18) & 1) !== 0;
+  return {
+    nextPhase: (lo32 & 0xff) as SidebarDragPhase,
+    effectCode: ((lo32 >>> 8) & 0xff) as SidebarDragEffect,
+    eatClick: ((lo32 >>> 16) & 1) !== 0,
+    scrollDir: up ? -1 : down ? 1 : 0,
+    scrollStepPx: (lo32 >>> 24) & 0xff,
+    nextSpringTargetOrd: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+

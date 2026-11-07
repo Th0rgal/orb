@@ -185,6 +185,8 @@ uint8_t orb_codex_goal_preact_filter(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t
 uint64_t orb_skill_slash_step(uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t);
 uint32_t orb_worktree_decision_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t);
 uint64_t orb_repo_diff_budget_step(uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint8_t orb_sidebar_move_target_admit(uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint64_t orb_sidebar_drag_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 #ifdef __cplusplus
 }
 #endif

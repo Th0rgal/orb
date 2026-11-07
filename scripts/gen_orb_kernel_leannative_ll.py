@@ -278,6 +278,64 @@ BRANCHLESS_PROBES: dict[str, str] = {
   let foldW := foldLo.toUInt64 ||| (foldHi.toUInt64 <<< 32)
   let sliceErr := (st ||| keepThink).toUInt64 ||| (entryCount.toUInt64 <<< 32)
   blSel64 (blEz32 st) foldW sliceErr""",
+    "orb_sidebar_drag_step": """@[export probe_orb_sidebar_drag_step] def probe_orb_sidebar_drag_step (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 : UInt64) : UInt64 :=
+  let phase := a0.toUInt8; let ev := a1.toUInt8; let rowMov := a2.toUInt8
+  let tCol := a3.toUInt8; let tAdm := a4.toUInt8
+  let distSq := a5.toUInt32; let elMs := a6.toUInt32; let spMs := a7.toUInt32
+  let hovOrd := a8.toUInt32; let spOrd := a9.toUInt32
+  let topDist := a10.toUInt32; let botDist := a11.toUInt32
+  let badDom := (blLe8 phase 3 &&& blLe8 ev 5) ^^^ 1
+  let isCancel := blEq8 ev 5
+  let isDown := blEq8 ev 0
+  let isIdle := blEq8 phase 0
+  let isHold := blEq8 ev 1
+  let isMove := blEq8 ev 2
+  let isSpring := blEq8 ev 3
+  let holdArm := blEq8 phase 1 &&& blLe32 260 elMs &&& blLt32 distSq 36
+  let holdLo := blSel32 holdArm ((2 : UInt32) ||| ((1 : UInt32) <<< 8)) phase.toUInt32
+  let holdHi := blSel32 holdArm 0 spOrd
+  let entersDrag := (blEq8 phase 1 ||| blEq8 phase 2) &&& blLe32 36 distSq
+  let activeDrag := blEq8 phase 3 ||| entersDrag
+  let stayArmed := blEq8 phase 2 &&& blLt32 distSq 36
+  let movePhase := blSel32 activeDrag 3 (blSel32 stayArmed 2 1)
+  let moveEff := blSel32 entersDrag 2 0
+  let topIn := blLt32 topDist 36
+  let botIn := (topIn ^^^ 1) &&& blLt32 botDist 36
+  let upCalc := (((36 - topDist).toUInt64 * 10 + 35) / 36).toUInt32
+  let dnCalc := (((36 - botDist).toUInt64 * 10 + 35) / 36).toUInt32
+  let upPx := blSel32 topIn upCalc 0
+  let dnPx := blSel32 botIn dnCalc 0
+  let rawPx := blSel32 (blLt32 0 upPx) upPx dnPx
+  let clampPx := blSel32 (blLt32 10 rawPx) 10 rawPx
+  let dirBits := blSel32 (topIn &&& blLt32 0 upCalc) ((1 : UInt32) <<< 17)
+    (blSel32 (botIn &&& blLt32 0 dnCalc) ((1 : UInt32) <<< 18) 0)
+  let stepPx := blSel32 activeDrag clampPx 0
+  let stepDir := blSel32 activeDrag dirBits 0
+  let moveLo := movePhase ||| (moveEff <<< 8) ||| stepDir ||| (stepPx <<< 24)
+  let moveHi := blSel32 (activeDrag &&& blEq8 tCol 1 &&& blNz32 hovOrd) hovOrd 0
+  let spMatch := blEq8 phase 3 &&& blEq8 tCol 1 &&& blNz32 hovOrd &&& blEq32 hovOrd spOrd
+  let spReady := blLe32 450 spMs
+  let spLo := blSel32 (spMatch &&& spReady) ((3 : UInt32) ||| ((3 : UInt32) <<< 8)) phase.toUInt32
+  let spHi := blSel32 (spMatch &&& (spReady ^^^ 1)) spOrd 0
+  let upDrop := blNz32 hovOrd &&& blEq8 tAdm 1
+  let upLo := blSel32 (blEq8 phase 1) 0
+    (blSel32 (blEq8 phase 2) (((5 : UInt32) <<< 8) ||| ((1 : UInt32) <<< 16))
+      (blSel32 upDrop (((4 : UInt32) <<< 8) ||| ((1 : UInt32) <<< 16))
+        (((6 : UInt32) <<< 8) ||| ((1 : UInt32) <<< 16))))
+  let lo32 :=
+    blSel32 badDom ((6 : UInt32) <<< 8)
+      (blSel32 isCancel (blSel32 isIdle 0 ((6 : UInt32) <<< 8))
+        (blSel32 isDown (blSel32 (blEq8 rowMov 1) 1 0)
+          (blSel32 isIdle 0
+            (blSel32 isHold holdLo
+              (blSel32 isMove moveLo
+                (blSel32 isSpring spLo upLo))))))
+  let hi32 :=
+    blSel32 (badDom ||| isCancel ||| isDown ||| isIdle) 0
+      (blSel32 isHold holdHi
+        (blSel32 isMove moveHi
+          (blSel32 isSpring spHi 0)))
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)""",
 }
 
 BRANCHLESS_EQUIV_PROOFS = """
@@ -351,6 +409,14 @@ theorem eq_wire_transcript_slice (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 : UInt64) :
     blSatAdd32, blSpanFits, blVerifySliceIo, probe_orb_wire_transcript_slice_step,
     Orb.Kernel.wireTranscriptSliceStep, Orb.Kernel.transcriptFoldStep, Orb.Kernel.satAdd32,
     Orb.Kernel.wireVerifySliceIo, Orb.Kernel.wireSliceSpanFits]
+  bv_decide
+
+theorem eq_sidebar_drag_step (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 : UInt64) :
+    probe_orb_sidebar_drag_step a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 =
+    Orb.Kernel.sidebarDragStep a0.toUInt8 a1.toUInt8 a2.toUInt8 a3.toUInt8 a4.toUInt8 a5.toUInt32 a6.toUInt32 a7.toUInt32 a8.toUInt32 a9.toUInt32 a10.toUInt32 a11.toUInt32 := by
+  simp only [bne, blNz32, blEz32, blEq8, blEq32, blLt32, blLe32, blLt8, blLe8, blSel32,
+    probe_orb_sidebar_drag_step, Orb.Kernel.sidebarDragStep,
+    Orb.Kernel.sidebarScrollStepPx, Orb.Kernel.sidebarScrollDirBits]
   bv_decide
 """.strip()
 

@@ -42,6 +42,7 @@ export function useTooltip<T>(id: string, render: (value: T) => JSX.Element, opt
         if (event.currentTarget.matches(":focus-visible") && !event.currentTarget.closest('[data-pointer-focus="true"]')) show(value, event.currentTarget);
       },
     }),
+    hide,
     surface: <Show when={tip()}>{current => <Popover id={id} label="Details" role="tooltip" class={options.class ? `row-tip ${options.class}` : "row-tip"} anchor={current().anchor} width={options.width ?? 280} placement={options.placement ?? "right-start"} trap={false} restoreFocus={false} onClose={hide}>{render(current().value)}</Popover>}</Show>,
   };
 }

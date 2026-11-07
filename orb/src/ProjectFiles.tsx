@@ -1,4 +1,4 @@
-import { deleteFileOptimistically, fileMoveKey, isFilePathPending, mergeArrivingMissions, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, upsertMissionPreservingOrder, waitForFilePathSettled, withMovedMissions } from "./moves";
+import { deleteFileOptimistically, fileMoveKey, filesMovedAway, filesMovedInto, isFilePathPending, mergeArrivingMissions, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, upsertMissionPreservingOrder, waitForFilePathSettled, withMovedMissions } from "./moves";
 import { renameOptimistically } from "./renames";
 import { isArchivable, isReopenable, isRunning, isLive, isWorking, presentedStatus } from "./missionStatus";
 import { swallow } from "./log";
@@ -70,6 +70,9 @@ import {
 import { CronGlyph, untilLabel } from "./Controller";
 import { ConfirmDialog, Dialog, DialogButton, NameDialog } from "./Dialog";
 import { PopupMenu, type MenuEntry } from "./Menu";
+import { Picker, type PickerItem } from "./Picker";
+import { Portal } from "solid-js/web";
+import { createSidebarRowDrag, isGroupMoveAdmitted, type DragSourceItem } from "./tree/rowDrag";
 import {
   copyText,
   isClipboardReferenceRetired,
@@ -227,6 +230,7 @@ export function LiveProjectsSection(p: {
   const [missionMenu, setMissionMenu] = createSignal<{ x: number; y: number; mission: Mission; treeId: string; slug: string; folder: string } | null>(null);
   const [fileMenu, setFileMenu] = createSignal<{ slug: string; path: string; x: number; y: number } | null>(null);
   const [multiSelectMenu, setMultiSelectMenu] = createSignal<{ x: number; y: number; treeIds: string[] } | null>(null);
+  const [movePicker, setMovePicker] = createSignal<{ sources: DragSourceItem[]; anchor: HTMLElement; treeId: string } | null>(null);
   const [deleteTargets, setDeleteTargets] = createSignal<string[]>([]);
   const [deleteConfirmBusy, setDeleteConfirmBusy] = createSignal(false);
   const [batchBusy, setBatchBusy] = createSignal(false);
@@ -263,6 +267,8 @@ export function LiveProjectsSection(p: {
     if (fm) return `pf:${fm.slug}:${fm.path}`;
     const cm = controllerMenu();
     if (cm) return cm.controller ? `c:${cm.slug}` : cm.id ? `pc:${cm.slug}:${cm.id}` : null;
+    const mp = movePicker();
+    if (mp) return mp.treeId;
     return null;
   };
   const { setSelectedTreeIds, setSelectedAgents, selectionActive, setSelectionActive, selectedTreeSet, selectedRowIds, isRowActive, selectionAnchor, setSelectionAnchor, syncToCommitted, clickSelectableRow, contextSelectRow, selectedFor, selectedTreeFor } =
@@ -633,8 +639,14 @@ export function LiveProjectsSection(p: {
     setFolderLabel(slug, path, fileBaseName(path));
     if (!alreadyProjected) applyOptimisticFolderMove(slug, path, destination, project);
     openMovedSelection(slug, path, destination, true, project);
-    try { if (project === slug && !serverCascaded) await moveFolderWork(slug, path, destination); }
-    finally { await Promise.all([loadMissions(slug), loadCrons(slug, true)]); }
+    try { if (!serverCascaded) await moveFolderWork(slug, path, destination, project); }
+    finally {
+      await Promise.all([
+        loadMissions(slug),
+        loadCrons(slug, true),
+        ...(project !== slug ? [loadMissions(project), loadCrons(project, true)] : []),
+      ]);
+    }
   };
   const clearDeletedFileUi = (slug: string, path: string, directory: boolean) => {
     const treePrefix = `pf:${slug}:${path}`;
@@ -768,10 +780,8 @@ export function LiveProjectsSection(p: {
         const parent = dirs[`${item.slug}:${fileParent(item.path)}`];
         if (version !== connectionVersion() || text === consumedFileClipboard || isClipboardReferenceRetired(text) || (parent && !parent.some(e => e.name === fileBaseName(item.path) && e.kind === (item.directory ? "dir" : "file")))) return;
       }
-      // Agents and crons belong to their project: only documents cross over.
       let serverCascaded = false;
       const transfer = async () => {
-        if (other && item.directory && !item.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
         const res = await transferProjectFile(item.slug, item.path, destination, item.copy, slug);
         serverCascaded = didServerCascadeFolderTransfer(res);
       };
@@ -1006,6 +1016,15 @@ export function LiveProjectsSection(p: {
           if (p.selected() === `c:${detail.slug}`) p.open(null);
         }
       } else {
+        if (detail.targetSlug && detail.targetSlug !== detail.slug && detail.id) {
+          const movedJob = (crons[detail.slug] ?? []).find(j => j.id === detail.id);
+          setCrons(detail.slug, list => (list ?? []).filter(j => j.id !== detail.id));
+          if (movedJob) {
+            const updated = { ...movedJob, folder: detail.folder ?? movedJob.folder };
+            setCrons(detail.targetSlug, list => [...(list ?? []).filter(j => j.id !== detail.id), updated]);
+          }
+          if (p.selected() === `pc:${detail.slug}:${detail.id}`) p.open(`pc:${detail.targetSlug}:${detail.id}`);
+        }
         void loadCrons(detail.slug, true);
         if (detail.targetSlug && detail.targetSlug !== detail.slug) void loadCrons(detail.targetSlug, true);
       }
@@ -1482,7 +1501,6 @@ export function LiveProjectsSection(p: {
           const destination = other ? [targetPath, fileBaseName(item.path)].filter(Boolean).join("/") : fileDestination(item.path, targetPath, false);
           let serverCascaded = false;
           await moveFile(item, destination, async () => {
-            if (other && !bundle.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
             const res = await transferProjectFile(item.slug, item.path, destination, bundle.copy, targetSlug);
             serverCascaded = didServerCascadeFolderTransfer(res);
           });
@@ -1513,9 +1531,9 @@ export function LiveProjectsSection(p: {
         await Promise.all(cronItems.map(async item => {
           if (version !== connectionVersion()) return;
           const parentMove = item.folder ? underMovedFolder(item.slug, item.folder) : null;
-          if (parentMove && parentMove.destSlug === item.slug) return;
+          if (parentMove) return;
           try {
-            await performMoveCron(item.slug, item.id, targetSlug, parentMove ? parentMove.destPath : targetPath);
+            await performMoveCron(item.slug, item.id, targetSlug, targetPath);
           } catch (err) { failures.push(`${item.name}: ${err instanceof Error ? err.message : String(err)}`); }
         }));
         // Missions (with the missions they launched) move together and in parallel.
@@ -1525,9 +1543,8 @@ export function LiveProjectsSection(p: {
           const m = allKnownMissions().find(x => x.id === item.id);
           const mFolder = m ? missionFolder(m) : "";
           const parentMove = m?.project && mFolder ? underMovedFolder(m.project, mFolder) : null;
-          if (parentMove && parentMove.destSlug === m?.project) continue;
-          const dest = parentMove ? parentMove.destPath : targetPath;
-          byFolder.set(dest, [...(byFolder.get(dest) ?? []), item.id]);
+          if (parentMove) continue;
+          byFolder.set(targetPath, [...(byFolder.get(targetPath) ?? []), item.id]);
         }
         const plans = [...byFolder].map(([dest, ids]) => planMissionMoves(ids, targetSlug, dest, allKnownMissions()));
         const missionFailures = (await Promise.all(plans.map(plan => moveMissions(plan, targetSlug, { approvalPolicy })))).flat();
@@ -2126,8 +2143,6 @@ export function LiveProjectsSection(p: {
   };
   let dropTree:HTMLDivElement|undefined;
   let pointerPos: { x: number; y: number } | null = null;
-  let cancelActiveDrag: (() => void) | undefined;
-  onCleanup(() => cancelActiveDrag?.());
   const [importing,setImporting]=createSignal(false),[importStatus,setImportStatus]=createSignal('');
   const [pendingLargeImport, setPendingLargeImport] = createSignal<{
     slug: string;
@@ -2151,120 +2166,161 @@ export function LiveProjectsSection(p: {
     const dest = entry?.dataset.treeId ? resolveTreeDestination(entry.dataset.treeId) : null;
     return dest ? dropContainerElement(dest.slug, dest.path) : undefined;
   };
-  const startRowDrag = (e: PointerEvent) => {
-    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-    const target = e.target as HTMLElement | null;
-    if (!target || target.closest(".row-action, .launched-toggle, input, textarea, [contenteditable='true']")) return;
-    const entry = target.closest<HTMLElement>(".tree-entry");
-    if (!entry || !dropTree?.contains(entry) || entry.querySelector("button:disabled")) return;
-    const treeId = entry.dataset.treeId;
-    if (!treeId) return;
+  const rowToDragSource = (treeId: string): DragSourceItem | null => {
     const row = findNodeById(treeId, tree());
-    if (!row) return;
-    // Project rows are buttons inside the tree. WebKit drops their click after
-    // this pointerdown, so open the project from the pointerup that follows.
-    if (row.kind === "project") {
-      const x = e.clientX, y = e.clientY, slug = row.slug;
-      const up = (ev: PointerEvent) => {
-        window.removeEventListener("pointerup", up, true);
-        window.removeEventListener("pointercancel", up, true);
-        if (ev.button !== 0 || Math.hypot(ev.clientX - x, ev.clientY - y) >= 6) return;
-        entry.dataset.toggled = "1";
-        toggleProject(slug);
-        setTimeout(() => { delete entry.dataset.toggled; }, 0);
-      };
-      window.addEventListener("pointerup", up, true);
-      window.addEventListener("pointercancel", up, true);
+    if (!row) return null;
+    if (row.kind === "mission" && row.mission && !deletingIds().has(row.mission.id)) {
+      return { treeId, kind: 0, srcSlug: row.mission.project ?? row.slug, srcPath: missionFolder(row.mission), srcParent: "", label: row.label };
+    }
+    if (row.kind === "folder" && row.path) {
+      return { treeId, kind: 1, srcSlug: row.slug, srcPath: row.path, srcParent: fileParent(row.path), label: row.label };
+    }
+    if (row.kind === "file" && row.path) {
+      return { treeId, kind: 2, srcSlug: row.slug, srcPath: row.path, srcParent: fileParent(row.path), label: row.label };
+    }
+    if (row.kind === "cron" && !row.controller && row.job?.id) {
+      return { treeId, kind: 3, srcSlug: row.slug, srcPath: row.job.folder ?? "", srcParent: "", label: row.label };
+    }
+    return null;
+  };
+  const executeMoveSources = (sources: readonly DragSourceItem[], destSlug: string, destPath: string) => {
+    if (!isGroupMoveAdmitted(rowDrag.ords, sources, destSlug, destPath)) return;
+    const items = sources.map(s => treeIdToClipboardItem(s.treeId)).filter((x): x is ClipboardItem => !!x);
+    if (!items.length) return;
+    if (items.every(i => i.kind === "mission")) {
+      const ids = [...new Set(items.map(i => (i as { kind: "mission"; id: string }).id))];
+      const known = allKnownMissions();
+      const plan = planMissionMoves(ids, destSlug, destPath, known);
+      const changed = plan.some(step => {
+        const m = known.find(x => x.id === step.id);
+        return !m || (m.project ?? "") !== destSlug || missionFolder(m) !== step.folder;
+      });
+      if (changed) moveDirect(ids, destSlug, destPath);
       return;
     }
-    const movable = (row.kind === "mission" && !!row.mission && !deletingIds().has(row.mission.id))
-      || (row.kind === "cron" && !row.controller && !!row.job?.id)
-      || ((row.kind === "file" || row.kind === "folder") && !!row.path);
-    if (!movable) return;
-    cancelActiveDrag?.();
-    const startX = e.clientX, startY = e.clientY;
-    let dragging = false;
-    let highlighted: HTMLElement | undefined;
-    const prevUserSelect = document.body.style.userSelect;
-    const clearHighlight = () => { highlighted?.classList.remove("drop-active"); highlighted = undefined; };
-    const finish = () => {
-      clearHighlight();
-      if (dragging) document.body.style.userSelect = prevUserSelect;
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", finish);
-      window.removeEventListener("keydown", onKey, true);
-      cancelActiveDrag = undefined;
-    };
-    const onKey = (ke: KeyboardEvent) => {
-      if (ke.key === "Escape" && dragging) { ke.preventDefault(); ke.stopPropagation(); finish(); }
-    };
-    const onMove = (me: PointerEvent) => {
-      if (!dragging) {
-        if (Math.hypot(me.clientX - startX, me.clientY - startY) < 6) return;
-        dragging = true;
-        document.body.style.userSelect = "none";
+    if (items.length === 1 && items[0].kind === "cron") {
+      const c = items[0];
+      if (!movingCron()) {
+        setMovingCron(true); setActionError(null);
+        void performMoveCron(c.slug, c.id, destSlug, destPath)
+          .catch(err => setActionError(`Couldn’t move cron: ${err instanceof Error ? err.message : String(err)}`))
+          .finally(() => setMovingCron(false));
       }
-      const next = dropAt(me.clientX, me.clientY);
-      if (next !== highlighted) {
-        clearHighlight();
-        highlighted = next;
-        highlighted?.classList.add("drop-active");
-      }
-    };
-    const onUp = (ue: PointerEvent) => {
-      const wasDragging = dragging;
-      const dropEl = wasDragging ? dropAt(ue.clientX, ue.clientY) : undefined;
-      finish();
-      if (!wasDragging) {
-        if (row.kind === "folder" && ue.button === 0 && Math.hypot(ue.clientX - startX, ue.clientY - startY) < 6) {
-          entry.dataset.toggled = "1";
-          toggleDir(row.slug, row.path ?? "");
-          setTimeout(() => { delete entry.dataset.toggled; }, 0);
-        }
-        return;
-      }
-      const eatClick = (ce: MouseEvent) => { ce.preventDefault(); ce.stopPropagation(); };
-      window.addEventListener("click", eatClick, true);
-      setTimeout(() => window.removeEventListener("click", eatClick, true), 0);
-      if (!dropEl?.dataset.dropProject) return;
-      const destSlug = dropEl.dataset.dropProject, destPath = dropEl.dataset.dropFolder ?? "";
-      const group = selectionActive() && selectedTreeSet().has(treeId) ? selectedTreeFor(treeId) : [treeId];
-      const items = group.map(treeIdToClipboardItem).filter((x): x is ClipboardItem => !!x);
-      if (!items.length) return;
-      if (items.every(i => i.kind === "mission")) {
-        const ids = [...new Set(items.map(i => (i as { kind: "mission"; id: string }).id))];
-        const known = allKnownMissions();
-        const plan = planMissionMoves(ids, destSlug, destPath, known);
-        const changed = plan.some(step => {
-          const m = known.find(x => x.id === step.id);
-          return !m || (m.project ?? "") !== destSlug || missionFolder(m) !== step.folder;
-        });
-        if (!changed) return;
-        moveDirect(ids, destSlug, destPath);
-        return;
-      }
-      if (items.length === 1 && items[0].kind === "cron") {
-        const c = items[0];
-        if (c.slug === destSlug && (c.folder ?? "") === destPath) return;
-        if (!movingCron()) {
-          setMovingCron(true); setActionError(null);
-          void performMoveCron(c.slug, c.id, destSlug, destPath)
-            .catch(err => setActionError(`Couldn’t move cron: ${err instanceof Error ? err.message : String(err)}`))
-            .finally(() => setMovingCron(false));
-        }
-        return;
-      }
-      if (items.some(i => i.kind === "file" && i.directory && i.slug === destSlug && (destPath === i.path || destPath.startsWith(`${i.path}/`)))) return;
-      if (items.length === 1 && items[0].kind === "file" && items[0].slug === destSlug && fileParent(items[0].path) === destPath) return;
-      void pasteItems(destSlug, destPath, makeItemsReference(items, false));
-    };
-    cancelActiveDrag = finish;
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", finish);
-    window.addEventListener("keydown", onKey, true);
+      return;
+    }
+    void pasteItems(destSlug, destPath, makeItemsReference(items, false));
   };
+  const warmProjectFolders = async (slug: string) => {
+    await Promise.all([loadDir(slug, ""), loadMissions(slug, { transcripts: false, cached: true }), loadCrons(slug)]);
+    for (const entry of dirs[`${slug}:`] ?? []) {
+      if (entry.kind === "dir" && entry.name !== "attachments") void loadDir(slug, entry.name);
+    }
+  };
+  const knownFoldersForProject = (slug: string): string[] => {
+    const found = new Set<string>();
+    const walk = (dirPath: string) => {
+      const away = filesMovedAway(slug, dirPath);
+      const list = [...(dirs[`${slug}:${dirPath}`] ?? []).filter(e => !away.has(e.name) && !(dirPath === "" && e.name === "attachments"))];
+      for (const arriving of filesMovedInto(slug, dirPath)) {
+        if (!list.some(e => e.name === arriving.name)) list.push(arriving);
+      }
+      for (const entry of list) {
+        if (entry.kind !== "dir") continue;
+        const full = dirPath ? `${dirPath}/${entry.name}` : entry.name;
+        if (!found.has(full)) { found.add(full); walk(full); }
+      }
+    };
+    walk("");
+    const extraPaths = [
+      ...(missions[slug] ?? []).filter(m => !isArchived(m)).map(missionFolder),
+      ...(crons[slug] ?? []).map(j => j.folder ?? ""),
+    ];
+    for (const raw of extraPaths) {
+      const parts = raw.split("/").filter(Boolean);
+      for (let i = 1; i <= parts.length; i++) found.add(parts.slice(0, i).join("/"));
+    }
+    return [...found].sort((a, b) => a.localeCompare(b));
+  };
+  const currentContainerKey = (sources: readonly DragSourceItem[]): string | undefined => {
+    if (!sources.length) return undefined;
+    const keyOf = (s: DragSourceItem) => `${s.srcSlug}:${s.kind === 1 || s.kind === 2 ? s.srcParent : s.srcPath}`;
+    const first = keyOf(sources[0]!);
+    return sources.every(s => keyOf(s) === first) ? first : undefined;
+  };
+  const movePickerItems = (sources: readonly DragSourceItem[]): PickerItem[] => {
+    const out: PickerItem[] = [];
+    for (const proj of projects()) {
+      const projTitle = proj.title || proj.slug;
+      out.push({
+        id: `${proj.slug}:`,
+        label: projTitle,
+        description: "Project root",
+        group: projTitle,
+        disabled: !isGroupMoveAdmitted(rowDrag.ords, sources, proj.slug, ""),
+        icon: <SidebarIcon.Folder size={14} />,
+      });
+      for (const folderPath of knownFoldersForProject(proj.slug)) {
+        const selfSubtree = sources.some(s =>
+          s.kind === 1 && s.srcSlug === proj.slug && (folderPath === s.srcPath || folderPath.startsWith(`${s.srcPath}/`)));
+        if (selfSubtree) continue;
+        out.push({
+          id: `${proj.slug}:${folderPath}`,
+          label: folderLabel(proj.slug, folderPath) || folderPath,
+          description: folderPath.includes("/") ? `${projTitle} · ${folderPath}` : projTitle,
+          group: projTitle,
+          disabled: !isGroupMoveAdmitted(rowDrag.ords, sources, proj.slug, folderPath),
+          icon: <SidebarIcon.Folder size={14} />,
+        });
+      }
+    }
+    return out;
+  };
+  const rowDrag = createSidebarRowDrag({
+    getTreeEl: () => dropTree,
+    resolveSources: (treeId) => {
+      const primary = rowToDragSource(treeId);
+      if (!primary) return [];
+      const group = selectionActive() && selectedTreeSet().has(treeId) ? selectedTreeFor(treeId) : [treeId];
+      const rest = group.filter(id => id !== treeId).map(rowToDragSource).filter((x): x is DragSourceItem => !!x);
+      return [primary, ...rest];
+    },
+    resolveTargetAt: (x, y) => {
+      const element = dropAt(x, y);
+      const slug = element?.dataset.dropProject;
+      if (!element || !slug) return undefined;
+      const path = element.dataset.dropFolder ?? "";
+      const collapsed = path ? !expanded[`${slug}:${path}`] : !expanded[slug];
+      return { slug, path, collapsed, element };
+    },
+    expandContainer: (slug, path) => {
+      if (path) {
+        if (!expanded[`${slug}:${path}`]) {
+          setExpanded(`${slug}:${path}`, true);
+          void loadDir(slug, path);
+        }
+      } else if (!expanded[slug]) {
+        toggleProject(slug);
+      }
+    },
+    commitDrop: (sources, dstSlug, dstPath) => executeMoveSources(sources, dstSlug, dstPath),
+    openMovePicker: (sources, anchor) => {
+      setActionMenu(null); setMissionMenu(null); setArchiveMenu(null);
+      setControllerMenu(null); setFileMenu(null); setMultiSelectMenu(null); setForkTarget(null);
+      if (sources.length <= 1) syncToCommitted();
+      setMovePicker({ sources, anchor, treeId: sources[0]!.treeId });
+      for (const proj of projects()) void warmProjectFolders(proj.slug);
+    },
+    dismissTooltip: () => rowTip.hide(),
+    onQuickTap: (treeId, entry) => {
+      const row = findNodeById(treeId, tree());
+      if (!row || (row.kind !== "project" && row.kind !== "folder")) return;
+      entry.dataset.toggled = "1";
+      if (row.kind === "project") toggleProject(row.slug);
+      else toggleDir(row.slug, row.path ?? "");
+      setTimeout(() => { delete entry.dataset.toggled; }, 0);
+    },
+  });
+  onCleanup(() => rowDrag.cancel());
   onMount(() => {
     const editableTarget = (t: EventTarget | null) =>
       t instanceof Element && !!t.closest('input, textarea, [contenteditable="true"], [role="dialog"], dialog');
@@ -2451,19 +2507,23 @@ export function LiveProjectsSection(p: {
       <Ic.BellIcon size={12} /><button class="cron-status-label" onClick={() => setCronInfo(d.slug)}>{cronUnsupported() ? "Crons need backend update" : cronRetryable[d.slug] ? "Crons temporarily unavailable" : "Crons unavailable"}</button>
       <Show when={!cronUnsupported() && cronRetryable[d.slug]}><button class="cron-retry" aria-label="Retry crons" title="Retry crons" onClick={() => void loadCrons(d.slug, true)}>↻</button></Show>
     </div>;
-    if (d.kind === "folder") return <div class={`row folder ${(cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id) ? "mission-cut" : ""} ${selectionActive() && selectedTreeSet().has(row.id) ? "active" : ""}`} data-drop-project={d.slug} data-drop-folder={d.path ?? ""} onContextMenu={contextMenu}>
-      <button type="button" class="row-main" aria-label={d.label} aria-expanded={row.expanded} {...rowTip.bind(rowDetail(d.label))} onPointerEnter={() => warmIntent(d.slug, d.path!)} onPointerLeave={cancelIntent} onFocus={() => warmIntent(d.slug, d.path!)} onBlur={cancelIntent} onClick={e => { const entry = e.currentTarget.closest<HTMLElement>(".tree-entry"); if (entry?.dataset.toggled) { delete entry.dataset.toggled; return; } if (e.metaKey || e.ctrlKey || e.shiftKey) clickSelectableRow(e, row.id, () => toggleDir(d.slug, d.path!)); else { setSelectionAnchor(row.id); toggleDir(d.slug, d.path!); } }}>
-        <FolderActivityIcon expanded={row.expanded} color={projectColor(d.slug)} count={activity().get(d.slug)?.get(d.path ?? "") ?? 0} scheduled={scheduledActivity().get(d.slug)?.get(d.path ?? "") ?? 0} /><span class="row-label">{d.label}</span>
-      </button>
-      <button class="row-action" aria-label={`Folder actions for ${d.label}`} title="Folder actions"
-        onPointerDown={e => setActionFocus(e.pointerType !== "mouse")}
-        onKeyDown={e => { if (e.key === "Enter" || e.key === " ") setActionFocus(true); }}
-        onClick={e => { e.stopPropagation(); e.currentTarget.focus({ preventScroll: true }); const box = e.currentTarget.getBoundingClientRect(); setActionMenu({ x: Math.max(8, box.right - 176), y: box.bottom + 4, slug: d.slug, path: d.path! }); }}><Ic.PlusIcon size={13} /></button>
-    </div>;
+    if (d.kind === "folder") {
+      const folderTip = rowTip.bind(rowDetail(d.label));
+      return <div class={`row folder ${(cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id) ? "mission-cut" : ""} ${rowDrag.isLifted(row.id) ? "drag-source" : ""} ${(selectionActive() && selectedTreeSet().has(row.id)) || movePicker()?.treeId === row.id ? "active" : ""}`} data-drop-project={d.slug} data-drop-folder={d.path ?? ""} onContextMenu={contextMenu}>
+        <button type="button" class="row-main" aria-label={d.label} aria-expanded={row.expanded} {...folderTip} onPointerEnter={e => { if (rowDrag.phase() === 0) folderTip.onPointerEnter(e); warmIntent(d.slug, d.path!); }} onPointerLeave={() => { folderTip.onPointerLeave(); cancelIntent(); }} onFocus={e => { folderTip.onFocus(e); warmIntent(d.slug, d.path!); }} onBlur={() => { folderTip.onBlur(); cancelIntent(); }} onClick={e => { const entry = e.currentTarget.closest<HTMLElement>(".tree-entry"); if (entry?.dataset.toggled) { delete entry.dataset.toggled; return; } if (e.metaKey || e.ctrlKey || e.shiftKey) clickSelectableRow(e, row.id, () => toggleDir(d.slug, d.path!)); else { setSelectionAnchor(row.id); toggleDir(d.slug, d.path!); } }}>
+          <FolderActivityIcon expanded={row.expanded} color={projectColor(d.slug)} count={activity().get(d.slug)?.get(d.path ?? "") ?? 0} scheduled={scheduledActivity().get(d.slug)?.get(d.path ?? "") ?? 0} /><span class="row-label">{d.label}</span>
+        </button>
+        <button class="row-action" aria-label={`Folder actions for ${d.label}`} title="Folder actions"
+          onPointerDown={e => setActionFocus(e.pointerType !== "mouse")}
+          onKeyDown={e => { if (e.key === "Enter" || e.key === " ") setActionFocus(true); }}
+          onClick={e => { e.stopPropagation(); e.currentTarget.focus({ preventScroll: true }); const box = e.currentTarget.getBoundingClientRect(); setActionMenu({ x: Math.max(8, box.right - 176), y: box.bottom + 4, slug: d.slug, path: d.path! }); }}><Ic.PlusIcon size={13} /></button>
+      </div>;
+    }
     if (d.kind === "cron") {
       const ticking = () => d.controller && (controllers[d.slug]?.runs ?? []).some(r => r.status === "running" || r.status === "claimed");
       const isCronCut = () => !d.controller && (cutCron()?.id === d.job?.id || readCronReference(fileClipboard())?.id === d.job?.id || isItemCut(row.id));
-      return <><button class={`row agent cron ${d.job?.archived ? "done" : ""} ${isCronCut() ? "mission-cut" : ""} ${isRowActive(row.id) ? "active" : ""}`} aria-expanded={d.launched ? row.expanded : undefined} {...rowTip.bind(rowDetail(d.label, [d.controller ? "Controller" : "Cron", d.job?.folder || undefined]))} onClick={e => { if (!d.controller && d.job?.id) clickSelectableRow(e, row.id, () => p.open(row.id)); else p.open(row.id); }}
+      const cronTip = rowTip.bind(rowDetail(d.label, [d.controller ? "Controller" : "Cron", d.job?.folder || undefined]));
+      return <><button class={`row agent cron ${d.job?.archived ? "done" : ""} ${isCronCut() ? "mission-cut" : ""} ${rowDrag.isLifted(row.id) ? "drag-source" : ""} ${isRowActive(row.id) ? "active" : ""}`} aria-expanded={d.launched ? row.expanded : undefined} {...cronTip} onPointerEnter={e => { if (rowDrag.phase() === 0) cronTip.onPointerEnter(e); }} onClick={e => { if (!d.controller && d.job?.id) clickSelectableRow(e, row.id, () => p.open(row.id)); else p.open(row.id); }}
         onKeyDown={e => { if (d.launched && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }} onContextMenu={e => {
         e.preventDefault(); e.stopPropagation();
         setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setFileMenu(null); setMultiSelectMenu(null);
@@ -2489,8 +2549,8 @@ export function LiveProjectsSection(p: {
     const tip = rowTip.bind(rowDetail(d.label, [d.mission && isArchived(d.mission) ? [projects().find(project => project.slug === d.slug)?.title || d.slug, missionFolder(d.mission)].filter(Boolean).join(" / ") : undefined, d.mission ? missionMachine(d.mission) : undefined, d.mission?.backend, d.mission?.model_override, d.mission?.id, d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined]));
     return <><button disabled={deleting()} aria-busy={deleting() ? true : undefined} aria-current={p.selected() === row.id ? "page" : undefined} aria-expanded={d.launched || d.versions ? row.expanded : undefined}
       onKeyDown={e => { if (deleting()) return; if ((d.launched || d.versions) && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
-      aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && pendingPlaceMoves().has(missionMoveKey(d.mission.id)) ? "mission-arriving" : ""} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${isMissionCut() ? "mission-cut" : ""} ${!deleting() && isRowActive(row.id) ? "active" : ""}`} {...tip}
-      onPointerEnter={e => { if (deleting()) return; tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(swallow("projectFiles.hoverTranscript")); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) { if (deleting()) { e.preventDefault(); e.stopPropagation(); return; } const dest = resolveTreeDestination(row.id); onMissionContext(e, d.mission, row.id, dest?.slug ?? (isArchived(d.mission) ? "" : d.slug), dest?.path ?? ""); } else {
+      aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && pendingPlaceMoves().has(missionMoveKey(d.mission.id)) ? "mission-arriving" : ""} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${isMissionCut() ? "mission-cut" : ""} ${rowDrag.isLifted(row.id) ? "drag-source" : ""} ${!deleting() && isRowActive(row.id) ? "active" : ""}`} {...tip}
+      onPointerEnter={e => { if (deleting()) return; if (rowDrag.phase() === 0) tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(swallow("projectFiles.hoverTranscript")); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) { if (deleting()) { e.preventDefault(); e.stopPropagation(); return; } const dest = resolveTreeDestination(row.id); onMissionContext(e, d.mission, row.id, dest?.slug ?? (isArchived(d.mission) ? "" : d.slug), dest?.path ?? ""); } else {
         e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setControllerMenu(null); setMultiSelectMenu(null);
         const group = contextSelectRow(row.id);
         if (group.length > 1) {
@@ -2550,7 +2610,7 @@ export function LiveProjectsSection(p: {
           );
         }}
       </For>
-      <div ref={dropTree} onPointerDown={startRowDrag} onPointerMove={e => { pointerPos = { x: e.clientX, y: e.clientY }; }} onPointerLeave={() => { pointerPos = null; }} onDragOver={e=>{if(!Array.from(e.dataTransfer?.types??[]).includes('Files'))return;e.preventDefault();const target=dropAt(e.clientX,e.clientY);dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));target?.classList.add('drop-active');if(e.dataTransfer)e.dataTransfer.dropEffect=target?'copy':'none';}} onDragLeave={e=>{if(!dropTree?.contains(e.relatedTarget as globalThis.Node))dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));}} onDrop={e=>{e.preventDefault();e.stopPropagation();dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));const target=dropAt(e.clientX,e.clientY);if(target)void importFiles(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})),target);}} onKeyDown={moveKey}><SidebarTree nodes={tree()} label="Projects" selected={p.selected()} selectedIds={selectedRowIds()} render={renderRow} /></div>
+      <div ref={dropTree} onPointerDown={rowDrag.onPointerDown} onPointerMove={e => { pointerPos = { x: e.clientX, y: e.clientY }; }} onPointerLeave={() => { pointerPos = null; }} onDragOver={e=>{if(!Array.from(e.dataTransfer?.types??[]).includes('Files'))return;e.preventDefault();const target=dropAt(e.clientX,e.clientY);dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));target?.classList.add('drop-active');if(e.dataTransfer)e.dataTransfer.dropEffect=target?'copy':'none';}} onDragLeave={e=>{if(!dropTree?.contains(e.relatedTarget as globalThis.Node))dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));}} onDrop={e=>{e.preventDefault();e.stopPropagation();dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));const target=dropAt(e.clientX,e.clientY);if(target)void importFiles(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})),target);}} onKeyDown={moveKey}><SidebarTree nodes={tree()} label="Projects" selected={p.selected()} selectedIds={selectedRowIds()} render={renderRow} /></div>
       <Show when={projects().length === 0 && !error()}>
         <div class="row note">No projects on the core backend.</div>
       </Show>
@@ -2663,6 +2723,37 @@ export function LiveProjectsSection(p: {
               onFork={mission => { setForkTarget(null); setMissionMenu(null); p.onFork(mission); }} />
           }</Show>
         </PopupMenu>}
+      </Show>
+      <Show when={rowDrag.pill()}>
+        {pill => (
+          <Portal>
+            <div class="sidebar-drag-pill" role="status" aria-live="polite" style={{ transform: `translate3d(${pill().x + 12}px, ${pill().y + 12}px, 0)` }}>
+              <span class="sidebar-drag-pill-label">{pill().label}</span>
+              <Show when={pill().count > 1}><span class="sidebar-drag-pill-count">+{pill().count - 1}</span></Show>
+            </div>
+          </Portal>
+        )}
+      </Show>
+      <Show when={movePicker()} keyed>
+        {mp => (
+          <Picker
+            label="Move to"
+            searchLabel="Move to project or folder"
+            anchor={mp.anchor}
+            placement="right-start"
+            width={260}
+            items={movePickerItems(mp.sources)}
+            selected={currentContainerKey(mp.sources)}
+            onSelect={id => {
+              const sep = id.indexOf(":");
+              const slug = sep >= 0 ? id.slice(0, sep) : id;
+              const path = sep >= 0 ? id.slice(sep + 1) : "";
+              setMovePicker(null);
+              executeMoveSources(mp.sources, slug, path);
+            }}
+            onClose={() => setMovePicker(null)}
+          />
+        )}
       </Show>
       {rowTip.surface}
       <Show when={rename()}>

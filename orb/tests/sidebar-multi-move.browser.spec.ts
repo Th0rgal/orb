@@ -1,4 +1,5 @@
 import {test, expect, type Page} from '@playwright/test';
+import {eventPage} from './eventPageFixture';
 test.use({browserName:'webkit'});
 const P='00000000-0000-0000-0000-0000000000a1', F='00000000-0000-0000-0000-0000000000a2', C='00000000-0000-0000-0000-0000000000a3';
 type M={id:string;title:string;status:string;project:string;folder?:string;placement_revision?:number;tags:string[];history:[];updated_at:string;parent_mission_id?:string};
@@ -402,4 +403,207 @@ test('deleting a parent with unloaded server-side descendants or paused child re
   expect(acknowledged).toEqual([HIDDEN_PAUSED]);
   expect(deleteSearches).toEqual(['','?include_descendants=true','?include_descendants=true']);
   await expect(tree.getByRole('button',{name:'Fredrik',exact:true})).toHaveCount(0);
+});
+
+test('long-press lifts row, spring-loads collapsed project on 450ms dwell, opens Move to picker on hold-release without stealing selection, and moves folders with missions and crons across projects', async ({page}) => {
+  await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
+  let missions:M[]=[
+    {id:P,title:'Pareto',status:'completed',project:'verity',folder:'',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T09:00:00Z'},
+    {id:F,title:'Fredrik',status:'completed',project:'verity',folder:'',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T06:00:00Z'},
+    {id:C,title:'Nested Agent',status:'completed',project:'verity',folder:'Specs',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T05:00:00Z'},
+  ];
+  let dirs:Record<string,Array<{name:string;kind:'file'|'dir'}>>={
+    'verity:':[{name:'Specs',kind:'dir'}],
+    'verity:Specs':[{name:'plan.md',kind:'file'}],
+    'other:':[{name:'Archive',kind:'dir'}],
+    'other:Archive':[],
+  };
+  let crons:Record<string,Array<{id:string;name:string;schedule:string;enabled:boolean;failure_streak:number;folder?:string}>>={
+    verity:[{id:'cron-1',name:'Nightly Spec Check',schedule:'every 1h',enabled:true,failure_streak:0,folder:'Specs'}],
+    other:[],
+  };
+  await page.route('**/api/**',async route=>{
+    const req=route.request(),url=new URL(req.url()),path=url.pathname;
+    if(req.method()==='POST' && path==='/api/control/missions/move') {
+      const body=req.postDataJSON();
+      const rootSet=new Set<string>(body.mission_ids ?? []);
+      const moved:Array<{mission_id:string;project:string;folder:string;placement_revision:number}>=[];
+      missions=missions.map(m=>{
+        const isRoot=rootSet.has(m.id);
+        const isChild=!!m.parent_mission_id && rootSet.has(m.parent_mission_id);
+        if(!isRoot && !isChild) return m;
+        const nextProj=body.project ?? m.project;
+        const nextFolder=isRoot ? (body.folder ?? '') : '';
+        const nextRev=(m.placement_revision ?? 0) + 1;
+        moved.push({mission_id:m.id,project:nextProj,folder:nextFolder,placement_revision:nextRev});
+        return {...m,project:nextProj,folder:nextFolder,placement_revision:nextRev};
+      });
+      return route.fulfill({json:{moved,client_op_id:body.client_op_id}});
+    }
+    if(req.method()==='POST' && path.includes('/file/transfer')) {
+      const parts=path.split('/'),from=parts[3],to=parts[6]??from,body=req.postDataJSON();
+      const fromParent=body.path.includes('/')?body.path.slice(0,body.path.lastIndexOf('/')):'';
+      const base=body.path.includes('/')?body.path.slice(body.path.lastIndexOf('/')+1):body.path;
+      const moved=(dirs[`${from}:${fromParent}`]??[]).find(e=>e.name===base)??{name:base,kind:'dir' as const};
+      dirs[`${from}:${fromParent}`]=(dirs[`${from}:${fromParent}`]??[]).filter(e=>e.name!==base);
+      const toParent=body.destination.includes('/')?body.destination.slice(0,body.destination.lastIndexOf('/')):'';
+      const toBase=body.destination.includes('/')?body.destination.slice(body.destination.lastIndexOf('/')+1):body.destination;
+      dirs[`${to}:${toParent}`]=[...(dirs[`${to}:${toParent}`]??[]),{name:toBase,kind:moved.kind}];
+      if(moved.kind==='dir' && dirs[`${from}:${body.path}`]) {
+        dirs[`${to}:${body.destination}`]=dirs[`${from}:${body.path}`];
+        delete dirs[`${from}:${body.path}`];
+      }
+      return route.fulfill({json:{path:body.destination}});
+    }
+    if(req.method()==='PATCH' && path.includes('/crons/')) {
+      const parts=path.split('/'),from=parts[3],cronId=parts[5],body=req.postDataJSON();
+      const target=body.project??from;
+      const existing=(crons[from]??[]).find(j=>j.id===cronId)??{id:cronId,name:'Nightly Spec Check',schedule:'every 1h',enabled:true,failure_streak:0};
+      const updated={...existing,folder:body.folder??existing.folder};
+      if(target!==from) {
+        crons[from]=(crons[from]??[]).filter(j=>j.id!==cronId);
+        crons[target]=[...(crons[target]??[]),updated];
+      } else {
+        crons[from]=(crons[from]??[]).map(j=>j.id===cronId?updated:j);
+      }
+      return route.fulfill({json:{slug:target,job:updated,runs:[]}});
+    }
+    if(path==='/api/projects') return route.fulfill({json:{projects:[{slug:'verity',title:'Verity'},{slug:'other',title:'Other'}]}});
+    if(path==='/api/control/missions') {
+      const proj=url.searchParams.get('project');
+      return route.fulfill({json:missions.filter(m=>!proj||m.project===proj)});
+    }
+    if(path.startsWith('/api/control/missions/')) {
+      const id=path.split('/')[4];
+      return route.fulfill({json:missions.find(m=>m.id===id)??{}});
+    }
+    const slug=path.split('/')[3];
+    if(path.endsWith('/files')) return route.fulfill({json:{entries:dirs[`${slug}:${url.searchParams.get('path')??''}`]??[]}});
+    if(path.endsWith('/crons')) return route.fulfill({json:{jobs:crons[slug]??[]}});
+    if(path.endsWith('/controller')) return route.fulfill({json:{job:null,runs:[]}});
+    return route.fulfill({json:[]});
+  });
+
+  await page.goto('/');
+  await page.getByRole('button',{name:'Verity',exact:true}).click();
+  const tree=page.getByRole('tree',{name:'Projects',exact:true});
+
+  // Open Pareto so Pareto is the committed active conversation.
+  const paretoBtn=tree.getByRole('button',{name:'Pareto',exact:true});
+  await paretoBtn.click();
+  await expect(paretoBtn).toHaveAttribute('aria-current','page');
+
+  // 1. Long-press (>= 260ms) and release in place on unselected Fredrik -> opens searchable Move to Picker
+  //    without navigating away from Pareto, then moves Fredrik into Other / Archive!
+  const fredrikBtn=tree.getByRole('button',{name:'Fredrik',exact:true});
+  const fBox=(await fredrikBtn.boundingBox())!;
+  await page.mouse.move(fBox.x+24,fBox.y+10);
+  await page.mouse.down();
+  await page.waitForTimeout(300);
+  await expect(fredrikBtn).toHaveClass(/drag-source/);
+  await expect(page.locator('.sidebar-drag-pill')).toContainText('Fredrik');
+  await page.mouse.up();
+
+  const picker=page.getByRole('dialog',{name:'Move to'});
+  await expect(picker).toBeVisible();
+  // Pareto remains the committed open mission while Fredrik is transiently highlighted for the picker.
+  await expect(paretoBtn).toHaveAttribute('aria-current','page');
+  await picker.getByRole('combobox').fill('Archive');
+  await picker.getByRole('option',{name:/Archive/}).click();
+  await expect.poll(()=>missions.find(m=>m.id===F)).toMatchObject({project:'other',folder:'Archive'});
+  await expect(paretoBtn).toHaveAttribute('aria-current','page');
+
+  // Collapse Other again so we can test 450ms spring-loaded auto-expand while dragging!
+  const otherBtn=tree.getByRole('button',{name:'Other',exact:true});
+  if((await otherBtn.getAttribute('aria-expanded'))==='true') await otherBtn.click();
+  await expect(otherBtn).toHaveAttribute('aria-expanded','false');
+
+  // 2. Escape during an active drag cancels cleanly without moving.
+  const specsRow=tree.locator('[data-tree-id="pf:verity:Specs"] .row-main');
+  const sBox=(await specsRow.boundingBox())!;
+  const oBox=(await otherBtn.boundingBox())!;
+  await page.mouse.move(sBox.x+24,sBox.y+10);
+  await page.mouse.down();
+  await page.mouse.move(sBox.x+24,sBox.y+30,{steps:4});
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  expect(dirs['verity:']?.map(e=>e.name)).toEqual(['Specs']);
+
+  // 3. Dragging folder "Specs" (containing mission "Nested Agent" and cron "Nightly Spec Check")
+  //    onto collapsed project "Other", dwelling >= 450ms to spring-load expand "Other", and dropping
+  //    moves the folder, nested mission, and nested cron across projects together!
+  await page.mouse.move(sBox.x+24,sBox.y+10);
+  await page.mouse.down();
+  await page.mouse.move(oBox.x+24,oBox.y+10,{steps:6});
+  await expect(tree.locator('.row.project[data-drop-project="other"]')).toHaveClass(/drop-active/);
+  await page.waitForTimeout(500);
+  await expect(otherBtn).toHaveAttribute('aria-expanded','true');
+  // Re-position on Other header in case expansion shifted rows, then drop.
+  const oBoxAfter=(await otherBtn.boundingBox())!;
+  await page.mouse.move(oBoxAfter.x+24,oBoxAfter.y+10);
+  await page.mouse.up();
+
+  await expect.poll(()=>dirs['other:']?.some(e=>e.name==='Specs')).toBe(true);
+  await expect.poll(()=>missions.find(m=>m.id===C)).toMatchObject({project:'other',folder:'Specs'});
+  await expect.poll(()=>crons.other.some(j=>j.id==='cron-1' && j.folder==='Specs')).toBe(true);
+  expect(crons.verity).toEqual([]);
+});
+
+test('selecting transcript text while Composer textarea is focused blurs empty Composer selection so Cmd+C copies transcript text', async ({page}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('orb.apiUrl',location.origin);
+    localStorage.setItem('orb.jwt','test');
+  });
+  const mission={
+    id:P,title:'Pareto',status:'completed',project:'verity',folder:'',tags:[],
+    updated_at:'2026-09-25T10:00:00Z',
+    history:[],
+  };
+  const events=[
+    {id:1,sequence:1,event_type:'user_message',content:'Show token',timestamp:'2026-09-25T10:00:00Z'},
+    {id:2,sequence:2,event_type:'assistant_message_canonical',content:'COPY_TOKEN_ALPHA_99',timestamp:'2026-09-25T10:00:01Z',event_id:'turn:1',metadata:{bubble_id:'turn:1',revision:1}},
+  ];
+  await page.route('**/api/**',async route=>{
+    const url=new URL(route.request().url()),path=url.pathname;
+    if(path==='/api/projects') return route.fulfill({json:{projects:[{slug:'verity',title:'Verity'}]}});
+    if(path==='/api/control/missions') return route.fulfill({json:[mission]});
+    if(path===`/api/control/missions/${P}`) return route.fulfill({json:mission});
+    if(path.endsWith('/events')) return route.fulfill(eventPage(route,events));
+    if(path.endsWith('/files')) return route.fulfill({json:{entries:[]}});
+    if(path.endsWith('/crons')) return route.fulfill({json:{jobs:[]}});
+    if(path.endsWith('/controller')) return route.fulfill({json:{job:null,runs:[]}});
+    return route.fulfill({json:[]});
+  });
+
+  await page.goto('/');
+  await page.getByRole('button',{name:'Verity',exact:true}).click();
+  await page.getByRole('tree',{name:'Projects',exact:true}).getByRole('button',{name:'Pareto',exact:true}).click();
+  await expect(page.getByText('COPY_TOKEN_ALPHA_99')).toBeVisible();
+
+  // Focus Composer with empty selection (matching Orb launch/mission open behavior), then select transcript text.
+  const composer=page.locator('.composer textarea');
+  await composer.focus();
+  await expect(composer).toBeFocused();
+
+  const selectedAndBlurred=await page.evaluate(()=>{
+    const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+    let targetNode:Text|null=null;
+    while(walker.nextNode()){
+      const n=walker.currentNode as Text;
+      if(n.nodeValue?.includes('COPY_TOKEN_ALPHA_99')){ targetNode=n; break; }
+    }
+    if(!targetNode) return null;
+    const range=document.createRange();
+    range.selectNodeContents(targetNode);
+    const sel=window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return new Promise<{selected:string;activeTag:string}>(resolve=>{
+      setTimeout(()=>resolve({
+        selected:window.getSelection()?.toString()??'',
+        activeTag:document.activeElement?.tagName??'',
+      }),30);
+    });
+  });
+  expect(selectedAndBlurred).toEqual({selected:'COPY_TOKEN_ALPHA_99',activeTag:'BODY'});
 });

@@ -3768,4 +3768,146 @@ def repoDiffBudgetStep
       (256 : UInt32) ||| dirtyBit ||| truncFilesBit ||| truncBytesBit ||| (syncState <<< 16)
     lo32.toUInt64 ||| (clampedBytes.toUInt64 <<< 32)
 
+/--
+  Unboxed C-ABI Sidebar Move Target Admission Gate (`orb_sidebar_move_target_admit`):
+  Decides whether sidebar item (`itemKind`: `0 = mission`, `1 = folder`, `2 = file`, `3 = cron`)
+  at `(srcProjectOrd, srcPathOrd, srcParentOrd)` may be moved into destination container
+  `(dstProjectOrd, dstPathOrd)` (`0 = project root`, `> 0 = folder path ordinal`), given whether
+  `dstIsSelfOrSubtree == 1` (`dstProjectOrd == srcProjectOrd` and `dstPathOrd` is `srcPathOrd`
+  or a strict descendant `srcPathOrd ++ "/..."`):
+  - Rejects (`0`) invalid `itemKind > 3` or zero project ordinals (`srcProjectOrd == 0` or
+    `dstProjectOrd == 0`).
+  - Rejects (`0`) folder cycle / self-containment (`itemKind == 1 && dstIsSelfOrSubtree == 1`).
+  - Rejects (`0`) no-op moves into the item's existing enclosing container:
+    for folders/files (`itemKind == 1 || itemKind == 2`), `srcParentOrd == dstPathOrd` in the same
+    project; for missions/crons (`itemKind == 0 || itemKind == 3`), `srcPathOrd == dstPathOrd` in
+    the same project.
+  - Admits (`1`) otherwise (including cross-project moves to an identical relative folder ordinal).
+-/
+@[inline, export orb_sidebar_move_target_admit]
+def sidebarMoveTargetAdmit
+    (itemKind dstIsSelfOrSubtree : UInt8)
+    (srcProjectOrd srcPathOrd srcParentOrd dstProjectOrd dstPathOrd : UInt32) : UInt8 :=
+  let validIds : Bool := itemKind ≤ 3 && srcProjectOrd != 0 && dstProjectOrd != 0
+  let cycleBlocked : Bool := itemKind == 1 && dstIsSelfOrSubtree == 1
+  let curContainerOrd : UInt32 :=
+    if itemKind == 1 || itemKind == 2 then srcParentOrd else srcPathOrd
+  let isNoOp : Bool := srcProjectOrd == dstProjectOrd && curContainerOrd == dstPathOrd
+  if validIds && !cycleBlocked && !isNoOp then 1 else 0
+
+/-- Helper: edge auto-scroll step (`0..10 px/frame`) inside the `36px` sidebar scroll zone. -/
+@[inline]
+def sidebarScrollStepPx (edgeTopDistPx edgeBottomDistPx : UInt32) : UInt32 :=
+  let upPx : UInt32 :=
+    if edgeTopDistPx < 36 then (((36 - edgeTopDistPx).toUInt64 * 10 + 35) / 36).toUInt32 else 0
+  let downPx : UInt32 :=
+    if !(edgeTopDistPx < 36) && edgeBottomDistPx < 36 then
+      (((36 - edgeBottomDistPx).toUInt64 * 10 + 35) / 36).toUInt32
+    else 0
+  let rawPx : UInt32 := if upPx > 0 then upPx else downPx
+  if rawPx > 10 then 10 else rawPx
+
+/-- Helper: edge auto-scroll direction flag (`0`, `1 <<< 17` up, `1 <<< 18` down). -/
+@[inline]
+def sidebarScrollDirBits (edgeTopDistPx edgeBottomDistPx : UInt32) : UInt32 :=
+  if edgeTopDistPx < 36 && (((36 - edgeTopDistPx).toUInt64 * 10 + 35) / 36).toUInt32 > 0 then
+    (1 : UInt32) <<< 17
+  else if !(edgeTopDistPx < 36) && edgeBottomDistPx < 36 &&
+      (((36 - edgeBottomDistPx).toUInt64 * 10 + 35) / 36).toUInt32 > 0 then
+    (1 : UInt32) <<< 18
+  else 0
+
+/--
+  Unboxed C-ABI Sidebar Long-Press / Drag / Spring-Load Gesture Stepper (`orb_sidebar_drag_step`):
+  Pure deterministic state machine governing sidebar press-hold lift (`holdThresholdMs = 260`),
+  immediate pointer drag (`moveThresholdSq = 36`), spring-loaded collapsed project/folder dwell
+  (`springThresholdMs = 450`), edge auto-scroll velocity (`edgeZonePx = 36`, `maxStepPx = 10`),
+  and hold-release `Move to…` picker vs direct drop commit:
+  - `phase`: `0 = idle`, `1 = pressing`, `2 = armed` (held in place `>= holdThresholdMs` without
+    crossing `moveThresholdSq`), `3 = dragging` (crossed `moveThresholdSq`).
+  - `eventKind`: `0 = pointerDown`, `1 = holdTick`, `2 = pointerMove`, `3 = springTick`,
+    `4 = pointerUp`, `5 = cancel` (`Escape`, `pointercancel`, right-click, `blur`).
+  - Packed 64-bit verdict:
+    * `bits 0..7`: `nextPhase` (`0..3`)
+    * `bits 8..15`: `effectCode`:
+      - `0 = none`
+      - `1 = armLift` (entered `armed` via long-press; arm feedback & suppress tooltip)
+      - `2 = startDrag` (entered `dragging` from `pressing` or `armed`)
+      - `3 = expandTarget` (spring-load dwell reached on collapsed container `hoverTargetOrd != 0`)
+      - `4 = commitDrop` (released in `dragging` over an admitted `hoverTargetOrd != 0` with `targetAdmitted == 1`)
+      - `5 = openMovePicker` (released in `armed` without dragging: opens searchable `Move to…` `Picker`)
+      - `6 = cancelGesture` (explicit `cancel`, invalid gesture, or un-admitted drop release)
+    * `bit 16` (`eatClickBit = 65536`): suppress trailing synthetic `click` on `pointerUp` after
+      `armed` or `dragging` so opening the picker or dropping never navigates/toggles the source row.
+    * `bit 17` (`scrollUpBit = 131072`): auto-scroll `.sb-scroll` upward (`scrollStepPx > 0`).
+    * `bit 18` (`scrollDownBit = 262144`): auto-scroll `.sb-scroll` downward (`scrollStepPx > 0`).
+    * `bits 24..31`: `scrollStepPx` (`0..10`, proportional to proximity within `36px` edge zone).
+    * `bits 32..63`: `nextSpringTargetOrd` (`UInt32`, `0` when cleared or after firing `expandTarget`
+      so the same container never double-toggles; latches `hoverTargetOrd` while dragging over a
+      collapsed container).
+-/
+@[inline, export orb_sidebar_drag_step]
+def sidebarDragStep
+    (phase eventKind rowMovable targetCollapsed targetAdmitted : UInt8)
+    (distSq elapsedMs springElapsedMs hoverTargetOrd springTargetOrd : UInt32)
+    (edgeTopDistPx edgeBottomDistPx : UInt32) : UInt64 :=
+  let lo32 : UInt32 :=
+    if phase > 3 || eventKind > 5 then
+      (6 : UInt32) <<< 8
+    else if eventKind == 5 then
+      if phase == 0 then 0 else (6 : UInt32) <<< 8
+    else if eventKind == 0 then
+      if rowMovable == 1 then 1 else 0
+    else if phase == 0 then
+      0
+    else if eventKind == 1 then
+      if phase == 1 && elapsedMs ≥ 260 && distSq < 36 then
+        (2 : UInt32) ||| ((1 : UInt32) <<< 8)
+      else
+        phase.toUInt32
+    else if eventKind == 2 then
+      let entersDrag : Bool := (phase == 1 || phase == 2) && distSq ≥ 36
+      let stayArmed : Bool := phase == 2 && distSq < 36
+      let nextPhase : UInt8 :=
+        if phase == 3 || entersDrag then 3 else if stayArmed then 2 else 1
+      let eff : UInt8 := if entersDrag then 2 else 0
+      let stepPx : UInt32 :=
+        if nextPhase == 3 then sidebarScrollStepPx edgeTopDistPx edgeBottomDistPx else 0
+      let dirBits : UInt32 :=
+        if nextPhase == 3 then sidebarScrollDirBits edgeTopDistPx edgeBottomDistPx else 0
+      nextPhase.toUInt32 ||| (eff.toUInt32 <<< 8) ||| dirBits ||| (stepPx <<< 24)
+    else if eventKind == 3 then
+      if phase == 3 && targetCollapsed == 1 && hoverTargetOrd != 0 &&
+          hoverTargetOrd == springTargetOrd && springElapsedMs ≥ 450 then
+        (3 : UInt32) ||| ((3 : UInt32) <<< 8)
+      else
+        phase.toUInt32
+    else
+      if phase == 1 then
+        0
+      else if phase == 2 then
+        ((5 : UInt32) <<< 8) ||| ((1 : UInt32) <<< 16)
+      else if hoverTargetOrd != 0 && targetAdmitted == 1 then
+        ((4 : UInt32) <<< 8) ||| ((1 : UInt32) <<< 16)
+      else
+        ((6 : UInt32) <<< 8) ||| ((1 : UInt32) <<< 16)
+  let hi32 : UInt32 :=
+    if phase > 3 || eventKind > 5 || eventKind == 5 || eventKind == 0 || phase == 0 then
+      0
+    else if eventKind == 1 then
+      if phase == 1 && elapsedMs ≥ 260 && distSq < 36 then 0 else springTargetOrd
+    else if eventKind == 2 then
+      let entersDrag : Bool := (phase == 1 || phase == 2) && distSq ≥ 36
+      let activeDrag : Bool := phase == 3 || entersDrag
+      if activeDrag && targetCollapsed == 1 && hoverTargetOrd != 0 then hoverTargetOrd else 0
+    else if eventKind == 3 then
+      if phase == 3 && targetCollapsed == 1 && hoverTargetOrd != 0 &&
+          hoverTargetOrd == springTargetOrd && !(springElapsedMs ≥ 450) then
+        springTargetOrd
+      else
+        0
+    else
+      0
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
 end Orb.Kernel
