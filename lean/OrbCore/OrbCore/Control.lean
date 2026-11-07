@@ -68,6 +68,7 @@ structure CoreAppState where
   memTokenCache?  : Option MemoryTokenCache := none
   cloudWakeup?    : Option CloudWorkerWakeup := none
   bunkerStateRef? : Option (IO.Ref UInt8) := none
+  managedStore?   : Option ManagedComputeStore := none
 
 def isLoopbackHostStr (h : String) : Bool :=
   let t := h.trimAscii.toString
@@ -948,6 +949,60 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         ])
         return .ok (mkJson 200 unsupportedJson)
 
+  -- 5c. Managed Node Dial-Out Enrollment & Leased Relay
+  if req.method == "POST" && cleanPath == "/api/managed-machines/enroll" then
+    let some mst := st.managedStore?
+      | return .ok (mkJson 503 "{\"error\":\"managed_store_unavailable\"}")
+    let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+      | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+    let mid := (jv.fieldStr? "machine_id").getD ""
+    let tok := (jv.fieldStr? "enroll_token").getD ""
+    let boot? := jv.fieldUInt64? "node_boot_epoch"
+    match ← enrollManagedNode mst mid tok boot? with
+    | .error "stale_boot_epoch" => return .ok (mkJson 410 "{\"error\":\"stale_boot_epoch\"}")
+    | .error _ => return .ok (mkJson 401 "{\"error\":\"enrollment_rejected\"}")
+    | .ok (nodeId, nodeToken) =>
+      return .ok (mkJson 200 s!"\{\"node_id\":{jsonEscape nodeId},\"node_token\":{jsonEscape nodeToken}}")
+
+  if req.method == "GET" && cleanPath == "/api/managed-machines/relay/poll" then
+    let some mst := st.managedStore?
+      | return .ok (mkJson 503 "{\"error\":\"managed_store_unavailable\"}")
+    let mid := (lookupHeaderCI req.headers "x-orb-machine-id").getD ""
+    let boot? := ((lookupHeaderCI req.headers "x-orb-boot-epoch").bind String.toNat?).map Nat.toUInt64
+    let nodeTok := (extractBearerToken? req.headers nowEpochSec).getD ""
+    match ← authenticateNodeToken mst mid nodeTok boot? with
+    | .error "stale_boot_epoch" => return .ok (mkJson 410 "{\"error\":\"stale_boot_epoch\"}")
+    | .error _ => return .ok (mkJson 401 "{\"error\":\"node_unauthorized\"}")
+    | .ok vmBoot =>
+      match ← pollRelayLease mst mid vmBoot nowEpochSec (nowEpochSec + 60) with
+      | .error _ => return .ok (mkJson 410 "{\"error\":\"stale_boot_epoch\"}")
+      | .ok none => return .ok (mkJson 200 "[]")
+      | .ok (some cmd) => return .ok (mkJson 200 (renderRelayPollJson cmd))
+
+  if req.method == "POST" && cleanPath == "/api/managed-machines/relay/respond" then
+    let some mst := st.managedStore?
+      | return .ok (mkJson 503 "{\"error\":\"managed_store_unavailable\"}")
+    let mid := (lookupHeaderCI req.headers "x-orb-machine-id").getD ""
+    let boot? := ((lookupHeaderCI req.headers "x-orb-boot-epoch").bind String.toNat?).map Nat.toUInt64
+    let nodeTok := (extractBearerToken? req.headers nowEpochSec).getD ""
+    match ← authenticateNodeToken mst mid nodeTok boot? with
+    | .error "stale_boot_epoch" => return .ok (mkJson 410 "{\"error\":\"stale_boot_epoch\"}")
+    | .error _ => return .ok (mkJson 401 "{\"error\":\"node_unauthorized\"}")
+    | .ok vmBoot =>
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let cmdId := (jv.fieldStr? "id").getD ""
+      let leaseId := (jv.fieldUInt64? "lease_id").getD 0
+      match ← stepRelayCommand mst cmdId {
+        opCode := Orb.ManagedNode.RelayOp.encode .ack
+        presentedLeaseId := leaseId
+        presentedBootEpoch := vmBoot
+        nowEpoch := nowEpochSec
+      } with
+      | .error "stale_boot_epoch" => return .ok (mkJson 410 "{\"error\":\"stale_boot_epoch\"}")
+      | .error e => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
+      | .ok _ => return .ok (mkJson 200 "{\"ok\":true}")
+
   -- 6. Protected Routes (`require_auth`)
   if !authenticateHttpBearer st.cfg req.headers nowEpochSec then
     return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")
@@ -1535,14 +1590,39 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     else
       return .ok (mkJson 200 "{\"ok\":true,\"router\":\"/api/model-routing\"}")
 
-  -- Managed Compute Fleet (`/api/managed-machines/spend`, `/api/remote-nodes`)
-  if req.method == "GET" && (cleanPath == "/api/managed-machines/spend" || cleanPath == "/api/managed-machines") then
+  -- Managed Compute Fleet (`/api/managed-machines/spend`, `/api/managed-machines`, `/api/remote-nodes`)
+  if req.method == "GET" && cleanPath == "/api/managed-machines/spend" then
     let mf ← st.managedRef.get
-    return .ok (mkJson 200 (renderManagedBudgetJson mf))
+    match st.managedStore? with
+    | none => return .ok (mkJson 200 (renderManagedBudgetJson mf))
+    | some mst =>
+      match ← loadManagedFleet mst mf.enabled mf.boatEnabled mf.dailyCapCents mf.spentTodayCents mf.maxConcurrent with
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      | .ok live =>
+        st.managedRef.set live
+        return .ok (mkJson 200 (renderManagedBudgetJson live))
+
+  if req.method == "GET" && cleanPath == "/api/managed-machines" then
+    let mf ← st.managedRef.get
+    match st.managedStore? with
+    | none => return .ok (mkJson 200 (renderManagedBudgetJson mf))
+    | some mst =>
+      match ← loadManagedFleet mst mf.enabled mf.boatEnabled mf.dailyCapCents mf.spentTodayCents mf.maxConcurrent with
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      | .ok live =>
+        st.managedRef.set live
+        return .ok (mkJson 200 (renderManagedMachinesJson live))
 
   if req.method == "GET" && cleanPath == "/api/remote-nodes" then
     let mf ← st.managedRef.get
-    return .ok (mkJson 200 s!"\{\"nodes\":[],\"managed_compute\":{renderManagedBudgetJson mf}}")
+    match st.managedStore? with
+    | none => return .ok (mkJson 200 s!"\{\"nodes\":[],\"managed_compute\":{renderManagedBudgetJson mf}}")
+    | some mst =>
+      match ← loadManagedFleet mst mf.enabled mf.boatEnabled mf.dailyCapCents mf.spentTodayCents mf.maxConcurrent with
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      | .ok live =>
+        st.managedRef.set live
+        return .ok (mkJson 200 (renderRemoteNodesJson live))
 
   -- Durable follow-up queue (`GET /api/control/queue`, `PATCH /api/control/queue/:id`)
   if req.method == "GET" && cleanPath == "/api/control/queue" then
@@ -1844,8 +1924,14 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       else s!"{normWork}/.sandboxed-sh"
     let .ok store ← openCoreStore dataRoot
       | do IO.eprintln s!"[sandboxed-sh] FATAL: failed to open SQLite CoreStore at {dataRoot}"; return 1
+    let .ok managedStore ← openManagedComputeStore s!"{dataRoot}/managed_compute.db"
+      | do closeCoreStore store; IO.eprintln s!"[sandboxed-sh] FATAL: failed to open managed_compute.db at {dataRoot}"; return 1
     let searchRes ← openSearchIndex s!"{dataRoot}/search_index"
-    let managedRef ← IO.mkRef ({} : ManagedFleetState)
+    let initialManaged :=
+      match ← loadManagedFleet managedStore false false 2000 0 100 with
+      | .ok mf => mf
+      | .error _ => ({} : ManagedFleetState)
+    let managedRef ← IO.mkRef initialManaged
     let initialChains ← loadRoutingChainsFromStore store
     let chainsRef ← IO.mkRef initialChains
     let proxyCooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
@@ -1866,10 +1952,12 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       memTokenCache? := some memTokenCache
       cloudWakeup? := some cloudWakeup
       bunkerStateRef? := some bunkerRef
+      managedStore? := some managedStore
     }
     let bindHost := if cfg.host == "localhost" then "127.0.0.1" else cfg.host
     let .ok (listenFd, boundPort) ← tcpListen bindHost cfg.port 128
       | do
+        closeManagedComputeStore managedStore
         closeCoreStore store
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to bind {bindHost}:{cfg.port}"
         return 1
@@ -1885,6 +1973,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           discard <| IO.asTask (prio := .dedicated) (handleClientConn appState cfd)
         served := served + 1
     discard <| closeFd listenFd
+    closeManagedComputeStore managedStore
     closeCoreStore store
     return 0
 
