@@ -539,7 +539,8 @@ def encodeCoreHttpResponse (r : CoreHttpResponse) : ByteArray := Id.run do
       else
         s!"Access-Control-Allow-Origin: {orig}\r\n" ++
         "Vary: Origin\r\n" ++
-        "Access-Control-Allow-Headers: Authorization, Content-Type, Idempotency-Key\r\n" ++
+        "Access-Control-Allow-Headers: Authorization, Content-Type, Idempotency-Key, X-Paloma-Approval, X-Orb-Token, X-Language, Last-Event-ID, Cache-Control, Accept\r\n" ++
+        "Access-Control-Expose-Headers: X-Orb-Events-Protocol, X-Has-More, X-Next-Cursor, X-Page-Max-Sequence, X-Max-Sequence, Content-Disposition, Retry-After, X-Request-Id\r\n" ++
         "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
     | none => ""
   let mut head :=

@@ -39,7 +39,25 @@ func option(_ name: String) -> String? {
     guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
     return args[i + 1]
 }
-guard let command = args.first else { fail("usage: orb-signer create|public|sign --key PATH") }
+guard let command = args.first else { fail("usage: orb-signer create|public|sign|auth --key PATH") }
+if command == "auth" {
+    let reason = (option("--reason") ?? "Authenticate").trimmingCharacters(in: .whitespacesAndNewlines)
+    let context = LAContext()
+    context.localizedCancelTitle = "Cancel"
+    let semaphore = DispatchSemaphore(value: 0)
+    var authError: Error?
+    context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason.isEmpty ? "Authenticate" : reason) { ok, error in
+        if !ok { authError = error ?? NSError(domain: "orb-signer", code: 1) }
+        semaphore.signal()
+    }
+    semaphore.wait()
+    if let authError {
+        let code = (authError as? LAError)?.code
+        fail("Touch ID: \(authError.localizedDescription)", code: code == .userCancel || code == .appCancel ? 2 : 1)
+    }
+    emit(["authenticated": "true"])
+    exit(0)
+}
 guard let keyPath = option("--key") else { fail("--key is required") }
 let keyURL = URL(fileURLWithPath: keyPath)
 guard SecureEnclave.isAvailable else { fail("Secure Enclave is not available on this Mac", code: 3) }

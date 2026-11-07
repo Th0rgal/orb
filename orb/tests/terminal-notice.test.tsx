@@ -115,3 +115,26 @@ it("shows one card when a harness failure is followed by the node's generic stat
   expect(errors).toHaveLength(1);
   expect(errors[0].kind === "error" && errors[0].text).toContain("Argument list too long");
 });
+
+it("turns a silent remote end_turn without assistant text into an actionable warning card with Resume", () => {
+  const events = [
+    storedToStream({ id: 1, sequence: 1, event_id: "u-1", event_type: "user_message", timestamp: "", content: "Summarize findings", metadata: {} })!,
+    storedToStream({ id: 2, sequence: 2, event_id: "t-2", event_type: "thinking", timestamp: "", content: "Let me write the final summary.", metadata: { done: true } })!,
+    storedToStream({
+      id: 3, sequence: 3, event_id: "a-3", event_type: "assistant_message", timestamp: "",
+      content: "Remote opencode job 9c834349-1203-486c-8abf-977a118763b9 on node 'managed-mmdb9nz2ms' finished without assistant text (stop reason: end_turn).",
+      metadata: { success: true },
+    })!,
+  ];
+  const items = buildTranscript(events);
+  let resumed = 0;
+  const { container } = render(() => <Transcript backend="opencode" items={items} onResume={() => { resumed++; }} />);
+  const card = container.querySelector(".error-notice.warning")!;
+  expect(card).not.toBeNull();
+  expect(card.textContent).toContain("OpenCode stopped without a written reply");
+  expect(card.textContent).toContain("managed-mmdb9nz2ms");
+  const btn = card.querySelector(".error-notice-actions .error-notice-link") as HTMLButtonElement | null;
+  expect(btn?.textContent).toBe("Resume");
+  btn?.click();
+  expect(resumed).toBe(1);
+});

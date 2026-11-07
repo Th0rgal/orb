@@ -430,6 +430,14 @@ export class TranscriptReducer {
           return;
         }
         const at={...(typeof d.at==="string"?{at:d.at}:{}),...(id?{eventId:id}:{}),...(ev.sequence!=null?{sequence:ev.sequence}:{})};
+        if(!isNativeReceipt && /^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} (?:on node '[^']+' )?finished without assistant text/i.test(trimmed)){
+          const hasPriorText = (previous?.kind === "text" && !!previous.text.trim()) || this.items.slice(this.lastUser + 1).some(row => row.kind === "text" && !!row.text.trim());
+          if (!hasPriorText) {
+            this.items.push({ kind: "error", key: this.key("error"), text: trimmed, terminal: true });
+          }
+          this.hoistTrailingThoughts();
+          return;
+        }
         if(!isNativeReceipt){
           if(previous?.kind === "text" && index != null){this.put(index,{...previous,text:text||previous.text,live:false,...at});this.lastFinal=index;this.suppressedFinalPrefix="";}
           else if(text){this.lastFinal=this.items.length;this.suppressedFinalPrefix="";this.items.push({kind:"text",key:this.key("text"),text,live:false,...at});}

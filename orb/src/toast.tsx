@@ -309,12 +309,14 @@ function ToastItem(p: { toast: Toast }) {
     <div class="toast-actions">
       <For each={t().actions?.filter(a => !a.link)}>{a => <button type="button" class={a.primary ? "toast-btn primary" : "toast-btn"} onClick={() => runAction(a)}>{a.label}<Show when={a.kbd}><kbd>{a.kbd}</kbd></Show></button>}</For>
     </div>
-    <Show when={t().copy}>
-      <button type="button" class="icon-btn toast-icon-btn" aria-label={copied() ? "Error copied" : "Copy error"} title={copied() ? "Copied" : "Copy error"} onClick={() => void copy()}>
-        <Show when={copied()} fallback={<CopyIcon size={13} />}><CheckIcon size={13} /></Show>
-      </button>
-    </Show>
-    <button type="button" class="icon-btn toast-icon-btn" aria-label="Dismiss" onClick={() => close(t())}><CloseIcon size={13} /></button>
+    <div class="toast-corner">
+      <button type="button" class="icon-btn toast-icon-btn" aria-label="Dismiss" onClick={() => close(t())}><CloseIcon size={13} /></button>
+      <Show when={t().copy}>
+        <button type="button" class="icon-btn toast-icon-btn" aria-label={copied() ? "Error copied" : "Copy error"} title={copied() ? "Copied" : "Copy error"} onClick={() => void copy()}>
+          <Show when={copied()} fallback={<CopyIcon size={13} />}><CheckIcon size={13} /></Show>
+        </button>
+      </Show>
+    </div>
   </div>;
 }
 

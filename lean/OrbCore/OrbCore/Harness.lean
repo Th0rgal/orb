@@ -3,11 +3,22 @@
   (`0 import Lean`, `0 sorryAx`) enforcing all 9 `scripts/harness_contract_tests.sh` invariants.
 -/
 import LeanSys
+import OrbBin.Json
 
 namespace OrbCore.Harness
 
 open LeanSys.Posix
 open LeanSys.Codec
+open OrbBin.Json
+
+/-- True when OpenCode emitted an auto-compaction checkpoint rather than user-facing assistant prose. -/
+def isOpenCodeCompactionSummary (text : String) : Bool :=
+  let t := text.trimAscii.toString
+  (t.startsWith "## Objective\n" || t.startsWith "## Objective\r\n") &&
+  ((t.splitOn "\n## Work State\n").length > 1 || (t.splitOn "\n## Progress\n").length > 1 ||
+   (t.splitOn "\r\n## Work State\r\n").length > 1 || (t.splitOn "\r\n## Progress\r\n").length > 1) &&
+  ((t.splitOn "\n## Next Move\n").length > 1 || (t.splitOn "\r\n## Next Move\r\n").length > 1) &&
+  ((t.splitOn "\n## Relevant Files").length > 1 || (t.splitOn "\r\n## Relevant Files").length > 1)
 
 /-- Normalized harness stream event (`Thinking` capability parity). -/
 inductive AgentEvent where
@@ -24,6 +35,8 @@ structure HarnessParserState where
   missionId     : String
   pendingCalls  : Array (String × String) := #[]
   emittedEvents : Array AgentEvent := #[]
+  sawUserText   : Bool := false
+  sawActivity   : Bool := false
   deriving Repr, DecidableEq
 
 private def lookupToolName (calls : Array (String × String)) (callId : String) : String :=
@@ -73,7 +86,34 @@ def stepHarnessJsonLine (st : HarnessParserState) (line : String) : HarnessParse
       let msg := (JsonTape.lookupString? tape "error").getD ((JsonTape.lookupString? tape "result").getD "")
       { st with emittedEvents := st.emittedEvents.push (.TurnResult st.missionId isErr msg) }
     else
-      st
+      -- OpenCode `run --format json` events carry a nested `"part": {...}` object with `"sessionID"`.
+      match OrbBin.Json.parse trimmed with
+      | .error _ => st
+      | .ok jv =>
+        match jv.field? "part" with
+        | none => st
+        | some part =>
+          if evType == "reasoning" then
+            let thought := (part.fieldStr? "text").getD ""
+            { st with sawActivity := true, emittedEvents := st.emittedEvents.push (.Thinking st.missionId thought true) }
+          else if evType == "text" then
+            let txt := (part.fieldStr? "text").getD ""
+            if isOpenCodeCompactionSummary txt then
+              { st with sawActivity := true }
+            else if txt.trimAscii.toString.isEmpty then
+              st
+            else
+              { st with sawUserText := true, sawActivity := true, emittedEvents := st.emittedEvents.push (.TextDelta st.missionId txt) }
+          else if evType == "step_finish" then
+            let reason := (part.fieldStr? "reason").getD ""
+            if reason == "stop" && st.sawActivity && !st.sawUserText then
+              { st with emittedEvents := st.emittedEvents.push (.TurnResult st.missionId true "OpenCode finished without assistant text (stop reason: end_turn).") }
+            else if reason == "stop" then
+              { st with emittedEvents := st.emittedEvents.push (.TurnResult st.missionId false "end_turn") }
+            else
+              st
+          else
+            st
 
 /-- Parse an OpenCode SSE frame (`event: ... \n data: {...}`), ignoring keepalive comments and `[DONE]` sentinels. -/
 def parseOpenCodeSseChunk (st : HarnessParserState) (ssePayload : String) : HarnessParserState := Id.run do
@@ -151,6 +191,18 @@ def vibe_acp_session_update_contract : Bool :=
   parseVibeAcpNotification? "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"sessionId\":\"s-9\",\"sessionUpdate\":\"agent_thought_chunk\",\"text\":\"ACP_THINK\"}"
     == some ("s-9", .Thinking "s-9" "ACP_THINK" false)
 
+def opencode_empty_stop_after_reasoning_or_compaction_is_flagged : Bool :=
+  let compaction := "## Objective\nShip fix\n\n## Work State\nDone\n\n## Next Move\nSummarize\n\n## Relevant Files\n- a.lean"
+  let escComp := OrbBin.Json.escapeJsonString compaction
+  let s0 : HarnessParserState := { missionId := "m4" }
+  let s1 := stepHarnessJsonLine s0 "{\"type\":\"reasoning\",\"sessionID\":\"ses_1\",\"part\":{\"type\":\"reasoning\",\"text\":\"Let me write the summary.\"}}"
+  let s2 := stepHarnessJsonLine s1 s!"\{\"type\":\"text\",\"sessionID\":\"ses_1\",\"part\":\{\"type\":\"text\",\"text\":{escComp}}}"
+  let s3 := stepHarnessJsonLine s2 "{\"type\":\"step_finish\",\"sessionID\":\"ses_1\",\"part\":{\"type\":\"step-finish\",\"reason\":\"stop\"}}"
+  s3.emittedEvents == #[
+    .Thinking "m4" "Let me write the summary." true,
+    .TurnResult "m4" true "OpenCode finished without assistant text (stop reason: end_turn)."
+  ]
+
 def runAllHarnessContractTests : Bool :=
   text_delta_does_not_contain_thinking_content &&
   thinking_produces_thinking_event &&
@@ -160,6 +212,7 @@ def runAllHarnessContractTests : Bool :=
   test_parse_stream_event_delta &&
   test_parse_assistant_event &&
   test_parse_result_event &&
-  vibe_acp_session_update_contract
+  vibe_acp_session_update_contract &&
+  opencode_empty_stop_after_reasoning_or_compaction_is_flagged
 
 end OrbCore.Harness

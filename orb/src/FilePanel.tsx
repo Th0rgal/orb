@@ -982,7 +982,7 @@ export function FilePanelProvider(p: {
       <FileReferenceContext.Provider value={resolver}>
         <span ref={layoutMarker} hidden />
         {p.children}
-        <aside ref={el => { sideAside = el; }} class="btw-sidebar" classList={{ "file-panel": sideOpen(), maximized: sideOpen() && maximized() }} style={{ display: sideOpen() ? undefined : "none" }} aria-label="Side question panel"><div class="file-panel-resize" role="separator" aria-label="Resize side question panel" aria-orientation="vertical" onPointerDown={e=>resize(e)} /><div ref={setSideTarget} class="btw-sidebar-content" /></aside>
+        <aside ref={el => { sideAside = el; }} class="btw-sidebar" classList={{ "file-panel": sideOpen(), maximized: sideOpen() && maximized() }} style={{ display: sideOpen() ? undefined : "none" }} aria-label="Side question panel"><div class="file-panel-resize" role="separator" aria-label="Resize side question panel" aria-orientation="vertical" onPointerDown={e=>resize(e)} /><div class="btw-drag-strip" data-orb-drag-region /><div ref={setSideTarget} class="btw-sidebar-content" /></aside>
         <Show when={opened() && (p.missionOpen !== undefined && onMission() ? !!p.scope.mission : !!(p.scope.mission || p.scope.project))}>
           <aside
             ref={(el) => {

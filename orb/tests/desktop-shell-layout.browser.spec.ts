@@ -162,7 +162,7 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   // NEVER stretch past the 720px viewport, `Settings` stays visible at the bottom-left, and `.sb-scroll` scrolls!
   const viewportHeight = 720;
   const sbBox = (await page.locator("#orb-sidebar.sidebar").boundingBox())!;
-  expect(sbBox.y).toBe(layoutFixture.constants.titlebarHeightPx);
+  expect(sbBox.y).toBe(0);
   expect(sbBox.y + sbBox.height).toBeLessThanOrEqual(viewportHeight + 1);
 
   const gearBtn = page.locator(".sb-foot .gear-btn");
@@ -205,19 +205,19 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   expect(mainScrollMetrics.scrollHeight).toBeGreaterThan(mainScrollMetrics.clientHeight);
   expect(mainScrollMetrics.scrollTop).toBeGreaterThan(0);
 
-  // 4. Titlebar translucency, drag region attribute, sidebar border continuity, crisp scroll top, and Chapters menu.
+  // 4. Titlebar translucency, drag region attribute, merged top-fade scroll mask, and Chapters menu.
   const titlebar = page.locator(".app > .titlebar");
   await expect(titlebar).toHaveAttribute("data-orb-drag-region", "");
   const tbLeftBox = (await page.locator(".titlebar .tb-left").boundingBox())!;
-  expect(Math.abs(tbLeftBox.width - sbBox.width)).toBeLessThanOrEqual(1);
+  expect(tbLeftBox.x).toBeGreaterThanOrEqual(80);
+  expect(tbLeftBox.x + tbLeftBox.width).toBeLessThanOrEqual(sbBox.width);
 
   const scrollMask = await page.locator(".main > .scroll").evaluate((el) => {
     const s = getComputedStyle(el);
     return s.maskImage || s.webkitMaskImage || "";
   });
-  // Top of `.scroll` must start at opaque `#000 0` / `rgb(0, 0, 0) 0px`, NOT `transparent 0, #000 14px`.
-  expect(scrollMask.startsWith("linear-gradient(rgba(0, 0, 0, 0)")).toBe(false);
-  expect(scrollMask).not.toContain("transparent 0px, rgb(0, 0, 0) 14px");
+  // Top of `.scroll` fades smoothly (`transparent 0, #000 14px`) so messages dissolve into the header instead of hard-clipping.
+  expect(scrollMask.includes("14px")).toBe(true);
 
   const chaptersBtn = page.locator("#tb-tools .mission-tools .chapters-btn");
   await expect(chaptersBtn).toBeVisible();
@@ -226,7 +226,7 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   expect(chaptersMenu.y).toBeGreaterThanOrEqual(layoutFixture.constants.titlebarHeightPx - 1);
   await page.keyboard.press("Escape");
 
-  // 5. `/btw` side-column lifecycle: 2 tracks -> open `/btw` (3 tracks) -> Inbox page (2 tracks) -> back & close (2 tracks).
+  // 5. `/btw` and `Files` merge into row 1 (`y === 0`), and side-column lifecycle holds:
   const trackCount = () =>
     page.locator(".app").evaluate((el) => getComputedStyle(el).gridTemplateColumns.trim().split(/\s+/).length);
 
@@ -235,6 +235,11 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   await page.getByRole("button", { name: "Side question", exact: true }).click();
   await expect(page.getByPlaceholder(/Ask a side question/)).toBeVisible();
   expect(await trackCount()).toBe(3);
+  expect((await page.locator(".btw-sidebar").boundingBox())!.y).toBe(0);
+
+  await page.getByRole("button", { name: "Files", exact: true }).click();
+  await expect(page.locator(".file-panel[aria-label='Files']")).toBeVisible();
+  expect((await page.locator(".file-panel[aria-label='Files']").boundingBox())!.y).toBe(0);
 
   await page.getByRole("button", { name: /^Inbox/ }).click();
   await expect(page.locator(".app")).toHaveAttribute("data-pane", "page");
