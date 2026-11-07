@@ -56,6 +56,7 @@ structure CoreAppState where
   searchIdx?     : Option SearchIndex
   managedRef     : IO.Ref ManagedFleetState
   chainsRef      : IO.Ref (Array RoutingChain)
+  proxyCooldownsRef : IO.Ref (Array AccountCooldown)
   seqRef         : IO.Ref UInt64
   pacingTracker?  : Option ProxyPacingTracker := none
   memTokenCache?  : Option MemoryTokenCache := none
@@ -629,7 +630,27 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       return .ok (mkJson 401 "{\"error\":\"unauthorized_proxy\"}")
     let chains ← st.chainsRef.get
     let activeChain := selectRoutingChainForBody chains req.bodySlice.toByteArray
+    let cooldowns ← st.proxyCooldownsRef.get
+    let plan := planChain activeChain cooldowns nowEpochSec
+    if plan.eligible.isEmpty && !plan.cooling.isEmpty then
+      if plan.allUsageLimited then
+        let limit := (soonestCooldown? plan.cooling).getD
+          { accountId := "", untilEpoch := nowEpochSec + 60, reason := .usageLimit, label := "" }
+        let reply := usageLimitReply activeChain.id limit nowEpochSec
+        return .ok (mkJsonHdr reply.status reply.body reply.headers)
+      let retryAfter := (plan.retryAfterSecs? nowEpochSec).getD 60
+      let reply := cooldownReply activeChain.id retryAfter
+      return .ok (mkJsonHdr reply.status reply.body reply.headers)
+    let skipAccountIds := plan.cooling.map (fun c => c.accountId)
     let out ← forwardProxyChain activeChain req.method cleanPath #[] req.bodySlice.toByteArray none false st.pacingTracker?
+      (skipAccountIds := skipAccountIds)
+    let stillActive := activeCooldowns cooldowns nowEpochSec
+    let withoutSelected := stillActive.filter (fun c => c.accountId != out.selectedAccount)
+    let refreshed :=
+      match cooldownForOutcome out nowEpochSec with
+      | some c => withoutSelected.push c
+      | none => withoutSelected
+    st.proxyCooldownsRef.set refreshed
     return .ok { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := out.headers, body := out.body }
 
   -- 5. Privilege Broker Verification & Audit Log (`POST /api/privilege-access/verify-and-log`)
@@ -1473,6 +1494,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let managedRef ← IO.mkRef ({} : ManagedFleetState)
     let initialChains ← loadRoutingChainsFromStore store
     let chainsRef ← IO.mkRef initialChains
+    let proxyCooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
     let seqRef ← IO.mkRef (0 : UInt64)
     let pacingTracker ← newProxyPacingTracker
     let memTokenCache ← newMemoryTokenCache
@@ -1484,6 +1506,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       searchIdx? := searchRes.toOption
       managedRef := managedRef
       chainsRef := chainsRef
+      proxyCooldownsRef := proxyCooldownsRef
       seqRef := seqRef
       pacingTracker? := some pacingTracker
       memTokenCache? := some memTokenCache
