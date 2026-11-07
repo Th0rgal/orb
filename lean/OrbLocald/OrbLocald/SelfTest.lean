@@ -58,6 +58,23 @@ def main : IO UInt32 := do
   | .error e =>
     IO.eprintln s!"FAIL [transport_bridge_configure]: {e}"
 
+  let txCustomRes ← dispatchRpcCommand stRef "transport_bridge_configure" (.obj #[("apiUrl", .str "https://agent-backend-dev.thomas.md/")])
+  total := total + 1
+  let txCustomOk := match txCustomRes with
+    | .ok jv =>
+      jv.fieldStr? "configured_target" == some "https://agent-backend-dev.thomas.md" &&
+      (match jv.fieldArr? "failover_origins" with
+       | some #[.str o0, .str o1, .str o2] =>
+         o0 == "https://agent-backend-dev.thomas.md" &&
+         o1 == "https://orbcore.thomas.md" &&
+         o2 == "https://agent-backend.thomas.md"
+       | _ => false)
+    | .error _ => false
+  if (← assertTrue "transport_bridge_configure_updates_target_and_candidates" txCustomOk) then passed := passed + 1
+
+  total := total + 1
+  if (← assertEq "candidate_origins_standalone" (candidateOriginsFor "https://custom-core.example.org/") #["https://custom-core.example.org"]) then passed := passed + 1
+
   total := total + 1
   if (← assertTrue "sse_shard_rejects_port_overflow_65532" (verifySseShardConfig 6 65532 == 0)) then passed := passed + 1
 
@@ -316,6 +333,53 @@ def main : IO UInt32 := do
     (validateLocalCodexLaunch "audit" "gpt-daybreak-blue-latest" "automatic" false).isOk.not &&
     (validateLocalCodexLaunch "audit" "gpt-6.1-sol" "daybreak" false).isOk
   if (← assertTrue "validate_local_codex_launch_gates_goal_and_cyber" localCodexGateOk) then passed := passed + 1
+
+  -- 15. Persistent `orb-signer serve` protocol (`approval_sign` + `grace_until` reuse + `cancelled` code 2)
+  let mockSignerPath := System.FilePath.mk tmpStateDir / "mock-orb-signer.sh"
+  let countPath := System.FilePath.mk tmpStateDir / "mock-signer-spawns.txt"
+  let mockScript :=
+    "#!/bin/sh\n" ++
+    "cmd=\"$1\"\n" ++
+    "if [ \"$cmd\" = \"public\" ]; then echo '{\"public_key\":\"MOCK_PUB_KEY\"}'; exit 0; fi\n" ++
+    "if [ \"$cmd\" = \"create\" ]; then echo '{\"public_key\":\"MOCK_CREATED_KEY\"}'; exit 0; fi\n" ++
+    "if [ \"$cmd\" = \"serve\" ]; then\n" ++
+    s!"  echo spawn >> \"{countPath}\"\n" ++
+    "  while IFS= read -r line; do\n" ++
+    "    if [ \"$line\" = \"Q0FOQ0VM\" ]; then\n" ++
+    "      echo '{\"error\":\"User cancelled\",\"code\":\"2\"}'\n" ++
+    "    else\n" ++
+    "      echo '{\"signature\":\"MOCK_SIG_OK\",\"grace_until\":\"4102444800\"}'\n" ++
+    "    fi\n" ++
+    "  done\n" ++
+    "  exit 0\n" ++
+    "fi\n" ++
+    "exit 1\n"
+  IO.FS.writeFile mockSignerPath mockScript
+  let _ ← OrbBin.PosixExt.chmod mockSignerPath.toString 0o700
+  let stSignRef ← IO.mkRef ({
+    launchToken := validTok,
+    orbStateDir := tmpStateDir,
+    homeDir := tmpStateDir,
+    approvalKeyPath := (System.FilePath.mk tmpStateDir / "key.bin").toString,
+    hostOs := "macos",
+    signerBin? := some mockSignerPath.toString
+  } : LocaldState)
+  let signRes1 ← dispatchRpcCommand stSignRef "approval_sign" (.obj #[("payload", .str goodPayload)])
+  let signRes2 ← dispatchRpcCommand stSignRef "approval_sign" (.obj #[("payload", .str goodPayload)])
+  let graceAfterSign ← dispatchRpcCommand stSignRef "approval_grace_until" (.obj #[])
+  let cancelRes ← dispatchRpcCommand stSignRef "approval_sign" (.obj #[("payload", .str "CANCEL")])
+  let graceAfterCancel ← dispatchRpcCommand stSignRef "approval_grace_until" (.obj #[])
+  let spawnLines ← if (← countPath.pathExists) then IO.FS.readFile countPath else pure ""
+  let spawnCount := ((spawnLines.splitOn "\n").filter (fun s => !s.trimAscii.toString.isEmpty)).length
+  let _ ← dispatchRpcCommand stSignRef "set_approval_grace" (.obj #[("secs", JVal.nat 0)])
+  total := total + 1
+  let signerServeOk :=
+    (match signRes1, signRes2 with | .ok (.str "MOCK_SIG_OK"), .ok (.str "MOCK_SIG_OK") => true | _, _ => false) &&
+    (match graceAfterSign with | .ok (.num "4102444800") => true | _ => false) &&
+    (match cancelRes with | .error "cancelled" => true | _ => false) &&
+    (match graceAfterCancel with | .ok (.num "0") => true | _ => false) &&
+    spawnCount == 1
+  if (← assertTrue "orb_signer_serve_reuses_persistent_helper_and_propagates_grace_and_cancel" signerServeOk) then passed := passed + 1
 
   try IO.FS.removeDirAll tmpStateDir catch _ => pure ()
 

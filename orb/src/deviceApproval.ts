@@ -33,16 +33,17 @@ function invoke(): Invoke | null {
   return nativeInvoke() ?? null;
 }
 
-const deviceKey = () => `orb.approvalDevice.${getApiUrl()}`;
-export const enrolledDeviceId = (): string | null => {
+const deviceKey = (targetBase = getApiUrl()) => `orb.approvalDevice.${targetBase.trim().replace(/\/+$/, "")}`;
+export const enrolledDeviceId = (targetBase = getApiUrl()): string | null => {
   try {
-    return localStorage.getItem(deviceKey());
+    return localStorage.getItem(deviceKey(targetBase));
   } catch {
     return null;
   }
 };
 
-export const listApprovalDevices = () => api<ApprovalDevices>("/api/approvals/devices", { method: "GET" });
+export const listApprovalDevices = (targetBase?: string) =>
+  api<ApprovalDevices>("/api/approvals/devices", { method: "GET" }, targetBase);
 
 export async function localApprovalKey(): Promise<{ available: boolean; public_key: string | null }> {
   const call = invoke();
@@ -55,16 +56,48 @@ export async function localApprovalKey(): Promise<{ available: boolean; public_k
 }
 
 /** Is this Mac's key enrolled on this backend? Repairs the stored device id. */
-export async function thisDeviceEnrollment(devices: ApprovalDevice[]): Promise<ApprovalDevice | null> {
+export async function thisDeviceEnrollment(devices: ApprovalDevice[], targetBase = getApiUrl()): Promise<ApprovalDevice | null> {
   const key = await localApprovalKey();
   const match = key.public_key ? devices.find((d) => d.public_key === key.public_key) ?? null : null;
   try {
-    if (match) localStorage.setItem(deviceKey(), match.id);
-    else localStorage.removeItem(deviceKey());
+    if (match) localStorage.setItem(deviceKey(targetBase), match.id);
+    else localStorage.removeItem(deviceKey(targetBase));
   } catch {
     // Storage can be unavailable; signing then falls back to unsigned.
   }
   return match;
+}
+
+let signMutex: Promise<void> = Promise.resolve();
+function serializeSign<T>(run: () => Promise<T>): Promise<T> {
+  const next = signMutex.then(run, run);
+  signMutex = next.then(() => undefined, () => undefined);
+  return next;
+}
+
+async function resolveOrRepairDeviceId(targetBase: string, forceRefresh = false): Promise<string | null> {
+  if (!forceRefresh) {
+    const cached = enrolledDeviceId(targetBase);
+    if (cached) return cached;
+  }
+  const key = await localApprovalKey();
+  if (!key.public_key) return null;
+  try {
+    const { devices } = await listApprovalDevices(targetBase);
+    const match = await thisDeviceEnrollment(devices, targetBase);
+    return match?.id ?? null;
+  } catch {
+    return forceRefresh ? null : enrolledDeviceId(targetBase);
+  }
+}
+
+function isDeviceAuthMismatch(status: number, detail: string): boolean {
+  return (
+    status === 403 &&
+    (detail.includes("device_approval_required") ||
+      detail.includes("Unknown approval device") ||
+      detail.includes("Device signature does not verify"))
+  );
 }
 
 /**
@@ -165,46 +198,68 @@ function captureOriginConnection(): {
   return { version, targetBase, jwt, ensureUnchanged };
 }
 
-async function signedApiInner<T>(method: string, path: string, body: unknown, summary: string): Promise<T> {
-  const origin = captureOriginConnection();
-  const text = body === undefined ? "" : JSON.stringify(body);
-  const headers: Record<string, string> = {
-    ...(origin.jwt ? { Authorization: `Bearer ${origin.jwt}` } : {}),
-    ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-  };
-  const device = enrolledDeviceId();
-  const call = invoke();
-  if (device && call) {
-    const challenge = await api<{ challenge_id: string; payload: string }>(
-      "/api/approvals/challenge",
-      {
-        method: "POST",
-        headers: {
-          ...(origin.jwt ? { Authorization: `Bearer ${origin.jwt}` } : {}),
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ method, path, body: text, summary }),
-      },
-      origin.targetBase,
-    );
-    origin.ensureUnchanged();
-    let signature: string;
+async function signChallengePayload(call: Invoke, payload: string, summary: string): Promise<string> {
+  return serializeSign(async () => {
     try {
       await call("set_approval_grace", { secs: approvalGraceSecs() }).catch(() => undefined);
-      signature = (await call("approval_sign", { payload: challenge.payload, reason: summary })) as string;
+      const signature = (await call("approval_sign", { payload, reason: summary })) as string;
+      void refreshGrace(call);
+      return signature;
     } catch (e) {
       void refreshGrace(call);
       if (String(e).includes("cancelled")) throw new ApprovalCancelled();
       throw e instanceof Error ? e : new Error(String(e));
     }
-    void refreshGrace(call);
+  });
+}
+
+async function signedApiInner<T>(method: string, path: string, body: unknown, summary: string): Promise<T> {
+  const origin = captureOriginConnection();
+  const text = body === undefined ? "" : JSON.stringify(body);
+  const call = invoke();
+  let device = call ? await resolveOrRepairDeviceId(origin.targetBase, false) : null;
+
+  const attemptWithDevice = async (devId: string | null): Promise<T> => {
     origin.ensureUnchanged();
-    headers["X-Paloma-Approval"] = `${challenge.challenge_id}.${device}.${signature}`;
-  }
-  origin.ensureUnchanged();
+    const headers: Record<string, string> = {
+      ...(origin.jwt ? { Authorization: `Bearer ${origin.jwt}` } : {}),
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+    };
+    if (devId && call) {
+      const challenge = await api<{ challenge_id: string; payload: string }>(
+        "/api/approvals/challenge",
+        {
+          method: "POST",
+          headers: {
+            ...(origin.jwt ? { Authorization: `Bearer ${origin.jwt}` } : {}),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ method, path, body: text, summary }),
+        },
+        origin.targetBase,
+      );
+      origin.ensureUnchanged();
+      const signature = await signChallengePayload(call, challenge.payload, summary);
+      origin.ensureUnchanged();
+      headers["X-Paloma-Approval"] = `${challenge.challenge_id}.${devId}.${signature}`;
+    }
+    origin.ensureUnchanged();
+    return api<T>(path, { method, headers, ...(body === undefined ? {} : { body: text }) }, origin.targetBase);
+  };
+
   try {
-    return await api<T>(path, { method, headers, ...(body === undefined ? {} : { body: text }) }, origin.targetBase);
+    return await attemptWithDevice(device);
   } catch (e) {
+    if (e instanceof ApiError && call && isDeviceAuthMismatch(e.status, e.detail)) {
+      const repaired = await resolveOrRepairDeviceId(origin.targetBase, true);
+      if (repaired && repaired !== device) {
+        device = repaired;
+        return await attemptWithDevice(repaired);
+      }
+      if (!repaired && e.detail.includes("device_approval_required")) {
+        throw new Error("Core requires an enrolled device for this. Enroll this Mac in Settings → Security → Approval devices.");
+      }
+    }
     if (e instanceof ApiError && e.status === 403 && e.detail.includes("device_approval_required")) {
       throw new Error("Core requires an enrolled device for this. Enroll this Mac in Settings → Security → Approval devices.");
     }
@@ -230,72 +285,81 @@ export async function signedRawRequest(
   options?: { body?: Uint8Array; contentType?: string },
 ): Promise<Response> {
   const origin = captureOriginConnection();
-  const headers: Record<string, string> = {
-    ...(origin.jwt ? { Authorization: `Bearer ${origin.jwt}` } : {}),
-    ...(options?.contentType ? { "Content-Type": options.contentType } : {}),
-  };
-  const device = enrolledDeviceId();
   const call = invoke();
-  if (device && call) {
-    const bodyHash = options?.body ? await sha256Hex(options.body) : undefined;
+  let device = call ? await resolveOrRepairDeviceId(origin.targetBase, false) : null;
+  const bodyHash = options?.body ? await sha256Hex(options.body) : undefined;
+
+  const attemptRaw = async (devId: string | null): Promise<Response> => {
     origin.ensureUnchanged();
-    const challenge = await api<{ challenge_id: string; payload: string }>(
-      "/api/approvals/challenge",
-      {
-        method: "POST",
-        headers: {
-          ...(origin.jwt ? { Authorization: `Bearer ${origin.jwt}` } : {}),
-          "Content-Type": "application/json",
+    const headers: Record<string, string> = {
+      ...(origin.jwt ? { Authorization: `Bearer ${origin.jwt}` } : {}),
+      ...(options?.contentType ? { "Content-Type": options.contentType } : {}),
+    };
+    if (devId && call) {
+      const challenge = await api<{ challenge_id: string; payload: string }>(
+        "/api/approvals/challenge",
+        {
+          method: "POST",
+          headers: {
+            ...(origin.jwt ? { Authorization: `Bearer ${origin.jwt}` } : {}),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            method,
+            path,
+            ...(bodyHash ? { body_sha256: bodyHash } : { body: "" }),
+            summary,
+          }),
         },
-        body: JSON.stringify({
-          method,
-          path,
-          ...(bodyHash ? { body_sha256: bodyHash } : { body: "" }),
-          summary,
-        }),
+        origin.targetBase,
+      );
+      origin.ensureUnchanged();
+      const signature = await signChallengePayload(call, challenge.payload, summary);
+      origin.ensureUnchanged();
+      headers["X-Paloma-Approval"] = `${challenge.challenge_id}.${devId}.${signature}`;
+    }
+
+    let bodyInit: BodyInit | undefined;
+    if (options?.body) {
+      const copy = new ArrayBuffer(options.body.byteLength);
+      new Uint8Array(copy).set(options.body);
+      bodyInit = copy;
+    }
+
+    origin.ensureUnchanged();
+    if (method.toUpperCase() !== "GET") invalidateReads();
+    return transportFetch(
+      path,
+      {
+        method,
+        headers,
+        ...(bodyInit !== undefined ? { body: bodyInit } : {}),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       },
       origin.targetBase,
     );
-    origin.ensureUnchanged();
-    let signature: string;
-    try {
-      await call("set_approval_grace", { secs: approvalGraceSecs() }).catch(() => undefined);
-      signature = (await call("approval_sign", { payload: challenge.payload, reason: summary })) as string;
-    } catch (e) {
-      void refreshGrace(call);
-      if (String(e).includes("cancelled")) throw new ApprovalCancelled();
-      throw e instanceof Error ? e : new Error(String(e));
-    }
-    void refreshGrace(call);
-    origin.ensureUnchanged();
-    headers["X-Paloma-Approval"] = `${challenge.challenge_id}.${device}.${signature}`;
-  }
+  };
 
-  let bodyInit: BodyInit | undefined;
-  if (options?.body) {
-    const copy = new ArrayBuffer(options.body.byteLength);
-    new Uint8Array(copy).set(options.body);
-    bodyInit = copy;
-  }
-
-  origin.ensureUnchanged();
-  if (method.toUpperCase() !== "GET") invalidateReads();
-  const res = await transportFetch(
-    path,
-    {
-      method,
-      headers,
-      ...(bodyInit !== undefined ? { body: bodyInit } : {}),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    },
-    origin.targetBase,
-  );
+  let res = await attemptRaw(device);
   if (res.status === 401) {
     if (connectionVersion() === origin.version) clearConnection();
     throw new Error("401 Unauthorized — reconnect in Settings → Account");
   }
   if (!res.ok) {
-    const detail = (await res.text().catch(() => "")).trim();
+    let detail = (await res.text().catch(() => "")).trim();
+    if (call && isDeviceAuthMismatch(res.status, detail)) {
+      const repaired = await resolveOrRepairDeviceId(origin.targetBase, true);
+      if (repaired && repaired !== device) {
+        device = repaired;
+        res = await attemptRaw(repaired);
+        if (res.status === 401) {
+          if (connectionVersion() === origin.version) clearConnection();
+          throw new Error("401 Unauthorized — reconnect in Settings → Account");
+        }
+        if (res.ok) return res;
+        detail = (await res.text().catch(() => "")).trim();
+      }
+    }
     if (res.status === 403 && detail.includes("device_approval_required")) {
       throw new Error("Core requires an enrolled device for this. Enroll this Mac in Settings → Security → Approval devices.");
     }

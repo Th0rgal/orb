@@ -178,6 +178,13 @@ function pickBridgeUrl(streaming: boolean, fallback: string | null): string | nu
   return fallback;
 }
 
+function withTargetHeader(init: RequestInit | undefined, target: string): RequestInit | undefined {
+  if (!target.startsWith("https://")) return init;
+  const headers = new Headers(init?.headers);
+  if (!headers.has("X-Orb-Target")) headers.set("X-Orb-Target", target);
+  return { ...(init ?? {}), headers };
+}
+
 /** Perform `fetch` against `path` using the Tauri loopback transport when active
  * (eliminating `WKWebView` CORS preflights and DNS stalls), or ordered direct/fallback
  * origins synchronously when no native bridge is active. Long-lived SSE streams are
@@ -187,13 +194,14 @@ export function transportFetch(path: string, init?: RequestInit, explicitBase?: 
   const target = (explicitBase ?? getApiUrl()).trim().replace(/\/+$/, "");
   if (transportBridgeEnabled && nativeInvoke()) {
     const streaming = isStreamingFetch(path, init);
+    const proxiedInit = withTargetHeader(init, target);
     if (bridgeTarget === target && bridgeBaseUrl) {
       const chosen = pickBridgeUrl(streaming, bridgeBaseUrl)!;
-      return fetch(`${chosen}${path}`, init);
+      return fetch(`${chosen}${path}`, proxiedInit);
     }
     return resolveTransportBase(target).then((proxy) => {
       const chosen = bridgeTarget === target ? pickBridgeUrl(streaming, proxy) : proxy;
-      return chosen ? fetch(`${chosen}${path}`, init) : transportFetchDirect(target, path, init);
+      return chosen ? fetch(`${chosen}${path}`, proxiedInit) : transportFetchDirect(target, path, init);
     });
   }
   return transportFetchDirect(target, path, init);
