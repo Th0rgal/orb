@@ -7,6 +7,8 @@
     "dev": "vite",
     "desktop:dev": "../scripts/orb_desktop_dev.sh",
     "desktop:bundle": "../scripts/orb_desktop_dev.sh --bundle",
+    "desktop:install": "../scripts/orb_desktop_dev.sh --bundle --install",
+    "desktop:ui": "../scripts/orb_desktop_dev.sh --ui-only --install",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
     "check:bundle": "node scripts/check-bundle.mjs",

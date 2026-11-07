@@ -102,34 +102,59 @@ ships to testers:
 
 | Path | What it is |
 | --- | --- |
-| `src/`, `crates/orb-spec/` | Rust backend (`sandboxed-sh` API server, `sandboxed-node` remote runner, MCP binaries in `src/bin/`, `crates/orb-spec` standalone leaf crate & `src/orb_spec.rs` typed C-ABI bindings) |
-| `lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean` | Formal Lean 4 (`v4.35.0`) orchestration, proxy, mission lifecycle & cross-client projection kernel (`0 import Lean`, `0 sorryAx`, exports recorded in `shared/orb-spec/kernel_abi.json`, including `lean-sys`, compiled via `shared/orb-spec/cabi/orb_kernel_unboxed.c` into `liborb_spec_cabi.a` with zero `lean`/`lake`/`elan` build-time invocation and zero hand-written C fallback) |
-| `orb/` | Orb desktop client: SolidJS + Vite in `orb/src`, Tauri v2 shell in `orb/src-tauri` |
+| `lean/OrbCore/`, `lean/OrbNode/`, `lean/OrbLocald/`, `lean/OrbBin/` | Native Lean 4 (`v4.35.0`) backend (`sandboxed-sh` API server, `sandboxed-node` remote runner, `orb-locald` desktop RPC/transport daemon, MCP & CLI binaries; zero Rust files remain in the repo) |
+| `lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean`, `lean/LeanSys/` | Formal Lean 4 (`v4.35.0`) orchestration, proxy, mission lifecycle & cross-client projection kernel (`0 import Lean`, `0 sorryAx`, exports recorded in `shared/orb-spec/kernel_abi.json`, extracted to `shared/orb-spec/cabi/orb_kernel_unboxed.c` and `orb/src/assets/orb_kernel.wasm`) |
+| `orb/`, `macos_shell/`, `linux_shell/` | Orb desktop client: SolidJS + Vite in `orb/src`, native AppKit + `WKWebView` shell in `macos_shell/main.swift` (serving bundled `dist/` via `tauri://localhost` `WKURLSchemeHandler`), native GTK3 + WebKitGTK shell in `linux_shell/main.c`, and Lean 4 `orb-locald` |
 | `ios_dashboard/` | iOS app (SwiftUI, generated with XcodeGen from `project.yml`); the Orb UI lives in `SandboxedDashboard/Orb` |
 | `android_dashboard/` | Android app (Jetpack Compose + shared JNI kernel) |
 | `docs-site/` | Nextra documentation site |
-| `shared/` | Rust sources included by both the backend and `orb/src-tauri` via `#[path]` |
-| `catalog/`, `capabilities/` | Model catalog snapshots (compiled in by `build.rs`) and the capability matrix checked in CI |
-| `scripts/`, `deploy/`, `docker/` | Operational scripts (some are embedded with `include_str!`), systemd units, Docker entrypoint |
+| `shared/orb-spec/` | Shared kernel ABI manifest, C-ABI translation unit, and cross-client JSON test fixtures |
+| `catalog/`, `capabilities/` | Model catalog snapshots and the capability matrix checked in CI |
+| `scripts/`, `deploy/`, `docker/` | Operational & build scripts (`build_orb_bins.sh`, `orb_desktop_dev.sh`), systemd units, Docker entrypoint |
 | `docs/` | Reference documentation; `docs/archive/` holds design history |
+
+## Desktop fast local update workflows (`orb/`, `macos_shell/`, `lean/OrbLocald/`)
+
+Orb Desktop has no Rust or Tauri build step. Choose the fastest workflow that covers the layer you touched:
+
+1. **Instant HMR (`<100 ms` UI/CSS hot reload, zero rebuilds):**
+   ```bash
+   ./scripts/orb_desktop_dev.sh          # or: pnpm --dir orb desktop:dev
+   ```
+   Builds `orb-locald` + `macos_shell` once via `turbo-lean`, starts Vite on `http://127.0.0.1:1430/`, and launches the native shell pointed at `ORB_DEV_URL=http://127.0.0.1:1430/`. Or attach an already-installed `/Applications/Orb.app` to a running Vite server:
+   ```bash
+   (cd orb && pnpm dev --host 127.0.0.1 --port 1430 --strictPort) &
+   ORB_DEV_URL=http://127.0.0.1:1430/ /Applications/Orb.app/Contents/MacOS/orb
+   ```
+2. **Fast UI-only bundle update (`~10 s`, skips Lean & Swift compilation):**
+   When only `orb/src/**` or `orb/index.html` changed and you want the standalone `/Applications/Orb.app` Dock app updated immediately:
+   ```bash
+   ./scripts/orb_desktop_dev.sh --ui-only --install   # or: pnpm --dir orb desktop:ui
+   ```
+   Rebuilds `orb/dist`, `rsync`s it into `/Applications/Orb.app/Contents/Resources/dist/` (served at `tauri://localhost/` so WebKit `localStorage` is preserved), stamps `CFBundleVersion`, and re-signs the bundle.
+3. **Full native + UI bundle install (`turbo-lean` incremental):**
+   When `lean/OrbLocald/**`, `macos_shell/main.swift`, `linux_shell/main.c`, or `orb/scripts/build-signer.py` changed:
+   ```bash
+   ./scripts/orb_desktop_dev.sh --bundle --install    # or: pnpm --dir orb desktop:install
+   ```
+   Compiles `orb-locald` + `sandboxed-mcp` incrementally via `scripts/build_orb_bins.sh --only orb-locald --only sandboxed-mcp` (`turbo-lean build --jobs 2`), compiles `macos_shell/main.swift` + `orb-signer`, builds `orb/dist`, stages `macos_shell/build/Orb.app`, and syncs `/Applications/Orb.app`.
 
 ## Build and test before pushing
 
 CI runs all of these; run the ones for the area you touched.
 
 ```bash
-cargo fmt --all                                   # CI fails on unformatted Rust
-cargo clippy --locked --workspace -- -D clippy::all
-cargo test --locked --workspace
+scripts/build_orb_bins.sh --only orb-core-test --only orb-locald-test --only orb-spec-runner
+turbo-lean --json audit-spec lean/Orb/Spec.lean
 scripts/harness_contract_tests.sh
 scripts/check-capability-matrix.sh
-(cd orb && pnpm install --frozen-lockfile && pnpm build && pnpm test && pnpm test:browser)
+/opt/homebrew/bin/python3 scripts/check_state_inventory.py
+(cd orb && pnpm install --frozen-lockfile && pnpm build && pnpm check:bundle && pnpm test && pnpm test:browser)
 ```
-
-CI enforces formatting (`cargo fmt --check`); run it before pushing.
 
 Never push to `master` directly: open a PR and merge only when every check is
 green (pending counts as not green). Things CI checks that are easy to miss:
+zero `.rs` files remain in the repo and every C shim stays `<= 220` LOC;
 the iOS project must be regenerated with the pinned xcodegen (2.46.0); Lean
 must pass `turbo-lean --json audit-spec` with no horizontal-packing warnings;
 Android unit tests load the JNI kernel once per JVM, so tests fork per class.
@@ -149,34 +174,12 @@ missions.
 
 ## Local build resource budget
 
-- Concurrent builds of different worktrees must not share one
-  `CARGO_TARGET_DIR`: they invalidate each other's `sandboxed_sh` crate and
-  queue on the Cargo lock indefinitely. Use a per-worktree target dir, or wait.
-- When waiting for other builds, check `pgrep -lx "cargo|rustc|xcodebuild"`;
-  `pgrep -f` with the pattern inside your own command line matches itself.
-- On Thomas's Mac, prefer dev/debug builds for routine development and
-  validation. Use release builds only when the task requires a release artifact
-  or measuring optimized runtime behaviour; explain that need before starting.
-  The workspace backend deploy rule remains stricter: use debug builds.
-- Before starting a heavy Rust build/test or native app build, check for active
-  builds across **all worktrees**, not just this checkout. Run one heavy build
-  at a time on this 16 GB Mac. Wait for an existing build; do not terminate
-  another agent's work or silently offload it remotely.
-- Use `cargo check -j 1` for compile-only feedback and targeted
-  `cargo test -j 1 --lib <filter>` or `--bin <name>` when execution is needed.
-  Run required validation, but avoid duplicate full-workspace builds.
-  `-- --test-threads=1` limits test execution, **not compilation**; use `-j 1`
-  to limit Cargo build concurrency. A single large rustc process can still
-  consume several GB, so this does not replace cross-worktree serialization.
-- For routine local validation without debugger requirements, prefer consistent
-  `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0` settings to reduce
-  debug-symbol overhead. Preserve symbols when needed for debugging/profiling.
-  Changing profile settings can rebuild dependencies: do not alternate settings
-  or change a running task's environment in an attempt to recover memory.
-- Reuse the checkout's existing build cache. Avoid `cargo clean`, gratuitous
-  new target directories, and parallel builds merely to bypass Cargo's lock.
-  If memory pressure/swapping is high, defer new heavy builds and report which
-  task is holding resources. Keep build ownership and command visible in updates.
+- Before starting a heavy Lean (`lean`, `lake`, `turbo-lean`) or native mobile (`xcodebuild`, `gradle`) build, check for active builds across **all worktrees**, not just this checkout:
+  `pgrep -lx "lean|lake|turbo-lean|xcodebuild|java"` (`pgrep -f` with the pattern inside your own command line matches itself).
+- Run one heavy build at a time on this 16 GB Mac. Wait for an existing build; do not terminate another agent's work or silently offload it remotely.
+- Prefer `turbo-lean build --project-dir <pkg> --jobs 2` (via `scripts/build_orb_bins.sh --only <bin>`) over raw `lake build`: `turbo-lean` caches module artifacts across incremental edits and bounds peak memory. Keep Lakefiles parseable by `turbo-lean` (keep `moreLinkArgs` expressions single-line).
+- For routine UI-only desktop updates, use `./scripts/orb_desktop_dev.sh` (HMR) or `./scripts/orb_desktop_dev.sh --ui-only --install` (`~10 s`) instead of rebuilding Lean binaries.
+- Reuse the checkout's existing `.lake/build` cache. Avoid deleting `.lake` or spawning parallel builds across worktrees on the same package. If memory pressure/swapping is high, defer new heavy builds and report which task is holding resources. Keep build ownership and command visible in updates.
 
 ## High-level flow
 
