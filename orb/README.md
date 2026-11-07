@@ -6,8 +6,16 @@ Desktop client for **Orb** (SolidJS + native WebKit shell + Lean 4 `orb-locald` 
 
 ```bash
 pnpm install
-pnpm desktop:dev     # fast HMR dev loop (Vite on 127.0.0.1:1430 + native shell + orb-locald)
-pnpm desktop:bundle  # stage standalone macos_shell/build/Orb.app bundle
+pnpm desktop:dev      # <100ms HMR dev loop (Vite on 127.0.0.1:1430 + native shell + orb-locald)
+pnpm desktop:ui       # ~10s UI-only update: rebuild dist/ and sync into /Applications/Orb.app (skips Lean/Swift)
+pnpm desktop:bundle   # stage standalone macos_shell/build/Orb.app bundle
+pnpm desktop:install  # full incremental Lean + Swift + UI build synced into /Applications/Orb.app
+```
+
+You can also attach an already-installed `/Applications/Orb.app` directly to a running Vite dev server (`pnpm dev`):
+
+```bash
+ORB_DEV_URL=http://127.0.0.1:1430/ /Applications/Orb.app/Contents/MacOS/orb
 ```
 
 Shortcuts (`src/keyboardShortcuts.ts` & `docs/KEYBOARD_SHORTCUTS.md`):

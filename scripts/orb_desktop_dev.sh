@@ -5,11 +5,13 @@
 #   ./scripts/orb_desktop_dev.sh                     # HMR dev loop: Vite on 127.0.0.1:1430 + native shell + orb-locald
 #   ./scripts/orb_desktop_dev.sh --bundle            # Stage standalone macos_shell/build/Orb.app (or linux_shell/build)
 #   ./scripts/orb_desktop_dev.sh --bundle --install  # Also sync staged Orb.app into /Applications/Orb.app
+#   ./scripts/orb_desktop_dev.sh --ui-only --install # ~10s UI-only update: rebuild orb/dist + sync into Orb.app (skips Lean/Swift)
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="dev"
 INSTALL_APP=0
+UI_ONLY=0
 VITE_PORT="${ORB_VITE_PORT:-1430}"
 LOCALD_PORT="${ORB_LOCALD_PORT:-19477}"
 
@@ -19,12 +21,17 @@ while [[ $# -gt 0 ]]; do
       MODE="bundle"
       shift
       ;;
+    --ui-only)
+      MODE="bundle"
+      UI_ONLY=1
+      shift
+      ;;
     --install)
       INSTALL_APP=1
       shift
       ;;
     *)
-      echo "error: unknown option '$1' (expected --bundle or --install)" >&2
+      echo "error: unknown option '$1' (expected --bundle, --ui-only, or --install)" >&2
       exit 2
       ;;
   esac
@@ -33,6 +40,37 @@ done
 OS_NAME="$(uname -s)"
 STAGE_BIN_DIR="$ROOT_DIR/macos_shell/build"
 mkdir -p "$STAGE_BIN_DIR"
+
+if [[ "$UI_ONLY" == "1" ]]; then
+  echo "==> Fast UI-only build (orb/dist)..."
+  (cd "$ROOT_DIR/orb" && pnpm build)
+  GIT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo dev)"
+  if [[ "$OS_NAME" == "Darwin" ]]; then
+    APP_BUNDLE="$STAGE_BIN_DIR/Orb.app"
+    if [[ -d "$APP_BUNDLE/Contents/Resources" ]]; then
+      rm -rf "$APP_BUNDLE/Contents/Resources/dist"
+      cp -R "$ROOT_DIR/orb/dist" "$APP_BUNDLE/Contents/Resources/dist"
+      /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GIT_SHA" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
+      codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1 || true
+      echo "==> Updated dist/ in $APP_BUNDLE (CFBundleVersion=$GIT_SHA)"
+    fi
+    if [[ "$INSTALL_APP" == "1" ]]; then
+      if [[ ! -d "/Applications/Orb.app/Contents/MacOS" ]]; then
+        echo "error: /Applications/Orb.app not found; run './scripts/orb_desktop_dev.sh --bundle --install' once first" >&2
+        exit 1
+      fi
+      rsync -a --delete "$ROOT_DIR/orb/dist/" "/Applications/Orb.app/Contents/Resources/dist/"
+      /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GIT_SHA" "/Applications/Orb.app/Contents/Info.plist" 2>/dev/null || true
+      codesign --force --deep --sign - "/Applications/Orb.app" >/dev/null 2>&1 || true
+      echo "==> Synced orb/dist into /Applications/Orb.app (CFBundleVersion=$GIT_SHA)"
+    fi
+  else
+    rm -rf "$STAGE_BIN_DIR/dist"
+    cp -R "$ROOT_DIR/orb/dist" "$STAGE_BIN_DIR/dist"
+    echo "==> Synced orb/dist into $STAGE_BIN_DIR/dist"
+  fi
+  exit 0
+fi
 
 echo "==> Building orb-locald + sandboxed-mcp via turbo-lean / lake..."
 "$ROOT_DIR/scripts/build_orb_bins.sh" \

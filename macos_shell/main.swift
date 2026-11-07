@@ -9,10 +9,86 @@ import AppKit
 import Security
 import WebKit
 
+final class OrbBundleSchemeHandler: NSObject, WKURLSchemeHandler {
+    private let rootURL: URL
+
+    init(rootURL: URL) {
+        self.rootURL = rootURL.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    private static func mimeType(for ext: String) -> String {
+        switch ext.lowercased() {
+        case "html": return "text/html; charset=utf-8"
+        case "js", "mjs": return "text/javascript; charset=utf-8"
+        case "css": return "text/css; charset=utf-8"
+        case "wasm": return "application/wasm"
+        case "json": return "application/json; charset=utf-8"
+        case "svg": return "image/svg+xml"
+        case "png": return "image/png"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "webp": return "image/webp"
+        case "ico": return "image/x-icon"
+        case "woff2": return "font/woff2"
+        case "woff": return "font/woff"
+        case "ttf": return "font/ttf"
+        case "md", "txt": return "text/plain; charset=utf-8"
+        default: return "application/octet-stream"
+        }
+    }
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        guard let reqURL = urlSchemeTask.request.url else {
+            urlSchemeTask.didFailWithError(URLError(.badURL))
+            return
+        }
+        var relPath = reqURL.path
+        while relPath.hasPrefix("/") { relPath.removeFirst() }
+        if relPath.isEmpty { relPath = "index.html" }
+
+        let candidate = rootURL.appendingPathComponent(relPath).standardizedFileURL.resolvingSymlinksInPath()
+        let rootPrefix = rootURL.path.hasSuffix("/") ? rootURL.path : (rootURL.path + "/")
+        var target = candidate
+        var isDir: ObjCBool = false
+        let inRoot = (candidate.path == rootURL.path) || candidate.path.hasPrefix(rootPrefix)
+        if !inRoot || !FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDir) || isDir.boolValue {
+            // SPA fallback only for extensionless navigation routes; missing assets return 404.
+            if URL(fileURLWithPath: relPath).pathExtension.isEmpty {
+                target = rootURL.appendingPathComponent("index.html").standardizedFileURL.resolvingSymlinksInPath()
+            } else {
+                let resp = HTTPURLResponse(url: reqURL, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: [
+                    "Content-Type": "text/plain; charset=utf-8",
+                    "Access-Control-Allow-Origin": "tauri://localhost"
+                ])!
+                urlSchemeTask.didReceive(resp)
+                urlSchemeTask.didFinish()
+                return
+            }
+        }
+
+        guard let data = try? Data(contentsOf: target) else {
+            urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist))
+            return
+        }
+        let mime = Self.mimeType(for: target.pathExtension)
+        let resp = HTTPURLResponse(url: reqURL, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [
+            "Content-Type": mime,
+            "Content-Length": String(data.count),
+            "Access-Control-Allow-Origin": "tauri://localhost",
+            "Cache-Control": "no-cache"
+        ])!
+        urlSchemeTask.didReceive(resp)
+        urlSchemeTask.didReceive(data)
+        urlSchemeTask.didFinish()
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+}
+
 final class OrbAppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     var window: NSWindow!
     var webView: WKWebView!
     var localdProc: Process?
+    var schemeHandler: OrbBundleSchemeHandler?
 
     private static func randomHex256() -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
@@ -34,6 +110,7 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegat
 
     private static func isConfinedShellURL(_ u: URL) -> Bool {
         if u.isFileURL || u.absoluteString == "about:blank" { return true }
+        if u.scheme == "tauri" && u.host == "localhost" { return true }
         guard u.scheme == "http", let h = u.host else { return false }
         return h == "127.0.0.1" || h == "localhost"
     }
@@ -432,6 +509,11 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegat
         """
 
         let cfg = WKWebViewConfiguration()
+        if let distRoot = Bundle.main.resourceURL?.appendingPathComponent("dist") {
+            let handler = OrbBundleSchemeHandler(rootURL: distRoot)
+            self.schemeHandler = handler
+            cfg.setURLSchemeHandler(handler, forURLScheme: "tauri")
+        }
         cfg.userContentController.add(self, name: "orbNative")
         cfg.userContentController.addUserScript(
             WKUserScript(source: initJs, injectionTime: .atDocumentStart, forMainFrameOnly: true)
@@ -466,6 +548,8 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegat
         window.center()
         window.makeKeyAndOrderFront(nil)
         if let devUrl = env["ORB_DEV_URL"], let u = URL(string: devUrl), Self.isConfinedShellURL(u) {
+            webView.load(URLRequest(url: u))
+        } else if let u = URL(string: "tauri://localhost/") {
             webView.load(URLRequest(url: u))
         } else if let html = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "dist") {
             webView.loadFileURL(html, allowingReadAccessTo: html.deletingLastPathComponent())

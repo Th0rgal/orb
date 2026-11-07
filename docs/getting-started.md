@@ -12,7 +12,7 @@ This guide walks you through connecting **Orb** (macOS and iOS) to your **Core**
    - **Docker**: `http://localhost:3000` (see [install-docker.md](install-docker.md))
    - **Native Linux Server**: e.g. `https://orb.thomas.md` or `https://agent-backend.example.com` (see [install-native.md](install-native.md))
 2. **Orb Client**:
-   - **Desktop (`orb/`)**: Located in [`../orb/`](../orb/README.md) (`pnpm install && pnpm tauri dev`)
+   - **Desktop (`orb/`)**: Located in [`../orb/`](../orb/README.md) (`pnpm --dir orb install && ./scripts/orb_desktop_dev.sh` for HMR dev, or `./scripts/orb_desktop_dev.sh --bundle --install` to install `/Applications/Orb.app`)
    - **iOS App (`ios_dashboard/`)**: Located in [`../ios_dashboard/`](../ios_dashboard/README.md) (SwiftUI, generated via XcodeGen)
    - **Android App (`android_dashboard/`)**: Located in [`../android_dashboard/`](../android_dashboard/README.md) (Jetpack Compose)
 
