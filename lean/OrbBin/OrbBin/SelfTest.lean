@@ -48,7 +48,7 @@ private def assertTrue (label : String) (cond : Bool) : IO Unit := do
     throw <| IO.userError s!"FAIL [{label}]: expected true"
   IO.println s!"  [OK] {label}"
 
-def runR7bMcpAndPrivdTests (tmpDir : System.FilePath) : IO Unit := do
+private def runR7bMcpAndPrivdTests (tmpDir : System.FilePath) : IO Unit := do
   IO.println "--- R7-B / R7-C: SM-22 Control MCP Outcome, Stdio MCP Lifecycle & orb-privd TOCTOU ---"
 
   -- 1. SM-22 Control MCP `receipt_settled` vs `action_outcome`
