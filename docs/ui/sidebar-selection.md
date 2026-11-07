@@ -13,12 +13,37 @@ the open conversation:
    or bulk archive selection actions). Cleared by navigation, plain-clicking a
    row to open it, pressing `Escape` in the tree, or right-clicking a row outside
    the current multi-selection.
-3. **Transient context-menu target (`contextTreeId`)**: Derived directly from the
-   currently open row context menu (`missionMenu`, `fileMenu`, `controllerMenu`).
-   Right-clicking an unselected row highlights that row (`active` and
-   `aria-selected="true"`) while its context menu (including cascading submenus
-   such as **Transfer to another agent**) remains open, without mutating
+3. **Transient context-menu / move-picker target (`contextTreeId`)**: Derived
+   directly from the currently open row overlay (`missionMenu`, `fileMenu`,
+   `controllerMenu`, or `movePicker`). Right-clicking an unselected row — or
+   long-pressing (`260ms` without pointer movement) and releasing to open the
+   searchable **Move to** `Picker` — highlights that row (`active` and
+   `aria-selected="true"`) while the menu or picker remains open, without mutating
    `selectionActive` or opening the row.
+
+## Press-and-hold & drag-move gestures (`lean/Orb/Kernel.lean`, `orb/src/tree/rowDrag.ts`)
+
+Pure gesture phase transitions, timers, auto-scroll velocity math, and move-target
+admission live in Lean 4 (`orb_sidebar_drag_step`, `orb_sidebar_move_target_admit`
+in `lean/Orb/Kernel.lean`, proved in `lean/Orb/Spec.lean`):
+
+- **Quick click (`< 260ms`, `< 6px`)**: Releases cleanly with `eatClick = false` so
+  normal mission/file/cron activation and folder expand/collapse stay instant.
+- **Press-and-hold (`>= 260ms`, `< 6px`)**: Lifts the row (or active multi-selection)
+  into `armed` state (`.row.drag-source` + monochrome `.sidebar-drag-pill`) and
+  dismisses any delayed hover tooltip. Releasing without dragging opens the
+  searchable cross-project/folder **Move to** `Picker` anchored to the row and
+  suppresses the synthetic `click` (`eatClick = true`).
+- **Immediate or post-hold drag (`>= 6px`)**: Transitions into `dragging`,
+  highlights only Lean-admitted destination containers (`.drop-active`), expands
+  collapsed projects and folders once after a `450ms` dwell (`springTargetOrd`
+  clears to `0` on fire so containers never oscillate), auto-scrolls `.sb-scroll`
+  within `36px` top/bottom zones (`1..10 px/frame`), and cancels cleanly on
+  `Escape`, right-click, window `blur`, or `pointercancel`.
+- **Target admission & folder work**: Folders can never move into themselves or
+  their own descendants (`dstIsSelfOrSubtree`), items cannot no-op drop onto their
+  current container, and moving a folder across projects or folders carries its
+  nested missions (including launched subtrees) and crons along with it.
 
 ## Invariants
 

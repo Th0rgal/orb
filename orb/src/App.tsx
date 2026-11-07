@@ -148,7 +148,7 @@ const HermesSettings = lazy(() => import("./HermesSettings").then(module => ({ d
 const SkillsSettings = lazy(() => import("./SkillsSettings").then(module => ({ default: module.SkillsSettings })));
 const UsageTelemetrySettings = lazy(() => import("./UsageTelemetrySettings").then(module => ({ default: module.UsageTelemetrySettings })));
 const BitwardenSettings = lazy(() => import("./BitwardenSettings").then(module => ({ default: module.BitwardenSettings })));
-import { InboxPage } from "./Inbox";
+const InboxPage = lazy(() => import("./Inbox").then(module => ({ default: module.InboxPage })));
 import { requestInboxDigest } from "./inboxDigest";
 import { countUnreadInboxMissions, listUnreadInboxCandidates } from "./inboxModel";
 import { inboxConfig } from "./inboxSettings";
@@ -983,6 +983,19 @@ export default function App() {
   };
   onMount(() => {
     window.addEventListener("keydown", onKey);
+    // When the user selects non-editable DOM text while an input/textarea retains focus with no
+    // text selected inside it (e.g. auto-focused Composer), blur the input so WebKit/WebKitGTK
+    // routes Cmd/Ctrl+C to the document range selection.
+    const onSelectionChange = () => {
+      const active = document.activeElement;
+      if (!(active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement)) return;
+      if ((active.selectionStart ?? 0) !== (active.selectionEnd ?? 0)) return;
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || !sel.anchorNode || active.contains(sel.anchorNode)) return;
+      active.blur();
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    onCleanup(() => document.removeEventListener("selectionchange", onSelectionChange));
     const onOpenPage = (ev: Event) => {
       const target = (ev as CustomEvent<string>).detail;
       if (target) open(target);
@@ -1761,29 +1774,31 @@ export default function App() {
         </div></Show>
         <Switch>
             <Match when={selected() === "inbox"}>
-              <InboxPage
-                onFocusContent={() => { if (window.matchMedia("(max-width: 720px)").matches) setSidebar(false); }}
-                onDeleteMission={setDeleteMissionRequest}
-                missions={inboxMissions()}
-                projects={liveProjects()}
-                loading={missionsLoading()}
-                onOpenMission={(id) => { usageTelemetry.action("inbox_open", "inbox"); open(`m:${id}`); }}
-                onOpenSettings={openSettings}
-                onOpenInboxSettings={() => open("inbox-summaries")}
-                onNewAgent={() => open(null)}
-                onRefresh={refreshMissions}
-                onMissionUpdated={(m) => {
-                  setMissions((ms) => [m, ...ms.filter((x) => x.id !== m.id)]);
-                  setProjectMissions((prev) => {
-                    const next: Record<string, Mission[]> = {};
-                    for (const [k, rows] of Object.entries(prev)) {
-                      next[k] = rows.map((x) => (x.id === m.id ? m : x));
-                    }
-                    return next;
-                  });
-                  bumpProjects();
-                }}
-              />
+              <Suspense>
+                <InboxPage
+                  onFocusContent={() => { if (window.matchMedia("(max-width: 720px)").matches) setSidebar(false); }}
+                  onDeleteMission={setDeleteMissionRequest}
+                  missions={inboxMissions()}
+                  projects={liveProjects()}
+                  loading={missionsLoading()}
+                  onOpenMission={(id) => { usageTelemetry.action("inbox_open", "inbox"); open(`m:${id}`); }}
+                  onOpenSettings={openSettings}
+                  onOpenInboxSettings={() => open("inbox-summaries")}
+                  onNewAgent={() => open(null)}
+                  onRefresh={refreshMissions}
+                  onMissionUpdated={(m) => {
+                    setMissions((ms) => [m, ...ms.filter((x) => x.id !== m.id)]);
+                    setProjectMissions((prev) => {
+                      const next: Record<string, Mission[]> = {};
+                      for (const [k, rows] of Object.entries(prev)) {
+                        next[k] = rows.map((x) => (x.id === m.id ? m : x));
+                      }
+                      return next;
+                    });
+                    bumpProjects();
+                  }}
+                />
+              </Suspense>
             </Match>
             <Match when={selected() === "cloud-agent"}>
             <Suspense>

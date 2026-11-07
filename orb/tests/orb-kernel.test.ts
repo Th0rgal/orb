@@ -8,6 +8,7 @@ import {
   orbProviderAttemptStep, orbRelativeTimeString, orbResourceLedgerStep,
   orbScrollPolicyClampTop, orbScrollPolicyCorrect, orbScrollPolicyGap,
   orbScrollPolicyMaxTop, orbScrollPolicyStep,
+  orbSidebarDragStep, orbSidebarMoveTargetAdmit,
   orbStreamBoundedCommitStep, orbTranscriptFoldStep, orbTranscriptPatchStep,
   orbUsageLimitBadge, orbWireApplyPatchStep, orbWireDecodeSlice,
   orbWireEncodeSliceInto, orbWireMachineStep, orbWireScrollSliceStep,
@@ -684,5 +685,120 @@ describe("orb kernel gates mirror lean-sys", () => {
       utf16Cost: 2,
       nextUtf16Units: 7,
     });
+  });
+
+  it("enforces sidebar move target admission and long-press drag state machine invariants", () => {
+    // Folder cycle / self-subtree rejected even when parent ordinal differs
+    expect(orbSidebarMoveTargetAdmit({
+      itemKind: 1, dstIsSelfOrSubtree: true,
+      srcProjectOrd: 1, srcPathOrd: 2, srcParentOrd: 0,
+      dstProjectOrd: 1, dstPathOrd: 3,
+    })).toBe(false);
+
+    // Same-container no-op rejected for mission (0), folder (1), file (2), cron (3)
+    expect(orbSidebarMoveTargetAdmit({
+      itemKind: 0, dstIsSelfOrSubtree: false,
+      srcProjectOrd: 1, srcPathOrd: 4, srcParentOrd: 0,
+      dstProjectOrd: 1, dstPathOrd: 4,
+    })).toBe(false);
+    expect(orbSidebarMoveTargetAdmit({
+      itemKind: 1, dstIsSelfOrSubtree: false,
+      srcProjectOrd: 1, srcPathOrd: 5, srcParentOrd: 4,
+      dstProjectOrd: 1, dstPathOrd: 4,
+    })).toBe(false);
+    expect(orbSidebarMoveTargetAdmit({
+      itemKind: 2, dstIsSelfOrSubtree: false,
+      srcProjectOrd: 1, srcPathOrd: 6, srcParentOrd: 4,
+      dstProjectOrd: 1, dstPathOrd: 4,
+    })).toBe(false);
+    expect(orbSidebarMoveTargetAdmit({
+      itemKind: 3, dstIsSelfOrSubtree: false,
+      srcProjectOrd: 1, srcPathOrd: 4, srcParentOrd: 0,
+      dstProjectOrd: 1, dstPathOrd: 4,
+    })).toBe(false);
+
+    // Cross-project folder & mission moves admitted even when relative path ordinal matches
+    expect(orbSidebarMoveTargetAdmit({
+      itemKind: 1, dstIsSelfOrSubtree: false,
+      srcProjectOrd: 1, srcPathOrd: 5, srcParentOrd: 4,
+      dstProjectOrd: 2, dstPathOrd: 4,
+    })).toBe(true);
+    expect(orbSidebarMoveTargetAdmit({
+      itemKind: 0, dstIsSelfOrSubtree: false,
+      srcProjectOrd: 1, srcPathOrd: 0, srcParentOrd: 0,
+      dstProjectOrd: 2, dstPathOrd: 0,
+    })).toBe(true);
+
+    // Quick click (< 260ms, < 6px): pointerDown -> pointerUp preserves normal click (eatClick: false)
+    const down = orbSidebarDragStep({
+      phase: 0, eventKind: 0, rowMovable: true,
+      targetCollapsed: false, targetAdmitted: false,
+      distSq: 0, elapsedMs: 0, springElapsedMs: 0,
+      hoverTargetOrd: 0, springTargetOrd: 0, edgeTopDistPx: 999, edgeBottomDistPx: 999,
+    });
+    expect(down.nextPhase).toBe(1);
+    const quickUp = orbSidebarDragStep({
+      phase: down.nextPhase, eventKind: 4, rowMovable: true,
+      targetCollapsed: false, targetAdmitted: false,
+      distSq: 4, elapsedMs: 120, springElapsedMs: 0,
+      hoverTargetOrd: 0, springTargetOrd: 0, edgeTopDistPx: 999, edgeBottomDistPx: 999,
+    });
+    expect(quickUp).toMatchObject({ nextPhase: 0, effectCode: 0, eatClick: false });
+
+    // Hold >= 260ms within 6px slop -> armLift (effect 1) -> pointerUp opens Move picker (effect 5, eatClick: true)
+    const armed = orbSidebarDragStep({
+      phase: 1, eventKind: 1, rowMovable: true,
+      targetCollapsed: false, targetAdmitted: false,
+      distSq: 25, elapsedMs: 260, springElapsedMs: 0,
+      hoverTargetOrd: 0, springTargetOrd: 0, edgeTopDistPx: 999, edgeBottomDistPx: 999,
+    });
+    expect(armed).toMatchObject({ nextPhase: 2, effectCode: 1 });
+    const holdRelease = orbSidebarDragStep({
+      phase: armed.nextPhase, eventKind: 4, rowMovable: true,
+      targetCollapsed: false, targetAdmitted: false,
+      distSq: 25, elapsedMs: 310, springElapsedMs: 0,
+      hoverTargetOrd: 0, springTargetOrd: 0, edgeTopDistPx: 999, edgeBottomDistPx: 999,
+    });
+    expect(holdRelease).toMatchObject({ nextPhase: 0, effectCode: 5, eatClick: true });
+
+    // Pointer move >= 6px (distSq >= 36) enters dragging, arms spring-load, auto-scrolls, expands once at 450ms, and commits drop
+    const dragMove = orbSidebarDragStep({
+      phase: 1, eventKind: 2, rowMovable: true,
+      targetCollapsed: true, targetAdmitted: true,
+      distSq: 36, elapsedMs: 80, springElapsedMs: 0,
+      hoverTargetOrd: 7, springTargetOrd: 0, edgeTopDistPx: 999, edgeBottomDistPx: 0,
+    });
+    expect(dragMove).toMatchObject({
+      nextPhase: 3, effectCode: 2, nextSpringTargetOrd: 7, scrollDir: 1, scrollStepPx: 10,
+    });
+
+    const springFired = orbSidebarDragStep({
+      phase: 3, eventKind: 3, rowMovable: true,
+      targetCollapsed: true, targetAdmitted: true,
+      distSq: 100, elapsedMs: 530, springElapsedMs: 450,
+      hoverTargetOrd: 7, springTargetOrd: 7, edgeTopDistPx: 10, edgeBottomDistPx: 999,
+    });
+    expect(springFired).toMatchObject({
+      nextPhase: 3, effectCode: 3, nextSpringTargetOrd: 0,
+    });
+
+    const topScrollMove = orbSidebarDragStep({
+      phase: 3, eventKind: 2, rowMovable: true,
+      targetCollapsed: false, targetAdmitted: true,
+      distSq: 100, elapsedMs: 550, springElapsedMs: 0,
+      hoverTargetOrd: 7, springTargetOrd: 0, edgeTopDistPx: 10, edgeBottomDistPx: 999,
+    });
+    expect(topScrollMove.scrollDir).toBe(-1);
+    expect(topScrollMove.scrollStepPx).toBeGreaterThanOrEqual(1);
+    expect(topScrollMove.scrollStepPx).toBeLessThanOrEqual(10);
+
+    // Escape / cancel from dragging resets without committing
+    const cancelled = orbSidebarDragStep({
+      phase: 3, eventKind: 5, rowMovable: true,
+      targetCollapsed: false, targetAdmitted: true,
+      distSq: 100, elapsedMs: 600, springElapsedMs: 0,
+      hoverTargetOrd: 7, springTargetOrd: 0, edgeTopDistPx: 999, edgeBottomDistPx: 999,
+    });
+    expect(cancelled).toMatchObject({ nextPhase: 0, effectCode: 6, eatClick: false });
   });
 });

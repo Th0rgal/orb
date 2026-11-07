@@ -180,6 +180,8 @@
     "orb_codex_goal_preact_filter",
     "orb_skill_slash_step",
     "orb_worktree_decision_step",
-    "orb_repo_diff_budget_step"
+    "orb_repo_diff_budget_step",
+    "orb_sidebar_move_target_admit",
+    "orb_sidebar_drag_step"
   ]
 }

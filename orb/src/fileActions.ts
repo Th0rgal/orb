@@ -12,7 +12,7 @@ import {
 } from "./api";
 import { writeClipboardReference } from "./clipboard";
 import { localContextFile } from "./projectContext";
-import { applyServerPlacementEvent, moveMission, moveMissions } from "./missionMove";
+import { applyServerPlacementEvent, moveMission, moveMissions, planMissionMoves } from "./missionMove";
 
 export interface FileClipboard { slug: string; path: string; copy: boolean; directory?: boolean; backend: string; account: string; nonce: string }
 export interface CronClipboard { slug: string; id: string; name: string; folder?: string; backend: string; account: string; nonce: string }
@@ -154,7 +154,14 @@ async function folderWork(slug: string, path: string, first = false) {
   const version = connectionVersion();
   const checkConnection = () => { if (version !== connectionVersion()) throw new Error("Connection changed. Try again."); };
   const missions = new Map<string, string>();
-  const collect = (list: Mission[]) => { for (const mission of list) { const at = missionFolderIn(slug, path, mission); if (at !== undefined) missions.set(mission.id, at); } };
+  const allById = new Map<string, Mission>();
+  const collect = (list: Mission[]) => {
+    for (const mission of list) {
+      allById.set(mission.id, mission);
+      const at = missionFolderIn(slug, path, mission);
+      if (at !== undefined) missions.set(mission.id, at);
+    }
+  };
   if (!first) {
     const [, , rawCrons] = await Promise.all([
       import("./localOrigins").then(m => m.localOrigins()).then(local => { checkConnection(); collect(local); }),
@@ -169,23 +176,23 @@ async function folderWork(slug: string, path: string, first = false) {
       listProjectCrons(slug),
     ]);
     checkConnection();
-    return { missions, crons: rawCrons.filter(job => containsFolder(path, job.folder ?? "")) };
+    return { missions, allMissions: [...allById.values()], crons: rawCrons.filter(job => containsFolder(path, job.folder ?? "")) };
   }
   collect(await import("./localOrigins").then(m => m.localOrigins()));
   checkConnection();
-  if (missions.size) return { missions, crons: [] };
+  if (missions.size) return { missions, allMissions: [] as Mission[], crons: [] };
   for (let offset = 0; ; offset += 200) {
     const page = await api<Mission[]>(
       `/api/control/missions?project=${encodeURIComponent(slug)}&folder_prefix=${encodeURIComponent(normPrefix)}&limit=${first ? 1 : 200}&offset=${offset}&all=true`,
     );
     checkConnection();
     collect(page);
-    if (first && missions.size) return { missions, crons: [] };
+    if (first && missions.size) return { missions, allMissions: [] as Mission[], crons: [] };
     if (page.length < (first ? 1 : 200)) break;
   }
   const crons = (await listProjectCrons(slug)).filter(job => containsFolder(path, job.folder ?? ""));
   checkConnection();
-  return { missions, crons };
+  return { missions, allMissions: [] as Mission[], crons };
 }
 
 /** Keep executable work visible: removing documents must not orphan its folder. */
@@ -195,30 +202,47 @@ export async function assertFolderHasNoWork(slug: string, path: string, action =
   if (work.crons.length) throw new Error(`Move or delete the crons in this folder before ${action} it.`);
 }
 
-/** Fallback helper for local-context folder moves; server-side `transfer_file` cascades automatically. */
-export async function moveFolderWork(slug: string, path: string, destination: string): Promise<void> {
+/** Fallback helper for local-context or cross-project folder moves; server-side `transfer_file` cascades same-project moves automatically. */
+export async function moveFolderWork(slug: string, path: string, destination: string, targetSlug = slug): Promise<void> {
   const normPath = normalizeMissionFolder(path);
   const normDest = normalizeMissionFolder(destination);
+  const cross = targetSlug !== slug;
   const work = await folderWork(slug, normPath);
   const failed: string[] = [];
   const target = (folder: string) => normalizeMissionFolder(normDest + folder.slice(normPath.length));
-  const missionPlan = [...work.missions.entries()].map(([id, folder]) => ({
-    id,
-    from: slug,
-    folder: target(folder),
-  }));
+  const byDest = new Map<string, string[]>();
+  for (const [id, folder] of work.missions.entries()) {
+    const dest = target(folder);
+    byDest.set(dest, [...(byDest.get(dest) ?? []), id]);
+  }
+  const missionPlan = [...byDest.entries()].flatMap(([dest, ids]) =>
+    planMissionMoves(ids, targetSlug, dest, work.allMissions));
   if (missionPlan.length) {
-    let missionFailures = await moveMissions(missionPlan, slug);
-    if (missionFailures.length && missionPlan.length > 1) {
+    let missionFailures = await moveMissions(missionPlan, targetSlug);
+    const roots = missionPlan.filter(s => !s.viaRootId);
+    if (missionFailures.length && roots.length > 1) {
       missionFailures = [];
-      for (const step of missionPlan) {
-        await moveMission(step.id, slug, step.folder, slug).catch(error => missionFailures.push({ id: step.id, error }));
+      for (const step of roots) {
+        await moveMission(step.id, targetSlug, step.folder, slug, !!step.includeDescendants)
+          .catch(error => missionFailures.push({ id: step.id, error }));
       }
     }
     for (const f of missionFailures) failed.push(f.id.slice(0, 8));
   }
   await Promise.all(
-    work.crons.map(job => updateProjectCron(slug, job.id, { folder: target(job.folder ?? "") }).catch(() => { failed.push(job.name); })),
+    work.crons.map(job => {
+      const nextFolder = target(job.folder ?? "");
+      return updateProjectCron(slug, job.id, {
+        ...(cross ? { project: targetSlug } : {}),
+        folder: nextFolder,
+      }).then(() => {
+        if (cross) {
+          window.dispatchEvent(new CustomEvent("orb:cron-changed", {
+            detail: { slug, id: job.id, targetSlug, folder: nextFolder },
+          }));
+        }
+      }).catch(() => { failed.push(job.name); });
+    }),
   );
   if (failed.length) throw new Error(`The folder moved, but ${failed.join(", ")} could not follow. They remain visible under the previous path; move them to ${normDest}.`);
 }
