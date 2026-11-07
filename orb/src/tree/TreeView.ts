@@ -87,28 +87,45 @@ export function createProjectTree(deps: {
     out.push(...rootMissions(slug).filter(root => missionFolder(root.mission) === path && !(controllerRow(slug) && controllerLaunched(root.mission))).map(root => missionNode(slug, root)));
     return out;
   };
+  /** Folder names implied by missions and crons already in memory, one level under `path`. */
+  const folderHints = (slug: string, path: string): ProjectFileEntry[] => {
+    const names = new Set<string>();
+    const consider = (folder: string) => {
+      const rel = !path ? folder : folder === path ? "" : folder.startsWith(`${path}/`) ? folder.slice(path.length + 1) : "";
+      const name = rel.split("/")[0];
+      if (name) names.add(name);
+    };
+    for (const mission of deps.visibleMissions(slug)) consider(missionFolder(mission));
+    for (const job of crons[slug] ?? []) consider(job.folder ?? "");
+    return [...names].map(name => ({ name, kind: "dir" as const }));
+  };
+  const dirNode = (slug: string, path: string, entry: ProjectFileEntry, reveal = false): Node => {
+    const childPath = path ? `${path}/${entry.name}` : entry.name;
+    // A folder that already holds a known mission opens on its own. A click still
+    // records expanded/collapsed, so the listing arriving later does not snap it shut.
+    const open = expanded[`${slug}:${childPath}`] ?? reveal;
+    return { id: `pf:${slug}:${childPath}`, data: { kind: entry.kind === "dir" ? "folder" : "file", slug, path: childPath, label: entry.kind === "dir" ? folderLabel(slug, childPath) : entry.name },
+      ...(entry.kind === "dir" ? { expanded: open, children: open ? fileNodes(slug, childPath) : [] } : {}) };
+  };
   const fileNodes = (slug: string, path: string): Node[] => {
     const key = `${slug}:${path}`;
     const work = path ? workNodes(slug, path) : [];
     if (dirErrors[key] && !dirs[key]) return [...work, { id: `error:${key}`, data: { kind: "note", slug, path, label: `Files unavailable: ${dirErrors[key]}` } }];
-    if (!dirs[key]) return [...work, { id: `loading:${key}`, data: { kind: "note", slug, path, label: "Loading files…" } }];
+    // The directory listing is slow. Missions already known (the open
+    // conversation, the sidebar cache) show in their folders immediately
+    // instead of sitting behind "Loading files…".
+    if (!dirs[key]) {
+      const hinted = folderHints(slug, path);
+      const shown = [...work, ...hinted.map(entry => dirNode(slug, path, entry, true))];
+      if (shown.length) return shown;
+      return [{ id: `loading:${key}`, data: { kind: "note", slug, path, label: "Loading files…" } }];
+    }
     const away = filesMovedAway(slug, path);
     const entries = dirs[key].filter(e => !away.has(e.name) && !(path === "" && e.name === "attachments"));
     for (const arriving of filesMovedInto(slug, path)) if (!entries.some(e => e.name === arriving.name)) entries.push(arriving);
-    // Preserve visibility if a referenced folder listing is stale or its physical directory was removed.
-    const paths = [...rootMissions(slug).map(root => missionFolder(root.mission)), ...(crons[slug] ?? []).map(j => j.folder ?? "")];
-    for (const folder of paths) {
-      const relative = path ? (folder.startsWith(path + "/") ? folder.slice(path.length + 1) : "") : folder;
-      const name = relative.split("/")[0];
-      if (name && !entries.some(e => e.name === name)) entries.push({ name, kind: "dir" });
-    }
+    for (const hint of folderHints(slug, path)) if (!entries.some(e => e.name === hint.name)) entries.push(hint);
     if (!entries.length && !work.length && !dirErrors[key]) return path ? [{ id: `empty:${key}`, data: { kind: "note", slug, path, label: "Empty folder" } }] : [];
-    return [...work, ...(dirErrors[key] ? [{ id: `error:${key}`, data: { kind: "note" as const, slug, path, label: "Couldn’t refresh files. Showing saved list." } }] : []), ...entries.map((entry): Node => {
-      const childPath = path ? `${path}/${entry.name}` : entry.name;
-      const open = !!expanded[`${slug}:${childPath}`];
-      return { id: `pf:${slug}:${childPath}`, data: { kind: entry.kind === "dir" ? "folder" : "file", slug, path: childPath, label: entry.kind === "dir" ? folderLabel(slug, childPath) : entry.name },
-        ...(entry.kind === "dir" ? { expanded: open, children: open ? fileNodes(slug, childPath) : [] } : {}) };
-    })];
+    return [...work, ...(dirErrors[key] ? [{ id: `error:${key}`, data: { kind: "note" as const, slug, path, label: "Couldn’t refresh files. Showing saved list." } }] : []), ...entries.map(entry => dirNode(slug, path, entry, false))];
   };
   // Missions a mission launched are listed inside it. Closed by default,
   // except around the conversation that is open.
@@ -144,7 +161,7 @@ export function createProjectTree(deps: {
       }
       if (deps.cronUnsupported() || cronErrors[slug]) children.push({ id: `crons-error:${slug}`, data: { kind: "cron-error", slug, label: "Crons unavailable" } });
 
-      if (missions[slug] === undefined) children.push({ id: `loading-missions:${slug}`, data: { kind: "note", slug, label: "Loading missions…" } });
+      if (missions[slug] === undefined && !rootMissions(slug).length) children.push({ id: `loading-missions:${slug}`, data: { kind: "note", slug, label: "Loading missions…" } });
       children.push(...workNodes(slug, ""));
       children.push(...fileNodes(slug, ""));
       if (!children.length) children.push({ id: `empty:${slug}`, data: { kind: "note", slug, label: "No missions or files yet." } });

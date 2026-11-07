@@ -228,7 +228,8 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    if(session?.active)watchActive(session);
    resync?.();
   };
-  if(peekSideQuestionOpen(current)){setOpen(true);side?.show();}
+  // Don't reopen a side question just because it was open last time.
+  // That reserved an empty column beside the conversation.
   const hydrateSaved=(saved:SavedSideQuestion|undefined)=>{
   if(stale)return;
   const shouldOpen=consumeSideQuestionOpenHint(current)||Boolean(saved?.open);
@@ -326,7 +327,8 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setLoadedKey(current);
   // Never delay the tab for it: a fork's earlier history fills an empty tab when it arrives.
   if(!saved)void inheritSideQuestion(missionId).then(earlier=>{if(!stale&&key()===current&&earlier&&!history().length&&!busy())setHistory(earlier.history.filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()})));});
-  if(shouldOpen)queueMicrotask(()=>{if(loadedKey()===current)side?.show();});
+  // Restoring saved.open used to bring back an empty right column. The
+  // side-question button still opens it.
   if(hasReconcile){
    const reconcile=reconcileServer!;
    // The newest thread stays live while the tab is open: a question asked on

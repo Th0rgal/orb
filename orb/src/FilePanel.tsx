@@ -111,6 +111,8 @@ export function FilePanelButton() {
 }
 export function FilePanelProvider(p: {
   scope: FileScope;
+  /** Open mission id, if the main view is a conversation. */
+  missionOpen?: string | null;
   sidebar?: () => boolean;
   onSetSidebar?: (next: boolean) => void;
   children: JSX.Element;
@@ -181,9 +183,23 @@ export function FilePanelProvider(p: {
     const width=Number(localStorage.getItem("orb.files.width"));
     if(app&&width>0)app.style.setProperty("--file-panel-width",`${width}px`);
   });
+  // The side-question column is only for an open mission. Leaving that view
+  // (Resources, Inbox, …) must drop it even if the panel unmounted without
+  // clearing sideVisible, otherwise the grid keeps the empty right half.
+  const onMission = () => !!p.missionOpen;
+  const sideOpen = () => sideVisible() && !!openSide() && onMission();
+  createEffect(() => {
+    if (!onMission()) {
+      if (sideVisible()) setSideVisible(false);
+    }
+  });
   createEffect(() => {
     const app = layout();
-    if (app) { app.dataset.filesOpen = String((opened() || sideVisible()) && available()); app.dataset.editorExpanded=String((opened() || sideVisible())&&available()&&maximized()); app.dataset.filesSplit=String((opened() || sideVisible())&&available()&&split()); }
+    const side = sideOpen();
+    // A mission-scoped file pane must not keep the right column after the
+    // conversation is gone (Resources, Inbox, and the other top-level pages).
+    const files = opened() && (onMission() ? !!p.scope.mission : !!p.scope.project);
+    if (app) { app.dataset.filesOpen = String(files || side); app.dataset.editorExpanded=String((files || side)&&maximized()); app.dataset.filesSplit=String((files || side)&&split()); }
   });
   onCleanup(() => {
     const app = layout();
@@ -940,7 +956,8 @@ export function FilePanelProvider(p: {
         setOpenSide(() => fn);
         // A side question that unmounts and immediately mounts again (a
         // re-render of the mission view) keeps the pane open; only a real
-        // removal hides it.
+        // removal hides it. Hide in an effect too, so a missed microtask
+        // cannot leave the empty column reserved.
         if (!fn) queueMicrotask(() => { if (!openSide()) setSideVisible(false); });
       },
     }}>
@@ -961,8 +978,8 @@ export function FilePanelProvider(p: {
       <FileReferenceContext.Provider value={resolver}>
         <span ref={layoutMarker} hidden />
         {p.children}
-        <aside ref={el => { sideAside = el; }} class="btw-sidebar" classList={{ "file-panel": sideVisible(), maximized: sideVisible() && maximized() }} style={{ display: sideVisible() ? undefined : "none" }} aria-label="Side question panel"><div class="file-panel-resize" role="separator" aria-label="Resize side question panel" aria-orientation="vertical" onPointerDown={e=>resize(e)} /><div ref={setSideTarget} class="btw-sidebar-content" /></aside>
-        <Show when={opened() && available()}>
+        <aside ref={el => { sideAside = el; }} class="btw-sidebar" classList={{ "file-panel": sideOpen(), maximized: sideOpen() && maximized() }} style={{ display: sideOpen() ? undefined : "none" }} aria-label="Side question panel"><div class="file-panel-resize" role="separator" aria-label="Resize side question panel" aria-orientation="vertical" onPointerDown={e=>resize(e)} /><div ref={setSideTarget} class="btw-sidebar-content" /></aside>
+        <Show when={opened() && (onMission() ? !!p.scope.mission : !!p.scope.project)}>
           <aside
             ref={(el) => {
               panel = el;

@@ -167,6 +167,11 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -
 /* A faint native wallpaper tint carries across the shell. */
 .titlebar, .main { background: color-mix(in srgb, var(--bg) var(--surface-opacity), transparent); }
 .app.sb-hidden { grid-template-columns: 0 1fr; }
+/* Top-level pages (Resources, Inbox, …) have no side question. Drop the
+   column the conversation pane would otherwise keep reserved. */
+.app[data-pane="page"] { grid-template-columns: var(--sb-w) minmax(0, 1fr) !important; }
+.app[data-pane="page"] > .file-panel,
+.app[data-pane="page"] > .btw-sidebar { display: none !important; }
 .app.sb-hidden .sidebar { display: none; }
 
 /* Narrow windows use an overlay drawer controlled by the same sidebar toggle. */
@@ -182,6 +187,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -
 }
 
 /* ---------- sidebar ---------- */
+#orb-sidebar, #orb-sidebar * { -webkit-app-region: no-drag; }
 .sidebar {
   grid-row: 1 / 3;
   /* A quiet dark sidebar; native vibrancy contributes only a faint tint. */
@@ -458,8 +464,17 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
 /* ---------- titlebar ---------- */
 .titlebar {
   grid-column: 2; display: flex; align-items: center; gap: 12px;
-  padding: 0 10px 1px 14px; min-width: 0;
+  height: var(--tb-h); box-sizing: border-box;
+  padding: 0 10px 0 14px; min-width: 0;
+  position: relative; z-index: 2;
+  /* Opaque fill: WebKit only drags painted pixels, so a translucent bar
+     moved only where the title glyphs were. */
+  background: var(--bg);
+  -webkit-app-region: drag;
 }
+/* The title strip always reaches the right edge, including above a side panel. */
+.app > .titlebar { grid-column: 2 / -1; grid-row: 1; }
+.main { grid-row: 2; }
 .app:not(.sb-hidden) .tb-left {
   position: absolute; left: 82px; top: 0; height: var(--tb-h);
   width: calc(var(--sb-w) - 90px); z-index: 6;
@@ -469,8 +484,11 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
 .tb-left { padding-bottom: 1px; display: flex; align-items: center; gap: 2px; }
 .tb-gap { flex: 1; min-width: 8px; max-width: 40px; }
 .app:not(.sb-hidden) .tb-gap { max-width: none; }
-.tb-title { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; white-space: nowrap; overflow: hidden; color: var(--fg-2); padding-top: 4px; padding-bottom: 1px; }
+.tb-title { flex: 1; align-self: stretch; display: flex; align-items: center; gap: 8px; min-width: 0; white-space: nowrap; overflow: hidden; color: var(--fg-2); -webkit-app-region: drag; }
 .tb-title > span:not(.goal-tag) { overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.icon-btn, .files-toggle, .tb-tools button, .tb-tools a {
+  -webkit-app-region: no-drag;
+}
 .icon-btn {
   width: 24px; height: 24px; border-radius: var(--radius-sm); flex: none;
   display: inline-flex; align-items: center; justify-content: center;
@@ -1812,10 +1830,11 @@ button.fork-trigger:hover { color: var(--fg); }
 .app.sb-hidden[data-files-open="true"] { grid-template-columns: 0 minmax(420px,1fr) minmax(480px,var(--file-panel-width,45%)); }
 .files-toggle { margin-left:auto;flex:none;padding:7px;border-radius: var(--radius-sm);color:var(--fg-2); }
 .files-toggle:hover,.files-toggle[aria-expanded=true] { background:var(--bg-active);color:var(--fg); }
-.file-panel { grid-column:3;grid-row:1/3;position:relative;min-width:0;min-height:0;display:flex;flex-direction:column;border-left:1px solid var(--stroke);background:var(--bg);font-size:13px; }
+.file-panel { grid-column:3;grid-row:2 / 3;position:relative;min-width:0;min-height:0;display:flex;flex-direction:column;border-left:1px solid var(--stroke);background:var(--bg);font-size:13px; }
 .file-panel.maximized { position:fixed;inset:var(--tb-h) 0 0 var(--sb-w);z-index:30; }
 .file-panel-resize { position:absolute;left:-4px;top:0;bottom:0;width:8px;cursor:col-resize;z-index:4; }
-.file-tabs { display:flex;align-items:center;min-height:var(--tb-h);gap:3px;padding:0 10px;border-bottom:1px solid var(--stroke);overflow-x:auto; }
+.file-tabs { display:flex;align-items:center;min-height:var(--tb-h);gap:3px;padding:0 10px;border-bottom:1px solid var(--stroke);overflow-x:auto; -webkit-app-region: drag; background: var(--bg); }
+.file-tabs button, .file-header button, .file-header summary { -webkit-app-region: no-drag; }
 .file-tab { display:flex;align-items:center;flex:none;max-width:240px;border-radius: var(--radius-sm); }
 .file-tab.selected { background:var(--bg-active); }
 .file-tab button:first-child { overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
@@ -1859,6 +1878,13 @@ button.fork-trigger:hover { color: var(--fg); }
 
 .file-source-code code { background:none;padding:0;border-radius:0;font:inherit; }
 
+/* An empty side/file column (no panel body) must not keep half the window. */
+.app[data-files-open="true"]:not(:has(> .file-panel .btw-panel, > .file-panel .btw-thread, > .file-panel .file-tabs, > .file-panel .file-body)) {
+  grid-template-columns: var(--sb-w) minmax(0, 1fr) !important;
+}
+.app[data-files-open="true"]:not(:has(> .file-panel .btw-panel, > .file-panel .btw-thread, > .file-panel .file-tabs, > .file-panel .file-body)) > .file-panel {
+  display: none !important;
+}
 /* Use explicit layout state: WebKit must release the third track on close. */
 .app[data-files-open="false"] { grid-template-columns: var(--sb-w) minmax(0,1fr); }
 .app.sb-hidden[data-files-open="false"] { grid-template-columns: 0 minmax(0,1fr); }
@@ -2051,7 +2077,7 @@ button.fork-trigger:hover { color: var(--fg); }
 }
 
 /* Title hover card sits outside the draggable/clipped toolbar. */
-.session-title { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; min-width: 0; border: 0; border-radius: var(--session-radius); padding: var(--session-inset) 7px; margin-left: 0; color: inherit; background: transparent; font: inherit; text-align: left; -webkit-app-region: no-drag; }
+.session-title { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; min-width: 0; border: 0; border-radius: var(--session-radius); padding: var(--session-inset) 7px; margin-left: 0; color: inherit; background: transparent; font: inherit; text-align: left; -webkit-app-region: drag; }
 .session-title:hover, .session-title:focus-visible, .session-title[aria-describedby] { background: var(--bg-btn); color: var(--fg); }
 .session-title:focus-visible { outline: 1px solid var(--stroke); outline-offset: 2px; }
 .session-title > .session-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
