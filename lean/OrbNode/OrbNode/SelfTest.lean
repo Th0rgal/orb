@@ -1148,6 +1148,40 @@ def runTests : IO UInt32 := do
   -- 13. Round-3 regression checks
   rt ← runRound3RegressionTests check tmpRoot missionId nowEp authHdrs rt
 
+  -- 14. R2-B (`SM-02`) typed authority/placement/supersession/orphan/disk columns + `state_revision` CAS on `OrbNode.Store`
+  let casRoot := s!"{tmpRoot}/r2b-cas-ledger"
+  let .ok l0 ← OrbNode.Store.openLedger casRoot
+    | throw (IO.userError "openLedger failed on r2b-cas-ledger")
+  let seedJob : OrbNode.Store.JobRecord := {
+    jobId := "job-r2b-1"
+    missionId := missionId
+    payloadJson := "{}"
+    state := .queued
+    createdAt := "2026-11-06T00:00:00Z"
+    authorityMode := "readonly"
+    placementKind := "client"
+    reservedDiskGib := 24
+    stateRevision := 1
+  }
+  let .ok l1 ← l0.insertQueued seedJob
+    | throw (IO.userError "insertQueued failed on job-r2b-1")
+  let .ok (l2, jAfterCas) ← l1.updateJobAuthorityCas "job-r2b-1" 1 "writer" "managed" "m-super-9" "" 0
+    | throw (IO.userError "valid updateJobAuthorityCas rejected")
+  let staleNodeCas ← l2.updateJobAuthorityCas "job-r2b-1" 1 "readonly" "client" "" "2026-11-06T00:01:00Z" 24
+  let badModeCas ← l2.updateJobAuthorityCas "job-r2b-1" jAfterCas.stateRevision "invalid_mode" "managed" "" "" 0
+  let .ok lReopened ← OrbNode.Store.openLedger casRoot
+    | throw (IO.userError "reopen openLedger failed on r2b-cas-ledger")
+  let reopenedJob? := lReopened.jobs.get? "job-r2b-1"
+  check "SM-02 OrbNode.Store persists typed columns and rejects stale state_revision CAS"
+    (jAfterCas.stateRevision == 2 &&
+     jAfterCas.authorityMode == "writer" &&
+     jAfterCas.supersededById == "m-super-9" &&
+     jAfterCas.reservedDiskGib == 0 &&
+     !staleNodeCas.isOk &&
+     !badModeCas.isOk &&
+     reopenedJob?.map (·.supersededById) == some "m-super-9" &&
+     reopenedJob?.map (·.stateRevision) == some 2)
+
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get
   IO.println s!"OrbNode self-test: {passed}/{passed} assertions PASSED"

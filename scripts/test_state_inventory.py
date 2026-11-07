@@ -20,6 +20,42 @@ VALIDATION_PATH = ROOT / ".sandboxed/validation.toml"
 PLAN_PATH = ROOT / "plan.md"
 
 
+def _mutate_sm_row(text: str, sm_id: str, *, status: str, reproducer: str | None = None, closing_pr: str | None = None) -> str:
+    out_lines: list[str] = []
+    found = False
+    for line in text.splitlines():
+        if line.startswith(f"| {sm_id} |"):
+            found = True
+            cells = line.split("|")
+            # ['', id, title, owner, files, encoding, hazard, rationale, phase, status, reproducer, closing_pr, '']
+            cells[9] = f" {status} "
+            if reproducer is not None:
+                cells[10] = f" {reproducer} "
+            if closing_pr is not None:
+                cells[11] = f" {closing_pr} "
+            line = "|".join(cells)
+        out_lines.append(line)
+    if not found:
+        raise AssertionError(f"missing {sm_id} row in inventory fixture")
+    return "\n".join(out_lines) + "\n"
+
+
+def _mark_all_completed(text: str, closing_pr: str = "#1599") -> str:
+    out_lines: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("| SM-"):
+            cells = line.split("|")
+            cells[9] = " COMPLETED "
+            cells[11] = f" {closing_pr} "
+            line = "|".join(cells)
+        elif line.startswith("| G-ORB-"):
+            cells = line.split("|")
+            cells[6] = " COMPLETED "
+            line = "|".join(cells)
+        out_lines.append(line)
+    return "\n".join(out_lines) + "\n"
+
+
 class StateInventoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.inventory_text = INVENTORY_PATH.read_text(encoding="utf-8")
@@ -106,10 +142,11 @@ class StateInventoryTests(unittest.TestCase):
         )
         for placeholder in invalid_closing_prs:
             with self.subTest(placeholder=placeholder):
-                completed_placeholder = self.inventory_text.replace(
-                    "| R1, R2 | OPEN | `lean/OrbCore/OrbCore/Store.lean` | TBD |",
-                    f"| R1, R2 | COMPLETED | `lean/OrbCore/OrbCore/Store.lean` | {placeholder} |",
-                    1,
+                completed_placeholder = _mutate_sm_row(
+                    self.inventory_text,
+                    "SM-12",
+                    status="COMPLETED",
+                    closing_pr=placeholder,
                 )
                 with self.assertRaisesRegex(
                     ValueError,
@@ -117,9 +154,10 @@ class StateInventoryTests(unittest.TestCase):
                 ):
                     checker.validate_inventory_markdown(completed_placeholder, ROOT)
 
-                all_completed_placeholder = self.inventory_text.replace(
-                    "| OPEN |", "| COMPLETED |"
-                ).replace("| TBD |", f"| {placeholder} |")
+                all_completed_placeholder = _mark_all_completed(
+                    self.inventory_text,
+                    closing_pr=placeholder,
+                )
                 with self.assertRaisesRegex(
                     ValueError,
                     "COMPLETED row must specify concrete closing_pr",
@@ -132,10 +170,11 @@ class StateInventoryTests(unittest.TestCase):
 
         for duplicate_ref in ("#1578, #1578", "#1578, Th0rgal/orb#1578"):
             with self.subTest(duplicate_ref=duplicate_ref):
-                completed_duplicate = self.inventory_text.replace(
-                    "| R1, R2 | OPEN | `lean/OrbCore/OrbCore/Store.lean` | TBD |",
-                    f"| R1, R2 | COMPLETED | `lean/OrbCore/OrbCore/Store.lean` | {duplicate_ref} |",
-                    1,
+                completed_duplicate = _mutate_sm_row(
+                    self.inventory_text,
+                    "SM-12",
+                    status="COMPLETED",
+                    closing_pr=duplicate_ref,
                 )
                 with self.assertRaisesRegex(
                     ValueError,
@@ -143,10 +182,12 @@ class StateInventoryTests(unittest.TestCase):
                 ):
                     checker.validate_inventory_markdown(completed_duplicate, ROOT)
 
-        completed_missing_gate = self.inventory_text.replace(
-            "| R1, R2 | OPEN | `lean/OrbCore/OrbCore/Store.lean` | TBD |",
-            "| R1, R2 | COMPLETED | `lean/OrbCore/OrbCore/MissingGateTest.lean` | #1501 |",
-            1,
+        completed_missing_gate = _mutate_sm_row(
+            self.inventory_text,
+            "SM-12",
+            status="COMPLETED",
+            reproducer="`lean/OrbCore/OrbCore/MissingGateTest.lean`",
+            closing_pr="#1501",
         )
         with self.assertRaisesRegex(ValueError, "file does not exist"):
             checker.validate_inventory_markdown(completed_missing_gate, ROOT)
@@ -159,10 +200,11 @@ class StateInventoryTests(unittest.TestCase):
         )
         for token in valid_tokens:
             with self.subTest(token=token):
-                valid_single_completed = self.inventory_text.replace(
-                    "| R1, R2 | OPEN | `lean/OrbCore/OrbCore/Store.lean` | TBD |",
-                    f"| R1, R2 | COMPLETED | `lean/OrbCore/OrbCore/Store.lean` | {token} |",
-                    1,
+                valid_single_completed = _mutate_sm_row(
+                    self.inventory_text,
+                    "SM-12",
+                    status="COMPLETED",
+                    closing_pr=token,
                 )
                 sm_rows, _ = checker.validate_inventory_markdown(valid_single_completed, ROOT)
                 sm12 = next(row for row in sm_rows if row["id"] == "SM-12")
@@ -202,17 +244,20 @@ class StateInventoryTests(unittest.TestCase):
         self.assertEqual(len(sm_rows), 27)
 
     def test_require_all_completed_flag_enforces_r8_exit_gate(self) -> None:
+        incomplete_fixture = _mutate_sm_row(
+            self.inventory_text,
+            "SM-01",
+            status="IN_PROGRESS",
+            closing_pr="TBD",
+        )
         with self.assertRaisesRegex(ValueError, "expected 'COMPLETED'"):
             checker.validate_inventory_markdown(
-                self.inventory_text,
+                incomplete_fixture,
                 ROOT,
                 require_all_completed=True,
             )
 
-        all_completed = self.inventory_text.replace("| OPEN |", "| COMPLETED |").replace(
-            "| TBD |",
-            "| #1599 |",
-        )
+        all_completed = _mark_all_completed(self.inventory_text, closing_pr="#1599")
         sm_rows, gap_rows = checker.validate_inventory_markdown(
             all_completed,
             ROOT,
