@@ -5,6 +5,7 @@
     2. Transport proxy SSE shard count & unprivileged port bounds (`ConservedResource`)
     3. Transport 3-way failover retry idempotency gate (`RetrySafetyProof` + canonical `{0,1}` flags)
     4. Paloma Touch ID grace reuse gate (`PalomaGraceAction`, `ScopedAuthority`)
+    5. Run-scoped interactive tool-slot & tool-bridge admission (`ConservedResource`, `ScopedAuthority`, SM-11)
 -/
 
 namespace OrbLocald.Spec
@@ -413,5 +414,219 @@ theorem verifyPalomaGraceEligible_iff (isPost isBw : UInt8) (uuidLen : UInt32) (
       PalomaGraceDomainSafe ⟨isPost, isBw, uuidLen, actCode⟩ :=
   ⟨palomaGraceMetaGate.sound ⟨isPost, isBw, uuidLen, actCode⟩,
    palomaGraceMetaGate.complete ⟨isPost, isBw, uuidLen, actCode⟩⟩
+
+/-! ### 5. Run-Scoped Interactive Tool-Slot & Tool-Bridge Admission (`SM-11`) -/
+
+def maxInteractiveToolSlots : Nat := 64
+def maxInteractiveToolSlotCapBound : Nat := 256
+
+inductive ToolSlotAdmission where
+  | freshWithinCapacity
+  | idempotentSamePayload
+  deriving Repr, DecidableEq
+
+/-- Explicit duplicate classification, separate from fresh admission:
+    identical payload digest replays; a different digest under the same request id conflicts. -/
+inductive ToolSlotDuplicateClass where
+  | idempotentReplay
+  | conflictingDuplicate
+  deriving Repr, DecidableEq
+
+structure InteractiveToolSlotCheck where
+  activeSlots        : UInt16
+  maxCap             : UInt16
+  sessionEpoch       : UInt64
+  currentEpoch       : UInt64
+  hasNonEmptyRunId   : UInt8
+  hasNonEmptyRequestId : UInt8
+  isDuplicateRequestId : UInt8
+  samePayloadReplay  : UInt8
+  conflictingDuplicate : UInt8
+  deriving Repr, DecidableEq
+
+@[inline, export orb_locald_verify_tool_slot_admit]
+def verifyInteractiveToolSlotAdmit
+    (activeSlots maxCap : UInt16)
+    (sessionEpoch currentEpoch : UInt64)
+    (hasNonEmptyRunId hasNonEmptyRequestId isDuplicateRequestId
+      samePayloadReplay conflictingDuplicate : UInt8) : UInt8 :=
+  if 1 ≤ maxCap && maxCap ≤ 256 &&
+     hasNonEmptyRunId == 1 && hasNonEmptyRequestId == 1 &&
+     sessionEpoch > 0 && currentEpoch > 0 &&
+     sessionEpoch ≥ currentEpoch &&
+     isDuplicateRequestId ≤ 1 && samePayloadReplay ≤ 1 && conflictingDuplicate ≤ 1 &&
+     ((isDuplicateRequestId == 0 && activeSlots < maxCap) ||
+      (isDuplicateRequestId == 1 && samePayloadReplay == 1 && conflictingDuplicate == 0)) then 1 else 0
+
+/-- Independent run-scoped slot specification (`ConservedResource` + `ScopedAuthority`).
+    `"native-*"` request ids are ordinary non-empty ids: they do not appear as a bypass.
+    Fresh admission requires `activeSlots < maxCap` (explicit backpressure, never eviction).
+    Duplicate request ids admit only as an idempotent same-payload replay. -/
+def InteractiveToolSlotDomainSafe (c : InteractiveToolSlotCheck) : Prop :=
+  1 ≤ c.maxCap.toNat ∧
+  c.maxCap.toNat ≤ maxInteractiveToolSlotCapBound ∧
+  c.hasNonEmptyRunId.toNat = 1 ∧
+  c.hasNonEmptyRequestId.toNat = 1 ∧
+  c.currentEpoch.toNat > 0 ∧
+  c.sessionEpoch.toNat ≥ c.currentEpoch.toNat ∧
+  (c.isDuplicateRequestId.toNat = 0 ∨ c.isDuplicateRequestId.toNat = 1) ∧
+  (c.samePayloadReplay.toNat = 0 ∨ c.samePayloadReplay.toNat = 1) ∧
+  (c.conflictingDuplicate.toNat = 0 ∨ c.conflictingDuplicate.toNat = 1) ∧
+  ∃ w : ToolSlotAdmission,
+    match w with
+    | .freshWithinCapacity =>
+        c.isDuplicateRequestId.toNat = 0 ∧ c.activeSlots.toNat < c.maxCap.toNat
+    | .idempotentSamePayload =>
+        c.isDuplicateRequestId.toNat = 1 ∧
+        c.samePayloadReplay.toNat = 1 ∧
+        c.conflictingDuplicate.toNat = 0
+
+def interactiveToolSlotMetaGate :
+    MetaGateSpec InteractiveToolSlotCheck InteractiveToolSlotDomainSafe where
+  gate c :=
+    verifyInteractiveToolSlotAdmit c.activeSlots c.maxCap c.sessionEpoch c.currentEpoch
+      c.hasNonEmptyRunId c.hasNonEmptyRequestId c.isDuplicateRequestId
+      c.samePayloadReplay c.conflictingDuplicate == 1
+  sound c h := by
+    rcases c with ⟨active, maxC, sess, cur, runId, reqId, dup, same, conf⟩
+    change (verifyInteractiveToolSlotAdmit active maxC sess cur runId reqId dup same conf == 1) = true at h
+    dsimp [InteractiveToolSlotDomainSafe]
+    unfold verifyInteractiveToolSlotAdmit at h
+    have hc :
+        (1 ≤ maxC && maxC ≤ 256 && runId == 1 && reqId == 1 &&
+          sess > 0 && cur > 0 && sess ≥ cur &&
+          dup ≤ 1 && same ≤ 1 && conf ≤ 1 &&
+          ((dup == 0 && active < maxC) ||
+            (dup == 1 && same == 1 && conf == 0))) = true := by
+      cases hb :
+          (1 ≤ maxC && maxC ≤ 256 && runId == 1 && reqId == 1 &&
+            sess > 0 && cur > 0 && sess ≥ cur &&
+            dup ≤ 1 && same ≤ 1 && conf ≤ 1 &&
+            ((dup == 0 && active < maxC) ||
+              (dup == 1 && same == 1 && conf == 0)))
+      · rw [hb] at h; contradiction
+      · rfl
+    simp only [Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
+    rcases hc with ⟨hhead, hclass⟩
+    rcases hhead with ⟨⟨⟨⟨⟨⟨⟨⟨⟨hmax1, hmax2⟩, hrun⟩, hreq⟩, _hsess⟩, hcur⟩, hge⟩, hdup⟩, hsame⟩, hconf⟩
+    refine ⟨UInt16.le_iff_toNat_le.mp hmax1, UInt16.le_iff_toNat_le.mp hmax2,
+            by subst hrun; rfl, by subst hreq; rfl,
+            (UInt64.lt_iff_toNat_lt.mp hcur),
+            UInt64.le_iff_toNat_le.mp hge,
+            u8_le_one_cases dup hdup, u8_le_one_cases same hsame, u8_le_one_cases conf hconf, ?_⟩
+    rcases hclass with ⟨hdup0, hlt⟩ | ⟨⟨hdup1, hsame1⟩, hconf0⟩
+    · refine ⟨.freshWithinCapacity, ?_, UInt16.lt_iff_toNat_lt.mp hlt⟩
+      subst hdup0
+      rfl
+    · refine ⟨.idempotentSamePayload, ?_⟩
+      subst hdup1
+      subst hsame1
+      subst hconf0
+      exact ⟨rfl, rfl, rfl⟩
+  complete c h := by
+    rcases c with ⟨active, maxC, sess, cur, runId, reqId, dup, same, conf⟩
+    change (verifyInteractiveToolSlotAdmit active maxC sess cur runId reqId dup same conf == 1) = true
+    dsimp [InteractiveToolSlotDomainSafe] at h
+    rcases h with ⟨hmax1, hmax2, hrun, hreq, hcurPos, hge, hdup, hsame, hconf, w, hw⟩
+    unfold verifyInteractiveToolSlotAdmit
+    have hmaxGe : 1 ≤ maxC := UInt16.le_iff_toNat_le.mpr hmax1
+    have hmaxLe : maxC ≤ 256 := by
+      apply UInt16.le_iff_toNat_le.mpr
+      unfold maxInteractiveToolSlotCapBound at hmax2
+      exact hmax2
+    have hrunB : (runId == 1) = true := by
+      rw [beq_iff_eq]
+      exact u8_eq_of_toNat runId 1 (by omega) hrun
+    have hreqB : (reqId == 1) = true := by
+      rw [beq_iff_eq]
+      exact u8_eq_of_toNat reqId 1 (by omega) hreq
+    have hsessB : sess > 0 := UInt64.lt_iff_toNat_lt.mpr (Nat.lt_of_lt_of_le hcurPos hge)
+    have hcurB : cur > 0 := UInt64.lt_iff_toNat_lt.mpr hcurPos
+    have hgeB : sess ≥ cur := UInt64.le_iff_toNat_le.mpr hge
+    have hdupB : dup ≤ 1 := by
+      apply UInt8.le_iff_toNat_le.mpr
+      change dup.toNat ≤ 1
+      omega
+    have hsameB : same ≤ 1 := by
+      apply UInt8.le_iff_toNat_le.mpr
+      change same.toNat ≤ 1
+      omega
+    have hconfB : conf ≤ 1 := by
+      apply UInt8.le_iff_toNat_le.mpr
+      change conf.toNat ≤ 1
+      omega
+    cases w with
+    | freshWithinCapacity =>
+      rcases hw with ⟨hd0, hlt⟩
+      have hdup0 : (dup == 0) = true := by
+        rw [beq_iff_eq]
+        exact u8_eq_of_toNat dup 0 (by omega) hd0
+      have hltB : active < maxC := UInt16.lt_iff_toNat_lt.mpr hlt
+      simp [hmaxGe, hmaxLe, hrunB, hreqB, hsessB, hcurB, hgeB, hdupB, hsameB, hconfB, hdup0, hltB]
+    | idempotentSamePayload =>
+      rcases hw with ⟨hd1, hs1, hc0⟩
+      have hdup1 : (dup == 1) = true := by
+        rw [beq_iff_eq]
+        exact u8_eq_of_toNat dup 1 (by omega) hd1
+      have hsB : (same == 1) = true := by
+        rw [beq_iff_eq]
+        exact u8_eq_of_toNat same 1 (by omega) hs1
+      have hcB : (conf == 0) = true := by
+        rw [beq_iff_eq]
+        exact u8_eq_of_toNat conf 0 (by omega) hc0
+      simp [hmaxGe, hmaxLe, hrunB, hreqB, hsessB, hcurB, hgeB, hdupB, hsameB, hconfB, hdup1, hsB, hcB]
+  posWitness := {
+    activeSlots := 63, maxCap := 64, sessionEpoch := 2, currentEpoch := 2,
+    hasNonEmptyRunId := 1, hasNonEmptyRequestId := 1, isDuplicateRequestId := 0,
+    samePayloadReplay := 0, conflictingDuplicate := 0
+  }
+  negWitness := {
+    activeSlots := 64, maxCap := 64, sessionEpoch := 2, currentEpoch := 2,
+    hasNonEmptyRunId := 1, hasNonEmptyRequestId := 1, isDuplicateRequestId := 0,
+    samePayloadReplay := 0, conflictingDuplicate := 0
+  }
+  nonVacuous := by decide
+  tight := by decide
+
+def interactiveToolSlotConserved : ConservedResource InteractiveToolSlotCheck where
+  admit := interactiveToolSlotMetaGate.gate
+  withinCapacity c :=
+    1 ≤ c.maxCap.toNat ∧ c.maxCap.toNat ≤ 256 ∧
+    (c.isDuplicateRequestId.toNat = 1 ∨ c.activeSlots.toNat < c.maxCap.toNat)
+  conserved c h := by
+    rcases interactiveToolSlotMetaGate.sound c h with
+      ⟨hmax1, hmax2, _, _, _, _, _, _, _, w, hw⟩
+    refine ⟨hmax1, hmax2, ?_⟩
+    cases w with
+    | freshWithinCapacity => exact Or.inr hw.2
+    | idempotentSamePayload => exact Or.inl hw.1
+
+def interactiveToolSlotScoped : ScopedAuthority InteractiveToolSlotCheck where
+  admit := interactiveToolSlotMetaGate.gate
+  scopeValid c :=
+    c.hasNonEmptyRunId.toNat = 1 ∧ c.hasNonEmptyRequestId.toNat = 1 ∧
+    c.currentEpoch.toNat > 0 ∧ c.sessionEpoch.toNat ≥ c.currentEpoch.toNat
+  sound c h := by
+    rcases interactiveToolSlotMetaGate.sound c h with
+      ⟨_, _, hrun, hreq, hcur, hge, _, _, _, _⟩
+    exact ⟨hrun, hreq, hcur, hge⟩
+
+def classifyToolSlotDuplicate (samePayloadReplay conflictingDuplicate : UInt8) :
+    Option ToolSlotDuplicateClass :=
+  if samePayloadReplay == 1 && conflictingDuplicate == 0 then some .idempotentReplay
+  else if samePayloadReplay == 0 && conflictingDuplicate == 1 then some .conflictingDuplicate
+  else none
+
+theorem verifyInteractiveToolSlotAdmit_iff
+    (activeSlots maxCap : UInt16) (sessionEpoch currentEpoch : UInt64)
+    (hasRun hasReq isDup same conf : UInt8) :
+    (verifyInteractiveToolSlotAdmit activeSlots maxCap sessionEpoch currentEpoch
+      hasRun hasReq isDup same conf == 1) = true ↔
+      InteractiveToolSlotDomainSafe
+        ⟨activeSlots, maxCap, sessionEpoch, currentEpoch, hasRun, hasReq, isDup, same, conf⟩ :=
+  ⟨interactiveToolSlotMetaGate.sound
+      ⟨activeSlots, maxCap, sessionEpoch, currentEpoch, hasRun, hasReq, isDup, same, conf⟩,
+   interactiveToolSlotMetaGate.complete
+      ⟨activeSlots, maxCap, sessionEpoch, currentEpoch, hasRun, hasReq, isDup, same, conf⟩⟩
 
 end OrbLocald.Spec

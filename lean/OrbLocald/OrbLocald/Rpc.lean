@@ -155,8 +155,263 @@ def isPalomaPayloadGraceEligible (payload : String) : Bool :=
 structure SubscriptionEntry where
   token   : Nat
   channel : String
+  target? : Option String := none
   active  : Bool := true
   deriving Repr, Inhabited
+
+/-- Lifecycle states for a run-scoped interactive tool / bridge slot (`SM-11`).
+    `"native-*"` request ids share this exact lifecycle with zero prefix bypass. -/
+inductive InteractiveToolSlotLifecycle where
+  | waitingAck
+  | earlyBuffered
+  | answered (responseJson : JVal)
+  | cancelled (reason : String)
+  deriving Repr, Inhabited, BEq
+
+def InteractiveToolSlotLifecycle.isActive : InteractiveToolSlotLifecycle → Bool
+  | .waitingAck | .earlyBuffered => true
+  | .answered _ | .cancelled _   => false
+
+def InteractiveToolSlotLifecycle.label : InteractiveToolSlotLifecycle → String
+  | .waitingAck     => "waiting_ack"
+  | .earlyBuffered  => "early_buffered"
+  | .answered _     => "answered"
+  | .cancelled _    => "cancelled"
+
+structure InteractiveToolSlot where
+  runId         : String
+  sessionEpoch  : UInt64
+  requestId     : String
+  payload       : JVal
+  payloadDigest : String
+  lifecycle     : InteractiveToolSlotLifecycle
+  deriving Repr, Inhabited, BEq
+
+structure RunToolSlotTable where
+  runId        : String
+  currentEpoch : UInt64 := 1
+  slots        : Array InteractiveToolSlot := #[]
+  deriving Repr, Inhabited
+
+structure InteractiveToolHubState where
+  maxCap : UInt16 := maxInteractiveToolSlots.toUInt16
+  runs   : Array RunToolSlotTable := #[]
+  deriving Repr, Inhabited
+
+private partial def canonicalizeJsonValue : JVal → JVal
+  | .null => .null
+  | .bool b => .bool b
+  | .num raw => .num raw.trimAscii.toString
+  | .str s => .str s
+  | .arr xs => .arr (xs.map canonicalizeJsonValue)
+  | .obj kvs =>
+    let mapped := kvs.map fun (k, v) => (k, canonicalizeJsonValue v)
+    let sorted := mapped.qsort (fun a b => a.1 < b.1)
+    .obj sorted
+
+def digestToolPayload (payload : JVal) : String :=
+  let canon := renderCompact (canonicalizeJsonValue payload)
+  LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes canon.toUTF8)
+
+def InteractiveToolSlot.toSummaryJson (s : InteractiveToolSlot) : JVal :=
+  let base : Array (String × JVal) := #[
+    ("run_id", .str s.runId),
+    ("session_epoch", JVal.uint64 s.sessionEpoch),
+    ("request_id", .str s.requestId),
+    ("state", .str s.lifecycle.label),
+    ("active", .bool s.lifecycle.isActive),
+    ("payload_digest", .str s.payloadDigest),
+    ("payload", s.payload)
+  ]
+  let extra : Array (String × JVal) := match s.lifecycle with
+    | .answered resp => #[("answer", resp)]
+    | .cancelled r   => #[("cancel_reason", .str r)]
+    | _              => #[]
+  .obj (base ++ extra)
+
+def InteractiveToolSlot.toClientRequestJson (s : InteractiveToolSlot) : JVal :=
+  match s.payload with
+  | .obj _ =>
+    if (s.payload.fieldStr? "id").isSome then s.payload
+    else s.payload.setField "id" (.str s.requestId)
+  | _ =>
+    .obj #[("id", .str s.requestId), ("method", .str "questions"), ("params", s.payload)]
+
+def RunToolSlotTable.activeCount (tbl : RunToolSlotTable) : Nat :=
+  (tbl.slots.filter fun s => s.sessionEpoch == tbl.currentEpoch && s.lifecycle.isActive).size
+
+def RunToolSlotTable.firstActiveSlot? (tbl : RunToolSlotTable) : Option InteractiveToolSlot :=
+  tbl.slots.find? fun s => s.sessionEpoch == tbl.currentEpoch && s.lifecycle.isActive
+
+def InteractiveToolHubState.findRun? (hub : InteractiveToolHubState) (runId : String) : Option RunToolSlotTable :=
+  hub.runs.find? fun r => r.runId == runId
+
+private def upsertRunTable (hub : InteractiveToolHubState) (tbl : RunToolSlotTable) : InteractiveToolHubState :=
+  if hub.runs.any (fun r => r.runId == tbl.runId) then
+    { hub with runs := hub.runs.map (fun r => if r.runId == tbl.runId then tbl else r) }
+  else
+    { hub with runs := hub.runs.push tbl }
+
+private def cancelPriorEpochs (slots : Array InteractiveToolSlot) (newEpoch : UInt64) (reason : String) :
+    Array InteractiveToolSlot :=
+  slots.map fun s =>
+    if s.sessionEpoch < newEpoch && s.lifecycle.isActive then
+      { s with lifecycle := .cancelled reason }
+    else s
+
+/-- Admit or replay a run-scoped interactive tool slot (`register` or `offer_early`),
+    gated authoritatively by `OrbLocald.Spec.verifyInteractiveToolSlotAdmit`.
+    Never evicts active `waitingAck` or `earlyBuffered` slots; returns explicit errors on
+    stale epoch, conflicting duplicate payload, or capacity exhaustion (`interactive_slot_backpressure`). -/
+def InteractiveToolHubState.admitSlot
+    (hub : InteractiveToolHubState)
+    (runId : String)
+    (sessionEpoch : UInt64)
+    (requestId : String)
+    (payload : JVal)
+    (isEarly : Bool) : Except String (InteractiveToolSlot × Bool × InteractiveToolHubState) := do
+  let cleanRun := runId.trimAscii.toString
+  let cleanReq := requestId.trimAscii.toString
+  let hasRunFlag : UInt8 := if cleanRun.isEmpty then 0 else 1
+  let hasReqFlag : UInt8 := if cleanReq.isEmpty then 0 else 1
+  let existingTbl : RunToolSlotTable :=
+    (hub.findRun? cleanRun).getD { runId := cleanRun, currentEpoch := (if sessionEpoch > 0 then sessionEpoch else 1), slots := #[] }
+  let curEpoch := existingTbl.currentEpoch
+  let effectiveTbl : RunToolSlotTable :=
+    if sessionEpoch > curEpoch then
+      { existingTbl with
+          currentEpoch := sessionEpoch,
+          slots := cancelPriorEpochs existingTbl.slots sessionEpoch "superseded_epoch" }
+    else existingTbl
+  let digest := digestToolPayload payload
+  let existingSlot? := effectiveTbl.slots.find? fun s =>
+    s.sessionEpoch == sessionEpoch && s.requestId == cleanReq
+  let (dupFlag, sameFlag, confFlag) : (UInt8 × UInt8 × UInt8) :=
+    match existingSlot? with
+    | none => (0, 0, 0)
+    | some prev =>
+      if prev.payloadDigest == digest then (1, 1, 0) else (1, 0, 1)
+  let activeU16 : UInt16 := UInt16.ofNat (min effectiveTbl.activeCount 65535)
+  let maxCapU16 : UInt16 := hub.maxCap
+  let gateVerdict := verifyInteractiveToolSlotAdmit
+    activeU16 maxCapU16 sessionEpoch curEpoch
+    hasRunFlag hasReqFlag dupFlag sameFlag confFlag
+  if gateVerdict != 1 then
+    if hasRunFlag == 0 || hasReqFlag == 0 then
+      throw "invalid_tool_slot_identity"
+    else if sessionEpoch == 0 || curEpoch == 0 || sessionEpoch < curEpoch then
+      throw "stale_session_epoch"
+    else if dupFlag == 1 then
+      match classifyToolSlotDuplicate sameFlag confFlag with
+      | some .conflictingDuplicate => throw "duplicate_request_id_conflict"
+      | _ => throw "invalid_tool_slot_duplicate"
+    else if maxCapU16 < 1 || maxCapU16 > 256 then
+      throw "invalid_tool_slot_capacity"
+    else
+      throw "interactive_slot_backpressure"
+  match existingSlot? with
+  | some prev =>
+    -- Idempotent replay: promote `earlyBuffered` to `waitingAck` if `register` arrives after `offer_early`,
+    -- while preserving `answered` / `cancelled` receipts verbatim without consuming an extra slot.
+    let updatedSlot : InteractiveToolSlot :=
+      match prev.lifecycle with
+      | .earlyBuffered =>
+        if !isEarly then { prev with lifecycle := .waitingAck } else prev
+      | _ => prev
+    let nextSlots := effectiveTbl.slots.map fun s =>
+      if s.sessionEpoch == sessionEpoch && s.requestId == cleanReq then updatedSlot else s
+    let nextHub := upsertRunTable hub { effectiveTbl with slots := nextSlots }
+    return (updatedSlot, true, nextHub)
+  | none =>
+    let fresh : InteractiveToolSlot := {
+      runId := cleanRun
+      sessionEpoch := sessionEpoch
+      requestId := cleanReq
+      payload := payload
+      payloadDigest := digest
+      lifecycle := if isEarly then .earlyBuffered else .waitingAck
+    }
+    let nextTbl := { effectiveTbl with slots := effectiveTbl.slots.push fresh }
+    let nextHub := upsertRunTable hub nextTbl
+    return (fresh, false, nextHub)
+
+def InteractiveToolHubState.answerSlot
+    (hub : InteractiveToolHubState)
+    (runId : String)
+    (sessionEpoch? : Option UInt64)
+    (requestId : String)
+    (answerJson : JVal) : Except String (InteractiveToolSlot × InteractiveToolHubState) := do
+  let cleanRun := runId.trimAscii.toString
+  let cleanReq := requestId.trimAscii.toString
+  if cleanRun.isEmpty || cleanReq.isEmpty then
+    throw "invalid_tool_slot_identity"
+  let some tbl := hub.findRun? cleanRun
+    | throw "unknown_interactive_slot"
+  let targetEpoch := sessionEpoch?.getD tbl.currentEpoch
+  if targetEpoch == 0 || targetEpoch < tbl.currentEpoch then
+    throw "stale_session_epoch"
+  if targetEpoch > tbl.currentEpoch then
+    throw "unknown_interactive_slot"
+  let some slot := tbl.slots.find? (fun s => s.sessionEpoch == targetEpoch && s.requestId == cleanReq)
+    | throw "unknown_interactive_slot"
+  match slot.lifecycle with
+  | .cancelled _ =>
+    throw "cancelled_interactive_slot"
+  | .answered prevAns =>
+    if digestToolPayload prevAns == digestToolPayload answerJson then
+      return (slot, hub)
+    else
+      throw "duplicate_answer_conflict"
+  | .waitingAck | .earlyBuffered =>
+    let updated := { slot with lifecycle := .answered answerJson }
+    let nextSlots := tbl.slots.map fun s =>
+      if s.sessionEpoch == targetEpoch && s.requestId == cleanReq then updated else s
+    let nextHub := upsertRunTable hub { tbl with slots := nextSlots }
+    return (updated, nextHub)
+
+def InteractiveToolHubState.cancelRunSlots
+    (hub : InteractiveToolHubState)
+    (runId : String)
+    (reason : String)
+    (bumpEpoch : Bool) : (Nat × UInt64 × InteractiveToolHubState) :=
+  let cleanRun := runId.trimAscii.toString
+  match hub.findRun? cleanRun with
+  | none => (0, 1, hub)
+  | some tbl =>
+    let cancelledCount := (tbl.slots.filter (·.lifecycle.isActive)).size
+    let nextSlots := tbl.slots.map fun s =>
+      if s.lifecycle.isActive then { s with lifecycle := .cancelled reason } else s
+    let nextEpoch := if bumpEpoch then tbl.currentEpoch + 1 else tbl.currentEpoch
+    let nextTbl := { tbl with currentEpoch := nextEpoch, slots := nextSlots }
+    (cancelledCount, nextEpoch, upsertRunTable hub nextTbl)
+
+def InteractiveToolHubState.reconcileRun
+    (hub : InteractiveToolHubState)
+    (runId : String)
+    (sessionEpoch? : Option UInt64) : Except String (RunToolSlotTable × InteractiveToolHubState) := do
+  let cleanRun := runId.trimAscii.toString
+  if cleanRun.isEmpty then
+    throw "invalid_tool_slot_identity"
+  let existingTbl : RunToolSlotTable :=
+    (hub.findRun? cleanRun).getD { runId := cleanRun, currentEpoch := (sessionEpoch?.filter (· > 0) |>.getD 1), slots := #[] }
+  match sessionEpoch? with
+  | none =>
+    let nextHub := upsertRunTable hub existingTbl
+    return (existingTbl, nextHub)
+  | some reqEpoch =>
+    if reqEpoch == 0 || reqEpoch < existingTbl.currentEpoch then
+      throw "stale_session_epoch"
+    else if reqEpoch > existingTbl.currentEpoch then
+      let nextTbl : RunToolSlotTable := {
+        existingTbl with
+          currentEpoch := reqEpoch
+          slots := cancelPriorEpochs existingTbl.slots reqEpoch "superseded_epoch"
+      }
+      let nextHub := upsertRunTable hub nextTbl
+      return (nextTbl, nextHub)
+    else
+      let nextHub := upsertRunTable hub existingTbl
+      return (existingTbl, nextHub)
 
 structure LocaldState where
   launchToken         : String
@@ -167,6 +422,7 @@ structure LocaldState where
   queuedChannelEvents : Array (Nat × JVal) := #[]
   bindingsRevision    : Nat := 0
   bindingsEntries     : Array (String × JVal) := #[]
+  toolHub             : InteractiveToolHubState := {}
   clientLinkConnected : Bool := false
   approvalGraceSecs   : Nat := 300
   approvalGraceUntil  : UInt64 := 0
@@ -183,9 +439,27 @@ structure LocaldState where
 def LocaldState.bindingsSnapshotJson (st : LocaldState) : JVal :=
   .obj #[("revision", JVal.nat st.bindingsRevision), ("bindings", .obj st.bindingsEntries)]
 
-def LocaldState.subscribe (st : LocaldState) (channel : String) (initialEvent? : Option JVal := none) : (Nat × LocaldState) :=
+def LocaldState.activeInteractionJson (st : LocaldState) (runId : String) : JVal :=
+  let clean := runId.trimAscii.toString
+  if clean.isEmpty then .null
+  else
+    match (st.toolHub.findRun? clean).bind RunToolSlotTable.firstActiveSlot? with
+    | some slot => slot.toClientRequestJson
+    | none      => .null
+
+def LocaldState.publishInteractionSnapshot (st : LocaldState) (runId : String) : LocaldState :=
+  let clean := runId.trimAscii.toString
+  let snap := st.activeInteractionJson clean
+  let pushed := (st.subscriptions.filter fun e =>
+      e.active && e.channel == "local_interaction" &&
+      (match e.target? with | none => true | some t => t == clean)).foldl
+    (fun acc e => acc.push (e.token, snap)) st.queuedChannelEvents
+  { st with queuedChannelEvents := pushed }
+
+def LocaldState.subscribe (st : LocaldState) (channel : String) (initialEvent? : Option JVal := none)
+    (target? : Option String := none) : (Nat × LocaldState) :=
   let tok := st.nextSubToken
-  let entry : SubscriptionEntry := { token := tok, channel := channel, active := true }
+  let entry : SubscriptionEntry := { token := tok, channel := channel, target? := target?, active := true }
   let q := match initialEvent? with
     | some ev => st.queuedChannelEvents.push (tok, ev)
     | none    => st.queuedChannelEvents
@@ -976,8 +1250,12 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       s.subscribe "local_bindings" (some s.bindingsSnapshotJson)
     return .ok (JVal.nat tok)
   | "local_interaction_subscribe" =>
+    let rawId := ((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).getD ""
+    let cleanId := rawId.trimAscii.toString
+    let target? : Option String := if cleanId.isEmpty then none else some cleanId
     let tok ← stRef.modifyGet fun s =>
-      s.subscribe "local_interaction" (some .null)
+      let initEv := if cleanId.isEmpty then .null else s.activeInteractionJson cleanId
+      s.subscribe "local_interaction" (some initEv) target?
     return .ok (JVal.nat tok)
   | "project_context_subscribe" =>
     let tok ← stRef.modifyGet fun s =>
@@ -1153,14 +1431,174 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       let branch? ← readCommandStdout? "git" #["-C", cwd.trimAscii.toString, "symbolic-ref", "--short", "HEAD"]
       let branchVal : JVal := match branch? with | some b => (if b.isEmpty then .null else .str b) | none => .null
       return .ok (.obj #[("repository", .str repoName), ("branch", branchVal)])
-  | "mistral_usage_sign_in" | "local_interaction" | "local_skills_status" =>
+  | "mistral_usage_sign_in" | "local_skills_status" =>
     return .ok .null
+  | "local_interaction" =>
+    let runId := (((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).orElse
+      (fun _ => args.fieldStr? "runId")).getD ""
+    let reqId? := (((args.fieldStr? "request_id").orElse (fun _ => args.fieldStr? "requestId")).orElse
+      (fun _ => (args.field? "payload").bind (·.fieldStr? "id")))
+    let epoch? := (args.fieldUInt64? "session_epoch").orElse (fun _ => args.fieldUInt64? "sessionEpoch")
+    let action? := (args.fieldStr? "action").map (·.trimAscii.toString.toLower)
+    match action? with
+    | none =>
+      if reqId?.isNone then
+        -- Legacy / desktop initial probe (`local_interaction` with `{}` or `{id}`):
+        -- return active pending interaction request for `id`, or `.null` if idle.
+        return .ok (st.activeInteractionJson runId)
+      else
+        let reqId := reqId?.getD ""
+        let curEp := ((st.toolHub.findRun? runId.trimAscii.toString).map (·.currentEpoch)).getD 1
+        let ep := epoch?.getD curEp
+        let payload := ((args.field? "payload").orElse (fun _ => args.field? "request")).getD
+          (.obj #[("id", .str reqId), ("method", .str ((args.fieldStr? "method").getD "questions")),
+                  ("params", (args.field? "params").getD (.obj #[]))])
+        let res ← stRef.modifyGet fun s =>
+          match s.toolHub.admitSlot runId ep reqId payload false with
+          | .error e => (.error e, s)
+          | .ok (slot, replayed, nextHub) =>
+            let s' := ({ s with toolHub := nextHub }).publishInteractionSnapshot runId
+            let body := (slot.toSummaryJson.setField "idempotent_replay" (.bool replayed)).setField
+              "active_slots" (JVal.nat ((nextHub.findRun? runId.trimAscii.toString).map (·.activeCount) |>.getD 0))
+            (.ok body, s')
+        return res
+    | some "register" | some "offer_early" =>
+      let isEarly := action? == some "offer_early"
+      let reqId := reqId?.getD ""
+      let res ← stRef.modifyGet fun s =>
+        let curEp := ((s.toolHub.findRun? runId.trimAscii.toString).map (·.currentEpoch)).getD 1
+        let ep := epoch?.getD curEp
+        let payload := ((args.field? "payload").orElse (fun _ => args.field? "request")).getD
+          (.obj #[("id", .str reqId), ("method", .str ((args.fieldStr? "method").getD "questions")),
+                  ("params", (args.field? "params").getD (.obj #[]))])
+        let hub0 : InteractiveToolHubState := match args.fieldNat? "max_cap" with
+          | some cap =>
+            let clamped := min cap 65535
+            { s.toolHub with maxCap := UInt16.ofNat clamped }
+          | none     => s.toolHub
+        match hub0.admitSlot runId ep reqId payload isEarly with
+        | .error e =>
+          let sKeep := if hub0.maxCap ≥ 1 && hub0.maxCap ≤ 256 then { s with toolHub := hub0 } else s
+          (.error e, sKeep)
+        | .ok (slot, replayed, nextHub) =>
+          let s' := ({ s with toolHub := nextHub }).publishInteractionSnapshot runId
+          let body := (slot.toSummaryJson.setField "idempotent_replay" (.bool replayed)).setField
+            "active_slots" (JVal.nat ((nextHub.findRun? runId.trimAscii.toString).map (·.activeCount) |>.getD 0))
+          (.ok body, s')
+      return res
+    | some "respond" | some "answer" =>
+      let reqId := reqId?.getD ""
+      let ansVal := ((args.field? "answer").orElse (fun _ => args.field? "response")).getD .null
+      let res ← stRef.modifyGet fun s =>
+        match s.toolHub.answerSlot runId epoch? reqId ansVal with
+        | .error e => (.error e, s)
+        | .ok (slot, nextHub) =>
+          let s' := ({ s with toolHub := nextHub }).publishInteractionSnapshot runId
+          (.ok slot.toSummaryJson, s')
+      return res
+    | some "poll" =>
+      let cleanRun := runId.trimAscii.toString
+      match st.toolHub.findRun? cleanRun with
+      | none =>
+        return .ok (if reqId?.isSome then .null else .obj #[("run_id", .str cleanRun), ("session_epoch", JVal.uint64 1), ("active_slots", JVal.nat 0), ("slots", .arr #[])])
+      | some tbl =>
+        match reqId? with
+        | some rq =>
+          let targetEp := epoch?.getD tbl.currentEpoch
+          match tbl.slots.find? (fun sl => sl.sessionEpoch == targetEp && sl.requestId == rq.trimAscii.toString) with
+          | some sl => return .ok sl.toSummaryJson
+          | none    => return .ok .null
+        | none =>
+          return .ok (.obj #[
+            ("run_id", .str tbl.runId),
+            ("session_epoch", JVal.uint64 tbl.currentEpoch),
+            ("active_slots", JVal.nat tbl.activeCount),
+            ("active_request", st.activeInteractionJson cleanRun),
+            ("slots", .arr (tbl.slots.map InteractiveToolSlot.toSummaryJson))
+          ])
+    | some "cancel_run" =>
+      let reason := (args.fieldStr? "reason").getD "run_cancelled"
+      let bump := (args.fieldBool? "bump_epoch").getD true
+      let out ← stRef.modifyGet fun s =>
+        let (cancelledCount, nextEp, nextHub) := s.toolHub.cancelRunSlots runId reason bump
+        let s' := ({ s with toolHub := nextHub }).publishInteractionSnapshot runId
+        (.obj #[
+          ("run_id", .str runId.trimAscii.toString),
+          ("cancelled_slots", JVal.nat cancelledCount),
+          ("session_epoch", JVal.uint64 nextEp)
+        ], s')
+      return .ok out
+    | some "reconcile" =>
+      let res ← stRef.modifyGet fun s =>
+        match s.toolHub.reconcileRun runId epoch? with
+        | .error e => (.error e, s)
+        | .ok (tbl, nextHub) =>
+          let s' := { s with toolHub := nextHub }
+          let activeArr := (tbl.slots.filter fun sl => sl.sessionEpoch == tbl.currentEpoch && sl.lifecycle.isActive).map
+            InteractiveToolSlot.toSummaryJson
+          (.ok (.obj #[
+            ("run_id", .str tbl.runId),
+            ("session_epoch", JVal.uint64 tbl.currentEpoch),
+            ("active_slots", JVal.nat activeArr.size),
+            ("active_request", s'.activeInteractionJson tbl.runId),
+            ("pending", .arr activeArr),
+            ("slots", .arr (tbl.slots.map InteractiveToolSlot.toSummaryJson))
+          ]), s')
+      return res
+    | some other =>
+      return .error s!"unsupported local_interaction action: {other}"
+  | "local_interaction_answer" =>
+    let runId := (((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).orElse
+      (fun _ => args.fieldStr? "runId")).getD ""
+    let reqId := ((args.fieldStr? "requestId").orElse (fun _ => args.fieldStr? "request_id")).getD ""
+    let epoch? := (args.fieldUInt64? "session_epoch").orElse (fun _ => args.fieldUInt64? "sessionEpoch")
+    let ansVal := ((args.field? "answer").orElse (fun _ => args.field? "response")).getD .null
+    let res ← stRef.modifyGet fun s =>
+      match s.toolHub.answerSlot runId epoch? reqId ansVal with
+      | .error e => (.error e, s)
+      | .ok (_, nextHub) =>
+        let s' := ({ s with toolHub := nextHub }).publishInteractionSnapshot runId
+        (.ok .null, s')
+    return res
   | "local_wakeups_sync" =>
     return .ok (.obj #[("pending", .arr #[]), ("changed", .bool false), ("cancelled", .arr #[])])
   | "local_wakeups_cancel" | "local_wakeups_discard"
-  | "local_origin_confirm" | "local_origin_disconnect"
-  | "local_run_reconcile" | "local_agents_stop" =>
+  | "local_origin_confirm" | "local_origin_disconnect" =>
     return .ok .null
+  | "local_agents_stop" =>
+    let runId := (((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).orElse
+      (fun _ => args.fieldStr? "runId")).getD ""
+    if !runId.trimAscii.toString.isEmpty then
+      let bump := (args.fieldBool? "bump_epoch").getD true
+      stRef.modify fun s =>
+        let (_, _, nextHub) := s.toolHub.cancelRunSlots runId "stopped" bump
+        ({ s with toolHub := nextHub }).publishInteractionSnapshot runId
+    return .ok .null
+  | "local_run_reconcile" =>
+    let runId := (((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).orElse
+      (fun _ => args.fieldStr? "runId")).getD ""
+    let epoch? := (args.fieldUInt64? "session_epoch").orElse (fun _ => args.fieldUInt64? "sessionEpoch")
+    let includeSummary := (args.fieldBool? "include_slots").getD (epoch?.isSome)
+    if runId.trimAscii.toString.isEmpty then
+      return .ok .null
+    let res ← stRef.modifyGet fun s =>
+      match s.toolHub.reconcileRun runId epoch? with
+      | .error e => (.error e, s)
+      | .ok (tbl, nextHub) =>
+        let s' := { s with toolHub := nextHub }
+        if includeSummary then
+          let activeArr := (tbl.slots.filter fun sl => sl.sessionEpoch == tbl.currentEpoch && sl.lifecycle.isActive).map
+            InteractiveToolSlot.toSummaryJson
+          (.ok (.obj #[
+            ("run_id", .str tbl.runId),
+            ("session_epoch", JVal.uint64 tbl.currentEpoch),
+            ("active_slots", JVal.nat activeArr.size),
+            ("active_request", s'.activeInteractionJson tbl.runId),
+            ("pending", .arr activeArr)
+          ]), s')
+        else
+          (.ok .null, s')
+    return res
   | "local_agents_poll" =>
     return .ok (.obj #[("text", .str ""), ("done", .bool true), ("resumed", .bool false)])
   | "local_codex_speed_options" =>

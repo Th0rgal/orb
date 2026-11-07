@@ -1,7 +1,7 @@
 import OrbLocald.Spec
 
 /-
-  OrbLocald.MutantSuite — 4-mutant kill & agreement witnesses covering all 4 gates in OrbLocald.Spec (`0 sorryAx`).
+  OrbLocald.MutantSuite — 7-mutant kill & agreement witnesses covering all 5 gates in OrbLocald.Spec (`0 sorryAx`).
 -/
 
 namespace OrbLocald.MutantSuite
@@ -45,6 +45,70 @@ def mutantGraceNonBitwarden (isPost isBitwardenReq : UInt8) (uuidLen : UInt32) (
 theorem kill_mutantGraceNonBitwarden :
     verifyPalomaGraceEligible 1 0 36 1 ≠ mutantGraceNonBitwarden 1 0 36 1 ∧
     verifyPalomaGraceEligible 1 1 36 1 = mutantGraceNonBitwarden 1 1 36 1 := by
+  decide
+
+/-- Mutant 5: silently evicts the oldest slot once `activeSlots == maxCap` (over-capacity admit). -/
+def mutantToolSlotSilentEvict
+    (activeSlots maxCap : UInt16)
+    (sessionEpoch currentEpoch : UInt64)
+    (hasNonEmptyRunId hasNonEmptyRequestId isDuplicateRequestId
+      samePayloadReplay conflictingDuplicate : UInt8) : UInt8 :=
+  if 1 ≤ maxCap && maxCap ≤ 256 &&
+     hasNonEmptyRunId == 1 && hasNonEmptyRequestId == 1 &&
+     sessionEpoch > 0 && currentEpoch > 0 &&
+     sessionEpoch ≥ currentEpoch &&
+     isDuplicateRequestId ≤ 1 && samePayloadReplay ≤ 1 && conflictingDuplicate ≤ 1 &&
+     ((isDuplicateRequestId == 0 && activeSlots ≤ maxCap) ||
+      (isDuplicateRequestId == 1 && samePayloadReplay == 1 && conflictingDuplicate == 0)) then 1 else 0
+
+theorem kill_mutantToolSlotSilentEvict :
+    verifyInteractiveToolSlotAdmit 64 64 2 2 1 1 0 0 0 ≠
+      mutantToolSlotSilentEvict 64 64 2 2 1 1 0 0 0 ∧
+    verifyInteractiveToolSlotAdmit 63 64 2 2 1 1 0 0 0 =
+      mutantToolSlotSilentEvict 63 64 2 2 1 1 0 0 0 := by
+  decide
+
+/-- Mutant 6: accepts a stale session epoch (`sessionEpoch < currentEpoch`). -/
+def mutantToolSlotStaleEpoch
+    (activeSlots maxCap : UInt16)
+    (sessionEpoch currentEpoch : UInt64)
+    (hasNonEmptyRunId hasNonEmptyRequestId isDuplicateRequestId
+      samePayloadReplay conflictingDuplicate : UInt8) : UInt8 :=
+  if 1 ≤ maxCap && maxCap ≤ 256 &&
+     hasNonEmptyRunId == 1 && hasNonEmptyRequestId == 1 &&
+     sessionEpoch > 0 && currentEpoch > 0 &&
+     sessionEpoch ≤ currentEpoch &&
+     isDuplicateRequestId ≤ 1 && samePayloadReplay ≤ 1 && conflictingDuplicate ≤ 1 &&
+     ((isDuplicateRequestId == 0 && activeSlots < maxCap) ||
+      (isDuplicateRequestId == 1 && samePayloadReplay == 1 && conflictingDuplicate == 0)) then 1 else 0
+
+theorem kill_mutantToolSlotStaleEpoch :
+    verifyInteractiveToolSlotAdmit 0 64 1 2 1 1 0 0 0 ≠
+      mutantToolSlotStaleEpoch 0 64 1 2 1 1 0 0 0 ∧
+    verifyInteractiveToolSlotAdmit 0 64 2 2 1 1 0 0 0 =
+      mutantToolSlotStaleEpoch 0 64 2 2 1 1 0 0 0 := by
+  decide
+
+/-- Mutant 7: `"native-"` prefix (empty-id flag) bypasses capacity and duplicate checks. -/
+def mutantToolSlotNativeBypass
+    (activeSlots maxCap : UInt16)
+    (sessionEpoch currentEpoch : UInt64)
+    (hasNonEmptyRunId hasNonEmptyRequestId isDuplicateRequestId
+      samePayloadReplay conflictingDuplicate : UInt8) : UInt8 :=
+  if 1 ≤ maxCap && maxCap ≤ 256 &&
+     hasNonEmptyRunId == 1 &&
+     sessionEpoch > 0 && currentEpoch > 0 &&
+     sessionEpoch ≥ currentEpoch &&
+     (hasNonEmptyRequestId == 0 ||
+      ((isDuplicateRequestId ≤ 1 && samePayloadReplay ≤ 1 && conflictingDuplicate ≤ 1) &&
+       ((isDuplicateRequestId == 0 && activeSlots < maxCap) ||
+        (isDuplicateRequestId == 1 && samePayloadReplay == 1 && conflictingDuplicate == 0)))) then 1 else 0
+
+theorem kill_mutantToolSlotNativeBypass :
+    verifyInteractiveToolSlotAdmit 64 64 2 2 1 0 1 0 1 ≠
+      mutantToolSlotNativeBypass 64 64 2 2 1 0 1 0 1 ∧
+    verifyInteractiveToolSlotAdmit 0 64 2 2 1 1 0 0 0 =
+      mutantToolSlotNativeBypass 0 64 2 2 1 1 0 0 0 := by
   decide
 
 end OrbLocald.MutantSuite
