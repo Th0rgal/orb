@@ -19,23 +19,33 @@ struct OrbProviderLogo: View {
     var name: String = ""
     var size: CGFloat = 18
 
-    static func assetName(type: String, name: String = "") -> String? {
+    private static func containsWord(_ text: String, _ word: String) -> Bool {
+        text.split { !$0.isLetter && !$0.isNumber }.contains { $0 == word }
+    }
+
+    static func brandKey(type: String, name: String = "") -> String? {
         let key = type.lowercased()
         let combined = "\(key) \(name.lowercased())"
-        if key.contains("hermes") { return "provider-hermes" }
-        if combined.contains("spark") || combined.contains("nvidia") || combined.contains("local") { return "provider-nvidia" }
-        if key.contains("anthropic") || key.contains("claude") { return "provider-anthropic" }
-        if key.contains("openai") || key.contains("codex") || key.contains("chatgpt") { return "provider-openai" }
-        if key.contains("kimi") || key.contains("moonshot") { return "provider-kimi" }
-        if key.contains("grok") { return "provider-grok" }
-        if key.contains("cursor") { return "provider-cursor" }
-        if key.contains("xai") { return "provider-xai" }
-        if key.contains("meta") || key.contains("muse") || key.contains("llama") { return "provider-meta" }
-        if key.contains("minimax") { return "provider-minimax" }
-        if key.contains("mistral") || key.contains("vibe") { return "provider-mistral" }
-        if key.contains("google") || key.contains("antigravity") || key.contains("gemini") { return "provider-google" }
-        if key.contains("zai") || key.contains("z.ai") || key.contains("z-ai") || key.contains("z_ai") || key.contains("zhipu") || key.contains("glm") { return "provider-zai" }
+        if key.contains("hermes") { return "hermes" }
+        if combined.contains("spark") || combined.contains("nvidia") || combined.contains("local") { return "nvidia" }
+        if combined.contains("ethereum") || containsWord(combined, "ef") { return "ethereum" }
+        if containsWord(combined, "particle") || combined.contains("particleai") || combined.contains("particle.ai") || combined.contains("particle-ai") || combined.contains("particle_ai") { return "particle" }
+        if key.contains("anthropic") || key.contains("claude") { return "anthropic" }
+        if key.contains("openai") || key.contains("codex") || key.contains("chatgpt") { return "openai" }
+        if key.contains("kimi") || key.contains("moonshot") { return "kimi" }
+        if key.contains("grok") { return "grok" }
+        if key.contains("cursor") { return "cursor" }
+        if key.contains("xai") { return "xai" }
+        if key.contains("meta") || key.contains("muse") || key.contains("llama") { return "meta" }
+        if key.contains("minimax") { return "minimax" }
+        if key.contains("mistral") || key.contains("vibe") { return "mistral" }
+        if key.contains("google") || key.contains("antigravity") || key.contains("gemini") { return "google" }
+        if key.contains("zai") || key.contains("z.ai") || key.contains("z-ai") || key.contains("z_ai") || key.contains("zhipu") || key.contains("glm") { return "zai" }
         return nil
+    }
+
+    static func assetName(type: String, name: String = "") -> String? {
+        brandKey(type: type, name: name).map { "provider-\($0)" }
     }
 
     var body: some View {

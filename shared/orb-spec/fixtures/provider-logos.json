@@ -1,0 +1,23 @@
+{
+  "description": "resolveProviderBrand(type, name): maps an inference or cloud provider (type + optional display name) to its bundled brand mark key across Orb desktop (orb/src/ProviderLogo.tsx), iOS (OrbProviderLogo.assetName in OrbProvidersSettings.swift), and Android (resolveProviderBrandKey in OrbSfIcons.kt). Custom OpenAI-compatible gateways (type = 'custom') resolve known brands from their display name (such as Ethereum Foundation / EF -> 'ethereum' and Particle / Particle AI -> 'particle') while keeping unknown custom endpoints on the generic plug/CPU fallback (null).",
+  "cases": [
+    { "name": "Ethereum Foundation custom provider", "type": "custom", "providerName": "Ethereum Foundation", "expected": "ethereum" },
+    { "name": "EF shorthand custom provider", "type": "custom", "providerName": "EF", "expected": "ethereum" },
+    { "name": "EF cluster custom provider", "type": "custom", "providerName": "EF Inference", "expected": "ethereum" },
+    { "name": "sanitized ethereumfoundation provider id", "type": "ethereumfoundation", "providerName": "", "expected": "ethereum" },
+    { "name": "ethereum provider type", "type": "ethereum", "providerName": "", "expected": "ethereum" },
+    { "name": "Particle custom provider", "type": "custom", "providerName": "Particle", "expected": "particle" },
+    { "name": "Particle AI custom provider", "type": "custom", "providerName": "Particle AI", "expected": "particle" },
+    { "name": "particle.ai custom provider", "type": "custom", "providerName": "particle.ai", "expected": "particle" },
+    { "name": "sanitized particle provider id", "type": "particle", "providerName": "", "expected": "particle" },
+    { "name": "Default custom name does not false-match EF", "type": "custom", "providerName": "Default Endpoint", "expected": null },
+    { "name": "Reference custom name does not false-match EF", "type": "custom", "providerName": "Reference Gateway", "expected": null },
+    { "name": "Briefing custom name does not false-match EF", "type": "custom", "providerName": "Briefing Gateway", "expected": null },
+    { "name": "Unknown custom provider falls back to generic", "type": "custom", "providerName": "Acme Corp Gateway", "expected": null },
+    { "name": "Spark custom provider resolves nvidia", "type": "custom", "providerName": "DGX Spark", "expected": "nvidia" },
+    { "name": "Anthropic provider", "type": "anthropic", "providerName": "Claude Max", "expected": "anthropic" },
+    { "name": "OpenAI provider", "type": "openai", "providerName": "Codex Pro", "expected": "openai" },
+    { "name": "Google Antigravity provider", "type": "antigravity", "providerName": "Antigravity", "expected": "google" },
+    { "name": "Z.AI provider", "type": "z-ai", "providerName": "GLM Coding", "expected": "zai" }
+  ]
+}

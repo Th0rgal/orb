@@ -606,6 +606,35 @@ enum OrbResourcesModel {
         let b = Double(val & 0xFF) / 255.0
         return Color(red: r, green: g, blue: b)
     }
+
+    static func normalizePoolLabel(id: String, label: String) -> String {
+        var cleanId = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if cleanId.hasPrefix("in:inf:") {
+            cleanId = String(cleanId.dropFirst(7))
+        }
+        if cleanId.hasSuffix(":pool") {
+            cleanId = String(cleanId.dropLast(5))
+        }
+        let head = cleanId.split(separator: ":").first.map(String.init) ?? ""
+        let cleanLabel = label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        if head == "ethereumfoundation"
+            || head == "ethereum_foundation"
+            || head == "ethereum"
+            || head == "ef"
+            || cleanLabel == "ethereumfoundation"
+            || cleanLabel == "ethereum foundation"
+            || cleanLabel == "ethereum_foundation" {
+            return "EF"
+        }
+
+        if (head == "particle" || head == "particleai" || head == "particle_ai" || head == "particle.ai")
+            && (cleanLabel == "particleai" || cleanLabel == "particle_ai") {
+            return "Particle"
+        }
+
+        return label
+    }
 }
 
 struct OrbResourcesView: View {
@@ -1602,10 +1631,11 @@ struct OrbResourcesView: View {
                 } else {
                     sub = rawSub
                 }
+                let pid = p["id"].text
                 nodes.append(.init(
-                    id: p["id"].text,
+                    id: pid,
                     column: 0,
-                    label: p["label"].text,
+                    label: OrbResourcesModel.normalizePoolLabel(id: pid, label: p["label"].text),
                     sub: sub,
                     colorHex: Self.palette[idx % Self.palette.count],
                     fallbackValue: p["current_b_tok_per_h"].doubleValue ?? 0,
@@ -1702,10 +1732,12 @@ struct OrbResourcesView: View {
         var links: [OrbResourcesModel.SankeyInputLink] = []
 
         for (idx, inp) in flow["inputs"].items.filter({ $0["kind"].text == lens.rawValue }).enumerated() {
+            let iid = inp["id"].text
+            let rawLbl = inp["label"].text
             nodes.append(.init(
-                id: inp["id"].text,
+                id: iid,
                 column: 0,
-                label: inp["label"].text,
+                label: lens == .inference ? OrbResourcesModel.normalizePoolLabel(id: iid, label: rawLbl) : rawLbl,
                 sub: inp["sub"].text,
                 colorHex: Self.palette[idx % Self.palette.count],
                 fallbackValue: inp["weight"].doubleValue ?? 0,

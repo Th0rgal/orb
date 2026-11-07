@@ -57,5 +57,18 @@
     "expected_x0": [0.1666666667, 0.3333333333, 0.6666666667],
     "expected_x1": [0.5, 0.8333333333, 0.8333333333],
     "expected_proj_x1": [null, 0.9166666667, 0.875]
-  }
+  },
+  "pool_labels": [
+    { "id": "ethereumfoundation:pool", "label": "Ethereumfoundation", "expected": "EF" },
+    { "id": "ethereumfoundation:pool", "label": "Ethereum Foundation", "expected": "EF" },
+    { "id": "in:inf:ethereumfoundation:pool", "label": "Ethereumfoundation", "expected": "EF" },
+    { "id": "ethereum_foundation:pool", "label": "Ethereum_foundation", "expected": "EF" },
+    { "id": "ef:pool", "label": "Ef", "expected": "EF" },
+    { "id": "particleai:pool", "label": "Particleai", "expected": "Particle" },
+    { "id": "in:inf:particle_ai:pool", "label": "Particle_ai", "expected": "Particle" },
+    { "id": "particle:pool", "label": "Particle", "expected": "Particle" },
+    { "id": "particle:pool", "label": "Particle AI", "expected": "Particle AI" },
+    { "id": "anthropic:claude", "label": "Anthropic · Claude", "expected": "Anthropic · Claude" },
+    { "id": "default:pool", "label": "Default", "expected": "Default" }
+  ]
 }

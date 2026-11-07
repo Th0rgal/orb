@@ -199,4 +199,22 @@ final class OrbSettingsTests: XCTestCase {
         }
     }
 
+    func testProviderLogosMatchSharedSpec() throws {
+        let spec = try OrbSpec.json("fixtures/provider-logos.json")
+        for c in try XCTUnwrap(spec["cases"] as? [[String: Any]]) {
+            let name = c["name"] as? String ?? "?"
+            let type = try XCTUnwrap(c["type"] as? String)
+            let providerName = c["providerName"] as? String ?? ""
+            let expected = c["expected"] as? String
+            XCTAssertEqual(OrbProviderLogo.brandKey(type: type, name: providerName), expected, name)
+            if let expected {
+                let expectedAsset = "provider-\(expected)"
+                XCTAssertEqual(OrbProviderLogo.assetName(type: type, name: providerName), expectedAsset, name)
+                XCTAssertNotNil(UIImage(named: expectedAsset), "Missing bundled iOS asset \(expectedAsset)")
+            } else {
+                XCTAssertNil(OrbProviderLogo.assetName(type: type, name: providerName), name)
+            }
+        }
+    }
+
 }
