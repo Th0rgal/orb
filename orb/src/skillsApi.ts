@@ -73,6 +73,7 @@ export async function putProjectSkills(slug: string, skills: string[]): Promise<
 
 export interface DeliveredSkill {
   name: string;
+  description?: string | null;
   reasons: string[];
 }
 

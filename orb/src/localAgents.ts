@@ -761,6 +761,15 @@ async function requireLocalCyber(invoke:NonNullable<ReturnType<typeof desktopInv
 }
 
 
+export interface InvocableSkill { name: string; description?: string | null; path: string; }
+
+/** Project skills win over global skills. Desktop-only; Core missions use skill delivery. */
+export async function localInvocableSkills(cwd: string, harness: string): Promise<InvocableSkill[]> {
+ const invoke = tauriInvoke();
+ if (!invoke) throw new Error("Local skill discovery requires the Orb desktop app.");
+ return await invoke("local_invocable_skills", { cwd, harness }) as InvocableSkill[];
+}
+
 export async function localCodexSpeedOptions(model: string): Promise<{tiers: {id: import('./api').CodexServiceTier; available: boolean; reason?: string}[]}> {
  const invoke=desktopInvoke(); if(!invoke)throw new Error('Open Orb desktop to check the local Codex subscription.');
  const cli=await localAgentForLaunch('codex'); if(!cli?.path)throw new Error('Codex is not installed on this computer.');

@@ -3017,13 +3017,16 @@ struct OrbInboxView: View {
         busyIDs.insert(item.id)
         defer { busyIDs.remove(item.id) }
         do {
+            let latest = try await api.call("/api/control/missions/\(OrbCore.escape(item.id))?include_history=false")
+            let current = latest["id"].text.isEmpty ? item.row.raw : latest
+            try await OrbCyberAccess.requireFollowUp("Continue from where you left off.", mission: current)
             var body: [String: OrbJSON] = [
                 "mission_id": .string(item.id),
                 "content": .string("Continue from where you left off."),
                 "queue_followup": .bool(true),
                 "client_message_id": .string(UUID().uuidString.lowercased()),
             ]
-            if let identity = OrbContinuation.identity(for: item.row.raw) {
+            if let identity = OrbContinuation.identity(for: current) {
                 body["continue_identity"] = identity
             }
             _ = try await api.call("/api/control/message", method: "POST", body: .object(body))
@@ -3034,7 +3037,7 @@ struct OrbInboxView: View {
             }
             await load(force: true)
         } catch {
-            self.error = error.localizedDescription
+            self.error = OrbCyberAccess.error(error)
         }
     }
 
@@ -3044,13 +3047,16 @@ struct OrbInboxView: View {
         busyIDs.insert(item.id)
         defer { busyIDs.remove(item.id) }
         do {
+            let latest = item.row.cloud ? item.row.raw : try await api.call("/api/control/missions/\(OrbCore.escape(item.id))?include_history=false")
+            let current = latest["id"].text.isEmpty ? item.row.raw : latest
+            try await OrbCyberAccess.requireFollowUp(text, mission: current)
             var body: [String: OrbJSON] = [
                 "mission_id": .string(item.id),
                 "content": .string(text),
                 "queue_followup": .bool(true),
                 "client_message_id": .string(UUID().uuidString.lowercased()),
             ]
-            if let identity = OrbContinuation.identity(for: item.row.raw) {
+            if let identity = OrbContinuation.identity(for: current) {
                 body["continue_identity"] = identity
             }
             _ = try await api.call("/api/control/message", method: "POST", body: .object(body))
@@ -3064,7 +3070,7 @@ struct OrbInboxView: View {
             }
             await load(force: true)
         } catch {
-            self.error = error.localizedDescription
+            self.error = OrbCyberAccess.error(error)
         }
     }
 }

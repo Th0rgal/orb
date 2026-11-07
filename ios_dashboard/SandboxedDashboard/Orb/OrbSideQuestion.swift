@@ -1330,7 +1330,20 @@ struct OrbSideQuestionSheet: View {
             if parent["tags"].items.contains(where: { $0.text == "placement:client" }) {
                 throw OrbHTTPError(status: 409, detail: "This conversation runs on a computer. Ask side questions from Orb on that computer.")
             }
-            // Like the desktop: files go to the shared working folder, named in the request.
+            let rotateIdle = !running && followUps.count == 0 && OrbBtwThreads.shouldRotateSession(turnCount: store.boundTurnCount, maxSequence: store.boundMaxSequence)
+            let reusingBound = store.boundID != nil && !freshSession && !rotateIdle && (running || followUps.count > 0 || OrbBtwThreads.resumableStatuses.contains(store.boundStatus))
+            if reusingBound, let id = store.boundID {
+                try await OrbCyberAccess.requireFollowUp(text, missionID: id)
+            } else if OrbBtwConfig.harness == "codex" {
+                if let reason = OrbCyberAccess.emptyGoalError(text) {
+                    throw OrbHTTPError(status: 400, detail: reason)
+                }
+                let cyber = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(parentID))/cyber")
+                guard OrbCyberAccess.modes.contains(cyber["mode"].text) else {
+                    throw OrbHTTPError(status: 400, detail: "The backend did not return a Cyber selection. Your draft is kept.")
+                }
+                try await OrbCyberAccess.require(model: OrbBtwConfig.model, mode: cyber["mode"].text, remote: OrbContinuation.remoteNodeID(for: parent) != "core", goal: OrbCyberAccess.isGoal(text))
+            }
             var content = text
             for file in files {
                 let node = OrbContinuation.remoteNodeID(for: parent)
@@ -1338,8 +1351,7 @@ struct OrbSideQuestionSheet: View {
                 guard !receipt["path"].text.isEmpty else { throw URLError(.cannotParseResponse) }
                 content += "\nAttachment: " + receipt["path"].text
             }
-            let rotateIdle = !running && followUps.count == 0 && OrbBtwThreads.shouldRotateSession(turnCount: store.boundTurnCount, maxSequence: store.boundMaxSequence)
-            if let id = store.boundID, !freshSession, !rotateIdle, (running || followUps.count > 0 || OrbBtwThreads.resumableStatuses.contains(store.boundStatus)) {
+            if reusingBound, let id = store.boundID {
                 let shouldQueue = running || followUps.count > 0
                 let idempotencyHeader = ["Idempotency-Key": "msg:\(id):\(messageID)"]
                 let result = try await OrbSideSend.retrying { try await OrbCore.shared.call("/api/control/message", method: "POST", body: .object([
@@ -1386,7 +1398,7 @@ struct OrbSideQuestionSheet: View {
         } catch {
             if queueing { followUps = followUps.postFailed(messageID) }
             restore(text, files)
-            self.error = error.localizedDescription
+            self.error = OrbCyberAccess.error(error)
         }
     }
 
@@ -1405,16 +1417,24 @@ struct OrbSideQuestionSheet: View {
     }
 
     private func editQueued(_ queueID: String, content: String) async {
-        guard store.boundID != nil else { return }
-        editingQueuedID = nil
-        question = ""
+        guard let id = store.boundID else { return }
         guard followUps.row(queueID) != nil else {
+            editingQueuedID = nil
+            question = ""
             error = "This side question was already sent. Your edit was not applied."
             return
         }
-        followUps = followUps.edit(queueID, content)
         let base = rawQueuedByID[queueID] ?? followUps.row(queueID)?.content ?? content
         let wireContent = OrbMessagePresentation.replaceUserText(base, with: content)
+        do {
+            try await OrbCyberAccess.requireFollowUp(OrbBtwThreads.question(wireContent), missionID: id)
+        } catch {
+            self.error = OrbCyberAccess.error(error)
+            return
+        }
+        editingQueuedID = nil
+        question = ""
+        followUps = followUps.edit(queueID, content)
         var status: Int? = nil
         do {
             _ = try await OrbCore.shared.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "PATCH", body: .object(["content": .string(wireContent)]))
@@ -1442,6 +1462,12 @@ struct OrbSideQuestionSheet: View {
     private func sendQueuedNow(_ queueID: String) async {
         guard let id = store.boundID, editingQueuedID == nil, let row = followUps.row(queueID), !row.sending else { return }
         let wireContent = rawQueuedByID[queueID] ?? row.content
+        do {
+            try await OrbCyberAccess.requireFollowUp(OrbBtwThreads.question(wireContent), missionID: id)
+        } catch {
+            self.error = OrbCyberAccess.error(error)
+            return
+        }
         withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) {
             followUps = followUps.hide(queueID)
             pendingBaselineTurns = store.turns

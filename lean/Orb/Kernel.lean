@@ -3616,4 +3616,156 @@ def mcpPreflightCacheGate
       maxTtlSecs ≥ 1 && maxTtlSecs ≤ 300 && ageSecs ≤ maxTtlSecs then 1
   else 0
 
+/--
+  Unboxed C-ABI Codex Pre-Thread Native `/goal` & Cyber Access Admission Step (`orb_codex_goal_launch_step`):
+  Evaluates pre-`thread/start` and pre-`thread/resume` admission for Codex missions (`#1497`):
+  - `hasExplicitCyber != 0` means an explicit `Standard` or `Daybreak` selection (not `Automatic`).
+  - Rejects (`1`) retired Daybreak aliases (`hasRetiredAlias != 0`).
+  - Rejects (`2`) model/program incompatibility (`modelCompatible == 0`).
+  - Rejects (`3`) non-ChatGPT / non-OpenAI explicit Cyber connections (`hasExplicitCyber != 0 && hasChatGptAuth == 0`).
+  - Rejects (`4`) accounts lacking the requested Cyber program (`hasExplicitCyber != 0 && accountSupportsProgram == 0`).
+  - Rejects (`5`) explicit Cyber selections on `/goal` launch or resumed active `/goal` continuation
+    (`hasExplicitCyber != 0 && (isGoalRequest != 0 || resumedGoalActive != 0)`), BEFORE creating or binding
+    an unstarted native thread.
+  - Rejects (`6`) `/goal` launches with an empty objective (`isGoalRequest != 0 && hasNonEmptyObjective == 0`).
+  - Rejects (`7`) `/goal` launches with image attachments (`isGoalRequest != 0 && hasImages != 0`).
+  - Admits (`256 | goalModeBit(512)`) otherwise (`goalModeBit` set iff `isGoalRequest != 0 || resumedGoalActive != 0`).
+-/
+@[inline, export orb_codex_goal_launch_step]
+def codexGoalLaunchStep
+    (isGoalRequest hasNonEmptyObjective hasImages hasExplicitCyber : UInt8)
+    (hasChatGptAuth modelCompatible accountSupportsProgram resumedGoalActive hasRetiredAlias : UInt8) : UInt32 :=
+  let goalMode : Bool := isGoalRequest != 0 || resumedGoalActive != 0
+  let goalBit : UInt32 := if goalMode then 512 else 0
+  if hasRetiredAlias != 0 then 1
+  else if modelCompatible == 0 then 2
+  else if hasExplicitCyber != 0 && hasChatGptAuth == 0 then 3
+  else if hasExplicitCyber != 0 && accountSupportsProgram == 0 then 4
+  else if hasExplicitCyber != 0 && goalMode then 5
+  else if isGoalRequest != 0 && hasNonEmptyObjective == 0 then 6
+  else if isGoalRequest != 0 && hasImages != 0 then 7
+  else 256 ||| goalBit
+
+/--
+  Unboxed C-ABI Codex Pre-Activation Goal Notification Drain Gate (`orb_codex_goal_preact_filter`):
+  Decides whether an inbound JSON-RPC message queued during `thread/resume` / `thread/goal/get`
+  BEFORE `thread/goal/set` or `thread/goal/status("active")` must be stripped (`1`) as a stale
+  pre-activation snapshot (`#1497`), or retained (`0`) for the live turn event translator:
+  - `msgKind`: `0` = non-goal notification or server request, `1` = `thread/goal/updated`,
+    `2` = `thread/goal/cleared`.
+  - Never strips server requests (`isRequest != 0`), messages for another thread (`sameThread == 0`),
+    turn-scoped notifications (`hasTurnId != 0`), or notifications when the thread already has an
+    in-progress turn (`threadAlreadyActive != 0`).
+  - When idle (`threadAlreadyActive == 0`) on the bound thread with `turnId == null`:
+    * `thread/goal/cleared` (`msgKind == 2`) is stripped (`1`) iff `goalGetWasNull != 0`
+      (preventing `codex-cli`'s pre-`goal/set` cleared snapshot from immediately terminating the turn).
+    * `thread/goal/updated` (`msgKind == 1`) is stripped (`1`) iff `snapshotMatchesGoalGet != 0`.
+-/
+@[inline, export orb_codex_goal_preact_filter]
+def codexGoalPreactFilter
+    (msgKind isRequest sameThread hasTurnId threadAlreadyActive : UInt8)
+    (goalGetWasNull snapshotMatchesGoalGet : UInt8) : UInt8 :=
+  if isRequest != 0 || sameThread == 0 || hasTurnId != 0 || threadAlreadyActive != 0 then 0
+  else if msgKind == 2 && goalGetWasNull != 0 then 1
+  else if msgKind == 1 && snapshotMatchesGoalGet != 0 then 1
+  else 0
+
+/--
+  Unboxed C-ABI Composer `/` Skill Autocomplete & Harness Invocation Step (`orb_skill_slash_step`):
+  Validates a selected `/` skill token and selects its deterministic per-harness invocation strategy (`#1553`):
+  - Rejects (`1`) empty or overlong skill identifiers (`nameLen == 0 || maxNameLen == 0 || maxNameLen < nameLen`).
+  - Rejects (`2`) identifiers containing NUL, path separators, traversal, or whitespace (`nameCharsValid == 0`).
+  - Rejects (`3`) skills not delivered to the target mission/project (`isDelivered == 0`).
+  - Rejects (`4`) duplicate chip insertions (`alreadySelected != 0`).
+  - Rejects (`5`) selections exceeding `maxSelected` (`maxSelected == 0 || maxSelected ≤ selectedCount`).
+  - Admits (`(256 | (strategy <<< 16)) ||| ((selectedCount + 1) <<< 32)`) otherwise, where `strategy`:
+    * `1` (`opencode`, `claudecode`): explicit harness `Skill` tool call directive + fallback `SKILL.md` read
+    * `2` (`codex`, `antigravity`, `grok`, `vibe`, and other harnesses): explicit workspace skill `SKILL.md` load directive
+-/
+@[inline, export orb_skill_slash_step]
+def skillSlashStep
+    (harnessKind isDelivered alreadySelected nameCharsValid : UInt8)
+    (nameLen maxNameLen selectedCount maxSelected : UInt32) : UInt64 :=
+  if nameLen == 0 || maxNameLen == 0 || maxNameLen < nameLen then
+    (1 : UInt64) ||| (selectedCount.toUInt64 <<< 32)
+  else if nameCharsValid == 0 then
+    (2 : UInt64) ||| (selectedCount.toUInt64 <<< 32)
+  else if isDelivered == 0 then
+    (3 : UInt64) ||| (selectedCount.toUInt64 <<< 32)
+  else if alreadySelected != 0 then
+    (4 : UInt64) ||| (selectedCount.toUInt64 <<< 32)
+  else if maxSelected == 0 || maxSelected ≤ selectedCount then
+    (5 : UInt64) ||| (selectedCount.toUInt64 <<< 32)
+  else
+    let strategy : UInt32 := if harnessKind == 1 || harnessKind == 2 then 1 else 2
+    let nextCount : UInt32 := selectedCount + 1
+    let lo32 : UInt32 := (256 : UInt32) ||| (strategy <<< 16)
+    lo32.toUInt64 ||| (nextCount.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Workspace Occupancy & Sibling Git Worktree Admission Step (`orb_worktree_decision_step`):
+  Governs busy-repo detection and sibling git worktree creation (`#1552`):
+  - When `opKind == 0` (launch occupancy check):
+    * Admits direct launch (`256`) when `isOccupied == 0`.
+    * Rejects (`1 | offerWorktreeBit(512)`) when occupied (`isOccupied != 0`), setting `offerWorktreeBit`
+      iff the target is a git repository with a valid parent directory (`isGitRepo != 0 && parentDirValid != 0`).
+  - When `opKind == 1` (sibling worktree creation admission):
+    * Rejects (`2`) non-git repositories (`isGitRepo == 0`).
+    * Rejects (`3`) missing/unwritable parent directories (`parentDirValid == 0`).
+    * Rejects (`4`) unsafe branch or directory slugs (`branchCharsValid == 0 || slugLen == 0 || maxSlugLen == 0 || maxSlugLen < slugLen`).
+    * Rejects (`5`) path or branch collisions (`targetPathExists != 0`).
+    * Rejects (`6`) worktree count cap overflow (`maxWorktrees == 0 || maxWorktrees ≤ activeWorktrees`).
+    * Admits sibling worktree creation (`257`) otherwise.
+  - Rejects (`7`) unknown `opKind > 1`.
+-/
+@[inline, export orb_worktree_decision_step]
+def worktreeDecisionStep
+    (opKind isOccupied isGitRepo branchCharsValid targetPathExists parentDirValid : UInt8)
+    (slugLen maxSlugLen activeWorktrees maxWorktrees : UInt32) : UInt32 :=
+  if opKind == 0 then
+    if isOccupied == 0 then 256
+    else if isGitRepo != 0 && parentDirValid != 0 then 513
+    else 1
+  else if opKind == 1 then
+    if isGitRepo == 0 then 2
+    else if parentDirValid == 0 then 3
+    else if branchCharsValid == 0 || slugLen == 0 || maxSlugLen == 0 || maxSlugLen < slugLen then 4
+    else if targetPathExists != 0 then 5
+    else if maxWorktrees == 0 || maxWorktrees ≤ activeWorktrees then 6
+    else 257
+  else 7
+
+/--
+  Unboxed C-ABI Repo Supervision Status & Unified Diff Budget Stepper (`orb_repo_diff_budget_step`):
+  Bounds changed-file listings and unified `git diff` payloads for repo supervision (`#352`):
+  - Rejects (`1`) non-git directories (`isGitRepo == 0`).
+  - Rejects (`2`) invalid relative file paths (`pathSafe == 0` — e.g. leading `-`, NUL, `..`, or outside repo).
+  - Rejects (`3`) zero budget caps (`maxFiles == 0 || maxBytes == 0`).
+  - Admits (`lo32 = 256 | dirtyBit(512) | truncatedFilesBit(1024) | truncatedBytesBit(2048) | syncState <<< 16`,
+    `hi32 = clampedBytes : UInt32`) otherwise, where `syncState`:
+    `0` = clean/synced, `1` = ahead only, `2` = behind only, `3` = diverged (`ahead > 0 && behind > 0`).
+-/
+@[inline, export orb_repo_diff_budget_step]
+def repoDiffBudgetStep
+    (isGitRepo pathSafe hasUntracked : UInt8)
+    (modifiedCount stagedCount aheadCount behindCount diffBytes maxFiles maxBytes : UInt32) : UInt64 :=
+  if isGitRepo == 0 then 1
+  else if pathSafe == 0 then 2
+  else if maxFiles == 0 || maxBytes == 0 then 3
+  else
+    let totalChanges64 : UInt64 :=
+      modifiedCount.toUInt64 + stagedCount.toUInt64 + (if hasUntracked != 0 then 1 else 0)
+    let dirtyBit : UInt32 := if 0 < totalChanges64 then 512 else 0
+    let truncFilesBit : UInt32 := if maxFiles.toUInt64 < totalChanges64 then 1024 else 0
+    let truncBytesBit : UInt32 := if maxBytes < diffBytes then 2048 else 0
+    let syncState : UInt32 :=
+      if 0 < aheadCount && 0 < behindCount then 3
+      else if 0 < aheadCount then 1
+      else if 0 < behindCount then 2
+      else 0
+    let clampedBytes : UInt32 := if diffBytes ≤ maxBytes then diffBytes else maxBytes
+    let lo32 : UInt32 :=
+      (256 : UInt32) ||| dirtyBit ||| truncFilesBit ||| truncBytesBit ||| (syncState <<< 16)
+    lo32.toUInt64 ||| (clampedBytes.toUInt64 <<< 32)
+
 end Orb.Kernel

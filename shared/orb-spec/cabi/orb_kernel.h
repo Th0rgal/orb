@@ -180,6 +180,11 @@ uint8_t orb_composer_default_step(uint8_t, uint8_t, uint8_t, uint8_t);
 uint32_t orb_cloud_handoff_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
 uint64_t orb_fast_poll_delay_ms(uint8_t, uint64_t, uint32_t);
 uint8_t orb_mcp_preflight_cache_gate(uint8_t, uint8_t, uint8_t, uint8_t, uint64_t, uint64_t);
+uint32_t orb_codex_goal_launch_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint8_t orb_codex_goal_preact_filter(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_skill_slash_step(uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint32_t orb_worktree_decision_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint64_t orb_repo_diff_budget_step(uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 #ifdef __cplusplus
 }
 #endif

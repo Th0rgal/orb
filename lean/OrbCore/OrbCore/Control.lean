@@ -6,12 +6,15 @@
 import LeanSys
 import Orb.Kernel
 import OrbBin.Json
+import OrbBin.PosixExt
 import OrbBin.PrivdShared
 import OrbCore.Spec
 import OrbCore.Store
 import OrbCore.Search
 import OrbCore.Harness
 import OrbCore.Proxy
+import OrbCore.Cyber
+import OrbCore.Skills
 import OrbCore.Managed
 import OrbCore.MemoryAndCloud
 
@@ -24,11 +27,14 @@ open LeanSys.Auth
 open LeanSys.Codec
 open Orb.Kernel
 open OrbBin.Json
+open OrbBin.PosixExt
 open OrbCore.Spec
 open OrbCore.Store
 open OrbCore.Search
 open OrbCore.Harness
 open OrbCore.Proxy
+open OrbCore.Cyber
+open OrbCore.Skills
 open OrbCore.Managed
 open OrbCore.MemoryAndCloud
 
@@ -583,6 +589,100 @@ private def nextMcpSessionUuid (st : CoreAppState) : IO String := do
   let seq ← st.seqRef.modifyGet fun n => (n + 1, n + 1)
   return s!"00000000-0000-4000-8000-{hex12OfU64 seq}"
 
+private def bodyHasImages (jv : JVal) : Bool :=
+  match jv.fieldArr? "attachments" with
+  | none => false
+  | some xs => xs.any fun item =>
+      let kind := (item.fieldStr? "kind").getD ""
+      let mime := (item.fieldStr? "mime_type").getD ((item.fieldStr? "content_type").getD "")
+      kind == "image" || mime.startsWith "image/"
+
+private def isClientPlacement (placement? : Option String) (tags : Array String) : Bool :=
+  (placement?.map (fun p => p == "client" || p.startsWith "client:")).getD false ||
+  tags.any (fun t => t == "placement:client" || t.startsWith "placement:client:")
+
+/-- Gate `/v1/*` proxy requests against execution-bound mission Cyber selections (`#1497`)
+    and per-account cooldowns (`#1612`). -/
+private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPath : String)
+    (reqOrigin? : Option String) (nowEpochSec : UInt64) : IO CoreHttpResponse := do
+  let mkJson (code : Nat) (b : String) : CoreHttpResponse := jsonResponse code b #[] reqOrigin?
+  let mkJsonHdr (code : Nat) (b : String) (hdrs : Array (String × String)) : CoreHttpResponse :=
+    jsonResponse code b hdrs reqOrigin?
+  let bodyStr := String.fromUTF8? req.bodySlice.toByteArray |>.getD ""
+  let bodyJv := (OrbBin.Json.parse bodyStr).toOption.getD (.obj #[])
+  let requestedModel := bareModel ((bodyJv.fieldStr? "model").getD defaultCodexModel)
+  let execKey? := lookupHeaderCI req.headers "x-sandboxed-execution-key"
+  let mut selection? : Option Selection := none
+  let mut boundMid? : Option String := none
+  if let some key := execKey? then
+    if key.startsWith "remote-launch:" then
+      let mid := (key.drop 14).toString
+      boundMid? := some mid
+      match ← readSelection st.cfg.workingDir mid with
+      | .error e => return mkJson 403 s!"\{\"error\":\"invalid_access_program\",\"detail\":{jsonEscape e}}"
+      | .ok sel =>
+        if sel.revision != nilRevision then
+          match ← readBinding? st.cfg.workingDir mid with
+          | none => return mkJson 403 "{\"error\":\"invalid_access_program\",\"detail\":\"This mission execution key is stale\"}"
+          | some b =>
+            if b.key != key || b.revision != sel.revision then
+              return mkJson 403 "{\"error\":\"invalid_access_program\",\"detail\":\"This mission execution key is stale\"}"
+            if bareModel b.model != requestedModel then
+              return mkJson 400 "{\"error\":\"invalid_access_program\",\"detail\":\"The execution key is bound to another model\"}"
+        selection? := some sel
+  let headerProgram? := lookupHeaderCI req.headers "x-sandboxed-cyber-program"
+  let bodyProgram? := bodyCyberProgram? bodyStr
+  let expected? ← match enforceProxySelection selection? requestedModel headerProgram? bodyProgram? with
+    | .ok p => pure p
+    | .error e => return mkJson 400 s!"\{\"error\":\"unsupported_access_program\",\"detail\":{jsonEscape e}}"
+  let chains ← st.chainsRef.get
+  let activeChain := selectRoutingChainForBody chains req.bodySlice.toByteArray
+  let cooldowns ← st.proxyCooldownsRef.get
+  let plan := planChain activeChain cooldowns nowEpochSec
+  if plan.eligible.isEmpty && !plan.cooling.isEmpty then
+    if plan.allUsageLimited then
+      let limit := (soonestCooldown? plan.cooling).getD
+        { accountId := "", untilEpoch := nowEpochSec + 60, reason := .usageLimit, label := "" }
+      let reply := usageLimitReply activeChain.id limit nowEpochSec
+      return mkJsonHdr reply.status reply.body reply.headers
+    let retryAfter := (plan.retryAfterSecs? nowEpochSec).getD 60
+    let reply := cooldownReply activeChain.id retryAfter
+    return mkJsonHdr reply.status reply.body reply.headers
+  if expected?.isSome then
+    match plan.eligible[0]?.orElse (fun _ => activeChain.targets[0]?) with
+    | none => return mkJson 400 "{\"error\":\"unsupported_access_program\",\"detail\":\"no upstream route\"}"
+    | some tgt =>
+      let fullUrl := trimTrailingSlashes tgt.baseUrl.trimAscii.toString ++ cleanPath
+      if !cyberEntrySupported tgt.provider requestedModel fullUrl tgt.apiKey false false then
+        return mkJson 400 "{\"error\":\"unsupported_access_program\"}"
+  let forwardBody ← match expected? with
+    | none => pure req.bodySlice.toByteArray
+    | some program =>
+      match injectAccessProgram req.bodySlice.toByteArray program with
+      | .ok b => pure b
+      | .error e => return mkJson 400 s!"\{\"error\":\"unsupported_access_program\",\"detail\":{jsonEscape e}}"
+  let skipAccountIds := plan.cooling.map (fun c => c.accountId)
+  let out ← forwardProxyChain activeChain req.method cleanPath #[] forwardBody none false st.pacingTracker?
+    (skipAccountIds := skipAccountIds)
+  let stillActive := activeCooldowns cooldowns nowEpochSec
+  let withoutSelected := stillActive.filter (fun c => c.accountId != out.selectedAccount)
+  let refreshed :=
+    match cooldownForOutcome out nowEpochSec with
+    | some c => withoutSelected.push c
+    | none => withoutSelected
+  st.proxyCooldownsRef.set refreshed
+  if let (some program, some mid, some sel) := (expected?, boundMid?, selection?) then
+    let text := String.fromUTF8? out.body |>.getD ""
+    for line in text.splitOn "\n" do
+      let t := line.trimAscii.toString
+      if t.startsWith "data:" then
+        let data := (t.drop 5).toString.trimAscii.toString
+        if let some (confirmed, model) := observeSseData? data program then
+          discard <| writeReceipt st.cfg.workingDir mid {
+            revision := sel.revision, requestedModel := requestedModel, program := confirmed, model := model
+          }
+  return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := out.headers, body := out.body }
+
 /-- Dispatch a parsed `HttpRequest` against `CoreAppState` (`routes` capability parity:
     `"/api/control/missions/:id/automations"`, `"/api/model-routing"`). -/
 def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : UInt64) : IO (Except ByteArray CoreHttpResponse) := do
@@ -629,30 +729,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
   if cleanPath.startsWith "/v1/" then
     if !authenticateProxyRequest st.cfg req.headers nowEpochSec then
       return .ok (mkJson 401 "{\"error\":\"unauthorized_proxy\"}")
-    let chains ← st.chainsRef.get
-    let activeChain := selectRoutingChainForBody chains req.bodySlice.toByteArray
-    let cooldowns ← st.proxyCooldownsRef.get
-    let plan := planChain activeChain cooldowns nowEpochSec
-    if plan.eligible.isEmpty && !plan.cooling.isEmpty then
-      if plan.allUsageLimited then
-        let limit := (soonestCooldown? plan.cooling).getD
-          { accountId := "", untilEpoch := nowEpochSec + 60, reason := .usageLimit, label := "" }
-        let reply := usageLimitReply activeChain.id limit nowEpochSec
-        return .ok (mkJsonHdr reply.status reply.body reply.headers)
-      let retryAfter := (plan.retryAfterSecs? nowEpochSec).getD 60
-      let reply := cooldownReply activeChain.id retryAfter
-      return .ok (mkJsonHdr reply.status reply.body reply.headers)
-    let skipAccountIds := plan.cooling.map (fun c => c.accountId)
-    let out ← forwardProxyChain activeChain req.method cleanPath #[] req.bodySlice.toByteArray none false st.pacingTracker?
-      (skipAccountIds := skipAccountIds)
-    let stillActive := activeCooldowns cooldowns nowEpochSec
-    let withoutSelected := stillActive.filter (fun c => c.accountId != out.selectedAccount)
-    let refreshed :=
-      match cooldownForOutcome out nowEpochSec with
-      | some c => withoutSelected.push c
-      | none => withoutSelected
-    st.proxyCooldownsRef.set refreshed
-    return .ok { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := out.headers, body := out.body }
+    return .ok (← handleProxyRequest st req cleanPath reqOrigin? nowEpochSec)
 
   -- 5. Privilege Broker Verification & Audit Log (`POST /api/privilege-access/verify-and-log`)
   if req.method == "POST" && cleanPath == "/api/privilege-access/verify-and-log" then
@@ -1152,6 +1229,47 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       let intentStr := (JsonTape.lookupString? tape "intent").getD ""
       let .ok authMode := classifyAuthorityMode writerFlag? reqTags (intentStr == "review_only" || intentStr == "readonly")
         | do abortIdem; return .ok (mkJson 400 "{\"error\":\"contradictory_authority_tags\"}")
+      let bodyJv := bodyVal?.getD (.obj #[])
+      let modelOverride := (JsonTape.lookupString? tape "model_override").getD ""
+      let prompt? := JsonTape.lookupString? tape "prompt"
+      let placement? := JsonTape.lookupString? tape "placement"
+      let clientPlaced := isClientPlacement placement? reqTags
+      if !clientPlaced then
+        if let some prompt := prompt? then
+          match ← selectDelivered st.cfg.workingDir (if projSlug.isEmpty then none else some projSlug) backend prompt with
+          | .error e =>
+            abortIdem
+            return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+          | .ok selected =>
+            if (JsonTape.lookupString? tape "remote_node_id").isSome then
+              for sk in selected do
+                if !remoteInstallable sk.name then
+                  let errMsg := s!"Skill cannot be installed by the remote skill installer: {sk.name}"
+                  abortIdem
+                  return .ok (mkJson 400 s!"\{\"error\":{jsonEscape errMsg}}")
+      let cyberMode ← match JsonTape.lookupString? tape "cyber_access" with
+        | none => pure Mode.automatic
+        | some rawMode =>
+          match parseMode? rawMode with
+          | some m => pure m
+          | none =>
+            abortIdem
+            return .ok (mkJson 400 "{\"error\":\"invalid_cyber_mode\"}")
+      if backend != "codex" && cyberMode != .automatic then
+        abortIdem
+        return .ok (mkJson 400 "{\"error\":\"Cyber selection is available for Codex only.\"}")
+      if backend == "codex" then
+        if let some prompt := prompt? then
+          if let .error e := validateGoalMessage prompt (bodyHasImages bodyJv) then
+            abortIdem
+            return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+        let effectiveModel := if modelOverride.isEmpty then defaultCodexModel else modelOverride
+        if let .error e := cyberMode.program effectiveModel then
+          abortIdem
+          return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+        if let .error e := validateGoalSelection cyberMode (prompt?.bind parseGoalPrefix?).isSome then
+          abortIdem
+          return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
       if !projSlug.isEmpty then
         let rawCap? ← queryProjectParallelMissions? st.store projSlug
         if let some cap := enforcedProjectParallelCap? rawCap? then
@@ -1162,8 +1280,8 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
               return .ok (mkJson 429 s!"\{\"error\":\"parallel_missions_cap\",\"cap\":{cap},\"active\":{held}}")
       let initTagsJson := projectCompatibilityTagsJson authMode placeKind "" "" diskGib reqTags
       let mRec : MissionRecord := {
-        id := mid,         title := title, status := "awaiting_user", backend := backend,
-        modelOverride := "", modelEffort := normEffort, workingDirectory := safeWorkDir,
+        id := mid, title := title, status := "awaiting_user", backend := backend,
+        modelOverride := modelOverride, modelEffort := normEffort, workingDirectory := safeWorkDir,
         project := projSlug, updatedAt := s!"{nowEpochSec}", totalCostCents := 0,
         authorityMode := authMode, placementKind := placeKind, reservedDiskGib := diskGib,
         nodeBootEpoch := st.store.bootEpoch, tagsJson := initTagsJson, track := track, repo := repo
@@ -1191,12 +1309,16 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
             abortIdem
             return .ok (mkJson 409 s!"\{\"error\":{jsonEscape leaseErr}}")
         let respBody :=
-          s!"\{\"id\":{jsonEscape mid},\"status\":\"awaiting_user\",\"model_effort\":{jsonEscape normEffort}," ++
+          s!"\{\"id\":{jsonEscape mid},\"status\":\"awaiting_user\",\"backend\":{jsonEscape backend}," ++
+          s!"\"model_override\":{jsonEscape modelOverride},\"model_effort\":{jsonEscape normEffort}," ++
           s!"\"authority_mode\":{jsonEscape authMode},\"placement_kind\":{jsonEscape placeKind}," ++
           s!"\"state_revision\":1,\"total_cost_cents\":0}"
         if !idemKey.isEmpty then
           match ← recordOrReplayIdempotency st.store "missions_create" idemKey 201 respBody s!"{nowEpochSec}" with
           | .ok rec =>
+            if backend == "codex" && cyberMode != .automatic then
+              let rev ← newUuidV4
+              discard <| writeCommitted st.cfg.workingDir mid { mode := cyberMode, revision := (parseUuidCanonical? rev).getD rev }
             if let some sIdx := st.searchIdx? then
               discard <| indexConversation sIdx mid title
             return .ok (mkJson rec.statusCode rec.bodyJson)
@@ -1207,6 +1329,9 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
             discard <| recoverDispatchLeases st.store.missionsDb st.store.projectsDb st.store.bootEpoch
             abortIdem
             return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+        if backend == "codex" && cyberMode != .automatic then
+          let rev ← newUuidV4
+          discard <| writeCommitted st.cfg.workingDir mid { mode := cyberMode, revision := (parseUuidCanonical? rev).getD rev }
         if isCloudBackendName backend then
           if let some cw := st.cloudWakeup? then
             discard <| notifyCloudWorker cw
@@ -1415,6 +1540,134 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
           #[missionId, s!"{seq}", eventPayload, s!"{nowEpochSec}"] with
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         | .ok _ => return .ok (mkJson 200 s!"\{\"ok\":true,\"id\":{jsonEscape messageId},\"content\":{jsonEscape content}}")
+
+  -- Mission Cyber Access (`GET|PATCH /api/control/missions/:id/cyber`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/cyber" rawTarget then
+    let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+    let some mission ← getMission? st.store mid
+      | return .ok (mkJson 404 "{\"error\":\"Mission not found\"}")
+    if req.method == "GET" then
+      match ← readSelection st.cfg.workingDir mid with
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      | .ok sel =>
+        let outBody ← match ← readReceipt? st.cfg.workingDir mid with
+          | some r =>
+            if receiptIsCurrent mission.backend mission.modelOverride false sel r then
+              pure (confirmedResponse sel r)
+            else pure (selectionResponse sel)
+          | none => pure (selectionResponse sel)
+        return .ok (mkJson 200 outBody)
+    else if req.method == "PATCH" then
+      if mission.backend != "codex" then
+        return .ok (mkJson 400 "{\"error\":\"Cyber selection is available for Codex only.\"}")
+      let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD ""
+      let .ok (.obj fields) := OrbBin.Json.parse rawBody
+        | return .ok (mkJson 400 "{\"error\":\"invalid_cyber_mode\"}")
+      if fields.any (fun (k, _) => k != "mode") then
+        return .ok (mkJson 400 "{\"error\":\"unknown_cyber_field\"}")
+      let some rawMode := (fields.find? (fun (k, _) => k == "mode")).bind (fun p => p.2.asStr?)
+        | return .ok (mkJson 400 "{\"error\":\"invalid_cyber_mode\"}")
+      let some mode := parseMode? rawMode
+        | return .ok (mkJson 400 "{\"error\":\"invalid_cyber_mode\"}")
+      let effectiveModel := if mission.modelOverride.isEmpty then defaultCodexModel else mission.modelOverride
+      if let .error e := mode.program effectiveModel then
+        return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+      let rawRev ← newUuidV4
+      let sel : Selection := { mode := mode, revision := (parseUuidCanonical? rawRev).getD rawRev }
+      match ← writePending st.cfg.workingDir mid sel with
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      | .ok () => return .ok (mkJson 200 (selectionResponse sel))
+
+  -- Cyber capability probe (`GET /api/control/cyber-capabilities`)
+  if req.method == "GET" && cleanPath == "/api/control/cyber-capabilities" then
+    let q := parseQueryParams rawTarget
+    let model? := ((q.find? (fun p => p.1 == "model")).map Prod.snd).filter (fun s => !s.trimAscii.toString.isEmpty)
+    let mode := ((q.find? (fun p => p.1 == "mode")).bind (fun p => parseMode? p.2)).getD .standard
+    let remote := ((q.find? (fun p => p.1 == "remote")).map Prod.snd).getD "" == "true"
+    return .ok (mkJson 200 (capabilitiesJson remote mode model?))
+
+  -- Mission Follow-up Message (`POST /api/control/message`)
+  if req.method == "POST" && cleanPath == "/api/control/message" then
+    let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD "{}"
+    let bodyJv := (OrbBin.Json.parse rawBody).toOption.getD (.obj #[])
+    let content := (bodyJv.fieldStr? "content").getD ""
+    let mid? := (bodyJv.fieldStr? "mission_id").filter (fun s => !s.isEmpty)
+    let defMsgId ← nextUniqueId st "msg" nowEpochSec
+    let msgId := (bodyJv.fieldStr? "client_message_id").getD defMsgId
+    let mission? ← match mid? with
+      | some mid => getMission? st.store mid
+      | none => pure none
+    if let some mid := mid? then
+      if let some m := mission? then
+        if m.backend == "codex" then
+          if let .error e := validateGoalMessage content (bodyHasImages bodyJv) then
+            return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+          let saved ← match ← readSelection st.cfg.workingDir mid with
+            | .ok s => pure s
+            | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+          let effectiveModel := if m.modelOverride.isEmpty then defaultCodexModel else m.modelOverride
+          if let .error e := saved.mode.program effectiveModel then
+            return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+          if (parseGoalPrefix? content).isSome then
+            if let .error e := validateGoalSelection saved.mode true then
+              return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+          if let some reqCyber := bodyJv.fieldStr? "cyber_access" then
+            match parseMode? reqCyber with
+            | none => return .ok (mkJson 400 "{\"error\":\"invalid_cyber_mode\"}")
+            | some rm =>
+              if rm != saved.mode then
+                return .ok (mkJson 409 s!"\{\"error\":{jsonEscape clientSelectionConflict}}")
+    if !(references content).isEmpty then
+      let proj? := mission?.bind (fun m => if m.project.isEmpty then none else some m.project)
+      let harness := (mission?.map (·.backend)).getD "opencode"
+      if let .error e ← selectDelivered st.cfg.workingDir proj? harness content then
+        return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+    return .ok (mkJson 200 s!"\{\"id\":{jsonEscape msgId},\"queued\":false,\"message_accepted\":true}")
+
+  -- Mission Resume (`POST /api/control/missions/:id/resume`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/resume" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let some m ← getMission? st.store mid
+        | return .ok (mkJson 404 "{\"error\":\"Mission not found\"}")
+      let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD "{}"
+      let bodyJv := (OrbBin.Json.parse rawBody).toOption.getD (.obj #[])
+      let content? := bodyJv.fieldStr? "content"
+      if m.backend == "codex" then
+        let saved ← match ← readSelection st.cfg.workingDir mid with
+          | .ok s => pure s
+          | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+        let effectiveModel := if m.modelOverride.isEmpty then defaultCodexModel else m.modelOverride
+        if let .error e := saved.mode.program effectiveModel then
+          return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+        let resumesGoal := (content?.bind parseGoalPrefix?).isSome ||
+          ((bodyJv.fieldBool? "goal_mode").getD false && content?.isNone)
+        if resumesGoal then
+          if let .error e := validateGoalSelection saved.mode true then
+            return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+      if let some content := content? then
+        if !(references content).isEmpty then
+          let proj? := if m.project.isEmpty then none else some m.project
+          if let .error e ← selectDelivered st.cfg.workingDir proj? m.backend content then
+            return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+      return .ok (mkJson 200 s!"\{\"id\":{jsonEscape mid},\"status\":\"active\"}")
+
+  -- Single Mission Lookup (`GET /api/control/missions/:id`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id" rawTarget then
+    if req.method == "GET" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if mid != "search" then
+        let some m ← getMission? st.store mid
+          | return .ok (mkJson 404 "{\"error\":\"Mission not found\"}")
+        return .ok (mkJson 200 s!"\{\"id\":{jsonEscape m.id},\"title\":{jsonEscape m.title},\"status\":{jsonEscape m.status},\"backend\":{jsonEscape m.backend},\"model_override\":{jsonEscape m.modelOverride},\"model_effort\":{jsonEscape m.modelEffort},\"working_directory\":{jsonEscape m.workingDirectory},\"project\":{jsonEscape m.project},\"updated_at\":{jsonEscape m.updatedAt},\"total_cost_cents\":{m.totalCostCents}}")
+
+  -- Delivered skill catalog (`GET /api/library/skill-delivery`)
+  if req.method == "GET" && cleanPath == "/api/library/skill-delivery" then
+    let q := parseQueryParams rawTarget
+    let proj? := (q.find? (fun p => p.1 == "project")).map Prod.snd
+    match ← buildDeliveryPlan st.cfg.workingDir proj? with
+    | .error e => return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+    | .ok plan => return .ok (mkJson 200 (planToJson plan))
 
   return .ok (mkJson 404 s!"\{\"error\":\"not_found\",\"path\":{jsonEscape cleanPath}}")
 

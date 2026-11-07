@@ -16,6 +16,9 @@ import { ErrorToast, StatusToast } from "../toast";
 import { isAutoManagedTarget } from "../machines/nodes";
 import { type RemoteSupport } from "../missionLaunch";
 import { absorbGoalPrefix, composerModes, filterSlash, slashQuery, modePrompt, ModeChip, type ComposerMode } from "../goal";
+import { filterSkills, insertSkill, removeSkill, selectedSkillNames, skillPreview, skillQuery, validateSkillSelection, type SkillChoice } from "../skillSlash";
+import { getSkillDelivery } from "../skillsApi";
+import { localInvocableSkills, localBinding, localWorkspace } from "../localAgents";
 import { atQuery, browseAttachItems, filterAttach, folderPrefixFromQuery, insertMention, loadAttachItems, mentionedChips, type AttachChip, type AttachItem } from "../attach";
 import { hasOverlay } from "../overlayLayer";
 import { Lightbox } from "../Lightbox";
@@ -46,7 +49,7 @@ export const draftLightbox = (images: DraftImage[]) => images.map((image, index)
 
 function OptimisticMessage(p: {draft:{text:string; images:DraftImage[]}}) {
   const [viewing,setViewing]=createSignal<number|null>(null);
-  return <div class="optimistic-message" aria-label="Pending message"><div class="user"><Show when={p.draft.images.length}><div class="message-images"><For each={p.draft.images}>{(image,index)=><button type="button" class="message-image" aria-label={`Open image #${image.reference ?? index()+1}`} onClick={()=>setViewing(index())}><img src={image.dataUrl} alt={`Image #${image.reference ?? index()+1}`}/><span>#{image.reference ?? index()+1}</span></button>}</For></div></Show><Show when={viewing()!==null}><Lightbox items={draftLightbox(p.draft.images)} index={viewing()!} onClose={()=>setViewing(null)}/></Show><span>{p.draft.text}</span></div><span class="composer-pending-status" role="status">Waiting for confirmation…</span></div>;
+  return <div class="optimistic-message" aria-label="Pending message"><div class="user"><Show when={p.draft.images.length}><div class="message-images"><For each={p.draft.images}>{(image,index)=><button type="button" class="message-image" aria-label={`Open image #${image.reference ?? index()+1}`} onClick={()=>setViewing(index())}><img src={image.dataUrl} alt={`Image #${image.reference ?? index()+1}`}/><span>#{image.reference ?? index()+1}</span></button>}</For></div></Show><Show when={viewing()!==null}><Lightbox items={draftLightbox(p.draft.images)} index={viewing()!} onClose={()=>setViewing(null)}/></Show><span>{skillPreview(p.draft.text)}</span></div><span class="composer-pending-status" role="status">Waiting for confirmation…</span></div>;
 }
 
 export function Composer(p: {
@@ -97,6 +100,9 @@ export function Composer(p: {
   sendLabel?: string;
   /** With textOnly: keep "+" in place, disabled, explaining why attachments are unavailable. */
   attachDisabledReason?: string;
+  workspaceId?: string | null;
+  localCwd?: string | null;
+  missionId?: string;
 }) {
   const [text, setText] = createSignal("");
   const [uploading, setUploading] = createSignal(false);
@@ -415,6 +421,8 @@ export function Composer(p: {
   const [ctx, setCtx] = createSignal(false);
   const [which, setWhich] = createSignal<"harness" | "model" | "effort" | null>(null);
   const [slashOff, setSlashOff] = createSignal(false);
+  const [skillItems, setSkillItems] = createSignal<SkillChoice[]>([]);
+  const [skillCatalogError, setSkillCatalogError] = createSignal<string | null>(null);
   const [atOff, setAtOff] = createSignal(false);
   const [atHi, setAtHi] = createSignal(0);
   const [atItems, setAtItems] = createSignal<AttachItem[]>([]);
@@ -435,12 +443,42 @@ export function Composer(p: {
     else if (target && target !== "side") void refreshNodeAntigravityModels(target);
   });
   const modes = createMemo(() => p.textOnly || p.imagesOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : !!p.uploadTarget && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
+  const skillCatalogKey = createMemo(() => JSON.stringify([p.scope, p.projectSlug, p.workspaceId, p.localCwd, p.missionId, backend(), p.uploadTarget]));
+  createEffect(() => {
+    if (p.textOnly || p.imagesOnly || p.sideQuestion) { setSkillItems([]); setSkillCatalogError(null); return; }
+    const key = skillCatalogKey();
+    const harness = backend();
+    let current = true;
+    setSkillItems([]); setSkillCatalogError(null);
+    onCleanup(() => { current = false; });
+    const apply = (skills: SkillChoice[]) => { if (current && key === skillCatalogKey()) { setSkillItems(skills); setSkillCatalogError(null); } };
+    const fail = (error: unknown) => { if (current && key === skillCatalogKey()) { setSkillItems([]); setSkillCatalogError(error instanceof Error ? error.message : String(error)); } };
+    if (p.uploadTarget === "local") {
+      if (!harness) return;
+      const missionCwd = p.missionId ? localBinding(p.missionId)?.cwd : undefined;
+      const explicitCwd = p.localCwd?.trim() || missionCwd;
+      const cwdPromise = explicitCwd ? Promise.resolve(explicitCwd) : (p.projectSlug ? localWorkspace(p.projectSlug).catch(() => "") : Promise.resolve(""));
+      void cwdPromise.then(resolved => resolved ? localInvocableSkills(resolved, harness).then(apply) : undefined).catch(fail);
+      return;
+    }
+    if (!isConnected() || (!p.projectSlug && !p.workspaceId)) return;
+    void getSkillDelivery(p.projectSlug ?? "", p.workspaceId ?? undefined).then(plan => apply(plan.skills)).catch(fail);
+  });
+  const availableSkills = createMemo(() => new Set(skillItems().map(skill => skill.name)));
+  const selectedSkills = createMemo(() => selectedSkillNames(text(), availableSkills()));
   const slash = createMemo(() => {
-    if (mode() || voiceActive() || slashOff()) return null;
-    const q = slashQuery(text());
-    if (!q.open) return null;
-    const items = filterSlash(modes(), q.query);
-    return items.length ? { query: q.query, items } : null;
+    if (voiceActive() || slashOff()) return null;
+    const q = skillQuery(text(), caret());
+    if (!q.open) {
+      if (mode()) return null;
+      const legacy = slashQuery(text());
+      if (!legacy.open) return null;
+      const items = filterSlash(modes(), legacy.query);
+      return items.length ? { query: legacy.query, start: 0, items, skills: [] as SkillChoice[] } : null;
+    }
+    const items = !mode() && q.start === 0 ? filterSlash(modes(), q.query) : [];
+    const skills = filterSkills(skillItems(), q.query, selectedSkills());
+    return items.length || skills.length || skillCatalogError() ? { ...q, items, skills } : null;
   });
   const [ctxFolder, setCtxFolder] = createSignal("");
   const atSource = createMemo<AttachItem[]>(() => {
@@ -468,8 +506,9 @@ export function Composer(p: {
     setCaret(nextCaret);
   };
   createEffect(() => {
-    slash();
-    setSlashHi(0);
+    const menu = slash();
+    const count = menu ? menu.items.length + menu.skills.length : 0;
+    setSlashHi(i => count ? Math.min(i, count - 1) : 0);
   });
   createEffect(() => {
     at();
@@ -580,6 +619,21 @@ export function Composer(p: {
     ta.focus();
   };
   const pickSlash = (item: { id: ComposerMode }) => enterMode(item.id, "");
+  const pickSkill = (skill: SkillChoice) => {
+    const next = insertSkill(text(), caret(), skill.name);
+    write(next.text);
+    setSlashOff(true);
+    ta.focus();
+    ta.setSelectionRange(next.caret, next.caret);
+    setCaret(next.caret);
+  };
+  const clearSkill = (name: string) => {
+    const next = removeSkill(text(), name);
+    write(next);
+    ta.focus();
+    ta.setSelectionRange(next.length, next.length);
+    setCaret(next.length);
+  };
   /**
    * Write the chosen attachment into the sentence at the point `@` was typed.
    *
@@ -605,6 +659,8 @@ export function Composer(p: {
     if (!payload && !images().length && p.onEmptySubmit && !p.disabled && !sending()) { p.onEmptySubmit(); return; }
     if (p.disabled || (!payload && !images().length) || sendingLocked() || uploading() || readingImages()) return;
     if (folderBusy()) { setUploadError("Wait for the folder upload to finish, or cancel it. Your draft is kept."); return; }
+    const skillError = validateSkillSelection(payload, backend(), availableSkills());
+    if (skillError) { setUploadError(`${skillError}. Your draft is kept.`); return; }
     if (!p.textOnly && !p.imagesOnly && (mode() === "plan" || /^\/plan(?:\s|$)/.test(payload)) && !modes().some(m => m.id === "plan")) {
       setUploadError("Plan mode is not supported by this harness on this machine. Your draft is kept.");
       return;
@@ -869,7 +925,7 @@ export function Composer(p: {
           </Show>
           <Show when={pick()?.backend === "codex"}>
             <span class="picks-sep">·</span><CodexSpeedPicker model={pick()?.model??""} value={pick()?.service_tier??"standard"} local={p.uploadTarget==="local"} onChange={tier=>setHarnessPick({...pick()!,service_tier:tier})}/>
-            <span class="picks-sep">·</span><CyberPicker value={draftCyber()} model={pick()?.model??""} remote={!!p.uploadTarget&&p.uploadTarget!=="core"&&p.uploadTarget!=="local"} onChange={setDraftCyber}/>
+            <span class="picks-sep">·</span><CyberPicker value={draftCyber()} model={pick()?.model??""} goal={mode()==="goal"||/^\s*\/goal(?:\s|$)/.test(text())} remote={!!p.uploadTarget&&p.uploadTarget!=="core"&&p.uploadTarget!=="local"} onChange={setDraftCyber}/>
           </Show>
         </Show>
       </div>
@@ -903,7 +959,7 @@ export function Composer(p: {
     <Show when={slash()}>
       {(s) => (
         <Popover role="listbox" label="Commands" class="slash-menu" anchor={ta} placement="top-start" width={340} trap={false} onClose={() => setSlashOff(true)}>
-          <div class="slash-head">Modes</div>
+          <Show when={s().items.length}><div class="slash-head">Modes</div></Show>
           <For each={s().items}>
             {(it, i) => (
               <button
@@ -920,13 +976,26 @@ export function Composer(p: {
               </button>
             )}
           </For>
+          <Show when={s().skills.length || skillCatalogError()}><div class="slash-head">Skills</div></Show>
+          <Show when={skillCatalogError()}><div class="slash-empty" role="alert">{skillCatalogError()}</div></Show>
+          <For each={s().skills}>
+            {(skill, i) => {
+              const index = () => s().items.length + i();
+              return (
+                <button type="button" role="option" aria-selected={slashHi() === index()} class={`menu-item ${slashHi() === index() ? "on" : ""}`} title={skill.description ?? skill.name} onMouseEnter={() => setSlashHi(index())} onClick={() => pickSkill(skill)}>
+                  <span class="menu-ico"><Ic.SkillsIcon size={14} /></span>
+                  <span class="slash-item-copy"><span class="slash-item-label">{skill.name}</span><Show when={skill.description}><span class="slash-item-detail">{skill.description}</span></Show></span>
+                </button>
+              );
+            }}
+          </For>
         </Popover>
       )}
     </Show>
   );
   return (<>
     <Show when={!p.onPending && pendingSend()}>{pending=><OptimisticMessage draft={pending()} />}</Show>
-    <div ref={composerElement} class={`composer ${p.tall || images().length || multiline() ? "tall" : ""} ${voiceActive() ? "voice-on" : ""} ${mode() || p.editingQueued ? "has-mode" : ""}`} data-mode={mode() ?? ""}
+    <div ref={composerElement} class={`composer ${p.tall || images().length || multiline() ? "tall" : ""} ${voiceActive() ? "voice-on" : ""} ${mode() || p.editingQueued ? "has-mode" : ""} ${selectedSkills().length ? "has-skills" : ""}`} data-mode={mode() ?? ""}
       onDragOver={e=>{if(Array.from(e.dataTransfer?.types??[]).includes("Files")){e.preventDefault();e.stopPropagation();if(e.dataTransfer)e.dataTransfer.dropEffect="copy";e.currentTarget.classList.add("drop-active");}}}
       onDragLeave={e=>{if(!e.currentTarget.contains(e.relatedTarget as Node))e.currentTarget.classList.remove("drop-active");}}
       onDrop={e=>{e.preventDefault();e.stopPropagation();e.currentTarget.classList.remove("drop-active");if(sendingLocked()||uploading()||readingImages())return;const data=e.dataTransfer;if(!data)return;void sourcesFromDataTransfer(data).then(sources=>sources.some(source=>source.relativePath)?attachSources(sources):attachMixed(sources)).catch(error=>setUploadError(error instanceof Error?error.message:String(error)));}}
@@ -1002,6 +1071,7 @@ export function Composer(p: {
       />
       <ErrorToast error={uploadError()} title="Couldn’t upload the file" onDismiss={() => setUploadError(null)} />
       <Show when={mode()}>{m => <ModeChip mode={m()} onClear={clearMode} />}</Show>
+      <Show when={selectedSkills().length}><div class="skill-chips" aria-label="Selected skills"><For each={selectedSkills()}>{name => <span class="mode-chip skill-chip" role="status"><Ic.SkillsIcon size={12}/><span class="mode-chip-label">/{name}</span><button type="button" class="mode-chip-x" title={`Remove ${name}`} aria-label={`Remove skill ${name}`} onClick={e => { e.preventDefault(); e.stopPropagation(); clearSkill(name); }}><Ic.CloseIcon size={10}/></button></span>}</For></div></Show>
       <Show when={!mode() && p.editingQueued}>{editing => <span class="mode-chip edit-queued" role="status" aria-label="Editing a queued message">
         <Ic.PencilIcon size={12} /><span class="mode-chip-label">Edit Queued</span>
         <button type="button" class="mode-chip-x" tabIndex={-1} title="Stop editing" aria-label="Stop editing the queued message" onClick={e => { e.preventDefault(); e.stopPropagation(); editing().onCancel(); }}><Ic.CloseIcon size={10} /></button>
@@ -1056,22 +1126,19 @@ export function Composer(p: {
                 return;
               }
             }
-            const items = slash()?.items;
-            if (items) {
+            const menu = slash();
+            const items = menu ? [...menu.items, ...menu.skills] : undefined;
+            if (items?.length) {
               if (e.key === "ArrowDown" || e.key === "ArrowUp") {
                 e.preventDefault();
                 const n = items.length;
                 setSlashHi((i) => (e.key === "ArrowDown" ? (i + 1) % n : (i - 1 + n) % n));
                 return;
               }
-              if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+              if (((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") && !e.isComposing) {
                 e.preventDefault();
-                pickSlash(items[Math.min(slashHi(), items.length - 1)]);
-                return;
-              }
-              if (e.key === "Tab") {
-                e.preventDefault();
-                pickSlash(items[Math.min(slashHi(), items.length - 1)]);
+                const item = items[Math.min(slashHi(), items.length - 1)];
+                if ("section" in item) pickSlash(item); else pickSkill(item);
                 return;
               }
             }

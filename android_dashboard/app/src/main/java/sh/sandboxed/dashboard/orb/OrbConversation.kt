@@ -669,6 +669,25 @@ fun OrbConversationPage(
     var selectedModel by remember(currentMission?.id) {
         mutableStateOf(currentMission?.str("model_override", "model", "model_id") ?: "")
     }
+    var selectedCyber by remember(currentMission?.id) { mutableStateOf(OrbCyberMode.Automatic) }
+    var cyberSelection by remember(currentMission?.id) { mutableStateOf<OrbCyberSelection?>(null) }
+    var cyberLoading by remember(currentMission?.id) { mutableStateOf(currentMission != null) }
+    LaunchedEffect(currentMission?.id, showAgentPicker, currentMission?.str("status")) {
+        val id = currentMission?.id ?: return@LaunchedEffect
+        if (!OrbCyberAccess.nativeCodex(currentMission?.str("backend"), currentMission?.dict("cloud"))) {
+            cyberLoading = false
+            return@LaunchedEffect
+        }
+        cyberLoading = true
+        try {
+            val value = OrbJSON.dict(core.request("/api/control/missions/${core.encodeComponent(id)}/cyber"))
+                ?: throw OrbError("Cyber settings unavailable")
+            cyberSelection = OrbCyberSelection.parse(value)
+            selectedCyber = cyberSelection!!.mode
+        } catch (e: Exception) {
+            errorMessage = OrbCyberAccess.error(e)
+        } finally { cyberLoading = false }
+    }
     var selectedWorkspaceId by remember(currentMission?.id, project.id) {
         mutableStateOf(
             currentMission?.str("workspace_id", "workspaceId")
@@ -1453,6 +1472,7 @@ fun OrbConversationPage(
         scope.launch {
             try {
                 settingsSaveJob?.join()
+                OrbCyberAccess.requireFollowUp(core, id, content)
                 val receipt = OrbJSON.dict(
                     core.request(
                         "/api/control/message",
@@ -1471,7 +1491,7 @@ fun OrbConversationPage(
             } catch (e: Throwable) {
                 followUps = followUps.postFailed(clientId)
                 inputText = inputText.ifEmpty { content }
-                errorMessage = e.message ?: "Couldn't queue the message. Your text is back in the composer."
+                errorMessage = OrbCyberAccess.error(e)
             }
         }
     }
@@ -1488,6 +1508,15 @@ fun OrbConversationPage(
         val wireContent = OrbMessagePresentation.replaceUserText(before.content, content)
         followUps = followUps.edit(queueId, wireContent)
         scope.launch {
+            try {
+                OrbCyberAccess.requireFollowUp(core, id, content)
+            } catch (e: Exception) {
+                followUps = followUps.editReverted(queueId)
+                inputText = content
+                editingQueuedId = queueId
+                errorMessage = OrbCyberAccess.error(e)
+                return@launch
+            }
             val status = try {
                 core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "PATCH", body = mapOf("content" to wireContent))
                 200
@@ -1544,7 +1573,7 @@ fun OrbConversationPage(
     var followPinned by remember(missionId) { mutableStateOf(true) }
     fun syncFollow() { followPinned = transcriptFollow.pinned }
 
-    fun sendTurn(rawInput: String? = null) {
+    fun performSendTurn(rawInput: String? = null) {
         val baseText = (rawInput ?: inputText).trim()
         if (baseText.isEmpty() && pendingAttachments.isEmpty()) return
         transcriptFollow.pin(); syncFollow()
@@ -1559,7 +1588,7 @@ fun OrbConversationPage(
             editQueued(editingId, baseText)
             return
         }
-        if (isLive && rawInput == null && missionId != null && pendingAttachments.isEmpty()) {
+        if ((handoffActive || liveRow?.let { OrbMissionTree.isLive(it) } == true) && rawInput == null && missionId != null && pendingAttachments.isEmpty()) {
             queueFollowUp(missionId, composeMode.wrapPrompt(baseText))
             inputText = ""
             return
@@ -1694,6 +1723,7 @@ fun OrbConversationPage(
                             "backend" to selectedBackend
                         )
                         if (tags.isNotEmpty()) nativeBody["tags"] = tags
+                        if (OrbCyberAccess.nativeCodex(selectedBackend)) nativeBody["cyber_access"] = selectedCyber.wire
                         if (selectedModel.isNotEmpty()) nativeBody["model_override"] = selectedModel
                         if (selectedWorkspaceId.isNotEmpty()) nativeBody["workspace_id"] = selectedWorkspaceId
                         if (selectedWorkspaceId.isEmpty() && selectedNodeId.isNotEmpty() && selectedNodeId != "core") {
@@ -1729,8 +1759,50 @@ fun OrbConversationPage(
                     }
                 }
             } catch (e: Throwable) {
-                errorMessage = e.message ?: "Failed to send message"
+                errorMessage = OrbCyberAccess.error(e)
             } finally {
+                isSending = false
+            }
+        }
+    }
+
+    fun sendTurn(rawInput: String? = null) {
+        if (isSending) return
+        val text = (rawInput ?: inputText).trim()
+        if (text.isEmpty() && pendingAttachments.isEmpty()) return
+        isSending = true
+        scope.launch {
+            try {
+                val mission = currentMission
+                if (mission != null) {
+                    OrbCyberAccess.requireFollowUp(core, mission.id, composeMode.wrapPrompt(text))
+                    isSending = false
+                    performSendTurn(rawInput)
+                    return@launch
+                }
+                if (!OrbCyberAccess.nativeCodex(selectedBackend)) {
+                    isSending = false
+                    performSendTurn(rawInput)
+                    return@launch
+                }
+                val selection = selectedCyber
+                val backend = selectedBackend
+                val model = selectedModel
+                if (OrbCyberAccess.nativeGoal(backend, composeMode.wrapPrompt(text)) &&
+                    composeMode.wrapPrompt(text).trim().equals("/goal", ignoreCase = true))
+                    throw OrbError(OrbCyberAccess.EMPTY_GOAL)
+                val remote = (selectedWorkspaceId.isEmpty() &&
+                    selectedNodeId.isNotEmpty() && selectedNodeId != "core" &&
+                    selectedBackend !in setOf("cursor_cloud", "grok_bot", "hermes") &&
+                    !(selectedBackend == "opencode" && selectedModel.isBlank() && !nodePinnedByUser))
+                OrbCyberAccess.requireSupport(model, selection, remote,
+                    OrbCyberAccess.nativeGoal(backend, composeMode.wrapPrompt(text))) { path ->
+                    OrbJSON.dict(core.request(path)) ?: emptyMap()
+                }
+                isSending = false
+                performSendTurn(rawInput)
+            } catch (e: Exception) {
+                errorMessage = OrbCyberAccess.error(e)
                 isSending = false
             }
         }
@@ -1804,6 +1876,7 @@ fun OrbConversationPage(
         handoff = OrbHandoff(queueId, System.currentTimeMillis())
         scope.launch {
             try {
+                OrbCyberAccess.requireFollowUp(core, id, row.content)
                 val resp = OrbJSON.dict(
                     core.request("/api/control/queue/${core.encodeComponent(queueId)}/send-now?interrupt=true", method = "POST")
                 )
@@ -1811,6 +1884,7 @@ fun OrbConversationPage(
                     OrbSendFlow.SendNow.Live -> handoff = null
                     OrbSendFlow.SendNow.Promoted -> Unit // handoff ends when the new turn runs
                     OrbSendFlow.SendNow.Fallback -> {
+                        OrbCyberAccess.requireFollowUp(core, id, row.content)
                         // Older Core without promote: stop the turn, then send this message.
                         messages = messages.filterNot { it.id == localId }
                         orbTry(OrbLog.Category.Network, "/api/control/queue") {
@@ -1828,7 +1902,7 @@ fun OrbConversationPage(
                 messages = messages.filterNot { it.id == localId }
                 followUps = followUps.unhide(queueId)
                 handoff = null
-                errorMessage = e.message ?: "Couldn't send now."
+                errorMessage = OrbCyberAccess.error(e)
             }
         }
     }
@@ -3446,6 +3520,41 @@ fun OrbConversationPage(
             },
             selectedModel = selectedModel,
             onSelectModel = { selectedModel = it },
+            cyberMode = selectedCyber,
+            showCyber = OrbCyberAccess.nativeCodex(selectedBackend, currentMission?.dict("cloud")),
+            cyberSummary = if (currentMission == null) "Uses the account’s default access unless explicitly selected." else
+                cyberSelection?.summary ?: "Cyber: unavailable",
+            cyberEnabled = !cyberLoading && (currentMission == null || cyberSelection != null),
+            cyberRemote = currentMission?.let { OrbCyberAccess.remote(it) } ?: (selectedWorkspaceId.isEmpty() &&
+                selectedNodeId.isNotEmpty() && selectedNodeId != "core"),
+            onSelectCyber = { mode ->
+                if (!isSending) {
+                    val mission = currentMission
+                    val model = selectedModel
+                    val prompt = composeMode.wrapPrompt(inputText)
+                    val remote = mission?.let { OrbCyberAccess.remote(it) } ?: (selectedWorkspaceId.isEmpty() &&
+                        selectedNodeId.isNotEmpty() && selectedNodeId != "core")
+                    isSending = true
+                    scope.launch {
+                        try {
+                            if (prompt.trim().equals("/goal", ignoreCase = true))
+                                throw OrbError(OrbCyberAccess.EMPTY_GOAL)
+                            OrbCyberAccess.requireSupport(model, mode, remote,
+                                OrbCyberAccess.nativeGoal(selectedBackend, prompt)) { path ->
+                                OrbJSON.dict(core.request(path)) ?: emptyMap()
+                            }
+                            if (mission == null) selectedCyber = mode
+                            else {
+                                val value = OrbJSON.dict(core.request("/api/control/missions/${core.encodeComponent(mission.id)}/cyber",
+                                    method = "PATCH", body = mapOf("mode" to mode.wire))) ?: throw OrbError("Cyber settings unavailable")
+                                cyberSelection = OrbCyberSelection.parse(value)
+                                selectedCyber = cyberSelection!!.mode
+                            }
+                        } catch (e: Exception) { errorMessage = OrbCyberAccess.error(e) }
+                        finally { isSending = false }
+                    }
+                }
+            },
             selectedWorkspaceId = selectedWorkspaceId,
             onSelectWorkspaceId = {
                 selectedWorkspaceId = it
@@ -3487,6 +3596,7 @@ fun OrbConversationPage(
                     scope.launch {
                         try {
                             val source = currentMission ?: throw OrbError("Conversation unavailable.")
+                            OrbCyberAccess.requireInherited(core, source.id, selectedBackend, selectedModel, "")
                             val base = "/api/control/missions/${core.encodeComponent(source.id)}"
                             var next = transferredMission
                             if (next == null) {
@@ -4209,6 +4319,12 @@ fun OrbAgentPickerSheet(
     onSelectBackend: (String) -> Unit,
     selectedModel: String,
     onSelectModel: (String) -> Unit,
+    cyberMode: OrbCyberMode = OrbCyberMode.Automatic,
+    showCyber: Boolean = false,
+    cyberRemote: Boolean = false,
+    cyberSummary: String = "",
+    cyberEnabled: Boolean = true,
+    onSelectCyber: (OrbCyberMode) -> Unit = {},
     selectedWorkspaceId: String,
     onSelectWorkspaceId: (String) -> Unit,
     selectedNodeId: String = "",
@@ -4898,6 +5014,23 @@ fun OrbAgentPickerSheet(
                                     HorizontalDivider(color = OrbStyle.border)
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            if (showCyber) {
+                Text("Cyber program", color = OrbStyle.textMuted, fontSize = 12.sp)
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    OrbCyberMode.entries.forEach { mode ->
+                        TextButton(enabled = !locked && cyberEnabled, onClick = { onSelectCyber(mode) }) {
+                            Text("${if (mode == cyberMode) "✓ " else ""}${mode.label}", color = Color.White)
+                        }
+                    }
+                    Text(cyberSummary, color = OrbStyle.textMuted, fontSize = 12.sp)
+                    if (!cyberRemote || selectedModel.isNotBlank()) {
+                        OrbCyberAccess.compatibility(cyberMode, selectedModel)?.let {
+                            Text(it, color = OrbStyle.textMuted, fontSize = 12.sp)
                         }
                     }
                 }

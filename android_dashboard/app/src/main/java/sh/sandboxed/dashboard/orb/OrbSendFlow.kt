@@ -1,5 +1,108 @@
 package sh.sandboxed.dashboard.orb
 
+enum class OrbCyberMode(val wire: String, val label: String) {
+    Automatic("automatic", "Automatic"), Standard("standard", "Standard"), Daybreak("daybreak", "Daybreak")
+}
+
+data class OrbCyberSelection(val mode: OrbCyberMode, val status: String?, val revision: String?, val confirmedProgram: String?) {
+    val summary: String get() = if (status == "confirmed" && !confirmedProgram.isNullOrBlank())
+        "${mode.label} · confirmed: $confirmedProgram" else "${mode.label} · requested"
+
+    companion object {
+        fun parse(value: OrbDict): OrbCyberSelection = OrbCyberSelection(
+            OrbCyberMode.entries.firstOrNull { it.wire == OrbJSON.str(value, "mode") }
+                ?: throw OrbError("Cyber selection unavailable. Update or reconnect before changing this option."),
+            OrbJSON.str(value, "status"), OrbJSON.str(value, "revision"), OrbJSON.str(value, "confirmed_program")
+        )
+    }
+}
+
+object OrbCyberAccess {
+    fun nativeCodex(backend: String?, cloud: OrbDict? = null): Boolean = backend == "codex" &&
+        OrbJSON.str(cloud, "provider").isNullOrBlank()
+
+    const val EMPTY_GOAL = "Add an objective after /goal, for example “/goal Make the test suite pass”. Your draft is kept."
+
+    suspend fun requireFollowUp(core: OrbCore, missionId: String, content: String) =
+        requireFollowUp(missionId, content, core::encodeComponent) { path -> OrbJSON.dict(core.request(path)) ?: emptyMap() }
+
+    suspend fun requireFollowUp(missionId: String, content: String, encode: (String) -> String = { it },
+        get: suspend (String) -> OrbDict) {
+        val base = "/api/control/missions/${encode(missionId)}"
+        val value = get("$base?include_history=false")
+        val mission = OrbRow(OrbJSON.dict(value["mission"]) ?: value)
+        val backend = mission.str("backend") ?: throw OrbError("Mission settings unavailable. Your draft is kept.")
+        if (!nativeCodex(backend, mission.dict("cloud"))) return
+        val goal = nativeGoal(backend, content)
+        if (goal && content.trim().equals("/goal", ignoreCase = true))
+            throw OrbError(EMPTY_GOAL)
+        val cyber = OrbCyberSelection.parse(get("$base/cyber"))
+        requireSupport(mission.str("model_override") ?: "", cyber.mode, remote(mission), goal, get)
+    }
+
+    suspend fun requireInherited(core: OrbCore, sourceId: String, backend: String, model: String, content: String) {
+        if (!nativeCodex(backend)) return
+        val base = "/api/control/missions/${core.encodeComponent(sourceId)}"
+        val value = OrbJSON.dict(core.request("$base?include_history=false")) ?: throw OrbError("Mission settings unavailable. Your draft is kept.")
+        val source = OrbRow(OrbJSON.dict(value["mission"]) ?: value)
+        val cyber = OrbCyberSelection.parse(OrbJSON.dict(core.request("$base/cyber")) ?: emptyMap())
+        if (content.trim().equals("/goal", ignoreCase = true)) throw OrbError(EMPTY_GOAL)
+        requireSupport(model, cyber.mode, remote(source), nativeGoal(backend, content)) { path ->
+            OrbJSON.dict(core.request(path)) ?: emptyMap()
+        }
+    }
+
+    fun nativeGoal(backend: String, prompt: String): Boolean = backend == "codex" &&
+        Regex("^/goal(?:\\s|$)", RegexOption.IGNORE_CASE).containsMatchIn(prompt.trimStart())
+
+    fun remote(mission: OrbRow): Boolean {
+        mission.dict("machine_transfer")?.let { transfer ->
+            OrbJSON.dict(transfer["destination"])?.let { return OrbJSON.str(it, "kind") == "node" }
+        }
+        val tags = mission.raw["tags"] as? List<*>
+        return tags?.contains("placement:client") != true && mission.bool("local_run_active") != true &&
+            (!mission.str("remote_node_id").isNullOrBlank() || !OrbJSON.str(mission.dict("remote_job"), "node_id").isNullOrBlank())
+    }
+
+    fun compatibility(mode: OrbCyberMode, model: String): String? {
+        val id = model.substringAfterLast('/')
+        if (id == "gpt-daybreak-blue-latest" || id == "gpt-daybreak-red-latest")
+            return "OpenAI retired the $id alias on 2026-10-28. Choose a specific model ID such as ${if (id.contains("red")) "gpt-5.6-cyber" else "gpt-6.1-sol"}."
+        if (mode == OrbCyberMode.Standard && (id.startsWith("gpt-daybreak-") || id == "gpt-5.6-cyber"))
+            return "This model requires Daybreak. Choose Daybreak or Automatic, or change the model."
+        if (mode == OrbCyberMode.Daybreak && id !in setOf("gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-cyber"))
+            return "Daybreak support has not been established for this model."
+        return null
+    }
+
+    fun error(error: Throwable): String {
+        val text = error.message ?: "Cyber request failed"
+        return when {
+            "access_program_not_enabled" in text -> "Daybreak is not enabled for this account and model. Check the account’s approved access, or explicitly select Standard. The model was not changed."
+            "unsupported_access_program" in text -> "This connection cannot apply the requested cyber program. Choose another supported connection, or explicitly select Automatic. $text"
+            "invalid_access_program" in text -> "The selected cyber program is incompatible with this model. Choose another program or model."
+            "cyberPolicy" in text || "cyber_policy" in text -> "OpenAI rejected this request under its cyber policy. This can also happen with Daybreak enabled. $text"
+            else -> text
+        }
+    }
+
+    suspend fun requireSupport(model: String, mode: OrbCyberMode, remote: Boolean, goal: Boolean,
+        get: suspend (String) -> OrbDict) {
+        if (!remote || model.isNotBlank()) compatibility(mode, model)?.let { throw OrbError(it) }
+        val query = (if (model.isNotBlank()) "model=${java.net.URLEncoder.encode(model, "UTF-8")}&" else "") +
+            "mode=${mode.wire}&remote=$remote"
+        val value = try { get("/api/control/cyber-capabilities?$query") } catch (e: Exception) {
+            throw OrbError("Update or reconnect to a backend supporting cyber selection before launching. Your draft is kept; the requested program was not silently omitted.")
+        }
+        if ((value["version"] as? Number)?.toInt() != 2)
+            throw OrbError("Update or reconnect to a backend supporting cyber selection before launching. Your draft is kept.")
+        if (goal && mode != OrbCyberMode.Automatic && value["native_goals_explicit"] != true)
+            throw OrbError("This connection cannot confirm an explicit Cyber program for native goals. Choose Automatic explicitly. Your draft is kept.")
+        if (remote && mode != OrbCyberMode.Automatic && value["route_supported"] != true)
+            throw OrbError(OrbJSON.str(value, "refusal") ?: "This backend cannot confirm the selected Cyber route. Choose Automatic explicitly. Your draft is kept.")
+    }
+}
+
 /**
  * Smooth sending on mobile, mirroring the desktop work in PR #1174
  * (orb/src/RemoteQueue.tsx, orb/src/mission/handoff.ts, orb/src/missionStatus.ts).

@@ -1617,6 +1617,7 @@ fun OrbInboxView(
     var selectedProjectSlug by remember { mutableStateOf<String?>(null) }
     var replyingItemId by remember { mutableStateOf<String?>(null) }
     var replyDraft by remember { mutableStateOf("") }
+    var replyError by remember { mutableStateOf<String?>(null) }
     var sendingItemId by remember { mutableStateOf<String?>(null) }
     var showRunningSection by remember { mutableStateOf(false) }
     var lastDismissedItem by remember { mutableStateOf<OrbInboxItem?>(null) }
@@ -1845,6 +1846,7 @@ fun OrbInboxView(
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
         sendingItemId = item.id
+        replyError = null
         scope.launch {
             try {
                 val pending = item.pendingInteraction
@@ -1861,6 +1863,7 @@ fun OrbInboxView(
                     )
                     answeredCallIds[pending.callId] = true
                 } else {
+                    OrbCyberAccess.requireFollowUp(core, item.id, trimmed)
                     core.request(
                         path = "/api/control/message",
                         method = "POST",
@@ -1877,6 +1880,7 @@ fun OrbInboxView(
                 replyDraft = ""
                 core.refreshMissionsQuietly()
             } catch (msgErr: Throwable) {
+                replyError = OrbCyberAccess.error(msgErr)
                 core.requestInboxOpen()
             } finally {
                 sendingItemId = null
@@ -1898,6 +1902,13 @@ fun OrbInboxView(
     }
 
     Box(modifier = modifier.fillMaxSize()) {
+        replyError?.let { message ->
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { replyError = null },
+                confirmButton = { androidx.compose.material3.TextButton(onClick = { replyError = null }) { Text("OK") } },
+                text = { Text(message) }
+            )
+        }
         PullToRefreshBox(
             isRefreshing = isRefreshing,
             onRefresh = {

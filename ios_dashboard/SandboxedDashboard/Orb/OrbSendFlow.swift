@@ -148,6 +148,76 @@ struct OrbFollowUpQueue: Equatable {
     }
 }
 
+enum OrbCyberAccess {
+    static let modes = ["automatic", "standard", "daybreak"]
+    static func label(_ mode: String) -> String { mode.capitalized }
+    static func isGoal(_ text: String, mode: String = "Message") -> Bool {
+        if mode == "Goal" { return true }
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = value.prefix(5).lowercased()
+        return prefix == "/goal" && (value.count == 5 || value.dropFirst(5).first?.isWhitespace == true)
+    }
+    static func emptyGoalError(_ text: String, mode: String = "Message") -> String? {
+        guard isGoal(text, mode: mode) else { return nil }
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if mode == "Goal" && value.prefix(5).lowercased() != "/goal" {
+            return value.isEmpty ? "Add an objective after /goal, for example “/goal Make the test suite pass”. Your draft is kept." : nil
+        }
+        let rest = value.dropFirst(5).trimmingCharacters(in: .whitespacesAndNewlines)
+        return rest.isEmpty ? "Add an objective after /goal, for example “/goal Make the test suite pass”. Your draft is kept." : nil
+    }
+    static func compatibility(mode: String, model: String) -> String? {
+        let id = model.components(separatedBy: "/").last ?? model
+        if ["gpt-daybreak-blue-latest", "gpt-daybreak-red-latest"].contains(id) {
+            return "OpenAI retired the \(id) alias on 2026-10-28. Choose a specific model ID such as \(id.contains("red") ? "gpt-5.6-cyber" : "gpt-6.1-sol")."
+        }
+        if mode == "standard" && (id.hasPrefix("gpt-daybreak-") || id == "gpt-5.6-cyber") { return "This model requires Daybreak. Choose Daybreak or Automatic, or change the model." }
+        if mode == "daybreak" && !["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-cyber"].contains(id) { return "Daybreak support has not been established for this model." }
+        return nil
+    }
+    static func capabilityPath(model: String, mode: String, remote: Bool) -> String {
+        let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "/api/control/cyber-capabilities?" + (model.isEmpty ? "" : "model=\(OrbCore.escape(model))&") + "mode=\(mode)&remote=\(remote)"
+    }
+    static func refusal(_ value: OrbJSON, mode: String, remote: Bool, goal: Bool) -> String? {
+        if value["version"].doubleValue != 2 { return "Update or reconnect to a backend supporting cyber selection before launching. Your draft is kept." }
+        if goal && mode != "automatic" && value["native_goals_explicit"] != .bool(true) { return "This connection cannot confirm an explicit Cyber program for native goals. Choose Automatic explicitly. Your draft is kept." }
+        if remote && mode != "automatic" && value["route_supported"] != .bool(true) {
+            return value["refusal"].text.isEmpty ? "This backend cannot confirm the selected Cyber route. Choose Automatic explicitly. Your draft is kept." : value["refusal"].text
+        }
+        return nil
+    }
+    static func confirmed(_ value: OrbJSON) -> Bool { value["status"].text == "confirmed" && !value["confirmed_program"].text.isEmpty }
+    static func error(_ error: Error) -> String {
+        let text = error.localizedDescription
+        if text.contains("access_program_not_enabled") { return "Daybreak is not enabled for this account and model. Check the account’s approved access, or explicitly select Standard. The model was not changed." }
+        if text.contains("unsupported_access_program") { return "This connection cannot apply the requested cyber program. Choose another supported connection, or explicitly select Automatic. " + text }
+        if text.contains("invalid_access_program") { return "The selected cyber program is incompatible with this model. Choose another program or model." }
+        if text.contains("cyberPolicy") || text.contains("cyber_policy") { return "OpenAI rejected this request under its cyber policy. This can also happen with Daybreak enabled. " + text }
+        return text
+    }
+    @MainActor static func requireFollowUp(_ content: String, missionID: String) async throws {
+        let mission = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(missionID))?include_history=false")
+        try await requireFollowUp(content, mission: mission)
+    }
+    @MainActor static func requireFollowUp(_ content: String, mission: OrbJSON, model: String? = nil, node: String = "", call: (String) async throws -> OrbJSON = { try await OrbCore.shared.call($0) }) async throws {
+        guard !OrbRow(mission).cloud, mission["backend"].text == "codex" else { return }
+        if let reason = emptyGoalError(content) { throw OrbHTTPError(status: 400, detail: reason) }
+        let current = try await call("/api/control/missions/\(OrbCore.escape(mission["id"].text))/cyber")
+        guard modes.contains(current["mode"].text) else {
+            throw OrbHTTPError(status: 400, detail: "The backend did not return a Cyber selection. Your draft is kept.")
+        }
+        try await require(model: model ?? mission["model_override"].text, mode: current["mode"].text, remote: OrbContinuation.remoteNodeID(for: mission, fallback: node) != "core", goal: isGoal(content), call: call)
+    }
+    @MainActor static func require(model: String, mode: String, remote: Bool, goal: Bool, call: (String) async throws -> OrbJSON = { try await OrbCore.shared.call($0) }) async throws {
+        if let reason = (remote && model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : compatibility(mode: mode, model: model)) { throw OrbHTTPError(status: 400, detail: reason) }
+        let value: OrbJSON
+        do { value = try await call(capabilityPath(model: model, mode: mode, remote: remote)) }
+        catch { throw OrbHTTPError(status: 400, detail: "Update or reconnect to a backend supporting cyber selection before launching. Your draft is kept; the requested program was not silently omitted.") }
+        if let reason = refusal(value, mode: mode, remote: remote, goal: goal) { throw OrbHTTPError(status: 400, detail: reason) }
+    }
+}
+
 enum OrbEditOutcome: Equatable { case edited, unsupported, alreadySent, failed }
 enum OrbSendNowOutcome: Equatable { case live, promoted, fallback }
 

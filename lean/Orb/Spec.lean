@@ -10903,4 +10903,672 @@ theorem mcp_preflight_cache_rejects_mismatch_or_stale :
     mcpPreflightCacheGate 1 1 1 1 2 301 = 0 := by
   decide
 
+-- ===========================================================================
+-- Codex Native `/goal` Pre-Thread Admission & Pre-Activation Drain (`#1497`:
+-- `orb_codex_goal_launch_step` & `orb_codex_goal_preact_filter`)
+-- ===========================================================================
+
+private theorem pack32_toUInt32 (a b : UInt32) :
+    (a.toUInt64 ||| (b.toUInt64 <<< 32)).toUInt32 = a := by
+  apply UInt32.toBitVec_inj.mp
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  simp [UInt64.toBitVec_toUInt32, UInt64.toBitVec_or, UInt64.toBitVec_shiftLeft,
+    UInt32.toBitVec_toUInt64, shiftLeft32_bv, BitVec.getLsbD_setWidth, hi]
+
+private theorem u64_reason_hi_toUInt32 (r : UInt32) (b : UInt32) :
+    (r.toUInt64 ||| (b.toUInt64 <<< 32)).toUInt32 = r :=
+  pack32_toUInt32 r b
+
+private theorem beq_not_bne {α : Type} [BEq α] (a b : α) :
+    (a == b) = !(a != b) := by
+  change (a == b) = !(!(a == b))
+  cases (a == b) <;> rfl
+
+private theorem bne_def' {α : Type} [BEq α] (a b : α) :
+    (a != b) = !(a == b) := rfl
+
+structure CodexGoalLaunchCheck where
+  isGoalRequest          : UInt8
+  hasNonEmptyObjective   : UInt8
+  hasImages              : UInt8
+  hasExplicitCyber       : UInt8
+  hasChatGptAuth         : UInt8
+  modelCompatible        : UInt8
+  accountSupportsProgram : UInt8
+  resumedGoalActive      : UInt8
+  hasRetiredAlias        : UInt8
+  deriving Repr, DecidableEq
+
+def CodexGoalLaunchCheck.Admissible (c : CodexGoalLaunchCheck) : Bool :=
+  c.hasRetiredAlias == 0 &&
+  c.modelCompatible != 0 &&
+  (c.hasExplicitCyber == 0 ||
+    (c.hasChatGptAuth != 0 &&
+     c.accountSupportsProgram != 0 &&
+     c.isGoalRequest == 0 &&
+     c.resumedGoalActive == 0)) &&
+  (c.isGoalRequest == 0 || (c.hasNonEmptyObjective != 0 && c.hasImages == 0))
+
+def codexGoalLaunchMetaGate : MetaGateSpec CodexGoalLaunchCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    ((codexGoalLaunchStep
+        c.isGoalRequest c.hasNonEmptyObjective c.hasImages c.hasExplicitCyber
+        c.hasChatGptAuth c.modelCompatible c.accountSupportsProgram
+        c.resumedGoalActive c.hasRetiredAlias &&& 256) != 0)
+  sound c h := by
+    unfold codexGoalLaunchStep at h
+    dsimp only [] at h
+    unfold CodexGoalLaunchCheck.Admissible
+    rw [beq_not_bne c.hasRetiredAlias 0,
+        bne_def' c.modelCompatible 0,
+        beq_not_bne c.hasExplicitCyber 0,
+        bne_def' c.hasChatGptAuth 0,
+        bne_def' c.accountSupportsProgram 0,
+        beq_not_bne c.isGoalRequest 0,
+        beq_not_bne c.resumedGoalActive 0,
+        bne_def' c.hasNonEmptyObjective 0,
+        beq_not_bne c.hasImages 0]
+    cases hr : (c.hasRetiredAlias != 0)
+    · cases hm : (c.modelCompatible == 0)
+      · cases hc : (c.hasExplicitCyber != 0)
+        · cases hg : (c.isGoalRequest != 0)
+          · rfl
+          · cases ho : (c.hasNonEmptyObjective == 0)
+            · cases hi : (c.hasImages != 0)
+              · rfl
+              · simp only [hr, hm, hc, hg, ho, hi, Bool.false_and, Bool.true_and,
+                  Bool.true_or, Bool.false_eq_true, ↓reduceIte] at h
+                exact False.elim ((by decide : ¬(((7 : UInt32) &&& 256 != 0) = true)) h)
+            · simp only [hr, hm, hc, hg, ho, Bool.false_and, Bool.true_and,
+                Bool.true_or, Bool.false_eq_true, ↓reduceIte] at h
+              exact False.elim ((by decide : ¬(((6 : UInt32) &&& 256 != 0) = true)) h)
+        · cases ha : (c.hasChatGptAuth == 0)
+          · cases hp : (c.accountSupportsProgram == 0)
+            · cases hg : (c.isGoalRequest != 0)
+              · cases hrg : (c.resumedGoalActive != 0)
+                · rfl
+                · simp only [hr, hm, hc, ha, hp, hg, hrg, Bool.true_and, Bool.false_or,
+                    Bool.false_eq_true, ↓reduceIte] at h
+                  exact False.elim ((by decide : ¬(((5 : UInt32) &&& 256 != 0) = true)) h)
+              · simp only [hr, hm, hc, ha, hp, hg, Bool.true_and, Bool.true_or,
+                  Bool.false_eq_true, ↓reduceIte] at h
+                exact False.elim ((by decide : ¬(((5 : UInt32) &&& 256 != 0) = true)) h)
+            · simp only [hr, hm, hc, ha, hp, Bool.true_and, Bool.false_eq_true, ↓reduceIte] at h
+              exact False.elim ((by decide : ¬(((4 : UInt32) &&& 256 != 0) = true)) h)
+          · simp only [hr, hm, hc, ha, Bool.true_and, Bool.false_eq_true, ↓reduceIte] at h
+            exact False.elim ((by decide : ¬(((3 : UInt32) &&& 256 != 0) = true)) h)
+      · simp only [hr, hm, Bool.false_eq_true, ↓reduceIte] at h
+        exact False.elim ((by decide : ¬(((2 : UInt32) &&& 256 != 0) = true)) h)
+    · simp only [hr, ↓reduceIte] at h
+      exact False.elim ((by decide : ¬(((1 : UInt32) &&& 256 != 0) = true)) h)
+  complete c h := by
+    unfold CodexGoalLaunchCheck.Admissible at h
+    unfold codexGoalLaunchStep
+    dsimp only []
+    rw [beq_not_bne c.hasRetiredAlias 0,
+        bne_def' c.modelCompatible 0,
+        beq_not_bne c.hasExplicitCyber 0,
+        bne_def' c.hasChatGptAuth 0,
+        bne_def' c.accountSupportsProgram 0,
+        beq_not_bne c.isGoalRequest 0,
+        beq_not_bne c.resumedGoalActive 0,
+        bne_def' c.hasNonEmptyObjective 0,
+        beq_not_bne c.hasImages 0] at h
+    cases hr : (c.hasRetiredAlias != 0)
+    · cases hm : (c.modelCompatible == 0)
+      · cases hc : (c.hasExplicitCyber != 0)
+        · cases hg : (c.isGoalRequest != 0)
+          · cases hrg : (c.resumedGoalActive != 0) <;>
+              (simp only [hr, hm, hc, hg, hrg, Bool.false_and, Bool.false_or,
+                Bool.false_eq_true, ↓reduceIte]; decide)
+          · cases ho : (c.hasNonEmptyObjective == 0)
+            · cases hi : (c.hasImages != 0)
+              · cases hrg : (c.resumedGoalActive != 0) <;>
+                  (simp only [hr, hm, hc, hg, ho, hi, hrg, Bool.false_and, Bool.true_and,
+                    Bool.true_or, Bool.false_eq_true, ↓reduceIte]; decide)
+              · simp [hr, hm, hc, hg, ho, hi] at h
+            · simp [hr, hm, hc, hg, ho] at h
+        · cases ha : (c.hasChatGptAuth == 0)
+          · cases hp : (c.accountSupportsProgram == 0)
+            · cases hg : (c.isGoalRequest != 0)
+              · cases hrg : (c.resumedGoalActive != 0)
+                · simp only [hr, hm, hc, ha, hp, hg, hrg, Bool.true_and, Bool.false_and,
+                    Bool.false_or, Bool.false_eq_true, ↓reduceIte]; decide
+                · simp [hr, hm, hc, ha, hp, hg, hrg] at h
+              · simp [hr, hm, hc, ha, hp, hg] at h
+            · simp [hr, hm, hc, ha, hp] at h
+          · simp [hr, hm, hc, ha] at h
+      · simp [hr, hm] at h
+    · simp [hr] at h
+  posWitness := ⟨1, 1, 0, 0, 1, 1, 1, 0, 0⟩
+  negWitness := ⟨1, 1, 0, 1, 1, 1, 1, 0, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def codexGoalLaunchScopedAuthority : ScopedAuthority CodexGoalLaunchCheck where
+  admit c := codexGoalLaunchMetaGate.gate c
+  scopeValid c := c.Admissible
+  sound c h := codexGoalLaunchMetaGate.sound c h
+
+/-- Corollary (`ScopedAuthority` — `#1497` Bug B):
+    Any explicit Cyber selection (`hasExplicitCyber = 1`) combined with either a new `/goal`
+    request (`isGoalRequest = 1`) or an active resumed native goal (`resumedGoalActive = 1`)
+    is rejected (`admittedBit = 0`, reason `1..5`) BEFORE `thread/start` or `thread/resume`. -/
+theorem codex_goal_launch_rejects_explicit_cyber_before_thread_bind
+    (hasObj hasImg hasAuth compat acctOk resumed retired : UInt8) :
+    ((codexGoalLaunchStep 1 hasObj hasImg 1 hasAuth compat acctOk resumed retired &&& 256) == 0) = true ∧
+    ((codexGoalLaunchStep 0 hasObj hasImg 1 hasAuth compat acctOk 1 retired &&& 256) == 0) = true := by
+  refine ⟨?_, ?_⟩
+  · unfold codexGoalLaunchStep
+    dsimp only []
+    have h1 : ((1 : UInt8) != 0) = true := rfl
+    cases hr : (retired != 0) <;>
+    cases hm : (compat == 0) <;>
+    cases ha : (hasAuth == 0) <;>
+    cases hp : (acctOk == 0) <;>
+    (simp only [hr, hm, ha, hp, h1, Bool.true_and, Bool.true_or, Bool.false_eq_true, ↓reduceIte]
+     decide)
+  · unfold codexGoalLaunchStep
+    dsimp only []
+    have h1 : ((1 : UInt8) != 0) = true := rfl
+    have h0 : ((0 : UInt8) != 0) = false := rfl
+    cases hr : (retired != 0) <;>
+    cases hm : (compat == 0) <;>
+    cases ha : (hasAuth == 0) <;>
+    cases hp : (acctOk == 0) <;>
+    (simp only [hr, hm, ha, hp, h1, h0, Bool.true_and, Bool.false_or, Bool.false_eq_true, ↓reduceIte]
+     decide)
+
+structure CodexGoalPreactCheck where
+  msgKind                : UInt8
+  isRequest              : UInt8
+  sameThread             : UInt8
+  hasTurnId              : UInt8
+  threadAlreadyActive    : UInt8
+  goalGetWasNull         : UInt8
+  snapshotMatchesGoalGet : UInt8
+  deriving Repr, DecidableEq
+
+def CodexGoalPreactCheck.ShouldStrip (c : CodexGoalPreactCheck) : Bool :=
+  c.isRequest == 0 &&
+  c.sameThread != 0 &&
+  c.hasTurnId == 0 &&
+  c.threadAlreadyActive == 0 &&
+  ((c.msgKind == 2 && c.goalGetWasNull != 0) ||
+   (c.msgKind == 1 && c.snapshotMatchesGoalGet != 0))
+
+def codexGoalPreactMetaGate : MetaGateSpec CodexGoalPreactCheck
+    (fun c => c.ShouldStrip = true) where
+  gate c :=
+    codexGoalPreactFilter
+      c.msgKind c.isRequest c.sameThread c.hasTurnId
+      c.threadAlreadyActive c.goalGetWasNull c.snapshotMatchesGoalGet == 1
+  sound c h := by
+    unfold CodexGoalPreactCheck.ShouldStrip
+    unfold codexGoalPreactFilter at h
+    rw [beq_not_bne c.isRequest 0,
+        bne_def' c.sameThread 0,
+        beq_not_bne c.hasTurnId 0,
+        beq_not_bne c.threadAlreadyActive 0]
+    cases hr : (c.isRequest != 0)
+    · cases hs : (c.sameThread == 0)
+      · cases ht : (c.hasTurnId != 0)
+        · cases ha : (c.threadAlreadyActive != 0)
+          · cases hm2 : (c.msgKind == 2) <;>
+            cases hm1 : (c.msgKind == 1) <;>
+            cases hgn : (c.goalGetWasNull != 0) <;>
+            cases hsm : (c.snapshotMatchesGoalGet != 0) <;>
+            (simp only [hr, hs, ht, ha, hm2, hm1, hgn, hsm, Bool.false_or,
+              Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte] at h ⊢; revert h; decide)
+          · simp [hr, hs, ht, ha] at h
+        · simp [hr, hs, ht] at h
+      · simp [hr, hs] at h
+    · simp [hr] at h
+  complete c h := by
+    unfold CodexGoalPreactCheck.ShouldStrip at h
+    unfold codexGoalPreactFilter
+    rw [beq_not_bne c.isRequest 0,
+        bne_def' c.sameThread 0,
+        beq_not_bne c.hasTurnId 0,
+        beq_not_bne c.threadAlreadyActive 0] at h
+    cases hr : (c.isRequest != 0)
+    · cases hs : (c.sameThread == 0)
+      · cases ht : (c.hasTurnId != 0)
+        · cases ha : (c.threadAlreadyActive != 0)
+          · cases hm2 : (c.msgKind == 2) <;>
+            cases hm1 : (c.msgKind == 1) <;>
+            cases hgn : (c.goalGetWasNull != 0) <;>
+            cases hsm : (c.snapshotMatchesGoalGet != 0) <;>
+            (simp only [hr, hs, ht, ha, hm2, hm1, hgn, hsm, Bool.false_or,
+              Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte] at h ⊢; revert h; decide)
+          · simp [hr, hs, ht, ha] at h
+        · simp [hr, hs, ht] at h
+      · simp [hr, hs] at h
+    · simp [hr] at h
+  posWitness := ⟨2, 0, 1, 0, 0, 1, 0⟩
+  negWitness := ⟨2, 0, 1, 1, 0, 1, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary (`StickyFence` / `ReplayIdempotence` — `#1497` Bug A):
+    1. Pre-activation `thread/goal/cleared` (`msgKind = 2`, `turnId = null`) emitted during
+       `thread/resume` when `thread/goal/get -> null` (`goalGetWasNull = 1`) is stripped (`1`).
+    2. Real turn-scoped goal events (`hasTurnId = 1`), server requests (`isRequest = 1`), and
+       active-thread events (`threadAlreadyActive = 1`) are NEVER stripped (`0`). -/
+theorem codex_preact_filter_strips_stale_cleared_and_preserves_live_events
+    (mk req same turn act gnull smatch : UInt8) :
+    codexGoalPreactFilter 2 0 1 0 0 1 smatch = 1 ∧
+    codexGoalPreactFilter mk 1 same turn act gnull smatch = 0 ∧
+    codexGoalPreactFilter mk req same 1 act gnull smatch = 0 ∧
+    codexGoalPreactFilter mk req same turn 1 gnull smatch = 0 := by
+  refine ⟨rfl, ?_, ?_, ?_⟩
+  · unfold codexGoalPreactFilter
+    simp
+  · unfold codexGoalPreactFilter
+    cases req != 0 <;>
+    cases same == 0 <;>
+    simp
+  · unfold codexGoalPreactFilter
+    cases req != 0 <;>
+    cases same == 0 <;>
+    cases turn != 0 <;>
+    simp
+
+-- ===========================================================================
+-- Composer `/` Skill Autocomplete & Harness Invocation (`#1553`: `orb_skill_slash_step`)
+-- ===========================================================================
+
+structure SkillSlashCheck where
+  harnessKind     : UInt8
+  isDelivered     : UInt8
+  alreadySelected : UInt8
+  nameCharsValid  : UInt8
+  nameLen         : UInt32
+  maxNameLen      : UInt32
+  selectedCount   : UInt32
+  maxSelected     : UInt32
+  deriving Repr, DecidableEq
+
+def SkillSlashCheck.Admissible (c : SkillSlashCheck) : Bool :=
+  c.nameLen != 0 &&
+  c.maxNameLen != 0 &&
+  !(decide (c.maxNameLen < c.nameLen)) &&
+  c.nameCharsValid != 0 &&
+  c.isDelivered != 0 &&
+  c.alreadySelected == 0 &&
+  c.maxSelected != 0 &&
+  !(decide (c.maxSelected ≤ c.selectedCount))
+
+def skillSlashMetaGate : MetaGateSpec SkillSlashCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    (((skillSlashStep
+        c.harnessKind c.isDelivered c.alreadySelected c.nameCharsValid
+        c.nameLen c.maxNameLen c.selectedCount c.maxSelected).toUInt32 &&& 256) != 0)
+  sound c h := by
+    unfold skillSlashStep at h
+    dsimp only [] at h
+    unfold SkillSlashCheck.Admissible
+    rw [bne_def' c.nameLen 0,
+        bne_def' c.maxNameLen 0,
+        bne_def' c.nameCharsValid 0,
+        bne_def' c.isDelivered 0,
+        beq_not_bne c.alreadySelected 0,
+        bne_def' c.maxSelected 0]
+    have r1 : ((1 : UInt64) ||| (c.selectedCount.toUInt64 <<< 32)).toUInt32 = 1 :=
+      pack32_toUInt32 1 c.selectedCount
+    have r2 : ((2 : UInt64) ||| (c.selectedCount.toUInt64 <<< 32)).toUInt32 = 2 :=
+      pack32_toUInt32 2 c.selectedCount
+    have r3 : ((3 : UInt64) ||| (c.selectedCount.toUInt64 <<< 32)).toUInt32 = 3 :=
+      pack32_toUInt32 3 c.selectedCount
+    have r4 : ((4 : UInt64) ||| (c.selectedCount.toUInt64 <<< 32)).toUInt32 = 4 :=
+      pack32_toUInt32 4 c.selectedCount
+    have r5 : ((5 : UInt64) ||| (c.selectedCount.toUInt64 <<< 32)).toUInt32 = 5 :=
+      pack32_toUInt32 5 c.selectedCount
+    cases b1 : (c.nameLen == 0)
+    · cases b2 : (c.maxNameLen == 0)
+      · cases b3 : decide (c.maxNameLen < c.nameLen)
+        · cases b4 : (c.nameCharsValid == 0)
+          · cases b5 : (c.isDelivered == 0)
+            · cases b6 : (c.alreadySelected != 0)
+              · cases b7 : (c.maxSelected == 0)
+                · cases b8 : decide (c.maxSelected ≤ c.selectedCount)
+                  · rfl
+                  · simp only [b1, b2, b3, b4, b5, b6, b7, b8, Bool.false_or, Bool.or_true,
+                      Bool.false_eq_true, ↓reduceIte, r5] at h
+                    exact False.elim ((by decide : ¬(((5 : UInt32) &&& 256 != 0) = true)) h)
+                · simp only [b1, b2, b3, b4, b5, b6, b7, Bool.false_or, Bool.true_or,
+                    Bool.false_eq_true, ↓reduceIte, r5] at h
+                  exact False.elim ((by decide : ¬(((5 : UInt32) &&& 256 != 0) = true)) h)
+              · simp only [b1, b2, b3, b4, b5, b6, Bool.false_or, Bool.false_eq_true, ↓reduceIte, r4] at h
+                exact False.elim ((by decide : ¬(((4 : UInt32) &&& 256 != 0) = true)) h)
+            · simp only [b1, b2, b3, b4, b5, Bool.false_or, Bool.false_eq_true, ↓reduceIte, r3] at h
+              exact False.elim ((by decide : ¬(((3 : UInt32) &&& 256 != 0) = true)) h)
+          · simp only [b1, b2, b3, b4, Bool.false_or, Bool.false_eq_true, ↓reduceIte, r2] at h
+            exact False.elim ((by decide : ¬(((2 : UInt32) &&& 256 != 0) = true)) h)
+        · simp only [b1, b2, b3, Bool.false_or, Bool.or_true, ↓reduceIte, r1] at h
+          exact False.elim ((by decide : ¬(((1 : UInt32) &&& 256 != 0) = true)) h)
+      · simp only [b1, b2, Bool.false_or, Bool.true_or, ↓reduceIte, r1] at h
+        exact False.elim ((by decide : ¬(((1 : UInt32) &&& 256 != 0) = true)) h)
+    · simp only [b1, Bool.true_or, ↓reduceIte, r1] at h
+      exact False.elim ((by decide : ¬(((1 : UInt32) &&& 256 != 0) = true)) h)
+  complete c h := by
+    unfold SkillSlashCheck.Admissible at h
+    unfold skillSlashStep
+    dsimp only []
+    rw [bne_def' c.nameLen 0,
+        bne_def' c.maxNameLen 0,
+        bne_def' c.nameCharsValid 0,
+        bne_def' c.isDelivered 0,
+        beq_not_bne c.alreadySelected 0,
+        bne_def' c.maxSelected 0] at h
+    have rok1 := pack32_toUInt32 ((256 : UInt32) ||| ((1 : UInt32) <<< 16)) (c.selectedCount + 1)
+    have rok2 := pack32_toUInt32 ((256 : UInt32) ||| ((2 : UInt32) <<< 16)) (c.selectedCount + 1)
+    cases b1 : (c.nameLen == 0)
+    · cases b2 : (c.maxNameLen == 0)
+      · cases b3 : decide (c.maxNameLen < c.nameLen)
+        · cases b4 : (c.nameCharsValid == 0)
+          · cases b5 : (c.isDelivered == 0)
+            · cases b6 : (c.alreadySelected != 0)
+              · cases b7 : (c.maxSelected == 0)
+                · cases b8 : decide (c.maxSelected ≤ c.selectedCount)
+                  · cases b9 : (c.harnessKind == 1 || c.harnessKind == 2) <;>
+                      (simp only [b1, b2, b3, b4, b5, b6, b7, b8, b9, Bool.false_or,
+                        Bool.false_eq_true, ↓reduceIte, rok1, rok2]; decide)
+                  · simp [b1, b2, b3, b4, b5, b6, b7, b8] at h
+                · simp [b1, b2, b3, b4, b5, b6, b7] at h
+              · simp [b1, b2, b3, b4, b5, b6] at h
+            · simp [b1, b2, b3, b4, b5] at h
+          · simp [b1, b2, b3, b4] at h
+        · simp [b1, b2, b3] at h
+      · simp [b1, b2] at h
+    · simp [b1] at h
+  posWitness := ⟨1, 1, 0, 1, 12, 64, 0, 8⟩
+  negWitness := ⟨1, 0, 0, 1, 12, 64, 0, 8⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def skillSlashConservedResource : ConservedResource SkillSlashCheck where
+  admit c := skillSlashMetaGate.gate c
+  withinBudget c := c.Admissible
+  conserved c h := skillSlashMetaGate.sound c h
+
+/-- Corollary (`ConservedResource` — `#1553` slash skill selection):
+    Every admitted `/` skill selection produces `selectedCount + 1` in `hi32` and a non-zero
+    invocation strategy (`1` or `2`), and every rejected selection leaves `selectedCount` unchanged. -/
+theorem skill_slash_step_preserves_or_increments_count
+    (hk del dup chars : UInt8) (nl mnl cnt mcnt : UInt32) :
+    let raw := skillSlashStep hk del dup chars nl mnl cnt mcnt
+    (if (raw.toUInt32 &&& 256) != 0 then (raw >>> 32).toUInt32 = cnt + 1
+     else (raw >>> 32).toUInt32 = cnt) := by
+  dsimp only []
+  unfold skillSlashStep
+  dsimp only []
+  have r1 : ((1 : UInt64) ||| (cnt.toUInt64 <<< 32)).toUInt32 = 1 := pack32_toUInt32 1 cnt
+  have r2 : ((2 : UInt64) ||| (cnt.toUInt64 <<< 32)).toUInt32 = 2 := pack32_toUInt32 2 cnt
+  have r3 : ((3 : UInt64) ||| (cnt.toUInt64 <<< 32)).toUInt32 = 3 := pack32_toUInt32 3 cnt
+  have r4 : ((4 : UInt64) ||| (cnt.toUInt64 <<< 32)).toUInt32 = 4 := pack32_toUInt32 4 cnt
+  have r5 : ((5 : UInt64) ||| (cnt.toUInt64 <<< 32)).toUInt32 = 5 := pack32_toUInt32 5 cnt
+  have h1 : ((1 : UInt64) ||| (cnt.toUInt64 <<< 32)) >>> 32 = cnt.toUInt64 := pack32_hi 1 cnt
+  have h2 : ((2 : UInt64) ||| (cnt.toUInt64 <<< 32)) >>> 32 = cnt.toUInt64 := pack32_hi 2 cnt
+  have h3 : ((3 : UInt64) ||| (cnt.toUInt64 <<< 32)) >>> 32 = cnt.toUInt64 := pack32_hi 3 cnt
+  have h4 : ((4 : UInt64) ||| (cnt.toUInt64 <<< 32)) >>> 32 = cnt.toUInt64 := pack32_hi 4 cnt
+  have h5 : ((5 : UInt64) ||| (cnt.toUInt64 <<< 32)) >>> 32 = cnt.toUInt64 := pack32_hi 5 cnt
+  have rok1 := pack32_toUInt32 ((256 : UInt32) ||| ((1 : UInt32) <<< 16)) (cnt + 1)
+  have rok2 := pack32_toUInt32 ((256 : UInt32) ||| ((2 : UInt32) <<< 16)) (cnt + 1)
+  have hok1 := pack32_hi ((256 : UInt32) ||| ((1 : UInt32) <<< 16)) (cnt + 1)
+  have hok2 := pack32_hi ((256 : UInt32) ||| ((2 : UInt32) <<< 16)) (cnt + 1)
+  have c1 : (((1 : UInt32) &&& 256 != 0) = true) = False := by decide
+  have c2 : (((2 : UInt32) &&& 256 != 0) = true) = False := by decide
+  have c3 : (((3 : UInt32) &&& 256 != 0) = true) = False := by decide
+  have c4 : (((4 : UInt32) &&& 256 != 0) = true) = False := by decide
+  have c5 : (((5 : UInt32) &&& 256 != 0) = true) = False := by decide
+  have cok1 : ((((256 : UInt32) ||| ((1 : UInt32) <<< 16)) &&& 256 != 0) = true) = True := by decide
+  have cok2 : ((((256 : UInt32) ||| ((2 : UInt32) <<< 16)) &&& 256 != 0) = true) = True := by decide
+  by_cases b1 : (nl == 0 || mnl == 0 || decide (mnl < nl))
+  · simp only [b1, ↓reduceIte, r1, h1, c1, ite_false, toUInt32_toUInt64]
+  · by_cases b2 : (chars == 0)
+    · simp only [b1, b2, Bool.false_eq_true, ↓reduceIte, r2, h2, c2, ite_false, toUInt32_toUInt64]
+    · by_cases b3 : (del == 0)
+      · simp only [b1, b2, b3, Bool.false_eq_true, ↓reduceIte, r3, h3, c3, ite_false, toUInt32_toUInt64]
+      · by_cases b4 : (dup != 0)
+        · simp only [b1, b2, b3, b4, Bool.false_eq_true, ↓reduceIte, r4, h4, c4, ite_false, toUInt32_toUInt64]
+        · by_cases b5 : (mcnt == 0 || decide (mcnt ≤ cnt))
+          · simp only [b1, b2, b3, b4, b5, Bool.false_eq_true, ↓reduceIte, r5, h5, c5, ite_false, toUInt32_toUInt64]
+          · cases b6 : (hk == 1 || hk == 2) <;>
+              simp only [b1, b2, b3, b4, b5, b6, Bool.false_eq_true, ↓reduceIte,
+                rok1, rok2, hok1, hok2, cok1, cok2, ite_true, toUInt32_toUInt64]
+
+-- ===========================================================================
+-- Workspace Occupancy & Sibling Git Worktree Admission (`#1552`: `orb_worktree_decision_step`)
+-- ===========================================================================
+
+structure WorktreeCreateCheck where
+  isGitRepo        : UInt8
+  branchCharsValid : UInt8
+  targetPathExists : UInt8
+  parentDirValid   : UInt8
+  slugLen          : UInt32
+  maxSlugLen       : UInt32
+  activeWorktrees  : UInt32
+  maxWorktrees     : UInt32
+  deriving Repr, DecidableEq
+
+def WorktreeCreateCheck.Safe (c : WorktreeCreateCheck) : Bool :=
+  c.isGitRepo != 0 &&
+  c.parentDirValid != 0 &&
+  c.branchCharsValid != 0 &&
+  c.slugLen != 0 &&
+  c.maxSlugLen != 0 &&
+  !(decide (c.maxSlugLen < c.slugLen)) &&
+  c.targetPathExists == 0 &&
+  c.maxWorktrees != 0 &&
+  !(decide (c.maxWorktrees ≤ c.activeWorktrees))
+
+def worktreeCreateMetaGate : MetaGateSpec WorktreeCreateCheck
+    (fun c => c.Safe = true) where
+  gate c :=
+    ((worktreeDecisionStep
+        1 1 c.isGitRepo c.branchCharsValid c.targetPathExists c.parentDirValid
+        c.slugLen c.maxSlugLen c.activeWorktrees c.maxWorktrees &&& 256) != 0)
+  sound c h := by
+    unfold worktreeDecisionStep at h
+    unfold WorktreeCreateCheck.Safe
+    have hop0 : ((1 : UInt8) == 0) = false := rfl
+    have hop1 : ((1 : UInt8) == 1) = true := rfl
+    rw [bne_def' c.isGitRepo 0,
+        bne_def' c.parentDirValid 0,
+        bne_def' c.branchCharsValid 0,
+        bne_def' c.slugLen 0,
+        bne_def' c.maxSlugLen 0,
+        beq_not_bne c.targetPathExists 0,
+        bne_def' c.maxWorktrees 0]
+    cases b1 : (c.isGitRepo == 0)
+    · cases b2 : (c.parentDirValid == 0)
+      · cases b3 : (c.branchCharsValid == 0)
+        · cases b4 : (c.slugLen == 0)
+          · cases b5 : (c.maxSlugLen == 0)
+            · cases b6 : decide (c.maxSlugLen < c.slugLen)
+              · cases b7 : (c.targetPathExists != 0)
+                · cases b8 : (c.maxWorktrees == 0)
+                  · cases b9 : decide (c.maxWorktrees ≤ c.activeWorktrees)
+                    · rfl
+                    · simp only [hop0, hop1, b1, b2, b3, b4, b5, b6, b7, b8, b9,
+                        Bool.false_or, Bool.or_true, Bool.false_eq_true, ↓reduceIte] at h
+                      exact False.elim ((by decide : ¬(((6 : UInt32) &&& 256 != 0) = true)) h)
+                  · simp only [hop0, hop1, b1, b2, b3, b4, b5, b6, b7, b8,
+                      Bool.false_or, Bool.true_or, Bool.false_eq_true, ↓reduceIte] at h
+                    exact False.elim ((by decide : ¬(((6 : UInt32) &&& 256 != 0) = true)) h)
+                · simp only [hop0, hop1, b1, b2, b3, b4, b5, b6, b7,
+                    Bool.false_or, Bool.false_eq_true, ↓reduceIte] at h
+                  exact False.elim ((by decide : ¬(((5 : UInt32) &&& 256 != 0) = true)) h)
+              · simp only [hop0, hop1, b1, b2, b3, b4, b5, b6,
+                  Bool.false_or, Bool.or_true, Bool.false_eq_true, ↓reduceIte] at h
+                exact False.elim ((by decide : ¬(((4 : UInt32) &&& 256 != 0) = true)) h)
+            · simp only [hop0, hop1, b1, b2, b3, b4, b5,
+                Bool.false_or, Bool.true_or, Bool.false_eq_true, ↓reduceIte] at h
+              exact False.elim ((by decide : ¬(((4 : UInt32) &&& 256 != 0) = true)) h)
+          · simp only [hop0, hop1, b1, b2, b3, b4,
+              Bool.false_or, Bool.true_or, Bool.false_eq_true, ↓reduceIte] at h
+            exact False.elim ((by decide : ¬(((4 : UInt32) &&& 256 != 0) = true)) h)
+        · simp only [hop0, hop1, b1, b2, b3,
+            Bool.true_or, Bool.false_eq_true, ↓reduceIte] at h
+          exact False.elim ((by decide : ¬(((4 : UInt32) &&& 256 != 0) = true)) h)
+      · simp only [hop0, hop1, b1, b2, Bool.false_eq_true, ↓reduceIte] at h
+        exact False.elim ((by decide : ¬(((3 : UInt32) &&& 256 != 0) = true)) h)
+    · simp only [hop0, hop1, b1, Bool.false_eq_true, ↓reduceIte] at h
+      exact False.elim ((by decide : ¬(((2 : UInt32) &&& 256 != 0) = true)) h)
+  complete c h := by
+    unfold WorktreeCreateCheck.Safe at h
+    unfold worktreeDecisionStep
+    have hop0 : ((1 : UInt8) == 0) = false := rfl
+    have hop1 : ((1 : UInt8) == 1) = true := rfl
+    rw [bne_def' c.isGitRepo 0,
+        bne_def' c.parentDirValid 0,
+        bne_def' c.branchCharsValid 0,
+        bne_def' c.slugLen 0,
+        bne_def' c.maxSlugLen 0,
+        beq_not_bne c.targetPathExists 0,
+        bne_def' c.maxWorktrees 0] at h
+    cases b1 : (c.isGitRepo == 0)
+    · cases b2 : (c.parentDirValid == 0)
+      · cases b3 : (c.branchCharsValid == 0)
+        · cases b4 : (c.slugLen == 0)
+          · cases b5 : (c.maxSlugLen == 0)
+            · cases b6 : decide (c.maxSlugLen < c.slugLen)
+              · cases b7 : (c.targetPathExists != 0)
+                · cases b8 : (c.maxWorktrees == 0)
+                  · cases b9 : decide (c.maxWorktrees ≤ c.activeWorktrees)
+                    · simp only [hop0, hop1, b1, b2, b3, b4, b5, b6, b7, b8, b9,
+                        Bool.false_or, Bool.false_eq_true, ↓reduceIte]
+                      decide
+                    · simp [b1, b2, b3, b4, b5, b6, b7, b8, b9] at h
+                  · simp [b1, b2, b3, b4, b5, b6, b7, b8] at h
+                · simp [b1, b2, b3, b4, b5, b6, b7] at h
+              · simp [b1, b2, b3, b4, b5, b6] at h
+            · simp [b1, b2, b3, b4, b5] at h
+          · simp [b1, b2, b3, b4] at h
+        · simp [b1, b2, b3] at h
+      · simp [b1, b2] at h
+    · simp [b1] at h
+  posWitness := ⟨1, 1, 0, 1, 18, 64, 1, 16⟩
+  negWitness := ⟨1, 1, 1, 1, 18, 64, 1, 16⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary (`ScopedAuthority` — `#1552` busy-repo prompt):
+    When a directory is occupied (`isOccupied = 1`), `worktreeDecisionStep 0 ...` ALWAYS rejects
+    in-place launch (`admittedBit(256) = 0`) and offers sibling worktree creation (`512` bit)
+    iff `isGitRepo != 0 && parentDirValid != 0`. -/
+theorem worktree_decision_busy_repo_never_admits_in_place_and_gates_offer
+    (isGit brOk exists_ parentOk : UInt8) (sl msl aw mw : UInt32) :
+    ((worktreeDecisionStep 0 1 isGit brOk exists_ parentOk sl msl aw mw &&& 256) == 0) = true ∧
+    (((worktreeDecisionStep 0 1 isGit brOk exists_ parentOk sl msl aw mw &&& 512) != 0) =
+      (isGit != 0 && parentOk != 0)) := by
+  unfold worktreeDecisionStep
+  have hop0 : ((0 : UInt8) == 0) = true := rfl
+  have hocc : ((1 : UInt8) == 0) = false := rfl
+  simp only [hop0, hocc, Bool.false_eq_true, ↓reduceIte]
+  cases b1 : (isGit != 0) <;> cases b2 : (parentOk != 0) <;>
+    (simp only [b1, b2, Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte]; decide)
+
+-- ===========================================================================
+-- Repo Supervision Git Status & Diff Budget (`#352`: `orb_repo_diff_budget_step`)
+-- ===========================================================================
+
+structure RepoDiffBudgetCheck where
+  isGitRepo     : UInt8
+  pathSafe      : UInt8
+  hasUntracked  : UInt8
+  modifiedCount : UInt32
+  stagedCount   : UInt32
+  aheadCount    : UInt32
+  behindCount   : UInt32
+  diffBytes     : UInt32
+  maxFiles      : UInt32
+  maxBytes      : UInt32
+  deriving Repr, DecidableEq
+
+def RepoDiffBudgetCheck.Admissible (c : RepoDiffBudgetCheck) : Bool :=
+  c.isGitRepo != 0 &&
+  c.pathSafe != 0 &&
+  c.maxFiles != 0 &&
+  c.maxBytes != 0
+
+def repoDiffBudgetMetaGate : MetaGateSpec RepoDiffBudgetCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    (((repoDiffBudgetStep
+        c.isGitRepo c.pathSafe c.hasUntracked
+        c.modifiedCount c.stagedCount c.aheadCount c.behindCount
+        c.diffBytes c.maxFiles c.maxBytes).toUInt32 &&& 256) != 0)
+  sound c h := by
+    unfold repoDiffBudgetStep at h
+    dsimp only [] at h
+    unfold RepoDiffBudgetCheck.Admissible
+    rw [bne_def' c.isGitRepo 0,
+        bne_def' c.pathSafe 0,
+        bne_def' c.maxFiles 0,
+        bne_def' c.maxBytes 0]
+    cases bg : (c.isGitRepo == 0)
+    · cases bp : (c.pathSafe == 0)
+      · cases bmf : (c.maxFiles == 0)
+        · cases bmb : (c.maxBytes == 0)
+          · rfl
+          · simp only [bg, bp, bmf, bmb, Bool.false_or, Bool.or_true, Bool.false_eq_true, ↓reduceIte] at h
+            exact False.elim ((by decide : ¬(((3 : UInt64).toUInt32 &&& 256 != 0) = true)) h)
+        · simp only [bg, bp, bmf, Bool.true_or, Bool.false_eq_true, ↓reduceIte] at h
+          exact False.elim ((by decide : ¬(((3 : UInt64).toUInt32 &&& 256 != 0) = true)) h)
+      · simp only [bg, bp, Bool.false_eq_true, ↓reduceIte] at h
+        exact False.elim ((by decide : ¬(((2 : UInt64).toUInt32 &&& 256 != 0) = true)) h)
+    · simp only [bg, ↓reduceIte] at h
+      exact False.elim ((by decide : ¬(((1 : UInt64).toUInt32 &&& 256 != 0) = true)) h)
+  complete c h := by
+    unfold RepoDiffBudgetCheck.Admissible at h
+    rw [bne_def' c.isGitRepo 0,
+        bne_def' c.pathSafe 0,
+        bne_def' c.maxFiles 0,
+        bne_def' c.maxBytes 0] at h
+    cases bg : (c.isGitRepo == 0)
+    · cases bp : (c.pathSafe == 0)
+      · cases bmf : (c.maxFiles == 0)
+        · cases bmb : (c.maxBytes == 0)
+          · unfold repoDiffBudgetStep
+            dsimp only []
+            simp only [bg, bp, bmf, bmb, Bool.false_or, Bool.false_eq_true, ↓reduceIte, pack32_toUInt32]
+            apply bne_iff_ne.mpr
+            intro hz
+            have h8 := congrArg (fun x : UInt32 => x.toBitVec.getLsbD 8) hz
+            simp [UInt32.toBitVec_and, UInt32.toBitVec_or] at h8
+          · simp [bg, bp, bmf, bmb] at h
+        · simp [bg, bp, bmf] at h
+      · simp [bg, bp] at h
+    · simp [bg] at h
+  posWitness := ⟨1, 1, 0, 3, 1, 2, 0, 4096, 200, 262144⟩
+  negWitness := ⟨1, 0, 0, 3, 1, 2, 0, 4096, 200, 262144⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary (`ConservedResource` — `#352` diff byte cap):
+    For every input, the returned `clampedBytes` (`hi32`) never exceeds `maxBytes`. -/
+theorem repo_diff_budget_clamps_output_bytes
+    (isGit pathSafe untracked : UInt8)
+    (modCnt stgCnt ahead behind diffB maxF maxB : UInt32) :
+    ((repoDiffBudgetStep isGit pathSafe untracked modCnt stgCnt ahead behind diffB maxF maxB >>> 32).toUInt32) ≤ maxB := by
+  have hzero : (0 : UInt32) ≤ maxB := UInt32.le_iff_toNat_le.mpr (Nat.zero_le _)
+  unfold repoDiffBudgetStep
+  dsimp only []
+  by_cases hg : isGit == 0
+  · simp only [hg, ↓reduceIte]; exact hzero
+  · by_cases hp : pathSafe == 0
+    · simp only [hg, hp, Bool.false_eq_true, ↓reduceIte]; exact hzero
+    · by_cases hm : (maxF == 0 || maxB == 0)
+      · simp only [hg, hp, hm, Bool.false_eq_true, ↓reduceIte]; exact hzero
+      · simp only [hg, hp, hm, Bool.false_eq_true, ↓reduceIte, pack32_hi, toUInt32_toUInt64]
+        by_cases hd : diffB ≤ maxB
+        · simp [hd]
+        · simp only [hd, ↓reduceIte]; exact UInt32.le_refl maxB
+
 end Orb.Spec

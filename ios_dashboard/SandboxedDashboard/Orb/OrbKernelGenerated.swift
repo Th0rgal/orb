@@ -434,6 +434,21 @@ internal func orb_composer_default_step(_ hasExplicitChoice: UInt8, _ hasPinnedC
 @_silgen_name("orb_cloud_handoff_step")
 internal func orb_cloud_handoff_step(_ sourceIsCloud: UInt8, _ isSideQuestion: UInt8, _ targetIsNative: UInt8, _ hasHistoryTurns: UInt8, _ targetPlacementValid: UInt8) -> UInt32
 
+@_silgen_name("orb_codex_goal_launch_step")
+internal func orb_codex_goal_launch_step(_ isGoalRequest: UInt8, _ hasNonEmptyObjective: UInt8, _ hasImages: UInt8, _ hasExplicitCyber: UInt8, _ hasChatGptAuth: UInt8, _ modelCompatible: UInt8, _ accountSupportsProgram: UInt8, _ resumedGoalActive: UInt8, _ hasRetiredAlias: UInt8) -> UInt32
+
+@_silgen_name("orb_codex_goal_preact_filter")
+internal func orb_codex_goal_preact_filter(_ msgKind: UInt8, _ isRequest: UInt8, _ sameThread: UInt8, _ hasTurnId: UInt8, _ threadAlreadyActive: UInt8, _ goalGetWasNull: UInt8, _ snapshotMatchesGoalGet: UInt8) -> UInt8
+
+@_silgen_name("orb_skill_slash_step")
+internal func orb_skill_slash_step(_ harnessKind: UInt8, _ isDelivered: UInt8, _ alreadySelected: UInt8, _ nameCharsValid: UInt8, _ nameLen: UInt32, _ maxNameLen: UInt32, _ selectedCount: UInt32, _ maxSelected: UInt32) -> UInt64
+
+@_silgen_name("orb_worktree_decision_step")
+internal func orb_worktree_decision_step(_ opKind: UInt8, _ isOccupied: UInt8, _ isGitRepo: UInt8, _ branchCharsValid: UInt8, _ targetPathExists: UInt8, _ parentDirValid: UInt8, _ slugLen: UInt32, _ maxSlugLen: UInt32, _ activeWorktrees: UInt32, _ maxWorktrees: UInt32) -> UInt32
+
+@_silgen_name("orb_repo_diff_budget_step")
+internal func orb_repo_diff_budget_step(_ isGitRepo: UInt8, _ pathSafe: UInt8, _ hasUntracked: UInt8, _ modifiedCount: UInt32, _ stagedCount: UInt32, _ aheadCount: UInt32, _ behindCount: UInt32, _ diffBytes: UInt32, _ maxFiles: UInt32, _ maxBytes: UInt32) -> UInt64
+
 enum OrbKernel {
     struct WorkfoldVerdict: Equatable, Sendable {
         let foldItem: Bool
@@ -1179,5 +1194,184 @@ enum OrbKernel {
         )
         if (raw & 1) == 0 { return .deny }
         return ((raw >> 24) & 1) != 0 ? .allowHandoff : .allowNativeFork
+    }
+
+    struct CodexGoalLaunchVerdict: Equatable, Sendable {
+        let admitted: Bool
+        let goalMode: Bool
+        let rejectCode: UInt8
+    }
+
+    static func codexGoalLaunchStep(
+        isGoalRequest: Bool,
+        hasNonEmptyObjective: Bool,
+        hasImages: Bool,
+        hasExplicitCyber: Bool,
+        hasChatGptAuth: Bool,
+        modelCompatible: Bool,
+        accountSupportsProgram: Bool,
+        resumedGoalActive: Bool,
+        hasRetiredAlias: Bool
+    ) -> CodexGoalLaunchVerdict {
+        let raw = orb_codex_goal_launch_step(
+            b8(isGoalRequest),
+            b8(hasNonEmptyObjective),
+            b8(hasImages),
+            b8(hasExplicitCyber),
+            b8(hasChatGptAuth),
+            b8(modelCompatible),
+            b8(accountSupportsProgram),
+            b8(resumedGoalActive),
+            b8(hasRetiredAlias)
+        )
+        let admitted = (raw & 256) != 0
+        return CodexGoalLaunchVerdict(
+            admitted: admitted,
+            goalMode: (raw & 512) != 0,
+            rejectCode: admitted ? 0 : UInt8(raw & 0xFF)
+        )
+    }
+
+    static func codexGoalPreactFilter(
+        msgKind: Int,
+        isRequest: Bool,
+        sameThread: Bool,
+        hasTurnId: Bool,
+        threadAlreadyActive: Bool,
+        goalGetWasNull: Bool,
+        snapshotMatchesGoalGet: Bool
+    ) -> Bool {
+        orb_codex_goal_preact_filter(
+            enum8(msgKind),
+            b8(isRequest),
+            b8(sameThread),
+            b8(hasTurnId),
+            b8(threadAlreadyActive),
+            b8(goalGetWasNull),
+            b8(snapshotMatchesGoalGet)
+        ) == 1
+    }
+
+    struct SkillSlashVerdict: Equatable, Sendable {
+        let admitted: Bool
+        let strategy: UInt8
+        let rejectCode: UInt8
+        let nextSelectedCount: Int
+    }
+
+    static func skillSlashStep(
+        harnessKind: Int,
+        isDelivered: Bool,
+        alreadySelected: Bool,
+        nameCharsValid: Bool,
+        nameLen: Int,
+        maxNameLen: Int,
+        selectedCount: Int,
+        maxSelected: Int
+    ) -> SkillSlashVerdict {
+        let raw = orb_skill_slash_step(
+            enum8(harnessKind),
+            b8(isDelivered),
+            b8(alreadySelected),
+            b8(nameCharsValid),
+            satU32(nameLen),
+            satU32(maxNameLen),
+            satU32(selectedCount),
+            satU32(maxSelected)
+        )
+        let lo32 = UInt32(truncatingIfNeeded: raw)
+        let hi32 = UInt32(truncatingIfNeeded: raw >> 32)
+        let admitted = (lo32 & 256) != 0
+        return SkillSlashVerdict(
+            admitted: admitted,
+            strategy: UInt8((lo32 >> 16) & 0xFF),
+            rejectCode: admitted ? 0 : UInt8(lo32 & 0xFF),
+            nextSelectedCount: Int(hi32)
+        )
+    }
+
+    struct WorktreeDecisionVerdict: Equatable, Sendable {
+        let admitted: Bool
+        let offerWorktree: Bool
+        let actionOrRejectCode: UInt8
+    }
+
+    static func worktreeDecisionStep(
+        opKind: Int,
+        isOccupied: Bool,
+        isGitRepo: Bool,
+        branchCharsValid: Bool,
+        targetPathExists: Bool,
+        parentDirValid: Bool,
+        slugLen: Int,
+        maxSlugLen: Int,
+        activeWorktrees: Int,
+        maxWorktrees: Int
+    ) -> WorktreeDecisionVerdict {
+        let raw = orb_worktree_decision_step(
+            enum8(opKind),
+            b8(isOccupied),
+            b8(isGitRepo),
+            b8(branchCharsValid),
+            b8(targetPathExists),
+            b8(parentDirValid),
+            satU32(slugLen),
+            satU32(maxSlugLen),
+            satU32(activeWorktrees),
+            satU32(maxWorktrees)
+        )
+        return WorktreeDecisionVerdict(
+            admitted: (raw & 256) != 0,
+            offerWorktree: (raw & 512) != 0,
+            actionOrRejectCode: UInt8(raw & 0xFF)
+        )
+    }
+
+    struct RepoDiffBudgetVerdict: Equatable, Sendable {
+        let admitted: Bool
+        let dirty: Bool
+        let truncatedFiles: Bool
+        let truncatedBytes: Bool
+        let syncState: UInt8
+        let rejectCode: UInt8
+        let clampedBytes: Int
+    }
+
+    static func repoDiffBudgetStep(
+        isGitRepo: Bool,
+        pathSafe: Bool,
+        hasUntracked: Bool,
+        modifiedCount: Int,
+        stagedCount: Int,
+        aheadCount: Int,
+        behindCount: Int,
+        diffBytes: Int,
+        maxFiles: Int,
+        maxBytes: Int
+    ) -> RepoDiffBudgetVerdict {
+        let raw = orb_repo_diff_budget_step(
+            b8(isGitRepo),
+            b8(pathSafe),
+            b8(hasUntracked),
+            satU32(modifiedCount),
+            satU32(stagedCount),
+            satU32(aheadCount),
+            satU32(behindCount),
+            satU32(diffBytes),
+            satU32(maxFiles),
+            satU32(maxBytes)
+        )
+        let lo32 = UInt32(truncatingIfNeeded: raw)
+        let hi32 = UInt32(truncatingIfNeeded: raw >> 32)
+        let admitted = (lo32 & 256) != 0
+        return RepoDiffBudgetVerdict(
+            admitted: admitted,
+            dirty: (lo32 & 512) != 0,
+            truncatedFiles: (lo32 & 1024) != 0,
+            truncatedBytes: (lo32 & 2048) != 0,
+            syncState: UInt8((lo32 >> 16) & 0xFF),
+            rejectCode: admitted ? 0 : UInt8(lo32 & 0xFF),
+            clampedBytes: Int(hi32)
+        )
     }
 }

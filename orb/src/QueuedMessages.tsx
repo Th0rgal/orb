@@ -2,6 +2,7 @@ import {For,Show,createMemo,createSignal} from 'solid-js';
 import { ErrorToast } from "./toast";
 import {canDiscardQueuedMessage,queuedLocalMessages,removeQueuedMessage,retryQueuedMessage,sendQueuedNow} from './localMessageQueue';
 import * as Ic from './icons';
+import { skillPreview } from './skillSlash';
 /** Follow-ups waiting for the current turn, shown like Cursor's queue: one line per
  * message, hover actions, and the row being edited marked in place. */
 export function QueuedMessages(p:{mission:string;editing?:string;pending?:{id:string;text:string}[];onEdit?:(row:{id:string;text:string})=>void;onCancel?:(id:string)=>void;onCancelPending?:(id:string)=>void}){
@@ -29,7 +30,7 @@ export function QueuedMessages(p:{mission:string;editing?:string;pending?:{id:st
   <Show when={!collapsed()}><ol classList={{scrollable:totalCount()>6}}>
    <For each={rows()}>{row=><li class="queue-row" classList={{editing:p.editing===row.id,failed:!!row.error}}>
     <div class="queue-line">
-     <span class="queue-text" title={row.text}>{row.text}</span>
+      <span class="queue-text" title={skillPreview(row.text)}>{skillPreview(row.text)}</span>
      <Show when={p.editing===row.id} fallback={<span class="queue-row-actions">
       <Show when={p.onEdit&&row.state==='queued'}><button type="button" class="queue-action-btn" aria-label={`Edit queued message: ${row.text}`} disabled={working()||busyIds().has(row.id)||!!p.editing} onClick={()=>p.onEdit!({id:row.id,text:row.text})}><Ic.PencilIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Edit</span><kbd>→</kbd></span></button></Show>
       <Show when={row.state==='queued'}><button type="button" class="queue-action-btn" aria-label={`Send now: ${row.text}`} disabled={working()||busyIds().has(row.id)||!!p.editing} onClick={()=>void act(()=>sendQueuedNow(p.mission,row.id))}><Ic.ArrowUpIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Send now</span><kbd>↵</kbd></span></button></Show>
@@ -41,7 +42,7 @@ export function QueuedMessages(p:{mission:string;editing?:string;pending?:{id:st
    </li>}</For>
    <For each={pendingRows()}>{row=><li class="queue-row">
     <div class="queue-line">
-     <span class="queue-text" title={row.text}>{row.text}</span>
+      <span class="queue-text" title={skillPreview(row.text)}>{skillPreview(row.text)}</span>
      <Show when={p.onCancelPending} fallback={<span class="queue-editing">Sending…</span>}>
       <span class="queue-row-actions">
        <button type="button" class="queue-action-btn" aria-label={`Remove queued message: ${row.text}`} onClick={()=>p.onCancelPending!(row.id)}><Ic.TrashIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Delete</span></span></button>

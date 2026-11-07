@@ -1,4 +1,5 @@
 import LeanSys
+import Orb.Kernel
 import OrbNetLeaf
 import OrbBin.Json
 import OrbBin.PosixExt
@@ -6,7 +7,7 @@ import OrbLocald.Spec
 
 /-
   OrbLocald.Rpc — Loopback JSON-RPC & transport proxy bridge for Orb desktop:
-    - All 88 desktop IPC commands (`87` commands + `plugin:app|version`)
+    - All 89 desktop IPC commands (`88` commands + `plugin:app|version`)
     - `transport_bridge_configure` with 6 dedicated live SSE stream shard sockets,
       0ms local OPTIONS CORS preflight, DoH (`1.1.1.1` / `8.8.8.8`), and
       3-way failover (`orbcore.thomas.md` <-> `agent-backend.nico-best-pc-ever.ovh` <-> `agent-backend.thomas.md`)
@@ -200,7 +201,7 @@ def isAllowedLocaldOrigin (origin? : Option String) : Bool :=
       o.startsWith "http://127.0.0.1:" || o.startsWith "http://localhost:" ||
       o == "http://127.0.0.1" || o == "http://localhost"
 
-/-- Canonical list of all 88 desktop IPC commands (`87` commands + `plugin:app|version`). -/
+/-- Canonical list of all 89 desktop IPC commands (`88` commands + `plugin:app|version`). -/
 def supportedDesktopCommands : Array String := #[
   "plugin:app|version",
   "transport_bridge_configure",
@@ -227,9 +228,147 @@ def supportedDesktopCommands : Array String := #[
   "project_context_status", "project_context_subscribe", "project_context_unsubscribe",
   "project_context_sync", "project_context_disconnect", "project_context_workers", "project_context_stop",
   "software_inventory", "software_update", "software_cancel",
-  "local_skills_status", "local_skills_sync", "local_skill_source_files",
+  "local_skills_status", "local_skills_sync", "local_skill_source_files", "local_invocable_skills",
   "voice_capability", "voice_prewarm", "voice_transcribe", "voice_cancel"
 ]
+
+structure InvocableSkill where
+  name        : String
+  description : Option String
+  path        : String
+  deriving Repr, DecidableEq
+
+/-- `(globalRel, projectRel)` matching desktop `HARNESS_TARGETS`. -/
+def harnessSkillTargets (harness : String) : Option (String × String) :=
+  match harness with
+  | "claudecode"  => some (".claude/skills", ".claude/skills")
+  | "codex"       => some (".codex/skills", ".agents/skills")
+  | "antigravity" => some (".gemini/config/skills", ".agents/skills")
+  | "opencode"    => some (".config/opencode/skills", ".opencode/skills")
+  | "grok"        => some (".grok/skills", ".grok/skills")
+  | "vibe"        => some (".vibe/skills", ".vibe/skills")
+  | _             => none
+
+def validSkillIdentifier (name : String) : Bool :=
+  !name.isEmpty && name.length ≤ 64 && (name.splitOn "..").length == 1 &&
+    name.toList.all fun c =>
+      ('a' ≤ c && c ≤ 'z') || ('A' ≤ c && c ≤ 'Z') || ('0' ≤ c && c ≤ '9') || c == '.' || c == '_' || c == '-'
+
+private def extractSkillDescription (content : String) : Option String := Id.run do
+  let text := content.replace "\r\n" "\n"
+  if text.startsWith "---\n" then
+    let rest := (text.drop 4).toString
+    let lines := rest.splitOn "\n"
+    let mut inFm := true
+    let mut desc? : Option String := none
+    let mut body : Array String := #[]
+    for line in lines do
+      if inFm then
+        if line == "---" then inFm := false
+        else if line.startsWith "description:" then
+          let raw := ((line.drop 12).toString).trimAscii.toString
+          let v := if raw.startsWith "\"" && raw.endsWith "\"" && raw.length ≥ 2 then ((raw.drop 1).dropEnd 1).toString else raw
+          if !v.isEmpty then desc? := some v
+      else
+        body := body.push line
+    if let some d := desc? then return some d
+    let p := (((String.intercalate "\n" body.toList).trimAscii.toString.splitOn "\n\n").head?.getD "").trimAscii.toString
+    if p.isEmpty then return none
+    return some (if p.length > 220 then (p.take 220).toString else p)
+  else
+    let p := text.trimAscii.toString
+    if p.isEmpty then return none
+    let paragraph := (p.splitOn "\n\n").head?.getD p
+    return some (if paragraph.length > 220 then (paragraph.take 220).toString else paragraph)
+
+/-- Project skills (`cwd/<projectRel>`) win over global skills (`home/<globalRel>`), sorted by skill name. -/
+def invocableSkillsIn (home cwd : System.FilePath) (harness : String) : IO (Except String (Array InvocableSkill)) := do
+  let some (globalRel, projectRel) := harnessSkillTargets harness
+    | return .error "Unknown skill harness"
+  let mut found : Array InvocableSkill := #[]
+  for root in #[cwd / projectRel, home / globalRel] do
+    let entries ← try root.readDir catch _ => pure #[]
+    for entry in entries do
+      let name := entry.fileName
+      if validSkillIdentifier name && !(found.any (fun s => s.name == name)) then
+        let md := entry.path / "SKILL.md"
+        let st ← OrbBin.PosixExt.statPath md.toString
+        if st.exists_ && st.isReg && !st.isSymlink then
+          let raw ← try IO.FS.readFile md catch _ => pure ""
+          found := found.push { name := name, description := extractSkillDescription raw, path := md.toString }
+  return .ok (found.qsort (fun a b => a.name < b.name))
+
+def selectLocalSkillsIn (home cwd : System.FilePath) (harness prompt : String) : IO (Except String (Array (String × String × UInt8))) := do
+  let refs := (prompt.split (fun c => c == ' ' || c == '\t' || c == '\n' || c == '\r')).toArray.filterMap fun w =>
+    if w.startsWith "/skill:" then some (w.drop 7).toString else none
+  if refs.isEmpty then return .ok #[]
+  let skills ← match ← invocableSkillsIn home cwd harness with
+    | .ok xs => pure xs
+    | .error e => return .error e
+  let hKind : UInt8 := if harness == "opencode" then 1 else if harness == "claudecode" then 2 else 0
+  let mut selected : Array (String × String × UInt8) := #[]
+  for name in refs do
+    if selected.any (fun (n, _, _) => n == name) then
+      continue
+    let skill? := skills.find? (fun s => s.name == name)
+    let verdict := Orb.Kernel.skillSlashStep
+      hKind
+      (if skill?.isSome then 1 else 0)
+      0
+      (if validSkillIdentifier name then 1 else 0)
+      (if name.utf8ByteSize > 0xFFFFFFFF then 0xFFFFFFFF else name.utf8ByteSize.toUInt32)
+      64
+      selected.size.toUInt32
+      8
+    let lo := verdict.toUInt32
+    if (lo &&& 255) != 0 then
+      let code := lo &&& 255
+      let msg :=
+        if code == 1 || code == 2 then "Invalid /skill: identifier (use at most 64 ASCII letters, numbers, '.', '_' or '-', without '..')"
+        else if code == 3 then s!"Selected skill is not delivered to this mission: {name}"
+        else if code == 5 then "Select at most 8 distinct skills"
+        else "Skill selection rejected"
+      return .error msg
+    let some sk := skill? | return .error "Selected skill is unavailable"
+    selected := selected.push (name, sk.path, ((lo >>> 16) &&& 255).toUInt8)
+  return .ok selected
+
+def validateLocalCodexLaunch (prompt model cyberMode : String) (hasImages : Bool) : Except String Unit := do
+  let bare := (model.splitOn "/").getLast?.getD model
+  let hasRetired := bare == "gpt-daybreak-blue-latest" || bare == "gpt-daybreak-red-latest"
+  let mode := cyberMode.trimAscii.toString.toLower
+  let explicitCyber := !mode.isEmpty && mode != "automatic"
+  let modelCompat :=
+    if mode == "standard" then !(bare.startsWith "gpt-daybreak-" || bare == "gpt-5.6-cyber")
+    else if mode == "daybreak" then
+      bare == "gpt-6-sol" || bare == "gpt-6.1-sol" || bare == "gpt-6-astra" || bare == "gpt-5.6-sol" || bare == "gpt-5.6-cyber"
+    else mode.isEmpty || mode == "automatic"
+  let t := prompt.trimAscii.toString
+  let goalObj? : Option String :=
+    if t == "/goal" then some ""
+    else if t.startsWith "/goal" then
+      let rest := (t.drop 5).toString
+      match rest.toList.head? with
+      | some c => if c == ' ' || c == '\t' || c == '\n' || c == '\r' then some rest.trimAscii.toString else none
+      | none => some ""
+    else none
+  let verdict := Orb.Kernel.codexGoalLaunchStep
+    (if goalObj?.isSome then 1 else 0)
+    (if (goalObj?.map (fun o => !o.isEmpty)).getD false then 1 else 0)
+    (if hasImages then 1 else 0)
+    (if explicitCyber then 1 else 0)
+    1
+    (if modelCompat then 1 else 0)
+    1
+    0
+    (if hasRetired then 1 else 0)
+  if verdict == 1 then throw "invalid_access_program: the selected model alias is retired."
+  if verdict == 2 then throw "invalid_access_program: explicit cyber selection is incompatible with this model."
+  if verdict == 5 then throw "unsupported_access_program: native goal continuations do not confirm per-turn cyber selection. Choose Automatic explicitly for this goal."
+  if verdict == 6 then throw "/goal requires a non-empty objective."
+  if verdict == 7 then throw "Goal launches with images are not supported yet; include file paths in the objective."
+  if explicitCyber && bare.isEmpty then
+    throw "unsupported_access_program: choose an explicit model before selecting a Cyber program. No thread was started."
 
 private def runOrbSigner (signerBin : String) (subArgs : Array String) (stdinText? : Option String := none) :
     IO (Except (UInt32 × String) JVal) := do
@@ -859,10 +998,65 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     return .ok .null
   | "local_agents_poll" =>
     return .ok (.obj #[("text", .str ""), ("done", .bool true), ("resumed", .bool false)])
-  | "local_agents_cyber_capabilities" =>
-    return .ok (JVal.nat 0)
   | "local_codex_speed_options" =>
     return .ok (.obj #[("tiers", .arr #[])])
+  | "local_agents_cyber_capabilities" =>
+    return .ok (JVal.nat 2)
+  | "local_invocable_skills" =>
+    let cwd := (args.fieldStr? "cwd").getD "."
+    let harness := (args.fieldStr? "harness").getD ""
+    let some home ← OrbBin.PosixExt.firstEnvNonEmpty ["ORB_SKILLS_TEST_HOME", "HOME"]
+      | do
+        if !st.homeDir.isEmpty then
+          match ← invocableSkillsIn (System.FilePath.mk st.homeDir) (System.FilePath.mk cwd) harness with
+          | .error e => return .error e
+          | .ok skills =>
+            return .ok (.arr (skills.map fun s => .obj #[
+              ("name", .str s.name),
+              ("description", match s.description with | some d => .str d | none => .null),
+              ("path", .str s.path)
+            ]))
+        return .error "HOME is not set"
+    match ← invocableSkillsIn (System.FilePath.mk home) (System.FilePath.mk cwd) harness with
+    | .error e => return .error e
+    | .ok skills =>
+      return .ok (.arr (skills.map fun s => .obj #[
+        ("name", .str s.name),
+        ("description", match s.description with | some d => .str d | none => .null),
+        ("path", .str s.path)
+      ]))
+  | "local_origin_launch" | "local_run_launch" =>
+    let reqObj := (args.field? "request").getD args
+    let harness := (reqObj.fieldStr? "harness").getD ""
+    let cwd := (reqObj.fieldStr? "cwd").getD "."
+    let prompt := (reqObj.fieldStr? "prompt").getD (((args.field? "draft").bind (·.fieldStr? "prompt")).getD "")
+    let model := (reqObj.fieldStr? "model").getD ""
+    let cyber := (reqObj.fieldStr? "cyberAccess").getD ((reqObj.fieldStr? "cyber_access").getD "automatic")
+    let hasImgs := (((reqObj.fieldArr? "image_paths").orElse (fun _ => reqObj.fieldArr? "imagePaths")).map (fun xs => !xs.isEmpty)).getD false
+    if !harness.isEmpty then
+      let home? ← do
+        match ← OrbBin.PosixExt.firstEnvNonEmpty ["ORB_SKILLS_TEST_HOME", "HOME"] with
+        | some h => pure (some h)
+        | none => pure (if st.homeDir.isEmpty then none else some st.homeDir)
+      if let some home := home? then
+        if let .error e ← selectLocalSkillsIn (System.FilePath.mk home) (System.FilePath.mk cwd) harness prompt then
+          return .error e
+      if harness == "codex" then
+        if let .error e := validateLocalCodexLaunch prompt model cyber hasImgs then
+          return .error e
+    if cmd == "local_origin_launch" then
+      let rawId ← randomUuidV4
+      let mid := (OrbBin.PosixExt.parseUuidCanonical? rawId).getD rawId
+      let title := (((args.field? "draft").bind (·.fieldStr? "title")).orElse (fun _ => reqObj.fieldStr? "title")).getD "Local Mission"
+      return .ok (.obj #[
+        ("id", .str mid),
+        ("title", .str title),
+        ("status", .str "active"),
+        ("backend", .str (if harness.isEmpty then "opencode" else harness)),
+        ("working_directory", .str cwd),
+        ("total_cost_cents", JVal.nat 0)
+      ])
+    return .ok (.obj #[("ok", .bool true), ("command", .str cmd)])
   | _ =>
     if supportedDesktopCommands.contains cmd then
       return .error s!"{cmd} is not supported in this local runtime"

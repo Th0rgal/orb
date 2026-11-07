@@ -6,6 +6,110 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OrbSendFlowTest {
+    @Test fun nonCodexAndCloudFollowUpsNeverRequestCyber() = kotlinx.coroutines.runBlocking {
+        for (mission in listOf(
+            mapOf("id" to "m", "backend" to "opencode"),
+            mapOf("id" to "m", "backend" to "codex", "cloud" to mapOf("provider" to "chatgpt"))
+        )) {
+            val calls = mutableListOf<String>()
+            OrbCyberAccess.requireFollowUp("m", "/goal") { path -> calls += path; mission }
+            assertEquals(listOf("/api/control/missions/m?include_history=false"), calls)
+        }
+    }
+
+    @Test fun sideQuestionExtractionKeepsActualGoalRequest() {
+        val wrapped = OrbSideAgent.prompt("Earlier context", "/goal fix tests")
+        assertFalse(OrbCyberAccess.nativeGoal("codex", wrapped))
+        assertTrue(OrbCyberAccess.nativeGoal("codex", OrbSideAgent.extractQuestion(wrapped)))
+    }
+
+    @Test fun freshFollowUpRejectsActualGoalBeforeMutationButAllowsPausedGoalText() = kotlinx.coroutines.runBlocking {
+        for (content in listOf("/goal implement", "/goal", "continue working")) {
+            val calls = mutableListOf<String>()
+            var draft = content
+            try {
+                OrbCyberAccess.requireFollowUp("mission", content) { path ->
+                    calls += path
+                    when {
+                        path.endsWith("include_history=false") -> mapOf("id" to "mission", "backend" to "codex", "goal_mode" to true,
+                            "model_override" to "gpt-6.1-sol")
+                        path.endsWith("/cyber") -> mapOf("mode" to "standard", "status" to "requested", "revision" to "2")
+                        else -> mapOf("version" to 2, "native_goals_explicit" to false)
+                    }
+                }
+                calls += "mutation"
+                draft = ""
+            } catch (e: OrbError) {
+                assertTrue(e.message.orEmpty().contains("draft is kept"))
+            }
+            assertEquals(content == "continue working", calls.contains("mutation"))
+            assertEquals(if (content == "continue working") "" else content, draft)
+            assertTrue(calls.first().endsWith("include_history=false"))
+        }
+    }
+
+    @Test fun cyberRefusalPrecedesMutationsAndPreservesDraft() = kotlinx.coroutines.runBlocking {
+        for (mode in listOf(OrbCyberMode.Standard, OrbCyberMode.Daybreak)) {
+            for (capabilities in listOf(
+                mapOf("version" to 2, "native_goals_explicit" to false, "route_supported" to true),
+                mapOf("version" to 1), emptyMap()
+            )) {
+                var draft = "/goal implement the feature"
+                var model = "gpt-6.1-sol"
+                var program = mode
+                val calls = mutableListOf<String>()
+                try {
+                    OrbCyberAccess.requireSupport(model, program, true, OrbCyberAccess.nativeGoal("codex", draft)) {
+                        calls += it
+                        capabilities
+                    }
+                    calls += "upload/create/send/PATCH"
+                    draft = ""
+                    model = ""
+                    program = OrbCyberMode.Automatic
+                    throw AssertionError("Expected Cyber refusal")
+                } catch (e: OrbError) {
+                    assertTrue(e.message.orEmpty().contains("draft is kept"))
+                }
+                assertEquals(1, calls.size)
+                assertTrue(calls.single().startsWith("/api/control/cyber-capabilities?"))
+                assertEquals("/goal implement the feature", draft)
+                assertEquals("gpt-6.1-sol", model)
+                assertEquals(mode, program)
+            }
+        }
+    }
+
+    @Test fun explicitRemoteCyberFailsClosedAndOmitsBlankModel() = kotlinx.coroutines.runBlocking {
+        for (supported in listOf(null, false, true)) {
+            var accepted = false
+            try {
+                OrbCyberAccess.requireSupport("  ", OrbCyberMode.Daybreak, true, false) { path ->
+                    assertFalse(path.contains("model="))
+                    mapOf("version" to 2, "route_supported" to supported)
+                }
+                accepted = true
+            } catch (_: OrbError) { }
+            assertEquals(supported == true, accepted)
+        }
+    }
+
+    @Test fun pausedGoalHistoryDoesNotTurnPlainTextIntoNativeGoal() {
+        assertFalse(OrbCyberAccess.nativeGoal("codex", "continue working"))
+        assertFalse(OrbCyberAccess.nativeGoal("codex", "/goals are useful"))
+        assertTrue(OrbCyberAccess.nativeGoal("codex", " /goal continue working"))
+        assertFalse(OrbCyberAccess.nativeGoal("opencode", "/goal continue working"))
+    }
+
+    @Test fun cyberConfirmationRequiresProviderStatusAndProgram() {
+        assertEquals("Daybreak · requested", OrbCyberSelection(OrbCyberMode.Daybreak, "confirmed", "1", " ").summary)
+        assertEquals("Daybreak · requested", OrbCyberSelection(OrbCyberMode.Daybreak, "requested", "1", "daybreak").summary)
+        assertEquals("Daybreak · confirmed: daybreak", OrbCyberSelection(OrbCyberMode.Daybreak, "confirmed", "2", "daybreak").summary)
+        assertTrue(OrbCyberAccess.compatibility(OrbCyberMode.Standard, "openai/gpt-5.6-cyber") != null)
+        assertTrue(OrbCyberAccess.compatibility(OrbCyberMode.Automatic, "gpt-daybreak-blue-latest")!!.contains("retired"))
+        assertTrue(OrbCyberAccess.error(OrbError("access_program_not_enabled")).contains("model was not changed"))
+    }
+
     private fun ids(q: OrbFollowUpQueue) = q.rows.map { it.id }
 
     @Test fun optimisticSendShowsAtOnceThenSettlesWithoutJump() {

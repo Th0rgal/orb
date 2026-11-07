@@ -320,7 +320,7 @@ struct OrbConversation: View {
                     hasHistoryTurns: !turns.isEmpty,
                     targetPlacementValid: true
                 ) == .allowHandoff
-                OrbAgentPicker(selection: $selection, existing: id != nil, onTransfer: id != nil && (!isCloud || canCloudHandoff) ? { transferRequested = true } : nil).orbTrackPage("agent_picker", surface: .sheet)
+                OrbAgentPicker(selection: $selection, existing: id != nil, onTransfer: id != nil && (!isCloud || canCloudHandoff) ? { transferRequested = true } : nil, missionID: id, goal: OrbCyberAccess.isGoal(text, mode: mode)).orbTrackPage("agent_picker", surface: .sheet)
             }
             .sheet(isPresented: $transferring) { OrbForkSheet(mission: mission, transfer: true) { forkedMission = $0["id"].text }.orbTrackPage("transfer", surface: .sheet) }
             .sheet(isPresented: $showContext) { NavigationStack { OrbDocuments(project: effectiveProjectSlug, path: "").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showContext = false } } } } }
@@ -420,7 +420,8 @@ struct OrbConversation: View {
             if execution != .null { selection.restore(execution["selection"]) }
             else if mission != .null {
                 selection.backend = mission["backend"].text
-                selection.node = mission["remote_node_id"].text
+                let resolvedNode = OrbContinuation.remoteNodeID(for: mission)
+                selection.node = resolvedNode == "core" ? mission["remote_node_id"].text : resolvedNode
                 selection.model = mission["model_override"].text
                 selection.serviceTier = OrbCodexSpeed.of(mission)
             }

@@ -63,6 +63,112 @@ struct OrbCodexSpeedSection: View {
     }
 }
 
+struct OrbCyberSection: View {
+    let model: String
+    let remote: Bool
+    let goal: Bool
+    var missionID: String?
+    @Binding var mode: String
+    @State private var routes: [String: Bool] = [:]
+    @State private var routeLoading = false
+    @State private var routeFailed = false
+    @State private var state: OrbJSON = .null
+    @State private var saving = false
+    @State private var unavailable = false
+    @State private var error = ""
+
+    var body: some View {
+        Section {
+            if unavailable {
+                LabeledContent("Cyber", value: "Unavailable")
+            } else {
+                Picker("Cyber", selection: Binding(
+                    get: { mode },
+                    set: { next in
+                        guard next != mode else { return }
+                        if let missionID { Task { await save(missionID, next: next) } }
+                        else { mode = next }
+                    }
+                )) {
+                    ForEach(OrbCyberAccess.modes, id: \.self) { id in
+                        Text(OrbCyberAccess.label(id)).tag(id).disabled(saving || disabled(id))
+                    }
+                }
+                .disabled(saving)
+                .accessibilityIdentifier("picker.codex-cyber")
+            }
+        } footer: {
+            Text(footer)
+        }
+        .task(id: "\(missionID ?? "")|\(model)|\(remote)") { await load() }
+    }
+
+    private func compatibility(_ id: String) -> String? {
+        remote && model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : OrbCyberAccess.compatibility(mode: id, model: model)
+    }
+    private func goalReason(_ id: String) -> String? {
+        goal && id != "automatic" ? "Native goals cannot confirm an explicit Cyber program. Choose Automatic explicitly." : nil
+    }
+    private func routeReason(_ id: String) -> String? {
+        guard remote, id != "automatic" else { return nil }
+        if routeFailed { return "Could not check the Cyber route. Reopen settings to retry." }
+        if routeLoading { return "Checking the selected Cyber route…" }
+        if routes[id] != true { return "This remote route cannot guarantee the selected Cyber program. Choose Automatic explicitly or a direct OpenAI route." }
+        return nil
+    }
+    private func disabled(_ id: String) -> Bool {
+        compatibility(id) != nil || goalReason(id) != nil || routeReason(id) != nil
+    }
+    private var footer: String {
+        if !error.isEmpty { return error }
+        if unavailable { return "The connected backend does not expose cyber settings, or the request failed. Update or reconnect before changing this option." }
+        if let reason = goalReason(mode) ?? routeReason(mode) ?? compatibility(mode) { return reason }
+        let detail = mode == "standard" ? "Standard safeguards" : (mode == "daybreak" ? "Requires approved account access" : "Use the account’s default access")
+        guard missionID != nil else { return detail }
+        let status = OrbCyberAccess.confirmed(state) ? "Confirmed (\(state["confirmed_program"].text))" : "Requested"
+        return "\(status) · Applies to the next turn."
+    }
+    private func load() async {
+        error = ""
+        if let missionID {
+            do {
+                try await OrbCyberAccess.require(model: "", mode: "automatic", remote: false, goal: false)
+                let fetched = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(missionID))/cyber")
+                guard OrbCyberAccess.modes.contains(fetched["mode"].text) else { unavailable = true; return }
+                state = fetched
+                mode = fetched["mode"].text
+                unavailable = false
+            } catch is CancellationError { return }
+            catch { unavailable = true; return }
+        } else {
+            unavailable = false
+        }
+        guard remote else { routes = [:]; routeLoading = false; routeFailed = false; return }
+        routeLoading = true; routeFailed = false
+        defer { routeLoading = false }
+        do {
+            async let standard = OrbCore.shared.call(OrbCyberAccess.capabilityPath(model: model, mode: "standard", remote: true))
+            async let daybreak = OrbCore.shared.call(OrbCyberAccess.capabilityPath(model: model, mode: "daybreak", remote: true))
+            let (s, d) = try await (standard, daybreak)
+            routes = ["standard": s["route_supported"] == .bool(true), "daybreak": d["route_supported"] == .bool(true)]
+        } catch is CancellationError {}
+        catch { routeFailed = true; routes = [:] }
+    }
+    private func save(_ missionID: String, next: String) async {
+        saving = true; defer { saving = false }
+        do {
+            try await OrbCyberAccess.require(model: model, mode: next, remote: remote, goal: goal)
+            let saved = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(missionID))/cyber", method: "PATCH", body: .object(["mode": .string(next)]))
+            guard OrbCyberAccess.modes.contains(saved["mode"].text) else {
+                throw OrbHTTPError(status: 400, detail: "The backend did not return a Cyber selection. Reopen settings to verify it.")
+            }
+            state = saved
+            mode = saved["mode"].text
+            error = ""
+        } catch { self.error = OrbCyberAccess.error(error) }
+    }
+}
+
 /// Fork a conversation into another harness/model (same workspace), as in Orb's
 /// "Fork conversation" menu.
 struct OrbForkSheet: View {
@@ -190,7 +296,14 @@ struct OrbForkSheet: View {
         guard !busy else { return }
         busy = true; defer { busy = false }
         do {
-            if submitted == nil && backend == "codex" { try await OrbCodexSpeed.require(model: model, tier: speed) }
+            if submitted == nil && backend == "codex" {
+                let cyber = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(mission["id"].text))/cyber")
+                guard OrbCyberAccess.modes.contains(cyber["mode"].text) else {
+                    throw OrbHTTPError(status: 400, detail: "The backend did not return a Cyber selection. Your draft is kept.")
+                }
+                try await OrbCyberAccess.require(model: model, mode: cyber["mode"].text, remote: OrbContinuation.remoteNodeID(for: mission) != "core", goal: false)
+                try await OrbCodexSpeed.require(model: model, tier: speed)
+            }
             var body: [String: OrbJSON] = ["backend": .string(backend), "model_override": .string(model), "model_effort": .string(effort), "idempotency_key": .string(key)]
             if backend == "codex" { body["service_tier"] = .string(speed) }
             if isCloudSource && !targetNode.isEmpty && targetNode != "core" {
@@ -215,7 +328,8 @@ struct OrbForkSheet: View {
         } catch let e as OrbHTTPError where [404, 405].contains(e.status) {
             error = created != nil ? "The new agent is ready, but the original could not be archived." : transfer ? "Transfer is unavailable on this server. The original conversation is retained; it may have been stopped." : "This backend needs the conversation-fork update. The original mission has not been changed."
         } catch {
-            self.error = created == nil ? error.localizedDescription : "The new agent is ready, but the original could not be archived. " + error.localizedDescription
+            let msg = OrbCyberAccess.error(error)
+            self.error = created == nil ? msg : "The new agent is ready, but the original could not be archived. " + msg
         }
     }
 

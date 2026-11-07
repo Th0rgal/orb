@@ -674,6 +674,7 @@ object OrbSideAgent {
         priorTurns: List<Turn> = emptyList(),
         idempotencyKey: String = UUID.randomUUID().toString()
     ): OrbRow {
+        OrbCyberAccess.requireInherited(core, parentId, OrbBtwSettings.harness, OrbBtwSettings.model, question)
         val body = mapOf(
             "backend" to OrbBtwSettings.harness,
             "model_override" to OrbBtwSettings.model,
@@ -1079,6 +1080,7 @@ fun OrbSideAgentSheet(
             val canReuse = !freshSession && !rotateIdle && (isTargetLive || followUps.count > 0 || currentStatus in OrbSideAgent.resumableStatuses)
 
             if (targetId != null && canReuse) {
+                OrbCyberAccess.requireFollowUp(core, targetId, text)
                 val queueing = isTargetLive || followUps.count > 0
                 if (queueing) {
                     followUps = followUps.enqueue(clientId, text, lastSequence = boundSeqCursor)
@@ -1148,7 +1150,7 @@ fun OrbSideAgentSheet(
             localAskedAtMs = null
             pendingBaselineTurns = emptyList()
             if (inputText.isEmpty()) inputText = text
-            error = e.message ?: "Couldn't send side question."
+            error = OrbCyberAccess.error(e)
         } finally {
             sending = false
         }
@@ -1166,6 +1168,15 @@ fun OrbSideAgentSheet(
         val base = rawQueuedById[queueId] ?: followUps.row(queueId)?.content ?: content
         val wireContent = OrbMessagePresentation.replaceUserText(base, content)
         scope.launch {
+            try {
+                OrbCyberAccess.requireFollowUp(core, targetId, OrbSideAgent.extractQuestion(wireContent))
+            } catch (e: Exception) {
+                followUps = followUps.editReverted(queueId)
+                inputText = content
+                editingQueuedId = queueId
+                error = OrbCyberAccess.error(e)
+                return@launch
+            }
             val httpStatus = try {
                 core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "PATCH", body = mapOf("content" to wireContent))
                 200
@@ -1236,10 +1247,12 @@ fun OrbSideAgentSheet(
         OrbWarmSyncCoordinator.markBtwDirty(core, session.parentId)
         scope.launch {
             try {
+                OrbCyberAccess.requireFollowUp(core, targetId, OrbSideAgent.extractQuestion(wireContent))
                 val resp = OrbJSON.dict(
                     core.request("/api/control/queue/${core.encodeComponent(queueId)}/send-now?interrupt=true", method = "POST")
                 )
                 if (OrbSendFlow.sendNowOutcome(resp) == OrbSendFlow.SendNow.Fallback) {
+                    OrbCyberAccess.requireFollowUp(core, targetId, OrbSideAgent.extractQuestion(wireContent))
                     runCatching { core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "DELETE") }
                     runCatching { core.request("/api/control/missions/${core.encodeComponent(targetId)}/cancel", method = "POST") }
                     core.request(
@@ -1254,7 +1267,7 @@ fun OrbSideAgentSheet(
                 pendingQuestion = null
                 localAskedAtMs = null
                 pendingBaselineTurns = emptyList()
-                error = e.message ?: "Couldn't send now."
+                error = OrbCyberAccess.error(e)
             }
         }
     }

@@ -665,6 +665,7 @@ extension OrbNotificationCenter {
     static let categoryActionFailed = "ORB_ACTION_FAILED"
 
     fileprivate func sendMessage(missionID: String, content: String) async throws {
+        try await OrbCyberAccess.requireFollowUp(content, missionID: missionID)
         _ = try await OrbCore.shared.call(
             "/api/control/message",
             method: "POST",

@@ -26,9 +26,9 @@ def main : IO UInt32 := do
   let mut passed := 0
   let mut total := 0
 
-  -- 1. Command table size (87 desktop commands + plugin:app|version = 88)
+  -- 1. Command table size (88 desktop commands + plugin:app|version = 89)
   total := total + 1
-  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 88) then passed := passed + 1
+  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 89) then passed := passed + 1
 
   -- 2. Loopback RPC auth gate (>= 32-byte non-placeholder secret + local Origin confinement)
   let validTok := "0123456789abcdef0123456789abcdef"
@@ -265,6 +265,49 @@ def main : IO UInt32 := do
       jv.fieldStr? "label" == some "Touch ID"
     | _ => false
   if (← assertTrue "biometric_status_touch_id_schema" bioStatusOk) then passed := passed + 1
+
+  -- 14. `#1497` + `#1553` local cyber capabilities, invocable skills precedence, and fail-closed launch gates
+  let cyberCapRes ← dispatchRpcCommand stDiskRef "local_agents_cyber_capabilities" (.obj #[])
+  total := total + 1
+  let cyberCapOk := match cyberCapRes with | .ok (.num "2") => true | _ => false
+  if (← assertTrue "local_agents_cyber_capabilities_supported_2" cyberCapOk) then passed := passed + 1
+
+  let homeRoot := System.FilePath.mk tmpStateDir / "fake-home"
+  let projRoot := System.FilePath.mk tmpStateDir / "fake-repo"
+  IO.FS.createDirAll (homeRoot / ".codex" / "skills" / "shared-skill")
+  IO.FS.createDirAll (homeRoot / ".codex" / "skills" / "global-only")
+  IO.FS.createDirAll (projRoot / ".agents" / "skills" / "shared-skill")
+  IO.FS.writeFile (homeRoot / ".codex" / "skills" / "shared-skill" / "SKILL.md") "Global fallback description.\n"
+  IO.FS.writeFile (homeRoot / ".codex" / "skills" / "global-only" / "SKILL.md") "---\ndescription: \"Global helper\"\n---\nBody\n"
+  IO.FS.writeFile (projRoot / ".agents" / "skills" / "shared-skill" / "SKILL.md") "---\ndescription: \"Project override\"\n---\nBody\n"
+
+  let skillsFound ← invocableSkillsIn homeRoot projRoot "codex"
+  total := total + 1
+  let skillsPrecOk := match skillsFound with
+    | .ok #[s0, s1] =>
+      s0.name == "global-only" && s0.description == some "Global helper" &&
+      s1.name == "shared-skill" && s1.description == some "Project override"
+    | _ => false
+  if (← assertTrue "invocable_skills_project_precedence_and_frontmatter" skillsPrecOk) then passed := passed + 1
+
+  let selOk ← selectLocalSkillsIn homeRoot projRoot "codex" "please run /skill:shared-skill and /skill:shared-skill"
+  let selMissing ← selectLocalSkillsIn homeRoot projRoot "codex" "run /skill:missing-skill"
+  let selBadId ← selectLocalSkillsIn homeRoot projRoot "codex" "run /skill:../escape"
+  total := total + 1
+  let localSkillGateOk :=
+    (match selOk with | .ok #[("shared-skill", _, 2)] => true | _ => false) &&
+    selMissing.isOk.not &&
+    selBadId.isOk.not
+  if (← assertTrue "select_local_skills_dedups_and_rejects_missing_or_invalid" localSkillGateOk) then passed := passed + 1
+
+  total := total + 1
+  let localCodexGateOk :=
+    (validateLocalCodexLaunch "/goal ship it" "gpt-6.1-sol" "automatic" false).isOk &&
+    (validateLocalCodexLaunch "/goal ship it" "gpt-6.1-sol" "daybreak" false).isOk.not &&
+    (validateLocalCodexLaunch "/goal" "gpt-6.1-sol" "automatic" false).isOk.not &&
+    (validateLocalCodexLaunch "audit" "gpt-daybreak-blue-latest" "automatic" false).isOk.not &&
+    (validateLocalCodexLaunch "audit" "gpt-6.1-sol" "daybreak" false).isOk
+  if (← assertTrue "validate_local_codex_launch_gates_goal_and_cyber" localCodexGateOk) then passed := passed + 1
 
   try IO.FS.removeDirAll tmpStateDir catch _ => pure ()
 
