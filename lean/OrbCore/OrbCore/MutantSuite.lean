@@ -99,4 +99,22 @@ theorem deploy_unit_kills_traversal_mutant :
       verifyDeployUnitNameMutantTraversal 1 0 12 := by
   decide
 
+/-- Mutant 6: Ignores per-model concurrency cap (`modelConcCap`) whenever account concurrency is uncapped (`acctConcCap == 0`)! -/
+def verifyProviderPacingAdmissionMutantIgnoreModelConc
+    (acctRpmCap acctConcCap modelRpmCap modelConcCap : UInt32)
+    (acctRpmUsed acctInflight modelRpmUsed modelInflight : UInt32) : UInt8 :=
+  if singleCapAdmitted acctRpmCap 100000 acctRpmUsed &&
+     singleCapAdmitted acctConcCap 1024 acctInflight &&
+     singleCapAdmitted modelRpmCap 100000 modelRpmUsed &&
+     (acctConcCap == 0 || singleCapAdmitted modelConcCap 1024 modelInflight) then 1 else 0
+
+/-- Theorem 6: `verifyProviderPacingAdmission` kills the per-model concurrency bypass mutant
+    AND agrees when per-model in-flight load has headroom (`1 < 2`). -/
+theorem provider_pacing_kills_model_concurrency_mutant :
+    verifyProviderPacingAdmission 300 0 0 2 2 2 2 2 ≠
+      verifyProviderPacingAdmissionMutantIgnoreModelConc 300 0 0 2 2 2 2 2 ∧
+    verifyProviderPacingAdmission 300 0 0 2 2 1 2 1 =
+      verifyProviderPacingAdmissionMutantIgnoreModelConc 300 0 0 2 2 1 2 1 := by
+  decide
+
 end OrbCore.MutantSuite

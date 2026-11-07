@@ -27,6 +27,11 @@ export interface ResolvedEntry {
   has_credentials: boolean;
   auth_kind: "api_key" | "oauth" | "none";
   has_base_url: boolean;
+  rpm_limit?: number | null;
+  max_concurrency?: number | null;
+  model_rpm_limit?: number | null;
+  model_tpm_limit?: number | null;
+  model_max_concurrency?: number | null;
 }
 
 export interface RateLimitSnapshot {
@@ -40,6 +45,7 @@ export interface RateLimitSnapshot {
   input_tokens_remaining: number | null;
   output_tokens_limit: number | null;
   output_tokens_remaining: number | null;
+  key_rpm_limit?: number | null;
   updated_at: string;
 }
 

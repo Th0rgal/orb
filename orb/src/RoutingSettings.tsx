@@ -807,6 +807,11 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                             <p>
                               Provider limits · observed {time(s().updated_at)}
                             </p>
+                            <Show when={s().key_rpm_limit != null}>
+                              <p>
+                                Account key RPM ceiling: {s().key_rpm_limit} RPM
+                              </p>
+                            </Show>
                             <p>
                               Requests remaining:{" "}
                               {s().requests_remaining ?? "Unknown"} /{" "}

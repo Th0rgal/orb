@@ -178,6 +178,7 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS core_boot_state (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1), boot_epoch INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS remote_message_queue (sequence INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, message_id TEXT NOT NULL, mission_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'waiting', UNIQUE(user_id,message_id));" ++
   "CREATE INDEX IF NOT EXISTS remote_message_pending ON remote_message_queue(state,sequence);" ++
+  "CREATE TABLE IF NOT EXISTS ai_providers (id TEXT PRIMARY KEY, provider_type TEXT NOT NULL, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, base_url TEXT NOT NULL DEFAULT '', api_key TEXT NOT NULL DEFAULT '', rpm_limit INTEGER, max_concurrency INTEGER, custom_models_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT '');" ++
   transferSchemaSql ++ "\n" ++ transferCleanupSql
 
 def projectsSchemaSql : String :=
@@ -1294,5 +1295,216 @@ def editRemoteMessage (st : CoreStore) (userId messageId content : String) : IO 
           let n := ((crs[1]?.bind (·[0]?)).bind String.toNat?).getD 0
           if n == 0 then return .ok .AlreadyDelivered
           return .ok (.Edited missionId source?)
+
+/-- Per-model metadata & router pacing limits on a custom inference provider. -/
+structure CustomModelConfig where
+  id              : String
+  name?           : Option String := none
+  contextLimit?   : Option UInt32 := none
+  outputLimit?    : Option UInt32 := none
+  rpmLimit?       : Option UInt32 := none
+  tpmLimit?       : Option UInt64 := none
+  maxConcurrency? : Option UInt32 := none
+  deriving Repr, DecidableEq, Inhabited
+
+/-- Persisted AI provider account record (`ai_providers` in `missions.db`). -/
+structure AIProviderRecord where
+  id              : String
+  providerType    : String
+  name            : String
+  enabled         : Bool := true
+  baseUrl         : String := ""
+  apiKey          : String := ""
+  rpmLimit?       : Option UInt32 := none
+  maxConcurrency? : Option UInt32 := none
+  customModels    : Array CustomModelConfig := #[]
+  updatedAt       : String := ""
+  deriving Repr, DecidableEq, Inhabited
+
+/-- Validate account-level and per-model RPM (`1..=100000`), concurrency (`1..=1024`),
+    and TPM (`1..=1000000000`) bounds. -/
+def validateAIProviderRecord (p : AIProviderRecord) : Except String Unit := do
+  if p.name.trimAscii.toString.isEmpty then
+    throw "provider_name_required"
+  if let some rpm := p.rpmLimit? then
+    if rpm < 1 || rpm > 100000 then
+      throw "rpm_limit_out_of_range"
+  if let some conc := p.maxConcurrency? then
+    if conc < 1 || conc > 1024 then
+      throw "max_concurrency_out_of_range"
+  for m in p.customModels do
+    if m.id.trimAscii.toString.isEmpty then
+      throw "custom_model_id_required"
+    if let some mrpm := m.rpmLimit? then
+      if mrpm < 1 || mrpm > 100000 then
+        throw s!"model_rpm_limit_out_of_range:{m.id}"
+    if let some mconc := m.maxConcurrency? then
+      if mconc < 1 || mconc > 1024 then
+        throw s!"model_max_concurrency_out_of_range:{m.id}"
+    if let some mtpm := m.tpmLimit? then
+      if mtpm < 1 || mtpm > 1000000000 then
+        throw s!"model_tpm_limit_out_of_range:{m.id}"
+
+/-- Parse an optional bounded `UInt32` field from a JSON object (`null` / absent -> `.ok none`,
+    non-integer or out-of-range -> `.error`). -/
+def parseOptionalBoundedU32 (jv : JVal) (field : String) (lo hi : Nat) : Except String (Option UInt32) :=
+  match jv.field? field with
+  | none | some .null => .ok none
+  | some v =>
+    match v.asInt? with
+    | some n =>
+      if n ≥ Int.ofNat lo && n ≤ Int.ofNat hi then
+        .ok (some n.toNat.toUInt32)
+      else
+        .error s!"{field}_out_of_range"
+    | none => .error s!"{field}_invalid_integer"
+
+/-- Parse an optional bounded `UInt64` field from a JSON object (`null` / absent -> `.ok none`,
+    non-integer or out-of-range -> `.error`). -/
+def parseOptionalBoundedU64 (jv : JVal) (field : String) (lo hi : Nat) : Except String (Option UInt64) :=
+  match jv.field? field with
+  | none | some .null => .ok none
+  | some v =>
+    match v.asInt? with
+    | some n =>
+      if n ≥ Int.ofNat lo && n ≤ Int.ofNat hi then
+        .ok (some n.toNat.toUInt64)
+      else
+        .error s!"{field}_out_of_range"
+    | none => .error s!"{field}_invalid_integer"
+
+/-- Strictly parse and validate a `custom_models` JSON array from an API request body. -/
+def parseCustomModelsStrict (arr : Array JVal) : Except String (Array CustomModelConfig) := do
+  let mut out : Array CustomModelConfig := Array.mkEmpty arr.size
+  for it in arr do
+    let mid := ((it.fieldStr? "id").getD "").trimAscii.toString
+    if mid.isEmpty then
+      throw "custom_model_id_required"
+    let nm? := (it.fieldStr? "name").map (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty)
+    let ctx? ← parseOptionalBoundedU32 it "context_limit" 1 100000000
+    let outLim? ← parseOptionalBoundedU32 it "output_limit" 1 100000000
+    let rpm? ← parseOptionalBoundedU32 it "rpm_limit" 1 100000
+    let tpm? ← parseOptionalBoundedU64 it "tpm_limit" 1 1000000000
+    let conc? ← parseOptionalBoundedU32 it "max_concurrency" 1 1024
+    out := out.push {
+      id := mid
+      name? := nm?
+      contextLimit? := ctx?
+      outputLimit? := outLim?
+      rpmLimit? := rpm?
+      tpmLimit? := tpm?
+      maxConcurrency? := conc?
+    }
+  return out
+
+/-- Best-effort hydration of stored `custom_models_json` from SQLite. -/
+def parseCustomModelsStored (rawJson : String) : Array CustomModelConfig :=
+  match OrbBin.Json.parse rawJson with
+  | .ok (.arr arr) => (parseCustomModelsStrict arr).toOption.getD #[]
+  | _ => #[]
+
+/-- Render `CustomModelConfig` array as compact JSON. -/
+def renderCustomModelsJson (models : Array CustomModelConfig) : String := Id.run do
+  let mut items : Array String := Array.mkEmpty models.size
+  for m in models do
+    let mut kvs : Array String := #[s!"\"id\":{jsonEscape m.id}"]
+    if let some nm := m.name? then
+      kvs := kvs.push s!"\"name\":{jsonEscape nm}"
+    if let some ctx := m.contextLimit? then
+      kvs := kvs.push s!"\"context_limit\":{ctx}"
+    if let some outLim := m.outputLimit? then
+      kvs := kvs.push s!"\"output_limit\":{outLim}"
+    if let some rpm := m.rpmLimit? then
+      kvs := kvs.push s!"\"rpm_limit\":{rpm}"
+    if let some tpm := m.tpmLimit? then
+      kvs := kvs.push s!"\"tpm_limit\":{tpm}"
+    if let some conc := m.maxConcurrency? then
+      kvs := kvs.push s!"\"max_concurrency\":{conc}"
+    items := items.push ("{" ++ String.intercalate "," kvs.toList ++ "}")
+  return "[" ++ String.intercalate "," items.toList ++ "]"
+
+/-- Render `AIProviderRecord` for API responses (redacting `apiKey` completely). -/
+def renderAIProviderJson (p : AIProviderRecord) (observedKeyRpm? : Option UInt32 := none) : String := Id.run do
+  let enStr := if p.enabled then "true" else "false"
+  let hasKeyStr := if p.apiKey.isEmpty then "false" else "true"
+  let statusStr := if p.enabled then "{\"type\":\"connected\"}" else "{\"type\":\"disabled\"}"
+  let mut kvs : Array String := #[
+    s!"\"id\":{jsonEscape p.id}",
+    s!"\"provider_type\":{jsonEscape p.providerType}",
+    s!"\"name\":{jsonEscape p.name}",
+    s!"\"enabled\":{enStr}",
+    s!"\"has_api_key\":{hasKeyStr}",
+    "\"uses_oauth\":false",
+    s!"\"status\":{statusStr}"
+  ]
+  if !p.baseUrl.isEmpty then
+    kvs := kvs.push s!"\"base_url\":{jsonEscape p.baseUrl}"
+  if let some rpm := p.rpmLimit? then
+    kvs := kvs.push s!"\"rpm_limit\":{rpm}"
+  if let some conc := p.maxConcurrency? then
+    kvs := kvs.push s!"\"max_concurrency\":{conc}"
+  if let some obs := observedKeyRpm? then
+    kvs := kvs.push s!"\"observed_key_rpm_limit\":{obs}"
+  if !p.customModels.isEmpty || p.providerType == "custom" then
+    kvs := kvs.push s!"\"custom_models\":{renderCustomModelsJson p.customModels}"
+  if !p.updatedAt.isEmpty then
+    kvs := kvs.push s!"\"updated_at\":{jsonEscape p.updatedAt}"
+  return "{" ++ String.intercalate "," kvs.toList ++ "}"
+
+private def rowToAIProviderRecord (r : Array String) : AIProviderRecord :=
+  let rpm? := ((r[6]?).bind String.toNat?).filter (fun n => n ≥ 1 && n ≤ 100000) |>.map (·.toUInt32)
+  let conc? := ((r[7]?).bind String.toNat?).filter (fun n => n ≥ 1 && n ≤ 1024) |>.map (·.toUInt32)
+  {
+    id              := (r[0]?).getD ""
+    providerType    := (r[1]?).getD "custom"
+    name            := (r[2]?).getD ""
+    enabled         := ((r[3]?).getD "1") != "0"
+    baseUrl         := (r[4]?).getD ""
+    apiKey          := (r[5]?).getD ""
+    rpmLimit?       := rpm?
+    maxConcurrency? := conc?
+    customModels    := parseCustomModelsStored ((r[8]?).getD "[]")
+    updatedAt       := (r[9]?).getD ""
+  }
+
+/-- List all persisted `AIProviderRecord` rows ordered by `updated_at ASC, id ASC`. -/
+def listAIProviders (st : CoreStore) : IO (Array AIProviderRecord) := do
+  match ← execParamQuery st.missionsDb
+    "SELECT id,provider_type,name,enabled,base_url,api_key,COALESCE(CAST(rpm_limit AS TEXT),''),COALESCE(CAST(max_concurrency AS TEXT),''),custom_models_json,updated_at FROM ai_providers ORDER BY id ASC;" #[] with
+  | .error _ => return #[]
+  | .ok rows =>
+    if rows.size ≤ 1 then return #[]
+    let mut out : Array AIProviderRecord := Array.mkEmpty (rows.size - 1)
+    for i in [1:rows.size] do
+      out := out.push (rowToAIProviderRecord rows[i]!)
+    return out
+
+/-- Look up a single `AIProviderRecord` by `id`. -/
+def getAIProvider? (st : CoreStore) (pid : String) : IO (Option AIProviderRecord) := do
+  if pid.isEmpty then return none
+  match ← execParamQuery st.missionsDb
+    "SELECT id,provider_type,name,enabled,base_url,api_key,COALESCE(CAST(rpm_limit AS TEXT),''),COALESCE(CAST(max_concurrency AS TEXT),''),custom_models_json,updated_at FROM ai_providers WHERE id=?1;" #[pid] with
+  | .error _ => return none
+  | .ok rows =>
+    if rows.size ≤ 1 then return none
+    return some (rowToAIProviderRecord rows[1]!)
+
+/-- Validate and upsert an `AIProviderRecord` into `missions.db`. -/
+def upsertAIProvider (st : CoreStore) (p : AIProviderRecord) : IO (Except String Unit) := do
+  match validateAIProviderRecord p with
+  | .error e => return .error e
+  | .ok () =>
+    let rpmParam := match p.rpmLimit? with | some v => s!"{v}" | none => ""
+    let concParam := match p.maxConcurrency? with | some v => s!"{v}" | none => ""
+    let res ← execParamQuery st.missionsDb
+      "INSERT INTO ai_providers(id,provider_type,name,enabled,base_url,api_key,rpm_limit,max_concurrency,custom_models_json,updated_at) VALUES(?1,?2,?3,?4,?5,?6,NULLIF(?7,''),NULLIF(?8,''),?9,?10) ON CONFLICT(id) DO UPDATE SET provider_type=excluded.provider_type,name=excluded.name,enabled=excluded.enabled,base_url=excluded.base_url,api_key=excluded.api_key,rpm_limit=excluded.rpm_limit,max_concurrency=excluded.max_concurrency,custom_models_json=excluded.custom_models_json,updated_at=excluded.updated_at;"
+      #[p.id, p.providerType, p.name, if p.enabled then "1" else "0", p.baseUrl, p.apiKey,
+        rpmParam, concParam, renderCustomModelsJson p.customModels, p.updatedAt]
+    return res.map (fun _ => ())
+
+/-- Delete an `AIProviderRecord` by `id`. -/
+def deleteAIProvider (st : CoreStore) (pid : String) : IO (Except String Unit) := do
+  let res ← execParamQuery st.missionsDb "DELETE FROM ai_providers WHERE id=?1;" #[pid]
+  return res.map (fun _ => ())
 
 end OrbCore.Store

@@ -49,12 +49,13 @@ structure CoreConfig where
 
 /-- Live runtime state for the `sandboxed-sh` HTTP/WS server. -/
 structure CoreAppState where
-  cfg          : CoreConfig
-  store        : CoreStore
-  searchIdx?   : Option SearchIndex
-  managedRef   : IO.Ref ManagedFleetState
-  chainsRef    : IO.Ref (Array RoutingChain)
-  seqRef       : IO.Ref UInt64
+  cfg            : CoreConfig
+  store          : CoreStore
+  searchIdx?     : Option SearchIndex
+  managedRef     : IO.Ref ManagedFleetState
+  chainsRef      : IO.Ref (Array RoutingChain)
+  seqRef         : IO.Ref UInt64
+  pacingTracker? : Option ProxyPacingTracker := none
 
 def isLoopbackHostStr (h : String) : Bool :=
   let t := h.trimAscii.toString
@@ -352,23 +353,57 @@ def confineWorkingDirectory (baseDir rawDir : String) : IO (Except String String
         return .error "working_directory_outside_workspace_root"
       resolveConfinedTargetPath realBase cand
 
-/-- Parse `models_json` array into `ProviderTarget` list for `RoutingChain` hydration. -/
-def parseChainTargetsJson (rawJson : String) : Array ProviderTarget := Id.run do
+private def matchProviderForChainTarget? (providers : Array AIProviderRecord) (acctId provId : String) : Option AIProviderRecord :=
+  let stripped := if provId.startsWith "custom:" then (provId.drop 7).toString else provId
+  providers.find? fun p =>
+    p.enabled && (p.id == acctId || p.id == stripped || (!provId.startsWith "custom:" && p.providerType == provId))
+
+/-- Parse `models_json` array into `ProviderTarget` list for `RoutingChain` hydration,
+    enriching targets with account & per-model pacing limits from `ai_providers`. -/
+def parseChainTargetsJson (rawJson : String) (providers : Array AIProviderRecord := #[]) : Array ProviderTarget := Id.run do
   match OrbBin.Json.parse rawJson with
   | .ok (.arr items) =>
     let mut out : Array ProviderTarget := #[]
     for it in items do
-      let acct := (it.fieldStr? "account_id").orElse (fun _ => it.fieldStr? "accountId") |>.getD "default"
-      let prov := (it.fieldStr? "provider").getD "openai"
-      let url := (it.fieldStr? "base_url").orElse (fun _ => it.fieldStr? "baseUrl") |>.getD "https://api.openai.com"
-      let key := (it.fieldStr? "api_key").orElse (fun _ => it.fieldStr? "apiKey") |>.getD ""
+      let provRaw := (it.fieldStr? "provider_id").orElse (fun _ => it.fieldStr? "provider") |>.getD "openai"
+      let defaultAcct :=
+        if provRaw.startsWith "custom:" then (provRaw.drop 7).toString else "default"
+      let acctRaw := (it.fieldStr? "account_id").orElse (fun _ => it.fieldStr? "accountId") |>.getD defaultAcct
       let mdl := (it.fieldStr? "model_id").orElse (fun _ => it.fieldStr? "modelId") |>.getD ""
-      out := out.push { accountId := acct, provider := prov, baseUrl := url, apiKey := key, modelId := mdl }
+      let matchedProv? := matchProviderForChainTarget? providers acctRaw provRaw
+      let matchedModel? := matchedProv?.bind (fun p => p.customModels.find? (fun cm => cm.id == mdl))
+      let acct := match matchedProv? with | some p => p.id | none => acctRaw
+      let url :=
+        (it.fieldStr? "base_url").orElse (fun _ => it.fieldStr? "baseUrl")
+        |>.orElse (fun _ => matchedProv?.bind (fun p => if p.baseUrl.isEmpty then none else some p.baseUrl))
+        |>.getD "https://api.openai.com"
+      let key :=
+        (it.fieldStr? "api_key").orElse (fun _ => it.fieldStr? "apiKey")
+        |>.orElse (fun _ => matchedProv?.map (·.apiKey))
+        |>.getD ""
+      let inlineAcctRpm? := (parseOptionalBoundedU32 it "rpm_limit" 1 100000).toOption.join
+      let inlineAcctConc? := (parseOptionalBoundedU32 it "max_concurrency" 1 1024).toOption.join
+      let inlineMdlRpm? := (parseOptionalBoundedU32 it "model_rpm_limit" 1 100000).toOption.join
+      let inlineMdlTpm? := (parseOptionalBoundedU64 it "model_tpm_limit" 1 1000000000).toOption.join
+      let inlineMdlConc? := (parseOptionalBoundedU32 it "model_max_concurrency" 1 1024).toOption.join
+      out := out.push {
+        accountId              := acct
+        provider               := provRaw
+        baseUrl                := url
+        apiKey                 := key
+        modelId                := mdl
+        accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedProv?.bind (·.rpmLimit?))
+        accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))
+        modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
+        modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
+        modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+      }
     return out
   | _ => return #[]
 
-/-- Hydrate `RoutingChain` table from `missions.db` (`model_routing_chains`). -/
+/-- Hydrate `RoutingChain` table from `missions.db` (`model_routing_chains` + `ai_providers`). -/
 def loadRoutingChainsFromStore (st : CoreStore) : IO (Array RoutingChain) := do
+  let providers ← listAIProviders st
   match ← execParamQuery st.missionsDb "SELECT id,name,models_json FROM model_routing_chains ORDER BY id ASC;" #[] with
   | .error _ => return #[]
   | .ok rows =>
@@ -379,8 +414,47 @@ def loadRoutingChainsFromStore (st : CoreStore) : IO (Array RoutingChain) := do
       let cid := (r[0]?).getD ""
       let nm := (r[1]?).getD cid
       let mj := (r[2]?).getD "[]"
-      out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj }
+      out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers }
     return out
+
+private def optU32Json (v? : Option UInt32) : String :=
+  match v? with | some v => s!"{v}" | none => "null"
+
+private def optU64Json (v? : Option UInt64) : String :=
+  match v? with | some v => s!"{v}" | none => "null"
+
+/-- Render `ResolvedEntry[]` JSON for `GET /api/model-routing/chains/:id/resolve`. -/
+def renderResolvedChainJson (chain : RoutingChain) (pacingTracker? : Option ProxyPacingTracker) : IO String := do
+  let mut items : Array String := Array.mkEmpty chain.targets.size
+  for tgt in chain.targets do
+    let obsRpm? ← match pacingTracker? with
+      | some tr => lookupObservedKeyRpm? tr tgt.accountId
+      | none => pure none
+    let effAcctRpm? := tgt.accountRpmLimit?.orElse (fun _ => obsRpm?)
+    let hasCreds := if tgt.apiKey.isEmpty then "false" else "true"
+    let authKind := if tgt.apiKey.isEmpty then "\"none\"" else "\"api_key\""
+    let hasBaseUrl := if tgt.baseUrl.isEmpty then "false" else "true"
+    let entryJson :=
+      s!"\{\"provider_id\":{jsonEscape tgt.provider},\"model_id\":{jsonEscape tgt.modelId}," ++
+      s!"\"account_id\":{jsonEscape tgt.accountId},\"has_credentials\":{hasCreds}," ++
+      s!"\"auth_kind\":{authKind},\"has_base_url\":{hasBaseUrl}," ++
+      s!"\"rpm_limit\":{optU32Json effAcctRpm?}," ++
+      s!"\"max_concurrency\":{optU32Json tgt.accountMaxConcurrency?}," ++
+      s!"\"model_rpm_limit\":{optU32Json tgt.modelRpmLimit?}," ++
+      s!"\"model_tpm_limit\":{optU64Json tgt.modelTpmLimit?}," ++
+      s!"\"model_max_concurrency\":{optU32Json tgt.modelMaxConcurrency?}}"
+    items := items.push entryJson
+  return "[" ++ String.intercalate "," items.toList ++ "]"
+
+private def selectRoutingChainForBody (chains : Array RoutingChain) (body : ByteArray) : RoutingChain :=
+  let reqModel? :=
+    (String.fromUTF8? body).bind fun raw =>
+      match OrbBin.Json.parse raw with
+      | .ok jv => jv.fieldStr? "model"
+      | .error _ => none
+  match reqModel?.bind (fun m => chains.find? (fun c => c.id == m || c.name == m)) with
+  | some matched => matched
+  | none => chains[0]?.getD { id := "default", name := "default", targets := #[] }
 
 private def scopeRankOf? : String → Option UInt8
   | "ops_read"       => some 0
@@ -536,8 +610,8 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     if !authenticateProxyRequest st.cfg req.headers nowEpochSec then
       return .ok (mkJson 401 "{\"error\":\"unauthorized_proxy\"}")
     let chains ← st.chainsRef.get
-    let activeChain := chains[0]?.getD { id := "default", name := "default", targets := #[] }
-    let out ← forwardProxyChain activeChain req.method cleanPath #[] req.bodySlice.toByteArray
+    let activeChain := selectRoutingChainForBody chains req.bodySlice.toByteArray
+    let out ← forwardProxyChain activeChain req.method cleanPath #[] req.bodySlice.toByteArray none false st.pacingTracker?
     return .ok { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := out.headers, body := out.body }
 
   -- 5. Privilege Broker Verification & Audit Log (`POST /api/privilege-access/verify-and-log`)
@@ -850,19 +924,141 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       let hitJson := "[" ++ String.intercalate "," (hits.toList.map jsonEscape) ++ "]"
       return .ok (mkJson 200 s!"\{\"hits\":{hitJson}}")
 
+  -- AI Providers CRUD & Rate-Limit Metadata (`/api/ai/providers`, `/api/ai/providers/:id`)
+  if cleanPath == "/api/ai/providers" || cleanPath.startsWith "/api/ai/providers/" then
+    if req.method == "GET" && cleanPath == "/api/ai/providers" then
+      let providers ← listAIProviders st.store
+      let mut items : Array String := Array.mkEmpty providers.size
+      for p in providers do
+        let obs? ← match st.pacingTracker? with
+          | some tr => lookupObservedKeyRpm? tr p.id
+          | none => pure none
+        items := items.push (renderAIProviderJson p obs?)
+      return .ok (mkJson 200 ("[" ++ String.intercalate "," items.toList ++ "]"))
+    else if req.method == "POST" && cleanPath == "/api/ai/providers" then
+      let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD ""
+      let .ok jv := OrbBin.Json.parse rawBody
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let defPid ← nextUniqueId st "prov" nowEpochSec
+      let pid := ((jv.fieldStr? "id").getD defPid).trimAscii.toString
+      let pType := ((jv.fieldStr? "provider_type").getD "custom").trimAscii.toString
+      let nm := ((jv.fieldStr? "name").getD pType).trimAscii.toString
+      let enabled := (jv.fieldBool? "enabled").getD true
+      let baseUrl := ((jv.fieldStr? "base_url").getD "").trimAscii.toString
+      let apiKey := ((jv.fieldStr? "api_key").getD "").trimAscii.toString
+      let .ok rpm? := parseOptionalBoundedU32 jv "rpm_limit" 1 100000
+        | return .ok (mkJson 400 "{\"error\":\"invalid_provider_limits\",\"field\":\"rpm_limit\"}")
+      let .ok conc? := parseOptionalBoundedU32 jv "max_concurrency" 1 1024
+        | return .ok (mkJson 400 "{\"error\":\"invalid_provider_limits\",\"field\":\"max_concurrency\"}")
+      let customModelsRes : Except String (Array CustomModelConfig) :=
+        match jv.field? "custom_models" with
+        | none | some .null => .ok #[]
+        | some (.arr arr) => parseCustomModelsStrict arr
+        | some _ => .error "custom_models_must_be_array"
+      let .ok cModels := customModelsRes
+        | return .ok (mkJson 400 "{\"error\":\"invalid_provider_limits\",\"field\":\"custom_models\"}")
+      let provRec : AIProviderRecord := {
+        id := pid, providerType := pType, name := nm, enabled := enabled,
+        baseUrl := baseUrl, apiKey := apiKey, rpmLimit? := rpm?, maxConcurrency? := conc?,
+        customModels := cModels, updatedAt := s!"{nowEpochSec}"
+      }
+      match ← upsertAIProvider st.store provRec with
+      | .error e => return .ok (mkJson 400 s!"\{\"error\":\"invalid_provider_limits\",\"detail\":{jsonEscape e}}")
+      | .ok () =>
+        let refreshed ← loadRoutingChainsFromStore st.store
+        st.chainsRef.set refreshed
+        return .ok (mkJson 201 (renderAIProviderJson provRec none))
+    else if let some params := matchRoutePattern? "/api/ai/providers/:id" rawTarget then
+      let pid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if req.method == "PUT" || req.method == "PATCH" then
+        let some existing ← getAIProvider? st.store pid
+          | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
+        let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD ""
+        let .ok jv := OrbBin.Json.parse rawBody
+          | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+        let nm := match jv.fieldStr? "name" with
+          | some s => let t := s.trimAscii.toString; if t.isEmpty then existing.name else t
+          | none => existing.name
+        let enabled := (jv.fieldBool? "enabled").getD existing.enabled
+        let baseUrl := match jv.field? "base_url" with
+          | none => existing.baseUrl
+          | some .null => ""
+          | some (.str s) => s.trimAscii.toString
+          | some _ => existing.baseUrl
+        let apiKey := match jv.fieldStr? "api_key" with
+          | some s => let t := s.trimAscii.toString; if t.isEmpty then existing.apiKey else t
+          | none => existing.apiKey
+        let rpmRes : Except String (Option UInt32) :=
+          match jv.field? "rpm_limit" with
+          | none => .ok existing.rpmLimit?
+          | some .null => .ok none
+          | some _ => parseOptionalBoundedU32 jv "rpm_limit" 1 100000
+        let .ok rpm? := rpmRes
+          | return .ok (mkJson 400 "{\"error\":\"invalid_provider_limits\",\"field\":\"rpm_limit\"}")
+        let concRes : Except String (Option UInt32) :=
+          match jv.field? "max_concurrency" with
+          | none => .ok existing.maxConcurrency?
+          | some .null => .ok none
+          | some _ => parseOptionalBoundedU32 jv "max_concurrency" 1 1024
+        let .ok conc? := concRes
+          | return .ok (mkJson 400 "{\"error\":\"invalid_provider_limits\",\"field\":\"max_concurrency\"}")
+        let modelsRes : Except String (Array CustomModelConfig) :=
+          match jv.field? "custom_models" with
+          | none => .ok existing.customModels
+          | some .null => .ok #[]
+          | some (.arr arr) => parseCustomModelsStrict arr
+          | some _ => .error "custom_models_must_be_array"
+        let .ok cModels := modelsRes
+          | return .ok (mkJson 400 "{\"error\":\"invalid_provider_limits\",\"field\":\"custom_models\"}")
+        let updated : AIProviderRecord := {
+          existing with
+          name := nm, enabled := enabled, baseUrl := baseUrl, apiKey := apiKey,
+          rpmLimit? := rpm?, maxConcurrency? := conc?, customModels := cModels,
+          updatedAt := s!"{nowEpochSec}"
+        }
+        match ← upsertAIProvider st.store updated with
+        | .error e => return .ok (mkJson 400 s!"\{\"error\":\"invalid_provider_limits\",\"detail\":{jsonEscape e}}")
+        | .ok () =>
+          let refreshed ← loadRoutingChainsFromStore st.store
+          st.chainsRef.set refreshed
+          let obs? ← match st.pacingTracker? with
+            | some tr => lookupObservedKeyRpm? tr updated.id
+            | none => pure none
+          return .ok (mkJson 200 (renderAIProviderJson updated obs?))
+      else if req.method == "DELETE" then
+        match ← deleteAIProvider st.store pid with
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+        | .ok () =>
+          let refreshed ← loadRoutingChainsFromStore st.store
+          st.chainsRef.set refreshed
+          return .ok (mkJson 200 "{\"ok\":true}")
+
   -- Model Routing Controls (`"/api/model-routing"` / `/api/model-routing/chains`)
   if cleanPath.startsWith "/api/model-routing" then
+    if let some params := matchRoutePattern? "/api/model-routing/chains/:id/resolve" rawTarget then
+      if req.method == "GET" then
+        let cid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+        let chains ← loadRoutingChainsFromStore st.store
+        st.chainsRef.set chains
+        match chains.find? (fun c => c.id == cid) with
+        | none => return .ok (mkJson 404 "{\"error\":\"chain_not_found\"}")
+        | some ch =>
+          let resolvedJson ← renderResolvedChainJson ch st.pacingTracker?
+          return .ok (mkJson 200 resolvedJson)
     if req.method == "GET" && cleanPath == "/api/model-routing/chains" then
       let rows ← execParamQuery st.store.missionsDb
         "SELECT id,name,models_json,updated_at FROM model_routing_chains ORDER BY id ASC;" #[]
       return .ok (mkJson 200 (match rows with | .ok rs => rowsToJsonArray rs | .error _ => "[]"))
-    else if req.method == "POST" && cleanPath == "/api/model-routing/chains" then
+    else if (req.method == "POST" && cleanPath == "/api/model-routing/chains") ||
+            (req.method == "PUT" && (matchRoutePattern? "/api/model-routing/chains/:id" rawTarget).isSome) then
+      let pathCid? := (matchRoutePattern? "/api/model-routing/chains/:id" rawTarget).bind fun ps =>
+        (ps.find? (fun p => p.1 == "id")).map Prod.snd
       let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD "{}"
       let jv := (OrbBin.Json.parse rawBody).toOption.getD (.obj #[])
       let defCid ← nextUniqueId st "chain" nowEpochSec
-      let cid := (jv.fieldStr? "id").getD defCid
+      let cid := pathCid?.orElse (fun _ => jv.fieldStr? "id") |>.getD defCid
       let nm := (jv.fieldStr? "name").getD cid
-      let modelsJson := match jv.field? "models" with
+      let modelsJson := match (jv.field? "models").orElse (fun _ => jv.field? "entries") with
         | some arr@(.arr _) => renderCompact arr
         | _ => (jv.fieldStr? "models_json").getD "[]"
       match ← execParamQuery st.store.missionsDb
@@ -872,7 +1068,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       | .ok _ =>
         let refreshed ← loadRoutingChainsFromStore st.store
         st.chainsRef.set refreshed
-        return .ok (mkJson 201 s!"\{\"id\":{jsonEscape cid},\"name\":{jsonEscape nm}}")
+        return .ok (mkJson (if req.method == "POST" then 201 else 200) s!"\{\"id\":{jsonEscape cid},\"name\":{jsonEscape nm}}")
     else
       return .ok (mkJson 200 "{\"ok\":true,\"router\":\"/api/model-routing\"}")
 
@@ -999,6 +1195,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let initialChains ← loadRoutingChainsFromStore store
     let chainsRef ← IO.mkRef initialChains
     let seqRef ← IO.mkRef (0 : UInt64)
+    let pacingTracker ← newProxyPacingTracker
     let appState : CoreAppState := {
       cfg := cfg
       store := store
@@ -1006,6 +1203,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       managedRef := managedRef
       chainsRef := chainsRef
       seqRef := seqRef
+      pacingTracker? := some pacingTracker
     }
     let bindHost := if cfg.host == "localhost" then "127.0.0.1" else cfg.host
     let .ok (listenFd, boundPort) ← tcpListen bindHost cfg.port 128

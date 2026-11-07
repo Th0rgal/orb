@@ -287,7 +287,9 @@ struct OrbProvidersSettings: View {
         }
         let lead = accountHint.isEmpty ? p["provider_type"].text : accountHint
         let resetBadge = showResetBadge ? (OrbSubscriptionResetSummary.from(detail)?.badge ?? "") : ""
-        return [lead, state, resetBadge].filter { !$0.isEmpty }.joined(separator: " · ")
+        let rpmBadge = p["rpm_limit"].number.map { "\(Int($0)) RPM" } ?? ""
+        let concBadge = p["max_concurrency"].number.map { "\(Int($0)) concurrent" } ?? ""
+        return [lead, state, rpmBadge, concBadge, resetBadge].filter { !$0.isEmpty }.joined(separator: " · ")
     }
     /// Quota severity of the row (nil while below 80% or when another state wins).
     private func quotaStatus(_ p: OrbJSON) -> OrbQuotaStatus? {
@@ -600,12 +602,30 @@ struct OrbProviderKeyEditor: View {
     @State private var name = ""
     @State private var key = ""
     @State private var baseURL = ""
+    @State private var rpmLimit = ""
+    @State private var maxConcurrency = ""
     @State private var error = ""
     @State private var busy = false
     static let apiKeyTypes = ["anthropic", "openai", "google", "xai", "open-router", "groq", "mistral", "minimax", "zai", "custom"]
+    enum CapParseResult: Equatable {
+        case ok(Int?)
+        case invalid
+    }
+    static func parseOptionalCap(_ raw: String, min: Int, max: Int) -> CapParseResult {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return .ok(nil) }
+        guard let n = Int(trimmed), n >= min, n <= max else { return .invalid }
+        return .ok(n)
+    }
+    private var capsValid: Bool {
+        Self.parseOptionalCap(rpmLimit, min: 1, max: 100_000) != .invalid
+        && Self.parseOptionalCap(maxConcurrency, min: 1, max: 1024) != .invalid
+    }
     private var valid: Bool {
-        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        && (provider != nil || type != "custom" || (URL(string: baseURL)?.host != nil && ["http", "https"].contains(URL(string: baseURL)?.scheme ?? "")))
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        && (provider != nil || !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        && capsValid
+        && (type != "custom" || (URL(string: baseURL)?.host != nil && ["http", "https"].contains(URL(string: baseURL)?.scheme ?? "")))
     }
     var body: some View {
         NavigationStack {
@@ -613,8 +633,12 @@ struct OrbProviderKeyEditor: View {
                 OrbSettingsError(message: error)
                 if provider == nil { Picker("Provider", selection: $type) { ForEach(Self.apiKeyTypes, id: \.self) { Text($0).tag($0) } } }
                 TextField("Name", text: $name).textInputAutocapitalization(.never).autocorrectionDisabled()
-                SecureField("API key", text: $key).textInputAutocapitalization(.never).autocorrectionDisabled()
-                if provider == nil && type == "custom" { TextField("Base URL", text: $baseURL).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled() }
+                SecureField(provider == nil ? "API key" : "New API key (optional)", text: $key).textInputAutocapitalization(.never).autocorrectionDisabled()
+                if type == "custom" { TextField("Base URL", text: $baseURL).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled() }
+                Section("Router pacing (optional)") {
+                    TextField("Requests / min limit (e.g. 300)", text: $rpmLimit).keyboardType(.numberPad)
+                    TextField("Max concurrent requests (e.g. 10)", text: $maxConcurrency).keyboardType(.numberPad)
+                }
             }.disabled(busy)
             .navigationTitle(provider == nil ? "Add API key" : "Edit API key").navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -622,18 +646,41 @@ struct OrbProviderKeyEditor: View {
                 ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(!valid || busy) }
             }
         }.interactiveDismissDisabled(busy)
-        .onAppear { if let provider { name = provider["name"].text; type = provider["provider_type"].text } }
+        .onAppear {
+            if let provider {
+                name = provider["name"].text
+                type = provider["provider_type"].text
+                baseURL = provider["base_url"].text
+                rpmLimit = provider["rpm_limit"].number.map { String(Int($0)) } ?? ""
+                maxConcurrency = provider["max_concurrency"].number.map { String(Int($0)) } ?? ""
+            }
+        }
         .onDisappear { key = "" }
     }
     private func save() async {
         guard valid, !busy else { return }; busy = true; defer { busy = false }
-        var body: [String: OrbJSON] = ["name": .string(name.trimmingCharacters(in: .whitespacesAndNewlines)), "api_key": .string(key.trimmingCharacters(in: .whitespacesAndNewlines))]
-        if provider == nil { body["provider_type"] = .string(type); if type == "custom" { body["base_url"] = .string(baseURL) } }
+        guard case .ok(let rpm) = Self.parseOptionalCap(rpmLimit, min: 1, max: 100_000),
+              case .ok(let conc) = Self.parseOptionalCap(maxConcurrency, min: 1, max: 1024) else { return }
+        var body: [String: OrbJSON] = ["name": .string(name.trimmingCharacters(in: .whitespacesAndNewlines))]
+        let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedKey.isEmpty { body["api_key"] = .string(trimmedKey) }
+        if provider == nil {
+            body["provider_type"] = .string(type)
+            if type == "custom" { body["base_url"] = .string(baseURL.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            if let rpm { body["rpm_limit"] = .number(Double(rpm)) }
+            if let conc { body["max_concurrency"] = .number(Double(conc)) }
+        } else if let provider {
+            if type == "custom" { body["base_url"] = .string(baseURL.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            if let rpm { body["rpm_limit"] = .number(Double(rpm)) }
+            else if provider["rpm_limit"].number != nil { body["rpm_limit"] = .null }
+            if let conc { body["max_concurrency"] = .number(Double(conc)) }
+            else if provider["max_concurrency"].number != nil { body["max_concurrency"] = .null }
+        }
         do {
             _ = try await client.call("/api/ai/providers" + (provider.map { "/" + OrbCore.escape($0["id"].text) } ?? ""), method: provider == nil ? "POST" : "PUT", body: .object(body))
             key = ""; onSaved(); dismiss()
         } catch is CancellationError { key = ""; error = "Backend changed. Close and reopen this page." }
-        catch { self.error = "Could not save the API key. Check the connection and try again." }
+        catch { self.error = "Could not save the provider settings. Check the connection and try again." }
     }
 }
 

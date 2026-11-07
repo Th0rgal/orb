@@ -226,4 +226,29 @@ class OrbClientParityTest {
         assertTrue(OrbAdminFormatting.needsLibraryRemoteInit("git@github.com:org/new.git", "git@github.com:org/old.git", null))
         assertTrue(OrbAdminFormatting.needsLibraryRemoteInit("git@github.com:org/new.git", "git@github.com:org/new.git", "git@github.com:org/new.git"))
     }
+
+    @Test
+    fun customProviderPacingSubtitleAndCapValidation() {
+        val provider = OrbRow(
+            mapOf(
+                "id" to "eth-1",
+                "provider_type" to "custom",
+                "name" to "Ethereum Foundation",
+                "enabled" to true,
+                "status" to mapOf("type" to "connected"),
+                "rpm_limit" to 300,
+                "max_concurrency" to 8
+            )
+        )
+        assertEquals(
+            "custom · connected · 300 RPM · 8 concurrent",
+            providerStatusSubtitle(provider, null)
+        )
+        assertEquals(true to null, parseOptionalProviderCap("  ", 1, 100_000))
+        assertEquals(true to 300, parseOptionalProviderCap("300", 1, 100_000))
+        assertEquals(false to null, parseOptionalProviderCap("0", 1, 100_000))
+        assertEquals(false to null, parseOptionalProviderCap("100001", 1, 100_000))
+        assertTrue(isValidHttpUrl("https://inference.ethereum.foundation/v1"))
+        assertFalse(isValidHttpUrl("ftp://inference.ethereum.foundation/v1"))
+    }
 }
