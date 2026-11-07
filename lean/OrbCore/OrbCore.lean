@@ -8,6 +8,7 @@ import OrbCore.Search
 import OrbCore.Harness
 import OrbCore.Proxy
 import OrbCore.Managed
+import OrbCore.MemoryAndCloud
 import OrbCore.Control
 import OrbCore.HostObservers
 import OrbCore.HostTests

@@ -2190,8 +2190,8 @@ export function holdsCapSlot(status: string | null | undefined): boolean {
   return CAP_SLOT_STATUSES.has((status ?? "").toLowerCase());
 }
 
-/** A conversation fork preserves the source workspace and never switches the source harness. */
-export async function forkMission(id: string, body: { backend: string; model_override: string; model_effort: string; service_tier?: CodexServiceTier; idempotency_key: string; /** Edit-and-resend: keep the history before this message and continue with `replacement`. */ replace_message_id?: string; replacement?: string }): Promise<Mission> {
+/** A conversation fork preserves the source workspace (or hands off a cloud conversation into a fresh workspace) and never switches the source harness. */
+export async function forkMission(id: string, body: { backend: string; model_override: string; model_effort: string; service_tier?: CodexServiceTier; idempotency_key: string; /** Edit-and-resend: keep the history before this message and continue with `replacement`. */ replace_message_id?: string; replacement?: string; remote_node_id?: string | null; workspace_id?: string | null; working_directory?: string | null }): Promise<Mission> {
   try {
     return await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}/fork`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),

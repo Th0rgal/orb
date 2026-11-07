@@ -5,6 +5,7 @@
 -/
 import LeanSys.Auth
 import LeanSys.Posix
+import Orb.Kernel
 import OrbBin.PosixExt
 import OrbBin.Json
 import OrbNode.Posix
@@ -507,6 +508,54 @@ def cancelUploadSession (workDir uid : String) : IO (Except String Unit) := do
   if ← sessDir.pathExists then
     let _ ← IO.Process.output { cmd := "rm", args := #["-rf", sessDir.toString] }
   return .ok ()
+
+/-- Content-addressed shared Library skills archive (`library-skills-<hex>.tar.gz`) uploaded once per
+    content digest and reused across remote worker missions. Strictly rejects any path separators,
+    `..` segments, or NUL/control bytes. -/
+def isSharedLibrarySkillsArchive (fileName : String) : Bool :=
+  fileName.startsWith "library-skills-" &&
+  fileName.endsWith ".tar.gz" &&
+  fileName.length > ("library-skills-".length + ".tar.gz".length) &&
+  !fileName.contains '/' &&
+  !fileName.contains '\\' &&
+  (fileName.splitOn "..").tail.isEmpty &&
+  fileName.all (fun c => c.isAlphanum || c == '-' || c == '_' || c == '.')
+
+/-- Decide whether `<uploads>/<uid>/<fileName>` may be deleted under single-job post-run cleanup
+    (`expiredForGc = false`) vs TTL sweep (`expiredForGc = true`), delegated to `Orb.Kernel.uploadCleanupGate`. -/
+def shouldCleanupUploadEntry (uid fileName : String) (expiredForGc : Bool) : Bool :=
+  let validUuidBit : UInt8 := if (parseUuidCanonical? uid).isSome then 1 else 0
+  let sharedLibBit : UInt8 := if isSharedLibrarySkillsArchive fileName then 1 else 0
+  let expiredBit   : UInt8 := if expiredForGc then 1 else 0
+  Orb.Kernel.uploadCleanupGate validUuidBit sharedLibBit expiredBit == 1
+
+/-- Sweep `<workDir>/uploads/<uid>` entries referenced by a completed job (`expiredForGc = false`) or
+    periodic TTL sweep (`expiredForGc = true`), retaining shared `library-skills-*.tar.gz` bundles
+    until TTL expiry so concurrent/subsequent remote missions never hit `ENOENT` on cached skill tarballs. -/
+def cleanupUploadDirectories (workDir : String) (uids : Array String) (expiredForGc : Bool) : IO Nat := do
+  let uploadsRoot := System.FilePath.mk workDir / "uploads"
+  let mut removed : Nat := 0
+  for rawUid in uids do
+    if let some uid := parseUuidCanonical? rawUid then
+      let dir := uploadsRoot / uid
+      let st ← statPath dir.toString
+      if st.exists_ && !st.isSymlink && st.isDir then
+        if let .ok entries ← dir.readDir |>.toBaseIO then
+          let mut keepAny := false
+          for ent in entries do
+            if shouldCleanupUploadEntry uid ent.fileName expiredForGc then
+              try IO.FS.removeFile ent.path catch _ => pure ()
+              removed := removed + 1
+            else
+              keepAny := true
+          if !keepAny then
+            try IO.FS.removeDirAll dir catch _ => pure ()
+  return removed
+
+/-- Adaptive remote-job observation poll cadence (`80 ms -> 200 ms -> 500 ms -> bounded backoff`),
+    delegated to `Orb.Kernel.fastPollDelayMs`. -/
+def computeFastPollDelayMs (isStopping : Bool) (elapsedMs : UInt64) (consecutiveFailures : UInt32) : UInt64 :=
+  Orb.Kernel.fastPollDelayMs (if isStopping then 1 else 0) elapsedMs consecutiveFailures
 
 /-! ### 4. Managed Auth (`grok` + `antigravity` / `antigravity:<slot>`) -/
 

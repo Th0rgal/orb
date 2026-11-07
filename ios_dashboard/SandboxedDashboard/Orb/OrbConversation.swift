@@ -313,7 +313,14 @@ struct OrbConversation: View {
                 if transferRequested { transferRequested = false; transferring = true }
                 else { scheduleMissionSettingsSave() }
             }) {
-                OrbAgentPicker(selection: $selection, existing: id != nil, onTransfer: id != nil && !isCloud ? { transferRequested = true } : nil).orbTrackPage("agent_picker", surface: .sheet)
+                let canCloudHandoff = isCloud && OrbKernel.cloudHandoffStep(
+                    sourceIsCloud: true,
+                    isSideQuestion: false,
+                    targetIsNative: true,
+                    hasHistoryTurns: !turns.isEmpty,
+                    targetPlacementValid: true
+                ) == .allowHandoff
+                OrbAgentPicker(selection: $selection, existing: id != nil, onTransfer: id != nil && (!isCloud || canCloudHandoff) ? { transferRequested = true } : nil).orbTrackPage("agent_picker", surface: .sheet)
             }
             .sheet(isPresented: $transferring) { OrbForkSheet(mission: mission, transfer: true) { forkedMission = $0["id"].text }.orbTrackPage("transfer", surface: .sheet) }
             .sheet(isPresented: $showContext) { NavigationStack { OrbDocuments(project: effectiveProjectSlug, path: "").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showContext = false } } } } }
@@ -435,17 +442,40 @@ struct OrbConversation: View {
             let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
             OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts, status: mission["status"].text, hasInteraction: !pendingQuestionEvents.isEmpty)
         } else if !selection.cloud && !selection.nodePinnedByUser {
-            let resolveAutoNode: ([OrbJSON]) -> String = { items in
-                if selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    return "core"
+            let applyPalomaDefault: ([OrbJSON]) -> Bool = { accounts in
+                guard let hermes = accounts.first(where: { $0["provider"].text == "hermes" && $0["available"].flag }),
+                      !hermes["id"].text.isEmpty else { return false }
+                let step = OrbKernel.composerDefaultStep(
+                    hasExplicitChoice: selection.cloud || !selection.backend.isEmpty,
+                    hasPinnedContext: !folder.isEmpty || selection.nodePinnedByUser,
+                    hermesAvailable: true,
+                    hasNativeHarness: true
+                )
+                guard step == .defaultPalomaHermes else { return false }
+                selection.provider = "hermes"
+                selection.account = hermes["id"].text
+                return true
+            }
+            var defaultedToPaloma = false
+            if let cachedAccounts = OrbReadCache.read("catalog:cloud:accounts") {
+                defaultedToPaloma = applyPalomaDefault(cachedAccounts.items)
+            }
+            if !defaultedToPaloma, let liveAccounts = try? await OrbReadCache.cloudAccounts() {
+                defaultedToPaloma = applyPalomaDefault(liveAccounts.items)
+            }
+            if !defaultedToPaloma {
+                let resolveAutoNode: ([OrbJSON]) -> String = { items in
+                    if selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        return "core"
+                    }
+                    return OrbSelection.firstAvailableNodeID(items, backend: selection.backend) ?? "core"
                 }
-                return OrbSelection.firstAvailableNodeID(items, backend: selection.backend) ?? "core"
-            }
-            if selection.node.isEmpty, let cached = OrbReadCache.read("catalog:agent") {
-                selection.node = resolveAutoNode(cached["nodes"]["nodes"].items)
-            }
-            if let catalog = try? await OrbReadCache.agentCatalog(), !selection.cloud && !selection.nodePinnedByUser {
-                selection.node = resolveAutoNode(catalog["nodes"]["nodes"].items)
+                if selection.node.isEmpty, let cached = OrbReadCache.read("catalog:agent") {
+                    selection.node = resolveAutoNode(cached["nodes"]["nodes"].items)
+                }
+                if let catalog = try? await OrbReadCache.agentCatalog(), !selection.cloud && !selection.nodePinnedByUser {
+                    selection.node = resolveAutoNode(catalog["nodes"]["nodes"].items)
+                }
             }
         }
         let targetProject = effectiveProjectSlug

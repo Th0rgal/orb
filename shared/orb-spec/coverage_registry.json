@@ -1,10 +1,10 @@
 {
   "schema_version": "orb-coverage-registry-v1",
   "acceptance": "INCOMPLETE",
-  "total_exports": 169,
+  "total_exports": 176,
   "counts_by_status": {
     "partial": 105,
-    "unconnected": 64
+    "unconnected": 71
   },
   "entries": [
     {
@@ -45,15 +45,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -122,15 +122,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -199,15 +199,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -276,15 +276,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -358,15 +358,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -435,15 +435,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -512,15 +512,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -589,15 +589,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -666,15 +666,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -743,15 +743,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -820,15 +820,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -897,15 +897,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -974,15 +974,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -1057,15 +1057,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -1146,15 +1146,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -1224,15 +1224,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -1301,15 +1301,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -1378,15 +1378,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -1455,15 +1455,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -1532,15 +1532,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -1647,15 +1647,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -1773,15 +1773,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -1850,15 +1850,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -1927,15 +1927,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -2004,15 +2004,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -2097,15 +2097,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -2175,15 +2175,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -2252,15 +2252,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -2393,15 +2393,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -2470,15 +2470,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -2547,15 +2547,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -2624,15 +2624,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -2701,15 +2701,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -2778,15 +2778,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -3239,15 +3239,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -3323,15 +3323,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -3402,15 +3402,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -3481,15 +3481,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -3559,15 +3559,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -3636,15 +3636,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -3741,15 +3741,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -3833,15 +3833,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -3918,15 +3918,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -4002,15 +4002,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -4080,15 +4080,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -4157,15 +4157,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -4234,15 +4234,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -4311,15 +4311,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -4404,15 +4404,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -4492,15 +4492,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -4581,15 +4581,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -4675,15 +4675,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/Orb/StatefulMutantSuite.lean",
@@ -4773,15 +4773,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/Orb/StatefulMutantSuite.lean",
@@ -4871,15 +4871,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/Orb/StatefulMutantSuite.lean",
@@ -4969,15 +4969,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/Orb/StatefulMutantSuite.lean",
@@ -5067,15 +5067,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/Orb/StatefulMutantSuite.lean",
@@ -5170,15 +5170,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/Orb/StatefulMutantSuite.lean",
@@ -5273,15 +5273,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/Orb/Stream.lean",
@@ -5360,7 +5360,7 @@
         "sources": [
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -5447,7 +5447,7 @@
         "sources": [
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -5592,7 +5592,7 @@
         "sources": [
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -5699,7 +5699,7 @@
         "sources": [
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -5765,7 +5765,7 @@
         "sources": [
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -5879,7 +5879,7 @@
         "sources": [
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -6088,7 +6088,7 @@
         "sources": [
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -6211,7 +6211,7 @@
         "sources": [
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -6287,7 +6287,7 @@
         "sources": [
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -6353,7 +6353,7 @@
         "sources": [
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -6423,15 +6423,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -6500,15 +6500,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -6577,15 +6577,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -6669,15 +6669,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -6751,15 +6751,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -6844,15 +6844,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -6927,15 +6927,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -7004,15 +7004,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -7086,15 +7086,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -7173,15 +7173,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -7255,15 +7255,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -7337,15 +7337,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -7409,7 +7409,7 @@
         "sources": [
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -7473,7 +7473,7 @@
         "sources": [
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -7553,7 +7553,7 @@
         "sources": [
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -7665,7 +7665,7 @@
         "sources": [
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -7739,15 +7739,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -7816,15 +7816,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -7898,15 +7898,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -7980,15 +7980,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -8067,15 +8067,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -8149,15 +8149,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -8236,15 +8236,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -8323,15 +8323,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -8405,15 +8405,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -8487,15 +8487,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -8564,15 +8564,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -8641,15 +8641,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -8718,15 +8718,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -8800,15 +8800,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -8882,15 +8882,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -8964,15 +8964,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -9046,15 +9046,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -9123,15 +9123,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -9200,15 +9200,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -9362,15 +9362,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -9444,15 +9444,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+            "sha256": "6361442669934e31f9b5b7e81f9fca11e7c4f9787bc0a80498e26482a390fde9"
           },
           {
             "path": "shared/orb-spec/kernel_abi.json",
-            "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+            "sha256": "096aef332035283399ac0327254e56fee403fedabc66cb5fe99ca0f70948685e"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+            "sha256": "0f6b9bdac7c9a2c2898a2ab5b81f10b4340251cce7f0133b9e82ced0fa90ff9b"
           },
           {
             "path": "lean/OrbCore/OrbCore/HostObservers.lean",
@@ -9482,6 +9482,118 @@
           "Remote node HTTP transport, timer scheduling, and SQLite persistence remain in OrbCore.Store and OrbCore.Control."
         ]
       }
+    },
+    {
+      "export": "orb_memory_tool_gate",
+      "requirement": "Inventory ABI declaration orb_memory_tool_gate; behavioral acceptance pending",
+      "model": "Orb.Kernel.memoryToolGate",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_upload_cleanup_gate",
+      "requirement": "Inventory ABI declaration orb_upload_cleanup_gate; behavioral acceptance pending",
+      "model": "Orb.Kernel.uploadCleanupGate",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_proxy_exhaustion_step",
+      "requirement": "Inventory ABI declaration orb_proxy_exhaustion_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.proxyExhaustionStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_composer_default_step",
+      "requirement": "Inventory ABI declaration orb_composer_default_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.composerDefaultStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_cloud_handoff_step",
+      "requirement": "Inventory ABI declaration orb_cloud_handoff_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.cloudHandoffStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_fast_poll_delay_ms",
+      "requirement": "Inventory ABI declaration orb_fast_poll_delay_ms; behavioral acceptance pending",
+      "model": "Orb.Kernel.fastPollDelayMs",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mcp_preflight_cache_gate",
+      "requirement": "Inventory ABI declaration orb_mcp_preflight_cache_gate; behavioral acceptance pending",
+      "model": "Orb.Kernel.mcpPreflightCacheGate",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
     }
   ]
 }

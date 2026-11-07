@@ -71,8 +71,10 @@ struct OrbForkSheet: View {
     let onForked: (OrbJSON) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var backends: [OrbJSON] = []
+    @State private var nodes: [OrbJSON] = []
     @State private var modelsMap: OrbJSON = .null
     @State private var backend = ""
+    @State private var targetNode = "core"
     @State private var model = ""
     @State private var effort = ""
     @State private var speed = "standard"
@@ -88,6 +90,12 @@ struct OrbForkSheet: View {
     ]
     private static let remoteCapable: Set<String> = ["codex", "grok", "claudecode", "opencode", "antigravity", "vibe"]
 
+    private var isCloudSource: Bool {
+        mission["backend"].text.hasPrefix("cloud_") || !mission["cloud"]["provider"].text.isEmpty
+    }
+    private var isRemoteTarget: Bool {
+        isCloudSource ? (!targetNode.isEmpty && targetNode != "core") : !mission["remote_node_id"].text.isEmpty
+    }
     private var models: [OrbJSON] { modelsMap[backend].items.filter { !modelValue($0).isEmpty } }
     private var efforts: [String] { Self.effortsByHarness[backend] ?? [] }
     private func modelValue(_ m: OrbJSON) -> String { m["value"].text.isEmpty ? m["id"].text : m["value"].text }
@@ -95,7 +103,7 @@ struct OrbForkSheet: View {
         for key in ["label", "displayName", "name"] where !m[key].text.isEmpty { return m[key].text }
         return modelValue(m)
     }
-    private func unavailable(_ id: String) -> Bool { !mission["remote_node_id"].text.isEmpty && !Self.remoteCapable.contains(id) }
+    private func unavailable(_ id: String) -> Bool { isRemoteTarget && !Self.remoteCapable.contains(id) }
 
     var body: some View {
         NavigationStack {
@@ -105,7 +113,10 @@ struct OrbForkSheet: View {
                 if backend == "codex" && !model.isEmpty { OrbCodexSpeedSection(model: model, tier: $speed).disabled(busy || submitted != nil) }
                 Section {
                     Button { Task { await fork() } } label: {
-                        HStack { Text(busy ? (transfer ? "Transferring…" : "Forking…") : (created != nil ? "Retry archiving" : transfer ? "Transfer conversation" : "Fork conversation")); if busy { Spacer(); ProgressView() } }
+                        HStack {
+                            Text(busy ? (transfer ? "Transferring…" : isCloudSource ? "Handing off…" : "Forking…") : (created != nil ? "Retry archiving" : isCloudSource ? "Continue in workspace" : transfer ? "Transfer conversation" : "Fork conversation"))
+                            if busy { Spacer(); ProgressView() }
+                        }
                     }
                     .disabled(busy || backend.isEmpty || model.isEmpty || unavailable(backend))
                     .accessibilityIdentifier("fork.submit")
@@ -113,10 +124,10 @@ struct OrbForkSheet: View {
                         Button("Open transferred conversation") { dismiss(); onForked(created) }.disabled(busy)
                     }
                 } footer: {
-                    Text(transfer ? "Stops the current agent, continues with the selected agent and conversation history, then archives the original." : "Starts a new conversation with this one's history in the same workspace. The original is not changed.")
+                    Text(isCloudSource ? "Starts a workspace agent with this cloud conversation's history on the selected machine." : transfer ? "Stops the current agent, continues with the selected agent and conversation history, then archives the original." : "Starts a new conversation with this one's history in the same workspace. The original is not changed.")
                 }
             }
-            .navigationTitle(transfer ? "Transfer to another agent" : "Fork conversation").navigationBarTitleDisplayMode(.inline)
+            .navigationTitle(isCloudSource ? "Continue in workspace" : transfer ? "Transfer to another agent" : "Fork conversation").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() }.disabled(busy) } }
             .task { await load() }
             .onChange(of: backend) { old, new in
@@ -129,6 +140,15 @@ struct OrbForkSheet: View {
 
     private var harnessSection: some View {
         Section {
+            if isCloudSource {
+                Picker("Machine", selection: $targetNode) {
+                    Text("Core").tag("core")
+                    ForEach(nodes.indices, id: \.self) { idx in
+                        let n = nodes[idx]
+                        Text(n["name"].text.isEmpty ? n["id"].text : n["name"].text).tag(n["id"].text)
+                    }
+                }
+            }
             Picker("Harness", selection: $backend) {
                 ForEach(backends, id: \.selfID) { b in
                     Text(b["name"].text.isEmpty ? b.selfID : b["name"].text).tag(b.selfID).disabled(unavailable(b.selfID))
@@ -153,13 +173,15 @@ struct OrbForkSheet: View {
             let response = catalog["backends"]
             let rawBackends = response.items.isEmpty ? response["backends"].items : response.items
             backends = rawBackends.filter { $0.selfID != "gemini" }
+            nodes = OrbSelection.sortedComputeNodes(catalog["nodes"]["nodes"].items)
             modelsMap = catalog["models"]["backends"]
             if backend.isEmpty {
-                backend = mission["backend"].text.isEmpty ? (backends.first?.selfID ?? "") : mission["backend"].text
+                let rawBackend = mission["backend"].text
+                backend = (rawBackend.isEmpty || isCloudSource) ? (backends.first?.selfID ?? "") : rawBackend
                 let current = mission["model_override"].text
                 model = models.contains { modelValue($0) == current } ? current : (models.first.map(modelValue) ?? "")
-                effort = mission["model_effort"].text
-                if backend == "codex" { speed = OrbCodexSpeed.of(mission) }
+                effort = isCloudSource ? "" : mission["model_effort"].text
+                if backend == "codex" && !isCloudSource { speed = OrbCodexSpeed.of(mission) }
             }
         } catch { self.error = error.localizedDescription }
     }
@@ -171,16 +193,19 @@ struct OrbForkSheet: View {
             if submitted == nil && backend == "codex" { try await OrbCodexSpeed.require(model: model, tier: speed) }
             var body: [String: OrbJSON] = ["backend": .string(backend), "model_override": .string(model), "model_effort": .string(effort), "idempotency_key": .string(key)]
             if backend == "codex" { body["service_tier"] = .string(speed) }
+            if isCloudSource && !targetNode.isEmpty && targetNode != "core" {
+                body["remote_node_id"] = .string(targetNode)
+            }
             let base = "/api/control/missions/\(OrbCore.escape(mission["id"].text))"
             let forked: OrbJSON
             if let created { forked = created }
             else {
-                if transfer { try await stopSource(base) }
+                if transfer && !isCloudSource { try await stopSource(base) }
                 if submitted == nil { submitted = .object(body) }
                 forked = try await OrbCore.shared.call(base + "/fork", method: "POST", body: submitted!)
                 created = forked
             }
-            if transfer {
+            if transfer && !isCloudSource {
                 _ = try await OrbCore.shared.call(base + "/status", method: "POST", body: .object(["status": .string("acknowledged")]))
             }
             OrbHaptics.success()
@@ -198,7 +223,8 @@ struct OrbForkSheet: View {
         let api = OrbCore.shared
         let source = try await api.call(base)
         if Self.sourceStopped(source) { return }
-        _ = try await api.call(base + "/cancel", method: "POST")
+        let cancelPath = source["backend"].text.hasPrefix("cloud_") ? "/cloud/cancel" : "/cancel"
+        _ = try await api.call(base + cancelPath, method: "POST")
         for _ in 0..<20 {
             if Self.sourceStopped(try await api.call(base)) { return }
             try await Task.sleep(for: .milliseconds(500))

@@ -428,6 +428,12 @@ internal func orb_effect_outbox_step(_ phase: UInt8, _ delivered: UInt8, _ op: U
 @_silgen_name("orb_crash_boundary_step")
 internal func orb_crash_boundary_step(_ durableQueued: UInt32, _ durableAcked: UInt32, _ stateRevision: UInt64, _ volatileInFlight: UInt32, _ leaseBootEpoch: UInt64, _ nodeBootEpoch: UInt64, _ volatileLeaseOwner: UInt32, _ reqOwner: UInt32) -> UInt64
 
+@_silgen_name("orb_composer_default_step")
+internal func orb_composer_default_step(_ hasExplicitChoice: UInt8, _ hasPinnedContext: UInt8, _ hermesAvailable: UInt8, _ hasNativeHarness: UInt8) -> UInt8
+
+@_silgen_name("orb_cloud_handoff_step")
+internal func orb_cloud_handoff_step(_ sourceIsCloud: UInt8, _ isSideQuestion: UInt8, _ targetIsNative: UInt8, _ hasHistoryTurns: UInt8, _ targetPlacementValid: UInt8) -> UInt32
+
 enum OrbKernel {
     struct WorkfoldVerdict: Equatable, Sendable {
         let foldItem: Bool
@@ -1122,5 +1128,56 @@ enum OrbKernel {
             evictOtherProjects: ((lo32 >> 10) & 1) != 0,
             nextRev32: hi32
         )
+    }
+
+    enum ComposerDefaultResult: Equatable, Sendable {
+        case keepExplicit
+        case defaultPalomaHermes
+        case defaultWorkspaceHarness
+        case awaitSelection
+    }
+
+    static func composerDefaultStep(
+        hasExplicitChoice: Bool,
+        hasPinnedContext: Bool,
+        hermesAvailable: Bool,
+        hasNativeHarness: Bool
+    ) -> ComposerDefaultResult {
+        let raw = orb_composer_default_step(
+            b8(hasExplicitChoice),
+            b8(hasPinnedContext),
+            b8(hermesAvailable),
+            b8(hasNativeHarness)
+        )
+        switch raw {
+        case 0: return .keepExplicit
+        case 1: return .defaultPalomaHermes
+        case 2: return .defaultWorkspaceHarness
+        default: return .awaitSelection
+        }
+    }
+
+    enum CloudHandoffResult: Equatable, Sendable {
+        case deny
+        case allowHandoff
+        case allowNativeFork
+    }
+
+    static func cloudHandoffStep(
+        sourceIsCloud: Bool,
+        isSideQuestion: Bool,
+        targetIsNative: Bool,
+        hasHistoryTurns: Bool,
+        targetPlacementValid: Bool
+    ) -> CloudHandoffResult {
+        let raw = orb_cloud_handoff_step(
+            b8(sourceIsCloud),
+            b8(isSideQuestion),
+            b8(targetIsNative),
+            b8(hasHistoryTurns),
+            b8(targetPlacementValid)
+        )
+        if (raw & 1) == 0 { return .deny }
+        return ((raw >> 24) & 1) != 0 ? .allowHandoff : .allowNativeFork
     }
 }

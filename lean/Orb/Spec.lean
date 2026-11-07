@@ -10337,4 +10337,570 @@ theorem ashur_9409f9a9_enospc_replay_recovery_witness :
     healStranded = 262 := by
   decide
 
+-- ===========================================================================
+-- Governed Read-Only Memory MCP Broker, Upload Cleanup Retention &
+-- Proxy Chain Exhaustion Classification
+-- (`orb_memory_tool_gate`, `orb_upload_cleanup_gate`, `orb_proxy_exhaustion_step`)
+-- ===========================================================================
+
+structure MemoryToolCheck where
+  opKind                : UInt8
+  callerRole            : UInt8
+  isExternalSession     : UInt8
+  bunkerState           : UInt8
+  onManagedNode         : UInt8
+  hasProjectMemorySkill : UInt8
+  hasSecretAccess       : UInt8
+  bankKind              : UInt8
+  requestedLimit        : UInt32
+  maxLimit              : UInt32
+  requestedTokens       : UInt32
+  maxTokens             : UInt32
+  deriving Repr, DecidableEq
+
+def MemoryToolCheck.ScopeValid (c : MemoryToolCheck) : Bool :=
+  let roleAuthorized : Bool :=
+    c.callerRole == 1 || c.callerRole == 2 ||
+    (c.callerRole == 0 && ((c.isExternalSession == 0 && c.hasProjectMemorySkill == 1) || c.hasSecretAccess == 1))
+  let bunkerAllowed : Bool :=
+    c.isExternalSession == 0 || c.bunkerState == 0
+  c.opKind ≤ 3 && c.bankKind ≤ 1 && c.onManagedNode == 0 &&
+    bunkerAllowed && roleAuthorized
+
+def MemoryToolCheck.WithinBudget (c : MemoryToolCheck) : Bool :=
+  c.maxLimit ≥ 1 && c.requestedLimit ≥ 1 && c.requestedLimit ≤ c.maxLimit &&
+  c.maxTokens ≥ 256 && c.requestedTokens ≥ 1 && c.requestedTokens ≤ c.maxTokens
+
+def MemoryToolCheck.Admissible (c : MemoryToolCheck) : Bool :=
+  c.ScopeValid && c.WithinBudget
+
+def memoryToolMetaGate : MetaGateSpec MemoryToolCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    memoryToolGate c.opKind c.callerRole c.isExternalSession c.bunkerState
+      c.onManagedNode c.hasProjectMemorySkill c.hasSecretAccess c.bankKind
+      c.requestedLimit c.maxLimit c.requestedTokens c.maxTokens == 1
+  sound c h := by
+    unfold MemoryToolCheck.Admissible MemoryToolCheck.ScopeValid MemoryToolCheck.WithinBudget
+    unfold memoryToolGate at h
+    dsimp only [] at h
+    cases hm : (c.opKind ≤ 3 && c.bankKind ≤ 1 && c.onManagedNode == 0 &&
+        (c.isExternalSession == 0 || c.bunkerState == 0) &&
+        (c.callerRole == 1 || c.callerRole == 2 ||
+          (c.callerRole == 0 && ((c.isExternalSession == 0 && c.hasProjectMemorySkill == 1) || c.hasSecretAccess == 1))) &&
+        (c.maxLimit ≥ 1 && c.requestedLimit ≥ 1 && c.requestedLimit ≤ c.maxLimit &&
+          c.maxTokens ≥ 256 && c.requestedTokens ≥ 1 && c.requestedTokens ≤ c.maxTokens))
+    · simp [hm] at h
+    · simp only [Bool.and_assoc, hm]
+  complete c h := by
+    unfold MemoryToolCheck.Admissible MemoryToolCheck.ScopeValid MemoryToolCheck.WithinBudget at h
+    dsimp only [] at h
+    unfold memoryToolGate
+    dsimp only []
+    simp only [Bool.and_assoc] at h ⊢
+    rw [h]
+    rfl
+  posWitness := ⟨0, 0, 0, 0, 0, 1, 0, 0, 10, 25, 4096, 8192⟩
+  negWitness := ⟨0, 0, 0, 0, 1, 1, 1, 0, 10, 25, 4096, 8192⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def memoryToolScopedAuthority : ScopedAuthority MemoryToolCheck where
+  admit c := memoryToolMetaGate.gate c
+  scopeValid c := c.ScopeValid
+  sound c h := by
+    have hadm := memoryToolMetaGate.sound c h
+    unfold MemoryToolCheck.Admissible at hadm
+    exact (Bool.and_eq_true _ _).mp hadm |>.1
+
+def memoryToolConservedResource : ConservedResource MemoryToolCheck where
+  admit c := memoryToolMetaGate.gate c
+  withinBudget c := c.WithinBudget
+  conserved c h := by
+    have hadm := memoryToolMetaGate.sound c h
+    unfold MemoryToolCheck.Admissible at hadm
+    exact (Bool.and_eq_true _ _).mp hadm |>.2
+
+/-- Corollary (`ScopedAuthority` — `orb_memory_tool_gate`):
+    1. Untrusted `managed-*` cloud VMs (`onManagedNode = 1`) are unconditionally rejected (`0`),
+       even when `hasProjectMemorySkill = 1`, `hasSecretAccess = 1`, or `callerRole = 2`.
+    2. Write/unknown operations (`opKind >= 4`) and unallowlisted memory banks (`bankKind >= 2`)
+       are unconditionally rejected (`0`).
+    3. An executor without `spark-memory` project attachment or secret grant is rejected (`0`).
+    4. External sessions are rejected whenever Bunker `SoftQuarantine` / `HardLockdown` is active. -/
+theorem memory_tool_enforces_managed_exclusion_and_readonly_scope
+    (op role ext bunker managed skill sec bank : UInt8)
+    (reqLim maxLim reqTok maxTok : UInt32) :
+    memoryToolGate op role ext bunker 1 skill sec bank reqLim maxLim reqTok maxTok = 0 ∧
+    (op > 3 → memoryToolGate op role ext bunker managed skill sec bank reqLim maxLim reqTok maxTok = 0) ∧
+    (bank > 1 → memoryToolGate op role ext bunker managed skill sec bank reqLim maxLim reqTok maxTok = 0) ∧
+    memoryToolGate op 0 ext bunker managed 0 0 bank reqLim maxLim reqTok maxTok = 0 ∧
+    (bunker ≠ 0 → memoryToolGate op role 1 bunker managed skill sec bank reqLim maxLim reqTok maxTok = 0) := by
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · unfold memoryToolGate; dsimp only []
+    have hm : ((1 : UInt8) == 0) = false := rfl
+    simp [hm]
+  · intro hop
+    unfold memoryToolGate; dsimp only []
+    have hnat : op.toNat > 3 := UInt8.lt_iff_toNat_lt.mp hop
+    have hle : decide (op ≤ 3) = false :=
+      decide_eq_false (fun h => Nat.not_le_of_gt hnat (UInt8.le_iff_toNat_le.mp h))
+    simp [hle]
+  · intro hbank
+    unfold memoryToolGate; dsimp only []
+    have hnat : bank.toNat > 1 := UInt8.lt_iff_toNat_lt.mp hbank
+    have hle : decide (bank ≤ 1) = false :=
+      decide_eq_false (fun h => Nat.not_le_of_gt hnat (UInt8.le_iff_toNat_le.mp h))
+    simp [hle]
+  · unfold memoryToolGate; dsimp only []
+    simp
+  · intro hb
+    unfold memoryToolGate; dsimp only []
+    have hb0 : (bunker == 0) = false := beq_eq_false_iff_ne.mpr hb
+    simp [hb0]
+
+structure UploadCleanupCheck where
+  hasValidUuid           : UInt8
+  isSharedLibraryArchive : UInt8
+  isExpiredForGc         : UInt8
+  deriving Repr, DecidableEq
+
+def UploadCleanupCheck.Removable (c : UploadCleanupCheck) : Bool :=
+  c.hasValidUuid == 1 && (c.isSharedLibraryArchive == 0 || c.isExpiredForGc == 1)
+
+def uploadCleanupMetaGate : MetaGateSpec UploadCleanupCheck
+    (fun c => c.Removable = true) where
+  gate c :=
+    uploadCleanupGate c.hasValidUuid c.isSharedLibraryArchive c.isExpiredForGc == 1
+  sound c h := by
+    unfold UploadCleanupCheck.Removable
+    unfold uploadCleanupGate at h
+    cases hm : (c.hasValidUuid == 1 && (c.isSharedLibraryArchive == 0 || c.isExpiredForGc == 1))
+    · simp [hm] at h
+    · rfl
+  complete c h := by
+    unfold UploadCleanupCheck.Removable at h
+    unfold uploadCleanupGate
+    simp [h]
+  posWitness := ⟨1, 0, 0⟩
+  negWitness := ⟨1, 1, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def uploadCleanupScopedAuthority : ScopedAuthority UploadCleanupCheck where
+  admit c := uploadCleanupMetaGate.gate c
+  scopeValid c := c.Removable
+  sound c h := uploadCleanupMetaGate.sound c h
+
+/-- Corollary (`ScopedAuthority` — `orb_upload_cleanup_gate` `babylon` regression witness):
+    Post-job cleanup (`isExpiredForGc = 0`) deletes one-shot prompt attachments
+    (`uploadCleanupGate 1 0 0 = 1`) while strictly preserving shared `library-skills-*.tar.gz`
+    archives (`uploadCleanupGate 1 1 0 = 0`) until TTL expiration (`uploadCleanupGate 1 1 1 = 1`). -/
+theorem upload_cleanup_retains_shared_library_archive_across_jobs (validUuid : UInt8) :
+    uploadCleanupGate validUuid 1 0 = 0 ∧
+    uploadCleanupGate 1 0 0 = 1 ∧
+    uploadCleanupGate 1 1 1 = 1 := by
+  refine ⟨?_, rfl, rfl⟩
+  unfold uploadCleanupGate
+  cases hv : (validUuid == 1) <;> simp [hv]
+
+structure ProxyExhaustionInput where
+  rateLimitCount           : UInt32
+  paymentRequiredCount     : UInt32
+  clientAuthErrorCount     : UInt32
+  serverErrorCount         : UInt32
+  transportValidationCount : UInt32
+  hasContextOverflow       : UInt8
+  deriving Repr, DecidableEq
+
+def ProxyExhaustionInput.eval (x : ProxyExhaustionInput) : UInt8 :=
+  proxyExhaustionStep x.rateLimitCount x.paymentRequiredCount x.clientAuthErrorCount
+    x.serverErrorCount x.transportValidationCount x.hasContextOverflow
+
+def proxyExhaustionProjectionStability : ProjectionStability ProxyExhaustionInput UInt8 where
+  project x := x.eval
+  validIn _ := true
+  stable x cls :=
+    let anyAttempt :=
+      x.rateLimitCount != 0 || x.paymentRequiredCount != 0 ||
+      x.clientAuthErrorCount != 0 || x.serverErrorCount != 0
+    let attempted :=
+      x.rateLimitCount.toUInt64 + x.paymentRequiredCount.toUInt64 +
+      x.clientAuthErrorCount.toUInt64 + x.serverErrorCount.toUInt64
+    1 ≤ cls && cls ≤ 7 &&
+    ((cls == 1) == !anyAttempt) &&
+    (!(x.paymentRequiredCount != 0 && x.rateLimitCount == 0 &&
+       x.serverErrorCount == 0 && x.transportValidationCount.toUInt64 != attempted) || cls == 4)
+  preserves x _ := by
+    unfold ProxyExhaustionInput.eval proxyExhaustionStep
+    dsimp only []
+    cases ha : (x.rateLimitCount != 0 || x.paymentRequiredCount != 0 ||
+        x.clientAuthErrorCount != 0 || x.serverErrorCount != 0)
+    · simp only [Bool.not_false, ↓reduceIte]
+      have hp0 : (x.paymentRequiredCount != 0) = false := by
+        cases hp : (x.paymentRequiredCount != 0)
+        · rfl
+        · simp [hp] at ha
+      simp [hp0]
+    · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+      cases ht : (x.transportValidationCount.toUInt64 ==
+          x.rateLimitCount.toUInt64 + x.paymentRequiredCount.toUInt64 +
+          x.clientAuthErrorCount.toUInt64 + x.serverErrorCount.toUInt64)
+      · simp only [Bool.false_eq_true, ↓reduceIte]
+        cases hc : (x.hasContextOverflow == 1 && x.rateLimitCount == 0 && x.paymentRequiredCount == 0)
+        · simp only [Bool.false_eq_true, ↓reduceIte]
+          cases hp : (x.paymentRequiredCount != 0 && x.rateLimitCount == 0 && x.serverErrorCount == 0)
+          · simp only [Bool.false_eq_true, ↓reduceIte]
+            cases hca : (x.clientAuthErrorCount != 0 && x.paymentRequiredCount == 0 &&
+                x.rateLimitCount == 0 && x.serverErrorCount == 0)
+            · simp only [Bool.false_eq_true, ↓reduceIte]
+              cases hs : (x.serverErrorCount != 0 && x.rateLimitCount == 0) <;>
+                · have hguard : (x.paymentRequiredCount != 0 && x.rateLimitCount == 0 &&
+                      x.serverErrorCount == 0 &&
+                      x.transportValidationCount.toUInt64 !=
+                        x.rateLimitCount.toUInt64 + x.paymentRequiredCount.toUInt64 +
+                        x.clientAuthErrorCount.toUInt64 + x.serverErrorCount.toUInt64) = false := by
+                    simp [hp]
+                  simp [hguard]
+            · have hguard : (x.paymentRequiredCount != 0 && x.rateLimitCount == 0 &&
+                  x.serverErrorCount == 0 &&
+                  x.transportValidationCount.toUInt64 !=
+                    x.rateLimitCount.toUInt64 + x.paymentRequiredCount.toUInt64 +
+                    x.clientAuthErrorCount.toUInt64 + x.serverErrorCount.toUInt64) = false := by
+                simp [hp]
+              simp [hguard]
+          · simp
+        · have hp0 : (x.paymentRequiredCount != 0) = false := by
+            simp only [Bool.and_eq_true, beq_iff_eq] at hc
+            simp [hc.2]
+          simp [hp0]
+      · have hne : (x.transportValidationCount.toUInt64 !=
+            x.rateLimitCount.toUInt64 + x.paymentRequiredCount.toUInt64 +
+            x.clientAuthErrorCount.toUInt64 + x.serverErrorCount.toUInt64) = false := by
+          cases hne' : (x.transportValidationCount.toUInt64 !=
+              x.rateLimitCount.toUInt64 + x.paymentRequiredCount.toUInt64 +
+              x.clientAuthErrorCount.toUInt64 + x.serverErrorCount.toUInt64)
+          · rfl
+          · rw [bne_iff_ne] at hne'
+            rw [beq_iff_eq] at ht
+            exact False.elim (hne' ht)
+        simp [hne]
+
+/-- Corollary (`ProjectionStability` — `builtin/fast` `particle-1` HTTP 402 regression witness):
+    When a chain exhausts with `paymentRequiredCount > 0` (`CooldownReason::PaymentRequired`),
+    zero rate limits, zero 5xx errors, and zero transport validation skips, `proxyExhaustionStep`
+    projects to `4` (`PaymentRequiredOutOfCredit`) and never conflates with `5` (`ClientOrAuthError`). -/
+theorem proxy_exhaustion_separates_payment_required_from_client_auth
+    (payCnt authCnt : UInt32) (ctxOv : UInt8) (hpay : payCnt ≠ 0) :
+    proxyExhaustionStep 0 payCnt authCnt 0 0 ctxOv = 4 ∧
+    proxyExhaustionStep 0 0 1 0 0 0 = 5 := by
+  refine ⟨?_, by decide⟩
+  unfold proxyExhaustionStep
+  dsimp only []
+  have hpne : (payCnt != 0) = true := bne_iff_ne.mpr hpay
+  have hpeq : (payCnt == 0) = false := beq_eq_false_iff_ne.mpr hpay
+  have hgt : payCnt.toNat > 0 :=
+    Nat.pos_of_ne_zero (fun h0 => hpay (UInt32.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h0)))
+  have h1 : payCnt.toNat < 2 ^ 32 := payCnt.toBitVec.isLt
+  have h2 : authCnt.toNat < 2 ^ 32 := authCnt.toBitVec.isLt
+  have hlt64 : payCnt.toNat + authCnt.toNat < 2 ^ 64 := by omega
+  have hsum : (0 : UInt64) ≠ payCnt.toUInt64 + authCnt.toUInt64 := by
+    intro heq
+    have hnat : (0 : Nat) = (payCnt.toUInt64 + authCnt.toUInt64).toNat :=
+      congrArg UInt64.toNat heq
+    have hp64 : payCnt.toUInt64.toNat = payCnt.toNat := UInt32.toNat_toUInt64 payCnt
+    have ha64 : authCnt.toUInt64.toNat = authCnt.toNat := UInt32.toNat_toUInt64 authCnt
+    have hadd : (payCnt.toUInt64 + authCnt.toUInt64).toNat = payCnt.toNat + authCnt.toNat := by
+      rw [UInt64.toNat_add, hp64, ha64]
+      exact Nat.mod_eq_of_lt hlt64
+    omega
+  have hz : (0 : UInt32).toUInt64 = 0 := rfl
+  simp [hpne, hpeq, hz, hsum]
+
+/-! ## Cross-Client Composer Default, Cloud Handoff, Fast Poll Cadence & MCP Preflight Cache -/
+
+structure ComposerDefaultInput where
+  hasExplicitChoice : UInt8
+  hasPinnedContext  : UInt8
+  hermesAvailable   : UInt8
+  hasNativeHarness  : UInt8
+  deriving Repr, DecidableEq
+
+def ComposerDefaultInput.eval (x : ComposerDefaultInput) : UInt8 :=
+  composerDefaultStep x.hasExplicitChoice x.hasPinnedContext x.hermesAvailable x.hasNativeHarness
+
+def composerDefaultPalomaMetaGate : MetaGateSpec ComposerDefaultInput
+    (fun x => (x.hasExplicitChoice != 1 && x.hasPinnedContext == 0 && x.hermesAvailable == 1) = true) where
+  gate x := x.eval == 1
+  sound x h := by
+    unfold ComposerDefaultInput.eval composerDefaultStep at h
+    cases he : (x.hasExplicitChoice == 1)
+    · simp only [he, Bool.false_eq_true, ↓reduceIte] at h
+      cases hp : (x.hasPinnedContext == 0 && x.hermesAvailable == 1)
+      · simp only [hp, Bool.false_eq_true, ↓reduceIte] at h
+        cases hn : (x.hasNativeHarness == 1) <;> simp [hn] at h
+      · have hne : (x.hasExplicitChoice != 1) = true := by
+          cases hne' : (x.hasExplicitChoice != 1)
+          · rw [bne_eq_false_iff_eq] at hne'
+            simp [hne'] at he
+          · rfl
+        rcases Bool.and_eq_true_iff.mp hp with ⟨hp0, hh1⟩
+        simp [hne, hp0, hh1]
+    · simp [he] at h
+  complete x h := by
+    unfold ComposerDefaultInput.eval composerDefaultStep
+    rcases Bool.and_eq_true_iff.mp h with ⟨hleft, hh1⟩
+    rcases Bool.and_eq_true_iff.mp hleft with ⟨hne, hp0⟩
+    have he : (x.hasExplicitChoice == 1) = false := by
+      cases he' : (x.hasExplicitChoice == 1)
+      · rfl
+      · rw [beq_iff_eq] at he'
+        simp [he'] at hne
+    simp [he, hp0, hh1]
+  posWitness := ⟨0, 0, 1, 1⟩
+  negWitness := ⟨0, 1, 1, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def composerDefaultProjectionStability : ProjectionStability ComposerDefaultInput UInt8 where
+  project x := x.eval
+  validIn _ := true
+  stable x code :=
+    code ≤ 3 &&
+    ((code == 0) == (x.hasExplicitChoice == 1)) &&
+    ((code == 1) == (x.hasExplicitChoice != 1 && x.hasPinnedContext == 0 && x.hermesAvailable == 1))
+  preserves x _ := by
+    unfold ComposerDefaultInput.eval composerDefaultStep
+    cases he : (x.hasExplicitChoice == 1)
+    · have hne : (x.hasExplicitChoice != 1) = true := by
+        cases hne' : (x.hasExplicitChoice != 1)
+        · rw [bne_eq_false_iff_eq] at hne'
+          simp [hne'] at he
+        · rfl
+      cases hp : (x.hasPinnedContext == 0) <;>
+        cases hh : (x.hermesAvailable == 1) <;>
+        cases hn : (x.hasNativeHarness == 1) <;>
+        simp [he, hne, hp, hh, hn]
+    · have hne : (x.hasExplicitChoice != 1) = false := by
+        rw [beq_iff_eq] at he
+        simp [he]
+      simp [he, hne]
+
+/-- Corollary (`ProjectionStability` — cross-client composer default witnesses):
+    Unpinned new conversations default to Paloma (`1`) when Hermes is available, switch to
+    workspace harness (`2`) whenever a folder/repo/node is pinned (`hasPinnedContext = 1`),
+    and preserve explicit user choices (`0`). -/
+theorem composer_default_unpinned_paloma_vs_pinned_workspace :
+    composerDefaultStep 0 0 1 1 = 1 ∧
+    composerDefaultStep 0 1 1 1 = 2 ∧
+    composerDefaultStep 0 0 0 1 = 2 ∧
+    composerDefaultStep 1 0 1 1 = 0 ∧
+    composerDefaultStep 0 0 0 0 = 3 := by
+  decide
+
+structure CloudHandoffCheck where
+  sourceIsCloud        : UInt8
+  isSideQuestion       : UInt8
+  targetIsNative       : UInt8
+  hasHistoryTurns      : UInt8
+  targetPlacementValid : UInt8
+  deriving Repr, DecidableEq
+
+def CloudHandoffCheck.eval (c : CloudHandoffCheck) : UInt32 :=
+  cloudHandoffStep c.sourceIsCloud c.isSideQuestion c.targetIsNative
+    c.hasHistoryTurns c.targetPlacementValid
+
+def CloudHandoffCheck.Admissible (c : CloudHandoffCheck) : Bool :=
+  c.targetIsNative == 1 && c.targetPlacementValid == 1 &&
+  (c.sourceIsCloud != 1 || (c.isSideQuestion == 0 && c.hasHistoryTurns == 1))
+
+def cloudHandoffMetaGate : MetaGateSpec CloudHandoffCheck
+    (fun c => c.Admissible = true) where
+  gate c := (c.eval &&& 1) == 1
+  sound c h := by
+    unfold CloudHandoffCheck.Admissible
+    unfold CloudHandoffCheck.eval cloudHandoffStep at h
+    cases ht : (c.targetIsNative != 1 || c.targetPlacementValid != 1)
+    · rcases Bool.or_eq_false_iff.mp ht with ⟨htn, htp⟩
+      rw [bne_eq_false_iff_eq] at htn htp
+      simp only [htn, htp, bne_self_eq_false, Bool.or_self, Bool.false_eq_true, ↓reduceIte,
+        beq_self_eq_true, Bool.true_and] at h ⊢
+      cases hs : (c.sourceIsCloud == 1)
+      · have hsne : (c.sourceIsCloud != 1) = true := by
+          cases hs' : (c.sourceIsCloud != 1)
+          · rw [bne_eq_false_iff_eq] at hs'
+            simp [hs'] at hs
+          · rfl
+        simp [hsne]
+      · simp only [hs, ↓reduceIte] at h
+        cases hch : (c.isSideQuestion == 0 && c.hasHistoryTurns == 1)
+        · simp [hch] at h
+        · simp [hch]
+    · simp [ht] at h
+  complete c h := by
+    unfold CloudHandoffCheck.Admissible at h
+    unfold CloudHandoffCheck.eval cloudHandoffStep
+    rcases Bool.and_eq_true_iff.mp h with ⟨htp_all, hsrc⟩
+    rcases Bool.and_eq_true_iff.mp htp_all with ⟨htn, htp⟩
+    rw [beq_iff_eq] at htn htp
+    simp only [htn, htp, bne_self_eq_false, Bool.or_self, Bool.false_eq_true, ↓reduceIte]
+    cases hs : (c.sourceIsCloud == 1)
+    · simp [hs]; decide
+    · rw [beq_iff_eq] at hs
+      simp only [hs, bne_self_eq_false, Bool.false_or, beq_self_eq_true, ↓reduceIte] at hsrc ⊢
+      simp [hsrc]; decide
+  posWitness := ⟨1, 0, 1, 1, 1⟩
+  negWitness := ⟨1, 1, 1, 1, 1⟩
+  nonVacuous := by decide
+  tight      := by decide
+
+def cloudHandoffScopedAuthority : ScopedAuthority CloudHandoffCheck where
+  admit c := cloudHandoffMetaGate.gate c
+  scopeValid c := c.Admissible
+  sound c h := cloudHandoffMetaGate.sound c h
+
+/-- Corollary (`ScopedAuthority` & `ProjectionStability` — Cloud-to-Workspace handoff separation):
+    1. Admitted cloud handoffs (`sourceIsCloud = 1`) set `useCloudTurns` (`bit 8`) and
+       `freshWorkspace` (`bit 24`) while strictly clearing `shareSourceWorkspace` (`bit 16 = 0`);
+    2. Side-questions (`/btw`, `isSideQuestion = 1`) on cloud sources are always rejected (`0`);
+    3. Native forks (`sourceIsCloud = 0`) set `shareSourceWorkspace` (`bit 16`) and never set
+       `useCloudTurns` (`bit 8 = 0`) or `freshWorkspace` (`bit 24 = 0`). -/
+theorem cloud_handoff_isolates_fresh_workspace_from_native_fork :
+    cloudHandoffStep 1 0 1 1 1 = (0x01000101 : UInt32) ∧
+    (cloudHandoffStep 1 0 1 1 1 &&& (0x00010000 : UInt32)) = 0 ∧
+    cloudHandoffStep 1 1 1 1 1 = 0 ∧
+    cloudHandoffStep 1 0 1 0 1 = 0 ∧
+    cloudHandoffStep 0 0 1 0 1 = (0x00010001 : UInt32) := by
+  decide
+
+structure FastPollInput where
+  isStopping          : UInt8
+  elapsedMs           : UInt64
+  consecutiveFailures : UInt32
+  deriving Repr, DecidableEq
+
+def FastPollInput.eval (x : FastPollInput) : UInt64 :=
+  fastPollDelayMs x.isStopping x.elapsedMs x.consecutiveFailures
+
+def fastPollConservedResource : ConservedResource FastPollInput where
+  admit _ := true
+  withinBudget x :=
+    let d := x.eval
+    decide (80 ≤ d) && decide (d ≤ 5000) &&
+    (!(decide (1 ≤ x.consecutiveFailures)) || decide (1000 ≤ d))
+  conserved x _ := by
+    unfold FastPollInput.eval fastPollDelayMs
+    by_cases hf4 : 4 ≤ x.consecutiveFailures
+    · have hf1 : 1 ≤ x.consecutiveFailures := UInt32.le_trans (by decide) hf4
+      simp [hf4, hf1]
+    · simp only [hf4, ↓reduceIte]
+      cases hf3 : (x.consecutiveFailures == 3)
+      · simp only [Bool.false_eq_true, ↓reduceIte]
+        cases hf2 : (x.consecutiveFailures == 2)
+        · simp only [Bool.false_eq_true, ↓reduceIte]
+          cases hf1 : (x.consecutiveFailures == 1)
+          · simp only [Bool.false_eq_true, ↓reduceIte]
+            have hzero : ¬ (1 ≤ x.consecutiveFailures) := by
+              intro hle
+              have hlt4 : x.consecutiveFailures.toNat < 4 :=
+                Nat.lt_of_not_le (fun h4 => hf4 (UInt32.le_iff_toNat_le.mpr h4))
+              have hge1 : 1 ≤ x.consecutiveFailures.toNat := UInt32.le_iff_toNat_le.mp hle
+              have hne1 : x.consecutiveFailures.toNat ≠ 1 := by
+                intro h1
+                have heq : x.consecutiveFailures = 1 :=
+                  UInt32.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h1)
+                simp [heq] at hf1
+              have hne2 : x.consecutiveFailures.toNat ≠ 2 := by
+                intro h2
+                have heq : x.consecutiveFailures = 2 :=
+                  UInt32.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h2)
+                simp [heq] at hf2
+              have hne3 : x.consecutiveFailures.toNat ≠ 3 := by
+                intro h3
+                have heq : x.consecutiveFailures = 3 :=
+                  UInt32.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h3)
+                simp [heq] at hf3
+              omega
+            cases hst : (x.isStopping == 1)
+            · simp only [Bool.false_eq_true, ↓reduceIte]
+              by_cases he4 : x.elapsedMs < 4000
+              · simp [he4, hzero]
+              · by_cases he15 : x.elapsedMs < 15000
+                · simp [he4, he15, hzero]
+                · simp [he4, he15, hzero]
+            · simp [hst, hzero]
+          · rw [beq_iff_eq] at hf1
+            simp [hf1]
+        · rw [beq_iff_eq] at hf2
+          simp [hf2]
+      · rw [beq_iff_eq] at hf3
+        simp [hf3]
+
+/-- Boundary & backoff witnesses for `orb_fast_poll_delay_ms`:
+    80 ms initial burst -> 200 ms warm ramp -> 500 ms steady state / stopping -> 1s..5s failure backoff. -/
+theorem fast_poll_delay_burst_ramp_and_backoff_witnesses :
+    fastPollDelayMs 0 0 0 = 80 ∧
+    fastPollDelayMs 0 3999 0 = 80 ∧
+    fastPollDelayMs 0 4000 0 = 200 ∧
+    fastPollDelayMs 0 15000 0 = 500 ∧
+    fastPollDelayMs 1 500 0 = 500 ∧
+    fastPollDelayMs 0 100 1 = 1000 ∧
+    fastPollDelayMs 0 100 2 = 2000 ∧
+    fastPollDelayMs 0 100 5 = 5000 := by
+  decide
+
+structure McpPreflightCacheCheck where
+  hasCached        : UInt8
+  identityMatches  : UInt8
+  contractMatches  : UInt8
+  sessionUnexpired : UInt8
+  ageSecs          : UInt64
+  maxTtlSecs       : UInt64
+  deriving Repr, DecidableEq
+
+def McpPreflightCacheCheck.Admissible (c : McpPreflightCacheCheck) : Bool :=
+  c.hasCached == 1 && c.identityMatches == 1 && c.contractMatches == 1 &&
+  c.sessionUnexpired == 1 &&
+  decide (1 ≤ c.maxTtlSecs) && decide (c.maxTtlSecs ≤ 300) && decide (c.ageSecs ≤ c.maxTtlSecs)
+
+def mcpPreflightCacheMetaGate : MetaGateSpec McpPreflightCacheCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    mcpPreflightCacheGate c.hasCached c.identityMatches c.contractMatches
+      c.sessionUnexpired c.ageSecs c.maxTtlSecs == 1
+  sound c h := by
+    unfold McpPreflightCacheCheck.Admissible
+    unfold mcpPreflightCacheGate at h
+    cases hm : (c.hasCached == 1 && c.identityMatches == 1 && c.contractMatches == 1 &&
+        c.sessionUnexpired == 1 &&
+        decide (1 ≤ c.maxTtlSecs) && decide (c.maxTtlSecs ≤ 300) && decide (c.ageSecs ≤ c.maxTtlSecs))
+    · simp [hm] at h
+    · rfl
+  complete c h := by
+    unfold McpPreflightCacheCheck.Admissible at h
+    unfold mcpPreflightCacheGate
+    simp [h]
+  posWitness := ⟨1, 1, 1, 1, 2, 30⟩
+  negWitness := ⟨1, 0, 1, 1, 2, 30⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def mcpPreflightCacheScopedAuthority : ScopedAuthority McpPreflightCacheCheck where
+  admit c := mcpPreflightCacheMetaGate.gate c
+  scopeValid c := c.Admissible
+  sound c h := mcpPreflightCacheMetaGate.sound c h
+
+/-- Corollary (`ScopedAuthority` — `sandboxed-mcp` preflight cache safety witnesses):
+    Rejects cross-mission identity mismatch (`identityMatches = 0`), contract drift
+    (`contractMatches = 0`), expired tokens (`sessionUnexpired = 0`), stale snapshots
+    (`ageSecs > maxTtlSecs`), and unbounded TTL (`maxTtlSecs > 300`). -/
+theorem mcp_preflight_cache_rejects_mismatch_or_stale :
+    mcpPreflightCacheGate 1 1 1 1 2 30 = 1 ∧
+    mcpPreflightCacheGate 1 0 1 1 2 30 = 0 ∧
+    mcpPreflightCacheGate 1 1 0 1 2 30 = 0 ∧
+    mcpPreflightCacheGate 1 1 1 0 2 30 = 0 ∧
+    mcpPreflightCacheGate 1 1 1 1 31 30 = 0 ∧
+    mcpPreflightCacheGate 1 1 1 1 2 301 = 0 := by
+  decide
+
 end Orb.Spec

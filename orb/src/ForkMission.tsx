@@ -2,7 +2,7 @@ import { isHarness } from "./harnesses";
 import { DONE_STATUSES, isArchivable, isFailedStatus, isReady, remoteJobEnded, remoteJobFailed } from "./missionStatus";
 import { CodexSpeedPicker, missionSpeed, requireSpeedSupport } from "./CodexSpeedPicker";
 import { localBinding } from "./localAgents";
-import { ApiError, archiveMission, cancelMission, forkMission, getMission, shortModelLabel, type CodexServiceTier, type HarnessChoice, type Mission } from "./api";
+import { api, ApiError, archiveMission, cancelMission, forkMission, getMission, shortModelLabel, type CodexServiceTier, type HarnessChoice, type Mission } from "./api";
 import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createEffect, createMemo, createSignal, on, onMount } from "solid-js";
 import { effortLabel, supportedEfforts } from "./effort";
@@ -68,8 +68,8 @@ export const transferForDestination = (destinationId: string | null | undefined)
   return Object.values(transfers()).find(t => t.destination?.id === destinationId);
 };
 
-const targetKey = (backend: string, model: string, effort: string, speed?: CodexServiceTier) =>
-  JSON.stringify([backend, model, effort, backend === "codex" ? (speed ?? "standard") : ""]);
+const targetKey = (backend: string, model: string, effort: string, speed?: CodexServiceTier, remoteNodeId?: string | null) =>
+  JSON.stringify([backend, model, effort, backend === "codex" ? (speed ?? "standard") : "", remoteNodeId ?? ""]);
 
 export function destinationStartupOutcome(
   mission: Mission | null | undefined,
@@ -198,15 +198,36 @@ function isDefinitiveRefusal(error: unknown): boolean {
   return error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429;
 }
 
-export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; destination: string; anchor?: HTMLElement; onOpen?: () => void; onClose: () => void; onFork: (mission: Mission) => void }) {
-  const [backend, setBackend] = createSignal(p.mission.backend ?? p.choices[0]?.backend.id ?? "");
+export type CloudHandoffTarget = { id: string; label: string; remoteNodeId: string | null };
+
+export function ForkMission(p: {
+  mission: Mission;
+  choices: HarnessChoice[];
+  destination: string;
+  targets?: CloudHandoffTarget[];
+  targetId?: string;
+  onTargetChange?: (id: string) => void;
+  anchor?: HTMLElement;
+  onOpen?: () => void;
+  onClose: () => void;
+  onFork: (mission: Mission) => void;
+}) {
+  const isCloudSource = () => Boolean(p.mission.backend?.startsWith("cloud_"));
+  const initialBackend = () => (!isCloudSource() && p.mission.backend ? p.mission.backend : p.choices[0]?.backend.id ?? "");
+  const [backend, setBackend] = createSignal(initialBackend());
   const [speed, setSpeed] = createSignal<CodexServiceTier>(missionSpeed(p.mission));
-  const [model, setModel] = createSignal(p.mission.model_override ?? "");
+  const [model, setModel] = createSignal(isCloudSource() ? "" : (p.mission.model_override ?? ""));
   const [modelAnchor, setModelAnchor] = createSignal<HTMLButtonElement>();
   const [effortAnchor, setEffortAnchor] = createSignal<HTMLButtonElement>();
   const [busy, setBusy] = createSignal(false), [error, setError] = createSignal("");
+  const [localTargetId, setLocalTargetId] = createSignal(p.targetId ?? p.targets?.[0]?.id ?? "");
+  createEffect(() => { if (p.targetId !== undefined) setLocalTargetId(p.targetId); });
+  const activeTargetId = () => p.targetId !== undefined ? p.targetId : localTargetId();
+  const selectedTarget = () => p.targets?.find(t => t.id === activeTargetId()) ?? p.targets?.[0];
+  const remoteTargetNodeId = () => isCloudSource() ? (selectedTarget()?.remoteNodeId ?? null) : p.mission.remote_node_id;
   const choices = () => p.choices.find(choice => choice.backend.id === backend())?.models ?? [];
-  const unavailable = (id: string) => !!p.mission.remote_node_id && !isHarness(id);
+  const unavailable = (id: string) => !!remoteTargetNodeId() && !isHarness(id);
+  const menuTitle = () => isCloudSource() ? "Continue in workspace" : "Transfer to another agent";
   const existing = createMemo(() => transferForSource(p.mission.id));
   const lockedSubmitted = createMemo(() => {
     const t = existing();
@@ -242,7 +263,8 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
     }
     const retryingUncertain = current?.stage === "source_stopped";
     if (!retryingUncertain && (!backend() || unavailable(backend()) || !choices().some(choice => choice.value === model()))) return;
-    const sig = retryingUncertain ? current.targetSignature : targetKey(backend(), model(), effort, speed());
+    const targetNodeId = remoteTargetNodeId();
+    const sig = retryingUncertain ? current.targetSignature : targetKey(backend(), model(), effort, speed(), targetNodeId);
     // If an earlier transfer to this exact target already created a destination that failed
     // before starting, reuse that receipt and open it instead of spawning a duplicate writer.
     if (!retryingUncertain && current?.stage === "failed" && current.targetSignature === sig && current.destination) {
@@ -255,16 +277,24 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
       let payload = retryingUncertain ? current.payload : undefined;
       if (!payload) {
         if (pendingSignature !== sig) { pendingSignature = sig; pendingKey = crypto.randomUUID(); }
+        const nextPayload = {
+          backend: backend(),
+          model_override: model(),
+          model_effort: effort,
+          service_tier: backend() === "codex" ? speed() : undefined,
+          ...(isCloudSource() && targetNodeId ? { remote_node_id: targetNodeId } : {}),
+          idempotency_key: pendingKey,
+        };
         putTransfer({
           sourceId: p.mission.id,
           targetSignature: sig,
-          payload: { backend: backend(), model_override: model(), model_effort: effort, service_tier: backend() === "codex" ? speed() : undefined, idempotency_key: pendingKey },
+          payload: nextPayload,
           stage: "preparing",
           archiveState: "idle",
         });
         if (backend() === "codex") await requireSpeedSupport(model(), speed(), undefined, !!localBinding(p.mission.id));
         await stopSource(p.mission.id);
-        payload = { backend: backend(), model_override: model(), model_effort: effort, service_tier: backend() === "codex" ? speed() : undefined, idempotency_key: pendingKey };
+        payload = nextPayload;
         putTransfer({ sourceId: p.mission.id, targetSignature: sig, payload, stage: "source_stopped", archiveState: "idle" });
       }
       const next = await forkMission(p.mission.id, payload);
@@ -304,9 +334,18 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
   };
   const showArchiveRetry = () => existing()?.stage === "running" && existing()?.archiveState === "failed";
   const displayError = () => error() || (showArchiveRetry() ? existing()?.error ?? "" : "");
+  const effectiveDestination = () => selectedTarget()?.label ?? p.destination;
 
-  return <Menu label="Transfer to another agent" class="fork-harnesses" anchor={p.anchor} placement={p.anchor ? "right-start" : "top-start"} busy={busy()} onClose={() => { if (!busy()) p.onClose(); }}>
-    <Show when={!p.anchor}><div class="menu-group">Transfer to another agent</div></Show>
+  return <Menu label={menuTitle()} class="fork-harnesses" anchor={p.anchor} placement={p.anchor ? "right-start" : "top-start"} busy={busy()} onClose={() => { if (!busy()) p.onClose(); }}>
+    <Show when={!p.anchor}><div class="menu-group">{menuTitle()}</div></Show>
+    <Show when={isCloudSource() && (p.targets?.length ?? 0) > 1}>
+      <div class="menu-group">Destination</div>
+      <For each={p.targets ?? []}>{target => <button type="button" class={`menu-item ${selectedTarget()?.id === target.id ? "on" : ""}`} role="menuitemradio" aria-checked={selectedTarget()?.id === target.id} disabled={busy() || lockedSubmitted()}
+        onClick={() => { if (!busy() && !lockedSubmitted()) { setLocalTargetId(target.id); setEffortAnchor(undefined); setModelAnchor(undefined); p.onTargetChange?.(target.id); } }}>
+        {target.label}
+      </button>}</For>
+      <div class="menu-sep" />
+    </Show>
     <For each={p.choices}>{choice => <button type="button" class="menu-item" role="menuitem" data-backend={choice.backend.id} aria-haspopup="menu" aria-expanded={!!modelAnchor() && backend() === choice.backend.id} disabled={busy() || lockedSubmitted() || unavailable(choice.backend.id)}
       title={unavailable(choice.backend.id) ? "Not supported on this remote workspace" : choice.backend.name}
       onMouseEnter={e => openModels(choice.backend.id, e.currentTarget)} onClick={e => openModels(choice.backend.id, e.currentTarget)}
@@ -317,7 +356,7 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
       <For each={choices()}>{choice => {
         const choose = (anchor: HTMLButtonElement) => { if (busy() || lockedSubmitted()) return; setModel(choice.value); if (supportedEfforts(backend()).length) setEffortAnchor(anchor); else void fork(); };
         return <button type="button" class="menu-item" role="menuitem" data-model={choice.value} disabled={busy() || lockedSubmitted()} aria-haspopup={supportedEfforts(backend()).length ? "menu" : undefined}
-          title={`Transfer to ${shortModelLabel(choice.label)} · same workspace on ${p.destination}`}
+          title={isCloudSource() ? `Continue with ${shortModelLabel(choice.label)} · fresh workspace on ${effectiveDestination()}` : `Transfer to ${shortModelLabel(choice.label)} · same workspace on ${effectiveDestination()}`}
           onClick={e => choose(e.currentTarget)} onMouseEnter={e => { if (!busy() && !lockedSubmitted() && supportedEfforts(backend()).length) { setModel(choice.value); setEffortAnchor(e.currentTarget); } }}
           onKeyDown={e => { if (e.key === "ArrowRight" && supportedEfforts(backend()).length) { e.preventDefault(); e.stopPropagation(); choose(e.currentTarget); } }}>
           {shortModelLabel(choice.label)}<Show when={supportedEfforts(backend()).length}><span class="menu-chevron" aria-hidden="true">›</span></Show>
@@ -338,7 +377,7 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
       <Show when={existing()?.destination}>{dest => <button type="button" class="menu-item" role="menuitem" disabled={busy()} onClick={() => p.onFork(dest())}>Open transferred conversation</button>}</Show>
     </Show>
     <Show when={displayError() && !modelAnchor()}><ErrorNotice error={displayError()} /></Show>
-    <Show when={busy()}><div class="menu-group" role="status">Transferring…</div></Show>
+    <Show when={busy()}><div class="menu-group" role="status">{isCloudSource() ? "Starting workspace…" : "Transferring…"}</div></Show>
   </Menu>;
 }
 
@@ -346,7 +385,11 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
 export async function stopSource(id: string): Promise<void> {
   const current = await getMission(id);
   if (sourceStopped(current)) return;
-  await cancelMission(id);
+  if (current.backend?.startsWith("cloud_")) {
+    await api(`/api/control/missions/${encodeURIComponent(id)}/cloud/cancel`, { method: "POST" });
+  } else {
+    await cancelMission(id);
+  }
   for (let i = 0; i < 20; i++) {
     const m = await getMission(id);
     if (sourceStopped(m)) return;

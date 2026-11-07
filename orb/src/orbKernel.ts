@@ -1082,3 +1082,54 @@ export function orbUtf8Utf16WindowStep(
   };
 }
 
+export type ComposerDefaultDecision =
+  | "keep_explicit"
+  | "default_paloma_hermes"
+  | "default_workspace_harness"
+  | "await_selection";
+
+export function orbComposerDefaultStep(input: {
+  hasExplicitChoice: boolean;
+  hasPinnedContext: boolean;
+  hermesAvailable: boolean;
+  hasNativeHarness: boolean;
+}): ComposerDefaultDecision {
+  const code = kernel.orb_composer_default_step(
+    b8(input.hasExplicitChoice),
+    b8(input.hasPinnedContext),
+    b8(input.hermesAvailable),
+    b8(input.hasNativeHarness),
+  );
+  if (code === 0) return "keep_explicit";
+  if (code === 1) return "default_paloma_hermes";
+  if (code === 2) return "default_workspace_harness";
+  return "await_selection";
+}
+
+export function orbCloudHandoffStep(input: {
+  sourceIsCloud: boolean;
+  isSideQuestion: boolean;
+  targetIsNative: boolean;
+  hasHistoryTurns: boolean;
+  targetPlacementValid: boolean;
+}): {
+  admit: boolean;
+  useCloudTurns: boolean;
+  shareSourceWorkspace: boolean;
+  freshWorkspace: boolean;
+} {
+  const raw = kernel.orb_cloud_handoff_step(
+    b8(input.sourceIsCloud),
+    b8(input.isSideQuestion),
+    b8(input.targetIsNative),
+    b8(input.hasHistoryTurns),
+    b8(input.targetPlacementValid),
+  );
+  return {
+    admit: (raw & 1) !== 0,
+    useCloudTurns: ((raw >>> 8) & 1) !== 0,
+    shareSourceWorkspace: ((raw >>> 16) & 1) !== 0,
+    freshWorkspace: ((raw >>> 24) & 1) !== 0,
+  };
+}
+

@@ -232,6 +232,9 @@ struct OrbAgentPicker: View {
                         Picker("Repository", selection: $selection.repository) { Text("Choose repository").tag(""); ForEach(repos.indices, id: \.self) { Text(repos[$0]["url"].text).tag(repos[$0]["url"].text) } }.accessibilityIdentifier("picker.repository")
                         TextField("Git reference (required)", text: $selection.gitRef).accessibilityIdentifier("picker.git-ref").textInputAutocapitalization(.never).autocorrectionDisabled()
                     }
+                    if existing, let onTransfer {
+                        Button("Continue in workspace") { onTransfer(); dismiss() }.accessibilityIdentifier("picker.transfer")
+                    }
                 } else {
                     if existing {
                         LabeledContent("Harness", value: OrbStyle.serviceName(selection.backend))

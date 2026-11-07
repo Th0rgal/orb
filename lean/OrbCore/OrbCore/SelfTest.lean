@@ -21,6 +21,7 @@ open OrbCore.Search
 open OrbCore.Harness
 open OrbCore.Proxy
 open OrbCore.Managed
+open OrbCore.MemoryAndCloud
 open OrbCore.Control
 open OrbCore.HostTests
 
@@ -345,6 +346,177 @@ private def runCustomProviderRateLimitTests
     return 1
   return 0
 
+private def runFastMemoryBrokerTests
+    (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
+  -- (a) Proxy 402 (`particle-ai/particle-1`) pre-header failover -> 200 on fallback, and all-402 -> `out_of_credit`
+  let chain402Fallback : RoutingChain := {
+    id := "c-402", name := "particle-then-claude",
+    targets := #[
+      { accountId := "particle-1", provider := "particle", baseUrl := "https://api.particle.ai", apiKey := "pk", modelId := "particle-ai/particle-1" },
+      { accountId := "claude-2", provider := "anthropic", baseUrl := "https://api.anthropic.com", apiKey := "ak", modelId := "claude" }
+    ]
+  }
+  let out402Ok ← forwardProxyChain chain402Fallback "POST" "/v1/chat/completions" #[] "{}".toUTF8 (some fun tgt => do
+    if tgt.accountId == "particle-1" then
+      return .ok { status := 402, headers := #[], body := "{\"error\":\"insufficient_balance\"}".toUTF8 }
+    else
+      return .ok { status := 200, headers := #[("Content-Type", "application/json")], body := "{\"id\":\"ok_after_402\"}".toUTF8 })
+  if out402Ok.status != 200 || out402Ok.selectedAccount != "claude-2" || out402Ok.attemptsUsed != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: HTTP 402 pre-header failover failed: status={out402Ok.status} acct={out402Ok.selectedAccount}"
+    return 1
+  let chain402Only : RoutingChain := {
+    id := "c-402-only", name := "particle-only",
+    targets := #[
+      { accountId := "particle-1", provider := "particle", baseUrl := "https://api.particle.ai", apiKey := "pk", modelId := "particle-ai/particle-1" }
+    ]
+  }
+  let out402Exhaust ← forwardProxyChain chain402Only "POST" "/v1/chat/completions" #[] "{}".toUTF8 (some fun _ => do
+    return .ok { status := 402, headers := #[], body := "{\"error\":\"out_of_credit\"}".toUTF8 })
+  if out402Exhaust.status != 502 ||
+     out402Exhaust.exhaustionClass != "out_of_credit" ||
+     !out402Exhaust.headers.any (fun (k, v) => k == "X-Orb-Exhaustion-Class" && v == "out_of_credit") then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: all-402 exhaustion class mismatch: status={out402Exhaust.status} class={out402Exhaust.exhaustionClass}"
+    return 1
+
+  -- (b) Loopback Hindsight MCP server + `executeMemoryMcpTool` + `/api/mcp/*` routes + managed/bunker denials
+  let .ok (memListenFd, memPort) ← tcpListen "127.0.0.1" 0 16
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: loopback Hindsight fixture listen failed"; return 1
+  let _ ← IO.asTask (prio := .dedicated) do
+    for idx in [0:4] do
+      if let .ok cfd ← tcpAcceptPoll memListenFd 5000 then
+        let _ ← readHttpRequestFromFd cfd none 2000
+        let (ct, body) :=
+          if idx == 0 then
+            ("text/event-stream", "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"structuredContent\":{\"hits\":[{\"path\":\"projects/orb.md\",\"title\":\"Orb Architecture\"}]}}}\n\n")
+          else if idx == 1 then
+            ("application/json", "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"# Orb Architecture\\nPure Lean 4.\"}]}}")
+          else if idx == 2 then
+            ("application/json", "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"structuredContent\":{\"entries\":[\"projects/orb.md\"]}}}")
+          else
+            ("application/json", "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"structuredContent\":{\"memories\":[\"Thomas prefers Lean 4 over Rust\"]}}}")
+        let wire := s!"HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}".toUTF8
+        discard <| writeAll cfd wire false
+        discard <| closeFd cfd
+    discard <| closeFd memListenFd
+
+  let memBaseUrl := s!"http://127.0.0.1:{memPort}/mcp"
+  let memCache ← newMemoryTokenCache
+  let coordCtx : MemoryCallerContext := { callerRole := 1 }
+  let .ok searchVal ← executeMemoryMcpTool memCache coordCtx "memory_search_knowledge"
+      (OrbBin.Json.JVal.obj #[("query", .str "Orb"), ("bank", .str "thomas"), ("limit", .nat 5)])
+      nowSec (some memBaseUrl) (some "hindsight-test-tok")
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: memory_search_knowledge SSE call failed"; return 1
+  let .ok pageVal ← executeMemoryMcpTool memCache coordCtx "memory_get_knowledge_page"
+      (OrbBin.Json.JVal.obj #[("path", .str "projects/orb.md"), ("bank", .str "thomas")])
+      nowSec (some memBaseUrl) (some "hindsight-test-tok")
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: memory_get_knowledge_page call failed"; return 1
+  let .ok treeVal ← executeMemoryMcpTool memCache coordCtx "memory_get_knowledge_tree"
+      (OrbBin.Json.JVal.obj #[("bank", .str "ppl")])
+      nowSec (some memBaseUrl) (some "hindsight-test-tok")
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: memory_get_knowledge_tree call failed"; return 1
+  let .ok recallVal ← executeMemoryMcpTool memCache coordCtx "memory_recall"
+      (OrbBin.Json.JVal.obj #[("query", .str "Lean 4"), ("max_tokens", .nat 1024)])
+      nowSec (some memBaseUrl) (some "hindsight-test-tok")
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: memory_recall call failed"; return 1
+  if (OrbBin.Json.renderCompact searchVal |>.splitOn "projects/orb.md").length != 2 ||
+     (OrbBin.Json.renderCompact pageVal |>.splitOn "Pure Lean 4.").length != 2 ||
+     (OrbBin.Json.renderCompact treeVal |>.splitOn "\"bank\":\"ppl\"").length != 2 ||
+     (OrbBin.Json.renderCompact recallVal |>.splitOn "Thomas prefers Lean 4").length != 2 then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: Hindsight memory_* unwrapped payload mismatch"
+    return 1
+
+  let managedRes ← executeMemoryMcpTool memCache { callerRole := 2, onManagedNode := true } "memory_search_knowledge"
+      (OrbBin.Json.JVal.obj #[("query", .str "Orb")]) nowSec (some memBaseUrl) (some "tok")
+  let bunkerExtRes ← executeMemoryMcpTool memCache { callerRole := 2, isExternalSession := true, bunkerState := 1 } "memory_search_knowledge"
+      (OrbBin.Json.JVal.obj #[("query", .str "Orb")]) nowSec (some memBaseUrl) (some "tok")
+  if managedRes.isOk || bunkerExtRes.isOk then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: memoryToolGate failed to deny managed VM or quarantined external session"
+    return 1
+
+  let mcpSessBody := "{\"mission_id\":\"m-alpha\",\"role\":\"coordinator\",\"project\":\"orb\"}"
+  let mcpSessRaw := s!"POST /api/mcp/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {mcpSessBody.utf8ByteSize}\r\n\r\n{mcpSessBody}".toUTF8
+  let .ok mcpSessReq := parseRequest mcpSessRaw none | do closeCoreStore store; return 1
+  let .ok mcpSessResp ← dispatchCoreRequest appSt mcpSessReq nowSec | do closeCoreStore store; return 1
+  let .ok mcpSessJson := OrbBin.Json.parseBytes mcpSessResp.body | do closeCoreStore store; return 1
+  let scopedMcpTok := (mcpSessJson.fieldStr? "token").getD ""
+  if mcpSessResp.status != 200 || !scopedMcpTok.startsWith "mcp1." then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: /api/mcp/session failed: status={mcpSessResp.status}"
+    return 1
+  let mcpCapsRaw := s!"GET /api/mcp/capabilities HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {scopedMcpTok}\r\n\r\n".toUTF8
+  let .ok mcpCapsReq := parseRequest mcpCapsRaw none | do closeCoreStore store; return 1
+  let .ok mcpCapsResp ← dispatchCoreRequest appSt mcpCapsReq nowSec | do closeCoreStore store; return 1
+  let mcpCapsStr := String.fromUTF8! mcpCapsResp.body
+  if mcpCapsResp.status != 200 ||
+     (mcpCapsStr.splitOn "\"memory_search_knowledge\"").length != 2 ||
+     (mcpCapsStr.splitOn "\"memory_recall\"").length != 2 then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: /api/mcp/capabilities missing memory_* tools"
+    return 1
+  return 0
+
+private def runCloudHandoffTests
+    (tmpRoot : String) (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
+  -- (c) Instant Paloma wakeup + SSE delta reducer (monotone cursor dedup across reconnects)
+  let wake ← newCloudWorkerWakeup
+  let g1 ← notifyCloudWorker wake
+  let gObserved ← waitForCloudWake wake 0 1000
+  let sseChunk :=
+    "id: 1\nevent: text_delta\ndata: {\"delta\":\"Hello \"}\n\n" ++
+    "id: 1\nevent: text_delta\ndata: {\"delta\":\"DUPLICATE\"}\n\n" ++
+    "id: 2\nevent: text_delta\ndata: {\"delta\":\"world!\"}\n\n" ++
+    "id: 3\nevent: completed\ndata: {\"status\":\"completed\"}\n\n"
+  let (sseSt, sseEvs) := stepHermesSseChunk {} sseChunk
+  if g1 != 1 || gObserved != 1 || sseSt.accumulatedText != "Hello world!" ||
+     sseSt.lastCursor != 3 || sseSt.terminalStatus? != some "completed" || sseEvs.size != 3 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: Paloma wakeup or SSE monotone reducer mismatch: text={sseSt.accumulatedText} evs={sseEvs.size}"
+    return 1
+
+  -- (d) Cloud-to-workspace handoff & native mission fork (`POST /api/control/missions/:id/fork`)
+  let cloudSrc : MissionRecord := {
+    id := "m-paloma-1", title := "Quick Paloma Ask", status := "completed",
+    backend := "cloud_hermes", modelOverride := "", workingDirectory := tmpRoot,
+    updatedAt := "2026-11-07T00:00:00Z"
+  }
+  let .ok () ← insertNewMission store cloudSrc | do closeCoreStore store; return 1
+  let emptyForkBody := "{\"id\":\"m-handoff-empty\",\"backend\":\"codex\"}"
+  let emptyForkRaw := s!"POST /api/control/missions/m-paloma-1/fork HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {emptyForkBody.utf8ByteSize}\r\n\r\n{emptyForkBody}".toUTF8
+  let .ok emptyForkReq := parseRequest emptyForkRaw none | do closeCoreStore store; return 1
+  let .ok emptyForkResp ← dispatchCoreRequest appSt emptyForkReq nowSec | do closeCoreStore store; return 1
+  if emptyForkResp.status != 422 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: empty cloud mission handoff should return 422, got {emptyForkResp.status}"
+    return 1
+  let _ ← execParamQuery store.missionsDb
+    "INSERT INTO cloud_executions(id,mission_id,provider,prompt,response_text,status,created_at,updated_at) VALUES('ce-1','m-paloma-1','hermes','Where is the memory spec?','In docs/specs/fast-memory-and-remote-skill-delivery.md.','completed','1','2');" #[]
+  let btwCloudBody := "{\"id\":\"m-handoff-btw\",\"backend\":\"codex\",\"side_question\":true}"
+  let btwCloudRaw := s!"POST /api/control/missions/m-paloma-1/fork HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {btwCloudBody.utf8ByteSize}\r\n\r\n{btwCloudBody}".toUTF8
+  let .ok btwCloudReq := parseRequest btwCloudRaw none | do closeCoreStore store; return 1
+  let .ok btwCloudResp ← dispatchCoreRequest appSt btwCloudReq nowSec | do closeCoreStore store; return 1
+  if btwCloudResp.status != 400 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: cloud /btw side_question should return 400, got {btwCloudResp.status}"
+    return 1
+  let validHandoffBody := "{\"id\":\"m-handoff-ok\",\"backend\":\"codex\",\"remote_node_id\":\"babylon\",\"working_directory\":\"/var/lib/sandboxed-node/work/orb\"}"
+  let validHandoffRaw := s!"POST /api/control/missions/m-paloma-1/fork HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {validHandoffBody.utf8ByteSize}\r\n\r\n{validHandoffBody}".toUTF8
+  let .ok validHandoffReq := parseRequest validHandoffRaw none | do closeCoreStore store; return 1
+  let .ok validHandoffResp ← dispatchCoreRequest appSt validHandoffReq nowSec | do closeCoreStore store; return 1
+  let handoffStr := String.fromUTF8! validHandoffResp.body
+  if validHandoffResp.status != 201 ||
+     (handoffStr.splitOn "\"turns_copied\":2").length != 2 ||
+     (handoffStr.splitOn "\"used_cloud_turns\":true").length != 2 ||
+     (handoffStr.splitOn "\"fresh_workspace\":true").length != 2 ||
+     (handoffStr.splitOn "fork-workspace:").length != 1 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: cloud-to-workspace handoff response mismatch: status={validHandoffResp.status} body={handoffStr}"
+    return 1
+  return 0
+
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
   let prodNoSecrets : CoreConfig := { devMode := false, host := "127.0.0.1" }
@@ -476,10 +648,16 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
   let seqRef ← IO.mkRef (1 : UInt64)
   let pacingTracker ← newProxyPacingTracker
+  let memTokenCache ← newMemoryTokenCache
+  let cloudWakeup ← newCloudWorkerWakeup
+  let bunkerRef ← IO.mkRef (0 : UInt8)
   let appSt : CoreAppState := {
     cfg := prodValid, store := store, searchIdx? := some sIdx1,
     managedRef := managedRef, chainsRef := chainsRef, seqRef := seqRef,
-    pacingTracker? := some pacingTracker
+    pacingTracker? := some pacingTracker,
+    memTokenCache? := some memTokenCache,
+    cloudWakeup? := some cloudWakeup,
+    bunkerStateRef? := some bunkerRef
   }
   let nowSec : UInt64 := 1700001000
   let .ok healthReq := parseRequest "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".toUTF8 none | do closeCoreStore store; return 1
@@ -890,6 +1068,8 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     return 1
 
   if (← runCustomProviderRateLimitTests store appSt validJwt nowSec) != 0 then return 1
+  if (← runFastMemoryBrokerTests store appSt validJwt nowSec) != 0 then return 1
+  if (← runCloudHandoffTests tmpRoot store appSt validJwt nowSec) != 0 then return 1
   if (← runPostCrashAndReconcileExtras store tmpRoot) != 0 then return 1
   IO.FS.removeDirAll tmpRoot
 
