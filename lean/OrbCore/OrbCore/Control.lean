@@ -733,6 +733,70 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok () => return .ok (mkJson 200 "{\"ok\":true}")
 
+  -- Mission Remote Wait Arm (`POST /api/control/missions/:id/remote-wait`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/remote-wait" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let tape := JsonTape.indexJsonObject req.bodySlice
+      let nodeId := (JsonTape.lookupString? tape "node_id").getD ""
+      let failedJobId := (JsonTape.lookupString? tape "failed_job_id").getD ""
+      let schedOriginJobId := (JsonTape.lookupString? tape "scheduled_origin_job_id").getD ""
+      let maxRetries := ((JsonTape.lookupNat? tape "max_retries").getD 10).toUInt32
+      let deadlineEpoch := ((JsonTape.lookupNat? tape "deadline_epoch").getD 0).toUInt64
+      let termReason := (JsonTape.lookupString? tape "terminal_reason").getD "usage_limit_wait"
+      match ← armRemoteMissionWait st.store mid nodeId failedJobId schedOriginJobId maxRetries deadlineEpoch termReason s!"{nowEpochSec}" with
+      | .ok () =>
+        return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"node_id\":{jsonEscape nodeId},\"failed_job_id\":{jsonEscape failedJobId}}")
+      | .error "remote_wait_invalid_ids" =>
+        return .ok (mkJson 400 "{\"error\":\"remote_wait_invalid_ids\"}")
+      | .error e =>
+        if e.startsWith "mission_not_found:" then
+          return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
+  -- Mission Remote Replay Step (`POST /api/control/missions/:id/remote-replay`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/remote-replay" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let bodyVal? := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption
+      let tape := JsonTape.indexJsonObject req.bodySlice
+      let nodeId := (JsonTape.lookupString? tape "node_id").getD ""
+      let defCand ← nextUniqueId st "rjob" nowEpochSec
+      let candidateJobId := (JsonTape.lookupString? tape "candidate_job_id").getD defCand
+      let isSched := (bodyVal?.bind (·.fieldBool? "scheduled_origin")).getD false
+      let dispatchOutcome := ((JsonTape.lookupNat? tape "dispatch_outcome").getD 0).toUInt8
+      let hasRecHandle := ((JsonTape.lookupNat? tape "has_recovery_handle").getD 0).toUInt8
+      let retryFits := ((JsonTape.lookupNat? tape "retry_fits_deadline").getD 1).toUInt8
+      match ← stepRemoteMissionReplay st.store mid nodeId candidateJobId isSched dispatchOutcome hasRecHandle retryFits nowEpochSec s!"{nowEpochSec}" with
+      | .ok rec =>
+        let waitStr := if rec.waitActive then "true" else "false"
+        return .ok (mkJson 200 (
+          s!"\{\"action\":{rec.action},\"verdict\":{rec.verdict},\"status\":{jsonEscape rec.missionStatus}," ++
+          s!"\"terminal_reason\":{jsonEscape rec.terminalReason},\"placement_job_id\":{jsonEscape rec.placementJobId}," ++
+          s!"\"scheduled_remote_job_id\":{jsonEscape rec.scheduledRemoteJobId},\"failed_job_id\":{jsonEscape rec.failedJobId}," ++
+          s!"\"retries\":{rec.retries},\"replays\":{rec.replays},\"wait_active\":{waitStr}}"
+        ))
+      | .error "scheduled_recovery_superseded" =>
+        return .ok (mkJson 409 "{\"error\":\"scheduled_recovery_superseded\"}")
+      | .error "scheduled_recovery_missing_remote_job" =>
+        return .ok (mkJson 400 "{\"error\":\"scheduled_recovery_missing_remote_job\"}")
+      | .error "remote_wait_not_armed" =>
+        return .ok (mkJson 404 "{\"error\":\"remote_wait_not_armed\"}")
+      | .error "remote_replay_missing_candidate_job" =>
+        return .ok (mkJson 400 "{\"error\":\"remote_replay_missing_candidate_job\"}")
+      | .error "remote_replay_invalid_flags" =>
+        return .ok (mkJson 400 "{\"error\":\"remote_replay_invalid_flags\"}")
+      | .error e =>
+        if e.startsWith "mission_not_found:" then
+          return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
+  -- Stranded Pending Reconciliation (`POST /api/control/missions/reconcile-pending`)
+  if req.method == "POST" && cleanPath == "/api/control/missions/reconcile-pending" then
+    match ← reconcileStrandedPendingMissions st.store.missionsDb s!"{nowEpochSec}" with
+    | .ok n => return .ok (mkJson 200 s!"\{\"ok\":true,\"healed\":{n}}")
+    | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
   -- Mission Machine Transfer (`GET|POST /api/control/missions/:id/machine-transfer`)
   if let some params := matchRoutePattern? "/api/control/missions/:id/machine-transfer" rawTarget then
     let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""

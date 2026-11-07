@@ -64,8 +64,8 @@ relabeled.
 
 Physical device and native Apple execution remain blocked. Production rollout,
 full end-to-end host callers and independently accepted phase exits remain
-separate gates. On current `master` (167 manifest entries / 166 public exports including
-`orb_slot_bypass_step`, `orb_node_resize_step`, `orb_node_lane_step`, the Phase R2b `orb_wire_*_slice_*` exports, Phase R3 Cluster 1–4 partial evidence, the `dgx-spark` / `lean-sys` `c8449e0` gates, Phase R4 Scroll / Stream / Transcript zero-copy slice ABI exports, `orb_placement_merge_step`, Wave 3.2 / Wave 4 scanner, pacer, confinement, DAG, FTS5, UTF-16, and `LeanSys` host-gate evidence, `orb_model_account_{admit,score}`, and the Phase R2-A `orb_epoch_fence_step`, `orb_effect_outbox_step`, and `orb_crash_boundary_step` exports), the coverage registry is **103 partial / 64 unconnected**
+separate gates. On current `master` (169 manifest entries / 168 public exports including
+`orb_slot_bypass_step`, `orb_node_resize_step`, `orb_node_lane_step`, the Phase R2b `orb_wire_*_slice_*` exports, Phase R3 Cluster 1–4 partial evidence, the `dgx-spark` / `lean-sys` `c8449e0` gates, Phase R4 Scroll / Stream / Transcript zero-copy slice ABI exports, `orb_placement_merge_step`, Wave 3.2 / Wave 4 scanner, pacer, confinement, DAG, FTS5, UTF-16, and `LeanSys` host-gate evidence, `orb_model_account_{admit,score}`, the Phase R2-A `orb_epoch_fence_step`, `orb_effect_outbox_step`, and `orb_crash_boundary_step` exports, and `orb_activation_rollback_admit` / `orb_remote_replay_step`), the coverage registry is **105 partial / 64 unconnected**
 (23 partial / 106 unconnected across the 129 entries at execution head
 `3c70e5ada`); passing scalar conformance does not close those connections.
 
@@ -73,7 +73,7 @@ separate gates. On current `master` (167 manifest entries / 166 public exports i
 checkout. It signs an Ed25519 consistency receipt (`assurance: Tested`,
 `kernel_proof: false`) binding both compared archive hashes and distinguishing
 `compared_backend` from the selected `backend` under rollback, compares the
-334-case scalar C ABI (`167 * 2`) with a LeanNative `probe_*` archive (supplied
+338-case scalar C ABI (`169 * 2`) with a LeanNative `probe_*` archive (supplied
 via `--leannative-archive` or compiled fresh via `--turbo-root`), and rolls
 back with `--rollback-stock` or `ORB_KERNEL_BACKEND=stock-c`. A local match is
 not phase acceptance, the historical 1044-case multi-target qualification,

@@ -5071,6 +5071,68 @@
         "method": "orbCrashBoundaryStep",
         "ret": "jlong"
       }
+    },
+    {
+      "name": "orb_activation_rollback_admit",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "currentStatus",
+          "type": "uint8_t"
+        },
+        {
+          "name": "snapshotStatus",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasActiveRun",
+          "type": "uint8_t"
+        }
+      ],
+      "internal": true
+    },
+    {
+      "name": "orb_remote_replay_step",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "op",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isWaitingRemote",
+          "type": "uint8_t"
+        },
+        {
+          "name": "waitMatches",
+          "type": "uint8_t"
+        },
+        {
+          "name": "pastDeadline",
+          "type": "uint8_t"
+        },
+        {
+          "name": "dispatchOutcome",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasRecoveryHandle",
+          "type": "uint8_t"
+        },
+        {
+          "name": "retryFitsDeadline",
+          "type": "uint8_t"
+        },
+        {
+          "name": "retries",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxRetries",
+          "type": "uint32_t"
+        }
+      ],
+      "internal": true
     }
   ]
 }

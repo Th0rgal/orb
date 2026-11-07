@@ -577,6 +577,12 @@ def canonicalize_llvm_ir(ir_text: str, arch_label: str) -> str:
                 r"^!\d+\s*=\s*!\{!\"[^\"]*clang version", stripped
             ):
                 continue
+            line = re.sub(r"\btrunc\s+(?:nuw\s+)?(?:nsw\s+)?", "trunc ", line)
+            line = re.sub(r"\bicmp\s+samesign\s+", "icmp ", line)
+            line = re.sub(r"-Fn32", "", line)
+            line = re.sub(r"\s*captures\([^)]*\)", "", line)
+            line = re.sub(r"\s*dead_on_unwind", "", line)
+            line = re.sub(r"\brange\([^)]*\)\s*", "", line)
             out_lines.append(line)
         return "\n".join(out_lines).rstrip() + "\n"
 

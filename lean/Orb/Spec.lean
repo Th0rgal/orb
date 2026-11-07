@@ -10082,4 +10082,259 @@ theorem crashBoundary_conserves_backlog_and_excludes_dual_writers
     cases hz : (queued - acked == 0) <;>
       (simp only [hz, h_cur_nz, ite_true, ite_false]; decide)
 
+-- ===========================================================================
+-- Remote Replay Rollback & Stranded-Pending Recovery
+-- (`orb_activation_rollback_admit` & `orb_remote_replay_step`)
+-- ===========================================================================
+
+structure ActivationRollbackCheck where
+  currentStatus  : UInt8
+  snapshotStatus : UInt8
+  hasActiveRun   : UInt8
+  deriving Repr, DecidableEq
+
+def ActivationRollbackCheck.Admissible (c : ActivationRollbackCheck) : Bool :=
+  c.hasActiveRun == 0 &&
+  c.currentStatus ≤ 10 &&
+  c.snapshotStatus ≤ 10 &&
+  c.currentStatus != 3 &&
+  (c.currentStatus == 0 || c.currentStatus == 1 || c.currentStatus == c.snapshotStatus)
+
+def activationRollbackMetaGate : MetaGateSpec ActivationRollbackCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    activationRollbackAdmit c.currentStatus c.snapshotStatus c.hasActiveRun == 1
+  sound c h := by
+    unfold ActivationRollbackCheck.Admissible
+    unfold activationRollbackAdmit at h
+    cases hm : (c.hasActiveRun == 0 && c.currentStatus ≤ 10 && c.snapshotStatus ≤ 10 &&
+        c.currentStatus != 3 &&
+        (c.currentStatus == 0 || c.currentStatus == 1 || c.currentStatus == c.snapshotStatus))
+    · simp [hm] at h
+    · rfl
+  complete c h := by
+    unfold ActivationRollbackCheck.Admissible at h
+    unfold activationRollbackAdmit
+    simp [h]
+  posWitness := ⟨0, 7, 0⟩
+  negWitness := ⟨3, 7, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def activationRollbackScopedAuthority : ScopedAuthority ActivationRollbackCheck where
+  admit c :=
+    activationRollbackAdmit c.currentStatus c.snapshotStatus c.hasActiveRun == 1
+  scopeValid c := c.Admissible
+  sound c h := activationRollbackMetaGate.sound c h
+
+/-- StickyFence on archived (`status = 3 (Acknowledged)`) missions under rollback:
+    once `currentStatus == 3`, applying rollback for any `(snapshotStatus, hasActiveRun)`
+    keeps `currentStatus = 3` and never admits un-archiving (`preFenceAct = false`). -/
+def activationRollbackArchiveStickyFence :
+    StickyFence UInt8 (UInt8 × UInt8) where
+  fenced st := st == 3
+  preFenceAct st := st != 3
+  step st ev :=
+    if activationRollbackAdmit st ev.1 ev.2 == 1 then ev.1 else st
+  sticky st ev hf := by
+    have hst : st = 3 := by simpa using hf
+    subst hst
+    have hrej : activationRollbackAdmit 3 ev.1 ev.2 = 0 := by
+      unfold activationRollbackAdmit
+      simp
+    simp [hrej]
+  forbids_post st ev hf := by
+    have hst : st = 3 := by simpa using hf
+    subst hst
+    have hrej : activationRollbackAdmit 3 ev.1 ev.2 = 0 := by
+      unfold activationRollbackAdmit
+      simp
+    simp [hrej]
+
+/-- Corollary (`ScopedAuthority` & `StickyFence` — `orb_activation_rollback_admit`):
+    1. Both transitional activation states (`0 = Pending` for remote replay/dispatch,
+       `1 = Active` for host message activation) and idempotent `snapshotStatus`
+       admit rollback to any valid snapshot `snap ≤ 10` when `hasActiveRun = 0`.
+    2. A live non-terminal run (`hasActiveRun != 0`), an archived mission (`currentStatus = 3`),
+       or a concurrent third-party transition (`currentStatus = 6 (Failed)` when `snap = 7`)
+       strictly rejects rollback (`0`). -/
+theorem activation_rollback_admits_pending_and_active_but_fences_live_and_archived
+    (snap : UInt8) (hsnap : snap ≤ 10) :
+    activationRollbackAdmit 0 snap 0 = 1 ∧
+    activationRollbackAdmit 1 snap 0 = 1 ∧
+    activationRollbackAdmit 3 snap 0 = 0 ∧
+    activationRollbackAdmit 0 snap 1 = 0 ∧
+    activationRollbackAdmit 6 7 0 = 0 := by
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · unfold activationRollbackAdmit; simp [hsnap]
+  · unfold activationRollbackAdmit; simp [hsnap]
+  · unfold activationRollbackAdmit; simp
+  · unfold activationRollbackAdmit; rfl
+  · unfold activationRollbackAdmit; rfl
+
+structure RemoteReplayCheck where
+  op                : UInt8
+  isWaitingRemote   : UInt8
+  waitMatches       : UInt8
+  pastDeadline      : UInt8
+  dispatchOutcome   : UInt8
+  hasRecoveryHandle : UInt8
+  retryFitsDeadline : UInt8
+  retries           : UInt32
+  maxRetries        : UInt32
+  deriving Repr, DecidableEq
+
+def RemoteReplayCheck.Admissible (c : RemoteReplayCheck) : Bool :=
+  if c.op == 1 then
+    c.isWaitingRemote == 1 && c.waitMatches == 1 && c.hasRecoveryHandle == 0 &&
+      c.pastDeadline == 1 && c.dispatchOutcome == 1
+  else
+    c.op == 0 && c.waitMatches == 1
+
+def remoteReplayMetaGate : MetaGateSpec RemoteReplayCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    ((remoteReplayStep c.op c.isWaitingRemote c.waitMatches c.pastDeadline
+        c.dispatchOutcome c.hasRecoveryHandle c.retryFitsDeadline
+        c.retries c.maxRetries) &&& 256) != 0
+  sound c h := by
+    unfold RemoteReplayCheck.Admissible
+    unfold remoteReplayStep at h
+    by_cases hop1 : c.op == 1
+    · simp only [hop1, ↓reduceIte] at h ⊢
+      cases hg : (c.isWaitingRemote == 1 && c.waitMatches == 1 && c.hasRecoveryHandle == 0 &&
+          c.pastDeadline == 1 && c.dispatchOutcome == 1)
+      · simp only [hg, Bool.false_eq_true, ↓reduceIte] at h; exact absurd h (by decide)
+      · rfl
+    · simp only [hop1, Bool.false_eq_true, ↓reduceIte] at h ⊢
+      cases hop0 : (c.op == 0)
+      · have hne : (c.op != 0 || c.waitMatches != 1) = true := by simp [bne, hop0]
+        simp only [hne, ↓reduceIte] at h; exact absurd h (by decide)
+      · cases hwm : (c.waitMatches == 1)
+        · have hne : (c.op != 0 || c.waitMatches != 1) = true := by simp [bne, hop0, hwm]
+          simp only [hne, ↓reduceIte] at h; exact absurd h (by decide)
+        · rfl
+  complete c h := by
+    unfold RemoteReplayCheck.Admissible at h
+    unfold remoteReplayStep
+    by_cases hop1 : c.op == 1
+    · simp only [hop1, ↓reduceIte] at h ⊢
+      rw [h]; decide
+    · simp only [hop1, Bool.false_eq_true, ↓reduceIte] at h ⊢
+      rcases Bool.and_eq_true_iff.mp h with ⟨hop0, hwm⟩
+      have hbad : (c.op != 0 || c.waitMatches != 1) = false := by simp [bne, hop0, hwm]
+      simp only [hbad, Bool.false_eq_true, ↓reduceIte]
+      cases hiw : (c.isWaitingRemote != 1) <;>
+        cases hpd : (c.pastDeadline == 1) <;>
+        cases hdo : (c.dispatchOutcome == 0) <;>
+        cases hrh : (c.hasRecoveryHandle == 0) <;>
+        cases hrt : (c.dispatchOutcome == 1 && decide (c.retries < c.maxRetries) && c.retryFitsDeadline == 1) <;>
+        decide
+  posWitness := ⟨0, 1, 1, 0, 1, 0, 1, 0, 10⟩
+  negWitness := ⟨0, 1, 0, 0, 1, 0, 1, 0, 10⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def remoteReplayRetryResource : ConservedResource RemoteReplayCheck where
+  admit c :=
+    ((remoteReplayStep c.op c.isWaitingRemote c.waitMatches c.pastDeadline
+        c.dispatchOutcome c.hasRecoveryHandle c.retryFitsDeadline
+        c.retries c.maxRetries) &&& 0xFF) == 4
+  withinBudget c :=
+    c.op == 0 && c.waitMatches == 1 && c.isWaitingRemote == 1 &&
+      c.pastDeadline != 1 && c.dispatchOutcome == 1 &&
+      decide (c.retries < c.maxRetries) && c.retryFitsDeadline == 1
+  conserved c h := by
+    unfold remoteReplayStep at h
+    by_cases hop1 : c.op == 1
+    · simp only [hop1, ↓reduceIte] at h
+      cases hg : (c.isWaitingRemote == 1 && c.waitMatches == 1 && c.hasRecoveryHandle == 0 &&
+          c.pastDeadline == 1 && c.dispatchOutcome == 1) <;>
+        (simp only [hg, Bool.false_eq_true, ↓reduceIte] at h; exact absurd h (by decide))
+    · simp only [hop1, Bool.false_eq_true, ↓reduceIte] at h
+      cases hop0 : (c.op == 0)
+      · have hbad : (c.op != 0 || c.waitMatches != 1) = true := by simp [bne, hop0]
+        simp only [hbad, ↓reduceIte] at h; exact absurd h (by decide)
+      · cases hwm : (c.waitMatches == 1)
+        · have hbad : (c.op != 0 || c.waitMatches != 1) = true := by simp [bne, hop0, hwm]
+          simp only [hbad, ↓reduceIte] at h; exact absurd h (by decide)
+        · have hbad : (c.op != 0 || c.waitMatches != 1) = false := by simp [bne, hop0, hwm]
+          simp only [hbad, Bool.false_eq_true, ↓reduceIte] at h
+          cases hiw : (c.isWaitingRemote == 1)
+          · have hne : (c.isWaitingRemote != 1) = true := by simp [bne, hiw]
+            simp only [hne, ↓reduceIte] at h; exact absurd h (by decide)
+          · have hiwf : (c.isWaitingRemote != 1) = false := by simp [bne, hiw]
+            simp only [hiwf, Bool.false_eq_true, ↓reduceIte] at h
+            cases hpd : (c.pastDeadline == 1)
+            · have hpdf : (c.pastDeadline != 1) = true := by simp [bne, hpd]
+              simp only [hpd, Bool.false_eq_true, ↓reduceIte] at h
+              cases hdo0 : (c.dispatchOutcome == 0)
+              · simp only [hdo0, Bool.false_eq_true, ↓reduceIte] at h
+                cases hdo1 : (c.dispatchOutcome == 1) <;>
+                  cases hlt : decide (c.retries < c.maxRetries) <;>
+                  cases hfit : (c.retryFitsDeadline == 1) <;>
+                  cases hrh : (c.hasRecoveryHandle == 0) <;>
+                  (simp only [hop0, hwm, hiw, hpdf, hdo1, hlt, hfit, hrh,
+                    Bool.true_and, Bool.false_and, Bool.and_true, Bool.and_false,
+                    Bool.false_eq_true, ↓reduceIte] at h ⊢ <;>
+                   first | rfl | exact absurd h (by decide))
+              · simp only [hdo0, ↓reduceIte] at h
+                exact absurd h (by decide)
+            · simp only [hpd, ↓reduceIte] at h
+              exact absurd h (by decide)
+
+/-- Corollary (`ClockDiscipline` & `ConservedResource` — `orb_remote_replay_step`):
+    1. Every rejected replay (`dispatchOutcome ∈ {1, 2}`) on a due waiting mission sets
+       `rollbackStatus` (`bit 9 = 512`), ensuring transitional `Pending` status rolls back
+       before deciding `retry_wait (4)` vs `give_up_fail (5)`.
+    2. `restoreScheduledOrigin` (`bit 10 = 1024`) is set iff `hasRecoveryHandle == 0`
+       (definitive preflight or node HTTP rejection), preserving scheduled job bindings
+       on ambiguous transport failures (`hasRecoveryHandle == 1`).
+    3. Transient node/storage/transport/still-running failures (`dispatchOutcome = 1`)
+       retry (`action = 4`) whenever `retries < maxRetries` and `retryFitsDeadline == 1`,
+       instead of giving up on a `409 CONFLICT` wrapper.
+    4. Stranded-pending reconciliation (`op = 1`) interrupts (`262`) iff the mission is
+       `Pending`, unowned (`hasRecoveryHandle = 0`), past grace (`pastDeadline = 1`), and
+       its latest run ended with `remote_dispatch_failed` (`dispatchOutcome = 1`). -/
+theorem remote_replay_preserves_wait_on_transient_rejection_and_heals_stranded_pending
+    (retries maxRetries : UInt32) (h_budget : retries < maxRetries) :
+    remoteReplayStep 0 1 1 0 1 0 1 retries maxRetries = 1796 ∧
+    remoteReplayStep 0 1 1 0 1 1 1 retries maxRetries = 772 ∧
+    remoteReplayStep 0 1 1 0 2 0 1 retries maxRetries = 1797 ∧
+    remoteReplayStep 1 1 1 1 1 0 0 0 0 = 262 ∧
+    remoteReplayStep 1 1 1 1 1 1 0 0 0 = 0 := by
+  have hlt : decide (retries < maxRetries) = true := decide_eq_true h_budget
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · unfold remoteReplayStep; simp only [hlt, Bool.true_and, Bool.and_true, Bool.false_eq_true, ↓reduceIte]; decide
+  · unfold remoteReplayStep; simp only [hlt, Bool.true_and, Bool.and_true, Bool.false_eq_true, ↓reduceIte]; decide
+  · unfold remoteReplayStep; rfl
+  · unfold remoteReplayStep; rfl
+  · unfold remoteReplayStep; rfl
+
+/-- End-to-end `ashur` mission `9409f9a9` ENOSPC replay regression witness
+    (`orb_activation_rollback_admit` + `orb_remote_replay_step`):
+    1. Scheduled wakeup job fails on `ashur` with `No space left on device (os error 28)` ->
+       mission enters `Interrupted (7)` with `RemoteWait` (`retries = 0, maxRetries = 10`).
+    2. Replay timer transitions mission to transitional `Pending (0)` and attempts remote dispatch,
+       which receives definitive HTTP 500 `ENOSPC` from `ashur` (`dispatchOutcome = 1, hasRecoveryHandle = 0`).
+       - `activationRollbackAdmit 0 7 0 = 1` admits rolling back `Pending (0) -> Interrupted (7)`!
+       - `remoteReplayStep 0 1 1 0 1 0 1 0 10 = 1796` (`action = 4 (retry_wait)` + `rollbackStatus (512)`
+         + `restoreScheduledOrigin (1024)`), restoring `scheduled_remote_job_id` to `previousOriginJob` and
+         keeping `RemoteWait` alive at `retries = 1` instead of stranding in `Pending` or giving up!
+    3. Next replay tick succeeds (`dispatchOutcome = 0`) -> `remoteReplayStep = 259 (mark_replayed)`.
+    4. Any legacy pre-fix row already stranded in `Pending (0)` with terminal `remote_dispatch_failed`
+       and no active run (`op = 1`) is transitioned to `Interrupted` (`262`). -/
+theorem ashur_9409f9a9_enospc_replay_recovery_witness :
+    let rollbackAdmit := activationRollbackAdmit 0 7 0
+    let enospcReplay  := remoteReplayStep 0 1 1 0 1 0 1 0 10
+    let resumedReplay := remoteReplayStep 0 1 1 0 0 1 1 1 10
+    let healStranded  := remoteReplayStep 1 1 1 1 1 0 0 0 0
+    rollbackAdmit = 1 ∧
+    (enospcReplay &&& 0xFF) = 4 ∧
+    (enospcReplay &&& 512) = 512 ∧
+    (enospcReplay &&& 1024) = 1024 ∧
+    (resumedReplay &&& 0xFF) = 3 ∧
+    healStranded = 262 := by
+  decide
+
 end Orb.Spec

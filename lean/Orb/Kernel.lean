@@ -3381,4 +3381,78 @@ def crashBoundaryStep
     else (if unacked == 0 then 2 else 3) ||| crashBit ||| writerBit
   lo32.toUInt64 ||| (unacked.toUInt64 <<< 32)
 
+/--
+  Unboxed C-ABI Activation Status Rollback Gate (`orb_activation_rollback_admit`):
+  Decides whether `restoreMissionStatus(currentStatus, snapshotStatus, hasActiveRun)` may
+  atomically restore `snapshotStatus` after a rejected local or remote activation attempt:
+  - Status encoding (`0..10`):
+    `0 = Pending`, `1 = Active`, `2 = AwaitingUser`, `3 = Acknowledged (archived)`,
+    `4 = WaitingBackground`, `5 = Completed`, `6 = Failed`, `7 = Interrupted`,
+    `8 = Blocked`, `9 = NotFeasible`, `10 = Paused`.
+  - Rejects (`0`) whenever `hasActiveRun != 0` (a live non-terminal run owns execution),
+    `currentStatus > 10` or `snapshotStatus > 10` (out-of-domain status), or
+    `currentStatus == 3` (`StickyFence`: archived missions never un-archive via rollback,
+    nor may an unarchived snapshot overwrite a concurrent archive).
+  - Admits (`1`) iff `currentStatus == 0 (Pending)` (remote replay/dispatch transitional
+    activation), `currentStatus == 1 (Active)` (local message transitional activation),
+    or `currentStatus == snapshotStatus` (idempotent rollback).
+-/
+@[inline, export orb_activation_rollback_admit]
+def activationRollbackAdmit
+    (currentStatus snapshotStatus hasActiveRun : UInt8) : UInt8 :=
+  if hasActiveRun == 0 &&
+     currentStatus ≤ 10 &&
+     snapshotStatus ≤ 10 &&
+     currentStatus != 3 &&
+     (currentStatus == 0 || currentStatus == 1 || currentStatus == snapshotStatus) then 1
+  else 0
+
+/--
+  Unboxed C-ABI Remote Replay & Stranded-Pending Recovery Stepper (`orb_remote_replay_step`):
+  Governs automatic remote wait replay (`stepRemoteMissionReplay`) and startup/periodic
+  stranded-pending reconciliation (`reconcileStrandedPendingMissions`):
+  - `op = 0 (replay_outcome)`:
+    - `isWaitingRemote`, `waitMatches`, `pastDeadline`, `retryFitsDeadline` in `{0, 1}`.
+    - `dispatchOutcome`:
+      `0 = started`,
+      `1 = transient_error` (HTTP 5xx, `ENOSPC`/storage exhaustion, transport/connect error,
+           ambiguous submit cancellation, or `REMOTE_JOB_STILL_RUNNING`),
+      `2 = permanent_rejection` (no native session, superseded track/PR, invalid config).
+    - Returns packed 32-bit verdict:
+      - `bits 0..7 = action`:
+        `0 = noop_keep_wait`, `1 = clear_wait_superseded`, `2 = fail_deadline`,
+        `3 = mark_replayed`, `4 = retry_wait`, `5 = give_up_fail`.
+      - `bit 8 (256)`: `admitted` (`1` when an authoritative state/wait mutation is emitted).
+      - `bit 9 (512)`: `rollbackStatus` (`1` when transitional `Pending` status must roll back
+        to the pre-activation `Interrupted` snapshot).
+      - `bit 10 (1024)`: `restoreScheduledOrigin` (`1` when `hasRecoveryHandle == 0` on a
+        failed dispatch so `scheduled_remote_job_id` rolls back to `previousOriginJob`; `0` when ambiguous).
+  - `op = 1 (stranded_pending_check)`:
+    - Reuses `(isWaitingRemote := isPending, waitMatches := notClientPlacedAndNotRunning,
+      pastDeadline := endedLongAgo, dispatchOutcome := latestReasonIsDispatchFailed,
+      hasRecoveryHandle := hasActiveRunOrDeferredGoal)`.
+    - Emits `action = 6 (interrupt_stranded_pending) | admittedBit (256) = 262` iff
+      `isPending == 1 && notClientPlacedAndNotRunning == 1 && hasRecoveryHandle == 0 &&
+       pastDeadline == 1 && dispatchOutcome == 1`, else `0`.
+-/
+@[inline, export orb_remote_replay_step]
+def remoteReplayStep
+    (op isWaitingRemote waitMatches pastDeadline dispatchOutcome
+     hasRecoveryHandle retryFitsDeadline : UInt8)
+    (retries maxRetries : UInt32) : UInt32 :=
+  if op == 1 then
+    if isWaitingRemote == 1 && waitMatches == 1 && hasRecoveryHandle == 0 &&
+       pastDeadline == 1 && dispatchOutcome == 1 then 262
+    else 0
+  else if op != 0 || waitMatches != 1 then 0
+  else if isWaitingRemote != 1 then 257
+  else if pastDeadline == 1 then 258
+  else if dispatchOutcome == 0 then 259
+  else
+    let restoreFlags : UInt32 := if hasRecoveryHandle == 0 then 1536 else 512
+    if dispatchOutcome == 1 && retries < maxRetries && retryFitsDeadline == 1 then
+      260 ||| restoreFlags
+    else
+      261 ||| restoreFlags
+
 end Orb.Kernel

@@ -653,6 +653,18 @@ def r2a_epoch_fence_effect_outbox_and_crash_boundary_diverge_on_stale_and_corrup
   (observe_effect_outbox_shadow 0 != observe_effect_outbox_shadow 1) &&
   (observe_crash_boundary_shadow 0 != observe_crash_boundary_shadow 1)
 
+def remote_replay_rollback_and_stranded_pending_gates_diverge_on_enospc_and_archive (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_activation_rollback_admit" #[0, 7, 0] == some 1) &&
+  (callExportU64? "orb_activation_rollback_admit" #[1, 7, 0] == some 1) &&
+  (callExportU64? "orb_activation_rollback_admit" #[3, 7, 0] == some 0) &&
+  (callExportU64? "orb_activation_rollback_admit" #[0, 7, 1] == some 0) &&
+  (callExportU64? "orb_remote_replay_step" #[0, 1, 1, 0, 1, 0, 1, 0, 10] == some 1796) &&
+  (callExportU64? "orb_remote_replay_step" #[0, 1, 1, 0, 0, 1, 1, 1, 10] == some 259) &&
+  (callExportU64? "orb_remote_replay_step" #[1, 1, 1, 1, 1, 0, 0, 0, 0] == some 262) &&
+  (callExportU64? "orb_remote_replay_step" #[1, 1, 1, 1, 1, 1, 0, 0, 0] == some 0) &&
+  (observe_activation_rollback_shadow 0 != observe_activation_rollback_shadow 1) &&
+  (observe_remote_replay_shadow 0 != observe_remote_replay_shadow 1)
+
 def runAllHostTests (emitLogPath? : Option String := none) : IO Bool := do
   let cases : Array (String × Bool) := #[
     ("shadow_state_observation_detects_independent_host_poststate_and_effect_divergences", shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ()),
@@ -737,7 +749,8 @@ def runAllHostTests (emitLogPath? : Option String := none) : IO Bool := do
     ("mobile_and_leansys_extensions_roundtrip_via_cabi", mobile_and_leansys_extensions_roundtrip_via_cabi ()),
     ("placement_merge_step_fences_stale_polls_and_advances_monotonically", placement_merge_step_fences_stale_polls_and_advances_monotonically ()),
     ("wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts", wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts ()),
-    ("r2a_epoch_fence_effect_outbox_and_crash_boundary_diverge_on_stale_and_corrupt_inputs", r2a_epoch_fence_effect_outbox_and_crash_boundary_diverge_on_stale_and_corrupt_inputs ())
+    ("r2a_epoch_fence_effect_outbox_and_crash_boundary_diverge_on_stale_and_corrupt_inputs", r2a_epoch_fence_effect_outbox_and_crash_boundary_diverge_on_stale_and_corrupt_inputs ()),
+    ("remote_replay_rollback_and_stranded_pending_gates_diverge_on_enospc_and_archive", remote_replay_rollback_and_stranded_pending_gates_diverge_on_enospc_and_archive ())
   ]
   let mut passed : Nat := 0
   let mut failed : Nat := 0

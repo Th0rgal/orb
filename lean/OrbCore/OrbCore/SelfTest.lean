@@ -1,12 +1,12 @@
 /-
   OrbCore.SelfTest: End-to-End Verification Suite for Wave 4 `OrbCore` (`orb-core-test`):
-  1. All 5 `OrbCore.Spec` `MetaGateSpec` gates (fail-closed `DEV_MODE=false` secrets, `DEV_MODE=true` non-loopback rejection, `:80/api/console/ws` JWT auth + conflicting-credential rejection, transfer fence, proxy failover, deploy unit allowlist).
-  2. Live SQLite `CoreStore` (`missions.db`, `projects.db`, `ask.db`, `idempotency_keys.db`), parameterized queries, `BEGIN IMMEDIATE` machine-transfer fencing, privilege leases & audit log, automations & routing chains.
+  1. All 7 `OrbCore.Spec` `MetaGateSpec` gates (fail-closed `DEV_MODE=false` secrets, `DEV_MODE=true` non-loopback rejection, `:80/api/console/ws` JWT auth + conflicting-credential rejection, transfer fence, proxy failover, deploy unit allowlist, proactive provider pacing, remote replay supersession lineage fence).
+  2. Live SQLite `CoreStore` (`missions.db`, `projects.db`, `ask.db`, `idempotency_keys.db`), parameterized queries, `BEGIN IMMEDIATE` machine-transfer fencing, remote replay rollback & stranded-`pending` reconciliation, privilege leases & audit log, automations & routing chains.
   3. `OrbCore.Search` conversation indexing & in-memory trigram SST lookup.
   4. All 9 `OrbCore.Harness` contract tests.
   5. `/v1/*` `OrbCore.Proxy` pre-first-byte `429`/`503` failover + hop-by-hop header sanitization.
   6. Live HTTP/1.1 + WebSocket dispatch (`/api/health`, `/api/auth/login` with `SANDBOXED_USERS`, `/v1/*` auth, `/api/privilege-access/verify-and-log` fail-closed vs valid lease, `/api/console/ws` `401` without JWT and `101` echoing `Sec-WebSocket-Protocol: jwt.<token>`).
-  7. All 83 `OrbCore.HostTests` & optional `--emit-evidence-log <path>` receipt generation.
+  7. All 84 `OrbCore.HostTests` & optional `--emit-evidence-log <path>` receipt generation.
 -/
 import OrbCore
 
@@ -107,6 +107,157 @@ private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (valid
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: 64-bit disk wraparound was not rejected: http={wrapDiskResp.status}"
     return 1
+
+  -- Remote replay rollback & `ashur` `9409f9a9` consecutive `ENOSPC` regression suite:
+  -- 1. Create mission `m-ashur-9409f9a9` and arm a scheduled-origin `RemoteWait` (`failed_job_id = "job-origin-0"`, `scheduled_origin_job_id = "job-origin-0"`).
+  let .ok () ← upsertMission store {
+    id := "m-ashur-9409f9a9", title := "evm.fast (claude takeover)", status := "interrupted",
+    backend := "claude", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    project := "evm-fast", updatedAt := "t-w0", totalCostCents := 0
+  } | do closeCoreStore store; return 1
+  let armBody := "{\"node_id\":\"ashur\",\"failed_job_id\":\"job-origin-0\",\"scheduled_origin_job_id\":\"job-origin-0\",\"max_retries\":10,\"terminal_reason\":\"usage_limit_wait\"}"
+  let armRaw := s!"POST /api/control/missions/m-ashur-9409f9a9/remote-wait HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {armBody.utf8ByteSize}\r\n\r\n{armBody}".toUTF8
+  let .ok armReq := parseRequest armRaw none | do closeCoreStore store; return 1
+  let .ok armResp ← dispatchCoreRequest appSt armReq nowSec | do closeCoreStore store; return 1
+  if armResp.status != 200 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: arm remote-wait failed: {armResp.status}"
+    return 1
+
+  -- 2. Retry #1 hits HTTP 500 `ENOSPC` pre-dispatch (`dispatch_outcome = 1`, `has_recovery_handle = 0`, `scheduled_origin = true`, `candidate_job_id = "job-enospc-1"`):
+  --    MUST roll `pending -> interrupted` (`usage_limit_wait`), restore `scheduled_remote_job_id = "job-origin-0"`, and advance `failed_job_id = "job-enospc-1"` (`retries = 1`).
+  let rep1Body := "{\"node_id\":\"ashur\",\"candidate_job_id\":\"job-enospc-1\",\"scheduled_origin\":true,\"dispatch_outcome\":1,\"has_recovery_handle\":0,\"retry_fits_deadline\":1}"
+  let rep1Raw := s!"POST /api/control/missions/m-ashur-9409f9a9/remote-replay HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {rep1Body.utf8ByteSize}\r\n\r\n{rep1Body}".toUTF8
+  let .ok rep1Req := parseRequest rep1Raw none | do closeCoreStore store; return 1
+  let .ok rep1Resp ← dispatchCoreRequest appSt rep1Req nowSec | do closeCoreStore store; return 1
+  let rep1Str := String.fromUTF8! rep1Resp.body
+  if rep1Resp.status != 200 ||
+     (rep1Str.splitOn "\"action\":4").length != 2 ||
+     (rep1Str.splitOn "\"status\":\"interrupted\"").length != 2 ||
+     (rep1Str.splitOn "\"scheduled_remote_job_id\":\"job-origin-0\"").length != 2 ||
+     (rep1Str.splitOn "\"failed_job_id\":\"job-enospc-1\"").length != 2 ||
+     (rep1Str.splitOn "\"retries\":1").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: ENOSPC retry #1 rollback mismatch ({rep1Resp.status}): {rep1Str}"
+    return 1
+
+  -- 3. Retry #2 also hits HTTP 500 `ENOSPC` (`candidate_job_id = "job-enospc-2"`):
+  --    MUST NOT fail with `400 scheduled_recovery_missing_remote_job` or `409 scheduled_recovery_superseded`!
+  let rep2Body := "{\"node_id\":\"ashur\",\"candidate_job_id\":\"job-enospc-2\",\"scheduled_origin\":true,\"dispatch_outcome\":1,\"has_recovery_handle\":0,\"retry_fits_deadline\":1}"
+  let rep2Raw := s!"POST /api/control/missions/m-ashur-9409f9a9/remote-replay HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {rep2Body.utf8ByteSize}\r\n\r\n{rep2Body}".toUTF8
+  let .ok rep2Req := parseRequest rep2Raw none | do closeCoreStore store; return 1
+  let .ok rep2Resp ← dispatchCoreRequest appSt rep2Req nowSec | do closeCoreStore store; return 1
+  let rep2Str := String.fromUTF8! rep2Resp.body
+  if rep2Resp.status != 200 ||
+     (rep2Str.splitOn "\"action\":4").length != 2 ||
+     (rep2Str.splitOn "\"scheduled_remote_job_id\":\"job-origin-0\"").length != 2 ||
+     (rep2Str.splitOn "\"failed_job_id\":\"job-enospc-2\"").length != 2 ||
+     (rep2Str.splitOn "\"retries\":2").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: ENOSPC retry #2 rollback mismatch ({rep2Resp.status}): {rep2Str}"
+    return 1
+
+  -- 4. Retry #3 succeeds after disk recovery on `ashur` (`dispatch_outcome = 0`, `candidate_job_id = "job-ok-3"`):
+  --    MUST transition to `active` (`action = 3`), clear `mission_remote_waits`, and record a live `running` run!
+  let rep3Body := "{\"node_id\":\"ashur\",\"candidate_job_id\":\"job-ok-3\",\"scheduled_origin\":true,\"dispatch_outcome\":0,\"has_recovery_handle\":1,\"retry_fits_deadline\":1}"
+  let rep3Raw := s!"POST /api/control/missions/m-ashur-9409f9a9/remote-replay HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {rep3Body.utf8ByteSize}\r\n\r\n{rep3Body}".toUTF8
+  let .ok rep3Req := parseRequest rep3Raw none | do closeCoreStore store; return 1
+  let .ok rep3Resp ← dispatchCoreRequest appSt rep3Req nowSec | do closeCoreStore store; return 1
+  let rep3Str := String.fromUTF8! rep3Resp.body
+  if rep3Resp.status != 200 ||
+     (rep3Str.splitOn "\"action\":3").length != 2 ||
+     (rep3Str.splitOn "\"status\":\"active\"").length != 2 ||
+     (rep3Str.splitOn "\"wait_active\":false").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: ENOSPC retry #3 resume mismatch ({rep3Resp.status}): {rep3Str}"
+    return 1
+
+  -- 5. Manual user resume supersession fence (`verifyRemoteReplaySupersession`):
+  --    When a manual resume advances `placement_job_id` with a non-`remote_dispatch_failed` run,
+  --    `POST /api/control/missions/:id/remote-replay` MUST return `409 scheduled_recovery_superseded` and clear the stale wait!
+  let .ok () ← upsertMission store {
+    id := "m-manual-sup", title := "Manual Supersession Test", status := "interrupted",
+    backend := "claude", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    updatedAt := "t-sup0", totalCostCents := 0
+  } | do closeCoreStore store; return 1
+  let .ok () ← armRemoteMissionWait store "m-manual-sup" "ashur" "job-wait-1" "job-wait-1" 10 0 "usage_limit_wait" "t-sup1"
+    | do closeCoreStore store; return 1
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE missions SET placement_job_id='job-manual-2' WHERE id='m-manual-sup';" #[]
+  let _ ← execParamQuery store.missionsDb
+    "INSERT INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES('run-manual-2','m-manual-sup',2,'terminal','completed','job-manual-2','t-sup2');" #[]
+  let supBody := "{\"node_id\":\"ashur\",\"candidate_job_id\":\"job-stale-replay\",\"scheduled_origin\":true,\"dispatch_outcome\":0}"
+  let supRaw := s!"POST /api/control/missions/m-manual-sup/remote-replay HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {supBody.utf8ByteSize}\r\n\r\n{supBody}".toUTF8
+  let .ok supReq := parseRequest supRaw none | do closeCoreStore store; return 1
+  let .ok supResp ← dispatchCoreRequest appSt supReq nowSec | do closeCoreStore store; return 1
+  if supResp.status != 409 || ((String.fromUTF8! supResp.body).splitOn "scheduled_recovery_superseded").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: manual resume did not supersede remote-replay ({supResp.status})"
+    return 1
+
+  -- 6. `restoreMissionStatus` `StickyFence` on `acknowledged` & live-run protection:
+  let .ok () ← upsertMission store {
+    id := "m-rb-ack", title := "Archived Mission", status := "acknowledged",
+    backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    updatedAt := "t-rb0", totalCostCents := 0
+  } | do closeCoreStore store; return 1
+  let .ok ackRb ← restoreMissionStatus store "m-rb-ack" "interrupted" "usage_limit_wait" "t-rb1"
+    | do closeCoreStore store; return 1
+  if ackRb then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: restoreMissionStatus un-archived acknowledged mission"
+    return 1
+  let .ok () ← upsertMission store {
+    id := "m-rb-pend", title := "Pending Pre-Dispatch", status := "pending",
+    backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    updatedAt := "t-rb0", totalCostCents := 0
+  } | do closeCoreStore store; return 1
+  let .ok pendRb ← restoreMissionStatus store "m-rb-pend" "interrupted" "usage_limit_wait" "t-rb2"
+    | do closeCoreStore store; return 1
+  if !pendRb then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: restoreMissionStatus failed to roll back pending -> interrupted"
+    return 1
+  return 0
+
+private def runPostCrashAndReconcileExtras (store : CoreStore) (tmpRoot : String) : IO UInt32 := do
+  -- Seed one crash-stranded `pending` mission (`m-crash-pend`, latest run `remote_dispatch_failed`) and one legitimate `deferred_goal` `pending` mission (`m-deferred-pend`) before closing `store`:
+  let .ok () ← upsertMission store {
+    id := "m-crash-pend", title := "Crash Stranded Pending", status := "pending",
+    backend := "claude", modelOverride := "", modelEffort := "", workingDirectory := tmpRoot,
+    updatedAt := "t-cp0", totalCostCents := 0
+  } | do closeCoreStore store; return 1
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE missions SET terminal_reason='usage_limit_wait' WHERE id='m-crash-pend';" #[]
+  let _ ← execParamQuery store.missionsDb
+    "INSERT INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES('run-cp-1','m-crash-pend',1,'terminal','remote_dispatch_failed','job-cp-1','t-cp1');" #[]
+  let .ok () ← upsertMission store {
+    id := "m-deferred-pend", title := "Deferred Goal Pending", status := "pending",
+    backend := "claude", modelOverride := "", modelEffort := "", workingDirectory := tmpRoot,
+    updatedAt := "t-dp0", totalCostCents := 0
+  } | do closeCoreStore store; return 1
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE missions SET deferred_goal='run after dependency',terminal_reason='remote_dispatch_failed' WHERE id='m-deferred-pend';" #[]
+
+  closeCoreStore store
+  -- Re-opening `openCoreStore tmpRoot` MUST auto-increment persistent `bootEpoch` (`1 -> 2`), recover stale boot-1 leases,
+  -- heal `m-crash-pend` (`pending -> interrupted` with `usage_limit_wait`), and preserve `m-deferred-pend` (`pending`)!
+  let .ok storeBoot2 ← openCoreStore tmpRoot
+    | do IO.eprintln "[orb-core-test] FAIL: second openCoreStore failed"; return 1
+  if storeBoot2.bootEpoch != 2 then
+    closeCoreStore storeBoot2
+    IO.eprintln s!"[orb-core-test] FAIL: expected persistent bootEpoch=2 on reopen, got {storeBoot2.bootEpoch}"
+    return 1
+  let cpRows ← execParamQuery storeBoot2.missionsDb "SELECT status,COALESCE(terminal_reason,'') FROM missions WHERE id='m-crash-pend';" #[]
+  let dpRows ← execParamQuery storeBoot2.missionsDb "SELECT status FROM missions WHERE id='m-deferred-pend';" #[]
+  let cpStatus := match cpRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let cpReason := match cpRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  let dpStatus := match dpRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  if cpStatus != "interrupted" || cpReason != "usage_limit_wait" || dpStatus != "pending" then
+    closeCoreStore storeBoot2
+    IO.eprintln s!"[orb-core-test] FAIL: startup reconcileStrandedPendingMissions mismatch: cp=({cpStatus},{cpReason}) dp={dpStatus}"
+    return 1
+  closeCoreStore storeBoot2
   return 0
 
 private def runCustomProviderRateLimitTests
@@ -739,25 +890,16 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     return 1
 
   if (← runCustomProviderRateLimitTests store appSt validJwt nowSec) != 0 then return 1
-
-  closeCoreStore store
-  -- Re-opening `openCoreStore tmpRoot` MUST auto-increment persistent `bootEpoch` (`1 -> 2`) and recover stale boot-1 leases!
-  let .ok storeBoot2 ← openCoreStore tmpRoot
-    | do IO.eprintln "[orb-core-test] FAIL: second openCoreStore failed"; return 1
-  if storeBoot2.bootEpoch != 2 then
-    closeCoreStore storeBoot2
-    IO.eprintln s!"[orb-core-test] FAIL: expected persistent bootEpoch=2 on reopen, got {storeBoot2.bootEpoch}"
-    return 1
-  closeCoreStore storeBoot2
+  if (← runPostCrashAndReconcileExtras store tmpRoot) != 0 then return 1
   IO.FS.removeDirAll tmpRoot
 
-  -- 7. Host evidence suite (`83/83` host tests)
+  -- 7. Host evidence suite (`84/84` host tests)
   let hostOk ← runAllHostTests emitLogPath?
   if !hostOk then
     IO.eprintln "[orb-core-test] FAIL: OrbCore.HostTests failed"
     return 1
 
-  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":6,\"harness_contracts\":9,\"host_tests\":83}"
+  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":7,\"harness_contracts\":9,\"host_tests\":84}"
   return 0
 
 end OrbCore.SelfTest

@@ -49,27 +49,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -123,27 +123,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -201,27 +201,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -268,27 +268,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -330,27 +330,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -392,27 +392,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -459,27 +459,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -526,27 +526,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -608,27 +608,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -680,27 +680,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -747,27 +747,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -824,27 +824,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -896,27 +896,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -968,27 +968,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -1045,15 +1045,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/Orb/StatefulMutantSuite.lean",
@@ -1061,15 +1061,15 @@
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -1126,15 +1126,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/Orb/StatefulMutantSuite.lean",
@@ -1142,15 +1142,15 @@
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -1207,15 +1207,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/Orb/StatefulMutantSuite.lean",
@@ -1223,15 +1223,15 @@
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -1288,15 +1288,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/Orb/StatefulMutantSuite.lean",
@@ -1304,15 +1304,15 @@
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -1369,15 +1369,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/Orb/StatefulMutantSuite.lean",
@@ -1385,15 +1385,15 @@
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -1455,15 +1455,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/Orb/StatefulMutantSuite.lean",
@@ -1471,15 +1471,15 @@
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -1541,15 +1541,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/Orb/Stream.lean",
@@ -1561,15 +1561,15 @@
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -1606,19 +1606,19 @@
       "sources": [
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -1675,27 +1675,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -1737,19 +1737,19 @@
       "sources": [
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -1796,19 +1796,19 @@
       "sources": [
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -1845,19 +1845,19 @@
       "sources": [
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -1894,19 +1894,19 @@
       "sources": [
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -1948,19 +1948,19 @@
       "sources": [
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2007,19 +2007,19 @@
       "sources": [
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2066,19 +2066,19 @@
       "sources": [
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2120,27 +2120,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2181,27 +2181,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2242,27 +2242,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2318,27 +2318,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2384,27 +2384,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2445,27 +2445,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2511,27 +2511,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2577,27 +2577,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2638,27 +2638,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2699,27 +2699,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2760,27 +2760,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2821,27 +2821,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2887,27 +2887,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -2948,27 +2948,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3009,27 +3009,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3070,27 +3070,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3141,27 +3141,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3207,27 +3207,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3273,27 +3273,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3334,27 +3334,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3395,27 +3395,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3456,27 +3456,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3517,27 +3517,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3578,27 +3578,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3639,27 +3639,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3700,27 +3700,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3761,27 +3761,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3822,27 +3822,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3883,27 +3883,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -3944,27 +3944,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4005,27 +4005,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4066,27 +4066,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4127,27 +4127,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4188,27 +4188,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4249,27 +4249,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4310,27 +4310,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4371,27 +4371,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4432,27 +4432,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4493,27 +4493,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4554,27 +4554,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4615,27 +4615,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4676,27 +4676,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4737,27 +4737,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4798,27 +4798,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4859,27 +4859,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4920,27 +4920,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -4981,27 +4981,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5042,27 +5042,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5108,27 +5108,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5174,27 +5174,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5245,27 +5245,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5311,27 +5311,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5382,27 +5382,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5453,27 +5453,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5519,27 +5519,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5580,27 +5580,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5646,27 +5646,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5707,27 +5707,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5768,27 +5768,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5829,27 +5829,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5895,27 +5895,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -5961,27 +5961,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -6027,27 +6027,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -6093,27 +6093,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -6154,27 +6154,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -6215,27 +6215,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -6271,19 +6271,19 @@
       "sources": [
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -6319,19 +6319,19 @@
       "sources": [
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -6367,19 +6367,19 @@
       "sources": [
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -6415,19 +6415,19 @@
       "sources": [
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -6463,19 +6463,19 @@
       "sources": [
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -6511,19 +6511,19 @@
       "sources": [
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -6569,27 +6569,27 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "c9a10f1e19be0b465e493dd39d9ebb7677b2c175b78a29b022b4ad9d7c57b4fd"
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
         },
         {
           "path": "shared/orb-spec/kernel_abi.json",
-          "sha256": "f7c41240dc26676f94be71c150309c23c2de937406a84531c80a97a44769c077"
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "10be24ea42713d800147948331c63233f65b0bff485dce746d29eef6451543a5"
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostObservers.lean",
-          "sha256": "3f403bf098440091bb33b2a79b2bcd7975a4a247432523201eb6a6c0400411aa"
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
         },
         {
           "path": "lean/OrbCore/OrbCore/HostTests.lean",
-          "sha256": "7915dd9d6b5c159be66468da44ac84ad4511855be607e225f84bbb9d0d792c6c"
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
         },
         {
           "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
-          "sha256": "30695026de3d72f0035969f4fd7bdb2fcb07c6a586d73fff44cd4f1713cf2e3b"
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
         }
       ],
       "execution": {
@@ -6605,6 +6605,138 @@
       ],
       "blockers": [
         "SQLite transaction persistence, SSE fan-out, and per-client UI store mutations remain in host Rust and client stores."
+      ]
+    },
+    "orb_activation_rollback_admit": {
+      "status": "partial",
+      "claim": "Local host tests and OrbCore SQLite store tests verify that transitional Pending and Active mission statuses admit rollback to a valid snapshot when no live run exists, while sticky-fenced Acknowledged/archived missions, active runs, and unrelated concurrent transitions fail closed.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "activation_rollback_admits_pending_and_active_but_fences_live_and_archived"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "ashur_9409f9a9_enospc_replay_recovery_witness"
+        },
+        {
+          "kind": "host_observer",
+          "path": "lean/OrbCore/OrbCore/HostObservers.lean",
+          "symbol": "observe_activation_rollback_shadow"
+        },
+        {
+          "kind": "host_test",
+          "path": "lean/OrbCore/OrbCore/HostTests.lean",
+          "symbol": "remote_replay_rollback_and_stranded_pending_gates_diverge_on_enospc_and_archive"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+        },
+        {
+          "path": "shared/orb-spec/kernel_abi.json",
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+        },
+        {
+          "path": "lean/OrbCore/OrbCore/HostObservers.lean",
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
+        },
+        {
+          "path": "lean/OrbCore/OrbCore/HostTests.lean",
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
+        },
+        {
+          "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
+        "command": "(cd lean/OrbCore && lake build orb-core-test -- -DwarningAsError=true) && ./lean/OrbCore/.lake/build/bin/orb-core-test --emit-evidence-log shared/orb-spec/evidence/w4-lean-host-tests.log",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "SQLite BEGIN IMMEDIATE serialization and SSE status broadcast remain in OrbCore.Store and host HTTP handlers."
+      ]
+    },
+    "orb_remote_replay_step": {
+      "status": "partial",
+      "claim": "Local host tests and OrbCore SQLite store tests verify that transient pre-dispatch remote replay rejections roll back Pending status, restore scheduled_remote_job_id when no recovery handle exists, advance failed_job_id across consecutive ENOSPC retries within budget, and heal crash-stranded Pending missions without touching legitimate deferred_goal pending missions.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "remote_replay_preserves_wait_on_transient_rejection_and_heals_stranded_pending"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "ashur_9409f9a9_enospc_replay_recovery_witness"
+        },
+        {
+          "kind": "host_observer",
+          "path": "lean/OrbCore/OrbCore/HostObservers.lean",
+          "symbol": "observe_remote_replay_shadow"
+        },
+        {
+          "kind": "host_test",
+          "path": "lean/OrbCore/OrbCore/HostTests.lean",
+          "symbol": "remote_replay_rollback_and_stranded_pending_gates_diverge_on_enospc_and_archive"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "61864d1a63bf817e19d334f009fc1f6b30135c4c88a528450eb84960520b8f88"
+        },
+        {
+          "path": "shared/orb-spec/kernel_abi.json",
+          "sha256": "6134337e1280487d7c8d9456c7c5558e26157355e9e41e5d1a179a2c892aa1ac"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "d56eee96575994453c959e37816b9ed1a09dc1044417d0bdddd8ee4b45417188"
+        },
+        {
+          "path": "lean/OrbCore/OrbCore/HostObservers.lean",
+          "sha256": "645a9f3954b7f6da0ded42a7fa24c9bfc2e7a0ed4fc3613d97b69e91286387bc"
+        },
+        {
+          "path": "lean/OrbCore/OrbCore/HostTests.lean",
+          "sha256": "2a5613e7234626d95e4bc56cf60423b1e9d9ee969361e355cc0e3a37f1b061ca"
+        },
+        {
+          "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
+          "sha256": "f7c6440a49c247b6fecd730887599758cfbc5ec6ad424a8527ccb7301080d550"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/w4-lean-host-tests.log",
+        "command": "(cd lean/OrbCore && lake build orb-core-test -- -DwarningAsError=true) && ./lean/OrbCore/.lake/build/bin/orb-core-test --emit-evidence-log shared/orb-spec/evidence/w4-lean-host-tests.log",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Remote node HTTP transport, timer scheduling, and SQLite persistence remain in OrbCore.Store and OrbCore.Control."
       ]
     }
   }
