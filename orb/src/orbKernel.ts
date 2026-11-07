@@ -1285,3 +1285,127 @@ export function orbRepoDiffBudgetStep(input: {
   };
 }
 
+export function orbFollowupQueueStep(input: {
+  op: number;
+  serverRev: number;
+  incomingServerRev: number;
+  expectedServerRev: number;
+  clientMsgId: bigint | number;
+  trackedMsgId: bigint | number;
+  deliveredMsgId: bigint | number;
+  postedAfterSeq: bigint | number;
+  turnSeq: bigint | number;
+  optimisticSending: boolean;
+  serverListed: boolean;
+  contentMatched: boolean;
+  alreadyDelivered: boolean;
+}): {
+  reasonCode: number;
+  admitted: boolean;
+  optimisticLiveNext: boolean;
+  retiredNow: boolean;
+  nextServerRev: number;
+} {
+  const raw = kernel.orb_followup_queue_step(
+    enum8(input.op),
+    sat32(input.serverRev),
+    sat32(input.incomingServerRev),
+    sat32(input.expectedServerRev),
+    u64(input.clientMsgId),
+    u64(input.trackedMsgId),
+    u64(input.deliveredMsgId),
+    u64(input.postedAfterSeq),
+    u64(input.turnSeq),
+    b8(input.optimisticSending),
+    b8(input.serverListed),
+    b8(input.contentMatched),
+    b8(input.alreadyDelivered),
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  return {
+    reasonCode: lo32 & 0xff,
+    admitted: ((lo32 >>> 8) & 1) !== 0,
+    optimisticLiveNext: ((lo32 >>> 9) & 1) !== 0,
+    retiredNow: ((lo32 >>> 10) & 1) !== 0,
+    nextServerRev: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+export function orbTransportEpochStep(input: {
+  mode: number;
+  eventKind: number;
+  everReady: boolean;
+  stickyUnsupported: boolean;
+  endpointClass: number;
+  failureStreak: number;
+  failThreshold: number;
+  httpStatus: number;
+  sinceSeq32: number;
+  nowMs: bigint | number;
+  cooldownUntilMs: bigint | number;
+}): {
+  nextMode: number;
+  admitted: boolean;
+  stickyUnsupportedNext: boolean;
+  fallbackActiveNext: boolean;
+  reprobeTriggered: boolean;
+  nextFailureStreak: number;
+  preservedSinceSeq32: number;
+} {
+  const raw = kernel.orb_transport_epoch_step(
+    enum8(input.mode),
+    enum8(input.eventKind),
+    b8(input.everReady),
+    b8(input.stickyUnsupported),
+    enum8(input.endpointClass),
+    sat32(input.failureStreak),
+    sat32(input.failThreshold),
+    sat32(input.httpStatus),
+    sat32(input.sinceSeq32),
+    u64(input.nowMs),
+    u64(input.cooldownUntilMs),
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  return {
+    nextMode: lo32 & 0xff,
+    admitted: ((lo32 >>> 8) & 1) !== 0,
+    stickyUnsupportedNext: ((lo32 >>> 9) & 1) !== 0,
+    fallbackActiveNext: ((lo32 >>> 10) & 1) !== 0,
+    reprobeTriggered: ((lo32 >>> 11) & 1) !== 0,
+    nextFailureStreak: (lo32 >>> 16) & 0xff,
+    preservedSinceSeq32: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+export function orbStreamOpenTailCapStep(
+  prevLen: number,
+  prevCommit: number,
+  prevCheckpoint: number,
+  newLen: number,
+  rawCommit: number,
+  maxOpenTailBytes: number,
+  openFenceActive: boolean,
+): {
+  admitted: boolean;
+  checkpointForced: boolean;
+  openFenceCapped: boolean;
+  nextCheckpoint: number;
+} {
+  const raw = kernel.orb_stream_open_tail_cap_step(
+    sat32(prevLen),
+    sat32(prevCommit),
+    sat32(prevCheckpoint),
+    sat32(newLen),
+    sat32(rawCommit),
+    sat32(maxOpenTailBytes),
+    b8(openFenceActive),
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  return {
+    admitted: ((lo32 >>> 8) & 1) !== 0,
+    checkpointForced: ((lo32 >>> 9) & 1) !== 0,
+    openFenceCapped: ((lo32 >>> 10) & 1) !== 0,
+    nextCheckpoint: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+

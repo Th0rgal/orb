@@ -904,6 +904,49 @@ object OrbKernel {
         maxBytes: Int
     ): Long
 
+    @JvmStatic
+    external fun orbFollowupQueueStep(
+        op: Int,
+        serverRev: Int,
+        incomingServerRev: Int,
+        expectedServerRev: Int,
+        clientMsgId: Long,
+        trackedMsgId: Long,
+        deliveredMsgId: Long,
+        postedAfterSeq: Long,
+        turnSeq: Long,
+        optimisticSending: Int,
+        serverListed: Int,
+        contentMatched: Int,
+        alreadyDelivered: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbTransportEpochStep(
+        mode: Int,
+        eventKind: Int,
+        everReady: Int,
+        stickyUnsupported: Int,
+        endpointClass: Int,
+        failureStreak: Int,
+        failThreshold: Int,
+        httpStatus: Int,
+        sinceSeq32: Int,
+        nowMs: Long,
+        cooldownUntilMs: Long
+    ): Long
+
+    @JvmStatic
+    external fun orbStreamOpenTailCapStep(
+        prevLen: Int,
+        prevCommit: Int,
+        prevCheckpoint: Int,
+        newLen: Int,
+        rawCommit: Int,
+        maxOpenTailBytes: Int,
+        openFenceActive: Int
+    ): Long
+
     data class WorkfoldVerdict(val foldItem: Boolean, val foldHasToolNext: Boolean)
 
     private fun bInt(v: Boolean): Int = if (v) 1 else 0
@@ -1892,6 +1935,142 @@ object OrbKernel {
             syncState = (lo32 ushr 16) and 0xFF,
             rejectCode = if (admitted) 0 else (lo32 and 0xFF),
             clampedBytes = hi32
+        )
+    }
+
+    data class FollowupQueueVerdict(
+        val reasonCode: Int,
+        val admitted: Boolean,
+        val optimisticLiveNext: Boolean,
+        val retiredNow: Boolean,
+        val nextServerRev: Long
+    )
+
+    fun followupQueueStep(
+        op: Int,
+        serverRev: Int,
+        incomingServerRev: Int,
+        expectedServerRev: Int,
+        clientMsgId: Long,
+        trackedMsgId: Long,
+        deliveredMsgId: Long,
+        postedAfterSeq: Long,
+        turnSeq: Long,
+        optimisticSending: Boolean,
+        serverListed: Boolean,
+        contentMatched: Boolean,
+        alreadyDelivered: Boolean
+    ): FollowupQueueVerdict {
+        requireNative()
+        val raw = orbFollowupQueueStep(
+            enum8(op),
+            maxOf(0, serverRev),
+            maxOf(0, incomingServerRev),
+            maxOf(0, expectedServerRev),
+            maxOf(0L, clientMsgId),
+            maxOf(0L, trackedMsgId),
+            maxOf(0L, deliveredMsgId),
+            maxOf(0L, postedAfterSeq),
+            maxOf(0L, turnSeq),
+            bInt(optimisticSending),
+            bInt(serverListed),
+            bInt(contentMatched),
+            bInt(alreadyDelivered)
+        )
+        val lo32 = (raw and 0xFFFF_FFFFL).toInt()
+        val hi32 = (raw ushr 32) and 0xFFFF_FFFFL
+        return FollowupQueueVerdict(
+            reasonCode = lo32 and 0xFF,
+            admitted = ((lo32 ushr 8) and 1) != 0,
+            optimisticLiveNext = ((lo32 ushr 9) and 1) != 0,
+            retiredNow = ((lo32 ushr 10) and 1) != 0,
+            nextServerRev = hi32
+        )
+    }
+
+    data class TransportEpochVerdict(
+        val nextMode: Int,
+        val admitted: Boolean,
+        val stickyUnsupportedNext: Boolean,
+        val fallbackActiveNext: Boolean,
+        val reprobeTriggered: Boolean,
+        val nextFailureStreak: Int,
+        val preservedSinceSeq32: Long
+    )
+
+    fun transportEpochStep(
+        mode: Int,
+        eventKind: Int,
+        everReady: Boolean,
+        stickyUnsupported: Boolean,
+        endpointClass: Int,
+        failureStreak: Int,
+        failThreshold: Int,
+        httpStatus: Int,
+        sinceSeq32: Int,
+        nowMs: Long,
+        cooldownUntilMs: Long
+    ): TransportEpochVerdict {
+        requireNative()
+        val raw = orbTransportEpochStep(
+            enum8(mode),
+            enum8(eventKind),
+            bInt(everReady),
+            bInt(stickyUnsupported),
+            enum8(endpointClass),
+            maxOf(0, failureStreak),
+            maxOf(0, failThreshold),
+            maxOf(0, httpStatus),
+            maxOf(0, sinceSeq32),
+            maxOf(0L, nowMs),
+            maxOf(0L, cooldownUntilMs)
+        )
+        val lo32 = (raw and 0xFFFF_FFFFL).toInt()
+        val hi32 = (raw ushr 32) and 0xFFFF_FFFFL
+        return TransportEpochVerdict(
+            nextMode = lo32 and 0xFF,
+            admitted = ((lo32 ushr 8) and 1) != 0,
+            stickyUnsupportedNext = ((lo32 ushr 9) and 1) != 0,
+            fallbackActiveNext = ((lo32 ushr 10) and 1) != 0,
+            reprobeTriggered = ((lo32 ushr 11) and 1) != 0,
+            nextFailureStreak = (lo32 ushr 16) and 0xFF,
+            preservedSinceSeq32 = hi32
+        )
+    }
+
+    data class StreamOpenTailCapVerdict(
+        val admitted: Boolean,
+        val checkpointForced: Boolean,
+        val openFenceCapped: Boolean,
+        val nextCheckpoint: Long
+    )
+
+    fun streamOpenTailCapStep(
+        prevLen: Int,
+        prevCommit: Int,
+        prevCheckpoint: Int,
+        newLen: Int,
+        rawCommit: Int,
+        maxOpenTailBytes: Int,
+        openFenceActive: Boolean
+    ): StreamOpenTailCapVerdict {
+        requireNative()
+        val raw = orbStreamOpenTailCapStep(
+            maxOf(0, prevLen),
+            maxOf(0, prevCommit),
+            maxOf(0, prevCheckpoint),
+            maxOf(0, newLen),
+            maxOf(0, rawCommit),
+            maxOf(0, maxOpenTailBytes),
+            bInt(openFenceActive)
+        )
+        val lo32 = (raw and 0xFFFF_FFFFL).toInt()
+        val hi32 = (raw ushr 32) and 0xFFFF_FFFFL
+        return StreamOpenTailCapVerdict(
+            admitted = ((lo32 ushr 8) and 1) != 0,
+            checkpointForced = ((lo32 ushr 9) and 1) != 0,
+            openFenceCapped = ((lo32 ushr 10) and 1) != 0,
+            nextCheckpoint = hi32
         )
     }
 }

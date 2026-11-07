@@ -34,6 +34,7 @@ MUTATION_FAMILIES = (
     "mission_merge_hierarchy", "transcript_reducer_streaming", "durable_outbox_queue_leases",
     "provider_attempt_lifecycle", "authorization", "scheduling_resources", "incremental_parsing_scroll",
     "r2a_epoch_fence", "r2a_effect_outbox", "r2a_crash_boundary",
+    "r6a_followup_queue", "r6a_transport_epoch", "r6a_stream_open_tail_cap",
 )
 
 
@@ -379,6 +380,24 @@ DOMAIN_MUTANTS = (
      "Orb.MutantSuite.kill_m29_crashBoundary_volatileLeaseSurvivesReboot", [5, 2, 1, 0, 8, 9, 4, 7]),
     ("m30", "orb_mut_m30", "r2a_crash_boundary", "orb_crash_boundary_step",
      "Orb.MutantSuite.kill_m30_crashBoundary_dualWriterSteal", [5, 2, 1, 0, 9, 9, 4, 7]),
+    ("m31", "orb_mut_m31", "r6a_followup_queue", "orb_followup_queue_step",
+     "Orb.MutantSuite.kill_m31_followupQueue_staleRevisionAccepted", [1, 5, 5, 4, 42, 42, 0, 10, 10, 0, 0, 0, 0]),
+    ("m32", "orb_mut_m32", "r6a_followup_queue", "orb_followup_queue_step",
+     "Orb.MutantSuite.kill_m32_followupQueue_historicalSeqRetires", [3, 5, 5, 5, 42, 42, 0, 10, 10, 0, 0, 1, 0]),
+    ("m33", "orb_mut_m33", "r6a_followup_queue", "orb_followup_queue_step",
+     "Orb.MutantSuite.kill_m33_followupQueue_duplicateClientMsgDoubleApplies", [2, 5, 5, 5, 42, 42, 0, 10, 10, 0, 0, 0, 0]),
+    ("m34", "orb_mut_m34", "r6a_transport_epoch", "orb_transport_epoch_step",
+     "Orb.MutantSuite.kill_m34_transportEpoch_everReadyBlocksFallback", [0, 1, 1, 0, 0, 1, 2, 0, 40, 0, 0]),
+    ("m35", "orb_mut_m35", "r6a_transport_epoch", "orb_transport_epoch_step",
+     "Orb.MutantSuite.kill_m35_transportEpoch_fallbackDropsSinceSeq", [0, 1, 1, 0, 0, 1, 2, 0, 40, 0, 0]),
+    ("m36", "orb_mut_m36", "r6a_transport_epoch", "orb_transport_epoch_step",
+     "Orb.MutantSuite.kill_m36_transportEpoch_transientSetsStickyUnsupported", [0, 1, 1, 0, 0, 1, 2, 0, 40, 0, 0]),
+    ("m37", "orb_mut_m37", "r6a_stream_open_tail_cap", "orb_stream_open_tail_cap_step",
+     "Orb.MutantSuite.kill_m37_streamOpenTailCap_openFenceFreezesCheckpoint", [20, 5, 12, 40, 5, 8, 1]),
+    ("m38", "orb_mut_m38", "r6a_stream_open_tail_cap", "orb_stream_open_tail_cap_step",
+     "Orb.MutantSuite.kill_m38_streamOpenTailCap_zeroCapAdmitted", [20, 5, 12, 40, 5, 0, 1]),
+    ("m39", "orb_mut_m39", "r6a_stream_open_tail_cap", "orb_stream_open_tail_cap_step",
+     "Orb.MutantSuite.kill_m39_streamOpenTailCap_checkpointRegresses", [20, 5, 18, 22, 5, 8, 1]),
 )
 
 
@@ -405,7 +424,7 @@ def public_export_functions(manifest):
     # `internal` also marks public-prefix steppers not exposed to mobile.
     # The roadmap includes those steppers; exclude only the compiler helper.
     functions = [f for f in manifest["functions"] if f["name"].startswith(("orb_", "leansys_"))]
-    if len(functions) != 180 or len(manifest["functions"]) != 181:
+    if len(functions) != 183 or len(manifest["functions"]) != 184:
         raise ValueError("public export inventory changed; qualify the new surface explicitly")
     return functions
 
@@ -648,7 +667,56 @@ for (const c of cases) {
         return wasm_rows(OUT / "kernel.wasm")
 
     def lnir():
-        run([TURBO / "lean/.lake/build/bin/lean-native", "emit-lnir", "--wire", OUT / "Wrappers.lean", "-o", OUT / "module.lnir"])
+        from gen_orb_kernel_leannative_ll import BRANCHLESS_PRELUDE, BRANCHLESS_PROBES
+
+        probe_lines = []
+        for f in functions:
+            if f["name"] in BRANCHLESS_PROBES:
+                probe_lines.append((True, BRANCHLESS_PROBES[f["name"]]))
+                continue
+            params = " ".join(f"(a{i} : UInt64)" for i in range(len(f["params"])))
+            arguments = " ".join(
+                f"a{i}" if p["type"] == "uint64_t" else f"a{i}.toUInt{bits[p['type']]}"
+                for i, p in enumerate(f["params"])
+            )
+            call = f"({exports[f['name']]} {arguments})"
+            if f["ret"] != "uint64_t":
+                call += ".toUInt64"
+            name = "probe_" + f["name"]
+            probe_lines.append((False, f"@[export {name}] def {name} {params} : UInt64 := {call}"))
+        shard_size = 8
+        shards = [probe_lines[idx : idx + shard_size] for idx in range(0, len(probe_lines), shard_size)]
+        seen_decl_names = set()
+        deduped_decl_blocks = []
+        for shard_idx, entries in enumerate(shards):
+            needs_bl = any(flag for flag, _ in entries)
+            lines = [text for _, text in entries]
+            shard_lean = OUT / f"Wrappers_lnir_{shard_idx:02d}.lean"
+            shard_lnir = OUT / f"module_{shard_idx:02d}.lnir"
+            header = "import Orb.Kernel\nimport LeanSys.Spec\n"
+            if needs_bl:
+                header += BRANCHLESS_PRELUDE + "\n"
+            shard_lean.write_text(header + "\n".join(lines) + "\n")
+            run([TURBO / "lean/.lake/build/bin/lean-native", "emit-lnir", "--wire", shard_lean, "-o", shard_lnir])
+            parts = shard_lnir.read_text().strip().split("|", 3)
+            if len(parts) != 4 or parts[0] != "LNIR_WIRE_V1":
+                raise ValueError(f"unexpected LNIR wire header in {shard_lnir.name}")
+            for block in re.split(r"(?=\bD_decl\|)", parts[3]):
+                block = block.strip("|")
+                if not block:
+                    continue
+                if not block.startswith("D_decl|"):
+                    raise ValueError(f"unexpected LNIR decl chunk prefix: {block[:40]}")
+                sym_hex = block.split("|", 2)[1]
+                if sym_hex not in seen_decl_names:
+                    seen_decl_names.add(sym_hex)
+                    deduped_decl_blocks.append(block)
+        if len(deduped_decl_blocks) < len(functions):
+            raise ValueError(f"expected >= {len(functions)} LNIR decls, got {len(deduped_decl_blocks)}")
+        mod_hex = "Orb.Kernel.LeanNative".encode("utf-8").hex()
+        (OUT / "module.lnir").write_text(
+            "|".join(["LNIR_WIRE_V1", mod_hex, str(len(deduped_decl_blocks))] + deduped_decl_blocks) + "\n"
+        )
         return run_lnir_cases(TURBO / "lean/.lake/build/bin/lean-native-core", OUT / "module.lnir", cases)
 
     for name, action in [("stock_lean", stock), ("stock_extracted_c", stock_c),
@@ -811,7 +879,7 @@ for c in json.loads(Path(sys.argv[3]).read_text()):
         report["loop_alias_rc"] = {"status": "BLOCKED", "reason": str(error)}
         qualification_failed |= isinstance(error, (RowFailure, ValueError))
 
-    # 3. Scalar bit-flip & 30 Lean-witnessed domain mutants across all 10 roadmap families.
+    # 3. Scalar bit-flip & 39 Lean-witnessed domain mutants across all 13 roadmap families.
     report["mutation_checks"] = {}
     try:
         # Rename the real target, then interpose a bit-flipping forwarding shim.

@@ -10,9 +10,9 @@ and not authorization to replace production artifacts.
 - LeanSys: `c089f3e31dbd36f2bde2219913d5b9c90da670be`.
 - All input checkouts clean; compiler executables clean-built from the Turbo head.
 - 129 manifest entries; 128 public exports (95 Orb + 33 LeanSys); 1044 cases at
-  execution head `3c70e5ada` (current `master` has 181 manifest entries / 180
-  public exports after `#1488`, live node resize / coordinator lane exports, Phase R2b `orb_wire_*_slice_*` exports, the `dgx-spark` / `lean-sys` `c8449e0` gates, Phase R4 Scroll / Stream / Transcript zero-copy slice ABI exports, Wave 4 scanner / pacer / confinement / DAG / FTS5 / UTF-16 steppers, `orb_model_account_{admit,score}`, Phase R2-A, remote replay, fast memory / Paloma handoff, and Codex Cyber / skill-delivery / worktree / bounded-diff gates; this historical
-  multi-target receipt has not been rerun on the 180-export surface).
+  execution head `3c70e5ada` (current `master` has 184 manifest entries / 183
+  public exports after `#1488`, live node resize / coordinator lane exports, Phase R2b `orb_wire_*_slice_*` exports, the `dgx-spark` / `lean-sys` `c8449e0` gates, Phase R4 Scroll / Stream / Transcript zero-copy slice ABI exports, Wave 4 scanner / pacer / confinement / DAG / FTS5 / UTF-16 steppers, `orb_model_account_{admit,score}`, Phase R2-A, remote replay, fast memory / Paloma handoff, Codex Cyber / skill-delivery / worktree / bounded-diff gates, and the Phase R6-A `orb_followup_queue_step`, `orb_transport_epoch_step`, and `orb_stream_open_tail_cap_step` exports; this historical
+  multi-target receipt has not been rerun on the 183-export surface).
 - Default and verified-kernel-only certificate checks report `verified: true`,
   but both retain effective `overallAssurance: Tested` for these frontend inputs.
   Do not promote that label to a kernel proof of the compiled program.
@@ -64,8 +64,8 @@ relabeled.
 
 Physical device and native Apple execution remain blocked. Production rollout,
 full end-to-end host callers and independently accepted phase exits remain
-separate gates. On current `master` (181 manifest entries / 180 public exports including
-`orb_slot_bypass_step`, `orb_node_resize_step`, `orb_node_lane_step`, the Phase R2b `orb_wire_*_slice_*` exports, Phase R3 Cluster 1–4 partial evidence, the `dgx-spark` / `lean-sys` `c8449e0` gates, Phase R4 Scroll / Stream / Transcript zero-copy slice ABI exports, `orb_placement_merge_step`, Wave 3.2 / Wave 4 scanner, pacer, confinement, DAG, FTS5, UTF-16, and `LeanSys` host-gate evidence, `orb_model_account_{admit,score}`, the Phase R2-A `orb_epoch_fence_step`, `orb_effect_outbox_step`, and `orb_crash_boundary_step` exports, `orb_activation_rollback_admit` / `orb_remote_replay_step`, the fast memory / Paloma handoff exports, and the `#1497` / `#1553` / `#1552` / `#352` gates), the coverage registry is **110 partial / 71 unconnected**
+separate gates. On current `master` (184 manifest entries / 183 public exports including
+`orb_slot_bypass_step`, `orb_node_resize_step`, `orb_node_lane_step`, the Phase R2b `orb_wire_*_slice_*` exports, Phase R3 Cluster 1–4 partial evidence, the `dgx-spark` / `lean-sys` `c8449e0` gates, Phase R4 Scroll / Stream / Transcript zero-copy slice ABI exports, `orb_placement_merge_step`, Wave 3.2 / Wave 4 scanner, pacer, confinement, DAG, FTS5, UTF-16, and `LeanSys` host-gate evidence, `orb_model_account_{admit,score}`, the Phase R2-A `orb_epoch_fence_step`, `orb_effect_outbox_step`, and `orb_crash_boundary_step` exports, `orb_activation_rollback_admit` / `orb_remote_replay_step`, the fast memory / Paloma handoff exports, the `#1497` / `#1553` / `#1552` / `#352` gates, and the Phase R6-A `orb_followup_queue_step`, `orb_transport_epoch_step`, and `orb_stream_open_tail_cap_step` exports), the coverage registry is **110 partial / 74 unconnected**
 (23 partial / 106 unconnected across the 129 entries at execution head
 `3c70e5ada`); passing scalar conformance does not close those connections.
 
@@ -73,7 +73,7 @@ separate gates. On current `master` (181 manifest entries / 180 public exports i
 checkout. It signs an Ed25519 consistency receipt (`assurance: Tested`,
 `kernel_proof: false`) binding both compared archive hashes and distinguishing
 `compared_backend` from the selected `backend` under rollback, compares the
-362-case scalar C ABI (`181 * 2`) with a LeanNative `probe_*` archive (supplied
+368-case scalar C ABI (`184 * 2`) with a LeanNative `probe_*` archive (supplied
 via `--leannative-archive` or compiled fresh via `--turbo-root`), and rolls
 back with `--rollback-stock` or `ORB_KERNEL_BACKEND=stock-c`. A local match is
 not phase acceptance, the historical 1044-case multi-target qualification,

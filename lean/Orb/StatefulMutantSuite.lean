@@ -714,4 +714,93 @@ theorem kill_crash_boundary_dual_writer :
 #guard effectOutboxMetaGate.gate ⟨4, 0, 1, 1, 9, 9⟩ == false
 #guard crashBoundaryMetaGate.gate ⟨2, 5, 1, 0, 9, 9, 0, 7⟩ == false
 
+-- Phase R6-A Stateful Transition Mutants (`followupQueue`, `transportEpoch`, `streamOpenTailCap`)
+
+/-- Mutant 11A (`followupQueue`): stale server revision accepted on edit CAS. -/
+def mutantFollowupQueueStaleRevision (c : FollowupQueueCheck) : Bool :=
+  followupQueueMetaGate.gate { c with expectedServerRev := c.serverRev }
+
+/-- Mutant 11B (`followupQueue`): historical turn (`turnSeq == postedAfterSeq`) retires optimistic row. -/
+def mutantFollowupQueueHistoricalRetire (c : FollowupQueueCheck) : Bool :=
+  (((followupQueueStep c.op c.serverRev c.incomingServerRev c.expectedServerRev
+      c.clientMsgId c.trackedMsgId c.deliveredMsgId c.postedAfterSeq (c.turnSeq + 1)
+      c.optimisticSending c.serverListed c.contentMatched c.alreadyDelivered) &&& 0xFFFFFFFF) &&& 1024) != 0
+
+/-- Mutant 11C (`followupQueue`): duplicate `clientMsgId` double-admitted on enqueue. -/
+def mutantFollowupQueueDuplicateAdmit (c : FollowupQueueCheck) : Bool :=
+  followupQueueMetaGate.gate { c with trackedMsgId := 0 }
+
+/-- Mutant 12A (`transportEpoch`): `everReady == 1` locks out SSE fallback (`nextMode` stays `0`). -/
+def mutantTransportEpochEverReadyLock (c : TransportEpochCheck) : UInt8 :=
+  if c.everReady == 1 && c.eventKind == 1 then 0 else (c.eval &&& 0xFF).toUInt8
+
+/-- Mutant 12B (`transportEpoch`): SSE fallback drops `sinceSeq32` cursor to `0`. -/
+def mutantTransportEpochDropsSinceSeq (c : TransportEpochCheck) : UInt32 :=
+  if ((c.eval &&& 0xFFFFFFFF) &&& 1024) != 0 then 0 else (c.eval >>> 32).toUInt32
+
+/-- Mutant 12C (`transportEpoch`): transient WS failure sets sticky unsupported capability bit. -/
+def mutantTransportEpochTransientSticky (c : TransportEpochCheck) : Bool :=
+  if c.eventKind == 1 then true else (((c.eval &&& 0xFFFFFFFF) &&& 512) != 0)
+
+/-- Mutant 13A (`streamOpenTailCap`): open fence freezes checkpoint instead of advancing cap floor. -/
+def mutantStreamOpenTailCapFrozenFence (c : StreamOpenTailCapCheck) : UInt32 :=
+  if c.openFenceActive == 1 then c.prevCheckpoint else (c.eval >>> 32).toUInt32
+
+/-- Mutant 13B (`streamOpenTailCap`): zero cap (`maxOpenTailBytes == 0`) admitted. -/
+def mutantStreamOpenTailCapZeroAdmitted (c : StreamOpenTailCapCheck) : Bool :=
+  streamOpenTailCapMetaGate.gate { c with maxOpenTailBytes := if c.maxOpenTailBytes == 0 then 1 else c.maxOpenTailBytes }
+
+/-- Mutant 13C (`streamOpenTailCap`): checkpoint regresses behind `prevCheckpoint`. -/
+def mutantStreamOpenTailCapRegresses (c : StreamOpenTailCapCheck) : UInt32 :=
+  if c.maxOpenTailBytes ≤ c.newLen then c.newLen - c.maxOpenTailBytes else 0
+
+theorem kill_followup_queue_stale_revision :
+    mutantFollowupQueueStaleRevision ⟨1, 5, 5, 4, 42, 42, 0, 10, 10, 0, 0, 0, 0⟩ ≠
+      followupQueueMetaGate.gate ⟨1, 5, 5, 4, 42, 42, 0, 10, 10, 0, 0, 0, 0⟩ := by
+  decide
+
+theorem kill_followup_queue_historical_retire :
+    mutantFollowupQueueHistoricalRetire ⟨3, 5, 5, 5, 42, 42, 0, 10, 10, 0, 0, 1, 0⟩ ≠
+      ((((followupQueueStep 3 5 5 5 42 42 0 10 10 0 0 1 0) &&& 0xFFFFFFFF) &&& 1024) != 0) := by
+  decide
+
+theorem kill_followup_queue_duplicate_admit :
+    mutantFollowupQueueDuplicateAdmit ⟨2, 5, 5, 5, 42, 42, 0, 10, 10, 0, 0, 0, 0⟩ ≠
+      followupQueueMetaGate.gate ⟨2, 5, 5, 5, 42, 42, 0, 10, 10, 0, 0, 0, 0⟩ := by
+  decide
+
+theorem kill_transport_epoch_ever_ready_lock :
+    mutantTransportEpochEverReadyLock ⟨0, 1, 1, 0, 0, 1, 2, 0, 40, 0, 0⟩ ≠
+      ((transportEpochStep 0 1 1 0 0 1 2 0 40 0 0) &&& 0xFF).toUInt8 := by
+  decide
+
+theorem kill_transport_epoch_drops_since_seq :
+    mutantTransportEpochDropsSinceSeq ⟨0, 1, 1, 0, 0, 1, 2, 0, 40, 0, 0⟩ ≠
+      (transportEpochStep 0 1 1 0 0 1 2 0 40 0 0 >>> 32).toUInt32 := by
+  decide
+
+theorem kill_transport_epoch_transient_sticky :
+    mutantTransportEpochTransientSticky ⟨0, 1, 1, 0, 0, 1, 2, 0, 40, 0, 0⟩ ≠
+      ((((transportEpochStep 0 1 1 0 0 1 2 0 40 0 0) &&& 0xFFFFFFFF) &&& 512) != 0) := by
+  decide
+
+theorem kill_stream_open_tail_cap_frozen_fence :
+    mutantStreamOpenTailCapFrozenFence ⟨20, 5, 12, 40, 5, 8, 1⟩ ≠
+      (streamOpenTailCapStep 20 5 12 40 5 8 1 >>> 32).toUInt32 := by
+  decide
+
+theorem kill_stream_open_tail_cap_zero_admitted :
+    mutantStreamOpenTailCapZeroAdmitted ⟨20, 5, 12, 40, 5, 0, 1⟩ ≠
+      streamOpenTailCapMetaGate.gate ⟨20, 5, 12, 40, 5, 0, 1⟩ := by
+  decide
+
+theorem kill_stream_open_tail_cap_regresses :
+    mutantStreamOpenTailCapRegresses ⟨20, 5, 18, 22, 5, 8, 1⟩ ≠
+      (streamOpenTailCapStep 20 5 18 22 5 8 1 >>> 32).toUInt32 := by
+  decide
+
+#guard followupQueueMetaGate.gate ⟨1, 5, 5, 4, 42, 42, 0, 10, 10, 0, 0, 0, 0⟩ == false
+#guard (transportEpochStep 0 1 1 0 0 1 2 0 40 0 0 >>> 32).toUInt32 == 40
+#guard streamOpenTailCapMetaGate.gate ⟨20, 5, 12, 40, 5, 0, 1⟩ == false
+
 end Orb.StatefulMutantSuite

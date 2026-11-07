@@ -3768,4 +3768,184 @@ def repoDiffBudgetStep
       (256 : UInt32) ||| dirtyBit ||| truncFilesBit ||| truncBytesBit ||| (syncState <<< 16)
     lo32.toUInt64 ||| (clampedBytes.toUInt64 <<< 32)
 
+-- ===========================================================================
+-- Phase R6-A: Cross-Client Follow-Up Queue (`SM-24` / `G-ORB-1`),
+--             Transport Epoch (`SM-26`), and Stream Open-Tail Cap (`SM-25` / `G-ORB-6`)
+-- ===========================================================================
+
+/--
+  Phase R6-A Cross-Client Follow-Up Queue Reconciliation Stepper
+  (`orb_followup_queue_step`, `SM-24` / `G-ORB-1`):
+  Models exact server revision CAS + optimistic `(client_msg_id, posted_after_seq)` retirement
+  across Desktop (`RemoteQueue.tsx`), iOS (`OrbSendFlow.swift`), and Android (`OrbSendFlow.kt`),
+  replacing lossy XOR/count summary parity (`clientParityStep`) for follow-up queue actions:
+  - `op`:
+    - `0 = PollReconcile` (`incomingServerRev ≥ serverRev` updates authoritative queue snapshot)
+    - `1 = EditCas` (`expectedServerRev == serverRev && serverRev < 0xFFFFFFFF` advances revision)
+    - `2 = EnqueueOptimistic` (`clientMsgId != 0`, idempotent when `clientMsgId == trackedMsgId` or `alreadyDelivered == 1`)
+    - `3 = TranscriptTurnReconcile` (retires optimistic row ONLY when `clientMsgId != 0`, `alreadyDelivered == 0`,
+      and either `deliveredMsgId == clientMsgId` or `(contentMatched == 1 && deliveredMsgId == 0 && turnSeq > postedAfterSeq)`)
+  - Returns `lo32 | (nextServerRev <<< 32)` where:
+    - `lo32 bits 0..7`: reason/outcome (`0` malformed, `1` applied, `2` stale revision, `3` duplicate `client_msg_id`,
+      `4` historical turn not retired, `5` revision saturated)
+    - `bit 8 (256)`: `admitted`
+    - `bit 9 (512)`: `optimisticLiveNext` (`1` iff the optimistic row remains visible in the drawer)
+    - `bit 10 (1024)`: `retiredNow` (`1` iff this transition newly retires the optimistic row into `delivered`)
+-/
+@[inline, export orb_followup_queue_step]
+def followupQueueStep
+    (op : UInt8)
+    (serverRev incomingServerRev expectedServerRev : UInt32)
+    (clientMsgId trackedMsgId deliveredMsgId : UInt64)
+    (postedAfterSeq turnSeq : UInt64)
+    (optimisticSending serverListed contentMatched alreadyDelivered : UInt8) : UInt64 :=
+  let opOk : Bool := op ≤ 3
+  let flagsOk : Bool :=
+    optimisticSending ≤ 1 && serverListed ≤ 1 && contentMatched ≤ 1 && alreadyDelivered ≤ 1
+  let shaped : Bool := opOk && flagsOk && serverRev != 0
+  if !shaped then
+    serverRev.toUInt64 <<< 32
+  else
+    let hasClientMsg : Bool := clientMsgId != 0
+    let notDelivered : Bool := alreadyDelivered == 0
+    let serverUnlisted : Bool := serverListed == 0
+    let idMatchRetire : Bool :=
+      hasClientMsg && notDelivered && deliveredMsgId == clientMsgId
+    let contentRetire : Bool :=
+      hasClientMsg && notDelivered && deliveredMsgId == 0 &&
+      contentMatched == 1 && turnSeq > postedAfterSeq
+    let turnRetires : Bool := op == 3 && (idMatchRetire || contentRetire)
+    let pollRetires : Bool :=
+      op == 0 && incomingServerRev ≥ serverRev &&
+      hasClientMsg && notDelivered &&
+      serverUnlisted && optimisticSending == 0 && turnSeq > postedAfterSeq
+    let retiredNow : Bool := turnRetires || pollRetires
+    let dupEnqueue : Bool :=
+      op == 2 && hasClientMsg && (clientMsgId == trackedMsgId || !notDelivered)
+    let admit : Bool :=
+      if op == 0 then incomingServerRev ≥ serverRev
+      else if op == 1 then expectedServerRev == serverRev && serverRev < 0xFFFFFFFF
+      else if op == 2 then hasClientMsg && !dupEnqueue
+      else turnRetires
+    let nextRev : UInt32 :=
+      if !admit then serverRev
+      else if op == 0 then incomingServerRev
+      else if op == 1 then serverRev + 1
+      else serverRev
+    let liveBranch : Bool :=
+      if op == 0 then (if incomingServerRev < serverRev then true else serverUnlisted)
+      else if op == 2 then (if admit then true else clientMsgId == trackedMsgId)
+      else serverUnlisted
+    let optimisticLiveNext : Bool :=
+      if !notDelivered || retiredNow || !hasClientMsg then false else liveBranch
+    let reason : UInt32 :=
+      if admit then 1
+      else if op == 0 then 2
+      else if op == 1 then (if expectedServerRev != serverRev then 2 else 5)
+      else if op == 2 then (if dupEnqueue then 3 else 0)
+      else if !notDelivered then 3
+      else 4
+    let admitBit : UInt32 := if admit then 256 else 0
+    let liveBit : UInt32 := if optimisticLiveNext then 512 else 0
+    let retireBit : UInt32 := if retiredNow then 1024 else 0
+    let lo32 : UInt32 := reason ||| admitBit ||| liveBit ||| retireBit
+    lo32.toUInt64 ||| (nextRev.toUInt64 <<< 32)
+
+/--
+  Phase R6-A Epoch-Aware WS/SSE Transport Stepper (`orb_transport_epoch_step`, `SM-26`):
+  Governs WebSocket <-> SSE fallback, `since_seq` cursor preservation, cooldown WS reprobe,
+  and `(endpoint_class, server_build)` sticky `404`/`501` capability latches across Desktop (`stream.ts`),
+  iOS (`OrbClient.swift`), and Android (`OrbCore.kt`):
+  - `mode`: `0 = WsActive`, `1 = SseFallback`, `2 = WsReprobe`.
+  - `eventKind`: `0 = WsReady`, `1 = TransientWsFailure`, `2 = HttpStatusFailure`, `3 = CooldownCheck`, `4 = ServerBuildChanged`.
+  - Importantly, `everReady == 1` does NOT lock the client out of SSE fallback once `failureStreak + 1 ≥ failThreshold`
+    (fixing the desktop `!everReady` wedge during prolonged WS proxy drops while keeping `sinceSeq` intact).
+  - HTTP `404` / `501` sets `stickyUnsupportedNext = 1` for the current `(endpointClass, serverBuild)` until
+    `ServerBuildChanged` (`eventKind == 4`), whereas transient network errors never set `stickyUnsupportedNext`.
+  - Returns `lo32 | (preservedSinceSeq32 <<< 32)` where:
+    - `lo32 bits 0..7`: `nextMode` (`0` WsActive, `1` SseFallback, `2` WsReprobe; `255` malformed)
+    - `bit 8 (256)`: `admitted`
+    - `bit 9 (512)`: `stickyUnsupportedNext`
+    - `bit 10 (1024)`: `fallbackActiveNext` (`nextMode == 1`)
+    - `bit 11 (2048)`: `reprobeTriggered` (`mode == 1 && nextMode == 2`)
+    - `bits 16..23`: `nextFailureStreak` (`0..255` saturating)
+-/
+@[inline, export orb_transport_epoch_step]
+def transportEpochStep
+    (mode eventKind everReady stickyUnsupported endpointClass : UInt8)
+    (failureStreak failThreshold httpStatus sinceSeq32 : UInt32)
+    (nowMs cooldownUntilMs : UInt64) : UInt64 :=
+  let shaped : Bool :=
+    mode ≤ 2 && eventKind ≤ 4 && everReady ≤ 1 && stickyUnsupported ≤ 1 &&
+    endpointClass ≤ 3 && failThreshold ≥ 1
+  let isPermStatus : Bool := eventKind == 2 && (httpStatus == 404 || httpStatus == 501)
+  let isTransientFail : Bool := eventKind == 1 || (eventKind == 2 && !isPermStatus)
+  let bumpedStreak : UInt32 :=
+    if failureStreak < 255 then failureStreak + 1 else 255
+  let clampedThreshold : UInt32 :=
+    if failThreshold ≤ 255 then failThreshold else 255
+  let nextSticky : Bool :=
+    if !shaped then stickyUnsupported == 1
+    else if eventKind == 4 then false
+    else if isPermStatus then true
+    else stickyUnsupported == 1
+  let nextStreak : UInt32 :=
+    if !shaped then (if failureStreak ≤ 255 then failureStreak else 255)
+    else if eventKind == 0 || eventKind == 4 then 0
+    else if isPermStatus then (if bumpedStreak ≥ clampedThreshold then bumpedStreak else clampedThreshold)
+    else if isTransientFail then bumpedStreak
+    else (if failureStreak ≤ 255 then failureStreak else 255)
+  let nextMode : UInt8 :=
+    if !shaped then mode
+    else if eventKind == 4 then 2
+    else if nextSticky then 1
+    else if eventKind == 0 then 0
+    else if isTransientFail then
+      if bumpedStreak ≥ failThreshold then 1 else 0
+    else if eventKind == 3 then
+      if mode == 1 && nowMs ≥ cooldownUntilMs then 2 else mode
+    else mode
+  let reprobeBit : UInt32 :=
+    if shaped && ((mode == 1 && nextMode == 2) || eventKind == 4) && !nextSticky then 2048 else 0
+  let stickyBit : UInt32 := if nextSticky then 512 else 0
+  let fallbackBit : UInt32 := if shaped && nextMode == 1 then 1024 else 0
+  let lo32 : UInt32 :=
+    if !shaped then 255
+    else nextMode.toUInt32 ||| (256 : UInt32) ||| stickyBit ||| fallbackBit ||| reprobeBit ||| (nextStreak <<< 16)
+  lo32.toUInt64 ||| (sinceSeq32.toUInt64 <<< 32)
+
+/--
+  Phase R6-A Checkpointed Open-Fence Tail Cap Stepper
+  (`orb_stream_open_tail_cap_step`, `SM-25` / `G-ORB-6`):
+  Computes the exact per-frame checkpoint advance and bounded open-tail re-parse byte count for
+  streaming Markdown renderers (`OrbStreamText.swift`, `OrbStreamText.kt`, `orb/src`):
+  - Enforces `maxOpenTailBytes > 0` and monotone stream coordinates `prevCommit ≤ prevCheckpoint ≤ prevLen ≤ newLen`.
+  - Regardless of whether an unclosed code fence holds `rawCommit` at `0` (`openFenceActive == 1`),
+    advances `nextCheckpoint = max (max prevCheckpoint nextCommit) (newLen - maxOpenTailBytes)` so the
+    open tail byte count `openTailBytes = newLen - nextCheckpoint` NEVER exceeds `maxOpenTailBytes` ($O(1)$ per frame).
+  - Returns `lo32 | (nextCheckpoint <<< 32)` where:
+    - `lo32`: `0` if inadmissible, else `257 | checkpointForcedBit(512) | openFenceCappedBit(1024)`
+    - `hi32`: `nextCheckpoint` (from which `openTailBytes = newLen - nextCheckpoint ≤ maxOpenTailBytes` unconditionally).
+-/
+@[inline, export orb_stream_open_tail_cap_step]
+def streamOpenTailCapStep
+    (prevLen prevCommit prevCheckpoint : UInt32)
+    (newLen rawCommit maxOpenTailBytes : UInt32)
+    (openFenceActive : UInt8) : UInt64 :=
+  let validFlags : Bool := openFenceActive ≤ 1
+  let baseWord : UInt64 :=
+    streamBoundedCommitStep prevLen prevCommit prevCheckpoint newLen rawCommit maxOpenTailBytes
+  let baseLo : UInt32 := (baseWord &&& 0xFFFFFFFF).toUInt32
+  let nextCheckpoint : UInt32 := (baseWord >>> 32).toUInt32
+  let baseAdmitted : Bool := (baseLo &&& 256) != 0
+  let admit : Bool := validFlags && baseAdmitted
+  let forced : Bool := (baseLo &&& 512) != 0
+  let fenceCapBit : UInt32 := if openFenceActive == 1 && forced then 1024 else 0
+  let lo32 : UInt32 :=
+    if !admit then 0
+    else baseLo ||| fenceCapBit
+  let hi32 : UInt32 :=
+    if !admit then prevCheckpoint else nextCheckpoint
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
 end Orb.Kernel
