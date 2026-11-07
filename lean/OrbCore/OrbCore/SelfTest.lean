@@ -783,6 +783,220 @@ private def runCyberAndSkillDeliveryTests
     return 1
   return 0
 
+private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
+  let r5Ts ← IO.monoNanosNow
+  let r5Root := s!"/tmp/orb-core-r5b-{r5Ts}"
+  IO.FS.createDirAll r5Root
+  let memRej ← openManagedComputeStore ":memory:"
+  if memRej.isOk then
+    IO.eprintln "[orb-core-test] FAIL: openManagedComputeStore accepted :memory:"
+    return 1
+  let .ok mst ← openManagedComputeStore s!"{r5Root}/managed_compute.db"
+    | do IO.eprintln "[orb-core-test] FAIL: openManagedComputeStore failed"; return 1
+  let .ok () ← sealProviderSecret r5Root "boat" "boat-secret-token-r5b"
+    | do closeManagedComputeStore mst; IO.eprintln "[orb-core-test] FAIL: sealProviderSecret failed"; return 1
+  let secStat ← OrbBin.PosixExt.statPath (managedSecretPath r5Root "boat").toString
+  let keyStat ← OrbBin.PosixExt.statPath (managedMasterKeyPath r5Root).toString
+  let dirStat ← OrbBin.PosixExt.statPath (managedSecretDir r5Root).toString
+  let rawCipher ← IO.FS.readBinFile (managedSecretPath r5Root "boat")
+  let rawMasterKey ← IO.FS.readBinFile (managedMasterKeyPath r5Root)
+  let managedSecretRej ← openProviderSecret r5Root "boat" true true
+  let missionSecretRej ← openProviderSecret r5Root "boat" false false
+  let .ok openedSecret ← openProviderSecret r5Root "boat" false true
+    | do closeManagedComputeStore mst; IO.eprintln "[orb-core-test] FAIL: openProviderSecret failed"; return 1
+  if managedSecretRej.isOk || missionSecretRej.isOk || openedSecret != "boat-secret-token-r5b" ||
+     (secStat.mode &&& 0o777) != 0o600 || (keyStat.mode &&& 0o777) != 0o600 ||
+     (dirStat.mode &&& 0o777) != 0o700 || rawMasterKey.size != 32 ||
+     rawCipher.extract 0 32 == rawMasterKey ||
+     (((String.fromUTF8? rawCipher).getD "").splitOn "boat-secret-token-r5b").length > 1 ||
+     admitCoreReservedSecret true true != 512 || admitCoreReservedSecret false false != 512 ||
+     admitCoreReservedSecret false true != 257 then
+    closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: CoreReserved secret gate, 0600 mode, or AEAD round-trip failed"
+    return 1
+  let adapterOk :=
+    match observeProviderPayload "boat" "m1" 200 (.obj #[("state", .str "running"), ("spent_cents", .nat 12)]),
+          observeProviderPayload "boost" "m2" 200 (.obj #[("status", .str "halted")]),
+          observeProviderPayload "hetzner" "m3" 200 (.obj #[("status", .str "off")]),
+          observeProviderPayload "vastai" "m4" 200 (.obj #[("state", .str "exited")]),
+          observeProviderPayload "scaleway" "m5" 200 (.obj #[("state", .str "stopped_in_place")]),
+          observeProviderPayload "colab" "m6" 404 (.obj #[]) with
+    | .ok o1, .ok o2, .ok o3, .ok o4, .ok o5, .ok o6 =>
+      o1.observedStatus == "ready" && !o1.orphaned && o1.spentCents == 12 &&
+      o2.observedStatus == "stopped" && o3.observedStatus == "stopped" &&
+      o4.observedStatus == "stopped" && o5.observedStatus == "stopped" &&
+      o6.orphaned && (observeProviderPayload "aws" "m7" 200 (.obj #[])).isOk == false
+    | _, _, _, _, _, _ => false
+  if !adapterOk then
+    closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: pure ProviderObservation adapter check failed"
+    return 1
+  let fleet0 : ManagedFleetState := { enabled := true, boatEnabled := true }
+  let vm0 : ManagedMachine := {
+    id := "mm-r5b-1", sandboxName := "orb-managed-mm-r5b-1", provider := "boat",
+    size := "small", spentCents := 25, nodeBootEpoch := 1, deletableAtSec := 100
+  }
+  let .ok _ ← provisionManagedMachine mst fleet0 vm0 50
+    | do closeManagedComputeStore mst; IO.eprintln "[orb-core-test] FAIL: provisionManagedMachine failed"; return 1
+  let .ok () ← putEnrollmentToken mst "mm-r5b-1" "enroll-boot-1"
+    | do closeManagedComputeStore mst; return 1
+  let .ok r5Store ← openCoreStore s!"{r5Root}/core"
+    | do closeManagedComputeStore mst; return 1
+  let r5ManagedRef ← IO.mkRef fleet0
+  let r5ChainsRef ← IO.mkRef (#[] : Array RoutingChain)
+  let r5CooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
+  let r5SeqRef ← IO.mkRef (1 : UInt64)
+  let r5App : CoreAppState := {
+    cfg := prodValid, store := r5Store, searchIdx? := none,
+    managedRef := r5ManagedRef, chainsRef := r5ChainsRef,
+    proxyCooldownsRef := r5CooldownsRef, seqRef := r5SeqRef,
+    managedStore? := some mst
+  }
+  let enrollBody := "{\"machine_id\":\"mm-r5b-1\",\"enroll_token\":\"enroll-boot-1\"}"
+  let enrollRaw := s!"POST /api/managed-machines/enroll HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {enrollBody.utf8ByteSize}\r\n\r\n{enrollBody}".toUTF8
+  let .ok enrollReq := parseRequest enrollRaw none | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok enrollResp ← dispatchCoreRequest r5App enrollReq 65 | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok enrollJson := OrbBin.Json.parseBytes enrollResp.body | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let nodeTok1 := (enrollJson.fieldStr? "node_token").getD ""
+  let replayEnroll ← enrollManagedNode mst "mm-r5b-1" "enroll-boot-1" (some 1)
+  if enrollResp.status != 200 || nodeTok1.isEmpty || replayEnroll.isOk then
+    closeCoreStore r5Store
+    closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: HTTP enroll or replay rejection failed"
+    return 1
+  let .ok claim1 ← applyVmClaim mst "mm-r5b-1" "m-owner-1" {
+    opCode := Orb.ManagedNode.ClaimOp.encode .claim, ownerInLineage := 1, ownerSuperseded := 0,
+    vmLive := 1, activeComputeEligible := 1, presentedReservation := 10, presentedBootEpoch := 1
+  } | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let dupClaim ← applyVmClaim mst "mm-r5b-1" "m-owner-1" {
+    opCode := Orb.ManagedNode.ClaimOp.encode .claim, ownerInLineage := 1, ownerSuperseded := 0,
+    vmLive := 1, activeComputeEligible := 1, presentedReservation := 10, presentedBootEpoch := 1
+  }
+  if dupClaim.isOk || claim1.reservationId != 10 then
+    closeCoreStore r5Store
+    closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: duplicate claim was not rejected"
+    return 1
+  let earlyDestroy ← applyVmLifecycle mst "mm-r5b-1" {
+    opCode := Orb.ManagedNode.VmOp.encode .destroy, ownerLive := 0, idleElapsed := 1,
+    presentedBootEpoch := 1, nowEpoch := 60
+  }
+  if earlyDestroy.isOk then
+    closeCoreStore r5Store
+    closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: destroy inside deletable_at lease was accepted"
+    return 1
+  let .ok () ← enqueueRelayCommand mst "mm-r5b-1" "cmd-http" "{\"op\":\"echo\"}"
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let pollRaw := s!"GET /api/managed-machines/relay/poll HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {nodeTok1}\r\nx-orb-machine-id: mm-r5b-1\r\n\r\n".toUTF8
+  let .ok pollReq := parseRequest pollRaw none | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok pollResp ← dispatchCoreRequest r5App pollReq 68 | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let staleLeaseBody := "{\"id\":\"cmd-http\",\"lease_id\":999}"
+  let staleLeaseRaw := s!"POST /api/managed-machines/relay/respond HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {nodeTok1}\r\nx-orb-machine-id: mm-r5b-1\r\nContent-Length: {staleLeaseBody.utf8ByteSize}\r\n\r\n{staleLeaseBody}".toUTF8
+  let .ok staleLeaseReq := parseRequest staleLeaseRaw none | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok staleLeaseResp ← dispatchCoreRequest r5App staleLeaseReq 69 | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let ackBody := "{\"id\":\"cmd-http\",\"lease_id\":1}"
+  let ackRaw := s!"POST /api/managed-machines/relay/respond HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {nodeTok1}\r\nx-orb-machine-id: mm-r5b-1\r\nx-orb-boot-epoch: 1\r\nContent-Length: {ackBody.utf8ByteSize}\r\n\r\n{ackBody}".toUTF8
+  let .ok ackReq := parseRequest ackRaw none | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok ackResp ← dispatchCoreRequest r5App ackReq 69 | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let opJwt := mintSessionToken prodValid.jwtSecret 3660
+  let mmListRaw := s!"GET /api/managed-machines HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {opJwt}\r\n\r\n".toUTF8
+  let .ok mmListReq := parseRequest mmListRaw none | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok mmListResp ← dispatchCoreRequest r5App mmListReq 70 | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let rnListRaw := s!"GET /api/remote-nodes HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {opJwt}\r\n\r\n".toUTF8
+  let .ok rnListReq := parseRequest rnListRaw none | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok rnListResp ← dispatchCoreRequest r5App rnListReq 70 | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  if pollResp.status != 200 || staleLeaseResp.status != 409 || ackResp.status != 200 ||
+     mmListResp.status != 200 || rnListResp.status != 200 ||
+     (((String.fromUTF8? mmListResp.body).getD "").splitOn "\"mm-r5b-1\"").length <= 1 ||
+     (((String.fromUTF8? rnListResp.body).getD "").splitOn "\"managed-mm-r5b-1\"").length <= 1 then
+    closeCoreStore r5Store
+    closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: HTTP relay poll/respond or operator fleet routes failed"
+    return 1
+  let .ok () ← enqueueRelayCommand mst "mm-r5b-1" "cmd-1" "{\"op\":\"ping\"}"
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok (some leased1) ← pollRelayLease mst "mm-r5b-1" 1 70 80
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok none ← pollRelayLease mst "mm-r5b-1" 1 70 80
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok releasedCmd ← expireRelayLease mst "cmd-1" 85 1
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok (some leased2) ← pollRelayLease mst "mm-r5b-1" 1 85 96
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let staleLeaseAck ← stepRelayCommand mst "cmd-1" {
+    opCode := Orb.ManagedNode.RelayOp.encode .ack, presentedLeaseId := leased1.heldLeaseId,
+    presentedBootEpoch := 1, nowEpoch := 86
+  }
+  let .ok uncCmd ← stepRelayCommand mst "cmd-1" {
+    opCode := Orb.ManagedNode.RelayOp.encode .markUncertain, presentedLeaseId := leased2.heldLeaseId,
+    presentedBootEpoch := 1, nowEpoch := 87
+  } | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let uncRetry ← expireRelayLease mst "cmd-1" 120 1
+  let .ok recCmd ← stepRelayCommand mst "cmd-1" {
+    opCode := Orb.ManagedNode.RelayOp.encode .reconcile, presentedLeaseId := leased2.heldLeaseId,
+    presentedBootEpoch := 1, nowEpoch := 88
+  } | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  if leased1.phaseCode != 1 || leased2.heldLeaseId <= leased1.heldLeaseId || staleLeaseAck.isOk ||
+     releasedCmd.phaseCode != 0 || uncCmd.phaseCode != 3 ||
+     uncRetry.isOk || recCmd.phaseCode != 2 then
+    closeCoreStore r5Store
+    closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: leased relay transitions violated SM-19"
+    return 1
+  let .ok _ ← applyProviderObservation mst { provider := "boat", machineId := "mm-r5b-1", observedStatus := "stopped" } 90 0 0
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let sameBootResume ← applyVmLifecycle mst "mm-r5b-1" {
+    opCode := Orb.ManagedNode.VmOp.encode .resume, ownerLive := 0, idleElapsed := 0,
+    presentedBootEpoch := 1, nowEpoch := 95
+  }
+  let .ok (resumedSlice, _) ← applyVmLifecycle mst "mm-r5b-1" {
+    opCode := Orb.ManagedNode.VmOp.encode .resume, ownerLive := 0, idleElapsed := 0,
+    presentedBootEpoch := 2, nowEpoch := 95
+  } | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let staleNodeAuth ← authenticateNodeToken mst "mm-r5b-1" nodeTok1 (some 1)
+  let .ok stalePollResp ← dispatchCoreRequest r5App pollReq 96 | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  if stalePollResp.status != 410 then
+    closeCoreStore r5Store
+    closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: superseded boot token did not return HTTP 410 on /relay/poll"
+    return 1
+  let staleClaim ← applyVmClaim mst "mm-r5b-1" "m-owner-2" {
+    opCode := Orb.ManagedNode.ClaimOp.encode .claim, ownerInLineage := 1, ownerSuperseded := 0,
+    vmLive := 1, activeComputeEligible := 1, presentedReservation := 11, presentedBootEpoch := 1
+  }
+  let .ok claimBoot2 ← applyVmClaim mst "mm-r5b-1" "m-owner-2" {
+    opCode := Orb.ManagedNode.ClaimOp.encode .claim, ownerInLineage := 1, ownerSuperseded := 0,
+    vmLive := 1, activeComputeEligible := 1, presentedReservation := 11, presentedBootEpoch := 2
+  } | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok _ ← applyVmClaim mst "mm-r5b-1" "m-owner-2" {
+    opCode := Orb.ManagedNode.ClaimOp.encode .release, ownerInLineage := 1, ownerSuperseded := 0,
+    vmLive := 1, activeComputeEligible := 1, presentedReservation := 11, presentedBootEpoch := 2
+  } | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let sameBootReplace ← applyVmLifecycle mst "mm-r5b-1" {
+    opCode := Orb.ManagedNode.VmOp.encode .replace, ownerLive := 0, idleElapsed := 0,
+    presentedBootEpoch := 2, nowEpoch := 120
+  }
+  let .ok (replacedSlice, _) ← applyVmLifecycle mst "mm-r5b-1" {
+    opCode := Orb.ManagedNode.VmOp.encode .replace, ownerLive := 0, idleElapsed := 0,
+    presentedBootEpoch := 3, nowEpoch := 120
+  } | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let wrongProviderRej := (← applyProviderObservation mst
+    { provider := "hetzner", machineId := "mm-r5b-1", observedStatus := "destroyed", orphaned := true } 150 0 1).isOk
+  let .ok closeEffs ← applyProviderObservation mst
+    { provider := "boat", machineId := "mm-r5b-1", observedStatus := "destroyed", orphaned := true } 150 0 1
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  closeCoreStore r5Store
+  closeManagedComputeStore mst
+  IO.FS.removeDirAll r5Root
+  if sameBootResume.isOk || resumedSlice.nodeBootEpoch != 2 || sameBootReplace.isOk ||
+     replacedSlice.nodeBootEpoch != 3 || staleNodeAuth.isOk ||
+     staleClaim.isOk || claimBoot2.claimBoot != 2 || wrongProviderRej ||
+     !closeEffs.contains (.closeCostLedger 3) then
+    IO.eprintln "[orb-core-test] FAIL: boot-epoch fence or closeCostLedger invariant failed"
+    return 1
+  return 0
+
 set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
@@ -1870,6 +2084,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if !hostOk then
     IO.eprintln "[orb-core-test] FAIL: OrbCore.HostTests failed"
     return 1
+  if (← runR5bManagedStoreTests prodValid) != 0 then return 1
 
   IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":7,\"harness_contracts\":9,\"host_tests\":85}"
   return 0
