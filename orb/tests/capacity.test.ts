@@ -72,7 +72,7 @@ describe("cap slot accounting mirrors the core", () => {
     const core = [...body.matchAll(/"([a-z_]+)"/g)]
       .map((m) => m[1])
       .sort();
-    expect(core).toEqual(["active", "awaiting_user", "paused", "pending", "waiting_background"]);
+    expect(core).toEqual(["active", "awaiting_user", "paused", "pending", "waiting_background", "waiting_rate_limit"]);
     for (const status of core) expect(holdsCapSlot(status)).toBe(true);
     for (const status of ["completed", "failed", "cancelled", "interrupted", "not_feasible"]) {
       expect(holdsCapSlot(status)).toBe(false);
