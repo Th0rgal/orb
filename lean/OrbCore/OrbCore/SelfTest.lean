@@ -28,6 +28,7 @@ open OrbCore.Skills
 open OrbCore.Control
 open OrbCore.HostTests
 open OrbCore.HarnessSessionRegistry
+open OrbNetLeaf.TlsHttp
 
 private def findFlag? (args : List String) (flag : String) : Option String :=
   match args with
@@ -998,6 +999,685 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
     return 1
   return 0
 
+private def runR4dUnitTests (r4dRoot : String) (r4dChain : RoutingChain) : IO UInt32 := do
+  -- (A) `OrbCore.Proxy`: sticky `firstByteCommitted` lock (`abortCommittedLock = 4` on mid-stream failure,
+  -- `passCommittedStream = 8` on committed 2xx), pre-commit failover, stale `attemptGeneration` fencing (`0`),
+  -- and unified `ProviderHealthTracker` exponential cooldowns + circuit breaker (`Orb.Kernel.accountCooldownSecs` / `breakerStep`).
+  let hTracker ← newProviderHealthTracker 1 2
+  -- 1. Pre-commit 503 fails over cleanly to `acct-backup` (`firstByteCommitted = false` -> `true` on 200 commit),
+  -- recording `transientStreak = 1` (< `transientThreshold = 2`, so not yet cooled down).
+  let preCommitOut ← forwardProxyChain r4dChain "POST" "/v1/responses" #[] "{}".toUTF8
+    (some fun tgt => do
+      if tgt.accountId == "acct-primary" then
+        return .ok { status := 503, headers := #[], body := "{\"error\":\"overloaded\"}".toUTF8 }
+      else
+        return .ok { status := 200, headers := #[("Content-Type", "text/event-stream")], body := "data: ok\n\n".toUTF8 })
+    false none #[] (some hTracker) (some 1) (some 1000)
+  let primRec1 ← lookupAccountHealthRecord hTracker "acct-primary"
+  if preCommitOut.status != 200 || preCommitOut.selectedAccount != "acct-backup" ||
+     preCommitOut.attemptsUsed != 2 || !preCommitOut.firstByteCommitted ||
+     preCommitOut.pinnedAccountId != accountSlotId "acct-backup" ||
+     preCommitOut.verdictCode != 1 || primRec1.transientStreak != 1 || primRec1.cooldown?.isSome then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: R4-D pre-commit failover/health mismatch: acct={preCommitOut.selectedAccount} streak={primRec1.transientStreak}"
+    return 1
+
+  -- 2. Second transient 503 on `acct-primary` reaches `transientThreshold == 2` and trips the account breaker,
+  -- installing an exponential cooldown via `Orb.Kernel.accountCooldownSecs` so `planChainFromHealth` skips `acct-primary`!
+  let tripOut ← forwardProxyChain r4dChain "POST" "/v1/responses" #[] "{}".toUTF8
+    (some fun tgt => do
+      if tgt.accountId == "acct-primary" then
+        return .ok { status := 503, headers := #[], body := "{\"error\":\"overloaded_again\"}".toUTF8 }
+      else
+        return .ok { status := 200, headers := #[("Content-Type", "application/json")], body := "{\"ok\":true}".toUTF8 })
+    false none #[] (some hTracker) (some 1) (some 1005)
+  let primRec2 ← lookupAccountHealthRecord hTracker "acct-primary"
+  let planDuringCool ← planChainFromHealth hTracker r4dChain 1010
+  let planAfterExpiry ← planChainFromHealth hTracker r4dChain 2000
+  if tripOut.status != 200 || tripOut.selectedAccount != "acct-backup" ||
+     primRec2.consecutiveTrips != 1 || primRec2.cooldown?.isNone ||
+     planDuringCool.eligible.size != 1 || planDuringCool.eligible[0]!.accountId != "acct-backup" ||
+     planAfterExpiry.eligible.size != 2 then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: R4-D breaker cooldown/expiry mismatch: trips={primRec2.consecutiveTrips} elig={planDuringCool.eligible.size}"
+    return 1
+
+  -- 3. Exponential cooldown progression (`15s -> 30s -> 60s` for rate-limit, capped at `maxCooldownRetryAfterSecs`).
+  let e1 := exponentialCooldownSecs .rateLimit 1
+  let e2 := exponentialCooldownSecs .rateLimit 2
+  let e3 := exponentialCooldownSecs .rateLimit 3
+  let u1 := exponentialCooldownSecs .usageLimit 1
+  let u2 := exponentialCooldownSecs .usageLimit 2
+  let uCap := exponentialCooldownSecs .usageLimit 20
+  if e1 != 15 || e2 != 30 || e3 != 60 || u1 != 300 || u2 != 600 || uCap != maxCooldownRetryAfterSecs then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: R4-D exponentialCooldownSecs mismatch ({e1}, {e2}, {e3}, {u1}, {u2}, {uCap})"
+    return 1
+
+  -- 4. Sticky `firstByteCommitted = true` (`headersAlreadyCommitted := true`):
+  --    - 200 response yields `verdictCode == 8` (`passCommittedStream`) on the pinned primary without touching backup.
+  --    - 503 mid-stream failure yields `verdictCode == 4` (`abortCommittedLock`), `attemptsUsed == 1`, and NEVER reroutes to `acct-backup`!
+  let backupTouchedRef ← IO.mkRef false
+  let committedPassOut ← forwardProxyChain r4dChain "POST" "/v1/responses" #[] "{}".toUTF8
+    (some fun tgt => do
+      if tgt.accountId == "acct-backup" then backupTouchedRef.set true
+      return .ok { status := 200, headers := #[("Content-Type", "text/event-stream")], body := "data: chunk2\n\n".toUTF8 })
+    true none #[] (some hTracker) (some 1) (some 2005)
+  let committedAbortOut ← forwardProxyChain r4dChain "POST" "/v1/responses" #[] "{}".toUTF8
+    (some fun tgt => do
+      if tgt.accountId == "acct-backup" then backupTouchedRef.set true
+      return .ok { status := 503, headers := #[], body := "{\"error\":\"mid_stream_reset\"}".toUTF8 })
+    true none #[] (some hTracker) (some 1) (some 2006)
+  let committedNetAbortOut ← forwardProxyChain r4dChain "POST" "/v1/responses" #[] "{}".toUTF8
+    (some fun tgt => do
+      if tgt.accountId == "acct-backup" then backupTouchedRef.set true
+      return .error "mid_stream_eof")
+    true none #[] (some hTracker) (some 1) (some 2007)
+  let committedRemovedPinOut ← forwardProxyChain r4dChain "POST" "/v1/responses" #[] "{}".toUTF8
+    (some fun _ => do
+      backupTouchedRef.set true
+      return .ok { status := 200, headers := #[], body := "{\"hijack\":true}".toUTF8 })
+    true none #[] (some hTracker) (some 1) (some 2008) (some "acct-removed")
+  let committedMissingPinOut ← forwardProxyChain r4dChain "POST" "/v1/responses" #[] "{}".toUTF8
+    (some fun _ => do
+      backupTouchedRef.set true
+      return .ok { status := 200, headers := #[], body := "{\"hijack\":true}".toUTF8 })
+    true none #[] (some hTracker) (some 1) (some 2009) (some "")
+  let backupTouched ← backupTouchedRef.get
+  if backupTouched ||
+     committedPassOut.status != 200 || committedPassOut.verdictCode != 8 || !committedPassOut.firstByteCommitted ||
+     committedAbortOut.verdictCode != 4 || committedAbortOut.attemptsUsed != 1 ||
+     committedAbortOut.exhaustionClass != "committed_stream_aborted" ||
+     committedNetAbortOut.verdictCode != 4 || committedNetAbortOut.attemptsUsed != 1 ||
+     committedNetAbortOut.exhaustionClass != "committed_stream_aborted" ||
+     committedRemovedPinOut.status != 502 || committedRemovedPinOut.verdictCode != 0 ||
+     committedRemovedPinOut.attemptsUsed != 0 ||
+     committedRemovedPinOut.exhaustionClass != "committed_stream_aborted" ||
+     ((String.fromUTF8! committedRemovedPinOut.body).splitOn "committed_stream_pin_mismatch").length < 2 ||
+     committedMissingPinOut.status != 502 || committedMissingPinOut.verdictCode != 0 ||
+     committedMissingPinOut.attemptsUsed != 0 || committedMissingPinOut.pinnedAccountId != 0 ||
+     committedMissingPinOut.exhaustionClass != "committed_stream_aborted" then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: R4-D sticky firstByteCommitted violated: backupTouched={backupTouched} passV={committedPassOut.verdictCode} abortV={committedAbortOut.verdictCode} remSt={committedRemovedPinOut.status} missSt={committedMissingPinOut.status}"
+    return 1
+
+  -- 5. Route-generation fencing: bumping `routeGeneration` (`1 -> 2`) causes stale `attemptGeneration = 1`
+  -- to fail closed (`verdictCode == 0`, `attemptsUsed == 0`, HTTP 409) with zero upstream calls!
+  let nextGen ← bumpRouteGeneration hTracker
+  let staleCalledRef ← IO.mkRef false
+  let staleGenOut ← forwardProxyChain r4dChain "POST" "/v1/responses" #[] "{}".toUTF8
+    (some fun _ => do
+      staleCalledRef.set true
+      return .ok { status := 200, headers := #[], body := "{}".toUTF8 })
+    false none #[] (some hTracker) (some 1) (some 2010)
+  let staleCalled ← staleCalledRef.get
+  if nextGen != 2 || staleCalled || staleGenOut.status != 409 ||
+     staleGenOut.verdictCode != 0 || staleGenOut.attemptsUsed != 0 then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: R4-D stale routeGeneration was not fenced: status={staleGenOut.status} v={staleGenOut.verdictCode}"
+    return 1
+
+  -- (B) `OrbCore.AuthSidecar.CliProxyLoginSession`: concurrent CLIProxy OAuth logins (`attemptA` vs `attemptB`)
+  -- bound to `<authRoot>/attempts/<attemptNonce>/` with zero cross-attribution, plus negative tests on
+  -- zero/mismatched/expired nonces and path traversal.
+  let cliRoot := s!"{r4dRoot}/cliproxy"
+  if (← OrbCore.AuthSidecar.beginCliProxyLogin cliRoot "openai" 0 100 200).isOk ||
+     (← OrbCore.AuthSidecar.beginCliProxyLogin cliRoot "../escape" 11 100 200).isOk ||
+     (← OrbCore.AuthSidecar.beginCliProxyLogin cliRoot "openai" 11 200 200).isOk then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln "[orb-core-test] FAIL: R4-D beginCliProxyLogin accepted invalid nonce/provider/expiry"
+    return 1
+  let .ok sessA ← OrbCore.AuthSidecar.beginCliProxyLogin cliRoot "openai" 1001 100 500
+    | do IO.FS.removeDirAll r4dRoot; IO.eprintln "[orb-core-test] FAIL: beginCliProxyLogin sessA failed"; return 1
+  let .ok sessB ← OrbCore.AuthSidecar.beginCliProxyLogin cliRoot "openai" 2002 105 500
+    | do IO.FS.removeDirAll r4dRoot; IO.eprintln "[orb-core-test] FAIL: beginCliProxyLogin sessB failed"; return 1
+  -- Stage distinct credentials concurrently into `sessA` and `sessB`
+  let .ok stagedPathA ← OrbCore.AuthSidecar.stageCliProxyCredential sessA 1001 "openai" "{\"account\":\"alice-oauth\"}" 120
+    | do IO.FS.removeDirAll r4dRoot; IO.eprintln "[orb-core-test] FAIL: stageCliProxyCredential sessA failed"; return 1
+  let .ok stagedPathB ← OrbCore.AuthSidecar.stageCliProxyCredential sessB 2002 "openai" "{\"account\":\"bob-oauth\"}" 121
+    | do IO.FS.removeDirAll r4dRoot; IO.eprintln "[orb-core-test] FAIL: stageCliProxyCredential sessB failed"; return 1
+  let cliRootStat ← OrbBin.PosixExt.statPath cliRoot
+  let attemptsDirStat ← OrbBin.PosixExt.statPath s!"{cliRoot}/attempts"
+  let attemptADirStat ← OrbBin.PosixExt.statPath sessA.attemptDir
+  let credsADirStat ← OrbBin.PosixExt.statPath s!"{sessA.attemptDir}/credentials"
+  let stagedAStat ← OrbBin.PosixExt.statPath stagedPathA
+  let stagedBStat ← OrbBin.PosixExt.statPath stagedPathB
+  if (cliRootStat.mode &&& 0o777) != 0o700 || (attemptsDirStat.mode &&& 0o777) != 0o700 ||
+     (attemptADirStat.mode &&& 0o777) != 0o700 || (credsADirStat.mode &&& 0o777) != 0o700 ||
+     (stagedAStat.mode &&& 0o777) != 0o600 || (stagedBStat.mode &&& 0o777) != 0o600 then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: R4-D CLIProxy staged 0700/0600 permissions violated: root={cliRootStat.mode} credA={stagedAStat.mode}"
+    return 1
+  -- Cross-nonce stage, read, and promote (`attemptA` presenting `2002`, `attemptB` presenting `1001`, or expired `nowEpoch = 500`) MUST fail closed!
+  let crossStage ← OrbCore.AuthSidecar.stageCliProxyCredential sessA 2002 "openai" "{\"account\":\"hijack\"}" 122
+  let crossRead ← OrbCore.AuthSidecar.readStagedCliProxyCredential sessA 2002 "openai"
+  let crossPromote ← OrbCore.AuthSidecar.promoteCliProxyCredential sessA 2002 "openai" 130
+  let expiredPromote ← OrbCore.AuthSidecar.promoteCliProxyCredential sessA 1001 "openai" 500
+  let .ok readA ← OrbCore.AuthSidecar.readStagedCliProxyCredential sessA 1001 "openai"
+    | do IO.FS.removeDirAll r4dRoot; return 1
+  let .ok readB ← OrbCore.AuthSidecar.readStagedCliProxyCredential sessB 2002 "openai"
+    | do IO.FS.removeDirAll r4dRoot; return 1
+  let .ok promotedPathA ← OrbCore.AuthSidecar.promoteCliProxyCredential sessA 1001 "openai" 140
+    | do IO.FS.removeDirAll r4dRoot; IO.eprintln "[orb-core-test] FAIL: promoteCliProxyCredential sessA failed"; return 1
+  let promotedRawA ← IO.FS.readFile promotedPathA
+  let promotedDirStat ← OrbBin.PosixExt.statPath s!"{cliRoot}/promoted"
+  let promotedFileStat ← OrbBin.PosixExt.statPath promotedPathA
+  if (promotedDirStat.mode &&& 0o777) != 0o700 || (promotedFileStat.mode &&& 0o777) != 0o600 then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: R4-D CLIProxy promoted 0700/0600 permissions violated: dir={promotedDirStat.mode} file={promotedFileStat.mode}"
+    return 1
+  -- After promoting `sessA`, `sessB`'s staged credential remains intact and isolated, and `sessA` cannot be replayed!
+  let replayPromoteA ← OrbCore.AuthSidecar.promoteCliProxyCredential sessA 1001 "openai" 141
+  let .ok readBAfter ← OrbCore.AuthSidecar.readStagedCliProxyCredential sessB 2002 "openai"
+    | do IO.FS.removeDirAll r4dRoot; return 1
+  if stagedPathA == stagedPathB ||
+     crossStage.isOk || crossRead.isOk || crossPromote.isOk || expiredPromote.isOk || replayPromoteA.isOk ||
+     readA != "{\"account\":\"alice-oauth\"}" || readB != "{\"account\":\"bob-oauth\"}" ||
+     promotedRawA != "{\"account\":\"alice-oauth\"}" || readBAfter != "{\"account\":\"bob-oauth\"}" then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln "[orb-core-test] FAIL: R4-D CLIProxy concurrent nonce isolation or replay fence violated"
+    return 1
+
+  -- (C) `OrbCore.AuthSidecar`: generation-fenced OAuth rotation (`stepAuthRefreshSlice`), `R1-02`
+  -- `drainPendingRotations` preserving concurrent `gen = 3` while draining `gen = 2`, `R1-03`
+  -- `CoalescedAtomicWriter` keeping `dirty = true` & `dirtySeq` on `fsync`/`rename` failure, and sticky `Revoked (3)`.
+  let rotDir := s!"{r4dRoot}/rotations"
+  IO.FS.createDirAll rotDir
+  let rot2File := s!"{rotDir}/pending-gen-2.json"
+  let rot3File := s!"{rotDir}/pending-gen-3.json"
+  IO.FS.writeFile rot2File "{\"gen\":2}"
+  IO.FS.writeFile rot3File "{\"gen\":3}"
+  let targetCredFile := s!"{rotDir}/oauth_creds.json"
+
+  let rot0 : OrbCore.AuthSidecar.AuthRotationState := { durableAuthGeneration := 1 }
+  -- Stale/non-consecutive claim or zero nonce must fail closed
+  let badZeroNonceClaim := OrbCore.AuthSidecar.claimAuthRefresh rot0 0 100 300
+  let .ok (rotClaimed, _) := OrbCore.AuthSidecar.claimAuthRefresh rot0 7777 100 300
+    | do IO.FS.removeDirAll r4dRoot; IO.eprintln "[orb-core-test] FAIL: claimAuthRefresh failed"; return 1
+  -- Mismatched nonce or wrong candidate generation on stage must fail closed
+  let badNonceStage := OrbCore.AuthSidecar.stageAuthRotation rotClaimed 2 9999 110 rot2File
+  let badGenStage := OrbCore.AuthSidecar.stageAuthRotation rotClaimed 1 7777 110 rot2File
+  let .ok (rotStaged, _) := OrbCore.AuthSidecar.stageAuthRotation rotClaimed 2 7777 110 rot2File
+    | do IO.FS.removeDirAll r4dRoot; IO.eprintln "[orb-core-test] FAIL: stageAuthRotation failed"; return 1
+  -- Simulate concurrent next-generation rotation (`gen = 3`) staged into `pendingRotations` BEFORE `gen = 2` drains (`R1-02`)!
+  let .ok rotWithConcurrentGen3 := OrbCore.AuthSidecar.recordPendingRotation rotStaged 3 rot3File
+    | do IO.FS.removeDirAll r4dRoot; IO.eprintln "[orb-core-test] FAIL: recordPendingRotation(gen=3) failed"; return 1
+  let stalePendingReject := OrbCore.AuthSidecar.recordPendingRotation rotStaged 1 rot2File
+
+  -- Stage coalesced payloads (`seq = 1`, coalesced to `seq = 2`) on `CoalescedAtomicWriter`
+  let w0 := (OrbCore.AuthSidecar.CoalescedAtomicWriter.new targetCredFile).stage 1 "{\"tok\":\"v1\"}".toUTF8
+  let wDirty := w0.stage 2 "{\"tok\":\"v2-gen2\"}".toUTF8
+  -- `R1-03` negative tests:
+  --   1. `fsyncConfirmed = false` or `simulateFsyncFail = true` MUST fail and keep `dirty = true`, `dirtySeq = 2`, `flushedSeq = 0`!
+  --   2. `simulateRenameFail = true` MUST fail and keep `dirty = true`, `dirtySeq = 2`, `flushedSeq = 0`!
+  --   3. Expired refresh lease (`nowEpoch >= leaseDeadlineEpoch`) MUST reject `commitAndDrainRotation`!
+  let unconfirmedFlush ← wDirty.commit false
+  let fsyncFailCommit ← OrbCore.AuthSidecar.commitAndDrainRotation rotWithConcurrentGen3 wDirty 2 120 900 (simulateFsyncFail := true)
+  let renameFailCommit ← OrbCore.AuthSidecar.commitAndDrainRotation rotWithConcurrentGen3 wDirty 2 120 900 (simulateRenameFail := true)
+  let expiredLeaseCommit ← OrbCore.AuthSidecar.commitAndDrainRotation rotWithConcurrentGen3 wDirty 2 300 900
+  if badZeroNonceClaim.isOk || badNonceStage.isOk || badGenStage.isOk || stalePendingReject.isOk ||
+     unconfirmedFlush.isOk || fsyncFailCommit.isOk || renameFailCommit.isOk || expiredLeaseCommit.isOk ||
+     !wDirty.dirty || wDirty.dirtySeq != 2 || wDirty.flushedSeq != 0 ||
+     (← (System.FilePath.mk targetCredFile).pathExists) then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln "[orb-core-test] FAIL: R4-D R1-03 negative commit/fsync/rename/lease fence violated"
+    return 1
+
+  -- Happy-path `commitAndDrainRotation` for `committedGen = 2`:
+  --   - `wCommitted.dirty == false` and `wCommitted.flushedSeq == 2`
+  --   - `rot2File` (`appliedGen = 2 <= 2`) is unlinked and drained
+  --   - `rot3File` (`appliedGen = 3 > 2`) SURVIVES on disk and in `rotCommitted.pendingRotations` (`R1-02`)!
+  let .ok (rotCommitted, wCommitted, drainedPaths, _) ←
+      OrbCore.AuthSidecar.commitAndDrainRotation rotWithConcurrentGen3 wDirty 2 150 900
+    | do IO.FS.removeDirAll r4dRoot; IO.eprintln "[orb-core-test] FAIL: commitAndDrainRotation happy path failed"; return 1
+  let diskCreds ← IO.FS.readFile targetCredFile
+  let targetCredStat ← OrbBin.PosixExt.statPath targetCredFile
+  let rotDirStat ← OrbBin.PosixExt.statPath rotDir
+  let rot2Exists ← (System.FilePath.mk rot2File).pathExists
+  let rot3Exists ← (System.FilePath.mk rot3File).pathExists
+  if rotCommitted.phaseCode != 0 || rotCommitted.durableAuthGeneration != 2 || rotCommitted.dirtyPending != 0 ||
+     wCommitted.dirty || wCommitted.flushedSeq != 2 || diskCreds != "{\"tok\":\"v2-gen2\"}" ||
+     (targetCredStat.mode &&& 0o777) != 0o600 || (rotDirStat.mode &&& 0o777) != 0o700 ||
+     drainedPaths != #[rot2File] || rot2Exists || !rot3Exists ||
+     rotCommitted.pendingRotations.size != 1 || rotCommitted.pendingRotations[0]!.appliedGen != 3 then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: R4-D R1-02/R1-03 commitAndDrainRotation invariant violated: pending={rotCommitted.pendingRotations.size} rot2={rot2Exists} rot3={rot3Exists}"
+    return 1
+
+  -- Transient abort (`RefreshClaimed -> Valid`) retains `dirtyPending` without rewinding generation,
+  -- and `revokeAuthCredential` transitions to sticky `Revoked (3)` where subsequent `claimAuthRefresh` fails closed!
+  let .ok (rotGen3Claim, _) := OrbCore.AuthSidecar.claimAuthRefresh rotCommitted 8888 200 500
+    | do IO.FS.removeDirAll r4dRoot; return 1
+  let .ok (rotAborted, _) := OrbCore.AuthSidecar.abortAuthRefreshTransient rotGen3Claim 3 210
+    | do IO.FS.removeDirAll r4dRoot; return 1
+  let .ok (rotRevoked, _) := OrbCore.AuthSidecar.revokeAuthCredential rotAborted 3 220
+    | do IO.FS.removeDirAll r4dRoot; return 1
+  let claimAfterRevoke := OrbCore.AuthSidecar.claimAuthRefresh rotRevoked 9999 230 600
+  let revokeAgain := OrbCore.AuthSidecar.revokeAuthCredential rotRevoked 3 231
+  if rotAborted.phaseCode != 0 || rotAborted.durableAuthGeneration != 3 ||
+     rotRevoked.phaseCode != 3 || claimAfterRevoke.isOk || revokeAgain.isOk then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln "[orb-core-test] FAIL: R4-D transient abort or sticky Revoked (3) invariant violated"
+    return 1
+  return 0
+
+private def runR4dProxyAuthTests (prodValid : CoreConfig) : IO UInt32 := do
+  let r4dPid ← IO.monoNanosNow
+  let r4dRoot := s!"/tmp/orb-core-r4d-{r4dPid}"
+  IO.FS.createDirAll r4dRoot
+  let r4dChain : RoutingChain := {
+    id := "r4d-chain", name := "r4d-chain",
+    targets := #[
+      { accountId := "acct-primary", provider := "openai", baseUrl := "https://api.openai.com/v1", apiKey := "k-prim", modelId := "gpt-6" },
+      { accountId := "acct-backup", provider := "openai", baseUrl := "https://api.openai.com/v1", apiKey := "k-bak", modelId := "gpt-6" }
+    ]
+  }
+  if (← runR4dUnitTests r4dRoot r4dChain) != 0 then
+    return 1
+  let .ok store ← openCoreStore s!"{r4dRoot}/store"
+    | do IO.FS.removeDirAll r4dRoot; IO.eprintln "[orb-core-test] FAIL: openCoreStore for R4-D failed"; return 1
+  let managedRef ← IO.mkRef ({ enabled := true, boatEnabled := true } : ManagedFleetState)
+  let nowSec : UInt64 := 1700001000
+
+  -- (D) End-to-end `dispatchCoreRequest` (`SM-21`):
+  --   1. first-target `503` pre-commit failover
+  --   2. post-first-byte sticky pin (no silent account switch)
+  --   3. breaker threshold 2 holds across one transient failure
+  --   4. authenticated CLIProxy login nonce isolation via `/api/control/auth/cliproxy/*`
+  --   5. lost/older generation drain does not unlink a newer staged file
+  let chainsRef2 ← IO.mkRef #[r4dChain]
+  let coolRef2 ← IO.mkRef (#[] : Array AccountCooldown)
+  let seqRef2 ← IO.mkRef (1 : UInt64)
+  let hLive ← newProviderHealthTracker 1 2
+  let mockTransport : ProviderTarget → IO (Except String HttpsResponse) := fun tgt => do
+    if tgt.accountId == "acct-primary" then
+      return .ok { status := 503, headers := #[], body := "{\"error\":\"overloaded\"}".toUTF8 }
+    else
+      return .ok { status := 200, headers := #[("Content-Type", "application/json")], body := "{\"ok\":true}".toUTF8 }
+  let authRoot2 := s!"{r4dRoot}/live-auth"
+  IO.FS.createDirAll authRoot2
+  let rotH ← OrbCore.AuthSidecar.newAuthRotationHandle s!"{authRoot2}/oauth_credentials.json"
+  let sessRef ← IO.mkRef (#[] : Array OrbCore.AuthSidecar.CliProxyLoginSession)
+  let appLive : CoreAppState := {
+    cfg := { prodValid with workingDir := r4dRoot }
+    store := store
+    searchIdx? := none
+    managedRef := managedRef
+    chainsRef := chainsRef2
+    proxyCooldownsRef := coolRef2
+    seqRef := seqRef2
+    pacingTracker? := some hLive.pacing
+    healthTracker? := some hLive
+    proxyMockTransport? := some mockTransport
+    authRoot := authRoot2
+    authRotation? := some rotH
+    cliProxySessionsRef? := some sessRef
+  }
+  let bearer := s!"Authorization: Bearer {prodValid.proxySecret}"
+  let jwt := mintSessionToken prodValid.jwtSecret (nowSec + 3600)
+  let jwtH := s!"Authorization: Bearer {jwt}"
+  let postV1 (extraHdrs body : String) (atEp : UInt64) : IO (Except String (Nat × String × Array (String × String))) := do
+    let raw := s!"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\n{bearer}\r\nContent-Type: application/json\r\n{extraHdrs}Content-Length: {body.utf8ByteSize}\r\n\r\n{body}".toUTF8
+    let .ok req := parseRequest raw none | return .error "parse_v1"
+    let .ok resp ← dispatchCoreRequest appLive req atEp | return .error "dispatch_v1"
+    return .ok (resp.status, String.fromUTF8! resp.body, resp.extraHdrs)
+  let hdr (hs : Array (String × String)) (k : String) : String :=
+    (hs.find? (fun p => p.1.toLower == k.toLower)).map Prod.snd |>.getD ""
+  let .ok (s1, b1, h1) ← postV1 "" "{}" 1000 | return 1
+  let primAfterOne ← lookupAccountHealthRecord hLive "acct-primary"
+  let hPin ← newProviderHealthTracker 1 2
+  let pinMock : ProviderTarget → IO (Except String HttpsResponse) := fun tgt => do
+    if tgt.accountId == "acct-primary" then
+      return .ok { status := 503, headers := #[], body := "{\"error\":\"mid_stream\"}".toUTF8 }
+    else
+      return .ok { status := 200, headers := #[], body := "{\"hijack\":true}".toUTF8 }
+  let appPin : CoreAppState := { appLive with healthTracker? := some hPin, proxyMockTransport? := some pinMock }
+  let pinRaw := s!"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\n{bearer}\r\nContent-Type: application/json\r\nX-Orb-First-Byte-Committed: 1\r\nX-Orb-Pinned-Account: acct-primary\r\nContent-Length: 2\r\n\r\n\{}".toUTF8
+  let .ok pinReq := parseRequest pinRaw none | return 1
+  let .ok pinResp ← dispatchCoreRequest appPin pinReq 1005 | return 1
+  let h2 := pinResp.extraHdrs
+  let s2 := pinResp.status
+  let primPin ← lookupAccountHealthRecord hPin "acct-primary"
+  let .ok (s3, _, h3) ← postV1 "" "{}" 1010 | return 1
+  let primTripped ← lookupAccountHealthRecord hLive "acct-primary"
+  let planHeld ← planChainFromHealth hLive r4dChain 1010
+  if s1 != 200 || hdr h1 "X-Orb-Selected-Account" != "acct-backup" ||
+     hdr h1 "X-Orb-Attempts-Used" != "2" ||
+     !b1.contains 'o' ||
+     s2 != 503 || hdr h2 "X-Orb-Selected-Account" != "acct-primary" ||
+     hdr h2 "X-Orb-Attempts-Used" != "1" ||
+     hdr h2 "X-Orb-Verdict-Code" != "4" ||
+     primPin.cooldown?.isSome ||
+     primAfterOne.transientStreak != 1 || primAfterOne.cooldown?.isSome ||
+     s3 != 200 || hdr h3 "X-Orb-Selected-Account" != "acct-backup" ||
+     hdr h3 "X-Orb-Attempts-Used" != "2" ||
+     primTripped.cooldown?.isNone || planHeld.eligible.size != 1 ||
+     planHeld.eligible[0]!.accountId != "acct-backup" then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: dispatchCoreRequest proxy failover/pin/threshold: {s1}/{s2}/{s3} streak1={primAfterOne.transientStreak}"
+    return 1
+  let missPinRaw := s!"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\n{bearer}\r\nContent-Type: application/json\r\nX-Orb-First-Byte-Committed: 1\r\nContent-Length: 2\r\n\r\n\{}".toUTF8
+  let .ok missPinReq := parseRequest missPinRaw none | return 1
+  let .ok missPinResp ← dispatchCoreRequest appPin missPinReq 1006 | return 1
+  let gonePinRaw := s!"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\n{bearer}\r\nContent-Type: application/json\r\nX-Orb-First-Byte-Committed: 1\r\nX-Orb-Pinned-Account: acct-removed\r\nContent-Length: 2\r\n\r\n\{}".toUTF8
+  let .ok gonePinReq := parseRequest gonePinRaw none | return 1
+  let .ok gonePinResp ← dispatchCoreRequest appPin gonePinReq 1007 | return 1
+  if missPinResp.status != 502 || hdr missPinResp.extraHdrs "X-Orb-Verdict-Code" != "0" ||
+     hdr missPinResp.extraHdrs "X-Orb-Attempts-Used" != "0" ||
+     hdr missPinResp.extraHdrs "X-Orb-Selected-Account" != "" ||
+     !(String.fromUTF8! missPinResp.body).contains 'm' ||
+     gonePinResp.status != 502 || hdr gonePinResp.extraHdrs "X-Orb-Verdict-Code" != "0" ||
+     hdr gonePinResp.extraHdrs "X-Orb-Attempts-Used" != "0" ||
+     hdr gonePinResp.extraHdrs "X-Orb-Selected-Account" != "" ||
+     !((String.fromUTF8! gonePinResp.body).splitOn "committed_stream_pin_mismatch").length > 1 then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: HTTP committed pin fail-closed: miss={missPinResp.status} gone={gonePinResp.status}"
+    return 1
+  let postCtl (path body : String) (atEp : UInt64) : IO (Nat × String) := do
+    let raw := s!"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{jwtH}\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}".toUTF8
+    let .ok req := parseRequest raw none | return (0, "parse")
+    match ← dispatchCoreRequest appLive req atEp with
+    | .error _ => return (0, "ws")
+    | .ok resp => return (resp.status, String.fromUTF8! resp.body)
+  let unauthSt ← do
+    let raw := "POST /api/control/auth/cliproxy/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{}".toUTF8
+    match parseRequest raw none with
+    | .error _ => pure 0
+    | .ok req =>
+      match ← dispatchCoreRequest appLive req 120 with
+      | .ok resp => pure resp.status
+      | .error _ => pure 0
+  let (la, ba) ← postCtl "/api/control/auth/cliproxy/login" "{\"provider\":\"openai\",\"attempt_nonce\":1001,\"expires_at\":500}" 120
+  let (lb, _) ← postCtl "/api/control/auth/cliproxy/login" "{\"provider\":\"openai\",\"attempt_nonce\":2002,\"expires_at\":500}" 121
+  let (lCross, _) ← postCtl "/api/control/auth/cliproxy/login" "{\"provider\":\"anthropic\",\"attempt_nonce\":1001,\"expires_at\":500}" 122
+  let heldAfterCross ← sessRef.get
+  let (sa, _) ← postCtl "/api/control/auth/cliproxy/stage" "{\"session_nonce\":1001,\"presented_nonce\":1001,\"provider\":\"openai\",\"credential_json\":\"{\\\"account\\\":\\\"alice-oauth\\\"}\"}" 130
+  let (sb, _) ← postCtl "/api/control/auth/cliproxy/stage" "{\"session_nonce\":2002,\"presented_nonce\":2002,\"provider\":\"openai\",\"credential_json\":\"{\\\"account\\\":\\\"bob-oauth\\\"}\"}" 131
+  let (sx, bx) ← postCtl "/api/control/auth/cliproxy/stage" "{\"session_nonce\":1001,\"presented_nonce\":2002,\"provider\":\"openai\",\"credential_json\":\"{\\\"account\\\":\\\"hijack\\\"}\"}" 132
+  let readRaw := s!"GET /api/control/auth/cliproxy/staged?session_nonce=1001&presented_nonce=1001&provider=openai HTTP/1.1\r\nHost: 127.0.0.1\r\n{jwtH}\r\n\r\n".toUTF8
+  let .ok readReq := parseRequest readRaw none | return 1
+  let .ok readResp ← dispatchCoreRequest appLive readReq 130 | return 1
+  let readBody := String.fromUTF8! readResp.body
+  if unauthSt != 401 || la != 201 || lb != 201 || lCross != 409 ||
+     heldAfterCross.any (fun s => s.attemptNonce == 1001 && s.provider == "anthropic") ||
+     sa != 200 || sb != 200 || sx == 200 ||
+     !(ba.splitOn "attempts/1001").length > 1 ||
+     readResp.status != 200 || (readBody.splitOn "alice-oauth").length < 2 ||
+     (readBody.splitOn "bob-oauth").length > 1 then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: control CLIProxy nonce isolation: unauth={unauthSt} cross={lCross} stageX={sx} bodyX={bx}"
+    return 1
+  let (gPreClaim, _) ← postCtl "/api/control/auth/rotation/stage" "{\"candidate_gen\":2,\"presented_nonce\":7777,\"record_name\":\"preclaim-stage.json\",\"payload_json\":\"{\\\"tok\\\":\\\"preclaim\\\"}\",\"seq\":7}" 139
+  let rotDirPre ← (System.FilePath.mk s!"{authRoot2}/rotations").pathExists
+  let (gTrav, _) ← postCtl "/api/control/auth/rotation/stage" "{\"candidate_gen\":2,\"presented_nonce\":7777,\"record_name\":\"../escape.json\",\"payload_json\":\"{\\\"tok\\\":\\\"x\\\"}\"}" 161
+  let (gSlash, _) ← postCtl "/api/control/auth/rotation/stage" "{\"candidate_gen\":2,\"presented_nonce\":7777,\"record_name\":\"a/b.json\",\"payload_json\":\"{\\\"tok\\\":\\\"x\\\"}\"}" 162
+  let travExists ← (System.FilePath.mk s!"{authRoot2}/escape.json").pathExists
+  let ledAfterTrav ← OrbCore.AuthSidecar.snapshotRotationLedger rotH
+  if gPreClaim != 409 || rotDirPre || gTrav != 400 || gSlash != 400 || travExists || ledAfterTrav.writer.dirty then
+    closeCoreStore store
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: rotation preclaim/traversal wrote disk or dirtied writer: pre={gPreClaim} rotDir={rotDirPre} trav={gTrav} slash={gSlash} exists={travExists} dirty={ledAfterTrav.writer.dirty}"
+    return 1
+  let (pStale, _) ← postCtl "/api/control/auth/rotation/record-pending" "{\"applied_gen\":0,\"record_name\":\"stale.json\",\"payload_json\":\"{\\\"tok\\\":\\\"stale\\\"}\",\"coalesce_writer\":true,\"seq\":9}" 163
+  let staleFile ← (System.FilePath.mk s!"{authRoot2}/rotations/stale.json").pathExists
+  let ledAfterStale ← OrbCore.AuthSidecar.snapshotRotationLedger rotH
+  if pStale != 409 || staleFile || ledAfterStale.writer.dirty || ledAfterStale.writer.dirtySeq != 0 then
+    closeCoreStore store
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: rejected record-pending mutated disk or writer: status={pStale} file={staleFile} dirtySeq={ledAfterStale.writer.dirtySeq}"
+    return 1
+  let (cSt, _) ← postCtl "/api/control/auth/rotation/claim" "{\"attempt_nonce\":7777,\"lease_deadline\":900}" 150
+  let (gSt, _) ← postCtl "/api/control/auth/rotation/stage" "{\"candidate_gen\":2,\"presented_nonce\":7777,\"record_name\":\"pending-gen-2.json\",\"payload_json\":\"{\\\"tok\\\":\\\"v2\\\"}\",\"seq\":2}" 160
+  let (gBadNonce, _) ← postCtl "/api/control/auth/rotation/stage" "{\"candidate_gen\":2,\"presented_nonce\":9999,\"record_name\":\"bad-nonce-stage.json\",\"payload_json\":\"{\\\"tok\\\":\\\"bad\\\"}\",\"seq\":99}" 164
+  let badNonceFile ← (System.FilePath.mk s!"{authRoot2}/rotations/bad-nonce-stage.json").pathExists
+  let ledAfterBadStage ← OrbCore.AuthSidecar.snapshotRotationLedger rotH
+  if gBadNonce != 409 || badNonceFile || ledAfterBadStage.writer.dirtySeq != 2 then
+    closeCoreStore store
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: rejected stage mutated disk or writer: status={gBadNonce} file={badNonceFile} dirtySeq={ledAfterBadStage.writer.dirtySeq}"
+    return 1
+  let (pSt, _) ← postCtl "/api/control/auth/rotation/record-pending" "{\"applied_gen\":3,\"record_name\":\"pending-gen-3.json\",\"payload_json\":\"{\\\"tok\\\":\\\"v3\\\"}\",\"coalesce_writer\":true,\"seq\":3}" 170
+  let snapBeforeRace ← OrbCore.AuthSidecar.snapshotRotationLedger rotH
+  let _ ← OrbCore.AuthSidecar.stageRotationNext rotH "{\"tok\":\"v3-next\"}".toUTF8
+  let postSnapMismatch ← OrbCore.AuthSidecar.commitAndDrainRotation
+    snapBeforeRace.rotation snapBeforeRace.writer 2 174 900 false false (some rotH)
+  let ledAfterPostSnap ← OrbCore.AuthSidecar.snapshotRotationLedger rotH
+  let postSnapErr := match postSnapMismatch with | .error e => e | .ok _ => "ok"
+  if postSnapErr != "concurrent_stage_generation_mismatch" ||
+     ledAfterPostSnap.rotation.phaseCode != 2 || !ledAfterPostSnap.writer.dirty ||
+     ledAfterPostSnap.writer.dirtySeq != 4 then
+    closeCoreStore store
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: commitAndDrainRotation post-snapshot stageNext mismatch: err={postSnapErr} phase={ledAfterPostSnap.rotation.phaseCode} seq={ledAfterPostSnap.writer.dirtySeq}"
+    return 1
+  let (staleCommitSt, _) ← postCtl "/api/control/auth/rotation/commit" "{\"candidate_gen\":2,\"new_expiry\":900,\"expected_seq\":2}" 175
+  let gen2BeforeDrain ← (System.FilePath.mk s!"{authRoot2}/rotations/pending-gen-2.json").pathExists
+  let ledStale ← OrbCore.AuthSidecar.snapshotRotationLedger rotH
+  -- BLOCK-3a: HTTP `/api/control/auth/rotation/commit` must ignore caller-supplied `simulate_fsync_fail` /
+  -- `simulate_rename_fail` fault-injection fields and commit normally (`200`), never leaving `PendingFsync` wedged.
+  let (kSt, kb) ← postCtl "/api/control/auth/rotation/commit" "{\"candidate_gen\":2,\"new_expiry\":900,\"simulate_fsync_fail\":true,\"simulate_rename_fail\":true}" 180
+  let liveOauthStat ← OrbBin.PosixExt.statPath s!"{authRoot2}/oauth_credentials.json"
+  let liveRotDirStat ← OrbBin.PosixExt.statPath s!"{authRoot2}/rotations"
+  let liveGen3Stat ← OrbBin.PosixExt.statPath s!"{authRoot2}/rotations/pending-gen-3.json"
+  if (liveOauthStat.mode &&& 0o777) != 0o600 || (liveRotDirStat.mode &&& 0o777) != 0o700 ||
+     (liveGen3Stat.mode &&& 0o777) != 0o600 then
+    closeCoreStore store
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: live rotation 0700/0600 permissions violated: oauth={liveOauthStat.mode} rotDir={liveRotDirStat.mode} gen3={liveGen3Stat.mode}"
+    return 1
+  let (pStaleAfterGen2, _) ← postCtl "/api/control/auth/rotation/record-pending" "{\"applied_gen\":1,\"record_name\":\"stale-gen1.json\",\"payload_json\":\"{\\\"tok\\\":\\\"stale1\\\"}\",\"coalesce_writer\":true,\"seq\":99}" 181
+  let staleGen1File ← (System.FilePath.mk s!"{authRoot2}/rotations/stale-gen1.json").pathExists
+  let gen2AfterDrain ← (System.FilePath.mk s!"{authRoot2}/rotations/pending-gen-2.json").pathExists
+  let gen3Exists ← (System.FilePath.mk s!"{authRoot2}/rotations/pending-gen-3.json").pathExists
+  let ledAfter ← OrbCore.AuthSidecar.snapshotRotationLedger rotH
+  let .ok kbVal := OrbBin.Json.parse kb | do IO.FS.removeDirAll r4dRoot; return 1
+  let drainedArr := (kbVal.fieldArr? "drained_paths").getD #[]
+  if cSt != 200 || gSt != 200 || pSt != 200 || staleCommitSt != 409 || !gen2BeforeDrain ||
+     !ledStale.writer.dirty || ledStale.writer.dirtySeq != 4 ||
+     kSt != 200 || pStaleAfterGen2 != 409 || staleGen1File || gen2AfterDrain || !gen3Exists ||
+     ledAfter.writer.dirty || ledAfter.writer.flushedSeq != 4 ||
+     ledAfter.rotation.pendingRotations.size != 1 ||
+     ledAfter.rotation.pendingRotations[0]!.appliedGen != 3 ||
+     drainedArr.size != 1 ||
+     drainedArr.any (fun v => ((v.asStr?).getD "").endsWith "pending-gen-3.json") then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: control rotation generation fence: claim={cSt} stage={gSt} pend={pSt} stale={staleCommitSt} commit={kSt} gen2={gen2AfterDrain} gen3={gen3Exists}"
+    return 1
+  let wideTargets := (List.range 20).toArray.map fun i =>
+    ({ accountId := s!"acct-{i}", provider := "openai", baseUrl := "https://api.openai.com/v1",
+       apiKey := "k", modelId := "gpt-6" } : ProviderTarget)
+  let wideChain : RoutingChain := { id := "wide", name := "wide", targets := wideTargets }
+  let widePlan := planChain wideChain #[] 1000
+  let zeroFailover := canFailoverUpstream 0 20 503 false
+  let lastLegal := canFailoverUpstream 14 16 503 false
+  let pastCap := canFailoverUpstream 15 16 503 false
+  let callsRef ← IO.mkRef (0 : Nat)
+  let wideOut ← forwardProxyChain wideChain "POST" "/v1/responses" #[] "{}".toUTF8
+    (some fun _ => do
+      callsRef.modify (· + 1)
+      return .ok { status := 503, headers := #[], body := "{\"error\":\"down\"}".toUTF8 })
+    false none #[] none none (some 1000)
+  let calls ← callsRef.get
+  if widePlan.eligible.size != 16 || !zeroFailover || !lastLegal || pastCap || calls != 16 || wideOut.attemptsUsed != 16 then
+    closeCoreStore store
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: proxy chain cap: eligible={widePlan.eligible.size} calls={calls} z={zeroFailover} last={lastLegal} past={pastCap}"
+    return 1
+  let genBeforeWrite ← currentRouteGeneration hLive
+  let provBody := "{\"id\":\"prov-r4d\",\"provider_type\":\"custom\",\"name\":\"r4d\",\"base_url\":\"https://example.invalid/v1\",\"api_key\":\"sk-r4d-secret-value\",\"rpm_limit\":10}"
+  let (provSt, _) ← postCtl "/api/ai/providers" provBody 190
+  let genAfterWrite ← currentRouteGeneration hLive
+  chainsRef2.set #[r4dChain]
+  let snapGen ← currentRouteGeneration hLive
+  let bumpTask ← IO.asTask (prio := .dedicated) do
+    IO.sleep 30
+    discard <| bumpRouteGeneration hLive
+  let racedMock : ProviderTarget → IO (Except String HttpsResponse) := fun _ => do
+    let _ ← IO.wait bumpTask
+    return .ok { status := 200, headers := #[], body := "{\"ok\":true}".toUTF8 }
+  let appRace : CoreAppState := { appLive with proxyMockTransport? := some racedMock }
+  let raceRaw := s!"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\n{bearer}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n\{}".toUTF8
+  let .ok raceReq := parseRequest raceRaw none | do closeCoreStore store; IO.FS.removeDirAll r4dRoot; return 1
+  let .ok raceResp ← dispatchCoreRequest appRace raceReq 191 | do closeCoreStore store; IO.FS.removeDirAll r4dRoot; return 1
+  let genAfterRace ← currentRouteGeneration hLive
+  if provSt != 201 || genAfterWrite <= genBeforeWrite || raceResp.status != 409 ||
+     genAfterRace <= snapGen ||
+     ((String.fromUTF8! raceResp.body).splitOn "stale_route_generation").length < 2 then
+    closeCoreStore store
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: route generation fence: prov={provSt} before={genBeforeWrite} after={genAfterWrite} race={raceResp.status} snap={snapGen} now={genAfterRace}"
+    return 1
+  sessRef.set #[]
+  let mut loginN : Nat := 0
+  let mut lastLogin := 0
+  while loginN < maxCliProxyLoginSessions do
+    let nonce := 3000 + loginN
+    let (stL, _) ← postCtl "/api/control/auth/cliproxy/login" s!"\{\"provider\":\"openai\",\"attempt_nonce\":{nonce},\"expires_at\":900}" 200
+    lastLogin := stL
+    if stL != 201 then break
+    loginN := loginN + 1
+  let (overSt, _) ← postCtl "/api/control/auth/cliproxy/login" "{\"provider\":\"openai\",\"attempt_nonce\":9999,\"expires_at\":900}" 210
+  let held ← sessRef.get
+  let (preStageSt, _) ← postCtl "/api/control/auth/cliproxy/stage" "{\"session_nonce\":3000,\"presented_nonce\":3000,\"provider\":\"openai\",\"credential_json\":\"{\\\"account\\\":\\\"cap-user\\\"}\"}" 215
+  let (reuseCrossAtCap, _) ← postCtl "/api/control/auth/cliproxy/login" "{\"provider\":\"anthropic\",\"attempt_nonce\":3000,\"expires_at\":950}" 218
+  let (reuseSt, _) ← postCtl "/api/control/auth/cliproxy/login" "{\"provider\":\"openai\",\"attempt_nonce\":3000,\"expires_at\":950}" 220
+  let readAfterRefreshRaw := s!"GET /api/control/auth/cliproxy/staged?session_nonce=3000&presented_nonce=3000&provider=openai HTTP/1.1\r\nHost: 127.0.0.1\r\n{jwtH}\r\n\r\n".toUTF8
+  let .ok readAfterRefreshReq := parseRequest readAfterRefreshRaw none | do closeCoreStore store; IO.FS.removeDirAll r4dRoot; return 1
+  let .ok readAfterRefreshResp ← dispatchCoreRequest appLive readAfterRefreshReq 221 | do closeCoreStore store; IO.FS.removeDirAll r4dRoot; return 1
+  let (promotedOkSt, _) ← postCtl "/api/control/auth/cliproxy/promote" "{\"session_nonce\":3000,\"presented_nonce\":3000,\"provider\":\"openai\"}" 222
+  let (freedSlotSt, _) ← postCtl "/api/control/auth/cliproxy/login" "{\"provider\":\"openai\",\"attempt_nonce\":8888,\"expires_at\":950}" 225
+  let (afterExpirySt, _) ← postCtl "/api/control/auth/cliproxy/login" "{\"provider\":\"openai\",\"attempt_nonce\":7770,\"expires_at\":1200}" 920
+  let heldAfterExpiry ← sessRef.get
+  if loginN != maxCliProxyLoginSessions || lastLogin != 201 || overSt != 429 ||
+     held.size != maxCliProxyLoginSessions || preStageSt != 200 ||
+     reuseCrossAtCap != 409 || reuseSt != 201 ||
+     readAfterRefreshResp.status != 200 ||
+     ((String.fromUTF8! readAfterRefreshResp.body).splitOn "cap-user").length < 2 ||
+     promotedOkSt != 200 || freedSlotSt != 201 ||
+     afterExpirySt != 201 || heldAfterExpiry.size != 2 ||
+     held.any (fun s => s.attemptNonce == 9999) ||
+     !heldAfterExpiry.any (fun s => s.attemptNonce == 8888) ||
+     !heldAfterExpiry.any (fun s => s.attemptNonce == 7770) then
+    closeCoreStore store
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: CLIProxy session cap/prune: n={loginN} over={overSt} held={held.size} cross={reuseCrossAtCap} reuse={reuseSt} read={readAfterRefreshResp.status} prom={promotedOkSt} freed={freedSlotSt} exp={afterExpirySt} after={heldAfterExpiry.size}"
+    return 1
+  -- BLOCK-1: Concurrent sibling cooldown race on `[acct-primary, acct-backup]`:
+  -- R1 and R2 are both admitted before `acct-primary` cools down. R1 gets `429` and installs a live
+  -- cooldown on `acct-primary` while R2 is already in flight on `acct-primary`:
+  --   (a) R2 receiving `200` on `acct-primary` MUST return `200` (never `409 stale_route_generation`).
+  --   (b) R2 receiving pre-commit `503` on `acct-primary` MUST fail over cleanly to `acct-backup` (`200`, never `409`).
+  let hSibA ← newProviderHealthTracker 1 2
+  let r1TaskA ← IO.asTask (prio := .dedicated) do
+    IO.sleep 25
+    forwardProxyChain r4dChain "POST" "/v1/responses" #[] "{}".toUTF8
+      (some fun tgt => do
+        if tgt.accountId == "acct-primary" then
+          return .ok { status := 429, headers := #[("Retry-After", "60")], body := "{\"error\":\"rate_limit\"}".toUTF8 }
+        else
+          return .ok { status := 200, headers := #[("Content-Type", "application/json")], body := "{\"r1\":true}".toUTF8 })
+      false none #[] (some hSibA) (some 1) (some 3000)
+  let r2Out200 ← forwardProxyChain r4dChain "POST" "/v1/responses" #[] "{}".toUTF8
+    (some fun tgt => do
+      if tgt.accountId == "acct-primary" then
+        let _ ← IO.wait r1TaskA
+        return .ok { status := 200, headers := #[("Content-Type", "application/json")], body := "{\"r2\":200}".toUTF8 }
+      else
+        return .ok { status := 200, headers := #[], body := "{\"unexpected\":true}".toUTF8 })
+    false none #[] (some hSibA) (some 1) (some 3000)
+  let r1OutA ← IO.ofExcept r1TaskA.get
+  let hSibB ← newProviderHealthTracker 1 2
+  let r1TaskB ← IO.asTask (prio := .dedicated) do
+    IO.sleep 25
+    forwardProxyChain r4dChain "POST" "/v1/responses" #[] "{}".toUTF8
+      (some fun tgt => do
+        if tgt.accountId == "acct-primary" then
+          return .ok { status := 429, headers := #[("Retry-After", "60")], body := "{\"error\":\"rate_limit\"}".toUTF8 }
+        else
+          return .ok { status := 200, headers := #[("Content-Type", "application/json")], body := "{\"r1\":true}".toUTF8 })
+      false none #[] (some hSibB) (some 1) (some 3010)
+  let r2Out503 ← forwardProxyChain r4dChain "POST" "/v1/responses" #[] "{}".toUTF8
+    (some fun tgt => do
+      if tgt.accountId == "acct-primary" then
+        let _ ← IO.wait r1TaskB
+        return .ok { status := 503, headers := #[], body := "{\"error\":\"overloaded\"}".toUTF8 }
+      else
+        return .ok { status := 200, headers := #[("Content-Type", "application/json")], body := "{\"r2\":\"failover\"}".toUTF8 })
+    false none #[] (some hSibB) (some 1) (some 3010)
+  let r1OutB ← IO.ofExcept r1TaskB.get
+  let primSibB ← lookupAccountHealthRecord hSibB "acct-primary"
+  if r1OutA.status != 200 || r1OutA.selectedAccount != "acct-backup" ||
+     r2Out200.status != 200 || r2Out200.selectedAccount != "acct-primary" || r2Out200.verdictCode != 1 ||
+     r1OutB.status != 200 || r1OutB.selectedAccount != "acct-backup" ||
+     r2Out503.status != 200 || r2Out503.selectedAccount != "acct-backup" || r2Out503.attemptsUsed != 2 ||
+     primSibB.cooldown?.isNone then
+    closeCoreStore store
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: BLOCK-1 sibling cooldown race: r2_200={r2Out200.status}/{r2Out200.selectedAccount} r2_503={r2Out503.status}/{r2Out503.selectedAccount}/{r2Out503.attemptsUsed}"
+    return 1
+
+  -- BLOCK-3b: Dashboard-JWT caller (when `proxySecret` is unset) sending `X-Orb-First-Byte-Committed: 1`
+  -- and `X-Orb-Pinned-Account` MUST be treated as a fresh unpinned request (cooldown gate applies, no pin).
+  let freshSlice0 : Orb.HarnessCloud.ProviderAttemptSliceState := {
+    firstByteCommitted := 0, pinnedAccountId := 0, attemptsUsed := 0,
+    transientStreak := 0, routeGeneration := 1, cooldownUntilEpoch := 0
+  }
+  let hJwtProxy ← newProviderHealthTracker 1 2
+  let _ ← recordHealthAttempt hJwtProxy freshSlice0 "acct-primary" 429 #[("Retry-After", "120")] "{\"error\":\"rate_limit\"}" false 1 1 (nowSec - 1)
+  let _ ← recordHealthAttempt hJwtProxy freshSlice0 "acct-backup" 429 #[("Retry-After", "120")] "{\"error\":\"rate_limit\"}" false 1 1 (nowSec - 1)
+  let jwtUpstreamCalled ← IO.mkRef false
+  let appJwtNoSecret : CoreAppState := {
+    appLive with
+    cfg := { appLive.cfg with proxySecret := "" }
+    proxyCooldownsRef := (← IO.mkRef #[])
+    healthTracker? := some hJwtProxy
+    proxyMockTransport? := some (fun _ => do
+      jwtUpstreamCalled.set true
+      return .ok { status := 200, headers := #[("Content-Type", "application/json")], body := "{\"bypassed\":true}".toUTF8 })
+  }
+  let jwtSpoofRaw := s!"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\n{jwtH}\r\nContent-Type: application/json\r\nX-Orb-First-Byte-Committed: 1\r\nX-Orb-Pinned-Account: acct-primary\r\nContent-Length: 2\r\n\r\n\{}".toUTF8
+  let .ok jwtSpoofReq := parseRequest jwtSpoofRaw none | do closeCoreStore store; IO.FS.removeDirAll r4dRoot; return 1
+  let .ok jwtSpoofResp ← dispatchCoreRequest appJwtNoSecret jwtSpoofReq nowSec | do closeCoreStore store; IO.FS.removeDirAll r4dRoot; return 1
+  let jwtCalled1 ← jwtUpstreamCalled.get
+  let hJwtPin ← newProviderHealthTracker 1 2
+  let _ ← recordHealthAttempt hJwtPin freshSlice0 "acct-primary" 429 #[("Retry-After", "120")] "{\"error\":\"rate_limit\"}" false 1 1 (nowSec - 1)
+  let appJwtPin : CoreAppState := {
+    appLive with
+    cfg := { appLive.cfg with proxySecret := "" }
+    proxyCooldownsRef := (← IO.mkRef #[])
+    healthTracker? := some hJwtPin
+    proxyMockTransport? := some (fun tgt => do
+      return .ok { status := 200, headers := #[("Content-Type", "application/json")], body := s!"\{\"acct\":\"{tgt.accountId}\"}".toUTF8 })
+  }
+  let .ok jwtUnpinnedResp ← dispatchCoreRequest appJwtPin jwtSpoofReq nowSec | do closeCoreStore store; IO.FS.removeDirAll r4dRoot; return 1
+  let hJwtPinOrder ← newProviderHealthTracker 1 2
+  let appJwtPinOrder : CoreAppState := {
+    appLive with
+    cfg := { appLive.cfg with proxySecret := "" }
+    proxyCooldownsRef := (← IO.mkRef #[])
+    healthTracker? := some hJwtPinOrder
+    proxyMockTransport? := some (fun tgt => do
+      return .ok { status := 200, headers := #[("Content-Type", "application/json")], body := s!"\{\"acct\":\"{tgt.accountId}\"}".toUTF8 })
+  }
+  let jwtSpoofBackupRaw := s!"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\n{jwtH}\r\nContent-Type: application/json\r\nX-Orb-First-Byte-Committed: 1\r\nX-Orb-Pinned-Account: acct-backup\r\nContent-Length: 2\r\n\r\n\{}".toUTF8
+  let .ok jwtSpoofBackupReq := parseRequest jwtSpoofBackupRaw none | do closeCoreStore store; IO.FS.removeDirAll r4dRoot; return 1
+  let .ok jwtSpoofBackupResp ← dispatchCoreRequest appJwtPinOrder jwtSpoofBackupReq nowSec | do closeCoreStore store; IO.FS.removeDirAll r4dRoot; return 1
+  if jwtCalled1 || jwtSpoofResp.status != 429 ||
+     jwtUnpinnedResp.status != 200 ||
+     hdr jwtUnpinnedResp.extraHdrs "X-Orb-Selected-Account" != "acct-backup" ||
+     hdr jwtUnpinnedResp.extraHdrs "X-Orb-Verdict-Code" != "1" ||
+     jwtSpoofBackupResp.status != 200 ||
+     hdr jwtSpoofBackupResp.extraHdrs "X-Orb-Selected-Account" != "acct-primary" ||
+     hdr jwtSpoofBackupResp.extraHdrs "X-Orb-Verdict-Code" != "1" then
+    closeCoreStore store
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: BLOCK-3b dashboard JWT spoofed committed/pin headers: coolSt={jwtSpoofResp.status} called={jwtCalled1} unpinSt={jwtUnpinnedResp.status} acct={hdr jwtUnpinnedResp.extraHdrs "X-Orb-Selected-Account"} ordAcct={hdr jwtSpoofBackupResp.extraHdrs "X-Orb-Selected-Account"}"
+    return 1
+
+  closeCoreStore store
+  IO.FS.removeDirAll r4dRoot
+  return 0
+
 set_option maxRecDepth 4000 in
 private def runR4cHarnessSessionTests (store : CoreStore) (tmpRoot : String) : IO UInt32 := do
   -- 1. SM-15: Generation-owned `HarnessSessionHandle` & Registry + warm-turn latch reset + stale-generation fail-closed
@@ -1915,7 +2595,11 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
   let proxyCooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
   let seqRef ← IO.mkRef (1 : UInt64)
-  let pacingTracker ← newProxyPacingTracker
+  let liveHealthTracker ← newProviderHealthTracker 1 2
+  let authRootMain := s!"{tmpRoot}/auth"
+  IO.FS.createDirAll authRootMain
+  let authRotMain ← OrbCore.AuthSidecar.newAuthRotationHandle s!"{authRootMain}/oauth_credentials.json"
+  let cliSessRefMain ← IO.mkRef (#[] : Array OrbCore.AuthSidecar.CliProxyLoginSession)
   let memTokenCache ← newMemoryTokenCache
   let cloudWakeup ← newCloudWorkerWakeup
   let bunkerRef ← IO.mkRef (0 : UInt8)
@@ -1923,7 +2607,11 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     cfg := prodValid, store := store, searchIdx? := some sIdx1,
     managedRef := managedRef, chainsRef := chainsRef,
     proxyCooldownsRef := proxyCooldownsRef, seqRef := seqRef,
-    pacingTracker? := some pacingTracker,
+    pacingTracker? := some liveHealthTracker.pacing,
+    healthTracker? := some liveHealthTracker,
+    authRoot := authRootMain,
+    authRotation? := some authRotMain,
+    cliProxySessionsRef? := some cliSessRefMain,
     memTokenCache? := some memTokenCache,
     cloudWakeup? := some cloudWakeup,
     bunkerStateRef? := some bunkerRef
@@ -2828,6 +3516,11 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
        IO.eprintln "[orb-core-test] FAIL: streamOrFallbackHermesRun JSON fallback round-trip mismatch"
        return 1
      pure (0 : UInt32)) != 0 then return 1
+
+
+  -- 7b. Phase R4-D (`SM-21`): extracted so `runSuite` stays under the heartbeat elaboration bound.
+  if (← runR4dProxyAuthTests prodValid) != 0 then return 1
+
   let hostOk ← runAllHostTests emitLogPath?
   if !hostOk then
     IO.eprintln "[orb-core-test] FAIL: OrbCore.HostTests failed"

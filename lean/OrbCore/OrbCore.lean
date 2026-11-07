@@ -18,6 +18,7 @@ import OrbCore.Harness
 import OrbCore.Proxy
 import OrbCore.Cyber
 import OrbCore.Skills
+import OrbCore.AuthSidecar
 import OrbCore.Managed
 import OrbCore.CloudAgents
 import OrbCore.MemoryAndCloud

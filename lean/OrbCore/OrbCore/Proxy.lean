@@ -1,9 +1,15 @@
 /-
   OrbCore.Proxy: Verified `/v1/*` Multi-Provider LLM Proxy, Model-Routing Chain Resolver &
   Bounded Pre-First-Byte Failover Engine (`0 import Lean`, `0 sorryAx`).
+
+  Phase R4-D (`SM-21`): Consolidates proxy commitment, circuit-breaker transitions, proactive
+  pacing, and exponential account cooldowns behind one single-owner state machine wired
+  authoritatively to `Orb.HarnessCloud.classifyProviderAttempt` / `stepProviderAttemptSlice`
+  and `Orb.Kernel.proxyStep` / `breakerStep` / `accountCooldownSecs`.
 -/
 import Std.Sync.Mutex
 import Orb.Kernel
+import Orb.HarnessCloud
 import OrbBin.Json
 import OrbCore.Spec
 import OrbCore.Store
@@ -11,6 +17,7 @@ import OrbNetLeaf.TlsHttp
 
 namespace OrbCore.Proxy
 
+open Orb.HarnessCloud
 open OrbBin.Json
 open OrbCore.Spec
 open OrbCore.Store
@@ -169,13 +176,16 @@ structure RoutingChain where
 
 /-- Upstream proxy attempt outcome. -/
 structure ProxyOutcome where
-  status           : Nat
-  contentType      : String := "application/json"
-  headers          : Array (String × String)
-  body             : ByteArray
-  selectedAccount  : String
-  attemptsUsed     : Nat
-  exhaustionClass  : String := ""
+  status             : Nat
+  contentType        : String := "application/json"
+  headers            : Array (String × String)
+  body               : ByteArray
+  selectedAccount    : String
+  attemptsUsed       : Nat
+  exhaustionClass    : String := ""
+  firstByteCommitted : Bool := false
+  pinnedAccountId    : UInt32 := 0
+  verdictCode        : UInt8 := 0
   deriving Inhabited
 
 /-- Why a routing-chain target is temporarily unavailable. -/
@@ -236,11 +246,18 @@ structure ChainPlan where
   cooling  : Array AccountCooldown
   deriving Repr, Inhabited
 
-/-- Split a chain into still-usable targets and cooling accounts. -/
+/-- Spec-aligned failover bound (`verifyProxyFailoverStep`: `chainLen ≤ 16 && attemptIdx < 16`). -/
+def maxProxyChainTargets : Nat := 16
+
+/-- Truncate a planned/forwarded candidate chain to the 16-target spec bound. -/
+def capProxyTargets (targets : Array ProviderTarget) : Array ProviderTarget :=
+  if targets.size ≤ maxProxyChainTargets then targets else targets.extract 0 maxProxyChainTargets
+
+/-- Split a chain into still-usable targets (capped to `maxProxyChainTargets = 16`) and cooling accounts. -/
 def planChain (chain : RoutingChain) (cooldowns : Array AccountCooldown) (now : UInt64) : ChainPlan :=
   let active := activeCooldowns cooldowns now
   let cooling := coolingFor chain.targets active
-  { eligible := eligibleTargets chain.targets cooling, cooling := cooling }
+  { eligible := capProxyTargets (eligibleTargets chain.targets cooling), cooling := cooling }
 
 def ChainPlan.retryAfterSecs? (plan : ChainPlan) (now : UInt64) : Option UInt64 :=
   (soonestCooldown? plan.cooling).map (fun c => clampCooldownRetryAfter (c.remainingSecs now))
@@ -278,37 +295,300 @@ def retryAfterSecs? (headers : Array (String × String)) : Option UInt64 :=
   | some v => (v.toNat?).map (fun n => n.toUInt64)
   | none => none
 
-def defaultCooldownSecs (reason : CooldownReason) : UInt64 :=
+def defaultCooldownBaseSecs (reason : CooldownReason) : UInt64 :=
   match reason with
-  | .usageLimit => 300
-  | .rateLimit => 15
+  | .usageLimit  => 300
+  | .rateLimit   => 15
   | .authFailure => 15
-  | .overloaded => 15
+  | .overloaded  => 15
   | .serverError => 15
 
-def cooldownReasonFor (status : Nat) (body : String) : Option CooldownReason :=
-  if status == 429 then
-    if quotaHint body then some .usageLimit else some .rateLimit
-  else if status == 402 then some .usageLimit
-  else if status == 401 then some .authFailure
+def defaultCooldownSecs (reason : CooldownReason) : UInt64 :=
+  Orb.Kernel.accountCooldownSecs (defaultCooldownBaseSecs reason) maxCooldownRetryAfterSecs 1
+
+def exponentialCooldownSecs (reason : CooldownReason) (consecutive : UInt32 := 1) : UInt64 :=
+  Orb.Kernel.accountCooldownSecs (defaultCooldownBaseSecs reason) maxCooldownRetryAfterSecs consecutive
+
+/-- Map an upstream HTTP status + response body to `Orb.HarnessCloud.classifyProviderAttempt` /
+    `Orb.Kernel.breakerStep` failure reason code (`0..5`):
+    `0 = ok_fresh`, `1 = rate_limit_429`, `2 = quota_exhausted`, `3 = payment_required_402`,
+    `4 = transient_502_stall`, `5 = auth_401_403`. -/
+def providerFailureReasonCode (status : Nat) (body : String) : UInt8 :=
+  if status ≥ 200 && status < 300 then 0
+  else if status == 429 then
+    if quotaHint body then 2 else 1
+  else if status == 402 then 3
+  else if status == 401 then 5
   else if status == 403 then
-    if authHint body then some .authFailure else none
-  else if status == 529 || status == 503 then some .overloaded
-  else if 500 ≤ status && status < 600 then some .serverError
+    if authHint body then 5 else 0
+  else if status ≥ 500 && status < 600 then 4
+  else 0
+
+def cooldownReasonFor (status : Nat) (body : String) : Option CooldownReason :=
+  let code := providerFailureReasonCode status body
+  if code == 2 || code == 3 then some .usageLimit
+  else if code == 1 then some .rateLimit
+  else if code == 5 then some .authFailure
+  else if code == 4 then
+    if status == 529 || status == 503 then some .overloaded else some .serverError
   else none
 
-/-- Record the failed selected account's cooldown after a proxy outcome. -/
-def cooldownForOutcome (out : ProxyOutcome) (now : UInt64) : Option AccountCooldown :=
+/-- Authoritative circuit-breaker & exponential cooldown evaluation via `Orb.Kernel.breakerStep`
+    + `Orb.Kernel.accountCooldownSecs`. When `transientThreshold > 0` and `status` is a `5xx`
+    transient failure (`reason == 4`) with `transientStreak < transientThreshold`, `breakerStep`
+    returns `0` (`applyCooldown == 0`) so transient blips do not prematurely cool down the account. -/
+def cooldownForOutcomeWithBreaker
+    (out : ProxyOutcome)
+    (now : UInt64)
+    (consecutive : UInt32 := 1)
+    (transientStreak : UInt32 := 1)
+    (transientThreshold : UInt32 := 1) : Option AccountCooldown :=
   if out.selectedAccount.isEmpty then none
   else
     let body := (String.fromUTF8? out.body).getD ""
-    match cooldownReasonFor out.status body with
-    | none => none
+    let failCode := providerFailureReasonCode out.status body
+    if failCode == 0 then none
+    else
+      let breakerWord := Orb.Kernel.breakerStep failCode transientStreak transientThreshold
+      let applyCooldown := ((breakerWord >>> 16) &&& 0xFF) == 1
+      if !applyCooldown then none
+      else
+        match cooldownReasonFor out.status body with
+        | none => none
+        | some reason =>
+          let announced := (retryAfterSecs? out.headers).getD 0
+          let computed := exponentialCooldownSecs reason consecutive
+          let secs := clampCooldownRetryAfter (if announced == 0 then computed else announced)
+          some { accountId := out.selectedAccount, untilEpoch := now + secs, reason := reason, label := "" }
+
+/-- Record the failed selected account's cooldown after a proxy outcome. -/
+def cooldownForOutcome (out : ProxyOutcome) (now : UInt64) : Option AccountCooldown :=
+  cooldownForOutcomeWithBreaker out now 1 1 2
+
+/-! ### Unified Generation-Fenced `ProviderHealthTracker` (`SM-21`) -/
+
+/-- Stable non-zero 32-bit candidate account slot hash (`≥ 1`) for `stepProviderAttemptSlice`. -/
+def accountSlotId (accountId : String) : UInt32 := Id.run do
+  let bytes := accountId.toUTF8
+  let mut h : UInt32 := 2166136261
+  for i in [0:bytes.size] do
+    let b := bytes.get! i
+    h := (h ^^^ b.toUInt32) * 16777619
+  return if h == 0 then 1 else h
+
+/-- Per-account circuit-breaker, streak, parking & exponential cooldown state owned by `ProviderHealthTracker`. -/
+structure AccountHealthRecord where
+  accountId        : String
+  slotId           : UInt32
+  transientStreak  : UInt32 := 0
+  consecutiveTrips : UInt32 := 0
+  parkedQuota      : Bool   := false
+  poisonedSub      : Bool   := false
+  cooldown?        : Option AccountCooldown := none
+  lastVerdictCode  : UInt8  := 0
+  deriving Repr, DecidableEq, Inhabited
+
+/-- Single-owner provider health, circuit-breaker, route-generation, and pacing state (`SM-21`). -/
+structure ProviderHealthState where
+  routeGeneration    : UInt64 := 1
+  transientThreshold : UInt32 := 2
+  accounts           : Array AccountHealthRecord := #[]
+  deriving Repr, Inhabited
+
+/-- Unified single-owner runtime tracker consolidating `proxy.rs` commitment, `provider_health.rs`
+    transient streaks / circuit-breaker trips, and `account_limits.rs` pacing & cooldowns (`SM-21`). -/
+structure ProviderHealthTracker where
+  pacing : ProxyPacingTracker
+  health : Std.Mutex ProviderHealthState
+
+def newProviderHealthTracker
+    (routeGeneration : UInt64 := 1)
+    (transientThreshold : UInt32 := 2) : IO ProviderHealthTracker := do
+  let pacing ← newProxyPacingTracker
+  let effGen : UInt64 := if routeGeneration == 0 then 1 else routeGeneration
+  let health ← Std.Mutex.new { routeGeneration := effGen, transientThreshold := transientThreshold }
+  return { pacing := pacing, health := health }
+
+private def lookupAccountHealth (xs : Array AccountHealthRecord) (accountId : String) : AccountHealthRecord :=
+  match xs.find? (fun r => r.accountId == accountId) with
+  | some r => r
+  | none => { accountId := accountId, slotId := accountSlotId accountId }
+
+private def upsertAccountHealth (xs : Array AccountHealthRecord) (rec : AccountHealthRecord) : Array AccountHealthRecord :=
+  if xs.any (fun r => r.accountId == rec.accountId) then
+    xs.map (fun r => if r.accountId == rec.accountId then rec else r)
+  else
+    xs.push rec
+
+/-- Read current `routeGeneration` from `ProviderHealthTracker`. -/
+def currentRouteGeneration (tracker : ProviderHealthTracker) : IO UInt64 :=
+  tracker.health.atomically do
+    return (← get).routeGeneration
+
+/-- Advance `routeGeneration` monotonically (`+ 1`) so in-flight attempts carrying an older
+    `attemptGeneration` fail closed (`0 = rejectStaleOrPin`) without mutating cooldowns or streaks. -/
+def bumpRouteGeneration (tracker : ProviderHealthTracker) : IO UInt64 :=
+  tracker.health.atomically do
+    let st ← get
+    let nextGen := if st.routeGeneration < 0xFFFFFFFFFFFFFFFF then st.routeGeneration + 1 else st.routeGeneration
+    set { st with routeGeneration := nextGen }
+    return nextGen
+
+/-- Inspect per-account health record (`transientStreak`, `consecutiveTrips`, `cooldown?`, `parkedQuota`). -/
+def lookupAccountHealthRecord (tracker : ProviderHealthTracker) (accountId : String) : IO AccountHealthRecord :=
+  tracker.health.atomically do
+    let st ← get
+    return lookupAccountHealth st.accounts accountId
+
+/-- Snapshot all active cooldowns (`untilEpoch > nowEpoch`) currently enforced by `ProviderHealthTracker`,
+    lazy-expiring elapsed cooldown windows so recovered accounts become eligible again automatically. -/
+def snapshotActiveHealthCooldowns (tracker : ProviderHealthTracker) (nowEpoch : UInt64) : IO (Array AccountCooldown) :=
+  tracker.health.atomically do
+    let st ← get
+    let mut updated : Array AccountHealthRecord := Array.mkEmpty st.accounts.size
+    let mut active : Array AccountCooldown := #[]
+    for rec in st.accounts do
+      match rec.cooldown? with
+      | some c =>
+        if c.untilEpoch > nowEpoch then
+          updated := updated.push rec
+          active := active.push c
+        else
+          updated := updated.push { rec with cooldown? := none, parkedQuota := false, poisonedSub := false }
+      | none =>
+        updated := updated.push rec
+    set { st with accounts := updated }
+    return active
+
+/-- Plan a `RoutingChain` directly from `ProviderHealthTracker`'s single-owner state at `nowEpoch`. -/
+def planChainFromHealth (tracker : ProviderHealthTracker) (chain : RoutingChain) (nowEpoch : UInt64) : IO ChainPlan := do
+  let active ← snapshotActiveHealthCooldowns tracker nowEpoch
+  return planChain chain active nowEpoch
+
+/-- Pure single-step reconciliation of an attempt outcome against `(ProviderHealthState, ProviderAttemptSliceState)`
+    using `Orb.HarnessCloud.stepProviderAttemptSlice`, `Orb.Kernel.breakerStep`, and `Orb.Kernel.accountCooldownSecs`.
+    - Stale `attemptGeneration != routeGeneration` or pin mismatch returns verdict `0` (`rejectStaleOrPin`) with zero state mutation.
+    - Committed stream (`s.firstByteCommitted == 1`) with `status` 2xx (`failureReason == 0`) returns verdict `8` (`passCommittedStream`)
+      without resetting `transientStreak` or opening a second upstream attempt.
+    - Committed stream (`s.firstByteCommitted == 1`) with any failure returns verdict `4` (`abortCommittedLock`) and emits `.abortLockedStream`. -/
+def stepHealthAttemptPure
+    (hst : ProviderHealthState)
+    (slice : ProviderAttemptSliceState)
+    (accountId : String)
+    (status : Nat)
+    (respHeaders : Array (String × String))
+    (respBody : String)
+    (chunkCommits : Bool)
+    (maxRetries : UInt32)
+    (attemptGeneration : UInt64)
+    (nowEpoch : UInt64) :
+    ProviderHealthState × ProviderAttemptSliceState × UInt8 × List ProviderAttemptEffect :=
+  let rec0 := lookupAccountHealth hst.accounts accountId
+  let activeCoolUntil : UInt64 :=
+    match rec0.cooldown? with
+    | some c => if c.untilEpoch > nowEpoch then c.untilEpoch else 0
+    | none => 0
+  let failCode :=
+    let raw := providerFailureReasonCode status respBody
+    if slice.firstByteCommitted == 1 && raw == 0 && !(status ≥ 200 && status < 300) then 4 else raw
+  let candId :=
+    if slice.pinnedAccountId != 0 && slice.firstByteCommitted == 1 && accountId.isEmpty then
+      slice.pinnedAccountId
+    else
+      rec0.slotId
+  let sliceIn : ProviderAttemptSliceState := {
+    slice with
+    transientStreak := rec0.transientStreak
+    routeGeneration := hst.routeGeneration
+  }
+  let nextConsecutive := if rec0.consecutiveTrips < 0xFFFFFFFF then rec0.consecutiveTrips + 1 else rec0.consecutiveTrips
+  let proposedCooldownSecs : UInt64 :=
+    match cooldownReasonFor status respBody with
+    | none => 0
     | some reason =>
-      let announced := (retryAfterSecs? out.headers).getD 0
-      let secs := clampCooldownRetryAfter
-        (if announced == 0 then defaultCooldownSecs reason else announced)
-      some { accountId := out.selectedAccount, untilEpoch := now + secs, reason := reason, label := "" }
+      let announced := (retryAfterSecs? respHeaders).getD 0
+      let computed := exponentialCooldownSecs reason nextConsecutive
+      clampCooldownRetryAfter (if announced == 0 then computed else announced)
+  let nextCooldownEpoch :=
+    if proposedCooldownSecs > 0 then nowEpoch + proposedCooldownSecs else activeCoolUntil
+  let ev : ProviderAttemptSliceEvent := {
+    chunkCommits := if chunkCommits then 1 else 0
+    failureReason := failCode
+    candidateAccountId := candId
+    maxRetries := maxRetries
+    transientThreshold := hst.transientThreshold
+    attemptGeneration := attemptGeneration
+    nowEpoch := nowEpoch
+    nextCooldownEpoch := nextCooldownEpoch
+  }
+  let verdict := classifyProviderAttempt
+    sliceIn.firstByteCommitted ev.failureReason
+    sliceIn.pinnedAccountId ev.candidateAccountId
+    sliceIn.attemptsUsed ev.maxRetries
+    sliceIn.transientStreak ev.transientThreshold
+    sliceIn.routeGeneration ev.attemptGeneration
+    ev.nowEpoch sliceIn.cooldownUntilEpoch
+  let (sliceOut, effs) := stepProviderAttemptSlice sliceIn ev
+  if verdict == 0 || verdict == 8 then
+    (hst, sliceIn, verdict, effs)
+  else
+    let breakerWord := Orb.Kernel.breakerStep failCode sliceOut.transientStreak hst.transientThreshold
+    let parkAcct := (breakerWord &&& 0xFF) == 1
+    let poisonSub := ((breakerWord >>> 8) &&& 0xFF) == 1
+    let breakerCooldown := ((breakerWord >>> 16) &&& 0xFF) == 1
+    let sliceTripped := effs.any (fun e => match e with | .tripAccountBreaker _ _ => true | _ => false)
+    let tripped := sliceTripped || breakerCooldown
+    let targetCoolUntil :=
+      if sliceTripped && sliceOut.cooldownUntilEpoch > nowEpoch then sliceOut.cooldownUntilEpoch
+      else nextCooldownEpoch
+    let nextCool? : Option AccountCooldown :=
+      if tripped && targetCoolUntil > nowEpoch then
+        match cooldownReasonFor status respBody with
+        | some reason =>
+          some { accountId := accountId, untilEpoch := targetCoolUntil, reason := reason, label := "" }
+        | none =>
+          some { accountId := accountId, untilEpoch := nowEpoch + clampCooldownRetryAfter 15, reason := .serverError, label := "" }
+      else if verdict == 1 then
+        none
+      else if activeCoolUntil > nowEpoch then
+        rec0.cooldown?
+      else
+        none
+    let nextTrips : UInt32 :=
+      if verdict == 1 then 0
+      else if tripped then nextConsecutive
+      else rec0.consecutiveTrips
+    let rec1 : AccountHealthRecord := {
+      rec0 with
+      transientStreak := sliceOut.transientStreak
+      consecutiveTrips := nextTrips
+      parkedQuota := if verdict == 1 then false else (rec0.parkedQuota || parkAcct)
+      poisonedSub := if verdict == 1 then false else (rec0.poisonedSub || poisonSub)
+      cooldown? := nextCool?
+      lastVerdictCode := verdict
+    }
+    ({ hst with accounts := upsertAccountHealth hst.accounts rec1 }, sliceOut, verdict, effs)
+
+/-- Record an attempt outcome atomically on `ProviderHealthTracker`. -/
+def recordHealthAttempt
+    (tracker : ProviderHealthTracker)
+    (slice : ProviderAttemptSliceState)
+    (accountId : String)
+    (status : Nat)
+    (respHeaders : Array (String × String))
+    (respBody : String)
+    (chunkCommits : Bool)
+    (maxRetries : UInt32)
+    (attemptGeneration : UInt64)
+    (nowEpoch : UInt64) :
+    IO (ProviderAttemptSliceState × UInt8 × List ProviderAttemptEffect) :=
+  tracker.health.atomically do
+    let hst ← get
+    let (hst', slice', v, effs) :=
+      stepHealthAttemptPure hst slice accountId status respHeaders respBody
+        chunkCommits maxRetries attemptGeneration nowEpoch
+    set hst'
+    return (slice', v, effs)
 
 def cooldownReply (chainId : String) (retryAfterSecs : UInt64) : ProxyHttpReply :=
   let secs := clampCooldownRetryAfter retryAfterSecs
@@ -383,16 +663,26 @@ def splitUpstreamBaseUrl (raw : String) : Bool × String × UInt16 × String :=
       | _ => (hostPort, 0)
   (isTls, host, port, pfx)
 
-/-- Decide whether upstream `status` may fail over to `attemptIdx + 1` in `chainLen`,
-    strictly gated by `verifyProxyFailoverStep` (`OrbCore.Spec`). -/
+/-- Decide whether upstream `status` may fail over to `attemptIdx + 1` in `chainLen`.
+    Chains longer than 16 are compared against the capped length so `attemptIdx = 0` is not
+    disabled solely because `targets.size > 16`. Still gated by `Orb.Kernel.proxyStep`
+    (no transparent reroute once `firstByteCommitted == 1`) and `verifyProxyFailoverStep`. -/
 def canFailoverUpstream (attemptIdx chainLen : Nat) (status : Nat) (headersCommitted : Bool) : Bool :=
-  if attemptIdx > 255 || chainLen > 255 then false
+  let effLen := if chainLen > maxProxyChainTargets then maxProxyChainTargets else chainLen
+  if attemptIdx > 255 || effLen > 255 then false
   else
-    verifyProxyFailoverStep
-      attemptIdx.toUInt8
-      chainLen.toUInt8
-      status.toUInt32
-      (if headersCommitted then 1 else 0) == 1
+    let commBit : UInt8 := if headersCommitted then 1 else 0
+    let maxRet : UInt32 := if effLen > 1 then (effLen - 1).toUInt32 else 0
+    let proxyWord := Orb.Kernel.proxyStep commBit 0 1 attemptIdx.toUInt32 maxRet
+    let proxyAction := (proxyWord >>> 8) &&& 0xFF
+    let kernelAllows := proxyAction == 1 || proxyAction == 2
+    let specAllows :=
+      verifyProxyFailoverStep
+        attemptIdx.toUInt8
+        effLen.toUInt8
+        status.toUInt32
+        commBit == 1
+    kernelAllows && specAllows && attemptIdx + 1 < effLen && !headersCommitted
 
 /-- Map `Orb.Kernel.proxyExhaustionStep` class code (`1..7`) to its canonical HTTP status and error code
     so HTTP `402` (`out_of_credit`, e.g. `particle-ai/particle-1`) is never misreported as `"client_or_auth_error"`. -/
@@ -420,8 +710,11 @@ private def bodyIndicatesContextOverflow (body : ByteArray) : Bool :=
   (low.splitOn "maximum context length").length > 1
 
 /-- Execute a bounded `/v1/*` proxy forward across `chain.targets` with proactive pacing spillover,
-    pre-header failover on `402`, `429`, and `5xx`, and deterministic exhaustion classification via
-    `Orb.Kernel.proxyExhaustionStep`. Targets in `skipAccountIds` (active cooldowns) are not attempted. -/
+    sticky `firstByteCommitted` pin enforcement via `Orb.HarnessCloud.stepProviderAttemptSlice` /
+    `classifyProviderAttempt` (`SM-21`), pre-header failover on `402`, `429`, and `5xx` via
+    `Orb.Kernel.proxyStep` + `verifyProxyFailoverStep`, and deterministic exhaustion classification via
+    `Orb.Kernel.proxyExhaustionStep`. Targets in `skipAccountIds` or active cooldowns in `healthTracker?`
+    are not attempted. -/
 def forwardProxyChain
     (chain : RoutingChain)
     (method relPath : String)
@@ -430,11 +723,99 @@ def forwardProxyChain
     (mockTransport? : Option (ProviderTarget → IO (Except String HttpsResponse)) := none)
     (headersAlreadyCommitted : Bool := false)
     (pacingTracker? : Option ProxyPacingTracker := none)
-    (skipAccountIds : Array String := #[]) :
+    (skipAccountIds : Array String := #[])
+    (healthTracker? : Option ProviderHealthTracker := none)
+    (attemptGeneration? : Option UInt64 := none)
+    (nowEpoch? : Option UInt64 := none)
+    (pinnedAccount? : Option String := none) :
     IO ProxyOutcome := do
-  let targets := chain.targets.filter (fun t => !skipAccountIds.any (fun id => id == t.accountId))
+  let nowSec ← match nowEpoch? with
+    | some ep => pure ep
+    | none => coreEpochSec
+  let healthCooldownIds ← match healthTracker? with
+    | none => pure #[]
+    | some htr => do
+      if headersAlreadyCommitted then
+        pure #[]
+      else
+        let active ← snapshotActiveHealthCooldowns htr nowSec
+        pure (active.map (fun c => c.accountId))
+  let targets := capProxyTargets (chain.targets.filter (fun t =>
+    !skipAccountIds.any (fun id => id == t.accountId) &&
+    !healthCooldownIds.any (fun id => id == t.accountId)))
   let n := targets.size
+  let explicitPin? : Option String :=
+    pinnedAccount?.map (·.trimAscii.toString)
+  let routeGen ← match healthTracker? with
+    | some htr => currentRouteGeneration htr
+    | none => pure 1
+  let attemptGen := attemptGeneration?.getD routeGen
+  if attemptGen == 0 || routeGen == 0 || attemptGen != routeGen then
+    let candSlot0 : UInt32 :=
+      match targets[0]? with
+      | some t => accountSlotId t.accountId
+      | none => 0
+    let pinSlot0 : UInt32 :=
+      if headersAlreadyCommitted then
+        match explicitPin? with
+        | some p => if p.isEmpty then 0 else accountSlotId p
+        | none => candSlot0
+      else
+        0
+    let v0 := classifyProviderAttempt
+      (if headersAlreadyCommitted then 1 else 0) 0 pinSlot0 candSlot0
+      0 (if n > 1 then (n - 1).toUInt32 else 0) 0 2 routeGen attemptGen nowSec 0
+    return {
+      status := 409
+      contentType := "application/json"
+      headers := #[("X-Orb-Exhaustion-Class", "stale_route_generation")]
+      body := "{\"error\":\"stale_route_generation\"}".toUTF8
+      selectedAccount := ""
+      attemptsUsed := 0
+      exhaustionClass := "stale_route_generation"
+      firstByteCommitted := headersAlreadyCommitted
+      pinnedAccountId := pinSlot0
+      verdictCode := v0
+    }
+  if headersAlreadyCommitted then
+    if let some pinnedAcct := explicitPin? then
+      if pinnedAcct.isEmpty then
+        let candSlot0 : UInt32 :=
+          match targets[0]? with
+          | some t => accountSlotId t.accountId
+          | none => 0
+        let vPin0 := classifyProviderAttempt
+          1 0 0 candSlot0 0 (if n > 1 then (n - 1).toUInt32 else 0) 0 2 routeGen attemptGen nowSec 0
+        return {
+          status := 502
+          contentType := "application/json"
+          headers := #[("X-Orb-Exhaustion-Class", "committed_stream_aborted")]
+          body := "{\"error\":\"committed_stream_missing_pin\"}".toUTF8
+          selectedAccount := ""
+          attemptsUsed := 0
+          exhaustionClass := "committed_stream_aborted"
+          firstByteCommitted := true
+          pinnedAccountId := 0
+          verdictCode := vPin0
+        }
   if n == 0 then
+    if headersAlreadyCommitted then
+      let pinSlot0 : UInt32 :=
+        match explicitPin? with
+        | some p => if p.isEmpty then 0 else accountSlotId p
+        | none => 0
+      return {
+        status := 502
+        contentType := "application/json"
+        headers := #[("X-Orb-Exhaustion-Class", "committed_stream_aborted")]
+        body := "{\"error\":\"committed_stream_pin_mismatch\"}".toUTF8
+        selectedAccount := ""
+        attemptsUsed := 0
+        exhaustionClass := "committed_stream_aborted"
+        firstByteCommitted := true
+        pinnedAccountId := pinSlot0
+        verdictCode := ProviderAttemptVerdict.encode .rejectStaleOrPin
+      }
     let (st, errCode, errMsg) := classifyExhaustionOutcome 0 0 0 0 0 false
     return {
       status := st
@@ -444,7 +825,56 @@ def forwardProxyChain
       selectedAccount := ""
       attemptsUsed := 0
       exhaustionClass := errCode
+      firstByteCommitted := headersAlreadyCommitted
     }
+  let effPacing? : Option ProxyPacingTracker :=
+    pacingTracker?.orElse (fun _ => healthTracker?.map (fun h => h.pacing))
+  let initPin : UInt32 :=
+    if headersAlreadyCommitted then
+      match explicitPin? with
+      | some pinnedAcct => if pinnedAcct.isEmpty then 0 else accountSlotId pinnedAcct
+      | none => accountSlotId targets[0]!.accountId
+    else
+      0
+  let maxRetriesU32 : UInt32 := if n > 1 then (n - 1).toUInt32 else 0
+  if headersAlreadyCommitted && initPin == 0 then
+    let vMissing := classifyProviderAttempt
+      1 0 0 (accountSlotId targets[0]!.accountId) 0 maxRetriesU32 0 2 routeGen attemptGen nowSec 0
+    return {
+      status := 502
+      contentType := "application/json"
+      headers := #[("X-Orb-Exhaustion-Class", "committed_stream_aborted")]
+      body := "{\"error\":\"committed_stream_missing_pin\"}".toUTF8
+      selectedAccount := ""
+      attemptsUsed := 0
+      exhaustionClass := "committed_stream_aborted"
+      firstByteCommitted := true
+      pinnedAccountId := 0
+      verdictCode := vMissing
+    }
+  if headersAlreadyCommitted && !targets.any (fun t => accountSlotId t.accountId == initPin) then
+    let vGone := classifyProviderAttempt
+      1 0 initPin (accountSlotId targets[0]!.accountId) 0 maxRetriesU32 0 2 routeGen attemptGen nowSec 0
+    return {
+      status := 502
+      contentType := "application/json"
+      headers := #[("X-Orb-Exhaustion-Class", "committed_stream_aborted")]
+      body := "{\"error\":\"committed_stream_pin_mismatch\"}".toUTF8
+      selectedAccount := ""
+      attemptsUsed := 0
+      exhaustionClass := "committed_stream_aborted"
+      firstByteCommitted := true
+      pinnedAccountId := initPin
+      verdictCode := vGone
+    }
+  let mut attemptSlice : ProviderAttemptSliceState := {
+    firstByteCommitted := if headersAlreadyCommitted then 1 else 0
+    pinnedAccountId := initPin
+    attemptsUsed := 0
+    transientStreak := 0
+    routeGeneration := routeGen
+    cooldownUntilEpoch := 0
+  }
   let mut idx : Nat := 0
   let mut rateLimitCount : UInt32 := 0
   let mut paymentRequiredCount : UInt32 := 0
@@ -454,15 +884,83 @@ def forwardProxyChain
   let mut hasContextOverflow : Bool := false
   while idx < n do
     let tgt := targets[idx]!
-    let slotAdmitted ← match pacingTracker? with
+    let candSlot := accountSlotId tgt.accountId
+    let isCommitted := attemptSlice.firstByteCommitted == 1
+    if isCommitted && attemptSlice.pinnedAccountId != 0 && candSlot != attemptSlice.pinnedAccountId then
+      return {
+        status := 502
+        contentType := "application/json"
+        headers := #[("X-Orb-Exhaustion-Class", "committed_stream_aborted")]
+        body := "{\"error\":\"committed_stream_pin_mismatch\"}".toUTF8
+        selectedAccount := tgt.accountId
+        attemptsUsed := idx
+        exhaustionClass := "committed_stream_aborted"
+        firstByteCommitted := true
+        pinnedAccountId := attemptSlice.pinnedAccountId
+        verdictCode := ProviderAttemptVerdict.encode .rejectStaleOrPin
+      }
+    let slotAdmitted ← match effPacing? with
       | none => pure true
       | some tracker => do
         let nowMs ← IO.monoMsNow
         tryAcquireTargetSlot tracker tgt nowMs.toUInt64
     if !slotAdmitted then
       rateLimitCount := rateLimitCount + 1
-      if canFailoverUpstream idx n 429 headersAlreadyCommitted then
+      let (nextSlice, vCode, _) ← match healthTracker? with
+        | some htr =>
+          recordHealthAttempt htr attemptSlice tgt.accountId 429 #[] "provider_pacing_limit_exceeded"
+            false maxRetriesU32 attemptGen nowSec
+        | none =>
+          let ev : ProviderAttemptSliceEvent := {
+            chunkCommits := 0
+            failureReason := 1
+            candidateAccountId := candSlot
+            maxRetries := maxRetriesU32
+            transientThreshold := 2
+            attemptGeneration := attemptGen
+            nowEpoch := nowSec
+            nextCooldownEpoch := nowSec + defaultCooldownSecs .rateLimit
+          }
+          let v := classifyProviderAttempt
+            attemptSlice.firstByteCommitted ev.failureReason
+            attemptSlice.pinnedAccountId ev.candidateAccountId
+            attemptSlice.attemptsUsed ev.maxRetries
+            attemptSlice.transientStreak ev.transientThreshold
+            attemptSlice.routeGeneration ev.attemptGeneration
+            ev.nowEpoch attemptSlice.cooldownUntilEpoch
+          let (s', effs) := stepProviderAttemptSlice attemptSlice ev
+          pure (s', v, effs)
+      attemptSlice := nextSlice
+      if !isCommitted && vCode == ProviderAttemptVerdict.encode .rejectStaleOrPin then
+        return {
+          status := 409
+          contentType := "application/json"
+          headers := #[("X-Orb-Exhaustion-Class", "stale_route_generation")]
+          body := "{\"error\":\"stale_route_generation\"}".toUTF8
+          selectedAccount := tgt.accountId
+          attemptsUsed := idx + 1
+          exhaustionClass := "stale_route_generation"
+          firstByteCommitted := false
+          pinnedAccountId := attemptSlice.pinnedAccountId
+          verdictCode := vCode
+        }
+      else if !isCommitted && vCode != ProviderAttemptVerdict.encode .abortCommittedLock &&
+         canFailoverUpstream idx n 429 isCommitted then
+        attemptSlice := { attemptSlice with cooldownUntilEpoch := 0 }
         idx := idx + 1
+      else if vCode == ProviderAttemptVerdict.encode .abortCommittedLock then
+        return {
+          status := 502
+          contentType := "application/json"
+          headers := #[("X-Orb-Exhaustion-Class", "committed_stream_aborted")]
+          body := "{\"error\":\"committed_stream_aborted\",\"reason\":\"provider_pacing_limit_exceeded\"}".toUTF8
+          selectedAccount := tgt.accountId
+          attemptsUsed := idx + 1
+          exhaustionClass := "committed_stream_aborted"
+          firstByteCommitted := true
+          pinnedAccountId := attemptSlice.pinnedAccountId
+          verdictCode := vCode
+        }
       else
         return {
           status := 429
@@ -472,6 +970,9 @@ def forwardProxyChain
           selectedAccount := tgt.accountId
           attemptsUsed := idx + 1
           exhaustionClass := "rate_limited_or_quota"
+          firstByteCommitted := attemptSlice.firstByteCommitted == 1
+          pinnedAccountId := attemptSlice.pinnedAccountId
+          verdictCode := vCode
         }
     else
       let (isTls, host, port, pfx) := splitUpstreamBaseUrl tgt.baseUrl
@@ -489,14 +990,52 @@ def forwardProxyChain
           else
             pure (.error "plaintext_upstream_disabled")
       finally
-        if let some tracker := pacingTracker? then
+        if let some tracker := effPacing? then
           releaseTargetSlot tracker tgt
       match respRes with
       | .ok resp =>
-        if let some tracker := pacingTracker? then
+        if let some tracker := effPacing? then
           recordObservedHeaders tracker tgt.accountId resp.headers
+        let respBodyStr := (String.fromUTF8? resp.body).getD ""
         if resp.status ≥ 200 && resp.status < 300 then
+          let (nextSlice, vCode, _) ← match healthTracker? with
+            | some htr =>
+              recordHealthAttempt htr attemptSlice tgt.accountId resp.status resp.headers respBodyStr
+                true maxRetriesU32 attemptGen nowSec
+            | none =>
+              let ev : ProviderAttemptSliceEvent := {
+                chunkCommits := 1
+                failureReason := 0
+                candidateAccountId := candSlot
+                maxRetries := maxRetriesU32
+                transientThreshold := 2
+                attemptGeneration := attemptGen
+                nowEpoch := nowSec
+                nextCooldownEpoch := 0
+              }
+              let v := classifyProviderAttempt
+                attemptSlice.firstByteCommitted ev.failureReason
+                attemptSlice.pinnedAccountId ev.candidateAccountId
+                attemptSlice.attemptsUsed ev.maxRetries
+                attemptSlice.transientStreak ev.transientThreshold
+                attemptSlice.routeGeneration ev.attemptGeneration
+                ev.nowEpoch attemptSlice.cooldownUntilEpoch
+              let (s', effs) := stepProviderAttemptSlice attemptSlice ev
+              pure (s', v, effs)
           let (ctype, safeHdrs) := sanitizeUpstreamHeaders resp.headers
+          if vCode == ProviderAttemptVerdict.encode .rejectStaleOrPin && !isCommitted then
+            return {
+              status := 409
+              contentType := "application/json"
+              headers := #[("X-Orb-Exhaustion-Class", "stale_route_generation")]
+              body := "{\"error\":\"stale_route_generation\"}".toUTF8
+              selectedAccount := tgt.accountId
+              attemptsUsed := idx + 1
+              exhaustionClass := "stale_route_generation"
+              firstByteCommitted := false
+              pinnedAccountId := nextSlice.pinnedAccountId
+              verdictCode := vCode
+            }
           return {
             status := resp.status
             contentType := ctype
@@ -504,6 +1043,9 @@ def forwardProxyChain
             body := resp.body
             selectedAccount := tgt.accountId
             attemptsUsed := idx + 1
+            firstByteCommitted := nextSlice.firstByteCommitted == 1
+            pinnedAccountId := nextSlice.pinnedAccountId
+            verdictCode := vCode
           }
         if resp.status == 429 then
           rateLimitCount := rateLimitCount + 1
@@ -515,7 +1057,67 @@ def forwardProxyChain
           clientAuthErrorCount := clientAuthErrorCount + 1
           if bodyIndicatesContextOverflow resp.body then
             hasContextOverflow := true
-        if canFailoverUpstream idx n resp.status headersAlreadyCommitted then
+        let failCode := providerFailureReasonCode resp.status respBodyStr
+        let (nextSlice, vCode, _) ← match healthTracker? with
+          | some htr =>
+            if failCode == 0 && !isCommitted then
+              pure (attemptSlice, ProviderAttemptVerdict.encode .dispatchFresh, [])
+            else
+              recordHealthAttempt htr attemptSlice tgt.accountId resp.status resp.headers respBodyStr
+                false maxRetriesU32 attemptGen nowSec
+          | none =>
+            let effFail : UInt8 := if isCommitted && failCode == 0 then 4 else failCode
+            let ev : ProviderAttemptSliceEvent := {
+              chunkCommits := 0
+              failureReason := effFail
+              candidateAccountId := candSlot
+              maxRetries := maxRetriesU32
+              transientThreshold := 2
+              attemptGeneration := attemptGen
+              nowEpoch := nowSec
+              nextCooldownEpoch :=
+                match cooldownReasonFor resp.status respBodyStr with
+                | some r => nowSec + defaultCooldownSecs r
+                | none => 0
+            }
+            let v := classifyProviderAttempt
+              attemptSlice.firstByteCommitted ev.failureReason
+              attemptSlice.pinnedAccountId ev.candidateAccountId
+              attemptSlice.attemptsUsed ev.maxRetries
+              attemptSlice.transientStreak ev.transientThreshold
+              attemptSlice.routeGeneration ev.attemptGeneration
+              ev.nowEpoch attemptSlice.cooldownUntilEpoch
+            let (s', effs) := stepProviderAttemptSlice attemptSlice ev
+            pure (s', v, effs)
+        attemptSlice := nextSlice
+        if vCode == ProviderAttemptVerdict.encode .abortCommittedLock || isCommitted then
+          return {
+            status := if resp.status ≥ 400 then resp.status else 502
+            contentType := "application/json"
+            headers := #[("X-Orb-Exhaustion-Class", "committed_stream_aborted")]
+            body := s!"\{\"error\":\"committed_stream_aborted\",\"upstream_status\":{resp.status}}".toUTF8
+            selectedAccount := tgt.accountId
+            attemptsUsed := idx + 1
+            exhaustionClass := "committed_stream_aborted"
+            firstByteCommitted := true
+            pinnedAccountId := attemptSlice.pinnedAccountId
+            verdictCode := ProviderAttemptVerdict.encode .abortCommittedLock
+          }
+        else if vCode == ProviderAttemptVerdict.encode .rejectStaleOrPin then
+          return {
+            status := 409
+            contentType := "application/json"
+            headers := #[("X-Orb-Exhaustion-Class", "stale_route_generation")]
+            body := "{\"error\":\"stale_route_generation\"}".toUTF8
+            selectedAccount := tgt.accountId
+            attemptsUsed := idx + 1
+            exhaustionClass := "stale_route_generation"
+            firstByteCommitted := false
+            pinnedAccountId := attemptSlice.pinnedAccountId
+            verdictCode := vCode
+          }
+        else if canFailoverUpstream idx n resp.status false then
+          attemptSlice := { attemptSlice with cooldownUntilEpoch := 0 }
           idx := idx + 1
         else if paymentRequiredCount > 0 ||
                 paymentRequiredCount + rateLimitCount + serverErrorCount > 1 then
@@ -530,6 +1132,9 @@ def forwardProxyChain
             selectedAccount := tgt.accountId
             attemptsUsed := idx + 1
             exhaustionClass := errCode
+            firstByteCommitted := attemptSlice.firstByteCommitted == 1
+            pinnedAccountId := attemptSlice.pinnedAccountId
+            verdictCode := vCode
           }
         else
           let (ctype, safeHdrs) := sanitizeUpstreamHeaders resp.headers
@@ -540,12 +1145,67 @@ def forwardProxyChain
             body := resp.body
             selectedAccount := tgt.accountId
             attemptsUsed := idx + 1
+            firstByteCommitted := attemptSlice.firstByteCommitted == 1
+            pinnedAccountId := attemptSlice.pinnedAccountId
+            verdictCode := vCode
           }
       | .error errMsg =>
         serverErrorCount := serverErrorCount + 1
         if errMsg == "invalid_upstream_port" || errMsg == "plaintext_upstream_disabled" then
           transportValidationCount := transportValidationCount + 1
-        if canFailoverUpstream idx n 503 headersAlreadyCommitted then
+        let (nextSlice, vCode, _) ← match healthTracker? with
+          | some htr =>
+            recordHealthAttempt htr attemptSlice tgt.accountId 503 #[] errMsg
+              false maxRetriesU32 attemptGen nowSec
+          | none =>
+            let ev : ProviderAttemptSliceEvent := {
+              chunkCommits := 0
+              failureReason := 4
+              candidateAccountId := candSlot
+              maxRetries := maxRetriesU32
+              transientThreshold := 2
+              attemptGeneration := attemptGen
+              nowEpoch := nowSec
+              nextCooldownEpoch := nowSec + defaultCooldownSecs .overloaded
+            }
+            let v := classifyProviderAttempt
+              attemptSlice.firstByteCommitted ev.failureReason
+              attemptSlice.pinnedAccountId ev.candidateAccountId
+              attemptSlice.attemptsUsed ev.maxRetries
+              attemptSlice.transientStreak ev.transientThreshold
+              attemptSlice.routeGeneration ev.attemptGeneration
+              ev.nowEpoch attemptSlice.cooldownUntilEpoch
+            let (s', effs) := stepProviderAttemptSlice attemptSlice ev
+            pure (s', v, effs)
+        attemptSlice := nextSlice
+        if vCode == ProviderAttemptVerdict.encode .abortCommittedLock || isCommitted then
+          return {
+            status := 502
+            contentType := "application/json"
+            headers := #[("X-Orb-Exhaustion-Class", "committed_stream_aborted")]
+            body := s!"\{\"error\":{jsonEscape errMsg},\"exhaustion_class\":\"committed_stream_aborted\"}".toUTF8
+            selectedAccount := tgt.accountId
+            attemptsUsed := idx + 1
+            exhaustionClass := "committed_stream_aborted"
+            firstByteCommitted := true
+            pinnedAccountId := attemptSlice.pinnedAccountId
+            verdictCode := ProviderAttemptVerdict.encode .abortCommittedLock
+          }
+        else if vCode == ProviderAttemptVerdict.encode .rejectStaleOrPin then
+          return {
+            status := 409
+            contentType := "application/json"
+            headers := #[("X-Orb-Exhaustion-Class", "stale_route_generation")]
+            body := "{\"error\":\"stale_route_generation\"}".toUTF8
+            selectedAccount := tgt.accountId
+            attemptsUsed := idx + 1
+            exhaustionClass := "stale_route_generation"
+            firstByteCommitted := false
+            pinnedAccountId := attemptSlice.pinnedAccountId
+            verdictCode := vCode
+          }
+        else if canFailoverUpstream idx n 503 false then
+          attemptSlice := { attemptSlice with cooldownUntilEpoch := 0 }
           idx := idx + 1
         else
           let (st, errCode, _) :=
@@ -559,6 +1219,9 @@ def forwardProxyChain
             selectedAccount := tgt.accountId
             attemptsUsed := idx + 1
             exhaustionClass := errCode
+            firstByteCommitted := attemptSlice.firstByteCommitted == 1
+            pinnedAccountId := attemptSlice.pinnedAccountId
+            verdictCode := vCode
           }
   let (st, errCode, errMsg) :=
     classifyExhaustionOutcome rateLimitCount paymentRequiredCount clientAuthErrorCount
@@ -571,6 +1234,8 @@ def forwardProxyChain
     selectedAccount := ""
     attemptsUsed := n
     exhaustionClass := errCode
+    firstByteCommitted := attemptSlice.firstByteCommitted == 1
+    pinnedAccountId := attemptSlice.pinnedAccountId
   }
 
 end OrbCore.Proxy
