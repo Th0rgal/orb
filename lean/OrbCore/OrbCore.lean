@@ -1,6 +1,9 @@
 /-
   OrbCore: Root library umbrella for Wave 4 Core Gateway (`sandboxed-sh`).
 -/
+import Orb.Lifecycle
+import Orb.LifecycleSpec
+import Orb.LifecycleMutants
 import OrbCore.Spec
 import OrbCore.MutantSuite
 import OrbCore.Store

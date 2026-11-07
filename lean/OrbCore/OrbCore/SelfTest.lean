@@ -109,6 +109,22 @@ private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (valid
     return 1
   return 0
 
+private def runLifecycleCompositionTests : IO UInt32 := do
+  let mOk := Orb.Lifecycle.verifyMissionLifecycleAdmit 0 0 0 0 0 1 5 5 10 20 == 1
+  let mSupRej := Orb.Lifecycle.verifyMissionLifecycleAdmit 0 0 1 0 0 1 5 5 10 20 == 0
+  let rReenterRej := Orb.Lifecycle.verifyRunLifecycleAdmit 4 0 0 0 0 0 0 8 8 7 7 == 0
+  let rNextGenOk := Orb.Lifecycle.verifyRunLifecycleAdmit 4 0 0 0 0 0 0 8 9 7 7 == 1
+  let qAckRej := Orb.Lifecycle.verifyQueueItemAdmit 2 0 1 0 0 0 0 0 9 3 3 1 == 0
+  let cNoRecRej := Orb.Lifecycle.verifyCancelProtocolAdmit 1 2 0 0 6 6 == 0
+  let cWithRecOk := Orb.Lifecycle.verifyCancelProtocolAdmit 1 2 1 0 6 6 == 1
+  let wEarlyRej := Orb.Lifecycle.verifyWakeupContinuationAdmit 1 2 0 0 4 4 20 10 == 0
+  let wDueOk := Orb.Lifecycle.verifyWakeupContinuationAdmit 1 2 0 0 4 4 10 20 == 1
+  if !(mOk && mSupRej && rReenterRej && rNextGenOk && qAckRej &&
+       cNoRecRej && cWithRecOk && wEarlyRej && wDueOk) then
+    IO.eprintln "[orb-core-test] FAIL: Orb.Lifecycle R3-A gate invariants failed"
+    return 1
+  return 0
+
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
   let prodNoSecrets : CoreConfig := { devMode := false, host := "127.0.0.1" }
@@ -662,7 +678,10 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   closeCoreStore storeBoot2
   IO.FS.removeDirAll tmpRoot
 
-  -- 7. Host evidence suite (`83/83` host tests)
+  -- 7. Host evidence suite (`83/83` host tests) + R3-A lifecycle composition gates
+  let r3Rc ← runLifecycleCompositionTests
+  if r3Rc != 0 then
+    return r3Rc
   let hostOk ← runAllHostTests emitLogPath?
   if !hostOk then
     IO.eprintln "[orb-core-test] FAIL: OrbCore.HostTests failed"

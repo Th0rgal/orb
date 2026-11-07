@@ -65,6 +65,15 @@ jobs:
           LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/StatefulMutantSuite.lean \
             -o .lake/build/lib/lean/Orb/StatefulMutantSuite.olean \
             -i .lake/build/lib/lean/Orb/StatefulMutantSuite.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/Lifecycle.lean \
+            -o .lake/build/lib/lean/Orb/Lifecycle.olean \
+            -i .lake/build/lib/lean/Orb/Lifecycle.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/LifecycleSpec.lean \
+            -o .lake/build/lib/lean/Orb/LifecycleSpec.olean \
+            -i .lake/build/lib/lean/Orb/LifecycleSpec.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/LifecycleMutants.lean \
+            -o .lake/build/lib/lean/Orb/LifecycleMutants.olean \
+            -i .lake/build/lib/lean/Orb/LifecycleMutants.ilean
           LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true audit/AuditSpec.lean
           lean -DwarningAsError=true -DautoImplicit=false Orb/Transcript.lean \
             -o .lake/build/lib/lean/Orb/Transcript.olean \
@@ -246,6 +255,10 @@ jobs:
           python3 scripts/check_spec_audit.py audit-results/mutant-audit.json
           .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/StatefulMutantSuite.lean > audit-results/stateful-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/stateful-mutant-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/LifecycleSpec.lean > audit-results/lifecycle-spec-audit.json
+          python3 scripts/check_spec_audit.py audit-results/lifecycle-spec-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/LifecycleMutants.lean > audit-results/lifecycle-mutant-audit.json
+          python3 scripts/check_spec_audit.py audit-results/lifecycle-mutant-audit.json
           .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Stream.lean > audit-results/stream-audit.json
           python3 scripts/check_spec_audit.py audit-results/stream-audit.json
           .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Transcript.lean > audit-results/transcript-audit.json
