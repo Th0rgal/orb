@@ -69,3 +69,27 @@ export const isResumePrompt = (content: string) => content.trim() === resumeProm
 export function isAutomaticRecovery(content: string): boolean {
   return /^\[Automatic (?:recovery|resume after a usage limit)\]/i.test(content.trimStart());
 }
+
+const AUTOMATIC_USER_SOURCES = new Set([
+  "api:usage-limit-replay",
+  "background-task",
+  "scheduler",
+  "idle-worker-watchdog",
+  "transport_auto_resume",
+  "remote-build-terminal",
+  "task-board",
+]);
+
+/** True when a stored `user_message` was injected by Core's coordinator/recovery
+ * machinery rather than asked by the user. In `/btw` threads, such messages
+ * continue the interrupted side turn instead of opening a new user turn. */
+export function isAutomaticUserEvent(content: string, metadata?: unknown): boolean {
+  const meta = metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : undefined;
+  const source = typeof meta?.source === "string" ? meta.source : undefined;
+  if (source && AUTOMATIC_USER_SOURCES.has(source)) return true;
+  if (meta?.backgroundWake !== undefined || meta?.resumePrompt === true) return true;
+  const trimmed = content.trim();
+  if (!trimmed) return false;
+  if (isAutomaticRecovery(trimmed) || isResumePrompt(trimmed)) return true;
+  return trimmed.startsWith("Background task `") && trimmed.endsWith("\n\nContinue from here.");
+}

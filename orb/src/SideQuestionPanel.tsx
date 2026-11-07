@@ -560,7 +560,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    }
   }
   if(clientMessageId)setTurnId(clientMessageId);
-  else if(!preparing()&&!retryTurn)setTurnId(crypto.randomUUID());
+  else if(!preparing()&&(!retryTurn||!notSent()||error().includes('idempotency_conflict')))setTurnId(crypto.randomUUID());
   setPreparing(false);
   const current=key(),missionId=p.mission,activeTurnId=turnId(),context=sideContext(p.items,true),controller=new AbortController(),launchController=new AbortController();abort=controller;launchAbort=launchController;
   let attachments:SideAttachment[];
@@ -634,15 +634,20 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   }
   if(!ordered.length)return;
   const first=ordered[0];
+  let firstTurnId=first.id as ReturnType<typeof crypto.randomUUID>;
   setHandoffId(first.id);
   abort?.abort();
   await stopBtw(p.mission).catch(swallow("sideQuestions.stopForSendNow"));
-  for(const row of ordered){
-   await sendMissionMessage(targetId,row.content,undefined,row.id).catch(e=>setQueueToast(e instanceof Error?e.message:String(e)));
+  for(const [idx,row] of ordered.entries()){
+   // A delete-and-resend fallback may carry an edited `row.content`: mint a fresh
+   // idempotency key so Core never rejects it against the original enqueue payload.
+   const nextId=crypto.randomUUID();
+   if(idx===0)firstTurnId=nextId;
+   await sendMissionMessage(targetId,row.content,undefined,nextId).catch(e=>setQueueToast(e instanceof Error?e.message:String(e)));
   }
   const presented=messagePresentation(first.content).text;
   pendingBaselineHistory=history();
-  setTurnId(first.id as ReturnType<typeof crypto.randomUUID>);
+  setTurnId(firstTurnId);
   setStartedAt(new Date().toISOString());
   setBusy(true);setQuestion(presented);setAnswer('');setNarration([]);setError('');setNotSent(false);setRunStatus('Starting side agent…');
  };

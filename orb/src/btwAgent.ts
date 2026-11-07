@@ -11,7 +11,7 @@ import {reconcileSavedSideQuestion,resetSideQuestionStorageForTest,sideQuestionK
 import {forkSource} from './missionTree';
 import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,recoverLocalLaunch} from './localAgents';
 import {enqueueLocalMessage,queuedLocalMessages} from './localMessageQueue';
-import {extractBtwAttachmentPaths,extractBtwUserQuestion as extractBtwQuestion,replaceBtwUserQuestion as replaceBtwQuestion} from './messagePresentation';
+import {extractBtwAttachmentPaths,extractBtwUserQuestion as extractBtwQuestion,isAutomaticUserEvent,replaceBtwUserQuestion as replaceBtwQuestion} from './messagePresentation';
 import {getMissionEvents,isMultiplexSyncActive,storedToStream,type StoredEvent,type StreamEvent} from './stream';
 import {isBackgroundSyncActive,onBackgroundSyncActiveChange} from './backgroundSync';
 import {attachMissionStream,reconcileWarmSubscriptions,registerWarmBtwTargets,warmRecentMissionIds} from './missionCache';
@@ -100,13 +100,21 @@ export function dropBtwQueuedCursor(parent:string,messageId:string):void{
  if(changed)save(parent,s);
 }
 const isQueuedUserEvent=(event:StoredEvent)=>event.metadata?.queued===true;
+const isTurnUserEvent=(event:StoredEvent)=>event.event_type==='user_message'&&!isQueuedUserEvent(event)&&!isAutomaticUserEvent(event.content,event.metadata);
+const attachmentLogicalKey=async(question:string,attachments:SideAttachment[]):Promise<string>=>{
+ const attachmentDigest=attachments.length?Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(attachments)))),b=>b.toString(16).padStart(2,'0')).join(''):'';
+ return JSON.stringify([question,attachmentDigest]);
+};
+const isIdempotencyConflictError=(error:unknown):boolean=>
+ error instanceof ApiError&&error.status===409&&error.detail.includes('idempotency_conflict');
 
-// A turn is delimited by its latest non-queued user event, not an array offset:
+// A turn is delimited by its latest non-queued, non-automatic user event, not an array offset:
 // late persistence or a resumed session can otherwise replay the previous answer,
-// while pre-submitted follow-ups (`metadata.queued === true`) must not truncate the active turn.
+// while pre-submitted follow-ups (`metadata.queued === true`) and coordinator recovery
+// prompts (`[Automatic recovery]` / `api:usage-limit-replay`) must not truncate the active turn.
 export function btwTurnEvents(events:StoredEvent[],session:Pick<BtwSession,'baseline'|'afterSequence'>):StoredEvent[]{
  const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
- const latestUser=ordered.reduce((sequence,event)=>event.event_type==='user_message'&&!isQueuedUserEvent(event)?event.sequence:sequence,0);
+ const latestUser=ordered.reduce((sequence,event)=>isTurnUserEvent(event)?event.sequence:sequence,0);
  const boundary=Math.max(session.afterSequence??0,latestUser);
  return ordered.filter(event=>event.sequence>boundary);
 }
@@ -243,8 +251,12 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   const handleWatchEvent=(event:StreamEvent)=>{
    if(id!==s.id||signal.aborted||connectionVersion()!==version)return;
    if(event.type==='user_message'&&event.data?.queued!==true){
-    live=new TranscriptReducer();streamed={answer:'',narration:[]};
-    setLiveThoughts(all=>({...all,[id]:[]}));
+    const streamContent=typeof event.data?.content==='string'?event.data.content:'';
+    const streamMeta=isRecord(event.data?.metadata)?event.data.metadata:(isRecord(event.data)?event.data:undefined);
+    if(!isAutomaticUserEvent(streamContent,streamMeta)){
+     live=new TranscriptReducer();streamed={answer:'',narration:[]};
+     setLiveThoughts(all=>({...all,[id]:[]}));
+    }
     wake?.();
     return;
    }
@@ -273,7 +285,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
    const maxKnown=knownBySeq.size?Math.max(...knownBySeq.keys()):undefined;
    const fetched=maxKnown!==undefined
     ? await getMissionEvents(s.id,{since:maxKnown})
-    : await getMissionEvents(s.id,{enough:rows=>rows.some(e=>e.event_type==='user_message'&&!isQueuedUserEvent(e))||(rows.at(-1)?.sequence??0)<=(s.afterSequence??0)});
+    : await getMissionEvents(s.id,{enough:rows=>rows.some(isTurnUserEvent)||(rows.at(-1)?.sequence??0)<=(s.afterSequence??0)});
    if(maxKnown!==undefined&&fetched.length&&Math.max(...fetched.map(e=>e.sequence))<maxKnown)knownBySeq.clear();
    for(const ev of fetched)knownBySeq.set(ev.sequence,ev);
    events=[...knownBySeq.values()].sort((a,b)=>a.sequence-b.sequence);
@@ -289,7 +301,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
    continue;
   }
   if(signal.aborted||connectionVersion()!==version)return;
-  const userEvents=events.filter(e=>e.event_type==='user_message'&&!isQueuedUserEvent(e)&&e.sequence>(s.afterSequence??0));
+  const userEvents=events.filter(e=>isTurnUserEvent(e)&&e.sequence>(s.afterSequence??0));
   const latestUser=userEvents.at(-1);
   if(latestUser){
    if(activeUserSeq===undefined){
@@ -454,17 +466,27 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
    reuse ? getMissionEvents(s!.id,{limit:1,enough:()=>true}) : Promise.resolve([] as StoredEvent[]),
   ]);
   let headSeq=0;
+  const msgAttemptKey=reuse?key+':msg:'+s!.id+':'+clientMessageId:'';
+  let cachedMsg:{logical:string;prompt:string;snapshot:Awaited<ReturnType<typeof prepareBtwContext>>}|undefined;
+  let msgLogical='';
   if(reuse){
    headSeq=tail.reduce((n,e)=>Math.max(n,e.sequence),0);
    if(shouldRotateBtwSession(s?.turnCount??0,headSeq))reuse=false;
+   else{
+    msgLogical=await attachmentLogicalKey(question,attachments);
+    try{
+     const parsed=JSON.parse(localStorage.getItem(msgAttemptKey)||'null');
+     if(parsed?.logical===msgLogical&&typeof parsed.prompt==='string'&&parsed.snapshot)cachedMsg=parsed;
+    }catch{}
+   }
   }
   const [snapshotResult, launchAgent] = await Promise.all([
-   prepareBtwContext(source,context,destination,reuse?s?.conversationCursor:undefined,reuse?[]:history,local?localBinding(parent)?.cwd:undefined),
+   cachedMsg ? Promise.resolve(cachedMsg.snapshot) : prepareBtwContext(source,context,destination,reuse?s?.conversationCursor:undefined,reuse?[]:history,local?localBinding(parent)?.cwd:undefined),
    local ? localAgentForLaunch(config.harness) : Promise.resolve(undefined),
   ]);
   let snapshot=snapshotResult;
   const makePrompt=(context:string)=>makeBtwPrompt(context,question,paths);
-  let prompt=makePrompt(snapshot.context);
+  let prompt=cachedMsg?cachedMsg.prompt:makePrompt(snapshot.context);
   const binding=local?localBinding(parent):undefined;
   const bin=local?(launchAgent?.path??''):'';
   if(local){if(!binding)throw new Error('Open this conversation on the computer that owns its workspace.');if(!bin)throw new Error(`${config.harness} is not installed. Configure it in Settings → Agents → Local agents.`);}
@@ -474,14 +496,13 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
    const stored=localStorage.getItem(attemptKey);
    let cached:{id:string;logical:string;prompt:string;snapshot:typeof snapshot}|undefined;
    try{const parsed=JSON.parse(stored||'null');if(parsed?.id)cached=parsed;}catch{/* Legacy UUID-only attempt. */}
-   const attachmentDigest=attachments.length?Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(attachments)))),b=>b.toString(16).padStart(2,'0')).join(''):'';
-   const logical=JSON.stringify([question,attachmentDigest]);
+   const logical=await attachmentLogicalKey(question,attachments);
    const attempt=cached?.id||stored||crypto.randomUUID();
    if(cached?.logical===logical){prompt=cached.prompt;snapshot=cached.snapshot;}
-   const retained=cached??{id:attempt,logical,prompt,snapshot};
+   const retained=cached?.logical===logical?cached:{id:attempt,logical,prompt,snapshot};
    localStorage.setItem(attemptKey,JSON.stringify(retained));
    const m=await api<Mission>(`/api/control/missions/${parent}/btw/agent`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({backend:config.harness,model_override:config.model,model_effort:null,idempotency_key:attempt,side_question:prompt,side_context_mode:"incremental"})}).catch(error=>{
-    if(error instanceof ApiError&&error.status===409&&error.detail.startsWith('This side request key was already used for different launch content;')&&localStorage.getItem(attemptKey)===JSON.stringify(retained))localStorage.removeItem(attemptKey);
+    if(error instanceof ApiError&&error.status===409&&(error.detail.startsWith('This side request key was already used for different launch content;')||isIdempotencyConflictError(error))&&localStorage.getItem(attemptKey)===JSON.stringify(retained))localStorage.removeItem(attemptKey);
     throw error;
    });
    // Core owns placement. A stale local view must not launch a native run for
@@ -491,14 +512,18 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   };
   if(!reuse)await createSide();
   else{
+   if(!cachedMsg)localStorage.setItem(msgAttemptKey,JSON.stringify({logical:msgLogical,prompt,snapshot}));
    const next:BtwSession={...s!,question,active:!local,baseline:0,afterSequence:headSeq,turnCount:(s!.turnCount??1)+1,lastSequence:headSeq,startedAt:new Date().toISOString()};
    delete next.brokenSession;delete next.freshSession;
    try{
     if(!local)await sendMissionMessage(next.id,prompt,undefined,clientMessageId);
+    localStorage.removeItem(msgAttemptKey);
     s=next;save(parent,s);accepted=!local;
     reusedExisting=true;
    }catch(error){
+    if(isIdempotencyConflictError(error))localStorage.removeItem(msgAttemptKey);
     if(!(error instanceof ApiError)||error.status!==409||!error.detail.startsWith('REMOTE_RESUME_REQUIRES_REPLACEMENT:'))throw error;
+    localStorage.removeItem(msgAttemptKey);
     // Only an explicit pre-submit refusal permits a fresh native side session.
     // Keep previous side turns in its archive, never in the process argv.
     snapshot=await prepareBtwContext(source,context,destination,undefined,history);
@@ -515,10 +540,15 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   noteWarmBtwSessionStarted(parent,s!);
  };
  try{
+  let activeMessageId=clientMessageId;
   for(let attempt=0;;attempt++){
-   try{await launch();break;}
+   try{clientMessageId=activeMessageId;await launch();break;}
    catch(error){
     if(accepted)throw error;
+    if(isIdempotencyConflictError(error)&&attempt===0){
+     activeMessageId=crypto.randomUUID();
+     continue;
+    }
     // Stop, a new connection, or a refusal: never resend on our own.
     if(launchSignal.aborted||connectionVersion()!==version||!isTransientNetworkError(error)||attempt>=BTW_SEND_RETRY_MS.length){
      const wrapped=notSent(error);
@@ -723,7 +753,7 @@ function parseBtwThread(m:Mission,events:StoredEvent[]):Omit<ParsedBtwThread,'st
  };
  for(const ev of ordered){
   if(ev.event_type==='user_message'){
-   if(isQueuedUserEvent(ev))continue;
+   if(!isTurnUserEvent(ev))continue;
    if(curQuestion)flush();
    curAnswers=[];curFinal=undefined;curDelta=undefined;
    curQuestion=extractBtwUserQuestion(ev.content);curAt=ev.timestamp||'';curSeq=ev.sequence;
@@ -761,7 +791,7 @@ export async function reconnectBtwSession(parent:string,sideId:string):Promise<B
  let startedAt=existing?.id===mission.id?existing.startedAt:undefined;
  let sawPriorReply=false;
  for(const ev of ordered){
-  if(ev.event_type==='user_message'&&!isQueuedUserEvent(ev)){
+  if(isTurnUserEvent(ev)){
    question=extractBtwUserQuestion(ev.content)||question;
    if(ev.timestamp)startedAt=ev.timestamp;
   }else if(ev.event_type==='assistant_message'&&!isSyntheticRemoteAssistantNote(ev.content)&&ev.content.trim()){
@@ -1156,14 +1186,20 @@ function reduceLiveBtwStreamEvents(
         : "assistant_message";
     const rawContent = typeof ev.data.content === "string" ? ev.data.content : "";
     if (eventType !== "user_message" && !rawContent.trim()) continue;
+    const streamMeta = isRecord(ev.data.metadata)
+     ? (ev.data.metadata as Record<string, unknown>)
+     : (ev.data as Record<string, unknown>);
+    const isQueuedOrAutoUser =
+     eventType === "user_message" &&
+     (ev.data.queued === true || isAutomaticUserEvent(rawContent, streamMeta));
     let liveDeltaContent: string | undefined;
     for (const [kSeq, row] of [...known]) {
      if (row.event_type === "text_delta" && row.event_id === "text_delta_latest") {
       liveDeltaContent = row.content;
-      if (ev.data.queued !== true) known.delete(kSeq);
+      if (!isQueuedOrAutoUser) known.delete(kSeq);
      }
     }
-    if (ev.data.queued !== true) {
+    if (!isQueuedOrAutoUser) {
      textReducer = new TranscriptReducer();
      setBounded(liveThreadTextReducers, cacheKey, textReducer, 64);
     }
@@ -1179,6 +1215,9 @@ function reduceLiveBtwStreamEvents(
      metadata: {
       ...(hasDurableSeq ? {} : { provisional: true }),
       ...(ev.data.queued === true ? { queued: true } : {}),
+      ...(typeof streamMeta?.source === "string" ? { source: streamMeta.source } : {}),
+      ...(streamMeta?.backgroundWake !== undefined ? { backgroundWake: streamMeta.backgroundWake } : {}),
+      ...(streamMeta?.resumePrompt === true ? { resumePrompt: true } : {}),
       ...(typeof ev.data.client_message_id === "string"
        ? { client_message_id: ev.data.client_message_id }
        : {}),
@@ -1209,7 +1248,7 @@ function reduceLiveBtwStreamEvents(
  entry.latest = childMissionId;
 
  const events = [...known.values()].sort((a, b) => a.sequence - b.sequence);
- if (!events.some(e => e.event_type === "user_message" && !isQueuedUserEvent(e))) {
+ if (!events.some(isTurnUserEvent)) {
   if (statusChangedTo && !ACTIVE.includes(statusChangedTo) && existingSession?.id === childMissionId && existingSession.active) {
    const cleared: BtwSession = { ...existingSession, active: false };
    delete cleared.startedAt;
@@ -1378,7 +1417,7 @@ export function reconcileWarmBtwFollows(): void {
       entry.caughtUp = true;
       const knownNow = liveThreadEventCache.get(cacheKey);
       const hasEvents =
-       Boolean(knownNow && [...knownNow.values()].some(e => e.event_type === "user_message" && !isQueuedUserEvent(e))) ||
+       Boolean(knownNow && [...knownNow.values()].some(isTurnUserEvent)) ||
        terminalThreadCache.has(cacheKey);
       if (hasEvents && !pendingDirtyBtwParents.has(`${ver}:${entry.parent}`)) {
        entry.dirty = false;
