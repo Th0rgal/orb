@@ -283,6 +283,33 @@ private def runLifecycleCompositionTests : IO UInt32 := do
     return 1
   return 0
 
+private def runHarnessCloudCompositionTests : IO UInt32 := do
+  let ctSubmitOk := Orb.HarnessCloud.verifyCloudTurnAdmit 0 0 0 0 0 0 1 2 0 0 100 100 == 1
+  let ctUncRej := Orb.HarnessCloud.verifyCloudTurnAdmit 4 0 0 0 0 0 1 2 0 0 100 100 == 0
+  let ctCancelNoRecRej := Orb.HarnessCloud.verifyCloudTurnAdmit 5 9 0 0 0 0 2 2 10 0 100 200 == 0
+  let hsUnderflowRej := Orb.HarnessCloud.verifyHarnessSessionAdmit 2 3 0 0 0 0 4 4 == 0
+  let hsDeadNoRecRej := Orb.HarnessCloud.verifyHarnessSessionAdmit 4 10 0 0 0 0 4 4 == 0
+  let paPreOk := Orb.HarnessCloud.verifyProviderAttemptAdmit 0 0 0 7 0 2 0 3 5 5 20 10 == 1
+  let paCommittedPass := Orb.HarnessCloud.classifyProviderAttempt 1 0 7 7 1 2 2 3 5 5 20 10 == 8
+  let paCommittedUnpinnedRej := Orb.HarnessCloud.classifyProviderAttempt 1 0 0 7 1 2 0 3 5 5 20 10 == 0
+  let paCommittedFaultAbort := Orb.HarnessCloud.classifyProviderAttempt 1 4 7 7 1 2 0 3 5 5 20 10 == 4
+  let paCommittedNoDispatch :=
+    let s : Orb.HarnessCloud.ProviderAttemptSliceState :=
+      { firstByteCommitted := 1, pinnedAccountId := 7, attemptsUsed := 1,
+        transientStreak := 2, routeGeneration := 5, cooldownUntilEpoch := 10 }
+    let ev : Orb.HarnessCloud.ProviderAttemptSliceEvent :=
+      { chunkCommits := 0, failureReason := 0, candidateAccountId := 7, maxRetries := 2,
+        transientThreshold := 3, attemptGeneration := 5, nowEpoch := 20, nextCooldownEpoch := 30 }
+    Orb.HarnessCloud.stepProviderAttemptSlice s ev == (s, [])
+  let arRevokedRej := Orb.HarnessCloud.verifyAuthRefreshAdmit 3 0 0 0 4 5 99 99 10 20 == 0
+  let arCommitOk := Orb.HarnessCloud.verifyAuthRefreshAdmit 2 2 1 1 4 4 99 99 10 20 == 1
+  if !(ctSubmitOk && ctUncRej && ctCancelNoRecRej && hsUnderflowRej && hsDeadNoRecRej &&
+       paPreOk && paCommittedPass && paCommittedUnpinnedRej && paCommittedFaultAbort &&
+       paCommittedNoDispatch && arRevokedRej && arCommitOk) then
+    IO.eprintln "[orb-core-test] FAIL: Orb.HarnessCloud R4-A gate invariants failed"
+    return 1
+  return 0
+
 private def runCustomProviderRateLimitTests
     (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
   -- Custom provider rate-limit CRUD, out-of-range rejection, `/resolve` projection & proactive proxy pacing spillover
@@ -1139,8 +1166,9 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runPostCrashAndReconcileExtras store tmpRoot) != 0 then return 1
   IO.FS.removeDirAll tmpRoot
 
-  -- 7. Host evidence suite (`84/84` host tests) + R3-A lifecycle composition gates
+  -- 7. Host evidence suite (`84/84` host tests) + R3-A lifecycle & R4-A harness/cloud composition gates
   if (← runLifecycleCompositionTests) != 0 then return 1
+  if (← runHarnessCloudCompositionTests) != 0 then return 1
   if (← do
     let base := OrbCore.RunCoordinator.fresh "m-r3b" 7
     let .ok supMarked := OrbCore.RunCoordinator.markSuperseded base 7

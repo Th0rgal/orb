@@ -74,6 +74,15 @@ jobs:
           LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/LifecycleMutants.lean \
             -o .lake/build/lib/lean/Orb/LifecycleMutants.olean \
             -i .lake/build/lib/lean/Orb/LifecycleMutants.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/HarnessCloud.lean \
+            -o .lake/build/lib/lean/Orb/HarnessCloud.olean \
+            -i .lake/build/lib/lean/Orb/HarnessCloud.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/HarnessCloudSpec.lean \
+            -o .lake/build/lib/lean/Orb/HarnessCloudSpec.olean \
+            -i .lake/build/lib/lean/Orb/HarnessCloudSpec.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/HarnessCloudMutants.lean \
+            -o .lake/build/lib/lean/Orb/HarnessCloudMutants.olean \
+            -i .lake/build/lib/lean/Orb/HarnessCloudMutants.ilean
           LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true audit/AuditSpec.lean
           lean -DwarningAsError=true -DautoImplicit=false Orb/Transcript.lean \
             -o .lake/build/lib/lean/Orb/Transcript.olean \
@@ -259,6 +268,10 @@ jobs:
           python3 scripts/check_spec_audit.py audit-results/lifecycle-spec-audit.json
           .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/LifecycleMutants.lean > audit-results/lifecycle-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/lifecycle-mutant-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/HarnessCloudSpec.lean > audit-results/harness-cloud-spec-audit.json
+          python3 scripts/check_spec_audit.py audit-results/harness-cloud-spec-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/HarnessCloudMutants.lean > audit-results/harness-cloud-mutant-audit.json
+          python3 scripts/check_spec_audit.py audit-results/harness-cloud-mutant-audit.json
           .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Stream.lean > audit-results/stream-audit.json
           python3 scripts/check_spec_audit.py audit-results/stream-audit.json
           .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Transcript.lean > audit-results/transcript-audit.json
