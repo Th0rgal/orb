@@ -13,6 +13,7 @@ import { taskCardView } from "../src/taskList";
 import { compactAgo } from "../src/time";
 import { narrationKeys } from "../src/workModel";
 import { subscriptionResetSummary, supportsSubscriptionReset } from "../src/providerUsage";
+import { resolveProviderBrand } from "../src/ProviderLogo";
 import type { AIProvider, ProviderUsage } from "../src/api";
 
 const SPEC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "shared", "orb-spec");
@@ -167,6 +168,23 @@ describe("shared/orb-spec/fixtures/subscription-resets.json", () => {
       } else {
         expect(got).toMatchObject(c.expected);
       }
+    });
+  }
+});
+
+describe("shared/orb-spec/fixtures/provider-logos.json", () => {
+  const fixture = spec<{
+    cases: Array<{
+      name: string;
+      type: string;
+      providerName: string;
+      expected: string | null;
+    }>;
+  }>("fixtures/provider-logos.json");
+
+  for (const c of fixture.cases) {
+    it(`resolveProviderBrand: ${c.name}`, () => {
+      expect(resolveProviderBrand(c.type, c.providerName) ?? null).toBe(c.expected);
     });
   }
 });

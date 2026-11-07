@@ -700,6 +700,35 @@ object OrbResourcesModel {
             )
         }.getOrDefault(Color(0xFF2F83BF))
     }
+
+    fun normalizePoolLabel(id: String, label: String): String {
+        var cleanId = id.trim().lowercase(Locale.US)
+        if (cleanId.startsWith("in:inf:")) cleanId = cleanId.removePrefix("in:inf:")
+        if (cleanId.endsWith(":pool")) cleanId = cleanId.removeSuffix(":pool")
+        val head = cleanId.substringBefore(':')
+        val cleanLabel = label.trim().lowercase(Locale.US)
+
+        if (
+            head == "ethereumfoundation" ||
+            head == "ethereum_foundation" ||
+            head == "ethereum" ||
+            head == "ef" ||
+            cleanLabel == "ethereumfoundation" ||
+            cleanLabel == "ethereum foundation" ||
+            cleanLabel == "ethereum_foundation"
+        ) {
+            return "EF"
+        }
+
+        if (
+            (head == "particle" || head == "particleai" || head == "particle_ai" || head == "particle.ai") &&
+            (cleanLabel == "particleai" || cleanLabel == "particle_ai")
+        ) {
+            return "Particle"
+        }
+
+        return label
+    }
 }
 
 private val RESOURCES_PALETTE = listOf("#2f83bf", "#1d9a78", "#7b63cf", "#cf6a2d", "#be4f78", "#22959d")
@@ -1480,11 +1509,13 @@ private fun FleetSankeyCard(
                 } else {
                     rawSub
                 }
+                val pid = OrbJSON.str(p, "id") ?: "pool-$i"
+                val rawLbl = OrbJSON.str(p, "label") ?: "Pool"
                 inputNodes.add(
                     OrbResourcesModel.SankeyInputNode(
-                        id = OrbJSON.str(p, "id") ?: "pool-$i",
+                        id = pid,
                         column = 0,
-                        label = OrbJSON.str(p, "label") ?: "Pool",
+                        label = OrbResourcesModel.normalizePoolLabel(pid, rawLbl),
                         sub = sub,
                         colorHex = RESOURCES_PALETTE[i % RESOURCES_PALETTE.size],
                         fallbackValue = OrbJSON.double(p, "current_b_tok_per_h") ?: 0.0,
@@ -1774,11 +1805,17 @@ private fun MissionFlowCard(
 
         val inputs = OrbJSON.dictList(flow["inputs"]).filter { OrbJSON.str(it, "kind") == lens.id }
         inputs.forEachIndexed { idx, inp ->
+            val iid = OrbJSON.str(inp, "id") ?: "inp-$idx"
+            val rawLbl = OrbJSON.str(inp, "label") ?: "Source"
             inputNodes.add(
                 OrbResourcesModel.SankeyInputNode(
-                    id = OrbJSON.str(inp, "id") ?: "inp-$idx",
+                    id = iid,
                     column = 0,
-                    label = OrbJSON.str(inp, "label") ?: "Source",
+                    label = if (lens == OrbResourcesModel.Lens.Inference) {
+                        OrbResourcesModel.normalizePoolLabel(iid, rawLbl)
+                    } else {
+                        rawLbl
+                    },
                     sub = OrbJSON.str(inp, "sub") ?: "",
                     colorHex = RESOURCES_PALETTE[idx % RESOURCES_PALETTE.size],
                     fallbackValue = OrbJSON.double(inp, "weight") ?: 0.0,

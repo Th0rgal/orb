@@ -9,6 +9,7 @@ import {
   formatLargeNumber,
   formatResourceRate,
   layoutDagRows,
+  normalizeResourcePoolLabel,
   stabilizeTrailingOpenBucket,
   type ResourceLens,
   type ResourceMetric,
@@ -486,5 +487,63 @@ describe("resourcesModel shared spec", () => {
     expect(dag.rows[0].bar.id).toBe("w-step2");
     expect(dag.edges.map((e) => e.id)).toEqual(["w-step1->w-step2"]);
     expect(dag.edges[0].fromCenterY).toBe(dag.edges[0].toCenterY);
+  });
+
+  it("simplifies Ethereum Foundation and sanitized custom pool labels in Resources to EF / Particle", () => {
+    for (const row of fixture.pool_labels) {
+      expect(normalizeResourcePoolLabel(row.id, row.label)).toBe(row.expected);
+    }
+
+    const ov: ResourcesOverviewResponse = {
+      as_of: new Date().toISOString(),
+      range: "6h",
+      bucket_seconds: 300,
+      timestamps_ms: [Date.now()],
+      compute: {
+        total_vcpu: 0,
+        active_vcpu: 0,
+        idle_leased_vcpu: 0,
+        hourly_burn_usd: 0,
+        sources: [],
+      },
+      inference: {
+        current_b_tok_per_h: 0.5,
+        est_usd_per_h: 4.0,
+        window_total_tokens: 1_000_000,
+        window_est_usd: 4.0,
+        throttled_429_count: 0,
+        pools: [
+          {
+            id: "ethereumfoundation:pool",
+            label: "Ethereumfoundation",
+            sublabel: "on-demand",
+            current_b_tok_per_h: 0.3,
+            est_usd_per_h: 2.5,
+            quota_pct_remaining: null,
+            health: "ok",
+            series_b_tok_per_h: [0.3],
+            series_usd_per_h: [2.5],
+          },
+          {
+            id: "particleai:pool",
+            label: "Particleai",
+            sublabel: "on-demand",
+            current_b_tok_per_h: 0.2,
+            est_usd_per_h: 1.5,
+            quota_pct_remaining: null,
+            health: "ok",
+            series_b_tok_per_h: [0.2],
+            series_usd_per_h: [1.5],
+          },
+        ],
+      },
+      missions: [],
+      links: [],
+    };
+    const sankey = buildOverviewSankeyInput(ov, "inference");
+    expect(sankey.nodes.find((n) => n.id === "ethereumfoundation:pool")?.label).toBe("EF");
+    expect(sankey.nodes.find((n) => n.id === "ethereumfoundation:pool")?.color).toBe("#627eea");
+    expect(sankey.nodes.find((n) => n.id === "particleai:pool")?.label).toBe("Particle");
+    expect(sankey.nodes.find((n) => n.id === "particleai:pool")?.color).toBe("#cf6f2e");
   });
 });

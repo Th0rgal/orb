@@ -2,7 +2,7 @@ import {test,expect} from '@playwright/test';
 test.use({browserName:'webkit'});
 test('compact quota rows, separate account actions and API key add/edit',async({page})=>{
  await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
- const accounts=[{id:'quota',name:'OpenAI (person@example.com)',account_email:'person@example.com',provider_type:'openai',uses_oauth:true,status:{type:'connected'}},{id:'key',name:'Work key',provider_type:'openai',uses_oauth:false,status:{type:'connected'}}];
+ const accounts=[{id:'quota',name:'OpenAI (person@example.com)',account_email:'person@example.com',provider_type:'openai',uses_oauth:true,status:{type:'connected'}},{id:'key',name:'Work key',provider_type:'openai',uses_oauth:false,status:{type:'connected'}},{id:'ef',name:'Ethereum Foundation',provider_type:'custom',uses_oauth:false,status:{type:'connected'}},{id:'particle',name:'Particle',provider_type:'custom',uses_oauth:false,status:{type:'connected'}}];
  const usage={provider_type:'openai',codex_primary_used_percent:100,codex_primary_window_minutes:10080,codex_primary_reset_at:Math.floor(Date.now()/1000)+7200};
  const writes:any[]=[];
  await page.route('**/api/**',route=>{
@@ -12,6 +12,8 @@ test('compact quota rows, separate account actions and API key add/edit',async({
  });
  await page.goto('/');await page.getByRole('button',{name:'Inference',exact:true}).click();
  await expect(page.getByRole('heading',{name:'Inference',exact:true})).toBeVisible();
+ await expect(page.locator('.p-acc-wrap').filter({hasText:'Ethereum Foundation'}).locator('.provider-logo > span')).toHaveAttribute('style',/ethereum\.svg/);
+ await expect(page.locator('.p-acc-wrap').filter({hasText:'Particle'}).locator('.provider-logo > span')).toHaveAttribute('style',/particle\.svg/);
  const account=page.locator('.p-acc-wrap').filter({hasText:'person@example.com'});
  await account.locator('.p-acc-btn').click();
  await expect(account.getByRole('button',{name:'Reconnect',exact:true})).toHaveCount(0);

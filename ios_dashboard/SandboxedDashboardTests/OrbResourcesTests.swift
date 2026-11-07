@@ -109,6 +109,14 @@ final class OrbResourcesTests: XCTestCase {
                 XCTAssertNil(r.etaEndFrac)
             }
         }
+
+        // 5. Pool label normalization (Ethereumfoundation -> EF, Particleai -> Particle)
+        for row in try XCTUnwrap(spec["pool_labels"] as? [[String: Any]]) {
+            let id = try XCTUnwrap(row["id"] as? String)
+            let label = try XCTUnwrap(row["label"] as? String)
+            let expected = try XCTUnwrap(row["expected"] as? String)
+            XCTAssertEqual(OrbResourcesModel.normalizePoolLabel(id: id, label: label), expected)
+        }
     }
 
     func testSankeySuppressesOverlappingLabelsForDenseSmallMissions() {
