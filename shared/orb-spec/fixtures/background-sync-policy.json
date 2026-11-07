@@ -149,6 +149,25 @@
       "btwByParent": { "m-focus": "btw-focus" },
       "openBtwParentIds": [],
       "expectedMissionIds": ["m-focus"]
+    },
+    {
+      "name": "active background sync prioritizes live running missions ahead of idle recents up to maxWarm",
+      "backgroundActive": true,
+      "maxWarm": 4,
+      "focusedIds": ["m-focus"],
+      "liveIds": ["m-live-1", "m-focus", "m-live-2"],
+      "recentIds": ["m-old-1", "m-old-2", "m-live-1", "m-old-3"],
+      "btwByParent": { "m-live-2": "btw-live-2", "m-old-2": "btw-old-2" },
+      "expectedMissionIds": ["m-focus", "m-live-1", "m-live-2", "m-old-3", "btw-live-2"]
+    },
+    {
+      "name": "inactive background sync sheds unfocused live missions as well as recents",
+      "backgroundActive": false,
+      "maxWarm": 12,
+      "focusedIds": ["m-focus"],
+      "liveIds": ["m-live-1", "m-live-2"],
+      "recentIds": ["m-old-1"],
+      "expectedMissionIds": ["m-focus"]
     }
   ]
 }

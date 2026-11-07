@@ -123,16 +123,26 @@ extension OrbConversation {
         }
     }
 
-    /// A long turn starts far before the loaded tail (hundreds of tool events), so its
-    /// user message and task list were missing: the Tasks card vanished on reopen. Fetch
-    /// only the turn's start and its task-list calls (small tool-call rows, no results).
+    /// A long turn starts far before the loaded tail (hundreds or thousands of tool events), so its
+    /// user message and task list were missing: the Tasks card vanished on reopen. Fetch both
+    /// the latest delivered `user_message` before `first` (even >400 tool calls back) and recent
+    /// `tool_call` rows so the turn prompt and Tasks card always stay anchored.
     func hydrateTurnStart(_ id: String) async {
-        guard let first = events.first?.sequence, first > 1, !events.contains(where: { $0.eventType == "user_message" }) else { return }
-        guard let older = try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: ["user_message", "tool_call"], limit: 400, beforeSeq: first).events,
-              id == self.id else { return }
-        let start = older.last(where: { $0.eventType == "user_message" })?.sequence ?? 0
-        let keep = older.filter { e in
-            e.sequence >= start && (e.eventType == "user_message" || OrbWorkModel.isTaskListTool(e.toolName))
+        guard let first = events.first?.sequence,
+              first > 1,
+              !events.contains(where: { $0.eventType == "user_message" && ($0.metadata["queued"]?.value as? Bool) != true }) else { return }
+        async let usersReq = try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: ["user_message"], limit: 5, beforeSeq: first).events
+        async let toolsReq = try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: ["tool_call"], limit: 400, beforeSeq: first).events
+        let (users, tools) = await (usersReq, toolsReq)
+        guard id == self.id else { return }
+        let startUser = (users ?? []).last(where: { $0.eventType == "user_message" && ($0.metadata["queued"]?.value as? Bool) != true })
+        let start = startUser?.sequence ?? 0
+        var keep: [StoredEvent] = []
+        if let startUser {
+            keep.append(startUser)
+        }
+        for e in tools ?? [] where e.sequence >= start && OrbWorkModel.isTaskListTool(e.toolName) {
+            keep.append(e)
         }
         guard !keep.isEmpty else { return }
         let unique = Dictionary((keep + events).map { ($0.sequence, $0) }, uniquingKeysWith: { _, new in new })

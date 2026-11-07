@@ -32,7 +32,7 @@ const toBottom = (el: HTMLElement) => { if (typeof el.scrollTo === "function") e
 const gapOf = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight;
 const editable = (t: EventTarget | null) => t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
 
-export function createPinnedScroll(o: { key: () => string; onResize?: () => void }) {
+export function createPinnedScroll(o: { key: () => string; onResize?: () => void; onUpwardAtTop?: () => void }) {
   let scroller: HTMLDivElement | undefined;
   let detach: (() => void) | undefined;
   const [pinned, setPinned] = createSignal(true);
@@ -77,14 +77,24 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
     const el = scroller;
     if (!el) return;
     const height = content?.offsetHeight ?? 0;
-    if (content && height < lastColHeight && lastColHeight > held) reserve(lastColHeight);
-    if (!anchor) return remember();
-    const [target, top] = anchor.el.isConnected ? [anchor.el, anchor.top] : anchor.row?.isConnected ? [anchor.row, anchor.rowTop] : [null, 0];
+    const hasConnectedAnchor = Boolean(anchor && (anchor.el.isConnected || anchor.row?.isConnected));
+    if (hasConnectedAnchor && content && height < lastColHeight && lastColHeight > held) reserve(lastColHeight);
+    if (!hasConnectedAnchor) {
+      if (held) reserve(0);
+      if (gapOf(el) < NEAR) {
+        setPinned(true);
+        syncBottom(el);
+        return;
+      }
+      remember();
+      return;
+    }
+    const [target, top] = anchor!.el.isConnected ? [anchor!.el, anchor!.top] : anchor!.row?.isConnected ? [anchor!.row, anchor!.rowTop] : [null, 0];
     if (target) {
       // Idempotent: measured from where the anchor is now, so a second settle is a no-op.
       const next = correct(el.scrollHeight, el.clientHeight, el.scrollTop, el.scrollTop + target.getBoundingClientRect().top, top);
       if (Math.abs(next - el.scrollTop) >= 0.5) el.scrollTop = next;
-      if (target === anchor.el && Math.abs(target.getBoundingClientRect().top - top) < 1) {
+      if (target === anchor!.el && Math.abs(target.getBoundingClientRect().top - top) < 1) {
         recordGeometry(el);
         return;
       }
@@ -104,10 +114,19 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
   const markIntent = () => { intentAt = performance.now(); };
   const onWheel = (e: WheelEvent) => {
     markIntent();
-    if (e.deltaY < 0) setPinned(false);
-    else if (e.deltaY > 0 && scroller && gapOf(scroller) < NEAR) setPinned(true);
+    if (e.deltaY < 0) {
+      setPinned(false);
+      if (scroller && scroller.scrollTop <= 1) o.onUpwardAtTop?.();
+    } else if (e.deltaY > 0 && scroller && gapOf(scroller) < NEAR) setPinned(true);
   };
-  const onKey = (e: KeyboardEvent) => { if (scroller?.isConnected && NAV_KEYS.has(e.key) && !editable(e.target)) markIntent(); };
+  const onKey = (e: KeyboardEvent) => {
+    if (scroller?.isConnected && NAV_KEYS.has(e.key) && !editable(e.target)) {
+      markIntent();
+      if ((e.key === "ArrowUp" || e.key === "PageUp" || e.key === "Home") && scroller.scrollTop <= 1) {
+        o.onUpwardAtTop?.();
+      }
+    }
+  };
   // A press on the scroller itself or the custom overlay thumb is a scrollbar drag.
   const onPointerDown = (e: PointerEvent) => {
     if (!scroller?.isConnected) return;

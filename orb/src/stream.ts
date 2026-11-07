@@ -549,8 +549,8 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
       }
       streamLoad("sync-ws", 1, rawText.length);
       if (eventType === "stream_lagged") {
-        reportSyncStreamLagged();
-        const targetMid = typeof parsed.mission_id === "string" ? parsed.mission_id : null;
+        const targetMid = typeof parsed.mission_id === "string" && parsed.mission_id ? parsed.mission_id : null;
+        if (!targetMid) reportSyncStreamLagged();
         for (const l of listeners) {
           if (!targetMid || l.missionId === targetMid) l.onLagged();
         }
