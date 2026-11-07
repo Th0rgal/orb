@@ -7,6 +7,9 @@ import Orb.LifecycleMutants
 import Orb.HarnessCloud
 import Orb.HarnessCloudSpec
 import Orb.HarnessCloudMutants
+import Orb.ManagedNode
+import Orb.ManagedNodeSpec
+import Orb.ManagedNodeMutants
 import OrbCore.Spec
 import OrbCore.MutantSuite
 import OrbCore.Store
