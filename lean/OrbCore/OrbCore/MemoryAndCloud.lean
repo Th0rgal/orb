@@ -16,16 +16,19 @@ import OrbBin.HttpClient
 import OrbBin.McpCatalog
 import OrbCore.Spec
 import OrbCore.Store
+import OrbCore.CloudAgents
 
 namespace OrbCore.MemoryAndCloud
 
 open LeanSys.Auth
 open LeanSys.Codec
 open Orb.Kernel
+open Orb.HarnessCloud
 open OrbBin.PosixExt
 open OrbBin.Json
 open OrbBin.HttpClient
 open OrbCore.Store
+open OrbCore.CloudAgents
 
 /-! ### 1. Governed Hindsight Memory MCP Broker (`memory_*`) -/
 
@@ -450,20 +453,43 @@ def getOrFetchHermesCapabilities
 
 /-- Normalized live events emitted by `stepHermesSseChunk`. -/
 inductive HermesSseEvent where
-  | textDelta (cursor : UInt64) (delta : String)
-  | completed (cursor : UInt64) (finalText : String)
-  | failed    (cursor : UInt64) (errorMsg : String)
-  | cancelled (cursor : UInt64)
+  | textDelta        (cursor : UInt64) (delta : String)
+  | waitingApproval  (cursor : UInt64) (req : CloudApprovalRequest)
+  | approvalResolved (cursor : UInt64)
+  | completed        (cursor : UInt64) (finalText : String)
+  | failed           (cursor : UInt64) (errorMsg : String)
+  | cancelled        (cursor : UInt64)
   deriving Repr, DecidableEq
 
-/-- Monotone-cursor incremental SSE state for `/v1/runs/{run_id}/events?after={cursor}`. -/
+/-- Monotone-cursor incremental SSE state for `/v1/runs/{run_id}/events?after={cursor}`.
+    `submittedAtMs?` and `eventCursor?` are separate fields, never multiplexed in a string cursor. -/
 structure HermesSseState where
   lastCursor      : UInt64 := 0
   hasCursor       : Bool   := false
+  submittedAtMs?  : Option UInt64 := none
+  eventCursor?    : Option UInt64 := none
+  pendingApproval? : Option CloudApprovalRequest := none
   accumulatedText : String := ""
   terminalStatus? : Option String := none
   terminalError?  : Option String := none
   deriving Repr, DecidableEq
+
+private def parseHermesApproval? (jv : JVal) : Option CloudApprovalRequest := do
+  let reqObj := (jv.field? "request").getD jv
+  let reqId :=
+    (reqObj.fieldUInt64? "request_id")
+    |>.orElse (fun _ => reqObj.fieldUInt64? "req_id")
+    |>.orElse (fun _ => (reqObj.fieldStr? "request_id").bind String.toNat? |>.map Nat.toUInt64)
+    |>.orElse (fun _ => jv.fieldUInt64? "approval_req_id")
+  let idVal ← reqId
+  if idVal == 0 then none
+  else
+    let cmd := (reqObj.fieldStr? "command").getD ""
+    let choices :=
+      match reqObj.fieldArr? "choices" with
+      | some xs => xs.filterMap (fun v => v.asStr?)
+      | none => #[]
+    some { reqId := idVal, command := cmd, choices := choices }
 
 /-- Pure-Lean incremental SSE reducer enforcing strict cursor monotonicity across reconnects. -/
 def stepHermesSseChunk (st0 : HermesSseState) (rawChunk : String) : HermesSseState × Array HermesSseEvent := Id.run do
@@ -490,16 +516,20 @@ def stepHermesSseChunk (st0 : HermesSseState) (rawChunk : String) : HermesSseSta
         if let .ok jv := OrbBin.Json.parse dataRaw then
           let curFromJson? := (jv.fieldNat? "cursor").orElse (fun _ => jv.fieldNat? "seq") |>.map Nat.toUInt64
           let effCursor? := idCursor?.orElse (fun _ => curFromJson?)
+          let prevCur? := st.eventCursor?.orElse (fun _ => if st.hasCursor then some st.lastCursor else none)
           let freshCursor : Bool :=
-            match effCursor? with
-            | some c => if !st.hasCursor then true else c > st.lastCursor
-            | none => true
+            match effCursor?, prevCur? with
+            | some 0, _ => false
+            | some c, some prev => c > prev
+            | some _, none => true
+            | none, _ => true
           if freshCursor then
             let curVal : UInt64 :=
-              match effCursor? with
-              | some c => c
-              | none => if st.hasCursor then st.lastCursor + 1 else 1
-            st := { st with lastCursor := curVal, hasCursor := true }
+              match effCursor?, prevCur? with
+              | some c, _ => c
+              | none, some prev => prev + 1
+              | none, none => 1
+            st := { st with lastCursor := curVal, hasCursor := true, eventCursor? := some curVal }
             let kind :=
               if !evName.isEmpty then evName
               else (jv.fieldStr? "type").orElse (fun _ => jv.fieldStr? "status") |>.getD ""
@@ -509,86 +539,331 @@ def stepHermesSseChunk (st0 : HermesSseState) (rawChunk : String) : HermesSseSta
               if !delta.isEmpty then
                 st := { st with accumulatedText := st.accumulatedText ++ delta }
                 out := out.push (.textDelta curVal delta)
+            | "waiting_approval" | "waiting_user" | "approval_required" =>
+              if let some req := parseHermesApproval? jv then
+                st := { st with pendingApproval? := some req }
+                out := out.push (.waitingApproval curVal req)
+            | "approval_resolved" | "resumed" =>
+              st := { st with pendingApproval? := none }
+              out := out.push (.approvalResolved curVal)
             | "completed" | "succeeded" =>
               let fullTxt :=
                 (jv.fieldStr? "output").orElse (fun _ => jv.fieldStr? "response")
                 |>.orElse (fun _ => jv.fieldStr? "text")
                 |>.getD st.accumulatedText
               let mergedTxt := if st.accumulatedText.isEmpty then fullTxt else st.accumulatedText
-              st := { st with accumulatedText := mergedTxt, terminalStatus? := some "completed" }
+              st := { st with accumulatedText := mergedTxt, pendingApproval? := none, terminalStatus? := some "completed" }
               out := out.push (.completed curVal mergedTxt)
             | "failed" | "error" =>
               let errMsg := (jv.fieldStr? "error").orElse (fun _ => jv.fieldStr? "message") |>.getD "Hermes run failed"
-              st := { st with terminalStatus? := some "failed", terminalError? := some errMsg }
+              st := { st with pendingApproval? := none, terminalStatus? := some "failed", terminalError? := some errMsg }
               out := out.push (.failed curVal errMsg)
             | "cancelled" | "canceled" =>
-              st := { st with terminalStatus? := some "cancelled" }
+              st := { st with pendingApproval? := none, terminalStatus? := some "cancelled" }
               out := out.push (.cancelled curVal)
             | _ => pure ()
   return (st, out)
 
-/-- Connect to Hermes SSE `/v1/runs/{runId}/events?after={cursor}` with automatic JSON fallback (`/v1/runs/{runId}`). -/
+/-- One persisted CAS step, even when the kernel walked request-cancel then the receipt. -/
+private def singleRev (turn done : CloudTurnState) (effs : List CloudTurnEffect) :
+    CloudTurnState × List CloudTurnEffect :=
+  if effs.isEmpty then (turn, [])
+  else ({ done with stateRevision := turn.stateRevision + 1 }, effs)
+
+/-- Stamp `cur` onto a turn without counting a revision; the following kernel step owns the `+1`. -/
+private def stampCursor (turn : CloudTurnState) (cur : UInt64) : CloudTurnState :=
+  if cur == 0 || cur ≤ cursorOf turn then turn else { turn with eventCursor? := some cur }
+
+/-- Kernel walk `requestCancel` then `finalizeCancelReceipt`. Revision is left as the stepper wrote it;
+    the caller collapses a multi-step walk to one CAS bump. -/
+private def finishCancelFrom (turn : CloudTurnState) (cur nowMs : UInt64) :
+    CloudTurnState × List CloudTurnEffect :=
+  let (mid, effs1) := requestCancel turn nowMs
+  if effs1.isEmpty then (turn, [])
+  else
+    let (done, effs2) := finalizeCancelReceipt (stampCursor mid cur) nowMs
+    if effs2.isEmpty then (turn, [])
+    else (done, effs1 ++ effs2)
+
+/-- Fold one `HermesSseEvent` into `CloudTurnState` exclusively via `Orb.HarnessCloud.stepCloudTurnSlice`.
+    `submittedAtMs?` is never overwritten by `eventCursor?`. A provider cancel/fail/complete while
+    `cancelRequested` is the termination receipt (`opCode = 9`) and keeps/advances `eventCursor?`.
+    `running` / `waitingApproval` / `queued` cancel as request (`opCode = 8`) then receipt (`opCode = 9`)
+    with exactly one `stateRevision` bump. `submitting` / `uncertain` cancel only when a provider turn
+    is already bound (`confirmAccepted` / `bindExistingTurn`), otherwise they stay unchanged. -/
+def applyHermesEventToTurn
+    (turn : CloudTurnState)
+    (ev : HermesSseEvent)
+    (nowMs : UInt64) : CloudTurnState × List CloudTurnEffect :=
+  match ev with
+  | .textDelta cur _ =>
+    (advanceRunningCursor turn cur, [])
+  | .waitingApproval cur req =>
+    awaitApproval (stampCursor turn cur) req nowMs
+  | .approvalResolved cur =>
+    let effCur := if cur > cursorOf turn then cur else cursorOf turn
+    resolveApproval turn effCur nowMs
+  | .completed cur _ =>
+    if turn.phase == .cancelRequested then
+      finalizeCancelReceipt (stampCursor turn cur) nowMs
+    else
+      let effCur := if cur > cursorOf turn then cur else cursorOf turn
+      completeTurnReceipt turn effCur nowMs
+  | .failed cur errMsg =>
+    if turn.phase == .cancelRequested then
+      let (next, effs) := finalizeCancelReceipt (stampCursor turn cur) nowMs
+      if effs.isEmpty then (turn, [])
+      else ({ next with errorKind := .providerRejected, detail := errMsg }, effs)
+    else
+      let effCur := if cur > cursorOf turn then cur else cursorOf turn
+      let (next, effs) := completeTurnReceipt turn effCur nowMs
+      if effs.isEmpty then (turn, [])
+      else ({ next with errorKind := .providerRejected, detail := errMsg }, effs)
+  | .cancelled cur =>
+    match turn.phase with
+    | .cancelRequested =>
+      finalizeCancelReceipt (stampCursor turn cur) nowMs
+    | .running | .waitingApproval | .queued =>
+      let (done, effs) := finishCancelFrom (stampCursor turn cur) cur nowMs
+      singleRev turn done effs
+    | .submitting =>
+      if turn.providerTurnId == 0 then (turn, [])
+      else
+        let (accepted, effs0) := confirmAccepted turn turn.providerTurnId (cursorOf turn) nowMs
+        if effs0.isEmpty then (turn, [])
+        else
+          let (done, effs1) := finishCancelFrom accepted cur nowMs
+          if effs1.isEmpty then (turn, [])
+          else singleRev turn done (effs0 ++ effs1)
+    | .uncertain =>
+      if turn.providerTurnId == 0 then (turn, [])
+      else
+        let (bound, effs0) := bindExistingTurn turn turn.providerTurnId (cursorOf turn) nowMs
+        if effs0.isEmpty then (turn, [])
+        else
+          let (done, effs1) := finishCancelFrom bound cur nowMs
+          if effs1.isEmpty then (turn, [])
+          else singleRev turn done (effs0 ++ effs1)
+    | .terminal =>
+      (turn, [])
+
+/-- Mirror a `CloudTurnState` and incremental SSE fields into one `HermesSseState` view. -/
+def hermesViewOf (turn : CloudTurnState) (text : String) (terminalStatus? terminalError? : Option String) : HermesSseState :=
+  { lastCursor := cursorOf turn
+    hasCursor := turn.eventCursor?.isSome
+    submittedAtMs? := turn.submittedAtMs?
+    eventCursor? := turn.eventCursor?
+    pendingApproval? := turn.approval?
+    accumulatedText := text
+    terminalStatus? := terminalStatus?
+    terminalError? := terminalError? }
+
+/-- Seed an `HermesSseState` view from the authoritative `CloudTurnState` without losing an
+    already-known cursor or terminal marker on `initState`. -/
+def seedHermesView (turn : CloudTurnState) (initState : HermesSseState) : HermesSseState :=
+  let initCur? :=
+    turn.eventCursor?.orElse (fun _ =>
+      initState.eventCursor?.orElse (fun _ =>
+        if initState.hasCursor && initState.lastCursor != 0 then some initState.lastCursor else none))
+  let pend? :=
+    if turn.phase == .waitingApproval then turn.approval?.orElse (fun _ => initState.pendingApproval?)
+    else if turn.phase.isTerminal || turn.phase == .cancelRequested then none
+    else initState.pendingApproval?
+  let termSt? :=
+    if turn.phase.isTerminal then
+      initState.terminalStatus?.orElse (fun _ =>
+        some (if turn.cancel == .confirmedReceipt then "cancelled"
+              else if turn.errorKind != .none then "failed"
+              else "completed"))
+    else if turn.phase == .cancelRequested then none
+    else initState.terminalStatus?
+  let termErr? :=
+    if turn.phase.isTerminal then
+      initState.terminalError?.orElse (fun _ => if turn.detail.isEmpty then none else some turn.detail)
+    else if turn.phase == .cancelRequested then none
+    else initState.terminalError?
+  { lastCursor := initCur?.getD 0
+    hasCursor := initCur?.isSome
+    submittedAtMs? := turn.submittedAtMs?.orElse (fun _ => initState.submittedAtMs?)
+    eventCursor? := initCur?
+    pendingApproval? := pend?
+    accumulatedText := initState.accumulatedText
+    terminalStatus? := termSt?
+    terminalError? := termErr? }
+
+/-- Already-terminal turns, and cancel requests that already hold a termination receipt, are sticky. -/
+def hermesPollSettled (turn : CloudTurnState) (view : HermesSseState) : Bool :=
+  turn.phase.isTerminal || (turn.phase == .cancelRequested && turn.cancel == .confirmedReceipt) ||
+    (view.terminalStatus?.isSome && turn.phase != .cancelRequested)
+
+/-- Step a Hermes SSE chunk across both `(HermesSseState, CloudTurnState)`. -/
+def stepHermesTurnChunk
+    (sseSt : HermesSseState)
+    (turn : CloudTurnState)
+    (rawChunk : String)
+    (nowMs : UInt64) : HermesSseState × CloudTurnState × Array HermesSseEvent × List CloudTurnEffect := Id.run do
+  let seeded := seedHermesView turn sseSt
+  if hermesPollSettled turn seeded then
+    return (seeded, turn, #[], [])
+  let (nextSse, evs) := stepHermesSseChunk seeded rawChunk
+  let mut curTurn := turn
+  let mut allEffs : List CloudTurnEffect := []
+  for ev in evs do
+    let (t1, effs) := applyHermesEventToTurn curTurn ev nowMs
+    curTurn := t1
+    allEffs := allEffs ++ effs
+  if curTurn == turn && allEffs.isEmpty then
+    return (seeded, turn, #[], [])
+  let finalTurn := { curTurn with stateRevision := turn.stateRevision + 1 }
+  let syncedSse : HermesSseState := {
+    nextSse with
+    submittedAtMs? := finalTurn.submittedAtMs?.orElse (fun _ => nextSse.submittedAtMs?)
+    eventCursor? := finalTurn.eventCursor?.orElse (fun _ => seeded.eventCursor?)
+    hasCursor := finalTurn.eventCursor?.isSome || seeded.hasCursor
+    lastCursor := (finalTurn.eventCursor?.orElse (fun _ => seeded.eventCursor?)).getD seeded.lastCursor
+    pendingApproval? := finalTurn.approval?
+    terminalStatus? := if finalTurn.phase.isTerminal then nextSse.terminalStatus? else none
+    terminalError? := if finalTurn.phase.isTerminal then nextSse.terminalError? else none
+  }
+  return (syncedSse, finalTurn, evs, allEffs)
+
+/-- Fold a `/v1/runs/{runId}` JSON body into `CloudTurnState` via `applyHermesEventToTurn`.
+    A sticky terminal (or a settled cancel receipt) emits nothing and does not move the cursor.
+    `waitingApproval` plus provider `"running"` emits `.approvalResolved` and returns to `.running`.
+    `cancelRequested` finalizes only on an explicit `"cancelled"` / `"failed"` / `"completed"` receipt. -/
+def applyHermesJsonFallback
+    (turn : CloudTurnState)
+    (view : HermesSseState)
+    (jv : JVal)
+    (nowMs : UInt64) : CloudTurnState × HermesSseState × Array HermesSseEvent × List CloudTurnEffect :=
+  if hermesPollSettled turn view then
+    (turn, view, #[], [])
+  else
+    let statusStr := (jv.fieldStr? "status").getD "running"
+    let outText :=
+      (jv.fieldStr? "output").orElse (fun _ => jv.fieldStr? "response")
+      |>.orElse (fun _ => jv.fieldStr? "text") |>.getD ""
+    let initCur := view.eventCursor?.getD (if view.hasCursor then view.lastCursor else 0)
+    let baseCur := max (cursorOf turn) initCur
+    let jsonCur :=
+      ((jv.fieldUInt64? "event_cursor").orElse (fun _ => jv.fieldUInt64? "cursor")
+        |>.orElse (fun _ => jv.fieldUInt64? "seq")).getD 0
+    let nextCur := if jsonCur > baseCur then jsonCur else baseCur + 1
+    let pendingFromJson? := parseHermesApproval? jv
+    let ev? : Option HermesSseEvent :=
+      match statusStr with
+      | "waiting_approval" | "waiting_user" | "approval_required" =>
+        match pendingFromJson? with
+        | some req => some (.waitingApproval nextCur req)
+        | none => none
+      | "running" | "in_progress" | "resumed" =>
+        match pendingFromJson? with
+        | some req =>
+          if turn.phase == .running then some (.waitingApproval nextCur req) else none
+        | none =>
+          if turn.phase == .waitingApproval || view.pendingApproval?.isSome then
+            some (.approvalResolved nextCur)
+          else if !outText.isEmpty && outText != view.accumulatedText then
+            some (.textDelta nextCur outText)
+          else
+            none
+      | "completed" | "succeeded" =>
+        some (.completed nextCur (if outText.isEmpty then view.accumulatedText else outText))
+      | "failed" | "error" =>
+        some (.failed nextCur (((jv.fieldStr? "error").orElse (fun _ => jv.fieldStr? "message")).getD "Hermes run failed"))
+      | "cancelled" | "canceled" =>
+        some (.cancelled nextCur)
+      | _ =>
+        if !outText.isEmpty && outText != view.accumulatedText then some (.textDelta nextCur outText)
+        else none
+    match ev? with
+    | none => (turn, view, #[], [])
+    | some ev =>
+      let (nextTurn, effs) :=
+         match ev with
+        | .approvalResolved cur =>
+          if turn.phase == CloudTurnPhase.waitingApproval then applyHermesEventToTurn turn ev nowMs
+          else (advanceRunningCursor turn cur, [])
+        | _ => applyHermesEventToTurn turn ev nowMs
+      if nextTurn == turn && effs.isEmpty then
+        (turn, view, #[], [])
+      else
+        let text :=
+          match ev with
+          | .textDelta _ d => d
+          | .completed _ t => t
+          | _ => if outText.isEmpty then view.accumulatedText else outText
+        let (termSt, termErr) :=
+          match ev with
+          | .completed _ _ => (some "completed", none)
+          | .failed _ err => (some "failed", some err)
+          | .cancelled _ => (some "cancelled", none)
+          | _ => (none, none)
+        (nextTurn, hermesViewOf nextTurn text termSt termErr, #[ev], effs)
+
+/-- Connect to Hermes SSE `/v1/runs/{runId}/events?after={cursor}` with automatic JSON fallback (`/v1/runs/{runId}`).
+    Both paths step the authoritative `CloudTurnState`. When `store?` is supplied, a changed turn is
+    persisted with `persistCloudTurn` using the pre-step `stateRevision` (`0` inserts revision `1`). -/
 def streamOrFallbackHermesRun
     (hermesBaseUrl runId : String)
     (bearerToken? : Option String)
-    (initState : HermesSseState := {}) : IO (Except String (HermesSseState × Array HermesSseEvent)) := do
+    (turn : CloudTurnState)
+    (initState : HermesSseState := {})
+    (store? : Option CoreStore := none)
+    (nowMs : UInt64 := 0) : IO (Except String (HermesSseState × CloudTurnState × Array HermesSseEvent)) := do
+  let view0 := seedHermesView turn initState
+  if hermesPollSettled turn view0 then
+    return .ok (view0, turn, #[])
   let base := stripTrailingSlash hermesBaseUrl.trimAscii.toString
-  let afterParam := if initState.hasCursor then s!"?after={initState.lastCursor}" else "?after=0"
+  let afterParam := match view0.eventCursor? with | some c => s!"?after={c}" | none => "?after=0"
   let sseUrl := s!"{base}/v1/runs/{runId}/events{afterParam}"
   let mut hdrs : Array (String × String) := #[("Accept", "text/event-stream, application/json")]
   if let some tok := bearerToken? then
     if !tok.isEmpty then
       hdrs := hdrs.push ("Authorization", s!"Bearer {tok}")
-  match ← sendRequest "GET" sseUrl hdrs ByteArray.empty 15000 with
-  | .ok resp =>
-    let ct := ((resp.headers.find? (fun (k, _) => k.toLower == "content-type")).map Prod.snd).getD ""
-    let bodyStr := String.fromUTF8? resp.body |>.getD ""
-    if resp.status == 200 && (containsSubstr ct.toLower "text/event-stream" || bodyStr.trimAscii.toString.startsWith "data:" || bodyStr.trimAscii.toString.startsWith "id:" || bodyStr.trimAscii.toString.startsWith "event:") then
-      return .ok (stepHermesSseChunk initState bodyStr)
-    if resp.status != 404 && resp.status != 405 && resp.status != 501 && resp.status != 200 then
-      return .error s!"Hermes events endpoint returned HTTP {resp.status}"
-    -- Fallback to `/v1/runs/{runId}` JSON status
-    let jsonUrl := s!"{base}/v1/runs/{runId}"
-    match ← sendJsonRequest "GET" jsonUrl bearerToken? none #[] 10000 with
+  let stepped ←
+    match ← sendRequest "GET" sseUrl hdrs ByteArray.empty 15000 with
     | .error e => return .error e
-    | .ok (jStatus, _, jBody?) =>
-      if jStatus < 200 || jStatus ≥ 300 then
-        return .error s!"Hermes run status endpoint returned HTTP {jStatus}"
-      let jv := jBody?.getD (.obj #[])
-      let statusStr := (jv.fieldStr? "status").getD "running"
-      let outText :=
-        (jv.fieldStr? "output").orElse (fun _ => jv.fieldStr? "response")
-        |>.orElse (fun _ => jv.fieldStr? "text") |>.getD ""
-      let nextCur := if initState.hasCursor then initState.lastCursor + 1 else 1
-      match statusStr with
-      | "completed" | "succeeded" =>
-        let st1 : HermesSseState := {
-          lastCursor := nextCur, hasCursor := true,
-          accumulatedText := outText, terminalStatus? := some "completed"
-        }
-        return .ok (st1, #[.completed nextCur outText])
-      | "failed" | "error" =>
-        let err := (jv.fieldStr? "error").getD "Hermes run failed"
-        let st1 : HermesSseState := {
-          lastCursor := nextCur, hasCursor := true,
-          accumulatedText := outText, terminalStatus? := some "failed", terminalError? := some err
-        }
-        return .ok (st1, #[.failed nextCur err])
-      | "cancelled" | "canceled" =>
-        let st1 : HermesSseState := {
-          lastCursor := nextCur, hasCursor := true,
-          accumulatedText := initState.accumulatedText, terminalStatus? := some "cancelled"
-        }
-        return .ok (st1, #[.cancelled nextCur])
-      | _ =>
-        if !outText.isEmpty && outText != initState.accumulatedText then
-          let st1 : HermesSseState := {
-            lastCursor := nextCur, hasCursor := true,
-            accumulatedText := outText
-          }
-          return .ok (st1, #[.textDelta nextCur outText])
-        return .ok (initState, #[])
+    | .ok resp =>
+      let ct := ((resp.headers.find? (fun (k, _) => k.toLower == "content-type")).map Prod.snd).getD ""
+      let bodyStr := String.fromUTF8? resp.body |>.getD ""
+      if resp.status == 200 && (containsSubstr ct.toLower "text/event-stream" || bodyStr.trimAscii.toString.startsWith "data:" || bodyStr.trimAscii.toString.startsWith "id:" || bodyStr.trimAscii.toString.startsWith "event:") then
+        let (sse1, turn1, evs, _) := stepHermesTurnChunk view0 turn bodyStr nowMs
+        pure (turn1, sse1, evs)
+      else if resp.status != 404 && resp.status != 405 && resp.status != 501 && resp.status != 200 then
+        return .error s!"Hermes events endpoint returned HTTP {resp.status}"
+      else
+        let jsonUrl := s!"{base}/v1/runs/{runId}"
+        match ← sendJsonRequest "GET" jsonUrl bearerToken? none #[] 10000 with
+        | .error e => return .error e
+        | .ok (jStatus, _, jBody?) =>
+          if jStatus < 200 || jStatus ≥ 300 then
+            return .error s!"Hermes run status endpoint returned HTTP {jStatus}"
+          let jv := jBody?.getD (.obj #[])
+          let (turn1, view1, evs, _) := applyHermesJsonFallback turn view0 jv nowMs
+          pure (turn1, view1, evs)
+  let (turn1, view1, evs) := stepped
+  if let some store := store? then
+    if turn1 != turn || turn1.stateRevision != turn.stateRevision then
+      match ← persistCloudTurn store.missionsDb turn1 turn.stateRevision with
+      | .error e => return .error e
+      | .ok written =>
+        return .ok (hermesViewOf written view1.accumulatedText view1.terminalStatus? view1.terminalError?, written, evs)
+  return .ok (view1, turn1, evs)
+
+/-- Load (or initialize) a Hermes turn in `store`, run `streamOrFallbackHermesRun`, and CAS-persist any change. -/
+def syncHermesTurnWithStore
+    (store : CoreStore)
+    (hermesBaseUrl runId : String)
+    (bearerToken? : Option String)
+    (fallbackTurn : CloudTurnState)
+    (initState : HermesSseState := {})
+    (nowMs : UInt64 := 0) : IO (Except String (HermesSseState × CloudTurnState × Array HermesSseEvent)) := do
+  match ← loadCloudTurn? store.missionsDb fallbackTurn.missionId fallbackTurn.turnIndex with
   | .error e => return .error e
+  | .ok turn? =>
+    let activeTurn := turn?.getD { fallbackTurn with stateRevision := 0 }
+    streamOrFallbackHermesRun hermesBaseUrl runId bearerToken? activeTurn initState (some store) nowMs
 
 /-! ### 4. Cloud-to-Workspace Handoff & Native Mission Fork (`POST /api/control/missions/:id/fork`) -/
 

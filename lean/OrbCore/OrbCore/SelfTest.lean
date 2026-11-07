@@ -21,6 +21,7 @@ open OrbCore.Search
 open OrbCore.Harness
 open OrbCore.Proxy
 open OrbCore.Managed
+open OrbCore.CloudAgents
 open OrbCore.MemoryAndCloud
 open OrbCore.Control
 open OrbCore.HostTests
@@ -1335,6 +1336,318 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
       IO.eprintln "[orb-core-test] FAIL: RunCoordinator mutated activeToolCalls or pendingReceipts while superseded or terminal"
       return 1
     pure (0 : UInt32)) != 0 then return 1
+  if (← do
+    -- R4-B (`SM-14`): Grok prose-invariance, Hermes split cursor + approval + SSE replay,
+    -- Cursor Cloud follow-up `SubmissionUncertain` reconciliation, cancel-receipt fence, and SQLite CAS.
+    let grok0 := freshCloudTurn "m-grok" 0 .grok
+    let (grokSub, grokSubEffs) := beginSubmit grok0 1 1000 1000
+    let (grokRej, _) := rejectPreCommit grokSub .reconnectRequired 1010
+    let (grokSub2, _) := beginSubmit grokRej 2 1020 1020
+    let (grokRun, _) := confirmAccepted grokSub2 9001 0 1030
+    let (grokCancReq, _) := requestCancel grokRun 1040
+    let proseSamples : Array String := #[
+      "", "reconnect_required", "Cancellation sent...", " localized: connexion requise / annulation envoyée "
+    ]
+    let evSamples : Array Orb.HarnessCloud.CloudTurnSliceEvent := #[
+      { opCode := 0, hasTerminationReceipt := 0, hasCompletionReceipt := 0, operatorConfirmedNotDelivered := 0,
+        approvalResolved := 0, proposedAttemptId := 3, reqProviderTurnId := 0, reqEventCursor := 0,
+        reqApprovalReqId := 0, reqSubmittedAtMs := 2000, nowMs := 2000 },
+      { opCode := 1, hasTerminationReceipt := 0, hasCompletionReceipt := 0, operatorConfirmedNotDelivered := 0,
+        approvalResolved := 0, proposedAttemptId := 2, reqProviderTurnId := 9002, reqEventCursor := 4,
+        reqApprovalReqId := 0, reqSubmittedAtMs := 0, nowMs := 2010 },
+      { opCode := 8, hasTerminationReceipt := 0, hasCompletionReceipt := 0, operatorConfirmedNotDelivered := 0,
+        approvalResolved := 0, proposedAttemptId := 2, reqProviderTurnId := 0, reqEventCursor := 0,
+        reqApprovalReqId := 0, reqSubmittedAtMs := 0, nowMs := 2020 },
+      { opCode := 9, hasTerminationReceipt := 0, hasCompletionReceipt := 0, operatorConfirmedNotDelivered := 0,
+        approvalResolved := 0, proposedAttemptId := 2, reqProviderTurnId := 0, reqEventCursor := 0,
+        reqApprovalReqId := 0, reqSubmittedAtMs := 0, nowMs := 2030 },
+      { opCode := 9, hasTerminationReceipt := 1, hasCompletionReceipt := 0, operatorConfirmedNotDelivered := 0,
+        approvalResolved := 0, proposedAttemptId := 2, reqProviderTurnId := 0, reqEventCursor := 0,
+        reqApprovalReqId := 0, reqSubmittedAtMs := 0, nowMs := 2040 }
+    ]
+    for stSample in #[grok0, grokSub, grokRej, grokRun, grokCancReq] do
+      for evSample in evSamples do
+        for prose in proseSamples do
+          if !detailIsInert stSample evSample prose then
+            IO.eprintln "[orb-core-test] FAIL: Grok CloudTurnState transition branched on detail prose"
+            return 1
+    if grokSubEffs.isEmpty || grokRej.errorKind != .reconnectRequired || grokRej.phase != .queued ||
+       grokRun.errorKind != .none || grokCancReq.cancel != .requested || grokCancReq.phase != .cancelRequested then
+      IO.eprintln "[orb-core-test] FAIL: Grok typed SubmissionErrorKind / CancelState transition mismatch"
+      return 1
+    -- CancelRequested refuses Terminal without termination receipt (`hasTerminationReceipt == 0`), admits with `1`, and Terminal is sticky
+    let (noReceiptSt, noReceiptEffs) := stepCloudTurn grokCancReq {
+      opCode := 9, hasTerminationReceipt := 0, hasCompletionReceipt := 0, operatorConfirmedNotDelivered := 0,
+      approvalResolved := 0, proposedAttemptId := 2, reqProviderTurnId := 0, reqEventCursor := 0,
+      reqApprovalReqId := 0, reqSubmittedAtMs := 0, nowMs := 1050
+    }
+    if noReceiptEffs != [] || noReceiptSt != grokCancReq || noReceiptSt.phase != .cancelRequested then
+      IO.eprintln "[orb-core-test] FAIL: CancelRequested entered Terminal without termination receipt"
+      return 1
+    let (grokTerm, grokTermEffs) := finalizeCancelReceipt grokCancReq 1060
+    let (afterTerm, afterTermEffs) := beginSubmit grokTerm 3 1070 1070
+    if grokTerm.phase != .terminal || grokTerm.cancel != .confirmedReceipt || grokTermEffs.isEmpty ||
+       afterTerm != grokTerm || !afterTermEffs.isEmpty then
+      IO.eprintln "[orb-core-test] FAIL: CloudTurnState cancel receipt finalization or terminal sticky fence broken"
+      return 1
+
+    -- Hermes: split `(submittedAtMs?, eventCursor?)`, typed `WaitingApproval`, and duplicate/reordered/dropped SSE replay
+    let h0 := freshCloudTurn "m-hermes" 1 .hermes
+    let (hSub, _) := beginSubmit h0 1 1700000123456 1700000123456
+    let (hRun, _) := confirmAccepted hSub 501 0 1700000123500
+    if hRun.submittedAtMs? != some 1700000123456 || hRun.eventCursor? != none then
+      IO.eprintln "[orb-core-test] FAIL: Hermes initial (submittedAtMs?, eventCursor?) split state mismatch"
+      return 1
+    let hermesTrace :=
+      "id: 2\nevent: text_delta\ndata: {\"delta\":\"Alpha \"}\n\n" ++
+      "id: 2\nevent: text_delta\ndata: {\"delta\":\"DUP\"}\n\n" ++
+      "id: 1\nevent: text_delta\ndata: {\"delta\":\"REORDERED-STALE\"}\n\n" ++
+      "id: 5\nevent: waiting_approval\ndata: {\"request\":{\"request_id\":77,\"command\":\"git push\",\"choices\":[\"allow\",\"deny\"]}}\n\n" ++
+      "id: 4\nevent: text_delta\ndata: {\"delta\":\"LATE-4\"}\n\n" ++
+      "id: 8\nevent: approval_resolved\ndata: {\"status\":\"resumed\"}\n\n" ++
+      "id: 11\nevent: text_delta\ndata: {\"delta\":\"Omega\"}\n\n" ++
+      "id: 12\nevent: completed\ndata: {\"status\":\"completed\"}\n\n" ++
+      "id: 13\nevent: text_delta\ndata: {\"delta\":\"POST-TERMINAL\"}\n\n"
+    let approvalChunk :=
+      "id: 2\nevent: text_delta\ndata: {\"delta\":\"Alpha \"}\n\n" ++
+      "id: 5\nevent: waiting_approval\ndata: {\"request\":{\"request_id\":77,\"command\":\"git push\",\"choices\":[\"allow\",\"deny\"]}}\n\n"
+    let (hSseMid, hTurnMid, _, _) := stepHermesTurnChunk {} hRun approvalChunk 1700000124000
+    let expectedApproval : CloudApprovalRequest := { reqId := 77, command := "git push", choices := #["allow", "deny"] }
+     if hTurnMid.phase != .waitingApproval || hTurnMid.approval? != some expectedApproval ||
+       hTurnMid.approvalReqId != 77 || hTurnMid.submittedAtMs? != some 1700000123456 ||
+       hTurnMid.eventCursor? != some 5 || hTurnMid.stateRevision != hRun.stateRevision + 1 ||
+       hSseMid.eventCursor? != some 5 || hSseMid.submittedAtMs? != some 1700000123456 then
+      IO.eprintln "[orb-core-test] FAIL: Hermes typed WaitingApproval or split cursor/timestamp corrupted"
+      return 1
+    let (hSseDone, hTurnDone, hEvs, _) := stepHermesTurnChunk {} hRun hermesTrace 1700000125000
+     if hSseDone.accumulatedText != "Alpha Omega" || hSseDone.eventCursor? != some 12 ||
+       hSseDone.submittedAtMs? != some 1700000123456 || hTurnDone.phase != .terminal ||
+       hTurnDone.approval? != none || hTurnDone.approvalReqId != 0 ||
+       hTurnDone.eventCursor? != some 12 || hTurnDone.submittedAtMs? != some 1700000123456 ||
+       hTurnDone.stateRevision != hRun.stateRevision + 1 ||
+       hEvs.size != 5 then
+      IO.eprintln s!"[orb-core-test] FAIL: Hermes duplicate/reordered/dropped SSE trace mismatch: text={hSseDone.accumulatedText} evs={hEvs.size}"
+      return 1
+
+    -- Cursor Cloud follow-up timeout -> `uncertain` -> blocked fresh retry -> `inspectProviderTurns` + `bindExistingTurn`
+    -- AND `confirmNotDeliveredRetry` -> fresh `attemptId + 1`
+    let c0 := freshCloudTurn "m-cursor" 2 .cursorCloud
+    let (cSub, _) := beginSubmit c0 10 5000 5000
+    let (cUnc, cUncEffs) := markUncertain cSub 5500
+    let (cBlockedSame, cBlockedSameEffs) := beginSubmit cUnc 10 5600 5600
+    let (cBlockedNext, cBlockedNextEffs) := beginSubmit cUnc 11 5600 5600
+    if cUnc.phase != .uncertain || cUnc.errorKind != .transportTimeout || cUncEffs.isEmpty ||
+       cBlockedSame != cUnc || !cBlockedSameEffs.isEmpty ||
+       cBlockedNext != cUnc || !cBlockedNextEffs.isEmpty then
+      IO.eprintln "[orb-core-test] FAIL: Cursor Cloud uncertain turn failed to fence fresh submission"
+      return 1
+    let obsMiss := inspectProviderTurns cUnc #[{ providerTurnId := 888, attemptId := 9, submittedAtMs := 5000 }]
+    let obsHit := inspectProviderTurns cUnc #[
+      { providerTurnId := 888, attemptId := 9, submittedAtMs := 5000 },
+      { providerTurnId := 999, attemptId := 10, submittedAtMs := 5000 }
+    ]
+    if obsMiss != .none || obsHit != .matched 999 || cUnc.phase != .uncertain then
+      IO.eprintln "[orb-core-test] FAIL: inspectProviderTurns did not match durable attempt handle cleanly"
+      return 1
+    let (cBound, cBoundEffs) := bindExistingTurn cUnc 999 3 5700
+    if cBound.phase != .running || cBound.providerTurnId != 999 || cBound.eventCursor? != some 3 ||
+       cBound.errorKind != .none || cBound.lastAttemptId != 10 || cBoundEffs.isEmpty then
+      IO.eprintln "[orb-core-test] FAIL: bindExistingTurn did not reconcile uncertain turn to running"
+      return 1
+    let (cRequeued, cRequeuedEffs) := confirmNotDeliveredRetry cUnc 5700
+    let (cDupAttempt, cDupEffs) := beginSubmit cRequeued 10 5800 5800
+    let (cRetryOk, cRetryEffs) := beginSubmit cRequeued 11 5800 5800
+    if cRequeued.phase != .queued || cRequeued.errorKind != .none || cRequeuedEffs.isEmpty ||
+       cDupAttempt != cRequeued || !cDupEffs.isEmpty ||
+       cRetryOk.phase != .submitting || cRetryOk.lastAttemptId != 11 ||
+       cRetryOk.submittedAtMs? != some 5800 || cRetryEffs.isEmpty then
+      IO.eprintln "[orb-core-test] FAIL: confirmNotDeliveredRetry / attemptId+1 recovery failed"
+      return 1
+
+     -- Cancel receipt preserves the cursor and counts as one revision, including from waitingApproval.
+     let (hCancReq, _) := requestCancel hTurnMid 1700000124100
+     let (hCancKept, hCancKeptEffs) := applyHermesEventToTurn hCancReq (.cancelled 0) 1700000124200
+     let (hCancDone, hCancEffs) := applyHermesEventToTurn hCancReq (.cancelled 9) 1700000124300
+     let (hCancFromWait, hCancFromWaitEffs) := applyHermesEventToTurn hTurnMid (.cancelled 9) 1700000124400
+     let (hSubCanc, hSubCancEffs) := applyHermesEventToTurn hSub (.cancelled 4) 1700000124500
+     let (hUncCanc, hUncCancEffs) := applyHermesEventToTurn cUnc (.cancelled 4) 1700000124600
+     if hCancKeptEffs.isEmpty || hCancKept.phase != .terminal || hCancKept.eventCursor? != some 5 ||
+        hCancKept.stateRevision != hCancReq.stateRevision + 1 ||
+        hCancEffs.isEmpty || hCancDone.phase != .terminal || hCancDone.cancel != .confirmedReceipt ||
+        hCancDone.eventCursor? != some 9 || hCancDone.stateRevision != hCancReq.stateRevision + 1 ||
+        hCancFromWaitEffs.isEmpty || hCancFromWait.phase != .terminal ||
+        hCancFromWait.eventCursor? != some 9 || hCancFromWait.approval? != none ||
+        hCancFromWait.stateRevision != hTurnMid.stateRevision + 1 ||
+        !hSubCancEffs.isEmpty || hSubCanc != hSub ||
+        !hUncCancEffs.isEmpty || hUncCanc != cUnc then
+       IO.eprintln "[orb-core-test] FAIL: Hermes cancel receipt cursor or single-revision fence broken"
+       return 1
+     let (zeroReq, zeroReqEffs) := awaitApproval hRun { reqId := 0, command := "nope" } 1700000124700
+     if !zeroReqEffs.isEmpty || zeroReq != hRun then
+       IO.eprintln "[orb-core-test] FAIL: awaitApproval accepted reqId 0"
+       return 1
+
+     -- SQLite crash-durable `cloud_turn_states` persistence + CAS revision conflict check.
+     -- Schema is created inside persist/load; do not call ensureCloudTurnSchema first.
+     let ctTs ← IO.monoNanosNow
+     let ctRoot := s!"/tmp/orb-core-r4b-{ctTs}"
+     let .ok ctStore ← openCoreStore ctRoot
+       | do IO.eprintln "[orb-core-test] FAIL: openCoreStore for R4-B failed"; return 1
+     let .ok none ← loadCloudTurn? ctStore.missionsDb hTurnMid.missionId hTurnMid.turnIndex
+       | do closeCoreStore ctStore; IO.eprintln "[orb-core-test] FAIL: fresh loadCloudTurn? should be none"; return 1
+     let .ok persisted1 ← persistCloudTurn ctStore.missionsDb hTurnMid 0
+       | do closeCoreStore ctStore; IO.eprintln "[orb-core-test] FAIL: initial persistCloudTurn failed"; return 1
+     let .ok peerDb ← openSqliteDb s!"{ctRoot}/missions.db" ""
+       | do closeCoreStore ctStore; IO.eprintln "[orb-core-test] FAIL: second cloud_turn connection failed"; return 1
+     let staleRes ← persistCloudTurn ctStore.missionsDb cUnc 0
+     let cUncSameKey := { cUnc with missionId := hTurnMid.missionId, turnIndex := hTurnMid.turnIndex }
+     let conflictRes ← persistCloudTurn peerDb cUncSameKey 0
+     let staleUpdate ← persistCloudTurn peerDb { persisted1 with detail := "lost" } 0
+     let missingUpdate ← persistCloudTurn peerDb { cUnc with detail := "missing" } 7
+     let .ok persisted2 ← persistCloudTurn ctStore.missionsDb hTurnDone persisted1.stateRevision
+       | do discard <| sqliteCloseRaw peerDb.handle; closeCoreStore ctStore
+            IO.eprintln "[orb-core-test] FAIL: CAS update persistCloudTurn failed"; return 1
+     let racedUpdate ← persistCloudTurn peerDb { persisted1 with detail := "stale" } persisted1.stateRevision
+     let .ok loadedDone? ← loadCloudTurn? ctStore.missionsDb hTurnDone.missionId hTurnDone.turnIndex
+       | do discard <| sqliteCloseRaw peerDb.handle; closeCoreStore ctStore
+            IO.eprintln "[orb-core-test] FAIL: loadCloudTurn? failed"; return 1
+     let .ok loadedUnc? ← loadCloudTurn? ctStore.missionsDb cUnc.missionId cUnc.turnIndex
+       | do discard <| sqliteCloseRaw peerDb.handle; closeCoreStore ctStore
+            IO.eprintln "[orb-core-test] FAIL: loadCloudTurn? uncertain failed"; return 1
+     let resetWaitingSql :=
+       "UPDATE cloud_turn_states SET phase_code=?1,approval_req_id=?2,approval_json=?3,event_cursor=?4,state_revision=?5 WHERE mission_id=?6 AND turn_index=?7;"
+     let resetWaitingArgs : Array String := #[
+       s!"{phaseCodeOf hTurnMid}", "77",
+       "{\"req_id\":77,\"command\":\"git push\",\"choices\":[\"allow\",\"deny\"]}",
+       "5", s!"{persisted1.stateRevision}", hTurnMid.missionId, s!"{hTurnMid.turnIndex}"
+     ]
+     let corruptCases : Array String := #[
+       "UPDATE cloud_turn_states SET approval_json='' WHERE mission_id=?1 AND turn_index=?2;",
+       "UPDATE cloud_turn_states SET approval_json='not-json' WHERE mission_id=?1 AND turn_index=?2;",
+       "UPDATE cloud_turn_states SET approval_req_id=0 WHERE mission_id=?1 AND turn_index=?2;",
+       "UPDATE cloud_turn_states SET approval_json='{\"req_id\":78,\"command\":\"git push\",\"choices\":[]}' WHERE mission_id=?1 AND turn_index=?2;",
+       "UPDATE cloud_turn_states SET phase_code=2 WHERE mission_id=?1 AND turn_index=?2;",
+       "UPDATE cloud_turn_states SET phase_code=2,approval_req_id=0 WHERE mission_id=?1 AND turn_index=?2;",
+       "UPDATE cloud_turn_states SET phase_code=2,approval_json='' WHERE mission_id=?1 AND turn_index=?2;",
+       "UPDATE cloud_turn_states SET state_revision=0 WHERE mission_id=?1 AND turn_index=?2;"
+     ]
+     let badWrite ← persistCloudTurn peerDb { hTurnMid with approval? := none } 0
+     let mut corruptFailed := false
+     for sql in corruptCases do
+       let _ ← execParamQuery peerDb resetWaitingSql resetWaitingArgs
+       let upd ← execParamQuery peerDb sql #[hTurnMid.missionId, s!"{hTurnMid.turnIndex}"]
+       if upd.isOk then
+         match ← loadCloudTurn? peerDb hTurnMid.missionId hTurnMid.turnIndex with
+         | .error "cloud_turn_row_corrupt" => pure ()
+         | _ => corruptFailed := true
+       else
+         corruptFailed := true
+     let _ ← execParamQuery peerDb resetWaitingSql resetWaitingArgs
+     let .ok (some restored) ← loadCloudTurn? peerDb hTurnMid.missionId hTurnMid.turnIndex
+       | do discard <| sqliteCloseRaw peerDb.handle; closeCoreStore ctStore
+            IO.eprintln "[orb-core-test] FAIL: restored waitingApproval row did not load"; return 1
+     discard <| sqliteCloseRaw peerDb.handle
+     closeCoreStore ctStore
+     IO.FS.removeDirAll ctRoot
+     let isCasErr := fun (r : Except String CloudTurnState) =>
+       match r with | .error "cloud_turn_cas_conflict" => true | _ => false
+     let isBadApprovalErr := fun (r : Except String CloudTurnState) =>
+       match r with | .error "cloud_turn_invalid_approval_state" => true | _ => false
+     if !staleRes.isOk || !isCasErr conflictRes ||
+        !isCasErr staleUpdate || !isCasErr missingUpdate || !isCasErr racedUpdate ||
+        !isBadApprovalErr badWrite ||
+        persisted1.stateRevision != 1 || persisted2.stateRevision != persisted1.stateRevision + 1 ||
+        loadedDone? != some persisted2 || loadedUnc?.map (fun s => s.phase) != some .uncertain ||
+        corruptFailed || restored.phase != .waitingApproval then
+       IO.eprintln "[orb-core-test] FAIL: cloud_turn_states SQLite CAS or corrupt-row fence mismatch"
+       return 1
+
+     -- Hermes JSON fallback steps CloudTurnState: sticky terminal, approval resolve, cancel receipt, store round-trip.
+     let termView := seedHermesView hTurnDone { accumulatedText := "Alpha Omega", terminalStatus? := some "completed" }
+     let (termTurn, termView2, termEvs, termEffs) :=
+       applyHermesJsonFallback hTurnDone termView (.obj #[("status", .str "running"), ("output", .str "LATE")]) 1700000126000
+     if termTurn != hTurnDone || termView2.eventCursor? != termView.eventCursor? ||
+        !termEvs.isEmpty || !termEffs.isEmpty then
+       IO.eprintln "[orb-core-test] FAIL: Hermes JSON fallback mutated a sticky terminal turn"
+       return 1
+     let (resolved, resolvedView, resolvedEvs, resolvedEffs) :=
+       applyHermesJsonFallback hTurnMid (seedHermesView hTurnMid {})
+         (.obj #[("status", .str "running")]) 1700000126100
+     if resolved.phase != .running || resolved.approval? != none || resolved.approvalReqId != 0 ||
+        resolved.eventCursor? != some 6 || resolved.submittedAtMs? != hTurnMid.submittedAtMs? ||
+        resolved.stateRevision != hTurnMid.stateRevision + 1 ||
+        resolvedView.pendingApproval? != none || resolvedView.terminalStatus? != none ||
+        resolvedEvs != #[.approvalResolved 6] || resolvedEffs.isEmpty then
+       IO.eprintln "[orb-core-test] FAIL: Hermes JSON fallback did not resolve waitingApproval to running"
+       return 1
+     let (stillCanc, _, stillEvs, stillEffs) :=
+       applyHermesJsonFallback hCancReq (seedHermesView hCancReq {})
+         (.obj #[("status", .str "running"), ("output", .str "draining")]) 1700000126200
+     let (failCanc, failView, failEvs, _) :=
+       applyHermesJsonFallback hCancReq (seedHermesView hCancReq {})
+         (.obj #[("status", .str "failed"), ("error", .str "provider cancelled")]) 1700000126300
+     let (doneCanc, _, doneEvs, _) :=
+       applyHermesJsonFallback hCancReq (seedHermesView hCancReq {})
+         (.obj #[("status", .str "completed"), ("output", .str "finished")]) 1700000126400
+     if stillCanc != hCancReq || !stillEvs.isEmpty || !stillEffs.isEmpty ||
+        failCanc.phase != .terminal || failCanc.cancel != .confirmedReceipt ||
+        failCanc.eventCursor? != some 6 || failCanc.errorKind != .providerRejected ||
+        failCanc.stateRevision != hCancReq.stateRevision + 1 ||
+        failView.terminalStatus? != some "failed" || failEvs.size != 1 ||
+        doneCanc.phase != .terminal || doneCanc.eventCursor? != some 6 || doneEvs.size != 1 then
+       IO.eprintln "[orb-core-test] FAIL: Hermes JSON fallback cancel receipt fence broken"
+       return 1
+     let fbTs ← IO.monoNanosNow
+     let fbRoot := s!"/tmp/orb-core-r4b-fb-{fbTs}"
+     let .ok fbStore ← openCoreStore fbRoot
+       | do IO.eprintln "[orb-core-test] FAIL: openCoreStore for Hermes fallback failed"; return 1
+     let .ok (fbListen, fbPort) ← tcpListen "127.0.0.1" 0 16
+       | do closeCoreStore fbStore; IO.eprintln "[orb-core-test] FAIL: Hermes fallback listen failed"; return 1
+     let _ ← IO.asTask (prio := .dedicated) do
+       for idx in [0:4] do
+         if let .ok cfd ← tcpAcceptPoll fbListen 5000 then
+           let _ ← readHttpRequestFromFd cfd none 2000
+           let (statusLine, body) :=
+             if idx == 0 || idx == 2 then ("404 Not Found", "{}")
+             else if idx == 1 then ("200 OK", "{\"status\":\"running\"}")
+             else ("200 OK", "{\"status\":\"cancelled\"}")
+           let wire := s!"HTTP/1.1 {statusLine}\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}".toUTF8
+           discard <| writeAll cfd wire false
+           discard <| closeFd cfd
+       discard <| closeFd fbListen
+     let fbBase := s!"http://127.0.0.1:{fbPort}"
+     let .ok (stickyView, stickyTurn, stickyEvs) ←
+       streamOrFallbackHermesRun fbBase "run-sticky" none hTurnDone
+         { accumulatedText := "Alpha Omega", terminalStatus? := some "completed" } (some fbStore) 1700000127000
+       | do closeCoreStore fbStore; IO.eprintln "[orb-core-test] FAIL: sticky streamOrFallbackHermesRun errored"; return 1
+     let .ok none ← loadCloudTurn? fbStore.missionsDb hTurnDone.missionId hTurnDone.turnIndex
+       | do closeCoreStore fbStore; IO.eprintln "[orb-core-test] FAIL: sticky poll persisted a terminal turn"; return 1
+     let .ok (runView, runTurn, runEvs) ←
+       syncHermesTurnWithStore fbStore fbBase "run-wait" none hTurnMid {} 1700000127100
+       | do closeCoreStore fbStore; IO.eprintln "[orb-core-test] FAIL: syncHermesTurnWithStore resolve errored"; return 1
+     let .ok (some loadedRun) ← loadCloudTurn? fbStore.missionsDb hTurnMid.missionId hTurnMid.turnIndex
+       | do closeCoreStore fbStore; IO.eprintln "[orb-core-test] FAIL: resolved Hermes turn missing from store"; return 1
+     let (fbCancReq, _) := requestCancel loadedRun 1700000127150
+     let .ok persistedCancReq ← persistCloudTurn fbStore.missionsDb fbCancReq loadedRun.stateRevision
+       | do closeCoreStore fbStore; IO.eprintln "[orb-core-test] FAIL: persistCloudTurn cancelRequested errored"; return 1
+     let .ok (cancView, cancTurn, cancEvs) ←
+       streamOrFallbackHermesRun fbBase "run-cancel" none persistedCancReq (seedHermesView persistedCancReq {}) (some fbStore) 1700000127200
+       | do closeCoreStore fbStore; IO.eprintln "[orb-core-test] FAIL: cancel streamOrFallbackHermesRun errored"; return 1
+     let .ok (some loadedCanc) ← loadCloudTurn? fbStore.missionsDb persistedCancReq.missionId persistedCancReq.turnIndex
+       | do closeCoreStore fbStore; IO.eprintln "[orb-core-test] FAIL: finalized cancel turn missing from store"; return 1
+     closeCoreStore fbStore
+     IO.FS.removeDirAll fbRoot
+     if stickyTurn != hTurnDone || stickyView.eventCursor? != some 12 || !stickyEvs.isEmpty ||
+        runTurn.phase != .running || runTurn.approval? != none || runTurn.eventCursor? != some 6 ||
+        runTurn.stateRevision != 1 || runView.pendingApproval? != none ||
+        runEvs != #[.approvalResolved 6] || loadedRun != runTurn ||
+        cancTurn.phase != .terminal || cancTurn.cancel != .confirmedReceipt ||
+        cancTurn.eventCursor? != some 7 || cancTurn.stateRevision != 3 ||
+        loadedCanc != cancTurn ||
+        cancView.terminalStatus? != some "cancelled" || cancEvs != #[.cancelled 7] then
+       IO.eprintln "[orb-core-test] FAIL: streamOrFallbackHermesRun JSON fallback round-trip mismatch"
+       return 1
+     pure (0 : UInt32)) != 0 then return 1
   let hostOk ← runAllHostTests emitLogPath?
   if !hostOk then
     IO.eprintln "[orb-core-test] FAIL: OrbCore.HostTests failed"
