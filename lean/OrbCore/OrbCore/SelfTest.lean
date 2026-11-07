@@ -25,6 +25,7 @@ open OrbCore.CloudAgents
 open OrbCore.MemoryAndCloud
 open OrbCore.Cyber
 open OrbCore.Skills
+open OrbCore.QueueCont
 open OrbCore.Control
 open OrbCore.HostTests
 
@@ -137,7 +138,7 @@ private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (valid
   let rep1Str := String.fromUTF8! rep1Resp.body
   if rep1Resp.status != 200 ||
      (rep1Str.splitOn "\"action\":4").length != 2 ||
-     (rep1Str.splitOn "\"status\":\"interrupted\"").length != 2 ||
+     (rep1Str.splitOn "\"status\":\"waiting_rate_limit\"").length != 2 ||
      (rep1Str.splitOn "\"scheduled_remote_job_id\":\"job-origin-0\"").length != 2 ||
      (rep1Str.splitOn "\"failed_job_id\":\"job-enospc-1\"").length != 2 ||
      (rep1Str.splitOn "\"retries\":1").length != 2 then
@@ -180,7 +181,7 @@ private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (valid
   --    When a manual resume advances `placement_job_id` with a non-`remote_dispatch_failed` run,
   --    `POST /api/control/missions/:id/remote-replay` MUST return `409 scheduled_recovery_superseded` and clear the stale wait!
   let .ok () ← upsertMission store {
-    id := "m-manual-sup", title := "Manual Supersession Test", status := "interrupted",
+    id := "m-manual-sup", title := "Manual Supersession Test", status := "waiting_rate_limit",
     backend := "claude", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
     updatedAt := "t-sup0", totalCostCents := 0
   } | do closeCoreStore store; return 1
@@ -242,10 +243,16 @@ private def runPostCrashAndReconcileExtras (store : CoreStore) (tmpRoot : String
   } | do closeCoreStore store; return 1
   let _ ← execParamQuery store.missionsDb
     "UPDATE missions SET deferred_goal='run after dependency',terminal_reason='remote_dispatch_failed' WHERE id='m-deferred-pend';" #[]
+  let _ ← enqueueStructuredFollowup store "core" "q-boot1-inflight" "m-r3c-local" "claimed before crash" "desktop" "t-qb1"
+  let _ ← stepQueueItem store "core" "q-boot1-inflight" 0 "1" s!"{store.bootEpoch}" "0" "t-qb2"
+  let _ ← enqueueStructuredFollowup store "core" "q-boot1-delivered" "m-r3c-local" "delivered before crash" "desktop" "t-qd1"
+  let _ ← stepQueueItem store "core" "q-boot1-delivered" 0 "1" s!"{store.bootEpoch}" "0" "t-qd2"
+  let _ ← stepQueueItem store "core" "q-boot1-delivered" 1 "1" s!"{store.bootEpoch}" "77" "t-qd3"
 
   closeCoreStore store
   -- Re-opening `openCoreStore tmpRoot` MUST auto-increment persistent `bootEpoch` (`1 -> 2`), recover stale boot-1 leases,
-  -- heal `m-crash-pend` (`pending -> interrupted` with `usage_limit_wait`), and preserve `m-deferred-pend` (`pending`)!
+  -- heal `m-crash-pend` (`pending -> waiting_rate_limit` with `usage_limit_wait`), preserve `m-deferred-pend` (`pending`),
+  -- and convert boot-1 claimed `q-boot1-inflight` into `crash_tombstone` (`phase=3`) via `outboxCrashReconcileStep`!
   let .ok storeBoot2 ← openCoreStore tmpRoot
     | do IO.eprintln "[orb-core-test] FAIL: second openCoreStore failed"; return 1
   if storeBoot2.bootEpoch != 2 then
@@ -254,14 +261,640 @@ private def runPostCrashAndReconcileExtras (store : CoreStore) (tmpRoot : String
     return 1
   let cpRows ← execParamQuery storeBoot2.missionsDb "SELECT status,COALESCE(terminal_reason,'') FROM missions WHERE id='m-crash-pend';" #[]
   let dpRows ← execParamQuery storeBoot2.missionsDb "SELECT status FROM missions WHERE id='m-deferred-pend';" #[]
+  let qtRows ← execParamQuery storeBoot2.missionsDb "SELECT phase,state FROM remote_message_queue WHERE message_id='q-boot1-inflight';" #[]
   let cpStatus := match cpRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
   let cpReason := match cpRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
   let dpStatus := match dpRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
-  if cpStatus != "interrupted" || cpReason != "usage_limit_wait" || dpStatus != "pending" then
+  let qtPhase := match qtRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let qtState := match qtRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  if cpStatus != "waiting_rate_limit" || cpReason != "usage_limit_wait" || dpStatus != "pending" ||
+     qtPhase != "3" || qtState != "crash_tombstone" then
     closeCoreStore storeBoot2
-    IO.eprintln s!"[orb-core-test] FAIL: startup reconcileStrandedPendingMissions mismatch: cp=({cpStatus},{cpReason}) dp={dpStatus}"
+    IO.eprintln s!"[orb-core-test] FAIL: startup reconcile mismatch: cp=({cpStatus},{cpReason}) dp={dpStatus} qt=({qtPhase},{qtState})"
+    return 1
+  -- Verify restart durability: accepted id (`q-boot1-delivered`) is preserved (never overwritten/re-inserted) across restart,
+  -- delivered & crash tombstone rows cannot be re-claimed or edited without operator requeue,
+  -- and `mission_supervision` `bg_wait_arms` survived restart without zeroing!
+  let dupAfterBoot ← enqueueStructuredFollowup storeBoot2 "core" "q-boot1-delivered" "m-r3c-local" "replay after restart" "desktop" "t-qd4"
+  let reclaimDeliveredAfterBoot ← stepQueueItem storeBoot2 "core" "q-boot1-delivered" 0 "2" s!"{storeBoot2.bootEpoch}" "0" "t-qd5"
+  let reclaimTombstoneAfterBoot ← stepQueueItem storeBoot2 "core" "q-boot1-inflight" 0 "2" s!"{storeBoot2.bootEpoch}" "0" "t-qb3"
+  let editTombstoneAfterBoot ← stepQueueItem storeBoot2 "core" "q-boot1-inflight" 6 "2" s!"{storeBoot2.bootEpoch}" "0" "t-qb4" 0 0 "tampered"
+  let .ok (bgBoot2, _) ← readSupervision storeBoot2 "m-r3d-place"
+    | do closeCoreStore storeBoot2; IO.eprintln "[orb-core-test] FAIL: readSupervision boot2 failed"; return 1
+  let sameDupContent := match dupAfterBoot with | .ok c => c == "delivered before crash" | .error _ => false
+  let rejDelivered := match reclaimDeliveredAfterBoot with | .ok (.rejected _) => true | _ => false
+  let rejTombstone := match reclaimTombstoneAfterBoot with | .ok (.rejected _) => true | _ => false
+  let rejEditTombstone := match editTombstoneAfterBoot with | .ok (.rejected _) => true | _ => false
+  if !sameDupContent || !rejDelivered || !rejTombstone || !rejEditTombstone || bgBoot2 == 0 then
+    closeCoreStore storeBoot2
+    IO.eprintln s!"[orb-core-test] FAIL: restart durability failed: sameDupContent={sameDupContent} rejD={rejDelivered} rejT={rejTombstone} rejEditT={rejEditTombstone} bgBoot2={bgBoot2}"
+    return 1
+  let bgStatusRows ← execParamQuery storeBoot2.missionsDb "SELECT status FROM missions WHERE id='m-r3d-place';" #[]
+  let bgStatus := match bgStatusRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  if bgStatus != "interrupted" then
+    closeCoreStore storeBoot2
+    IO.eprintln s!"[orb-core-test] FAIL: undurable waiting_background survived restart as {bgStatus}"
     return 1
   closeCoreStore storeBoot2
+  return 0
+
+private def sendTestHttp
+    (appSt : CoreAppState) (validJwt method target body : String) (nowSec : UInt64) :
+    IO (Except String (Nat × String)) := do
+  let raw :=
+    if body.isEmpty then
+      s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
+    else
+      s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}".toUTF8
+  let .ok req := parseRequest raw none | return .error s!"parseRequest failed for {method} {target}"
+  let .ok resp ← dispatchCoreRequest appSt req nowSec | return .error s!"dispatch failed for {method} {target}"
+  return .ok (resp.status, String.fromUTF8! resp.body)
+
+private def runR3cdQueueAndContinuationTests
+    (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
+  let failWith (msg : String) : IO UInt32 := do
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: {msg}"
+    return 1
+
+  -- Seed dedicated R3-C / R3-D test missions across local (`managed`), `client`, and `remote` placements
+  for (mid, place, stStr) in #[("m-r3c-local", "managed", "active"), ("m-r3c-remote", "remote", "active"), ("m-r3d-cont", "managed", "awaiting_user"), ("m-r3d-place", "client", "awaiting_user")] do
+    let .ok () ← upsertMission store {
+      id := mid, title := s!"R3 {mid}", status := stStr,
+      backend := "codex", modelOverride := "", modelEffort := "medium", workingDirectory := store.rootDir,
+      placementKind := place, nodeBootEpoch := store.bootEpoch, updatedAt := s!"{nowSec}", totalCostCents := 0
+    } | return (← failWith s!"upsertMission {mid} failed")
+
+  -- 1. SM-04: Row-level queue CAS (`queued -> claimed -> delivered`), edit fence, crash tombstone & operator requeue
+  let .ok (sEnq1, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue"
+    "{\"id\":\"q-r3c-1\",\"mission_id\":\"m-r3c-local\",\"content\":\"first step\",\"source\":\"desktop\"}" nowSec
+    | return (← failWith "POST /api/control/queue q-r3c-1 transport")
+  if sEnq1 != 201 then return (← failWith s!"enqueue q-r3c-1 expected 201, got {sEnq1}")
+
+  let .ok (sClaim1, bClaim1) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-1/step"
+    s!"\{\"op\":0,\"run_generation\":1,\"node_boot_epoch\":{store.bootEpoch}}" nowSec
+    | return (← failWith "claim q-r3c-1 transport")
+  if sClaim1 != 200 || (bClaim1.splitOn "\"phase_name\":\"claimed\"").length != 2 then
+    return (← failWith s!"claim q-r3c-1 mismatch: {sClaim1} {bClaim1}")
+
+  -- Editing a claimed item MUST return 409
+  let .ok (sEditClaimed, _) ← sendTestHttp appSt validJwt "PATCH" "/api/control/queue/q-r3c-1" "{\"content\":\"late edit\"}" nowSec
+    | return (← failWith "PATCH claimed transport")
+  if sEditClaimed != 409 then return (← failWith s!"PATCH claimed expected 409, got {sEditClaimed}")
+
+  -- Confirm delivered (`op=1`, `delivery_seq=77`)
+  let .ok (sDeliv1, bDeliv1) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-1/step"
+    s!"\{\"op\":1,\"run_generation\":1,\"node_boot_epoch\":{store.bootEpoch},\"delivery_seq\":77}" nowSec
+    | return (← failWith "deliver q-r3c-1 transport")
+  if sDeliv1 != 200 || (bDeliv1.splitOn "\"delivered_seq\":77").length != 2 then
+    return (← failWith s!"deliver q-r3c-1 mismatch: {sDeliv1} {bDeliv1}")
+
+  -- Delivered item NEVER replays (`op=0`), edits (`PATCH`), or cancels (`op=5`)
+  let .ok (sReplayDeliv, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-1/step"
+    s!"\{\"op\":0,\"run_generation\":2,\"node_boot_epoch\":{store.bootEpoch}}" nowSec
+    | return (← failWith "replay delivered transport")
+  let .ok (sEditDeliv, _) ← sendTestHttp appSt validJwt "PATCH" "/api/control/queue/q-r3c-1" "{\"content\":\"after deliv\"}" nowSec
+    | return (← failWith "edit delivered transport")
+  let .ok (sCancelDeliv, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-1/step"
+    s!"\{\"op\":5,\"run_generation\":2,\"node_boot_epoch\":{store.bootEpoch}}" nowSec
+    | return (← failWith "cancel delivered transport")
+  if sReplayDeliv != 409 || sEditDeliv != 409 || sCancelDeliv != 409 then
+    return (← failWith s!"delivered queue fence violated: replay={sReplayDeliv} edit={sEditDeliv} cancel={sCancelDeliv}")
+
+  -- Crash-tombstone flow (`q-r3c-tomb`): claim -> uncertain timeout (`op=3`) -> silent claim/requeue without operator confirmation rejected -> operator requeue (`operator_confirmed=true`) succeeds!
+  let .ok (sEnq2, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue"
+    "{\"id\":\"q-r3c-tomb\",\"mission_id\":\"m-r3c-local\",\"content\":\"uncertain msg\",\"source\":\"telegram\"}" nowSec
+    | return (← failWith "enqueue q-r3c-tomb")
+  let .ok (sClaim2, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-tomb/step"
+    s!"\{\"op\":0,\"run_generation\":1,\"node_boot_epoch\":{store.bootEpoch}}" nowSec
+    | return (← failWith "claim q-r3c-tomb")
+  let .ok (sTomb, bTomb) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-tomb/step"
+    s!"\{\"op\":3,\"run_generation\":1,\"node_boot_epoch\":{store.bootEpoch},\"uncertain_timeout\":true}" nowSec
+    | return (← failWith "tombstone q-r3c-tomb")
+  if sEnq2 != 201 || sClaim2 != 200 || sTomb != 200 || (bTomb.splitOn "\"phase_name\":\"crash_tombstone\"").length != 2 then
+    return (← failWith s!"tombstone transition failed: {sTomb} {bTomb}")
+  let .ok (sSilentClaim, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-tomb/step"
+    s!"\{\"op\":0,\"run_generation\":2,\"node_boot_epoch\":{store.bootEpoch}}" nowSec
+    | return (← failWith "silent claim tombstone")
+  let .ok (sUnconfReq, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-tomb/requeue" "{\"operator_confirmed\":false}" nowSec
+    | return (← failWith "unconfirmed requeue")
+  let .ok (sEditTomb, _) ← sendTestHttp appSt validJwt "PATCH" "/api/control/queue/q-r3c-tomb" "{\"content\":\"edit tomb\"}" nowSec
+    | return (← failWith "edit tombstone")
+  if sSilentClaim != 409 || sUnconfReq != 409 || sEditTomb != 409 then
+    return (← failWith s!"crash_tombstone block violated: claim={sSilentClaim} unconf={sUnconfReq} edit={sEditTomb}")
+  let .ok (sConfReq, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-tomb/requeue" "{\"operator_confirmed\":true}" nowSec
+    | return (← failWith "confirmed requeue")
+  if sConfReq != 200 then return (← failWith s!"confirmed requeue expected 200, got {sConfReq}")
+
+  -- 2. SM-05: Structured deferred batches unpacked uniformly across sources & HTML trailer stripped; malformed rejected
+  let validBatchJson := "{\"messages\":[[\"550e8400-e29b-41d4-a716-446655440000\",\"msg one\"],[\"550e8400-e29b-41d4-a716-446655440001\",\"msg two\"]]}"
+  let validB64 := OrbBin.PosixExt.base64Encode validBatchJson.toUTF8
+  let trailerContent := s!"Primary goal\n<!-- sandboxed:messages:v1:{validB64} -->"
+  let enqTrailerBody := s!"\{\"id\":\"q-r3c-batch\",\"mission_id\":\"m-r3c-local\",\"content\":{jsonEscape trailerContent},\"source\":\"hermes\"}"
+  let .ok (sBatchOk, bBatchOk) ← sendTestHttp appSt validJwt "POST" "/api/control/queue" enqTrailerBody nowSec
+    | return (← failWith "enqueue trailer batch")
+  if sBatchOk != 201 || (bBatchOk.splitOn "sandboxed:messages:v1:").length != 1 || (bBatchOk.splitOn "\"content\":\"Primary goal\"").length != 2 then
+    return (← failWith s!"SM-05 trailer not stripped on write: {sBatchOk} {bBatchOk}")
+  let bCntRows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM deferred_message_batches WHERE mission_id='m-r3c-local' AND source='hermes';" #[]
+  let bCnt := match bCntRows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
+  if bCnt != 2 then return (← failWith s!"expected 2 unpacked rows in deferred_message_batches, got {bCnt}")
+
+  -- Also test `deferred-unpack` on `missions.deferred_goal` with non-control source (`webhook`)
+  let _ ← execParamQuery store.missionsDb "UPDATE missions SET deferred_goal=?1 WHERE id='m-r3c-remote';" #[trailerContent]
+  let .ok (sUnpack, bUnpack) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3c-remote/deferred-unpack" "{\"source\":\"webhook\"}" nowSec
+    | return (← failWith "deferred-unpack")
+  let remGoalRows ← execParamQuery store.missionsDb "SELECT deferred_goal FROM missions WHERE id='m-r3c-remote';" #[]
+  let remGoal := match remGoalRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  if sUnpack != 200 || (bUnpack.splitOn "\"unpacked\":2").length != 2 || remGoal != "Primary goal" then
+    return (← failWith s!"deferred-unpack mismatch: {sUnpack} {bUnpack} goal={remGoal}")
+
+  -- Malformed UUID / duplicate IDs / empty content MUST return 400
+  let badUuidB64 := OrbBin.PosixExt.base64Encode "{\"messages\":[[\"not-a-uuid\",\"hi\"]]}".toUTF8
+  let dupUuidB64 := OrbBin.PosixExt.base64Encode "{\"messages\":[[\"550e8400-e29b-41d4-a716-446655440000\",\"a\"],[\"550e8400-e29b-41d4-a716-446655440000\",\"b\"]]}".toUTF8
+  for badB64 in #[badUuidB64, dupUuidB64, "%%%not_base64%%%"] do
+    let badMsg := s!"Goal\n<!-- sandboxed:messages:v1:{badB64} -->"
+    let .ok (sBad, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue"
+      s!"\{\"id\":\"q-bad\",\"mission_id\":\"m-r3c-local\",\"content\":{jsonEscape badMsg}}" nowSec
+      | return (← failWith "bad batch transport")
+    if sBad != 400 then return (← failWith s!"expected 400 on malformed deferred trailer, got {sBad}")
+
+  -- 3. SM-06: Unified local (`m-r3c-local`) + remote (`m-r3c-remote`) `waiting_rate_limit` park & resume
+  let dueRl := nowSec + 120
+  for mid in #["m-r3c-local", "m-r3c-remote"] do
+    -- Past `not_before` rejected (409)
+    let .ok (sPast, _) ← sendTestHttp appSt validJwt "POST" s!"/api/control/missions/{mid}/rate-limit/park"
+      s!"\{\"not_before\":{nowSec - 5},\"resume_intent\":true}" nowSec | return (← failWith "past park")
+    if sPast != 409 then return (← failWith s!"{mid} past not_before should 409, got {sPast}")
+    -- Valid park -> `waiting_rate_limit`
+    let .ok (sPark, bPark) ← sendTestHttp appSt validJwt "POST" s!"/api/control/missions/{mid}/rate-limit/park"
+      s!"\{\"not_before\":{dueRl},\"resume_intent\":true}" nowSec | return (← failWith "valid park")
+    if sPark != 200 || (bPark.splitOn "\"status\":\"waiting_rate_limit\"").length != 2 then
+      return (← failWith s!"{mid} park failed: {sPark} {bPark}")
+    -- Early resume before `dueRl` rejected (409)
+    let .ok (sEarly, _) ← sendTestHttp appSt validJwt "POST" s!"/api/control/missions/{mid}/rate-limit/resume" "{}" (nowSec + 30)
+      | return (← failWith "early resume")
+    if sEarly != 409 then return (← failWith s!"{mid} early resume should 409, got {sEarly}")
+    -- Resume at `dueRl` -> `active`
+    let .ok (sRes, bRes) ← sendTestHttp appSt validJwt "POST" s!"/api/control/missions/{mid}/rate-limit/resume" "{}" dueRl
+      | return (← failWith "due resume")
+    if sRes != 200 || (bRes.splitOn "\"status\":\"active\"").length != 2 then
+      return (← failWith s!"{mid} resume failed: {sRes} {bRes}")
+
+  -- 4. SM-07: Dedicated `mission_continuations` via MCP `/automations` payload, cron separation, replace, race, Hosted Stop vs local interrupt
+  let mcpWakeBody1 :=
+    "{\"command_source\":{\"type\":\"inline\",\"content\":\"check child status\"}," ++
+    "\"trigger\":{\"type\":\"interval\",\"seconds\":180},\"stop_policy\":{\"type\":\"after_first_fire\"}," ++
+    "\"variables\":{\"__wakeup_request_id\":\"req-w-1\",\"__wakeup_reason\":\"poll child\",\"__wakeup_source\":\"automation-manager\"}}"
+  let .ok (sW1, bW1) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3d-cont/automations" mcpWakeBody1 nowSec
+    | return (← failWith "arm wakeup 1")
+  let .ok (sW1Dup, bW1Dup) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3d-cont/automations" mcpWakeBody1 nowSec
+    | return (← failWith "idempotent wakeup 1")
+  if sW1 != 201 || sW1Dup != 201 || bW1 != bW1Dup then
+    return (← failWith s!"idempotent wakeup mismatch: {sW1}/{sW1Dup} {bW1} vs {bW1Dup}")
+
+  -- User cron table `mission_automations` MUST remain empty for one-shot wakeups; posting a real cron strips `__wakeup_*`
+  let .ok (sCronList0, bCronList0) ← sendTestHttp appSt validJwt "GET" "/api/control/missions/m-r3d-cont/automations" "" nowSec
+    | return (← failWith "list cron 0")
+  if sCronList0 != 200 || bCronList0 != "[]" then
+    return (← failWith s!"one-shot wakeup leaked into mission_automations: {bCronList0}")
+  let cronWithLeak := "{\"id\":\"cron-clean-1\",\"cron_expr\":\"*/15 * * * *\",\"prompt\":\"periodic\",\"variables\":{\"env\":\"prod\",\"__wakeup_reason\":\"strip_me\"}}"
+  let .ok (sCronAdd, bCronAdd) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3d-cont/automations" cronWithLeak nowSec
+    | return (← failWith "add cron")
+  if sCronAdd != 201 || (bCronAdd.splitOn "__wakeup_").length != 1 || (bCronAdd.splitOn "\"env\":\"prod\"").length != 2 then
+    return (← failWith s!"cron __wakeup_* variable sanitization failed: {sCronAdd} {bCronAdd}")
+
+  -- Second time wakeup with new `request_id` replaces the existing armed time wakeup in place (`count` stays 1)
+  let mcpWakeBody2 :=
+    "{\"command_source\":{\"type\":\"inline\",\"content\":\"updated prompt\"}," ++
+    "\"trigger\":{\"type\":\"interval\",\"seconds\":300},\"stop_policy\":{\"type\":\"after_first_fire\"}," ++
+    "\"variables\":{\"__wakeup_request_id\":\"req-w-2\",\"__wakeup_reason\":\"updated reason\",\"__wakeup_source\":\"automation-manager\"}}"
+  let .ok (sW2, bW2) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3d-cont/automations" mcpWakeBody2 nowSec
+    | return (← failWith "replace wakeup 2")
+  if sW2 != 201 then return (← failWith s!"replace wakeup expected 201, got {sW2}")
+  let contId := match (OrbBin.Json.parse bW2).toOption.bind (·.fieldStr? "id") with | some cid => cid | none => ""
+  if contId.isEmpty then return (← failWith s!"missing continuation id in {bW2}")
+
+  -- Check `orb/src/continuations.ts` contract + SM-01 parity across `GET /missions`, `GET /missions/:id`, and `GET /missions/:id/health`
+  let expectedIso300 := formatEpochIso8601Utc (nowSec + 300)
+  let _ ← execParamQuery store.missionsDb "UPDATE missions SET status='paused' WHERE id='m-r3d-cont';" #[]
+  let .ok (sDet, bDet) ← sendTestHttp appSt validJwt "GET" "/api/control/missions/m-r3d-cont" "" nowSec | return (← failWith "detail")
+  let .ok (sHlth, bHlth) ← sendTestHttp appSt validJwt "GET" "/api/control/missions/m-r3d-cont/health" "" nowSec | return (← failWith "health")
+  let .ok (sList, bList) ← sendTestHttp appSt validJwt "GET" "/api/control/missions" "" nowSec | return (← failWith "list")
+  if sDet != 200 || sHlth != 200 || sList != 200 ||
+     (bDet.splitOn "\"health_verdict\":\"paused_wakeup\"").length != 2 ||
+     (bHlth.splitOn "\"health_verdict\":\"paused_wakeup\"").length != 2 ||
+     (bList.splitOn "\"health_verdict\":\"paused_wakeup\"").length != 2 ||
+     (bDet.splitOn "\"state\":\"scheduled\"").length != 2 ||
+     (bDet.splitOn s!"\"next_at\":\"{expectedIso300}\"").length != 2 ||
+     (bList.splitOn s!"\"next_at\":\"{expectedIso300}\"").length != 2 ||
+     (bDet.splitOn s!"\"next_at\":\"{nowSec + 300}\"").length != 1 ||
+     (bDet.splitOn "\"reason\":\"updated reason\"").length != 2 then
+    return (← failWith s!"SM-01/SM-07 projection mismatch:\ndetail={bDet}\nhealth={bHlth}")
+
+  -- Local runner interrupt (`POST /interrupt`) MUST preserve armed continuation (`phase=1`)
+  let .ok (sInt, _) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3d-cont/interrupt" "{}" nowSec
+    | return (← failWith "local interrupt")
+  let .ok (_, bAfterInt) ← sendTestHttp appSt validJwt "GET" "/api/control/missions/m-r3d-cont" "" nowSec
+    | return (← failWith "detail after interrupt")
+  if sInt != 200 || (bAfterInt.splitOn "\"state\":\"scheduled\"").length != 2 then
+    return (← failWith s!"local interrupt wrongly revoked armed continuation: {bAfterInt}")
+
+  -- Fire continuation (`action=resume` at due time) -> `queued`; then late `cancel` loses race -> 409!
+  let .ok (sFire, _) ← sendTestHttp appSt validJwt "POST" s!"/api/control/automations/{contId}/action" "{\"action\":\"resume\"}" (nowSec + 301)
+    | return (← failWith "fire continuation")
+  let .ok (sCancelRace, _) ← sendTestHttp appSt validJwt "POST" s!"/api/control/automations/{contId}/action" "{\"action\":\"cancel\"}" (nowSec + 302)
+    | return (← failWith "cancel race continuation")
+  if sFire != 200 || sCancelRace != 409 then
+    return (← failWith s!"continuation resume/cancel-race mismatch: fire={sFire} cancel={sCancelRace}")
+
+  -- Arm a durable-job wakeup (`schedule_job_wakeup` shape), then Hosted Stop (`POST /stop`) bumps `run_generation` and revokes continuations + waiting queue!
+  let jobWakeBody :=
+    "{\"command_source\":{\"type\":\"inline\",\"content\":\"on job done\"}," ++
+    "\"trigger\":{\"type\":\"durable_job_terminal\",\"job_id\":\"550e8400-e29b-41d4-a716-446655440099\"}," ++
+    "\"stop_policy\":{\"type\":\"after_first_fire\"}," ++
+    "\"variables\":{\"__wakeup_request_id\":\"req-job-1\",\"__wakeup_reason\":\"await build\",\"__wakeup_source\":\"durable-job-terminal\"}}"
+  let .ok (sJW, _) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3d-cont/automations" jobWakeBody nowSec
+    | return (← failWith "arm job wakeup")
+  let .ok (sStop, bStop) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3d-cont/stop" "{}" nowSec
+    | return (← failWith "hosted stop")
+  let .ok (sStaleArm, _) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3d-cont/automations"
+    "{\"run_generation\":1,\"command_source\":{\"type\":\"inline\",\"content\":\"stale\"},\"trigger\":{\"type\":\"interval\",\"seconds\":60},\"stop_policy\":{\"type\":\"after_first_fire\"},\"variables\":{\"__wakeup_request_id\":\"req-stale-1\"}}" nowSec
+    | return (← failWith "stale arm")
+  if sJW != 201 || sStop != 200 || (bStop.splitOn "\"run_generation\":2").length != 2 || sStaleArm != 409 then
+    return (← failWith s!"Hosted Stop / stale generation fence failed: jw={sJW} stop={sStop} ({bStop}) staleArm={sStaleArm}")
+
+  -- 5. SM-10: `beginMissionRun` reads typed `missions.placement_kind` (ignoring adversarial `tags`) and retires stale armed continuations on generation advance
+  let _ ← execParamQuery store.missionsDb "UPDATE missions SET run_generation=0,tags='[\"remote\",\"invalid-tag\"]' WHERE id='m-r3d-place';" #[]
+  let .ok (sRun1, bRun1) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3d-place/runs/begin" "{\"run_id\":\"run-p-1\",\"owner_epoch\":1}" nowSec
+    | return (← failWith "begin run 1")
+  if sRun1 != 201 || (bRun1.splitOn "\"placement_kind\":\"client\"").length != 2 || (bRun1.splitOn "\"generation\":1").length != 2 then
+    return (← failWith s!"SM-10 typed placement_kind mismatch: {sRun1} {bRun1}")
+  -- Second `begin` while `run-p-1` is non-terminal MUST reject with 409
+  let .ok (sRunDup, _) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3d-place/runs/begin" "{\"run_id\":\"run-p-2\",\"owner_epoch\":1}" nowSec
+    | return (← failWith "begin dup run")
+  if sRunDup != 409 then return (← failWith s!"concurrent non-terminal beginMissionRun expected 409, got {sRunDup}")
+
+  -- 6. SM-09: Durable supervision counters + shared reconcile (`POST /api/control/missions/reconcile`)
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE missions SET status='waiting_background',node_boot_epoch=0 WHERE id='m-r3d-place';" #[]
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE mission_runs SET execution_state='terminal' WHERE mission_id='m-r3d-place';" #[]
+  let .ok (sRec, bRec) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/reconcile" "{}" nowSec
+    | return (← failWith "shared reconcile")
+  let .ok (sSup, bSup) ← sendTestHttp appSt validJwt "GET" "/api/control/missions/m-r3d-place/supervision" "" nowSec
+    | return (← failWith "get supervision")
+  if sRec != 200 || sSup != 200 || (bSup.splitOn "\"bg_wait_arms\":1").length != 2 then
+    return (← failWith s!"SM-09 shared reconcile / bg_wait_arms mismatch: rec={bRec} sup={bSup}")
+
+  -- Round-2 BLOCK regressions (lifecycle CAS, trailer strip, durable background wait, rate-limit status).
+  let .ok () ← upsertMission store {
+    id := "m-r2-term", title := "Terminal Stop Fence", status := "completed",
+    backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    updatedAt := "t-r2", totalCostCents := 0
+  } | return (← failWith "seed m-r2-term")
+  let .ok (sStopTerm, _) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r2-term/stop" "{}" nowSec
+    | return (← failWith "stop terminal")
+  let .ok (sIntTerm, _) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r2-term/interrupt" "{}" nowSec
+    | return (← failWith "interrupt terminal")
+  let .ok (sStopMiss, _) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r2-missing/stop" "{}" nowSec
+    | return (← failWith "stop missing")
+  let .ok (sIntMiss, _) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r2-missing/interrupt" "{}" nowSec
+    | return (← failWith "interrupt missing")
+  if sStopTerm != 409 || sIntTerm != 409 || sStopMiss != 404 || sIntMiss != 404 then
+    return (← failWith s!"BLOCK1 stop/interrupt codes: stopT={sStopTerm} intT={sIntTerm} stopM={sStopMiss} intM={sIntMiss}")
+  let .ok () ← upsertMission store {
+    id := "m-r2-run", title := "Terminal Begin Fence", status := "failed",
+    backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    updatedAt := "t-r2b", totalCostCents := 0, placementKind := "managed"
+  } | return (← failWith "seed m-r2-run")
+  let .ok (sBeginTerm, _) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r2-run/runs/begin" "{\"run_id\":\"run-term\",\"owner_epoch\":1}" nowSec
+    | return (← failWith "begin terminal")
+  if sBeginTerm != 409 then
+    return (← failWith s!"BLOCK1 beginMissionRun on failed expected 409, got {sBeginTerm}")
+
+  let trailB64 := OrbBin.PosixExt.base64Encode "{\"messages\":[[\"550e8400-e29b-41d4-a716-4466554400aa\",\"follow one\"]]}".toUTF8
+  let trailBody := s!"Visible goal\n<!-- sandboxed:messages:v1:{trailB64} -->"
+  let .ok (sTrail, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue"
+    s!"\{\"id\":\"q-r2-trail\",\"mission_id\":\"m-r2-run\",\"content\":{jsonEscape trailBody}}" nowSec
+    | return (← failWith "enqueue trailer")
+  let trailRows ← execParamQuery store.missionsDb
+    "SELECT payload FROM remote_message_queue WHERE message_id='q-r2-trail';" #[]
+  let trailPayload := match trailRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let batchRows ← execParamQuery store.missionsDb
+    "SELECT COUNT(*) FROM deferred_message_batches WHERE mission_id='m-r2-run' AND message_id='550e8400-e29b-41d4-a716-4466554400aa';" #[]
+  let batchN := match batchRows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
+  if sTrail != 201 || (trailPayload.splitOn "sandboxed:messages").length != 1 || batchN != 1 then
+    return (← failWith s!"BLOCK3 trailer persisted: status={sTrail} payload={trailPayload} batchN={batchN}")
+  let .ok (sEditTrail, _) ← sendTestHttp appSt validJwt "PATCH" "/api/control/queue/q-r2-trail"
+    s!"\{\"content\":{jsonEscape trailBody}}" nowSec | return (← failWith "edit trailer")
+  if sEditTrail != 400 then
+    return (← failWith s!"BLOCK2 edit trailer expected 400, got {sEditTrail}")
+  let .ok (sEditClaim, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r2-trail/step"
+    "{\"op\":0,\"run_generation\":1}" nowSec | return (← failWith "claim trail row")
+  let .ok (sEditAfterClaim, _) ← sendTestHttp appSt validJwt "PATCH" "/api/control/queue/q-r2-trail"
+    "{\"content\":\"too late\"}" nowSec | return (← failWith "edit claimed")
+  if sEditClaim != 200 || sEditAfterClaim != 409 then
+    return (← failWith s!"BLOCK2 claimed edit codes: claim={sEditClaim} edit={sEditAfterClaim}")
+
+  let .ok () ← upsertMission store {
+    id := "m-r2-bg", title := "Durable Background", status := "waiting_background",
+    backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    updatedAt := "t-r2c", totalCostCents := 0
+  } | return (← failWith "seed m-r2-bg")
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE missions SET node_boot_epoch=0 WHERE id='m-r2-bg';" #[]
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,created_at,updated_at) " ++
+     "VALUES('cont-r2-bg','m-r2-bg',1,1,1,'time','durable','stay','req-r2-bg','t','t');") #[]
+  let .ok (sKeepBg, _) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/reconcile" "{}" nowSec
+    | return (← failWith "reconcile durable bg")
+  let bgKeepRows ← execParamQuery store.missionsDb "SELECT status FROM missions WHERE id='m-r2-bg';" #[]
+  let bgKept := match bgKeepRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  if sKeepBg != 200 || bgKept != "waiting_background" then
+    return (← failWith s!"BLOCK4 durable waiting_background flipped to {bgKept}")
+
+  let .ok (sRlArm, bRlArm) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r2-bg/remote-wait"
+    "{\"node_id\":\"ashur\",\"failed_job_id\":\"job-rl-1\",\"scheduled_origin_job_id\":\"job-rl-1\",\"terminal_reason\":\"usage_limit_wait\",\"deadline_epoch\":1}" nowSec
+    | return (← failWith "remote wait rate limit")
+  let rlRows ← execParamQuery store.missionsDb "SELECT status,COALESCE(resume_intent,0) FROM missions WHERE id='m-r2-bg';" #[]
+  let rlStatus := match rlRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let rlIntent := match rlRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  if sRlArm != 200 || (bRlArm.splitOn "\"ok\":true").length != 2 || rlStatus != "waiting_rate_limit" || rlIntent != "1" then
+    return (← failWith s!"BLOCK5 remote wait parked {rlStatus}/{rlIntent}: {sRlArm} {bRlArm}")
+  let .ok rbReject ← restoreMissionStatus store "m-r2-bg" "interrupted" "usage_limit_wait" "t-rb3"
+    | return (← failWith "rollback collision")
+  if rbReject then
+    return (← failWith "BLOCK5 waiting_rate_limit collided with interrupted rollback")
+
+  -- SM-01: `GET /api/control/missions`, `GET /api/control/missions/:id`, and `GET /api/control/missions/:id/health`
+  -- all include `mission_terminal_evidence` / `terminal_evidence` when present
+  let .ok () ← upsertTerminalEvidence store {
+    missionId := "m-r3d-cont"
+    terminalReason := "completed_verified"
+    summary := "r3d verified"
+    artifactRef := "sha256:r3de0001"
+    verified := true
+    recordedAt := "2026-11-07T00:10:00Z"
+  } | return (← failWith "upsertTerminalEvidence m-r3d-cont")
+  let .ok (sEvList, bEvList) ← sendTestHttp appSt validJwt "GET" "/api/control/missions" "" nowSec
+    | return (← failWith "list terminal evidence")
+  let .ok (sEvGet, bEvGet) ← sendTestHttp appSt validJwt "GET" "/api/control/missions/m-r3d-cont" "" nowSec
+    | return (← failWith "get terminal evidence")
+  let .ok (sEvHealth, bEvHealth) ← sendTestHttp appSt validJwt "GET" "/api/control/missions/m-r3d-cont/health" "" nowSec
+    | return (← failWith "health terminal evidence")
+  if sEvList != 200 || sEvGet != 200 || sEvHealth != 200 ||
+     (bEvList.splitOn "\"artifact_ref\":\"sha256:r3de0001\"").length != 2 ||
+     (bEvGet.splitOn "\"artifact_ref\":\"sha256:r3de0001\"").length != 2 ||
+     (bEvHealth.splitOn "\"artifact_ref\":\"sha256:r3de0001\"").length != 2 ||
+     (bEvGet.splitOn "\"verified\":true").length != 2 then
+    return (← failWith s!"SM-01 list/get/health terminal_evidence mismatch: get={bEvGet} health={bEvHealth}")
+
+  -- 7. SM-13: `project_decisions.status` canonical (`pending | answered | dismissed`), `answered` derived, contradictory rejected with 400
+  let .ok (sDecOk, bDecOk) ← sendTestHttp appSt validJwt "POST" "/api/control/projects/orb/decisions"
+    "{\"id\":\"dec-1\",\"status\":\"answered\",\"question\":\"Ship R3?\",\"evidence\":\"green\"}" nowSec
+    | return (← failWith "put decision ok")
+  let .ok (sDecBad1, _) ← sendTestHttp appSt validJwt "POST" "/api/control/projects/orb/decisions"
+    "{\"id\":\"dec-2\",\"status\":\"pending\",\"answered\":true,\"question\":\"Contradiction\"}" nowSec
+    | return (← failWith "put decision bad 1")
+  let .ok (sDecBad2, _) ← sendTestHttp appSt validJwt "POST" "/api/control/projects/orb/decisions"
+    "{\"id\":\"dec-3\",\"status\":\"answered\",\"answered\":false,\"question\":\"Contradiction 2\"}" nowSec
+    | return (← failWith "put decision bad 2")
+  let .ok (sDecList, bDecList) ← sendTestHttp appSt validJwt "GET" "/api/control/projects/orb/decisions" "" nowSec
+    | return (← failWith "list decisions")
+  if sDecOk != 200 || (bDecOk.splitOn "\"answered\":true").length != 2 ||
+     sDecBad1 != 400 || sDecBad2 != 400 ||
+     sDecList != 200 || (bDecList.splitOn "\"status\":\"answered\"").length != 2 then
+    return (← failWith s!"SM-13 decision invariant failed: ok={sDecOk} ({bDecOk}) bad1={sDecBad1} bad2={sDecBad2} list={bDecList}")
+
+  return 0
+
+private def runR3cdRound3BlockerTests
+    (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
+  let failWith (msg : String) : IO UInt32 := do
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: {msg}"
+    return 1
+
+  -- Round-3 Blocker Regressions (`d0af28d5`, `SM-04..SM-11`):
+  -- R3-BLOCK-1 (`SM-07` ISO-8601 `next_at` + `__wakeup_due_at` + job `next_at: null`):
+  let iso2030 := "2030-10-30T13:30:00Z"
+  let ep2030 := parseIso8601EpochU64? iso2030
+  let ep2030Offset := parseIso8601EpochU64? "2030-10-30T15:30:00.250+02:00"
+  if ep2030 != some 1919597400 || ep2030Offset != some 1919597400 || formatEpochIso8601Utc 1919597400 != iso2030 ||
+     formatEpochIso8601Utc 0 != "1970-01-01T00:00:00Z" || (parseIso8601EpochU64? "1919597400").isSome then
+    return (← failWith s!"R3-BLOCK-1 ISO-8601 codec roundtrip failed: ep={repr ep2030} off={repr ep2030Offset}")
+  let .ok () ← upsertMission store {
+    id := "m-r3b-iso", title := "ISO Wakeup Contract", status := "awaiting_user",
+    backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    placementKind := "managed", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
+  } | return (← failWith "seed m-r3b-iso")
+  let wakeIsoBody :=
+    "{\"command_source\":{\"type\":\"inline\",\"content\":\"check build\"}," ++
+    "\"trigger\":{\"type\":\"interval\",\"seconds\":60},\"stop_policy\":{\"type\":\"after_first_fire\"}," ++
+    "\"variables\":{\"__wakeup_request_id\":\"req-iso-2030\",\"__wakeup_reason\":\"Check the build\"," ++
+    "\"__wakeup_source\":\"orb-local\",\"__wakeup_due_at\":\"2030-10-30T13:30:00+00:00\",\"__wakeup_run_generation\":\"1\"}}"
+  let .ok (sWiso, bWiso) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3b-iso/automations" wakeIsoBody nowSec
+    | return (← failWith "arm iso wakeup")
+  let wakeJobNullBody :=
+    "{\"command_source\":{\"type\":\"inline\",\"content\":\"after job\"}," ++
+    "\"trigger\":{\"type\":\"durable_job_terminal\",\"job_id\":\"550e8400-e29b-41d4-a716-446655440077\"}," ++
+    "\"stop_policy\":{\"type\":\"after_first_fire\"}," ++
+    "\"variables\":{\"__wakeup_request_id\":\"req-job-null\",\"__wakeup_reason\":\"Wait job\",\"__wakeup_source\":\"durable-job-terminal\"}}"
+  let .ok (sWjobN, bWjobN) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3b-iso/automations" wakeJobNullBody nowSec
+    | return (← failWith "arm job null wakeup")
+  let .ok (sDetIso, bDetIso) ← sendTestHttp appSt validJwt "GET" "/api/control/missions/m-r3b-iso" "" nowSec
+    | return (← failWith "detail m-r3b-iso")
+  let .ok (sListIso, bListIso) ← sendTestHttp appSt validJwt "GET" "/api/control/missions" "" nowSec
+    | return (← failWith "list m-r3b-iso")
+  let isoTsRows ← execParamQuery store.missionsDb
+    "SELECT created_at,updated_at FROM mission_continuations WHERE mission_id='m-r3b-iso' AND request_id='req-iso-2030';" #[]
+  let cAtIso := match isoTsRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let uAtIso := match isoTsRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  if sWiso != 201 || sWjobN != 201 || sDetIso != 200 || sListIso != 200 ||
+     (bWiso.splitOn "\"next_at\":\"2030-10-30T13:30:00Z\"").length != 2 ||
+     (bWjobN.splitOn "\"next_at\":null").length != 2 ||
+     (bDetIso.splitOn "\"next_at\":\"2030-10-30T13:30:00Z\"").length != 2 ||
+     (bListIso.splitOn "\"next_at\":\"2030-10-30T13:30:00Z\"").length != 2 ||
+     (bDetIso.splitOn "\"next_at\":null").length != 2 ||
+     (bDetIso.splitOn "\"next_at\":\"1919597400\"").length != 1 ||
+     (parseIso8601EpochU64? cAtIso).isNone || (parseIso8601EpochU64? uAtIso).isNone then
+    return (← failWith s!"R3-BLOCK-1 ISO next_at / job null / wakeup_due_at failed:\nwiso={bWiso}\nwjob={bWjobN}\ndet={bDetIso}\ncAt={cAtIso}")
+
+  -- Verify `__wakeup_run_generation` variable fence rejects stale generation (`99 != 1`) with 409
+  let wakeStaleVarBody :=
+    "{\"command_source\":{\"type\":\"inline\",\"content\":\"stale var gen\"}," ++
+    "\"trigger\":{\"type\":\"interval\",\"seconds\":60},\"stop_policy\":{\"type\":\"after_first_fire\"}," ++
+    "\"variables\":{\"__wakeup_request_id\":\"req-stale-var\",\"__wakeup_run_generation\":\"99\"}}"
+  let .ok (sWstaleVar, _) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3b-iso/automations" wakeStaleVarBody nowSec
+    | return (← failWith "stale __wakeup_run_generation")
+  if sWstaleVar != 409 then
+    return (← failWith s!"R3-BLOCK-1 stale __wakeup_run_generation expected 409, got {sWstaleVar}")
+
+  -- R3-BLOCK-2 (`POST /api/control/missions/:id/continuations/cancel` MUST revoke undelivered `effect_outbox`, `remote_message_queue`, and `queue_item_receipts`):
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO effect_outbox(effect_id,mission_id,state_revision,intent_kind,payload_json,phase,delivered,attempt_epoch,created_at,updated_at) " ++
+     "VALUES('eff-cancel-plan','m-r3b-iso',1,'wakeup_dispatch','{}',0,0,1,'t0','t0')," ++
+     "('eff-cancel-claim','m-r3b-iso',1,'wakeup_dispatch','{}',1,0,1,'t0','t0')," ++
+     "('eff-cancel-deliv','m-r3b-iso',1,'wakeup_dispatch','{}',2,1,1,'t0','t0');") #[]
+  let .ok (sEnqCancel, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue"
+    "{\"id\":\"q-cancel-outbox\",\"mission_id\":\"m-r3b-iso\",\"content\":\"scheduled follow-up\",\"source\":\"durable_schedule\"}" nowSec
+    | return (← failWith "enqueue q-cancel-outbox")
+  let .ok (sCancelCont, bCancelCont) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3b-iso/continuations/cancel" "{}" nowSec
+    | return (← failWith "POST continuations/cancel")
+  let outboxCancelRows ← execParamQuery store.missionsDb
+    "SELECT effect_id,phase,delivered FROM effect_outbox WHERE mission_id='m-r3b-iso' ORDER BY effect_id ASC;" #[]
+  let qCancelRows ← execParamQuery store.missionsDb
+    "SELECT state,phase FROM remote_message_queue WHERE message_id='q-cancel-outbox';" #[]
+  let qrCancelRows ← execParamQuery store.missionsDb
+    "SELECT phase FROM queue_item_receipts WHERE message_id='q-cancel-outbox';" #[]
+  let effClaimPh := match outboxCancelRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  let effDelivPh := match outboxCancelRows with | .ok rs => (rs[2]?.bind (·[1]?)).getD "" | .error _ => ""
+  let effDelivFl := match outboxCancelRows with | .ok rs => (rs[2]?.bind (·[2]?)).getD "" | .error _ => ""
+  let effPlanPh  := match outboxCancelRows with | .ok rs => (rs[3]?.bind (·[1]?)).getD "" | .error _ => ""
+  let qCancState := match qCancelRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let qCancPhase := match qCancelRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  let qrCancPhase := match qrCancelRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  if sEnqCancel != 201 || sCancelCont != 200 || (bCancelCont.splitOn "\"cancelled\":2").length != 2 ||
+     effClaimPh != "5" || effPlanPh != "5" || effDelivPh != "2" || effDelivFl != "1" ||
+     qCancState != "cancelled" || qCancPhase != "4" || qrCancPhase != "4" then
+    return (← failWith s!"R3-BLOCK-2 continuations/cancel outbox revocation failed: body={bCancelCont} claimPh={effClaimPh} planPh={effPlanPh} deliv={effDelivPh}/{effDelivFl} q={qCancState}/{qCancPhase} qr={qrCancPhase}")
+
+  -- R3-BLOCK-3 (`hostedStop` single atomic `BEGIN IMMEDIATE` transaction):
+  -- Install a test SQLite `BEFORE UPDATE ON mission_continuations` trigger for `m-r3b-stop-tx` that raises `ABORT` on revocation;
+  -- if `hostedStop` ran across multiple transactions, `missions.status='interrupted'` or `run_generation+1` would commit before revocation failed!
+  let .ok () ← upsertMission store {
+    id := "m-r3b-stop-tx", title := "Atomic Hosted Stop", status := "active",
+    backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    placementKind := "managed", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
+  } | return (← failWith "seed m-r3b-stop-tx")
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,created_at,updated_at) " ++
+     "VALUES('cont-stop-tx','m-r3b-stop-tx',1,1,?1,'time','atomic check','run','req-stop-tx','2026-11-07T00:00:00Z','2026-11-07T00:00:00Z');")
+    #[s!"{nowSec + 600}"]
+  let _ ← execParamQuery store.missionsDb
+    "CREATE TEMP TRIGGER tr_abort_stop_tx BEFORE UPDATE ON mission_continuations WHEN OLD.mission_id='m-r3b-stop-tx' BEGIN SELECT RAISE(ABORT,'simulated_revoke_fault'); END;" #[]
+  let stopTxAbort ← hostedStop store "m-r3b-stop-tx" (formatEpochIso8601Utc nowSec)
+  let _ ← execParamQuery store.missionsDb "DROP TRIGGER IF EXISTS tr_abort_stop_tx;" #[]
+  let postAbortRows ← execParamQuery store.missionsDb
+    "SELECT status,COALESCE(run_generation,1),COALESCE(state_revision,1) FROM missions WHERE id='m-r3b-stop-tx';" #[]
+  let postAbortContRows ← execParamQuery store.missionsDb
+    "SELECT phase FROM mission_continuations WHERE id='cont-stop-tx';" #[]
+  let paStatus := match postAbortRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let paGen    := match postAbortRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  let paRev    := match postAbortRows with | .ok rs => (rs[1]?.bind (·[2]?)).getD "" | .error _ => ""
+  let paContPh := match postAbortContRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  if stopTxAbort.isOk || paStatus != "active" || paGen != "1" || paRev != "1" || paContPh != "1" then
+    return (← failWith s!"R3-BLOCK-3 hostedStop was NOT atomic in a single transaction: res={repr stopTxAbort} status={paStatus} gen={paGen} rev={paRev} contPh={paContPh}")
+  -- Now without the fault trigger, `hostedStop` commits interrupt + fence + continuation/outbox/run revocation atomically:
+  let _ ← execParamQuery store.missionsDb
+    "INSERT INTO effect_outbox(effect_id,mission_id,state_revision,intent_kind,payload_json,phase,delivered,attempt_epoch,created_at,updated_at) VALUES('eff-stop-tx','m-r3b-stop-tx',1,'dispatch','{}',0,0,1,'t0','t0');" #[]
+  let _ ← execParamQuery store.missionsDb
+    "INSERT INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES('run-stop-live','m-r3b-stop-tx',1,'running','','','t0');" #[]
+  let .ok stopNextGen ← hostedStop store "m-r3b-stop-tx" (formatEpochIso8601Utc nowSec)
+    | return (← failWith "hostedStop clean after trigger drop")
+  let cleanStopRows ← execParamQuery store.missionsDb
+    "SELECT status,run_generation,(SELECT phase FROM mission_continuations WHERE id='cont-stop-tx'),(SELECT phase FROM effect_outbox WHERE effect_id='eff-stop-tx'),(SELECT execution_state FROM mission_runs WHERE id='run-stop-live') FROM missions WHERE id='m-r3b-stop-tx';" #[]
+  let csStatus := match cleanStopRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let csGen    := match cleanStopRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  let csContPh := match cleanStopRows with | .ok rs => (rs[1]?.bind (·[2]?)).getD "" | .error _ => ""
+  let csEffPh  := match cleanStopRows with | .ok rs => (rs[1]?.bind (·[3]?)).getD "" | .error _ => ""
+  let csRunSt  := match cleanStopRows with | .ok rs => (rs[1]?.bind (·[4]?)).getD "" | .error _ => ""
+  if stopNextGen != 2 || csStatus != "interrupted" || csGen != "2" || csContPh != "4" || csEffPh != "5" || csRunSt != "aborted" then
+    return (← failWith s!"R3-BLOCK-3 hostedStop clean state mismatch: nextGen={stopNextGen} st={csStatus} gen={csGen} cont={csContPh} eff={csEffPh} run={csRunSt}")
+
+  -- R3-BLOCK-4 (`stepRemoteMissionReplay` fenced CAS status writes + `Orb.Lifecycle` superseded gate + no premature `run_generation` bump):
+  let .ok () ← upsertMission store {
+    id := "m-r3b-replay", title := "Fenced Remote Replay", status := "waiting_rate_limit",
+    backend := "claude", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    placementKind := "remote", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
+  } | return (← failWith "seed m-r3b-replay")
+  let .ok () ← armRemoteMissionWait store "m-r3b-replay" "ashur" "job-fenced-0" "job-fenced-0" 3 (nowSec + 600) "usage_limit_wait" (formatEpochIso8601Utc nowSec)
+    | return (← failWith "arm m-r3b-replay")
+  -- Transient dispatch failure (`dispatchOutcome = 1 -> action = 4`) MUST NOT advance `missions.run_generation` (`1 -> 1`), while bumping `state_revision`:
+  let preRepRows ← execParamQuery store.missionsDb "SELECT run_generation,state_revision FROM missions WHERE id='m-r3b-replay';" #[]
+  let preRepGen := match preRepRows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
+  let preRepRev := match preRepRows with | .ok rs => ((rs[1]?.bind (·[1]?)).bind String.toNat?).getD 0 | .error _ => 0
+  let .ok repRetryRec ← stepRemoteMissionReplay store "m-r3b-replay" "ashur" "job-fenced-1" true 1 0 1 nowSec (formatEpochIso8601Utc nowSec)
+    | return (← failWith "stepRemoteMissionReplay retry")
+  let midRepRows ← execParamQuery store.missionsDb "SELECT run_generation,state_revision,status FROM missions WHERE id='m-r3b-replay';" #[]
+  let midRepGen := match midRepRows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
+  let midRepRev := match midRepRows with | .ok rs => ((rs[1]?.bind (·[1]?)).bind String.toNat?).getD 0 | .error _ => 0
+  let midRepSt  := match midRepRows with | .ok rs => (rs[1]?.bind (·[2]?)).getD "" | .error _ => ""
+  if repRetryRec.action != 4 || midRepGen != preRepGen || midRepRev ≤ preRepRev || midRepSt != "waiting_rate_limit" then
+    return (← failWith s!"R3-BLOCK-4 retry bumped run_generation prematurely or skipped state_revision: preGen={preRepGen} midGen={midRepGen} preRev={preRepRev} midRev={midRepRev} st={midRepSt}")
+  -- Successful dispatch (`dispatchOutcome = 0 -> action = 3`) before deadline (`nowSec + 120 <= nowSec + 600`) advances `run_generation` by 1 (`1 -> 2`):
+  let .ok repOkRec ← stepRemoteMissionReplay store "m-r3b-replay" "ashur" "job-fenced-2" true 0 1 1 (nowSec + 120) (formatEpochIso8601Utc (nowSec + 120))
+    | return (← failWith "stepRemoteMissionReplay ok")
+  let okRepRows ← execParamQuery store.missionsDb "SELECT run_generation,status FROM missions WHERE id='m-r3b-replay';" #[]
+  let okRepGen := match okRepRows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
+  let okRepSt  := match okRepRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  if repOkRec.action != 3 || okRepGen != preRepGen + 1 || okRepSt != "active" then
+    return (← failWith s!"R3-BLOCK-4 mark_replayed generation/status mismatch: gen={okRepGen} expected={preRepGen + 1} st={okRepSt}")
+  -- Past-deadline terminal failure (`nowSec + 601 > nowSec + 600 -> action = 2`, `status = 'failed'`) ALSO keeps `run_generation` unadvanced (`1 -> 1`):
+  let .ok () ← upsertMission store {
+    id := "m-r3b-replay-exp", title := "Deadline Expired Replay", status := "waiting_rate_limit",
+    backend := "claude", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    placementKind := "remote", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
+  } | return (← failWith "seed m-r3b-replay-exp")
+  let .ok () ← armRemoteMissionWait store "m-r3b-replay-exp" "ashur" "job-exp-0" "job-exp-0" 3 (nowSec + 600) "usage_limit_wait" (formatEpochIso8601Utc nowSec)
+    | return (← failWith "arm m-r3b-replay-exp")
+  let .ok repExpRec ← stepRemoteMissionReplay store "m-r3b-replay-exp" "ashur" "job-exp-1" true 0 1 1 (nowSec + 601) (formatEpochIso8601Utc (nowSec + 601))
+    | return (← failWith "stepRemoteMissionReplay expired")
+  let expRepRows ← execParamQuery store.missionsDb "SELECT run_generation,status FROM missions WHERE id='m-r3b-replay-exp';" #[]
+  let expRepGen := match expRepRows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
+  let expRepSt  := match expRepRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  if repExpRec.action != 2 || expRepGen != 1 || expRepSt != "failed" then
+    return (← failWith s!"R3-BLOCK-4 fail_deadline bumped run_generation or wrong status: action={repExpRec.action} gen={expRepGen} st={expRepSt}")
+  -- Superseded mission (`superseded_by_mission_id != ''`) MUST be rejected by `Orb.Lifecycle` (`remote_replay_lifecycle_rejected`, HTTP 409) without mutating status!
+  let .ok () ← upsertMission store {
+    id := "m-r3b-replay-sup", title := "Superseded Replay Fence", status := "waiting_rate_limit",
+    backend := "claude", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    placementKind := "remote", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
+  } | return (← failWith "seed m-r3b-replay-sup")
+  let .ok () ← armRemoteMissionWait store "m-r3b-replay-sup" "ashur" "job-sup-0" "job-sup-0" 3 0 "usage_limit_wait" (formatEpochIso8601Utc nowSec)
+    | return (← failWith "arm m-r3b-replay-sup")
+  let _ ← execParamQuery store.missionsDb "UPDATE missions SET superseded_by_mission_id='m-successor-99' WHERE id='m-r3b-replay-sup';" #[]
+  let .ok (sRepSup, bRepSup) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3b-replay-sup/remote-replay"
+    "{\"node_id\":\"ashur\",\"candidate_job_id\":\"job-sup-1\",\"scheduled_origin\":true,\"dispatch_outcome\":0}" nowSec
+    | return (← failWith "POST remote-replay superseded")
+  let supRepStRows ← execParamQuery store.missionsDb "SELECT status,run_generation FROM missions WHERE id='m-r3b-replay-sup';" #[]
+  let supRepSt := match supRepStRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let supRepGen := match supRepStRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  if sRepSup != 409 || (bRepSup.splitOn "remote_replay_lifecycle_rejected").length != 2 || supRepSt != "waiting_rate_limit" || supRepGen != "1" then
+    return (← failWith s!"R3-BLOCK-4 superseded remote-replay not fenced by Orb.Lifecycle: code={sRepSup} body={bRepSup} st={supRepSt} gen={supRepGen}")
+
+  -- R3-BLOCK-5 (`beginMissionRun` passes honest lifecycle phase — rejects `active` and `pending` even with zero rows in `mission_runs`,
+  -- and rejects a second live `active` run via `verifyRunLifecycleAdmit` when `mission_runs` has a live row):
+  for (midAct, badStatus) in #[("m-r3b-honest-act", "active"), ("m-r3b-honest-pend", "pending")] do
+    let .ok () ← upsertMission store {
+      id := midAct, title := s!"Honest Phase {badStatus}", status := badStatus,
+      backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+      placementKind := "managed", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
+    } | return (← failWith s!"seed {midAct}")
+    let .ok (sHonestRej, bHonestRej) ← sendTestHttp appSt validJwt "POST" s!"/api/control/missions/{midAct}/runs/begin"
+      "{\"run_id\":\"run-should-reject\",\"owner_epoch\":1}" nowSec
+      | return (← failWith s!"POST runs/begin {midAct}")
+    let runCntRows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM mission_runs WHERE mission_id=?1;" #[midAct]
+    let runCnt := match runCntRows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 99 | .error _ => 99
+    if sHonestRej != 409 || (bHonestRej.splitOn s!"begin_run_mission_rejected:{badStatus}").length != 2 || runCnt != 0 then
+      return (← failWith s!"R3-BLOCK-5 beginMissionRun allowed second live {badStatus} run: status={sHonestRej} body={bHonestRej} runCnt={runCnt}")
+
+  -- Also verify `verifyRunLifecycleAdmit` (`begin_run_rejected`) blocks a second live run even if `missions.status` is `awaiting_user`:
+  let .ok () ← upsertMission store {
+    id := "m-r3b-honest-live", title := "Honest Live Run Row", status := "awaiting_user",
+    backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    placementKind := "managed", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
+  } | return (← failWith "seed m-r3b-honest-live")
+  let .ok (sLive1, _) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3b-honest-live/runs/begin"
+    "{\"run_id\":\"run-live-1\",\"owner_epoch\":1}" nowSec
+    | return (← failWith "begin run-live-1")
+  let _ ← execParamQuery store.missionsDb "UPDATE missions SET status='awaiting_user' WHERE id='m-r3b-honest-live';" #[]
+  let .ok (sLive2, bLive2) ← sendTestHttp appSt validJwt "POST" "/api/control/missions/m-r3b-honest-live/runs/begin"
+    "{\"run_id\":\"run-live-2\",\"owner_epoch\":1}" nowSec
+    | return (← failWith "begin run-live-2")
+  if sLive1 != 201 || sLive2 != 409 || (bLive2.splitOn "begin_run_rejected").length != 2 then
+    return (← failWith s!"R3-BLOCK-5 live mission_runs row was not rejected by verifyRunLifecycleAdmit: s1={sLive1} s2={sLive2} b2={bLive2}")
+
   return 0
 
 private def runLifecycleCompositionTests : IO UInt32 := do
@@ -1381,6 +2014,8 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runFastMemoryBrokerTests store appSt validJwt nowSec) != 0 then return 1
   if (← runCloudHandoffTests tmpRoot store appSt validJwt nowSec) != 0 then return 1
   if (← runCyberAndSkillDeliveryTests tmpRoot store appSt validJwt nowSec) != 0 then return 1
+  if (← runR3cdQueueAndContinuationTests store appSt validJwt nowSec) != 0 then return 1
+  if (← runR3cdRound3BlockerTests store appSt validJwt nowSec) != 0 then return 1
   if (← runPostCrashAndReconcileExtras store tmpRoot) != 0 then return 1
   IO.FS.removeDirAll tmpRoot
 

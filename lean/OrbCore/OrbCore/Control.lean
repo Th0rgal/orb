@@ -17,6 +17,7 @@ import OrbCore.Cyber
 import OrbCore.Skills
 import OrbCore.Managed
 import OrbCore.MemoryAndCloud
+import OrbCore.QueueCont
 
 namespace OrbCore.Control
 
@@ -37,6 +38,7 @@ open OrbCore.Cyber
 open OrbCore.Skills
 open OrbCore.Managed
 open OrbCore.MemoryAndCloud
+open OrbCore.QueueCont
 
 /-- Core runtime configuration parsed from environment variables (`HOST`, `PORT`, `WORKING_DIR`,
     `DEV_MODE`, `DASHBOARD_PASSWORD`, `JWT_SECRET`, `SANDBOXED_USERS`, `ALLOW_INSECURE_REMOTE_DEV_AUTH`). -/
@@ -274,7 +276,7 @@ def normalizeModelEffortForBackend (backend? : Option String) (raw : String) : O
 /-- Statuses that hold an active campaign / project `parallel_missions` cap slot. -/
 def campaignSlotHeldBy (status : String) : Bool :=
   match status with
-  | "active" | "awaiting_user" | "paused" | "pending" | "waiting_background" => true
+  | "active" | "awaiting_user" | "paused" | "pending" | "waiting_background" | "waiting_rate_limit" => true
   | _ => false
 
 /-- Return `some cap` only when `parallelMissions?` is strictly positive (`> 0`). -/
@@ -952,24 +954,163 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
   if !authenticateHttpBearer st.cfg req.headers nowEpochSec then
     return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")
 
-  -- Mission Automations (`"/api/control/missions/:id/automations"`)
+  -- Mission Automations (`"/api/control/missions/:id/automations"`) + SM-07 wakeup interception
   if let some params := matchRoutePattern? "/api/control/missions/:id/automations" rawTarget then
     let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
     if req.method == "GET" then
       let rows ← execParamQuery st.store.missionsDb
-        "SELECT id,mission_id,cron_expr,prompt,enabled,created_at FROM mission_automations WHERE mission_id=?1 ORDER BY created_at ASC;" #[mid]
+        "SELECT id,mission_id,cron_expr,prompt,enabled,variables_used,created_at FROM mission_automations WHERE mission_id=?1 ORDER BY created_at ASC;" #[mid]
       return .ok (mkJson 200 (match rows with | .ok rs => rowsToJsonArray rs | .error _ => "[]"))
     else if req.method == "POST" then
+      let bodyVal? := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption
       let tape := JsonTape.indexJsonObject req.bodySlice
       let defAid ← nextUniqueId st "auto" nowEpochSec
       let aid := (JsonTape.lookupString? tape "id").getD defAid
+      if let some jv := bodyVal? then
+        if let some draft := parseMcpWakeupPayload? jv mid aid nowEpochSec then
+          let varGen? := (jv.field? "variables").bind (·.fieldStr? "__wakeup_run_generation") |>.bind String.toNat?
+          let callerGen? := ((jv.fieldNat? "run_generation").orElse (fun _ => varGen?)).map Nat.toUInt64
+          let isoNow := formatEpochIso8601Utc nowEpochSec
+          match ← registerContinuation st.store draft nowEpochSec isoNow callerGen? with
+          | .ok cid =>
+            let nextAtJson := renderContinuationNextAtJson draft.triggerKind draft.dueEpoch
+            return .ok (mkJson 201 s!"\{\"id\":{jsonEscape cid},\"mission_id\":{jsonEscape mid},\"continuation\":true,\"next_at\":{nextAtJson}}")
+          | .error "mission_not_found" =>
+            return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+          | .error "stale_run_generation" =>
+            return .ok (mkJson 409 "{\"error\":\"stale_run_generation\"}")
+          | .error "continuation_arm_rejected" | .error "continuation_replace_rejected" =>
+            return .ok (mkJson 409 "{\"error\":\"continuation_rejected\"}")
+          | .error e =>
+            return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       let cron := (JsonTape.lookupString? tape "cron_expr").getD "0 * * * *"
-      let prompt := (JsonTape.lookupString? tape "prompt").getD ""
+      let prompt :=
+        match bodyVal?.bind (·.field? "command_source") |>.bind (·.fieldStr? "content") with
+        | some p => p
+        | none => (JsonTape.lookupString? tape "prompt").getD ""
+      let varsJson := match bodyVal? with | some jv => sanitizeAutomationVariablesJson jv | none => "{}"
       match ← execParamQuery st.store.missionsDb
-        "INSERT INTO mission_automations(id,mission_id,cron_expr,prompt,enabled,created_at) VALUES(?1,?2,?3,?4,1,?5) ON CONFLICT(id) DO UPDATE SET cron_expr=excluded.cron_expr,prompt=excluded.prompt WHERE mission_automations.mission_id=excluded.mission_id;"
-        #[aid, mid, cron, prompt, s!"{nowEpochSec}"] with
+        "INSERT INTO mission_automations(id,mission_id,cron_expr,prompt,enabled,variables_used,created_at) VALUES(?1,?2,?3,?4,1,?5,?6) ON CONFLICT(id) DO UPDATE SET cron_expr=excluded.cron_expr,prompt=excluded.prompt,variables_used=excluded.variables_used WHERE mission_automations.mission_id=excluded.mission_id;"
+        #[aid, mid, cron, prompt, varsJson, s!"{nowEpochSec}"] with
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
-      | .ok _ => return .ok (mkJson 201 s!"\{\"id\":{jsonEscape aid},\"mission_id\":{jsonEscape mid}}")
+      | .ok _ => return .ok (mkJson 201 s!"\{\"id\":{jsonEscape aid},\"mission_id\":{jsonEscape mid},\"variables_used\":{varsJson}}")
+
+  -- Continuation Action (`POST /api/control/automations/:id/action`, `SM-07`)
+  if let some params := matchRoutePattern? "/api/control/automations/:id/action" rawTarget then
+    if req.method == "POST" then
+      let cid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let action := (jv.fieldStr? "action").getD ""
+      if action != "resume" && action != "cancel" then
+        return .ok (mkJson 400 "{\"error\":\"invalid_continuation_action\"}")
+      match ← actOnContinuation st.store cid action s!"{nowEpochSec}" nowEpochSec with
+      | .ok mid =>
+        return .ok (mkJson 200 s!"\{\"ok\":true,\"id\":{jsonEscape cid},\"mission_id\":{jsonEscape mid},\"action\":{jsonEscape action}}")
+      | .error "continuation_not_found" =>
+        return .ok (mkJson 404 "{\"error\":\"continuation_not_found\"}")
+      | .error "continuation_cancel_race" | .error "stale_run_generation" | .error "continuation_resume_rejected" =>
+        return .ok (mkJson 409 "{\"error\":\"continuation_conflict\"}")
+      | .error e =>
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
+  -- Cancel Armed Continuations (`POST /api/control/missions/:id/continuations/cancel`, `SM-07`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/continuations/cancel" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      match ← revokeContinuations st.store mid (formatEpochIso8601Utc nowEpochSec) true with
+      | .ok n => return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"cancelled\":{n}}")
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
+  -- Hosted Stop vs Local Interrupt (`POST /api/control/missions/:id/stop`, `POST /api/control/missions/:id/interrupt`, `SM-07`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/stop" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      match ← hostedStop st.store mid s!"{nowEpochSec}" with
+      | .ok gen => return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"run_generation\":{gen}}")
+      | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      | .error e =>
+        if e.startsWith "interrupt_rejected:" || e == "interrupt_cas_lost" || e == "mission_terminal" || e == "fence_cas_lost" then
+          return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
+  if let some params := matchRoutePattern? "/api/control/missions/:id/interrupt" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      match ← reportLocalInterrupt st.store mid s!"{nowEpochSec}" with
+      | .ok () => return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid}}")
+      | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      | .error e =>
+        if e.startsWith "interrupt_rejected:" || e == "interrupt_cas_lost" then
+          return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
+  -- Unified Local + Remote Rate-Limit Park & Resume (`SM-06`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/rate-limit/park" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let notBefore := (jv.fieldNat? "not_before").map Nat.toUInt64 |>.getD 0
+      let intent : UInt8 :=
+        match jv.fieldBool? "resume_intent" with
+        | some b => if b then 1 else 0
+        | none => ((jv.fieldNat? "resume_intent").getD 1).toUInt8
+      match ← parkRateLimit st.store mid notBefore nowEpochSec intent s!"{nowEpochSec}" with
+      | .ok () => return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"status\":\"waiting_rate_limit\",\"not_before\":{notBefore},\"resume_intent\":{intent.toNat}}")
+      | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      | .error e => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
+
+  if let some params := matchRoutePattern? "/api/control/missions/:id/rate-limit/resume" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      match ← resumeRateLimit st.store mid nowEpochSec s!"{nowEpochSec}" with
+      | .ok () => return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"status\":\"active\"}")
+      | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      | .error e => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
+
+  -- Typed Placement Run Begin (`POST /api/control/missions/:id/runs/begin`, `SM-10`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/runs/begin" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD (.obj #[])
+      let defRid ← nextUniqueId st "run" nowEpochSec
+      let runId := (jv.fieldStr? "run_id").getD defRid
+      let callerEp := (jv.fieldNat? "owner_epoch").map Nat.toUInt64 |>.getD 1
+      match ← beginMissionRun st.store mid runId s!"{nowEpochSec}" callerEp with
+      | .ok res =>
+        return .ok (mkJson 201 s!"\{\"run_id\":{jsonEscape res.runId},\"mission_id\":{jsonEscape mid},\"generation\":{res.generation},\"placement_kind\":{jsonEscape res.placementKind}}")
+      | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      | .error e =>
+        if e.startsWith "invalid_placement_kind:" then
+          return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+        return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
+
+  -- Deferred Goal Structured Trailer Unpack (`POST /api/control/missions/:id/deferred-unpack`, `SM-05`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/deferred-unpack" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD (.obj #[])
+      let source := (jv.fieldStr? "source").getD "control"
+      match ← unpackDeferredGoal st.store mid source s!"{nowEpochSec}" with
+      | .ok n => return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"unpacked\":{n}}")
+      | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      | .error e => return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+
+  -- Durable Supervision Counters (`GET|POST /api/control/missions/:id/supervision`, `SM-09`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/supervision" rawTarget then
+    let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+    if req.method == "GET" then
+      match ← readSupervision st.store mid with
+      | .ok (bg, stArms) =>
+        return .ok (mkJson 200 s!"\{\"mission_id\":{jsonEscape mid},\"bg_wait_arms\":{bg},\"stall_consecutive_arms\":{stArms}}")
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+    else if req.method == "POST" then
+      let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD (.obj #[])
+      let field := (jv.fieldStr? "counter").getD "bg_wait_arms"
+      match ← bumpSupervision st.store mid field s!"{nowEpochSec}" with
+      | .ok v => return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"counter\":{jsonEscape field},\"value\":{v}}")
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
 
   -- Mission Opened (`POST /api/control/missions/:id/opened`)
   if let some params := matchRoutePattern? "/api/control/missions/:id/opened" rawTarget then
@@ -998,6 +1139,8 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       | .error e =>
         if e.startsWith "mission_not_found:" then
           return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+        if e.startsWith "remote_wait_rejected:" || e == "remote_wait_cas_lost" then
+          return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
 
   -- Mission Remote Replay Step (`POST /api/control/missions/:id/remote-replay`)
@@ -1035,12 +1178,21 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       | .error e =>
         if e.startsWith "mission_not_found:" then
           return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+        if e.startsWith "remote_replay_lifecycle_rejected:" || e == "remote_replay_cas_lost" ||
+           e == "remote_replay_run_lifecycle_rejected" || e == "remote_replay_rollback_lifecycle_rejected" ||
+           e == "remote_replay_fail_lifecycle_rejected" || e == "remote_replay_rollback_invariant_failed" then
+          return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
 
-  -- Stranded Pending Reconciliation (`POST /api/control/missions/reconcile-pending`)
+  -- Stranded Pending & Shared Startup/Runtime Reconciliation (`POST /api/control/missions/reconcile-pending`, `POST /api/control/missions/reconcile`)
   if req.method == "POST" && cleanPath == "/api/control/missions/reconcile-pending" then
     match ← reconcileStrandedPendingMissions st.store.missionsDb s!"{nowEpochSec}" with
     | .ok n => return .ok (mkJson 200 s!"\{\"ok\":true,\"healed\":{n}}")
+    | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
+  if req.method == "POST" && cleanPath == "/api/control/missions/reconcile" then
+    match ← runSharedReconcile st.store s!"{nowEpochSec}" with
+    | .ok n => return .ok (mkJson 200 s!"\{\"ok\":true,\"reconciled\":{n}}")
     | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
 
   -- Mission Fork & Cloud-to-Workspace Handoff (`POST /api/control/missions/:id/fork`)
@@ -1162,7 +1314,9 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         "m.placement_kind,m.node_boot_epoch,m.state_revision," ++
         "COALESCE(e.terminal_reason,''),COALESCE(e.summary,''),COALESCE(e.artifact_ref,''),COALESCE(e.recorded_at,'')," ++
         "(SELECT COUNT(*) FROM mission_runs r WHERE r.mission_id=m.id AND r.execution_state<>'terminal')," ++
-        "(SELECT COUNT(*) FROM mission_events ev WHERE ev.mission_id=m.id) " ++
+        "(SELECT COUNT(*) FROM mission_events ev WHERE ev.mission_id=m.id)," ++
+        "(SELECT COUNT(*) FROM mission_continuations c WHERE c.mission_id=m.id AND c.phase=1)," ++
+        "COALESCE(e.verified,1) " ++
         "FROM missions m LEFT JOIN mission_terminal_evidence e ON e.mission_id = m.id WHERE m.id=?1;"
       match ← execParamQuery st.store.missionsDb sql #[mid] with
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
@@ -1183,18 +1337,21 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         let evRecorded := r[10]?.getD ""
         let liveRuns := (r[11]?.bind String.toNat?).getD 0
         let evCnt := (r[12]?.bind String.toNat?).getD 0
+        let armedWakeups := (r[13]?.bind String.toNat?).getD 0
+        let evVerified := ((r[14]?.bind String.toNat?).getD 1) != 0
         let effReason := if !evReason.isEmpty then evReason else mReason
         let hasEv := !evRecorded.isEmpty || !evReason.isEmpty
         let verdict := deriveMissionHealthVerdict
           status effReason orphAt superBy placeKind
-          (rowBoot == st.store.bootEpoch) false (liveRuns > 0) (evCnt > 0) false hasEv
+          (rowBoot == st.store.bootEpoch) false (liveRuns > 0) (evCnt > 0) (armedWakeups > 0) hasEv
         let evJson :=
           if hasEv then
-            s!"\{\"terminal_reason\":{jsonEscape evReason},\"summary\":{jsonEscape evSummary},\"artifact_ref\":{jsonEscape evArtifact},\"recorded_at\":{jsonEscape evRecorded}}"
+            s!"\{\"terminal_reason\":{jsonEscape evReason},\"summary\":{jsonEscape evSummary},\"artifact_ref\":{jsonEscape evArtifact},\"verified\":{if evVerified then "true" else "false"},\"recorded_at\":{jsonEscape evRecorded}}"
           else "null"
+        let (bgArms, stallArms) ← match ← readSupervision st.store mid with | .ok p => pure p | .error _ => pure (0, 0)
         return .ok (mkJson 200 (
           s!"\{\"mission_id\":{jsonEscape mid},\"status\":{jsonEscape status},\"health_verdict\":{jsonEscape verdict}," ++
-          s!"\"state_revision\":{stateRev},\"terminal_evidence\":{evJson}}"
+          s!"\"state_revision\":{stateRev},\"bg_wait_arms\":{bgArms},\"stall_consecutive_arms\":{stallArms},\"terminal_evidence\":{evJson}}"
         ))
 
   -- Missions Collection (`GET|POST /api/control/missions`)
@@ -1387,6 +1544,44 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       let hitJson := "[" ++ String.intercalate "," (hits.toList.map jsonEscape) ++ "]"
       return .ok (mkJson 200 s!"\{\"hits\":{hitJson}}")
 
+  -- Mission Detail (`GET /api/control/missions/:id`, `SM-01`, `SM-07`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id" rawTarget then
+    if req.method == "GET" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      match ← missionDetailJson st.store mid with
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      | .ok none => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      | .ok (some body) => return .ok (mkJson 200 body)
+
+  -- Project Decisions (`GET|POST /api/control/projects/:slug/decisions`, `SM-13`)
+  if let some params := matchRoutePattern? "/api/control/projects/:slug/decisions" rawTarget then
+    let slug := (params.find? (fun p => p.1 == "slug")).map Prod.snd |>.getD ""
+    if req.method == "GET" then
+      match ← listProjectDecisionsJson st.store slug with
+      | .ok body => return .ok (mkJson 200 body)
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+    else if req.method == "POST" || req.method == "PUT" || req.method == "PATCH" then
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let defDid ← nextUniqueId st "dec" nowEpochSec
+      let did := (jv.fieldStr? "id").getD defDid
+      let status := (jv.fieldStr? "status").getD "pending"
+      let question := (jv.fieldStr? "question").getD ""
+      let evidence := (jv.fieldStr? "evidence").getD ""
+      let answered? := jv.fieldBool? "answered"
+      let drec : ProjectDecision := {
+        id := did, projectSlug := slug, status := status,
+        question := question, evidence := evidence, updatedAt := s!"{nowEpochSec}"
+      }
+      match ← putProjectDecision st.store drec answered? with
+      | .ok out =>
+        let ansStr := if answeredOfStatus out.status then "true" else "false"
+        return .ok (mkJson 200 s!"\{\"id\":{jsonEscape out.id},\"project_slug\":{jsonEscape out.projectSlug},\"status\":{jsonEscape out.status},\"answered\":{ansStr}}")
+      | .error "invalid_decision_status" | .error "contradictory_answered" =>
+        return .ok (mkJson 400 "{\"error\":\"invalid_or_contradictory_decision_status\"}")
+      | .error e =>
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
   -- AI Providers CRUD & Rate-Limit Metadata (`/api/ai/providers`, `/api/ai/providers/:id`)
   if cleanPath == "/api/ai/providers" || cleanPath.startsWith "/api/ai/providers/" then
     if req.method == "GET" && cleanPath == "/api/ai/providers" then
@@ -1544,14 +1739,63 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     let mf ← st.managedRef.get
     return .ok (mkJson 200 s!"\{\"nodes\":[],\"managed_compute\":{renderManagedBudgetJson mf}}")
 
-  -- Durable follow-up queue (`GET /api/control/queue`, `PATCH /api/control/queue/:id`)
-  if req.method == "GET" && cleanPath == "/api/control/queue" then
-    let missionId := ((parseQueryParams rawTarget).find? (fun p => p.1 == "mission_id")).map Prod.snd |>.getD ""
-    if missionId.isEmpty then
-      return .ok (mkJson 400 "{\"error\":\"missing_mission_id\"}")
-    match ← listRemoteQueueJson st.store "core" missionId with
-    | .ok body => return .ok (mkJson 200 body)
-    | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+  -- Durable follow-up queue (`GET|POST /api/control/queue`, `PATCH /api/control/queue/:id`, `POST /api/control/queue/:id/step`, `POST /api/control/queue/:id/requeue`)
+  if cleanPath == "/api/control/queue" then
+    if req.method == "GET" then
+      let missionId := ((parseQueryParams rawTarget).find? (fun p => p.1 == "mission_id")).map Prod.snd |>.getD ""
+      if missionId.isEmpty then
+        return .ok (mkJson 400 "{\"error\":\"missing_mission_id\"}")
+      match ← listRemoteQueueJson st.store "core" missionId with
+      | .ok body => return .ok (mkJson 200 body)
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+    else if req.method == "POST" then
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let missionId := (jv.fieldStr? "mission_id").getD ""
+      let rawContent := (jv.fieldStr? "content").getD ""
+      if missionId.isEmpty || rawContent.trimAscii.toString.isEmpty then
+        return .ok (mkJson 400 "{\"error\":\"missing_mission_or_content\"}")
+      let defMsgId ← nextUniqueId st "qmsg" nowEpochSec
+      let messageId := (jv.fieldStr? "id").getD defMsgId
+      let source := (jv.fieldStr? "source").getD "control"
+      match ← enqueueStructuredFollowup st.store "core" messageId missionId rawContent source s!"{nowEpochSec}" with
+      | .ok stored =>
+        return .ok (mkJson 201 s!"\{\"id\":{jsonEscape messageId},\"mission_id\":{jsonEscape missionId},\"content\":{jsonEscape stored},\"source\":{jsonEscape source}}")
+      | .error e =>
+        if e.startsWith "deferred_batch_" then
+          return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
+  if let some params := matchRoutePattern? "/api/control/queue/:id/step" rawTarget then
+    if req.method == "POST" then
+      let messageId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let op := ((jv.fieldNat? "op").getD 0).toUInt8
+      let runGen := s!"{(jv.fieldNat? "run_generation").getD 1}"
+      let bootEp := s!"{(jv.fieldNat? "node_boot_epoch").map Nat.toUInt64 |>.getD st.store.bootEpoch}"
+      let delivSeq := s!"{(jv.fieldNat? "delivery_seq").getD 0}"
+      let uncertain : UInt8 := if (jv.fieldBool? "uncertain_timeout").getD false then 1 else ((jv.fieldNat? "uncertain_timeout").getD 0).toUInt8
+      let opConfirm : UInt8 := if (jv.fieldBool? "operator_confirmed").getD false then 1 else ((jv.fieldNat? "operator_confirmed").getD 0).toUInt8
+      let nextContent := (jv.fieldStr? "content").getD ""
+      match ← stepQueueItem st.store "core" messageId op runGen bootEp delivSeq s!"{nowEpochSec}" uncertain opConfirm nextContent with
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      | .ok .notFound => return .ok (mkJson 404 "{\"error\":\"message not in queue\"}")
+      | .ok (.rejected reason) => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape reason}}")
+      | .ok (.ok rec) =>
+        return .ok (mkJson 200 s!"\{\"ok\":true,\"id\":{jsonEscape rec.messageId},\"mission_id\":{jsonEscape rec.missionId},\"phase\":{rec.phase.toNat},\"phase_name\":{jsonEscape (queuePhaseName rec.phase)},\"delivered_seq\":{rec.deliveredSeq}}")
+
+  if let some params := matchRoutePattern? "/api/control/queue/:id/requeue" rawTarget then
+    if req.method == "POST" then
+      let messageId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD (.obj #[])
+      let opConfirm : UInt8 := if (jv.fieldBool? "operator_confirmed").getD false then 1 else ((jv.fieldNat? "operator_confirmed").getD 0).toUInt8
+      match ← stepQueueItem st.store "core" messageId 4 "0" s!"{st.store.bootEpoch}" "0" s!"{nowEpochSec}" 0 opConfirm "" with
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      | .ok .notFound => return .ok (mkJson 404 "{\"error\":\"message not in queue\"}")
+      | .ok (.rejected reason) => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape reason}}")
+      | .ok (.ok rec) =>
+        return .ok (mkJson 200 s!"\{\"ok\":true,\"id\":{jsonEscape rec.messageId},\"phase\":{rec.phase.toNat}}")
 
   if let some params := matchRoutePattern? "/api/control/queue/:id" rawTarget then
     if req.method == "PATCH" then
@@ -1564,7 +1808,10 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       if content.isEmpty then
         return .ok (mkJson 400 "{\"error\":\"A queued message cannot be empty; remove it instead\"}")
       match ← editRemoteMessage st.store "core" messageId content with
-      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      | .error e =>
+        if e.startsWith "deferred_batch_" then
+          return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok .NotFound => return .ok (mkJson 404 "{\"error\":\"message not in queue\"}")
       | .ok .AlreadyDelivered =>
         return .ok (mkJson 409 "{\"error\":\"This message was already sent; it can no longer be edited\"}")

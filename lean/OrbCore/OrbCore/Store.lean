@@ -6,13 +6,17 @@
 -/
 import Std.Sync.Mutex
 import Orb.Kernel
+import Orb.Lifecycle
 import OrbBin.Json
+import OrbBin.PosixExt
 import OrbCore.Spec
 
 namespace OrbCore.Store
 
 open Orb.Kernel
+open Orb.Lifecycle
 open OrbBin.Json
+open OrbBin.PosixExt
 open OrbCore.Spec
 
 @[extern "orb_sqlite_open"]
@@ -173,7 +177,7 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS mission_remote_waits (mission_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, failed_job_id TEXT NOT NULL, scheduled_origin_job_id TEXT NOT NULL DEFAULT '', retries INTEGER NOT NULL DEFAULT 0, max_retries INTEGER NOT NULL DEFAULT 10, replays INTEGER NOT NULL DEFAULT 0, deadline_epoch INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_events (id INTEGER PRIMARY KEY AUTOINCREMENT, mission_id TEXT NOT NULL, seq INTEGER NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS cloud_executions (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'hermes', prompt TEXT NOT NULL DEFAULT '', response_text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
-  "CREATE TABLE IF NOT EXISTS mission_automations (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, cron_expr TEXT NOT NULL, prompt TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS mission_automations (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, cron_expr TEXT NOT NULL, prompt TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, variables_used TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS model_routing_chains (id TEXT PRIMARY KEY, name TEXT NOT NULL, models_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS privilege_leases (grant_id TEXT PRIMARY KEY, lease_token TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, scope TEXT NOT NULL, allowed_units_json TEXT NOT NULL DEFAULT '[]', require_force_cmd INTEGER NOT NULL DEFAULT 0, biometric_signed INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0, expires_at_epoch INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS privilege_audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, grant_id TEXT NOT NULL, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, executing_host TEXT NOT NULL, command TEXT NOT NULL, allowed INTEGER NOT NULL, created_at TEXT NOT NULL);" ++
@@ -181,12 +185,18 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS remote_message_queue (sequence INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, message_id TEXT NOT NULL, mission_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'waiting', UNIQUE(user_id,message_id));" ++
   "CREATE INDEX IF NOT EXISTS remote_message_pending ON remote_message_queue(state,sequence);" ++
   "CREATE TABLE IF NOT EXISTS ai_providers (id TEXT PRIMARY KEY, provider_type TEXT NOT NULL, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, base_url TEXT NOT NULL DEFAULT '', api_key TEXT NOT NULL DEFAULT '', rpm_limit INTEGER, max_concurrency INTEGER, custom_models_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS deferred_message_batches (mission_id TEXT NOT NULL, batch_seq INTEGER NOT NULL, message_id TEXT NOT NULL, content TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', unpacked INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(mission_id, batch_seq, message_id));" ++
+  "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);" ++
+  "CREATE TABLE IF NOT EXISTS queue_item_receipts (message_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, phase INTEGER NOT NULL DEFAULT 0, claimed_generation INTEGER NOT NULL DEFAULT 0, claim_boot_epoch INTEGER NOT NULL DEFAULT 0, delivered_seq INTEGER NOT NULL DEFAULT 0, edit_revision INTEGER NOT NULL DEFAULT 0, content TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS mission_continuations (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, run_generation INTEGER NOT NULL, phase INTEGER NOT NULL DEFAULT 1, due_epoch INTEGER NOT NULL DEFAULT 0, trigger_kind TEXT NOT NULL DEFAULT 'time', reason TEXT NOT NULL DEFAULT '', prompt TEXT NOT NULL DEFAULT '', request_id TEXT NOT NULL DEFAULT '', job_id TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', recurrence TEXT NOT NULL DEFAULT '', stop_after_first INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', UNIQUE(mission_id, request_id));" ++
+  "CREATE TABLE IF NOT EXISTS mission_supervision (mission_id TEXT PRIMARY KEY, bg_wait_arms INTEGER NOT NULL DEFAULT 0, stall_consecutive_arms INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '');" ++
   transferSchemaSql ++ "\n" ++ transferCleanupSql
 
 def projectsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS project_grant (slug TEXT PRIMARY KEY, merge_authority TEXT, budget_per_tick TEXT, parallel_missions INTEGER, pause_reason TEXT, resume_condition TEXT, material_bar TEXT, autonomy_level TEXT, updated_at TEXT NOT NULL DEFAULT '');" ++
-  "CREATE TABLE IF NOT EXISTS project_track_leases (project_slug TEXT NOT NULL, track TEXT NOT NULL, reservation_id TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, repo TEXT NOT NULL DEFAULT '', authority_mode TEXT NOT NULL DEFAULT 'writer', phase TEXT NOT NULL DEFAULT 'preparing', boot_epoch INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(project_slug, track, mission_id));"
+  "CREATE TABLE IF NOT EXISTS project_track_leases (project_slug TEXT NOT NULL, track TEXT NOT NULL, reservation_id TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, repo TEXT NOT NULL DEFAULT '', authority_mode TEXT NOT NULL DEFAULT 'writer', phase TEXT NOT NULL DEFAULT 'preparing', boot_epoch INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(project_slug, track, mission_id));" ++
+  "CREATE TABLE IF NOT EXISTS project_decisions (id TEXT PRIMARY KEY, project_slug TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', question TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');"
 
 def upsertProjectGrantSql : String :=
   "INSERT INTO project_grant (slug, merge_authority, budget_per_tick, parallel_missions, pause_reason, resume_condition, material_bar, autonomy_level, updated_at) " ++
@@ -236,8 +246,25 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE missions ADD COLUMN repo TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN placement_job_id TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN scheduled_remote_job_id TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE missions ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE missions ADD COLUMN resume_intent INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE mission_runs ADD COLUMN terminal_reason TEXT NOT NULL DEFAULT '';",
-  "ALTER TABLE mission_runs ADD COLUMN remote_job_id TEXT NOT NULL DEFAULT '';"
+  "ALTER TABLE mission_runs ADD COLUMN remote_job_id TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE remote_message_queue ADD COLUMN phase INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE remote_message_queue ADD COLUMN claimed_generation INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE remote_message_queue ADD COLUMN claim_boot_epoch INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE remote_message_queue ADD COLUMN delivered_seq INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE remote_message_queue ADD COLUMN edit_revision INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE mission_automations ADD COLUMN variables_used TEXT NOT NULL DEFAULT '{}';",
+  "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);"
+]
+
+def projectsAdditiveAlters : Array String := #[
+  "ALTER TABLE project_decisions ADD COLUMN project_slug TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE project_decisions ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';",
+  "ALTER TABLE project_decisions ADD COLUMN question TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE project_decisions ADD COLUMN evidence TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE project_decisions ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';"
 ]
 
 def idempotencyAdditiveAlters : Array String := #[
@@ -401,6 +428,68 @@ def recoverDispatchLeases (mDb pDb : SqliteDb) (bootEpoch : UInt64 := 1) : IO (E
       if let .error e := pDel then return .error e
   return .ok ()
 
+private def hasStoreRawTrailerMarker (s : String) : Bool :=
+  (s.splitOn "<!-- sandboxed:messages:v1:").length > 1
+
+private def stripStoreDeferredTrailer (goal : String) : String × Option String :=
+  let nlMarker := "\n<!-- sandboxed:messages:v1:"
+  let nlParts := goal.splitOn nlMarker
+  if nlParts.length ≥ 2 && (nlParts.getLast!).endsWith " -->" then
+    let head := String.intercalate nlMarker (nlParts.dropLast)
+    let b64 := ((nlParts.getLast!).dropEnd 4).toString
+    (head, some b64)
+  else
+    let marker := "<!-- sandboxed:messages:v1:"
+    let parts := goal.splitOn marker
+    if parts.length < 2 then
+      (goal, none)
+    else
+      let head := String.intercalate marker (parts.dropLast)
+      let tail := parts.getLast!
+      if tail.endsWith " -->" then
+        let b64 := (tail.dropEnd 4).toString
+        (head, some b64)
+      else
+        (goal, none)
+
+private def isStoreCanonicalUuid (s : String) : Bool :=
+  (parseUuidCanonical? s) == some s.toLower
+
+private def parseStoreDeferredBatch? (b64 : String) : Except String (Array (String × String)) := do
+  let some bytes := base64Decode? b64 | throw "deferred_batch_b64"
+  let some txt := String.fromUTF8? bytes | throw "deferred_batch_utf8"
+  let .ok jv := OrbBin.Json.parse txt | throw "deferred_batch_json"
+  let some arr := jv.fieldArr? "messages" | throw "deferred_batch_messages"
+  if arr.isEmpty then throw "deferred_batch_empty"
+  let mut out : Array (String × String) := #[]
+  let mut seen : Array String := #[]
+  for item in arr do
+    let some pair := item.asArr? | throw "deferred_batch_pair"
+    if pair.size < 2 then throw "deferred_batch_pair"
+    let some mid := pair[0]!.asStr? | throw "deferred_batch_id"
+    let some content := pair[1]!.asStr? | throw "deferred_batch_content"
+    let canon := mid.trimAscii.toString.toLower
+    if !isStoreCanonicalUuid canon then throw "deferred_batch_uuid"
+    if content.trimAscii.toString.isEmpty then throw "deferred_batch_content"
+    if hasStoreRawTrailerMarker content then throw "deferred_batch_nested_trailer"
+    if seen.any (· == canon) then throw "deferred_batch_dup"
+    seen := seen.push canon
+    out := out.push (canon, content)
+  return out
+
+private def extractStoreDeferredTrailerStrict (raw : String) : Except String (String × Option (Array (String × String))) := do
+  let (plain, b64?) := stripStoreDeferredTrailer raw
+  match b64? with
+  | none =>
+    if hasStoreRawTrailerMarker raw then
+      throw "deferred_batch_unterminated"
+    return (raw, none)
+  | some b64 =>
+    if hasStoreRawTrailerMarker plain then
+      throw "deferred_batch_multiple"
+    let msgs ← parseStoreDeferredBatch? b64
+    return (plain, some msgs)
+
 /-- Reconcile missions stranded in transitional `status = 'pending'` whose latest `mission_runs`
     row ended with `terminal_reason = 'remote_dispatch_failed'` (or whose mission row already carries
     a `remote_dispatch_failed` / `usage_limit_wait` / `node_maintenance_wait` pre-dispatch snapshot)
@@ -440,9 +529,10 @@ def reconcileStrandedPendingMissions (mDb : SqliteDb) (nowAt : String := "startu
           let restoredReason :=
             if mReason == "usage_limit_wait" || mReason == "node_maintenance_wait" then mReason
             else "remote_dispatch_failed"
+          let nextStatus := if restoredReason == "usage_limit_wait" then "waiting_rate_limit" else "interrupted"
           let upd ← sqliteQueryRowsRaw mDb.handle
-            "UPDATE missions SET status='interrupted',terminal_reason=?2,state_revision=state_revision+1,updated_at=CASE WHEN ?3='' THEN updated_at ELSE ?3 END WHERE id=?1 AND status='pending';"
-            #[mid, restoredReason, nowAt]
+            "UPDATE missions SET status=?2,terminal_reason=?3,resume_intent=CASE WHEN ?2='waiting_rate_limit' THEN 1 ELSE resume_intent END,state_revision=state_revision+1,updated_at=CASE WHEN ?4='' THEN updated_at ELSE ?4 END WHERE id=?1 AND status='pending';"
+            #[mid, nextStatus, restoredReason, nowAt]
           if let .error ue := upd then
             discard <| sqliteExecRaw mDb.handle "ROLLBACK;"
             return .error s!"stranded_pending_update_failed:{ue}"
@@ -451,6 +541,112 @@ def reconcileStrandedPendingMissions (mDb : SqliteDb) (nowAt : String := "startu
         discard <| sqliteExecRaw mDb.handle "ROLLBACK;"
         return .error s!"stranded_pending_commit_failed:{ce}"
       return .ok healed
+
+def runStartupAndHealthReconcile (mDb : SqliteDb) (bootEpoch : UInt64) (nowAt : String := "startup") : IO (Except String Nat) := do
+  match ← reconcileStrandedPendingMissions mDb nowAt with
+  | .error e => return .error e
+  | .ok healedPending =>
+    mDb.mu.atomically do
+      if let .error e ← sqliteExecRaw mDb.handle "BEGIN IMMEDIATE;" then
+        return .error s!"shared_reconcile_begin_failed:{e}"
+      let q ← sqliteQueryRowsRaw mDb.handle
+        ("SELECT m.id,m.status,m.placement_kind,m.node_boot_epoch,m.orphaned_at," ++
+         "(SELECT COUNT(*) FROM mission_runs r WHERE r.mission_id=m.id AND r.execution_state<>'terminal')," ++
+         "(SELECT COUNT(*) FROM mission_events ev WHERE ev.mission_id=m.id)," ++
+         "(SELECT COUNT(*) FROM mission_continuations c WHERE c.mission_id=m.id AND c.phase=1)," ++
+         "COALESCE(m.deferred_goal,'') FROM missions m;") #[]
+      match q with
+      | .error qe =>
+        discard <| sqliteExecRaw mDb.handle "ROLLBACK;"
+        return .error s!"shared_reconcile_select_failed:{qe}"
+      | .ok rows =>
+        let mut extra : Nat := 0
+        for i in [1:rows.size] do
+          let r := rows[i]!
+          let mid := (r[0]?).getD ""
+          let status := (r[1]?).getD ""
+          let pKind := (r[2]?).getD "managed"
+          let rowBoot := ((r[3]?.bind String.toNat?).getD 1).toUInt64
+          let orphAt := (r[4]?).getD ""
+          let liveCnt := ((r[5]?.bind String.toNat?).getD 0)
+          let evCnt := ((r[6]?.bind String.toNat?).getD 0)
+          let armedContCnt := ((r[7]?.bind String.toNat?).getD 0)
+          let defGoalRaw := (r[8]?).getD ""
+          if hasStoreRawTrailerMarker defGoalRaw then
+            if let .ok (strippedGoal, some msgs) := extractStoreDeferredTrailerStrict defGoalRaw then
+              let seqRows ← sqliteQueryRowsRaw mDb.handle
+                "SELECT COALESCE(MAX(batch_seq),0) FROM deferred_message_batches WHERE mission_id=?1;" #[mid]
+              let nextBatchSeq :=
+                match seqRows with
+                | .ok srs => (((srs[1]?.bind (·[0]?)).bind String.toNat?).getD 0) + 1
+                | .error _ => 1
+              let mut dupFound := false
+              for (bMid, _) in msgs do
+                if let .ok drs ← sqliteQueryRowsRaw mDb.handle
+                    "SELECT COUNT(*) FROM deferred_message_batches WHERE mission_id=?1 AND message_id=?2;" #[mid, bMid] then
+                  if (((drs[1]?.bind (·[0]?)).bind String.toNat?).getD 0) > 0 then
+                    dupFound := true
+              if !dupFound then
+                let markAt := if nowAt.isEmpty then "startup" else nowAt
+                for (bMid, bContent) in msgs do
+                  discard <| sqliteQueryRowsRaw mDb.handle
+                    "INSERT INTO deferred_message_batches(mission_id,batch_seq,message_id,content,source,unpacked,created_at) VALUES(?1,?2,?3,?4,'reconcile',1,?5);"
+                    #[mid, s!"{nextBatchSeq}", bMid, bContent, markAt]
+                discard <| sqliteQueryRowsRaw mDb.handle
+                  "UPDATE missions SET deferred_goal=?2 WHERE id=?1;" #[mid, strippedGoal]
+          let statusCode : UInt8 :=
+            if status == "active" then 0
+            else if status == "awaiting_user" then 1
+            else if status == "interrupted" then 2
+            else 3
+          let isClient : UInt8 := if pKind == "client" then 1 else 0
+          let sameBoot : UInt8 := if rowBoot == bootEpoch then 1 else 0
+          let alreadyOrph : UInt8 := if orphAt.isEmpty then 0 else 1
+          let hasDurableBgScope : Bool := liveCnt > 0 || armedContCnt > 0
+          let verdict := Orb.Kernel.reconcileStep
+            statusCode isClient sameBoot 0 0 0
+            (if liveCnt > 0 then 1 else 0) 0 (if evCnt > 0 then 1 else 0) alreadyOrph 0 0 0
+          if verdict == 2 && orphAt.isEmpty then
+            let markAt := if nowAt.isEmpty then "startup" else nowAt
+            let upd ← sqliteQueryRowsRaw mDb.handle
+              "UPDATE missions SET orphaned_at=?2,state_revision=state_revision+1 WHERE id=?1 AND orphaned_at='';"
+              #[mid, markAt]
+            if let .error ue := upd then
+              discard <| sqliteExecRaw mDb.handle "ROLLBACK;"
+              return .error s!"shared_reconcile_orphan_failed:{ue}"
+            extra := extra + 1
+          else if status == "waiting_background" && sameBoot == 0 && !hasDurableBgScope then
+            let markAt := if nowAt.isEmpty then "startup" else nowAt
+            let _ ← sqliteQueryRowsRaw mDb.handle
+              "INSERT INTO mission_supervision(mission_id,bg_wait_arms,stall_consecutive_arms,updated_at) VALUES(?1,1,0,?2) ON CONFLICT(mission_id) DO UPDATE SET bg_wait_arms=mission_supervision.bg_wait_arms+1,updated_at=excluded.updated_at;"
+              #[mid, markAt]
+            let upd ← sqliteQueryRowsRaw mDb.handle
+              "UPDATE missions SET status='interrupted',terminal_reason='background_wait_reconciled',state_revision=state_revision+1 WHERE id=?1 AND status='waiting_background';"
+              #[mid]
+            if let .error ue := upd then
+              discard <| sqliteExecRaw mDb.handle "ROLLBACK;"
+              return .error s!"shared_reconcile_bg_failed:{ue}"
+            extra := extra + 1
+        let qRows ← sqliteQueryRowsRaw mDb.handle
+          "SELECT user_id,message_id,COALESCE(claim_boot_epoch,0) FROM remote_message_queue WHERE COALESCE(phase,0)=1;" #[]
+        if let .ok qrs := qRows then
+          for i in [1:qrs.size] do
+            let qr := qrs[i]!
+            let uid := (qr[0]?).getD ""
+            let msgId := (qr[1]?).getD ""
+            let cBoot := ((qr[2]?.bind String.toNat?).getD 0).toUInt64
+            let outWord := Orb.Kernel.outboxCrashReconcileStep 1 0 1 cBoot bootEpoch 1 1
+            if (outWord &&& 512) != 0 && cBoot != bootEpoch then
+              let _ ← sqliteQueryRowsRaw mDb.handle
+                "UPDATE remote_message_queue SET phase=3,state='crash_tombstone' WHERE user_id=?1 AND message_id=?2 AND COALESCE(phase,0)=1;"
+                #[uid, msgId]
+              let _ ← sqliteQueryRowsRaw mDb.handle
+                "UPDATE queue_item_receipts SET phase=3 WHERE message_id=?1;" #[msgId]
+              extra := extra + 1
+        if let .error ce ← sqliteExecRaw mDb.handle "COMMIT;" then
+          discard <| sqliteExecRaw mDb.handle "ROLLBACK;"
+          return .error s!"shared_reconcile_commit_failed:{ce}"
+        return .ok (healedPending + extra)
 
 /-- Atomically allocate and persist the next monotonic `boot_epoch` in `core_boot_state` (`missions.db`),
     ensuring every `runCoreServer` / auto-epoch `openCoreStore` start increments `node_boot_epoch`. -/
@@ -491,7 +687,7 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) : IO (Except Stri
   let .ok effBoot := effBootRes | do
     sqliteCloseRaw mDb.handle
     return .error (match effBootRes with | .error e => e | .ok _ => "boot_epoch_failed")
-  let pRes ← openSqliteDb s!"{trimmedRoot}/projects.db" projectsSchemaSql
+  let pRes ← openSqliteDb s!"{trimmedRoot}/projects.db" projectsSchemaSql projectsAdditiveAlters
   let .ok pDb := pRes | do sqliteCloseRaw mDb.handle; return .error (match pRes with | .error e => e | .ok _ => "err")
   let aRes ← openSqliteDb s!"{trimmedRoot}/ask.db" askSchemaSql
   let .ok aDb := aRes | do sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; return .error (match aRes with | .error e => e | .ok _ => "err")
@@ -507,7 +703,7 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) : IO (Except Stri
     sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
     return .error s!"core_store_lease_recovery_failed:{recErr}"
   | .ok () =>
-    match ← reconcileStrandedPendingMissions mDb "" with
+    match ← runStartupAndHealthReconcile mDb effBoot "" with
     | .error pendErr =>
       sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
       return .error s!"core_store_stranded_pending_recovery_failed:{pendErr}"
@@ -530,7 +726,10 @@ private def isIntegerCol (col : String) : Bool :=
   col == "owner_epoch" || col == "run_generation" || col == "node_boot_epoch" ||
   col == "phase" || col == "delivered" || col == "committed_oversize" || col == "body_bytes" ||
   col == "status_code" || col == "verified" || col == "retries" || col == "max_retries" ||
-  col == "replays" || col == "deadline_epoch"
+  col == "replays" || col == "deadline_epoch" || col == "not_before" || col == "resume_intent" ||
+  col == "claimed_generation" || col == "claim_boot_epoch" || col == "delivered_seq" ||
+  col == "edit_revision" || col == "batch_seq" || col == "unpacked" || col == "due_epoch" ||
+  col == "stop_after_first" || col == "bg_wait_arms" || col == "stall_consecutive_arms"
 
 /-- Classify authority mode (`readonly | writer`) via `Orb.Kernel.verifyLeaseMode` (`SM-02`),
     rejecting contradictory `pr-writer` + `pr-readonly` tag combinations fail-closed. -/
@@ -585,6 +784,7 @@ def deriveMissionHealthVerdict
         let stepCode := Orb.Kernel.missionStep 1 0 0 (if wakeupArmed then 1 else 0) 1 0 3 0 10 0
         if stepCode == 4 then "paused_wakeup" else "paused"
       | "waiting_background" => "waiting_background"
+      | "waiting_rate_limit" => "waiting_rate_limit"
       | "pending" => "pending"
       | "interrupted" => "interrupted"
       | "awaiting_user" => "awaiting_user"
@@ -594,7 +794,7 @@ def deriveMissionHealthVerdict
       | _ => "unknown"
 
 private def isRawJsonCol (col : String) : Bool :=
-  col == "models_json" || col == "data" || col == "history_json" || col == "tags" || col == "allowed_units_json" || col == "payload"
+  col == "models_json" || col == "data" || col == "history_json" || col == "tags" || col == "allowed_units_json" || col == "payload" || col == "variables_used"
 
 /-- Convert `(headerRow + dataRows)` from `sqliteQueryRowsRaw` into a JSON array of objects,
     preserving integer and raw JSON columns where applicable. -/
@@ -1000,6 +1200,119 @@ def queryProjectParallelMissions? (st : CoreStore) (slug : String) : IO (Option 
     if rows.size ≤ 1 then return none
     return (rows[1]?.bind (·[0]?)).bind String.toInt?
 
+/-- Convert Unix epoch seconds (`1970-01-01T00:00:00Z = 0`) into canonical ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`)
+    using the Howard Hinnant civil-from-days algorithm (`0 import Lean`, `SM-07`). -/
+def formatEpochIso8601Utc (epochSecs : UInt64) : String :=
+  let totalSecs : Nat := epochSecs.toNat
+  let daySecs : Nat := totalSecs % 86400
+  let hh : Nat := daySecs / 3600
+  let mm : Nat := (daySecs % 3600) / 60
+  let ss : Nat := daySecs % 60
+  let z : Int := Int.ofNat (totalSecs / 86400) + 719468
+  let era : Int := (if z ≥ 0 then z else z - 146096) / 146097
+  let doe : Nat := (z - era * 146097).toNat
+  let yoe : Nat := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+  let y : Int := Int.ofNat yoe + era * 400
+  let doy : Nat := doe - (365 * yoe + yoe / 4 - yoe / 100)
+  let mp : Nat := (5 * doy + 2) / 153
+  let d : Nat := doy - (153 * mp + 2) / 5 + 1
+  let m : Nat := if mp < 10 then mp + 3 else mp - 9
+  let yr : Int := if m ≤ 2 then y + 1 else y
+  let pad2 (n : Nat) : String := if n < 10 then s!"0{n}" else s!"{n}"
+  let pad4 (n : Int) : String :=
+    let k := n.toNat
+    if k < 10 then s!"000{k}"
+    else if k < 100 then s!"00{k}"
+    else if k < 1000 then s!"0{k}"
+    else s!"{k}"
+  s!"{pad4 yr}-{pad2 m}-{pad2 d}T{pad2 hh}:{pad2 mm}:{pad2 ss}Z"
+
+private def isLeapYearUtc (y : Nat) : Bool :=
+  (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+
+private def daysInMonthUtc (y m : Nat) : Nat :=
+  match m with
+  | 1 | 3 | 5 | 7 | 8 | 10 | 12 => 31
+  | 4 | 6 | 9 | 11 => 30
+  | 2 => if isLeapYearUtc y then 29 else 28
+  | _ => 0
+
+/-- Parse an ISO-8601 / RFC-3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM)`) into `UInt64` UTC epoch seconds (`>= 0`). -/
+def parseIso8601EpochU64? (s : String) : Option UInt64 := do
+  if s.trimAscii.toString != s then none
+  let (datePart, rest0) ← match s.splitOn "T" with
+    | [d, t] => some (d, t)
+    | _ => match s.splitOn "t" with
+      | [d, t] => some (d, t)
+      | _ => none
+  let [yStr, mStr, dStr] := datePart.splitOn "-" | none
+  if yStr.length != 4 || mStr.length != 2 || dStr.length != 2 then none
+  if !yStr.all Char.isDigit || !mStr.all Char.isDigit || !dStr.all Char.isDigit then none
+  let y ← yStr.toNat?
+  let mo ← mStr.toNat?
+  let da ← dStr.toNat?
+  if y < 1970 || mo < 1 || mo > 12 || da < 1 || da > daysInMonthUtc y mo then none
+  let (timePart, tzOffsetSec) ←
+    if rest0.endsWith "Z" || rest0.endsWith "z" then
+      some ((rest0.dropEnd 1).toString, (0 : Int))
+    else if rest0.length > 6 then
+      let tzSignPos := rest0.length - 6
+      let pfx := (rest0.take tzSignPos).toString
+      let sfx := (rest0.drop tzSignPos).toString
+      let signChar := sfx.toList.headD ' '
+      if signChar != '+' && signChar != '-' then none
+      else
+        match (sfx.drop 1).toString.splitOn ":" with
+        | [ohS, omS] =>
+          if ohS.length != 2 || omS.length != 2 || !ohS.all Char.isDigit || !omS.all Char.isDigit then none
+          else
+            let oh ← ohS.toNat?
+            let om ← omS.toNat?
+            if oh > 23 || om > 59 then none
+            else
+              let mag : Int := Int.ofNat (oh * 3600 + om * 60)
+              some (pfx, if signChar == '+' then mag else -mag)
+        | _ => none
+    else none
+  let baseTime ← match timePart.splitOn "." with
+    | [h] => some h
+    | [h, frac] =>
+      if !frac.isEmpty && frac.all Char.isDigit then some h else none
+    | _ => none
+  let [hhS, mmS, ssS] := baseTime.splitOn ":" | none
+  if hhS.length != 2 || mmS.length != 2 || ssS.length != 2 then none
+  if !hhS.all Char.isDigit || !mmS.all Char.isDigit || !ssS.all Char.isDigit then none
+  let hh ← hhS.toNat?
+  let mm ← mmS.toNat?
+  let ss ← ssS.toNat?
+  if hh > 23 || mm > 59 || ss > 60 then none
+  let mut yearDays : Nat := 0
+  for yr in [1970:y] do
+    yearDays := yearDays + (if isLeapYearUtc yr then 366 else 365)
+  let mut monthDays : Nat := 0
+  for mn in [1:mo] do
+    monthDays := monthDays + daysInMonthUtc y mn
+  let totalDays : Int := Int.ofNat (yearDays + monthDays + (da - 1))
+  let utcSec : Int := totalDays * 86400 + Int.ofNat (hh * 3600 + mm * 60 + ss) - tzOffsetSec
+  if utcSec < 0 then none else some utcSec.toNat.toUInt64
+
+/-- Normalize any continuation timestamp string: if already valid ISO-8601, return canonical UTC `Z`;
+    if decimal epoch seconds, format as ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`). -/
+def normalizeContinuationIso8601 (raw : String) (fallbackEpoch : UInt64 := 0) : String :=
+  let t := raw.trimAscii.toString
+  if let some ep := parseIso8601EpochU64? t then
+    formatEpochIso8601Utc ep
+  else if let some n := t.toNat? then
+    formatEpochIso8601Utc n.toUInt64
+  else
+    formatEpochIso8601Utc fallbackEpoch
+
+/-- Format continuation `next_at` JSON field value (`null` when `trigger_kind == "job"` or `due == 0`,
+    otherwise JSON-escaped ISO-8601 UTC `YYYY-MM-DDTHH:MM:SSZ`). -/
+def renderContinuationNextAtJson (triggerKind : String) (dueEpoch : UInt64) : String :=
+  if triggerKind == "job" || dueEpoch == 0 then "null"
+  else jsonEscape (formatEpochIso8601Utc dueEpoch)
+
 /-- List missions from `missions.db` joined with `mission_terminal_evidence` as JSON (`SM-01`, `SM-02`),
     preserving `total_cost_cents` telemetry, typed authority/placement/revision columns, and unified `health_verdict`. -/
 def listMissionsJson (st : CoreStore) (nodeBootEpoch? : Option UInt64 := none) : IO (Except String String) := do
@@ -1013,10 +1326,44 @@ def listMissionsJson (st : CoreStore) (nodeBootEpoch? : Option UInt64 := none) :
     "COALESCE(e.artifact_ref,'') AS ev_artifact,COALESCE(e.recorded_at,'') AS ev_recorded_at," ++
     "(SELECT COUNT(*) FROM mission_runs r WHERE r.mission_id=m.id AND r.execution_state<>'terminal') AS live_runs," ++
     "(SELECT COUNT(*) FROM mission_events ev WHERE ev.mission_id=m.id) AS ev_cnt," ++
-    "m.tags " ++
+    "m.tags," ++
+    "(SELECT COUNT(*) FROM mission_continuations c WHERE c.mission_id=m.id AND c.phase=1) AS armed_wakeups," ++
+    "COALESCE(e.verified,1) AS ev_verified " ++
     "FROM missions m LEFT JOIN mission_terminal_evidence e ON e.mission_id = m.id " ++
     "ORDER BY m.updated_at DESC, m.id ASC;"
   let rows ← execParamQuery st.missionsDb sql #[]
+  let contRows ← execParamQuery st.missionsDb
+    ("SELECT mission_id,id,phase,due_epoch,trigger_kind,reason,source,error,recurrence " ++
+     "FROM mission_continuations WHERE phase IN (1,2,3) ORDER BY due_epoch ASC, id ASC;") #[]
+  let contItemsByMission : String → Array String := fun mid =>
+    match contRows with
+    | .error _ => #[]
+    | .ok crs =>
+      if crs.size ≤ 1 then #[]
+      else Id.run do
+        let mut acc : Array String := #[]
+        for ci in [1:crs.size] do
+          let cr := crs[ci]!
+          if (cr[0]?).getD "" == mid then
+            let cid := (cr[1]?).getD ""
+            let cphase := ((cr[2]?.bind String.toNat?).getD 1).toUInt8
+            let cdue := (cr[3]?.bind String.toNat?).getD 0
+            let ctrig := (cr[4]?).getD "time"
+            let creason := (cr[5]?).getD ""
+            let csrc := (cr[6]?).getD ""
+            let cerr := (cr[7]?).getD ""
+            let crec := (cr[8]?).getD ""
+            let cstate :=
+              if cphase == 2 then (if ctrig == "delivery" then "waiting_for_client" else "queued")
+              else if cphase == 3 then "error"
+              else "scheduled"
+            let srcJson := if csrc.isEmpty then "" else s!",\"source\":{jsonEscape csrc}"
+            let errJson := if cerr.isEmpty then "" else s!",\"error\":{jsonEscape cerr}"
+            let recJson := if crec.isEmpty then "" else s!",\"recurrence\":{jsonEscape crec}"
+            acc := acc.push (
+              s!"\{\"id\":{jsonEscape cid},\"state\":{jsonEscape cstate}," ++
+              s!"\"next_at\":{renderContinuationNextAtJson ctrig cdue.toUInt64},\"trigger\":{jsonEscape ctrig},\"reason\":{jsonEscape creason}{srcJson}{errJson}{recJson}}")
+        return acc
   return rows.map (fun rs =>
     if rs.size ≤ 1 then "[]"
     else Id.run do
@@ -1047,15 +1394,19 @@ def listMissionsJson (st : CoreStore) (nodeBootEpoch? : Option UInt64 := none) :
         let liveRuns := (r[21]?.bind String.toNat?).getD 0
         let evCnt := (r[22]?.bind String.toNat?).getD 0
         let rawTags := r[23]?.getD "[]"
+        let armedWakeups := (r[24]?.bind String.toNat?).getD 0
+        let evVerified := ((r[25]?.bind String.toNat?).getD 1) != 0
         let effReason := if !evReason.isEmpty then evReason else mTermReason
         let hasEv := !evRecorded.isEmpty || !evReason.isEmpty
         let verdict := deriveMissionHealthVerdict
           c2 effReason orphAt superBy placeKind
-          (rowBoot == nodeBootEpoch) false (liveRuns > 0) (evCnt > 0) false hasEv
+          (rowBoot == nodeBootEpoch) false (liveRuns > 0) (evCnt > 0) (armedWakeups > 0) hasEv
         let evJson :=
           if hasEv then
-            s!"\{\"terminal_reason\":{jsonEscape evReason},\"summary\":{jsonEscape evSummary},\"artifact_ref\":{jsonEscape evArtifact},\"recorded_at\":{jsonEscape evRecorded}}"
+            s!"\{\"terminal_reason\":{jsonEscape evReason},\"summary\":{jsonEscape evSummary},\"artifact_ref\":{jsonEscape evArtifact},\"verified\":{if evVerified then "true" else "false"},\"recorded_at\":{jsonEscape evRecorded}}"
           else "null"
+        let cItems := contItemsByMission c0
+        let contJson := s!"\{\"count\":{cItems.size},\"items\":[{String.intercalate "," cItems.toList}]}"
         let tagsOut :=
           if rawTags.startsWith "[" then rawTags
           else projectCompatibilityTagsJson authMode placeKind superBy orphAt diskGib.toUInt64
@@ -1066,7 +1417,7 @@ def listMissionsJson (st : CoreStore) (nodeBootEpoch? : Option UInt64 := none) :
           s!"\"authority_mode\":{jsonEscape authMode},\"placement_kind\":{jsonEscape placeKind}," ++
           s!"\"superseded_by_mission_id\":{jsonEscape superBy},\"orphaned_at\":{jsonEscape orphAt}," ++
           s!"\"reserved_disk_gib\":{diskGib},\"state_revision\":{stateRev}," ++
-          s!"\"health_verdict\":{jsonEscape verdict},\"terminal_evidence\":{evJson},\"tags\":{tagsOut}}"
+          s!"\"health_verdict\":{jsonEscape verdict},\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut}}"
         )
       return "[" ++ String.intercalate "," items.toList ++ "]")
 
@@ -1074,7 +1425,7 @@ def listMissionsJson (st : CoreStore) (nodeBootEpoch? : Option UInt64 := none) :
 def isStatusMovable (status : String) : Bool :=
   status == "awaiting_user" || status == "completed" || status == "failed" ||
   status == "interrupted" || status == "paused" || status == "blocked" ||
-  status == "not_feasible" || status == "acknowledged"
+  status == "not_feasible" || status == "acknowledged" || status == "waiting_rate_limit"
 
 /-- Transactional fence-checked machine-transfer initiation gated by `verifyTransferFence` (`OrbCore.Spec`). -/
 def startMachineTransfer (st : CoreStore) (t : TransferRecord) : IO (Except String TransferRecord) := do
@@ -1313,7 +1664,9 @@ private def payloadContent? (payload : String) : Option String :=
 private def payloadSource? (payload : String) : Option String :=
   (OrbBin.Json.parse payload).toOption.bind (·.field? "message") |>.bind (·.fieldStr? "source")
 
-/-- Enqueue a waiting remote follow-up. Replaying the same id returns its current content without moving it. -/
+/-- Enqueue a waiting remote follow-up. Replaying the same id returns its current content without moving it.
+    Strips any `<!-- sandboxed:messages:v1:<b64> -->` trailer into `deferred_message_batches` (`SM-05`)
+    and fails closed on malformed trailers or duplicate batch UUIDs. -/
 def enqueueRemoteMessage (st : CoreStore) (userId messageId missionId content : String)
     (source? : Option String := some "remote-queue") : IO (Except String String) :=
   withImmediateTx st.missionsDb do
@@ -1324,17 +1677,43 @@ def enqueueRemoteMessage (st : CoreStore) (userId messageId missionId content : 
     | .ok rows =>
       if rows.size > 1 then
         return .ok ((payloadContent? ((rows[1]?.bind (·[0]?)).getD "")).getD "")
+      let (plain, batchMsgs?) ←
+        match extractStoreDeferredTrailerStrict content with
+        | .error e => return .error e
+        | .ok p => pure p
+      if plain.trimAscii.toString.isEmpty then
+        return .error "deferred_batch_content"
+      if let some msgs := batchMsgs? then
+        let seqRows ← execParamQueryUnlocked st.missionsDb
+          "SELECT COALESCE(MAX(batch_seq),0) FROM deferred_message_batches WHERE mission_id=?1;" #[missionId]
+        let .ok srs := seqRows | return .error "deferred_batch_seq_failed"
+        let batchSeq := (((srs[1]?.bind (·[0]?)).bind String.toNat?).getD 0) + 1
+        for (mid, _) in msgs do
+          let dupBatch ← execParamQueryUnlocked st.missionsDb
+            "SELECT COUNT(*) FROM deferred_message_batches WHERE mission_id=?1 AND message_id=?2;" #[missionId, mid]
+          let .ok drs := dupBatch | return .error "deferred_batch_dup_check_failed"
+          if (((drs[1]?.bind (·[0]?)).bind String.toNat?).getD 0) > 0 then
+            return .error "deferred_batch_dup"
+        for (mid, c) in msgs do
+          let insB ← execParamQueryUnlocked st.missionsDb
+            "INSERT INTO deferred_message_batches(mission_id,batch_seq,message_id,content,source,unpacked,created_at) VALUES(?1,?2,?3,?4,?5,1,'');"
+            #[missionId, s!"{batchSeq}", mid, c, source?.getD ""]
+          if let .error e := insB then return .error e
       let ins ← execParamQueryUnlocked st.missionsDb
-        "INSERT INTO remote_message_queue(user_id,message_id,mission_id,payload,state) VALUES(?1,?2,?3,?4,'waiting');"
-        #[userId, messageId, missionId, queuePayload content missionId source?]
-      match ins with
+        "INSERT INTO remote_message_queue(user_id,message_id,mission_id,payload,state,phase,claimed_generation,claim_boot_epoch,delivered_seq,edit_revision) VALUES(?1,?2,?3,?4,'waiting',0,0,0,0,0);"
+        #[userId, messageId, missionId, queuePayload plain missionId source?]
+      if let .error e := ins then return .error e
+      let rec ← execParamQueryUnlocked st.missionsDb
+        "INSERT INTO queue_item_receipts(message_id,mission_id,phase,claimed_generation,claim_boot_epoch,delivered_seq,edit_revision,content,source,updated_at) VALUES(?1,?2,0,0,0,0,0,?3,?4,'') ON CONFLICT(message_id) DO NOTHING;"
+        #[messageId, missionId, plain, source?.getD ""]
+      match rec with
       | .error e => return .error e
-      | .ok _ => return .ok content
+      | .ok _ => return .ok plain
 
 /-- List one mission's waiting queue in FIFO order (`sequence ASC`). -/
 def listRemoteQueueJson (st : CoreStore) (userId missionId : String) : IO (Except String String) := do
   let rows ← execParamQuery st.missionsDb
-    "SELECT sequence,message_id,mission_id,payload,state FROM remote_message_queue WHERE user_id=?1 AND mission_id=?2 AND state='waiting' AND json_extract(payload,'$.job_id') IS NULL ORDER BY sequence ASC;"
+    "SELECT sequence,message_id,mission_id,payload,state FROM remote_message_queue WHERE user_id=?1 AND mission_id=?2 AND state='waiting' AND COALESCE(phase,0)=0 AND json_extract(payload,'$.job_id') IS NULL ORDER BY sequence ASC;"
     #[userId, missionId]
   match rows with
   | .error e => return .error e
@@ -1351,25 +1730,63 @@ def listRemoteQueueJson (st : CoreStore) (userId missionId : String) : IO (Excep
       items := items.push s!"\{\"id\":{jsonEscape id},\"mission_id\":{jsonEscape mid},\"content\":{jsonEscape content},\"source\":{sourceJson},\"inflight\":false}"
     return .ok ("[" ++ String.intercalate "," items.toList ++ "]")
 
-/-- Edit a waiting unbound row in place. Bound or non-waiting rows are `AlreadyDelivered`; missing ids are `NotFound`. -/
-def editRemoteMessage (st : CoreStore) (userId messageId content : String) : IO (Except String QueueEditOutcome) :=
+/-- Edit a waiting unbound row in place via `Orb.Lifecycle.stepQueueSlice` (`opCode = 6`, `SM-04`/`SM-05`).
+    Bound or non-waiting rows (`claimed`/`delivered`/`crash_tombstone`/`cancelled`) are `AlreadyDelivered`;
+    missing ids are `NotFound`; empty or trailer-bearing content returns `.error`. -/
+def editRemoteMessage (st : CoreStore) (userId messageId content : String) : IO (Except String QueueEditOutcome) := do
+  let cleanContent ←
+    match extractStoreDeferredTrailerStrict content with
+    | .error e => return .error e
+    | .ok (_, some _) => return .error "deferred_batch_edit_trailer"
+    | .ok (plain, none) =>
+      let t := plain.trimAscii.toString
+      if t.isEmpty then return .error "deferred_batch_content"
+      else pure plain
   withImmediateTx st.missionsDb do
     let found ← execParamQueryUnlocked st.missionsDb
-      "SELECT mission_id,payload,state,json_extract(payload,'$.job_id') FROM remote_message_queue WHERE user_id=?1 AND message_id=?2;"
+      ("SELECT mission_id,payload,state,json_extract(payload,'$.job_id'),COALESCE(phase,0)," ++
+       "COALESCE(claimed_generation,0),COALESCE(claim_boot_epoch,0),COALESCE(delivered_seq,0),COALESCE(edit_revision,0) " ++
+       "FROM remote_message_queue WHERE user_id=?1 AND message_id=?2;")
       #[userId, messageId]
     match found with
     | .error e => return .error e
     | .ok rows =>
       if rows.size ≤ 1 then return .ok .NotFound
-      let missionId := ((rows[1]?.bind (·[0]?)).getD "")
-      let payload := ((rows[1]?.bind (·[1]?)).getD "")
-      let state := ((rows[1]?.bind (·[2]?)).getD "")
-      let job := ((rows[1]?.bind (·[3]?)).getD "")
+      let r := rows[1]!
+      let missionId := (r[0]?).getD ""
+      let payload := (r[1]?).getD ""
+      let state := (r[2]?).getD ""
+      let job := (r[3]?).getD ""
+      let phaseNat := ((r[4]?.bind String.toNat?).getD 0)
+      let claimedGen := ((r[5]?.bind String.toNat?).getD 0).toUInt64
+      let claimBoot := ((r[6]?.bind String.toNat?).getD 0).toUInt64
+      let delivSeq := ((r[7]?.bind String.toNat?).getD 0).toUInt64
+      let editRev := ((r[8]?.bind String.toNat?).getD 0).toUInt32
       let source? := payloadSource? payload
-      if state != "waiting" || !job.isEmpty then return .ok .AlreadyDelivered
+      let effPhase : UInt8 :=
+        if phaseNat != 0 then phaseNat.toUInt8
+        else if state == "claimed" || !job.isEmpty then 1
+        else if state == "delivered" then 2
+        else if state == "crash_tombstone" then 3
+        else if state == "cancelled" then 4
+        else 0
+      let pendingRows ← execParamQueryUnlocked st.missionsDb
+        "SELECT COUNT(*) FROM deferred_message_batches WHERE mission_id=?1 AND unpacked=0;" #[missionId]
+      let .ok prs := pendingRows | return .error "deferred_pending_select_failed"
+      let pendingCnt := ((prs[1]?.bind (·[0]?)).bind String.toNat?).getD 0
+      let deferredUnpacked : UInt8 :=
+        if hasStoreRawTrailerMarker payload || pendingCnt > 0 then 0 else 1
+      let effBoot : UInt64 := if st.bootEpoch == 0 then 1 else st.bootEpoch
+      let (nextState, effs) := stepQueueSlice
+        { phaseCode := effPhase, claimedGeneration := claimedGen, claimBootEpoch := claimBoot, deliveredSeq := delivSeq, editRevision := editRev }
+        { opCode := 6, deferredUnpacked := deferredUnpacked, durablyStarted := 1, uncertainTimeout := 0, operatorConfirmedNotDelivered := 0,
+          contentNonEmpty := 1, runGeneration := 0, nodeBootEpoch := effBoot, deliverySeq := 0 }
+      if effs.isEmpty || state != "waiting" || !job.isEmpty then
+        return .ok .AlreadyDelivered
       let updated ← execParamQueryUnlocked st.missionsDb
-        "UPDATE remote_message_queue SET payload=json_set(payload,'$.message.content',?3) WHERE user_id=?1 AND message_id=?2 AND state='waiting' AND json_extract(payload,'$.job_id') IS NULL;"
-        #[userId, messageId, content]
+        ("UPDATE remote_message_queue SET payload=json_set(payload,'$.message.content',?3),edit_revision=?4 " ++
+         "WHERE user_id=?1 AND message_id=?2 AND state='waiting' AND COALESCE(phase,0)=0 AND COALESCE(edit_revision,0)=CAST(?5 AS INTEGER) AND json_extract(payload,'$.job_id') IS NULL;")
+        #[userId, messageId, cleanContent, s!"{nextState.editRevision}", s!"{editRev}"]
       match updated with
       | .error e => return .error e
       | .ok _ =>
@@ -1379,6 +1796,11 @@ def editRemoteMessage (st : CoreStore) (userId messageId content : String) : IO 
         | .ok crs =>
           let n := ((crs[1]?.bind (·[0]?)).bind String.toNat?).getD 0
           if n == 0 then return .ok .AlreadyDelivered
+          let rec ← execParamQueryUnlocked st.missionsDb
+            ("INSERT INTO queue_item_receipts(message_id,mission_id,phase,claimed_generation,claim_boot_epoch,delivered_seq,edit_revision,content,source,updated_at) " ++
+             "VALUES(?1,?2,0,0,0,0,?3,?4,?5,'') ON CONFLICT(message_id) DO UPDATE SET edit_revision=excluded.edit_revision,content=excluded.content;")
+            #[messageId, missionId, s!"{nextState.editRevision}", cleanContent, source?.getD ""]
+          if let .error re := rec then return .error re
           return .ok (.Edited missionId source?)
 
 /-- Per-model metadata & router pacing limits on a custom inference provider. -/
@@ -1617,6 +2039,7 @@ def encodeRollbackStatus (status : String) : UInt8 :=
   | "blocked" => 8
   | "not_feasible" => 9
   | "paused" => 10
+  | "waiting_rate_limit" => 7
   | _ => 255
 
 /-- Atomically restore pre-activation `(snapshotStatus, snapshotReason)` after a rejected local or
@@ -1638,10 +2061,12 @@ def restoreMissionStatus
         return .error s!"mission_not_found:{missionId}"
       let curStatus := (rows[1]?.bind (·[0]?)).getD ""
       let liveRuns := ((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0
+      let exactStatusGuard :=
+        curStatus == "pending" || curStatus == "active" || curStatus == snapshotStatus
       let curCode := encodeRollbackStatus curStatus
       let snapCode := encodeRollbackStatus snapshotStatus
       let hasActiveRun : UInt8 := if liveRuns > 0 then 1 else 0
-      if Orb.Kernel.activationRollbackAdmit curCode snapCode hasActiveRun != 1 then
+      if !exactStatusGuard || Orb.Kernel.activationRollbackAdmit curCode snapCode hasActiveRun != 1 then
         return .ok false
       let upd ← execParamQueryUnlocked st.missionsDb
         "UPDATE missions SET status=?2,terminal_reason=?3,state_revision=state_revision+1,updated_at=?4 WHERE id=?1;"
@@ -1663,16 +2088,40 @@ def armRemoteMissionWait
   withImmediateTx st.missionsDb do
     if nodeId.trimAscii.isEmpty || failedJobId.trimAscii.isEmpty then
       return .error "remote_wait_invalid_ids"
-    let q ← execParamQueryUnlocked st.missionsDb "SELECT id FROM missions WHERE id=?1;" #[missionId]
+    let q ← execParamQueryUnlocked st.missionsDb
+      "SELECT id,status,superseded_by_mission_id,COALESCE(owner_epoch,1),COALESCE(state_revision,1),COALESCE(not_before,0) FROM missions WHERE id=?1;" #[missionId]
     match q with
     | .error e => return .error e
     | .ok rows =>
       if rows.size ≤ 1 then
         return .error s!"mission_not_found:{missionId}"
+      let curStatus := (rows[1]?.bind (·[1]?)).getD ""
+      let superseded : UInt8 := if ((rows[1]?.bind (·[2]?)).getD "").isEmpty then 0 else 1
+      let ownerEpoch := ((rows[1]?.bind (·[3]?)).bind String.toNat?).getD 1 |>.toUInt64
+      let stateRev := ((rows[1]?.bind (·[4]?)).bind String.toNat?).getD 1 |>.toUInt32
+      let curNotBefore := ((rows[1]?.bind (·[5]?)).bind String.toNat?).getD 0 |>.toUInt64
+      let parkPhase : UInt8 :=
+        if curStatus == "active" || curStatus == "pending" || curStatus == "interrupted" ||
+           curStatus == "awaiting_user" || curStatus == "paused" ||
+           curStatus == "waiting_background" || curStatus == "waiting_rate_limit" then 1
+        else 6
+      let effNotBefore : UInt64 := if deadlineEpoch == 0 then 1 else deadlineEpoch
+      let (nextState, effs) := stepMissionSlice
+        { phaseCode := parkPhase, superseded := superseded, resumeIntent := 0, ownerEpoch := ownerEpoch, notBeforeEpoch := curNotBefore, stateRevision := stateRev }
+        { opCode := 3, hasEvidence := 0, hasTermReceipt := 0, reqResumeInt := 1, callerEpoch := ownerEpoch, nowEpoch := 0, reqNotBefore := effNotBefore, markSuperseded := 0 }
+      if effs.isEmpty then
+        return .error s!"remote_wait_rejected:{curStatus}"
+      let parkedStatus := if terminalReason == "usage_limit_wait" then "waiting_rate_limit" else "interrupted"
+      let parkedIntent := if parkedStatus == "waiting_rate_limit" then "1" else "0"
+      let storedNotBefore := if deadlineEpoch == 0 then curNotBefore else nextState.notBeforeEpoch
       let updM ← execParamQueryUnlocked st.missionsDb
-        "UPDATE missions SET status='interrupted',terminal_reason=?2,placement_job_id=?3,scheduled_remote_job_id=?4,state_revision=state_revision+1,updated_at=?5 WHERE id=?1;"
-        #[missionId, terminalReason, failedJobId, scheduledOriginJobId, updatedAt]
+        "UPDATE missions SET status=?2,terminal_reason=?3,placement_job_id=?4,scheduled_remote_job_id=?5,not_before=?6,resume_intent=?7,state_revision=?8,updated_at=?9 WHERE id=?1 AND status=?10 AND COALESCE(state_revision,1)=CAST(?11 AS INTEGER);"
+        #[missionId, parkedStatus, terminalReason, failedJobId, scheduledOriginJobId, s!"{storedNotBefore}", parkedIntent, s!"{nextState.stateRevision}", updatedAt, curStatus, s!"{stateRev}"]
       if let .error ue := updM then return .error ue
+      let ch ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
+      let .ok crs := ch | return .error "remote_wait_changes_failed"
+      if ((crs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 == 0 then
+        return .error "remote_wait_cas_lost"
       let insW ← execParamQueryUnlocked st.missionsDb
         ("INSERT INTO mission_remote_waits(mission_id,node_id,failed_job_id,scheduled_origin_job_id,retries,max_retries,replays,deadline_epoch,updated_at) " ++
          "VALUES(?1,?2,?3,?4,0,?5,0,?6,?7) " ++
@@ -1723,11 +2172,13 @@ def stepRemoteMissionReplay
     if dispatchOutcome > 2 || hasRecoveryHandle > 1 || retryFitsDeadline > 1 then
       return .error "remote_replay_invalid_flags"
     let mq ← execParamQueryUnlocked st.missionsDb
-      ("SELECT m.status, COALESCE(m.terminal_reason,''), COALESCE(m.placement_job_id,''), COALESCE(m.scheduled_remote_job_id,''), m.run_generation, " ++
+      ("SELECT m.status, COALESCE(m.terminal_reason,''), COALESCE(m.placement_job_id,''), COALESCE(m.scheduled_remote_job_id,''), COALESCE(m.run_generation,1), " ++
        "(SELECT COUNT(*) FROM mission_runs r WHERE r.mission_id=m.id AND r.execution_state<>'terminal'), " ++
        "COALESCE((SELECT r2.execution_state FROM mission_runs r2 WHERE r2.mission_id=m.id ORDER BY r2.generation DESC, r2.rowid DESC LIMIT 1),''), " ++
        "COALESCE((SELECT r2.terminal_reason FROM mission_runs r2 WHERE r2.mission_id=m.id ORDER BY r2.generation DESC, r2.rowid DESC LIMIT 1),''), " ++
-       "COALESCE((SELECT r2.remote_job_id FROM mission_runs r2 WHERE r2.mission_id=m.id ORDER BY r2.generation DESC, r2.rowid DESC LIMIT 1),'') " ++
+       "COALESCE((SELECT r2.remote_job_id FROM mission_runs r2 WHERE r2.mission_id=m.id ORDER BY r2.generation DESC, r2.rowid DESC LIMIT 1),''), " ++
+       "COALESCE(m.superseded_by_mission_id,''), COALESCE(m.owner_epoch,1), COALESCE(m.state_revision,0), " ++
+       "COALESCE(m.not_before,0), COALESCE(m.resume_intent,0) " ++
        "FROM missions m WHERE m.id=?1;")
       #[missionId]
     let .ok mrows := mq | return .error (match mq with | .error e => e | .ok _ => "err")
@@ -1738,11 +2189,16 @@ def stepRemoteMissionReplay
     let rawReason := (mr[1]?).getD ""
     let curPlacementJob := (mr[2]?).getD ""
     let curScheduledJob := (mr[3]?).getD ""
-    let curRunGen := ((mr[4]?.bind String.toNat?).getD 1)
+    let curRunGen := ((mr[4]?.bind String.toNat?).getD 1).toUInt64
     let liveRunCnt := ((mr[5]?.bind String.toNat?).getD 0)
     let latestExecState := (mr[6]?).getD ""
     let latestRunReason := (mr[7]?).getD ""
     let latestRunJob := (mr[8]?).getD ""
+    let supersededFlag : UInt8 := if ((mr[9]?).getD "").isEmpty then 0 else 1
+    let ownerEpoch := ((mr[10]?.bind String.toNat?).getD 1).toUInt64
+    let curStateRev := ((mr[11]?.bind String.toNat?).getD 0).toUInt32
+    let curNotBefore := ((mr[12]?.bind String.toNat?).getD 0).toUInt64
+    let curResumeIntent := ((mr[13]?.bind String.toNat?).getD 0).toUInt8
 
     let wq ← execParamQueryUnlocked st.missionsDb
       "SELECT node_id, failed_job_id, scheduled_origin_job_id, retries, max_retries, replays, deadline_epoch FROM mission_remote_waits WHERE mission_id=?1;"
@@ -1766,11 +2222,12 @@ def stepRemoteMissionReplay
        (rawReason == "usage_limit_wait" || rawReason == "node_maintenance_wait" ||
         rawReason == "remote_dispatch_failed" || latestRunReason == "remote_dispatch_failed") then
       if Orb.Kernel.activationRollbackAdmit 0 7 0 == 1 then
-        snapStatus := "interrupted"
+        snapStatus := if snapReason == "usage_limit_wait" then "waiting_rate_limit" else "interrupted"
         if snapReason == "remote_dispatch_failed" then
           snapReason := "usage_limit_wait"
+          snapStatus := "waiting_rate_limit"
 
-    if liveRunCnt > 0 || snapStatus != "interrupted" then
+    if liveRunCnt > 0 || (snapStatus != "interrupted" && snapStatus != "waiting_rate_limit") then
       let clearWord := Orb.Kernel.remoteReplayStep 0 0 1 0 0 0 1 retries maxRetries
       if (clearWord &&& 0xFF) == 1 then
         discard <| execParamQueryUnlocked st.missionsDb "DELETE FROM mission_remote_waits WHERE mission_id=?1;" #[missionId]
@@ -1802,13 +2259,33 @@ def stepRemoteMissionReplay
     if isScheduledOrigin && previousOriginJob.trimAscii.isEmpty then
       return .error "scheduled_recovery_missing_remote_job"
 
-    -- Transitional pre-dispatch activation (`interrupted -> pending`) and tentative job binding
+    if curRunGen == 0xFFFFFFFFFFFFFFFF then
+      return .error "run_generation_overflow"
     let nextGen := curRunGen + 1
     let tentativeSchedJob := if isScheduledOrigin then candidateJobId else curScheduledJob
+    let snapPhase : UInt8 := if snapStatus == "waiting_rate_limit" then 3 else 4
+    let effResumeInt : UInt8 := if snapPhase == 3 then (if curResumeIntent == 0 then 1 else curResumeIntent) else curResumeIntent
+    let effNowForResume : UInt64 := if nowEpoch < curNotBefore then curNotBefore else nowEpoch
+    let dispatchOp : UInt8 := if snapPhase == 3 then 4 else 0
+
+    -- Transitional pre-dispatch activation (`interrupted | waiting_rate_limit -> pending`) gated by `Orb.Lifecycle` + CAS;
+    -- `run_generation` is NOT advanced before `dispatchOutcome` / `remoteReplayStep` outcome is known!
+    let (preSlice, preEffs) := stepMissionSlice
+      { phaseCode := snapPhase, superseded := supersededFlag, resumeIntent := effResumeInt,
+        ownerEpoch := ownerEpoch, notBeforeEpoch := curNotBefore, stateRevision := curStateRev }
+      { opCode := dispatchOp, hasEvidence := 0, hasTermReceipt := 0, reqResumeInt := effResumeInt,
+        callerEpoch := ownerEpoch, nowEpoch := effNowForResume, reqNotBefore := curNotBefore, markSuperseded := 0 }
+    if preEffs.isEmpty then
+      return .error s!"remote_replay_lifecycle_rejected:{rawStatus}"
+    let preRev := preSlice.stateRevision
     let preAct ← execParamQueryUnlocked st.missionsDb
-      "UPDATE missions SET status='pending',placement_job_id=?2,scheduled_remote_job_id=?3,run_generation=?4,state_revision=state_revision+1,updated_at=?5 WHERE id=?1;"
-      #[missionId, candidateJobId, tentativeSchedJob, s!"{nextGen}", updatedAt]
+      "UPDATE missions SET status='pending',placement_job_id=?2,scheduled_remote_job_id=?3,state_revision=?4,updated_at=?5 WHERE id=?1 AND status=?6 AND COALESCE(state_revision,0)=CAST(?7 AS INTEGER);"
+      #[missionId, candidateJobId, tentativeSchedJob, s!"{preRev}", updatedAt, rawStatus, s!"{curStateRev}"]
     if let .error pe := preAct then return .error pe
+    let preChg ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
+    let .ok preCrs := preChg | return .error "remote_replay_changes_failed"
+    if ((preCrs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 != 1 then
+      return .error "remote_replay_cas_lost"
 
     let pastDeadline : UInt8 :=
       if deadlineEpoch > 0 && nowEpoch > deadlineEpoch then 1 else 0
@@ -1819,16 +2296,27 @@ def stepRemoteMissionReplay
     let mustRestoreOrigin := (verdict &&& 1024) != 0
 
     if action == 3 then
-      -- `mark_replayed`: remote job started!
+      -- `mark_replayed`: remote job started! Gate run claim via `Orb.Lifecycle.verifyRunLifecycleAdmit` and advance `run_generation` now.
+      let runPhase : UInt8 := if curRunGen == 0 then 0 else 4
+      let runAdmit := verifyRunLifecycleAdmit runPhase 0 supersededFlag 0 0 0 0 curRunGen nextGen ownerEpoch ownerEpoch
+      if runAdmit != 1 then
+        return .error "remote_replay_run_lifecycle_rejected"
+      if preRev == 0xFFFFFFFF then
+        return .error "remote_replay_revision_overflow"
+      let finalRev := preRev + 1
       let newReplays := replays + 1
       let insRun ← execParamQueryUnlocked st.missionsDb
         "INSERT INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,'running','',?4,?5);"
         #[s!"remote-job:{candidateJobId}", missionId, s!"{nextGen}", candidateJobId, updatedAt]
       if let .error re := insRun then return .error re
       let updOk ← execParamQueryUnlocked st.missionsDb
-        "UPDATE missions SET status='active',terminal_reason='',state_revision=state_revision+1,updated_at=?2 WHERE id=?1;"
-        #[missionId, updatedAt]
+        "UPDATE missions SET status='active',terminal_reason='',not_before=0,resume_intent=0,run_generation=?2,state_revision=?3,updated_at=?4 WHERE id=?1 AND status='pending' AND COALESCE(state_revision,0)=CAST(?5 AS INTEGER);"
+        #[missionId, s!"{nextGen}", s!"{finalRev}", updatedAt, s!"{preRev}"]
       if let .error ue := updOk then return .error ue
+      let okChg ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
+      let .ok okCrs := okChg | return .error "remote_replay_changes_failed"
+      if ((okCrs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 != 1 then
+        return .error "remote_replay_cas_lost"
       let delW ← execParamQueryUnlocked st.missionsDb
         "DELETE FROM mission_remote_waits WHERE mission_id=?1;" #[missionId]
       if let .error de := delW then return .error de
@@ -1845,20 +2333,34 @@ def stepRemoteMissionReplay
         waitActive := false
       }
     else if action == 4 then
-      -- `retry_wait`: roll back transitional `pending -> interrupted`, restore scheduled origin, advance `failed_job_id`!
-      let insAborted ← execParamQueryUnlocked st.missionsDb
-        "INSERT INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,'terminal','remote_dispatch_failed',?4,?5);"
-        #[s!"remote-job:{candidateJobId}", missionId, s!"{nextGen}", candidateJobId, updatedAt]
-      if let .error re := insAborted then return .error re
+      -- `retry_wait`: roll back transitional `pending -> interrupted | waiting_rate_limit` via `Orb.Lifecycle` + `activationRollbackAdmit`,
+      -- keeping `missions.run_generation` unadvanced because no live run was spawned!
       let admitRb := Orb.Kernel.activationRollbackAdmit 0 (encodeRollbackStatus snapStatus) 0
       if !mustRollbackStatus || admitRb != 1 then
         return .error "remote_replay_rollback_invariant_failed"
+      let rbOp : UInt8 := if snapStatus == "waiting_rate_limit" then 3 else 5
+      let rbNotBefore : UInt64 := if rbOp == 3 then (if curNotBefore > nowEpoch then curNotBefore else nowEpoch + 1) else curNotBefore
+      let (rbSlice, rbEffs) := stepMissionSlice
+        { phaseCode := 1, superseded := supersededFlag, resumeIntent := 0,
+          ownerEpoch := ownerEpoch, notBeforeEpoch := curNotBefore, stateRevision := preRev }
+        { opCode := rbOp, hasEvidence := 0, hasTermReceipt := 0, reqResumeInt := 1,
+          callerEpoch := ownerEpoch, nowEpoch := nowEpoch, reqNotBefore := rbNotBefore, markSuperseded := 0 }
+      if rbEffs.isEmpty then
+        return .error "remote_replay_rollback_lifecycle_rejected"
+      let insAborted ← execParamQueryUnlocked st.missionsDb
+        "INSERT INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,'terminal','remote_dispatch_failed',?4,?5);"
+        #[s!"remote-job:{candidateJobId}", missionId, s!"{curRunGen}", candidateJobId, updatedAt]
+      if let .error re := insAborted then return .error re
       let restoredSchedJob :=
         if isScheduledOrigin && mustRestoreOrigin then previousOriginJob else tentativeSchedJob
       let updRb ← execParamQueryUnlocked st.missionsDb
-        "UPDATE missions SET status=?2,terminal_reason=?3,scheduled_remote_job_id=?4,state_revision=state_revision+1,updated_at=?5 WHERE id=?1;"
-        #[missionId, snapStatus, snapReason, restoredSchedJob, updatedAt]
+        "UPDATE missions SET status=?2,terminal_reason=?3,scheduled_remote_job_id=?4,resume_intent=CASE WHEN ?2='waiting_rate_limit' THEN 1 ELSE resume_intent END,state_revision=?5,updated_at=?6 WHERE id=?1 AND status='pending' AND COALESCE(state_revision,0)=CAST(?7 AS INTEGER);"
+        #[missionId, snapStatus, snapReason, restoredSchedJob, s!"{rbSlice.stateRevision}", updatedAt, s!"{preRev}"]
       if let .error ue := updRb then return .error ue
+      let rbChg ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
+      let .ok rbCrs := rbChg | return .error "remote_replay_changes_failed"
+      if ((rbCrs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 != 1 then
+        return .error "remote_replay_cas_lost"
       let newRetries := retries + 1
       let updW ← execParamQueryUnlocked st.missionsDb
         "UPDATE mission_remote_waits SET failed_job_id=?2,scheduled_origin_job_id=?3,retries=?4,updated_at=?5 WHERE mission_id=?1;"
@@ -1877,18 +2379,29 @@ def stepRemoteMissionReplay
         waitActive := true
       }
     else
-      -- `fail_deadline (2)` or `give_up_fail (5)`: terminal failure, clear wait, record evidence
+      -- `fail_deadline (2)` or `give_up_fail (5)`: terminal failure gated by `Orb.Lifecycle` (`opCode = 7`), clear wait, record evidence
+      let (failSlice, failEffs) := stepMissionSlice
+        { phaseCode := 1, superseded := supersededFlag, resumeIntent := 0,
+          ownerEpoch := ownerEpoch, notBeforeEpoch := curNotBefore, stateRevision := preRev }
+        { opCode := 7, hasEvidence := 1, hasTermReceipt := 0, reqResumeInt := 0,
+          callerEpoch := ownerEpoch, nowEpoch := nowEpoch, reqNotBefore := 0, markSuperseded := 0 }
+      if failEffs.isEmpty then
+        return .error "remote_replay_fail_lifecycle_rejected"
       let termReason := if action == 2 then "remote_wait_deadline_exceeded" else "remote_replay_exhausted"
       let insAborted ← execParamQueryUnlocked st.missionsDb
         "INSERT INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,'terminal','remote_dispatch_failed',?4,?5);"
-        #[s!"remote-job:{candidateJobId}", missionId, s!"{nextGen}", candidateJobId, updatedAt]
+        #[s!"remote-job:{candidateJobId}", missionId, s!"{curRunGen}", candidateJobId, updatedAt]
       if let .error re := insAborted then return .error re
       let restoredSchedJob :=
         if isScheduledOrigin && mustRestoreOrigin then previousOriginJob else tentativeSchedJob
       let updFail ← execParamQueryUnlocked st.missionsDb
-        "UPDATE missions SET status='failed',terminal_reason=?2,scheduled_remote_job_id=?3,state_revision=state_revision+1,updated_at=?4 WHERE id=?1;"
-        #[missionId, termReason, restoredSchedJob, updatedAt]
+        "UPDATE missions SET status='failed',terminal_reason=?2,scheduled_remote_job_id=?3,not_before=0,resume_intent=0,state_revision=?4,updated_at=?5 WHERE id=?1 AND status='pending' AND COALESCE(state_revision,0)=CAST(?6 AS INTEGER);"
+        #[missionId, termReason, restoredSchedJob, s!"{failSlice.stateRevision}", updatedAt, s!"{preRev}"]
       if let .error ue := updFail then return .error ue
+      let failChg ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
+      let .ok failCrs := failChg | return .error "remote_replay_changes_failed"
+      if ((failCrs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 != 1 then
+        return .error "remote_replay_cas_lost"
       let insEv ← execParamQueryUnlocked st.missionsDb
         ("INSERT INTO mission_terminal_evidence(mission_id,terminal_reason,summary,artifact_ref,verified,recorded_at) " ++
          "VALUES(?1,?2,'Remote wait recovery exhausted or expired','',1,?3) " ++
