@@ -1147,8 +1147,10 @@ object OrbWarmSyncCoordinator {
                 val stillActive = synchronized(lock) { activeScopeKey == scopeSnapshot && warmBtwSubs[parentId] === sub }
                 if (!stillActive) return@launch
                 val closed = kotlinx.coroutines.CompletableDeferred<Unit>()
-                val existingEvs = btwSnapshots[parentId]?.cachedEventsByThread?.get(missionId).orEmpty()
-                val sinceSeq = OrbSideAgent.maxEventSeq(existingEvs).takeIf { it > 0L }
+                val snap = btwSnapshots[parentId]
+                val existingEvs = snap?.cachedEventsByThread?.get(missionId).orEmpty()
+                val cachedMaxSeq = snap?.cachedThreads?.get(missionId)?.second?.maxSequence ?: 0L
+                val sinceSeq = maxOf(OrbSideAgent.maxEventSeq(existingEvs), cachedMaxSeq).takeIf { it > 0L }
                 val sinceSuffix = sinceSeq?.let { "&since_seq=$it" } ?: ""
                 var source: EventSource? = null
                 try {
@@ -1262,7 +1264,9 @@ object OrbWarmSyncCoordinator {
             )
             val otherTurns = currentSnap.turns.filterNot { it.id.startsWith("btw:$missionId:") }
             val mergedTurns = OrbSideAgent.mergeTurns(listOf(otherTurns, nextParsed.turns))
-            val updatedEventsMap = LinkedHashMap(currentSnap.cachedEventsByThread).apply { put(missionId, nextEvents) }
+            val updatedEventsMap = LinkedHashMap(currentSnap.cachedEventsByThread).apply {
+                if (active) put(missionId, nextEvents) else remove(missionId)
+            }
             val updatedThreadsMap = LinkedHashMap(currentSnap.cachedThreads).apply { put(missionId, "" to nextParsed) }
             val updatedSnap = OrbWarmBtwSnapshot(
                 boundMission = nextBound,
