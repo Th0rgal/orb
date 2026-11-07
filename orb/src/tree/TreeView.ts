@@ -121,7 +121,8 @@ export function createProjectTree(deps: {
       return [{ id: `loading:${key}`, data: { kind: "note", slug, path, label: "Loading files…" } }];
     }
     const away = filesMovedAway(slug, path);
-    const entries = dirs[key].filter(e => !away.has(e.name) && !(path === "" && e.name === "attachments"));
+    const listed = Array.isArray(dirs[key]) ? dirs[key] : [];
+    const entries = listed.filter(e => !away.has(e.name) && !(path === "" && e.name === "attachments"));
     for (const arriving of filesMovedInto(slug, path)) if (!entries.some(e => e.name === arriving.name)) entries.push(arriving);
     for (const hint of folderHints(slug, path)) if (!entries.some(e => e.name === hint.name)) entries.push(hint);
     if (!entries.length && !work.length && !dirErrors[key]) return path ? [{ id: `empty:${key}`, data: { kind: "note", slug, path, label: "Empty folder" } }] : [];

@@ -2163,14 +2163,16 @@ export function LiveProjectsSection(p: {
     if (!row) return;
     // Project rows are buttons inside the tree. WebKit drops their click after
     // this pointerdown, so open the project from the pointerup that follows.
-    if (row.kind === "project") {
-      const x = e.clientX, y = e.clientY, slug = row.slug;
+    if (row.kind === "project" || row.kind === "folder") {
+      const x = e.clientX, y = e.clientY, slug = row.slug, path = row.path ?? "";
+      const kind = row.kind;
       const up = (ev: PointerEvent) => {
         window.removeEventListener("pointerup", up, true);
         window.removeEventListener("pointercancel", up, true);
         if (ev.button !== 0 || Math.hypot(ev.clientX - x, ev.clientY - y) >= 6) return;
         entry.dataset.toggled = "1";
-        toggleProject(slug);
+        if (kind === "project") toggleProject(slug);
+        else toggleDir(slug, path);
         setTimeout(() => { delete entry.dataset.toggled; }, 0);
       };
       window.addEventListener("pointerup", up, true);
@@ -2445,7 +2447,7 @@ export function LiveProjectsSection(p: {
       <Show when={!cronUnsupported() && cronRetryable[d.slug]}><button class="cron-retry" aria-label="Retry crons" title="Retry crons" onClick={() => void loadCrons(d.slug, true)}>↻</button></Show>
     </div>;
     if (d.kind === "folder") return <div class={`row folder ${(cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id) ? "mission-cut" : ""} ${selectionActive() && selectedTreeSet().has(row.id) ? "active" : ""}`} data-drop-project={d.slug} data-drop-folder={d.path ?? ""} onContextMenu={contextMenu}>
-      <button class="row-main" aria-label={d.label} aria-expanded={row.expanded} {...rowTip.bind(rowDetail(d.label))} onPointerEnter={() => warmIntent(d.slug, d.path!)} onPointerLeave={cancelIntent} onFocus={() => warmIntent(d.slug, d.path!)} onBlur={cancelIntent} onClick={e => { if (e.metaKey || e.ctrlKey || e.shiftKey) clickSelectableRow(e, row.id, () => toggleDir(d.slug, d.path!)); else { setSelectionAnchor(row.id); toggleDir(d.slug, d.path!); } }}>
+      <button type="button" class="row-main" aria-label={d.label} aria-expanded={row.expanded} {...rowTip.bind(rowDetail(d.label))} onPointerEnter={() => warmIntent(d.slug, d.path!)} onPointerLeave={cancelIntent} onFocus={() => warmIntent(d.slug, d.path!)} onBlur={cancelIntent} onClick={e => { const entry = e.currentTarget.closest<HTMLElement>(".tree-entry"); if (entry?.dataset.toggled) { delete entry.dataset.toggled; return; } if (e.metaKey || e.ctrlKey || e.shiftKey) clickSelectableRow(e, row.id, () => toggleDir(d.slug, d.path!)); else { setSelectionAnchor(row.id); toggleDir(d.slug, d.path!); } }}>
         <FolderActivityIcon expanded={row.expanded} color={projectColor(d.slug)} count={activity().get(d.slug)?.get(d.path ?? "") ?? 0} scheduled={scheduledActivity().get(d.slug)?.get(d.path ?? "") ?? 0} /><span class="row-label">{d.label}</span>
       </button>
       <button class="row-action" aria-label={`Folder actions for ${d.label}`} title="Folder actions"
