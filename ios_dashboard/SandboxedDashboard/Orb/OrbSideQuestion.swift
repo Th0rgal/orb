@@ -83,6 +83,29 @@ enum OrbBtwThreads {
     static let liveStatuses: Set<String> = ["active", "running", "pending", "queued", "starting", "resuming", "waiting_background", "paused"]
     static let resumableStatuses: Set<String> = ["awaiting_user", "completed", "interrupted"]
     static let transcriptEventTypes = ["user_message", "assistant_message", "assistant_message_canonical"]
+    static let automaticUserSources: Set<String> = [
+        "api:usage-limit-replay",
+        "background-task",
+        "scheduler",
+        "idle-worker-watchdog",
+        "transport_auto_resume",
+        "remote-build-terminal",
+        "task-board",
+    ]
+    static let resumePromptText = "Your previous turn was interrupted before it finished. Check what is already done, then continue from there. Do not redo finished work."
+
+    static func isAutomaticUserEvent(_ content: String, metadata: [String: AnyCodable] = [:]) -> Bool {
+        if let source = metadata["source"]?.value as? String, automaticUserSources.contains(source) { return true }
+        if metadata["backgroundWake"] != nil { return true }
+        if (metadata["resumePrompt"]?.value as? Bool) == true { return true }
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.range(of: #"^\[Automatic (?:recovery|resume after a usage limit)\]"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            return true
+        }
+        if trimmed == resumePromptText { return true }
+        return trimmed.hasPrefix("Background task `") && trimmed.hasSuffix("\n\nContinue from here.")
+    }
     static let maxSessionEvents: Int64 = 400
     static let maxSessionTurns = 8
     static let initialVisibleTurns = 20
@@ -230,7 +253,7 @@ enum OrbBtwThreads {
         for (index, e) in ordered.enumerated() {
             switch e.eventType {
             case "user_message":
-                if (e.metadata["queued"]?.value as? Bool) == true { continue }
+                if (e.metadata["queued"]?.value as? Bool) == true || isAutomaticUserEvent(e.content, metadata: e.metadata) { continue }
                 if !question.isEmpty { flush() }
                 question = Self.question(e.content); at = e.timestamp; seq = e.sequence; start = index + 1
             case "assistant_message", "assistant_message_canonical":
@@ -382,7 +405,9 @@ final class OrbBtwStore {
 
     nonisolated private static func deliveredMessages(from events: [StoredEvent]) -> [OrbDeliveredMessage] {
         events.compactMap { e in
-            guard e.eventType == "user_message", (e.metadata["queued"]?.value as? Bool) != true else { return nil }
+            guard e.eventType == "user_message",
+                  (e.metadata["queued"]?.value as? Bool) != true,
+                  !OrbBtwThreads.isAutomaticUserEvent(e.content, metadata: e.metadata) else { return nil }
             return OrbDeliveredMessage(id: e.eventId, content: OrbBtwThreads.question(e.content), sequence: e.sequence)
         }
     }
@@ -1316,12 +1341,13 @@ struct OrbSideQuestionSheet: View {
             let rotateIdle = !running && followUps.count == 0 && OrbBtwThreads.shouldRotateSession(turnCount: store.boundTurnCount, maxSequence: store.boundMaxSequence)
             if let id = store.boundID, !freshSession, !rotateIdle, (running || followUps.count > 0 || OrbBtwThreads.resumableStatuses.contains(store.boundStatus)) {
                 let shouldQueue = running || followUps.count > 0
+                let idempotencyHeader = ["Idempotency-Key": "msg:\(id):\(messageID)"]
                 let result = try await OrbSideSend.retrying { try await OrbCore.shared.call("/api/control/message", method: "POST", body: .object([
                     "mission_id": .string(id),
                     "content": .string(content),
                     "client_message_id": .string(messageID),
                     "queue_followup": .bool(true),
-                ])) }
+                ]), headers: idempotencyHeader) }
                 let queuedNow = result["queued"] == .bool(true)
                 let receiptID = result["id"].text.isEmpty ? messageID : result["id"].text
                 rawQueuedByID[receiptID] = content
@@ -1342,10 +1368,11 @@ struct OrbSideQuestionSheet: View {
                 }
             } else {
                 let launchBody = OrbBtwThreads.launchQuestion(content, priorTurns: store.turns)
+                let idempotencyHeader = ["Idempotency-Key": "btw:\(parentID):\(messageID)"]
                 let created = try await OrbSideSend.retrying { try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(parentID))/btw/agent", method: "POST", body: .object([
                     "backend": .string(OrbBtwConfig.harness), "model_override": .string(OrbBtwConfig.model), "model_effort": .null,
                     "idempotency_key": .string(messageID), "side_question": .string(launchBody),
-                ])) }
+                ]), headers: idempotencyHeader) }
                 freshSession = false
                 store.sent(to: created["id"].text)
             }

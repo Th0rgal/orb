@@ -1358,3 +1358,74 @@ it('serializes reconcileSavedSideQuestion with concurrent panel writes so newer 
  saveSpy.mockRestore();
 });
 
+// Replays 23bad383-5b27-4b83-9a84-d86d34223509 / fc153ce6-2a61-43a6-8e2f-e01cbc263661:
+// 1. User question accepted at seq 274 -> remote job failed with synthetic note at seq 286
+//    -> Core auto-recovered at seq 289 (`[Automatic recovery]`, `api:usage-limit-replay`)
+//    -> final answer at seq 301 must stay paired with seq 274's question, never `[Automatic recovery]`.
+it('pairs an auto-recovered /btw answer with the user question instead of [Automatic recovery]',async()=>{
+ const {getMissionEvents}=await import('../src/stream');
+ const {reconcileBtwServerHistory,reconnectBtwSession}=await import('../src/btwAgent');
+ const rows=[
+  {id:1,sequence:274,event_id:'8652b679-ee6e-4b49-9429-b09ec99e08a9',event_type:'user_message',content:"You are the independent /btw agent sharing the main agent's working folder.\n\n<main_conversation_update>\nctx\n</main_conversation_update>\n\nCurrent request:\noù en est le run sur babylon ?\n",timestamp:'2026-11-07T04:47:37Z',metadata:{queued:false,source:'api:prod'}},
+  {id:2,sequence:286,event_type:'assistant_message',content:"Remote opencode job 155911be-15b0-4184-a58b-acb8875ac36c on node 'babylon' finished with state 'failed' (exit Some(1)); error: command exited with Some(1).\nThe inference connection failed temporarily.",timestamp:'2026-11-07T04:49:34Z'},
+  {id:3,sequence:289,event_id:'e2abbfa2-fbba-40e3-a3b1-285e68691620',event_type:'user_message',content:'[Automatic recovery] Inference connection interrupted stopped your previous turn. Resume your work where it stopped, and check the state of anything you had started before continuing. Do not redo finished work.',timestamp:'2026-11-07T04:51:10Z',metadata:{queued:false,source:'api:usage-limit-replay'}},
+  {id:4,sequence:301,event_type:'assistant_message',content:'Oui, ça a nettement progressé ces deux dernières heures sur `babylon`.',timestamp:'2026-11-07T04:55:02Z'},
+ ] as any;
+ expect(btwTurnEvents(rows,{baseline:0}).map(e=>e.sequence)).toEqual([286,289,301]);
+ vi.mocked(api).mockImplementation(async(path:string)=>path.startsWith('/api/control/missions?tag=')?[{id:'fc153ce6-2a61-43a6-8e2f-e01cbc263661',status:'completed',created_at:'2026-11-06T20:39:59Z',updated_at:'2026-11-07T04:55:02Z',backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:23bad383-5b27-4b83-9a84-d86d34223509'],history:[],title:'leanvm faster · btw'}] as any:[] as any);
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'completed',backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:23bad383-5b27-4b83-9a84-d86d34223509'],history:[],title:'leanvm faster · btw',created_at:'2026-11-06T20:39:59Z',updated_at:'2026-11-07T04:55:02Z'} as any));
+ vi.mocked(getMissionEvents).mockResolvedValue(rows);
+ const reconciled=await reconcileBtwServerHistory('23bad383-5b27-4b83-9a84-d86d34223509',[],undefined,{force:true});
+ expect(reconciled.history).toEqual([{
+  id:'btw:fc153ce6-2a61-43a6-8e2f-e01cbc263661:274',
+  question:'où en est le run sur babylon ?',
+  answer:'Oui, ça a nettement progressé ces deux dernières heures sur `babylon`.',
+  at:'2026-11-07T04:47:37Z',
+  userEventId:'8652b679-ee6e-4b49-9429-b09ec99e08a9',
+ }]);
+ const reconnected=await reconnectBtwSession('23bad383-5b27-4b83-9a84-d86d34223509','fc153ce6-2a61-43a6-8e2f-e01cbc263661');
+ expect(reconnected.question).toBe('où en est le run sur babylon ?');
+});
+
+it('freezes the continuation prompt per clientMessageId across retries while rotating on idempotency_conflict',async()=>{
+ vi.useFakeTimers();
+ const {prepareBtwContext}=await import('../src/btwContext');
+ const {getMissionEvents}=await import('../src/stream');
+ try{
+  completedSide('idem-parent');
+  let sideSeq=1;
+  vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='idem-parent'?'active':'completed',history:[],tags:id==='side-done'?['btw-parent:idem-parent']:[],title:null,created_at:'',updated_at:''} as any));
+  vi.mocked(getMissionEvents).mockImplementation(async()=>[{event_type:'assistant_message',content:'Done.',sequence:sideSeq,id:sideSeq,timestamp:''}] as any);
+  vi.mocked(prepareBtwContext)
+   .mockResolvedValueOnce({context:'parent seq 100',cursor:{sequence:100,visibleHash:'h100'}})
+   .mockResolvedValueOnce({context:'parent seq 105 (advanced while retrying)',cursor:{sequence:105,visibleHash:'h105'}});
+  vi.mocked(sendMissionMessage)
+   .mockRejectedValueOnce(aborted())
+   .mockImplementationOnce(async()=>{sideSeq=3;return {id:'turn-frozen',queued:false} as any;});
+  const run=askBtwAgent('idem-parent','Status?','live ctx',[],new AbortController().signal,()=>{},[],new AbortController().signal,'turn-frozen');
+  await vi.advanceTimersByTimeAsync(2000);
+  await run;
+  expect(sendMissionMessage).toHaveBeenCalledTimes(2);
+  const [firstCall,secondCall]=vi.mocked(sendMissionMessage).mock.calls;
+  expect(firstCall[3]).toBe('turn-frozen');
+  expect(secondCall[3]).toBe('turn-frozen');
+  expect(secondCall[1]).toBe(firstCall[1]);
+  expect(secondCall[1]).toContain('parent seq 100');
+  expect(btwSession('idem-parent')?.conversationCursor).toEqual({sequence:100,visibleHash:'h100'});
+
+  vi.mocked(prepareBtwContext)
+   .mockReset()
+   .mockResolvedValueOnce({context:'fresh seq 110',cursor:{sequence:110,visibleHash:'h110'}})
+   .mockResolvedValueOnce({context:'fresh seq 110',cursor:{sequence:110,visibleHash:'h110'}});
+  vi.mocked(sendMissionMessage)
+   .mockReset()
+   .mockRejectedValueOnce(new ApiError(409,'{"error":"idempotency_conflict","message":"Idempotency-Key was already used with a different request payload"}'))
+   .mockImplementationOnce(async()=>{sideSeq=5;return {id:'rotated',queued:false} as any;});
+  await askBtwAgent('idem-parent','Retry question','live ctx',[],new AbortController().signal,()=>{},[],new AbortController().signal,'8652b679-ee6e-4b49-9429-b09ec99e08a9');
+  expect(sendMissionMessage).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(sendMissionMessage).mock.calls[0][3]).toBe('8652b679-ee6e-4b49-9429-b09ec99e08a9');
+  expect(vi.mocked(sendMissionMessage).mock.calls[1][3]).not.toBe('8652b679-ee6e-4b49-9429-b09ec99e08a9');
+  expect(btwSession('idem-parent')?.conversationCursor).toEqual({sequence:110,visibleHash:'h110'});
+ }finally{vi.useRealTimers();}
+});
+

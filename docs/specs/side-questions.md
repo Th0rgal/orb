@@ -341,6 +341,56 @@ simultaneously:
      first). Live `/btw` missions continue to cache full incremental `since_seq`
      deltas until they reach a terminal status.
 
+## 8. Automatic turn recovery continuity & idempotent continuation payloads (P0)
+
+During parent mission `23bad383-5b27-4b83-9a84-d86d34223509` (`/btw` child
+`fc153ce6-2a61-43a6-8e2f-e01cbc263661`), a `/btw` turn (`8652b679-ee6e-4b49-9429-b09ec99e08a9`)
+was accepted by Core (`200 OK` with `Idempotency-Key: msg:fc153ce6-...:8652b679-...`),
+experienced a transient remote `opencode` inference disconnect on `babylon`
+(`seq 286`), was automatically resumed by Core's coordinator (`seq 289`,
+`metadata.source = "api:usage-limit-replay"`, content `"[Automatic recovery]..."`),
+and finished its answer at `seq 301`. Clicking **Retry** later surfaced:
+
+```text
+409 {"error":"idempotency_conflict","message":"Idempotency-Key was already used with a different request payload"}
+```
+
+Two invariants prevent both the orphaned recovery answer and the `409` conflict:
+
+1. **Coordinator / automatic `user_message` events continue the active `/btw` turn (`isAutomaticUserEvent`)**:
+   - Stored or streamed `user_message` events injected by Core (`metadata.source`
+     in `{"api:usage-limit-replay", "background-task", "scheduler", "idle-worker-watchdog",
+     "transport_auto_resume", "remote-build-terminal", "task-board"}`,
+     `metadata.backgroundWake !== undefined`, `metadata.resumePrompt === true`,
+     `[Automatic recovery]` / `[Automatic resume after a usage limit]`, or the
+     exact resume prompt) **never** open a new `/btw` turn, flush the prior
+     user question, reset live streaming state, or register as a delivered
+     user follow-up across Desktop (`btwTurnEvents`, `watchBtw`,
+     `parseBtwThread`, `reconnectBtwSession`, `reduceLiveBtwStreamEvents`),
+     iOS (`OrbBtwThreads.parse`, `OrbBtwStore.deliveredMessages`), and Android
+     (`OrbSideAgent.parseTurns`, `OrbSideAgent.parseHistoryFallback`).
+   - Consequently, an auto-recovered `/btw` answer stays paired with the user's
+     real question (`btw:<mission>:<userSeq>`), allowing `doesTurnAnswerPending`
+     and `reconcileSavedSideQuestion` to clear any transient failure banner as
+     soon as Core's recovery completes.
+2. **Frozen continuation payload per `(sideMissionId, clientMessageId)` & post-acceptance key rotation**:
+   - While a `POST /api/control/message` continuation is unaccepted, `askBtwAgent`
+     caches `{ logical, prompt, snapshot }` under `(sideId, clientMessageId)` so
+     every automatic retry (`BTW_SEND_RETRY_MS`) or manual `Retry` of a genuinely
+     unsent (`notSent === true`) turn replays the **exact same JSON body** for
+     that `Idempotency-Key`, even if the parent mission emits new events in the
+     meantime. Mobile `OrbSideQuestionSheet.ask()` (iOS) and
+     `OrbSideAgentSheet.submitQuestion` / `OrbSideAgent.launch` (Android)
+     likewise freeze the wrapped prompt and `Idempotency-Key` outside their
+     `retrying` loops.
+   - Once Core has accepted a turn (`notSent === false`), or if any stale
+     persisted key ever receives `409 idempotency_conflict`, `Retry` and
+     `askBtwAgent` mint a fresh `crypto.randomUUID()` (and evict any cached
+     attempt payload) instead of reusing the consumed `Idempotency-Key`. Legacy
+     delete-and-resend `Send now` fallbacks (`sendSideImmediate`) also mint a
+     fresh UUID per resent item so edited queue content never collides with the
+     original enqueue `Idempotency-Key`.
+
 ## Client parity
 
 - **Orb desktop (`orb/`)**: implemented in `orb/src/SideQuestionPanel.tsx`,
