@@ -3224,7 +3224,11 @@ def clientParityMetaGate : MetaGateSpec ClientParityCheck
     Core (`0`), iOS (`1`), Android (`2`), and Desktop `wasm32` (`3`) produce the exact same
     64-bit XOR/count summary digest word on any `OrbWire` event summary (`wireSchemaId`, `transcriptSeq`,
     `markdownBlocksCount`, `sendQueueDepth`, `scrollCorrectedInEpoch`).
-    Note: This establishes equality of the 64-bit summary word (`clientParityStep`), not full client-state equivalence. -/
+    Note (`G-ORB-1` / `SM-24`): `clientParityStep` remains a lossy 64-bit XOR/count summary digest word ONLY,
+    NOT full client-state or queue-reconciliation equivalence. Exact server revision CAS and
+    `(client_msg_id, posted_after_seq)` optimistic follow-up retirement are modeled and proved in
+    `orb_followup_queue_step` (`followupQueueMetaGate`, `followupQueueMetaStepSpec`,
+    `followup_queue_retires_only_strictly_after_posted_seq`, and `followup_queue_duplicate_idempotent`). -/
 theorem client_summary_digest_word_parity_across_targets
     (schema : UInt32) (seq blocks queue : UInt32) (sc : UInt8) :
     clientParityStep 0 schema seq blocks queue sc = clientParityStep 1 schema seq blocks queue sc ∧
@@ -12303,5 +12307,804 @@ theorem sidebar_drag_cancel_resets_any_active_phase
     ]
     decide
   )
+
+-- ===========================================================================
+-- Phase R6-A: Cross-Client Follow-Up Queue (`SM-24` / `G-ORB-1`),
+--             Transport Epoch (`SM-26`), and Stream Open-Tail Cap (`SM-25` / `G-ORB-6`)
+-- ===========================================================================
+
+/-! ## R6-A.1: `orb_followup_queue_step` (`SM-24` / `G-ORB-1`) -/
+
+structure FollowupQueueCheck where
+  op                  : UInt8
+  serverRev           : UInt32
+  incomingServerRev   : UInt32
+  expectedServerRev   : UInt32
+  clientMsgId         : UInt64
+  trackedMsgId        : UInt64
+  deliveredMsgId      : UInt64
+  postedAfterSeq      : UInt64
+  turnSeq             : UInt64
+  optimisticSending   : UInt8
+  serverListed        : UInt8
+  contentMatched      : UInt8
+  alreadyDelivered    : UInt8
+  deriving Repr, DecidableEq
+
+def FollowupQueueCheck.Shaped (c : FollowupQueueCheck) : Bool :=
+  decide (c.op ≤ 3) &&
+  decide (c.optimisticSending ≤ 1) &&
+  decide (c.serverListed ≤ 1) &&
+  decide (c.contentMatched ≤ 1) &&
+  decide (c.alreadyDelivered ≤ 1) &&
+  (c.serverRev != 0)
+
+def FollowupQueueCheck.IdMatchRetire (c : FollowupQueueCheck) : Bool :=
+  c.clientMsgId != 0 && c.alreadyDelivered == 0 && c.deliveredMsgId == c.clientMsgId
+
+def FollowupQueueCheck.ContentRetire (c : FollowupQueueCheck) : Bool :=
+  c.clientMsgId != 0 && c.alreadyDelivered == 0 && c.deliveredMsgId == 0 &&
+  c.contentMatched == 1 && decide (c.postedAfterSeq < c.turnSeq)
+
+def FollowupQueueCheck.TurnRetires (c : FollowupQueueCheck) : Bool :=
+  c.op == 3 && (c.IdMatchRetire || c.ContentRetire)
+
+def FollowupQueueCheck.PollRetires (c : FollowupQueueCheck) : Bool :=
+  c.op == 0 && decide (c.serverRev ≤ c.incomingServerRev) &&
+  c.clientMsgId != 0 && c.alreadyDelivered == 0 &&
+  c.serverListed == 0 && c.optimisticSending == 0 && decide (c.postedAfterSeq < c.turnSeq)
+
+def FollowupQueueCheck.DupEnqueue (c : FollowupQueueCheck) : Bool :=
+  c.op == 2 && c.clientMsgId != 0 && (c.clientMsgId == c.trackedMsgId || !(c.alreadyDelivered == 0))
+
+def FollowupQueueCheck.Admissible (c : FollowupQueueCheck) : Bool :=
+  c.Shaped &&
+  (if c.op == 0 then decide (c.serverRev ≤ c.incomingServerRev)
+   else if c.op == 1 then (c.expectedServerRev == c.serverRev && decide (c.serverRev < 0xFFFFFFFF))
+   else if c.op == 2 then (c.clientMsgId != 0 && !c.DupEnqueue)
+   else c.TurnRetires)
+
+def FollowupQueueCheck.eval (c : FollowupQueueCheck) : UInt64 :=
+  followupQueueStep c.op c.serverRev c.incomingServerRev c.expectedServerRev
+    c.clientMsgId c.trackedMsgId c.deliveredMsgId c.postedAfterSeq c.turnSeq
+    c.optimisticSending c.serverListed c.contentMatched c.alreadyDelivered
+
+private theorem lo32_mask256_eq (a : UInt32) :
+    ((a.toUInt64 &&& 256) != 0) = ((a &&& 256) != 0) := by
+  have h1 : ∀ (u : UInt64), ((u &&& 256) != 0) = u.toBitVec.getLsbD 8 := by
+    intro u
+    have hm : ∀ i < 64, (256 : UInt64).toBitVec.getLsbD i = decide (i = 8) := by decide
+    cases hb8 : u.toBitVec.getLsbD 8
+    · apply Bool.eq_false_iff.mpr
+      intro hne
+      apply bne_iff_ne.mp hne
+      apply UInt64.toBitVec_inj.mp
+      apply BitVec.eq_of_getLsbD_eq
+      intro i hi
+      rw [UInt64.toBitVec_and, BitVec.getLsbD_and, hm i hi]
+      by_cases h8 : i = 8 <;> simp_all
+    · apply bne_iff_ne.mpr
+      intro hz
+      have hbv := congrArg (fun z : UInt64 => z.toBitVec.getLsbD 8) hz
+      rw [UInt64.toBitVec_and, BitVec.getLsbD_and, hm 8 (by decide), hb8] at hbv
+      cases hbv
+  have h2 : ∀ (u : UInt32), ((u &&& 256) != 0) = u.toBitVec.getLsbD 8 := by
+    intro u
+    have hm : ∀ i < 32, (256 : UInt32).toBitVec.getLsbD i = decide (i = 8) := by decide
+    cases hb8 : u.toBitVec.getLsbD 8
+    · apply Bool.eq_false_iff.mpr
+      intro hne
+      apply bne_iff_ne.mp hne
+      apply UInt32.toBitVec_inj.mp
+      apply BitVec.eq_of_getLsbD_eq
+      intro i hi
+      rw [UInt32.toBitVec_and, BitVec.getLsbD_and, hm i hi]
+      by_cases h8 : i = 8 <;> simp_all
+    · apply bne_iff_ne.mpr
+      intro hz
+      have hbv := congrArg (fun z : UInt32 => z.toBitVec.getLsbD 8) hz
+      rw [UInt32.toBitVec_and, BitVec.getLsbD_and, hm 8 (by decide), hb8] at hbv
+      cases hbv
+  rw [h1, h2]
+  simp [UInt32.toBitVec_toUInt64, BitVec.getLsbD_setWidth]
+
+private theorem followup_lo32_admit_bit (reason : UInt32) (admit live ret : Bool)
+    (hr : reason == 0 || reason == 1 || reason == 2 || reason == 3 || reason == 4 || reason == 5) :
+    (((reason ||| (if admit then (256 : UInt32) else 0) |||
+        (if live then (512 : UInt32) else 0) |||
+        (if ret then (1024 : UInt32) else 0)) &&& 256) != 0) = admit := by
+  rcases (by simpa [Bool.or_eq_true, beq_iff_eq] using hr :
+    (((((reason = 0 ∨ reason = 1) ∨ reason = 2) ∨ reason = 3) ∨ reason = 4) ∨ reason = 5)) with
+    ((((rfl | rfl) | rfl) | rfl) | rfl) | rfl <;>
+    cases admit <;>
+    cases live <;>
+    cases ret <;>
+    decide
+
+theorem followupQueueStep_admit_eq (c : FollowupQueueCheck) :
+    (((c.eval &&& 0xFFFFFFFF) &&& 256) != 0) = c.Admissible := by
+  have hadm_eq :
+      (if (!(decide (c.op ≤ 3) &&
+            (decide (c.optimisticSending ≤ 1) && decide (c.serverListed ≤ 1) &&
+              decide (c.contentMatched ≤ 1) && decide (c.alreadyDelivered ≤ 1)) &&
+            (c.serverRev != 0))) = true then false
+       else if (c.op == 0) = true then decide (c.serverRev ≤ c.incomingServerRev)
+       else if (c.op == 1) = true then c.expectedServerRev == c.serverRev && decide (c.serverRev < 0xFFFFFFFF)
+        else if (c.op == 2) = true then
+          c.clientMsgId != 0 &&
+            !(c.op == 2 && c.clientMsgId != 0 && (c.clientMsgId == c.trackedMsgId || !(c.alreadyDelivered == 0)))
+        else
+         c.op == 3 &&
+           ((c.clientMsgId != 0 && c.alreadyDelivered == 0 && c.deliveredMsgId == c.clientMsgId) ||
+            (c.clientMsgId != 0 && c.alreadyDelivered == 0 && c.deliveredMsgId == 0 &&
+              c.contentMatched == 1 && decide (c.postedAfterSeq < c.turnSeq)))) =
+      c.Admissible := by
+    unfold FollowupQueueCheck.Admissible FollowupQueueCheck.Shaped FollowupQueueCheck.DupEnqueue
+      FollowupQueueCheck.TurnRetires FollowupQueueCheck.IdMatchRetire FollowupQueueCheck.ContentRetire
+    cases decide (c.op ≤ 3) <;>
+      cases decide (c.optimisticSending ≤ 1) <;>
+      cases decide (c.serverListed ≤ 1) <;>
+      cases decide (c.contentMatched ≤ 1) <;>
+      cases decide (c.alreadyDelivered ≤ 1) <;>
+      cases (c.serverRev != 0) <;> simp
+  unfold FollowupQueueCheck.eval followupQueueStep
+  dsimp only [GE.ge, GT.gt]
+  rw [← hadm_eq]
+  split
+  · have hzero : ((c.serverRev.toUInt64 <<< 32 &&& 0xFFFFFFFF) &&& 256 != 0) = false := by
+      have h0 : c.serverRev.toUInt64 <<< 32 = (0 : UInt32).toUInt64 ||| (c.serverRev.toUInt64 <<< 32) := by
+        simp
+      rw [h0, pack32_lo]
+      decide
+    exact hzero
+  · rw [pack32_lo, lo32_mask256_eq]
+    let hasClientMsg : Bool := c.clientMsgId != 0
+    let notDelivered : Bool := c.alreadyDelivered == 0
+    let serverUnlisted : Bool := c.serverListed == 0
+    let idMatchRetire : Bool := hasClientMsg && notDelivered && c.deliveredMsgId == c.clientMsgId
+    let contentRetire : Bool :=
+      hasClientMsg && notDelivered && c.deliveredMsgId == 0 &&
+      c.contentMatched == 1 && decide (c.postedAfterSeq < c.turnSeq)
+    let turnRetires : Bool := c.op == 3 && (idMatchRetire || contentRetire)
+    let pollRetires : Bool :=
+      c.op == 0 && decide (c.serverRev ≤ c.incomingServerRev) &&
+      hasClientMsg && notDelivered &&
+      serverUnlisted && c.optimisticSending == 0 && decide (c.postedAfterSeq < c.turnSeq)
+    let retiredNow : Bool := turnRetires || pollRetires
+    let dupEnqueue : Bool :=
+      c.op == 2 && hasClientMsg && (c.clientMsgId == c.trackedMsgId || !notDelivered)
+    let admit : Bool :=
+      if c.op == 0 then decide (c.serverRev ≤ c.incomingServerRev)
+      else if c.op == 1 then c.expectedServerRev == c.serverRev && decide (c.serverRev < 0xFFFFFFFF)
+      else if c.op == 2 then hasClientMsg && !dupEnqueue
+      else turnRetires
+    let liveBranch : Bool :=
+      if c.op == 0 then (if c.incomingServerRev < c.serverRev then true else serverUnlisted)
+      else if c.op == 2 then (if admit then true else c.clientMsgId == c.trackedMsgId)
+      else serverUnlisted
+    let optimisticLiveNext : Bool :=
+      if !notDelivered || retiredNow || !hasClientMsg then false else liveBranch
+    let reason : UInt32 :=
+      if admit then 1
+      else if c.op == 0 then 2
+      else if c.op == 1 then (if c.expectedServerRev != c.serverRev then 2 else 5)
+      else if c.op == 2 then (if dupEnqueue then 3 else 0)
+      else if !notDelivered then 3
+      else 4
+    have hr : (reason == 0 || reason == 1 || reason == 2 || reason == 3 || reason == 4 || reason == 5) = true := by
+      dsimp [reason]
+      split <;> try decide
+      split <;> try decide
+      split
+      · split <;> decide
+      · split
+        · split <;> decide
+        · split <;> decide
+    exact followup_lo32_admit_bit reason admit optimisticLiveNext retiredNow hr
+
+def followupQueueMetaGate : MetaGateSpec FollowupQueueCheck
+    (fun c => c.Admissible = true) where
+  gate c := ((c.eval &&& 0xFFFFFFFF) &&& 256) != 0
+  sound c hg := by rw [← followupQueueStep_admit_eq c]; exact hg
+  complete c hadm := by rw [followupQueueStep_admit_eq c]; exact hadm
+  posWitness := ⟨2, 5, 5, 5, 42, 0, 0, 10, 10, 0, 0, 0, 0⟩
+  negWitness := ⟨1, 5, 5, 4, 42, 0, 0, 10, 10, 0, 0, 0, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def followupQueueScopedAuthority : ScopedAuthority FollowupQueueCheck where
+  admit c := followupQueueMetaGate.gate c
+  scopeValid c := c.Admissible
+  sound c h := followupQueueMetaGate.sound c h
+
+structure FollowupQueueState where
+  serverRev : UInt32
+  trackedMsgId : UInt64
+  postedAfterSeq : UInt64
+  optimisticLive : Bool
+  alreadyDelivered : Bool
+  deriving Repr, DecidableEq
+
+def effectiveFollowupQueueCheck (s : FollowupQueueState) (c : FollowupQueueCheck) : FollowupQueueCheck :=
+  { c with
+    serverRev := s.serverRev
+    trackedMsgId := s.trackedMsgId
+    postedAfterSeq := if c.op == 2 then c.postedAfterSeq else s.postedAfterSeq
+    alreadyDelivered := if s.alreadyDelivered then 1 else 0 }
+
+def followupQueueMachineStep (s : FollowupQueueState) (c : FollowupQueueCheck) :
+    FollowupQueueState × List UInt32 :=
+  let c' := effectiveFollowupQueueCheck s c
+  let w := c'.eval
+  let admit := followupQueueMetaGate.gate c'
+  let nextRev := (w >>> 32).toUInt32
+  let liveNext := ((w &&& 0xFFFFFFFF) &&& 512) != 0
+  let retiredNow := ((w &&& 0xFFFFFFFF) &&& 1024) != 0
+  let nextTracked := if c'.op == 2 && admit then c'.clientMsgId else s.trackedMsgId
+  let nextPostedAfter := if c'.op == 2 && admit then c'.postedAfterSeq else s.postedAfterSeq
+  (⟨nextRev, nextTracked, nextPostedAfter, liveNext, s.alreadyDelivered || retiredNow⟩,
+   if admit then [c'.op.toUInt32] else [])
+
+def followupQueueMetaStepSpec : MetaStepSpec FollowupQueueState FollowupQueueCheck UInt32 where
+  safety := {
+    step := followupQueueMachineStep
+    authorized := fun s c eff =>
+      eff == (effectiveFollowupQueueCheck s c).op.toUInt32 &&
+      (effectiveFollowupQueueCheck s c).Admissible
+    sound := fun s c eff h_in => by
+      dsimp [followupQueueMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := followupQueueMetaGate.sound (effectiveFollowupQueueCheck s c) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨5, 0, 0, false, false⟩
+    step := followupQueueMachineStep
+    progressRequired := fun s c => (effectiveFollowupQueueCheck s c).Admissible
+    expectedEffect := fun c eff => eff == c.op.toUInt32
+    live := fun s c h_req => by
+      have h_gate := followupQueueMetaGate.complete (effectiveFollowupQueueCheck s c) h_req
+      refine ⟨(effectiveFollowupQueueCheck s c).op.toUInt32, ?_, ?_⟩
+      · dsimp [followupQueueMachineStep]
+        simp [h_gate]
+      · exact beq_self_eq_true _
+    traceEvents := [⟨2, 5, 5, 5, 7, 0, 0, 1, 1, 0, 0, 0, 0⟩]
+    posEvent := ⟨1, 5, 5, 5, 7, 7, 0, 1, 1, 0, 0, 0, 0⟩
+    negEvent := ⟨1, 5, 5, 4, 7, 7, 0, 1, 1, 0, 0, 0, 0⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := followupQueueMachineStep
+    cpuFuel := fun s c => 12 + ((followupQueueMachineStep s c).2).length
+    inputBytes := fun _ => 72
+    outputBytes := fun s c => 16 + 4 * ((followupQueueMachineStep s c).2).length
+    c0 := 13
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 20
+    fuel_bound := fun s c => by
+      dsimp [followupQueueMachineStep]
+      split <;> simp
+    eff_bound := fun s c => by
+      dsimp [followupQueueMachineStep]
+      split <;> simp
+    out_bound := fun s c => by
+      dsimp [followupQueueMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- Exact `(client_msg_id, posted_after_seq)` retirement (`G-ORB-1`): an equal historical sequence does not
+    retire a content match, while a strictly later turn does, and an exact message id always does. -/
+theorem followup_queue_retires_only_strictly_after_posted_seq :
+    (((followupQueueStep 3 5 5 5 42 42 0 10 10 0 0 1 0 &&& 0xFFFFFFFF) &&& 1024) = 0) ∧
+    (((followupQueueStep 3 5 5 5 42 42 0 10 11 0 0 1 0 &&& 0xFFFFFFFF) &&& 1024) = 1024) ∧
+    (((followupQueueStep 3 5 5 5 42 42 42 10 10 0 0 0 0 &&& 0xFFFFFFFF) &&& 1024) = 1024) := by
+  decide
+
+/-- A repeated `client_msg_id` is not admitted again and does not advance the server revision. -/
+theorem followup_queue_duplicate_idempotent :
+    (((followupQueueStep 2 5 5 5 42 42 0 10 10 0 0 0 0 &&& 0xFFFFFFFF) &&& 256) = 0) ∧
+    ((followupQueueStep 2 5 5 5 42 42 0 10 10 0 0 0 0 &&& 0xFFFFFFFF) &&& 0xFF) = 3 ∧
+    (followupQueueStep 2 5 5 5 42 42 0 10 10 0 0 0 0 >>> 32).toUInt32 = 5 := by
+  decide
+
+/-! ## R6-A.2: `orb_transport_epoch_step` (`SM-26`) -/
+
+structure TransportEpochCheck where
+  mode              : UInt8
+  eventKind         : UInt8
+  everReady         : UInt8
+  stickyUnsupported : UInt8
+  endpointClass     : UInt8
+  prevEndpointClass : UInt8
+  hasSinceSeq       : UInt8
+  failureStreak     : UInt32
+  failThreshold     : UInt32
+  httpStatus        : UInt32
+  sinceSeq32        : UInt32
+  nowMs             : UInt64
+  cooldownUntilMs   : UInt64
+  deriving Repr, DecidableEq
+
+def TransportEpochCheck.Shaped (c : TransportEpochCheck) : Bool :=
+  decide (c.mode ≤ 2) && decide (c.eventKind ≤ 4) && decide (c.everReady ≤ 1) &&
+  decide (c.stickyUnsupported ≤ 1) && decide (c.endpointClass ≤ 3) &&
+  decide (c.prevEndpointClass ≤ 3) && decide (c.hasSinceSeq ≤ 1) && decide (1 ≤ c.failThreshold)
+
+def TransportEpochCheck.eval (c : TransportEpochCheck) : UInt64 :=
+  transportEpochStep c.mode c.eventKind c.everReady c.stickyUnsupported
+    c.endpointClass c.prevEndpointClass c.hasSinceSeq
+    c.failureStreak c.failThreshold c.httpStatus c.sinceSeq32 c.nowMs c.cooldownUntilMs
+
+private theorem transport_lo32_admit_bit (m : UInt8) (st fb rp hs : Bool) (streak : UInt32) :
+    (((m.toUInt32 ||| (256 : UInt32) |||
+        (if st then (512 : UInt32) else 0) |||
+        (if fb then (1024 : UInt32) else 0) |||
+        (if rp then (2048 : UInt32) else 0) |||
+        (if hs then (4096 : UInt32) else 0) |||
+        (streak <<< 16)) &&& 256) != 0) = true := by
+  apply bne_iff_ne.mpr
+  intro hz
+  have hbv := congrArg (fun x : UInt32 => x.toBitVec.getLsbD 8) hz
+  have hm : m.toUInt32.toBitVec.getLsbD 8 = false := by
+    have hm32 : m.toUInt32.toBitVec = BitVec.setWidth 32 m.toBitVec := rfl
+    rw [hm32, BitVec.getLsbD_setWidth]
+    exact BitVec.getLsbD_of_ge m.toBitVec 8 (by decide)
+  cases st <;>
+    cases fb <;>
+    cases rp <;>
+    cases hs <;>
+    simp [UInt32.toBitVec_and, UInt32.toBitVec_or, UInt32.toBitVec_shiftLeft,
+      BitVec.getLsbD_and, BitVec.getLsbD_or, BitVec.getLsbD_shiftLeft, hm] at hbv
+
+private theorem transport_lo32_reprobe_bit (m : UInt8) (st fb rp hs : Bool) (streak : UInt32) :
+    (((m.toUInt32 ||| (256 : UInt32) |||
+        (if st then (512 : UInt32) else 0) |||
+        (if fb then (1024 : UInt32) else 0) |||
+        (if rp then (2048 : UInt32) else 0) |||
+        (if hs then (4096 : UInt32) else 0) |||
+        (streak <<< 16)) &&& 2048) != 0) = rp := by
+  have hm : m.toUInt32.toBitVec.getLsbD 11 = false := by
+    have hm32 : m.toUInt32.toBitVec = BitVec.setWidth 32 m.toBitVec := rfl
+    rw [hm32, BitVec.getLsbD_setWidth]
+    exact BitVec.getLsbD_of_ge m.toBitVec 11 (by decide)
+  have h2048 : ∀ i < 32, (2048 : UInt32).toBitVec.getLsbD i = decide (i = 11) := by decide
+  cases rp
+  · apply Bool.eq_false_iff.mpr
+    intro hne
+    apply bne_iff_ne.mp hne
+    apply UInt32.toBitVec_inj.mp
+    apply BitVec.eq_of_getLsbD_eq
+    intro i hi
+    rw [UInt32.toBitVec_and, BitVec.getLsbD_and, h2048 i hi]
+    by_cases hi11 : i = 11
+    · subst hi11
+      cases st <;>
+        cases fb <;>
+        cases hs <;>
+        simp [UInt32.toBitVec_or, UInt32.toBitVec_shiftLeft,
+          BitVec.getLsbD_or, BitVec.getLsbD_shiftLeft, hm]
+    · simp [hi11]
+  · apply bne_iff_ne.mpr
+    intro hz
+    have hbv := congrArg (fun x : UInt32 => x.toBitVec.getLsbD 11) hz
+    rw [UInt32.toBitVec_and, BitVec.getLsbD_and, h2048 11 (by decide)] at hbv
+    cases st <;>
+      cases fb <;>
+      cases hs <;>
+      simp [UInt32.toBitVec_or, UInt32.toBitVec_shiftLeft,
+        BitVec.getLsbD_or, BitVec.getLsbD_shiftLeft, hm] at hbv
+
+theorem transportEpochStep_admit_eq (c : TransportEpochCheck) :
+    (((c.eval &&& 0xFFFFFFFF) &&& 256) != 0) = c.Shaped := by
+  unfold TransportEpochCheck.eval TransportEpochCheck.Shaped transportEpochStep
+  dsimp only [GE.ge]
+  rw [pack32_lo, lo32_mask256_eq]
+  cases hsh : (decide (c.mode ≤ 2) && decide (c.eventKind ≤ 4) && decide (c.everReady ≤ 1) &&
+      decide (c.stickyUnsupported ≤ 1) && decide (c.endpointClass ≤ 3) &&
+      decide (c.prevEndpointClass ≤ 3) && decide (c.hasSinceSeq ≤ 1) && decide (1 ≤ c.failThreshold))
+  · simp only [hsh, Bool.not_false, ite_true]
+    decide
+  · simp only [hsh, Bool.not_true, Bool.false_eq_true, ite_false]
+    exact transport_lo32_admit_bit _ _ _ _ _ _
+
+def transportEpochMetaGate : MetaGateSpec TransportEpochCheck
+    (fun c => c.Shaped = true) where
+  gate c := ((c.eval &&& 0xFFFFFFFF) &&& 256) != 0
+  sound c hg := by rw [← transportEpochStep_admit_eq c]; exact hg
+  complete c hadm := by rw [transportEpochStep_admit_eq c]; exact hadm
+  posWitness := ⟨0, 1, 1, 0, 0, 0, 1, 1, 2, 0, 40, 0, 0⟩
+  negWitness := ⟨0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 40, 0, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def transportEpochClockDiscipline : ClockDiscipline TransportEpochCheck where
+  eval c := (c.eval &&& 0xFFFFFFFF).toUInt32
+  clockMask := 2048
+  guardOk c :=
+    c.Shaped &&
+    (c.eventKind == 4 || c.endpointClass != c.prevEndpointClass ||
+     (c.eventKind == 3 && decide (c.cooldownUntilMs ≤ c.nowMs)))
+  isolated c h := by
+    unfold TransportEpochCheck.eval transportEpochStep at h
+    dsimp only [GE.ge] at h
+    rw [pack32_lo, toUInt32_toUInt64] at h
+    cases hsh : (decide (c.mode ≤ 2) && decide (c.eventKind ≤ 4) && decide (c.everReady ≤ 1) &&
+        decide (c.stickyUnsupported ≤ 1) && decide (c.endpointClass ≤ 3) &&
+        decide (c.prevEndpointClass ≤ 3) && decide (c.hasSinceSeq ≤ 1) && decide (1 ≤ c.failThreshold))
+    · simp only [hsh, Bool.not_false, ite_true] at h
+      exact False.elim (by revert h; decide)
+    · have hsh_eq : c.Shaped = true := hsh
+      rw [hsh_eq, Bool.true_and]
+      simp only [hsh, Bool.not_true, Bool.false_eq_true, ite_false] at h
+      rw [transport_lo32_reprobe_bit] at h
+      by_cases her : (c.eventKind == 4 || c.endpointClass != c.prevEndpointClass) = true
+      · cases hk4 : (c.eventKind == 4) <;> simp_all
+      · simp only [Bool.not_eq_true] at her
+        have hk4 : (c.eventKind == 4) = false := by cases hk : (c.eventKind == 4) <;> simp_all
+        have hepc : (c.endpointClass != c.prevEndpointClass) = false := by
+          cases hp : (c.endpointClass != c.prevEndpointClass) <;> simp_all
+        simp only [her, hk4, hepc, Bool.not_false, Bool.true_and, Bool.false_or, Bool.or_false,
+          Bool.false_eq_true, ite_false] at h ⊢
+        by_cases hk3 : (c.eventKind == 3) = true
+        · by_cases hnow : decide (c.cooldownUntilMs ≤ c.nowMs) = true
+          · simp [hk3, hnow]
+          · simp only [Bool.not_eq_true] at hnow
+            have hk_eq : c.eventKind = 3 := beq_iff_eq.mp hk3
+            have hk0 : (c.eventKind == 0) = false := by rw [hk_eq]; decide
+            have hk1 : (c.eventKind == 1) = false := by rw [hk_eq]; decide
+            have hk2 : (c.eventKind == 2) = false := by rw [hk_eq]; decide
+            simp only [hk3, hk0, hk1, hk2, hnow, Bool.false_and, Bool.and_false, Bool.false_or,
+              Bool.false_eq_true, ite_true, ite_false] at h
+            cases hm1 : (c.mode == 1)
+            · simp [hm1] at h
+            · have hm_val : c.mode = 1 := beq_iff_eq.mp hm1
+              cases hsu : (c.stickyUnsupported == 1) <;>
+                (simp only [hm1, hm_val, hsu, Bool.true_and, Bool.not_true, Bool.not_false,
+                  Bool.and_false, Bool.and_true, ite_true, ite_false] at h;
+                 exact False.elim (by revert h; decide))
+        · simp only [Bool.not_eq_true] at hk3
+          cases hm1 : (c.mode == 1)
+          · simp [hm1] at h
+          · have hm_val : c.mode = 1 := beq_iff_eq.mp hm1
+            simp only [hm1, hm_val, hk3, Bool.true_and, Bool.false_eq_true, ite_false] at h
+            cases hst : (if (c.eventKind == 2 && (c.httpStatus == 404 || c.httpStatus == 501)) = true
+                then true else c.stickyUnsupported == 1)
+            · simp only [hst, Bool.not_false, Bool.and_true, Bool.false_eq_true, ite_false] at h
+              cases hk0 : (c.eventKind == 0)
+              · simp only [hk0, Bool.false_eq_true, ite_false] at h
+                cases htf : (c.eventKind == 1 || (c.eventKind == 2 && !(c.eventKind == 2 &&
+                    (c.httpStatus == 404 || c.httpStatus == 501))))
+                · simp only [htf, Bool.false_eq_true, ite_false] at h
+                  exact False.elim (by revert h; decide)
+                · simp only [htf, ite_true] at h
+                  by_cases hth : c.failThreshold ≤ (if c.failureStreak < 255 then c.failureStreak + 1 else 255)
+                  · simp only [hth, ite_true] at h
+                    exact False.elim (by revert h; decide)
+                  · simp only [hth, ite_false] at h
+                    exact False.elim (by revert h; decide)
+              · simp only [hk0, ite_true] at h
+                exact False.elim (by revert h; decide)
+            · simp only [hst, Bool.not_true, Bool.and_false] at h
+              cases h
+
+structure TransportEpochState where
+  mode              : UInt8
+  stickyUnsupported : UInt8
+  prevEndpointClass : UInt8
+  hasSinceSeq       : UInt8
+  failureStreak     : UInt32
+  sinceSeq32        : UInt32
+  deriving Repr, DecidableEq
+
+def effectiveTransportEpochCheck (s : TransportEpochState) (c : TransportEpochCheck) : TransportEpochCheck :=
+  { c with
+    mode := s.mode
+    stickyUnsupported := s.stickyUnsupported
+    prevEndpointClass := s.prevEndpointClass
+    hasSinceSeq := s.hasSinceSeq
+    failureStreak := s.failureStreak
+    sinceSeq32 := s.sinceSeq32 }
+
+def transportEpochMachineStep (s : TransportEpochState) (c : TransportEpochCheck) :
+    TransportEpochState × List UInt8 :=
+  let c' := effectiveTransportEpochCheck s c
+  let w := c'.eval
+  let lo := (w &&& 0xFFFFFFFF).toUInt32
+  let admit := transportEpochMetaGate.gate c'
+  let nextMode := (lo &&& 0xFF).toUInt8
+  let nextSticky : UInt8 := if (lo &&& 512) != 0 then 1 else 0
+  let nextHasSeq : UInt8 := if (lo &&& 4096) != 0 then 1 else 0
+  let nextStreak : UInt32 := (lo >>> 16) &&& 0xFF
+  let nextSeq : UInt32 := (w >>> 32).toUInt32
+  (if admit then ⟨nextMode, nextSticky, c'.endpointClass, nextHasSeq, nextStreak, nextSeq⟩ else s,
+   if admit then [nextMode] else [])
+
+def transportEpochMetaStepSpec : MetaStepSpec TransportEpochState TransportEpochCheck UInt8 where
+  safety := {
+    step := transportEpochMachineStep
+    authorized := fun s c eff =>
+      let c' := effectiveTransportEpochCheck s c
+      eff == ((c'.eval &&& 0xFFFFFFFF).toUInt32 &&& 0xFF).toUInt8 && c'.Shaped
+    sound := fun s c eff h_in => by
+      dsimp [transportEpochMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := transportEpochMetaGate.sound (effectiveTransportEpochCheck s c) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨0, 0, 0, 1, 0, 40⟩
+    step := transportEpochMachineStep
+    progressRequired := fun s c => (effectiveTransportEpochCheck s c).Shaped
+    expectedEffect := fun _ _ => true
+    live := fun s c h_req => by
+      have h_gate := transportEpochMetaGate.complete (effectiveTransportEpochCheck s c) h_req
+      dsimp [transportEpochMachineStep]
+      simp [h_gate]
+    traceEvents := [⟨0, 1, 1, 0, 0, 0, 1, 0, 2, 0, 40, 10, 100⟩]
+    posEvent := ⟨0, 1, 1, 0, 0, 0, 1, 1, 2, 0, 40, 20, 100⟩
+    negEvent := ⟨0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 40, 20, 100⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := transportEpochMachineStep
+    cpuFuel := fun s c => 12 + ((transportEpochMachineStep s c).2).length
+    inputBytes := fun _ => 42
+    outputBytes := fun s c => 14 + ((transportEpochMachineStep s c).2).length
+    c0 := 13
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 15
+    fuel_bound := fun s c => by
+      dsimp [transportEpochMachineStep]
+      split <;> simp
+    eff_bound := fun s c => by
+      dsimp [transportEpochMachineStep]
+      split <;> simp
+    out_bound := fun s c => by
+      dsimp [transportEpochMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- `everReady` cannot suppress SSE fallback, endpoint-class switches clear sticky
+    `404`/`501` and trigger reprobe, and `hasSinceSeq` preserves `0` vs absent cursor. -/
+theorem transport_epoch_ever_ready_still_falls_back_and_preserves_seq :
+    (((transportEpochStep 0 1 1 0 0 0 1 1 2 0 40 0 0 &&& 0xFFFFFFFF) &&& 0xFF) = 1) ∧
+    (((transportEpochStep 0 2 1 0 0 0 1 0 2 404 40 0 0 &&& 0xFFFFFFFF) &&& 512) = 512) ∧
+    (((transportEpochStep 0 1 1 0 0 0 1 0 2 0 40 0 0 &&& 0xFFFFFFFF) &&& 512) = 0) ∧
+    (((transportEpochStep 1 3 1 1 1 0 1 3 2 0 40 0 100 &&& 0xFFFFFFFF) &&& 512) = 0) ∧
+    (((transportEpochStep 1 3 1 1 1 0 1 3 2 0 40 0 100 &&& 0xFFFFFFFF) &&& 2048) = 2048) ∧
+    (((transportEpochStep 0 1 1 0 0 0 1 1 2 0 0 0 0 &&& 0xFFFFFFFF) &&& 4096) = 4096) ∧
+    (((transportEpochStep 0 1 1 0 0 0 0 1 2 0 40 0 0 &&& 0xFFFFFFFF) &&& 4096) = 0) ∧
+    (transportEpochStep 0 1 1 0 0 0 0 1 2 0 40 0 0 >>> 32).toUInt32 = 0 ∧
+    (transportEpochStep 0 1 1 0 0 0 1 1 2 0 40 0 0 >>> 32).toUInt32 = 40 := by
+  decide
+
+/-! ## R6-A.3: `orb_stream_open_tail_cap_step` (`SM-25` / `G-ORB-6`) -/
+
+structure StreamOpenTailCapCheck where
+  prevLen          : UInt32
+  prevCommit       : UInt32
+  prevCheckpoint   : UInt32
+  newLen           : UInt32
+  rawCommit        : UInt32
+  maxOpenTailBytes : UInt32
+  openFenceActive  : UInt8
+  deriving Repr, DecidableEq
+
+def StreamOpenTailCapCheck.Admissible (c : StreamOpenTailCapCheck) : Bool :=
+  decide (c.openFenceActive ≤ 1) &&
+  (StreamBoundedCommitCheck.mk c.prevLen c.prevCommit c.prevCheckpoint
+    c.newLen c.rawCommit c.maxOpenTailBytes).Admissible
+
+def StreamOpenTailCapCheck.eval (c : StreamOpenTailCapCheck) : UInt64 :=
+  streamOpenTailCapStep c.prevLen c.prevCommit c.prevCheckpoint c.newLen c.rawCommit
+    c.maxOpenTailBytes c.openFenceActive
+
+private theorem or_1024_preserves_bit8 (x : UInt32) (f : Bool) :
+    (((x ||| (if f then (1024 : UInt32) else 0)) &&& 256) != 0) =
+      ((x &&& 256) != 0) := by
+  cases f
+  · simp
+  · simp only [ite_true]
+    have hbit : ∀ (u : UInt32), ((u &&& 256) != 0) = u.toBitVec.getLsbD 8 := by
+      intro u
+      have hm : ∀ i < 32, (256 : UInt32).toBitVec.getLsbD i = decide (i = 8) := by decide
+      cases hb8 : u.toBitVec.getLsbD 8
+      · apply Bool.eq_false_iff.mpr
+        intro hne
+        apply bne_iff_ne.mp hne
+        apply UInt32.toBitVec_inj.mp
+        apply BitVec.eq_of_getLsbD_eq
+        intro i hi
+        rw [UInt32.toBitVec_and, BitVec.getLsbD_and, hm i hi]
+        by_cases h8 : i = 8 <;> simp_all
+      · apply bne_iff_ne.mpr
+        intro hz
+        have hbv := congrArg (fun z : UInt32 => z.toBitVec.getLsbD 8) hz
+        rw [UInt32.toBitVec_and, BitVec.getLsbD_and, hm 8 (by decide), hb8] at hbv
+        cases hbv
+    rw [hbit, hbit]
+    simp [UInt32.toBitVec_or, BitVec.getLsbD_or]
+
+theorem streamOpenTailCapStep_admit_eq (c : StreamOpenTailCapCheck) :
+    (((c.eval &&& 0xFFFFFFFF) &&& 256) != 0) = c.Admissible := by
+  unfold StreamOpenTailCapCheck.eval StreamOpenTailCapCheck.Admissible streamOpenTailCapStep
+  dsimp only
+  rw [pack32_lo, lo32_mask256_eq]
+  have hz := streamBoundedCommit_lo32_admit_zero
+    c.prevLen c.prevCommit c.prevCheckpoint c.newLen c.rawCommit c.maxOpenTailBytes
+  let inner : StreamBoundedCommitCheck :=
+    ⟨c.prevLen, c.prevCommit, c.prevCheckpoint, c.newLen, c.rawCommit, c.maxOpenTailBytes⟩
+  have hz' :
+      ((((streamBoundedCommitStep c.prevLen c.prevCommit c.prevCheckpoint
+          c.newLen c.rawCommit c.maxOpenTailBytes &&& 0xFFFFFFFF).toUInt32 &&& 256) != 0)) =
+        inner.Admissible := by
+    have hnot := congrArg Bool.not hz
+    simpa [bne, inner] using hnot
+  cases hf : decide (c.openFenceActive ≤ 1)
+  · simp only [hf, Bool.false_and, Bool.not_false, ite_true]
+    decide
+  · simp only [hf, Bool.true_and, hz']
+    cases hi : inner.Admissible
+    · simp only [hi, Bool.not_false, ite_true]
+      decide
+    · simp only [hi, Bool.not_true, Bool.false_eq_true, ite_false]
+      rw [or_1024_preserves_bit8]
+      exact hz'.trans hi
+
+def streamOpenTailCapMetaGate : MetaGateSpec StreamOpenTailCapCheck
+    (fun c => c.Admissible = true) where
+  gate c := ((c.eval &&& 0xFFFFFFFF) &&& 256) != 0
+  sound c hg := by rw [← streamOpenTailCapStep_admit_eq c]; exact hg
+  complete c hadm := by rw [streamOpenTailCapStep_admit_eq c]; exact hadm
+  posWitness := ⟨20, 5, 12, 40, 5, 8, 1⟩
+  negWitness := ⟨20, 5, 12, 40, 5, 0, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def streamOpenTailCapConservedResource : ConservedResource StreamOpenTailCapCheck where
+  admit c := streamOpenTailCapMetaGate.gate c
+  withinBudget c := c.Admissible && decide (c.newLen - (c.eval >>> 32).toUInt32 ≤ c.maxOpenTailBytes)
+  conserved c h := by
+    have hadm := streamOpenTailCapMetaGate.sound c h
+    have hpair : c.Admissible = true ∧
+        c.newLen - (c.eval >>> 32).toUInt32 ≤ c.maxOpenTailBytes := by
+      refine ⟨hadm, ?_⟩
+      have hadm' := hadm
+      unfold StreamOpenTailCapCheck.Admissible at hadm'
+      simp only [Bool.and_eq_true] at hadm'
+      rcases hadm' with ⟨hfl, hinner⟩
+      have href := streamBoundedCommitStep_refines_stepBoundedStream
+        c.prevLen c.prevCommit c.prevCheckpoint c.newLen c.rawCommit c.maxOpenTailBytes hinner
+      have hextract :
+          (c.eval >>> 32).toUInt32 =
+          (streamBoundedCommitStep c.prevLen c.prevCommit c.prevCheckpoint
+            c.newLen c.rawCommit c.maxOpenTailBytes >>> 32).toUInt32 := by
+        unfold StreamOpenTailCapCheck.eval streamOpenTailCapStep
+        dsimp only
+        rw [pack32_hi, toUInt32_toUInt64]
+        have hz := streamBoundedCommit_lo32_admit_zero
+          c.prevLen c.prevCommit c.prevCheckpoint c.newLen c.rawCommit c.maxOpenTailBytes
+        have hz' :
+            ((((streamBoundedCommitStep c.prevLen c.prevCommit c.prevCheckpoint
+                c.newLen c.rawCommit c.maxOpenTailBytes &&& 0xFFFFFFFF).toUInt32 &&& 256) != 0)) = true := by
+          have hnot := congrArg Bool.not hz
+          simpa [bne, hinner] using hnot
+        rw [hfl, hz', Bool.true_and, Bool.not_true]
+        rfl
+      rw [hextract]
+      have hinner2 := hinner
+      unfold StreamBoundedCommitCheck.Admissible at hinner2
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at hinner2
+      rcases hinner2 with ⟨⟨⟨_, hm1⟩, hm2⟩, hm3⟩
+      have hm1_n := UInt32.le_iff_toNat_le.mp hm1
+      have hm2_n := UInt32.le_iff_toNat_le.mp hm2
+      have hm3_n := UInt32.le_iff_toNat_le.mp hm3
+      let cp := (streamBoundedCommitStep c.prevLen c.prevCommit c.prevCheckpoint
+        c.newLen c.rawCommit c.maxOpenTailBytes >>> 32).toUInt32
+      have hcp : cp.toNat = (Orb.Stream.stepBoundedStream c.maxOpenTailBytes.toNat
+        ⟨c.prevLen.toNat, c.prevCommit.toNat, c.prevCheckpoint.toNat⟩
+        ⟨c.newLen.toNat, c.rawCommit.toNat⟩).checkpoint := href.2.1
+      dsimp [Orb.Stream.stepBoundedStream] at hcp
+      have hcp_le : cp ≤ c.newLen := UInt32.le_iff_toNat_le.mpr (by omega)
+      apply UInt32.le_iff_toNat_le.mpr
+      rw [UInt32.toNat_sub_of_le _ _ hcp_le]
+      omega
+    simpa [Bool.and_eq_true, decide_eq_true_eq] using hpair
+
+def effectiveStreamOpenTailCapCheck (s : StreamCommitState) (c : StreamOpenTailCapCheck) :
+    StreamOpenTailCapCheck :=
+  { c with prevLen := s.len, prevCommit := s.commit, prevCheckpoint := s.checkpoint }
+
+def streamOpenTailCapMachineStep (s : StreamCommitState) (c : StreamOpenTailCapCheck) :
+    StreamCommitState × List UInt32 :=
+  let c' := effectiveStreamOpenTailCapCheck s c
+  let w := c'.eval
+  let admit := streamOpenTailCapMetaGate.gate c'
+  let clampedRaw := if c'.rawCommit ≤ c'.newLen then c'.rawCommit else c'.newLen
+  let nextCommit := if s.commit ≤ clampedRaw then clampedRaw else s.commit
+  let nextCheckpoint := (w >>> 32).toUInt32
+  (if admit then ⟨c'.newLen, nextCommit, nextCheckpoint⟩ else s,
+   if admit then [nextCheckpoint] else [])
+
+def streamOpenTailCapMetaStepSpec :
+    MetaStepSpec StreamCommitState StreamOpenTailCapCheck UInt32 where
+  safety := {
+    step := streamOpenTailCapMachineStep
+    authorized := fun s c eff =>
+      let c' := effectiveStreamOpenTailCapCheck s c
+      eff == (c'.eval >>> 32).toUInt32 && c'.Admissible
+    sound := fun s c eff h_in => by
+      dsimp [streamOpenTailCapMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := streamOpenTailCapMetaGate.sound (effectiveStreamOpenTailCapCheck s c) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨0, 0, 0⟩
+    step := streamOpenTailCapMachineStep
+    progressRequired := fun s c => (effectiveStreamOpenTailCapCheck s c).Admissible
+    expectedEffect := fun _ _ => true
+    live := fun s c h_req => by
+      have h_gate := streamOpenTailCapMetaGate.complete (effectiveStreamOpenTailCapCheck s c) h_req
+      dsimp [streamOpenTailCapMachineStep]
+      simp [h_gate]
+    traceEvents := [⟨0, 0, 0, 20, 5, 8, 1⟩]
+    posEvent := ⟨20, 5, 12, 40, 5, 8, 1⟩
+    negEvent := ⟨20, 5, 12, 40, 5, 0, 1⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := streamOpenTailCapMachineStep
+    cpuFuel := fun s c => 12 + ((streamOpenTailCapMachineStep s c).2).length
+    inputBytes := fun _ => 28
+    outputBytes := fun s c => 12 + 4 * ((streamOpenTailCapMachineStep s c).2).length
+    c0 := 13
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 16
+    fuel_bound := fun s c => by
+      dsimp [streamOpenTailCapMachineStep]
+      split <;> simp
+    eff_bound := fun s c => by
+      dsimp [streamOpenTailCapMachineStep]
+      split <;> simp
+    out_bound := fun s c => by
+      dsimp [streamOpenTailCapMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- Hypothesis-free universal open-tail cap (`G-ORB-6`): for EVERY admissible frame (with zero external
+    tail-size hypothesis), `newLen - nextCheckpoint ≤ maxOpenTailBytes`. -/
+theorem stream_open_tail_cap_universal_bound (c : StreamOpenTailCapCheck)
+    (hadm : c.Admissible = true) :
+    c.newLen - (c.eval >>> 32).toUInt32 ≤ c.maxOpenTailBytes := by
+  have hgate := streamOpenTailCapMetaGate.complete c hadm
+  have hbud := streamOpenTailCapConservedResource.conserved c hgate
+  simp only [streamOpenTailCapConservedResource, Bool.and_eq_true, decide_eq_true_eq] at hbud
+  exact hbud.2
+
+/-- Hypothesis-free open-tail cap (`G-ORB-6`): a stalled unclosed fence still leaves at most `cap` bytes. -/
+theorem stream_open_tail_cap_without_external_tail_hypothesis :
+    let w := streamOpenTailCapStep 100 0 0 100000 0 64 1
+    (((w &&& 0xFFFFFFFF) &&& 256) != 0) = true ∧
+    (100000 : UInt32) - (w >>> 32).toUInt32 ≤ 64 := by
+  decide
 
 end Orb.Spec

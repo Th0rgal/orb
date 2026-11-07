@@ -5643,80 +5643,227 @@
       "name": "orb_codex_goal_launch_step",
       "ret": "uint32_t",
       "params": [
-        { "name": "isGoalRequest", "type": "uint8_t" },
-        { "name": "hasNonEmptyObjective", "type": "uint8_t" },
-        { "name": "hasImages", "type": "uint8_t" },
-        { "name": "hasExplicitCyber", "type": "uint8_t" },
-        { "name": "hasChatGptAuth", "type": "uint8_t" },
-        { "name": "modelCompatible", "type": "uint8_t" },
-        { "name": "accountSupportsProgram", "type": "uint8_t" },
-        { "name": "resumedGoalActive", "type": "uint8_t" },
-        { "name": "hasRetiredAlias", "type": "uint8_t" }
+        {
+          "name": "isGoalRequest",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasNonEmptyObjective",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasImages",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasExplicitCyber",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasChatGptAuth",
+          "type": "uint8_t"
+        },
+        {
+          "name": "modelCompatible",
+          "type": "uint8_t"
+        },
+        {
+          "name": "accountSupportsProgram",
+          "type": "uint8_t"
+        },
+        {
+          "name": "resumedGoalActive",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasRetiredAlias",
+          "type": "uint8_t"
+        }
       ],
-      "jni": { "method": "orbCodexGoalLaunchStep", "ret": "jint" }
+      "jni": {
+        "method": "orbCodexGoalLaunchStep",
+        "ret": "jint"
+      }
     },
     {
       "name": "orb_codex_goal_preact_filter",
       "ret": "uint8_t",
       "params": [
-        { "name": "msgKind", "type": "uint8_t" },
-        { "name": "isRequest", "type": "uint8_t" },
-        { "name": "sameThread", "type": "uint8_t" },
-        { "name": "hasTurnId", "type": "uint8_t" },
-        { "name": "threadAlreadyActive", "type": "uint8_t" },
-        { "name": "goalGetWasNull", "type": "uint8_t" },
-        { "name": "snapshotMatchesGoalGet", "type": "uint8_t" }
+        {
+          "name": "msgKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isRequest",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sameThread",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasTurnId",
+          "type": "uint8_t"
+        },
+        {
+          "name": "threadAlreadyActive",
+          "type": "uint8_t"
+        },
+        {
+          "name": "goalGetWasNull",
+          "type": "uint8_t"
+        },
+        {
+          "name": "snapshotMatchesGoalGet",
+          "type": "uint8_t"
+        }
       ],
-      "jni": { "method": "orbCodexGoalPreactFilter", "ret": "jbyte" }
+      "jni": {
+        "method": "orbCodexGoalPreactFilter",
+        "ret": "jbyte"
+      }
     },
     {
       "name": "orb_skill_slash_step",
       "ret": "uint64_t",
       "params": [
-        { "name": "harnessKind", "type": "uint8_t" },
-        { "name": "isDelivered", "type": "uint8_t" },
-        { "name": "alreadySelected", "type": "uint8_t" },
-        { "name": "nameCharsValid", "type": "uint8_t" },
-        { "name": "nameLen", "type": "uint32_t" },
-        { "name": "maxNameLen", "type": "uint32_t" },
-        { "name": "selectedCount", "type": "uint32_t" },
-        { "name": "maxSelected", "type": "uint32_t" }
+        {
+          "name": "harnessKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isDelivered",
+          "type": "uint8_t"
+        },
+        {
+          "name": "alreadySelected",
+          "type": "uint8_t"
+        },
+        {
+          "name": "nameCharsValid",
+          "type": "uint8_t"
+        },
+        {
+          "name": "nameLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxNameLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "selectedCount",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxSelected",
+          "type": "uint32_t"
+        }
       ],
-      "jni": { "method": "orbSkillSlashStep", "ret": "jlong" }
+      "jni": {
+        "method": "orbSkillSlashStep",
+        "ret": "jlong"
+      }
     },
     {
       "name": "orb_worktree_decision_step",
       "ret": "uint32_t",
       "params": [
-        { "name": "opKind", "type": "uint8_t" },
-        { "name": "isOccupied", "type": "uint8_t" },
-        { "name": "isGitRepo", "type": "uint8_t" },
-        { "name": "branchCharsValid", "type": "uint8_t" },
-        { "name": "targetPathExists", "type": "uint8_t" },
-        { "name": "parentDirValid", "type": "uint8_t" },
-        { "name": "slugLen", "type": "uint32_t" },
-        { "name": "maxSlugLen", "type": "uint32_t" },
-        { "name": "activeWorktrees", "type": "uint32_t" },
-        { "name": "maxWorktrees", "type": "uint32_t" }
+        {
+          "name": "opKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isOccupied",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isGitRepo",
+          "type": "uint8_t"
+        },
+        {
+          "name": "branchCharsValid",
+          "type": "uint8_t"
+        },
+        {
+          "name": "targetPathExists",
+          "type": "uint8_t"
+        },
+        {
+          "name": "parentDirValid",
+          "type": "uint8_t"
+        },
+        {
+          "name": "slugLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxSlugLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "activeWorktrees",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxWorktrees",
+          "type": "uint32_t"
+        }
       ],
-      "jni": { "method": "orbWorktreeDecisionStep", "ret": "jint" }
+      "jni": {
+        "method": "orbWorktreeDecisionStep",
+        "ret": "jint"
+      }
     },
     {
       "name": "orb_repo_diff_budget_step",
       "ret": "uint64_t",
       "params": [
-        { "name": "isGitRepo", "type": "uint8_t" },
-        { "name": "pathSafe", "type": "uint8_t" },
-        { "name": "hasUntracked", "type": "uint8_t" },
-        { "name": "modifiedCount", "type": "uint32_t" },
-        { "name": "stagedCount", "type": "uint32_t" },
-        { "name": "aheadCount", "type": "uint32_t" },
-        { "name": "behindCount", "type": "uint32_t" },
-        { "name": "diffBytes", "type": "uint32_t" },
-        { "name": "maxFiles", "type": "uint32_t" },
-        { "name": "maxBytes", "type": "uint32_t" }
+        {
+          "name": "isGitRepo",
+          "type": "uint8_t"
+        },
+        {
+          "name": "pathSafe",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasUntracked",
+          "type": "uint8_t"
+        },
+        {
+          "name": "modifiedCount",
+          "type": "uint32_t"
+        },
+        {
+          "name": "stagedCount",
+          "type": "uint32_t"
+        },
+        {
+          "name": "aheadCount",
+          "type": "uint32_t"
+        },
+        {
+          "name": "behindCount",
+          "type": "uint32_t"
+        },
+        {
+          "name": "diffBytes",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxFiles",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxBytes",
+          "type": "uint32_t"
+        }
       ],
-      "jni": { "method": "orbRepoDiffBudgetStep", "ret": "jlong" }
+      "jni": {
+        "method": "orbRepoDiffBudgetStep",
+        "ret": "jlong"
+      }
     },
     {
       "name": "orb_sidebar_move_target_admit",
@@ -5807,6 +5954,168 @@
         }
       ],
       "internal": true
+    },
+    {
+      "name": "orb_followup_queue_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "op",
+          "type": "uint8_t"
+        },
+        {
+          "name": "serverRev",
+          "type": "uint32_t"
+        },
+        {
+          "name": "incomingServerRev",
+          "type": "uint32_t"
+        },
+        {
+          "name": "expectedServerRev",
+          "type": "uint32_t"
+        },
+        {
+          "name": "clientMsgId",
+          "type": "uint64_t"
+        },
+        {
+          "name": "trackedMsgId",
+          "type": "uint64_t"
+        },
+        {
+          "name": "deliveredMsgId",
+          "type": "uint64_t"
+        },
+        {
+          "name": "postedAfterSeq",
+          "type": "uint64_t"
+        },
+        {
+          "name": "turnSeq",
+          "type": "uint64_t"
+        },
+        {
+          "name": "optimisticSending",
+          "type": "uint8_t"
+        },
+        {
+          "name": "serverListed",
+          "type": "uint8_t"
+        },
+        {
+          "name": "contentMatched",
+          "type": "uint8_t"
+        },
+        {
+          "name": "alreadyDelivered",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbFollowupQueueStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_transport_epoch_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "mode",
+          "type": "uint8_t"
+        },
+        {
+          "name": "eventKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "everReady",
+          "type": "uint8_t"
+        },
+        {
+          "name": "stickyUnsupported",
+          "type": "uint8_t"
+        },
+        {
+          "name": "endpointClass",
+          "type": "uint8_t"
+        },
+        {
+          "name": "prevEndpointClass",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasSinceSeq",
+          "type": "uint8_t"
+        },
+        {
+          "name": "failureStreak",
+          "type": "uint32_t"
+        },
+        {
+          "name": "failThreshold",
+          "type": "uint32_t"
+        },
+        {
+          "name": "httpStatus",
+          "type": "uint32_t"
+        },
+        {
+          "name": "sinceSeq32",
+          "type": "uint32_t"
+        },
+        {
+          "name": "nowMs",
+          "type": "uint64_t"
+        },
+        {
+          "name": "cooldownUntilMs",
+          "type": "uint64_t"
+        }
+      ],
+      "jni": {
+        "method": "orbTransportEpochStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_stream_open_tail_cap_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "prevLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "prevCommit",
+          "type": "uint32_t"
+        },
+        {
+          "name": "prevCheckpoint",
+          "type": "uint32_t"
+        },
+        {
+          "name": "newLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "rawCommit",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxOpenTailBytes",
+          "type": "uint32_t"
+        },
+        {
+          "name": "openFenceActive",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbStreamOpenTailCapStep",
+        "ret": "jlong"
+      }
     }
   ]
 }

@@ -156,7 +156,7 @@ class Receipts(unittest.TestCase):
             self.assertEqual(report["cases"], 2 * len(functions))
             self.assertEqual(report["mismatches"], [])
             self.assertFalse(report["phase_acceptance"])
-            self.assertEqual(report["coverage"], {"partial": 110, "unconnected": 73, "acceptance": "INCOMPLETE"})
+            self.assertEqual(report["coverage"], {"partial": 110, "unconnected": 76, "acceptance": "INCOMPLETE"})
             self.assertEqual(verified["backend"], "leannative")
             self.assertEqual(verified["compared_backend"], "leannative")
             self.assertEqual(verified["artifact_sha256"], verified["leannative_artifact_sha256"])
@@ -269,6 +269,13 @@ class Receipts(unittest.TestCase):
                         target.parent.mkdir(parents=True, exist_ok=True)
                         if target.suffix == ".a":
                             target.write_bytes(archive.read_bytes())
+                        elif target.suffix == ".lnir":
+                            decls = "|".join(
+                                f"D_decl|{('probe_' + fn['name']).encode().hex()}|stub"
+                                for fn in functions
+                                if fn["name"].startswith(("orb_", "leansys_"))
+                            )
+                            target.write_text(f"LNIR_WIRE_V1|4f7262|{len(functions)}|{decls}\n")
                         else:
                             target.write_text("stub\n")
                     return subprocess.CompletedProcess(cmd, 0, "", "")

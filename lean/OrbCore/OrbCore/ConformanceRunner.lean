@@ -1,6 +1,6 @@
 /-
   OrbCore.ConformanceRunner: Pure-Lean Shared Kernel Conformance & Fixture Runner (`orb-spec-runner`)
-   covering all 181 C-ABI exports in `shared/orb-spec/kernel_abi.json` and shared projection fixtures.
+   covering all 186 C-ABI exports in `shared/orb-spec/kernel_abi.json` and shared projection fixtures.
 -/
 import Orb.Kernel
 import LeanSys.Spec
@@ -10,7 +10,7 @@ namespace OrbCore.ConformanceRunner
 
 open OrbBin.Json
 
--- Direct `@[extern]` imports to all 181 exported C-ABI symbols of `Orb.Kernel` and `LeanSys.Spec`.
+-- Direct `@[extern]` imports to all 186 exported C-ABI symbols of `Orb.Kernel` and `LeanSys.Spec`.
 @[extern "orb_verify_writer_reuse"]
 private opaque c_fn_0 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt8) : UInt8
 @[extern "orb_verify_lease_mode"]
@@ -373,6 +373,16 @@ private opaque c_fn_178 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 
 private opaque c_fn_179 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt8) (a6 : UInt32) (a7 : UInt32) (a8 : UInt32) (a9 : UInt32) : UInt32
 @[extern "orb_repo_diff_budget_step"]
 private opaque c_fn_180 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt32) (a4 : UInt32) (a5 : UInt32) (a6 : UInt32) (a7 : UInt32) (a8 : UInt32) (a9 : UInt32) : UInt64
+@[extern "orb_sidebar_move_target_admit"]
+private opaque c_fn_181 (a0 : UInt8) (a1 : UInt8) (a2 : UInt32) (a3 : UInt32) (a4 : UInt32) (a5 : UInt32) (a6 : UInt32) : UInt8
+@[extern "orb_sidebar_drag_step"]
+private opaque c_fn_182 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt32) (a6 : UInt32) (a7 : UInt32) (a8 : UInt32) (a9 : UInt32) (a10 : UInt32) (a11 : UInt32) : UInt64
+@[extern "orb_followup_queue_step"]
+private opaque c_fn_183 (a0 : UInt8) (a1 : UInt32) (a2 : UInt32) (a3 : UInt32) (a4 : UInt64) (a5 : UInt64) (a6 : UInt64) (a7 : UInt64) (a8 : UInt64) (a9 : UInt8) (a10 : UInt8) (a11 : UInt8) (a12 : UInt8) : UInt64
+@[extern "orb_transport_epoch_step"]
+private opaque c_fn_184 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt8) (a6 : UInt8) (a7 : UInt32) (a8 : UInt32) (a9 : UInt32) (a10 : UInt32) (a11 : UInt64) (a12 : UInt64) : UInt64
+@[extern "orb_stream_open_tail_cap_step"]
+private opaque c_fn_185 (a0 : UInt32) (a1 : UInt32) (a2 : UInt32) (a3 : UInt32) (a4 : UInt32) (a5 : UInt32) (a6 : UInt8) : UInt64
 
 private def callExportChunk0? (sym : String) (args : Array UInt64) : Option UInt64 :=
   if sym == "orb_verify_writer_reuse" && args.size == 6 then some ((c_fn_0 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt8).toUInt64)
@@ -577,9 +587,14 @@ private def callExportChunk7? (sym : String) (args : Array UInt64) : Option UInt
   else if sym == "orb_skill_slash_step" && args.size == 8 then some (c_fn_178 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt32 (args[5]!).toUInt32 (args[6]!).toUInt32 (args[7]!).toUInt32)
   else if sym == "orb_worktree_decision_step" && args.size == 10 then some ((c_fn_179 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt8 (args[6]!).toUInt32 (args[7]!).toUInt32 (args[8]!).toUInt32 (args[9]!).toUInt32).toUInt64)
   else if sym == "orb_repo_diff_budget_step" && args.size == 10 then some (c_fn_180 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt32 (args[4]!).toUInt32 (args[5]!).toUInt32 (args[6]!).toUInt32 (args[7]!).toUInt32 (args[8]!).toUInt32 (args[9]!).toUInt32)
+  else if sym == "orb_sidebar_move_target_admit" && args.size == 7 then some ((c_fn_181 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt32 (args[3]!).toUInt32 (args[4]!).toUInt32 (args[5]!).toUInt32 (args[6]!).toUInt32).toUInt64)
+  else if sym == "orb_sidebar_drag_step" && args.size == 12 then some (c_fn_182 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt32 (args[6]!).toUInt32 (args[7]!).toUInt32 (args[8]!).toUInt32 (args[9]!).toUInt32 (args[10]!).toUInt32 (args[11]!).toUInt32)
+  else if sym == "orb_followup_queue_step" && args.size == 13 then some (c_fn_183 (args[0]!).toUInt8 (args[1]!).toUInt32 (args[2]!).toUInt32 (args[3]!).toUInt32 (args[4]!) (args[5]!) (args[6]!) (args[7]!) (args[8]!) (args[9]!).toUInt8 (args[10]!).toUInt8 (args[11]!).toUInt8 (args[12]!).toUInt8)
+  else if sym == "orb_transport_epoch_step" && args.size == 13 then some (c_fn_184 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt8 (args[6]!).toUInt8 (args[7]!).toUInt32 (args[8]!).toUInt32 (args[9]!).toUInt32 (args[10]!).toUInt32 (args[11]!) (args[12]!))
+  else if sym == "orb_stream_open_tail_cap_step" && args.size == 7 then some (c_fn_185 (args[0]!).toUInt32 (args[1]!).toUInt32 (args[2]!).toUInt32 (args[3]!).toUInt32 (args[4]!).toUInt32 (args[5]!).toUInt32 (args[6]!).toUInt8)
   else none
 
-/-- Dispatch any of the 181 C-ABI exports by symbol name and `UInt64` argument vector. -/
+/-- Dispatch any of the 186 C-ABI exports by symbol name and `UInt64` argument vector. -/
 def callExportU64? (sym : String) (args : Array UInt64) : Option UInt64 :=
   (callExportChunk0? sym args) <|> (callExportChunk1? sym args) <|> (callExportChunk2? sym args) <|> (callExportChunk3? sym args) <|> (callExportChunk4? sym args) <|> (callExportChunk5? sym args) <|> (callExportChunk6? sym args) <|> (callExportChunk7? sym args)
 
@@ -700,7 +715,7 @@ private def evalUsageLimitLabel (usage : JVal) (nowSec : UInt64) : Option (Strin
       label := label ++ s!" · resets in {resetVal}{unitStr}"
     return some (tone, label)
 
-/-- Replay all `shared/orb-spec/fixtures/{projection-invariants,relative-time,usage-limit-status}.json` cases
+/-- Replay all `shared/orb-spec/fixtures/{projection-invariants,relative-time,usage-limit-status,r6a-client-kernel}.json` cases
     against `Orb.Kernel` exports (`--fixtures <dir>`). -/
 def runSharedFixtures (fixturesDir : String) : IO UInt32 := do
   let projRaw ← IO.FS.readFile s!"{fixturesDir}/projection-invariants.json"
@@ -829,6 +844,79 @@ def runSharedFixtures (fixturesDir : String) : IO UInt32 := do
     if got != want then
       let cname := (c.fieldStr? "name").getD ""
       IO.eprintln s!"[orb-spec-runner] FAIL: usage-limit-status mismatch {cname}"
+      return 1
+
+  let r6aRaw ← IO.FS.readFile s!"{fixturesDir}/r6a-client-kernel.json"
+  let .ok r6aDoc := parse r6aRaw
+    | do IO.eprintln "[orb-spec-runner] FAIL: parse r6a-client-kernel.json"; return 1
+  for c in (r6aDoc.fieldArr? "cases").getD #[] do
+    let cname := (c.fieldStr? "name").getD ""
+    let wordOf (v : JVal) : Option UInt64 :=
+      match v with
+      | .num raw => (raw.trimAscii.toString.toNat?).map (·.toUInt64)
+      | .str raw => (raw.trimAscii.toString.toNat?).map (·.toUInt64)
+      | _ => none
+    let fieldWord (k : String) : Option UInt64 := (c.field? k).bind wordOf
+    let bit (k : String) : UInt8 := if (c.fieldBool? k).getD false then 1 else 0
+    let op := (c.fieldStr? "op").getD ""
+    let mismatch : Bool :=
+      if op == "followupQueue" then
+        match fieldWord "queueOp", fieldWord "serverRev", fieldWord "incomingServerRev",
+            fieldWord "expectedServerRev", fieldWord "clientMsgId", fieldWord "trackedMsgId",
+            fieldWord "deliveredMsgId", fieldWord "postedAfterSeq", fieldWord "turnSeq",
+            fieldWord "expectedReasonCode", fieldWord "expectedNextServerRev" with
+        | some queueOp, some serverRev, some incoming, some expected, some clientMsg, some tracked,
+          some delivered, some posted, some turn, some reason, some nextRev =>
+          let w := Orb.Kernel.followupQueueStep queueOp.toUInt8 serverRev.toUInt32 incoming.toUInt32
+            expected.toUInt32 clientMsg tracked delivered posted turn (bit "optimisticSending")
+            (bit "serverListed") (bit "contentMatched") (bit "alreadyDelivered")
+          let word := (w &&& 0xFFFFFFFF).toUInt32
+          word &&& 0xFF != reason.toUInt32 ||
+            ((word &&& 256) != 0) != ((c.fieldBool? "expectedAdmitted").getD false) ||
+            ((word &&& 512) != 0) != ((c.fieldBool? "expectedOptimisticLiveNext").getD false) ||
+            ((word &&& 1024) != 0) != ((c.fieldBool? "expectedRetiredNow").getD false) ||
+            (w >>> 32) != nextRev
+        | _, _, _, _, _, _, _, _, _, _, _ => true
+      else if op == "transportEpoch" then
+        match fieldWord "mode", fieldWord "eventKind", fieldWord "endpointClass",
+            fieldWord "prevEndpointClass", fieldWord "failureStreak", fieldWord "failThreshold",
+            fieldWord "httpStatus", fieldWord "sinceSeq32", fieldWord "nowMs", fieldWord "cooldownUntilMs",
+            fieldWord "expectedNextMode", fieldWord "expectedNextFailureStreak",
+            fieldWord "expectedPreservedSinceSeq32" with
+        | some mode, some eventKind, some endpoint, some prevEndpoint, some streak, some threshold,
+          some status, some sinceSeq, some nowMs, some cooldown, some nextMode, some nextStreak,
+          some preserved =>
+          let w := Orb.Kernel.transportEpochStep mode.toUInt8 eventKind.toUInt8 (bit "everReady")
+            (bit "stickyUnsupported") endpoint.toUInt8 prevEndpoint.toUInt8 (bit "hasSinceSeq")
+            streak.toUInt32 threshold.toUInt32 status.toUInt32 sinceSeq.toUInt32 nowMs cooldown
+          let word := (w &&& 0xFFFFFFFF).toUInt32
+          word &&& 0xFF != nextMode.toUInt32 ||
+            ((word &&& 256) != 0) != ((c.fieldBool? "expectedAdmitted").getD false) ||
+            ((word &&& 512) != 0) != ((c.fieldBool? "expectedStickyUnsupportedNext").getD false) ||
+            ((word &&& 1024) != 0) != ((c.fieldBool? "expectedFallbackActiveNext").getD false) ||
+            ((word &&& 2048) != 0) != ((c.fieldBool? "expectedReprobeTriggered").getD false) ||
+            ((word &&& 4096) != 0) != ((c.fieldBool? "expectedHasPreservedSinceSeq").getD false) ||
+            ((word >>> 16) &&& 0xFF) != nextStreak.toUInt32 ||
+            (w >>> 32) != preserved
+        | _, _, _, _, _, _, _, _, _, _, _, _, _ => true
+      else if op == "streamOpenTailCap" then
+        match fieldWord "prevLen", fieldWord "prevCommit", fieldWord "prevCheckpoint",
+            fieldWord "newLen", fieldWord "rawCommit", fieldWord "maxOpenTailBytes",
+            fieldWord "expectedNextCheckpoint" with
+        | some prevLen, some prevCommit, some prevCheckpoint, some newLen, some rawCommit,
+          some maxTail, some nextCheckpoint =>
+          let w := Orb.Kernel.streamOpenTailCapStep prevLen.toUInt32 prevCommit.toUInt32
+            prevCheckpoint.toUInt32 newLen.toUInt32 rawCommit.toUInt32 maxTail.toUInt32
+            (bit "openFenceActive")
+          let word := (w &&& 0xFFFFFFFF).toUInt32
+          ((word &&& 256) != 0) != ((c.fieldBool? "expectedAdmitted").getD false) ||
+            ((word &&& 512) != 0) != ((c.fieldBool? "expectedCheckpointForced").getD false) ||
+            ((word &&& 1024) != 0) != ((c.fieldBool? "expectedOpenFenceCapped").getD false) ||
+            (w >>> 32) != nextCheckpoint
+        | _, _, _, _, _, _, _ => true
+      else true
+    if mismatch then
+      IO.eprintln s!"[orb-spec-runner] FAIL: r6a-client-kernel mismatch {cname}"
       return 1
 
   IO.println "test result: ok. 3 passed; 0 failed; 0 ignored"

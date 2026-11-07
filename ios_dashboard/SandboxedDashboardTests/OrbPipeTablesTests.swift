@@ -150,4 +150,160 @@ final class OrbPipeTablesTests: XCTestCase {
         XCTAssertTrue(OrbKernel.verifyIsaSelection(detectedHwCaps: 775, requiredMask: 263, selectedVariantId: 0, maxVariantId: 4))
         XCTAssertFalse(OrbKernel.verifyIsaSelection(detectedHwCaps: 775, requiredMask: 927, selectedVariantId: 4, maxVariantId: 4))
     }
+
+    func testR6aClientSteppersPreserveHighBitUnsignedWordsAndMatchLeanFixtures() throws {
+        let highDelivered = OrbKernel.followupQueueStep(
+            op: 3,
+            serverRev: 5,
+            incomingServerRev: 5,
+            expectedServerRev: 5,
+            clientMsgId: 0x1234,
+            trackedMsgId: 0x1234,
+            deliveredMsgId: 0x9000_0000_0000_0001,
+            postedAfterSeq: 10,
+            turnSeq: 11,
+            optimisticSending: false,
+            serverListed: false,
+            contentMatched: true,
+            alreadyDelivered: false
+        )
+        XCTAssertEqual(
+            highDelivered,
+            OrbKernel.FollowupQueueVerdict(
+                reasonCode: 4,
+                admitted: false,
+                optimisticLiveNext: true,
+                retiredNow: false,
+                nextServerRev: 5
+            )
+        )
+
+        let allOnesMatch = OrbKernel.followupQueueStep(
+            op: 3,
+            serverRev: 0x8000_0001,
+            incomingServerRev: 0x8000_0001,
+            expectedServerRev: 0x8000_0001,
+            clientMsgId: UInt64.max,
+            trackedMsgId: 0x8000_0001,
+            deliveredMsgId: UInt64.max,
+            postedAfterSeq: 10,
+            turnSeq: 11,
+            optimisticSending: false,
+            serverListed: false,
+            contentMatched: true,
+            alreadyDelivered: false
+        )
+        XCTAssertEqual(
+            allOnesMatch,
+            OrbKernel.FollowupQueueVerdict(
+                reasonCode: 1,
+                admitted: true,
+                optimisticLiveNext: false,
+                retiredNow: true,
+                nextServerRev: 0x8000_0001
+            )
+        )
+
+        let cases = try XCTUnwrap(OrbSpec.json("fixtures/r6a-client-kernel.json")["cases"] as? [[String: Any]])
+        XCTAssertGreaterThanOrEqual(cases.count, 12)
+
+        func u32(_ item: [String: Any], _ key: String, _ label: String) throws -> UInt32 {
+            let raw = try XCTUnwrap(item[key] as? String, "\(label).\(key)")
+            return try XCTUnwrap(UInt32(raw), "\(label).\(key)")
+        }
+
+        func u64(_ item: [String: Any], _ key: String, _ label: String) throws -> UInt64 {
+            let raw = try XCTUnwrap(item[key] as? String, "\(label).\(key)")
+            return try XCTUnwrap(UInt64(raw), "\(label).\(key)")
+        }
+
+        for (idx, item) in cases.enumerated() {
+            let label = item["name"] as? String ?? "case-\(idx)"
+            let op = try XCTUnwrap(item["op"] as? String, label)
+            switch op {
+            case "followupQueue":
+                let got = OrbKernel.followupQueueStep(
+                    op: item["queueOp"] as? Int ?? 0,
+                    serverRev: try u32(item, "serverRev", label),
+                    incomingServerRev: try u32(item, "incomingServerRev", label),
+                    expectedServerRev: try u32(item, "expectedServerRev", label),
+                    clientMsgId: try u64(item, "clientMsgId", label),
+                    trackedMsgId: try u64(item, "trackedMsgId", label),
+                    deliveredMsgId: try u64(item, "deliveredMsgId", label),
+                    postedAfterSeq: try u64(item, "postedAfterSeq", label),
+                    turnSeq: try u64(item, "turnSeq", label),
+                    optimisticSending: item["optimisticSending"] as? Bool ?? false,
+                    serverListed: item["serverListed"] as? Bool ?? false,
+                    contentMatched: item["contentMatched"] as? Bool ?? false,
+                    alreadyDelivered: item["alreadyDelivered"] as? Bool ?? false
+                )
+                XCTAssertEqual(
+                    got,
+                    OrbKernel.FollowupQueueVerdict(
+                        reasonCode: item["expectedReasonCode"] as? Int ?? -1,
+                        admitted: item["expectedAdmitted"] as? Bool ?? false,
+                        optimisticLiveNext: item["expectedOptimisticLiveNext"] as? Bool ?? false,
+                        retiredNow: item["expectedRetiredNow"] as? Bool ?? false,
+                        nextServerRev: try u32(item, "expectedNextServerRev", label)
+                    ),
+                    label
+                )
+
+            case "transportEpoch":
+                let got = OrbKernel.transportEpochStep(
+                    mode: item["mode"] as? Int ?? 0,
+                    eventKind: item["eventKind"] as? Int ?? 0,
+                    everReady: item["everReady"] as? Bool ?? false,
+                    stickyUnsupported: item["stickyUnsupported"] as? Bool ?? false,
+                    endpointClass: item["endpointClass"] as? Int ?? 0,
+                    prevEndpointClass: item["prevEndpointClass"] as? Int ?? 0,
+                    hasSinceSeq: item["hasSinceSeq"] as? Bool ?? false,
+                    failureStreak: try u32(item, "failureStreak", label),
+                    failThreshold: try u32(item, "failThreshold", label),
+                    httpStatus: try u32(item, "httpStatus", label),
+                    sinceSeq32: try u32(item, "sinceSeq32", label),
+                    nowMs: try u64(item, "nowMs", label),
+                    cooldownUntilMs: try u64(item, "cooldownUntilMs", label)
+                )
+                XCTAssertEqual(
+                    got,
+                    OrbKernel.TransportEpochVerdict(
+                        nextMode: item["expectedNextMode"] as? Int ?? -1,
+                        admitted: item["expectedAdmitted"] as? Bool ?? false,
+                        stickyUnsupportedNext: item["expectedStickyUnsupportedNext"] as? Bool ?? false,
+                        fallbackActiveNext: item["expectedFallbackActiveNext"] as? Bool ?? false,
+                        reprobeTriggered: item["expectedReprobeTriggered"] as? Bool ?? false,
+                        hasPreservedSinceSeq: item["expectedHasPreservedSinceSeq"] as? Bool ?? false,
+                        nextFailureStreak: item["expectedNextFailureStreak"] as? Int ?? -1,
+                        preservedSinceSeq32: try u32(item, "expectedPreservedSinceSeq32", label)
+                    ),
+                    label
+                )
+
+            case "streamOpenTailCap":
+                let got = OrbKernel.streamOpenTailCapStep(
+                    prevLen: try u32(item, "prevLen", label),
+                    prevCommit: try u32(item, "prevCommit", label),
+                    prevCheckpoint: try u32(item, "prevCheckpoint", label),
+                    newLen: try u32(item, "newLen", label),
+                    rawCommit: try u32(item, "rawCommit", label),
+                    maxOpenTailBytes: try u32(item, "maxOpenTailBytes", label),
+                    openFenceActive: item["openFenceActive"] as? Bool ?? false
+                )
+                XCTAssertEqual(
+                    got,
+                    OrbKernel.StreamOpenTailCapVerdict(
+                        admitted: item["expectedAdmitted"] as? Bool ?? false,
+                        checkpointForced: item["expectedCheckpointForced"] as? Bool ?? false,
+                        openFenceCapped: item["expectedOpenFenceCapped"] as? Bool ?? false,
+                        nextCheckpoint: try u32(item, "expectedNextCheckpoint", label)
+                    ),
+                    label
+                )
+
+            default:
+                XCTFail("unexpected R6-A fixture op \(op) in \(label)")
+            }
+        }
+    }
 }

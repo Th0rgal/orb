@@ -1,8 +1,24 @@
-import { isValidSkillIdentifier, orbSkillSlashStep } from "./orbKernel";
+import { orbSkillSlashStep } from "./orbKernel";
 
 export const MAX_SKILL_NAME = 64;
 export const MAX_SELECTED_SKILLS = 8;
 const TOKEN = /(^|[\s])\/skill:([^\s]*)/g;
+
+export function isValidSkillIdentifier(name: string): boolean {
+  if (!name || name.includes("..")) return false;
+  for (let i = 0; i < name.length; i++) {
+    const c = name.charCodeAt(i);
+    const ok =
+      (c >= 48 && c <= 57) ||
+      (c >= 65 && c <= 90) ||
+      (c >= 97 && c <= 122) ||
+      c === 45 ||
+      c === 95 ||
+      c === 46;
+    if (!ok) return false;
+  }
+  return true;
+}
 
 export interface SkillChoice {
   name: string;

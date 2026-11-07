@@ -1163,22 +1163,6 @@ export function orbCodexGoalLaunchStep(input: {
   };
 }
 
-export function isValidSkillIdentifier(name: string): boolean {
-  if (!name || name.includes("..")) return false;
-  for (let i = 0; i < name.length; i++) {
-    const c = name.charCodeAt(i);
-    const ok =
-      (c >= 48 && c <= 57) ||
-      (c >= 65 && c <= 90) ||
-      (c >= 97 && c <= 122) ||
-      c === 45 ||
-      c === 95 ||
-      c === 46;
-    if (!ok) return false;
-  }
-  return true;
-}
-
 export function orbSkillSlashStep(input: {
   harnessKind: number;
   isDelivered: boolean;
@@ -1354,6 +1338,150 @@ export function orbSidebarDragStep(input: {
     scrollDir: up ? -1 : down ? 1 : 0,
     scrollStepPx: (lo32 >>> 24) & 0xff,
     nextSpringTargetOrd: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+const rawU32 = (value: bigint | number): number => {
+  if (typeof value === "bigint") return Number(BigInt.asUintN(32, value));
+  if (!Number.isFinite(value)) throw new RangeError("Expected finite UInt32 number");
+  return Math.trunc(value) >>> 0;
+};
+
+const rawU64 = (value: bigint | number): bigint => {
+  if (typeof value === "bigint") return BigInt.asUintN(64, value);
+  if (!Number.isFinite(value)) throw new RangeError("Expected finite UInt64 number");
+  const whole = Math.trunc(value);
+  if (!Number.isSafeInteger(whole)) throw new RangeError("UInt64 number is outside the exact safe integer range");
+  return BigInt.asUintN(64, BigInt(whole));
+};
+
+export function orbFollowupQueueStep(input: {
+  op: number;
+  serverRev: bigint | number;
+  incomingServerRev: bigint | number;
+  expectedServerRev: bigint | number;
+  clientMsgId: bigint | number;
+  trackedMsgId: bigint | number;
+  deliveredMsgId: bigint | number;
+  postedAfterSeq: bigint | number;
+  turnSeq: bigint | number;
+  optimisticSending: boolean;
+  serverListed: boolean;
+  contentMatched: boolean;
+  alreadyDelivered: boolean;
+}): {
+  reasonCode: number;
+  admitted: boolean;
+  optimisticLiveNext: boolean;
+  retiredNow: boolean;
+  nextServerRev: number;
+} {
+  const raw = kernel.orb_followup_queue_step(
+    enum8(input.op),
+    rawU32(input.serverRev),
+    rawU32(input.incomingServerRev),
+    rawU32(input.expectedServerRev),
+    rawU64(input.clientMsgId),
+    rawU64(input.trackedMsgId),
+    rawU64(input.deliveredMsgId),
+    rawU64(input.postedAfterSeq),
+    rawU64(input.turnSeq),
+    b8(input.optimisticSending),
+    b8(input.serverListed),
+    b8(input.contentMatched),
+    b8(input.alreadyDelivered),
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  return {
+    reasonCode: lo32 & 0xff,
+    admitted: ((lo32 >>> 8) & 1) !== 0,
+    optimisticLiveNext: ((lo32 >>> 9) & 1) !== 0,
+    retiredNow: ((lo32 >>> 10) & 1) !== 0,
+    nextServerRev: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+export function orbTransportEpochStep(input: {
+  mode: number;
+  eventKind: number;
+  everReady: boolean;
+  stickyUnsupported: boolean;
+  endpointClass: number;
+  prevEndpointClass: number;
+  hasSinceSeq: boolean;
+  failureStreak: bigint | number;
+  failThreshold: bigint | number;
+  httpStatus: bigint | number;
+  sinceSeq32: bigint | number;
+  nowMs: bigint | number;
+  cooldownUntilMs: bigint | number;
+}): {
+  nextMode: number;
+  admitted: boolean;
+  stickyUnsupportedNext: boolean;
+  fallbackActiveNext: boolean;
+  reprobeTriggered: boolean;
+  hasPreservedSinceSeq: boolean;
+  nextFailureStreak: number;
+  preservedSinceSeq32: number;
+} {
+  const raw = kernel.orb_transport_epoch_step(
+    enum8(input.mode),
+    enum8(input.eventKind),
+    b8(input.everReady),
+    b8(input.stickyUnsupported),
+    enum8(input.endpointClass),
+    enum8(input.prevEndpointClass),
+    b8(input.hasSinceSeq),
+    rawU32(input.failureStreak),
+    rawU32(input.failThreshold),
+    rawU32(input.httpStatus),
+    rawU32(input.sinceSeq32),
+    rawU64(input.nowMs),
+    rawU64(input.cooldownUntilMs),
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  return {
+    nextMode: lo32 & 0xff,
+    admitted: ((lo32 >>> 8) & 1) !== 0,
+    stickyUnsupportedNext: ((lo32 >>> 9) & 1) !== 0,
+    fallbackActiveNext: ((lo32 >>> 10) & 1) !== 0,
+    reprobeTriggered: ((lo32 >>> 11) & 1) !== 0,
+    hasPreservedSinceSeq: ((lo32 >>> 12) & 1) !== 0,
+    nextFailureStreak: (lo32 >>> 16) & 0xff,
+    preservedSinceSeq32: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+export function orbStreamOpenTailCapStep(
+  prevLen: bigint | number,
+  prevCommit: bigint | number,
+  prevCheckpoint: bigint | number,
+  newLen: bigint | number,
+  rawCommit: bigint | number,
+  maxOpenTailBytes: bigint | number,
+  openFenceActive: boolean,
+): {
+  admitted: boolean;
+  checkpointForced: boolean;
+  openFenceCapped: boolean;
+  nextCheckpoint: number;
+} {
+  const raw = kernel.orb_stream_open_tail_cap_step(
+    rawU32(prevLen),
+    rawU32(prevCommit),
+    rawU32(prevCheckpoint),
+    rawU32(newLen),
+    rawU32(rawCommit),
+    rawU32(maxOpenTailBytes),
+    b8(openFenceActive),
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  return {
+    admitted: ((lo32 >>> 8) & 1) !== 0,
+    checkpointForced: ((lo32 >>> 9) & 1) !== 0,
+    openFenceCapped: ((lo32 >>> 10) & 1) !== 0,
+    nextCheckpoint: Number((raw >> 32n) & 0xffff_ffffn),
   };
 }
 

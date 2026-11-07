@@ -449,6 +449,15 @@ internal func orb_worktree_decision_step(_ opKind: UInt8, _ isOccupied: UInt8, _
 @_silgen_name("orb_repo_diff_budget_step")
 internal func orb_repo_diff_budget_step(_ isGitRepo: UInt8, _ pathSafe: UInt8, _ hasUntracked: UInt8, _ modifiedCount: UInt32, _ stagedCount: UInt32, _ aheadCount: UInt32, _ behindCount: UInt32, _ diffBytes: UInt32, _ maxFiles: UInt32, _ maxBytes: UInt32) -> UInt64
 
+@_silgen_name("orb_followup_queue_step")
+internal func orb_followup_queue_step(_ op: UInt8, _ serverRev: UInt32, _ incomingServerRev: UInt32, _ expectedServerRev: UInt32, _ clientMsgId: UInt64, _ trackedMsgId: UInt64, _ deliveredMsgId: UInt64, _ postedAfterSeq: UInt64, _ turnSeq: UInt64, _ optimisticSending: UInt8, _ serverListed: UInt8, _ contentMatched: UInt8, _ alreadyDelivered: UInt8) -> UInt64
+
+@_silgen_name("orb_transport_epoch_step")
+internal func orb_transport_epoch_step(_ mode: UInt8, _ eventKind: UInt8, _ everReady: UInt8, _ stickyUnsupported: UInt8, _ endpointClass: UInt8, _ prevEndpointClass: UInt8, _ hasSinceSeq: UInt8, _ failureStreak: UInt32, _ failThreshold: UInt32, _ httpStatus: UInt32, _ sinceSeq32: UInt32, _ nowMs: UInt64, _ cooldownUntilMs: UInt64) -> UInt64
+
+@_silgen_name("orb_stream_open_tail_cap_step")
+internal func orb_stream_open_tail_cap_step(_ prevLen: UInt32, _ prevCommit: UInt32, _ prevCheckpoint: UInt32, _ newLen: UInt32, _ rawCommit: UInt32, _ maxOpenTailBytes: UInt32, _ openFenceActive: UInt8) -> UInt64
+
 enum OrbKernel {
     struct WorkfoldVerdict: Equatable, Sendable {
         let foldItem: Bool
@@ -1372,6 +1381,145 @@ enum OrbKernel {
             syncState: UInt8((lo32 >> 16) & 0xFF),
             rejectCode: admitted ? 0 : UInt8(lo32 & 0xFF),
             clampedBytes: Int(hi32)
+        )
+    }
+
+    struct FollowupQueueVerdict: Equatable, Sendable {
+        let reasonCode: Int
+        let admitted: Bool
+        let optimisticLiveNext: Bool
+        let retiredNow: Bool
+        let nextServerRev: UInt32
+    }
+
+    static func followupQueueStep(
+        op: Int,
+        serverRev: UInt32,
+        incomingServerRev: UInt32,
+        expectedServerRev: UInt32,
+        clientMsgId: UInt64,
+        trackedMsgId: UInt64,
+        deliveredMsgId: UInt64,
+        postedAfterSeq: UInt64,
+        turnSeq: UInt64,
+        optimisticSending: Bool,
+        serverListed: Bool,
+        contentMatched: Bool,
+        alreadyDelivered: Bool
+    ) -> FollowupQueueVerdict {
+        let raw = orb_followup_queue_step(
+            enum8(op),
+            serverRev,
+            incomingServerRev,
+            expectedServerRev,
+            clientMsgId,
+            trackedMsgId,
+            deliveredMsgId,
+            postedAfterSeq,
+            turnSeq,
+            b8(optimisticSending),
+            b8(serverListed),
+            b8(contentMatched),
+            b8(alreadyDelivered)
+        )
+        let lo32 = UInt32(truncatingIfNeeded: raw)
+        let hi32 = UInt32(truncatingIfNeeded: raw >> 32)
+        return FollowupQueueVerdict(
+            reasonCode: Int(lo32 & 0xFF),
+            admitted: ((lo32 >> 8) & 1) != 0,
+            optimisticLiveNext: ((lo32 >> 9) & 1) != 0,
+            retiredNow: ((lo32 >> 10) & 1) != 0,
+            nextServerRev: hi32
+        )
+    }
+
+    struct TransportEpochVerdict: Equatable, Sendable {
+        let nextMode: Int
+        let admitted: Bool
+        let stickyUnsupportedNext: Bool
+        let fallbackActiveNext: Bool
+        let reprobeTriggered: Bool
+        let hasPreservedSinceSeq: Bool
+        let nextFailureStreak: Int
+        let preservedSinceSeq32: UInt32
+    }
+
+    static func transportEpochStep(
+        mode: Int,
+        eventKind: Int,
+        everReady: Bool,
+        stickyUnsupported: Bool,
+        endpointClass: Int,
+        prevEndpointClass: Int,
+        hasSinceSeq: Bool,
+        failureStreak: UInt32,
+        failThreshold: UInt32,
+        httpStatus: UInt32,
+        sinceSeq32: UInt32,
+        nowMs: UInt64,
+        cooldownUntilMs: UInt64
+    ) -> TransportEpochVerdict {
+        let raw = orb_transport_epoch_step(
+            enum8(mode),
+            enum8(eventKind),
+            b8(everReady),
+            b8(stickyUnsupported),
+            enum8(endpointClass),
+            enum8(prevEndpointClass),
+            b8(hasSinceSeq),
+            failureStreak,
+            failThreshold,
+            httpStatus,
+            sinceSeq32,
+            nowMs,
+            cooldownUntilMs
+        )
+        let lo32 = UInt32(truncatingIfNeeded: raw)
+        let hi32 = UInt32(truncatingIfNeeded: raw >> 32)
+        return TransportEpochVerdict(
+            nextMode: Int(lo32 & 0xFF),
+            admitted: ((lo32 >> 8) & 1) != 0,
+            stickyUnsupportedNext: ((lo32 >> 9) & 1) != 0,
+            fallbackActiveNext: ((lo32 >> 10) & 1) != 0,
+            reprobeTriggered: ((lo32 >> 11) & 1) != 0,
+            hasPreservedSinceSeq: ((lo32 >> 12) & 1) != 0,
+            nextFailureStreak: Int((lo32 >> 16) & 0xFF),
+            preservedSinceSeq32: hi32
+        )
+    }
+
+    struct StreamOpenTailCapVerdict: Equatable, Sendable {
+        let admitted: Bool
+        let checkpointForced: Bool
+        let openFenceCapped: Bool
+        let nextCheckpoint: UInt32
+    }
+
+    static func streamOpenTailCapStep(
+        prevLen: UInt32,
+        prevCommit: UInt32,
+        prevCheckpoint: UInt32,
+        newLen: UInt32,
+        rawCommit: UInt32,
+        maxOpenTailBytes: UInt32,
+        openFenceActive: Bool
+    ) -> StreamOpenTailCapVerdict {
+        let raw = orb_stream_open_tail_cap_step(
+            prevLen,
+            prevCommit,
+            prevCheckpoint,
+            newLen,
+            rawCommit,
+            maxOpenTailBytes,
+            b8(openFenceActive)
+        )
+        let lo32 = UInt32(truncatingIfNeeded: raw)
+        let hi32 = UInt32(truncatingIfNeeded: raw >> 32)
+        return StreamOpenTailCapVerdict(
+            admitted: ((lo32 >> 8) & 1) != 0,
+            checkpointForced: ((lo32 >> 9) & 1) != 0,
+            openFenceCapped: ((lo32 >> 10) & 1) != 0,
+            nextCheckpoint: hi32
         )
     }
 }

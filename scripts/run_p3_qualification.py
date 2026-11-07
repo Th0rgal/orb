@@ -35,7 +35,7 @@ def load_manifest():
     manifest = json.loads((ROOT / "shared/orb-spec/kernel_abi.json").read_text())
     functions = manifest["functions"]
     public = [item for item in functions if item["name"].startswith(("orb_", "leansys_"))]
-    if len(public) != 182 or len(functions) != 183:
+    if len(public) != 185 or len(functions) != 186:
         raise ValueError("kernel ABI export inventory changed")
     return functions
 
@@ -159,6 +159,79 @@ def export_map(path, namespace):
     }
 
 
+def _emit_lnir_shards(stage, public, exports, bits, lean_native_bin, env):
+    """Emit LNIR in independent 8-probe shards so normalizeAndInlineLocalDefs stays O(1)
+    per shard and runs concurrently across cores, then splice deterministic LNIR_WIRE_V1
+    D_decl streams into a single module.lnir with fixed moduleName "Orb.Kernel.LeanNative"."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from gen_orb_kernel_leannative_ll import BRANCHLESS_PRELUDE, BRANCHLESS_PROBES
+
+    probe_lines: list[tuple[bool, str]] = []
+    for item in public:
+        if item["name"] in BRANCHLESS_PROBES:
+            probe_lines.append((True, BRANCHLESS_PROBES[item["name"]]))
+            continue
+        params = " ".join(f"(a{i} : UInt64)" for i in range(len(item["params"])))
+        args = " ".join(
+            f"a{i}" if param["type"] == "uint64_t" else f"a{i}.toUInt{bits[param['type']]}"
+            for i, param in enumerate(item["params"])
+        )
+        call = f"({exports[item['name']]} {args})"
+        if item["ret"] != "uint64_t":
+            call += ".toUInt64"
+        probe = "probe_" + item["name"]
+        probe_lines.append((False, f"@[export {probe}] def {probe} {params} : UInt64 := {call}"))
+    shard_size = 8
+    shards = [probe_lines[idx : idx + shard_size] for idx in range(0, len(probe_lines), shard_size)]
+
+    def emit_shard(shard_idx_and_lines: tuple[int, list[tuple[bool, str]]]) -> tuple[int, int, str]:
+        shard_idx, entries = shard_idx_and_lines
+        needs_bl = any(flag for flag, _ in entries)
+        lines = [text for _, text in entries]
+        shard_lean = stage / f"Wrappers_{shard_idx:02d}.lean"
+        shard_lnir = stage / f"module_{shard_idx:02d}.lnir"
+        header = "import Orb.Kernel\nimport LeanSys.Spec\n"
+        if needs_bl:
+            header += BRANCHLESS_PRELUDE + "\n"
+        shard_lean.write_text(header + "\n".join(lines) + "\n")
+        subprocess.run(
+            [str(lean_native_bin), "emit-lnir", "--wire", str(shard_lean), "-o", str(shard_lnir)],
+            cwd=stage,
+            env=env,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        wire = shard_lnir.read_text().strip()
+        parts = wire.split("|", 3)
+        if len(parts) != 4 or parts[0] != "LNIR_WIRE_V1":
+            raise RuntimeError(f"unexpected LNIR wire header in {shard_lnir.name}")
+        return shard_idx, int(parts[2]), parts[3]
+
+    with ThreadPoolExecutor(max_workers=min(4, len(shards))) as pool:
+        shard_results = sorted(pool.map(emit_shard, enumerate(shards)))
+    seen_decl_names: set[str] = set()
+    deduped_decl_blocks: list[str] = []
+    for _, _, decl_stream in shard_results:
+        for block in re.split(r"(?=\bD_decl\|)", decl_stream):
+            block = block.strip("|")
+            if not block:
+                continue
+            if not block.startswith("D_decl|"):
+                raise RuntimeError(f"unexpected LNIR decl chunk prefix: {block[:40]}")
+            sym_hex = block.split("|", 2)[1]
+            if sym_hex in seen_decl_names:
+                continue
+            seen_decl_names.add(sym_hex)
+            deduped_decl_blocks.append(block)
+    if len(deduped_decl_blocks) < len(public):
+        raise RuntimeError(f"expected >= {len(public)} LNIR decls, got {len(deduped_decl_blocks)}")
+    mod_hex = "Orb.Kernel.LeanNative".encode("utf-8").hex()
+    (stage / "module.lnir").write_text(
+        "|".join(["LNIR_WIRE_V1", mod_hex, str(len(deduped_decl_blocks))] + deduped_decl_blocks) + "\n"
+    )
+
+
 def compile_leannative_from_turbo(out, functions, turbo_root, lean_sys_root, lean_bin_dir):
     out = Path(out).resolve()
     turbo_root = Path(turbo_root).resolve()
@@ -185,33 +258,15 @@ def compile_leannative_from_turbo(out, functions, turbo_root, lean_sys_root, lea
             check=True,
         )
     bits = {"uint8_t": 8, "uint32_t": 32, "uint64_t": 64}
-    wrappers = ["import Orb.Kernel", "import LeanSys.Spec"]
-    for item in public:
-        params = " ".join(f"(a{i} : UInt64)" for i in range(len(item["params"])))
-        args = " ".join(
-            f"a{i}" if param["type"] == "uint64_t" else f"a{i}.toUInt{bits[param['type']]}"
-            for i, param in enumerate(item["params"])
-        )
-        call = f"({exports[item['name']]} {args})"
-        if item["ret"] != "uint64_t":
-            call += ".toUInt64"
-        probe = "probe_" + item["name"]
-        wrappers.append(f"@[export {probe}] def {probe} {params} : UInt64 := {call}")
-    wrappers_lean = stage / "Wrappers.lean"
-    wrappers_lean.write_text("\n".join(wrappers) + "\n")
-    subprocess.run(
-        [lean_bin_dir / "lean", "Wrappers.lean", "-o", "Wrappers.olean"],
-        cwd=stage,
-        env=env,
-        check=True,
+    _emit_lnir_shards(
+        stage,
+        public,
+        exports,
+        bits,
+        turbo_root / "lean/.lake/build/bin/lean-native",
+        env,
     )
     module_lnir = stage / "module.lnir"
-    subprocess.run(
-        [turbo_root / "lean/.lake/build/bin/lean-native", "emit-lnir", "--wire", wrappers_lean, "-o", module_lnir],
-        cwd=stage,
-        env=env,
-        check=True,
-    )
     raw_archive = stage / "libleannative_raw.a"
     raw_header = stage / "libleannative_raw.h"
     clang_bin = lean_bin_dir / "clang" if (lean_bin_dir / "clang").is_file() else (shutil.which("clang") or shutil.which("cc"))
