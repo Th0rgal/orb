@@ -232,7 +232,9 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   // That reserved an empty column beside the conversation.
   const hydrateSaved=(saved:SavedSideQuestion|undefined)=>{
   if(stale)return;
-  const shouldOpen=consumeSideQuestionOpenHint(current)||Boolean(saved?.open);
+  const hinted=consumeSideQuestionOpenHint(current);
+  const savedOpen=Boolean(saved?.open);
+  const shouldOpen=hinted||(side?side.visible()||savedOpen:savedOpen);
   const cleanHistory=(saved?.history??[]).filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()}));
   const warmNow='peekWarmBtwState' in btwMod && typeof btwMod.peekWarmBtwState==='function'?btwMod.peekWarmBtwState(missionId):undefined;
   const initialHistory=warmNow&&(warmNow.clean||warmNow.history.length>cleanHistory.length)?mergeLocalAttachments(warmNow.history,cleanHistory):cleanHistory;
@@ -258,6 +260,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   );
   if(warmAnsweredPending&&agent?.active)clearStaleActive();
   setHistory(initialHistory);setBusy(false);setOpen(shouldOpen);
+  if(hinted||(savedOpen&&side?.standalone))queueMicrotask(()=>{if(!stale&&key()===current)side?.show();});
   const interruptedError='Side question interrupted. Retry to request a complete answer.';
   const rawSavedError=saved?.pending?.error||'';
   const normalizedSavedError=rawSavedError.includes('Check its activity for tool errors')&&btwActivities(missionId).length===0

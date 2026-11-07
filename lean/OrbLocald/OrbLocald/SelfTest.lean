@@ -120,11 +120,13 @@ def main : IO UInt32 := do
   total := total + 1
   if (← assertTrue "paloma_grace_rejects_wrong_header" (!(isPalomaPayloadGraceEligible badHeaderPayload))) then passed := passed + 1
 
-  -- 6. WebView init script exposes __TAURI__, __TAURI_INTERNALS__, captured _fetch, and JSON-escapes token
+  -- 6. WebView init script exposes __ORB_DESKTOP__, __TAURI__, __TAURI_INTERNALS__, SSE /__orb_events, captured _fetch, and JSON-escapes token
   let js := renderWebviewInitScript 19479 (validTok ++ "\"quote")
   total := total + 1
   let hasGlobals :=
+    (js.splitOn "__ORB_DESKTOP__").length > 1 &&
     (js.splitOn "__TAURI_INTERNALS__").length > 1 &&
+    (js.splitOn "/__orb_events").length > 1 &&
     (js.splitOn "Channel").length > 1 &&
     (js.splitOn "const _fetch = window.fetch.bind(window);").length > 1 &&
     (js.splitOn "\\\"quote").length > 1
@@ -195,6 +197,66 @@ def main : IO UInt32 := do
     parseOriginHostPort "https://orbcore.thomas.md:9443/tx" == some (true, "orbcore.thomas.md", 9443, "/tx") &&
     (parseOriginHostPort "https://[:::]").isNone
   if (← assertTrue "parse_origin_host_port_supports_bracketed_ipv6" ipv6Ok) then passed := passed + 1
+
+  -- 12. Optional unconfigured RPCs return `.null` (never `{ok: true}`) and unknown action commands fail cleanly
+  let ctxFileRes ← dispatchRpcCommand stRef "project_context_file" (.obj #[("slug", .str "ethereum"), ("op", .str "list")])
+  let ctxStatusRes ← dispatchRpcCommand stRef "project_context_status" (.obj #[("slug", .str "ethereum")])
+  let unsupportedRes ← dispatchRpcCommand stRef "nonexistent_action_cmd" (.obj #[])
+  total := total + 1
+  let optionalNullOk :=
+    (match ctxFileRes with | .ok .null => true | _ => false) &&
+    (match ctxStatusRes with | .ok .null => true | _ => false) &&
+    unsupportedRes.isOk.not
+  if (← assertTrue "optional_project_context_rpcs_return_null_not_stub_obj" optionalNullOk) then passed := passed + 1
+
+  -- 13. Persisted desktop connection (`0600`), diagnostics JSONL sink, machine identity string, and host metrics schema
+  let tmpUuid ← randomUuidV4
+  let tmpStateDir := s!"/tmp/orb-locald-selftest-{tmpUuid}"
+  let stDiskRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := tmpStateDir, homeDir := tmpStateDir, hostOs := "macos" } : LocaldState)
+  let initLoad ← dispatchRpcCommand stDiskRef "desktop_connection_load" (.obj #[])
+  let _ ← dispatchRpcCommand stDiskRef "desktop_connection_save" (.obj #[("apiUrl", .str "https://orbcore.example:9443"), ("token", .str "tok-secret-123")])
+  let savedLoad ← dispatchRpcCommand stDiskRef "desktop_connection_load" (.obj #[("ignore", .null)])
+  let stReloadRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := tmpStateDir, homeDir := tmpStateDir, hostOs := "macos" } : LocaldState)
+  let diskLoad ← dispatchRpcCommand stReloadRef "desktop_connection_load" (.obj #[])
+  total := total + 1
+  let connOk :=
+    (match initLoad with | .ok .null => true | _ => false) &&
+    (match savedLoad with
+     | .ok jv => jv.fieldStr? "api_url" == some "https://orbcore.example:9443" && jv.fieldStr? "token" == some "tok-secret-123"
+     | _ => false) &&
+    (match diskLoad with
+     | .ok jv => jv.fieldStr? "api_url" == some "https://orbcore.example:9443" && jv.fieldStr? "token" == some "tok-secret-123"
+     | _ => false)
+  if (← assertTrue "desktop_connection_save_and_disk_reload" connOk) then passed := passed + 1
+
+  let _ ← dispatchRpcCommand stDiskRef "diagnostics_append" (.obj #[
+    ("lines", .arr #[.str "{\"ts\":1,\"kind\":\"ok\"}", .str "bad\nmultiline"])
+  ])
+  let logsDir := System.FilePath.mk tmpStateDir / "logs"
+  let logEntries ← if (← logsDir.pathExists) then logsDir.readDir else pure #[]
+  total := total + 1
+  let mut diagOk := false
+  if let #[firstLog] := logEntries then
+    let content ← IO.FS.readFile firstLog.path
+    diagOk := content == "{\"ts\":1,\"kind\":\"ok\"}\n"
+  if (← assertTrue "diagnostics_append_writes_single_line_jsonl" diagOk) then passed := passed + 1
+
+  let idRes1 ← dispatchRpcCommand stDiskRef "local_machine_identity" (.obj #[])
+  let idRes2 ← dispatchRpcCommand stReloadRef "local_machine_identity" (.obj #[])
+  let metricsRes ← dispatchRpcCommand stDiskRef "local_machine_metrics" (.obj #[])
+  total := total + 1
+  let idAndMetricsOk :=
+    (match idRes1, idRes2 with
+     | .ok (.str s1), .ok (.str s2) => !s1.isEmpty && s1 == s2
+     | _, _ => false) &&
+    (match metricsRes with
+     | .ok jv =>
+       (jv.fieldNat? "memory_total").isSome &&
+       (jv.fieldNat? "memory_used").isSome &&
+       (jv.fieldArr? "consumers").isSome
+     | _ => false)
+  if (← assertTrue "local_machine_identity_string_and_metrics_schema" idAndMetricsOk) then passed := passed + 1
+  try IO.FS.removeDirAll tmpStateDir catch _ => pure ()
 
   IO.println s!"orb-locald-test: {passed}/{total} checks passed"
   return if passed == total then 0 else 1

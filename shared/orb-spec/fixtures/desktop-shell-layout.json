@@ -1,0 +1,94 @@
+{
+  "description": "Desktop shell layout, viewport containment, drag region, and optimistic folder expansion invariants shared across Orb desktop projections (orb/src/styles.css, orb/src/App.tsx, orb/src/FilePanel.tsx, orb/src/SideQuestionPanel.tsx).",
+  "constants": {
+    "titlebarHeightPx": 35,
+    "defaultSidebarWidthPx": 236,
+    "trafficLightReservePx": 78,
+    "collapsedTrafficLightReservePx": 70,
+    "launchedToggleRightReservePx": 70
+  },
+  "regions": [
+    {
+      "id": "titlebar",
+      "selector": ".app > .titlebar",
+      "gridRow": "1 / 2",
+      "gridColumn": "1 / -1",
+      "heightPx": 35,
+      "dragRegionAttr": "data-orb-drag-region",
+      "translucent": true
+    },
+    {
+      "id": "sidebarControls",
+      "selector": ".titlebar .tb-left",
+      "owner": "titlebar",
+      "expandedWidthMatchesSidebar": true,
+      "expandedRightBorderMatchesSidebar": true,
+      "buttons": ["Toggle sidebar", "Back", "Forward"]
+    },
+    {
+      "id": "chapterMenu",
+      "selector": "#tb-tools .mission-tools .chapters-btn",
+      "owner": "titlebar",
+      "popoverSelector": ".chapters-list",
+      "popoverOpensBelowTitlebar": true
+    },
+    {
+      "id": "sidebar",
+      "selector": "#orb-sidebar.sidebar",
+      "gridRow": "2 / 3",
+      "gridColumn": "1 / 2",
+      "minHeightZero": true,
+      "overflowHidden": true,
+      "scrollChild": ".sb-scroll",
+      "pinnedFooter": ".sb-foot .gear-btn"
+    },
+    {
+      "id": "main",
+      "selector": ".app > .main",
+      "gridRow": "2 / 3",
+      "gridColumn": "2 / 3",
+      "minHeightZero": true,
+      "crispScrollTop": true,
+      "pinnedComposer": ".dock textarea"
+    }
+  ],
+  "columnStates": [
+    {
+      "name": "conversation-default",
+      "sidebarOpen": true,
+      "pane": "conversation",
+      "sideQuestionOpen": false,
+      "filesOpen": false,
+      "expectedTrackCount": 2
+    },
+    {
+      "name": "conversation-with-side-question",
+      "sidebarOpen": true,
+      "pane": "conversation",
+      "sideQuestionOpen": true,
+      "filesOpen": false,
+      "expectedTrackCount": 3
+    },
+    {
+      "name": "top-level-page-drops-side-column",
+      "sidebarOpen": true,
+      "pane": "page",
+      "sideQuestionOpen": false,
+      "filesOpen": false,
+      "expectedTrackCount": 2
+    },
+    {
+      "name": "conversation-after-closing-side-question",
+      "sidebarOpen": true,
+      "pane": "conversation",
+      "sideQuestionOpen": false,
+      "filesOpen": false,
+      "expectedTrackCount": 2
+    }
+  ],
+  "projectExpansion": {
+    "showsKnownMissionsBeforeFilesResolve": true,
+    "clearsLoadingFilesNoteWhenEmpty": true,
+    "nullContextStatusShowsNoErrorDot": true
+  }
+}

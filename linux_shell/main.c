@@ -117,7 +117,7 @@ static char *build_init_script(unsigned port, const char *token) {
         "    listeners.get(n).add(h); return () => listeners.get(n)?.delete(h);\n"
         "  }\n"
         "  window.__TAURI_INTERNALS__ = { invoke };\n"
-        "  window.__TAURI__ = { core: { invoke, Channel }, event: { listen },\n"
+        "  window.__ORB_DESKTOP__ = window.__TAURI__ = { core: { invoke, Channel }, event: { listen },\n"
         "    window: { getCurrentWindow: () => ({\n"
         "      innerSize: async () => ({ width: window.innerWidth, height: window.innerHeight }),\n"
         "      scaleFactor: async () => window.devicePixelRatio || 1 }) },\n"
@@ -161,7 +161,7 @@ int main(int argc, char **argv) {
     if (!init_js) return 1;
 
     if (argc > 1 && strcmp(argv[1], "--self-test") == 0) {
-        int ok = strstr(init_js, "__orb_poll_events") != NULL &&
+        int ok = strstr(init_js, "__ORB_DESKTOP__") != NULL && strstr(init_js, "__orb_poll_events") != NULL &&
                  strstr(init_js, "const _fetch = window.fetch.bind(window)") != NULL &&
                  is_confined_shell_uri("http://127.0.0.1:5173") && is_confined_shell_uri("http://localhost/") &&
                  !is_confined_shell_uri("http://127.0.0.1:80@evil.com/") && !is_confined_shell_uri("https://evil.example");

@@ -148,8 +148,11 @@ structure LocaldState where
   approvalGraceSecs   : Nat := 300
   approvalGraceUntil  : UInt64 := 0
   approvalKeyPath     : String := ""
+  orbStateDir         : String := ""
+  homeDir             : String := ""
+  machineId           : String := ""
   grantedFolders      : Array String := #[]
-  connectionJson      : JVal := .obj #[("url", .str ""), ("token", .str "")]
+  connectionJson      : JVal := .null
   hostOs              : String := "linux"
   signerBin?          : Option String := none
   deriving Inhabited
@@ -262,6 +265,209 @@ private def allShardPortsValid (rpcPort proxyPort : UInt16) (shardPorts : Array 
   shardPorts.all (fun p => p ≥ 1024 && p != rpcPort && p != proxyPort) &&
   (shardPorts.toList.eraseDups.length == shardPorts.size)
 
+/-- Convert Unix epoch seconds to `YYYY-MM-DD` (UTC Howard Hinnant civil-from-days algorithm). -/
+def formatUtcYmd (epochSecs : UInt64) : String :=
+  let z : Int := Int.ofNat (epochSecs.toNat / 86400) + 719468
+  let era : Int := (if z ≥ 0 then z else z - 146096) / 146097
+  let doe : Nat := (z - era * 146097).toNat
+  let yoe : Nat := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+  let y : Int := Int.ofNat yoe + era * 400
+  let doy : Nat := doe - (365 * yoe + yoe / 4 - yoe / 100)
+  let mp : Nat := (5 * doy + 2) / 153
+  let d : Nat := doy - (153 * mp + 2) / 5 + 1
+  let m : Nat := if mp < 10 then mp + 3 else mp - 9
+  let yr : Int := if m ≤ 2 then y + 1 else y
+  let pad2 (n : Nat) : String := if n < 10 then s!"0{n}" else s!"{n}"
+  s!"{yr}-{pad2 m}-{pad2 d}"
+
+private def resolveOrbStateDir (st : LocaldState) : Option System.FilePath :=
+  let raw := st.orbStateDir.trimAscii.toString
+  if raw.isEmpty then none else some (System.FilePath.mk raw)
+
+private def connectionFilePath? (st : LocaldState) : Option System.FilePath :=
+  (resolveOrbStateDir st).map (· / "connection.json")
+
+private def logsDirPath? (st : LocaldState) : Option System.FilePath :=
+  (resolveOrbStateDir st).map (· / "logs")
+
+private def isSafeHttpUrl (raw : String) : Bool :=
+  let u := raw.trimAscii.toString
+  (u.startsWith "https://" || u.startsWith "http://") &&
+  !(u.toList.any (fun c => c.toNat ≤ 0x20 || c.toNat == 0x7F))
+
+private def isSafeBasename (raw : String) : Bool :=
+  let n := raw.trimAscii.toString
+  !n.isEmpty && n != "." && n != ".." &&
+  !(n.toList.any (fun c => c == '/' || c == '\\' || c.toNat < 0x20 || c.toNat == 0x7F))
+
+private def runDetachedOpen (hostOs : String) (args : Array String) : IO (Except String Unit) := do
+  let prog := if hostOs == "macos" then "/usr/bin/open" else "xdg-open"
+  try
+    let child ← IO.Process.spawn {
+      cmd := prog
+      args := args
+      stdin := .null
+      stdout := .null
+      stderr := .piped
+    }
+    let err ← child.stderr.readToEnd
+    let code ← child.wait
+    if code == 0 then return .ok ()
+    else
+      let detail := err.trimAscii.toString
+      return .error (if detail.isEmpty then s!"{prog} exited {code}" else detail)
+  catch e =>
+    return .error (toString e)
+
+private def readCommandStdout? (cmd : String) (args : Array String) : IO (Option String) := do
+  try
+    let child ← IO.Process.spawn {
+      cmd := cmd
+      args := args
+      stdin := .null
+      stdout := .piped
+      stderr := .null
+    }
+    let out ← child.stdout.readToEnd
+    let code ← child.wait
+    if code == 0 then return some out.trimAscii.toString else return none
+  catch _ =>
+    return none
+
+private def sampleHostMetrics (hostOs : String) : IO JVal := do
+  let nowSec ← OrbBin.PosixExt.nowEpoch
+  let sampledAtMs := nowSec.toNat * 1000
+  let mut memTotal : Nat := 0
+  let mut memUsed : Nat := 0
+  let mut diskTotal : Nat := 0
+  let mut diskUsed : Nat := 0
+  let mut cpuPct? : Option String := none
+  if hostOs == "macos" then
+    if let some hwOut ← readCommandStdout? "/usr/sbin/sysctl" #["-n", "hw.memsize"] then
+      memTotal := hwOut.toNat?.getD 0
+    if let some vmOut ← readCommandStdout? "/usr/bin/vm_stat" #[] then
+      let lines := vmOut.splitOn "\n"
+      let mut pageSize : Nat := 16384
+      if let some first := lines.head? then
+        for tok in first.splitOn " " do
+          if let some ps := tok.toNat? then
+            if ps ≥ 4096 then pageSize := ps
+      let parseVmPages (pfx : String) : Nat := Id.run do
+        for ln in lines do
+          if ln.startsWith pfx then
+            let rhs := ((ln.splitOn ":").drop 1 |> String.intercalate ":").trimAscii.toString
+            let clean := if rhs.endsWith "." then (rhs.dropEnd 1).toString else rhs
+            if let some n := clean.trimAscii.toString.toNat? then return n
+        return 0
+      let active := parseVmPages "Pages active"
+      let wired := parseVmPages "Pages wired down"
+      let comp := parseVmPages "Pages occupied by compressor"
+      let usedCandidate := (active + wired + comp) * pageSize
+      if memTotal > 0 then
+        memUsed := min usedCandidate memTotal
+    if let some psOut ← readCommandStdout? "/bin/ps" #["-A", "-o", "%cpu="] then
+      let mut tenthsSum : Nat := 0
+      for ln in psOut.splitOn "\n" do
+        let t := ln.trimAscii.toString
+        if !t.isEmpty then
+          match t.splitOn "." with
+          | [w] => tenthsSum := tenthsSum + (w.toNat?.getD 0) * 10
+          | [w, f] =>
+            let d1 := ((f.take 1).toString.toNat?).getD 0
+            tenthsSum := tenthsSum + (w.toNat?.getD 0) * 10 + d1
+          | _ => pure ()
+      let ncpu ← do
+        match ← readCommandStdout? "/usr/sbin/sysctl" #["-n", "hw.logicalcpu"] with
+        | some s => pure (max 1 (s.toNat?.getD 1))
+        | none => pure 1
+      let normPct := min 100 ((tenthsSum / ncpu + 5) / 10)
+      cpuPct? := some s!"{normPct}"
+  else
+    try
+      let memInfo ← IO.FS.readFile "/proc/meminfo"
+      let parseKb (k : String) : Nat := Id.run do
+        for ln in memInfo.splitOn "\n" do
+          if ln.startsWith k then
+            for tok in (ln.drop k.length).toString.splitOn " " do
+              if let some n := tok.trimAscii.toString.toNat? then return n * 1024
+        return 0
+      memTotal := parseKb "MemTotal:"
+      let avail := parseKb "MemAvailable:"
+      if memTotal > avail && avail > 0 then memUsed := memTotal - avail
+    catch _ => pure ()
+  if let some dfOut ← readCommandStdout? "/bin/df" #["-k", "/"] then
+    if let some dataLn := (dfOut.splitOn "\n").drop 1 |>.head? then
+      let cols := (dataLn.splitOn " ").filter (fun s => !s.trimAscii.toString.isEmpty)
+      if cols.length ≥ 4 then
+        diskTotal := (cols[1]!.toNat?.getD 0) * 1024
+        diskUsed := (cols[2]!.toNat?.getD 0) * 1024
+  let cpuVal : JVal := match cpuPct? with | some s => .num s | none => .null
+  return .obj #[
+    ("sampled_at", JVal.nat sampledAtMs),
+    ("cpu_percent", cpuVal),
+    ("gpu_percent", .null),
+    ("memory_used", JVal.nat memUsed),
+    ("memory_total", JVal.nat memTotal),
+    ("memory_used_bytes", JVal.nat memUsed),
+    ("memory_total_bytes", JVal.nat memTotal),
+    ("disk_used", JVal.nat diskUsed),
+    ("disk_total", JVal.nat diskTotal),
+    ("consumers", .arr #[])
+  ]
+
+private def appendDiagnosticsLines (st : LocaldState) (lines : Array String) : IO Unit := do
+  let some logsDir := logsDirPath? st | return ()
+  if lines.isEmpty then return ()
+  try
+    IO.FS.createDirAll logsDir
+    let _ ← OrbBin.PosixExt.chmod logsDir.toString 0o700
+    let epoch ← OrbBin.PosixExt.nowEpoch
+    let logFile := logsDir / s!"orb-{formatUtcYmd epoch}.jsonl"
+    let existingSize ← try
+      let m ← logFile.metadata
+      pure m.byteSize.toNat
+    catch _ => pure 0
+    if existingSize ≥ 20 * 1024 * 1024 then return ()
+    let h ← IO.FS.Handle.mk logFile .append
+    for line in lines do
+      if line.utf8ByteSize ≤ 16384 && !(line.contains '\n') && !(line.contains '\r') then
+        h.putStr (line ++ "\n")
+    h.flush
+  catch _ =>
+    pure ()
+
+private def ensureMachineId (stRef : IO.Ref LocaldState) : IO String := do
+  let st ← stRef.get
+  if !st.machineId.isEmpty then return st.machineId
+  match resolveOrbStateDir st with
+  | none =>
+    let host ← OrbBin.PosixExt.getHostname
+    let fallback := if host.trimAscii.toString.isEmpty then "local-desktop" else host.trimAscii.toString
+    stRef.modify fun s => { s with machineId := fallback }
+    return fallback
+  | some dir =>
+    let idFile := dir / "machine-id"
+    let loaded? ← try
+      if (← idFile.pathExists) then
+        let txt := (← IO.FS.readFile idFile).trimAscii.toString
+        pure (if txt.isEmpty then none else some txt)
+      else pure none
+    catch _ => pure none
+    match loaded? with
+    | some mid =>
+      stRef.modify fun s => { s with machineId := mid }
+      return mid
+    | none =>
+      let fresh ← randomUuidV4
+      let _ ← OrbBin.PosixExt.writeAtomicPrivate0600 idFile (fresh ++ "\n").toUTF8
+      stRef.modify fun s => { s with machineId := fresh }
+      return fresh
+
+private def isGrantedUploadPath (st : LocaldState) (rawPath : String) : Bool :=
+  let p := rawPath.trimAscii.toString
+  !p.isEmpty && p.startsWith "/" && !(p.splitOn "/").contains ".." &&
+  st.grantedFolders.any (fun g => p == g || p.startsWith (if g.endsWith "/" then g else g ++ "/"))
+
 /-- Pure/IO dispatcher for all desktop IPC commands plus internal `__orb_poll_events`. -/
 def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal) : IO (Except String JVal) := do
   let st ← stRef.get
@@ -281,16 +487,82 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       (JVal.arr items, { s with queuedChannelEvents := #[] })
     return .ok evs
   | "desktop_connection_load" =>
-    return .ok st.connectionJson
+    match connectionFilePath? st with
+    | none => return .ok st.connectionJson
+    | some path =>
+      if !(← path.pathExists) then
+        return .ok st.connectionJson
+      try
+        let raw ← IO.FS.readFile path
+        match OrbBin.Json.parse raw.trimAscii.toString with
+        | .ok jv =>
+          stRef.modify fun s => { s with connectionJson := jv }
+          return .ok jv
+        | .error _ => return .error "Invalid saved connection"
+      catch _ =>
+        return .error "Cannot read saved connection"
   | "desktop_connection_save" =>
-    stRef.modify fun s => { s with connectionJson := args }
-    return .ok (.bool true)
+    let rawConn := (args.field? "connection").getD args
+    let connVal : JVal :=
+      match rawConn with
+      | .null => .null
+      | _ =>
+        let url := ((rawConn.fieldStr? "api_url").orElse (fun _ => rawConn.fieldStr? "apiUrl")).getD ""
+        let tok := (rawConn.fieldStr? "token").getD ""
+        if url.isEmpty && tok.isEmpty then .null
+        else .obj #[("api_url", .str url), ("token", .str tok)]
+    stRef.modify fun s => { s with connectionJson := connVal }
+    if let some path := connectionFilePath? st then
+      let payload := (renderCompact connVal ++ "\n").toUTF8
+      if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path payload then
+        return .error e
+    return .ok .null
   | "diagnostics_append" =>
+    let lines : Array String := match args.fieldArr? "lines" with
+      | some xs => xs.filterMap (·.asStr?)
+      | none => #[]
+    appendDiagnosticsLines st lines
+    return .ok .null
+  | "reveal_logs" =>
+    match logsDirPath? st with
+    | none => return .error "Log folder unavailable"
+    | some dir =>
+      try IO.FS.createDirAll dir catch _ => pure ()
+      match ← runDetachedOpen st.hostOs #[dir.toString] with
+      | .ok () => return .ok .null
+      | .error e => return .error s!"Could not open the log folder: {e}"
+  | "open_url" =>
+    let url := (args.fieldStr? "url").getD ""
+    if !isSafeHttpUrl url then
+      return .error "Refusing unsafe or non-HTTP URL"
+    match ← runDetachedOpen st.hostOs #[url.trimAscii.toString] with
+    | .ok () => return .ok .null
+    | .error e => return .error s!"Could not open URL: {e}"
+  | "reveal_download" =>
+    let name := (args.fieldStr? "name").getD ""
+    if !isSafeBasename name || st.homeDir.trimAscii.toString.isEmpty then
+      return .error "Could not reveal download"
+    let dlPath := System.FilePath.mk st.homeDir.trimAscii.toString / "Downloads" / name.trimAscii.toString
+    if !(← dlPath.pathExists) then
+      return .error "Download file not found"
+    let openArgs := if st.hostOs == "macos" then #["-R", dlPath.toString] else #[(dlPath.parent.getD (System.FilePath.mk st.homeDir)).toString]
+    match ← runDetachedOpen st.hostOs openArgs with
+    | .ok () => return .ok .null
+    | .error e => return .error s!"Could not reveal download: {e}"
+  | "set_window_theme" =>
     return .ok .null
   | "local_machine_metrics" =>
-    return .ok (.obj #[("cpu_percent", JVal.int 0), ("memory_used_bytes", JVal.int 0), ("memory_total_bytes", JVal.int 0)])
+    let snap ← sampleHostMetrics st.hostOs
+    return .ok snap
   | "paloma_ssh_pubkey" =>
-    return .ok .null
+    if st.homeDir.trimAscii.toString.isEmpty then return .ok .null
+    let pubPath := System.FilePath.mk st.homeDir.trimAscii.toString / ".ssh" / "paloma.pub"
+    if !(← pubPath.pathExists) then return .ok .null
+    try
+      let txt := (← IO.FS.readFile pubPath).trimAscii.toString
+      return .ok (if txt.isEmpty then .null else .str txt)
+    catch _ =>
+      return .ok .null
   | "approval_key_status" =>
     match st.signerBin? with
     | some bin =>
@@ -402,27 +674,183 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     stRef.modify fun s => s.unsubscribe tok
     return .ok .null
   | "grant_upload_folder" =>
-    let p := (args.fieldStr? "path").getD ""
+    let p := ((args.fieldStr? "path").orElse (fun _ => args.fieldStr? "batch")).getD ""
     if !p.isEmpty then
-      stRef.modify fun s => { s with grantedFolders := s.grantedFolders.push p }
+      stRef.modify fun s =>
+        if s.grantedFolders.contains p then s
+        else { s with grantedFolders := s.grantedFolders.push p }
     return .ok .null
   | "revoke_upload_folder" =>
-    let p := (args.fieldStr? "path").getD ""
+    let p := ((args.fieldStr? "path").orElse (fun _ => args.fieldStr? "batch")).getD ""
     stRef.modify fun s => { s with grantedFolders := s.grantedFolders.filter (· != p) }
     return .ok .null
+  | "stat_upload_file" =>
+    let p := (args.fieldStr? "path").getD ""
+    if !isGrantedUploadPath st p then
+      return .error "File was not granted for upload"
+    try
+      let m ← (System.FilePath.mk p).metadata
+      let modMs := m.modified.sec.toNat * 1000
+      return .ok (.obj #[("size", JVal.nat m.byteSize.toNat), ("modified", JVal.nat modMs)])
+    catch e =>
+      return .error s!"Cannot stat upload file: {e}"
+  | "read_upload_file" =>
+    let p := (args.fieldStr? "path").getD ""
+    let maxBytes := (args.fieldNat? "maxBytes").getD (20 * 1024 * 1024)
+    if !isGrantedUploadPath st p then
+      return .error "File was not granted for upload"
+    try
+      let fp := System.FilePath.mk p
+      let m ← fp.metadata
+      if m.byteSize.toNat > maxBytes then
+        return .error s!"File exceeds maximum size ({maxBytes} bytes)"
+      let raw ← IO.FS.readBinFile fp
+      return .ok (.str (OrbBin.PosixExt.base64Encode raw))
+    catch e =>
+      return .error s!"Cannot read upload file: {e}"
+  | "read_upload_file_chunk" =>
+    let p := (args.fieldStr? "path").getD ""
+    let offset := (args.fieldNat? "offset").getD 0
+    let length := min ((args.fieldNat? "length").getD (4 * 1024 * 1024)) (8 * 1024 * 1024)
+    if !isGrantedUploadPath st p then
+      return .error "File was not granted for upload"
+    try
+      let h ← IO.FS.Handle.mk (System.FilePath.mk p) .read
+      h.rewind
+      let mut skipped : Nat := 0
+      while skipped < offset do
+        let step := min (offset - skipped) 1048576
+        let chunk ← h.read step.toUSize
+        if chunk.isEmpty then skipped := offset
+        else skipped := skipped + chunk.size
+      let data ← h.read length.toUSize
+      return .ok (.str (OrbBin.PosixExt.base64Encode data))
+    catch e =>
+      return .error s!"Cannot read upload file chunk: {e}"
+  | "save_file_as" =>
+    let destPath := (args.fieldStr? "destPath").getD ""
+    let b64 := (args.fieldStr? "dataBase64").getD ""
+    if destPath.trimAscii.toString.isEmpty then
+      return .ok .null
+    match OrbBin.PosixExt.base64Decode? b64 with
+    | none => return .error "Invalid base64 file data"
+    | some bytes =>
+      try
+        let fp := System.FilePath.mk destPath.trimAscii.toString
+        if let some parent := fp.parent then
+          IO.FS.createDirAll parent
+        IO.FS.writeBinFile fp bytes
+        return .ok (.str fp.toString)
+      catch e =>
+        return .error s!"Could not save file: {e}"
+  | "pick_working_directory" =>
+    return .ok .null
+  | "pick_upload_files" =>
+    return .ok (.arr #[])
+  | "pick_upload_folder" =>
+    return .ok (.obj #[("batch", .null), ("files", .arr #[])])
   | "voice_capability" =>
     return .ok (.obj #[("available", .bool false), ("backend", .str "none")])
+  | "voice_prewarm" | "voice_cancel" =>
+    return .ok .null
   | "software_inventory" =>
     return .ok (.arr #[])
   | "local_origin_list" | "local_agents_scan" | "local_antigravity_models"
-  | "local_claude_models" | "project_context_workers" | "browse_local_files"
+  | "local_claude_models" | "project_context_workers"
   | "local_skill_source_files" =>
     return .ok (.arr #[])
+  | "browse_local_files" =>
+    let rootRaw := (args.fieldStr? "root").getD ""
+    let reqObj := (args.field? "request").getD (.obj #[])
+    let action := (reqObj.fieldStr? "action").getD "list"
+    let relRaw := (reqObj.fieldStr? "path").getD ""
+    if rootRaw.trimAscii.toString.isEmpty || (relRaw.splitOn "/").contains ".." then
+      return .error "Invalid local browse path"
+    let rootFp := System.FilePath.mk rootRaw.trimAscii.toString
+    let cleanRel := (relRaw.splitOn "/").filter (fun s => !s.isEmpty && s != ".") |> String.intercalate "/"
+    let targetFp := if cleanRel.isEmpty then rootFp else rootFp / cleanRel
+    if action == "reveal" then
+      let openArgs := if st.hostOs == "macos" then #["-R", targetFp.toString] else #[(targetFp.parent.getD rootFp).toString]
+      match ← runDetachedOpen st.hostOs openArgs with
+      | .ok () => return .ok (.obj #[])
+      | .error _ => return .error "Could not reveal this file"
+    else if action == "read" then
+      try
+        let m ← targetFp.metadata
+        if m.byteSize.toNat > 2 * 1024 * 1024 then
+          return .error "File is too large to preview"
+        let content ← IO.FS.readFile targetFp
+        return .ok (.obj #[("content", .str content), ("size", JVal.nat m.byteSize.toNat)])
+      catch _ =>
+        return .error "Could not read local file"
+    else if action == "resolve" then
+      let paths := (reqObj.fieldArr? "paths").getD #[]
+      let mut results : Array JVal := #[]
+      for pVal in paths do
+        if let some refStr := pVal.asStr? then
+          let cleanRef := (refStr.splitOn "/").filter (fun s => !s.isEmpty && s != "." && s != "..") |> String.intercalate "/"
+          let cand := if cleanRef.isEmpty then rootFp else rootFp / cleanRef
+          let existsFile ← try
+            let m ← cand.metadata
+            pure (m.type != .dir)
+          catch _ => pure false
+          let matchesArr : Array JVal :=
+            if existsFile then
+              let fname := cand.fileName.getD cleanRef
+              #[.obj #[("name", .str fname), ("path", .str cleanRef), ("kind", .str "file")]]
+            else #[]
+          results := results.push (.obj #[("reference", .str refStr), ("matches", .arr matchesArr)])
+      return .ok (.obj #[("results", .arr results)])
+    else
+      try
+        let dirEntries ← targetFp.readDir
+        let mut out : Array JVal := #[]
+        for entry in dirEntries do
+          let name := entry.fileName
+          if !name.isEmpty && name != "." && name != ".." then
+            let m? ← try pure (some (← entry.path.metadata)) catch _ => pure none
+            let kind := match m? with | some m => (if m.type == .dir then "dir" else "file") | none => "file"
+            let sz := match m? with | some m => m.byteSize.toNat | none => 0
+            let entryPath := if cleanRel.isEmpty then name else s!"{cleanRel}/{name}"
+            out := out.push (.obj #[("name", .str name), ("path", .str entryPath), ("kind", .str kind), ("size", JVal.nat sz)])
+        return .ok (.obj #[("entries", .arr out)])
+      catch _ =>
+        return .ok (.obj #[("entries", .arr #[])])
   | "local_machine_identity" =>
-    return .ok (.obj #[("hostname", .str "localhost"), ("os", .str st.hostOs)])
+    let mid ← ensureMachineId stRef
+    return .ok (.str mid)
+  | "project_context_file" | "project_context_status" | "project_context_sync"
+  | "project_context_prepare" | "project_skills_prepare"
+  | "project_context_disconnect" | "project_context_stop" =>
+    -- Return `.null` when no local replica exists so callers cleanly use Core's `/api/projects/:slug/files` endpoints.
+    return .ok .null
+  | "local_session_git" =>
+    let cwd := (args.fieldStr? "cwd").getD ""
+    if cwd.trimAscii.toString.isEmpty then return .ok .null
+    match ← readCommandStdout? "git" #["-C", cwd.trimAscii.toString, "rev-parse", "--show-toplevel"] with
+    | none => return .ok .null
+    | some top =>
+      let repoName := (System.FilePath.mk top).fileName.getD top
+      let branch? ← readCommandStdout? "git" #["-C", cwd.trimAscii.toString, "symbolic-ref", "--short", "HEAD"]
+      let branchVal : JVal := match branch? with | some b => (if b.isEmpty then .null else .str b) | none => .null
+      return .ok (.obj #[("repository", .str repoName), ("branch", branchVal)])
+  | "mistral_usage_sign_in" | "local_interaction" | "local_skills_status" =>
+    return .ok .null
+  | "local_wakeups_sync" =>
+    return .ok (.obj #[("pending", .arr #[]), ("changed", .bool false), ("cancelled", .arr #[])])
+  | "local_wakeups_cancel" | "local_wakeups_discard"
+  | "local_origin_confirm" | "local_origin_disconnect"
+  | "local_run_reconcile" | "local_agents_stop" =>
+    return .ok .null
+  | "local_agents_poll" =>
+    return .ok (.obj #[("text", .str ""), ("done", .bool true), ("resumed", .bool false)])
+  | "local_agents_cyber_capabilities" =>
+    return .ok (JVal.nat 0)
+  | "local_codex_speed_options" =>
+    return .ok (.obj #[("tiers", .arr #[])])
   | _ =>
     if supportedDesktopCommands.contains cmd then
-      return .ok (.obj #[("ok", .bool true), ("command", .str cmd)])
+      return .error s!"{cmd} is not supported in this local runtime"
     else
       return .error s!"unknown desktop command: {cmd}"
 
@@ -430,25 +858,27 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
 def jsStringLiteral (s : String) : String :=
   renderCompact (.str s)
 
-/-- WebView initialization JavaScript injecting `window.__TAURI__` and `window.__TAURI_INTERNALS__`
-    with captured `_fetch` / `_jsonStringify` closures (preventing `window.fetch` token theft)
-    and active `Channel` callback registration. -/
+/-- WebView initialization JavaScript injecting `window.__ORB_DESKTOP__` (with `__TAURI__` /
+    `__TAURI_INTERNALS__` aliases) using captured `_fetch` / `_jsonStringify` closures (preventing
+    `window.fetch` token theft) and zero-idle-poll SSE event streaming (`/__orb_events`). -/
 def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :=
   let urlLit := jsStringLiteral s!"http://127.0.0.1:{rpcPort}/__orb_rpc"
+  let sseLit := jsStringLiteral s!"http://127.0.0.1:{rpcPort}/__orb_events"
   let tokLit := jsStringLiteral launchToken
   "(() => {\n" ++
   "  const _fetch = window.fetch.bind(window);\n" ++
   "  const _jsonStringify = JSON.stringify;\n" ++
   s!"  const ORB_LOCALD_URL = {urlLit};\n" ++
+  s!"  const ORB_EVENTS_URL = {sseLit};\n" ++
   s!"  const ORB_TOKEN = {tokLit};\n" ++
   "  const listeners = new Map();\n" ++
   "  const channels = new Map();\n" ++
-  "  let timer = 0;\n" ++
+  "  let streamCtrl = null;\n" ++
   "  class Channel {\n" ++
   "    constructor() { this.onmessage = () => {}; }\n" ++
   "  }\n" ++
   "  async function drain() {\n" ++
-  "    if (!channels.size) { if (timer) { clearInterval(timer); timer = 0; } return; }\n" ++
+  "    if (!channels.size) return;\n" ++
   "    try {\n" ++
   "      const r = await _fetch(ORB_LOCALD_URL, {\n" ++
   "        method: 'POST',\n" ++
@@ -461,6 +891,49 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "      }\n" ++
   "    } catch {}\n" ++
   "  }\n" ++
+  "  function stopStream() {\n" ++
+  "    if (streamCtrl) { streamCtrl.abort(); streamCtrl = null; }\n" ++
+  "  }\n" ++
+  "  function ensureStream() {\n" ++
+  "    if (streamCtrl || !channels.size) return;\n" ++
+  "    const ctrl = new AbortController();\n" ++
+  "    streamCtrl = ctrl;\n" ++
+  "    (async () => {\n" ++
+  "      while (!ctrl.signal.aborted && channels.size) {\n" ++
+  "        try {\n" ++
+  "          const r = await _fetch(ORB_EVENTS_URL, {\n" ++
+  "            headers: { 'Accept': 'text/event-stream', 'X-Orb-Token': ORB_TOKEN },\n" ++
+  "            signal: ctrl.signal\n" ++
+  "          });\n" ++
+  "          if (!r.ok || !r.body) throw new Error('sse');\n" ++
+  "          const reader = r.body.getReader();\n" ++
+  "          const dec = new TextDecoder();\n" ++
+  "          let buf = '';\n" ++
+  "          while (!ctrl.signal.aborted && channels.size) {\n" ++
+  "            const { value, done } = await reader.read();\n" ++
+  "            if (done) break;\n" ++
+  "            buf += dec.decode(value, { stream: true });\n" ++
+  "            let idx;\n" ++
+  "            while ((idx = buf.indexOf('\\n\\n')) >= 0) {\n" ++
+  "              const frame = buf.slice(0, idx);\n" ++
+  "              buf = buf.slice(idx + 2);\n" ++
+  "              for (const ln of frame.split('\\n')) {\n" ++
+  "                if (ln.startsWith('data: ')) {\n" ++
+  "                  const arr = JSON.parse(ln.slice(6));\n" ++
+  "                  if (Array.isArray(arr)) for (const ev of arr) channels.get(ev.token)?.onmessage(ev.payload);\n" ++
+  "                }\n" ++
+  "              }\n" ++
+  "            }\n" ++
+  "          }\n" ++
+  "        } catch {\n" ++
+  "          if (ctrl.signal.aborted || !channels.size) break;\n" ++
+  "          await new Promise(res => setTimeout(res, 1500));\n" ++
+  "          if (!ctrl.signal.aborted && channels.size) await drain();\n" ++
+  "        }\n" ++
+  "      }\n" ++
+  "      if (streamCtrl === ctrl) streamCtrl = null;\n" ++
+  "    })();\n" ++
+  "  }\n" ++
   "  async function invoke(command, args = {}, _options = {}) {\n" ++
   "    const cleanArgs = { ...(args || {}) };\n" ++
   "    let boundChan = null;\n" ++
@@ -470,6 +943,7 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "    }\n" ++
   "    if (command.endsWith('_unsubscribe') && typeof cleanArgs.token === 'number') {\n" ++
   "      channels.delete(cleanArgs.token);\n" ++
+  "      if (!channels.size) stopStream();\n" ++
   "    }\n" ++
   "    const res = await _fetch(ORB_LOCALD_URL, {\n" ++
   "      method: 'POST',\n" ++
@@ -480,8 +954,8 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "    if (!res.ok || body.error) throw new Error(body.error || `RPC ${command} failed`);\n" ++
   "    if (boundChan && typeof body.result === 'number') {\n" ++
   "      channels.set(body.result, boundChan);\n" ++
-  "      if (!timer) timer = setInterval(drain, 250);\n" ++
   "      void drain();\n" ++
+  "      ensureStream();\n" ++
   "    }\n" ++
   "    return body.result;\n" ++
   "  }\n" ++
@@ -490,8 +964,7 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "    listeners.get(name).add(handler);\n" ++
   "    return () => listeners.get(name)?.delete(handler);\n" ++
   "  }\n" ++
-  "  window.__TAURI_INTERNALS__ = { invoke };\n" ++
-  "  window.__TAURI__ = {\n" ++
+  "  const desktop = {\n" ++
   "    core: { invoke, Channel },\n" ++
   "    event: { listen },\n" ++
   "    window: { getCurrentWindow: () => ({\n" ++
@@ -500,6 +973,9 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "    }) },\n" ++
   "    webview: { getCurrentWebview: () => ({ label: 'main' }) }\n" ++
   "  };\n" ++
+  "  window.__ORB_DESKTOP__ = desktop;\n" ++
+  "  window.__TAURI_INTERNALS__ = { invoke };\n" ++
+  "  window.__TAURI__ = desktop;\n" ++
   "})();\n"
 
 /-- Parse an origin URL (`https://host[:port][/pfx]` or bracketed IPv6 `https://[::1][:port][/pfx]`)

@@ -46,7 +46,12 @@ export function ContextBadge(p:{slug:string;compact?:boolean}){
    busy=true;
    await Promise.allSettled([
     contextConflicts(slug,{signal:AbortSignal.timeout(8000)}).then(result=>{if(valid())setConflicts(Object.values(result).map(op=>op.path));}),
-    invoke?.('project_context_status',{request}).then(result=>{if(valid()){ok((result as {state:SyncState}).state);setRetryError('');}}).catch(error=>{if(valid())setRetryError(String(error));}),
+    invoke?.('project_context_status',{request}).then(result=>{
+      if(!valid())return;
+      const next=(result as {state?:SyncState}|null)?.state;
+      if(next)ok(next);else setState(undefined);
+      setRetryError('');
+    }).catch(error=>{if(valid())setRetryError(String(error));}),
    ]);
    busy=false;
   };
@@ -54,8 +59,8 @@ export function ContextBadge(p:{slug:string;compact?:boolean}){
    if(!invoke||retrying())return;
    setRetrying(true);setRetryError('');
    try{
-    const result=await invoke('project_context_sync',{request}) as {state:SyncState};
-    if(valid())ok(result.state);
+    const result=await invoke('project_context_sync',{request}) as {state?:SyncState}|null;
+    if(valid()&&result?.state)ok(result.state);
    }catch(error){if(valid())setRetryError(String(error));}
    finally{if(valid()){setRetrying(false);void refresh();}}
   };

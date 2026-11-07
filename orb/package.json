@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "desktop:dev": "../scripts/orb_desktop_dev.sh",
+    "desktop:bundle": "../scripts/orb_desktop_dev.sh --bundle",
     "build": "tsc --noEmit && vite build",
-    "tauri": "tauri",
     "test": "vitest run",
     "check:bundle": "node scripts/check-bundle.mjs",
     "test:browser": "playwright test"
@@ -22,7 +23,6 @@
   "devDependencies": {
     "@playwright/test": "1.55.0",
     "@solidjs/testing-library": "0.8.10",
-    "@tauri-apps/cli": "^2.9.0",
     "@types/prismjs": "^1.26.6",
     "jsdom": "26.1.0",
     "typescript": "^5.6.0",

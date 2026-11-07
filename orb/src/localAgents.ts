@@ -100,19 +100,21 @@ export function localBinding(id: string): LocalBinding | undefined { return bind
 export async function rememberBinding(id: string, binding: LocalBinding) {
  await restoreLocalBindings();
  if(JSON.stringify(bindings()[id])===JSON.stringify(binding))return;
- const invoke=tauriInvoke();if(!invoke)throw Error('Native storage unavailable.');
+ const invoke=desktopInvoke();if(!invoke)throw Error('Native storage unavailable.');
  applyBindings(await invoke('local_binding_set',{id,binding}) as BindingSnapshot);
 }
 
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
-export function tauriInvoke(): Invoke | null {
+export function desktopInvoke(): Invoke | null {
   return nativeInvoke() ?? null;
 }
 
+export const tauriInvoke = desktopInvoke;
+
 export async function refreshLocalBindings(): Promise<void> {
  await restoreLocalBindings();
- const invoke=tauriInvoke();
+ const invoke=desktopInvoke();
  if(!invoke)throw new Error('Native storage unavailable.');
  try { applyBindings(await invoke('local_bindings_refresh') as BindingSnapshot); }
  catch(error) {
@@ -123,7 +125,7 @@ export async function refreshLocalBindings(): Promise<void> {
 
 export function restoreLocalBindings(): Promise<void> {
  if(bindingsReady)return bindingsReady;
- if(!tauriInvoke())return Promise.resolve();
+ if(!desktopInvoke())return Promise.resolve();
  bindingsReady=new Promise<void>((resolve,reject)=>{
   let initialized=false;
   const stop=followNative<{revision:number;bindings:Record<string,LocalBinding>}>('local_bindings',{},snapshot=>{
@@ -134,7 +136,7 @@ export function restoreLocalBindings(): Promise<void> {
     let legacy:Record<string,LocalBinding>={};
     try{legacy=JSON.parse(localStorage.getItem(BIND_KEY)||'{}');}catch{/* Invalid legacy data is not imported. */}
     if(legacy&&typeof legacy==='object'&&!Array.isArray(legacy))for(const [id,binding] of Object.entries(legacy)){
-     if(!snapshot.bindings[id]&&binding&&['harness','bin','cwd'].every(key=>typeof (binding as unknown as Record<string,unknown>)[key]==='string'))await tauriInvoke()!('local_binding_set',{id,binding,ifAbsent:true});
+     if(!snapshot.bindings[id]&&binding&&['harness','bin','cwd'].every(key=>typeof (binding as unknown as Record<string,unknown>)[key]==='string'))await desktopInvoke()!('local_binding_set',{id,binding,ifAbsent:true});
     }
     localStorage.removeItem(BIND_KEY);resolve();
    })().catch(error=>{bindingsReady=undefined;stop();reject(error);});
@@ -161,7 +163,7 @@ const LOCAL_MODEL_COMMANDS: Record<string, string> = {antigravity: "local_antigr
 function refreshLocalModels() {
   for (const [id, command] of Object.entries(LOCAL_MODEL_COMMANDS)) {
     const path = installed().find(row => row.id === id)?.path;
-    const invoke = tauriInvoke();
+    const invoke = desktopInvoke();
     const key = `${id}:${path}`;
     if (!path || !invoke || localModelRequests.has(key)) continue;
     localModelRequests.add(key);
@@ -181,7 +183,7 @@ export function refreshLocalAgents(force = false): Promise<ScanRow[]> {
   if (!force && key === scannedPaths && Date.now() - scannedAt < 60_000) return Promise.resolve(installed());
   setScanning(true);
   scanPromise = (async () => {
-    const invoke = tauriInvoke();
+    const invoke = desktopInvoke();
     if (!invoke) { setInstalled([]); return []; }
     try {
       const rows = await invoke("local_agents_scan", { request: { overrides: paths } }) as ScanRow[];
@@ -280,7 +282,7 @@ export async function materializeMentions(
   let contextRoot: string | undefined;
   const contextPaths=new Map<string,string>();
   if (contextMentions.length) {
-    const invoke = tauriInvoke();
+    const invoke = desktopInvoke();
     if (!invoke && required) throw new Error("Shared context requires the Orb desktop app on this computer.");
     try {
       if (invoke) {
@@ -376,13 +378,13 @@ export function bindWorkspace(prompt: string, root: string): string {
 
 /** Validate an explicit host folder before copying attachments or claiming a run. */
 export async function localDirectory(path: string): Promise<string> {
-  const invoke = tauriInvoke();
+  const invoke = desktopInvoke();
   if (!invoke) throw new Error("Local folders require Orb desktop.");
   return await invoke("local_agents_directory", {path}) as string;
 }
 
 export async function localWorkspace(slug: string): Promise<string> {
-  const invoke = tauriInvoke();
+  const invoke = desktopInvoke();
   if (!invoke) throw new Error("Local agents run in the Orb desktop app.");
   const path = await invoke("local_agents_workspace", { request: { slug } });
   if (typeof path !== "string" || !path) throw new Error("Could not create the local workspace.");
@@ -390,7 +392,7 @@ export async function localWorkspace(slug: string): Promise<string> {
 }
 
 export async function writeLocalFiles(root: string, files: LocalFile[]): Promise<void> {
-  const invoke = tauriInvoke();
+  const invoke = desktopInvoke();
   if (!invoke) throw new Error("Local agents run in the Orb desktop app.");
   const result = await invoke("local_agents_write", { request: { root, files } }) as {skipped?: string[]; binary_supported?: boolean};
   if (files.some(file => file.encoding === "base64") && !result?.binary_supported) throw new Error("Restart Orb to enable image attachments. Your draft is kept.");
@@ -418,7 +420,7 @@ const pendingLaunches = new Map<string, Promise<unknown>>();
 
 export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
   if (localRunActive(req.id)) throw new Error("This mission is still running locally. Stop it before sending another message.");
-  const invoke = tauriInvoke();
+  const invoke = desktopInvoke();
   if (!invoke) throw new Error("Local agents run in the Orb desktop app.");
   launching.add(req.id);
   const version=(runVersions.get(req.id) ?? 0)+1;
@@ -474,7 +476,7 @@ export interface PollLocal {
 }
 
 export async function pollLocal(id: string): Promise<PollLocal> {
-  const invoke = tauriInvoke();
+  const invoke = desktopInvoke();
   if (!invoke) throw new Error("Local agents run in the Orb desktop app.");
   return (await invoke("local_agents_poll", { id })) as PollLocal;
 }
@@ -534,7 +536,7 @@ async function reconcileRun(id: string): Promise<void> {
 
 export async function stopLocal(id: string, options: { cancelWakeups?: boolean } = {}): Promise<void> {
   runVersions.set(id,(runVersions.get(id) ?? 0)+1);
-  const invoke = tauriInvoke();
+  const invoke = desktopInvoke();
   if (invoke) {
     const connection = { api_url: getApiUrl(), token: getJwt() };
     const sameConnection = () => connection.api_url === getApiUrl() && connection.token === getJwt();
@@ -582,13 +584,13 @@ export function followLocal(id:string,onText:(text:string)=>void):Promise<PollLo
 }
 
 export async function localSessionGit(cwd: string): Promise<{ repository: string; branch?: string | null } | null> {
-  const invoke = tauriInvoke();
+  const invoke = desktopInvoke();
   return invoke ? await invoke("local_session_git", { cwd }) as { repository: string; branch?: string | null } | null : null;
 }
 
 /** Initial runs have a native-generated identity and a durable synchronization journal. */
 export async function startLocalOrigin(request: Omit<StartLocal,"id">, draft: {key:string;title:string;project:string;folder?:string;prompt:string;tags:string[]}): Promise<import("./api").Mission> {
- const invoke=tauriInvoke();if(!invoke)throw new Error("Open Orb desktop to start on this computer.");
+ const invoke=desktopInvoke();if(!invoke)throw new Error("Open Orb desktop to start on this computer.");
  if(request.harness==='codex'){await Promise.all([requireCyberSupport(),requireLocalCyber(invoke)]);}
  await import("./localWakeups").then(m=>m.replayLocalWakeupStops());
  let mission:import("./api").Mission;
@@ -603,7 +605,7 @@ export async function startLocalOrigin(request: Omit<StartLocal,"id">, draft: {k
 
 /** Explicit retry must prove the previous native launch is no longer alive. */
 export async function recoverLocalLaunch(id: string, sharedCwdWith?: string): Promise<void> {
- const invoke=tauriInvoke();
+ const invoke=desktopInvoke();
  if(!invoke)throw new Error("Local agents run in the Orb desktop app.");
  await nativeRecovery(id, sharedCwdWith);
  await reconcileLocalRun(id);
@@ -612,7 +614,7 @@ export async function recoverLocalLaunch(id: string, sharedCwdWith?: string): Pr
 function nativeRecovery(id: string, sharedCwdWith?: string): Promise<unknown> {
  const existing=nativeRecoveries.get(id);
  if(existing)return existing;
- const invoke=tauriInvoke();
+ const invoke=desktopInvoke();
  if(!invoke)return Promise.reject(new Error("Local agents run in the Orb desktop app."));
  const pending=invoke("local_run_reconcile",{id,sharedCwdWith,connection:{api_url:getApiUrl(),token:getJwt()}}).finally(()=>{nativeRecoveries.delete(id);});
  nativeRecoveries.set(id,pending);
@@ -621,7 +623,7 @@ function nativeRecovery(id: string, sharedCwdWith?: string): Promise<unknown> {
 
 /** Sync and expose all project skills before launch; failures keep the draft. */
 export async function prepareProjectSkills(project: string, cwd: string, harness: string, bin?: string): Promise<void> {
-  const invoke = tauriInvoke();
+  const invoke = desktopInvoke();
   if (!invoke) throw new Error("Project skills require the Orb desktop app. Your draft is kept.");
   await invoke("project_skills_prepare", {
     request: { endpoint: getApiUrl(), token: getJwt() ?? "", project, paths: [] }, cwd, harness, bin: bin ?? null,
@@ -680,7 +682,7 @@ export interface SkillSourceRef {
 /** Read selected allowlisted reference files of a legacy skill, for an explicit import. */
 export async function readLegacySkillFiles(sourceId: string, name: string, rels: string[]): Promise<Array<{ rel: string; content: string }>> {
   if (!rels.length) return [];
-  const invoke = tauriInvoke();
+  const invoke = desktopInvoke();
   if (!invoke) throw new Error("Importing legacy skill files requires the Orb desktop app.");
   return (await invoke("local_skill_source_files", { sourceId, name, rels })) as Array<{ rel: string; content: string }>;
 }
@@ -736,13 +738,13 @@ export interface SyncSkillsResult {
 
 /** Inspect local harnesses against the given Library snapshot (canonical source). */
 export async function localSkillsStatus(librarySkills?: SyncSkillPayload[]): Promise<LocalSkillsReport | null> {
-  const invoke = tauriInvoke();
+  const invoke = desktopInvoke();
   if (!invoke) return null;
   return (await invoke("local_skills_status", { request: { library_skills: librarySkills ?? [] } })) as LocalSkillsReport;
 }
 
 export async function localSkillsSync(options: { librarySkills?: SyncSkillPayload[]; pruneRemoved?: boolean; replaceUnmanaged?: string[] } = {}): Promise<SyncSkillsResult> {
-  const invoke = tauriInvoke();
+  const invoke = desktopInvoke();
   if (!invoke) throw new Error("Unified local skill sync requires the Orb desktop app.");
   return (await invoke("local_skills_sync", {
     request: {
@@ -753,14 +755,14 @@ export async function localSkillsSync(options: { librarySkills?: SyncSkillPayloa
   })) as SyncSkillsResult;
 }
 
-async function requireLocalCyber(invoke:NonNullable<ReturnType<typeof tauriInvoke>>){
+async function requireLocalCyber(invoke:NonNullable<ReturnType<typeof desktopInvoke>>){
  try {if(await invoke("local_agents_cyber_capabilities")===2)return;}catch{}
  throw Error("Update Orb desktop before requesting a cyber program on this computer. Your selection was not silently omitted.");
 }
 
 
 export async function localCodexSpeedOptions(model: string): Promise<{tiers: {id: import('./api').CodexServiceTier; available: boolean; reason?: string}[]}> {
- const invoke=tauriInvoke(); if(!invoke)throw new Error('Open Orb desktop to check the local Codex subscription.');
+ const invoke=desktopInvoke(); if(!invoke)throw new Error('Open Orb desktop to check the local Codex subscription.');
  const cli=await localAgentForLaunch('codex'); if(!cli?.path)throw new Error('Codex is not installed on this computer.');
  return await invoke('local_codex_speed_options',{bin:cli.path,model}) as {tiers: {id: import('./api').CodexServiceTier; available: boolean; reason?: string}[]};
 }

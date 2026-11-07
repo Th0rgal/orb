@@ -8,7 +8,7 @@ package «orb-core» where
     ⟨`autoImplicit, false⟩,
     ⟨`warningAsError, true⟩
   ]
-  moreLinkArgs := #["-lssl", "-lcrypto", "-lutil", "-ldl"]
+  moreLinkArgs := if System.Platform.isOSX then #["-lssl", "-lcrypto"] else #["-lssl", "-lcrypto", "-lutil", "-ldl"]
 
 require «orb-spec» from ".."
 require «orb-net-leaf» from "../OrbNetLeaf"
