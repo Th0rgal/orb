@@ -341,15 +341,11 @@ If you copy a macOS binary, the service will fail with `exit code 203/EXEC`.
 Sync source code and build directly on the server:
 
 ```bash
-# Sync source (backend-only; avoids copying dashboard/ which deploys via Vercel)
-rsync -avz --exclude 'target' --exclude '.git' --exclude 'dashboard' \
+# Sync source (backend-only; avoids copying client/docs trees)
+rsync -avz --exclude '.lake' --exclude '.git' --exclude 'orb' --exclude 'docs-site' \
+  --exclude 'ios_dashboard' --exclude 'android_dashboard' \
   -e ssh \
-  /Users/thomas/work/paloma/sandboxed_sh/ agent-core:/opt/sandboxed-sh-dev/
-
-# If you need the dashboard on the server for debugging, remove the dashboard exclude:
-# rsync -avz --exclude 'target' --exclude '.git' --exclude 'dashboard/node_modules' --exclude 'dashboard/.next' \
-#   -e ssh \
-#   /Users/thomas/work/paloma/sandboxed_sh/ agent-core:/opt/sandboxed-sh-dev/
+  /Users/thomas/work/orb/ agent-core:/opt/sandboxed-sh-dev/
 
 # Build on server (debug mode)
 ssh agent-core "cd /opt/sandboxed-sh-dev && source ~/.cargo/env && cargo build"
