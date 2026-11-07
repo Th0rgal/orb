@@ -4,6 +4,9 @@
 import Orb.Lifecycle
 import Orb.LifecycleSpec
 import Orb.LifecycleMutants
+import Orb.HarnessCloud
+import Orb.HarnessCloudSpec
+import Orb.HarnessCloudMutants
 import OrbCore.Spec
 import OrbCore.MutantSuite
 import OrbCore.Store
