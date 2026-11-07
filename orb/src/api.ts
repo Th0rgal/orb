@@ -581,12 +581,26 @@ export interface RemoteNodesResponse {
   managed_compute?: ManagedComputeFleetSummary | null;
 }
 
+export interface CustomModelConfig {
+  id: string;
+  name?: string | null;
+  context_limit?: number | null;
+  output_limit?: number | null;
+  rpm_limit?: number | null;
+  tpm_limit?: number | null;
+  max_concurrency?: number | null;
+}
+
 export interface AIProvider {
   id: string;
   provider_type: string;
   provider_type_name: string;
   name: string;
   label?: string | null;
+  base_url?: string | null;
+  custom_models?: CustomModelConfig[] | null;
+  rpm_limit?: number | null;
+  max_concurrency?: number | null;
   enabled: boolean;
   uses_oauth: boolean;
   has_api_key?: boolean;

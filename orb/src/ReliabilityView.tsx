@@ -20,7 +20,7 @@ export function ReliabilityView(p: { health: ProxyHealth | null }) {
   const totalRate = () => h()?.totals.success_rate ?? null;
   const columns: Column<Row>[] = [
     { header: "Provider · model", width: "minmax(180px, 1fr)", narrowWidth: "minmax(0, 1fr)", cell: r => <span class="st-cell-provider">
-      <ProviderLogo type={r.group.provider ?? ""} />
+      <ProviderLogo type={r.group.provider ?? ""} name={r.account} />
       <span class="st-cell-name">
         <strong title={r.name}>{r.group.model ?? r.name}</strong>
         <span title={r.name}>{[r.group.provider, r.account].filter(Boolean).join(" · ")}</span>

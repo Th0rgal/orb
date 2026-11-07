@@ -15,13 +15,38 @@ final class OrbMermaidRenderer: NSObject, WKNavigationDelegate {
     @MainActor private final class Gate { var resumed = false }
 
     static let shared = OrbMermaidRenderer()
+    nonisolated static let maxInlineDiagramMounts = 8
     private var cache: [String: Result] = [:]
     private var order: [String] = []
     private var web: WKWebView?
     private var ready = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var activeInlineMounts = 0
 
     func cached(_ source: String) -> Result? { cache[source] }
+
+    func acquireInlineMount() -> Bool {
+        let gate = OrbTranscriptGates.admitMount(active: activeInlineMounts, cap: Self.maxInlineDiagramMounts)
+        activeInlineMounts = gate.nextActive
+        return gate.admitted
+    }
+
+    func forceAcquireInlineMount() {
+        activeInlineMounts += 1
+    }
+
+    func releaseInlineMount() {
+        activeInlineMounts = max(0, activeInlineMounts - 1)
+    }
+
+    func trimCache() {
+        cache.removeAll()
+        order.removeAll()
+        if waiters.isEmpty {
+            web = nil
+            ready = false
+        }
+    }
 
     func render(_ source: String) async -> Result {
         if let hit = cache[source] { return hit }
@@ -129,15 +154,48 @@ struct OrbMermaidBlock: View {
     @State private var showCode = false
     @State private var copied = false
     @State private var fullscreen = false
+    @State private var mountAcquired = false
+    @State private var mountDeferred = false
 
     private var source: String { code.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var failure: String? { if case .failure(let message) = result { return message }; return nil }
     private var diagramVisible: Bool { complete && failure == nil && !showCode }
+    private var showingInlineDiagram: Bool { diagramVisible && !mountDeferred }
+
+    private func syncMount(wanted: Bool) {
+        if wanted {
+            guard !mountAcquired, !mountDeferred else { return }
+            if OrbMermaidRenderer.shared.acquireInlineMount() {
+                mountAcquired = true
+            } else {
+                mountDeferred = true
+            }
+        } else {
+            releaseMountIfNeeded()
+            mountDeferred = false
+        }
+    }
+
+    private func forceMount() {
+        showCode = false
+        if !mountAcquired {
+            OrbMermaidRenderer.shared.forceAcquireInlineMount()
+            mountAcquired = true
+        }
+        mountDeferred = false
+    }
+
+    private func releaseMountIfNeeded() {
+        if mountAcquired {
+            OrbMermaidRenderer.shared.releaseInlineMount()
+            mountAcquired = false
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            if diagramVisible {
+            if showingInlineDiagram {
                 if case .svg(let svg, let width, let height) = result {
                     OrbSVGView(svg: svg, interactive: false)
                         .aspectRatio(width / height, contentMode: .fit)
@@ -169,6 +227,28 @@ struct OrbMermaidBlock: View {
                     .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(OrbStyle.error.opacity(0.28)))
                     .padding(.horizontal, 10)
                     .padding(.top, 10)
+                } else if diagramVisible && mountDeferred {
+                    Button { forceMount() } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "rectangle.expand.vertical")
+                                .font(.system(size: 11, weight: .medium))
+                            Text("Show diagram")
+                                .font(.caption.weight(.medium))
+                            Spacer()
+                            Text("Previewing source to save memory")
+                                .font(.caption2)
+                                .foregroundStyle(OrbStyle.textMuted)
+                        }
+                        .foregroundStyle(OrbStyle.textSecondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.white.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 10)
+                    .accessibilityIdentifier("mermaid.showDiagram")
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
                     Text(code)
@@ -182,8 +262,11 @@ struct OrbMermaidBlock: View {
         }
         .background(Color(white: 0.086), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.white.opacity(0.09)))
-        .task(id: complete ? source : "") {
-            guard complete else { return }
+        .onAppear { syncMount(wanted: diagramVisible) }
+        .onDisappear { releaseMountIfNeeded() }
+        .onChange(of: diagramVisible) { _, wanted in syncMount(wanted: wanted) }
+        .task(id: complete && mountAcquired ? source : "") {
+            guard complete, mountAcquired else { return }
             if let hit = OrbMermaidRenderer.shared.cached(source) { result = hit; return }
             try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled else { return }
@@ -199,8 +282,14 @@ struct OrbMermaidBlock: View {
         HStack(spacing: 8) {
             Text("Mermaid").font(.caption.weight(.medium)).foregroundStyle(OrbStyle.textMuted)
             HStack(spacing: 2) {
-                segment("Diagram", selected: diagramVisible, enabled: complete && failure == nil) { showCode = false }
-                segment("Code", selected: !diagramVisible, enabled: true) { showCode = true }
+                segment("Diagram", selected: showingInlineDiagram, enabled: complete && failure == nil) {
+                    if mountDeferred {
+                        forceMount()
+                    } else {
+                        showCode = false
+                    }
+                }
+                segment("Code", selected: !showingInlineDiagram, enabled: true) { showCode = true }
             }
             .padding(2)
             .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -225,8 +314,8 @@ struct OrbMermaidBlock: View {
                     .frame(width: 28, height: 28)
             }
             .buttonStyle(.plain)
-            .disabled(!(diagramVisible && result != nil))
-            .opacity(diagramVisible && result != nil ? 1 : 0.4)
+            .disabled(!(showingInlineDiagram && result != nil))
+            .opacity(showingInlineDiagram && result != nil ? 1 : 0.4)
             .accessibilityLabel("Expand diagram")
         }
         .padding(.leading, 12)
@@ -272,12 +361,14 @@ private struct OrbMermaidFullscreen: View {
 /// Displays a rendered SVG. The page's CSP forbids every script, so diagram
 /// content can only be drawn, never executed. Interactive views pinch-zoom and pan.
 struct OrbSVGView: UIViewRepresentable {
+    @MainActor static let diagramDataStore = WKWebsiteDataStore.nonPersistent()
+
     let svg: String
     let interactive: Bool
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = .nonPersistent()
+        config.websiteDataStore = Self.diagramDataStore
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
         let view = WKWebView(frame: .zero, configuration: config)

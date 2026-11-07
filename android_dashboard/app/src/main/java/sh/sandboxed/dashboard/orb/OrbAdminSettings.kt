@@ -332,6 +332,15 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
         val parts = mutableListOf("${h.int("total_successes") ?: 0}/${h.int("total_requests") ?: 0} ok")
         val rl = h.int("total_rate_limits") ?: 0
         if (rl > 0) parts += "$rl rate limits"
+        val snap = h.dict("rate_limit_snapshot")
+        val keyRpm = OrbJSON.int(snap, "key_rpm_limit")
+        val reqLim = OrbJSON.int(snap, "requests_limit")
+        if (keyRpm != null) {
+            parts += "$keyRpm RPM"
+        } else if (reqLim != null) {
+            val reqRem = OrbJSON.int(snap, "requests_remaining")
+            parts += if (reqRem != null) "$reqRem/$reqLim req" else "$reqLim RPM"
+        }
         h.double("avg_latency_ms")?.let { parts += "${it.roundToInt()} ms" }
         val cd = h.int("cooldown_remaining_secs") ?: 0
         if (cd > 0) parts += "cooldown ${OrbActivityCompaction.formatCooldown(cd)}"

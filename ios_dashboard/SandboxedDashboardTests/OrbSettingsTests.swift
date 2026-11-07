@@ -199,4 +199,40 @@ final class OrbSettingsTests: XCTestCase {
         }
     }
 
+    func testProviderLogosMatchSharedSpec() throws {
+        let spec = try OrbSpec.json("fixtures/provider-logos.json")
+        for c in try XCTUnwrap(spec["cases"] as? [[String: Any]]) {
+            let name = c["name"] as? String ?? "?"
+            let type = try XCTUnwrap(c["type"] as? String)
+            let providerName = c["providerName"] as? String ?? ""
+            let expected = c["expected"] as? String
+            XCTAssertEqual(OrbProviderLogo.brandKey(type: type, name: providerName), expected, name)
+            if let expected {
+                let expectedAsset = "provider-\(expected)"
+                XCTAssertEqual(OrbProviderLogo.assetName(type: type, name: providerName), expectedAsset, name)
+                XCTAssertNotNil(UIImage(named: expectedAsset), "Missing bundled iOS asset \(expectedAsset)")
+            } else {
+                XCTAssertNil(OrbProviderLogo.assetName(type: type, name: providerName), name)
+            }
+        }
+    }
+
+    func testCustomProviderKeyEditabilityAndCapParsing() {
+        let custom = OrbJSON.object([
+            "id": .string("eth-1"),
+            "provider_type": .string("custom"),
+            "name": .string("Ethereum Foundation"),
+            "has_api_key": .bool(true),
+            "uses_oauth": .bool(false),
+            "rpm_limit": .number(300),
+            "max_concurrency": .number(8),
+        ])
+        XCTAssertTrue(OrbProvidersSettings.canEditKey(custom))
+        XCTAssertFalse(OrbProvidersSettings.canConnectOAuth(custom))
+        XCTAssertEqual(OrbProviderKeyEditor.parseOptionalCap("  ", min: 1, max: 100_000), .ok(nil))
+        XCTAssertEqual(OrbProviderKeyEditor.parseOptionalCap("300", min: 1, max: 100_000), .ok(300))
+        XCTAssertEqual(OrbProviderKeyEditor.parseOptionalCap("0", min: 1, max: 100_000), .invalid)
+        XCTAssertEqual(OrbProviderKeyEditor.parseOptionalCap("100001", min: 1, max: 100_000), .invalid)
+    }
+
 }

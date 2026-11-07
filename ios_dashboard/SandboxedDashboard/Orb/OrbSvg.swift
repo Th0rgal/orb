@@ -58,6 +58,8 @@ enum OrbSvg {
 
 /// An SVG drawn in a script-free, network-free, non-navigating web view.
 struct OrbSvgView: UIViewRepresentable {
+    @MainActor static let sharedDataStore = WKWebsiteDataStore.nonPersistent()
+
     let svg: Data
     var interactive = true
 
@@ -66,7 +68,7 @@ struct OrbSvgView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = false
-        config.websiteDataStore = .nonPersistent()
+        config.websiteDataStore = Self.sharedDataStore
         config.dataDetectorTypes = []
         let view = WKWebView(frame: .zero, configuration: config)
         view.navigationDelegate = context.coordinator

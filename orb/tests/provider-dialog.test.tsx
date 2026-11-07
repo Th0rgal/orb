@@ -42,3 +42,58 @@ it("keeps the login modal open during callback submission and exposes a rejected
   fireEvent.click(screen.getByRole("button", {name:"Discard changes"}));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
+
+it("saves custom provider pacing limits without requiring a replacement API key", async () => {
+  setConnection("http://core.test", "test-token");
+  const puts: any[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    const method = init?.method || "GET";
+    if (method === "PUT" && url.includes("/api/ai/providers/eth-foundation")) {
+      const body = JSON.parse(init!.body as string);
+      puts.push(body);
+      return new Response(JSON.stringify({ id: "eth-foundation", ...body }));
+    }
+    const data = url.endsWith("/providers")
+      ? [{
+          id: "eth-foundation",
+          provider_type: "custom",
+          name: "Ethereum Foundation",
+          enabled: true,
+          has_api_key: true,
+          uses_oauth: false,
+          base_url: "https://inference.ethereum.foundation/v1",
+          rpm_limit: 300,
+          status: { type: "connected" },
+        }]
+      : { entries: {} };
+    return new Response(JSON.stringify(data));
+  }));
+  render(() => <Providers />);
+  expect(await screen.findByText("300 RPM")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Actions for Ethereum Foundation", exact: true }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Edit API key", exact: true }));
+  const concInput = await screen.findByLabelText("Max concurrent requests (optional)");
+  fireEvent.input(concInput, { target: { value: "8" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save", exact: true }));
+  await waitFor(() => expect(puts.length).toBe(1));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(puts[0]).toEqual({
+    name: "Ethereum Foundation",
+    base_url: "https://inference.ethereum.foundation/v1",
+    rpm_limit: 300,
+    max_concurrency: 8,
+  });
+
+  // Clearing a previously configured rpm_limit sends explicit null while omitting untouched unset caps.
+  fireEvent.click(await screen.findByRole("button", { name: "Actions for Ethereum Foundation", exact: true }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Edit API key", exact: true }));
+  const rpmInput = await screen.findByLabelText("Requests / min limit (optional)");
+  fireEvent.input(rpmInput, { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save", exact: true }));
+  await waitFor(() => expect(puts.length).toBe(2));
+  expect(puts[1]).toEqual({
+    name: "Ethereum Foundation",
+    base_url: "https://inference.ethereum.foundation/v1",
+    rpm_limit: null,
+  });
+});

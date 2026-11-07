@@ -306,6 +306,41 @@ fabricates an interruption or drops completed turns:
      exceeds the pre-pending local match count and the latest matching turn's
      timestamp is not older than `startedAt - 5 s`.
 
+## 7. Bounded `/btw` rendering, WebView mount budgeting & conversational terminal loads (P0)
+
+Opening the `/btw` sheet on long-running parent campaigns (`9409f9a9`, 25 `/btw`
+missions, 9,992 stored events / 15.5 MB JSON, 251 answered side turns, 28
+` ```mermaid ` diagrams) exposed a mobile Jetsam / main-thread watchdog crash
+when all turns, raw tool events, and inline `WKWebView` diagrams were mounted
+simultaneously:
+
+1. **Bounded `/btw` transcript window (`OrbTranscriptGates.visibleTurnCount`)**:
+   - `OrbSideQuestionSheet` (iOS) and `OrbSideAgentSheet` (Android) window
+     rendered `/btw` history to the latest `20` turns (`INITIAL_VISIBLE_TURNS =
+     20`, stepping by `20` via a `"Load earlier side questions"` pill when
+     `hiddenTurnCount > 0`), preserving scroll anchor on expansion and avoiding
+     layout jumps when new turns arrive while scrolled up.
+   - Merged `/btw` turn IDs pass through `OrbTranscriptGates.ensureUniqueIds`
+     (`lean/Orb/Transcript.lean`) so `ForEach` / `.scrollPosition` never
+     encounters duplicate identities even across replayed or legacy cached rows.
+2. **Inline diagram WebView mount budget (`OrbTranscriptGates.admitMount`) & shared data store**:
+   - Inline Mermaid `WKWebView` mounts (`OrbMermaidBlock` / `OrbMermaidRenderer`)
+     enforce `OrbTranscriptGates.admitMount(active, cap = 8)` (`maxInlineDiagramMounts = 8`),
+     falling back beyond the cap to a lightweight source preview with an explicit
+     **Show diagram** action and releasing mount slots on disappear.
+   - Script-disabled SVG display web views (`OrbSVGView`, `OrbSvgView`) share a
+     single non-persistent `WKWebsiteDataStore` instead of spawning an isolated
+     `WebContent` XPC process per diagram.
+3. **Conversational-only terminal thread fetches & zero raw tool-event retention**:
+   - For terminal (`!live`) `/btw` missions, `OrbBtwStore` (iOS) and
+     `OrbSideAgent` (Android) fetch only conversational message events
+     (`types=user_message,assistant_message,assistant_message_canonical`),
+     memoize only the parsed `turns`, `delivered` IDs, and `maxSequence`
+     (`X-Max-Sequence` / 1-row tail), and evict raw `[StoredEvent]` / `OrbRow`
+     logs from memory immediately (with bounded 4-way concurrency, live/newest
+     first). Live `/btw` missions continue to cache full incremental `since_seq`
+     deltas until they reach a terminal status.
+
 ## Client parity
 
 - **Orb desktop (`orb/`)**: implemented in `orb/src/SideQuestionPanel.tsx`,
@@ -313,14 +348,18 @@ fabricates an interruption or drops completed turns:
   `orb/src/messagePresentation.ts` (including header `New side session` action,
   `shouldRotateBtwSession`, O(1) tail preflight, bounded parent delta reads, and
   incremental live `view=history` caching).
-- **iOS (`ios_dashboard/SandboxedDashboard/Orb/OrbSideQuestion.swift`)**:
+- **iOS (`ios_dashboard/SandboxedDashboard/Orb/OrbSideQuestion.swift`, `OrbMermaid.swift`)**:
   `OrbSideQuestionSheet` shares `OrbFollowUpQueue` (`queue_followup: true`,
   `Edit`, `Send now`, `Remove`), toolbar `New side session`, automatic
-  `OrbBtwThreads.shouldRotateSession` rotation, incremental `sinceSeq` live
+  `OrbBtwThreads.shouldRotateSession` rotation, bounded 20-turn transcript
+  windowing (`btw.loadEarlier`), `admitMount`-budgeted Mermaid `WKWebView`s,
+  4-way conversational-only terminal thread loading, incremental `sinceSeq` live
   polling, queued `user_message` isolation, and OpenCode compaction stripping.
 - **Android (`android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbSideAgent.kt`)**:
-  `OrbSideAgentSheet` renders multi-turn `/btw` threads, shares
-  `OrbFollowUpQueueView` (`queue_followup: true`, `Edit`, `Send now`, `Remove`),
-  header `New` side-session action, automatic `OrbSideAgent.shouldRotateSession`
-  rotation, incremental `since_seq` live polling, queued `user_message`
-  isolation, and OpenCode compaction stripping.
+  `OrbSideAgentSheet` renders multi-turn `/btw` threads with bounded 20-turn
+  windowing (`Load earlier side questions`), 4-way conversational-only terminal
+  thread loading without raw tool-event retention, shares `OrbFollowUpQueueView`
+  (`queue_followup: true`, `Edit`, `Send now`, `Remove`), header `New`
+  side-session action, automatic `OrbSideAgent.shouldRotateSession` rotation,
+  incremental `since_seq` live polling, queued `user_message` isolation, and
+  OpenCode compaction stripping.

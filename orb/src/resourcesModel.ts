@@ -138,7 +138,44 @@ const SOURCE_PALETTE: Record<string, string> = {
   "xai:grok": "#7c65d6",
   "kimi:moonshot": "#0e9aa7",
   "zai:glm": "#5b8c3e",
+  "ethereumfoundation:pool": "#627eea",
+  "ethereum_foundation:pool": "#627eea",
+  "ef:pool": "#627eea",
+  "particle:pool": "#cf6f2e",
+  "particleai:pool": "#cf6f2e",
 };
+
+export function normalizeResourcePoolLabel(id: string, label: string): string {
+  let cleanId = id.trim().toLowerCase();
+  if (cleanId.startsWith("in:inf:")) cleanId = cleanId.slice(7);
+  if (cleanId.endsWith(":pool")) cleanId = cleanId.slice(0, -5);
+  const head = cleanId.split(":")[0] ?? "";
+  const cleanLabel = label.trim().toLowerCase();
+
+  if (
+    head === "ethereumfoundation" ||
+    head === "ethereum_foundation" ||
+    head === "ethereum" ||
+    head === "ef" ||
+    cleanLabel === "ethereumfoundation" ||
+    cleanLabel === "ethereum foundation" ||
+    cleanLabel === "ethereum_foundation"
+  ) {
+    return "EF";
+  }
+
+  if (
+    (head === "particle" ||
+      head === "particleai" ||
+      head === "particle_ai" ||
+      head === "particle.ai") &&
+    (cleanLabel === "particleai" || cleanLabel === "particle_ai")
+  ) {
+    return "Particle";
+  }
+
+  return label;
+}
 
 const MISSION_PALETTE = [
   "#2f83bf",
@@ -152,7 +189,8 @@ const MISSION_PALETTE = [
 ];
 
 export function colorForSource(id: string, index = 0): string {
-  if (SOURCE_PALETTE[id]) return SOURCE_PALETTE[id];
+  const paletteKey = id.startsWith("in:inf:") ? id.slice(7) : id;
+  if (SOURCE_PALETTE[paletteKey]) return SOURCE_PALETTE[paletteKey];
   if (id.startsWith("boat:")) return "#2f83bf";
   if (id.startsWith("hetzner:")) return "#cf5c36";
   if (id.startsWith("vast:") || id.startsWith("vastai:")) return "#7b63cf";
@@ -989,7 +1027,7 @@ export function buildOverviewSankeyInput(
       nodes.push({
         id: pool.id,
         column: 0,
-        label: pool.label,
+        label: normalizeResourcePoolLabel(pool.id, pool.label),
         sub: cleanSub,
         color: colorForSource(pool.id, idx),
         health: pool.health,
@@ -1140,7 +1178,10 @@ export function buildMissionFlowSankeyInput(
       nodes.push({
         id: inp.id,
         column: 0,
-        label: inp.label,
+        label:
+          inp.kind === "inference"
+            ? normalizeResourcePoolLabel(inp.id, inp.label)
+            : inp.label,
         sub: inp.sub,
         color: colorForSource(inp.id, idx),
         fallbackValue: inp.weight,

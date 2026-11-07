@@ -33,6 +33,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -55,6 +56,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.util.UUID
 
 /** Slash commands handled by the client instead of being sent as a turn. */
@@ -92,11 +95,15 @@ object OrbSideAgent {
     const val DEFAULT_MODEL = "builtin/smart"
     const val MAX_SESSION_EVENTS = 400L
     const val MAX_SESSION_TURNS = 8
+    const val INITIAL_VISIBLE_TURNS = 20
+    const val VISIBLE_TURNS_STEP = 20
+    const val MAX_CONCURRENT_THREAD_LOADS = 4
     private const val CONTEXT_LIMIT = 80_000
     private const val SIDE_HISTORY_LIMIT = 4_000
 
     val liveStatuses = setOf("active", "running", "pending", "queued", "starting", "resuming", "waiting_background", "paused")
     val resumableStatuses = setOf("awaiting_user", "completed", "interrupted")
+    val transcriptEventTypes = listOf("user_message", "assistant_message", "assistant_message_canonical")
 
     fun shouldRotateSession(turnCount: Int, maxSequence: Long): Boolean =
         turnCount >= MAX_SESSION_TURNS || maxSequence >= MAX_SESSION_EVENTS
@@ -279,14 +286,19 @@ object OrbSideAgent {
             if (x == y) a.index.compareTo(b.index) else x.compareTo(y)
         }?.value
 
-    fun mergeTurns(perThread: List<List<Turn>>): List<Turn> =
-        perThread.flatten()
+    fun mergeTurns(perThread: List<List<Turn>>): List<Turn> {
+        val ordered = perThread.flatten()
             .withIndex()
             .sortedWith { a, b ->
                 if (a.value.at != b.value.at) a.value.at.compareTo(b.value.at)
                 else a.index.compareTo(b.index)
             }
             .map { it.value }
+        val uniqueIds = OrbTranscriptGates.ensureUniqueIds(ordered.map { it.id })
+        return ordered.zip(uniqueIds) { turn, id ->
+            if (id == turn.id) turn else turn.copy(id = id)
+        }
+    }
 
     /**
      * Disambiguates whether [reconciledTurns] contains Core's answer to [question],
@@ -707,6 +719,7 @@ fun OrbSideAgentSheet(
     var localAskedAtMs by remember(session.parentId) { mutableStateOf<Long?>(null) }
     var pendingBaselineTurns by remember(session.parentId) { mutableStateOf<List<OrbSideAgent.Turn>>(emptyList()) }
     var nowMs by remember(session.parentId) { mutableLongStateOf(System.currentTimeMillis()) }
+    var expandedSteps by remember(session.parentId) { mutableIntStateOf(0) }
 
     suspend fun refreshQueue(targetId: String?) {
         val id = targetId ?: return
@@ -736,6 +749,7 @@ fun OrbSideAgentSheet(
             turns = snap.turns
             openTurn = snap.openTurn
             cachedThreads.putAll(snap.cachedThreads)
+            cachedEventsByThread.clear()
             cachedEventsByThread.putAll(snap.cachedEventsByThread)
             val activeBoundId = snap.boundMission?.id ?: boundId
             if (!activeBoundId.isNullOrEmpty()) {
@@ -833,6 +847,14 @@ fun OrbSideAgentSheet(
         boundMission = target
         boundId = target.id
 
+        data class ThreadSpec(
+            val row: OrbRow,
+            val tid: String,
+            val isLive: Boolean,
+            val stamp: String,
+            val cached: Pair<String, OrbSideAgent.ParsedThread>?,
+            val priorEvents: List<OrbRow>?
+        )
         data class ThreadFetchOutcome(
             val tid: String,
             val isLive: Boolean,
@@ -844,64 +866,119 @@ fun OrbSideAgentSheet(
         )
         val cachedSnapshot = cachedThreads.toMap()
         val cachedEventsSnapshot = cachedEventsByThread.toMap()
-        val outcomes = coroutineScope {
-            matching.map { thread ->
-                val row = if (thread.id == latest.id) target else thread
-                val tid = row.id
-                val tStatus = row.str("status").orEmpty().lowercase()
-                val isLive = tid == target.id && tStatus in OrbSideAgent.liveStatuses
-                val stamp = OrbSideAgent.activityStamp(row)
-                val cached = cachedSnapshot[tid]
-                val priorEvents = cachedEventsSnapshot[tid]
+        val specs = matching.map { thread ->
+            val row = if (thread.id == latest.id) target else thread
+            val tid = row.id
+            val tStatus = row.str("status").orEmpty().lowercase()
+            val isLive = tid == target.id && tStatus in OrbSideAgent.liveStatuses
+            val stamp = OrbSideAgent.activityStamp(row)
+            ThreadSpec(
+                row = row,
+                tid = tid,
+                isLive = isLive,
+                stamp = stamp,
+                cached = cachedSnapshot[tid],
+                priorEvents = if (isLive) cachedEventsSnapshot[tid] else null
+            )
+        }
+        val outcomesById = LinkedHashMap<String, ThreadFetchOutcome>()
+        val uncachedSpecs = mutableListOf<ThreadSpec>()
+        for (spec in specs) {
+            val cached = spec.cached
+            if (!spec.isLive && cached != null && cached.first.isNotEmpty() && cached.first == spec.stamp) {
+                outcomesById[spec.tid] = ThreadFetchOutcome(
+                    tid = spec.tid,
+                    isLive = false,
+                    stamp = spec.stamp,
+                    cachedHit = true,
+                    parsed = cached.second
+                )
+            } else {
+                uncachedSpecs.add(spec)
+            }
+        }
+        val prioritized = uncachedSpecs.sortedWith { a, b ->
+            if (a.isLive != b.isLive) {
+                if (a.isLive) -1 else 1
+            } else {
+                b.stamp.compareTo(a.stamp)
+            }
+        }
+        val fetchedOutcomes = coroutineScope {
+            val gate = Semaphore(OrbSideAgent.MAX_CONCURRENT_THREAD_LOADS)
+            prioritized.map { spec ->
                 async {
-                    if (!isLive && cached != null && cached.first == stamp) {
-                        ThreadFetchOutcome(tid = tid, isLive = isLive, stamp = stamp, cachedHit = true, parsed = cached.second)
-                    } else {
+                    gate.withPermit {
                         try {
-                            val typesFilter = if (isLive) null else "user_message,assistant_message,assistant_message_canonical"
-                            val sinceSeq = priorEvents?.let { OrbSideAgent.maxEventSeq(it) }?.takeIf { it > 0L }
-                            val evs = if (priorEvents != null && sinceSeq != null) {
-                                val delta = OrbSideAgent.loadThreadEventsDelta(core, tid, sinceSeq, types = typesFilter)
-                                OrbSideAgent.mergeThreadEvents(priorEvents, delta)
-                                    ?: OrbSideAgent.loadThreadEvents(core, tid, types = typesFilter)
+                            val typesFilter = if (spec.isLive) null else OrbSideAgent.transcriptEventTypes.joinToString(",")
+                            val sinceSeq = spec.priorEvents?.let { OrbSideAgent.maxEventSeq(it) }?.takeIf { it > 0L }
+                            val evs = if (spec.priorEvents != null && sinceSeq != null) {
+                                val delta = OrbSideAgent.loadThreadEventsDelta(core, spec.tid, sinceSeq, types = typesFilter)
+                                OrbSideAgent.mergeThreadEvents(spec.priorEvents, delta)
+                                    ?: OrbSideAgent.loadThreadEvents(core, spec.tid, types = typesFilter)
                             } else {
-                                OrbSideAgent.loadThreadEvents(core, tid, types = typesFilter)
+                                OrbSideAgent.loadThreadEvents(core, spec.tid, types = typesFilter)
                             }
-                            val historyRows = row.rows("history").ifEmpty {
+                            val tailMaxSeq = if (!spec.isLive && spec.tid == target.id) {
+                                runCatching {
+                                    val tail = core.fetchRows(
+                                        "/api/control/missions/${core.encodeComponent(spec.tid)}/events?limit=1&include_counts=false&max_payload=64",
+                                        "events"
+                                    )
+                                    OrbSideAgent.maxEventSeq(tail)
+                                }.getOrDefault(0L)
+                            } else 0L
+                            val historyRows = spec.row.rows("history").ifEmpty {
                                 if (evs.none { (it.str("event_type", "type", "kind") ?: "").equals("user_message", ignoreCase = true) }) {
                                     runCatching {
-                                        OrbRow(tid, core.fetchDict("/api/control/missions/${core.encodeComponent(tid)}")).rows("history")
+                                        OrbRow(spec.tid, core.fetchDict("/api/control/missions/${core.encodeComponent(spec.tid)}")).rows("history")
                                     }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
                                 } else emptyList()
                             }
-                            val next = OrbSideAgent.parseTurns(
-                                missionId = tid,
+                            val parsed = OrbSideAgent.parseTurns(
+                                missionId = spec.tid,
                                 events = evs,
-                                active = isLive,
+                                active = spec.isLive,
                                 history = historyRows,
-                                previous = cached?.second
+                                previous = spec.cached?.second
                             )
-                            ThreadFetchOutcome(tid = tid, isLive = isLive, stamp = stamp, cachedHit = false, events = evs, parsed = next)
+                            val next = if (tailMaxSeq > parsed.maxSequence) parsed.copy(maxSequence = tailMaxSeq) else parsed
+                            ThreadFetchOutcome(
+                                tid = spec.tid,
+                                isLive = spec.isLive,
+                                stamp = spec.stamp,
+                                cachedHit = false,
+                                events = if (spec.isLive) evs else null,
+                                parsed = next
+                            )
                         } catch (e: CancellationException) {
                             throw e
                         } catch (_: Throwable) {
                             // Preserve already-rendered thread turns and open progress on transient errors.
-                            val fallback = cached?.second?.let { prev -> if (isLive) prev else prev.copy(open = null) }
-                            ThreadFetchOutcome(tid = tid, isLive = isLive, stamp = stamp, cachedHit = false, parsed = fallback, failed = true)
+                            val fallback = spec.cached?.second?.let { prev -> if (spec.isLive) prev else prev.copy(open = null) }
+                            ThreadFetchOutcome(tid = spec.tid, isLive = spec.isLive, stamp = spec.stamp, cachedHit = false, parsed = fallback, failed = true)
                         }
                     }
                 }
             }.awaitAll()
         }
+        for (outcome in fetchedOutcomes) {
+            outcomesById[outcome.tid] = outcome
+        }
         val perThread = mutableListOf<List<OrbSideAgent.Turn>>()
         var latestOpen: OrbSideAgent.OpenTurn? = null
         var latestDelivered = emptyList<OrbDeliveredMessage>()
-        for (outcome in outcomes) {
+        for (spec in specs) {
+            val outcome = outcomesById[spec.tid] ?: continue
             val tid = outcome.tid
             val isLive = outcome.isLive
             if (outcome.failed) hadReadFailure = true
-            if (!outcome.cachedHit && outcome.events != null && outcome.parsed != null) {
+            if (isLive && outcome.events != null) {
                 cachedEventsByThread[tid] = outcome.events
+            } else if (!isLive) {
+                cachedEventsByThread.remove(tid)
+            }
+            if (!outcome.cachedHit && !outcome.failed && outcome.parsed != null) {
                 cachedThreads[tid] = outcome.stamp to outcome.parsed
             }
             val parsed = outcome.parsed
@@ -1314,7 +1391,38 @@ fun OrbSideAgentSheet(
                         fontSize = 13.sp
                     )
                 } else {
-                    for (turn in turns) {
+                    val visibleTurnLimit = OrbTranscriptGates.visibleTurnCount(
+                        total = turns.size,
+                        baseLimit = OrbSideAgent.INITIAL_VISIBLE_TURNS,
+                        expandedSteps = expandedSteps,
+                        stepSize = OrbSideAgent.VISIBLE_TURNS_STEP
+                    )
+                    val hiddenTurnCount = OrbTranscriptGates.hiddenTurnCount(
+                        total = turns.size,
+                        baseLimit = OrbSideAgent.INITIAL_VISIBLE_TURNS,
+                        expandedSteps = expandedSteps,
+                        stepSize = OrbSideAgent.VISIBLE_TURNS_STEP
+                    )
+                    if (hiddenTurnCount > 0) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.03f))
+                                .border(1.dp, OrbStyle.border, CircleShape)
+                                .orbPressClickable { expandedSteps += 1 }
+                                .padding(vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "Load earlier side questions",
+                                color = OrbStyle.textSecondary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                    for (turn in turns.takeLast(visibleTurnLimit)) {
                         OrbBtwQuestionBubble(turn.question)
                         OrbBtwNarrationFold(turn.narration)
                         OrbRichText(markdown = turn.answer, tone = OrbRichTextTone.Primary)

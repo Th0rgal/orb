@@ -17,6 +17,12 @@ class OrbResourcesTest {
             val expected = OrbJSON.str(row, "expected")!!
             assertEquals(expected, OrbResourcesModel.formatResourceRate(value, lens, metric, withUnit))
         }
+        for (row in OrbJSON.dictList(spec["pool_labels"])) {
+            val id = OrbJSON.str(row, "id")!!
+            val label = OrbJSON.str(row, "label")!!
+            val expected = OrbJSON.str(row, "expected")!!
+            assertEquals(expected, OrbResourcesModel.normalizePoolLabel(id, label))
+        }
     }
 
     @Test

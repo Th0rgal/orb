@@ -131,6 +131,91 @@ private def runLifecycleCompositionTests : IO UInt32 := do
     return 1
   return 0
 
+private def runCustomProviderRateLimitTests
+    (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
+  -- Custom provider rate-limit CRUD, out-of-range rejection, `/resolve` projection & proactive proxy pacing spillover
+  if verifyProviderPacingAdmission 300 0 60 2 42 1 10 1 != 1 ||
+     verifyProviderPacingAdmission 300 0 0 2 2 2 2 2 != 0 then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: verifyProviderPacingAdmission spec gate mismatch"
+    return 1
+
+  let createProvBody := "{\"id\":\"eth-1\",\"provider_type\":\"custom\",\"name\":\"Ethereum Foundation\",\"base_url\":\"https://inference.ethereum.foundation/v1\",\"api_key\":\"sk-secret-do-not-leak\",\"rpm_limit\":300,\"custom_models\":[{\"id\":\"glm-5.3\",\"max_concurrency\":2},{\"id\":\"qwen3.8-27b\",\"rpm_limit\":60,\"tpm_limit\":200000}]}"
+  let createProvRaw := s!"POST /api/ai/providers HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {createProvBody.utf8ByteSize}\r\n\r\n{createProvBody}".toUTF8
+  let .ok createProvReq := parseRequest createProvRaw none | do closeCoreStore store; return 1
+  let .ok createProvResp ← dispatchCoreRequest appSt createProvReq nowSec | do closeCoreStore store; return 1
+  let createProvStr := String.fromUTF8! createProvResp.body
+  if createProvResp.status != 201 ||
+     (createProvStr.splitOn "sk-secret-do-not-leak").length != 1 ||
+     (createProvStr.splitOn "\"rpm_limit\":300").length != 2 ||
+     (createProvStr.splitOn "\"max_concurrency\":2").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: POST /api/ai/providers mismatch ({createProvResp.status}): {createProvStr}"
+    return 1
+
+  let badProvBody := "{\"rpm_limit\":0}"
+  let badProvRaw := s!"PUT /api/ai/providers/eth-1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {badProvBody.utf8ByteSize}\r\n\r\n{badProvBody}".toUTF8
+  let .ok badProvReq := parseRequest badProvRaw none | do closeCoreStore store; return 1
+  let .ok badProvResp ← dispatchCoreRequest appSt badProvReq nowSec | do closeCoreStore store; return 1
+  if badProvResp.status != 400 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: out-of-range PUT /api/ai/providers/eth-1 returned {badProvResp.status}"
+    return 1
+
+  let chainCreateBody := "{\"id\":\"obliterated\",\"name\":\"obliterated\",\"entries\":[{\"provider_id\":\"custom:eth-1\",\"model_id\":\"glm-5.3\"},{\"provider_id\":\"custom:eth-1\",\"model_id\":\"qwen3.8-27b\"}]}"
+  let chainCreateRaw := s!"POST /api/model-routing/chains HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {chainCreateBody.utf8ByteSize}\r\n\r\n{chainCreateBody}".toUTF8
+  let .ok chainCreateReq := parseRequest chainCreateRaw none | do closeCoreStore store; return 1
+  let .ok chainCreateResp ← dispatchCoreRequest appSt chainCreateReq nowSec | do closeCoreStore store; return 1
+  if chainCreateResp.status != 201 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: POST /api/model-routing/chains returned {chainCreateResp.status}"
+    return 1
+
+  let resolveRaw := s!"GET /api/model-routing/chains/obliterated/resolve HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
+  let .ok resolveReq := parseRequest resolveRaw none | do closeCoreStore store; return 1
+  let .ok resolveResp ← dispatchCoreRequest appSt resolveReq nowSec | do closeCoreStore store; return 1
+  let resolveStr := String.fromUTF8! resolveResp.body
+  if resolveResp.status != 200 ||
+     (resolveStr.splitOn "\"rpm_limit\":300").length != 3 ||
+     (resolveStr.splitOn "\"model_max_concurrency\":2").length != 2 ||
+     (resolveStr.splitOn "\"model_rpm_limit\":60").length != 2 ||
+     (resolveStr.splitOn "\"model_tpm_limit\":200000").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: GET /api/model-routing/chains/obliterated/resolve mismatch: {resolveStr}"
+    return 1
+
+  -- Proactive proxy spillover on saturated `modelRpmLimit := some 1` + upstream `x-litellm-key-rpm-limit` header learning
+  let pacedTracker ← newProxyPacingTracker
+  let pacedChain : RoutingChain := {
+    id := "paced", name := "paced",
+    targets := #[
+      {
+        accountId := "eth-learn", provider := "custom:eth-learn",
+        baseUrl := "https://inference.ethereum.foundation/v1", apiKey := "k1",
+        modelId := "qwen3.8-27b", modelRpmLimit? := some 1
+      },
+      {
+        accountId := "eth-backup", provider := "custom:eth-backup",
+        baseUrl := "https://inference.ethereum.foundation/v1", apiKey := "k2",
+        modelId := "deepseek-v4.1-flash"
+      }
+    ]
+  }
+  let pacedMock := some fun (tgt : ProviderTarget) => do
+    return .ok {
+      status := 200,
+      headers := #[("Content-Type", "application/json"), ("x-litellm-key-rpm-limit", "300")],
+      body := s!"\{\"model\":\"{tgt.modelId}\"}".toUTF8
+    }
+  let pOut1 ← forwardProxyChain pacedChain "POST" "/v1/chat/completions" #[] "{\"model\":\"paced\"}".toUTF8 pacedMock false (some pacedTracker)
+  let pOut2 ← forwardProxyChain pacedChain "POST" "/v1/chat/completions" #[] "{\"model\":\"paced\"}".toUTF8 pacedMock false (some pacedTracker)
+  let learnedRpm? ← lookupObservedKeyRpm? pacedTracker "eth-learn"
+  if pOut1.selectedAccount != "eth-learn" || pOut2.selectedAccount != "eth-backup" || learnedRpm? != some 300 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: proactive pacing spillover or header learning mismatch ({pOut1.selectedAccount}, {pOut2.selectedAccount}, {repr learnedRpm?})"
+    return 1
+  return 0
+
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
   let prodNoSecrets : CoreConfig := { devMode := false, host := "127.0.0.1" }
@@ -261,9 +346,11 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let managedRef ← IO.mkRef ({ enabled := true, boatEnabled := true } : ManagedFleetState)
   let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
   let seqRef ← IO.mkRef (1 : UInt64)
+  let pacingTracker ← newProxyPacingTracker
   let appSt : CoreAppState := {
     cfg := prodValid, store := store, searchIdx? := some sIdx1,
-    managedRef := managedRef, chainsRef := chainsRef, seqRef := seqRef
+    managedRef := managedRef, chainsRef := chainsRef, seqRef := seqRef,
+    pacingTracker? := some pacingTracker
   }
   let nowSec : UInt64 := 1700001000
   let .ok healthReq := parseRequest "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".toUTF8 none | do closeCoreStore store; return 1
@@ -673,6 +760,8 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln s!"[orb-core-test] FAIL: SM-12 committed_oversize sentinel invariant violated: {over2.bodyJson}"
     return 1
 
+  if (← runCustomProviderRateLimitTests store appSt validJwt nowSec) != 0 then return 1
+
   closeCoreStore store
   -- Re-opening `openCoreStore tmpRoot` MUST auto-increment persistent `bootEpoch` (`1 -> 2`) and recover stale boot-1 leases!
   let .ok storeBoot2 ← openCoreStore tmpRoot
@@ -693,7 +782,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln "[orb-core-test] FAIL: OrbCore.HostTests failed"
     return 1
 
-  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":5,\"harness_contracts\":9,\"host_tests\":83}"
+  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":6,\"harness_contracts\":9,\"host_tests\":83}"
   return 0
 
 end OrbCore.SelfTest

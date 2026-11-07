@@ -1,6 +1,9 @@
 package sh.sandboxed.dashboard.orb
 
+import androidx.compose.ui.graphics.vector.PathParser
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OrbQuotaExhaustedTest {
@@ -60,6 +63,29 @@ class OrbQuotaExhaustedTest {
                 assertEquals(name, expected["usableNow"] as Boolean, got.usableNow)
                 assertEquals(name, expected["badge"] as String, got.badge)
                 assertEquals(name, expected["detail"] as String, got.detail)
+            }
+        }
+    }
+
+    @Test
+    fun providerLogosMatchSharedFixture() {
+        val cases = OrbJSON.dictList(OrbSpec.dict("fixtures/provider-logos.json")["cases"])
+        check(cases.isNotEmpty())
+        for (c in cases) {
+            val name = c["name"] as String
+            val type = c["type"] as String
+            val providerName = (c["providerName"] as? String) ?: ""
+            val expected = c["expected"] as? String
+            val got = resolveProviderBrandKey(type, providerName)
+            assertEquals(name, expected, got)
+            if (expected != null) {
+                val paths = providerVectorPaths[expected]
+                assertNotNull("Missing vector path for $expected ($name)", paths)
+                assertTrue("Empty vector path list for $expected", paths!!.isNotEmpty())
+                for (pathStr in paths) {
+                    val nodes = PathParser().parsePathString(pathStr).toNodes()
+                    assertTrue("Parsed zero path nodes for $expected", nodes.isNotEmpty())
+                }
             }
         }
     }

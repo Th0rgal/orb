@@ -177,6 +177,15 @@ struct OrbRoutingSettings: View {
     private func healthLine(_ h: OrbJSON) -> String {
         var parts = ["\(h["total_successes"].display)/\(h["total_requests"].display) ok"]
         if let rl = h["total_rate_limits"].number, rl > 0 { parts.append("\(Int(rl)) rate limits") }
+        if let keyRpm = h["rate_limit_snapshot"]["key_rpm_limit"].number {
+            parts.append("\(Int(keyRpm)) RPM")
+        } else if let reqLim = h["rate_limit_snapshot"]["requests_limit"].number {
+            if let rem = h["rate_limit_snapshot"]["requests_remaining"].number {
+                parts.append("\(Int(rem))/\(Int(reqLim)) req")
+            } else {
+                parts.append("\(Int(reqLim)) RPM")
+            }
+        }
         if let latency = h["avg_latency_ms"].number { parts.append("\(Int(latency)) ms") }
         if let cooldown = h["cooldown_remaining_secs"].number, cooldown > 0 {
             parts.append("cooldown \(OrbActivityCompaction.formatCooldown(Int(cooldown)))")
