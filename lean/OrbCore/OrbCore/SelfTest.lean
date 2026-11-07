@@ -517,6 +517,7 @@ private def runCloudHandoffTests
     return 1
   return 0
 
+set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
   let prodNoSecrets : CoreConfig := { devMode := false, host := "127.0.0.1" }
@@ -643,9 +644,51 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln "[orb-core-test] FAIL: forwardProxyChain failover or header sanitization mismatch"
     return 1
 
+  -- 5b. Cooldown planning, retry-after cap, usage-limit parity
+  let nowSec0 : UInt64 := 1700001000
+  let cooling : Array AccountCooldown := #[
+    { accountId := "acct-1", untilEpoch := nowSec0 + 7200, reason := .rateLimit, label := "" }
+  ]
+  let plan := planChain chain cooling nowSec0
+  if plan.eligible.size != 1 || plan.eligible[0]!.accountId != "acct-2" ||
+     (plan.retryAfterSecs? nowSec0).getD 0 != 3600 then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: cooldown chain plan or retry-after cap mismatch"
+    return 1
+  let coolReply := cooldownReply "c1" 7200
+  if coolReply.status != 429 ||
+     !coolReply.headers.any (fun (k, v) => k.toLower == "retry-after" && v == "3600") then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: cooldown reply retry-after cap mismatch"
+    return 1
+  let usageLimit : AccountCooldown := {
+    accountId := "acct-1", untilEpoch := nowSec0 + 2700, reason := .usageLimit, label := "GLM usage limit"
+  }
+  let usageReply := usageLimitReply "c1" usageLimit nowSec0
+  if usageReply.status != 429 ||
+     !usageReply.headers.any (fun (k, v) => k.toLower == "retry-after" && v == "2700") ||
+     !containsSubstring usageReply.body "\"code\":\"usage_limit_reached\"" ||
+     !containsSubstring usageReply.body "\"resets_in_seconds\":2700" then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: usage-limit reply parity mismatch"
+    return 1
+  let limitOut : ProxyOutcome := {
+    status := 429, headers := #[("retry-after", "1800")], body := "usage limit reached".toUTF8,
+    selectedAccount := "acct-1", attemptsUsed := 1
+  }
+  let limitOk :=
+    match cooldownForOutcome limitOut nowSec0 with
+    | some c => c.reason == .usageLimit && c.untilEpoch == nowSec0 + 1800
+    | none => false
+  if !limitOk then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: cooldown classification from upstream mismatch"
+    return 1
+
   -- 6. HTTP/WS Dispatch checks (`/api/health`, `SANDBOXED_USERS` login, `/v1/*` auth, privilege lease verification, WS subprotocol echo)
   let managedRef ← IO.mkRef ({ enabled := true, boatEnabled := true } : ManagedFleetState)
   let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
+  let proxyCooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
   let seqRef ← IO.mkRef (1 : UInt64)
   let pacingTracker ← newProxyPacingTracker
   let memTokenCache ← newMemoryTokenCache
@@ -653,7 +696,8 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let bunkerRef ← IO.mkRef (0 : UInt8)
   let appSt : CoreAppState := {
     cfg := prodValid, store := store, searchIdx? := some sIdx1,
-    managedRef := managedRef, chainsRef := chainsRef, seqRef := seqRef,
+    managedRef := managedRef, chainsRef := chainsRef,
+    proxyCooldownsRef := proxyCooldownsRef, seqRef := seqRef,
     pacingTracker? := some pacingTracker,
     memTokenCache? := some memTokenCache,
     cloudWakeup? := some cloudWakeup,

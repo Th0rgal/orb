@@ -178,6 +178,156 @@ structure ProxyOutcome where
   exhaustionClass  : String := ""
   deriving Inhabited
 
+/-- Why a routing-chain target is temporarily unavailable. -/
+inductive CooldownReason where
+  | rateLimit
+  | usageLimit
+  | authFailure
+  | overloaded
+  | serverError
+  deriving Repr, DecidableEq, Inhabited
+
+/-- A per-account cooldown recorded after an upstream failure. -/
+structure AccountCooldown where
+  accountId  : String
+  untilEpoch : UInt64
+  reason     : CooldownReason
+  label      : String := ""
+  deriving Repr, DecidableEq, Inhabited
+
+/-- Cooldown-derived HTTP response (kept independent of `OrbCore.Control`). -/
+structure ProxyHttpReply where
+  status  : Nat
+  headers : Array (String × String)
+  body    : String
+  deriving Repr, Inhabited
+
+/-- Upper bound for an announced retry delay. Long enough to reflect a real
+    quota cooldown instead of making clients re-poll every minute, but short
+    enough that a weekly limit still gets re-checked periodically. -/
+def maxCooldownRetryAfterSecs : UInt64 := 3600
+
+def clampCooldownRetryAfter (secs : UInt64) : UInt64 :=
+  let s := if secs == 0 then 1 else secs
+  if s > maxCooldownRetryAfterSecs then maxCooldownRetryAfterSecs else s
+
+def AccountCooldown.remainingSecs (c : AccountCooldown) (now : UInt64) : UInt64 :=
+  if c.untilEpoch > now then c.untilEpoch - now else 0
+
+def activeCooldowns (cooldowns : Array AccountCooldown) (now : UInt64) : Array AccountCooldown :=
+  cooldowns.filter (fun c => c.untilEpoch > now)
+
+def coolingFor (targets : Array ProviderTarget) (cooldowns : Array AccountCooldown) : Array AccountCooldown :=
+  cooldowns.filter (fun c => targets.any (fun t => t.accountId == c.accountId))
+
+def eligibleTargets (targets : Array ProviderTarget) (cooldowns : Array AccountCooldown) : Array ProviderTarget :=
+  targets.filter (fun t => !cooldowns.any (fun c => c.accountId == t.accountId))
+
+def soonestCooldown? (cooldowns : Array AccountCooldown) : Option AccountCooldown :=
+  cooldowns.foldl
+    (fun (best : Option AccountCooldown) (c : AccountCooldown) =>
+      match best with
+      | none => some c
+      | some b => if c.untilEpoch < b.untilEpoch then some c else best)
+    none
+
+structure ChainPlan where
+  eligible : Array ProviderTarget
+  cooling  : Array AccountCooldown
+  deriving Repr, Inhabited
+
+/-- Split a chain into still-usable targets and cooling accounts. -/
+def planChain (chain : RoutingChain) (cooldowns : Array AccountCooldown) (now : UInt64) : ChainPlan :=
+  let active := activeCooldowns cooldowns now
+  let cooling := coolingFor chain.targets active
+  { eligible := eligibleTargets chain.targets cooling, cooling := cooling }
+
+def ChainPlan.retryAfterSecs? (plan : ChainPlan) (now : UInt64) : Option UInt64 :=
+  (soonestCooldown? plan.cooling).map (fun c => clampCooldownRetryAfter (c.remainingSecs now))
+
+def ChainPlan.allUsageLimited (plan : ChainPlan) : Bool :=
+  !plan.cooling.isEmpty &&
+  plan.cooling.foldl (fun acc c => acc && c.reason == .usageLimit) true
+
+def containsSubstring (haystack needle : String) : Bool :=
+  (haystack.splitOn needle).length > 1
+
+def quotaHint (body : String) : Bool :=
+  let low := body.toLower
+  containsSubstring low "usage limit" || containsSubstring low "usage_limit" ||
+  containsSubstring low "quota" || containsSubstring low "insufficient_quota" ||
+  containsSubstring low "billing" || containsSubstring low "exhausted"
+
+def authHint (body : String) : Bool :=
+  let low := body.toLower
+  containsSubstring low "invalid api key" || containsSubstring low "invalid_api_key" ||
+  containsSubstring low "unauthorized" || containsSubstring low "authentication"
+
+def lookupHeader? (headers : Array (String × String)) (name : String) : Option String :=
+  let target := name.toLower
+  headers.foldl
+    (fun (acc : Option String) (kv : String × String) =>
+      match acc with
+      | some _ => acc
+      | none =>
+        if kv.1.trimAscii.toString.toLower == target then some kv.2.trimAscii.toString else none)
+    none
+
+def retryAfterSecs? (headers : Array (String × String)) : Option UInt64 :=
+  match lookupHeader? headers "retry-after" with
+  | some v => (v.toNat?).map (fun n => n.toUInt64)
+  | none => none
+
+def defaultCooldownSecs (reason : CooldownReason) : UInt64 :=
+  match reason with
+  | .usageLimit => 300
+  | .rateLimit => 15
+  | .authFailure => 15
+  | .overloaded => 15
+  | .serverError => 15
+
+def cooldownReasonFor (status : Nat) (body : String) : Option CooldownReason :=
+  if status == 429 then
+    if quotaHint body then some .usageLimit else some .rateLimit
+  else if status == 402 then some .usageLimit
+  else if status == 401 then some .authFailure
+  else if status == 403 then
+    if authHint body then some .authFailure else none
+  else if status == 529 || status == 503 then some .overloaded
+  else if 500 ≤ status && status < 600 then some .serverError
+  else none
+
+/-- Record the failed selected account's cooldown after a proxy outcome. -/
+def cooldownForOutcome (out : ProxyOutcome) (now : UInt64) : Option AccountCooldown :=
+  if out.selectedAccount.isEmpty then none
+  else
+    let body := (String.fromUTF8? out.body).getD ""
+    match cooldownReasonFor out.status body with
+    | none => none
+    | some reason =>
+      let announced := (retryAfterSecs? out.headers).getD 0
+      let secs := clampCooldownRetryAfter
+        (if announced == 0 then defaultCooldownSecs reason else announced)
+      some { accountId := out.selectedAccount, untilEpoch := now + secs, reason := reason, label := "" }
+
+def cooldownReply (chainId : String) (retryAfterSecs : UInt64) : ProxyHttpReply :=
+  let secs := clampCooldownRetryAfter retryAfterSecs
+  { status := 429
+    headers := #[("Retry-After", toString secs)]
+    body :=
+      s!"\{\"error\":\{\"message\":{jsonEscape s!"All providers in chain '{chainId}' are currently in cooldown or unconfigured"},\"type\":\"rate_limit_exceeded\",\"code\":\"rate_limit_exceeded\",\"retry_after_secs\":{secs}}}" }
+
+def usageLimitReply (chainId : String) (c : AccountCooldown) (now : UInt64) : ProxyHttpReply :=
+  let secs := clampCooldownRetryAfter (c.remainingSecs now)
+  let resetIn := c.remainingSecs now
+  let label := if c.label.isEmpty then "usage limit" else c.label
+  let msg :=
+    s!"You've hit your usage limit on every account configured for '{chainId}' ({label}). Try again in {secs} seconds."
+  { status := 429
+    headers := #[("Retry-After", toString secs)]
+    body :=
+      s!"\{\"error\":\{\"message\":{jsonEscape msg},\"type\":\"rate_limit_exceeded\",\"code\":\"usage_limit_reached\",\"resets_at\":{c.untilEpoch},\"resets_in_seconds\":{resetIn}}}" }
+
 private def isForbiddenResponseHeader (name : String) : Bool :=
   let low := name.trimAscii.toString.toLower
   low == "transfer-encoding" || low == "content-length" || low == "connection" ||
@@ -271,7 +421,7 @@ private def bodyIndicatesContextOverflow (body : ByteArray) : Bool :=
 
 /-- Execute a bounded `/v1/*` proxy forward across `chain.targets` with proactive pacing spillover,
     pre-header failover on `402`, `429`, and `5xx`, and deterministic exhaustion classification via
-    `Orb.Kernel.proxyExhaustionStep`. -/
+    `Orb.Kernel.proxyExhaustionStep`. Targets in `skipAccountIds` (active cooldowns) are not attempted. -/
 def forwardProxyChain
     (chain : RoutingChain)
     (method relPath : String)
@@ -279,9 +429,11 @@ def forwardProxyChain
     (body : ByteArray)
     (mockTransport? : Option (ProviderTarget → IO (Except String HttpsResponse)) := none)
     (headersAlreadyCommitted : Bool := false)
-    (pacingTracker? : Option ProxyPacingTracker := none) :
+    (pacingTracker? : Option ProxyPacingTracker := none)
+    (skipAccountIds : Array String := #[]) :
     IO ProxyOutcome := do
-  let n := chain.targets.size
+  let targets := chain.targets.filter (fun t => !skipAccountIds.any (fun id => id == t.accountId))
+  let n := targets.size
   if n == 0 then
     let (st, errCode, errMsg) := classifyExhaustionOutcome 0 0 0 0 0 false
     return {
@@ -301,7 +453,7 @@ def forwardProxyChain
   let mut transportValidationCount : UInt32 := 0
   let mut hasContextOverflow : Bool := false
   while idx < n do
-    let tgt := chain.targets[idx]!
+    let tgt := targets[idx]!
     let slotAdmitted ← match pacingTracker? with
       | none => pure true
       | some tracker => do
