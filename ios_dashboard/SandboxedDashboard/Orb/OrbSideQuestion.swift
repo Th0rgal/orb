@@ -82,8 +82,12 @@ enum OrbBtwThreads {
 
     static let liveStatuses: Set<String> = ["active", "running", "pending", "queued", "starting", "resuming", "waiting_background", "paused"]
     static let resumableStatuses: Set<String> = ["awaiting_user", "completed", "interrupted"]
+    static let transcriptEventTypes = ["user_message", "assistant_message", "assistant_message_canonical"]
     static let maxSessionEvents: Int64 = 400
     static let maxSessionTurns = 8
+    static let initialVisibleTurns = 20
+    static let visibleTurnsStep = 20
+    static let maxConcurrentThreadLoads = 4
 
     static func shouldRotateSession(turnCount: Int, maxSequence: Int64) -> Bool {
         turnCount >= maxSessionTurns || maxSequence >= maxSessionEvents
@@ -255,7 +259,7 @@ enum OrbBtwThreads {
         return (turns, nil)
     }
 
-    /// Every thread's turns, in the order they were asked.
+    /// Every thread's turns, in the order they were asked, with strictly unique row IDs.
     static func merge(_ perThread: [[Turn]]) -> [Turn] {
         let all: [Turn] = perThread.flatMap { $0 }
         let indexed: [(offset: Int, turn: Turn)] = all.enumerated().map { ($0.offset, $0.element) }
@@ -263,7 +267,11 @@ enum OrbBtwThreads {
             if a.turn.at != b.turn.at { return a.turn.at < b.turn.at }
             return a.offset < b.offset
         }
-        return sorted.map { $0.turn }
+        let ordered = sorted.map(\.turn)
+        let uniqueIDs = OrbTranscriptGates.ensureUniqueIds(ordered.map(\.id))
+        return zip(uniqueIDs, ordered).map { id, turn in
+            id == turn.id ? turn : Turn(id: id, question: turn.question, answer: turn.answer, narration: turn.narration, at: turn.at)
+        }
     }
 
     /// Disambiguates whether `reconciledTurns` contains Core's answer to `question`,
@@ -291,6 +299,19 @@ enum OrbBtwThreads {
 /// opens on its history at once. The conversation warms it before the sheet opens.
 @Observable @MainActor
 final class OrbBtwStore {
+    private struct TerminalThreadSummary: Sendable {
+        let stamp: String
+        let turns: [OrbBtwThreads.Turn]
+        let maxSequence: Int64
+        let delivered: [OrbDeliveredMessage]
+    }
+
+    private enum ThreadFetchOutcome: Sendable {
+        case live(id: String, stamp: String, events: [StoredEvent], maxSequence: Int64)
+        case terminal(id: String, summary: TerminalThreadSummary)
+        case failed(id: String)
+    }
+
     private static var stores: [String: OrbBtwStore] = [:]
     static func shared(_ parent: String) -> OrbBtwStore {
         let key = OrbBtwConfig.sessionKey(parent)
@@ -332,6 +353,40 @@ final class OrbBtwStore {
         }
     }
 
+    static func trimMemory() {
+        for (key, store) in Array(stores) {
+            store.terminalCache.removeAll()
+            let activeID = store.running ? store.boundID : nil
+            store.eventCache = store.eventCache.filter { $0.key == activeID }
+            if !store.warmFollowWanted && store.sheetOpenCount == 0 && store.refreshing == nil && !store.running {
+                store.streamTask?.cancel()
+                store.streamTask = nil
+                store.streamMissionId = nil
+                stores.removeValue(forKey: key)
+            }
+        }
+    }
+
+    static func resetAll() {
+        for store in stores.values {
+            store.refreshing?.cancel()
+            store.refreshing = nil
+            store.streamTask?.cancel()
+            store.streamTask = nil
+            store.streamMissionId = nil
+            store.terminalCache.removeAll()
+            store.eventCache.removeAll()
+        }
+        stores.removeAll()
+    }
+
+    nonisolated private static func deliveredMessages(from events: [StoredEvent]) -> [OrbDeliveredMessage] {
+        events.compactMap { e in
+            guard e.eventType == "user_message", (e.metadata["queued"]?.value as? Bool) != true else { return nil }
+            return OrbDeliveredMessage(id: e.eventId, content: OrbBtwThreads.question(e.content), sequence: e.sequence)
+        }
+    }
+
     let parent: String
     private(set) var turns: [OrbBtwThreads.Turn]
     private(set) var open: OrbBtwThreads.OpenTurn?
@@ -342,9 +397,12 @@ final class OrbBtwStore {
     private(set) var boundMaxSequence: Int64 = 0
     private(set) var loaded = false
     private(set) var isWarmCaughtUp = false
+    /// Raw event cache retained only for live threads; finished threads keep only `terminalCache`.
     private var eventCache: [String: (stamp: String, events: [StoredEvent])] = [:]
+    private var terminalCache: [String: TerminalThreadSummary] = [:]
     private var refreshing: Task<Void, Error>?
     private var warmFollowWanted = false
+    private var sheetOpenCount = 0
     private var streamTask: Task<Void, Never>?
     private var streamMissionId: String?
 
@@ -355,9 +413,13 @@ final class OrbBtwStore {
 
     private init(parent: String) {
         self.parent = parent
-        turns = OrbDisk.read("btw:turns:" + parent, as: [OrbBtwThreads.Turn].self) ?? []
+        let disk = OrbDisk.read("btw:turns:" + parent, as: [OrbBtwThreads.Turn].self) ?? []
+        turns = disk.isEmpty ? [] : OrbBtwThreads.merge([disk])
         loaded = !turns.isEmpty
     }
+
+    func noteSheetOpened() { sheetOpenCount += 1 }
+    func noteSheetClosed() { sheetOpenCount = max(0, sheetOpenCount - 1) }
 
     func setWarmFollow(_ wanted: Bool) {
         guard warmFollowWanted != wanted else {
@@ -438,50 +500,154 @@ final class OrbBtwStore {
                 hadReadFailure = true
             }
         }
-        var fetched: [String: [StoredEvent]] = [:]
-        // Threads are read concurrently; a finished thread whose activity has
-        // not changed is not read again, and cached threads fetch only `sinceSeq` deltas.
-        var reads: [(id: String, stamp: String, task: Task<[StoredEvent]?, Never>)] = []
+        struct PendingThreadRead: Sendable {
+            let id: String
+            let stamp: String
+            let activity: String
+            let live: Bool
+            let priorEvents: [StoredEvent]?
+            let sinceSeq: Int64?
+        }
+
+        var liveFetched: [String: (events: [StoredEvent], maxSequence: Int64)] = [:]
+        var terminalResolved: [String: TerminalThreadSummary] = [:]
+        var pendingReads: [PendingThreadRead] = []
+
         for m in threads {
-            let id = m["id"].text, stamp = OrbBtwThreads.activity(m) + m["status"].text
+            let id = m["id"].text
+            let activity = OrbBtwThreads.activity(m)
+            let stamp = activity + "\u{0}" + m["status"].text
             let live = OrbBtwThreads.liveStatuses.contains(m["status"].text)
-            if !live, let cached = eventCache[id], !cached.stamp.isEmpty, cached.stamp == stamp {
-                fetched[id] = cached.events
-                continue
-            }
-            let priorEvents = eventCache[id]?.events
-            let sinceSeq = priorEvents?.map(\.sequence).max()
-            let typesFilter: [String]? = live ? nil : ["user_message", "assistant_message", "assistant_message_canonical"]
-            reads.append((id, stamp, Task {
-                if let priorEvents, let sinceSeq,
-                   let delta = try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: typesFilter, limit: 1000, sinceSeq: sinceSeq).events,
-                   let merged = OrbBtwThreads.mergeEvents(existing: priorEvents, delta: delta) {
-                    return merged
+            if !live {
+                if let cached = terminalCache[id], !cached.stamp.isEmpty, cached.stamp == stamp {
+                    terminalResolved[id] = cached
+                    eventCache.removeValue(forKey: id)
+                    continue
                 }
-                return try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: typesFilter, limit: 1000).events
-            }))
-        }
-        for read in reads {
-            guard let events = await read.task.value else {
-                hadReadFailure = true
-                continue
+                if let cachedEvents = eventCache[id], !cachedEvents.stamp.isEmpty, cachedEvents.stamp == stamp {
+                    let parsed = OrbBtwThreads.parse(missionID: id, events: cachedEvents.events, active: false)
+                    let summary = TerminalThreadSummary(
+                        stamp: stamp,
+                        turns: parsed.turns,
+                        maxSequence: cachedEvents.events.map(\.sequence).max() ?? 0,
+                        delivered: Self.deliveredMessages(from: cachedEvents.events)
+                    )
+                    terminalCache[id] = summary
+                    terminalResolved[id] = summary
+                    eventCache.removeValue(forKey: id)
+                    continue
+                }
             }
-            fetched[read.id] = events
-            eventCache[read.id] = (read.stamp, events)
+            let priorEvents = live ? eventCache[id]?.events : nil
+            let sinceSeq = priorEvents?.map(\.sequence).max()
+            pendingReads.append(PendingThreadRead(
+                id: id,
+                stamp: stamp,
+                activity: activity,
+                live: live,
+                priorEvents: priorEvents,
+                sinceSeq: sinceSeq
+            ))
         }
+
+        pendingReads.sort { a, b in
+            if a.live != b.live { return a.live && !b.live }
+            return a.activity > b.activity
+        }
+
+        let outcomes = await withTaskGroup(of: ThreadFetchOutcome.self, returning: [ThreadFetchOutcome].self) { group in
+            var index = 0
+            let limit = OrbBtwThreads.maxConcurrentThreadLoads
+            func enqueue(_ item: PendingThreadRead) {
+                group.addTask {
+                    guard !Task.isCancelled else { return .failed(id: item.id) }
+                    if item.live {
+                        if let priorEvents = item.priorEvents, let sinceSeq = item.sinceSeq,
+                           let delta = try? await OrbCore.shared.getMissionEventsWithMeta(id: item.id, limit: 1000, sinceSeq: sinceSeq),
+                           let merged = OrbBtwThreads.mergeEvents(existing: priorEvents, delta: delta.events) {
+                            let maxSeq = max(delta.maxSequence ?? 0, merged.map(\.sequence).max() ?? 0)
+                            return .live(id: item.id, stamp: item.stamp, events: merged, maxSequence: maxSeq)
+                        }
+                        guard let full = try? await OrbCore.shared.getMissionEventsWithMeta(id: item.id, limit: 1000) else {
+                            return .failed(id: item.id)
+                        }
+                        let maxSeq = max(full.maxSequence ?? 0, full.events.map(\.sequence).max() ?? 0)
+                        return .live(id: item.id, stamp: item.stamp, events: full.events, maxSequence: maxSeq)
+                    } else {
+                        guard let res = try? await OrbCore.shared.getMissionEventsWithMeta(
+                            id: item.id,
+                            types: OrbBtwThreads.transcriptEventTypes,
+                            limit: 1000
+                        ) else {
+                            return .failed(id: item.id)
+                        }
+                        let parsed = OrbBtwThreads.parse(missionID: item.id, events: res.events, active: false)
+                        let maxSeq = max(res.maxSequence ?? 0, res.events.map(\.sequence).max() ?? 0)
+                        let summary = TerminalThreadSummary(
+                            stamp: item.stamp,
+                            turns: parsed.turns,
+                            maxSequence: maxSeq,
+                            delivered: Self.deliveredMessages(from: res.events)
+                        )
+                        return .terminal(id: item.id, summary: summary)
+                    }
+                }
+            }
+            while index < min(limit, pendingReads.count) {
+                enqueue(pendingReads[index])
+                index += 1
+            }
+            var collected: [ThreadFetchOutcome] = []
+            collected.reserveCapacity(pendingReads.count)
+            while let nextOutcome = await group.next() {
+                collected.append(nextOutcome)
+                if index < pendingReads.count && !Task.isCancelled {
+                    enqueue(pendingReads[index])
+                    index += 1
+                }
+            }
+            return collected
+        }
+
         try Task.checkCancellation()
+
+        for outcome in outcomes {
+            switch outcome {
+            case .live(let id, let stamp, let events, let maxSequence):
+                terminalCache.removeValue(forKey: id)
+                eventCache[id] = (stamp, events)
+                liveFetched[id] = (events, maxSequence)
+            case .terminal(let id, let summary):
+                eventCache.removeValue(forKey: id)
+                terminalCache[id] = summary
+                terminalResolved[id] = summary
+            case .failed:
+                hadReadFailure = true
+            }
+        }
+
+        let validIDs = Set(threads.map { $0["id"].text })
+        let protectedID = running ? boundID : nil
+        eventCache = eventCache.filter { validIDs.contains($0.key) || $0.key == protectedID }
+        if terminalCache.count > 256 {
+            terminalCache = terminalCache.filter { validIDs.contains($0.key) }
+        }
+
         var perThread: [[OrbBtwThreads.Turn]] = []
         var opens: [String: OrbBtwThreads.OpenTurn] = [:]
         for m in threads {
             let id = m["id"].text
-            guard let events = fetched[id] else {
+            let live = OrbBtwThreads.liveStatuses.contains(m["status"].text)
+            if live, let liveData = liveFetched[id] {
+                let result = OrbBtwThreads.parse(missionID: id, events: liveData.events, active: true)
+                perThread.append(result.turns)
+                if let open = result.open { opens[id] = open }
+            } else if !live, let summary = terminalResolved[id] ?? terminalCache[id] {
+                perThread.append(summary.turns)
+            } else {
                 // A failed read keeps what was shown for that thread.
-                perThread.append(turns.filter { $0.id.hasPrefix("btw:\(id):") })
-                continue
+                perThread.append(terminalCache[id]?.turns ?? turns.filter { $0.id.hasPrefix("btw:\(id):") })
             }
-            let result = OrbBtwThreads.parse(missionID: id, events: events, active: OrbBtwThreads.liveStatuses.contains(m["status"].text))
-            perThread.append(result.turns)
-            if let open = result.open { opens[id] = open }
         }
         // A live thread wins; otherwise the latest activity.
         let latestLive = threads.filter { opens[$0["id"].text] != nil }.last
@@ -495,15 +661,20 @@ final class OrbBtwStore {
             return
         }
         if merged != turns { turns = merged; OrbDisk.saveAsync(merged, key: cacheKey) }
-        let nextOpen = opens[next["id"].text]
+        let nextID = next["id"].text
+        let nextOpen = opens[nextID]
         if nextOpen != open { open = nextOpen }
         if next != bound { bound = next }
-        let boundEvents = fetched[next["id"].text] ?? []
-        boundTurnCount = perThread.enumerated().first(where: { threads[$0.offset]["id"].text == next["id"].text })?.element.count ?? 0
-        boundMaxSequence = boundEvents.map(\.sequence).max() ?? 0
-        boundDeliveredMessages = boundEvents.compactMap { e in
-            guard e.eventType == "user_message", (e.metadata["queued"]?.value as? Bool) != true else { return nil }
-            return OrbDeliveredMessage(id: e.eventId, content: OrbBtwThreads.question(e.content), sequence: e.sequence)
+        boundTurnCount = perThread.enumerated().first(where: { threads[$0.offset]["id"].text == nextID })?.element.count ?? 0
+        if let liveData = liveFetched[nextID] {
+            boundMaxSequence = liveData.maxSequence
+            boundDeliveredMessages = Self.deliveredMessages(from: liveData.events)
+        } else if let summary = terminalResolved[nextID] ?? terminalCache[nextID] {
+            boundMaxSequence = summary.maxSequence
+            boundDeliveredMessages = summary.delivered
+        } else {
+            boundMaxSequence = 0
+            boundDeliveredMessages = []
         }
         if let id = boundID { UserDefaults.standard.set(id, forKey: OrbBtwConfig.sessionKey(parent)) }
         loaded = true
@@ -534,7 +705,9 @@ final class OrbBtwStore {
         streamTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self, self.warmFollowWanted, self.streamMissionId == targetId else { return }
-                let since = self.eventCache[targetId]?.events.map(\.sequence).max()
+                let cachedSeq = self.eventCache[targetId]?.events.map(\.sequence).max()
+                let terminalSeq = self.terminalCache[targetId].flatMap { $0.maxSequence > 0 ? $0.maxSequence : nil }
+                let since = cachedSeq ?? terminalSeq
                 let inner = OrbCore.shared.streamControl(
                     missionId: targetId,
                     sinceSeq: since
@@ -624,11 +797,19 @@ final class OrbBtwStore {
     }
 
     private func recomputeFromCache() {
-        guard let id = boundID ?? streamMissionId, let cached = eventCache[id]?.events else { return }
+        guard let id = boundID ?? streamMissionId else { return }
         let active = OrbBtwThreads.liveStatuses.contains(boundStatus)
+        guard let cached = eventCache[id]?.events else {
+            if !active && open != nil { open = nil }
+            return
+        }
         let parsed = OrbBtwThreads.parse(missionID: id, events: cached, active: active)
+        let parsedIDs = Set(parsed.turns.map(\.id))
+        let priorSameThread = (terminalCache[id]?.turns ?? turns.filter { $0.id.hasPrefix("btw:\(id):") })
+            .filter { !parsedIDs.contains($0.id) }
+        let mergedThreadTurns = OrbBtwThreads.merge([priorSameThread, parsed.turns])
         let otherTurns = turns.filter { !$0.id.hasPrefix("btw:\(id):") }
-        let merged = OrbBtwThreads.merge([otherTurns, parsed.turns])
+        let merged = OrbBtwThreads.merge([otherTurns, mergedThreadTurns])
         if merged != turns {
             turns = merged
             OrbDisk.saveAsync(merged, key: cacheKey)
@@ -636,11 +817,26 @@ final class OrbBtwStore {
         if parsed.open != open {
             open = parsed.open
         }
-        boundTurnCount = parsed.turns.count
-        boundMaxSequence = cached.map(\.sequence).max() ?? boundMaxSequence
-        boundDeliveredMessages = cached.compactMap { e in
-            guard e.eventType == "user_message", (e.metadata["queued"]?.value as? Bool) != true else { return nil }
-            return OrbDeliveredMessage(id: e.eventId, content: OrbBtwThreads.question(e.content), sequence: e.sequence)
+        boundTurnCount = mergedThreadTurns.count
+        let nextMaxSeq = max(boundMaxSequence, max(terminalCache[id]?.maxSequence ?? 0, cached.map(\.sequence).max() ?? 0))
+        boundMaxSequence = nextMaxSeq
+        var seenDelivered = Set<String>()
+        var combinedDelivered: [OrbDeliveredMessage] = []
+        for item in (terminalCache[id]?.delivered ?? []) + Self.deliveredMessages(from: cached) {
+            let key = item.id ?? "seq:\(item.sequence)"
+            if seenDelivered.insert(key).inserted {
+                combinedDelivered.append(item)
+            }
+        }
+        boundDeliveredMessages = combinedDelivered
+        if !active {
+            terminalCache[id] = TerminalThreadSummary(
+                stamp: "",
+                turns: mergedThreadTurns,
+                maxSequence: nextMaxSeq,
+                delivered: combinedDelivered
+            )
+            eventCache.removeValue(forKey: id)
         }
         loaded = true
     }
@@ -670,6 +866,8 @@ struct OrbSideQuestionSheet: View {
     @State private var pendingBaselineTurns: [OrbBtwThreads.Turn] = []
     @State private var autoAsked = false
     @State private var scroller = OrbTranscriptScroller()
+    @State private var expandedSteps = 0
+    @State private var pinnedExtraTurns = 0
     @State private var followUps = OrbFollowUpQueue()
     @State private var queueExpanded = true
     @State private var editingQueuedID: String?
@@ -683,6 +881,22 @@ struct OrbSideQuestionSheet: View {
 
     private var running: Bool { store.running }
     private var waiting: Bool { running || pending != nil }
+    private var visibleTurnLimit: Int {
+        OrbTranscriptGates.visibleTurnCount(
+            total: store.turns.count,
+            baseLimit: OrbBtwThreads.initialVisibleTurns + pinnedExtraTurns,
+            expandedSteps: expandedSteps,
+            stepSize: OrbBtwThreads.visibleTurnsStep
+        )
+    }
+    private var hiddenTurnCount: Int {
+        OrbTranscriptGates.hiddenTurnCount(
+            total: store.turns.count,
+            baseLimit: OrbBtwThreads.initialVisibleTurns + pinnedExtraTurns,
+            expandedSteps: expandedSteps,
+            stepSize: OrbBtwThreads.visibleTurnsStep
+        )
+    }
     /// The optimistic bubble, until Core's thread holds the question.
     private var pendingBubble: String? {
         guard let pending else { return nil }
@@ -693,14 +907,23 @@ struct OrbSideQuestionSheet: View {
     private var canSend: Bool { !busy && !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     private var scrollTranscriptView: some View {
-        OrbTranscriptScrollView(identifier: "btw", scroller: scroller, working: waiting) {
-            transcript
+        ScrollViewReader { scroll in
+            OrbTranscriptScrollView(identifier: "btw", scroller: scroller, working: waiting) {
+                transcript(scroll: scroll)
+            }
         }
         .scrollDismissesKeyboard(.interactively)
         // Tapping the transcript hides the keyboard, like the conversation tab
         // (simultaneous: links and buttons in the transcript still get the tap).
         .simultaneousGesture(TapGesture().onEnded { if focused { focused = false } })
-        .onChange(of: store.turns.count) { _, _ in if scroller.pinned { scroller.scrollToBottom(animated: true) } }
+        .onChange(of: store.turns.count) { oldCount, newCount in
+            let grew = newCount - oldCount
+            if scroller.pinned {
+                scroller.scrollToBottom(animated: true)
+            } else if grew > 0 && oldCount >= visibleTurnLimit {
+                pinnedExtraTurns += grew
+            }
+        }
         .onChange(of: store.boundDeliveredMessages) { _, delivered in
             let next = followUps.reconciled(with: delivered)
             if next != followUps { withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next } }
@@ -712,6 +935,7 @@ struct OrbSideQuestionSheet: View {
     }
 
     private func handleSheetAppear() {
+        store.noteSheetOpened()
         OrbWarmSyncCoordinator.shared.noteBtwSheetOpened(parentId: parentID)
         // `/btw <question>` from the composer was already a send: don't ask for a second tap.
         let typed = question.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -732,6 +956,7 @@ struct OrbSideQuestionSheet: View {
             .task(id: phase) { await follow() }
             .onAppear { handleSheetAppear() }
             .onDisappear {
+                store.noteSheetClosed()
                 OrbWarmSyncCoordinator.shared.noteBtwSheetClosed(parentId: parentID)
             }
             .onChange(of: store.loaded) { _, loaded in
@@ -745,8 +970,9 @@ struct OrbSideQuestionSheet: View {
         .presentationContentInteraction(.scrolls)
     }
 
-    private var transcript: some View {
-        VStack(alignment: .leading, spacing: 16) {
+    private func transcript(scroll: ScrollViewProxy) -> some View {
+        let visibleTurns = Array(store.turns.suffix(visibleTurnLimit))
+        return VStack(alignment: .leading, spacing: 16) {
             if !error.isEmpty { OrbNotice(message: error) }
             if !store.loaded && store.turns.isEmpty {
                 loadingPlaceholder
@@ -755,13 +981,31 @@ struct OrbSideQuestionSheet: View {
                     .font(.footnote).foregroundStyle(OrbStyle.textSecondary)
                     .accessibilityIdentifier("btw.intro")
             }
-            ForEach(store.turns) { turn in
+            if hiddenTurnCount > 0 {
+                Button("Load earlier side questions") {
+                    let anchor = visibleTurns.first?.id
+                    scroller.pinned = false
+                    expandedSteps += 1
+                    Task { @MainActor in
+                        await Task.yield()
+                        if let anchor { scroll.scrollTo(anchor, anchor: .top) }
+                    }
+                }
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(OrbStyle.textSecondary)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity)
+                .background(Color.white.opacity(0.03), in: Capsule())
+                .overlay(Capsule().stroke(OrbStyle.border))
+                .accessibilityIdentifier("btw.loadEarlier")
+            }
+            ForEach(visibleTurns) { turn in
                 OrbUserBubble(text: turn.question).id(turn.id)
                 OrbBtwNarration(updates: turn.narration)
                 OrbAssistantMessage(text: turn.answer).id(turn.id + ":a")
             }
             if let open = store.open {
-                OrbUserBubble(text: open.question, pending: true).id(open.id)
+                OrbUserBubble(text: open.question, pending: true).id(open.id + ":open")
                 liveRow(open)
             }
             if let pendingBubble {

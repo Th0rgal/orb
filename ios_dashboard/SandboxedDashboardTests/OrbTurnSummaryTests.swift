@@ -285,4 +285,98 @@ final class OrbTurnSummaryTests: XCTestCase {
         XCTAssertTrue(wrapped.contains("Earlier side questions in this conversation"))
         XCTAssertEqual(OrbBtwThreads.question(wrapped), "What is left?")
     }
+
+    @MainActor
+    func testLargeBtwCampaignBoundsVisibleWindowMountBudgetAndUniqueTurnIDs() {
+        // Replays the structural shape of a 25-thread, 251-turn /btw campaign with 28 Mermaid
+        // diagrams, glued fences, pipe tables, `<file>` CLI placeholders, and duplicate row IDs.
+        var perThread: [[OrbBtwThreads.Turn]] = []
+        for threadIdx in 0..<25 {
+            let count = threadIdx == 0 ? 11 : 10
+            var turns: [OrbBtwThreads.Turn] = []
+            for turnIdx in 0..<count {
+                let globalIdx = threadIdx * 10 + turnIdx
+                let hasMermaid = globalIdx < 28
+                let body: String
+                if globalIdx == 0 {
+                    body = """
+                    Run `turbo-lean check <file>` first. Let's present the updated diagram cleanly!```mermaid
+                    flowchart TD
+                      A["Gate \(globalIdx)"] --> B["Verified"]
+                    ```
+                    | Metric | Value |
+                    | --- | --- |
+                    | Turns | 251 |
+                    """
+                } else if hasMermaid {
+                    body = "Diagram \(globalIdx):\n```mermaid\nflowchart LR\n  N\(globalIdx) --> M\(globalIdx)\n```\nDone."
+                } else {
+                    body = "Checked `<file>` in thread \(threadIdx) turn \(turnIdx)."
+                }
+                let stamp = String(format: "2026-11-05T%02d:%02d:%02dZ", (globalIdx / 60) % 24, globalIdx % 60, turnIdx % 60)
+                // Intentionally collide sequence 1 on thread 24 to verify `ensureUniqueIds`.
+                let seq = (threadIdx == 24 && turnIdx == 1) ? 0 : turnIdx
+                turns.append(.init(
+                    id: "btw:t\(threadIdx):\(seq)",
+                    question: "Question \(globalIdx)?",
+                    answer: body,
+                    narration: ["Inspecting step \(turnIdx)"],
+                    at: stamp
+                ))
+            }
+            perThread.append(turns)
+        }
+
+        let merged = OrbBtwThreads.merge(perThread)
+        XCTAssertEqual(merged.count, 251)
+        XCTAssertEqual(Set(merged.map(\.id)).count, 251, "every merged /btw turn must have a unique ForEach/ScrollPosition ID")
+        XCTAssertTrue(merged.contains { $0.id == "btw:t24:0#1" }, "colliding IDs retain thread prefix while disambiguating")
+
+        let initialVisible = OrbTranscriptGates.visibleTurnCount(
+            total: merged.count,
+            baseLimit: OrbBtwThreads.initialVisibleTurns,
+            expandedSteps: 0,
+            stepSize: OrbBtwThreads.visibleTurnsStep
+        )
+        let initialHidden = OrbTranscriptGates.hiddenTurnCount(
+            total: merged.count,
+            baseLimit: OrbBtwThreads.initialVisibleTurns,
+            expandedSteps: 0,
+            stepSize: OrbBtwThreads.visibleTurnsStep
+        )
+        XCTAssertEqual(initialVisible, 20)
+        XCTAssertEqual(initialHidden, 231)
+        XCTAssertEqual(
+            OrbTranscriptGates.visibleTurnCount(
+                total: merged.count,
+                baseLimit: OrbBtwThreads.initialVisibleTurns,
+                expandedSteps: 2,
+                stepSize: OrbBtwThreads.visibleTurnsStep
+            ),
+            60
+        )
+
+        // Parse blocks across all visible turns + glued Mermaid turn without crashing or dropping prose.
+        let gluedBlocks = OrbNativeMarkdownView.parseBlocks(merged[0].answer)
+        XCTAssertTrue(gluedBlocks.contains { if case .mermaid(_, complete: true) = $0 { return true }; return false })
+        for turn in merged.suffix(initialVisible) {
+            for seg in OrbFileRefs.segments(turn.answer) {
+                if case .text(let md) = seg {
+                    _ = OrbNativeMarkdownView.parseBlocks(md)
+                }
+            }
+        }
+
+        // Verify OrbMermaidRenderer's inline WebView mount gate caps automatic mounts at 8.
+        let renderer = OrbMermaidRenderer.shared
+        while renderer.activeInlineMounts > 0 { renderer.releaseInlineMount() }
+        var admittedCount = 0
+        for _ in 0..<28 {
+            if renderer.acquireInlineMount() { admittedCount += 1 }
+        }
+        XCTAssertEqual(admittedCount, OrbMermaidRenderer.maxInlineDiagramMounts)
+        XCTAssertEqual(renderer.activeInlineMounts, OrbMermaidRenderer.maxInlineDiagramMounts)
+        for _ in 0..<admittedCount { renderer.releaseInlineMount() }
+        XCTAssertEqual(renderer.activeInlineMounts, 0)
+    }
 }

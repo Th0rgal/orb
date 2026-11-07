@@ -1635,6 +1635,7 @@ enum OrbReadCache {
     static func clearAll() {
         OrbHierarchy.reset()
         OrbWarmSyncCoordinator.shared.resetCaches()
+        OrbBtwStore.resetAll()
         for item in pending.values { item.task.cancel() }
         pending.removeAll()
         values.removeAll()
@@ -1652,6 +1653,7 @@ enum OrbReadCache {
     /// Drops memory copies (disk copies stay) so a suspended app is a small jetsam target.
     static func trimMemory() {
         OrbWarmSyncCoordinator.shared.resetCaches()
+        OrbBtwStore.trimMemory()
         values.removeAll()
         eventValues.removeAll()
         eventFetchedAt.removeAll()

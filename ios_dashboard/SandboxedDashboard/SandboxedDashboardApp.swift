@@ -67,6 +67,7 @@ private struct OrbTestTypeSize: ViewModifier {
     static func trim() {
         OrbReadCache.trimMemory()
         OrbNativeMarkdownView.trimCaches()
+        OrbMermaidRenderer.shared.trimCache()
         OrbRemoteLog.trimCache()
         OrbImageLoader.trimCache()
     }
