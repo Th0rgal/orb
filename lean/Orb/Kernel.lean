@@ -3381,4 +3381,239 @@ def crashBoundaryStep
     else (if unacked == 0 then 2 else 3) ||| crashBit ||| writerBit
   lo32.toUInt64 ||| (unacked.toUInt64 <<< 32)
 
+/--
+  Unboxed C-ABI Activation Status Rollback Gate (`orb_activation_rollback_admit`):
+  Decides whether `restoreMissionStatus(currentStatus, snapshotStatus, hasActiveRun)` may
+  atomically restore `snapshotStatus` after a rejected local or remote activation attempt:
+  - Status encoding (`0..10`):
+    `0 = Pending`, `1 = Active`, `2 = AwaitingUser`, `3 = Acknowledged (archived)`,
+    `4 = WaitingBackground`, `5 = Completed`, `6 = Failed`, `7 = Interrupted`,
+    `8 = Blocked`, `9 = NotFeasible`, `10 = Paused`.
+  - Rejects (`0`) whenever `hasActiveRun != 0` (a live non-terminal run owns execution),
+    `currentStatus > 10` or `snapshotStatus > 10` (out-of-domain status), or
+    `currentStatus == 3` (`StickyFence`: archived missions never un-archive via rollback,
+    nor may an unarchived snapshot overwrite a concurrent archive).
+  - Admits (`1`) iff `currentStatus == 0 (Pending)` (remote replay/dispatch transitional
+    activation), `currentStatus == 1 (Active)` (local message transitional activation),
+    or `currentStatus == snapshotStatus` (idempotent rollback).
+-/
+@[inline, export orb_activation_rollback_admit]
+def activationRollbackAdmit
+    (currentStatus snapshotStatus hasActiveRun : UInt8) : UInt8 :=
+  if hasActiveRun == 0 &&
+     currentStatus ≤ 10 &&
+     snapshotStatus ≤ 10 &&
+     currentStatus != 3 &&
+     (currentStatus == 0 || currentStatus == 1 || currentStatus == snapshotStatus) then 1
+  else 0
+
+/--
+  Unboxed C-ABI Remote Replay & Stranded-Pending Recovery Stepper (`orb_remote_replay_step`):
+  Governs automatic remote wait replay (`stepRemoteMissionReplay`) and startup/periodic
+  stranded-pending reconciliation (`reconcileStrandedPendingMissions`):
+  - `op = 0 (replay_outcome)`:
+    - `isWaitingRemote`, `waitMatches`, `pastDeadline`, `retryFitsDeadline` in `{0, 1}`.
+    - `dispatchOutcome`:
+      `0 = started`,
+      `1 = transient_error` (HTTP 5xx, `ENOSPC`/storage exhaustion, transport/connect error,
+           ambiguous submit cancellation, or `REMOTE_JOB_STILL_RUNNING`),
+      `2 = permanent_rejection` (no native session, superseded track/PR, invalid config).
+    - Returns packed 32-bit verdict:
+      - `bits 0..7 = action`:
+        `0 = noop_keep_wait`, `1 = clear_wait_superseded`, `2 = fail_deadline`,
+        `3 = mark_replayed`, `4 = retry_wait`, `5 = give_up_fail`.
+      - `bit 8 (256)`: `admitted` (`1` when an authoritative state/wait mutation is emitted).
+      - `bit 9 (512)`: `rollbackStatus` (`1` when transitional `Pending` status must roll back
+        to the pre-activation `Interrupted` snapshot).
+      - `bit 10 (1024)`: `restoreScheduledOrigin` (`1` when `hasRecoveryHandle == 0` on a
+        failed dispatch so `scheduled_remote_job_id` rolls back to `previousOriginJob`; `0` when ambiguous).
+  - `op = 1 (stranded_pending_check)`:
+    - Reuses `(isWaitingRemote := isPending, waitMatches := notClientPlacedAndNotRunning,
+      pastDeadline := endedLongAgo, dispatchOutcome := latestReasonIsDispatchFailed,
+      hasRecoveryHandle := hasActiveRunOrDeferredGoal)`.
+    - Emits `action = 6 (interrupt_stranded_pending) | admittedBit (256) = 262` iff
+      `isPending == 1 && notClientPlacedAndNotRunning == 1 && hasRecoveryHandle == 0 &&
+       pastDeadline == 1 && dispatchOutcome == 1`, else `0`.
+-/
+@[inline, export orb_remote_replay_step]
+def remoteReplayStep
+    (op isWaitingRemote waitMatches pastDeadline dispatchOutcome
+     hasRecoveryHandle retryFitsDeadline : UInt8)
+    (retries maxRetries : UInt32) : UInt32 :=
+  if op == 1 then
+    if isWaitingRemote == 1 && waitMatches == 1 && hasRecoveryHandle == 0 &&
+       pastDeadline == 1 && dispatchOutcome == 1 then 262
+    else 0
+  else if op != 0 || waitMatches != 1 then 0
+  else if isWaitingRemote != 1 then 257
+  else if pastDeadline == 1 then 258
+  else if dispatchOutcome == 0 then 259
+  else
+    let restoreFlags : UInt32 := if hasRecoveryHandle == 0 then 1536 else 512
+    if dispatchOutcome == 1 && retries < maxRetries && retryFitsDeadline == 1 then
+      260 ||| restoreFlags
+    else
+      261 ||| restoreFlags
+
+/--
+  Unboxed C-ABI Governed Read-Only Memory MCP Admission Gate (`orb_memory_tool_gate`):
+  Decides whether an MCP caller may invoke a Core-brokered read-only Hindsight memory tool:
+  - `opKind`: `0 = search_knowledge`, `1 = get_knowledge_page`, `2 = get_knowledge_tree`,
+    `3 = recall` (`>= 4` = unknown or mutating operation -> rejected `0`).
+  - `callerRole`: `0 = Executor`, `1 = Coordinator`, `2 = Operator` (`> 2` -> rejected `0`).
+  - `isExternalSession`: `1` for external missionless MCP sessions; suspended (`0`) whenever
+    `bunkerState >= 1` (`SoftQuarantine` or `HardLockdown`).
+  - `onManagedNode`: `1` when executing on an untrusted `managed-*` cloud VM -> always rejected (`0`).
+  - `hasProjectMemorySkill`: `1` when a non-external mission's Paloma project attaches `spark-memory`.
+  - `hasSecretAccess`: `1` when `SecretBroker` grants read access to `HINDSIGHT_API_KEY` / `SPARK_MEMORY_API_TOKEN`.
+  - `bankKind`: `0 = thomas`, `1 = ppl` (`>= 2` -> rejected `0`).
+  - `requestedLimit`, `maxLimit`, `requestedTokens`, `maxTokens`: bounded query count & recall token budget.
+-/
+@[inline, export orb_memory_tool_gate]
+def memoryToolGate
+    (opKind callerRole isExternalSession bunkerState onManagedNode
+     hasProjectMemorySkill hasSecretAccess bankKind : UInt8)
+    (requestedLimit maxLimit requestedTokens maxTokens : UInt32) : UInt8 :=
+  let roleAuthorized : Bool :=
+    callerRole == 1 || callerRole == 2 ||
+    (callerRole == 0 && ((isExternalSession == 0 && hasProjectMemorySkill == 1) || hasSecretAccess == 1))
+  let bunkerAllowed : Bool :=
+    isExternalSession == 0 || bunkerState == 0
+  let withinBudget : Bool :=
+    maxLimit ≥ 1 && requestedLimit ≥ 1 && requestedLimit ≤ maxLimit &&
+    maxTokens ≥ 256 && requestedTokens ≥ 1 && requestedTokens ≤ maxTokens
+  if opKind ≤ 3 && bankKind ≤ 1 && onManagedNode == 0 &&
+      bunkerAllowed && roleAuthorized && withinBudget then 1
+  else 0
+
+/--
+  Unboxed C-ABI Upload Post-Job Cleanup Gate (`orb_upload_cleanup_gate`):
+  Decides whether `<uploads>/<uuid>` may be removed:
+  - Single-job post-run cleanup (`isExpiredForGc == 0`) deletes temporary prompt attachments
+    (`isSharedLibraryArchive == 0`) while retaining shared `library-skills-*.tar.gz` bundles
+    (`isSharedLibraryArchive == 1`) cached across missions in `REMOTE_LIBRARY_SKILL_UPLOADS`.
+  - TTL sweep (`isExpiredForGc == 1`, `age > BATCH_OPEN_SECS`) reaps both once expired.
+-/
+@[inline, export orb_upload_cleanup_gate]
+def uploadCleanupGate
+    (hasValidUuid isSharedLibraryArchive isExpiredForGc : UInt8) : UInt8 :=
+  if hasValidUuid == 1 && (isSharedLibraryArchive == 0 || isExpiredForGc == 1) then 1
+  else 0
+
+/--
+  Unboxed C-ABI Proxy Chain Exhaustion Classifier (`orb_proxy_exhaustion_step`):
+  Partitions terminal chain exhaustion across upstream attempt outcomes into disjoint classes:
+  - `1 = SkippedConfiguration` (`attempted == 0`)
+  - `2 = TransportValidation` (`attempted > 0` and all attempts rejected by pre-flight transport policy)
+  - `3 = ContextLengthExceeded` (`attempted > 0`, prompt overflow reported, zero rate-limit / billing errors)
+  - `4 = PaymentRequiredOutOfCredit` (`paymentRequiredCount > 0`, zero rate-limit / 5xx errors)
+  - `5 = ClientOrAuthError` (`clientAuthErrorCount > 0`, zero billing / rate-limit / 5xx errors)
+  - `6 = ServerUnavailable` (`serverErrorCount > 0`, zero rate-limit errors)
+  - `7 = RateLimitedOrQuota` (`rateLimitCount > 0`)
+-/
+@[inline, export orb_proxy_exhaustion_step]
+def proxyExhaustionStep
+    (rateLimitCount paymentRequiredCount clientAuthErrorCount
+     serverErrorCount transportValidationCount : UInt32)
+    (hasContextOverflow : UInt8) : UInt8 :=
+  let anyAttempt : Bool :=
+    rateLimitCount != 0 || paymentRequiredCount != 0 ||
+    clientAuthErrorCount != 0 || serverErrorCount != 0
+  let attempted : UInt64 :=
+    rateLimitCount.toUInt64 + paymentRequiredCount.toUInt64 +
+    clientAuthErrorCount.toUInt64 + serverErrorCount.toUInt64
+  if !anyAttempt then 1
+  else if transportValidationCount.toUInt64 == attempted then 2
+  else if hasContextOverflow == 1 && rateLimitCount == 0 && paymentRequiredCount == 0 then 3
+  else if paymentRequiredCount != 0 && rateLimitCount == 0 && serverErrorCount == 0 then 4
+  else if clientAuthErrorCount != 0 && paymentRequiredCount == 0 &&
+          rateLimitCount == 0 && serverErrorCount == 0 then 5
+  else if serverErrorCount != 0 && rateLimitCount == 0 then 6
+  else 7
+
+/--
+  Unboxed C-ABI Cross-Client Composer Default Stepper (`orb_composer_default_step`):
+  Decides how an unpinned or newly opened composer selects its initial execution backend
+  identically across Orb Desktop, iOS, and Android:
+  - `0 = KeepExplicitChoice` (`hasExplicitChoice == 1`)
+  - `1 = DefaultPalomaHermes` (`hasExplicitChoice == 0 && hasPinnedContext == 0 && hermesAvailable == 1`)
+  - `2 = DefaultWorkspaceHarness` (`hasExplicitChoice == 0 && (hasPinnedContext == 1 || hermesAvailable == 0) && hasNativeHarness == 1`)
+  - `3 = AwaitSelection` (otherwise: no explicit choice, Paloma unavailable or context pinned, and no native harness)
+-/
+@[inline, export orb_composer_default_step]
+def composerDefaultStep
+    (hasExplicitChoice hasPinnedContext hermesAvailable hasNativeHarness : UInt8) : UInt8 :=
+  if hasExplicitChoice == 1 then 0
+  else if hasPinnedContext == 0 && hermesAvailable == 1 then 1
+  else if hasNativeHarness == 1 then 2
+  else 3
+
+/--
+  Unboxed C-ABI Cloud-to-Workspace Handoff & Fork Admission Stepper (`orb_cloud_handoff_step`):
+  Decides whether `POST /api/control/missions/:id/fork` is admitted and how transcript/workspace
+  provenance is materialized when forking from a `cloud_*` (Paloma / Cursor / Grok Bot) vs native
+  workspace mission:
+  - Packs `(admit : UInt8, useCloudTurns : UInt8, shareSourceWorkspace : UInt8, freshWorkspace : UInt8)`
+    into a 32-bit word:
+    * `bit 0 = admit` (`1` iff handoff/fork is permitted)
+    * `bit 8 = useCloudTurns` (`1` -> synthesize canonical turns from `cloud_executions`)
+    * `bit 16 = shareSourceWorkspace` (`1` -> emit `fork-workspace:<source>` and reuse source root)
+    * `bit 24 = freshWorkspace` (`1` -> omit `fork-workspace:<source>`, allocate fresh workspace on chosen machine)
+  - Side-questions (`/btw`, `isSideQuestion == 1`) are forbidden on `cloud_*` sources (`0`).
+  - Cloud-to-workspace handoffs (`sourceIsCloud == 1 && isSideQuestion == 0`) require a native
+    target harness (`targetIsNative == 1`), non-empty conversation turns (`hasHistoryTurns == 1`),
+    and valid target placement (`targetPlacementValid == 1`).
+  - Native forks (`sourceIsCloud == 0`) require `targetIsNative == 1` and `targetPlacementValid == 1`,
+    and share the source workspace lineage (`shareSourceWorkspace == 1`, `freshWorkspace == 0`).
+-/
+@[inline, export orb_cloud_handoff_step]
+def cloudHandoffStep
+    (sourceIsCloud isSideQuestion targetIsNative hasHistoryTurns targetPlacementValid : UInt8) : UInt32 :=
+  if targetIsNative != 1 || targetPlacementValid != 1 then 0
+  else if sourceIsCloud == 1 then
+    if isSideQuestion == 0 && hasHistoryTurns == 1 then
+      (0x01000101 : UInt32)
+    else 0
+  else
+    (0x00010001 : UInt32)
+
+/--
+  Unboxed C-ABI Adaptive Observation Poll Cadence (`orb_fast_poll_delay_ms`):
+  Computes the bounded sleep interval (in milliseconds) for remote node incremental log
+  streaming and active run reconciliation:
+  - Stopping / cancelled jobs (`isStopping == 1`): steady `500` ms.
+  - Consecutive observation failures (`consecutiveFailures > 0`): bounded backoff
+    `1000` ms (`1`), `2000` ms (`2`), `4000` ms (`3`), clamped at `5000` ms (`>= 4`).
+  - Healthy initial burst (`elapsedMs < 4000`): `80` ms for low first-token latency.
+  - Warm ramp (`4000 <= elapsedMs < 15000`): `200` ms.
+  - Long-running steady state (`elapsedMs >= 15000`): `500` ms.
+-/
+@[inline, export orb_fast_poll_delay_ms]
+def fastPollDelayMs
+    (isStopping : UInt8) (elapsedMs : UInt64) (consecutiveFailures : UInt32) : UInt64 :=
+  if consecutiveFailures ≥ 4 then 5000
+  else if consecutiveFailures == 3 then 4000
+  else if consecutiveFailures == 2 then 2000
+  else if consecutiveFailures == 1 then 1000
+  else if isStopping == 1 then 500
+  else if elapsedMs < 4000 then 80
+  else if elapsedMs < 15000 then 200
+  else 500
+
+/--
+  Unboxed C-ABI Scoped MCP Preflight Cache Gate (`orb_mcp_preflight_cache_gate`):
+  Admits (`1`) reuse of a verified `/api/mcp/capabilities` snapshot across `sandboxed-mcp launch`
+  -> child stdio `"initialize"` -> `"tools/list"` iff:
+  - `hasCached == 1`, `identityMatches == 1` (mission ID + role), `contractMatches == 1`,
+  - `sessionUnexpired == 1` (token expiry strictly beyond safety margin), and
+  - `maxTtlSecs >= 1 && maxTtlSecs <= 300 && ageSecs <= maxTtlSecs`.
+-/
+@[inline, export orb_mcp_preflight_cache_gate]
+def mcpPreflightCacheGate
+    (hasCached identityMatches contractMatches sessionUnexpired : UInt8)
+    (ageSecs maxTtlSecs : UInt64) : UInt8 :=
+  if hasCached == 1 && identityMatches == 1 && contractMatches == 1 && sessionUnexpired == 1 &&
+      maxTtlSecs ≥ 1 && maxTtlSecs ≤ 300 && ageSecs ≤ maxTtlSecs then 1
+  else 0
+
 end Orb.Kernel

@@ -8,7 +8,7 @@ package «orb-net-leaf» where
     ⟨`autoImplicit, false⟩,
     ⟨`warningAsError, true⟩
   ]
-  moreLinkArgs := #["-lssl", "-lcrypto", "-lutil", "-ldl"]
+  moreLinkArgs := if System.Platform.isOSX then #["-lssl", "-lcrypto"] else #["-lssl", "-lcrypto", "-lutil", "-ldl"]
 
 require «lean-sys» from git
   "https://github.com/Th0rgal/lean-sys.git" @ "bbe3183d3fd57ee662405f0c63fde890fb878324"

@@ -104,6 +104,29 @@ object OrbSideAgent {
     val liveStatuses = setOf("active", "running", "pending", "queued", "starting", "resuming", "waiting_background", "paused")
     val resumableStatuses = setOf("awaiting_user", "completed", "interrupted")
     val transcriptEventTypes = listOf("user_message", "assistant_message", "assistant_message_canonical")
+    private val automaticUserSources = setOf(
+        "api:usage-limit-replay",
+        "background-task",
+        "scheduler",
+        "idle-worker-watchdog",
+        "transport_auto_resume",
+        "remote-build-terminal",
+        "task-board"
+    )
+    private const val RESUME_PROMPT_TEXT =
+        "Your previous turn was interrupted before it finished. Check what is already done, then continue from there. Do not redo finished work."
+    private val automaticRecoveryRegex = Regex("""^\[Automatic (?:recovery|resume after a usage limit)\]""", RegexOption.IGNORE_CASE)
+
+    fun isAutomaticUserEvent(content: String, metadata: Map<String, Any?> = emptyMap()): Boolean {
+        val source = OrbJSON.str(metadata, "source")
+        if (source != null && source in automaticUserSources) return true
+        if (metadata["backgroundWake"] != null) return true
+        if (OrbJSON.bool(metadata, "resumePrompt") == true) return true
+        val trimmed = content.trim()
+        if (trimmed.isEmpty()) return false
+        if (automaticRecoveryRegex.containsMatchIn(trimmed) || trimmed == RESUME_PROMPT_TEXT) return true
+        return trimmed.startsWith("Background task `") && trimmed.endsWith("\n\nContinue from here.")
+    }
 
     fun shouldRotateSession(turnCount: Int, maxSequence: Long): Boolean =
         turnCount >= MAX_SESSION_TURNS || maxSequence >= MAX_SESSION_EVENTS
@@ -456,6 +479,8 @@ object OrbSideAgent {
             val rawContent = (row.raw["content"] as? String) ?: row.str("content", "text", "message").orEmpty()
             when (role) {
                 "user" -> {
+                    val rowMeta = row.dict("metadata") ?: row.raw
+                    if (isAutomaticUserEvent(rawContent, rowMeta)) continue
                     if (question.isNotEmpty()) flush(index)
                     question = extractQuestion(rawContent)
                     at = row.str("timestamp", "created_at").orEmpty()
@@ -548,7 +573,7 @@ object OrbSideAgent {
             when (type) {
                 "user_message" -> {
                     val queued = OrbJSON.bool(meta, "queued") == true || OrbJSON.bool(data, "queued") == true
-                    if (queued) continue
+                    if (queued || isAutomaticUserEvent(rawContent, meta.ifEmpty { data })) continue
                     sawNonQueuedUser = true
                     var primaryId: String? = null
                     for (key in listOf("client_message_id", "message_id", "event_id")) {
@@ -657,11 +682,13 @@ object OrbSideAgent {
             "side_question" to prompt(context(turns), question, priorTurns),
             "side_context_mode" to "incremental"
         )
+        val idempotencyHeaders = mapOf("Idempotency-Key" to "btw:$parentId:$idempotencyKey")
         val res = retrying {
             core.request(
                 "/api/control/missions/${core.encodeComponent(parentId)}/btw/agent",
                 method = "POST",
-                body = body
+                body = body,
+                headers = idempotencyHeaders
             )
         }
         val dict = OrbJSON.dict(res) ?: throw OrbError("The side agent did not start.")
@@ -1062,6 +1089,7 @@ fun OrbSideAgentSheet(
                     localAskedAtMs = System.currentTimeMillis()
                 }
                 OrbWarmSyncCoordinator.markBtwDirty(core, session.parentId)
+                val idempotencyHeaders = mapOf("Idempotency-Key" to "msg:$targetId:$clientId")
                 val receipt = OrbJSON.dict(
                     OrbSideAgent.retrying {
                         core.request(
@@ -1072,7 +1100,8 @@ fun OrbSideAgentSheet(
                                 "content" to wrapped,
                                 "client_message_id" to clientId,
                                 "queue_followup" to true
-                            )
+                            ),
+                            headers = idempotencyHeaders
                         )
                     }
                 )

@@ -79,4 +79,55 @@ class OrbSideAgentTest {
             OrbSideAgent.transcriptEventTypes
         )
     }
+
+    @Test
+    fun parseTurnsPairsAutoRecoveredAnswerWithOriginalQuestion() {
+        val events = listOf(
+            OrbRow(
+                "e1",
+                mapOf(
+                    "sequence" to 274L,
+                    "event_type" to "user_message",
+                    "content" to "<main_conversation_update>\nctx\n</main_conversation_update>\n\nCurrent request:\noù en est le run sur babylon ?\n",
+                    "timestamp" to "2026-11-07T04:47:37Z",
+                    "event_id" to "8652b679-ee6e-4b49-9429-b09ec99e08a9",
+                    "metadata" to mapOf("queued" to false, "source" to "api:prod")
+                )
+            ),
+            OrbRow(
+                "e2",
+                mapOf(
+                    "sequence" to 286L,
+                    "event_type" to "assistant_message",
+                    "content" to "Remote opencode job 155911be-15b0-4184-a58b-acb8875ac36c on node 'babylon' finished with state 'failed' (exit Some(1)); error: command exited with Some(1)."
+                )
+            ),
+            OrbRow(
+                "e3",
+                mapOf(
+                    "sequence" to 289L,
+                    "event_type" to "user_message",
+                    "content" to "[Automatic recovery] Inference connection interrupted stopped your previous turn. Resume your work where it stopped, and check the state of anything you had started before continuing. Do not redo finished work.",
+                    "timestamp" to "2026-11-07T04:51:10Z",
+                    "event_id" to "e2abbfa2-fbba-40e3-a3b1-285e68691620",
+                    "metadata" to mapOf("queued" to false, "source" to "api:usage-limit-replay")
+                )
+            ),
+            OrbRow(
+                "e4",
+                mapOf(
+                    "sequence" to 301L,
+                    "event_type" to "assistant_message",
+                    "content" to "Oui, ça a nettement progressé ces deux dernières heures sur babylon."
+                )
+            )
+        )
+        val parsed = OrbSideAgent.parseTurns(missionId = "fc153ce6", events = events, active = false)
+        assertNull(parsed.open)
+        assertEquals(1, parsed.turns.size)
+        assertEquals("btw:fc153ce6:274", parsed.turns[0].id)
+        assertEquals("où en est le run sur babylon ?", parsed.turns[0].question)
+        assertEquals("Oui, ça a nettement progressé ces deux dernières heures sur babylon.", parsed.turns[0].answer)
+        assertEquals(listOf("8652b679-ee6e-4b49-9429-b09ec99e08a9"), parsed.deliveredMessages.mapNotNull { it.id })
+    }
 }

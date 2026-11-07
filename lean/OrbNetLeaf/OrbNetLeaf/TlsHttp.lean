@@ -307,18 +307,21 @@ def openHttps11Stream
 
 /-- Drain a live `TlsSession` in linear $O(N)$ time (`Array ByteArray` chunk accumulation + single flatten)
     up to `maxWireCap` bytes into `[statusByte || wireBytes]` (`1` = `close_notify`, `2` = cap exceeded, `4` = TCP EOF). -/
-private def drainTlsSessionToFramed (sess : TlsSession) (maxWireCap : Nat) : IO ByteArray := do
+private def drainTlsSessionToFramed (sess : TlsSession) (maxWireCap : Nat) (rcvTimeoutMs : UInt32 := 0) : IO ByteArray := do
   let mut chunks : Array ByteArray := #[]
   let mut got : Nat := 0
   let mut status : UInt8 := 3
   let mut failed := false
+  let mut firstRead := true
   try
     while status == 3 && !failed do
       if got > maxWireCap then
         status := 2
       else
         let stepCap := Nat.min 16384 ((maxWireCap + 1) - got)
-        match ← readTlsSessionChunk sess stepCap 0 with
+        let tmo : UInt32 := if firstRead then rcvTimeoutMs else 0
+        firstRead := false
+        match ← readTlsSessionChunk sess stepCap tmo with
         | .chunk c =>
           chunks := chunks.push c
           got := got + c.size
@@ -491,9 +494,10 @@ def httpsRequest
       host.toUTF8.size.toUInt64 reqWire.size.toUInt64 maxRespBytes.toUInt64 != 1 then
     return .error "httpsRequest rejected by verifyOutboundRequest"
   let maxWireCap := maxRespBytes + 65536
-  let some sess ← rawTlsOpen host port reqWire vpFlag 0 timeoutMs
+  let connectTimeoutMs : UInt32 := if timeoutMs == 0 || timeoutMs > 15000 then 15000 else timeoutMs
+  let some sess ← rawTlsOpen host port reqWire vpFlag 0 connectTimeoutMs
     | return .error s!"TLS roundtrip failed to {host}:{port}"
-  let framed ← drainTlsSessionToFramed sess maxWireCap
+  let framed ← drainTlsSessionToFramed sess maxWireCap timeoutMs
   if framed.isEmpty then
     return .error s!"TLS read failed from {host}:{port}"
   return decodeTlsRoundtripWire framed maxRespBytes method

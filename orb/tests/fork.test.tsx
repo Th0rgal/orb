@@ -189,6 +189,60 @@ it("dismisses a positioned sidebar fork when clicking outside its portal", () =>
   ui.unmount();
 });
 
+it("hands off a completed Paloma cloud conversation into a chosen workspace machine", async () => {
+  const cloudSource: api.Mission = {
+    id: "cloud-source",
+    title: "Memory recall",
+    backend: "cloud_hermes",
+    status: "completed",
+    history: [],
+    created_at: "",
+    updated_at: "",
+  };
+  const handedOff: api.Mission = {
+    ...cloudSource,
+    id: "ws-child",
+    backend: "codex",
+    model_override: "gpt-6-astra",
+    remote_node_id: "babylon",
+    status: "active",
+    tags: ["fork-of:cloud-source"],
+  };
+  vi.spyOn(api, "getMission").mockResolvedValue(cloudSource);
+  const stop = vi.spyOn(api, "cancelMission");
+  const fork = vi.spyOn(api, "forkMission").mockResolvedValue(handedOff);
+  const opened = vi.fn();
+  const ui = render(() => (
+    <ForkMission
+      mission={cloudSource}
+      choices={choices}
+      destination="Paloma"
+      targets={[
+        { id: "core", label: "Core", remoteNodeId: null },
+        { id: "babylon", label: "babylon", remoteNodeId: "babylon" },
+      ]}
+      onClose={() => {}}
+      onFork={opened}
+    />
+  ));
+  expect(screen.getByRole("menu", { name: "Continue in workspace" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "babylon" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Codex" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /GPT-6 Astra/ }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Default" }));
+  await waitFor(() => expect(opened).toHaveBeenCalledWith(expect.objectContaining({ id: "ws-child" })));
+  expect(stop).not.toHaveBeenCalled();
+  expect(fork).toHaveBeenCalledWith(
+    "cloud-source",
+    expect.objectContaining({
+      backend: "codex",
+      model_override: "gpt-6-astra",
+      remote_node_id: "babylon",
+    }),
+  );
+  ui.unmount();
+});
+
 for (const fixture of fixtures) it(`fork context fixture: ${fixture.name}`, () => {
   const parsed = forkContext(fixture.text);
   if (!fixture.valid) expect(parsed).toBeNull();

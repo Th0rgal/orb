@@ -171,6 +171,15 @@ uint64_t orb_model_account_score(uint32_t, uint8_t, uint8_t, uint8_t, uint8_t, u
 uint64_t orb_epoch_fence_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, uint64_t);
 uint64_t orb_effect_outbox_step(uint8_t, uint8_t, uint8_t, uint8_t, uint64_t, uint64_t);
 uint64_t orb_crash_boundary_step(uint32_t, uint32_t, uint64_t, uint32_t, uint64_t, uint64_t, uint32_t, uint32_t);
+uint8_t orb_activation_rollback_admit(uint8_t, uint8_t, uint8_t);
+uint32_t orb_remote_replay_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t);
+uint8_t orb_memory_tool_gate(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint8_t orb_upload_cleanup_gate(uint8_t, uint8_t, uint8_t);
+uint8_t orb_proxy_exhaustion_step(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint8_t);
+uint8_t orb_composer_default_step(uint8_t, uint8_t, uint8_t, uint8_t);
+uint32_t orb_cloud_handoff_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_fast_poll_delay_ms(uint8_t, uint64_t, uint32_t);
+uint8_t orb_mcp_preflight_cache_gate(uint8_t, uint8_t, uint8_t, uint8_t, uint64_t, uint64_t);
 #ifdef __cplusplus
 }
 #endif

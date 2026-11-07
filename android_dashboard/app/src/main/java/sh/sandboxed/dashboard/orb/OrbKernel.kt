@@ -823,6 +823,23 @@ object OrbKernel {
         reqOwner: Int
     ): Long
 
+    @JvmStatic
+    external fun orbComposerDefaultStep(
+        hasExplicitChoice: Int,
+        hasPinnedContext: Int,
+        hermesAvailable: Int,
+        hasNativeHarness: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbCloudHandoffStep(
+        sourceIsCloud: Int,
+        isSideQuestion: Int,
+        targetIsNative: Int,
+        hasHistoryTurns: Int,
+        targetPlacementValid: Int
+    ): Int
+
     data class WorkfoldVerdict(val foldItem: Boolean, val foldHasToolNext: Boolean)
 
     private fun bInt(v: Boolean): Int = if (v) 1 else 0
@@ -1575,5 +1592,58 @@ object OrbKernel {
             evictOtherProjects = ((lo32 ushr 10) and 1) != 0,
             nextRev32 = hi32
         )
+    }
+
+    enum class ComposerDefaultStepResult {
+        KEEP_EXPLICIT,
+        DEFAULT_PALOMA_HERMES,
+        DEFAULT_WORKSPACE_HARNESS,
+        AWAIT_SELECTION
+    }
+
+    fun composerDefaultStep(
+        hasExplicitChoice: Boolean,
+        hasPinnedContext: Boolean,
+        hermesAvailable: Boolean,
+        hasNativeHarness: Boolean
+    ): ComposerDefaultStepResult {
+        requireNative()
+        val raw = orbComposerDefaultStep(
+            bInt(hasExplicitChoice),
+            bInt(hasPinnedContext),
+            bInt(hermesAvailable),
+            bInt(hasNativeHarness)
+        )
+        return when (raw) {
+            0 -> ComposerDefaultStepResult.KEEP_EXPLICIT
+            1 -> ComposerDefaultStepResult.DEFAULT_PALOMA_HERMES
+            2 -> ComposerDefaultStepResult.DEFAULT_WORKSPACE_HARNESS
+            else -> ComposerDefaultStepResult.AWAIT_SELECTION
+        }
+    }
+
+    enum class CloudHandoffStepResult {
+        DENY,
+        ALLOW_HANDOFF,
+        ALLOW_NATIVE_FORK
+    }
+
+    fun cloudHandoffStep(
+        sourceIsCloud: Boolean,
+        isSideQuestion: Boolean,
+        targetIsNative: Boolean,
+        hasHistoryTurns: Boolean,
+        targetPlacementValid: Boolean
+    ): CloudHandoffStepResult {
+        requireNative()
+        val raw = orbCloudHandoffStep(
+            bInt(sourceIsCloud),
+            bInt(isSideQuestion),
+            bInt(targetIsNative),
+            bInt(hasHistoryTurns),
+            bInt(targetPlacementValid)
+        )
+        if ((raw and 1) == 0) return CloudHandoffStepResult.DENY
+        return if (((raw ushr 24) and 1) != 0) CloudHandoffStepResult.ALLOW_HANDOFF else CloudHandoffStepResult.ALLOW_NATIVE_FORK
     }
 }

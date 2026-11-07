@@ -43,7 +43,7 @@ import {
   verifyGitHubOAuthCallback,
   verifyIssuedAuthToken,
 } from "./githubSignIn";
-import { localInstalled, pathOverrides, refreshLocalAgents, setPathOverride, tauriInvoke } from "./localAgents";
+import { localInstalled, pathOverrides, refreshLocalAgents, setPathOverride } from "./localAgents";
 import { nativeInvoke } from "./native";
 import { pollWhileVisible } from "./poll";
 import { DebugInfoPanel } from "./DebugInfo";
@@ -271,13 +271,13 @@ function BackgroundSyncCard() {
   const request = (project: string) => ({ endpoint: getApiUrl(), token: getJwt() ?? "", project, paths: [] });
   const refresh = async () => {
     try {
-      const invoke = tauriInvoke(); if (!invoke) return;
-      const res = await invoke("project_context_workers", { request: request("list") }) as { workers: ContextWorker[] };
-      setWorkers(res.workers); setError("");
+      const invoke = nativeInvoke(); if (!invoke) return;
+      const res = await invoke("project_context_workers", { request: request("list") }) as { workers: ContextWorker[] } | null;
+      setWorkers(Array.isArray(res?.workers) ? res.workers : []); setError("");
     } catch (e) { setError(String(e)); }
   };
   const stop = async (project: string) => {
-    try { const invoke = tauriInvoke(); if (!invoke) return; await invoke("project_context_stop", { request: request(project) }); }
+    try { const invoke = nativeInvoke(); if (!invoke) return; await invoke("project_context_stop", { request: request(project) }); }
     catch (e) { setError(String(e)); }
     setTimeout(() => void refresh(), 1500);
   };

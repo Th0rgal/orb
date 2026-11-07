@@ -1,5 +1,5 @@
 /-
-  OrbCore.MutantSuite: Adversarial Mutant Kills (`5/5` domain gates covered, `0 sorryAx`)
+  OrbCore.MutantSuite: Adversarial Mutant Kills (`7/7` domain gates covered, `0 sorryAx`)
   for Wave 4 `OrbCore.Spec`.
 -/
 import OrbCore.Spec
@@ -54,6 +54,27 @@ def verifyDeployUnitNameMutantTraversal
       (unitCode == 2 && unitLen ≥ 8 && unitLen ≤ 22) ||
       (unitCode == 3 && unitLen ≥ 9 && unitLen ≤ 17)) then 1 else 0
 
+/-- Mutant 6: Ignores per-model concurrency cap (`modelConcCap`) whenever account concurrency is uncapped (`acctConcCap == 0`)! -/
+def verifyProviderPacingAdmissionMutantIgnoreModelConc
+    (acctRpmCap acctConcCap modelRpmCap modelConcCap : UInt32)
+    (acctRpmUsed acctInflight modelRpmUsed modelInflight : UInt32) : UInt8 :=
+  if singleCapAdmitted acctRpmCap 100000 acctRpmUsed &&
+     singleCapAdmitted acctConcCap 1024 acctInflight &&
+     singleCapAdmitted modelRpmCap 100000 modelRpmUsed &&
+     (acctConcCap == 0 || singleCapAdmitted modelConcCap 1024 modelInflight) then 1 else 0
+
+/-- Mutant 7: Replays a `RemoteWait` even after a manual/user resume superseded `placementJobHash`
+    with a non-`remote_dispatch_failed` run (`latestRunDispatchFailed == 0`)! -/
+def verifyRemoteReplaySupersessionMutantManualOverride
+    (waitArmed nodeMatches latestRunTerminal latestRunDispatchFailed : UInt8)
+    (placementJobHash failedJobHash latestRunJobHash : UInt64) : UInt8 :=
+  if waitArmed == 1 && nodeMatches == 1 &&
+     latestRunTerminal ≤ 1 && latestRunDispatchFailed ≤ 1 &&
+     placementJobHash > 0 && failedJobHash > 0 &&
+     (placementJobHash == failedJobHash ||
+      (latestRunTerminal == 1 &&
+       latestRunJobHash > 0 && latestRunJobHash == placementJobHash)) then 1 else 0
+
 /-- Theorem 1: `verifyCoreStartupConfig` kills the non-loopback `DEV_MODE=true` remote exposure mutant
     AND agrees on valid production config. -/
 theorem core_startup_kills_remote_dev_mutant :
@@ -99,15 +120,6 @@ theorem deploy_unit_kills_traversal_mutant :
       verifyDeployUnitNameMutantTraversal 1 0 12 := by
   decide
 
-/-- Mutant 6: Ignores per-model concurrency cap (`modelConcCap`) whenever account concurrency is uncapped (`acctConcCap == 0`)! -/
-def verifyProviderPacingAdmissionMutantIgnoreModelConc
-    (acctRpmCap acctConcCap modelRpmCap modelConcCap : UInt32)
-    (acctRpmUsed acctInflight modelRpmUsed modelInflight : UInt32) : UInt8 :=
-  if singleCapAdmitted acctRpmCap 100000 acctRpmUsed &&
-     singleCapAdmitted acctConcCap 1024 acctInflight &&
-     singleCapAdmitted modelRpmCap 100000 modelRpmUsed &&
-     (acctConcCap == 0 || singleCapAdmitted modelConcCap 1024 modelInflight) then 1 else 0
-
 /-- Theorem 6: `verifyProviderPacingAdmission` kills the per-model concurrency bypass mutant
     AND agrees when per-model in-flight load has headroom (`1 < 2`). -/
 theorem provider_pacing_kills_model_concurrency_mutant :
@@ -115,6 +127,15 @@ theorem provider_pacing_kills_model_concurrency_mutant :
       verifyProviderPacingAdmissionMutantIgnoreModelConc 300 0 0 2 2 2 2 2 ∧
     verifyProviderPacingAdmission 300 0 0 2 2 1 2 1 =
       verifyProviderPacingAdmissionMutantIgnoreModelConc 300 0 0 2 2 1 2 1 := by
+  decide
+
+/-- Theorem 7: `verifyRemoteReplaySupersession` kills the manual-resume supersession mutant
+    AND agrees on valid pre-dispatch failed replay chains (`latestRunDispatchFailed == 1`). -/
+theorem remote_replay_supersession_kills_manual_override_mutant :
+    verifyRemoteReplaySupersession 1 1 1 0 3003 1001 3003 ≠
+      verifyRemoteReplaySupersessionMutantManualOverride 1 1 1 0 3003 1001 3003 ∧
+    verifyRemoteReplaySupersession 1 1 1 1 2002 1001 2002 =
+      verifyRemoteReplaySupersessionMutantManualOverride 1 1 1 1 2002 1001 2002 := by
   decide
 
 end OrbCore.MutantSuite

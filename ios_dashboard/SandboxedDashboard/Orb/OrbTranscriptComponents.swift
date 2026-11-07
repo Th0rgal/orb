@@ -328,6 +328,8 @@ struct OrbConversationMenu: View, Equatable {
     let canStop: Bool
     let externalURL: URL?
     let local: Bool
+    var canFork: Bool = true
+    var forkTitle: String = "Fork"
     let hasProject: Bool
     let perform: (Action) -> Void
 
@@ -341,7 +343,8 @@ struct OrbConversationMenu: View, Equatable {
         l.hasMission == r.hasMission && l.summary == r.summary &&
         l.canReopen == r.canReopen && l.reopenTitle == r.reopenTitle && l.canArchive == r.canArchive &&
         l.working == r.working && l.canStop == r.canStop && l.externalURL == r.externalURL &&
-        l.local == r.local && l.hasProject == r.hasProject
+        l.local == r.local && l.canFork == r.canFork && l.forkTitle == r.forkTitle &&
+        l.hasProject == r.hasProject
     }
 
     var body: some View {
@@ -367,8 +370,10 @@ struct OrbConversationMenu: View, Equatable {
                 Section {
                     Button { perform(.rename) } label: { Label("Rename", systemImage: "pencil") }
                     Button { perform(.move) } label: { Label("Move", systemImage: "folder.badge.gearshape") }
+                    if canFork {
+                        Button { perform(.fork) } label: { Label(forkTitle, systemImage: "arrow.triangle.branch") }
+                    }
                     if local {
-                        Button { perform(.fork) } label: { Label("Fork", systemImage: "arrow.triangle.branch") }
                         Button { perform(.clone) } label: { Label("Clone", systemImage: "plus.square.on.square") }
                     }
                 }

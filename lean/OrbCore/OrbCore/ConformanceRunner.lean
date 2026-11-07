@@ -1,6 +1,6 @@
 /-
   OrbCore.ConformanceRunner: Pure-Lean Shared Kernel Conformance & Fixture Runner (`orb-spec-runner`)
-   covering all 167 C-ABI exports in `shared/orb-spec/kernel_abi.json` and shared projection fixtures.
+   covering all 174 C-ABI exports in `shared/orb-spec/kernel_abi.json` and shared projection fixtures.
 -/
 import Orb.Kernel
 import LeanSys.Spec
@@ -10,7 +10,7 @@ namespace OrbCore.ConformanceRunner
 
 open OrbBin.Json
 
--- Direct `@[extern]` imports to all 167 exported C-ABI symbols of `Orb.Kernel` and `LeanSys.Spec`.
+-- Direct `@[extern]` imports to all 174 exported C-ABI symbols of `Orb.Kernel` and `LeanSys.Spec`.
 @[extern "orb_verify_writer_reuse"]
 private opaque c_fn_0 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt8) : UInt8
 @[extern "orb_verify_lease_mode"]
@@ -345,6 +345,24 @@ private opaque c_fn_164 (a0 : UInt64) (a1 : UInt64) (a2 : UInt64) (a3 : UInt64) 
 private opaque c_fn_165 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt64) (a5 : UInt64) : UInt64
 @[extern "orb_crash_boundary_step"]
 private opaque c_fn_166 (a0 : UInt32) (a1 : UInt32) (a2 : UInt64) (a3 : UInt32) (a4 : UInt64) (a5 : UInt64) (a6 : UInt32) (a7 : UInt32) : UInt64
+@[extern "orb_activation_rollback_admit"]
+private opaque c_fn_167 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) : UInt8
+@[extern "orb_remote_replay_step"]
+private opaque c_fn_168 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt8) (a6 : UInt8) (a7 : UInt32) (a8 : UInt32) : UInt32
+@[extern "orb_memory_tool_gate"]
+private opaque c_fn_169 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt8) (a6 : UInt8) (a7 : UInt8) (a8 : UInt32) (a9 : UInt32) (a10 : UInt32) (a11 : UInt32) : UInt8
+@[extern "orb_upload_cleanup_gate"]
+private opaque c_fn_170 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) : UInt8
+@[extern "orb_proxy_exhaustion_step"]
+private opaque c_fn_171 (a0 : UInt32) (a1 : UInt32) (a2 : UInt32) (a3 : UInt32) (a4 : UInt32) (a5 : UInt8) : UInt8
+@[extern "orb_composer_default_step"]
+private opaque c_fn_172 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) : UInt8
+@[extern "orb_cloud_handoff_step"]
+private opaque c_fn_173 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) : UInt32
+@[extern "orb_fast_poll_delay_ms"]
+private opaque c_fn_174 (a0 : UInt8) (a1 : UInt64) (a2 : UInt32) : UInt64
+@[extern "orb_mcp_preflight_cache_gate"]
+private opaque c_fn_175 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt64) (a5 : UInt64) : UInt8
 
 private def callExportChunk0? (sym : String) (args : Array UInt64) : Option UInt64 :=
   if sym == "orb_verify_writer_reuse" && args.size == 6 then some ((c_fn_0 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt8).toUInt64)
@@ -532,11 +550,23 @@ private def callExportChunk6? (sym : String) (args : Array UInt64) : Option UInt
   else if sym == "orb_epoch_fence_step" && args.size == 9 then some (c_fn_164 (args[0]!) (args[1]!) (args[2]!) (args[3]!) (args[4]!) (args[5]!) (args[6]!).toUInt32 (args[7]!).toUInt32 (args[8]!))
   else if sym == "orb_effect_outbox_step" && args.size == 6 then some (c_fn_165 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!) (args[5]!))
   else if sym == "orb_crash_boundary_step" && args.size == 8 then some (c_fn_166 (args[0]!).toUInt32 (args[1]!).toUInt32 (args[2]!) (args[3]!).toUInt32 (args[4]!) (args[5]!) (args[6]!).toUInt32 (args[7]!).toUInt32)
+  else if sym == "orb_activation_rollback_admit" && args.size == 3 then some ((c_fn_167 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8).toUInt64)
+  else if sym == "orb_remote_replay_step" && args.size == 9 then some ((c_fn_168 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt8 (args[6]!).toUInt8 (args[7]!).toUInt32 (args[8]!).toUInt32).toUInt64)
   else none
 
-/-- Dispatch any of the 167 C-ABI exports by symbol name and `UInt64` argument vector. -/
+private def callExportChunk7? (sym : String) (args : Array UInt64) : Option UInt64 :=
+  if sym == "orb_memory_tool_gate" && args.size == 12 then some ((c_fn_169 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt8 (args[6]!).toUInt8 (args[7]!).toUInt8 (args[8]!).toUInt32 (args[9]!).toUInt32 (args[10]!).toUInt32 (args[11]!).toUInt32).toUInt64)
+  else if sym == "orb_upload_cleanup_gate" && args.size == 3 then some ((c_fn_170 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8).toUInt64)
+  else if sym == "orb_proxy_exhaustion_step" && args.size == 6 then some ((c_fn_171 (args[0]!).toUInt32 (args[1]!).toUInt32 (args[2]!).toUInt32 (args[3]!).toUInt32 (args[4]!).toUInt32 (args[5]!).toUInt8).toUInt64)
+  else if sym == "orb_composer_default_step" && args.size == 4 then some ((c_fn_172 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8).toUInt64)
+  else if sym == "orb_cloud_handoff_step" && args.size == 5 then some ((c_fn_173 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8).toUInt64)
+  else if sym == "orb_fast_poll_delay_ms" && args.size == 3 then some (c_fn_174 (args[0]!).toUInt8 (args[1]!) (args[2]!).toUInt32)
+  else if sym == "orb_mcp_preflight_cache_gate" && args.size == 6 then some ((c_fn_175 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!) (args[5]!)).toUInt64)
+  else none
+
+/-- Dispatch any of the 176 C-ABI exports by symbol name and `UInt64` argument vector. -/
 def callExportU64? (sym : String) (args : Array UInt64) : Option UInt64 :=
-  (callExportChunk0? sym args) <|> (callExportChunk1? sym args) <|> (callExportChunk2? sym args) <|> (callExportChunk3? sym args) <|> (callExportChunk4? sym args) <|> (callExportChunk5? sym args) <|> (callExportChunk6? sym args)
+  (callExportChunk0? sym args) <|> (callExportChunk1? sym args) <|> (callExportChunk2? sym args) <|> (callExportChunk3? sym args) <|> (callExportChunk4? sym args) <|> (callExportChunk5? sym args) <|> (callExportChunk6? sym args) <|> (callExportChunk7? sym args)
 
 private def boolBit (v : JVal) (k : String) : UInt8 :=
   if (v.fieldBool? k).getD false then 1 else 0

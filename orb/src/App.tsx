@@ -38,6 +38,7 @@ import {
 } from "./keyboardShortcuts";
 import {preferSparkAdministration} from "./machineDestinations";
 import { LazyCloudAgentPage as CloudAgentPage } from "./cloudAgentsLoader";
+import { orbComposerDefaultStep } from "./orbKernel";
 import { monitorSoftware } from "./softwareInventory";
 import {startLocalQueueWorker} from "./localMessageQueue";
 const BtwSettings = lazy(() => import("./btwSettings").then(module => ({ default: module.BtwSettings })));
@@ -284,6 +285,28 @@ export default function App() {
     setWorkingDirectory(value);
     writeString(directoryKey(), value); // Kept in memory when storage refuses it.
   };
+  const [palomaAvailable, setPalomaAvailable] = createSignal(false);
+  createEffect(() => {
+    connectionVersion();
+    if (!isConnected()) {
+      setPalomaAvailable(false);
+      return;
+    }
+    import("./cloudAgentApi")
+      .then((m) => m.cloudAccounts())
+      .then((rows) => setPalomaAvailable(rows.some((row) => row.provider === "hermes" && row.available)))
+      .catch(() => setPalomaAvailable(false));
+  });
+  const showAskPaloma = createMemo(
+    () =>
+      isConnected() &&
+      orbComposerDefaultStep({
+        hasExplicitChoice: Boolean(harnessPick()),
+        hasPinnedContext: Boolean(newFolder() || workingDirectory().trim() || explicitMachine()),
+        hermesAvailable: palomaAvailable(),
+        hasNativeHarness: harnessChoices(newMachine()).length > 0,
+      }) === "default_paloma_hermes",
+  );
   const [envOpen, setEnvOpen] = createSignal<"machine" | "project" | null>(null);
   const [history, setHistory] = createSignal<(string | null)[]>([selected()]);
   const [hIdx, setHIdx] = createSignal(0);
@@ -1175,12 +1198,12 @@ export default function App() {
   };
 
   return (
-    <div class={`app ${onSettings() ? "settings-view" : ""} ${sidebar() ? "" : "sb-hidden"}`} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
+    <div class={`app ${onSettings() ? "settings-view" : ""} ${sidebar() ? "" : "sb-hidden"}`} data-pane={currentMissionId() ? "mission" : (currentController() || currentProjectFile() || currentProjectSettings()) ? "project" : "page"} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
       <MentionProjectContext.Provider value={()=>openMission()?.project??currentController()?.slug??effectiveNewProject()}>
-      <FilePanelProvider scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }} sidebar={sidebar} onSetSidebar={setSidebar}>
+      <FilePanelProvider missionOpen={currentMissionId()} scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }} sidebar={sidebar} onSetSidebar={setSidebar}>
       <button class="sidebar-backdrop" aria-label="Close sidebar" onClick={() => setSidebar(false)} tabIndex={-1} />
       <aside id="orb-sidebar" class="sidebar">
-        <div class="sb-top" data-tauri-drag-region />
+        <div class="sb-top" data-orb-drag-region />
         <nav class="sb-scroll" onContextMenu={(e) => e.preventDefault()}>
           <Show
             when={onSettings()}
@@ -1321,7 +1344,7 @@ export default function App() {
         <div class="sb-resize" onPointerDown={startResize} />
       </aside>
 
-      <header class="titlebar" data-tauri-drag-region>
+      <header class="titlebar" data-orb-drag-region>
         <div class="tb-left">
           <button class="icon-btn" aria-label="Toggle sidebar" aria-expanded={sidebar()} aria-controls="orb-sidebar" title={`Toggle sidebar (${sidebarShortcutLabel()})`} onClick={() => setSidebar(!sidebar())}>
             <Ic.SidebarIcon />
@@ -1337,7 +1360,7 @@ export default function App() {
             <Ic.ArrowRight />
           </button>
         </div>
-        <div class="tb-title" data-tauri-drag-region>
+        <div class="tb-title" data-orb-drag-region>
           <Switch>
             <Match when={skillPageName(selected())}>{(sk) => <span>Skills · {sk().name}</span>}</Match>
             <Match when={settingsSectionFor(selected())}>{(sec) => <span>Settings · {sec().label}</span>}</Match>
@@ -1690,6 +1713,21 @@ export default function App() {
                       )}
                     </Show>
                   </div><WorkingDirectoryPicker machine={newMachine()} machineName={machineLabel()} missions={missions()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/>
+                  <Show when={showAskPaloma()}>
+                    <button
+                      type="button"
+                      class="na-drop-btn"
+                      aria-label="Ask Paloma"
+                      title="Switch to Paloma for instant memory and fleet answers"
+                      onClick={() => {
+                        writeString("orb.cloud.provider", "hermes");
+                        open("cloud-agent");
+                      }}
+                    >
+                      <ProviderLogo type="hermes" />
+                      <span>Ask Paloma</span>
+                    </button>
+                  </Show>
                 </div>
 
                 {/* NativeMissionView owns the preview through acceptance; failures restore this composer. */}

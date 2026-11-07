@@ -1,6 +1,6 @@
 /** Managed (boat.dev) machines: API client and presentation logic. */
 import { createSignal } from "solid-js";
-import { api, ApiError, connectionVersion } from "./api";
+import { api, ApiError, connectionVersion, MANAGED_PROVISION_TIMEOUT_MS } from "./api";
 import { rememberManagedMachines } from "./machines/nodes";
 
 export type ManagedState = "provisioning" | "enrolling" | "online" | "destroying" | "destroyed" | "failed" | "stopped";
@@ -139,13 +139,18 @@ export async function listManagedMachines(): Promise<ManagedMachinesResponse | n
     throw error;
   }
 }
-const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-export const createManagedMachine = (body: CreateManagedMachine) => api<ManagedMachine>("/api/managed-machines", json(body));
+const json = (body: unknown, timeoutMs?: number): RequestInit => ({
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+  ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
+});
+export const createManagedMachine = (body: CreateManagedMachine) => api<ManagedMachine>("/api/managed-machines", json(body, MANAGED_PROVISION_TIMEOUT_MS));
 export const claimManagedMachineOwner = (id: string, owner_mission_id: string) =>
   api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}/owner`, json({ owner_mission_id }));
 export const destroyManagedMachine = (id: string) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}`, { method: "DELETE" });
 export const stopManagedMachine = (id: string) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}/stop`, json({}));
-export const resumeManagedMachine = (id: string) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}/resume`, json({}));
+export const resumeManagedMachine = (id: string) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}/resume`, json({}, MANAGED_PROVISION_TIMEOUT_MS));
 
 /** A named snapshot (`GET /api/managed-machines/snapshots?all=true`). */
 export type ManagedSnapshot = {

@@ -3,6 +3,7 @@
   Bounded Pre-First-Byte Failover Engine (`0 import Lean`, `0 sorryAx`).
 -/
 import Std.Sync.Mutex
+import Orb.Kernel
 import OrbBin.Json
 import OrbCore.Spec
 import OrbCore.Store
@@ -174,6 +175,7 @@ structure ProxyOutcome where
   body             : ByteArray
   selectedAccount  : String
   attemptsUsed     : Nat
+  exhaustionClass  : String := ""
   deriving Inhabited
 
 private def isForbiddenResponseHeader (name : String) : Bool :=
@@ -242,8 +244,34 @@ def canFailoverUpstream (attemptIdx chainLen : Nat) (status : Nat) (headersCommi
       status.toUInt32
       (if headersCommitted then 1 else 0) == 1
 
-/-- Execute a bounded `/v1/*` proxy forward across `chain.targets` with proactive pacing spillover
-    and pre-header failover on `429` / `5xx`. -/
+/-- Map `Orb.Kernel.proxyExhaustionStep` class code (`1..7`) to its canonical HTTP status and error code
+    so HTTP `402` (`out_of_credit`, e.g. `particle-ai/particle-1`) is never misreported as `"client_or_auth_error"`. -/
+def classifyExhaustionOutcome
+    (rateLimitCount paymentRequiredCount clientAuthErrorCount
+     serverErrorCount transportValidationCount : UInt32)
+    (hasContextOverflow : Bool) : Nat × String × String :=
+  let code :=
+    Orb.Kernel.proxyExhaustionStep
+      rateLimitCount paymentRequiredCount clientAuthErrorCount
+      serverErrorCount transportValidationCount
+      (if hasContextOverflow then 1 else 0)
+  match code with
+  | 1 => (503, "skipped_configuration", "No eligible providers configured in routing chain")
+  | 2 => (502, "transport_validation", "All providers in routing chain failed transport validation")
+  | 3 => (400, "context_length_exceeded", "Prompt exceeds context window across routing chain")
+  | 4 => (502, "out_of_credit", "All providers in routing chain exhausted credits (HTTP 402 Payment Required)")
+  | 5 => (502, "client_or_auth_error", "All providers in routing chain rejected the request (client/auth errors)")
+  | 6 => (502, "server_unavailable", "All providers in routing chain returned upstream 5xx / transport errors")
+  | _ => (429, "rate_limited_or_quota", "All providers in routing chain are rate-limited or quota-exhausted")
+
+private def bodyIndicatesContextOverflow (body : ByteArray) : Bool :=
+  let low := (String.fromUTF8? body |>.getD "").toLower
+  (low.splitOn "context_length_exceeded").length > 1 ||
+  (low.splitOn "maximum context length").length > 1
+
+/-- Execute a bounded `/v1/*` proxy forward across `chain.targets` with proactive pacing spillover,
+    pre-header failover on `402`, `429`, and `5xx`, and deterministic exhaustion classification via
+    `Orb.Kernel.proxyExhaustionStep`. -/
 def forwardProxyChain
     (chain : RoutingChain)
     (method relPath : String)
@@ -255,15 +283,23 @@ def forwardProxyChain
     IO ProxyOutcome := do
   let n := chain.targets.size
   if n == 0 then
+    let (st, errCode, errMsg) := classifyExhaustionOutcome 0 0 0 0 0 false
     return {
-      status := 503
+      status := st
       contentType := "application/json"
-      headers := #[]
-      body := "{\"error\":\"empty_routing_chain\"}".toUTF8
+      headers := #[("X-Orb-Exhaustion-Class", errCode)]
+      body := s!"\{\"error\":{jsonEscape errCode},\"message\":{jsonEscape errMsg}}".toUTF8
       selectedAccount := ""
       attemptsUsed := 0
+      exhaustionClass := errCode
     }
   let mut idx : Nat := 0
+  let mut rateLimitCount : UInt32 := 0
+  let mut paymentRequiredCount : UInt32 := 0
+  let mut clientAuthErrorCount : UInt32 := 0
+  let mut serverErrorCount : UInt32 := 0
+  let mut transportValidationCount : UInt32 := 0
+  let mut hasContextOverflow : Bool := false
   while idx < n do
     let tgt := chain.targets[idx]!
     let slotAdmitted ← match pacingTracker? with
@@ -272,16 +308,18 @@ def forwardProxyChain
         let nowMs ← IO.monoMsNow
         tryAcquireTargetSlot tracker tgt nowMs.toUInt64
     if !slotAdmitted then
+      rateLimitCount := rateLimitCount + 1
       if canFailoverUpstream idx n 429 headersAlreadyCommitted then
         idx := idx + 1
       else
         return {
           status := 429
           contentType := "application/json"
-          headers := #[]
+          headers := #[("X-Orb-Exhaustion-Class", "rate_limited_or_quota")]
           body := "{\"error\":\"provider_pacing_limit_exceeded\"}".toUTF8
           selectedAccount := tgt.accountId
           attemptsUsed := idx + 1
+          exhaustionClass := "rate_limited_or_quota"
         }
     else
       let (isTls, host, port, pfx) := splitUpstreamBaseUrl tgt.baseUrl
@@ -305,8 +343,42 @@ def forwardProxyChain
       | .ok resp =>
         if let some tracker := pacingTracker? then
           recordObservedHeaders tracker tgt.accountId resp.headers
+        if resp.status ≥ 200 && resp.status < 300 then
+          let (ctype, safeHdrs) := sanitizeUpstreamHeaders resp.headers
+          return {
+            status := resp.status
+            contentType := ctype
+            headers := safeHdrs
+            body := resp.body
+            selectedAccount := tgt.accountId
+            attemptsUsed := idx + 1
+          }
+        if resp.status == 429 then
+          rateLimitCount := rateLimitCount + 1
+        else if resp.status == 402 then
+          paymentRequiredCount := paymentRequiredCount + 1
+        else if resp.status ≥ 500 && resp.status ≤ 599 then
+          serverErrorCount := serverErrorCount + 1
+        else if resp.status ≥ 400 && resp.status < 500 then
+          clientAuthErrorCount := clientAuthErrorCount + 1
+          if bodyIndicatesContextOverflow resp.body then
+            hasContextOverflow := true
         if canFailoverUpstream idx n resp.status headersAlreadyCommitted then
           idx := idx + 1
+        else if paymentRequiredCount > 0 ||
+                paymentRequiredCount + rateLimitCount + serverErrorCount > 1 then
+          let (st, errCode, errMsg) :=
+            classifyExhaustionOutcome rateLimitCount paymentRequiredCount clientAuthErrorCount
+              serverErrorCount transportValidationCount hasContextOverflow
+          return {
+            status := st
+            contentType := "application/json"
+            headers := #[("X-Orb-Exhaustion-Class", errCode)]
+            body := s!"\{\"error\":{jsonEscape errCode},\"message\":{jsonEscape errMsg}}".toUTF8
+            selectedAccount := tgt.accountId
+            attemptsUsed := idx + 1
+            exhaustionClass := errCode
+          }
         else
           let (ctype, safeHdrs) := sanitizeUpstreamHeaders resp.headers
           return {
@@ -318,24 +390,35 @@ def forwardProxyChain
             attemptsUsed := idx + 1
           }
       | .error errMsg =>
+        serverErrorCount := serverErrorCount + 1
+        if errMsg == "invalid_upstream_port" || errMsg == "plaintext_upstream_disabled" then
+          transportValidationCount := transportValidationCount + 1
         if canFailoverUpstream idx n 503 headersAlreadyCommitted then
           idx := idx + 1
         else
+          let (st, errCode, _) :=
+            classifyExhaustionOutcome rateLimitCount paymentRequiredCount clientAuthErrorCount
+              serverErrorCount transportValidationCount hasContextOverflow
           return {
-            status := 502
+            status := st
             contentType := "application/json"
-            headers := #[]
-            body := s!"\{\"error\":{jsonEscape errMsg}}".toUTF8
+            headers := #[("X-Orb-Exhaustion-Class", errCode)]
+            body := s!"\{\"error\":{jsonEscape errMsg},\"exhaustion_class\":{jsonEscape errCode}}".toUTF8
             selectedAccount := tgt.accountId
             attemptsUsed := idx + 1
+            exhaustionClass := errCode
           }
+  let (st, errCode, errMsg) :=
+    classifyExhaustionOutcome rateLimitCount paymentRequiredCount clientAuthErrorCount
+      serverErrorCount transportValidationCount hasContextOverflow
   return {
-    status := 502
+    status := st
     contentType := "application/json"
-    headers := #[]
-    body := "{\"error\":\"routing_chain_exhausted\"}".toUTF8
+    headers := #[("X-Orb-Exhaustion-Class", errCode)]
+    body := s!"\{\"error\":{jsonEscape errCode},\"message\":{jsonEscape errMsg}}".toUTF8
     selectedAccount := ""
     attemptsUsed := n
+    exhaustionClass := errCode
   }
 
 end OrbCore.Proxy

@@ -1,4 +1,5 @@
 import { onCleanup, onMount } from 'solid-js';
+import { nativeEvents, nativeWebview } from './native';
 import { folderOfferSources, type FolderOffer, type UploadSource } from './uploads';
 
 /** `folder` offers files found inside dropped folders (relative to the folder's parent). */
@@ -38,8 +39,7 @@ export function nativeComposerDrop(element: () => HTMLElement | undefined, attac
     void attach([...paths.map(path => ({ name: name(path), localPath: path })), ...folderOfferSources(folder)],el);
   };
   onMount(() => {
-    const native = (window as any).__TAURI__;
-    const events = native?.event;
+    const events = nativeEvents();
     if (!events) return;
     const listen = (name: string, handler: (event: any) => void, options?: { target: { kind: string; label: string } }) => {
       void events.listen(name, handler, options).then((off: () => void) => {
@@ -54,15 +54,17 @@ export function nativeComposerDrop(element: () => HTMLElement | undefined, attac
       const bounds=el.getBoundingClientRect();
       el.classList.toggle('drop-active', x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom);
     };
-    const target = { target: { kind: 'Webview', label: native.webview?.getCurrentWebview?.().label ?? 'main' } };
-    listen('tauri://drag-enter', highlight, target);
-    listen('tauri://drag-over', highlight, target);
-    listen('tauri://drag-leave', () => highlighted?.classList.remove('drop-active'), target);
+    const label = nativeWebview()?.label ?? 'main';
+    const target = { target: { kind: 'Webview', label } };
+    for (const prefix of ['orb', 'tauri']) {
+      listen(`${prefix}://drag-enter`, highlight, target);
+      listen(`${prefix}://drag-over`, highlight, target);
+      listen(`${prefix}://drag-leave`, () => highlighted?.classList.remove('drop-active'), target);
+      listen(`${prefix}://drag-drop`, ({ payload }: { payload: NativeDrop }) => {
+        consume({ paths: payload.paths, ...payload.position }, prefix);
+      }, target);
+    }
     listen('orb-upload-drop', ({ payload }: { payload: Drop }) => consume(payload, 'orb'));
-    // Also works with already-running desktop binaries without Orb's custom relay.
-    listen('tauri://drag-drop', ({ payload }: { payload: NativeDrop }) => {
-      consume({ paths: payload.paths, ...payload.position }, 'tauri');
-    }, { target: { kind: 'Webview', label: native.webview?.getCurrentWebview?.().label ?? 'main' } });
   });
   onCleanup(() => { stopped = true; if (deferred) clearTimeout(deferred.timer); disposers.forEach(off => off()); });
 }

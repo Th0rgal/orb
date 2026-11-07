@@ -440,3 +440,13 @@ JNIEXPORT jlong JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_orbCrashBoundaryStep(JNIEnv *env, jclass clazz, jint durableQueued, jint durableAcked, jlong stateRevision, jint volatileInFlight, jlong leaseBootEpoch, jlong nodeBootEpoch, jint volatileLeaseOwner, jint reqOwner) {
     return (jlong)orb_crash_boundary_step((uint32_t)durableQueued, (uint32_t)durableAcked, (uint64_t)stateRevision, (uint32_t)volatileInFlight, (uint64_t)leaseBootEpoch, (uint64_t)nodeBootEpoch, (uint32_t)volatileLeaseOwner, (uint32_t)reqOwner);
 }
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbComposerDefaultStep(JNIEnv *env, jclass clazz, jint hasExplicitChoice, jint hasPinnedContext, jint hermesAvailable, jint hasNativeHarness) {
+    return (jint)orb_composer_default_step((uint8_t)hasExplicitChoice, (uint8_t)hasPinnedContext, (uint8_t)hermesAvailable, (uint8_t)hasNativeHarness);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbCloudHandoffStep(JNIEnv *env, jclass clazz, jint sourceIsCloud, jint isSideQuestion, jint targetIsNative, jint hasHistoryTurns, jint targetPlacementValid) {
+    return (jint)orb_cloud_handoff_step((uint8_t)sourceIsCloud, (uint8_t)isSideQuestion, (uint8_t)targetIsNative, (uint8_t)hasHistoryTurns, (uint8_t)targetPlacementValid);
+}

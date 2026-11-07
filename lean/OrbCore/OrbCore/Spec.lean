@@ -1,7 +1,8 @@
 /-
   OrbCore.Spec: Two-Layer Non-Tautological Specifications (`0 import Lean`, `0 sorryAx`)
   for Wave 4 Core Gateway (`sandboxed-sh`): Startup Secret/Dev-Mode Posture, Console WS Auth,
-  Machine-Transfer Single-Active Fence, Upstream Proxy Failover, and Deploy Unit Confinement.
+  Machine-Transfer Single-Active Fence, Upstream Proxy Failover, Deploy Unit Confinement,
+  Proactive Provider Pacing, and Remote Replay Supersession Lineage Fence.
 
   Every unboxed scalar gate is proved equivalent (`MetaGateSpec`, `ScopedAuthority`,
   `StickyFence`) to an independent domain model over typed protocol ADTs, finite unit catalogs,
@@ -394,12 +395,14 @@ def transferStickyFence : StickyFence TransferFenceCheck where
 /-! ### 4. `/v1/*` Model-Routing & Provider Failover Step Gate -/
 
 inductive UpstreamFailureClass where
+  | outOfCredit402
   | rateLimited429
   | serverError5xx (code : Nat)
   deriving Repr, DecidableEq
 
 def UpstreamFailureClass.classifyRetryable? (code : Nat) : Option UpstreamFailureClass :=
-  if code = 429 then some .rateLimited429
+  if code = 402 then some .outOfCredit402
+  else if code = 429 then some .rateLimited429
   else if 500 ≤ code ∧ code ≤ 599 then some (.serverError5xx code)
   else none
 
@@ -412,7 +415,8 @@ structure ProxyFailoverCheck where
 /-- Independent provider-failover domain specification:
     the fallback chain has `1..16` candidates, at least one unvisited fallback candidate remains
     (`attemptIdx + 1 < chainLen` in `Nat`, overflow-free), downstream response headers have not yet
-    been committed (`headersCommitted = 0`), and `UpstreamFailureClass.classifyRetryable?` succeeds. -/
+    been committed (`headersCommitted = 0`), and `UpstreamFailureClass.classifyRetryable?` succeeds
+    (`402` out-of-credit, `429` rate-limited, or `500..599` upstream server error). -/
 def ProxyFailoverDomainSafe (c : ProxyFailoverCheck) : Prop :=
   1 ≤ c.chain.2.toNat ∧
   c.chain.2.toNat ≤ 16 ∧
@@ -426,7 +430,8 @@ def verifyProxyFailoverStep
   if chainLen ≥ 1 && chainLen ≤ 16 &&
      attemptIdx < 16 && attemptIdx + 1 < chainLen &&
      headersCommitted == 0 &&
-     (upstreamStatus == 429 || (upstreamStatus ≥ 500 && upstreamStatus ≤ 599)) then 1 else 0
+     (upstreamStatus == 402 || upstreamStatus == 429 ||
+      (upstreamStatus ≥ 500 && upstreamStatus ≤ 599)) then 1 else 0
 
 def proxyFailoverMetaGate : MetaGateSpec ProxyFailoverCheck ProxyFailoverDomainSafe where
   gate c :=
@@ -438,10 +443,10 @@ def proxyFailoverMetaGate : MetaGateSpec ProxyFailoverCheck ProxyFailoverDomainS
     unfold verifyProxyFailoverStep at h
     have hc :
         (clen ≥ 1 && clen ≤ 16 && att < 16 && att + 1 < clen && hcFlag == 0 &&
-         (st == 429 || (st ≥ 500 && st ≤ 599))) = true := by
+         (st == 402 || st == 429 || (st ≥ 500 && st ≤ 599))) = true := by
       cases hb :
           (clen ≥ 1 && clen ≤ 16 && att < 16 && att + 1 < clen && hcFlag == 0 &&
-           (st == 429 || (st ≥ 500 && st ≤ 599)))
+           (st == 402 || st == 429 || (st ≥ 500 && st ≤ 599)))
       · rw [hb] at h; contradiction
       · rfl
     simp only [Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
@@ -453,12 +458,14 @@ def proxyFailoverMetaGate : MetaGateSpec ProxyFailoverCheck ProxyFailoverDomainS
     have hattNat : att.toNat + 1 < clen.toNat := by omega
     refine ⟨hclN1, hclN2, hattNat, by subst hcomm; rfl, ?_⟩
     unfold UpstreamFailureClass.classifyRetryable?
-    rcases hst with h429 | ⟨h500, h599⟩
+    rcases hst with (h402 | h429) | ⟨h500, h599⟩
+    · subst h402; rfl
     · subst h429; rfl
     · have hs1 : 500 ≤ st.toNat := UInt32.le_iff_toNat_le.mp h500
       have hs2 : st.toNat ≤ 599 := UInt32.le_iff_toNat_le.mp h599
+      have hne402 : st.toNat ≠ 402 := by omega
       have hne429 : st.toNat ≠ 429 := by omega
-      simp [hne429, hs1, hs2]
+      simp [hne402, hne429, hs1, hs2]
   complete c h := by
     rcases c with ⟨⟨att, clen⟩, st, hcFlag⟩
     change (verifyProxyFailoverStep att clen st hcFlag == 1) = true
@@ -476,22 +483,31 @@ def proxyFailoverMetaGate : MetaGateSpec ProxyFailoverCheck ProxyFailoverDomainS
       rw [beq_iff_eq]; exact u8_eq_of_toNat hcFlag 0 (by omega) hcomm
     unfold UpstreamFailureClass.classifyRetryable? at hst
     split at hst
-    · rename_i h429
-      have hstEq : (st == 429) = true := by
+    · rename_i h402
+      have hstEq : (st == 402) = true := by
         rw [beq_iff_eq]
         apply UInt32.eq_of_toBitVec_eq
         apply BitVec.eq_of_toNat_eq
-        change st.toNat = 429
-        exact h429
+        change st.toNat = 402
+        exact h402
       simp [hclGe, hclLe, hatt16, hattB, hcommB, hstEq]
     · split at hst
-      · rename_i h5xx
-        have h500 : st ≥ 500 := UInt32.le_iff_toNat_le.mpr h5xx.1
-        have h599 : st ≤ 599 := UInt32.le_iff_toNat_le.mpr h5xx.2
-        simp [hclGe, hclLe, hatt16, hattB, hcommB, h500, h599]
-      · contradiction
-  posWitness := { chain := (0, 3), upstreamStatus := 503, headersCommitted := 0 }
-  negWitness := { chain := (0, 3), upstreamStatus := 503, headersCommitted := 1 }
+      · rename_i h429
+        have hstEq : (st == 429) = true := by
+          rw [beq_iff_eq]
+          apply UInt32.eq_of_toBitVec_eq
+          apply BitVec.eq_of_toNat_eq
+          change st.toNat = 429
+          exact h429
+        simp [hclGe, hclLe, hatt16, hattB, hcommB, hstEq]
+      · split at hst
+        · rename_i h5xx
+          have h500 : st ≥ 500 := UInt32.le_iff_toNat_le.mpr h5xx.1
+          have h599 : st ≤ 599 := UInt32.le_iff_toNat_le.mpr h5xx.2
+          simp [hclGe, hclLe, hatt16, hattB, hcommB, h500, h599]
+        · contradiction
+  posWitness := { chain := (0, 3), upstreamStatus := 402, headersCommitted := 0 }
+  negWitness := { chain := (0, 3), upstreamStatus := 402, headersCommitted := 1 }
   nonVacuous := by decide
   tight := by decide
 
@@ -771,5 +787,141 @@ def providerPacingMetaGate : MetaGateSpec ProviderPacingCheck ProviderPacingDoma
   }
   nonVacuous := by decide
   tight := by decide
+
+/-! ### 7. Remote Replay Supersession & Aborted-Pre-Dispatch Lineage Fence -/
+
+/-- Independent domain ADT classifying why a `RemoteWait` entry remains unsuperseded:
+    - `.exactFailedJob`: `placementJobHash` still equals the originally armed `failedJobHash`.
+    - `.abortedPreDispatchChain`: an earlier scheduled replay bound a tentative `placementJobHash`
+      that terminated pre-dispatch (`latestRunTerminal == 1`, `latestRunDispatchFailed == 1`) with
+      matching `latestRunJobHash == placementJobHash` before any remote runner accepted execution.
+    Any manual/user resume or live run breaks both lineages and permanently supersedes the wait. -/
+inductive ReplayLineageKind where
+  | exactFailedJob
+  | abortedPreDispatchChain
+  deriving Repr, DecidableEq
+
+structure RemoteReplaySupersessionCheck where
+  flags     : UInt8 × UInt8
+  runFlags  : UInt8 × UInt8
+  placement : UInt64 × UInt64
+  latestJob : UInt64
+  deriving Repr, DecidableEq
+
+def RemoteReplaySupersessionDomainSafe (c : RemoteReplaySupersessionCheck) : Prop :=
+  c.flags.1.toNat = 1 ∧
+  c.flags.2.toNat = 1 ∧
+  (c.runFlags.1.toNat = 0 ∨ c.runFlags.1.toNat = 1) ∧
+  (c.runFlags.2.toNat = 0 ∨ c.runFlags.2.toNat = 1) ∧
+  c.placement.1.toNat > 0 ∧
+  c.placement.2.toNat > 0 ∧
+  ∃ kind : ReplayLineageKind,
+    match kind with
+    | .exactFailedJob =>
+      c.placement.1.toNat = c.placement.2.toNat
+    | .abortedPreDispatchChain =>
+      c.runFlags.1.toNat = 1 ∧
+      c.runFlags.2.toNat = 1 ∧
+      c.latestJob.toNat > 0 ∧
+      c.latestJob.toNat = c.placement.1.toNat
+
+@[inline, export orb_core_verify_remote_replay_supersession]
+def verifyRemoteReplaySupersession
+    (waitArmed nodeMatches latestRunTerminal latestRunDispatchFailed : UInt8)
+    (placementJobHash failedJobHash latestRunJobHash : UInt64) : UInt8 :=
+  if waitArmed == 1 && nodeMatches == 1 &&
+     latestRunTerminal ≤ 1 && latestRunDispatchFailed ≤ 1 &&
+     placementJobHash > 0 && failedJobHash > 0 &&
+     (placementJobHash == failedJobHash ||
+      (latestRunTerminal == 1 && latestRunDispatchFailed == 1 &&
+       latestRunJobHash > 0 && latestRunJobHash == placementJobHash)) then 1 else 0
+
+def remoteReplaySupersessionMetaGate :
+    MetaGateSpec RemoteReplaySupersessionCheck RemoteReplaySupersessionDomainSafe where
+  gate c :=
+    verifyRemoteReplaySupersession
+      c.flags.1 c.flags.2 c.runFlags.1 c.runFlags.2
+      c.placement.1 c.placement.2 c.latestJob == 1
+  sound c h := by
+    rcases c with ⟨⟨wa, nm⟩, ⟨rt, df⟩, ⟨pj, fj⟩, lj⟩
+    change (verifyRemoteReplaySupersession wa nm rt df pj fj lj == 1) = true at h
+    dsimp [RemoteReplaySupersessionDomainSafe]
+    unfold verifyRemoteReplaySupersession at h
+    have hc :
+        (wa == 1 && nm == 1 &&
+         rt ≤ 1 && df ≤ 1 &&
+         pj > 0 && fj > 0 &&
+         (pj == fj ||
+          (rt == 1 && df == 1 && lj > 0 && lj == pj))) = true := by
+      cases hb :
+          (wa == 1 && nm == 1 &&
+           rt ≤ 1 && df ≤ 1 &&
+           pj > 0 && fj > 0 &&
+           (pj == fj ||
+            (rt == 1 && df == 1 && lj > 0 && lj == pj)))
+      · rw [hb] at h; contradiction
+      · rfl
+    simp only [Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
+    rcases hc with ⟨⟨⟨⟨⟨⟨hwa, hnm⟩, hrt⟩, hdf⟩, hpj⟩, hfj⟩, hlin⟩
+    subst hwa; subst hnm
+    have hpjN : pj.toNat > 0 := UInt64.lt_iff_toNat_lt.mp hpj
+    have hfjN : fj.toNat > 0 := UInt64.lt_iff_toNat_lt.mp hfj
+    refine ⟨rfl, rfl, u8_le_one_cases rt hrt, u8_le_one_cases df hdf, hpjN, hfjN, ?_⟩
+    rcases hlin with heq | ⟨⟨⟨hrt1, hdf1⟩, hlj⟩, hljp⟩
+    · exact ⟨.exactFailedJob, by subst heq; rfl⟩
+    · subst hrt1; subst hdf1; subst hljp
+      exact ⟨.abortedPreDispatchChain, rfl, rfl, UInt64.lt_iff_toNat_lt.mp hlj, rfl⟩
+  complete c h := by
+    rcases c with ⟨⟨wa, nm⟩, ⟨rt, df⟩, ⟨pj, fj⟩, lj⟩
+    change (verifyRemoteReplaySupersession wa nm rt df pj fj lj == 1) = true
+    dsimp [RemoteReplaySupersessionDomainSafe] at h
+    rcases h with ⟨hwa, hnm, hrt, hdf, hpj, hfj, kind, hkind⟩
+    unfold verifyRemoteReplaySupersession
+    have hwaB : (wa == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat wa 1 (by omega) hwa
+    have hnmB : (nm == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat nm 1 (by omega) hnm
+    have hrtL : rt ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change rt.toNat ≤ 1; omega
+    have hdfL : df ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change df.toNat ≤ 1; omega
+    have hpjB : pj > 0 := UInt64.lt_iff_toNat_lt.mpr hpj
+    have hfjB : fj > 0 := UInt64.lt_iff_toNat_lt.mpr hfj
+    cases kind with
+    | exactFailedJob =>
+      have hpjf : (pj == fj) = true := by rw [beq_iff_eq]; exact u64_eq_of_toNat_eq pj fj hkind
+      simp [hwaB, hnmB, hrtL, hdfL, hpjB, hfjB, hpjf]
+    | abortedPreDispatchChain =>
+      rcases hkind with ⟨hrt1, hdf1, hlj, hljp⟩
+      have hrtB : (rt == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat rt 1 (by omega) hrt1
+      have hdfB : (df == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat df 1 (by omega) hdf1
+      have hljB : lj > 0 := UInt64.lt_iff_toNat_lt.mpr hlj
+      have hljpB : (lj == pj) = true := by rw [beq_iff_eq]; exact u64_eq_of_toNat_eq lj pj hljp
+      simp [hwaB, hnmB, hrtL, hdfL, hpjB, hfjB, hrtB, hdfB, hljB, hljpB]
+  posWitness :=
+    { flags := (1, 1)
+      runFlags := (1, 1)
+      placement := (2002, 1001)
+      latestJob := 2002 }
+  negWitness :=
+    { flags := (1, 1)
+      runFlags := (1, 0)
+      placement := (3003, 1001)
+      latestJob := 3003 }
+  nonVacuous := by decide
+  tight := by decide
+
+def remoteReplaySupersessionFence : StickyFence RemoteReplaySupersessionCheck where
+  admit := remoteReplaySupersessionMetaGate.gate
+  fenceClear c :=
+    c.flags.1.toNat = 1 ∧
+    c.flags.2.toNat = 1 ∧
+    (c.placement.1.toNat = c.placement.2.toNat ∨
+     (c.runFlags.1.toNat = 1 ∧ c.runFlags.2.toNat = 1 ∧ c.latestJob.toNat = c.placement.1.toNat))
+  enforced c h := by
+    rcases remoteReplaySupersessionMetaGate.sound c h with
+      ⟨hwa, hnm, _, _, _, _, kind, hkind⟩
+    refine ⟨hwa, hnm, ?_⟩
+    cases kind with
+    | exactFailedJob => exact Or.inl hkind
+    | abortedPreDispatchChain =>
+      rcases hkind with ⟨hrt, hdf, _, hljp⟩
+      exact Or.inr ⟨hrt, hdf, hljp⟩
 
 end OrbCore.Spec

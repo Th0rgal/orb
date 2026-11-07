@@ -213,6 +213,19 @@ final class OrbTurnSummaryTests: XCTestCase {
         XCTAssertEqual(live.open?.question, "And now?")
         XCTAssertEqual(live.open?.answer, "Still checking")
         XCTAssertEqual(live.open?.events.map(\.sequence), [7, 8])
+
+        // Replays 23bad383 / fc153ce6: automatic recovery user_message continues the user's side turn.
+        let recoveredEvents = [
+            StoredEvent(id: 274, missionId: "fc153ce6", sequence: 274, eventType: "user_message", timestamp: "2026-11-07T04:47:37Z", eventId: "8652b679", toolCallId: nil, toolName: nil, content: "<main_conversation_update>\nctx\n</main_conversation_update>\n\nCurrent request:\noù en est le run sur babylon ?\n", metadata: ["queued": AnyCodable(false), "source": AnyCodable("api:prod")]),
+            StoredEvent(id: 286, missionId: "fc153ce6", sequence: 286, eventType: "assistant_message", timestamp: "2026-11-07T04:49:34Z", eventId: nil, toolCallId: nil, toolName: nil, content: "Remote opencode job 155911be-15b0-4184-a58b-acb8875ac36c on node 'babylon' finished with state 'failed' (exit Some(1)); error: command exited with Some(1).", metadata: [:]),
+            StoredEvent(id: 289, missionId: "fc153ce6", sequence: 289, eventType: "user_message", timestamp: "2026-11-07T04:51:10Z", eventId: "e2abbfa2", toolCallId: nil, toolName: nil, content: "[Automatic recovery] Inference connection interrupted stopped your previous turn. Resume your work where it stopped, and check the state of anything you had started before continuing. Do not redo finished work.", metadata: ["queued": AnyCodable(false), "source": AnyCodable("api:usage-limit-replay")]),
+            StoredEvent(id: 301, missionId: "fc153ce6", sequence: 301, eventType: "assistant_message", timestamp: "2026-11-07T04:55:02Z", eventId: nil, toolCallId: nil, toolName: nil, content: "Oui, ça a nettement progressé ces deux dernières heures sur babylon.", metadata: [:]),
+        ]
+        let recovered = OrbBtwThreads.parse(missionID: "fc153ce6", events: recoveredEvents, active: false)
+        XCTAssertEqual(recovered.turns.count, 1)
+        XCTAssertEqual(recovered.turns[0].id, "btw:fc153ce6:274")
+        XCTAssertEqual(recovered.turns[0].question, "où en est le run sur babylon ?")
+        XCTAssertEqual(recovered.turns[0].answer, "Oui, ça a nettement progressé ces deux dernières heures sur babylon.")
     }
 
     func testBtwBindsToTheThreadWithLatestActivityAndOrdersTurnsByTime() {

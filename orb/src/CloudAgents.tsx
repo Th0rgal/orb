@@ -5,7 +5,10 @@ import * as Ic from "./icons";
 import { For, Show, createSignal, createEffect, on, onMount, onCleanup } from 'solid-js';
 import { createPinnedScroll } from './mission/pinnedScroll';
 import { JumpToLatest } from './mission/JumpToLatest';
-import { api, getMission, openExternalUrl, type Mission } from './api';
+import { api, getMission, getRemoteNodes, openExternalUrl, type Mission, type RemoteNodeView } from './api';
+import { ForkMission, type CloudHandoffTarget } from './ForkMission';
+import { harnessChoices, refreshHarnessChoices, refreshNodeAntigravityModels } from './harnessPick';
+import { orbCloudHandoffStep } from './orbKernel';
 import { cloudAccounts, cloudAccountLabel, cloudAttachmentBlock, cloudLaunchSeeds, defaultCloudProvider, readCloudProvider, writeCloudProvider, type CloudLaunchSeed, cloudCanSend, cloudExecution, cloudNames, cloudPhase, launchCloud, safeCloudUrl, type CloudAccount, type CloudExecution, type CloudProvider, type CloudTurn } from './cloudAgentApi';
 import './cloudAgents.css';
 import { ProviderLogo } from './ProviderLogo';
@@ -181,6 +184,11 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
   const seed = () => p.launch ?? cloudLaunchSeeds.get(p.id);
   const [children,setChildren]=createSignal<{id:string;title:string;status:string}[]>([]);
   const [execution, setExecution] = createSignal<CloudExecution>(); const [accounts, setAccounts] = createSignal<CloudAccount[]>([]);
+  const [missionRecord, setMissionRecord] = createSignal<Mission | null>(null);
+  const [forkOpen, setForkOpen] = createSignal(false);
+  const [forkTargetId, setForkTargetId] = createSignal('core');
+  const [remoteNodes, setRemoteNodes] = createSignal<RemoteNodeView[]>([]);
+  let forkBtn: HTMLButtonElement | undefined;
   const [loadError, setLoadError] = createSignal(''); const [error, setError] = createSignal(''); const [busy, setBusy] = createSignal(false);
   const [model,setModel]=createSignal(''),[modelParams,setModelParams]=createSignal<ModelParam[]>([]);
   let initializedFor = '';
@@ -198,7 +206,7 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
     if (refreshing) { queuedManual ||= manual; return refreshing; }
     refreshing = (async () => {
       try { const [e, m] = await Promise.all([cloudExecution(p.id), getMission(p.id)]);
-        if (!disposed) { setExecution(old => JSON.stringify(old) === JSON.stringify(e) ? old : e); p.onMission?.(m); setLoadError(''); }
+        if (!disposed) { setExecution(old => JSON.stringify(old) === JSON.stringify(e) ? old : e); setMissionRecord(m); p.onMission?.(m); setLoadError(''); }
         if(e.selection.provider==='hermes') {
           const result=await api<{missions:{id:string;title:string;status:string}[]}>(`/api/control/missions/${p.id}/cloud/children`);
           if(!disposed)setChildren(result.missions);
@@ -272,6 +280,29 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
       isCloud: true,
     });
   });
+  const handoffTargets = (): CloudHandoffTarget[] => [
+    { id: 'core', label: 'Core', remoteNodeId: null },
+    ...remoteNodes()
+      .filter(n => n.status === 'online')
+      .map(n => ({ id: n.id, label: n.display_name || n.id, remoteNodeId: n.id })),
+  ];
+  const canHandoffToWorkspace = () => Boolean(
+    p.onOpenMission && p.id && orbCloudHandoffStep({
+      sourceIsCloud: true,
+      isSideQuestion: false,
+      targetIsNative: true,
+      hasHistoryTurns: (execution()?.turns.length ?? 0) > 0,
+      targetPlacementValid: true,
+    }).admit,
+  );
+  const openHandoffMenu = () => {
+    const next = !forkOpen();
+    setForkOpen(next);
+    if (next) {
+      void refreshHarnessChoices();
+      void getRemoteNodes().then(r => { if (!disposed) setRemoteNodes(r.nodes ?? []); }).catch(swallow('cloudAgents.remoteNodes'));
+    }
+  };
   const progress = () => {
     const t = execution()?.turns.find(working); if (!t) return;
     return t.phase === 'cancel_requested' ? 'Stopping…' : t.phase === 'queued' ? 'Queued…'
@@ -311,6 +342,24 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
           <div class="picks cloud-meta-picks"><CloudModelPicker provider={e().selection.provider} model={model()} params={modelParams()} disabled={busy()} onChange={(model,params)=>{setModel(model);setModelParams(params);}} onError={setError}/></div>
         </Show>
         <span role="status">{cloudPhase(e().turns.at(-1)?.phase ?? '')}</span>
+        <Show when={canHandoffToWorkspace()}>
+          <button ref={el => { forkBtn = el; }} type="button" class="na-drop-btn" aria-haspopup="menu" aria-expanded={forkOpen()} onClick={openHandoffMenu}>
+            Continue in workspace
+          </button>
+          <Show when={forkOpen()}>
+            <ForkMission
+              mission={missionRecord() ?? { id: p.id, title: null, backend: `cloud_${e().selection.provider}`, status: active() ? 'active' : 'completed', history: [], created_at: '', updated_at: '' }}
+              choices={harnessChoices(forkTargetId())}
+              destination={handoffTargets().find(t => t.id === forkTargetId())?.label ?? 'Core'}
+              targets={handoffTargets()}
+              targetId={forkTargetId()}
+              onTargetChange={id => { setForkTargetId(id); if (id !== 'core') void refreshNodeAntigravityModels(id); }}
+              anchor={forkBtn}
+              onClose={() => setForkOpen(false)}
+              onFork={forked => { setForkOpen(false); p.onOpenMission?.(forked); }}
+            />
+          </Show>
+        </Show>
         <Show when={safeCloudUrl(e().external_url)}>{url => <a href={url()} onClick={event => {event.preventDefault(); void openExternalUrl(url());}}>Open in {cloudNames[e().selection.provider]}</a>}</Show>
       </div>
     </>}</Show>

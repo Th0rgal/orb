@@ -4,7 +4,7 @@ import { nativeInvoke } from "./clientRuns";
 import type { Continuation, ContinuationSummary } from "./continuations";
 const [pending, setPending] = createSignal<(Continuation & { mission: string })[]>([]);
 export function localContinuation(mission?: string): ContinuationSummary | undefined {
-  const items = pending().filter(item => item.mission === mission);
+  const items = (pending() ?? []).filter(item => item.mission === mission);
   return items.length ? { count: items.length, items } : undefined;
 }
 /** A pending Stop is recovered before any new native launch is allowed. */
@@ -33,7 +33,7 @@ export function startLocalWakeups() {
       if (stopped || version !== connectionVersion()) return;
       await import("./localMessageQueue").then(m => { if (!stopped && version === connectionVersion()) return m.confirmWakeupStops(result.cancelled ?? []); });
       if (stopped || version !== connectionVersion()) return;
-      setPending(result.pending);
+      setPending(Array.isArray(result.pending) ? result.pending : []);
       if (result.changed) window.dispatchEvent(new Event("orb:refresh"));
     } catch { /* Older native versions do not advertise local scheduling. */ }
     finally { busy = false; }

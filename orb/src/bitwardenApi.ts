@@ -52,15 +52,8 @@ export interface BiometricStatus {
   label: string;
 }
 
-type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
-
-function tauriInvoke(): Invoke | null {
-  if (typeof window === "undefined") return null;
-  return nativeInvoke() ?? null;
-}
-
 export async function getBiometricStatus(): Promise<BiometricStatus> {
-  const invoke = tauriInvoke();
+  const invoke = nativeInvoke();
   if (!invoke) {
     return { available: false, kind: "none", label: "Touch ID" };
   }
@@ -72,7 +65,7 @@ export async function getBiometricStatus(): Promise<BiometricStatus> {
 }
 
 export async function authenticateBiometric(reason: string): Promise<void> {
-  const invoke = tauriInvoke();
+  const invoke = nativeInvoke();
   if (!invoke) return;
   await invoke("biometric_authenticate", { reason });
 }

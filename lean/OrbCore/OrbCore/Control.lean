@@ -13,6 +13,7 @@ import OrbCore.Search
 import OrbCore.Harness
 import OrbCore.Proxy
 import OrbCore.Managed
+import OrbCore.MemoryAndCloud
 
 namespace OrbCore.Control
 
@@ -29,6 +30,7 @@ open OrbCore.Search
 open OrbCore.Harness
 open OrbCore.Proxy
 open OrbCore.Managed
+open OrbCore.MemoryAndCloud
 
 /-- Core runtime configuration parsed from environment variables (`HOST`, `PORT`, `WORKING_DIR`,
     `DEV_MODE`, `DASHBOARD_PASSWORD`, `JWT_SECRET`, `SANDBOXED_USERS`, `ALLOW_INSECURE_REMOTE_DEV_AUTH`). -/
@@ -55,7 +57,10 @@ structure CoreAppState where
   managedRef     : IO.Ref ManagedFleetState
   chainsRef      : IO.Ref (Array RoutingChain)
   seqRef         : IO.Ref UInt64
-  pacingTracker? : Option ProxyPacingTracker := none
+  pacingTracker?  : Option ProxyPacingTracker := none
+  memTokenCache?  : Option MemoryTokenCache := none
+  cloudWakeup?    : Option CloudWorkerWakeup := none
+  bunkerStateRef? : Option (IO.Ref UInt8) := none
 
 def isLoopbackHostStr (h : String) : Bool :=
   let t := h.trimAscii.toString
@@ -563,6 +568,19 @@ private def nextUniqueId (st : CoreAppState) (prefixStr : String) (nowEpochSec :
   let seq ← st.seqRef.modifyGet fun n => (n + 1, n + 1)
   return s!"{prefixStr}-{nowEpochSec}-{seq}"
 
+private def hex12OfU64 (v : UInt64) : String := Id.run do
+  let hex := "0123456789abcdef".toList.toArray
+  let mut chars : Array Char := Array.mkEmpty 12
+  for i in [0:12] do
+    let shift := ((11 - i) * 4).toUInt64
+    let nib := ((v >>> shift) &&& 0xF).toNat
+    chars := chars.push hex[nib]!
+  return String.ofList chars.toList
+
+private def nextMcpSessionUuid (st : CoreAppState) : IO String := do
+  let seq ← st.seqRef.modifyGet fun n => (n + 1, n + 1)
+  return s!"00000000-0000-4000-8000-{hex12OfU64 seq}"
+
 /-- Dispatch a parsed `HttpRequest` against `CoreAppState` (`routes` capability parity:
     `"/api/control/missions/:id/automations"`, `"/api/model-routing"`). -/
 def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : UInt64) : IO (Except ByteArray CoreHttpResponse) := do
@@ -702,6 +720,114 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     let unitsRaw := if lease.allowedUnitsJson.startsWith "[" then lease.allowedUnitsJson else "[]"
     return .ok (mkJson 200 s!"\{\"allow_exec\":true,\"allowed\":true,\"grant_id\":{jsonEscape lease.grantId},\"scope\":{jsonEscape lease.scope},\"allowed_units\":{unitsRaw},\"require_force_cmd\":{rfStr}}")
 
+  -- 5b. Unified Control-Plane MCP Gateway (`/api/mcp/session`, `/api/mcp/renew`, `/api/mcp/capabilities`, `/api/mcp/call`)
+  if cleanPath.startsWith "/api/mcp/" then
+    let bearerTok? := extractBearerToken? req.headers nowEpochSec
+    let scopedClaims? := bearerTok?.bind (verifyScopedMcpToken? st.cfg.jwtSecret · nowEpochSec)
+    let coreAuthed := authenticateHttpBearer st.cfg req.headers nowEpochSec
+
+    if req.method == "POST" && cleanPath == "/api/mcp/session" then
+      if !coreAuthed then
+        return .ok (mkJson 401 "{\"error\":\"unauthorized_mcp_session\"}")
+      let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD (.obj #[])
+      let mid := (jv.fieldStr? "mission_id").getD ""
+      if mid.trimAscii.toString.isEmpty then
+        return .ok (mkJson 400 "{\"error\":\"missing_mission_id\"}")
+      let role := normalizeMcpRole ((jv.fieldStr? "role").getD "executor")
+      let proj := (jv.fieldStr? "project").getD ""
+      let sid ← nextMcpSessionUuid st
+      let exp := nowEpochSec + 3600
+      let claims : McpSessionClaims := {
+        sessionId := sid, missionId := mid, role := role,
+        project := proj, isExternal := false, expiresAt := exp
+      }
+      let scopedTok := mintScopedMcpToken st.cfg.jwtSecret claims
+      return .ok (mkJson 200 s!"\{\"token\":{jsonEscape scopedTok},\"session_id\":{jsonEscape sid},\"expires_at\":{exp}}")
+
+    if req.method == "POST" && cleanPath == "/api/mcp/renew" then
+      let some prev := scopedClaims?
+        | return .ok (mkJson 401 "{\"error\":\"invalid_or_expired_scoped_token\"}")
+      let nextExp := nowEpochSec + 3600
+      let renewed : McpSessionClaims := { prev with expiresAt := nextExp }
+      let nextTok := mintScopedMcpToken st.cfg.jwtSecret renewed
+      return .ok (mkJson 200 s!"\{\"token\":{jsonEscape nextTok},\"session_id\":{jsonEscape renewed.sessionId},\"expires_at\":{nextExp}}")
+
+    let effClaims? : Option McpSessionClaims :=
+      match scopedClaims? with
+      | some c => some c
+      | none =>
+        if coreAuthed then
+          some {
+            sessionId := "00000000-0000-4000-8000-000000000000"
+            missionId := ""
+            role := "operator"
+            project := ""
+            isExternal := false
+            expiresAt := nowEpochSec + 3600
+          }
+        else none
+
+    let some activeClaims := effClaims?
+      | return .ok (mkJson 401 "{\"error\":\"unauthorized_mcp\"}")
+
+    if req.method == "GET" && cleanPath == "/api/mcp/capabilities" then
+      return .ok (mkJson 200 (buildMcpCapabilitiesJson activeClaims))
+
+    if req.method == "POST" && cleanPath == "/api/mcp/call" then
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"ok\":false,\"error\":{\"code\":\"invalid_json\",\"message\":\"Malformed JSON body\",\"accepted\":\"no\",\"retryable\":false}}")
+      let toolName := (jv.fieldStr? "name").getD ""
+      let args := (jv.field? "arguments").getD (.obj #[])
+      if isMemoryToolName toolName then
+        let mut onManagedNode := false
+        let mut hasProjSkill := !activeClaims.isExternal && !activeClaims.project.isEmpty
+        if !activeClaims.missionId.isEmpty then
+          if let .ok mRs ← execParamQuery st.store.missionsDb
+              "SELECT placement_kind, project, tags FROM missions WHERE id=?1;" #[activeClaims.missionId] then
+            if mRs.size > 1 then
+              let pk := (mRs[1]?.bind (·[0]?)).getD ""
+              let mProj := (mRs[1]?.bind (·[1]?)).getD ""
+              let mTags := parseStringJsonArray ((mRs[1]?.bind (·[2]?)).getD "[]")
+              if pk == "managed_vm" || pk.startsWith "managed-" || mTags.any (fun t => t.startsWith "managed-" || t == "placement:managed_vm") then
+                onManagedNode := true
+              if !activeClaims.isExternal && (!mProj.isEmpty || mTags.contains "skill:spark-memory") then
+                hasProjSkill := true
+        let bunkerSt ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
+        let memCache ← match st.memTokenCache? with | some c => pure c | none => newMemoryTokenCache
+        let ctx : MemoryCallerContext := {
+          callerRole := roleCodeFor activeClaims.role
+          isExternalSession := activeClaims.isExternal
+          onManagedNode := onManagedNode
+          bunkerState := bunkerSt
+          hasProjectMemorySkill := hasProjSkill
+          hasSecretAccess := false
+        }
+        match ← executeMemoryMcpTool memCache ctx toolName args nowEpochSec with
+        | .ok resVal =>
+          return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("result", resVal)])))
+        | .error errMsg =>
+          let errJson := renderCompact (.obj #[
+            ("ok", .bool false),
+            ("error", .obj #[
+              ("code", .str "memory_tool_denied"),
+              ("message", .str errMsg),
+              ("accepted", .str "no"),
+              ("retryable", .bool false)
+            ])
+          ])
+          return .ok (mkJson 200 errJson)
+      else
+        let unsupportedJson := renderCompact (.obj #[
+          ("ok", .bool false),
+          ("error", .obj #[
+            ("code", .str "unknown_tool"),
+            ("message", .str s!"Unknown or unsupported MCP tool `{toolName}`"),
+            ("accepted", .str "no"),
+            ("retryable", .bool false)
+          ])
+        ])
+        return .ok (mkJson 200 unsupportedJson)
+
   -- 6. Protected Routes (`require_auth`)
   if !authenticateHttpBearer st.cfg req.headers nowEpochSec then
     return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")
@@ -732,6 +858,156 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       match ← mark_mission_opened st.store mid s!"{nowEpochSec}" with
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok () => return .ok (mkJson 200 "{\"ok\":true}")
+
+  -- Mission Remote Wait Arm (`POST /api/control/missions/:id/remote-wait`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/remote-wait" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let tape := JsonTape.indexJsonObject req.bodySlice
+      let nodeId := (JsonTape.lookupString? tape "node_id").getD ""
+      let failedJobId := (JsonTape.lookupString? tape "failed_job_id").getD ""
+      let schedOriginJobId := (JsonTape.lookupString? tape "scheduled_origin_job_id").getD ""
+      let maxRetries := ((JsonTape.lookupNat? tape "max_retries").getD 10).toUInt32
+      let deadlineEpoch := ((JsonTape.lookupNat? tape "deadline_epoch").getD 0).toUInt64
+      let termReason := (JsonTape.lookupString? tape "terminal_reason").getD "usage_limit_wait"
+      match ← armRemoteMissionWait st.store mid nodeId failedJobId schedOriginJobId maxRetries deadlineEpoch termReason s!"{nowEpochSec}" with
+      | .ok () =>
+        return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"node_id\":{jsonEscape nodeId},\"failed_job_id\":{jsonEscape failedJobId}}")
+      | .error "remote_wait_invalid_ids" =>
+        return .ok (mkJson 400 "{\"error\":\"remote_wait_invalid_ids\"}")
+      | .error e =>
+        if e.startsWith "mission_not_found:" then
+          return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
+  -- Mission Remote Replay Step (`POST /api/control/missions/:id/remote-replay`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/remote-replay" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let bodyVal? := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption
+      let tape := JsonTape.indexJsonObject req.bodySlice
+      let nodeId := (JsonTape.lookupString? tape "node_id").getD ""
+      let defCand ← nextUniqueId st "rjob" nowEpochSec
+      let candidateJobId := (JsonTape.lookupString? tape "candidate_job_id").getD defCand
+      let isSched := (bodyVal?.bind (·.fieldBool? "scheduled_origin")).getD false
+      let dispatchOutcome := ((JsonTape.lookupNat? tape "dispatch_outcome").getD 0).toUInt8
+      let hasRecHandle := ((JsonTape.lookupNat? tape "has_recovery_handle").getD 0).toUInt8
+      let retryFits := ((JsonTape.lookupNat? tape "retry_fits_deadline").getD 1).toUInt8
+      match ← stepRemoteMissionReplay st.store mid nodeId candidateJobId isSched dispatchOutcome hasRecHandle retryFits nowEpochSec s!"{nowEpochSec}" with
+      | .ok rec =>
+        let waitStr := if rec.waitActive then "true" else "false"
+        return .ok (mkJson 200 (
+          s!"\{\"action\":{rec.action},\"verdict\":{rec.verdict},\"status\":{jsonEscape rec.missionStatus}," ++
+          s!"\"terminal_reason\":{jsonEscape rec.terminalReason},\"placement_job_id\":{jsonEscape rec.placementJobId}," ++
+          s!"\"scheduled_remote_job_id\":{jsonEscape rec.scheduledRemoteJobId},\"failed_job_id\":{jsonEscape rec.failedJobId}," ++
+          s!"\"retries\":{rec.retries},\"replays\":{rec.replays},\"wait_active\":{waitStr}}"
+        ))
+      | .error "scheduled_recovery_superseded" =>
+        return .ok (mkJson 409 "{\"error\":\"scheduled_recovery_superseded\"}")
+      | .error "scheduled_recovery_missing_remote_job" =>
+        return .ok (mkJson 400 "{\"error\":\"scheduled_recovery_missing_remote_job\"}")
+      | .error "remote_wait_not_armed" =>
+        return .ok (mkJson 404 "{\"error\":\"remote_wait_not_armed\"}")
+      | .error "remote_replay_missing_candidate_job" =>
+        return .ok (mkJson 400 "{\"error\":\"remote_replay_missing_candidate_job\"}")
+      | .error "remote_replay_invalid_flags" =>
+        return .ok (mkJson 400 "{\"error\":\"remote_replay_invalid_flags\"}")
+      | .error e =>
+        if e.startsWith "mission_not_found:" then
+          return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
+  -- Stranded Pending Reconciliation (`POST /api/control/missions/reconcile-pending`)
+  if req.method == "POST" && cleanPath == "/api/control/missions/reconcile-pending" then
+    match ← reconcileStrandedPendingMissions st.store.missionsDb s!"{nowEpochSec}" with
+    | .ok n => return .ok (mkJson 200 s!"\{\"ok\":true,\"healed\":{n}}")
+    | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
+  -- Mission Fork & Cloud-to-Workspace Handoff (`POST /api/control/missions/:id/fork`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/fork" rawTarget then
+    if req.method == "POST" then
+      let srcMid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let jv :=
+        if req.bodySlice.len == 0 then JVal.obj #[]
+        else match OrbBin.Json.parseBytes req.bodySlice.toByteArray with
+          | .ok v => v
+          | .error _ => .null
+      if jv == .null then
+        return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let defNewId ← nextUniqueId st "m" nowEpochSec
+      let newMid := (jv.fieldStr? "id").getD defNewId
+      let reqBackend? := jv.fieldStr? "backend"
+      let reqModelOv? := jv.fieldStr? "model_override"
+      let rawEffort? := jv.fieldStr? "model_effort"
+      if let some re := rawEffort? then
+        let trimmedRe := re.trimAscii.toString
+        if !trimmedRe.isEmpty then
+          let checkBack := reqBackend?.orElse (fun _ => some "codex")
+          if (normalizeModelEffortForBackend checkBack trimmedRe).isNone then
+            return .ok (mkJson 400 s!"\{\"error\":\"unsupported_model_effort\",\"effort\":{jsonEscape trimmedRe}}")
+      let remoteNodeId? := jv.fieldStr? "remote_node_id"
+      let isRemoteTarget :=
+        match remoteNodeId? with
+        | some rn =>
+          let t := rn.trimAscii.toString
+          !t.isEmpty && t != "local"
+        | none => false
+      let rawWd? := jv.fieldStr? "working_directory"
+      let confinedWdRes : Except String (Option String) ← do
+        match rawWd? with
+        | none => pure (.ok none)
+        | some wd =>
+          let t := wd.trimAscii.toString
+          if t.isEmpty then pure (.ok none)
+          else if isRemoteTarget then
+            if t.toList.any (fun c => c.toNat == 0) || (t.splitOn "/").any (· == "..") then
+              pure (.error "invalid_working_directory")
+            else
+              pure (.ok (some t))
+          else
+            match ← confineWorkingDirectory st.cfg.workingDir t with
+            | .ok safe => pure (.ok (some safe))
+            | .error e => pure (.error e)
+      let .ok safeWd? := confinedWdRes
+        | return .ok (mkJson 400 "{\"error\":\"invalid_working_directory\"}")
+      let defaultSafeBase ← do
+        match ← confineWorkingDirectory st.cfg.workingDir st.cfg.workingDir with
+        | .ok b => pure b
+        | .error _ => pure st.cfg.workingDir
+      let sideQ := (jv.fieldBool? "side_question").getD false
+      let sidePrompt? := jv.fieldStr? "prompt"
+      let forkReq : ForkMissionRequest := {
+        sourceMissionId := srcMid
+        newMissionId := newMid
+        targetBackend? := reqBackend?
+        modelOverride? := reqModelOv?
+        modelEffort? := rawEffort?.map (fun s => s.trimAscii.toString.toLower)
+        workingDir? := safeWd?
+        remoteNodeId? := remoteNodeId?
+        title? := jv.fieldStr? "title"
+        sideQuestion := sideQ
+        sidePrompt? := sidePrompt?
+        nowAt := s!"{nowEpochSec}"
+      }
+      match ← forkOrHandoffMission st.store defaultSafeBase forkReq with
+      | .error (code, msg) =>
+        return .ok (mkJson code s!"\{\"error\":{jsonEscape msg}}")
+      | .ok out =>
+        if let some sIdx := st.searchIdx? then
+          discard <| indexConversation sIdx out.missionId out.title
+        let rnJson := match out.remoteNodeId? with | some rn => jsonEscape rn | none => "null"
+        let modOvJson := if out.modelOverride.isEmpty then "null" else jsonEscape out.modelOverride
+        let effJson := if out.modelEffort.isEmpty then "null" else jsonEscape out.modelEffort
+        let cloudTurnsStr := if out.usedCloudTurns then "true" else "false"
+        let freshWsStr := if out.freshWorkspace then "true" else "false"
+        let body :=
+          s!"\{\"id\":{jsonEscape out.missionId},\"title\":{jsonEscape out.title},\"status\":\"awaiting_user\"," ++
+          s!"\"backend\":{jsonEscape out.backend},\"model_override\":{modOvJson},\"model_effort\":{effJson}," ++
+          s!"\"working_directory\":{jsonEscape out.workingDirectory},\"remote_node_id\":{rnJson}," ++
+          s!"\"forked_from\":{jsonEscape out.forkedFrom},\"turns_copied\":{out.turnsCopied}," ++
+          s!"\"used_cloud_turns\":{cloudTurnsStr},\"fresh_workspace\":{freshWsStr}," ++
+          s!"\"state_revision\":1,\"tags\":{out.tagsJson}}"
+        return .ok (mkJson 201 body)
 
   -- Mission Machine Transfer (`GET|POST /api/control/missions/:id/machine-transfer`)
   if let some params := matchRoutePattern? "/api/control/missions/:id/machine-transfer" rawTarget then
@@ -909,6 +1185,9 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
             discard <| recoverDispatchLeases st.store.missionsDb st.store.projectsDb st.store.bootEpoch
             abortIdem
             return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+        if isCloudBackendName backend then
+          if let some cw := st.cloudWakeup? then
+            discard <| notifyCloudWorker cw
         if let some sIdx := st.searchIdx? then
           discard <| indexConversation sIdx mid title
         return .ok (mkJson 201 respBody)
@@ -1196,6 +1475,9 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let chainsRef ← IO.mkRef initialChains
     let seqRef ← IO.mkRef (0 : UInt64)
     let pacingTracker ← newProxyPacingTracker
+    let memTokenCache ← newMemoryTokenCache
+    let cloudWakeup ← newCloudWorkerWakeup
+    let bunkerRef ← IO.mkRef (0 : UInt8)
     let appState : CoreAppState := {
       cfg := cfg
       store := store
@@ -1204,6 +1486,9 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       chainsRef := chainsRef
       seqRef := seqRef
       pacingTracker? := some pacingTracker
+      memTokenCache? := some memTokenCache
+      cloudWakeup? := some cloudWakeup
+      bunkerStateRef? := some bunkerRef
     }
     let bindHost := if cfg.host == "localhost" then "127.0.0.1" else cfg.host
     let .ok (listenFd, boundPort) ← tcpListen bindHost cfg.port 128

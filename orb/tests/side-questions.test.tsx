@@ -14,13 +14,14 @@ const warmMock=vi.hoisted(()=>({
  updateSpy:vi.fn(),
 }));
 const watchMock=vi.hoisted(()=>({fn:async(_parent:string,_signal:AbortSignal,_receive:(e:any)=>void)=>{}}));
+const askMock=vi.hoisted(()=>({fn:undefined as typeof askSide|undefined}));
 const queueFollowUpMock=vi.hoisted(()=>({enabled:false,fn:vi.fn()}));
 const launchMock=vi.hoisted(()=>({
  pending:undefined as Promise<void>|undefined,
  lastError:undefined as {error:string;notSent:boolean}|undefined,
 }));
 const sessionMock=vi.hoisted(()=>({current:undefined as any,rev:undefined as (()=>number)|undefined,bump:undefined as (()=>void)|undefined}));
-vi.mock('../src/btwAgent',async()=>{const {createSignal}=await import('solid-js');const [rev,setRev]=createSignal(0);sessionMock.rev=rev;sessionMock.bump=()=>setRev(v=>v+1);const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>{sessionMock.rev?.();return sessionMock.current;},clearStaleBtwSessionActive:()=>{if(sessionMock.current?.active){sessionMock.current={...sessionMock.current,active:false,startedAt:undefined};sessionMock.bump?.();}},noteBtwPanelOpen:()=>()=>{},btwLaunchPending:()=>launchMock.pending,btwLastLaunchError:()=>launchMock.lastError,startFreshBtwSession:()=>{if(sessionMock.current){sessionMock.current={...sessionMock.current,freshSession:true};sessionMock.bump?.();}},btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[],signal?:AbortSignal,options?:{force?:boolean})=>serverReconcile.fn(parent,local,signal,options),peekWarmBtwState:(parent:string)=>warmMock.current.get(parent),updateWarmBtwHistory:(...args:any[])=>warmMock.updateSpy(...args),get queueBtwFollowUp(){return queueFollowUpMock.enabled?queueFollowUpMock.fn:undefined;},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
+vi.mock('../src/btwAgent',async()=>{const {createSignal}=await import('solid-js');const [rev,setRev]=createSignal(0);sessionMock.rev=rev;sessionMock.bump=()=>setRev(v=>v+1);const client=await import('../src/sideQuestionClient');return {askBtwAgent:(...args:Parameters<typeof client.askSide>)=>(askMock.fn??client.askSide)(...args),btwSession:()=>{sessionMock.rev?.();return sessionMock.current;},clearStaleBtwSessionActive:()=>{if(sessionMock.current?.active){sessionMock.current={...sessionMock.current,active:false,startedAt:undefined};sessionMock.bump?.();}},noteBtwPanelOpen:()=>()=>{},btwLaunchPending:()=>launchMock.pending,btwLastLaunchError:()=>launchMock.lastError,startFreshBtwSession:()=>{if(sessionMock.current){sessionMock.current={...sessionMock.current,freshSession:true};sessionMock.bump?.();}},btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[],signal?:AbortSignal,options?:{force?:boolean})=>serverReconcile.fn(parent,local,signal,options),peekWarmBtwState:(parent:string)=>warmMock.current.get(parent),updateWarmBtwHistory:(...args:any[])=>warmMock.updateSpy(...args),get queueBtwFollowUp(){return queueFollowUpMock.enabled?queueFollowUpMock.fn:undefined;},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
 const thoughts=vi.hoisted(()=>({value:[] as {kind:'think';key:string;text:string;done:boolean}[]}));
 const storage=vi.hoisted(()=>new Map<string,unknown>());
 vi.mock('../src/composerDrafts',()=>({
@@ -29,7 +30,7 @@ vi.mock('../src/composerDrafts',()=>({
  readSideThread:async(key:string)=>storage.get('thread:'+key),
  saveSideThread:async(key:string,value:unknown)=>{storage.set('thread:'+key,structuredClone(value));},
 }));
-afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();resetSideQuestionStorageForTest();thoughts.value=[];sessionMock.current=undefined;launchMock.pending=undefined;launchMock.lastError=undefined;warmMock.current.clear();warmMock.updateSpy.mockReset();queueFollowUpMock.enabled=false;queueFollowUpMock.fn.mockReset();watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
+afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();resetSideQuestionStorageForTest();thoughts.value=[];sessionMock.current=undefined;askMock.fn=undefined;launchMock.pending=undefined;launchMock.lastError=undefined;warmMock.current.clear();warmMock.updateSpy.mockReset();queueFollowUpMock.enabled=false;queueFollowUpMock.fn.mockReset();watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
 it('routes /btw away from the working agent while it is busy',async()=>{
  const send=vi.fn(),ask=vi.fn(()=>true),stop=vi.fn();
  render(()=><Composer placeholder="Follow-up" busy onSend={send} onStop={stop} onBtw={ask}/>);
@@ -841,6 +842,61 @@ it('transitions an idle open /btw panel into busy streaming via the warm fast pa
   streamSpy.mockRestore();
   muxSpy.mockRestore();
  }
+});
+
+it('mints a fresh clientMessageId on Retry after a post-acceptance failure or idempotency_conflict while preserving it for unsent network failures',async()=>{
+ const seenIds:string[]=[];
+ askMock.fn=async(_m,_q,_ctx,_hist,_sig,receive,_att,_launchSig,clientId)=>{
+  seenIds.push(clientId!);
+  if(seenIds.length===1)throw new Error("Remote opencode job failed: The inference connection failed temporarily.");
+  if(seenIds.length===2)throw Object.assign(new Error('409 {"error":"idempotency_conflict","message":"Idempotency-Key was already used with a different request payload"}'),{notSent:true});
+  if(seenIds.length===3)throw Object.assign(new Error('Connection interrupted — your question was not sent. Retry to send it.'),{notSent:true});
+  receive({type:'done',answer:'Recovered cleanly.'});
+ };
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="retry-turn-id-discipline" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ await handle.ask('Check babylon progress');
+ await screen.findByText("Couldn’t complete side question");
+ fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+ await screen.findByText(/idempotency_conflict/);
+ expect(seenIds[1]).not.toBe(seenIds[0]);
+ fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+ await screen.findByText(/your question was not sent/);
+ expect(seenIds[2]).not.toBe(seenIds[1]);
+ fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+ await screen.findByText('Recovered cleanly.');
+ expect(seenIds[3]).toBe(seenIds[2]);
+});
+
+it('clears a persisted pending error banner when server reconciliation returns the auto-recovered answer',async()=>{
+ const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ await writeSideQuestion(sideQuestionKey('23bad383-5b27-4b83-9a84-d86d34223509'),{
+  history:[],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{
+   question:'où en est le run sur babylon ?',
+   answer:'',
+   turnId:'8652b679-ee6e-4b49-9429-b09ec99e08a9',
+   error:'409 {"error":"idempotency_conflict","message":"Idempotency-Key was already used with a different request payload"}',
+   notSent:true,
+  },
+ });
+ serverReconcile.fn=async()=>({
+  history:[{
+   id:'btw:fc153ce6-2a61-43a6-8e2f-e01cbc263661:274',
+   question:'où en est le run sur babylon ?',
+   answer:'Oui, ça a nettement progressé ces deux dernières heures sur babylon.',
+   at:'2026-11-07T04:47:37Z',
+   userEventId:'8652b679-ee6e-4b49-9429-b09ec99e08a9',
+  }],
+  authoritative:true,
+ });
+ render(()=><SideQuestions mission="23bad383-5b27-4b83-9a84-d86d34223509" items={[]} ref={()=>{}} onTransfer={()=>{}}/>);
+ await screen.findByText('Oui, ça a nettement progressé ces deux dernières heures sur babylon.');
+ await waitFor(()=>expect(screen.queryByText(/idempotency_conflict/)).toBeNull());
 });
 
 

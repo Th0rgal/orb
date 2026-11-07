@@ -525,11 +525,36 @@ def default_lean_bin_dir() -> Path:
     return fallback
 
 
+def downgrade_llvm20_textual_ir(line: str) -> str:
+    """Strip LLVM 19+/20+ textual IR poison-refinement flags/attributes not recognized
+    by LLVM 18/19 parsers (`ubuntu-latest` clang 18, Android NDK r28 clang 19).
+    Dropping optional poison-refinement flags (`trunc nuw/nsw`, `icmp samesign`,
+    `getelementptr nusw/nuw`, `uwtable(sync)`, `nocreateundeforpoison`) is strictly
+    semantics-preserving for all well-defined inputs."""
+    line = re.sub(r"\btrunc\s+(?:nuw\s+|nsw\s+)+", "trunc ", line)
+    line = re.sub(r"\bicmp\s+samesign\s+", "icmp ", line)
+    line = re.sub(r"\bgetelementptr\s+inbounds\s+(?:nuw\s+|nusw\s+)+", "getelementptr inbounds ", line)
+    line = re.sub(r"\bgetelementptr\s+(?:nuw\s+|nusw\s+)+", "getelementptr ", line)
+    line = re.sub(r"\buwtable\(sync\)", "uwtable", line)
+    line = re.sub(r"\s+nocreateundeforpoison\b", "", line)
+    line = re.sub(r"-Fn32", "", line)
+    line = re.sub(r"\s*captures\([^)]*\)", "", line)
+    line = re.sub(r"\s*dead_on_unwind", "", line)
+    line = re.sub(r"\brange\([^)]*\)\s*", "", line)
+    return line
+
+
 def canonicalize_llvm_ir(ir_text: str, arch_label: str) -> str:
     """Run target-canonical LLVM IR simplification (`clang -O2 -S -emit-llvm`) and
     strip host-specific `target-cpu` / `target-features` / `!llvm.ident` metadata
     so committed `.ll` files stay compact (~480 KB) and compile in ~1s on CI/mobile."""
-    clang = shutil.which("clang")
+    ndk_home = os.environ.get("ANDROID_NDK_HOME")
+    ndk_clang = (
+        sorted(Path(ndk_home).glob("toolchains/llvm/prebuilt/*/bin/clang"))
+        if ndk_home
+        else []
+    )
+    clang = str(ndk_clang[0]) if ndk_clang else shutil.which("clang")
     if not clang:
         return ir_text
     target = (
@@ -571,13 +596,13 @@ def canonicalize_llvm_ir(ir_text: str, arch_label: str) -> str:
             if stripped.startswith("attributes #"):
                 cleaned = re.sub(r'\s*"target-cpu"="[^"]*"', "", line)
                 cleaned = re.sub(r'\s*"target-features"="[^"]*"', "", cleaned)
-                out_lines.append(cleaned)
+                out_lines.append(downgrade_llvm20_textual_ir(cleaned))
                 continue
             if stripped.startswith("!llvm.ident =") or re.match(
                 r"^!\d+\s*=\s*!\{!\"[^\"]*clang version", stripped
             ):
                 continue
-            out_lines.append(line)
+            out_lines.append(downgrade_llvm20_textual_ir(line))
         return "\n".join(out_lines).rstrip() + "\n"
 
 
@@ -603,6 +628,10 @@ def generate_ir_files(
         raise RuntimeError(f"unresolved Lean exports for Wrappers.lean: {missing}")
 
     lean_native_bin = turbo_root / "lean/.lake/build/bin/lean-native"
+    if not lean_native_bin.is_file() and (turbo_root / ".lake/build/bin/lean-native").is_file():
+        lean_native_bin = turbo_root / ".lake/build/bin/lean-native"
+    if not lean_native_bin.is_file() and shutil.which("lean-native"):
+        lean_native_bin = Path(shutil.which("lean-native") or "").resolve()
     if not lean_native_bin.is_file():
         raise FileNotFoundError(f"missing elaborating lean-native binary: {lean_native_bin}")
     if not lean_native_core.is_file():

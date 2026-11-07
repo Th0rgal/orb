@@ -9,11 +9,13 @@ object OrbHarnessTransfer {
             OrbJSON.dict(mission["remote_job"])?.get("node_state") !in setOf("queued", "running")
 
     suspend fun stopSource(core: OrbCore, base: String) {
-        fun stopped(value: Any?) = OrbJSON.dict(value)?.let(::sourceStopped) == true
-        if (stopped(core.request(base))) return
-        core.request("$base/cancel", method = "POST")
+        val current = OrbJSON.dict(core.request(base))
+        if (current != null && sourceStopped(current)) return
+        val cancelSuffix = if ((current?.get("backend") as? String)?.startsWith("cloud_") == true) "/cloud/cancel" else "/cancel"
+        core.request("$base$cancelSuffix", method = "POST")
         repeat(20) {
-            if (stopped(core.request(base))) return
+            val polled = OrbJSON.dict(core.request(base))
+            if (polled != null && sourceStopped(polled)) return
             delay(500)
         }
         throw OrbError("The original agent has not stopped yet. Wait and retry the transfer.")

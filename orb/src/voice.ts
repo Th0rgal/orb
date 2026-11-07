@@ -118,10 +118,6 @@ export interface VoiceBridge {
 
 type Invoke = (cmd: string, args?: unknown, options?: { headers?: Record<string, string> }) => Promise<unknown>;
 
-function tauriInvoke(): Invoke | null {
-  return nativeInvoke() ?? null;
-}
-
 /** Normalize whatever `invoke` rejected with into a VoiceError. */
 export function toVoiceError(e: unknown): VoiceError {
   if (e instanceof VoiceError) return e;
@@ -133,9 +129,9 @@ export function toVoiceError(e: unknown): VoiceError {
   return new VoiceError("error", e instanceof Error ? e.message : String(e));
 }
 
-/** The Tauri-backed bridge, or null when not running inside Orb's webview. */
-export function tauriVoiceBridge(): VoiceBridge | null {
-  const invoke = tauriInvoke();
+/** The native desktop voice bridge, or null when not running inside Orb's webview. */
+export function nativeVoiceBridge(): VoiceBridge | null {
+  const invoke = (nativeInvoke() ?? null) as Invoke | null;
   if (!invoke) return null;
   const call = async <T>(cmd: string, args?: unknown, options?: { headers?: Record<string, string> }): Promise<T> => {
     try {
@@ -147,15 +143,16 @@ export function tauriVoiceBridge(): VoiceBridge | null {
   return {
     capability: () => call<VoiceCapability>("voice_capability"),
     prewarm: () => call("voice_prewarm"),
-    // Raw body: Tauri sends ArrayBuffer/typed-array args as bytes, not JSON.
     transcribe: (wav, language) => call<VoiceTranscript>("voice_transcribe", wav, { headers: { "x-language": language } }),
     cancel: () => call<boolean>("voice_cancel"),
   };
 }
 
+export const tauriVoiceBridge = nativeVoiceBridge;
+
 let capabilityPromise: Promise<VoiceCapability | null> | null = null;
 /** Probe once per session; null means "no native voice here" (browser, non-Mac). */
-export function probeVoice(bridge: VoiceBridge | null = tauriVoiceBridge()): Promise<VoiceCapability | null> {
+export function probeVoice(bridge: VoiceBridge | null = nativeVoiceBridge()): Promise<VoiceCapability | null> {
   if (!capabilityPromise) {
     capabilityPromise = (async () => {
       if (!bridge) return null;

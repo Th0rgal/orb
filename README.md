@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="orb/src-tauri/icons/icon.png" width="96" alt="Orb" />
+  <img src="macos_shell/icons/icon.png" width="96" alt="Orb" />
 </p>
 
 <h1 align="center">Orb</h1>
@@ -97,11 +97,10 @@ Cursor Cloud API account.
 ## Under the hood
 
 **Orb is the client; Core is its backend.**
-Desktop is built with Tauri and SolidJS; iOS uses SwiftUI. The Rust backend owns
-projects, missions, event history and remote-node coordination, backed by a
-Lean 4 decision kernel for orchestration, proxy and mission lifecycle, and
-cross-client projections. Rust performs I/O; the verified decisions compile to
-`liborb_spec_cabi.a` without a Lean runtime dependency. The
+Desktop is built with SolidJS, a thin native WebKit shell (`macos_shell/` on macOS, `linux_shell/` on Linux), and the Lean 4 `orb-locald` daemon; iOS uses SwiftUI and Android uses Jetpack Compose. The Lean 4 backend (`lean/OrbCore/`, `lean/OrbNode/`) owns
+projects, missions, event history and remote-node coordination, backed by the
+formal Lean 4 decision kernel (`lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean`) for orchestration, proxy and mission lifecycle, and
+cross-client projections. The
 [ABI manifest](shared/orb-spec/kernel_abi.json) records the exported functions,
 and the [kernel audit](lean/audit/AuditSpec.lean) checks the proof boundary.
 These guarantees cover the decision kernel, not the entire application.
