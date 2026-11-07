@@ -287,7 +287,7 @@ class Harness(unittest.TestCase):
             self.assertEqual(records[-1]["exit_code"], -9)
 
     def test_domain_mutant_inventory_and_witness_qualification(self):
-        self.assertEqual(len(conformance.DOMAIN_MUTANTS), 30)
+        self.assertEqual(len(conformance.DOMAIN_MUTANTS), 39)
         by_family = {}
         for _, _, fam, _, _, _ in conformance.DOMAIN_MUTANTS:
             by_family[fam] = by_family.get(fam, 0) + 1
@@ -312,7 +312,7 @@ class Harness(unittest.TestCase):
             "loop_alias_rc": {"status": "PASS", "live_objects": 0},
             "mutation_families": {f: {"status": "PASS", "killed": 3, "total": 3} for f in conformance.MUTATION_FAMILIES},
             "mutation_checks": {"m01_native": {"status": "KILLED"}},
-            "total_domain_mutants_killed": 30,
+            "total_domain_mutants_killed": 39,
         }
         report = copy.deepcopy(base_report)
         self.assertEqual(conformance.summarize(report, values, {}, self.cases), 0)
@@ -337,8 +337,8 @@ class Harness(unittest.TestCase):
     def test_public_export_inventory_matches_current_manifest_and_rejects_drift(self):
         manifest = conformance.load_manifest(conformance.ORB / "shared/orb-spec/kernel_abi.json")
         functions = conformance.public_export_functions(manifest)
-        self.assertEqual(len(manifest["functions"]), 181)
-        self.assertEqual(len(functions), 180)
+        self.assertEqual(len(manifest["functions"]), 184)
+        self.assertEqual(len(functions), 183)
         self.assertIn("orb_slot_bypass_step", {f["name"] for f in functions})
         self.assertIn("orb_node_resize_step", {f["name"] for f in functions})
         self.assertIn("orb_node_lane_step", {f["name"] for f in functions})
@@ -374,15 +374,18 @@ class Harness(unittest.TestCase):
         self.assertIn("orb_skill_slash_step", {f["name"] for f in functions})
         self.assertIn("orb_worktree_decision_step", {f["name"] for f in functions})
         self.assertIn("orb_repo_diff_budget_step", {f["name"] for f in functions})
+        self.assertIn("orb_followup_queue_step", {f["name"] for f in functions})
+        self.assertIn("orb_transport_epoch_step", {f["name"] for f in functions})
+        self.assertIn("orb_stream_open_tail_cap_step", {f["name"] for f in functions})
         self.assertNotIn("lp_orb_x2dspec_Orb_Kernel_accessStep___redArg", {f["name"] for f in functions})
         shrunk = copy.deepcopy(manifest)
         shrunk["functions"] = [f for f in shrunk["functions"] if f["name"] != "orb_slot_bypass_step"]
         with self.assertRaises(ValueError):
             conformance.public_export_functions(shrunk)
         cases, witness_cases = conformance.build_corpus(functions)
-        self.assertEqual(len(functions) * 8, 1440)
-        self.assertEqual(len(cases), 1469)
-        self.assertEqual(len(witness_cases), 30)
+        self.assertEqual(len(functions) * 8, 1464)
+        self.assertEqual(len(cases), 1500)
+        self.assertEqual(len(witness_cases), 39)
 
 
 if __name__ == "__main__":

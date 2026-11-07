@@ -16,6 +16,7 @@ import {
   orbMissionFlags, orbMissionInboxSection, orbMissionSortRank, orbMissionStateClassify,
   orbNumericCellScan, orbSendFlowStep, orbTurnOutcomeStep, orbUtf8Utf16WindowStep,
   orbWorkedDurationBucket,
+  orbFollowupQueueStep, orbTransportEpochStep, orbStreamOpenTailCapStep,
 } from "../src/orbKernel";
 import { mergeMission, reparentMission, resetMissionHierarchy } from "../src/missionHierarchy";
 import { normalizeLoosePipeTables } from "../src/pipeTables";
@@ -683,6 +684,86 @@ describe("orb kernel gates mirror lean-sys", () => {
       seqBytes: 4,
       utf16Cost: 2,
       nextUtf16Units: 7,
+    });
+  });
+
+  it("evaluates R6-A follow-up queue, transport epoch, and stream open-tail cap wrappers", () => {
+    expect(orbFollowupQueueStep({
+      op: 1,
+      serverRev: 5,
+      incomingServerRev: 5,
+      expectedServerRev: 5,
+      clientMsgId: 42n,
+      trackedMsgId: 42n,
+      deliveredMsgId: 0n,
+      postedAfterSeq: 10n,
+      turnSeq: 10n,
+      optimisticSending: false,
+      serverListed: false,
+      contentMatched: false,
+      alreadyDelivered: false,
+    })).toEqual({
+      reasonCode: 1,
+      admitted: true,
+      optimisticLiveNext: true,
+      retiredNow: false,
+      nextServerRev: 6,
+    });
+    expect(orbFollowupQueueStep({
+      op: 3,
+      serverRev: 5,
+      incomingServerRev: 5,
+      expectedServerRev: 5,
+      clientMsgId: 42n,
+      trackedMsgId: 42n,
+      deliveredMsgId: 0n,
+      postedAfterSeq: 10n,
+      turnSeq: 10n,
+      optimisticSending: false,
+      serverListed: false,
+      contentMatched: true,
+      alreadyDelivered: false,
+    })).toEqual({
+      reasonCode: 4,
+      admitted: false,
+      optimisticLiveNext: true,
+      retiredNow: false,
+      nextServerRev: 5,
+    });
+
+    expect(orbTransportEpochStep({
+      mode: 0,
+      eventKind: 1,
+      everReady: true,
+      stickyUnsupported: false,
+      endpointClass: 0,
+      failureStreak: 1,
+      failThreshold: 2,
+      httpStatus: 0,
+      sinceSeq32: 40,
+      nowMs: 1000n,
+      cooldownUntilMs: 0n,
+    })).toEqual({
+      nextMode: 1,
+      admitted: true,
+      stickyUnsupportedNext: false,
+      fallbackActiveNext: true,
+      reprobeTriggered: false,
+      nextFailureStreak: 2,
+      preservedSinceSeq32: 40,
+    });
+
+    expect(orbStreamOpenTailCapStep(20, 5, 12, 40, 5, 8, true)).toEqual({
+      admitted: true,
+      checkpointForced: true,
+      openFenceCapped: true,
+      nextCheckpoint: 32,
+    });
+    expect(orbStreamOpenTailCapStep(20, 5, 12, 40, 5, 0, true)).toEqual({
+      admitted: false,
+      checkpointForced: false,
+      openFenceCapped: false,
+      nextCheckpoint: 12,
     });
   });
 });

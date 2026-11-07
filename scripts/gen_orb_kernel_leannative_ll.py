@@ -66,6 +66,7 @@ BRANCHLESS_PRELUDE = """
 @[inline] def blNz32 (x : UInt32) : UInt32 := ((x ||| (0 - x)) >>> 31)
 @[inline] def blEz32 (x : UInt32) : UInt32 := blNz32 x ^^^ 1
 @[inline] def blEq8  (a b : UInt8) : UInt32 := blEz32 (a ^^^ b).toUInt32
+@[inline] def blEz8  (a : UInt8) : UInt32 := blEz32 a.toUInt32
 @[inline] def blEq32 (a b : UInt32) : UInt32 := blEz32 (a ^^^ b)
 @[inline] def blNz64 (x : UInt64) : UInt32 := ((x ||| (0 - x)) >>> 63).toUInt32
 @[inline] def blEz64 (x : UInt64) : UInt32 := blNz64 x ^^^ 1
@@ -278,6 +279,223 @@ BRANCHLESS_PROBES: dict[str, str] = {
   let foldW := foldLo.toUInt64 ||| (foldHi.toUInt64 <<< 32)
   let sliceErr := (st ||| keepThink).toUInt64 ||| (entryCount.toUInt64 <<< 32)
   blSel64 (blEz32 st) foldW sliceErr""",
+    "orb_followup_queue_step": """@[export probe_orb_followup_queue_step] def probe_orb_followup_queue_step (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 : UInt64) : UInt64 :=
+  let op := a0.toUInt8; let serverRev := a1.toUInt32; let incoming := a2.toUInt32; let expected := a3.toUInt32
+  let clientMsg := a4; let tracked := a5; let delivered := a6; let posted := a7; let turn := a8
+  let optimistic := a9.toUInt8; let listed := a10.toUInt8; let matched := a11.toUInt8; let already := a12.toUInt8
+  let shaped := blLe8 op 3 &&& blLe8 optimistic 1 &&& blLe8 listed 1 &&& blLe8 matched 1 &&& blLe8 already 1 &&& blNz32 serverRev
+  let hasClient := blNz64 clientMsg; let notDelivered := blEz8 already; let unlisted := blEz8 listed
+  let idMatch := hasClient &&& notDelivered &&& blEq64 delivered clientMsg
+  let contentRetire := hasClient &&& notDelivered &&& blEz64 delivered &&& blEq8 matched 1 &&& blLt64 posted turn
+  let turnRetires := blEq8 op 3 &&& (idMatch ||| contentRetire)
+  let pollRetires := blEz8 op &&& blLe32 serverRev incoming &&& hasClient &&& notDelivered &&& unlisted &&& blEz8 optimistic &&& blLt64 posted turn
+  let retired := shaped &&& (turnRetires ||| pollRetires)
+  let dup := blEq8 op 2 &&& hasClient &&& (blEq64 clientMsg tracked ||| (notDelivered ^^^ 1))
+  let admit0 := blLe32 serverRev incoming
+  let admit1 := blEq32 expected serverRev &&& blLt32 serverRev 0xFFFFFFFF
+  let admit2 := hasClient &&& (dup ^^^ 1)
+  let admitOp := blSel32 (blEz8 op) admit0 (blSel32 (blEq8 op 1) admit1 (blSel32 (blEq8 op 2) admit2 turnRetires))
+  let admit := shaped &&& admitOp
+  let nextRev := blSel32 (admit ^^^ 1) serverRev (blSel32 (blEz8 op) incoming (blSel32 (blEq8 op 1) (serverRev + 1) serverRev))
+  let live0 := blSel32 (blLt32 incoming serverRev) hasClient (hasClient &&& unlisted)
+  let live2 := hasClient &&& (admit ||| blEq64 clientMsg tracked)
+  let liveOp := blSel32 (blEz8 op) live0 (blSel32 (blEq8 op 2) live2 (hasClient &&& unlisted))
+  let live := shaped &&& notDelivered &&& (retired ^^^ 1) &&& liveOp
+  let reasonOp :=
+    blSel32 admit 1
+      (blSel32 (blEz8 op) 2
+        (blSel32 (blEq8 op 1) (blSel32 (blEq32 expected serverRev ^^^ 1) 2 5)
+          (blSel32 (blEq8 op 2) (blSel32 dup 3 0) (blSel32 notDelivered 4 3))))
+  let reason := blSel32 shaped reasonOp 0
+  let lo32 := reason ||| (admit <<< 8) ||| (live <<< 9) ||| (retired <<< 10)
+  lo32.toUInt64 ||| (nextRev.toUInt64 <<< 32)""",
+    "orb_transport_epoch_step": """@[export probe_orb_transport_epoch_step] def probe_orb_transport_epoch_step (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 : UInt64) : UInt64 :=
+  let mode := a0.toUInt8; let eventKind := a1.toUInt8; let sticky := a3.toUInt8
+  let streak := a5.toUInt32; let threshold := a6.toUInt32; let status := a7.toUInt32; let since := a8.toUInt32
+  let shaped := blLe8 mode 2 &&& blLe8 eventKind 4 &&& blLe8 a2.toUInt8 1 &&& blLe8 sticky 1 &&& blLe8 a4.toUInt8 3 &&& blNz32 threshold
+  let perm := blEq8 eventKind 2 &&& (blEq32 status 404 ||| blEq32 status 501)
+  let transient := blEq8 eventKind 1 ||| (blEq8 eventKind 2 &&& (perm ^^^ 1))
+  let bumped := blSel32 (blLt32 streak 255) (streak + 1) 255
+  let clamped := blSel32 (blLe32 threshold 255) threshold 255
+  let keptSticky := blEq8 sticky 1
+  let nextSticky := blSel32 shaped (blSel32 (blEq8 eventKind 4) 0 (blSel32 perm 1 keptSticky)) keptSticky
+  let keptStreak := blSel32 (blLe32 streak 255) streak 255
+  let permStreak := blSel32 (blLe32 clamped bumped) bumped clamped
+  let nextStreak :=
+    blSel32 shaped
+      (blSel32 (blEq8 eventKind 0 ||| blEq8 eventKind 4) 0
+        (blSel32 perm permStreak (blSel32 transient bumped keptStreak)))
+      keptStreak
+  let transientMode := blSel32 (blLe32 threshold bumped) 1 0
+  let cooldownMode := blSel32 (blEq8 mode 1 &&& blLe64 a10 a9) 2 mode.toUInt32
+  let nextMode :=
+    blSel32 shaped
+      (blSel32 (blEq8 eventKind 4) 2
+        (blSel32 nextSticky 1
+          (blSel32 (blEq8 eventKind 0) 0
+            (blSel32 transient transientMode (blSel32 (blEq8 eventKind 3) cooldownMode mode.toUInt32)))))
+      mode.toUInt32
+  let reprobe := shaped &&& ((blEq8 mode 1 &&& blEq32 nextMode 2) ||| blEq8 eventKind 4) &&& (nextSticky ^^^ 1)
+  let lo32 :=
+    blSel32 shaped
+      (nextMode ||| (256 : UInt32) ||| (nextSticky <<< 9) ||| ((shaped &&& blEq32 nextMode 1) <<< 10) ||| (reprobe <<< 11) ||| (nextStreak <<< 16))
+      255
+  lo32.toUInt64 ||| (since.toUInt64 <<< 32)""",
+    "orb_stream_open_tail_cap_step": """@[export probe_orb_stream_open_tail_cap_step] def probe_orb_stream_open_tail_cap_step (a0 a1 a2 a3 a4 a5 a6 : UInt64) : UInt64 :=
+  let prevLen := a0.toUInt32; let prevCommit := a1.toUInt32; let prevCp := a2.toUInt32
+  let newLen := a3.toUInt32; let raw := a4.toUInt32; let maxTail := a5.toUInt32
+  let valid := blLt32 0 maxTail &&& blLe32 prevCommit prevCp &&& blLe32 prevCp prevLen &&& blLe32 prevLen newLen
+  let clamped := blSel32 (blLe32 raw newLen) raw newLen
+  let nextCommit := blSel32 (blLe32 prevCommit clamped) clamped prevCommit
+  let baseCp := blSel32 (blLe32 prevCp nextCommit) nextCommit prevCp
+  let capFloor := blSel32 (blLe32 maxTail newLen) (newLen - maxTail) 0
+  let nextCp := blSel32 (blLe32 baseCp capFloor) capFloor baseCp
+  let forced := blLt32 nextCommit nextCp
+  let baseLo := blSel32 valid ((257 : UInt32) ||| (forced <<< 9)) 0
+  let baseHi := blSel32 valid nextCp prevCp
+  let admit := blLe8 a6.toUInt8 1 &&& ((baseLo >>> 8) &&& 1)
+  let lo32 := blSel32 admit (baseLo ||| ((blEq8 a6.toUInt8 1 &&& forced) <<< 10)) 0
+  let hi32 := blSel32 admit baseHi prevCp
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)""",
+    "orb_stream_commit_step": """@[export probe_orb_stream_commit_step] def probe_orb_stream_commit_step (a0 a1 a2 a3 a4 a5 a6 a7 a8 : UInt64) : UInt64 :=
+  let tick := a0.toUInt8; let openKind := a1.toUInt8; let openCount := a2.toUInt32
+  let lineBlank := a3.toUInt8; let lineTick := a4.toUInt8; let markerKind := a5.toUInt8
+  let markerCount := a6.toUInt32; let pos := a7.toUInt32; let commit := a8.toUInt32
+  let tick1 := blEq8 tick 1
+  let nextTick := blSel32 (blEq8 lineTick 1) (tick1 ^^^ 1) tick1
+  let markerLong := blLe32 3 markerCount
+  let markerValid := (blEq8 markerKind 1 ||| blEq8 markerKind 2) &&& markerLong
+  let openNext := blSel32 markerValid markerKind.toUInt32 0
+  let closeMatch := blEq8 markerKind openKind &&& blLe32 openCount markerCount &&& markerLong
+  let closeNext := blSel32 closeMatch 0 openKind.toUInt32
+  let nextFenceKind := blSel32 (blEz8 openKind) openNext closeNext
+  let nextPos := blSatAdd32 pos 1
+  let commits := blEq8 lineBlank 1 &&& blEz32 nextTick &&& blEz32 nextFenceKind
+  let nextCommit := blSel32 commits nextPos commit
+  let fence1 := blEq32 nextFenceKind 1
+  let nextFenceBits := blSel32 fence1 256 (blSel32 (blEq32 nextFenceKind 2) 512 0)
+  let lo32 := nextTick ||| nextFenceBits ||| (commits <<< 16)
+  lo32.toUInt64 ||| (nextCommit.toUInt64 <<< 32)""",
+    "orb_provider_pool_step": """@[export probe_orb_provider_pool_step] def probe_orb_provider_pool_step (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 : UInt64) : UInt64 :=
+  let hasBound := blEq8 a0.toUInt8 1; let boundId := a1.toUInt32; let candId := a2.toUInt32
+  let isRej := blEq8 a3.toUInt8 1; let fb := blEq8 a4.toUInt8 1; let isFailover := blEq8 a5.toUInt8 1
+  let attempts := a6.toUInt32; let maxAtt := a7.toUInt32
+  let lockBit := fb <<< 16
+  let c1 := fb &&& isFailover
+  let c2 := isFailover &&& ((blLe32 1 maxAtt &&& blLt32 attempts maxAtt) ^^^ 1)
+  let c3 := hasBound &&& (blEq32 candId boundId ^^^ 1)
+  let c4 := isRej &&& blLt64 a8 a9
+  let c5 := blEz32 candId
+  let okLo := blSel32 hasBound 1 2 + 256 + lockBit
+  let lo32 := blSel32 c1 (3 + lockBit) (blSel32 c2 (4 + lockBit) (blSel32 (c3 ||| c4 ||| c5) lockBit okLo))
+  let hi32 := blSel32 (c1 ||| c2 ||| c3 ||| c4 ||| c5) 0 candId
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)""",
+    "orb_node_gc_step": """@[export probe_orb_node_gc_step] def probe_orb_node_gc_step (a0 a1 a2 a3 a4 a5 a6 : UInt64) : UInt64 :=
+  let underFloor := blLt64 a0 a1
+  let emerg := blLt64 a0 a2
+  let deficit := a1 - a0
+  let agedCovers := blLe64 deficit a3
+  let rem1 := blSel64 agedCovers 0 (deficit - a3)
+  let coldCovers := blLe64 rem1 a5
+  let rem2 := blSel64 coldCovers 0 (rem1 - a5)
+  let freshCovers := blLe64 rem2 a4
+  let rem3 := blSel64 freshCovers 0 (rem2 - a4)
+  let unrec := blLt64 a6 rem3
+  let evictCold := blNz64 rem1
+  let hasRem2 := blNz64 rem2
+  let sweepFresh := hasRem2 ||| emerg
+  let hasRem3 := blNz64 rem3
+  let evictHot := hasRem3 &&& ((unrec ^^^ 1) ||| (emerg &&& blNz64 a6))
+  let act := blSel32 (unrec &&& (evictHot ^^^ 1)) 5 (blSel32 evictHot 4 (blSel32 sweepFresh 3 (blSel32 evictCold 2 1)))
+  let lo32 := act ||| (256 : UInt32) ||| (evictCold <<< 9) ||| (sweepFresh <<< 10) ||| (evictHot <<< 11) ||| (unrec <<< 12)
+  let grace := blSel32 sweepFresh 0 6
+  let underWord := lo32.toUInt64 ||| (grace.toUInt64 <<< 32)
+  blSel64 underFloor underWord ((72 : UInt64) <<< 32)""",
+    "orb_http_rate_limit_classify_step": """@[export probe_orb_http_rate_reason] def probe_orb_http_rate_reason (st quotaHint authHint : UInt32) : UInt32 :=
+  let r429 := blSel32 quotaHint 2 1
+  let is401_403 := blEq32 st 401 ||| (blEq32 st 403 &&& authHint)
+  let is529_503 := blEq32 st 529 ||| blEq32 st 503
+  let is5xx := blLe32 500 st &&& blLt32 st 600
+  blSel32 (blEq32 st 429) r429
+    (blSel32 (blEq32 st 402) 2
+      (blSel32 is401_403 3
+        (blSel32 is529_503 4 (blSel32 is5xx 5 0))))
+
+@[export probe_orb_http_rate_limit_classify_step] def probe_orb_http_rate_limit_classify_step (a0 a1 a2 a3 a4 : UInt64) : UInt64 :=
+  let reason := probe_orb_http_rate_reason a0.toUInt32 (blEq8 a1.toUInt8 1) (blEq8 a2.toUInt8 1)
+  let cap := blSel64 (blEz64 a4) 3600 a4
+  let dflt := blSel64 (blEq32 reason 2) 300 15
+  let raw := blSel64 (blEz64 a3) dflt a3
+  let cl64 := blSel64 (blLe64 raw cap) raw cap
+  let cl32 := blSel32 (blLe64 cl64 0xFFFFFFFF) cl64.toUInt32 0xFFFFFFFF
+  let retryBit := (blEq32 reason 1 ||| blEq32 reason 4 ||| blEq32 reason 5) <<< 9
+  let lo32 := reason ||| (256 : UInt32) ||| retryBit
+  let w := lo32.toUInt64 ||| (cl32.toUInt64 <<< 32)
+  blSel64 (blEz32 reason) 0 w""",
+    "orb_effect_outbox_step": """@[export probe_orb_effect_outbox_step] def probe_orb_effect_outbox_step (a0 a1 a2 a3 a4 a5 : UInt64) : UInt64 :=
+  let phase := a0.toUInt8; let deliv := a1.toUInt8; let op := a2.toUInt8
+  let phase32 := phase.toUInt32; let op32 := op.toUInt32
+  let fenceOk := blEq8 a3.toUInt8 1 &&& blEq64 a4 a5 &&& blNz64 a4
+  let phaseOk := blLe8 phase 5; let opOk := blLe8 op 5
+  let ok := fenceOk &&& phaseOk &&& opOk
+  let p0 := blSel32 (blEq8 phase 3 ||| blEq8 phase 5) 0 phase32
+  let p1 := blSel32 (blEz8 phase) 1 phase32
+  let p2 := blSel32 (blEq8 phase 1) 2 phase32
+  let p3 := blSel32 (blEq8 phase 1) 3 phase32
+  let p4 := blSel32 (blEq8 phase 1) 4 phase32
+  let p5 := blSel32 (blEq8 phase 4) 5 phase32
+  let opPhase :=
+    blSel32 (blEz8 op) p0
+      (blSel32 (blEq32 op32 1) p1
+        (blSel32 (blEq32 op32 2) p2
+          (blSel32 (blEq32 op32 3) p3
+            (blSel32 (blEq32 op32 4) p4 (blSel32 (blEq32 op32 5) p5 phase32)))))
+  let nextPhase := blSel32 ok opPhase phase32
+  let moved := blEq32 nextPhase phase32 ^^^ 1
+  let delivMoved := blSel32 (blEq32 nextPhase 2) 1 (blSel32 (blEz32 nextPhase ||| blEq32 nextPhase 3) 0 deliv.toUInt32)
+  let delivNext := blSel32 moved delivMoved deliv.toUInt32
+  let freshRetry := (blEq32 op32 1 ||| blEq32 op32 2) &&& blEq8 phase 4
+  let lo32 :=
+    blSel32 (fenceOk ^^^ 1) 4
+      (blSel32 ((phaseOk &&& opOk) ^^^ 1) 0
+        (blSel32 freshRetry 3
+          (blSel32 moved ((257 : UInt32) ||| (nextPhase <<< 16)) 2)))
+  lo32.toUInt64 ||| (delivNext.toUInt64 <<< 32)""",
+    "orb_fleet_place_argmin_step": """@[export probe_orb_fleet_place_argmin_step] def probe_orb_fleet_place_argmin_step (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 : UInt64) : UInt64 :=
+  let aq := blEz8 a0.toUInt8 ^^^ 1
+  let bq := blEz8 a3.toUInt8 ^^^ 1
+  let as_ := blEz8 a1.toUInt8 ^^^ 1
+  let bs_ := blEz8 a4.toUInt8 ^^^ 1
+  let ac := blSel64 (blEz32 a8.toUInt32) 1 a8.toUInt32.toUInt64
+  let bc := blSel64 (blEz32 a11.toUInt32) 1 a11.toUInt32.toUInt64
+  let lhs := a7.toUInt32.toUInt64 * bc
+  let rhs := a10.toUInt32.toUInt64 * ac
+  let ad := blEz8 a2.toUInt8 ^^^ 1
+  let bd := blEz8 a5.toUInt8 ^^^ 1
+  let idLt := blEq8 a6.toUInt8 1
+  let diskCmp := blSel32 (blLt32 a12.toUInt32 a9.toUInt32) 1 (blSel32 (blLt32 a9.toUInt32 a12.toUInt32) 0 idLt)
+  let memCmp := blSel32 (blLt64 a14 a13) 1 (blSel32 (blLt64 a13 a14) 0 diskCmp)
+  let softCmp := blSel32 (blLt32 ad bd) 1 (blSel32 (blLt32 bd ad) 0 memCmp)
+  let loadCmp := blSel32 (blLt64 lhs rhs) 1 (blSel32 (blLt64 rhs lhs) 0 softCmp)
+  let specCmp := blSel32 (blLt32 as_ bs_) 1 (blSel32 (blLt32 bs_ as_) 0 loadCmp)
+  (blSel32 (blLt32 aq bq) 1 (blSel32 (blLt32 bq aq) 0 specCmp)).toUInt64""",
+    "orb_proxy_exhaustion_step": """@[export probe_orb_proxy_exhaustion_step] def probe_orb_proxy_exhaustion_step (a0 a1 a2 a3 a4 a5 : UInt64) : UInt64 :=
+  let rl := a0.toUInt32; let pay := a1.toUInt32; let auth := a2.toUInt32
+  let srv := a3.toUInt32; let tv := a4.toUInt32; let ctx := a5.toUInt8
+  let rl0 := blEz32 rl; let pay0 := blEz32 pay; let auth0 := blEz32 auth; let srv0 := blEz32 srv
+  let noAttempt := rl0 &&& pay0 &&& auth0 &&& srv0
+  let attempted := rl.toUInt64 + pay.toUInt64 + auth.toUInt64 + srv.toUInt64
+  let isTv := blEq64 tv.toUInt64 attempted
+  let isCtx := blEq8 ctx 1 &&& rl0 &&& pay0
+  let isPay := (pay0 ^^^ 1) &&& rl0 &&& srv0
+  let isAuth := (auth0 ^^^ 1) &&& pay0 &&& rl0 &&& srv0
+  let isSrv := (srv0 ^^^ 1) &&& rl0
+  (blSel32 noAttempt 1
+    (blSel32 isTv 2
+      (blSel32 isCtx 3
+        (blSel32 isPay 4
+          (blSel32 isAuth 5
+            (blSel32 isSrv 6 7)))))).toUInt64""",
 }
 
 BRANCHLESS_EQUIV_PROOFS = """
@@ -351,6 +569,193 @@ theorem eq_wire_transcript_slice (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 : UInt64) :
     blSatAdd32, blSpanFits, blVerifySliceIo, probe_orb_wire_transcript_slice_step,
     Orb.Kernel.wireTranscriptSliceStep, Orb.Kernel.transcriptFoldStep, Orb.Kernel.satAdd32,
     Orb.Kernel.wireVerifySliceIo, Orb.Kernel.wireSliceSpanFits]
+  bv_decide
+
+theorem eq_followup_queue (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 : UInt64) :
+    probe_orb_followup_queue_step a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 =
+    Orb.Kernel.followupQueueStep a0.toUInt8 a1.toUInt32 a2.toUInt32 a3.toUInt32 a4 a5 a6 a7 a8 a9.toUInt8 a10.toUInt8 a11.toUInt8 a12.toUInt8 := by
+  simp only [bne, blNz32, blEz32, blEq8, blEz8, blEq32, blNz64, blEz64, blEq64, blLt32, blLe32, blLe8, blLt64, blLe64, blSel32,
+    probe_orb_followup_queue_step, Orb.Kernel.followupQueueStep]
+  bv_decide
+
+theorem eq_transport_epoch (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 : UInt64) :
+    probe_orb_transport_epoch_step a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 =
+    Orb.Kernel.transportEpochStep a0.toUInt8 a1.toUInt8 a2.toUInt8 a3.toUInt8 a4.toUInt8 a5.toUInt32 a6.toUInt32 a7.toUInt32 a8.toUInt32 a9 a10 := by
+  simp only [bne, blNz32, blEz32, blEq8, blEq32, blLt32, blLe32, blLe8, blLt64, blLe64, blSel32,
+    probe_orb_transport_epoch_step, Orb.Kernel.transportEpochStep]
+  bv_decide
+
+theorem eq_stream_open_tail_cap (a0 a1 a2 a3 a4 a5 a6 : UInt64) :
+    probe_orb_stream_open_tail_cap_step a0 a1 a2 a3 a4 a5 a6 =
+    Orb.Kernel.streamOpenTailCapStep a0.toUInt32 a1.toUInt32 a2.toUInt32 a3.toUInt32 a4.toUInt32 a5.toUInt32 a6.toUInt8 := by
+  simp only [bne, blNz32, blEz32, blEq8, blLt32, blLe32, blLe8, blSel32,
+    probe_orb_stream_open_tail_cap_step, Orb.Kernel.streamOpenTailCapStep, Orb.Kernel.streamBoundedCommitStep]
+  bv_decide
+
+theorem eq_stream_commit (a0 a1 a2 a3 a4 a5 a6 a7 a8 : UInt64) :
+    probe_orb_stream_commit_step a0 a1 a2 a3 a4 a5 a6 a7 a8 =
+    Orb.Kernel.streamCommitStep a0.toUInt8 a1.toUInt8 a2.toUInt32 a3.toUInt8 a4.toUInt8 a5.toUInt8 a6.toUInt32 a7.toUInt32 a8.toUInt32 := by
+  unfold probe_orb_stream_commit_step blSatAdd32
+  have hpos : blLe64 (a7.toUInt32.toUInt64 + (1 : UInt32).toUInt64) 0xFFFFFFFF =
+      if a7.toUInt32.toUInt64 + (1 : UInt32).toUInt64 ≤ 0xFFFFFFFF then 1 else 0 := by
+    simp only [blLe64, blLt64]; bv_decide
+  simp only [hpos, bne, blNz32, blEz32, blEq8, blEz8, blEq32, blLt32, blLe32, blSel32,
+    Orb.Kernel.streamCommitStep, Orb.Kernel.streamNextFenceKind, Orb.Kernel.streamNextFenceCount, Orb.Kernel.satAdd32]
+  bv_decide
+
+theorem eq_provider_pool (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 : UInt64) :
+    probe_orb_provider_pool_step a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 =
+    Orb.Kernel.providerPoolStep a0.toUInt8 a1.toUInt32 a2.toUInt32 a3.toUInt8 a4.toUInt8 a5.toUInt8 a6.toUInt32 a7.toUInt32 a8 a9 := by
+  simp only [bne, blNz32, blEz32, blEq8, blEq32, blLt32, blLe32, blLt64, blSel32,
+    probe_orb_provider_pool_step, Orb.Kernel.providerPoolStep]
+  bv_decide
+
+theorem eq_node_gc (a0 a1 a2 a3 a4 a5 a6 : UInt64) :
+    probe_orb_node_gc_step a0 a1 a2 a3 a4 a5 a6 = Orb.Kernel.nodeGcStep a0 a1 a2 a3 a4 a5 a6 := by
+  unfold probe_orb_node_gc_step
+  have hrem1 : blNz64 (blSel64 (blLe64 (a1 - a0) a3) 0 (a1 - a0 - a3)) =
+      if (blLe64 (a1 - a0) a3 = 0) && (a1 - a0 - a3 ≠ 0) then 1 else 0 := by
+    simp only [blNz64, blLe64, blLt64, blSel64]; bv_decide
+  have hrem2 : blNz64 (blSel64 (blLe64 (blSel64 (blLe64 (a1 - a0) a3) 0 (a1 - a0 - a3)) a5) 0
+      (blSel64 (blLe64 (a1 - a0) a3) 0 (a1 - a0 - a3) - a5)) =
+      if (blLe64 (blSel64 (blLe64 (a1 - a0) a3) 0 (a1 - a0 - a3)) a5 = 0) &&
+        (blSel64 (blLe64 (a1 - a0) a3) 0 (a1 - a0 - a3) - a5 ≠ 0) then 1 else 0 := by
+    simp only [blNz64, blLe64, blLt64, blSel64]; bv_decide
+  have hrem3 : blNz64 (blSel64
+      (blLe64 (blSel64 (blLe64 (blSel64 (blLe64 (a1 - a0) a3) 0 (a1 - a0 - a3)) a5) 0
+        (blSel64 (blLe64 (a1 - a0) a3) 0 (a1 - a0 - a3) - a5)) a4) 0
+      (blSel64 (blLe64 (blSel64 (blLe64 (a1 - a0) a3) 0 (a1 - a0 - a3)) a5) 0
+        (blSel64 (blLe64 (a1 - a0) a3) 0 (a1 - a0 - a3) - a5) - a4)) =
+      if (blLe64 (blSel64 (blLe64 (blSel64 (blLe64 (a1 - a0) a3) 0 (a1 - a0 - a3)) a5) 0
+          (blSel64 (blLe64 (a1 - a0) a3) 0 (a1 - a0 - a3) - a5)) a4 = 0) &&
+        (blSel64 (blLe64 (blSel64 (blLe64 (a1 - a0) a3) 0 (a1 - a0 - a3)) a5) 0
+          (blSel64 (blLe64 (a1 - a0) a3) 0 (a1 - a0 - a3) - a5) - a4 ≠ 0) then 1 else 0 := by
+    simp only [blNz64, blLe64, blLt64, blSel64]; bv_decide
+  simp only [hrem1, hrem2, hrem3, bne, blLt64, blLe64, blNz64, blSel32, blSel64, Orb.Kernel.nodeGcStep]
+  bv_decide
+
+theorem eq_http_rate_reason (st quotaHint authHint : UInt32)
+    (hq : quotaHint = 0 ∨ quotaHint = 1) (ha : authHint = 0 ∨ authHint = 1) :
+    probe_orb_http_rate_reason st quotaHint authHint =
+    let r429 : UInt32 := if quotaHint = 1 then 2 else 1
+    let is401_403 := st = 401 || (st = 403 && authHint = 1)
+    let is529_503 := st = 529 || st = 503
+    let is5xx := 500 ≤ st && st < 600
+    if st = 429 then r429
+    else if st = 402 then 2
+    else if is401_403 then 3
+    else if is529_503 then 4
+    else if is5xx then 5
+    else 0 := by
+  cases hq <;> cases ha <;>
+    simp only [*, probe_orb_http_rate_reason, blEq32, blEz32, blNz32, blLe32, blLt32, blSel32] <;>
+    bv_decide
+
+theorem eq_http_rate_limit (a0 a1 a2 a3 a4 : UInt64) :
+    probe_orb_http_rate_limit_classify_step a0 a1 a2 a3 a4 =
+    Orb.Kernel.httpRateLimitClassifyStep a0.toUInt32 a1.toUInt8 a2.toUInt8 a3 a4 := by
+  unfold probe_orb_http_rate_limit_classify_step
+  have hcap : blEz64 a4 = if a4 = 0 then 1 else 0 := by simp only [blEz64, blNz64]; bv_decide
+  have hraw : blEz64 a3 = if a3 = 0 then 1 else 0 := by simp only [blEz64, blNz64]; bv_decide
+  have hquota : blEq8 a1.toUInt8 1 = if a1.toUInt8 = 1 then 1 else 0 := by
+    simp only [blEq8, blEz32, blNz32]; bv_decide
+  have hauth : blEq8 a2.toUInt8 1 = if a2.toUInt8 = 1 then 1 else 0 := by
+    simp only [blEq8, blEz32, blNz32]; bv_decide
+  have hq01 : (if a1.toUInt8 = 1 then (1 : UInt32) else 0) = 0 ∨ (if a1.toUInt8 = 1 then (1 : UInt32) else 0) = 1 := by
+    by_cases h : a1.toUInt8 = 1 <;> simp [h]
+  have ha01 : (if a2.toUInt8 = 1 then (1 : UInt32) else 0) = 0 ∨ (if a2.toUInt8 = 1 then (1 : UInt32) else 0) = 1 := by
+    by_cases h : a2.toUInt8 = 1 <;> simp [h]
+  rw [hquota, hauth, eq_http_rate_reason _ _ _ hq01 ha01]
+  simp only [hcap, hraw, bne, blEq32, blEz32, blNz32, blLt64, blLe64, blSel32, blSel64,
+    Orb.Kernel.httpRateLimitClassifyStep]
+  bv_decide
+
+theorem eq_effect_outbox (a0 a1 a2 a3 a4 a5 : UInt64) :
+    probe_orb_effect_outbox_step a0 a1 a2 a3 a4 a5 =
+    Orb.Kernel.effectOutboxStep a0.toUInt8 a1.toUInt8 a2.toUInt8 a3.toUInt8 a4 a5 := by
+  unfold probe_orb_effect_outbox_step
+  have hphase : blLe8 a0.toUInt8 5 = if a0.toUInt8.toUInt32 ≤ (5 : UInt8).toUInt32 then 1 else 0 := by
+    simp only [blLe8, blLe32, blLt32]; bv_decide
+  have hop : blLe8 a2.toUInt8 5 = if a2.toUInt8.toUInt32 ≤ (5 : UInt8).toUInt32 then 1 else 0 := by
+    simp only [blLe8, blLe32, blLt32]; bv_decide
+  have heq : blEq64 a4 a5 = if a4 = a5 then 1 else 0 := by
+    simp only [blEq64, blEz64, blNz64]; bv_decide
+  simp only [hphase, hop, heq, bne, blNz32, blEz32, blEq8, blEz8, blEq32, blNz64, blSel32,
+    Orb.Kernel.effectOutboxStep]
+  bv_decide
+
+theorem eq_fleet_place_argmin_core (aq bq as_ bs_ ad bd idLt : UInt32) (a9 a12 : UInt32) (lhs rhs a13 a14 : UInt64)
+    (haq : aq = 0 ∨ aq = 1) (hbq : bq = 0 ∨ bq = 1)
+    (has : as_ = 0 ∨ as_ = 1) (hbs : bs_ = 0 ∨ bs_ = 1)
+    (had : ad = 0 ∨ ad = 1) (hbd : bd = 0 ∨ bd = 1)
+    (hid : idLt = 0 ∨ idLt = 1) :
+    (let diskCmp := blSel32 (blLt32 a12 a9) 1 (blSel32 (blLt32 a9 a12) 0 idLt)
+     let memCmp := blSel32 (blLt64 a14 a13) 1 (blSel32 (blLt64 a13 a14) 0 diskCmp)
+     let softCmp := blSel32 (blLt32 ad bd) 1 (blSel32 (blLt32 bd ad) 0 memCmp)
+     let loadCmp := blSel32 (blLt64 lhs rhs) 1 (blSel32 (blLt64 rhs lhs) 0 softCmp)
+     let specCmp := blSel32 (blLt32 as_ bs_) 1 (blSel32 (blLt32 bs_ as_) 0 loadCmp)
+     (blSel32 (blLt32 aq bq) 1 (blSel32 (blLt32 bq aq) 0 specCmp)).toUInt64) =
+    (if aq < bq then (1 : UInt8)
+     else if bq < aq then 0
+     else if as_ < bs_ then 1
+     else if bs_ < as_ then 0
+     else if lhs < rhs then 1
+     else if rhs < lhs then 0
+     else if ad < bd then 1
+     else if bd < ad then 0
+     else if a14 < a13 then 1
+     else if a13 < a14 then 0
+     else if a12 < a9 then 1
+     else if a9 < a12 then 0
+     else if idLt = 1 then 1
+     else 0).toUInt64 := by
+  have hml1 : blLt64 a14 a13 = if a14 < a13 then 1 else 0 := by simp only [blLt64]; bv_decide
+  have hml2 : blLt64 a13 a14 = if a13 < a14 then 1 else 0 := by simp only [blLt64]; bv_decide
+  have hll1 : blLt64 lhs rhs = if lhs < rhs then 1 else 0 := by simp only [blLt64]; bv_decide
+  have hll2 : blLt64 rhs lhs = if rhs < lhs then 1 else 0 := by simp only [blLt64]; bv_decide
+  have hdl1 : blLt32 a12 a9 = if a12 < a9 then 1 else 0 := by simp only [blLt32]; bv_decide
+  have hdl2 : blLt32 a9 a12 = if a9 < a12 then 1 else 0 := by simp only [blLt32]; bv_decide
+  simp only [hml1, hml2, hll1, hll2, hdl1, hdl2]
+  rcases haq with rfl | rfl <;> rcases hbq with rfl | rfl <;>
+  rcases has with rfl | rfl <;> rcases hbs with rfl | rfl <;>
+  rcases had with rfl | rfl <;> rcases hbd with rfl | rfl <;>
+  rcases hid with rfl | rfl <;>
+  by_cases hl1 : lhs < rhs <;> by_cases hl2 : rhs < lhs <;>
+  by_cases hm1 : a14 < a13 <;> by_cases hm2 : a13 < a14 <;>
+  by_cases hd1 : a12 < a9 <;> by_cases hd2 : a9 < a12 <;>
+  simp only [*, blLt32, blSel32] <;> decide
+
+theorem eq_fleet_place_argmin (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 : UInt64) :
+    probe_orb_fleet_place_argmin_step a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 =
+    (Orb.Kernel.fleetPlaceArgminStep a0.toUInt8 a1.toUInt8 a2.toUInt8 a3.toUInt8 a4.toUInt8 a5.toUInt8 a6.toUInt8
+      a7.toUInt32 a8.toUInt32 a9.toUInt32 a10.toUInt32 a11.toUInt32 a12.toUInt32 a13 a14).toUInt64 := by
+  unfold probe_orb_fleet_place_argmin_step Orb.Kernel.fleetPlaceArgminStep
+  have hnz8 : ∀ (x : UInt8), (blEz8 x ^^^ 1) = if x == 0 then 0 else 1 := by
+    intro x; simp only [blEz8, blEz32, blNz32]; bv_decide
+  have h01 : ∀ (x : UInt8), (if x == 0 then (0 : UInt32) else 1) = 0 ∨ (if x == 0 then (0 : UInt32) else 1) = 1 := by
+    intro x; by_cases h : x == 0 <;> simp [h]
+  have hid : blEq8 a6.toUInt8 1 = if a6.toUInt8 == 1 then 1 else 0 := by
+    simp only [blEq8, blEz32, blNz32]; bv_decide
+  have hid01 : (if a6.toUInt8 == 1 then (1 : UInt32) else 0) = 0 ∨ (if a6.toUInt8 == 1 then (1 : UInt32) else 0) = 1 := by
+    by_cases h : a6.toUInt8 == 1 <;> simp [h]
+  have hac : blSel64 (blEz32 a8.toUInt32) 1 a8.toUInt32.toUInt64 = if a8.toUInt32 == 0 then 1 else a8.toUInt32.toUInt64 := by
+    simp only [blSel64, blEz32, blNz32]; bv_decide
+  have hbc : blSel64 (blEz32 a11.toUInt32) 1 a11.toUInt32.toUInt64 = if a11.toUInt32 == 0 then 1 else a11.toUInt32.toUInt64 := by
+    simp only [blSel64, blEz32, blNz32]; bv_decide
+  have hu8lt : ∀ (x y : UInt8), ((if x == 0 then (0 : UInt32) else 1) < (if y == 0 then 0 else 1)) ↔
+      ((if x == 0 then (0 : UInt8) else 1) < (if y == 0 then 0 else 1)) := by
+    intro x y; by_cases hx : x == 0 <;> by_cases hy : y == 0 <;> simp [hx, hy]
+  simp only [hnz8, hid, hac, hbc]
+  rw [eq_fleet_place_argmin_core _ _ _ _ _ _ _ _ _ _ _ _ _
+    (h01 _) (h01 _) (h01 _) (h01 _) (h01 _) (h01 _) hid01]
+  simp only [hu8lt]
+  by_cases h6 : a6.toUInt8 == 1 <;> simp [h6]
+
+theorem eq_proxy_exhaustion (a0 a1 a2 a3 a4 a5 : UInt64) :
+    probe_orb_proxy_exhaustion_step a0 a1 a2 a3 a4 a5 =
+    (Orb.Kernel.proxyExhaustionStep a0.toUInt32 a1.toUInt32 a2.toUInt32 a3.toUInt32 a4.toUInt32 a5.toUInt8).toUInt64 := by
+  simp only [bne, blNz32, blEz32, blEq8, blNz64, blEz64, blEq64, blSel32,
+    probe_orb_proxy_exhaustion_step, Orb.Kernel.proxyExhaustionStep]
   bv_decide
 """.strip()
 
