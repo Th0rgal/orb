@@ -146,10 +146,11 @@ body {
   cursor: default;
 }
 body.resizing, body.resizing * { cursor: col-resize !important; }
-button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; user-select: none; -webkit-user-select: none; }
 button:disabled, select:disabled, input:disabled, textarea:disabled { cursor: default; }
 a[href], select { cursor: pointer; }
 input, textarea, [contenteditable="true"] { cursor: text; user-select: text; -webkit-user-select: text; -webkit-font-smoothing: antialiased; }
+.error-notice-body, .toast-body, .legacy-log, .page p, .page pre, .page code, .s-inner p, .s-inner pre, .s-inner code, .dlg-body p, .dlg-body pre, .dlg-body code { user-select: text; -webkit-user-select: text; }
 ::selection { background: var(--selection-bg); }
 .row, .icon-btn, .plus, .send, .voice-btn, .voice-x, .voice-ok, .voice-lang, .model, .na-drop-btn, .under-loc, .ctx, button.under-model, .row-action, .section-add, .gear-btn, .pill, .menu-item, .env-btn, .cron-retry {
   transition: background-color var(--t) var(--ease), color var(--t) var(--ease), opacity var(--t) var(--ease), border-color var(--t) var(--ease);

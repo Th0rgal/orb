@@ -199,19 +199,35 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         appMenu.addItem(withTitle: "Quit Orb", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
 
-        // Edit menu (required by AppKit + WKWebView for Cmd+Z, Shift+Cmd+Z, Cmd+X, Cmd+C, Cmd+V, Cmd+A)
+        // Edit menu (required by AppKit + WKWebView for Cmd+Z, Shift+Cmd+Z, Cmd+X, Cmd+C, Cmd+V, Cmd+A).
+        // Route explicitly through OrbAppDelegate with autoenablesItems disabled: WKWebView's
+        // validateUserInterfaceItem(_:) inspects only the focused editable element's _editorState,
+        // returning false for copy:/cut: whenever an empty <textarea> (Composer) retains focus while
+        // the user selects non-editable transcript/page text — causing AppKit to swallow Cmd+C.
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
         let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-        let redoItem = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        editMenu.autoenablesItems = false
+        let undoItem = NSMenuItem(title: "Undo", action: #selector(editUndo(_:)), keyEquivalent: "z")
+        undoItem.target = self
+        editMenu.addItem(undoItem)
+        let redoItem = NSMenuItem(title: "Redo", action: #selector(editRedo(_:)), keyEquivalent: "z")
         redoItem.keyEquivalentModifierMask = [.command, .shift]
+        redoItem.target = self
         editMenu.addItem(redoItem)
         editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let cutItem = NSMenuItem(title: "Cut", action: #selector(editCut(_:)), keyEquivalent: "x")
+        cutItem.target = self
+        editMenu.addItem(cutItem)
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(editCopy(_:)), keyEquivalent: "c")
+        copyItem.target = self
+        editMenu.addItem(copyItem)
+        let pasteItem = NSMenuItem(title: "Paste", action: #selector(editPaste(_:)), keyEquivalent: "v")
+        pasteItem.target = self
+        editMenu.addItem(pasteItem)
+        let selectAllItem = NSMenuItem(title: "Select All", action: #selector(editSelectAll(_:)), keyEquivalent: "a")
+        selectAllItem.target = self
+        editMenu.addItem(selectAllItem)
         editMenuItem.submenu = editMenu
 
         // Window menu
@@ -226,6 +242,26 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
 
         NSApp.mainMenu = mainMenu
     }
+
+    private func sendWebViewEditAction(_ action: Selector, from sender: Any?) {
+        if let win = window, win.attachedSheet == nil, let wv = webView {
+            if win.firstResponder === win || win.firstResponder === win.contentView {
+                win.makeFirstResponder(wv)
+            }
+            if win.firstResponder === wv {
+                NSApp.sendAction(action, to: wv, from: sender)
+                return
+            }
+        }
+        NSApp.sendAction(action, to: nil, from: sender)
+    }
+
+    @objc private func editUndo(_ sender: Any?) { sendWebViewEditAction(Selector(("undo:")), from: sender) }
+    @objc private func editRedo(_ sender: Any?) { sendWebViewEditAction(Selector(("redo:")), from: sender) }
+    @objc private func editCut(_ sender: Any?) { sendWebViewEditAction(#selector(NSText.cut(_:)), from: sender) }
+    @objc private func editCopy(_ sender: Any?) { sendWebViewEditAction(#selector(NSText.copy(_:)), from: sender) }
+    @objc private func editPaste(_ sender: Any?) { sendWebViewEditAction(#selector(NSText.paste(_:)), from: sender) }
+    @objc private func editSelectAll(_ sender: Any?) { sendWebViewEditAction(#selector(NSText.selectAll(_:)), from: sender) }
 
     private func replyToWebView(id: Int, result: Any?, error: String? = nil) {
         var payload: [String: Any] = ["id": id]
@@ -622,16 +658,26 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         container.addSubview(vibrancy)
         container.addSubview(webView, positioned: .above, relativeTo: vibrancy)
         window.contentView = container
+        window.initialFirstResponder = webView
         window.center()
         layoutTrafficLights()
         window.makeKeyAndOrderFront(nil)
         layoutTrafficLights()
+        window.makeFirstResponder(webView)
+        NSApp.activate(ignoringOtherApps: true)
         if let devUrl = env["ORB_DEV_URL"], let u = URL(string: devUrl), Self.isConfinedShellURL(u) {
             webView.load(URLRequest(url: u))
         } else if let u = URL(string: "tauri://localhost/") {
             webView.load(URLRequest(url: u))
         } else if let html = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "dist") {
             webView.loadFileURL(html, allowingReadAccessTo: html.deletingLastPathComponent())
+        }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        if let win = window, win.attachedSheet == nil, let wv = webView,
+           win.firstResponder === win || win.firstResponder === win.contentView {
+            win.makeFirstResponder(wv)
         }
     }
 

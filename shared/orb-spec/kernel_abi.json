@@ -5717,6 +5717,96 @@
         { "name": "maxBytes", "type": "uint32_t" }
       ],
       "jni": { "method": "orbRepoDiffBudgetStep", "ret": "jlong" }
+    },
+    {
+      "name": "orb_sidebar_move_target_admit",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "itemKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "dstIsSelfOrSubtree",
+          "type": "uint8_t"
+        },
+        {
+          "name": "srcProjectOrd",
+          "type": "uint32_t"
+        },
+        {
+          "name": "srcPathOrd",
+          "type": "uint32_t"
+        },
+        {
+          "name": "srcParentOrd",
+          "type": "uint32_t"
+        },
+        {
+          "name": "dstProjectOrd",
+          "type": "uint32_t"
+        },
+        {
+          "name": "dstPathOrd",
+          "type": "uint32_t"
+        }
+      ],
+      "internal": true
+    },
+    {
+      "name": "orb_sidebar_drag_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "phase",
+          "type": "uint8_t"
+        },
+        {
+          "name": "eventKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "rowMovable",
+          "type": "uint8_t"
+        },
+        {
+          "name": "targetCollapsed",
+          "type": "uint8_t"
+        },
+        {
+          "name": "targetAdmitted",
+          "type": "uint8_t"
+        },
+        {
+          "name": "distSq",
+          "type": "uint32_t"
+        },
+        {
+          "name": "elapsedMs",
+          "type": "uint32_t"
+        },
+        {
+          "name": "springElapsedMs",
+          "type": "uint32_t"
+        },
+        {
+          "name": "hoverTargetOrd",
+          "type": "uint32_t"
+        },
+        {
+          "name": "springTargetOrd",
+          "type": "uint32_t"
+        },
+        {
+          "name": "edgeTopDistPx",
+          "type": "uint32_t"
+        },
+        {
+          "name": "edgeBottomDistPx",
+          "type": "uint32_t"
+        }
+      ],
+      "internal": true
     }
   ]
 }
