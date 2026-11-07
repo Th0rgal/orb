@@ -277,7 +277,7 @@ def recoverDispatchLeases (mDb pDb : SqliteDb) (bootEpoch : UInt64 := 1) : IO (E
   let bootStr := s!"{bootEpoch}"
   let intentRows ← mDb.mu.atomically <|
     sqliteQueryRowsRaw mDb.handle
-      "SELECT reservation_id,mission_id,project_slug,track,phase,boot_epoch,reserved_disk_gib FROM dispatch_lease_intents WHERE phase IN ('preparing','rejected') OR (phase='active' AND boot_epoch<>?1);"
+      "SELECT reservation_id,mission_id,project_slug,track,phase,boot_epoch,reserved_disk_gib FROM dispatch_lease_intents WHERE phase IN ('preparing','rejected') OR (phase='active' AND boot_epoch<>?1) OR (phase NOT IN ('rolled_back','released') AND NOT EXISTS (SELECT 1 FROM missions m WHERE m.id = dispatch_lease_intents.mission_id));"
       #[bootStr]
   let .ok rs := intentRows
     | return .error (match intentRows with | .error e => e | .ok _ => "lease_recovery_query_failed")
@@ -313,10 +313,11 @@ def recoverDispatchLeases (mDb pDb : SqliteDb) (bootEpoch : UInt64 := 1) : IO (E
     let projPhase := (ors[i]![1]?).getD ""
     let chk ← mDb.mu.atomically <|
       sqliteQueryRowsRaw mDb.handle
-        "SELECT phase,boot_epoch FROM dispatch_lease_intents WHERE reservation_id=?1;" #[rid]
+        "SELECT d.phase,d.boot_epoch,CASE WHEN EXISTS (SELECT 1 FROM missions m WHERE m.id=d.mission_id) THEN '1' ELSE '0' END FROM dispatch_lease_intents d WHERE d.reservation_id=?1;" #[rid]
     let intentPhase := match chk with | .ok crs => (crs[1]?.bind (·[0]?)).getD "" | .error _ => ""
     let intentBoot := match chk with | .ok crs => (crs[1]?.bind (·[1]?)).getD "" | .error _ => ""
-    if intentPhase == "active" && intentBoot == bootStr then
+    let missionExists := match chk with | .ok crs => ((crs[1]?.bind (·[2]?)).getD "0") == "1" | .error _ => false
+    if intentPhase == "active" && intentBoot == bootStr && missionExists then
       if projPhase != "active" then
         let pProm ← pDb.mu.atomically <|
           sqliteQueryRowsRaw pDb.handle
@@ -586,6 +587,35 @@ def upsertMission (st : CoreStore) (m : MissionRecord) : IO (Except String Unit)
   ]
   return res.map (fun _ => ())
 
+/-- Insert a brand-new mission row (`POST /api/control/missions`), failing with `mission_already_exists`
+    if `m.id` is already present so caller error-cleanup never mutates or deletes pre-existing missions. -/
+def insertNewMission (st : CoreStore) (m : MissionRecord) : IO (Except String Unit) := do
+  if m.authorityMode != "readonly" && m.authorityMode != "writer" then
+    return .error s!"invalid_authority_mode:{m.authorityMode}"
+  let compatTags :=
+    if m.tagsJson.isEmpty || m.tagsJson == "[]" then
+      projectCompatibilityTagsJson m.authorityMode m.placementKind m.supersededById m.orphanedAt m.reservedDiskGib
+    else
+      m.tagsJson
+  let rev := if m.stateRevision == 0 then 1 else m.stateRevision
+  let ownEp := if m.ownerEpoch == 0 then 1 else m.ownerEpoch
+  let runGen := if m.runGeneration == 0 then 1 else m.runGeneration
+  let bootEp := if m.nodeBootEpoch == 0 then 1 else m.nodeBootEpoch
+  withImmediateTx st.missionsDb do
+    let existing ← execParamQueryUnlocked st.missionsDb "SELECT id FROM missions WHERE id=?1;" #[m.id]
+    let .ok ers := existing | return .error "mission_exists_check_failed"
+    if ers.size > 1 then
+      return .error "mission_already_exists"
+    let sql :=
+      "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,updated_at,total_cost_cents,authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,reserved_disk_gib,state_revision,owner_epoch,run_generation,node_boot_epoch,tags,track,repo) " ++
+      "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22);"
+    let res ← execParamQueryUnlocked st.missionsDb sql #[
+      m.id, m.title, m.status, m.backend, m.modelOverride, m.modelEffort, m.workingDirectory, m.project,
+      m.updatedAt, s!"{m.totalCostCents}", m.authorityMode, m.placementKind, m.supersededById, m.orphanedAt,
+      s!"{m.reservedDiskGib}", s!"{rev}", s!"{ownEp}", s!"{runGen}", s!"{bootEp}", compatTags, m.track, m.repo
+    ]
+    return res.map (fun _ => ())
+
 /-- Record authoritative terminal evidence in `mission_terminal_evidence` (`SM-01`). -/
 def upsertTerminalEvidence (st : CoreStore) (ev : TerminalEvidenceRecord) : IO (Except String Unit) := do
   let res ← execParamQuery st.missionsDb
@@ -735,13 +765,19 @@ def acquireDispatchTrackLease (st : CoreStore) (req : DispatchLeaseRequest) : IO
   | .ok () =>
     -- Phase 3: Promote intent to `active` in `missions.db` (source of truth), then promote `projects.db` row
     let actRes ← withImmediateTx st.missionsDb do
+      let mRows ← execParamQueryUnlocked st.missionsDb
+        "SELECT placement_kind,superseded_by_mission_id,orphaned_at FROM missions WHERE id=?1;" #[req.missionId]
+      let pk := match mRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "managed" | .error _ => "managed"
+      let sb := match mRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+      let oa := match mRows with | .ok rs => (rs[1]?.bind (·[2]?)).getD "" | .error _ => ""
+      let leaseTags := projectCompatibilityTagsJson req.authorityMode pk sb oa req.reservedDiskGib
       let u1 ← execParamQueryUnlocked st.missionsDb
         "UPDATE dispatch_lease_intents SET phase='active',updated_at=?2 WHERE reservation_id=?1;"
         #[req.reservationId, req.nowAt]
       if let .error e := u1 then return .error e
       let u2 ← execParamQueryUnlocked st.missionsDb
-        "UPDATE missions SET project=?2,track=?3,repo=?4,authority_mode=?5,reserved_disk_gib=?6,state_revision=state_revision+1,updated_at=?7 WHERE id=?1;"
-        #[req.missionId, req.projectSlug, req.track, req.repo, req.authorityMode, s!"{req.reservedDiskGib}", req.nowAt]
+        "UPDATE missions SET project=?2,track=?3,repo=?4,authority_mode=?5,reserved_disk_gib=?6,tags=?8,state_revision=state_revision+1,updated_at=?7 WHERE id=?1;"
+        #[req.missionId, req.projectSlug, req.track, req.repo, req.authorityMode, s!"{req.reservedDiskGib}", req.nowAt, leaseTags]
       return u2.map (fun _ => ())
     if let .error e := actRes then
       discard <| recoverDispatchLeases st.missionsDb st.projectsDb req.bootEpoch
@@ -751,10 +787,30 @@ def acquireDispatchTrackLease (st : CoreStore) (req : DispatchLeaseRequest) : IO
         "UPDATE project_track_leases SET phase='active',updated_at=?2 WHERE reservation_id=?1;"
         #[req.reservationId, req.nowAt]
       return pu.map (fun _ => ())
-    if let .error pe := projActRes then
+    match projActRes with
+    | .ok () => return .ok ()
+    | .error pe =>
+      -- Phase 3b failed after the missions intent was promoted: roll the reservation back instead of
+      -- leaving an active lease that the caller will treat as a failed admission.
+      let rollbackTags := projectCompatibilityTagsJson req.authorityMode "managed" "" "" 0
+      discard <| withImmediateTx st.missionsDb do
+        let mRows ← execParamQueryUnlocked st.missionsDb
+          "SELECT placement_kind,superseded_by_mission_id,orphaned_at FROM missions WHERE id=?1;" #[req.missionId]
+        let pk := match mRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "managed" | .error _ => "managed"
+        let sb := match mRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+        let oa := match mRows with | .ok rs => (rs[1]?.bind (·[2]?)).getD "" | .error _ => ""
+        let rbTags := if mRows.isOk then projectCompatibilityTagsJson req.authorityMode pk sb oa 0 else rollbackTags
+        discard <| execParamQueryUnlocked st.missionsDb
+          "UPDATE dispatch_lease_intents SET phase='rolled_back',updated_at=?2 WHERE reservation_id=?1;"
+          #[req.reservationId, req.nowAt]
+        execParamQueryUnlocked st.missionsDb
+          "UPDATE missions SET reserved_disk_gib=0,tags=?3,state_revision=state_revision+1,updated_at=?2 WHERE id=?1;"
+          #[req.missionId, req.nowAt, rbTags]
+      discard <| withImmediateTx st.projectsDb do
+        execParamQueryUnlocked st.projectsDb
+          "DELETE FROM project_track_leases WHERE reservation_id=?1;" #[req.reservationId]
       discard <| recoverDispatchLeases st.missionsDb st.projectsDb req.bootEpoch
       return .error pe
-    return .ok ()
 
 /-- Release an active cross-DB dispatch track lease cleanly across `projects.db` and `missions.db`. -/
 def releaseDispatchTrackLease (st : CoreStore) (reservationId nowAt : String) : IO (Except String Unit) := do
@@ -765,16 +821,23 @@ def releaseDispatchTrackLease (st : CoreStore) (reservationId nowAt : String) : 
   if let .error e := pRes then return .error e
   withImmediateTx st.missionsDb do
     let rows ← execParamQueryUnlocked st.missionsDb
-      "SELECT mission_id FROM dispatch_lease_intents WHERE reservation_id=?1;" #[reservationId]
+      "SELECT mission_id,authority_mode,reserved_disk_gib FROM dispatch_lease_intents WHERE reservation_id=?1;" #[reservationId]
     let mid := match rows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+    let mode := match rows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "writer" | .error _ => "writer"
     let u1 ← execParamQueryUnlocked st.missionsDb
       "UPDATE dispatch_lease_intents SET phase='released',updated_at=?2 WHERE reservation_id=?1;"
       #[reservationId, nowAt]
     if let .error e := u1 then return .error e
     if !mid.isEmpty then
+      let mRows ← execParamQueryUnlocked st.missionsDb
+        "SELECT placement_kind,superseded_by_mission_id,orphaned_at FROM missions WHERE id=?1;" #[mid]
+      let pk := match mRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "managed" | .error _ => "managed"
+      let sb := match mRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+      let oa := match mRows with | .ok rs => (rs[1]?.bind (·[2]?)).getD "" | .error _ => ""
+      let releasedTags := projectCompatibilityTagsJson mode pk sb oa 0
       let u2 ← execParamQueryUnlocked st.missionsDb
-        "UPDATE missions SET reserved_disk_gib=0,state_revision=state_revision+1,updated_at=?2 WHERE id=?1;"
-        #[mid, nowAt]
+        "UPDATE missions SET reserved_disk_gib=0,tags=?3,state_revision=state_revision+1,updated_at=?2 WHERE id=?1;"
+        #[mid, nowAt, releasedTags]
       if let .error e := u2 then return .error e
     return .ok ()
 

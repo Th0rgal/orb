@@ -791,7 +791,10 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         authorityMode := authMode, placementKind := placeKind, reservedDiskGib := diskGib,
         nodeBootEpoch := st.store.bootEpoch, track := track, repo := repo
       }
-      match ← upsertMission st.store mRec with
+      match ← insertNewMission st.store mRec with
+      | .error "mission_already_exists" =>
+        abortIdem
+        return .ok (mkJson 409 "{\"error\":\"mission_already_exists\"}")
       | .error e =>
         abortIdem
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
@@ -805,6 +808,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
           }
           if let .error leaseErr ← acquireDispatchTrackLease st.store leaseReq then
             discard <| execParamQuery st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
+            discard <| recoverDispatchLeases st.store.missionsDb st.store.projectsDb st.store.bootEpoch
             abortIdem
             return .ok (mkJson 409 s!"\{\"error\":{jsonEscape leaseErr}}")
         if let some sIdx := st.searchIdx? then

@@ -36,6 +36,38 @@ private def exceptStrEq (a b : Except String String) : Bool :=
   | .error x, .error y => x == y
   | _, _ => false
 
+private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
+  -- Same-boot orphan mission cleanup: if a mission row is deleted while an intent/lease exists at the current boot,
+  -- `recoverDispatchLeases` rolls back the orphaned reservation so the track is never wedged.
+  let .ok () ← releaseDispatchTrackLease store "rsv-post-crash" "t5b"
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: release rsv-post-crash failed"; return 1
+  let _ ← execParamQuery store.missionsDb
+    "INSERT INTO dispatch_lease_intents(reservation_id,mission_id,project_slug,track,repo,authority_mode,reserved_disk_gib,phase,boot_epoch,created_at,updated_at) VALUES('rsv-ghost','m-deleted-ghost','orb','r2-track','Th0rgal/orb','writer',4,'active',2,'t5c','t5c');" #[]
+  let _ ← execParamQuery store.projectsDb
+    "INSERT INTO project_track_leases(project_slug,track,reservation_id,mission_id,repo,authority_mode,phase,boot_epoch,updated_at) VALUES('orb','r2-track','rsv-ghost','m-deleted-ghost','Th0rgal/orb','writer','active',2,'t5c');" #[]
+  let .ok () ← recoverDispatchLeases store.missionsDb store.projectsDb 2
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: ghost-mission recoverDispatchLeases failed"; return 1
+  let .ok () ← acquireDispatchTrackLease store {
+    reservationId := "rsv-after-ghost", missionId := "m-w1", projectSlug := "orb",
+    track := "r2-track", repo := "Th0rgal/orb", authorityMode := "writer",
+    reservedDiskGib := 3, bootEpoch := 2, nowAt := "t5d"
+  } | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: ghost mission wedged track lease"; return 1
+  -- Duplicate caller-supplied mission `id` on `POST /api/control/missions` returns 409 without deleting or overwriting `m-w1`
+  let dupCreateBody := "{\"id\":\"m-w1\",\"title\":\"Attempt overwrite\",\"project\":\"orb\",\"track\":\"r2-track\",\"repo\":\"Th0rgal/orb\",\"writer\":true}"
+  let dupCreateRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {dupCreateBody.utf8ByteSize}\r\n\r\n{dupCreateBody}".toUTF8
+  let .ok dupCreateReq := parseRequest dupCreateRaw none | do closeCoreStore store; return 1
+  let .ok dupCreateResp ← dispatchCoreRequest appSt dupCreateReq nowSec | do closeCoreStore store; return 1
+  let mW1Rows ← execParamQuery store.missionsDb "SELECT title,tags FROM missions WHERE id='m-w1';" #[]
+  let .ok mW1Rs := mW1Rows
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: duplicate POST /api/control/missions deleted existing m-w1"; return 1
+  let mW1Title := (mW1Rs[1]?.bind (·[0]?)).getD ""
+  let mW1Tags := (mW1Rs[1]?.bind (·[1]?)).getD ""
+  if dupCreateResp.status != 409 || mW1Title == "Attempt overwrite" || (mW1Tags.splitOn "disk-gib:3").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: duplicate mission id guard or lease tags projection failed: status={dupCreateResp.status} title={mW1Title} tags={mW1Tags}"
+    return 1
+  return 0
+
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
   let prodNoSecrets : CoreConfig := { devMode := false, host := "127.0.0.1" }
@@ -551,6 +583,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     track := "r2-track", repo := "Th0rgal/orb", authorityMode := "writer",
     reservedDiskGib := 4, bootEpoch := 2, nowAt := "t5"
   } | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: post-crash lease acquisition blocked"; return 1
+  if (← runR2bRound2Extras store appSt validJwt nowSec) != 0 then return 1
 
   -- SM-12: pre-effect in-flight idempotency reservation + committed `2xx` > 512 KiB `committed_oversize` sentinel
   let .ok .Claimed ← claimIdempotencySlot store "missions_create" "idem-inflight-1" "t5"

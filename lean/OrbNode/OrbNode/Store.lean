@@ -335,13 +335,18 @@ private def jobUpsertSql (r : JobRecord) : String :=
   "INSERT INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json, authority_mode, placement_kind, superseded_by_mission_id, orphaned_at, reserved_disk_gib, state_revision) VALUES (" ++
   s!"{sqlEsc r.jobId}, {sqlEsc r.missionId}, {sqlEsc r.payloadJson}, {sqlEsc r.state.asString}, {exitSql}, {sqlEsc r.createdAt}, {sqlOptStr r.startedAt?}, {sqlOptStr r.finishedAt?}, {sqlOptStr r.logPath?}, {sqlOptStr r.error?}, {artsSql}, {cancSql}, {sqlEsc r.authorityMode}, {sqlEsc r.placementKind}, {sqlEsc r.supersededById}, {sqlEsc r.orphanedAt}, {r.reservedDiskGib}, {rev}) " ++
   "ON CONFLICT(id) DO UPDATE SET " ++
-  "state = excluded.state, exit_code = excluded.exit_code, started_at = excluded.started_at, " ++
-  "finished_at = excluded.finished_at, log_path = excluded.log_path, error = excluded.error, " ++
-  "artifacts_json = excluded.artifacts_json, cancellation_json = excluded.cancellation_json, " ++
+  "state = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN jobs.state ELSE excluded.state END, " ++
+  "exit_code = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN COALESCE(jobs.exit_code, excluded.exit_code) ELSE excluded.exit_code END, " ++
+  "started_at = COALESCE(excluded.started_at, jobs.started_at), " ++
+  "finished_at = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN COALESCE(jobs.finished_at, excluded.finished_at) ELSE excluded.finished_at END, " ++
+  "log_path = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN COALESCE(jobs.log_path, excluded.log_path) ELSE excluded.log_path END, " ++
+  "error = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN COALESCE(jobs.error, excluded.error) ELSE excluded.error END, " ++
+  "artifacts_json = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN COALESCE(jobs.artifacts_json, excluded.artifacts_json) ELSE excluded.artifacts_json END, " ++
+  "cancellation_json = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN COALESCE(jobs.cancellation_json, excluded.cancellation_json) ELSE excluded.cancellation_json END, " ++
   "authority_mode = excluded.authority_mode, placement_kind = excluded.placement_kind, " ++
   "superseded_by_mission_id = excluded.superseded_by_mission_id, orphaned_at = excluded.orphaned_at, " ++
   "reserved_disk_gib = excluded.reserved_disk_gib, state_revision = excluded.state_revision " ++
-  "WHERE jobs.state NOT IN ('succeeded', 'failed', 'cancelled') AND excluded.state_revision >= jobs.state_revision;"
+  "WHERE excluded.state_revision >= jobs.state_revision;"
 
 private def syncJobToLegacySqlite
     (workDir : String) (backend : SqliteBackend) (r : JobRecord)

@@ -1169,18 +1169,36 @@ def runTests : IO UInt32 := do
     | throw (IO.userError "valid updateJobAuthorityCas rejected")
   let staleNodeCas ← l2.updateJobAuthorityCas "job-r2b-1" 1 "readonly" "client" "" "2026-11-06T00:01:00Z" 24
   let badModeCas ← l2.updateJobAuthorityCas "job-r2b-1" jAfterCas.stateRevision "invalid_mode" "managed" "" "" 0
+  -- Transition `job-r2b-1` to terminal `succeeded` with reserved_disk_gib=8, then run post-terminal `updateJobAuthorityCas`
+  -- to release `reserved_disk_gib` -> 0 and set `orphaned_at`, verifying `jobs.db` SQLite row reflects the post-terminal CAS!
+  let .ok (l3, jTerm) ← l2.updateJob "job-r2b-1" (fun r => .ok {
+    r with state := .succeeded, exitCode? := some 0, finishedAt? := some "2026-11-06T00:02:00Z", reservedDiskGib := 8
+  }) | throw (IO.userError "terminal updateJob failed on job-r2b-1")
+  let .ok (_l4, jPostTermCas) ← l3.updateJobAuthorityCas "job-r2b-1" jTerm.stateRevision "writer" "managed" "m-super-post" "2026-11-06T00:03:00Z" 0
+    | throw (IO.userError "post-terminal updateJobAuthorityCas failed on job-r2b-1")
+  let sqliteRowOut ← IO.Process.output {
+    cmd := "python3"
+    args := #["-c",
+      "import sqlite3, sys; conn = sqlite3.connect(sys.argv[1]); r = conn.execute(\"SELECT state, COALESCE(CAST(exit_code AS TEXT),''), superseded_by_mission_id, orphaned_at, reserved_disk_gib, state_revision FROM jobs WHERE id='job-r2b-1'\").fetchone(); print('|'.join(str(x) for x in r) if r else '')",
+      (System.FilePath.mk casRoot / "jobs.db").toString]
+  }
+  let sqliteRowTrim := sqliteRowOut.stdout.trimAscii.toString
   let .ok lReopened ← OrbNode.Store.openLedger casRoot
     | throw (IO.userError "reopen openLedger failed on r2b-cas-ledger")
   let reopenedJob? := lReopened.jobs.get? "job-r2b-1"
-  check "SM-02 OrbNode.Store persists typed columns and rejects stale state_revision CAS"
+  check "SM-02 OrbNode.Store persists typed columns and post-terminal CAS into jobs.db while rejecting stale state_revision"
     (jAfterCas.stateRevision == 2 &&
      jAfterCas.authorityMode == "writer" &&
      jAfterCas.supersededById == "m-super-9" &&
      jAfterCas.reservedDiskGib == 0 &&
      !staleNodeCas.isOk &&
      !badModeCas.isOk &&
-      reopenedJob?.map (·.supersededById) == some "m-super-9" &&
-      reopenedJob?.map (·.stateRevision) == some 2)
+     jPostTermCas.state == .succeeded &&
+     jPostTermCas.stateRevision == 4 &&
+     sqliteRowTrim == "succeeded|0|m-super-post|2026-11-06T00:03:00Z|0|4" &&
+     reopenedJob?.map (·.supersededById) == some "m-super-post" &&
+     reopenedJob?.map (·.reservedDiskGib) == some 0 &&
+     reopenedJob?.map (·.stateRevision) == some 4)
   let httpAuthJobId := "77777777-7777-4777-8777-777777777777"
   let httpAuthBody := renderCompact (.obj #[
     ("job_id", .str httpAuthJobId),
