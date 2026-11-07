@@ -134,6 +134,7 @@ function BunkerModeCard() {
 }
 
 function act(items: ApprovalItem[], approve: boolean) {
+  if (!items.length) return;
   hide(items, true);
   if (!visible().length) dismissToast(KEY);
   void (async () => {
@@ -142,14 +143,27 @@ function act(items: ApprovalItem[], approve: boolean) {
       else for (const i of items) await denyItem(i);
     } catch (e) {
       hide(items, false);
-      syncApprovalQueue(pending(), openReview);
-      void getApprovalQueue().then(({ items: fresh }) => syncApprovalQueue(fresh, openReview)).catch(() => {});
+      let stillPendingCount = items.length;
+      try {
+        const { items: fresh } = await getApprovalQueue();
+        const freshKeys = new Set(fresh.map(key));
+        stillPendingCount = items.filter((i) => freshKeys.has(key(i))).length;
+        syncApprovalQueue(fresh, openReview);
+      } catch {
+        syncApprovalQueue(pending(), openReview);
+      }
       if (e instanceof ApprovalCancelled) return;
+      if (stillPendingCount === 0) return;
+      const rawMessage = e instanceof Error ? e.message : String(e);
+      const staleBatch =
+        rawMessage.includes("is no longer pending") || rawMessage.includes("changed since it was shown");
       notify({
         key: `approval-error:${approve ? "approve" : "deny"}`,
         kind: "error",
         title: approve ? "Could not approve" : "Could not deny",
-        message: e instanceof Error ? e.message : String(e),
+        message: staleBatch
+          ? "Approval queue updated — review the remaining requests and approve again."
+          : rawMessage,
       });
     }
   })();
