@@ -258,9 +258,10 @@ def RunOp.decode? : Nat → Option RunOp
 /-- Pure admission gate for `RunLifecycle` transitions (`SM-03`, `SM-10`):
     - Superseded owners (`ownerSuperseded == 1`) or stale owner epochs (`callerOwnerEpoch != durableOwnerEpoch`)
       are strictly forbidden from claiming or mutating runs.
-    - Terminal runs (`phaseCode >= 4`) and `idle` (`phaseCode == 0`) can enter `claimed` (`opCode == 0`)
-      ONLY with `proposedGeneration == currentGeneration + 1` (completed/terminal runs NEVER re-enter
-      `running` at the same `run_generation`).
+     - Terminal runs (`phaseCode >= 4`) and `idle` (`phaseCode == 0`) can enter `claimed` (`opCode == 0`)
+       ONLY when `proposedGeneration.toNat = currentGeneration.toNat + 1` with no `UInt64` wrap
+       (`currentGeneration < proposedGeneration` and their difference is exactly 1). A completed run
+       NEVER re-enters `running` at the same `run_generation`.
     - In-flight transitions (`opCode >= 1`) require `proposedGeneration == currentGeneration` and `currentGeneration != 0`.
     - `completeTurnReceipt` (`opCode == 4`) requires structured `hasStructuredReceipt == 1` and `activeToolCalls == 0`.
     - `reconcileDrainedTools` (`opCode == 3`) bounds wedged `activeToolCalls` when `activeToolCalls == 0 || drainTimedOut == 1`. -/
@@ -274,9 +275,10 @@ def verifyRunLifecycleAdmit
      callerOwnerEpoch == durableOwnerEpoch &&
      phaseCode ≤ 6 &&
      opCode ≤ 6 &&
-     ((opCode == 0 && (phaseCode == 0 || phaseCode ≥ 4) &&
+      ((opCode == 0 && (phaseCode == 0 || phaseCode ≥ 4) &&
        currentGeneration < 0xFFFFFFFFFFFFFFFF &&
-       proposedGeneration == currentGeneration + 1) ||
+       currentGeneration < proposedGeneration &&
+       proposedGeneration - currentGeneration == 1) ||
       (opCode ≥ 1 && currentGeneration != 0 && proposedGeneration == currentGeneration &&
        ((opCode == 1 && phaseCode == 1) ||
         (opCode == 2 && phaseCode == 2 && activeToolCalls > 0) ||
@@ -309,6 +311,7 @@ structure RunSliceEvent where
   hasStructuredReceipt : UInt8
   hasAbortReceipt      : UInt8
   drainTimedOut        : UInt8
+  markOwnerSuperseded  : UInt8 := 0
   nextToolCalls        : UInt32
   proposedGeneration   : UInt64
   callerOwnerEpoch     : UInt64
@@ -323,10 +326,14 @@ inductive RunEffect where
 def stepRunSlice (s : RunSliceState) (ev : RunSliceEvent) :
     RunSliceState × List RunEffect :=
   let effTools := if ev.opCode == 2 then ev.nextToolCalls else s.activeToolCalls
-  if verifyRunLifecycleAdmit s.phaseCode ev.opCode s.ownerSuperseded
-       ev.hasStructuredReceipt ev.hasAbortReceipt ev.drainTimedOut
-       effTools s.runGeneration ev.proposedGeneration
-       s.durableOwnerEpoch ev.callerOwnerEpoch == 1 then
+  if ev.markOwnerSuperseded == 1 && s.ownerSuperseded == 0 &&
+     s.durableOwnerEpoch != 0 && ev.callerOwnerEpoch == s.durableOwnerEpoch then
+    ({ s with ownerSuperseded := 1 }, [.persistRunPhase s.phaseCode s.runGeneration])
+  else if ev.markOwnerSuperseded == 0 &&
+          verifyRunLifecycleAdmit s.phaseCode ev.opCode s.ownerSuperseded
+            ev.hasStructuredReceipt ev.hasAbortReceipt ev.drainTimedOut
+            effTools s.runGeneration ev.proposedGeneration
+            s.durableOwnerEpoch ev.callerOwnerEpoch == 1 then
     let nextPhase := runLifecycleTargetPhase ev.opCode
     let nextGen := if ev.opCode == 0 then ev.proposedGeneration else s.runGeneration
     let nextTools : UInt32 :=
@@ -346,6 +353,9 @@ def stepRunSlice (s : RunSliceState) (ev : RunSliceEvent) :
         runGeneration := nextGen }, effs)
   else
     (s, [])
+
+def foldRunSlice (s : RunSliceState) (evs : List RunSliceEvent) : RunSliceState :=
+  evs.foldl (fun acc ev => (stepRunSlice acc ev).1) s
 
 /-! ## 3. `QueueItemLifecycle` (`SM-04`, `SM-05`, `G-ORB-2`) -/
 

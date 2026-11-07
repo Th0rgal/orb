@@ -414,15 +414,18 @@ def runLifecycleMetaGate : MetaGateSpec RunAdmitCheck RunAdmitDomainSafe where
       omega
     refine ⟨by subst hsup; rfl, hownPos, by subst hcal; rfl, ?_⟩
     rcases hbr with hclaim | ⟨⟨⟨hop1, hcur0⟩, hsame⟩, hin⟩
-    · rcases hclaim with ⟨⟨⟨hop, hph⟩, hlt⟩, hsucc⟩
+    · rcases hclaim with ⟨⟨⟨⟨hop, hph⟩, hlt⟩, hcurLtProp⟩, hdiff⟩
       subst hop
       have hltNat : curG.toNat < 18446744073709551615 := by
         simpa using UInt64.lt_iff_toNat_lt.mp hlt
+      have hcurLtNat : curG.toNat < propG.toNat :=
+        UInt64.lt_iff_toNat_lt.mp hcurLtProp
       have hsuccNat : propG.toNat = curG.toNat + 1 := by
-        rw [hsucc, UInt64.toNat_add]
-        have : UInt64.toNat 1 = 1 := rfl
-        rw [this]
-        exact Nat.mod_eq_of_lt (by omega)
+        have hd : (propG - curG).toNat = 1 := by
+          rw [hdiff]
+          rfl
+        rw [UInt64.toNat_sub_of_le propG curG (UInt64.le_iff_toNat_le.mpr (by omega))] at hd
+        omega
       rcases hph with hidle | hterm
       · subst hidle
         exact ⟨.idle, rfl, .claimFreshGeneration, rfl, Or.inl rfl, hltNat, hsuccNat⟩
@@ -496,17 +499,18 @@ def runLifecycleMetaGate : MetaGateSpec RunAdmitCheck RunAdmitDomainSafe where
     | claimFreshGeneration =>
       rcases hbr with ⟨hph, hlt, hsucc⟩
       have hltB : curG < 0xFFFFFFFFFFFFFFFF := UInt64.lt_iff_toNat_lt.mpr hlt
-      have hsuccB : (propG == curG + 1) = true := by
+      have hltPropB : curG < propG := UInt64.lt_iff_toNat_lt.mpr (by omega)
+      have hdiffB : (propG - curG == 1) = true := by
         rw [beq_iff_eq]
         apply u64_eq_of_toNat_eq
-        rw [UInt64.toNat_add]
+        rw [UInt64.toNat_sub_of_le propG curG (UInt64.le_iff_toNat_le.mpr (by omega))]
         have h1 : UInt64.toNat 1 = 1 := rfl
-        rw [h1, Nat.mod_eq_of_lt (by omega)]
-        exact hsucc
+        rw [h1]
+        omega
       rcases hph with rfl | hterm
-      · simp [RunPhase.encode, RunOp.encode, hownNe, hltB, hsuccB]
+      · simp [RunPhase.encode, RunOp.encode, hownNe, hltB, hltPropB, hdiffB]
       · cases ph <;> simp [RunPhase.isTerminal] at hterm <;>
-          simp [RunPhase.encode, RunOp.encode, hownNe, hltB, hsuccB]
+          simp [RunPhase.encode, RunOp.encode, hownNe, hltB, hltPropB, hdiffB]
     | confirmSpawned =>
       rcases hbr with ⟨rfl, hpos, heq⟩
       have hne : (curG != 0) = true := by
@@ -599,6 +603,7 @@ def runOwnerScopedAuthority : ScopedAuthority RunAdmitCheck where
 theorem completed_run_requires_fresh_generation_and_superseded_owner_rejected
     (s : RunSliceState) (ev : RunSliceEvent)
     (hge4 : 4 ≤ s.phaseCode) (hle6 : s.phaseCode ≤ 6)
+    (hmark0 : ev.markOwnerSuperseded = 0)
     (hadm : verifyRunLifecycleAdmit s.phaseCode ev.opCode s.ownerSuperseded
         ev.hasStructuredReceipt ev.hasAbortReceipt ev.drainTimedOut
         (if ev.opCode == 2 then ev.nextToolCalls else s.activeToolCalls)
@@ -650,8 +655,155 @@ theorem completed_run_requires_fresh_generation_and_superseded_owner_rejected
     simpa using hadm
   rcases hbr with ⟨_, _, hsucc⟩
   refine ⟨h0, hsucc, ?_, ?_⟩
-  · unfold stepRunSlice; simp [h0, hadm0, runLifecycleTargetPhase]
-  · unfold stepRunSlice; simp [h0, hadm0]
+  · unfold stepRunSlice; simp [h0, hmark0, hadm0, runLifecycleTargetPhase]
+  · unfold stepRunSlice; simp [h0, hmark0, hadm0]
+
+theorem run_superseded_step_id (s : RunSliceState) (ev : RunSliceEvent)
+    (hf : (s.ownerSuperseded != 0) = true) :
+    stepRunSlice s ev = (s, []) := by
+  unfold stepRunSlice
+  have hsupNe0 : s.ownerSuperseded ≠ 0 := by rwa [bne_iff_ne] at hf
+  have hsupFalse : ¬ ((ev.markOwnerSuperseded == 1 && s.ownerSuperseded == 0 &&
+      s.durableOwnerEpoch != 0 && ev.callerOwnerEpoch == s.durableOwnerEpoch) = true) := by
+    intro hm
+    simp only [Bool.and_eq_true, beq_iff_eq] at hm
+    exact hsupNe0 hm.1.1.2
+  have hadmFalse : ¬ ((ev.markOwnerSuperseded == 0 &&
+      verifyRunLifecycleAdmit s.phaseCode ev.opCode s.ownerSuperseded
+        ev.hasStructuredReceipt ev.hasAbortReceipt ev.drainTimedOut
+        (if ev.opCode == 2 then ev.nextToolCalls else s.activeToolCalls)
+        s.runGeneration ev.proposedGeneration s.durableOwnerEpoch ev.callerOwnerEpoch == 1) = true) := by
+    intro ha
+    have ha2 : (verifyRunLifecycleAdmit s.phaseCode ev.opCode s.ownerSuperseded
+        ev.hasStructuredReceipt ev.hasAbortReceipt ev.drainTimedOut
+        (if ev.opCode == 2 then ev.nextToolCalls else s.activeToolCalls)
+        s.runGeneration ev.proposedGeneration s.durableOwnerEpoch ev.callerOwnerEpoch == 1) = true :=
+      (Bool.and_eq_true _ _).mp ha |>.2
+    unfold verifyRunLifecycleAdmit at ha2
+    have hc := bit_cond_true ha2
+    simp only [Bool.and_eq_true, beq_iff_eq] at hc
+    exact hsupNe0 hc.1.1.1.1.1
+  dsimp only
+  rw [ite_eq_right_iff.mpr (fun h => absurd h hsupFalse),
+      ite_eq_right_iff.mpr (fun h => absurd h hadmFalse)]
+
+def runOwnerSupersededStickyFence : StickyFence RunSliceState RunSliceEvent where
+  fenced s := s.ownerSuperseded != 0
+  preFenceAct s := s.phaseCode == 2 && s.ownerSuperseded == 0
+  step s ev := (stepRunSlice s ev).1
+  sticky s ev hf := by
+    have h := run_superseded_step_id s ev hf
+    rw [h]
+    exact hf
+  forbids_post s ev hf := by
+    have h := run_superseded_step_id s ev hf
+    simp only [h]
+    have hne : s.ownerSuperseded ≠ 0 := by rwa [bne_iff_ne] at hf
+    have hfalse : (s.ownerSuperseded == 0) = false := beq_eq_false_iff_ne.mpr hne
+    simp [hfalse]
+
+theorem run_step_generation_monotone (s : RunSliceState) (ev : RunSliceEvent) :
+    s.runGeneration.toNat ≤ (stepRunSlice s ev).1.runGeneration.toNat := by
+  unfold stepRunSlice
+  dsimp only
+  by_cases hmark : (ev.markOwnerSuperseded == 1 && s.ownerSuperseded == 0 &&
+      s.durableOwnerEpoch != 0 && ev.callerOwnerEpoch == s.durableOwnerEpoch) = true
+  · rw [ite_eq_left_iff.mpr (fun h => absurd hmark h)]
+    exact Nat.le_refl _
+  · rw [ite_eq_right_iff.mpr (fun h => absurd h hmark)]
+    by_cases hadm : (ev.markOwnerSuperseded == 0 &&
+        verifyRunLifecycleAdmit s.phaseCode ev.opCode s.ownerSuperseded
+          ev.hasStructuredReceipt ev.hasAbortReceipt ev.drainTimedOut
+          (if ev.opCode == 2 then ev.nextToolCalls else s.activeToolCalls)
+          s.runGeneration ev.proposedGeneration s.durableOwnerEpoch ev.callerOwnerEpoch == 1) = true
+    · rw [ite_eq_left_iff.mpr (fun h => absurd hadm h)]
+      by_cases hop : (ev.opCode == 0) = true
+      · dsimp only
+        rw [ite_eq_left_iff.mpr (fun h => absurd hop h)]
+        have ha2 : (verifyRunLifecycleAdmit s.phaseCode ev.opCode s.ownerSuperseded
+            ev.hasStructuredReceipt ev.hasAbortReceipt ev.drainTimedOut
+            (if ev.opCode == 2 then ev.nextToolCalls else s.activeToolCalls)
+            s.runGeneration ev.proposedGeneration s.durableOwnerEpoch ev.callerOwnerEpoch == 1) = true :=
+          (Bool.and_eq_true _ _).mp hadm |>.2
+        have hop0 : ev.opCode = 0 := by rwa [beq_iff_eq] at hop
+        unfold verifyRunLifecycleAdmit at ha2
+        rw [hop0] at ha2
+        have hc := bit_cond_true ha2
+        simp only [Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq, bne_iff_ne, decide_eq_true_eq] at hc
+        rcases hc with ⟨_, hbr⟩
+        rcases hbr with ⟨⟨⟨_, _⟩, hcurLt⟩, _⟩ | ⟨⟨⟨hge, _⟩, _⟩, _⟩
+        · exact Nat.le_of_lt (UInt64.lt_iff_toNat_lt.mp hcurLt)
+        · have hnot : ¬ (1 : UInt8) ≤ 0 := by decide
+          exact absurd hge hnot
+      · dsimp only
+        rw [ite_eq_right_iff.mpr (fun h => absurd h hop)]
+        exact Nat.le_refl _
+    · rw [ite_eq_right_iff.mpr (fun h => absurd h hadm)]
+      exact Nat.le_refl _
+
+theorem run_fold_generation_monotone (s : RunSliceState) (evs : List RunSliceEvent) :
+    s.runGeneration.toNat ≤ (foldRunSlice s evs).runGeneration.toNat := by
+  induction evs generalizing s with
+  | nil => exact Nat.le_refl _
+  | cons ev rest ih =>
+    have hcons : foldRunSlice s (ev :: rest) = foldRunSlice (stepRunSlice s ev).1 rest := rfl
+    rw [hcons]
+    have h1 := run_step_generation_monotone s ev
+    have h2 := ih (stepRunSlice s ev).1
+    omega
+
+theorem terminal_reentry_running_requires_fresh_generation
+    (s : RunSliceState) (evs : List RunSliceEvent)
+    (hge : 4 ≤ s.phaseCode) (hle : s.phaseCode ≤ 6)
+    (hrun : (foldRunSlice s evs).phaseCode = 2) :
+    s.runGeneration.toNat + 1 ≤ (foldRunSlice s evs).runGeneration.toNat := by
+  induction evs generalizing s with
+  | nil =>
+    simp [foldRunSlice] at hrun
+    have hgeN : 4 ≤ s.phaseCode.toNat := UInt8.le_iff_toNat_le.mp hge
+    rw [hrun] at hgeN
+    simp at hgeN
+  | cons ev rest ih =>
+    have hcons : foldRunSlice s (ev :: rest) = foldRunSlice (stepRunSlice s ev).1 rest := rfl
+    rw [hcons] at hrun ⊢
+    by_cases hmark : (ev.markOwnerSuperseded == 1 && s.ownerSuperseded == 0 &&
+        s.durableOwnerEpoch != 0 && ev.callerOwnerEpoch == s.durableOwnerEpoch) = true
+    · have hs1 : (stepRunSlice s ev).1 = { s with ownerSuperseded := 1 } := by
+        unfold stepRunSlice
+        dsimp only
+        rw [ite_eq_left_iff.mpr (fun h => absurd hmark h)]
+      have hgEq : (stepRunSlice s ev).1.runGeneration = s.runGeneration := by rw [hs1]
+      have hpEq : (stepRunSlice s ev).1.phaseCode = s.phaseCode := by rw [hs1]
+      have hih := ih (stepRunSlice s ev).1 (by rw [hpEq]; exact hge) (by rw [hpEq]; exact hle) hrun
+      rw [hgEq] at hih
+      exact hih
+    · by_cases hadm : (ev.markOwnerSuperseded == 0 &&
+          verifyRunLifecycleAdmit s.phaseCode ev.opCode s.ownerSuperseded
+            ev.hasStructuredReceipt ev.hasAbortReceipt ev.drainTimedOut
+            (if ev.opCode == 2 then ev.nextToolCalls else s.activeToolCalls)
+            s.runGeneration ev.proposedGeneration s.durableOwnerEpoch ev.callerOwnerEpoch == 1) = true
+      · have hm0 : ev.markOwnerSuperseded = 0 := by
+          have ha1 := (Bool.and_eq_true _ _).mp hadm |>.1
+          rwa [beq_iff_eq] at ha1
+        have ha2 : verifyRunLifecycleAdmit s.phaseCode ev.opCode s.ownerSuperseded
+            ev.hasStructuredReceipt ev.hasAbortReceipt ev.drainTimedOut
+            (if ev.opCode == 2 then ev.nextToolCalls else s.activeToolCalls)
+            s.runGeneration ev.proposedGeneration s.durableOwnerEpoch ev.callerOwnerEpoch = 1 := by
+          have hb := (Bool.and_eq_true _ _).mp hadm |>.2
+          rwa [beq_iff_eq] at hb
+        have hfresh :=
+          completed_run_requires_fresh_generation_and_superseded_owner_rejected s ev hge hle hm0 ha2
+        have hrest := run_fold_generation_monotone (stepRunSlice s ev).1 rest
+        have hgen : (stepRunSlice s ev).1.runGeneration.toNat = s.runGeneration.toNat + 1 := by
+          rw [hfresh.2.2.2, hfresh.2.1]
+        omega
+      · have hs1 : (stepRunSlice s ev).1 = s := by
+          unfold stepRunSlice
+          dsimp only
+          rw [ite_eq_right_iff.mpr (fun h => absurd h hmark),
+              ite_eq_right_iff.mpr (fun h => absurd h hadm)]
+        rw [hs1] at hrun ⊢
+        exact ih s hge hle hrun
 
 /-! ## 3. `QueueItemLifecycle` (`SM-05` + `SM-10`) -/
 

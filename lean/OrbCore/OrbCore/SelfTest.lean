@@ -119,7 +119,13 @@ private def runLifecycleCompositionTests : IO UInt32 := do
   let cWithRecOk := Orb.Lifecycle.verifyCancelProtocolAdmit 1 2 1 0 6 6 == 1
   let wEarlyRej := Orb.Lifecycle.verifyWakeupContinuationAdmit 1 2 0 0 4 4 20 10 == 0
   let wDueOk := Orb.Lifecycle.verifyWakeupContinuationAdmit 1 2 0 0 4 4 10 20 == 1
-  if !(mOk && mSupRej && rReenterRej && rNextGenOk && qAckRej &&
+  let rWrapRej := Orb.Lifecycle.verifyRunLifecycleAdmit 4 0 0 0 0 0 0
+    0xFFFFFFFFFFFFFFFF 0 7 7 == 0
+  let rSupSticky := (Orb.Lifecycle.stepRunSlice
+    { phaseCode := 2, ownerSuperseded := 1, activeToolCalls := 0, runGeneration := 4, durableOwnerEpoch := 7 }
+    { opCode := 4, hasStructuredReceipt := 1, hasAbortReceipt := 0, drainTimedOut := 0,
+      markOwnerSuperseded := 0, nextToolCalls := 0, proposedGeneration := 4, callerOwnerEpoch := 7 }).1.ownerSuperseded == 1
+  if !(mOk && mSupRej && rReenterRej && rNextGenOk && rWrapRej && rSupSticky && qAckRej &&
        cNoRecRej && cWithRecOk && wEarlyRej && wDueOk) then
     IO.eprintln "[orb-core-test] FAIL: Orb.Lifecycle R3-A gate invariants failed"
     return 1
