@@ -1,3 +1,4 @@
+import Std.Sync.Mutex
 import LeanSys
 import OrbNetLeaf
 import OrbBin.Json
@@ -25,17 +26,37 @@ def defaultFailoverOrigins : Array String := #[
   "https://agent-backend.thomas.md"
 ]
 
+/-- Ordered candidate HTTPS origins matching `candidateApiUrls` in `orb/src/api.ts`. -/
+def candidateOriginsFor (raw : String) : Array String :=
+  let clean := OrbBin.PosixExt.stripTrailingSlash raw.trimAscii.toString
+  if clean.isEmpty || !clean.startsWith "https://" ||
+     clean.toList.any (fun c => c.toNat ≤ 0x20 || c.toNat == 0x7F) then
+    defaultFailoverOrigins
+  else
+    let low := clean.toLower
+    if low == "https://orbcore.thomas.md" then
+      #[clean, "https://agent-backend.nico-best-pc-ever.ovh", "https://agent-backend.thomas.md"]
+    else if low == "https://agent-backend.nico-best-pc-ever.ovh" then
+      #[clean, "https://orbcore.thomas.md", "https://agent-backend.thomas.md"]
+    else if low == "https://agent-backend.thomas.md" then
+      #[clean, "https://orbcore.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"]
+    else if low.endsWith ".thomas.md" then
+      #[clean, "https://orbcore.thomas.md", "https://agent-backend.thomas.md"]
+    else
+      #[clean]
+
 def defaultDohEndpoints : Array String := #[
   "https://1.1.1.1/dns-query",
   "https://8.8.8.8/dns-query"
 ]
 
 structure TransportBridgeState where
-  proxyPort       : UInt16 := 19480
-  bridgeUuid      : String := "00000000-0000-4000-8000-000000000001"
-  shardPorts      : Array UInt16 := #[19481, 19482, 19483, 19484, 19485, 19486]
-  failoverOrigins : Array String := defaultFailoverOrigins
-  dohEndpoints    : Array String := defaultDohEndpoints
+  proxyPort        : UInt16 := 19480
+  bridgeUuid       : String := "00000000-0000-4000-8000-000000000001"
+  shardPorts       : Array UInt16 := #[19481, 19482, 19483, 19484, 19485, 19486]
+  configuredTarget : String := "https://orbcore.thomas.md"
+  failoverOrigins  : Array String := defaultFailoverOrigins
+  dohEndpoints     : Array String := defaultDohEndpoints
   deriving Repr, Inhabited
 
 def TransportBridgeState.proxyBaseUrl (st : TransportBridgeState) : String :=
@@ -48,6 +69,7 @@ def TransportBridgeState.toJson (st : TransportBridgeState) : JVal :=
   .obj #[
     ("proxy_base_url", .str st.proxyBaseUrl),
     ("stream_proxy_base_urls", .arr (st.streamProxyBaseUrls.map .str)),
+    ("configured_target", .str st.configuredTarget),
     ("failover_origins", .arr (st.failoverOrigins.map .str)),
     ("doh_endpoints", .arr (st.dohEndpoints.map .str))
   ]
@@ -231,35 +253,150 @@ def supportedDesktopCommands : Array String := #[
   "voice_capability", "voice_prewarm", "voice_transcribe", "voice_cancel"
 ]
 
+private def resolveApprovalKeyPath (st : LocaldState) : String :=
+  if st.approvalKeyPath.trimAscii.toString.isEmpty then "approval-key.bin" else st.approvalKeyPath
+
+private def resolveApprovalKeyArgs (st : LocaldState) (verb : String) : Array String :=
+  #[verb, "--key", resolveApprovalKeyPath st]
+
 private def runOrbSigner (signerBin : String) (subArgs : Array String) (stdinText? : Option String := none) :
     IO (Except (UInt32 × String) JVal) := do
   if !(← System.FilePath.pathExists signerBin) then
     return .error (127, "orb-signer binary not found")
-  let child ← IO.Process.spawn {
+  match stdinText? with
+  | none =>
+    let child ← IO.Process.spawn {
+      cmd := signerBin
+      args := subArgs
+      stdin := .null
+      stdout := .piped
+      stderr := .piped
+    }
+    let outTask ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
+    let errStr ← child.stderr.readToEnd
+    let code ← child.wait
+    let outStr ← IO.ofExcept outTask.get
+    if code != 0 then
+      let msg := if errStr.trimAscii.toString.isEmpty then s!"orb-signer exited {code}" else errStr.trimAscii.toString
+      return .error (code, msg)
+    match OrbBin.Json.parse outStr.trimAscii.toString with
+    | .ok jv => return .ok jv
+    | .error e => return .error (1, s!"orb-signer JSON parse error: {e}")
+  | some txt =>
+    let child ← IO.Process.spawn {
+      cmd := signerBin
+      args := subArgs
+      stdin := .piped
+      stdout := .piped
+      stderr := .piped
+    }
+    let child' ← do
+      let (stdinH, c') ← child.takeStdin
+      stdinH.putStr txt
+      stdinH.flush
+      pure c'
+    let outTask ← IO.asTask child'.stdout.readToEnd Task.Priority.dedicated
+    let errStr ← child'.stderr.readToEnd
+    let code ← child'.wait
+    let outStr ← IO.ofExcept outTask.get
+    if code != 0 then
+      let msg := if errStr.trimAscii.toString.isEmpty then s!"orb-signer exited {code}" else errStr.trimAscii.toString
+      return .error (code, msg)
+    match OrbBin.Json.parse outStr.trimAscii.toString with
+    | .ok jv => return .ok jv
+    | .error e => return .error (1, s!"orb-signer JSON parse error: {e}")
+
+private structure SignerServerProc where
+  signerBin : String
+  keyPath   : String
+  graceSecs : Nat
+  stdinH    : IO.FS.Handle
+  child     : IO.Process.Child { stdin := .null, stdout := .piped, stderr := .null }
+
+initialize signerServerMutex : Std.Mutex (Option SignerServerProc) ← Std.Mutex.new none
+
+private def stopSignerServerProc (srv? : Option SignerServerProc) : IO Unit := do
+  if let some srv := srv? then
+    try srv.child.kill catch _ => pure ()
+    try discard <| srv.child.wait catch _ => pure ()
+
+private def resetSignerServer : IO Unit := do
+  signerServerMutex.atomically do
+    let prev ← get
+    set (none : Option SignerServerProc)
+    stopSignerServerProc prev
+
+private def spawnSignerServerProc (signerBin keyPath : String) (graceSecs : Nat) : IO SignerServerProc := do
+  let rawChild ← IO.Process.spawn {
     cmd := signerBin
-    args := subArgs
+    args := #["serve", "--key", keyPath, "--grace", s!"{graceSecs}"]
     stdin := .piped
     stdout := .piped
-    stderr := .piped
+    stderr := .null
   }
-  let (stdinH, child') ← child.takeStdin
-  if let some txt := stdinText? then
-    stdinH.putStr txt
-    stdinH.flush
-  let outTask ← IO.asTask child'.stdout.readToEnd Task.Priority.dedicated
-  let errStr ← child'.stderr.readToEnd
-  let code ← child'.wait
-  let outStr ← IO.ofExcept outTask.get
-  if code != 0 then
-    let msg := if errStr.trimAscii.toString.isEmpty then s!"orb-signer exited {code}" else errStr.trimAscii.toString
-    return .error (code, msg)
-  match OrbBin.Json.parse outStr.trimAscii.toString with
-  | .ok jv => return .ok jv
-  | .error e => return .error (1, s!"orb-signer JSON parse error: {e}")
+  let (stdinH, child) ← rawChild.takeStdin
+  return { signerBin, keyPath, graceSecs, stdinH, child }
 
-private def resolveApprovalKeyArgs (st : LocaldState) (verb : String) : Array String :=
-  let kp := if st.approvalKeyPath.trimAscii.toString.isEmpty then "approval-key.bin" else st.approvalKeyPath
-  #[verb, "--key", kp]
+private def signViaOrbSignerServer (signerBin keyPath : String) (graceSecs : Nat) (payload : String) :
+    IO (Except (UInt32 × String) JVal) := do
+  if !(← System.FilePath.pathExists signerBin) then
+    return .error (127, "orb-signer binary not found")
+  let reqLine := OrbBin.PosixExt.base64Encode payload.toUTF8 false true ++ "\n"
+  signerServerMutex.atomically do
+    let tryOnce (srv : SignerServerProc) : IO (Option JVal) := do
+      try
+        srv.stdinH.putStr reqLine
+        srv.stdinH.flush
+        let line ← srv.child.stdout.getLine
+        let trimmed := line.trimAscii.toString
+        if trimmed.isEmpty then
+          return none
+        match OrbBin.Json.parse trimmed with
+        | .ok jv => return some jv
+        | .error _ => return none
+      catch _ =>
+        return none
+    let mut cur ← get
+    if let some existing := cur then
+      if existing.signerBin != signerBin || existing.keyPath != keyPath || existing.graceSecs != graceSecs then
+        stopSignerServerProc (some existing)
+        cur := none
+      else if (← try existing.child.tryWait catch _ => pure (some 1)).isSome then
+        stopSignerServerProc (some existing)
+        cur := none
+    let srv ← match cur with
+      | some s => pure s
+      | none =>
+        try
+          let fresh ← spawnSignerServerProc signerBin keyPath graceSecs
+          set (some fresh)
+          pure fresh
+        catch e =>
+          set (none : Option SignerServerProc)
+          return .error (1, s!"Could not start orb-signer: {e}")
+    let reply? ← match ← tryOnce srv with
+      | some jv => pure (some jv)
+      | none =>
+        stopSignerServerProc (some srv)
+        set (none : Option SignerServerProc)
+        try
+          let fresh ← spawnSignerServerProc signerBin keyPath graceSecs
+          set (some fresh)
+          tryOnce fresh
+        catch _ =>
+          set (none : Option SignerServerProc)
+          pure none
+    match reply? with
+    | none =>
+      let curAfter ← get
+      stopSignerServerProc curAfter
+      set (none : Option SignerServerProc)
+      return .error (1, "orb-signer closed unexpectedly")
+    | some jv =>
+      if let some errMsg := jv.fieldStr? "error" then
+        let codeNat := (jv.fieldStr? "code").bind String.toNat? |>.getD 1
+        return .error (codeNat.toUInt32, errMsg)
+      return .ok jv
 
 private def allShardPortsValid (rpcPort proxyPort : UInt16) (shardPorts : Array UInt16) : Bool :=
   shardPorts.all (fun p => p ≥ 1024 && p != rpcPort && p != proxyPort) &&
@@ -479,7 +616,15 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     if verifySseShardConfig shardCountU8 st.bridge.proxyPort != 1 ||
        !allShardPortsValid st.rpcPort st.bridge.proxyPort st.bridge.shardPorts then
       return .error "invalid SSE shard configuration"
-    return .ok st.bridge.toJson
+    let rawUrl := ((args.fieldStr? "apiUrl").orElse (fun _ => args.fieldStr? "api_url")).getD ""
+    let cleanUrl := OrbBin.PosixExt.stripTrailingSlash rawUrl.trimAscii.toString
+    let nextBridge ← stRef.modifyGet fun s =>
+      if cleanUrl.startsWith "https://" && !(cleanUrl.toList.any (fun c => c.toNat ≤ 0x20 || c.toNat == 0x7F)) then
+        let b := { s.bridge with configuredTarget := cleanUrl, failoverOrigins := candidateOriginsFor cleanUrl }
+        (b, { s with bridge := b })
+      else
+        (s.bridge, s)
+    return .ok nextBridge.toJson
   | "__orb_poll_events" =>
     let evs ← stRef.modifyGet fun s =>
       let items := s.queuedChannelEvents.map fun (tok, payload) =>
@@ -581,6 +726,8 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     match st.signerBin? with
     | some bin =>
       if st.hostOs == "macos" then
+        resetSignerServer
+        stRef.modify fun s => { s with approvalGraceUntil := 0 }
         match ← runOrbSigner bin (resolveApprovalKeyArgs st "create") with
         | .ok jv =>
           let pk := (jv.fieldStr? "public_key").getD ""
@@ -594,13 +741,15 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     match st.signerBin? with
     | some bin =>
       if st.hostOs == "macos" then
-        match ← runOrbSigner bin (resolveApprovalKeyArgs st "sign") (some payload) with
+        match ← signViaOrbSignerServer bin (resolveApprovalKeyPath st) st.approvalGraceSecs payload with
         | .ok jv =>
           let sig := (jv.fieldStr? "signature").getD ""
           if sig.isEmpty then return .error "orb-signer returned empty signature"
-          if isPalomaPayloadGraceEligible payload && st.approvalGraceSecs > 0 then
-            let graceNat := (jv.fieldStr? "grace_until").bind String.toNat? |>.getD 0
-            stRef.modify fun s => { s with approvalGraceUntil := graceNat.toUInt64 }
+          let graceNat :=
+            if st.approvalGraceSecs > 0 then
+              (jv.fieldStr? "grace_until").bind String.toNat? |>.getD 0
+            else 0
+          stRef.modify fun s => { s with approvalGraceUntil := graceNat.toUInt64 }
           return .ok (.str sig)
         | .error (2, _) =>
           stRef.modify fun s => { s with approvalGraceUntil := 0 }
@@ -617,10 +766,13 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "set_approval_grace" =>
     let secs := ((args.fieldNat? "secs").orElse (fun _ => args.fieldNat? "seconds")).getD 300
     let clamped := min secs 3600
-    stRef.modify fun s =>
-      { s with
+    let changed ← stRef.modifyGet fun s =>
+      let diff := s.approvalGraceSecs != clamped
+      (diff, { s with
           approvalGraceSecs := clamped,
-          approvalGraceUntil := if clamped == 0 then 0 else s.approvalGraceUntil }
+          approvalGraceUntil := if diff || clamped == 0 then 0 else s.approvalGraceUntil })
+    if changed then
+      resetSignerServer
     return .ok .null
   | "biometric_status" =>
     let avail := st.hostOs == "macos"
@@ -983,7 +1135,7 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "    core: { invoke, Channel },\n" ++
   "    event: { listen },\n" ++
   "    window: { getCurrentWindow: () => ({\n" ++
-  "      innerSize: async () => ({ width: window.innerWidth, height: window.innerHeight }),\n" ++
+  "      innerSize: async () => { const s = window.devicePixelRatio || 1; return { width: Math.round(window.innerWidth * s), height: Math.round(window.innerHeight * s) }; },\n" ++
   "      scaleFactor: async () => window.devicePixelRatio || 1\n" ++
   "    }) },\n" ++
   "    webview: { getCurrentWebview: () => ({ label: 'main' }) }\n" ++

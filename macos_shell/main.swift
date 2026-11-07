@@ -497,7 +497,7 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegat
             core: { invoke, Channel },
             event: { listen },
             window: { getCurrentWindow: () => ({
-              innerSize: async () => ({ width: window.innerWidth, height: window.innerHeight }),
+              innerSize: async () => { const s = window.devicePixelRatio || 1; return { width: Math.round(window.innerWidth * s), height: Math.round(window.innerHeight * s) }; },
               scaleFactor: async () => window.devicePixelRatio || 1
             }) },
             webview: { getCurrentWebview: () => ({ label: 'main' }) }

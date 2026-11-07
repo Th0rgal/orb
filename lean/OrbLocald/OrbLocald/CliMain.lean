@@ -25,15 +25,19 @@ private def findHeaderVal? (hdrs : Array (String × String)) (lowerKey : String)
   let tv := v.trimAscii.toString
   if tv.isEmpty then none else some tv
 
+private def corsExposeHeadersLine : String :=
+  "Access-Control-Expose-Headers: X-Orb-Events-Protocol, X-Has-More, X-Next-Cursor, X-Page-Max-Sequence, X-Max-Sequence, X-Orb-Upstream, X-Orb-Idempotent-Replay, Content-Type, Content-Disposition, Retry-After, X-Request-Id\r\n"
+
+private def corsAllowHeadersLine : String :=
+  "Access-Control-Allow-Headers: Content-Type, Authorization, Accept, Cache-Control, Last-Event-ID, Idempotency-Key, X-Orb-Token, X-Orb-Target, X-Paloma-Approval, X-Language\r\n"
+
 private def corsHeaderBlock (origin? : Option String) : String :=
   match origin? with
   | none => ""
   | some raw =>
     let o := raw.trimAscii.toString
     if !o.isEmpty && isAllowedLocaldOrigin (some o) then
-      s!"Access-Control-Allow-Origin: {o}\r\n" ++
-      "Vary: Origin\r\n" ++
-      "Access-Control-Expose-Headers: X-Orb-Events-Protocol, X-Has-More, X-Next-Cursor, X-Page-Max-Sequence, X-Max-Sequence, Content-Disposition, Retry-After, X-Request-Id\r\n"
+      s!"Access-Control-Allow-Origin: {o}\r\nVary: Origin\r\n" ++ corsExposeHeadersLine
     else
       ""
 
@@ -52,8 +56,8 @@ private def sendPreflight204 (fd : Fd) (origin? : Option String) : IO Unit := do
   let head :=
     "HTTP/1.1 204 No Content\r\n" ++
     corsHeaderBlock origin? ++
-    "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n" ++
-    "Access-Control-Allow-Headers: Content-Type, Authorization, X-Orb-Token, Idempotency-Key, X-Paloma-Approval, X-Language, Last-Event-ID, Cache-Control, Accept\r\n" ++
+    "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS\r\n" ++
+    corsAllowHeadersLine ++
     "Access-Control-Max-Age: 86400\r\n" ++
     "Content-Length: 0\r\n" ++
     "Connection: close\r\n\r\n"
@@ -64,6 +68,11 @@ private def isHopByHopHeader (name : String) : Bool :=
   low == "host" || low == "connection" || low == "content-length" ||
   low == "transfer-encoding" || low == "keep-alive" || low == "upgrade" ||
   low == "proxy-connection" || low.startsWith "access-control-"
+
+private def isStrippedClientHeader (name : String) : Bool :=
+  let low := name.trimAscii.toString.toLower
+  isHopByHopHeader low || low == "origin" || low == "referer" ||
+  low == "x-orb-target" || low.startsWith "sec-"
 
 private def isHeaderValueClean (s : String) : Bool :=
   !LeanSys.Http.hasHttpFieldControlByte s &&
@@ -205,9 +214,12 @@ private def handleTransportProxyRequest (st : LocaldState) (isShardPort : Bool) 
     let rawRel := (req.path.drop expectedPfx.length).toString
     let relPath := if rawRel.isEmpty then "/" else if rawRel.startsWith "/" then rawRel else "/" ++ rawRel
     let hasIdem := (findHeaderVal? req.headers "idempotency-key").isSome
-    let fwdHdrs := req.headers.filter fun (k, _) => !isHopByHopHeader k
+    let fwdHdrs := req.headers.filter fun (k, _) => !isStrippedClientHeader k
     let reqBody := req.bodySlice.toByteArray
-    let origins := st.bridge.failoverOrigins
+    let targetHdr := (findHeaderVal? req.headers "x-orb-target").getD ""
+    let origins :=
+      if !targetHdr.isEmpty then candidateOriginsFor targetHdr
+      else st.bridge.failoverOrigins
     let wantSse := isSseStreamRequest isShardPort req && reqBody.isEmpty
     if origins.isEmpty then
       sendJsonHttp fd 503 origin? "{\"error\":\"no_failover_origins\"}"
