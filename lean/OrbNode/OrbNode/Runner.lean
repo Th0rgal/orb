@@ -6,6 +6,7 @@
 import LeanSys.Posix
 import LeanSys.Auth
 import Orb.Kernel
+import Orb.ManagedNode
 import OrbBin.PosixExt
 import OrbBin.Json
 import OrbNode.Spec
@@ -306,10 +307,71 @@ def computeJobTimeoutSecs (kind : String) (payload : JVal) (maxJobSecs : UInt64)
     let raw := (payload.fieldUInt64? "timeout_secs").getD maxJobSecs
     some (max 1 (min maxJobSecs raw))
 
+structure ProcLivenessSample where
+  procMissing : UInt8
+  isZombie    : UInt8
+  actualPid   : UInt32
+  actualTicks : UInt64
+  bootId      : String := ""
+  deriving Repr, BEq, Inhabited
+
+/-- Read the Linux kernel boot UUID (`/proc/sys/kernel/random/boot_id`) so liveness samples and
+    signals fail closed if `/proc` is unmounted or `boot_id` rotated across a host reboot. -/
+def readKernelBootId : IO String := do
+  match ← (IO.FS.readFile (System.FilePath.mk "/proc/sys/kernel/random/boot_id")).toBaseIO with
+  | .ok raw => return raw.trimAscii.toString
+  | .error _ => return ""
+
+/-- Parse Linux `/proc/<pid>/stat` after the last `)` of `(comm)`:
+    - field 3 (`fields[0]` after `") "`) is process state (`Z` / `X` = zombie/dead)
+    - field 22 (`fields[19]` after `") "`, 1-based field 22 in `proc(5)`) is `starttime` in clock ticks.
+    Handles arbitrary spaces and nested parentheses inside `comm`. -/
+def parseProcStatLiveness (statRaw : String) (fallbackPid : UInt32 := 0) (bootId : String := "") : ProcLivenessSample := Id.run do
+  let partsOpen := statRaw.splitOn "("
+  if partsOpen.length < 2 then
+    return { procMissing := 1, isZombie := 0, actualPid := 0, actualTicks := 0, bootId := "" }
+  let pidParsed : UInt32 :=
+    (partsOpen.head!.trimAscii.toString.toNat?.map (·.toUInt32)).getD fallbackPid
+  let afterOpen := String.intercalate "(" partsOpen.tail!
+  let partsClose := afterOpen.splitOn ") "
+  if partsClose.length < 2 then
+    return { procMissing := 1, isZombie := 0, actualPid := 0, actualTicks := 0, bootId := "" }
+  let rest := partsClose.getLast!
+  let fields := (rest.splitOn " ").filter (fun s => !s.isEmpty) |>.toArray
+  if fields.size < 20 then
+    return { procMissing := 1, isZombie := 0, actualPid := 0, actualTicks := 0, bootId := "" }
+  let st := fields[0]!
+  let ticksRaw := fields[19]!.trimAscii.toString
+  let some ticksNat := ticksRaw.toNat?
+    | return { procMissing := 1, isZombie := 0, actualPid := 0, actualTicks := 0, bootId := "" }
+  let ticks := ticksNat.toUInt64
+  if ticks == 0 || pidParsed == 0 then
+    return { procMissing := 1, isZombie := 0, actualPid := 0, actualTicks := 0, bootId := "" }
+  let zombie : UInt8 := if st == "Z" || st == "X" || st == "x" then 1 else 0
+  return {
+    procMissing := 0
+    isZombie := zombie
+    actualPid := pidParsed
+    actualTicks := ticks
+    bootId := bootId
+  }
+
+def sampleProcLiveness (pid : UInt64) : IO ProcLivenessSample := do
+  if pid == 0 || pid > 0xFFFFFFFF then
+    return { procMissing := 1, isZombie := 0, actualPid := 0, actualTicks := 0, bootId := "" }
+  let bootId ← readKernelBootId
+  if bootId.isEmpty then
+    return { procMissing := 1, isZombie := 0, actualPid := 0, actualTicks := 0, bootId := "" }
+  let statPath := System.FilePath.mk s!"/proc/{pid}/stat"
+  match ← (IO.FS.readFile statPath).toBaseIO with
+  | .ok raw => return parseProcStatLiveness raw pid.toUInt32 bootId
+  | .error _ => return { procMissing := 1, isZombie := 0, actualPid := 0, actualTicks := 0, bootId := "" }
+
 private structure ProcStatEntry where
-  ppid    : UInt32
-  comm    : String
-  cmdline : String
+  ppid       : UInt32
+  comm       : String
+  cmdline    : String
+  startTicks : UInt64 := 0
 
 private def isHarnessProc (e : ProcStatEntry) : Bool :=
   let c := e.comm
@@ -337,12 +399,24 @@ private def isAuxHarnessHelper (e : ProcStatEntry) : Bool :=
   (cmd.splitOn ".sandboxed-sh-opencode-cmd.sh").length > 1 ||
   (cmd.splitOn "orb-native-plan").length > 1
 
+/-- Anchored child-tool identity taken from one `/proc/<pid>/stat` read (`SM-20`).
+    `startTicks == 0` or an empty `bootId` is never a signal target. -/
+structure ChildToolAnchor where
+  pid        : UInt32
+  startTicks : UInt64
+  bootId     : String
+  deriving Repr, BEq, Inhabited
+
 /-- Inspect `/proc` process subtree below `rootPid` (plus any PIDs in `scopeUnit?`, matching
-    `src/node/tool_interrupt.rs`) and return active descendant child-tool PIDs
-    (never including `rootPid`, harness PIDs, or MCP stdio sidecars). -/
-def collectInflightChildToolPids (rootPid : UInt64) (scopeUnit? : Option String := none) : IO (Array UInt32) := do
+    `src/node/tool_interrupt.rs`) and return active descendant child-tool identities
+    `(pid, start_ticks, boot_id)` from the same `/proc/<pid>/stat` read used to classify them
+    (never including `rootPid`, harness PIDs, MCP stdio sidecars, missing `/proc`, zombies,
+    `start_ticks == 0`, an empty `boot_id`, or a boot id that disagrees with the scan's kernel boot id). -/
+def collectInflightChildToolPids (rootPid : UInt64) (scopeUnit? : Option String := none) : IO (Array ChildToolAnchor) := do
   let procRoot := System.FilePath.mk "/proc"
   if !(← procRoot.isDir) || rootPid == 0 then return #[]
+  let bootId ← readKernelBootId
+  if bootId.isEmpty then return #[]
   let .ok entries ← procRoot.readDir |>.toBaseIO | return #[]
   let mut table : Std.HashMap UInt32 ProcStatEntry := {}
   let mut children : Std.HashMap UInt32 (Array UInt32) := {}
@@ -352,6 +426,7 @@ def collectInflightChildToolPids (rootPid : UInt64) (scopeUnit? : Option String 
     if let some pidNat := item.fileName.toNat? then
       let pid := pidNat.toUInt32
       if let .ok statRaw ← IO.FS.readFile (item.path / "stat") |>.toBaseIO then
+        let sample := parseProcStatLiveness statRaw pid bootId
         let partsOpen := statRaw.splitOn "("
         if partsOpen.length ≥ 2 then
           let afterOpen := String.intercalate "(" partsOpen.tail!
@@ -361,7 +436,10 @@ def collectInflightChildToolPids (rootPid : UInt64) (scopeUnit? : Option String 
             let comm := String.intercalate ") " partsClose.dropLast
             let fields := (rest.splitOn " ").filter (fun s => !s.isEmpty)
             if let st :: ppidStr :: _ := fields then
-              if st != "Z" && st != "X" then
+              if st != "Z" && st != "X" && st != "x" &&
+                  sample.procMissing == 0 && sample.isZombie == 0 &&
+                  sample.actualPid == pid && sample.actualTicks != 0 &&
+                  sample.bootId == bootId then
                 if let some ppidNat := ppidStr.toNat? then
                   let ppid := ppidNat.toUInt32
                   let cmdline ← match ← IO.FS.readBinFile (item.path / "cmdline") |>.toBaseIO with
@@ -369,7 +447,7 @@ def collectInflightChildToolPids (rootPid : UInt64) (scopeUnit? : Option String 
                       let s := String.fromUTF8? (b.foldl (fun acc x => if x == 0 then acc.push 32 else acc.push x) ByteArray.empty) |>.getD ""
                       pure s.trimAscii.toString
                     | .error _ => pure ""
-                  table := table.insert pid { ppid, comm, cmdline }
+                  table := table.insert pid { ppid, comm, cmdline, startTicks := sample.actualTicks }
                   let curKids := (children.get? ppid).getD #[]
                   children := children.insert ppid (curKids.push pid)
                   if let some needle := unitNeedle? then
@@ -429,7 +507,7 @@ def collectInflightChildToolPids (rootPid : UInt64) (scopeUnit? : Option String 
         let info := (table.get? p).getD defEntry
         if !isAuxHarnessHelper info then
           candidateRoots := candidateRoots.push p
-  let mut toolPids : Array UInt32 := #[]
+  let mut toolPids : Array ChildToolAnchor := #[]
   let mut seenTools : Std.HashMap UInt32 Unit := {}
   let mut toolStack := candidateRoots
   while !toolStack.isEmpty do
@@ -442,21 +520,196 @@ def collectInflightChildToolPids (rootPid : UInt64) (scopeUnit? : Option String 
           if harnessPids.isEmpty then
             if let some kids := children.get? p then
               toolStack := toolStack ++ kids
-        else
-          toolPids := toolPids.push p
+        else if info.startTicks != 0 && p > 1 then
+          toolPids := toolPids.push { pid := p, startTicks := info.startTicks, bootId := bootId }
           if let some kids := children.get? p then
             toolStack := toolStack ++ kids
-  return toolPids.qsort (· < ·)
+  return toolPids.qsort (fun a b => a.pid < b.pid)
 
-def sigintInflightChildTools (rootPid : UInt64) (scopeUnit? : Option String := none) : IO Nat := do
-  let pids ← collectInflightChildToolPids rootPid scopeUnit?
+/-- Execute one `Orb.ManagedNode.ProcOp` (`0=observeAlive`, `1=observeDead`, `2=sigterm`, `3=sigkill`)
+    against `(expectedPid, expectedTicks, expectedBootId)` by re-reading `/proc/<pid>/stat` +
+    `/proc/sys/kernel/random/boot_id` and gating via `Orb.ManagedNode.stepProcSlice` and
+    `Orb.ManagedNode.verifyProcLivenessAdmit`. Returns `(nextPhase, admitted)`. Never signals a reused
+    or unsampled PID! -/
+def stepVerifiedPgrpOp
+    (curPhase opCode : UInt8) (expectedPid : UInt64) (expectedTicks : UInt64)
+    (sampleOverride? : Option ProcLivenessSample := none)
+    (expectedBootId : String := "") : IO (UInt8 × Bool) := do
+  if expectedPid == 0 || expectedPid > 0xFFFFFFFF || expectedTicks == 0 then
+    return (2, false)
+  let rawSample ← match sampleOverride? with
+    | some s => pure s
+    | none => sampleProcLiveness expectedPid
+  let bootMismatch :=
+    !expectedBootId.isEmpty && (rawSample.bootId.isEmpty || rawSample.bootId != expectedBootId)
+  let sample : ProcLivenessSample :=
+    if bootMismatch then
+      { procMissing := 1, isZombie := 0, actualPid := 0, actualTicks := 0, bootId := "" }
+    else
+      rawSample
+  let admit := Orb.ManagedNode.verifyProcLivenessAdmit curPhase opCode sample.procMissing sample.isZombie
+    expectedPid.toUInt32 sample.actualPid expectedTicks sample.actualTicks
+  if admit != 1 then
+    return (curPhase, false)
+  let stIn : Orb.ManagedNode.ProcSliceState := {
+    phaseCode := curPhase
+    leaderPid := expectedPid.toUInt32
+    leaderTicks := expectedTicks
+  }
+  let ev : Orb.ManagedNode.ProcSliceEvent := {
+    opCode := opCode
+    procMissing := sample.procMissing
+    isZombie := sample.isZombie
+    actualPid := sample.actualPid
+    actualTicks := sample.actualTicks
+  }
+  let (stOut, effs) := Orb.ManagedNode.stepProcSlice stIn ev
+  if effs.isEmpty then
+    return (curPhase, false)
+  for eff in effs do
+    match eff with
+    | .persistLeader _ _ _ => pure ()
+    | .sendSignal sig p ticks =>
+      if p > 1 && ticks != 0 && sample.procMissing == 0 && sample.isZombie == 0 && !bootMismatch then
+        if Orb.ManagedNode.verifyProcLivenessAdmit curPhase opCode sample.procMissing sample.isZombie
+            expectedPid.toUInt32 sample.actualPid expectedTicks sample.actualTicks == 1 then
+          OrbNode.Posix.killPgrp p.toUInt64 sig.toUInt32
+  return (stOut.phaseCode, true)
+
+/-- Escalate termination (`alive -> termSent (SIGTERM) -> killSent (SIGKILL) -> dead`) for a tracked
+    process group `(pid, startTicks, expectedBootId)` with mandatory `/proc/<pid>/stat` + `boot_id`
+    re-verification via `Orb.ManagedNode.verifyProcLivenessAdmit` before EVERY signal (`SM-20`).
+    If the process already exited, `/proc` is missing (`procMissing == 1`), became a zombie, or its
+    PID was reused with different `startTicks`, transitions cleanly via `observeDead` without signalling. -/
+def terminateVerifiedPgrp
+    (curPhase : UInt8) (pid : UInt64) (startTicks : UInt64)
+    (sampleOverride? : Option ProcLivenessSample := none)
+    (expectedBootId : String := "") : IO UInt8 := do
+  if pid ≤ 1 || pid > 0xFFFFFFFF then
+    return 2
+  if startTicks == 0 then
+    return 2
+  let mut ph := if curPhase == 0 then 1 else curPhase
+  if ph == 2 then
+    return 2
+  if ph == 1 then
+    let (phTerm, sentTerm) ← stepVerifiedPgrpOp ph 2 pid startTicks sampleOverride? expectedBootId
+    ph := phTerm
+    if !sentTerm then
+      let (phDead, _) ← stepVerifiedPgrpOp ph 1 pid startTicks sampleOverride? expectedBootId
+      return phDead
+  if ph == 3 then
+    let (phKill, sentKill) ← stepVerifiedPgrpOp ph 3 pid startTicks sampleOverride? expectedBootId
+    ph := phKill
+    if !sentKill then
+      let (phDead, _) ← stepVerifiedPgrpOp ph 1 pid startTicks sampleOverride? expectedBootId
+      return phDead
+  let (phFinal, obsDead) ← stepVerifiedPgrpOp ph 1 pid startTicks sampleOverride? expectedBootId
+  return if obsDead then phFinal else ph
+
+/-- Discover active container leaders for `workspaceId` strictly from the durable `container_leaders`
+    SQLite runtime table verified via `/proc/<leader_pid>/stat` + `Orb.ManagedNode.stepProcSlice`
+    (never by scanning `/proc/*/environ`, `SM-20`). Marks stale/dead/reused-PID leaders `dead (2)`. -/
+def resolveLiveContainerLeaders
+    (l : Ledger) (workspaceId : String) : IO (Array ContainerLeaderRecord) := do
+  let .ok allRows ← l.listContainerLeaders | return #[]
+  let nowTs ← nowRfc3339
+  let mut live : Array ContainerLeaderRecord := #[]
+  for rec in allRows do
+    if rec.workspaceId == workspaceId then
+      if rec.nodeBootEpoch != l.nodeBootEpoch || rec.procPhase == 2 || rec.leaderPid == 0 || rec.startTicks == 0 then
+        if rec.procPhase != 2 then
+          discard <| l.upsertContainerLeader { rec with procPhase := 2, updatedAt := nowTs }
+      else
+        let sample ← sampleProcLiveness rec.leaderPid.toUInt64
+        let probePh : UInt8 := if rec.procPhase == 0 || rec.procPhase == 1 then rec.procPhase else 1
+        let aliveAdmit := Orb.ManagedNode.verifyProcLivenessAdmit probePh 0 sample.procMissing sample.isZombie
+          rec.leaderPid sample.actualPid rec.startTicks sample.actualTicks
+        let stIn : Orb.ManagedNode.ProcSliceState := {
+          phaseCode := probePh
+          leaderPid := rec.leaderPid
+          leaderTicks := rec.startTicks
+        }
+        let evAlive : Orb.ManagedNode.ProcSliceEvent := {
+          opCode := 0
+          procMissing := sample.procMissing
+          isZombie := sample.isZombie
+          actualPid := sample.actualPid
+          actualTicks := sample.actualTicks
+        }
+        let (stAlive, effAlive) := Orb.ManagedNode.stepProcSlice stIn evAlive
+        if aliveAdmit == 1 && !effAlive.isEmpty then
+          let nextRec := { rec with procPhase := stAlive.phaseCode, updatedAt := nowTs }
+          if rec.procPhase != stAlive.phaseCode then
+            discard <| l.upsertContainerLeader nextRec
+          live := live.push nextRec
+        else
+          let (phDead, _) ← stepVerifiedPgrpOp rec.procPhase 1 rec.leaderPid.toUInt64 rec.startTicks (some sample)
+          let deadCode : UInt8 := if phDead == 2 then 2 else 2
+          discard <| l.upsertContainerLeader { rec with procPhase := deadCode, updatedAt := nowTs }
+  return live
+
+/-- Pure admission gate for signalling an enumerated child-tool snapshot `anchor` against a fresh
+    `/proc/<pid>/stat` + `boot_id` re-sample (`SM-20`): passes `anchor.startTicks` as `leaderTicks`
+    and `resample.actualTicks` as `actualTicks` to `Orb.ManagedNode.verifyProcLivenessAdmit`, and
+    requires non-empty matching `bootId`, `procMissing == 0`, `isZombie == 0`, and `pid > 1`. -/
+def verifyChildToolSignalAdmit
+    (anchor : ChildToolAnchor) (resample : ProcLivenessSample)
+    (expectedBootId : String := "") : Bool :=
+  anchor.pid > 1 &&
+  anchor.startTicks != 0 &&
+  !anchor.bootId.isEmpty &&
+  (expectedBootId.isEmpty || anchor.bootId == expectedBootId) &&
+  resample.procMissing == 0 &&
+  resample.isZombie == 0 &&
+  resample.actualTicks != 0 &&
+  !resample.bootId.isEmpty &&
+  resample.bootId == anchor.bootId &&
+  Orb.ManagedNode.verifyProcLivenessAdmit 1 2 resample.procMissing resample.isZombie
+    anchor.pid resample.actualPid anchor.startTicks resample.actualTicks == 1
+
+/-- Re-sample `anchor.pid` (or apply `sampleOverride?`) and send `SIGINT` only when
+    `verifyChildToolSignalAdmit` admits `(anchor.pid, anchor.startTicks, anchor.bootId)` (`SM-20`). -/
+def sigintAnchoredChildTool
+    (anchor : ChildToolAnchor)
+    (expectedBootId : String := "")
+    (sampleOverride? : Option ProcLivenessSample := none) : IO Bool := do
+  if anchor.pid ≤ 1 || anchor.startTicks == 0 || anchor.bootId.isEmpty then
+    return false
+  if !expectedBootId.isEmpty && anchor.bootId != expectedBootId then
+    return false
+  let resample ← match sampleOverride? with
+    | some s => pure s
+    | none => sampleProcLiveness anchor.pid.toUInt64
+  if !verifyChildToolSignalAdmit anchor resample expectedBootId then
+    return false
+  let rc ← killSig (Int64.ofNat anchor.pid.toNat) 2
+  return rc == 0
+
+/-- Return anchored live child-tool identities below `(rootPid, expectedRootTicks, expectedBootId)`
+    only after verifying the job leader itself is still alive with matching `(pid, start_ticks, boot_id)`. -/
+def collectVerifiedInflightChildTools
+    (rootPid : UInt64) (scopeUnit? : Option String := none)
+    (expectedRootTicks : UInt64 := 0) (expectedBootId : String := "") : IO (Array ChildToolAnchor) := do
+  if expectedRootTicks == 0 || expectedBootId.isEmpty then
+    return #[]
+  let (_, rootAlive) ← stepVerifiedPgrpOp 1 0 rootPid expectedRootTicks none expectedBootId
+  if !rootAlive then
+    return #[]
+  let anchors ← collectInflightChildToolPids rootPid scopeUnit?
+  return anchors.filter (fun a => a.pid > 1 && a.startTicks != 0 && a.bootId == expectedBootId)
+
+def sigintInflightChildTools (rootPid : UInt64) (scopeUnit? : Option String := none)
+    (expectedRootTicks : UInt64 := 0) (expectedBootId : String := "")
+    (sampleOverride? : Option (UInt32 → IO ProcLivenessSample) := none) : IO Nat := do
+  let anchors ← collectVerifiedInflightChildTools rootPid scopeUnit? expectedRootTicks expectedBootId
   let mut count : Nat := 0
-  let revPids := pids.reverse
-  for p in revPids do
-    if p > 1 then
-      let rc ← killSig (Int64.ofNat p.toNat) 2
-      if rc == 0 then
-        count := count + 1
+  for anchor in anchors.reverse do
+    let ov? ← match sampleOverride? with
+      | some f => some <$> f anchor.pid
+      | none => pure none
+    if ← sigintAnchoredChildTool anchor expectedBootId ov? then
+      count := count + 1
   return count
 
 /-! ### Transient Systemd Scope Containment (`systemd-run --scope`) -/
@@ -686,13 +939,17 @@ def stopLostJobScopeOutsideLock (nodeId workDir jid : String) : IO Bool := do
 
 /-- Detach `stopSystemdScope` and `cleanupIsolatedCheckout` onto a background worker so callers holding
     `Std.Mutex NodeRuntime` never block on `systemctl` D-Bus / `rm -rf` subprocess I/O! -/
-def teardownJobResourcesAsync (scope? : Option SystemdScope) (iso? : Option String) : IO Unit := do
-  if scope?.isNone && iso?.isNone then return
+def teardownJobResourcesAsync
+    (scope? : Option SystemdScope) (iso? : Option String)
+    (scratchFinalize? : Option (String × SqliteBackend × String × String × UInt64 × UInt64) := none) : IO Unit := do
+  if scope?.isNone && iso?.isNone && scratchFinalize?.isNone then return
   discard <| IO.asTask do
     stopSystemdScope scope?
     if let some dir := iso? then
       if !dir.isEmpty then
         discard <| (IO.Process.output { cmd := "rm", args := #["-rf", dir] }).toBaseIO
+    if let some (workDir, backend, scratchId, scratchDir, bootEp, claimSeq) := scratchFinalize? then
+      discard <| retireScratchOutsideLedger workDir backend scratchId scratchDir bootEp claimSeq
 
 /-- Reap any leftover `sandboxed-node-<prefix>-{sync,job}-*.scope` units from a previous daemon start. -/
 def reapPreviousScopesOnStart (cfg : NodeConfig) : IO Unit := do
@@ -731,6 +988,9 @@ structure LaunchingSlot where
 
 structure LiveProc where
   pid              : UInt64
+  startTicks       : UInt64 := 0
+  bootId           : String := ""
+  procPhase        : UInt8 := 1
   startedEp        : UInt64
   timeoutSecs?     : Option UInt64
   forced           : Bool
@@ -740,6 +1000,9 @@ structure LiveProc where
   cwd              : String
   isolatedCheckout : Option String := none
   systemdScope?    : Option SystemdScope := none
+  scratchDir?      : Option String := none
+  machineName?     : Option String := none
+  workspaceId      : String := ""
   steerAfterTool   : Bool := false
   deriving Repr, Inhabited
 
@@ -753,6 +1016,9 @@ structure PreparedJobSpec where
   cwd              : String
   isolatedCheckout : Option String
   systemdScope?    : Option SystemdScope := none
+  scratchDir?      : Option String := none
+  machineName?     : Option String := none
+  workspaceId      : String := ""
   prog             : String
   args             : Array String
   envKv            : Array String
@@ -1061,6 +1327,11 @@ private def prepareJobOutsideLockInner
       | .ok authEnv =>
         for (ak, av) in authEnv do
           envPairs := mergeEnvPair envPairs ak av
+  let scratchCand := (System.FilePath.mk cfg.workDir / ".scratch" / s!"job-{jid}").toString
+  IO.FS.createDirAll scratchCand
+  let wsId := ((payload.fieldStr? "workspace_id").orElse (fun _ => payload.fieldStr? "companion_of")).getD missionId
+  let machName? := ((payload.fieldStr? "machine_name").orElse (fun _ => payload.fieldStr? "container_machine")).map
+    (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty)
   let (wrappedProg, wrappedArgs, wrappedEnvPairs, scope?) ←
     wrapWithSystemdScope cfg false jid timeoutSecs? prog args envPairs
   return .ok {
@@ -1073,6 +1344,9 @@ private def prepareJobOutsideLockInner
     cwd := cwd
     isolatedCheckout := isolatedCheckout
     systemdScope? := scope?
+    scratchDir? := some scratchCand
+    machineName? := machName?
+    workspaceId := wsId
     prog := wrappedProg
     args := wrappedArgs
     envKv := flattenEnvKv wrappedEnvPairs
@@ -1105,7 +1379,9 @@ def prepareJobOutsideLock
 /-- Commit a `PreparedJobSpec` into `NodeRuntime` (clearing its `launching` reservation and `queuedPayloads`,
     and spawning `-pgid` / transient `systemd-run --scope` unless cancelled while preparing). -/
 def commitPreparedJob
-    (rt0 : NodeRuntime) (jid : String) (prepRes : Except String PreparedJobSpec) : IO NodeRuntime := do
+    (rt0 : NodeRuntime) (jid : String) (prepRes : Except String PreparedJobSpec)
+    (postSpawnSampleOverride? : Option ProcLivenessSample := none)
+    (injectPostSpawnUpdateErr? : Option String := none) : IO NodeRuntime := do
   let wasLaunching := rt0.launching.get? jid
   let mut rt := {
     rt0 with
@@ -1119,37 +1395,155 @@ def commitPreparedJob
         { r with shrinkDebt := r.shrinkDebt - 1 }
       else r
     | none => r
+  let scratchFinOf (bootEp claimSeq : UInt64) (s? : Option String) :
+      Option (String × SqliteBackend × String × String × UInt64 × UInt64) :=
+    s?.map (fun sd => (rt0.cfg.workDir, rt0.ledger.sqliteBackend, jid, sd, bootEp, claimSeq))
   let some cur := rt.ledger.jobs.get? jid
-    | if let .ok spec := prepRes then teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
+    | if let .ok spec := prepRes then
+        teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout (scratchFinOf 0 0 spec.scratchDir?)
       return releaseDebt rt
+  let curOpStr := if cur.operationId.isEmpty then jid else cur.operationId
+  let curClaimSeq := operationIdToken curOpStr
+  if cur.nodeBootEpoch != rt.ledger.nodeBootEpoch then
+    if let .ok spec := prepRes then
+      teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
+        (scratchFinOf cur.nodeBootEpoch curClaimSeq spec.scratchDir?)
+    let nowStale ← nowRfc3339
+    if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
+      r with
+      state := .lost
+      phaseCode := 2
+      finishedAt? := some (r.finishedAt?.getD nowStale)
+      error? := some (r.error?.getD "refused adopting job from prior node_boot_epoch")
+    }) then
+      rt := { rt with ledger := l' }
+    return releaseDebt rt
   if cur.state != .queued then
-    if let .ok spec := prepRes then teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
+    if let .ok spec := prepRes then
+      teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
+        (scratchFinOf cur.nodeBootEpoch curClaimSeq spec.scratchDir?)
     return releaseDebt rt
   let nowTs ← nowRfc3339
   match prepRes with
   | .error errMsg =>
+    let defScratch := (System.FilePath.mk rt.cfg.workDir / ".scratch" / s!"job-{jid}").toString
+    discard <| retireScratchOutsideLedger rt.cfg.workDir rt.ledger.sqliteBackend jid defScratch
+      cur.nodeBootEpoch curClaimSeq
     if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
       r with state := .failed, finishedAt? := some nowTs, error? := some errMsg
     }) then
       rt := { rt with ledger := l' }
     return releaseDebt rt
   | .ok spec =>
+    let mut preExtraSql := ""
+    if let some sd := spec.scratchDir? then
+      let parentPath := (System.FilePath.mk sd).parent.map (·.toString) |>.getD ""
+      if let (some pId, some dId) ← pure (← readPathIdentity? parentPath, ← readPathIdentity? sd) then
+        preExtraSql := preExtraSql ++ scratchReceiptUpsertSql {
+          id := jid
+          missionId := cur.missionId
+          jobId? := some jid
+          nodeBootEpoch := cur.nodeBootEpoch
+          claimSeq := curClaimSeq
+          parentIdentity := pId
+          directoryIdentity := dId
+          retiredAt? := none
+        } ++ " "
     let nowEp ← OrbNode.Posix.nowEpoch
     match ← (OrbNode.Posix.spawnJobPgrp spec.prog spec.args spec.envKv spec.cwd spec.logPath).toBaseIO with
     | .error e =>
       teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
+        (scratchFinOf cur.nodeBootEpoch curClaimSeq spec.scratchDir?)
       if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
         r with state := .failed, finishedAt? := some nowTs, error? := some (toString e), forced := spec.forced
       }) then
         rt := { rt with ledger := l' }
       return releaseDebt rt
     | .ok pid =>
-      match ← rt.ledger.updateJob jid (fun r => .ok {
-        r with state := .running, startedAt? := some nowTs, logPath? := some spec.logPath, forced := spec.forced
-      }) with
+      let sample ← match postSpawnSampleOverride? with
+        | some s => pure s
+        | none => sampleProcLiveness pid
+      let initTicks := sample.actualTicks
+      let initBootId := sample.bootId
+      if sample.procMissing == 1 || initTicks == 0 || initBootId.isEmpty then
+        let wFast ← OrbNode.Posix.pollPid pid
+        let doneFast := (wFast &&& 1) == 1
+        if doneFast && postSpawnSampleOverride?.isNone then
+          let codeU32 := (wFast >>> 32).toUInt32
+          let codeInt : Int := if codeU32 == 0xFFFFFFFF then -1 else Int.ofNat codeU32.toNat
+          let arts ← collectArtifactsConfined spec.cwd spec.artifacts
+          teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
+            (scratchFinOf cur.nodeBootEpoch curClaimSeq spec.scratchDir?)
+          let nextState : JobState := if codeInt == 0 then .succeeded else .failed
+          if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
+            r with
+            state := if r.state == .cancelled then .cancelled else nextState
+            exitCode? := some codeInt
+            startedAt? := some nowTs
+            finishedAt? := some nowTs
+            logPath? := some spec.logPath
+            forced := spec.forced
+            pid := pid
+            startTicks := 0
+            procPhase := 2
+            artifacts := arts
+          }) preExtraSql then
+            rt := { rt with ledger := l' }
+          return releaseDebt rt
+        else
+          -- Fail closed without signalling by bare PID when `(starttime_ticks, boot_id)` could not be sampled!
+          teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
+            (scratchFinOf cur.nodeBootEpoch curClaimSeq spec.scratchDir?)
+          let unsampledErr :=
+            s!"proc_liveness_unsampled: refused bare-PID signal when /proc/{pid}/stat starttime_ticks or boot_id could not be sampled"
+          if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
+            r with
+            state := .failed
+            startedAt? := some nowTs
+            finishedAt? := some nowTs
+            logPath? := some spec.logPath
+            forced := spec.forced
+            pid := pid
+            startTicks := 0
+            procPhase := 0
+            error? := some unsampledErr
+          }) preExtraSql then
+            rt := { rt with ledger := l' }
+          return releaseDebt rt
+      let (initProcPh, _) ← stepVerifiedPgrpOp 0 0 pid initTicks (some sample) initBootId
+      let mut extraSql := preExtraSql
+      if let some mName := spec.machineName? then
+        if initTicks != 0 && pid ≤ 0xFFFFFFFF then
+          extraSql := extraSql ++ containerLeaderUpsertSql {
+            workspaceId := if spec.workspaceId.isEmpty then cur.missionId else spec.workspaceId
+            machineName := mName
+            leaderPid := pid.toUInt32
+            startTicks := initTicks
+            nodeBootEpoch := rt.ledger.nodeBootEpoch
+            procPhase := initProcPh
+            jobId := jid
+            updatedAt := nowTs
+          } ++ " "
+      let postSpawnUpdateRes ← match injectPostSpawnUpdateErr? with
+        | some simErr => pure (.error simErr)
+        | none =>
+          rt.ledger.updateJob jid (fun r => .ok {
+            r with
+            state := .running
+            startedAt? := some nowTs
+            logPath? := some spec.logPath
+            forced := spec.forced
+            pid := pid
+            startTicks := initTicks
+            procPhase := initProcPh
+          }) extraSql
+      match postSpawnUpdateRes with
       | .ok (l', _) =>
         let lp : LiveProc := {
           pid := pid
+          startTicks := initTicks
+          bootId := initBootId
+          procPhase := initProcPh
           startedEp := nowEp
           timeoutSecs? := spec.timeoutSecs?
           forced := spec.forced
@@ -1159,12 +1553,32 @@ def commitPreparedJob
           cwd := spec.cwd
           isolatedCheckout := spec.isolatedCheckout
           systemdScope? := spec.systemdScope?
+          scratchDir? := spec.scratchDir?
+          machineName? := spec.machineName?
+          workspaceId := if spec.workspaceId.isEmpty then cur.missionId else spec.workspaceId
         }
         return { rt with ledger := l', liveProcs := rt.liveProcs.insert jid lp }
-      | .error _ =>
-        OrbNode.Posix.killPgrp pid 9
+      | .error updErr =>
+        let mut postPh ← terminateVerifiedPgrp initProcPh pid initTicks none initBootId
+        if postPh == 3 then
+          postPh ← terminateVerifiedPgrp 3 pid initTicks none initBootId
         discard <| OrbNode.Posix.pollPid pid
         teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
+          (scratchFinOf cur.nodeBootEpoch curClaimSeq spec.scratchDir?)
+        let recErr := s!"post_spawn_ledger_update_failed: {updErr}"
+        if let .ok (lErr, _) ← rt.ledger.updateJob jid (fun r => .ok {
+          r with
+          state := .failed
+          startedAt? := some nowTs
+          finishedAt? := some nowTs
+          logPath? := some spec.logPath
+          forced := spec.forced
+          pid := pid
+          startTicks := initTicks
+          procPhase := postPh
+          error? := some recErr
+        }) then
+          rt := { rt with ledger := lErr }
         return releaseDebt rt
 
 structure PendingAsyncLaunch where
@@ -1188,14 +1602,36 @@ def tickRuntimeReserve
     rt := { rt with ledger := lFlushed }
   let nowEp ← OrbNode.Posix.nowEpoch
   for (jid, lp) in rt.liveProcs.toList do
+    let recJob? := rt.ledger.jobs.get? jid
+    let recBootEp := (recJob?.map (·.nodeBootEpoch)).getD rt.ledger.nodeBootEpoch
+    let recClaimSeq := operationIdToken ((recJob?.map (fun r => if r.operationId.isEmpty then jid else r.operationId)).getD jid)
+    let scratchFin : Option (String × SqliteBackend × String × String × UInt64 × UInt64) :=
+      lp.scratchDir?.map (fun sd => (rt.cfg.workDir, rt.ledger.sqliteBackend, jid, sd, recBootEp, recClaimSeq))
+    let mkLeaderDeadSql (nowTs : String) : String :=
+      match lp.machineName? with
+      | some mName =>
+        if lp.startTicks != 0 && lp.pid ≤ 0xFFFFFFFF then
+          containerLeaderUpsertSql {
+            workspaceId := lp.workspaceId
+            machineName := mName
+            leaderPid := lp.pid.toUInt32
+            startTicks := lp.startTicks
+            nodeBootEpoch := rt.ledger.nodeBootEpoch
+            procPhase := 2
+            jobId := jid
+            updatedAt := nowTs
+          }
+        else ""
+      | none => ""
     let w ← OrbNode.Posix.pollPid lp.pid
     let done := (w &&& 1) == 1
     if done then
       let codeU32 := (w >>> 32).toUInt32
       let codeInt : Int := if codeU32 == 0xFFFFFFFF then -1 else Int.ofNat codeU32.toNat
-      OrbNode.Posix.killPgrp lp.pid 9
+      if lp.startTicks != 0 then
+        discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
       let arts ← collectArtifactsConfined lp.cwd lp.artifacts
-      teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout
+      teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout scratchFin
       let nowTs ← nowRfc3339
       let nextState : JobState := if codeInt == 0 then .succeeded else .failed
       if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
@@ -1204,17 +1640,18 @@ def tickRuntimeReserve
         exitCode? := some codeInt
         finishedAt? := some nowTs
         artifacts := arts
-      }) then
+        procPhase := 2
+      }) (mkLeaderDeadSql nowTs) then
         rt := { rt with ledger := l' }
       rt := { rt with liveProcs := rt.liveProcs.erase jid }
       if !lp.forced && !lp.sideLane && !lp.coordLane && rt.shrinkDebt > 0 then
         rt := { rt with shrinkDebt := rt.shrinkDebt - 1 }
     else if let some limitSecs := lp.timeoutSecs? then
       if nowEp > lp.startedEp + limitSecs then
-        OrbNode.Posix.killPgrp lp.pid 15
-        OrbNode.Posix.killPgrp lp.pid 9
+        if lp.startTicks != 0 then
+          discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
         discard <| OrbNode.Posix.pollPid lp.pid
-        teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout
+        teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout scratchFin
         let nowTs ← nowRfc3339
         if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
           r with
@@ -1222,43 +1659,46 @@ def tickRuntimeReserve
           exitCode? := some 124
           finishedAt? := some nowTs
           error? := some s!"job timed out after {limitSecs}s"
-        }) then
+          procPhase := 2
+        }) (mkLeaderDeadSql nowTs) then
           rt := { rt with ledger := l' }
         rt := { rt with liveProcs := rt.liveProcs.erase jid }
         if !lp.forced && !lp.sideLane && !lp.coordLane && rt.shrinkDebt > 0 then
           rt := { rt with shrinkDebt := rt.shrinkDebt - 1 }
       else if lp.steerAfterTool then
-        let inflight ← collectInflightChildToolPids lp.pid (lp.systemdScope?.map (·.unit))
+        let inflight ← collectVerifiedInflightChildTools lp.pid (lp.systemdScope?.map (·.unit)) lp.startTicks lp.bootId
         if inflight.isEmpty then
-          OrbNode.Posix.killPgrp lp.pid 15
-          OrbNode.Posix.killPgrp lp.pid 9
+          if lp.startTicks != 0 then
+            discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
           discard <| OrbNode.Posix.pollPid lp.pid
-          teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout
+          teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout scratchFin
           let nowTs ← nowRfc3339
           let cInfo : JobCancellation := {
             actor := "core", reason := "Steered immediately after tool call completed", requestedAt := nowTs
           }
           if let .ok (l', _) ← rt.ledger.updateJob jid (fun r =>
             if r.state.isTerminal then .ok r
-            else .ok { r with state := .cancelled, finishedAt? := some nowTs, cancellation? := some cInfo }) then
+            else .ok { r with state := .cancelled, finishedAt? := some nowTs, cancellation? := some cInfo, procPhase := 2 })
+            (mkLeaderDeadSql nowTs) then
             rt := { rt with ledger := l' }
           rt := { rt with liveProcs := rt.liveProcs.erase jid }
           if !lp.forced && !lp.sideLane && !lp.coordLane && rt.shrinkDebt > 0 then
             rt := { rt with shrinkDebt := rt.shrinkDebt - 1 }
     else if lp.steerAfterTool then
-      let inflight ← collectInflightChildToolPids lp.pid (lp.systemdScope?.map (·.unit))
+      let inflight ← collectVerifiedInflightChildTools lp.pid (lp.systemdScope?.map (·.unit)) lp.startTicks lp.bootId
       if inflight.isEmpty then
-        OrbNode.Posix.killPgrp lp.pid 15
-        OrbNode.Posix.killPgrp lp.pid 9
+        if lp.startTicks != 0 then
+          discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
         discard <| OrbNode.Posix.pollPid lp.pid
-        teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout
+        teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout scratchFin
         let nowTs ← nowRfc3339
         let cInfo : JobCancellation := {
           actor := "core", reason := "Steered immediately after tool call completed", requestedAt := nowTs
         }
         if let .ok (l', _) ← rt.ledger.updateJob jid (fun r =>
           if r.state.isTerminal then .ok r
-          else .ok { r with state := .cancelled, finishedAt? := some nowTs, cancellation? := some cInfo }) then
+          else .ok { r with state := .cancelled, finishedAt? := some nowTs, cancellation? := some cInfo, procPhase := 2 })
+          (mkLeaderDeadSql nowTs) then
           rt := { rt with ledger := l' }
         rt := { rt with liveProcs := rt.liveProcs.erase jid }
         if !lp.forced && !lp.sideLane && !lp.coordLane && rt.shrinkDebt > 0 then
@@ -1267,7 +1707,17 @@ def tickRuntimeReserve
   let mut toLaunch : Array PendingAsyncLaunch := #[]
   for jid in rt.queueOrder do
     if let some rec := rt.ledger.jobs.get? jid then
-      if rec.state == .queued && !rt.launching.contains jid then
+      if rec.state == .queued && rec.nodeBootEpoch != rt.ledger.nodeBootEpoch then
+        let nowStale ← nowRfc3339
+        if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
+          r with
+          state := .lost
+          phaseCode := 2
+          finishedAt? := some (r.finishedAt?.getD nowStale)
+          error? := some (r.error?.getD "refused adopting job from prior node_boot_epoch")
+        }) then
+          rt := { rt with ledger := l', queuedPayloads := rt.queuedPayloads.erase jid }
+      else if rec.state == .queued && !rt.launching.contains jid then
         let payload? := (rt.queuedPayloads.get? jid).orElse (fun _ =>
           (payloadHints.get? jid).orElse (fun _ =>
             match OrbBin.Json.parse rec.payloadJson with
@@ -1333,14 +1783,42 @@ def cancelJob
         else .ok { r with cancellation? := some cInfo }) with
       | .error e => return .error e
       | .ok (l', updated) => return .ok ({ rt with ledger := l' }, updated, false)
+    if cur.nodeBootEpoch == rt.ledger.nodeBootEpoch && cur.pid > 1 && cur.startTicks != 0 then
+      let lostBoot ← readKernelBootId
+      discard <| terminateVerifiedPgrp cur.procPhase cur.pid cur.startTicks none lostBoot
+    let lostOpStr := if cur.operationId.isEmpty then jid else cur.operationId
+    let lostScratch := (System.FilePath.mk rt.cfg.workDir / ".scratch" / s!"job-{jid}").toString
+    teardownJobResourcesAsync none none
+      (some (rt.cfg.workDir, rt.ledger.sqliteBackend, jid, lostScratch, cur.nodeBootEpoch, operationIdToken lostOpStr))
+  let curCancelOp := if cur.operationId.isEmpty then jid else cur.operationId
+  let curCancelSeq := operationIdToken curCancelOp
   let mut releasedRegular := false
+  let mut cancelLeaderSql := ""
   if let some lp := rt.liveProcs.get? jid then
-    OrbNode.Posix.killPgrp lp.pid 15
-    OrbNode.Posix.killPgrp lp.pid 9
+    if lp.startTicks != 0 then
+      discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
     discard <| OrbNode.Posix.pollPid lp.pid
-    teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout
+    let scratchFin : Option (String × SqliteBackend × String × String × UInt64 × UInt64) :=
+      lp.scratchDir?.map (fun sd => (rt.cfg.workDir, rt.ledger.sqliteBackend, jid, sd, cur.nodeBootEpoch, curCancelSeq))
+    teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout scratchFin
+    if let some mName := lp.machineName? then
+      if lp.startTicks != 0 && lp.pid ≤ 0xFFFFFFFF then
+        cancelLeaderSql := containerLeaderUpsertSql {
+          workspaceId := lp.workspaceId
+          machineName := mName
+          leaderPid := lp.pid.toUInt32
+          startTicks := lp.startTicks
+          nodeBootEpoch := rt.ledger.nodeBootEpoch
+          procPhase := 2
+          jobId := jid
+          updatedAt := nowTs
+        }
     if !lp.forced && !lp.sideLane && !lp.coordLane then
       releasedRegular := true
+  else if cur.state == .queued then
+    let qScratch := (System.FilePath.mk rt.cfg.workDir / ".scratch" / s!"job-{jid}").toString
+    teardownJobResourcesAsync none none
+      (some (rt.cfg.workDir, rt.ledger.sqliteBackend, jid, qScratch, cur.nodeBootEpoch, curCancelSeq))
   if let some sl := rt.launching.get? jid then
     if !sl.forced && !sl.sideLane && !sl.coordLane then
       releasedRegular := true
@@ -1351,7 +1829,13 @@ def cancelJob
   let nextDebt := if releasedRegular && rt.shrinkDebt > 0 then rt.shrinkDebt - 1 else rt.shrinkDebt
   match ← rt.ledger.updateJob jid (fun r =>
     if r.state.isTerminal then .ok r
-    else .ok { r with state := .cancelled, finishedAt? := some nowTs, cancellation? := some cInfo }) with
+    else .ok {
+      r with
+      state := .cancelled
+      finishedAt? := some nowTs
+      cancellation? := some cInfo
+      procPhase := if r.pid != 0 then 2 else r.procPhase
+    }) cancelLeaderSql with
   | .error e => return .error e
   | .ok (l', updated) =>
     return .ok ({
@@ -1370,7 +1854,7 @@ def reserveForceJob (rt : NodeRuntime) (jid : String) :
     Except String (NodeRuntime × PendingAsyncLaunch × JobRecord) := do
   let some cur := rt.ledger.jobs.get? jid
     | throw "not_found"
-  if cur.state != .queued || rt.launching.contains jid then
+  if cur.state != .queued || cur.nodeBootEpoch != rt.ledger.nodeBootEpoch || rt.launching.contains jid then
     throw "not_queued"
   if activeForcedCount rt >= 1 then
     throw "force_slot_busy"
@@ -1453,7 +1937,7 @@ def interruptJob (rt : NodeRuntime) (jid mode : String) : IO (Except String (Nod
       ], none)
   let scopeUnit? := lp.systemdScope?.map (·.unit)
   if mode == "steer_between_tools" then
-    let inflight ← collectInflightChildToolPids lp.pid scopeUnit?
+    let inflight ← collectVerifiedInflightChildTools lp.pid scopeUnit? lp.startTicks lp.bootId
     if inflight.isEmpty then
       match ← cancelJob rt jid "core" "Steered between tool calls" with
       | .error e => return .error e
@@ -1476,7 +1960,7 @@ def interruptJob (rt : NodeRuntime) (jid mode : String) : IO (Except String (Nod
         ("deferred_until_tool_finishes", .bool true)
       ], some lp.pid)
   else
-    let sigCount ← sigintInflightChildTools lp.pid scopeUnit?
+    let sigCount ← sigintInflightChildTools lp.pid scopeUnit? lp.startTicks lp.bootId
     if sigCount > 0 then
       IO.sleep 60
     match ← cancelJob rt jid "core" "Interrupted in-flight tool via SIGINT for immediate controller steering" with
@@ -1518,14 +2002,15 @@ private def drainHandleCapped (h : IO.FS.Handle) (capBytes : Nat) : IO String :=
 
 /-- Spawn a child process in its own session (`setsid` when non-scoped) and drain `stdout`/`stderr`
     concurrently with bounded retention (`capBytes = 2796032`), tearing down `activeScope?` and
-    sending `SIGKILL` to the child process group (`-pid`) IMMEDIATELY after `child.wait` returns
-    (BEFORE awaiting `outTask`/`errTask` EOF!) so backgrounded descendants inheriting stdout/stderr FDs
-    can never wedge node capacity or rolling-upgrade fencing! -/
+    escalating verified termination of the child process group (`-pid`) IMMEDIATELY after `child.wait`
+    returns ONLY when `/proc/<pid>/stat` + `boot_id` matches `(childPid, childTicks)` and
+    `Orb.ManagedNode.verifyProcLivenessAdmit == 1` (never signalling when `/proc` is missing or `procMissing == 1`). -/
 def runBoundedOutput
     (sa : IO.Process.SpawnArgs)
     (activeScope? : Option SystemdScope := none)
     (killChildPgrp : Bool := false)
-    (capBytes : Nat := syncExecOutputCapBytes) : IO IO.Process.Output := do
+    (capBytes : Nat := syncExecOutputCapBytes)
+    (postWaitSampleOverride? : Option ProcLivenessSample := none) : IO IO.Process.Output := do
   let child ← IO.Process.spawn {
     sa with
     stdin := .null
@@ -1533,12 +2018,21 @@ def runBoundedOutput
     stderr := .piped
   }
   let childPid := child.pid.toUInt64
+  let initSample ← sampleProcLiveness childPid
+  let childTicks := initSample.actualTicks
+  let childBootId := initSample.bootId
   let outTask ← IO.asTask (drainHandleCapped child.stdout capBytes) Task.Priority.dedicated
   let errTask ← IO.asTask (drainHandleCapped child.stderr capBytes) Task.Priority.dedicated
   let exitCode ← child.wait
   stopSystemdScope activeScope?
-  if killChildPgrp && childPid > 1 then
-    OrbNode.Posix.killPgrp childPid 9
+  if killChildPgrp && childPid > 1 && childTicks != 0 && !childBootId.isEmpty then
+    let afterSample ← match postWaitSampleOverride? with
+      | some s => pure s
+      | none => sampleProcLiveness childPid
+    if afterSample.procMissing == 0 && afterSample.isZombie == 0 && afterSample.bootId == childBootId &&
+       Orb.ManagedNode.verifyProcLivenessAdmit 1 2 afterSample.procMissing afterSample.isZombie
+         childPid.toUInt32 afterSample.actualPid childTicks afterSample.actualTicks == 1 then
+      discard <| terminateVerifiedPgrp 1 childPid childTicks none childBootId
   let stdout := (← IO.wait outTask).toOption.getD ""
   let stderr := (← IO.wait errTask).toOption.getD ""
   return { exitCode, stdout, stderr }
@@ -1547,11 +2041,14 @@ def runBoundedOutput
     fenced via `jobs.db` and contained in a transient `systemd-run --scope` unit (or `setsid` process group
     fallback) so all spawned descendants are terminated as soon as the top-level command exits. -/
 def execClearedLeaseCommand
-    (cfg : NodeConfig) (sqliteBackend : SqliteBackend) (missionId command : String) :
+    (cfg : NodeConfig) (sqliteBackend : SqliteBackend) (missionId command : String)
+    (nodeBootEpoch : UInt64 := 1)
+    (postWaitSampleOverride? : Option ProcLivenessSample := none) :
     IO (Except String JVal) := do
   let execId ← newUuidV4
-  if let .error fenceErr ← acquireExecFenceReceipt cfg.workDir sqliteBackend execId missionId then
-    return .error fenceErr
+  let scratchDir ← match ← acquireExecFenceReceipt cfg.workDir sqliteBackend execId missionId nodeBootEpoch with
+    | .ok sd => pure sd
+    | .error fenceErr => return .error fenceErr
   let mut activeScope? : Option SystemdScope := none
   try
     let missionDir := (System.FilePath.mk cfg.workDir / missionId).toString
@@ -1593,7 +2090,7 @@ def execClearedLeaseCommand
           cmd := spawnCmd
           args := spawnArgs
           cwd := some missionDir
-        } none hasSetsid
+        } none hasSetsid syncExecOutputCapBytes postWaitSampleOverride?
     return .ok (.obj #[
       ("accepted", .bool true),
       ("exit_code", JVal.int (Int.ofNat out.exitCode.toNat)),
@@ -1602,16 +2099,19 @@ def execClearedLeaseCommand
     ])
   finally
     stopSystemdScope activeScope?
-    releaseExecFenceReceipt cfg.workDir sqliteBackend execId missionId
+    releaseExecFenceReceipt cfg.workDir sqliteBackend execId missionId scratchDir nodeBootEpoch
 
 /-- Single-threaded synchronous `POST /execute` helper (used by direct `handleRequest` tests). -/
-def runSyncExecute (rt : NodeRuntime) (missionId command : String) (sideLane : Bool := false) : IO (Nat × JVal) := do
+def runSyncExecute
+    (rt : NodeRuntime) (missionId command : String) (sideLane : Bool := false)
+    (postWaitSampleOverride? : Option ProcLivenessSample := none) : IO (Nat × JVal) := do
   if sideLane then
     if activeSideCount rt >= rt.cfg.sideCapacity then
       return (429, .str "node side-lane capacity exhausted")
   else if activeRegularCount rt + rt.shrinkDebt >= rt.cfg.capacityTotal then
     return (429, .str "node capacity exhausted")
-  match ← execClearedLeaseCommand rt.cfg rt.ledger.sqliteBackend missionId command with
+  match ← execClearedLeaseCommand rt.cfg rt.ledger.sqliteBackend missionId command rt.ledger.nodeBootEpoch
+      postWaitSampleOverride? with
   | .ok resp => return (200, resp)
   | .error fenceErr => return (503, .str fenceErr)
 

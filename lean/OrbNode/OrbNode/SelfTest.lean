@@ -37,6 +37,108 @@ private def assertTrue (label : String) (cond : Bool) : IO Unit := do
   if !cond then
     throw (IO.userError s!"FAIL: {label}")
 
+/-- Regression check for `SM-20` anchored child-tool `SIGINT` admission (`verifyChildToolSignalAdmit`,
+    `sigintAnchoredChildTool`, and `sigintInflightChildTools`):
+    (a) PID reuse between enumeration and signal (re-sampled `start_ticks` differs) is NOT signalled;
+    (b) matching live `(pid, start_ticks, boot_id)` IS signalled;
+    (c) missing `/proc`, zombie, `start_ticks == 0`, empty `boot_id`, or boot-id mismatch never signal. -/
+private def runChildToolSigintAnchorRegressionTests (check : String → Bool → IO Unit) : IO Unit := do
+  let rootSpawn ← IO.Process.spawn {
+    cmd := "setsid"
+    args := #["python3", "-c", "import subprocess, time\np = subprocess.Popen(['python3', '-c', 'import time\\ntime.sleep(30)'])\ntime.sleep(30)"]
+    stdin := .null
+    stdout := .null
+    stderr := .null
+  }
+  let rootPid := rootSpawn.pid.toUInt64
+  let mut rootSample ← sampleProcLiveness rootPid
+  let mut anchors : Array ChildToolAnchor := #[]
+  for _ in [0:40] do
+    IO.sleep 25
+    rootSample ← sampleProcLiveness rootPid
+    if rootSample.procMissing == 0 && rootSample.actualTicks != 0 && !rootSample.bootId.isEmpty then
+      anchors ← collectVerifiedInflightChildTools rootPid none rootSample.actualTicks rootSample.bootId
+      if !anchors.isEmpty then break
+  let some childAnchor := anchors[0]?
+    | do
+      discard <| terminateVerifiedPgrp 1 rootPid rootSample.actualTicks none rootSample.bootId
+      discard <| rootSpawn.wait
+      throw (IO.userError "failed to enumerate live child-tool anchor under test root")
+  let childLive0 ← sampleProcLiveness childAnchor.pid.toUInt64
+  let reusedSample : ProcLivenessSample := {
+    procMissing := 0
+    isZombie := 0
+    actualPid := childAnchor.pid
+    actualTicks := childAnchor.startTicks + 99
+    bootId := childAnchor.bootId
+  }
+  let missingSample : ProcLivenessSample := {
+    procMissing := 1, isZombie := 0, actualPid := 0, actualTicks := 0, bootId := ""
+  }
+  let zombieSample : ProcLivenessSample := {
+    procMissing := 0, isZombie := 1, actualPid := childAnchor.pid,
+    actualTicks := childAnchor.startTicks, bootId := childAnchor.bootId
+  }
+  let zeroTicksSample : ProcLivenessSample := {
+    procMissing := 0, isZombie := 0, actualPid := childAnchor.pid,
+    actualTicks := 0, bootId := childAnchor.bootId
+  }
+  let emptyBootSample : ProcLivenessSample := {
+    procMissing := 0, isZombie := 0, actualPid := childAnchor.pid,
+    actualTicks := childAnchor.startTicks, bootId := ""
+  }
+  let bootRotSample : ProcLivenessSample := {
+    procMissing := 0, isZombie := 0, actualPid := childAnchor.pid,
+    actualTicks := childAnchor.startTicks, bootId := "deadbeef-boot-id"
+  }
+  let zeroAnchor : ChildToolAnchor := { childAnchor with startTicks := 0 }
+  let emptyBootAnchor : ChildToolAnchor := { childAnchor with bootId := "" }
+  let pureChecks :=
+    !verifyChildToolSignalAdmit childAnchor reusedSample childAnchor.bootId &&
+    verifyChildToolSignalAdmit childAnchor childLive0 childAnchor.bootId &&
+    !verifyChildToolSignalAdmit childAnchor missingSample childAnchor.bootId &&
+    !verifyChildToolSignalAdmit childAnchor zombieSample childAnchor.bootId &&
+    !verifyChildToolSignalAdmit childAnchor zeroTicksSample childAnchor.bootId &&
+    !verifyChildToolSignalAdmit childAnchor emptyBootSample childAnchor.bootId &&
+    !verifyChildToolSignalAdmit childAnchor bootRotSample childAnchor.bootId &&
+    !verifyChildToolSignalAdmit zeroAnchor childLive0 childAnchor.bootId &&
+    !verifyChildToolSignalAdmit emptyBootAnchor childLive0 childAnchor.bootId
+  let sigReusedCount ← sigintInflightChildTools rootPid none rootSample.actualTicks rootSample.bootId
+    (some fun p => pure {
+      procMissing := 0, isZombie := 0, actualPid := p,
+      actualTicks := childAnchor.startTicks + 77, bootId := childAnchor.bootId
+    })
+  let sigMissing ← sigintAnchoredChildTool childAnchor childAnchor.bootId (some missingSample)
+  let sigZombie ← sigintAnchoredChildTool childAnchor childAnchor.bootId (some zombieSample)
+  let sigZeroTicksSample ← sigintAnchoredChildTool childAnchor childAnchor.bootId (some zeroTicksSample)
+  let sigEmptyBootSample ← sigintAnchoredChildTool childAnchor childAnchor.bootId (some emptyBootSample)
+  let sigZeroAnchor ← sigintAnchoredChildTool zeroAnchor childAnchor.bootId (some childLive0)
+  let sigEmptyBootAnchor ← sigintAnchoredChildTool emptyBootAnchor childAnchor.bootId (some childLive0)
+  let childStillAlive ← sampleProcLiveness childAnchor.pid.toUInt64
+  let sigMatchCount ← sigintInflightChildTools rootPid none rootSample.actualTicks rootSample.bootId
+  let mut childExited := false
+  for _ in [0:40] do
+    IO.sleep 25
+    let s ← sampleProcLiveness childAnchor.pid.toUInt64
+    if s.procMissing == 1 || s.isZombie == 1 || s.actualTicks != childAnchor.startTicks then
+      childExited := true
+      break
+  discard <| terminateVerifiedPgrp 1 rootPid rootSample.actualTicks none rootSample.bootId
+  discard <| rootSpawn.wait
+  check "SM-20 anchored child-tool SIGINT rejects PID-reused/missing/zombie/zero-ticks/empty-boot re-samples and signals matching live child"
+    (pureChecks &&
+     childLive0.procMissing == 0 &&
+     childLive0.actualTicks == childAnchor.startTicks &&
+     childAnchor.bootId == rootSample.bootId &&
+     sigReusedCount == 0 &&
+     !sigMissing && !sigZombie && !sigZeroTicksSample && !sigEmptyBootSample &&
+     !sigZeroAnchor && !sigEmptyBootAnchor &&
+     childStillAlive.procMissing == 0 &&
+     childStillAlive.isZombie == 0 &&
+     childStillAlive.actualTicks == childAnchor.startTicks &&
+     sigMatchCount >= 1 &&
+     childExited)
+
 /-- Section 12: Round-2 regression checks (split UTF-8 log slicing, >150 KiB SQLite stdin,
     pure-Lean tar+zstd `-C` / newline filename safety, timeout shrinkDebt repayment, and
     saturated-queue cold archive-backed `lean_build` execution). -/
@@ -1271,6 +1373,354 @@ def runTests : IO UInt32 := do
      computeFastPollDelayMs true 500 0 == 500 &&
      computeFastPollDelayMs false 500 2 == 2000 &&
      computeFastPollDelayMs false 500 5 == 5000)
+
+  let sm20Root := (System.FilePath.mk tmpRoot / "sm20-remote-node").toString
+  IO.FS.createDirAll sm20Root
+  let .ok l20a ← OrbNode.Store.openLedger sm20Root
+    | throw (IO.userError "openLedger sm20 a failed")
+  let epochA := l20a.nodeBootEpoch
+  let sm20JobId := "99999999-9999-4999-8999-999999999999"
+  let sm20MissionId := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  let (sm20ScratchDir, sm20Receipt) ← match ← createScratchDirAndReceipt sm20Root sm20JobId sm20MissionId (some sm20JobId) with
+    | .ok pair => pure pair
+    | .error e => throw (IO.userError s!"createScratchDirAndReceipt failed: {e}")
+  let sm20Rec : JobRecord := {
+    jobId := sm20JobId
+    missionId := sm20MissionId
+    payloadJson := "{\"kind\":\"raw_command\"}"
+    state := .queued
+    createdAt := "2026-11-07T00:00:00Z"
+    operationId := sm20JobId
+    nodeBootEpoch := epochA
+    phaseCode := 1
+  }
+  let .ok l20b ← l20a.insertQueued sm20Rec (some sm20Receipt)
+    | throw (IO.userError "SM-20 insertQueued failed")
+  let dupIns ← l20b.insertQueued sm20Rec (some sm20Receipt)
+  let .ok l20c ← openLedger sm20Root
+    | throw (IO.userError "reopen sm20 ledger failed")
+  let epochB := l20c.nodeBootEpoch
+  let reopened20? := l20c.jobs.get? sm20JobId
+  let staleClaim ← l20c.insertQueued { sm20Rec with jobId := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", operationId := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", nodeBootEpoch := epochA }
+  let crossBootReconcile ← l20c.stepJobClaim sm20JobId 7 sm20JobId epochB "2026-11-07T00:00:30Z"
+  let sm20LiveId := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+  let .ok l20live0 ← l20c.insertQueued {
+    sm20Rec with
+    jobId := sm20LiveId
+    operationId := "op-sm20-1"
+    nodeBootEpoch := epochB
+  } | throw (IO.userError "SM-20 live insertQueued failed")
+  let .ok (l20unc, recUnc) ← l20live0.stepJobClaim sm20LiveId 1 "op-sm20-1" epochB "2026-11-07T00:00:45Z"
+    | throw (IO.userError "markUncertain failed")
+  let blindRetry ← l20unc.stepJobClaim sm20LiveId 5 "op-sm20-1" epochB "2026-11-07T00:00:50Z"
+  let sameOpRetry ← l20unc.stepJobClaim sm20LiveId 10 "op-sm20-1" epochB "2026-11-07T00:00:55Z"
+  let .ok (l20d, recRetry) ← l20unc.stepJobClaim sm20LiveId 10 "op-sm20-2" epochB "2026-11-07T00:01:00Z"
+    | throw (IO.userError "confirmNotDeliveredRetry failed")
+  let .ok (l20unc2, _) ← l20d.stepJobClaim sm20LiveId 1 "op-sm20-2" epochB "2026-11-07T00:01:30Z"
+    | throw (IO.userError "second markUncertain failed")
+  let .ok (_l20e, recSucc) ← l20unc2.stepJobClaim sm20LiveId 7 "op-sm20-2" epochB "2026-11-07T00:02:00Z"
+    | throw (IO.userError "reconcileSucceeded failed")
+  let lateCancel ← _l20e.stepJobClaim sm20LiveId 4 "op-sm20-2" epochB "2026-11-07T00:02:30Z"
+  let scratchBefore ← l20d.getScratchReceipt? sm20Receipt.id
+  let some parentId ← readPathIdentity? (System.FilePath.mk sm20Root / ".scratch").toString
+    | throw (IO.userError "read parent identity failed")
+  let some dirId ← readPathIdentity? sm20ScratchDir
+    | throw (IO.userError "read dir identity failed")
+  let mismatchRetire ← l20d.retireScratchReceipt sm20Receipt.id "0:0" dirId "2026-11-07T00:04:00Z"
+  let retiredOk ← retireScratchOutsideLedger sm20Root l20d.sqliteBackend sm20Receipt.id sm20ScratchDir
+    sm20Receipt.nodeBootEpoch sm20Receipt.claimSeq
+  let recreateDir := sm20ScratchDir
+  IO.FS.createDirAll recreateDir
+  let recreateMarker := (System.FilePath.mk recreateDir / "recreated.txt").toString
+  IO.FS.writeFile recreateMarker "kept"
+  let secondRetire ← retireScratchOutsideLedger sm20Root l20d.sqliteBackend sm20Receipt.id recreateDir
+    sm20Receipt.nodeBootEpoch sm20Receipt.claimSeq
+  let recreateKept ← (System.FilePath.mk recreateMarker).pathExists
+  let foreignRetire ← retireScratchOutsideLedger sm20Root l20d.sqliteBackend sm20Receipt.id recreateDir
+    (sm20Receipt.nodeBootEpoch + 1) sm20Receipt.claimSeq
+  let foreignKept ← (System.FilePath.mk recreateMarker).pathExists
+  let cliScratchId := "99999999-9999-4999-8999-999999999990"
+  let (cliScratchDir, cliReceipt) ← match ← createScratchDirAndReceipt sm20Root cliScratchId sm20MissionId
+      (some cliScratchId) epochB 77 with
+    | .ok pair => pure pair
+    | .error e => throw (IO.userError s!"createScratchDirAndReceipt cli failed: {e}")
+  let .ok () ← l20d.persistScratchReceipt cliReceipt
+    | throw (IO.userError "persistScratchReceipt cli failed")
+  let cliRetireWrongSeq ← retireScratchOutsideLedger sm20Root .cli cliScratchId cliScratchDir epochB 78 true
+  let cliStillExists ← (System.FilePath.mk cliScratchDir).pathExists
+  let cliRetireOk ← retireScratchOutsideLedger sm20Root .cli cliScratchId cliScratchDir epochB 77 true
+  let cliRemoved := !(← (System.FilePath.mk cliScratchDir).pathExists)
+  IO.FS.createDirAll cliScratchDir
+  let cliRecreateMarker := (System.FilePath.mk cliScratchDir / "cli-kept.txt").toString
+  IO.FS.writeFile cliRecreateMarker "kept"
+  let cliSecondRetire ← retireScratchOutsideLedger sm20Root .cli cliScratchId cliScratchDir epochB 77 true
+  let cliRecreateKept ← (System.FilePath.mk cliRecreateMarker).pathExists
+  let _ ← IO.Process.output { cmd := "rm", args := #["-rf", recreateDir, cliScratchDir] }
+  let scratchAfter ← l20d.getScratchReceipt? sm20Receipt.id
+  let .ok () ← l20d.upsertContainerLeader {
+    workspaceId := "ws-sm20"
+    machineName := "small-a"
+    leaderPid := 4242
+    startTicks := 999001
+    nodeBootEpoch := epochB
+    procPhase := 1
+    jobId := sm20JobId
+    updatedAt := "2026-11-07T00:05:00Z"
+  } | throw (IO.userError "upsertContainerLeader failed")
+  let selfPid ← (IO.Process.output { cmd := "bash", args := #["-lc", "echo $PPID"] }).toBaseIO
+  let selfPidN := match selfPid with
+    | .ok o => (o.stdout.trimAscii.toString.toNat?).getD 0
+    | .error _ => 0
+  let selfSample ← sampleProcLiveness selfPidN.toUInt64
+  let .ok () ← l20d.upsertContainerLeader {
+    workspaceId := "ws-sm20"
+    machineName := "live-self"
+    leaderPid := selfPidN.toUInt32
+    startTicks := selfSample.actualTicks
+    nodeBootEpoch := epochB
+    procPhase := 1
+    jobId := sm20LiveId
+    updatedAt := "2026-11-07T00:05:01Z"
+  } | throw (IO.userError "upsert live ContainerLeader failed")
+  let .ok leaders ← l20d.listContainerLeaders
+    | throw (IO.userError "listContainerLeaders failed")
+  let leader0? := leaders[0]?
+  let liveResolved ← resolveLiveContainerLeaders l20d "ws-sm20"
+  let .ok leadersAfterResolve ← l20d.listContainerLeaders
+    | throw (IO.userError "listContainerLeaders after resolve failed")
+  let staleAfter? := leadersAfterResolve.find? (fun r => r.machineName == "small-a")
+  let pgrpSpawn ← IO.Process.spawn {
+    cmd := "setsid"
+    args := #["sleep", "30"]
+    stdin := .null
+    stdout := .null
+    stderr := .null
+  }
+  let pgrpPid := pgrpSpawn.pid.toUInt64
+  IO.sleep 30
+  let pgrpSample ← sampleProcLiveness pgrpPid
+  let reusedKill ← terminateVerifiedPgrp 1 pgrpPid (pgrpSample.actualTicks + 99)
+  let pgrpStillAlive ← sampleProcLiveness pgrpPid
+  let realKill ← terminateVerifiedPgrp 1 pgrpPid pgrpSample.actualTicks
+  discard <| pgrpSpawn.wait
+  let parsedSample := parseProcStatLiveness s!"{selfPidN} (self test) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 {selfSample.actualTicks} 0 0"
+  let aliveStep ← stepVerifiedPgrpOp 1 0 selfPidN.toUInt64 selfSample.actualTicks (some selfSample)
+  let deadStep ← stepVerifiedPgrpOp 1 2 selfPidN.toUInt64 (selfSample.actualTicks + 7) (some selfSample)
+  let zombieSample : ProcLivenessSample := { procMissing := 0, isZombie := 1, actualPid := 77, actualTicks := 55 }
+  let zombieObsAlive ← stepVerifiedPgrpOp 1 1 77 55 (some zombieSample)
+  let zombieKill ← stepVerifiedPgrpOp 3 3 77 55 (some zombieSample)
+  let zombieObsDead ← stepVerifiedPgrpOp 3 1 77 55 (some zombieSample)
+  let zombieObsKillSent ← stepVerifiedPgrpOp 4 1 77 55 (some zombieSample)
+  let missingSample : ProcLivenessSample := { procMissing := 1, isZombie := 0, actualPid := 0, actualTicks := 0 }
+  let missingTerm ← terminateVerifiedPgrp 1 88 12 (some missingSample)
+  let unsampledSample : ProcLivenessSample := {
+    procMissing := 1, isZombie := 0, actualPid := 0, actualTicks := 0, bootId := ""
+  }
+  let unsampledSignal ← stepVerifiedPgrpOp 1 2 selfPidN.toUInt64 selfSample.actualTicks (some unsampledSample) selfSample.bootId
+  let bootMismatchSample : ProcLivenessSample := { selfSample with bootId := "deadbeef-boot-id" }
+  let bootMismatchSignal ← stepVerifiedPgrpOp 1 2 selfPidN.toUInt64 selfSample.actualTicks
+    (some bootMismatchSample) selfSample.bootId
+  let selfStillAlive ← sampleProcLiveness selfPidN.toUInt64
+  let (stExec, execVal) ← runSyncExecute rt missionId "sleep 0.2" true (some unsampledSample)
+  let execAccepted := (execVal.fieldBool? "accepted").getD false
+  let execCode := (execVal.fieldInt? "exit_code").getD (-1)
+  let bOutMissing ← runBoundedOutput {
+    cmd := "setsid"
+    args := #["true"]
+  } none true syncExecOutputCapBytes (some unsampledSample)
+  let sigintZeroTicks ← sigintInflightChildTools selfPidN.toUInt64 none 0 selfSample.bootId
+  let sigintBadBoot ← sigintInflightChildTools selfPidN.toUInt64 none selfSample.actualTicks "deadbeef-boot-id"
+  let failSpawnJob := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+  let failRec : JobRecord := {
+    jobId := failSpawnJob
+    missionId := missionId
+    payloadJson := "{\"kind\":\"raw_command\",\"command\":\"sleep 30\",\"long_running\":true}"
+    state := .queued
+    createdAt := "2026-11-07T00:07:00Z"
+    operationId := failSpawnJob
+    nodeBootEpoch := rt.ledger.nodeBootEpoch
+    phaseCode := 1
+  }
+  let rtFail0 := {
+    rt with
+    ledger := { rt.ledger with jobs := rt.ledger.jobs.insert failSpawnJob failRec, order := rt.ledger.order.push failSpawnJob }
+  }
+  let failPrep : PreparedJobSpec := {
+    jid := failSpawnJob
+    prog := "/bin/sleep"
+    args := #["30"]
+    envKv := #[]
+    cwd := tmpRoot
+    logPath := (System.FilePath.mk tmpRoot / "fail-spawn.log").toString
+    artifacts := #[]
+    timeoutSecs? := none
+    forced := false
+    sideLane := false
+    coordLane := false
+    isolatedCheckout := none
+    systemdScope? := none
+    scratchDir? := none
+    machineName? := none
+    workspaceId := ""
+  }
+  let rtFail1 ← commitPreparedJob rtFail0 failSpawnJob (.ok failPrep) (some unsampledSample)
+  let failUnsampled? := rtFail1.ledger.jobs.get? failSpawnJob
+  if let some fu := failUnsampled? then
+    if fu.pid > 1 then
+      let cleanupSample ← sampleProcLiveness fu.pid
+      if cleanupSample.actualTicks != 0 then
+        discard <| terminateVerifiedPgrp 1 fu.pid cleanupSample.actualTicks none cleanupSample.bootId
+      discard <| OrbNode.Posix.pollPid fu.pid
+  let failLedgerJob := "ffffffff-ffff-4fff-8fff-fffffffffff0"
+  let rtFail2 := {
+    rtFail1 with
+    ledger := {
+      rtFail1.ledger with
+      jobs := rtFail1.ledger.jobs.insert failLedgerJob { failRec with jobId := failLedgerJob, operationId := failLedgerJob }
+      order := rtFail1.ledger.order.push failLedgerJob
+    }
+  }
+  let failPrep2 : PreparedJobSpec := { failPrep with jid := failLedgerJob }
+  let rtFail3 ← commitPreparedJob rtFail2 failLedgerJob (.ok failPrep2) none (some "simulated_sqlite_lock")
+  IO.sleep 60
+  let failLedger? := rtFail3.ledger.jobs.get? failLedgerJob
+  if let some fl := failLedger? then
+    if fl.pid > 1 then
+      discard <| OrbNode.Posix.pollPid fl.pid
+  let failLedgerDeadSample ← match failLedger? with
+    | some fl => if fl.pid > 1 then sampleProcLiveness fl.pid else pure unsampledSample
+    | none => pure unsampledSample
+  let sm20Body := renderCompact (.obj #[
+    ("job_id", .str "cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+    ("mission_id", .str missionId),
+    ("lease_token", .str submitLease),
+    ("operation_id", .str "op-http-sm20"),
+    ("node_boot_epoch", JVal.uint64 rt.ledger.nodeBootEpoch),
+    ("workspace_id", .str "ws-http-sm20"),
+    ("machine_name", .str "nspawn-http-a"),
+    ("leader_pid", JVal.uint64 selfPidN.toUInt64),
+    ("start_ticks", JVal.uint64 selfSample.actualTicks),
+    ("payload", .obj #[
+      ("kind", .str "raw_command"),
+      ("command", .str "sleep 10"),
+      ("long_running", .bool true)
+    ])
+  ])
+  let (rtSm20, rSm20) ← handleRequest rt {
+    method := "POST", rawPath := "/jobs", path := "/jobs",
+    query := #[], headers := authHdrs, body := sm20Body.toUTF8
+  }
+  rt := rtSm20
+  let httpSm20? := rt.ledger.jobs.get? "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+  let httpScratch? ← rt.ledger.getScratchReceipt? "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+  let httpLeaders ← resolveLiveContainerLeaders rt.ledger "ws-http-sm20"
+  let staleRunId := "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+  let staleRec : JobRecord := {
+    jobId := staleRunId
+    missionId := missionId
+    payloadJson := "{\"kind\":\"raw_command\",\"command\":\"echo should_not_run\"}"
+    state := .queued
+    createdAt := "2026-11-07T00:06:00Z"
+    operationId := staleRunId
+    nodeBootEpoch := rt.ledger.nodeBootEpoch + 99
+    phaseCode := 1
+  }
+  let rtInjected := {
+    rt with
+    ledger := { rt.ledger with jobs := rt.ledger.jobs.insert staleRunId staleRec, order := rt.ledger.order.push staleRunId }
+    queueOrder := rt.queueOrder.push staleRunId
+  }
+  let rtAfterTick ← tickRuntime rtInjected
+  let staleAfterTick? := rtAfterTick.ledger.jobs.get? staleRunId
+  let reconcileBody := renderCompact (.obj #[
+    ("op_code", JVal.nat 4),
+    ("operation_id", .str "op-http-sm20"),
+    ("node_boot_epoch", JVal.uint64 rt.ledger.nodeBootEpoch)
+  ])
+  let (rtSm20b, rReconcile) ← handleRequest rt {
+    method := "POST", rawPath := "/jobs/cccccccc-cccc-4ccc-8ccc-cccccccccccc/reconcile",
+    path := "/jobs/cccccccc-cccc-4ccc-8ccc-cccccccccccc/reconcile",
+    query := #[], headers := authHdrs, body := reconcileBody.toUTF8
+  }
+  rt := rtSm20b
+  if let some lpHttp := rt.liveProcs.get? "cccccccc-cccc-4ccc-8ccc-cccccccccccc" then
+    if lpHttp.startTicks != 0 then
+      discard <| terminateVerifiedPgrp lpHttp.procPhase lpHttp.pid lpHttp.startTicks none lpHttp.bootId
+    discard <| OrbNode.Posix.pollPid lpHttp.pid
+    rt := { rt with liveProcs := rt.liveProcs.erase "cccccccc-cccc-4ccc-8ccc-cccccccccccc" }
+  let reconciled? := rt.ledger.jobs.get? "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+  check "SM-20 scratch claim-retire transaction (.python3 & .cli) preserves recreated path and fences epoch/seq"
+    (scratchBefore.isSome &&
+     !parentId.isEmpty &&
+     !mismatchRetire.isOk &&
+     retiredOk &&
+     (scratchAfter.bind (·.retiredAt?)).isSome &&
+     !(← (System.FilePath.mk sm20ScratchDir).pathExists) &&
+     secondRetire && recreateKept && !foreignRetire && foreignKept &&
+     !cliRetireWrongSeq && cliStillExists && cliRetireOk && cliRemoved && cliSecondRetire && cliRecreateKept)
+  check "SM-20 unsampled/boot_id/post-spawn/runBoundedOutput proc liveness fail-closed gates"
+    (!unsampledSignal.2 && !bootMismatchSignal.2 &&
+     selfStillAlive.procMissing == 0 && selfStillAlive.actualTicks == selfSample.actualTicks &&
+     stExec == 200 && execAccepted && execCode == 0 &&
+     bOutMissing.exitCode == 0 && sigintZeroTicks == 0 && sigintBadBoot == 0 &&
+     failUnsampled?.map (·.state) == some .failed &&
+     (failUnsampled?.bind (·.error?)).any (fun e => e.startsWith "proc_liveness_unsampled:") &&
+     failLedger?.map (·.state) == some .failed &&
+     (failLedger?.bind (·.error?)).any (fun e => e.startsWith "post_spawn_ledger_update_failed:") &&
+     (failLedgerDeadSample.procMissing == 1 || failLedgerDeadSample.isZombie == 1))
+  check "SM-20 durable job claims, boot-epoch loss, scratch identity, and proc liveness gates"
+    (epochB == epochA + 1 &&
+     !dupIns.isOk &&
+     reopened20?.map (·.state) == some .lost &&
+     reopened20?.map (·.phaseCode) == some 2 &&
+     !staleClaim.isOk &&
+     !crossBootReconcile.isOk &&
+     recUnc.state == .lost &&
+     recUnc.phaseCode == 2 &&
+     !blindRetry.isOk &&
+     !sameOpRetry.isOk &&
+     recRetry.state == .queued &&
+     recRetry.phaseCode == 1 &&
+     recRetry.operationId == "op-sm20-2" &&
+     recSucc.state == .succeeded &&
+     recSucc.phaseCode == 3 &&
+     !lateCancel.isOk &&
+     leader0?.map (·.leaderPid) == some 4242 &&
+     leader0?.map (·.startTicks) == some 999001 &&
+     liveResolved.size == 1 &&
+     liveResolved[0]?.map (·.machineName) == some "live-self" &&
+     staleAfter?.map (·.procPhase) == some 2 &&
+     pgrpSample.procMissing == 0 &&
+     reusedKill == 2 &&
+     pgrpStillAlive.procMissing == 0 &&
+     pgrpStillAlive.actualTicks == pgrpSample.actualTicks &&
+     (realKill == 2 || realKill == 4) &&
+     selfSample.procMissing == 0 &&
+     selfSample.actualPid == selfPidN.toUInt32 &&
+     parsedSample.actualTicks == selfSample.actualTicks &&
+     aliveStep.2 &&
+     !deadStep.2 &&
+     zombieObsAlive.1 == 2 &&
+     zombieObsAlive.2 &&
+     !zombieKill.2 &&
+     zombieObsDead.1 == 2 &&
+     zombieObsDead.2 &&
+     zombieObsKillSent.1 == 2 &&
+     zombieObsKillSent.2 &&
+     missingTerm == 2 &&
+     rSm20.status == 202 &&
+     httpSm20?.map (·.operationId) == some "op-http-sm20" &&
+     httpSm20?.map (·.nodeBootEpoch) == some rt.ledger.nodeBootEpoch &&
+     httpScratch?.isSome == true &&
+     httpLeaders.size == 1 &&
+     httpLeaders[0]?.map (·.machineName) == some "nspawn-http-a" &&
+     staleAfterTick?.map (·.state) == some .lost &&
+     staleAfterTick?.map (·.phaseCode) == some 2 &&
+     rReconcile.status == 200 &&
+     reconciled?.map (·.state) == some .cancelled &&
+     reconciled?.map (·.phaseCode) == some 5)
+
+  runChildToolSigintAnchorRegressionTests check
 
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get
