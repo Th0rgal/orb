@@ -23,6 +23,9 @@ import Lean
 import Orb.Spec
 import Orb.MutantSuite
 import Orb.StatefulMutantSuite
+import Orb.Lifecycle
+import Orb.LifecycleSpec
+import Orb.LifecycleMutants
 
 open Lean Elab Command
 
@@ -99,12 +102,15 @@ private def runAdversarialSelfTest : CommandElabM Unit := do
   let spec ← moduleConsts env `Orb.Spec
   let mutants ← moduleConsts env `Orb.MutantSuite
   let statefulMutants ← moduleConsts env `Orb.StatefulMutantSuite
-  let allMutants := mutants ++ statefulMutants
+  let lifecycle ← moduleConsts env `Orb.Lifecycle
+  let lifecycleSpec ← moduleConsts env `Orb.LifecycleSpec
+  let lifecycleMutants ← moduleConsts env `Orb.LifecycleMutants
+  let allMutants := mutants ++ statefulMutants ++ lifecycleMutants
   let mut errors : Array String := #[]
   for req in requiredMetaSpecs do
     unless env.contains req do
       errors := errors.push s!"missing required Meta-Spec in Orb.Spec: {req}"
-  for n in kernel ++ spec ++ allMutants do
+  for n in kernel ++ spec ++ lifecycle ++ lifecycleSpec ++ allMutants do
     let some ci := env.find? n | continue
     if ci matches .axiomInfo _ then
       errors := errors.push s!"{n}: declares an axiom"
@@ -113,7 +119,7 @@ private def runAdversarialSelfTest : CommandElabM Unit := do
       unless allowedAxioms.contains a do
         errors := errors.push s!"{n}: depends on {a}"
   let mut theorems : Nat := 0
-  for n in spec ++ allMutants do
+  for n in spec ++ lifecycleSpec ++ allMutants do
     let some (.thmInfo t) := env.find? n | continue
     theorems := theorems + 1
     if let some reason := checkTheoremVacuity t.type then
@@ -138,8 +144,9 @@ private def runAdversarialSelfTest : CommandElabM Unit := do
     let some ci := env.find? n | continue
     if ci.type.isAppOf ``Orb.Spec.MetaStepSpec then
       metaStepSpecs := metaStepSpecs + 1
-  if theorems == 0 || exports == 0 || metaStepSpecs < 15 || mutantKills < 21 || statefulMutants.isEmpty then
-    errors := errors.push s!"audit found {theorems} theorems / {exports} exports / {metaStepSpecs} MetaStepSpecs / {mutantKills} mutant kills; expected theorems > 0, exports > 0, metaStepSpecs >= 15, mutantKills >= 21"
+  if theorems == 0 || exports == 0 || metaStepSpecs < 15 || mutantKills < 36 ||
+      statefulMutants.isEmpty || lifecycleMutants.isEmpty then
+    errors := errors.push s!"audit found {theorems} theorems / {exports} exports / {metaStepSpecs} MetaStepSpecs / {mutantKills} mutant kills; expected theorems > 0, exports > 0, metaStepSpecs >= 15, mutantKills >= 36"
   unless errors.isEmpty do
     throwError "Orb spec audit failed:\n{String.intercalate "\n" errors.toList}"
-  logInfo m!"Orb spec audit OK: {kernel.size + spec.size + allMutants.size} declarations, {theorems} theorems ({mutantKills} mutant kills), {exports} exports, {metaStepSpecs} MetaStepSpec instances, 10 Meta-Specs + adversarial self-test verified, axioms ⊆ {allowedAxioms}"
+  logInfo m!"Orb spec audit OK: {kernel.size + spec.size + lifecycle.size + lifecycleSpec.size + allMutants.size} declarations, {theorems} theorems ({mutantKills} mutant kills), {exports} exports, {metaStepSpecs} MetaStepSpec instances, 10 Meta-Specs + adversarial self-test verified, axioms ⊆ {allowedAxioms}"

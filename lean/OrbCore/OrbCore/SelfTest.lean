@@ -261,6 +261,28 @@ private def runPostCrashAndReconcileExtras (store : CoreStore) (tmpRoot : String
   closeCoreStore storeBoot2
   return 0
 
+private def runLifecycleCompositionTests : IO UInt32 := do
+  let mOk := Orb.Lifecycle.verifyMissionLifecycleAdmit 0 0 0 0 0 1 5 5 10 20 == 1
+  let mSupRej := Orb.Lifecycle.verifyMissionLifecycleAdmit 0 0 1 0 0 1 5 5 10 20 == 0
+  let rReenterRej := Orb.Lifecycle.verifyRunLifecycleAdmit 4 0 0 0 0 0 0 8 8 7 7 == 0
+  let rNextGenOk := Orb.Lifecycle.verifyRunLifecycleAdmit 4 0 0 0 0 0 0 8 9 7 7 == 1
+  let qAckRej := Orb.Lifecycle.verifyQueueItemAdmit 2 0 1 0 0 0 0 0 9 3 3 1 == 0
+  let cNoRecRej := Orb.Lifecycle.verifyCancelProtocolAdmit 1 2 0 0 6 6 == 0
+  let cWithRecOk := Orb.Lifecycle.verifyCancelProtocolAdmit 1 2 1 0 6 6 == 1
+  let wEarlyRej := Orb.Lifecycle.verifyWakeupContinuationAdmit 1 2 0 0 4 4 20 10 == 0
+  let wDueOk := Orb.Lifecycle.verifyWakeupContinuationAdmit 1 2 0 0 4 4 10 20 == 1
+  let rWrapRej := Orb.Lifecycle.verifyRunLifecycleAdmit 4 0 0 0 0 0 0
+    0xFFFFFFFFFFFFFFFF 0 7 7 == 0
+  let rSupSticky := (Orb.Lifecycle.stepRunSlice
+    { phaseCode := 2, ownerSuperseded := 1, activeToolCalls := 0, runGeneration := 4, durableOwnerEpoch := 7 }
+    { opCode := 4, hasStructuredReceipt := 1, hasAbortReceipt := 0, drainTimedOut := 0,
+      markOwnerSuperseded := 0, nextToolCalls := 0, proposedGeneration := 4, callerOwnerEpoch := 7 }).1.ownerSuperseded == 1
+  if !(mOk && mSupRej && rReenterRej && rNextGenOk && rWrapRej && rSupSticky && qAckRej &&
+       cNoRecRej && cWithRecOk && wEarlyRej && wDueOk) then
+    IO.eprintln "[orb-core-test] FAIL: Orb.Lifecycle R3-A gate invariants failed"
+    return 1
+  return 0
+
 private def runCustomProviderRateLimitTests
     (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
   -- Custom provider rate-limit CRUD, out-of-range rejection, `/resolve` projection & proactive proxy pacing spillover
@@ -1117,7 +1139,8 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runPostCrashAndReconcileExtras store tmpRoot) != 0 then return 1
   IO.FS.removeDirAll tmpRoot
 
-  -- 7. Host evidence suite (`84/84` host tests)
+  -- 7. Host evidence suite (`84/84` host tests) + R3-A lifecycle composition gates
+  if (← runLifecycleCompositionTests) != 0 then return 1
   let hostOk ← runAllHostTests emitLogPath?
   if !hostOk then
     IO.eprintln "[orb-core-test] FAIL: OrbCore.HostTests failed"
