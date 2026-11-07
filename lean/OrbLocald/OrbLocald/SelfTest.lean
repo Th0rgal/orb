@@ -22,6 +22,204 @@ private def assertTrue (label : String) (cond : Bool) : IO Bool := do
     IO.eprintln s!"FAIL [{label}]"
     return false
 
+private def runR7aInteractiveToolSlotChecks (assertTrue : String → Bool → IO Bool) : IO (Nat × Nat) := do
+  let mut passed := 0
+  let mut total := 0
+  let stRef ← IO.mkRef ({ launchToken := "0123456789abcdef0123456789abcdef" } : LocaldState)
+  let payload (k : String) : JVal := .obj #[("method", .str "questions"), ("params", .obj #[("k", .str k)])]
+  let register (runId reqId : String) (ep : UInt64) (pl : JVal) (cap? : Option Nat) : IO (Except String JVal) := do
+    let mut fields : Array (String × JVal) := #[
+      ("action", .str "register"),
+      ("id", .str runId),
+      ("request_id", .str reqId),
+      ("session_epoch", JVal.uint64 ep),
+      ("payload", pl)
+    ]
+    if let some cap := cap? then
+      fields := fields.push ("max_cap", JVal.nat cap)
+    dispatchRpcCommand stRef "local_interaction" (.obj fields)
+  let errOf : Except String JVal → String := fun
+    | .error e => e
+    | .ok _ => ""
+  let okField (res : Except String JVal) (k : String) (pred : JVal → Bool) : Bool :=
+    match res with
+    | .ok jv =>
+      match jv.field? k with
+      | some v => pred v
+      | none => false
+    | .error _ => false
+  -- 1. Capacity + no silent eviction: fill to max_cap, reject overflow, prior slots retained.
+  let r1 ← register "run-a" "req-1" 1 (payload "a") (some 2)
+  let r2 ← register "run-a" "req-2" 1 (payload "b") none
+  let r3 ← register "run-a" "req-3" 1 (payload "c") none
+  total := total + 1
+  let capOk :=
+    okField r1 "state" (· == .str "waiting_ack") &&
+    okField r2 "active_slots" (· == JVal.nat 2) &&
+    errOf r3 == "interactive_slot_backpressure"
+  if (← assertTrue "tool_slot_capacity_backpressure_no_eviction" capOk) then passed := passed + 1
+  let pollFull ← dispatchRpcCommand stRef "local_interaction"
+    (.obj #[("action", .str "poll"), ("id", .str "run-a")])
+  total := total + 1
+  let retainedOk := match pollFull with
+    | .ok jv =>
+      jv.fieldNat? "active_slots" == some 2 &&
+      (match jv.fieldArr? "slots" with
+       | some xs => xs.any (fun s => s.fieldStr? "request_id" == some "req-1") &&
+                    xs.any (fun s => s.fieldStr? "request_id" == some "req-2") &&
+                    xs.all (fun s => s.fieldStr? "request_id" != some "req-3")
+       | none => false)
+    | .error _ => false
+  if (← assertTrue "tool_slot_overflow_keeps_prior_waiting_slots" retainedOk) then passed := passed + 1
+  -- 2. `"native-..."` request ids share the exact same gate (no prefix bypass) and hit backpressure identically.
+  let nativeRes ← register "run-a" "native-bypass-1" 1 (payload "native") none
+  total := total + 1
+  if (← assertTrue "tool_slot_native_prefix_no_bypass" (errOf nativeRes == "interactive_slot_backpressure")) then
+    passed := passed + 1
+  -- 3. Idempotent same-payload replay vs conflicting duplicate vs stale epoch.
+  let replay ← register "run-a" "req-1" 1 (payload "a") none
+  let conflict ← register "run-a" "req-1" 1 (payload "MUTATED") none
+  let stale ← register "run-a" "req-9" 0 (payload "stale") none
+  total := total + 1
+  let dedupOk :=
+    okField replay "idempotent_replay" (· == .bool true) &&
+    okField replay "state" (· == .str "waiting_ack") &&
+    errOf conflict == "duplicate_request_id_conflict" &&
+    errOf stale == "stale_session_epoch"
+  if (← assertTrue "tool_slot_idempotent_replay_conflict_and_stale_epoch" dedupOk) then passed := passed + 1
+  -- Empty request id is rejected even when capacity remains (no identity bypass).
+  let emptyId ← register "run-b" "" 1 (payload "x") (some 4)
+  total := total + 1
+  if (← assertTrue "tool_slot_empty_request_id_rejected" (errOf emptyId == "invalid_tool_slot_identity")) then
+    passed := passed + 1
+  -- 4. Answer one slot, then reconnect: pending request retained, answered receipt preserved, poll after re-subscribe.
+  let ans ← dispatchRpcCommand stRef "local_interaction_answer" (.obj #[
+    ("id", .str "run-a"),
+    ("requestId", .str "req-1"),
+    ("answer", .obj #[("action", .str "accept")])
+  ])
+  total := total + 1
+  if (← assertTrue "tool_slot_answer_returns_null" (match ans with | .ok .null => true | _ => false)) then
+    passed := passed + 1
+  let probe ← dispatchRpcCommand stRef "local_interaction" (.obj #[("id", .str "run-a")])
+  total := total + 1
+  let probeOk := match probe with
+    | .ok jv => jv.fieldStr? "id" == some "req-2"
+    | .error _ => false
+  if (← assertTrue "tool_slot_probe_returns_next_active_request" probeOk) then passed := passed + 1
+  -- Simulate a client reconnect: fresh subscription receives the retained active request, not null.
+  let sub ← dispatchRpcCommand stRef "local_interaction_subscribe" (.obj #[("id", .str "run-a")])
+  let polled ← dispatchRpcCommand stRef "__orb_poll_events" (.obj #[])
+  total := total + 1
+  let reconnectOk :=
+    (match sub with | .ok (.num _) => true | _ => false) &&
+    (match polled with
+     | .ok (.arr evs) =>
+       evs.any fun ev =>
+         match ev.field? "payload" with
+         | some p => p.fieldStr? "id" == some "req-2"
+         | none => false
+     | _ => false)
+  if (← assertTrue "tool_slot_reconnect_subscribe_retains_pending_request" reconnectOk) then passed := passed + 1
+  let pollAfter ← dispatchRpcCommand stRef "local_interaction" (.obj #[
+    ("action", .str "poll"), ("id", .str "run-a"), ("request_id", .str "req-1")
+  ])
+  total := total + 1
+  let answeredKept := match pollAfter with
+    | .ok jv => jv.fieldStr? "state" == some "answered" && (jv.field? "answer").isSome
+    | .error _ => false
+  if (← assertTrue "tool_slot_answered_receipt_retained_across_reconnect" answeredKept) then passed := passed + 1
+  -- Reconcile at a higher epoch cancels prior-epoch slots and keeps the new epoch empty until re-register.
+  let recon ← dispatchRpcCommand stRef "local_run_reconcile" (.obj #[
+    ("id", .str "run-a"), ("session_epoch", JVal.uint64 2), ("include_slots", .bool true)
+  ])
+  let staleEpoch1 ← register "run-a" "req-old-ep" 1 (payload "old") none
+  total := total + 1
+  let reconOk := match recon with
+    | .ok jv =>
+      jv.fieldUInt64? "session_epoch" == some 2 &&
+      jv.fieldNat? "active_slots" == some 0 &&
+      (match jv.fieldArr? "pending" with | some xs => xs.isEmpty | none => false) &&
+      errOf staleEpoch1 == "stale_session_epoch"
+    | .error _ => false
+  if (← assertTrue "tool_slot_reconcile_bumps_epoch_and_rejects_epoch_lt_current" reconOk) then passed := passed + 1
+  -- `offer_early` enters `early_buffered` and promotes idempotently to `waiting_ack` on `register` without using a 2nd slot.
+  let earlyRes ← dispatchRpcCommand stRef "local_interaction" (.obj #[
+    ("action", .str "offer_early"), ("id", .str "run-a"), ("request_id", .str "native-early-1"),
+    ("session_epoch", JVal.uint64 2), ("payload", payload "early")
+  ])
+  let promoRes ← register "run-a" "native-early-1" 2 (payload "early") none
+  total := total + 1
+  let earlyPromoOk :=
+    okField earlyRes "state" (· == .str "early_buffered") &&
+    okField earlyRes "active_slots" (· == JVal.nat 1) &&
+    okField promoRes "state" (· == .str "waiting_ack") &&
+    okField promoRes "idempotent_replay" (· == .bool true) &&
+    okField promoRes "active_slots" (· == JVal.nat 1)
+  if (← assertTrue "tool_slot_offer_early_promotes_idempotently_to_waiting_ack" earlyPromoOk) then passed := passed + 1
+  -- Stop cancels the run and publishes a null snapshot to subscribers.
+  let fresh ← register "run-a" "req-epoch2" 2 (payload "next") none
+  let _ ← dispatchRpcCommand stRef "__orb_poll_events" (.obj #[])
+  let stopRes ← dispatchRpcCommand stRef "local_agents_stop" (.obj #[("id", .str "run-a")])
+  let afterStop ← dispatchRpcCommand stRef "__orb_poll_events" (.obj #[])
+  total := total + 1
+  let stopOk :=
+    okField fresh "state" (· == .str "waiting_ack") &&
+    (match stopRes with | .ok .null => true | _ => false) &&
+    (match afterStop with
+     | .ok (.arr evs) => evs.any fun ev => ev.field? "payload" == some .null
+     | _ => false)
+  if (← assertTrue "tool_slot_stop_cancels_run_and_clears_subscribers" stopOk) then passed := passed + 1
+  -- Full default `maxInteractiveToolSlots = 64` burst: 64 succeed with 0 evictions, 65th fails with backpressure.
+  let stRef64 ← IO.mkRef ({ launchToken := "0123456789abcdef0123456789abcdef" } : LocaldState)
+  let mut all64Ok := true
+  for i in [0:64] do
+    let ri ← dispatchRpcCommand stRef64 "local_interaction" (.obj #[
+      ("action", .str (if i % 2 == 0 then "offer_early" else "register")),
+      ("id", .str "run-64"),
+      ("request_id", .str s!"slot-{i}"),
+      ("session_epoch", JVal.uint64 1),
+      ("payload", payload s!"p-{i}")
+    ])
+    if !(okField ri "active_slots" (· == JVal.nat (i + 1))) then
+      all64Ok := false
+  let r65 ← dispatchRpcCommand stRef64 "local_interaction" (.obj #[
+    ("action", .str "register"),
+    ("id", .str "run-64"),
+    ("request_id", .str "native-slot-65"),
+    ("session_epoch", JVal.uint64 1),
+    ("payload", payload "overflow")
+  ])
+  let poll64 ← dispatchRpcCommand stRef64 "local_interaction" (.obj #[("action", .str "poll"), ("id", .str "run-64")])
+  total := total + 1
+  let burst64Ok :=
+    all64Ok &&
+    errOf r65 == "interactive_slot_backpressure" &&
+    (match poll64 with
+     | .ok jv =>
+       jv.fieldNat? "active_slots" == some 64 &&
+       (match jv.fieldArr? "slots" with
+        | some xs => xs.size == 64 && xs.any (fun s => s.fieldStr? "request_id" == some "slot-0") &&
+                     xs.any (fun s => s.fieldStr? "request_id" == some "slot-63")
+        | none => false)
+     | .error _ => false)
+  if (← assertTrue "tool_slot_full_64_burst_backpressure_and_zero_eviction" burst64Ok) then passed := passed + 1
+  return (passed, total)
+
+private def runR7aInteractiveToolSlotTestsWithCounts (passedRef totalRef : IO.Ref Nat) : IO Unit := do
+  let (p, t) ← runR7aInteractiveToolSlotChecks assertTrue
+  passedRef.modify (· + p)
+  totalRef.modify (· + t)
+
+private def runR7aInteractiveToolSlotTests : IO Unit := do
+  let passedRef ← IO.mkRef 0
+  let totalRef ← IO.mkRef 0
+  runR7aInteractiveToolSlotTestsWithCounts passedRef totalRef
+  let p ← passedRef.get
+  let t ← totalRef.get
+  if p != t then
+    throw (IO.userError s!"runR7aInteractiveToolSlotTests failed ({p}/{t})")
+
 def main : IO UInt32 := do
   let mut passed := 0
   let mut total := 0
@@ -380,6 +578,11 @@ def main : IO UInt32 := do
     (match graceAfterCancel with | .ok (.num "0") => true | _ => false) &&
     spawnCount == 1
   if (← assertTrue "orb_signer_serve_reuses_persistent_helper_and_propagates_grace_and_cancel" signerServeOk) then passed := passed + 1
+
+  -- 16. R7-A (`SM-11`) run-scoped interactive tool slots, backpressure, `"native-"` parity, epoch dedup & reconnect retention
+  runR7aInteractiveToolSlotTests
+  passed := passed + 13
+  total := total + 13
 
   try IO.FS.removeDirAll tmpStateDir catch _ => pure ()
 
