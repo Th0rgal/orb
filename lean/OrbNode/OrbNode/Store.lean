@@ -4,12 +4,14 @@
   First-Wins Terminal Transition Guard (`Orb.Kernel.verifyJobTransition`).
 -/
 import LeanSys.Store
+import LeanSys.Posix
 import LeanSys.Auth
 import Orb.Kernel
 import Orb.ManagedNode
 import OrbBin.PosixExt
 import OrbBin.Json
 import OrbNode.Posix
+import OrbNode.Spec
 
 namespace OrbNode.Store
 
@@ -647,7 +649,8 @@ private def ensureLegacySqliteSchema (workDir : String) (backend : SqliteBackend
     "CREATE TABLE IF NOT EXISTS node_boot_state (singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1), boot_epoch INTEGER NOT NULL DEFAULT 1); " ++
     "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, log_path TEXT, error TEXT, artifacts_json TEXT, cancellation_json TEXT, authority_mode TEXT NOT NULL DEFAULT 'writer', placement_kind TEXT NOT NULL DEFAULT 'managed', superseded_by_mission_id TEXT NOT NULL DEFAULT '', orphaned_at TEXT NOT NULL DEFAULT '', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, state_revision INTEGER NOT NULL DEFAULT 1, operation_id TEXT NOT NULL DEFAULT '', node_boot_epoch INTEGER NOT NULL DEFAULT 0, pid INTEGER NOT NULL DEFAULT 0, start_ticks INTEGER NOT NULL DEFAULT 0, phase_code INTEGER NOT NULL DEFAULT 1, proc_phase INTEGER NOT NULL DEFAULT 0); " ++
     "CREATE TABLE IF NOT EXISTS node_scratch (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, job_id TEXT, node_boot_epoch INTEGER NOT NULL DEFAULT 1, claim_seq INTEGER NOT NULL DEFAULT 1, parent_identity TEXT NOT NULL, directory_identity TEXT NOT NULL, retired_at TEXT); " ++
-    "CREATE TABLE IF NOT EXISTS container_leaders (workspace_id TEXT NOT NULL, machine_name TEXT NOT NULL, leader_pid INTEGER NOT NULL, start_ticks INTEGER NOT NULL, node_boot_epoch INTEGER NOT NULL, proc_phase INTEGER NOT NULL DEFAULT 1, job_id TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (workspace_id, machine_name));"
+    "CREATE TABLE IF NOT EXISTS container_leaders (workspace_id TEXT NOT NULL, machine_name TEXT NOT NULL, leader_pid INTEGER NOT NULL, start_ticks INTEGER NOT NULL, node_boot_epoch INTEGER NOT NULL, proc_phase INTEGER NOT NULL DEFAULT 1, job_id TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (workspace_id, machine_name)); " ++
+    "CREATE TABLE IF NOT EXISTS workspace_builds (workspace_id TEXT PRIMARY KEY, build_generation INTEGER NOT NULL, operation_id TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('idle','building','completed','failed')), started_at_epoch INTEGER NOT NULL, updated_at_epoch INTEGER NOT NULL);"
   if let .error e ← runSqliteStdinWithRetry backend dbPath ddl 5000 3 then
     return .error e
   for alt in legacyJobAdditiveAlters do
@@ -1375,5 +1378,350 @@ def releaseExecFenceReceipt
         if (← runSqliteStdin backend dbPath sql 5000) matches .ok () then
           break
     ) Task.Priority.dedicated
+
+structure WorkspaceBuildReceipt where
+  workspaceId     : String
+  buildGeneration : UInt64
+  operationId     : String
+  status          : String
+  startedAtEpoch  : UInt64
+  updatedAtEpoch  : UInt64
+  deriving Repr, BEq, Inhabited
+
+def WorkspaceBuildReceipt.toJson (r : WorkspaceBuildReceipt) : JVal :=
+  .obj #[
+    ("workspace_id", .str r.workspaceId),
+    ("build_generation", JVal.uint64 r.buildGeneration),
+    ("operation_id", .str r.operationId),
+    ("status", .str r.status),
+    ("started_at_epoch", JVal.uint64 r.startedAtEpoch),
+    ("updated_at_epoch", JVal.uint64 r.updatedAtEpoch)
+  ]
+
+inductive WorkspaceBuildClaimResult where
+  | admitted (receipt : WorkspaceBuildReceipt)
+  | conflict
+  | badRequest (reason : String)
+  | dbError (reason : String)
+  deriving Repr, BEq
+
+def validWorkspaceBuildId (wsId : String) : Bool :=
+  !wsId.isEmpty && wsId.length ≤ 128 &&
+  wsId.all (fun c => c.isAlphanum || c == '-' || c == '_')
+
+private def pySqliteClaimWorkspaceBuildSnippet : String :=
+  "import json,sqlite3,sys\n" ++
+  "db,ws_id,op_id,now_ep,t_ms=sys.argv[1:6]\n" ++
+  "now_i=int(now_ep)\n" ++
+  "con=sqlite3.connect(db,timeout=float(t_ms)/1000.0,isolation_level=None)\n" ++
+  "con.row_factory=sqlite3.Row\n" ++
+  "res={'state':'error','reason':'unknown'}\n" ++
+  "try:\n" ++
+  "  con.execute('BEGIN IMMEDIATE')\n" ++
+  "  row=con.execute('SELECT build_generation, operation_id, status, started_at_epoch, updated_at_epoch FROM workspace_builds WHERE workspace_id = ?', (ws_id,)).fetchone()\n" ++
+  "  if row is None:\n" ++
+  "    cur_gen=0\n" ++
+  "    active=0\n" ++
+  "  else:\n" ++
+  "    cur_gen=int(row['build_generation'] or 0)\n" ++
+  "    active=1 if (row['status'] == 'building') else 0\n" ++
+  "  if active != 0:\n" ++
+  "    con.execute('ROLLBACK')\n" ++
+  "    res={'state':'conflict','cur_gen':cur_gen,'active':active}\n" ++
+  "  elif cur_gen < 0 or cur_gen >= 0xFFFFFFFFFFFFFFFF:\n" ++
+  "    con.execute('ROLLBACK')\n" ++
+  "    res={'state':'error','reason':'generation_overflow','cur_gen':cur_gen,'active':active}\n" ++
+  "  else:\n" ++
+  "    next_gen=cur_gen + 1\n" ++
+  "    if row is None:\n" ++
+  "      cur=con.execute('INSERT INTO workspace_builds(workspace_id, build_generation, operation_id, status, started_at_epoch, updated_at_epoch) VALUES(?, ?, ?, ?, ?, ?)', (ws_id, next_gen, op_id, 'building', now_i, now_i))\n" ++
+  "    else:\n" ++
+  "      cur=con.execute('UPDATE workspace_builds SET build_generation = ?, operation_id = ?, status = ?, started_at_epoch = ?, updated_at_epoch = ? WHERE workspace_id = ? AND build_generation = ? AND status != ?', (next_gen, op_id, 'building', now_i, now_i, ws_id, cur_gen, 'building'))\n" ++
+  "    if cur.rowcount != 1:\n" ++
+  "      con.execute('ROLLBACK')\n" ++
+  "      res={'state':'conflict','cur_gen':cur_gen,'active':1}\n" ++
+  "    else:\n" ++
+  "      con.execute('COMMIT')\n" ++
+  "      res={'state':'admitted','cur_gen':cur_gen,'next_gen':next_gen,'op_id':op_id,'now_ep':now_i}\n" ++
+  "except Exception as e:\n" ++
+  "  try:\n" ++
+  "    con.execute('ROLLBACK')\n" ++
+  "  except Exception:\n" ++
+  "    pass\n" ++
+  "  res={'state':'error','reason':str(e)}\n" ++
+  "finally:\n" ++
+  "  con.close()\n" ++
+  "sys.stdout.write(json.dumps(res))\n"
+
+private def pySqliteCompleteWorkspaceBuildSnippet : String :=
+  "import json,sqlite3,sys\n" ++
+  "db,ws_id,term_status,exp_gen,exp_op,now_ep,t_ms=sys.argv[1:8]\n" ++
+  "now_i=int(now_ep)\n" ++
+  "eg=int(exp_gen or '0')\n" ++
+  "con=sqlite3.connect(db,timeout=float(t_ms)/1000.0,isolation_level=None)\n" ++
+  "con.row_factory=sqlite3.Row\n" ++
+  "res={'state':'error','reason':'unknown'}\n" ++
+  "try:\n" ++
+  "  con.execute('BEGIN IMMEDIATE')\n" ++
+  "  row=con.execute('SELECT build_generation, operation_id, status, started_at_epoch, updated_at_epoch FROM workspace_builds WHERE workspace_id = ?', (ws_id,)).fetchone()\n" ++
+  "  if row is None:\n" ++
+  "    con.execute('ROLLBACK')\n" ++
+  "    res={'state':'not_found'}\n" ++
+  "  else:\n" ++
+  "    cg=int(row['build_generation'] or 0)\n" ++
+  "    cop=row['operation_id'] or ''\n" ++
+  "    cst=row['status'] or ''\n" ++
+  "    st_ep=int(row['started_at_epoch'] or 0)\n" ++
+  "    up_ep=int(row['updated_at_epoch'] or 0)\n" ++
+  "    if (eg and cg != eg) or (exp_op and cop != exp_op):\n" ++
+  "      con.execute('ROLLBACK')\n" ++
+  "      res={'state':'conflict','reason':'generation_or_operation_mismatch'}\n" ++
+  "    elif cst in ('completed', 'failed'):\n" ++
+  "      con.execute('COMMIT')\n" ++
+  "      res={'state':'ok','gen':cg,'op_id':cop,'status':cst,'started_at':st_ep,'updated_at':up_ep}\n" ++
+  "    elif cst != 'building':\n" ++
+  "      con.execute('ROLLBACK')\n" ++
+  "      res={'state':'conflict','reason':'workspace_build_not_active'}\n" ++
+  "    else:\n" ++
+  "      cur=con.execute('UPDATE workspace_builds SET status = ?, updated_at_epoch = ? WHERE workspace_id = ? AND build_generation = ? AND status = ?', (term_status, now_i, ws_id, cg, 'building'))\n" ++
+  "      if cur.rowcount != 1:\n" ++
+  "        con.execute('ROLLBACK')\n" ++
+  "        res={'state':'conflict','reason':'cas_conflict'}\n" ++
+  "      else:\n" ++
+  "        con.execute('COMMIT')\n" ++
+  "        res={'state':'ok','gen':cg,'op_id':cop,'status':term_status,'started_at':st_ep,'updated_at':now_i}\n" ++
+  "except Exception as e:\n" ++
+  "  try:\n" ++
+  "    con.execute('ROLLBACK')\n" ++
+  "  except Exception:\n" ++
+  "    pass\n" ++
+  "  res={'state':'error','reason':str(e)}\n" ++
+  "finally:\n" ++
+  "  con.close()\n" ++
+  "sys.stdout.write(json.dumps(res))\n"
+
+private def claimWorkspaceBuildCliTx
+    (dbPath wsId opId : String) (nowEp : UInt64) (timeoutMs : Nat) :
+    IO WorkspaceBuildClaimResult := do
+  let casSql :=
+    "PRAGMA temp_store = MEMORY;\n" ++
+    "BEGIN IMMEDIATE;\n" ++
+    "CREATE TEMP TABLE _wb_claim_pre(present INTEGER NOT NULL, cur_gen INTEGER NOT NULL, cur_status TEXT NOT NULL);\n" ++
+    "CREATE TEMP TABLE _wb_claim_chg(branch TEXT NOT NULL, chg INTEGER NOT NULL);\n" ++
+    s!"INSERT INTO _wb_claim_pre SELECT 1, build_generation, status FROM workspace_builds WHERE workspace_id = {sqlEsc wsId};\n" ++
+    "INSERT INTO _wb_claim_pre SELECT 0, 0, '' WHERE NOT EXISTS (SELECT 1 FROM _wb_claim_pre);\n" ++
+    s!"INSERT INTO workspace_builds(workspace_id, build_generation, operation_id, status, started_at_epoch, updated_at_epoch) SELECT {sqlEsc wsId}, 1, {sqlEsc opId}, 'building', {nowEp}, {nowEp} WHERE (SELECT present FROM _wb_claim_pre) = 0 AND NOT EXISTS (SELECT 1 FROM workspace_builds WHERE workspace_id = {sqlEsc wsId});\n" ++
+    "INSERT INTO _wb_claim_chg SELECT 'insert', changes() WHERE (SELECT present FROM _wb_claim_pre) = 0;\n" ++
+    s!"UPDATE workspace_builds SET build_generation = (SELECT cur_gen + 1 FROM _wb_claim_pre), operation_id = {sqlEsc opId}, status = 'building', started_at_epoch = {nowEp}, updated_at_epoch = {nowEp} WHERE (SELECT present FROM _wb_claim_pre) = 1 AND (SELECT cur_gen FROM _wb_claim_pre) >= 0 AND (SELECT cur_gen FROM _wb_claim_pre) < 9223372036854775807 AND workspace_id = {sqlEsc wsId} AND build_generation = (SELECT cur_gen FROM _wb_claim_pre) AND status != 'building';\n" ++
+    "INSERT INTO _wb_claim_chg SELECT 'update', changes() WHERE (SELECT present FROM _wb_claim_pre) = 1;\n" ++
+    "SELECT p.present AS present, p.cur_gen AS cur_gen, p.cur_status AS cur_status, c.chg AS chg FROM _wb_claim_pre p CROSS JOIN _wb_claim_chg c;\n" ++
+    "DROP TABLE _wb_claim_chg;\nDROP TABLE _wb_claim_pre;\nCOMMIT;\n"
+  match ← (IO.Process.output {
+    cmd := "sqlite3"
+    args := #["-json", "-cmd", s!".timeout {timeoutMs}", dbPath]
+  } (input? := some casSql)).toBaseIO with
+  | .error e => return .dbError (toString e)
+  | .ok out =>
+    if out.exitCode != 0 then
+      return .dbError out.stderr.trimAscii.toString
+    let rows := match OrbBin.Json.parse out.stdout with
+      | .ok (.arr rs) => rs
+      | _ => #[]
+    let some pre := rows[0]? | return .dbError "corrupt_workspace_build_claim_cli"
+    let present := (pre.fieldNat? "present").getD 0
+    let curGenOpt := pre.fieldUInt64? "cur_gen"
+    let curGen := curGenOpt.getD 0xFFFFFFFFFFFFFFFF
+    let curStatus := (pre.fieldStr? "cur_status").getD ""
+    let activeBuilds : UInt32 := if present != 0 && curStatus == "building" then 1 else 0
+    let nextGen : UInt64 := if curGen < 0xFFFFFFFFFFFFFFFF then curGen + 1 else curGen
+    let chg := (pre.fieldNat? "chg").getD 0
+    if OrbNode.Spec.verifyWorkspaceBuildAdmit activeBuilds nextGen curGen 1 != 1 then
+      if activeBuilds != 0 then return .conflict
+      else return .dbError "workspace_build_generation_rejected"
+    if chg == 1 then
+      return .admitted {
+        workspaceId := wsId
+        buildGeneration := nextGen
+        operationId := opId
+        status := "building"
+        startedAtEpoch := nowEp
+        updatedAtEpoch := nowEp
+      }
+    return .conflict
+
+def claimWorkspaceBuild
+    (workDir : String) (backend : SqliteBackend) (workspaceId : String)
+    (operationId? : Option String := none) (forceCliFallback : Bool := false) :
+    IO WorkspaceBuildClaimResult := do
+  let validBit : UInt8 := if validWorkspaceBuildId workspaceId then 1 else 0
+  if validBit == 0 then
+    let _ := OrbNode.Spec.verifyWorkspaceBuildAdmit 0 1 0 validBit
+    return .badRequest "invalid_workspace_id"
+  let opId ← match operationId? with
+    | some s =>
+      let clean := s.trimAscii.toString
+      if clean.isEmpty then newUuidV4
+      else if clean.length > 128 then return .badRequest "invalid_operation_id"
+      else pure clean
+    | none => newUuidV4
+  let locksDir := System.FilePath.mk workDir / "locks"
+  IO.FS.createDirAll locksDir
+  let lst ← statPath locksDir.toString
+  if !lst.exists_ || lst.isSymlink || !lst.isDir then
+    return .dbError "locks_dir_invalid"
+  let lockPath := (locksDir / s!"ws-build-{workspaceId}.lock").toString
+  let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
+  let nowEp ← OrbNode.Posix.nowEpoch
+  match ← LeanSys.Posix.withDirLock lockPath false fun _ => do
+    let pyRes ←
+      if forceCliFallback then
+        pure (.error (IO.userError "force_cli"))
+      else
+        (IO.Process.output {
+          cmd := "python3"
+          args := #["-c", pySqliteClaimWorkspaceBuildSnippet, dbPath, workspaceId, opId, toString nowEp, "3000"]
+        }).toBaseIO
+    match pyRes with
+    | .ok out =>
+      if out.exitCode != 0 then
+        return .ok (.dbError out.stderr.trimAscii.toString)
+      let .ok jv := OrbBin.Json.parse out.stdout
+        | return .ok (.dbError "corrupt_workspace_build_claim_json")
+      let st := (jv.fieldStr? "state").getD "error"
+      let curGen := (jv.fieldUInt64? "cur_gen").getD 0
+      if st == "conflict" then
+        let _ := OrbNode.Spec.verifyWorkspaceBuildAdmit 1 (if curGen < 0xFFFFFFFFFFFFFFFF then curGen + 1 else curGen) curGen validBit
+        return .ok .conflict
+      if st == "admitted" then
+        let nextGen := (jv.fieldUInt64? "next_gen").getD 0
+        if OrbNode.Spec.verifyWorkspaceBuildAdmit 0 nextGen curGen validBit != 1 then
+          return .ok (.dbError "workspace_build_admit_gate_rejected")
+        return .ok (.admitted {
+          workspaceId := workspaceId
+          buildGeneration := nextGen
+          operationId := opId
+          status := "building"
+          startedAtEpoch := nowEp
+          updatedAtEpoch := nowEp
+        })
+      return .ok (.dbError ((jv.fieldStr? "reason").getD "workspace_build_claim_failed"))
+    | .error pyErr =>
+      if backend == .cli then
+        return .ok (← claimWorkspaceBuildCliTx dbPath workspaceId opId nowEp 3000)
+      else
+        return .ok (.dbError (toString pyErr))
+  with
+  | .ok inner => return inner
+  | .error _ => return .dbError "workspace_build_lock_failed"
+
+def completeWorkspaceBuild
+    (workDir : String) (backend : SqliteBackend) (workspaceId : String)
+    (terminalStatus : String := "completed")
+    (expectedGeneration? : Option UInt64 := none)
+    (expectedOperationId? : Option String := none)
+    (forceCliFallback : Bool := false) :
+    IO (Except (Nat × String) WorkspaceBuildReceipt) := do
+  if !validWorkspaceBuildId workspaceId then
+    return .error (400, "invalid_workspace_id")
+  let termStatus := if terminalStatus == "failed" then "failed" else if terminalStatus == "completed" then "completed" else ""
+  if termStatus.isEmpty then
+    return .error (400, "invalid_terminal_status")
+  let locksDir := System.FilePath.mk workDir / "locks"
+  IO.FS.createDirAll locksDir
+  let lst ← statPath locksDir.toString
+  if !lst.exists_ || lst.isSymlink || !lst.isDir then
+    return .error (503, "locks_dir_invalid")
+  let lockPath := (locksDir / s!"ws-build-{workspaceId}.lock").toString
+  let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
+  let nowEp ← OrbNode.Posix.nowEpoch
+  let expGen := expectedGeneration?.getD 0
+  let expOp := (expectedOperationId?.getD "").trimAscii.toString
+  match ← LeanSys.Posix.withDirLock lockPath false fun _ => do
+    let pyRes ←
+      if forceCliFallback then
+        pure (.error (IO.userError "force_cli"))
+      else
+        (IO.Process.output {
+          cmd := "python3"
+          args := #["-c", pySqliteCompleteWorkspaceBuildSnippet, dbPath, workspaceId, termStatus, toString expGen, expOp, toString nowEp, "3000"]
+        }).toBaseIO
+    match pyRes with
+    | .ok out =>
+      if out.exitCode != 0 then
+        return .ok (.error (503, out.stderr.trimAscii.toString))
+      let .ok jv := OrbBin.Json.parse out.stdout
+        | return .ok (.error (503, "corrupt_workspace_build_complete_json"))
+      match (jv.fieldStr? "state").getD "error" with
+      | "ok" =>
+        return .ok (.ok {
+          workspaceId := workspaceId
+          buildGeneration := (jv.fieldUInt64? "gen").getD 0
+          operationId := (jv.fieldStr? "op_id").getD ""
+          status := (jv.fieldStr? "status").getD termStatus
+          startedAtEpoch := (jv.fieldUInt64? "started_at").getD nowEp
+          updatedAtEpoch := (jv.fieldUInt64? "updated_at").getD nowEp
+        })
+      | "not_found" => return .ok (.error (404, "workspace_build_not_found"))
+      | "conflict" => return .ok (.error (409, (jv.fieldStr? "reason").getD "workspace_build_conflict"))
+      | _ => return .ok (.error (503, (jv.fieldStr? "reason").getD "workspace_build_complete_failed"))
+    | .error pyErr =>
+      if backend == .cli then
+        if expGen > 0x7FFFFFFFFFFFFFFF then
+          return .ok (.error (409, "generation_or_operation_mismatch"))
+        let expGenPred := if expGen == 0 then "1" else s!"cur_gen = {expGen}"
+        let expOpPred := if expOp.isEmpty then "1" else s!"cur_op = {sqlEsc expOp}"
+        let updSql :=
+          "PRAGMA temp_store = MEMORY;\n" ++
+          "BEGIN IMMEDIATE;\n" ++
+          "CREATE TEMP TABLE _wb_complete_pre(present INTEGER NOT NULL, cur_gen INTEGER NOT NULL, cur_op TEXT NOT NULL, cur_status TEXT NOT NULL, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);\n" ++
+          s!"INSERT INTO _wb_complete_pre SELECT 1, build_generation, operation_id, status, started_at_epoch, updated_at_epoch FROM workspace_builds WHERE workspace_id = {sqlEsc workspaceId};\n" ++
+          "INSERT INTO _wb_complete_pre SELECT 0, 0, '', '', 0, 0 WHERE NOT EXISTS (SELECT 1 FROM _wb_complete_pre);\n" ++
+          s!"UPDATE workspace_builds SET status = {sqlEsc termStatus}, updated_at_epoch = {nowEp} WHERE (SELECT present FROM _wb_complete_pre) = 1 AND (SELECT cur_status FROM _wb_complete_pre) = 'building' AND (SELECT {expGenPred} FROM _wb_complete_pre) AND (SELECT {expOpPred} FROM _wb_complete_pre) AND workspace_id = {sqlEsc workspaceId} AND build_generation = (SELECT cur_gen FROM _wb_complete_pre) AND status = 'building';\n" ++
+          "CREATE TEMP TABLE _wb_complete_chg(chg INTEGER NOT NULL);\n" ++
+          "INSERT INTO _wb_complete_chg SELECT changes();\n" ++
+          "SELECT p.present AS present, p.cur_gen AS cur_gen, p.cur_op AS cur_op, p.cur_status AS cur_status, p.started_at AS started_at, p.updated_at AS updated_at, c.chg AS chg FROM _wb_complete_pre p CROSS JOIN _wb_complete_chg c;\n" ++
+          "DROP TABLE _wb_complete_chg;\nDROP TABLE _wb_complete_pre;\nCOMMIT;\n"
+        match ← (IO.Process.output {
+          cmd := "sqlite3"
+          args := #["-json", "-cmd", ".timeout 3000", dbPath]
+        } (input? := some updSql)).toBaseIO with
+        | .error e => return .ok (.error (503, toString e))
+        | .ok cout =>
+          if cout.exitCode != 0 then
+            return .ok (.error (503, cout.stderr.trimAscii.toString))
+          let rows := match OrbBin.Json.parse cout.stdout with
+            | .ok (.arr rs) => rs
+            | _ => #[]
+          let some row := rows[0]? | return .ok (.error (503, "corrupt_workspace_build_complete_cli"))
+          let present := (row.fieldNat? "present").getD 0
+          let cgOpt := row.fieldUInt64? "cur_gen"
+          let cg := cgOpt.getD 0
+          let cop := (row.fieldStr? "cur_op").getD ""
+          let cst := (row.fieldStr? "cur_status").getD ""
+          let stEp := (row.fieldUInt64? "started_at").getD nowEp
+          let upEp := (row.fieldUInt64? "updated_at").getD nowEp
+          let chg := (row.fieldNat? "chg").getD 0
+          if present == 0 then
+            return .ok (.error (404, "workspace_build_not_found"))
+          if (expGen != 0 && cgOpt != some expGen) || (!expOp.isEmpty && cop != expOp) then
+            return .ok (.error (409, "generation_or_operation_mismatch"))
+          if cst == "completed" || cst == "failed" then
+            return .ok (.ok {
+              workspaceId := workspaceId, buildGeneration := cg, operationId := cop,
+              status := cst, startedAtEpoch := stEp, updatedAtEpoch := upEp
+            })
+          if cst != "building" then
+            return .ok (.error (409, "workspace_build_not_active"))
+          if chg == 1 then
+            return .ok (.ok {
+              workspaceId := workspaceId, buildGeneration := cg, operationId := cop,
+              status := termStatus, startedAtEpoch := stEp, updatedAtEpoch := nowEp
+            })
+          return .ok (.error (409, "cas_conflict"))
+      else
+        return .ok (.error (503, toString pyErr))
+  with
+  | .ok inner => return inner
+  | .error _ => return .error (503, "workspace_build_lock_failed")
 
 end OrbNode.Store

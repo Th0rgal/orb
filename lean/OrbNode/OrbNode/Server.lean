@@ -990,6 +990,33 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
     match ← prepareNodeProjectContext rt.cfg.workDir jv with
     | .ok res => return (rt, jsonResp 200 res, preLaunches, #[])
     | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
+  | "POST", ["workspaces", wsId, "build"] =>
+    let opId? ←
+      if req.body.isEmpty then pure none
+      else match String.fromUTF8? req.body with
+        | none => return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
+        | some s =>
+          match OrbBin.Json.parse s with
+          | .error _ => return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
+          | .ok jv => pure (jv.fieldStr? "operation_id")
+    match ← claimWorkspaceBuild rt.cfg.workDir rt.ledger.sqliteBackend wsId opId? with
+    | .admitted rec => return (rt, jsonResp 200 rec.toJson, preLaunches, #[])
+    | .conflict => return (rt, jsonResp 409 (.obj #[("error", .str "workspace_build_in_progress")]), preLaunches, #[])
+    | .badRequest msg => return (rt, jsonResp 400 (.obj #[("error", .str msg)]), preLaunches, #[])
+    | .dbError msg => return (rt, jsonResp 503 (.obj #[("error", .str msg)]), preLaunches, #[])
+  | "POST", ["workspaces", wsId, "build", "complete"] =>
+    let (termStatus, expGen?, expOp?) ←
+      if req.body.isEmpty then pure ("completed", none, none)
+      else match String.fromUTF8? req.body with
+        | none => return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
+        | some s =>
+          match OrbBin.Json.parse s with
+          | .error _ => return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
+          | .ok jv =>
+            pure ((jv.fieldStr? "status").getD "completed", jv.fieldUInt64? "build_generation", jv.fieldStr? "operation_id")
+    match ← completeWorkspaceBuild rt.cfg.workDir rt.ledger.sqliteBackend wsId termStatus expGen? expOp? with
+    | .ok rec => return (rt, jsonResp 200 rec.toJson, preLaunches, #[])
+    | .error (code, msg) => return (rt, jsonResp code (.obj #[("error", .str msg)]), preLaunches, #[])
   | _, _ =>
     return (rt, textResp 404 "route not found", preLaunches, #[])
 
@@ -1263,6 +1290,116 @@ def handleRequestConcurrent
       match ← prepareNodeProjectContext workDir jv with
       | .ok res => return jsonResp 200 res
       | .error msg => return textResp 400 msg
+  else if req.method == "POST" && segs == ["uploads", "sessions"] then
+    let authCheck ← mtx.atomically do
+      let rt ← get
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return Except.error (textResp 401 "invalid node token")
+      return Except.ok rt.cfg.workDir
+    match authCheck with
+    | .error errResp => return errResp
+    | .ok workDir =>
+      let some bodyStr := String.fromUTF8? req.body
+        | return textResp 400 "invalid UTF-8 body"
+      let .ok jv := OrbBin.Json.parse bodyStr
+        | return textResp 400 "invalid JSON body"
+      match ← initOrStatusUploadSession workDir jv with
+      | .ok status => return jsonResp 200 status
+      | .error msg => return textResp 400 msg
+  else if req.method == "PUT" && segs.length == 5 &&
+          segs[0]? == some "uploads" && segs[1]? == some "sessions" && segs[3]? == some "chunks" then
+    let uid := segs[2]!
+    let idxStr := segs[4]!
+    let authCheck ← mtx.atomically do
+      let rt ← get
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return Except.error (textResp 401 "invalid node token")
+      return Except.ok rt.cfg.workDir
+    match authCheck with
+    | .error errResp => return errResp
+    | .ok workDir =>
+      if req.body.size > maxChunkBytes then
+        return textResp 413 "chunk too large"
+      let some idx := idxStr.toNat?
+        | return textResp 400 "invalid chunk index"
+      match ← writeUploadSessionChunk workDir uid idx req.body with
+      | .ok status => return jsonResp 200 status
+      | .error msg => return textResp 400 msg
+  else if req.method == "POST" && segs.length == 4 &&
+          segs[0]? == some "uploads" && segs[1]? == some "sessions" && segs[3]? == some "complete" then
+    let uid := segs[2]!
+    let authCheck ← mtx.atomically do
+      let rt ← get
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return Except.error (textResp 401 "invalid node token")
+      return Except.ok rt.cfg.workDir
+    match authCheck with
+    | .error errResp => return errResp
+    | .ok workDir =>
+      match ← completeUploadSession workDir uid with
+      | .ok receipt => return jsonResp 200 receipt
+      | .error msg => return textResp 400 msg
+  else if req.method == "DELETE" && segs.length == 3 &&
+          segs[0]? == some "uploads" && segs[1]? == some "sessions" then
+    let uid := segs[2]!
+    let authCheck ← mtx.atomically do
+      let rt ← get
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return Except.error (textResp 401 "invalid node token")
+      return Except.ok rt.cfg.workDir
+    match authCheck with
+    | .error errResp => return errResp
+    | .ok workDir =>
+      match ← cancelUploadSession workDir uid with
+      | .ok () => return { status := 204, contentType := "text/plain; charset=utf-8", body := ByteArray.empty }
+      | .error msg => return textResp 400 msg
+  else if req.method == "POST" && segs.length == 3 &&
+          segs[0]? == some "workspaces" && segs[2]? == some "build" then
+    let wsId := segs[1]!
+    let authCheck ← mtx.atomically do
+      let rt ← get
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return Except.error (textResp 401 "invalid node token")
+      return Except.ok (rt.cfg.workDir, rt.ledger.sqliteBackend)
+    match authCheck with
+    | .error errResp => return errResp
+    | .ok (workDir, sqliteBackend) =>
+      let opId? ←
+        if req.body.isEmpty then pure none
+        else match String.fromUTF8? req.body with
+          | none => return textResp 400 "invalid UTF-8 body"
+          | some s =>
+            match OrbBin.Json.parse s with
+            | .error _ => return textResp 400 "invalid JSON body"
+            | .ok jv => pure (jv.fieldStr? "operation_id")
+      match ← claimWorkspaceBuild workDir sqliteBackend wsId opId? with
+      | .admitted rec => return jsonResp 200 rec.toJson
+      | .conflict => return jsonResp 409 (.obj #[("error", .str "workspace_build_in_progress")])
+      | .badRequest msg => return jsonResp 400 (.obj #[("error", .str msg)])
+      | .dbError msg => return jsonResp 503 (.obj #[("error", .str msg)])
+  else if req.method == "POST" && segs.length == 4 &&
+          segs[0]? == some "workspaces" && segs[2]? == some "build" && segs[3]? == some "complete" then
+    let wsId := segs[1]!
+    let authCheck ← mtx.atomically do
+      let rt ← get
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return Except.error (textResp 401 "invalid node token")
+      return Except.ok (rt.cfg.workDir, rt.ledger.sqliteBackend)
+    match authCheck with
+    | .error errResp => return errResp
+    | .ok (workDir, sqliteBackend) =>
+      let (termStatus, expGen?, expOp?) ←
+        if req.body.isEmpty then pure ("completed", none, none)
+        else match String.fromUTF8? req.body with
+          | none => return textResp 400 "invalid UTF-8 body"
+          | some s =>
+            match OrbBin.Json.parse s with
+            | .error _ => return textResp 400 "invalid JSON body"
+            | .ok jv =>
+              pure ((jv.fieldStr? "status").getD "completed", jv.fieldUInt64? "build_generation", jv.fieldStr? "operation_id")
+      match ← completeWorkspaceBuild workDir sqliteBackend wsId termStatus expGen? expOp? with
+      | .ok rec => return jsonResp 200 rec.toJson
+      | .error (code, msg) => return jsonResp code (.obj #[("error", .str msg)])
   else if req.method == "POST" && segs == ["machine-transfer", "files"] then
     if req.body.size > 16 * 1024 * 1024 then
       return textResp 413 "payload too large"
