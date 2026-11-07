@@ -23,11 +23,13 @@ open OrbLocald.Spec
 
 def defaultFailoverOrigins : Array String := #[
   "https://orbcore.thomas.md",
-  "https://agent-backend.nico-best-pc-ever.ovh",
-  "https://agent-backend.thomas.md"
+  "https://agent-backend.thomas.md",
+  "https://agent-backend.nico-best-pc-ever.ovh"
 ]
 
-/-- Ordered candidate HTTPS origins matching `candidateApiUrls` in `orb/src/api.ts`. -/
+/-- Ordered Edge-diverse candidate HTTPS origins matching `candidateApiUrls` in `orb/src/api.ts`:
+    - Hosted Orb endpoints rotate across distinct network edges (`orbcore.thomas.md` -> Cloudflare BBR `agent-backend.thomas.md` -> direct OVH `agent-backend.nico-best-pc-ever.ovh`).
+    - Custom/self-hosted origins never leak requests to hosted failover endpoints. -/
 def candidateOriginsFor (raw : String) : Array String :=
   let clean := OrbBin.PosixExt.stripTrailingSlash raw.trimAscii.toString
   if clean.isEmpty || !clean.startsWith "https://" ||
@@ -36,15 +38,56 @@ def candidateOriginsFor (raw : String) : Array String :=
   else
     let low := clean.toLower
     if low == "https://orbcore.thomas.md" then
-      #[clean, "https://agent-backend.nico-best-pc-ever.ovh", "https://agent-backend.thomas.md"]
+      #[clean, "https://agent-backend.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"]
     else if low == "https://agent-backend.nico-best-pc-ever.ovh" then
-      #[clean, "https://orbcore.thomas.md", "https://agent-backend.thomas.md"]
+      #[clean, "https://agent-backend.thomas.md", "https://orbcore.thomas.md"]
     else if low == "https://agent-backend.thomas.md" then
       #[clean, "https://orbcore.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"]
     else if low.endsWith ".thomas.md" then
-      #[clean, "https://orbcore.thomas.md", "https://agent-backend.thomas.md"]
+      #[clean, "https://agent-backend.thomas.md", "https://orbcore.thomas.md"]
     else
       #[clean]
+
+abbrev candidateFailoverOrigins := candidateOriginsFor
+
+/-- Classify local transport proxy requests into `P0` (`0`), `P1` (`1`), or `P2` (`2`) priority lanes. -/
+def classifyProxyRequestPriority (method relPath : String) (explicitPrio? : Option String := none) : UInt8 :=
+  match explicitPrio? with
+  | some "p0" | some "0" => 0
+  | some "p2" | some "2" => 2
+  | some "p1" | some "1" => 1
+  | _ =>
+    let m := method.trimAscii.toString.toUpper
+    let p := (relPath.splitOn "?").head?.getD relPath
+    if m != "GET" && m != "HEAD" && m != "OPTIONS" then
+      0
+    else if p.startsWith "/api/auth/" || p.startsWith "/api/bitwarden/" || p.startsWith "/api/privilege-access/" then
+      0
+    else if p.startsWith "/api/software" || p.startsWith "/api/stats" ||
+            p.startsWith "/api/antigravity-models" || p.startsWith "/api/crons" ||
+            p.endsWith "/files" || (p.splitOn "/files/").length > 1 then
+      2
+    else
+      1
+
+/-- Per-origin EWMA RTT and cooldown health tracked inside `orb-locald`. -/
+structure OriginHealthEntry where
+  origin              : String
+  srttMs              : UInt32 := 0
+  rttVarMs            : UInt32 := 0
+  consecutiveFailures : UInt32 := 0
+  cooldownUntilMs     : Nat := 0
+  deriving Repr, Inhabited
+
+/-- Rank candidate origins so non-cooled origins come first while preserving configured tie-break order. -/
+def rankFailoverOrigins (origins : Array String) (health : Array OriginHealthEntry) (nowMs : Nat) : Array String :=
+  let isCooled (orig : String) : Bool :=
+    match health.find? (fun h => h.origin == orig) with
+    | some h => h.cooldownUntilMs > nowMs
+    | none => false
+  let healthy := origins.filter (fun o => !isCooled o)
+  let cooled := origins.filter isCooled
+  healthy ++ cooled
 
 def defaultDohEndpoints : Array String := #[
   "https://1.1.1.1/dns-query",
@@ -434,7 +477,38 @@ structure LocaldState where
   connectionJson      : JVal := .null
   hostOs              : String := "linux"
   signerBin?          : Option String := none
+  originHealth        : Array OriginHealthEntry := #[]
+  h2Pool?             : Option OrbNetLeaf.H2Pool.H2ClientPool := none
   deriving Inhabited
+
+/-- Record an upstream RTT sample (`orb_rtt_ewma_step`) and clear cooldown on `origin`, returning updated `srttMs`. -/
+def recordOriginSuccess (stRef : IO.Ref LocaldState) (origin : String) (sampleMs : UInt32) : IO UInt32 := do
+  stRef.modifyGet fun s =>
+    let cur := (s.originHealth.find? (fun h => h.origin == origin)).getD { origin := origin }
+    let packed := Orb.Kernel.rttEwmaStep cur.srttMs cur.rttVarMs sampleMs
+    let nextSrtt : UInt32 := (packed &&& 0xFFFFFFFF).toUInt32
+    let nextVar : UInt32 := ((packed >>> 32) &&& 0xFFFFFFFF).toUInt32
+    let updated : OriginHealthEntry := {
+      origin := origin
+      srttMs := nextSrtt
+      rttVarMs := nextVar
+      consecutiveFailures := 0
+      cooldownUntilMs := 0
+    }
+    let others := s.originHealth.filter (fun h => h.origin != origin)
+    (nextSrtt, { s with originHealth := others.push updated })
+
+/-- Record an upstream transport or 5xx/429 failure on `origin`, placing it into a 20s failover cooldown. -/
+def recordOriginFailure (stRef : IO.Ref LocaldState) (origin : String) (nowMs : Nat) (cooldownMs : Nat := 20000) : IO Unit := do
+  stRef.modify fun s =>
+    let cur := (s.originHealth.find? (fun h => h.origin == origin)).getD { origin := origin }
+    let updated : OriginHealthEntry := {
+      cur with
+      consecutiveFailures := cur.consecutiveFailures + 1
+      cooldownUntilMs := nowMs + cooldownMs
+    }
+    let others := s.originHealth.filter (fun h => h.origin != origin)
+    { s with originHealth := others.push updated }
 
 def LocaldState.bindingsSnapshotJson (st : LocaldState) : JVal :=
   .obj #[("revision", JVal.nat st.bindingsRevision), ("bindings", .obj st.bindingsEntries)]
@@ -1031,6 +1105,46 @@ private def isGrantedUploadPath (st : LocaldState) (rawPath : String) : Bool :=
   !p.isEmpty && p.startsWith "/" && !(p.splitOn "/").contains ".." &&
   st.grantedFolders.any (fun g => p == g || p.startsWith (if g.endsWith "/" then g else g ++ "/"))
 
+/-- Parse an origin URL (`https://host[:port][/pfx]` or bracketed IPv6 `https://[::1][:port][/pfx]`)
+    into `(isTls, bareHost, port, pathPrefix)`. -/
+def parseOriginHostPort (raw : String) : Option (Bool × String × UInt16 × String) :=
+  let (isTls, rest) :=
+    if raw.startsWith "https://" then (true, (raw.drop 8).toString)
+    else if raw.startsWith "http://" then (false, (raw.drop 7).toString)
+    else (false, "")
+  if rest.isEmpty then none
+  else
+    let defPort : UInt16 := if isTls then 443 else 80
+    let parts := rest.splitOn "/"
+    let hostPort := parts.head?.getD ""
+    let tail := String.intercalate "/" (parts.drop 1)
+    let pfx := if tail.isEmpty then "" else "/" ++ tail
+    if hostPort.startsWith "[" then
+      match hostPort.splitOn "]" with
+      | [brack, afterBrack] =>
+        let ipv6 := (brack.drop 1).toString
+        if !ipv6.contains ':' || !OrbNetLeaf.TlsHttp.isValidBareHost ipv6 then none
+        else if afterBrack.isEmpty then
+          some (isTls, ipv6, defPort, pfx)
+        else if afterBrack.startsWith ":" then
+          match LeanSys.Http.parseStrictContentLength? (afterBrack.drop 1).toString with
+          | some p => if 1 ≤ p && p ≤ 65535 then some (isTls, ipv6, p.toUInt16, pfx) else none
+          | none => none
+        else none
+      | _ => none
+    else
+      match hostPort.splitOn ":" with
+      | [h] =>
+        if !OrbNetLeaf.TlsHttp.isValidBareHost h then none
+        else some (isTls, h, defPort, pfx)
+      | [h, pStr] =>
+        if !OrbNetLeaf.TlsHttp.isValidBareHost h then none
+        else
+          match LeanSys.Http.parseStrictContentLength? pStr with
+          | some p => if 1 ≤ p && p ≤ 65535 then some (isTls, h, p.toUInt16, pfx) else none
+          | none => none
+      | _ => none
+
 /-- Pure/IO dispatcher for all desktop IPC commands plus internal `__orb_poll_events`. -/
 def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal) : IO (Except String JVal) := do
   let st ← stRef.get
@@ -1050,6 +1164,11 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         (b, { s with bridge := b })
       else
         (s.bridge, s)
+    -- Non-blocking TLS 1.3 HTTP/2 prewarm on primary origin so user's first click/send pays 0 handshake RTTs
+    if let some pool := st.h2Pool? then
+      if let some primaryOrig := nextBridge.failoverOrigins[0]? then
+        if let some (true, host, port, _) := parseOriginHostPort primaryOrig then
+          pool.prewarm host port true 6000
     return .ok nextBridge.toJson
   | "__orb_poll_events" =>
     let evs ← stRef.modifyGet fun s =>
@@ -1761,11 +1880,20 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "      channels.delete(cleanArgs.token);\n" ++
   "      if (!channels.size) stopStream();\n" ++
   "    }\n" ++
-  "    const res = await _fetch(ORB_LOCALD_URL, {\n" ++
-  "      method: 'POST',\n" ++
-  "      headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN },\n" ++
-  "      body: _jsonStringify({ command, args: cleanArgs })\n" ++
-  "    });\n" ++
+  "    let res = await (async () => {\n" ++
+  "      for (let attempt = 0; ; attempt++) {\n" ++
+  "        try {\n" ++
+  "          return await _fetch(ORB_LOCALD_URL, {\n" ++
+  "            method: 'POST',\n" ++
+  "            headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN },\n" ++
+  "            body: _jsonStringify({ command, args: cleanArgs })\n" ++
+  "          });\n" ++
+  "        } catch (err) {\n" ++
+  "          if (attempt >= 8) throw err;\n" ++
+  "          await new Promise(r => setTimeout(r, 75));\n" ++
+  "        }\n" ++
+  "      }\n" ++
+  "    })();\n" ++
   "    const body = await res.json();\n" ++
   "    if (!res.ok || body.error) throw new Error(body.error || `RPC ${command} failed`);\n" ++
   "    if (boundChan && typeof body.result === 'number') {\n" ++
@@ -1793,46 +1921,6 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "  window.__TAURI_INTERNALS__ = { invoke };\n" ++
   "  window.__TAURI__ = desktop;\n" ++
   "})();\n"
-
-/-- Parse an origin URL (`https://host[:port][/pfx]` or bracketed IPv6 `https://[::1][:port][/pfx]`)
-    into `(isTls, bareHost, port, pathPrefix)`. -/
-def parseOriginHostPort (raw : String) : Option (Bool × String × UInt16 × String) :=
-  let (isTls, rest) :=
-    if raw.startsWith "https://" then (true, (raw.drop 8).toString)
-    else if raw.startsWith "http://" then (false, (raw.drop 7).toString)
-    else (false, "")
-  if rest.isEmpty then none
-  else
-    let defPort : UInt16 := if isTls then 443 else 80
-    let parts := rest.splitOn "/"
-    let hostPort := parts.head?.getD ""
-    let tail := String.intercalate "/" (parts.drop 1)
-    let pfx := if tail.isEmpty then "" else "/" ++ tail
-    if hostPort.startsWith "[" then
-      match hostPort.splitOn "]" with
-      | [brack, afterBrack] =>
-        let ipv6 := (brack.drop 1).toString
-        if !ipv6.contains ':' || !OrbNetLeaf.TlsHttp.isValidBareHost ipv6 then none
-        else if afterBrack.isEmpty then
-          some (isTls, ipv6, defPort, pfx)
-        else if afterBrack.startsWith ":" then
-          match LeanSys.Http.parseStrictContentLength? (afterBrack.drop 1).toString with
-          | some p => if 1 ≤ p && p ≤ 65535 then some (isTls, ipv6, p.toUInt16, pfx) else none
-          | none => none
-        else none
-      | _ => none
-    else
-      match hostPort.splitOn ":" with
-      | [h] =>
-        if !OrbNetLeaf.TlsHttp.isValidBareHost h then none
-        else some (isTls, h, defPort, pfx)
-      | [h, pStr] =>
-        if !OrbNetLeaf.TlsHttp.isValidBareHost h then none
-        else
-          match LeanSys.Http.parseStrictContentLength? pStr with
-          | some p => if 1 ≤ p && p ≤ 65535 then some (isTls, h, p.toUInt16, pfx) else none
-          | none => none
-      | _ => none
 
 /-- Incremental Sans-I/O RFC 9112 §7.1 HTTP/1.1 `Transfer-Encoding: chunked` stream decoder state. -/
 inductive ChunkedStreamState where

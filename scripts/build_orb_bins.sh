@@ -55,6 +55,16 @@ do
   fi
 done
 
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  for ossl_dir in "/opt/homebrew/opt/openssl@3" "/usr/local/opt/openssl@3"; do
+    if [[ -d "$ossl_dir/include" && -d "$ossl_dir/lib" ]]; then
+      export CPATH="${CPATH:+$CPATH:}$ossl_dir/include"
+      export LIBRARY_PATH="${LIBRARY_PATH:+$LIBRARY_PATH:}$ossl_dir/lib"
+      break
+    fi
+  done
+fi
+
 if ! command -v lake >/dev/null 2>&1; then
   if [[ "$ENSURE_LEAN" == "1" ]]; then
     os_name="$(uname -s)"

@@ -383,6 +383,10 @@ private opaque c_fn_183 (a0 : UInt8) (a1 : UInt32) (a2 : UInt32) (a3 : UInt32) (
 private opaque c_fn_184 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt8) (a6 : UInt8) (a7 : UInt32) (a8 : UInt32) (a9 : UInt32) (a10 : UInt32) (a11 : UInt64) (a12 : UInt64) : UInt64
 @[extern "orb_stream_open_tail_cap_step"]
 private opaque c_fn_185 (a0 : UInt32) (a1 : UInt32) (a2 : UInt32) (a3 : UInt32) (a4 : UInt32) (a5 : UInt32) (a6 : UInt8) : UInt64
+@[extern "orb_rtt_ewma_step"]
+private opaque c_fn_186 (a0 : UInt32) (a1 : UInt32) (a2 : UInt32) : UInt64
+@[extern "orb_client_link_budget_step"]
+private opaque c_fn_187 (a0 : UInt32) (a1 : UInt32) (a2 : UInt32) (a3 : UInt8) (a4 : UInt32) : UInt64
 
 private def callExportChunk0? (sym : String) (args : Array UInt64) : Option UInt64 :=
   if sym == "orb_verify_writer_reuse" && args.size == 6 then some ((c_fn_0 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt8).toUInt64)
@@ -592,9 +596,11 @@ private def callExportChunk7? (sym : String) (args : Array UInt64) : Option UInt
   else if sym == "orb_followup_queue_step" && args.size == 13 then some (c_fn_183 (args[0]!).toUInt8 (args[1]!).toUInt32 (args[2]!).toUInt32 (args[3]!).toUInt32 (args[4]!) (args[5]!) (args[6]!) (args[7]!) (args[8]!) (args[9]!).toUInt8 (args[10]!).toUInt8 (args[11]!).toUInt8 (args[12]!).toUInt8)
   else if sym == "orb_transport_epoch_step" && args.size == 13 then some (c_fn_184 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt8 (args[6]!).toUInt8 (args[7]!).toUInt32 (args[8]!).toUInt32 (args[9]!).toUInt32 (args[10]!).toUInt32 (args[11]!) (args[12]!))
   else if sym == "orb_stream_open_tail_cap_step" && args.size == 7 then some (c_fn_185 (args[0]!).toUInt32 (args[1]!).toUInt32 (args[2]!).toUInt32 (args[3]!).toUInt32 (args[4]!).toUInt32 (args[5]!).toUInt32 (args[6]!).toUInt8)
+  else if sym == "orb_rtt_ewma_step" && args.size == 3 then some (c_fn_186 (args[0]!).toUInt32 (args[1]!).toUInt32 (args[2]!).toUInt32)
+  else if sym == "orb_client_link_budget_step" && args.size == 5 then some (c_fn_187 (args[0]!).toUInt32 (args[1]!).toUInt32 (args[2]!).toUInt32 (args[3]!).toUInt8 (args[4]!).toUInt32)
   else none
 
-/-- Dispatch any of the 186 C-ABI exports by symbol name and `UInt64` argument vector. -/
+/-- Dispatch any of the 188 C-ABI exports by symbol name and `UInt64` argument vector. -/
 def callExportU64? (sym : String) (args : Array UInt64) : Option UInt64 :=
   (callExportChunk0? sym args) <|> (callExportChunk1? sym args) <|> (callExportChunk2? sym args) <|> (callExportChunk3? sym args) <|> (callExportChunk4? sym args) <|> (callExportChunk5? sym args) <|> (callExportChunk6? sym args) <|> (callExportChunk7? sym args)
 
@@ -919,7 +925,45 @@ def runSharedFixtures (fixturesDir : String) : IO UInt32 := do
       IO.eprintln s!"[orb-spec-runner] FAIL: r6a-client-kernel mismatch {cname}"
       return 1
 
-  IO.println "test result: ok. 3 passed; 0 failed; 0 ignored"
+  let lgRaw ← IO.FS.readFile s!"{fixturesDir}/client-link-governor.json"
+  let .ok lgDoc := parse lgRaw
+    | do IO.eprintln "[orb-spec-runner] FAIL: parse client-link-governor.json"; return 1
+  for c in (lgDoc.fieldArr? "rtt_ewma_cases").getD #[] do
+    let srtt := ((c.fieldUInt64? "srtt_ms").getD 0).toUInt32
+    let rvar := ((c.fieldUInt64? "rtt_var_ms").getD 0).toUInt32
+    let samp := ((c.fieldUInt64? "sample_ms").getD 0).toUInt32
+    let packed := Orb.Kernel.rttEwmaStep srtt rvar samp
+    let gotSrtt := packed &&& 0xFFFFFFFF
+    let gotVar := (packed >>> 32) &&& 0xFFFFFFFF
+    let e := c.fieldOrNull "expected"
+    if gotSrtt != ((e.fieldUInt64? "next_srtt_ms").getD 999999) ||
+       gotVar != ((e.fieldUInt64? "next_rtt_var_ms").getD 999999) then
+      let cname := (c.fieldStr? "name").getD ""
+      IO.eprintln s!"[orb-spec-runner] FAIL: rtt_ewma mismatch {cname} (got {gotSrtt}/{gotVar})"
+      return 1
+  for c in (lgDoc.fieldArr? "link_budget_cases").getD #[] do
+    let srtt := ((c.fieldUInt64? "srtt_ms").getD 0).toUInt32
+    let rvar := ((c.fieldUInt64? "rtt_var_ms").getD 0).toUInt32
+    let fails := ((c.fieldUInt64? "consecutive_failures").getD 0).toUInt32
+    let constr := ((c.fieldUInt64? "is_constrained").getD 0).toUInt8
+    let p0 := ((c.fieldUInt64? "p0_in_flight").getD 0).toUInt32
+    let packed := Orb.Kernel.clientLinkBudgetStep srtt rvar fails constr p0
+    let p1Cap := packed &&& 0xFF
+    let p2Cap := (packed >>> 8) &&& 0xFF
+    let connMs := (packed >>> 16) &&& 0xFFFF
+    let pongMs := (packed >>> 32) &&& 0xFFFF
+    let wakeMs := (packed >>> 48) &&& 0xFFFF
+    let e := c.fieldOrNull "expected"
+    if p1Cap != ((e.fieldUInt64? "p1_cap").getD 999) ||
+       p2Cap != ((e.fieldUInt64? "p2_cap").getD 999) ||
+       connMs != ((e.fieldUInt64? "connect_deadline_ms").getD 999999) ||
+       pongMs != ((e.fieldUInt64? "pong_deadline_ms").getD 999999) ||
+       wakeMs != ((e.fieldUInt64? "wake_pong_deadline_ms").getD 999999) then
+      let cname := (c.fieldStr? "name").getD ""
+      IO.eprintln s!"[orb-spec-runner] FAIL: link_budget mismatch {cname}"
+      return 1
+
+  IO.println "test result: ok. 5 passed; 0 failed; 0 ignored"
   return 0
 
 /-- Execute a `cases.txt` batch (`id:symbol:arg0,arg1,...`) and print `id:value`. -/

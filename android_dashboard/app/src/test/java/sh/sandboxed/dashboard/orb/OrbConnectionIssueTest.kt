@@ -88,16 +88,16 @@ class OrbConnectionIssueTest {
         assertEquals(
             listOf(
                 "https://orbcore.thomas.md",
-                "https://agent-backend.nico-best-pc-ever.ovh",
-                "https://agent-backend.thomas.md"
+                "https://agent-backend.thomas.md",
+                "https://agent-backend.nico-best-pc-ever.ovh"
             ),
             OrbConnection.candidateEndpoints("https://orbcore.thomas.md/")
         )
         assertEquals(
             listOf(
                 "https://agent-backend.nico-best-pc-ever.ovh",
-                "https://orbcore.thomas.md",
-                "https://agent-backend.thomas.md"
+                "https://agent-backend.thomas.md",
+                "https://orbcore.thomas.md"
             ),
             OrbConnection.candidateEndpoints("https://agent-backend.nico-best-pc-ever.ovh/")
         )

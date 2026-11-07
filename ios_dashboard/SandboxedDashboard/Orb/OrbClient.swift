@@ -739,7 +739,8 @@ final class OrbCore {
                 if Task.isCancelled || closed { break }
                 guard let url = Self.makeWSURL(base: base, path: "/api/control/sync") else { continue }
                 var request = URLRequest(url: url)
-                request.timeoutInterval = 8
+                let connectDeadlineSecs = max(6.0, Double(OrbBackgroundSyncMonitor.shared.linkBudget.connectDeadlineMs) / 1000.0)
+                request.timeoutInterval = connectDeadlineSecs
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
                 let task = OrbCore.streamSession.webSocketTask(with: request)
                 self.wsTask = task
@@ -747,17 +748,28 @@ final class OrbCore {
                 self.presentationSent = nil
                 task.resume()
 
+                var awaitingPongSinceMs: Int64? = nil
                 let pingLoop = Task { @MainActor [weak self] in
                     while !Task.isCancelled {
                         try? await Task.sleep(for: .seconds(10))
                         guard let self, !self.closed, self.opened else { continue }
-                        self.sendJSON(["op": "ping", "ts": Int64(Date().timeIntervalSince1970 * 1000)])
+                        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+                        let pongDeadlineMs = Int64(OrbBackgroundSyncMonitor.shared.linkBudget.pongDeadlineMs)
+                        if let since = awaitingPongSinceMs, nowMs - since >= pongDeadlineMs {
+                            task.cancel(with: .goingAway, reason: nil)
+                            break
+                        }
+                        if awaitingPongSinceMs == nil {
+                            awaitingPongSinceMs = nowMs
+                        }
+                        self.sendJSON(["op": "ping", "ts": nowMs])
                     }
                 }
 
                 do {
                     while !Task.isCancelled && !closed {
                         let message = try await task.receive()
+                        awaitingPongSinceMs = nil
                         let text: String
                         switch message {
                         case .string(let s): text = s

@@ -490,3 +490,13 @@ JNIEXPORT jlong JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_orbStreamOpenTailCapStep(JNIEnv *env, jclass clazz, jint prevLen, jint prevCommit, jint prevCheckpoint, jint newLen, jint rawCommit, jint maxOpenTailBytes, jint openFenceActive) {
     return (jlong)orb_stream_open_tail_cap_step((uint32_t)prevLen, (uint32_t)prevCommit, (uint32_t)prevCheckpoint, (uint32_t)newLen, (uint32_t)rawCommit, (uint32_t)maxOpenTailBytes, (uint8_t)openFenceActive);
 }
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbRttEwmaStep(JNIEnv *env, jclass clazz, jint srttMs, jint rttVarMs, jint sampleMs) {
+    return (jlong)orb_rtt_ewma_step((uint32_t)srttMs, (uint32_t)rttVarMs, (uint32_t)sampleMs);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbClientLinkBudgetStep(JNIEnv *env, jclass clazz, jint srttMs, jint rttVarMs, jint consecutiveFailures, jint isConstrained, jint p0InFlight) {
+    return (jlong)orb_client_link_budget_step((uint32_t)srttMs, (uint32_t)rttVarMs, (uint32_t)consecutiveFailures, (uint8_t)isConstrained, (uint32_t)p0InFlight);
+}

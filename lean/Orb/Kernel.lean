@@ -4097,4 +4097,99 @@ def streamOpenTailCapStep
     if !admit then prevCheckpoint else nextCheckpoint
   lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Poor-Network Transport: RFC 6298 RTT Estimator & Client Link Budget Governor
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Unboxed C-ABI RFC 6298 Smoothed RTT & Variance Estimator (`orb_rtt_ewma_step`):
+  Shared across macOS, Linux, iOS, and Android (`orb-locald`, Desktop WebAssembly, Swift, JNI):
+  - Clamps `sampleMs` to `[1, 60000]`.
+  - Cold start (`srttMs == 0`): `nextSrtt = sample`, `nextVar = max(50, sample / 2)`.
+  - Steady state: `nextVar = clamp((3 * rttVar + |srtt - sample|) / 4, 10, 60000)`,
+    `nextSrtt = clamp((7 * srtt + sample) / 8, 1, 60000)`.
+  - Packs `(nextVar.toUInt64 <<< 32) ||| nextSrtt.toUInt64`.
+-/
+@[inline, export orb_rtt_ewma_step]
+def rttEwmaStep (srttMs rttVarMs sampleMs : UInt32) : UInt64 :=
+  let sample32 : UInt32 :=
+    if sampleMs == 0 then 1
+    else if sampleMs > 60000 then 60000
+    else sampleMs
+  if srttMs == 0 then
+    let halfSample : UInt32 := sample32 >>> 1
+    let initVar : UInt32 := if halfSample < 50 then 50 else halfSample
+    sample32.toUInt64 ||| (initVar.toUInt64 <<< 32)
+  else
+    let srtt64 : UInt64 := if srttMs > 60000 then 60000 else srttMs.toUInt64
+    let var64 : UInt64 := if rttVarMs > 60000 then 60000 else rttVarMs.toUInt64
+    let sample64 : UInt64 := sample32.toUInt64
+    let diff64 : UInt64 := if srtt64 >= sample64 then srtt64 - sample64 else sample64 - srtt64
+    let rawVar : UInt64 := (3 * var64 + diff64) >>> 2
+    let nextVar : UInt32 :=
+      if rawVar < 10 then 10
+      else if rawVar > 60000 then 60000
+      else rawVar.toUInt32
+    let rawSrtt : UInt64 := (7 * srtt64 + sample64) >>> 3
+    let nextSrtt : UInt32 :=
+      if rawSrtt < 1 then 1
+      else if rawSrtt > 60000 then 60000
+      else rawSrtt.toUInt32
+    nextSrtt.toUInt64 ||| (nextVar.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Cross-Client Priority Concurrency & Adaptive WebSocket Deadline Governor
+  (`orb_client_link_budget_step`):
+  Governs `P1` (foreground conversation/sidebar), `P2` (background prefetches/sweeps), and
+  `sync-ws` connect/pong/wake-probe deadlines across macOS, Linux, iOS, and Android:
+  - `bits 0..7`: `p1Cap` (`2..6`)
+  - `bits 8..15`: `p2Cap` (`0..4`; strictly `0` whenever `p0InFlight > 0`, `srttMs > 1200`,
+    `consecutiveFailures > 0`, or `isConstrained != 0`)
+  - `bits 16..31`: `connectDeadlineMs` (`8000..30000`)
+  - `bits 32..47`: `pongDeadlineMs` (`8000..25000`)
+  - `bits 48..63`: `wakePongDeadlineMs` (`6000..15000`)
+-/
+@[inline, export orb_client_link_budget_step]
+def clientLinkBudgetStep
+    (srttMs rttVarMs consecutiveFailures : UInt32)
+    (isConstrained : UInt8)
+    (p0InFlight : UInt32) : UInt64 :=
+  let degraded : Bool :=
+    srttMs > 1200 || consecutiveFailures > 0 || isConstrained != 0
+  let moderate : Bool := !degraded && srttMs > 400
+  let p1Cap : UInt32 :=
+    if degraded then 2
+    else if moderate then 3
+    else 6
+  let p2Cap : UInt32 :=
+    if p0InFlight > 0 || degraded then 0
+    else if moderate then 1
+    else 4
+  let srtt64 : UInt64 := if srttMs > 60000 then 60000 else srttMs.toUInt64
+  let var64 : UInt64 := if rttVarMs > 60000 then 60000 else rttVarMs.toUInt64
+  let failSteps : UInt64 :=
+    if consecutiveFailures >= 4 then 4 else consecutiveFailures.toUInt64
+  let baseConn : UInt64 :=
+    if srtt64 == 0 then 10000 else srtt64 + 4 * var64 + 4000
+  let rawConn : UInt64 := baseConn + 2000 * failSteps
+  let connMs : UInt32 :=
+    if rawConn < 8000 then 8000
+    else if rawConn > 30000 then 30000
+    else rawConn.toUInt32
+  let rawPong : UInt64 :=
+    if srtt64 == 0 then 8000 else srtt64 + 4 * var64 + 3000
+  let pongMs : UInt32 :=
+    if rawPong < 8000 then 8000
+    else if rawPong > 25000 then 25000
+    else rawPong.toUInt32
+  let rawWake : UInt64 :=
+    if srtt64 == 0 then 6000 else srtt64 + 2 * var64 + 2500
+  let wakeMs : UInt32 :=
+    if rawWake < 6000 then 6000
+    else if rawWake > 15000 then 15000
+    else rawWake.toUInt32
+  let lo32 : UInt32 := p1Cap ||| (p2Cap <<< 8) ||| (connMs <<< 16)
+  let hi32 : UInt32 := pongMs ||| (wakeMs <<< 16)
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
 end Orb.Kernel

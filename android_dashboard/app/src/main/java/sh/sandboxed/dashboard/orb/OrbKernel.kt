@@ -949,6 +949,18 @@ object OrbKernel {
         openFenceActive: Int
     ): Long
 
+    @JvmStatic
+    external fun orbRttEwmaStep(srttMs: Int, rttVarMs: Int, sampleMs: Int): Long
+
+    @JvmStatic
+    external fun orbClientLinkBudgetStep(
+        srttMs: Int,
+        rttVarMs: Int,
+        consecutiveFailures: Int,
+        isConstrained: Int,
+        p0InFlight: Int
+    ): Long
+
     data class WorkfoldVerdict(val foldItem: Boolean, val foldHasToolNext: Boolean)
 
     private fun bInt(v: Boolean): Int = if (v) 1 else 0
@@ -2079,6 +2091,52 @@ object OrbKernel {
             checkpointForced = ((lo32 ushr 9) and 1) != 0,
             openFenceCapped = ((lo32 ushr 10) and 1) != 0,
             nextCheckpoint = hi32
+        )
+    }
+
+    data class RttEwmaStepResult(
+        val srttMs: Int,
+        val rttVarMs: Int
+    )
+
+    fun rttEwmaStep(srttMs: Int, rttVarMs: Int, sampleMs: Int): RttEwmaStepResult {
+        requireNative()
+        val raw = orbRttEwmaStep(maxOf(0, srttMs), maxOf(0, rttVarMs), maxOf(0, sampleMs))
+        return RttEwmaStepResult(
+            srttMs = (raw and 0xFFFF_FFFFL).toInt(),
+            rttVarMs = ((raw ushr 32) and 0xFFFF_FFFFL).toInt()
+        )
+    }
+
+    data class ClientLinkBudgetStepResult(
+        val p1Cap: Int,
+        val p2Cap: Int,
+        val connectDeadlineMs: Int,
+        val pongDeadlineMs: Int,
+        val wakePongDeadlineMs: Int
+    )
+
+    fun clientLinkBudgetStep(
+        srttMs: Int,
+        rttVarMs: Int,
+        consecutiveFailures: Int,
+        isConstrained: Boolean,
+        p0InFlight: Int
+    ): ClientLinkBudgetStepResult {
+        requireNative()
+        val raw = orbClientLinkBudgetStep(
+            maxOf(0, srttMs),
+            maxOf(0, rttVarMs),
+            maxOf(0, consecutiveFailures),
+            bInt(isConstrained),
+            maxOf(0, p0InFlight)
+        )
+        return ClientLinkBudgetStepResult(
+            p1Cap = (raw and 0xFFL).toInt(),
+            p2Cap = ((raw ushr 8) and 0xFFL).toInt(),
+            connectDeadlineMs = ((raw ushr 16) and 0xFFFFL).toInt(),
+            pongDeadlineMs = ((raw ushr 32) and 0xFFFFL).toInt(),
+            wakePongDeadlineMs = ((raw ushr 48) and 0xFFFFL).toInt()
         )
     }
 }

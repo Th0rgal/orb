@@ -264,8 +264,8 @@ def main : IO UInt32 := do
       (match jv.fieldArr? "failover_origins" with
        | some #[.str o0, .str o1, .str o2] =>
          o0 == "https://agent-backend-dev.thomas.md" &&
-         o1 == "https://orbcore.thomas.md" &&
-         o2 == "https://agent-backend.thomas.md"
+         o1 == "https://agent-backend.thomas.md" &&
+         o2 == "https://orbcore.thomas.md"
        | _ => false)
     | .error _ => false
   if (← assertTrue "transport_bridge_configure_updates_target_and_candidates" txCustomOk) then passed := passed + 1
@@ -583,6 +583,50 @@ def main : IO UInt32 := do
   runR7aInteractiveToolSlotTests
   passed := passed + 13
   total := total + 13
+
+  -- 17. Edge-diverse failover ordering, priority classification, EWMA RTT + cooldown ranking, and transport_bridge_configure apiUrl
+  total := total + 1
+  let edgeDivOk :=
+    candidateFailoverOrigins "https://orbcore.thomas.md" ==
+      #["https://orbcore.thomas.md", "https://agent-backend.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"] &&
+    candidateFailoverOrigins "https://agent-backend.thomas.md/" ==
+      #["https://agent-backend.thomas.md", "https://orbcore.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"] &&
+    candidateFailoverOrigins "https://agent-backend.nico-best-pc-ever.ovh" ==
+      #["https://agent-backend.nico-best-pc-ever.ovh", "https://agent-backend.thomas.md", "https://orbcore.thomas.md"] &&
+    candidateFailoverOrigins "https://selfhosted.example:8443/" ==
+      #["https://selfhosted.example:8443"]
+  if (← assertTrue "edge_diverse_candidate_failover_origins" edgeDivOk) then passed := passed + 1
+
+  total := total + 1
+  let prioOk :=
+    classifyProxyRequestPriority "POST" "/api/control/missions/m1/message" none == 0 &&
+    classifyProxyRequestPriority "GET" "/api/auth/me" none == 0 &&
+    classifyProxyRequestPriority "GET" "/api/control/missions/m1/events" none == 1 &&
+    classifyProxyRequestPriority "GET" "/api/software" none == 2 &&
+    classifyProxyRequestPriority "GET" "/api/control/missions/m1/events" (some "p2") == 2 &&
+    classifyProxyRequestPriority "GET" "/api/software" (some "p0") == 0
+  if (← assertTrue "proxy_request_priority_classification" prioOk) then passed := passed + 1
+
+  let stRankRef ← IO.mkRef ({ launchToken := validTok } : LocaldState)
+  let srtt1 ← recordOriginSuccess stRankRef "https://orbcore.thomas.md" 800
+  let srtt2 ← recordOriginSuccess stRankRef "https://orbcore.thomas.md" 400
+  recordOriginFailure stRankRef "https://orbcore.thomas.md" 10000 20000
+  let rankSt ← stRankRef.get
+  let rankedDuringCooldown := rankFailoverOrigins defaultFailoverOrigins rankSt.originHealth 15000
+  let rankedAfterCooldown := rankFailoverOrigins defaultFailoverOrigins rankSt.originHealth 35000
+  let txCustomRes2 ← dispatchRpcCommand stRankRef "transport_bridge_configure" (.obj #[("apiUrl", .str "https://custom.orb.internal:9443/")])
+  total := total + 1
+  let rankAndCfgOk :=
+    srtt1 == 800 && srtt2 == 750 &&
+    rankedDuringCooldown == #["https://agent-backend.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh", "https://orbcore.thomas.md"] &&
+    rankedAfterCooldown == defaultFailoverOrigins &&
+    (match txCustomRes2 with
+     | .ok jv =>
+       match jv.fieldArr? "failover_origins" with
+       | some #[.str "https://custom.orb.internal:9443"] => true
+       | _ => false
+     | _ => false)
+  if (← assertTrue "origin_ewma_cooldown_ranking_and_bridge_api_url" rankAndCfgOk) then passed := passed + 1
 
   try IO.FS.removeDirAll tmpStateDir catch _ => pure ()
 

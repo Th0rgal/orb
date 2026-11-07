@@ -870,6 +870,24 @@ textarea::placeholder { color: var(--placeholder); }
 button.under-model { color: inherit; }
 .under-model svg, .under-loc svg:last-child, .under-harness svg:last-child { width: 10px; height: 10px; flex: none; }
 .under-model-menu { min-width: 180px; }
+.under-link-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 18px; padding: 0 6px; border-radius: var(--radius-xs);
+  border: 1px solid var(--stroke-soft); background: var(--bg-elev);
+  color: var(--fg-3); font-size: 11px; line-height: 1; flex: none;
+}
+.under-link-pill > i {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--fg-3); flex: none;
+}
+.under-link-pill.slow > i { background: var(--warning); }
+.under-link-pill.reconnecting { color: var(--fg-2); }
+.under-link-pill.reconnecting > i {
+  background: var(--warning);
+  animation: rdot 1.4s ease-in-out infinite;
+}
+.under-link-pill + .ctx-wrap { margin-left: 0; }
+.under-link-pill { margin-left: auto; }
 .ctx-wrap, .ctx { margin-left: auto; flex: none; }
 .ctx-wrap { position: relative; }
 .ctx { color: inherit; }
@@ -877,6 +895,8 @@ button.under-model { color: inherit; }
   .under { gap: 4px; padding-left: 6px; padding-right: 6px; }
   .under-verbose-prefix, .under-verbose-suffix { display: none; }
   .under-model { max-width: 130px; }
+  .under-link-label { display: none; }
+  .under-link-pill { padding: 0 5px; }
 }
 @container (max-width: 360px) {
   .under-loc > .under-label { display: none; }

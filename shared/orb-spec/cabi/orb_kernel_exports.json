@@ -185,6 +185,8 @@
     "orb_sidebar_drag_step",
     "orb_followup_queue_step",
     "orb_transport_epoch_step",
-    "orb_stream_open_tail_cap_step"
+    "orb_stream_open_tail_cap_step",
+    "orb_rtt_ewma_step",
+    "orb_client_link_budget_step"
   ]
 }

@@ -201,4 +201,59 @@ class OrbBackgroundSyncTest {
             )
         )
     }
+
+    @Test
+    fun replaysSharedClientLinkGovernorFixtures() {
+        val specDir = System.getProperty("orb.spec.dir")
+        val candidates = listOfNotNull(
+            specDir?.let { File(it, "fixtures/client-link-governor.json") },
+            File("../shared/orb-spec/fixtures/client-link-governor.json"),
+            File("../../shared/orb-spec/fixtures/client-link-governor.json"),
+            File("shared/orb-spec/fixtures/client-link-governor.json"),
+        )
+        val file = candidates.firstOrNull { it.exists() }
+            ?: error("Could not locate shared/orb-spec/fixtures/client-link-governor.json")
+        val root = OrbJSON.dict(OrbJSON.parse(file.readText()))
+            ?: error("Invalid JSON in client-link-governor.json")
+
+        val ewmaCases = OrbJSON.dictList(root["rtt_ewma_cases"])
+        assertFalse(ewmaCases.isEmpty())
+        for (c in ewmaCases) {
+            val name = OrbJSON.str(c, "name")!!
+            val expected = OrbJSON.dict(c["expected"])!!
+            val res = OrbKernel.rttEwmaStep(
+                srttMs = (c["srtt_ms"] as Number).toInt(),
+                rttVarMs = (c["rtt_var_ms"] as Number).toInt(),
+                sampleMs = (c["sample_ms"] as Number).toInt(),
+            )
+            assertEquals(name, (expected["next_srtt_ms"] as Number).toInt(), res.srttMs)
+            assertEquals(name, (expected["next_rtt_var_ms"] as Number).toInt(), res.rttVarMs)
+        }
+
+        val budgetCases = OrbJSON.dictList(root["link_budget_cases"])
+        assertFalse(budgetCases.isEmpty())
+        for (c in budgetCases) {
+            val name = OrbJSON.str(c, "name")!!
+            val expected = OrbJSON.dict(c["expected"])!!
+            val res = OrbKernel.clientLinkBudgetStep(
+                srttMs = (c["srtt_ms"] as Number).toInt(),
+                rttVarMs = (c["rtt_var_ms"] as Number).toInt(),
+                consecutiveFailures = (c["consecutive_failures"] as Number).toInt(),
+                isConstrained = (c["is_constrained"] as Number).toInt() != 0,
+                p0InFlight = (c["p0_in_flight"] as Number).toInt(),
+            )
+            assertEquals(name, (expected["p1_cap"] as Number).toInt(), res.p1Cap)
+            assertEquals(name, (expected["p2_cap"] as Number).toInt(), res.p2Cap)
+            assertEquals(name, (expected["connect_deadline_ms"] as Number).toInt(), res.connectDeadlineMs)
+            assertEquals(name, (expected["pong_deadline_ms"] as Number).toInt(), res.pongDeadlineMs)
+            assertEquals(name, (expected["wake_pong_deadline_ms"] as Number).toInt(), res.wakePongDeadlineMs)
+        }
+
+        val originCases = OrbJSON.dictList(root["candidate_origin_cases"])
+        for (c in originCases) {
+            val name = OrbJSON.str(c, "name")!!
+            val configured = OrbJSON.str(c, "configured_url")!!
+            assertEquals(name, OrbJSON.strList(c, "expected"), OrbConnection.candidateEndpoints(configured))
+        }
+    }
 }

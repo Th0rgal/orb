@@ -1485,3 +1485,49 @@ export function orbStreamOpenTailCapStep(
   };
 }
 
+export type RttEwmaVerdict = {
+  srttMs: number;
+  rttVarMs: number;
+};
+
+export function orbRttEwmaStep(srttMs: number, rttVarMs: number, sampleMs: number): RttEwmaVerdict {
+  const raw = kernel.orb_rtt_ewma_step(sat32(srttMs), sat32(rttVarMs), sat32(sampleMs));
+  return {
+    srttMs: Number(raw & 0xffff_ffffn),
+    rttVarMs: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+export type ClientLinkBudget = {
+  p1Cap: number;
+  p2Cap: number;
+  connectDeadlineMs: number;
+  pongDeadlineMs: number;
+  wakePongDeadlineMs: number;
+};
+
+export function orbClientLinkBudgetStep(input: {
+  srttMs: number;
+  rttVarMs: number;
+  consecutiveFailures: number;
+  isConstrained: boolean;
+  p0InFlight: number;
+}): ClientLinkBudget {
+  const raw = kernel.orb_client_link_budget_step(
+    sat32(input.srttMs),
+    sat32(input.rttVarMs),
+    sat32(input.consecutiveFailures),
+    b8(input.isConstrained),
+    sat32(input.p0InFlight),
+  );
+  const lo32 = Number(raw & 0xffff_ffffn);
+  const hi32 = Number((raw >> 32n) & 0xffff_ffffn);
+  return {
+    p1Cap: lo32 & 0xff,
+    p2Cap: (lo32 >>> 8) & 0xff,
+    connectDeadlineMs: (lo32 >>> 16) & 0xffff,
+    pongDeadlineMs: hi32 & 0xffff,
+    wakePongDeadlineMs: (hi32 >>> 16) & 0xffff,
+  };
+}
+

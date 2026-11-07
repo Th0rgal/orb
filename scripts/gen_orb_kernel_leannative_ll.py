@@ -559,6 +559,41 @@ BRANCHLESS_PROBES: dict[str, str] = {
         (blSel32 isMove moveHi
           (blSel32 isSpring spHi 0)))
   lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)""",
+    "orb_rtt_ewma_step": """@[export probe_orb_rtt_ewma_step] def probe_orb_rtt_ewma_step (a0 a1 a2 : UInt64) : UInt64 :=
+  let srttMs := a0 &&& 0xFFFFFFFF; let rttVarMs := a1 &&& 0xFFFFFFFF; let sampleMs := a2 &&& 0xFFFFFFFF
+  let sample64 := blSel64 (blEz64 sampleMs) 1 (blSel64 (blLt64 60000 sampleMs) 60000 sampleMs)
+  let halfSample := sample64 >>> 1
+  let initVar := blSel64 (blLt64 halfSample 50) 50 halfSample
+  let coldWord := sample64 ||| (initVar <<< 32)
+  let srtt64 := blSel64 (blLt64 60000 srttMs) 60000 srttMs
+  let var64 := blSel64 (blLt64 60000 rttVarMs) 60000 rttVarMs
+  let diff64 := blSel64 (blLe64 sample64 srtt64) (srtt64 - sample64) (sample64 - srtt64)
+  let rawVar := (3 * var64 + diff64) >>> 2
+  let nextVar := blSel64 (blLt64 rawVar 10) 10 (blSel64 (blLt64 60000 rawVar) 60000 rawVar)
+  let rawSrtt := (7 * srtt64 + sample64) >>> 3
+  let nextSrtt := blSel64 (blLt64 rawSrtt 1) 1 (blSel64 (blLt64 60000 rawSrtt) 60000 rawSrtt)
+  let warmWord := nextSrtt ||| (nextVar <<< 32)
+  blSel64 (blEz64 srttMs) coldWord warmWord""",
+    "orb_client_link_budget_step": """@[export probe_orb_client_link_budget_step] def probe_orb_client_link_budget_step (a0 a1 a2 a3 a4 : UInt64) : UInt64 :=
+  let srtt64_in := a0 &&& 0xFFFFFFFF; let var64_in := a1 &&& 0xFFFFFFFF; let fails := a2 &&& 0xFFFFFFFF
+  let constrained := a3 &&& 0xFF; let p0 := a4 &&& 0xFFFFFFFF
+  let degraded := blLt64 1200 srtt64_in ||| blLt64 0 fails ||| blNz64 constrained
+  let moderate := (degraded ^^^ 1) &&& blLt64 400 srtt64_in
+  let p1Cap := blSel64 degraded 2 (blSel64 moderate 3 6)
+  let p2Cap := blSel64 (blLt64 0 p0 ||| degraded) 0 (blSel64 moderate 1 4)
+  let srtt64 := blSel64 (blLt64 60000 srtt64_in) 60000 srtt64_in
+  let var64 := blSel64 (blLt64 60000 var64_in) 60000 var64_in
+  let failSteps := blSel64 (blLe64 4 fails) 4 fails
+  let baseConn := blSel64 (blEz64 srtt64) 10000 (srtt64 + 4 * var64 + 4000)
+  let rawConn := baseConn + 2000 * failSteps
+  let connMs := blSel64 (blLt64 rawConn 8000) 8000 (blSel64 (blLt64 30000 rawConn) 30000 rawConn)
+  let rawPong := blSel64 (blEz64 srtt64) 8000 (srtt64 + 4 * var64 + 3000)
+  let pongMs := blSel64 (blLt64 rawPong 8000) 8000 (blSel64 (blLt64 25000 rawPong) 25000 rawPong)
+  let rawWake := blSel64 (blEz64 srtt64) 6000 (srtt64 + 2 * var64 + 2500)
+  let wakeMs := blSel64 (blLt64 rawWake 6000) 6000 (blSel64 (blLt64 15000 rawWake) 15000 rawWake)
+  let lo64 := p1Cap ||| (p2Cap <<< 8) ||| (connMs <<< 16)
+  let hi64 := pongMs ||| (wakeMs <<< 16)
+  lo64 ||| (hi64 <<< 32)""",
 }
 
 BRANCHLESS_EQUIV_PROOFS = """
@@ -826,6 +861,20 @@ theorem eq_sidebar_drag_step (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 : UInt64) :
   simp only [bne, blNz32, blEz32, blEq8, blEq32, blLt32, blLe32, blLt8, blLe8, blSel32,
     probe_orb_sidebar_drag_step, Orb.Kernel.sidebarDragStep,
     Orb.Kernel.sidebarScrollStepPx, Orb.Kernel.sidebarScrollDirBits]
+  bv_decide
+
+theorem eq_rtt_ewma (a0 a1 a2 : UInt64) :
+    probe_orb_rtt_ewma_step a0 a1 a2 =
+    Orb.Kernel.rttEwmaStep a0.toUInt32 a1.toUInt32 a2.toUInt32 := by
+  simp only [bne, blNz64, blEz64, blLt64, blLe64, blSel64,
+    probe_orb_rtt_ewma_step, Orb.Kernel.rttEwmaStep]
+  bv_decide
+
+theorem eq_client_link_budget (a0 a1 a2 a3 a4 : UInt64) :
+    probe_orb_client_link_budget_step a0 a1 a2 a3 a4 =
+    Orb.Kernel.clientLinkBudgetStep a0.toUInt32 a1.toUInt32 a2.toUInt32 a3.toUInt8 a4.toUInt32 := by
+  simp only [bne, blNz64, blEz64, blLt64, blLe64, blSel64,
+    probe_orb_client_link_budget_step, Orb.Kernel.clientLinkBudgetStep]
   bv_decide
 """.strip()
 

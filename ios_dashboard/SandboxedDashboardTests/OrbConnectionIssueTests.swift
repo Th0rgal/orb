@@ -72,11 +72,11 @@ final class OrbConnectionIssueTests: XCTestCase {
     func testCandidateEndpointsPairDirectAndFallback() {
         XCTAssertEqual(
             OrbConnection.candidateEndpoints(for: "https://orbcore.thomas.md/"),
-            ["https://orbcore.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh", "https://agent-backend.thomas.md"]
+            ["https://orbcore.thomas.md", "https://agent-backend.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"]
         )
         XCTAssertEqual(
             OrbConnection.candidateEndpoints(for: "https://agent-backend.nico-best-pc-ever.ovh/"),
-            ["https://agent-backend.nico-best-pc-ever.ovh", "https://orbcore.thomas.md", "https://agent-backend.thomas.md"]
+            ["https://agent-backend.nico-best-pc-ever.ovh", "https://agent-backend.thomas.md", "https://orbcore.thomas.md"]
         )
         XCTAssertEqual(
             OrbConnection.candidateEndpoints(for: "https://agent-backend.thomas.md"),

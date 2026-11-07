@@ -9,3 +9,5 @@ import OrbNetLeaf.Crypto
 import OrbNetLeaf.HpackQpack
 import OrbNetLeaf.Pty
 import OrbNetLeaf.TlsHttp
+import OrbNetLeaf.Gzip
+import OrbNetLeaf.H2Pool

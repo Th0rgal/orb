@@ -17,6 +17,7 @@ import {
   type ResourcesWindowRange,
 } from "./api";
 import { ErrorToast } from "./toast";
+import { cachePeek, cachePut } from "./pageCache";
 import { pollWhileVisible } from "./poll";
 import {
   buildMissionFlowSankeyInput,
@@ -107,9 +108,17 @@ export default function Resources(props: {
   const [horizon, setHorizon] = createSignal<string>("6h");
   const [submode, setSubmode] = createSignal<MissionDetailSubmode>("flow");
 
-  const [overview, setOverview] = createSignal<ResourcesOverviewResponse | null>(null);
-  const [detail, setDetail] = createSignal<MissionResourcesResponse | null>(null);
-  const [loading, setLoading] = createSignal<boolean>(true);
+  const [overview, setOverview] = createSignal<ResourcesOverviewResponse | null>(
+    cachePeek<ResourcesOverviewResponse>("resources:overview:6h") ?? null,
+  );
+  const [detail, setDetail] = createSignal<MissionResourcesResponse | null>(
+    props.missionId ? (cachePeek<MissionResourcesResponse>(`resources:mission:${props.missionId}:6h`) ?? null) : null,
+  );
+  const [loading, setLoading] = createSignal<boolean>(
+    props.missionId
+      ? cachePeek<MissionResourcesResponse>(`resources:mission:${props.missionId}:6h`) === undefined
+      : cachePeek<ResourcesOverviewResponse>("resources:overview:6h") === undefined,
+  );
   const [error, setError] = createSignal<string | null>(null);
 
   const [isolatedId, setIsolatedId] = createSignal<string | null>(null);
@@ -187,7 +196,7 @@ export default function Resources(props: {
 
   let activeAbort: AbortController | null = null;
 
-  async function refresh(showSkeleton = false) {
+  async function refresh(showSkeleton = false, isBackgroundPoll = false) {
     activeAbort?.abort();
     const ac = new AbortController();
     activeAbort = ac;
@@ -196,19 +205,26 @@ export default function Resources(props: {
     if (showSkeleton) setLoading(true);
     try {
       if (mid) {
-        const res = await getMissionResources(mid, horizon(), ac.signal);
+        const h = horizon();
+        const res = await getMissionResources(mid, h, ac.signal);
         if (ac.signal.aborted) return;
+        cachePut(`resources:mission:${mid}:${h}`, res);
         setDetail(res);
         setError(null);
       } else {
-        const res = await getResourcesOverview(range(), ac.signal);
+        const r = range();
+        const res = await getResourcesOverview(r, ac.signal);
         if (ac.signal.aborted) return;
+        cachePut(`resources:overview:${r}`, res);
         setOverview(res);
         setError(null);
       }
     } catch (err) {
       if (ac.signal.aborted) return;
-      setError(err instanceof Error ? err.message : String(err));
+      const hasRenderedData = mid ? detail()?.mission.id === mid : overview() !== null;
+      if (!isBackgroundPoll || !hasRenderedData) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       if (!ac.signal.aborted) setLoading(false);
     }
@@ -235,16 +251,23 @@ export default function Resources(props: {
   createEffect(
     on(
       [connectionVersion, () => props.missionId ?? null, range, horizon],
-      ([, mid]) => {
+      ([, mid, r, h]) => {
+        if (mid) {
+          const cached = cachePeek<MissionResourcesResponse>(`resources:mission:${mid}:${h}`);
+          if (cached) setDetail(cached);
+        } else {
+          const cached = cachePeek<ResourcesOverviewResponse>(`resources:overview:${r}`);
+          if (cached) setOverview(cached);
+        }
         const needsSkeleton = mid ? detail()?.mission.id !== mid : overview() === null;
         setError(null);
-        void refresh(needsSkeleton);
+        void refresh(needsSkeleton, false);
       },
     ),
   );
 
   onMount(() => {
-    const stop = pollWhileVisible(() => refresh(false), 10_000, "app.resources");
+    const stop = pollWhileVisible(() => refresh(false, true), 10_000, "app.resources");
     onCleanup(() => {
       stop();
       activeAbort?.abort();

@@ -93,16 +93,16 @@ describe("connection reliability transport & prefetch bounds", () => {
     expect(seenIdemKeys).toEqual(["idem-fixed-1", "idem-fixed-1"]);
   });
 
-  it("fails over idempotent GET and Idempotency-Key POST across the 3-way orbcore failover ring", async () => {
+  it("fails over idempotent GET and Idempotency-Key POST across the 3-way Edge-diverse orbcore failover ring", async () => {
     expect(candidateApiUrls("https://orbcore.thomas.md")).toEqual([
       "https://orbcore.thomas.md",
-      "https://agent-backend.nico-best-pc-ever.ovh",
       "https://agent-backend.thomas.md",
+      "https://agent-backend.nico-best-pc-ever.ovh",
     ]);
     expect(candidateApiUrls("https://agent-backend.nico-best-pc-ever.ovh")).toEqual([
       "https://agent-backend.nico-best-pc-ever.ovh",
-      "https://orbcore.thomas.md",
       "https://agent-backend.thomas.md",
+      "https://orbcore.thomas.md",
     ]);
     expect(candidateApiUrls("https://agent-backend.thomas.md")).toEqual([
       "https://agent-backend.thomas.md",
@@ -128,16 +128,16 @@ describe("connection reliability transport & prefetch bounds", () => {
     expect(await res.json()).toEqual({ healthy: true });
     expect(seenUrls).toEqual([
       "https://agent-backend.nico-best-pc-ever.ovh/api/health",
-      "https://orbcore.thomas.md/api/health",
+      "https://agent-backend.thomas.md/api/health",
     ]);
 
-    // Subsequent Idempotency-Key POST skips the cooling-down .ovh endpoint and hits orbcore immediately.
+    // Subsequent Idempotency-Key POST skips the cooling-down .ovh endpoint and hits Cloudflare Edge immediately.
     const postRes = await transportFetch(
       "/api/control/missions/m1/opened",
       withIdempotencyKey({ method: "POST" }, "open-m1"),
     );
     expect(await postRes.json()).toEqual({ healthy: true });
-    expect(seenUrls[seenUrls.length - 1]).toBe("https://orbcore.thomas.md/api/control/missions/m1/opened");
+    expect(seenUrls[seenUrls.length - 1]).toBe("https://agent-backend.thomas.md/api/control/missions/m1/opened");
   });
 
   it("routes requests through Tauri loopback transport bridge when available", async () => {

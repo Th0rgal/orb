@@ -27,22 +27,24 @@ enum OrbConnection {
         return s
     }
 
-    /// Ordered candidate origins for 3-way multi-path failover (mirrors Desktop/Tauri/Android).
+    /// Ordered candidate origins for 3-way Edge-diverse multi-path failover (mirrors Desktop/Tauri/Android).
+    /// Prefers Cloudflare Edge BBR (`defaultBaseURL`) before direct OVH (`knownDirectBaseURL`) so lossy/high-RTT
+    /// Wi-Fi or cellular links avoid transatlantic CUBIC collapse when `orbcore` degrades.
     static func candidateEndpoints(for primary: String) -> [String] {
         let clean = normalize(primary)
         guard !clean.isEmpty else { return [] }
         let lower = clean.lowercased()
         if lower == orbcoreBaseURL {
-            return [clean, knownDirectBaseURL, defaultBaseURL]
+            return [clean, defaultBaseURL, knownDirectBaseURL]
         }
         if lower == knownDirectBaseURL {
-            return [clean, orbcoreBaseURL, defaultBaseURL]
+            return [clean, defaultBaseURL, orbcoreBaseURL]
         }
         if lower == defaultBaseURL {
             return [clean, orbcoreBaseURL, knownDirectBaseURL]
         }
         if lower.hasSuffix(".thomas.md") {
-            return [clean, orbcoreBaseURL, defaultBaseURL]
+            return [clean, defaultBaseURL, orbcoreBaseURL]
         }
         return [clean]
     }

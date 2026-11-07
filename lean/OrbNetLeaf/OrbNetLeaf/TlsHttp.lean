@@ -88,6 +88,7 @@ inductive TlsReadOutcome where
   | chunk (bytes : ByteArray)
   | closeNotify
   | tcpEof
+  | timeout
   | transportError
 
 /-- Read up to `maxChunk` (`1..65536`) decrypted bytes from a live `TlsSession`.
@@ -105,6 +106,8 @@ def readTlsSessionChunk
     return .closeNotify
   else if tag == 4 then
     return .tcpEof
+  else if tag == 5 then
+    return .timeout
   else
     return .transportError
 
@@ -329,7 +332,7 @@ private def drainTlsSessionToFramed (sess : TlsSession) (maxWireCap : Nat) (rcvT
             status := 2
         | .closeNotify => status := 1
         | .tcpEof => status := 4
-        | .transportError => failed := true
+        | .timeout | .transportError => failed := true
   finally
     closeTlsSession sess
   if failed then
@@ -505,7 +508,7 @@ def httpsRequest
 /-! ## Native RFC 9113 HTTP/2 (`LeanSys.H2` + `OrbNetLeaf.HpackQpack`) Client -/
 
 /-- Validate and normalize pseudo-headers + application headers for HTTP/2 and HTTP/3 requests. -/
-private def buildPseudoAndAppHeaders
+def buildPseudoAndAppHeaders
     (method authority path : String) (headers : Array (String × String))
     (bodyLen : Nat) : Except String (Array (String × String)) := do
   if method.isEmpty || !isHttpToken method then
@@ -549,7 +552,7 @@ private def buildPseudoAndAppHeaders
 /-- Validate decoded HPACK/QPACK response header fields (`:status`, lowercase token names,
     RFC 9113 §8.2.1 / RFC 9110 §5.5 control-byte & whitespace hygiene, `<= 128` fields,
     forbidding connection-specific headers, and extracting any declared `content-length`). -/
-private def validateDecodedHeaderFields (proto : String) (fields : Array (String × String)) :
+def validateDecodedHeaderFields (proto : String) (fields : Array (String × String)) :
     Except String (Nat × Array (String × String) × Option Nat) := do
   let mut statusOpt : Option Nat := none
   let mut sawPseudoDone := false
@@ -593,7 +596,7 @@ private def validateDecodedHeaderFields (proto : String) (fields : Array (String
     | throw s!"{proto} response missing :status pseudo-header"
   return (statusCode, appHeaders, contentLen?)
 
-private def validateTrailerFields (proto : String) (fields : Array (String × String)) : Except String Unit := do
+def validateTrailerFields (proto : String) (fields : Array (String × String)) : Except String Unit := do
   if verifySliceBounds fields.size.toUInt64 0 128 != 1 then
     throw s!"{proto} trailer section exceeds 128 fields"
   for (tk, tv) in fields do
@@ -680,7 +683,7 @@ def buildOutboundH2PrefaceAndStream
   return wire
 
 /-- Validate RFC 9113 §6.5.2 inbound `SETTINGS` payload parameters, returning any updated `INITIAL_WINDOW_SIZE`. -/
-private def validatePeerSettingsPayload (flags : UInt8) (payload : ByteArray) : Except String (Option Nat) := do
+def validatePeerSettingsPayload (flags : UInt8) (payload : ByteArray) : Except String (Option Nat) := do
   if (flags &&& 0x01) != 0 then
     if !payload.isEmpty then
       throw "HTTP/2 SETTINGS ACK frame with non-empty payload"
@@ -707,7 +710,7 @@ private def validatePeerSettingsPayload (flags : UInt8) (payload : ByteArray) : 
       throw s!"HTTP/2 SETTINGS_MAX_FRAME_SIZE out of range ({val})"
   return newInitWin?
 
-private def parseGoawayPayload (payload : ByteArray) : Except String (UInt32 × UInt32) := do
+def parseGoawayPayload (payload : ByteArray) : Except String (UInt32 × UInt32) := do
   if verifySliceBounds 0 8 payload.size.toUInt64 != 1 then
     throw "HTTP/2 GOAWAY frame shorter than 8 bytes"
   let s0 := (payload.get! 0).toUInt32 &&& 0x7F
@@ -722,7 +725,7 @@ private def parseGoawayPayload (payload : ByteArray) : Except String (UInt32 × 
   let errCode := (e0 <<< 24) ||| (e1 <<< 16) ||| (e2 <<< 8) ||| e3
   return (lastSid, errCode)
 
-private def enforceBodylessAndLengthInvariants
+def enforceBodylessAndLengthInvariants
     (proto requestMethod : String) (statusCode : Nat)
     (respHeaders : Array (String × String))
     (contentLen? : Option Nat) (bodyAccum : ByteArray) : Except String HttpsResponse := do
@@ -891,11 +894,32 @@ def parseH2ResponseFrames
     throw "incomplete HTTP/2 response stream (missing END_STREAM)"
   enforceBodylessAndLengthInvariants "HTTP/2" requestMethod statusCode respHeaders contentLen? bodyAccum
 
-private def h2SettingsAckFrame : ByteArray :=
+def h2SettingsAckFrame : ByteArray :=
   ByteArray.mk #[0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00]
 
-private def buildH2PingAckFrame (payload8 : ByteArray) : ByteArray :=
+def buildH2PingAckFrame (payload8 : ByteArray) : ByteArray :=
   (ByteArray.mk #[0x00, 0x00, 0x08, 0x06, 0x01, 0x00, 0x00, 0x00, 0x00]) ++ payload8
+
+/-- Open a persistent WebPKI TLS 1.3/1.2 HTTP/2 connection (`ALPN "h2"`), sending the RFC 9113
+    client preface + `SETTINGS` (`HEADER_TABLE_SIZE=0`, `ENABLE_PUSH=0`, `INITIAL_WINDOW_SIZE=16 MiB`)
+    + connection `WINDOW_UPDATE` (`+16,711,681` -> `16 MiB` window), gated by `verifyOutboundRequest`. -/
+def openH2PersistentSession
+    (host : String) (port : UInt16 := 443)
+    (verifyPeer : Bool := true)
+    (connectTimeoutMs : UInt32 := 10000) : IO (Except String TlsSession) := do
+  let noCrLf := if isValidBareHost host && hasNoCrLfOrNul host == 1 then (1 : UInt8) else 0
+  let vpFlag : UInt8 := if verifyPeer then 1 else 0
+  let some settingsFrame := buildSettingsFrame? #[(0x0001, 0), (0x0002, 0), (0x0004, 16777216)] false
+    | return .error "failed to encode HTTP/2 SETTINGS frame"
+  let some winFrame := buildWindowUpdateFrame? 0 16711681
+    | return .error "failed to encode HTTP/2 WINDOW_UPDATE frame"
+  let initWire := clientPreface ++ settingsFrame ++ winFrame
+  if verifyOutboundRequest noCrLf vpFlag port.toUInt32
+      host.toUTF8.size.toUInt64 initWire.size.toUInt64 65536 != 1 then
+    return .error "openH2PersistentSession rejected by verifyOutboundRequest"
+  match ← rawTlsOpen host port initWire vpFlag 1 connectTimeoutMs with
+  | some sess => return .ok sess
+  | none => return .error s!"TLS ALPN h2 handshake failed to {host}:{port}"
 
 /-- Execute a verified interactive RFC 9113 HTTP/2 request over WebPKI TLS 1.3/1.2 with ALPN `"h2"`:
     - Sends `SETTINGS` ACK (`0x01`) and `PING` ACK (`0x01`) interactively via `writeTlsSessionAll`.
@@ -1073,7 +1097,7 @@ def http2Request
               pendingOff := 0
         | .closeNotify | .tcpEof =>
           break
-        | .transportError =>
+        | .timeout | .transportError =>
           transportErr := true
   finally
     closeTlsSession sess

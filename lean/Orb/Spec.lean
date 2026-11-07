@@ -13107,4 +13107,328 @@ theorem stream_open_tail_cap_without_external_tail_hypothesis :
     (100000 : UInt32) - (w >>> 32).toUInt32 ≤ 64 := by
   decide
 
+-- ===========================================================================
+-- Poor-Network Transport: RFC 6298 RTT Estimator & Client Link Budget Governor
+-- ===========================================================================
+
+structure RttEwmaInput where
+  srttMs   : UInt32
+  rttVarMs : UInt32
+  sampleMs : UInt32
+  deriving Repr, DecidableEq
+
+def RttEwmaInput.nextSrtt (x : RttEwmaInput) : UInt64 :=
+  rttEwmaStep x.srttMs x.rttVarMs x.sampleMs &&& 0xFFFFFFFF
+
+def RttEwmaInput.nextVar (x : RttEwmaInput) : UInt64 :=
+  rttEwmaStep x.srttMs x.rttVarMs x.sampleMs >>> 32
+
+private theorem clamp64_u32_bounds
+    (v : UInt64) (lo32 hi32 : UInt32) (lo64 hi64 : UInt64)
+    (hlo_eq : lo32.toNat = lo64.toNat)
+    (hhi_eq : hi32.toNat = hi64.toNat)
+    (hlo_hi : lo64.toNat ≤ hi64.toNat)
+    (hhi_fit : hi64.toNat ≤ 60000) :
+    let out32 : UInt32 := if v < lo64 then lo32 else if v > hi64 then hi32 else v.toUInt32
+    lo64 ≤ out32.toUInt64 ∧ out32.toUInt64 ≤ hi64 := by
+  dsimp only []
+  by_cases h1 : v < lo64
+  · simp only [h1, ↓reduceIte]
+    exact ⟨UInt64.le_iff_toNat_le.mpr (by simp [UInt32.toNat_toUInt64]; omega),
+           UInt64.le_iff_toNat_le.mpr (by simp [UInt32.toNat_toUInt64]; omega)⟩
+  · simp only [h1, ↓reduceIte]
+    by_cases h2 : v > hi64
+    · simp only [h2, ↓reduceIte]
+      exact ⟨UInt64.le_iff_toNat_le.mpr (by simp [UInt32.toNat_toUInt64]; omega),
+             UInt64.le_iff_toNat_le.mpr (by simp [UInt32.toNat_toUInt64]; omega)⟩
+    · simp only [h2, ↓reduceIte]
+      have hge : lo64.toNat ≤ v.toNat :=
+        Nat.le_of_not_lt (fun h => h1 (UInt64.lt_iff_toNat_lt.mpr h))
+      have hle : v.toNat ≤ hi64.toNat :=
+        Nat.le_of_not_lt (fun h => h2 (UInt64.lt_iff_toNat_lt.mpr h))
+      have hv_mod : v.toUInt32.toNat = v.toNat := by
+        rw [UInt64.toNat_toUInt32]
+        exact Nat.mod_eq_of_lt (by omega)
+      exact ⟨UInt64.le_iff_toNat_le.mpr (by simp [UInt32.toNat_toUInt64, hv_mod]; omega),
+             UInt64.le_iff_toNat_le.mpr (by simp [UInt32.toNat_toUInt64, hv_mod]; omega)⟩
+
+def rttEwmaConservedResource : ConservedResource RttEwmaInput where
+  admit _ := true
+  withinBudget x :=
+    let s := x.nextSrtt
+    let v := x.nextVar
+    decide (1 ≤ s) && decide (s ≤ 60000) &&
+    decide (10 ≤ v) && decide (v ≤ 60000)
+  conserved x _ := by
+    unfold RttEwmaInput.nextSrtt RttEwmaInput.nextVar rttEwmaStep
+    dsimp only []
+    cases hs0 : (x.srttMs == 0)
+    · simp only [Bool.false_eq_true, ↓reduceIte]
+      rw [pack32_lo, pack32_hi]
+      have hs := clamp64_u32_bounds
+        (((7 * if x.srttMs > 60000 then 60000 else x.srttMs.toUInt64) +
+            (if x.sampleMs == 0 then 1 else if x.sampleMs > 60000 then 60000 else x.sampleMs).toUInt64) >>> 3)
+        1 60000 1 60000 rfl rfl (by decide) (by decide)
+      have hv := clamp64_u32_bounds
+        (((3 * if x.rttVarMs > 60000 then 60000 else x.rttVarMs.toUInt64) +
+            if (if x.srttMs > 60000 then 60000 else x.srttMs.toUInt64) ≥
+                (if x.sampleMs == 0 then 1 else if x.sampleMs > 60000 then 60000 else x.sampleMs).toUInt64 then
+              (if x.srttMs > 60000 then 60000 else x.srttMs.toUInt64) -
+                (if x.sampleMs == 0 then 1 else if x.sampleMs > 60000 then 60000 else x.sampleMs).toUInt64
+            else
+              (if x.sampleMs == 0 then 1 else if x.sampleMs > 60000 then 60000 else x.sampleMs).toUInt64 -
+                (if x.srttMs > 60000 then 60000 else x.srttMs.toUInt64)) >>> 2)
+        10 60000 10 60000 rfl rfl (by decide) (by decide)
+      dsimp only [] at hs hv
+      have hs1d := decide_eq_true hs.1
+      have hs2d := decide_eq_true hs.2
+      have hv1d := decide_eq_true hv.1
+      have hv2d := decide_eq_true hv.2
+      simp only [hs1d, hs2d, hv1d, hv2d, Bool.true_and]
+    · simp only [↓reduceIte]
+      rw [pack32_lo, pack32_hi]
+      have h_cold : ∀ (sm : UInt32),
+          let s32 : UInt32 := if sm == 0 then 1 else if sm > 60000 then 60000 else sm
+          let v32 : UInt32 := if (s32 >>> 1) < 50 then 50 else (s32 >>> 1)
+          (decide ((1 : UInt64) ≤ s32.toUInt64) && decide (s32.toUInt64 ≤ (60000 : UInt64)) &&
+           decide ((10 : UInt64) ≤ v32.toUInt64) && decide (v32.toUInt64 ≤ (60000 : UInt64))) = true := by
+        intro sm
+        dsimp only []
+        have hs_nat :
+            1 ≤ (if sm == 0 then (1 : UInt32) else if sm > 60000 then 60000 else sm).toNat ∧
+            (if sm == 0 then (1 : UInt32) else if sm > 60000 then 60000 else sm).toNat ≤ 60000 := by
+          cases hz : (sm == 0)
+          · simp only [Bool.false_eq_true, ↓reduceIte]
+            by_cases hgt : sm > 60000
+            · simp [hgt]
+            · simp only [hgt, ↓reduceIte]
+              have hnz : sm.toNat ≠ 0 := by
+                intro h0
+                have he : sm = 0 := UInt32.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h0)
+                simp [he] at hz
+              have hle : sm.toNat ≤ 60000 :=
+                Nat.le_of_not_lt (fun h => hgt (UInt32.lt_iff_toNat_lt.mpr h))
+              omega
+          · simp
+        generalize (if sm == 0 then (1 : UInt32) else if sm > 60000 then 60000 else sm) = s32 at hs_nat ⊢
+        have hd1 : decide ((1 : UInt64) ≤ s32.toUInt64) = true := by
+          apply decide_eq_true
+          apply UInt64.le_iff_toNat_le.mpr
+          simp [UInt32.toNat_toUInt64]
+          omega
+        have hd2 : decide (s32.toUInt64 ≤ (60000 : UInt64)) = true := by
+          apply decide_eq_true
+          apply UInt64.le_iff_toNat_le.mpr
+          simp [UInt32.toNat_toUInt64]
+          omega
+        by_cases hlt50 : (s32 >>> 1) < 50
+        · simp only [hlt50, ↓reduceIte, hd1, hd2, Bool.true_and]
+          decide
+        · simp only [hlt50, ↓reduceIte, hd1, hd2, Bool.true_and]
+          have hge50 : 50 ≤ (s32 >>> 1).toNat :=
+            Nat.le_of_not_lt (fun h => hlt50 (UInt32.lt_iff_toNat_lt.mpr h))
+          have hhalf_le : (s32 >>> 1).toNat ≤ 30000 := by
+            rw [UInt32.toNat_shiftRight]
+            have : (1 : UInt32).toNat % 32 = 1 := rfl
+            rw [this]
+            omega
+          have hd3 : decide ((10 : UInt64) ≤ (s32 >>> 1).toUInt64) = true := by
+            apply decide_eq_true
+            apply UInt64.le_iff_toNat_le.mpr
+            rw [UInt32.toNat_toUInt64]
+            exact Nat.le_trans (by decide) hge50
+          have hd4 : decide ((s32 >>> 1).toUInt64 ≤ (60000 : UInt64)) = true := by
+            apply decide_eq_true
+            apply UInt64.le_iff_toNat_le.mpr
+            rw [UInt32.toNat_toUInt64]
+            exact Nat.le_trans hhalf_le (by decide)
+          simp only [hd3, hd4, Bool.true_and]
+      exact h_cold x.sampleMs
+
+/-- Boundary & RFC 6298 EWMA witnesses for `orb_rtt_ewma_step`:
+    cold initialization (`srtt = 0`), steady-state smoothing (`7/8` + `1/8`), and `[1, 60000]` clamping. -/
+theorem rtt_ewma_cold_start_and_smoothing_witnesses :
+    (rttEwmaStep 0 0 600 &&& 0xFFFFFFFF) = 600 ∧
+    (rttEwmaStep 0 0 600 >>> 32) = 300 ∧
+    (rttEwmaStep 0 0 40 &&& 0xFFFFFFFF) = 40 ∧
+    (rttEwmaStep 0 0 40 >>> 32) = 50 ∧
+    (rttEwmaStep 800 200 1600 &&& 0xFFFFFFFF) = 900 ∧
+    (rttEwmaStep 800 200 1600 >>> 32) = 350 ∧
+    (rttEwmaStep 500 100 99999 &&& 0xFFFFFFFF) = 7937 ∧
+    (rttEwmaStep 0 0 0 &&& 0xFFFFFFFF) = 1 := by
+  decide
+
+private theorem mask_byte1_getLsbD :
+    ∀ i, i < 64 → (UInt64.toBitVec 255).getLsbD i = decide (i < 8) := by
+  decide
+
+private theorem shiftRight8_bv (x : BitVec 64) :
+    x >>> (UInt64.toBitVec 8 % 64) = x >>> 8 := by
+  rw [show UInt64.toBitVec 8 % 64 = 8#64 from rfl, BitVec.ushiftRight_eq']
+  rfl
+
+private theorem shiftLeft8_u32_bv (x : BitVec 32) :
+    x <<< (UInt32.toBitVec 8 % 32) = x <<< 8 := by
+  rw [show UInt32.toBitVec 8 % 32 = 8#32 from rfl, BitVec.shiftLeft_eq']
+  rfl
+
+private theorem shiftLeft16_u32_bv (x : BitVec 32) :
+    x <<< (UInt32.toBitVec 16 % 32) = x <<< 16 := by
+  rw [show UInt32.toBitVec 16 % 32 = 16#32 from rfl, BitVec.shiftLeft_eq']
+  rfl
+
+private theorem u32_high_bits_false
+    (x : UInt32) (hx : x.toNat < 256) (k : Nat) (hk8 : 8 ≤ k) (hk32 : k < 32) :
+    x.toBitVec[k]'hk32 = false := by
+  rw [BitVec.getElem_eq_testBit_toNat, UInt32.toNat_toBitVec]
+  apply Nat.testBit_lt_two_pow
+  have h256 : (256 : Nat) ≤ 2 ^ k := by
+    have : 2 ^ 8 ≤ 2 ^ k := Nat.pow_le_pow_right (by decide : 0 < 2) hk8
+    simpa using this
+  omega
+
+private theorem unpack_p2_byte (a b w : UInt32) (ha : a < 256) (hb : b < 256) :
+    (((a ||| (b <<< 8) ||| (w <<< 16)).toUInt64 >>> 8) &&& (0xFF : UInt64)) = b.toUInt64 := by
+  apply UInt64.toBitVec_inj.mp
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  have hm := mask_byte1_getLsbD i hi
+  have ha_nat : a.toNat < 256 := UInt32.lt_iff_toNat_lt.mp ha
+  have hb_nat : b.toNat < 256 := UInt32.lt_iff_toNat_lt.mp hb
+  simp only [UInt64.toBitVec_and, UInt64.toBitVec_shiftRight, UInt32.toBitVec_toUInt64,
+    UInt32.toBitVec_or, UInt32.toBitVec_shiftLeft,
+    BitVec.getLsbD_and, shiftRight8_bv, BitVec.getLsbD_ushiftRight,
+    BitVec.getLsbD_setWidth, BitVec.getLsbD_or, shiftLeft8_u32_bv, shiftLeft16_u32_bv,
+    BitVec.getLsbD_shiftLeft, hm]
+  by_cases hi8 : i < 8
+  · have h8_32 : 8 + i < 32 := by omega
+    have h8_64 : 8 + i < 64 := by omega
+    have hi_32 : i < 32 := by omega
+    have ha_zero : a.toBitVec[8 + i]'h8_32 = false :=
+      u32_high_bits_false a ha_nat (8 + i) (by omega) h8_32
+    have hnot8 : ¬ (8 + i < 8) := by omega
+    have hlt16 : 8 + i < 16 := by omega
+    have hsub : 8 + i - 8 = i := by omega
+    simp [hi8, hi, h8_32, h8_64, hi_32, ha_zero, hnot8, hlt16, hsub]
+  · have hb_zero : b.toBitVec.getLsbD i = false := by
+      by_cases hi32 : i < 32
+      · rw [BitVec.getLsbD_eq_getElem hi32]
+        exact u32_high_bits_false b hb_nat i (by omega) hi32
+      · exact BitVec.getLsbD_of_ge b.toBitVec i (by omega)
+    simp [hi8, hi, hb_zero]
+
+private theorem p1_val_lt_256 (deg mod : Bool) :
+    (if deg = true then (2 : UInt32) else if mod = true then 3 else 6) < 256 := by
+  cases deg
+  · cases mod <;> decide
+  · cases mod <;> decide
+
+private theorem p2_val_lt_256 (p0 deg mod : Bool) :
+    (if (p0 || deg) = true then (0 : UInt32) else if mod = true then 1 else 4) < 256 := by
+  cases p0
+  · cases deg
+    · cases mod <;> decide
+    · cases mod <;> decide
+  · cases deg
+    · cases mod <;> decide
+    · cases mod <;> decide
+
+structure ClientLinkBudgetCheck where
+  srttMs              : UInt32
+  rttVarMs            : UInt32
+  consecutiveFailures : UInt32
+  isConstrained       : UInt8
+  p0InFlight          : UInt32
+  deriving Repr, DecidableEq
+
+def ClientLinkBudgetCheck.P2Allowed (c : ClientLinkBudgetCheck) : Bool :=
+  c.p0InFlight == 0 &&
+    !(decide (c.srttMs > 1200) || decide (c.consecutiveFailures > 0) || c.isConstrained != 0)
+
+/-- `MetaGateSpec` for background `P2` prefetch/sweep admission in `orb_client_link_budget_step`:
+    proves `p2Cap > 0` iff `p0InFlight == 0`, `srttMs ≤ 1200`, `consecutiveFailures == 0`, and `isConstrained == 0`. -/
+def clientLinkP2MetaGate : MetaGateSpec ClientLinkBudgetCheck
+    (fun c => c.P2Allowed = true) where
+  gate c :=
+    let raw := clientLinkBudgetStep
+      c.srttMs c.rttVarMs c.consecutiveFailures c.isConstrained c.p0InFlight
+    (((raw &&& 0xFFFFFFFF) >>> 8) &&& (0xFF : UInt64)) != 0
+  sound c h := by
+    unfold ClientLinkBudgetCheck.P2Allowed
+    unfold clientLinkBudgetStep at h
+    dsimp only [] at h
+    rw [pack32_lo] at h
+    have hp1 := p1_val_lt_256
+      (decide (c.srttMs > 1200) || decide (c.consecutiveFailures > 0) || c.isConstrained != 0)
+      (!(decide (c.srttMs > 1200) || decide (c.consecutiveFailures > 0) || c.isConstrained != 0) && decide (c.srttMs > 400))
+    have hp2 := p2_val_lt_256
+      (decide (c.p0InFlight > 0))
+      (decide (c.srttMs > 1200) || decide (c.consecutiveFailures > 0) || c.isConstrained != 0)
+      (!(decide (c.srttMs > 1200) || decide (c.consecutiveFailures > 0) || c.isConstrained != 0) && decide (c.srttMs > 400))
+    rw [unpack_p2_byte _ _ _ hp1 hp2] at h
+    cases hp0 : decide (c.p0InFlight > 0)
+    · cases hdeg : (decide (c.srttMs > 1200) || decide (c.consecutiveFailures > 0) || c.isConstrained != 0)
+      · have hpz : (c.p0InFlight == 0) = true := by
+          cases hpeq : (c.p0InFlight == 0)
+          · exfalso
+            have hne : c.p0InFlight.toNat ≠ 0 := by
+              intro hz
+              have he : c.p0InFlight = 0 := UInt32.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq hz)
+              simp [he] at hpeq
+            have hz_nat : (0 : UInt32).toNat = 0 := rfl
+            have hgt : (0 : UInt32) < c.p0InFlight := UInt32.lt_iff_toNat_lt.mpr (by rw [hz_nat]; omega)
+            exact absurd (decide_eq_true hgt) (by simp [hp0])
+          · rfl
+        simp [hpz, hdeg]
+      · simp [hp0, hdeg] at h
+    · simp [hp0] at h
+  complete c h := by
+    unfold ClientLinkBudgetCheck.P2Allowed at h
+    unfold clientLinkBudgetStep
+    dsimp only []
+    rw [pack32_lo]
+    have hp1 := p1_val_lt_256
+      (decide (c.srttMs > 1200) || decide (c.consecutiveFailures > 0) || c.isConstrained != 0)
+      (!(decide (c.srttMs > 1200) || decide (c.consecutiveFailures > 0) || c.isConstrained != 0) && decide (c.srttMs > 400))
+    have hp2 := p2_val_lt_256
+      (decide (c.p0InFlight > 0))
+      (decide (c.srttMs > 1200) || decide (c.consecutiveFailures > 0) || c.isConstrained != 0)
+      (!(decide (c.srttMs > 1200) || decide (c.consecutiveFailures > 0) || c.isConstrained != 0) && decide (c.srttMs > 400))
+    rw [unpack_p2_byte _ _ _ hp1 hp2]
+    have ⟨hp0z, hnotdeg⟩ := Bool.and_eq_true_iff.mp h
+    have hp0f : decide (c.p0InFlight > 0) = false := by
+      rw [beq_iff_eq] at hp0z
+      simp [hp0z]
+    have hdegf :
+        (decide (c.srttMs > 1200) || decide (c.consecutiveFailures > 0) || c.isConstrained != 0) = false := by
+      cases hd : (decide (c.srttMs > 1200) || decide (c.consecutiveFailures > 0) || c.isConstrained != 0)
+      · rfl
+      · simp [hd] at hnotdeg
+    cases hmd : decide (c.srttMs > 400)
+    · simp [hp0f, hdegf, hmd]
+    · simp [hp0f, hdegf, hmd]
+  posWitness := ⟨250, 80, 0, 0, 0⟩
+  negWitness := ⟨250, 80, 0, 0, 1⟩
+  nonVacuous := by decide
+  tight      := by decide
+
+/-- Corollary (`ConservedResource` & `ClockDiscipline` — `orb_client_link_budget_step`):
+    1. Any active `P0` user mutation (`p0InFlight > 0`) immediately preempts `P2` (`p2Cap = 0`).
+    2. High RTT (`srtt = 2600 ms`, `rttVar = 900 ms`) scales `pongDeadlineMs` from `8000 ms` to `9200 ms`
+       and `connectDeadlineMs` to `12200 ms`, preventing premature `sync-ws` suicide teardowns under bufferbloat.
+    3. Foreground `P1` never starves (`p1Cap ≥ 2` even when constrained or failing). -/
+theorem client_link_budget_preempts_p2_and_scales_ws_deadlines :
+    let fast := clientLinkBudgetStep 120 40 0 0 0
+    let p0Active := clientLinkBudgetStep 120 40 0 0 1
+    let bloated := clientLinkBudgetStep 2600 900 1 0 0
+    (fast &&& 0xFF) = 6 ∧
+    ((fast >>> 8) &&& 0xFF) = 4 ∧
+    ((p0Active >>> 8) &&& 0xFF) = 0 ∧
+    (bloated &&& 0xFF) = 2 ∧
+    ((bloated >>> 8) &&& 0xFF) = 0 ∧
+    ((bloated >>> 16) &&& 0xFFFF) = 12200 ∧
+    ((bloated >>> 32) &&& 0xFFFF) = 9200 ∧
+    ((bloated >>> 48) &&& 0xFFFF) = 6900 := by
+  decide
+
 end Orb.Spec

@@ -1,5 +1,8 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mission } from "../src/api";
+
+const kernelWasm = new Uint8Array(readFileSync("src/assets/orb_kernel.wasm"));
 
 vi.mock("../src/api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../src/api")>(), isConnected: () => true,
@@ -22,7 +25,12 @@ const response = (overrides: Record<string, unknown> = {}) => JSON.stringify({
 // Each test re-imports the inbox module graph after resetModules; on a busy
 // parallel run that alone can exceed the default 5 s timeout.
 vi.setConfig({ testTimeout: 20_000 });
-beforeEach(() => { vi.resetModules(); localStorage.clear(); });
+beforeEach(async () => {
+  vi.resetModules();
+  localStorage.clear();
+  const { initializeKernel } = await import("../src/orbKernelAbi");
+  await initializeKernel(kernelWasm);
+});
 afterEach(() => vi.unstubAllGlobals());
 
 describe("structured inbox digests", () => {
