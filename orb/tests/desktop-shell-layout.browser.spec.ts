@@ -3,6 +3,7 @@ import layoutFixture from "../../shared/orb-spec/fixtures/desktop-shell-layout.j
 import { eventPage } from "./eventPageFixture";
 
 test("desktop shell layout: translucent titlebar, pinned Settings footer, scrollable sidebar & mission, crisp top, optimistic folder open, and /btw column lifecycle", async ({ page }) => {
+  test.setTimeout(60_000);
   await page.setViewportSize({ width: 1200, height: 720 });
 
   // Simulate the native `__ORB_DESKTOP__` host (`orb-locald` RPC contract).
@@ -99,11 +100,18 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
-    if (path === `/api/control/missions/${targetMissionId}` || path.endsWith("/opened")) {
+    const singleMissionId = path.match(/^\/api\/control\/missions\/([^/]+)$/)?.[1];
+    if (singleMissionId) {
+      return route.fulfill({ json: missions.find((m) => m.id === singleMissionId) ?? missions[0] });
+    }
+    if (path.endsWith("/opened")) {
       return route.fulfill({ json: missions[0] });
     }
     if (path === `/api/control/missions/${targetMissionId}/events`) {
       return route.fulfill(eventPage(route, events));
+    }
+    if (path.endsWith("/events")) {
+      return route.fulfill(eventPage(route, []));
     }
     if (path === "/api/control/stream") {
       return route.fulfill({ contentType: "text/event-stream", body: "" });
@@ -249,13 +257,34 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   await expect(page.locator(".app")).toHaveAttribute("data-pane", "page");
   expect(await trackCount()).toBe(2);
 
-  // Reopen the conversation -> open `/btw` -> close `/btw` -> 2 tracks.
+  // Reopen the conversation -> open `/btw` -> verify `/btw` stays open across page & conversation switches -> close `/btw` -> 2 tracks.
   await targetRow.click();
   const sideToggle = page.getByRole("button", { name: "Side question", exact: true });
   if ((await sideToggle.getAttribute("aria-expanded")) !== "true") {
     await sideToggle.click();
   }
+  await expect(sideToggle).toHaveAttribute("aria-expanded", "true");
   expect(await trackCount()).toBe(3);
+
+  // Switch to Inbox and back: `/btw` reopens automatically without another click.
+  await page.getByRole("button", { name: /^Inbox/ }).click();
+  expect(await trackCount()).toBe(2);
+  await targetRow.click();
+  await expect(sideToggle).toHaveAttribute("aria-expanded", "true");
+  expect(await trackCount()).toBe(3);
+
+  // Switch to another conversation tab (without `/btw` open) and back: `/btw` hides there and reopens on `targetRow`.
+  const siblingRow = page.getByRole("button", { name: "Child done run 24", exact: true });
+  await siblingRow.scrollIntoViewIfNeeded();
+  await siblingRow.click();
+  await expect(sideToggle).toHaveAttribute("aria-expanded", "false");
+  expect(await trackCount()).toBe(2);
+
+  await targetRow.scrollIntoViewIfNeeded();
+  await targetRow.click();
+  await expect(sideToggle).toHaveAttribute("aria-expanded", "true");
+  expect(await trackCount()).toBe(3);
+
   await sideToggle.click();
   expect(await trackCount()).toBe(2);
 });

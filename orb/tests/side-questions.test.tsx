@@ -899,5 +899,101 @@ it('clears a persisted pending error banner when server reconciliation returns t
  await waitFor(()=>expect(screen.queryByText(/idempotency_conflict/)).toBeNull());
 });
 
+it('preserves and reopens /btw automatically when switching across mission tabs and top-level pages unless explicitly closed',async()=>{
+ const {Show}=await import('solid-js');
+ const {FilePanelProvider,FilePanelButton}=await import('../src/FilePanel');
+ const {readSideQuestion,sideQuestionKey}=await import('../src/sideQuestionStorage');
+ vi.stubGlobal('fetch',vi.fn(async()=>response([{type:'done',answer:'Mission A side answer.'}])));
+
+ const missionRecord=(id:string)=>({id,project:'orb',status:'active' as const,title:id,history:[],created_at:'',updated_at:''});
+ const [missionOpen,setMissionOpen]=createSignal<string|null>('mission-a');
+ // Simulate `fileScopeMission()` arriving asynchronously after `missionOpen` on archived/project missions:
+ const [scopeMission,setScopeMission]=createSignal<ReturnType<typeof missionRecord>|undefined>(undefined);
+
+ const view=render(()=>(
+  <div class="app">
+   <FilePanelProvider missionOpen={missionOpen()} scope={{mission:scopeMission()}}>
+    <FilePanelButton/>
+    <Show when={missionOpen()??undefined} keyed>
+     {id=><SideQuestions mission={id} items={[]} ref={()=>{}} onTransfer={()=>{}}/>}
+    </Show>
+   </FilePanelProvider>
+  </div>
+ ));
+ const appEl=view.container.querySelector('.app') as HTMLElement;
+ const sideAside=()=>view.container.querySelector('.btw-sidebar') as HTMLElement;
+
+ // Open /btw on mission-a before scope.mission finishes hydrating:
+ fireEvent.click(screen.getByRole('button',{name:'Side question'}));
+ expect(await screen.findByPlaceholderText('Ask a side question…')).toBeTruthy();
+ expect(appEl.dataset.filesOpen).toBe('true');
+ expect(sideAside().style.display).not.toBe('none');
+
+ // Late `fileScopeMission()` resolution for the SAME mission must not close `/btw`:
+ setScopeMission(missionRecord('mission-a'));
+ expect(appEl.dataset.filesOpen).toBe('true');
+ expect(sideAside().style.display).not.toBe('none');
+
+ const sideInput=screen.getByPlaceholderText('Ask a side question…');
+ fireEvent.input(sideInput,{target:{value:'Keep me open across tabs'}});
+ fireEvent.keyDown(sideInput,{key:'Enter'});
+ expect(await screen.findByText('Mission A side answer.')).toBeTruthy();
+
+ // 1. Switch from mission-a (/btw open) to mission-b (/btw never opened):
+ setMissionOpen('mission-b');
+ setScopeMission(missionRecord('mission-b'));
+ await waitFor(()=>expect(appEl.dataset.filesOpen).toBe('false'));
+ expect(sideAside().style.display).toBe('none');
+ expect((await readSideQuestion(sideQuestionKey('mission-a')))?.open).toBe(true);
+
+ // 2. Switch back to mission-a: /btw reopens automatically on frame 0 without clicking again!
+ setMissionOpen('mission-a');
+ setScopeMission(undefined);
+ expect(appEl.dataset.filesOpen).toBe('true');
+ expect(sideAside().style.display).not.toBe('none');
+ expect(await screen.findByText('Mission A side answer.')).toBeTruthy();
+ setScopeMission(missionRecord('mission-a'));
+ expect(appEl.dataset.filesOpen).toBe('true');
+
+ // 3. Switch from mission-a (/btw open) to a top-level page (Inbox / New Agent: missionOpen = null) and back:
+ setMissionOpen(null);
+ setScopeMission(undefined);
+ expect(appEl.dataset.filesOpen).toBe('false');
+ expect(sideAside().style.display).toBe('none');
+ expect((await readSideQuestion(sideQuestionKey('mission-a')))?.open).toBe(true);
+
+ setMissionOpen('mission-a');
+ expect(appEl.dataset.filesOpen).toBe('true');
+ expect(sideAside().style.display).not.toBe('none');
+ expect(await screen.findByText('Mission A side answer.')).toBeTruthy();
+
+ // 4. Cold reload (in-memory hints cleared, IndexedDB still holds open: true) with missionOpen passed:
+ view.unmount();
+ resetSideQuestionStorageForTest();
+ const coldView=render(()=>(
+  <div class="app">
+   <FilePanelProvider missionOpen={missionOpen()} scope={{mission:missionRecord(missionOpen()??'mission-a')}}>
+    <FilePanelButton/>
+    <Show when={missionOpen()??undefined} keyed>
+     {id=><SideQuestions mission={id} items={[]} ref={()=>{}} onTransfer={()=>{}}/>}
+    </Show>
+   </FilePanelProvider>
+  </div>
+ ));
+ const coldApp=coldView.container.querySelector('.app') as HTMLElement;
+ await waitFor(()=>expect(coldApp.dataset.filesOpen).toBe('true'));
+ expect(await screen.findByText('Mission A side answer.')).toBeTruthy();
+
+ // 5. Explicit user close persists closed across tab switches:
+ fireEvent.click(screen.getByRole('button',{name:'Close side questions'}));
+ expect(coldApp.dataset.filesOpen).toBe('false');
+ await waitFor(async()=>expect((await readSideQuestion(sideQuestionKey('mission-a')))?.open).toBe(false));
+ setMissionOpen('mission-b');
+ setMissionOpen('mission-a');
+ await new Promise(r=>setTimeout(r,20));
+ expect(coldApp.dataset.filesOpen).toBe('false');
+});
+
+
 
 

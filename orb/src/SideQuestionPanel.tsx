@@ -14,7 +14,7 @@ import { useSidePanel } from './FilePanel';
 import { createPinnedScroll } from './mission/pinnedScroll';
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
 import { connectionVersion, isTransientNetworkError, sendMissionMessage, type QueuedMessage } from './api';
-import { consumeSideQuestionOpenHint, peekSavedSideQuestion, readSideQuestion, peekSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion, type SavedSideQuestion } from './sideQuestionStorage';
+import { consumeSideQuestionOpenHint, peekSavedSideQuestion, readSideQuestion, peekSideQuestionOpen, rememberSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion, type SavedSideQuestion } from './sideQuestionStorage';
 import { RemoteQueue, type PendingRemoteQueueItem, type RemoteQueueHandle } from './RemoteQueue';
 import { QueuedMessages } from './QueuedMessages';
 import { createQueuedEdit } from './queuedEdit';
@@ -131,6 +131,10 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   void ask(next.question,[],[],next.attachments??[]);
  };
  const [loadedKey,setLoadedKey]=createSignal('');
+ const markOpen=()=>{rememberSideQuestionOpen(key(),true);setOpen(true);};
+ const markClosed=()=>{rememberSideQuestionOpen(key(),false);setOpen(false);};
+ const unregisterSide=side?.register({open:markOpen,close:markClosed});
+ onCleanup(()=>{abort?.abort();unregisterSide?.();});
  let ready:Promise<void>=Promise.resolve();
  let reconnectSession:(sideId:string)=>Promise<void>=async sideId=>{await p.onOpenSession?.(sideId);};
  let watchActiveSession:((agent:NonNullable<ReturnType<typeof btwSession>>,initialAttachments?:SideAttachment[])=>void)|undefined;
@@ -140,6 +144,9 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setLoadedKey('');setBusy(false);setHistory([]);setError('');setQueue([]);setQueueToast('');setStartedAt(undefined);
   setSideSessionId('');setSideSessionLocal(false);
   setPendingQueued([]);setConfirmedQueued([]);setSideLiveEdits([]);setDeliveredQueuedIds([]);setRemoteQueuedIds([]);setHandoffId(undefined);
+  const knownOpen=peekSideQuestionOpen(current);
+  if(knownOpen){setOpen(true);side?.show({restore:true});}
+  else{setOpen(false);side?.hide({restore:true});}
   let stale=false;onCleanup(()=>{stale=true;});
   const missionId=p.mission;
   const warmInitial='peekWarmBtwState' in btwMod && typeof btwMod.peekWarmBtwState==='function'?btwMod.peekWarmBtwState(missionId):undefined;
@@ -228,13 +235,14 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    if(session?.active)watchActive(session);
    resync?.();
   };
-  // Don't reopen a side question just because it was open last time.
-  // That reserved an empty column beside the conversation.
+  // Restore per-mission `/btw` open state when switching back to a conversation
+  // where `/btw` was left open, while hiding the shared right column on conversations
+  // where `/btw` is closed.
   const hydrateSaved=(saved:SavedSideQuestion|undefined)=>{
   if(stale)return;
   const hinted=consumeSideQuestionOpenHint(current);
-  const savedOpen=Boolean(saved?.open);
-  const shouldOpen=hinted||(side?side.visible()||savedOpen:savedOpen);
+  const savedOpen=peekSideQuestionOpen(current)??Boolean(saved?.open);
+  const shouldOpen=hinted||savedOpen;
   const cleanHistory=(saved?.history??[]).filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()}));
   const warmNow='peekWarmBtwState' in btwMod && typeof btwMod.peekWarmBtwState==='function'?btwMod.peekWarmBtwState(missionId):undefined;
   const initialHistory=warmNow&&(warmNow.clean||warmNow.history.length>cleanHistory.length)?mergeLocalAttachments(warmNow.history,cleanHistory):cleanHistory;
@@ -260,7 +268,12 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   );
   if(warmAnsweredPending&&agent?.active)clearStaleActive();
   setHistory(initialHistory);setBusy(false);setOpen(shouldOpen);
-  if(hinted||(savedOpen&&side?.standalone))queueMicrotask(()=>{if(!stale&&key()===current)side?.show();});
+  if(shouldOpen){
+   if(hinted)side?.show();
+   else side?.show({restore:true});
+  }else{
+   side?.hide({restore:true});
+  }
   const interruptedError='Side question interrupted. Retry to request a complete answer.';
   const rawSavedError=saved?.pending?.error||'';
   const normalizedSavedError=rawSavedError.includes('Check its activity for tool errors')&&btwActivities(missionId).length===0
@@ -459,7 +472,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  }));
  createEffect(()=>{
   const missionId=p.mission;
-  const visible=side?side.visible():open();
+  const visible=side?side.visible()&&open():open();
   if(!visible||!missionId)return;
   let stopOpen:(()=>void)|undefined;
   try{
@@ -471,15 +484,13 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  });
  createEffect(()=>{
   const current=key();
-  const snapshot={history:history(),draft:draft(),model:model(),open:side?side.visible():open(),docked:true,
+  const snapshot={history:history(),draft:draft(),model:model(),open:open(),docked:true,
     pending:(busy()||error())?{question:question(),answer:answer(),error:error(),attachments:pendingAttachments(),turnId:turnId(),...(startedAt()?{startedAt:startedAt()}:{}),...(notSent()?{notSent:true}:{})}:undefined,
     queue:queue()};
   if(loadedKey()===current){
    void writeSideQuestion(current,snapshot).then(saved=>{if(key()===current)setStorageError(!saved);});
   }
  });
- side?.register(()=>setOpen(true));
- onCleanup(()=>{abort?.abort();side?.register(undefined);});
  const submitQueuedFollowUp=async(
   text:string,
   images:DraftImage[],
@@ -494,7 +505,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   for(const file of files)text=text.replaceAll(uploadToken(file.path),`[File: ${file.source.name}]`);
   if(!hasQueueFollowUp()){
    setQueue(rows=>[...rows,{id:clientMessageId,question:text,attachments}].slice(0,20));
-   setOpen(true);side?.show();setDraft('');
+   markOpen();side?.show();setDraft('');
    revealSentQuestion();
    return true;
   }
@@ -502,7 +513,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   if(!replace){
    setPendingQueued(rows=>[...rows,{id:clientMessageId,content:text,attached:attachments.length>0||undefined}]);
   }
-  setOpen(true);side?.show();setDraft('');
+  markOpen();side?.show();setDraft('');
   revealSentQuestion();
   try{
    const res=await queueFn(missionId,text,sideContext(p.items,true),history(),attachments,clientMessageId,replace);
@@ -573,7 +584,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   if(current===key()){
    pendingBaselineHistory=history();
    setPendingAttachments(attachments);
-   setOpen(true);side?.show();setBusy(true);setQuestion(text);setAnswer('');setNarration([]);setError('');setNotSent(false);setDraft('');
+   markOpen();side?.show();setBusy(true);setQuestion(text);setAnswer('');setNarration([]);setError('');setNotSent(false);setDraft('');
    revealSentQuestion();
   }
   asking=true;
@@ -671,11 +682,11 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   }
   remoteQueue?.editFirst();
  };
- const reveal=()=>{setOpen(true);side?.show({focus:true});};
+ const reveal=()=>{markOpen();side?.show({focus:true});};
  p.ref({ask,open:reveal});
  const escape=(event:KeyboardEvent)=>{
   if(event.key==='Escape'&&!event.defaultPrevented&&open()&&!side){
-   event.preventDefault();setOpen(false);
+   event.preventDefault();markClosed();
   }
  };
  onMount(()=>window.addEventListener('keydown',escape));
@@ -694,7 +705,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   if(!draft){setPreparing(false);return;}
   if(busy()||editingQueued())return;
   setTurnId(crypto.randomUUID());setQuestion(draft.text);setAnswer('');setNarration([]);setError('');setPreparing(true);
-  setOpen(true);side?.show();revealSentQuestion();
+  markOpen();side?.show();revealSentQuestion();
  };
  let inline!:HTMLDivElement;
  // Keep a live stage and elapsed time visible throughout an active turn, anchored to the turn's start timestamp.
@@ -709,7 +720,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   <div ref={inline}/>
   <Show when={!side&&!open()&&(history().length||busy()||error())}><button class="btw-reopen" onClick={reveal}>Side questions {busy()?'· Answering…':`· ${history().length}`}</button></Show>
   <Show when={open()}><Portal mount={side ? side.target() : inline}><section class="btw-panel" aria-label="Side questions">
-   <header data-orb-drag-region><div><strong>Side question</strong></div><div class="btw-actions"><Show when={canStartFreshSession()}><button class="icon-btn" aria-label="New side session" title={freshSession()?"Next question starts a new side session":"New side session"} disabled={busy()||!btwSession(p.mission)||freshSession()} onClick={startFreshSession}><Ic.PlusIcon size={15}/></button></Show><button class="icon-btn" aria-label="Close side questions" onClick={()=>{setOpen(false);side?.hide();}}><Ic.CloseIcon size={16}/></button></div></header>
+   <header data-orb-drag-region><div><strong>Side question</strong></div><div class="btw-actions"><Show when={canStartFreshSession()}><button class="icon-btn" aria-label="New side session" title={freshSession()?"Next question starts a new side session":"New side session"} disabled={busy()||!btwSession(p.mission)||freshSession()} onClick={startFreshSession}><Ic.PlusIcon size={15}/></button></Show><button class="icon-btn" aria-label="Close side questions" onClick={()=>{markClosed();side?.hide();}}><Ic.CloseIcon size={16}/></button></div></header>
    <div class="btw-thread" ref={pin.ref} onScroll={pin.onScroll}>
     <For each={turns}>{exchange=>{
      const content=()=>remoteLog(exchange.answer);
