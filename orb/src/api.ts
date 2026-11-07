@@ -2197,6 +2197,7 @@ export const CAP_SLOT_STATUSES = new Set([
   "active",
   "awaiting_user",
   "waiting_background",
+  "waiting_rate_limit",
   "paused",
 ]);
 
