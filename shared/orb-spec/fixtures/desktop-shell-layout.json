@@ -12,7 +12,7 @@
       "id": "titlebar",
       "selector": ".app > .titlebar",
       "gridRow": "1 / 2",
-      "gridColumn": "1 / -1",
+      "gridColumn": "2 / 3",
       "heightPx": 35,
       "dragRegionAttr": "data-orb-drag-region",
       "translucent": true
@@ -22,7 +22,6 @@
       "selector": ".titlebar .tb-left",
       "owner": "titlebar",
       "expandedWidthMatchesSidebar": true,
-      "expandedRightBorderMatchesSidebar": true,
       "buttons": ["Toggle sidebar", "Back", "Forward"]
     },
     {
@@ -35,7 +34,7 @@
     {
       "id": "sidebar",
       "selector": "#orb-sidebar.sidebar",
-      "gridRow": "2 / 3",
+      "gridRow": "1 / 3",
       "gridColumn": "1 / 2",
       "minHeightZero": true,
       "overflowHidden": true,
@@ -48,8 +47,15 @@
       "gridRow": "2 / 3",
       "gridColumn": "2 / 3",
       "minHeightZero": true,
-      "crispScrollTop": true,
+      "topDissolvePx": 14,
       "pinnedComposer": ".dock textarea"
+    },
+    {
+      "id": "sidePanel",
+      "selector": ".app > .file-panel",
+      "gridRow": "1 / 3",
+      "gridColumn": "3 / 4",
+      "mergedIntoTopRow": true
     }
   ],
   "columnStates": [

@@ -624,9 +624,24 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     return .ok .null
   | "biometric_status" =>
     let avail := st.hostOs == "macos"
-    return .ok (.obj #[("available", .bool avail), ("biometry_type", .str (if avail then "touch_id" else "none"))])
+    return .ok (.obj #[
+      ("available", .bool avail),
+      ("kind", .str (if avail then "touch_id" else "none")),
+      ("label", .str (if avail then "Touch ID" else "")),
+      ("biometry_type", .str (if avail then "touch_id" else "none"))
+    ])
   | "biometric_authenticate" =>
-    return .ok (.bool false)
+    if st.hostOs != "macos" then
+      return .ok (.bool false)
+    else
+      match st.signerBin? with
+      | none => return .ok (.bool false)
+      | some bin =>
+        let rawReason := (args.fieldStr? "reason").getD "Authenticate"
+        let cleanReason := if rawReason.trimAscii.toString.isEmpty then "Authenticate" else rawReason.trimAscii.toString
+        match ← runOrbSigner bin #["auth", "--reason", cleanReason] none with
+        | .ok jv => return .ok (.bool ((jv.fieldStr? "authenticated") == some "true"))
+        | .error _ => return .ok (.bool false)
   | "client_link_active" =>
     return .ok (.bool st.clientLinkConnected)
   | "client_link_connect" =>

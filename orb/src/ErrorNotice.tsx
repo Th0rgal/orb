@@ -100,6 +100,16 @@ export function describeError(raw: string, fallback = "Something went wrong", ba
   }
   const outdated = raw.match(/Update (.+) to receive a workspace (containing links|with selected build folders)/);
   if (outdated) return { title: `${outdated[1]} needs an update`, message: `This workspace ${outdated[2] === "containing links" ? "contains links" : "includes build folders you selected"}, which that machine cannot receive yet. Update it, or choose another machine. The conversation has not moved.` };
+  const silentStop = raw.match(/^Remote\s+(opencode|claudecode|claude|codex|antigravity|grok|vibe|node\s+'[^']+')\s+job\s+[0-9a-f-]{36}(?:\s+on\s+node\s+'([^']+)')?\s+finished without assistant text(?:\s+\(stop reason:\s*([^)]+)\))?\.?$/i);
+  if (silentStop) {
+    const agent = inferLaunchHarness(raw, backend);
+    const node = silentStop[2] ? ` on ${silentStop[2]}` : "";
+    return {
+      tone: "warning",
+      title: `${agent} stopped without a written reply`,
+      message: `The run${node} completed its tool or reasoning step without emitting a final message. Your workspace and conversation history are preserved — resume or send a follow-up to ask for the summary.`,
+    };
+  }
   if (raw.trim() === "Model error") return { title: fallback, message: "The run ended with an error before returning a response. Your workspace and conversation history are preserved." };
   const technical = raw.length > 260 || /(?:^\s*[{[]|\\n|Traceback|Internal error|statvfs:)/.test(raw);
   return { title: fallback, message: technical ? "The request could not be completed. See details for the backend response." : raw };
@@ -132,8 +142,10 @@ export function ErrorNotice(p: { error: string; title?: string; backend?: string
       <Show when={info().message !== p.error}><details><summary>Technical details</summary><pre>{p.error}</pre></details></Show>
       <Show when={copyError()}><p class="error-copy-status" role="status">{copyError()}</p></Show>
     </div>
-    <button type="button" class="icon-btn toast-icon-btn error-copy" aria-label={copied() ? "Error copied" : "Copy error"} title={copied() ? "Copied" : "Copy error"} onClick={() => void copy()}><Show when={copied()} fallback={<CopyIcon size={13} />}><CheckIcon size={13} /></Show></button>
-    <Show when={p.onDismiss}><button type="button" class="icon-btn toast-icon-btn" aria-label="Dismiss error" onClick={() => p.onDismiss?.()}><CloseIcon size={13} /></button></Show>
+    <div class="toast-corner">
+      <Show when={p.onDismiss}><button type="button" class="icon-btn toast-icon-btn" aria-label="Dismiss error" onClick={() => p.onDismiss?.()}><CloseIcon size={13} /></button></Show>
+      <button type="button" class="icon-btn toast-icon-btn error-copy" aria-label={copied() ? "Error copied" : "Copy error"} title={copied() ? "Copied" : "Copy error"} onClick={() => void copy()}><Show when={copied()} fallback={<CopyIcon size={13} />}><CheckIcon size={13} /></Show></button>
+    </div>
   </section>;
 }
 

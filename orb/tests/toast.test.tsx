@@ -354,4 +354,13 @@ describe("unified workspace ErrorToast & Toaster", () => {
     expect(onDismissMain).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
   });
+
+  it("stacks the Copy error button under the Dismiss button inside .toast-corner", () => {
+    render(() => <ErrorToast error="HTTP 502: Upstream gateway error" title="Couldn’t load the conversation" />);
+    const alert = screen.getByRole("alert");
+    const corner = alert.querySelector(".toast-corner");
+    expect(corner).not.toBeNull();
+    const btns = Array.from(corner!.querySelectorAll("button"));
+    expect(btns.map((b) => b.getAttribute("aria-label"))).toEqual(["Dismiss", "Copy error"]);
+  });
 });

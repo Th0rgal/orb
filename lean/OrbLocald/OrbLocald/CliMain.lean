@@ -31,7 +31,9 @@ private def corsHeaderBlock (origin? : Option String) : String :=
   | some raw =>
     let o := raw.trimAscii.toString
     if !o.isEmpty && isAllowedLocaldOrigin (some o) then
-      s!"Access-Control-Allow-Origin: {o}\r\nVary: Origin\r\n"
+      s!"Access-Control-Allow-Origin: {o}\r\n" ++
+      "Vary: Origin\r\n" ++
+      "Access-Control-Expose-Headers: X-Orb-Events-Protocol, X-Has-More, X-Next-Cursor, X-Page-Max-Sequence, X-Max-Sequence, Content-Disposition, Retry-After, X-Request-Id\r\n"
     else
       ""
 
@@ -51,7 +53,7 @@ private def sendPreflight204 (fd : Fd) (origin? : Option String) : IO Unit := do
     "HTTP/1.1 204 No Content\r\n" ++
     corsHeaderBlock origin? ++
     "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n" ++
-    "Access-Control-Allow-Headers: Content-Type, Authorization, X-Orb-Token, Idempotency-Key\r\n" ++
+    "Access-Control-Allow-Headers: Content-Type, Authorization, X-Orb-Token, Idempotency-Key, X-Paloma-Approval, X-Language, Last-Event-ID, Cache-Control, Accept\r\n" ++
     "Access-Control-Max-Age: 86400\r\n" ++
     "Content-Length: 0\r\n" ++
     "Connection: close\r\n\r\n"

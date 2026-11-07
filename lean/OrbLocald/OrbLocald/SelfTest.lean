@@ -256,6 +256,16 @@ def main : IO UInt32 := do
        (jv.fieldArr? "consumers").isSome
      | _ => false)
   if (← assertTrue "local_machine_identity_string_and_metrics_schema" idAndMetricsOk) then passed := passed + 1
+  let bioStatusRes ← dispatchRpcCommand stDiskRef "biometric_status" (.obj #[])
+  total := total + 1
+  let bioStatusOk := match bioStatusRes with
+    | .ok jv =>
+      jv.fieldBool? "available" == some true &&
+      jv.fieldStr? "kind" == some "touch_id" &&
+      jv.fieldStr? "label" == some "Touch ID"
+    | _ => false
+  if (← assertTrue "biometric_status_touch_id_schema" bioStatusOk) then passed := passed + 1
+
   try IO.FS.removeDirAll tmpStateDir catch _ => pure ()
 
   IO.println s!"orb-locald-test: {passed}/{total} checks passed"

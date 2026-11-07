@@ -709,7 +709,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   <div ref={inline}/>
   <Show when={!side&&!open()&&(history().length||busy()||error())}><button class="btw-reopen" onClick={reveal}>Side questions {busy()?'· Answering…':`· ${history().length}`}</button></Show>
   <Show when={open()}><Portal mount={side ? side.target() : inline}><section class="btw-panel" aria-label="Side questions">
-   <header><div><strong>Side question</strong></div><div class="btw-actions"><Show when={canStartFreshSession()}><button class="icon-btn" aria-label="New side session" title={freshSession()?"Next question starts a new side session":"New side session"} disabled={busy()||!btwSession(p.mission)||freshSession()} onClick={startFreshSession}><Ic.PlusIcon size={15}/></button></Show><button class="icon-btn" aria-label="Close side questions" onClick={()=>{setOpen(false);side?.hide();}}><Ic.CloseIcon size={16}/></button></div></header>
+   <header data-orb-drag-region><div><strong>Side question</strong></div><div class="btw-actions"><Show when={canStartFreshSession()}><button class="icon-btn" aria-label="New side session" title={freshSession()?"Next question starts a new side session":"New side session"} disabled={busy()||!btwSession(p.mission)||freshSession()} onClick={startFreshSession}><Ic.PlusIcon size={15}/></button></Show><button class="icon-btn" aria-label="Close side questions" onClick={()=>{setOpen(false);side?.hide();}}><Ic.CloseIcon size={16}/></button></div></header>
    <div class="btw-thread" ref={pin.ref} onScroll={pin.onScroll}>
     <For each={turns}>{exchange=>{
      const content=()=>remoteLog(exchange.answer);
