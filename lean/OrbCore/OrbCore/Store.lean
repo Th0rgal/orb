@@ -201,8 +201,37 @@ def upsertProjectGrantSql : String :=
   "autonomy_level = COALESCE(excluded.autonomy_level, project_grant.autonomy_level), " ++
   "updated_at = excluded.updated_at;"
 
+def harnessContinuitySchemaSql : String :=
+  "CREATE TABLE IF NOT EXISTS harness_continuity (" ++
+  "mission_id TEXT PRIMARY KEY, " ++
+  "backend TEXT NOT NULL, " ++
+  "session_generation INTEGER NOT NULL, " ++
+  "session_id TEXT NOT NULL DEFAULT '', " ++
+  "prompt_claim_id TEXT NOT NULL DEFAULT '', " ++
+  "prompt_claim_phase TEXT NOT NULL DEFAULT 'none' CHECK(prompt_claim_phase IN ('none','claimed','delivered','uncertain')), " ++
+  "tool_journal_json TEXT NOT NULL DEFAULT '[]', " ++
+  "reconcile_required INTEGER NOT NULL DEFAULT 0, " ++
+  "state_revision INTEGER NOT NULL DEFAULT 1, " ++
+  "updated_at TEXT NOT NULL DEFAULT '');"
+
+def harnessContinuityIndexSql : String :=
+  "CREATE INDEX IF NOT EXISTS idx_harness_continuity_reconcile ON harness_continuity(reconcile_required, updated_at);"
+
 def askSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS ask_requests (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, question TEXT NOT NULL, answer TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT '');"
+
+def askMidturnSchemaSql : String :=
+  "CREATE TABLE IF NOT EXISTS operator_notes (" ++
+  "note_id TEXT PRIMARY KEY, " ++
+  "mission_id TEXT NOT NULL, " ++
+  "content TEXT NOT NULL, " ++
+  "created_at_seq INTEGER NOT NULL, " ++
+  "created_at_iso TEXT NOT NULL DEFAULT '', " ++
+  "delivery_tries INTEGER NOT NULL DEFAULT 0, " ++
+  "flushed_at TEXT DEFAULT NULL);"
+
+def askMidturnPendingIndexSql : String :=
+  "CREATE INDEX IF NOT EXISTS idx_operator_notes_pending ON operator_notes(mission_id, flushed_at, created_at_seq);"
 
 def idempotencySchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS idempotency_keys (scope TEXT NOT NULL, request_key TEXT NOT NULL, response_json TEXT NOT NULL, status_code INTEGER NOT NULL DEFAULT 200, committed_oversize INTEGER NOT NULL DEFAULT 0, body_bytes INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT 'committed', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(scope, request_key));"
@@ -486,6 +515,15 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) : IO (Except Stri
     return .error s!"core_store_mkdir_failed:{ioErr}"
   let mRes ← openSqliteDb s!"{trimmedRoot}/missions.db" missionsSchemaSql missionsAdditiveAlters
   let .ok mDb := mRes | return .error (match mRes with | .error e => e | .ok _ => "err")
+  let contInitRes : Except String Unit ← mDb.mu.atomically do
+    if let .error e ← sqliteQueryRowsRaw mDb.handle harnessContinuitySchemaSql #[] then
+      return .error e
+    match ← sqliteQueryRowsRaw mDb.handle harnessContinuityIndexSql #[] with
+    | .ok _ => return .ok ()
+    | .error e => return .error e
+  if let .error contErr := contInitRes then
+    sqliteCloseRaw mDb.handle
+    return .error s!"core_store_continuity_schema_failed:{contErr}"
   let effBootRes : Except String UInt64 ←
     if bootEpoch == 0 then allocateNextBootEpoch mDb else pure (.ok bootEpoch)
   let .ok effBoot := effBootRes | do
@@ -495,6 +533,15 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) : IO (Except Stri
   let .ok pDb := pRes | do sqliteCloseRaw mDb.handle; return .error (match pRes with | .error e => e | .ok _ => "err")
   let aRes ← openSqliteDb s!"{trimmedRoot}/ask.db" askSchemaSql
   let .ok aDb := aRes | do sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; return .error (match aRes with | .error e => e | .ok _ => "err")
+  let askNotesInitRes : Except String Unit ← aDb.mu.atomically do
+    if let .error e ← sqliteQueryRowsRaw aDb.handle askMidturnSchemaSql #[] then
+      return .error e
+    match ← sqliteQueryRowsRaw aDb.handle askMidturnPendingIndexSql #[] with
+    | .ok _ => return .ok ()
+    | .error e => return .error e
+  if let .error askNotesErr := askNotesInitRes then
+    sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle
+    return .error s!"core_store_ask_midturn_schema_failed:{askNotesErr}"
   let iRes ← openSqliteDb s!"{trimmedRoot}/idempotency_keys.db" idempotencySchemaSql idempotencyAdditiveAlters
   let .ok iDb := iRes | do
     sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle

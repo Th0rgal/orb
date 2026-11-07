@@ -17,6 +17,7 @@ import OrbCore.Cyber
 import OrbCore.Skills
 import OrbCore.Managed
 import OrbCore.MemoryAndCloud
+import OrbCore.HarnessSessionRegistry
 
 namespace OrbCore.Control
 
@@ -37,6 +38,7 @@ open OrbCore.Cyber
 open OrbCore.Skills
 open OrbCore.Managed
 open OrbCore.MemoryAndCloud
+open OrbCore.HarnessSessionRegistry
 
 /-- Core runtime configuration parsed from environment variables (`HOST`, `PORT`, `WORKING_DIR`,
     `DEV_MODE`, `DASHBOARD_PASSWORD`, `JWT_SECRET`, `SANDBOXED_USERS`, `ALLOW_INSECURE_REMOTE_DEV_AUTH`). -/
@@ -53,6 +55,7 @@ structure CoreConfig where
   libraryRemote              : String := ""
   githubClientId             : String := ""
   proxySecret                : String := ""
+  askSandboxTmpRoot          : String := ""
   deriving Repr, DecidableEq
 
 /-- Live runtime state for the `sandboxed-sh` HTTP/WS server. -/
@@ -143,6 +146,9 @@ def loadConfigFromEnv : IO CoreConfig := do
   let libRem := (← IO.getEnv "LIBRARY_REMOTE").getD ""
   let ghId := (← IO.getEnv "GITHUB_CLIENT_ID").getD ""
   let proxySec := (← IO.getEnv "SANDBOXED_PROXY_SECRET").getD ""
+  let askTmpA := ((← IO.getEnv "SANDBOXED_SH_ASK_TMP_ROOT").getD "").trimAscii.toString
+  let askTmpB := ((← IO.getEnv "TMPDIR").getD "").trimAscii.toString
+  let askTmp := if !askTmpA.isEmpty then askTmpA else if !askTmpB.isEmpty then askTmpB else "/tmp"
   return {
     host := if host.isEmpty then "127.0.0.1" else host
     port := (if portNat == 0 || portNat > 65535 then 3000 else portNat).toUInt16
@@ -156,6 +162,7 @@ def loadConfigFromEnv : IO CoreConfig := do
     libraryRemote := libRem
     githubClientId := ghId
     proxySecret := proxySec
+    askSandboxTmpRoot := askTmp
   }
 
 /-- Mint a deterministic HMAC-SHA256 bearer/WS session token (`expEpoch.hexMac`). -/
@@ -1926,6 +1933,17 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       | do IO.eprintln s!"[sandboxed-sh] FATAL: failed to open SQLite CoreStore at {dataRoot}"; return 1
     let .ok managedStore ← openManagedComputeStore s!"{dataRoot}/managed_compute.db"
       | do closeCoreStore store; IO.eprintln s!"[sandboxed-sh] FATAL: failed to open managed_compute.db at {dataRoot}"; return 1
+    let effAskTmpRoot : System.FilePath :=
+      let fromCfg := cfg.askSandboxTmpRoot.trimAscii.toString
+      if !fromCfg.isEmpty then System.FilePath.mk fromCfg else System.FilePath.mk "/tmp"
+    let .ok (askPendingNotes, askReapedSandboxes) ← bootstrapAskSidecarOnStartup store.askDb effAskTmpRoot
+      | do
+        closeManagedComputeStore managedStore
+        closeCoreStore store
+        IO.eprintln s!"[sandboxed-sh] FATAL: failed to bootstrap Ask sidecar at {dataRoot}"
+        return 1
+    if askPendingNotes > 0 || !askReapedSandboxes.isEmpty then
+      IO.eprintln s!"[sandboxed-sh] Ask sidecar bootstrap: pending_notes={askPendingNotes} reaped_sandboxes={askReapedSandboxes.size}"
     let searchRes ← openSearchIndex s!"{dataRoot}/search_index"
     let initialManaged :=
       match ← loadManagedFleet managedStore false false 2000 0 100 with

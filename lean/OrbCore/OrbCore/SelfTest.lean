@@ -27,6 +27,7 @@ open OrbCore.Cyber
 open OrbCore.Skills
 open OrbCore.Control
 open OrbCore.HostTests
+open OrbCore.HarnessSessionRegistry
 
 private def findFlag? (args : List String) (flag : String) : Option String :=
   match args with
@@ -998,6 +999,750 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
   return 0
 
 set_option maxRecDepth 4000 in
+private def runR4cHarnessSessionTests (store : CoreStore) (tmpRoot : String) : IO UInt32 := do
+  -- 1. SM-15: Generation-owned `HarnessSessionHandle` & Registry + warm-turn latch reset + stale-generation fail-closed
+  let reg ← newHarnessSessionRegistry
+  let badZeroGen ← registerSessionHandle reg "m-r4c-1" .openCode 0 "high"
+  let badEmptyId ← registerSessionHandle reg "   " .openCode 1 "high"
+  if badZeroGen.isOk || badEmptyId.isOk then
+    IO.eprintln "[orb-core-test] FAIL: SM-15 registerSessionHandle accepted empty missionId or zero generation"
+    return 1
+
+  let supKilledRef ← IO.mkRef (#[] : Array (Int64 × Int32))
+  let khGen1 : ProcessKillHandle := {
+    pid := 42420
+    startTicks := 900100
+    killProcessGrp := true
+    observeFn? := some (fun _ => pure {
+      procMissing := 0, procReadError := 0, isZombieOrDeadState := 0,
+      fieldsAfterComm := 50, actualStartTicks := 900100
+    })
+    signalFn? := some (fun tgt sig => do
+      supKilledRef.modify (fun xs => xs.push (tgt, sig))
+      return 0)
+  }
+  let .ok hGen1 ← registerSessionHandle reg "m-r4c-1" .openCode 1 "high" (some khGen1)
+    | do IO.eprintln "[orb-core-test] FAIL: SM-15 initial registerSessionHandle failed"; return 1
+  if hGen1.sessionGeneration != 1 || hGen1.backend != .openCode then
+    IO.eprintln "[orb-core-test] FAIL: SM-15 initial handle identity mismatch"
+    return 1
+  -- Stale or duplicate generation registration MUST fail closed
+  if (← registerSessionHandle reg "m-r4c-1" .openCode 1 "high").isOk then
+    IO.eprintln "[orb-core-test] FAIL: SM-15 registerSessionHandle accepted duplicate generation"
+    return 1
+  -- Superseding with generation 2 must reap generation 1's process group (`-42420`)
+  let .ok hWarm ← registerSessionHandle reg "m-r4c-1" .openCode 2 "high"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-15 generation-2 supersession failed"; return 1
+  let supSignals ← supKilledRef.get
+  if supSignals != #[(-42420, 15)] || (← registerSessionHandle reg "m-r4c-1" .openCode 1 "high").isOk then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-15 supersession kill or stale-generation rejection failed: {repr supSignals}"
+    return 1
+
+  -- Stale eventGeneration (`1 != 2`) MUST be rejected fail-closed on `applySessionOp`
+  if (← applySessionOp hWarm .confirmReady 1).isOk then
+    IO.eprintln "[orb-core-test] FAIL: SM-15 applySessionOp accepted stale eventGeneration"
+    return 1
+  let .ok (stReady, _) ← applySessionOp hWarm .confirmReady 2
+    | do IO.eprintln "[orb-core-test] FAIL: SM-15 confirmReady failed"; return 1
+  let .ok (stTurn1, _) ← applySessionOp hWarm .beginTurn 2
+    | do IO.eprintln "[orb-core-test] FAIL: SM-15 beginTurn 1 failed"; return 1
+  if stReady.slice.phaseCode != 1 || stTurn1.slice.phaseCode != 2 || stTurn1.turnOrdinal != 1 then
+    IO.eprintln "[orb-core-test] FAIL: SM-15 phase/ordinal mismatch on turn 1"
+    return 1
+
+  -- Turn 1 activity: tool call + tool result + assistant text + SSE idle + CLI exit 0 -> Ready (`phaseCode == 1`)
+  let .ok _ ← stepOpenCodeHandleInput hWarm 2
+    (.sseChunk "ses_warm_1" "data: {\"type\":\"tool_call\",\"sessionID\":\"ses_warm_1\",\"id\":\"tc-1\",\"name\":\"bash\"}\n")
+    (requireCliExitForTurnDone := false)
+    | do IO.eprintln "[orb-core-test] FAIL: SM-15/16 OpenCode tool_call step failed"; return 1
+  -- While `toolDepth == 1`, `finishTurnToReady` MUST be rejected!
+  if (← applySessionOp hWarm .finishTurnToReady 2 (hasTurnIdleReceipt := true)).isOk then
+    IO.eprintln "[orb-core-test] FAIL: SM-15 finishTurnToReady admitted while toolDepth > 0"
+    return 1
+  let .ok _ ← stepOpenCodeHandleInput hWarm 2
+    (.sseChunk "ses_warm_1" "data: {\"type\":\"tool_result\",\"sessionID\":\"ses_warm_1\",\"tool_use_id\":\"tc-1\",\"output\":\"ok\"}\n")
+    (requireCliExitForTurnDone := false)
+    | do IO.eprintln "[orb-core-test] FAIL: SM-15/16 OpenCode tool_result step failed"; return 1
+  -- Duplicate `tool_result` for `tc-1` must NOT underflow `toolDepth`
+  let .ok (afterDupTool, _, dupEvs) ← stepOpenCodeHandleInput hWarm 2
+    (.sseChunk "ses_warm_1" "data: {\"type\":\"tool_result\",\"sessionID\":\"ses_warm_1\",\"tool_use_id\":\"tc-1\",\"output\":\"dup\"}\n")
+    (requireCliExitForTurnDone := false)
+    | do IO.eprintln "[orb-core-test] FAIL: SM-16 duplicate tool_result step errored"; return 1
+  if afterDupTool.slice.toolDepth != 0 || !dupEvs.isEmpty then
+    IO.eprintln "[orb-core-test] FAIL: SM-16 duplicate tool_result underflowed or re-emitted"
+    return 1
+  let .ok _ ← stepOpenCodeHandleInput hWarm 2
+    (.cliJsonLine "{\"type\":\"text\",\"sessionID\":\"ses_warm_1\",\"part\":{\"type\":\"text\",\"text\":\"Turn 1 visible reply\"}}")
+    (requireCliExitForTurnDone := false)
+    | do IO.eprintln "[orb-core-test] FAIL: SM-16 Turn 1 text step failed"; return 1
+  let .ok _ ← stepOpenCodeHandleInput hWarm 2
+    (.cliJsonLine "{\"type\":\"step_finish\",\"sessionID\":\"ses_warm_1\",\"part\":{\"type\":\"step-finish\",\"reason\":\"stop\"}}")
+    (requireCliExitForTurnDone := false)
+    | do IO.eprintln "[orb-core-test] FAIL: SM-16 Turn 1 step_finish failed"; return 1
+  let .ok (afterTurn1Idle, _, turn1IdleEvs) ← stepOpenCodeHandleInput hWarm 2
+    (.sseSessionIdle "ses_warm_1")
+    (requireCliExitForTurnDone := false)
+    | do IO.eprintln "[orb-core-test] FAIL: SM-16 Turn 1 sseSessionIdle failed"; return 1
+  if afterTurn1Idle.slice.phaseCode != 1 ||
+     turn1IdleEvs != #[.TurnResult "m-r4c-1" false "end_turn"] then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-16 Turn 1 did not settle to Ready cleanly: {repr afterTurn1Idle.slice} evs={repr turn1IdleEvs}"
+    return 1
+
+  -- Park -> Wake -> BeginTurn (Turn 2) on warm session MUST reset `sawUserText`, `sawActivity`, `emittedEvents`, `openCode` latches
+  -- while preserving `expectedSessionId == "ses_warm_1"`, so a silent stop on Turn 2 is NOT masked by Turn 1's `sawUserText = true`!
+  let .ok (stParked, _) ← applySessionOp hWarm .parkSession 2
+    | do IO.eprintln "[orb-core-test] FAIL: SM-15 parkSession failed"; return 1
+  let .ok (stWoken, _) ← applySessionOp hWarm .wakeParkedSession 2
+    | do IO.eprintln "[orb-core-test] FAIL: SM-15 wakeParkedSession failed"; return 1
+  let .ok (stTurn2, _) ← applySessionOp hWarm .beginTurn 2
+    | do IO.eprintln "[orb-core-test] FAIL: SM-15 beginTurn 2 failed"; return 1
+  if stParked.slice.phaseCode != 3 || stWoken.slice.phaseCode != 1 || stTurn2.slice.phaseCode != 2 ||
+     stTurn2.turnOrdinal != 2 || stTurn2.parser.sawUserText || stTurn2.parser.sawActivity ||
+     !stTurn2.parser.emittedEvents.isEmpty || stTurn2.openCode.sawSseIdle ||
+     stTurn2.openCode.expectedSessionId != "ses_warm_1" then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-15 warm turn latch reset failed: {repr stTurn2}"
+    return 1
+  -- Foreign sessionID frame on SSE sidecar must be rejected by `agentEventNormalizeStep` (`sessionMatchesExpected == 0`)
+  let .ok (afterForeign, _, foreignEvs) ← stepOpenCodeHandleInput hWarm 2
+    (.sseChunk "ses_foreign_999" "data: {\"type\":\"text_delta\",\"sessionID\":\"ses_foreign_999\",\"delta\":\"SPOOFED\"}\n")
+    (requireCliExitForTurnDone := false)
+    | do IO.eprintln "[orb-core-test] FAIL: SM-16 foreign session step errored"; return 1
+  if afterForeign.parser.sawUserText || !foreignEvs.isEmpty then
+    IO.eprintln "[orb-core-test] FAIL: SM-16 foreign OpenCode SSE session leaked into active turn"
+    return 1
+  -- Direct `foldEmittedAgentEventIntoSession` normalizer admission gate on `.TurnResult _ true msg`:
+  -- oversize payload (`payloadBytes > 65536`), invalid `harnessKind > 5`, or foreign `sessionMatches == 0`
+  -- when `expectedSessionId` is bound MUST all be rejected fail-closed (`sawExplicitError == false`, `ev? == none`),
+  -- and an oversize OpenCode SSE/CLI error line (`> 65536` bytes) MUST NOT poison `sawExplicitError` or `expectedSessionId`!
+  let baseNormSlice := afterForeign.slice
+  let baseNormDc : OpenCodeDualChannelState := { expectedSessionId := "ses_warm_1" }
+  let errEv := AgentEvent.TurnResult "m-r4c-1" true "synthetic-err"
+  let (_, dcOversize, _, evOversize?) :=
+    foldEmittedAgentEventIntoSession 3 baseNormSlice baseNormDc 1 70000 errEv
+  let (_, dcBadKind, _, evBadKind?) :=
+    foldEmittedAgentEventIntoSession 9 baseNormSlice baseNormDc 1 128 errEv
+  let (_, dcForeignErr, _, evForeignErr?) :=
+    foldEmittedAgentEventIntoSession 3 baseNormSlice baseNormDc 0 128 errEv
+  let (_, dcValidErr, _, evValidErr?) :=
+    foldEmittedAgentEventIntoSession 3 baseNormSlice baseNormDc 1 128 errEv
+  if dcOversize.sawExplicitError || evOversize?.isSome ||
+     dcBadKind.sawExplicitError || evBadKind?.isSome ||
+     dcForeignErr.sawExplicitError || evForeignErr?.isSome ||
+     !dcValidErr.sawExplicitError || evValidErr? != some errEv then
+    IO.eprintln "[orb-core-test] FAIL: SM-16 foldEmittedAgentEventIntoSession did not enforce normalizer/session admission on error TurnResult"
+    return 1
+  let hugePad := String.ofList (List.replicate 66000 'x')
+  let hugeErrJson := s!"\{\"type\":\"result\",\"sessionID\":\"ses_warm_1\",\"is_error\":true,\"error\":\"{hugePad}\"}"
+  let .ok (afterHugeErr, _, hugeErrEvs) ← stepOpenCodeHandleInput hWarm 2
+    (.cliJsonLine hugeErrJson)
+    (requireCliExitForTurnDone := false)
+    | do IO.eprintln "[orb-core-test] FAIL: SM-16 oversize CLI error line step errored"; return 1
+  if afterHugeErr.openCode.sawExplicitError || !hugeErrEvs.isEmpty then
+    IO.eprintln "[orb-core-test] FAIL: SM-16 oversize (>65536B) error event bypassed normalizer byte cap"
+    return 1
+  -- Turn 2 reasoning without assistant text + `step_finish=stop` MUST flag silent stop (proving Turn 1 `sawUserText` did not bleed)
+  let .ok _ ← stepOpenCodeHandleInput hWarm 2
+    (.cliJsonLine "{\"type\":\"reasoning\",\"sessionID\":\"ses_warm_1\",\"part\":{\"type\":\"reasoning\",\"text\":\"Thinking only\"}}")
+    (requireCliExitForTurnDone := false)
+    | do IO.eprintln "[orb-core-test] FAIL: SM-16 Turn 2 reasoning failed"; return 1
+  let .ok (afterSilent, _, silentEvs) ← stepOpenCodeHandleInput hWarm 2
+    (.cliJsonLine "{\"type\":\"step_finish\",\"sessionID\":\"ses_warm_1\",\"part\":{\"type\":\"step-finish\",\"reason\":\"stop\"}}")
+    (requireCliExitForTurnDone := false)
+    | do IO.eprintln "[orb-core-test] FAIL: SM-16 Turn 2 step_finish failed"; return 1
+  if afterSilent.openCode.verdict != .failedSilentStop "OpenCode finished without assistant text (stop reason: end_turn)." ||
+     !silentEvs.any (fun e => e == .TurnResult "m-r4c-1" true "OpenCode finished without assistant text (stop reason: end_turn).") then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-15/16 Turn 2 silent stop was masked by stale Turn 1 latches: {repr afterSilent.openCode}"
+    return 1
+
+  -- 2. SM-16: Out-of-order, duplicate, and raced OpenCode SSE `session.idle` vs CLI exit (`0` vs non-zero)
+  -- Case A: Raced `SSE session.idle` arriving BEFORE non-zero CLI exit (`exitCode = 137`) MUST NOT mark turn clean,
+  -- and `Terminating -> Dead` (`opCode = 10`) MUST fail closed without `hasProcExitReceipt == 1`.
+  let .ok hRace ← mkHarnessSessionHandle "m-oc-race" .openCode 3
+    | do IO.eprintln "[orb-core-test] FAIL: mkHarnessSessionHandle m-oc-race failed"; return 1
+  let .ok _ ← applySessionOp hRace .confirmReady 3 | return 1
+  let .ok _ ← applySessionOp hRace .beginTurn 3 | return 1
+  let .ok _ ← stepOpenCodeHandleInput hRace 3
+    (.cliJsonLine "{\"type\":\"text\",\"sessionID\":\"ses_r\",\"part\":{\"type\":\"text\",\"text\":\"partial output\"}}")
+    (requireCliExitForTurnDone := true) | return 1
+  let .ok (sAfterRacedIdle, _, evsRacedIdle) ← stepOpenCodeHandleInput hRace 3
+    (.sseSessionIdle "ses_r") (requireCliExitForTurnDone := true) | return 1
+  -- Duplicate `session.idle` while CLI still running must also stay `inProgress`
+  let .ok (sAfterDupIdle, _, evsDupIdle) ← stepOpenCodeHandleInput hRace 3
+    (.sseSessionIdle "ses_r") (requireCliExitForTurnDone := true) | return 1
+  if sAfterRacedIdle.slice.phaseCode != 2 || !evsRacedIdle.isEmpty ||
+     sAfterDupIdle.openCode.verdict != .inProgress || !evsDupIdle.isEmpty then
+    IO.eprintln "[orb-core-test] FAIL: SM-16 raced/duplicate SSE session.idle prematurely completed turn before CLI exit"
+    return 1
+  let .ok (sAfterCrashExit, _, evsCrashExit) ← stepOpenCodeHandleInput hRace 3
+    (.cliProcessExited 137) (requireCliExitForTurnDone := true) | return 1
+  if sAfterCrashExit.openCode.verdict != .failedCliExit 137 "opencode_cli_exit_137" ||
+     evsCrashExit != #[.TurnResult "m-oc-race" true "opencode_cli_exit_137"] then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-16 non-zero CLI exit after SSE idle did not surface failedCliExit: {repr sAfterCrashExit.openCode}"
+    return 1
+  -- Verify `Terminating -> Dead` (`confirmProcessDead`) rejects `hasProcExitReceipt = false` on a live handle
+  let .ok hTermGate ← mkHarnessSessionHandle "m-oc-term" .openCode 4 | return 1
+  let .ok _ ← applySessionOp hTermGate .beginTerminate 4 | return 1
+  if (← applySessionOp hTermGate .confirmProcessDead 4 (hasProcExitReceipt := false)).isOk ||
+     (← retireDeadSessionHandle reg "m-r4c-1" 2) then
+    IO.eprintln "[orb-core-test] FAIL: SM-16 confirmProcessDead admitted without exit receipt or retired live handle"
+    return 1
+  let .ok (deadTerm, _) ← applySessionOp hTermGate .confirmProcessDead 4 (hasProcExitReceipt := true)
+    | do IO.eprintln "[orb-core-test] FAIL: SM-16 confirmProcessDead with exit receipt failed"; return 1
+  if deadTerm.slice.phaseCode != 5 || (← applySessionOp hTermGate .confirmReady 4).isOk then
+    IO.eprintln "[orb-core-test] FAIL: SM-16 Dead phase was not sticky"
+    return 1
+
+  -- Case B: Out-of-order `CLI exit 0` BEFORE trailing SSE `session.idle` settles once and suppresses trailing duplicate SSE idle
+  let .ok hOutOrder ← mkHarnessSessionHandle "m-oc-ooo" .openCode 5 | return 1
+  let .ok _ ← applySessionOp hOutOrder .confirmReady 5 | return 1
+  let .ok _ ← applySessionOp hOutOrder .beginTurn 5 | return 1
+  let .ok _ ← stepOpenCodeHandleInput hOutOrder 5
+    (.cliJsonLine "{\"type\":\"text\",\"sessionID\":\"ses_ooo\",\"part\":{\"type\":\"text\",\"text\":\"complete answer\"}}")
+    (requireCliExitForTurnDone := true) | return 1
+  let .ok (sExitFirst, _, evsExitFirst) ← stepOpenCodeHandleInput hOutOrder 5
+    (.cliProcessExited 0) (requireCliExitForTurnDone := true) | return 1
+  let .ok (sTrailingIdle, _, evsTrailingIdle) ← stepOpenCodeHandleInput hOutOrder 5
+    (.sseChunk "ses_ooo" "data: {\"type\":\"session.idle\",\"sessionID\":\"ses_ooo\"}\n")
+    (requireCliExitForTurnDone := true) | return 1
+  if sExitFirst.slice.phaseCode != 1 || evsExitFirst != #[.TurnResult "m-oc-ooo" false "end_turn"] ||
+     sTrailingIdle.slice.phaseCode != 1 || !evsTrailingIdle.isEmpty then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-16 CLI-exit-before-SSE-idle out-of-order settlement failed: ev1={repr evsExitFirst} ev2={repr evsTrailingIdle}"
+    return 1
+
+  -- 3. SM-17: Non-contended `ProcessKillHandle` (`procLivenessStep` + `/proc/<pid>/stat` parser + contended mutex test)
+  let trickyStat :=
+    "54321 (codex (worker) 1) S 1 54321 54321 0 -1 4194304 100 0 0 0 12 3 0 0 20 0 4 0 88776655 12345678 1024"
+  let parsedObs := parseProcStatContent trickyStat
+  if parsedObs.procMissing != 0 || parsedObs.procReadError != 0 || parsedObs.isZombieOrDeadState != 0 ||
+     parsedObs.actualStartTicks != 88776655 || parsedObs.fieldsAfterComm < 20 then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-17 parseProcStatContent failed on parens/spaces comm: {repr parsedObs}"
+    return 1
+  -- Live `/proc/self/stat` check on Linux
+  let selfPid ← OrbBin.PosixExt.getpid
+  let selfTicks? ← readLiveProcStartTicks? selfPid
+  if selfPid == 0 || selfTicks?.isNone then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-17 readLiveProcStartTicks? failed on current PID {selfPid}"
+    return 1
+
+  -- PID reuse (`actualStartTicks != startTicks`) and zombie (`'Z'`) MUST return `.skippedDeadOrPidReused` and NEVER invoke `signalFn`!
+  let killSignalsRef ← IO.mkRef (#[] : Array (Int64 × Int32))
+  let reusedKh : ProcessKillHandle := {
+    pid := 54321
+    startTicks := 88776655
+    observeFn? := some (fun _ => pure { parsedObs with actualStartTicks := 99999999 })
+    signalFn? := some (fun tgt sig => do killSignalsRef.modify (·.push (tgt, sig)); return 0)
+  }
+  let zombieKh : ProcessKillHandle := {
+    pid := 54321
+    startTicks := 88776655
+    observeFn? := some (fun _ => pure { parsedObs with isZombieOrDeadState := 1 })
+    signalFn? := some (fun tgt sig => do killSignalsRef.modify (·.push (tgt, sig)); return 0)
+  }
+  let vReused ← reapWithKillHandle reusedKh 9
+  let vZombie ← reapWithKillHandle zombieKh 9
+  let sigsAfterReject ← killSignalsRef.get
+  if vReused != .skippedDeadOrPidReused || vZombie != .skippedDeadOrPidReused || !sigsAfterReject.isEmpty then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-17 PID reuse or zombie process was signaled: {repr vReused} {repr vZombie}"
+    return 1
+
+  -- Contended `handle.mu` test: hold `handle.mu` inside a background task and prove `forceKillHandleNonBlocking`
+  -- immediately reaps the matching `(pid, startTicks)` without blocking on `handle.mu`!
+  let liveKh : ProcessKillHandle := {
+    pid := 54321
+    startTicks := 88776655
+    killProcessGrp := true
+    observeFn? := some (fun _ => pure parsedObs)
+    signalFn? := some (fun tgt sig => do killSignalsRef.modify (·.push (tgt, sig)); return 0)
+  }
+  let .ok hContended ← mkHarnessSessionHandle "m-contended" .codex 1 "high" (some liveKh) | return 1
+  let enteredLock ← IO.Promise.new
+  let releaseLock ← IO.Promise.new
+  let holderTask ← IO.asTask (prio := .dedicated) do
+    hContended.mu.atomically do
+      enteredLock.resolve ()
+      let _ := releaseLock.result!.get
+      pure ()
+  let _ := enteredLock.result!.get
+  let vWhileLocked ← forceKillHandleNonBlocking hContended 15
+  releaseLock.resolve ()
+  let _ ← IO.wait holderTask
+  let sigsAfterContended ← killSignalsRef.get
+  if vWhileLocked != .signaledAlive 0 || sigsAfterContended != #[(-54321, 15)] then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-17 non-contended forceKillHandleNonBlocking failed while mu locked: {repr vWhileLocked} {repr sigsAfterContended}"
+    return 1
+
+  -- 4. SM-17: Durable `(session_id, prompt_claim, tool_journal)` continuity table & crash reconciliation
+  let .ok () ← ensureHarnessContinuitySchema store.missionsDb
+    | do IO.eprintln "[orb-core-test] FAIL: SM-17 ensureHarnessContinuitySchema failed"; return 1
+  let .ok contIdxRows ← execParamQuery store.missionsDb
+    "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_harness_continuity_reconcile';" #[]
+    | do IO.eprintln "[orb-core-test] FAIL: SM-17 sqlite_master continuity index query failed"; return 1
+  if contIdxRows.size != 2 || contIdxRows[1]! != #["idx_harness_continuity_reconcile"] then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-17 idx_harness_continuity_reconcile missing in sqlite_master: {repr contIdxRows}"
+    return 1
+  let .ok boundRec ← bindHarnessContinuitySession store.missionsDb "m-codex-cont" .codex 1 "thread-codex-1" "t-c0"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-17 bindHarnessContinuitySession failed"; return 1
+  if boundRec.sessionId != "thread-codex-1" || boundRec.promptClaimPhase != .none || boundRec.stateRevision != 1 then
+    IO.eprintln "[orb-core-test] FAIL: SM-17 bound continuity record mismatch"
+    return 1
+  -- Winning CAS advances `state_revision` by exactly 1; stale expected revision (`0`-row update) returns `cas_conflict`
+  -- and leaves the durable row unchanged (no unwritten revision returned as `.ok`).
+  let .ok casWinner ← commitHarnessContinuityCas store.missionsDb "m-codex-cont" boundRec.stateRevision .codex 1 "thread-codex-1" "" .none #[] false "t-c0b"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-17 winning continuity CAS failed"; return 1
+  if casWinner.stateRevision != boundRec.stateRevision + 1 then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-17 winning CAS did not advance state_revision by 1: {casWinner.stateRevision}"
+    return 1
+  let lostCas ← commitHarnessContinuityCas store.missionsDb "m-codex-cont" boundRec.stateRevision .codex 1 "thread-codex-LOST" "" .none #[] false "t-c0c"
+  match lostCas with
+  | .error msg =>
+    if !(msg.startsWith "cas_conflict:") then
+      IO.eprintln s!"[orb-core-test] FAIL: SM-17 lost CAS returned unexpected error: {msg}"
+      return 1
+  | .ok stale =>
+    IO.eprintln s!"[orb-core-test] FAIL: SM-17 lost CAS returned .ok stale record: {repr stale}"
+    return 1
+  let .ok (some afterLost?) ← loadHarnessContinuity? store.missionsDb "m-codex-cont"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-17 loadHarnessContinuity? after lost CAS failed"; return 1
+  if afterLost?.sessionId != "thread-codex-1" || afterLost?.stateRevision != casWinner.stateRevision then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-17 lost CAS mutated durable continuity row: {repr afterLost?}"
+    return 1
+  -- Claim prompt `claim-1` and start tool `call-a`, then simulate crash before delivery ack / tool result
+  let .ok claimedRec ← claimHarnessPrompt store.missionsDb "m-codex-cont" 1 "claim-1" "t-c1"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-17 claimHarnessPrompt failed"; return 1
+  if claimedRec.stateRevision != afterLost?.stateRevision + 1 then
+    IO.eprintln "[orb-core-test] FAIL: SM-17 claimHarnessPrompt did not advance state_revision by 1"
+    return 1
+  -- Second concurrent prompt claim before delivery/reconcile MUST fail closed (double prompt claim rejected)
+  if (← claimHarnessPrompt store.missionsDb "m-codex-cont" 1 "claim-1" "t-c1b").isOk ||
+     (← claimHarnessPrompt store.missionsDb "m-codex-cont" 1 "claim-2" "t-c1c").isOk then
+    IO.eprintln "[orb-core-test] FAIL: SM-17 concurrent/duplicate inflight claim was not fenced"
+    return 1
+  let .ok _ ← recordHarnessToolJournal store.missionsDb "m-codex-cont" 1
+    { callId := "call-a", toolName := "bash", phase := .started } "t-c2"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-17 recordHarnessToolJournal started failed"; return 1
+  let .ok (some recOut) ← reconcileHarnessContinuityOnRestart store.missionsDb "m-codex-cont" "t-c3"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-17 reconcileHarnessContinuityOnRestart failed"; return 1
+  let reconciledRec ← match recOut with
+    | .requiresReconciliation r reason =>
+      if reason != "prompt_claim_uncertain" || r.promptClaimPhase != .uncertain || !r.reconcileRequired ||
+         r.sessionId != "thread-codex-1" ||
+         r.toolJournal != #[{ callId := "call-a", toolName := "bash", phase := .crashTombstone, outputHash := "" }] then
+        IO.eprintln s!"[orb-core-test] FAIL: SM-17 crash reconciliation state mismatch: reason={reason} rec={repr r}"
+        return 1
+      pure r
+    | .cleanReady r =>
+      IO.eprintln s!"[orb-core-test] FAIL: SM-17 expected requiresReconciliation across crash, got cleanReady: {repr r}"
+      return 1
+  let _ := reconciledRec
+  -- While `reconcile_required == true`, fresh prompt claim or session rebind MUST fail closed with `native_continuity_required`
+  if (← claimHarnessPrompt store.missionsDb "m-codex-cont" 1 "claim-after-crash" "t-c4").isOk ||
+     (← bindHarnessContinuitySession store.missionsDb "m-codex-cont" .codex 2 "thread-different" "t-c4").isOk ||
+     (← resolveContinuityReconciliation store.missionsDb "m-codex-cont" 1 true "thread-DRIFTED" "t-c4").isOk then
+    IO.eprintln "[orb-core-test] FAIL: SM-17 unreconciled continuity allowed fresh claim, rebind, or sessionId drift"
+    return 1
+  let .ok resolvedRec ← resolveContinuityReconciliation store.missionsDb "m-codex-cont" 1 true "thread-codex-1" "t-c5"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-17 resolveContinuityReconciliation failed"; return 1
+  -- Duplicate replay of already-delivered `claim-1` is rejected, while new `claim-2` now succeeds
+  if resolvedRec.reconcileRequired || resolvedRec.promptClaimPhase != .delivered ||
+     (← claimHarnessPrompt store.missionsDb "m-codex-cont" 1 "claim-1" "t-c6").isOk then
+    IO.eprintln "[orb-core-test] FAIL: SM-17 delivered prompt claim was not idempotent after reconciliation"
+    return 1
+  let .ok _ ← claimHarnessPrompt store.missionsDb "m-codex-cont" 1 "claim-2" "t-c7"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-17 next prompt claim after reconciliation failed"; return 1
+  let .ok _ ← confirmHarnessPromptDelivered store.missionsDb "m-codex-cont" 1 "claim-2" "" "t-c8"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-17 confirmHarnessPromptDelivered failed"; return 1
+
+  -- 5. SM-18: Ask sidecar post-ack `operator_notes` midturn flush + startup `ask-sandbox-*` GC
+  let sbxRoot : System.FilePath := System.FilePath.mk s!"{tmpRoot}/ask-tmp-root"
+  IO.FS.createDirAll sbxRoot
+  let orphanDir1 := sbxRoot / "ask-sandbox-orphan-01"
+  let orphanDir2 := sbxRoot / "ask-sandbox-orphan-02"
+  let activeDir := sbxRoot / "ask-sandbox-active-99"
+  let unrelatedDir := sbxRoot / "keep-other-scratch"
+  let protectedOutside := System.FilePath.mk s!"{tmpRoot}/protected-outside-dir"
+  IO.FS.createDirAll (orphanDir1 / "nested")
+  IO.FS.writeFile (orphanDir1 / "nested" / "scratch.txt") "orphan1"
+  IO.FS.createDirAll orphanDir2
+  IO.FS.createDirAll activeDir
+  IO.FS.writeFile (activeDir / "live.txt") "keep-active"
+  IO.FS.createDirAll unrelatedDir
+  IO.FS.createDirAll protectedOutside
+  IO.FS.writeFile (protectedOutside / "must-survive.txt") "precious"
+  -- Create a symlink `ask-sandbox-symlink-03 -> protectedOutside` to prove GC uses `lstat` and unlinks only the symlink
+  let symPath := sbxRoot / "ask-sandbox-symlink-03"
+  let symOut ← IO.Process.output { cmd := "ln", args := #["-s", protectedOutside.toString, symPath.toString] }
+  if symOut.exitCode != 0 then
+    IO.eprintln "[orb-core-test] FAIL: SM-18 ln -s setup failed"
+    return 1
+
+  let .ok () ← ensureAskMidturnSchema store.askDb
+    | do IO.eprintln "[orb-core-test] FAIL: SM-18 ensureAskMidturnSchema failed"; return 1
+  let .ok askIdxRows ← execParamQuery store.askDb
+    "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_operator_notes_pending';" #[]
+    | do IO.eprintln "[orb-core-test] FAIL: SM-18 sqlite_master idx_operator_notes_pending query failed"; return 1
+  if askIdxRows.size != 2 || askIdxRows[1]! != #["idx_operator_notes_pending"] then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-18 idx_operator_notes_pending missing in sqlite_master: {repr askIdxRows}"
+    return 1
+  let .ok n1 ← enqueueOperatorNote store.askDb "uuid-note-001" "m-midturn" "First operator steer" 10 "2026-11-07T01:00:00Z"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-18 enqueueOperatorNote 1 failed"; return 1
+  let .ok n2 ← enqueueOperatorNote store.askDb "uuid-note-002" "m-midturn" "Second operator steer" 20 "2026-11-07T01:00:01Z"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-18 enqueueOperatorNote 2 failed"; return 1
+  -- Duplicate enqueue of `uuid-note-001` preserves original UUID & seq without duplicating
+  let .ok n1Dup ← enqueueOperatorNote store.askDb "uuid-note-001" "m-midturn" "Mutated text" 999 "2026-11-07T01:05:00Z"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-18 duplicate enqueueOperatorNote failed"; return 1
+  if n1Dup != n1 || n2.createdAtSeq != 20 then
+    IO.eprintln "[orb-core-test] FAIL: SM-18 idempotent enqueueOperatorNote mutated original note"
+    return 1
+
+  let .ok (bootPendingCount, reapedNames) ← bootstrapAskSidecarOnStartup store.askDb sbxRoot #["active-99"]
+    | do IO.eprintln "[orb-core-test] FAIL: SM-18 bootstrapAskSidecarOnStartup failed"; return 1
+  let orphan1St ← OrbBin.PosixExt.statPath orphanDir1.toString
+  let orphan2St ← OrbBin.PosixExt.statPath orphanDir2.toString
+  let symSt ← OrbBin.PosixExt.statPath symPath.toString
+  let activeSt ← OrbBin.PosixExt.statPath (activeDir / "live.txt").toString
+  let unrelatedSt ← OrbBin.PosixExt.statPath unrelatedDir.toString
+  let preciousSt ← OrbBin.PosixExt.statPath (protectedOutside / "must-survive.txt").toString
+  if bootPendingCount != 2 ||
+     reapedNames != #["ask-sandbox-orphan-01", "ask-sandbox-orphan-02", "ask-sandbox-symlink-03"] ||
+     orphan1St.exists_ || orphan2St.exists_ || symSt.exists_ ||
+     !activeSt.exists_ || !unrelatedSt.exists_ || !preciousSt.exists_ then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-18 startup bootstrap / sandbox GC invariant violated: pending={bootPendingCount} reaped={repr reapedNames}"
+    return 1
+
+  -- Midturn flush fencing: MUST reject while `toolDepth > 0`, and on transient RPC injection failure on note 2:
+  -- note 1 commits `flushed_at`, while note 2 keeps `flushed_at == none`, original `noteId == "uuid-note-002"`,
+  -- original `createdAtSeq == 20`, `deliveryTries == 1`, and `steerPending == 1` on `hMid`!
+  let .ok hMid ← mkHarnessSessionHandle "m-midturn" .claudeCode 1 | return 1
+  let .ok _ ← applySessionOp hMid .confirmReady 1 | return 1
+  let .ok _ ← applySessionOp hMid .beginTurn 1 | return 1
+  let .ok _ ← stepStandardHarnessLine hMid 1 "{\"type\":\"tool_call\",\"id\":\"c-mid-1\",\"name\":\"bash\"}" | return 1
+  -- Flush while `toolDepth == 1` MUST fail closed before calling `injectFn`
+  let calledWhileToolBusy ← IO.mkRef false
+  let busyFlush ← flushPendingOperatorNotesBetweenTools store.askDb hMid 1 "2026-11-07T01:01:00Z" (fun _ => do
+    calledWhileToolBusy.set true
+    return .ok { receiptId := "should-not-run" })
+  if busyFlush.isOk || (← calledWhileToolBusy.get) then
+    IO.eprintln "[orb-core-test] FAIL: SM-18 midturn flush admitted while toolDepth > 0"
+    return 1
+  -- Complete tool call (`toolDepth -> 0`), then inject note 1 ok and fail note 2 transiently
+  let .ok _ ← stepStandardHarnessLine hMid 1 "{\"type\":\"tool_result\",\"tool_use_id\":\"c-mid-1\",\"output\":\"done\"}" | return 1
+  let injectedLogRef ← IO.mkRef (#[] : Array String)
+  let failFlush ← flushPendingOperatorNotesBetweenTools store.askDb hMid 1 "2026-11-07T01:02:00Z" (fun note => do
+    injectedLogRef.modify (·.push note.noteId)
+    if note.noteId == "uuid-note-002" then
+      return .error "rpc_stdin_would_block"
+    return .ok { receiptId := s!"ack-{note.noteId}" })
+  match failFlush with
+  | .ok partialSum =>
+    IO.eprintln s!"[orb-core-test] FAIL: SM-18 failed inject returned .ok success: {repr partialSum}"
+    return 1
+  | .error errMsg =>
+    if errMsg != "rpc_stdin_would_block" then
+      IO.eprintln s!"[orb-core-test] FAIL: SM-18 failed inject surfaced unexpected error: {errMsg}"
+      return 1
+  let midInnerAfterFail ← inspectSessionInner hMid
+  let .ok remAfterFail ← listPendingOperatorNotes store.askDb "m-midturn" | return 1
+  let .ok allAfterFail ← listAllOperatorNotes store.askDb "m-midturn" | return 1
+  let note1AfterFail := allAfterFail.find? (fun n => n.noteId == "uuid-note-001")
+  if note1AfterFail != some { n1 with deliveryTries := 1, flushedAt? := some "2026-11-07T01:02:00Z" } ||
+     midInnerAfterFail.slice.steerPending != 1 ||
+     remAfterFail.size != 1 ||
+     remAfterFail[0]!.noteId != "uuid-note-002" ||
+     remAfterFail[0]!.createdAtSeq != 20 ||
+     remAfterFail[0]!.createdAtIso != n2.createdAtIso ||
+     remAfterFail[0]!.deliveryTries != 1 ||
+     remAfterFail[0]!.flushedAt?.isSome then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-18 transient midturn failure dropped or mutated note identity/order: rem={repr remAfterFail}"
+    return 1
+
+  -- Empty delivery receipt MUST NOT mark `flushed_at` before a real receipt exists
+  let emptyReceiptFlush ← flushPendingOperatorNotesBetweenTools store.askDb hMid 1 "2026-11-07T01:02:15Z" (fun note => do
+    if note.noteId == "uuid-note-002" then
+      return .ok { receiptId := "   " }
+    return .ok { receiptId := s!"ack-{note.noteId}" })
+  match emptyReceiptFlush with
+  | .ok bogus =>
+    IO.eprintln s!"[orb-core-test] FAIL: SM-18 empty delivery receipt was treated as success: {repr bogus}"
+    return 1
+  | .error errMsg =>
+    if errMsg != "missing_delivery_receipt:uuid-note-002" then
+      IO.eprintln s!"[orb-core-test] FAIL: SM-18 empty receipt error mismatch: {errMsg}"
+      return 1
+  let .ok remAfterEmpty ← listPendingOperatorNotes store.askDb "m-midturn" | return 1
+  if remAfterEmpty.size != 1 || remAfterEmpty[0]!.noteId != "uuid-note-002" ||
+     remAfterEmpty[0]!.createdAtSeq != 20 || remAfterEmpty[0]!.flushedAt?.isSome then
+    IO.eprintln "[orb-core-test] FAIL: SM-18 empty delivery receipt marked flushed_at before receipt"
+    return 1
+
+  -- Enqueue a third note (`seq = 30`) and retry flush when RPC succeeds: `uuid-note-002` MUST flush BEFORE `uuid-note-003`,
+  -- and `steerPending` MUST clear (`0`) via `flushSteerBetweenTools` (`opCode = 5`)!
+  let .ok _ ← enqueueOperatorNote store.askDb "uuid-note-003" "m-midturn" "Third operator steer" 30 "2026-11-07T01:02:30Z"
+    | return 1
+  let retryOrderRef ← IO.mkRef (#[] : Array String)
+  let .ok fullFlush ← flushPendingOperatorNotesBetweenTools store.askDb hMid 1 "2026-11-07T01:03:00Z" (fun note => do
+    retryOrderRef.modify (·.push note.noteId)
+    return .ok { receiptId := s!"ack-{note.noteId}" })
+    | do IO.eprintln "[orb-core-test] FAIL: SM-18 retry midturn flush failed"; return 1
+  let retryOrder ← retryOrderRef.get
+  let midInnerAfterOk ← inspectSessionInner hMid
+  let .ok remAfterOk ← listPendingOperatorNotes store.askDb "m-midturn" | return 1
+  let .ok allNotes ← listAllOperatorNotes store.askDb "m-midturn" | return 1
+  if retryOrder != #["uuid-note-002", "uuid-note-003"] ||
+     fullFlush.flushedNoteIds != #["uuid-note-002", "uuid-note-003"] ||
+     fullFlush.remainingCount != 0 ||
+     fullFlush.failedReason?.isSome ||
+     midInnerAfterOk.slice.steerPending != 0 ||
+     !remAfterOk.isEmpty ||
+     allNotes.map (·.noteId) != #["uuid-note-001", "uuid-note-002", "uuid-note-003"] ||
+     allNotes.any (fun n => n.flushedAt?.isNone) then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-18 retry FIFO order or post-ack flush settlement failed: order={repr retryOrder} all={repr allNotes}"
+    return 1
+
+  -- Lost CAS after a successful inject (`flushed_at` committed concurrently inside `injectFn` before post-inject CAS)
+  -- MUST NOT report the note as flushed by this caller, and MUST leave the winner's `flushed_at` timestamp untouched.
+  let .ok lostNote ← enqueueOperatorNote store.askDb "uuid-note-lost-cas" "m-midturn-lost" "Lost CAS steer" 40 "2026-11-07T01:04:00Z"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-18 lost-CAS note enqueue failed"; return 1
+  let .ok hLost ← mkHarnessSessionHandle "m-midturn-lost" .claudeCode 1 | return 1
+  let .ok _ ← applySessionOp hLost .confirmReady 1 | return 1
+  let .ok _ ← applySessionOp hLost .beginTurn 1 | return 1
+  let .ok _ ← stepStandardHarnessLine hLost 1 "{\"type\":\"tool_call\",\"id\":\"c-lost-1\",\"name\":\"bash\"}" | return 1
+  let .ok _ ← stepStandardHarnessLine hLost 1 "{\"type\":\"tool_result\",\"tool_use_id\":\"c-lost-1\",\"output\":\"done\"}" | return 1
+  let preInjectPendingRef ← IO.mkRef false
+  let lostFlush ← flushPendingOperatorNotesBetweenTools store.askDb hLost 1 "2026-11-07T01:05:00Z" (fun note => do
+    -- Also verify `flushed_at` is STILL NULL inside `injectFn` BEFORE receipt is returned!
+    let .ok duringInject ← listPendingOperatorNotes store.askDb "m-midturn-lost"
+      | return .error "pending_query_during_inject_failed"
+    if duringInject.any (fun n => n.noteId == note.noteId && n.flushedAt?.isNone) then
+      preInjectPendingRef.set true
+    -- Simulate concurrent caller winning the CAS right before our `injectFn` returns its receipt
+    let raceWin ← withImmediateTx store.askDb do
+      execParamQueryUnlocked store.askDb
+        "UPDATE operator_notes SET flushed_at=?2, delivery_tries=delivery_tries+1 WHERE note_id=?1 AND (flushed_at IS NULL OR flushed_at = '');"
+        #[note.noteId, "2026-11-07T01:04:30Z"]
+    if let .error e := raceWin then
+      return .error s!"race_winner_failed:{e}"
+    return .ok { receiptId := s!"ack-{note.noteId}" })
+  let wasPendingBeforeReceipt ← preInjectPendingRef.get
+  if !wasPendingBeforeReceipt then
+    IO.eprintln "[orb-core-test] FAIL: SM-18 flushed_at was set before injectFn returned receipt"
+    return 1
+  match lostFlush with
+  | .error e =>
+    IO.eprintln s!"[orb-core-test] FAIL: SM-18 lost note CAS returned error: {e}"
+    return 1
+  | .ok summary =>
+    if summary.flushedNoteIds.contains "uuid-note-lost-cas" || summary.remainingCount != 0 then
+      IO.eprintln s!"[orb-core-test] FAIL: SM-18 lost note CAS reported note flushed by this caller: {repr summary}"
+      return 1
+  let .ok allLost ← listAllOperatorNotes store.askDb "m-midturn-lost" | return 1
+  if allLost.size != 1 || allLost[0]!.noteId != lostNote.noteId ||
+     allLost[0]!.createdAtSeq != 40 || allLost[0]!.deliveryTries != 1 ||
+     allLost[0]!.flushedAt? != some "2026-11-07T01:04:30Z" then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-18 lost note CAS rewrote flushed_at or tries: {repr allLost}"
+    return 1
+
+  -- Fail-closed error propagation in `bootstrapAskSidecarOnStartup`:
+  -- Case 1: unopen/null SQLite handle (`handle = 0`) MUST propagate `.error` rather than masking as `.ok (0, _)`.
+  let bogusMu ← Std.Mutex.new ()
+  let bogusDb : SqliteDb := { handle := 0, path := s!"{tmpRoot}/null-ask.db", mu := bogusMu }
+  if (← bootstrapAskSidecarOnStartup bogusDb sbxRoot).isOk then
+    IO.eprintln "[orb-core-test] FAIL: SM-18 bootstrapAskSidecarOnStartup masked null-handle SQLite error"
+    return 1
+  -- Case 2: `ensureAskMidturnSchema` succeeds (`CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS` on `main`),
+  -- while a `TEMP VIEW operator_notes` without `flushed_at` causes `SELECT COUNT(*) FROM operator_notes WHERE flushed_at IS NULL ...`
+  -- inside `bootstrapAskSidecarOnStartup` to fail in SQLite, proving the query error propagates fail-closed.
+  let badAskPath := s!"{tmpRoot}/bad-query-ask.db"
+  let .ok badAskDb ← openSqliteDb badAskPath
+    "CREATE TABLE operator_notes (note_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, flushed_at TEXT, created_at_seq INTEGER); CREATE TEMP VIEW operator_notes AS SELECT 1 AS broken_col;"
+    | do IO.eprintln "[orb-core-test] FAIL: SM-18 openSqliteDb bad-query-ask.db failed"; return 1
+  let badBootRes ← bootstrapAskSidecarOnStartup badAskDb sbxRoot
+  sqliteCloseRaw badAskDb.handle
+  if badBootRes.isOk then
+    IO.eprintln s!"[orb-core-test] FAIL: SM-18 bootstrapAskSidecarOnStartup masked COUNT(*) SQLite query error: {repr badBootRes}"
+    return 1
+
+  -- 6. Round-4 regressions (`SM-15`..`SM-18`):
+  -- 6a. Eager `openCoreStore` DDL initialization (`operator_notes`, `idx_operator_notes_pending`, `harness_continuity`,
+  --     `idx_harness_continuity_reconcile`) WITHOUT calling `ensureAskMidturnSchema` or `ensureHarnessContinuitySchema`
+  --     first, plus live `runCoreServer` startup wiring (`bootstrapAskSidecarOnStartup` + `ask-sandbox-*` GC).
+  let eagerRoot := s!"{tmpRoot}/eager-r4c-store"
+  let .ok eagerStore ← openCoreStore eagerRoot
+    | do IO.eprintln "[orb-core-test] FAIL: R4-C openCoreStore eager-r4c-store failed"; return 1
+  let .ok eagerContTables ← execParamQuery eagerStore.missionsDb
+    "SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name IN ('harness_continuity','idx_harness_continuity_reconcile') ORDER BY name ASC;" #[]
+    | do closeCoreStore eagerStore; IO.eprintln "[orb-core-test] FAIL: R4-C sqlite_master eager missions.db query failed"; return 1
+  let .ok eagerAskTables ← execParamQuery eagerStore.askDb
+    "SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name IN ('operator_notes','idx_operator_notes_pending') ORDER BY name ASC;" #[]
+    | do closeCoreStore eagerStore; IO.eprintln "[orb-core-test] FAIL: R4-C sqlite_master eager ask.db query failed"; return 1
+  closeCoreStore eagerStore
+  if eagerContTables.size != 3 ||
+     eagerContTables[1]! != #["harness_continuity"] ||
+     eagerContTables[2]! != #["idx_harness_continuity_reconcile"] ||
+     eagerAskTables.size != 3 ||
+     eagerAskTables[1]! != #["idx_operator_notes_pending"] ||
+     eagerAskTables[2]! != #["operator_notes"] then
+    IO.eprintln s!"[orb-core-test] FAIL: R4-C openCoreStore did not eagerly materialize R4-C DDL: cont={repr eagerContTables} ask={repr eagerAskTables}"
+    return 1
+
+  let srvWorkDir := s!"{tmpRoot}/live-srv-work"
+  let srvAskTmp := System.FilePath.mk s!"{tmpRoot}/live-srv-ask-tmp"
+  let srvOrphan := srvAskTmp / "ask-sandbox-srv-orphan-77"
+  let srvKeep := srvAskTmp / "unrelated-srv-scratch"
+  IO.FS.createDirAll (srvOrphan / "sub")
+  IO.FS.writeFile (srvOrphan / "sub" / "leak.txt") "orphan-bytes"
+  IO.FS.createDirAll srvKeep
+  let srvExitCode ← runCoreServer {
+    host := "127.0.0.1"
+    port := 0
+    workingDir := srvWorkDir
+    devMode := true
+    askSandboxTmpRoot := srvAskTmp.toString
+  } (some 0)
+  let srvOrphanAfter ← OrbBin.PosixExt.statPath srvOrphan.toString
+  let srvKeepAfter ← OrbBin.PosixExt.statPath srvKeep.toString
+  if srvExitCode != 0 || srvOrphanAfter.exists_ || !srvKeepAfter.exists_ then
+    IO.eprintln s!"[orb-core-test] FAIL: R4-C runCoreServer did not run bootstrapAskSidecarOnStartup / ask-sandbox-* GC: code={srvExitCode} orphan={srvOrphanAfter.exists_}"
+    return 1
+
+  -- 6b. Standalone raw `SqliteDb` idempotent schema guards on continuity & operator-note entry points
+  --     (`openSqliteDb path ""` with zero pre-existing tables -> no `no such table` error).
+  let .ok rawContDb1 ← openSqliteDb s!"{tmpRoot}/standalone-cont-1.db" ""
+    | do IO.eprintln "[orb-core-test] FAIL: openSqliteDb standalone-cont-1.db failed"; return 1
+  let rawLoadRes ← loadHarnessContinuity? rawContDb1 "m-raw-1"
+  let rawRecRes ← reconcileHarnessContinuityOnRestart rawContDb1 "m-raw-1" "t-raw-0"
+  sqliteCloseRaw rawContDb1.handle
+  let rawContOk :=
+    match rawLoadRes, rawRecRes with
+    | .ok none, .ok none => true
+    | _, _ => false
+  if !rawContOk then
+    IO.eprintln s!"[orb-core-test] FAIL: standalone load/reconcile failed on bare SqliteDb: load={repr rawLoadRes} rec={repr rawRecRes}"
+    return 1
+
+  let .ok rawContDb2 ← openSqliteDb s!"{tmpRoot}/standalone-cont-2.db" ""
+    | do IO.eprintln "[orb-core-test] FAIL: openSqliteDb standalone-cont-2.db failed"; return 1
+  let rawBindRes ← bindHarnessContinuitySession rawContDb2 "m-raw-2" .grok 1 "grok-sess-1" "t-raw-1"
+  sqliteCloseRaw rawContDb2.handle
+  if !rawBindRes.isOk then
+    IO.eprintln s!"[orb-core-test] FAIL: standalone bindHarnessContinuitySession failed on bare SqliteDb: {repr rawBindRes}"
+    return 1
+
+  let .ok rawAskDb1 ← openSqliteDb s!"{tmpRoot}/standalone-ask-1.db" ""
+    | do IO.eprintln "[orb-core-test] FAIL: openSqliteDb standalone-ask-1.db failed"; return 1
+  let rawPendEmpty ← listPendingOperatorNotes rawAskDb1 "m-raw-ask"
+  let rawAllEmpty ← listAllOperatorNotes rawAskDb1 "m-raw-ask"
+  let .ok hRawAsk ← mkHarnessSessionHandle "m-raw-ask" .claudeCode 1 | do sqliteCloseRaw rawAskDb1.handle; return 1
+  let .ok _ ← applySessionOp hRawAsk .confirmReady 1 | do sqliteCloseRaw rawAskDb1.handle; return 1
+  let .ok _ ← applySessionOp hRawAsk .beginTurn 1 | do sqliteCloseRaw rawAskDb1.handle; return 1
+  let rawFlushEmpty ← flushPendingOperatorNotesBetweenTools rawAskDb1 hRawAsk 1 "2026-11-07T02:00:00Z"
+    (fun _ => pure (.ok { receiptId := "unused" }))
+  sqliteCloseRaw rawAskDb1.handle
+  let rawAskOk :=
+    match rawPendEmpty, rawAllEmpty, rawFlushEmpty with
+    | .ok ps, .ok as, .ok fs => ps.isEmpty && as.isEmpty && fs.flushedNoteIds.isEmpty && fs.remainingCount == 0
+    | _, _, _ => false
+  if !rawAskOk then
+    IO.eprintln s!"[orb-core-test] FAIL: standalone list/flush failed on bare SqliteDb: pend={repr rawPendEmpty} flush={repr rawFlushEmpty}"
+    return 1
+
+  let .ok rawAskDb2 ← openSqliteDb s!"{tmpRoot}/standalone-ask-2.db" ""
+    | do IO.eprintln "[orb-core-test] FAIL: openSqliteDb standalone-ask-2.db failed"; return 1
+  let rawEnqRes ← enqueueOperatorNote rawAskDb2 "raw-note-1" "m-raw-ask-2" "Standalone note" 1 "2026-11-07T02:01:00Z"
+  sqliteCloseRaw rawAskDb2.handle
+  if !rawEnqRes.isOk then
+    IO.eprintln s!"[orb-core-test] FAIL: standalone enqueueOperatorNote failed on bare SqliteDb: {repr rawEnqRes}"
+    return 1
+
+  -- 6c. `stepStandardHarnessLine`: session-ID extraction, binding, foreign-session fencing (`sessionMatches == 0`),
+  --     and Vibe ACP JSON-RPC (`session/new` + `session/update`) dispatch.
+  let .ok hCodexFence ← mkHarnessSessionHandle "m-codex-fence" .codex 1
+    | do IO.eprintln "[orb-core-test] FAIL: mkHarnessSessionHandle m-codex-fence failed"; return 1
+  let .ok _ ← applySessionOp hCodexFence .confirmReady 1 | return 1
+  let .ok _ ← applySessionOp hCodexFence .beginTurn 1 | return 1
+  -- First line with `thread_id` binds `sessionId` / `expectedSessionId` and enters tool call (`toolDepth == 1`)
+  let .ok (stCodexBound, _, codexEvs1) ← stepStandardHarnessLine hCodexFence 1
+    "{\"type\":\"tool_call\",\"thread_id\":\"thr-bound-1\",\"id\":\"tc-cx-1\",\"name\":\"bash\"}"
+    | do IO.eprintln "[orb-core-test] FAIL: stepStandardHarnessLine codex bind failed"; return 1
+  if stCodexBound.sessionId != "thr-bound-1" || stCodexBound.openCode.expectedSessionId != "thr-bound-1" ||
+     stCodexBound.slice.toolDepth != 1 || codexEvs1 != #[.ToolCall "m-codex-fence" "tc-cx-1" "bash"] then
+    IO.eprintln s!"[orb-core-test] FAIL: stepStandardHarnessLine did not bind thread_id or increment toolDepth: {repr stCodexBound}"
+    return 1
+  -- Foreign `thread_id` (`thr-foreign-999`) MUST be fenced out (`sessionMatches == 0`):
+  -- MUST NOT mutate `toolDepth`, `sawExplicitError`, `sessionId`, or emit events!
+  let .ok (stCodexForeignTool, _, foreignToolEvs) ← stepStandardHarnessLine hCodexFence 1
+    "{\"type\":\"tool_call\",\"thread_id\":\"thr-foreign-999\",\"id\":\"tc-spoof\",\"name\":\"rm\"}"
+    | return 1
+  let .ok (stCodexForeignErr, _, foreignErrEvs) ← stepStandardHarnessLine hCodexFence 1
+    "{\"type\":\"result\",\"session_id\":\"thr-foreign-999\",\"is_error\":true,\"error\":\"spoofed-err\"}"
+    | return 1
+  if stCodexForeignTool.slice.toolDepth != 1 || !foreignToolEvs.isEmpty ||
+     stCodexForeignErr.openCode.sawExplicitError || !foreignErrEvs.isEmpty ||
+     stCodexForeignErr.sessionId != "thr-bound-1" then
+    IO.eprintln s!"[orb-core-test] FAIL: stepStandardHarnessLine allowed foreign session line to mutate session state: {repr stCodexForeignErr}"
+    return 1
+  -- Matching `thread_id` completes `tc-cx-1` (`toolDepth -> 0`)
+  let .ok (stCodexDoneTool, _, doneToolEvs) ← stepStandardHarnessLine hCodexFence 1
+    "{\"type\":\"tool_result\",\"thread_id\":\"thr-bound-1\",\"tool_use_id\":\"tc-cx-1\",\"output\":\"clean\"}"
+    | return 1
+  if stCodexDoneTool.slice.toolDepth != 0 || doneToolEvs != #[.ToolResult "m-codex-fence" "tc-cx-1" "bash" "clean"] then
+    IO.eprintln s!"[orb-core-test] FAIL: stepStandardHarnessLine rejected matching thread_id tool_result: {repr stCodexDoneTool}"
+    return 1
+
+  -- Vibe ACP JSON-RPC notifications (`method = "session/update"`, both flat and nested `params.update.content`)
+  let .ok hVibe ← mkHarnessSessionHandle "m-vibe-acp" .vibe 1 | return 1
+  let .ok _ ← applySessionOp hVibe .confirmReady 1 | return 1
+  let .ok _ ← applySessionOp hVibe .beginTurn 1 | return 1
+  let .ok (stVibe1, _, vibeEvs1) ← stepStandardHarnessLine hVibe 1
+    "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"vibe-native-1\",\"update\":{\"sessionUpdate\":\"agent_thought_chunk\",\"content\":{\"type\":\"text\",\"text\":\"vibe-plan\"}}}}"
+    | do IO.eprintln "[orb-core-test] FAIL: stepStandardHarnessLine Vibe thought failed"; return 1
+  let .ok (stVibe2, _, vibeEvs2) ← stepStandardHarnessLine hVibe 1
+    "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"sessionId\":\"vibe-native-1\",\"sessionUpdate\":\"agent_message_chunk\",\"text\":\"vibe-answer\"}"
+    | do IO.eprintln "[orb-core-test] FAIL: stepStandardHarnessLine Vibe message failed"; return 1
+  let .ok (stVibeForeign, _, vibeForeignEvs) ← stepStandardHarnessLine hVibe 1
+    "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"sessionId\":\"vibe-foreign-2\",\"sessionUpdate\":\"agent_message_chunk\",\"text\":\"SPOOF\"}"
+    | do IO.eprintln "[orb-core-test] FAIL: stepStandardHarnessLine Vibe foreign failed"; return 1
+  if stVibe1.sessionId != "vibe-native-1" ||
+     vibeEvs1 != #[.Thinking "m-vibe-acp" "vibe-plan" false] ||
+     !stVibe2.parser.sawUserText ||
+     vibeEvs2 != #[.TextDelta "m-vibe-acp" "vibe-answer"] ||
+     !vibeForeignEvs.isEmpty ||
+     stVibeForeign.sessionId != "vibe-native-1" then
+    IO.eprintln s!"[orb-core-test] FAIL: Vibe ACP dispatch or session fencing failed in stepStandardHarnessLine: ev1={repr vibeEvs1} ev2={repr vibeEvs2} foreign={repr vibeForeignEvs}"
+    return 1
+
+  -- 6d. `stepOpenCodeDualChannel` `.sseSessionIdle`: `expectedSessionId` binding MUST be gated on
+  --     `checkNormalizerAdmitted` so a duplicate `.sseSessionIdle "foreign_sid"` (`isDup == 1`) after an
+  --     unattributed `.sseSessionIdle ""` NEVER poisons `expectedSessionId` or blocks legitimate CLI lines!
+  let .ok hDupIdle ← mkHarnessSessionHandle "m-oc-dupidle-bind" .openCode 1 | return 1
+  let .ok _ ← applySessionOp hDupIdle .confirmReady 1 | return 1
+  let .ok _ ← applySessionOp hDupIdle .beginTurn 1 | return 1
+  -- First, unattributed `.sseSessionIdle ""` sets `sawSseIdle := true` while `expectedSessionId` stays `""`.
+  let .ok (afterUnattrIdle, _, _) ← stepOpenCodeHandleInput hDupIdle 1
+    (.sseSessionIdle "") (requireCliExitForTurnDone := true) | return 1
+  -- Next, duplicate `.sseSessionIdle "ses_poison_foreign"` AND duplicate raw SSE `session.idle` chunk arrive
+  -- (`isDup == 1` -> rejected by normalizer!). Neither may poison `expectedSessionId`!
+  let .ok (afterDupForeignIdle, _, _) ← stepOpenCodeHandleInput hDupIdle 1
+    (.sseSessionIdle "ses_poison_foreign") (requireCliExitForTurnDone := true) | return 1
+  let .ok (afterDupForeignSseChunk, _, _) ← stepOpenCodeHandleInput hDupIdle 1
+    (.sseChunk "" "data: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_poison_chunk\"}}\n")
+    (requireCliExitForTurnDone := true) | return 1
+  if !afterUnattrIdle.openCode.sawSseIdle || !afterUnattrIdle.openCode.expectedSessionId.isEmpty ||
+     !afterDupForeignIdle.openCode.expectedSessionId.isEmpty || !afterDupForeignIdle.sessionId.isEmpty ||
+     !afterDupForeignSseChunk.openCode.expectedSessionId.isEmpty || !afterDupForeignSseChunk.sessionId.isEmpty then
+    IO.eprintln s!"[orb-core-test] FAIL: rejected duplicate .sseSessionIdle / SSE idle chunk poisoned expectedSessionId: {repr afterDupForeignSseChunk.openCode}"
+    return 1
+  -- Now legitimate CLI output with `"sessionID":"ses_legit_1"` arrives and MUST bind `"ses_legit_1"` and emit its event!
+  let .ok (afterLegitCli, _, legitCliEvs) ← stepOpenCodeHandleInput hDupIdle 1
+    (.cliJsonLine "{\"type\":\"text\",\"sessionID\":\"ses_legit_1\",\"part\":{\"type\":\"text\",\"text\":\"Legit CLI output\"}}")
+    (requireCliExitForTurnDone := true) | return 1
+  if afterLegitCli.openCode.expectedSessionId != "ses_legit_1" ||
+     afterLegitCli.sessionId != "ses_legit_1" ||
+     legitCliEvs != #[.TextDelta "m-oc-dupidle-bind" "Legit CLI output"] then
+    IO.eprintln s!"[orb-core-test] FAIL: legitimate CLI line was blocked after duplicate sseSessionIdle: {repr afterLegitCli.openCode} evs={repr legitCliEvs}"
+    return 1
+  return 0
+
+set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
   let prodNoSecrets : CoreConfig := { devMode := false, host := "127.0.0.1" }
@@ -1595,6 +2340,9 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runFastMemoryBrokerTests store appSt validJwt nowSec) != 0 then return 1
   if (← runCloudHandoffTests tmpRoot store appSt validJwt nowSec) != 0 then return 1
   if (← runCyberAndSkillDeliveryTests tmpRoot store appSt validJwt nowSec) != 0 then return 1
+  if (← runR4cHarnessSessionTests store tmpRoot) != 0 then
+    closeCoreStore store
+    return 1
   if (← runPostCrashAndReconcileExtras store tmpRoot) != 0 then return 1
   IO.FS.removeDirAll tmpRoot
 

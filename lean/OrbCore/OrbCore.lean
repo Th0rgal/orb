@@ -25,3 +25,4 @@ import OrbCore.Control
 import OrbCore.HostObservers
 import OrbCore.HostTests
 import OrbCore.RunCoordinator
+import OrbCore.HarnessSessionRegistry

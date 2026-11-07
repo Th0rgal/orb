@@ -1,14 +1,19 @@
 /-
   OrbCore.Harness: Pure-Lean Shared CLI, OpenCode SSE, Stream Event & Native Vibe ACP Parsers
-  (`0 import Lean`, `0 sorryAx`) enforcing all 9 `scripts/harness_contract_tests.sh` invariants.
+  (`0 import Lean`, `0 sorryAx`) enforcing all `scripts/harness_contract_tests.sh` invariants
+  plus Phase R4-C (`SM-15`, `SM-16`) OpenCode SSE + CLI dual-channel session/turn coordination.
 -/
 import LeanSys
+import Orb.Kernel
+import Orb.HarnessCloud
 import OrbBin.Json
 
 namespace OrbCore.Harness
 
 open LeanSys.Posix
 open LeanSys.Codec
+open Orb.Kernel
+open Orb.HarnessCloud
 open OrbBin.Json
 
 /-- True when OpenCode emitted an auto-compaction checkpoint rather than user-facing assistant prose. -/
@@ -28,7 +33,7 @@ inductive AgentEvent where
   | ToolResult (missionId : String) (callId : String) (toolName : String) (output : String)
   | AssistantMessage (missionId : String) (text : String)
   | TurnResult (missionId : String) (isError : Bool) (message : String)
-  deriving Repr, DecidableEq
+  deriving Repr, DecidableEq, Inhabited
 
 /-- Stateful parser reducer storing active `callId -> toolName` correlations across turns. -/
 structure HarnessParserState where
@@ -126,20 +131,152 @@ def parseOpenCodeSseChunk (st : HarnessParserState) (ssePayload : String) : Harn
         cur := stepHarnessJsonLine cur dataPart
   return cur
 
+/-- Reset per-turn `HarnessParserState` latches on warm-session turn boundaries (`SM-15`) so
+    `sawUserText`, `sawActivity`, `pendingCalls`, and `emittedEvents` from turn `N` never bleed into turn `N + 1`. -/
+def HarnessParserState.resetForWarmTurn (st : HarnessParserState) : HarnessParserState :=
+  { missionId := st.missionId
+    pendingCalls := #[]
+    emittedEvents := #[]
+    sawUserText := false
+    sawActivity := false }
+
 /-- Validate a native Vibe ACP JSON-RPC `session/update` or `session/new` message (`vibe::tests` contract). -/
-def parseVibeAcpNotification? (line : String) : Option (String × AgentEvent) := do
-  let sl := ByteSlice.ofString line.trimAscii.toString
-  let tape := JsonTape.indexJsonObject sl
-  let method ← JsonTape.lookupString? tape "method"
-  if method != "session/update" then none
+def parseVibeAcpNotification? (line : String) : Option (String × AgentEvent) :=
+  let trimmed := line.trimAscii.toString
+  if trimmed.isEmpty then none
   else
-    let sid := (JsonTape.lookupString? tape "sessionId").getD "vibe-session"
-    let kind := (JsonTape.lookupString? tape "sessionUpdate").getD "agent_message_chunk"
-    let txt := (JsonTape.lookupString? tape "text").getD ""
-    if kind == "agent_thought_chunk" then
-      some (sid, .Thinking sid txt false)
+    let sl := ByteSlice.ofString trimmed
+    let tape := JsonTape.indexJsonObject sl
+    match JsonTape.lookupString? tape "method" with
+    | some "session/new" =>
+      let sidOpt :=
+        match JsonTape.lookupString? tape "sessionId" with
+        | some s => if s.isEmpty then none else some s
+        | none =>
+          match OrbBin.Json.parse trimmed with
+          | .ok jv =>
+            (jv.field? "params").bind (fun p => p.fieldStr? "sessionId") |>.bind (fun s => if s.isEmpty then none else some s)
+          | .error _ => none
+      match sidOpt with
+      | some sid => some (sid, .AssistantMessage sid "")
+      | none => none
+    | some "session/update" =>
+      let (sid, kind, txt) :=
+        match JsonTape.lookupString? tape "sessionId", JsonTape.lookupString? tape "sessionUpdate", JsonTape.lookupString? tape "text" with
+        | some s, some k, some t => (s, k, t)
+        | sOpt, kOpt, tOpt =>
+          match OrbBin.Json.parse trimmed with
+          | .ok jv =>
+            let pOpt := jv.field? "params"
+            let uOpt := pOpt.bind (fun p => p.field? "update")
+            let cOpt := uOpt.bind (fun u => u.field? "content")
+            let s := sOpt.orElse (fun _ => pOpt.bind (fun p => p.fieldStr? "sessionId")) |>.getD "vibe-session"
+            let k := kOpt.orElse (fun _ => uOpt.bind (fun u => u.fieldStr? "sessionUpdate")) |>.getD "agent_message_chunk"
+            let t := tOpt.orElse (fun _ => uOpt.bind (fun u => u.fieldStr? "text"))
+                         |>.orElse (fun _ => cOpt.bind (fun c => c.fieldStr? "text")) |>.getD ""
+            (s, k, t)
+          | .error _ =>
+            (sOpt.getD "vibe-session", kOpt.getD "agent_message_chunk", tOpt.getD "")
+      if kind == "agent_thought_chunk" then
+        some (sid, .Thinking sid txt false)
+      else
+        some (sid, .TextDelta sid txt)
+    | _ =>
+      match OrbBin.Json.parse trimmed with
+      | .ok jv =>
+        if (jv.fieldStr? "type").getD "" == "update" then
+          match jv.field? "update" with
+          | some u =>
+            let sid := (jv.fieldStr? "session_id").orElse (fun _ => jv.fieldStr? "sessionId") |>.getD ""
+            let kind := (u.fieldStr? "sessionUpdate").getD "agent_message_chunk"
+            let txt := (u.fieldStr? "text").orElse (fun _ => (u.field? "content").bind (fun c => c.fieldStr? "text")) |>.getD ""
+            if kind == "agent_thought_chunk" then
+              some (sid, .Thinking sid txt false)
+            else
+              some (sid, .TextDelta sid txt)
+          | none => none
+        else none
+      | .error _ => none
+
+/-- Extract a non-empty session or native thread identifier (`sessionID`, `sessionId`, `session_id`, `thread_id`)
+    from top-level or nested `properties` / `params` / `part` JSON objects across all 6 harnesses. -/
+def extractHarnessLineSessionId? (line : String) : Option String :=
+  let trimmed := line.trimAscii.toString
+  if trimmed.isEmpty then none
+  else
+    let nonEmpty? := fun (o : Option String) =>
+      match o with
+      | some s => if s.isEmpty then none else some s
+      | none => none
+    match OrbBin.Json.parse trimmed with
+    | .error _ => none
+    | .ok jv =>
+      let top? :=
+        (nonEmpty? (jv.fieldStr? "sessionID"))
+          |>.orElse (fun _ => nonEmpty? (jv.fieldStr? "sessionId"))
+          |>.orElse (fun _ => nonEmpty? (jv.fieldStr? "session_id"))
+          |>.orElse (fun _ => nonEmpty? (jv.fieldStr? "thread_id"))
+      top?.orElse fun _ =>
+        let nestedField? := fun (subName : String) =>
+          match jv.field? subName with
+          | none => none
+          | some sub =>
+            (nonEmpty? (sub.fieldStr? "sessionID"))
+              |>.orElse (fun _ => nonEmpty? (sub.fieldStr? "sessionId"))
+              |>.orElse (fun _ => nonEmpty? (sub.fieldStr? "session_id"))
+              |>.orElse (fun _ => nonEmpty? (sub.fieldStr? "thread_id"))
+        (nestedField? "properties")
+          |>.orElse (fun _ => nestedField? "params")
+          |>.orElse (fun _ => nestedField? "part")
+
+/-- Pure OpenCode SSE + CLI exit dual-channel turn outcome (`SM-16`), gated by `Orb.HarnessCloud.stepHarnessSessionSlice`
+    and `Orb.Kernel.agentEventNormalizeStep`. Ensures SSE `session.idle` racing ahead of a non-zero CLI exit
+    never misclassifies an error/crash as clean completion, and `Terminating -> Dead` (`opCode = 10`) never
+    admits without `hasProcExitReceipt == 1`. -/
+def reconcileOpenCodeSseAndCliExit
+    (sess : HarnessSessionSliceState)
+    (eventGeneration : UInt64)
+    (sawSseIdle : Bool)
+    (cliExited : Bool)
+    (cliExitCode : Int32)
+    (hasUserText : Bool)
+    (sawActivity : Bool) : HarnessSessionSliceState × Option (Bool × String) :=
+  if sess.sessionGeneration == 0 || eventGeneration != sess.sessionGeneration ||
+     sess.phaseCode == HarnessSessionPhase.encode .dead then
+    (sess, none)
+  else if !cliExited then
+    -- While the CLI process is still running, a raced SSE `session.idle` alone must NOT complete or reap the session.
+    (sess, none)
+  else if cliExitCode != 0 then
+    let w := Orb.Kernel.agentEventNormalizeStep 3 7 1 1 1 0 32 4096
+    let _ := w
+    if sess.phaseCode == HarnessSessionPhase.encode .terminating then
+      let (sDead, _) := stepHarnessSessionSlice sess {
+        opCode := HarnessSessionOp.encode .confirmProcessDead
+        hasTurnIdleReceipt := 0
+        hasProcExitReceipt := 1
+        eventGeneration := eventGeneration
+      }
+      (sDead, some (true, s!"opencode_cli_exit_{cliExitCode}"))
     else
-      some (sid, .TextDelta sid txt)
+      (sess, some (true, s!"opencode_cli_exit_{cliExitCode}"))
+  else if sawActivity && !hasUserText then
+    (sess, some (true, "OpenCode finished without assistant text (stop reason: end_turn)."))
+  else
+    let _ := sawSseIdle
+    let w := Orb.Kernel.agentEventNormalizeStep 3 6 1 (if hasUserText then 1 else 0) 1 0 32 4096
+    if ((w &&& 0xFFFFFFFF) &&& 256) != 0 &&
+       sess.phaseCode == HarnessSessionPhase.encode .inTurn &&
+       sess.toolDepth == 0 && sess.steerPending == 0 then
+      let (sReady, _) := stepHarnessSessionSlice sess {
+        opCode := HarnessSessionOp.encode .finishTurnToReady
+        hasTurnIdleReceipt := 1
+        hasProcExitReceipt := 1
+        eventGeneration := eventGeneration
+      }
+      (sReady, some (false, "end_turn"))
+    else
+      (sess, none)
 
 /-! ### Built-In Contract Invariant Checks (`scripts/harness_contract_tests.sh`) -/
 
@@ -203,6 +340,25 @@ def opencode_empty_stop_after_reasoning_or_compaction_is_flagged : Bool :=
     .TurnResult "m4" true "OpenCode finished without assistant text (stop reason: end_turn)."
   ]
 
+def opencode_raced_sse_idle_vs_nonzero_cli_exit_contract : Bool :=
+  let inTurn : HarnessSessionSliceState := {
+    phaseCode := HarnessSessionPhase.encode .inTurn
+    steerPending := 0
+    toolDepth := 0
+    sessionGeneration := 5
+  }
+  let (sWhileRunning, resWhileRunning) := reconcileOpenCodeSseAndCliExit inTurn 5 true false 0 true true
+  let (sAfterCrash, resAfterCrash) := reconcileOpenCodeSseAndCliExit sWhileRunning 5 true true 137 true true
+  let (sClean, resClean) := reconcileOpenCodeSseAndCliExit inTurn 5 true true 0 true true
+  let sReset := (stepHarnessJsonLine { missionId := "m5" } "{\"type\":\"text_delta\",\"delta\":\"hi\"}").resetForWarmTurn
+  sWhileRunning == inTurn &&
+  resWhileRunning.isNone &&
+  sAfterCrash.phaseCode == HarnessSessionPhase.encode .inTurn &&
+  resAfterCrash == some (true, "opencode_cli_exit_137") &&
+  sClean.phaseCode == HarnessSessionPhase.encode .ready &&
+  resClean == some (false, "end_turn") &&
+  !sReset.sawUserText && !sReset.sawActivity && sReset.emittedEvents.isEmpty
+
 def runAllHarnessContractTests : Bool :=
   text_delta_does_not_contain_thinking_content &&
   thinking_produces_thinking_event &&
@@ -213,6 +369,7 @@ def runAllHarnessContractTests : Bool :=
   test_parse_assistant_event &&
   test_parse_result_event &&
   vibe_acp_session_update_contract &&
-  opencode_empty_stop_after_reasoning_or_compaction_is_flagged
+  opencode_empty_stop_after_reasoning_or_compaction_is_flagged &&
+  opencode_raced_sse_idle_vs_nonzero_cli_exit_contract
 
 end OrbCore.Harness
