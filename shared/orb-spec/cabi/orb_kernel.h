@@ -171,6 +171,8 @@ uint64_t orb_model_account_score(uint32_t, uint8_t, uint8_t, uint8_t, uint8_t, u
 uint64_t orb_epoch_fence_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, uint64_t);
 uint64_t orb_effect_outbox_step(uint8_t, uint8_t, uint8_t, uint8_t, uint64_t, uint64_t);
 uint64_t orb_crash_boundary_step(uint32_t, uint32_t, uint64_t, uint32_t, uint64_t, uint64_t, uint32_t, uint32_t);
+uint8_t orb_activation_rollback_admit(uint8_t, uint8_t, uint8_t);
+uint32_t orb_remote_replay_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t);
 #ifdef __cplusplus
 }
 #endif

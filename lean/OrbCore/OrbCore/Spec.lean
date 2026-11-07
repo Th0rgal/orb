@@ -1,7 +1,8 @@
 /-
   OrbCore.Spec: Two-Layer Non-Tautological Specifications (`0 import Lean`, `0 sorryAx`)
   for Wave 4 Core Gateway (`sandboxed-sh`): Startup Secret/Dev-Mode Posture, Console WS Auth,
-  Machine-Transfer Single-Active Fence, Upstream Proxy Failover, and Deploy Unit Confinement.
+  Machine-Transfer Single-Active Fence, Upstream Proxy Failover, Deploy Unit Confinement,
+  Proactive Provider Pacing, and Remote Replay Supersession Lineage Fence.
 
   Every unboxed scalar gate is proved equivalent (`MetaGateSpec`, `ScopedAuthority`,
   `StickyFence`) to an independent domain model over typed protocol ADTs, finite unit catalogs,
@@ -771,5 +772,141 @@ def providerPacingMetaGate : MetaGateSpec ProviderPacingCheck ProviderPacingDoma
   }
   nonVacuous := by decide
   tight := by decide
+
+/-! ### 7. Remote Replay Supersession & Aborted-Pre-Dispatch Lineage Fence -/
+
+/-- Independent domain ADT classifying why a `RemoteWait` entry remains unsuperseded:
+    - `.exactFailedJob`: `placementJobHash` still equals the originally armed `failedJobHash`.
+    - `.abortedPreDispatchChain`: an earlier scheduled replay bound a tentative `placementJobHash`
+      that terminated pre-dispatch (`latestRunTerminal == 1`, `latestRunDispatchFailed == 1`) with
+      matching `latestRunJobHash == placementJobHash` before any remote runner accepted execution.
+    Any manual/user resume or live run breaks both lineages and permanently supersedes the wait. -/
+inductive ReplayLineageKind where
+  | exactFailedJob
+  | abortedPreDispatchChain
+  deriving Repr, DecidableEq
+
+structure RemoteReplaySupersessionCheck where
+  flags     : UInt8 × UInt8
+  runFlags  : UInt8 × UInt8
+  placement : UInt64 × UInt64
+  latestJob : UInt64
+  deriving Repr, DecidableEq
+
+def RemoteReplaySupersessionDomainSafe (c : RemoteReplaySupersessionCheck) : Prop :=
+  c.flags.1.toNat = 1 ∧
+  c.flags.2.toNat = 1 ∧
+  (c.runFlags.1.toNat = 0 ∨ c.runFlags.1.toNat = 1) ∧
+  (c.runFlags.2.toNat = 0 ∨ c.runFlags.2.toNat = 1) ∧
+  c.placement.1.toNat > 0 ∧
+  c.placement.2.toNat > 0 ∧
+  ∃ kind : ReplayLineageKind,
+    match kind with
+    | .exactFailedJob =>
+      c.placement.1.toNat = c.placement.2.toNat
+    | .abortedPreDispatchChain =>
+      c.runFlags.1.toNat = 1 ∧
+      c.runFlags.2.toNat = 1 ∧
+      c.latestJob.toNat > 0 ∧
+      c.latestJob.toNat = c.placement.1.toNat
+
+@[inline, export orb_core_verify_remote_replay_supersession]
+def verifyRemoteReplaySupersession
+    (waitArmed nodeMatches latestRunTerminal latestRunDispatchFailed : UInt8)
+    (placementJobHash failedJobHash latestRunJobHash : UInt64) : UInt8 :=
+  if waitArmed == 1 && nodeMatches == 1 &&
+     latestRunTerminal ≤ 1 && latestRunDispatchFailed ≤ 1 &&
+     placementJobHash > 0 && failedJobHash > 0 &&
+     (placementJobHash == failedJobHash ||
+      (latestRunTerminal == 1 && latestRunDispatchFailed == 1 &&
+       latestRunJobHash > 0 && latestRunJobHash == placementJobHash)) then 1 else 0
+
+def remoteReplaySupersessionMetaGate :
+    MetaGateSpec RemoteReplaySupersessionCheck RemoteReplaySupersessionDomainSafe where
+  gate c :=
+    verifyRemoteReplaySupersession
+      c.flags.1 c.flags.2 c.runFlags.1 c.runFlags.2
+      c.placement.1 c.placement.2 c.latestJob == 1
+  sound c h := by
+    rcases c with ⟨⟨wa, nm⟩, ⟨rt, df⟩, ⟨pj, fj⟩, lj⟩
+    change (verifyRemoteReplaySupersession wa nm rt df pj fj lj == 1) = true at h
+    dsimp [RemoteReplaySupersessionDomainSafe]
+    unfold verifyRemoteReplaySupersession at h
+    have hc :
+        (wa == 1 && nm == 1 &&
+         rt ≤ 1 && df ≤ 1 &&
+         pj > 0 && fj > 0 &&
+         (pj == fj ||
+          (rt == 1 && df == 1 && lj > 0 && lj == pj))) = true := by
+      cases hb :
+          (wa == 1 && nm == 1 &&
+           rt ≤ 1 && df ≤ 1 &&
+           pj > 0 && fj > 0 &&
+           (pj == fj ||
+            (rt == 1 && df == 1 && lj > 0 && lj == pj)))
+      · rw [hb] at h; contradiction
+      · rfl
+    simp only [Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
+    rcases hc with ⟨⟨⟨⟨⟨⟨hwa, hnm⟩, hrt⟩, hdf⟩, hpj⟩, hfj⟩, hlin⟩
+    subst hwa; subst hnm
+    have hpjN : pj.toNat > 0 := UInt64.lt_iff_toNat_lt.mp hpj
+    have hfjN : fj.toNat > 0 := UInt64.lt_iff_toNat_lt.mp hfj
+    refine ⟨rfl, rfl, u8_le_one_cases rt hrt, u8_le_one_cases df hdf, hpjN, hfjN, ?_⟩
+    rcases hlin with heq | ⟨⟨⟨hrt1, hdf1⟩, hlj⟩, hljp⟩
+    · exact ⟨.exactFailedJob, by subst heq; rfl⟩
+    · subst hrt1; subst hdf1; subst hljp
+      exact ⟨.abortedPreDispatchChain, rfl, rfl, UInt64.lt_iff_toNat_lt.mp hlj, rfl⟩
+  complete c h := by
+    rcases c with ⟨⟨wa, nm⟩, ⟨rt, df⟩, ⟨pj, fj⟩, lj⟩
+    change (verifyRemoteReplaySupersession wa nm rt df pj fj lj == 1) = true
+    dsimp [RemoteReplaySupersessionDomainSafe] at h
+    rcases h with ⟨hwa, hnm, hrt, hdf, hpj, hfj, kind, hkind⟩
+    unfold verifyRemoteReplaySupersession
+    have hwaB : (wa == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat wa 1 (by omega) hwa
+    have hnmB : (nm == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat nm 1 (by omega) hnm
+    have hrtL : rt ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change rt.toNat ≤ 1; omega
+    have hdfL : df ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change df.toNat ≤ 1; omega
+    have hpjB : pj > 0 := UInt64.lt_iff_toNat_lt.mpr hpj
+    have hfjB : fj > 0 := UInt64.lt_iff_toNat_lt.mpr hfj
+    cases kind with
+    | exactFailedJob =>
+      have hpjf : (pj == fj) = true := by rw [beq_iff_eq]; exact u64_eq_of_toNat_eq pj fj hkind
+      simp [hwaB, hnmB, hrtL, hdfL, hpjB, hfjB, hpjf]
+    | abortedPreDispatchChain =>
+      rcases hkind with ⟨hrt1, hdf1, hlj, hljp⟩
+      have hrtB : (rt == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat rt 1 (by omega) hrt1
+      have hdfB : (df == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat df 1 (by omega) hdf1
+      have hljB : lj > 0 := UInt64.lt_iff_toNat_lt.mpr hlj
+      have hljpB : (lj == pj) = true := by rw [beq_iff_eq]; exact u64_eq_of_toNat_eq lj pj hljp
+      simp [hwaB, hnmB, hrtL, hdfL, hpjB, hfjB, hrtB, hdfB, hljB, hljpB]
+  posWitness :=
+    { flags := (1, 1)
+      runFlags := (1, 1)
+      placement := (2002, 1001)
+      latestJob := 2002 }
+  negWitness :=
+    { flags := (1, 1)
+      runFlags := (1, 0)
+      placement := (3003, 1001)
+      latestJob := 3003 }
+  nonVacuous := by decide
+  tight := by decide
+
+def remoteReplaySupersessionFence : StickyFence RemoteReplaySupersessionCheck where
+  admit := remoteReplaySupersessionMetaGate.gate
+  fenceClear c :=
+    c.flags.1.toNat = 1 ∧
+    c.flags.2.toNat = 1 ∧
+    (c.placement.1.toNat = c.placement.2.toNat ∨
+     (c.runFlags.1.toNat = 1 ∧ c.runFlags.2.toNat = 1 ∧ c.latestJob.toNat = c.placement.1.toNat))
+  enforced c h := by
+    rcases remoteReplaySupersessionMetaGate.sound c h with
+      ⟨hwa, hnm, _, _, _, _, kind, hkind⟩
+    refine ⟨hwa, hnm, ?_⟩
+    cases kind with
+    | exactFailedJob => exact Or.inl hkind
+    | abortedPreDispatchChain =>
+      rcases hkind with ⟨hrt, hdf, _, hljp⟩
+      exact Or.inr ⟨hrt, hdf, hljp⟩
 
 end OrbCore.Spec

@@ -181,6 +181,8 @@ extern uint64_t probe_orb_model_account_score(uint64_t, uint64_t, uint64_t, uint
 extern uint64_t probe_orb_epoch_fence_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 extern uint64_t probe_orb_effect_outbox_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 extern uint64_t probe_orb_crash_boundary_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+extern uint64_t probe_orb_activation_rollback_admit(uint64_t, uint64_t, uint64_t);
+extern uint64_t probe_orb_remote_replay_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 uint8_t orb_verify_writer_reuse(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5) { return (uint8_t)probe_orb_verify_writer_reuse((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5); }
 uint8_t orb_verify_lease_mode(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3) { return (uint8_t)probe_orb_verify_lease_mode((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3); }
@@ -349,3 +351,5 @@ uint64_t orb_model_account_score(uint32_t a0, uint8_t a1, uint8_t a2, uint8_t a3
 uint64_t orb_epoch_fence_step(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint32_t a6, uint32_t a7, uint64_t a8) { return (uint64_t)probe_orb_epoch_fence_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6, (uint64_t)a7, (uint64_t)a8); }
 uint64_t orb_effect_outbox_step(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint64_t a4, uint64_t a5) { return (uint64_t)probe_orb_effect_outbox_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5); }
 uint64_t orb_crash_boundary_step(uint32_t a0, uint32_t a1, uint64_t a2, uint32_t a3, uint64_t a4, uint64_t a5, uint32_t a6, uint32_t a7) { return (uint64_t)probe_orb_crash_boundary_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6, (uint64_t)a7); }
+uint8_t orb_activation_rollback_admit(uint8_t a0, uint8_t a1, uint8_t a2) { return (uint8_t)probe_orb_activation_rollback_admit((uint64_t)a0, (uint64_t)a1, (uint64_t)a2); }
+uint32_t orb_remote_replay_step(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5, uint8_t a6, uint32_t a7, uint32_t a8) { return (uint32_t)probe_orb_remote_replay_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6, (uint64_t)a7, (uint64_t)a8); }

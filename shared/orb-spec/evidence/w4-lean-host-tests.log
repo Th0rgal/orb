@@ -1,4 +1,4 @@
-running 83 tests
+running 84 tests
 test OrbCore.HostTests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test OrbCore.HostTests::production_mission_control_gate_enforces_archive_lease_dedupe_and_codex_rollout ... ok
 test OrbCore.HostTests::mission_control_rejects_store_supersession_with_stale_caller_snapshot ... ok
@@ -82,5 +82,6 @@ test OrbCore.HostTests::mobile_and_leansys_extensions_roundtrip_via_cabi ... ok
 test OrbCore.HostTests::placement_merge_step_fences_stale_polls_and_advances_monotonically ... ok
 test OrbCore.HostTests::wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts ... ok
 test OrbCore.HostTests::r2a_epoch_fence_effect_outbox_and_crash_boundary_diverge_on_stale_and_corrupt_inputs ... ok
+test OrbCore.HostTests::remote_replay_rollback_and_stranded_pending_gates_diverge_on_enospc_and_archive ... ok
 
-test result: ok. 83 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 84 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out

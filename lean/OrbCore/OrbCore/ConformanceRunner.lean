@@ -345,6 +345,10 @@ private opaque c_fn_164 (a0 : UInt64) (a1 : UInt64) (a2 : UInt64) (a3 : UInt64) 
 private opaque c_fn_165 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt64) (a5 : UInt64) : UInt64
 @[extern "orb_crash_boundary_step"]
 private opaque c_fn_166 (a0 : UInt32) (a1 : UInt32) (a2 : UInt64) (a3 : UInt32) (a4 : UInt64) (a5 : UInt64) (a6 : UInt32) (a7 : UInt32) : UInt64
+@[extern "orb_activation_rollback_admit"]
+private opaque c_fn_167 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) : UInt8
+@[extern "orb_remote_replay_step"]
+private opaque c_fn_168 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt8) (a6 : UInt8) (a7 : UInt32) (a8 : UInt32) : UInt32
 
 private def callExportChunk0? (sym : String) (args : Array UInt64) : Option UInt64 :=
   if sym == "orb_verify_writer_reuse" && args.size == 6 then some ((c_fn_0 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt8).toUInt64)
@@ -532,9 +536,11 @@ private def callExportChunk6? (sym : String) (args : Array UInt64) : Option UInt
   else if sym == "orb_epoch_fence_step" && args.size == 9 then some (c_fn_164 (args[0]!) (args[1]!) (args[2]!) (args[3]!) (args[4]!) (args[5]!) (args[6]!).toUInt32 (args[7]!).toUInt32 (args[8]!))
   else if sym == "orb_effect_outbox_step" && args.size == 6 then some (c_fn_165 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!) (args[5]!))
   else if sym == "orb_crash_boundary_step" && args.size == 8 then some (c_fn_166 (args[0]!).toUInt32 (args[1]!).toUInt32 (args[2]!) (args[3]!).toUInt32 (args[4]!) (args[5]!) (args[6]!).toUInt32 (args[7]!).toUInt32)
+  else if sym == "orb_activation_rollback_admit" && args.size == 3 then some ((c_fn_167 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8).toUInt64)
+  else if sym == "orb_remote_replay_step" && args.size == 9 then some ((c_fn_168 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt8 (args[6]!).toUInt8 (args[7]!).toUInt32 (args[8]!).toUInt32).toUInt64)
   else none
 
-/-- Dispatch any of the 167 C-ABI exports by symbol name and `UInt64` argument vector. -/
+/-- Dispatch any of the 169 C-ABI exports by symbol name and `UInt64` argument vector. -/
 def callExportU64? (sym : String) (args : Array UInt64) : Option UInt64 :=
   (callExportChunk0? sym args) <|> (callExportChunk1? sym args) <|> (callExportChunk2? sym args) <|> (callExportChunk3? sym args) <|> (callExportChunk4? sym args) <|> (callExportChunk5? sym args) <|> (callExportChunk6? sym args)
 

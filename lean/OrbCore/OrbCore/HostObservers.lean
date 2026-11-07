@@ -534,4 +534,14 @@ def observe_crash_boundary_shadow (seed : UInt64 := 0) : UInt64 :=
   if (seed &&& 1) == 0 then (callExportU64? "orb_crash_boundary_step" #[5, 2, 1, 0, 9, 9, 0, 7]).getD 0
   else (callExportU64? "orb_crash_boundary_step" #[2, 5, 1, 0, 9, 9, 0, 7]).getD 0
 
+/-- Activation rollback gate: transitional `Pending (0)` admits rollback to `Interrupted (7)`; archived `Acknowledged (3)` is sticky-fenced (`0`). -/
+def observe_activation_rollback_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_activation_rollback_admit" #[0, 7, 0]).getD 0
+  else (callExportU64? "orb_activation_rollback_admit" #[3, 7, 0]).getD 0
+
+/-- Remote replay & stranded-pending stepper: transient pre-dispatch HTTP 500 `ENOSPC` rolls back & retries (`1796`); stranded `Pending` heals (`262`). -/
+def observe_remote_replay_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_remote_replay_step" #[0, 1, 1, 0, 1, 0, 1, 0, 10]).getD 0
+  else (callExportU64? "orb_remote_replay_step" #[1, 1, 1, 1, 1, 0, 0, 0, 0]).getD 0
+
 end OrbCore.HostObservers
