@@ -134,3 +134,58 @@ for (const where of ["bottom", "middle"] as const) test(`stale cache then networ
   }
   expect(worst).toBeLessThanOrEqual(where === "bottom" ? 2 : 1);
 });
+
+test("snapshot replacement that disconnects scrolled-up anchor clears --scroll-reserve and avoids blank void + upward wheel at top notifies older()", async ({ page }) => {
+  await page.goto("/tests/scroll-anchor.html");
+  await page.waitForFunction(() => !!(window as any).anchorHarness);
+  await frame(page);
+  await frame(page);
+
+  // Stage 1: user scrolls up while conversation is ~10,000px tall (pinned = false)
+  await page.locator("#scroller").hover();
+  await page.mouse.wheel(0, -3500);
+  await frame(page);
+  await frame(page);
+  expect(await bottomGap(page)).toBeGreaterThan(500);
+
+  // Stage 2: snapshot replacement disconnects the old turn nodes and replaces with a short folded tool/tasks tail
+  await page.evaluate(() => {
+    (window as any).anchorHarness.replaceEvents([
+      { type: "tool_call", data: { tool_call_id: "c-1", name: "read_file", args: { path: "turbo_verify.py" } } },
+      { type: "tool_result", data: { tool_call_id: "c-1", result: "ok" } },
+      {
+        type: "tool_call",
+        data: {
+          tool_call_id: "todo-1",
+          name: "todowrite",
+          args: { todos: [{ content: "Fix turbo_verify.py CLI args", status: "completed" }] },
+        },
+      },
+      { type: "tool_result", data: { tool_call_id: "todo-1", result: "ok" } },
+    ]);
+  });
+  await frame(page);
+  await frame(page);
+
+  // Verify --scroll-reserve is cleared (not holding 10,000px of blank black void) and no phantom JumpToLatest appears!
+  const metrics = await page.evaluate(() => {
+    const s = document.getElementById("scroller")!;
+    return {
+      reserve: s.style.getPropertyValue("--scroll-reserve"),
+      scrollHeight: s.scrollHeight,
+      clientHeight: s.clientHeight,
+      scrollTop: s.scrollTop,
+    };
+  });
+  expect(metrics.reserve).toBe("");
+  expect(metrics.scrollHeight).toBeLessThanOrEqual(metrics.clientHeight + 50);
+  await expect(page.locator(".jump-latest")).toBeHidden();
+
+  // Upward wheel at scrollTop === 0 on a viewport-fitting transcript fires onUpwardAtTop so older() can page history!
+  const callsBefore = await page.evaluate(() => (window as any).anchorHarness.upwardAtTopCalls());
+  await page.locator("#scroller").hover();
+  await page.mouse.wheel(0, -120);
+  await frame(page);
+  const callsAfter = await page.evaluate(() => (window as any).anchorHarness.upwardAtTopCalls());
+  expect(callsAfter).toBeGreaterThan(callsBefore);
+});

@@ -195,6 +195,7 @@ export function selectWarmMissionIds(params: {
   backgroundActive: boolean;
   maxWarm?: number;
   focusedIds: readonly string[];
+  liveIds?: readonly string[];
   recentIds: readonly string[];
   btwByParent?: Readonly<Record<string, string | undefined>>;
   openBtwParentIds?: readonly string[];
@@ -209,6 +210,15 @@ export function selectWarmMissionIds(params: {
     }
   }
   if (params.backgroundActive) {
+    if (params.liveIds) {
+      for (const id of params.liveIds) {
+        if (warmParents.length >= maxWarm) break;
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          warmParents.push(id);
+        }
+      }
+    }
     for (let i = params.recentIds.length - 1; i >= 0; i--) {
       if (warmParents.length >= maxWarm) break;
       const id = params.recentIds[i];

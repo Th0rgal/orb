@@ -797,7 +797,10 @@ final class OrbCore {
                             continue
                         }
                         if eventType == "stream_lagged" {
-                            OrbBackgroundSyncMonitor.shared.noteStreamLagged()
+                            let targetMid = (obj["mission_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if targetMid == nil || targetMid?.isEmpty == true {
+                                OrbBackgroundSyncMonitor.shared.noteStreamLagged()
+                            }
                         }
                         if eventType == "mission_presentation" {
                             for sub in subscribers.values where sub.kinds == ["presentation"] {

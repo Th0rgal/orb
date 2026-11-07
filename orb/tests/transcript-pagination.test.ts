@@ -140,3 +140,112 @@ it('keeps a failed activity hydration readable but retries it on reopen',async()
  expect(reopened.items).toMatchObject([{text:'Saved response'}]);
  vi.mocked(getMissionEventPreview).mockResolvedValue(null as any);
 });
+
+it('preserves cached conversational spine and hydrates intervening turns across >400-event forward gaps even when tail ends with assistant_message (mission c2dcb8ab)',async()=>{
+ const toolCall=(seq:number,callId:string,name='run_command',content='{"CommandLine":"ls"}')=>({id:seq,event_id:`ev-${seq}`,sequence:seq,event_type:'tool_call',tool_call_id:callId,tool_name:name,content,timestamp:''});
+ const toolResult=(seq:number,callId:string)=>({id:seq,event_id:`ev-${seq}`,sequence:seq,event_type:'tool_result',tool_call_id:callId,tool_name:'run_command',content:'ok',timestamp:''});
+ // Stage 1: mission cached up to seq=1910 with prior turns
+ mocks.page.mockResolvedValueOnce({
+  events:[
+   {id:1,event_id:'u-1',sequence:1,event_type:'user_message',content:'Initial goal',timestamp:''},
+   {id:100,event_id:'a-1',sequence:100,event_type:'assistant_message',content:'Initial answer',timestamp:''},
+   {id:1910,event_id:'u-34',sequence:1910,event_type:'user_message',content:'Run turbo-lean receipt verification',timestamp:''},
+  ],
+  nextCursor:1,pageMax:1910,hasMore:false,
+ });
+ const stage1 = await loadTranscript('c2dcb8ab');
+ expect(stage1.items.filter(i=>i.kind==='user').map(i=>i.kind==='user'?i.text:'')).toEqual(['Initial goal','Run turbo-lean receipt verification']);
+
+ // Stage 2+3: >2,200 unfocused tool events stream (seq 1911..4249), ending with todowrite + final assistant_message (seq=4248)
+ mocks.page
+  .mockResolvedValueOnce({events:[toolCall(1911,'c-1911'),toolResult(1912,'c-1911')],nextCursor:2110,pageMax:2110,hasMore:true})
+  .mockResolvedValueOnce({events:[toolCall(2111,'c-2111'),toolResult(2112,'c-2111')],nextCursor:2310,pageMax:2310,hasMore:true})
+  .mockResolvedValueOnce({
+   events:[
+    toolCall(4051,'c-4051'),
+    toolResult(4052,'c-4051'),
+    toolCall(4240,'todo-1','todowrite',JSON.stringify({todos:[{content:'Fix turbo_verify.py',status:'completed'}]})),
+    toolResult(4241,'todo-1'),
+    {id:4248,event_id:'a-final',sequence:4248,event_type:'assistant_message',content:'Replaced PR #32 with passing turbo benchmark.',timestamp:''},
+   ],
+   nextCursor:4051,pageMax:4249,hasMore:true,
+  })
+  .mockResolvedValueOnce({
+   events:[
+    {id:1,event_id:'u-1',sequence:1,event_type:'user_message',content:'Initial goal',timestamp:''},
+    {id:100,event_id:'a-1',sequence:100,event_type:'assistant_message',content:'Initial answer',timestamp:''},
+    {id:1910,event_id:'u-34',sequence:1910,event_type:'user_message',content:'Run turbo-lean receipt verification',timestamp:''},
+    {id:3200,event_id:'a-mid',sequence:3200,event_type:'assistant_message',content:'Checking CI logs before final verification...',timestamp:''},
+   ],
+   nextCursor:1,pageMax:3200,hasMore:false,
+  });
+
+ const refreshed = await refreshTranscript('c2dcb8ab');
+ expect(mocks.page.mock.calls.slice(1)).toEqual([
+  ['c2dcb8ab',{since:1910}],
+  ['c2dcb8ab',{since:2110}],
+  ['c2dcb8ab',{}],
+  ['c2dcb8ab',{before:4051,view:'transcript'}],
+ ]);
+ // Prior turns stay visible above the work fold AND intermediate narration at seq=3200 is suppressed by tailAnswered=true because seq=4248 answered the turn!
+ expect(refreshed.items.filter(i=>i.kind==='user').map(i=>i.kind==='user'?i.text:'')).toEqual([
+  'Initial goal',
+  'Run turbo-lean receipt verification',
+ ]);
+ expect(refreshed.items.filter(i=>i.kind==='text').map(i=>i.kind==='text'?i.text:'')).toEqual([
+  'Initial answer',
+  'Replaced PR #32 with passing turbo benchmark.',
+ ]);
+ expect(refreshed.spineComplete).toBe(true);
+});
+
+it('hydrates spine on cold tail load when 200-event tool tail ends with assistant_message but lacks turn user_message',async()=>{
+ const toolCall=(seq:number,callId:string)=>({id:seq,event_id:`ev-${seq}`,sequence:seq,event_type:'tool_call',tool_call_id:callId,tool_name:'run_command',content:'{"CommandLine":"ls"}',timestamp:''});
+ const toolResult=(seq:number,callId:string)=>({id:seq,event_id:`ev-${seq}`,sequence:seq,event_type:'tool_result',tool_call_id:callId,tool_name:'run_command',content:'ok',timestamp:''});
+ mocks.page
+  .mockResolvedValueOnce({
+   events:[
+    toolCall(4051,'c-4051'),
+    toolResult(4052,'c-4051'),
+    {id:4248,event_id:'a-4248',sequence:4248,event_type:'assistant_message',content:'Final agent report',timestamp:''},
+   ],
+   nextCursor:4051,pageMax:4249,hasMore:true,
+  })
+  .mockResolvedValueOnce({
+   events:[
+    {id:1910,event_id:'u-1910',sequence:1910,event_type:'user_message',content:'Audit PR #32',timestamp:''},
+   ],
+   nextCursor:1910,pageMax:1910,hasMore:false,
+  });
+ const snap = await loadTranscript('cold-tool-plus-reply');
+ expect(mocks.page.mock.calls).toEqual([
+  ['cold-tool-plus-reply',{}],
+  ['cold-tool-plus-reply',{before:4051,view:'transcript'}],
+ ]);
+ expect(snap.items.filter(i=>i.kind==='user').map(i=>i.kind==='user'?i.text:'')).toEqual(['Audit PR #32']);
+ expect(snap.items.filter(i=>i.kind==='text').map(i=>i.kind==='text'?i.text:'')).toEqual(['Final agent report']);
+});
+
+it('recovers conversational spine in one loadOlderTranscript step if initial spine hydration failed and raw page is tool-only',async()=>{
+ const toolCall=(seq:number,callId:string)=>({id:seq,event_id:`ev-${seq}`,sequence:seq,event_type:'tool_call',tool_call_id:callId,tool_name:'run_command',content:'{"CommandLine":"ls"}',timestamp:''});
+ const toolResult=(seq:number,callId:string)=>({id:seq,event_id:`ev-${seq}`,sequence:seq,event_type:'tool_result',tool_call_id:callId,tool_name:'run_command',content:'ok',timestamp:''});
+ mocks.page
+  .mockResolvedValueOnce({events:[toolCall(4051,'c-4051'),toolResult(4052,'c-4051')],nextCursor:4051,pageMax:4247,hasMore:true})
+  .mockRejectedValueOnce(new Error('transient spine timeout'));
+ const initial = await loadTranscript('recover-spine');
+ expect(initial.spineComplete).toBe(false);
+
+ mocks.page
+  .mockResolvedValueOnce({events:[toolCall(3851,'c-3851'),toolResult(3852,'c-3851')],nextCursor:3851,pageMax:4050,hasMore:true})
+  .mockResolvedValueOnce({
+   events:[{id:1910,event_id:'u-1910',sequence:1910,event_type:'user_message',content:'Original prompt',timestamp:''}],
+   nextCursor:1910,pageMax:1910,hasMore:false,
+  });
+ const older = await loadOlderTranscript('recover-spine');
+ expect(mocks.page.mock.calls.slice(2)).toEqual([
+  ['recover-spine',{before:4051}],
+  ['recover-spine',{before:3851,view:'transcript'}],
+ ]);
+ expect(older.spineComplete).toBe(true);
+ expect(older.items.some(i=>i.kind==='user'&&i.text==='Original prompt')).toBe(true);
+});

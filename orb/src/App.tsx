@@ -99,7 +99,7 @@ import { mdSource, toggleMdSource } from "./Markdown";
 import { applyPendingMoves } from "./missionMove";
 import { cacheRecents } from "./pageCache";
 import { effortLabel, normalizeEffort } from "./effort";
-import { loadTranscript, peekReadyTranscript, prefetchTranscript, selectLivePrefetchIds, transcriptVersion } from "./missionCache";
+import { loadTranscript, noteLiveMissionIds, peekReadyTranscript, prefetchTranscript, selectLivePrefetchIds, transcriptVersion } from "./missionCache";
 import { mergeById, pollWhileVisible } from "./poll";
 import { syncApprovalQueue, syncBunkerNotice } from "./approvalQueueNotices";
 import { getApprovalQueue } from "./approvalQueue";
@@ -421,7 +421,13 @@ export default function App() {
       const freshIds = new Set(fresh.map(m => m.id));
       const vanished = partial ? [] : prev.filter(m => !freshIds.has(m.id));
       // Reconcile, never replace: a short answer during a restart keeps what is on screen.
-      setMissions((current) => applyPendingMoves(mergeById(current, reconcileMissionList(current.filter(m => !isMissionDeleting(m.id)), fresh, listMisses, partial))));
+      setMissions((current) => {
+        const reconciled = applyPendingMoves(mergeById(current, reconcileMissionList(current.filter(m => !isMissionDeleting(m.id)), fresh, listMisses, partial)));
+        const liveIds = selectLivePrefetchIds(reconciled, isLive);
+        noteLiveMissionIds(liveIds);
+        for (const id of liveIds) prefetchTranscript(id);
+        return reconciled;
+      });
       recordMissions(fresh);
       if (vanished.length) {
         const slugs = [...new Set(vanished.map(m => m.project?.trim()).filter((s): s is string => !!s))];
@@ -448,7 +454,6 @@ export default function App() {
           }
         }
       }
-      for (const id of selectLivePrefetchIds(fresh, isLive)) prefetchTranscript(id);
       for (const key of cacheRecents()) {
         if (key.startsWith("m:") && !isMissionDeleting(key.slice(2))) prefetchTranscript(key.slice(2));
       }

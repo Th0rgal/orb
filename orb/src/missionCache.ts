@@ -17,7 +17,7 @@ import {
   type StoredEvent,
   type StreamEvent,
 } from "./stream";
-import { cacheDelete, cachePeek, cachePut, onCacheEvict } from "./pageCache";
+import { cacheDelete, cachePeek, cachePut, cacheRecents, onCacheEvict } from "./pageCache";
 
 export type TranscriptSnap = {
   activity?: string;
@@ -27,6 +27,7 @@ export type TranscriptSnap = {
   fromLog?: boolean;
   detailsPending?: boolean;
   spineComplete?: boolean;
+  spineBefore?: number;
   queueError?: string;
   cursor?: number;
   before?: number;
@@ -99,11 +100,41 @@ type WarmMissionSub = {
 };
 
 const recentlyOpened = new Map<string, string>();
+const liveMissionIds = new Map<string, string>();
+const cachedScopes = new Set<string>();
 const active = new Map<string, { refs: number; snapshot?: TranscriptSnap }>();
 const warmSubs = new Map<string, WarmMissionSub>();
 const dirtyMissions = new Set<string>();
 let warmBtwProvider: (() => WarmBtwTargets) | undefined;
 let warmReconcileListeners = new Set<() => void>();
+
+function rememberWarmRecent(scope: string, id: string) {
+  recentlyOpened.delete(scope);
+  recentlyOpened.set(scope, id);
+  while (recentlyOpened.size > MAX_WARM_MISSIONS) {
+    recentlyOpened.delete(recentlyOpened.keys().next().value!);
+  }
+}
+
+export function noteLiveMissionIds(ids: readonly string[]): void {
+  const ver = connectionVersion();
+  const prefix = `c:${ver}:`;
+  const next = new Map<string, string>();
+  for (const id of ids) {
+    if (!id) continue;
+    const scope = key(id);
+    next.set(scope, id);
+    if (peekReadyTranscript(id)) rememberWarmRecent(scope, id);
+  }
+  for (const [scope, id] of liveMissionIds) {
+    if (!next.has(scope) && scope.startsWith(prefix) && peekReadyTranscript(id)) {
+      rememberWarmRecent(scope, id);
+    }
+  }
+  liveMissionIds.clear();
+  for (const [scope, id] of next) liveMissionIds.set(scope, id);
+  reconcileWarmSubscriptions();
+}
 
 export function registerWarmBtwTargets(
   provider: () => WarmBtwTargets,
@@ -137,19 +168,20 @@ export function extractMissionSettingsPatch(
 }
 
 function saveSnapshot(scope: string, snapshot: TranscriptSnap) {
+  cachedScopes.add(scope);
   const entry = active.get(scope);
   if (entry) entry.snapshot = snapshot;
   else cachePut(scope, snapshot);
+  const liveId = liveMissionIds.get(scope);
+  if (liveId && snapshot.fromLog && !snapshot.detailsPending) {
+    rememberWarmRecent(scope, liveId);
+  }
   bumpTranscriptVersion();
 }
 
 export function retainTranscript(id: string): () => void {
   const scope = key(id);
-  recentlyOpened.delete(scope);
-  recentlyOpened.set(scope, id);
-  while (recentlyOpened.size > MAX_WARM_MISSIONS) {
-    recentlyOpened.delete(recentlyOpened.keys().next().value!);
-  }
+  rememberWarmRecent(scope, id);
   let entry = active.get(scope);
   if (entry) entry.refs++;
   else {
@@ -320,7 +352,13 @@ export function noteMissionPresentationHint(id: string, kind: unknown): void {
 }
 
 export function markUnfocusedMissionsDirty(): void {
-  for (const [scope] of recentlyOpened) {
+  const ver = connectionVersion();
+  const prefix = `c:${ver}:`;
+  const scopes = new Set<string>(recentlyOpened.keys());
+  for (const scope of cachedScopes) {
+    if (scope.startsWith(prefix)) scopes.add(scope);
+  }
+  for (const scope of scopes) {
     const sub = warmSubs.get(scope);
     if (!sub || !sub.healthy || !sub.caughtUp) {
       dirtyMissions.add(scope);
@@ -413,8 +451,11 @@ function ensureWarmSub(id: string, initialSinceSeq?: number): WarmMissionSub {
         for (const v of sub.views) v.onLagged();
       } else if (peekReadyTranscript(id)) {
         void refreshTranscript(id)
-          .then(() => {
+          .then((refreshed) => {
             if (warmSubs.get(scope) === sub && sub.healthy) {
+              if (typeof refreshed.cursor === "number" && Number.isSafeInteger(refreshed.cursor)) {
+                sub.cursor = sub.cursor === undefined ? refreshed.cursor : Math.max(sub.cursor, refreshed.cursor);
+              }
               sub.caughtUp = true;
               dirtyMissions.delete(scope);
             }
@@ -486,13 +527,32 @@ export function warmRecentMissionIds(includeBtw = false): string[] {
   const focusedIds: string[] = [];
   for (const [scope, entry] of active) {
     if (entry.refs > 0 && scope.startsWith(prefix)) {
-      const mid = recentlyOpened.get(scope) ?? scope.slice(prefix.length + 2, -3);
+      const mid = recentlyOpened.get(scope) ?? liveMissionIds.get(scope) ?? scope.slice(prefix.length + 2, -3);
       if (mid) focusedIds.push(mid);
     }
   }
+  const liveIds: string[] = [];
+  for (const [scope, mid] of liveMissionIds) {
+    if (scope.startsWith(prefix) && peekReadyTranscript(mid)) {
+      liveIds.push(mid);
+    }
+  }
   const recentIds: string[] = [];
+  const seenRecent = new Set<string>();
+  const storedRecents = cacheRecents();
+  for (let i = storedRecents.length - 1; i >= 0; i--) {
+    const entry = storedRecents[i];
+    if (!entry.startsWith("m:")) continue;
+    const mid = entry.slice(2);
+    if (mid && !seenRecent.has(mid) && peekReadyTranscript(mid)) {
+      seenRecent.add(mid);
+      recentIds.push(mid);
+    }
+  }
   for (const [scope, mid] of recentlyOpened) {
     if (scope.startsWith(prefix) && peekReadyTranscript(mid)) {
+      const idx = recentIds.indexOf(mid);
+      if (idx >= 0) recentIds.splice(idx, 1);
       recentIds.push(mid);
     }
   }
@@ -505,6 +565,7 @@ export function warmRecentMissionIds(includeBtw = false): string[] {
     backgroundActive: bgActive,
     maxWarm: MAX_WARM_MISSIONS,
     focusedIds,
+    liveIds,
     recentIds,
     ...(btwTargets
       ? {
@@ -596,28 +657,46 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
    }
   }
   let stream:StreamEvent[]=[...(previous?.stream??[])];
+  let retainedSpine:StreamEvent[]=[];
   let cursor=previous?.cursor, before=previous?.before, hasOlder=previous?.hasOlder;
-  let resets=0, forwardPages=0;
+  let spineComplete=previous?.spineComplete, spineBefore=previous?.spineBefore;
+  let resets=0, forwardPages=0, jumpedForwardGap=false;
   for(;;){
    const page=await getMissionEventPage(id,cursor===undefined?{}:{since:cursor});
    check();
-   if(page.reset){if(resets++)throw Error('Event history changed repeatedly during recovery.');stream.length=0;cursor=undefined;before=undefined;hasOlder=undefined;forwardPages=0;continue;}
-   for(const row of page.events){const event=storedToStream(row);if(event)stream.push(event);}
+   if(page.reset){if(resets++)throw Error('Event history changed repeatedly during recovery.');stream.length=0;retainedSpine=[];cursor=undefined;before=undefined;hasOlder=undefined;spineComplete=undefined;spineBefore=undefined;forwardPages=0;jumpedForwardGap=false;continue;}
+   const tailEvents:StreamEvent[]=[];
+   for(const row of page.events){const event=storedToStream(row);if(event){stream.push(event);tailEvents.push(event);}}
    if(cursor===undefined){
     before=page.nextCursor;hasOlder=page.hasMore;cursor=page.pageMax??0;
+    if(!hasOlder){spineComplete=true;spineBefore=undefined;}
     // When a tool-heavy turn exceeds the 200-event tail window (e.g. hundreds
     // or thousands of consecutive tool_call/tool_result events since the last
-    // user/assistant message), the raw tail page has hasMore=true but lacks
-    // the recent conversation turns. Fetch the lightweight conversational
-    // spine (view=transcript) before nextCursor so the latest messages always
-    // appear immediately above the active work fold on first paint.
-    if(hasOlder && before !== undefined && !stream.some(e => (e.type === "user_message" && e.data.queued !== true) || (e.type === "assistant_message" && e.data.canonical !== true))){
+    // user_message, even if the turn's final assistant_message landed at the
+    // very end of the 200-event tail) or we jumped a >400-event forward gap,
+    // fetch the lightweight conversational spine (view=transcript) before
+    // nextCursor so the user prompt and prior turns stay anchored above the
+    // active work fold on first paint.
+    const hasDeliveredUser = tailEvents.some(e => e.type === "user_message" && e.data.queued !== true);
+    const hasNonCanonicalReply = tailEvents.some(e => e.type === "assistant_message" && e.data.canonical !== true);
+    const hasWorkActivity = tailEvents.some(e => e.type === "tool_call" || e.type === "tool_result" || e.type === "thinking");
+    if(hasOlder && before !== undefined && (jumpedForwardGap || (!hasDeliveredUser && (!hasNonCanonicalReply || hasWorkActivity)))){
      const spinePage = await getMissionEventPage(id, { before, view: "transcript" }).catch(() => null);
      check();
-     if(spinePage?.events?.length){
-      const spine = spineAnswers(spinePage.events.map(storedToStream).filter((e): e is StreamEvent => e !== null));
-      stream = mergeStreamBySequence(spine, stream);
+     if(spinePage){
+      spineBefore = spinePage.nextCursor;
+      spineComplete = !spinePage.hasMore;
+      if(spinePage.events?.length){
+       const firstTailConv = tailEvents.find(e => e.type === "user_message" || (e.type === "assistant_message" && e.data.success !== false));
+       const spine = spineAnswers(spinePage.events.map(storedToStream).filter((e): e is StreamEvent => e !== null), firstTailConv?.type === "assistant_message");
+       stream = mergeStreamBySequence(spine, stream);
+      }
+     } else {
+      spineComplete = false;
      }
+    }
+    if(retainedSpine.length){
+     stream = mergeStreamBySequence(retainedSpine, stream);
     }
     break;
    }
@@ -625,13 +704,17 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
    if(!page.hasMore)break;
    if(++forwardPages>=2){
     // More than 400 raw events streamed since our cached cursor (e.g. a long
-    // offscreen tool storm). Jump straight to the newest 200-event tail and
-    // hydrate the latest conversational spine below instead of walking dozens
-    // of sequential pages.
+    // offscreen tool storm). Preserve any already-cached conversational spine
+    // turns, jump straight to the newest 200-event tail, and hydrate the
+    // intervening conversational spine above instead of wiping scrollback.
+    retainedSpine = spineAnswers(stream);
     stream=[];
     cursor=undefined;
     before=undefined;
     hasOlder=undefined;
+    spineComplete=false;
+    spineBefore=undefined;
+    jumpedForwardGap=true;
    }
   }
   stream=mergeStreamBySequence(preview,stream);
@@ -640,7 +723,7 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
   const queueEvents: StreamEvent[] = queued.map(row => ({ type: "user_message", eventId: row.id, data: { id: row.id, content: row.content, queued: row.inflight !== true } }));
   const retainedLive = previous?.liveTail?.length ? heldAfterHistory(stream, previous.liveTail) : [];
   // History first puts accepted user turns at their actual transcript positions.
-  return { items: buildTranscript([...stream, ...retainedLive, ...queueEvents]), stream, ...(retainedLive.length ? { liveTail: retainedLive } : {}), fromLog: true, spineComplete: previous?.spineComplete, queueError, cursor, before, hasOlder };
+  return { items: buildTranscript([...stream, ...retainedLive, ...queueEvents]), stream, ...(retainedLive.length ? { liveTail: retainedLive } : {}), fromLog: true, spineComplete, ...(spineBefore !== undefined ? { spineBefore } : {}), queueError, cursor, before, hasOlder };
 }
 
 type JobKind='initial'|'refresh'|'older';
@@ -671,6 +754,7 @@ const PREFETCH_PAUSE_MS=10*60_000,PREFETCH_RETRY_MS=60_000;
 export const MAX_LIVE_PREFETCH=8;
 onCacheEvict((evictedKey)=>{
  if(evictedKey.endsWith(':tx')&&!active.has(evictedKey)){
+  cachedScopes.delete(evictedKey);
   prefetchPaused.set(evictedKey,Date.now()+PREFETCH_PAUSE_MS);
  }
 });
@@ -712,6 +796,8 @@ export function forgetPrefetchPauses(){
   warmSubs.clear();
   dirtyMissions.clear();
   recentlyOpened.clear();
+  liveMissionIds.clear();
+  cachedScopes.clear();
 }
 export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{
  return transcriptJob(id,'older',async()=>{
@@ -720,11 +806,28 @@ export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{
   const page=await getMissionEventPage(id,{before:previous.before});
   if(page.hasMore&&(page.nextCursor===undefined||page.nextCursor>=previous.before))throw Error('Older event cursor did not advance.');
   const older=page.events.map(storedToStream).filter((e):e is StreamEvent=>e!==null);
-  const stream=mergeStreamBySequence(older,previous.stream);let items=buildTranscript(stream);
+  let stream=mergeStreamBySequence(older,previous.stream);
+  let spineComplete = !page.hasMore ? true : previous.spineComplete;
+  let spineBefore = !page.hasMore ? undefined : previous.spineBefore;
+  const olderHasConv = older.some(e => (e.type === "user_message" && e.data.queued !== true) || (e.type === "assistant_message" && e.data.canonical !== true));
+  if(page.hasMore && page.nextCursor !== undefined && !spineComplete && (!olderHasConv || (spineBefore !== undefined && page.nextCursor <= spineBefore))){
+   const targetSpineBefore = spineBefore ?? page.nextCursor;
+   const spinePage = await getMissionEventPage(id, { before: targetSpineBefore, view: "transcript" }).catch(() => null);
+   if(spinePage){
+    spineBefore = spinePage.nextCursor;
+    spineComplete = !spinePage.hasMore;
+    if(spinePage.events?.length){
+     const firstConv = stream.find(e => e.type === "user_message" || (e.type === "assistant_message" && e.data.success !== false));
+     const spine = spineAnswers(spinePage.events.map(storedToStream).filter((e): e is StreamEvent => e !== null), firstConv?.type === "assistant_message");
+     stream = mergeStreamBySequence(spine, stream);
+    }
+   }
+  }
+  let items=buildTranscript(stream);
   const preservedUsers: StreamEvent[] = [];
   for(const item of previous.items)if(item.kind==='user'&&item.messageId)preservedUsers.push({type:'user_message',data:{id:item.messageId,content:item.text,queued:item.queued,receipt:item.receipt,attached:item.attached}});
   items = applyStreamEvents(items, preservedUsers);
-  return {...previous,stream,items,before:page.nextCursor??previous.before,hasOlder:page.hasMore};
+  return {...previous,stream,items,before:page.nextCursor??previous.before,hasOlder:page.hasMore,spineComplete,spineBefore};
  });
 }
 
@@ -812,13 +915,16 @@ export function prepareTranscriptSearch(id: string, signal?: AbortSignal): Promi
 const presentationLoads = new Set<string>();
 export async function refreshPresentationPreview(id: string) {
  const scope=key(id);
- if(!recentlyOpened.has(scope) || active.has(scope) || isMissionWarmLive(id) || jobs.has(scope) || presentationLoads.has(scope)) return;
+ if((!recentlyOpened.has(scope) && !cachedScopes.has(scope)) || active.has(scope) || isMissionWarmLive(id) || jobs.has(scope) || presentationLoads.has(scope)) return;
  presentationLoads.add(scope);
  try {
  const page=await getMissionEventPreview(id);
  if(scope!==key(id) || active.has(scope) || jobs.has(scope)) return;
  const prior=peekTranscript(id);
  const incoming=spineAnswers(page.events.map(storedToStream).filter((e):e is StreamEvent=>e!==null));
+ if(prior?.fromLog && incoming.some(e => typeof e.sequence === "number" && e.sequence > (prior.cursor ?? 0))){
+  dirtyMissions.add(scope);
+ }
  const stream=mergeStreamBySequence(prior?.stream??[],incoming);
  saveSnapshot(scope,{...prior,activity:page.activity,stream,items:buildTranscript(stream),fromLog:true,detailsPending:prior?.detailsPending ?? !prior?.fromLog});
  } finally { presentationLoads.delete(scope); }
@@ -827,7 +933,7 @@ export async function refreshPresentationPreview(id: string) {
 export function recordPresentationActivity(id: string, label: unknown) {
  if(typeof label!=="string" || !label) return;
  const scope=key(id), prior=peekTranscript(id);
- if(!recentlyOpened.has(scope) || !prior || active.has(scope)) return;
+ if((!recentlyOpened.has(scope) && !cachedScopes.has(scope)) || !prior || active.has(scope)) return;
  saveSnapshot(scope,{...prior,activity:label.slice(0,160)});
 }
 

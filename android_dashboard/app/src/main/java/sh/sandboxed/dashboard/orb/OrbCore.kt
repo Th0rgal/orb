@@ -2288,6 +2288,24 @@ class OrbCore private constructor(context: Context) {
                         OrbDisk.write("missions", m.map { it.raw })
                         OrbDisk.write("projects", p.map { it.raw })
                     }
+                    val liveRows = m.filter { OrbMissionTree.isLive(it) && it.str("backend")?.startsWith("cloud_") != true }.take(8)
+                    val prefetchTargets = (liveRows + m.take(5)).distinctBy { it.id }.filter { it.id.isNotEmpty() && it.str("backend")?.startsWith("cloud_") != true }
+                    coroutineScope {
+                        prefetchTargets.map { row ->
+                            async {
+                                val evKey = "mission_events_${row.id}"
+                                if (OrbReadCache.loadRows(evKey).isEmpty()) {
+                                    val evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                                        fetchRows("/api/control/missions/${encodeComponent(row.id)}/events?limit=150&max_payload=${OrbReadCache.RESULT_KEEP_CHARS}", "events")
+                                    }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
+                                    if (evs.isNotEmpty()) {
+                                        OrbReadCache.saveRows(evKey, evs)
+                                    }
+                                }
+                            }
+                        }.awaitAll()
+                    }
+                    OrbWarmSyncCoordinator.noteLiveMissionIds(this@OrbCore, liveRows.map { it.id })
                 }
             }
         } catch (t: Throwable) {
@@ -2329,13 +2347,15 @@ class OrbCore private constructor(context: Context) {
                 launch(Dispatchers.IO) {
                     seedMissionAndProjectCaches(m, fresh = true)
                     OrbDisk.write("missions", m.map { it.raw })
+                    val liveRows = m.filter { OrbMissionTree.isLive(it) && it.str("backend")?.startsWith("cloud_") != true }.take(8)
+                    val prefetchTargets = (liveRows + m.take(5)).distinctBy { it.id }.filter { it.id.isNotEmpty() && it.str("backend")?.startsWith("cloud_") != true }
                     coroutineScope {
-                        m.take(5).map { row ->
+                        prefetchTargets.map { row ->
                             async {
                                 val evKey = "mission_events_${row.id}"
                                 if (OrbReadCache.loadRows(evKey).isEmpty()) {
                                     val evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
-                                        fetchRows("/api/control/missions/${encodeComponent(row.id)}/events?limit=150", "events")
+                                        fetchRows("/api/control/missions/${encodeComponent(row.id)}/events?limit=150&max_payload=${OrbReadCache.RESULT_KEEP_CHARS}", "events")
                                     }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
                                     if (evs.isNotEmpty()) {
                                         OrbReadCache.saveRows(evKey, evs)
@@ -2344,6 +2364,7 @@ class OrbCore private constructor(context: Context) {
                             }
                         }.awaitAll()
                     }
+                    OrbWarmSyncCoordinator.noteLiveMissionIds(this@OrbCore, liveRows.map { it.id })
                 }
             }
             wTask.await().onSuccess { w ->
@@ -2917,7 +2938,10 @@ class OrbCore private constructor(context: Context) {
                     }
                     if (eventType in setOf("sync_ready", "heartbeat", "subscribed", "unsubscribed")) return
                     if (eventType == "stream_lagged") {
-                        OrbBackgroundSyncMonitor.noteStreamLagged()
+                        val targetMid = OrbJSON.str(parsed, "mission_id")?.trim()
+                        if (targetMid.isNullOrEmpty()) {
+                            OrbBackgroundSyncMonitor.noteStreamLagged()
+                        }
                     }
                     val snapshot = synchronized(lock) { subs.values.toList() }
                     if (eventType == "mission_presentation") {

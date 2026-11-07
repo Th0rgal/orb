@@ -112,6 +112,7 @@ class OrbBackgroundSyncTest {
                 backgroundActive = OrbJSON.bool(wc, "backgroundActive") == true,
                 maxWarm = (wc["maxWarm"] as Number).toInt(),
                 focusedIds = OrbJSON.strList(wc, "focusedIds"),
+                liveIds = OrbJSON.strList(wc, "liveIds"),
                 recentIds = OrbJSON.strList(wc, "recentIds"),
                 knownBtwByParent = knownBtwMap,
                 focusedBtwParents = OrbJSON.strList(wc, "openBtwParentIds"),

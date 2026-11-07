@@ -1123,12 +1123,47 @@ fun OrbConversationPage(
                                 if (tail.isNotEmpty()) collectedEvs.addAll(tail)
                             }
                         }
-                        val mergedEvs = if (lastSeq != null && lastSeq > 0 && existingForCid.isNotEmpty()) {
+                        var mergedEvs = if (lastSeq != null && lastSeq > 0 && existingForCid.isNotEmpty()) {
                             mergeMissionEvents(existingForCid, collectedEvs)
                         } else if (collectedEvs.isNotEmpty()) {
                             mergeMissionEvents(emptyList(), collectedEvs)
                         } else {
                             existingForCid
+                        }
+                        val firstSeq = mergedEvs.firstOrNull()?.int("sequence", "seq") ?: 0
+                        val hasDeliveredUser = mergedEvs.any { ev ->
+                            (ev.str("event_type", "type") ?: "").lowercase() == "user_message" &&
+                                OrbJSON.bool(ev.dict("metadata"), "queued") != true
+                        }
+                        if (!isCloudCid && firstSeq > 1 && !hasDeliveredUser) {
+                            val usersDef = async {
+                                orbTry(OrbLog.Category.Network, "turn start user") {
+                                    core.fetchRows("/api/control/missions/${core.encodeComponent(cid)}/events?types=user_message&limit=5&before_seq=$firstSeq&max_payload=$maxPayload", "events")
+                                }.getOrDefault(emptyList())
+                            }
+                            val toolsDef = async {
+                                orbTry(OrbLog.Category.Network, "turn start tools") {
+                                    core.fetchRows("/api/control/missions/${core.encodeComponent(cid)}/events?types=tool_call&limit=400&before_seq=$firstSeq&max_payload=$maxPayload", "events")
+                                }.getOrDefault(emptyList())
+                            }
+                            val startUser = usersDef.await().lastOrNull { ev ->
+                                (ev.str("event_type", "type") ?: "").lowercase() == "user_message" &&
+                                    OrbJSON.bool(ev.dict("metadata"), "queued") != true
+                            }
+                            val startSeq = startUser?.int("sequence", "seq") ?: 0
+                            val keep = buildList {
+                                if (startUser != null) add(startUser)
+                                for (tc in toolsDef.await()) {
+                                    val seq = tc.int("sequence", "seq") ?: 0
+                                    val toolName = (tc.str("tool_name", "name", "tool") ?: "").lowercase()
+                                    if (seq >= startSeq && (toolName.contains("todowrite") || toolName.contains("todo_write") || toolName == "update_plan" || toolName == "todos")) {
+                                        add(tc)
+                                    }
+                                }
+                            }
+                            if (keep.isNotEmpty()) {
+                                mergedEvs = mergeMissionEvents(keep, mergedEvs)
+                            }
                         }
                         if (cid == targetId && detail != null) {
                             withContext(Dispatchers.Main) {

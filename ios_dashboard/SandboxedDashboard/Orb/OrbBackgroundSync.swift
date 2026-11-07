@@ -186,6 +186,7 @@ enum OrbBackgroundSyncPolicy {
         backgroundActive: Bool,
         maxWarm: Int = maxWarmMissions,
         focusedIds: [String],
+        liveIds: [String] = [],
         recentIds: [String],
         knownBtwByParent: [String: String] = [:],
         focusedBtwParents: [String] = []
@@ -197,6 +198,12 @@ enum OrbBackgroundSyncPolicy {
             orderedMissions.append(id)
         }
         if backgroundActive {
+            for id in liveIds {
+                if orderedMissions.count >= cap { break }
+                if !id.isEmpty && missionSet.insert(id).inserted {
+                    orderedMissions.append(id)
+                }
+            }
             for id in recentIds.reversed() {
                 if orderedMissions.count >= cap { break }
                 if !id.isEmpty && missionSet.insert(id).inserted {
@@ -533,6 +540,7 @@ final class OrbWarmSyncCoordinator {
     private var activeScope = ""
     private var appIsActive = true
     private var focusedCounts: [String: Int] = [:]
+    private var liveIds: [String] = []
     private var recentlyOpened: [String] = []
     private var focusedBtwParents: Set<String> = []
     private var warmSubs: [String: WarmSubscription] = [:]
@@ -577,6 +585,7 @@ final class OrbWarmSyncCoordinator {
         for sub in warmSubs.values { sub.cancel() }
         warmSubs.removeAll()
         focusedCounts.removeAll()
+        liveIds.removeAll()
         recentlyOpened.removeAll()
         focusedBtwParents.removeAll()
         dirtyMissions.removeAll()
@@ -590,6 +599,7 @@ final class OrbWarmSyncCoordinator {
             sub.cancel()
         }
         warmSubs = warmSubs.filter { !$0.value.listeners.isEmpty }
+        liveIds.removeAll()
         recentlyOpened.removeAll()
         dirtyMissions.removeAll()
         dirtyBtwParents.removeAll()
@@ -597,14 +607,36 @@ final class OrbWarmSyncCoordinator {
         OrbBtwStore.stopAllWarmFollows()
     }
 
-    func noteOpened(_ missionId: String) {
+    private func rememberRecent(_ missionId: String) {
         guard !missionId.isEmpty else { return }
-        ensureScope()
         recentlyOpened.removeAll { $0 == missionId }
         recentlyOpened.append(missionId)
         if recentlyOpened.count > OrbBackgroundSyncPolicy.maxWarmMissions {
             recentlyOpened.removeFirst(recentlyOpened.count - OrbBackgroundSyncPolicy.maxWarmMissions)
         }
+    }
+
+    func noteLiveMissionIds(_ ids: [String]) {
+        ensureScope()
+        var unique: [String] = []
+        var seen = Set<String>()
+        for id in ids where !id.isEmpty && seen.insert(id).inserted {
+            unique.append(id)
+            if !OrbReadCache.readEvents(id).isEmpty {
+                rememberRecent(id)
+            }
+        }
+        for prev in liveIds where !seen.contains(prev) && !OrbReadCache.readEvents(prev).isEmpty {
+            rememberRecent(prev)
+        }
+        liveIds = unique
+        reconcile()
+    }
+
+    func noteOpened(_ missionId: String) {
+        guard !missionId.isEmpty else { return }
+        ensureScope()
+        rememberRecent(missionId)
         focusedCounts[missionId, default: 0] += 1
         reconcile()
     }
@@ -753,7 +785,7 @@ final class OrbWarmSyncCoordinator {
 
     func notePresentationStreamDisrupted() {
         ensureScope()
-        for mid in recentlyOpened {
+        for mid in Set(recentlyOpened + liveIds) {
             if warmSubs[mid]?.isCaughtUpHealthy != true {
                 dirtyMissions.insert(mid)
             }
@@ -775,12 +807,15 @@ final class OrbWarmSyncCoordinator {
 
         let bgActive = OrbBackgroundSyncMonitor.shared.active && OrbCore.shared.canUseMultiplexSync
         let focusedIds = Array(focusedCounts.keys)
+        let liveReady = liveIds.filter { !OrbReadCache.readEvents($0).isEmpty }
+        for mid in liveReady { rememberRecent(mid) }
         let recentReady = recentlyOpened.filter { !OrbReadCache.readEvents($0).isEmpty }
-        let knownBtw = OrbBtwStore.knownBoundIdsByParent(candidates: Set(focusedIds + recentReady + Array(focusedBtwParents)))
+        let knownBtw = OrbBtwStore.knownBoundIdsByParent(candidates: Set(focusedIds + liveReady + recentReady + Array(focusedBtwParents)))
         let selection = OrbBackgroundSyncPolicy.selectWarmMissionIds(
             backgroundActive: bgActive,
             maxWarm: OrbBackgroundSyncPolicy.maxWarmMissions,
             focusedIds: focusedIds,
+            liveIds: liveReady,
             recentIds: recentReady,
             knownBtwByParent: knownBtw,
             focusedBtwParents: Array(focusedBtwParents)
@@ -877,11 +912,31 @@ final class OrbWarmSyncCoordinator {
             return
         }
         if type == "stream_lagged" || type == "error" {
-            sub.healthy = false
             sub.caughtUp = false
             dirtyMissions.insert(missionId)
             for listener in sub.listeners.values {
                 listener(type, data, nil)
+            }
+            if type == "stream_lagged" && sub.listeners.isEmpty {
+                let scope = activeScope
+                Task { @MainActor [weak self, weak sub] in
+                    guard let self, let sub, self.activeScope == scope, self.warmSubs[missionId] === sub else { return }
+                    if let tail = try? await OrbCore.shared.getMissionEventsWithMeta(id: missionId, limit: 200, sinceSeq: nil),
+                       !tail.events.isEmpty,
+                       self.activeScope == scope,
+                       self.warmSubs[missionId] === sub {
+                        let existing = OrbReadCache.readEvents(missionId)
+                        let merged = OrbConversation.mergeStoredEvents(existing: existing, incoming: tail.events)
+                        OrbReadCache.saveEvents(missionId, events: merged)
+                        if let lastSeq = merged.last?.sequence {
+                            sub.cursor = max(sub.cursor ?? lastSeq, lastSeq)
+                        }
+                        if sub.healthy {
+                            sub.caughtUp = true
+                            self.dirtyMissions.remove(missionId)
+                        }
+                    }
+                }
             }
             return
         }
