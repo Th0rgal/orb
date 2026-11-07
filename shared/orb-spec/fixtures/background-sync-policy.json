@@ -118,6 +118,46 @@
         { "type": "pong", "rttMs": 10, "nowMs": 10000 }
       ],
       "expected": { "active": false, "reason": "forced_off" }
+    },
+    {
+      "name": "clearing os data saver on clean link resumes immediately without false slow_rtt pause",
+      "mode": "auto",
+      "events": [
+        { "type": "network", "dataSaver": true, "slowLink": false, "nowMs": 10000 },
+        { "type": "network", "dataSaver": false, "slowLink": false, "nowMs": 12000 }
+      ],
+      "expected": { "active": true, "reason": "healthy" }
+    },
+    {
+      "name": "clearing os data saver after stream_lagged preserves lagged pause reason until recovery",
+      "mode": "auto",
+      "events": [
+        { "type": "lagged", "nowMs": 10000 },
+        { "type": "network", "dataSaver": true, "slowLink": false, "nowMs": 15000 },
+        { "type": "network", "dataSaver": false, "slowLink": false, "nowMs": 20000 }
+      ],
+      "expected": { "active": false, "reason": "lagged" }
+    },
+    {
+      "name": "clearing os data saver after disconnect burst preserves unstable pause reason until recovery",
+      "mode": "auto",
+      "events": [
+        { "type": "disconnect", "nowMs": 10000 },
+        { "type": "disconnect", "nowMs": 20000 },
+        { "type": "network", "dataSaver": true, "slowLink": false, "nowMs": 25000 },
+        { "type": "network", "dataSaver": false, "slowLink": false, "nowMs": 30000 }
+      ],
+      "expected": { "active": false, "reason": "unstable" }
+    },
+    {
+      "name": "stream_lagged resets slow_rtt streak so a single high-rtt pong does not overwrite lagged reason",
+      "mode": "auto",
+      "events": [
+        { "type": "pong", "rttMs": 900, "nowMs": 10000 },
+        { "type": "lagged", "nowMs": 11000 },
+        { "type": "pong", "rttMs": 900, "nowMs": 12000 }
+      ],
+      "expected": { "active": false, "reason": "lagged" }
     }
   ],
   "warmSelection": [
@@ -149,6 +189,26 @@
       "btwByParent": { "m-focus": "btw-focus" },
       "openBtwParentIds": [],
       "expectedMissionIds": ["m-focus"]
+    },
+    {
+      "name": "open btw sheet stays warm even when its parent mission is not focused or in top warm cap",
+      "backgroundActive": false,
+      "maxWarm": 2,
+      "focusedIds": ["m-focus"],
+      "recentIds": ["m-old", "m-focus"],
+      "btwByParent": { "m-old": "btw-old", "m-focus": "btw-focus" },
+      "openBtwParentIds": ["m-old"],
+      "expectedMissionIds": ["m-focus", "btw-old"]
+    },
+    {
+      "name": "active background sync keeps open btw sheet warm even when parent evicted past maxWarm",
+      "backgroundActive": true,
+      "maxWarm": 2,
+      "focusedIds": ["m-focus"],
+      "recentIds": ["m-old", "m-2", "m-3"],
+      "btwByParent": { "m-old": "btw-old", "m-3": "btw-3" },
+      "openBtwParentIds": ["m-old"],
+      "expectedMissionIds": ["m-focus", "m-3", "btw-3", "btw-old"]
     }
   ]
 }

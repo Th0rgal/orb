@@ -1,4 +1,4 @@
-import { isRecord, readJson, writeJson } from "./storage";
+import { isRecord, readJson, readString, writeJson, writeString } from "./storage";
 import { swallow } from "./log";
 import * as apiModule from "./api";
 import { sideQuestionKey } from "./sideQuestionStorage";
@@ -23,11 +23,13 @@ export type SharedInboxPreferences = {
   model: string;
 };
 export type SharedInboxState = Record<string, unknown> & { preferences?: SharedInboxPreferences };
+export const MAX_INBOX_OUTBOX_BYTES = 512 * 1024;
+const textEncoder = new TextEncoder();
 type OutboxEntry = { body: unknown; serial: number; minServerVersion: number; rebased?: boolean; conflict?: boolean; failed?: boolean };
 function nextMutationSeq(floor = 0): number {
-  const stored = Number(localStorage.getItem("orb.inbox.sequence.v1") ?? 0);
+  const stored = Number(readString("orb.inbox.sequence.v1") ?? 0);
   const sequence = Math.max(Number.isSafeInteger(stored) && stored >= 0 ? stored : 0, floor) + 1;
-  localStorage.setItem("orb.inbox.sequence.v1", String(sequence));
+  writeString("orb.inbox.sequence.v1", String(sequence));
   return sequence;
 }
 let mutation = 0;
@@ -61,7 +63,15 @@ function loadOutbox(): string {
   }
   return key;
 }
-function persist(): void { writeJson(loadedKey, outbox); }
+function persist(): void {
+  try {
+    const raw = JSON.stringify(outbox);
+    if (textEncoder.encode(raw).byteLength > MAX_INBOX_OUTBOX_BYTES) return;
+  } catch {
+    return;
+  }
+  writeJson(loadedKey, outbox);
+}
 function entryKey(path: string): string {
   return path.startsWith("seen/") ? `seen:${decodeURIComponent(path.slice(5))}` : path;
 }
@@ -164,9 +174,9 @@ export function writeInboxState(path: string, input: unknown): void {
     const fields = { ...input };
     delete fields.mutationAt;
     if (!fields.clientId || !fields.mutationSeq) {
-      const clientId = localStorage.getItem("orb.inbox.client.v1") ?? crypto.randomUUID();
+      const clientId = readString("orb.inbox.client.v1") ?? crypto.randomUUID();
       const sequence = nextMutationSeq();
-      localStorage.setItem("orb.inbox.client.v1", clientId);
+      writeString("orb.inbox.client.v1", clientId);
       Object.assign(fields, { clientId, mutationSeq: sequence, expectedVersion: versions[entryKey(path)] ?? 0 });
     }
     body = fields;
