@@ -163,6 +163,7 @@ enum OrbBackgroundSyncPolicy {
         case .streamLagged(let atMs):
             next.pausedByLink = true
             next.linkPauseReason = .streamLagged
+            next.slowRttStreak = 0
             next.fastRttStreak = 0
             next.cooldownUntilMs = max(next.cooldownUntilMs, atMs + resumeCooldownMs)
             return next

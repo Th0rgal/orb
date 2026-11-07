@@ -83,6 +83,7 @@ import { usageTelemetry } from "./usageTelemetry";
 import { enqueueLocalMessage } from "./localMessageQueue";
 import { pendingMissionInteraction } from "./missionAttention";
 import {
+  attachMissionStream,
   loadTranscript,
   peekReadyTranscript,
   peekTranscript,
@@ -102,7 +103,7 @@ import {
 import { rememberApprovedPlan } from "./PlanProgress";
 import { projectColor } from "./projectAppearance";
 import { InboxSkeleton } from "./Skeleton";
-import { streamMission, type StreamEvent } from "./stream";
+import { type StreamEvent } from "./stream";
 import { Transcript, type StreamItem } from "./Transcript";
 import { applyStreamEvent, applyStreamEvents } from "./transcriptModel";
 import { imageByteLimit, imageMime } from "./imageTypes";
@@ -1186,18 +1187,17 @@ export function InboxPage(p: {
           createEffect(() => {
             if (!isPeeked() || !isConnected()) return;
             const release = retainTranscript(id);
-            const stopStream = streamMission(
-              id,
-              (ev) => {
+            const stopStream = attachMissionStream(id, {
+              onEvent: (ev) => {
                 if (ev.type === "mission_status_changed" || ev.type === "status") {
-                  if (ev.type === "mission_status_changed" && typeof ev.data.status === "string") {
+                  if (ev.type === "mission_status_changed" && typeof ev.data?.status === "string") {
                     const nextStatus = ev.data.status;
                     const curM = untrack(() => currentItem().mission);
                     p.onMissionUpdated?.({
                       ...curM,
                       status: nextStatus,
                       status_message:
-                        typeof ev.data.summary === "string"
+                        typeof ev.data?.summary === "string"
                           ? ev.data.summary
                           : curM.status_message,
                     });
@@ -1208,13 +1208,13 @@ export function InboxPage(p: {
                 }
                 appendLiveEvent(ev);
               },
-              () => {
+              onBatch: appendLiveBatch,
+              onLagged: () => {
                 void refreshTranscript(id).catch(swallow("inbox.refreshTranscript", { mission: id }));
               },
-              undefined,
-              undefined,
-              appendLiveBatch,
-            );
+              onReady: () => {},
+              onDisconnected: () => {},
+            });
             onCleanup(() => {
               stopStream();
               release();

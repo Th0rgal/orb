@@ -99,11 +99,40 @@ data class OrbInboxModelPreset(
 )
 
 object OrbSharedInboxState {
+    const val MAX_PERSISTED_OUTBOX_BYTES = 512 * 1024
+    sealed interface ConflictResolution {
+        data object Retire : ConflictResolution
+        data class Rebase(val expectedVersion: Long, val mutationSeq: Long) : ConflictResolution
+    }
+    fun shouldPersistEncodedOutbox(raw: String): Boolean =
+        raw.toByteArray(Charsets.UTF_8).size <= MAX_PERSISTED_OUTBOX_BYTES
+    fun resolveConflict(
+        path: String,
+        currentBody: Any?,
+        conflictState: Map<*, *>,
+        alreadyRebased: Boolean,
+        currentRevision: Long,
+        storedSeq: Long,
+    ): ConflictResolution? {
+        val entry = if (path.startsWith("seen/")) "seen:" + java.net.URLDecoder.decode(path.removePrefix("seen/"), "UTF-8") else path
+        val revision = ((conflictState["_versions"] as? Map<*, *>)?.get(entry) as? Number)?.toLong() ?: return null
+        if (revision < 0L) return null
+        val mergedRevision = maxOf(currentRevision, revision)
+        val remoteStamp = (conflictState[entry] as? Number)?.toLong()
+        val localStamp = ((currentBody as? Map<*, *>)?.get("stamp") as? Number)?.toLong()
+        val satisfied = path.startsWith("seen/") && localStamp != null && remoteStamp != null &&
+            (remoteStamp == localStamp || (localStamp > 0L && remoteStamp >= localStamp))
+        if (satisfied || alreadyRebased) return ConflictResolution.Retire
+        val prevSeq = ((currentBody as? Map<*, *>)?.get("mutationSeq") as? Number)?.toLong() ?: 0L
+        val nextSeq = maxOf(maxOf(0L, storedSeq), prevSeq) + 1L
+        return ConflictResolution.Rebase(expectedVersion = mergedRevision, mutationSeq = nextSeq)
+    }
     private var mutation = 0
     private var pending = 0
     private var tail: kotlinx.coroutines.Job? = null
     private var scope = ""
     private val outbox = mutableMapOf<String, Any>()
+    private val rebasedPaths = mutableSetOf<String>()
     private val seen = mutableMapOf<String, Long>()
     private val revisions = mutableMapOf<String, Long>()
     var applying = false
@@ -113,11 +142,23 @@ object OrbSharedInboxState {
     private var fallbackMutationSequence: Long = 0L
     fun init(context: Context) { persistence = context.applicationContext.getSharedPreferences("orb_inbox_outbox", Context.MODE_PRIVATE) }
     private fun diskKey() = java.security.MessageDigest.getInstance("SHA-256").digest(scope.toByteArray()).joinToString("") { "%02x".format(it) }
-    private fun persistOutbox() { persistence?.edit()?.putString(diskKey(), OrbJSON.stringify(outbox))?.commit() }
+    private fun entryKey(path: String) = if (path.startsWith("seen/")) "seen:" + java.net.URLDecoder.decode(path.removePrefix("seen/"), "UTF-8") else path
+    private fun nextMutationSeq(floor: Long = 0L): Long {
+        val disk = persistence
+        val stored = disk?.getLong("mutation_sequence", 0L) ?: fallbackMutationSequence
+        val next = maxOf(maxOf(0L, stored), floor) + 1
+        if (disk != null) disk.edit().putLong("mutation_sequence", next).apply() else fallbackMutationSequence = next
+        return next
+    }
+    private fun persistOutbox() {
+        val raw = OrbJSON.stringify(outbox)
+        if (!shouldPersistEncodedOutbox(raw)) return
+        persistence?.edit()?.putString(diskKey(), raw)?.apply()
+    }
     private fun ensureScope() {
         val current = account()
         if (scope == current) return
-        scope = current; seen.clear(); revisions.clear(); outbox.clear()
+        scope = current; seen.clear(); revisions.clear(); outbox.clear(); rebasedPaths.clear()
         OrbInboxSettings.bindAccount(current)
         OrbJSON.dict(OrbJSON.parse(persistence?.getString(diskKey(), null) ?: "{}"))?.forEach { (path, body) ->
             if (body == null) return@forEach
@@ -132,6 +173,14 @@ object OrbSharedInboxState {
             if (stamp != null) seen[java.net.URLDecoder.decode(path.removePrefix("seen/"), "UTF-8")] = stamp.toLong()
         }
     }
+    private fun updateVersions(raw: Map<*, *>) {
+        val values = raw["_versions"] as? Map<*, *> ?: return
+        for ((key, value) in values) {
+            if (key is String && value is Number && value.toLong() >= 0L) {
+                revisions[key] = maxOf(revisions[key] ?: 0L, value.toLong())
+            }
+        }
+    }
     fun write(path: String, input: Any) {
         if (applying) return
         val core = OrbCore.shared
@@ -142,24 +191,87 @@ object OrbSharedInboxState {
         if (fields != null && (!fields.containsKey("clientId") || !fields.containsKey("mutationSeq"))) {
             val disk = persistence
             val client = disk?.getString("client_id", null) ?: fallbackClientId
-            val sequence = if (disk != null) disk.getLong("mutation_sequence", 0) + 1 else ++fallbackMutationSequence
-            disk?.edit()?.putString("client_id", client)?.putLong("mutation_sequence", sequence)?.commit()
-            val entry = if (path.startsWith("seen/")) "seen:" + java.net.URLDecoder.decode(path.removePrefix("seen/"), "UTF-8") else path
+            disk?.edit()?.putString("client_id", client)?.apply()
+            val sequence = nextMutationSeq()
+            val entry = entryKey(path)
             fields["clientId"] = client; fields["mutationSeq"] = sequence; fields["expectedVersion"] = revisions[entry] ?: 0L
         }
         val body = fields ?: input
+        rebasedPaths.remove(path)
         outbox[path] = body
         persistOutbox()
         mutation++; pending++
         val previous = tail
         tail = core.scope.launch {
             previous?.join()
-            if (expected == account()) orbTry(OrbLog.Category.Network, "/api/control/inbox-state") {
-                core.request("/api/control/inbox-state/$path", method = "PUT", body = body)
-                if (expected == account() && outbox[path] == body) { outbox.remove(path); persistOutbox() }
-            }.onFailure { error ->
-                val st = (error as? OrbError)?.status
-                if ((st == 404 || st == 400) && path.startsWith("seen/") && expected == account() && outbox[path] == body) { outbox.remove(path); persistOutbox() }
+            if (expected == account()) {
+                var currentBody = body
+                for (attempt in 0 until 2) {
+                    if (expected != account() || outbox[path] != currentBody) break
+                    val result = orbTry(OrbLog.Category.Network, "/api/control/inbox-state") {
+                        core.request("/api/control/inbox-state/$path", method = "PUT", body = currentBody)
+                    }
+                    val error = result.exceptionOrNull()
+                    if (error == null) {
+                        if (expected == account() && outbox[path] == currentBody) {
+                            outbox.remove(path)
+                            rebasedPaths.remove(path)
+                            persistOutbox()
+                        }
+                        break
+                    }
+                    val orbError = error as? OrbError
+                    val st = orbError?.status
+                    if ((st == 404 || st == 400) && path.startsWith("seen/") && expected == account() && outbox[path] == currentBody) {
+                        outbox.remove(path)
+                        rebasedPaths.remove(path)
+                        persistOutbox()
+                        break
+                    }
+                    if (st == 409 && expected == account() && outbox[path] == currentBody) {
+                        val entry = entryKey(path)
+                        var conflictState = OrbJSON.dict(OrbJSON.parse(orbError?.body))
+                        if ((conflictState?.get("_versions") as? Map<*, *>)?.get(entry) !is Number) {
+                            conflictState = orbTry(OrbLog.Category.Network, "/api/control/inbox-state") {
+                                core.request("/api/control/inbox-state") as? Map<*, *>
+                            }.getOrNull()
+                        }
+                        if (expected != account() || outbox[path] != currentBody || conflictState == null) break
+                        val storedSeq = persistence?.getLong("mutation_sequence", 0L) ?: fallbackMutationSequence
+                        val resolution = resolveConflict(
+                            path = path,
+                            currentBody = currentBody,
+                            conflictState = conflictState,
+                            alreadyRebased = rebasedPaths.contains(path),
+                            currentRevision = revisions[entry] ?: 0L,
+                            storedSeq = storedSeq,
+                        ) ?: break
+                        updateVersions(conflictState)
+                        when (resolution) {
+                            ConflictResolution.Retire -> {
+                                outbox.remove(path)
+                                rebasedPaths.remove(path)
+                                persistOutbox()
+                                break
+                            }
+                            is ConflictResolution.Rebase -> {
+                                val nextFields = (currentBody as? Map<*, *>)?.entries?.associate { it.key.toString() to it.value }?.toMutableMap() ?: break
+                                val disk = persistence
+                                if (disk != null) disk.edit().putLong("mutation_sequence", resolution.mutationSeq).apply()
+                                else fallbackMutationSequence = resolution.mutationSeq
+                                nextFields["expectedVersion"] = resolution.expectedVersion
+                                nextFields["mutationSeq"] = resolution.mutationSeq
+                                val rebased = nextFields.toMap()
+                                currentBody = rebased
+                                outbox[path] = rebased
+                                rebasedPaths.add(path)
+                                persistOutbox()
+                                continue
+                            }
+                        }
+                    }
+                    break
+                }
             }
             pending--
         }
@@ -198,7 +310,11 @@ object OrbSharedInboxState {
         val expected = account(); val serial = mutation
         val raw = orbTry(OrbLog.Category.Network, "/api/control/inbox-state") { OrbCore.shared.request("/api/control/inbox-state") as? Map<*, *> }.getOrNull() ?: return
         if (expected != account() || serial != mutation) return
-        (raw["_versions"] as? Map<*, *>)?.let { values -> revisions.clear(); for ((key, value) in values) if (key is String && value is Number) revisions[key] = value.toLong() }
+        (raw["_versions"] as? Map<*, *>)?.let { values ->
+            for ((key, value) in values) if (key is String && value is Number && value.toLong() >= 0L) {
+                revisions[key] = maxOf(revisions[key] ?: 0L, value.toLong())
+            }
+        }
         val changedAccount = scope != expected
         if (changedAccount) { scope = expected; seen.clear() }
         for ((key, value) in raw) if (key is String && key.startsWith("seen:") && value is Number) seen[key.removePrefix("seen:")] = value.toLong()

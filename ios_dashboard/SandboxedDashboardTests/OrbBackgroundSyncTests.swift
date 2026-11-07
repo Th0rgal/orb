@@ -201,4 +201,69 @@ final class OrbBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(UserDefaults.standard.string(forKey: sessionKey), "btw-new")
         XCTAssertEqual(OrbBtwStore.knownBoundIdsByParent(candidates: [parentId])[parentId], "btw-new")
     }
+
+    func testSharedInboxOutboxByteCapAnd409ConflictRebase() {
+        XCTAssertTrue(OrbSharedInboxState.shouldPersistEncodedOutbox(Data(count: OrbSharedInboxState.maxPersistedOutboxBytes)))
+        XCTAssertFalse(OrbSharedInboxState.shouldPersistEncodedOutbox(Data(count: OrbSharedInboxState.maxPersistedOutboxBytes + 1)))
+
+        let conflictPrefs: OrbJSON = .object([
+            "preferences": .object(["model": .string("builtin/fast")]),
+            "_versions": .object(["preferences": .number(4), "seen:m-1": .number(8)])
+        ])
+        let prefsBody: OrbJSON = .object([
+            "model": .string("builtin/smart"),
+            "clientId": .string("client-1"),
+            "mutationSeq": .number(2),
+            "expectedVersion": .number(0)
+        ])
+        XCTAssertEqual(
+            OrbSharedInboxState.resolveConflict(
+                path: "preferences",
+                currentBody: prefsBody,
+                state: conflictPrefs,
+                alreadyRebased: false,
+                currentRevision: 0,
+                storedSeq: 5
+            ),
+            .rebase(expectedVersion: 4, mutationSeq: 6)
+        )
+        XCTAssertEqual(
+            OrbSharedInboxState.resolveConflict(
+                path: "preferences",
+                currentBody: prefsBody,
+                state: conflictPrefs,
+                alreadyRebased: true,
+                currentRevision: 4,
+                storedSeq: 6
+            ),
+            .retire
+        )
+
+        let subsumedState: OrbJSON = .object([
+            "seen:m-1": .number(500),
+            "_versions": .object(["seen:m-1": .number(8)])
+        ])
+        XCTAssertEqual(
+            OrbSharedInboxState.resolveConflict(
+                path: "seen/m-1",
+                currentBody: .object(["stamp": .number(300), "mutationSeq": .number(3)]),
+                state: subsumedState,
+                alreadyRebased: false,
+                currentRevision: 0,
+                storedSeq: 3
+            ),
+            .retire
+        )
+        XCTAssertEqual(
+            OrbSharedInboxState.resolveConflict(
+                path: "seen/m-1",
+                currentBody: .object(["stamp": .number(-500), "mutationSeq": .number(3)]),
+                state: subsumedState,
+                alreadyRebased: false,
+                currentRevision: 0,
+                storedSeq: 3
+            ),
+            .rebase(expectedVersion: 8, mutationSeq: 4)
+        )
+    }
 }

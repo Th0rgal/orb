@@ -24,8 +24,8 @@ Conversation rows never mount `android.webkit.WebView` or `WKWebView`:
 
 ## 3. Bounded Payloads & Storage Guards
 
-- **`POST /api/control/missions/:id/opened`**: Returns a compact `{ id, user_opened_at, updated_at }` receipt rather than re-serializing full mission history (`mark_mission_opened` in `src/api/control/mission_settings.rs`).
-- **App-Group / Preferences Size Cap**: `OrbSharedInboxState` skips `UserDefaults` persistence when encoded JSON exceeds `512 KiB`, preventing iOS `cfprefsd` Jetsam kills.
+- **`POST /api/control/missions/:id/opened`**: Returns a compact `{ id, user_opened_at, updated_at }` receipt rather than re-serializing full mission history (`lean/OrbCore/OrbCore/ApiServer.lean`).
+- **App-Group / Preferences Size Cap & Conflict Rebase**: `OrbSharedInboxState` (`orb/src/inboxState.ts`, `OrbInbox.swift`, `OrbInbox.kt`) skips disk persistence when encoded JSON exceeds `512 KiB` (preventing iOS `cfprefsd` Jetsam kills and Android oversized `SharedPreferences` snapshots), uses async `SharedPreferences.Editor.apply()` on Android (never main-thread `.commit()`), and rebases `expectedVersion` + `mutationSeq` at most once on HTTP `409` conflicts while retiring subsumed monotonic `seen/` stamps.
 - **Privacy-Safe Crash Breadcrumbs**: `OrbCrashBreadcrumbs` records only structural metadata (screen name, mission UUID, event count, heap KB, exception class — never prompts, tokens, or message text).
 
 ## 4. Verification & Differential Fuzzing
