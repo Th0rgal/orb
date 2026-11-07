@@ -205,9 +205,12 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   expect(mainScrollMetrics.scrollHeight).toBeGreaterThan(mainScrollMetrics.clientHeight);
   expect(mainScrollMetrics.scrollTop).toBeGreaterThan(0);
 
-  // 4. Titlebar translucency, drag region attribute, merged top-fade scroll mask, and Chapters menu.
+  // 4. Titlebar translucency,compositing isolation, drag region attribute, merged top-fade scroll mask, and Chapters menu.
   const titlebar = page.locator(".app > .titlebar");
   await expect(titlebar).toHaveAttribute("data-orb-drag-region", "");
+  for (const sel of ["#orb-sidebar.sidebar", ".app > .titlebar", ".app > .main"]) {
+    expect(await page.locator(sel).evaluate((el) => getComputedStyle(el).isolation)).toBe("isolate");
+  }
   const tbLeftBox = (await page.locator(".titlebar .tb-left").boundingBox())!;
   expect(tbLeftBox.x).toBeGreaterThanOrEqual(80);
   expect(tbLeftBox.x + tbLeftBox.width).toBeLessThanOrEqual(sbBox.width);
@@ -240,6 +243,7 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   await page.getByRole("button", { name: "Files", exact: true }).click();
   await expect(page.locator(".file-panel[aria-label='Files']")).toBeVisible();
   expect((await page.locator(".file-panel[aria-label='Files']").boundingBox())!.y).toBe(0);
+  expect(await page.locator(".file-panel[aria-label='Files']").evaluate((el) => getComputedStyle(el).isolation)).toBe("isolate");
 
   await page.getByRole("button", { name: /^Inbox/ }).click();
   await expect(page.locator(".app")).toHaveAttribute("data-pane", "page");

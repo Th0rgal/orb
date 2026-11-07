@@ -84,11 +84,76 @@ final class OrbBundleSchemeHandler: NSObject, WKURLSchemeHandler {
     func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
 }
 
-final class OrbAppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScriptMessageHandler {
+final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKScriptMessageHandler {
+    private static let titlebarHeight: CGFloat = 35
+    private static let trafficLightInsetX: CGFloat = 12
+    private static let trafficLightStepX: CGFloat = 20
+
     var window: NSWindow!
     var webView: WKWebView!
+    var vibrancyView: NSVisualEffectView?
     var localdProc: Process?
     var schemeHandler: OrbBundleSchemeHandler?
+
+    private static func setBoolPreference(_ prefs: WKPreferences, selector name: String, value: Bool) {
+        let sel = Selector((name))
+        guard prefs.responds(to: sel) else { return }
+        typealias Setter = @convention(c) (AnyObject, Selector, ObjCBool) -> Void
+        let fn = unsafeBitCast(prefs.method(for: sel), to: Setter.self)
+        fn(prefs, sel, ObjCBool(value))
+    }
+
+    private func layoutTrafficLights() {
+        guard let win = window else { return }
+        let targetMidYFromTop = Self.titlebarHeight / 2.0
+        for (idx, btnType) in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].enumerated() {
+            guard let btn = win.standardWindowButton(btnType), let sv = btn.superview else { continue }
+            let x = Self.trafficLightInsetX + CGFloat(idx) * Self.trafficLightStepX
+            let rawY = sv.isFlipped
+                ? (targetMidYFromTop - btn.frame.height / 2.0)
+                : (sv.bounds.height - targetMidYFromTop - btn.frame.height / 2.0)
+            btn.setFrameOrigin(NSPoint(x: x, y: (rawY * 2.0).rounded() / 2.0))
+        }
+    }
+
+    private func refreshWebViewDisplay() {
+        guard let wv = webView else { return }
+        wv.needsDisplay = true
+        wv.layer?.setNeedsDisplay()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        layoutTrafficLights()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        layoutTrafficLights()
+        refreshWebViewDisplay()
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        layoutTrafficLights()
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        layoutTrafficLights()
+        refreshWebViewDisplay()
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        layoutTrafficLights()
+        refreshWebViewDisplay()
+    }
+
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        guard let win = window, win.occlusionState.contains(.visible) else { return }
+        layoutTrafficLights()
+        refreshWebViewDisplay()
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        webView.reload()
+    }
 
     private static func randomHex256() -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
@@ -232,13 +297,16 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegat
         switch cmd {
         case "set_window_theme":
             let theme = (args["theme"] as? String) ?? "auto"
+            let appearance: NSAppearance?
             if theme == "dark" {
-                window?.appearance = NSAppearance(named: .darkAqua)
+                appearance = NSAppearance(named: .darkAqua)
             } else if theme == "light" {
-                window?.appearance = NSAppearance(named: .aqua)
+                appearance = NSAppearance(named: .aqua)
             } else {
-                window?.appearance = nil
+                appearance = nil
             }
+            window?.appearance = appearance
+            vibrancyView?.appearance = appearance
             replyToWebView(id: reqId, result: nil)
         case "pick_working_directory":
             let panel = NSOpenPanel()
@@ -497,7 +565,7 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegat
             core: { invoke, Channel },
             event: { listen },
             window: { getCurrentWindow: () => ({
-              innerSize: async () => ({ width: window.innerWidth, height: window.innerHeight }),
+              innerSize: async () => { const s = window.devicePixelRatio || 1; return { width: Math.round(window.innerWidth * s), height: Math.round(window.innerHeight * s) }; },
               scaleFactor: async () => window.devicePixelRatio || 1
             }) },
             webview: { getCurrentWebview: () => ({ label: 'main' }) }
@@ -509,6 +577,11 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegat
         """
 
         let cfg = WKWebViewConfiguration()
+        // Keep the desktop shell's layer backing store and live sync active when occluded:
+        // under memory pressure, WebKit's background page-visibility suppression marks remote
+        // layer tiles volatile (`FailedToAcquireBufferSpan`), leaving non-isolated regions blank.
+        Self.setBoolPreference(cfg.preferences, selector: "_setPageVisibilityBasedProcessSuppressionEnabled:", value: false)
+        Self.setBoolPreference(cfg.preferences, selector: "_setHiddenPageDOMTimerThrottlingEnabled:", value: false)
         if let distRoot = Bundle.main.resourceURL?.appendingPathComponent("dist") {
             let handler = OrbBundleSchemeHandler(rootURL: distRoot)
             self.schemeHandler = handler
@@ -524,29 +597,35 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegat
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false
         )
+        window.delegate = self
         window.minSize = NSSize(width: 720, height: 480)
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isOpaque = false
         window.backgroundColor = .clear
-        for (idx, btnType) in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].enumerated() {
-            if let btn = window.standardWindowButton(btnType) {
-                btn.setFrameOrigin(NSPoint(x: 12 + CGFloat(idx) * 20, y: 12))
-            }
-        }
+
+        // Place NSVisualEffectView as a sibling behind WKWebView inside a plain container NSView
+        // (matching AppKit/window-vibrancy requirements: never host WKWebView inside NSVisualEffectView,
+        // which propagates vibrant CAFilter group-blending into WebKit's non-isolated tile layers).
+        let container = NSView(frame: rect)
+        container.autoresizingMask = [.width, .height]
         let vibrancy = NSVisualEffectView(frame: rect)
         vibrancy.material = .sidebar
         vibrancy.blendingMode = .behindWindow
         vibrancy.state = .active
         vibrancy.autoresizingMask = [.width, .height]
+        self.vibrancyView = vibrancy
         webView = WKWebView(frame: rect, configuration: cfg)
         webView.navigationDelegate = self
         webView.setValue(false, forKey: "drawsBackground")
         webView.autoresizingMask = [.width, .height]
-        vibrancy.addSubview(webView)
-        window.contentView = vibrancy
+        container.addSubview(vibrancy)
+        container.addSubview(webView, positioned: .above, relativeTo: vibrancy)
+        window.contentView = container
         window.center()
+        layoutTrafficLights()
         window.makeKeyAndOrderFront(nil)
+        layoutTrafficLights()
         if let devUrl = env["ORB_DEV_URL"], let u = URL(string: devUrl), Self.isConfinedShellURL(u) {
             webView.load(URLRequest(url: u))
         } else if let u = URL(string: "tauri://localhost/") {
