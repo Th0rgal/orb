@@ -1532,16 +1532,22 @@ enum OrbReadCache {
     }
     static func seedFromGlobalMissions(_ rawMissions: [OrbJSON]) {
         var byProject: [String: [OrbJSON]] = [:]
+        var activeIds: [String] = []
         for item in rawMissions {
             let mid = item["id"].text
             if !mid.isEmpty {
                 seedMemory("mission:\(mid)", value: item)
+                let row = OrbRow(item)
+                if row.active && !row.cloud && row.mobile {
+                    activeIds.append(mid)
+                }
             }
             let proj = item["project"].text
             if !proj.isEmpty {
                 byProject[proj, default: []].append(item)
             }
         }
+        OrbWarmSyncCoordinator.shared.noteLiveMissionIds(Array(activeIds.prefix(8)))
         for (proj, list) in byProject {
             let cacheName = "project:\(proj)"
             let scope = key(cacheName)
@@ -1828,7 +1834,11 @@ enum OrbReadCache {
         }
     }
     static func prefetch(_ rows: [OrbRow]) async {
-        let tasks: [Task<Void, Never>] = rows.prefix(5).map { row in
+        let liveTargets = rows.filter { $0.active && !$0.cloud && $0.mobile }.prefix(8)
+        let topTargets = rows.prefix(5)
+        var seen = Set<String>()
+        let combined = (Array(liveTargets) + Array(topTargets)).filter { !$0.id.isEmpty && seen.insert($0.id).inserted }
+        let tasks: [Task<Void, Never>] = combined.map { row in
             Task { @MainActor in
                 guard !Task.isCancelled else { return }
                 if row.raw != .null && !row.raw["history"].items.isEmpty {
@@ -1846,6 +1856,7 @@ enum OrbReadCache {
         for t in tasks {
             await t.value
         }
+        OrbWarmSyncCoordinator.shared.reconcile()
     }
 }
 

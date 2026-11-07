@@ -95,6 +95,7 @@ final class OrbBackgroundSyncTests: XCTestCase {
                 backgroundActive: (wc["backgroundActive"] as? Bool) ?? false,
                 maxWarm: (wc["maxWarm"] as? NSNumber)?.intValue ?? 12,
                 focusedIds: (wc["focusedIds"] as? [String]) ?? [],
+                liveIds: (wc["liveIds"] as? [String]) ?? [],
                 recentIds: (wc["recentIds"] as? [String]) ?? [],
                 knownBtwByParent: (wc["btwByParent"] as? [String: String]) ?? [:],
                 focusedBtwParents: (wc["openBtwParentIds"] as? [String]) ?? []

@@ -4,28 +4,48 @@ The readable conversation and current activity must not wait for tool history.
 Desktop, iOS and Android share these invariants:
 
 - Account, mission and run identity scope every cached value and live update.
-- A partial snapshot never erases complete history. Late disk/network reads do
-  not overwrite newer revisions. Completion cannot be undone by an old action.
+- A partial snapshot never erases complete history. When catching up from a stale
+  `since_seq` cursor exceeds two forward pages (`> 400` raw events) and jumps to
+  the latest `200`-event tail, cached `spineAnswers` from earlier turns are
+  retained and `{ before_seq, view = "transcript" }` hydrates any conversational
+  gap before `nextCursor` whenever the tail lacks a delivered `user_message` or
+  skipped forward pages; only an explicit server `reset` clears prior history.
+  Late disk/network reads do not overwrite newer revisions. Completion cannot be
+  undone by an old action.
 - Show cached content while refreshing; loading is distinct from execution.
 - One activity area owns the current turn. A known action replaces the generic
   working label in place; historical work counts do not add a second status row.
 - Latest durable answers load before detailed tool history. Partial previews
-  never become pagination cursors or complete inputs to Inbox summaries.
-- Recently opened foreground conversations (up to 12 MRU parent missions plus
-  each warm mission's active `/btw` child mission) stay live over the single
+  never become pagination cursors or complete inputs to Inbox summaries, and
+  merging an offscreen presentation preview ahead of a stale raw `cursor` marks
+  the mission dirty for raw catch-up on reopen.
+- Currently active/live missions and recently opened foreground conversations
+  (up to 12 parent missions ordered `focusedIds → liveIds → recentIds` plus each
+  warm mission's active `/btw` child mission) stay live over the single
   multiplexed `/api/control/sync` WebSocket (`max_payload = 4096`) when
   **Background sync** resolves to active (`On` or `Auto` on a healthy link),
-  rendering on reopen with zero HTTP round-trips. When **Background sync** is
-  `Off` or `Auto` pauses on a slow/Data-Saver link, unfocused subscriptions
-  detach immediately while preserving cached transcripts, `/btw` turns, and
-  `since_seq` cursors; clean missions without intervening `mission_presentation`
-  hints reopen without redundant metadata or `/btw` crawls. Mobile suspension
-  uses resume reconciliation rather than relying on background sockets.
+  rendering on open with zero HTTP round-trips. Per-mission `stream_lagged`
+  frames (`mission_id` present when a single mission's `since_seq` exceeds the
+  500-event replay window) recover that mission locally without tripping global
+  link-quality backpressure; only socket-wide `stream_lagged` frames pause
+  **Background sync**. When **Background sync** is `Off` or `Auto` pauses on a
+  slow/Data-Saver link, unfocused subscriptions detach immediately while
+  preserving cached transcripts, `/btw` turns, and `since_seq` cursors; clean
+  missions without intervening `mission_presentation` hints reopen without
+  redundant metadata or `/btw` crawls. Mobile suspension uses resume
+  reconciliation rather than relying on background sockets.
 - Images already read reuse a bounded, account/mission-scoped cache. Concurrent
   consumers share reads; failures are retryable; scope changes reject late loads.
   Mutable workspace images must expire or be invalidated when the mission changes.
 - Existing scroll ownership remains authoritative. Hydration must preserve the
-  reader's anchor. Skeletons represent only missing content; reduced motion works.
+  reader's anchor. `--scroll-reserve` holds collapsed narration height only
+  while the reader's anchored element or turn row stays connected in the DOM;
+  a snapshot replacement that disconnects the anchor clears the reserve so no
+  blank scroll void remains below the conversation. Upward pagination hydrates
+  missing `{ view = "transcript" }` spine rows when a raw `before_seq` batch
+  contains only folded tool events, and upward wheel/key input at `scrollTop = 0`
+  loads older history even when the loaded tail fits within the viewport height.
+  Skeletons represent only missing content; reduced motion works.
 
 ## Regression scenarios
 

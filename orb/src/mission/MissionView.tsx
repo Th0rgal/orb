@@ -531,25 +531,27 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     return sendMsg(resumePrompt, [], []);
   };
   const [followAttach, setFollowAttach] = createSignal<AttachChip[]>([]);
-  // Near the top, or too short to scroll at all (a page of folded tool rows),
-  // keep fetching older pages: a scroll event alone never fires otherwise.
-  // Once at least one user/assistant message is visible above a collapsed tool
-  // fold, stop auto-paging raw tool pages on `short` alone until the user scrolls up.
-  const older=()=>{
+  // Near the top, or too short to scroll at all (a page of folded tool rows or
+  // an incomplete spine), keep fetching older pages: a scroll event alone never
+  // fires otherwise. Also respond to upward wheel/key input at scrollTop <= 1.
+  const older=(force=false)=>{
     const el=scroller;
     if(!el||hasPendingSearchTarget(p.id))return;
-    const hasConversationItem=items().some(i=>i.kind==="user"||i.kind==="text");
-    const short=!hasConversationItem&&el.scrollHeight<=el.clientHeight+800;
-    if((el.scrollTop<800&&el.scrollHeight>el.clientHeight||short)&&peekReadyTranscript(p.id)?.hasOlder)void loadOlder().then(()=>requestAnimationFrame(older)).catch(e=>setError(String(e)));
+    const ready=peekReadyTranscript(p.id);
+    const hasDeliveredUser=items().some(i=>i.kind==="user"&&!i.queued);
+    const missingSpine=!hasDeliveredUser||(el.scrollHeight<=el.clientHeight&&ready?.spineComplete===false);
+    const short=missingSpine&&el.scrollHeight<=el.clientHeight+800;
+    if((force||short||(el.scrollTop<800&&el.scrollHeight>el.clientHeight))&&ready?.hasOlder)void loadOlder().then(()=>requestAnimationFrame(()=>older())).catch(e=>setError(String(e)));
   };
-  const pin = createPinnedScroll({ key: () => p.id, onResize: () => older() });
+  const onScrollOlder=()=>older(false);
+  const pin = createPinnedScroll({ key: () => p.id, onResize: () => older(false), onUpwardAtTop: () => older(true) });
   const { landAtBottom, scrollIfPinned } = pin;
   let scroller: HTMLDivElement | undefined;
   createEffect(()=>{if(p.id)cacheRemember(`m:${p.id}`);});
   pin.observe();
   onMount(() => {
     if (!scroller) return;
-    scroller.addEventListener('scroll',older,{passive:true});onCleanup(()=>scroller?.removeEventListener('scroll',older));
+    scroller.addEventListener('scroll',onScrollOlder,{passive:true});onCleanup(()=>scroller?.removeEventListener('scroll',onScrollOlder));
   });
 
   // A stream status is newer than any mission read started before it: such a
@@ -923,7 +925,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   });
 
   const viewItems = createMemo(() => {
-    const canonical = withInitialPrompt(items(), mission(), receipt, awaiting());
+    const ready = p.id ? peekReadyTranscript(p.id) : undefined;
+    const spinePending = Boolean(ready?.hasOlder && ready.spineComplete === false);
+    const canonical = withInitialPrompt(items(), mission(), receipt, awaiting() || spinePending);
     const outbox = [...acceptedLocalMessages(p.id), ...queuedLocalMessages(p.id).filter(row=>!row.error&&(!row.waiting||row.state==='accepted'||row.state==='dispatching'))];
     const drafts=optimisticList();
     let list = canonical;

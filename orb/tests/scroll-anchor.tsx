@@ -14,8 +14,12 @@ for (let i = 0; i < 60; i++) events.push(
 );
 events.push({ type: "user_message", data: { content: "Now do the long task", id: "ulive" } });
 const [items, setItems] = createSignal(buildTranscript(events));
+let upwardAtTopCalls = 0;
 function App() {
-  const pin = createPinnedScroll({ key: () => "scroll-anchor" });
+  const pin = createPinnedScroll({
+    key: () => "scroll-anchor",
+    onUpwardAtTop: () => { upwardAtTopCalls++; },
+  });
   pin.observe();
   createEffect(on(items, () => queueMicrotask(pin.scrollIfPinned), { defer: true }));
   queueMicrotask(pin.landAtBottom);
@@ -28,6 +32,8 @@ render(() => <App />, document.getElementById("root")!);
 const log: StreamEvent[] = [...events];
 Object.assign(window, { anchorHarness: {
   apply: (ev: StreamEvent) => { log.push(ev); setItems(v => applyStreamEvent(v, ev)); },
+  replaceEvents: (evs: StreamEvent[]) => { log.splice(0, log.length, ...evs); setItems(buildTranscript(evs)); },
+  upwardAtTopCalls: () => upwardAtTopCalls,
   /** Cached first paint vs network: show `stale` now (spine-like: no tools, fewer
    * turns), then the fresh history (tools and narration folded into earlier turns,
    * newer turns appended) as one replacement, like MissionView's resync. */

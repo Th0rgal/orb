@@ -5,6 +5,7 @@ import { clearConnection, setConnection } from "../src/api";
 import {
   createBackgroundSyncMonitorState,
   evaluateBackgroundSync,
+  getBackgroundSyncVerdict,
   normalizeBackgroundSyncMode,
   resetBackgroundSyncMonitorForTest,
   selectWarmMissionIds,
@@ -31,9 +32,11 @@ import {
   isMissionDirtyWhileUnfocused,
   isMissionWarmLive,
   loadTranscript,
+  noteLiveMissionIds,
   noteMissionPresentationHint,
   peekReadyTranscript,
   peekWarmMissionPatch,
+  prefetchTranscript,
   retainTranscript,
 } from "../src/missionCache";
 import { cacheReset } from "../src/pageCache";
@@ -52,6 +55,7 @@ type PolicyFixture = {
     backgroundActive: boolean;
     maxWarm: number;
     focusedIds: string[];
+    liveIds?: string[];
     recentIds: string[];
     btwByParent?: Record<string, string>;
     openBtwParentIds?: string[];
@@ -151,6 +155,7 @@ describe("shared background-sync-policy.json conformance", () => {
           backgroundActive: wc.backgroundActive,
           maxWarm: wc.maxWarm,
           focusedIds: wc.focusedIds,
+          liveIds: wc.liveIds,
           recentIds: wc.recentIds,
           btwByParent: wc.btwByParent,
           openBtwParentIds: wc.openBtwParentIds,
@@ -1281,5 +1286,254 @@ describe("warm background sync & off-mode quickness", () => {
       question: "Summarize findings",
       answer: fullTextOpAnswer,
     });
+  });
+
+  it("subscribes unfocused live missions over /api/control/sync and keeps them WarmLive through completion", async () => {
+    setConnection("http://live-warm.test", "jwt-tok");
+    setMultiplexSyncEnabledForTest(true);
+    vi.stubGlobal("WebSocket", FakeSyncSocket as unknown as typeof WebSocket);
+
+    let eventFetchesForLive = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/queue?")) return Response.json([]);
+        if (url.includes("/snapshot?")) return new Response("none", { status: 404 });
+        if (url.includes("/missions/m-focused/events?")) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: 1,
+                mission_id: "m-focused",
+                sequence: 1,
+                event_type: "user_message",
+                event_id: "u-foc",
+                timestamp: "2026-11-07T00:00:00Z",
+                content: "Focused prompt",
+                metadata: {},
+              },
+            ]),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orb-Events-Protocol": "1",
+                "X-Has-More": "false",
+                "X-Next-Cursor": "1",
+                "X-Page-Max-Sequence": "1",
+                "X-Max-Sequence": "1",
+              },
+            },
+          );
+        }
+        if (url.includes("/missions/m-unfocused-live/events?")) {
+          eventFetchesForLive++;
+          return new Response(
+            JSON.stringify([
+              {
+                id: 1,
+                mission_id: "m-unfocused-live",
+                sequence: 20,
+                event_type: "user_message",
+                event_id: "u-live",
+                timestamp: "2026-11-07T00:01:00Z",
+                content: "Run turbo benchmark",
+                metadata: {},
+              },
+            ]),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orb-Events-Protocol": "1",
+                "X-Has-More": "false",
+                "X-Next-Cursor": "20",
+                "X-Page-Max-Sequence": "20",
+                "X-Max-Sequence": "20",
+              },
+            },
+          );
+        }
+        return Response.json({});
+      }),
+    );
+
+    // User opens m-focused (establishing the multiplex sync WS), while m-unfocused-live runs in the background:
+    const releaseFocused = retainTranscript("m-focused");
+    await loadTranscript("m-focused");
+    const detachFocused = attachMissionStream("m-focused", {
+      onEvent: () => {},
+      onBatch: () => {},
+      onLagged: () => {},
+      onReady: () => {},
+      onDisconnected: () => {},
+    });
+    await vi.waitFor(() => expect(FakeSyncSocket.instances).toHaveLength(1));
+    const sock = FakeSyncSocket.instances[0];
+    await vi.waitFor(() => expect(isMissionWarmLive("m-focused")).toBe(true));
+
+    // Mission list poll discovers m-unfocused-live and prefetches it without user ever opening it:
+    noteLiveMissionIds(["m-unfocused-live"]);
+    prefetchTranscript("m-unfocused-live");
+
+    await vi.waitFor(() => expect(isMissionWarmLive("m-unfocused-live")).toBe(true));
+    expect(sock.sent).toContainEqual(
+      expect.objectContaining({ op: "subscribe", mission_id: "m-unfocused-live", since_seq: 20 }),
+    );
+    const initialFetches = eventFetchesForLive;
+    expect(initialFetches).toBeGreaterThan(0);
+
+    // Unfocused live mission streams its final reply and completes while user is still on m-focused:
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "assistant_message",
+        mission_id: "m-unfocused-live",
+        id: "a-21",
+        sequence: 21,
+        content: "Replaced PR #32 with passing turbo benchmark.",
+        success: true,
+        at: "2026-11-07T00:05:00Z",
+      }),
+    });
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "mission_status_changed",
+        mission_id: "m-unfocused-live",
+        status: "completed",
+      }),
+    });
+
+    // Next mission list poll no longer lists m-unfocused-live as live, but it stays in warm recents!
+    noteLiveMissionIds([]);
+    expect(sock.sent.some((m) => m.op === "unsubscribe" && m.mission_id === "m-unfocused-live")).toBe(false);
+    expect(isMissionWarmLive("m-unfocused-live")).toBe(true);
+
+    // User finally opens m-unfocused-live: instant up-to-date conversation with 0 extra HTTP fetches!
+    const snap = peekReadyTranscript("m-unfocused-live");
+    expect(snap?.cursor).toBe(21);
+    expect(snap?.items.some((i) => i.kind === "text" && i.text.includes("Replaced PR #32"))).toBe(true);
+    expect(eventFetchesForLive).toBe(initialFetches);
+
+    detachFocused();
+    releaseFocused();
+  });
+
+  it("isolates per-mission stream_lagged from pausing global Background Sync", async () => {
+    setConnection("http://lag-isolation.test", "jwt-tok");
+    setMultiplexSyncEnabledForTest(true);
+    vi.stubGlobal("WebSocket", FakeSyncSocket as unknown as typeof WebSocket);
+
+    let mLagCursor = 100;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/queue?")) return Response.json([]);
+        if (url.includes("/snapshot?")) return new Response("none", { status: 404 });
+        if (url.includes("/missions/m-lagged/events?")) {
+          const seq = mLagCursor;
+          return new Response(
+            JSON.stringify([
+              {
+                id: seq,
+                mission_id: "m-lagged",
+                sequence: seq,
+                event_type: "assistant_message",
+                event_id: `a-${seq}`,
+                timestamp: "2026-11-07T00:00:00Z",
+                content: `Reply at ${seq}`,
+                metadata: {},
+              },
+            ]),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orb-Events-Protocol": "1",
+                "X-Has-More": "false",
+                "X-Next-Cursor": String(seq),
+                "X-Page-Max-Sequence": String(seq),
+                "X-Max-Sequence": String(seq),
+              },
+            },
+          );
+        }
+        if (url.includes("/missions/m-healthy/events?")) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: 5,
+                mission_id: "m-healthy",
+                sequence: 5,
+                event_type: "user_message",
+                event_id: "u-5",
+                timestamp: "2026-11-07T00:00:00Z",
+                content: "Healthy warm mission",
+                metadata: {},
+              },
+            ]),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orb-Events-Protocol": "1",
+                "X-Has-More": "false",
+                "X-Next-Cursor": "5",
+                "X-Page-Max-Sequence": "5",
+                "X-Max-Sequence": "5",
+              },
+            },
+          );
+        }
+        return Response.json({});
+      }),
+    );
+
+    const relHealthy = retainTranscript("m-healthy");
+    await loadTranscript("m-healthy");
+    relHealthy();
+
+    const relLagged = retainTranscript("m-lagged");
+    await loadTranscript("m-lagged");
+    const detachLagged = attachMissionStream("m-lagged", {
+      onEvent: () => {},
+      onBatch: () => {},
+      onLagged: () => {},
+      onReady: () => {},
+      onDisconnected: () => {},
+    });
+    await vi.waitFor(() => expect(FakeSyncSocket.instances).toHaveLength(1));
+    const sock = FakeSyncSocket.instances[0];
+    await vi.waitFor(() => expect(isMissionWarmLive("m-healthy")).toBe(true));
+    await vi.waitFor(() => expect(isMissionWarmLive("m-lagged")).toBe(true));
+
+    detachLagged();
+    relLagged();
+
+    // Per-mission replay-window overflow (`mission_id: "m-lagged"`) catches up m-lagged WITHOUT pausing global Auto mode!
+    mLagCursor = 800;
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "stream_lagged",
+        mission_id: "m-lagged",
+        reason: "replay_window_exceeded",
+      }),
+    });
+
+    expect(getBackgroundSyncVerdict()).toMatchObject({ active: true, reason: "healthy" });
+    expect(isMissionWarmLive("m-healthy")).toBe(true);
+    expect(sock.sent.some((m) => m.op === "unsubscribe" && m.mission_id === "m-healthy")).toBe(false);
+    await vi.waitFor(() => expect(peekReadyTranscript("m-lagged")?.cursor).toBe(800));
+    await vi.waitFor(() => expect(isMissionWarmLive("m-lagged")).toBe(true));
+
+    // Socket-wide backpressure (`stream_lagged` WITHOUT `mission_id`) DOES pause global Auto mode and shed unfocused subs:
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "stream_lagged",
+      }),
+    });
+    expect(getBackgroundSyncVerdict()).toMatchObject({ active: false, reason: "lagged" });
+    expect(sock.sent).toContainEqual({ op: "unsubscribe", mission_id: "m-healthy" });
   });
 });
