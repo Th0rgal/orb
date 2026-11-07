@@ -270,6 +270,60 @@ def openSqliteDb (path : String) (ddl : String) (alters : Array String := #[]) (
         let mu ← Std.Mutex.new ()
         return .ok { handle := h, path := path, mu := mu }
 
+private def hexNibble (n : Nat) : Char :=
+  let v := n % 16
+  if v < 10 then Char.ofNat (48 + v) else Char.ofNat (87 + v)
+
+/-- Complete RFC 8259 JSON string escaper (escapes quotes, backslashes, and all `U+0000..U+001F`). -/
+def jsonEscape (s : String) : String := Id.run do
+  let mut out := "\""
+  for ch in s.toList do
+    let code := ch.toNat
+    if ch == '"' then out := out ++ "\\\""
+    else if ch == '\\' then out := out ++ "\\\\"
+    else if ch == '\n' then out := out ++ "\\n"
+    else if ch == '\r' then out := out ++ "\\r"
+    else if ch == '\t' then out := out ++ "\\t"
+    else if code == 8 then out := out ++ "\\b"
+    else if code == 12 then out := out ++ "\\f"
+    else if code < 0x20 then
+      out := out ++ "\\u00" ++ String.singleton (hexNibble (code / 16)) ++ String.singleton (hexNibble (code % 16))
+    else out := out.push ch
+  return out ++ "\""
+
+/-- Maximum per-mission/job reserved scratch disk budget (`512 GiB`, matching API schema ceiling). -/
+def maxReservedDiskGib : UInt64 := 512
+
+/-- Parse existing `missions.tags` JSON array so custom non-system tags survive authority/lease updates. -/
+def parseStringJsonArray (raw : String) : Array String :=
+  match OrbBin.Json.parse raw with
+  | .ok (.arr xs) => xs.filterMap (fun v => match v with | .str s => some s | _ => none)
+  | _ => #[]
+
+/-- Read-compatibility `tags` JSON array projection from typed `missions` columns (`SM-02`, `R2-B`). -/
+def projectCompatibilityTagsJson
+    (authorityMode placementKind supersededById orphanedAt : String)
+    (reservedDiskGib : UInt64)
+    (extraTags : Array String := #[]) : String := Id.run do
+  let filtered := extraTags.filter fun t =>
+    t != "pr-writer" && t != "pr-readonly" &&
+    !t.startsWith "placement:" && !t.startsWith "superseded_by:" &&
+    t != "orphaned" && !t.startsWith "disk-gib:"
+  let mut out : Array String := #[]
+  out := out.push (if authorityMode == "readonly" then "pr-readonly" else "pr-writer")
+  if !placementKind.isEmpty then
+    out := out.push s!"placement:{placementKind}"
+  if !supersededById.isEmpty then
+    out := out.push s!"superseded_by:{supersededById}"
+  if !orphanedAt.isEmpty then
+    out := out.push "orphaned"
+  if reservedDiskGib > 0 then
+    out := out.push s!"disk-gib:{reservedDiskGib}"
+  for t in filtered do
+    if !out.contains t then
+      out := out.push t
+  return "[" ++ String.intercalate "," (out.toList.map jsonEscape) ++ "]"
+
 /-- Reconcile `dispatch_lease_intents` (`missions.db`) and `project_track_leases` (`projects.db`)
     deterministically on startup (`SM-08`), rolling back uncommitted `preparing` / `rejected` rows
     and clearing stale-boot leases without relying on ambient process mutexes or 6h TTL expiry. -/
@@ -298,10 +352,21 @@ def recoverDispatchLeases (mDb pDb : SqliteDb) (bootEpoch : UInt64 := 1) : IO (E
         sqliteQueryRowsRaw mDb.handle
           "UPDATE dispatch_lease_intents SET phase='rolled_back' WHERE reservation_id=?1;" #[rid]
       if let .error e := mUpd then return .error e
-      let diskRel ← mDb.mu.atomically <|
+      let mTagRows ← mDb.mu.atomically <|
         sqliteQueryRowsRaw mDb.handle
-          "UPDATE missions SET reserved_disk_gib=0, state_revision=state_revision+1 WHERE id=?1 AND reserved_disk_gib>0;" #[mid]
-      if let .error e := diskRel then return .error e
+          "SELECT authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,tags,reserved_disk_gib FROM missions WHERE id=?1;" #[mid]
+      if let .ok mtrs := mTagRows then
+        if mtrs.size > 1 && (((mtrs[1]![5]?).bind String.toNat?).getD 0) > 0 then
+          let am := (mtrs[1]![0]?).getD "writer"
+          let pk := (mtrs[1]![1]?).getD "managed"
+          let sb := (mtrs[1]![2]?).getD ""
+          let oa := (mtrs[1]![3]?).getD ""
+          let ex := parseStringJsonArray ((mtrs[1]![4]?).getD "[]")
+          let nextTags := projectCompatibilityTagsJson am pk sb oa 0 ex
+          let diskRel ← mDb.mu.atomically <|
+            sqliteQueryRowsRaw mDb.handle
+              "UPDATE missions SET reserved_disk_gib=0, tags=?2, state_revision=state_revision+1 WHERE id=?1 AND reserved_disk_gib>0;" #[mid, nextTags]
+          if let .error e := diskRel then return .error e
   let orphanProjs ← pDb.mu.atomically <|
     sqliteQueryRowsRaw pDb.handle
       "SELECT reservation_id,phase,boot_epoch FROM project_track_leases;"
@@ -396,27 +461,6 @@ def closeCoreStore (st : CoreStore) : IO Unit := do
     st.askDb.mu.atomically (sqliteCloseRaw st.askDb.handle)
     st.idempotencyDb.mu.atomically (sqliteCloseRaw st.idempotencyDb.handle)
 
-private def hexNibble (n : Nat) : Char :=
-  let v := n % 16
-  if v < 10 then Char.ofNat (48 + v) else Char.ofNat (87 + v)
-
-/-- Complete RFC 8259 JSON string escaper (escapes quotes, backslashes, and all `U+0000..U+001F`). -/
-def jsonEscape (s : String) : String := Id.run do
-  let mut out := "\""
-  for ch in s.toList do
-    let code := ch.toNat
-    if ch == '"' then out := out ++ "\\\""
-    else if ch == '\\' then out := out ++ "\\\\"
-    else if ch == '\n' then out := out ++ "\\n"
-    else if ch == '\r' then out := out ++ "\\r"
-    else if ch == '\t' then out := out ++ "\\t"
-    else if code == 8 then out := out ++ "\\b"
-    else if code == 12 then out := out ++ "\\f"
-    else if code < 0x20 then
-      out := out ++ "\\u00" ++ String.singleton (hexNibble (code / 16)) ++ String.singleton (hexNibble (code % 16))
-    else out := out.push ch
-  return out ++ "\""
-
 private def isIntegerCol (col : String) : Bool :=
   col == "enabled" || col == "revision" || col == "total_cost_cents" || col == "generation" ||
   col == "parallel_missions" || col == "state_revision" || col == "reserved_disk_gib" ||
@@ -435,30 +479,6 @@ def classifyAuthorityMode (writerFlag : Option Bool) (tags : Array String) (isRe
     let wf : UInt8 := match writerFlag with | some false => 0 | some true => 1 | none => 2
     let code := Orb.Kernel.verifyLeaseMode wf (if hasRo then 1 else 0) (if hasWr then 1 else 0) (if isReadonlyIntent then 1 else 0)
     .ok (if code == 0 then "readonly" else "writer")
-
-/-- Read-compatibility `tags` JSON array projection from typed `missions` columns (`SM-02`, `R2-B`). -/
-def projectCompatibilityTagsJson
-    (authorityMode placementKind supersededById orphanedAt : String)
-    (reservedDiskGib : UInt64)
-    (extraTags : Array String := #[]) : String := Id.run do
-  let filtered := extraTags.filter fun t =>
-    t != "pr-writer" && t != "pr-readonly" &&
-    !t.startsWith "placement:" && !t.startsWith "superseded_by:" &&
-    t != "orphaned" && !t.startsWith "disk-gib:"
-  let mut out : Array String := #[]
-  out := out.push (if authorityMode == "readonly" then "pr-readonly" else "pr-writer")
-  if !placementKind.isEmpty then
-    out := out.push s!"placement:{placementKind}"
-  if !supersededById.isEmpty then
-    out := out.push s!"superseded_by:{supersededById}"
-  if !orphanedAt.isEmpty then
-    out := out.push "orphaned"
-  if reservedDiskGib > 0 then
-    out := out.push s!"disk-gib:{reservedDiskGib}"
-  for t in filtered do
-    if !out.contains t then
-      out := out.push t
-  return "[" ++ String.intercalate "," (out.toList.map jsonEscape) ++ "]"
 
 /-- Authoritative unified mission `health_verdict` derived from `MissionLifecycle` +
     `Orb.Kernel.missionStep` + `Orb.Kernel.reconcileStep` (`SM-01`). -/
@@ -566,11 +586,11 @@ def withImmediateTx {α : Type} (db : SqliteDb) (act : IO (Except String α)) : 
 def upsertMission (st : CoreStore) (m : MissionRecord) : IO (Except String Unit) := do
   if m.authorityMode != "readonly" && m.authorityMode != "writer" then
     return .error s!"invalid_authority_mode:{m.authorityMode}"
+  if m.reservedDiskGib > maxReservedDiskGib then
+    return .error s!"invalid_reserved_disk_gib:{m.reservedDiskGib}"
   let compatTags :=
-    if m.tagsJson.isEmpty || m.tagsJson == "[]" then
-      projectCompatibilityTagsJson m.authorityMode m.placementKind m.supersededById m.orphanedAt m.reservedDiskGib
-    else
-      m.tagsJson
+    projectCompatibilityTagsJson m.authorityMode m.placementKind m.supersededById m.orphanedAt m.reservedDiskGib
+      (parseStringJsonArray m.tagsJson)
   let rev := if m.stateRevision == 0 then 1 else m.stateRevision
   let ownEp := if m.ownerEpoch == 0 then 1 else m.ownerEpoch
   let runGen := if m.runGeneration == 0 then 1 else m.runGeneration
@@ -592,11 +612,11 @@ def upsertMission (st : CoreStore) (m : MissionRecord) : IO (Except String Unit)
 def insertNewMission (st : CoreStore) (m : MissionRecord) : IO (Except String Unit) := do
   if m.authorityMode != "readonly" && m.authorityMode != "writer" then
     return .error s!"invalid_authority_mode:{m.authorityMode}"
+  if m.reservedDiskGib > maxReservedDiskGib then
+    return .error s!"invalid_reserved_disk_gib:{m.reservedDiskGib}"
   let compatTags :=
-    if m.tagsJson.isEmpty || m.tagsJson == "[]" then
-      projectCompatibilityTagsJson m.authorityMode m.placementKind m.supersededById m.orphanedAt m.reservedDiskGib
-    else
-      m.tagsJson
+    projectCompatibilityTagsJson m.authorityMode m.placementKind m.supersededById m.orphanedAt m.reservedDiskGib
+      (parseStringJsonArray m.tagsJson)
   let rev := if m.stateRevision == 0 then 1 else m.stateRevision
   let ownEp := if m.ownerEpoch == 0 then 1 else m.ownerEpoch
   let runGen := if m.runGeneration == 0 then 1 else m.runGeneration
@@ -637,10 +657,12 @@ def commitTransitionWithIntents
     (intents : Array OutboxIntent := #[]) : IO (Except String UInt32) :=
   if nextAuthorityMode != "readonly" && nextAuthorityMode != "writer" then
     pure (.error s!"invalid_authority_mode:{nextAuthorityMode}")
+  else if nextReservedDiskGib > maxReservedDiskGib then
+    pure (.error s!"invalid_reserved_disk_gib:{nextReservedDiskGib}")
   else
     withImmediateTx st.missionsDb do
       let curRows ← execParamQueryUnlocked st.missionsDb
-        "SELECT owner_epoch,run_generation,node_boot_epoch,state_revision FROM missions WHERE id=?1;"
+        "SELECT owner_epoch,run_generation,node_boot_epoch,state_revision,tags FROM missions WHERE id=?1;"
         #[missionId]
       let .ok rs := curRows | return .error "cas_select_failed"
       if rs.size ≤ 1 then
@@ -650,6 +672,7 @@ def commitTransitionWithIntents
       let durRun := ((r[1]?.bind String.toNat?).getD 1).toUInt64
       let durBoot := ((r[2]?.bind String.toNat?).getD 1).toUInt64
       let durRev := ((r[3]?.bind String.toNat?).getD 1).toUInt32
+      let prevExtraTags := parseStringJsonArray ((r[4]?).getD "[]")
       let fenceWord := Orb.Kernel.epochFenceStep
         durOwner liveOwnerEpoch durRun liveRunGen durBoot liveBootEpoch durRev expectedRev writerOwnerEpoch
       let lo32 := (fenceWord &&& 0xFFFFFFFF).toUInt32
@@ -658,7 +681,7 @@ def commitTransitionWithIntents
         let reason := lo32 &&& 0xFF
         return .error s!"cas_fence_rejected:{reason}:expected={expectedRev}:actual={durRev}"
       let compatTags := projectCompatibilityTagsJson
-        nextAuthorityMode nextPlacementKind nextSupersededBy nextOrphanedAt nextReservedDiskGib
+        nextAuthorityMode nextPlacementKind nextSupersededBy nextOrphanedAt nextReservedDiskGib prevExtraTags
       let upd ← execParamQueryUnlocked st.missionsDb
         "UPDATE missions SET status=?2,authority_mode=?3,placement_kind=?4,superseded_by_mission_id=?5,orphaned_at=?6,reserved_disk_gib=?7,tags=?8,state_revision=?9,updated_at=?10 WHERE id=?1 AND state_revision=?11;"
         #[missionId, nextStatus, nextAuthorityMode, nextPlacementKind, nextSupersededBy, nextOrphanedAt,
@@ -712,6 +735,8 @@ def acquireDispatchTrackLease (st : CoreStore) (req : DispatchLeaseRequest) : IO
     return .error "lease_missing_project_or_track"
   if req.authorityMode != "readonly" && req.authorityMode != "writer" then
     return .error s!"invalid_authority_mode:{req.authorityMode}"
+  if req.reservedDiskGib > maxReservedDiskGib then
+    return .error s!"invalid_reserved_disk_gib:{req.reservedDiskGib}"
   let gibBytes : UInt64 := req.reservedDiskGib * 1073741824
   let admWord := Orb.Kernel.admissionStep 0 1 0 gibBytes req.freeDiskBytes
   if (admWord &&& 1) == 0 then
@@ -726,31 +751,39 @@ def acquireDispatchTrackLease (st : CoreStore) (req : DispatchLeaseRequest) : IO
   if let .error e := prepRes then
     return .error e
   -- Phase 2: Atomic conflict check + lease insert in `projects.db`
+  -- Track exclusivity is scoped to `project_slug`, while non-empty repository/PR writer exclusivity
+  -- applies globally across all projects (`SM-08`), preventing cross-project PR writer split-brain.
   let projRes ← withImmediateTx st.projectsDb do
     let existing ← execParamQueryUnlocked st.projectsDb
-      "SELECT mission_id,track,repo,authority_mode,phase FROM project_track_leases WHERE project_slug=?1 AND phase IN ('preparing','active');"
-      #[req.projectSlug]
+      "SELECT project_slug,mission_id,track,repo,authority_mode,phase FROM project_track_leases WHERE phase IN ('preparing','active');"
+      #[]
     let .ok rs := existing | return .error "project_lease_query_failed"
     for i in [1:rs.size] do
       let r := rs[i]!
-      let otherMid := (r[0]?).getD ""
-      let otherTrack := (r[1]?).getD ""
-      let otherRepo := (r[2]?).getD ""
-      let otherMode := (r[3]?).getD "writer"
-      let otherPhase := (r[4]?).getD "active"
+      let otherProj := (r[0]?).getD ""
+      let otherMid := (r[1]?).getD ""
+      let otherTrack := (r[2]?).getD ""
+      let otherRepo := (r[3]?).getD ""
+      let otherMode := (r[4]?).getD "writer"
+      let otherPhase := (r[5]?).getD "active"
       if otherMid != req.missionId then
         let inUnresolved : UInt8 := if otherPhase == "preparing" then 1 else 0
         let hasLiveOwner : UInt8 := if otherPhase == "active" then 1 else 0
         let holds := Orb.Kernel.verifyTrackHold inUnresolved 0 hasLiveOwner 0
         if holds == 1 then
-          if otherTrack == req.track && (req.authorityMode == "writer" || otherMode == "writer") then
+          if otherProj == req.projectSlug && otherTrack == req.track && (req.authorityMode == "writer" || otherMode == "writer") then
             return .error s!"track_writer_conflict:{otherMid}"
-          if req.authorityMode == "writer" && otherMode == "writer" && (!req.repo.isEmpty || !otherRepo.isEmpty) then
-            let hKnown : UInt8 := if otherRepo.isEmpty then 0 else 1
-            let tKnown : UInt8 := if req.repo.isEmpty then 0 else 1
-            let sameRepo : UInt8 := if otherRepo == req.repo then 1 else 0
-            if Orb.Kernel.verifyRepoDisjoint hKnown tKnown sameRepo == 0 then
-              return .error s!"repo_writer_conflict:{otherMid}"
+          if req.authorityMode == "writer" && otherMode == "writer" then
+            if otherProj == req.projectSlug && (!req.repo.isEmpty || !otherRepo.isEmpty) then
+              let hKnown : UInt8 := if otherRepo.isEmpty then 0 else 1
+              let tKnown : UInt8 := if req.repo.isEmpty then 0 else 1
+              let sameRepo : UInt8 := if otherRepo == req.repo then 1 else 0
+              if Orb.Kernel.verifyRepoDisjoint hKnown tKnown sameRepo == 0 then
+                return .error s!"repo_writer_conflict:{otherMid}"
+            else if !req.repo.isEmpty && !otherRepo.isEmpty then
+              let sameRepo : UInt8 := if otherRepo == req.repo then 1 else 0
+              if Orb.Kernel.verifyRepoDisjoint 1 1 sameRepo == 0 then
+                return .error s!"repo_writer_conflict:{otherMid}"
     let ins ← execParamQueryUnlocked st.projectsDb
       "INSERT INTO project_track_leases(project_slug,track,reservation_id,mission_id,repo,authority_mode,phase,boot_epoch,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'preparing',?7,?8) ON CONFLICT(project_slug,track,mission_id) DO UPDATE SET reservation_id=excluded.reservation_id,repo=excluded.repo,authority_mode=excluded.authority_mode,phase='preparing',boot_epoch=excluded.boot_epoch,updated_at=excluded.updated_at;"
       #[req.projectSlug, req.track, req.reservationId, req.missionId, req.repo, req.authorityMode, s!"{req.bootEpoch}", req.nowAt]
@@ -766,11 +799,12 @@ def acquireDispatchTrackLease (st : CoreStore) (req : DispatchLeaseRequest) : IO
     -- Phase 3: Promote intent to `active` in `missions.db` (source of truth), then promote `projects.db` row
     let actRes ← withImmediateTx st.missionsDb do
       let mRows ← execParamQueryUnlocked st.missionsDb
-        "SELECT placement_kind,superseded_by_mission_id,orphaned_at FROM missions WHERE id=?1;" #[req.missionId]
+        "SELECT placement_kind,superseded_by_mission_id,orphaned_at,tags FROM missions WHERE id=?1;" #[req.missionId]
       let pk := match mRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "managed" | .error _ => "managed"
       let sb := match mRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
       let oa := match mRows with | .ok rs => (rs[1]?.bind (·[2]?)).getD "" | .error _ => ""
-      let leaseTags := projectCompatibilityTagsJson req.authorityMode pk sb oa req.reservedDiskGib
+      let ex := match mRows with | .ok rs => parseStringJsonArray ((rs[1]?.bind (·[3]?)).getD "[]") | .error _ => #[]
+      let leaseTags := projectCompatibilityTagsJson req.authorityMode pk sb oa req.reservedDiskGib ex
       let u1 ← execParamQueryUnlocked st.missionsDb
         "UPDATE dispatch_lease_intents SET phase='active',updated_at=?2 WHERE reservation_id=?1;"
         #[req.reservationId, req.nowAt]
@@ -795,11 +829,12 @@ def acquireDispatchTrackLease (st : CoreStore) (req : DispatchLeaseRequest) : IO
       let rollbackTags := projectCompatibilityTagsJson req.authorityMode "managed" "" "" 0
       discard <| withImmediateTx st.missionsDb do
         let mRows ← execParamQueryUnlocked st.missionsDb
-          "SELECT placement_kind,superseded_by_mission_id,orphaned_at FROM missions WHERE id=?1;" #[req.missionId]
+          "SELECT placement_kind,superseded_by_mission_id,orphaned_at,tags FROM missions WHERE id=?1;" #[req.missionId]
         let pk := match mRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "managed" | .error _ => "managed"
         let sb := match mRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
         let oa := match mRows with | .ok rs => (rs[1]?.bind (·[2]?)).getD "" | .error _ => ""
-        let rbTags := if mRows.isOk then projectCompatibilityTagsJson req.authorityMode pk sb oa 0 else rollbackTags
+        let ex := match mRows with | .ok rs => parseStringJsonArray ((rs[1]?.bind (·[3]?)).getD "[]") | .error _ => #[]
+        let rbTags := if mRows.isOk then projectCompatibilityTagsJson req.authorityMode pk sb oa 0 ex else rollbackTags
         discard <| execParamQueryUnlocked st.missionsDb
           "UPDATE dispatch_lease_intents SET phase='rolled_back',updated_at=?2 WHERE reservation_id=?1;"
           #[req.reservationId, req.nowAt]
@@ -830,11 +865,12 @@ def releaseDispatchTrackLease (st : CoreStore) (reservationId nowAt : String) : 
     if let .error e := u1 then return .error e
     if !mid.isEmpty then
       let mRows ← execParamQueryUnlocked st.missionsDb
-        "SELECT placement_kind,superseded_by_mission_id,orphaned_at FROM missions WHERE id=?1;" #[mid]
+        "SELECT placement_kind,superseded_by_mission_id,orphaned_at,tags FROM missions WHERE id=?1;" #[mid]
       let pk := match mRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "managed" | .error _ => "managed"
       let sb := match mRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
       let oa := match mRows with | .ok rs => (rs[1]?.bind (·[2]?)).getD "" | .error _ => ""
-      let releasedTags := projectCompatibilityTagsJson mode pk sb oa 0
+      let ex := match mRows with | .ok rs => parseStringJsonArray ((rs[1]?.bind (·[3]?)).getD "[]") | .error _ => #[]
+      let releasedTags := projectCompatibilityTagsJson mode pk sb oa 0 ex
       let u2 ← execParamQueryUnlocked st.missionsDb
         "UPDATE missions SET reserved_disk_gib=0,tags=?3,state_revision=state_revision+1,updated_at=?2 WHERE id=?1;"
         #[mid, nowAt, releasedTags]

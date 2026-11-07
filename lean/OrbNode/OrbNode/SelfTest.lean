@@ -1224,6 +1224,26 @@ def runTests : IO UInt32 := do
      storedHttpJob?.map (·.authorityMode) == some "readonly" &&
      storedHttpJob?.map (·.placementKind) == some "client" &&
      storedHttpJob?.map (·.reservedDiskGib) == some 12)
+  let wrapDiskJobId := "88888888-8888-4888-8888-888888888888"
+  let wrapDiskJobBody := renderCompact (.obj #[
+    ("job_id", .str wrapDiskJobId),
+    ("mission_id", .str missionId),
+    ("lease_token", .str submitLease),
+    ("authority_mode", .str "readonly"),
+    ("reserved_disk_gib", .num "17179869185"),
+    ("payload", .obj #[
+      ("kind", .str "raw_command"),
+      ("command", .str "true"),
+      ("long_running", .bool true)
+    ])
+  ])
+  let (rtWrapJob, rWrapJob) ← handleRequest rt {
+    method := "POST", rawPath := "/jobs", path := "/jobs",
+    query := #[], headers := authHdrs, body := wrapDiskJobBody.toUTF8
+  }
+  rt := rtWrapJob
+  check "POST /jobs rejects >512 GiB / 2^34 wraparound reserved_disk_gib with 422"
+    (rWrapJob.status == 422 && !rt.ledger.jobs.contains wrapDiskJobId)
 
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get

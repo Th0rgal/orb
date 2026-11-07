@@ -594,7 +594,9 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
         if let .error err := validateLeanBuildPayload payloadVal rt.cfg.envAllowlist then
           return (rt, textResp 422 err, preLaunches, #[])
         let st ← OrbNode.Posix.hostStats rt.cfg.workDir
-        let estDisk := (payloadVal.fieldUInt64? "estimated_disk_bytes").getD 0
+        let estDiskNat := (payloadVal.fieldNat? "estimated_disk_bytes").getD 0
+        let estDisk : UInt64 :=
+          if estDiskNat > 0xFFFFFFFFFFFFFFFF then 0xFFFFFFFFFFFFFFFF else estDiskNat.toUInt64
         let availAfterEst := if st.diskAvailBytes > estDisk then st.diskAvailBytes - estDisk else 0
         if verifyNodeCapacityDisk rt.cfg.capacityTotal rt.cfg.coordinatorCapacity availAfterEst rt.cfg.minFreeDiskBytes 0 0 != 1 then
           return (rt, textResp 422 "insufficient free disk space below min_free_disk_bytes floor", preLaunches, #[])
@@ -621,10 +623,13 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
       if rawAuthMode != "readonly" && rawAuthMode != "writer" then
         return (rt, textResp 422 s!"invalid authority_mode '{rawAuthMode}'", preLaunches, #[])
       let placeKind := ((jv.fieldStr? "placement_kind").orElse (fun _ => payloadVal.fieldStr? "placement_kind")).getD "managed"
-      let diskGib :=
-        match (jv.fieldUInt64? "reserved_disk_gib").orElse (fun _ => payloadVal.fieldUInt64? "reserved_disk_gib") with
-        | some g => g
-        | none => ((payloadVal.fieldUInt64? "estimated_disk_bytes").getD 0) / 1073741824
+      let rawDiskGibNat ← do
+        match (jv.fieldNat? "reserved_disk_gib").orElse (fun _ => payloadVal.fieldNat? "reserved_disk_gib") with
+        | some g => pure g
+        | none => pure (((payloadVal.fieldNat? "estimated_disk_bytes").getD 0) / 1073741824)
+      if rawDiskGibNat > Ledger.maxReservedDiskGib.toNat then
+        return (rt, textResp 422 s!"invalid reserved_disk_gib '{rawDiskGibNat}' (max {Ledger.maxReservedDiskGib})", preLaunches, #[])
+      let diskGib := rawDiskGibNat.toUInt64
       let nowTs ← nowRfc3339
       let logPath := (System.FilePath.mk rt.cfg.workDir / "logs" / s!"{jobId}.log").toString
       let persistedPayload := sanitizePersistedPayload payloadVal

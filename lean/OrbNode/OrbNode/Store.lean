@@ -503,7 +503,13 @@ def flushPendingSqlite (l : Ledger) : IO Ledger := do
   | .ok () => return { l with pendingSqliteSync := {} }
   | .error _ => return l
 
+def maxReservedDiskGib : UInt64 := 512
+
 def insertQueued (l0 : Ledger) (rec : JobRecord) : IO (Except String Ledger) := do
+  if rec.authorityMode != "readonly" && rec.authorityMode != "writer" then
+    return .error s!"invalid_authority_mode:{rec.authorityMode}"
+  if rec.reservedDiskGib > maxReservedDiskGib then
+    return .error s!"invalid_reserved_disk_gib:{rec.reservedDiskGib}"
   let l ← flushPendingSqlite l0
   if l.jobs.contains rec.jobId then
     return .error "duplicate_job_id"
@@ -563,6 +569,8 @@ def updateJobAuthorityCas
     (nextReservedDiskGib : UInt64) : IO (Except String (Ledger × JobRecord)) := do
   if nextAuthorityMode != "readonly" && nextAuthorityMode != "writer" then
     return .error s!"invalid_authority_mode:{nextAuthorityMode}"
+  if nextReservedDiskGib > maxReservedDiskGib then
+    return .error s!"invalid_reserved_disk_gib:{nextReservedDiskGib}"
   let l ← flushPendingSqlite l0
   let some cur := l.jobs.get? jobId
     | return .error "not_found"

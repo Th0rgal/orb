@@ -767,7 +767,11 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       let track := (JsonTape.lookupString? tape "track").getD ""
       let repo := ((JsonTape.lookupString? tape "github_pr").orElse (fun _ => JsonTape.lookupString? tape "repo")).getD ""
       let placeKind := (JsonTape.lookupString? tape "placement_kind").getD "managed"
-      let diskGib := ((JsonTape.lookupNat? tape "estimated_disk_gib").getD 0).toUInt64
+      let rawDiskNat := (JsonTape.lookupNat? tape "estimated_disk_gib").getD 0
+      if rawDiskNat > maxReservedDiskGib.toNat then
+        abortIdem
+        return .ok (mkJson 400 "{\"error\":\"invalid_estimated_disk_gib\"}")
+      let diskGib := rawDiskNat.toUInt64
       let writerFlag? := bodyVal?.bind (·.fieldBool? "writer")
       let reqTags : Array String :=
         match bodyVal?.bind (·.fieldArr? "tags") with
@@ -784,12 +788,13 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
             if held ≥ cap then
               abortIdem
               return .ok (mkJson 429 s!"\{\"error\":\"parallel_missions_cap\",\"cap\":{cap},\"active\":{held}}")
+      let initTagsJson := projectCompatibilityTagsJson authMode placeKind "" "" diskGib reqTags
       let mRec : MissionRecord := {
         id := mid,         title := title, status := "awaiting_user", backend := backend,
         modelOverride := "", modelEffort := normEffort, workingDirectory := safeWorkDir,
         project := projSlug, updatedAt := s!"{nowEpochSec}", totalCostCents := 0,
         authorityMode := authMode, placementKind := placeKind, reservedDiskGib := diskGib,
-        nodeBootEpoch := st.store.bootEpoch, track := track, repo := repo
+        nodeBootEpoch := st.store.bootEpoch, tagsJson := initTagsJson, track := track, repo := repo
       }
       match ← insertNewMission st.store mRec with
       | .error "mission_already_exists" =>
@@ -799,8 +804,10 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         abortIdem
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok () =>
+        let mut leaseReservationId := ""
         if !projSlug.isEmpty && !track.isEmpty then
           let resId ← nextUniqueId st "rsv" nowEpochSec
+          leaseReservationId := resId
           let leaseReq : DispatchLeaseRequest := {
             reservationId := resId, missionId := mid, projectSlug := projSlug,
             track := track, repo := repo, authorityMode := authMode,
@@ -811,16 +818,25 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
             discard <| recoverDispatchLeases st.store.missionsDb st.store.projectsDb st.store.bootEpoch
             abortIdem
             return .ok (mkJson 409 s!"\{\"error\":{jsonEscape leaseErr}}")
-        if let some sIdx := st.searchIdx? then
-          discard <| indexConversation sIdx mid title
         let respBody :=
           s!"\{\"id\":{jsonEscape mid},\"status\":\"awaiting_user\",\"model_effort\":{jsonEscape normEffort}," ++
           s!"\"authority_mode\":{jsonEscape authMode},\"placement_kind\":{jsonEscape placeKind}," ++
           s!"\"state_revision\":1,\"total_cost_cents\":0}"
         if !idemKey.isEmpty then
           match ← recordOrReplayIdempotency st.store "missions_create" idemKey 201 respBody s!"{nowEpochSec}" with
-          | .ok rec => return .ok (mkJson rec.statusCode rec.bodyJson)
-          | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+          | .ok rec =>
+            if let some sIdx := st.searchIdx? then
+              discard <| indexConversation sIdx mid title
+            return .ok (mkJson rec.statusCode rec.bodyJson)
+          | .error e =>
+            if !leaseReservationId.isEmpty then
+              discard <| releaseDispatchTrackLease st.store leaseReservationId s!"{nowEpochSec}"
+            discard <| execParamQuery st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
+            discard <| recoverDispatchLeases st.store.missionsDb st.store.projectsDb st.store.bootEpoch
+            abortIdem
+            return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+        if let some sIdx := st.searchIdx? then
+          discard <| indexConversation sIdx mid title
         return .ok (mkJson 201 respBody)
 
   -- Mission Search (`GET /api/control/missions/search`)
