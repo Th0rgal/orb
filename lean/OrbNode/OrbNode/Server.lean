@@ -630,9 +630,34 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
       if rawDiskGibNat > Ledger.maxReservedDiskGib.toNat then
         return (rt, textResp 422 s!"invalid reserved_disk_gib '{rawDiskGibNat}' (max {Ledger.maxReservedDiskGib})", preLaunches, #[])
       let diskGib := rawDiskGibNat.toUInt64
+      let rawOpId := ((jv.fieldStr? "operation_id").orElse (fun _ => payloadVal.fieldStr? "operation_id")).getD jobId
+      let opBoot := ((jv.fieldUInt64? "node_boot_epoch").orElse (fun _ => payloadVal.fieldUInt64? "node_boot_epoch")).getD rt.ledger.nodeBootEpoch
+      let rawWsId := ((jv.fieldStr? "workspace_id").orElse (fun _ => payloadVal.fieldStr? "workspace_id")).getD missionId
+      let rawMach? := ((jv.fieldStr? "machine_name").orElse (fun _ =>
+        (jv.fieldStr? "container_machine").orElse (fun _ =>
+          (payloadVal.fieldStr? "machine_name").orElse (fun _ =>
+            payloadVal.fieldStr? "container_machine")))).filter (fun s => !s.isEmpty)
+      let rawLeaderPid := ((jv.fieldUInt64? "leader_pid").orElse (fun _ => payloadVal.fieldUInt64? "leader_pid")).getD 0
+      let rawLeaderTicks := ((jv.fieldUInt64? "start_ticks").orElse (fun _ => payloadVal.fieldUInt64? "start_ticks")).getD 0
       let nowTs ← nowRfc3339
+      let claimLeader? : Option ContainerLeaderRecord :=
+        rawMach?.map (fun mName => {
+          workspaceId := if rawWsId.isEmpty then missionId else rawWsId
+          machineName := mName
+          leaderPid := if rawLeaderPid ≤ 0xFFFFFFFF then rawLeaderPid.toUInt32 else 0
+          startTicks := rawLeaderTicks
+          nodeBootEpoch := opBoot
+          procPhase := if rawLeaderPid != 0 && rawLeaderTicks != 0 then 1 else 0
+          jobId := jobId
+          updatedAt := nowTs
+        })
       let logPath := (System.FilePath.mk rt.cfg.workDir / "logs" / s!"{jobId}.log").toString
       let persistedPayload := sanitizePersistedPayload payloadVal
+      let effClaimOp := if rawOpId.isEmpty then jobId else rawOpId
+      let (scratchDir, scratchReceipt) ← match ← createScratchDirAndReceipt rt.cfg.workDir jobId missionId (some jobId)
+          opBoot (operationIdToken effClaimOp) with
+        | .ok pair => pure pair
+        | .error scErr => return (rt, textResp 503 scErr, preLaunches, #[])
       let jobRec : JobRecord := {
         jobId := jobId
         missionId := missionId
@@ -643,10 +668,20 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
         authorityMode := rawAuthMode
         placementKind := placeKind
         reservedDiskGib := diskGib
+        operationId := rawOpId
+        nodeBootEpoch := opBoot
+        pid := rawLeaderPid
+        startTicks := rawLeaderTicks
+        phaseCode := 1
       }
-      match ← rt.ledger.insertQueued jobRec with
-      | .error "duplicate_job_id" => return (rt, textResp 409 s!"job {jobId} already exists", preLaunches, #[])
-      | .error msg => return (rt, textResp 503 msg, preLaunches, #[])
+      match ← rt.ledger.insertQueued jobRec (some scratchReceipt) claimLeader? with
+      | .error "duplicate_job_id" =>
+        discard <| (IO.Process.output { cmd := "rm", args := #["-rf", scratchDir] }).toBaseIO
+        return (rt, textResp 409 s!"job {jobId} already exists", preLaunches, #[])
+      | .error msg =>
+        discard <| (IO.Process.output { cmd := "rm", args := #["-rf", scratchDir] }).toBaseIO
+        let stCode := if msg.startsWith "job_claim_fence_rejected:" then 409 else 503
+        return (rt, textResp stCode msg, preLaunches, #[])
       | .ok l' =>
         let rtQueued := {
           rt with
@@ -655,7 +690,11 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
           queueOrder := rt.queueOrder.push jobId
         }
         let (rtReserved, postLaunches) ← tickRuntimeReserve rtQueued
-        return (rtReserved, jsonResp 202 (.obj #[("job_id", .str jobId), ("state", .str "queued")]),
+        return (rtReserved, jsonResp 202 (.obj #[
+          ("job_id", .str jobId),
+          ("state", .str "queued"),
+          ("node_boot_epoch", JVal.uint64 l'.nodeBootEpoch)
+        ]),
           preLaunches ++ postLaunches, #[])
   | "GET", ["jobs"] =>
     let lim := (req.query? "limit" >>= String.toNat?).getD 20
@@ -740,6 +779,26 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
           ("state", .str updated.state.asString),
           ("forced", .bool true)
         ]), preLaunches.push forceLaunch, #[])
+  | "POST", ["jobs", jid, "reconcile"] =>
+    let key := (parseUuidCanonical? jid).getD jid
+    let some bodyStr := String.fromUTF8? req.body
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
+    let .ok jv := OrbBin.Json.parse bodyStr
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
+    let some opNat := jv.fieldNat? "op_code"
+      | return (rt, textResp 400 "missing op_code", preLaunches, #[])
+    if opNat > 10 then
+      return (rt, textResp 422 "invalid op_code", preLaunches, #[])
+    let presOp := (jv.fieldStr? "operation_id").getD ""
+    let presBoot := (jv.fieldUInt64? "node_boot_epoch").getD rt.ledger.nodeBootEpoch
+    let nowTs ← nowRfc3339
+    match ← rt.ledger.stepJobClaim key opNat.toUInt8 presOp presBoot nowTs with
+    | .error "not_found" => return (rt, textResp 404 s!"job {key} not found", preLaunches, #[])
+    | .error msg =>
+      let stCode := if msg.startsWith "claim_step_rejected:" then 409 else 503
+      return (rt, textResp stCode msg, preLaunches, #[])
+    | .ok (l', updated) =>
+      return ({ rt with ledger := l' }, jsonResp 200 (updated.toStatusJson none), preLaunches, #[])
   | "POST", ["jobs", jid, "files"] =>
     let key := (parseUuidCanonical? jid).getD jid
     let some rec := rt.ledger.jobs.get? key
@@ -1082,14 +1141,14 @@ def handleRequestConcurrent
           if activeRegularCount rt + rt.shrinkDebt >= rt.cfg.capacityTotal then
             return (Except.error (textResp 429 "node capacity exhausted"), preL)
           set { rt with activeExecMain := rt.activeExecMain + 1 }
-        return (Except.ok (rt.cfg, rt.ledger.sqliteBackend, missionId, command, sideLane), preL)
+        return (Except.ok (rt.cfg, rt.ledger.sqliteBackend, rt.ledger.nodeBootEpoch, missionId, command, sideLane), preL)
     if !preLaunches.isEmpty then
       spawnAsyncLaunches mtx preLaunches
     match prep with
     | .error errResp => return errResp
-    | .ok (cfg, sqliteBackend, missionId, command, sideLane) =>
+    | .ok (cfg, sqliteBackend, nodeBootEpoch, missionId, command, sideLane) =>
       try
-        match ← execClearedLeaseCommand cfg sqliteBackend missionId command with
+        match ← execClearedLeaseCommand cfg sqliteBackend missionId command nodeBootEpoch with
         | .ok outVal => return jsonResp 200 outVal
         | .error fenceErr => return textResp 503 fenceErr
       finally
