@@ -159,7 +159,10 @@ export function LiveProjectsSection(p: {
   const LIVE = new Set(["active", "pending", "queued", "awaiting_user", "resuming", "running", "starting", "blocked", "paused", "waiting_background"]);
   const visibleMissions = (slug: string) => {
     // Pending moves: rows leave their old project and appear in the new one at once.
-    const own = (missions[slug] ?? []).filter(m => !movingOutOf(m.id, slug) && (!m.project || m.project === slug));
+    // The per-project fetch pages history and walks parents. Until it lands,
+    // the conversations already on the activity list are the list.
+    const stored = missions[slug] ?? (p.activityMissions ?? []).filter(m => (m.project ?? "") === slug);
+    const own = stored.filter(m => !movingOutOf(m.id, slug) && (!m.project || m.project === slug));
     const arriving = pendingPlaceMoves().size ? missionsMovedInto(slug, [...Object.values(missions).flat(), ...(p.activityMissions ?? [])]).filter(m => !own.some(o => o.id === m.id)) : [];
     const rows = withMovedMissions(mergeArrivingMissions(own, arriving)).map(withHierarchy);
     const current = currentMission();
@@ -1993,10 +1996,16 @@ export function LiveProjectsSection(p: {
     const next = !expanded[slug];
     setExpanded(slug, next);
     if (next) {
-      loadMissions(slug, { cached: true });
-      loadDir(slug, "");
-      loadController(slug, false);
-      loadCrons(slug);
+      // Paint the known conversations before the paged fetch returns, and
+      // don't wait on that fetch before another project can open.
+      if (missions[slug] === undefined) {
+        const known = (p.activityMissions ?? []).filter(m => (m.project ?? "") === slug);
+        if (known.length) setMissions(slug, known);
+      }
+      void loadMissions(slug, { cached: true });
+      void loadDir(slug, "");
+      void loadController(slug, false);
+      void loadCrons(slug);
     }
   };
 
@@ -2152,6 +2161,22 @@ export function LiveProjectsSection(p: {
     if (!treeId) return;
     const row = findNodeById(treeId, tree());
     if (!row) return;
+    // Project rows are buttons inside the tree. WebKit drops their click after
+    // this pointerdown, so open the project from the pointerup that follows.
+    if (row.kind === "project") {
+      const x = e.clientX, y = e.clientY, slug = row.slug;
+      const up = (ev: PointerEvent) => {
+        window.removeEventListener("pointerup", up, true);
+        window.removeEventListener("pointercancel", up, true);
+        if (ev.button !== 0 || Math.hypot(ev.clientX - x, ev.clientY - y) >= 6) return;
+        entry.dataset.toggled = "1";
+        toggleProject(slug);
+        setTimeout(() => { delete entry.dataset.toggled; }, 0);
+      };
+      window.addEventListener("pointerup", up, true);
+      window.addEventListener("pointercancel", up, true);
+      return;
+    }
     const movable = (row.kind === "mission" && !!row.mission && !deletingIds().has(row.mission.id))
       || (row.kind === "cron" && !row.controller && !!row.job?.id)
       || ((row.kind === "file" || row.kind === "folder") && !!row.path);
@@ -2403,7 +2428,7 @@ export function LiveProjectsSection(p: {
       <SidebarIcon.ChevronRight size={12} class={`history-chevron ${row.expanded ? "open" : ""}`} />
     </button>;
     if (d.kind === "project") return <div class={`row project ${currentMission()?.project === d.slug ? "contains-current" : ""}`} data-drop-project={d.slug} data-drop-folder={d.path ?? ""} onContextMenu={contextMenu}>
-      <button class="row-main" aria-label={d.label} aria-expanded={row.expanded} onPointerEnter={() => warmIntent(d.slug)} onPointerLeave={cancelIntent} onFocus={() => warmIntent(d.slug)} onBlur={cancelIntent} onClick={() => toggleProject(d.slug)}>
+      <button type="button" class="row-main" aria-label={d.label} aria-expanded={row.expanded} onPointerEnter={() => warmIntent(d.slug)} onPointerLeave={cancelIntent} onFocus={() => warmIntent(d.slug)} onBlur={cancelIntent} onClick={e => { const entry = e.currentTarget.closest<HTMLElement>(".tree-entry"); if (entry?.dataset.toggled) { delete entry.dataset.toggled; return; } toggleProject(d.slug); }}>
         <FolderActivityIcon expanded={row.expanded} color={projectColor(d.slug)} count={activity().get(d.slug)?.get(d.path ?? "") ?? 0} scheduled={scheduledActivity().get(d.slug)?.get(d.path ?? "") ?? 0} />
         <span class="row-label">{d.label}</span>
         <Show when={!row.expanded && currentMission()?.project === d.slug}><span class="current-location-label">Open</span></Show>

@@ -1175,9 +1175,9 @@ export default function App() {
   };
 
   return (
-    <div class={`app ${onSettings() ? "settings-view" : ""} ${sidebar() ? "" : "sb-hidden"}`} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
+    <div class={`app ${onSettings() ? "settings-view" : ""} ${sidebar() ? "" : "sb-hidden"}`} data-pane={currentMissionId() ? "mission" : (currentController() || currentProjectFile() || currentProjectSettings()) ? "project" : "page"} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
       <MentionProjectContext.Provider value={()=>openMission()?.project??currentController()?.slug??effectiveNewProject()}>
-      <FilePanelProvider scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }} sidebar={sidebar} onSetSidebar={setSidebar}>
+      <FilePanelProvider missionOpen={currentMissionId()} scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }} sidebar={sidebar} onSetSidebar={setSidebar}>
       <button class="sidebar-backdrop" aria-label="Close sidebar" onClick={() => setSidebar(false)} tabIndex={-1} />
       <aside id="orb-sidebar" class="sidebar">
         <div class="sb-top" data-tauri-drag-region />

@@ -17,10 +17,11 @@ const [entries,publishEntries]=createSignal<QueuedLocalMessage[]>([]);
 // IndexedDB clones every read. Keep unchanged rows stable so the 1s worker
 // heartbeat does not invalidate every mounted conversation and its markdown.
 const optimisticallyRemoved=new Set<string>();
-const setEntries=(rows:QueuedLocalMessage[])=>publishEntries(previous=>mergeById(previous,rows.filter(r=>!optimisticallyRemoved.has(r.id))));
+const asRows=(rows:QueuedLocalMessage[]|undefined|null)=>Array.isArray(rows)?rows:[];
+const setEntries=(rows:QueuedLocalMessage[])=>publishEntries(previous=>mergeById(asRows(previous),asRows(rows).filter(r=>!optimisticallyRemoved.has(r.id))));
 const [accepted,setAccepted]=createSignal<QueuedLocalMessage[]>([]);
-export const queuedLocalMessages=(mission:string)=>entries().filter(row=>row.mission===mission);
-export const acceptedLocalMessages=(mission:string)=>accepted().filter(row=>row.mission===mission);
+export const queuedLocalMessages=(mission:string)=>asRows(entries()).filter(row=>row.mission===mission);
+export const acceptedLocalMessages=(mission:string)=>asRows(accepted()).filter(row=>row.mission===mission);
 export function forgetAcceptedLocalMessages(ids:Set<string>){setAccepted(rows=>rows.some(row=>ids.has(row.id))?rows.filter(row=>!ids.has(row.id)):rows);}
 const storageKey=()=>`followups:${sideQuestionKey('queue')}`;
 const wakeEvent='orb:queue-wake';
@@ -36,7 +37,7 @@ async function forgetMoved(key:string,id:string){
   await saveSideThread(`${key}:recovered:${row.id}:${row.receipt?.run_id??'moved'}`,row);
   await write(key,rows.filter(row=>row.id!==id));
  });
- publishEntries(rows=>rows.filter(r=>r.id!==id));
+ publishEntries(rows=>asRows(rows).filter(r=>r.id!==id));
 }
 /** The agent keeps its session: it is told what happened instead of being handed the request as new work. */
 export const resumedPrompt=(prompt:string,cut:'restart'|'connection'|'background'='restart')=>{
@@ -111,9 +112,9 @@ export async function enqueueLocalMessage(request:StartLocal,text:string,options
  const key=storageKey(),id=options.id??crypto.randomUUID();
  if(!options.delegated&&!options.scheduled){
   if(options.replace){
-   publishEntries(rows=>rows.map(row=>row.id===id&&row.state==='queued'?{...row,text,request:{...request,imagePaths:[...new Set([...(request.imagePaths??[]),...(row.request.imagePaths??[]).filter(path=>text.includes(path))])]},heldAt:undefined}:row));
+   publishEntries(rows=>asRows(rows).map(row=>row.id===id&&row.state==='queued'?{...row,text,request:{...request,imagePaths:[...new Set([...(request.imagePaths??[]),...(row.request.imagePaths??[]).filter(path=>text.includes(path))])]},heldAt:undefined}:row));
   }else{
-   publishEntries(rows=>rows.some(row=>row.id===id)?rows:[...rows.filter(r=>!(r.mission===request.id&&r.state==='error'&&r.interrupted)),{id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true,delegated:options.delegated,scheduled:options.scheduled}]);
+   publishEntries(rows=>{const list=asRows(rows);return list.some(row=>row.id===id)?list:[...list.filter(r=>!(r.mission===request.id&&r.state==='error'&&r.interrupted)),{id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true,delegated:options.delegated,scheduled:options.scheduled}];});
   }
  }
  await locked(key,async()=>{
@@ -198,13 +199,13 @@ export async function removeQueuedMessage(id:string){
  const row=prev.find(r=>r.id===id);
  if(row&&row.state==='queued'&&!row.interrupted){
   optimisticallyRemoved.add(id);
-  publishEntries(rows=>rows.filter(r=>r.id!==id));
+  publishEntries(rows=>asRows(rows).filter(r=>r.id!==id));
  }
  try{
   const removed=await discardQueuedMessage(id);
   if(removed!==undefined)optimisticallyRemoved.delete(id);
  }
- catch(e){optimisticallyRemoved.delete(id);if(row)publishEntries(rows=>rows.some(r=>r.id===id)?rows:mergeById(rows,prev));throw e;}
+ catch(e){optimisticallyRemoved.delete(id);if(row)publishEntries(rows=>{const list=asRows(rows);return list.some(r=>r.id===id)?list:mergeById(list,prev);});throw e;}
 }
 export async function takeQueuedMessage(id:string){
  const text=await discardQueuedMessage(id);
