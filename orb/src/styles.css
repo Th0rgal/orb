@@ -3690,8 +3690,8 @@ select.orb-select-native:disabled { cursor: default; }
   gap: 4px;
 }
 
-/* Bottom notifications (toast.tsx). Window-centered across the full app (including over the sidebar); shared by errors, approvals, and undo. */
-.toaster { position: fixed; left: 50%; transform: translateX(-50%); z-index: 90; display: flex; flex-direction: column; align-items: center; gap: 8px; width: max-content; max-width: min(580px, calc(100vw - 32px)); pointer-events: none; }
+/* Bottom notifications (toast.tsx). Workspace-centered across active panels (excluding the left sidebar); shared by errors, approvals, and undo. */
+.toaster { position: fixed; left: 50%; transform: translateX(-50%); z-index: 90; display: flex; flex-direction: column; align-items: center; gap: 8px; width: max-content; max-width: min(var(--col, 748px), calc(100vw - 32px)); pointer-events: none; }
 .toaster.fit .toast.secret, .toaster.fit .toast.error, .toaster.fit .toast.warning { align-self: stretch; }
 .toast { pointer-events: auto; display: flex; align-items: center; gap: 10px; max-width: 100%; padding: 8px 8px 8px 14px; border-radius: 8px; background: var(--overlay-surface); border: 1px solid var(--overlay-border); box-shadow: var(--shadow-lg); color: var(--fg-2); font-size: 12px; animation: toast-in 140ms ease-out; }
 .toast.error, .toast.warning { align-items: flex-start; padding-top: 10px; padding-bottom: 10px; }
