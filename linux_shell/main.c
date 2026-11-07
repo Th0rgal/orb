@@ -119,7 +119,7 @@ static char *build_init_script(unsigned port, const char *token) {
         "  window.__TAURI_INTERNALS__ = { invoke };\n"
         "  window.__ORB_DESKTOP__ = window.__TAURI__ = { core: { invoke, Channel }, event: { listen },\n"
         "    window: { getCurrentWindow: () => ({\n"
-        "      innerSize: async () => ({ width: window.innerWidth, height: window.innerHeight }),\n"
+        "      innerSize: async () => { const s = window.devicePixelRatio || 1; return { width: Math.round(window.innerWidth * s), height: Math.round(window.innerHeight * s) }; },\n"
         "      scaleFactor: async () => window.devicePixelRatio || 1 }) },\n"
         "    webview: { getCurrentWebview: () => ({ label: 'main' }) } };\n"
         "})();\n";

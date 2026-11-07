@@ -59,7 +59,9 @@ if [[ "$UI_ONLY" == "1" ]]; then
         echo "error: /Applications/Orb.app not found; run './scripts/orb_desktop_dev.sh --bundle --install' once first" >&2
         exit 1
       fi
-      rsync -a --delete "$ROOT_DIR/orb/dist/" "/Applications/Orb.app/Contents/Resources/dist/"
+      # Sync without --delete so an already-running Orb.app never hits 404 on lazy
+      # JS/CSS chunks from its previous bundle while index.html points to the new build.
+      rsync -a "$ROOT_DIR/orb/dist/" "/Applications/Orb.app/Contents/Resources/dist/"
       /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GIT_SHA" "/Applications/Orb.app/Contents/Info.plist" 2>/dev/null || true
       codesign --force --deep --sign - "/Applications/Orb.app" >/dev/null 2>&1 || true
       echo "==> Synced orb/dist into /Applications/Orb.app (CFBundleVersion=$GIT_SHA)"
