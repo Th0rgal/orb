@@ -167,10 +167,11 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -
 }
 /* A faint native wallpaper tint carries across the shell. */
 .titlebar, .main { background: color-mix(in srgb, var(--bg) var(--surface-opacity), transparent); }
-.app.sb-hidden { grid-template-columns: 0 1fr; }
+.app.sb-hidden { grid-template-columns: 0 minmax(0, 1fr); }
 /* Top-level pages (Resources, Inbox, …) have no side question. Drop the
    column the conversation pane would otherwise keep reserved. */
 .app[data-pane="page"] { grid-template-columns: var(--sb-w) minmax(0, 1fr) !important; }
+.app.sb-hidden[data-pane="page"] { grid-template-columns: 0 minmax(0, 1fr) !important; }
 .app[data-pane="page"] > .file-panel,
 .app[data-pane="page"] > .btw-sidebar { display: none !important; }
 .app.sb-hidden .sidebar { display: none; }
@@ -178,7 +179,8 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -
 /* Narrow windows use an overlay drawer controlled by the same sidebar toggle. */
 .sidebar-backdrop { display: none; }
 @media (max-width: 720px) {
-  .app { grid-template-columns: 0 minmax(0, 1fr); }
+  .app,
+  .app[data-pane="page"] { grid-template-columns: 0 minmax(0, 1fr) !important; }
   .app:not(.sb-hidden) .sidebar { display: flex; position: fixed; top: var(--tb-h); bottom: 0; left: 0; width: min(var(--sb-w), 85vw); z-index: 20; background: var(--bg); box-shadow: 8px 0 24px #0003; }
   .sidebar .sb-top, .sidebar .sb-resize { display: none; }
   .app:not(.sb-hidden) .sidebar-backdrop { display: block; position: fixed; inset: var(--tb-h) 0 0; z-index: 19; background: #0005; }
@@ -1894,6 +1896,14 @@ button.fork-trigger:hover { color: var(--fg); }
 /* An empty side/file column (no panel body) must not keep half the window. */
 .app[data-files-open="true"]:not(:has(> .file-panel .btw-panel, > .file-panel .btw-thread, > .file-panel .file-tabs, > .file-panel .file-body)) {
   grid-template-columns: var(--sb-w) minmax(0, 1fr) !important;
+}
+.app.sb-hidden[data-files-open="true"]:not(:has(> .file-panel .btw-panel, > .file-panel .btw-thread, > .file-panel .file-tabs, > .file-panel .file-body)) {
+  grid-template-columns: 0 minmax(0, 1fr) !important;
+}
+@media(max-width:720px) {
+  .app[data-files-open="true"]:not(:has(> .file-panel .btw-panel, > .file-panel .btw-thread, > .file-panel .file-tabs, > .file-panel .file-body)) {
+    grid-template-columns: 0 minmax(0, 1fr) !important;
+  }
 }
 .app[data-files-open="true"]:not(:has(> .file-panel .btw-panel, > .file-panel .btw-thread, > .file-panel .file-tabs, > .file-panel .file-body)) > .file-panel {
   display: none !important;
@@ -4195,8 +4205,9 @@ select.orb-select-native:disabled { cursor: default; }
 /* Side by side (⌘⇧E): the sidebar steps aside and the panel takes the right half at full height. */
 .app[data-files-split="true"], .app.sb-hidden[data-files-split="true"] { grid-template-columns:0 minmax(0,1fr) minmax(0,1fr); }
 .app[data-files-split="true"] > .sidebar, .app[data-files-split="true"] > .sidebar-backdrop, .app[data-files-split="true"] .sb-resize { display:none; }
-.app[data-files-split="true"] .tb-left { position:static; width:auto; margin-left:70px; }
-.app[data-files-split="true"] > .file-panel:not(.maximized) { position:relative; inset:auto; width:auto; box-shadow:none; }
+.app[data-files-split="true"] > .titlebar { grid-column: 1 / 3; padding-left: 14px; background: color-mix(in srgb, var(--bg) var(--surface-opacity), transparent); }
+.app[data-files-split="true"] .tb-left { position:static; width:auto; margin-left:70px; padding-left:0; padding-right:0; border-right:0; height:auto; align-self:center; }
+.app[data-files-split="true"] > .file-panel:not(.maximized) { grid-row:1 / -1; position:relative; inset:auto; width:auto; box-shadow:none; }
 .app[data-files-split="true"] > .file-panel > .file-panel-resize { display:none; }
 @media(max-width:1150px) { .app[data-files-split="true"], .app.sb-hidden[data-files-split="true"] { grid-template-columns:0 minmax(0,1fr) minmax(0,1fr); } }
 
