@@ -59,6 +59,10 @@ describe("poor-network resilience suite", () => {
     expect(classifyClientRequestPriority("GET", "/api/health")).toBe("p0");
     expect(classifyClientRequestPriority("GET", "/api/control/missions")).toBe("p1");
     expect(classifyClientRequestPriority("GET", "/api/software?force=false")).toBe("p2");
+    expect(classifyClientRequestPriority("POST", "/api/control/missions/m1/inbox-digest")).toBe("p1");
+    expect(classifyClientRequestPriority("POST", "/api/file-resources")).toBe("p1");
+    expect(classifyClientRequestPriority("POST", "/api/control/missions/m1/opened")).toBe("p1");
+    expect(classifyClientRequestPriority("PUT", "/api/control/inbox-state/seen/m1")).toBe("p1");
 
     let releaseP0!: () => void;
     const p0Promise = scheduleTransportRequest(
@@ -201,5 +205,33 @@ describe("poor-network resilience suite", () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(await loadPersistedSidebar(scope)).toBeNull();
     expect(await loadPersistedTranscript(scope, `m-${MAX_PERSISTED_TRANSCRIPTS + 3}`)).toBeNull();
+  });
+
+  it("does not poison SRTT with slow compute-bound POST /inbox-digest or /file-resources handlers", async () => {
+    const { transportFetch } = await import("../src/api");
+    setConnection("https://orbcore.thomas.md", "tok-rtt");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        const rttHeader = url.includes("/inbox-digest") || url.includes("/file-resources") ? "18000" : "85";
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            "X-Orb-Transport-Rtt-Ms": rttHeader,
+          },
+        });
+      }),
+    );
+
+    await transportFetch("/api/health");
+    expect(networkHealthSnapshot().srttMs).toBe(85);
+    expect(networkHealthSnapshot().status).toBe("healthy");
+
+    await transportFetch("/api/control/missions/m1/inbox-digest", { method: "POST", body: "{}" });
+    await transportFetch("/api/file-resources", { method: "POST", body: "{}" });
+    expect(networkHealthSnapshot().srttMs).toBe(85);
+    expect(networkHealthSnapshot().status).toBe("healthy");
   });
 });

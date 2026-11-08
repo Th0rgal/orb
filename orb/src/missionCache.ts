@@ -790,17 +790,27 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
     return [];
   });
   const previous = peekReadyTranscript(id) ?? (await hydrateTranscriptFromDisk(id));
-  // Publish persisted messages before requesting activity. A preview is readable,
-  // but has no raw cursor and must never count as a complete replay.
-  let preview:StreamEvent[]=[];
-  if(!previous){
-   const page=await getMissionEventPreview(id).catch(()=>null);
-   check();
-   if(page?.events.length){
-    preview=spineAnswers(page.events.map(storedToStream).filter((e):e is StreamEvent=>e!==null));
-     saveSnapshot(key(id),{activity:page.activity,items:buildTranscript(preview, previewSessionFor(id)),stream:preview,fromLog:true,detailsPending:true});
-   }
-  }
+  // Publish persisted messages before requesting activity, while racing the
+  // full tail page in parallel so cold opens never pay an extra serial RTT.
+  let preview: StreamEvent[] = [];
+  let tailSettled = false;
+  const previewPromise = !previous
+    ? getMissionEventPreview(id)
+        .then(page => {
+          if (!page?.events.length || version !== connectionVersionSafe()) return;
+          preview = spineAnswers(page.events.map(storedToStream).filter((e): e is StreamEvent => e !== null));
+          if (!tailSettled && !peekReadyTranscript(id)) {
+            saveSnapshot(key(id), {
+              activity: page.activity,
+              items: buildTranscript(preview, previewSessionFor(id)),
+              stream: preview,
+              fromLog: true,
+              detailsPending: true,
+            });
+          }
+        })
+        .catch(() => {})
+    : Promise.resolve();
   let stream:StreamEvent[]=[...(previous?.stream??[])];
   let retainedSpine:StreamEvent[]=[];
   let cursor=previous?.cursor, before=previous?.before, hasOlder=previous?.hasOlder;
@@ -808,6 +818,7 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
   let resets=0, forwardPages=0, jumpedForwardGap=false;
   for(;;){
    const page=await getMissionEventPage(id,cursor===undefined?{}:{since:cursor});
+   tailSettled = true;
    check();
    if(page.reset){if(resets++)throw Error('Event history changed repeatedly during recovery.');stream.length=0;retainedSpine=[];cursor=undefined;before=undefined;hasOlder=undefined;spineComplete=undefined;spineBefore=undefined;forwardPages=0;jumpedForwardGap=false;continue;}
    const tailEvents:StreamEvent[]=[];
@@ -862,6 +873,7 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
     jumpedForwardGap=true;
    }
   }
+  await previewPromise;
   stream=mergeStreamBySequence(preview,stream);
   const queued = await queuedPromise;
   check();

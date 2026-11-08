@@ -59,12 +59,18 @@ def classifyProxyRequestPriority (method relPath : String) (explicitPrio? : Opti
   | _ =>
     let m := method.trimAscii.toString.toUpper
     let p := (relPath.splitOn "?").head?.getD relPath
-    if m != "GET" && m != "HEAD" && m != "OPTIONS" then
+    if p == "/api/file-resources" || p.endsWith "/inbox-digest" || p.endsWith "/opened" ||
+       p.startsWith "/api/control/inbox-state/seen/" then
+      1
+    else if m != "GET" && m != "HEAD" && m != "OPTIONS" then
       0
-    else if p.startsWith "/api/auth/" || p.startsWith "/api/bitwarden/" || p.startsWith "/api/privilege-access/" then
+    else if p == "/api/health" || p.startsWith "/api/auth/" || p.startsWith "/api/bitwarden/" || p.startsWith "/api/privilege-access/" then
       0
     else if p.startsWith "/api/software" || p.startsWith "/api/stats" ||
             p.startsWith "/api/antigravity-models" || p.startsWith "/api/crons" ||
+            p.startsWith "/api/library/skill-delivery" || p.startsWith "/api/ai/providers/usage" ||
+            p.startsWith "/api/usage-telemetry" || p.startsWith "/api/remote-nodes" ||
+            p.endsWith "/context/conflicts" ||
             p.endsWith "/files" || (p.splitOn "/files/").length > 1 then
       2
     else
@@ -695,6 +701,26 @@ def recordOriginFailure (stRef : IO.Ref LocaldState) (origin : String) (nowMs : 
     }
     let others := s.originHealth.filter (fun h => h.origin != origin)
     { s with originHealth := others.push updated }
+
+/-- Check whether `orb-locald` may safely exit after its parent shell process (`ORB_PARENT_PID`) exits.
+    Returns `false` while any local-origin run is still active or unsynchronized, or while any
+    interactive tool slot is awaiting an answer, so background local work is never cut short. -/
+def LocaldState.canExitOnOrphanParent (st : LocaldState) : Bool :=
+  !st.localOrigins.any (fun e => e.localRunActive || e.localSyncPending) &&
+  !st.toolHub.runs.any (fun r => r.activeCount > 0)
+
+/-- Decide whether an orphaned `orb-locald` should shut down after `ORB_PARENT_PID` is no longer alive. -/
+def shouldExitForDeadParent (parentPid? : Option Int64) (stRef : IO.Ref LocaldState) : IO Bool := do
+  match parentPid? with
+  | none => return false
+  | some ppid =>
+    if ppid ≤ 1 then return false
+    -- `kill(ppid, 0)` returns `0` when alive or `EPERM` (`1`) if alive under different credentials; `ESRCH` (`3`) means gone.
+    let rc ← OrbBin.PosixExt.killSig ppid 0
+    if rc == 0 || rc == 1 then
+      return false
+    let st ← stRef.get
+    return st.canExitOnOrphanParent
 
 def LocaldState.bindingsSnapshotJson (st : LocaldState) : JVal :=
   .obj #[("revision", JVal.nat st.bindingsRevision), ("bindings", .obj st.bindingsEntries)]

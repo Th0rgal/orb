@@ -91,10 +91,24 @@ private structure OriginPoolEntry where
   shared       : Std.Mutex ConnSharedState
   generation   : Nat
 
+private inductive OriginConnectResult where
+  | ok (entry : OriginPoolEntry)
+  | fallbackH1
+  | failed (msg : String)
+
+private instance : Nonempty OriginConnectResult := ⟨.failed "uninitialized"⟩
+
+private structure InFlightOriginConnect where
+  host       : String
+  port       : UInt16
+  verifyPeer : Bool
+  promise    : IO.Promise OriginConnectResult
+
 private structure PoolMapState where
-  nextGen      : Nat := 1
-  entries      : Array OriginPoolEntry := #[]
-  h1OnlyHosts  : Array (String × UInt16) := #[]
+  nextGen          : Nat := 1
+  entries          : Array OriginPoolEntry := #[]
+  inFlightConnects : Array InFlightOriginConnect := #[]
+  h1OnlyHosts      : Array (String × UInt16) := #[]
 
 /-- Persistent multiplexed HTTP/2 client pool (`Std.Mutex`-guarded). -/
 structure H2ClientPool where
@@ -199,6 +213,7 @@ private partial def runH2OriginWorker
   let mut goingAway := false
   let mut fatalErr? : Option String := none
   let mut lastActivityMs ← IO.monoMsNow
+  let mut lastRxMs : Nat := lastActivityMs
   let mut lastPingSentMs : Nat := lastActivityMs
   let mut inFlightPingToken? : Option (UInt64 × Nat) := none
   let mut firstStreamUsed := false
@@ -309,16 +324,18 @@ private partial def runH2OriginWorker
                       lastActivityMs := nowMs
                       madeWriteProgress := true
 
-      -- 4. Idle timeout (`90 s`) & periodic `PING` health probe (`25 s` when active or warm)
+      -- 4. Idle timeout (`90 s`) & liveness `PING` probe (`3 s` rx-silence + `4 s` ACK deadline when streams wait)
       if fatalErr?.isNone then
         let hasQueued ← entry.shared.atomically do return !(← get).queue.isEmpty
         if streams.isEmpty && !hasQueued && (nowMs - lastActivityMs >= 90000) then
           goingAway := true
         else
           if let some (_, pingSentAt) := inFlightPingToken? then
-            if nowMs - pingSentAt >= 12000 then
+            let pingDeadlineMs : Nat := if !streams.isEmpty then 4000 else 12000
+            if nowMs - pingSentAt >= pingDeadlineMs then
               fatalErr? := some "HTTP/2 keepalive PING timed out"
-          else if (!streams.isEmpty && nowMs - lastPingSentMs >= 15000) ||
+          else if (!streams.isEmpty && nowMs - lastRxMs >= 3000 && nowMs - lastPingSentMs >= 3000) ||
+                  (!streams.isEmpty && nowMs - lastPingSentMs >= 15000) ||
                   (streams.isEmpty && nowMs - lastPingSentMs >= 30000) then
             let tok : UInt64 := nowMs.toUInt64 ^^^ 0x4F52424832504E47
             if !(← writeTlsSessionAll sess (encodePingFrame tok)) then
@@ -327,10 +344,10 @@ private partial def runH2OriginWorker
               lastPingSentMs := nowMs
               inFlightPingToken? := some (tok, nowMs)
 
-      -- 5. Poll inbound TLS records with short timeout (`12 ms` when streams active, `60 ms` when idle)
+      -- 5. Poll inbound TLS records with short timeout (`4 ms` when streams active, `8 ms` when idle)
       if fatalErr?.isNone && !(goingAway && streams.isEmpty) then
         let hasQueuedNow ← entry.shared.atomically do return !(← get).queue.isEmpty
-        let pollMs : UInt32 := if hasQueuedNow then 1 else if !streams.isEmpty then 12 else 60
+        let pollMs : UInt32 := if hasQueuedNow then 1 else if !streams.isEmpty then 4 else 8
         match ← readTlsSessionChunk sess 16384 pollMs with
         | .closeNotify | .tcpEof =>
           fatalErr? := some "HTTP/2 peer closed TLS connection"
@@ -342,6 +359,7 @@ private partial def runH2OriginWorker
           if !c.isEmpty then
             let rxAtMs ← IO.monoMsNow
             lastActivityMs := rxAtMs
+            lastRxMs := rxAtMs
             pendingBuf := pendingBuf ++ c
             let mut scanMore := true
             while scanMore && fatalErr?.isNone do
@@ -612,42 +630,91 @@ private partial def runH2OriginWorker
       else
         sk.promise.resolve (.error errMsg)
 
-/-- Ensure a live HTTP/2 connection worker exists for `(host, port, verifyPeer)`, or report HTTP/1.1 fallback. -/
+/-- Ensure a live HTTP/2 connection worker exists for `(host, port, verifyPeer)`, coalescing
+    concurrent cold-start handshakes onto a single in-flight TLS 1.3 dial per origin, and falling
+    back to HTTP/1.1 strictly when TLS succeeded without negotiating `ALPN "h2"`. -/
 private def getOrConnectOrigin
     (pool : H2ClientPool) (host : String) (port : UInt16)
-    (verifyPeer : Bool) (connectTimeoutMs : UInt32) : IO (Except Bool OriginPoolEntry) := do
-  -- `Except.error true` = known HTTP/1.1-only origin; `Except.error false` = transport/handshake error
-  let existing? ← pool.mu.atomically do
+    (verifyPeer : Bool) (connectTimeoutMs : UInt32) : IO OriginConnectResult := do
+  let freshProm ← IO.Promise.new
+  let (immediate?, waiter?, isLeader) ← pool.mu.atomically do
     let st ← get
     if st.h1OnlyHosts.contains (host, port) then
-      return some (Except.error true)
+      return (some OriginConnectResult.fallbackH1, none, false)
     match st.entries.find? (fun e => e.host == host && e.port == port && e.verifyPeer == verifyPeer) with
-    | some e => return some (Except.ok e)
-    | none => return none
-  if let some res := existing? then
-    return res
-  match ← openH2PersistentSession host port verifyPeer connectTimeoutMs with
-  | .ok sess =>
-    let shared ← Std.Mutex.new {}
-    let (chosen, supersededSess?) ← pool.mu.atomically do
-      let st ← get
-      match st.entries.find? (fun e => e.host == host && e.port == port && e.verifyPeer == verifyPeer) with
-      | some raceWinner =>
-        return (raceWinner, some sess)
+    | some e => return (some (.ok e), none, false)
+    | none =>
+      match st.inFlightConnects.find? (fun c => c.host == host && c.port == port && c.verifyPeer == verifyPeer) with
+      | some inflight => return (none, some inflight.promise, false)
       | none =>
-        let gen := st.nextGen
-        let entry : OriginPoolEntry := {
-          host := host, port := port, verifyPeer := verifyPeer, shared := shared, generation := gen
+        let inflight : InFlightOriginConnect := {
+          host := host, port := port, verifyPeer := verifyPeer, promise := freshProm
         }
-        set { st with nextGen := gen + 1, entries := st.entries.push entry }
-        return (entry, none)
-    if let some dup := supersededSess? then
-      closeTlsSession dup
-    else
-      discard <| IO.asTask (prio := .dedicated) (runH2OriginWorker pool chosen sess)
-    return .ok chosen
-  | .error _ =>
-    return .error false
+        set { st with inFlightConnects := st.inFlightConnects.push inflight }
+        return (none, some freshProm, true)
+  if let some res := immediate? then
+    return res
+  if !isLeader then
+    match waiter? with
+    | some prom => return prom.result!.get
+    | none => return .failed s!"missing in-flight connect promise for {host}:{port}"
+  let mut resolved := false
+  try
+    match ← openH2PersistentSessionOutcome host port verifyPeer connectTimeoutMs with
+    | .ok sess =>
+      let shared ← Std.Mutex.new {}
+      let (chosen, supersededSess?) ← pool.mu.atomically do
+        let st ← get
+        let remInflight := st.inFlightConnects.filter
+          (fun c => !(c.host == host && c.port == port && c.verifyPeer == verifyPeer))
+        match st.entries.find? (fun e => e.host == host && e.port == port && e.verifyPeer == verifyPeer) with
+        | some raceWinner =>
+          set { st with inFlightConnects := remInflight }
+          return (raceWinner, some sess)
+        | none =>
+          let gen := st.nextGen
+          let entry : OriginPoolEntry := {
+            host := host, port := port, verifyPeer := verifyPeer, shared := shared, generation := gen
+          }
+          set { st with nextGen := gen + 1, entries := st.entries.push entry, inFlightConnects := remInflight }
+          return (entry, none)
+      if let some dup := supersededSess? then
+        closeTlsSession dup
+      else
+        discard <| IO.asTask (prio := .dedicated) (runH2OriginWorker pool chosen sess)
+      let out := OriginConnectResult.ok chosen
+      freshProm.resolve out
+      resolved := true
+      return out
+    | .alpnFallbackH1 =>
+      pool.mu.atomically do
+        let st ← get
+        let remInflight := st.inFlightConnects.filter
+          (fun c => !(c.host == host && c.port == port && c.verifyPeer == verifyPeer))
+        let h1' := if st.h1OnlyHosts.contains (host, port) then st.h1OnlyHosts else st.h1OnlyHosts.push (host, port)
+        set { st with inFlightConnects := remInflight, h1OnlyHosts := h1' }
+      let out := OriginConnectResult.fallbackH1
+      freshProm.resolve out
+      resolved := true
+      return out
+    | .transportError msg =>
+      pool.mu.atomically do
+        let st ← get
+        let remInflight := st.inFlightConnects.filter
+          (fun c => !(c.host == host && c.port == port && c.verifyPeer == verifyPeer))
+        set { st with inFlightConnects := remInflight }
+      let out := OriginConnectResult.failed msg
+      freshProm.resolve out
+      resolved := true
+      return out
+  finally
+    if !resolved then
+      pool.mu.atomically do
+        let st ← get
+        let remInflight := st.inFlightConnects.filter
+          (fun c => !(c.host == host && c.port == port && c.verifyPeer == verifyPeer))
+        set { st with inFlightConnects := remInflight }
+      freshProm.resolve (.failed s!"HTTP/2 connect aborted for {host}:{port}")
 
 /-- Pre-warm a persistent TLS 1.3 HTTP/2 connection in the background so the user's first action pays 0 handshake RTTs. -/
 def H2ClientPool.prewarm
@@ -702,26 +769,25 @@ def H2ClientPool.request
       else
         match prom.result!.get with
         | .ok resp rttMs reused =>
-          return .ok { response := resp, rttMs := rttMs, reusedConn := reused }
+          let pingRtt ← entry.shared.atomically do return (← get).lastPingRttMs
+          let effRtt := if pingRtt > 0 && pingRtt < rttMs then pingRtt else rttMs
+          return .ok { response := resp, rttMs := effRtt, reusedConn := reused }
         | .retryUnprocessed reason =>
           if attempt >= 2 then
             return .error reason
         | .error msg =>
           return .error msg
-    | .error isKnownH1 =>
+    | .fallbackH1 =>
       let t0 ← IO.monoMsNow
       match ← httpsRequest method host port path headers body maxRespBytes verifyPeer totalTimeoutMs with
       | .ok resp =>
         let t1 ← IO.monoMsNow
-        if !isKnownH1 then
-          pool.mu.atomically do
-            let st ← get
-            if !st.h1OnlyHosts.contains (host, port) then
-              set { st with h1OnlyHosts := st.h1OnlyHosts.push (host, port) }
         let dur := (Nat.min (Nat.max 1 (t1 - t0)) 60000).toUInt32
         return .ok { response := resp, rttMs := dur, reusedConn := false }
       | .error e =>
         return .error e
+    | .failed errMsg =>
+      return .error errMsg
   return .error s!"HTTP/2 pool exhausted retries for {host}:{port}"
 
 end OrbNetLeaf.H2Pool

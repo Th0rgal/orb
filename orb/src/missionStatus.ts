@@ -130,8 +130,9 @@ export function statusPresentation(status: string): { label: string; tone: Statu
 /* ── One answer to "is this mission working?" ─────────────────────────── */
 
 /** A follow-up the user sent now (or promoted from the queue) that has not
- * started its turn yet. `at` is when it was sent (ms). */
-export type Handoff = { id: string; at: number };
+ * started its turn yet. `at` is when it was sent (ms); `promoted` marks a
+ * message promoted out of the follow-up queue ("Send now"). */
+export type Handoff = { id: string; at: number; promoted?: boolean };
 
 /** After this long the real mission state shows again, whatever happened. */
 export const HANDOFF_TIMEOUT_MS = 30_000;
@@ -145,8 +146,8 @@ const [handoffs, setHandoffs] = createSignal<Readonly<Record<string, Handoff>>>(
 /** Start a handoff for `mission`: every surface (sidebar, Stop button, Working
  * row, banner) keeps reading "working" until the new turn starts, the message
  * is withdrawn, or {@link HANDOFF_TIMEOUT_MS} passes. */
-export function beginHandoff(mission: string, id: string, at = Date.now()): void {
-  setHandoffs(all => ({ ...all, [mission]: { id, at } }));
+export function beginHandoff(mission: string, id: string, at = Date.now(), promoted = false): void {
+  setHandoffs(all => ({ ...all, [mission]: { id, at, ...(promoted ? { promoted: true } : {}) } }));
   setTimeout(() => endHandoff(mission, id), HANDOFF_TIMEOUT_MS + 50);
 }
 

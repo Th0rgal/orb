@@ -48,9 +48,10 @@ test("sidebar rows stay compact with distinct hover/selected and delayed real me
     await route.fulfill({ json });
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "test", exact: true }).click();
-  const live = page.getByRole("button", { name: /Orb DGX launch/ });
-  const archived = page.getByRole("button", { name: "Archived", exact: true });
+  const sb = page.locator("#orb-sidebar");
+  await sb.getByRole("button", { name: "test", exact: true }).click();
+  const live = sb.getByRole("button", { name: /Orb DGX launch/ });
+  const archived = sb.getByRole("button", { name: "Archived", exact: true });
   await expect(live).toBeVisible();
   await expect(archived).toBeVisible();
   expect((await live.boundingBox())!.height).toBe(30);
@@ -72,12 +73,12 @@ test("sidebar rows stay compact with distinct hover/selected and delayed real me
   expect(idleHover).not.toBe(selectedBg);
   await page.locator("#orb-sidebar").screenshot({ path: "test-results/orb-sidebar-hover-selected.png" });
   await expect(archived).toHaveAttribute("aria-expanded", "false");
-  const done = page.getByRole("button", { name: /Finished mission 5/ });
+  const done = sb.getByRole("button", { name: /Finished mission 5/ });
   await expect(done).toBeVisible();
   const livePad = await live.evaluate((el) => getComputedStyle(el).paddingLeft);
   const donePad = await done.evaluate((el) => getComputedStyle(el).paddingLeft);
   expect(parseFloat(donePad)).toBe(parseFloat(livePad));
-  const otherLive = page.getByRole("button", { name: "Live mission 1" });
+  const otherLive = sb.getByRole("button", { name: "Live mission 1" });
   const doneColor = await done.evaluate((el) => getComputedStyle(el).color);
   const liveColor = await otherLive.evaluate((el) => getComputedStyle(el).color);
   expect(doneColor).toBe(liveColor);

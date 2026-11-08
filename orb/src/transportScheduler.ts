@@ -28,6 +28,14 @@ export function classifyClientRequestPriority(
   if (explicit) return explicit;
   const method = (methodRaw ?? "GET").trim().toUpperCase();
   const cleanPath = path.split("?")[0] ?? path;
+  if (
+    cleanPath === "/api/file-resources" ||
+    cleanPath.endsWith("/inbox-digest") ||
+    cleanPath.endsWith("/opened") ||
+    cleanPath.startsWith("/api/control/inbox-state/seen/")
+  ) {
+    return "p1";
+  }
   if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
     return "p0";
   }
@@ -43,6 +51,12 @@ export function classifyClientRequestPriority(
     cleanPath.startsWith("/api/software") ||
     cleanPath.startsWith("/api/stats") ||
     cleanPath.startsWith("/api/antigravity-models") ||
+    cleanPath.startsWith("/api/crons") ||
+    cleanPath.startsWith("/api/library/skill-delivery") ||
+    cleanPath.startsWith("/api/ai/providers/usage") ||
+    cleanPath.startsWith("/api/usage-telemetry") ||
+    cleanPath.startsWith("/api/remote-nodes") ||
+    cleanPath.endsWith("/context/conflicts") ||
     cleanPath.endsWith("/files") ||
     cleanPath.includes("/files/")
   ) {
