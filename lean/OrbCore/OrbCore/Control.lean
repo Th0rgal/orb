@@ -21,6 +21,7 @@ import OrbCore.MemoryAndCloud
 import OrbCore.HarnessSessionRegistry
 import OrbCore.QueueCont
 import OrbCore.R7Core
+import OrbCore.TelemetryAndVoice
 import OrbNetLeaf.TlsHttp
 
 namespace OrbCore.Control
@@ -46,6 +47,7 @@ open OrbCore.MemoryAndCloud
 open OrbCore.HarnessSessionRegistry
 open OrbCore.QueueCont
 open OrbCore.R7Core
+open OrbCore.TelemetryAndVoice
 open OrbNetLeaf.TlsHttp
 
 /-- Core runtime configuration parsed from environment variables (`HOST`, `PORT`, `WORKING_DIR`,
@@ -86,6 +88,9 @@ structure CoreAppState where
   bunkerStateRef? : Option (IO.Ref UInt8) := none
   managedStore?   : Option ManagedComputeStore := none
   bootstrapAdminId : String := ""
+  telemetrySink?  : Option TelemetrySink := none
+  voiceSlots?     : Option VoiceRelaySlots := none
+  voiceEndpointOverride? : Option String := none
 
 /-- Authenticated multi-user request principal resolved by `resolveCallerPrincipal?`. -/
 structure CallerPrincipal where
@@ -3160,6 +3165,10 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       discard <| execParamQuery st.store.missionsDb
         "INSERT INTO mission_events(mission_id,seq,event_type,payload,created_at) VALUES(?1,?2,'user_message',?3,?4);"
         #[mid, s!"{seq}", evPayload, s!"{nowEpochSec}"]
+      if let some tSink := st.telemetrySink? then
+        let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
+        let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
+        observeControlUserPrompt tSink (caller.role == "admin") actorUid? actorUname? mid content nowEpochSec
     let deliveredField :=
       if selectedSkills.isEmpty then ""
       else s!",\"delivered_prompt\":{jsonEscape (withDirective content selectedSkills)}"
@@ -3625,6 +3634,82 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       let code := if rcpt.verdict == "admitted" || rcpt.verdict == "dry_run_admitted" then 200 else 409
       return .ok (mkJson code s!"\{\"unit\":{jsonEscape rcpt.unitName},\"verdict\":{jsonEscape rcpt.verdict},\"verdict_code\":{rcpt.verdictCode},\"dry_run\":{if rcpt.dryRun then "true" else "false"}}")
 
+  -- Multi-User Opt-In Usage Telemetry (`/api/usage-telemetry`, `/api/usage-telemetry/config`, `/api/usage-telemetry/events`)
+  if cleanPath == "/api/usage-telemetry" || cleanPath.startsWith "/api/usage-telemetry/" then
+    let tSink ← match st.telemetrySink? with
+      | some s => pure s
+      | none => newTelemetrySink
+    if cleanPath == "/api/usage-telemetry" && req.method == "GET" then
+      let s ← loadTelemetrySettings st.store.rootDir
+      let body ← renderTelemetryStatusJson s tSink
+      return .ok (mkJson 200 body)
+    else if cleanPath == "/api/usage-telemetry/config" && req.method == "PUT" then
+      if !caller.isLegacyUnscoped then
+        if let some (cCode, cBody) := requireAdminPrincipal caller then
+          return .ok (mkJson cCode cBody)
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let mut s ← loadTelemetrySettings st.store.rootDir
+      if let some en := jv.fieldBool? "enabled" then
+        s := { s with enabled := en }
+      if let some pr := jv.fieldBool? "prompts_enabled" then
+        s := { s with promptsEnabled := pr }
+      if let some rawUrl := jv.fieldStr? "hub_url" then
+        let u := stripTrailingSlash rawUrl.trimAscii.toString
+        if !u.isEmpty && !hubUrlAllowed u then
+          return .ok (mkJson 400 "{\"error\":\"hub_url must be https (http only on loopback)\"}")
+        let nextUrl := if u.isEmpty then defaultHubUrl else u
+        if nextUrl != s.hubUrl && (jv.fieldStr? "token").isNone then
+          s := { s with encryptedToken := none }
+        s := { s with hubUrl := nextUrl }
+      if let some rawNs := jv.fieldStr? "namespace" then
+        let ns := rawNs.trimAscii.toString
+        if !ns.isEmpty && !validTelemetryNamespace ns then
+          return .ok (mkJson 400 "{\"error\":\"namespace must be [a-z0-9_-]{1,40} and not community\"}")
+        s := { s with ns := if ns.isEmpty then none else some ns }
+      if let some rawTok := jv.fieldStr? "token" then
+        let tok := rawTok.trimAscii.toString
+        if tok.isEmpty then
+          s := { s with encryptedToken := none }
+        else
+          match ← encryptTelemetryToken (effectiveJwtSecret st.cfg) st.store.rootDir tok with
+          | .error _ => return .ok (mkJson 500 "{\"error\":\"Failed to encrypt telemetry token\"}")
+          | .ok enc => s := { s with encryptedToken := some enc }
+      if s.promptsEnabled && !s.enabled then
+        s := { s with promptsEnabled := false }
+      if let .error e ← saveTelemetrySettings st.store.rootDir s then
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      let tgt? ← resolveHubTarget (effectiveJwtSecret st.cfg) st.store.rootDir s
+      syncSinkTarget tSink tgt?
+      let body ← renderTelemetryStatusJson s tSink
+      return .ok (mkJson 200 body)
+    else if cleanPath == "/api/usage-telemetry/events" && req.method == "POST" then
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let some evArr := jv.fieldArr? "events"
+        | return .ok (mkJson 400 "{\"error\":\"missing_events_array\"}")
+      let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
+      let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
+      let (enabled, accepted) ← acceptClientTelemetryBatch tSink evArr actorUid? actorUname? nowEpochSec
+      if enabled && accepted > 0 then
+        let qLen ← tSink.mu.atomically do return (← get).events.size
+        if qLen ≥ telemetryBatchSize then
+          discard <| IO.asTask (prio := .dedicated) (do discard <| flushTelemetryOnce tSink nowEpochSec)
+      return .ok (mkJson 202 s!"\{\"enabled\":{if enabled then "true" else "false"},\"accepted\":{accepted}}")
+
+  -- Authenticated Speaker-Attributed Voice Transcription Relay (`POST /api/voice/transcribe?language=<lang>`)
+  if cleanPath == "/api/voice/transcribe" && req.method == "POST" then
+    let qParams := parseQueryParams rawTarget
+    let lang := ((qParams.find? (fun p => p.1 == "language")).map Prod.snd |>.getD "").trimAscii.toString
+    if lang.isEmpty then
+      return .ok (mkJson 400 "{\"error\":\"Missing language query parameter.\"}")
+    let vSlots ← match st.voiceSlots? with
+      | some vs => pure vs
+      | none => newVoiceRelaySlots
+    let (vCode, vBody) ← transcribeVoiceRelay
+      vSlots lang req.bodySlice.toByteArray caller.userId caller.username caller.isLegacyUnscoped st.voiceEndpointOverride?
+    return .ok (mkJson vCode vBody)
+
   return .ok (mkJson 404 s!"\{\"error\":\"not_found\",\"path\":{jsonEscape cleanPath}}")
 
 /-- Bounded RFC 6455 WebSocket session loop after `101 Switching Protocols`:
@@ -3749,6 +3834,11 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let memTokenCache ← newMemoryTokenCache
     let cloudWakeup ← newCloudWorkerWakeup
     let bunkerRef ← IO.mkRef (← readPersistedBunkerState store)
+    let telemetrySink ← newTelemetrySink
+    let initTelSettings ← loadTelemetrySettings store.rootDir
+    let initTelTarget? ← resolveHubTarget (effectiveJwtSecret cfg) store.rootDir initTelSettings
+    syncSinkTarget telemetrySink initTelTarget?
+    let voiceSlots ← newVoiceRelaySlots
     let appState : CoreAppState := {
       cfg := cfg
       store := store
@@ -3767,6 +3857,8 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       bunkerStateRef? := some bunkerRef
       managedStore? := some managedStore
       bootstrapAdminId := bootAdminId
+      telemetrySink? := some telemetrySink
+      voiceSlots? := some voiceSlots
     }
     let bindHost := if cfg.host == "localhost" then "127.0.0.1" else cfg.host
     let .ok (listenFd, boundPort) ← tcpListen bindHost cfg.port 128
@@ -3776,10 +3868,16 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to bind {bindHost}:{cfg.port}"
         return 1
     IO.eprintln s!"[sandboxed-sh] listening on http://{bindHost}:{boundPort} (dev_mode={cfg.devMode})"
+    let mut lastTelFlushSec : UInt64 := nowBootSec
     let mut served : Nat := 0
     while (match maxRequests? with | some lim => decide (served < lim) | none => true) do
       match ← tcpAcceptPoll listenFd 250 with
-      | .error _ => pure ()
+      | .error _ =>
+        if maxRequests?.isNone then
+          let curSec ← coreEpochSec
+          if curSec ≥ lastTelFlushSec + 30 then
+            lastTelFlushSec := curSec
+            discard <| IO.asTask (prio := .dedicated) (do discard <| flushTelemetryOnce telemetrySink curSec)
       | .ok cfd =>
         if maxRequests?.isSome then
           handleClientConn appState cfd

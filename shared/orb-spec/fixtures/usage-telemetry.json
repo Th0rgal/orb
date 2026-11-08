@@ -88,7 +88,9 @@
     "event_id": "ident",
     "ts": "ident",
     "client": "client",
-    "app_version": "ident"
+    "app_version": "ident",
+    "user_id": "ident",
+    "username": "ident"
   },
   "ident_pattern": "^[A-Za-z0-9_.:/+@-]{1,120}$",
   "sanitize": [
