@@ -31,25 +31,30 @@ class MultiUserPrivdTests(unittest.TestCase):
             pcm.orb_privd_user_exec_step(1, 1, 0, 0, 1, 2005, 2005, 1, 1, 1),
             1,
         )
+        # Invalid caller_role (> 1) rejected
+        self.assertEqual(
+            pcm.orb_privd_user_exec_step(1, 1, 0, 2, 1, 2005, 2005, 1, 1, 1),
+            3 << 8,
+        )
         # Colocated admin-only node denies member
         self.assertEqual(
             pcm.orb_privd_user_exec_step(1, 1, 1, 0, 1, 2005, 2005, 1, 1, 1),
-            3 << 1,
+            4 << 8,
         )
         # UID < 2000 rejected
         self.assertEqual(
             pcm.orb_privd_user_exec_step(1, 1, 0, 0, 1, 1000, 2005, 1, 1, 1),
-            5 << 1,
+            6 << 8,
         )
         # Privileged supplementary group rejected
         self.assertEqual(
             pcm.orb_privd_user_exec_step(1, 1, 0, 0, 1, 2005, 2005, 0, 1, 1),
-            6 << 1,
+            7 << 8,
         )
         # Symlinked home rejected
         self.assertEqual(
             pcm.orb_privd_user_exec_step(1, 1, 0, 0, 1, 2005, 2005, 1, 0, 1),
-            7 << 1,
+            8 << 8,
         )
 
     def test_nonroot_ensure_spawn_control_and_fs_confinement(self) -> None:

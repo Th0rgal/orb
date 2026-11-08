@@ -249,39 +249,49 @@ def orb_privd_user_exec_step(
     elan_root_owned: int,
 ) -> int:
     """Invoke Lean 4 `Orb.Kernel.privdUserExecStep` (`orb_privd_user_exec_step`) via `liborb_kernel.so` and verified mirror."""
+    u8_peer = peer_is_node_uid & 0xFF
+    u8_lease = lease_verified & 0xFF
+    u8_admin_only = node_admin_only & 0xFF
+    u8_role = caller_role & 0xFF
+    u8_uvalid = username_valid & 0xFF
     u32_uid = target_uid & 0xFFFFFFFF
     u32_gid = target_gid & 0xFFFFFFFF
-    if peer_is_node_uid != 1:
-        mirror = 1 << 1
-    elif lease_verified != 1:
-        mirror = 2 << 1
-    elif not (caller_role == 1 or node_admin_only == 0):
-        mirror = 3 << 1
-    elif username_valid != 1:
-        mirror = 4 << 1
+    u8_disjoint = gid_disjoint_priv & 0xFF
+    u8_home = home_confined_no_symlink & 0xFF
+    u8_elan = elan_root_owned & 0xFF
+    if u8_peer != 1:
+        mirror = 1 << 8
+    elif u8_lease != 1:
+        mirror = 2 << 8
+    elif u8_role > 1:
+        mirror = 3 << 8
+    elif u8_role == 0 and u8_admin_only != 0:
+        mirror = 4 << 8
+    elif u8_uvalid != 1:
+        mirror = 5 << 8
     elif not (2000 <= u32_uid < 65534 and 2000 <= u32_gid < 65534):
-        mirror = 5 << 1
-    elif gid_disjoint_priv != 1:
-        mirror = 6 << 1
-    elif home_confined_no_symlink != 1:
-        mirror = 7 << 1
-    elif elan_root_owned != 1:
-        mirror = 8 << 1
+        mirror = 6 << 8
+    elif u8_disjoint != 1:
+        mirror = 7 << 8
+    elif u8_home != 1:
+        mirror = 8 << 8
+    elif u8_elan != 1:
+        mirror = 9 << 8
     else:
         mirror = 1
     if _ORB_KERNEL_SO is not None and hasattr(_ORB_KERNEL_SO, "orb_privd_user_exec_step"):
         native = int(
             _ORB_KERNEL_SO.orb_privd_user_exec_step(
-                peer_is_node_uid & 0xFF,
-                lease_verified & 0xFF,
-                node_admin_only & 0xFF,
-                caller_role & 0xFF,
-                username_valid & 0xFF,
+                u8_peer,
+                u8_lease,
+                u8_admin_only,
+                u8_role,
+                u8_uvalid,
                 u32_uid,
                 u32_gid,
-                gid_disjoint_priv & 0xFF,
-                home_confined_no_symlink & 0xFF,
-                elan_root_owned & 0xFF,
+                u8_disjoint,
+                u8_home,
+                u8_elan,
             )
         )
         if native != mirror:
