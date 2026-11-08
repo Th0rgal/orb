@@ -3121,6 +3121,153 @@ private def runR4dProxyAuthTests (prodValid : CoreConfig) : IO UInt32 := do
   IO.FS.removeDirAll r4dRoot
   return 0
 
+private def runWarmClaudeControlAndCheckpointsCoreTests (prodValid : CoreConfig) : IO UInt32 := do
+  let ts ← IO.monoNanosNow
+  let rawRoot := s!"/tmp/orb-core-warm-claude-{ts}"
+  IO.FS.createDirAll rawRoot
+  let realRootFp ← IO.FS.realPath (System.FilePath.mk rawRoot)
+  let root := realRootFp.toString
+  let repoFp := realRootFp / "repo"
+  IO.FS.createDirAll repoFp
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", repoFp.toString, "init", "-b", "main"] }
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", repoFp.toString, "config", "user.email", "core@orb.local"] }
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", repoFp.toString, "config", "user.name", "Orb Core"] }
+  IO.FS.writeFile (repoFp / "tracked.txt") "initial\n"
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", repoFp.toString, "add", "tracked.txt"] }
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", repoFp.toString, "commit", "-m", "init"] }
+
+  let mockClaudeFp := realRootFp / "mock-claude-core.py"
+  IO.FS.writeFile mockClaudeFp (
+    "#!/usr/bin/env python3\n" ++
+    "import sys, json\n" ++
+    "for raw in sys.stdin:\n" ++
+    "    line = raw.strip()\n" ++
+    "    if not line: continue\n" ++
+    "    msg = json.loads(line)\n" ++
+    "    if msg.get('type') == 'control_request' and msg.get('request', {}).get('subtype') == 'initialize':\n" ++
+    "        print(json.dumps({'type':'system','subtype':'init','session_id':'core-sid-1'}), flush=True)\n" ++
+    "    elif msg.get('type') == 'user':\n" ++
+    "        print(json.dumps({'type':'control_request','request_id':'core-perm-1','request':{'subtype':'can_use_tool','tool_name':'Bash','input':{'command':'ls'}}}), flush=True)\n" ++
+    "    elif msg.get('type') == 'control_response':\n" ++
+    "        with open('tracked.txt', 'w') as f: f.write('updated-by-core\\n')\n" ++
+    "        print(json.dumps({'type':'assistant','message':{'content':[{'type':'text','text':'Core warm reply'}]}}), flush=True)\n" ++
+    "        print(json.dumps({'type':'result','num_turns':1,'is_error':False,'result':'Core warm reply','session_id':'core-sid-1'}), flush=True)\n"
+  )
+  let _ ← OrbBin.PosixExt.chmod mockClaudeFp.toString 0o755
+
+  let .ok store ← openCoreStore s!"{root}/store"
+    | do IO.FS.removeDirAll root; IO.eprintln "[orb-core-test] FAIL: openCoreStore for warm claude test failed"; return 1
+  let managedRef ← IO.mkRef ({ enabled := true } : ManagedFleetState)
+  let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
+  let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
+  let seqRef ← IO.mkRef (1 : UInt64)
+  let warmMgr ← OrbBin.ClaudeControl.newWarmHarnessManager
+  let pendingRef ← IO.mkRef (#[] : Array (String × String))
+  let app : CoreAppState := {
+    cfg := { prodValid with workingDir := root }
+    store := store
+    searchIdx? := none
+    managedRef := managedRef
+    chainsRef := chainsRef
+    proxyCooldownsRef := cooldownsRef
+    seqRef := seqRef
+    warmMgr? := some warmMgr
+    warmHarnessBinOverride? := some mockClaudeFp.toString
+    pendingControlCallsRef? := some pendingRef
+  }
+  let nowSec ← coreEpochSec
+  let jwt := mintSessionToken prodValid.jwtSecret (nowSec + 3600)
+  let dispatch (raw : String) : IO (Option CoreHttpResponse) := do
+    match parseRequest raw.toUTF8 none with
+    | .ok req =>
+      match ← dispatchCoreRequest app req nowSec with
+      | .ok resp => return some resp
+      | .error _ => return none
+    | .error _ => return none
+
+  let createBody := OrbBin.Json.renderCompact (.obj #[
+    ("id", .str "m-warm-core-1"),
+    ("title", .str "Warm Claude Core Test"),
+    ("backend", .str "claudecode"),
+    ("working_directory", .str repoFp.toString),
+    ("prompt", .str "Update tracked.txt"),
+    ("spawn_harness", .bool true),
+    ("permission_mode", .str "supervised")
+  ])
+  let createResp? ← dispatch s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {createBody.utf8ByteSize}\r\n\r\n{createBody}"
+  if createResp?.map (·.status) != some 201 then
+    OrbBin.ClaudeControl.stopHarnessRun warmMgr "m-warm-core-1"
+    closeCoreStore store
+    IO.FS.removeDirAll root
+    IO.eprintln s!"[orb-core-test] FAIL: warm claude mission create failed: {createResp?.map (·.status)}"
+    return 1
+
+  let mut waitedPerm := 0
+  let mut sawNativeReq := false
+  let mut hasEventsHdr := false
+  while waitedPerm < 4000 && !sawNativeReq do
+    if let some evResp ← dispatch s!"GET /api/control/missions/m-warm-core-1/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n" then
+      hasEventsHdr := evResp.extraHdrs.any (fun p => p.1 == "X-Orb-Events-Protocol" && p.2 == "1")
+      let bodyStr := String.fromUTF8? evResp.body |>.getD ""
+      if (bodyStr.splitOn "core-perm-1").length >= 2 && (bodyStr.splitOn "ui_native_request").length >= 2 then
+        sawNativeReq := true
+    if !sawNativeReq then
+      IO.sleep 25
+      waitedPerm := waitedPerm + 25
+
+  let toolResBody := "{\"tool_call_id\":\"core-perm-1\",\"name\":\"ui_native_request\",\"result\":{\"action\":\"accept_session\"}}"
+  let toolResResp? ← dispatch s!"POST /api/control/tool_result HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {toolResBody.utf8ByteSize}\r\n\r\n{toolResBody}"
+  let toolResStr := (toolResResp?.map (·.body)).bind String.fromUTF8? |>.getD ""
+
+  let mut waitedDone := 0
+  let mut sawCompleted := false
+  while waitedDone < 4000 && !sawCompleted do
+    if let some evResp ← dispatch s!"GET /api/control/missions/m-warm-core-1/events?since_seq=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n" then
+      let bodyStr := String.fromUTF8? evResp.body |>.getD ""
+      if (bodyStr.splitOn "Core warm reply").length >= 2 && (bodyStr.splitOn "mission_status_changed").length >= 2 then
+        sawCompleted := true
+    if !sawCompleted then
+      IO.sleep 25
+      waitedDone := waitedDone + 25
+
+  let permModeBody := "{\"mode\":\"acceptEdits\"}"
+  let permModeResp? ← dispatch s!"POST /api/control/missions/m-warm-core-1/permission-mode HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {permModeBody.utf8ByteSize}\r\n\r\n{permModeBody}"
+  let tcResp? ← dispatch s!"GET /api/control/missions/m-warm-core-1/tool-calls/core-perm-1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+  let cpListResp? ← dispatch s!"GET /api/control/missions/m-warm-core-1/checkpoints HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+  let cpDiffResp? ← dispatch s!"GET /api/control/missions/m-warm-core-1/checkpoints/diff HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+  let wtGetResp? ← dispatch s!"GET /api/control/missions/m-warm-core-1/worktree?prefer_worktree=true HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+
+  let cpListStr := (cpListResp?.map (·.body)).bind String.fromUTF8? |>.getD "{}"
+  let firstRef :=
+    match OrbBin.Json.parse cpListStr with
+    | .ok jv =>
+      let cps := (jv.fieldArr? "checkpoints").getD #[]
+      (cps[0]?.bind (·.fieldStr? "ref")).getD ""
+    | _ => ""
+  let restoreBody := OrbBin.Json.renderCompact (.obj #[("ref", .str firstRef)])
+  let cpRestoreResp? ← dispatch s!"POST /api/control/missions/m-warm-core-1/checkpoints/restore HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {restoreBody.utf8ByteSize}\r\n\r\n{restoreBody}"
+  let restoredContent ← IO.FS.readFile (repoFp / "tracked.txt")
+
+  OrbBin.ClaudeControl.stopHarnessRun warmMgr "m-warm-core-1"
+  closeCoreStore store
+  IO.FS.removeDirAll root
+
+  let cpDiffStr := (cpDiffResp?.map (·.body)).bind String.fromUTF8? |>.getD "{}"
+  let wtGetStr := (wtGetResp?.map (·.body)).bind String.fromUTF8? |>.getD "{}"
+  let tcStr := (tcResp?.map (·.body)).bind String.fromUTF8? |>.getD "{}"
+  if !hasEventsHdr || !sawNativeReq ||
+     toolResResp?.map (·.status) != some 200 || (toolResStr.splitOn "\"delivered\":true").length != 2 ||
+     !sawCompleted ||
+     permModeResp?.map (·.status) != some 200 ||
+     tcResp?.map (·.status) != some 200 || (tcStr.splitOn "core-perm-1").length < 2 ||
+     cpListResp?.map (·.status) != some 200 || firstRef.isEmpty ||
+     cpDiffResp?.map (·.status) != some 200 || (cpDiffStr.splitOn "tracked.txt").length < 2 ||
+     wtGetResp?.map (·.status) != some 200 || (wtGetStr.splitOn "\"decision_word\":513").length < 2 ||
+     cpRestoreResp?.map (·.status) != some 200 || restoredContent != "initial\n" then
+    IO.eprintln s!"[orb-core-test] FAIL: warm claude Core control/checkpoints/worktree mismatch: hdr={hasEventsHdr} req={sawNativeReq} toolRes={toolResStr} done={sawCompleted} ref={firstRef} restored={repr restoredContent}"
+    return 1
+  return 0
+
 set_option maxRecDepth 4000 in
 private def runR4cHarnessSessionTests (store : CoreStore) (tmpRoot : String) : IO UInt32 := do
   -- 1. SM-15: Generation-owned `HarnessSessionHandle` & Registry + warm-turn latch reset + stale-generation fail-closed
@@ -5454,8 +5601,9 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runR5bManagedStoreTests prodValid) != 0 then return 1
   if (← runR7CoreTests prodValid) != 0 then return 1
   if (← runMultiUserCoreTests prodValid) != 0 then return 1
+  if (← runWarmClaudeControlAndCheckpointsCoreTests prodValid) != 0 then return 1
 
-  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":9,\"host_tests\":101}"
+  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":10,\"host_tests\":101}"
   return 0
 
 end OrbCore.SelfTest

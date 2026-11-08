@@ -12,7 +12,7 @@ import { rememberClientRunReceipt, type ClientRunReceipt } from "./clientRuns";
 import { bufferedOutput, type OutputEvent } from "./localStream";
 import { createSignal } from "solid-js";
 import { scanMentions, type AttachChip } from "./attach";
-import { getApiUrl, getJwt, isConnected, listProjectFiles, readProjectFile, getProjectController } from "./api";
+import { api, getApiUrl, getJwt, isConnected, listProjectFiles, readProjectFile, getProjectController } from "./api";
 import { ApprovalCancelled, signedApi } from "./deviceApproval";
 import { classifyConflictError } from "./conflictClassification";
 
@@ -45,6 +45,9 @@ export interface ScanRow {
   plan_supported?: boolean;
 }
 
+export type ClaudePermissionMode = "supervised" | "acceptEdits" | "auto" | "bypassPermissions";
+export type WorktreeLaunchMode = "local" | "worktree" | "auto";
+
 export interface LocalBinding {
   harness: string;
   bin: string;
@@ -54,6 +57,8 @@ export interface LocalBinding {
   sessionId?: string;
   transferId?: string;
   planMode?: boolean;
+  permissionMode?: ClaudePermissionMode;
+  worktreeMode?: WorktreeLaunchMode;
 }
 
 export interface LocalFile {
@@ -426,6 +431,8 @@ export interface StartLocal {
   effort?: string;
   sessionId?: string;
   sharedCwdWith?: string;
+  permissionMode?: ClaudePermissionMode;
+  worktreeMode?: WorktreeLaunchMode;
 }
 
 const nativeRecoveries = new Map<string, Promise<unknown>>();
@@ -454,7 +461,14 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
     }
     const launch = invoke("local_run_launch", {
       connection: { api_url: getApiUrl(), token: getJwt() },
-      request: { ...req, session_id: req.sessionId, image_paths: req.imagePaths ?? [], shared_cwd_with: req.sharedCwdWith },
+      request: {
+        ...req,
+        session_id: req.sessionId,
+        image_paths: req.imagePaths ?? [],
+        shared_cwd_with: req.sharedCwdWith,
+        ...(req.permissionMode ? { permission_mode: req.permissionMode } : {}),
+        ...(req.worktreeMode ? { worktree_mode: req.worktreeMode } : {}),
+      },
     });
     pendingLaunches.set(req.id,launch);
     const receipt = await launch as ClientRunReceipt;
@@ -609,7 +623,7 @@ export async function startLocalOrigin(request: Omit<StartLocal,"id">, draft: {k
  if(request.harness==='codex'){await Promise.all([requireCyberSupport(),requireLocalCyber(invoke)]);}
  await import("./localWakeups").then(m=>m.replayLocalWakeupStops());
  let mission:import("./api").Mission;
- try{mission=await invoke("local_origin_launch",{request:{...request,id:"",session_id:null,image_paths:request.imagePaths??[]},draft,connection:{api_url:getApiUrl(),token:getJwt()}}) as import("./api").Mission;}
+ try{mission=await invoke("local_origin_launch",{request:{...request,id:"",session_id:null,image_paths:request.imagePaths??[],...(request.permissionMode?{permission_mode:request.permissionMode}:{}),...(request.worktreeMode?{worktree_mode:request.worktreeMode}:{})},draft,connection:{api_url:getApiUrl(),token:getJwt()}}) as import("./api").Mission;}
  catch(error){if(/unknown command|command .*not found/i.test(String(error)))throw new Error("Update Orb desktop to enable local launches with offline support. Your draft is kept.");throw error;}
  // Native launch owns the durable binding, including mode and resumed session.
  // Refresh it instead of replacing it after the first turn or an idempotent replay.
@@ -919,4 +933,149 @@ export async function localCodexSpeedOptions(model: string): Promise<{tiers: {id
  const invoke=desktopInvoke(); if(!invoke)throw new Error('Open Orb desktop to check the local Codex subscription.');
  const cli=await localAgentForLaunch('codex'); if(!cli?.path)throw new Error('Codex is not installed on this computer.');
  return await invoke('local_codex_speed_options',{bin:cli.path,model}) as {tiers: {id: import('./api').CodexServiceTier; available: boolean; reason?: string}[]};
+}
+
+export interface CheckpointMeta {
+  turn: number;
+  ref: string;
+  commit: string;
+  head_commit: string;
+  created_at: number;
+}
+
+export interface DiffFileEntry {
+  status: string;
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+export interface CheckpointDiffReport {
+  from_ref: string;
+  to_ref: string;
+  files: DiffFileEntry[];
+  total_additions: number;
+  total_deletions: number;
+  raw_diff: string;
+  budget_exceeded: boolean;
+  filtered_by_author: boolean;
+}
+
+export interface WorktreeStatus {
+  is_git_repo: boolean;
+  repo_root: string;
+  current_branch: string;
+  is_worktree: boolean;
+  is_dirty: boolean;
+  repo_busy: boolean;
+  decision_word: number;
+}
+
+function normalizeCheckpointMeta(raw: Record<string, unknown>): CheckpointMeta {
+  return {
+    turn: typeof raw.turn === "number" ? raw.turn : typeof raw.turn_index === "number" ? raw.turn_index : 0,
+    ref: typeof raw.ref === "string" ? raw.ref : "",
+    commit:
+      typeof raw.commit === "string" && raw.commit
+        ? raw.commit
+        : typeof raw.commit_sha === "string"
+          ? raw.commit_sha
+          : typeof raw.oid === "string"
+            ? raw.oid
+            : "",
+    head_commit:
+      typeof raw.head_commit === "string" && raw.head_commit
+        ? raw.head_commit
+        : typeof raw.head_sha === "string"
+          ? raw.head_sha
+          : "",
+    created_at: typeof raw.created_at === "number" ? raw.created_at : 0,
+  };
+}
+
+export async function listMissionCheckpoints(missionId: string, cwd?: string): Promise<CheckpointMeta[]> {
+  const invoke = desktopInvoke();
+  const binding = localBinding(missionId);
+  const localDir = binding?.cwd || cwd?.trim();
+  if (invoke && (binding || localDir)) {
+    const res = await invoke("local_checkpoints_list", { cwd: localDir, mission_id: missionId }) as
+      | { checkpoints?: Record<string, unknown>[] }
+      | Record<string, unknown>[];
+    const items = Array.isArray(res) ? res : Array.isArray(res?.checkpoints) ? res.checkpoints : [];
+    return items.map(normalizeCheckpointMeta).filter((cp) => Boolean(cp.ref));
+  }
+  const res = await api<{ checkpoints?: Record<string, unknown>[] } | Record<string, unknown>[]>(
+    `/api/control/missions/${encodeURIComponent(missionId)}/checkpoints`,
+  );
+  const items = Array.isArray(res) ? res : Array.isArray(res?.checkpoints) ? res.checkpoints : [];
+  return items.map(normalizeCheckpointMeta).filter((cp) => Boolean(cp.ref));
+}
+
+export async function diffMissionCheckpoints(
+  missionId: string,
+  opts: { cwd?: string; fromRef?: string; toRef?: string; sinceEpoch?: number } = {},
+): Promise<CheckpointDiffReport> {
+  const invoke = desktopInvoke();
+  const binding = localBinding(missionId);
+  const localDir = binding?.cwd || opts.cwd?.trim();
+  if (invoke && (binding || localDir)) {
+    return await invoke("local_checkpoint_diff", {
+      cwd: localDir,
+      mission_id: missionId,
+      from_ref: opts.fromRef ?? "HEAD",
+      to_ref: opts.toRef ?? "",
+      since_epoch: opts.sinceEpoch ?? 0,
+    }) as CheckpointDiffReport;
+  }
+  const params = new URLSearchParams();
+  if (opts.fromRef) params.set("from_ref", opts.fromRef);
+  if (opts.toRef !== undefined) params.set("to_ref", opts.toRef);
+  if (opts.sinceEpoch) params.set("since_epoch", String(opts.sinceEpoch));
+  const qs = params.toString();
+  return await api<CheckpointDiffReport>(
+    `/api/control/missions/${encodeURIComponent(missionId)}/checkpoints/diff${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export async function restoreMissionCheckpoint(missionId: string, ref: string, cwd?: string): Promise<{ ok: boolean; backup_ref?: string }> {
+  const invoke = desktopInvoke();
+  const binding = localBinding(missionId);
+  const localDir = binding?.cwd || cwd?.trim();
+  if (invoke && (binding || localDir)) {
+    return await invoke("local_checkpoint_restore", { cwd: localDir, mission_id: missionId, ref }) as { ok: boolean; backup_ref?: string };
+  }
+  return await api<{ ok: boolean; backup_ref?: string }>(
+    `/api/control/missions/${encodeURIComponent(missionId)}/checkpoints/restore`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ref }),
+    },
+  );
+}
+
+export async function inspectMissionWorktree(cwd: string, missionId?: string, preferWorktree = false): Promise<WorktreeStatus | null> {
+  const invoke = desktopInvoke();
+  if (invoke && cwd.trim()) {
+    return await invoke("local_worktree_status", { cwd: cwd.trim(), prefer_worktree: preferWorktree }) as WorktreeStatus;
+  }
+  if (missionId) {
+    return await api<WorktreeStatus>(`/api/control/missions/${encodeURIComponent(missionId)}/worktree`);
+  }
+  return null;
+}
+
+export async function setMissionPermissionMode(missionId: string, mode: ClaudePermissionMode): Promise<void> {
+  const invoke = desktopInvoke();
+  const binding = localBinding(missionId);
+  if (invoke && binding) {
+    await invoke("local_permission_mode_set", { id: missionId, mode });
+    await rememberBinding(missionId, { ...binding, permissionMode: mode });
+    return;
+  }
+  await api(`/api/control/missions/${encodeURIComponent(missionId)}/permission-mode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
 }

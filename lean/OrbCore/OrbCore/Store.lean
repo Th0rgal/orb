@@ -3278,4 +3278,169 @@ def renderAIProviderForCallerJson
     kvs := kvs.push s!"\"custom_models\":{renderCustomModelsJson p.customModels}"
   return "{" ++ String.intercalate "," kvs.toList ++ "}"
 
+/-- Append one event row to `mission_events` with monotonically increasing `seq` per mission. -/
+def appendMissionEvent
+    (st : CoreStore) (missionId eventType payloadJson createdAt : String) : IO (Except String UInt64) :=
+  withImmediateTx st.missionsDb do
+    let seqRes ← execParamQueryUnlocked st.missionsDb
+      "SELECT COALESCE(MAX(seq), 0) + 1 FROM mission_events WHERE mission_id=?1;" #[missionId]
+    let .ok srs := seqRes | return .error "mission_events_seq_failed"
+    let nextSeq : UInt64 := (((srs[1]?.bind (·[0]?)).bind String.toNat?).getD 1).toUInt64
+    let ins ← execParamQueryUnlocked st.missionsDb
+      "INSERT INTO mission_events(mission_id,seq,event_type,payload,created_at) VALUES(?1,?2,?3,?4,?5);"
+      #[missionId, s!"{nextSeq}", eventType, payloadJson, createdAt]
+    match ins with
+    | .error e => return .error e
+    | .ok _ => return .ok nextSeq
+
+/-- Render one `mission_events` row (`id`, `mission_id`, `seq`, `event_type`, `payload`, `created_at`)
+    as the `StoredEvent` JSON object expected by Desktop, iOS, and Android clients. -/
+def renderStoredMissionEventJson
+    (rowId : UInt64) (missionId : String) (seq : UInt64)
+    (evType rawPayload createdAt : String) (maxPayload? : Option Nat := none) : String := Id.run do
+  let mut content := rawPayload
+  let mut eventIdJson := "null"
+  let mut callIdJson := "null"
+  let mut toolNameJson := "null"
+  let mut extraMetaPairs : Array (String × JVal) := #[]
+  if let .ok jv := OrbBin.Json.parse rawPayload then
+    if let some eid := jv.fieldStr? "id" then
+      eventIdJson := jsonEscape eid
+    else if let some eid := jv.fieldStr? "event_id" then
+      eventIdJson := jsonEscape eid
+    if let some cid := (jv.fieldStr? "tool_call_id").orElse (fun _ => jv.fieldStr? "call_id") then
+      callIdJson := jsonEscape cid
+    if let some tnm := (jv.fieldStr? "tool_name").orElse (fun _ => jv.fieldStr? "name") then
+      toolNameJson := jsonEscape tnm
+    if evType == "tool_call" then
+      if let some argsV := jv.field? "args" then
+        content := renderCompact argsV
+      else if let some c := jv.fieldStr? "content" then
+        content := c
+    else if evType == "tool_result" then
+      if let some resV := jv.field? "result" then
+        content := match resV with | .str s => s | other => renderCompact other
+      else if let some c := jv.fieldStr? "content" then
+        content := c
+    else
+      if let some c := (jv.fieldStr? "content").orElse (fun _ => jv.fieldStr? "message") then
+        content := c
+    if let some q := jv.fieldBool? "queued" then
+      extraMetaPairs := extraMetaPairs.push ("queued", .bool q)
+    if let some d := jv.fieldBool? "done" then
+      extraMetaPairs := extraMetaPairs.push ("done", .bool d)
+    if let some stVal := jv.fieldStr? "status" then
+      extraMetaPairs := extraMetaPairs.push ("status", .str stVal)
+    if let some srcVal := jv.fieldStr? "source" then
+      extraMetaPairs := extraMetaPairs.push ("source", .str srcVal)
+    if let some uidVal := jv.fieldStr? "sender_user_id" then
+      extraMetaPairs := extraMetaPairs.push ("sender_user_id", .str uidVal)
+    if let some unmVal := jv.fieldStr? "sender_username" then
+      extraMetaPairs := extraMetaPairs.push ("sender_username", .str unmVal)
+    if let some succ := jv.fieldBool? "success" then
+      extraMetaPairs := extraMetaPairs.push ("success", .bool succ)
+    if let some (.obj mPairs) := jv.field? "metadata" then
+      extraMetaPairs := extraMetaPairs ++ mPairs
+  let mut truncated := false
+  if let some maxP := maxPayload? then
+    if maxP > 0 && (evType == "tool_call" || evType == "tool_result") && content.utf8ByteSize > maxP then
+      content := (content.take maxP).toString
+      truncated := true
+      extraMetaPairs := extraMetaPairs.push ("truncated", .bool true)
+  let _ := truncated
+  let metaJson := renderCompact (.obj extraMetaPairs)
+  return s!"\{\"id\":{rowId},\"event_id\":{eventIdJson},\"mission_id\":{jsonEscape missionId},\"sequence\":{seq},\"event_type\":{jsonEscape evType},\"timestamp\":{jsonEscape createdAt},\"tool_call_id\":{callIdJson},\"tool_name\":{toolNameJson},\"content\":{jsonEscape content},\"metadata\":{metaJson}}"
+
+/-- Page result for `GET /api/control/missions/:id/events`. -/
+structure MissionEventsPage where
+  eventsJson : String
+  hasMore    : Bool
+  nextCursor : Option UInt64
+  pageMaxSeq : Option UInt64
+  maxSeq     : UInt64
+
+/-- Query a cursor-paginated slice of `mission_events` matching `X-Orb-Events-Protocol: 1` semantics. -/
+def queryMissionEventsPage
+    (st : CoreStore) (missionId : String)
+    (sinceSeq? beforeSeq? : Option UInt64)
+    (limit : Nat := 200)
+    (typesFilter : Array String := #[])
+    (maxPayload? : Option Nat := none) : IO (Except String MissionEventsPage) := do
+  let clampedLim := max 1 (min 500 limit)
+  let fetchLim := clampedLim + 1
+  let maxRes ← execParamQuery st.missionsDb
+    "SELECT COALESCE(MAX(seq), 0) FROM mission_events WHERE mission_id=?1;" #[missionId]
+  let .ok maxRs := maxRes | return .error "mission_events_max_failed"
+  let maxSeq : UInt64 := (((maxRs[1]?.bind (·[0]?)).bind String.toNat?).getD 0).toUInt64
+  let (sql, params, forwardOrder) :=
+    match sinceSeq?, beforeSeq? with
+    | some s, _ =>
+      ("SELECT id,seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 AND seq>?2 ORDER BY seq ASC LIMIT ?3;",
+       #[missionId, s!"{s}", s!"{fetchLim}"], true)
+    | none, some b =>
+      ("SELECT id,seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3;",
+       #[missionId, s!"{b}", s!"{fetchLim}"], false)
+    | none, none =>
+      ("SELECT id,seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 ORDER BY seq DESC LIMIT ?2;",
+       #[missionId, s!"{fetchLim}"], false)
+  let rowsRes ← execParamQuery st.missionsDb sql params
+  let .ok rs := rowsRes | return .error "mission_events_query_failed"
+  let mut rawItems : Array (UInt64 × UInt64 × String × String × String) := #[]
+  for i in [1:rs.size] do
+    let r := rs[i]!
+    let rid := (((r[0]?).bind String.toNat?).getD 0).toUInt64
+    let seq := (((r[1]?).bind String.toNat?).getD 0).toUInt64
+    let et := (r[2]?).getD ""
+    let pl := (r[3]?).getD ""
+    let ts := (r[4]?).getD ""
+    if typesFilter.isEmpty || typesFilter.contains et then
+      rawItems := rawItems.push (rid, seq, et, pl, ts)
+  let hasMore := rawItems.size > clampedLim
+  let pageSlice := if hasMore then rawItems.extract 0 clampedLim else rawItems
+  let ordered := if forwardOrder then pageSlice else pageSlice.reverse
+  let mut jsonItems : Array String := Array.mkEmpty ordered.size
+  for (rid, seq, et, pl, ts) in ordered do
+    jsonItems := jsonItems.push (renderStoredMissionEventJson rid missionId seq et pl ts maxPayload?)
+  let eventsJson := "[" ++ String.intercalate "," jsonItems.toList ++ "]"
+  if ordered.isEmpty then
+    return .ok {
+      eventsJson := eventsJson
+      hasMore := false
+      nextCursor := if hasMore then some 0 else none
+      pageMaxSeq := if hasMore then some 0 else none
+      maxSeq := maxSeq
+    }
+  else
+    let firstSeq := ordered[0]!.2.1
+    let lastSeq := ordered[ordered.size - 1]!.2.1
+    let nextCur := if forwardOrder then lastSeq else firstSeq
+    return .ok {
+      eventsJson := eventsJson
+      hasMore := hasMore
+      nextCursor := some nextCur
+      pageMaxSeq := some lastSeq
+      maxSeq := maxSeq
+    }
+
+/-- Fetch full untruncated `tool_call` + `tool_result` event rows for `GET /api/control/missions/:id/tool-calls/:callId`. -/
+def queryMissionToolCallEventsJson (st : CoreStore) (missionId callId : String) : IO (Except String String) := do
+  let needle := s!"%{callId}%"
+  let res ← execParamQuery st.missionsDb
+    "SELECT id,seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 AND event_type IN ('tool_call','tool_result') AND payload LIKE ?2 ORDER BY seq ASC;"
+    #[missionId, needle]
+  let .ok rs := res | return .error "tool_call_events_query_failed"
+  let mut out : Array String := #[]
+  for i in [1:rs.size] do
+    let r := rs[i]!
+    let rid := (((r[0]?).bind String.toNat?).getD 0).toUInt64
+    let seq := (((r[1]?).bind String.toNat?).getD 0).toUInt64
+    let et := (r[2]?).getD ""
+    let pl := (r[3]?).getD ""
+    let ts := (r[4]?).getD ""
+    if let .ok jv := OrbBin.Json.parse pl then
+      let cid := (jv.fieldStr? "tool_call_id").orElse (fun _ => jv.fieldStr? "call_id") |>.getD ""
+      if cid == callId then
+        out := out.push (renderStoredMissionEventJson rid missionId seq et pl ts none)
+  return .ok ("[" ++ String.intercalate "," out.toList ++ "]")
+
 end OrbCore.Store

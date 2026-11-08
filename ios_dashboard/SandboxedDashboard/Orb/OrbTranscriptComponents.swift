@@ -317,7 +317,7 @@ struct OrbComposerBox<Top: View, Leading: View>: View {
 /// Working clock and 3 s polling do not rebuild it while a finger is on it (a rebuilt
 /// toolbar menu could swallow the first tap).
 struct OrbConversationMenu: View, Equatable {
-    enum Action { case rename, move, reopen, archive, stop, sideQuestion, files, fork, clone, context, share, leave }
+    enum Action { case rename, move, reopen, archive, stop, sideQuestion, files, changes, fork, clone, context, share, leave }
 
     let hasMission: Bool
     let summary: String
@@ -359,6 +359,8 @@ struct OrbConversationMenu: View, Equatable {
                     if local {
                         Button { perform(.files) } label: { Label("Files", systemImage: "folder") }
                             .accessibilityIdentifier("conversation.files")
+                        Button { perform(.changes) } label: { Label("Changes", systemImage: "arrow.left.arrow.right") }
+                            .accessibilityIdentifier("conversation.changes")
                         if !isParticipant {
                             Button { perform(.share) } label: { Label("Share…", systemImage: "person.2") }
                                 .accessibilityIdentifier("conversation.share")

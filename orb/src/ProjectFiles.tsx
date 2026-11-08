@@ -20,7 +20,7 @@ const ContextHistory = lazy(() => import("./ContextHistory").then(module => ({ d
 import { readProjectFileVersion } from "./projectContext";
 import { makeCutMission, moveMissions, planMissionMoves, readCutMission } from "./missionMove";
 import { RunningWorkers, deleteDescendants, descendantsSentence, pausedMissionIds, requiresDescendantOptIn, runningWorkerIds } from "./deleteRunning";
-import { ForkMission } from "./ForkMission";
+const ForkMission = lazy(() => import("./ForkMission").then(module => ({ default: module.ForkMission })));
 import { For, Show, Suspense, createMemo, createSignal, onCleanup, onMount, createEffect, on, batch, lazy } from "solid-js";
 import { mergeById, pollWhileVisible } from "./poll";
 import { createStore, reconcile } from "solid-js/store";
@@ -72,7 +72,7 @@ import {
   type ApprovalTransferPolicy,
   type ControllerView as ControllerData,
 } from "./api";
-import { CronGlyph, untilLabel } from "./Controller";
+import { CronGlyph, untilLabel } from "./cronGlyph";
 import { ConfirmDialog, Dialog, DialogButton, NameDialog } from "./Dialog";
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { Picker, type PickerItem } from "./Picker";
@@ -2895,9 +2895,9 @@ export function LiveProjectsSection(p: {
       <Show when={missionMenu()}>
         {(menu) => <PopupMenu x={menu().x} y={menu().y} focus={false} items={missionMenuItems(menu().mission, menu().slug, menu().folder)} onDismissSubmenu={() => setForkTarget(null)} onClose={() => { setForkTarget(null); setMissionMenu(null); }}>
           <Show when={forkTarget()}>{target =>
-            <ForkMission mission={target().mission} choices={p.forkChoices?.(target().mission) ?? p.harnessChoices} onOpen={() => p.onForkOpen?.(target().mission)} destination={missionDestination(target().mission)}
+            <Suspense><ForkMission mission={target().mission} choices={p.forkChoices?.(target().mission) ?? p.harnessChoices} onOpen={() => p.onForkOpen?.(target().mission)} destination={missionDestination(target().mission)}
               anchor={target().anchor} onClose={() => setForkTarget(null)}
-              onFork={mission => { setForkTarget(null); setMissionMenu(null); p.onFork(mission); }} />
+              onFork={mission => { setForkTarget(null); setMissionMenu(null); p.onFork(mission); }} /></Suspense>
           }</Show>
         </PopupMenu>}
       </Show>

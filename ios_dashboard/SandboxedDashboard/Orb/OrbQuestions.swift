@@ -5,10 +5,12 @@ struct OrbQuestion: View {
     let request: OrbJSON
     let onAnswered: () -> Void
     @State private var answers: [String: String] = [:]
+    @State private var feedback = ""
     @State private var error = ""
     @State private var busy = false
     private var params: OrbJSON { request["params"] == .null ? request : request["params"] }
     private var permission: Bool { ["permission", "plan"].contains(request["method"].text) }
+    private var isToolPermission: Bool { request["method"].text == "permission" }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
@@ -36,37 +38,67 @@ struct OrbQuestion: View {
                         .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(OrbStyle.border))
                 }
-                HStack(spacing: 10) {
-                    Button {
-                        OrbHaptics.light()
-                        Task { await reply(.object(["action": .string("revise")])) }
-                    } label: {
-                        Text("Decline")
-                            .font(.footnote.weight(.medium))
-                            .foregroundStyle(OrbStyle.textSecondary)
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(Color.white.opacity(0.05), in: Capsule())
-                            .overlay(Capsule().stroke(OrbStyle.border))
-                    }
-                    .buttonStyle(.plain)
+                TextField("Optional feedback if declining", text: $feedback)
+                    .font(.footnote)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(OrbStyle.border))
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        Button {
+                            OrbHaptics.light()
+                            var body: [String: OrbJSON] = ["action": .string("revise")]
+                            let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmed.isEmpty { body["feedback"] = .string(trimmed) }
+                            Task { await reply(.object(body)) }
+                        } label: {
+                            Text("Decline")
+                                .font(.footnote.weight(.medium))
+                                .foregroundStyle(OrbStyle.textSecondary)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(Color.white.opacity(0.05), in: Capsule())
+                                .overlay(Capsule().stroke(OrbStyle.border))
+                        }
+                        .buttonStyle(.plain)
 
-                    Button {
-                        OrbHaptics.success()
-                        Task { await reply(.object(["action": .string("accept")])) }
-                    } label: {
-                        Text("Approve")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(OrbStyle.background)
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                            .background(Color.white, in: Capsule())
+                        if isToolPermission {
+                            Button {
+                                OrbHaptics.selection()
+                                Task { await reply(.object(["action": .string("accept_session")])) }
+                            } label: {
+                                Text("Allow for session")
+                                    .font(.footnote.weight(.medium))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(Color.white.opacity(0.09), in: Capsule())
+                                    .overlay(Capsule().stroke(OrbStyle.borderStrong))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("question.allowSession")
+                        }
+
+                        Button {
+                            OrbHaptics.success()
+                            Task { await reply(.object(["action": .string("accept")])) }
+                        } label: {
+                            Text(isToolPermission ? "Allow once" : "Approve")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(OrbStyle.background)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(Color.white, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             } else {
                 ForEach(params["questions"].items.indices, id: \.self) { index in

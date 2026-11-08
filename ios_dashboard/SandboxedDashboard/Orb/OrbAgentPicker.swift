@@ -7,6 +7,8 @@ struct OrbSelection {
     var allow24hCommitment = false
     var serviceTier = "standard"
     var cyberMode = "automatic"
+    var permissionMode = "supervised"
+    var worktreeMode = "auto"
     var params: OrbJSON = .array([])
     var canCancel = false
     var cloud: Bool { provider != "agent" }
@@ -347,6 +349,22 @@ struct OrbAgentPicker: View {
                             Text(variants[index]["displayName"].text.isEmpty ? variants[index]["params"].items.map { $0["value"].text }.joined(separator: " · ") : variants[index]["displayName"].text).tag(index)
                         }
                     }
+                }
+                if !selection.cloud && selection.backend == "claudecode" {
+                    Picker("Permissions", selection: $selection.permissionMode) {
+                        ForEach(OrbClaudePermissionMode.allCases, id: \.rawValue) { mode in
+                            Text(mode.label).tag(mode.rawValue)
+                        }
+                    }
+                    .accessibilityIdentifier("picker.claudePermissions")
+                }
+                if !existing && !selection.cloud {
+                    Picker("Git workspace", selection: $selection.worktreeMode) {
+                        ForEach(OrbWorktreeLaunchMode.allCases, id: \.rawValue) { mode in
+                            Text(mode.label).tag(mode.rawValue)
+                        }
+                    }
+                    .accessibilityIdentifier("picker.worktreeMode")
                 }
                 if !selection.cloud && selection.backend == "codex" && !selection.model.isEmpty {
                     OrbCodexSpeedSection(model: selection.model, missionID: missionID, tier: $selection.serviceTier)

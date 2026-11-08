@@ -275,7 +275,7 @@ export function userMessageText(raw: string, source?: string): string | null {
   return skillPreview(plan ?? imgs.text);
 }
 
-export function UserTurn(p: { messageKey?: string; text: string; images?: DraftImage[]; source?: string; senderUsername?: string; attached?: boolean; pending?: boolean; /** Handed to the agent; its turn has not started yet. */ sending?: boolean; onSend?: (text: string) => boolean | Promise<boolean> }) {
+export function UserTurn(p: { messageKey?: string; text: string; images?: DraftImage[]; source?: string; senderUsername?: string; attached?: boolean; pending?: boolean; /** Handed to the agent; its turn has not started yet. */ sending?: boolean; onSend?: (text: string) => boolean | Promise<boolean>; checkpoint?: import("./localAgents").CheckpointMeta; onRestoreCheckpoint?: (cp: import("./localAgents").CheckpointMeta) => void }) {
   const fork = createMemo(() => forkContext(p.text));
   // An edited message's request is the bubble; its history collapses above it.
   const editable = createMemo(() => !fork() || fork()!.request !== undefined);
@@ -342,6 +342,23 @@ export function UserTurn(p: { messageKey?: string; text: string; images?: DraftI
       </Show>
       <Show when={editable()}><span data-find-message={!p.source || !AUTOMATIC_SOURCES.has(p.source) ? "" : undefined}>{visibleText()}</span></Show>
       <Show when={p.attached || presentation().attached}><small class="user-context">Attached context</small></Show>
+      <Show when={editable() && p.onRestoreCheckpoint && p.checkpoint}>
+        {(cp) => (
+          <button
+            type="button"
+            class="icon-btn prompt-revert"
+            style={p.onSend ? undefined : { right: "8px" }}
+            aria-label={`Revert workspace to Turn ${cp().turn}`}
+            title={`Revert workspace to Turn ${cp().turn} (${cp().commit.slice(0, 7)})`}
+            onClick={(e) => {
+              e.stopPropagation();
+              p.onRestoreCheckpoint?.(cp());
+            }}
+          >
+            ↶
+          </button>
+        )}
+      </Show>
       <Show when={editable() && p.onSend}><button class="icon-btn prompt-edit" aria-label="Edit prompt" onClick={edit}><Ic.PencilIcon size={14} /></button></Show>
       </>}>
         <PromptEditor value={draft()} disabled={sending()} input={setDraft} cancel={()=>{if(!sending())setEditing(false);}} submit={()=>void submit()}/>
@@ -679,7 +696,7 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[]; ended?: boolean; 
   );
 }
 
-export function Transcript(p: { sizeKey?: string; backend?: string | null; prepareSearch?:(signal:AbortSignal)=>Promise<void>; needsPrepareSearch?:()=>boolean; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; onForceSlot?: () => void; forceSlotPending?: boolean; /** `messageId`: the stored message being edited, which the new text replaces. */ onSend?: (text: string, messageId?: string) => boolean | Promise<boolean>; onResume?: () => void; onOpenSource?: () => void; loadToolCall?: ToolCallLoader }) {
+export function Transcript(p: { sizeKey?: string; backend?: string | null; prepareSearch?:(signal:AbortSignal)=>Promise<void>; needsPrepareSearch?:()=>boolean; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; onForceSlot?: () => void; forceSlotPending?: boolean; /** `messageId`: the stored message being edited, which the new text replaces. */ onSend?: (text: string, messageId?: string) => boolean | Promise<boolean>; onResume?: () => void; onOpenSource?: () => void; loadToolCall?: ToolCallLoader; checkpoints?: import("./localAgents").CheckpointMeta[]; onRestoreCheckpoint?: (cp: import("./localAgents").CheckpointMeta) => void }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
@@ -718,6 +735,21 @@ export function Transcript(p: { sizeKey?: string; backend?: string | null; prepa
   const lastUserKey = createMemo(() => {
     const last = p.items[p.items.length - 1];
     return last?.kind === "user" ? last.key : null;
+  });
+  const checkpointByUserKey = createMemo(() => {
+    const map = new Map<string, import("./localAgents").CheckpointMeta>();
+    const cps = p.checkpoints;
+    if (!cps?.length) return map;
+    const byTurn = new Map(cps.map((cp) => [cp.turn, cp]));
+    let turnIdx = 0;
+    for (const item of nonQueuedItems()) {
+      if (item.kind !== "user") continue;
+      if (backgroundWake(item.text, item.source) || reminders().has(item.key)) continue;
+      turnIdx += 1;
+      const found = byTurn.get(turnIdx);
+      if (found) map.set(item.key, found);
+    }
+    return map;
   });
   const lastErrorKey = createMemo(() => {
     for (let i = groups().length - 1; i >= 0; i--) {
@@ -764,7 +796,7 @@ export function Transcript(p: { sizeKey?: string; backend?: string | null; prepa
             case "user":
               // Only the turn still waiting for a reply animates: once anything
               // has been said or done after it, the work is visible on its own.
-              return <Show when={backgroundWake(item.text, item.source)} fallback={<Show when={reminders().get(item.key)} fallback={<UserTurn messageKey={item.key} text={item.text} images={item.images} source={item.source} senderUsername={item.senderUsername} attached={item.attached} onSend={p.onSend ? text => p.onSend!(text, item.messageId) : undefined} pending={p.pending && item.key === lastUserKey()} sending={!!p.sending && item.messageId === p.sending} />}>{reminder => <AutomaticReminder text={item.text} reminder={reminder()} />}</Show>}>
+              return <Show when={backgroundWake(item.text, item.source)} fallback={<Show when={reminders().get(item.key)} fallback={<UserTurn messageKey={item.key} text={item.text} images={item.images} source={item.source} senderUsername={item.senderUsername} attached={item.attached} onSend={p.onSend ? text => p.onSend!(text, item.messageId) : undefined} pending={p.pending && item.key === lastUserKey()} sending={!!p.sending && item.messageId === p.sending} checkpoint={checkpointByUserKey().get(item.key)} onRestoreCheckpoint={p.onRestoreCheckpoint} />}>{reminder => <AutomaticReminder text={item.text} reminder={reminder()} />}</Show>}>
                 {wake => <BackgroundWakeRow wake={wake()} />}
               </Show>;
             case "think":

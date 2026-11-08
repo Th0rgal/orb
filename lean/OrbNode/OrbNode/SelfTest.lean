@@ -5,6 +5,7 @@ import LeanSys.Auth
 import OrbBin.PosixExt
 import OrbBin.Json
 import OrbBin.PrivdMain
+import OrbBin.GitWorkspace
 import OrbNode.Spec
 import OrbNode.MutantSuite
 import OrbNode.Posix
@@ -588,6 +589,168 @@ private def runR7NodeUploadsAndWorkspaceBuildTests
      (match secondComplete with
       | .ok r => r == (firstComplete.toOption.getD default) && r.status == "completed"
       | .error _ => false))
+
+/-- Verify bidirectional job `stdin`, SSE `/jobs/:id/stream`, and `/git/checkpoints*` + `/git/worktree/*` routes on `OrbNode`. -/
+private def runNodeStdinStreamAndGitWorkspaceTests
+    (tmpRoot : String) (rt0 : NodeRuntime) (authHdrs : Array (String × String)) : IO Unit := do
+  -- 1. Git checkpoints + worktree routes confined under `tmpRoot`
+  let gitRepoFp := System.FilePath.mk tmpRoot / "node-git-repo"
+  IO.FS.createDirAll gitRepoFp
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", gitRepoFp.toString, "init", "-b", "main"] }
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", gitRepoFp.toString, "config", "user.email", "node@orb.local"] }
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", gitRepoFp.toString, "config", "user.name", "Orb Node"] }
+  IO.FS.writeFile (gitRepoFp / "hello.txt") "v1\n"
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", gitRepoFp.toString, "add", "hello.txt"] }
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", gitRepoFp.toString, "commit", "-m", "init"] }
+
+  let cpCap ← OrbBin.GitWorkspace.captureCheckpoint gitRepoFp.toString "m-node-1" 0 "pre-1" "Before edit"
+  assertTrue "Node captureCheckpoint succeeded" cpCap.isOk
+  IO.FS.writeFile (gitRepoFp / "hello.txt") "v2\n"
+
+  let (rt1, rCpList) ← handleRequest rt0 {
+    method := "GET"
+    rawPath := "/git/checkpoints?cwd=node-git-repo&mission_id=m-node-1"
+    path := "/git/checkpoints"
+    query := #[("cwd", "node-git-repo"), ("mission_id", "m-node-1")]
+    headers := authHdrs
+    body := ByteArray.empty
+  }
+  let cpListStr := String.fromUTF8? rCpList.body |>.getD "{}"
+  let firstRef :=
+    match OrbBin.Json.parse cpListStr with
+    | .ok jv =>
+      let xs := (jv.fieldArr? "checkpoints").getD #[]
+      (xs[0]?.bind (·.fieldStr? "ref")).getD ""
+    | _ => ""
+  assertTrue "GET /git/checkpoints lists captured ref" (rCpList.status == 200 && !firstRef.isEmpty)
+
+  let (rt2, rCpDiff) ← handleRequest rt1 {
+    method := "GET"
+    rawPath := "/git/checkpoints/diff?cwd=node-git-repo"
+    path := "/git/checkpoints/diff"
+    query := #[("cwd", "node-git-repo")]
+    headers := authHdrs
+    body := ByteArray.empty
+  }
+  let cpDiffStr := String.fromUTF8? rCpDiff.body |>.getD "{}"
+  assertTrue "GET /git/checkpoints/diff reports hello.txt diff"
+    (rCpDiff.status == 200 && (cpDiffStr.splitOn "hello.txt").length >= 2)
+
+  let restoreBody := renderCompact (.obj #[
+    ("cwd", .str "node-git-repo"),
+    ("mission_id", .str "m-node-1"),
+    ("ref", .str firstRef)
+  ])
+  let (rt3, rCpRestore) ← handleRequest rt2 {
+    method := "POST"
+    rawPath := "/git/checkpoints/restore"
+    path := "/git/checkpoints/restore"
+    query := #[]
+    headers := authHdrs
+    body := restoreBody.toUTF8
+  }
+  let restoredTxt ← IO.FS.readFile (gitRepoFp / "hello.txt")
+  assertTrue "POST /git/checkpoints/restore reverts working tree to v1"
+    (rCpRestore.status == 200 && restoredTxt == "v1\n")
+
+  let (_, rTraversal) ← handleRequest rt3 {
+    method := "GET"
+    rawPath := "/git/checkpoints?cwd=../../etc"
+    path := "/git/checkpoints"
+    query := #[("cwd", "../../etc")]
+    headers := authHdrs
+    body := ByteArray.empty
+  }
+  assertTrue "GET /git/checkpoints rejects path traversal outside workDir" (rTraversal.status == 400)
+
+  let wtStatusBody := renderCompact (.obj #[("cwd", .str "node-git-repo"), ("mission_id", .str "m-node-wt"), ("prefer_worktree", .bool true)])
+  let (rt4, rWtStatus) ← handleRequest rt3 {
+    method := "POST", rawPath := "/git/worktree/status", path := "/git/worktree/status",
+    query := #[], headers := authHdrs, body := wtStatusBody.toUTF8
+  }
+  let wtStatusStr := String.fromUTF8? rWtStatus.body |>.getD "{}"
+  assertTrue "POST /git/worktree/status returns decision_word 513"
+    (rWtStatus.status == 200 && (wtStatusStr.splitOn "\"decision_word\":513").length >= 2)
+
+  let wtCreateBody := renderCompact (.obj #[("cwd", .str "node-git-repo"), ("mission_id", .str "m-node-wt")])
+  let (rt5, rWtCreate) ← handleRequest rt4 {
+    method := "POST", rawPath := "/git/worktree/create", path := "/git/worktree/create",
+    query := #[], headers := authHdrs, body := wtCreateBody.toUTF8
+  }
+  let wtPath :=
+    match OrbBin.Json.parse (String.fromUTF8? rWtCreate.body |>.getD "{}") with
+    | .ok jv => (jv.fieldStr? "worktree_path").getD ""
+    | _ => ""
+  assertTrue "POST /git/worktree/create creates sibling worktree" (rWtCreate.status == 201 && !wtPath.isEmpty)
+
+  let wtRmBody := renderCompact (.obj #[("worktree_path", .str wtPath), ("force", .bool true)])
+  let (rt6, rWtRm) ← handleRequest rt5 {
+    method := "POST", rawPath := "/git/worktree/remove", path := "/git/worktree/remove",
+    query := #[], headers := authHdrs, body := wtRmBody.toUTF8
+  }
+  assertTrue "POST /git/worktree/remove cleans up sibling worktree" (rWtRm.status == 200)
+
+  -- 2. SSE `/jobs/:id/stream` + `POST /jobs/:id/stdin` contract
+  let streamJid := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+  let streamLogFp := System.FilePath.mk tmpRoot / "stream-job.log"
+  IO.FS.writeFile streamLogFp "line1\nline2\n"
+  let streamRec : JobRecord := {
+    jobId := streamJid
+    missionId := "11111111-1111-4111-8111-111111111111"
+    payloadJson := "{\"kind\":\"raw_command\",\"command\":\"cat\",\"pipe_stdin\":true}"
+    state := .running
+    createdAt := "2026-11-08T00:00:00Z"
+    logPath? := some streamLogFp.toString
+    operationId := streamJid
+    nodeBootEpoch := rt6.ledger.nodeBootEpoch
+    phaseCode := 1
+  }
+  let spCat ← spawnPgrp "/bin/sh" #["-c", "read -r line && printf '%s\\n' \"$line\" >> \"$1\"", "sh", streamLogFp.toString] #[] (pipeStdin := true) (nullStdio := true) (pipeStdout := false)
+  let lpStream : LiveProc := {
+    pid := spCat.pid.toUInt64
+    startTicks := 1
+    bootId := "test-boot"
+    procPhase := 1
+    startedEp := 1
+    timeoutSecs? := none
+    forced := false
+    sideLane := false
+    coordLane := false
+    artifacts := #[]
+    cwd := tmpRoot
+    stdinFd := spCat.stdinFd
+  }
+  let rtWithStdin := {
+    rt6 with
+    ledger := { rt6.ledger with jobs := rt6.ledger.jobs.insert streamJid streamRec, order := rt6.ledger.order.push streamJid }
+    liveProcs := rt6.liveProcs.insert streamJid lpStream
+  }
+  let stdinBody := "{\"line\":\"from-stdin-relay\"}"
+  let (rtAfterStdin, rStdin) ← handleRequest rtWithStdin {
+    method := "POST"
+    rawPath := s!"/jobs/{streamJid}/stdin"
+    path := s!"/jobs/{streamJid}/stdin"
+    query := #[]
+    headers := authHdrs
+    body := stdinBody.toUTF8
+  }
+  let _ ← waitpidBlock spCat.pid
+  closeFdRaw spCat.stdinFd
+  let (_, rStream) ← handleRequest rtAfterStdin {
+    method := "GET"
+    rawPath := s!"/jobs/{streamJid}/stream?offset=0"
+    path := s!"/jobs/{streamJid}/stream"
+    query := #[("offset", "0")]
+    headers := authHdrs
+    body := ByteArray.empty
+  }
+  let streamBodyStr := String.fromUTF8? rStream.body |>.getD ""
+  assertTrue "POST /jobs/:id/stdin writes to live job pipe and GET /jobs/:id/stream emits SSE frame"
+    (rStdin.status == 200 &&
+     rStream.status == 200 &&
+     (rStream.contentType.splitOn "text/event-stream").length >= 2 &&
+     (streamBodyStr.splitOn "event: log_slice").length >= 2 &&
+     (streamBodyStr.splitOn "from-stdin-relay").length >= 2)
 
 /-- Section 12: Round-2 regression checks (split UTF-8 log slicing, >150 KiB SQLite stdin,
     pure-Lean tar+zstd `-C` / newline filename safety, timeout shrinkDebt repayment, and
@@ -2370,6 +2533,8 @@ def runTests : IO UInt32 := do
   runChildToolSigintAnchorRegressionTests check
   runR7NodeUploadsAndWorkspaceBuildTests tmpRoot rt authHdrs
   check "R7 flock-ordered durable upload finalization and CAS workspace-build admission" true
+  runNodeStdinStreamAndGitWorkspaceTests tmpRoot rt authHdrs
+  check "Node bidirectional stdin relay, SSE log stream, and confined git checkpoints/worktrees" true
 
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get

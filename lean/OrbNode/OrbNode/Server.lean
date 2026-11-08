@@ -6,6 +6,7 @@ import Std.Sync.Mutex
 import LeanSys.Auth
 import OrbBin.PosixExt
 import OrbBin.Json
+import OrbBin.GitWorkspace
 import OrbNode.Spec
 import OrbNode.Posix
 import OrbNode.Lease
@@ -50,10 +51,11 @@ def HttpRequest.query? (req : HttpRequest) (key : String) : Option String :=
   (req.query.find? (fun (k, _) => k == key)).map Prod.snd
 
 structure HttpResponse where
-  status      : Nat
-  contentType : String := "application/json"
-  body        : ByteArray := ByteArray.empty
-  tempFile?   : Option System.FilePath := none
+  status       : Nat
+  contentType  : String := "application/json"
+  body         : ByteArray := ByteArray.empty
+  tempFile?    : Option System.FilePath := none
+  extraHeaders : Array (String × String) := #[]
   deriving Inhabited
 
 def jsonResp (status : Nat) (v : JVal) : HttpResponse :=
@@ -64,6 +66,7 @@ def textResp (status : Nat) (msg : String) : HttpResponse :=
 
 private def statusReason : Nat → String
   | 200 => "OK"
+  | 201 => "Created"
   | 202 => "Accepted"
   | 204 => "No Content"
   | 400 => "Bad Request"
@@ -77,10 +80,17 @@ private def statusReason : Nat → String
   | 503 => "Service Unavailable"
   | _   => "Internal Server Error"
 
+private def formatExtraHeaders (hdrs : Array (String × String)) : String := Id.run do
+  let mut out := ""
+  for (k, v) in hdrs do
+    out := out ++ s!"{k}: {v}\r\n"
+  return out
+
 def encodeHttpResponse (resp : HttpResponse) : ByteArray :=
   let head :=
     s!"HTTP/1.1 {resp.status} {statusReason resp.status}\r\n" ++
     s!"Content-Type: {resp.contentType}\r\n" ++
+    formatExtraHeaders resp.extraHeaders ++
     s!"Content-Length: {resp.body.size}\r\n" ++
     "Connection: close\r\n\r\n"
   head.toUTF8 ++ resp.body
@@ -98,6 +108,7 @@ def sendHttpResponse (cfd : UInt32) (resp : HttpResponse) : IO Unit := do
       let head :=
         s!"HTTP/1.1 {resp.status} {statusReason resp.status}\r\n" ++
         s!"Content-Type: {resp.contentType}\r\n" ++
+        formatExtraHeaders resp.extraHeaders ++
         s!"Content-Length: {fileLen}\r\n" ++
         "Connection: close\r\n\r\n"
       let rc ← OrbNode.Posix.fdWriteAll cfd head.toUTF8
@@ -373,6 +384,59 @@ def readHttpRequest
 
 private def readLogTail64K (logPath? : Option String) : IO (Option String) :=
   readJobLogTailBounded logPath? 65536
+
+/-- Confine a requested git workspace path strictly under `workDir` (or `workDir`'s parent `.orb-worktrees/`
+    directory for Orb-managed sibling worktrees), rejecting `..` traversal and symlinks escaping `workDir`. -/
+private def resolveConfinedNodeGitPath (workDir rawPath : String) : IO (Except String String) := do
+  let rootReal ← try
+      let rp ← IO.FS.realPath (System.FilePath.mk workDir)
+      pure rp.toString
+    catch _ =>
+      pure workDir
+  let rootPrefix := if rootReal.endsWith "/" then rootReal else rootReal ++ "/"
+  let parentWtPrefix :=
+    match (System.FilePath.mk rootReal).parent with
+    | some p => p.toString ++ "/.orb-worktrees/"
+    | none => rootPrefix ++ ".orb-worktrees/"
+  let t := rawPath.trimAscii.toString
+  if t.contains '\\' || (t.splitOn "..").length > 1 then
+    return .error "path_traversal_rejected"
+  let cand :=
+    if t.isEmpty || t == "." then rootReal
+    else if t.startsWith "/" then t
+    else rootPrefix ++ t
+  let resolved ← try
+      if ← System.FilePath.pathExists cand then
+        let rp ← IO.FS.realPath (System.FilePath.mk cand)
+        pure rp.toString
+      else
+        pure cand
+    catch _ =>
+      pure cand
+  if resolved == rootReal || resolved.startsWith rootPrefix || resolved.startsWith parentWtPrefix then
+    return .ok resolved
+  else
+    return .error "path_outside_node_workdir"
+
+/-- Format a bounded job log slice as an SSE (`text/event-stream`) snapshot/tail frame. -/
+private def buildJobStreamSseResp (jobId stateStr : String) (sl : LogSliceResult) : HttpResponse :=
+  let evPayload := renderCompact (.obj #[
+    ("job_id", .str jobId),
+    ("offset", JVal.uint64 sl.offset),
+    ("next_offset", JVal.uint64 sl.nextOffset),
+    ("log_len", JVal.uint64 sl.logLen),
+    ("data", .str sl.data),
+    ("state", .str stateStr)
+  ])
+  let sseBody := s!"event: log_slice\ndata: {evPayload}\n\n"
+  { status := 200
+    contentType := "text/event-stream; charset=utf-8"
+    body := sseBody.toUTF8
+    extraHeaders := #[
+      ("Cache-Control", "no-cache"),
+      ("X-Orb-Job-State", stateStr),
+      ("X-Next-Offset", s!"{sl.nextOffset}")
+    ] }
 
 private def resolveToolPath? (bin : String) : IO (Option String) := do
   let envPath := (← IO.getEnv "PATH").getD "/usr/local/bin:/usr/bin:/bin"
@@ -756,6 +820,29 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
       ("data", .str sl.data),
       ("state", .str rec.state.asString)
     ]), preLaunches, #[])
+  | "GET", ["jobs", jid, "stream"] =>
+    let key := (parseUuidCanonical? jid).getD jid
+    let some rec := rt.ledger.jobs.get? key
+      | return (rt, textResp 404 "job not found", preLaunches, #[])
+    let off := (req.query? "offset" >>= String.toNat?).getD 0
+    let maxB := (req.query? "max_bytes" >>= String.toNat?).getD 262144
+    let sl ← readJobLogSliceBounded rec.logPath? off.toUInt64 maxB rec.state.confirmsTermination
+    return (rt, buildJobStreamSseResp key rec.state.asString sl, preLaunches, #[])
+  | "POST", ["jobs", jid, "stdin"] =>
+    let key := (parseUuidCanonical? jid).getD jid
+    let some bodyStr := String.fromUTF8? req.body
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
+    let .ok jv := OrbBin.Json.parse bodyStr
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
+    let some line := jv.fieldStr? "line"
+      | return (rt, textResp 400 "missing line", preLaunches, #[])
+    match ← writeJobStdinLine rt key line with
+    | .ok () =>
+      return (rt, jsonResp 200 (.obj #[("job_id", .str key), ("delivered", .bool true)]), preLaunches, #[])
+    | .error "not_found" =>
+      return (rt, textResp 404 s!"job {key} not found", preLaunches, #[])
+    | .error err =>
+      return (rt, jsonResp 409 (.obj #[("job_id", .str key), ("delivered", .bool false), ("error", .str err)]), preLaunches, #[])
   | "POST", ["jobs", jid, "cancel"] =>
     let key := (parseUuidCanonical? jid).getD jid
     let actor := (req.header? "x-sandboxed-cancel-actor").getD "unknown"
@@ -1058,6 +1145,68 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
     match ← completeWorkspaceBuild rt.cfg.workDir rt.ledger.sqliteBackend wsId termStatus expGen? expOp? with
     | .ok rec => return (rt, jsonResp 200 rec.toJson, preLaunches, #[])
     | .error (code, msg) => return (rt, jsonResp code (.obj #[("error", .str msg)]), preLaunches, #[])
+  | "GET", ["git", "checkpoints"] =>
+    let rawCwd := (req.query? "cwd").getD ""
+    let mid := (req.query? "mission_id").getD "default"
+    match ← resolveConfinedNodeGitPath rt.cfg.workDir rawCwd with
+    | .error msg => return (rt, jsonResp 400 (.obj #[("error", .str msg)]), preLaunches, #[])
+    | .ok safeCwd =>
+      match ← OrbBin.GitWorkspace.listCheckpoints safeCwd mid with
+      | .ok cps => return (rt, jsonResp 200 (.obj #[("checkpoints", .arr (cps.map OrbBin.GitWorkspace.CheckpointMeta.toJVal))]), preLaunches, #[])
+      | .error msg => return (rt, jsonResp 400 (.obj #[("error", .str msg)]), preLaunches, #[])
+  | "GET", ["git", "checkpoints", "diff"] =>
+    let rawCwd := (req.query? "cwd").getD ""
+    let fromRef := ((req.query? "from_ref").filter (!·.isEmpty)).getD "HEAD"
+    let toRef := ((req.query? "to_ref").filter (!·.isEmpty)).getD "WORKTREE"
+    let sinceEpoch? := (req.query? "since_epoch" >>= String.toNat?).map Nat.toUInt64
+    match ← resolveConfinedNodeGitPath rt.cfg.workDir rawCwd with
+    | .error msg => return (rt, jsonResp 400 (.obj #[("error", .str msg)]), preLaunches, #[])
+    | .ok safeCwd =>
+      match ← OrbBin.GitWorkspace.diffCheckpoints safeCwd fromRef toRef sinceEpoch? with
+      | .ok rep => return (rt, jsonResp 200 rep.toJVal, preLaunches, #[])
+      | .error msg => return (rt, jsonResp 400 (.obj #[("error", .str msg)]), preLaunches, #[])
+  | "POST", ["git", "checkpoints", "restore"] =>
+    let some bodyStr := String.fromUTF8? req.body
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
+    let .ok jv := OrbBin.Json.parse bodyStr
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
+    let rawCwd := (jv.fieldStr? "cwd").getD ""
+    let mid := (jv.fieldStr? "mission_id").getD "default"
+    let ref := (jv.fieldStr? "ref").getD ""
+    let turn? := jv.fieldNat? "turn"
+    match ← resolveConfinedNodeGitPath rt.cfg.workDir rawCwd with
+    | .error msg => return (rt, jsonResp 400 (.obj #[("error", .str msg)]), preLaunches, #[])
+    | .ok safeCwd =>
+      match ← OrbBin.GitWorkspace.restoreCheckpoint safeCwd mid ref turn? with
+      | .ok outJv => return (rt, jsonResp 200 outJv, preLaunches, #[])
+      | .error msg => return (rt, jsonResp 400 (.obj #[("error", .str msg)]), preLaunches, #[])
+  | "POST", ["git", "worktree", action] =>
+    let some bodyStr := String.fromUTF8? req.body
+      | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
+    let .ok jv := OrbBin.Json.parse bodyStr
+      | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
+    let rawCwd := (jv.fieldStr? "cwd").orElse (fun _ => jv.fieldStr? "worktree_path") |>.getD ""
+    match ← resolveConfinedNodeGitPath rt.cfg.workDir rawCwd with
+    | .error msg => return (rt, jsonResp 400 (.obj #[("error", .str msg)]), preLaunches, #[])
+    | .ok safeCwd =>
+      let mid := (jv.fieldStr? "mission_id").getD "new"
+      if action == "status" then
+        let preferWt := (jv.fieldBool? "prefer_worktree").getD false
+        let activeCwds := rt.liveProcs.fold (fun acc k lp => if k == mid then acc else acc.push lp.cwd) #[]
+        let wtSt ← OrbBin.GitWorkspace.inspectWorktreeStatus safeCwd mid activeCwds preferWt
+        return (rt, jsonResp 200 wtSt.toJVal, preLaunches, #[])
+      else if action == "create" then
+        let baseBranch? := (jv.fieldStr? "base_branch").filter (!·.isEmpty)
+        match ← OrbBin.GitWorkspace.createMissionWorktree safeCwd mid baseBranch? with
+        | .ok created => return (rt, jsonResp 201 created.toJVal, preLaunches, #[])
+        | .error msg => return (rt, jsonResp 409 (.obj #[("error", .str msg)]), preLaunches, #[])
+      else if action == "remove" then
+        let force := (jv.fieldBool? "force").getD false
+        match ← OrbBin.GitWorkspace.removeMissionWorktree safeCwd force with
+        | .ok outJv => return (rt, jsonResp 200 outJv, preLaunches, #[])
+        | .error msg => return (rt, jsonResp 409 (.obj #[("error", .str msg)]), preLaunches, #[])
+      else
+        return (rt, textResp 404 "route not found", preLaunches, #[])
   | _, _ =>
     return (rt, textResp 404 "route not found", preLaunches, #[])
 
@@ -1268,6 +1417,26 @@ def handleRequestConcurrent
         ("data", .str sl.data),
         ("state", .str stateStr)
       ])
+  else if req.method == "GET" && segs.length == 3 && segs[0]? == some "jobs" && segs[2]? == some "stream" then
+    let jid := segs[1]!
+    let key := (parseUuidCanonical? jid).getD jid
+    let (lookupRes, preLaunches) ← mtx.atomically do
+      let (rt, preL) ← tickRuntimeReserve (← get)
+      set rt
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return (Except.error (textResp 401 "invalid node token"), preL)
+      let some rec := rt.ledger.jobs.get? key
+        | return (Except.error (textResp 404 "job not found"), preL)
+      return (Except.ok (rec.logPath?, rec.state.asString, rec.state.confirmsTermination), preL)
+    if !preLaunches.isEmpty then
+      spawnAsyncLaunches mtx preLaunches
+    match lookupRes with
+    | .error errResp => return errResp
+    | .ok (logPath?, stateStr, isTerminal) =>
+      let off := (req.query? "offset" >>= String.toNat?).getD 0
+      let maxB := (req.query? "max_bytes" >>= String.toNat?).getD 262144
+      let sl ← readJobLogSliceBounded logPath? off.toUInt64 maxB isTerminal
+      return buildJobStreamSseResp key stateStr sl
   else if req.method == "GET" && segs.length == 2 && segs[0]? == some "jobs" then
     let jid := segs[1]!
     let key := (parseUuidCanonical? jid).getD jid
@@ -1631,6 +1800,80 @@ def handleRequestConcurrent
       if !postLaunches.isEmpty then
         spawnAsyncLaunches mtx postLaunches
       return resp
+  else if segs[0]? == some "git" then
+    let authSnap ← mtx.atomically do
+      let rt ← get
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return Except.error (textResp 401 "invalid node token")
+      let cwds := rt.liveProcs.fold (fun acc k lp => acc.push (k, lp.cwd)) #[]
+      return Except.ok (rt.cfg.workDir, cwds)
+    match authSnap with
+    | .error errResp => return errResp
+    | .ok (workDir, liveCwds) =>
+      match req.method, segs with
+      | "GET", ["git", "checkpoints"] =>
+        let rawCwd := (req.query? "cwd").getD ""
+        let mid := (req.query? "mission_id").getD "default"
+        match ← resolveConfinedNodeGitPath workDir rawCwd with
+        | .error msg => return jsonResp 400 (.obj #[("error", .str msg)])
+        | .ok safeCwd =>
+          match ← OrbBin.GitWorkspace.listCheckpoints safeCwd mid with
+          | .ok cps => return jsonResp 200 (.obj #[("checkpoints", .arr (cps.map OrbBin.GitWorkspace.CheckpointMeta.toJVal))])
+          | .error msg => return jsonResp 400 (.obj #[("error", .str msg)])
+      | "GET", ["git", "checkpoints", "diff"] =>
+        let rawCwd := (req.query? "cwd").getD ""
+        let fromRef := ((req.query? "from_ref").filter (!·.isEmpty)).getD "HEAD"
+        let toRef := ((req.query? "to_ref").filter (!·.isEmpty)).getD "WORKTREE"
+        let sinceEpoch? := (req.query? "since_epoch" >>= String.toNat?).map Nat.toUInt64
+        match ← resolveConfinedNodeGitPath workDir rawCwd with
+        | .error msg => return jsonResp 400 (.obj #[("error", .str msg)])
+        | .ok safeCwd =>
+          match ← OrbBin.GitWorkspace.diffCheckpoints safeCwd fromRef toRef sinceEpoch? with
+          | .ok rep => return jsonResp 200 rep.toJVal
+          | .error msg => return jsonResp 400 (.obj #[("error", .str msg)])
+      | "POST", ["git", "checkpoints", "restore"] =>
+        let some bodyStr := String.fromUTF8? req.body
+          | return textResp 400 "invalid UTF-8 body"
+        let .ok jv := OrbBin.Json.parse bodyStr
+          | return textResp 400 "invalid JSON body"
+        let rawCwd := (jv.fieldStr? "cwd").getD ""
+        let mid := (jv.fieldStr? "mission_id").getD "default"
+        let ref := (jv.fieldStr? "ref").getD ""
+        let turn? := jv.fieldNat? "turn"
+        match ← resolveConfinedNodeGitPath workDir rawCwd with
+        | .error msg => return jsonResp 400 (.obj #[("error", .str msg)])
+        | .ok safeCwd =>
+          match ← OrbBin.GitWorkspace.restoreCheckpoint safeCwd mid ref turn? with
+          | .ok outJv => return jsonResp 200 outJv
+          | .error msg => return jsonResp 400 (.obj #[("error", .str msg)])
+      | "POST", ["git", "worktree", action] =>
+        let some bodyStr := String.fromUTF8? req.body
+          | return textResp 400 "invalid UTF-8 body"
+        let .ok jv := OrbBin.Json.parse bodyStr
+          | return textResp 400 "invalid JSON body"
+        let rawCwd := (jv.fieldStr? "cwd").orElse (fun _ => jv.fieldStr? "worktree_path") |>.getD ""
+        match ← resolveConfinedNodeGitPath workDir rawCwd with
+        | .error msg => return jsonResp 400 (.obj #[("error", .str msg)])
+        | .ok safeCwd =>
+          let mid := (jv.fieldStr? "mission_id").getD "new"
+          if action == "status" then
+            let preferWt := (jv.fieldBool? "prefer_worktree").getD false
+            let activeCwds := liveCwds.foldl (fun acc (k, c) => if k == mid then acc else acc.push c) #[]
+            let wtSt ← OrbBin.GitWorkspace.inspectWorktreeStatus safeCwd mid activeCwds preferWt
+            return jsonResp 200 wtSt.toJVal
+          else if action == "create" then
+            let baseBranch? := (jv.fieldStr? "base_branch").filter (!·.isEmpty)
+            match ← OrbBin.GitWorkspace.createMissionWorktree safeCwd mid baseBranch? with
+            | .ok created => return jsonResp 201 created.toJVal
+            | .error msg => return jsonResp 409 (.obj #[("error", .str msg)])
+          else if action == "remove" then
+            let force := (jv.fieldBool? "force").getD false
+            match ← OrbBin.GitWorkspace.removeMissionWorktree safeCwd force with
+            | .ok outJv => return jsonResp 200 outJv
+            | .error msg => return jsonResp 409 (.obj #[("error", .str msg)])
+          else
+            return textResp 404 "route not found"
+      | _, _ => return textResp 404 "route not found"
   else
     let (resp, launches, watchers) ← mtx.atomically do
       let rt ← get

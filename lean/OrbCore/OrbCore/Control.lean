@@ -8,6 +8,8 @@ import Orb.Kernel
 import OrbBin.Json
 import OrbBin.PosixExt
 import OrbBin.PrivdShared
+import OrbBin.GitWorkspace
+import OrbBin.ClaudeControl
 import OrbCore.Spec
 import OrbCore.Store
 import OrbCore.Search
@@ -91,6 +93,9 @@ structure CoreAppState where
   telemetrySink?  : Option TelemetrySink := none
   voiceSlots?     : Option VoiceRelaySlots := none
   voiceEndpointOverride? : Option String := none
+  warmMgr?        : Option OrbBin.ClaudeControl.WarmHarnessManager := none
+  warmHarnessBinOverride? : Option String := none
+  pendingControlCallsRef? : Option (IO.Ref (Array (String × String))) := none
 
 /-- Authenticated multi-user request principal resolved by `resolveCallerPrincipal?`. -/
 structure CallerPrincipal where
@@ -1096,6 +1101,300 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   ]
   return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs, body := out.body }
 
+/-- Map structured `HarnessCallbacks` from `OrbBin.ClaudeControl` onto persisted `mission_events` rows
+    and record pending `control_request` call IDs so `POST /api/control/tool_result` can route answers cleanly. -/
+private def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.ClaudeControl.HarnessCallbacks := {
+  onStructuredEvent := fun evType payload => do
+    let nowSec ← coreEpochSec
+    let ts := formatEpochIso8601Utc nowSec
+    if evType == "tool_call" then
+      let cid := (payload.fieldStr? "tool_call_id").getD ""
+      let nm := (payload.fieldStr? "name").getD "tool"
+      let args := (payload.field? "args").getD (.obj #[])
+      if nm == "ui_native_request" && !cid.isEmpty then
+        if let some ref := st.pendingControlCallsRef? then
+          ref.modify fun xs =>
+            let trimmed := if xs.size ≥ 512 then xs.extract 1 xs.size else xs
+            (trimmed.filter (fun p => p.1 != cid)).push (cid, missionId)
+      let pl := renderCompact (.obj #[("tool_call_id", .str cid), ("tool_name", .str nm), ("args", args)])
+      discard <| appendMissionEvent st.store missionId "tool_call" pl ts
+    else
+      discard <| appendMissionEvent st.store missionId evType (renderCompact payload) ts
+  onTurnFinished := fun finalSnap => do
+    let nowSec ← coreEpochSec
+    let ts := formatEpochIso8601Utc nowSec
+    let isErr := finalSnap.error?.isSome || (finalSnap.exitCode?.getD 0) != 0
+    let nextStatus := if isErr then "failed" else "awaiting_user"
+    discard <| execParamQuery st.store.missionsDb
+      "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1 AND status IN ('active','pending');"
+      #[missionId, nextStatus, s!"{nowSec}"]
+    let stPl := renderCompact (.obj #[("status", .str nextStatus), ("content", .str finalSnap.text)])
+    discard <| appendMissionEvent st.store missionId "mission_status_changed" stPl ts
+}
+
+/-- Resolve a confined git workspace directory for a non-client mission under `st.cfg.workingDir`. -/
+private def resolveConfinedCoreMissionGitDir (st : CoreAppState) (m : MissionRecord) : IO (Except (Nat × String) String) := do
+  if m.placementKind == "client" then
+    return .error (400, "{\"error\":\"client_mission_uses_local_git\"}")
+  match ← confineWorkingDirectory st.cfg.workingDir m.workingDirectory with
+  | .ok safeDir => return .ok safeDir
+  | .error err => return .error (400, s!"\{\"error\":{jsonEscape err}}")
+
+/-- Launch a live warm harness turn when `spawn_harness: true` is supplied by an authorized admin/legacy caller on a managed mission. -/
+private def maybeSpawnWarmHarnessTurn
+    (st : CoreAppState)
+    (caller : CallerPrincipal)
+    (placementKind : String)
+    (missionId harness cwd prompt model effort permMode : String)
+    (worktreeMode : String := "")
+    (appendUserEvent : Bool := true) : IO (Option String) := do
+  let some mgr := st.warmMgr? | return none
+  if !(caller.isLegacyUnscoped || caller.role == "admin") then return none
+  if placementKind != "managed" then return none
+  let .ok safeCwd ← confineWorkingDirectory st.cfg.workingDir cwd | return none
+  let .ok safeRoot ← confineWorkingDirectory st.cfg.workingDir st.cfg.workingDir | return none
+  let binOverride := st.warmHarnessBinOverride?.getD ""
+  let nowSec ← coreEpochSec
+  let ts := formatEpochIso8601Utc nowSec
+  if appendUserEvent then
+    let userPl := renderCompact (.obj #[("content", .str prompt)])
+    discard <| appendMissionEvent st.store missionId "user_message" userPl ts
+  discard <| execParamQuery st.store.missionsDb
+    "UPDATE missions SET status='active',state_revision=state_revision+1,updated_at=?2 WHERE id=?1;"
+    #[missionId, s!"{nowSec}"]
+  let prevSt? ← OrbBin.ClaudeControl.getRunState? mgr missionId
+  let nextGen := (prevSt?.map (fun s => s.generation + 1)).getD 1
+  let model? := if model.trimAscii.toString.isEmpty then none else some model.trimAscii.toString
+  let effort? := if effort.trimAscii.toString.isEmpty then none else some effort.trimAscii.toString
+  let parsedPerm := OrbBin.ClaudeControl.parsePermissionMode permMode
+  let wtArg := if worktreeMode.trimAscii.toString.isEmpty then "local" else worktreeMode.trimAscii.toString
+  let cbs := buildCoreHarnessCallbacks st missionId
+  match ← OrbBin.ClaudeControl.startHarnessTurn
+      mgr missionId harness binOverride safeCwd prompt nextGen model? effort? none parsedPerm wtArg #[] cbs (some safeRoot) with
+  | .ok runSt =>
+    if runSt.cwd != safeCwd && !runSt.cwd.isEmpty then
+      if let .ok safeWt ← confineWorkingDirectory st.cfg.workingDir runSt.cwd then
+        discard <| execParamQuery st.store.missionsDb
+          "UPDATE missions SET working_directory=?2 WHERE id=?1;" #[missionId, safeWt]
+        return some safeWt
+    return some safeCwd
+  | .error err =>
+    let errPl := renderCompact (.obj #[("message", .str err)])
+    discard <| appendMissionEvent st.store missionId "error" errPl ts
+    return none
+
+/-- Handle warm harness control, events, checkpoints, worktree, and permission routes. -/
+private def dispatchMissionControlAndGitRoutes?
+    (st : CoreAppState)
+    (req : HttpRequest)
+    (rawTarget cleanPath : String)
+    (caller : CallerPrincipal)
+    (reqOrigin? : Option String)
+    (nowEpochSec : UInt64) : IO (Option (Except ByteArray CoreHttpResponse)) := do
+  let mkJson (code : Nat) (bodyStr : String) : CoreHttpResponse :=
+    jsonResponse code bodyStr #[] reqOrigin?
+  let mkJsonHdr (code : Nat) (bodyStr : String) (hdrs : Array (String × String)) : CoreHttpResponse :=
+    jsonResponse code bodyStr hdrs reqOrigin?
+
+  if let some params := matchRoutePattern? "/api/control/missions/:id/events" rawTarget then
+    if req.method == "GET" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if !isSafeMissionId mid then
+        return some (.ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}"))
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
+        return some (.ok (mkJson cCode cBody))
+      let qParams := parseQueryParams rawTarget
+      let limNat := ((qParams.find? (fun p => p.1 == "limit")).bind (fun p => p.2.toNat?)).getD 200
+      let sinceSeq? := ((qParams.find? (fun p => p.1 == "since_seq")).bind (fun p => p.2.toNat?)).map Nat.toUInt64
+      let beforeSeq? := ((qParams.find? (fun p => p.1 == "before_seq")).bind (fun p => p.2.toNat?)).map Nat.toUInt64
+      let maxPayload? := ((qParams.find? (fun p => p.1 == "max_payload")).bind (fun p => p.2.toNat?))
+      let typesRaw := ((qParams.find? (fun p => p.1 == "types")).map Prod.snd).getD ""
+      let typesArr :=
+        if typesRaw.trimAscii.toString.isEmpty then #[]
+        else (typesRaw.splitOn ",").toArray.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+      match ← queryMissionEventsPage st.store mid sinceSeq? beforeSeq? limNat typesArr maxPayload? with
+      | .error e => return some (.ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}"))
+      | .ok pg =>
+        let mut hdrs : Array (String × String) := #[
+          ("X-Orb-Events-Protocol", "1"),
+          ("X-Has-More", if pg.hasMore then "true" else "false"),
+          ("X-Max-Sequence", s!"{pg.maxSeq}")
+        ]
+        if let some nc := pg.nextCursor then
+          hdrs := hdrs.push ("X-Next-Cursor", s!"{nc}")
+        if let some pm := pg.pageMaxSeq then
+          hdrs := hdrs.push ("X-Page-Max-Sequence", s!"{pm}")
+        return some (.ok (mkJsonHdr 200 pg.eventsJson hdrs))
+
+  if let some params := matchRoutePattern? "/api/control/missions/:id/tool-calls/:callId" rawTarget then
+    if req.method == "GET" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if !isSafeMissionId mid then
+        return some (.ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}"))
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
+        return some (.ok (mkJson cCode cBody))
+      let callId := (params.find? (fun p => p.1 == "callId")).map Prod.snd |>.getD ""
+      match ← queryMissionToolCallEventsJson st.store mid callId with
+      | .error e => return some (.ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}"))
+      | .ok body => return some (.ok (mkJson 200 body))
+
+  if let some params := matchRoutePattern? "/api/control/missions/:id/checkpoints" rawTarget then
+    if req.method == "GET" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if !isSafeMissionId mid then
+        return some (.ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}"))
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
+        return some (.ok (mkJson cCode cBody))
+      let some m ← getMission? st.store mid
+        | return some (.ok (mkJson 404 "{\"error\":\"mission_not_found\"}"))
+      let safeDir ← match ← resolveConfinedCoreMissionGitDir st m with
+        | .ok d => pure d
+        | .error (cCode, cBody) => return some (.ok (mkJson cCode cBody))
+      match ← OrbBin.GitWorkspace.listCheckpoints safeDir mid with
+      | Except.ok cps =>
+        let items := cps.map OrbBin.GitWorkspace.CheckpointMeta.toJVal
+        return some (.ok (mkJson 200 (renderCompact (.obj #[("checkpoints", .arr items)]))))
+      | Except.error err =>
+        return some (.ok (mkJson 400 s!"\{\"error\":{jsonEscape err}}"))
+
+  if let some params := matchRoutePattern? "/api/control/missions/:id/checkpoints/diff" rawTarget then
+    if req.method == "GET" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if !isSafeMissionId mid then
+        return some (.ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}"))
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
+        return some (.ok (mkJson cCode cBody))
+      let some m ← getMission? st.store mid
+        | return some (.ok (mkJson 404 "{\"error\":\"mission_not_found\"}"))
+      let safeDir ← match ← resolveConfinedCoreMissionGitDir st m with
+        | .ok d => pure d
+        | .error (cCode, cBody) => return some (.ok (mkJson cCode cBody))
+      let q := parseQueryParams rawTarget
+      let fromRef := (((q.find? (fun p => p.1 == "from_ref")).map Prod.snd).filter (!·.isEmpty)).getD "HEAD"
+      let toRef := (((q.find? (fun p => p.1 == "to_ref")).map Prod.snd).filter (!·.isEmpty)).getD "WORKTREE"
+      let sinceEpoch? := ((q.find? (fun p => p.1 == "since_epoch")).bind (fun p => p.2.toNat?)).map Nat.toUInt64
+      match ← OrbBin.GitWorkspace.diffCheckpoints safeDir fromRef toRef sinceEpoch? with
+      | Except.ok rep =>
+        return some (.ok (mkJson 200 (renderCompact rep.toJVal)))
+      | Except.error err =>
+        return some (.ok (mkJson 400 s!"\{\"error\":{jsonEscape err}}"))
+
+  if let some params := matchRoutePattern? "/api/control/missions/:id/checkpoints/restore" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if !isSafeMissionId mid then
+        return some (.ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}"))
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid true) then
+        return some (.ok (mkJson cCode cBody))
+      let some m ← getMission? st.store mid
+        | return some (.ok (mkJson 404 "{\"error\":\"mission_not_found\"}"))
+      let safeDir ← match ← resolveConfinedCoreMissionGitDir st m with
+        | .ok d => pure d
+        | .error (cCode, cBody) => return some (.ok (mkJson cCode cBody))
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return some (.ok (mkJson 400 "{\"error\":\"invalid_json\"}"))
+      let ref := (jv.fieldStr? "ref").getD ""
+      let turn? := jv.fieldNat? "turn"
+      match ← OrbBin.GitWorkspace.restoreCheckpoint safeDir mid ref turn? with
+      | Except.ok outJv =>
+        return some (.ok (mkJson 200 (renderCompact outJv)))
+      | Except.error err =>
+        return some (.ok (mkJson 400 s!"\{\"error\":{jsonEscape err}}"))
+
+  if let some params := matchRoutePattern? "/api/control/missions/:id/worktree" rawTarget then
+    let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+    if !isSafeMissionId mid then
+      return some (.ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}"))
+    if let some (cCode, cBody) := (← authorizeMissionOp st caller mid (req.method != "GET")) then
+      return some (.ok (mkJson cCode cBody))
+    let some m ← getMission? st.store mid
+      | return some (.ok (mkJson 404 "{\"error\":\"mission_not_found\"}"))
+    let safeDir ← match ← resolveConfinedCoreMissionGitDir st m with
+      | .ok d => pure d
+      | .error (cCode, cBody) => return some (.ok (mkJson cCode cBody))
+    let safeRoot ← match ← confineWorkingDirectory st.cfg.workingDir st.cfg.workingDir with
+      | .ok r => pure r
+      | .error err => return some (.ok (mkJson 400 s!"\{\"error\":{jsonEscape err}}"))
+    let otherCwds ← match st.warmMgr? with
+      | some mgr => OrbBin.ClaudeControl.activeRunCwdsExcept mgr mid
+      | none => pure #[]
+    if req.method == "GET" then
+      let q := parseQueryParams rawTarget
+      let preferWt := ((q.find? (fun p => p.1 == "prefer_worktree")).map Prod.snd) == some "true"
+      let wtSt ← OrbBin.GitWorkspace.inspectWorktreeStatus safeDir mid otherCwds preferWt (some safeRoot)
+      return some (.ok (mkJson 200 (renderCompact wtSt.toJVal)))
+    else if req.method == "POST" then
+      let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD (.obj #[])
+      let baseBranch? := (jv.fieldStr? "base_branch").filter (!·.isEmpty)
+      match ← OrbBin.GitWorkspace.createMissionWorktree safeDir mid baseBranch? (some safeRoot) with
+      | Except.ok created =>
+        let .ok safeWt ← confineWorkingDirectory st.cfg.workingDir created.worktreePath
+          | return some (.ok (mkJson 400 "{\"error\":\"worktree_outside_workspace_root\"}"))
+        discard <| execParamQuery st.store.missionsDb
+          "UPDATE missions SET working_directory=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1;"
+          #[mid, safeWt, s!"{nowEpochSec}"]
+        return some (.ok (mkJson 201 (renderCompact created.toJVal)))
+      | Except.error err =>
+        return some (.ok (mkJson 409 s!"\{\"error\":{jsonEscape err}}"))
+    else if req.method == "DELETE" then
+      let q := parseQueryParams rawTarget
+      let force := ((q.find? (fun p => p.1 == "force")).map Prod.snd) == some "true"
+      match ← OrbBin.GitWorkspace.removeMissionWorktree safeDir force with
+      | Except.ok outJv => return some (.ok (mkJson 200 (renderCompact outJv)))
+      | Except.error err => return some (.ok (mkJson 409 s!"\{\"error\":{jsonEscape err}}"))
+
+  if let some params := matchRoutePattern? "/api/control/missions/:id/permission-mode" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if !isSafeMissionId mid then
+        return some (.ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}"))
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid true) then
+        return some (.ok (mkJson cCode cBody))
+      let some _ ← getMission? st.store mid
+        | return some (.ok (mkJson 404 "{\"error\":\"mission_not_found\"}"))
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return some (.ok (mkJson 400 "{\"error\":\"invalid_json\"}"))
+      let rawMode := (jv.fieldStr? "mode").getD "supervised"
+      let parsedMode := OrbBin.ClaudeControl.parsePermissionMode rawMode
+      let applied ← match st.warmMgr? with
+        | some mgr => OrbBin.ClaudeControl.setSessionPermissionMode mgr mid parsedMode
+        | none => pure false
+      return some (.ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"mode\":{jsonEscape parsedMode.toUiWire},\"cli_mode\":{jsonEscape parsedMode.toCliWire},\"applied_live\":{if applied then "true" else "false"}}"))
+
+  if req.method == "POST" && cleanPath == "/api/control/tool_result" then
+    let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+      | return some (.ok (mkJson 400 "{\"error\":\"invalid_json\"}"))
+    let callId := (jv.fieldStr? "tool_call_id").getD ""
+    let toolName := (jv.fieldStr? "name").getD "ui_native_request"
+    let resultVal := (jv.field? "result").getD (.obj #[("action", .str "accept")])
+    if callId.trimAscii.toString.isEmpty then
+      return some (.ok (mkJson 400 "{\"error\":\"missing_tool_call_id\"}"))
+    let explicitMid? := (jv.fieldStr? "mission_id").filter (!·.isEmpty)
+    let mappedMid? ← match explicitMid? with
+      | some m => pure (some m)
+      | none =>
+        match st.pendingControlCallsRef? with
+        | some ref =>
+          let xs ← ref.get
+          pure ((xs.find? (fun p => p.1 == callId)).map Prod.snd)
+        | none => pure none
+    if let some mid := mappedMid? then
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
+        return some (.ok (mkJson cCode cBody))
+    let mut delivered := false
+    if let (some mgr, some mid) := (st.warmMgr?, mappedMid?) then
+      delivered ← OrbBin.ClaudeControl.respondToControlRequest mgr mid callId resultVal
+      if delivered then
+        if let some ref := st.pendingControlCallsRef? then
+          ref.modify fun xs => xs.filter (fun p => p.1 != callId)
+        let ts := formatEpochIso8601Utc nowEpochSec
+        let pl := renderCompact (.obj #[("tool_call_id", .str callId), ("tool_name", .str toolName), ("result", resultVal)])
+        discard <| appendMissionEvent st.store mid "tool_result" pl ts
+    return some (.ok (mkJson 200 s!"\{\"delivered\":{if delivered then "true" else "false"}}"))
+
+  return none
+
+set_option maxHeartbeats 800000 in
 /-- Dispatch a parsed `HttpRequest` against `CoreAppState` (`routes` capability parity:
     `"/api/control/missions/:id/automations"`, `"/api/model-routing"`). -/
 def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : UInt64) : IO (Except ByteArray CoreHttpResponse) := do
@@ -2274,16 +2573,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       | .ok pTok =>
         return .ok (mkJson 201 s!"\{\"mission_id\":{jsonEscape mid},\"token\":{jsonEscape pTok},\"expires_at\":{exp}}")
 
-  -- Mission Events, Messages & Files (`GET /api/control/missions/:id/events`, `/messages`, `/files`)
-  if let some params := matchRoutePattern? "/api/control/missions/:id/events" rawTarget then
-    if req.method == "GET" then
-      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
-      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
-        return .ok (mkJson cCode cBody)
-      let rows ← execParamQuery st.store.missionsDb
-        "SELECT seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 ORDER BY seq ASC;" #[mid]
-      return .ok (mkJson 200 (match rows with | .ok rs => rowsToJsonArray rs | .error _ => "[]"))
-
+  -- Mission Messages & Files (`GET /api/control/missions/:id/messages`, `/files`; `/events` handled by cursor-paginated `X-Orb-Events-Protocol: 1` below)
   if let some params := matchRoutePattern? "/api/control/missions/:id/messages" rawTarget then
     if req.method == "GET" then
       let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
@@ -2574,6 +2864,13 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         if isCloudBackendName backend then
           if let some cw := st.cloudWakeup? then
             discard <| notifyCloudWorker cw
+        let spawnWanted := (bodyJv.fieldBool? "spawn_harness").getD false
+        if spawnWanted then
+          if let some p := prompt? then
+            let deliv := if selectedSkills.isEmpty then p else withDirective p selectedSkills
+            let permMode := (bodyJv.fieldStr? "permission_mode").getD "supervised"
+            let wtMode := (bodyJv.fieldStr? "worktree_mode").getD ""
+            discard <| maybeSpawnWarmHarnessTurn st caller placeKind mid backend safeWorkDir deliv modelOverride normEffort permMode wtMode true
         if let some sIdx := st.searchIdx? then
           discard <| indexConversation sIdx mid title
         return .ok (mkJson 201 respBody)
@@ -2597,6 +2894,9 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
               hits := hits.push hMid
       let hitJson := "[" ++ String.intercalate "," (hits.toList.map jsonEscape) ++ "]"
       return .ok (mkJson 200 s!"\{\"hits\":{hitJson}}")
+
+  if let some res ← dispatchMissionControlAndGitRoutes? st req rawTarget cleanPath caller reqOrigin? nowEpochSec then
+    return res
 
   -- Mission Board Task Admission (`POST /api/control/missions/:id/board-task`, `SM-13`)
   if let some params := matchRoutePattern? "/api/control/missions/:id/board-task" rawTarget then
@@ -3332,6 +3632,12 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     let deliveredField :=
       if selectedSkills.isEmpty then ""
       else s!",\"delivered_prompt\":{jsonEscape (withDirective content selectedSkills)}"
+    let spawnWanted := (bodyJv.fieldBool? "spawn_harness").getD false
+    if spawnWanted then
+      if let (some mid, some m) := (mid?, mission?) then
+        let deliv := if selectedSkills.isEmpty then content else withDirective content selectedSkills
+        let permMode := (bodyJv.fieldStr? "permission_mode").getD "supervised"
+        discard <| maybeSpawnWarmHarnessTurn st caller m.placementKind mid m.backend m.workingDirectory deliv m.modelOverride m.modelEffort permMode "" false
     return .ok (mkJson 200 (
       s!"\{\"id\":{jsonEscape msgId},\"queued\":false,\"message_accepted\":true," ++
       s!"\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}{deliveredField}}"))
@@ -3399,6 +3705,12 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
           if selectedSkills.isEmpty then ""
           else s!",\"delivered_prompt\":{jsonEscape (withDirective c selectedSkills)}"
         | none => ""
+      let spawnWanted := (bodyJv.fieldBool? "spawn_harness").getD false
+      if spawnWanted then
+        let rawPrompt := content?.getD "Continue."
+        let deliv := if selectedSkills.isEmpty then rawPrompt else withDirective rawPrompt selectedSkills
+        let permMode := (bodyJv.fieldStr? "permission_mode").getD "supervised"
+        discard <| maybeSpawnWarmHarnessTurn st caller m.placementKind mid m.backend m.workingDirectory deliv m.modelOverride m.modelEffort permMode "" true
       return .ok (mkJson 200 s!"\{\"id\":{jsonEscape mid},\"status\":\"active\"{deliveredField}}")
 
   -- Delivered skill catalog (`GET /api/library/skill-delivery`)
@@ -3999,6 +4311,8 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let initTelTarget? ← resolveHubTarget (effectiveJwtSecret cfg) store.rootDir initTelSettings
     syncSinkTarget telemetrySink initTelTarget?
     let voiceSlots ← newVoiceRelaySlots
+    let warmMgr ← OrbBin.ClaudeControl.newWarmHarnessManager
+    let pendingControlCallsRef ← IO.mkRef (#[] : Array (String × String))
     let appState : CoreAppState := {
       cfg := cfg
       store := store
@@ -4019,6 +4333,8 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       bootstrapAdminId := bootAdminId
       telemetrySink? := some telemetrySink
       voiceSlots? := some voiceSlots
+      warmMgr? := some warmMgr
+      pendingControlCallsRef? := some pendingControlCallsRef
     }
     let bindHost := if cfg.host == "localhost" then "127.0.0.1" else cfg.host
     let .ok (listenFd, boundPort) ← tcpListen bindHost cfg.port 128

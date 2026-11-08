@@ -47,6 +47,7 @@ import { MdView, ReadOnlySource } from "./Markdown";
 import { FileSkeleton } from "./Skeleton";
 import { ErrorToast } from "./toast";
 import { connectionVersion } from "./api";
+import { localBinding } from "./localAgents";
 import * as Ic from "./icons";
 
 import ImagePreview from "./ImagePreview";
@@ -54,6 +55,7 @@ import { imageByteLimit, imageMime } from "./imageTypes";
 import { scrollKeeper } from "./mission/scrollPolicy";
 
 const PdfPreview = lazy(() => import("./PdfPreview"));
+const DiffViewer = lazy(() => import("./DiffViewer"));
 
 type Tab = FileRef & { pinned: boolean; scroll?: number };
 type Saved = {
@@ -188,11 +190,20 @@ export function FilePanelProvider(p: {
     readGeneration = 0;
   let layoutMarker: HTMLSpanElement | undefined;
   const [layout, setLayout] = createSignal<HTMLElement>();
+  const [panelTab, setPanelTab] = createSignal<"files" | "changes">("files");
   onMount(() => {
     const app=layoutMarker?.closest<HTMLElement>(".app");
     setLayout(app ?? undefined);
     const width=Number(localStorage.getItem("orb.files.width"));
     if(app&&width>0)app.style.setProperty("--file-panel-width",`${width}px`);
+    const onOpenChanges = () => {
+      if (p.scope.mission?.id) {
+        setOpened(true);
+        setPanelTab("changes");
+      }
+    };
+    window.addEventListener("orb:open-changes", onOpenChanges);
+    onCleanup(() => window.removeEventListener("orb:open-changes", onOpenChanges));
   });
   // The side-question column is only for an open mission. Leaving that view
   // (Resources, Inbox, …) must drop it even if the panel unmounted without
@@ -280,6 +291,7 @@ export function FilePanelProvider(p: {
       const owner = untrack(() => p.missionOpen ?? p.scope.mission?.id ?? `project:${p.scope.project ?? ""}:${p.scope.controller ?? ""}`);
       setFilesOpened(saved.open);
       if (owner !== shownFor) {
+        setPanelTab("files");
         zenRestore = null;
         if (saved.open) setSideVisible(false);
       }
@@ -313,6 +325,7 @@ export function FilePanelProvider(p: {
   function openFile(ref: FileRef, pinned = false, record = true) {
     rememberScroll();
     const key = identity(ref);
+    setPanelTab("files");
     setOpened(true);
     setSearch(null);
     setChoices([]);
@@ -1057,14 +1070,37 @@ export function FilePanelProvider(p: {
               <button
                 aria-label="Find file"
                 onClick={() => {
+                  setPanelTab("files");
                   setSearch("");
                   requestAnimationFrame(() => searchInput?.focus());
                 }}
               >
                 <Ic.SearchIcon size={16} />
               </button>
+              <Show when={p.scope.mission?.id}>
+                <div class="file-panel-tabs" role="tablist" aria-label="Workspace view">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={panelTab() === "files"}
+                    class={panelTab() === "files" ? "active" : ""}
+                    onClick={() => setPanelTab("files")}
+                  >
+                    Files
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={panelTab() === "changes"}
+                    class={panelTab() === "changes" ? "active" : ""}
+                    onClick={() => setPanelTab("changes")}
+                  >
+                    Changes
+                  </button>
+                </div>
+              </Show>
               <div class="file-tab-list" data-orb-drag-region>
-                <Show when={!tabs().length}>
+                <Show when={!tabs().length && !p.scope.mission?.id}>
                   <span class="file-header-title" data-orb-drag-region>Files</span>
                 </Show>
                 <For each={tabs()}>
@@ -1146,6 +1182,10 @@ export function FilePanelProvider(p: {
               </div>
             </Show>
             <div class="file-body">
+              <Show
+                when={panelTab() === "changes" && p.scope.mission?.id}
+                fallback={
+                  <>
               <Show when={tree()}>
                 <nav class="file-tree" aria-label="File explorer">
                   <For each={sources()}>
@@ -1377,6 +1417,20 @@ export function FilePanelProvider(p: {
                   )}
                 </Show>
               </div>
+                  </>
+                }
+              >
+                <Suspense fallback={<div class="file-preview"><FileSkeleton /></div>}>
+                  <DiffViewer
+                    missionId={p.scope.mission!.id}
+                    cwd={
+                      localBinding(p.scope.mission!.id)?.cwd ??
+                      p.scope.mission!.working_directory ??
+                      undefined
+                    }
+                  />
+                </Suspense>
+              </Show>
             </div>
             <Show when={notice()}>
               <div class="file-muted">{notice()}</div>

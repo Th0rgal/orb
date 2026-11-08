@@ -174,11 +174,16 @@ object OrbQuestionExtractor {
         val params = OrbJSON.dict(request["params"]) ?: request
         val input = OrbJSON.dict(params["input"])
         val detail = OrbJSON.str(params, "plan") ?: OrbJSON.str(input, "description")
+        val opts = if (method == "permission") {
+            listOf("Allow once", "Allow for session", "Decline")
+        } else {
+            listOf("Approve", "Decline")
+        }
         return OrbQuestion(
             id = "native-$callId",
             title = if (method == "plan") "Plan ready for review" else "Review request",
             prompt = detail ?: if (method == "plan") "Review the plan." else "The agent is asking for approval.",
-            options = listOf("Approve", "Decline"),
+            options = opts,
             kind = if (method == "plan") OrbQuestion.Kind.Plan else OrbQuestion.Kind.Permission,
             toolCallId = callId,
             toolName = toolName,
