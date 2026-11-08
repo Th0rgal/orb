@@ -741,6 +741,18 @@ struct OrbNativeMarkdownView: View {
         trimmed.hasPrefix("$$") || trimmed.hasPrefix("\\[")
     }
 
+    static func isBlockTableRow(_ trimmed: String) -> Bool {
+        isTableRow(trimmed)
+    }
+
+    static func isBlockStandaloneImage(_ trimmed: String) -> Bool {
+        parseStandaloneImage(trimmed) != nil
+    }
+
+    static func isBlockDisplayMathStart(_ trimmed: String) -> Bool {
+        isDisplayMathStart(trimmed)
+    }
+
     static func parseBlocks(_ source: String) -> [Block] {
         var blocks: [Block] = []
         let lines = OrbPipeTables.normalize(OrbCodeFences.normalize(source)).components(separatedBy: "\n")

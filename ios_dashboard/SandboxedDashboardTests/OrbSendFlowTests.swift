@@ -405,4 +405,65 @@ final class OrbSendFlowTests: XCTestCase {
             "Select at most 8 distinct skills"
         )
     }
+
+    func testFollowUpQueueRevisionCASDuplicateEnqueueAndTurnSeqPollRetire() {
+        var q = OrbFollowUpQueue()
+        XCTAssertEqual(q.serverRev, 1)
+        XCTAssertFalse(q.hasServerRevision)
+        XCTAssertNil(q.expectedRevision(for: "c1"))
+
+        q = q.enqueue("c1", "first", lastSequence: 10)
+        let dup = q.enqueue("c1", "changed-duplicate", lastSequence: 10)
+        XCTAssertEqual(dup.rows.map(\.content), ["first"])
+        XCTAssertEqual(dup.pending.count, 1)
+
+        q = q.posted("c1", queued: true, at: Date(timeIntervalSince1970: 100))
+        q = q.withServer([OrbQueuedRow(id: "c1", content: "first")], incomingServerRev: 5)
+        XCTAssertEqual(q.serverRev, 5)
+        XCTAssertTrue(q.hasServerRevision)
+        XCTAssertEqual(q.expectedRevision(for: "c1"), 5)
+
+        let stalePoll = q.withServer([], incomingServerRev: 4)
+        XCTAssertEqual(stalePoll, q, "stale incomingServerRev must not overwrite newer queue snapshot")
+
+        let staleEdit = q.edit("c1", "stale", expectedServerRev: 4)
+        XCTAssertEqual(staleEdit, q, "stale expectedServerRev CAS must reject edit")
+
+        let staged = q.edit("c1", "updated", expectedServerRev: 5)
+        XCTAssertEqual(staged.serverRev, 5, "optimistic edit stages content without inflating serverRev before PATCH")
+        XCTAssertEqual(staged.rows.map(\.content), ["updated"])
+
+        let reverted = staged.editReverted("c1")
+        XCTAssertEqual(reverted.serverRev, 5)
+        let pollAfterRevert = reverted.withServer([OrbQueuedRow(id: "c1", content: "first", revision: 5)], incomingServerRev: 5)
+        XCTAssertEqual(pollAfterRevert.rows.map(\.content), ["first"], "poll at same revision after revert must not be dropped as STALE_REV")
+
+        let confirmed = staged.editConfirmed("c1", "updated", expectedServerRev: 5)
+        XCTAssertEqual(confirmed.serverRev, 6)
+        XCTAssertTrue(confirmed.edits.isEmpty)
+        XCTAssertEqual(confirmed.server.map(\.content), ["updated"])
+        XCTAssertEqual(confirmed.server.first?.revision, 6)
+
+        // Envelope & row revision extraction parity with desktop listQueuedMessages.
+        let envelope = OrbJSON.object([
+            "revision": .number(9),
+            "items": .array([
+                .object(["id": .string("m1"), "content": .string("hi"), "mission_id": .string("m"), "revision": .number(11)]),
+                .object(["id": .string("other"), "content": .string("no"), "mission_id": .string("x"), "revision": .number(99)]),
+            ]),
+        ])
+        let parsed = OrbFollowUpQueue.parseResponse(envelope, missionID: "m")
+        XCTAssertEqual(parsed.rows.map(\.id), ["m1"])
+        XCTAssertEqual(parsed.rows.first?.revision, 11)
+        XCTAssertEqual(parsed.revision, 11)
+
+        var p = OrbFollowUpQueue()
+            .enqueue("p1", "queued", lastSequence: 20)
+            .posted("p1", queued: true, at: Date(timeIntervalSince1970: 200))
+        p = p.withServer([], incomingServerRev: 2, turnSeq: 20)
+        XCTAssertEqual(p.count, 1, "poll at same turnSeq keeps accepted unlisted row")
+        p = p.withServer([], incomingServerRev: 3, turnSeq: 21)
+        XCTAssertEqual(p.count, 0, "poll after turnSeq advances retires accepted unlisted row")
+        XCTAssertTrue(p.delivered.contains("p1"))
+    }
 }

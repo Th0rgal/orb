@@ -754,16 +754,21 @@ fun OrbSideAgentSheet(
         val fetchedAtMs = System.currentTimeMillis()
         val parsedThread = cachedThreads[id]?.second
         val lastSequence = (parsedThread?.maxSequence ?: OrbSideAgent.maxEventSeq(cachedEventsByThread[id].orEmpty())).takeIf { it > 0L }
-        val items = runCatching {
-            OrbJSON.dictList(core.request("/api/control/queue?mission_id=${core.encodeComponent(id)}"))
+        val rawQueue = runCatching {
+            core.request("/api/control/queue?mission_id=${core.encodeComponent(id)}")
         }.getOrNull()
-        if (items != null) {
-            val parsed = OrbFollowUpQueue.parse(items, id)
-            val displayRows = parsed.map { row ->
+        if (rawQueue != null) {
+            val parsedQueue = OrbFollowUpQueue.parseResponse(rawQueue, id)
+            val displayRows = parsedQueue.rows.map { row ->
                 rawQueuedById[row.id] = row.content
                 row.copy(content = OrbMessagePresentation.parse(row.content).text)
             }
-            followUps = followUps.withServer(displayRows, fetchedAtMs = fetchedAtMs, lastSequence = lastSequence)
+            followUps = followUps.withServer(
+                displayRows,
+                fetchedAtMs = fetchedAtMs,
+                lastSequence = lastSequence,
+                incomingServerRev = parsedQueue.revision
+            )
         }
         parsedThread?.deliveredMessages?.takeIf { it.isNotEmpty() }?.let { followUps = followUps.reconciled(it) }
     }
@@ -1165,13 +1170,20 @@ fun OrbSideAgentSheet(
         val targetId = boundId ?: return
         editingQueuedId = null
         inputText = ""
-        if (followUps.row(queueId) == null) {
+        val before = followUps.row(queueId)
+        if (before == null) {
             error = "This side question was already sent. Your edit was not applied."
             return
         }
-        followUps = followUps.edit(queueId, content)
-        val base = rawQueuedById[queueId] ?: followUps.row(queueId)?.content ?: content
+        val base = rawQueuedById[queueId] ?: before.content
         val wireContent = OrbMessagePresentation.replaceUserText(base, content)
+        val expectedRev = followUps.expectedRevision(queueId)
+        val staged = followUps.edit(queueId, content, expectedServerRev = expectedRev)
+        if (staged.edits[queueId] != content) {
+            error = "This side question was already sent, so the edit was not applied."
+            return
+        }
+        followUps = staged
         scope.launch {
             try {
                 OrbCyberAccess.requireFollowUp(core, targetId, OrbSideAgent.extractQuestion(wireContent))
@@ -1182,10 +1194,14 @@ fun OrbSideAgentSheet(
                 error = OrbCyberAccess.error(e)
                 return@launch
             }
+            val patchBody = mutableMapOf<String, Any>("content" to wireContent)
+            if (expectedRev != null) patchBody["expected_revision"] = expectedRev
+            var errorDetail = ""
             val httpStatus = try {
-                core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "PATCH", body = mapOf("content" to wireContent))
+                core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "PATCH", body = patchBody)
                 200
             } catch (e: OrbError) {
+                errorDetail = e.message.orEmpty()
                 e.status ?: -1
             } catch (_: Throwable) {
                 -1
@@ -1193,7 +1209,7 @@ fun OrbSideAgentSheet(
             when (OrbSendFlow.editOutcome(httpStatus.takeIf { it >= 0 })) {
                 OrbEditOutcome.Edited -> {
                     rawQueuedById[queueId] = wireContent
-                    followUps = followUps.editConfirmed(queueId, content)
+                    followUps = followUps.editConfirmed(queueId, content, expectedServerRev = expectedRev)
                     UsageTelemetry.trackAction(UsageTelemetry.Action.MessageEdit, "btw_queue")
                 }
                 OrbEditOutcome.Unsupported -> {
@@ -1202,7 +1218,12 @@ fun OrbSideAgentSheet(
                 }
                 OrbEditOutcome.AlreadySent -> {
                     followUps = followUps.editReverted(queueId)
-                    error = "This side question was already sent, so the edit was not applied."
+                    val isRevConflict = httpStatus == 409 && (errorDetail.contains("revision", ignoreCase = true) || errorDetail.contains("stale", ignoreCase = true))
+                    error = if (isRevConflict) {
+                        "Queue changed on another client; refreshed queue before editing."
+                    } else {
+                        "This side question was already sent, so the edit was not applied."
+                    }
                     refreshThreads(force = true)
                 }
                 OrbEditOutcome.Failed -> {
