@@ -20,6 +20,7 @@ import OrbCore.Managed
 import OrbCore.MemoryAndCloud
 import OrbCore.HarnessSessionRegistry
 import OrbCore.QueueCont
+import OrbCore.R7Core
 import OrbNetLeaf.TlsHttp
 
 namespace OrbCore.Control
@@ -44,6 +45,7 @@ open OrbCore.Managed
 open OrbCore.MemoryAndCloud
 open OrbCore.HarnessSessionRegistry
 open OrbCore.QueueCont
+open OrbCore.R7Core
 open OrbNetLeaf.TlsHttp
 
 /-- Core runtime configuration parsed from environment variables (`HOST`, `PORT`, `WORKING_DIR`,
@@ -555,6 +557,7 @@ private def reasonPhrase : Nat → String
   | 403 => "Forbidden"
   | 404 => "Not Found"
   | 409 => "Conflict"
+  | 413 => "Payload Too Large"
   | 422 => "Unprocessable Entity"
   | 429 => "Too Many Requests"
   | 502 => "Bad Gateway"
@@ -585,7 +588,7 @@ def encodeCoreHttpResponse (r : CoreHttpResponse) : ByteArray := Id.run do
       else
         s!"Access-Control-Allow-Origin: {orig}\r\n" ++
         "Vary: Origin\r\n" ++
-        "Access-Control-Allow-Headers: Authorization, Content-Type, Idempotency-Key, X-Paloma-Approval, X-Orb-Token, X-Language, Last-Event-ID, Cache-Control, Accept\r\n" ++
+        "Access-Control-Allow-Headers: Authorization, Content-Type, Idempotency-Key, X-Paloma-Approval, X-Orb-Token, X-Orb-Lease, X-Language, Last-Event-ID, Cache-Control, Accept\r\n" ++
         "Access-Control-Expose-Headers: X-Orb-Events-Protocol, X-Has-More, X-Next-Cursor, X-Page-Max-Sequence, X-Max-Sequence, Content-Disposition, Retry-After, X-Request-Id\r\n" ++
         "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
     | none => ""
@@ -909,7 +912,8 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         match ← OrbBin.PrivdShared.checkScopeRestrictions lease.scope allowedUnits argv (jv.fieldStr? "cwd") #[] lease.requireForceCmd with
         | .ok _ => pure true
         | .error _ => pure false
-    let bunkerWord := bunkerStep 0 0 0 0 0
+    let liveBunker ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
+    let bunkerWord := bunkerStep liveBunker 0 0 0 0
     let bunkerState : UInt8 := (bunkerWord &&& 0xFF).toUInt8
     let sameOwner : UInt8 := if lease.missionId == missionId && targetMatches && execMatches then 1 else 0
     let privWord := privilegeStep
@@ -927,18 +931,20 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         if h == 0 || h == tgtHash then tgtHash ^^^ 1 else h
     let cmdDigest := hash64Fnv1a (cmdText ++ "\x00" ++ String.intercalate "\x00" argv.toList)
     let principalKind : UInt8 := sRank + 1
+    let liveLeaseEp : UInt64 := if lease.leaseEpoch != 0 then lease.leaseEpoch else lease.expiresAtEpoch
     let toctouWord := authToctouExecuteStep principalKind bunkerState
       tgtHash execHash
-      lease.expiresAtEpoch lease.expiresAtEpoch nowEpochSec lease.expiresAtEpoch
+      liveLeaseEp (if lease.revoked then 0 else liveLeaseEp) nowEpochSec lease.expiresAtEpoch
       cmdDigest cmdDigest
     let allowExec := cmdScopeOk && (privWord &&& 1) == 1 && toctouWord == 257
     if let .error e ← appendPrivilegeAuditLog st.store lease.grantId missionId targetHost execHost cmdText allowExec s!"{nowEpochSec}" then
-      return .ok (mkJson 500 s!"\{\"allow_exec\":false,\"allowed\":false,\"error\":{jsonEscape e}}")
+      return .ok (mkJson 500 s!"\{\"allow_exec\":false,\"allowed\":false,\"bunker_state\":{bunkerState.toNat},\"expires_at\":{lease.expiresAtEpoch},\"lease_epoch\":{if lease.revoked then 0 else liveLeaseEp},\"error\":{jsonEscape e}}")
     if !allowExec then
-      return .ok (mkJson 403 "{\"allow_exec\":false,\"allowed\":false,\"error\":\"lease_denied\"}")
+      let denyReason := if bunkerState != 0 then "bunker_active" else "lease_denied"
+      return .ok (mkJson 403 s!"\{\"allow_exec\":false,\"allowed\":false,\"bunker_state\":{bunkerState.toNat},\"expires_at\":{lease.expiresAtEpoch},\"lease_epoch\":{if lease.revoked then 0 else liveLeaseEp},\"error\":{jsonEscape denyReason}}")
     let rfStr := if lease.requireForceCmd then "true" else "false"
     let unitsRaw := if lease.allowedUnitsJson.startsWith "[" then lease.allowedUnitsJson else "[]"
-    return .ok (mkJson 200 s!"\{\"allow_exec\":true,\"allowed\":true,\"grant_id\":{jsonEscape lease.grantId},\"scope\":{jsonEscape lease.scope},\"allowed_units\":{unitsRaw},\"require_force_cmd\":{rfStr}}")
+    return .ok (mkJson 200 s!"\{\"allow_exec\":true,\"allowed\":true,\"grant_id\":{jsonEscape lease.grantId},\"scope\":{jsonEscape lease.scope},\"allowed_units\":{unitsRaw},\"require_force_cmd\":{rfStr},\"bunker_state\":{bunkerState.toNat},\"expires_at\":{lease.expiresAtEpoch},\"lease_epoch\":{liveLeaseEp}}")
 
   -- 5b. Unified Control-Plane MCP Gateway (`/api/mcp/session`, `/api/mcp/renew`, `/api/mcp/capabilities`, `/api/mcp/call`)
   if cleanPath.startsWith "/api/mcp/" then
@@ -1709,6 +1715,19 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       let hitJson := "[" ++ String.intercalate "," (hits.toList.map jsonEscape) ++ "]"
       return .ok (mkJson 200 s!"\{\"hits\":{hitJson}}")
 
+  -- Mission Board Task Admission (`POST /api/control/missions/:id/board-task`, `SM-13`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/board-task" rawTarget then
+    if req.method == "POST" then
+      let rawMid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let some mid := percentDecodeStrict rawMid
+        | return .ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}")
+      if mid.isEmpty then
+        return .ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}")
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let (code, body) ← postBoardTask st.store mid jv
+      return .ok (mkJson code body)
+
   -- Mission Detail (`GET /api/control/missions/:id`, `SM-01`, `SM-07`)
   if let some params := matchRoutePattern? "/api/control/missions/:id" rawTarget then
     if req.method == "GET" then
@@ -2416,8 +2435,150 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         match ← revokeAuthCredentialLive rotH candGen nowEpochSec with
         | .error reason => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape reason}}")
         | .ok _ =>
-          let led ← snapshotRotationLedger rotH
-          return .ok (mkJson 200 (renderLedger led))
+            let led ← snapshotRotationLedger rotH
+            return .ok (mkJson 200 (renderLedger led))
+
+  -- Inbox Single-Owner CAS (`GET /api/control/inbox-state`, `PUT /api/control/inbox-state/*`, `SM-18`)
+  if cleanPath == "/api/control/inbox-state" && req.method == "GET" then
+    match ← readInboxStateJson st.store with
+    | .ok body => return .ok (mkJson 200 body)
+    | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
+  if cleanPath.startsWith "/api/control/inbox-state/" && req.method == "PUT" then
+    let subPath := (cleanPath.drop 25).toString
+    let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+      | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+    match parseInboxPut subPath jv with
+    | .error "unknown_inbox_path" => return .ok (mkJson 404 "{\"error\":\"unknown_inbox_path\"}")
+    | .error e => return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+    | .ok putReq =>
+      let (code, body) ← putInboxState st.store putReq
+      return .ok (mkJson code body)
+
+  -- Project Context Replica Endpoints (`/api/projects/:project/context/*`, `SM-18`) and Tracks/Board (`SM-13`)
+  if cleanPath.startsWith "/api/projects/" then
+    let afterPfx := (cleanPath.drop 14).toString
+    let segs := afterPfx.splitOn "/"
+    match segs with
+    | [rawProj, "tracks"] =>
+      if req.method == "POST" then
+        let proj := match percentDecodeStrict rawProj with | some p => p | none => ""
+        if proj.isEmpty then
+          return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
+        let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+          | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+        let track := (jv.fieldStr? "track").getD ""
+        let desired := (jv.fieldStr? "desired_condition").getD ""
+        let status := (jv.fieldStr? "status").getD "open"
+        let expRev? := jv.fieldNat? "expected_revision"
+        let (code, body) ← putProjectTrack st.store proj track desired status s!"{nowEpochSec}" expRev?
+        return .ok (mkJson code body)
+    | [rawProj, "board"] =>
+      if req.method == "GET" then
+        let proj := match percentDecodeStrict rawProj with | some p => p | none => ""
+        if proj.isEmpty || !validProjectSlug proj then
+          return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
+        match ← projectBoardJson st.store proj with
+        | .ok body => return .ok (mkJson 200 body)
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+    | rawProj :: "context" :: restSegs =>
+      let proj := match percentDecodeStrict rawProj with | some p => p | none => ""
+      if proj.isEmpty || !validProjectSlug proj then
+        return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
+      let rest := String.intercalate "/" restSegs
+      let (kind, arg) := splitContextSuffix rest
+      if kind == "manifest" && req.method == "GET" && arg.isEmpty then
+        match ← contextManifestJson st.store proj with
+        | .ok body => return .ok (mkJson 200 body)
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      else if kind == "conflicts" && req.method == "GET" && arg.isEmpty then
+        match ← contextConflictsJson st.store proj with
+        | .ok body => return .ok (mkJson 200 body)
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      else if kind == "conflicts" && req.method == "POST" && !arg.isEmpty then
+        let some cid := percentDecodeStrict arg
+          | return .ok (mkJson 400 "{\"error\":\"invalid_conflict_id\"}")
+        if cid.isEmpty then
+          return .ok (mkJson 400 "{\"error\":\"invalid_conflict_id\"}")
+        let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+          | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+        match ← applyContextOperation st.store st.store.rootDir proj jv s!"{nowEpochSec}" (some cid) with
+        | .ok (code, body) => return .ok (mkJson code body)
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      else if kind == "history" && req.method == "GET" && arg.isEmpty then
+        match ← contextHistoryJson st.store proj with
+        | .ok body => return .ok (mkJson 200 body)
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      else if kind == "stream" && req.method == "GET" && arg.isEmpty then
+        match ← contextStreamEvent st.store proj with
+        | .ok ev =>
+          return .ok {
+            status := 200,
+            contentType := "text/event-stream",
+            corsOrigin? := reqOrigin?,
+            extraHdrs := #[("Cache-Control", "no-cache"), ("X-Accel-Buffering", "no")],
+            body := ev.toUTF8
+          }
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      else if kind == "blobs" && req.method == "POST" && arg.isEmpty then
+        let qParams := parseQueryParams rawTarget
+        let confirmedLarge :=
+          ((qParams.find? (fun p => p.1 == "confirmed_large")).map Prod.snd |>.getD "") == "true" ||
+          ((lookupHeaderCI req.headers "x-orb-confirmed-large").getD "") == "1"
+        match ← putContextBlob st.store.rootDir proj req.bodySlice.toByteArray confirmedLarge with
+        | .ok hash => return .ok (mkJson 200 s!"\{\"hash\":{jsonEscape hash}}")
+        | .error "oversize" => return .ok (mkJson 413 "{\"error\":\"blob_too_large\"}")
+        | .error e => return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+      else if kind == "blobs" && req.method == "GET" && !arg.isEmpty then
+        match ← readContextBlob st.store.rootDir proj arg with
+        | .ok bytes =>
+          return .ok { status := 200, contentType := "application/octet-stream", corsOrigin? := reqOrigin?, body := bytes }
+        | .error "blob not found" => return .ok (mkJson 404 "{\"error\":\"blob_not_found\"}")
+        | .error e => return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+      else if kind == "operations" && req.method == "POST" && arg.isEmpty then
+        let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+          | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+        match ← applyContextOperation st.store st.store.rootDir proj jv s!"{nowEpochSec}" with
+        | .ok (code, body) => return .ok (mkJson code body)
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+    | _ => pure ()
+
+  -- Guarded System Deploy (`POST /api/system/deploy`, `SM-22` / `G-ORB-7`)
+  if cleanPath == "/api/system/deploy" && req.method == "POST" then
+    let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+      | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+    let rawUnit :=
+      match jv.fieldStr? "service" with
+      | some s => s
+      | none => (jv.fieldStr? "expected_service").getD "sandboxed-sh"
+    let .ok unitName := validateDeployServiceUnit rawUnit
+      | return .ok (mkJson 400 "{\"error\":\"invalid_deploy_unit\"}")
+    let dryRun := (jv.fieldBool? "dry_run").getD false
+    let forceFlag := (jv.fieldBool? "force").getD false
+    let _skipBuild := (jv.fieldBool? "skip_build").getD false
+    let _repoPath := (jv.fieldStr? "repo_path").getD ""
+    let _callingMissionId := (jv.fieldStr? "calling_mission_id").getD ""
+    let _gitRef := (jv.fieldStr? "git_ref").getD ""
+    let bodyLease := (jv.fieldStr? "lease_token").getD ""
+    let hdrLease := (lookupHeaderCI req.headers "x-orb-lease").getD ""
+    let leaseTok := if !bodyLease.isEmpty then bodyLease else hdrLease
+    if leaseTok.isEmpty then
+      return .ok (mkJson 403 "{\"error\":\"lease_required\"}")
+    let some lease ← lookupPrivilegeLease? st.store leaseTok
+      | return .ok (mkJson 403 "{\"error\":\"unknown_lease\"}")
+    let nowLive ← coreEpochSec
+    let memBunker ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
+    let obs ← observeDeployLive st.store unitName forceFlag dryRun false (some lease) nowLive memBunker
+    let reobserve : IO DeployObservation := do
+      let liveSec ← coreEpochSec
+      let liveMem ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
+      let liveLease? ← lookupPrivilegeLease? st.store leaseTok
+      observeDeployLive st.store unitName forceFlag dryRun false liveLease? liveSec liveMem
+    match ← runGuardedDeploy st.store obs reobserve dryRun s!"{nowLive}" none with
+    | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+    | .ok rcpt =>
+      let code := if rcpt.verdict == "admitted" || rcpt.verdict == "dry_run_admitted" then 200 else 409
+      return .ok (mkJson code s!"\{\"unit\":{jsonEscape rcpt.unitName},\"verdict\":{jsonEscape rcpt.verdict},\"verdict_code\":{rcpt.verdictCode},\"dry_run\":{if rcpt.dryRun then "true" else "false"}}")
 
   return .ok (mkJson 404 s!"\{\"error\":\"not_found\",\"path\":{jsonEscape cleanPath}}")
 
@@ -2462,9 +2623,9 @@ private def runWebSocketSessionLoop (cfd : Fd) : IO Unit := do
     if let some cls := makeServerClose? 1000 "" then
       discard <| writeAll cfd cls false
 
-/-- Serve one accepted TCP connection on `cfd` using full multi-packet `readHttpRequestFromFd`. -/
+/-- Serve one accepted TCP connection on `cfd` using full multi-packet `readCoreHttpRequestFromFd`. -/
 def handleClientConn (st : CoreAppState) (cfd : Fd) : IO Unit := do
-  match ← readHttpRequestFromFd cfd none 5000 with
+  match ← readCoreHttpRequestFromFd cfd 5000 with
   | .error errMsg =>
     let code := statusForParseError errMsg
     let resp := encodeCoreHttpResponse (jsonResponse code s!"\{\"error\":{jsonEscape errMsg}}")
@@ -2530,7 +2691,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let cliProxySessionsRef ← IO.mkRef (#[] : Array CliProxyLoginSession)
     let memTokenCache ← newMemoryTokenCache
     let cloudWakeup ← newCloudWorkerWakeup
-    let bunkerRef ← IO.mkRef (0 : UInt8)
+    let bunkerRef ← IO.mkRef (← readPersistedBunkerState store)
     let appState : CoreAppState := {
       cfg := cfg
       store := store

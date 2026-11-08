@@ -23,6 +23,7 @@ import OrbCore.Managed
 import OrbCore.CloudAgents
 import OrbCore.MemoryAndCloud
 import OrbCore.QueueCont
+import OrbCore.R7Core
 import OrbCore.Control
 import OrbCore.HostObservers
 import OrbCore.HostTests

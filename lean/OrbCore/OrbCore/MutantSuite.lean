@@ -1,6 +1,6 @@
 /-
-  OrbCore.MutantSuite: Adversarial Mutant Kills (`7/7` domain gates covered, `0 sorryAx`)
-  for Wave 4 `OrbCore.Spec`.
+  OrbCore.MutantSuite: Adversarial Mutant Kills (`11/11` domain gates covered)
+  for Wave 4 + Phase R7 `OrbCore.Spec`.
 -/
 import OrbCore.Spec
 
@@ -50,7 +50,7 @@ def verifyProxyFailoverStepMutantCommitted
 def verifyDeployUnitNameMutantTraversal
     (unitCode hasPathTraversal : UInt8) (unitLen : UInt32) : UInt8 :=
   if hasPathTraversal ≤ 1 &&
-     ((unitCode == 1 && unitLen ≥ 8 && unitLen ≤ 20) ||
+     ((unitCode == 1 && unitLen ≥ 8 && unitLen ≤ 25) ||
       (unitCode == 2 && unitLen ≥ 8 && unitLen ≤ 22) ||
       (unitCode == 3 && unitLen ≥ 9 && unitLen ≤ 17)) then 1 else 0
 
@@ -74,6 +74,43 @@ def verifyRemoteReplaySupersessionMutantManualOverride
      (placementJobHash == failedJobHash ||
       (latestRunTerminal == 1 &&
        latestRunJobHash > 0 && latestRunJobHash == placementJobHash)) then 1 else 0
+
+/-- Mutant 8: Commits an inbox write even when the presented version is one ahead of the stored version! -/
+def verifyInboxCasMutantStaleWrite
+    (pathKind clientOk seqOk expectedOk bodyOk : UInt8)
+    (storedVer expectedVer : UInt64)
+    (sameMutation : UInt8) : UInt8 :=
+  if pathKind ≥ 1 && pathKind ≤ 2 && clientOk == 1 && seqOk == 1 && expectedOk == 1 &&
+     bodyOk == 1 && (storedVer == expectedVer || storedVer + 1 == expectedVer) && sameMutation ≤ 1 then 1 else 0
+
+/-- Mutant 9: Applies a context operation whose presented base does not match the entry! -/
+def verifyContextOpCasMutantIgnoreBase
+    (pathOk sizeOk countOk projectOk blobOk : UInt8)
+    (entryRev baseRev : UInt64)
+    (basePresent entryPresent : UInt8) : UInt8 :=
+  if pathOk == 1 && sizeOk == 1 && countOk == 1 && projectOk == 1 && blobOk == 1 &&
+     basePresent ≤ 1 && entryPresent ≤ 1 &&
+     ((basePresent == 0 && entryPresent ≤ 1) ||
+      (basePresent == 1 && entryPresent == 1 && (entryRev == baseRev || entryRev + 1 == baseRev))) then 1 else 0
+
+/-- Mutant 10: Admits a board task even when an open task with the same key already exists! -/
+def verifyBoardTrackMutantDuplicate
+    (trackExists statusOk slotsOk retryOk duplicateOpen : UInt8) : UInt8 :=
+  if trackExists == 1 && statusOk == 1 && slotsOk == 1 && retryOk == 1 && duplicateOpen ≤ 1 then 1 else 0
+
+/-- Mutant 11: Executes a deploy after the live lease epoch diverges from the observed epoch! -/
+def verifyDeployRecheckMutantStaleLease
+    (gateOk principalKind bunkerState : UInt8)
+    (observedTarget execTarget : UInt32)
+    (observedLease liveLease nowTick expiryTick observedDigest execDigest : UInt64) : UInt32 :=
+  if gateOk != 1 then 512
+  else if bunkerState != 0 then 513
+  else if !(principalKind ≥ 1 && principalKind ≤ 3) then 514
+  else if !(nowTick < expiryTick) then 515
+  else if !(observedLease != 0 && (observedLease == liveLease || observedLease + 1 == liveLease)) then 516
+  else if !(observedTarget != 0 && observedTarget == execTarget) then 517
+  else if !(observedDigest != 0 && observedDigest == execDigest) then 518
+  else 257
 
 /-- Theorem 1: `verifyCoreStartupConfig` kills the non-loopback `DEV_MODE=true` remote exposure mutant
     AND agrees on valid production config. -/
@@ -136,6 +173,34 @@ theorem remote_replay_supersession_kills_manual_override_mutant :
       verifyRemoteReplaySupersessionMutantManualOverride 1 1 1 0 3003 1001 3003 ∧
     verifyRemoteReplaySupersession 1 1 1 1 2002 1001 2002 =
       verifyRemoteReplaySupersessionMutantManualOverride 1 1 1 1 2002 1001 2002 := by
+  decide
+
+theorem inbox_cas_kills_stale_write_mutant :
+    verifyInboxCas 1 1 1 1 1 4 5 0 ≠
+      verifyInboxCasMutantStaleWrite 1 1 1 1 1 4 5 0 ∧
+    verifyInboxCas 1 1 1 1 1 4 4 0 =
+      verifyInboxCasMutantStaleWrite 1 1 1 1 1 4 4 0 := by
+  decide
+
+theorem context_op_kills_stale_base_mutant :
+    verifyContextOpCas 1 1 1 1 1 7 8 1 1 ≠
+      verifyContextOpCasMutantIgnoreBase 1 1 1 1 1 7 8 1 1 ∧
+    verifyContextOpCas 1 1 1 1 1 7 7 1 1 =
+      verifyContextOpCasMutantIgnoreBase 1 1 1 1 1 7 7 1 1 := by
+  decide
+
+theorem board_track_kills_duplicate_mutant :
+    verifyBoardTrack 1 1 1 1 1 ≠
+      verifyBoardTrackMutantDuplicate 1 1 1 1 1 ∧
+    verifyBoardTrack 1 1 1 1 0 =
+      verifyBoardTrackMutantDuplicate 1 1 1 1 0 := by
+  decide
+
+theorem deploy_recheck_kills_stale_lease_mutant :
+    verifyDeployRecheck 1 2 0 9 9 4 5 10 20 8 8 ≠
+      verifyDeployRecheckMutantStaleLease 1 2 0 9 9 4 5 10 20 8 8 ∧
+    verifyDeployRecheck 1 2 0 9 9 4 4 10 20 8 8 =
+      verifyDeployRecheckMutantStaleLease 1 2 0 9 9 4 4 10 20 8 8 := by
   decide
 
 end OrbCore.MutantSuite

@@ -134,6 +134,7 @@ structure PrivilegeLeaseRecord where
   biometricSigned  : Bool   := true
   revoked          : Bool   := false
   expiresAtEpoch   : UInt64
+  leaseEpoch       : UInt64 := 0
   deriving Repr, DecidableEq
 
 /-- Core SQLite database bundle across `missions.db`, `projects.db`, `ask.db`, and `idempotency_keys.db`. -/
@@ -179,9 +180,9 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS cloud_executions (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'hermes', prompt TEXT NOT NULL DEFAULT '', response_text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_automations (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, cron_expr TEXT NOT NULL, prompt TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, variables_used TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS model_routing_chains (id TEXT PRIMARY KEY, name TEXT NOT NULL, models_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT '');" ++
-  "CREATE TABLE IF NOT EXISTS privilege_leases (grant_id TEXT PRIMARY KEY, lease_token TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, scope TEXT NOT NULL, allowed_units_json TEXT NOT NULL DEFAULT '[]', require_force_cmd INTEGER NOT NULL DEFAULT 0, biometric_signed INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0, expires_at_epoch INTEGER NOT NULL DEFAULT 0);" ++
+  "CREATE TABLE IF NOT EXISTS privilege_leases (grant_id TEXT PRIMARY KEY, lease_token TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, scope TEXT NOT NULL, allowed_units_json TEXT NOT NULL DEFAULT '[]', require_force_cmd INTEGER NOT NULL DEFAULT 0, biometric_signed INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0, expires_at_epoch INTEGER NOT NULL DEFAULT 0, lease_epoch INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS privilege_audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, grant_id TEXT NOT NULL, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, executing_host TEXT NOT NULL, command TEXT NOT NULL, allowed INTEGER NOT NULL, created_at TEXT NOT NULL);" ++
-  "CREATE TABLE IF NOT EXISTS core_boot_state (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1), boot_epoch INTEGER NOT NULL DEFAULT 0);" ++
+  "CREATE TABLE IF NOT EXISTS core_boot_state (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1), boot_epoch INTEGER NOT NULL DEFAULT 0, bunker_state INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS remote_message_queue (sequence INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, message_id TEXT NOT NULL, mission_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'waiting', UNIQUE(user_id,message_id));" ++
   "CREATE INDEX IF NOT EXISTS remote_message_pending ON remote_message_queue(state,sequence);" ++
   "CREATE TABLE IF NOT EXISTS ai_providers (id TEXT PRIMARY KEY, provider_type TEXT NOT NULL, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, base_url TEXT NOT NULL DEFAULT '', api_key TEXT NOT NULL DEFAULT '', rpm_limit INTEGER, max_concurrency INTEGER, custom_models_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT '');" ++
@@ -285,6 +286,8 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE remote_message_queue ADD COLUMN delivered_seq INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE remote_message_queue ADD COLUMN edit_revision INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE mission_automations ADD COLUMN variables_used TEXT NOT NULL DEFAULT '{}';",
+  "ALTER TABLE core_boot_state ADD COLUMN bunker_state INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE privilege_leases ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 0;",
   "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);"
 ]
 
@@ -293,7 +296,15 @@ def projectsAdditiveAlters : Array String := #[
   "ALTER TABLE project_decisions ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';",
   "ALTER TABLE project_decisions ADD COLUMN question TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE project_decisions ADD COLUMN evidence TEXT NOT NULL DEFAULT '';",
-  "ALTER TABLE project_decisions ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';"
+  "ALTER TABLE project_decisions ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';",
+  "CREATE TABLE IF NOT EXISTS context_entries (project_slug TEXT NOT NULL, path TEXT NOT NULL, content_hash TEXT NOT NULL DEFAULT '', directory INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0, size INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT '', PRIMARY KEY(project_slug, path));",
+  "CREATE TABLE IF NOT EXISTS context_conflicts (id TEXT PRIMARY KEY, project_slug TEXT NOT NULL, path TEXT NOT NULL, base_revision INTEGER NOT NULL DEFAULT 0, base_present INTEGER NOT NULL DEFAULT 0, content_hash TEXT NOT NULL DEFAULT '', directory INTEGER NOT NULL DEFAULT 0, delete_flag INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '');",
+  "ALTER TABLE context_entries ADD COLUMN source TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE context_conflicts ADD COLUMN base_present INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE context_conflicts ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE context_conflicts ADD COLUMN directory INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE context_conflicts ADD COLUMN delete_flag INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE context_conflicts ADD COLUMN source TEXT NOT NULL DEFAULT '';"
 ]
 
 def idempotencyAdditiveAlters : Array String := #[
@@ -755,6 +766,73 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) : IO (Except Stri
       sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
       return .error s!"core_store_stranded_pending_recovery_failed:{pendErr}"
     | .ok _ =>
+      let r7Ask :=
+        "CREATE TABLE IF NOT EXISTS inbox_state (" ++
+        "entry_key TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '', " ++
+        "stamp INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 0, " ++
+        "client_id TEXT NOT NULL DEFAULT '', mutation_seq INTEGER NOT NULL DEFAULT 0);"
+      let r7Proj :=
+        "CREATE TABLE IF NOT EXISTS project_tracks (" ++
+        "project_slug TEXT NOT NULL, track TEXT NOT NULL, desired_condition TEXT NOT NULL DEFAULT '', " ++
+        "status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','satisfied','blocked','cancelled')), " ++
+        "updated_at TEXT NOT NULL DEFAULT '', state_revision INTEGER NOT NULL DEFAULT 1, " ++
+        "PRIMARY KEY(project_slug, track));" ++
+        "CREATE TABLE IF NOT EXISTS context_entries (" ++
+        "project_slug TEXT NOT NULL, path TEXT NOT NULL, content_hash TEXT NOT NULL DEFAULT '', " ++
+        "directory INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0, " ++
+        "size INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, " ++
+        "source TEXT NOT NULL DEFAULT '', " ++
+        "PRIMARY KEY(project_slug, path));" ++
+        "CREATE TABLE IF NOT EXISTS context_heads (" ++
+        "project_slug TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0);" ++
+        "CREATE TABLE IF NOT EXISTS context_conflicts (" ++
+        "id TEXT PRIMARY KEY, project_slug TEXT NOT NULL, path TEXT NOT NULL, " ++
+        "base_revision INTEGER NOT NULL DEFAULT 0, base_present INTEGER NOT NULL DEFAULT 0, " ++
+        "content_hash TEXT NOT NULL DEFAULT '', directory INTEGER NOT NULL DEFAULT 0, " ++
+        "delete_flag INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT '', " ++
+        "created_at TEXT NOT NULL DEFAULT '');" ++
+        "CREATE TABLE IF NOT EXISTS context_history (" ++
+        "project_slug TEXT NOT NULL, revision INTEGER NOT NULL, path TEXT NOT NULL, " ++
+        "content_hash TEXT NOT NULL DEFAULT '', directory INTEGER NOT NULL DEFAULT 0, " ++
+        "size INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, " ++
+        "source TEXT NOT NULL DEFAULT '', " ++
+        "PRIMARY KEY(project_slug, revision));" ++
+        "CREATE TABLE IF NOT EXISTS context_receipts (" ++
+        "op_id TEXT PRIMARY KEY, project_slug TEXT NOT NULL, conflict INTEGER NOT NULL, " ++
+        "revision INTEGER NOT NULL);"
+      let r7ProjAlters : Array String := #[
+        "ALTER TABLE context_entries ADD COLUMN source TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE context_conflicts ADD COLUMN base_present INTEGER NOT NULL DEFAULT 0;",
+        "ALTER TABLE context_conflicts ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE context_conflicts ADD COLUMN directory INTEGER NOT NULL DEFAULT 0;",
+        "ALTER TABLE context_conflicts ADD COLUMN delete_flag INTEGER NOT NULL DEFAULT 0;",
+        "ALTER TABLE context_conflicts ADD COLUMN source TEXT NOT NULL DEFAULT '';"
+      ]
+      let r7Miss :=
+        "CREATE TABLE IF NOT EXISTS mission_board_tasks (" ++
+        "task_key TEXT PRIMARY KEY, project_slug TEXT NOT NULL, track TEXT NOT NULL, " ++
+        "mission_id TEXT NOT NULL, attempt_seq INTEGER NOT NULL DEFAULT 0, " ++
+        "status TEXT NOT NULL DEFAULT 'open');" ++
+        "CREATE TABLE IF NOT EXISTS deploy_receipts (" ++
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, unit_name TEXT NOT NULL, " ++
+        "observed_digest TEXT NOT NULL, exec_digest TEXT NOT NULL, " ++
+        "verdict TEXT NOT NULL, dry_run INTEGER NOT NULL DEFAULT 0, " ++
+        "created_at TEXT NOT NULL DEFAULT '');"
+      let r7AskRes ← aDb.mu.atomically (sqliteExecRaw aDb.handle r7Ask)
+      let r7ProjRes ← pDb.mu.atomically do
+        match ← sqliteExecRaw pDb.handle r7Proj with
+        | .error e => return .error e
+        | .ok () => applyAdditiveAlters pDb.handle r7ProjAlters
+      let r7MissRes ← mDb.mu.atomically (sqliteExecRaw mDb.handle r7Miss)
+      if let .error r7Err := r7AskRes then
+        sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
+        return .error s!"core_store_r7_schema_failed:{r7Err}"
+      if let .error r7Err := r7ProjRes then
+        sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
+        return .error s!"core_store_r7_schema_failed:{r7Err}"
+      if let .error r7Err := r7MissRes then
+        sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
+        return .error s!"core_store_r7_schema_failed:{r7Err}"
       let closedRef ← IO.mkRef false
       return .ok { rootDir := trimmedRoot, bootEpoch := effBoot, missionsDb := mDb, projectsDb := pDb, askDb := aDb, idempotencyDb := iDb, closedRef := closedRef }
 
@@ -1523,19 +1601,20 @@ def startMachineTransfer (st : CoreStore) (t : TransferRecord) : IO (Except Stri
 /-- Insert or update a hardware-approved JIT privilege lease in `missions.db`. -/
 def upsertPrivilegeLease (st : CoreStore) (rec : PrivilegeLeaseRecord) : IO (Except String Unit) := do
   let res ← execParamQuery st.missionsDb
-    "INSERT OR REPLACE INTO privilege_leases(grant_id,lease_token,mission_id,target_host,scope,allowed_units_json,require_force_cmd,biometric_signed,revoked,expires_at_epoch) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10);"
+    "INSERT OR REPLACE INTO privilege_leases(grant_id,lease_token,mission_id,target_host,scope,allowed_units_json,require_force_cmd,biometric_signed,revoked,expires_at_epoch,lease_epoch) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11);"
     #[rec.grantId, rec.leaseToken, rec.missionId, rec.targetHost, rec.scope, rec.allowedUnitsJson,
       if rec.requireForceCmd then "1" else "0",
       if rec.biometricSigned then "1" else "0",
       if rec.revoked then "1" else "0",
-      s!"{rec.expiresAtEpoch}"]
+      s!"{rec.expiresAtEpoch}",
+      s!"{rec.leaseEpoch}"]
   return res.map (fun _ => ())
 
 /-- Look up a privilege lease by `lease_token` in `missions.db`. -/
 def lookupPrivilegeLease? (st : CoreStore) (leaseToken : String) : IO (Option PrivilegeLeaseRecord) := do
   if leaseToken.isEmpty then return none
   match ← execParamQuery st.missionsDb
-    "SELECT grant_id,lease_token,mission_id,target_host,scope,allowed_units_json,require_force_cmd,biometric_signed,revoked,expires_at_epoch FROM privilege_leases WHERE lease_token=?1;" #[leaseToken] with
+    "SELECT grant_id,lease_token,mission_id,target_host,scope,allowed_units_json,require_force_cmd,biometric_signed,revoked,expires_at_epoch,lease_epoch FROM privilege_leases WHERE lease_token=?1;" #[leaseToken] with
   | .error _ => return none
   | .ok rows =>
     if rows.size ≤ 1 then return none
@@ -1551,7 +1630,50 @@ def lookupPrivilegeLease? (st : CoreStore) (leaseToken : String) : IO (Option Pr
       biometricSigned  := ((r[7]?).getD "0") == "1"
       revoked          := ((r[8]?).getD "0") == "1"
       expiresAtEpoch   := (((r[9]?).bind String.toNat?).getD 0).toUInt64
+      leaseEpoch       := (((r[10]?).bind String.toNat?).getD 0).toUInt64
     }
+
+/-- Persistent bunker lattice (`0` normal, `1` soft, `2` hard). Shared by every process on this store. -/
+def readPersistedBunkerState (st : CoreStore) : IO UInt8 := do
+  match ← execParamQuery st.missionsDb
+      "SELECT bunker_state FROM core_boot_state WHERE singleton_id=1;" #[] with
+  | .ok rows =>
+    let n := ((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 0
+    pure (if n ≥ 2 then 2 else n.toUInt8)
+  | .error _ => pure 0
+
+def writePersistedBunkerState (st : CoreStore) (state : UInt8) : IO (Except String Unit) := do
+  let clamped : Nat := if state.toNat ≥ 2 then 2 else state.toNat
+  let res ← execParamQuery st.missionsDb
+    "INSERT INTO core_boot_state(singleton_id,boot_epoch,bunker_state) VALUES(1,0,?1) ON CONFLICT(singleton_id) DO UPDATE SET bunker_state=excluded.bunker_state;"
+    #[s!"{clamped}"]
+  return res.map (fun _ => ())
+
+/-- Live writer missions: non-terminal runs plus active writer track leases. -/
+def countLiveWriters (st : CoreStore) : IO (Except String UInt32) := do
+  let runs ← execParamQuery st.missionsDb
+    "SELECT COUNT(*) FROM mission_runs WHERE execution_state NOT IN ('terminal','failed','cancelled','completed');" #[]
+  let leases ← execParamQuery st.projectsDb
+    "SELECT COUNT(*) FROM project_track_leases WHERE phase IN ('preparing','active') AND authority_mode='writer';" #[]
+  match runs, leases with
+  | .ok rr, .ok lr =>
+    let n := ((rr[1]?.bind (·[0]?)).bind String.toNat?).getD 0
+    let m := ((lr[1]?.bind (·[0]?)).bind String.toNat?).getD 0
+    let sum := n + m
+    pure (.ok (Nat.min sum 0xFFFFFFFF).toUInt32)
+  | .error e, _ => pure (.error e)
+  | _, .error e => pure (.error e)
+
+/-- Wall-clock seconds of the newest non-dry-run admitted deploy of `unitName`, if any. -/
+def lastAdmittedDeployEpoch? (st : CoreStore) (unitName : String) : IO (Option UInt64) := do
+  match ← execParamQuery st.missionsDb
+      "SELECT created_at FROM deploy_receipts WHERE unit_name=?1 AND verdict='admitted' AND dry_run=0 ORDER BY id DESC LIMIT 1;"
+      #[unitName] with
+  | .ok rows =>
+    match (rows[1]?.bind (·[0]?)).bind String.toNat? with
+    | some n => pure (some n.toUInt64)
+    | none => pure none
+  | .error _ => pure none
 
 /-- Append a privilege verification & execution audit entry to `privilege_audit_log`. -/
 def appendPrivilegeAuditLog (st : CoreStore)
