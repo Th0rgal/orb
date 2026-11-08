@@ -199,6 +199,7 @@ class OrbSparkRecorder(
             prev to next
         }
         if (previous != null) {
+            synchronized(previous.pcmBuffer) { previous.completed.set(true) }
             terminateSession(previous)
         }
         if (generationCounter.get() != myGen) {
@@ -311,7 +312,7 @@ class OrbSparkRecorder(
             cur
         }
         if (session != null) {
-            session.completed.set(true)
+            synchronized(session.pcmBuffer) { session.completed.set(true) }
             terminateSession(session)
         }
     }

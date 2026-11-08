@@ -28,20 +28,70 @@ export const overlayIndex = (layer: OverlayLayer) => layers().indexOf(layer);
 export const overlayTop = (layer: OverlayLayer) => layers().at(-1) === layer;
 export const overlayZIndex = (layer: OverlayLayer) => 1300 + Math.max(0, overlayIndex(layer)) * 2;
 export const overlayHasModalAbove = (layer: OverlayLayer) => layers().slice(overlayIndex(layer) + 1).some(item => item.modal);
-const inerted = new Map<HTMLElement, boolean>();
+type InertHold = { holders: Set<OverlayLayer>; original: boolean };
+const inerted = new Map<HTMLElement, InertHold>();
 let overflow = "";
 let scrollLocked = false;
 let observer: MutationObserver | undefined;
-function updateBackground() {
-  for (const [el, original] of inerted) el.inert = original;
-  inerted.clear();
-  if (!layers().some(layer => layer.modal)) return;
-  // Portal containers must remain interactive. Only their siblings are inert;
-  // making body inert would also disable portalled child pickers in WebKit.
-  for (const child of Array.from(document.body.children)) {
-    if (!(child instanceof HTMLElement) || layers().some(layer => child.contains(layer.root()))) continue;
-    inerted.set(child, child.inert); child.inert = true;
+function readInert(el: HTMLElement): boolean {
+  return el.inert === true || el.hasAttribute("inert");
+}
+function writeInert(el: HTMLElement, value: boolean) {
+  el.inert = value;
+  if (value) el.setAttribute("inert", "");
+  else el.removeAttribute("inert");
+}
+function releaseInert(el: HTMLElement) {
+  const hold = inerted.get(el);
+  if (!hold) return;
+  writeInert(el, hold.original);
+  inerted.delete(el);
+}
+function syncInert(el: HTMLElement, modalLayers: OverlayLayer[]) {
+  const hold = inerted.get(el);
+  if (!modalLayers.length) {
+    releaseInert(el);
+    return;
   }
+  if (hold) {
+    hold.holders = new Set(modalLayers);
+    writeInert(el, true);
+    return;
+  }
+  inerted.set(el, { holders: new Set(modalLayers), original: readInert(el) });
+  writeInert(el, true);
+}
+export function inertHoldDepth(el: HTMLElement): number {
+  return inerted.get(el)?.holders.size ?? 0;
+}
+function updateBackground() {
+  const modalLayers = layers().filter(layer => layer.modal);
+  const wanted = new Map<HTMLElement, OverlayLayer[]>();
+  if (modalLayers.length > 0) {
+    for (const child of Array.from(document.body.children)) {
+      if (!(child instanceof HTMLElement) || layers().some(layer => child.contains(layer.root()))) continue;
+      wanted.set(child, modalLayers);
+    }
+    for (let i = 0; i < modalLayers.length; i++) {
+      const modal = modalLayers[i];
+      const above = modalLayers.slice(i + 1);
+      if (!above.length) continue;
+      const modalContainer = Array.from(document.body.children).find(
+        (child): child is HTMLElement => child instanceof HTMLElement && child.contains(modal.root()),
+      );
+      if (!modalContainer || modalContainer === modal.root()) {
+        wanted.set(modal.root(), above);
+        continue;
+      }
+      if (!layers().some(other => other !== modal && modalContainer.contains(other.root()))) {
+        wanted.set(modalContainer, above);
+      } else {
+        wanted.set(modal.root(), above);
+      }
+    }
+  }
+  for (const el of [...inerted.keys()]) if (!wanted.has(el)) releaseInert(el);
+  for (const [el, owners] of wanted) syncInert(el, owners);
 }
 export function mountOverlay(layer: OverlayLayer, options: {
   close: () => void; busy?: () => boolean; trap?: boolean; initialFocus?: () => HTMLElement | undefined;

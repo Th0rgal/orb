@@ -1,6 +1,12 @@
-import { createSignal, untrack } from "solid-js";
-import { connectionVersion, listQueuedMessages, type Mission } from "./api";
+import { createEffect, createRoot, createSignal, untrack } from "solid-js";
+import { listQueuedMessages, type Mission } from "./api";
 import * as apiModule from "./api";
+
+function connectionVersionSafe(): number {
+  return "connectionVersion" in apiModule && typeof apiModule.connectionVersion === "function"
+    ? apiModule.connectionVersion()
+    : 0;
+}
 import { historyScope } from "./resourceCache";
 import {
   MAX_WARM_MISSIONS,
@@ -8,7 +14,7 @@ import {
   onBackgroundSyncActiveChange,
   selectWarmMissionIds,
 } from "./backgroundSync";
-import { applyStreamEvent, applyStreamEvents, buildTranscript, type StreamItem } from "./transcriptModel";
+import { applyStreamEvent, applyStreamEvents, buildTranscript, clearTranscriptSessions, dropTranscriptSession, dropTranscriptSessionsByPrefixIfNot, transcriptSessionKey, type StreamItem } from "./transcriptModel";
 import * as streamModule from "./stream";
 import {
   getMissionEventPage,
@@ -29,7 +35,7 @@ function transcriptPersistScope(): string {
     typeof apiModule.getJwt === "function" &&
     typeof apiModule.getApiUrl === "function"
     ? historyScope()
-    : `c:${connectionVersion()}`;
+    : `c:${connectionVersionSafe()}`;
 }
 
 export type TranscriptSnap = {
@@ -47,8 +53,13 @@ export type TranscriptSnap = {
   hasOlder?: boolean;
 };
 
-const key = (id: string) => `c:${connectionVersion()}:m:${id}:tx`;
-const heightKey = (id: string) => `c:${connectionVersion()}:m:${id}:h`;
+const key = (id: string) => {
+  syncConnectionChange();
+  return `c:${connectionVersionSafe()}:m:${id}:tx`;
+};
+const heightKey = (id: string) => `c:${connectionVersionSafe()}:m:${id}:h`;
+const sessionFor = (id: string) => transcriptSessionKey(id, connectionVersionSafe());
+const previewSessionFor = (id: string) => `${sessionFor(id)}:preview`;
 
 const [transcriptVersion, setTranscriptVersion] = createSignal(0);
 export { transcriptVersion };
@@ -130,7 +141,7 @@ function rememberWarmRecent(scope: string, id: string) {
 }
 
 export function noteLiveMissionIds(ids: readonly string[]): void {
-  const ver = connectionVersion();
+  const ver = connectionVersionSafe();
   const prefix = `c:${ver}:`;
   const next = new Map<string, string>();
   for (const id of ids) {
@@ -194,10 +205,10 @@ function schedulePersistReadySnapshot(scope: string, snapshot: TranscriptSnap) {
   const existing = persistTimers.get(scope);
   if (existing !== undefined) clearTimeout(existing);
   const persistScope = transcriptPersistScope();
-  const ver = connectionVersion();
+  const ver = connectionVersionSafe();
   const timer = setTimeout(() => {
     persistTimers.delete(scope);
-    if (ver !== connectionVersion()) return;
+    if (ver !== connectionVersionSafe()) return;
     void savePersistedTranscript(persistScope, missionId, snapshot);
   }, 250);
   persistTimers.set(scope, timer);
@@ -218,21 +229,85 @@ function saveSnapshot(scope: string, snapshot: TranscriptSnap, persist = true) {
 
 const hydratingFromDisk = new Map<string, Promise<TranscriptSnap | undefined>>();
 
+let observedConnectionVersion = untrack(connectionVersionSafe);
+function cleanupStaleConnectionState(nextVer: number) {
+  const prefix = `c:${nextVer}:`;
+  for (const [scope, timer] of [...persistTimers]) {
+    if (!scope.startsWith(prefix)) {
+      clearTimeout(timer);
+      persistTimers.delete(scope);
+    }
+  }
+  for (const scope of [...hydratingFromDisk.keys()]) {
+    if (!scope.startsWith(prefix)) hydratingFromDisk.delete(scope);
+  }
+  for (const [scope, sub] of [...warmSubs]) {
+    if (sub.connVer !== nextVer) {
+      sub.stop();
+      warmSubs.delete(scope);
+    }
+  }
+  for (const scope of [...dirtyMissions]) {
+    if (!scope.startsWith(prefix)) dirtyMissions.delete(scope);
+  }
+  for (const scope of [...recentlyOpened.keys()]) {
+    if (!scope.startsWith(prefix)) recentlyOpened.delete(scope);
+  }
+  for (const scope of [...liveMissionIds.keys()]) {
+    if (!scope.startsWith(prefix)) liveMissionIds.delete(scope);
+  }
+  for (const scope of [...cachedScopes]) {
+    if (!scope.startsWith(prefix)) cachedScopes.delete(scope);
+  }
+  for (const scope of [...prefetchPaused.keys()]) {
+    if (!scope.startsWith(prefix)) prefetchPaused.delete(scope);
+  }
+  for (const scope of [...prefetchQueue.keys()]) {
+    if (!scope.startsWith(prefix)) prefetchQueue.delete(scope);
+  }
+  const sessionPrefix = `c:${nextVer}:m:`;
+  dropTranscriptSessionsByPrefixIfNot(sessionPrefix);
+  observedConnectionVersion = nextVer;
+}
+
+function syncConnectionChange() {
+  const current = untrack(connectionVersionSafe);
+  if (current !== observedConnectionVersion) {
+    cleanupStaleConnectionState(current);
+  }
+}
+
+createRoot(() => {
+  createEffect(() => {
+    const current = connectionVersionSafe();
+    if (current !== observedConnectionVersion) {
+      cleanupStaleConnectionState(current);
+    }
+  });
+});
+
 export function hydrateTranscriptFromDisk(id: string): Promise<TranscriptSnap | undefined> {
+  syncConnectionChange();
   const existingReady = peekReadyTranscript(id);
   if (existingReady) return Promise.resolve(existingReady);
   const scope = key(id);
   const inflightHydrate = hydratingFromDisk.get(scope);
   if (inflightHydrate) return inflightHydrate;
-  const ver = connectionVersion();
+  const ver = connectionVersionSafe();
   const persistScope = transcriptPersistScope();
   const p = loadPersistedTranscript<TranscriptSnap>(persistScope, id)
     .then((persisted) => {
-      if (ver !== connectionVersion() || !persisted?.fromLog || persisted.detailsPending) {
+      if (ver !== connectionVersionSafe() || !persisted?.fromLog || persisted.detailsPending) {
         return undefined;
       }
       if (!peekReadyTranscript(id)) {
-        saveSnapshot(scope, persisted, false);
+        const session = sessionFor(id);
+        const rebuiltItems = buildTranscript(
+          [...(persisted.stream ?? []), ...(persisted.liveTail ?? [])],
+          session,
+        );
+        const hydrated: TranscriptSnap = { ...persisted, items: rebuiltItems };
+        saveSnapshot(scope, hydrated, false);
         dirtyMissions.add(scope);
       }
       return peekReadyTranscript(id);
@@ -302,7 +377,8 @@ export function applyLiveEventsToTranscriptCache(
   if (!evs.length) return;
   const scope = key(id);
   const prev = peekTranscript(id);
-  const items = precomputedItems ?? applyStreamEvents(prev?.items ?? [], evs);
+  const session = sessionFor(id);
+  const items = precomputedItems ?? applyStreamEvents(prev?.items ?? [], evs, session);
   let cursor = prev?.cursor;
   const sequenced: StreamEvent[] = [];
   const unsequenced: StreamEvent[] = [];
@@ -336,7 +412,7 @@ export function isMissionWarmLive(id: string): boolean {
   return Boolean(
     peekReadyTranscript(id) &&
       sub &&
-      sub.connVer === connectionVersion() &&
+      sub.connVer === connectionVersionSafe() &&
       sub.healthy &&
       sub.caughtUp &&
       !dirtyMissions.has(scope),
@@ -351,7 +427,7 @@ export function peekWarmMissionStatus(
   id: string,
 ): { status: string; summary?: string } | undefined {
   const sub = warmSubs.get(key(id));
-  if (!sub || sub.connVer !== connectionVersion() || !sub.healthy || !sub.caughtUp || !sub.lastStatus) {
+  if (!sub || sub.connVer !== connectionVersionSafe() || !sub.healthy || !sub.caughtUp || !sub.lastStatus) {
     return undefined;
   }
   return { status: sub.lastStatus, summary: sub.lastStatusSummary };
@@ -359,7 +435,7 @@ export function peekWarmMissionStatus(
 
 export function peekWarmMissionPatch(id: string): WarmMissionPatch | undefined {
   const sub = warmSubs.get(key(id));
-  if (!sub || sub.connVer !== connectionVersion() || !sub.healthy || !sub.caughtUp) return undefined;
+  if (!sub || sub.connVer !== connectionVersionSafe() || !sub.healthy || !sub.caughtUp) return undefined;
   if (!sub.lastStatus && !sub.lastSettingsPatch) return undefined;
   return {
     ...(sub.lastSettingsPatch ?? {}),
@@ -370,7 +446,7 @@ export function peekWarmMissionPatch(id: string): WarmMissionPatch | undefined {
 
 export function clearWarmMissionSettingsPatch(id: string): void {
   const sub = warmSubs.get(key(id));
-  if (!sub || sub.connVer !== connectionVersion()) return;
+  if (!sub || sub.connVer !== connectionVersionSafe()) return;
   sub.lastSettingsPatch = undefined;
   sub.lastSettingsAtMs = undefined;
 }
@@ -381,7 +457,7 @@ export function applyWarmMissionPatch(
 ): Mission | null {
   if (!mission) return null;
   const sub = warmSubs.get(key(mission.id));
-  if (!sub || sub.connVer !== connectionVersion() || !sub.healthy || !sub.caughtUp) return mission;
+  if (!sub || sub.connVer !== connectionVersionSafe() || !sub.healthy || !sub.caughtUp) return mission;
   if (!sub.lastStatus && !sub.lastSettingsPatch) return mission;
 
   const missionTs = Date.parse(mission.updated_at || "");
@@ -408,7 +484,7 @@ export function applyWarmMissionPatch(
 
 export function isMissionStreamCaughtUp(id: string): boolean {
   const sub = warmSubs.get(key(id));
-  return Boolean(sub && sub.connVer === connectionVersion() && sub.healthy && sub.caughtUp);
+  return Boolean(sub && sub.connVer === connectionVersionSafe() && sub.healthy && sub.caughtUp);
 }
 
 export function noteMissionPresentationHint(id: string, kind: unknown): void {
@@ -421,7 +497,7 @@ export function noteMissionPresentationHint(id: string, kind: unknown): void {
 }
 
 export function markUnfocusedMissionsDirty(): void {
-  const ver = connectionVersion();
+  const ver = connectionVersionSafe();
   const prefix = `c:${ver}:`;
   const scopes = new Set<string>(recentlyOpened.keys());
   for (const scope of cachedScopes) {
@@ -437,7 +513,7 @@ export function markUnfocusedMissionsDirty(): void {
 
 function ensureWarmSub(id: string, initialSinceSeq?: number): WarmMissionSub {
   const scope = key(id);
-  const ver = connectionVersion();
+  const ver = connectionVersionSafe();
   const existing = warmSubs.get(scope);
   if (existing && existing.connVer === ver) return existing;
   existing?.stop();
@@ -591,7 +667,7 @@ export function attachMissionStream(
 }
 
 export function warmRecentMissionIds(includeBtw = false): string[] {
-  const ver = connectionVersion();
+  const ver = connectionVersionSafe();
   const prefix = `c:${ver}:`;
   const focusedIds: string[] = [];
   for (const [scope, entry] of active) {
@@ -651,7 +727,7 @@ export function reconcileWarmSubscriptions(): void {
   reconcilingWarmSubs = true;
   try {
     for (const cb of warmReconcileListeners) cb();
-    const ver = connectionVersion();
+    const ver = connectionVersionSafe();
     for (const [scope, sub] of [...warmSubs]) {
       if (sub.connVer !== ver) {
         sub.stop();
@@ -704,7 +780,7 @@ function mergeStreamBySequence(older: StreamEvent[], newer: StreamEvent[]): Stre
 }
 
 async function fetchTranscript(id: string): Promise<TranscriptSnap> {
-  const version=connectionVersion();const check=()=>{if(version!==connectionVersion())throw Error("Connection changed during transcript load.");};
+  const version=connectionVersionSafe();const check=()=>{if(version!==connectionVersionSafe())throw Error("Connection changed during transcript load.");};
   // Start pending queue read in parallel with the event page read rather than
   // blocking the event log round-trip on /queue. Any delivery racing this read
   // wins by message identity in the reducer; held SSE fills the live boundary.
@@ -722,7 +798,7 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
    check();
    if(page?.events.length){
     preview=spineAnswers(page.events.map(storedToStream).filter((e):e is StreamEvent=>e!==null));
-    saveSnapshot(key(id),{activity:page.activity,items:buildTranscript(preview),stream:preview,fromLog:true,detailsPending:true});
+     saveSnapshot(key(id),{activity:page.activity,items:buildTranscript(preview, previewSessionFor(id)),stream:preview,fromLog:true,detailsPending:true});
    }
   }
   let stream:StreamEvent[]=[...(previous?.stream??[])];
@@ -792,18 +868,18 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
   const queueEvents: StreamEvent[] = queued.map(row => ({ type: "user_message", eventId: row.id, data: { id: row.id, content: row.content, queued: row.inflight !== true } }));
   const retainedLive = previous?.liveTail?.length ? heldAfterHistory(stream, previous.liveTail) : [];
   // History first puts accepted user turns at their actual transcript positions.
-  return { items: buildTranscript([...stream, ...retainedLive, ...queueEvents]), stream, ...(retainedLive.length ? { liveTail: retainedLive } : {}), fromLog: true, spineComplete, ...(spineBefore !== undefined ? { spineBefore } : {}), queueError, cursor, before, hasOlder };
+  return { items: buildTranscript([...stream, ...retainedLive, ...queueEvents], sessionFor(id)), stream, ...(retainedLive.length ? { liveTail: retainedLive } : {}), fromLog: true, spineComplete, ...(spineBefore !== undefined ? { spineBefore } : {}), queueError, cursor, before, hasOlder };
 }
 
 type JobKind='initial'|'refresh'|'older';
 const jobs=new Map<string,{tail:Promise<unknown>;pending:Map<JobKind,Promise<TranscriptSnap>>}>();
 function transcriptJob(id:string,kind:JobKind,load:()=>Promise<TranscriptSnap>):Promise<TranscriptSnap>{
- const scope=key(id),version=connectionVersion();
+ const scope=key(id),version=connectionVersionSafe();
  let job=jobs.get(scope);if(!job){job={tail:Promise.resolve(),pending:new Map()};jobs.set(scope,job);}
  const pending=job.pending.get(kind);if(pending)return pending;
  const owner=job;
- const result=owner.tail.catch(()=>{}).then(()=>{if(version!==connectionVersion())throw Error('Connection changed during transcript load.');return load();}).then(snapshot=>{
-  if(version!==connectionVersion())throw Error('Connection changed during transcript load.');saveSnapshot(scope,snapshot);dirtyMissions.delete(scope);reconcileWarmSubscriptions();return snapshot;
+ const result=owner.tail.catch(()=>{}).then(()=>{if(version!==connectionVersionSafe())throw Error('Connection changed during transcript load.');return load();}).then(snapshot=>{
+  if(version!==connectionVersionSafe())throw Error('Connection changed during transcript load.');saveSnapshot(scope,snapshot);dirtyMissions.delete(scope);reconcileWarmSubscriptions();return snapshot;
  }).finally(()=>{owner.pending.delete(kind);if(!owner.pending.size)jobs.delete(scope);});
  owner.tail=result;owner.pending.set(kind,result);return result;
 }
@@ -826,6 +902,7 @@ export const MAX_LIVE_PREFETCH=8;
 onCacheEvict((evictedKey)=>{
  if(evictedKey.endsWith(':tx')&&!active.has(evictedKey)){
   cachedScopes.delete(evictedKey);
+  dropTranscriptSession(evictedKey.slice(0, -3));
   prefetchPaused.set(evictedKey,Date.now()+PREFETCH_PAUSE_MS);
  }
 });
@@ -878,6 +955,7 @@ export function forgetPrefetchPauses(){
   recentlyOpened.clear();
   liveMissionIds.clear();
   cachedScopes.clear();
+  clearTranscriptSessions();
 }
 export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{
  return transcriptJob(id,'older',async()=>{
@@ -903,10 +981,11 @@ export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{
     }
    }
   }
-  let items=buildTranscript(stream);
+  const session = sessionFor(id);
+  let items=buildTranscript(stream, session);
   const preservedUsers: StreamEvent[] = [];
   for(const item of previous.items)if(item.kind==='user'&&item.messageId)preservedUsers.push({type:'user_message',data:{id:item.messageId,content:item.text,queued:item.queued,receipt:item.receipt,attached:item.attached}});
-  items = applyStreamEvents(items, preservedUsers);
+  items = applyStreamEvents(items, preservedUsers, session);
   return {...previous,stream,items,before:page.nextCursor??previous.before,hasOlder:page.hasMore,spineComplete,spineBefore};
  });
 }
@@ -967,7 +1046,8 @@ export function prepareTranscriptSearch(id: string, signal?: AbortSignal): Promi
     );
     const spine = spineAnswers(olderRaw, firstConv?.type === "assistant_message");
     const stream = mergeStreamBySequence(spine, current.stream);
-    let items = buildTranscript(stream);
+    const session = sessionFor(id);
+    let items = buildTranscript(stream, session);
     for (const item of current.items) {
       if (item.kind === "user" && item.messageId) {
         items = applyStreamEvent(items, {
@@ -979,7 +1059,7 @@ export function prepareTranscriptSearch(id: string, signal?: AbortSignal): Promi
             receipt: item.receipt,
             attached: item.attached,
           },
-        });
+        }, session);
       }
     }
     return {
@@ -1006,7 +1086,7 @@ export async function refreshPresentationPreview(id: string) {
   dirtyMissions.add(scope);
  }
  const stream=mergeStreamBySequence(prior?.stream??[],incoming);
- saveSnapshot(scope,{...prior,activity:page.activity,stream,items:buildTranscript(stream),fromLog:true,detailsPending:prior?.detailsPending ?? !prior?.fromLog});
+  saveSnapshot(scope,{...prior,activity:page.activity,stream,items:buildTranscript(stream, previewSessionFor(id)),fromLog:true,detailsPending:true});
  } finally { presentationLoads.delete(scope); }
 }
 
@@ -1042,13 +1122,14 @@ export function hydratePassageEvents(id: string, rawEvents: StoredEvent[]): Prom
     }
     const mergedOlder = mergeStreamBySequence(spineStream, passageStream);
     const stream = mergeStreamBySequence(mergedOlder, current.stream);
-    let items = buildTranscript(stream);
+    const session = sessionFor(id);
+    let items = buildTranscript(stream, session);
     for (const item of current.items) {
       if (item.kind === "user" && item.messageId) {
         items = applyStreamEvent(items, {
           type: "user_message",
           data: { id: item.messageId, content: item.text, queued: item.queued, receipt: item.receipt, attached: item.attached },
-        });
+        }, session);
       }
     }
     return { ...current, stream, items, before, hasOlder };

@@ -288,6 +288,36 @@ test('Codex Ultrafast is a distinct committed selection',async({page})=>{
  await page.getByRole('button',{name:'Speed: Standard'}).click();
  await page.getByRole('option',{name:/Ultrafast/}).click();
  await expect(page.getByRole('button',{name:'Speed: Ultrafast'})).toBeVisible();
- await page.getByRole('button',{name:'Speed: Ultrafast'}).click();
- await expect(page.getByRole('option',{name:/Ultrafast/})).toHaveAttribute('aria-selected','true');
+  await page.getByRole('button',{name:'Speed: Ultrafast'}).click();
+  await expect(page.getByRole('option',{name:/Ultrafast/})).toHaveAttribute('aria-selected','true');
+});
+
+test('stacked modals ref-count background inert holds and restore outer modal interactivity on inner close',async({page})=>{
+  await page.goto('/tests/overlays.html?nested-modal=1');
+  const root=page.locator('#root');
+  expect(await root.evaluate(el=>(el as HTMLElement).inert)).toBe(false);
+
+  await page.getByRole('button',{name:'Provider form'}).click();
+  const outer=page.getByRole('dialog',{name:/Connect a provider/});
+  await expect(outer).toBeVisible();
+  expect(await root.evaluate(el=>(el as HTMLElement).inert)).toBe(true);
+  expect(await outer.evaluate(el=>(el as HTMLElement).inert)).toBe(false);
+
+  await outer.getByRole('button',{name:'Reset credentials'}).click();
+  const inner=page.getByRole('dialog',{name:'Reset credentials?'});
+  await expect(inner).toBeVisible();
+  expect(await root.evaluate(el=>(el as HTMLElement).inert)).toBe(true);
+  expect(await page.locator('[aria-labelledby]').first().evaluate(el=>Boolean(el.closest('[inert]')))).toBe(true);
+  expect(await inner.evaluate(el=>Boolean(el.closest('[inert]')))).toBe(false);
+
+  await page.keyboard.press('Escape');
+  await expect(inner).toHaveCount(0);
+  await expect(outer).toBeVisible();
+  expect(await root.evaluate(el=>(el as HTMLElement).inert)).toBe(true);
+  expect(await outer.evaluate(el=>Boolean(el.closest('[inert]')))).toBe(false);
+  await expect(outer.getByRole('button',{name:'Reset credentials'})).toBeFocused();
+
+  await page.keyboard.press('Escape');
+  await expect(outer).toHaveCount(0);
+  expect(await root.evaluate(el=>(el as HTMLElement).inert)).toBe(false);
 });

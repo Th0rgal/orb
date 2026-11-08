@@ -30,9 +30,19 @@ export type StreamItem =
 
 
 const str = (v: unknown): string => typeof v === "string" ? v : v == null ? "" : String(v);
-const states = new WeakMap<StreamItem[], TranscriptReducer>();
+const reducers = new Map<string, TranscriptReducer[]>();
+const anonymous = new WeakMap<StreamItem[], TranscriptReducer>();
 const EMPTY_TRANSCRIPT_SLICE: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
 const TRANSCRIPT_EVENT_ENCODER = new TextEncoder();
+
+function sameTimeline(a: readonly StreamItem[], b: readonly StreamItem[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i]?.key !== b[i]?.key || a[i]?.kind !== b[i]?.kind) return false;
+  }
+  return true;
+}
 
 /** The producer owns text_delta_latest for an entire assistant response,
  * including tool boundaries. Other text_op bubbles have independent identities.
@@ -62,6 +72,64 @@ export class TranscriptReducer {
   private identity:string|undefined;
   private key(kind: string) { return this.identity ? `${kind}:${this.identity}:${++this.nextForEvent}` : `${kind}-${++this.next}`; }
   private nextForEvent=0;
+  clone(): TranscriptReducer {
+    const copy = new TranscriptReducer();
+    copy.items = this.items.slice();
+    copy.users = new Map(this.users);
+    copy.tools = new Map(this.tools);
+    copy.bubbles = new Map(this.bubbles);
+    copy.seen = new Set(this.seen);
+    copy.seq = new Map(this.seq);
+    copy.foldSeq = new Map(this.foldSeq);
+    copy.foldEntries = this.foldEntries;
+    copy.revisions = new Map(this.revisions);
+    copy.next = this.next;
+    copy.lastUser = this.lastUser;
+    copy.native = this.native.slice();
+    copy.lastFinal = this.lastFinal;
+    copy.carried = this.carried;
+    copy.glued = new Map(this.glued);
+    copy.suppressedFinalPrefix = this.suppressedFinalPrefix;
+    copy.identity = this.identity;
+    copy.nextForEvent = this.nextForEvent;
+    return copy;
+  }
+  reindexFromItems(items: StreamItem[]): TranscriptReducer {
+    const copy = new TranscriptReducer();
+    copy.items = items.slice();
+    let maxGenerated = 0;
+    for (let i = 0; i < copy.items.length; i++) {
+      const item = copy.items[i];
+      const genMatch = /^(?:user|think|text|error)-(\d+)$/.exec(item.key);
+      if (genMatch) maxGenerated = Math.max(maxGenerated, Number(genMatch[1]));
+      if (item.kind === "user") {
+        if (item.messageId) copy.users.set(item.messageId, i);
+        if (!item.queued) {
+          copy.lastUser = i;
+          copy.bubbles.clear();
+          copy.native = [];
+          copy.lastFinal = undefined;
+        }
+      } else if (item.kind === "tool") {
+        copy.tools.set(item.callId, i);
+      } else if (item.kind === "text") {
+        if (item.key.startsWith("text:antigravity:") || item.key.startsWith("text:opencode:")) {
+          const bubble = item.key.slice(5);
+          if (item.live) {
+            copy.bubbles.set(bubble, i);
+            copy.native.push(bubble);
+          }
+        } else if (item.live && item.cumulative) {
+          copy.bubbles.set("text_delta_latest", i);
+        } else if (!item.live) {
+          copy.lastFinal = i;
+        }
+      }
+    }
+    copy.next = maxGenerated;
+    copy.foldEntries = copy.items.length;
+    return copy;
+  }
   private put(index: number, item: StreamItem) { this.items[index] = item; }
   private placeText(bubble:string,item:Extract<StreamItem,{kind:'text'}>):number {
     let index=this.items.length;
@@ -604,11 +672,89 @@ export function visibleTranscript(items: StreamItem[]): StreamItem[] {
   ));
 }
 
-export function buildTranscript(events: StreamEvent[]): StreamItem[] {
-  const reducer=new TranscriptReducer();
-  for(const event of events)reducer.apply(event);
-  states.set(reducer.items,reducer);
+const MAX_SESSION_REDUCERS = 128;
+const MAX_SESSION_HISTORY = 4;
+
+export function transcriptSessionKey(id: string, connVersion?: number): string {
+  return connVersion === undefined ? `m:${id}` : `c:${connVersion}:m:${id}`;
+}
+
+export function dropTranscriptSession(session: string): void {
+  reducers.delete(session);
+  reducers.delete(`${session}:preview`);
+}
+
+export function dropTranscriptSessionsByPrefixIfNot(keepPrefix: string): void {
+  for (const key of [...reducers.keys()]) {
+    if (key.startsWith("c:") && !key.startsWith(keepPrefix)) {
+      reducers.delete(key);
+    }
+  }
+}
+
+export function clearTranscriptSessions(): void {
+  reducers.clear();
+}
+
+function bindReducer(session: string | undefined, items: StreamItem[], reducer: TranscriptReducer): void {
+  anonymous.set(items, reducer);
+  if (!session) return;
+  const history = reducers.get(session) ?? [];
+  const filtered = history.filter((entry) => !sameTimeline(entry.items, items));
+  filtered.push(reducer);
+  if (filtered.length > MAX_SESSION_HISTORY) {
+    filtered.splice(0, filtered.length - MAX_SESSION_HISTORY);
+  }
+  reducers.delete(session);
+  reducers.set(session, filtered);
+  while (reducers.size > MAX_SESSION_REDUCERS) {
+    const oldest = reducers.keys().next().value;
+    if (oldest === undefined) break;
+    reducers.delete(oldest);
+  }
+}
+
+function reducerFor(items: StreamItem[], session?: string): TranscriptReducer | undefined {
+  const exact = anonymous.get(items);
+  if (exact) {
+    if (session) {
+      const history = reducers.get(session);
+      if (history) {
+        reducers.delete(session);
+        reducers.set(session, history);
+      }
+    }
+    return sameTimeline(exact.items, items) ? exact.clone() : exact.reindexFromItems(items);
+  }
+  if (session) {
+    const history = reducers.get(session);
+    if (history && history.length > 0) {
+      reducers.delete(session);
+      reducers.set(session, history);
+      for (let i = history.length - 1; i >= 0; i--) {
+        if (sameTimeline(history[i].items, items)) {
+          return history[i].clone();
+        }
+      }
+      if (items.length > 0) {
+        return history[history.length - 1].reindexFromItems(items);
+      }
+    }
+  }
+  return undefined;
+}
+
+function buildTranscriptForSession(events: StreamEvent[], session?: string): StreamItem[] {
+  const reducer = new TranscriptReducer();
+  for (const event of events) reducer.apply(event);
+  bindReducer(session, reducer.items, reducer);
   return reducer.items;
+}
+
+export function buildTranscript(events: StreamEvent[]): StreamItem[];
+export function buildTranscript(events: StreamEvent[], session?: string): StreamItem[];
+export function buildTranscript(events: StreamEvent[]): StreamItem[] {
+  return buildTranscriptForSession(events, arguments[1] as string | undefined);
 }
 
 type UserItem = Extract<StreamItem, { kind: "user" }>;
@@ -617,47 +763,52 @@ type UserItem = Extract<StreamItem, { kind: "user" }>;
  * state, and the next live event threw ("must originate from
  * buildTranscript"): every later text of the turn was dropped until a full
  * resync — after a Send now, the new turn's reply. */
-export function removeUsers(items: StreamItem[], match: (item: UserItem) => boolean): StreamItem[] {
+export function removeUsers(items: StreamItem[], match: (item: UserItem) => boolean, session?: string): StreamItem[] {
   if (!items.some(item => item.kind === "user" && match(item))) return items;
-  const reducer = states.get(items);
+  const reducer = reducerFor(items, session);
   if (!reducer) return items.filter(item => item.kind !== "user" || !match(item));
   reducer.items = items.slice();
   for (let i = reducer.items.length - 1; i >= 0; i--) {
     const item = reducer.items[i];
     if (item.kind === "user" && match(item)) reducer.removeAt(i);
   }
-  states.set(reducer.items, reducer);
+  bindReducer(session, reducer.items, reducer);
   return reducer.items;
 }
 
 /** Rewrite user rows in place (same positions), keeping reducer state. */
-export function mapUsers(items: StreamItem[], update: (item: UserItem) => UserItem): StreamItem[] {
+export function mapUsers(items: StreamItem[], update: (item: UserItem) => UserItem, session?: string): StreamItem[] {
   let changed = false;
   const next = items.map(item => { if (item.kind !== "user") return item; const updated = update(item); if (updated !== item) changed = true; return updated; });
   if (!changed) return items;
-  const reducer = states.get(items);
-  if (reducer) { reducer.items = next; states.set(next, reducer); }
+  const reducer = reducerFor(items, session);
+  if (reducer) { reducer.items = next; bindReducer(session, next, reducer); }
   return next;
 }
 
-export function applyStreamEvent(items: StreamItem[], event: StreamEvent): StreamItem[] {
-  return applyStreamEvents(items, [event]);
+export function applyStreamEvent(items: StreamItem[], event: StreamEvent, session?: string): StreamItem[] {
+  return applyStreamEvents(items, [event], session);
 }
 
 /** One copy per transport batch; reducer ordering and deduplication are unchanged. */
-export function applyStreamEvents(items: StreamItem[], events: StreamEvent[]): StreamItem[] {
+export function applyStreamEvents(items: StreamItem[], events: StreamEvent[], session?: string): StreamItem[] {
   if (!events.length) return items;
-  let reducer=states.get(items);
-  if(!reducer){
-    if(items.length)throw new Error("Transcript must originate from buildTranscript");
-    reducer=new TranscriptReducer();
+  let reducer = reducerFor(items, session);
+  if (!reducer) {
+    if (items.length) throw new Error("Transcript must originate from buildTranscript");
+    reducer = new TranscriptReducer();
   }
-  reducer.items=items.slice();
+  const working = items.slice();
+  reducer.items = working;
   for (const event of events) reducer.apply(event);
   // An event that changed nothing (activity, status, a duplicate) keeps the
   // array identity: a new one would re-run every memo and the turn list.
-  if(reducer.items.length===items.length&&reducer.items.every((item,index)=>item===items[index])){reducer.items=items;states.set(items,reducer);return items;}
-  states.set(reducer.items,reducer);
+  if (reducer.items.length === items.length && reducer.items.every((item, index) => item === items[index])) {
+    reducer.items = items;
+    bindReducer(session, items, reducer);
+    return items;
+  }
+  bindReducer(session, reducer.items, reducer);
   return reducer.items;
 }
 
@@ -666,7 +817,7 @@ export function applyStreamEvents(items: StreamItem[], events: StreamEvent[]): S
  * follow `next` and its reducer state is kept, so later live events apply as
  * usual. A running conversation is re-read every 10s; without this each read
  * replaced every row and re-diffed the whole transcript. */
-export function reuseUnchanged(prev: StreamItem[], next: StreamItem[]): StreamItem[] {
+export function reuseUnchanged(prev: StreamItem[], next: StreamItem[], session?: string): StreamItem[] {
   if (prev === next || !prev.length) return next;
   const old = new Map(prev.map(item => [item.key, item]));
   let reused = 0;
@@ -677,7 +828,7 @@ export function reuseUnchanged(prev: StreamItem[], next: StreamItem[]): StreamIt
   });
   if (!reused) return next;
   if (out.length === prev.length && out.every((item, index) => item === prev[index])) out = prev;
-  const reducer = states.get(next);
-  if (reducer) { reducer.items = out; states.set(out, reducer); }
+  const reducer = reducerFor(next, session);
+  if (reducer) { reducer.items = out; bindReducer(session, out, reducer); }
   return out;
 }

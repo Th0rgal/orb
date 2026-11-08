@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { peekReadyTranscript, putTranscript, putTranscriptItems } from "../src/missionCache";
+import { peekReadyTranscript, peekTranscript, putTranscript, putTranscriptItems, refreshPresentationPreview, retainTranscript } from "../src/missionCache";
 import { cacheReset, prefetchProjectLimit } from "../src/pageCache";
-import type { StreamItem } from "../src/transcriptModel";
+import { buildTranscript, type StreamItem } from "../src/transcriptModel";
 
 const user = (text: string): StreamItem => ({ kind: "user", key: "u", text });
 
@@ -28,6 +28,35 @@ describe("transcript first-paint cache", () => {
     putTranscript("m1", { items: [user("hi")], stream: [], fromLog: true });
     putTranscriptItems("m1", [user("hi"), { kind: "text", key: "t", text: "mashed", live: false }]);
     expect(peekReadyTranscript("m1")?.items).toEqual([user("hi")]);
+  });
+  it("marks spine-preview refresh detailsPending so peekReadyTranscript never returns tool-stripped items", async () => {
+    const fullEvents = [
+      { type: "user_message" as const, eventId: "u1", sequence: 1, data: { id: "u1", content: "hi" } },
+      { type: "tool_call" as const, eventId: "tc1", sequence: 2, data: { tool_call_id: "c1", name: "bash", args: { command: "ls" } } },
+    ];
+    putTranscript("m-spine", { items: buildTranscript(fullEvents), stream: [fullEvents[0]], fromLog: true, cursor: 2 });
+    const release = retainTranscript("m-spine");
+    release();
+    expect(peekReadyTranscript("m-spine")?.items.some(i => i.kind === "tool")).toBe(true);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            profile: "presentation",
+            activity: "Working…",
+            events: [
+              { id: 1, event_id: "u1", sequence: 1, event_type: "user_message", content: "hi", timestamp: "" },
+              { id: 5, event_id: "a5", sequence: 5, event_type: "assistant_message", content: "done", timestamp: "" },
+            ],
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+    await refreshPresentationPreview("m-spine");
+    expect(peekReadyTranscript("m-spine")).toBeUndefined();
+    expect(peekTranscript("m-spine")).toMatchObject({ activity: "Working…", fromLog: true, detailsPending: true });
   });
 });
 

@@ -29,7 +29,8 @@ function Gallery() {
   const [anchor,setAnchor] = createSignal<HTMLElement>(), [sub,setSub] = createSignal<HTMLElement>();
   const [speed,setSpeed] = createSignal<CodexServiceTier>('standard');
   const [schedule,setSchedule] = createSignal("every 1h");
-  const close = () => setOpen("");
+  const [nestedConfirm,setNestedConfirm] = createSignal(false);
+  const close = () => {setNestedConfirm(false); setOpen("");};
   const show = (kind:string,button:HTMLButtonElement) => {setAnchor(button); setError(null); setOpen(kind);};
   const save = async () => {
     if (busy() || !name().trim()) return;
@@ -64,7 +65,9 @@ function Gallery() {
       <Field label="Notes"><textarea class="s-input" aria-label="Notes" rows="3"/></Field>
       <SchedulePicker value={schedule()} onChange={setSchedule}/>
       <DialogButton onClick={()=>setSearchOpen(true)}>Pick a model</DialogButton>
+      <Show when={new URLSearchParams(location.search).has("nested-modal")}><DialogButton onClick={()=>setNestedConfirm(true)}>Reset credentials</DialogButton></Show>
       <Show when={searchOpen()}><Picker label="Models" items={Array.from({length:80},(_,i)=>({id:`model-${i}`,label:`Model ${i}`,group:i<4?"Recent":"All models",disabled:i===1}))} selected={selected()} onSelect={id=>{setSelected(id);setSearchOpen(false);}} onClose={()=>setSearchOpen(false)}/></Show>
+      <Show when={nestedConfirm()}><ConfirmDialog title="Reset credentials?" description="Clear the draft credentials for this provider?" action="Reset" destructive onConfirm={()=>setNestedConfirm(false)} onClose={()=>setNestedConfirm(false)}/></Show>
     </Dialog></Show>
     <Show when={open()==="picker"}><Picker label="Models" searchLabel="Search models" anchor={anchor()} selected={selected()} loading={pickerState()==="loading"} error={pickerState()==="error" ? "Models could not load. Try again." : undefined} onRetry={()=>setPickerState("ready")} items={pickerState()==="empty" ? [] : [{id:"one",label:"Standard",group:"Available"},{id:"disabled",label:"Unavailable model",disabled:true,group:"Available"},{id:"two",label:"Advanced",description:"Additional reasoning",group:"Available"},...Array.from({length:40},(_,i)=>({id:`option-${i}`,label:`Model ${i}`,group:"Other models"}))]} onSelect={id=>{setSelected(id);close();}} onClose={close}/></Show>
     <Show when={open()==="effort"}><Picker label="Reasoning effort" searchable={false} anchor={anchor()} selected={effort()}
