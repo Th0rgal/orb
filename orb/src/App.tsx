@@ -13,7 +13,7 @@ import { MissionLookupContext } from "./orchestrationModel";
 import { renamedTitle, withRenamedTitles } from "./renames";
 import { readString, writeString } from "./storage";
 import { nodeLabel } from "./machines/nodes";
-import { isLive } from "./missionStatus";
+import { isLive, isWorking } from "./missionStatus";
 import { swallow } from "./log";
 import { connectClientLink, reportClientHarnesses, type RemoteStart } from "./clientLink";
 import {requireSpeedSupport} from './CodexSpeedPicker';
@@ -332,8 +332,19 @@ export default function App() {
     if (!next) return;
     const syncRow = (row: Mission) => {
       if (row.id !== next.id) return row;
-      const nextUpdatedAt = authoritative ? (next.updated_at ?? row.updated_at) : (next.updated_at || row.updated_at);
+      const prevTs = Date.parse(row.updated_at || "");
+      const nextTs = Date.parse(next.updated_at || "");
+      const statusNewer = authoritative || Number.isNaN(prevTs) || Number.isNaN(nextTs) || nextTs >= prevTs;
+      const nextUpdatedAt = authoritative ? (next.updated_at ?? row.updated_at) : (statusNewer ? (next.updated_at || row.updated_at) : row.updated_at);
+      const nextStatus = statusNewer ? next.status : row.status;
+      const nextRemoteJob = statusNewer && next.remote_job !== undefined ? next.remote_job : row.remote_job;
+      const nextQueueWait = statusNewer && next.queue_wait !== undefined ? next.queue_wait : row.queue_wait;
+      const nextExecution = statusNewer && next.execution !== undefined ? next.execution : row.execution;
       if (
+        row.status === nextStatus &&
+        row.remote_job === nextRemoteJob &&
+        row.queue_wait === nextQueueWait &&
+        row.execution === nextExecution &&
         row.backend === next.backend &&
         row.agent === next.agent &&
         row.model_override === next.model_override &&
@@ -347,6 +358,10 @@ export default function App() {
       }
       return {
         ...row,
+        status: nextStatus,
+        ...(nextRemoteJob !== undefined ? { remote_job: nextRemoteJob } : {}),
+        ...(nextQueueWait !== undefined ? { queue_wait: nextQueueWait } : {}),
+        ...(nextExecution !== undefined ? { execution: nextExecution } : {}),
         backend: next.backend,
         agent: next.agent,
         model_override: next.model_override,
@@ -357,7 +372,11 @@ export default function App() {
         updated_at: nextUpdatedAt,
       };
     };
-    setMissions(rows => rows.some(r => r.id === next.id) ? rows.map(syncRow) : rows);
+    setMissions(rows => {
+      if (rows.some(r => r.id === next.id)) return rows.map(syncRow);
+      if (isWorking(next.status) && !isBtwMission(next) && !isMissionDeleting(next.id)) return [next, ...rows];
+      return rows;
+    });
   };
   /** Only missions still doing something: the sidebar is a place to act,
    * not a history. Everything else lives under its project. */
@@ -542,13 +561,22 @@ export default function App() {
     const id = selected();
     return id && id.startsWith("m:") ? id.slice(2) : null;
   });
+  const findKnownMission = (id: string | null | undefined): Mission | undefined => {
+    if (!id) return undefined;
+    return (
+      (openMission()?.id === id ? openMission() ?? undefined : undefined) ??
+      missions().find(m => m.id === id) ??
+      inboxMissions().find(m => m.id === id) ??
+      lookupMissionById(id)
+    );
+  };
   /** The open mission for files and side questions. While the view reloads
    * it (openMission briefly null, mission not in the loaded list) keep the
    * last known record for the same id instead of dropping the scope. */
   const fileScopeMission = createMemo<Mission | null>(previous => {
     const id = currentMissionId();
     if (!id) return null;
-    const found = openMission()?.id === id ? openMission() : missions().find(m => m.id === id);
+    const found = findKnownMission(id);
     return found ?? (previous?.id === id ? previous : null);
   }, null);
   const inboxCount = createMemo(() => {
@@ -714,7 +742,7 @@ export default function App() {
   }));
   const sessionPreview = createMemo<SessionPreviewData>(() => {
     const id = currentMissionId() ?? "";
-    const found = openMission()?.id === id ? openMission() : missions().find(m => m.id === id);
+    const found = findKnownMission(id);
     const mission = found ? movedMission(found) : found;
     if (mission?.backend?.startsWith("cloud_")) return { id, title: displayTitle(renamedTitle("mission", id, mission.title)) || "Cloud agent", local: false, destination: ({cloud_grok_bot:"Grok Bot",cloud_cursor:"Cursor Cloud",cloud_hermes:"Paloma"} as Record<string,string>)[mission.backend], project: mission.project, context: null };
     const binding = localBinding(id);
@@ -1131,7 +1159,7 @@ export default function App() {
           }
           if (typeof id === "string" && changed.size < 12) changed.add(id);
           if (event.data.kind !== "mission_activity") needsList = true;
-          presentationTimer ??= setTimeout(flushPresentation, 1000);
+          presentationTimer ??= setTimeout(flushPresentation, needsList ? 150 : 1000);
         },
         () => { markUnfocusedMissionsDirty(); markUnfocusedBtwDirty(); void refreshMissions(); },
         () => { presentationConnected = true; },
@@ -1314,7 +1342,7 @@ export default function App() {
                     deleteRequest={deleteMissionRequest()}
                     onDeleteRequestHandled={() => setDeleteMissionRequest(null)}
                     activityMissions={missions()}
-                    currentMission={openMission()?.id === currentMissionId() && openMission() ? movedMission(openMission()!) : undefined}
+                    currentMission={(() => { const m = findKnownMission(currentMissionId()); return m ? movedMission(m) : undefined; })()}
                     harnessChoices={harnessChoices()}
                     forkChoices={mission => harnessChoices(mission.remote_node_id ?? "core")}
                     onForkOpen={mission => void refreshNodeAntigravityModels(mission.remote_node_id ?? "core")}
@@ -1882,8 +1910,8 @@ export default function App() {
           </Match>
           <Match when={currentMissionId() || (selected()===null && launchPreview())}>
             <Show when={currentMissionId() ? launchedViewKeys.get(currentMissionId()!) || currentMissionId() : launchViewKey()} keyed>{viewKey =>
-              <Show when={viewKey===launchViewKey()} fallback={<MissionLookupContext.Provider value={id=>missions().find(m=>m.id===id) ?? lookupMissionById(id)}><MissionView id={currentMissionId()!} initial={missions().find(m=>m.id===currentMissionId())} onMission={syncOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id,pct)=>setPreviewContext({id,pct})} onFork={commitFork}/></MissionLookupContext.Provider>}>
-                <NativeMissionView id={currentMissionId() || ''} initial={missions().find(m=>m.id===currentMissionId())} launch={launchPreview()??undefined} launchError={createError()??undefined} onRetryLaunch={()=>retryLaunch?.()} onMission={syncOpenMission} onContext={(id,pct)=>setPreviewContext({id,pct})} onPlan={(id,data)=>setPreviewPlan({id,data})} onFork={commitFork}/>
+              <Show when={viewKey===launchViewKey()} fallback={<MissionLookupContext.Provider value={id=>findKnownMission(id)}><MissionView id={currentMissionId()!} initial={findKnownMission(currentMissionId())} onMission={syncOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id,pct)=>setPreviewContext({id,pct})} onFork={commitFork}/></MissionLookupContext.Provider>}>
+                <NativeMissionView id={currentMissionId() || ''} initial={findKnownMission(currentMissionId())} launch={launchPreview()??undefined} launchError={createError()??undefined} onRetryLaunch={()=>retryLaunch?.()} onMission={syncOpenMission} onContext={(id,pct)=>setPreviewContext({id,pct})} onPlan={(id,data)=>setPreviewPlan({id,data})} onFork={commitFork}/>
               </Show>
             }</Show>
           </Match>

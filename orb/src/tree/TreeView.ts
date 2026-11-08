@@ -1,7 +1,8 @@
 import type { ControllerJob, ControllerView, Mission, ProjectFileEntry, ProjectSummary } from "../api";
 import { folderLabel } from "../folderLabels";
 import { displayTitle } from "../goal";
-import { isWorking } from "../missionStatus";
+import { localRunActive } from "../localAgents";
+import { isWorking, missionActivity, presentedStatus } from "../missionStatus";
 import { countNested, countVersions, forkTitle, holds, missionParent, nestMissions, versionLabel, type NestedMission } from "../missionTree";
 import { excludeBtwMissions, normalizeMissionFolder, resolveParent, seenMission, trackHierarchyResolution } from "../missionHierarchy";
 import { filesMovedAway, filesMovedInto } from "../moves";
@@ -136,6 +137,8 @@ export function createProjectTree(deps: {
   const controllerLaunched = (mission: Mission) => !missionParent(mission) && mission.origin === "hermes" && !!mission.origin_session_id;
   const controllerRow = (slug: string) => { const job = controllers[slug]?.job; return !!job && !job.archived; };
   const controllerRoots = (slug: string) => controllerRow(slug) ? rootMissions(slug).filter(root => controllerLaunched(root.mission)) : [];
+  const isMissionWorking = (m: Mission) =>
+    isWorking(presentedStatus(m, missionActivity(m, [], { localRun: localRunActive(m.id) })));
   const missionNode = (slug: string, nested: NestedMission<Mission>, archive = false): Node => {
     const mission = nested.mission;
     const id = mission.orb_placeholder ? missionTreeId(mission.id, archive ? `archive:${slug}` : slug) : missionTreeId(mission.id);
@@ -143,7 +146,7 @@ export function createProjectTree(deps: {
     if (!nested.children.length) return { id, data };
     const selected = deps.selected();
     const open = expanded[id] ?? (!!selected?.startsWith("m:") && holds(nested, selected.slice(2)));
-    return { id, data: { ...data, launched: countNested(nested), launchedLive: countNested(nested, child => isWorking(child.status)), versions: countVersions(nested) },
+    return { id, data: { ...data, launched: countNested(nested), launchedLive: countNested(nested, isMissionWorking), versions: countVersions(nested) },
       expanded: open, children: open ? nested.children.map(child => missionNode(slug, child, archive)) : [] };
   };
   const tree = (): Node[] => deps.projects().map(project => {
@@ -156,7 +159,7 @@ export function createProjectTree(deps: {
         const inside = !!selected?.startsWith("m:") && launched.some(root => root.mission.id === selected.slice(2) || holds(root, selected.slice(2)));
         const open = launched.length ? (expanded[id] ?? inside) : undefined;
         const count = launched.reduce((sum, root) => sum + 1 + countNested(root), 0);
-        const live = launched.reduce((sum, root) => sum + Number(isWorking(root.mission.status)) + countNested(root, child => isWorking(child.status)), 0);
+        const live = launched.reduce((sum, root) => sum + Number(isMissionWorking(root.mission)) + countNested(root, isMissionWorking), 0);
         children.push({ id, data: { kind: "cron", slug, label: job.name, job, controller: true, ...(launched.length ? { launched: count, launchedLive: live } : {}) },
           ...(launched.length ? { expanded: open, children: open ? launched.map(root => missionNode(slug, root)) : [] } : {}) });
       }

@@ -222,7 +222,28 @@ function withPriorityHeader(init: RequestInit | undefined, priority: RequestPrio
   };
 }
 
-function recordFetchTelemetry(res: Response, startedMs: number, fallbackOrigin?: string): Response {
+function shouldSampleTransportRtt(methodRaw: string | undefined, path: string): boolean {
+  const method = (methodRaw ?? "GET").trim().toUpperCase();
+  if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") return false;
+  const cleanPath = path.split("?")[0] ?? path;
+  if (
+    cleanPath === "/api/file-resources" ||
+    cleanPath.endsWith("/inbox-digest") ||
+    cleanPath.startsWith("/api/software") ||
+    cleanPath.startsWith("/api/stats")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function recordFetchTelemetry(
+  res: Response,
+  startedMs: number,
+  fallbackOrigin?: string,
+  methodRaw?: string,
+  path = "",
+): Response {
   const rttHeader = res.headers?.get?.("X-Orb-Transport-Rtt-Ms");
   const upstreamOrigin = res.headers?.get?.("X-Orb-Upstream-Origin") ?? fallbackOrigin ?? null;
   const parsedRtt = rttHeader ? Number(rttHeader) : NaN;
@@ -231,7 +252,9 @@ function recordFetchTelemetry(res: Response, startedMs: number, fallbackOrigin?:
       ? parsedRtt
       : Math.max(1, Math.round(performance.now() - startedMs));
   if (res.status < 500 && res.status !== 429) {
-    recordTransportRttSample(sampleMs, upstreamOrigin);
+    if (shouldSampleTransportRtt(methodRaw, path)) {
+      recordTransportRttSample(sampleMs, upstreamOrigin);
+    }
   } else if (res.status >= 500) {
     recordTransportFailure();
   }
@@ -272,7 +295,7 @@ export function transportFetch(
       if (bridgeTarget === target && bridgeBaseUrl) {
         const chosen = pickBridgeUrl(streaming, bridgeBaseUrl)!;
         return fetch(`${chosen}${path}`, bridgeInit).then(
-          (res) => recordFetchTelemetry(res, startedMs),
+          (res) => recordFetchTelemetry(res, startedMs, undefined, init?.method, path),
           (err) => {
             if (!isAbortError(err)) recordTransportFailure();
             throw err;
@@ -283,7 +306,7 @@ export function transportFetch(
         const chosen = bridgeTarget === target ? pickBridgeUrl(streaming, proxy) : proxy;
         if (!chosen) return transportFetchDirect(target, path, wireInit);
         return fetch(`${chosen}${path}`, bridgeInit).then(
-          (res) => recordFetchTelemetry(res, startedMs),
+          (res) => recordFetchTelemetry(res, startedMs, undefined, init?.method, path),
           (err) => {
             if (!isAbortError(err)) recordTransportFailure();
             throw err;
@@ -346,7 +369,7 @@ async function transportFetchDirect(target: string, path: string, init?: Request
         if (safeMethod && !isLast) continue;
       } else if (res.status < 500) {
         endpointCooldownUntil.delete(base);
-        recordFetchTelemetry(res, startedMs, base);
+        recordFetchTelemetry(res, startedMs, base, method, path);
       }
       return res;
     } catch (err) {
@@ -2053,11 +2076,14 @@ export async function sendMissionMessage(
   };
   const retry = remoteReplacements.get(replacementKey);
   if (retry) return createReplacement(retry);
-  // Only skip the pre-send GET when the mission is actively working in memory:
-  // idle/stopped missions fetch fresh `track`, `github_pr`, and `status` before
-  // building `continue_identity` or deciding replacement/reopen semantics.
-  const usedKnownMission = Boolean(knownMission && knownMission.id === id && isWorking(knownMission.status));
-  let mission = usedKnownMission ? knownMission! : await getMission(id);
+  // When `MissionView` supplies `knownMission`, omit full legacy `history` JSON
+  // on the pre-send metadata check; if Core later responds with 409
+  // `REMOTE_RESUME_REQUIRES_REPLACEMENT:`, full history is fetched on demand below.
+  const hasKnownContext = Boolean(knownMission && knownMission.id === id);
+  const usedKnownMission = Boolean(hasKnownContext && isWorking(knownMission!.status));
+  let mission = usedKnownMission
+    ? knownMission!
+    : await getMission(id, hasKnownContext ? { includeHistory: false } : undefined);
   if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
   if (mission.status === "acknowledged" || mission.status === "paused") {
     await api(`/api/control/missions/${encodeURIComponent(id)}/status`, withIdempotencyKey({
@@ -2099,7 +2125,7 @@ export async function sendMissionMessage(
       if (found) return { id: clientMessageId, queued: !found.inflight, message_accepted: true };
     }
     if (!(error instanceof ApiError) || error.status !== 409 || !error.detail.startsWith("REMOTE_RESUME_REQUIRES_REPLACEMENT:")) throw error;
-    if (usedKnownMission && !mission.history?.length) {
+    if (hasKnownContext && !mission.history?.length) {
       mission = await getMission(id, { fresh: true, includeHistory: true });
       if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
     }

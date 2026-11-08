@@ -43,26 +43,28 @@ static pthread_once_t g_onl_tls_once = PTHREAD_ONCE_INIT; static lean_external_c
 static void onl_tls_reg(void) { g_onl_tls_cls = lean_register_external_class(onl_tls_fin, onl_tls_for); }
 static inline const char *onl_cstr(b_lean_obj_arg s) { const char *p = lean_string_cstr(s); return strlen(p) == lean_string_size(s) - 1 ? p : NULL; }
 static inline lean_obj_res onl_pack(int64_t rc) { return lean_io_result_mk_ok(lean_box_uint64(rc < 0 ? ((1ULL << 63) | ((uint64_t)(uint32_t)errno << 32)) : ((uint64_t)rc & 0x7FFFFFFFFFFFFFFFULL))); }
+static int onl_try_sock(struct addrinfo *ai, int pms, struct timeval *tv, int socktype) {
+    int fd = socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC, ai->ai_protocol), fl = fd >= 0 ? fcntl(fd, F_GETFL, 0) : -1, one = 1;
+    int rc = (fd >= 0 && fl >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 && fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0) ? connect(fd, ai->ai_addr, ai->ai_addrlen) : -1;
+    if (rc < 0 && errno == EINPROGRESS && poll(&(struct pollfd){ .fd = fd, .events = POLLOUT }, 1, pms) == 1) {
+        int se = -1; socklen_t sl = sizeof(se); rc = (getsockopt(fd, SOL_SOCKET, SO_ERROR, &se, &sl) == 0 && se == 0) ? 0 : -1;
+    }
+    if (rc == 0 && fcntl(fd, F_SETFL, fl) == 0 && setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, tv, sizeof(*tv)) == 0 && setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, tv, sizeof(*tv)) == 0) {
+        if (socktype == SOCK_STREAM) { (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)); (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one)); }
+        return fd;
+    }
+    return fd >= 0 ? (close(fd), -1) : -1;
+}
 static int onl_connect_sock(const char *h, uint16_t port, int socktype, uint32_t timeout_ms) {
     if (!h || !*h) return -1;
-    char pstr[8]; snprintf(pstr, sizeof(pstr), "%u", (unsigned)port);
-    struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = socktype }, *res = NULL;
+    char pstr[8]; snprintf(pstr, sizeof(pstr), "%u", (unsigned)port); struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = socktype }, *res = NULL;
     if (getaddrinfo(h, pstr, &hints, &res) != 0 || !res) return -1;
-    int fd = -1, one = 1; uint32_t ms = timeout_ms ? timeout_ms : 30000U; int pms = ms > 0x7FFFFFFFU ? 0x7FFFFFFF : (int)ms;
+    int fd = -1; uint32_t ms = timeout_ms ? timeout_ms : 30000U; int pms = ms > 0x7FFFFFFFU ? 0x7FFFFFFF : (int)ms;
     struct timeval tv = { .tv_sec = (time_t)(ms / 1000U), .tv_usec = (suseconds_t)((ms % 1000U) * 1000U) };
-    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC, ai->ai_protocol); int fl = fd >= 0 ? fcntl(fd, F_GETFL, 0) : -1;
-        int rc = (fd >= 0 && fl >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 && fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0) ? connect(fd, ai->ai_addr, ai->ai_addrlen) : -1;
-        if (rc < 0 && errno == EINPROGRESS && poll(&(struct pollfd){ .fd = fd, .events = POLLOUT }, 1, pms) == 1) {
-            int se = -1; socklen_t sl = sizeof(se); rc = (getsockopt(fd, SOL_SOCKET, SO_ERROR, &se, &sl) == 0 && se == 0) ? 0 : -1;
-        }
-        if (rc == 0 && fcntl(fd, F_SETFL, fl) == 0 && setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 && setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0) {
-            if (socktype == SOCK_STREAM) { (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)); (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one)); }
-            break;
-        }
-        if (fd >= 0) { close(fd); fd = -1; }
-    }
-    freeaddrinfo(res); return fd;
+    for (int pass = 0; pass < 2 && fd < 0; ++pass)
+        for (struct addrinfo *ai = res; ai && fd < 0; ai = ai->ai_next)
+            if ((ai->ai_family == AF_INET) == (pass == 0)) fd = onl_try_sock(ai, ai->ai_next && pms > 2000 ? 2000 : pms, &tv, socktype);
+    return freeaddrinfo(res), fd;
 }
 LEAN_EXPORT lean_obj_res orb_net_leaf_rand_bytes(size_t n) {
     if (n > 0x40000000ULL) return lean_io_result_mk_ok(lean_alloc_sarray(1, 0, 0));
@@ -161,8 +163,7 @@ LEAN_EXPORT lean_obj_res orb_net_leaf_tls_open(b_lean_obj_arg host, uint16_t por
     const char *h = onl_cstr(host); if (!h) return lean_io_result_mk_ok(lean_box(0));
     onl_tls_t *s = (onl_tls_t *)calloc(1, sizeof(onl_tls_t));
     if (!s || pthread_mutex_init(&s->mu, NULL) != 0) return free(s), lean_io_result_mk_ok(lean_box(0));
-    s->fd = onl_connect_sock(h, port, SOCK_STREAM, timeout_ms);
-    int ok = s->fd >= 0 && (s->ctx = SSL_CTX_new(TLS_client_method())) != NULL;
+    int ok = (s->fd = onl_connect_sock(h, port, SOCK_STREAM, timeout_ms)) >= 0 && (s->ctx = SSL_CTX_new(TLS_client_method())) != NULL;
     if (ok && verify_peer) { SSL_CTX_set_verify(s->ctx, SSL_VERIFY_PEER, NULL); ok = SSL_CTX_set_default_verify_paths(s->ctx) == 1; }
     static const unsigned char h2_alpn[] = { 2, 'h', '2' }, h1_alpn[] = { 8, 'h', 't', 't', 'p', '/', '1', '.', '1' };
     if (ok) ok = SSL_CTX_set_alpn_protos(s->ctx, alpn_mode == 1 ? h2_alpn : h1_alpn, alpn_mode == 1 ? 3 : 9) == 0;
@@ -174,12 +175,12 @@ LEAN_EXPORT lean_obj_res orb_net_leaf_tls_open(b_lean_obj_arg host, uint16_t por
         if (ok && alpn_mode == 1) {
             const unsigned char *sel = NULL; unsigned int slen = 0; SSL_get0_alpn_selected(s->ssl, &sel, &slen);
             ok = (slen == 2 && sel && sel[0] == 'h' && sel[1] == '2');
+            if (!ok) return onl_tls_fin(s), lean_io_result_mk_ok(lean_box(1));
         }
     } else ok = 0;
     if (ok) ok = onl_ssl_write_all(s->ssl, req);
     if (!ok) return onl_tls_fin(s), lean_io_result_mk_ok(lean_box(0));
-    lean_object *some = lean_alloc_ctor(1, 1, 0);
-    return lean_ctor_set(some, 0, lean_alloc_external(g_onl_tls_cls, s)), lean_io_result_mk_ok(some);
+    lean_object *some = lean_alloc_ctor(2, 1, 0); return lean_ctor_set(some, 0, lean_alloc_external(g_onl_tls_cls, s)), lean_io_result_mk_ok(some);
 }
 LEAN_EXPORT lean_obj_res orb_net_leaf_tls_write(b_lean_obj_arg h_obj, b_lean_obj_arg buf) {
     onl_tls_t *s = (onl_tls_t *)lean_get_external_data(h_obj); if (!s) return lean_io_result_mk_ok(lean_box(0));

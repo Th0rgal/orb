@@ -1,6 +1,7 @@
 import { isLive } from "./missionStatus";
 import {getApiUrl,getJwt,connectionVersion,currentCapabilityEpochKey,type Mission} from './api';
 import {nativeInvoke} from './clientRuns';
+import {note} from './diagnostics';
 // Concurrent list, queue and transcript reads share one native journal scan.
 // Never cache settled rows: launches and synchronization can change them immediately.
 const reads=new Map<string,Promise<Mission[]>>();
@@ -14,7 +15,13 @@ export async function localOrigins(missionId?:string):Promise<Mission[]>{
  if(!read){
   read=(async()=>{
    try{const rows=await invoke('local_origin_list',{connection:{api_url:getApiUrl(),token:getJwt()}});if(version!==connectionVersion())throw new Error("Connection changed while reading local missions");return Array.isArray(rows)?rows as Mission[]:[];}
-   catch(error){if(/unknown command|unknown desktop command|not found/i.test(String(error))){unsupportedLocalOriginsEpoch=epoch;return [];}throw error;}
+   catch(error){
+    const msg=String(error);
+    if(/unknown command|unknown desktop command|not found/i.test(msg)){unsupportedLocalOriginsEpoch=epoch;return [];}
+    if(msg.includes("Connection changed while reading local missions"))throw error;
+    note("local-origins-error",{error:msg.slice(0,120)});
+    return [];
+   }
   })().finally(()=>reads.delete(epoch));
   reads.set(epoch,read);
  }

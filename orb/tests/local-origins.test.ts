@@ -1,5 +1,5 @@
 import {afterEach,expect,it,vi} from 'vitest';
-import {getMission,listMissions,listProjectMissions,archiveMission,reopenMission,renameMission,setConnection,clearConnection} from '../src/api';
+import {getMission,listMissions,listProjectMissions,listQueuedMessages,archiveMission,reopenMission,renameMission,setConnection,clearConnection} from '../src/api';
 afterEach(()=>{delete (window as any).__TAURI_INTERNALS__;clearConnection();vi.unstubAllGlobals();});
 it('shows a locally journaled mission and its text while Core is offline',async()=>{
  setConnection('http://offline.test','token');
@@ -170,4 +170,18 @@ it('keeps local output but reads current Antigravity effort from Core while runn
  expect(await listProjectMissions('test')).toMatchObject([{...local,model_effort:'high'}]);
  effort=null;
  expect(await getMission('done')).toMatchObject({...local,model_effort:null});
+});
+
+it('still loads Core missions and queued messages when local_origin_list fails with unauthorized',async()=>{
+ setConnection('http://core.test','token');
+ (window as any).__TAURI_INTERNALS__={invoke:vi.fn(async(command:string)=>{if(command==='local_origin_list')throw new Error('unauthorized');return null;})};
+ vi.stubGlobal('fetch',vi.fn(async(input:any)=>{
+  const url=String(input);
+  if(url.includes('/api/control/queue'))return new Response(JSON.stringify([{id:'q1',content:'Follow up',mission_id:'m-core'}]));
+  if(url.endsWith('/missions/m-core'))return new Response(JSON.stringify({id:'m-core',title:'Core conversation',status:'completed',history:[{role:'assistant',content:'Loaded cleanly'}]}));
+  return new Response(JSON.stringify([{id:'m-core',title:'Core conversation',status:'completed'}]));
+ }));
+ expect(await getMission('m-core')).toMatchObject({id:'m-core',title:'Core conversation',status:'completed'});
+ expect(await listQueuedMessages('m-core')).toEqual([{id:'q1',content:'Follow up',mission_id:'m-core'}]);
+ expect(await listMissions()).toMatchObject([{id:'m-core',title:'Core conversation'}]);
 });

@@ -560,10 +560,21 @@ def main : IO Unit := do
   assertTrue "gunzipBounded inflates FNAME + stored BTYPE=00 block"
     (match gunzipBounded gzStored 256 with | .ok out => out == rawHello | .error _ => false)
 
-  -- H2ClientPool instantiation & fast non-blocking connect timeout check (`127.0.0.1:9` fails quickly without stalling)
+  -- H2ClientPool instantiation, concurrent cold-connect coalescing, and fast fail-closed connect timeout (`totalTimeoutMs = 65000` must NOT stall on transport failure)
   let h2Pool ← H2ClientPool.new
-  let poolFailRes ← h2Pool.request 0 "GET" "127.0.0.1" 9 "/api/health" #[] ByteArray.empty 4096 false 150 250
-  assertTrue "H2ClientPool fails closed cleanly on unreachable port"
-    poolFailRes.isOk.not
+  let tPool0 ← IO.monoMsNow
+  let mut tasks : Array (Task (Except IO.Error (Except String PooledHttpResult))) := #[]
+  for _ in [0:8] do
+    let tk ← IO.asTask (prio := .dedicated) do
+      h2Pool.request 0 "GET" "127.0.0.1" 9 "/api/health" #[] ByteArray.empty 4096 false 150 65000
+    tasks := tasks.push tk
+  let mut allFailedCleanly := true
+  for tk in tasks do
+    match ← IO.ofExcept tk.get with
+    | .ok _ => allFailedCleanly := false
+    | .error _ => pure ()
+  let tPool1 ← IO.monoMsNow
+  assertTrue "H2ClientPool coalesces concurrent cold connects and fails fast without 65s H1 fallback stall"
+    (allFailedCleanly && (tPool1 - tPool0) < 3000)
 
   IO.println "[OrbNetLeaf] ALL SELF-TESTS PASSED"

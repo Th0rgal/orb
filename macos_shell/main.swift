@@ -6,6 +6,7 @@
 // SSE event streaming (`/__orb_events`), handles native macOS window drag / theme / file panels,
 // confines top-frame navigation to loopback/`file://`, and positions traffic lights + vibrancy.
 import AppKit
+import Darwin
 import Security
 import WebKit
 
@@ -93,7 +94,72 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
     var webView: WKWebView!
     var vibrancyView: NSVisualEffectView?
     var localdProc: Process?
+    var signalSources: [DispatchSourceSignal] = []
     var schemeHandler: OrbBundleSchemeHandler?
+
+    static func canBindLoopbackPort(_ port: Int) -> Bool {
+        guard (1024...65535).contains(port) else { return false }
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr = in_addr(s_addr: UInt32(0x7F000001).bigEndian)
+        return withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
+    }
+
+    static func selectAvailableLoopbackPort(preferred: Int) -> Int {
+        for cand in [preferred, 29479, 39479, 49479] where canBindLoopbackPort(cand) {
+            return cand
+        }
+        for _ in 0..<8 {
+            let fd = socket(AF_INET, SOCK_STREAM, 0)
+            guard fd >= 0 else { continue }
+            defer { close(fd) }
+            var addr = sockaddr_in()
+            addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = 0
+            addr.sin_addr = in_addr(s_addr: UInt32(0x7F000001).bigEndian)
+            let bound = withUnsafePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+                }
+            }
+            guard bound else { continue }
+            var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let named = withUnsafeMutablePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    getsockname(fd, $0, &len) == 0
+                }
+            }
+            if named {
+                let p = Int(UInt16(bigEndian: addr.sin_port))
+                if (1024...65520).contains(p) { return p }
+            }
+        }
+        return preferred
+    }
+
+    private func installTerminationSignalHandlers() {
+        guard signalSources.isEmpty else { return }
+        for sig in [SIGTERM, SIGINT] {
+            signal(sig, SIG_IGN)
+            let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            src.setEventHandler { [weak self] in
+                self?.localdProc?.terminate()
+                exit(0)
+            }
+            src.resume()
+            signalSources.append(src)
+        }
+    }
 
     private static func setBoolPreference(_ prefs: WKPreferences, selector name: String, value: Bool) {
         let sel = Selector((name))
@@ -434,9 +500,12 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
+        installTerminationSignalHandlers()
         let env = ProcessInfo.processInfo.environment
-        let rawPort = Int(env["ORB_LOCALD_PORT"] ?? "19479") ?? 19479
-        let port = (1024...65535).contains(rawPort) ? rawPort : 19479
+        let explicitPortEnv = env["ORB_LOCALD_PORT"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let rawPort = Int(explicitPortEnv) ?? 19479
+        let preferredPort = (1024...65535).contains(rawPort) ? rawPort : 19479
+        let port = explicitPortEnv.isEmpty ? Self.selectAvailableLoopbackPort(preferred: preferredPort) : preferredPort
         let envTok = env["ORB_LOCALD_TOKEN"] ?? ""
         let token = (envTok.utf8.count >= 32 && envTok != "orb-locald-default-token") ? envTok : Self.randomHex256()
 
@@ -451,7 +520,8 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             p.executableURL = localdURL
             var childEnv: [String: String] = [
                 "ORB_LOCALD_PORT": String(port),
-                "ORB_LOCALD_TOKEN": token
+                "ORB_LOCALD_TOKEN": token,
+                "ORB_PARENT_PID": String(ProcessInfo.processInfo.processIdentifier)
             ]
             for k in ["HOME", "PATH", "TMPDIR", "USER", "LANG", "ORB_SIGNER_BIN", "ORB_APPROVAL_KEY_PATH", "ORB_STATE_DIR"] {
                 if let v = env[k] { childEnv[k] = v }
@@ -771,6 +841,44 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
                 fputs("self-test failed: sendWebViewEditAction(\(sel)) returned false\n", stderr)
                 exit(1)
             }
+        }
+
+        // Verify loopback port conflict fallback when another process already holds the preferred port.
+        let busyFd = socket(AF_INET, SOCK_STREAM, 0)
+        guard busyFd >= 0 else {
+            fputs("self-test failed: socket() failed\n", stderr)
+            exit(1)
+        }
+        defer { close(busyFd) }
+        var busyAddr = sockaddr_in()
+        busyAddr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        busyAddr.sin_family = sa_family_t(AF_INET)
+        busyAddr.sin_port = 0
+        busyAddr.sin_addr = in_addr(s_addr: UInt32(0x7F000001).bigEndian)
+        let boundBusy = withUnsafePointer(to: &busyAddr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(busyFd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
+        var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let namedBusy = boundBusy && withUnsafeMutablePointer(to: &busyAddr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(busyFd, $0, &addrLen) == 0
+            }
+        } && listen(busyFd, 4) == 0
+        guard namedBusy else {
+            fputs("self-test failed: could not bind busy loopback socket\n", stderr)
+            exit(1)
+        }
+        let occupiedPort = Int(UInt16(bigEndian: busyAddr.sin_port))
+        guard !Self.canBindLoopbackPort(occupiedPort) else {
+            fputs("self-test failed: expected occupied loopback port \(occupiedPort) to fail bind check\n", stderr)
+            exit(1)
+        }
+        let fallbackPort = Self.selectAvailableLoopbackPort(preferred: occupiedPort)
+        guard fallbackPort != occupiedPort, (1024...65520).contains(fallbackPort), Self.canBindLoopbackPort(fallbackPort) else {
+            fputs("self-test failed: selectAvailableLoopbackPort(\(occupiedPort)) chose invalid port \(fallbackPort)\n", stderr)
+            exit(1)
         }
     }
 }

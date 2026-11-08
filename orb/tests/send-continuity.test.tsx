@@ -331,3 +331,64 @@ it('shows one Working on This computer… line for local Antigravity runs withou
   host.__TAURI_INTERNALS__=prevInternal;host.__TAURI__=prevTauri;
  }
 });
+
+it('starts sidebar/folder handoff immediately on follow-up keypress and clears cleanly on failure',async()=>{
+ const {sendMissionMessage,getMission}=await import('../src/api');
+ const {missionActivity,missionHandoff,presentedStatus,endHandoff}=await import('../src/missionStatus');
+ const {folderActivity}=await import('../src/FolderActivity');
+ const idleMission:Mission={
+  id:'idle-optimistic',
+  project:'verity-core',
+  folder:'audits',
+  status:'completed',
+  history:[],
+  created_at:'',
+  updated_at:'1',
+  remote_job:{job_id:'old-turn',node_id:'ashur',phase:'finished',node_state:'succeeded',finished_at:'2026-11-08T00:00:00Z'},
+ };
+ vi.mocked(getMission).mockResolvedValue(idleMission);
+ vi.stubGlobal('fetch',vi.fn(async()=>Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0'}})));
+ let rejectSend!:(err:Error)=>void;
+ vi.mocked(sendMissionMessage).mockImplementationOnce(()=>new Promise((_resolve,reject)=>{rejectSend=reject;}));
+ const view=render(()=><NativeMissionView id="idle-optimistic" initial={idleMission}/>);
+ const input=screen.getByPlaceholderText('Send follow-up') as HTMLTextAreaElement;
+ const {fireEvent}=await import('@solidjs/testing-library');
+ fireEvent.input(input,{target:{value:'Start turn 2 right away'}});
+ fireEvent.keyDown(input,{key:'Enter'});
+
+ // Synchronously on keypress: handoff is active, sidebar row presents "running", and collapsed folder spins.
+ expect(missionHandoff('idle-optimistic')).not.toBeNull();
+ expect(presentedStatus(idleMission,missionActivity(idleMission))).toBe('running');
+ expect(folderActivity([idleMission]).get('verity-core')?.get('audits')).toBe(1);
+ expect(view.container.querySelector('.user')?.textContent).toContain('Start turn 2 right away');
+
+ // If the send request fails, handoff ends immediately so sidebar & composer restore real state.
+ await waitFor(()=>expect(rejectSend).toBeTypeOf('function'));
+ rejectSend(new Error('Network dropped'));
+ await waitFor(()=>expect(screen.getByRole('button',{name:'Retry'})).toBeDefined());
+ expect(missionHandoff('idle-optimistic')).toBeNull();
+ expect(presentedStatus(idleMission,missionActivity(idleMission))).toBe('completed');
+ expect(folderActivity([idleMission]).get('verity-core')).toBeUndefined();
+ endHandoff('idle-optimistic');
+});
+
+it('mounts MissionView immediately without skeleton wait when initial mission record is already known',async()=>{
+ const {MissionView}=await import('../src/mission/MissionView');
+ const {getMission}=await import('../src/api');
+ let resolveMission!:(m:Mission)=>void;
+ vi.mocked(getMission).mockImplementationOnce(()=>new Promise<Mission>(resolve=>{resolveMission=resolve;}));
+ vi.stubGlobal('fetch',vi.fn(async()=>Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0'}})));
+ const completedProjectMission:Mission={
+  id:'c2dcb8ab-2065-4569-a96d-c7673352125b',
+  project:'verity-core',
+  status:'completed',
+  history:[],
+  created_at:'',
+  updated_at:'1',
+ };
+ const view=render(()=><MissionView id={completedProjectMission.id} initial={completedProjectMission}/>);
+ // Renders NativeMissionView composer immediately (0 ms) even while getMission is stalled on the network!
+ expect(screen.getByPlaceholderText('Send follow-up')).toBeDefined();
+ expect(view.container.querySelector('.skeleton-conversation')).toBeNull();
+ resolveMission?.(completedProjectMission);
+});

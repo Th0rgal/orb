@@ -683,7 +683,7 @@ export function Composer(p: {
     // What a failed send puts back; an unavailable attachment drops only its own mention.
     let restoreText = original, restoreUploads = originalUploads;
     try {
-      await attachmentLoad;
+      if (/@\S/.test(original)) await attachmentLoad;
       if (project !== p.projectSlug || draftScope !== p.scope || destination !== attachmentTarget()) return;
       const resolved = (p.textOnly || p.imagesOnly) ? {text: original, files: [], unavailable: []} : await prepareUploads(original, originalUploads, destination);
       if (project !== p.projectSlug || draftScope !== p.scope || destination !== attachmentTarget()) return;

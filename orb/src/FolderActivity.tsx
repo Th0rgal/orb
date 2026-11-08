@@ -1,17 +1,22 @@
 import { Show } from "solid-js";
 import { normalizeMissionFolder, type Mission } from "./api";
+import { localRunActive } from "./localAgents";
 import { missionStatusPresentation } from "./MissionGlyph";
 import { pendingMissionInteraction } from "./missionAttention";
+import { missionActivity, presentedStatus } from "./missionStatus";
 import * as Icon from "./sidebarIcons";
 
 /** Index every ancestor once, so collapsed folders need no additional requests. */
-export function folderActivity(missions: Mission[], running = (m: Mission) =>
-  missionStatusPresentation(m.status, pendingMissionInteraction(m.id)).tone === "running") {
+export function folderActivity(missions: Mission[], running = (m: Mission) => {
+  const effective = presentedStatus(m, missionActivity(m, [], { localRun: localRunActive(m.id) }));
+  return missionStatusPresentation(effective, pendingMissionInteraction(m.id)).tone === "running";
+}) {
   const counts = new Map<string, Map<string, number>>();
   const seen = new Set<string>();
   for (const mission of missions) {
-    if (seen.has(mission.id) || !mission.project || !running(mission)) continue;
+    if (seen.has(mission.id)) continue;
     seen.add(mission.id);
+    if (!mission.project || !running(mission)) continue;
     let project = counts.get(mission.project);
     if (!project) counts.set(mission.project, project = new Map());
     const path = normalizeMissionFolder(mission.folder);

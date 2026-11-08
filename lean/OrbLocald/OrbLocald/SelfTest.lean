@@ -748,8 +748,12 @@ def main : IO UInt32 := do
   let prioOk :=
     classifyProxyRequestPriority "POST" "/api/control/missions/m1/message" none == 0 &&
     classifyProxyRequestPriority "GET" "/api/auth/me" none == 0 &&
+    classifyProxyRequestPriority "GET" "/api/health" none == 0 &&
     classifyProxyRequestPriority "GET" "/api/control/missions/m1/events" none == 1 &&
     classifyProxyRequestPriority "GET" "/api/software" none == 2 &&
+    classifyProxyRequestPriority "POST" "/api/control/missions/m1/inbox-digest" none == 1 &&
+    classifyProxyRequestPriority "POST" "/api/file-resources" none == 1 &&
+    classifyProxyRequestPriority "POST" "/api/control/missions/m1/opened" none == 1 &&
     classifyProxyRequestPriority "GET" "/api/control/missions/m1/events" (some "p2") == 2 &&
     classifyProxyRequestPriority "GET" "/api/software" (some "p0") == 0
   if (← assertTrue "proxy_request_priority_classification" prioOk) then passed := passed + 1
@@ -779,6 +783,21 @@ def main : IO UInt32 := do
   runR6bClientLinkAndConflictTests
   passed := passed + 3
   total := total + 3
+
+  -- 19. Orphan parent-PID watchdog (`ORB_PARENT_PID`): exits when parent is gone & idle, stays alive while parent lives or local work is active/unsynced
+  let selfPid ← OrbBin.PosixExt.getpid
+  let orphanRef ← IO.mkRef ({ launchToken := validTok } : LocaldState)
+  let aliveParentRes ← shouldExitForDeadParent (some (Int64.ofNat selfPid.toNat)) orphanRef
+  let deadIdleRes ← shouldExitForDeadParent (some 2147483646) orphanRef
+  let _ ← dispatchRpcCommand orphanRef "local_origin_launch" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://orbcore.thomas.md")]),
+    ("prompt", .str "keep local run alive")
+  ])
+  let deadActiveRes ← shouldExitForDeadParent (some 2147483646) orphanRef
+  total := total + 1
+  if (← assertTrue "orphan_parent_watchdog_respects_liveness_and_active_local_origins"
+        (!aliveParentRes && deadIdleRes && !deadActiveRes)) then
+    passed := passed + 1
 
   try IO.FS.removeDirAll tmpStateDir catch _ => pure ()
 

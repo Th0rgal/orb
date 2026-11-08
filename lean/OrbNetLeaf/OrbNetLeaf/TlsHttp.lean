@@ -36,11 +36,17 @@ private opaque NonemptyTlsSession : NonemptyType
 def TlsSession : Type := NonemptyTlsSession.type
 instance : Nonempty TlsSession := NonemptyTlsSession.property
 
+/-- Outcome of `orb_net_leaf_tls_open` (`0` = connect/TLS failure, `1` = TLS succeeded without ALPN `"h2"`, `2` = live session). -/
+inductive TlsOpenOutcome where
+  | failed
+  | alpnNotH2
+  | ok (sess : TlsSession)
+
 @[extern "orb_net_leaf_tls_open"]
 private opaque rawTlsOpen
     (host : @& String) (port : UInt16)
     (req : @& ByteArray) (verifyPeer alpnMode : UInt8)
-    (timeoutMs : UInt32) : IO (Option TlsSession)
+    (timeoutMs : UInt32) : IO TlsOpenOutcome
 
 @[extern "orb_net_leaf_tls_write"]
 private opaque rawTlsWrite
@@ -305,8 +311,8 @@ def openHttps11Stream
       host.toUTF8.size.toUInt64 reqWire.size.toUInt64 initialHeadCapBytes.toUInt64 != 1 then
     return .error "openHttps11Stream rejected by verifyOutboundRequest"
   match ← rawTlsOpen host port reqWire vpFlag 0 timeoutMs with
-  | some sess => return .ok sess
-  | none => return .error s!"TLS stream connection failed to {host}:{port}"
+  | .ok sess => return .ok sess
+  | .failed | .alpnNotH2 => return .error s!"TLS stream connection failed to {host}:{port}"
 
 /-- Drain a live `TlsSession` in linear $O(N)$ time (`Array ByteArray` chunk accumulation + single flatten)
     up to `maxWireCap` bytes into `[statusByte || wireBytes]` (`1` = `close_notify`, `2` = cap exceeded, `4` = TCP EOF). -/
@@ -498,7 +504,7 @@ def httpsRequest
     return .error "httpsRequest rejected by verifyOutboundRequest"
   let maxWireCap := maxRespBytes + 65536
   let connectTimeoutMs : UInt32 := if timeoutMs == 0 || timeoutMs > 15000 then 15000 else timeoutMs
-  let some sess ← rawTlsOpen host port reqWire vpFlag 0 connectTimeoutMs
+  let .ok sess ← rawTlsOpen host port reqWire vpFlag 0 connectTimeoutMs
     | return .error s!"TLS roundtrip failed to {host}:{port}"
   let framed ← drainTlsSessionToFramed sess maxWireCap timeoutMs
   if framed.isEmpty then
@@ -900,26 +906,42 @@ def h2SettingsAckFrame : ByteArray :=
 def buildH2PingAckFrame (payload8 : ByteArray) : ByteArray :=
   (ByteArray.mk #[0x00, 0x00, 0x08, 0x06, 0x01, 0x00, 0x00, 0x00, 0x00]) ++ payload8
 
+/-- Outcome of attempting to open a persistent HTTP/2 session (`ALPN "h2"`). -/
+inductive H2ConnectOutcome where
+  | ok (sess : TlsSession)
+  | alpnFallbackH1
+  | transportError (msg : String)
+
 /-- Open a persistent WebPKI TLS 1.3/1.2 HTTP/2 connection (`ALPN "h2"`), sending the RFC 9113
     client preface + `SETTINGS` (`HEADER_TABLE_SIZE=0`, `ENABLE_PUSH=0`, `INITIAL_WINDOW_SIZE=16 MiB`)
     + connection `WINDOW_UPDATE` (`+16,711,681` -> `16 MiB` window), gated by `verifyOutboundRequest`. -/
+def openH2PersistentSessionOutcome
+    (host : String) (port : UInt16 := 443)
+    (verifyPeer : Bool := true)
+    (connectTimeoutMs : UInt32 := 10000) : IO H2ConnectOutcome := do
+  let noCrLf := if isValidBareHost host && hasNoCrLfOrNul host == 1 then (1 : UInt8) else 0
+  let vpFlag : UInt8 := if verifyPeer then 1 else 0
+  let some settingsFrame := buildSettingsFrame? #[(0x0001, 0), (0x0002, 0), (0x0004, 16777216)] false
+    | return .transportError "failed to encode HTTP/2 SETTINGS frame"
+  let some winFrame := buildWindowUpdateFrame? 0 16711681
+    | return .transportError "failed to encode HTTP/2 WINDOW_UPDATE frame"
+  let initWire := clientPreface ++ settingsFrame ++ winFrame
+  if verifyOutboundRequest noCrLf vpFlag port.toUInt32
+      host.toUTF8.size.toUInt64 initWire.size.toUInt64 65536 != 1 then
+    return .transportError "openH2PersistentSession rejected by verifyOutboundRequest"
+  match ← rawTlsOpen host port initWire vpFlag 1 connectTimeoutMs with
+  | .ok sess => return .ok sess
+  | .alpnNotH2 => return .alpnFallbackH1
+  | .failed => return .transportError s!"TLS connect failed to {host}:{port}"
+
 def openH2PersistentSession
     (host : String) (port : UInt16 := 443)
     (verifyPeer : Bool := true)
     (connectTimeoutMs : UInt32 := 10000) : IO (Except String TlsSession) := do
-  let noCrLf := if isValidBareHost host && hasNoCrLfOrNul host == 1 then (1 : UInt8) else 0
-  let vpFlag : UInt8 := if verifyPeer then 1 else 0
-  let some settingsFrame := buildSettingsFrame? #[(0x0001, 0), (0x0002, 0), (0x0004, 16777216)] false
-    | return .error "failed to encode HTTP/2 SETTINGS frame"
-  let some winFrame := buildWindowUpdateFrame? 0 16711681
-    | return .error "failed to encode HTTP/2 WINDOW_UPDATE frame"
-  let initWire := clientPreface ++ settingsFrame ++ winFrame
-  if verifyOutboundRequest noCrLf vpFlag port.toUInt32
-      host.toUTF8.size.toUInt64 initWire.size.toUInt64 65536 != 1 then
-    return .error "openH2PersistentSession rejected by verifyOutboundRequest"
-  match ← rawTlsOpen host port initWire vpFlag 1 connectTimeoutMs with
-  | some sess => return .ok sess
-  | none => return .error s!"TLS ALPN h2 handshake failed to {host}:{port}"
+  match ← openH2PersistentSessionOutcome host port verifyPeer connectTimeoutMs with
+  | .ok sess => return .ok sess
+  | .alpnFallbackH1 => return .error s!"TLS ALPN h2 not negotiated by {host}:{port}"
+  | .transportError msg => return .error msg
 
 /-- Execute a verified interactive RFC 9113 HTTP/2 request over WebPKI TLS 1.3/1.2 with ALPN `"h2"`:
     - Sends `SETTINGS` ACK (`0x01`) and `PING` ACK (`0x01`) interactively via `writeTlsSessionAll`.
@@ -947,7 +969,7 @@ def http2Request
       host.toUTF8.size.toUInt64 estTotalReqBytes.toUInt64 maxRespBytes.toUInt64 != 1 then
     return .error "http2Request rejected by verifyOutboundRequest"
   let maxWireCap := maxRespBytes + 131072
-  let some sess ← rawTlsOpen host port initialWire vpFlag 1 timeoutMs
+  let .ok sess ← rawTlsOpen host port initialWire vpFlag 1 timeoutMs
     | return .error s!"TLS ALPN h2 handshake failed to {host}:{port}"
   let mut rxChunks : Array ByteArray := #[]
   let mut totalRxBytes : Nat := 0

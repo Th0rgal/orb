@@ -508,8 +508,18 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     for (const item of items()) if (item.kind === "user" && !item.queued) count++;
     return count;
   };
+  let pendingBeforeSendId: ReturnType<typeof crypto.randomUUID> | null = null;
   const beginSend = (draft:{text:string;images:DraftImage[];retry?:()=>void}|null) => {
-    if(!draft)return;
+    if (!draft) {
+      if (pendingBeforeSendId) {
+        const cancelledId = pendingBeforeSendId;
+        pendingBeforeSendId = null;
+        sendingIds = sendingIds.filter(id => id !== cancelledId);
+        drafts.remove(cancelledId);
+        if (p.id) endHandoff(p.id, cancelledId);
+      }
+      return;
+    }
     const prevErr = sendError();
     const firstOpt = optimistic();
     const reused = Boolean(prevErr && firstOpt?.text === draft.text);
@@ -523,11 +533,13 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       alreadyDelivered: items().some(i => i.kind === "user" && !i.queued && i.messageId === nextId),
     });
     if (!enqueueStep.admitted && !reused) return;
+    pendingBeforeSendId = nextId;
     sendingIds.push(nextId);
     setSendError(null);
     const waiting = busy() || drafts.inFlightOtherThan(nextId);
     drafts.upsert({ ...draft, id: nextId, waiting, postedAfterSeq });
     if (!waiting) {
+      if (p.id && !clientPlaced() && !editingQueued()) beginHandoff(p.id, nextId);
       pin.pin();
     }
   };
@@ -1186,6 +1198,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       retryMessage = null;
       if (staleMission()) return true;
       if (result.replacement) {
+        endHandoff(targetMissionId, attemptId);
+        endHandoff(targetMissionId, result.id);
         const replacement = result.replacement;
         const nodeId = missionNode(replacement) ?? missionNode(mission()) ?? "";
         rememberLaunch(replacement.id, { prompt: sent, nodeId, destination: nodeLabel(nodeId), replacement: true });
@@ -1200,6 +1214,10 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         });
         return true;
       }
+      if (result.queued) {
+        endHandoff(targetMissionId, attemptId);
+        endHandoff(targetMissionId, result.id);
+      }
       const event: StreamEvent = { type: "user_message", eventId: result.id, data: { id: result.id, content: sent, queued: result.queued, receipt: true, attached: chips.length > 0 } };
       if (replaying) held.push(event);
       else applyLive(event);
@@ -1209,6 +1227,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       return true;
     }
     catch (e) {
+      endHandoff(targetMissionId, attemptId);
+      if (explicitId) endHandoff(targetMissionId, explicitId);
+      if (retryMessage?.id) endHandoff(targetMissionId, retryMessage.id);
       log.warn("mission.send", errorText(e), { mission: targetMissionId, message: explicitId ?? retryMessage?.id });
       if (e instanceof MessageRejectedError || (e instanceof ApiError && e.status < 500 && e.status !== 408)) retryMessage = null;
       if (!staleMission()) setSendError(launchError(e));
@@ -1240,10 +1261,17 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     setSentOverStop(mission() ? `${mission()!.status}|${mission()!.updated_at}` : null);
     if (!replace && working()) usageTelemetry.action("queue", "composer");
     const attemptId = explicitId ?? sendingIds.shift() ?? crypto.randomUUID();
+    if (pendingBeforeSendId === attemptId) pendingBeforeSendId = null;
+    if (p.id && !clientPlaced() && !replace && !busy() && !drafts.inFlightOtherThan(attemptId)) {
+      beginHandoff(p.id, attemptId);
+    }
     const run = sendChain.then(async () => {
       drafts.setFailed(attemptId, false);
       const accepted = await sendMsgOnce(text, images, chips, attemptId, explicitId, replace);
-      if (!accepted) drafts.setFailed(attemptId, true);
+      if (!accepted) {
+        if (p.id) endHandoff(p.id, attemptId);
+        drafts.setFailed(attemptId, true);
+      }
       return accepted;
     });
     sendChain = run.then(() => undefined, () => undefined);
@@ -1349,7 +1377,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const targetMissionId = boundMissionId || p.id;
     if (!targetMissionId || staleMission()) return;
     if (liveInjected?.length) {
-      beginHandoff(targetMissionId, liveInjected[0].id);
+      beginHandoff(targetMissionId, liveInjected[0].id, Date.now(), true);
       for (const row of liveInjected) {
         const presented = messagePresentation(row.content);
         const event: StreamEvent = {
@@ -1370,8 +1398,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       }
     }
     if (!ordered.length) return;
-    beginHandoff(targetMissionId, ordered[0].id);
     const wasBusy = busy();
+    beginHandoff(targetMissionId, ordered[0].id, Date.now(), true);
     setSendingImmediate(true);
     setSendError(null);
     // Show the messages as sent right away: stopping a remote turn can take
@@ -1485,7 +1513,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             <Show when={mission() && !(awaitingTurn() || optimisticList().some(item => !item.waiting && !item.failed)) && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
               <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} onResetRedeemed={() => void refresh()} recoveryPending={recoveryPending()} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} />
             </Show>
-            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.id} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} prepareSearch={prepareSearch} needsPrepareSearch={needsPrepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && ((missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled") || visibleViewItems().some(item => item.kind === "error" && item.terminal)) ? resume : undefined} />
+            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.promoted ? handoff()?.id : undefined} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} prepareSearch={prepareSearch} needsPrepareSearch={needsPrepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && ((missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled") || visibleViewItems().some(item => item.kind === "error" && item.terminal)) ? resume : undefined} />
             <Show when={awaiting() && items().length > 0}><ActivitySkeleton /></Show>
             <TurnRecap mission={mission() ?? undefined} items={viewItems()} busy={busy()} onDraft={text=>setSideRevision({text,append:false})} />
             <ErrorToast
@@ -1565,7 +1593,11 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
                 // The composer projected this text as a new outgoing message;
                 // an edit is not one.
                 const projected=sendingIds.shift();
-                if(projected)drafts.remove(projected);
+                if (projected) {
+                  if (pendingBeforeSendId === projected) pendingBeforeSendId = null;
+                  drafts.remove(projected);
+                  if (p.id) endHandoff(p.id, projected);
+                }
                 if(images.length){
                   const saved=await queue.replaceEdited(
                     id,

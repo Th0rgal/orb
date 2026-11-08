@@ -299,9 +299,20 @@ private def handleTransportProxyRequest (stRef : IO.Ref LocaldState) (isShardPor
             if retryStatus && canFailoverRequest req.method hasIdem (idx + 1) origins then
               idx := idx + 1
             else
+              let isComputeBound :=
+                !isSafeHttpMethod req.method ||
+                relPath == "/api/file-resources" ||
+                relPath.endsWith "/inbox-digest" ||
+                (relPath.splitOn "/inbox-digest?").length > 1
               let srtt ←
                 if retryStatus then
                   pure pooled.rttMs
+                else if isComputeBound then
+                  let curSt ← stRef.get
+                  let cappedRtt : UInt32 := if pooled.rttMs < 400 then pooled.rttMs else 400
+                  match curSt.originHealth.find? (fun h => h.origin == orig) with
+                  | some h => pure (if h.srttMs > 0 then h.srttMs else cappedRtt)
+                  | none => pure cappedRtt
                 else
                   recordOriginSuccess stRef orig pooled.rttMs
               let encVal := ((findHeaderVal? up.headers "content-encoding").getD "").trimAscii.toString.toLower
@@ -435,7 +446,18 @@ private def handleClientConnection (stRef : IO.Ref LocaldState) (portIdx : Nat) 
   finally
     discard <| closeFd clientFd
 
-partial def acceptMuxLoop (stRef : IO.Ref LocaldState) (rpcFd : Fd) (proxyFds : Array Fd) : IO UInt32 := do
+partial def acceptMuxLoop (stRef : IO.Ref LocaldState) (rpcFd : Fd) (proxyFds : Array Fd)
+    (parentPid? : Option Int64 := none) (tick : Nat := 0) : IO UInt32 := do
+  if (← OrbBin.PosixExt.pollTermTrap) != 0 then
+    discard <| closeFd rpcFd
+    for pfd in proxyFds do discard <| closeFd pfd
+    return 0
+  if tick ≥ 8 then
+    if (← shouldExitForDeadParent parentPid? stRef) then
+      discard <| closeFd rpcFd
+      for pfd in proxyFds do discard <| closeFd pfd
+      return 0
+  let nextTick := if tick ≥ 8 then 0 else tick + 1
   let allFds := #[rpcFd] ++ proxyFds
   match ← pollFdSet allFds 250 0 with
   | .ok readyIdxs =>
@@ -447,7 +469,7 @@ partial def acceptMuxLoop (stRef : IO.Ref LocaldState) (rpcFd : Fd) (proxyFds : 
           discard <| IO.asTask (prio := .dedicated) (handleClientConnection stRef idx cfd)
         | .error _ => pure ()
   | .error _ => pure ()
-  acceptMuxLoop stRef rpcFd proxyFds
+  acceptMuxLoop stRef rpcFd proxyFds parentPid? nextTick
 
 private def detectHostOs : IO String := do
   if (← System.FilePath.pathExists "/System/Library/CoreServices/SystemVersion.plist") then
@@ -581,5 +603,13 @@ def main (args : List String) : IO UInt32 := do
         signerBin? := signerBin?
         h2Pool? := some h2Pool
       }
+      let parentPid? : Option Int64 :=
+        match (← IO.getEnv "ORB_PARENT_PID") with
+        | some raw =>
+          match raw.trimAscii.toString.toNat? with
+          | some n => if n > 1 && n ≤ 0x7FFFFFFF then some (Int64.ofNat n) else none
+          | none => none
+        | none => none
+      OrbBin.PosixExt.installTermTrap
       let stRef ← IO.mkRef initState
-      acceptMuxLoop stRef rpcFd (#[proxyFd] ++ shardFds)
+      acceptMuxLoop stRef rpcFd (#[proxyFd] ++ shardFds) parentPid? 0
