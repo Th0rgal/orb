@@ -243,17 +243,29 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         NSApp.mainMenu = mainMenu
     }
 
-    private func sendWebViewEditAction(_ action: Selector, from sender: Any?) {
+    @discardableResult
+    private func sendWebViewEditAction(_ action: Selector, from sender: Any?) -> Bool {
         if let win = window, win.attachedSheet == nil, let wv = webView {
-            if win.firstResponder === win || win.firstResponder === win.contentView {
+            if win.firstResponder === win || win.firstResponder === win.contentView || win.firstResponder === vibrancyView {
                 win.makeFirstResponder(wv)
             }
             if win.firstResponder === wv {
-                NSApp.sendAction(action, to: wv, from: sender)
-                return
+                // Walk the responder chain from WKWebView instead of forcing `to: wv`:
+                // WKWebView implements cut:/copy:/paste:/selectAll: directly, whereas undo:/redo:
+                // are implemented on NSWindow (delegating to `firstResponder?.undoManager`, i.e.
+                // `wv.undoManager`). Passing `to: wv` without checking `responds(to:)` throws
+                // NSInvalidArgumentException (`-[WKWebView undo:]: unrecognized selector`).
+                var responder: NSResponder? = wv
+                while let r = responder {
+                    if r.responds(to: action) {
+                        return NSApp.sendAction(action, to: r, from: sender)
+                    }
+                    responder = r.nextResponder
+                }
+                return false
             }
         }
-        NSApp.sendAction(action, to: nil, from: sender)
+        return NSApp.sendAction(action, to: nil, from: sender)
     }
 
     @objc private func editUndo(_ sender: Any?) { sendWebViewEditAction(Selector(("undo:")), from: sender) }
@@ -685,7 +697,7 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
 
     func applicationDidBecomeActive(_ notification: Notification) {
         if let win = window, win.attachedSheet == nil, let wv = webView,
-           win.firstResponder === win || win.firstResponder === win.contentView {
+           win.firstResponder === win || win.firstResponder === win.contentView || win.firstResponder === vibrancyView {
             win.makeFirstResponder(wv)
         }
     }
@@ -693,10 +705,83 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
     func applicationWillTerminate(_ notification: Notification) {
         localdProc?.terminate()
     }
+
+    fileprivate func runSelfTest() {
+        let allowed = ["tauri://localhost/", "tauri://localhost/index.html", "http://127.0.0.1:19479/", "http://localhost:1430/", "file:///tmp/index.html", "about:blank"]
+        for raw in allowed {
+            guard let u = URL(string: raw), Self.isConfinedShellURL(u) else {
+                fputs("self-test failed: expected confined URL to be allowed: \(raw)\n", stderr)
+                exit(1)
+            }
+        }
+        let denied = ["https://example.com/", "http://example.com/", "tauri://evil.example/", "javascript:alert(1)"]
+        for raw in denied {
+            if let u = URL(string: raw), Self.isConfinedShellURL(u) {
+                fputs("self-test failed: expected external URL to be rejected: \(raw)\n", stderr)
+                exit(1)
+            }
+        }
+
+        installMainMenu()
+        let rect = NSRect(x: 0, y: 0, width: 320, height: 240)
+        window = NSWindow(
+            contentRect: rect,
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered, defer: false
+        )
+        let container = NSView(frame: rect)
+        let vibrancy = NSVisualEffectView(frame: rect)
+        vibrancyView = vibrancy
+        webView = WKWebView(frame: rect)
+        container.addSubview(vibrancy)
+        container.addSubview(webView, positioned: .above, relativeTo: vibrancy)
+        window.contentView = container
+        window.makeFirstResponder(webView)
+
+        guard let editMenu = NSApp.mainMenu?.item(withTitle: "Edit")?.submenu ?? NSApp.mainMenu?.items.dropFirst().first?.submenu else {
+            fputs("self-test failed: missing Edit menu\n", stderr)
+            exit(1)
+        }
+        let expectedTitles: Set<String> = ["Undo", "Redo", "Cut", "Copy", "Paste", "Select All"]
+        var exercised = Set<String>()
+        for initialResponder in [webView as NSResponder, window as NSResponder, container as NSResponder, vibrancy as NSResponder] {
+            window.makeFirstResponder(initialResponder)
+            for item in editMenu.items where !item.isSeparatorItem {
+                guard let action = item.action else {
+                    fputs("self-test failed: missing action on menu item \(item.title)\n", stderr)
+                    exit(1)
+                }
+                guard NSApp.sendAction(action, to: item.target, from: item) else {
+                    fputs("self-test failed: menu item \(item.title) action was not handled\n", stderr)
+                    exit(1)
+                }
+                guard window.firstResponder === webView else {
+                    fputs("self-test failed: expected WKWebView to be firstResponder after \(item.title)\n", stderr)
+                    exit(1)
+                }
+                exercised.insert(item.title)
+            }
+        }
+        guard exercised == expectedTitles else {
+            fputs("self-test failed: exercised \(exercised), expected \(expectedTitles)\n", stderr)
+            exit(1)
+        }
+        for sel in [Selector(("undo:")), Selector(("redo:")), #selector(NSText.cut(_:)), #selector(NSText.copy(_:)), #selector(NSText.paste(_:)), #selector(NSText.selectAll(_:))] {
+            guard sendWebViewEditAction(sel, from: nil) else {
+                fputs("self-test failed: sendWebViewEditAction(\(sel)) returned false\n", stderr)
+                exit(1)
+            }
+        }
+    }
 }
 
 let app = NSApplication.shared
 let delegate = OrbAppDelegate()
+if CommandLine.arguments.contains("--self-test") {
+    app.setActivationPolicy(.prohibited)
+    delegate.runSelfTest()
+    exit(0)
+}
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.run()

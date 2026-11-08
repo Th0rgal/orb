@@ -274,6 +274,7 @@ jobs:
           python3 orb/scripts/build-signer.py
           node orb/scripts/build-macos-icon.mjs
           test -x macos_shell/build/orb-desktop
+          ./macos_shell/build/orb-desktop --self-test
           test -x macos_shell/build/orb-signer
           test -f macos_shell/gen/app-icon/Assets.car
 
