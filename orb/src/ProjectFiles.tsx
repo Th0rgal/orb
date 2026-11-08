@@ -33,8 +33,10 @@ import { MdSource, MdView, mdSource, setMdSource } from "./Markdown";
 import { missionDestination } from "./missionLaunch";
 import {
   api,
+  currentUser,
   getApiUrl,
   isConnected,
+  isMissionParticipant,
   ApiError,
   cancelMission,
   connectionVersion,
@@ -89,6 +91,7 @@ import { cacheCanPrefetch, cachePeek, cachePrefetch, cachePut, cacheRemember } f
 import { currentLinkBudget, onLinkBudgetChange } from "./networkHealth";
 import { SidebarTree } from "./Tree";
 import { type TreeRow } from "./treeModel";
+const ShareMissionDialog = lazy(() => import("./ShareMissionDialog").then(module => ({ default: module.ShareMissionDialog })));
 import { deletingIds, setDeletingIds, createTreeSelection } from "./tree/selection";
 import { createArchivePager } from "./tree/archivePager";
 import { createMissionMoves, type ApprovalConfirmationPrompt } from "./tree/moves";
@@ -160,20 +163,31 @@ export function LiveProjectsSection(p: {
   const [error, setError] = createSignal<string | null>(null);
   const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
   const [archiveMenu, setArchiveMenu] = createSignal<{ x: number; y: number; slug?: string } | null>(null);
+  const [shareDialogMission, setShareDialogMission] = createSignal<Mission | null>(null);
   const isArchived = (mission: Mission) => mission.status === "acknowledged";
   const LIVE = new Set(["active", "pending", "queued", "awaiting_user", "resuming", "running", "starting", "blocked", "paused", "waiting_background"]);
+  const sharedWithMeMissions = createMemo(() =>
+    (p.activityMissions ?? []).filter(
+      m =>
+        isMissionParticipant(m) &&
+        !isArchived(m) &&
+        !deletingIds().has(m.id) &&
+        !m.parent_mission_id &&
+        !m.tags?.some(t => t.startsWith("btw:")),
+    ),
+  );
   const visibleMissions = (slug: string) => {
     // Pending moves: rows leave their old project and appear in the new one at once.
     // The per-project fetch pages history and walks parents. Until it lands,
     // the conversations already on the activity list are the list.
-    const stored = missions[slug] ?? (p.activityMissions ?? []).filter(m => (m.project ?? "") === slug);
-    const own = stored.filter(m => !movingOutOf(m.id, slug) && (!m.project || m.project === slug));
-    const arriving = pendingPlaceMoves().size ? missionsMovedInto(slug, [...Object.values(missions).flat(), ...(p.activityMissions ?? [])]).filter(m => !own.some(o => o.id === m.id)) : [];
+    const stored = missions[slug] ?? (p.activityMissions ?? []).filter(m => !isMissionParticipant(m) && (m.project ?? "") === slug);
+    const own = stored.filter(m => !isMissionParticipant(m) && !movingOutOf(m.id, slug) && (!m.project || m.project === slug));
+    const arriving = pendingPlaceMoves().size ? missionsMovedInto(slug, [...Object.values(missions).flat(), ...(p.activityMissions ?? [])]).filter(m => !isMissionParticipant(m) && !own.some(o => o.id === m.id)) : [];
     const rows = withMovedMissions(mergeArrivingMissions(own, arriving)).map(withHierarchy);
     const current = currentMission();
     // A paginated project list may not contain an older open conversation, and
     // the open conversation's live status updates ahead of the project poll.
-    const withCurrent = current?.project === slug && !isArchived(current) && !isBtwMission(current)
+    const withCurrent = current && !isMissionParticipant(current) && current.project === slug && !isArchived(current) && !isBtwMission(current)
       ? (rows.some(m => m.id === current.id)
         ? rows.map(m => m.id === current.id ? { ...mergeMission(m, current, "partial"), status: archiving.get(m.id) ?? current.status } : m)
         : [withHierarchy(current), ...rows])
@@ -1119,6 +1133,7 @@ export function LiveProjectsSection(p: {
     const incomingByProject = new Map<string, Mission[]>();
     const nextByProject = new Map<string, string[]>();
     for (const m of list ?? []) {
+      if (isMissionParticipant(m)) continue;
       const slug = m.project?.trim();
       if (!slug) continue;
       let rows = incomingByProject.get(slug);
@@ -1980,12 +1995,34 @@ export function LiveProjectsSection(p: {
     if (!archivesLoaded() && !archivesLoading()) void loadArchives();
     setArchiveMenu({ x: e.clientX, y: e.clientY, slug });
   };
+  const leaveSharedMission = async (mission: Mission) => {
+    const uid = currentUser()?.id;
+    setMissionMenu(null);
+    if (!uid) return;
+    setActionError(null);
+    try {
+      const { removeMissionShare } = await import("./missionSharesApi");
+      await removeMissionShare(mission.id, uid);
+      p.onDeleted?.([mission.id]);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    }
+  };
   /** Fork the clicked mission without changing the currently open conversation. */
   const missionMenuItems = (mission: Mission, slug: string, folder: string): MenuEntry[] => {
+    if (isMissionParticipant(mission)) {
+      return [
+        { kind: "item", label: "Copy mission ID", icon: Ic.CopyIcon, onClick: () => void copyMissionId(mission) },
+        { kind: "item", label: "Mission settings", icon: Ic.SlidersIcon, onClick: () => { setMissionMenu(null); p.open(`ms:${mission.id}`); } },
+        { kind: "sep" },
+        { kind: "item", label: "Leave shared mission", icon: Ic.CloseIcon, danger: true, onClick: () => void leaveSharedMission(mission) },
+      ];
+    }
     const pasteEntries = !isArchived(mission) && !(cutId() === mission.id && pendingMoves().length <= 1 && !fileClipboard() && !cutCron() && (mission.project ?? "") === slug && missionFolder(mission) === folder)
       ? pasteMenuEntries(slug, folder)
       : [];
     const pasteSection: MenuEntry[] = pasteEntries.length ? [...pasteEntries, { kind: "sep" }] : [];
+    const canShare = isConnected() && !mission.tags?.includes("placement:client");
     return selectedFor(mission.id).length > 1 ? [
       ...pasteSection,
       {kind: "item", label: `Move ${selectedFor(mission.id).length} agents`, icon: Ic.CutIcon, onClick: () => startMoveSelection(mission.id)},
@@ -2000,6 +2037,7 @@ export function LiveProjectsSection(p: {
         ? [{ kind: "item" as const, label: isArchived(mission) ? "Restore" : "Reopen", icon: Ic.ReopenIcon, onClick: () => void reopenConversation(mission) }] : []),
       { kind: "item", label: "Move", icon: Ic.CutIcon, onClick: () => startMoveSelection(mission.id) },
       { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginMissionRename(mission) },
+      ...(canShare ? [{ kind: "item" as const, label: "Share…", icon: Ic.UsersIcon, onClick: () => { setMissionMenu(null); setShareDialogMission(mission); } }] : []),
       { kind: "item", label: "Copy mission ID", icon: Ic.CopyIcon, onClick: () => void copyMissionId(mission) },
       { kind: "item", label: "Mission settings", icon: Ic.SlidersIcon, onClick: () => { setMissionMenu(null); p.open(`ms:${mission.id}`); } },
       ...(isArchivable(mission.status)
@@ -2045,7 +2083,7 @@ export function LiveProjectsSection(p: {
       // Paint the known conversations before the paged fetch returns, and
       // don't wait on that fetch before another project can open.
       if (missions[slug] === undefined) {
-        const known = (p.activityMissions ?? []).filter(m => (m.project ?? "") === slug);
+        const known = (p.activityMissions ?? []).filter(m => !isMissionParticipant(m) && (m.project ?? "") === slug);
         if (known.length) setMissions(slug, known);
       }
       void loadMissions(slug, { cached: true });
@@ -2644,6 +2682,38 @@ export function LiveProjectsSection(p: {
 
   return (
     <>
+      <Show when={sharedWithMeMissions().length > 0}>
+        <div class="section" data-testid="shared-with-me-section">Shared with me</div>
+        <div class="sb-shared-list">
+          <For each={sharedWithMeMissions()}>
+            {m => (
+              <button
+                type="button"
+                class={`row agent ${!LIVE.has(m.status) ? "done" : ""} ${p.selected() === `m:${m.id}` ? "active" : ""}`}
+                aria-current={p.selected() === `m:${m.id}` ? "page" : undefined}
+                onClick={() => p.open(`m:${m.id}`)}
+                onContextMenu={e => onMissionContext(e, m, `m:${m.id}`, "", "")}
+              >
+                <span class="row-ico glyph mission-lead">
+                  <MissionGlyph
+                    missionId={m.id}
+                    status={presentedStatus(m)}
+                    unread={isMissionUnread(m, currentMission()?.id, Boolean(pendingMissionInteraction(m.id)))}
+                    continuation={m.continuation}
+                    identity={m.backend?.startsWith("cloud_") ? <ProviderLogo type={m.backend!} /> : undefined}
+                  />
+                </span>
+                <span class="row-label">{m.title || "Untitled conversation"}</span>
+                <Show when={m.owner_username}>
+                  <span class="row-machine">
+                    <span class="row-machine-name">@{m.owner_username}</span>
+                  </span>
+                </Show>
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
       <div class="section section-row">
         <span>Projects</span>
         <button class="section-add" title="New project" onClick={e => { e.currentTarget.focus(); p.onNewProject(e.currentTarget); }}>
@@ -2800,6 +2870,13 @@ export function LiveProjectsSection(p: {
               onFork={mission => { setForkTarget(null); setMissionMenu(null); p.onFork(mission); }} />
           }</Show>
         </PopupMenu>}
+      </Show>
+      <Show when={shareDialogMission()}>
+        {m => (
+          <Suspense>
+            <ShareMissionDialog mission={m()} onClose={() => setShareDialogMission(null)} />
+          </Suspense>
+        )}
       </Show>
       <Show when={rowDrag.pill()}>
         {pill => (

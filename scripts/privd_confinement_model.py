@@ -78,6 +78,37 @@ UNSAFE_ENV_KEYS = {
     "DYLD_INSERT_LIBRARIES",
     "ORB_CORE_API_URL",
     "ORB_CORE_API_TOKEN",
+    "ORB_NODE_TOKEN",
+    "SANDBOXED_NODE_TOKEN",
+    "SANDBOXED_SH_TOKEN",
+    "ORB_API_TOKEN",
+}
+
+RESERVED_UNIX_USERNAMES = {
+    "root",
+    "daemon",
+    "nobody",
+    "ubuntu",
+    "debian",
+    "admin",
+    "orb-core",
+    "orb-node",
+    "sandboxed-node",
+    "postgres",
+    "systemd-network",
+    "systemd-resolve",
+    "sshd",
+}
+
+PRIVILEGED_UNIX_GROUPS = {
+    "root",
+    "sudo",
+    "wheel",
+    "docker",
+    "adm",
+    "shadow",
+    "sandboxed-node",
+    "orb-node",
 }
 
 
@@ -123,6 +154,21 @@ def _load_orb_kernel_so():
                 fn = lib.orb_privd_command_step
                 fn.argtypes = [ctypes.c_uint8] * 8
                 fn.restype = ctypes.c_uint64
+                if hasattr(lib, "orb_privd_user_exec_step"):
+                    ufn = lib.orb_privd_user_exec_step
+                    ufn.argtypes = [
+                        ctypes.c_uint8,
+                        ctypes.c_uint8,
+                        ctypes.c_uint8,
+                        ctypes.c_uint8,
+                        ctypes.c_uint8,
+                        ctypes.c_uint32,
+                        ctypes.c_uint32,
+                        ctypes.c_uint8,
+                        ctypes.c_uint8,
+                        ctypes.c_uint8,
+                    ]
+                    ufn.restype = ctypes.c_uint32
                 return lib
             except OSError:
                 continue
@@ -180,6 +226,66 @@ def orb_privd_command_step(
         )
         if native != mirror:
             raise RuntimeError(f"orb_privd_command_step divergence: native={native:#x} mirror={mirror:#x}")
+        return native
+    return mirror
+
+
+def valid_unix_username(raw: str) -> bool:
+    if not raw or len(raw) > 31 or raw in RESERVED_UNIX_USERNAMES:
+        return False
+    return re.fullmatch(r"[a-z_][a-z0-9_-]{0,30}", raw) is not None
+
+
+def orb_privd_user_exec_step(
+    peer_is_node_uid: int,
+    lease_verified: int,
+    node_admin_only: int,
+    caller_role: int,
+    username_valid: int,
+    target_uid: int,
+    target_gid: int,
+    gid_disjoint_priv: int,
+    home_confined_no_symlink: int,
+    elan_root_owned: int,
+) -> int:
+    """Invoke Lean 4 `Orb.Kernel.privdUserExecStep` (`orb_privd_user_exec_step`) via `liborb_kernel.so` and verified mirror."""
+    u32_uid = target_uid & 0xFFFFFFFF
+    u32_gid = target_gid & 0xFFFFFFFF
+    if peer_is_node_uid != 1:
+        mirror = 1 << 1
+    elif lease_verified != 1:
+        mirror = 2 << 1
+    elif not (caller_role == 1 or node_admin_only == 0):
+        mirror = 3 << 1
+    elif username_valid != 1:
+        mirror = 4 << 1
+    elif not (2000 <= u32_uid < 65534 and 2000 <= u32_gid < 65534):
+        mirror = 5 << 1
+    elif gid_disjoint_priv != 1:
+        mirror = 6 << 1
+    elif home_confined_no_symlink != 1:
+        mirror = 7 << 1
+    elif elan_root_owned != 1:
+        mirror = 8 << 1
+    else:
+        mirror = 1
+    if _ORB_KERNEL_SO is not None and hasattr(_ORB_KERNEL_SO, "orb_privd_user_exec_step"):
+        native = int(
+            _ORB_KERNEL_SO.orb_privd_user_exec_step(
+                peer_is_node_uid & 0xFF,
+                lease_verified & 0xFF,
+                node_admin_only & 0xFF,
+                caller_role & 0xFF,
+                username_valid & 0xFF,
+                u32_uid,
+                u32_gid,
+                gid_disjoint_priv & 0xFF,
+                home_confined_no_symlink & 0xFF,
+                elan_root_owned & 0xFF,
+            )
+        )
+        if native != mirror:
+            raise RuntimeError(f"orb_privd_user_exec_step divergence: native={native:#x} mirror={mirror:#x}")
         return native
     return mirror
 
@@ -669,6 +775,543 @@ def handle_exec(req: dict) -> dict:
     }
 
 
+def _peer_is_node_uid(peer_uid: int) -> bool:
+    allow_nonroot = os.environ.get("ORB_PRIVD_ALLOW_NONROOT_TEST") == "1"
+    if peer_uid == 0 or (allow_nonroot and peer_uid == os.geteuid()):
+        return True
+    try:
+        import pwd
+        for candidate in ("sandboxed-node", "orb-node"):
+            try:
+                if pwd.getpwnam(candidate).pw_uid == peer_uid:
+                    return True
+            except KeyError:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _lookup_or_create_unix_user(u_name: str, home_root: str, create_if_missing: bool) -> tuple[int, int, bool]:
+    allow_nonroot = os.environ.get("ORB_PRIVD_ALLOW_NONROOT_TEST") == "1"
+    if allow_nonroot and os.geteuid() != 0:
+        return 2500, 2500, True
+    import grp
+    import pwd
+
+    try:
+        pw = pwd.getpwnam(u_name)
+    except KeyError:
+        if not create_if_missing:
+            raise ValueError(f"Unix user '{u_name}' is not provisioned")
+        subprocess.run(
+            ["/usr/sbin/groupadd", "-K", "GID_MIN=2000", "-K", "GID_MAX=60000", u_name],
+            capture_output=True,
+        )
+        add_proc = subprocess.run(
+            [
+                "/usr/sbin/useradd",
+                "--create-home",
+                "--home-dir",
+                f"{home_root}/{u_name}",
+                "--shell",
+                "/bin/bash",
+                "-g",
+                u_name,
+                "-G",
+                "",
+                "-K",
+                "UID_MIN=2000",
+                "-K",
+                "UID_MAX=60000",
+                u_name,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if add_proc.returncode != 0:
+            raise RuntimeError(f"useradd failed for {u_name}: {add_proc.stderr.strip()}")
+        pw = pwd.getpwnam(u_name)
+
+    if pw.pw_dir != f"{home_root}/{u_name}":
+        raise ValueError(f"Existing unix user {u_name} home '{pw.pw_dir}' != '{home_root}/{u_name}'")
+    user_groups = {
+        g.gr_name.lower()
+        for g in grp.getgrall()
+        if g.gr_gid == pw.pw_gid or u_name in g.gr_mem
+    }
+    disjoint = user_groups.isdisjoint(PRIVILEGED_UNIX_GROUPS)
+    return pw.pw_uid, pw.pw_gid, disjoint
+
+
+def _scrub_user_job_env(raw_env: dict | list | None, home_dir: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    items = raw_env.items() if isinstance(raw_env, dict) else (raw_env or [])
+    for k_raw, v_raw in items:
+        k = str(k_raw).strip()
+        v = str(v_raw)
+        ku = k.upper()
+        if (
+            re.fullmatch(r"[A-Za-z0-9_]+", k)
+            and ku not in UNSAFE_ENV_KEYS
+            and not ku.startswith("LD_")
+            and not ku.startswith("DYLD_")
+            and "\x00" not in v
+        ):
+            out[k] = v
+    out["HOME"] = home_dir
+    out["ELAN_HOME"] = f"{home_dir}/.elan"
+    out["PATH"] = f"{home_dir}/.elan/bin:/opt/orb-tools/bin:/opt/sandboxed-tools/bin:/usr/local/bin:/usr/bin:/bin"
+    return out
+
+
+def handle_ensure_mission_user(req: dict, peer_uid: int) -> dict:
+    import stat
+
+    peer_ok = int(_peer_is_node_uid(peer_uid))
+    u_name = str(req.get("unix_username") or "").strip()
+    mission_id = str(req.get("mission_id") or "").strip()
+    caller_role = 1 if str(req.get("caller_role") or "member").strip() == "admin" else 0
+    node_admin_only = int(bool(req.get("node_admin_only", False)))
+    lease_verified = int(bool(req.get("lease_verified", True)))
+    if not mission_id or len(mission_id) > 128 or not re.fullmatch(r"[A-Za-z0-9_-]+", mission_id):
+        return {"ok": False, "exit_code": 2, "stderr": "Invalid mission_id"}
+    u_valid = int(valid_unix_username(u_name))
+    if not u_valid:
+        orb_privd_user_exec_step(peer_ok, lease_verified, node_admin_only, caller_role, 0, 0, 0, 0, 0, 0)
+        return {"ok": False, "exit_code": 2, "stderr": f"Invalid or reserved unix_username '{u_name}'"}
+    allow_nonroot = os.environ.get("ORB_PRIVD_ALLOW_NONROOT_TEST") == "1"
+    nonroot = allow_nonroot and os.geteuid() != 0
+    home_root = (os.environ.get("ORB_PRIVD_HOME_ROOT") or "/home").rstrip("/")
+    if nonroot:
+        os.makedirs(home_root, exist_ok=True)
+    target_uid, target_gid, disjoint = _lookup_or_create_unix_user(u_name, home_root, create_if_missing=True)
+    home_dir = f"{home_root}/{u_name}"
+    home_no_sym = False
+    if os.path.lexists(home_root):
+        st_r = os.lstat(home_root)
+        if stat.S_ISDIR(st_r.st_mode) and not stat.S_ISLNK(st_r.st_mode):
+            if not os.path.lexists(home_dir):
+                home_no_sym = True
+            else:
+                st_h = os.lstat(home_dir)
+                home_no_sym = stat.S_ISDIR(st_h.st_mode) and not stat.S_ISLNK(st_h.st_mode)
+    shared_elan = os.environ.get("ORB_PRIVD_SHARED_ELAN") or "/opt/orb/elan"
+    elan_ok = True
+    if os.path.lexists(shared_elan):
+        st_e = os.lstat(shared_elan)
+        elan_ok = (
+            stat.S_ISDIR(st_e.st_mode)
+            and not stat.S_ISLNK(st_e.st_mode)
+            and (nonroot or (st_e.st_uid == 0 and st_e.st_gid == 0))
+        )
+    gate = orb_privd_user_exec_step(
+        peer_ok,
+        lease_verified,
+        node_admin_only,
+        caller_role,
+        u_valid,
+        target_uid,
+        target_gid,
+        int(disjoint),
+        int(home_no_sym),
+        int(elan_ok),
+    )
+    if (gate & 1) != 1:
+        return {"ok": False, "exit_code": 126, "stderr": f"Rejected by orb_privd_user_exec_step (gate={gate})"}
+    if not os.path.lexists(home_dir):
+        os.mkdir(home_dir, 0o700)
+    if not nonroot:
+        os.chown(home_dir, target_uid, target_gid)
+    os.chmod(home_dir, 0o700)
+    helper = (
+        "import json, os, shutil, stat, sys\n"
+        "req = json.loads(sys.stdin.read())\n"
+        "if not req['nonroot']:\n"
+        "  os.setgroups([req['gid']]); os.setgid(req['gid']); os.setuid(req['uid'])\n"
+        "os.umask(0o077)\n"
+        "hd = req['home_dir']; se = req['shared_elan']\n"
+        "if os.path.isdir(se) and not os.path.islink(se):\n"
+        "  de = os.path.join(hd, '.elan')\n"
+        "  for s in ['', 'bin', 'toolchains']:\n"
+        "    p = os.path.join(de, s) if s else de\n"
+        "    if not os.path.lexists(p): os.mkdir(p, 0o700)\n"
+        "  bs = os.path.join(se, 'bin')\n"
+        "  if os.path.isdir(bs):\n"
+        "    for fn in os.listdir(bs):\n"
+        "      sp = os.path.join(bs, fn); dp = os.path.join(de, 'bin', fn)\n"
+        "      if os.path.isfile(sp) and not os.path.islink(dp): shutil.copy2(sp, dp); os.chmod(dp, 0o755)\n"
+        "  ts = os.path.join(se, 'toolchains')\n"
+        "  if os.path.isdir(ts):\n"
+        "    for fn in os.listdir(ts):\n"
+        "      sp = os.path.join(ts, fn); dp = os.path.join(de, 'toolchains', fn)\n"
+        "      if os.path.isdir(sp) and not os.path.lexists(dp): os.symlink(sp, dp)\n"
+        "  st = os.path.join(se, 'settings.toml'); dt = os.path.join(de, 'settings.toml')\n"
+        "  if os.path.isfile(st) and not os.path.lexists(dt): shutil.copy2(st, dt); os.chmod(dt, 0o600)\n"
+        "mr = os.path.join(hd, '.orb-missions')\n"
+        "if not os.path.lexists(mr): os.mkdir(mr, 0o700)\n"
+        "mc = os.path.join(mr, req['mission_id'])\n"
+        "if not os.path.lexists(mc): os.mkdir(mc, 0o700)\n"
+        "os.chmod(mc, 0o700)\n"
+        "for item in req.get('files', []):\n"
+        "  segs = [s for s in str(item.get('path', '')).strip('/').split('/') if s and s != '.']\n"
+        "  if not segs or '..' in segs: raise RuntimeError('unsafe workspace_file path')\n"
+        "  cur = mc\n"
+        "  for s in segs[:-1]:\n"
+        "    cur = os.path.join(cur, s)\n"
+        "    if not os.path.lexists(cur): os.mkdir(cur, 0o700)\n"
+        "  leaf = os.path.join(cur, segs[-1])\n"
+        "  fd = os.open(leaf, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o600)\n"
+        "  os.write(fd, str(item.get('content', '')).encode('utf-8')); os.close(fd)\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", helper],
+        input=json.dumps(
+            {
+                "nonroot": nonroot,
+                "uid": target_uid,
+                "gid": target_gid,
+                "home_dir": home_dir,
+                "shared_elan": shared_elan,
+                "mission_id": mission_id,
+                "files": req.get("workspace_files") or [],
+            }
+        ),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return {"ok": False, "exit_code": 126, "stderr": proc.stderr.strip()}
+    return {
+        "ok": True,
+        "uid": target_uid,
+        "gid": target_gid,
+        "home_dir": home_dir,
+        "mission_cwd": f"{home_dir}/.orb-missions/{mission_id}",
+    }
+
+
+def handle_spawn_user_job(req: dict, peer_uid: int, peer_gid: int) -> dict:
+    import stat
+
+    peer_ok = int(_peer_is_node_uid(peer_uid))
+    if not peer_ok:
+        return {"ok": False, "exit_code": 126, "stderr": "Unauthorized peer UID"}
+    u_name = str(req.get("unix_username") or "").strip()
+    job_id = str(req.get("job_id") or "").strip()
+    mission_id = str(req.get("mission_id") or "").strip()
+    log_path = str(req.get("log_path") or "").strip()
+    argv = [str(x) for x in (req.get("argv") or [])]
+    if (
+        not valid_unix_username(u_name)
+        or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", job_id)
+        or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", mission_id)
+        or not log_path
+        or not argv
+    ):
+        return {"ok": False, "exit_code": 2, "stderr": "Invalid spawn_user_job parameters"}
+    allow_nonroot = os.environ.get("ORB_PRIVD_ALLOW_NONROOT_TEST") == "1"
+    nonroot = allow_nonroot and os.geteuid() != 0
+    home_root = (os.environ.get("ORB_PRIVD_HOME_ROOT") or "/home").rstrip("/")
+    target_uid, target_gid, disjoint = _lookup_or_create_unix_user(u_name, home_root, create_if_missing=False)
+    home_dir = f"{home_root}/{u_name}"
+    mission_cwd = f"{home_dir}/.orb-missions/{mission_id}"
+    home_ok = all(
+        os.path.lexists(p) and stat.S_ISDIR(os.lstat(p).st_mode) and not stat.S_ISLNK(os.lstat(p).st_mode)
+        for p in (home_root, home_dir, mission_cwd)
+    )
+    caller_role = 1 if str(req.get("caller_role") or "member").strip() == "admin" else 0
+    node_admin_only = int(bool(req.get("node_admin_only", False)))
+    gate = orb_privd_user_exec_step(
+        peer_ok, 1, node_admin_only, caller_role, 1, target_uid, target_gid, int(disjoint), int(home_ok), 1
+    )
+    if (gate & 1) != 1:
+        return {"ok": False, "exit_code": 126, "stderr": f"Rejected by orb_privd_user_exec_step (gate={gate})"}
+    clean_env = _scrub_user_job_env(req.get("env"), home_dir)
+    unit = "orb-job-" + "".join(c for c in job_id if c.isalnum())
+    state_dir = (os.environ.get("ORB_PRIVD_STATE_DIR") or "/run/orb-privd-jobs").rstrip("/")
+    os.makedirs(state_dir, exist_ok=True)
+    meta_path = f"{state_dir}/{unit}.json"
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    lfd = os.open(log_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, 0o640)
+    if not nonroot:
+        try:
+            os.fchown(lfd, 0, peer_gid)
+        except OSError:
+            pass
+    if nonroot:
+        rc_path = f"{meta_path}.rc"
+        runner = (
+            "import os, subprocess, sys\n"
+            "p = subprocess.run(sys.argv[2:], env=os.environ)\n"
+            "open(sys.argv[1], 'w').write(str(p.returncode))\n"
+            "sys.exit(p.returncode)\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", runner, rc_path, *argv],
+            cwd=mission_cwd,
+            env=clean_env,
+            stdin=subprocess.DEVNULL,
+            stdout=lfd,
+            stderr=lfd,
+            start_new_session=True,
+        )
+        child_pid = proc.pid
+        proc.returncode = 0  # detached daemon child reaped via os.waitpid in handle_control_user_job
+        os.close(lfd)
+        Path(meta_path).write_text(
+            json.dumps({"unix_username": u_name, "unit": unit, "pid": child_pid, "rc_path": rc_path, "mode": "nonroot"})
+        )
+        return {"ok": True, "unit": unit, "pid": child_pid}
+    os.close(lfd)
+    timeout_secs = max(1, int(req.get("timeout_secs") or 14400))
+    cmd = [
+        "/usr/bin/systemd-run",
+        "--system",
+        "--quiet",
+        "--collect",
+        f"--unit={unit}",
+        f"--uid={target_uid}",
+        f"--gid={target_gid}",
+        f"--working-directory={mission_cwd}",
+        "--property=RemainAfterExit=yes",
+        "--property=Slice=missions.slice",
+        "--property=KillMode=control-group",
+        "--property=NoNewPrivileges=yes",
+        "--property=SupplementaryGroups=",
+        "--property=PrivateTmp=yes",
+        "--property=ProtectSystem=strict",
+        f"--property=ReadWritePaths={home_dir}",
+        f"--property=StandardOutput=file:{log_path}",
+        f"--property=StandardError=file:{log_path}",
+        f"--property=RuntimeMaxSec={timeout_secs}",
+    ]
+    if req.get("mem_max"):
+        cmd.append(f"--property=MemoryMax={int(req['mem_max'])}")
+    if req.get("mem_high"):
+        cmd.append(f"--property=MemoryHigh={int(req['mem_high'])}")
+    if req.get("cpu_weight"):
+        cmd.append(f"--property=CPUWeight={int(req['cpu_weight'])}")
+    if req.get("cpu_quota"):
+        cmd.append(f"--property=CPUQuota={req['cpu_quota']}")
+    for k, v in clean_env.items():
+        cmd.append(f"--setenv={k}={v}")
+    cmd.append("--")
+    cmd.extend(argv)
+    run_proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+    if run_proc.returncode != 0:
+        return {"ok": False, "exit_code": 126, "stderr": run_proc.stderr.strip() or run_proc.stdout.strip()}
+    sh = subprocess.run(
+        ["/usr/bin/systemctl", "show", "--property=MainPID", "--value", unit],
+        capture_output=True,
+        text=True,
+    )
+    mpid = int(sh.stdout.strip() or "0") if sh.returncode == 0 and sh.stdout.strip().isdigit() else 0
+    Path(meta_path).write_text(json.dumps({"unix_username": u_name, "unit": unit, "pid": mpid, "mode": "systemd"}))
+    return {"ok": True, "unit": unit, "pid": mpid}
+
+
+def handle_control_user_job(req: dict, peer_uid: int) -> dict:
+    import signal
+
+    if not _peer_is_node_uid(peer_uid):
+        return {"ok": False, "exit_code": 126, "stderr": "Unauthorized peer UID"}
+    op = str(req.get("op") or "status").strip()
+    job_id = str(req.get("job_id") or "").strip()
+    u_name = str(req.get("unix_username") or "").strip()
+    if not valid_unix_username(u_name) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", job_id):
+        return {"ok": False, "exit_code": 2, "stderr": "Invalid unix_username or job_id"}
+    unit = "orb-job-" + "".join(c for c in job_id if c.isalnum())
+    state_dir = (os.environ.get("ORB_PRIVD_STATE_DIR") or "/run/orb-privd-jobs").rstrip("/")
+    meta_path = Path(f"{state_dir}/{unit}.json")
+    if not meta_path.is_file():
+        return {"ok": True, "done": True, "exit_code": -1, "state": "not-found"}
+    meta = json.loads(meta_path.read_text())
+    if meta.get("unix_username") != u_name:
+        return {"ok": False, "exit_code": 126, "stderr": "job belongs to a different unix_username"}
+    if meta.get("mode") == "nonroot":
+        pid = int(meta.get("pid") or 0)
+        rc_path = Path(meta.get("rc_path") or "")
+        if op in ("stop", "kill"):
+            if pid > 1:
+                try:
+                    os.killpg(pid, signal.SIGKILL if op == "kill" else signal.SIGTERM)
+                except OSError:
+                    pass
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except OSError:
+                    pass
+            meta_path.unlink(missing_ok=True)
+            return {"ok": True, "done": True, "exit_code": 137, "state": "stopped"}
+        if rc_path.is_file():
+            if pid > 1:
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except OSError:
+                    pass
+            rc = int((rc_path.read_text().strip() or "0"))
+            meta_path.unlink(missing_ok=True)
+            rc_path.unlink(missing_ok=True)
+            return {"ok": True, "done": True, "exit_code": rc, "state": "exited"}
+        alive = False
+        if pid > 1:
+            try:
+                os.kill(pid, 0)
+                alive = True
+            except OSError:
+                alive = False
+        return {"ok": True, "done": not alive, "exit_code": 0 if alive else -1, "state": "running" if alive else "exited"}
+    if op in ("stop", "kill"):
+        subprocess.run(["/usr/bin/systemctl", "kill", "--kill-who=all", "--signal=SIGKILL", unit], capture_output=True)
+        subprocess.run(["/usr/bin/systemctl", "stop", unit], capture_output=True)
+        subprocess.run(["/usr/bin/systemctl", "reset-failed", unit], capture_output=True)
+        meta_path.unlink(missing_ok=True)
+        return {"ok": True, "done": True, "exit_code": 137, "state": "stopped"}
+    sh = subprocess.run(
+        ["/usr/bin/systemctl", "show", "--property=ActiveState,SubState,ExecMainStatus", unit],
+        capture_output=True,
+        text=True,
+    )
+    kv = dict(ln.split("=", 1) for ln in sh.stdout.splitlines() if "=" in ln)
+    running = kv.get("ActiveState") in ("active", "activating") and kv.get("SubState") == "running"
+    rc = int(kv.get("ExecMainStatus", "0") or "0")
+    if not running:
+        subprocess.run(["/usr/bin/systemctl", "stop", unit], capture_output=True)
+        subprocess.run(["/usr/bin/systemctl", "reset-failed", unit], capture_output=True)
+        meta_path.unlink(missing_ok=True)
+    return {"ok": True, "done": not running, "exit_code": rc, "state": kv.get("SubState") or kv.get("ActiveState", "")}
+
+
+def handle_user_fs_op(req: dict, peer_uid: int) -> dict:
+    import stat
+
+    peer_ok = int(_peer_is_node_uid(peer_uid))
+    if not peer_ok:
+        return {"ok": False, "exit_code": 126, "stderr": "Unauthorized peer UID"}
+    u_name = str(req.get("unix_username") or "").strip()
+    mission_id = str(req.get("mission_id") or "").strip()
+    if not valid_unix_username(u_name) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", mission_id):
+        return {"ok": False, "exit_code": 2, "stderr": "Invalid unix_username or mission_id"}
+    allow_nonroot = os.environ.get("ORB_PRIVD_ALLOW_NONROOT_TEST") == "1"
+    nonroot = allow_nonroot and os.geteuid() != 0
+    home_root = (os.environ.get("ORB_PRIVD_HOME_ROOT") or "/home").rstrip("/")
+    target_uid, target_gid, disjoint = _lookup_or_create_unix_user(u_name, home_root, create_if_missing=False)
+    home_dir = f"{home_root}/{u_name}"
+    mission_cwd = f"{home_dir}/.orb-missions/{mission_id}"
+    home_ok = all(
+        os.path.lexists(p) and stat.S_ISDIR(os.lstat(p).st_mode) and not stat.S_ISLNK(os.lstat(p).st_mode)
+        for p in (home_root, home_dir, mission_cwd)
+    )
+    gate = orb_privd_user_exec_step(peer_ok, 1, 0, 0, 1, target_uid, target_gid, int(disjoint), int(home_ok), 1)
+    if (gate & 1) != 1:
+        return {"ok": False, "exit_code": 126, "stderr": f"Rejected by orb_privd_user_exec_step (gate={gate})"}
+    fs_script = (
+        "import base64, hashlib, json, os, stat, sys\n"
+        "req = json.loads(sys.stdin.read())\n"
+        "if not req['nonroot']:\n"
+        "  os.setgroups([req['gid']]); os.setgid(req['gid']); os.setuid(req['uid'])\n"
+        "os.umask(0o077)\n"
+        "root = req['mission_cwd']\n"
+        "DENIED = {'.env', '.ssh', '.aws', '.gnupg', '.git', 'credentials.json', '.credentials.json', 'auth.json', 'id_rsa', 'id_ed25519', '.git-credentials'}\n"
+        "def bad_seg(s):\n"
+        "  low = s.lower()\n"
+        "  return low in DENIED or low.startswith('.env.') or low.endswith('.pem') or low.endswith('.key')\n"
+        "def resolve_rel(raw, allow_missing=False):\n"
+        "  r = str(raw or '').strip()\n"
+        "  if r.startswith('/'):\n"
+        "    rc = r.rstrip('/'); rt = root.rstrip('/')\n"
+        "    if rc == rt: r = ''\n"
+        "    elif rc.startswith(rt + '/'): r = rc[len(rt)+1:]\n"
+        "    else: raise ValueError('File is outside this source')\n"
+        "  if '\\\\' in r: raise ValueError('File is not available in this source')\n"
+        "  segs = [s for s in r.split('/') if s and s != '.']\n"
+        "  if any(s == '..' or bad_seg(s) for s in segs): raise ValueError('File is not available in this source')\n"
+        "  cur = root\n"
+        "  for i, s in enumerate(segs):\n"
+        "    cur = os.path.join(cur, s)\n"
+        "    if not os.path.lexists(cur):\n"
+        "      if allow_missing and i == len(segs) - 1: return cur, segs\n"
+        "      raise ValueError('File is unavailable')\n"
+        "    if stat.S_ISLNK(os.lstat(cur).st_mode): raise ValueError('Symbolic links are not exposed')\n"
+        "  return cur, segs\n"
+        "sub = req['subop']\n"
+        "if sub == 'file_browser':\n"
+        "  fb = req.get('req_json') or {}; act = fb.get('action', '')\n"
+        "  if act == 'roots': res = {'path': root}\n"
+        "  elif act == 'list':\n"
+        "    d, segs = resolve_rel(fb.get('path', ''))\n"
+        "    items = []\n"
+        "    for fn in sorted(os.listdir(d)):\n"
+        "      if bad_seg(fn): continue\n"
+        "      p = os.path.join(d, fn); st = os.lstat(p)\n"
+        "      if stat.S_ISLNK(st.st_mode): continue\n"
+        "      if stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode):\n"
+        "        items.append({'name': fn, 'path': '/'.join(segs + [fn]), 'kind': 'dir' if stat.S_ISDIR(st.st_mode) else 'file', 'size': 0 if stat.S_ISDIR(st.st_mode) else st.st_size, 'modified': int(st.st_mtime)})\n"
+        "    res = {'entries': items[:1000], 'truncated': len(items) > 1000}\n"
+        "  elif act in ('read', 'download'):\n"
+        "    fp, _ = resolve_rel(fb.get('path', ''))\n"
+        "    off = max(0, int(fb.get('offset') or 0))\n"
+        "    fd = os.open(fp, os.O_RDONLY | os.O_NOFOLLOW); st = os.fstat(fd)\n"
+        "    os.lseek(fd, min(off, st.st_size), os.SEEK_SET); chunk = os.read(fd, 1048576); os.close(fd)\n"
+        "    nxt = min(off, st.st_size) + len(chunk)\n"
+        "    if act == 'download': res = {'bytes': list(chunk), 'next': nxt, 'size': st.st_size}\n"
+        "    else:\n"
+        "      nul = b'\\x00' in chunk\n"
+        "      res = {'content': None if nul else chunk.decode('utf-8', errors='replace'), 'binary': nul, 'size': st.st_size, 'truncated': nxt < st.st_size, 'modified': int(st.st_mtime)}\n"
+        "  else: raise ValueError('Unknown file operation')\n"
+        "elif sub == 'collect_artifacts':\n"
+        "  arts = []\n"
+        "  for rel in (req.get('paths') or []):\n"
+        "    try:\n"
+        "      fp, segs = resolve_rel(rel); fd = os.open(fp, os.O_RDONLY | os.O_NOFOLLOW); st = os.fstat(fd)\n"
+        "      if stat.S_ISREG(st.st_mode):\n"
+        "        h = hashlib.sha256(); h.update(os.read(fd, st.st_size))\n"
+        "        arts.append({'path': '/'.join(segs), 'sha256': h.hexdigest(), 'size_bytes': st.st_size})\n"
+        "      os.close(fd)\n"
+        "    except Exception: pass\n"
+        "  res = {'artifacts': arts}\n"
+        "elif sub == 'mkdir':\n"
+        "  rel = str(req.get('rel_path') or '').strip('/')\n"
+        "  segs = [s for s in rel.split('/') if s and s != '.']\n"
+        "  if any(s == '..' or bad_seg(s) for s in segs): raise ValueError('Invalid path')\n"
+        "  cur = root\n"
+        "  for s in segs:\n"
+        "    cur = os.path.join(cur, s)\n"
+        "    if not os.path.lexists(cur): os.mkdir(cur, 0o700)\n"
+        "    if stat.S_ISLNK(os.lstat(cur).st_mode): raise ValueError('Symlink rejected')\n"
+        "  res = {'ok': True, 'path': cur}\n"
+        "elif sub == 'write':\n"
+        "  fp, _ = resolve_rel(req.get('rel_path', ''), allow_missing=True)\n"
+        "  raw = base64.b64decode(req.get('content_b64') or '')\n"
+        "  fd = os.open(fp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o600)\n"
+        "  os.write(fd, raw); os.close(fd); res = {'ok': True, 'size': len(raw)}\n"
+        "else: raise ValueError(f'Unknown subop: {sub}')\n"
+        "print(json.dumps({'ok': True, 'result': res}))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", fs_script],
+        input=json.dumps(
+            {
+                "nonroot": nonroot,
+                "uid": target_uid,
+                "gid": target_gid,
+                "mission_cwd": mission_cwd,
+                "subop": req.get("subop", "file_browser"),
+                "rel_path": req.get("rel_path"),
+                "content_b64": req.get("content_b64"),
+                "paths": req.get("paths"),
+                "req_json": req.get("req_json"),
+            }
+        ),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return {"ok": False, "exit_code": 2, "stderr": proc.stderr.strip()}
+    return json.loads(proc.stdout)
+
+
 def serve_conn(conn: socket.socket) -> None:
     try:
         conn.settimeout(10.0)
@@ -708,6 +1351,14 @@ def serve_conn(conn: socket.socket) -> None:
                 resp = handle_update_harness(req)
         elif action == "exec":
             resp = handle_exec(req)
+        elif action == "ensure_mission_user":
+            resp = handle_ensure_mission_user(req, uid)
+        elif action == "spawn_user_job":
+            resp = handle_spawn_user_job(req, uid, gid)
+        elif action == "control_user_job":
+            resp = handle_control_user_job(req, uid)
+        elif action == "user_fs_op":
+            resp = handle_user_fs_op(req, uid)
         elif action == "ping":
             resp = {"ok": True, "pid": pid, "uid": uid, "gid": gid, "host": HOST_LABEL}
         else:

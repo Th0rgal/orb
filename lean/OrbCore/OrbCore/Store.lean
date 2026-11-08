@@ -5,14 +5,18 @@
   in-place with WAL journaling and positional `?1..?N` bindings.
 -/
 import Std.Sync.Mutex
+import LeanSys
 import Orb.Kernel
 import Orb.Lifecycle
 import OrbBin.Json
 import OrbBin.PosixExt
+import OrbNetLeaf.Crypto
 import OrbCore.Spec
 
 namespace OrbCore.Store
 
+open LeanSys.Posix
+open LeanSys.Auth
 open Orb.Kernel
 open Orb.Lifecycle
 open OrbBin.Json
@@ -33,6 +37,9 @@ opaque sqliteQueryRowsRaw (handle : UInt64) (sql : @& String) (params : @& Array
 
 @[extern "orb_core_epoch_sec"]
 opaque coreEpochSec : IO UInt64
+
+@[extern "orb_pbkdf2_sha256"]
+opaque pbkdf2Sha256HexRaw (password : @& String) (salt : @& String) (iterations : UInt32) : IO String
 
 /-- Typed SQLite handle opened in WAL mode with an exclusive `Std.Mutex` serializing C `sqlite3*` access. -/
 structure SqliteDb where
@@ -73,6 +80,7 @@ structure MissionRecord where
   tagsJson         : String := "[]"
   track            : String := ""
   repo             : String := ""
+  ownerUserId      : String := ""
   history          : Array MissionHistoryEntry := #[]
   deriving Repr, DecidableEq
 
@@ -170,7 +178,15 @@ def transferCleanupSql : String :=
   "COMMIT;"
 
 def missionsSchemaSql : String :=
-  "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', model_override TEXT, model_effort TEXT, working_directory TEXT NOT NULL DEFAULT '', project TEXT NOT NULL DEFAULT '', requires_local_disk INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '[]', session_id TEXT, deferred_goal TEXT, workspace_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000', terminal_reason TEXT, updated_at TEXT NOT NULL DEFAULT '', opened_at TEXT, agent TEXT, config_profile TEXT, total_cost_cents INTEGER NOT NULL DEFAULT 0, history_json TEXT NOT NULL DEFAULT '[]', authority_mode TEXT NOT NULL DEFAULT 'writer' CHECK(authority_mode IN ('readonly','writer')), placement_kind TEXT NOT NULL DEFAULT 'managed', superseded_by_mission_id TEXT NOT NULL DEFAULT '', orphaned_at TEXT NOT NULL DEFAULT '', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, state_revision INTEGER NOT NULL DEFAULT 1, owner_epoch INTEGER NOT NULL DEFAULT 1, run_generation INTEGER NOT NULL DEFAULT 1, node_boot_epoch INTEGER NOT NULL DEFAULT 1, track TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', model_override TEXT, model_effort TEXT, working_directory TEXT NOT NULL DEFAULT '', project TEXT NOT NULL DEFAULT '', requires_local_disk INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '[]', session_id TEXT, deferred_goal TEXT, workspace_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000', terminal_reason TEXT, updated_at TEXT NOT NULL DEFAULT '', opened_at TEXT, agent TEXT, config_profile TEXT, total_cost_cents INTEGER NOT NULL DEFAULT 0, history_json TEXT NOT NULL DEFAULT '[]', authority_mode TEXT NOT NULL DEFAULT 'writer' CHECK(authority_mode IN ('readonly','writer')), placement_kind TEXT NOT NULL DEFAULT 'managed', superseded_by_mission_id TEXT NOT NULL DEFAULT '', orphaned_at TEXT NOT NULL DEFAULT '', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, state_revision INTEGER NOT NULL DEFAULT 1, owner_epoch INTEGER NOT NULL DEFAULT 1, run_generation INTEGER NOT NULL DEFAULT 1, node_boot_epoch INTEGER NOT NULL DEFAULT 1, track TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', owner_user_id TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','member')), unix_username TEXT UNIQUE, session_epoch INTEGER NOT NULL DEFAULT 1, disabled INTEGER NOT NULL DEFAULT 0, daily_spend_cap_cents INTEGER, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS mission_shares (mission_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'participant' CHECK(role IN ('participant')), granted_by TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (mission_id, user_id));" ++
+  "CREATE INDEX IF NOT EXISTS idx_mission_shares_user ON mission_shares(user_id);" ++
+  "CREATE TABLE IF NOT EXISTS user_provider_prefs (user_id TEXT NOT NULL, provider_id TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (user_id, provider_id));" ++
+  "CREATE TABLE IF NOT EXISTS user_daily_spend (user_id TEXT NOT NULL, utc_day TEXT NOT NULL, inference_cents INTEGER NOT NULL DEFAULT 0, compute_cents INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (user_id, utc_day));" ++
+  "CREATE TABLE IF NOT EXISTS mission_proxy_tokens (token_sha256 TEXT PRIMARY KEY, mission_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, expires_at_epoch INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);" ++
+  "CREATE INDEX IF NOT EXISTS idx_mission_proxy_tokens_mission ON mission_proxy_tokens(mission_id);" ++
+  "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'host', owner_user_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_terminal_evidence (mission_id TEXT PRIMARY KEY, terminal_reason TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', artifact_ref TEXT NOT NULL DEFAULT '', verified INTEGER NOT NULL DEFAULT 1, recorded_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS effect_outbox (effect_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, state_revision INTEGER NOT NULL, intent_kind TEXT NOT NULL, payload_json TEXT NOT NULL, phase INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0, attempt_epoch INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS dispatch_lease_intents (reservation_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, project_slug TEXT NOT NULL, track TEXT NOT NULL, repo TEXT NOT NULL DEFAULT '', authority_mode TEXT NOT NULL DEFAULT 'writer', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT 'preparing', boot_epoch INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
@@ -195,6 +211,8 @@ def missionsSchemaSql : String :=
 
 def projectsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS project_owners (slug TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE INDEX IF NOT EXISTS idx_project_owners_user ON project_owners(owner_user_id);" ++
   "CREATE TABLE IF NOT EXISTS project_grant (slug TEXT PRIMARY KEY, merge_authority TEXT, budget_per_tick TEXT, parallel_missions INTEGER, pause_reason TEXT, resume_condition TEXT, material_bar TEXT, autonomy_level TEXT, updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS project_track_leases (project_slug TEXT NOT NULL, track TEXT NOT NULL, reservation_id TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, repo TEXT NOT NULL DEFAULT '', authority_mode TEXT NOT NULL DEFAULT 'writer', phase TEXT NOT NULL DEFAULT 'preparing', boot_epoch INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(project_slug, track, mission_id));" ++
   "CREATE TABLE IF NOT EXISTS project_decisions (id TEXT PRIMARY KEY, project_slug TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', question TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');"
@@ -288,6 +306,8 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE mission_automations ADD COLUMN variables_used TEXT NOT NULL DEFAULT '{}';",
   "ALTER TABLE core_boot_state ADD COLUMN bunker_state INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE privilege_leases ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE missions ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
+  "CREATE INDEX IF NOT EXISTS idx_missions_owner ON missions(owner_user_id);",
   "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);"
 ]
 
@@ -770,7 +790,13 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) : IO (Except Stri
         "CREATE TABLE IF NOT EXISTS inbox_state (" ++
         "entry_key TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '', " ++
         "stamp INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 0, " ++
-        "client_id TEXT NOT NULL DEFAULT '', mutation_seq INTEGER NOT NULL DEFAULT 0);"
+        "client_id TEXT NOT NULL DEFAULT '', mutation_seq INTEGER NOT NULL DEFAULT 0);" ++
+        "CREATE TABLE IF NOT EXISTS user_inbox_state (" ++
+        "user_id TEXT NOT NULL, entry_key TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'seen', " ++
+        "payload_json TEXT NOT NULL DEFAULT '', stamp INTEGER NOT NULL DEFAULT 0, " ++
+        "version INTEGER NOT NULL DEFAULT 0, client_id TEXT NOT NULL DEFAULT '', " ++
+        "mutation_seq INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0, " ++
+        "read_at TEXT, updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(user_id, entry_key));"
       let r7Proj :=
         "CREATE TABLE IF NOT EXISTS project_tracks (" ++
         "project_slug TEXT NOT NULL, track TEXT NOT NULL, desired_condition TEXT NOT NULL DEFAULT '', " ++
@@ -985,14 +1011,14 @@ def upsertMission (st : CoreStore) (m : MissionRecord) : IO (Except String Unit)
   let runGen := if m.runGeneration == 0 then 1 else m.runGeneration
   let bootEp := if m.nodeBootEpoch == 0 then 1 else m.nodeBootEpoch
   let sql :=
-    "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,updated_at,total_cost_cents,authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,reserved_disk_gib,state_revision,owner_epoch,run_generation,node_boot_epoch,tags,track,repo) " ++
-    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22) " ++
+    "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,updated_at,total_cost_cents,authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,reserved_disk_gib,state_revision,owner_epoch,run_generation,node_boot_epoch,tags,track,repo,owner_user_id) " ++
+    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23) " ++
     "ON CONFLICT(id) DO UPDATE SET title=excluded.title,status=excluded.status,backend=excluded.backend,model_override=excluded.model_override,model_effort=excluded.model_effort,working_directory=excluded.working_directory,project=excluded.project,updated_at=excluded.updated_at,total_cost_cents=excluded.total_cost_cents," ++
-    "track=excluded.track,repo=excluded.repo;"
+    "track=excluded.track,repo=excluded.repo,owner_user_id=CASE WHEN excluded.owner_user_id<>'' THEN excluded.owner_user_id ELSE missions.owner_user_id END;"
   let res ← execParamQuery st.missionsDb sql #[
     m.id, m.title, m.status, m.backend, m.modelOverride, m.modelEffort, m.workingDirectory, m.project,
     m.updatedAt, s!"{m.totalCostCents}", m.authorityMode, m.placementKind, m.supersededById, m.orphanedAt,
-    s!"{m.reservedDiskGib}", s!"{rev}", s!"{ownEp}", s!"{runGen}", s!"{bootEp}", compatTags, m.track, m.repo
+    s!"{m.reservedDiskGib}", s!"{rev}", s!"{ownEp}", s!"{runGen}", s!"{bootEp}", compatTags, m.track, m.repo, m.ownerUserId
   ]
   return res.map (fun _ => ())
 
@@ -1016,12 +1042,12 @@ def insertNewMission (st : CoreStore) (m : MissionRecord) : IO (Except String Un
     if ers.size > 1 then
       return .error "mission_already_exists"
     let sql :=
-      "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,updated_at,total_cost_cents,authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,reserved_disk_gib,state_revision,owner_epoch,run_generation,node_boot_epoch,tags,track,repo) " ++
-      "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22);"
+      "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,updated_at,total_cost_cents,authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,reserved_disk_gib,state_revision,owner_epoch,run_generation,node_boot_epoch,tags,track,repo,owner_user_id) " ++
+      "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23);"
     let res ← execParamQueryUnlocked st.missionsDb sql #[
       m.id, m.title, m.status, m.backend, m.modelOverride, m.modelEffort, m.workingDirectory, m.project,
       m.updatedAt, s!"{m.totalCostCents}", m.authorityMode, m.placementKind, m.supersededById, m.orphanedAt,
-      s!"{m.reservedDiskGib}", s!"{rev}", s!"{ownEp}", s!"{runGen}", s!"{bootEp}", compatTags, m.track, m.repo
+      s!"{m.reservedDiskGib}", s!"{rev}", s!"{ownEp}", s!"{runGen}", s!"{bootEp}", compatTags, m.track, m.repo, m.ownerUserId
     ]
     return res.map (fun _ => ())
 
@@ -1276,7 +1302,7 @@ def mark_mission_opened (st : CoreStore) (missionId openedAt : String) : IO (Exc
 def getMission? (st : CoreStore) (missionId : String) : IO (Option MissionRecord) := do
   if missionId.isEmpty then return none
   match ← execParamQuery st.missionsDb
-    "SELECT id,title,status,backend,COALESCE(model_override,''),COALESCE(model_effort,''),working_directory,COALESCE(project,''),updated_at,total_cost_cents FROM missions WHERE id=?1;" #[missionId] with
+    "SELECT id,title,status,backend,COALESCE(model_override,''),COALESCE(model_effort,''),working_directory,COALESCE(project,''),updated_at,total_cost_cents,COALESCE(owner_user_id,''),COALESCE(placement_kind,'managed'),COALESCE(authority_mode,'writer'),COALESCE(state_revision,1),COALESCE(tags,'[]') FROM missions WHERE id=?1;" #[missionId] with
   | .error _ => return none
   | .ok rows =>
     if rows.size ≤ 1 then return none
@@ -1292,6 +1318,11 @@ def getMission? (st : CoreStore) (missionId : String) : IO (Option MissionRecord
       project          := (r[7]?).getD ""
       updatedAt        := (r[8]?).getD ""
       totalCostCents   := (((r[9]?).bind String.toNat?).getD 0).toUInt64
+      ownerUserId      := (r[10]?).getD ""
+      placementKind    := (r[11]?).getD "managed"
+      authorityMode    := (r[12]?).getD "writer"
+      stateRevision    := (((r[13]?).bind String.toNat?).getD 1).toUInt32
+      tagsJson         := (r[14]?).getD "[]"
     }
 
 /-- List all mission status strings currently persisted in `missions.db`. -/
@@ -1439,9 +1470,22 @@ def renderContinuationNextAtJson (triggerKind : String) (dueEpoch : UInt64) : St
   else jsonEscape (formatEpochIso8601Utc dueEpoch)
 
 /-- List missions from `missions.db` joined with `mission_terminal_evidence` as JSON (`SM-01`, `SM-02`),
-    preserving `total_cost_cents` telemetry, typed authority/placement/revision columns, and unified `health_verdict`. -/
-def listMissionsJson (st : CoreStore) (nodeBootEpoch? : Option UInt64 := none) : IO (Except String String) := do
+    preserving `total_cost_cents` telemetry, typed authority/placement/revision columns, and unified `health_verdict`.
+    When `callerUserId?` is `some uid`, strictly filters to `m.owner_user_id = uid` or `mission_shares` participation
+    (never disclosing unowned/unshared missions even when the caller is `admin`!). -/
+def listMissionsJson
+    (st : CoreStore)
+    (nodeBootEpoch? : Option UInt64 := none)
+    (callerUserId? : Option String := none) : IO (Except String String) := do
   let nodeBootEpoch := nodeBootEpoch?.getD st.bootEpoch
+  let whereClause :=
+    match callerUserId? with
+    | some _ => "WHERE (m.owner_user_id = ?1 OR EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id = m.id AND s.user_id = ?1)) "
+    | none => ""
+  let params : Array String :=
+    match callerUserId? with
+    | some uid => #[uid]
+    | none => #[]
   let sql :=
     "SELECT m.id,m.title,m.status,m.backend,COALESCE(m.model_override,'') AS model_override," ++
     "COALESCE(m.model_effort,'') AS model_effort,m.working_directory,m.updated_at,m.total_cost_cents," ++
@@ -1453,10 +1497,31 @@ def listMissionsJson (st : CoreStore) (nodeBootEpoch? : Option UInt64 := none) :
     "(SELECT COUNT(*) FROM mission_events ev WHERE ev.mission_id=m.id) AS ev_cnt," ++
     "m.tags," ++
     "(SELECT COUNT(*) FROM mission_continuations c WHERE c.mission_id=m.id AND c.phase=1) AS armed_wakeups," ++
-    "COALESCE(e.verified,1) AS ev_verified " ++
+    "COALESCE(e.verified,1) AS ev_verified," ++
+    "COALESCE(m.owner_user_id,'') AS owner_user_id," ++
+    "COALESCE((SELECT u.username FROM users u WHERE u.id = m.owner_user_id),'') AS owner_username " ++
     "FROM missions m LEFT JOIN mission_terminal_evidence e ON e.mission_id = m.id " ++
+    whereClause ++
     "ORDER BY m.updated_at DESC, m.id ASC;"
-  let rows ← execParamQuery st.missionsDb sql #[]
+  let rows ← execParamQuery st.missionsDb sql params
+  let shareRows ← execParamQuery st.missionsDb
+    ("SELECT s.mission_id, s.user_id, COALESCE(u.username,''), s.created_at " ++
+     "FROM mission_shares s LEFT JOIN users u ON u.id = s.user_id ORDER BY s.created_at ASC, s.user_id ASC;") #[]
+  let sharesByMission : String → Array String := fun mid =>
+    match shareRows with
+    | .error _ => #[]
+    | .ok srs =>
+      if srs.size ≤ 1 then #[]
+      else Id.run do
+        let mut acc : Array String := #[]
+        for si in [1:srs.size] do
+          let sr := srs[si]!
+          if (sr[0]?).getD "" == mid then
+            let suid := (sr[1]?).getD ""
+            let suname := (sr[2]?).getD ""
+            let scat := (sr[3]?).getD ""
+            acc := acc.push s!"\{\"user_id\":{jsonEscape suid},\"username\":{jsonEscape suname},\"created_at\":{jsonEscape scat}}"
+        return acc
   let contRows ← execParamQuery st.missionsDb
     ("SELECT mission_id,id,phase,due_epoch,trigger_kind,reason,source,error,recurrence " ++
      "FROM mission_continuations WHERE phase IN (1,2,3) ORDER BY due_epoch ASC, id ASC;") #[]
@@ -1521,6 +1586,14 @@ def listMissionsJson (st : CoreStore) (nodeBootEpoch? : Option UInt64 := none) :
         let rawTags := r[23]?.getD "[]"
         let armedWakeups := (r[24]?.bind String.toNat?).getD 0
         let evVerified := ((r[25]?.bind String.toNat?).getD 1) != 0
+        let ownerUid := r[26]?.getD ""
+        let ownerUname := r[27]?.getD ""
+        let viewerRole :=
+          match callerUserId? with
+          | some uid => if ownerUid == uid then "owner" else "participant"
+          | none => "owner"
+        let shItems := sharesByMission c0
+        let sharedWithJson := "[" ++ String.intercalate "," shItems.toList ++ "]"
         let effReason := if !evReason.isEmpty then evReason else mTermReason
         let hasEv := !evRecorded.isEmpty || !evReason.isEmpty
         let verdict := deriveMissionHealthVerdict
@@ -1542,6 +1615,7 @@ def listMissionsJson (st : CoreStore) (nodeBootEpoch? : Option UInt64 := none) :
           s!"\"authority_mode\":{jsonEscape authMode},\"placement_kind\":{jsonEscape placeKind}," ++
           s!"\"superseded_by_mission_id\":{jsonEscape superBy},\"orphaned_at\":{jsonEscape orphAt}," ++
           s!"\"reserved_disk_gib\":{diskGib},\"state_revision\":{stateRev}," ++
+          s!"\"viewer_role\":{jsonEscape viewerRole},\"owner_username\":{jsonEscape ownerUname},\"shared_with\":{sharedWithJson}," ++
           s!"\"health_verdict\":{jsonEscape verdict},\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut}}"
         )
       return "[" ++ String.intercalate "," items.toList ++ "]")
@@ -2603,5 +2677,599 @@ def stepRemoteMissionReplay
         replays := replays
         waitActive := false
       }
+
+/-! ## Multi-User Auth, RBAC, Mission Shares, Provider Preferences, Daily Spend & Proxy Tokens -/
+
+structure UserRecord where
+  id                  : String
+  username            : String
+  passwordHash        : String
+  role                : String := "member"
+  unixUsername?       : Option String := none
+  sessionEpoch        : UInt64 := 1
+  disabled            : Bool := false
+  dailySpendCapCents? : Option UInt64 := none
+  createdAt           : String := ""
+  updatedAt           : String := ""
+  deriving Repr, DecidableEq, Inhabited
+
+structure MissionShareInfo where
+  missionId : String
+  userId    : String
+  username  : String
+  createdAt : String
+  deriving Repr, DecidableEq, Inhabited
+
+def pbkdf2IterationsDefault : UInt32 := 210000
+
+/-- Pure-Lean PBKDF2-HMAC-SHA256 fallback (`dkLen = 32` bytes -> 64 lowercase hex chars) using `LeanSys.Auth.hmacSha256Bytes`
+    when `libcrypto` is unavailable to `dlopen`. -/
+private def pbkdf2Sha256FallbackHex (password salt : String) (iterations : UInt32) : String := Id.run do
+  let iters := Nat.max 1 iterations.toNat
+  let keyBytes := password.toUTF8
+  let block1 := salt.toUTF8 ++ ByteArray.mk #[0, 0, 0, 1]
+  let mut u := hmacSha256Bytes keyBytes block1
+  let mut acc := u.data
+  for _ in [1:iters] do
+    u := hmacSha256Bytes keyBytes u
+    let mut next : Array UInt8 := Array.mkEmpty 32
+    for j in [0:32] do
+      next := next.push (acc[j]! ^^^ u.get! j)
+    acc := next
+  return bytesToHexLower (ByteArray.mk acc)
+
+def derivePbkdf2Sha256Hex (password salt : String) (iterations : UInt32 := pbkdf2IterationsDefault) : IO String := do
+  let raw ← pbkdf2Sha256HexRaw password salt iterations
+  if raw.length == 64 then
+    return raw
+  return pbkdf2Sha256FallbackHex password salt iterations
+
+def hashPasswordPbkdf2 (password : String) (iterations : UInt32 := pbkdf2IterationsDefault) : IO String := do
+  let saltBytes ← match (← OrbNetLeaf.Crypto.randBytes 16) with
+    | .ok b => pure b
+    | .error e => throw <| IO.userError s!"CSPRNG failed to generate 16-byte PBKDF2 salt: {e}"
+  let saltHex := bytesToHexLower saltBytes
+  let dkHex ← derivePbkdf2Sha256Hex password saltHex iterations
+  return s!"pbkdf2-sha256${iterations}${saltHex}${dkHex}"
+
+def verifyPasswordPbkdf2 (password storedHash : String) : IO Bool := do
+  let parts := storedHash.splitOn "$"
+  match parts with
+  | ["pbkdf2-sha256", iterStr, saltHex, expectedHex] =>
+    let some iterNat := iterStr.toNat? | return false
+    if iterNat == 0 || iterNat > 2000000 || saltHex.isEmpty || expectedHex.length != 64 then
+      return false
+    let actualHex ← derivePbkdf2Sha256Hex password saltHex iterNat.toUInt32
+    return ctEqSlice (ByteSlice.ofString actualHex) (ByteSlice.ofString expectedHex.toLower)
+  | _ =>
+    return false
+
+def currentUtcDay (nowEpoch : UInt64) : String :=
+  (formatEpochIso8601Utc nowEpoch).take 10 |>.toString
+
+/-- Normalize a username into a default unprivileged Linux username (`orb-<slug>`, `<= 31` chars). -/
+def defaultUnixUsernameFor (username : String) : String := Id.run do
+  let mut slug := ""
+  for c in username.trimAscii.toString.toLower.toList do
+    if ('a' ≤ c && c ≤ 'z') || ('0' ≤ c && c ≤ '9') || c == '_' || c == '-' then
+      slug := slug.push c
+  if slug.isEmpty then slug := "user"
+  let cand := ("orb-" ++ slug).take 31 |>.toString
+  if validUnixUsername cand then cand else "orb-member"
+
+def validOrbUsername (raw : String) : Bool :=
+  let s := raw.trimAscii.toString
+  1 ≤ s.length && s.length ≤ 64 &&
+  s.all (fun c => c.isAlphanum || c == '_' || c == '-' || c == '.')
+
+private def rowToUserRecord (r : Array String) : UserRecord :=
+  let unixRaw := ((r[4]?).getD "").trimAscii.toString
+  let capRaw := ((r[7]?).getD "").trimAscii.toString
+  {
+    id                  := (r[0]?).getD ""
+    username            := (r[1]?).getD ""
+    passwordHash        := (r[2]?).getD ""
+    role                := let rl := (r[3]?).getD "member"; if rl == "admin" then "admin" else "member"
+    unixUsername?       := if unixRaw.isEmpty then none else some unixRaw
+    sessionEpoch        := (((r[5]?).bind String.toNat?).getD 1).toUInt64
+    disabled            := ((r[6]?).getD "0") != "0"
+    dailySpendCapCents? := (capRaw.toNat?).map (·.toUInt64)
+    createdAt           := (r[8]?).getD ""
+    updatedAt           := (r[9]?).getD ""
+  }
+
+def getUserById? (st : CoreStore) (userId : String) : IO (Option UserRecord) := do
+  if userId.trimAscii.isEmpty then return none
+  match ← execParamQuery st.missionsDb
+    "SELECT id,username,password_hash,role,COALESCE(unix_username,''),session_epoch,disabled,COALESCE(CAST(daily_spend_cap_cents AS TEXT),''),created_at,updated_at FROM users WHERE id=?1;"
+    #[userId] with
+  | .error _ => return none
+  | .ok rows =>
+    if rows.size ≤ 1 then return none
+    return some (rowToUserRecord rows[1]!)
+
+def getUserByUsername? (st : CoreStore) (username : String) : IO (Option UserRecord) := do
+  let clean := username.trimAscii.toString
+  if clean.isEmpty then return none
+  match ← execParamQuery st.missionsDb
+    "SELECT id,username,password_hash,role,COALESCE(unix_username,''),session_epoch,disabled,COALESCE(CAST(daily_spend_cap_cents AS TEXT),''),created_at,updated_at FROM users WHERE username=?1 COLLATE NOCASE;"
+    #[clean] with
+  | .error _ => return none
+  | .ok rows =>
+    if rows.size ≤ 1 then return none
+    return some (rowToUserRecord rows[1]!)
+
+def getBootstrapAdmin? (st : CoreStore) : IO (Option UserRecord) := do
+  match ← execParamQuery st.missionsDb
+    "SELECT id,username,password_hash,role,COALESCE(unix_username,''),session_epoch,disabled,COALESCE(CAST(daily_spend_cap_cents AS TEXT),''),created_at,updated_at FROM users WHERE role='admin' AND disabled=0 ORDER BY CASE WHEN LOWER(username)='admin' THEN 0 ELSE 1 END ASC, rowid ASC LIMIT 1;"
+    #[] with
+  | .error _ => return none
+  | .ok rows =>
+    if rows.size ≤ 1 then return none
+    return some (rowToUserRecord rows[1]!)
+
+def getUserSpentTodayCents (st : CoreStore) (userId utcDay : String) : IO (UInt64 × UInt64) := do
+  if userId.isEmpty then return (0, 0)
+  match ← execParamQuery st.missionsDb
+    "SELECT COALESCE(inference_cents,0), COALESCE(compute_cents,0) FROM user_daily_spend WHERE user_id=?1 AND utc_day=?2;"
+    #[userId, utcDay] with
+  | .error _ => return (0, 0)
+  | .ok rows =>
+    if rows.size ≤ 1 then return (0, 0)
+    let inf := (((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 0).toUInt64
+    let cmp := (((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0).toUInt64
+    return (inf, cmp)
+
+def addUserSpendCents
+    (st : CoreStore) (userId utcDay : String)
+    (addInferenceCents addComputeCents : UInt64) (updatedAt : String := "") : IO (Except String Unit) := do
+  if userId.isEmpty || (addInferenceCents == 0 && addComputeCents == 0) then
+    return .ok ()
+  let res ← execParamQuery st.missionsDb
+    ("INSERT INTO user_daily_spend(user_id,utc_day,inference_cents,compute_cents,updated_at) " ++
+     "VALUES(?1,?2,?3,?4,?5) " ++
+     "ON CONFLICT(user_id,utc_day) DO UPDATE SET " ++
+     "inference_cents=user_daily_spend.inference_cents+CAST(?3 AS INTEGER), " ++
+     "compute_cents=user_daily_spend.compute_cents+CAST(?4 AS INTEGER), " ++
+     "updated_at=excluded.updated_at;")
+    #[userId, utcDay, s!"{addInferenceCents}", s!"{addComputeCents}", updatedAt]
+  return res.map (fun _ => ())
+
+/-- Bootstrap initial `users` from `(username, password)` env pairs and backfill `owner_user_id = ''`
+    missions, `project_owners`, and `inbox_state -> user_inbox_state` to `bootstrapAdminId`. -/
+def bootstrapUsersAndBackfill
+    (st : CoreStore)
+    (seedAdmins : Array (String × String))
+    (nowAt : String) : IO (Except String String) := do
+  for (rawU, rawP) in seedAdmins do
+    let uname := rawU.trimAscii.toString
+    if !uname.isEmpty && !rawP.isEmpty then
+      if (← getUserByUsername? st uname).isNone then
+        let uid ← newUuidV4
+        let pwHash ← hashPasswordPbkdf2 rawP
+        discard <| execParamQuery st.missionsDb
+          ("INSERT OR IGNORE INTO users(id,username,password_hash,role,unix_username,session_epoch,disabled,daily_spend_cap_cents,created_at,updated_at) " ++
+           "VALUES(?1,?2,?3,'admin',NULL,1,0,NULL,?4,?4);")
+          #[uid, uname, pwHash, nowAt]
+  let bootstrapAdminId ←
+    match ← getBootstrapAdmin? st with
+    | some adm => pure adm.id
+    | none =>
+      let uid := "usr_bootstrap_admin"
+      let pwHash ← hashPasswordPbkdf2 "dev-mode-placeholder"
+      discard <| execParamQuery st.missionsDb
+        ("INSERT OR IGNORE INTO users(id,username,password_hash,role,unix_username,session_epoch,disabled,daily_spend_cap_cents,created_at,updated_at) " ++
+         "VALUES(?1,'admin',?2,'admin',NULL,1,0,NULL,?3,?3);")
+        #[uid, pwHash, nowAt]
+      pure uid
+  discard <| execParamQuery st.missionsDb
+    "UPDATE missions SET owner_user_id=?1 WHERE COALESCE(owner_user_id,'')='';"
+    #[bootstrapAdminId]
+  discard <| execParamQuery st.missionsDb
+    "UPDATE workspaces SET owner_user_id=?1 WHERE COALESCE(owner_user_id,'')='';"
+    #[bootstrapAdminId]
+  let pSlugs ← execParamQuery st.projectsDb
+    ("SELECT DISTINCT slug FROM (" ++
+     "SELECT id AS slug FROM projects UNION " ++
+     "SELECT slug FROM project_grant UNION " ++
+     "SELECT project_slug AS slug FROM project_tracks UNION " ++
+     "SELECT project_slug AS slug FROM context_heads) WHERE slug<>'';") #[]
+  if let .ok prs := pSlugs then
+    for i in [1:prs.size] do
+      let sl := (prs[i]![0]?).getD ""
+      if !sl.isEmpty && (sl.splitOn ":").length == 1 then
+        discard <| execParamQuery st.projectsDb
+          "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
+          #[sl, bootstrapAdminId, nowAt]
+  let ibRows ← execParamQuery st.askDb
+    "SELECT entry_key,kind,payload_json,stamp,version,client_id,mutation_seq FROM inbox_state;" #[]
+  if let .ok irs := ibRows then
+    for i in [1:irs.size] do
+      let ir := irs[i]!
+      discard <| execParamQuery st.askDb
+        ("INSERT OR IGNORE INTO user_inbox_state(user_id,entry_key,kind,payload_json,stamp,version,client_id,mutation_seq,updated_at) " ++
+         "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9);")
+        #[bootstrapAdminId, (ir[0]?).getD "", (ir[1]?).getD "seen", (ir[2]?).getD "",
+          (ir[3]?).getD "0", (ir[4]?).getD "0", (ir[5]?).getD "", (ir[6]?).getD "0", nowAt]
+  return .ok bootstrapAdminId
+
+/-- Admin user list (`GET /api/admin/users`): strictly omits any mission/project counts, titles, or workspaces! -/
+def listUsersAdminJson (st : CoreStore) (utcDay : String) : IO (Except String String) := do
+  let q ← execParamQuery st.missionsDb
+    ("SELECT u.id, u.username, u.role, COALESCE(u.unix_username,''), u.disabled, " ++
+     "COALESCE(CAST(u.daily_spend_cap_cents AS TEXT),''), u.created_at, " ++
+     "COALESCE((SELECT d.inference_cents + d.compute_cents FROM user_daily_spend d WHERE d.user_id = u.id AND d.utc_day = ?1), 0) " ++
+     "FROM users u ORDER BY u.created_at ASC, u.username ASC;")
+    #[utcDay]
+  match q with
+  | .error e => return .error e
+  | .ok rows =>
+    if rows.size ≤ 1 then return .ok "[]"
+    let mut items : Array String := #[]
+    for i in [1:rows.size] do
+      let r := rows[i]!
+      let uid := (r[0]?).getD ""
+      let uname := (r[1]?).getD ""
+      let role := (r[2]?).getD "member"
+      let unixRaw := (r[3]?).getD ""
+      let unixJson := if unixRaw.isEmpty then "null" else jsonEscape unixRaw
+      let dis := if ((r[4]?).getD "0") != "0" then "true" else "false"
+      let capRaw := (r[5]?).getD ""
+      let capJson := match capRaw.toNat? with | some c => s!"{c}" | none => "null"
+      let cat := (r[6]?).getD ""
+      let spent := ((r[7]?.bind String.toNat?).getD 0)
+      items := items.push (
+        s!"\{\"id\":{jsonEscape uid},\"username\":{jsonEscape uname},\"role\":{jsonEscape role}," ++
+        s!"\"unix_username\":{unixJson},\"disabled\":{dis},\"daily_spend_cap_cents\":{capJson}," ++
+        s!"\"spent_today_cents\":{spent},\"created_at\":{jsonEscape cat}}")
+    return .ok ("[" ++ String.intercalate "," items.toList ++ "]")
+
+/-- Minimal active user directory (`GET /api/users/directory`) for Share Mission picker:
+    returns `[{ id, username }]` only, excluding disabled accounts and the caller. -/
+def listUserDirectoryJson (st : CoreStore) (callerUserId : String) : IO (Except String String) := do
+  let q ← execParamQuery st.missionsDb
+    "SELECT id, username FROM users WHERE disabled=0 AND id<>?1 ORDER BY username ASC;"
+    #[callerUserId]
+  match q with
+  | .error e => return .error e
+  | .ok rows =>
+    if rows.size ≤ 1 then return .ok "[]"
+    let mut items : Array String := #[]
+    for i in [1:rows.size] do
+      let r := rows[i]!
+      items := items.push s!"\{\"id\":{jsonEscape ((r[0]?).getD "")},\"username\":{jsonEscape ((r[1]?).getD "")}}"
+    return .ok ("[" ++ String.intercalate "," items.toList ++ "]")
+
+def createUserRecord
+    (st : CoreStore)
+    (username password role : String)
+    (unixUsernameOpt : Option String)
+    (dailySpendCapCentsOpt : Option UInt64)
+    (nowAt : String) : IO (Except (Nat × String) UserRecord) := do
+  let cleanUser := username.trimAscii.toString
+  if !validOrbUsername cleanUser then
+    return .error (400, "Invalid username (1..64 alphanumeric/._- characters)")
+  if password.length < 8 then
+    return .error (400, "Password must be at least 8 characters")
+  if role != "admin" && role != "member" then
+    return .error (400, "Role must be 'admin' or 'member'")
+  let effUnix? : Option String :=
+    match unixUsernameOpt.map (·.trimAscii.toString) |>.filter (!·.isEmpty) with
+    | some ux => some ux
+    | none => if role == "member" then some (defaultUnixUsernameFor cleanUser) else none
+  if let some ux := effUnix? then
+    if !validUnixUsername ux then
+      return .error (400, s!"Invalid or reserved Linux unix_username '{ux}'")
+  let uid ← newUuidV4
+  let pwHash ← hashPasswordPbkdf2 password
+  let txRes ← withImmediateTx st.missionsDb do
+    let dupU ← execParamQueryUnlocked st.missionsDb
+      "SELECT COUNT(*) FROM users WHERE username=?1 COLLATE NOCASE;" #[cleanUser]
+    let .ok durs := dupU | return .error "user_dup_check_failed"
+    if (((durs[1]?.bind (·[0]?)).bind String.toNat?).getD 0) > 0 then
+      return .error "conflict:Username already exists"
+    if let some ux := effUnix? then
+      let dupX ← execParamQueryUnlocked st.missionsDb
+        "SELECT COUNT(*) FROM users WHERE unix_username=?1;" #[ux]
+      let .ok dxrs := dupX | return .error "unix_dup_check_failed"
+      if (((dxrs[1]?.bind (·[0]?)).bind String.toNat?).getD 0) > 0 then
+        return .error s!"conflict:Linux unix_username '{ux}' is already assigned"
+    let unixParam := effUnix?.getD ""
+    let capParam := match dailySpendCapCentsOpt with | some c => s!"{c}" | none => ""
+    let ins ← execParamQueryUnlocked st.missionsDb
+      ("INSERT INTO users(id,username,password_hash,role,unix_username,session_epoch,disabled,daily_spend_cap_cents,created_at,updated_at) " ++
+       "VALUES(?1,?2,?3,?4,NULLIF(?5,''),1,0,NULLIF(?6,''),?7,?7);")
+      #[uid, cleanUser, pwHash, role, unixParam, capParam, nowAt]
+    return ins.map (fun _ => {
+      id := uid
+      username := cleanUser
+      passwordHash := pwHash
+      role := role
+      unixUsername? := effUnix?
+      sessionEpoch := 1
+      disabled := false
+      dailySpendCapCents? := dailySpendCapCentsOpt
+      createdAt := nowAt
+      updatedAt := nowAt
+    })
+  match txRes with
+  | .ok rec => return .ok rec
+  | .error e =>
+    if e.startsWith "conflict:" then return .error (409, (e.drop 9).toString)
+    else return .error (500, e)
+
+def userHasActiveRuns (st : CoreStore) (userId : String) : IO Bool := do
+  match ← execParamQuery st.missionsDb
+    ("SELECT COUNT(*) FROM mission_runs r JOIN missions m ON m.id = r.mission_id " ++
+     "WHERE m.owner_user_id=?1 AND r.execution_state<>'terminal';")
+    #[userId] with
+  | .ok rows => return (((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 0) > 0
+  | .error _ => return true
+
+def updateUserRecord
+    (st : CoreStore)
+    (targetUserId : String)
+    (newRole? : Option String)
+    (newUnixUsername? : Option (Option String))
+    (newDisabled? : Option Bool)
+    (newDailyCap? : Option (Option UInt64))
+    (nowAt : String) : IO (Except (Nat × String) UserRecord) := do
+  let some cur ← getUserById? st targetUserId
+    | return .error (404, "User not found")
+  let effRole := newRole?.getD cur.role
+  if effRole != "admin" && effRole != "member" then
+    return .error (400, "Role must be 'admin' or 'member'")
+  let rawUnixOpt : Option String :=
+    match newUnixUsername? with
+    | some v => v.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+    | none => cur.unixUsername?
+  let effUnix? : Option String :=
+    match rawUnixOpt with
+    | some ux => some ux
+    | none => if effRole == "member" then some (defaultUnixUsernameFor cur.username) else none
+  if let some ux := effUnix? then
+    if !validUnixUsername ux then
+      return .error (400, s!"Invalid or reserved Linux unix_username '{ux}'")
+  if effUnix? != cur.unixUsername? then
+    if ← userHasActiveRuns st targetUserId then
+      return .error (409, "Cannot change unix_username while user has active running missions")
+  let effDisabled := newDisabled?.getD cur.disabled
+  let effCap? := match newDailyCap? with | some c => c | none => cur.dailySpendCapCents?
+  let bumpEpoch := effRole != cur.role || effUnix? != cur.unixUsername? || (effDisabled && !cur.disabled)
+  let nextEpoch := if bumpEpoch then cur.sessionEpoch + 1 else cur.sessionEpoch
+  let txRes ← withImmediateTx st.missionsDb do
+    if cur.role == "admin" && !cur.disabled && (effRole != "admin" || effDisabled) then
+      let admCnt ← execParamQueryUnlocked st.missionsDb
+        "SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=0 AND id<>?1;" #[targetUserId]
+      let .ok ars := admCnt | return .error "admin_count_failed"
+      if (((ars[1]?.bind (·[0]?)).bind String.toNat?).getD 0) == 0 then
+        return .error "bad:Cannot demote or disable the last active admin"
+    if let some ux := effUnix? then
+      let dupX ← execParamQueryUnlocked st.missionsDb
+        "SELECT COUNT(*) FROM users WHERE unix_username=?1 AND id<>?2;" #[ux, targetUserId]
+      let .ok dxrs := dupX | return .error "unix_dup_check_failed"
+      if (((dxrs[1]?.bind (·[0]?)).bind String.toNat?).getD 0) > 0 then
+        return .error s!"conflict:Linux unix_username '{ux}' is already assigned"
+    let unixParam := effUnix?.getD ""
+    let capParam := match effCap? with | some c => s!"{c}" | none => ""
+    let upd ← execParamQueryUnlocked st.missionsDb
+      ("UPDATE users SET role=?2, unix_username=NULLIF(?3,''), session_epoch=?4, disabled=?5, " ++
+       "daily_spend_cap_cents=NULLIF(?6,''), updated_at=?7 WHERE id=?1;")
+      #[targetUserId, effRole, unixParam, s!"{nextEpoch}", if effDisabled then "1" else "0", capParam, nowAt]
+    return upd.map (fun _ => {
+      cur with
+      role := effRole
+      unixUsername? := effUnix?
+      sessionEpoch := nextEpoch
+      disabled := effDisabled
+      dailySpendCapCents? := effCap?
+      updatedAt := nowAt
+    })
+  match txRes with
+  | .ok rec => return .ok rec
+  | .error e =>
+    if e.startsWith "bad:" then return .error (400, (e.drop 4).toString)
+    else if e.startsWith "conflict:" then return .error (409, (e.drop 9).toString)
+    else return .error (500, e)
+
+def resetUserPasswordRecord
+    (st : CoreStore) (targetUserId newPassword nowAt : String) : IO (Except (Nat × String) UserRecord) := do
+  if newPassword.length < 8 then
+    return .error (400, "Password must be at least 8 characters")
+  let some cur ← getUserById? st targetUserId
+    | return .error (404, "User not found")
+  let pwHash ← hashPasswordPbkdf2 newPassword
+  let nextEpoch := cur.sessionEpoch + 1
+  let res ← execParamQuery st.missionsDb
+    "UPDATE users SET password_hash=?2, session_epoch=?3, updated_at=?4 WHERE id=?1;"
+    #[targetUserId, pwHash, s!"{nextEpoch}", nowAt]
+  match res with
+  | .ok _ => return .ok { cur with passwordHash := pwHash, sessionEpoch := nextEpoch, updatedAt := nowAt }
+  | .error e => return .error (500, e)
+
+def deleteUserRecord
+    (st : CoreStore) (callerUserId targetUserId : String) : IO (Except (Nat × String) Unit) := do
+  if callerUserId == targetUserId then
+    return .error (400, "Cannot delete your own account")
+  let some cur ← getUserById? st targetUserId
+    | return .error (404, "User not found")
+  let txRes ← withImmediateTx st.missionsDb do
+    if cur.role == "admin" && !cur.disabled then
+      let admCnt ← execParamQueryUnlocked st.missionsDb
+        "SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=0 AND id<>?1;" #[targetUserId]
+      let .ok ars := admCnt | return .error "admin_count_failed"
+      if (((ars[1]?.bind (·[0]?)).bind String.toNat?).getD 0) == 0 then
+        return .error "bad:Cannot delete the last active admin"
+    discard <| execParamQueryUnlocked st.missionsDb "DELETE FROM mission_shares WHERE user_id=?1;" #[targetUserId]
+    discard <| execParamQueryUnlocked st.missionsDb "UPDATE mission_proxy_tokens SET revoked=1 WHERE owner_user_id=?1;" #[targetUserId]
+    discard <| execParamQueryUnlocked st.missionsDb "DELETE FROM user_provider_prefs WHERE user_id=?1;" #[targetUserId]
+    let del ← execParamQueryUnlocked st.missionsDb "DELETE FROM users WHERE id=?1;" #[targetUserId]
+    return del.map (fun _ => ())
+  match txRes with
+  | .ok () => return .ok ()
+  | .error e =>
+    if e.startsWith "bad:" then return .error (400, (e.drop 4).toString)
+    else return .error (500, e)
+
+/-- Determine caller's relationship to `missionId`:
+    returns `(missionExists, isOwner, isSharedParticipant)`. -/
+def getMissionRelationship (st : CoreStore) (missionId callerUserId : String) : IO (Bool × Bool × Bool) := do
+  if missionId.isEmpty then return (false, false, false)
+  let q ← execParamQuery st.missionsDb
+    ("SELECT COALESCE(m.owner_user_id,''), " ++
+     "CASE WHEN EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id = m.id AND s.user_id = ?2) THEN '1' ELSE '0' END " ++
+     "FROM missions m WHERE m.id = ?1;")
+    #[missionId, callerUserId]
+  match q with
+  | .error _ => return (false, false, false)
+  | .ok rows =>
+    if rows.size ≤ 1 then return (false, false, false)
+    let ownerId := (rows[1]![0]?).getD ""
+    let isPart := ((rows[1]![1]?).getD "0") == "1"
+    return (true, !callerUserId.isEmpty && ownerId == callerUserId, isPart)
+
+def listMissionSharesJson (st : CoreStore) (missionId : String) : IO (Except String String) := do
+  let q ← execParamQuery st.missionsDb
+    ("SELECT s.user_id, COALESCE(u.username,''), s.role, s.created_at " ++
+     "FROM mission_shares s LEFT JOIN users u ON u.id = s.user_id " ++
+     "WHERE s.mission_id = ?1 ORDER BY s.created_at ASC, s.user_id ASC;")
+    #[missionId]
+  match q with
+  | .error e => return .error e
+  | .ok rows =>
+    if rows.size ≤ 1 then return .ok "[]"
+    let mut items : Array String := #[]
+    for i in [1:rows.size] do
+      let r := rows[i]!
+      items := items.push (
+        s!"\{\"user_id\":{jsonEscape ((r[0]?).getD "")},\"username\":{jsonEscape ((r[1]?).getD "")}," ++
+        s!"\"role\":{jsonEscape ((r[2]?).getD "participant")},\"created_at\":{jsonEscape ((r[3]?).getD "")}}")
+    return .ok ("[" ++ String.intercalate "," items.toList ++ "]")
+
+def addMissionShareByUsername
+    (st : CoreStore) (missionId ownerUserId targetUsername nowAt : String) : IO (Except (Nat × String) MissionShareInfo) := do
+  let some targetUser ← getUserByUsername? st targetUsername
+    | return .error (404, "Target user not found")
+  if targetUser.disabled then
+    return .error (400, "Target user account is disabled")
+  if targetUser.id == ownerUserId then
+    return .error (400, "Mission owner already has full access")
+  let res ← execParamQuery st.missionsDb
+    ("INSERT INTO mission_shares(mission_id,user_id,role,granted_by,created_at) " ++
+     "VALUES(?1,?2,'participant',?3,?4) " ++
+     "ON CONFLICT(mission_id,user_id) DO UPDATE SET role='participant';")
+    #[missionId, targetUser.id, ownerUserId, nowAt]
+  match res with
+  | .ok _ =>
+    return .ok { missionId := missionId, userId := targetUser.id, username := targetUser.username, createdAt := nowAt }
+  | .error e => return .error (500, e)
+
+def removeMissionShareRecord (st : CoreStore) (missionId targetUserId : String) : IO (Except String Bool) := do
+  withImmediateTx st.missionsDb do
+    let d ← execParamQueryUnlocked st.missionsDb
+      "DELETE FROM mission_shares WHERE mission_id=?1 AND user_id=?2;" #[missionId, targetUserId]
+    if let .error e := d then return .error e
+    let ch ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
+    let n := match ch with | .ok crs => (((crs[1]?.bind (·[0]?)).bind String.toNat?).getD 0) | .error _ => 0
+    return .ok (n > 0)
+
+def getUserProviderPrefs (st : CoreStore) (userId : String) : IO (Array (String × Bool)) := do
+  if userId.isEmpty then return #[]
+  match ← execParamQuery st.missionsDb
+    "SELECT provider_id, enabled FROM user_provider_prefs WHERE user_id=?1;" #[userId] with
+  | .error _ => return #[]
+  | .ok rows =>
+    let mut out : Array (String × Bool) := #[]
+    for i in [1:rows.size] do
+      let r := rows[i]!
+      out := out.push ((r[0]?).getD "", ((r[1]?).getD "1") != "0")
+    return out
+
+def isUserProviderEnabled (prefs : Array (String × Bool)) (providerId : String) : Bool :=
+  match prefs.find? (fun (pid, _) => pid == providerId) with
+  | some (_, en) => en
+  | none => true
+
+def setUserProviderPref (st : CoreStore) (userId providerId : String) (enabled : Bool) (nowAt : String) : IO (Except String Unit) := do
+  let res ← execParamQuery st.missionsDb
+    ("INSERT INTO user_provider_prefs(user_id,provider_id,enabled,updated_at) VALUES(?1,?2,?3,?4) " ++
+     "ON CONFLICT(user_id,provider_id) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at;")
+    #[userId, providerId, if enabled then "1" else "0", nowAt]
+  return res.map (fun _ => ())
+
+def mintMissionProxyToken
+    (st : CoreStore) (missionId ownerUserId : String) (expiresAtEpoch : UInt64) : IO (Except String String) := do
+  let .ok rnd ← OrbNetLeaf.Crypto.randBytes 24
+    | return .error "csprng_failed"
+  let rawTok := "orb-mpt-v1_" ++ bytesToHexLower rnd
+  let tokSha := bytesToHexLower (sha256Bytes rawTok.toUTF8)
+  let res ← execParamQuery st.missionsDb
+    ("INSERT INTO mission_proxy_tokens(token_sha256,mission_id,owner_user_id,expires_at_epoch,revoked) " ++
+     "VALUES(?1,?2,?3,?4,0);")
+    #[tokSha, missionId, ownerUserId, s!"{expiresAtEpoch}"]
+  return res.map (fun _ => rawTok)
+
+def resolveMissionProxyToken?
+    (st : CoreStore) (rawTok : String) (nowEpoch : UInt64) : IO (Option (String × String)) := do
+  let clean := rawTok.trimAscii.toString
+  if !clean.startsWith "orb-mpt-v1_" then return none
+  let tokSha := bytesToHexLower (sha256Bytes clean.toUTF8)
+  match ← execParamQuery st.missionsDb
+    "SELECT mission_id, owner_user_id, expires_at_epoch, revoked FROM mission_proxy_tokens WHERE token_sha256=?1;"
+    #[tokSha] with
+  | .error _ => return none
+  | .ok rows =>
+    if rows.size ≤ 1 then return none
+    let r := rows[1]!
+    let mid := (r[0]?).getD ""
+    let uid := (r[1]?).getD ""
+    let exp := (((r[2]?).bind String.toNat?).getD 0).toUInt64
+    let rev := ((r[3]?).getD "0") != "0"
+    if rev || nowEpoch >= exp || mid.isEmpty || uid.isEmpty then return none
+    return some (mid, uid)
+
+def revokeMissionProxyTokensForMission (st : CoreStore) (missionId : String) : IO Unit := do
+  discard <| execParamQuery st.missionsDb
+    "UPDATE mission_proxy_tokens SET revoked=1 WHERE mission_id=?1;" #[missionId]
+
+/-- Render `AIProviderRecord` with multi-user role redaction & `user_enabled` / `effective_enabled` overlay.
+    For `member`, strips `base_url` and rate-limit internals while keeping `globally_enabled`, `user_enabled`, and `effective_enabled`. -/
+def renderAIProviderForCallerJson
+    (p : AIProviderRecord)
+    (isAdmin : Bool)
+    (userEnabled : Bool := true)
+    (observedKeyRpm? : Option UInt32 := none) : String := Id.run do
+  let effEnabled := p.enabled && userEnabled
+  let enStr := if p.enabled then "true" else "false"
+  let userEnStr := if userEnabled then "true" else "false"
+  let effEnStr := if effEnabled then "true" else "false"
+  let hasKeyStr := if p.apiKey.isEmpty then "false" else "true"
+  let statusStr := if effEnabled then "{\"type\":\"connected\"}" else "{\"type\":\"disabled\"}"
+  let mut kvs : Array String := #[
+    s!"\"id\":{jsonEscape p.id}",
+    s!"\"provider_type\":{jsonEscape p.providerType}",
+    s!"\"name\":{jsonEscape p.name}",
+    s!"\"enabled\":{enStr}",
+    s!"\"globally_enabled\":{enStr}",
+    s!"\"user_enabled\":{userEnStr}",
+    s!"\"effective_enabled\":{effEnStr}",
+    s!"\"has_api_key\":{hasKeyStr}",
+    "\"uses_oauth\":false",
+    s!"\"status\":{statusStr}"
+  ]
+  if isAdmin then
+    if !p.baseUrl.isEmpty then
+      kvs := kvs.push s!"\"base_url\":{jsonEscape p.baseUrl}"
+    if let some rpm := p.rpmLimit? then
+      kvs := kvs.push s!"\"rpm_limit\":{rpm}"
+    if let some conc := p.maxConcurrency? then
+      kvs := kvs.push s!"\"max_concurrency\":{conc}"
+    if let some obs := observedKeyRpm? then
+      kvs := kvs.push s!"\"observed_key_rpm_limit\":{obs}"
+    if !p.updatedAt.isEmpty then
+      kvs := kvs.push s!"\"updated_at\":{jsonEscape p.updatedAt}"
+  if !p.customModels.isEmpty || (isAdmin && p.providerType == "custom") then
+    kvs := kvs.push s!"\"custom_models\":{renderCustomModelsJson p.customModels}"
+  return "{" ++ String.intercalate "," kvs.toList ++ "}"
 
 end OrbCore.Store

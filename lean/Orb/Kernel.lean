@@ -4192,4 +4192,209 @@ def clientLinkBudgetStep
   let hi32 : UInt32 := pongMs ||| (wakeMs <<< 16)
   lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Multi-User Architecture: RBAC Privacy Gate, Placement Role Gate,
+-- Dual Spend-Cap Governor, and `orb-privd` Dedicated Linux User Confinement
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Constructive Linux username grammar validator (`validUnixUsername`):
+  Enforces `^[a-z_][a-z0-9_-]{0,30}$` (1..31 ASCII bytes) and rejects all reserved
+  system, control-plane, and node service principals so `/home/<u_name>` is strictly
+  a single non-traversal child segment under `/home`.
+-/
+def validUnixUsernameChars : List Char → Bool
+  | [] => true
+  | c :: cs =>
+    let n := c.toNat
+    let ok :=
+      (97 ≤ n && n ≤ 122) ||
+      (48 ≤ n && n ≤ 57) ||
+      n == 95 ||
+      n == 45
+    ok && validUnixUsernameChars cs
+
+def isReservedUnixUsername (u : String) : Bool :=
+  u == "root" ||
+  u == "daemon" ||
+  u == "nobody" ||
+  u == "ubuntu" ||
+  u == "debian" ||
+  u == "admin" ||
+  u == "orb-core" ||
+  u == "orb-node" ||
+  u == "sandboxed-node" ||
+  u == "postgres" ||
+  u == "systemd-network" ||
+  u == "systemd-resolve" ||
+  u == "sshd"
+
+def validUnixUsername (u : String) : Bool :=
+  let cs := u.toList
+  match cs with
+  | [] => false
+  | c0 :: rest =>
+    let n0 := c0.toNat
+    let headOk := (97 ≤ n0 && n0 ≤ 122) || n0 == 95
+    headOk &&
+    decide (rest.length ≤ 30) &&
+    validUnixUsernameChars rest &&
+    !isReservedUnixUsername u
+
+/--
+  Unboxed C-ABI Multi-User RBAC & Strict Owner-Privacy Gate (`orb_multiuser_rbac_step`):
+  Governs request admission and non-disclosure HTTP status codes across Core:
+  - `callerRole`: `0 = member`, `1 = admin`
+  - `opClass`:
+    - `0`: `selfAccount` (`/api/auth/me`, `/api/auth/change-password`, user prefs, `/api/users/directory`)
+    - `1`: `adminUsersAndInfra` (`/api/admin/users/*`, global provider keys/routing, node/fleet admin, deploys)
+    - `2`: `missionReadOrParticipate` (read mission/events/files, send/queue message, cancel, resume)
+    - `3`: `missionOwnerMutate` (delete, archive, machine-transfer, fork, mission settings, manage shares)
+    - `4`: `ownedResourceStrict` (projects, workspaces, managed machines)
+  - Privacy invariant: for `opClass ∈ {2, 3, 4}`, when `isOwner == 0 && isSharedParticipant == 0`,
+    returns HTTP `404` (`admit = 0, reason = 4`) **even when `callerRole == 1` (`admin`)**.
+  - Packed `UInt32` return:
+    - `bit 0`: `admit` (`0` or `1`)
+    - `bits 1..16`: `httpStatus` (`200`, `401`, `403`, `404`)
+    - `bits 17..20`: `reasonCode` (`0 = ok`, `1 = unauthed_or_stale_epoch`, `2 = disabled_account`,
+      `3 = admin_required`, `4 = not_found_private`, `5 = owner_required`, `6 = invalid_op`).
+-/
+@[inline, export orb_multiuser_rbac_step]
+def multiuserRbacStep
+    (callerAuthed callerDisabled epochMatches callerRole opClass isOwner isSharedParticipant : UInt8) : UInt32 :=
+  if callerAuthed != 1 || epochMatches != 1 then
+    ((401 : UInt32) <<< 1) ||| ((1 : UInt32) <<< 17)
+  else if callerDisabled != 0 then
+    ((403 : UInt32) <<< 1) ||| ((2 : UInt32) <<< 17)
+  else if callerRole > 1 then
+    ((403 : UInt32) <<< 1) ||| ((6 : UInt32) <<< 17)
+  else if opClass == 0 then
+    (1 : UInt32) ||| ((200 : UInt32) <<< 1)
+  else if opClass == 1 then
+    if callerRole == 1 then
+      (1 : UInt32) ||| ((200 : UInt32) <<< 1)
+    else
+      ((403 : UInt32) <<< 1) ||| ((3 : UInt32) <<< 17)
+  else if opClass == 2 then
+    if isOwner == 1 || isSharedParticipant == 1 then
+      (1 : UInt32) ||| ((200 : UInt32) <<< 1)
+    else
+      ((404 : UInt32) <<< 1) ||| ((4 : UInt32) <<< 17)
+  else if opClass == 3 then
+    if isOwner == 1 then
+      (1 : UInt32) ||| ((200 : UInt32) <<< 1)
+    else if isSharedParticipant == 1 then
+      ((403 : UInt32) <<< 1) ||| ((5 : UInt32) <<< 17)
+    else
+      ((404 : UInt32) <<< 1) ||| ((4 : UInt32) <<< 17)
+  else if opClass == 4 then
+    if isOwner == 1 then
+      (1 : UInt32) ||| ((200 : UInt32) <<< 1)
+    else
+      ((404 : UInt32) <<< 1) ||| ((4 : UInt32) <<< 17)
+  else
+    ((403 : UInt32) <<< 1) ||| ((6 : UInt32) <<< 17)
+
+/--
+  Unboxed C-ABI Role-Aware Execution Target Placement Gate (`orb_placement_role_admit`):
+  - `callerRole`: `0 = member`, `1 = admin`
+  - `targetKind`:
+    - `0 = core_local` (Core host or `systemd-nspawn` container on Core)
+    - `1 = core_colocated_node` (node colocated with Core)
+    - `2 = dedicated_fleet_node` (dedicated bare-metal worker node)
+    - `3 = managed_vm` (ephemeral cloud VM: Boat, Boost, Hetzner, Vast, Scaleway, Colab)
+    - `4 = client_local` (`placement:client` on the user's own desktop via `orb-locald`)
+  - Returns `1` iff admitted, `0` otherwise.
+-/
+@[inline, export orb_placement_role_admit]
+def placementRoleAdmit
+    (callerRole targetKind nodeAdminOnly hasValidUnixUser : UInt8) : UInt8 :=
+  if targetKind > 4 then
+    0
+  else if callerRole == 1 then
+    1
+  else if callerRole == 0 then
+    if targetKind == 4 then
+      1
+    else if (targetKind == 2 || targetKind == 3) && nodeAdminOnly == 0 && hasValidUnixUser == 1 then
+      1
+    else
+      0
+  else
+    0
+
+/--
+  Unboxed C-ABI Atomic Dual-Scope Spend-Cap Governor (`orb_user_spend_cap_step`):
+  Enforces both the global server daily spend cap and the per-user `daily_spend_cap_cents`
+  using overflow-free `UInt64` addition clamped to the 30-bit daily ceiling (`0x3FFFFFFF` cents = `$10,737,418.23`):
+  - `bit 0`: `admit` (`1` iff both active caps and the 30-bit daily ledger ceiling are respected)
+  - `bits 1..3`: `denyReason` (`0 = ok`, `1 = global_cap_exceeded`, `2 = user_cap_exceeded`, `3 = ledger_overflow`)
+  - `bits 4..33`: `nextGlobalSpentCents` (`30`-bit unsigned cents)
+  - `bits 34..63`: `nextUserSpentCents` (`30`-bit unsigned cents).
+-/
+@[inline, export orb_user_spend_cap_step]
+def userSpendCapStep
+    (globalCapActive : UInt8)
+    (globalSpentCents globalCapCents : UInt32)
+    (userCapActive : UInt8)
+    (userSpentCents userCapCents deltaCents : UInt32) : UInt64 :=
+  let maxLedger64 : UInt64 := 0x3FFFFFFF
+  let curG64 : UInt64 :=
+    if globalSpentCents.toUInt64 ≤ maxLedger64 then globalSpentCents.toUInt64 else maxLedger64
+  let curU64 : UInt64 :=
+    if userSpentCents.toUInt64 ≤ maxLedger64 then userSpentCents.toUInt64 else maxLedger64
+  let rawG64 : UInt64 := globalSpentCents.toUInt64 + deltaCents.toUInt64
+  let rawU64 : UInt64 := userSpentCents.toUInt64 + deltaCents.toUInt64
+  let overflow : Bool := rawG64 > maxLedger64 || rawU64 > maxLedger64
+  let globalExceeded : Bool := globalCapActive != 0 && rawG64 > globalCapCents.toUInt64
+  let userExceeded : Bool := userCapActive != 0 && rawU64 > userCapCents.toUInt64
+  if globalExceeded then
+    ((1 : UInt64) <<< 1) ||| (curG64 <<< 4) ||| (curU64 <<< 34)
+  else if userExceeded then
+    ((2 : UInt64) <<< 1) ||| (curG64 <<< 4) ||| (curU64 <<< 34)
+  else if overflow then
+    ((3 : UInt64) <<< 1) ||| (curG64 <<< 4) ||| (curU64 <<< 34)
+  else
+    (1 : UInt64) ||| (rawG64 <<< 4) ||| (rawU64 <<< 34)
+
+/--
+  Unboxed C-ABI `orb-privd` Dedicated Per-User Linux Execution Confinement Gate (`orb_privd_user_exec_step`):
+  Admits (`bit 0 = 1`, value `1`) dedicated-user provisioning, `systemd-run --uid` job spawn, or
+  UID-dropped `O_NOFOLLOW` filesystem brokerage iff:
+  1. `SO_PEERCRED` matches `sandboxed-node` (`peerIsNodeUid == 1`)
+  2. Node lease HMAC is verified (`leaseVerified == 1`)
+  3. Role & admin-only node policy holds (`callerRole == 1 || (callerRole == 0 && nodeAdminOnly == 0)`)
+  4. `unix_username` satisfies `validUnixUsername` (`usernameValid == 1`)
+  5. `targetUid` and `targetGid` both lie strictly in `2000..65533`
+  6. Supplementary/primary groups are disjoint from privileged/node groups (`gidDisjointPriv == 1`)
+  7. `/home` and `/home/<u_name>` are real `0700` non-symlink directories (`homeConfinedNoSymlink == 1`)
+  8. Shared `/opt/orb/elan` source (if present) is `root:root` owned (`elanRootOwned == 1`).
+  Otherwise returns `denyReason <<< 8` (`admitBit = 0`, `denyReason ∈ 1..9`).
+-/
+@[inline, export orb_privd_user_exec_step]
+def privdUserExecStep
+    (peerIsNodeUid leaseVerified nodeAdminOnly callerRole usernameValid : UInt8)
+    (targetUid targetGid : UInt32)
+    (gidDisjointPriv homeConfinedNoSymlink elanRootOwned : UInt8) : UInt32 :=
+  if peerIsNodeUid != 1 then
+    (1 : UInt32) <<< 8
+  else if leaseVerified != 1 then
+    (2 : UInt32) <<< 8
+  else if callerRole > 1 then
+    (3 : UInt32) <<< 8
+  else if callerRole == 0 && nodeAdminOnly != 0 then
+    (4 : UInt32) <<< 8
+  else if usernameValid != 1 then
+    (5 : UInt32) <<< 8
+  else if targetUid < 2000 || targetUid ≥ 65534 || targetGid < 2000 || targetGid ≥ 65534 then
+    (6 : UInt32) <<< 8
+  else if gidDisjointPriv != 1 then
+    (7 : UInt32) <<< 8
+  else if homeConfinedNoSymlink != 1 then
+    (8 : UInt32) <<< 8
+  else if elanRootOwned != 1 then
+    (9 : UInt32) <<< 8
+  else
+    1
+
 end Orb.Kernel

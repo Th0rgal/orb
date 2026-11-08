@@ -317,7 +317,7 @@ struct OrbComposerBox<Top: View, Leading: View>: View {
 /// Working clock and 3 s polling do not rebuild it while a finger is on it (a rebuilt
 /// toolbar menu could swallow the first tap).
 struct OrbConversationMenu: View, Equatable {
-    enum Action { case rename, move, reopen, archive, stop, sideQuestion, files, fork, clone, context }
+    enum Action { case rename, move, reopen, archive, stop, sideQuestion, files, fork, clone, context, share, leave }
 
     let hasMission: Bool
     let summary: String
@@ -331,6 +331,7 @@ struct OrbConversationMenu: View, Equatable {
     var canFork: Bool = true
     var forkTitle: String = "Fork"
     let hasProject: Bool
+    var isParticipant: Bool = false
     let perform: (Action) -> Void
 
     nonisolated static func summaryText(agentLabel: String, status: String) -> String {
@@ -344,20 +345,26 @@ struct OrbConversationMenu: View, Equatable {
         l.canReopen == r.canReopen && l.reopenTitle == r.reopenTitle && l.canArchive == r.canArchive &&
         l.working == r.working && l.canStop == r.canStop && l.externalURL == r.externalURL &&
         l.local == r.local && l.canFork == r.canFork && l.forkTitle == r.forkTitle &&
-        l.hasProject == r.hasProject
+        l.hasProject == r.hasProject && l.isParticipant == r.isParticipant
     }
 
     var body: some View {
         Menu {
             if hasMission {
                 Section {
-                    if local {
+                    if local && !isParticipant {
                         Button { perform(.sideQuestion) } label: { Label("Side question", systemImage: "bubble.left.and.text.bubble.right") }
                             .accessibilityIdentifier("conversation.sideQuestion")
+                    }
+                    if local {
                         Button { perform(.files) } label: { Label("Files", systemImage: "folder") }
                             .accessibilityIdentifier("conversation.files")
+                        if !isParticipant {
+                            Button { perform(.share) } label: { Label("Share…", systemImage: "person.2") }
+                                .accessibilityIdentifier("conversation.share")
+                        }
                     }
-                    if hasProject {
+                    if hasProject && !isParticipant {
                         Button { perform(.context) } label: { Label("Project context", systemImage: "doc.text") }
                     }
                     if let externalURL {
@@ -367,29 +374,37 @@ struct OrbConversationMenu: View, Equatable {
                     if !summary.isEmpty { Text(summary) }
                 }
 
-                Section {
-                    Button { perform(.rename) } label: { Label("Rename", systemImage: "pencil") }
-                    Button { perform(.move) } label: { Label("Move", systemImage: "folder.badge.gearshape") }
-                    if canFork {
-                        Button { perform(.fork) } label: { Label(forkTitle, systemImage: "arrow.triangle.branch") }
-                    }
-                    if local {
-                        Button { perform(.clone) } label: { Label("Clone", systemImage: "plus.square.on.square") }
+                if !isParticipant {
+                    Section {
+                        Button { perform(.rename) } label: { Label("Rename", systemImage: "pencil") }
+                        Button { perform(.move) } label: { Label("Move", systemImage: "folder.badge.gearshape") }
+                        if canFork {
+                            Button { perform(.fork) } label: { Label(forkTitle, systemImage: "arrow.triangle.branch") }
+                        }
+                        if local {
+                            Button { perform(.clone) } label: { Label("Clone", systemImage: "plus.square.on.square") }
+                        }
                     }
                 }
 
                 Section {
-                    if canReopen {
+                    if canReopen && !isParticipant {
                         Button { perform(.reopen) } label: { Label(reopenTitle, systemImage: "arrow.uturn.backward") }.disabled(working)
                     }
                     if canStop {
                         Button(role: .destructive) { perform(.stop) } label: { Label("Stop", systemImage: "stop.circle") }
                     }
-                    if canArchive && !working {
+                    if canArchive && !working && !isParticipant {
                         Button { perform(.archive) } label: { Label("Archive", systemImage: "archivebox") }
                     }
+                    if isParticipant {
+                        Button(role: .destructive) { perform(.leave) } label: {
+                            Label("Leave shared mission", systemImage: "rectangle.portrait.and.arrow.right")
+                        }
+                        .accessibilityIdentifier("conversation.leave")
+                    }
                 }
-            } else if hasProject {
+            } else if hasProject && !isParticipant {
                 Button { perform(.context) } label: { Label("Project context", systemImage: "doc.text") }
             }
         } label: {

@@ -95,6 +95,9 @@ fun OrbMachinesSettingsPage(
 ) {
     val scope = rememberCoroutineScope()
     val cachedNodes by core.nodes.collectAsState()
+    val currentUser by core.currentUserFlow.collectAsState()
+    val authMode by core.authModeFlow.collectAsState()
+    val isAdmin = OrbCore.computeIsAdmin(authMode, currentUser)
     var nodes by remember(cachedNodes) { mutableStateOf(cachedNodes) }
     var expandedNodeIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var isRefreshing by remember { mutableStateOf(false) }
@@ -106,9 +109,10 @@ fun OrbMachinesSettingsPage(
     var managedEnabled by remember { mutableStateOf(false) }
     var capacityDrafts by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var savingCapacityNodeId by remember { mutableStateOf<String?>(null) }
-    val fleetNodes = remember(nodes, managedEnabled) {
-        if (!managedEnabled) nodes
-        else nodes.filterNot { node ->
+    val fleetNodes = remember(nodes, managedEnabled, isAdmin) {
+        val visibleNodes = if (isAdmin) nodes else nodes.filterNot { OrbManagedMachines.isAdminOnlyNode(it) }
+        if (!managedEnabled) visibleNodes
+        else visibleNodes.filterNot { node ->
             val nodeId = node.str("id", "name") ?: node.id
             OrbManagedMachines.isManagedNode(nodeId, OrbManagedMachines.nodeLabels(node))
         }
@@ -438,7 +442,7 @@ fun OrbMachinesSettingsPage(
                                         ) {
                                             OrbKeyValueLine("Status", statusText)
                                             OrbKeyValueLine("Active jobs", activeJobs)
-                                            if (isStaticNode && currentCap != null) {
+                                            if (isAdmin && isStaticNode && currentCap != null) {
                                                 val draftRaw = capacityDrafts[nodeId] ?: currentCap.toString()
                                                 val parsedDraft = OrbNodeCapacity.parseDraft(draftRaw)
                                                 val isDirty = parsedDraft != null && parsedDraft != currentCap
@@ -554,23 +558,25 @@ fun OrbMachinesSettingsPage(
                                             if (gpuVal != null) {
                                                 OrbKeyValueLine("GPU", gpuVal)
                                             }
-                                            Spacer(modifier = Modifier.height(4.dp))
-                                            Box(
-                                                modifier = Modifier
-                                                    .clip(CircleShape)
-                                                    .background(OrbStyle.card)
-                                                    .border(1.dp, OrbStyle.border, CircleShape)
-                                                    .orbPressClickable { toggleCordon(node) }
-                                                    .padding(horizontal = 12.dp, vertical = 6.dp)
-                                            ) {
-                                                Text(
-                                                    text = if (cordoned) "Allow new jobs" else "Pause new jobs",
-                                                    color = OrbStyle.inboxBlue,
-                                                    fontSize = 13.sp,
-                                                    fontWeight = FontWeight.Medium,
-                                                    maxLines = 1,
-                                                    softWrap = false
-                                                )
+                                            if (isAdmin) {
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(CircleShape)
+                                                        .background(OrbStyle.card)
+                                                        .border(1.dp, OrbStyle.border, CircleShape)
+                                                        .orbPressClickable { toggleCordon(node) }
+                                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                                ) {
+                                                    Text(
+                                                        text = if (cordoned) "Allow new jobs" else "Pause new jobs",
+                                                        color = OrbStyle.inboxBlue,
+                                                        fontSize = 13.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                        maxLines = 1,
+                                                        softWrap = false
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -587,12 +593,14 @@ fun OrbMachinesSettingsPage(
                     }
                 }
 
-                item {
-                    OrbAgentSoftwareBlock(
-                        core = core,
-                        fleetNodes = fleetNodes,
-                        reloadKey = managedReloadKey
-                    )
+                if (isAdmin) {
+                    item {
+                        OrbAgentSoftwareBlock(
+                            core = core,
+                            fleetNodes = fleetNodes,
+                            reloadKey = managedReloadKey
+                        )
+                    }
                 }
             }
         }
@@ -725,9 +733,10 @@ object OrbComputePlacement {
         return true
     }
 
-    fun sortedComputeNodes(rawNodes: List<OrbDict>): List<OrbDict> {
-        val hasSparkAdmin = rawNodes.any { OrbJSON.str(it, "id") == "dgx-spark-admin" && OrbJSON.str(it, "status") == "online" }
-        val filtered = if (hasSparkAdmin) rawNodes.filter { OrbJSON.str(it, "id") != "dgx-spark" } else rawNodes
+    fun sortedComputeNodes(rawNodes: List<OrbDict>, includeAdminNodes: Boolean = true): List<OrbDict> {
+        val roleFiltered = if (includeAdminNodes) rawNodes else rawNodes.filterNot { OrbManagedMachines.isAdminOnlyNode(it) }
+        val hasSparkAdmin = roleFiltered.any { OrbJSON.str(it, "id") == "dgx-spark-admin" && OrbJSON.str(it, "status") == "online" }
+        val filtered = if (hasSparkAdmin) roleFiltered.filter { OrbJSON.str(it, "id") != "dgx-spark" } else roleFiltered
         return filtered.sortedWith(
             Comparator { a, b ->
                 val aUsable = isUsableComputeNode(a)
@@ -744,16 +753,17 @@ object OrbComputePlacement {
         )
     }
 
-    fun firstAvailableNodeId(rawNodes: List<OrbDict>, backend: String? = null): String? {
-        val first = sortedComputeNodes(rawNodes).firstOrNull { isAutoSchedulableNode(it, backend) } ?: return null
+    fun firstAvailableNodeId(rawNodes: List<OrbDict>, backend: String? = null, includeAdminNodes: Boolean = true): String? {
+        val first = sortedComputeNodes(rawNodes, includeAdminNodes = includeAdminNodes)
+            .firstOrNull { isAutoSchedulableNode(it, backend) } ?: return null
         return OrbJSON.str(first, "id")?.takeIf { it.isNotEmpty() }
     }
 
     @JvmName("sortedComputeNodeRows")
-    fun sortedComputeNodes(rows: List<OrbRow>): List<OrbRow> =
-        sortedComputeNodes(rows.map { it.raw }).map { OrbRow(it) }
+    fun sortedComputeNodes(rows: List<OrbRow>, includeAdminNodes: Boolean = true): List<OrbRow> =
+        sortedComputeNodes(rows.map { it.raw }, includeAdminNodes = includeAdminNodes).map { OrbRow(it) }
 
     @JvmName("firstAvailableNodeIdFromRows")
-    fun firstAvailableNodeId(rows: List<OrbRow>, backend: String? = null): String? =
-        firstAvailableNodeId(rows.map { it.raw }, backend)
+    fun firstAvailableNodeId(rows: List<OrbRow>, backend: String? = null, includeAdminNodes: Boolean = true): String? =
+        firstAvailableNodeId(rows.map { it.raw }, backend = backend, includeAdminNodes = includeAdminNodes)
 }

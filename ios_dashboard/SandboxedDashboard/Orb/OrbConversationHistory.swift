@@ -13,7 +13,8 @@ enum OrbConversationHistory {
                             "content": .string(event.content), "sequence": .number(Double(event.sequence)),
                             "canonical": .bool(event.eventType == "assistant_message_canonical"),
                             "bubble_id": .string(event.metadata["bubble_id"]?.value as? String ?? "text_delta_latest"),
-                            "revision": .number((event.metadata["revision"]?.value as? NSNumber)?.doubleValue ?? 0)])
+                            "revision": .number((event.metadata["revision"]?.value as? NSNumber)?.doubleValue ?? 0),
+                            "sender_username": .string(event.metadata["sender_username"]?.value as? String ?? "")])
         }
         guard !history.isEmpty else { return incoming }
         // New snapshots preserve event identities, including repeated identical prompts.

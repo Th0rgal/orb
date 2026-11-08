@@ -497,11 +497,12 @@ private def runR7bMcpAndPrivdTests (tmpDir : System.FilePath) : IO Unit := do
   assertEq "verifyExecWindowAndToctou admits execution within window and Core expiry (257)"
     (verifyExecWindowAndToctou 3 0 tSelf tHost l1 l1 1000 1010 (some 1050) d1 d1 1 1) 257
 
-  let privTrustedDir := tmpDir / "privd-trusted-bin"
+  let privTrustedRaw := tmpDir / "privd-trusted-bin"
+  IO.FS.createDirAll privTrustedRaw
+  let privTrustedDir ← IO.FS.realPath privTrustedRaw
   let privWorkDirA := tmpDir / "privd-cwd-a"
   let privWorkDirB := tmpDir / "privd-cwd-b"
   let markerSwap := tmpDir / "swap-executed.marker"
-  IO.FS.createDirAll privTrustedDir
   IO.FS.createDirAll privWorkDirA
   IO.FS.createDirAll privWorkDirB
   let _ ← chmod privTrustedDir.toString 0o755
@@ -665,6 +666,188 @@ private def runR7bMcpAndPrivdTests (tmpDir : System.FilePath) : IO Unit := do
   | .error e => throw <| IO.userError s!"parse repOkPath: {e}"
 
   let _ ← LeanSys.Posix.closeFd privHttpFd
+
+private def callTestPrivdSocket (sockPath : String) (payload : JVal) : IO JVal := do
+  let fd ← match (← LeanSys.Posix.unixConnect sockPath) with
+    | .ok f => pure f
+    | .error e => throw <| IO.userError s!"unixConnect {sockPath} failed: {e}"
+  let wire := ((renderCompact payload) ++ "\n").toUTF8
+  let _ ← LeanSys.Posix.writeAll fd wire
+  let _ ← shutdownWr (Int32.ofBitVec (BitVec.ofNat 32 fd.raw.toNat))
+  let mut respBytes := ByteArray.emptyWithCapacity 4096
+  while true do
+    match (← readSocketTimed fd 65536 15000) with
+    | .eof => break
+    | .timeout => break
+    | .fatal _ => break
+    | .bytes chunk => respBytes := respBytes ++ chunk
+  let _ ← LeanSys.Posix.closeFd fd
+  match Json.parseBytes respBytes with
+  | .ok j => return j
+  | .error e => throw <| IO.userError s!"privd parseBytes failed: {e}"
+
+private def runMultiUserPrivdBrokerTests (tmpDir : System.FilePath) : IO Unit := do
+  IO.println "--- Multi-User orb-privd Confined User Execution & Symlink Confinement ---"
+  assertTrue "checkUserExecAdmission admits valid dedicated uid/gid >= 2000"
+    ((checkUserExecAdmission true true false "member" "orb-alice" 2500 2500 true true true &&& 1) == 1)
+  assertTrue "checkUserExecAdmission rejects uid < 2000"
+    ((checkUserExecAdmission true true false "member" "orb-alice" 1000 2500 true true true &&& 1) == 0)
+  assertTrue "checkUserExecAdmission rejects reserved root username"
+    ((checkUserExecAdmission true true false "member" "root" 2500 2500 true true true &&& 1) == 0)
+  assertTrue "checkUserExecAdmission rejects member on admin-only node"
+    ((checkUserExecAdmission true true true "member" "orb-alice" 2500 2500 true true true &&& 1) == 0)
+  assertTrue "checkUserExecAdmission rejects privileged group membership"
+    ((checkUserExecAdmission true true false "member" "orb-alice" 2500 2500 false true true &&& 1) == 0)
+  let scrubbed := scrubUserJobEnv #[
+    ("ORB_CORE_API_TOKEN", "secret-core"),
+    ("ORB_NODE_TOKEN", "secret-node"),
+    ("SANDBOXED_NODE_TOKEN", "secret-snode"),
+    ("LD_PRELOAD", "/tmp/evil.so"),
+    ("ANTHROPIC_API_KEY", "orb-mpt-v1_ok"),
+    ("ANTHROPIC_BASE_URL", "http://127.0.0.1:3000/v1")
+  ] "/home/orb-alice"
+  assertTrue "scrubUserJobEnv strips node/core tokens and LD_PRELOAD"
+    (!scrubbed.any (fun (k, _) => k == "ORB_CORE_API_TOKEN" || k == "ORB_NODE_TOKEN" || k == "SANDBOXED_NODE_TOKEN" || k == "LD_PRELOAD"))
+  assertTrue "scrubUserJobEnv preserves mission_proxy_token env and pins HOME"
+    (scrubbed.any (fun (k, v) => k == "ANTHROPIC_API_KEY" && v == "orb-mpt-v1_ok") &&
+     scrubbed.any (fun (k, v) => k == "HOME" && v == "/home/orb-alice"))
+
+  let homeRoot := tmpDir / "privd-homes"
+  let stateDir := tmpDir / "privd-state"
+  let sharedElan := tmpDir / "shared-elan"
+  let logDir := tmpDir / "privd-logs"
+  IO.FS.createDirAll (sharedElan / "bin")
+  IO.FS.createDirAll (sharedElan / "toolchains" / "leanprover--lean4---v4.35.0")
+  IO.FS.writeFile (sharedElan / "bin" / "lean") "#!/bin/sh\necho lean-mock\n"
+  IO.FS.writeFile (sharedElan / "settings.toml") "default_toolchain = \"leanprover/lean4:v4.35.0\"\n"
+  IO.FS.createDirAll homeRoot
+  IO.FS.createDirAll stateDir
+  IO.FS.createDirAll logDir
+
+  setenvVar "ORB_PRIVD_ALLOW_NONROOT_TEST" "1"
+  setenvVar "ORB_PRIVD_HOME_ROOT" homeRoot.toString
+  setenvVar "ORB_PRIVD_STATE_DIR" stateDir.toString
+  setenvVar "ORB_PRIVD_SHARED_ELAN" sharedElan.toString
+  let cleanupPrivdEnv : IO Unit := do
+    unsetenvVar "ORB_PRIVD_ALLOW_NONROOT_TEST"
+    unsetenvVar "ORB_PRIVD_HOME_ROOT"
+    unsetenvVar "ORB_PRIVD_STATE_DIR"
+    unsetenvVar "ORB_PRIVD_SHARED_ELAN"
+  let runInner : IO Unit := do
+    let pidU ← getpid
+    let sockPath := s!"/tmp/opd-{pidU}.sock"
+    try IO.FS.removeFile sockPath catch _ => pure ()
+    let lfd ← match (← LeanSys.Posix.unixListen sockPath 16) with
+      | .ok f => pure f
+      | .error e => throw <| IO.userError s!"unixListen {sockPath} failed: {e}"
+    let cfg : PrivdConfig := {
+      socketPath := sockPath
+      groupName := "staff"
+      apiUrl := "http://127.0.0.1:9"
+      apiToken := some "tok"
+      auditLog := (tmpDir / "privd-audit.jsonl").toString
+      hostLabel := "self"
+    }
+    let serveOne : IO Unit := do
+      match (← LeanSys.Posix.tcpAcceptPoll lfd 5000) with
+      | .ok cfd => handleConnection cfd cfg
+      | .error e => throw <| IO.userError s!"tcpAcceptPoll failed: {e}"
+
+    let tBad ← IO.asTask serveOne
+    let rBad ← callTestPrivdSocket sockPath (.obj #[
+      ("action", .str "ensure_mission_user"),
+      ("unix_username", .str "root"),
+      ("mission_id", .str "11111111-1111-4111-8111-111111111111")
+    ])
+    let _ ← IO.ofExcept tBad.get
+    assertEq "ensure_mission_user rejects root username" (rBad.fieldBool? "ok") (some false)
+
+    let mid := "11111111-1111-4111-8111-111111111111"
+    let tEns ← IO.asTask serveOne
+    let rEns ← callTestPrivdSocket sockPath (.obj #[
+      ("action", .str "ensure_mission_user"),
+      ("unix_username", .str "orb-alice"),
+      ("mission_id", .str mid),
+      ("workspace_files", .arr #[.obj #[("path", .str "opencode.json"), ("content", .str "{\"ok\":true}\n")]])
+    ])
+    let _ ← IO.ofExcept tEns.get
+    assertEq "ensure_mission_user orb-alice ok" (rEns.fieldBool? "ok") (some true)
+    assertTrue "shared elan bin copied into ~/.elan/bin/lean"
+      (← (homeRoot / "orb-alice" / ".elan" / "bin" / "lean").pathExists)
+    assertTrue "workspace_files written inside mission cwd"
+      (← (homeRoot / "orb-alice" / ".orb-missions" / mid / "opencode.json").pathExists)
+
+    let logFile := (logDir / "job-u1.log").toString
+    let tSp ← IO.asTask serveOne
+    let rSp ← callTestPrivdSocket sockPath (.obj #[
+      ("action", .str "spawn_user_job"),
+      ("unix_username", .str "orb-alice"),
+      ("job_id", .str "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+      ("mission_id", .str mid),
+      ("argv", .arr #[.str "bash", .str "-lc", .str "printf 'MPT=%s|NT=%s\\n' \"$ANTHROPIC_API_KEY\" \"$ORB_NODE_TOKEN\" > result.txt; cat result.txt"]),
+      ("env", .obj #[
+        ("ANTHROPIC_API_KEY", .str "orb-mpt-v1_test123"),
+        ("ORB_NODE_TOKEN", .str "MUST_NOT_LEAK")
+      ]),
+      ("log_path", .str logFile)
+    ])
+    let _ ← IO.ofExcept tSp.get
+    assertEq "spawn_user_job orb-alice ok" (rSp.fieldBool? "ok") (some true)
+
+    let mut jobDone := false
+    let mut jobRc : Int := -1
+    for _ in [0:40] do
+      IO.sleep 50
+      let tSt ← IO.asTask serveOne
+      let rSt ← callTestPrivdSocket sockPath (.obj #[
+        ("action", .str "control_user_job"),
+        ("op", .str "status"),
+        ("job_id", .str "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        ("unix_username", .str "orb-alice")
+      ])
+      let _ ← IO.ofExcept tSt.get
+      if (rSt.fieldBool? "done") == some true then
+        jobDone := true
+        jobRc := (rSt.fieldInt? "exit_code").getD (-1)
+        break
+    assertTrue "control_user_job observed completion rc==0" (jobDone && jobRc == 0)
+
+    let tFsRead ← IO.asTask serveOne
+    let rFsRead ← callTestPrivdSocket sockPath (.obj #[
+      ("action", .str "user_fs_op"),
+      ("unix_username", .str "orb-alice"),
+      ("mission_id", .str mid),
+      ("subop", .str "file_browser"),
+      ("req_json", .obj #[("action", .str "read"), ("path", .str "result.txt")])
+    ])
+    let _ ← IO.ofExcept tFsRead.get
+    let readContent := ((rFsRead.fieldOrNull "result").fieldStr? "content").getD ""
+    assertEq "user_fs_op read verifies MPT present and ORB_NODE_TOKEN scrubbed"
+      readContent.trimAscii.toString "MPT=orb-mpt-v1_test123|NT="
+
+    let outsideSecret := tmpDir / "outside-secret.txt"
+    IO.FS.writeFile outsideSecret "TOP_SECRET"
+    let evilLink := homeRoot / "orb-alice" / ".orb-missions" / mid / "evil-link.txt"
+    let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", outsideSecret.toString, evilLink.toString] }
+    let tFsSym ← IO.asTask serveOne
+    let rFsSym ← callTestPrivdSocket sockPath (.obj #[
+      ("action", .str "user_fs_op"),
+      ("unix_username", .str "orb-alice"),
+      ("mission_id", .str mid),
+      ("subop", .str "file_browser"),
+      ("req_json", .obj #[("action", .str "read"), ("path", .str "evil-link.txt")])
+    ])
+    let _ ← IO.ofExcept tFsSym.get
+    assertEq "user_fs_op rejects symlink escape with O_NOFOLLOW/lstat" (rFsSym.fieldBool? "ok") (some false)
+
+    let _ ← LeanSys.Posix.closeFd lfd
+    try IO.FS.removeFile sockPath catch _ => pure ()
+  try
+    runInner
+    cleanupPrivdEnv
+  catch e =>
+    cleanupPrivdEnv
+    throw e
 
 def runAllTests : IO UInt32 := do
   IO.println "=== OrbBin Wave 1 Companion Binaries Self-Test ==="
@@ -1068,6 +1251,7 @@ def runAllTests : IO UInt32 := do
 
   -- 11. R7-B / R7-C SM-22 + G-ORB-7 MCP & orb-privd lifecycle / TOCTOU tests
   runR7bMcpAndPrivdTests tmpDir
+  runMultiUserPrivdBrokerTests tmpDir
 
   try IO.FS.removeDirAll tmpDir catch _ => pure ()
   IO.println "=== ALL ORB-BIN WAVE 1 SELF-TESTS PASSED ==="

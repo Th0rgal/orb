@@ -47,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -83,6 +84,9 @@ fun OrbManagedMachinesBlock(
     onActiveChanged: (Boolean) -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
+    val currentUser by core.currentUserFlow.collectAsState()
+    val authMode by core.authModeFlow.collectAsState()
+    val isAdmin = OrbCore.computeIsAdmin(authMode, currentUser)
     var data by remember { mutableStateOf<ManagedMachinesResponse?>(null) }
     var fetchedAt by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -182,12 +186,31 @@ fun OrbManagedMachinesBlock(
         val before = d
         busyProvider = pr.provider
         actionError = null
-        data = d.copy(providers = d.providers.map { if (it.provider == pr.provider) it.copy(enabled = targetEnabled) else it })
+        data = d.copy(
+            providers = d.providers.map {
+                if (it.provider == pr.provider) {
+                    val nextGlobal = if (isAdmin) targetEnabled else it.globallyEnabled
+                    val nextUser = if (isAdmin) it.userEnabled else targetEnabled
+                    val nextEff = nextGlobal && nextUser
+                    it.copy(
+                        enabled = nextEff,
+                        globallyEnabled = nextGlobal,
+                        userEnabled = nextUser,
+                        effectiveEnabled = nextEff
+                    )
+                } else it
+            }
+        )
         scope.launch {
             try {
+                val path = if (isAdmin) {
+                    "${OrbManagedMachines.PATH}/providers/${core.encodeComponent(pr.provider)}"
+                } else {
+                    "${OrbManagedMachines.PATH}/providers/${core.encodeComponent(pr.provider)}/preference"
+                }
                 val updated = OrbJSON.dict(
                     core.request(
-                        "${OrbManagedMachines.PATH}/providers/${core.encodeComponent(pr.provider)}",
+                        path,
                         method = "PUT",
                         body = mapOf("enabled" to targetEnabled)
                     )
@@ -311,16 +334,18 @@ fun OrbManagedMachinesBlock(
                         }
                         Switch(
                             checked = OrbManagedMachines.isProviderEnabled(pr),
-                            enabled = busyProvider != pr.provider,
+                            enabled = busyProvider != pr.provider && (isAdmin || pr.globallyEnabled),
                             onCheckedChange = { next -> toggleProvider(pr, next) }
                         )
-                        ManagedPill(
-                            label = if (pr.configured) "Configure" else "Set up",
-                            tint = OrbStyle.inboxBlue,
-                            busy = busyProvider == pr.provider,
-                            quiet = true,
-                            onClick = { editingProvider = pr }
-                        )
+                        if (isAdmin) {
+                            ManagedPill(
+                                label = if (pr.configured) "Configure" else "Set up",
+                                tint = OrbStyle.inboxBlue,
+                                busy = busyProvider == pr.provider,
+                                quiet = true,
+                                onClick = { editingProvider = pr }
+                            )
+                        }
                     }
                     if (idx < d.providers.lastIndex) {
                         HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 16.dp))
@@ -533,29 +558,31 @@ fun OrbManagedMachinesBlock(
         }
     }
 
-    editingProvider?.let { pr ->
-        ManagedConfigureProviderDialog(
-            provider = pr,
-            onDismiss = { editingProvider = null },
-            onSave = { patch ->
-                val updated = OrbJSON.dict(
-                    core.request(
-                        "${OrbManagedMachines.PATH}/providers/${core.encodeComponent(pr.provider)}",
-                        method = "PUT",
-                        body = patch
-                    )
-                )?.let { OrbManagedMachines.parseProvider(it) }
-                if (updated != null) {
-                    data = data?.let { cur ->
-                        cur.copy(
-                            enabled = cur.enabled || updated.configured,
-                            providers = cur.providers.map { if (it.provider == updated.provider) updated else it }
+    if (isAdmin) {
+        editingProvider?.let { pr ->
+            ManagedConfigureProviderDialog(
+                provider = pr,
+                onDismiss = { editingProvider = null },
+                onSave = { patch ->
+                    val updated = OrbJSON.dict(
+                        core.request(
+                            "${OrbManagedMachines.PATH}/providers/${core.encodeComponent(pr.provider)}",
+                            method = "PUT",
+                            body = patch
                         )
+                    )?.let { OrbManagedMachines.parseProvider(it) }
+                    if (updated != null) {
+                        data = data?.let { cur ->
+                            cur.copy(
+                                enabled = cur.enabled || updated.configured,
+                                providers = cur.providers.map { if (it.provider == updated.provider) updated else it }
+                            )
+                        }
                     }
+                    refresh()
                 }
-                refresh()
-            }
-        )
+            )
+        }
     }
 
     if (creating) {

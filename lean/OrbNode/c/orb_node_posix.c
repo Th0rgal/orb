@@ -17,6 +17,9 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <crt_externs.h>
+#endif
 
 static volatile sig_atomic_t g_node_term = 0, g_node_hup = 0;
 static void orb_node_on_term(int sig) { (void)sig; g_node_term = 1; }
@@ -98,8 +101,9 @@ LEAN_EXPORT lean_obj_res orb_node_host_stats(b_lean_obj_arg work_dir, lean_obj_a
 
 LEAN_EXPORT lean_obj_res orb_node_tcp_listen(b_lean_obj_arg host, uint16_t port, lean_obj_arg w) {
     (void)w;
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("socket() failed")));
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     struct sockaddr_in addr;
@@ -125,8 +129,9 @@ LEAN_EXPORT lean_obj_res orb_node_tcp_accept(uint32_t listen_fd, uint32_t timeou
     struct pollfd pfd = { .fd = (int)listen_fd, .events = POLLIN, .revents = 0 };
     int pr = poll(&pfd, 1, (int)timeout_ms);
     if (pr <= 0) return lean_io_result_mk_ok(lean_box_uint32(0xFFFFFFFFu));
-    int cfd = accept4((int)listen_fd, NULL, NULL, SOCK_CLOEXEC);
+    int cfd = accept((int)listen_fd, NULL, NULL);
     if (cfd < 0) return lean_io_result_mk_ok(lean_box_uint32(0xFFFFFFFFu));
+    fcntl(cfd, F_SETFD, FD_CLOEXEC);
     struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
     setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -159,43 +164,35 @@ LEAN_EXPORT lean_obj_res orb_node_fd_write_all(uint32_t fd, b_lean_obj_arg ba, l
     return lean_io_result_mk_ok(lean_box_uint32(0u));
 }
 
-LEAN_EXPORT lean_obj_res orb_node_fd_close(uint32_t fd, lean_obj_arg w) {
-    (void)w;
-    close((int)fd);
-    return lean_io_result_mk_ok(lean_box(0));
-}
+LEAN_EXPORT lean_obj_res orb_node_fd_close(uint32_t fd, lean_obj_arg w) { (void)w; close((int)fd); return lean_io_result_mk_ok(lean_box(0)); }
 
 LEAN_EXPORT lean_obj_res orb_node_spawn_job_pgrp(
-    b_lean_obj_arg prog, b_lean_obj_arg args_arr, b_lean_obj_arg env_arr,
-    b_lean_obj_arg cwd, b_lean_obj_arg log_path, lean_obj_arg w
+    b_lean_obj_arg prog, b_lean_obj_arg args_arr, b_lean_obj_arg env_arr, b_lean_obj_arg cwd, b_lean_obj_arg log_path, lean_obj_arg w
 ) {
     (void)w;
     int log_fd = open(lean_string_cstr(log_path), O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC, 0600);
     if (log_fd < 0) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("open log_path failed")));
     pid_t pid = fork();
-    if (pid < 0) {
-        close(log_fd);
-        return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("fork() failed")));
-    }
+    if (pid < 0) { close(log_fd); return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("fork() failed"))); }
     if (pid == 0) {
         setsid();
         int null_fd = open("/dev/null", O_RDONLY);
         if (null_fd >= 0) { dup2(null_fd, STDIN_FILENO); close(null_fd); }
-        dup2(log_fd, STDOUT_FILENO);
-        dup2(log_fd, STDERR_FILENO);
-        close(log_fd);
+        dup2(log_fd, STDOUT_FILENO); dup2(log_fd, STDERR_FILENO); close(log_fd);
         if (lean_string_size(cwd) > 1 && chdir(lean_string_cstr(cwd)) != 0) _exit(126);
+#ifdef __APPLE__
+        *_NSGetEnviron() = NULL;
+#else
         clearenv();
-        size_t envc = lean_array_size(env_arr);
+#endif
+        size_t envc = lean_array_size(env_arr), argc = lean_array_size(args_arr);
         for (size_t i = 0; i + 1 < envc; i += 2)
             setenv(lean_string_cstr(lean_array_get_core(env_arr, i)), lean_string_cstr(lean_array_get_core(env_arr, i + 1)), 1);
-        size_t argc = lean_array_size(args_arr);
         char **argv = (char **)calloc(argc + 2, sizeof(char *));
         if (!argv) _exit(126);
         argv[0] = (char *)lean_string_cstr(prog);
         for (size_t i = 0; i < argc; i++) argv[i + 1] = (char *)lean_string_cstr(lean_array_get_core(args_arr, i));
-        execvp(argv[0], argv);
-        _exit(127);
+        execvp(argv[0], argv); _exit(127);
     }
     close(log_fd);
     return lean_io_result_mk_ok(lean_box_uint64((uint64_t)pid));

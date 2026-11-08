@@ -96,10 +96,24 @@ struct OrbProvidersSettings: View {
     @State private var resetTarget: OrbResetPrompt?
     @State private var pendingResetKeys: [String: String] = [:]
     static let subscriptionTypes = ["anthropic", "openai", "google", "xai", "kimi"]
+    static func isEffectiveEnabled(_ p: OrbJSON) -> Bool {
+        if case .bool(let eff) = p["effective_enabled"] { return eff }
+        return p["enabled"] != .bool(false)
+    }
     var body: some View {
+        let isAdmin = OrbCore.shared.isAdminUser
         List {
             OrbSettingsError(message: error)
             OrbSettingsError(message: usageError)
+            if let user = OrbCore.shared.currentUser, let cap = user.dailySpendCapCents, cap > 0 {
+                Section("Daily spend") {
+                    LabeledContent(
+                        "Today",
+                        value: "\(OrbUsersModel.formatUsdFromCents(user.spentTodayCents)) / \(OrbUsersModel.formatUsdFromCents(cap))"
+                    )
+                    ProgressView(value: min(1.0, max(0.0, Double(user.spentTodayCents) / Double(max(1, cap)))))
+                }
+            }
             if loading && providers.isEmpty { ProgressView("Loading providers…") }
             Section("Accounts") {
                 if ready && providers.isEmpty { Text("No providers configured.").foregroundStyle(.secondary) }
@@ -114,20 +128,22 @@ struct OrbProvidersSettings: View {
                                     Text(reset.detail).font(.caption).foregroundStyle(.secondary)
                                 }
                             }
-                            Button("Use subscription reset…") {
-                                let pid = provider["id"].text
-                                let key = pendingResetKeys[pid] ?? UUID().uuidString.lowercased()
-                                pendingResetKeys[pid] = key
-                                resetTarget = OrbResetPrompt(
-                                    id: pid,
-                                    provider: provider,
-                                    summary: reset,
-                                    idempotencyKey: key
-                                )
+                            if isAdmin {
+                                Button("Use subscription reset…") {
+                                    let pid = provider["id"].text
+                                    let key = pendingResetKeys[pid] ?? UUID().uuidString.lowercased()
+                                    pendingResetKeys[pid] = key
+                                    resetTarget = OrbResetPrompt(
+                                        id: pid,
+                                        provider: provider,
+                                        summary: reset,
+                                        idempotencyKey: key
+                                    )
+                                }
+                                .disabled(!ready || busy || !reset.usableNow)
                             }
-                            .disabled(!ready || busy || !reset.usableNow)
                         }
-                        if Self.supportsSubscriptionReset(provider) {
+                        if isAdmin && Self.supportsSubscriptionReset(provider) {
                             Toggle(
                                 "Auto-use reset on limit",
                                 isOn: Binding(
@@ -139,7 +155,7 @@ struct OrbProvidersSettings: View {
                         }
                         if !detail["error"].text.isEmpty { Text(detail["error"].text).font(.caption).foregroundStyle(.orange) }
                         let unverified = detail["status"].text == "needs_verification"
-                        if unverified {
+                        if unverified && isAdmin {
                             // Google refuses this login until its owner verifies it; the
                             // OAuth sign-in itself is fine, so no Reconnect here.
                             Text("Google requires you to verify this account.").font(.caption).foregroundStyle(.orange)
@@ -147,12 +163,16 @@ struct OrbProvidersSettings: View {
                             Button("Check again") { Task { await recheck(provider) } }.disabled(!ready || busy)
                         }
                         if !detail["usage_note"].text.isEmpty { Text(detail["usage_note"].text).font(.caption).foregroundStyle(.secondary) }
-                        if Self.canEditKey(provider) { Button("Edit API key") { editKey = provider; keySheet = true }.disabled(!ready || busy) }
-                        if Self.canConnectOAuth(provider) && !unverified {
+                        if isAdmin && Self.canEditKey(provider) { Button("Edit API key") { editKey = provider; keySheet = true }.disabled(!ready || busy) }
+                        if isAdmin && Self.canConnectOAuth(provider) && !unverified {
                             if let spec = Self.loginSpec(provider) { Button("Connect / Reconnect") { login = spec }.disabled(!ready || busy) }
                             else { Text("This account must be connected on its credential owner.").font(.caption).foregroundStyle(.secondary) }
                         }
-                        Button(provider["enabled"] == .bool(false) ? "Enable" : "Disable") { Task { await toggle(provider) } }.disabled(!ready || busy)
+                        let globallyDisabled = provider["globally_enabled"] == .bool(false) || (!isAdmin && provider["enabled"] == .bool(false) && provider["effective_enabled"] == .null)
+                        Button(Self.isEffectiveEnabled(provider) ? (isAdmin ? "Disable" : "Skip for my missions") : (isAdmin ? "Enable" : "Use for my missions")) {
+                            Task { await toggle(provider) }
+                        }
+                        .disabled(!ready || busy || (!isAdmin && globallyDisabled))
                     } label: {
                         let parsed = Self.splitDisplayName(provider)
                         HStack(spacing: 12) {
@@ -172,23 +192,25 @@ struct OrbProvidersSettings: View {
                 }
             }
             OrbCloudAccountsSettings(client: client)
-            Section {
-                Button("Add API key", systemImage: "plus") { editKey = nil; keySheet = true }.disabled(!ready)
-                Menu("Connect subscription") {
-                    ForEach(Self.subscriptionTypes, id: \.self) { type in
-                        Button {
-                            login = Self.subscriptionLogin(type)
-                        } label: {
-                            Label {
-                                Text(type.capitalized)
-                            } icon: {
-                                if let asset = OrbProviderLogo.assetName(type: type) {
-                                    Image(asset)
+            if isAdmin {
+                Section {
+                    Button("Add API key", systemImage: "plus") { editKey = nil; keySheet = true }.disabled(!ready)
+                    Menu("Connect subscription") {
+                        ForEach(Self.subscriptionTypes, id: \.self) { type in
+                            Button {
+                                login = Self.subscriptionLogin(type)
+                            } label: {
+                                Label {
+                                    Text(type.capitalized)
+                                } icon: {
+                                    if let asset = OrbProviderLogo.assetName(type: type) {
+                                        Image(asset)
+                                    }
                                 }
                             }
                         }
-                    }
-                }.disabled(!ready)
+                    }.disabled(!ready)
+                }
             }
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
@@ -272,7 +294,11 @@ struct OrbProvidersSettings: View {
         let detail = usage[p["id"].text]
         let state: String
         var showResetBadge = false
-        if p["enabled"] == .bool(false) { state = "Disabled" }
+        if !Self.isEffectiveEnabled(p) {
+            if p["globally_enabled"] == .bool(false) { state = "Disabled by admin" }
+            else if p["user_enabled"] == .bool(false) { state = "Skipped for your missions" }
+            else { state = "Disabled" }
+        }
         else if detail["status"].text == "needs_verification" { state = "Verification required" }
         else if p["status"]["type"].text == "needs_reauth" || detail["status"].text == "needs_reauth" { state = "Reconnect" }
         else if !detail["error"].text.isEmpty { state = "Usage unavailable" }
@@ -294,7 +320,7 @@ struct OrbProvidersSettings: View {
     /// Quota severity of the row (nil while below 80% or when another state wins).
     private func quotaStatus(_ p: OrbJSON) -> OrbQuotaStatus? {
         let detail = usage[p["id"].text]
-        guard p["enabled"] != .bool(false), p["status"]["type"].text != "needs_reauth", detail["status"].text != "needs_reauth", detail["error"].text.isEmpty else { return nil }
+        guard Self.isEffectiveEnabled(p), p["status"]["type"].text != "needs_reauth", detail["status"].text != "needs_reauth", detail["error"].text.isEmpty else { return nil }
         return OrbProviderQuota.quotaStatus(OrbProviderQuota.windows(detail))
     }
     private func load() async {
@@ -355,8 +381,13 @@ struct OrbProvidersSettings: View {
     }
     private func toggle(_ provider: OrbJSON) async {
         guard !busy else { return }; busy = true; defer { busy = false }
+        let isAdmin = OrbCore.shared.isAdminUser
+        let next = !Self.isEffectiveEnabled(provider)
         do {
-            _ = try await client.call("/api/ai/providers/\(OrbCore.escape(provider["id"].text))", method: "PUT", body: .object(["enabled": .bool(provider["enabled"] == .bool(false))]))
+            let endpoint = isAdmin
+                ? "/api/ai/providers/\(OrbCore.escape(provider["id"].text))"
+                : "/api/ai/providers/\(OrbCore.escape(provider["id"].text))/preference"
+            _ = try await client.call(endpoint, method: "PUT", body: .object(["enabled": .bool(next)]))
             await load()
         } catch is CancellationError {} catch { self.error = error.localizedDescription }
     }

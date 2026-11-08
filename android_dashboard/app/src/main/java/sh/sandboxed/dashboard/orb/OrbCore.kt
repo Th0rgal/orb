@@ -259,6 +259,12 @@ data class OrbRow(
         OrbRow(item, "$id-$key-$idx")
     }
 
+    val isParticipant: Boolean
+        get() = str("viewer_role") == "participant"
+
+    val ownerUsername: String?
+        get() = str("owner_username")?.trim()?.takeIf { it.isNotEmpty() }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is OrbRow) return false
@@ -277,6 +283,8 @@ data class OrbRow(
             h = 31 * h + (raw["sequence"]?.hashCode() ?: 0)
             h = 31 * h + (raw["first_viewed_at"]?.hashCode() ?: 0)
             h = 31 * h + (raw["enabled"]?.hashCode() ?: 0)
+            h = 31 * h + (raw["effective_enabled"]?.hashCode() ?: 0)
+            h = 31 * h + (raw["viewer_role"]?.hashCode() ?: 0)
             h = 31 * h + (raw["project"]?.hashCode() ?: 0)
             h = 31 * h + (raw["folder"]?.hashCode() ?: 0)
             h = 31 * h + (raw["placement_revision"]?.hashCode() ?: 0)
@@ -1743,12 +1751,31 @@ object OrbKeychain {
 }
 
 class OrbCore private constructor(context: Context) {
+    data class CurrentUser(
+        val id: String,
+        val username: String,
+        val role: String,
+        val unixUsername: String?,
+        val dailySpendCapCents: Int?,
+        val spentTodayCents: Int,
+    )
+
+    data class AuthCapabilities(
+        val canManageUsers: Boolean,
+        val canUseCoreTarget: Boolean,
+        val canManageGlobalProviders: Boolean,
+    )
+
     companion object {
         private const val KEYCHAIN_SERVICE = "md.thomas.orb.core"
         private const val CREDENTIALS_SERVICE = "md.thomas.orb.credentials"
         private const val PREFS_NAME = "orb_core_prefs"
         private const val BASE_URL_KEY = "orb.baseURL"
         private const val TOKEN_FALLBACK_KEY = "orb.tokenFallback"
+
+        fun computeIsAdmin(authMode: String, user: CurrentUser?): Boolean =
+            if (authMode == "multi_user") user?.role == "admin"
+            else (user == null || user.role == "admin")
 
         @Volatile
         private var instance: OrbCore? = null
@@ -1851,6 +1878,74 @@ class OrbCore private constructor(context: Context) {
 
     private val _assistantStatus = MutableStateFlow<OrbDict>(emptyMap())
     val assistantStatus: StateFlow<OrbDict> = _assistantStatus.asStateFlow()
+
+    private val _authModeFlow = MutableStateFlow("single_tenant")
+    val authModeFlow: StateFlow<String> = _authModeFlow.asStateFlow()
+
+    private val _currentUserFlow = MutableStateFlow<CurrentUser?>(null)
+    val currentUserFlow: StateFlow<CurrentUser?> = _currentUserFlow.asStateFlow()
+
+    private val _authCapabilitiesFlow = MutableStateFlow<AuthCapabilities?>(null)
+    val authCapabilitiesFlow: StateFlow<AuthCapabilities?> = _authCapabilitiesFlow.asStateFlow()
+
+    val isAdminUser: Boolean
+        get() = computeIsAdmin(_authModeFlow.value, _currentUserFlow.value)
+
+    suspend fun refreshCurrentUser() {
+        if (!isConfigured) return
+        try {
+            val res = OrbJSON.dict(request("/api/auth/me")) ?: return
+            OrbJSON.str(res, "auth_mode")?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                _authModeFlow.value = it
+            }
+            val u = OrbJSON.dict(res["user"])
+            if (u != null) {
+                val id = OrbJSON.str(u, "id")?.trim().orEmpty()
+                val username = OrbJSON.str(u, "username")?.trim().orEmpty()
+                if (id.isNotEmpty() && username.isNotEmpty()) {
+                    val role = if (OrbJSON.str(u, "role") == "admin") "admin" else "member"
+                    val unix = OrbJSON.str(u, "unix_username")?.trim()?.takeIf { it.isNotEmpty() }
+                    val cap = OrbJSON.double(u, "daily_spend_cap_cents")?.let { kotlin.math.round(it).toInt() }
+                    val spent = OrbJSON.double(u, "spent_today_cents")?.let { maxOf(0, kotlin.math.round(it).toInt()) } ?: 0
+                    _currentUserFlow.value = CurrentUser(
+                        id = id,
+                        username = username,
+                        role = role,
+                        unixUsername = unix,
+                        dailySpendCapCents = cap,
+                        spentTodayCents = spent,
+                    )
+                } else {
+                    _currentUserFlow.value = null
+                }
+            } else {
+                _currentUserFlow.value = null
+            }
+            val caps = OrbJSON.dict(res["capabilities"])
+            _authCapabilitiesFlow.value = if (caps != null) {
+                AuthCapabilities(
+                    canManageUsers = OrbJSON.bool(caps, "can_manage_users") == true,
+                    canUseCoreTarget = OrbJSON.bool(caps, "can_use_core_target") == true,
+                    canManageGlobalProviders = OrbJSON.bool(caps, "can_manage_global_providers") == true,
+                )
+            } else {
+                null
+            }
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (err: OrbError) {
+            if (err.status == 404) {
+                runCatching {
+                    val health = OrbJSON.dict(request("/api/health"))
+                    OrbJSON.str(health, "auth_mode")?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                        _authModeFlow.value = it
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+            // Keep prior cached identity across transient network blips.
+        }
+    }
 
 
     private val _pendingProjectFocus = MutableStateFlow<String?>(null)
@@ -2043,6 +2138,10 @@ class OrbCore private constructor(context: Context) {
         _nodes.value = emptyList()
         _fleetSummary.value = emptyMap()
         _assistantStatus.value = emptyMap()
+        _authModeFlow.value = "single_tenant"
+        _currentUserFlow.value = null
+        _authCapabilitiesFlow.value = null
+        _pendingSecretRequests.value = 0
         _hasLoadedSuccessfully.value = false
         _lastError.value = null
         _lastErrorLog.value = null
@@ -2240,6 +2339,13 @@ class OrbCore private constructor(context: Context) {
         }
     }
 
+    /** Removes a mission from in-memory and delta caches (e.g. after leaving a shared mission). */
+    fun removeMissionInMemory(missionId: String) {
+        if (missionId.isEmpty()) return
+        _missions.value = _missions.value.filterNot { it.id == missionId }
+        missionDeltaCache = missionDeltaCache.filterNot { it.id == missionId }
+    }
+
     fun onBackground() {
         _isForeground.value = false
         val snapshot = dirtyMissionsSnapshot
@@ -2267,11 +2373,11 @@ class OrbCore private constructor(context: Context) {
         }
     }
 
-    suspend fun refreshMissionsQuietly(forceDiskFlush: Boolean = false) {
+    suspend fun refreshMissionsQuietly(forceDiskFlush: Boolean = false, forceFull: Boolean = false) {
         if (!quietRefreshMutex.tryLock()) return
         try {
             coroutineScope {
-                val mDeferred = async { syncRecentMissions(limit = 100, forceFull = false) }
+                val mDeferred = async { syncRecentMissions(limit = 100, forceFull = forceFull) }
                 val pDeferred = async { fetchRows("/api/projects", "projects") }
                 val m = OrbMissionTree.filterMobile(mDeferred.await())
                 val p = pDeferred.await()
@@ -2326,6 +2432,7 @@ class OrbCore private constructor(context: Context) {
         _lastErrorLog.value = null
 
         coroutineScope {
+            val meTask = async { runCatching { refreshCurrentUser() } }
             val pTask = async { orbTry(OrbLog.Category.Network, "/api/projects") { fetchRows("/api/projects", "projects") } }
             val mTask = async { orbTry(OrbLog.Category.Network, "/api/control/missions") { syncRecentMissions(limit = 100, forceFull = true) } }
             val wTask = async { orbTry(OrbLog.Category.Network, "/api/workspaces") { fetchRows("/api/workspaces", null) } }
@@ -2335,6 +2442,7 @@ class OrbCore private constructor(context: Context) {
             val nTask = async { orbTry(OrbLog.Category.Network, "/api/remote-nodes") { fetchDict("/api/remote-nodes") } }
             val aTask = async { orbTry(OrbLog.Category.Network, "/api/system/hermes-assistant/status") { fetchDict("/api/system/hermes-assistant/status") } }
 
+            meTask.await()
             val pResult = pTask.await()
             val mResult = mTask.await()
             var anyCoreSuccess = false

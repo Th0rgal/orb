@@ -114,12 +114,14 @@ final class OrbCore {
         set {
             let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let resolved = trimmed.isEmpty ? Self.defaultBaseURL : trimmed
+            let changed = cachedBaseURL != resolved
             cachedBaseURL = resolved
             cachedTokenEndpoint = nil
             cachedJwtToken = nil
             endpointCooldowns.removeAll()
             resetMissionDeltaState()
             applyTransportEndpointChange(to: resolved)
+            if changed { resetCurrentUser() }
             #if DEBUG
             // UI tests point the app at loopback fixtures with `-api_base_url`; never let a
             // test that edits the server URL overwrite the operator's saved endpoint.
@@ -173,8 +175,96 @@ final class OrbCore {
         jwtToken != nil
     }
     
+    struct CurrentUser: Equatable, Sendable {
+        let id: String
+        let username: String
+        let role: String
+        let unixUsername: String?
+        let dailySpendCapCents: Int?
+        let spentTodayCents: Int
+    }
+
+    struct AuthCapabilities: Equatable, Sendable {
+        let canManageUsers: Bool
+        let canUseCoreTarget: Bool
+        let canManageGlobalProviders: Bool
+    }
+
     var authRequired: Bool = false
     var authMode: AuthMode = .singleTenant
+    var currentUser: CurrentUser?
+    var authCapabilities: AuthCapabilities?
+    var isAdminUser: Bool {
+        if let u = currentUser { return u.role == "admin" }
+        if let c = authCapabilities { return c.canManageUsers }
+        return authMode != .multiUser
+    }
+
+    func resetCurrentUser() {
+        currentUser = nil
+        authCapabilities = nil
+    }
+
+    func applyAuthMe(_ info: OrbJSON) {
+        let modeRaw = info["auth_mode"].text
+        if let mode = AuthMode(rawValue: modeRaw) {
+            authMode = mode
+        }
+        let u = info["user"]
+        if u != .null, !u["id"].text.isEmpty, !u["username"].text.isEmpty {
+            let role = u["role"].text == "member" ? "member" : "admin"
+            let unix = u["unix_username"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+            currentUser = CurrentUser(
+                id: u["id"].text,
+                username: u["username"].text,
+                role: role,
+                unixUsername: unix.isEmpty ? nil : unix,
+                dailySpendCapCents: u["daily_spend_cap_cents"].doubleValue.map { Int($0.rounded()) },
+                spentTodayCents: u["spent_today_cents"].doubleValue.map { max(0, Int($0.rounded())) } ?? 0
+            )
+        } else {
+            currentUser = nil
+        }
+        let caps = info["capabilities"]
+        if caps != .null {
+            authCapabilities = AuthCapabilities(
+                canManageUsers: caps["can_manage_users"].flag,
+                canUseCoreTarget: caps["can_use_core_target"].flag,
+                canManageGlobalProviders: caps["can_manage_global_providers"].flag
+            )
+        } else {
+            authCapabilities = nil
+        }
+    }
+
+    func refreshCurrentUser() async {
+        guard isConfigured, isAuthenticated || !authRequired else {
+            resetCurrentUser()
+            return
+        }
+        let currentBase = baseURL
+        do {
+            let me = try await call("/api/auth/me")
+            if baseURL == currentBase { applyAuthMe(me) }
+        } catch let http as OrbHTTPError where http.status == 404 {
+            if let st = try? await call("/api/auth/status"), baseURL == currentBase {
+                applyAuthMe(st)
+            }
+        } catch {
+            // Preserve current cached state on transient failure.
+        }
+    }
+
+    func updateRotatedToken(_ token: String) {
+        let clean = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        let currentEndpoint = baseURL
+        if OrbKeychain.save(clean, for: currentEndpoint) {
+            cachedTokenEndpoint = currentEndpoint
+            cachedJwtToken = clean
+            authSessionExpired = false
+        }
+    }
     var githubEnabled: Bool = false
     var githubOAuthClientState: Bool = false
     var authSessionExpired: Bool = false
@@ -246,6 +336,7 @@ final class OrbCore {
         cachedJwtToken = response.token
         UserDefaults.standard.removeObject(forKey: "jwt_token")
         authSessionExpired = false
+        await refreshCurrentUser()
         return true
     }
 
@@ -278,6 +369,7 @@ final class OrbCore {
         OrbKeychain.saveCredentials(nil, for: baseURL)
         jwtToken = nil
         authSessionExpired = false
+        resetCurrentUser()
         resetMissionDeltaState()
         // Mission titles must not stay on the Lock Screen after sign-out.
         OrbFleetActivityController.shared.endAll()

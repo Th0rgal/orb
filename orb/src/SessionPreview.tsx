@@ -27,7 +27,15 @@ export interface SessionPreviewData {
   effort?: string;
   context?: number | null;
 }
-export function SessionPreview(p: { data: SessionPreviewData; goal?: boolean; plan?: PlanProgressData; onOpenSettings?: () => void }) {
+export function SessionPreview(p: {
+  data: SessionPreviewData;
+  goal?: boolean;
+  plan?: PlanProgressData;
+  ownerUsername?: string | null;
+  participant?: boolean;
+  onOpenSettings?: () => void;
+  onShare?: () => void;
+}) {
   const tipId = createUniqueId();
   const [open, setOpen] = createSignal(false);
   const [git, setGit] = createSignal<{
@@ -102,6 +110,12 @@ export function SessionPreview(p: { data: SessionPreviewData; goal?: boolean; pl
       <Show when={open()}>
         <Popover anchor={button} id={tipId} label="Session details" class="session-preview" width={360} trap={false} restoreFocus={false} onClose={close} onMouseEnter={() => clearTimeout(hideTimer)} onMouseLeave={leave}>
             <div class="session-preview-title">{p.data.title}</div>
+            <Show when={p.participant && p.ownerUsername}>
+              <div class="session-preview-row">
+                <Ic.UsersIcon />
+                <span>Shared by @{p.ownerUsername} · Participant</span>
+              </div>
+            </Show>
             <Show when={p.data.parent}><div class="session-preview-row"><span>Parent session</span><span>{p.data.parent}</span></div></Show>
             <Show when={p.data.children}><div class="session-preview-row"><span>Worker sessions</span><span>{p.data.children}</span></div></Show>
             <Show when={git()}>
@@ -162,19 +176,34 @@ export function SessionPreview(p: { data: SessionPreviewData; goal?: boolean; pl
                 Project · {p.data.project}
               </div>
             </Show>
-            <Show when={p.onOpenSettings && !p.data.local}>
+            <Show when={(p.onOpenSettings || p.onShare) && !p.data.local}>
               <div class="popover-foot">
-                <button
-                  type="button"
-                  class="s-btn sm"
-                  onClick={() => {
-                    close();
-                    p.onOpenSettings?.();
-                  }}
-                >
-                  <Ic.SlidersIcon />
-                  <span>Mission settings</span>
-                </button>
+                <Show when={p.onShare}>
+                  <button
+                    type="button"
+                    class="s-btn sm"
+                    onClick={() => {
+                      close();
+                      p.onShare?.();
+                    }}
+                  >
+                    <Ic.UsersIcon />
+                    <span>Share…</span>
+                  </button>
+                </Show>
+                <Show when={p.onOpenSettings}>
+                  <button
+                    type="button"
+                    class="s-btn sm"
+                    onClick={() => {
+                      close();
+                      p.onOpenSettings?.();
+                    }}
+                  >
+                    <Ic.SlidersIcon />
+                    <span>Mission settings</span>
+                  </button>
+                </Show>
               </div>
             </Show>
         </Popover>

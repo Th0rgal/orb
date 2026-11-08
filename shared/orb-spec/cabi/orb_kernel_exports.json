@@ -187,6 +187,10 @@
     "orb_transport_epoch_step",
     "orb_stream_open_tail_cap_step",
     "orb_rtt_ewma_step",
-    "orb_client_link_budget_step"
+    "orb_client_link_budget_step",
+    "orb_multiuser_rbac_step",
+    "orb_placement_role_admit",
+    "orb_user_spend_cap_step",
+    "orb_privd_user_exec_step"
   ]
 }

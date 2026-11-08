@@ -84,6 +84,7 @@ import { timed } from "../diagnostics";
 import {
   getMission,
   isConnected,
+  isMissionParticipant,
   modelPickerItems,
   shortModelLabel,
   cancelMission,
@@ -196,15 +197,16 @@ function MissionDock(p: {
   // Memos: a running mission is replaced on each poll; unchanged labels must
   // not rewrite the dock's attributes.
   const idle = createMemo(() => isSettingsIdle(p.mission?.status));
+  const participant = createMemo(() => isMissionParticipant(p.mission));
   const models = () => choice()?.models ?? [];
-  const canChangeModel = () => !!p.mission && (models().length > 1 || (models().length === 1 && models()[0].value !== modelId()));
+  const canChangeModel = () => !participant() && !!p.mission && (models().length > 1 || (models().length === 1 && models()[0].value !== modelId()));
   // The mission's own stored effort, normalized against its harness: a mission
   // created before an effort was offered simply has none.
   const effort = () => normalizeEffort(p.mission?.model_effort, p.mission?.backend);
   const efforts = () => supportedEfforts(p.mission?.backend);
   // Effort can change during a turn: a running Claude session applies it at
   // once, any other mission from its next turn.
-  const canChangeEffort = () => !!p.mission && efforts().length > 0;
+  const canChangeEffort = () => !participant() && !!p.mission && efforts().length > 0;
   const pickModel = async (value: string) => {
     const m = p.mission;
     if (!m || value === modelId() || saving()) { setModelOpen(false); return; }
@@ -280,7 +282,7 @@ function MissionDock(p: {
   // `p.mission` is replaced by every refresh even when the id is unchanged.
   const missionId = createMemo(() => p.mission?.id);
   createEffect(on(missionId, id => {
-    if (!id) return;
+    if (!id || participant()) return;
     if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine());
     const timer = setTimeout(() => preloadMachineDestinations(id), 1500);
     onCleanup(() => clearTimeout(timer));
@@ -288,16 +290,30 @@ function MissionDock(p: {
   return (
     <div class="under">
       <div class="fork-anchor">
-        <button class="under-loc fork-trigger" title="Change machine…" aria-label="Change machine" aria-haspopup="menu" aria-expanded={machineOpen()} disabled={!p.mission} onPointerEnter={() => p.mission && preloadMachineDestinations(p.mission.id)} onFocus={() => p.mission && preloadMachineDestinations(p.mission.id)} onClick={() => { setForkOpen(false); setMachineOpen(!machineOpen()); }}>
-          <Show when={p.destination !== "Core" && p.destination !== "This computer"} fallback={<Ic.LaptopIcon size={13} />}><Ic.CloudIcon /></Show>
-          {p.destination} <Ic.ChevronDown size={10} />
-        </button>
-        <Show when={machineOpen() && p.mission}>{m => <ChangeMachine mission={m()} choices={harnessChoices()} choicesFor={machine => harnessChoices(machine.kind === "client" ? "local" : machine.kind === "node" ? machine.id : "core")} onDestination={machine => { if (machine.kind === "client") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(machine.kind === "node" ? machine.id : "core"); }} onClose={() => setMachineOpen(false)} onMoved={mission => p.onMission?.(mission)} />}</Show>
+        <Show
+          when={!participant()}
+          fallback={
+            <span class="under-loc">
+              <Show when={p.destination !== "Core" && p.destination !== "This computer"} fallback={<Ic.LaptopIcon size={13} />}><Ic.CloudIcon /></Show>
+              {p.destination}
+            </span>
+          }
+        >
+          <button class="under-loc fork-trigger" title="Change machine…" aria-label="Change machine" aria-haspopup="menu" aria-expanded={machineOpen()} disabled={!p.mission} onPointerEnter={() => p.mission && preloadMachineDestinations(p.mission.id)} onFocus={() => p.mission && preloadMachineDestinations(p.mission.id)} onClick={() => { setForkOpen(false); setMachineOpen(!machineOpen()); }}>
+            <Show when={p.destination !== "Core" && p.destination !== "This computer"} fallback={<Ic.LaptopIcon size={13} />}><Ic.CloudIcon /></Show>
+            {p.destination} <Ic.ChevronDown size={10} />
+          </button>
+          <Show when={machineOpen() && p.mission}>{m => <ChangeMachine mission={m()} choices={harnessChoices()} choicesFor={machine => harnessChoices(machine.kind === "client" ? "local" : machine.kind === "node" ? machine.id : "core")} onDestination={machine => { if (machine.kind === "client") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(machine.kind === "node" ? machine.id : "core"); }} onClose={() => setMachineOpen(false)} onMoved={mission => p.onMission?.(mission)} />}</Show>
+        </Show>
       </div>
       <Show when={harnessName()}>
         <span class="under-sep" aria-hidden="true">·</span>
-        <div class="fork-anchor"><button class="under-harness fork-trigger" title="Transfer to another agent" aria-label="Transfer to another agent" onClick={() => setForkOpen(true)}>{harnessName()} <Ic.ChevronDown size={10} /></button>
-        <Show when={forkOpen() && p.mission}>{m => <ForkMission mission={m()} choices={harnessChoices(catalogMachine())} onOpen={() => { if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine()); }} destination={p.destination} onClose={() => setForkOpen(false)} onFork={forked => { setForkOpen(false); p.onFork?.(forked); }} />}</Show></div>
+        <div class="fork-anchor">
+          <Show when={!participant()} fallback={<span class="under-harness">{harnessName()}</span>}>
+            <button class="under-harness fork-trigger" title="Transfer to another agent" aria-label="Transfer to another agent" onClick={() => setForkOpen(true)}>{harnessName()} <Ic.ChevronDown size={10} /></button>
+            <Show when={forkOpen() && p.mission}>{m => <ForkMission mission={m()} choices={harnessChoices(catalogMachine())} onOpen={() => { if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine()); }} destination={p.destination} onClose={() => setForkOpen(false)} onFork={forked => { setForkOpen(false); p.onFork?.(forked); }} />}</Show>
+          </Show>
+        </div>
         <span class="under-sep" aria-hidden="true">·</span>
         <div class="under-model-wrap">
           <Show
@@ -363,13 +379,13 @@ function MissionDock(p: {
         </Show>
         <Show when={p.mission?.backend === "codex"}>
           <span class="under-sep" aria-hidden="true">·</span>
-          <CodexSpeedPicker model={modelId()} value={missionSpeed(p.mission!)} missionId={p.mission!.id} local={catalogMachine()==="local"} disabled={saving()} onChange={tier=>{
-            const mission=p.mission; if(!mission||saving())return;
+          <CodexSpeedPicker model={modelId()} value={missionSpeed(p.mission!)} missionId={p.mission!.id} local={catalogMachine()==="local"} disabled={saving() || participant()} onChange={tier=>{
+            const mission=p.mission; if(!mission||saving()||participant())return;
             setSaving(true);
             void trackMissionSettings(mission.id, updateMissionSettings(mission.id,{service_tier:tier})).then(updated=>{if(missionSpeed(updated)!==tier)throw new Error('The backend did not save the selected speed. Update it before retrying.');const latest=p.mission&&p.mission.id===mission.id?p.mission:mission;p.onMission?.({...latest,service_tier:updated.service_tier,fast_mode:updated.fast_mode??latest.fast_mode,session_id:updated.session_id??latest.session_id,updated_at:updated.updated_at??latest.updated_at}, true);}).catch(e=>p.onError?.(launchError(e))).finally(()=>setSaving(false));
           }}/>
         </Show>
-        <Show when={p.mission?.backend === "codex"}><MissionCyber mission={p.mission!} onError={p.onError}/></Show>
+        <Show when={p.mission?.backend === "codex" && !participant()}><MissionCyber mission={p.mission!} onError={p.onError}/></Show>
       </Show>
       <Show when={isConnected() && (networkHealth() === "reconnecting" || (networkHealth() === "slow" && (p.syncing || isWorking(p.mission?.status))))}>
         <span
@@ -459,6 +475,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     applyWarmMissionPatch(p.initial, { preserveSettings: Boolean(p.id && inflightSettings.has(p.id)) }),
     { equals: sameMission },
   );
+  const participant = createMemo(() => isMissionParticipant(mission()));
   let authoritativeOnce = false;
   const applyDockMission = (next: Mission, authoritative = false) => {
     clearWarmMissionSettingsPatch(next.id);
@@ -1495,7 +1512,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
                   {(r) => (
                     <>
                       <LaunchStatus destination={missionDestination(mission(), r())} mission={mission()} goal={missionGoal(mission(), r())} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} />
-                      <UserTurn text={r().prompt} images={r().images} pending={working()} onSend={p.id ? sendEditedPrompt : undefined} />
+                      <UserTurn text={r().prompt} images={r().images} pending={working()} onSend={p.id && !participant() ? sendEditedPrompt : undefined} />
                       <Show when={working()}>
                         <MissionPending destination={missionDestination(mission(), r())} label={phaseLabel()} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} />
                       </Show>
@@ -1513,7 +1530,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             <Show when={mission() && !(awaitingTurn() || optimisticList().some(item => !item.waiting && !item.failed)) && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
               <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} onResetRedeemed={() => void refresh()} recoveryPending={recoveryPending()} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} />
             </Show>
-            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.promoted ? handoff()?.id : undefined} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} prepareSearch={prepareSearch} needsPrepareSearch={needsPrepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && ((missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled") || visibleViewItems().some(item => item.kind === "error" && item.terminal)) ? resume : undefined} />
+            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.promoted ? handoff()?.id : undefined} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} prepareSearch={prepareSearch} needsPrepareSearch={needsPrepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id && !participant() ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && ((missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled") || visibleViewItems().some(item => item.kind === "error" && item.terminal)) ? resume : undefined} />
             <Show when={awaiting() && items().length > 0}><ActivitySkeleton /></Show>
             <TurnRecap mission={mission() ?? undefined} items={viewItems()} busy={busy()} onDraft={text=>setSideRevision({text,append:false})} />
             <ErrorToast

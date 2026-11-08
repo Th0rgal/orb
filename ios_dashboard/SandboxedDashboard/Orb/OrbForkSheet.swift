@@ -281,7 +281,7 @@ struct OrbForkSheet: View {
             let response = catalog["backends"]
             let rawBackends = response.items.isEmpty ? response["backends"].items : response.items
             backends = rawBackends.filter { $0.selfID != "gemini" }
-            nodes = OrbSelection.sortedComputeNodes(catalog["nodes"]["nodes"].items)
+            nodes = OrbSelection.sortedComputeNodes(catalog["nodes"]["nodes"].items, includeAdminNodes: OrbCore.shared.isAdminUser)
             modelsMap = catalog["models"]["backends"]
             if backend.isEmpty {
                 let rawBackend = mission["backend"].text

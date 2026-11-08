@@ -1238,4 +1238,44 @@ def forwardProxyChain
     pinnedAccountId := attemptSlice.pinnedAccountId
   }
 
+/-- Filter `chain.targets` according to a user's `user_provider_prefs` (`(providerId, enabled)` pairs;
+    providers omitted from `prefs` default to `true`). Checks both `tgt.accountId` and `tgt.provider`
+    (plus stripped `custom:<id>`). -/
+def filterChainTargetsForUserPrefs (chain : RoutingChain) (userPrefs : Array (String × Bool)) : RoutingChain :=
+  if userPrefs.isEmpty then chain
+  else
+    let allowed (tgt : ProviderTarget) : Bool :=
+      let stripped := if tgt.provider.startsWith "custom:" then (tgt.provider.drop 7).toString else tgt.provider
+      isUserProviderEnabled userPrefs tgt.accountId &&
+      isUserProviderEnabled userPrefs tgt.provider &&
+      isUserProviderEnabled userPrefs stripped
+    { chain with targets := chain.targets.filter allowed }
+
+/-- Estimate inference cost in USD cents from a `2xx` upstream JSON response body or explicit
+    `X-Orb-Cost-Cents` header (`minimum 1 cent` whenever positive token usage is reported). -/
+def estimateProxyUsageCostCents (respHdrs : Array (String × String)) (respBody : ByteArray) : UInt64 := Id.run do
+  for (hk, hv) in respHdrs do
+    if hk.trimAscii.toString.toLower == "x-orb-cost-cents" then
+      if let some n := hv.trimAscii.toString.toNat? then
+        return n.toUInt64
+  let rawStr := (String.fromUTF8? respBody).getD ""
+  match OrbBin.Json.parse rawStr with
+  | .ok jv =>
+    if let some usageObj := jv.field? "usage" then
+      let inToks :=
+        (usageObj.fieldNat? "input_tokens").orElse (fun _ => usageObj.fieldNat? "prompt_tokens") |>.getD 0
+      let outToks :=
+        (usageObj.fieldNat? "output_tokens").orElse (fun _ => usageObj.fieldNat? "completion_tokens") |>.getD 0
+      let totalToks :=
+        (usageObj.fieldNat? "total_tokens").getD (inToks + outToks)
+      if totalToks == 0 && inToks == 0 && outToks == 0 then
+        return 0
+      -- Conservative blended estimate (~$3/1M input + ~$15/1M output => cents = ceil((3*in + 15*out)/10000), min 1 cent)
+      let weighted := inToks * 3 + outToks * 15 + (if inToks == 0 && outToks == 0 then totalToks * 5 else 0)
+      let cents := (weighted + 9999) / 10000
+      return (Nat.max 1 cents).toUInt64
+    return 0
+  | .error _ =>
+    return 0
+
 end OrbCore.Proxy

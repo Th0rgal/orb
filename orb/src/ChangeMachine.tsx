@@ -1,5 +1,6 @@
 import {
   formatAutoManagedTarget,
+  isAdminOnlyNode,
   isAgentSpawnedManagedNode,
   isAutoManagedTarget,
   isManagedNode,
@@ -32,7 +33,7 @@ import { swallow } from "./log";
 import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
 import {cachedMachineDestinations,cacheMachineDestinations,preferSparkAdministration} from "./machineDestinations";
-import {connectionVersion} from "./api";
+import {connectionVersion, isAdminUser} from "./api";
 import { Select } from "./Select";
 import { For, Show, createMemo, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { ErrorNotice } from "./ErrorNotice";
@@ -137,7 +138,11 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
   const managed = (d: Destination) => d.machine.kind === "node" && isManagedNode({ id: d.machine.id });
   // This computer and Core keep their place; usable nodes go least busy first; managed machines last.
   const ordered = createMemo(() => {
-    const rows = destinations(), node = (d: Destination) => d.machine.kind === "node";
+    const admin = isAdminUser();
+    const rows = destinations().filter(
+      d => admin || (d.machine.kind !== "core" && !(d.machine.kind === "node" && isAdminOnlyNode({ id: d.machine.id }))),
+    );
+    const node = (d: Destination) => d.machine.kind === "node";
     const sorted = [...rows.filter(d => !node(d)), ...byLeastLoaded(rows.filter(d => node(d) && d.available), loadKey), ...rows.filter(d => node(d) && !d.available)];
     return [...sorted.filter(d => !managed(d)), ...sorted.filter(managed)];
   });

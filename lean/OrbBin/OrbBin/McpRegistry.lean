@@ -218,12 +218,13 @@ private def closeChildFds (ch : StdioChild) : IO Unit := do
     if ch.stdinFd >= 0 then closeFdRaw ch.stdinFd
     if ch.stdoutFd >= 0 then closeFdRaw ch.stdoutFd
 
-/-- Reap only when `/proc` still names this generation's `(pid, startTicks)` and close pipe descriptors once. -/
+/-- Reap only when `/proc` still names this generation's `(pid, startTicks)` (or on macOS where `/proc` is absent) and close pipe descriptors once. -/
 def reapChild (ch : StdioChild) : IO Unit := do
   closeChildFds ch
   let obs ← observeProcStat ch.pid
   let live := classifyChildLiveness ch.pid ch.startTicks obs
-  if live != 0 && ch.pid > 0 && ch.rawPid > 0 then
+  let noProcFs := System.Platform.isOSX && !(← (System.FilePath.mk "/proc").pathExists)
+  if (live != 0 || noProcFs) && ch.pid > 0 && ch.rawPid > 0 then
     let _ ← killSig (-ch.rawPid) 9
     let _ ← killSig ch.rawPid 9
   if ch.rawPid > 0 then

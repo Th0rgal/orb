@@ -379,6 +379,7 @@ struct OrbHome: View {
     /// The Inbox's own count once it has reconciled; the cached estimate before that.
     private var tabInboxCount: Int { OrbNotificationCenter.shared.unreadCount ?? inboxCount }
     @State private var workingByProject: [String: Int] = [:]
+    @State private var sharedMissions: [OrbRow] = []
     @State private var linkedProjectObj: OrbRow?
     @State private var archivesOpen = false
     @State private var archiveExpanded: Set<String> = []
@@ -452,14 +453,14 @@ struct OrbHome: View {
             if !enabled && homeTab == "inbox" { homeTab = "projects" }
         }
         .safeAreaInset(edge: .bottom) { OrbMoveBanner() }
-        .safeAreaInset(edge: .top, spacing: 0) { secretBanner }
+        .safeAreaInset(edge: .top, spacing: 0) { if api.isAdminUser { secretBanner } }
         .sheet(isPresented: $approvalsSheet) { OrbApprovalQueueSheet().orbTrackPage("approval_queue", surface: .sheet) }
         .sheet(isPresented: $privilegeSheet) { OrbPrivilegeAccessSheet().orbTrackPage("privilege_access", surface: .sheet) }
         .sheet(isPresented: $enrollSheet) { OrbApprovalEnrollmentSheet().orbTrackPage("approval_enrollment", surface: .sheet) }
         .onChange(of: approvalEnrollment.sheetRequested) { _, open in
             if open { approvalEnrollment.sheetRequested = false; enrollSheet = true }
         }
-        .task(id: scenePhase) { if scenePhase == .active { await approvalEnrollment.refresh() } }
+        .task(id: scenePhase) { if scenePhase == .active && api.isAdminUser { await approvalEnrollment.refresh() } }
         .onChange(of: privilegeRequests.openRequested, initial: true) { _, open in
             if open { privilegeRequests.openRequested = false; privilegeSheet = true }
         }
@@ -480,10 +481,10 @@ struct OrbHome: View {
                 }
             }
         }
-        .task(id: scenePhase) { if scenePhase == .active { await approvals.poll() } }
-        .task(id: scenePhase) { if scenePhase == .active { await secretRequests.poll() } }
-        .task(id: scenePhase) { if scenePhase == .active { await accessRequests.poll() } }
-        .task(id: scenePhase) { if scenePhase == .active { await privilegeRequests.poll() } }
+        .task(id: scenePhase) { if scenePhase == .active && api.isAdminUser { await approvals.poll() } }
+        .task(id: scenePhase) { if scenePhase == .active && api.isAdminUser { await secretRequests.poll() } }
+        .task(id: scenePhase) { if scenePhase == .active && api.isAdminUser { await accessRequests.poll() } }
+        .task(id: scenePhase) { if scenePhase == .active && api.isAdminUser { await privilegeRequests.poll() } }
     }
 
     private var secretBanner: some View {
@@ -996,6 +997,15 @@ struct OrbHome: View {
         }
     }
 
+    private var visibleSharedMissions: [OrbRow] {
+        sharedMissions.filter { row in
+            search.isEmpty
+                || row.name.localizedCaseInsensitiveContains(search)
+                || OrbStyle.displayTitle(row.name).localizedCaseInsensitiveContains(search)
+                || (row.ownerUsername?.localizedCaseInsensitiveContains(search) == true)
+        }
+    }
+
     private var projectsScrollView: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
@@ -1003,6 +1013,82 @@ struct OrbHome: View {
                     OrbConnectionIssueCard(issue: issue, onChangeServer: { changingServer = true }, onUseDefault: useDefaultServer)
                         .padding(.vertical, 6)
                 } else if !error.isEmpty { OrbNotice(message: error).padding(.vertical, 6) }
+                if !visibleSharedMissions.isEmpty {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.2")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(OrbStyle.textSecondary)
+                        Text("Shared with me")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(OrbStyle.textSecondary)
+                            .textCase(.uppercase)
+                        Spacer()
+                        Text("\(visibleSharedMissions.count)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(OrbStyle.textMuted)
+                    }
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+
+                    ForEach(visibleSharedMissions) { row in
+                        NavigationLink {
+                            OrbConversation(missionID: row.id, project: "", folder: "")
+                        } label: {
+                            HStack(spacing: 12) {
+                                OrbListIcon(symbol: "person.2", color: OrbStyle.textSecondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(OrbStyle.displayTitle(row.name))
+                                        .font(.body.weight(.medium))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                    HStack(spacing: 6) {
+                                        if let owner = row.ownerUsername, !owner.isEmpty {
+                                            Text("@\(owner)")
+                                                .font(.caption.monospaced())
+                                                .foregroundStyle(OrbStyle.textSecondary)
+                                        }
+                                        if row.active {
+                                            OrbRunningDots(size: 8)
+                                        }
+                                        if !row.updatedAt.isEmpty {
+                                            Text(OrbStyle.relativeTime(row.updatedAt))
+                                                .font(.caption)
+                                                .foregroundStyle(OrbStyle.textMuted)
+                                                .monospacedDigit()
+                                        }
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(.vertical, 10)
+                            .contentShape(Rectangle())
+                            .overlay(alignment: .bottom) {
+                                Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 34)
+                            }
+                        }
+                        .buttonStyle(OrbPressButtonStyle())
+                        .accessibilityIdentifier("shared.mission.\(row.id)")
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                Task {
+                                    do {
+                                        try await OrbMissionSharing.leaveSharedMission(missionID: row.id)
+                                        await load()
+                                    } catch {
+                                        self.error = error.localizedDescription
+                                    }
+                                }
+                            } label: {
+                                Label("Leave shared mission", systemImage: "rectangle.portrait.and.arrow.right")
+                            }
+                        }
+                    }
+
+                    Spacer().frame(height: 10)
+                }
                 ForEach(projects.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { project in
                     NavigationLink { OrbProjectPage(project: project) } label: {
                         HStack(spacing: 14) {
@@ -1291,7 +1377,10 @@ struct OrbHome: View {
         if let cachedMissions {
             OrbReadCache.seedFromGlobalMissions(cachedMissions.items)
             let rows = cachedMissions.items.map { OrbRow($0) }.filter(\.mobile)
-            let nextWorking = Self.countWorkingByProject(rows)
+            let ownRows = rows.filter { !$0.isParticipant }
+            let nextShared = rows.filter { $0.isParticipant && $0.state != "acknowledged" && $0.raw["parent_mission_id"].text.isEmpty }
+            if sharedMissions != nextShared { sharedMissions = nextShared }
+            let nextWorking = Self.countWorkingByProject(ownRows)
             if workingByProject != nextWorking { workingByProject = nextWorking }
             let nextInbox = OrbInboxModel.unreadCount(missions: rows, projects: projects)
             if inboxCount != nextInbox { inboxCount = nextInbox }
@@ -1313,7 +1402,10 @@ struct OrbHome: View {
                 OrbDisk.saveAsync(rawMissions, key: "inbox:missions")
                 OrbReadCache.seedFromGlobalMissions(rawMissions.items)
                 let rows = rawMissions.items.map { OrbRow($0) }.filter(\.mobile)
-                let nextWorking = Self.countWorkingByProject(rows)
+                let ownRows = rows.filter { !$0.isParticipant }
+                let nextShared = rows.filter { $0.isParticipant && $0.state != "acknowledged" && $0.raw["parent_mission_id"].text.isEmpty }
+                if sharedMissions != nextShared { sharedMissions = nextShared }
+                let nextWorking = Self.countWorkingByProject(ownRows)
                 if workingByProject != nextWorking { workingByProject = nextWorking }
                 let nextInbox = OrbInboxModel.unreadCount(missions: rows, projects: roster)
                 if inboxCount != nextInbox { inboxCount = nextInbox }
@@ -1385,6 +1477,7 @@ struct OrbProjectPage: View {
     @State private var loadedArchived = false
     @State private var renamingMission: OrbRow?
     @State private var settingsMission: OrbRow?
+    @State private var sharingMission: OrbRow?
     @State private var missionTitleDraft = ""
     private let moveClipboard = OrbMoveClipboard.shared
     private let api = OrbCore.shared
@@ -1551,7 +1644,11 @@ struct OrbProjectPage: View {
                 Button("Cancel", role: .cancel) { newFolderParent = ""; folderName = "" }
             }
             .sheet(item: $settingsMission) { row in
-                OrbMissionSettingsSheet(missionId: row.id, title: OrbStyle.displayTitle(row.name))
+                OrbMissionSettingsSheet(missionId: row.id, title: OrbStyle.displayTitle(row.name), readOnly: row.isParticipant)
+                    .presentationDetents([.medium, .large])
+            }
+            .sheet(item: $sharingMission) { row in
+                OrbShareMissionSheet(missionID: row.id, title: OrbStyle.displayTitle(row.name))
                     .presentationDetents([.medium, .large])
             }
             .alert("Rename conversation", isPresented: Binding(get: { renamingMission != nil }, set: { if !$0 { renamingMission = nil } })) {
@@ -1892,20 +1989,39 @@ struct OrbProjectPage: View {
     }
     /// Rename and Move work at any time; a running agent is stopped before it is archived.
     @ViewBuilder private func missionMenu(_ row: OrbRow) -> some View {
-        Button { missionTitleDraft = OrbStyle.displayTitle(row.name); renamingMission = row } label: { Label("Rename", systemImage: "pencil") }
-        Button { moveClipboard.pick(row, from: project.id, within: missions) } label: { Label("Move…", systemImage: "folder") }
-        Button { settingsMission = row } label: { Label("Mission settings…", systemImage: "slider.horizontal.3") }
-        Divider()
-        if row.missionState?.canReopen == true {
-            Button { Task { await setStatus(row, "paused") } } label: {
-                Label(row.state == "acknowledged" ? "Restore" : "Reopen", systemImage: "arrow.uturn.backward")
+        if row.isParticipant {
+            Button { settingsMission = row } label: { Label("Mission settings…", systemImage: "slider.horizontal.3") }
+            Divider()
+            Button(role: .destructive) {
+                Task {
+                    do {
+                        try await OrbMissionSharing.leaveSharedMission(missionID: row.id)
+                        invalidate(row)
+                        await load(force: true)
+                    } catch {
+                        self.error = error.localizedDescription
+                    }
+                }
+            } label: {
+                Label("Leave shared mission", systemImage: "rectangle.portrait.and.arrow.right")
             }
-        }
-        if row.state != "acknowledged" {
-            if row.active || row.raw["execution"]["state"].text == "running" {
-                Button(role: .destructive) { Task { await stopAndArchive(row) } } label: { Label("Stop & archive", systemImage: "archivebox") }
-            } else {
-                Button { Task { await setStatus(row, "acknowledged") } } label: { Label("Archive", systemImage: "archivebox") }
+        } else {
+            Button { missionTitleDraft = OrbStyle.displayTitle(row.name); renamingMission = row } label: { Label("Rename", systemImage: "pencil") }
+            Button { moveClipboard.pick(row, from: project.id, within: missions) } label: { Label("Move…", systemImage: "folder") }
+            Button { sharingMission = row } label: { Label("Share…", systemImage: "person.2") }
+            Button { settingsMission = row } label: { Label("Mission settings…", systemImage: "slider.horizontal.3") }
+            Divider()
+            if row.missionState?.canReopen == true {
+                Button { Task { await setStatus(row, "paused") } } label: {
+                    Label(row.state == "acknowledged" ? "Restore" : "Reopen", systemImage: "arrow.uturn.backward")
+                }
+            }
+            if row.state != "acknowledged" {
+                if row.active || row.raw["execution"]["state"].text == "running" {
+                    Button(role: .destructive) { Task { await stopAndArchive(row) } } label: { Label("Stop & archive", systemImage: "archivebox") }
+                } else {
+                    Button { Task { await setStatus(row, "acknowledged") } } label: { Label("Archive", systemImage: "archivebox") }
+                }
             }
         }
     }

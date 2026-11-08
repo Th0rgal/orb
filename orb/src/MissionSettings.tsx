@@ -74,6 +74,7 @@ export function MissionSettings(p: {
   saveVmLimits?: (id: string, limits: VmConcurrencyLimits | null) => Promise<MissionBudget>;
   saveBandwidthLimits?: (id: string, limits: BandwidthLimits | null) => Promise<MissionBudget>;
   loadStats?: typeof getMissionStats;
+  readOnly?: boolean;
 }) {
   const loadBudget = (id: string) => (p.load ?? getMissionBudget)(id);
   const loadResourcesApi = (id: string) =>
@@ -98,6 +99,7 @@ export function MissionSettings(p: {
   const [bwSaveError, setBwSaveError] = createSignal<string | null>(null);
   const [bwRetry, setBwRetry] = createSignal<(() => void) | null>(null);
   const [busy, setBusy] = createSignal(false);
+  const locked = () => Boolean(p.readOnly) || busy();
 
   const [draft, setDraft] = createSignal("");
   const [budgetEdited, setBudgetEdited] = createSignal(false);
@@ -574,6 +576,12 @@ export function MissionSettings(p: {
                 </div>
               </section>
 
+              <Show when={p.readOnly}>
+                <p class="s-lead" role="note">
+                  Shared conversation — only the mission owner can change spending or concurrency limits.
+                </p>
+              </Show>
+
               <SettingsCard title="Budget">
                 <SettingsRow
                   title="Spending budget"
@@ -585,7 +593,7 @@ export function MissionSettings(p: {
                     role="switch"
                     aria-checked={enabled()}
                     aria-label="Spending budget"
-                    disabled={busy()}
+                    disabled={locked()}
                     onClick={toggle}
                   />
                 </SettingsRow>
@@ -612,14 +620,14 @@ export function MissionSettings(p: {
                         inputmode="decimal"
                         aria-invalid={fieldError() ? "true" : undefined}
                         value={draft()}
-                        disabled={busy()}
+                        disabled={locked()}
                         onInput={e => {
                           setBudgetEdited(true);
                           setDraft(e.currentTarget.value);
                           setFieldError(null);
                         }}
                       />
-                      <button type="button" class="s-btn primary" disabled={busy() || !budgetDirty()} onClick={save}>
+                      <button type="button" class="s-btn primary" disabled={locked() || !budgetDirty()} onClick={save}>
                         {busy() && budgetDirty() ? "Saving…" : "Save budget"}
                       </button>
                     </form>
@@ -703,7 +711,7 @@ export function MissionSettings(p: {
                     role="switch"
                     aria-checked={bandwidthEnabled()}
                     aria-label="Bandwidth limit"
-                    disabled={busy()}
+                    disabled={locked()}
                     onClick={toggleBandwidth}
                   />
                 </SettingsRow>
@@ -725,7 +733,7 @@ export function MissionSettings(p: {
                       spellcheck={false}
                       placeholder="120000"
                       value={bwTokensDraft()}
-                      disabled={busy()}
+                      disabled={locked()}
                       onInput={e => {
                         setBwEdited(true);
                         setBwTokensDraft(e.currentTarget.value);
@@ -749,7 +757,7 @@ export function MissionSettings(p: {
                       inputmode="numeric"
                       placeholder="Optional"
                       value={bwVcpuDraft()}
-                      disabled={busy()}
+                      disabled={locked()}
                       onInput={e => {
                         setBwEdited(true);
                         setBwVcpuDraft(e.currentTarget.value);
@@ -773,7 +781,7 @@ export function MissionSettings(p: {
                       inputmode="decimal"
                       placeholder="Optional"
                       value={bwUsdHDraft()}
-                      disabled={busy()}
+                      disabled={locked()}
                       onInput={e => {
                         setBwEdited(true);
                         setBwUsdHDraft(e.currentTarget.value);
@@ -792,7 +800,7 @@ export function MissionSettings(p: {
                       role="switch"
                       aria-checked={bwProtectRoot()}
                       aria-label="Prioritize root agent"
-                      disabled={busy()}
+                      disabled={locked()}
                       onClick={() => {
                         setBwEdited(true);
                         setBwProtectRoot(x => !x);
@@ -803,7 +811,7 @@ export function MissionSettings(p: {
                     <Show when={bwFieldError()}>
                       <p class="field-error" role="alert">{bwFieldError()}</p>
                     </Show>
-                    <button type="button" class="s-btn primary" disabled={busy() || !bandwidthDirty()} onClick={saveBandwidth}>
+                    <button type="button" class="s-btn primary" disabled={locked() || !bandwidthDirty()} onClick={saveBandwidth}>
                       {busy() && bandwidthDirty() ? "Saving…" : "Save bandwidth"}
                     </button>
                   </div>
@@ -852,7 +860,7 @@ export function MissionSettings(p: {
                     role="switch"
                     aria-checked={vmLimitsEnabled()}
                     aria-label="Machine limit"
-                    disabled={busy()}
+                    disabled={locked()}
                     onClick={toggleVmLimits}
                   />
                 </SettingsRow>
@@ -879,14 +887,14 @@ export function MissionSettings(p: {
                         inputmode="numeric"
                         placeholder={hasAnyProviderDraft() ? "Any" : "4"}
                         value={maxDraft()}
-                        disabled={busy()}
+                        disabled={locked()}
                         onInput={e => {
                           setVmEdited(true);
                           setMaxDraft(e.currentTarget.value);
                           setLimitFieldError(null);
                         }}
                       />
-                      <button type="button" class="s-btn primary" disabled={busy() || !vmLimitsDirty()} onClick={saveLimits}>
+                      <button type="button" class="s-btn primary" disabled={locked() || !vmLimitsDirty()} onClick={saveLimits}>
                         {busy() && vmLimitsDirty() ? "Saving…" : "Save limit"}
                       </button>
                     </form>
@@ -919,7 +927,7 @@ export function MissionSettings(p: {
                                   placeholder="Any"
                                   aria-label={`${prov.label} limit`}
                                   value={provDrafts()[prov.id] ?? ""}
-                                  disabled={busy()}
+                                  disabled={locked()}
                                   onInput={e => {
                                     const val = e.currentTarget.value;
                                     setVmEdited(true);

@@ -8,5 +8,7 @@ import OrbNode.LeanBuild
 import OrbNode.FileBrowser
 import OrbNode.Transfer
 import OrbNode.ProjectContext
+import OrbNode.PrivdClient
 import OrbNode.Runner
 import OrbNode.Server
+import OrbNode.Main

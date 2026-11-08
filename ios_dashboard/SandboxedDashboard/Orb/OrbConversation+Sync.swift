@@ -531,10 +531,11 @@ extension OrbConversation {
                 }
                 if !isCloud && (id != nil ? mission["backend"].text : selection.backend) == "codex", let goalErr = OrbCyberAccess.emptyGoalError(prompt) { throw OrbHTTPError(status: 400, detail: goalErr) }
                 if id == nil && !selection.cloud && !selection.nodePinnedByUser {
-                    if selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let fallback = api.isAdminUser ? "core" : ""
+                    if api.isAdminUser && selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         selection.node = "core"
                     } else if let cached = OrbReadCache.read("catalog:agent") {
-                        selection.node = OrbSelection.firstAvailableNodeID(cached["nodes"]["nodes"].items, backend: selection.backend) ?? "core"
+                        selection.node = OrbSelection.firstAvailableNodeID(cached["nodes"]["nodes"].items, backend: selection.backend, includeAdminNodes: api.isAdminUser) ?? fallback
                     }
                 }
                 if id == nil { try selection.validate() }

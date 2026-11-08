@@ -82,6 +82,9 @@ struct OrbManagedProviderInfo: Codable, Equatable, Identifiable, Sendable {
     var display_name: String
     var configured: Bool
     var enabled: Bool?
+    var globally_enabled: Bool?
+    var user_enabled: Bool?
+    var effective_enabled: Bool?
     var credential_source: String?
     var key_hint: String?
     var region: String?
@@ -134,6 +137,13 @@ enum OrbManaged {
     /// Remote nodes provisioned by the managed-machine service.
     static func isManagedNode(_ node: OrbJSON) -> Bool {
         node["labels"].items.contains { $0.text == "managed" } || node["id"].text.hasPrefix("managed-")
+    }
+    /// Nodes reserved for administrators (co-located Core host or `admin-only` labelled fleet nodes).
+    static func isAdminOnlyNode(_ node: OrbJSON) -> Bool {
+        if node["admin_only"].flag || node["core_colocated"].flag { return true }
+        let id = node["id"].text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if id == "core" || id == "agent-core" || id == "dgx-spark-admin" { return true }
+        return node["labels"].items.contains { $0.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "admin-only" }
     }
     static func parseLabelsOwner(_ labels: [OrbJSON]) -> String? {
         for item in labels {
@@ -358,11 +368,12 @@ enum OrbManaged {
     }
 
     static func isProviderEnabled(_ p: OrbManagedProviderInfo) -> Bool {
-        p.enabled != false
+        if let eff = p.effective_enabled { return eff }
+        return p.enabled != false
     }
 
     static func isProviderUsable(_ p: OrbManagedProviderInfo) -> Bool {
-        p.configured && p.enabled != false
+        p.configured && isProviderEnabled(p)
     }
 
     static func credentialSourceLabel(_ source: String?) -> String {
@@ -382,8 +393,14 @@ enum OrbManaged {
             ? (p.availability?.status == "saturated" ? "At capacity"
                 : p.availability?.status == "degraded" ? "Limited capacity" : "")
             : ""
+        let stateLabel: String = {
+            if enabled { return "Configured" }
+            if p.globally_enabled == false { return "Disabled by admin" }
+            if p.user_enabled == false { return "Skipped for your missions" }
+            return "Disabled"
+        }()
         return [
-            enabled ? "Configured" : "Disabled",
+            stateLabel,
             avail,
             cred,
             p.region ?? "",
@@ -1141,10 +1158,12 @@ struct OrbMachineProvidersSection: View {
                         )
                     )
                     .labelsHidden()
-                    .disabled(busyProvider == pr.provider)
-                    Button(pr.configured ? "Configure" : "Set up") { editing = pr }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                    .disabled(busyProvider == pr.provider || (!OrbCore.shared.isAdminUser && pr.globally_enabled == false))
+                    if OrbCore.shared.isAdminUser {
+                        Button(pr.configured ? "Configure" : "Set up") { editing = pr }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                    }
                 }
                 .padding(.vertical, 2)
                 .accessibilityIdentifier("managed.provider.\(pr.provider)")

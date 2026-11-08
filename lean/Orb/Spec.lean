@@ -10920,10 +10920,6 @@ private theorem pack32_toUInt32 (a b : UInt32) :
   simp [UInt64.toBitVec_toUInt32, UInt64.toBitVec_or, UInt64.toBitVec_shiftLeft,
     UInt32.toBitVec_toUInt64, shiftLeft32_bv, BitVec.getLsbD_setWidth, hi]
 
-private theorem u64_reason_hi_toUInt32 (r : UInt32) (b : UInt32) :
-    (r.toUInt64 ||| (b.toUInt64 <<< 32)).toUInt32 = r :=
-  pack32_toUInt32 r b
-
 private theorem beq_not_bne {α : Type} [BEq α] (a b : α) :
     (a == b) = !(a != b) := by
   change (a == b) = !(!(a == b))
@@ -13430,5 +13426,1052 @@ theorem client_link_budget_preempts_p2_and_scales_ws_deadlines :
     ((bloated >>> 32) &&& 0xFFFF) = 9200 ∧
     ((bloated >>> 48) &&& 0xFFFF) = 6900 := by
   decide
+
+-- ===========================================================================
+-- Multi-User Architecture: RBAC Privacy Gate, Placement Role Gate,
+-- Dual Spend-Cap Governor, Session Epoch StickyFence, and Linux Confinement
+-- ===========================================================================
+
+structure MultiuserRbacCheck where
+  callerAuthed        : UInt8
+  callerDisabled      : UInt8
+  epochMatches        : UInt8
+  callerRole          : UInt8
+  opClass             : UInt8
+  isOwner             : UInt8
+  isSharedParticipant : UInt8
+  deriving Repr, DecidableEq
+
+def MultiuserRbacCheck.Admissible (c : MultiuserRbacCheck) : Bool :=
+  c.callerAuthed == 1 &&
+  c.epochMatches == 1 &&
+  c.callerDisabled == 0 &&
+  decide (c.callerRole ≤ 1) &&
+  ((c.opClass == 0) ||
+   (c.opClass == 1 && c.callerRole == 1) ||
+   (c.opClass == 2 && (c.isOwner == 1 || c.isSharedParticipant == 1)) ||
+   (c.opClass == 3 && c.isOwner == 1) ||
+   (c.opClass == 4 && c.isOwner == 1))
+
+def MultiuserRbacCheck.eval (c : MultiuserRbacCheck) : UInt32 :=
+  multiuserRbacStep
+    c.callerAuthed
+    c.callerDisabled
+    c.epochMatches
+    c.callerRole
+    c.opClass
+    c.isOwner
+    c.isSharedParticipant
+
+theorem multiuserRbac_admit_eq (c : MultiuserRbacCheck) :
+    ((c.eval &&& 1) != 0) = c.Admissible := by
+  unfold MultiuserRbacCheck.eval MultiuserRbacCheck.Admissible multiuserRbacStep
+  cases ha : (c.callerAuthed == 1)
+  · have hau : (c.callerAuthed != 1) = true := by
+      cases hx : (c.callerAuthed != 1)
+      · simp [bne] at hx
+        simp [hx] at ha
+      · rfl
+    simp only [ha, hau, Bool.true_or, ↓reduceIte, Bool.false_and]
+    decide
+  · have hau : (c.callerAuthed != 1) = false := by
+      rw [beq_iff_eq] at ha
+      simp [ha]
+    cases he : (c.epochMatches == 1)
+    · have heu : (c.epochMatches != 1) = true := by
+        cases hx : (c.epochMatches != 1)
+        · simp [bne] at hx
+          simp [hx] at he
+        · rfl
+      simp only [ha, he, hau, heu, Bool.false_or, ↓reduceIte, Bool.true_and, Bool.false_and]
+      decide
+    · have heu : (c.epochMatches != 1) = false := by
+        rw [beq_iff_eq] at he
+        simp [he]
+      cases hd : (c.callerDisabled == 0)
+      · have hne : (c.callerDisabled != 0) = true := by
+          cases hcd : (c.callerDisabled != 0)
+          · simp [bne] at hcd
+            simp [hcd] at hd
+          · rfl
+        simp only [ha, he, hd, hau, heu, hne, Bool.false_or, Bool.false_eq_true, ↓reduceIte, Bool.true_and, Bool.false_and]
+        decide
+      · have hdz : (c.callerDisabled != 0) = false := by
+          rw [beq_iff_eq] at hd
+          simp [hd]
+        by_cases hrgt : c.callerRole > 1
+        · have hrle : decide (c.callerRole ≤ 1) = false :=
+            decide_eq_false fun hle =>
+              Nat.not_lt_of_ge (UInt8.le_iff_toNat_le.mp hle) (UInt8.lt_iff_toNat_lt.mp hrgt)
+          simp only [ha, he, hd, hau, heu, hdz, hrgt, hrle, Bool.false_or, Bool.false_eq_true, ↓reduceIte, Bool.true_and, Bool.false_and]
+          decide
+        · have hrle : decide (c.callerRole ≤ 1) = true :=
+            decide_eq_true (UInt8.le_iff_toNat_le.mpr (Nat.le_of_not_lt fun hlt => hrgt (UInt8.lt_iff_toNat_lt.mpr hlt)))
+          cases hop0 : (c.opClass == 0)
+          · cases hop1 : (c.opClass == 1)
+            · cases hop2 : (c.opClass == 2)
+              · cases hop3 : (c.opClass == 3)
+                · cases hop4 : (c.opClass == 4)
+                  · simp only [ha, he, hd, hau, heu, hdz, hrgt, hrle, hop0, hop1, hop2, hop3, hop4,
+                      Bool.false_or, Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+                    decide
+                  · cases ho : (c.isOwner == 1)
+                    · simp only [ha, he, hd, hau, heu, hdz, hrgt, hrle, hop0, hop1, hop2, hop3, hop4, ho,
+                        Bool.false_or, Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+                      decide
+                    · simp only [ha, he, hd, hau, heu, hdz, hrgt, hrle, hop0, hop1, hop2, hop3, hop4, ho,
+                        Bool.false_or, Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+                      decide
+                · cases ho : (c.isOwner == 1)
+                  · cases hp : (c.isSharedParticipant == 1)
+                    · have hne4 : (c.opClass == 4) = false := by
+                        rw [beq_iff_eq] at hop3
+                        rw [hop3]
+                        decide
+                      simp only [ha, he, hd, hau, heu, hdz, hrgt, hrle, hop0, hop1, hop2, hop3, hne4, ho, hp,
+                        Bool.false_or, Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+                      decide
+                    · have hne4 : (c.opClass == 4) = false := by
+                        rw [beq_iff_eq] at hop3
+                        rw [hop3]
+                        decide
+                      simp only [ha, he, hd, hau, heu, hdz, hrgt, hrle, hop0, hop1, hop2, hop3, hne4, ho, hp,
+                        Bool.false_or, Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+                      decide
+                  · simp only [ha, he, hd, hau, heu, hdz, hrgt, hrle, hop0, hop1, hop2, hop3, ho,
+                      Bool.false_or, Bool.true_or, Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+                    decide
+              · have hne3 : (c.opClass == 3) = false := by
+                  rw [beq_iff_eq] at hop2
+                  rw [hop2]
+                  decide
+                have hne4 : (c.opClass == 4) = false := by
+                  rw [beq_iff_eq] at hop2
+                  rw [hop2]
+                  decide
+                cases ho : (c.isOwner == 1)
+                · cases hp : (c.isSharedParticipant == 1)
+                  · simp only [ha, he, hd, hau, heu, hdz, hrgt, hrle, hop0, hop1, hop2, hne3, hne4, ho, hp,
+                      Bool.false_or, Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+                    decide
+                  · simp only [ha, he, hd, hau, heu, hdz, hrgt, hrle, hop0, hop1, hop2, hne3, hne4, ho, hp,
+                      Bool.false_or, Bool.true_or, Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+                    decide
+                · simp only [ha, he, hd, hau, heu, hdz, hrgt, hrle, hop0, hop1, hop2, hne3, hne4, ho,
+                    Bool.false_or, Bool.true_or, Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+                  decide
+            · have hne2 : (c.opClass == 2) = false := by
+                rw [beq_iff_eq] at hop1
+                rw [hop1]
+                decide
+              have hne3 : (c.opClass == 3) = false := by
+                rw [beq_iff_eq] at hop1
+                rw [hop1]
+                decide
+              have hne4 : (c.opClass == 4) = false := by
+                rw [beq_iff_eq] at hop1
+                rw [hop1]
+                decide
+              cases hrole1 : (c.callerRole == 1)
+              · simp only [ha, he, hd, hau, heu, hdz, hrgt, hrle, hop0, hop1, hne2, hne3, hne4, hrole1,
+                  Bool.false_or, Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+                decide
+              · simp only [ha, he, hd, hau, heu, hdz, hrgt, hrle, hop0, hop1, hne2, hne3, hne4, hrole1,
+                  Bool.false_or, Bool.true_or, Bool.true_and, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+                decide
+          · simp only [ha, he, hd, hau, heu, hdz, hrgt, hrle, hop0,
+              Bool.true_or, Bool.true_and, Bool.false_or, Bool.false_eq_true, ↓reduceIte]
+            decide
+
+def multiuserRbacMetaGate : MetaGateSpec MultiuserRbacCheck
+    (fun c => c.Admissible = true) where
+  gate c := (c.eval &&& 1) != 0
+  sound c h := by
+    rw [← multiuserRbac_admit_eq c]
+    exact h
+  complete c h := by
+    rw [multiuserRbac_admit_eq c]
+    exact h
+  posWitness := ⟨1, 0, 1, 0, 2, 0, 1⟩
+  negWitness := ⟨1, 0, 1, 1, 2, 0, 0⟩
+  nonVacuous := by decide
+  tight      := by decide
+
+def multiuserRbacScopedAuthority : ScopedAuthority MultiuserRbacCheck where
+  admit c := multiuserRbacMetaGate.gate c
+  scopeValid c :=
+    !(decide (2 ≤ c.opClass) && decide (c.opClass ≤ 4) && c.isOwner != 1 && c.isSharedParticipant != 1)
+  sound c h := by
+    have hadm := multiuserRbacMetaGate.sound c h
+    unfold MultiuserRbacCheck.Admissible at hadm
+    cases hlo : decide (2 ≤ c.opClass)
+    · simp [hlo]
+    · cases hhi : decide (c.opClass ≤ 4)
+      · simp [hlo, hhi]
+      · cases ho : (c.isOwner != 1)
+        · simp [hlo, hhi, ho]
+        · cases hp : (c.isSharedParticipant != 1)
+          · simp [hlo, hhi, ho, hp]
+          · exfalso
+            have hge2 : 2 ≤ c.opClass := of_decide_eq_true hlo
+            have ho0 : (c.isOwner == 1) = false := by
+              cases h1 : (c.isOwner == 1)
+              · rfl
+              · rw [beq_iff_eq] at h1
+                simp [h1] at ho
+            have hp0 : (c.isSharedParticipant == 1) = false := by
+              cases h1 : (c.isSharedParticipant == 1)
+              · rfl
+              · rw [beq_iff_eq] at h1
+                simp [h1] at hp
+            have hop0 : (c.opClass == 0) = false := by
+              cases h0 : (c.opClass == 0)
+              · rfl
+              · rw [beq_iff_eq] at h0
+                rw [h0] at hge2
+                exact absurd hge2 (by decide)
+            have hop1 : (c.opClass == 1) = false := by
+              cases h1 : (c.opClass == 1)
+              · rfl
+              · rw [beq_iff_eq] at h1
+                rw [h1] at hge2
+                exact absurd hge2 (by decide)
+            simp [hop0, hop1, ho0, hp0] at hadm
+
+/-- Privacy Theorem (`ScopedAuthority` — `admin_cannot_read_unowned_mission`):
+    Even when `callerRole = 1` (`admin`), if `isOwner = 0` and `isSharedParticipant = 0`,
+    every mission, workspace, project, or managed-VM operation (`opClass ∈ {2, 3, 4}`) is rejected
+    (`admit = 0`) with HTTP `404` (`(eval >>> 1) &&& 0xFFFF = 404`), mathematically certifying
+    that server admin role never grants visibility into another user's private work. -/
+theorem admin_cannot_read_unowned_mission
+    (op : UInt8)
+    (h_op : op = 2 ∨ op = 3 ∨ op = 4) :
+    let raw := multiuserRbacStep 1 0 1 1 op 0 0
+    (raw &&& 1) = 0 ∧
+    ((raw >>> 1) &&& 0xFFFF) = 404 ∧
+    ((raw >>> 17) &&& 0xF) = 4 := by
+  rcases h_op with rfl | rfl | rfl
+  · decide
+  · decide
+  · decide
+
+/-- Collaborator Non-Destructiveness (`ScopedAuthority` — `participant_cannot_destroy_or_share`):
+    A shared participant (`isSharedParticipant = 1, isOwner = 0`) is admitted (`200`) on
+    `opClass = 2` (`missionReadOrParticipate`), denied with HTTP `403` on `opClass = 3`
+    (`missionOwnerMutate`: delete/archive/move/fork/settings/share), and denied with HTTP `404`
+    on `opClass = 4` (`ownedResourceStrict`). -/
+theorem participant_cannot_destroy_or_share
+    (role : UInt8)
+    (h_role : role = 0 ∨ role = 1) :
+    let partOk := multiuserRbacStep 1 0 1 role 2 0 1
+    let mutDeny := multiuserRbacStep 1 0 1 role 3 0 1
+    let strictDeny := multiuserRbacStep 1 0 1 role 4 0 1
+    (partOk &&& 1) = 1 ∧
+    ((partOk >>> 1) &&& 0xFFFF) = 200 ∧
+    (mutDeny &&& 1) = 0 ∧
+    ((mutDeny >>> 1) &&& 0xFFFF) = 403 ∧
+    (strictDeny &&& 1) = 0 ∧
+    ((strictDeny >>> 1) &&& 0xFFFF) = 404 := by
+  rcases h_role with rfl | rfl
+  · decide
+  · decide
+
+-- Session-epoch & account-disable `StickyFence`
+structure SessionEpochState where
+  tokenEpoch   : UInt32
+  currentEpoch : UInt32
+  disabled     : UInt8
+  deriving Repr, DecidableEq
+
+inductive SessionRevokeEvent where
+  | noop
+  | bumpEpoch
+  | disableAccount
+  deriving Repr, DecidableEq
+
+def stepSessionEpoch (s : SessionEpochState) (ev : SessionRevokeEvent) : SessionEpochState :=
+  match ev with
+  | .noop => s
+  | .bumpEpoch =>
+    let nextEp := if s.currentEpoch < 0xFFFFFFFF then s.currentEpoch + 1 else s.currentEpoch
+    if nextEp == s.tokenEpoch then
+      { s with disabled := 1 }
+    else
+      { s with currentEpoch := nextEp }
+  | .disableAccount => { s with disabled := 1 }
+
+def sessionTokenRevoked (s : SessionEpochState) : Bool :=
+  s.disabled != 0 || s.tokenEpoch != s.currentEpoch
+
+def sessionTokenAdmitted (s : SessionEpochState) : Bool :=
+  let epochEq : UInt8 := if s.tokenEpoch == s.currentEpoch then 1 else 0
+  (multiuserRbacStep 1 s.disabled epochEq 0 0 0 0 &&& 1) != 0
+
+private theorem stepSessionEpoch_preserves_revoked
+    (s : SessionEpochState)
+    (ev : SessionRevokeEvent)
+    (h_fenced : sessionTokenRevoked s = true) :
+    sessionTokenRevoked (stepSessionEpoch s ev) = true := by
+  cases ev
+  · exact h_fenced
+  · unfold sessionTokenRevoked at h_fenced ⊢
+    unfold stepSessionEpoch
+    dsimp only []
+    by_cases hmax : s.currentEpoch < 0xFFFFFFFF
+    · simp only [hmax, ↓reduceIte]
+      cases heq : ((s.currentEpoch + 1) == s.tokenEpoch)
+      · simp only [heq, Bool.false_eq_true, ↓reduceIte]
+        have hne : (s.tokenEpoch != s.currentEpoch + 1) = true := by
+          cases hx : (s.tokenEpoch != s.currentEpoch + 1)
+          · simp [bne] at hx
+            simp [hx] at heq
+          · rfl
+        simp [hne]
+      · simp [heq]
+    · simp only [hmax, ↓reduceIte]
+      cases heq : (s.currentEpoch == s.tokenEpoch)
+      · simp only [heq, Bool.false_eq_true, ↓reduceIte]
+        exact h_fenced
+      · simp [heq]
+  · unfold sessionTokenRevoked stepSessionEpoch
+    simp
+
+def sessionEpochStickyFence : StickyFence SessionEpochState SessionRevokeEvent where
+  fenced := sessionTokenRevoked
+  preFenceAct := sessionTokenAdmitted
+  step := stepSessionEpoch
+  sticky s ev h_fenced := stepSessionEpoch_preserves_revoked s ev h_fenced
+  forbids_post s ev h_fenced := by
+    have h_next := stepSessionEpoch_preserves_revoked s ev h_fenced
+    generalize stepSessionEpoch s ev = s' at h_next
+    unfold sessionTokenRevoked at h_next
+    unfold sessionTokenAdmitted multiuserRbacStep
+    cases hd : (s'.disabled != 0)
+    · simp only [hd, Bool.false_or] at h_next
+      have hne : (s'.tokenEpoch == s'.currentEpoch) = false := by
+        cases he : (s'.tokenEpoch == s'.currentEpoch)
+        · rfl
+        · rw [beq_iff_eq] at he
+          simp [he] at h_next
+      simp only [hne, ↓reduceIte]
+      decide
+    · cases he : (s'.tokenEpoch == s'.currentEpoch)
+      · simp only [he, ↓reduceIte]
+        decide
+      · simp only [he, hd, ↓reduceIte]
+        decide
+
+theorem session_epoch_sticky_fence
+    (s : SessionEpochState)
+    (ev : SessionRevokeEvent)
+    (h_revoked : sessionTokenRevoked s = true) :
+    sessionTokenRevoked (stepSessionEpoch s ev) = true ∧
+    sessionTokenAdmitted (stepSessionEpoch s ev) = false :=
+  sessionEpochStickyFence.fence_blocks_act s ev h_revoked
+
+-- Placement Role Admission Gate (`orb_placement_role_admit`)
+structure PlacementRoleCheck where
+  callerRole       : UInt8
+  targetKind       : UInt8
+  nodeAdminOnly    : UInt8
+  hasValidUnixUser : UInt8
+  deriving Repr, DecidableEq
+
+def PlacementRoleCheck.Admissible (p : PlacementRoleCheck) : Bool :=
+  decide (p.targetKind ≤ 4) &&
+  (p.callerRole == 1 ||
+   (p.callerRole == 0 &&
+    (p.targetKind == 4 ||
+     ((p.targetKind == 2 || p.targetKind == 3) &&
+      p.nodeAdminOnly == 0 &&
+      p.hasValidUnixUser == 1))))
+
+def placementRoleMetaGate : MetaGateSpec PlacementRoleCheck
+    (fun p => p.Admissible = true) where
+  gate p :=
+    placementRoleAdmit
+      p.callerRole
+      p.targetKind
+      p.nodeAdminOnly
+      p.hasValidUnixUser == 1
+  sound p h := by
+    unfold PlacementRoleCheck.Admissible
+    unfold placementRoleAdmit at h
+    by_cases hgt : p.targetKind > 4
+    · simp [hgt] at h
+    · have ht : decide (p.targetKind ≤ 4) = true :=
+        decide_eq_true (UInt8.le_iff_toNat_le.mpr (Nat.le_of_not_lt fun hlt => hgt (UInt8.lt_iff_toNat_lt.mpr hlt)))
+      cases hr1 : (p.callerRole == 1)
+      · cases hr0 : (p.callerRole == 0)
+        · simp [hgt, hr1, hr0] at h
+        · cases ht4 : (p.targetKind == 4)
+          · cases hded : ((p.targetKind == 2 || p.targetKind == 3) && p.nodeAdminOnly == 0 && p.hasValidUnixUser == 1)
+            · simp [hgt, hr1, hr0, ht4, hded] at h
+            · simp [ht, hr1, hr0, ht4, hded]
+          · simp [ht, hr1, hr0, ht4]
+      · simp [ht, hr1]
+  complete p h := by
+    unfold PlacementRoleCheck.Admissible at h
+    unfold placementRoleAdmit
+    have ⟨ht, hrest⟩ := Bool.and_eq_true_iff.mp h
+    have hngt : ¬ (p.targetKind > 4) := by
+      have hle : p.targetKind ≤ 4 := of_decide_eq_true ht
+      intro hlt
+      have h1 := UInt8.le_iff_toNat_le.mp hle
+      have h2 := UInt8.lt_iff_toNat_lt.mp hlt
+      omega
+    cases hr1 : (p.callerRole == 1)
+    · simp only [hr1, Bool.false_or] at hrest
+      have ⟨hr0, hmem⟩ := Bool.and_eq_true_iff.mp hrest
+      cases ht4 : (p.targetKind == 4)
+      · simp only [ht4, Bool.false_or] at hmem
+        simp [hngt, hr1, hr0, ht4, hmem]
+      · simp [hngt, hr1, hr0, ht4]
+    · simp [hngt, hr1]
+  posWitness := ⟨0, 2, 0, 1⟩
+  negWitness := ⟨0, 0, 0, 1⟩
+  nonVacuous := by decide
+  tight      := by decide
+
+/-- `ScopedAuthority` corollary: non-admin (`member`) users are unconditionally blocked from
+    `core_local` (`0`), `core_colocated_node` (`1`), and any `nodeAdminOnly = 1` node. -/
+theorem member_blocked_from_core_and_admin_nodes
+    (admOnly validUser target : UInt8) :
+    placementRoleAdmit 0 0 admOnly validUser = 0 ∧
+    placementRoleAdmit 0 1 admOnly validUser = 0 ∧
+    placementRoleAdmit 0 2 1 validUser = 0 ∧
+    placementRoleAdmit 0 3 1 validUser = 0 ∧
+    placementRoleAdmit 0 2 0 0 = 0 ∧
+    (target ≠ 4 → placementRoleAdmit 0 target 1 validUser = 0) := by
+  refine ⟨rfl, rfl, rfl, rfl, rfl, ?_⟩
+  intro hne4
+  unfold placementRoleAdmit
+  by_cases hgt : target > 4
+  · simp [hgt]
+  · have ht4 : (target == 4) = false := by
+      cases he : (target == 4)
+      · rfl
+      · rw [beq_iff_eq] at he
+        exact False.elim (hne4 he)
+    simp [hgt, ht4]
+
+-- Dual-Scope Spend-Cap Governor (`orb_user_spend_cap_step`)
+structure UserSpendCapCheck where
+  globalCapActive  : UInt8
+  globalSpentCents : UInt32
+  globalCapCents   : UInt32
+  userCapActive    : UInt8
+  userSpentCents   : UInt32
+  userCapCents     : UInt32
+  deltaCents       : UInt32
+  deriving Repr, DecidableEq
+
+def UserSpendCapCheck.Admissible (s : UserSpendCapCheck) : Bool :=
+  let rawG : UInt64 := s.globalSpentCents.toUInt64 + s.deltaCents.toUInt64
+  let rawU : UInt64 := s.userSpentCents.toUInt64 + s.deltaCents.toUInt64
+  !(s.globalCapActive != 0 && decide (rawG > s.globalCapCents.toUInt64)) &&
+  !(s.userCapActive != 0 && decide (rawU > s.userCapCents.toUInt64)) &&
+  !(decide (rawG > 0x3FFFFFFF) || decide (rawU > 0x3FFFFFFF))
+
+def UserSpendCapCheck.eval (s : UserSpendCapCheck) : UInt64 :=
+  userSpendCapStep
+    s.globalCapActive
+    s.globalSpentCents
+    s.globalCapCents
+    s.userCapActive
+    s.userSpentCents
+    s.userCapCents
+    s.deltaCents
+
+private theorem u64_mask1_getLsbD :
+    ∀ i, i < 64 → (UInt64.toBitVec 1).getLsbD i = decide (i = 0) := by
+  decide
+
+private theorem u64_mask30_getLsbD :
+    ∀ i, i < 64 → (UInt64.toBitVec 0x3FFFFFFF).getLsbD i = decide (i < 30) := by
+  decide
+
+private theorem u64_high30_false
+    (x : UInt64)
+    (hx : x ≤ 0x3FFFFFFF)
+    (k : Nat)
+    (hk30 : 30 ≤ k)
+    (hk64 : k < 64) :
+    x.toBitVec[k]'hk64 = false := by
+  rw [BitVec.getElem_eq_testBit_toNat, UInt64.toNat_toBitVec]
+  apply Nat.testBit_lt_two_pow
+  have hx_nat : x.toNat ≤ 0x3FFFFFFF := UInt64.le_iff_toNat_le.mp hx
+  have hpow : (0x40000000 : Nat) ≤ 2 ^ k := by
+    have : 2 ^ 30 ≤ 2 ^ k := Nat.pow_le_pow_right (by decide : 0 < 2) hk30
+    simpa using this
+  omega
+
+private theorem spend_packed_admit_zero
+    (reason curG curU : UInt64) :
+    ((((reason <<< 1) ||| (curG <<< 4) ||| (curU <<< 34)) &&& 1) != 0) = false := by
+  have heq : (((reason <<< 1) ||| (curG <<< 4) ||| (curU <<< 34)) &&& 1) = 0 := by
+    apply UInt64.toBitVec_inj.mp
+    apply BitVec.eq_of_getLsbD_eq
+    intro i hi
+    have hm := u64_mask1_getLsbD i hi
+    have hs1 : UInt64.toBitVec 1 % 64 = 1#64 := rfl
+    have hs4 : UInt64.toBitVec 4 % 64 = 4#64 := rfl
+    have hs34 : UInt64.toBitVec 34 % 64 = 34#64 := rfl
+    simp only [UInt64.toBitVec_and, UInt64.toBitVec_or, UInt64.toBitVec_shiftLeft,
+      BitVec.getLsbD_and, BitVec.getLsbD_or, hm, hs1, hs4, hs34,
+      BitVec.shiftLeft_eq', BitVec.getLsbD_shiftLeft]
+    by_cases hi0 : i = 0
+    · subst hi0
+      have hz : (UInt64.toBitVec 0).getLsbD 0 = false := by decide
+      rw [hz]
+      simp
+    · have hz : (UInt64.toBitVec 0).getLsbD i = false := by
+        have h0 : ∀ k, k < 64 → (UInt64.toBitVec 0).getLsbD k = false := by decide
+        exact h0 i hi
+      rw [hz]
+      simp [hi0]
+  rw [heq]
+  decide
+
+private theorem spend_packed_admit_one
+    (rawG rawU : UInt64) :
+    ((((1 : UInt64) ||| (rawG <<< 4) ||| (rawU <<< 34)) &&& 1) != 0) = true := by
+  have heq : (((1 : UInt64) ||| (rawG <<< 4) ||| (rawU <<< 34)) &&& 1) = 1 := by
+    apply UInt64.toBitVec_inj.mp
+    apply BitVec.eq_of_getLsbD_eq
+    intro i hi
+    have hm := u64_mask1_getLsbD i hi
+    have hs4 : UInt64.toBitVec 4 % 64 = 4#64 := rfl
+    have hs34 : UInt64.toBitVec 34 % 64 = 34#64 := rfl
+    simp only [UInt64.toBitVec_and, UInt64.toBitVec_or, UInt64.toBitVec_shiftLeft,
+      BitVec.getLsbD_and, BitVec.getLsbD_or, hm, hs4, hs34,
+      BitVec.shiftLeft_eq', BitVec.getLsbD_shiftLeft]
+    by_cases hi0 : i = 0
+    · subst hi0
+      simp
+    · simp [hi0]
+  rw [heq]
+  decide
+
+private theorem spend_unpack_next_global
+    (rawG rawU : UInt64)
+    (hg : rawG ≤ 0x3FFFFFFF) :
+    ((((1 : UInt64) ||| (rawG <<< 4) ||| (rawU <<< 34)) >>> 4) &&& 0x3FFFFFFF) = rawG := by
+  apply UInt64.toBitVec_inj.mp
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  have hm := u64_mask30_getLsbD i hi
+  have hs4 : UInt64.toBitVec 4 % 64 = 4#64 := rfl
+  have hs34 : UInt64.toBitVec 34 % 64 = 34#64 := rfl
+  simp only [UInt64.toBitVec_and, UInt64.toBitVec_shiftRight, UInt64.toBitVec_or, UInt64.toBitVec_shiftLeft,
+    BitVec.getLsbD_and, hm, hs4, hs34,
+    BitVec.ushiftRight_eq', BitVec.shiftLeft_eq',
+    BitVec.getLsbD_ushiftRight, BitVec.getLsbD_or, BitVec.getLsbD_shiftLeft]
+  by_cases hi30 : i < 30
+  · have h4_64 : 4 + i < 64 := by omega
+    have hnot4 : ¬ (4 + i < 4) := by omega
+    have hlt34 : 4 + i < 34 := by omega
+    have hsub : 4 + i - 4 = i := by omega
+    have h1_false : (UInt64.toBitVec 1).getLsbD (4 + i) = false := by
+      rw [u64_mask1_getLsbD (4 + i) h4_64]
+      simp [show 4 + i ≠ 0 by omega]
+    have hrg : rawG.toBitVec.getLsbD i = rawG.toBitVec[i]'hi := BitVec.getLsbD_eq_getElem hi
+    simp [hi30, h4_64, hnot4, hlt34, hsub, h1_false, hrg]
+  · have hrg0 : rawG.toBitVec.getLsbD i = false := by
+      rw [BitVec.getLsbD_eq_getElem hi]
+      exact u64_high30_false rawG hg i (by omega) hi
+    simp [hi30, hrg0]
+
+private theorem spend_unpack_next_user
+    (rawG rawU : UInt64)
+    (hg : rawG ≤ 0x3FFFFFFF)
+    (hu : rawU ≤ 0x3FFFFFFF) :
+    ((((1 : UInt64) ||| (rawG <<< 4) ||| (rawU <<< 34)) >>> 34) &&& 0x3FFFFFFF) = rawU := by
+  apply UInt64.toBitVec_inj.mp
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  have hm := u64_mask30_getLsbD i hi
+  have hs4 : UInt64.toBitVec 4 % 64 = 4#64 := rfl
+  have hs34 : UInt64.toBitVec 34 % 64 = 34#64 := rfl
+  simp only [UInt64.toBitVec_and, UInt64.toBitVec_shiftRight, UInt64.toBitVec_or, UInt64.toBitVec_shiftLeft,
+    BitVec.getLsbD_and, hm, hs4, hs34,
+    BitVec.ushiftRight_eq', BitVec.shiftLeft_eq',
+    BitVec.getLsbD_ushiftRight, BitVec.getLsbD_or, BitVec.getLsbD_shiftLeft]
+  by_cases hi30 : i < 30
+  · have h34_64 : 34 + i < 64 := by omega
+    have hnot4 : ¬ (34 + i < 4) := by omega
+    have hnot34 : ¬ (34 + i < 34) := by omega
+    have hsub4 : 34 + i - 4 = 30 + i := by omega
+    have hsub34 : 34 + i - 34 = i := by omega
+    have h1_false : (UInt64.toBitVec 1).getLsbD (34 + i) = false := by
+      rw [u64_mask1_getLsbD (34 + i) h34_64]
+      simp [show 34 + i ≠ 0 by omega]
+    have hrg_false : rawG.toBitVec.getLsbD (30 + i) = false := by
+      have h30_64 : 30 + i < 64 := by omega
+      rw [BitVec.getLsbD_eq_getElem h30_64]
+      exact u64_high30_false rawG hg (30 + i) (by omega) h30_64
+    have hru : rawU.toBitVec.getLsbD i = rawU.toBitVec[i]'hi := BitVec.getLsbD_eq_getElem hi
+    simp [hi30, h34_64, hnot4, hnot34, hsub4, hsub34, h1_false, hrg_false, hru]
+  · have hru0 : rawU.toBitVec.getLsbD i = false := by
+      rw [BitVec.getLsbD_eq_getElem hi]
+      exact u64_high30_false rawU hu i (by omega) hi
+    simp [hi30, hru0]
+
+def userSpendCapMetaGate : MetaGateSpec UserSpendCapCheck
+    (fun s => s.Admissible = true) where
+  gate s := (s.eval &&& 1) != 0
+  sound s h := by
+    unfold UserSpendCapCheck.Admissible
+    unfold UserSpendCapCheck.eval userSpendCapStep at h
+    dsimp only [] at h ⊢
+    cases hg :
+      (s.globalCapActive != 0 &&
+       decide (s.globalSpentCents.toUInt64 + s.deltaCents.toUInt64 > s.globalCapCents.toUInt64))
+    · cases hu :
+        (s.userCapActive != 0 &&
+         decide (s.userSpentCents.toUInt64 + s.deltaCents.toUInt64 > s.userCapCents.toUInt64))
+      · cases hov :
+          (decide (s.globalSpentCents.toUInt64 + s.deltaCents.toUInt64 > 0x3FFFFFFF) ||
+           decide (s.userSpentCents.toUInt64 + s.deltaCents.toUInt64 > 0x3FFFFFFF))
+        · rfl
+        · simp only [hg, hu, hov, Bool.false_eq_true, ↓reduceIte] at h
+          rw [spend_packed_admit_zero] at h
+          contradiction
+      · simp only [hg, hu, Bool.false_eq_true, ↓reduceIte] at h
+        rw [spend_packed_admit_zero] at h
+        contradiction
+    · simp only [hg, ↓reduceIte] at h
+      rw [spend_packed_admit_zero] at h
+      contradiction
+  complete s h := by
+    unfold UserSpendCapCheck.Admissible at h
+    unfold UserSpendCapCheck.eval userSpendCapStep
+    dsimp only [] at h ⊢
+    cases hg :
+      (s.globalCapActive != 0 &&
+       decide (s.globalSpentCents.toUInt64 + s.deltaCents.toUInt64 > s.globalCapCents.toUInt64))
+    · cases hu :
+        (s.userCapActive != 0 &&
+         decide (s.userSpentCents.toUInt64 + s.deltaCents.toUInt64 > s.userCapCents.toUInt64))
+      · cases hov :
+          (decide (s.globalSpentCents.toUInt64 + s.deltaCents.toUInt64 > 0x3FFFFFFF) ||
+           decide (s.userSpentCents.toUInt64 + s.deltaCents.toUInt64 > 0x3FFFFFFF))
+        · simp only [hg, hu, hov, Bool.false_eq_true, ↓reduceIte]
+          exact spend_packed_admit_one _ _
+        · simp [hg, hu, hov] at h
+      · simp [hg, hu] at h
+    · simp [hg] at h
+  posWitness := ⟨1, 400, 1000, 1, 150, 500, 200⟩
+  negWitness := ⟨1, 400, 1000, 1, 350, 500, 200⟩
+  nonVacuous := by decide
+  tight      := by decide
+
+def userSpendCapConservedResource : ConservedResource UserSpendCapCheck where
+  admit s := userSpendCapMetaGate.gate s
+  withinBudget s :=
+    let w := s.eval
+    let nextG := (w >>> 4) &&& 0x3FFFFFFF
+    let nextU := (w >>> 34) &&& 0x3FFFFFFF
+    (s.globalCapActive == 0 || decide (nextG ≤ s.globalCapCents.toUInt64)) &&
+    (s.userCapActive == 0 || decide (nextU ≤ s.userCapCents.toUInt64))
+  conserved s h := by
+    have hadm := userSpendCapMetaGate.sound s h
+    unfold UserSpendCapCheck.Admissible at hadm
+    dsimp only [] at hadm ⊢
+    have ⟨h12, hno_ov⟩ := Bool.and_eq_true_iff.mp hadm
+    have ⟨hno_g, hno_u⟩ := Bool.and_eq_true_iff.mp h12
+    have hg_f :
+        (s.globalCapActive != 0 && decide (s.globalSpentCents.toUInt64 + s.deltaCents.toUInt64 > s.globalCapCents.toUInt64)) = false := by
+      cases hx : (s.globalCapActive != 0 && decide (s.globalSpentCents.toUInt64 + s.deltaCents.toUInt64 > s.globalCapCents.toUInt64))
+      · rfl
+      · simp [hx] at hno_g
+    have hu_f :
+        (s.userCapActive != 0 && decide (s.userSpentCents.toUInt64 + s.deltaCents.toUInt64 > s.userCapCents.toUInt64)) = false := by
+      cases hx : (s.userCapActive != 0 && decide (s.userSpentCents.toUInt64 + s.deltaCents.toUInt64 > s.userCapCents.toUInt64))
+      · rfl
+      · simp [hx] at hno_u
+    have hov_f :
+        (decide (s.globalSpentCents.toUInt64 + s.deltaCents.toUInt64 > 0x3FFFFFFF) ||
+         decide (s.userSpentCents.toUInt64 + s.deltaCents.toUInt64 > 0x3FFFFFFF)) = false := by
+      cases hx :
+        (decide (s.globalSpentCents.toUInt64 + s.deltaCents.toUInt64 > 0x3FFFFFFF) ||
+         decide (s.userSpentCents.toUInt64 + s.deltaCents.toUInt64 > 0x3FFFFFFF))
+      · rfl
+      · simp [hx] at hno_ov
+    have hg_le_max : s.globalSpentCents.toUInt64 + s.deltaCents.toUInt64 ≤ 0x3FFFFFFF := by
+      cases hgt : decide (s.globalSpentCents.toUInt64 + s.deltaCents.toUInt64 > 0x3FFFFFFF)
+      · have hnlt := of_decide_eq_false hgt
+        exact UInt64.le_iff_toNat_le.mpr (Nat.le_of_not_lt fun hlt => hnlt (UInt64.lt_iff_toNat_lt.mpr hlt))
+      · simp [hgt] at hov_f
+    have hu_le_max : s.userSpentCents.toUInt64 + s.deltaCents.toUInt64 ≤ 0x3FFFFFFF := by
+      cases hgt : decide (s.userSpentCents.toUInt64 + s.deltaCents.toUInt64 > 0x3FFFFFFF)
+      · have hnlt := of_decide_eq_false hgt
+        exact UInt64.le_iff_toNat_le.mpr (Nat.le_of_not_lt fun hlt => hnlt (UInt64.lt_iff_toNat_lt.mpr hlt))
+      · simp [hgt] at hov_f
+    have hw_eq :
+        s.eval =
+          (1 : UInt64) |||
+          ((s.globalSpentCents.toUInt64 + s.deltaCents.toUInt64) <<< 4) |||
+          ((s.userSpentCents.toUInt64 + s.deltaCents.toUInt64) <<< 34) := by
+      unfold UserSpendCapCheck.eval userSpendCapStep
+      dsimp only []
+      simp [hg_f, hu_f, hov_f]
+    rw [hw_eq]
+    rw [spend_unpack_next_global _ _ hg_le_max]
+    rw [spend_unpack_next_user _ _ hg_le_max hu_le_max]
+    apply Bool.and_eq_true_iff.mpr
+    constructor
+    · cases hga : (s.globalCapActive == 0)
+      · have hgnz : (s.globalCapActive != 0) = true := by
+          cases hnz : (s.globalCapActive != 0)
+          · simp [bne] at hnz
+            simp [hnz] at hga
+          · rfl
+        rw [hgnz, Bool.true_and] at hg_f
+        have hnlt := of_decide_eq_false hg_f
+        have hle : s.globalSpentCents.toUInt64 + s.deltaCents.toUInt64 ≤ s.globalCapCents.toUInt64 :=
+          UInt64.le_iff_toNat_le.mpr (Nat.le_of_not_lt fun hlt => hnlt (UInt64.lt_iff_toNat_lt.mpr hlt))
+        simp [hga, decide_eq_true hle]
+      · simp [hga]
+    · cases hua : (s.userCapActive == 0)
+      · have hunz : (s.userCapActive != 0) = true := by
+          cases hnz : (s.userCapActive != 0)
+          · simp [bne] at hnz
+            simp [hnz] at hua
+          · rfl
+        rw [hunz, Bool.true_and] at hu_f
+        have hnlt := of_decide_eq_false hu_f
+        have hle : s.userSpentCents.toUInt64 + s.deltaCents.toUInt64 ≤ s.userCapCents.toUInt64 :=
+          UInt64.le_iff_toNat_le.mpr (Nat.le_of_not_lt fun hlt => hnlt (UInt64.lt_iff_toNat_lt.mpr hlt))
+        simp [hua, decide_eq_true hle]
+      · simp [hua]
+
+theorem user_spend_cap_conserved
+    (s : UserSpendCapCheck)
+    (h_adm : (s.eval &&& 1) != 0) :
+    (s.globalCapActive == 0 || decide (((s.eval >>> 4) &&& 0x3FFFFFFF) ≤ s.globalCapCents.toUInt64)) = true ∧
+    (s.userCapActive == 0 || decide (((s.eval >>> 34) &&& 0x3FFFFFFF) ≤ s.userCapCents.toUInt64)) = true :=
+  Bool.and_eq_true_iff.mp (userSpendCapConservedResource.conserved s h_adm)
+
+-- Dedicated Per-User Linux Execution Confinement (`orb_privd_user_exec_step` & `validUnixUsername`)
+structure PrivdUserExecCheck where
+  peerIsNodeUid         : UInt8
+  leaseVerified         : UInt8
+  nodeAdminOnly         : UInt8
+  callerRole            : UInt8
+  usernameValid         : UInt8
+  targetUid             : UInt32
+  targetGid             : UInt32
+  gidDisjointPriv       : UInt8
+  homeConfinedNoSymlink : UInt8
+  elanRootOwned         : UInt8
+  deriving Repr, DecidableEq
+
+def PrivdUserExecCheck.Admissible (p : PrivdUserExecCheck) : Bool :=
+  p.peerIsNodeUid == 1 &&
+  p.leaseVerified == 1 &&
+  decide (p.callerRole ≤ 1) &&
+  !(p.callerRole == 0 && p.nodeAdminOnly != 0) &&
+  p.usernameValid == 1 &&
+  decide (2000 ≤ p.targetUid) &&
+  decide (p.targetUid < 65534) &&
+  decide (2000 ≤ p.targetGid) &&
+  decide (p.targetGid < 65534) &&
+  p.gidDisjointPriv == 1 &&
+  p.homeConfinedNoSymlink == 1 &&
+  p.elanRootOwned == 1
+
+def PrivdUserExecCheck.eval (p : PrivdUserExecCheck) : UInt32 :=
+  privdUserExecStep
+    p.peerIsNodeUid
+    p.leaseVerified
+    p.nodeAdminOnly
+    p.callerRole
+    p.usernameValid
+    p.targetUid
+    p.targetGid
+    p.gidDisjointPriv
+    p.homeConfinedNoSymlink
+    p.elanRootOwned
+
+private theorem privd_deny_bit0_zero
+    (code : UInt32) :
+    (((code <<< 8) &&& 1) != 0) = false := by
+  have heq : ((code <<< 8) &&& 1) = 0 := by
+    apply UInt32.toBitVec_inj.mp
+    apply BitVec.eq_of_getLsbD_eq
+    intro i hi
+    have hs8 : UInt32.toBitVec 8 % 32 = 8#32 := rfl
+    simp only [UInt32.toBitVec_and, UInt32.toBitVec_shiftLeft,
+      BitVec.getLsbD_and, hs8, BitVec.shiftLeft_eq', BitVec.getLsbD_shiftLeft]
+    by_cases hi0 : i = 0
+    · subst hi0
+      have hz : (UInt32.toBitVec 0).getLsbD 0 = false := by decide
+      rw [hz]
+      simp
+    · have hm0 : (UInt32.toBitVec 1).getLsbD i = false := by
+        have h1 : ∀ k, k < 32 → (UInt32.toBitVec 1).getLsbD k = decide (k = 0) := by decide
+        rw [h1 i hi]
+        simp [hi0]
+      have hz0 : (UInt32.toBitVec 0).getLsbD i = false := by
+        have h0 : ∀ k, k < 32 → (UInt32.toBitVec 0).getLsbD k = false := by decide
+        exact h0 i hi
+      rw [hm0, hz0]
+      simp
+  rw [heq]
+  decide
+
+def privdUserExecMetaGate : MetaGateSpec PrivdUserExecCheck
+    (fun p => p.Admissible = true) where
+  gate p := (p.eval &&& 1) != 0
+  sound p h := by
+    unfold PrivdUserExecCheck.Admissible
+    unfold PrivdUserExecCheck.eval privdUserExecStep at h
+    cases hp : (p.peerIsNodeUid != 1)
+    · cases hl : (p.leaseVerified != 1)
+      · by_cases hrgt : p.callerRole > 1
+        · simp only [hp, hl, hrgt, Bool.false_eq_true, ↓reduceIte] at h
+          rw [privd_deny_bit0_zero 3] at h
+          contradiction
+        · cases hadm : (p.callerRole == 0 && p.nodeAdminOnly != 0)
+          · cases hu : (p.usernameValid != 1)
+            · by_cases huid : (p.targetUid < 2000 || p.targetUid ≥ 65534 || p.targetGid < 2000 || p.targetGid ≥ 65534) = true
+              · simp only [hp, hl, hrgt, hadm, hu, huid, Bool.false_eq_true, ↓reduceIte] at h
+                rw [privd_deny_bit0_zero 6] at h
+                contradiction
+              · cases hgid : (p.gidDisjointPriv != 1)
+                · cases hhome : (p.homeConfinedNoSymlink != 1)
+                  · cases helan : (p.elanRootOwned != 1)
+                    · have hp1 : p.peerIsNodeUid == 1 := by
+                        cases hx : (p.peerIsNodeUid == 1)
+                        · simp [bne, hx] at hp
+                        · rfl
+                      have hl1 : p.leaseVerified == 1 := by
+                        cases hx : (p.leaseVerified == 1)
+                        · simp [bne, hx] at hl
+                        · rfl
+                      have hrle : decide (p.callerRole ≤ 1) = true := by
+                        apply decide_eq_true
+                        exact UInt8.le_iff_toNat_le.mpr (Nat.le_of_not_lt fun hlt => hrgt (UInt8.lt_iff_toNat_lt.mpr hlt))
+                      have hu1 : p.usernameValid == 1 := by
+                        cases hx : (p.usernameValid == 1)
+                        · simp [bne, hx] at hu
+                        · rfl
+                      have hgd1 : p.gidDisjointPriv == 1 := by
+                        cases hx : (p.gidDisjointPriv == 1)
+                        · simp [bne, hx] at hgid
+                        · rfl
+                      have hhm1 : p.homeConfinedNoSymlink == 1 := by
+                        cases hx : (p.homeConfinedNoSymlink == 1)
+                        · simp [bne, hx] at hhome
+                        · rfl
+                      have hel1 : p.elanRootOwned == 1 := by
+                        cases hx : (p.elanRootOwned == 1)
+                        · simp [bne, hx] at helan
+                        · rfl
+                      have huid1 : decide (2000 ≤ p.targetUid) = true := by
+                        cases hx : decide (p.targetUid < 2000)
+                        · apply decide_eq_true
+                          have hn := of_decide_eq_false hx
+                          exact UInt32.le_iff_toNat_le.mpr (Nat.le_of_not_lt fun hlt => hn (UInt32.lt_iff_toNat_lt.mpr hlt))
+                        · exfalso
+                          apply huid
+                          simp [hx]
+                      have huid2 : decide (p.targetUid < 65534) = true := by
+                        cases hx : decide (p.targetUid ≥ 65534)
+                        · apply decide_eq_true
+                          have hn := of_decide_eq_false hx
+                          exact UInt32.lt_iff_toNat_lt.mpr (Nat.lt_of_not_le fun hle => hn (UInt32.le_iff_toNat_le.mpr hle))
+                        · exfalso
+                          apply huid
+                          simp [hx]
+                      have hgid1 : decide (2000 ≤ p.targetGid) = true := by
+                        cases hx : decide (p.targetGid < 2000)
+                        · apply decide_eq_true
+                          have hn := of_decide_eq_false hx
+                          exact UInt32.le_iff_toNat_le.mpr (Nat.le_of_not_lt fun hlt => hn (UInt32.lt_iff_toNat_lt.mpr hlt))
+                        · exfalso
+                          apply huid
+                          simp [hx]
+                      have hgid2 : decide (p.targetGid < 65534) = true := by
+                        cases hx : decide (p.targetGid ≥ 65534)
+                        · apply decide_eq_true
+                          have hn := of_decide_eq_false hx
+                          exact UInt32.lt_iff_toNat_lt.mpr (Nat.lt_of_not_le fun hle => hn (UInt32.le_iff_toNat_le.mpr hle))
+                        · exfalso
+                          apply huid
+                          simp [hx]
+                      simp [hp1, hl1, hrle, hadm, hu1, huid1, huid2, hgid1, hgid2, hgd1, hhm1, hel1]
+                    · simp only [hp, hl, hrgt, hadm, hu, huid, hgid, hhome, helan, Bool.false_eq_true, ↓reduceIte] at h
+                      rw [privd_deny_bit0_zero 9] at h
+                      contradiction
+                  · simp only [hp, hl, hrgt, hadm, hu, huid, hgid, hhome, Bool.false_eq_true, ↓reduceIte] at h
+                    rw [privd_deny_bit0_zero 8] at h
+                    contradiction
+                · simp only [hp, hl, hrgt, hadm, hu, huid, hgid, Bool.false_eq_true, ↓reduceIte] at h
+                  rw [privd_deny_bit0_zero 7] at h
+                  contradiction
+            · simp only [hp, hl, hrgt, hadm, hu, Bool.false_eq_true, ↓reduceIte] at h
+              rw [privd_deny_bit0_zero 5] at h
+              contradiction
+          · simp only [hp, hl, hrgt, hadm, Bool.false_eq_true, ↓reduceIte] at h
+            rw [privd_deny_bit0_zero 4] at h
+            contradiction
+      · simp only [hp, hl, Bool.false_eq_true, ↓reduceIte] at h
+        rw [privd_deny_bit0_zero 2] at h
+        contradiction
+    · simp only [hp, ↓reduceIte] at h
+      rw [privd_deny_bit0_zero 1] at h
+      contradiction
+  complete p h := by
+    unfold PrivdUserExecCheck.Admissible at h
+    unfold PrivdUserExecCheck.eval privdUserExecStep
+    simp only [Bool.and_eq_true] at h
+    rcases h with
+      ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨hp1, hl1⟩, hrle⟩, hadm⟩, hu1⟩, huid1⟩, huid2⟩,
+        hgid1⟩, hgid2⟩, hgd1⟩, hhm1⟩, hel1⟩
+    have hp : (p.peerIsNodeUid != 1) = false := by
+      rw [beq_iff_eq] at hp1
+      simp [hp1]
+    have hl : (p.leaseVerified != 1) = false := by
+      rw [beq_iff_eq] at hl1
+      simp [hl1]
+    have hrgt : ¬ (p.callerRole > 1) := by
+      have hle := of_decide_eq_true hrle
+      intro hlt
+      have h1 := UInt8.le_iff_toNat_le.mp hle
+      have h2 := UInt8.lt_iff_toNat_lt.mp hlt
+      omega
+    have hadmf : (p.callerRole == 0 && p.nodeAdminOnly != 0) = false := by
+      cases hx : (p.callerRole == 0 && p.nodeAdminOnly != 0)
+      · rfl
+      · simp [hx] at hadm
+    have hu : (p.usernameValid != 1) = false := by
+      rw [beq_iff_eq] at hu1
+      simp [hu1]
+    have huidf :
+        (decide (p.targetUid < 2000) ||
+         decide (p.targetUid ≥ 65534) ||
+         decide (p.targetGid < 2000) ||
+         decide (p.targetGid ≥ 65534)) = false := by
+      have u1 := UInt32.le_iff_toNat_le.mp (of_decide_eq_true huid1)
+      have u2 := UInt32.lt_iff_toNat_lt.mp (of_decide_eq_true huid2)
+      have g1 := UInt32.le_iff_toNat_le.mp (of_decide_eq_true hgid1)
+      have g2 := UInt32.lt_iff_toNat_lt.mp (of_decide_eq_true hgid2)
+      have d1 : decide (p.targetUid < 2000) = false :=
+        decide_eq_false fun hlt => Nat.not_lt_of_ge u1 (UInt32.lt_iff_toNat_lt.mp hlt)
+      have d2 : decide (p.targetUid ≥ 65534) = false :=
+        decide_eq_false fun hge => Nat.not_le_of_lt u2 (UInt32.le_iff_toNat_le.mp hge)
+      have d3 : decide (p.targetGid < 2000) = false :=
+        decide_eq_false fun hlt => Nat.not_lt_of_ge g1 (UInt32.lt_iff_toNat_lt.mp hlt)
+      have d4 : decide (p.targetGid ≥ 65534) = false :=
+        decide_eq_false fun hge => Nat.not_le_of_lt g2 (UInt32.le_iff_toNat_le.mp hge)
+      simp [d1, d2, d3, d4]
+    have hgd : (p.gidDisjointPriv != 1) = false := by
+      rw [beq_iff_eq] at hgd1
+      simp [hgd1]
+    have hhm : (p.homeConfinedNoSymlink != 1) = false := by
+      rw [beq_iff_eq] at hhm1
+      simp [hhm1]
+    have hel : (p.elanRootOwned != 1) = false := by
+      rw [beq_iff_eq] at hel1
+      simp [hel1]
+    simp [hp, hl, hrgt, hadmf, hu, huidf, hgd, hhm, hel]
+  posWitness := ⟨1, 1, 0, 0, 1, 2001, 2001, 1, 1, 1⟩
+  negWitness := ⟨1, 1, 0, 0, 1, 0, 2001, 1, 1, 1⟩
+  nonVacuous := by decide
+  tight      := by decide
+
+-- Constructive `GrammarConfinement` for `validUnixUsername`
+def hasNoSlashOrNul : List Char → Bool
+  | [] => true
+  | c :: cs => c != '/' && c != '\x00' && hasNoSlashOrNul cs
+
+def unixUsernameSafeSegment (u : String) : Bool :=
+  match u.toList with
+  | [] => false
+  | c0 :: rest =>
+    c0 != '.' &&
+    c0 != '/' &&
+    c0 != '\x00' &&
+    hasNoSlashOrNul rest &&
+    !isReservedUnixUsername u
+
+private theorem validUnixUsernameChars_no_slash_or_nul :
+    ∀ (cs : List Char),
+      validUnixUsernameChars cs = true →
+      hasNoSlashOrNul cs = true
+  | [], _ => rfl
+  | c :: cs, h => by
+    unfold validUnixUsernameChars at h
+    unfold hasNoSlashOrNul
+    have ⟨hok, hrest⟩ := Bool.and_eq_true_iff.mp h
+    have ih := validUnixUsernameChars_no_slash_or_nul cs hrest
+    have hc_not_slash : (c != '/') = true := by
+      cases he : (c != '/')
+      · simp [bne] at he
+        subst he
+        simp at hok
+      · rfl
+    have hc_not_nul : (c != '\x00') = true := by
+      cases he : (c != '\x00')
+      · simp [bne] at he
+        subst he
+        simp at hok
+      · rfl
+    simp [hc_not_slash, hc_not_nul, ih]
+
+theorem unix_username_confinement
+    (u : String)
+    (h_valid : validUnixUsername u = true) :
+    unixUsernameSafeSegment u = true := by
+  unfold validUnixUsername at h_valid
+  unfold unixUsernameSafeSegment
+  cases hcs : u.toList with
+  | nil =>
+    simp [hcs] at h_valid
+  | cons c0 rest =>
+    simp only [hcs, Bool.and_eq_true] at h_valid
+    rcases h_valid with ⟨⟨⟨hhead, _⟩, hchars⟩, hnotres⟩
+    have hrest_safe := validUnixUsernameChars_no_slash_or_nul rest hchars
+    have hc0_not_dot : (c0 != '.') = true := by
+      cases he : (c0 != '.')
+      · simp [bne] at he
+        subst he
+        simp at hhead
+      · rfl
+    have hc0_not_slash : (c0 != '/') = true := by
+      cases he : (c0 != '/')
+      · simp [bne] at he
+        subst he
+        simp at hhead
+      · rfl
+    have hc0_not_nul : (c0 != '\x00') = true := by
+      cases he : (c0 != '\x00')
+      · simp [bne] at he
+        subst he
+        simp at hhead
+      · rfl
+    simp [hc0_not_dot, hc0_not_slash, hc0_not_nul, hrest_safe, hnotres]
+
+def unixUsernameGrammarConfinement : GrammarConfinement String String UInt8 where
+  parse u := if validUnixUsername u then some u else none
+  inGrammar := unixUsernameSafeSegment
+  privsAfter _ role :=
+    if role == 1 then 1
+    else 0
+  allowedPrivs role :=
+    if role == 1 then 1
+    else 0
+  confined u cmd h_parse := by
+    by_cases hv : validUnixUsername u = true
+    · simp [hv] at h_parse
+      subst h_parse
+      exact unix_username_confinement u hv
+    · simp [hv] at h_parse
+  no_escalate _ role := by
+    cases hr : (role == 1)
+    · simp [hr]
+    · simp [hr]
 
 end Orb.Spec

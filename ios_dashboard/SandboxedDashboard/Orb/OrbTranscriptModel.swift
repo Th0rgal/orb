@@ -18,6 +18,8 @@ final class OrbTranscriptModel {
     private(set) var orchestration: [OrbOrchestration.Ref] = []
     private(set) var openQuestions: [OrbPendingQuestion] = []
     private(set) var history: [(String, String, String)] = []
+    /// Sender username by user turn row ID (`turn-<idx>-user`) for shared mission attribution.
+    private(set) var senderByItemID: [String: String] = [:]
     /// Completion time of each stored assistant row, by row id.
     private(set) var turnTimings: [String: OrbTurnTiming] = [:]
     /// `metadata.shared_files` of assistant messages, for file chips (size, download url).
@@ -44,7 +46,9 @@ final class OrbTranscriptModel {
     /// Rebuilds the message list; returns how many rows were added (0 when unchanged or shrunk).
     @discardableResult
     func rebuildHistory(isCloud: Bool, turns: [OrbJSON], mission: OrbJSON, optimisticPrompt: String?) -> Int {
-        let next = Self.computeHistory(isCloud: isCloud, turns: turns, mission: mission, events: events, optimisticPrompt: optimisticPrompt)
+        let computed = Self.computeHistoryWithSenders(isCloud: isCloud, turns: turns, mission: mission, events: events, optimisticPrompt: optimisticPrompt)
+        let next = computed.rows
+        if senderByItemID != computed.senders { senderByItemID = computed.senders }
         let grew = max(0, next.count - history.count)
         if history.count != next.count || zip(history, next).contains(where: { $0.0 != $1.0 || $0.1 != $1.1 || $0.2 != $1.2 }) {
             history = next
@@ -76,7 +80,24 @@ final class OrbTranscriptModel {
         events: [StoredEvent],
         optimisticPrompt: String?
     ) -> [(String, String, String)] {
+        computeHistoryWithSenders(
+            isCloud: isCloud,
+            turns: turns,
+            mission: mission,
+            events: events,
+            optimisticPrompt: optimisticPrompt
+        ).rows
+    }
+
+    nonisolated static func computeHistoryWithSenders(
+        isCloud: Bool,
+        turns: [OrbJSON],
+        mission: OrbJSON,
+        events: [StoredEvent],
+        optimisticPrompt: String?
+    ) -> (rows: [(String, String, String)], senders: [String: String]) {
         var rows: [(String, String, String)] = []
+        var rawSenders: [String: String] = [:]
         if isCloud {
             rows = turns.flatMap { turn in
                 [(turn["key"].text + ":u", "user", turn["prompt"].text), (turn["key"].text + ":a", "assistant", turn["result"].text)].filter { !$0.2.isEmpty }
@@ -95,7 +116,12 @@ final class OrbTranscriptModel {
                         expandedRaw.append(("cont-\(offset)-\(subIdx)", sub.role, sub.content))
                     }
                 } else {
-                    expandedRaw.append((element["sequence"].doubleValue.map { "seq-\($0)" } ?? String(offset), role, content))
+                    let rawID = element["sequence"].doubleValue.map { "seq-\($0)" } ?? String(offset)
+                    expandedRaw.append((rawID, role, content))
+                    let sender = element["sender_username"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if role == "user", !sender.isEmpty {
+                        rawSenders[rawID] = sender
+                    }
                 }
             }
             var deduplicated: [(String, String, String)] = []
@@ -118,12 +144,18 @@ final class OrbTranscriptModel {
         if let opt = optimisticPrompt, !rows.contains(where: { $0.1 == "user" && OrbConversation.sameMessage($0.2, opt) }) {
             rows.append(("optimistic-user", "user", opt))
         }
+        var senders: [String: String] = [:]
         if !isCloud {
             rows = rows.enumerated().map { index, row in
-                ("turn-\(index)-\(row.1)", row.1, row.2)
+                let finalID = "turn-\(index)-\(row.1)"
+                if let sender = rawSenders[row.0] {
+                    senders[finalID] = sender
+                }
+                return (finalID, row.1, row.2)
             }
         }
-        return OrbTranscriptGates.ensureUniqueRows(rows)
+        let uniqueRows = OrbTranscriptGates.ensureUniqueRows(rows)
+        return (rows: uniqueRows, senders: senders)
     }
 }
 

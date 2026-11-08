@@ -1180,7 +1180,11 @@ def sanitizeAutomationVariablesJson (jv : JVal) : String :=
     renderCompact (.obj kept)
   | _ => "{}"
 
-def missionDetailJson (st : CoreStore) (missionId : String) : IO (Except String (Option String)) := do
+def missionDetailJson
+    (st : CoreStore)
+    (missionId : String)
+    (callerUserId? : Option String := none)
+    (bootstrapAdminId : String := "") : IO (Except String (Option String)) := do
   let sql :=
     "SELECT m.id,m.title,m.status,m.backend,COALESCE(m.model_override,''),COALESCE(m.model_effort,'')," ++
     "m.working_directory,m.updated_at,m.total_cost_cents,m.authority_mode,m.placement_kind," ++
@@ -1191,7 +1195,8 @@ def missionDetailJson (st : CoreStore) (missionId : String) : IO (Except String 
     "(SELECT COUNT(*) FROM mission_events ev WHERE ev.mission_id=m.id),m.tags," ++
     "(SELECT COUNT(*) FROM mission_continuations c WHERE c.mission_id=m.id AND c.phase=1)," ++
     "COALESCE(e.verified,1)," ++
-    "COALESCE(m.project,''),COALESCE(m.track,''),COALESCE(m.repo,''),COALESCE(m.working_directory,''),COALESCE(m.total_cost_cents,0) " ++
+    "COALESCE(m.project,''),COALESCE(m.track,''),COALESCE(m.repo,''),COALESCE(m.working_directory,''),COALESCE(m.total_cost_cents,0)," ++
+    "COALESCE(m.owner_user_id,''),COALESCE((SELECT u.username FROM users u WHERE u.id = m.owner_user_id),'') " ++
     "FROM missions m LEFT JOIN mission_terminal_evidence e ON e.mission_id=m.id WHERE m.id=?1;"
   let rows ← execParamQuery st.missionsDb sql #[missionId]
   match rows with
@@ -1216,11 +1221,32 @@ def missionDetailJson (st : CoreStore) (missionId : String) : IO (Except String 
     let effReason := if !evReason.isEmpty then evReason else mReason
     let armedWakeups := cellNat r 27
     let evVerified := (cellNat r 28) != 0
-    let proj := cell r 29
+    let rawProj := cell r 29
+    let proj :=
+      match callerUserId? with
+      | some uid =>
+        if !rawProj.isEmpty && rawProj.startsWith (uid ++ ":") then
+          (rawProj.drop (uid.length + 1)).toString
+        else if !bootstrapAdminId.isEmpty && uid == bootstrapAdminId then
+          rawProj
+        else
+          match rawProj.splitOn ":" with
+          | [_, rest] => rest
+          | _ => rawProj
+      | none => rawProj
     let track := cell r 30
     let githubPr := cell r 31
     let workDir := cell r 32
     let totalCostCents := cellNat r 33
+    let ownerUid := cell r 34
+    let ownerUname := cell r 35
+    let viewerRole :=
+      match callerUserId? with
+      | some uid => if ownerUid == uid then "owner" else "participant"
+      | none => "owner"
+    let sharedWithJson ← match ← listMissionSharesJson st missionId with
+      | .ok sj => pure sj
+      | .error _ => pure "[]"
     let verdict := deriveMissionHealthVerdict status effReason orph superBy place
       ((cellNat r 15).toUInt64 == st.bootEpoch) false ((cellNat r 24) > 0) ((cellNat r 25) > 0) (armedWakeups > 0) hasEv
     let evJson :=
@@ -1241,6 +1267,7 @@ def missionDetailJson (st : CoreStore) (missionId : String) : IO (Except String 
       s!"\"updated_at\":{jsonEscape (cell r 7)},\"total_cost_cents\":{totalCostCents}," ++
       s!"\"authority_mode\":{jsonEscape authMode},\"placement_kind\":{jsonEscape place}," ++
       s!"\"superseded_by_mission_id\":{jsonEscape superBy},\"orphaned_at\":{jsonEscape orph},\"reserved_disk_gib\":{diskGib}," ++
+      s!"\"viewer_role\":{jsonEscape viewerRole},\"owner_username\":{jsonEscape ownerUname},\"shared_with\":{sharedWithJson}," ++
       s!"\"state_revision\":{cellNat r 14},\"not_before\":{cellNat r 17},\"resume_intent\":{cellNat r 18}," ++
       s!"\"run_generation\":{cellNat r 19},\"health_verdict\":{jsonEscape verdict}," ++
       s!"\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut}}"))

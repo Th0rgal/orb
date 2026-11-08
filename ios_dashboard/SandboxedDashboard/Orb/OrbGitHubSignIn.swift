@@ -295,7 +295,11 @@ struct OrbChangePasswordSheet: View {
                     SecureField("Confirm new password", text: $confirmPassword)
                         .textContentType(.newPassword)
                 } footer: {
-                    Text("Updates the password stored on Core for single-tenant sign-in.")
+                    Text(
+                        OrbCore.shared.authMode == .multiUser
+                            ? "Updates your personal Orb password and rotates your active session."
+                            : "Updates the password stored on Core for single-tenant sign-in."
+                    )
                 }
             }
             .scrollContentBackground(.hidden)
@@ -343,10 +347,13 @@ struct OrbChangePasswordSheet: View {
                 body["current_password"] = .string(currentPassword)
             }
             let res = try await OrbCore.shared.call("/api/auth/change-password", method: "POST", body: .object(body))
-            if OrbKeychain.credentials(for: OrbCore.shared.baseURL) != nil {
-                OrbKeychain.saveCredentials(.init(password: newPassword, username: nil), for: OrbCore.shared.baseURL)
+            if !res["token"].text.isEmpty {
+                OrbCore.shared.updateRotatedToken(res["token"].text)
             }
-            let msg = res["message"].text.isEmpty ? "Server password updated." : res["message"].text
+            if let saved = OrbKeychain.credentials(for: OrbCore.shared.baseURL) {
+                OrbKeychain.saveCredentials(.init(password: newPassword, username: saved.username), for: OrbCore.shared.baseURL)
+            }
+            let msg = res["message"].text.isEmpty ? "Password updated." : res["message"].text
             onSaved(msg)
             dismiss()
         } catch {

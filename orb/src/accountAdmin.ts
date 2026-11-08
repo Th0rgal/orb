@@ -1,12 +1,107 @@
-import { api, apiText } from "./api";
+import {
+  ApiError,
+  api,
+  apiText,
+  applyAuthMeResponse,
+  authCapabilities,
+  authModeState,
+  connectionVersion,
+  currentUser,
+  currentUserLoading,
+  getApiUrl,
+  isAdminUser,
+  isConnected,
+  refreshCurrentUser,
+  resetCurrentUserState,
+  setConnection,
+  type AuthCapabilities,
+  type AuthMeResponse,
+  type AuthStatusInfo,
+  type CurrentUser,
+} from "./api";
 import { sha256Hex, signedRawRequest } from "./deviceApproval";
 import { nativeInvoke } from "./native";
 
-export interface AuthStatusInfo {
-  auth_mode: "disabled" | "single_tenant" | "multi_user" | string;
-  password_source: "dashboard" | "environment" | "none" | string;
-  password_changed_at?: string | null;
-  dev_mode: boolean;
+export {
+  applyAuthMeResponse,
+  authCapabilities,
+  authModeState,
+  currentUser,
+  currentUserLoading,
+  isAdminUser,
+  refreshCurrentUser,
+  resetCurrentUserState,
+  type AuthCapabilities,
+  type AuthMeResponse,
+  type AuthStatusInfo,
+  type CurrentUser,
+};
+
+export interface AdminUserRecord {
+  id: string;
+  username: string;
+  role: "admin" | "member";
+  unix_username: string | null;
+  disabled: boolean;
+  daily_spend_cap_cents: number | null;
+  spent_today_cents: number;
+  created_at: string;
+}
+
+const RESERVED_UNIX_USERNAMES = new Set([
+  "root",
+  "daemon",
+  "bin",
+  "sys",
+  "sync",
+  "games",
+  "man",
+  "lp",
+  "mail",
+  "news",
+  "uucp",
+  "proxy",
+  "www-data",
+  "backup",
+  "list",
+  "irc",
+  "gnats",
+  "nobody",
+  "systemd-network",
+  "systemd-resolve",
+  "systemd-timesync",
+  "messagebus",
+  "sshd",
+  "postgres",
+  "redis",
+  "docker",
+  "orb-node",
+  "orb-privd",
+  "sandboxed",
+  "ubuntu",
+  "debian",
+  "admin",
+]);
+
+/** Matches `OrbCore.Store.validUnixUsername` / `orb-privd` strict POSIX account rules. */
+export function validUnixUsername(raw: string | null | undefined): boolean {
+  if (typeof raw !== "string") return false;
+  const trimmed = raw.trim();
+  if (trimmed.length < 1 || trimmed.length > 31) return false;
+  if (!/^[a-z_][a-z0-9_-]{0,30}$/.test(trimmed)) return false;
+  return !RESERVED_UNIX_USERNAMES.has(trimmed);
+}
+
+/** Suggest a safe default POSIX account (`orb-<username>`) for a multi-user member. */
+export function defaultUnixUsernameFor(username: string): string {
+  const slug = username
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (!slug) return "";
+  const candidate = `orb-${slug}`.slice(0, 31);
+  return validUnixUsername(candidate) ? candidate : "";
 }
 
 export function getAuthStatus(): Promise<AuthStatusInfo> {
@@ -17,13 +112,77 @@ export async function changeServerPassword(
   currentPassword: string | undefined,
   newPassword: string,
 ): Promise<void> {
-  await api("/api/auth/change-password", {
+  const res = await api<{ ok?: boolean; token?: string } | undefined>("/api/auth/change-password", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       ...(currentPassword && currentPassword.trim() ? { current_password: currentPassword } : {}),
       new_password: newPassword,
     }),
+  });
+  if (res && typeof res.token === "string" && res.token.trim()) {
+    setConnection(getApiUrl(), res.token.trim());
+  }
+}
+
+export async function listAdminUsers(): Promise<AdminUserRecord[]> {
+  const data = await api<AdminUserRecord[] | { users?: AdminUserRecord[] }>("/api/admin/users");
+  if (Array.isArray(data)) return data;
+  return Array.isArray(data?.users) ? data.users : [];
+}
+
+export interface CreateAdminUserInput {
+  username: string;
+  password: string;
+  role: "admin" | "member";
+  unix_username?: string | null;
+  daily_spend_cap_cents?: number | null;
+}
+
+export async function createAdminUser(input: CreateAdminUserInput): Promise<AdminUserRecord> {
+  return api<AdminUserRecord>("/api/admin/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      username: input.username.trim(),
+      password: input.password,
+      role: input.role,
+      ...(input.unix_username && input.unix_username.trim()
+        ? { unix_username: input.unix_username.trim() }
+        : {}),
+      ...(input.daily_spend_cap_cents !== undefined && input.daily_spend_cap_cents !== null
+        ? { daily_spend_cap_cents: input.daily_spend_cap_cents }
+        : {}),
+    }),
+  });
+}
+
+export interface UpdateAdminUserInput {
+  role?: "admin" | "member";
+  unix_username?: string | null;
+  disabled?: boolean;
+  daily_spend_cap_cents?: number | null;
+}
+
+export async function updateAdminUser(id: string, patch: UpdateAdminUserInput): Promise<AdminUserRecord> {
+  return api<AdminUserRecord>(`/api/admin/users/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function resetAdminUserPassword(id: string, password: string): Promise<void> {
+  await api(`/api/admin/users/${encodeURIComponent(id)}/reset-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+}
+
+export async function deleteAdminUser(id: string): Promise<void> {
+  await api(`/api/admin/users/${encodeURIComponent(id)}`, {
+    method: "DELETE",
   });
 }
 
@@ -203,6 +362,8 @@ export function effectiveCleanupDays(days: number | null | undefined): number {
     ? days
     : DEFAULT_CLEANUP_RETENTION_DAYS;
 }
+
+export { formatUsdFromCents, parseUsdToCents } from "./missionSharesApi";
 
 export function parseCleanupDays(raw: string, min = 1, max = 365): number | null {
   const trimmed = raw.trim();

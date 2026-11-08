@@ -763,6 +763,7 @@ struct OrbMissionBudget: Equatable {
 struct OrbMissionSettingsSheet: View {
     let missionId: String
     let title: String
+    var readOnly: Bool = false
     @Environment(\.dismiss) private var dismiss
     @State private var view: OrbMissionBudget?
     @State private var loadError: String?
@@ -834,14 +835,15 @@ struct OrbMissionSettingsSheet: View {
                 Section {
                     if let v = view {
                         Toggle("Spending budget", isOn: Binding(get: { v.mode == "own" }, set: { on in toggle(on) }))
-                            .disabled(busy)
+                            .disabled(busy || readOnly)
                             .accessibilityIdentifier("mission.settings.budget.toggle")
                         Text(v.modeLine).font(.footnote).foregroundStyle(.secondary)
                         if v.mode == "own" {
                             HStack {
                                 TextField("Amount (USD)", text: $draft).keyboardType(.decimalPad)
+                                    .disabled(readOnly)
                                     .accessibilityIdentifier("mission.settings.budget.amount")
-                                Button("Save") { save() }.disabled(busy || draft == format(v.ownBudget))
+                                Button("Save") { save() }.disabled(busy || readOnly || draft == format(v.ownBudget))
                             }
                             if let max = v.maxGrant { Text("Up to \(OrbMissionBudget.money(max)) from the parent pool.").font(.footnote).foregroundStyle(.secondary) }
                         }
@@ -869,7 +871,7 @@ struct OrbMissionSettingsSheet: View {
                 if let v = view {
                     Section {
                         Toggle("Bandwidth limit", isOn: Binding(get: { v.bandwidthMode == "own" }, set: { on in toggleBandwidth(on) }))
-                            .disabled(busy)
+                            .disabled(busy || readOnly)
                             .accessibilityIdentifier("mission.settings.bandwidth.toggle")
                         Text(v.bandwidthModeLine).font(.footnote).foregroundStyle(.secondary)
                         if let eff = v.effectiveBandwidth, eff.source == "mission" {
@@ -891,6 +893,7 @@ struct OrbMissionSettingsSheet: View {
                                 Text("Tokens / min")
                                 Spacer()
                                 TextField("e.g. 120k", text: $bwTokensDraft).textInputAutocapitalization(.never).autocorrectionDisabled()
+                                    .disabled(readOnly)
                                     .multilineTextAlignment(.trailing)
                                     .frame(maxWidth: 130)
                                     .accessibilityIdentifier("mission.settings.bandwidth.tpm")
@@ -899,6 +902,7 @@ struct OrbMissionSettingsSheet: View {
                                 Text("Compute (vCPU / min)")
                                 Spacer()
                                 TextField("Optional", text: $bwVcpuDraft)
+                                    .disabled(readOnly)
                                     .keyboardType(.numberPad)
                                     .multilineTextAlignment(.trailing)
                                     .frame(maxWidth: 130)
@@ -908,16 +912,17 @@ struct OrbMissionSettingsSheet: View {
                                 Text("Burn ceiling ($/h)")
                                 Spacer()
                                 TextField("Optional", text: $bwUsdHDraft)
+                                    .disabled(readOnly)
                                     .keyboardType(.decimalPad)
                                     .multilineTextAlignment(.trailing)
                                     .frame(maxWidth: 130)
                                     .accessibilityIdentifier("mission.settings.bandwidth.usdh")
                             }
                             Toggle("Prioritize root agent", isOn: $bwProtectRoot)
-                                .disabled(busy)
+                                .disabled(busy || readOnly)
                                 .accessibilityIdentifier("mission.settings.bandwidth.protect_root")
                             Button("Save bandwidth") { saveBandwidth() }
-                                .disabled(busy || !bwDraftDirty(v))
+                                .disabled(busy || readOnly || !bwDraftDirty(v))
                                 .accessibilityIdentifier("mission.settings.bandwidth.save")
                         }
                         if let bwSaveError {
@@ -925,12 +930,14 @@ struct OrbMissionSettingsSheet: View {
                             if let retry = pendingBwRetry { Button("Retry") { commitBandwidth(retry) } }
                         }
                     } header: { Text("Bandwidth & pacing") } footer: {
-                        Text("Smooths inference and machine spawn bursts with pace delays instead of hard errors.")
+                        Text(readOnly
+                            ? "Shared participants can view budgets and pacing; only the mission owner can edit them."
+                            : "Smooths inference and machine spawn bursts with pace delays instead of hard errors.")
                     }
 
                     Section {
                         Toggle("Machine limit", isOn: Binding(get: { v.vmLimitsMode == "own" }, set: { on in toggleVmLimits(on) }))
-                            .disabled(busy)
+                            .disabled(busy || readOnly)
                             .accessibilityIdentifier("mission.settings.vmlimits.toggle")
                         Text(v.vmLimitsModeLine).font(.footnote).foregroundStyle(.secondary)
                         if let eff = v.effectiveVmLimits {
@@ -948,6 +955,7 @@ struct OrbMissionSettingsSheet: View {
                                 Text("Max concurrent")
                                 Spacer()
                                 TextField("Optional", text: $vmTotalDraft)
+                                    .disabled(readOnly)
                                     .keyboardType(.numberPad)
                                     .multilineTextAlignment(.trailing)
                                     .frame(maxWidth: 110)
@@ -962,6 +970,7 @@ struct OrbMissionSettingsSheet: View {
                                             get: { vmProviderDrafts[p.id] ?? "" },
                                             set: { vmProviderDrafts[p.id] = $0 }
                                         ))
+                                        .disabled(readOnly)
                                         .keyboardType(.numberPad)
                                         .multilineTextAlignment(.trailing)
                                         .frame(maxWidth: 140)
@@ -973,7 +982,7 @@ struct OrbMissionSettingsSheet: View {
                                 LabeledContent("Per-provider limits", value: summary.isEmpty ? "Optional" : summary)
                             }
                             Button("Save machine limit") { saveVmLimits() }
-                                .disabled(busy || !vmDraftDirty(v))
+                                .disabled(busy || readOnly || !vmDraftDirty(v))
                                 .accessibilityIdentifier("mission.settings.vmlimits.save")
                         }
                         if let vmSaveError {

@@ -886,6 +886,7 @@ structure ForkMissionRequest where
   title?           : Option String := none
   sideQuestion     : Bool          := false
   sidePrompt?      : Option String := none
+  ownerUserId      : String        := ""
   nowAt            : String
   deriving Repr, DecidableEq
 
@@ -968,7 +969,7 @@ def forkOrHandoffMission
     (defaultWorkDir : String)
     (req : ForkMissionRequest) : IO (Except (Nat × String) ForkMissionOutcome) := do
   let mRows ← execParamQuery st.missionsDb
-    "SELECT title,backend,COALESCE(model_override,''),COALESCE(model_effort,''),working_directory,project,authority_mode,placement_kind,tags FROM missions WHERE id=?1;"
+    "SELECT title,backend,COALESCE(model_override,''),COALESCE(model_effort,''),working_directory,project,authority_mode,placement_kind,tags,COALESCE(owner_user_id,'') FROM missions WHERE id=?1;"
     #[req.sourceMissionId]
   let .ok rs := mRows | return .error (500, "source_mission_query_failed")
   if rs.size ≤ 1 then
@@ -983,6 +984,7 @@ def forkOrHandoffMission
   let srcAuthMode := (row[6]?).getD "writer"
   let srcPlacement := (row[7]?).getD "managed"
   let srcExtraTags := parseStringJsonArray ((row[8]?).getD "[]")
+  let srcOwnerUserId := (row[9]?).getD ""
 
   let srcIsCloud := isCloudBackendName srcBackend
   let targetBackend :=
@@ -1090,6 +1092,7 @@ def forkOrHandoffMission
     reservedDiskGib := 0
     nodeBootEpoch := st.bootEpoch
     tagsJson := initTagsJson
+    ownerUserId := if !req.ownerUserId.isEmpty then req.ownerUserId else srcOwnerUserId
   }
   match ← insertNewMission st mRec with
   | .error "mission_already_exists" =>

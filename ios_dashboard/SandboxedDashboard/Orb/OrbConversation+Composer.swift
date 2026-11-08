@@ -612,6 +612,7 @@ extension OrbConversation {
                 )
             }
             Button {
+                guard !isParticipant else { return }
                 composerFocused = false
                 showSelection = true
             } label: {
@@ -634,9 +635,11 @@ extension OrbConversation {
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8.5, weight: .semibold))
-                        .foregroundStyle(OrbStyle.textMuted)
+                    if !isParticipant {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(OrbStyle.textMuted)
+                    }
                 }
                 .padding(.horizontal, 9)
                 .padding(.vertical, 5.5)
@@ -654,6 +657,7 @@ extension OrbConversation {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .disabled(isParticipant)
             .accessibilityLabel("Agent and model: \(selection.label)")
             .accessibilityIdentifier("agent-selection")
         }

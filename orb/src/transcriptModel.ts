@@ -10,7 +10,7 @@ import { projectTranscriptCounts } from "./clientCore";
 import { isCancellationRequestedNotice, isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
 
 export type StreamItem =
-  | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; eventId?: string; sequence?: number; source?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
+  | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; eventId?: string; sequence?: number; source?: string; senderUsername?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
   | { kind: "think"; key: string; text: string; done: boolean }
   | { kind: "text"; key: string; text: string; live: boolean; eventId?: string; sequence?: number; /** When the turn this text closes completed (ISO), when known. */ at?: string; /** The producer's one bubble for a whole response (text_delta_latest), across tool boundaries: it holds the answer, never only narration. */ cumulative?: boolean }
   | { kind: "error"; key: string; text: string; terminal?: boolean; cancelled?: boolean; title?: string }
@@ -269,20 +269,28 @@ export class TranscriptReducer {
       }
       const index = messageId ? this.users.get(messageId) : undefined;
       const previous = index == null ? undefined : this.items[index];
+      const senderUsername = typeof d.sender_username === "string" && d.sender_username.trim() ? d.sender_username.trim() : undefined;
       if (previous?.kind === "user" && index != null) {
         if (previous.queued && queued) {
           const text = str(d.content) || previous.text;
           const nextSource = source ?? previous.source;
-          if (text !== previous.text || nextSource !== previous.source) {
-            this.put(index, { ...previous, text, source: nextSource });
+          const nextSender = senderUsername ?? previous.senderUsername;
+          if (text !== previous.text || nextSource !== previous.source || nextSender !== previous.senderUsername) {
+            this.put(index, { ...previous, text, source: nextSource, ...(nextSender ? { senderUsername: nextSender } : {}) });
           }
           return;
         }
-        if (source && source !== previous.source) this.put(index, { ...previous, source });
+        if ((source && source !== previous.source) || (senderUsername && senderUsername !== previous.senderUsername)) {
+          this.put(index, {
+            ...previous,
+            ...(source ? { source } : {}),
+            ...(senderUsername ? { senderUsername } : {}),
+          });
+        }
         if (!previous.queued || queued) {
           const nextAt = !queued && typeof d.at === "string" ? d.at : previous.at;
-          if ((previous.receipt && d.receipt !== true) || nextAt !== previous.at) {
-            this.put(index, { ...previous, source: source ?? previous.source, text: str(d.content) || previous.text, ...(previous.receipt && d.receipt !== true ? { receipt: false } : {}), ...(nextAt ? { at: nextAt } : {}) });
+          if ((previous.receipt && d.receipt !== true) || nextAt !== previous.at || (senderUsername && senderUsername !== previous.senderUsername)) {
+            this.put(index, { ...previous, source: source ?? previous.source, ...(senderUsername || previous.senderUsername ? { senderUsername: senderUsername ?? previous.senderUsername } : {}), text: str(d.content) || previous.text, ...(previous.receipt && d.receipt !== true ? { receipt: false } : {}), ...(nextAt ? { at: nextAt } : {}) });
           }
           return;
         }
@@ -296,13 +304,13 @@ export class TranscriptReducer {
         if (this.lastFinal != null && this.lastFinal > index) this.lastFinal--;
         this.lastUser = this.items.length;
         this.users.set(messageId!, this.items.length);
-        this.items.push({ ...previous, source: source ?? previous.source, text: str(d.content) || previous.text, queued: false, receipt: d.receipt === true, ...(ev.sequence != null ? { sequence: ev.sequence } : {}), at: typeof d.at === "string" ? d.at : undefined });
+        this.items.push({ ...previous, source: source ?? previous.source, ...(senderUsername || previous.senderUsername ? { senderUsername: senderUsername ?? previous.senderUsername } : {}), text: str(d.content) || previous.text, queued: false, receipt: d.receipt === true, ...(ev.sequence != null ? { sequence: ev.sequence } : {}), at: typeof d.at === "string" ? d.at : undefined });
         return;
       }
       if (!queued) { this.close(); this.lastFinal = undefined; this.suppressedFinalPrefix = ""; }
       if (messageId) this.users.set(messageId, this.items.length);
       if (!queued) this.lastUser = this.items.length;
-      this.items.push({ kind: "user", key: messageId ? `user:${messageId}` : this.key("user"), text: str(d.content), messageId, eventId: messageId, ...(ev.sequence != null ? { sequence: ev.sequence } : {}), source, queued, attached: d.attached === true, receipt: d.receipt === true, ...(!queued && typeof d.at === "string" ? { at: d.at } : {}) });
+      this.items.push({ kind: "user", key: messageId ? `user:${messageId}` : this.key("user"), text: str(d.content), messageId, eventId: messageId, ...(ev.sequence != null ? { sequence: ev.sequence } : {}), source, ...(senderUsername ? { senderUsername } : {}), queued, attached: d.attached === true, receipt: d.receipt === true, ...(!queued && typeof d.at === "string" ? { at: d.at } : {}) });
       return;
     }
     const id = ev.eventId ?? (typeof d.id === "string" ? d.id : undefined);

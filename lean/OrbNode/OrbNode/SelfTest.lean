@@ -4,6 +4,7 @@
 import LeanSys.Auth
 import OrbBin.PosixExt
 import OrbBin.Json
+import OrbBin.PrivdMain
 import OrbNode.Spec
 import OrbNode.MutantSuite
 import OrbNode.Posix
@@ -1229,6 +1230,203 @@ def runTests : IO UInt32 := do
   rt := rt4b
   check "POST /jobs rejects local source.repo with 422 before admission"
     (r422.status == 422 && !rt.ledger.jobs.contains badJobId)
+
+  -- Multi-User Phase 2: LeaseClaims v2, ORB_NODE_ADMIN_ONLY=1 defense-in-depth, zero managed_auth leak, and live orb-privd job + file browser
+  let nowMu ← OrbNode.Posix.nowEpoch
+  let memberClaims : LeaseClaims := {
+    missionId := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    nodeId := rt.cfg.nodeId
+    scope := .jobSubmit
+    expiresAt := nowMu + 600
+    ownerUserId := "usr_alice"
+    callerRole := "member"
+    unixUsername := some "orb-alice"
+  }
+  let memberTok := signLeaseToken rt.cfg.token memberClaims
+  let verifiedMember := verifyLeaseToken memberTok rt.cfg.token none rt.cfg.nodeId .jobSubmit nowMu none
+  check "LeaseClaims v2 round-trips ownerUserId, callerRole, and unixUsername"
+    (verifiedMember.toOption == some memberClaims)
+
+  let noUnixClaims : LeaseClaims := { memberClaims with unixUsername := none }
+  let noUnixTok := signLeaseToken rt.cfg.token noUnixClaims
+  let badRootClaims : LeaseClaims := { memberClaims with unixUsername := some "root" }
+  let badRootTok := signLeaseToken rt.cfg.token badRootClaims
+
+  -- Colocated admin-only node rejects member lease with 403
+  let rtAdminOnly : NodeRuntime := { rt with cfg := { rt.cfg with adminOnly := true } }
+  let (_, rAdminOnlyRej) ← handleRequest rtAdminOnly {
+    method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[
+      ("job_id", .str "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee01"),
+      ("mission_id", .str memberClaims.missionId),
+      ("lease_token", .str memberTok),
+      ("payload", .obj #[("kind", .str "raw_command"), ("command", .str "echo should-not-run")])
+    ])).toUTF8
+  }
+  let (_, rNoUnixRej) ← handleRequest rt {
+    method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[
+      ("job_id", .str "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee02"),
+      ("mission_id", .str memberClaims.missionId),
+      ("lease_token", .str noUnixTok),
+      ("payload", .obj #[("kind", .str "raw_command"), ("command", .str "echo no-unix")])
+    ])).toUTF8
+  }
+  let (_, rRootUnixRej) ← handleRequest rt {
+    method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[
+      ("job_id", .str "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee03"),
+      ("mission_id", .str memberClaims.missionId),
+      ("lease_token", .str badRootTok),
+      ("payload", .obj #[("kind", .str "raw_command"), ("command", .str "echo bad-root")])
+    ])).toUTF8
+  }
+  let capMemberTok := signLeaseToken rt.cfg.token {
+    missionId := "00000000-0000-0000-0000-000000000000"
+    nodeId := rt.cfg.nodeId
+    scope := .nodeCapacity
+    expiresAt := nowMu + 600
+    ownerUserId := "usr_alice"
+    callerRole := "member"
+    unixUsername := some "orb-alice"
+  }
+  let (_, rCapMemberRej) ← handleRequest rt {
+    method := "POST", rawPath := "/capacity", path := "/capacity", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[("lease_token", .str capMemberTok), ("capacity", JVal.nat 2)])).toUTF8
+  }
+  check "Node placement role gate rejects member on admin_only node, missing/root unix_username, and member /capacity with HTTP 403"
+    (rAdminOnlyRej.status == 403 &&
+     rNoUnixRej.status == 403 &&
+     rRootUnixRej.status == 403 &&
+     rCapMemberRej.status == 403)
+
+  -- Live OrbNode -> orb-privd confined user job + /jobs/:id/files + zero managed_auth leakage
+  let privdHomes := System.FilePath.mk tmpRoot / "mu-homes"
+  let privdState := System.FilePath.mk tmpRoot / "mu-privd-state"
+  let fakeAgHome := System.FilePath.mk tmpRoot / "fake-ag-home"
+  IO.FS.createDirAll privdHomes
+  IO.FS.createDirAll privdState
+  IO.FS.createDirAll fakeAgHome
+  let _ ← chmod fakeAgHome.toString 0o700
+  IO.FS.writeFile (fakeAgHome / "antigravity-oauth-token") "{\"access_token\":\"ADMIN_SECRET_OAUTH\"}\n"
+  let _ ← chmod (fakeAgHome / "antigravity-oauth-token").toString 0o600
+  setenvVar "ORB_PRIVD_ALLOW_NONROOT_TEST" "1"
+  setenvVar "ORB_PRIVD_HOME_ROOT" privdHomes.toString
+  setenvVar "ORB_PRIVD_STATE_DIR" privdState.toString
+  let pidNodeTest ← getpid
+  let muSock := s!"/tmp/on-privd-{pidNodeTest}.sock"
+  try IO.FS.removeFile muSock catch _ => pure ()
+  let stopPrivdRef ← IO.mkRef false
+  let privdLfd ← match ← LeanSys.Posix.unixListen muSock 32 with
+    | .ok f => pure f
+    | .error e => throw (IO.userError s!"unixListen {muSock} failed: {e}")
+  let privdCfg : OrbBin.Privd.PrivdConfig := {
+    socketPath := muSock
+    groupName := "staff"
+    apiUrl := "http://127.0.0.1:9"
+    apiToken := some "tok"
+    auditLog := (System.FilePath.mk tmpRoot / "mu-audit.jsonl").toString
+    hostLabel := "self"
+  }
+  let privdLoopTask ← IO.asTask do
+    while !(← stopPrivdRef.get) do
+      match ← LeanSys.Posix.tcpAcceptPoll privdLfd 100 with
+      | .ok cfd => OrbBin.Privd.handleConnection cfd privdCfg
+      | .error _ => pure ()
+    return true
+  let cleanupMuPrivd : IO Unit := do
+    stopPrivdRef.set true
+    let _ ← LeanSys.Posix.closeFd privdLfd
+    let _ := privdLoopTask.get
+    try IO.FS.removeFile muSock catch _ => pure ()
+    unsetenvVar "ORB_PRIVD_ALLOW_NONROOT_TEST"
+    unsetenvVar "ORB_PRIVD_HOME_ROOT"
+    unsetenvVar "ORB_PRIVD_STATE_DIR"
+  let runMuInner : IO Unit := do
+    let mut rtMu : NodeRuntime := {
+      rt with
+      cfg := {
+        rt.cfg with
+        privdSocket := muSock
+        managedAuth := { rt.cfg.managedAuth with antigravityHome? := some fakeAgHome.toString }
+      }
+    }
+    let muJobId := "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee99"
+    let (rtMuSub, rMuSub) ← handleRequest rtMu {
+      method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[
+        ("job_id", .str muJobId),
+        ("mission_id", .str memberClaims.missionId),
+        ("lease_token", .str memberTok),
+        ("payload", .obj #[
+          ("kind", .str "raw_command"),
+          ("managed_auth", .arr #[.str "antigravity"]),
+          ("env", .obj #[
+            ("ANTHROPIC_API_KEY", .str "orb-mpt-v1_scoped_alice"),
+            ("SANDBOXED_NODE_TOKEN", .str "NODE_SECRET_MUST_NOT_LEAK")
+          ]),
+          ("artifacts", .arr #[.str "out.txt"]),
+          ("command", .str "printf 'KEY=%s|NODE=%s|CRED=%d\\n' \"$ANTHROPIC_API_KEY\" \"$SANDBOXED_NODE_TOKEN\" \"$(test -e .gemini/antigravity-cli && echo 1 || echo 0)\" > out.txt")
+        ])
+      ])).toUTF8
+    }
+    rtMu := rtMuSub
+    let mut muFinished := false
+    for _ in [0:40] do
+      IO.sleep 60
+      rtMu ← tickRuntime rtMu
+      if let some jr := rtMu.ledger.jobs.get? muJobId then
+        if jr.state.isTerminal then
+          muFinished := true
+          break
+    let muRec? := rtMu.ledger.jobs.get? muJobId
+    let (_, rMuFiles) ← handleRequest rtMu {
+      method := "POST", rawPath := s!"/jobs/{muJobId}/files", path := s!"/jobs/{muJobId}/files",
+      query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[("action", .str "read"), ("path", .str "out.txt")])).toUTF8
+    }
+    let .ok muFileJv := OrbBin.Json.parse (String.fromUTF8? rMuFiles.body |>.getD "{}")
+      | throw (IO.userError "failed parsing /jobs/:id/files JSON")
+    let outTxt := (muFileJv.fieldStr? "content").getD ""
+
+    let muExecClaims : LeaseClaims := { memberClaims with scope := .missionExecute }
+    let muExecTok := signLeaseToken rt.cfg.token muExecClaims
+    let (_, rMuExec) ← handleRequest rtMu {
+      method := "POST", rawPath := "/execute", path := "/execute", query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[
+        ("mission_id", .str memberClaims.missionId),
+        ("lease_token", .str muExecTok),
+        ("command", .str "pwd")
+      ])).toUTF8
+    }
+    let .ok muExecJv := OrbBin.Json.parse (String.fromUTF8? rMuExec.body |>.getD "{}")
+      | throw (IO.userError "failed parsing /execute JSON")
+    let execOut := ((muExecJv.fieldStr? "stdout").getD "").trimAscii.toString
+
+    check "End-to-end OrbNode -> orb-privd confined member job + /files + /execute isolates home and never leaks managed OAuth or node token"
+      (rMuSub.status == 202 &&
+       muFinished &&
+       muRec?.map (·.state) == some .succeeded &&
+       muRec?.map (·.ownerUserId) == some "usr_alice" &&
+       muRec?.map (·.execUnixUser) == some "orb-alice" &&
+       muRec?.map (fun r => r.artifacts.size) == some 1 &&
+       rMuFiles.status == 200 &&
+       outTxt.trimAscii.toString == "KEY=orb-mpt-v1_scoped_alice|NODE=|CRED=0" &&
+       rMuExec.status == 200 &&
+       (execOut.splitOn "/orb-alice/.orb-missions/").length > 1)
+  try
+    runMuInner
+    cleanupMuPrivd
+  catch e =>
+    cleanupMuPrivd
+    throw e
+
+  -- Linux `/proc` + `setsid` runtime integration checks (runs in full on Linux; skips cleanly on macOS hosts without `/proc`)
+  if !(← (System.FilePath.mk "/proc/sys/kernel/random/boot_id").pathExists) then
+    let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
+    let passed ← passedRef.get
+    IO.println s!"OrbNode self-test: {passed}/{passed} assertions PASSED (host lacks /proc; Linux procfs integration skipped)"
+    return 0
 
   -- POST /jobs valid lean_build with complete bundle + SHA-256 + `lean` argv -> 202 -> succeeded + artifact
   let jobId := "33333333-3333-4333-8333-333333333333"

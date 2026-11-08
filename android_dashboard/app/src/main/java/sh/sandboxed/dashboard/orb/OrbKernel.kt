@@ -961,6 +961,50 @@ object OrbKernel {
         p0InFlight: Int
     ): Long
 
+    @JvmStatic
+    external fun orbMultiuserRbacStep(
+        callerAuthed: Int,
+        callerDisabled: Int,
+        epochMatches: Int,
+        callerRole: Int,
+        opClass: Int,
+        isOwner: Int,
+        isSharedParticipant: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbPlacementRoleAdmit(
+        callerRole: Int,
+        targetKind: Int,
+        nodeAdminOnly: Int,
+        hasValidUnixUser: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbUserSpendCapStep(
+        globalCapActive: Int,
+        globalSpentCents: Int,
+        globalCapCents: Int,
+        userCapActive: Int,
+        userSpentCents: Int,
+        userCapCents: Int,
+        deltaCents: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbPrivdUserExecStep(
+        peerIsNodeUid: Int,
+        leaseVerified: Int,
+        nodeAdminOnly: Int,
+        callerRole: Int,
+        usernameValid: Int,
+        targetUid: Int,
+        targetGid: Int,
+        gidDisjointPriv: Int,
+        homeConfinedNoSymlink: Int,
+        elanRootOwned: Int
+    ): Int
+
     data class WorkfoldVerdict(val foldItem: Boolean, val foldHasToolNext: Boolean)
 
     private fun bInt(v: Boolean): Int = if (v) 1 else 0
@@ -2137,6 +2181,123 @@ object OrbKernel {
             connectDeadlineMs = ((raw ushr 16) and 0xFFFFL).toInt(),
             pongDeadlineMs = ((raw ushr 32) and 0xFFFFL).toInt(),
             wakePongDeadlineMs = ((raw ushr 48) and 0xFFFFL).toInt()
+        )
+    }
+
+    data class MultiuserRbacVerdict(
+        val admitted: Boolean,
+        val httpStatus: Int,
+        val reasonCode: Int
+    )
+
+    fun multiuserRbacStep(
+        callerAuthed: Boolean,
+        callerDisabled: Boolean,
+        epochMatches: Boolean,
+        callerRole: Int,
+        opClass: Int,
+        isOwner: Boolean,
+        isSharedParticipant: Boolean
+    ): MultiuserRbacVerdict {
+        requireNative()
+        val raw = orbMultiuserRbacStep(
+            bInt(callerAuthed),
+            bInt(callerDisabled),
+            bInt(epochMatches),
+            enum8(callerRole),
+            enum8(opClass),
+            bInt(isOwner),
+            bInt(isSharedParticipant)
+        )
+        return MultiuserRbacVerdict(
+            admitted = (raw and 1) != 0,
+            httpStatus = (raw ushr 1) and 0xFFFF,
+            reasonCode = (raw ushr 17) and 0xF
+        )
+    }
+
+    fun placementRoleAdmit(
+        callerRole: Int,
+        targetKind: Int,
+        nodeAdminOnly: Boolean,
+        hasValidUnixUser: Boolean
+    ): Boolean {
+        requireNative()
+        return orbPlacementRoleAdmit(
+            enum8(callerRole),
+            enum8(targetKind),
+            bInt(nodeAdminOnly),
+            bInt(hasValidUnixUser)
+        ).toInt() != 0
+    }
+
+    data class UserSpendCapVerdict(
+        val admitted: Boolean,
+        val denyReason: Int,
+        val nextGlobalSpentCents: Int,
+        val nextUserSpentCents: Int
+    )
+
+    fun userSpendCapStep(
+        globalCapActive: Boolean,
+        globalSpentCents: Int,
+        globalCapCents: Int,
+        userCapActive: Boolean,
+        userSpentCents: Int,
+        userCapCents: Int,
+        deltaCents: Int
+    ): UserSpendCapVerdict {
+        requireNative()
+        val raw = orbUserSpendCapStep(
+            bInt(globalCapActive),
+            maxOf(0, globalSpentCents),
+            maxOf(0, globalCapCents),
+            bInt(userCapActive),
+            maxOf(0, userSpentCents),
+            maxOf(0, userCapCents),
+            maxOf(0, deltaCents)
+        )
+        return UserSpendCapVerdict(
+            admitted = (raw and 1L) != 0L,
+            denyReason = ((raw ushr 1) and 0x7L).toInt(),
+            nextGlobalSpentCents = ((raw ushr 4) and 0x3FFF_FFFFL).toInt(),
+            nextUserSpentCents = ((raw ushr 34) and 0x3FFF_FFFFL).toInt()
+        )
+    }
+
+    data class PrivdUserExecVerdict(
+        val admitted: Boolean,
+        val denyReason: Int
+    )
+
+    fun privdUserExecStep(
+        peerIsNodeUid: Boolean,
+        leaseVerified: Boolean,
+        nodeAdminOnly: Boolean,
+        callerRole: Int,
+        usernameValid: Boolean,
+        targetUid: Int,
+        targetGid: Int,
+        gidDisjointPriv: Boolean,
+        homeConfinedNoSymlink: Boolean,
+        elanRootOwned: Boolean
+    ): PrivdUserExecVerdict {
+        requireNative()
+        val raw = orbPrivdUserExecStep(
+            bInt(peerIsNodeUid),
+            bInt(leaseVerified),
+            bInt(nodeAdminOnly),
+            enum8(callerRole),
+            bInt(usernameValid),
+            maxOf(0, targetUid),
+            maxOf(0, targetGid),
+            bInt(gidDisjointPriv),
+            bInt(homeConfinedNoSymlink),
+            bInt(elanRootOwned)
+        )
+        return PrivdUserExecVerdict(
+            admitted = (raw and 1) != 0,
+            denyReason = (raw ushr 8) and 0xFF
         )
     }
 }

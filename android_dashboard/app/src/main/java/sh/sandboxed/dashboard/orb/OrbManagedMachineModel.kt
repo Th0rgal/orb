@@ -77,6 +77,9 @@ data class ManagedProviderInfo(
     val supportsFreeStop: Boolean,
     val sizes: List<ManagedSize>,
     val enabled: Boolean = true,
+    val globallyEnabled: Boolean = true,
+    val userEnabled: Boolean = true,
+    val effectiveEnabled: Boolean = true,
     val credentialSource: String? = null,
     val keyHint: String? = null,
     val region: String? = null,
@@ -164,6 +167,9 @@ object OrbManagedMachines {
 
     fun parseProvider(d: OrbDict): ManagedProviderInfo? {
         val p = OrbJSON.str(d, "provider") ?: return null
+        val globallyEnabled = OrbJSON.bool(d, "globally_enabled") ?: (OrbJSON.bool(d, "enabled") ?: true)
+        val userEnabled = OrbJSON.bool(d, "user_enabled") ?: true
+        val effectiveEnabled = OrbJSON.bool(d, "effective_enabled") ?: (globallyEnabled && userEnabled)
         return ManagedProviderInfo(
             provider = p,
             displayName = OrbJSON.str(d, "display_name") ?: providerLabel(p),
@@ -171,7 +177,10 @@ object OrbManagedMachines {
             supportsSnapshots = OrbJSON.bool(d, "supports_snapshots") ?: false,
             supportsFreeStop = OrbJSON.bool(d, "supports_free_stop") ?: false,
             sizes = OrbJSON.dictList(d["sizes"]).mapNotNull { parseSize(it) },
-            enabled = OrbJSON.bool(d, "enabled") ?: true,
+            enabled = effectiveEnabled,
+            globallyEnabled = globallyEnabled,
+            userEnabled = userEnabled,
+            effectiveEnabled = effectiveEnabled,
             credentialSource = OrbJSON.str(d, "credential_source"),
             keyHint = OrbJSON.str(d, "key_hint"),
             region = OrbJSON.str(d, "region"),
@@ -301,6 +310,16 @@ object OrbManagedMachines {
     fun nodeLabels(node: OrbRow): List<String> =
         (node.raw["labels"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
 
+    fun isAdminOnlyNode(node: OrbDict): Boolean {
+        val id = (OrbJSON.str(node, "id", "name") ?: "").trim()
+        if (id == "core" || id == "dgx-spark-admin") return true
+        if (OrbJSON.bool(node, "admin_only") == true) return true
+        val labels = (node["labels"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
+        return labels.any { it.trim().equals("admin-only", ignoreCase = true) }
+    }
+
+    fun isAdminOnlyNode(node: OrbRow): Boolean = isAdminOnlyNode(node.raw)
+
     fun parseLabelsOwner(labels: List<String>?): String? {
         for (raw in labels.orEmpty()) {
             val l = raw.trim().lowercase(Locale.US)
@@ -418,9 +437,9 @@ object OrbManagedMachines {
         return null
     }
 
-    fun isProviderEnabled(p: ManagedProviderInfo): Boolean = p.enabled
+    fun isProviderEnabled(p: ManagedProviderInfo): Boolean = p.effectiveEnabled
 
-    fun isProviderUsable(p: ManagedProviderInfo): Boolean = p.configured && p.enabled
+    fun isProviderUsable(p: ManagedProviderInfo): Boolean = p.configured && p.effectiveEnabled
 
     fun credentialSourceLabel(source: String?): String = when (source) {
         "settings" -> "Settings"
@@ -430,17 +449,23 @@ object OrbManagedMachines {
     }
 
     fun providerStatusLine(p: ManagedProviderInfo): String {
-        if (!p.configured) return if (p.enabled) "Not configured" else "Disabled · Not configured"
+        if (!p.configured) return if (p.effectiveEnabled) "Not configured" else "Disabled · Not configured"
         val cred = listOf(credentialSourceLabel(p.credentialSource), p.keyHint.orEmpty())
             .filter { it.isNotEmpty() }
             .joinToString(" ")
-        val avail = if (p.enabled) when (p.availability?.status) {
+        val avail = if (p.effectiveEnabled) when (p.availability?.status) {
             "saturated" -> "At capacity"
             "degraded" -> "Limited capacity"
             else -> ""
         } else ""
+        val statusLabel = when {
+            p.effectiveEnabled -> "Configured"
+            !p.globallyEnabled -> "Disabled by admin"
+            !p.userEnabled -> "Skipped for your missions"
+            else -> "Disabled"
+        }
         return listOf(
-            if (p.enabled) "Configured" else "Disabled",
+            statusLabel,
             avail,
             cred,
             p.region.orEmpty(),

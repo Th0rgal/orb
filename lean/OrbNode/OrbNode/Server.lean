@@ -15,6 +15,7 @@ import OrbNode.LeanBuild
 import OrbNode.FileBrowser
 import OrbNode.Transfer
 import OrbNode.ProjectContext
+import OrbNode.PrivdClient
 import OrbNode.Runner
 
 namespace OrbNode.Server
@@ -29,6 +30,7 @@ open OrbNode.LeanBuild
 open OrbNode.FileBrowser
 open OrbNode.Transfer
 open OrbNode.ProjectContext
+open OrbNode.PrivdClient
 open OrbNode.Runner
 
 structure HttpRequest where
@@ -66,6 +68,7 @@ private def statusReason : Nat → String
   | 204 => "No Content"
   | 400 => "Bad Request"
   | 401 => "Unauthorized"
+  | 403 => "Forbidden"
   | 404 => "Not Found"
   | 409 => "Conflict"
   | 413 => "Payload Too Large"
@@ -535,6 +538,30 @@ private def discoverAntigravityModels (ma : ManagedAuthConfig) (slot? : Option S
         return .error (503, "No Antigravity models are available for this account")
       return .ok (.arr (grouped.map fun (i, l) => .arr #[.str i, .str l]))
 
+/-- Defense-in-depth node role & unix_username gate via `Orb.Kernel.placementRoleAdmit`:
+    - On `ORB_NODE_ADMIN_ONLY=1` colocated nodes, rejects non-admin leases with HTTP `403`.
+    - For `member` leases, requires a valid `unix_username` (`Orb.Kernel.validUnixUsername`);
+      also rejects any malformed `unix_username` even on `admin` leases (`403`). -/
+def admitNodeLeaseRole (cfg : NodeConfig) (claims : LeaseClaims) (requireAdmin : Bool := false) :
+    Except HttpResponse Unit := do
+  if requireAdmin && claims.callerRole != "admin" then
+    throw (textResp 403 "admin role required for node capacity mutation")
+  if let some u := claims.unixUsername then
+    if !Orb.Kernel.validUnixUsername u then
+      throw (textResp 403 s!"invalid or reserved unix_username '{u}'")
+  let roleBit : UInt8 := if claims.callerRole == "admin" then 1 else 0
+  let targetKind : UInt8 := if cfg.adminOnly then 1 else 2
+  let nodeAdminBit : UInt8 := if cfg.adminOnly then 1 else 0
+  let hasValidUnix : UInt8 :=
+    match claims.unixUsername with
+    | some u => if Orb.Kernel.validUnixUsername u then 1 else 0
+    | none => 0
+  if Orb.Kernel.placementRoleAdmit roleBit targetKind nodeAdminBit hasValidUnix != 1 then
+    if cfg.adminOnly && claims.callerRole != "admin" then
+      throw (textResp 403 "member leases are forbidden on admin-only colocated nodes")
+    else
+      throw (textResp 403 "member node execution requires a valid confined unix_username")
+
 /-- Core route dispatcher over `NodeRuntime` returning `(updatedRuntime, response, pendingLaunches, steerWatchers)`
     so `handleRequestConcurrent` runs blocking checkout preparation and tool-steer watchers outside `Std.Mutex`. -/
 def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
@@ -558,6 +585,8 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
     match verifyLeaseToken leaseTok rt.cfg.token rt.cfg.tokenPrevious? rt.cfg.nodeId .nodeCapacity nowEp none with
     | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
     | .ok claims =>
+      if let .error forbidResp := admitNodeLeaseRole rt.cfg claims true then
+        return (rt, forbidResp, preLaunches, #[])
       if claims.missionId != "00000000-0000-0000-0000-000000000000" then
         return (rt, textResp 400 "node:capacity lease must use nil mission_id", preLaunches, #[])
       let some targetCap := jv.fieldNat? "capacity"
@@ -584,6 +613,8 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
     match verifyLeaseToken leaseTok rt.cfg.token rt.cfg.tokenPrevious? rt.cfg.nodeId .jobSubmit nowEp none with
     | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
     | .ok claims =>
+      if let .error forbidResp := admitNodeLeaseRole rt.cfg claims false then
+        return (rt, forbidResp, preLaunches, #[])
       if claims.missionId != missionId then
         return (rt, textResp 400 "lease is scoped to a different mission", preLaunches, #[])
       if let some cid := claims.jobId? then
@@ -591,6 +622,8 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
           return (rt, textResp 400 "lease is scoped to a different job", preLaunches, #[])
       let kind := (payloadVal.fieldStr? "kind").getD "raw_command"
       if kind == "lean_build" then
+        if claims.unixUsername.isSome || claims.callerRole == "member" then
+          return (rt, textResp 403 "lean_build jobs are reserved for shared admin builder lanes", preLaunches, #[])
         if let .error err := validateLeanBuildPayload payloadVal rt.cfg.envAllowlist then
           return (rt, textResp 422 err, preLaunches, #[])
         let st ← OrbNode.Posix.hostStats rt.cfg.workDir
@@ -602,7 +635,7 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
           return (rt, textResp 422 "insufficient free disk space below min_free_disk_bytes floor", preLaunches, #[])
       else if kind == "raw_command" then
         let longRunning := (payloadVal.fieldBool? "long_running").getD false
-        if !longRunning then
+        if !longRunning && claims.callerRole != "member" && claims.unixUsername.isNone then
           let reqAuth := ((payloadVal.fieldArr? "managed_auth").getD #[]).filterMap JVal.asStr?
           if !reqAuth.isEmpty then
             if let .error err ← validateManagedAuthRequest rt.cfg.managedAuth reqAuth then
@@ -673,6 +706,8 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
         pid := rawLeaderPid
         startTicks := rawLeaderTicks
         phaseCode := 1
+        ownerUserId := claims.ownerUserId
+        execUnixUser := claims.unixUsername.getD ""
       }
       match ← rt.ledger.insertQueued jobRec (some scratchReceipt) claimLeader? with
       | .error "duplicate_job_id" =>
@@ -762,6 +797,8 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
     match verifyLeaseToken leaseTok rt.cfg.token rt.cfg.tokenPrevious? rt.cfg.nodeId .jobForce nowEp (some key) with
     | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
     | .ok claims =>
+      if let .error forbidResp := admitNodeLeaseRole rt.cfg claims false then
+        return (rt, forbidResp, preLaunches, #[])
       if claims.missionId != missionId then
         return (rt, textResp 400 "lease is scoped to a different mission", preLaunches, #[])
       let some rec := rt.ledger.jobs.get? key
@@ -807,6 +844,10 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
       | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])
     let .ok reqJson := OrbBin.Json.parse bodyStr
       | return (rt, textResp 400 "invalid JSON body", preLaunches, #[])
+    if !rec.execUnixUser.isEmpty then
+      match ← userFileBrowser rt.cfg.privdSocket rec.execUnixUser rec.missionId reqJson with
+      | .ok v => return (rt, jsonResp 200 v, preLaunches, #[])
+      | .error msg => return (rt, textResp 400 msg, preLaunches, #[])
     let missionDir := (System.FilePath.mk rt.cfg.workDir / rec.missionId).toString
     match ← executeFileBrowser missionDir reqJson with
     | .ok v => return (rt, jsonResp 200 v, preLaunches, #[])
@@ -1026,7 +1067,7 @@ def handleNonExecRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRunti
   let mut rt := rtReserved
   for item in launches do
     let prepRes ← prepareJobOutsideLock item.cfg item.jid item.missionId item.payload item.logPath
-      item.forced item.sideLane item.coordLane
+      item.forced item.sideLane item.coordLane item.execUnixUser item.callerRole
     rt ← commitPreparedJob rt item.jid prepRes
   return (rt, resp)
 
@@ -1038,7 +1079,7 @@ private partial def spawnAsyncLaunches (mtx : Std.Mutex NodeRuntime) (launches :
   for item in launches do
     let _ ← IO.asTask do
       let prepRes ← match ← (prepareJobOutsideLock item.cfg item.jid item.missionId item.payload item.logPath
-          item.forced item.sideLane item.coordLane).toBaseIO with
+          item.forced item.sideLane item.coordLane item.execUnixUser item.callerRole).toBaseIO with
         | .ok r => pure r
         | .error e => pure (.error s!"unexpected launch exception: {e}")
       let more ← mtx.atomically do
@@ -1123,10 +1164,13 @@ def handleRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRuntime × H
     match verifyLeaseToken leaseTok rt.cfg.token rt.cfg.tokenPrevious? rt.cfg.nodeId .missionExecute nowEp none with
     | .error msg => return (rt, textResp 400 msg)
     | .ok claims =>
+      if let .error forbidResp := admitNodeLeaseRole rt.cfg claims false then
+        return (rt, forbidResp)
       if claims.missionId != missionId then
         return (rt, textResp 400 "lease mission_id mismatch")
       let sideLane := (jv.fieldBool? "side_lane").getD false
-      let (stCode, outVal) ← runSyncExecute rt missionId command sideLane
+      let (stCode, outVal) ← runSyncExecute rt missionId command sideLane none
+        (claims.unixUsername.getD "") claims.callerRole
       if stCode == 200 then return (rt, jsonResp 200 outVal)
       else return (rt, textResp stCode (outVal.asStr?.getD "execution rejected"))
   else
@@ -1158,6 +1202,8 @@ def handleRequestConcurrent
       match verifyLeaseToken leaseTok rt.cfg.token rt.cfg.tokenPrevious? rt.cfg.nodeId .missionExecute nowEp none with
       | .error msg => return (Except.error (textResp 400 msg), preL)
       | .ok claims =>
+        if let .error forbidResp := admitNodeLeaseRole rt.cfg claims false then
+          return (Except.error forbidResp, preL)
         if claims.missionId != missionId then
           return (Except.error (textResp 400 "lease mission_id mismatch"), preL)
         let sideLane := (jv.fieldBool? "side_lane").getD false
@@ -1169,14 +1215,15 @@ def handleRequestConcurrent
           if activeRegularCount rt + rt.shrinkDebt >= rt.cfg.capacityTotal then
             return (Except.error (textResp 429 "node capacity exhausted"), preL)
           set { rt with activeExecMain := rt.activeExecMain + 1 }
-        return (Except.ok (rt.cfg, rt.ledger.sqliteBackend, rt.ledger.nodeBootEpoch, missionId, command, sideLane), preL)
+        return (Except.ok (rt.cfg, rt.ledger.sqliteBackend, rt.ledger.nodeBootEpoch, missionId, command, sideLane,
+          claims.unixUsername.getD "", claims.callerRole), preL)
     if !preLaunches.isEmpty then
       spawnAsyncLaunches mtx preLaunches
     match prep with
     | .error errResp => return errResp
-    | .ok (cfg, sqliteBackend, nodeBootEpoch, missionId, command, sideLane) =>
+    | .ok (cfg, sqliteBackend, nodeBootEpoch, missionId, command, sideLane, execUnixUser, callerRole) =>
       try
-        match ← execClearedLeaseCommand cfg sqliteBackend missionId command nodeBootEpoch with
+        match ← execClearedLeaseCommand cfg sqliteBackend missionId command nodeBootEpoch none execUnixUser callerRole with
         | .ok outVal => return jsonResp 200 outVal
         | .error fenceErr => return textResp 503 fenceErr
       finally

@@ -330,3 +330,13 @@ export const FindNextIcon = (p: P) => (
   </I>
 );
 
+export const UsersIcon = (p: P) => (
+  <I {...p}>
+    <circle cx="6" cy="5.6" r="2.2" />
+    <path d="M2.4 12.8c0-2 1.6-3.4 3.6-3.4s3.6 1.4 3.6 3.4" />
+    <circle cx="11" cy="6.2" r="1.7" />
+    <path d="M10.8 9.6c1.5.1 2.8 1.2 2.8 2.9" />
+  </I>
+);
+
+

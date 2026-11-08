@@ -282,6 +282,9 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val endpoint by core.baseURLFlow.collectAsState()
     val signedInToken by core.tokenFlow.collectAsState()
+    val currentUser by core.currentUserFlow.collectAsState()
+    val authMode by core.authModeFlow.collectAsState()
+    val isAdmin = OrbCore.computeIsAdmin(authMode, currentUser)
     val lastRefresh by core.lastRefreshAtMs.collectAsState()
     val errors by OrbLog.ring.collectAsState()
     val perf by OrbPerfMonitor.snapshot.collectAsState()
@@ -378,7 +381,7 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
         }
     }
 
-    LaunchedEffect(endpoint, signedInToken) {
+    LaunchedEffect(endpoint, signedInToken, isAdmin) {
         val reqScope = "$endpoint|$signedInToken"
         backendVersion = null
         cleanupSaveSeq += 1
@@ -400,7 +403,9 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
         backendVersion = OrbDiagnostics.backendVersion(health)
         val healthDict = OrbJSON.dict(health)
         authRequired = OrbJSON.bool(healthDict, "auth_required") ?: true
-        loadCleanupSettings(reqScope)
+        if (isAdmin) {
+            loadCleanupSettings(reqScope)
+        }
     }
     val rows = OrbDiagnostics.build(context, endpoint, core.token, lastRefresh, errors, backendVersion, perf)
     val channelRows = rows.filter { it.first.startsWith("Channel ") }
@@ -522,7 +527,7 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
             Text("Copy diagnostics", color = Color.Black, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         }
 
-        if (core.isConfigured && (!signedInToken.isNullOrEmpty() || !authRequired)) {
+        if (isAdmin && core.isConfigured && (!signedInToken.isNullOrEmpty() || !authRequired)) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()

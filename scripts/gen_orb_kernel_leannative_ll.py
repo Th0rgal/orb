@@ -594,6 +594,68 @@ BRANCHLESS_PROBES: dict[str, str] = {
   let lo64 := p1Cap ||| (p2Cap <<< 8) ||| (connMs <<< 16)
   let hi64 := pongMs ||| (wakeMs <<< 16)
   lo64 ||| (hi64 <<< 32)""",
+    "orb_multiuser_rbac_step": """@[export probe_orb_multiuser_rbac_step] def probe_orb_multiuser_rbac_step (a0 a1 a2 a3 a4 a5 a6 : UInt64) : UInt64 :=
+  let authed := a0 &&& 0xFF; let dis := a1 &&& 0xFF; let ep := a2 &&& 0xFF
+  let role := a3 &&& 0xFF; let op := a4 &&& 0xFF; let own := a5 &&& 0xFF; let part := a6 &&& 0xFF
+  let ok200 : UInt64 := (1 : UInt64) ||| ((200 : UInt64) <<< 1)
+  let e401  : UInt64 := ((401 : UInt64) <<< 1) ||| ((1 : UInt64) <<< 17)
+  let eDis  : UInt64 := ((403 : UInt64) <<< 1) ||| ((2 : UInt64) <<< 17)
+  let eAdm  : UInt64 := ((403 : UInt64) <<< 1) ||| ((3 : UInt64) <<< 17)
+  let e404  : UInt64 := ((404 : UInt64) <<< 1) ||| ((4 : UInt64) <<< 17)
+  let eOwn  : UInt64 := ((403 : UInt64) <<< 1) ||| ((5 : UInt64) <<< 17)
+  let eInv  : UInt64 := ((403 : UInt64) <<< 1) ||| ((6 : UInt64) <<< 17)
+  let badAuth := (blEq64 authed 1 ^^^ 1) ||| (blEq64 ep 1 ^^^ 1)
+  let isDis := blNz64 dis
+  let badRole := blLt64 1 role
+  let rOp1 := blSel64 (blEq64 role 1) ok200 eAdm
+  let rOp2 := blSel64 (blEq64 own 1 ||| blEq64 part 1) ok200 e404
+  let rOp3 := blSel64 (blEq64 own 1) ok200 (blSel64 (blEq64 part 1) eOwn e404)
+  let rOp4 := blSel64 (blEq64 own 1) ok200 e404
+  let byOp := blSel64 (blEz64 op) ok200
+    (blSel64 (blEq64 op 1) rOp1
+      (blSel64 (blEq64 op 2) rOp2
+        (blSel64 (blEq64 op 3) rOp3
+          (blSel64 (blEq64 op 4) rOp4 eInv))))
+  blSel64 badAuth e401 (blSel64 isDis eDis (blSel64 badRole eInv byOp))""",
+    "orb_placement_role_admit": """@[export probe_orb_placement_role_admit] def probe_orb_placement_role_admit (a0 a1 a2 a3 : UInt64) : UInt64 :=
+  let role := a0 &&& 0xFF; let tgt := a1 &&& 0xFF; let admOnly := a2 &&& 0xFF; let validUnix := a3 &&& 0xFF
+  let inDom := blLe64 tgt 4
+  let memDed := (blEq64 tgt 2 ||| blEq64 tgt 3) &&& blEz64 admOnly &&& blEq64 validUnix 1
+  let memOk := blEq64 tgt 4 ||| memDed
+  let ok := inDom &&& (blEq64 role 1 ||| (blEz64 role &&& memOk))
+  blSel64 ok 1 0""",
+    "orb_user_spend_cap_step": """@[export probe_orb_user_spend_cap_step] def probe_orb_user_spend_cap_step (a0 a1 a2 a3 a4 a5 a6 : UInt64) : UInt64 :=
+  let gAct := a0 &&& 0xFF; let gSpent := a1 &&& 0xFFFFFFFF; let gCap := a2 &&& 0xFFFFFFFF
+  let uAct := a3 &&& 0xFF; let uSpent := a4 &&& 0xFFFFFFFF; let uCap := a5 &&& 0xFFFFFFFF
+  let delta := a6 &&& 0xFFFFFFFF
+  let maxL : UInt64 := 0x3FFFFFFF
+  let curG := blSel64 (blLe64 gSpent maxL) gSpent maxL
+  let curU := blSel64 (blLe64 uSpent maxL) uSpent maxL
+  let rawG := gSpent + delta
+  let rawU := uSpent + delta
+  let ov := blLt64 maxL rawG ||| blLt64 maxL rawU
+  let gEx := blNz64 gAct &&& blLt64 gCap rawG
+  let uEx := blNz64 uAct &&& blLt64 uCap rawU
+  let denyBase := (curG <<< 4) ||| (curU <<< 34)
+  let okWord := (1 : UInt64) ||| (rawG <<< 4) ||| (rawU <<< 34)
+  blSel64 gEx (((1 : UInt64) <<< 1) ||| denyBase)
+    (blSel64 uEx (((2 : UInt64) <<< 1) ||| denyBase)
+      (blSel64 ov (((3 : UInt64) <<< 1) ||| denyBase) okWord))""",
+    "orb_privd_user_exec_step": """@[export probe_orb_privd_user_exec_step] def probe_orb_privd_user_exec_step (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 : UInt64) : UInt64 :=
+  let peer := a0 &&& 0xFF; let lease := a1 &&& 0xFF; let admOnly := a2 &&& 0xFF
+  let role := a3 &&& 0xFF; let uValid := a4 &&& 0xFF
+  let uid := a5 &&& 0xFFFFFFFF; let gid := a6 &&& 0xFFFFFFFF
+  let gidDisj := a7 &&& 0xFF; let homeOk := a8 &&& 0xFF; let elanOk := a9 &&& 0xFF
+  let badUidGid := blLt64 uid 2000 ||| blLe64 65534 uid ||| blLt64 gid 2000 ||| blLe64 65534 gid
+  blSel64 (blEq64 peer 1 ^^^ 1) ((1 : UInt64) <<< 8)
+    (blSel64 (blEq64 lease 1 ^^^ 1) ((2 : UInt64) <<< 8)
+      (blSel64 (blLt64 1 role) ((3 : UInt64) <<< 8)
+        (blSel64 (blEz64 role &&& blNz64 admOnly) ((4 : UInt64) <<< 8)
+          (blSel64 (blEq64 uValid 1 ^^^ 1) ((5 : UInt64) <<< 8)
+            (blSel64 badUidGid ((6 : UInt64) <<< 8)
+              (blSel64 (blEq64 gidDisj 1 ^^^ 1) ((7 : UInt64) <<< 8)
+                (blSel64 (blEq64 homeOk 1 ^^^ 1) ((8 : UInt64) <<< 8)
+                  (blSel64 (blEq64 elanOk 1 ^^^ 1) ((9 : UInt64) <<< 8) 1))))))))""",
 }
 
 BRANCHLESS_EQUIV_PROOFS = """
@@ -875,6 +937,35 @@ theorem eq_client_link_budget (a0 a1 a2 a3 a4 : UInt64) :
     Orb.Kernel.clientLinkBudgetStep a0.toUInt32 a1.toUInt32 a2.toUInt32 a3.toUInt8 a4.toUInt32 := by
   simp only [bne, blNz64, blEz64, blLt64, blLe64, blSel64,
     probe_orb_client_link_budget_step, Orb.Kernel.clientLinkBudgetStep]
+  bv_decide
+
+theorem eq_multiuser_rbac (a0 a1 a2 a3 a4 a5 a6 : UInt64) :
+    probe_orb_multiuser_rbac_step a0 a1 a2 a3 a4 a5 a6 =
+    (Orb.Kernel.multiuserRbacStep a0.toUInt8 a1.toUInt8 a2.toUInt8 a3.toUInt8 a4.toUInt8 a5.toUInt8 a6.toUInt8).toUInt64 := by
+  simp only [bne, blNz64, blEz64, blEq64, blLt64, blSel64,
+    probe_orb_multiuser_rbac_step, Orb.Kernel.multiuserRbacStep]
+  bv_decide
+
+theorem eq_placement_role_admit (a0 a1 a2 a3 : UInt64) :
+    probe_orb_placement_role_admit a0 a1 a2 a3 =
+    (Orb.Kernel.placementRoleAdmit a0.toUInt8 a1.toUInt8 a2.toUInt8 a3.toUInt8).toUInt64 := by
+  simp only [blNz64, blEz64, blEq64, blLt64, blLe64, blSel64,
+    probe_orb_placement_role_admit, Orb.Kernel.placementRoleAdmit]
+  bv_decide
+
+theorem eq_user_spend_cap (a0 a1 a2 a3 a4 a5 a6 : UInt64) :
+    probe_orb_user_spend_cap_step a0 a1 a2 a3 a4 a5 a6 =
+    Orb.Kernel.userSpendCapStep a0.toUInt8 a1.toUInt32 a2.toUInt32 a3.toUInt8 a4.toUInt32 a5.toUInt32 a6.toUInt32 := by
+  simp only [bne, blNz64, blLt64, blLe64, blSel64,
+    probe_orb_user_spend_cap_step, Orb.Kernel.userSpendCapStep]
+  bv_decide
+
+theorem eq_privd_user_exec (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 : UInt64) :
+    probe_orb_privd_user_exec_step a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 =
+    (Orb.Kernel.privdUserExecStep a0.toUInt8 a1.toUInt8 a2.toUInt8 a3.toUInt8 a4.toUInt8
+      a5.toUInt32 a6.toUInt32 a7.toUInt8 a8.toUInt8 a9.toUInt8).toUInt64 := by
+  simp only [bne, blNz64, blEz64, blEq64, blLt64, blLe64, blSel64,
+    probe_orb_privd_user_exec_step, Orb.Kernel.privdUserExecStep]
   bv_decide
 """.strip()
 

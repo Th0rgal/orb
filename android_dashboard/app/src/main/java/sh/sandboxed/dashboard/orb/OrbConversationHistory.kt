@@ -16,11 +16,13 @@ object OrbConversationHistory {
             val type = event.str("event_type", "type")
             val content = event.str("content") ?: ""
             val metadata = event.dict("metadata") ?: emptyMap()
+            val sender = (event.str("sender_username") ?: OrbJSON.str(metadata, "sender_username"))?.trim()?.takeIf { it.isNotEmpty() }
             if (type !in eventTypes || content.isEmpty() || metadata["queued"] == true || metadata["success"] == false) null
             else OrbRow(event.id, event.raw + mapOf("role" to if (type == "user_message") "user" else "assistant", "content" to content,
                 "canonical" to (type == "assistant_message_canonical"),
                 "bubble_id" to (metadata["bubble_id"] ?: "text_delta_latest"), "revision" to (metadata["revision"] ?: 0)) +
-                (event.int("sequence", "seq")?.let { mapOf("sequence" to it) } ?: emptyMap()))
+                (event.int("sequence", "seq")?.let { mapOf("sequence" to it) } ?: emptyMap()) +
+                (sender?.let { mapOf("sender_username" to it) } ?: emptyMap()))
         }
         if (history.isEmpty()) return incoming
         if (history.all { it.int("sequence") != null } && incoming.all { it.int("sequence") != null }) {
