@@ -458,6 +458,12 @@ internal func orb_transport_epoch_step(_ mode: UInt8, _ eventKind: UInt8, _ ever
 @_silgen_name("orb_stream_open_tail_cap_step")
 internal func orb_stream_open_tail_cap_step(_ prevLen: UInt32, _ prevCommit: UInt32, _ prevCheckpoint: UInt32, _ newLen: UInt32, _ rawCommit: UInt32, _ maxOpenTailBytes: UInt32, _ openFenceActive: UInt8) -> UInt64
 
+@_silgen_name("orb_rtt_ewma_step")
+internal func orb_rtt_ewma_step(_ srttMs: UInt32, _ rttVarMs: UInt32, _ sampleMs: UInt32) -> UInt64
+
+@_silgen_name("orb_client_link_budget_step")
+internal func orb_client_link_budget_step(_ srttMs: UInt32, _ rttVarMs: UInt32, _ consecutiveFailures: UInt32, _ isConstrained: UInt8, _ p0InFlight: UInt32) -> UInt64
+
 enum OrbKernel {
     struct WorkfoldVerdict: Equatable, Sendable {
         let foldItem: Bool
@@ -1520,6 +1526,50 @@ enum OrbKernel {
             checkpointForced: ((lo32 >> 9) & 1) != 0,
             openFenceCapped: ((lo32 >> 10) & 1) != 0,
             nextCheckpoint: hi32
+        )
+    }
+
+    struct RttEwmaResult: Equatable, Sendable {
+        let srttMs: Int
+        let rttVarMs: Int
+    }
+
+    static func rttEwmaStep(srttMs: Int, rttVarMs: Int, sampleMs: Int) -> RttEwmaResult {
+        let raw = orb_rtt_ewma_step(satU32(srttMs), satU32(rttVarMs), satU32(sampleMs))
+        return RttEwmaResult(
+            srttMs: Int(raw & 0xFFFF_FFFF),
+            rttVarMs: Int((raw >> 32) & 0xFFFF_FFFF)
+        )
+    }
+
+    struct ClientLinkBudgetResult: Equatable, Sendable {
+        let p1Cap: Int
+        let p2Cap: Int
+        let connectDeadlineMs: Int
+        let pongDeadlineMs: Int
+        let wakePongDeadlineMs: Int
+    }
+
+    static func clientLinkBudgetStep(
+        srttMs: Int,
+        rttVarMs: Int,
+        consecutiveFailures: Int,
+        isConstrained: Bool,
+        p0InFlight: Int
+    ) -> ClientLinkBudgetResult {
+        let raw = orb_client_link_budget_step(
+            satU32(srttMs),
+            satU32(rttVarMs),
+            satU32(consecutiveFailures),
+            b8(isConstrained),
+            satU32(p0InFlight)
+        )
+        return ClientLinkBudgetResult(
+            p1Cap: Int(raw & 0xFF),
+            p2Cap: Int((raw >> 8) & 0xFF),
+            connectDeadlineMs: Int((raw >> 16) & 0xFFFF),
+            pongDeadlineMs: Int((raw >> 32) & 0xFFFF),
+            wakePongDeadlineMs: Int((raw >> 48) & 0xFFFF)
         )
     }
 }

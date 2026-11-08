@@ -1,5 +1,7 @@
 import LeanSys
 import OrbNetLeaf.TlsHttp
+import OrbNetLeaf.Gzip
+import OrbNetLeaf.H2Pool
 import OrbBin.Json
 import OrbLocald.Spec
 import OrbLocald.Rpc
@@ -26,10 +28,10 @@ private def findHeaderVal? (hdrs : Array (String × String)) (lowerKey : String)
   if tv.isEmpty then none else some tv
 
 private def corsExposeHeadersLine : String :=
-  "Access-Control-Expose-Headers: X-Orb-Events-Protocol, X-Has-More, X-Next-Cursor, X-Page-Max-Sequence, X-Max-Sequence, X-Orb-Upstream, X-Orb-Idempotent-Replay, Content-Type, Content-Disposition, Retry-After, X-Request-Id\r\n"
+  "Access-Control-Expose-Headers: X-Orb-Events-Protocol, X-Has-More, X-Next-Cursor, X-Page-Max-Sequence, X-Max-Sequence, X-Orb-Upstream, X-Orb-Idempotent-Replay, Content-Type, Content-Disposition, Retry-After, X-Request-Id, X-Orb-Transport-Rtt-Ms, X-Orb-Upstream-Origin\r\n"
 
 private def corsAllowHeadersLine : String :=
-  "Access-Control-Allow-Headers: Content-Type, Authorization, Accept, Cache-Control, Last-Event-ID, Idempotency-Key, X-Orb-Token, X-Orb-Target, X-Paloma-Approval, X-Language\r\n"
+  "Access-Control-Allow-Headers: Content-Type, Authorization, Accept, Accept-Encoding, Cache-Control, Last-Event-ID, Idempotency-Key, X-Orb-Token, X-Orb-Target, X-Orb-Priority, X-Paloma-Approval, X-Language\r\n"
 
 private def corsHeaderBlock (origin? : Option String) : String :=
   match origin? with
@@ -78,13 +80,16 @@ private def isHeaderValueClean (s : String) : Bool :=
   !LeanSys.Http.hasHttpFieldControlByte s &&
   !(s.toList.any (fun c => c == '\r' || c == '\n' || c.toNat == 0))
 
-private def sanitizeUpstreamHeaders (hdrs : Array (String × String)) : String := Id.run do
+private def sanitizeUpstreamHeaders (hdrs : Array (String × String)) (stripContentEncoding : Bool := false) : String := Id.run do
   let mut out := ""
   for (k, v) in hdrs do
     let tk := k.trimAscii.toString
     let tv := v.trimAscii.toString
+    let low := tk.toLower
     if !tk.isEmpty && LeanSys.Http.isHttpToken tk && !isHopByHopHeader tk &&
-       tk.toLower != "content-type" && isHeaderValueClean tv then
+       low != "content-type" && low != "vary" &&
+       (!stripContentEncoding || low != "content-encoding") &&
+       isHeaderValueClean tv then
       out := out ++ s!"{tk}: {tv}\r\n"
   return out
 
@@ -123,7 +128,7 @@ private def streamSseNativeTls (fd : Fd) (origin? : Option String)
       match ← readTlsSessionChunk sess 4096 rcvTmo with
       | .closeNotify | .tcpEof =>
         eof := true
-      | .transportError =>
+      | .timeout | .transportError =>
         aborted := true
       | .chunk chunk =>
         if chunk.isEmpty then
@@ -204,7 +209,8 @@ private def streamSseNativeTls (fd : Fd) (origin? : Option String)
     closeTlsSession sess
   return headerSent
 
-private def handleTransportProxyRequest (st : LocaldState) (isShardPort : Bool) (fd : Fd) (req : HttpRequest) (origin? : Option String) : IO Unit := do
+private def handleTransportProxyRequest (stRef : IO.Ref LocaldState) (isShardPort : Bool) (fd : Fd) (req : HttpRequest) (origin? : Option String) : IO Unit := do
+  let st ← stRef.get
   let expectedPfx := s!"/__orb_tx/{st.bridge.bridgeUuid}"
   if !req.path.startsWith expectedPfx then
     sendJsonHttp fd 403 origin? "{\"error\":\"invalid_bridge_token\"}"
@@ -214,12 +220,18 @@ private def handleTransportProxyRequest (st : LocaldState) (isShardPort : Bool) 
     let rawRel := (req.path.drop expectedPfx.length).toString
     let relPath := if rawRel.isEmpty then "/" else if rawRel.startsWith "/" then rawRel else "/" ++ rawRel
     let hasIdem := (findHeaderVal? req.headers "idempotency-key").isSome
-    let fwdHdrs := req.headers.filter fun (k, _) => !isStrippedClientHeader k
+    let explicitPrio? := findHeaderVal? req.headers "x-orb-priority"
+    let prio := classifyProxyRequestPriority req.method relPath explicitPrio?
+    let baseFwdHdrs := req.headers.filter fun (k, _) =>
+      let low := k.trimAscii.toString.toLower
+      !isStrippedClientHeader k && low != "x-orb-priority"
     let reqBody := req.bodySlice.toByteArray
     let targetHdr := (findHeaderVal? req.headers "x-orb-target").getD ""
-    let origins :=
+    let baseOrigins :=
       if !targetHdr.isEmpty then candidateOriginsFor targetHdr
       else st.bridge.failoverOrigins
+    let nowInitMs ← IO.monoMsNow
+    let origins := rankFailoverOrigins baseOrigins st.originHealth nowInitMs
     let wantSse := isSseStreamRequest isShardPort req && reqBody.isEmpty
     if origins.isEmpty then
       sendJsonHttp fd 503 origin? "{\"error\":\"no_failover_origins\"}"
@@ -231,13 +243,19 @@ private def handleTransportProxyRequest (st : LocaldState) (isShardPort : Bool) 
         if wantSse then
           match parseOriginHostPort orig with
           | some (true, host, port, pfx) =>
-            if (← streamSseNativeTls fd origin? host port (pfx ++ relPath) req.method fwdHdrs) then
+            let t0 ← IO.monoMsNow
+            if (← streamSseNativeTls fd origin? host port (pfx ++ relPath) req.method baseFwdHdrs) then
+              let t1 ← IO.monoMsNow
+              discard <| recordOriginSuccess stRef orig (Nat.min (Nat.max 1 (t1 - t0)) 60000).toUInt32
               done := true
-            else if canFailoverRequest req.method hasIdem (idx + 1) origins then
-              idx := idx + 1
             else
-              sendJsonHttp fd 502 origin? "{\"error\":\"upstream_stream_unreachable\"}"
-              done := true
+              let tFail ← IO.monoMsNow
+              recordOriginFailure stRef orig tFail
+              if canFailoverRequest req.method hasIdem (idx + 1) origins then
+                idx := idx + 1
+              else
+                sendJsonHttp fd 502 origin? "{\"error\":\"upstream_stream_unreachable\"}"
+                done := true
           | _ =>
             if canFailoverRequest req.method hasIdem (idx + 1) origins then
               idx := idx + 1
@@ -251,31 +269,80 @@ private def handleTransportProxyRequest (st : LocaldState) (isShardPort : Bool) 
              relPath == "/api/managed-machines" || relPath.startsWith "/api/managed-machines?" ||
              relPath.startsWith "/api/managed-machines/")
           let upTimeoutMs : UInt32 := if isLongProvision then 540000 else 65000
+          let connTimeoutMs : UInt32 := if origins.size > 1 && idx + 1 < origins.size then 6000 else 12000
+          let hasAcceptEnc := (findHeaderVal? baseFwdHdrs "accept-encoding").isSome
+          let fwdHdrs :=
+            if hasAcceptEnc then baseFwdHdrs
+            else baseFwdHdrs.push ("Accept-Encoding", "gzip")
           let attemptRes ← match parseOriginHostPort orig with
             | none => pure (.error "invalid_origin")
             | some (true, host, port, pfx) =>
-              httpsRequest req.method host port (pfx ++ relPath) fwdHdrs reqBody 16777216 true upTimeoutMs
+              match st.h2Pool? with
+              | some pool =>
+                pool.request prio req.method host port (pfx ++ relPath) fwdHdrs reqBody 16777216 true connTimeoutMs upTimeoutMs
+              | none =>
+                let t0 ← IO.monoMsNow
+                match ← httpsRequest req.method host port (pfx ++ relPath) fwdHdrs reqBody 16777216 true upTimeoutMs with
+                | .ok up =>
+                  let t1 ← IO.monoMsNow
+                  pure (.ok { response := up, rttMs := (Nat.min (Nat.max 1 (t1 - t0)) 60000).toUInt32, reusedConn := false })
+                | .error e => pure (.error e)
             | some (false, _, _, _) =>
               pure (.error "plaintext_origin_rejected")
           match attemptRes with
-          | .ok up =>
+          | .ok pooled =>
+            let up := pooled.response
             let retryStatus := up.status == 429 || (500 ≤ up.status && up.status ≤ 599)
+            if retryStatus then
+              let tFail ← IO.monoMsNow
+              recordOriginFailure stRef orig tFail
             if retryStatus && canFailoverRequest req.method hasIdem (idx + 1) origins then
               idx := idx + 1
             else
-              let ctype := (findHeaderVal? up.headers "content-type").getD "application/json"
-              let extra := sanitizeUpstreamHeaders up.headers
-              let reason := HttpResponse.reasonPhrase up.status
-              let head :=
-                s!"HTTP/1.1 {up.status} {reason}\r\n" ++
-                corsHeaderBlock origin? ++
-                s!"Content-Type: {ctype}\r\n" ++
-                extra ++
-                s!"Content-Length: {up.body.size}\r\n" ++
-                "Connection: close\r\n\r\n"
-              discard <| writeAll fd (head.toUTF8 ++ up.body) false
-              done := true
+              let srtt ←
+                if retryStatus then
+                  pure pooled.rttMs
+                else
+                  recordOriginSuccess stRef orig pooled.rttMs
+              let encVal := ((findHeaderVal? up.headers "content-encoding").getD "").trimAscii.toString.toLower
+              let isGzip := (encVal == "gzip" || encVal == "x-gzip") && req.method.toUpper != "HEAD"
+              let decodedRes : Except String (ByteArray × Bool) :=
+                if isGzip && !up.body.isEmpty then
+                  match OrbNetLeaf.Gzip.gunzipBounded up.body 33554432 with
+                  | .ok plain => .ok (plain, true)
+                  | .error e => .error e
+                else if isGzip && up.body.isEmpty then
+                  .ok (ByteArray.empty, true)
+                else
+                  .ok (up.body, false)
+              match decodedRes with
+              | .error _ =>
+                let tFail ← IO.monoMsNow
+                recordOriginFailure stRef orig tFail
+                if canFailoverRequest req.method hasIdem (idx + 1) origins then
+                  idx := idx + 1
+                else
+                  sendJsonHttp fd 502 origin? "{\"error\":\"upstream_invalid_gzip\"}"
+                  done := true
+              | .ok (finalBody, strippedEnc) =>
+                let ctype := (findHeaderVal? up.headers "content-type").getD "application/json"
+                let extra := sanitizeUpstreamHeaders up.headers strippedEnc
+                let cleanOrig := if isHeaderValueClean orig then orig else "https://orb"
+                let reason := HttpResponse.reasonPhrase up.status
+                let head :=
+                  s!"HTTP/1.1 {up.status} {reason}\r\n" ++
+                  corsHeaderBlock origin? ++
+                  s!"Content-Type: {ctype}\r\n" ++
+                  s!"X-Orb-Transport-Rtt-Ms: {srtt}\r\n" ++
+                  s!"X-Orb-Upstream-Origin: {cleanOrig}\r\n" ++
+                  extra ++
+                  s!"Content-Length: {finalBody.size}\r\n" ++
+                  "Connection: close\r\n\r\n"
+                discard <| writeAll fd (head.toUTF8 ++ finalBody) false
+                done := true
           | .error _ =>
+            let tFail ← IO.monoMsNow
+            recordOriginFailure stRef orig tFail
             if canFailoverRequest req.method hasIdem (idx + 1) origins then
               idx := idx + 1
             else
@@ -336,7 +403,7 @@ private def handleClientConnection (stRef : IO.Ref LocaldState) (portIdx : Nat) 
       else
         let st ← stRef.get
         if portIdx > 0 || req.path.startsWith "/__orb_tx/" then
-          handleTransportProxyRequest st (portIdx ≥ 2) clientFd req origin?
+          handleTransportProxyRequest stRef (portIdx ≥ 2) clientFd req origin?
         else if req.method == "OPTIONS" && (req.path == "/__orb_rpc" || req.path == "/__orb_events") then
           sendPreflight204 clientFd origin?
         else if req.method == "GET" && req.path == "/__orb_events" then
@@ -494,11 +561,15 @@ def main (args : List String) : IO UInt32 := do
       IO.eprintln s!"orb-locald: failed to bind 127.0.0.1:{port}"
       return 1
     | .ok (rpcFd, boundRpcPort) =>
+      let h2Pool ← OrbNetLeaf.H2Pool.H2ClientPool.new
       let bridge : TransportBridgeState := {
         proxyPort := proxyPort
         bridgeUuid := bridgeUuid
         shardPorts := shardPorts
       }
+      if let some primaryOrig := bridge.failoverOrigins[0]? then
+        if let some (true, host, p, _) := parseOriginHostPort primaryOrig then
+          h2Pool.prewarm host p true 6000
       let initState : LocaldState := {
         launchToken := tok
         rpcPort := boundRpcPort
@@ -508,6 +579,7 @@ def main (args : List String) : IO UInt32 := do
         homeDir := homeDir
         hostOs := hostOs
         signerBin? := signerBin?
+        h2Pool? := some h2Pool
       }
       let stRef ← IO.mkRef initState
       acceptMuxLoop stRef rpcFd (#[proxyFd] ++ shardFds)

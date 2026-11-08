@@ -9,6 +9,11 @@ import {
   reportSyncUnexpectedDisconnect,
 } from "./backgroundSync";
 import {
+  currentLinkBudget,
+  recordSyncWsState,
+  recordTransportRttSample,
+} from "./networkHealth";
+import {
   orbKernelScratchSliceStep,
   orbWireStreamSliceStep,
 } from "./orbKernel";
@@ -465,13 +470,14 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
       if (socket === ws && !ready) {
         try { ws.close(); } catch { /* ignore */ }
       }
-    }, 5_000);
+    }, currentLinkBudget().connectDeadlineMs);
 
     ws.onopen = () => {
       if (socket !== ws || closed) return;
       clearTimeout(connectDeadline);
       ready = true;
       everReady = true;
+      recordSyncWsState(true);
       const hadFailures = consecutiveFailures > 0;
       consecutiveFailures = 0;
       syncSubscriptions();
@@ -488,7 +494,7 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
             if (socket === ws) {
               try { ws.close(); } catch { /* ignore */ }
             }
-          }, 5_000);
+          }, currentLinkBudget().pongDeadlineMs);
         }
       }, 10_000);
     };
@@ -529,7 +535,9 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
       const eventType = typeof parsed.type === "string" ? parsed.type : "";
       if (eventType === "pong") {
         if (typeof parsed.ts === "number") {
-          reportSyncPongRtt(Math.max(0, Date.now() - parsed.ts));
+          const rttMs = Math.max(0, Date.now() - parsed.ts);
+          reportSyncPongRtt(rttMs);
+          recordTransportRttSample(rttMs);
         }
         return;
       }
@@ -587,6 +595,7 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
       ready = false;
       for (const l of listeners) l.onDisconnected?.();
       if (closed || !listeners.size) return;
+      recordSyncWsState(false);
       if (wasReady) reportSyncUnexpectedDisconnect();
       consecutiveFailures++;
       candidateIdx++;
@@ -625,7 +634,7 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
         if (socket === activeWs) {
           try { activeWs.close(); } catch { /* ignore */ }
         }
-      }, 2_500);
+      }, currentLinkBudget().wakePongDeadlineMs);
     }
   }
 

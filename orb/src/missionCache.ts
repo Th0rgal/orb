@@ -1,5 +1,7 @@
-import { createSignal } from "solid-js";
+import { createSignal, untrack } from "solid-js";
 import { connectionVersion, listQueuedMessages, type Mission } from "./api";
+import * as apiModule from "./api";
+import { historyScope } from "./resourceCache";
 import {
   MAX_WARM_MISSIONS,
   isBackgroundSyncActive,
@@ -18,6 +20,17 @@ import {
   type StreamEvent,
 } from "./stream";
 import { cacheDelete, cachePeek, cachePut, cacheRecents, onCacheEvict } from "./pageCache";
+import { currentLinkBudget, onLinkBudgetChange } from "./networkHealth";
+import { loadPersistedTranscript, savePersistedTranscript } from "./persistentCache";
+
+function transcriptPersistScope(): string {
+  return "getJwt" in apiModule &&
+    "getApiUrl" in apiModule &&
+    typeof apiModule.getJwt === "function" &&
+    typeof apiModule.getApiUrl === "function"
+    ? historyScope()
+    : `c:${connectionVersion()}`;
+}
 
 export type TranscriptSnap = {
   activity?: string;
@@ -167,7 +180,30 @@ export function extractMissionSettingsPatch(
   };
 }
 
-function saveSnapshot(scope: string, snapshot: TranscriptSnap) {
+const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function missionIdFromScope(scope: string): string | null {
+  const m = /^c:\d+:m:(.+):tx$/.exec(scope);
+  return m ? m[1] : null;
+}
+
+function schedulePersistReadySnapshot(scope: string, snapshot: TranscriptSnap) {
+  if (!snapshot.fromLog || snapshot.detailsPending) return;
+  const missionId = missionIdFromScope(scope);
+  if (!missionId) return;
+  const existing = persistTimers.get(scope);
+  if (existing !== undefined) clearTimeout(existing);
+  const persistScope = transcriptPersistScope();
+  const ver = connectionVersion();
+  const timer = setTimeout(() => {
+    persistTimers.delete(scope);
+    if (ver !== connectionVersion()) return;
+    void savePersistedTranscript(persistScope, missionId, snapshot);
+  }, 250);
+  persistTimers.set(scope, timer);
+}
+
+function saveSnapshot(scope: string, snapshot: TranscriptSnap, persist = true) {
   cachedScopes.add(scope);
   const entry = active.get(scope);
   if (entry) entry.snapshot = snapshot;
@@ -176,7 +212,37 @@ function saveSnapshot(scope: string, snapshot: TranscriptSnap) {
   if (liveId && snapshot.fromLog && !snapshot.detailsPending) {
     rememberWarmRecent(scope, liveId);
   }
+  if (persist) schedulePersistReadySnapshot(scope, snapshot);
   bumpTranscriptVersion();
+}
+
+const hydratingFromDisk = new Map<string, Promise<TranscriptSnap | undefined>>();
+
+export function hydrateTranscriptFromDisk(id: string): Promise<TranscriptSnap | undefined> {
+  const existingReady = peekReadyTranscript(id);
+  if (existingReady) return Promise.resolve(existingReady);
+  const scope = key(id);
+  const inflightHydrate = hydratingFromDisk.get(scope);
+  if (inflightHydrate) return inflightHydrate;
+  const ver = connectionVersion();
+  const persistScope = transcriptPersistScope();
+  const p = loadPersistedTranscript<TranscriptSnap>(persistScope, id)
+    .then((persisted) => {
+      if (ver !== connectionVersion() || !persisted?.fromLog || persisted.detailsPending) {
+        return undefined;
+      }
+      if (!peekReadyTranscript(id)) {
+        saveSnapshot(scope, persisted, false);
+        dirtyMissions.add(scope);
+      }
+      return peekReadyTranscript(id);
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      if (hydratingFromDisk.get(scope) === p) hydratingFromDisk.delete(scope);
+    });
+  hydratingFromDisk.set(scope, p);
+  return p;
 }
 
 export function retainTranscript(id: string): () => void {
@@ -188,6 +254,9 @@ export function retainTranscript(id: string): () => void {
     entry = { refs: 1, snapshot: cachePeek<TranscriptSnap>(scope) };
     cacheDelete(scope);
     active.set(scope, entry);
+    if (!entry.snapshot) {
+      void hydrateTranscriptFromDisk(id);
+    }
   }
   reconcileWarmSubscriptions();
   return () => {
@@ -644,7 +713,7 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
     queueError = `Queued messages could not refresh: ${error instanceof Error ? error.message : String(error)}`;
     return [];
   });
-  const previous=peekReadyTranscript(id);
+  const previous = peekReadyTranscript(id) ?? (await hydrateTranscriptFromDisk(id));
   // Publish persisted messages before requesting activity. A preview is readable,
   // but has no raw cursor and must never count as a complete replay.
   let preview:StreamEvent[]=[];
@@ -744,7 +813,9 @@ export function refreshTranscript(id:string):Promise<TranscriptSnap>{
  return transcriptJob(id,'refresh',()=>fetchTranscript(id));
 }
 export function loadTranscript(id:string):Promise<TranscriptSnap>{
- const cached=peekReadyTranscript(id);return cached?Promise.resolve(cached):transcriptJob(id,'initial',()=>fetchTranscript(id));
+ const cached=peekReadyTranscript(id);
+ if(cached)return Promise.resolve(cached);
+ return transcriptJob(id,'initial',async()=>await hydrateTranscriptFromDisk(id)??await fetchTranscript(id));
 }
 // A transcript the cache cannot hold (too large), evicted under LRU pressure,
 // or that could not load is not speculatively fetched again at every list
@@ -772,7 +843,11 @@ export function selectLivePrefetchIds(missions: ReadonlyArray<{ id: string; stat
 const prefetchQueue=new Map<string,string>();
 let prefetchActive=0;
 function pumpPrefetch(){
- while(prefetchActive<4&&prefetchQueue.size){
+ if(!untrack(isBackgroundSyncActive))return;
+ const p2Cap=currentLinkBudget().p2Cap;
+ if(p2Cap<=0)return;
+ const maxConc=Math.min(4,p2Cap);
+ while(prefetchActive<maxConc&&prefetchQueue.size){
   const [scope,id]=prefetchQueue.entries().next().value!;
   prefetchQueue.delete(scope);
   if(scope!==key(id)||peekReadyTranscript(id)||jobs.has(scope))continue;
@@ -782,6 +857,8 @@ function pumpPrefetch(){
    .finally(()=>{prefetchActive--;pumpPrefetch();});
  }
 }
+onBackgroundSyncActiveChange(()=>pumpPrefetch());
+onLinkBudgetChange(()=>pumpPrefetch());
 export function prefetchTranscript(id:string){
  const scope=key(id);
  if(peekReadyTranscript(id)||jobs.has(scope))return;
@@ -792,6 +869,9 @@ export function prefetchTranscript(id:string){
 export function forgetPrefetchPauses(){
   prefetchPaused.clear();
   prefetchQueue.clear();
+  for (const [, timer] of persistTimers) clearTimeout(timer);
+  persistTimers.clear();
+  hydratingFromDisk.clear();
   for (const [, sub] of warmSubs) sub.stop();
   warmSubs.clear();
   dirtyMissions.clear();

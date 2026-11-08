@@ -9487,6 +9487,99 @@ declare i32 @llvm.umin.i32(i32, i32) #1
 ; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i2 @llvm.vector.reduce.or.v4i2(<4 x i2>) #1
 
+define dso_local i64 @orb_rtt_ewma_step(i32 %a0, i32 %a1, i32 %a2) local_unnamed_addr #0 {
+entry:
+  %0 = icmp eq i32 %a2, 0
+  %1 = tail call i32 @llvm.umin.i32(i32 %a2, i32 60000)
+  %alu_43.i = zext nneg i32 %1 to i64
+  %alu_48.i = zext i1 %0 to i64
+  %alu_56.i = or i64 %alu_43.i, %alu_48.i
+  %isneg51.i = icmp ult i32 %a2, 100
+  %2 = shl nuw nsw i64 %alu_43.i, 31
+  %3 = and i64 %2, 140733193388032
+  %alu_88.i = select i1 %isneg51.i, i64 214748364800, i64 %3
+  %alu_91.i = or disjoint i64 %alu_88.i, %alu_56.i
+  %4 = tail call i32 @llvm.umin.i32(i32 %a0, i32 60000)
+  %alu_119.i = zext nneg i32 %4 to i64
+  %5 = tail call i32 @llvm.umin.i32(i32 %a1, i32 60000)
+  %alu_150.i = sub nsw i64 %alu_119.i, %alu_56.i
+  %alu_170.i = sub nsw i64 %alu_56.i, %alu_119.i
+  %alu_176.i = tail call i64 @llvm.smax.i64(i64 %alu_150.i, i64 0)
+  %isneg52.i = icmp slt i64 %alu_150.i, 0
+  %alu_181.i = select i1 %isneg52.i, i64 %alu_170.i, i64 0
+  %alu_184.i = or i64 %alu_181.i, %alu_176.i
+  %narrow = mul nuw nsw i32 %5, 3
+  %alu_186.i = zext nneg i32 %narrow to i64
+  %alu_189.i = add i64 %alu_184.i, %alu_186.i
+  %6 = tail call i64 @llvm.umin.i64(i64 %alu_189.i, i64 240003)
+  %isneg54.i = icmp ult i64 %alu_189.i, 40
+  %alu_249.i = mul nuw nsw i64 %alu_119.i, 7
+  %alu_252.i = add nuw nsw i64 %alu_56.i, %alu_249.i
+  %alu_254.i = lshr i64 %alu_252.i, 3
+  %alu_256.i = add nsw i64 %alu_254.i, -1
+  %alu_302.i = lshr i64 %alu_256.i, 63
+  %7 = shl nuw nsw i64 %6, 30
+  %8 = and i64 %7, 281470681743360
+  %alu_312.i = select i1 %isneg54.i, i64 42949672960, i64 %8
+  %9 = or disjoint i64 %alu_302.i, %alu_312.i
+  %alu_315.i = or i64 %9, %alu_254.i
+  %.not.i = icmp eq i32 %a0, 0
+  %alu_339.i = select i1 %.not.i, i64 %alu_91.i, i64 %alu_315.i
+  ret i64 %alu_339.i
+}
+
+define dso_local i64 @orb_client_link_budget_step(i32 %a0, i32 %a1, i32 %a2, i8 zeroext %a3, i32 %a4) local_unnamed_addr #0 {
+entry:
+  %ext2 = zext i32 %a2 to i64
+  %ext3 = zext i8 %a3 to i64
+  %0 = icmp ugt i32 %a0, 1200
+  %1 = or i64 %ext3, %ext2
+  %2 = icmp ne i64 %1, 0
+  %alu_4966.i = or i1 %0, %2
+  %3 = icmp ult i32 %a0, 401
+  %narrow.not.i = select i1 %3, i1 true, i1 %alu_4966.i
+  %alu_81.i = select i1 %narrow.not.i, i64 6, i64 3
+  %alu_94.i = select i1 %alu_4966.i, i64 2, i64 %alu_81.i
+  %4 = icmp ne i32 %a4, 0
+  %alu_10867.i = or i1 %4, %alu_4966.i
+  %not.narrow.not.i = xor i1 %narrow.not.i, true
+  %alu_110.i = zext i1 %not.narrow.not.i to i64
+  %alu_112.i = select i1 %narrow.not.i, i64 4, i64 0
+  %alu_115.i = or disjoint i64 %alu_112.i, %alu_110.i
+  %5 = tail call i32 @llvm.umin.i32(i32 %a0, i32 60000)
+  %alu_151.i = zext nneg i32 %5 to i64
+  %6 = tail call i32 @llvm.umin.i32(i32 %a1, i32 60000)
+  %alu_179.i = zext nneg i32 %6 to i64
+  %alu_209.i = tail call i64 @llvm.umin.i64(i64 %ext2, i64 4)
+  %.not.i = icmp eq i32 %a0, 0
+  %alu_221.i = shl nuw nsw i64 %alu_179.i, 2
+  %alu_224.i = add nuw nsw i64 %alu_221.i, %alu_151.i
+  %alu_226.i = add nuw nsw i64 %alu_224.i, 4000
+  %alu_239.i = select i1 %.not.i, i64 10000, i64 %alu_226.i
+  %alu_241.i = mul nuw nsw i64 %alu_209.i, 2000
+  %alu_244.i = add nuw nsw i64 %alu_239.i, %alu_241.i
+  %7 = tail call i64 @llvm.umax.i64(i64 %alu_244.i, i64 8000)
+  %alu_300.i = tail call i64 @llvm.umin.i64(i64 %7, i64 30000)
+  %8 = tail call i64 @llvm.umax.i64(i64 %alu_224.i, i64 5000)
+  %9 = tail call i64 @llvm.umin.i64(i64 %8, i64 22000)
+  %alu_368.i = shl nuw nsw i64 %alu_179.i, 1
+  %alu_371.i = add nuw nsw i64 %alu_368.i, %alu_151.i
+  %10 = tail call i64 @llvm.umax.i64(i64 %alu_371.i, i64 3500)
+  %11 = tail call i64 @llvm.umin.i64(i64 %10, i64 12500)
+  %12 = shl nuw nsw i64 %alu_115.i, 8
+  %alu_439.i = select i1 %alu_10867.i, i64 0, i64 %12
+  %alu_442.i = or disjoint i64 %alu_94.i, %alu_439.i
+  %alu_444.i = shl nuw nsw i64 %alu_300.i, 16
+  %alu_447.i = or disjoint i64 %alu_442.i, %alu_444.i
+  %13 = shl nuw nsw i64 %11, 48
+  %14 = shl nuw nsw i64 %9, 32
+  %15 = add nuw nsw i64 %14, 703700326678528000
+  %16 = add nuw nsw i64 %15, %13
+  %alu_454.i = select i1 %.not.i, i64 1688884220002304000, i64 %16
+  %alu_457.i = or disjoint i64 %alu_447.i, %alu_454.i
+  ret i64 %alu_457.i
+}
+
 attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable }
 attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
 

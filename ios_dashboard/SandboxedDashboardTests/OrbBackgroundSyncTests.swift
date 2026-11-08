@@ -202,4 +202,48 @@ final class OrbBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(UserDefaults.standard.string(forKey: sessionKey), "btw-new")
         XCTAssertEqual(OrbBtwStore.knownBoundIdsByParent(candidates: [parentId])[parentId], "btw-new")
     }
+
+    func testSharedClientLinkGovernorFixtures() throws {
+        let root = try OrbSpec.json("fixtures/client-link-governor.json")
+        let ewmaCases = try XCTUnwrap(root["rtt_ewma_cases"] as? [[String: Any]])
+        XCTAssertFalse(ewmaCases.isEmpty)
+        for c in ewmaCases {
+            let name = try XCTUnwrap(c["name"] as? String)
+            let expected = try XCTUnwrap(c["expected"] as? [String: Any])
+            let res = OrbKernel.rttEwmaStep(
+                srttMs: (c["srtt_ms"] as? NSNumber)?.intValue ?? 0,
+                rttVarMs: (c["rtt_var_ms"] as? NSNumber)?.intValue ?? 0,
+                sampleMs: (c["sample_ms"] as? NSNumber)?.intValue ?? 0
+            )
+            XCTAssertEqual(res.srttMs, (expected["next_srtt_ms"] as? NSNumber)?.intValue, name)
+            XCTAssertEqual(res.rttVarMs, (expected["next_rtt_var_ms"] as? NSNumber)?.intValue, name)
+        }
+
+        let budgetCases = try XCTUnwrap(root["link_budget_cases"] as? [[String: Any]])
+        XCTAssertFalse(budgetCases.isEmpty)
+        for c in budgetCases {
+            let name = try XCTUnwrap(c["name"] as? String)
+            let expected = try XCTUnwrap(c["expected"] as? [String: Any])
+            let res = OrbKernel.clientLinkBudgetStep(
+                srttMs: (c["srtt_ms"] as? NSNumber)?.intValue ?? 0,
+                rttVarMs: (c["rtt_var_ms"] as? NSNumber)?.intValue ?? 0,
+                consecutiveFailures: (c["consecutive_failures"] as? NSNumber)?.intValue ?? 0,
+                isConstrained: ((c["is_constrained"] as? NSNumber)?.intValue ?? 0) != 0,
+                p0InFlight: (c["p0_in_flight"] as? NSNumber)?.intValue ?? 0
+            )
+            XCTAssertEqual(res.p1Cap, (expected["p1_cap"] as? NSNumber)?.intValue, name)
+            XCTAssertEqual(res.p2Cap, (expected["p2_cap"] as? NSNumber)?.intValue, name)
+            XCTAssertEqual(res.connectDeadlineMs, (expected["connect_deadline_ms"] as? NSNumber)?.intValue, name)
+            XCTAssertEqual(res.pongDeadlineMs, (expected["pong_deadline_ms"] as? NSNumber)?.intValue, name)
+            XCTAssertEqual(res.wakePongDeadlineMs, (expected["wake_pong_deadline_ms"] as? NSNumber)?.intValue, name)
+        }
+
+        let originCases = try XCTUnwrap(root["candidate_origin_cases"] as? [[String: Any]])
+        for c in originCases {
+            let name = try XCTUnwrap(c["name"] as? String)
+            let configured = try XCTUnwrap(c["configured_url"] as? String)
+            let expected = try XCTUnwrap(c["expected"] as? [String])
+            XCTAssertEqual(OrbConnection.candidateEndpoints(for: configured), expected, name)
+        }
+    }
 }

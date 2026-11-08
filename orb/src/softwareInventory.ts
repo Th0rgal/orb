@@ -108,12 +108,17 @@ export async function cancelSoftware(machine:string,id:string){
  if(flight)await flight;
  await refreshSoftware();
 }
-/** Checks persist independently of the Machines page; native workers own queued updates. */
-export function monitorSoftware(){
+export const SOFTWARE_STARTUP_DELAY_MS=8000;
+/** Checks persist independently of the Machines page; native workers own queued updates.
+ * Defer initial startup sweep by `SOFTWARE_STARTUP_DELAY_MS` so cold-start sidebar & open
+ * transcript requests never compete with background node/CLI inventory probes on slow links. */
+export function monitorSoftware(startupDelayMs=SOFTWARE_STARTUP_DELAY_MS){
+ enterScope();
  let last=0;let lastScope='';
  const tick=()=>{const key=cacheKey();if(key!==lastScope){lastScope=key;last=0;}
  const pending=machines().some(m=>m.inventory?.jobs.some(j=>['queued','installing'].includes(j.state)));
  if(Date.now()-last>(pending?10000:900000)){last=Date.now();void refreshSoftware();}};
- tick();const timer=setInterval(tick,10000);window.addEventListener('focus',tick);
- return ()=>{clearInterval(timer);window.removeEventListener('focus',tick);};
+ const initTimer=startupDelayMs<=0?(tick(),undefined):setTimeout(tick,startupDelayMs);
+ const timer=setInterval(tick,10000);window.addEventListener('focus',tick);
+ return ()=>{if(initTimer!==undefined)clearTimeout(initTimer);clearInterval(timer);window.removeEventListener('focus',tick);};
 }

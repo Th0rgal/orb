@@ -36,6 +36,19 @@ struct OrbBackgroundSyncState: Equatable, Sendable {
     var cooldownUntilMs: Int64
     var recentDisconnectsMs: [Int64]
     var lastRttMs: Int?
+    var srttMs: Int = 0
+    var rttVarMs: Int = 0
+    var consecutiveFailures: Int = 0
+
+    var linkBudget: OrbKernel.ClientLinkBudgetResult {
+        OrbKernel.clientLinkBudgetStep(
+            srttMs: srttMs,
+            rttVarMs: rttVarMs,
+            consecutiveFailures: consecutiveFailures,
+            isConstrained: dataSaver || mode == .off,
+            p0InFlight: 0
+        )
+    }
 
     var pauseReason: OrbBackgroundSyncPauseReason? {
         switch mode {
@@ -137,6 +150,10 @@ enum OrbBackgroundSyncPolicy {
         case .pingRtt(let rttMs, let atMs):
             let clamped = max(0, rttMs)
             next.lastRttMs = clamped
+            let ewma = OrbKernel.rttEwmaStep(srttMs: next.srttMs, rttVarMs: next.rttVarMs, sampleMs: clamped)
+            next.srttMs = ewma.srttMs
+            next.rttVarMs = ewma.rttVarMs
+            next.consecutiveFailures = 0
             if clamped > rttSlowThresholdMs {
                 next.slowRttStreak += 1
                 next.fastRttStreak = 0
@@ -173,6 +190,7 @@ enum OrbBackgroundSyncPolicy {
             recent.append(atMs)
             next.recentDisconnectsMs = recent
             next.fastRttStreak = 0
+            next.consecutiveFailures = min(255, next.consecutiveFailures + 1)
             if recent.count >= disconnectBurstToPause {
                 next.pausedByLink = true
                 next.linkPauseReason = .unstableLink
@@ -267,6 +285,7 @@ final class OrbBackgroundSyncMonitor {
     var active: Bool { state.active }
     var pauseReason: OrbBackgroundSyncPauseReason? { state.pauseReason }
     var lastRttMs: Int? { state.lastRttMs }
+    var linkBudget: OrbKernel.ClientLinkBudgetResult { state.linkBudget }
 
     var statusText: String {
         switch state.mode {
@@ -328,8 +347,9 @@ final class OrbBackgroundSyncMonitor {
 
     private func apply(_ event: OrbBackgroundSyncEvent) {
         let prevActive = state.active
+        let prevP2Cap = state.linkBudget.p2Cap
         state = OrbBackgroundSyncPolicy.reduce(state, event: event)
-        if state.active != prevActive {
+        if state.active != prevActive || state.linkBudget.p2Cap != prevP2Cap {
             OrbWarmSyncCoordinator.shared.reconcile()
         }
     }
@@ -805,7 +825,9 @@ final class OrbWarmSyncCoordinator {
             return
         }
 
-        let bgActive = OrbBackgroundSyncMonitor.shared.active && OrbCore.shared.canUseMultiplexSync
+        let budget = OrbBackgroundSyncMonitor.shared.linkBudget
+        let bgActive = OrbBackgroundSyncMonitor.shared.active && OrbCore.shared.canUseMultiplexSync && budget.p2Cap > 0
+        let warmCap = min(OrbBackgroundSyncPolicy.maxWarmMissions, max(1, budget.p2Cap * 3))
         let focusedIds = Array(focusedCounts.keys)
         let liveReady = liveIds.filter { !OrbReadCache.readEvents($0).isEmpty }
         for mid in liveReady { rememberRecent(mid) }
@@ -813,7 +835,7 @@ final class OrbWarmSyncCoordinator {
         let knownBtw = OrbBtwStore.knownBoundIdsByParent(candidates: Set(focusedIds + liveReady + recentReady + Array(focusedBtwParents)))
         let selection = OrbBackgroundSyncPolicy.selectWarmMissionIds(
             backgroundActive: bgActive,
-            maxWarm: OrbBackgroundSyncPolicy.maxWarmMissions,
+            maxWarm: warmCap,
             focusedIds: focusedIds,
             liveIds: liveReady,
             recentIds: recentReady,

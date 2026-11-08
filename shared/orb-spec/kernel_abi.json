@@ -6116,6 +6116,58 @@
         "method": "orbStreamOpenTailCapStep",
         "ret": "jlong"
       }
+    },
+    {
+      "name": "orb_rtt_ewma_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "srttMs",
+          "type": "uint32_t"
+        },
+        {
+          "name": "rttVarMs",
+          "type": "uint32_t"
+        },
+        {
+          "name": "sampleMs",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbRttEwmaStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_client_link_budget_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "srttMs",
+          "type": "uint32_t"
+        },
+        {
+          "name": "rttVarMs",
+          "type": "uint32_t"
+        },
+        {
+          "name": "consecutiveFailures",
+          "type": "uint32_t"
+        },
+        {
+          "name": "isConstrained",
+          "type": "uint8_t"
+        },
+        {
+          "name": "p0InFlight",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbClientLinkBudgetStep",
+        "ret": "jlong"
+      }
     }
   ]
 }

@@ -944,4 +944,38 @@ theorem kill_m39_streamOpenTailCap_checkpointRegresses :
       streamOpenTailCapStep 20 5 18 22 5 8 1 := by
   decide
 
+/-- Mutant 14.1 (`orb_client_link_budget_step`):
+    Background `P2` prefetches fail to pause on an active `P0` user send (`p0InFlight == 1` leaked). -/
+@[inline, export orb_mut_m40]
+def m40_clientLinkBudget_p2IgnoresSingleP0
+    (srttMs rttVarMs consecutiveFailures : UInt32)
+    (isConstrained : UInt8)
+    (p0InFlight : UInt32) : UInt64 :=
+  clientLinkBudgetStep srttMs rttVarMs consecutiveFailures isConstrained
+    (if p0InFlight > 1 then p0InFlight else 0)
+
+theorem kill_m40_clientLinkBudget_p2IgnoresSingleP0 :
+    m40_clientLinkBudget_p2IgnoresSingleP0 250 80 0 0 1 ≠
+      clientLinkBudgetStep 250 80 0 0 1 := by
+  decide
+
+/-- Mutant 14.2 (`orb_rtt_ewma_step`):
+    Cold-start RTT variance collapses below 50 ms floor (`initVar = halfSample`). -/
+@[inline, export orb_mut_m41]
+def m41_rttEwma_noColdVarianceFloor (srttMs rttVarMs sampleMs : UInt32) : UInt64 :=
+  let sample32 : UInt32 :=
+    if sampleMs == 0 then 1
+    else if sampleMs > 60000 then 60000
+    else sampleMs
+  if srttMs == 0 then
+    let halfSample : UInt32 := sample32 >>> 1
+    sample32.toUInt64 ||| (halfSample.toUInt64 <<< 32)
+  else
+    rttEwmaStep srttMs rttVarMs sampleMs
+
+theorem kill_m41_rttEwma_noColdVarianceFloor :
+    m41_rttEwma_noColdVarianceFloor 0 0 40 ≠
+      rttEwmaStep 0 0 40 := by
+  decide
+
 end Orb.MutantSuite

@@ -11,6 +11,17 @@ import { getProjectCronFromJob, hermesPatch, normalizeControllerView, type Herme
 import { applyProjectRoster } from "./projectAppearance";
 import { note, requestDone } from "./diagnostics";
 import {
+  recordTransportFailure,
+  recordTransportRttSample,
+  resetNetworkHealth,
+} from "./networkHealth";
+import { clearPersistentCache } from "./persistentCache";
+import {
+  classifyClientRequestPriority,
+  scheduleTransportRequest,
+  type RequestPriority,
+} from "./transportScheduler";
+import {
   LOCAL_PLACEMENT_CLIENT_ID,
   allocatePlacementOpId,
   authoritativePlacement,
@@ -57,22 +68,23 @@ export function getApiUrl(): string {
   return localStorage.getItem(URL_KEY) ?? DEFAULT_URL;
 }
 
-/** Ordered candidate origins for 3-way multi-path failover (mirrors Rust/Swift/Kotlin). */
+/** Ordered candidate origins for Edge-diverse 3-way multi-path failover (mirrors Lean/Swift/Kotlin):
+ * rotates across distinct network edges (`orbcore.thomas.md` -> Cloudflare Edge BBR `agent-backend.thomas.md` -> direct OVH `agent-backend.nico-best-pc-ever.ovh`). */
 export function candidateApiUrls(primary = getApiUrl()): string[] {
   const clean = primary.trim().replace(/\/+$/, "");
   if (!clean) return [];
   const lower = clean.toLowerCase();
   if (lower === ORBCORE_URL) {
-    return [clean, KNOWN_DIRECT_URL, DEFAULT_URL];
+    return [clean, DEFAULT_URL, KNOWN_DIRECT_URL];
   }
   if (lower === KNOWN_DIRECT_URL) {
-    return [clean, ORBCORE_URL, DEFAULT_URL];
+    return [clean, DEFAULT_URL, ORBCORE_URL];
   }
   if (lower === DEFAULT_URL) {
     return [clean, ORBCORE_URL, KNOWN_DIRECT_URL];
   }
   if (lower.endsWith(".thomas.md")) {
-    return [clean, ORBCORE_URL, DEFAULT_URL];
+    return [clean, DEFAULT_URL, ORBCORE_URL];
   }
   return [clean];
 }
@@ -85,7 +97,7 @@ let bridgeStreamCursor = 0;
 let bridgePending: Promise<string | null> | null = null;
 const endpointCooldownUntil = new Map<string, number>();
 
-function resetTransportState() {
+export function resetTransportState() {
   bridgeTarget = null;
   bridgeBaseUrl = null;
   bridgeStreamUrls = [];
@@ -185,26 +197,103 @@ function withTargetHeader(init: RequestInit | undefined, target: string): Reques
   return { ...(init ?? {}), headers };
 }
 
+function withPriorityHeader(init: RequestInit | undefined, priority: RequestPriority): RequestInit {
+  if (!init?.headers) {
+    return { ...(init ?? {}), headers: { "X-Orb-Priority": priority } };
+  }
+  if (init.headers instanceof Headers) {
+    const next = new Headers(init.headers);
+    if (!next.has("X-Orb-Priority")) next.set("X-Orb-Priority", priority);
+    return { ...init, headers: next };
+  }
+  if (Array.isArray(init.headers)) {
+    const has = init.headers.some(([k]) => k.toLowerCase() === "x-orb-priority");
+    return has ? init : { ...init, headers: [...init.headers, ["X-Orb-Priority", priority]] };
+  }
+  const existing = headerValue(init.headers, "X-Orb-Priority");
+  if (existing) return init;
+  return {
+    ...init,
+    headers: {
+      ...(init.headers as Record<string, string>),
+      "X-Orb-Priority": priority,
+    },
+  };
+}
+
+function recordFetchTelemetry(res: Response, startedMs: number, fallbackOrigin?: string): Response {
+  const rttHeader = res.headers?.get?.("X-Orb-Transport-Rtt-Ms");
+  const upstreamOrigin = res.headers?.get?.("X-Orb-Upstream-Origin") ?? fallbackOrigin ?? null;
+  const parsedRtt = rttHeader ? Number(rttHeader) : NaN;
+  const sampleMs =
+    Number.isFinite(parsedRtt) && parsedRtt > 0
+      ? parsedRtt
+      : Math.max(1, Math.round(performance.now() - startedMs));
+  if (res.status < 500 && res.status !== 429) {
+    recordTransportRttSample(sampleMs, upstreamOrigin);
+  } else if (res.status >= 500) {
+    recordTransportFailure();
+  }
+  return res;
+}
+
 /** Perform `fetch` against `path` using the Tauri loopback transport when active
  * (eliminating `WKWebView` CORS preflights and DNS stalls), or ordered direct/fallback
  * origins synchronously when no native bridge is active. Long-lived SSE streams are
  * routed across sharded loopback stream ports so `WKWebView`'s 6-connection-per-origin
  * HTTP/1.1 limit never starves JSON/REST requests. */
-export function transportFetch(path: string, init?: RequestInit, explicitBase?: string): Promise<Response> {
+export function transportFetch(
+  path: string,
+  init?: RequestInit,
+  explicitBase?: string,
+  explicitPriority?: RequestPriority,
+  defaultWireTimeoutMs?: number,
+): Promise<Response> {
   const target = (explicitBase ?? getApiUrl()).trim().replace(/\/+$/, "");
-  if (transportBridgeEnabled && nativeInvoke()) {
-    const streaming = isStreamingFetch(path, init);
-    const proxiedInit = withTargetHeader(init, target);
-    if (bridgeTarget === target && bridgeBaseUrl) {
-      const chosen = pickBridgeUrl(streaming, bridgeBaseUrl)!;
-      return fetch(`${chosen}${path}`, proxiedInit);
+  const streaming = isStreamingFetch(path, init);
+  const rawPrio = headerValue(init?.headers, "X-Orb-Priority") as RequestPriority | undefined;
+  const validExplicit =
+    explicitPriority ??
+    (rawPrio === "p0" || rawPrio === "p1" || rawPrio === "p2" ? rawPrio : undefined);
+  const priority = classifyClientRequestPriority(init?.method, path, validExplicit);
+  const runOnce = (): Promise<Response> => {
+    const startedMs = performance.now();
+    // Attach the default request deadline on wire dispatch rather than before
+    // scheduler queueing so P2 requests paused behind a degraded link never
+    // fire spurious RequestTimeoutError banners while waiting locally.
+    const wireInit: RequestInit | undefined =
+      !init?.signal && !streaming && defaultWireTimeoutMs && defaultWireTimeoutMs > 0
+        ? { ...(init ?? {}), signal: AbortSignal.timeout(defaultWireTimeoutMs) }
+        : init;
+    if (transportBridgeEnabled && nativeInvoke()) {
+      const targetInit = withTargetHeader(wireInit, target);
+      const bridgeInit = streaming ? targetInit : withPriorityHeader(targetInit, priority);
+      if (bridgeTarget === target && bridgeBaseUrl) {
+        const chosen = pickBridgeUrl(streaming, bridgeBaseUrl)!;
+        return fetch(`${chosen}${path}`, bridgeInit).then(
+          (res) => recordFetchTelemetry(res, startedMs),
+          (err) => {
+            if (!isAbortError(err)) recordTransportFailure();
+            throw err;
+          },
+        );
+      }
+      return resolveTransportBase(target).then((proxy) => {
+        const chosen = bridgeTarget === target ? pickBridgeUrl(streaming, proxy) : proxy;
+        if (!chosen) return transportFetchDirect(target, path, wireInit);
+        return fetch(`${chosen}${path}`, bridgeInit).then(
+          (res) => recordFetchTelemetry(res, startedMs),
+          (err) => {
+            if (!isAbortError(err)) recordTransportFailure();
+            throw err;
+          },
+        );
+      });
     }
-    return resolveTransportBase(target).then((proxy) => {
-      const chosen = bridgeTarget === target ? pickBridgeUrl(streaming, proxy) : proxy;
-      return chosen ? fetch(`${chosen}${path}`, proxiedInit) : transportFetchDirect(target, path, init);
-    });
-  }
-  return transportFetchDirect(target, path, init);
+    return transportFetchDirect(target, path, wireInit);
+  };
+  if (streaming) return runOnce();
+  return scheduleTransportRequest(priority, init?.signal, runOnce);
 }
 
 function headerValue(headers: HeadersInit | undefined, name: string): string | undefined {
@@ -247,19 +336,23 @@ async function transportFetchDirect(target: string, path: string, init?: Request
   for (let i = 0; i < attempts; i++) {
     const base = candidates[i];
     const isLast = i + 1 === attempts;
+    const startedMs = performance.now();
     try {
       const res = await fetch(`${base}${path}`, init);
       if ([502, 503, 504, 522, 524].includes(res.status)) {
         endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
+        recordTransportFailure();
         if (safeMethod && !isLast) continue;
       } else if (res.status < 500) {
         endpointCooldownUntil.delete(base);
+        recordFetchTelemetry(res, startedMs, base);
       }
       return res;
     } catch (err) {
       lastError = err;
       if (!isAbortError(err)) {
         endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
+        recordTransportFailure();
       }
       if (isAbortError(err) || !safeMethod || isLast) throw err;
     }
@@ -304,7 +397,8 @@ function disconnectNativeSync(){
 export function setConnection(url: string, token: string) {
   const changed = url.replace(/\/+$/,"")!==getApiUrl() || token!==getJwt();
   if(getJwt() && changed)disconnectNativeSync();
-  if(changed){resetMissionHierarchy();ancestorCache.clear();}
+  if(changed){resetMissionHierarchy();ancestorCache.clear();void clearPersistentCache();}
+  resetNetworkHealth();
   setApiUrl(url);
   localStorage.setItem(JWT_KEY, token);
   setConnected(true);
@@ -318,6 +412,8 @@ export function clearConnection() {
   disconnectNativeSync();
   resetMissionHierarchy();
   ancestorCache.clear();
+  resetNetworkHealth();
+  void clearPersistentCache();
   const hadConnection = connected() || !!getJwt();
   localStorage.removeItem(JWT_KEY);
   persistDesktopConnection(null);
@@ -416,11 +512,20 @@ export function isTransientNetworkError(error: unknown): boolean {
   return error instanceof TypeError && /load failed|failed to fetch|networkerror|network connection|internet connection|could not connect/i.test(error.message);
 }
 
-export function api<T>(path: string, init?: RequestInit, explicitBase?: string): Promise<T> {
+export function api<T>(
+  path: string,
+  init?: RequestInit,
+  explicitBase?: string,
+  explicitPriority?: RequestPriority,
+): Promise<T> {
   // Explicit signals/options retain independent cancellation semantics.
-  if (!init && !explicitBase) return sharedRead(`${connectionVersion()}:${getApiUrl()}:${path}`, () => apiRequest<T>(path));
+  if (!init && !explicitBase) {
+    return sharedRead(`${connectionVersion()}:${getApiUrl()}:${path}`, () =>
+      apiRequest<T>(path, undefined, false, undefined, explicitPriority),
+    );
+  }
   if (init?.method && init.method.toUpperCase() !== 'GET') invalidateReads();
-  return apiRequest<T>(path, init, false, explicitBase);
+  return apiRequest<T>(path, init, false, explicitBase, explicitPriority);
 }
 /** Like `api`, for endpoints that answer with plain text (e.g. Library save receipts). */
 export function apiText(path: string, init?: RequestInit): Promise<string> {
@@ -431,10 +536,16 @@ function redactDiagnosticPath(path: string): string {
   return path.replace(/([?&](?:q|query)=)[^&]*/gi, "$1[redacted]");
 }
 
-async function apiRequest<T>(path: string, init?: RequestInit, text = false, explicitBase?: string): Promise<T> {
+async function apiRequest<T>(
+  path: string,
+  init?: RequestInit,
+  text = false,
+  explicitBase?: string,
+  explicitPriority?: RequestPriority,
+): Promise<T> {
   const from = performance.now(), label = `${init?.method?.toUpperCase() ?? "GET"} ${redactDiagnosticPath(path)}`;
   try {
-    const result = await sendRequest<T>(path, init, text, explicitBase);
+    const result = await sendRequest<T>(path, init, text, explicitBase, explicitPriority);
     requestDone(label, performance.now() - from, true);
     return text ? result : stickMissionRows(path, result);
   } catch (error) {
@@ -459,19 +570,31 @@ function isFastRetryableError(error: unknown, init?: RequestInit): boolean {
   return error instanceof TypeError && /load failed|failed to fetch|networkerror|network connection|internet connection|could not connect/i.test(error.message);
 }
 
-async function sendRequest<T>(path: string, init?: RequestInit, text = false, explicitBase?: string): Promise<T> {
+async function sendRequest<T>(
+  path: string,
+  init?: RequestInit,
+  text = false,
+  explicitBase?: string,
+  explicitPriority?: RequestPriority,
+): Promise<T> {
   try {
-    return await sendRequestOnce<T>(path, init, text, explicitBase);
+    return await sendRequestOnce<T>(path, init, text, explicitBase, explicitPriority);
   } catch (error) {
     if (!isFastRetryableError(error, init)) throw error;
     const delayMs = 200 + Math.floor(Math.random() * 200);
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     if (init?.signal?.aborted) throw error;
-    return sendRequestOnce<T>(path, init, text, explicitBase);
+    return sendRequestOnce<T>(path, init, text, explicitBase, explicitPriority);
   }
 }
 
-async function sendRequestOnce<T>(path: string, init?: RequestInit, text = false, explicitBase?: string): Promise<T> {
+async function sendRequestOnce<T>(
+  path: string,
+  init?: RequestInit,
+  text = false,
+  explicitBase?: string,
+  explicitPriority?: RequestPriority,
+): Promise<T> {
   const version = connectionVersion();
   const jwt = getJwt();
   const headers: Record<string, string> = {
@@ -483,8 +606,10 @@ async function sendRequestOnce<T>(path: string, init?: RequestInit, text = false
   try {
     res = await transportFetch(
       path,
-      { ...init, headers, signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+      { ...init, headers, ...(init?.signal ? { signal: init.signal } : {}) },
       explicitBase,
+      explicitPriority,
+      REQUEST_TIMEOUT_MS,
     );
   } catch (error) {
     if (!isAbortError(error)) throw error;
@@ -1419,11 +1544,14 @@ export async function listProjectMissions(slug: string): Promise<Mission[]> {
   try{const remote=await remotePromise;await origins.rememberCoreState(local,remote,observedAt);const pending=excludeBtwMissions(local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id)))));return [...pending,...excludeBtwMissions(remote).filter(m=>!pending.some(l=>l.id===m.id))];}catch(error){if(local.length)return partialList(local);throw error;}
 }
 
-export async function listProjectFiles(slug: string, path: string): Promise<ProjectFileEntry[]> {
+export async function listProjectFiles(
+  slug: string,
+  path: string,
+  opts?: { background?: boolean },
+): Promise<ProjectFileEntry[]> {
   const local=await import("./projectContext").then(m=>m.localContextFile<{entries?:ProjectFileEntry[]}>(slug,"list",path));if(local&&Array.isArray(local.entries))return local.entries;
-  const data = await api<{ entries?: ProjectFileEntry[] }>(
-    `/api/projects/${encodeURIComponent(slug)}/files?path=${encodeURIComponent(path)}`,
-  );
+  const url = `/api/projects/${encodeURIComponent(slug)}/files?path=${encodeURIComponent(path)}`;
+  const data = await api<{ entries?: ProjectFileEntry[] }>(url, undefined, undefined, opts?.background ? "p2" : "p1");
   return data.entries ?? [];
 }
 

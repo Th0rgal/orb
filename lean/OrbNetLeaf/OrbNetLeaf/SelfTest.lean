@@ -25,6 +25,8 @@ open OrbNetLeaf.Crypto
 open OrbNetLeaf.HpackQpack
 open OrbNetLeaf.Pty
 open OrbNetLeaf.TlsHttp
+open OrbNetLeaf.Gzip
+open OrbNetLeaf.H2Pool
 
 private def assertTrue (label : String) (cond : Bool) : IO Unit := do
   if !cond then
@@ -491,5 +493,77 @@ def main : IO Unit := do
   IO.println s!"[BENCH] Wave 5.B 200x in-process 1-RTT H3/QUIC codec={nativeNs / 1000}us vs fork+exec spawn floor={subScaledNs / 1000}us (Delta={deltaPct}%)"
   assertTrue "In-process 1-RTT H3/QUIC codec completed 200 roundtrips"
     (nativeNs > 0)
+
+  -- 8. RFC 1952 `gzip` + RFC 1951 `DEFLATE` decompressor & zip-bomb / CRC32 rejection
+  -- (a) Fixed Huffman (`BTYPE=01`): `gzip` of `"{\"ok\":true,\"missions\":[{\"id\":\"m1\"},{\"id\":\"m2\"}]}"` (48 bytes)
+  let gzValid := ByteArray.mk #[
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xab, 0x56,
+    0xca, 0xcf, 0x56, 0xb2, 0x2a, 0x29, 0x2a, 0x4d, 0xd5, 0x51, 0xca, 0xcd,
+    0x2c, 0x2e, 0xce, 0xcc, 0xcf, 0x2b, 0x56, 0xb2, 0x8a, 0xae, 0x56, 0xca,
+    0x4c, 0x51, 0xb2, 0x52, 0xca, 0x35, 0x54, 0xaa, 0xd5, 0x81, 0xb1, 0x8d,
+    0x94, 0x6a, 0x63, 0x6b, 0x01, 0xde, 0xda, 0xc6, 0xf0, 0x30, 0x00, 0x00,
+    0x00
+  ]
+  let expectedJson := "{\"ok\":true,\"missions\":[{\"id\":\"m1\"},{\"id\":\"m2\"}]}".toUTF8
+  let .ok inflatedJson := gunzipBounded gzValid 1024
+    | throw (IO.userError "gunzipBounded failed on valid RFC 1952 BTYPE=01 vector")
+  assertTrue "gunzipBounded inflates RFC 1952 BTYPE=01 + LZ77 back-referenced JSON and verifies CRC32/ISIZE"
+    (inflatedJson == expectedJson)
+
+  -- (b) Dynamic Huffman (`BTYPE=10`): 146B -> 642B mission list JSON (`4.4x` compression)
+  let gzDyn := ByteArray.mk #[
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x8d, 0xd2,
+    0x4d, 0x0a, 0x83, 0x30, 0x18, 0x84, 0xe1, 0xab, 0x94, 0x59, 0x5b, 0x30,
+    0xfe, 0x46, 0xef, 0xe0, 0x09, 0xc4, 0x85, 0x50, 0x91, 0x0f, 0x4c, 0x84,
+    0x26, 0xae, 0xc4, 0xbb, 0x1b, 0x28, 0x94, 0xcf, 0xdd, 0x6c, 0x07, 0x9e,
+    0xd5, 0xbc, 0x27, 0x9c, 0x84, 0x20, 0xbb, 0x0f, 0xe8, 0xc7, 0x13, 0xf2,
+    0x41, 0x0f, 0xf7, 0xce, 0x91, 0x21, 0xc4, 0x39, 0x1e, 0x69, 0xc5, 0xf7,
+    0xf0, 0x5e, 0xfc, 0x9a, 0xa6, 0x28, 0x71, 0x5b, 0xd2, 0x32, 0xfc, 0xc8,
+    0x2b, 0xc7, 0x95, 0xfd, 0x8d, 0xe1, 0x8c, 0xd1, 0xa6, 0xe0, 0x4c, 0xa1,
+    0x4d, 0xc9, 0x99, 0x52, 0x9b, 0x8a, 0x33, 0x95, 0x36, 0x35, 0x67, 0x6a,
+    0x6d, 0x1a, 0xce, 0x34, 0xda, 0xb4, 0x9c, 0x69, 0xb5, 0xb1, 0x9c, 0xb1,
+    0xda, 0x74, 0x9c, 0xe9, 0x1e, 0x9f, 0x92, 0x21, 0x98, 0x67, 0x09, 0x6c,
+    0x0a, 0xa9, 0x85, 0xe9, 0xba, 0x01, 0xbd, 0x91, 0x5b, 0x7b, 0x82, 0x02,
+    0x00, 0x00
+  ]
+  let .ok inflatedDyn := gunzipBounded gzDyn 2048
+    | throw (IO.userError "gunzipBounded failed on valid RFC 1952 BTYPE=10 dynamic Huffman vector")
+  assertTrue "gunzipBounded inflates RFC 1952 BTYPE=10 dynamic Huffman 146B -> 642B JSON"
+    (inflatedDyn.size == 642)
+
+  -- Corrupt trailer CRC32 byte -> fail closed
+  let gzBadCrc := gzValid.set! (gzValid.size - 8) ((gzValid.get! (gzValid.size - 8)) ^^^ 0xFF)
+  assertTrue "gunzipBounded rejects corrupted CRC32 trailer"
+    (gunzipBounded gzBadCrc 1024).isOk.not
+
+  -- Enforce maxOutBytes zip-bomb cap (`32 < 48`) -> fail closed before unbounded growth
+  assertTrue "gunzipBounded enforces maxOutBytes zip-bomb ceiling"
+    (gunzipBounded gzValid 32).isOk.not
+
+  -- Stored block (`BTYPE=00`) + `FNAME` header flag roundtrip
+  let rawHello := "hello-orb-gzip".toUTF8
+  let helloCrc := crc32 rawHello
+  let storedLen : UInt16 := rawHello.size.toUInt16
+  let storedNlen : UInt16 := storedLen ^^^ 0xFFFF
+  let mut gzStored := ByteArray.mk #[
+    0x1f, 0x8b, 0x08, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+    0x74, 0x2e, 0x6a, 0x73, 0x00, -- FNAME "t.js\0"
+    0x01, -- BFINAL=1, BTYPE=00
+    (storedLen &&& 0xFF).toUInt8, (storedLen >>> 8).toUInt8,
+    (storedNlen &&& 0xFF).toUInt8, (storedNlen >>> 8).toUInt8
+  ]
+  gzStored := gzStored ++ rawHello ++ ByteArray.mk #[
+    (helloCrc &&& 0xFF).toUInt8, ((helloCrc >>> 8) &&& 0xFF).toUInt8,
+    ((helloCrc >>> 16) &&& 0xFF).toUInt8, ((helloCrc >>> 24) &&& 0xFF).toUInt8,
+    rawHello.size.toUInt8, 0x00, 0x00, 0x00
+  ]
+  assertTrue "gunzipBounded inflates FNAME + stored BTYPE=00 block"
+    (match gunzipBounded gzStored 256 with | .ok out => out == rawHello | .error _ => false)
+
+  -- H2ClientPool instantiation & fast non-blocking connect timeout check (`127.0.0.1:9` fails quickly without stalling)
+  let h2Pool ← H2ClientPool.new
+  let poolFailRes ← h2Pool.request 0 "GET" "127.0.0.1" 9 "/api/health" #[] ByteArray.empty 4096 false 150 250
+  assertTrue "H2ClientPool fails closed cleanly on unreachable port"
+    poolFailRes.isOk.not
 
   IO.println "[OrbNetLeaf] ALL SELF-TESTS PASSED"

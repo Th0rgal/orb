@@ -1,3 +1,7 @@
+import { untrack } from "solid-js";
+import { isBackgroundSyncActive } from "./backgroundSync";
+import { currentLinkBudget } from "./networkHealth";
+
 /** In-memory LRU for page payloads. First paint reads here; network
  * refreshes in the background and joins in-flight work so open + prefetch
  * share one request. */
@@ -122,6 +126,7 @@ export function cacheRecents(): string[] {
 
 export function cacheCanPrefetch(): boolean {
   if (typeof document !== "undefined" && document.visibilityState === "hidden") return false;
+  if (!untrack(isBackgroundSyncActive) || currentLinkBudget().p2Cap === 0) return false;
   const mem = (navigator as { deviceMemory?: number }).deviceMemory;
   if (mem != null && mem < 2) return false;
   return true;

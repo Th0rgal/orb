@@ -3,11 +3,12 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { kernelAbi } from "../src/orbKernelAbi";
 import { ensureKernelLinearScratch, kernelScratchBaseOffset } from "../src/orbKernelRuntime";
+import fixtureClientLinkGovernor from "../../shared/orb-spec/fixtures/client-link-governor.json";
 import {
   ORB_WIRE_SCHEMA_SCROLL_SLICE, ORB_WIRE_SCHEMA_STREAM_SLICE, ORB_WIRE_SCHEMA_TRANSCRIPT_SLICE,
   leansysGfmPipeRowAdmitted, leansysRichTagAdmitted, leansysVerifyFdBounds,
-  orbAuthToctouExecuteStep, orbHierarchyMergeStep, orbOutboxCrashReconcileStep,
-  orbProviderAttemptStep, orbRelativeTimeString, orbResourceLedgerStep,
+  orbAuthToctouExecuteStep, orbClientLinkBudgetStep, orbHierarchyMergeStep, orbOutboxCrashReconcileStep,
+  orbProviderAttemptStep, orbRelativeTimeString, orbResourceLedgerStep, orbRttEwmaStep,
   orbScrollPolicyClampTop, orbScrollPolicyCorrect, orbScrollPolicyGap,
   orbScrollPolicyMaxTop, orbScrollPolicyStep,
   orbSidebarDragStep, orbSidebarMoveTargetAdmit,
@@ -1040,6 +1041,33 @@ describe("orb kernel gates mirror lean-sys", () => {
       } else {
         throw new Error(`Unexpected R6-A fixture op: ${String(item.op)}`);
       }
+    }
+  });
+
+  it("replays client-link-governor fixtures identically across WASM", () => {
+    for (const c of fixtureClientLinkGovernor.rtt_ewma_cases) {
+      expect(orbRttEwmaStep(c.srtt_ms, c.rtt_var_ms, c.sample_ms), c.name).toEqual({
+        srttMs: c.expected.next_srtt_ms,
+        rttVarMs: c.expected.next_rtt_var_ms,
+      });
+    }
+    for (const c of fixtureClientLinkGovernor.link_budget_cases) {
+      expect(
+        orbClientLinkBudgetStep({
+          srttMs: c.srtt_ms,
+          rttVarMs: c.rtt_var_ms,
+          consecutiveFailures: c.consecutive_failures,
+          isConstrained: c.is_constrained !== 0,
+          p0InFlight: c.p0_in_flight,
+        }),
+        c.name,
+      ).toEqual({
+        p1Cap: c.expected.p1_cap,
+        p2Cap: c.expected.p2_cap,
+        connectDeadlineMs: c.expected.connect_deadline_ms,
+        pongDeadlineMs: c.expected.pong_deadline_ms,
+        wakePongDeadlineMs: c.expected.wake_pong_deadline_ms,
+      });
     }
   });
 });

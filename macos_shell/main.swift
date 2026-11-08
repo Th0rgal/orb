@@ -495,11 +495,20 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             }, true);
           }
           async function callLocald(command, args = {}) {
-            const r = await _fetch(ORB_LOCALD_URL, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN },
-              body: _jsonStringify({ command, args })
-            });
+            let r;
+            for (let attempt = 0; ; attempt++) {
+              try {
+                r = await _fetch(ORB_LOCALD_URL, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN },
+                  body: _jsonStringify({ command, args })
+                });
+                break;
+              } catch (err) {
+                if (attempt >= 8) throw err;
+                await new Promise((res) => setTimeout(res, 75));
+              }
+            }
             const b = await r.json();
             if (!r.ok || b.error) throw new Error(b.error || command);
             return b.result;

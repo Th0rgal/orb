@@ -85,6 +85,7 @@ const CronForm = lazy(() => import("./ControllerSettings").then(module => ({ def
 import { getProjectCronFromJob } from "./cronSchema";
 import { loadTranscript, prefetchTranscript, selectLivePrefetchIds } from "./missionCache";
 import { cacheCanPrefetch, cachePeek, cachePrefetch, cachePut, cacheRemember } from "./pageCache";
+import { currentLinkBudget, onLinkBudgetChange } from "./networkHealth";
 import { SidebarTree } from "./Tree";
 import { type TreeRow } from "./treeModel";
 import { deletingIds, setDeletingIds, createTreeSelection } from "./tree/selection";
@@ -1137,29 +1138,32 @@ export function LiveProjectsSection(p: {
   }));
 
   const dirGenerations = new Map<string, number>();
-  const loadDir = (slug: string, path: string, force = false) => {
+  const loadDir = (slug: string, path: string, force = false, background = false) => {
     if (!isConnected()) return Promise.resolve();
     const version = connectionVersion();
     const key = `${slug}:${path}`;
     const gen = (dirGenerations.get(key) ?? 0) + (force ? 1 : 0);
     if (force) dirGenerations.set(key, gen);
     setDirErrors(key, null);
-    return requests.read(`files:${version}:${key}`, () => listProjectFiles(slug, path), force)
+    return requests.read(`files:${version}:${key}`, () => listProjectFiles(slug, path, { background }), force)
       .then((entries) => { if (currentConnection(version) && (dirGenerations.get(key) ?? 0) === gen) setDirs(key, reconcile(Array.isArray(entries) ? entries : [], {key: "name"})); })
       .catch((e) => { if (currentConnection(version) && (dirGenerations.get(key) ?? 0) === gen) setDirErrors(key, e instanceof Error ? e.message : String(e)); });
   };
 
   const warmupOne = async (slug: string) => {
+    const isOpen = !!expanded[slug];
     await Promise.all([
       loadMissions(slug, { transcripts: false, cached: true }),
-      loadDir(slug, ""),
+      loadDir(slug, "", false, !isOpen),
       loadController(slug, false),
       loadCrons(slug),
     ]);
   };
   const pumpWarmup = () => {
     if (!cacheCanPrefetch()) return;
-    while (warmupActive < 4 && warmupQueue.length) {
+    const cap = Math.min(2, currentLinkBudget().p2Cap);
+    if (cap <= 0) return;
+    while (warmupActive < cap && warmupQueue.length) {
       const slug = warmupQueue.shift()!;
       warmupActive++;
       void warmupOne(slug).finally(() => {
@@ -1168,15 +1172,16 @@ export function LiveProjectsSection(p: {
       });
     }
   };
+  onCleanup(onLinkBudgetChange(pumpWarmup));
   const warmupProjects = (list: ProjectSummary[]) => {
     const limit = list.length;
     if (!limit) return;
     const active = new Set((p.activityMissions ?? []).filter(m => isRunning(m.status)).map(m => m.project));
     const prioritized = [...list].sort((a, b) => Number(!!expanded[b.slug] || active.has(b.slug)) - Number(!!expanded[a.slug] || active.has(a.slug)));
-    for (const p of prioritized.slice(0, limit)) {
-      if (warmed.has(p.slug)) continue;
-      warmed.add(p.slug);
-      warmupQueue.push(p.slug);
+    for (const proj of prioritized.slice(0, limit)) {
+      if (warmed.has(proj.slug)) continue;
+      warmed.add(proj.slug);
+      warmupQueue.push(proj.slug);
     }
     pumpWarmup();
   };

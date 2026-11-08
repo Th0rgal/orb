@@ -108,6 +108,7 @@ import { createHandoffTracker } from "./handoff";
 import { createOptimisticList } from "./optimisticList";
 import { notify } from "../toast";
 import { usageTelemetry } from "../usageTelemetry";
+import { networkHealth, networkHealthSnapshot } from "../networkHealth";
 import { fulfillSearchTarget, hasPendingSearchTarget, pendingSearchTarget } from "../searchTarget";
 
 const inflightSettings = new Map<string, Promise<unknown>>();
@@ -162,6 +163,7 @@ function MissionDock(p: {
   mission: Mission | null;
   items: StreamItem[];
   destination: string;
+  syncing?: boolean;
   onMission?: (mission: Mission, authoritative?: boolean) => void;
   onError?: (message: string) => void;
   onFork?: (mission: Mission) => void;
@@ -363,6 +365,22 @@ function MissionDock(p: {
         </Show>
         <Show when={p.mission?.backend === "codex"}><MissionCyber mission={p.mission!} onError={p.onError}/></Show>
       </Show>
+      <Show when={isConnected() && (networkHealth() === "reconnecting" || (networkHealth() === "slow" && (p.syncing || isWorking(p.mission?.status))))}>
+        <span
+          class={`under-link-pill ${networkHealth()}`}
+          role="status"
+          title={
+            networkHealth() === "reconnecting"
+              ? "Reconnecting live sync — messages and output are buffered safely"
+              : `High network latency (${networkHealthSnapshot().srttMs} ms) — prioritizing this conversation`
+          }
+        >
+          <i aria-hidden="true" />
+          <span class="under-link-label">
+            {networkHealth() === "reconnecting" ? "Reconnecting" : "Slow link"}
+          </span>
+        </span>
+      </Show>
       <div class="ctx-wrap">
         <button class="ctx" title="Context used" onClick={() => setOpen(!open())}>
           <Ic.ContextRing pct={pct()} /> {pct()}%
@@ -462,6 +480,12 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   const [awaiting, setAwaiting] = createSignal(!cached || !!cached.detailsPending);
   createEffect(on(transcriptVersion, () => {
     if (!awaiting() || staleMission()) return;
+    const ready = peekReadyTranscript(p.id);
+    if (ready) {
+      setItems(reuseUnchanged(items(), ready.items));
+      setAwaiting(false);
+      return;
+    }
     const preview = peekTranscript(p.id);
     if (preview?.detailsPending) setItems(reuseUnchanged(items(), preview.items));
   }));
@@ -1534,7 +1558,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           <ErrorToast error={sendError()} title="Couldn’t send your message" onDismiss={() => setSendError(null)}
             action={optimistic() ? { label: "Retry", run: () => { const draft = optimistic(); if (draft?.retry) draft.retry(); else if (draft) void sendMsg(draft.text, draft.images, followAttach(), draft.id); } } : undefined} />
           <ErrorToast error={error() || queueError()} title="Couldn’t load the conversation" onDismiss={() => { setError(null); setQueueError(null); }} />
-          <MissionDock mission={mission()} items={viewItems()} destination={missionDestination(mission(), receipt)} onMission={applyDockMission} onError={setError} onFork={p.onFork} />
+          <MissionDock mission={mission()} items={viewItems()} destination={missionDestination(mission(), receipt)} syncing={syncing()} onMission={applyDockMission} onError={setError} onFork={p.onFork} />
         </div>
       </div>
     </>

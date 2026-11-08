@@ -2893,6 +2893,10 @@ class OrbCore private constructor(context: Context) {
                 return
             }
             val base = candidates[candidateIndex % candidates.size]
+            val budget = OrbBackgroundSyncMonitor.linkBudget
+            val connectClient = sseHttpClient.newBuilder()
+                .connectTimeout(maxOf(6_000L, budget.connectDeadlineMs.toLong()), java.util.concurrent.TimeUnit.MILLISECONDS)
+                .build()
             val req = Request.Builder()
                 .url(toWsUrl(base))
                 .header("Authorization", "Bearer $token")
@@ -2901,7 +2905,8 @@ class OrbCore private constructor(context: Context) {
                 subscribedMissions.clear()
                 presentationSent = null
             }
-            ws = sseHttpClient.newWebSocket(req, object : WebSocketListener() {
+            var awaitingPongSinceMs: Long? = null
+            ws = connectClient.newWebSocket(req, object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     if (closed) {
                         webSocket.close(1000, null)
@@ -2916,7 +2921,17 @@ class OrbCore private constructor(context: Context) {
                         while (isActive && !closed) {
                             delay(10_000L)
                             if (!closed && opened) {
-                                webSocket.send(OrbJSON.stringify(mapOf("op" to "ping", "ts" to System.currentTimeMillis())))
+                                val nowMs = System.currentTimeMillis()
+                                val pongDeadlineMs = OrbBackgroundSyncMonitor.linkBudget.pongDeadlineMs.toLong()
+                                val waitingSince = awaitingPongSinceMs
+                                if (waitingSince != null && nowMs - waitingSince >= pongDeadlineMs) {
+                                    webSocket.cancel()
+                                    break
+                                }
+                                if (waitingSince == null) {
+                                    awaitingPongSinceMs = nowMs
+                                }
+                                webSocket.send(OrbJSON.stringify(mapOf("op" to "ping", "ts" to nowMs)))
                             }
                         }
                     }
@@ -2924,6 +2939,7 @@ class OrbCore private constructor(context: Context) {
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     if (closed || text.isEmpty()) return
+                    awaitingPongSinceMs = null
                     val parsed = OrbJSON.dict(OrbJSON.parse(text)) ?: return
                     val eventType = OrbJSON.str(parsed, "type") ?: return
                     if (eventType == "pong") {

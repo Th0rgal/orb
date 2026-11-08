@@ -190,6 +190,8 @@ uint64_t orb_sidebar_drag_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint
 uint64_t orb_followup_queue_step(uint8_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint8_t, uint8_t, uint8_t, uint8_t);
 uint64_t orb_transport_epoch_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t);
 uint64_t orb_stream_open_tail_cap_step(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint8_t);
+uint64_t orb_rtt_ewma_step(uint32_t, uint32_t, uint32_t);
+uint64_t orb_client_link_budget_step(uint32_t, uint32_t, uint32_t, uint8_t, uint32_t);
 #ifdef __cplusplus
 }
 #endif

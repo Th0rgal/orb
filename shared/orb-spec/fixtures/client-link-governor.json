@@ -1,0 +1,178 @@
+{
+  "description": "Shared cross-client RFC 6298 EWMA RTT estimator (orb_rtt_ewma_step), adaptive priority link-budget governor (orb_client_link_budget_step), and Edge-diverse failover origin ordering.",
+  "rtt_ewma_cases": [
+    {
+      "name": "cold_start_idle_slow_wifi",
+      "srtt_ms": 0,
+      "rtt_var_ms": 0,
+      "sample_ms": 600,
+      "expected": {
+        "next_srtt_ms": 600,
+        "next_rtt_var_ms": 300
+      }
+    },
+    {
+      "name": "cold_start_variance_floor_50ms",
+      "srtt_ms": 0,
+      "rtt_var_ms": 0,
+      "sample_ms": 40,
+      "expected": {
+        "next_srtt_ms": 40,
+        "next_rtt_var_ms": 50
+      }
+    },
+    {
+      "name": "cold_start_zero_sample_clamped_to_1ms",
+      "srtt_ms": 0,
+      "rtt_var_ms": 0,
+      "sample_ms": 0,
+      "expected": {
+        "next_srtt_ms": 1,
+        "next_rtt_var_ms": 50
+      }
+    },
+    {
+      "name": "steady_state_spike_smoothing",
+      "srtt_ms": 800,
+      "rtt_var_ms": 200,
+      "sample_ms": 1600,
+      "expected": {
+        "next_srtt_ms": 900,
+        "next_rtt_var_ms": 350
+      }
+    },
+    {
+      "name": "steady_state_recovery_toward_fast_edge",
+      "srtt_ms": 1600,
+      "rtt_var_ms": 400,
+      "sample_ms": 400,
+      "expected": {
+        "next_srtt_ms": 1450,
+        "next_rtt_var_ms": 600
+      }
+    },
+    {
+      "name": "extreme_outlier_clamped_at_60000ms",
+      "srtt_ms": 500,
+      "rtt_var_ms": 100,
+      "sample_ms": 99999,
+      "expected": {
+        "next_srtt_ms": 7937,
+        "next_rtt_var_ms": 14950
+      }
+    }
+  ],
+  "link_budget_cases": [
+    {
+      "name": "fast_link_full_concurrency",
+      "srtt_ms": 120,
+      "rtt_var_ms": 40,
+      "consecutive_failures": 0,
+      "is_constrained": 0,
+      "p0_in_flight": 0,
+      "expected": {
+        "p1_cap": 6,
+        "p2_cap": 4,
+        "connect_deadline_ms": 8000,
+        "pong_deadline_ms": 8000,
+        "wake_pong_deadline_ms": 6000
+      }
+    },
+    {
+      "name": "active_p0_send_preempts_background_p2",
+      "srtt_ms": 120,
+      "rtt_var_ms": 40,
+      "consecutive_failures": 0,
+      "is_constrained": 0,
+      "p0_in_flight": 1,
+      "expected": {
+        "p1_cap": 6,
+        "p2_cap": 0,
+        "connect_deadline_ms": 8000,
+        "pong_deadline_ms": 8000,
+        "wake_pong_deadline_ms": 6000
+      }
+    },
+    {
+      "name": "moderate_wifi_throttles_p2_to_single_lane",
+      "srtt_ms": 650,
+      "rtt_var_ms": 220,
+      "consecutive_failures": 0,
+      "is_constrained": 0,
+      "p0_in_flight": 0,
+      "expected": {
+        "p1_cap": 3,
+        "p2_cap": 1,
+        "connect_deadline_ms": 8000,
+        "pong_deadline_ms": 8000,
+        "wake_pong_deadline_ms": 6000
+      }
+    },
+    {
+      "name": "loaded_4mbps_bufferbloat_pauses_p2_and_scales_ws_deadlines",
+      "srtt_ms": 2600,
+      "rtt_var_ms": 900,
+      "consecutive_failures": 1,
+      "is_constrained": 0,
+      "p0_in_flight": 0,
+      "expected": {
+        "p1_cap": 2,
+        "p2_cap": 0,
+        "connect_deadline_ms": 12200,
+        "pong_deadline_ms": 9200,
+        "wake_pong_deadline_ms": 6900
+      }
+    },
+    {
+      "name": "low_data_mode_pauses_background_p2_even_at_low_rtt",
+      "srtt_ms": 90,
+      "rtt_var_ms": 30,
+      "consecutive_failures": 0,
+      "is_constrained": 1,
+      "p0_in_flight": 0,
+      "expected": {
+        "p1_cap": 2,
+        "p2_cap": 0,
+        "connect_deadline_ms": 8000,
+        "pong_deadline_ms": 8000,
+        "wake_pong_deadline_ms": 6000
+      }
+    }
+  ],
+  "candidate_origin_cases": [
+    {
+      "name": "orbcore_primary_prefers_cloudflare_edge_second",
+      "configured_url": "https://orbcore.thomas.md",
+      "expected": [
+        "https://orbcore.thomas.md",
+        "https://agent-backend.thomas.md",
+        "https://agent-backend.nico-best-pc-ever.ovh"
+      ]
+    },
+    {
+      "name": "cloudflare_primary_falls_back_to_orbcore_then_direct_ovh",
+      "configured_url": "https://agent-backend.thomas.md/",
+      "expected": [
+        "https://agent-backend.thomas.md",
+        "https://orbcore.thomas.md",
+        "https://agent-backend.nico-best-pc-ever.ovh"
+      ]
+    },
+    {
+      "name": "direct_ovh_primary_falls_back_to_cloudflare_then_orbcore",
+      "configured_url": "https://agent-backend.nico-best-pc-ever.ovh",
+      "expected": [
+        "https://agent-backend.nico-best-pc-ever.ovh",
+        "https://agent-backend.thomas.md",
+        "https://orbcore.thomas.md"
+      ]
+    },
+    {
+      "name": "self_hosted_custom_origin_never_leaks_to_hosted_failovers",
+      "configured_url": "https://orb.internal.example.com:8443/",
+      "expected": [
+        "https://orb.internal.example.com:8443"
+      ]
+    }
+  ]
+}

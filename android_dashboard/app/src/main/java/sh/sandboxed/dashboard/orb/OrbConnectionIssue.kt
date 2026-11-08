@@ -32,22 +32,26 @@ object OrbConnection {
 
     fun isDefault(url: String): Boolean = normalize(url).equals(DEFAULT_BASE_URL, ignoreCase = true)
 
-    /** Ordered candidate origins for 3-way multi-path failover (mirrors Desktop/Tauri/iOS). */
+    /**
+     * Ordered candidate origins for 3-way Edge-diverse multi-path failover (mirrors Desktop/Tauri/iOS).
+     * Prefers Cloudflare Edge BBR (`DEFAULT_BASE_URL`) before direct OVH (`KNOWN_DIRECT_BASE_URL`) so lossy/high-RTT
+     * links avoid transatlantic CUBIC collapse when `orbcore` degrades.
+     */
     fun candidateEndpoints(primary: String): List<String> {
         val clean = normalize(primary)
         if (clean.isEmpty()) return emptyList()
         val lower = clean.lowercase()
         if (lower == ORBCORE_BASE_URL) {
-            return listOf(clean, KNOWN_DIRECT_BASE_URL, DEFAULT_BASE_URL)
+            return listOf(clean, DEFAULT_BASE_URL, KNOWN_DIRECT_BASE_URL)
         }
         if (lower == KNOWN_DIRECT_BASE_URL) {
-            return listOf(clean, ORBCORE_BASE_URL, DEFAULT_BASE_URL)
+            return listOf(clean, DEFAULT_BASE_URL, ORBCORE_BASE_URL)
         }
         if (lower == DEFAULT_BASE_URL) {
             return listOf(clean, ORBCORE_BASE_URL, KNOWN_DIRECT_BASE_URL)
         }
         if (lower.endsWith(".thomas.md")) {
-            return listOf(clean, ORBCORE_BASE_URL, DEFAULT_BASE_URL)
+            return listOf(clean, DEFAULT_BASE_URL, ORBCORE_BASE_URL)
         }
         return listOf(clean)
     }

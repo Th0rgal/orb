@@ -50,7 +50,18 @@ data class OrbBackgroundSyncState(
     val cooldownUntilMs: Long,
     val recentDisconnectsMs: List<Long>,
     val lastRttMs: Int?,
+    val srttMs: Int = 0,
+    val rttVarMs: Int = 0,
+    val consecutiveFailures: Int = 0,
 ) {
+    val linkBudget: OrbKernel.ClientLinkBudgetStepResult
+        get() = OrbKernel.clientLinkBudgetStep(
+            srttMs = srttMs,
+            rttVarMs = rttVarMs,
+            consecutiveFailures = consecutiveFailures,
+            isConstrained = dataSaver || mode == OrbBackgroundSyncMode.Off,
+            p0InFlight = 0,
+        )
     val pauseReason: OrbBackgroundSyncPauseReason?
         get() = when (mode) {
             OrbBackgroundSyncMode.On, OrbBackgroundSyncMode.Off -> null
@@ -139,33 +150,37 @@ object OrbBackgroundSyncPolicy {
         )
         is OrbBackgroundSyncEvent.PingRtt -> {
             val rtt = event.rttMs.coerceAtLeast(0)
+            val ewma = OrbKernel.rttEwmaStep(state.srttMs, state.rttVarMs, rtt)
+            val base = state.copy(
+                lastRttMs = rtt,
+                srttMs = ewma.srttMs,
+                rttVarMs = ewma.rttVarMs,
+                consecutiveFailures = 0,
+            )
             if (rtt > RTT_SLOW_THRESHOLD_MS) {
-                val slowStreak = state.slowRttStreak + 1
+                val slowStreak = base.slowRttStreak + 1
                 if (slowStreak >= RTT_SLOW_STREAK_TO_PAUSE) {
-                    state.copy(
-                        lastRttMs = rtt,
+                    base.copy(
                         slowRttStreak = slowStreak,
                         fastRttStreak = 0,
                         pausedByLink = true,
                         linkPauseReason = OrbBackgroundSyncPauseReason.SlowRtt,
-                        cooldownUntilMs = maxOf(state.cooldownUntilMs, event.atMs + RESUME_COOLDOWN_MS),
+                        cooldownUntilMs = maxOf(base.cooldownUntilMs, event.atMs + RESUME_COOLDOWN_MS),
                     )
                 } else {
-                    state.copy(
-                        lastRttMs = rtt,
+                    base.copy(
                         slowRttStreak = slowStreak,
                         fastRttStreak = 0,
                     )
                 }
             } else if (rtt < RTT_FAST_THRESHOLD_MS) {
-                val fastStreak = state.fastRttStreak + 1
-                val canResume = !state.dataSaver &&
-                    state.pausedByLink &&
+                val fastStreak = base.fastRttStreak + 1
+                val canResume = !base.dataSaver &&
+                    base.pausedByLink &&
                     fastStreak >= RTT_FAST_STREAK_TO_RESUME &&
-                    event.atMs >= state.cooldownUntilMs
+                    event.atMs >= base.cooldownUntilMs
                 if (canResume) {
-                    state.copy(
-                        lastRttMs = rtt,
+                    base.copy(
                         slowRttStreak = 0,
                         fastRttStreak = fastStreak,
                         pausedByLink = false,
@@ -173,15 +188,13 @@ object OrbBackgroundSyncPolicy {
                         recentDisconnectsMs = emptyList(),
                     )
                 } else {
-                    state.copy(
-                        lastRttMs = rtt,
+                    base.copy(
                         slowRttStreak = 0,
                         fastRttStreak = fastStreak,
                     )
                 }
             } else {
-                state.copy(
-                    lastRttMs = rtt,
+                base.copy(
                     slowRttStreak = 0,
                     fastRttStreak = 0,
                 )
@@ -196,10 +209,12 @@ object OrbBackgroundSyncPolicy {
         is OrbBackgroundSyncEvent.UnexpectedDisconnect -> {
             val cutoff = event.atMs - DISCONNECT_WINDOW_MS
             val recent = state.recentDisconnectsMs.filter { it >= cutoff } + event.atMs
+            val nextFailures = (state.consecutiveFailures + 1).coerceAtMost(255)
             if (recent.size >= DISCONNECT_BURST_TO_PAUSE) {
                 state.copy(
                     recentDisconnectsMs = recent,
                     fastRttStreak = 0,
+                    consecutiveFailures = nextFailures,
                     pausedByLink = true,
                     linkPauseReason = OrbBackgroundSyncPauseReason.UnstableLink,
                     cooldownUntilMs = maxOf(state.cooldownUntilMs, event.atMs + RESUME_COOLDOWN_MS),
@@ -208,6 +223,7 @@ object OrbBackgroundSyncPolicy {
                 state.copy(
                     recentDisconnectsMs = recent,
                     fastRttStreak = 0,
+                    consecutiveFailures = nextFailures,
                 )
             }
         }
@@ -317,6 +333,9 @@ object OrbBackgroundSyncMonitor {
     val active: Boolean
         get() = _state.value.active
 
+    val linkBudget: OrbKernel.ClientLinkBudgetStepResult
+        get() = _state.value.linkBudget
+
     fun init(context: Context) {
         if (initialized) return
         val appCtx = context.applicationContext
@@ -414,14 +433,15 @@ object OrbBackgroundSyncMonitor {
     }
 
     private fun apply(event: OrbBackgroundSyncEvent) {
-        val changedActive: Boolean
+        val changedBudget: Boolean
         synchronized(lock) {
             val prev = _state.value
+            val prevP2 = prev.linkBudget.p2Cap
             val next = OrbBackgroundSyncPolicy.reduce(prev, event)
             _state.value = next
-            changedActive = prev.active != next.active
+            changedBudget = prev.active != next.active || prevP2 != next.linkBudget.p2Cap
         }
-        if (changedActive) {
+        if (changedBudget) {
             OrbWarmSyncCoordinator.reconcileIfReady()
         }
     }
@@ -988,7 +1008,9 @@ object OrbWarmSyncCoordinator {
                 return
             }
 
-            val bgActive = OrbBackgroundSyncMonitor.active && core.canUseMultiplexSync
+            val budget = OrbBackgroundSyncMonitor.linkBudget
+            val bgActive = OrbBackgroundSyncMonitor.active && core.canUseMultiplexSync && budget.p2Cap > 0
+            val warmCap = minOf(OrbBackgroundSyncPolicy.MAX_WARM_MISSIONS, maxOf(1, budget.p2Cap * 3))
             val focusedIds = focusedCounts.keys.toList()
             val liveReady = liveIds.filter { mid ->
                 OrbReadCache.readMemoryRows("mission_events_$mid").isNotEmpty() ||
@@ -1006,7 +1028,7 @@ object OrbWarmSyncCoordinator {
             }
             val selection = OrbBackgroundSyncPolicy.selectWarmMissionIds(
                 backgroundActive = bgActive,
-                maxWarm = OrbBackgroundSyncPolicy.MAX_WARM_MISSIONS,
+                maxWarm = warmCap,
                 focusedIds = focusedIds,
                 liveIds = liveReady,
                 recentIds = recentReady,

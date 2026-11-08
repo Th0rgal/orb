@@ -6,6 +6,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,32 +32,34 @@
 typedef struct { pthread_mutex_t mu; SSL_CTX *ctx; SSL *ssl; int fd; } onl_tls_t;
 static void onl_tls_cleanup_locked(onl_tls_t *s) {
     if (s->ssl) { SSL_shutdown(s->ssl); SSL_free(s->ssl); s->ssl = NULL; }
-    if (s->ctx) { SSL_CTX_free(s->ctx); s->ctx = NULL; }
-    if (s->fd >= 0) { close(s->fd); s->fd = -1; }
+    if (s->ctx) { SSL_CTX_free(s->ctx); s->ctx = NULL; } if (s->fd >= 0) { close(s->fd); s->fd = -1; }
 }
 static void onl_tls_fin(void *p) {
     onl_tls_t *s = (onl_tls_t *)p; if (!s) return;
-    pthread_mutex_lock(&s->mu); onl_tls_cleanup_locked(s); pthread_mutex_unlock(&s->mu);
-    pthread_mutex_destroy(&s->mu); free(s);
+    pthread_mutex_lock(&s->mu); onl_tls_cleanup_locked(s); pthread_mutex_unlock(&s->mu); pthread_mutex_destroy(&s->mu); free(s);
 }
-static pthread_once_t g_onl_tls_once = PTHREAD_ONCE_INIT;
-static lean_external_class *g_onl_tls_cls = NULL;
-static void onl_tls_reg(void) { g_onl_tls_cls = lean_register_external_class(onl_tls_fin, NULL); }
+static void onl_tls_for(void *p, b_lean_obj_arg f) { (void)p; (void)f; }
+static pthread_once_t g_onl_tls_once = PTHREAD_ONCE_INIT; static lean_external_class *g_onl_tls_cls = NULL;
+static void onl_tls_reg(void) { g_onl_tls_cls = lean_register_external_class(onl_tls_fin, onl_tls_for); }
 static inline const char *onl_cstr(b_lean_obj_arg s) { const char *p = lean_string_cstr(s); return strlen(p) == lean_string_size(s) - 1 ? p : NULL; }
-static inline lean_obj_res onl_pack(int64_t rc) {
-    return lean_io_result_mk_ok(lean_box_uint64(rc < 0 ? ((1ULL << 63) | ((uint64_t)(uint32_t)errno << 32)) : ((uint64_t)rc & 0x7FFFFFFFFFFFFFFFULL)));
-}
+static inline lean_obj_res onl_pack(int64_t rc) { return lean_io_result_mk_ok(lean_box_uint64(rc < 0 ? ((1ULL << 63) | ((uint64_t)(uint32_t)errno << 32)) : ((uint64_t)rc & 0x7FFFFFFFFFFFFFFFULL))); }
 static int onl_connect_sock(const char *h, uint16_t port, int socktype, uint32_t timeout_ms) {
     if (!h || !*h) return -1;
     char pstr[8]; snprintf(pstr, sizeof(pstr), "%u", (unsigned)port);
     struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = socktype }, *res = NULL;
     if (getaddrinfo(h, pstr, &hints, &res) != 0 || !res) return -1;
-    int fd = -1; uint32_t ms = timeout_ms ? timeout_ms : 30000U;
+    int fd = -1, one = 1; uint32_t ms = timeout_ms ? timeout_ms : 30000U; int pms = ms > 0x7FFFFFFFU ? 0x7FFFFFFF : (int)ms;
     struct timeval tv = { .tv_sec = (time_t)(ms / 1000U), .tv_usec = (suseconds_t)((ms % 1000U) * 1000U) };
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC, ai->ai_protocol);
-        if (fd >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 && setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 &&
-            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0 && connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        fd = socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC, ai->ai_protocol); int fl = fd >= 0 ? fcntl(fd, F_GETFL, 0) : -1;
+        int rc = (fd >= 0 && fl >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 && fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0) ? connect(fd, ai->ai_addr, ai->ai_addrlen) : -1;
+        if (rc < 0 && errno == EINPROGRESS && poll(&(struct pollfd){ .fd = fd, .events = POLLOUT }, 1, pms) == 1) {
+            int se = -1; socklen_t sl = sizeof(se); rc = (getsockopt(fd, SOL_SOCKET, SO_ERROR, &se, &sl) == 0 && se == 0) ? 0 : -1;
+        }
+        if (rc == 0 && fcntl(fd, F_SETFL, fl) == 0 && setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 && setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0) {
+            if (socktype == SOCK_STREAM) { (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)); (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one)); }
+            break;
+        }
         if (fd >= 0) { close(fd); fd = -1; }
     }
     freeaddrinfo(res); return fd;
@@ -193,27 +197,23 @@ LEAN_EXPORT lean_obj_res orb_net_leaf_tls_read(b_lean_obj_arg h_obj, size_t max_
         (void)setsockopt(s->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     }
     lean_object *out = lean_alloc_sarray(1, 0, cap + 1); ERR_clear_error();
-    int r = SSL_read(s->ssl, lean_sarray_cptr(out) + 1, (int)cap), err = r > 0 ? 0 : SSL_get_error(s->ssl, r);
+    int r = SSL_read(s->ssl, lean_sarray_cptr(out) + 1, (int)cap), se = errno, err = r > 0 ? 0 : SSL_get_error(s->ssl, r);
     unsigned long e = r > 0 ? 0 : ERR_peek_error(); pthread_mutex_unlock(&s->mu);
     if (r > 0) return lean_sarray_cptr(out)[0] = 0, lean_sarray_set_size(out, 1 + (size_t)r), lean_io_result_mk_ok(out);
-    uint8_t st = err == SSL_ERROR_ZERO_RETURN ? 1 : (((err == SSL_ERROR_SYSCALL && e == 0 && r == 0) ||
-        (err == SSL_ERROR_SSL && ERR_GET_LIB(e) == ERR_LIB_SSL && ERR_GET_REASON(e) == SSL_R_UNEXPECTED_EOF_WHILE_READING)) ? 4 : 0);
+    uint8_t st = err == SSL_ERROR_ZERO_RETURN ? 1 : ((err == SSL_ERROR_WANT_READ || (err == SSL_ERROR_SYSCALL && (se == EAGAIN || se == EWOULDBLOCK || se == EINTR))) ? 5 :
+        (((err == SSL_ERROR_SYSCALL && e == 0 && r == 0) || (err == SSL_ERROR_SSL && ERR_GET_LIB(e) == ERR_LIB_SSL && ERR_GET_REASON(e) == SSL_R_UNEXPECTED_EOF_WHILE_READING)) ? 4 : 0));
     if (!st) return lean_dec_ref(out), lean_io_result_mk_ok(lean_alloc_sarray(1, 0, 0));
     return lean_sarray_cptr(out)[0] = st, lean_sarray_set_size(out, 1), lean_io_result_mk_ok(out);
 }
 LEAN_EXPORT lean_obj_res orb_net_leaf_tls_close(b_lean_obj_arg h_obj) {
-    onl_tls_t *s = (onl_tls_t *)lean_get_external_data(h_obj);
-    if (s) { pthread_mutex_lock(&s->mu); onl_tls_cleanup_locked(s); pthread_mutex_unlock(&s->mu); }
+    onl_tls_t *s = (onl_tls_t *)lean_get_external_data(h_obj); if (s) { pthread_mutex_lock(&s->mu); onl_tls_cleanup_locked(s); pthread_mutex_unlock(&s->mu); }
     return lean_io_result_mk_ok(lean_box(0));
 }
 LEAN_EXPORT lean_obj_res orb_net_leaf_udp_roundtrip(b_lean_obj_arg host, uint16_t port, b_lean_obj_arg dgram, size_t max_resp, uint32_t timeout_ms) {
-    const char *h = onl_cstr(host);
-    int fd = (!h || max_resp == 0 || max_resp > 65536) ? -1 : onl_connect_sock(h, port, SOCK_DGRAM, timeout_ms ? timeout_ms : 5000U);
+    const char *h = onl_cstr(host); int fd = (!h || max_resp == 0 || max_resp > 65536) ? -1 : onl_connect_sock(h, port, SOCK_DGRAM, timeout_ms ? timeout_ms : 5000U);
     if (fd < 0) return lean_io_result_mk_ok(lean_alloc_sarray(1, 0, 0));
     lean_object *out = lean_alloc_sarray(1, 0, max_resp);
-    ssize_t rd = send(fd, lean_sarray_cptr(dgram), lean_sarray_size(dgram), 0) == (ssize_t)lean_sarray_size(dgram)
-        ? recv(fd, lean_sarray_cptr(out), max_resp, 0) : -1;
-    close(fd);
-    if (rd <= 0) return lean_dec_ref(out), lean_io_result_mk_ok(lean_alloc_sarray(1, 0, 0));
+    ssize_t rd = send(fd, lean_sarray_cptr(dgram), lean_sarray_size(dgram), 0) == (ssize_t)lean_sarray_size(dgram) ? recv(fd, lean_sarray_cptr(out), max_resp, 0) : -1;
+    close(fd); if (rd <= 0) return lean_dec_ref(out), lean_io_result_mk_ok(lean_alloc_sarray(1, 0, 0));
     return lean_sarray_set_size(out, (size_t)rd), lean_io_result_mk_ok(out);
 }

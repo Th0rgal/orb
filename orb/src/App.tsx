@@ -100,6 +100,8 @@ import { applyPendingMoves } from "./missionMove";
 import { cacheRecents } from "./pageCache";
 import { effortLabel, normalizeEffort } from "./effort";
 import { loadTranscript, noteLiveMissionIds, peekReadyTranscript, prefetchTranscript, selectLivePrefetchIds, transcriptVersion } from "./missionCache";
+import { loadPersistedSidebar, savePersistedSidebar } from "./persistentCache";
+import { historyScope } from "./resourceCache";
 import { mergeById, pollWhileVisible } from "./poll";
 import { syncApprovalQueue, syncBunkerNotice } from "./approvalQueueNotices";
 import { getApprovalQueue } from "./approvalQueue";
@@ -421,12 +423,15 @@ export default function App() {
       const freshIds = new Set(fresh.map(m => m.id));
       const vanished = partial ? [] : prev.filter(m => !freshIds.has(m.id));
       // Reconcile, never replace: a short answer during a restart keeps what is on screen.
-      setMissions((current) => {
-        const reconciled = applyPendingMoves(mergeById(current, reconcileMissionList(current.filter(m => !isMissionDeleting(m.id)), fresh, listMisses, partial)));
-        const liveIds = selectLivePrefetchIds(reconciled, isLive);
-        noteLiveMissionIds(liveIds);
-        for (const id of liveIds) prefetchTranscript(id);
-        return reconciled;
+      const nextMissions = applyPendingMoves(mergeById(missions(), reconcileMissionList(missions().filter(m => !isMissionDeleting(m.id)), fresh, listMisses, partial)));
+      setMissions(nextMissions);
+      const liveIds = selectLivePrefetchIds(nextMissions, isLive);
+      noteLiveMissionIds(liveIds);
+      for (const id of liveIds) prefetchTranscript(id);
+      void savePersistedSidebar(historyScope(), {
+        missions: nextMissions,
+        completedMissions: completedMissions(),
+        projects: rawLiveProjects(),
       });
       recordMissions(fresh);
       if (vanished.length) {
@@ -663,13 +668,38 @@ export default function App() {
   // effect, which re-polled the fleet — an endless fetch loop.
   createEffect(on(isConnected, (connected) => {
     if (connected) {
+      const ver = connectionVersion();
+      void loadPersistedSidebar<Mission, ProjectSummary>(historyScope()).then((cachedSidebar) => {
+        if (!cachedSidebar || ver !== connectionVersion()) return;
+        batch(() => {
+          if (rawMissions().length === 0 && cachedSidebar.missions.length > 0) {
+            setMissions(cachedSidebar.missions.filter((m) => !isMissionDeleting(m.id)));
+            setMissionsLoading(false);
+          }
+          if (completedMissions().length === 0 && cachedSidebar.completedMissions.length > 0) {
+            setCompletedMissions(cachedSidebar.completedMissions.filter((m) => !isMissionDeleting(m.id)));
+          }
+          if (rawLiveProjects().length === 0 && cachedSidebar.projects.length > 0) {
+            setLiveProjects(cachedSidebar.projects);
+          }
+        });
+      });
       void refreshMissions();
       void refreshFleet();
       warmManagedCatalog();
       void refreshHarnessChoices();
       listProjects()
-        .then(setLiveProjects)
-        .catch(() => setLiveProjects([]));
+        .then((projects) => {
+          setLiveProjects(projects);
+          void savePersistedSidebar(historyScope(), {
+            missions: rawMissions(),
+            completedMissions: completedMissions(),
+            projects,
+          });
+        })
+        .catch(() => {
+          if (rawLiveProjects().length === 0) setLiveProjects([]);
+        });
       // Seed agent ids only exist offline — don't land on a demo transcript.
       const sel = selected();
       if (sel && !sel.includes(":") && !PAGES.has(sel)) open(null);
