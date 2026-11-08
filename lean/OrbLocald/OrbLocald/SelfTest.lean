@@ -206,6 +206,153 @@ private def runR7aInteractiveToolSlotChecks (assertTrue : String → Bool → IO
   if (← assertTrue "tool_slot_full_64_burst_backpressure_and_zero_eviction" burst64Ok) then passed := passed + 1
   return (passed, total)
 
+private def runR6bClientLinkAndConflictChecks
+    (assertTrue : String → Bool → IO Bool) : IO (Nat × Nat) := do
+  let mut passed := 0
+  let mut total := 0
+  let validTok := "0123456789abcdef0123456789abcdef"
+  let stRef ← IO.mkRef ({ launchToken := validTok } : LocaldState)
+
+  -- 1. Capability latch: 404/501 latches within `(endpoint, server_build)` and clears on `server_build` or `endpoint` change; 503 never latches.
+  let c503 ← dispatchRpcCommand stRef "client_link_connect" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-a.example")]),
+    ("server_build", .str "build-1"),
+    ("observed_http_status", JVal.nat 503)
+  ])
+  let c404 ← dispatchRpcCommand stRef "client_link_connect" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-a.example")]),
+    ("server_build", .str "build-1"),
+    ("observed_http_status", JVal.nat 404)
+  ])
+  let cSameEpoch ← dispatchRpcCommand stRef "client_link_connect" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-a.example/")]),
+    ("server_build", .str "build-1"),
+    ("observed_http_status", JVal.nat 200)
+  ])
+  let cNewBuild ← dispatchRpcCommand stRef "client_link_connect" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-a.example")]),
+    ("server_build", .str "build-2"),
+    ("observed_http_status", JVal.nat 200)
+  ])
+  let c501 ← dispatchRpcCommand stRef "client_link_connect" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-a.example")]),
+    ("server_build", .str "build-2"),
+    ("observed_http_status", JVal.nat 501)
+  ])
+  let cNewEndpoint ← dispatchRpcCommand stRef "client_link_connect" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-b.example")]),
+    ("server_build", .str "build-2"),
+    ("observed_http_status", JVal.nat 200)
+  ])
+  total := total + 1
+  let capOk :=
+    (match c503 with | .ok (.bool true) => true | _ => false) &&
+    (match c404 with | .ok (.bool false) => true | _ => false) &&
+    (match cSameEpoch with | .ok (.bool false) => true | _ => false) &&
+    (match cNewBuild with | .ok (.bool true) => true | _ => false) &&
+    (match c501 with | .ok (.bool false) => true | _ => false) &&
+    (match cNewEndpoint with | .ok (.bool true) => true | _ => false)
+  if (← assertTrue "client_link_capability_latch_scoped_to_endpoint_and_server_build" capOk) then passed := passed + 1
+
+  -- 2. 256-frame outbound journal ring: fill 256 frames, verify 257th backpressures without evicting, cumulative ACK, reconnect resync.
+  let mut enq256Ok := true
+  for i in [:256] do
+    let r ← dispatchRpcCommand stRef "client_link_flush" (.obj #[
+      ("action", .str "enqueue"),
+      ("mission", .str "m-journal"),
+      ("payload", .obj #[("idx", JVal.nat i)])
+    ])
+    match r with
+    | .ok jv =>
+      if jv.fieldUInt64? "seq" != some (i + 1).toUInt64 then enq256Ok := false
+    | .error _ => enq256Ok := false
+  let overflow257 ← dispatchRpcCommand stRef "client_link_flush" (.obj #[
+    ("action", .str "enqueue"),
+    ("mission", .str "m-journal"),
+    ("payload", .obj #[("idx", JVal.nat 256)])
+  ])
+  let flushPending ← dispatchRpcCommand stRef "client_link_flush" (.obj #[("mission", .str "m-journal")])
+  let ack200 ← dispatchRpcCommand stRef "client_link_flush" (.obj #[
+    ("action", .str "ack"),
+    ("ack_seq", JVal.nat 200)
+  ])
+  let badAckBeyondHead ← dispatchRpcCommand stRef "client_link_flush" (.obj #[
+    ("action", .str "ack"),
+    ("ack_seq", JVal.nat 257)
+  ])
+  let resyncFrom250 ← dispatchRpcCommand stRef "client_link_flush" (.obj #[
+    ("action", .str "resync"),
+    ("peer_ack_seq", JVal.nat 250)
+  ])
+  let ackAll ← dispatchRpcCommand stRef "client_link_flush" (.obj #[
+    ("action", .str "ack"),
+    ("ack_seq", JVal.nat 256)
+  ])
+  let flushDrained ← dispatchRpcCommand stRef "client_link_flush" (.obj #[("mission", .str "m-journal")])
+  total := total + 1
+  let journalOk :=
+    enq256Ok &&
+    (match overflow257 with | .error "client_link_journal_backpressure" => true | _ => false) &&
+    (match flushPending with | .ok (.bool false) => true | _ => false) &&
+    (match ack200 with | .ok jv => jv.fieldNat? "unacked_count" == some 56 && jv.fieldUInt64? "last_acked_seq" == some 200 | _ => false) &&
+    (match badAckBeyondHead with | .error "client_link_invalid_ack_seq" => true | _ => false) &&
+    (match resyncFrom250 with | .ok jv => jv.fieldNat? "replay_count" == some 6 && jv.fieldUInt64? "replay_from_seq" == some 250 | _ => false) &&
+    (match ackAll with | .ok jv => jv.fieldNat? "unacked_count" == some 0 | _ => false) &&
+    (match flushDrained with | .ok (.bool true) => true | _ => false)
+  if (← assertTrue "client_link_journal_ring_256_backpressure_ack_and_resync" journalOk) then passed := passed + 1
+
+  -- 3. Local-origin lifecycle + typed 409 conflict classification (`stopping`/`non_terminal_run` retry vs `already_ended`/`moved`/`stale_receipt` retire).
+  let launchRes ← dispatchRpcCommand stRef "local_origin_launch" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-b.example")]),
+    ("draft", .obj #[("title", .str "Origin A"), ("prompt", .str "hello")])
+  ])
+  let mid := match launchRes with | .ok jv => (jv.fieldStr? "id").getD "" | .error _ => ""
+  let listRes1 ← dispatchRpcCommand stRef "local_origin_list" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-b.example")])
+  ])
+  let confStopping ← dispatchRpcCommand stRef "local_origin_confirm" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-b.example")]),
+    ("id", .str mid),
+    ("http_status", JVal.nat 409),
+    ("conflict_code", .str "stopping")
+  ])
+  let confStale ← dispatchRpcCommand stRef "local_origin_confirm" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-b.example")]),
+    ("id", .str mid),
+    ("http_status", JVal.nat 409),
+    ("conflict_code", .str "stale_receipt")
+  ])
+  let confUnknown ← dispatchRpcCommand stRef "local_origin_confirm" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-b.example")]),
+    ("id", .str mid),
+    ("http_status", JVal.nat 409),
+    ("conflict_code", .str "mystery_409")
+  ])
+  let delConfirm ← dispatchRpcCommand stRef "local_origin_confirm" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-b.example")]),
+    ("confirmations", .arr #[.obj #[("id", .str mid), ("deleted", .bool true), ("observed_at", JVal.nat 999)]])
+  ])
+  let listAfterDel ← dispatchRpcCommand stRef "local_origin_list" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-b.example")])
+  ])
+  total := total + 1
+  let originConflictOk :=
+    !mid.isEmpty &&
+    (match listRes1 with | .ok (.arr #[jv]) => jv.fieldStr? "id" == some mid && jv.fieldBool? "local_sync_pending" == some true | _ => false) &&
+    (match confStopping with | .ok jv => jv.fieldBool? "retry" == some true && jv.fieldStr? "conflict_code" == some "stopping" | _ => false) &&
+    (match confStale with | .ok jv => jv.fieldBool? "retry" == some false && jv.fieldStr? "conflict_code" == some "stale_receipt" | _ => false) &&
+    (match confUnknown with | .error "unclassified_local_origin_conflict" => true | _ => false) &&
+    delConfirm.isOk &&
+    (match listAfterDel with | .ok (.arr #[]) => true | _ => false)
+  if (← assertTrue "local_origin_lifecycle_and_typed_409_conflict_classification" originConflictOk) then passed := passed + 1
+
+  return (passed, total)
+
+private def runR6bClientLinkAndConflictTests : IO Unit := do
+  let (p, t) ← runR6bClientLinkAndConflictChecks assertTrue
+  if p != t then
+    throw (IO.userError s!"runR6bClientLinkAndConflictTests failed ({p}/{t})")
+
 private def runR7aInteractiveToolSlotTestsWithCounts (passedRef totalRef : IO.Ref Nat) : IO Unit := do
   let (p, t) ← runR7aInteractiveToolSlotChecks assertTrue
   passedRef.modify (· + p)
@@ -627,6 +774,11 @@ def main : IO UInt32 := do
        | _ => false
      | _ => false)
   if (← assertTrue "origin_ewma_cooldown_ranking_and_bridge_api_url" rankAndCfgOk) then passed := passed + 1
+
+  -- 18. R6-B (`SM-26` / `SM-23`) `(endpoint, server_build)` capability latch, 256-frame journal ring backpressure/resync, and typed 409 conflict disposition
+  runR6bClientLinkAndConflictTests
+  passed := passed + 3
+  total := total + 3
 
   try IO.FS.removeDirAll tmpStateDir catch _ => pure ()
 

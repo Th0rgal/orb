@@ -13,6 +13,7 @@ import { bufferedOutput, type OutputEvent } from "./localStream";
 import { createSignal } from "solid-js";
 import { scanMentions, type AttachChip } from "./attach";
 import { getApiUrl, getJwt, listProjectFiles, readProjectFile, getProjectController } from "./api";
+import { classifyConflictError } from "./conflictClassification";
 
 function savedLocalFailures(): Record<string,string> {
   return readJson<Record<string,string>>("orb.localFailures", {}, isRecord);
@@ -452,7 +453,9 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
     launching.delete(req.id);
     await reconcileLocalRun(req.id);
     const msg = e instanceof Error ? e.message : String(e);
-    if (!/^Local launch deferred:/.test(msg) && !/already has non-terminal run|still running locally|starting in another Orb window/i.test(msg)) {
+    const conflict = classifyConflictError(e);
+    const transientNonTerminal = conflict ? conflict.retryable : (/^Local launch deferred:/.test(msg) || /already has non-terminal run|still running locally|starting in another Orb window/i.test(msg));
+    if (!transientNonTerminal) {
       recordLocalFailure(req.id, e);
     }
     throw e;

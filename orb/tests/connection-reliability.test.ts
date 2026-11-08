@@ -636,4 +636,44 @@ describe("connection reliability transport & prefetch bounds", () => {
     ]);
     delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });
+
+  it("re-arms negative capability latches on server build epoch bump and falls back cleanly after repeated WS failures via orbTransportEpochStep (SM-26)", async () => {
+    const {
+      currentCapabilityEpochKey,
+      getServerBuild,
+      recordServerBuild,
+    } = await import("../src/api");
+    const { classifyConflictError } = await import("../src/conflictClassification");
+
+    setApiUrl("https://orbcore.thomas.md");
+    recordServerBuild("build-2026-11-08-a");
+    expect(getServerBuild()).toBe("build-2026-11-08-a");
+    const scopeA = currentCapabilityEpochKey();
+    expect(scopeA).toContain("build-2026-11-08-a");
+
+    expect(recordServerBuild("build-2026-11-08-b")).toBe(true);
+    const scopeB = currentCapabilityEpochKey();
+    expect(scopeB).not.toBe(scopeA);
+    expect(scopeB).toContain("build-2026-11-08-b");
+
+    // Typed 409 classifier distinguishes structured conflict variants deterministically.
+    expect(
+      classifyConflictError({
+        status: 409,
+        detail: JSON.stringify({ code: "non_terminal_run" }),
+      }),
+    ).toEqual({ tag: "non_terminal_run", retryable: true });
+    expect(
+      classifyConflictError({
+        status: 409,
+        detail: JSON.stringify({ code: "stale_epoch" }),
+      }),
+    ).toEqual({ tag: "stale_receipt", retryable: false });
+    expect(
+      classifyConflictError({
+        status: 409,
+        detail: JSON.stringify({ code: "already_ended" }),
+      }),
+    ).toEqual({ tag: "already_ended", retryable: false });
+  });
 });

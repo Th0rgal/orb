@@ -6,6 +6,9 @@
     3. Transport 3-way failover retry idempotency gate (`RetrySafetyProof` + canonical `{0,1}` flags)
     4. Paloma Touch ID grace reuse gate (`PalomaGraceAction`, `ScopedAuthority`)
     5. Run-scoped interactive tool-slot & tool-bridge admission (`ConservedResource`, `ScopedAuthority`, SM-11)
+    6. Scoped `(endpoint, server_build)` client-link capability latch (`ScopedAuthority`, SM-26)
+    7. 256-frame outbound client-link journal ring backpressure & reconnect resync (`ConservedResource`, SM-26)
+    8. Typed HTTP `409` local-origin conflict disposition gate (`ScopedAuthority`, SM-23 / SM-26)
 -/
 
 namespace OrbLocald.Spec
@@ -628,5 +631,461 @@ theorem verifyInteractiveToolSlotAdmit_iff
       ⟨activeSlots, maxCap, sessionEpoch, currentEpoch, hasRun, hasReq, isDup, same, conf⟩,
    interactiveToolSlotMetaGate.complete
       ⟨activeSlots, maxCap, sessionEpoch, currentEpoch, hasRun, hasReq, isDup, same, conf⟩⟩
+
+/-! ### 6. Scoped `(endpoint, server_build)` Client-Link Capability Latch (`SM-26`) -/
+
+inductive CapabilityLatchWitness where
+  | retainedWithinEpoch
+  | newlyUnsupportedHttp
+  deriving Repr, DecidableEq
+
+structure CapabilityLatchCheck where
+  prevLatched          : UInt8
+  sameEndpoint         : UInt8
+  sameServerBuild      : UInt8
+  observedHttpStatus   : UInt16
+  hasObservedBuild     : UInt8
+  deriving Repr, DecidableEq
+
+/-- Returns `1` iff the client-link / local-origin capability remains latched as unsupported
+    under `(endpoint, server_build)` scoping (`SM-26`).
+    Switching endpoints (`sameEndpoint == 0`) or observing a changed `server_build`
+    (`hasObservedBuild == 1 && sameServerBuild == 0`) clears any prior latch, and transient
+    non-`404`/`501` statuses never create a sticky latch. -/
+@[inline, export orb_locald_verify_capability_latch]
+def verifyCapabilityLatch
+    (prevLatched sameEndpoint sameServerBuild : UInt8)
+    (observedHttpStatus : UInt16)
+    (hasObservedBuild : UInt8) : UInt8 :=
+  if prevLatched ≤ 1 && sameEndpoint ≤ 1 && sameServerBuild ≤ 1 && hasObservedBuild ≤ 1 &&
+     sameEndpoint == 1 &&
+     (hasObservedBuild == 0 || sameServerBuild == 1) &&
+     (prevLatched == 1 || observedHttpStatus == 404 || observedHttpStatus == 501) then 1 else 0
+
+/-- Independent `(endpoint, server_build)` capability-latch specification (`ScopedAuthority`):
+    a capability may be treated as unsupported only within the same endpoint and unchanged
+    `server_build`, and only when either already latched in that epoch or newly answered with
+    explicit HTTP `404` or `501`. -/
+def CapabilityLatchDomainSafe (c : CapabilityLatchCheck) : Prop :=
+  (c.prevLatched.toNat = 0 ∨ c.prevLatched.toNat = 1) ∧
+  (c.sameEndpoint.toNat = 0 ∨ c.sameEndpoint.toNat = 1) ∧
+  (c.sameServerBuild.toNat = 0 ∨ c.sameServerBuild.toNat = 1) ∧
+  (c.hasObservedBuild.toNat = 0 ∨ c.hasObservedBuild.toNat = 1) ∧
+  c.sameEndpoint.toNat = 1 ∧
+  (c.hasObservedBuild.toNat = 0 ∨ c.sameServerBuild.toNat = 1) ∧
+  ∃ w : CapabilityLatchWitness,
+    match w with
+    | .retainedWithinEpoch => c.prevLatched.toNat = 1
+    | .newlyUnsupportedHttp => c.observedHttpStatus.toNat = 404 ∨ c.observedHttpStatus.toNat = 501
+
+private theorem u16_eq_of_toNat (a : UInt16) (n : Nat) (hn : n < 65536) (h : a.toNat = n) :
+    a = UInt16.ofNat n := by
+  apply UInt16.eq_of_toBitVec_eq
+  apply BitVec.eq_of_toNat_eq
+  have hm : (UInt16.ofNat n).toBitVec.toNat = n := by
+    change n % 65536 = n
+    omega
+  change a.toNat = _
+  omega
+
+def capabilityLatchMetaGate :
+    MetaGateSpec CapabilityLatchCheck CapabilityLatchDomainSafe where
+  gate c :=
+    verifyCapabilityLatch c.prevLatched c.sameEndpoint c.sameServerBuild
+      c.observedHttpStatus c.hasObservedBuild == 1
+  sound c h := by
+    rcases c with ⟨prevL, sameEp, sameB, status, hasB⟩
+    change (verifyCapabilityLatch prevL sameEp sameB status hasB == 1) = true at h
+    dsimp [CapabilityLatchDomainSafe]
+    unfold verifyCapabilityLatch at h
+    have hc :
+        (prevL ≤ 1 && sameEp ≤ 1 && sameB ≤ 1 && hasB ≤ 1 &&
+          sameEp == 1 && (hasB == 0 || sameB == 1) &&
+          (prevL == 1 || status == 404 || status == 501)) = true := by
+      cases hb :
+          (prevL ≤ 1 && sameEp ≤ 1 && sameB ≤ 1 && hasB ≤ 1 &&
+            sameEp == 1 && (hasB == 0 || sameB == 1) &&
+            (prevL == 1 || status == 404 || status == 501))
+      · rw [hb] at h; contradiction
+      · rfl
+    simp only [Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
+    rcases hc with ⟨⟨⟨⟨⟨⟨hpL, hsEp⟩, hsB⟩, hhB⟩, hEp1⟩, hBuildOk⟩, hTrig⟩
+    refine ⟨u8_le_one_cases prevL hpL, u8_le_one_cases sameEp hsEp,
+            u8_le_one_cases sameB hsB, u8_le_one_cases hasB hhB,
+            by subst hEp1; rfl, ?_, ?_⟩
+    · rcases hBuildOk with hh0 | hs1
+      · exact Or.inl (by subst hh0; rfl)
+      · exact Or.inr (by subst hs1; rfl)
+    · rcases hTrig with (hp1 | h404) | h501
+      · exact ⟨.retainedWithinEpoch, by subst hp1; rfl⟩
+      · exact ⟨.newlyUnsupportedHttp, Or.inl (by subst h404; rfl)⟩
+      · exact ⟨.newlyUnsupportedHttp, Or.inr (by subst h501; rfl)⟩
+  complete c h := by
+    rcases c with ⟨prevL, sameEp, sameB, status, hasB⟩
+    change (verifyCapabilityLatch prevL sameEp sameB status hasB == 1) = true
+    dsimp [CapabilityLatchDomainSafe] at h
+    rcases h with ⟨hpL, hsEp, hsB, hhB, hEp1, hBuildOk, w, hw⟩
+    unfold verifyCapabilityLatch
+    have hpLB : prevL ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change prevL.toNat ≤ 1; omega
+    have hsEpB : sameEp ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change sameEp.toNat ≤ 1; omega
+    have hsBB : sameB ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change sameB.toNat ≤ 1; omega
+    have hhBB : hasB ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change hasB.toNat ≤ 1; omega
+    have hEp1B : (sameEp == 1) = true := by
+      rw [beq_iff_eq]; exact u8_eq_of_toNat sameEp 1 (by omega) hEp1
+    have hBuildDisj : (hasB == 0 || sameB == 1) = true := by
+      rcases hBuildOk with hh0 | hs1
+      · have hb0 : (hasB == 0) = true := by
+          rw [beq_iff_eq]; exact u8_eq_of_toNat hasB 0 (by omega) hh0
+        simp [hb0]
+      · have hb1 : (sameB == 1) = true := by
+          rw [beq_iff_eq]; exact u8_eq_of_toNat sameB 1 (by omega) hs1
+        simp [hb1]
+    cases w with
+    | retainedWithinEpoch =>
+      have hp1 : (prevL == 1) = true := by
+        rw [beq_iff_eq]; exact u8_eq_of_toNat prevL 1 (by omega) hw
+      simp [hpLB, hsEpB, hsBB, hhBB, hEp1B, hBuildDisj, hp1]
+    | newlyUnsupportedHttp =>
+      rcases hw with h404 | h501
+      · have hs404 : (status == 404) = true := by
+          rw [beq_iff_eq]; exact u16_eq_of_toNat status 404 (by omega) h404
+        simp [hpLB, hsEpB, hsBB, hhBB, hEp1B, hBuildDisj, hs404]
+      · have hs501 : (status == 501) = true := by
+          rw [beq_iff_eq]; exact u16_eq_of_toNat status 501 (by omega) h501
+        simp [hpLB, hsEpB, hsBB, hhBB, hEp1B, hBuildDisj, hs501]
+  posWitness := {
+    prevLatched := 0, sameEndpoint := 1, sameServerBuild := 1,
+    observedHttpStatus := 404, hasObservedBuild := 1
+  }
+  negWitness := {
+    prevLatched := 1, sameEndpoint := 1, sameServerBuild := 0,
+    observedHttpStatus := 200, hasObservedBuild := 1
+  }
+  nonVacuous := by decide
+  tight := by decide
+
+def capabilityLatchScoped : ScopedAuthority CapabilityLatchCheck where
+  admit := capabilityLatchMetaGate.gate
+  scopeValid c :=
+    c.sameEndpoint.toNat = 1 ∧ (c.hasObservedBuild.toNat = 0 ∨ c.sameServerBuild.toNat = 1)
+  sound c h := by
+    rcases capabilityLatchMetaGate.sound c h with ⟨_, _, _, _, hEp, hB, _⟩
+    exact ⟨hEp, hB⟩
+
+theorem verifyCapabilityLatch_iff
+    (prevLatched sameEndpoint sameServerBuild : UInt8)
+    (observedHttpStatus : UInt16) (hasObservedBuild : UInt8) :
+    (verifyCapabilityLatch prevLatched sameEndpoint sameServerBuild observedHttpStatus hasObservedBuild == 1) = true ↔
+      CapabilityLatchDomainSafe ⟨prevLatched, sameEndpoint, sameServerBuild, observedHttpStatus, hasObservedBuild⟩ :=
+  ⟨capabilityLatchMetaGate.sound ⟨prevLatched, sameEndpoint, sameServerBuild, observedHttpStatus, hasObservedBuild⟩,
+   capabilityLatchMetaGate.complete ⟨prevLatched, sameEndpoint, sameServerBuild, observedHttpStatus, hasObservedBuild⟩⟩
+
+/-! ### 7. 256-Frame Outbound Client-Link Journal Ring Backpressure & Reconnect Resync (`SM-26`) -/
+
+def maxClientLinkOutboundFrames : Nat := 256
+
+inductive JournalRingAdmission where
+  | enqueueWithinRing
+  | ackCumulativeSeq
+  | reconnectResyncWindow
+  deriving Repr, DecidableEq
+
+structure JournalRingStepCheck where
+  op            : UInt8
+  unackedFrames : UInt16
+  maxCap        : UInt16
+  lastAckedSeq  : UInt64
+  headSeq       : UInt64
+  targetSeq     : UInt64
+  deriving Repr, DecidableEq
+
+/-- Verifies 256-frame outbound client-link journal ring steps (`SM-26`):
+    - `op = 0` (`enqueueWithinRing`): requires `unackedFrames < maxCap` and `targetSeq == headSeq + 1`
+      with `headSeq < UInt64.max` (explicit backpressure at 256 unacked frames; NEVER evicts oldest frame).
+    - `op = 1` (`ackCumulativeSeq`): requires `lastAckedSeq ≤ targetSeq ≤ headSeq` so cumulative ACKs
+      retire only buffered frames in `[lastAckedSeq + 1 .. targetSeq]`.
+    - `op = 2` (`reconnectResyncWindow`): requires `targetSeq ≤ headSeq` and `lastAckedSeq ≤ headSeq`
+      so reconnect resync replays from `max lastAckedSeq targetSeq` through `headSeq` without dropping tail frames. -/
+@[inline, export orb_locald_verify_journal_ring_step]
+def verifyJournalRingStep
+    (op : UInt8)
+    (unackedFrames maxCap : UInt16)
+    (lastAckedSeq headSeq targetSeq : UInt64) : UInt8 :=
+  if 1 ≤ maxCap && maxCap ≤ 256 &&
+     unackedFrames ≤ maxCap &&
+     lastAckedSeq ≤ headSeq &&
+     headSeq - lastAckedSeq == unackedFrames.toUInt64 &&
+     ((op == 0 && unackedFrames < maxCap && headSeq < 0xFFFFFFFFFFFFFFFF && targetSeq == headSeq + 1) ||
+      (op == 1 && lastAckedSeq ≤ targetSeq && targetSeq ≤ headSeq) ||
+      (op == 2 && targetSeq ≤ headSeq)) then 1 else 0
+
+/-- Independent 256-frame outbound client-link journal specification (`ConservedResource`):
+    unacked frame count equals `headSeq - lastAckedSeq ≤ maxCap ≤ 256`, fresh frame admission
+    strictly requires `unackedFrames < maxCap` (backpressure rather than ring overwrite),
+    and acks / reconnect cursors stay bounded by `headSeq`. -/
+def JournalRingStepDomainSafe (c : JournalRingStepCheck) : Prop :=
+  1 ≤ c.maxCap.toNat ∧
+  c.maxCap.toNat ≤ maxClientLinkOutboundFrames ∧
+  c.unackedFrames.toNat ≤ c.maxCap.toNat ∧
+  c.lastAckedSeq.toNat ≤ c.headSeq.toNat ∧
+  c.headSeq.toNat - c.lastAckedSeq.toNat = c.unackedFrames.toNat ∧
+  ∃ w : JournalRingAdmission,
+    match w with
+    | .enqueueWithinRing =>
+        c.op.toNat = 0 ∧
+        c.unackedFrames.toNat < c.maxCap.toNat ∧
+        c.headSeq.toNat < 18446744073709551615 ∧
+        c.targetSeq.toNat = c.headSeq.toNat + 1
+    | .ackCumulativeSeq =>
+        c.op.toNat = 1 ∧
+        c.lastAckedSeq.toNat ≤ c.targetSeq.toNat ∧
+        c.targetSeq.toNat ≤ c.headSeq.toNat
+    | .reconnectResyncWindow =>
+        c.op.toNat = 2 ∧
+        c.targetSeq.toNat ≤ c.headSeq.toNat
+
+def journalRingStepMetaGate :
+    MetaGateSpec JournalRingStepCheck JournalRingStepDomainSafe where
+  gate c :=
+    verifyJournalRingStep c.op c.unackedFrames c.maxCap c.lastAckedSeq c.headSeq c.targetSeq == 1
+  sound c h := by
+    rcases c with ⟨op, unacked, maxC, acked, headS, targetS⟩
+    change (verifyJournalRingStep op unacked maxC acked headS targetS == 1) = true at h
+    dsimp [JournalRingStepDomainSafe]
+    unfold verifyJournalRingStep at h
+    have hc :
+        (1 ≤ maxC && maxC ≤ 256 && unacked ≤ maxC && acked ≤ headS &&
+          headS - acked == unacked.toUInt64 &&
+          ((op == 0 && unacked < maxC && headS < 0xFFFFFFFFFFFFFFFF && targetS == headS + 1) ||
+            (op == 1 && acked ≤ targetS && targetS ≤ headS) ||
+            (op == 2 && targetS ≤ headS))) = true := by
+      cases hb :
+          (1 ≤ maxC && maxC ≤ 256 && unacked ≤ maxC && acked ≤ headS &&
+            headS - acked == unacked.toUInt64 &&
+            ((op == 0 && unacked < maxC && headS < 0xFFFFFFFFFFFFFFFF && targetS == headS + 1) ||
+              (op == 1 && acked ≤ targetS && targetS ≤ headS) ||
+              (op == 2 && targetS ≤ headS)))
+      · rw [hb] at h; contradiction
+      · rfl
+    simp only [Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
+    rcases hc with ⟨⟨⟨⟨⟨hm1, hm2⟩, huLe⟩, haLe⟩, hdiff⟩, hbranch⟩
+    have haLeN : acked.toNat ≤ headS.toNat := UInt64.le_iff_toNat_le.mp haLe
+    have hdiffN : headS.toNat - acked.toNat = unacked.toNat := by
+      have hd0 : (headS - acked).toNat = unacked.toUInt64.toNat := congrArg UInt64.toNat hdiff
+      rw [UInt64.toNat_sub_of_le headS acked haLe, UInt16.toNat_toUInt64] at hd0
+      exact hd0
+    refine ⟨UInt16.le_iff_toNat_le.mp hm1, UInt16.le_iff_toNat_le.mp hm2,
+            UInt16.le_iff_toNat_le.mp huLe, haLeN, hdiffN, ?_⟩
+    rcases hbranch with (⟨⟨⟨hop0, hltC⟩, hheadLt⟩, htEq⟩ | ⟨⟨hop1, haT⟩, htH⟩) | ⟨hop2, htH⟩
+    · have hheadLtN : headS.toNat < 18446744073709551615 := UInt64.lt_iff_toNat_lt.mp hheadLt
+      have htEqN : targetS.toNat = headS.toNat + 1 := by
+        subst htEq
+        rw [UInt64.toNat_add]
+        change (headS.toNat + 1) % 18446744073709551616 = headS.toNat + 1
+        omega
+      exact ⟨.enqueueWithinRing, by subst hop0; rfl, UInt16.lt_iff_toNat_lt.mp hltC, hheadLtN, htEqN⟩
+    · exact ⟨.ackCumulativeSeq, by subst hop1; rfl,
+              UInt64.le_iff_toNat_le.mp haT, UInt64.le_iff_toNat_le.mp htH⟩
+    · exact ⟨.reconnectResyncWindow, by subst hop2; rfl, UInt64.le_iff_toNat_le.mp htH⟩
+  complete c h := by
+    rcases c with ⟨op, unacked, maxC, acked, headS, targetS⟩
+    change (verifyJournalRingStep op unacked maxC acked headS targetS == 1) = true
+    dsimp [JournalRingStepDomainSafe] at h
+    rcases h with ⟨hm1, hm2, huLe, haLe, hdiff, w, hw⟩
+    unfold verifyJournalRingStep
+    have hm1B : 1 ≤ maxC := UInt16.le_iff_toNat_le.mpr hm1
+    have hm2B : maxC ≤ 256 := by
+      apply UInt16.le_iff_toNat_le.mpr
+      unfold maxClientLinkOutboundFrames at hm2
+      exact hm2
+    have huLeB : unacked ≤ maxC := UInt16.le_iff_toNat_le.mpr huLe
+    have haLeB : acked ≤ headS := UInt64.le_iff_toNat_le.mpr haLe
+    have hdiffB : (headS - acked == unacked.toUInt64) = true := by
+      rw [beq_iff_eq]
+      apply UInt64.eq_of_toBitVec_eq
+      apply BitVec.eq_of_toNat_eq
+      change (headS - acked).toNat = unacked.toUInt64.toNat
+      rw [UInt64.toNat_sub_of_le headS acked haLeB, UInt16.toNat_toUInt64]
+      exact hdiff
+    cases w with
+    | enqueueWithinRing =>
+      rcases hw with ⟨hop0, hltC, hheadLt, htEq⟩
+      have hop0B : (op == 0) = true := by
+        rw [beq_iff_eq]; exact u8_eq_of_toNat op 0 (by omega) hop0
+      have hltCB : unacked < maxC := UInt16.lt_iff_toNat_lt.mpr hltC
+      have hheadLtB : headS < 0xFFFFFFFFFFFFFFFF := UInt64.lt_iff_toNat_lt.mpr hheadLt
+      have htEqB : (targetS == headS + 1) = true := by
+        rw [beq_iff_eq]
+        apply UInt64.eq_of_toBitVec_eq
+        apply BitVec.eq_of_toNat_eq
+        change targetS.toNat = (headS + 1).toNat
+        rw [UInt64.toNat_add]
+        change targetS.toNat = (headS.toNat + 1) % 18446744073709551616
+        omega
+      simp [hm1B, hm2B, huLeB, haLeB, hdiffB, hop0B, hltCB, hheadLtB, htEqB]
+    | ackCumulativeSeq =>
+      rcases hw with ⟨hop1, haT, htH⟩
+      have hop1B : (op == 1) = true := by
+        rw [beq_iff_eq]; exact u8_eq_of_toNat op 1 (by omega) hop1
+      have haTB : acked ≤ targetS := UInt64.le_iff_toNat_le.mpr haT
+      have htHB : targetS ≤ headS := UInt64.le_iff_toNat_le.mpr htH
+      simp [hm1B, hm2B, huLeB, haLeB, hdiffB, hop1B, haTB, htHB]
+    | reconnectResyncWindow =>
+      rcases hw with ⟨hop2, htH⟩
+      have hop2B : (op == 2) = true := by
+        rw [beq_iff_eq]; exact u8_eq_of_toNat op 2 (by omega) hop2
+      have htHB : targetS ≤ headS := UInt64.le_iff_toNat_le.mpr htH
+      simp [hm1B, hm2B, huLeB, haLeB, hdiffB, hop2B, htHB]
+  posWitness := {
+    op := 0, unackedFrames := 255, maxCap := 256,
+    lastAckedSeq := 10, headSeq := 265, targetSeq := 266
+  }
+  negWitness := {
+    op := 0, unackedFrames := 256, maxCap := 256,
+    lastAckedSeq := 10, headSeq := 266, targetSeq := 267
+  }
+  nonVacuous := by decide
+  tight := by decide
+
+def journalRingConserved : ConservedResource JournalRingStepCheck where
+  admit := journalRingStepMetaGate.gate
+  withinCapacity c :=
+    1 ≤ c.maxCap.toNat ∧ c.maxCap.toNat ≤ 256 ∧
+    c.headSeq.toNat - c.lastAckedSeq.toNat = c.unackedFrames.toNat ∧
+    (c.op.toNat ≠ 0 ∨ c.unackedFrames.toNat < c.maxCap.toNat)
+  conserved c h := by
+    rcases journalRingStepMetaGate.sound c h with ⟨hm1, hm2, _, _, hdiff, w, hw⟩
+    refine ⟨hm1, hm2, hdiff, ?_⟩
+    cases w with
+    | enqueueWithinRing => exact Or.inr hw.2.1
+    | ackCumulativeSeq => exact Or.inl (by omega)
+    | reconnectResyncWindow => exact Or.inl (by omega)
+
+theorem verifyJournalRingStep_iff
+    (op : UInt8) (unackedFrames maxCap : UInt16) (lastAckedSeq headSeq targetSeq : UInt64) :
+    (verifyJournalRingStep op unackedFrames maxCap lastAckedSeq headSeq targetSeq == 1) = true ↔
+      JournalRingStepDomainSafe ⟨op, unackedFrames, maxCap, lastAckedSeq, headSeq, targetSeq⟩ :=
+  ⟨journalRingStepMetaGate.sound ⟨op, unackedFrames, maxCap, lastAckedSeq, headSeq, targetSeq⟩,
+   journalRingStepMetaGate.complete ⟨op, unackedFrames, maxCap, lastAckedSeq, headSeq, targetSeq⟩⟩
+
+/-! ### 8. Typed HTTP `409` Local-Origin Conflict Disposition Gate (`SM-23` / `SM-26`) -/
+
+/-- Typed `409 Conflict` reason codes shared across `orb-locald` and desktop local-queue callers:
+    - `1 = stopping` (retryable transient stop drain)
+    - `2 = non_terminal_run` (retryable transient active/claiming run)
+    - `3 = already_ended` (terminal local execution closed)
+    - `4 = moved` (terminal machine-transfer ownership moved)
+    - `5 = stale_receipt` (terminal stale `(run_id, generation)` receipt) -/
+inductive LocalConflictDisposition where
+  | transientRetryableBackoff
+  | terminalRetireFence
+  deriving Repr, DecidableEq
+
+structure LocalConflictGateCheck where
+  httpStatus  : UInt16
+  conflictTag : UInt8
+  wantRetry   : UInt8
+  deriving Repr, DecidableEq
+
+/-- Verifies typed `409` conflict routing (`SM-23` / `SM-26`):
+    only HTTP `409` with an explicit typed conflict tag `1..5` is admitted;
+    `wantRetry == 1` admits exclusively for transient tags `{1 (stopping), 2 (non_terminal_run)}`,
+    while `wantRetry == 0` admits exclusively for terminal/fenced tags `{3 (already_ended), 4 (moved), 5 (stale_receipt)}`.
+    Unknown `conflictTag == 0` or non-`409` statuses fail closed (`0`). -/
+@[inline, export orb_locald_verify_conflict_disposition]
+def verifyLocalConflictDisposition
+    (httpStatus : UInt16) (conflictTag wantRetry : UInt8) : UInt8 :=
+  if httpStatus == 409 && wantRetry ≤ 1 &&
+     ((wantRetry == 1 && (conflictTag == 1 || conflictTag == 2)) ||
+      (wantRetry == 0 && (conflictTag == 3 || conflictTag == 4 || conflictTag == 5))) then 1 else 0
+
+def LocalConflictDispositionDomainSafe (c : LocalConflictGateCheck) : Prop :=
+  c.httpStatus.toNat = 409 ∧
+  (c.wantRetry.toNat = 0 ∨ c.wantRetry.toNat = 1) ∧
+  ∃ d : LocalConflictDisposition,
+    match d with
+    | .transientRetryableBackoff =>
+        c.wantRetry.toNat = 1 ∧ (c.conflictTag.toNat = 1 ∨ c.conflictTag.toNat = 2)
+    | .terminalRetireFence =>
+        c.wantRetry.toNat = 0 ∧
+        (c.conflictTag.toNat = 3 ∨ c.conflictTag.toNat = 4 ∨ c.conflictTag.toNat = 5)
+
+def localConflictDispositionMetaGate :
+    MetaGateSpec LocalConflictGateCheck LocalConflictDispositionDomainSafe where
+  gate c := verifyLocalConflictDisposition c.httpStatus c.conflictTag c.wantRetry == 1
+  sound c h := by
+    rcases c with ⟨st, tag, wr⟩
+    change (verifyLocalConflictDisposition st tag wr == 1) = true at h
+    dsimp [LocalConflictDispositionDomainSafe]
+    unfold verifyLocalConflictDisposition at h
+    have hc :
+        (st == 409 && wr ≤ 1 &&
+          ((wr == 1 && (tag == 1 || tag == 2)) ||
+            (wr == 0 && (tag == 3 || tag == 4 || tag == 5)))) = true := by
+      cases hb :
+          (st == 409 && wr ≤ 1 &&
+            ((wr == 1 && (tag == 1 || tag == 2)) ||
+              (wr == 0 && (tag == 3 || tag == 4 || tag == 5))))
+      · rw [hb] at h; contradiction
+      · rfl
+    simp only [Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
+    rcases hc with ⟨⟨hst, hwr⟩, hdisp⟩
+    refine ⟨by subst hst; rfl, u8_le_one_cases wr hwr, ?_⟩
+    rcases hdisp with ⟨hwr1, ht1 | ht2⟩ | ⟨hwr0, (ht3 | ht4) | ht5⟩
+    · exact ⟨.transientRetryableBackoff, by subst hwr1; rfl, Or.inl (by subst ht1; rfl)⟩
+    · exact ⟨.transientRetryableBackoff, by subst hwr1; rfl, Or.inr (by subst ht2; rfl)⟩
+    · exact ⟨.terminalRetireFence, by subst hwr0; rfl, Or.inl (by subst ht3; rfl)⟩
+    · exact ⟨.terminalRetireFence, by subst hwr0; rfl, Or.inr (Or.inl (by subst ht4; rfl))⟩
+    · exact ⟨.terminalRetireFence, by subst hwr0; rfl, Or.inr (Or.inr (by subst ht5; rfl))⟩
+  complete c h := by
+    rcases c with ⟨st, tag, wr⟩
+    change (verifyLocalConflictDisposition st tag wr == 1) = true
+    dsimp [LocalConflictDispositionDomainSafe] at h
+    rcases h with ⟨hst, hwr, d, hd⟩
+    unfold verifyLocalConflictDisposition
+    have hstB : (st == 409) = true := by
+      rw [beq_iff_eq]; exact u16_eq_of_toNat st 409 (by omega) hst
+    have hwrB : wr ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change wr.toNat ≤ 1; omega
+    cases d with
+    | transientRetryableBackoff =>
+      rcases hd with ⟨hw1, ht1 | ht2⟩
+      · have hw1B : (wr == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat wr 1 (by omega) hw1
+        have ht1B : (tag == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat tag 1 (by omega) ht1
+        simp [hstB, hwrB, hw1B, ht1B]
+      · have hw1B : (wr == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat wr 1 (by omega) hw1
+        have ht2B : (tag == 2) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat tag 2 (by omega) ht2
+        simp [hstB, hwrB, hw1B, ht2B]
+    | terminalRetireFence =>
+      rcases hd with ⟨hw0, ht3 | ht4 | ht5⟩
+      · have hw0B : (wr == 0) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat wr 0 (by omega) hw0
+        have ht3B : (tag == 3) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat tag 3 (by omega) ht3
+        simp [hstB, hwrB, hw0B, ht3B]
+      · have hw0B : (wr == 0) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat wr 0 (by omega) hw0
+        have ht4B : (tag == 4) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat tag 4 (by omega) ht4
+        simp [hstB, hwrB, hw0B, ht4B]
+      · have hw0B : (wr == 0) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat wr 0 (by omega) hw0
+        have ht5B : (tag == 5) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat tag 5 (by omega) ht5
+        simp [hstB, hwrB, hw0B, ht5B]
+  posWitness := { httpStatus := 409, conflictTag := 2, wantRetry := 1 }
+  negWitness := { httpStatus := 409, conflictTag := 5, wantRetry := 1 }
+  nonVacuous := by decide
+  tight := by decide
+
+def localConflictScoped : ScopedAuthority LocalConflictGateCheck where
+  admit := localConflictDispositionMetaGate.gate
+  scopeValid c := c.httpStatus.toNat = 409 ∧ 1 ≤ c.conflictTag.toNat ∧ c.conflictTag.toNat ≤ 5
+  sound c h := by
+    rcases localConflictDispositionMetaGate.sound c h with ⟨hst, _, d, hd⟩
+    refine ⟨hst, ?_⟩
+    cases d with
+    | transientRetryableBackoff => rcases hd with ⟨_, h1 | h2⟩ <;> omega
+    | terminalRetireFence => rcases hd with ⟨_, h3 | h4 | h5⟩ <;> omega
+
+theorem verifyLocalConflictDisposition_iff
+    (httpStatus : UInt16) (conflictTag wantRetry : UInt8) :
+    (verifyLocalConflictDisposition httpStatus conflictTag wantRetry == 1) = true ↔
+      LocalConflictDispositionDomainSafe ⟨httpStatus, conflictTag, wantRetry⟩ :=
+  ⟨localConflictDispositionMetaGate.sound ⟨httpStatus, conflictTag, wantRetry⟩,
+   localConflictDispositionMetaGate.complete ⟨httpStatus, conflictTag, wantRetry⟩⟩
 
 end OrbLocald.Spec

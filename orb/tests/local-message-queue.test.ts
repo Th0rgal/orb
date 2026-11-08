@@ -593,3 +593,55 @@ it.each(['high', null])('uses the current Antigravity effort at dispatch, includ
  expect(mocks.launch).toHaveBeenCalledTimes(1);
  expect(mocks.launch.mock.calls[0][0]).toMatchObject({harness:'antigravity',model:'agy-demo',effort:effort??undefined,sessionId:'latest'});
 });
+
+it('syncs durable cross-tab tombstones via BroadcastChannel and normalizes discriminated LocalQueueEntry variants (SM-23)', async () => {
+ const listeners = new Map<string, Set<(ev: { data: unknown }) => void>>();
+ class FakeBroadcastChannel {
+  constructor(public name: string) {
+   if (!listeners.has(name)) listeners.set(name, new Set());
+  }
+  addEventListener(_type: string, fn: (ev: { data: unknown }) => void) {
+   listeners.get(this.name)!.add(fn);
+  }
+  postMessage(data: unknown) {
+   for (const fn of listeners.get(this.name) ?? []) fn({ data });
+  }
+  close() {}
+ }
+ vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel);
+
+ await enqueueLocalMessage(request, 'tab-a-first');
+ await enqueueLocalMessage({ ...request, prompt: 'tab-a-second' }, 'tab-a-second');
+ stop = startLocalQueueWorker();
+ await vi.advanceTimersByTimeAsync(20);
+ const initial = queuedLocalMessages('mission');
+ expect(initial).toHaveLength(2);
+
+ // Simulate Tab B writing a durable tombstone for `tab-a-first` in IndexedDB and broadcasting `orb:local-queue`.
+ const key = `followups:account:${mocks.version}`;
+ const saved = mocks.store.get(key) as { id: string; kind: string }[];
+ expect(saved).toHaveLength(2);
+ expect(saved[0].kind).toBe('queued');
+ mocks.store.set(`${key}:tombstones`, [initial[0].id]);
+ new FakeBroadcastChannel('orb:local-queue').postMessage({ key, tabId: 'tab-b' });
+ await vi.advanceTimersByTimeAsync(20);
+
+ expect(queuedLocalMessages('mission').map(r => r.text)).toEqual(['tab-a-second']);
+ vi.unstubAllGlobals();
+});
+
+it('classifies typed 409 conflict codes deterministically without misclassifying terminal_conflict as retryable race (SM-23 / SM-26)', async () => {
+ mocks.active = false;
+ const terminalErr = Object.assign(new Error('409 terminal'), {
+  status: 409,
+  detail: JSON.stringify({ code: 'terminal_conflict', message: 'Mission already completed' }),
+ });
+ mocks.launch.mockRejectedValueOnce(terminalErr);
+ stop = startLocalQueueWorker();
+ await enqueueLocalMessage(request, 'after-terminal');
+ await vi.advanceTimersByTimeAsync(200);
+ // `terminal_conflict` must NOT loop as an `active_run_conflict` 400ms race retry; it surfaces an operator-visible dispatch failure.
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(queuedLocalMessages('mission')[0].state).toBe('dispatching');
+ expect(queuedLocalMessages('mission')[0].error).toBeTruthy();
+});

@@ -1,10 +1,73 @@
 import { nativeEvents } from "./native";
 import { swallow } from "./log";
-import { appendClientTranscript, getApiUrl, getJwt } from "./api";
+import { appendClientTranscript, currentCapabilityEpochKey, getApiUrl, getJwt, getServerBuild } from "./api";
 import type { ClientRunReceipt } from "./clientRuns";
 import { nativeInvoke } from "./clientRuns";
 
 const connection = () => ({ api_url: getApiUrl(), token: getJwt() ?? "" });
+let unsupportedClientLinkEpoch: string | null = null;
+
+export interface ClientLinkJournalEnqueueReceipt {
+  seq: number;
+  unacked_count: number;
+  last_acked_seq: number;
+  head_seq: number;
+}
+
+export interface ClientLinkResyncSummary {
+  replay_from_seq: number;
+  head_seq: number;
+  replay_count: number;
+  frames: Array<{ seq: number; mission: string; payload: unknown }>;
+}
+
+export function isClientLinkUnsupportedForCurrentEpoch(): boolean {
+  return unsupportedClientLinkEpoch !== null && unsupportedClientLinkEpoch === currentCapabilityEpochKey();
+}
+
+export function recordClientLinkHttpStatus(status: number): void {
+  if (status === 404 || status === 501) {
+    unsupportedClientLinkEpoch = currentCapabilityEpochKey();
+  }
+}
+
+/**
+ * Enqueue one outbound frame in `orb-locald`'s 256-frame client-link journal ring (`SM-26`).
+ * Rejects with `"client_link_journal_backpressure"` at 256 unacked frames rather than silently dropping.
+ */
+export async function enqueueClientLinkFrame(id: string, payload: unknown): Promise<ClientLinkJournalEnqueueReceipt | null> {
+  if (isClientLinkUnsupportedForCurrentEpoch()) return null;
+  const invoke = nativeInvoke();
+  if (!invoke) return null;
+  return await invoke("client_link_flush", {
+    connection: connection(),
+    action: "enqueue",
+    mission: id,
+    payload,
+  }) as ClientLinkJournalEnqueueReceipt;
+}
+
+/** Acknowledge cumulative `ackSeq` on `orb-locald`'s client-link journal ring (`SM-26`). */
+export async function ackClientLinkFrames(ackSeq: number): Promise<void> {
+  const invoke = nativeInvoke();
+  if (!invoke) return;
+  await invoke("client_link_flush", {
+    connection: connection(),
+    action: "ack",
+    ack_seq: ackSeq,
+  });
+}
+
+/** Compute reconnect replay window after `(last_acked_seq, head_seq)` resync (`SM-26`). */
+export async function resyncClientLinkFrames(peerAckSeq: number): Promise<ClientLinkResyncSummary | null> {
+  const invoke = nativeInvoke();
+  if (!invoke) return null;
+  return await invoke("client_link_flush", {
+    connection: connection(),
+    action: "resync",
+    peer_ack_seq: peerAckSeq,
+  }) as ClientLinkResyncSummary;
+}
 
 /**
  * Wait until Core acknowledged everything the client link journaled for this
@@ -13,6 +76,7 @@ const connection = () => ({ api_url: getApiUrl(), token: getJwt() ?? "" });
  * Returns false when the link is not in use or could not drain in time.
  */
 export async function flushClientLink(id: string, timeoutMs = 15000): Promise<boolean> {
+  if (isClientLinkUnsupportedForCurrentEpoch()) return false;
   // Not gated on the handshake: a run can finish before `welcome` arrives.
   // Native flush is false for any run the link did not carry.
   const invoke = nativeInvoke();
@@ -51,9 +115,17 @@ let stopListening: (() => void) | undefined;
  * as online) and handle remote starts. Each start is answered exactly once.
  */
 export async function connectClientLink(start: (request: RemoteStart) => Promise<string>): Promise<void> {
+  if (isClientLinkUnsupportedForCurrentEpoch()) return;
   const invoke = nativeInvoke();
   if (!invoke) return;
-  try { if (await invoke("client_link_connect", { connection: connection() }) !== true) return; }
+  try {
+    const serverBuild = getServerBuild();
+    const ok = await invoke("client_link_connect", {
+      connection: connection(),
+      ...(serverBuild ? { server_build: serverBuild } : {}),
+    });
+    if (ok !== true) return;
+  }
   catch { return; }
   const events = nativeEvents();
   if (!events || stopListening) return;
@@ -69,7 +141,15 @@ export async function connectClientLink(start: (request: RemoteStart) => Promise
 
 /** Tell Core which harnesses (and models) this computer can run. */
 export async function reportClientHarnesses(harnesses: { backend: string; name: string; models: { value: string; label: string }[] }[]): Promise<void> {
+  if (isClientLinkUnsupportedForCurrentEpoch()) return;
   const invoke = nativeInvoke();
   if (!invoke || !harnesses.length) return;
-  try { await invoke("client_link_set_capabilities", { connection: connection(), harnesses }); } catch { /* best effort */ }
+  try {
+    const serverBuild = getServerBuild();
+    await invoke("client_link_set_capabilities", {
+      connection: connection(),
+      harnesses,
+      ...(serverBuild ? { server_build: serverBuild } : {}),
+    });
+  } catch { /* best effort */ }
 }

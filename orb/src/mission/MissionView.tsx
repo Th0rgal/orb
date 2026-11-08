@@ -106,6 +106,12 @@ import { deliverInOrder } from "./sendQueue";
 import { missionActivity, beginHandoff, endHandoff, missionHandoff } from "../missionStatus";
 import { createHandoffTracker } from "./handoff";
 import { createOptimisticList } from "./optimisticList";
+import {
+  normalizeFollowupPrompt,
+  stepFollowupEnqueueOptimistic,
+  stepFollowupPollReconcile,
+  stepFollowupTurnReconcile,
+} from "../followupQueueState";
 import { notify } from "../toast";
 import { usageTelemetry } from "../usageTelemetry";
 import { networkHealth, networkHealthSnapshot } from "../networkHealth";
@@ -492,31 +498,64 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   const [error, setError] = createSignal<string | null>(null);
   const [queueError, setQueueError] = createSignal<string | null>(cached?.queueError ?? null);
   const [sendError, setSendError] = createSignal<string | null>(null);
-  const drafts = createOptimisticList<{id:ReturnType<typeof crypto.randomUUID>;text:string; images:DraftImage[];waiting:boolean;failed?:boolean;retry?:()=>void}>();
+  const drafts = createOptimisticList<{id:ReturnType<typeof crypto.randomUUID>;text:string; images:DraftImage[];waiting:boolean;postedAfterSeq:number;failed?:boolean;retry?:()=>void}>();
   const optimisticList = drafts.items;
   const optimistic = drafts.first;
   let sendingIds:ReturnType<typeof crypto.randomUUID>[]=[];
   let sendChain: Promise<void> = Promise.resolve();
+  const countDeliveredUserTurns = () => {
+    let count = 0;
+    for (const item of items()) if (item.kind === "user" && !item.queued) count++;
+    return count;
+  };
   const beginSend = (draft:{text:string;images:DraftImage[];retry?:()=>void}|null) => {
     if(!draft)return;
     const prevErr = sendError();
     const firstOpt = optimistic();
-    const nextId = prevErr && firstOpt?.text === draft.text ? firstOpt.id : crypto.randomUUID();
+    const reused = Boolean(prevErr && firstOpt?.text === draft.text);
+    const nextId = reused ? firstOpt!.id : crypto.randomUUID();
+    const postedAfterSeq = reused ? firstOpt!.postedAfterSeq : countDeliveredUserTurns();
+    const enqueueStep = stepFollowupEnqueueOptimistic({
+      serverRev: 1,
+      clientMsgId: nextId,
+      trackedMsgId: reused ? undefined : firstOpt?.id,
+      postedAfterSeq,
+      alreadyDelivered: items().some(i => i.kind === "user" && !i.queued && i.messageId === nextId),
+    });
+    if (!enqueueStep.admitted && !reused) return;
     sendingIds.push(nextId);
     setSendError(null);
     const waiting = busy() || drafts.inFlightOtherThan(nextId);
-    drafts.upsert({ ...draft, id: nextId, waiting });
+    drafts.upsert({ ...draft, id: nextId, waiting, postedAfterSeq });
     if (!waiting) {
       pin.pin();
     }
   };
   createEffect(()=>{
+    const userItems = items().filter((i): i is Extract<StreamItem, { kind: "user" }> => i.kind === "user");
     const ids=new Set([
-      ...items().filter(i=>i.kind==='user').map(i=>i.kind==='user'?i.messageId??'':''),
+      ...userItems.map(i=>i.messageId??''),
       ...remoteQueuedIds(),
       ...queuedLocalMessages(p.id).map(row=>row.id),
       ...acceptedLocalMessages(p.id).map(row=>row.id),
     ]);
+    let turnSeq = 0;
+    for (const u of userItems) {
+      if (u.queued) continue;
+      turnSeq++;
+      const normalizedTurn = normalizeFollowupPrompt(u.text);
+      for (const opt of optimisticList()) {
+        if (ids.has(opt.id)) continue;
+        const step = stepFollowupTurnReconcile({
+          clientMsgId: opt.id,
+          deliveredMsgId: u.messageId ?? null,
+          postedAfterSeq: opt.postedAfterSeq,
+          turnSeq,
+          contentMatched: normalizeFollowupPrompt(opt.text) === normalizedTurn,
+        });
+        if (step.retiredNow) ids.add(opt.id);
+      }
+    }
     // Remove the projection only after its canonical identity is visible.
     if (drafts.reconcile(ids) && !optimisticList().some(item => item.failed)) {
       if (retryMessage && ids.has(retryMessage.id)) retryMessage = null;
@@ -911,20 +950,51 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     return false;
   };
   // A turn ended with messages still queued: Core delivers the next one in a
-  // moment. Keep the Working row across that gap, or the transcript drops by
-  // the row and jumps back up when the delivered message lands.
-  const [queueHandover, setQueueHandover] = createSignal(0);
+  // moment. Keep the Working row across that gap via deterministic `SM-24`
+  // `orbFollowupQueueStep` reconciliation (clearing immediately when the new
+  // turn starts, a failure lands, or all handover message IDs retire/cancel).
+  const [queueHandoverState, setQueueHandoverState] = createSignal<{ ids: string[]; postedAfterSeq: number } | null>(null);
   createEffect(on(busy, (now, before) => {
-    if (now) { setQueueHandover(0); return; }
+    if (now) { setQueueHandoverState(null); return; }
     if (!before || clientPlaced() || isFailedStatus(mission()?.status)) return;
-    if (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued)) return;
-    const until = Date.now() + 3000;
-    setQueueHandover(until);
-    setTimeout(() => { if (queueHandover() === until) setQueueHandover(0); }, 3050);
+    const queuedTranscriptIds = items().flatMap(i => i.kind === "user" && i.queued && i.messageId ? [i.messageId] : []);
+    const candidateIds = [...new Set([...remoteQueuedIds(), ...queuedTranscriptIds])];
+    if (!candidateIds.length) return;
+    setQueueHandoverState({ ids: candidateIds, postedAfterSeq: countDeliveredUserTurns() });
   }, { defer: true }));
+  createEffect(() => {
+    const handover = queueHandoverState();
+    if (!handover) return;
+    if (busy() || clientPlaced() || isFailedStatus(mission()?.status)) {
+      setQueueHandoverState(null);
+      return;
+    }
+    const serverSet = new Set(remoteQueuedIds());
+    const queuedTranscriptSet = new Set(items().flatMap(i => i.kind === "user" && i.queued && i.messageId ? [i.messageId] : []));
+    const deliveredSet = new Set(deliveredRemote());
+    const currentTurnSeq = countDeliveredUserTurns();
+    const stillHandingOver = handover.ids.some(id => {
+      const serverListed = serverSet.has(id) || queuedTranscriptSet.has(id);
+      const step = stepFollowupPollReconcile({
+        serverRev: 1,
+        incomingServerRev: 1,
+        clientMsgId: id,
+        postedAfterSeq: handover.postedAfterSeq,
+        turnSeq: currentTurnSeq,
+        optimisticSending: false,
+        serverListed,
+        alreadyDelivered: deliveredSet.has(id),
+      });
+      // `serverListed` keeps the handover active while Core claims the queued
+      // follow-up; once unlisted (cancelled or delivered) and not yet driving
+      // `busy()`, retire the handover deterministically without a timer.
+      return serverListed && !step.retiredNow && !deliveredSet.has(id);
+    });
+    if (!stillHandingOver) setQueueHandoverState(null);
+  });
   const working = () => {
     if(sendError())return false;
-    if(queueHandover())return true;
+    if(queueHandoverState())return true;
     if(!p.id)return !p.launchError;
     if(sendingImmediate()&&!handoff())return false;
     if(clientPlaced() && !localRunActive(p.id) && (localFailure(p.id) || queuedLocalMessages(p.id).some(row=>row.interrupted)))return false;
@@ -1307,7 +1377,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     // Show the messages as sent right away: stopping a remote turn can take
     // several seconds, and the queue row has already disappeared.
     const projected = ordered.map(row => row.id as ReturnType<typeof crypto.randomUUID>);
-    drafts.replaceAll(ordered.map(row => ({ id: row.id as ReturnType<typeof crypto.randomUUID>, text: messagePresentation(row.content).text, images: [], waiting: false })));
+    const basePostedAfterSeq = countDeliveredUserTurns();
+    drafts.replaceAll(ordered.map(row => ({ id: row.id as ReturnType<typeof crypto.randomUUID>, text: messagePresentation(row.content).text, images: [], waiting: false, postedAfterSeq: basePostedAfterSeq })));
     pin.pin();
     try {
       if (wasBusy) {

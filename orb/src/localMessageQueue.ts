@@ -4,6 +4,7 @@ import {createSignal,batch} from 'solid-js';
 import {mergeById} from './poll';
 import {deliverAssistantText,flushClientLink} from './clientLink';
 import {connectionVersion,getMission,reopenMission,appendClientTranscript,setClientMissionStatus} from './api';
+import {classifyConflictError} from './conflictClassification';
 import type {ClientRunReceipt} from './clientRuns';
 import {readSideThread,saveSideThread} from './composerDrafts';
 import {sideQuestionKey} from './sideQuestionStorage';
@@ -12,13 +13,140 @@ import {providerLimit} from './usageLimit';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
 import {usageTelemetry} from './usageTelemetry';
 
+export type LocalQueueEntryBase={
+ id:ReturnType<typeof crypto.randomUUID>;
+ mission:string;
+ text:string;
+ request:StartLocal;
+ waiting?:boolean;
+ delegated?:boolean;
+ scheduled?:boolean;
+ resumes?:number;
+ lastSyncedText?:string;
+};
+export type LocalQueueQueuedEntry=LocalQueueEntryBase&{
+ kind:'queued';
+ heldAt?:number;
+ retryAfter?:number;
+ autoResumed?:boolean;
+ cut?:'restart'|'connection'|'background';
+ error?:string;
+};
+export type LocalQueueDispatchingEntry=LocalQueueEntryBase&{
+ kind:'dispatching';
+ claimedAt?:number;
+ autoResumed?:boolean;
+ cut?:'restart'|'connection'|'background';
+ error?:string;
+};
+export type LocalQueueAcceptedEntry=LocalQueueEntryBase&{
+ kind:'accepted';
+ receipt?:ClientRunReceipt;
+ userSynced?:boolean;
+ result?:PollLocal;
+ resultStatus?:'interrupted'|'failed'|'awaiting_user';
+ resultId?:ReturnType<typeof crypto.randomUUID>;
+ interrupted?:boolean;
+ autoResumed?:boolean;
+ cut?:'restart'|'connection'|'background';
+ error?:string;
+};
+export type LocalQueueErrorEntry=LocalQueueEntryBase&{
+ kind:'error';
+ error:string;
+ interrupted?:boolean;
+ autoResumed?:boolean;
+ cut?:'restart'|'connection'|'background';
+ receipt?:ClientRunReceipt;
+ userSynced?:boolean;
+ result?:PollLocal;
+ resultStatus?:'interrupted'|'failed'|'awaiting_user';
+ resultId?:ReturnType<typeof crypto.randomUUID>;
+};
+/** Persisted discriminated-union IndexedDB queue entry (`SM-23`). */
+export type LocalQueueEntry=
+ |LocalQueueQueuedEntry
+ |LocalQueueDispatchingEntry
+ |LocalQueueAcceptedEntry
+ |LocalQueueErrorEntry;
+
 export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;resumes?:number;lastSyncedText?:string;cut?:'restart'|'connection'|'background';retryAfter?:number;waiting?:boolean;delegated?:boolean;scheduled?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>;heldAt?:number};
+
+export function toLocalQueueEntry(raw:LocalQueueEntry|QueuedLocalMessage):LocalQueueEntry{
+ const legacy=raw as Partial<QueuedLocalMessage>&Partial<LocalQueueEntry>;
+ const state=(typeof legacy.state==='string'?legacy.state:legacy.kind)??'queued';
+ const base:LocalQueueEntryBase={
+  id:raw.id,
+  mission:raw.mission,
+  text:raw.text,
+  request:raw.request,
+  ...(raw.waiting!==undefined?{waiting:raw.waiting}:{}),
+  ...(raw.delegated!==undefined?{delegated:raw.delegated}:{}),
+  ...(raw.scheduled!==undefined?{scheduled:raw.scheduled}:{}),
+  ...(raw.resumes!==undefined?{resumes:raw.resumes}:{}),
+  ...(raw.lastSyncedText!==undefined?{lastSyncedText:raw.lastSyncedText}:{}),
+ };
+ if(state==='dispatching'){
+  return {
+   ...base,
+   kind:'dispatching',
+   ...(legacy.claimedAt!==undefined?{claimedAt:legacy.claimedAt}:{}),
+   ...(legacy.autoResumed!==undefined?{autoResumed:legacy.autoResumed}:{}),
+   ...(legacy.cut!==undefined?{cut:legacy.cut}:{}),
+   ...(legacy.error!==undefined?{error:legacy.error}:{}),
+  };
+ }
+ if(state==='accepted'){
+  return {
+   ...base,
+   kind:'accepted',
+   ...(legacy.receipt!==undefined?{receipt:legacy.receipt}:{}),
+   ...(legacy.userSynced!==undefined?{userSynced:legacy.userSynced}:{}),
+   ...(legacy.result!==undefined?{result:legacy.result}:{}),
+   ...(legacy.resultStatus!==undefined?{resultStatus:legacy.resultStatus}:{}),
+   ...(legacy.resultId!==undefined?{resultId:legacy.resultId}:{}),
+   ...(legacy.interrupted!==undefined?{interrupted:legacy.interrupted}:{}),
+   ...(legacy.autoResumed!==undefined?{autoResumed:legacy.autoResumed}:{}),
+   ...(legacy.cut!==undefined?{cut:legacy.cut}:{}),
+   ...(legacy.error!==undefined?{error:legacy.error}:{}),
+  };
+ }
+ if(state==='error'){
+  return {
+   ...base,
+   kind:'error',
+   error:legacy.error??'Unknown local queue error',
+   ...(legacy.interrupted!==undefined?{interrupted:legacy.interrupted}:{}),
+   ...(legacy.autoResumed!==undefined?{autoResumed:legacy.autoResumed}:{}),
+   ...(legacy.cut!==undefined?{cut:legacy.cut}:{}),
+   ...(legacy.receipt!==undefined?{receipt:legacy.receipt}:{}),
+   ...(legacy.userSynced!==undefined?{userSynced:legacy.userSynced}:{}),
+   ...(legacy.result!==undefined?{result:legacy.result}:{}),
+   ...(legacy.resultStatus!==undefined?{resultStatus:legacy.resultStatus}:{}),
+   ...(legacy.resultId!==undefined?{resultId:legacy.resultId}:{}),
+  };
+ }
+ return {
+  ...base,
+  kind:'queued',
+  ...(legacy.heldAt!==undefined?{heldAt:legacy.heldAt}:{}),
+  ...(legacy.retryAfter!==undefined?{retryAfter:legacy.retryAfter}:{}),
+  ...(legacy.autoResumed!==undefined?{autoResumed:legacy.autoResumed}:{}),
+  ...(legacy.cut!==undefined?{cut:legacy.cut}:{}),
+  ...(legacy.error!==undefined?{error:legacy.error}:{}),
+ };
+}
+
+export function fromLocalQueueEntry(raw:LocalQueueEntry|QueuedLocalMessage):QueuedLocalMessage{
+ const entry=toLocalQueueEntry(raw);
+ const {kind,...rest}=entry;
+ return {...rest,state:kind};
+}
 const [entries,publishEntries]=createSignal<QueuedLocalMessage[]>([]);
 // IndexedDB clones every read. Keep unchanged rows stable so the 1s worker
 // heartbeat does not invalidate every mounted conversation and its markdown.
-const optimisticallyRemoved=new Set<string>();
 const asRows=(rows:QueuedLocalMessage[]|undefined|null)=>Array.isArray(rows)?rows:[];
-const setEntries=(rows:QueuedLocalMessage[])=>publishEntries(previous=>mergeById(asRows(previous),asRows(rows).filter(r=>!optimisticallyRemoved.has(r.id))));
+const setEntries=(rows:QueuedLocalMessage[])=>publishEntries(previous=>mergeById(asRows(previous),asRows(rows)));
 const [accepted,setAccepted]=createSignal<QueuedLocalMessage[]>([]);
 export const queuedLocalMessages=(mission:string)=>asRows(entries()).filter(row=>row.mission===mission);
 export const acceptedLocalMessages=(mission:string)=>asRows(accepted()).filter(row=>row.mission===mission);
@@ -28,7 +156,7 @@ const wakeEvent='orb:queue-wake';
 const lostRun='Orb lost the local run. Your message is saved. Retry to resume it.';
 // The mission moved to another machine: there is no local run left to recover.
 const NOT_LOCAL='This conversation no longer runs on this computer';
-const movedAway=(error:unknown)=>String(error).includes(NOT_LOCAL);
+const movedAway=(error:unknown)=>classifyConflictError(error)?.tag==='moved'||String(error).includes(NOT_LOCAL);
 /** Archive a row whose mission now runs elsewhere and take it off the queue. */
 async function forgetMoved(key:string,id:string){
  await locked(key,async()=>{
@@ -81,12 +209,59 @@ function requeue(stored:QueuedLocalMessage,cut:'restart'|'connection'|'backgroun
  delete stored.receipt;delete stored.result;delete stored.resultId;delete stored.resultStatus;delete stored.userSynced;delete stored.claimedAt;
 }
 const wake=()=>window.dispatchEvent(new Event(wakeEvent));
+const queueChannel=()=>{
+ try{
+  if(typeof BroadcastChannel==='undefined')return undefined;
+  const ch=new BroadcastChannel('orb:local-queue');
+  (ch as unknown as {unref?:()=>void}).unref?.();
+  return ch;
+ }
+ catch{return undefined;}
+};
+const tabId=crypto.randomUUID();
+const announce=(key:string,id?:string)=>{
+ const channel=queueChannel();
+ channel?.postMessage({key,id,tabId,at:Date.now()});
+ channel?.close();
+};
 async function locked<T>(key:string,action:()=>Promise<T>):Promise<T>{
- if(!navigator.locks)throw new Error('Update Orb to queue messages safely on this computer.');
+ if(!navigator.locks?.request){
+  const locks=(globalThis as {__orbQueueLocks?:Map<string,Promise<unknown>>}).__orbQueueLocks??new Map<string,Promise<unknown>>();
+  (globalThis as {__orbQueueLocks?:Map<string,Promise<unknown>>}).__orbQueueLocks=locks;
+  const previous=locks.get(key)??Promise.resolve();
+  let release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  locks.set(key,previous.then(()=>gate,()=>gate));
+  await previous.catch(()=>undefined);
+  try{return await action();}
+  finally{release();if(locks.get(key)===gate)locks.delete(key);}
+ }
  return navigator.locks.request(key,action);
 }
-async function read(key:string){return await readSideThread<QueuedLocalMessage[]>(key)??[];}
-async function write(key:string,rows:QueuedLocalMessage[]){await saveSideThread(key,rows);if(key===storageKey())setEntries(rows);}
+async function tryLocked(key:string,action:(lock:unknown)=>Promise<void>):Promise<void>{
+ if(navigator.locks?.request){
+  await navigator.locks.request(key,{ifAvailable:true},action);
+  return;
+ }
+ const locks=(globalThis as {__orbTryLocks?:Set<string>}).__orbTryLocks??new Set<string>();
+ (globalThis as {__orbTryLocks?:Set<string>}).__orbTryLocks=locks;
+ if(locks.has(key)){await action(null);return;}
+ locks.add(key);
+ try{await action({name:key});}
+ finally{locks.delete(key);}
+}
+const tombKey=(key:string)=>`${key}:tombstones`;
+async function read(key:string){
+ const [rows,tombs]=await Promise.all([readSideThread<(LocalQueueEntry|QueuedLocalMessage)[]>(key),readSideThread<string[]>(tombKey(key))]);
+ const dropped=new Set(tombs??[]);
+ return (rows??[]).map(fromLocalQueueEntry).filter(row=>!dropped.has(row.id));
+}
+async function write(key:string,rows:QueuedLocalMessage[]){
+ const normalized=rows.map(toLocalQueueEntry);
+ await saveSideThread(key,normalized);
+ announce(key);
+ if(key===storageKey())setEntries(normalized.map(fromLocalQueueEntry));
+}
 async function update(key:string,id:string,change:(row:QueuedLocalMessage)=>void){await locked(key,async()=>{const rows=await read(key);const row=rows.find(r=>r.id===id);if(row){change(row);await write(key,rows);}});}
 export type WakeupFence={token:string;blocked:boolean};
 export async function captureWakeupFences(){const key=storageKey();return locked(key,async()=>await readSideThread<Record<string,WakeupFence>>(`${key}:wake-stops`)??{});}
@@ -117,9 +292,10 @@ export async function enqueueLocalMessage(request:StartLocal,text:string,options
    publishEntries(rows=>{const list=asRows(rows);return list.some(row=>row.id===id)?list:[...list.filter(r=>!(r.mission===request.id&&r.state==='error'&&r.interrupted)),{id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true,delegated:options.delegated,scheduled:options.scheduled}];});
   }
  }
- await locked(key,async()=>{
-  if(optimisticallyRemoved.delete(id))return;
-  const seenKey=`${key}:received`,seen=options.delegated?(await readSideThread<string[]>(seenKey)??[]):[];
+  await locked(key,async()=>{
+   const tombs=await readSideThread<string[]>(tombKey(key))??[];
+   if(tombs.includes(id))return;
+   const seenKey=`${key}:received`,seen=options.delegated?(await readSideThread<string[]>(seenKey)??[]):[];
   if(seen.includes(id))return;
   if(options.scheduled){
    const current=(await readSideThread<Record<string,WakeupFence>>(`${key}:wake-stops`))?.[request.id];
@@ -182,31 +358,27 @@ async function discardQueuedMessage(id:string):Promise<string|undefined>{
  const key=storageKey(),snapshot=(await read(key)).find(row=>row.id===id);
  if(snapshot&&!canDiscardQueuedMessage(snapshot))throw Error('This message has already been sent.');
  if(snapshot&&(snapshot.interrupted||snapshot.state==='dispatching'))await recoverLocalLaunch(snapshot.mission);
- const text=await locked(key,async()=>{
-  if(key!==storageKey())throw Error('Connection changed. The message is still saved.');
-  const rows=await read(key),row=rows.find(row=>row.id===id);
-  if(!row)return;
-  if(snapshot&&JSON.stringify(row)!==JSON.stringify(snapshot))throw Error('This message changed while checking the previous run. Try again.');
-  if(!canDiscardQueuedMessage(row))throw Error('This message has already been sent.');
-  if(row.receipt||row.result)await saveSideThread(`${key}:recovered:${row.id}:${row.receipt?.run_id??'unknown'}`,row);
-  await write(key,rows.filter(row=>row.id!==id));
-  return row.text;
- });
+  const text=await locked(key,async()=>{
+   if(key!==storageKey())throw Error('Connection changed. The message is still saved.');
+   const rows=await read(key),row=rows.find(row=>row.id===id);
+   if(!row)return;
+   if(snapshot&&JSON.stringify(row)!==JSON.stringify(snapshot))throw Error('This message changed while checking the previous run. Try again.');
+   if(!canDiscardQueuedMessage(row))throw Error('This message has already been sent.');
+   if(row.receipt||row.result)await saveSideThread(`${key}:recovered:${row.id}:${row.receipt?.run_id??'unknown'}`,row);
+   const tombs=await readSideThread<string[]>(tombKey(key))??[];
+   await saveSideThread(tombKey(key),[...tombs.filter(item=>item!==id),id].slice(-256));
+   await write(key,rows.filter(row=>row.id!==id));
+   return row.text;
+  });
  wake();return text;
 }
 export async function removeQueuedMessage(id:string){
- const prev=entries();
- const row=prev.find(r=>r.id===id);
- if(row&&row.state==='queued'&&!row.interrupted){
-  optimisticallyRemoved.add(id);
-  publishEntries(rows=>asRows(rows).filter(r=>r.id!==id));
+  const prev=entries();
+  const row=prev.find(r=>r.id===id);
+  if(row&&row.state==='queued'&&!row.interrupted)publishEntries(rows=>asRows(rows).filter(r=>r.id!==id));
+  try{await discardQueuedMessage(id);}
+  catch(e){if(row)publishEntries(rows=>{const list=asRows(rows);return list.some(r=>r.id===id)?list:mergeById(list,prev);});throw e;}
  }
- try{
-  const removed=await discardQueuedMessage(id);
-  if(removed!==undefined)optimisticallyRemoved.delete(id);
- }
- catch(e){optimisticallyRemoved.delete(id);if(row)publishEntries(rows=>{const list=asRows(rows);return list.some(r=>r.id===id)?list:mergeById(list,prev);});throw e;}
-}
 export async function takeQueuedMessage(id:string){
  const text=await discardQueuedMessage(id);
  if(text===undefined)throw Error('This message is no longer queued.');
@@ -321,7 +493,8 @@ export function startLocalQueueWorker(){
   if(!valid())return;
   // A closed receipt cannot become writable again. Keep its output and draft,
   // but require an explicit retry instead of looping or silently replaying work.
-  const closed=/409.*Local execution (already ended or moved|receipt is stale)/i.test(String(error));
+   const conflictTag=classifyConflictError(error)?.tag;
+   const closed=conflictTag==='already_ended'||conflictTag==='moved'||conflictTag==='stale_receipt';
   await update(key,row.id,stored=>{
    if(closed){stored.state='error';stored.interrupted=true;stored.error=closedRun;}
    else stored.error=`Saved locally; could not finish syncing: ${String(error)}`;
@@ -332,7 +505,7 @@ export function startLocalQueueWorker(){
   const runKey=`${key}:${row.mission}`;if(settling.has(runKey))return;
   // Set once the run is settled or confirmed stopped: the queue may then look at this mission again.
   let finished=false;
-  const promise=navigator.locks.request(`${runKey}:follow`,{ifAvailable:true},async lock=>{
+   const promise=tryLocked(`${runKey}:follow`,async lock=>{
    if(!lock)return;
    try {
     // Begin observing output immediately. A slow transcript write must not hide it.
@@ -533,7 +706,8 @@ export function startLocalQueueWorker(){
       if(stored.state==='queued'&&offline(error)){stored.error='Waiting for the connection to come back.';return;}
       const msg=error instanceof Error?error.message:String(error);
       if(/^Local launch deferred: directory busy/.test(msg)){stored.state='queued';stored.error='Waiting for another local mission to release this directory.';delete stored.claimedAt;return;}
-      if(/^Local launch rejected: 409:.*already has non-terminal run/i.test(msg)){stored.state='queued';stored.retryAfter=Date.now()+400;scheduleRetry=stored.retryAfter;delete stored.error;delete stored.claimedAt;return;}
+       const launchConflict=classifyConflictError(error);
+       if(launchConflict?.retryable||/^Local launch rejected: 409:.*already has non-terminal run/i.test(msg)){stored.state='queued';stored.retryAfter=Date.now()+400;scheduleRetry=stored.retryAfter;delete stored.error;delete stored.claimedAt;return;}
       if(stored.state==='queued'||/^Local launch rejected:/.test(msg))stored.state='error';stored.error=stored.state==='dispatching'?`Launch outcome uncertain. Retry will check that the previous run stopped. ${String(error)}`:String(error);
      });
      if(scheduleRetry)scheduleRetryWake(scheduleRetry);
@@ -542,9 +716,9 @@ export function startLocalQueueWorker(){
   }catch(error){swallow('localQueue.tick')(error);/* Durable entries stay available for the next attempt. */}
   finally{busy=false;if(again&&valid()){again=false;queueMicrotask(()=>void tick());}}
  };
- const onWake=()=>void tick();window.addEventListener(wakeEvent,onWake);void tick();// A queued row waits on a turn this window may not be following: look again on its own.
+  const onWake=()=>void tick();window.addEventListener(wakeEvent,onWake);const channel=queueChannel();channel?.addEventListener('message',(event:MessageEvent)=>{if(event.data?.tabId!==tabId&&valid())onWake();});void tick();// A queued row waits on a turn this window may not be following: look again on its own.
  const timer=setInterval(()=>{if(entries().some(row=>row.state==='queued'||row.state==='dispatching'||!!row.error||!!row.interrupted))onWake();},3000);window.addEventListener('online',onWake);
- return ()=>{stopped=true;clearRetryTimer();clearInterval(timer);window.removeEventListener(wakeEvent,onWake);window.removeEventListener('online',onWake);};
+  return ()=>{stopped=true;clearRetryTimer();clearInterval(timer);window.removeEventListener(wakeEvent,onWake);window.removeEventListener('online',onWake);channel?.close();};
 }
 
 /** Stop removes automatic continuations still waiting on this computer. */

@@ -1,4 +1,4 @@
-import { api, ApiError, getApiUrl, getJwt } from "./api";
+import { api, ApiError, currentCapabilityEpochKey, getApiUrl, getJwt } from "./api";
 export interface ClientRunReceipt { run_id: string; generation: number; legacy?: boolean }
 import { nativeInvoke } from "./native";
 export { nativeInvoke };
@@ -8,13 +8,24 @@ export async function machineIdentity(): Promise<string> {
   return await invoke("local_machine_identity") as string;
 }
 const receipts = new Map<string, ClientRunReceipt>();
-const key = (id: string) => `${getApiUrl()}:${id}`;
+const legacyEpochLatches = new Map<string, boolean>();
+const key = (id: string) => `${currentCapabilityEpochKey()}:${id}`;
 export function rememberClientRunReceipt(id: string, receipt: ClientRunReceipt) {
   receipts.set(key(id), receipt);
 }
 async function legacyBackend(id: string): Promise<boolean> {
-  try { await api(`/api/control/missions/${id}/machine-transfer`); return false; }
-  catch (e) { if (e instanceof ApiError && [404, 405].includes(e.status)) return true; throw e; }
+  const epochKey = currentCapabilityEpochKey();
+  if (legacyEpochLatches.get(epochKey) === false) return false;
+  try {
+    await api(`/api/control/missions/${id}/machine-transfer`);
+    legacyEpochLatches.set(epochKey, false);
+    return false;
+  } catch (e) {
+    if (e instanceof ApiError && [404, 405, 501].includes(e.status)) {
+      return true;
+    }
+    throw e;
+  }
 }
 const legacyReceipt = (): ClientRunReceipt => ({ run_id: "00000000-0000-0000-0000-000000000000", generation: 0, legacy: true });
 export async function clientRunReceipt(id: string): Promise<ClientRunReceipt> {
