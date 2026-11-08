@@ -127,4 +127,79 @@ class OrbConnectionIssueTest {
         assertFalse(OrbConnection.shouldAttachIdempotencyKey("POST", "/api/auth/login"))
         assertFalse(OrbConnection.shouldAttachIdempotencyKey("POST", "/api/voice/transcribe?language=en"))
     }
+
+    @Test fun transportEpochFallsBackEvenAfterEverReadyAndReprobesAfterCooldown() {
+        val epoch = OrbCore.TransportEpochState()
+        val base = "https://agent-backend.thomas.md"
+        assertTrue(epoch.evaluateForConnect(base, 1_000L, 0L).allowWebSocket)
+        epoch.noteWsReady(1_100L)
+        assertTrue(epoch.everReady)
+
+        val f1 = epoch.noteWsFailure(null, 2_000L, 0L)
+        assertFalse(f1.fallbackToSse)
+        assertEquals(0L, f1.sinceSeq)
+        val f2 = epoch.noteWsFailure(null, 3_000L, 42L)
+        assertFalse(f2.fallbackToSse)
+        val f3 = epoch.noteWsFailure(null, 4_000L, 42L)
+        assertTrue(f3.fallbackToSse)
+        assertEquals(42L, f3.sinceSeq)
+        assertEquals(OrbCore.TransportEpochState.MODE_SSE_FALLBACK, epoch.mode)
+
+        val duringCooldown = epoch.evaluateForConnect(base, 33_999L, 99L)
+        assertFalse(duringCooldown.allowWebSocket)
+        assertEquals(99L, duringCooldown.sinceSeq)
+        assertEquals(1L, epoch.reprobeDelayMs(33_999L))
+
+        val highSeq = 0xFFFF_FFFFL + 77L
+        val reprobe = epoch.evaluateForConnect(base, 34_000L, highSeq)
+        assertTrue(reprobe.allowWebSocket)
+        assertEquals(highSeq, reprobe.sinceSeq)
+        assertEquals(OrbCore.TransportEpochState.MODE_WS_REPROBE, epoch.mode)
+        assertNull(epoch.reprobeDelayMs(34_000L))
+
+        val reprobeFail = epoch.noteWsFailure(null, 34_500L, highSeq)
+        assertTrue(reprobeFail.fallbackToSse)
+        assertEquals(highSeq, reprobeFail.sinceSeq)
+        assertEquals(30_000L, epoch.reprobeDelayMs(34_500L))
+
+        val reprobe2 = epoch.evaluateForConnect(base, 64_500L, highSeq)
+        assertTrue(reprobe2.allowWebSocket)
+        assertEquals(highSeq, reprobe2.sinceSeq)
+        epoch.noteWsReady(64_600L)
+        assertEquals(OrbCore.TransportEpochState.MODE_WS_ACTIVE, epoch.mode)
+        assertEquals(0, epoch.failureStreak)
+    }
+
+    @Test fun transportEpochStickyHttpUnsupportedClearsOnBuildOrEndpointChange() {
+        val epoch = OrbCore.TransportEpochState()
+        val customA = "https://orb-a.example.com"
+        val customB = "https://orb-b.example.com"
+        epoch.applyEndpoint(customA, 1_000L)
+        epoch.noteServerBuild("0.9.0", 1_000L)
+
+        val unsupported = epoch.noteWsFailure(404, 2_000L, 17L)
+        assertTrue(unsupported.fallbackToSse)
+        assertTrue(epoch.stickyUnsupported)
+        assertNull(epoch.reprobeDelayMs(2_000L))
+        assertEquals(17L, unsupported.sinceSeq)
+        assertFalse(epoch.evaluateForConnect(customA, 500_000L, 17L).allowWebSocket)
+
+        val upgradedSeq = epoch.noteServerBuild("0.10.0", 500_100L, 18L)
+        assertEquals(18L, upgradedSeq)
+        assertFalse(epoch.stickyUnsupported)
+        assertTrue(epoch.evaluateForConnect(customA, 500_200L, 18L).allowWebSocket)
+
+        epoch.noteWsFailure(426, 500_500L, 19L)
+        assertTrue(epoch.stickyUnsupported)
+        assertNull(epoch.reprobeDelayMs(500_500L))
+        epoch.noteServerBuild("0.10.1", 500_600L, 19L)
+        assertFalse(epoch.stickyUnsupported)
+
+        epoch.noteWsFailure(501, 501_000L, 20L)
+        assertTrue(epoch.stickyUnsupported)
+        val switched = epoch.evaluateForConnect(customB, 501_100L, 20L)
+        assertTrue(switched.allowWebSocket)
+        assertFalse(epoch.stickyUnsupported)
+        assertEquals(20L, switched.sinceSeq)
+    }
 }

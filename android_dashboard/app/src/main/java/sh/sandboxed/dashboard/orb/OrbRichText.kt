@@ -676,6 +676,15 @@ private fun parseStandaloneImage(trimmed: String): Pair<String, String>? {
 private fun isDisplayMathStart(trimmed: String): Boolean =
     trimmed.startsWith("$$") || trimmed.startsWith("\\[")
 
+internal fun isMdBlockTableRow(trimmed: String): Boolean =
+    isMdTableRow(trimmed)
+
+internal fun isMdBlockStandaloneImage(trimmed: String): Boolean =
+    parseStandaloneImage(trimmed) != null
+
+internal fun isMdBlockDisplayMathStart(trimmed: String): Boolean =
+    isDisplayMathStart(trimmed)
+
 internal fun parseMdBlocks(source: String): List<OrbMdBlock> {
     val blocks = mutableListOf<OrbMdBlock>()
     val lines = OrbCodeFences.normalize(source).split("\n")

@@ -12,6 +12,7 @@ struct OrbQueuedRow: Equatable, Identifiable {
     var queueError: String? = nil
     /// When Core accepted this optimistic row into its queue (`queued: true`).
     var postedAt: Date? = nil
+    var revision: UInt32? = nil
 }
 
 /// A `user_message` Core delivered into the transcript.
@@ -34,6 +35,23 @@ struct OrbFollowUpQueue: Equatable {
     /// match must come from a later `user_message` (an older identical message does not count).
     var seenAfter: [String: Int64] = [:]
     var consumedSequences: Set<Int64> = []
+    var serverRev: UInt32 = 1
+    var hasServerRevision = false
+
+    static func hashMessageId(_ id: String?) -> UInt64 {
+        guard let id, !id.isEmpty else { return 0 }
+        var hash: UInt64 = 14695981039346656037
+        for byte in id.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1099511628211
+        }
+        return hash == 0 ? 1 : hash
+    }
+
+    private static func seqWord(_ value: Int64?) -> UInt64 {
+        guard let value, value >= 0 else { return 0 }
+        return UInt64(value)
+    }
 
     var rows: [OrbQueuedRow] {
         var seen = Set<String>()
@@ -50,17 +68,86 @@ struct OrbFollowUpQueue: Equatable {
 
     func row(_ id: String) -> OrbQueuedRow? { rows.first { $0.id == id } }
 
+    func expectedRevision(for id: String) -> UInt32? {
+        if hasServerRevision { return serverRev }
+        if let rev = server.first(where: { $0.id == id })?.revision, rev > 0 { return rev }
+        return nil
+    }
+
     /// Core's queue as read by a request started at `fetchedAt`. An accepted
     /// optimistic row Core no longer lists after it was posted was delivered (or
     /// removed) and leaves the drawer; a row still being posted stays.
-    func withServer(_ rows: [OrbQueuedRow], fetchedAt: Date = .distantPast, lastSequence: Int64? = nil) -> OrbFollowUpQueue {
+    func withServer(
+        _ rows: [OrbQueuedRow],
+        fetchedAt: Date = .distantPast,
+        lastSequence: Int64? = nil,
+        incomingServerRev: UInt32? = nil,
+        turnSeq: Int64? = nil
+    ) -> OrbFollowUpQueue {
+        let normalizedIncoming = incomingServerRev.flatMap { $0 > 0 ? $0 : nil }
+        let effectiveRev = normalizedIncoming ?? serverRev
+        let gate = OrbKernel.followupQueueStep(
+            op: 0,
+            serverRev: serverRev,
+            incomingServerRev: effectiveRev,
+            expectedServerRev: 0,
+            clientMsgId: 0,
+            trackedMsgId: 0,
+            deliveredMsgId: 0,
+            postedAfterSeq: 0,
+            turnSeq: 0,
+            optimisticSending: false,
+            serverListed: false,
+            contentMatched: false,
+            alreadyDelivered: false
+        )
+        guard gate.admitted else { return self }
+
         var next = self
+        next.serverRev = gate.nextServerRev
+        if normalizedIncoming != nil { next.hasServerRevision = true }
         let listed = Set(rows.map(\.id))
         next.server = rows.map { var r = $0; r.sending = false; return r }
         next.pending = pending.filter { row in
-            if listed.contains(row.id) { return false }
-            if let posted = row.postedAt, !row.sending, posted < fetchedAt { return false }
-            return true
+            let rowHash = Self.hashMessageId(row.id)
+            let isDelivered = next.delivered.contains(row.id)
+            let isListed = listed.contains(row.id)
+            let postedBeforeFetch = (row.postedAt.map { $0 < fetchedAt } ?? false) && !row.sending
+            let afterSeq = next.seenAfter[row.id]
+            let pollTurnSeq: UInt64 = {
+                if let turnSeq, turnSeq >= 0 { return UInt64(turnSeq) }
+                if postedBeforeFetch {
+                    let base = Self.seqWord(afterSeq)
+                    return base < UInt64.max ? base + 1 : base
+                }
+                return 0
+            }()
+            let postedWord: UInt64 = {
+                if turnSeq != nil, afterSeq == nil { return UInt64.max }
+                return Self.seqWord(afterSeq)
+            }()
+            let verdict = OrbKernel.followupQueueStep(
+                op: 0,
+                serverRev: serverRev,
+                incomingServerRev: effectiveRev,
+                expectedServerRev: 0,
+                clientMsgId: rowHash,
+                trackedMsgId: rowHash,
+                deliveredMsgId: 0,
+                postedAfterSeq: postedWord,
+                turnSeq: pollTurnSeq,
+                optimisticSending: row.sending,
+                serverListed: isListed,
+                contentMatched: false,
+                alreadyDelivered: isDelivered
+            )
+            if verdict.retiredNow && turnSeq != nil {
+                next.delivered.insert(row.id)
+            }
+            if isListed || postedBeforeFetch {
+                return false
+            }
+            return verdict.optimisticLiveNext
         }
         next.hidden = hidden.filter { listed.contains($0) }
         if let lastSequence {
@@ -74,11 +161,30 @@ struct OrbFollowUpQueue: Equatable {
     func reconciled(with messages: [OrbDeliveredMessage]) -> OrbFollowUpQueue {
         guard !messages.isEmpty else { return self }
         var next = self
-        let ids = Set(messages.compactMap(\.id))
         var used = consumedSequences
-        for row in rows {
-            if ids.contains(row.id) {
-                next.delivered.insert(row.id)
+        let known = Set(server.map(\.id) + pending.map(\.id)).union(delivered)
+        let currentRows = rows
+        for row in currentRows {
+            let rowHash = Self.hashMessageId(row.id)
+            for message in messages where message.id == row.id {
+                let verdict = OrbKernel.followupQueueStep(
+                    op: 3,
+                    serverRev: next.serverRev,
+                    incomingServerRev: 0,
+                    expectedServerRev: 0,
+                    clientMsgId: rowHash,
+                    trackedMsgId: rowHash,
+                    deliveredMsgId: rowHash,
+                    postedAfterSeq: Self.seqWord(seenAfter[row.id]),
+                    turnSeq: Self.seqWord(message.sequence),
+                    optimisticSending: row.sending,
+                    serverListed: server.contains { $0.id == row.id },
+                    contentMatched: false,
+                    alreadyDelivered: next.delivered.contains(row.id)
+                )
+                if verdict.retiredNow {
+                    next.delivered.insert(row.id)
+                }
             }
         }
         for message in messages {
@@ -86,15 +192,37 @@ struct OrbFollowUpQueue: Equatable {
                 used.insert(message.sequence)
             }
         }
-        let known = Set(server.map(\.id) + pending.map(\.id))
-        let content = { (s: String) in s.trimmingCharacters(in: .whitespacesAndNewlines) }
-        for row in rows where !next.delivered.contains(row.id) {
+        let trim = { (s: String) in s.trimmingCharacters(in: .whitespacesAndNewlines) }
+        for row in currentRows where !next.delivered.contains(row.id) {
             guard let after = seenAfter[row.id] else { continue }
-            if let m = messages.first(where: { m in
-                !used.contains(m.sequence) && m.sequence > after && !(m.id.map(known.contains) ?? false) && content(m.content) == content(row.content)
-            }) {
-                used.insert(m.sequence)
-                next.delivered.insert(row.id)
+            let rowHash = Self.hashMessageId(row.id)
+            let rowTrimmed = trim(row.content)
+            for m in messages where !used.contains(m.sequence) && m.sequence >= 0 && after >= 0 {
+                let delivHash: UInt64 = {
+                    guard let mid = m.id, known.contains(mid) else { return 0 }
+                    return Self.hashMessageId(mid)
+                }()
+                let matched = trim(m.content) == rowTrimmed
+                let verdict = OrbKernel.followupQueueStep(
+                    op: 3,
+                    serverRev: next.serverRev,
+                    incomingServerRev: 0,
+                    expectedServerRev: 0,
+                    clientMsgId: rowHash,
+                    trackedMsgId: rowHash,
+                    deliveredMsgId: delivHash,
+                    postedAfterSeq: UInt64(after),
+                    turnSeq: UInt64(m.sequence),
+                    optimisticSending: row.sending,
+                    serverListed: server.contains { $0.id == row.id },
+                    contentMatched: matched,
+                    alreadyDelivered: next.delivered.contains(row.id)
+                )
+                if verdict.retiredNow {
+                    used.insert(m.sequence)
+                    next.delivered.insert(row.id)
+                    break
+                }
             }
         }
         next.consumedSequences = used
@@ -102,7 +230,26 @@ struct OrbFollowUpQueue: Equatable {
     }
 
     func enqueue(_ id: String, _ content: String, lastSequence: Int64? = nil) -> OrbFollowUpQueue {
+        let rowHash = Self.hashMessageId(id)
+        let trackedHash: UInt64 = (pending.contains { $0.id == id } || server.contains { $0.id == id }) ? rowHash : 0
+        let verdict = OrbKernel.followupQueueStep(
+            op: 2,
+            serverRev: serverRev,
+            incomingServerRev: 0,
+            expectedServerRev: 0,
+            clientMsgId: rowHash,
+            trackedMsgId: trackedHash,
+            deliveredMsgId: 0,
+            postedAfterSeq: Self.seqWord(lastSequence),
+            turnSeq: 0,
+            optimisticSending: true,
+            serverListed: server.contains { $0.id == id },
+            contentMatched: false,
+            alreadyDelivered: delivered.contains(id)
+        )
+        guard verdict.admitted else { return self }
         var next = self
+        next.serverRev = verdict.nextServerRev
         next.pending = pending.filter { $0.id != id } + [OrbQueuedRow(id: id, content: content, sending: true)]
         if let lastSequence { next.seenAfter[id] = lastSequence } else { next.seenAfter.removeValue(forKey: id) }
         return next
@@ -119,13 +266,74 @@ struct OrbFollowUpQueue: Equatable {
         var next = self; next.pending = pending.filter { $0.id != id }; return next
     }
 
-    func edit(_ id: String, _ content: String) -> OrbFollowUpQueue {
-        var next = self; next.edits[id] = content; return next
+    func edit(_ id: String, _ content: String, expectedServerRev: UInt32? = nil) -> OrbFollowUpQueue {
+        guard !delivered.contains(id) else { return self }
+        let expected = expectedServerRev ?? serverRev
+        let rowHash = Self.hashMessageId(id)
+        let verdict = OrbKernel.followupQueueStep(
+            op: 1,
+            serverRev: serverRev,
+            incomingServerRev: 0,
+            expectedServerRev: expected,
+            clientMsgId: rowHash,
+            trackedMsgId: rowHash,
+            deliveredMsgId: 0,
+            postedAfterSeq: 0,
+            turnSeq: 0,
+            optimisticSending: false,
+            serverListed: server.contains { $0.id == id },
+            contentMatched: false,
+            alreadyDelivered: false
+        )
+        guard verdict.admitted else { return self }
+        var next = self
+        next.edits[id] = content
+        return next
     }
 
-    func editConfirmed(_ id: String, _ content: String) -> OrbFollowUpQueue {
+    func editConfirmed(
+        _ id: String,
+        _ content: String,
+        expectedServerRev: UInt32? = nil,
+        confirmedServerRev: UInt32? = nil
+    ) -> OrbFollowUpQueue {
+        guard !delivered.contains(id) else { return self }
+        let expected = expectedServerRev ?? serverRev
+        let rowHash = Self.hashMessageId(id)
+        let verdict = OrbKernel.followupQueueStep(
+            op: 1,
+            serverRev: serverRev,
+            incomingServerRev: 0,
+            expectedServerRev: expected,
+            clientMsgId: rowHash,
+            trackedMsgId: rowHash,
+            deliveredMsgId: 0,
+            postedAfterSeq: 0,
+            turnSeq: 0,
+            optimisticSending: false,
+            serverListed: server.contains { $0.id == id },
+            contentMatched: false,
+            alreadyDelivered: false
+        )
+        guard verdict.admitted else { return self }
         var next = self
-        next.server = server.map { var r = $0; if r.id == id { r.content = content }; return r }
+        let trackedRevision = hasServerRevision || expectedServerRev != nil || (confirmedServerRev ?? 0) > 0
+        let appliedRevision: UInt32? = {
+            if let confirmedServerRev, confirmedServerRev > 0 { return max(verdict.nextServerRev, confirmedServerRev) }
+            return trackedRevision ? verdict.nextServerRev : nil
+        }()
+        if let appliedRevision {
+            next.serverRev = appliedRevision
+            next.hasServerRevision = true
+        }
+        next.server = server.map {
+            var r = $0
+            if r.id == id {
+                r.content = content
+                if let appliedRevision { r.revision = appliedRevision }
+            }
+            return r
+        }
         next.pending = pending.map { var r = $0; if r.id == id { r.content = content }; return r }
         next.edits[id] = nil
         return next
@@ -135,6 +343,13 @@ struct OrbFollowUpQueue: Equatable {
     func hide(_ id: String) -> OrbFollowUpQueue { var next = self; next.hidden.insert(id); return next }
     func unhide(_ id: String) -> OrbFollowUpQueue { var next = self; next.hidden.remove(id); return next }
 
+    private static func parseUInt32Revision(_ value: OrbJSON) -> UInt32? {
+        guard let d = value.doubleValue, d.isFinite else { return nil }
+        let truncated = Int64(d)
+        guard truncated > 0 else { return nil }
+        return truncated > Int64(UInt32.max) ? UInt32.max : UInt32(truncated)
+    }
+
     /// Rows of `GET /api/control/queue` for `missionID` that belong in the follow-up queue.
     static func parse(_ items: [OrbJSON], missionID: String) -> [OrbQueuedRow] {
         items.compactMap { item in
@@ -143,8 +358,40 @@ struct OrbFollowUpQueue: Equatable {
             let source = item["source"].text
             guard source.isEmpty || source == "remote-queue" || source.hasPrefix("host-queue:api:") else { return nil }
             let error = item["queue_error"].text
-            return OrbQueuedRow(id: id, content: item["content"].text, queueError: error.isEmpty ? nil : error)
+            return OrbQueuedRow(
+                id: id,
+                content: item["content"].text,
+                queueError: error.isEmpty ? nil : error,
+                revision: parseUInt32Revision(item["revision"])
+            )
         }
+    }
+
+    /// Parses either a raw `[...]` queue list or `{ items: [...], revision: N }` envelope.
+    static func parseResponse(
+        _ raw: OrbJSON,
+        missionID: String,
+        missionScoped: Bool = true
+    ) -> (rows: [OrbQueuedRow], revision: UInt32?) {
+        let items: [OrbJSON]
+        let envelopeRev: UInt32?
+        switch raw {
+        case .array(let arr):
+            items = arr
+            envelopeRev = nil
+        case .object:
+            items = raw["items"].items
+            envelopeRev = missionScoped ? parseUInt32Revision(raw["revision"]) : nil
+        default:
+            return ([], nil)
+        }
+        var maxRev = envelopeRev
+        for item in items where item["mission_id"].text == missionID {
+            if let r = parseUInt32Revision(item["revision"]), maxRev == nil || r > maxRev! {
+                maxRev = r
+            }
+        }
+        return (parse(items, missionID: missionID), maxRev)
     }
 }
 

@@ -120,7 +120,8 @@ data class OrbQueuedRow(
     val sending: Boolean = false,
     /** Core could not deliver it yet (shown under the row). */
     val queueError: String? = null,
-    val postedAtMs: Long? = null
+    val postedAtMs: Long? = null,
+    val revision: Long? = null
 )
 
 data class OrbDeliveredMessage(
@@ -143,8 +144,15 @@ data class OrbFollowUpQueue(
     /** Ids already shown as delivered in the transcript. */
     val delivered: Set<String> = emptySet(),
     val seenAfter: Map<String, Long> = emptyMap(),
-    val consumedSequences: Set<Long> = emptySet()
+    val consumedSequences: Set<Long> = emptySet(),
+    val serverRev: Long = 1L,
+    val hasServerRevision: Boolean = false
 ) {
+    fun expectedRevision(id: String): Long? {
+        if (hasServerRevision) return serverRev
+        val rowRev = server.firstOrNull { it.id == id }?.revision
+        return if (rowRev != null && rowRev > 0L) rowRev else null
+    }
     /** Rows in Core's FIFO order, then optimistic ones; edits applied. */
     val rows: List<OrbQueuedRow>
         get() {
@@ -163,11 +171,65 @@ data class OrbFollowUpQueue(
     fun withServer(
         rows: List<OrbQueuedRow>,
         fetchedAtMs: Long = Long.MIN_VALUE,
-        lastSequence: Long? = null
+        lastSequence: Long? = null,
+        incomingServerRev: Long? = null,
+        turnSeq: Long? = null
     ): OrbFollowUpQueue {
+        val normalizedIncoming = incomingServerRev?.takeIf { it > 0L }?.coerceAtMost(0xFFFF_FFFFL)
+        val effectiveRev = normalizedIncoming ?: serverRev
+        val gate = OrbKernel.followupQueueStep(
+            op = 0,
+            serverRev = serverRev.toInt(),
+            incomingServerRev = effectiveRev.toInt(),
+            expectedServerRev = 0,
+            clientMsgId = 0L,
+            trackedMsgId = 0L,
+            deliveredMsgId = 0L,
+            postedAfterSeq = 0L,
+            turnSeq = 0L,
+            optimisticSending = false,
+            serverListed = false,
+            contentMatched = false,
+            alreadyDelivered = false
+        )
+        if (!gate.admitted) return this
+
         val listed = rows.map { it.id }.toSet()
+        val nextDelivered = delivered.toMutableSet()
         val remaining = pending.filterNot { row ->
-            row.id in listed || (!row.sending && row.postedAtMs?.let { it < fetchedAtMs } == true)
+            val rowHash = hashMessageId(row.id)
+            val isDelivered = row.id in delivered
+            val isListed = row.id in listed
+            val postedBeforeFetch = !row.sending && row.postedAtMs?.let { it < fetchedAtMs } == true
+            val afterSeq = seenAfter[row.id]
+            val pollTurnSeq = when {
+                turnSeq != null && turnSeq >= 0L -> turnSeq
+                postedBeforeFetch -> {
+                    val base = seqWord(afterSeq)
+                    if (base != Long.MAX_VALUE) base + 1 else base
+                }
+                else -> 0L
+            }
+            val postedWord = if (turnSeq != null && afterSeq == null) Long.MAX_VALUE else seqWord(afterSeq)
+            val verdict = OrbKernel.followupQueueStep(
+                op = 0,
+                serverRev = serverRev.toInt(),
+                incomingServerRev = effectiveRev.toInt(),
+                expectedServerRev = 0,
+                clientMsgId = rowHash,
+                trackedMsgId = rowHash,
+                deliveredMsgId = 0L,
+                postedAfterSeq = postedWord,
+                turnSeq = pollTurnSeq,
+                optimisticSending = row.sending,
+                serverListed = isListed,
+                contentMatched = false,
+                alreadyDelivered = isDelivered
+            )
+            if (verdict.retiredNow && turnSeq != null) {
+                nextDelivered.add(row.id)
+            }
+            isListed || postedBeforeFetch || !verdict.optimisticLiveNext
         }
         val baselines = seenAfter.toMutableMap()
         if (lastSequence != null) {
@@ -178,7 +240,10 @@ data class OrbFollowUpQueue(
             server = rows.map { it.copy(sending = false) },
             pending = remaining,
             hidden = hidden.filter { it in listed }.toSet(),
-            seenAfter = baselines.filterKeys { it in live }
+            seenAfter = baselines.filterKeys { it in live },
+            delivered = nextDelivered,
+            serverRev = gate.nextServerRev.toLong() and 0xFFFF_FFFFL,
+            hasServerRevision = hasServerRevision || normalizedIncoming != null
         )
     }
 
@@ -186,40 +251,99 @@ data class OrbFollowUpQueue(
 
     fun reconciled(messages: List<OrbDeliveredMessage>): OrbFollowUpQueue {
         if (messages.isEmpty()) return this
-        val ids = messages.mapNotNull { it.id }.toSet()
         val nextDelivered = delivered.toMutableSet()
-        for (row in rows) {
-            if (row.id in ids) {
-                nextDelivered.add(row.id)
+        val used = consumedSequences.toMutableSet()
+        val known = (server + pending).map { it.id }.toSet() + delivered
+        val currentRows = rows
+        for (row in currentRows) {
+            val rowHash = hashMessageId(row.id)
+            for (message in messages) {
+                if (message.id != row.id) continue
+                val verdict = OrbKernel.followupQueueStep(
+                    op = 3,
+                    serverRev = serverRev.toInt(),
+                    incomingServerRev = 0,
+                    expectedServerRev = 0,
+                    clientMsgId = rowHash,
+                    trackedMsgId = rowHash,
+                    deliveredMsgId = rowHash,
+                    postedAfterSeq = seqWord(seenAfter[row.id]),
+                    turnSeq = seqWord(message.sequence),
+                    optimisticSending = row.sending,
+                    serverListed = server.any { it.id == row.id },
+                    contentMatched = false,
+                    alreadyDelivered = row.id in nextDelivered
+                )
+                if (verdict.retiredNow) {
+                    nextDelivered.add(row.id)
+                }
             }
         }
-        val used = consumedSequences.toMutableSet()
         for (message in messages) {
             if (message.id != null && message.id in nextDelivered) {
                 used.add(message.sequence)
             }
         }
-        val known = (server + pending).map { it.id }.toSet()
-        for (row in rows) {
+        for (row in currentRows) {
             if (row.id in nextDelivered) continue
             val after = seenAfter[row.id] ?: continue
-            val message = messages.firstOrNull {
-                it.sequence !in used && it.sequence > after && it.id !in known &&
-                    it.content.trim() == row.content.trim()
-            }
-            if (message != null) {
-                used.add(message.sequence)
-                nextDelivered.add(row.id)
+            val rowHash = hashMessageId(row.id)
+            val rowTrimmed = row.content.trim()
+            for (m in messages) {
+                if (m.sequence in used || m.sequence < 0L || after < 0L) continue
+                val delivHash = if (m.id != null && m.id in known) hashMessageId(m.id) else 0L
+                val matched = m.content.trim() == rowTrimmed
+                val verdict = OrbKernel.followupQueueStep(
+                    op = 3,
+                    serverRev = serverRev.toInt(),
+                    incomingServerRev = 0,
+                    expectedServerRev = 0,
+                    clientMsgId = rowHash,
+                    trackedMsgId = rowHash,
+                    deliveredMsgId = delivHash,
+                    postedAfterSeq = after,
+                    turnSeq = m.sequence,
+                    optimisticSending = row.sending,
+                    serverListed = server.any { it.id == row.id },
+                    contentMatched = matched,
+                    alreadyDelivered = row.id in nextDelivered
+                )
+                if (verdict.retiredNow) {
+                    used.add(m.sequence)
+                    nextDelivered.add(row.id)
+                    break
+                }
             }
         }
         return copy(delivered = nextDelivered, consumedSequences = used)
     }
 
     /** Optimistic send while a turn runs: the row appears at once with a spinner. */
-    fun enqueue(id: String, content: String, lastSequence: Long? = null): OrbFollowUpQueue = copy(
-        pending = pending.filterNot { it.id == id } + OrbQueuedRow(id, content, sending = true),
-        seenAfter = if (lastSequence != null) seenAfter + (id to lastSequence) else seenAfter - id
-    )
+    fun enqueue(id: String, content: String, lastSequence: Long? = null): OrbFollowUpQueue {
+        val rowHash = hashMessageId(id)
+        val trackedHash = if (pending.any { it.id == id } || server.any { it.id == id }) rowHash else 0L
+        val verdict = OrbKernel.followupQueueStep(
+            op = 2,
+            serverRev = serverRev.toInt(),
+            incomingServerRev = 0,
+            expectedServerRev = 0,
+            clientMsgId = rowHash,
+            trackedMsgId = trackedHash,
+            deliveredMsgId = 0L,
+            postedAfterSeq = seqWord(lastSequence),
+            turnSeq = 0L,
+            optimisticSending = true,
+            serverListed = server.any { it.id == id },
+            contentMatched = false,
+            alreadyDelivered = id in delivered
+        )
+        if (!verdict.admitted) return this
+        return copy(
+            serverRev = verdict.nextServerRev.toLong() and 0xFFFF_FFFFL,
+            pending = pending.filterNot { it.id == id } + OrbQueuedRow(id, content, sending = true),
+            seenAfter = if (lastSequence != null) seenAfter + (id to lastSequence) else seenAfter - id
+        )
+    }
 
     /** POST /api/control/message answered: queued (keep) or delivered (drop the row). */
     fun posted(id: String, queued: Boolean, atMs: Long = System.currentTimeMillis()): OrbFollowUpQueue =
@@ -229,14 +353,77 @@ data class OrbFollowUpQueue(
     fun postFailed(id: String): OrbFollowUpQueue = copy(pending = pending.filterNot { it.id == id })
 
     /** Edit in place: same id, same position, text changes now. */
-    fun edit(id: String, content: String): OrbFollowUpQueue = copy(edits = edits + (id to content))
+    fun edit(id: String, content: String, expectedServerRev: Long? = null): OrbFollowUpQueue {
+        if (id in delivered) return this
+        val expected = (expectedServerRev ?: serverRev).coerceAtMost(0xFFFF_FFFFL)
+        val rowHash = hashMessageId(id)
+        val verdict = OrbKernel.followupQueueStep(
+            op = 1,
+            serverRev = serverRev.toInt(),
+            incomingServerRev = 0,
+            expectedServerRev = expected.toInt(),
+            clientMsgId = rowHash,
+            trackedMsgId = rowHash,
+            deliveredMsgId = 0L,
+            postedAfterSeq = 0L,
+            turnSeq = 0L,
+            optimisticSending = false,
+            serverListed = server.any { it.id == id },
+            contentMatched = false,
+            alreadyDelivered = false
+        )
+        if (!verdict.admitted) return this
+        return copy(edits = edits + (id to content))
+    }
 
     /** PATCH confirmed: the server copy takes the new text. */
-    fun editConfirmed(id: String, content: String): OrbFollowUpQueue = copy(
-        server = server.map { if (it.id == id) it.copy(content = content) else it },
-        pending = pending.map { if (it.id == id) it.copy(content = content) else it },
-        edits = edits - id
-    )
+    fun editConfirmed(
+        id: String,
+        content: String,
+        expectedServerRev: Long? = null,
+        confirmedServerRev: Long? = null
+    ): OrbFollowUpQueue {
+        if (id in delivered) return this
+        val expected = (expectedServerRev ?: serverRev).coerceAtMost(0xFFFF_FFFFL)
+        val rowHash = hashMessageId(id)
+        val verdict = OrbKernel.followupQueueStep(
+            op = 1,
+            serverRev = serverRev.toInt(),
+            incomingServerRev = 0,
+            expectedServerRev = expected.toInt(),
+            clientMsgId = rowHash,
+            trackedMsgId = rowHash,
+            deliveredMsgId = 0L,
+            postedAfterSeq = 0L,
+            turnSeq = 0L,
+            optimisticSending = false,
+            serverListed = server.any { it.id == id },
+            contentMatched = false,
+            alreadyDelivered = false
+        )
+        if (!verdict.admitted) return this
+        val steppedRev = verdict.nextServerRev.toLong() and 0xFFFF_FFFFL
+        val normalizedConfirmed = confirmedServerRev?.takeIf { it > 0L }?.coerceAtMost(0xFFFF_FFFFL)
+        val trackedRevision = hasServerRevision || expectedServerRev != null || normalizedConfirmed != null
+        val appliedRevision = when {
+            normalizedConfirmed != null -> maxOf(steppedRev, normalizedConfirmed)
+            trackedRevision -> steppedRev
+            else -> null
+        }
+        return copy(
+            serverRev = appliedRevision ?: serverRev,
+            hasServerRevision = hasServerRevision || appliedRevision != null,
+            server = server.map {
+                if (it.id == id) {
+                    it.copy(content = content, revision = appliedRevision ?: it.revision)
+                } else {
+                    it
+                }
+            },
+            pending = pending.map { if (it.id == id) it.copy(content = content) else it },
+            edits = edits - id
+        )
+    }
 
     fun editReverted(id: String): OrbFollowUpQueue = copy(edits = edits - id)
 
@@ -247,7 +434,32 @@ data class OrbFollowUpQueue(
 
     fun row(id: String): OrbQueuedRow? = rows.firstOrNull { it.id == id }
 
+    data class ParsedQueueResponse(val rows: List<OrbQueuedRow>, val revision: Long?)
+
     companion object {
+        fun hashMessageId(id: String?): Long {
+            if (id.isNullOrEmpty()) return 0L
+            var hash = -3750763034362895579L
+            for (byte in id.encodeToByteArray()) {
+                hash = (hash xor (byte.toLong() and 0xFFL)) * 1099511628211L
+            }
+            return if (hash == 0L) 1L else hash
+        }
+
+        private fun seqWord(value: Long?): Long = if (value == null || value < 0L) 0L else value
+
+        private fun parseUInt32Revision(value: Any?): Long? {
+            val num = when (value) {
+                is Number -> value.toDouble()
+                is String -> value.trim().toDoubleOrNull()
+                else -> null
+            } ?: return null
+            if (!num.isFinite()) return null
+            val truncated = num.toLong()
+            if (truncated <= 0L) return null
+            return truncated.coerceAtMost(0xFFFF_FFFFL)
+        }
+
         /** Rows from `GET /api/control/queue` for [missionId] that belong in the follow-up queue. */
         fun parse(items: List<OrbDict>, missionId: String): List<OrbQueuedRow> = items.mapNotNull { item ->
             val id = OrbJSON.str(item, "id") ?: return@mapNotNull null
@@ -256,7 +468,39 @@ data class OrbFollowUpQueue(
             if (item["inflight"] == true) return@mapNotNull null
             val source = OrbJSON.str(item, "source")
             if (source != null && source != "remote-queue" && !source.startsWith("host-queue:api:")) return@mapNotNull null
-            OrbQueuedRow(id, content, queueError = OrbJSON.str(item, "queue_error"))
+            OrbQueuedRow(
+                id = id,
+                content = content,
+                queueError = OrbJSON.str(item, "queue_error"),
+                revision = parseUInt32Revision(item["revision"])
+            )
+        }
+
+        /** Parses either a raw `[...]` queue list or `{ items: [...], revision: N }` envelope. */
+        fun parseResponse(raw: Any?, missionId: String, missionScoped: Boolean = true): ParsedQueueResponse {
+            val items: List<OrbDict>
+            val envelopeRev: Long?
+            when (raw) {
+                is List<*> -> {
+                    items = OrbJSON.dictList(raw)
+                    envelopeRev = null
+                }
+                else -> {
+                    val dict = OrbJSON.dict(raw) ?: return ParsedQueueResponse(emptyList(), null)
+                    items = OrbJSON.dictList(dict["items"])
+                    envelopeRev = if (missionScoped) parseUInt32Revision(dict["revision"]) else null
+                }
+            }
+            var maxRev = envelopeRev
+            for (item in items) {
+                if (OrbJSON.str(item, "mission_id") == missionId) {
+                    val r = parseUInt32Revision(item["revision"])
+                    if (r != null && (maxRev == null || r > maxRev)) {
+                        maxRev = r
+                    }
+                }
+            }
+            return ParsedQueueResponse(parse(items, missionId), maxRev)
         }
     }
 }

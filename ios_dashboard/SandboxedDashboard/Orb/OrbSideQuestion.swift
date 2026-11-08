@@ -1245,9 +1245,9 @@ struct OrbSideQuestionSheet: View {
             if next != followUps { withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next } }
             return
         }
-        let parsed = OrbFollowUpQueue.parse(response.items, missionID: id)
+        let parsedQueue = OrbFollowUpQueue.parseResponse(response, missionID: id)
         var rawMap = rawQueuedByID
-        let displayRows = parsed.map { row -> OrbQueuedRow in
+        let displayRows = parsedQueue.rows.map { row -> OrbQueuedRow in
             rawMap[row.id] = row.content
             var copy = row
             copy.content = OrbMessagePresentation.parse(row.content).text
@@ -1255,7 +1255,12 @@ struct OrbSideQuestionSheet: View {
         }
         rawQueuedByID = rawMap
         let lastSeq = store.boundMaxSequence > 0 ? store.boundMaxSequence : store.boundDeliveredMessages.last?.sequence
-        let next = followUps.withServer(displayRows, fetchedAt: fetchedAt, lastSequence: lastSeq).reconciled(with: store.boundDeliveredMessages)
+        let next = followUps.withServer(
+            displayRows,
+            fetchedAt: fetchedAt,
+            lastSequence: lastSeq,
+            incomingServerRev: parsedQueue.revision
+        ).reconciled(with: store.boundDeliveredMessages)
         if next != followUps { withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next } }
     }
 
@@ -1440,23 +1445,40 @@ struct OrbSideQuestionSheet: View {
         }
         editingQueuedID = nil
         question = ""
-        followUps = followUps.edit(queueID, content)
+        let expectedRev = followUps.expectedRevision(for: queueID)
+        let staged = followUps.edit(queueID, content, expectedServerRev: expectedRev)
+        guard staged.edits[queueID] == content else {
+            error = "This side question was already sent, so the edit was not applied."
+            return
+        }
+        followUps = staged
+        var patchFields: [String: OrbJSON] = ["content": .string(wireContent)]
+        if let expectedRev { patchFields["expected_revision"] = .number(Double(expectedRev)) }
         var status: Int? = nil
+        var errorDetail = ""
         do {
-            _ = try await OrbCore.shared.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "PATCH", body: .object(["content": .string(wireContent)]))
+            _ = try await OrbCore.shared.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "PATCH", body: .object(patchFields))
             status = 200
-        } catch let e as OrbHTTPError { status = e.status } catch { status = nil }
+        } catch let e as OrbHTTPError {
+            status = e.status
+            errorDetail = e.detail
+        } catch {
+            status = nil
+        }
         switch OrbSendFlow.editOutcome(status: status) {
         case .edited:
             rawQueuedByID[queueID] = wireContent
-            followUps = followUps.editConfirmed(queueID, content)
+            followUps = followUps.editConfirmed(queueID, content, expectedServerRev: expectedRev)
             OrbUsageTelemetry.shared.trackAction(.messageEdit, surface: "btw-queue")
         case .unsupported:
             followUps = followUps.editReverted(queueID)
             error = "This edit cannot be saved atomically. The queued messages have not been changed."
         case .alreadySent:
             followUps = followUps.editReverted(queueID)
-            error = "This side question was already sent, so the edit was not applied."
+            let isRevConflict = status == 409 && (errorDetail.localizedCaseInsensitiveContains("revision") || errorDetail.localizedCaseInsensitiveContains("stale"))
+            error = isRevConflict
+                ? "Queue changed on another client; refreshed queue before editing."
+                : "This side question was already sent, so the edit was not applied."
             try? await store.refresh(force: true)
         case .failed:
             followUps = followUps.editReverted(queueID)

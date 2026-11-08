@@ -1935,6 +1935,10 @@ class OrbCore private constructor(context: Context) {
                 loadCachedSnapshots()
             }
         }
+        if (previousBase != cleanBase) {
+            transportEpoch.applyEndpoint(cleanBase, System.currentTimeMillis())
+            transportBuildEpoch.incrementAndGet()
+        }
         _baseURL.value = cleanBase
         _token.value = cleanToken
         if (!password.isNullOrEmpty() && cleanBase.isNotEmpty()) {
@@ -2561,6 +2565,15 @@ class OrbCore private constructor(context: Context) {
             recordErrorLog("$method $path -> HTTP $code\n${raw.take(2000)}", "$method $path -> HTTP $code")
             throw OrbError(message, status = code, body = raw)
         }
+        if (path.substringBefore('?') == "/api/health") {
+            val parsed = OrbJSON.dict(OrbJSON.parse(bytes))
+            val prevMode = transportEpoch.mode
+            val prevSticky = transportEpoch.stickyUnsupported
+            transportEpoch.noteServerBuild(OrbJSON.str(parsed, "version"), System.currentTimeMillis())
+            if (transportEpoch.mode != prevMode || transportEpoch.stickyUnsupported != prevSticky) {
+                transportBuildEpoch.incrementAndGet()
+            }
+        }
         if (bytes.isEmpty()) return@withContext emptyMap<String, Any?>()
         OrbJSON.parse(bytes) ?: emptyMap<String, Any?>()
     }
@@ -2851,13 +2864,236 @@ class OrbCore private constructor(context: Context) {
         val id: String,
         val missionId: String?,
         val kindFilter: String?,
-        val sinceSeq: Long?,
+        @Volatile var sinceSeq: Long?,
         val request: Request,
         val onEvent: (eventType: String?, data: String) -> Unit,
         val onClosed: (Throwable?) -> Unit,
-        val fallbackFactory: () -> EventSource,
-        @Volatile var delegateSource: EventSource? = null
+        val fallbackFactory: (Long?) -> Unit,
+        val onWsReady: () -> Unit = {},
+        @Volatile var delegateSource: EventSource? = null,
+        @Volatile var reprobeJob: Job? = null,
+        @Volatile var currentHub: ControlSyncHub? = null,
+        @Volatile var cancelled: Boolean = false
     )
+
+    internal class TransportEpochState(
+        var failThreshold: Int = DEFAULT_FAIL_THRESHOLD,
+        var cooldownDurationMs: Long = DEFAULT_COOLDOWN_MS
+    ) {
+        data class ConnectEval(val allowWebSocket: Boolean, val sinceSeq: Long?)
+        data class FailureEval(val fallbackToSse: Boolean, val sinceSeq: Long?)
+
+        private val lock = Any()
+        var mode: Int = MODE_WS_ACTIVE
+            private set
+        var everReady: Boolean = false
+            private set
+        var stickyUnsupported: Boolean = false
+            private set
+        var endpointClass: Int = 3
+            private set
+        var normalizedBaseURL: String = ""
+            private set
+        var serverBuild: String? = null
+            private set
+        var failureStreak: Int = 0
+            private set
+        var cooldownUntilMs: Long = 0L
+            private set
+
+        fun applyEndpoint(url: String, nowMs: Long, sinceSeq: Long? = null): Long? = synchronized(lock) {
+            val clean = OrbConnection.normalize(url)
+            val newClass = classifyEndpoint(clean)
+            if (normalizedBaseURL.isEmpty()) {
+                normalizedBaseURL = clean
+                endpointClass = newClass
+                return sinceSeq
+            }
+            if (clean == normalizedBaseURL) return sinceSeq
+            val prevClass = endpointClass
+            normalizedBaseURL = clean
+            endpointClass = newClass
+            serverBuild = null
+            val event = if (newClass != prevClass) EVENT_COOLDOWN_CHECK else EVENT_SERVER_BUILD_CHANGED
+            val (hasSeq, seq32) = packSinceSeq(sinceSeq)
+            val verdict = OrbKernel.transportEpochStep(
+                mode = mode,
+                eventKind = event,
+                everReady = everReady,
+                stickyUnsupported = stickyUnsupported,
+                endpointClass = newClass,
+                prevEndpointClass = prevClass,
+                hasSinceSeq = hasSeq,
+                failureStreak = failureStreak,
+                failThreshold = failThreshold,
+                httpStatus = 0,
+                sinceSeq32 = seq32,
+                nowMs = nowMs.coerceAtLeast(0L),
+                cooldownUntilMs = cooldownUntilMs
+            )
+            applyVerdictLocked(verdict)
+            cooldownUntilMs = 0L
+            everReady = false
+            return unpackSinceSeq(verdict, sinceSeq)
+        }
+
+        fun noteServerBuild(build: String?, nowMs: Long, sinceSeq: Long? = null): Long? = synchronized(lock) {
+            val clean = build?.trim()?.takeIf { it.isNotEmpty() } ?: return sinceSeq
+            if (serverBuild == null) {
+                serverBuild = clean
+                return sinceSeq
+            }
+            if (serverBuild == clean) return sinceSeq
+            serverBuild = clean
+            val (hasSeq, seq32) = packSinceSeq(sinceSeq)
+            val verdict = OrbKernel.transportEpochStep(
+                mode = mode,
+                eventKind = EVENT_SERVER_BUILD_CHANGED,
+                everReady = everReady,
+                stickyUnsupported = stickyUnsupported,
+                endpointClass = endpointClass,
+                prevEndpointClass = endpointClass,
+                hasSinceSeq = hasSeq,
+                failureStreak = failureStreak,
+                failThreshold = failThreshold,
+                httpStatus = 0,
+                sinceSeq32 = seq32,
+                nowMs = nowMs.coerceAtLeast(0L),
+                cooldownUntilMs = cooldownUntilMs
+            )
+            applyVerdictLocked(verdict)
+            cooldownUntilMs = 0L
+            return unpackSinceSeq(verdict, sinceSeq)
+        }
+
+        fun noteWsReady(nowMs: Long) = synchronized(lock) {
+            val verdict = OrbKernel.transportEpochStep(
+                mode = mode,
+                eventKind = EVENT_WS_READY,
+                everReady = true,
+                stickyUnsupported = stickyUnsupported,
+                endpointClass = endpointClass,
+                prevEndpointClass = endpointClass,
+                hasSinceSeq = false,
+                failureStreak = failureStreak,
+                failThreshold = failThreshold,
+                httpStatus = 0,
+                sinceSeq32 = 0,
+                nowMs = nowMs.coerceAtLeast(0L),
+                cooldownUntilMs = cooldownUntilMs
+            )
+            everReady = true
+            applyVerdictLocked(verdict)
+            cooldownUntilMs = 0L
+        }
+
+        fun noteWsFailure(httpStatus: Int?, nowMs: Long, sinceSeq: Long? = null): FailureEval = synchronized(lock) {
+            val safeNow = nowMs.coerceAtLeast(0L)
+            val (hasSeq, seq32) = packSinceSeq(sinceSeq)
+            val event = if (httpStatus != null) EVENT_HTTP_STATUS_FAILURE else EVENT_TRANSIENT_WS_FAILURE
+            val normalizedStatus = if (isPermanentUnsupportedHttpStatus(httpStatus)) 404 else (httpStatus ?: 0).coerceAtLeast(0)
+            val verdict = OrbKernel.transportEpochStep(
+                mode = mode,
+                eventKind = event,
+                everReady = everReady,
+                stickyUnsupported = stickyUnsupported,
+                endpointClass = endpointClass,
+                prevEndpointClass = endpointClass,
+                hasSinceSeq = hasSeq,
+                failureStreak = failureStreak,
+                failThreshold = failThreshold,
+                httpStatus = normalizedStatus,
+                sinceSeq32 = seq32,
+                nowMs = safeNow,
+                cooldownUntilMs = cooldownUntilMs
+            )
+            applyVerdictLocked(verdict)
+            if (verdict.fallbackActiveNext && !verdict.stickyUnsupportedNext) {
+                cooldownUntilMs = safeNow + cooldownDurationMs
+            } else if (verdict.stickyUnsupportedNext) {
+                cooldownUntilMs = Long.MAX_VALUE
+            }
+            FailureEval(verdict.fallbackActiveNext, unpackSinceSeq(verdict, sinceSeq))
+        }
+
+        fun reprobeDelayMs(nowMs: Long): Long? = synchronized(lock) {
+            if (mode != MODE_SSE_FALLBACK || stickyUnsupported) return null
+            val safeNow = nowMs.coerceAtLeast(0L)
+            if (cooldownUntilMs > safeNow) cooldownUntilMs - safeNow else 0L
+        }
+
+        fun evaluateForConnect(url: String, nowMs: Long, sinceSeq: Long? = null): ConnectEval = synchronized(lock) {
+            val syncedSeq = applyEndpoint(url, nowMs, sinceSeq)
+            if (mode != MODE_SSE_FALLBACK) {
+                return ConnectEval(allowWebSocket = true, sinceSeq = syncedSeq)
+            }
+            val (hasSeq, seq32) = packSinceSeq(syncedSeq)
+            val verdict = OrbKernel.transportEpochStep(
+                mode = mode,
+                eventKind = EVENT_COOLDOWN_CHECK,
+                everReady = everReady,
+                stickyUnsupported = stickyUnsupported,
+                endpointClass = endpointClass,
+                prevEndpointClass = endpointClass,
+                hasSinceSeq = hasSeq,
+                failureStreak = failureStreak,
+                failThreshold = failThreshold,
+                httpStatus = 0,
+                sinceSeq32 = seq32,
+                nowMs = nowMs.coerceAtLeast(0L),
+                cooldownUntilMs = cooldownUntilMs
+            )
+            applyVerdictLocked(verdict)
+            ConnectEval(allowWebSocket = !verdict.fallbackActiveNext, sinceSeq = unpackSinceSeq(verdict, syncedSeq))
+        }
+
+        private fun applyVerdictLocked(verdict: OrbKernel.TransportEpochVerdict) {
+            if (!verdict.admitted) return
+            mode = verdict.nextMode
+            stickyUnsupported = verdict.stickyUnsupportedNext
+            failureStreak = verdict.nextFailureStreak
+        }
+
+        companion object {
+            const val MODE_WS_ACTIVE = 0
+            const val MODE_SSE_FALLBACK = 1
+            const val MODE_WS_REPROBE = 2
+
+            const val EVENT_WS_READY = 0
+            const val EVENT_TRANSIENT_WS_FAILURE = 1
+            const val EVENT_HTTP_STATUS_FAILURE = 2
+            const val EVENT_COOLDOWN_CHECK = 3
+            const val EVENT_SERVER_BUILD_CHANGED = 4
+
+            const val DEFAULT_FAIL_THRESHOLD = 3
+            const val DEFAULT_COOLDOWN_MS = 30_000L
+
+            fun isPermanentUnsupportedHttpStatus(status: Int?): Boolean =
+                status == 404 || status == 405 || status == 501 || status == 426
+
+            fun classifyEndpoint(url: String): Int {
+                val lower = OrbConnection.normalize(url).lowercase()
+                return when (lower) {
+                    OrbConnection.DEFAULT_BASE_URL -> 0
+                    OrbConnection.ORBCORE_BASE_URL -> 1
+                    OrbConnection.KNOWN_DIRECT_BASE_URL -> 2
+                    else -> 3
+                }
+            }
+
+            private fun packSinceSeq(sinceSeq: Long?): Pair<Boolean, Int> {
+                if (sinceSeq == null || sinceSeq < 0L) return false to 0
+                val clamped = if (sinceSeq > 0xFFFF_FFFFL) 0xFFFF_FFFFL else sinceSeq
+                return true to clamped.toInt()
+            }
+
+            private fun unpackSinceSeq(verdict: OrbKernel.TransportEpochVerdict, original: Long?): Long? {
+                if (!verdict.hasPreservedSinceSeq) return null
+                if (original != null && original > 0xFFFF_FFFFL) return original
+                return verdict.preservedSinceSeq32
+            }
+        }
+    }
 
     private inner class ControlSyncHub(
         val hubScope: String,
@@ -2889,7 +3125,7 @@ class OrbCore private constructor(context: Context) {
 
         private fun connectCandidate() {
             if (closed || candidates.isEmpty()) {
-                fallbackOrCloseAll(IOException("No sync candidates"))
+                fallbackOrCloseAll(IOException("No sync candidates"), null)
                 return
             }
             val base = candidates[candidateIndex % candidates.size]
@@ -2913,7 +3149,11 @@ class OrbCore private constructor(context: Context) {
                         return
                     }
                     opened = true
-                    webSocketOpenFailures = 0
+                    transportEpoch.noteWsReady(System.currentTimeMillis())
+                    val readySnapshot = synchronized(lock) { subs.values.toList() }
+                    for (sub in readySnapshot) {
+                        sub.onWsReady()
+                    }
                     syncSubscriptions()
                     webSocket.send(OrbJSON.stringify(mapOf("op" to "ping", "ts" to System.currentTimeMillis())))
                     pingJob?.cancel()
@@ -2982,38 +3222,51 @@ class OrbCore private constructor(context: Context) {
                         return
                     }
                     val targetMid = OrbJSON.str(parsed, "mission_id")
+                    val obsSeq = ((parsed["sequence"] as? Number)?.toLong()?.takeIf { it >= 0L })
+                        ?: ((parsed["cursor"] as? Number)?.toLong()?.takeIf { it > 0L })
                     for (sub in snapshot) {
                         if (sub.missionId != null) {
-                            if (targetMid == null || targetMid == sub.missionId) sub.onEvent(eventType, text)
+                            if (targetMid == null || targetMid == sub.missionId) {
+                                if (obsSeq != null) {
+                                    val curSeq = sub.sinceSeq
+                                    if (curSeq == null || obsSeq > curSeq) sub.sinceSeq = obsSeq
+                                }
+                                sub.onEvent(eventType, text)
+                            }
                         } else if (sub.kindFilter == null) {
+                            if (obsSeq != null) {
+                                val curSeq = sub.sinceSeq
+                                if (curSeq == null || obsSeq > curSeq) sub.sinceSeq = obsSeq
+                            }
                             sub.onEvent(eventType, text)
                         }
                     }
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    handleDisconnect(null)
+                    handleDisconnect(null, null)
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    handleDisconnect(t)
+                    handleDisconnect(t, response?.code)
                 }
             })
         }
 
-        private fun handleDisconnect(err: Throwable?) {
+        private fun handleDisconnect(err: Throwable?, httpStatus: Int?) {
             pingJob?.cancel()
             pingJob = null
             if (closed) return
-            if (!opened && candidateIndex + 1 < candidates.size) {
+            val permHttpStatus = TransportEpochState.isPermanentUnsupportedHttpStatus(httpStatus)
+            if (!opened && !permHttpStatus && candidateIndex + 1 < candidates.size) {
                 candidateIndex += 1
                 connectCandidate()
                 return
             }
-            fallbackOrCloseAll(err)
+            fallbackOrCloseAll(err, httpStatus)
         }
 
-        private fun fallbackOrCloseAll(err: Throwable?) {
+        private fun fallbackOrCloseAll(err: Throwable?, httpStatus: Int?) {
             val wasOpened = opened
             val remaining: List<SyncStreamSub>
             synchronized(lock) {
@@ -3025,15 +3278,30 @@ class OrbCore private constructor(context: Context) {
             ws?.cancel()
             ws = null
             if (activeSyncHub === this) activeSyncHub = null
-            if (!wasOpened) {
-                webSocketOpenFailures += 1
+            val failureEval = transportEpoch.noteWsFailure(httpStatus, System.currentTimeMillis())
+            if (wasOpened) {
+                OrbBackgroundSyncMonitor.noteUnexpectedDisconnect()
+            }
+            if (failureEval.fallbackToSse) {
                 for (sub in remaining) {
-                    sub.delegateSource = sub.fallbackFactory()
+                    if (sub.currentHub === this) sub.currentHub = null
+                    val curSeq = sub.sinceSeq
+                    val preserved = transportEpoch.evaluateForConnect(
+                        _baseURL.value,
+                        System.currentTimeMillis(),
+                        curSeq
+                    ).sinceSeq ?: curSeq
+                    sub.fallbackFactory(preserved)
                 }
             } else {
-                OrbBackgroundSyncMonitor.noteUnexpectedDisconnect()
                 for (sub in remaining) {
-                    sub.onClosed(err)
+                    if (sub.currentHub === this) sub.currentHub = null
+                    sub.reprobeJob?.cancel()
+                    sub.reprobeJob = null
+                    val oldDelegate = sub.delegateSource
+                    sub.delegateSource = null
+                    oldDelegate?.cancel()
+                    sub.onClosed(err ?: IOException("Control sync WebSocket disconnected"))
                 }
             }
         }
@@ -3056,11 +3324,12 @@ class OrbCore private constructor(context: Context) {
                 val wantedMissions = LinkedHashMap<String, Long?>()
                 for (sub in subs.values) {
                     val mid = sub.missionId ?: continue
+                    val seq = sub.sinceSeq
                     if (!wantedMissions.containsKey(mid)) {
-                        wantedMissions[mid] = sub.sinceSeq
+                        wantedMissions[mid] = seq
                     } else {
                         val prev = wantedMissions[mid]
-                        wantedMissions[mid] = if (prev != null && sub.sinceSeq != null) minOf(prev, sub.sinceSeq) else null
+                        wantedMissions[mid] = if (prev != null && seq != null) minOf(prev, seq) else null
                     }
                 }
                 val toRemove = subscribedMissions.filter { it !in wantedMissions }
@@ -3083,15 +3352,22 @@ class OrbCore private constructor(context: Context) {
         }
 
         fun register(sub: SyncStreamSub) {
+            var alreadyOpened = false
             val useFallback = synchronized(lock) {
-                if (closed) true else {
+                if (closed || sub.cancelled) true else {
+                    sub.currentHub = this
                     subs[sub.id] = sub
+                    alreadyOpened = opened
                     false
                 }
             }
+            if (sub.cancelled) return
             if (useFallback) {
-                sub.delegateSource = sub.fallbackFactory()
+                sub.fallbackFactory(sub.sinceSeq)
                 return
+            }
+            if (alreadyOpened) {
+                sub.onWsReady()
             }
             syncSubscriptions()
         }
@@ -3101,8 +3377,11 @@ class OrbCore private constructor(context: Context) {
             val emptyNow: Boolean
             synchronized(lock) {
                 removed = subs.remove(id)
+                if (removed?.currentHub === this) removed.currentHub = null
                 emptyNow = subs.isEmpty()
             }
+            removed?.reprobeJob?.cancel()
+            removed?.reprobeJob = null
             removed?.delegateSource?.cancel()
             if (emptyNow) {
                 close()
@@ -3125,18 +3404,25 @@ class OrbCore private constructor(context: Context) {
             ws = null
             if (activeSyncHub === this) activeSyncHub = null
             for (sub in toNotify) {
+                if (sub.currentHub === this) sub.currentHub = null
+                sub.reprobeJob?.cancel()
+                sub.reprobeJob = null
                 sub.delegateSource?.cancel()
             }
         }
     }
 
     @Volatile private var activeSyncHub: ControlSyncHub? = null
-    @Volatile private var webSocketOpenFailures: Int = 0
+    internal val transportEpoch = TransportEpochState()
+    private val transportBuildEpoch = java.util.concurrent.atomic.AtomicLong(0L)
 
     val canUseMultiplexSync: Boolean
-        get() = !_token.value?.trim().isNullOrEmpty() &&
-            _baseURL.value.trim().isNotEmpty() &&
-            webSocketOpenFailures < 3
+        get() {
+            val cleanToken = _token.value?.trim()
+            val primaryBase = _baseURL.value.trim()
+            if (cleanToken.isNullOrEmpty() || primaryBase.isEmpty()) return false
+            return transportEpoch.evaluateForConnect(primaryBase, System.currentTimeMillis()).allowWebSocket
+        }
 
     val isMultiplexSyncHealthy: Boolean
         get() {
@@ -3180,6 +3466,19 @@ class OrbCore private constructor(context: Context) {
         return Triple(missionId, kindFilter, sinceSeq)
     }
 
+    private fun rewriteControlStreamSinceSeq(path: String, sinceSeq: Long?): String {
+        if (sinceSeq == null || !path.startsWith("/api/control/stream")) return path
+        val qIdx = path.indexOf('?')
+        if (qIdx < 0) return "$path?since_seq=$sinceSeq"
+        val base = path.substring(0, qIdx)
+        val kept = path.substring(qIdx + 1)
+            .split('&')
+            .filter { it.isNotEmpty() && !it.startsWith("since_seq=") }
+            .toMutableList()
+        kept.add("since_seq=$sinceSeq")
+        return "$base?${kept.joinToString("&")}"
+    }
+
     fun openSSE(
         path: String,
         onEvent: (eventType: String?, data: String) -> Unit,
@@ -3187,15 +3486,24 @@ class OrbCore private constructor(context: Context) {
     ): EventSource {
         val cleanToken = _token.value?.trim()?.takeIf { it.isNotEmpty() }
         val primaryBase = _baseURL.value.trim().trimEnd('/')
-        val parsedSync = if (cleanToken != null && primaryBase.isNotEmpty() && webSocketOpenFailures < 3) {
+        val queryInfo = if (cleanToken != null && primaryBase.isNotEmpty()) {
             parseControlStreamQuery(path)
         } else {
             null
         }
-        if (parsedSync != null && cleanToken != null) {
-            val (missionId, kindFilter, sinceSeq) = parsedSync
+        val connectEval = if (queryInfo != null && cleanToken != null) {
+            transportEpoch.evaluateForConnect(primaryBase, System.currentTimeMillis(), queryInfo.third)
+        } else {
+            null
+        }
+        if (queryInfo != null && cleanToken != null && connectEval != null) {
+            val (missionId, kindFilter, _) = queryInfo
+            val effectiveSinceSeq = connectEval.sinceSeq
             val scopeKey = "$primaryBase|$cleanToken"
-            val hub = synchronized(this) {
+            val subId = UUID.randomUUID().toString()
+            val placeholderReq = Request.Builder().url(makeURL(rewriteControlStreamSinceSeq(path, effectiveSinceSeq))).build()
+
+            fun getOrCreateSyncHub(): ControlSyncHub = synchronized(this) {
                 val cur = activeSyncHub
                 if (cur != null && !cur.closed && cur.hubScope == scopeKey) {
                     cur
@@ -3206,28 +3514,127 @@ class OrbCore private constructor(context: Context) {
                     }
                 }
             }
-            val subId = UUID.randomUUID().toString()
-            val placeholderReq = Request.Builder().url(makeURL(path)).build()
-            val sub = SyncStreamSub(
+
+            lateinit var sub: SyncStreamSub
+            val observedOnEvent: (String?, String) -> Unit = { type, data ->
+                if (!sub.cancelled) {
+                    val parsed = OrbJSON.dict(OrbJSON.parse(data))
+                    if (parsed != null) {
+                        val obsSeq = ((parsed["sequence"] as? Number)?.toLong()?.takeIf { it >= 0L })
+                            ?: ((parsed["cursor"] as? Number)?.toLong()?.takeIf { it > 0L })
+                        if (obsSeq != null) {
+                            val curSeq = sub.sinceSeq
+                            if (curSeq == null || obsSeq > curSeq) sub.sinceSeq = obsSeq
+                        }
+                    }
+                    onEvent(type, data)
+                }
+            }
+
+            fun scheduleSubReprobe() {
+                sub.reprobeJob?.cancel()
+                sub.reprobeJob = null
+                if (sub.cancelled) return
+                val startBuildEpoch = transportBuildEpoch.get()
+                sub.reprobeJob = scope.launch(Dispatchers.IO) {
+                    while (isActive && !sub.cancelled) {
+                        val curToken = _token.value?.trim()?.takeIf { it.isNotEmpty() }
+                        val curBase = _baseURL.value.trim().trimEnd('/')
+                        if (curToken == null || curBase.isEmpty() || "$curBase|$curToken" != scopeKey) return@launch
+                        val delayMs = transportEpoch.reprobeDelayMs(System.currentTimeMillis())
+                        if (delayMs != null) {
+                            if (delayMs > 0L) delay(delayMs)
+                        } else {
+                            delay(500L)
+                            if (transportBuildEpoch.get() == startBuildEpoch || transportEpoch.stickyUnsupported) {
+                                continue
+                            }
+                        }
+                        if (!isActive || sub.cancelled) return@launch
+                        val curSeq = sub.sinceSeq
+                        val eval = transportEpoch.evaluateForConnect(curBase, System.currentTimeMillis(), curSeq)
+                        if (eval.sinceSeq != null) sub.sinceSeq = eval.sinceSeq
+                        if (eval.allowWebSocket && !sub.cancelled) {
+                            sub.reprobeJob = null
+                            getOrCreateSyncHub().register(sub)
+                            return@launch
+                        }
+                    }
+                }
+            }
+
+            fun attachSseFallback(preservedSeq: Long?) {
+                if (sub.cancelled) return
+                if (preservedSeq != null) {
+                    val curSeq = sub.sinceSeq
+                    if (curSeq == null || preservedSeq > curSeq) sub.sinceSeq = preservedSeq
+                }
+                if (sub.delegateSource == null) {
+                    lateinit var rawSource: EventSource
+                    rawSource = openRawSSE(
+                        rewriteControlStreamSinceSeq(path, sub.sinceSeq),
+                        observedOnEvent,
+                        onClosed = { t ->
+                            if (sub.delegateSource === rawSource && !sub.cancelled) {
+                                sub.delegateSource = null
+                                sub.reprobeJob?.cancel()
+                                sub.reprobeJob = null
+                                sub.currentHub?.unregister(subId)
+                                onClosed(t)
+                            }
+                        }
+                    )
+                    if (sub.cancelled) {
+                        rawSource.cancel()
+                        return
+                    }
+                    sub.delegateSource = rawSource
+                }
+                scheduleSubReprobe()
+            }
+
+            sub = SyncStreamSub(
                 id = subId,
                 missionId = missionId,
                 kindFilter = kindFilter,
-                sinceSeq = sinceSeq,
+                sinceSeq = effectiveSinceSeq,
                 request = placeholderReq,
-                onEvent = onEvent,
+                onEvent = observedOnEvent,
                 onClosed = onClosed,
-                fallbackFactory = { openRawSSE(path, onEvent, onClosed) }
+                fallbackFactory = { preservedSeq ->
+                    attachSseFallback(preservedSeq)
+                },
+                onWsReady = {
+                    sub.reprobeJob?.cancel()
+                    sub.reprobeJob = null
+                    val oldDelegate = sub.delegateSource
+                    sub.delegateSource = null
+                    oldDelegate?.cancel()
+                }
             )
-            hub.register(sub)
+
+            if (connectEval.allowWebSocket) {
+                getOrCreateSyncHub().register(sub)
+            } else {
+                attachSseFallback(effectiveSinceSeq)
+            }
+
             return object : EventSource {
                 override fun request(): Request = sub.delegateSource?.request() ?: placeholderReq
                 override fun cancel() {
-                    sub.delegateSource?.cancel()
-                    hub.unregister(subId)
+                    sub.cancelled = true
+                    sub.reprobeJob?.cancel()
+                    sub.reprobeJob = null
+                    val oldDelegate = sub.delegateSource
+                    sub.delegateSource = null
+                    oldDelegate?.cancel()
+                    sub.currentHub?.unregister(subId)
+                    sub.currentHub = null
                 }
             }
         }
-        return openRawSSE(path, onEvent, onClosed)
+        val ssePath = if (connectEval != null) rewriteControlStreamSinceSeq(path, connectEval.sinceSeq) else path
+        return openRawSSE(ssePath, onEvent, onClosed)
     }
 
     private fun openRawSSE(

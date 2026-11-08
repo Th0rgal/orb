@@ -98,7 +98,7 @@ final class OrbCore {
         missionDeltaPolls = 0
         missionDeltaLastFullSync = .distantPast
         missionDeltaCache.removeAll()
-        syncHub?.closeAll()
+        syncHub?.closeAll(intentional: true)
         syncHub = nil
     }
 
@@ -119,6 +119,7 @@ final class OrbCore {
             cachedJwtToken = nil
             endpointCooldowns.removeAll()
             resetMissionDeltaState()
+            applyTransportEndpointChange(to: resolved)
             #if DEBUG
             // UI tests point the app at loopback fixtures with `-api_base_url`; never let a
             // test that edits the server URL overwrite the operator's saved endpoint.
@@ -326,6 +327,7 @@ final class OrbCore {
         githubEnabled = response.githubEnabled == true
         githubOAuthClientState = response.githubOAuthClientState == true
         backendVersion = response.version
+        noteTransportServerBuild(response.version)
         if let modeRaw = response.authMode, let mode = AuthMode(rawValue: modeRaw) {
             authMode = mode
         } else {
@@ -392,13 +394,29 @@ final class OrbCore {
 
     // MARK: - Control Streaming
 
-    /// After this many consecutive WebSocket open failures, stop trying WS
-    /// for the rest of the process lifetime and go straight to SSE. Some
-    /// deployments (reverse proxies without upgrade support) close every WS
-    /// attempt with 1011; retrying on each reconnect just adds latency and
-    /// noise before the inevitable SSE fallback.
-    nonisolated static let webSocketMaxOpenFailures = 3
-    private var webSocketOpenFailureStreak = 0
+    typealias TransportEpochState = OrbTransportEpochState
+    nonisolated static let webSocketMaxOpenFailures = Int(OrbTransportEpochState.defaultFailThreshold)
+    private(set) var transportEpoch = OrbTransportEpochState()
+    @ObservationIgnored private var transportBuildEpoch: UInt64 = 0
+
+    private static func nowEpochMs() -> UInt64 {
+        let ms = Date().timeIntervalSince1970 * 1000
+        return ms > 0 ? UInt64(ms) : 0
+    }
+
+    private func applyTransportEndpointChange(to url: String) {
+        _ = transportEpoch.applyEndpoint(url, nowMs: Self.nowEpochMs())
+        transportBuildEpoch &+= 1
+    }
+
+    private func noteTransportServerBuild(_ version: String?) {
+        let prevMode = transportEpoch.mode
+        let prevSticky = transportEpoch.stickyUnsupported
+        _ = transportEpoch.noteServerBuild(version, nowMs: Self.nowEpochMs())
+        if transportEpoch.mode != prevMode || transportEpoch.stickyUnsupported != prevSticky {
+            transportBuildEpoch &+= 1
+        }
+    }
 
     var canUseMultiplexSync: Bool {
         #if DEBUG
@@ -406,7 +424,9 @@ final class OrbCore {
         #else
         let isUITestMock = false
         #endif
-        return !isUITestMock && jwtToken != nil && webSocketOpenFailureStreak < Self.webSocketMaxOpenFailures
+        guard !isUITestMock, jwtToken != nil else { return false }
+        let (allowWS, _) = transportEpoch.evaluateForConnect(url: endpoint, nowMs: Self.nowEpochMs())
+        return allowWS
     }
 
     var isMultiplexSyncHealthy: Bool {
@@ -429,41 +449,148 @@ final class OrbCore {
         #else
         let isUITestMock = false
         #endif
-        let canMultiplex = !isUITestMock && preferWebSocket && token != nil &&
-            (kinds == nil || kinds == ["presentation"] || kinds == ["fido"]) &&
-            webSocketOpenFailureStreak < Self.webSocketMaxOpenFailures
+        let kindSupported = (kinds == nil || kinds == ["presentation"] || kinds == ["fido"])
+        let wsEligible = !isUITestMock && preferWebSocket && token != nil && kindSupported
 
-        return Task { [weak self] in
+        return Task { @MainActor [weak self] in
             guard let self else { return }
-            if canMultiplex, let token {
-                let opened = await self.runMultiplexedControlSync(
-                    missionId: missionId,
-                    sinceSeq: sinceSeq,
-                    kinds: kinds,
-                    token: token,
-                    generation: generation,
-                    onDiagnostic: onDiagnostic,
-                    onEvent: onEvent
+            let seqTracker = StreamSequenceTracker(sinceSeq)
+            while !Task.isCancelled {
+                let nowMs = Self.nowEpochMs()
+                let eval = self.transportEpoch.evaluateForConnect(
+                    url: self.endpoint,
+                    nowMs: nowMs,
+                    sinceSeq: seqTracker.value
                 )
-                if opened {
-                    self.webSocketOpenFailureStreak = 0
+                seqTracker.value = eval.sinceSeq
+                if wsEligible, eval.allowWebSocket, let token {
+                    let outcome = await self.runMultiplexedControlSync(
+                        missionId: missionId,
+                        sinceSeq: seqTracker.value,
+                        kinds: kinds,
+                        token: token,
+                        generation: generation,
+                        onDiagnostic: onDiagnostic,
+                        onEvent: { type, payload in
+                            seqTracker.observe(payload)
+                            onEvent(type, payload)
+                        }
+                    )
+                    if Task.isCancelled || outcome.cleanClose {
+                        return
+                    }
+                    if !outcome.fallbackToSSE {
+                        return
+                    }
+                    if let preserved = self.transportEpoch.evaluateForConnect(
+                        url: self.endpoint,
+                        nowMs: Self.nowEpochMs(),
+                        sinceSeq: seqTracker.value
+                    ).sinceSeq {
+                        seqTracker.value = preserved
+                    }
+                    self.emitDiagnostic(
+                        transport: .webSocket,
+                        phase: .fallback,
+                        host: nil,
+                        status: outcome.httpStatus,
+                        bytes: nil,
+                        error: outcome.opened
+                            ? "Multiplexed sync WebSocket dropped repeatedly; falling back to SSE"
+                            : "Multiplexed sync WebSocket did not open; falling back to SSE",
+                        eventType: nil,
+                        generation: generation,
+                        onDiagnostic: onDiagnostic
+                    )
                 }
-                if opened || Task.isCancelled {
+
+                let observedOnEvent: (String, [String: Any]) -> Void = { type, payload in
+                    seqTracker.observe(payload)
+                    onEvent(type, payload)
+                }
+
+                let reprobeDelayMs = wsEligible
+                    ? self.transportEpoch.reprobeDelayMs(nowMs: Self.nowEpochMs())
+                    : nil
+                let buildEpochAtStart = self.transportBuildEpoch
+
+                if wsEligible {
+                    let reprobeInterrupted = await self.runControlSSEBoundedForReprobe(
+                        missionId: missionId,
+                        sinceSeq: seqTracker.value,
+                        kinds: kinds,
+                        token: token,
+                        generation: generation,
+                        reprobeDelayMs: reprobeDelayMs,
+                        buildEpochAtStart: buildEpochAtStart,
+                        onDiagnostic: onDiagnostic,
+                        onEvent: observedOnEvent
+                    )
+                    if reprobeInterrupted && !Task.isCancelled {
+                        continue
+                    }
+                    return
+                } else {
+                    await self.runControlSSE(
+                        missionId: missionId,
+                        sinceSeq: seqTracker.value,
+                        kinds: kinds,
+                        token: token,
+                        generation: generation,
+                        onDiagnostic: onDiagnostic,
+                        onEvent: observedOnEvent
+                    )
                     return
                 }
-                self.webSocketOpenFailureStreak += 1
-                self.emitDiagnostic(
-                    transport: .webSocket,
-                    phase: .fallback,
-                    host: nil,
-                    status: nil,
-                    bytes: nil,
-                    error: "Multiplexed sync WebSocket did not open; falling back to SSE",
-                    eventType: nil,
-                    generation: generation,
-                    onDiagnostic: onDiagnostic
-                )
             }
+        }
+    }
+
+    @MainActor
+    private final class StreamSequenceTracker {
+        var value: Int64?
+
+        init(_ initial: Int64?) {
+            self.value = initial
+        }
+
+        func observe(_ payload: [String: Any]) {
+            if let cur = (payload["cursor"] as? NSNumber)?.int64Value, cur > 0 {
+                if let existing = value {
+                    if cur > existing { value = cur }
+                } else {
+                    value = cur
+                }
+            }
+            if let seqNum = (payload["sequence"] as? NSNumber)?.int64Value, seqNum >= 0 {
+                if let existing = value {
+                    if seqNum > existing { value = seqNum }
+                } else {
+                    value = seqNum
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private final class ReprobeInterruptFlag {
+        var triggered = false
+    }
+
+    private func runControlSSEBoundedForReprobe(
+        missionId: String?,
+        sinceSeq: Int64?,
+        kinds: [String]?,
+        token: String?,
+        generation: Int,
+        reprobeDelayMs: UInt64?,
+        buildEpochAtStart: UInt64,
+        onDiagnostic: ((ControlStreamDiagnostic) -> Void)?,
+        onEvent: @escaping (String, [String: Any]) -> Void
+    ) async -> Bool {
+        let interruptFlag = ReprobeInterruptFlag()
+        let sseTask = Task { @MainActor [weak self] in
+            guard let self else { return }
             await self.runControlSSE(
                 missionId: missionId,
                 sinceSeq: sinceSeq,
@@ -474,6 +601,36 @@ final class OrbCore {
                 onEvent: onEvent
             )
         }
+        let watchdogTask = Task { @MainActor [weak self] in
+            if let reprobeDelayMs {
+                if reprobeDelayMs > 0 {
+                    try? await Task.sleep(for: .milliseconds(Int64(min(reprobeDelayMs, UInt64(Int64.max)))))
+                } else {
+                    await Task.yield()
+                }
+                guard !Task.isCancelled, self != nil else { return }
+                interruptFlag.triggered = true
+                sseTask.cancel()
+                return
+            }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard !Task.isCancelled, let self else { return }
+                if self.transportBuildEpoch != buildEpochAtStart && !self.transportEpoch.stickyUnsupported {
+                    interruptFlag.triggered = true
+                    sseTask.cancel()
+                    return
+                }
+            }
+        }
+        await withTaskCancellationHandler {
+            await sseTask.value
+        } onCancel: {
+            sseTask.cancel()
+            watchdogTask.cancel()
+        }
+        watchdogTask.cancel()
+        return interruptFlag.triggered
     }
 
     private func runControlSSE(
@@ -608,6 +765,13 @@ final class OrbCore {
         }
     }
 
+    private struct MultiplexSyncOutcome {
+        let opened: Bool
+        let cleanClose: Bool
+        let fallbackToSSE: Bool
+        let httpStatus: Int?
+    }
+
     @MainActor
     private final class ControlSyncHub {
         struct Subscriber {
@@ -619,24 +783,37 @@ final class OrbCore {
             let onDiagnostic: ((ControlStreamDiagnostic) -> Void)?
             let onEvent: (String, [String: Any]) -> Void
             var openedNotified: Bool
-            let finish: (Bool) -> Void
+            let finish: (MultiplexSyncOutcome) -> Void
         }
 
         let scope: String
         let candidates: [String]
         let token: String
+        let onSocketReady: () -> Void
+        let onSocketFailure: (Int?) -> Bool
         private(set) var opened = false
         private(set) var closed = false
+        private var intentionalClose = false
+        private var fallbackToSSE = false
+        private var lastHTTPStatus: Int?
         private var subscribers: [UUID: Subscriber] = [:]
         private var subscribedMissions: Set<String> = []
         private var presentationSent: Bool?
         private var wsTask: URLSessionWebSocketTask?
         private var runnerTask: Task<Void, Never>?
 
-        init(scope: String, candidates: [String], token: String) {
+        init(
+            scope: String,
+            candidates: [String],
+            token: String,
+            onSocketReady: @escaping () -> Void,
+            onSocketFailure: @escaping (Int?) -> Bool
+        ) {
             self.scope = scope
             self.candidates = candidates
             self.token = token
+            self.onSocketReady = onSocketReady
+            self.onSocketFailure = onSocketFailure
             self.runnerTask = Task { @MainActor [weak self] in
                 await self?.run()
             }
@@ -644,7 +821,12 @@ final class OrbCore {
 
         func addSubscriber(_ sub: Subscriber) {
             guard !closed else {
-                sub.finish(opened)
+                sub.finish(MultiplexSyncOutcome(
+                    opened: opened,
+                    cleanClose: intentionalClose,
+                    fallbackToSSE: fallbackToSSE,
+                    httpStatus: lastHTTPStatus
+                ))
                 return
             }
             var entry = sub
@@ -658,16 +840,24 @@ final class OrbCore {
 
         func removeSubscriber(_ id: UUID) {
             guard let removed = subscribers.removeValue(forKey: id) else { return }
-            removed.finish(opened)
+            removed.finish(MultiplexSyncOutcome(
+                opened: opened || removed.openedNotified,
+                cleanClose: true,
+                fallbackToSSE: false,
+                httpStatus: nil
+            ))
             syncSubscriptions()
             if subscribers.isEmpty {
-                closeAll()
+                closeAll(intentional: true)
             }
         }
 
-        func closeAll() {
+        func closeAll(intentional: Bool = false) {
             guard !closed else { return }
             closed = true
+            if intentional {
+                intentionalClose = true
+            }
             let wasOpened = opened
             let subs = Array(subscribers.values)
             subscribers.removeAll()
@@ -676,7 +866,12 @@ final class OrbCore {
             runnerTask?.cancel()
             runnerTask = nil
             for sub in subs {
-                sub.finish(wasOpened || sub.openedNotified)
+                sub.finish(MultiplexSyncOutcome(
+                    opened: wasOpened || sub.openedNotified,
+                    cleanClose: intentionalClose,
+                    fallbackToSSE: fallbackToSSE,
+                    httpStatus: lastHTTPStatus
+                ))
             }
         }
 
@@ -783,6 +978,7 @@ final class OrbCore {
                         }
                         if !opened {
                             opened = true
+                            onSocketReady()
                             for key in Array(subscribers.keys) {
                                 guard var sub = subscribers[key], !sub.openedNotified else { continue }
                                 sub.openedNotified = true
@@ -847,25 +1043,33 @@ final class OrbCore {
                 } catch {
                     pingLoop.cancel()
                     task.cancel(with: .normalClosure, reason: nil)
-                    if opened {
-                        if !closed {
-                            OrbBackgroundSyncMonitor.shared.noteUnexpectedDisconnect()
-                        }
-                        // Socket was established and later dropped; finish active tasks so callers reconnect cleanly.
+                    if closed || Task.isCancelled {
                         break
                     }
-                    // Try next candidate endpoint before falling back to SSE.
+                    let status = (task.response as? HTTPURLResponse)?.statusCode
+                    if let status { lastHTTPStatus = status }
+                    if opened {
+                        OrbBackgroundSyncMonitor.shared.noteUnexpectedDisconnect()
+                        fallbackToSSE = onSocketFailure(status)
+                        break
+                    }
+                    if OrbTransportEpochState.isPermanentUnsupportedHttpStatus(status) {
+                        break
+                    }
                     continue
                 }
                 pingLoop.cancel()
                 break
             }
-            closeAll()
+            if !opened && !closed && !Task.isCancelled && !intentionalClose {
+                fallbackToSSE = onSocketFailure(lastHTTPStatus)
+            }
+            closeAll(intentional: false)
         }
     }
 
     /// Multiplexes presentation, FIDO, and per-mission subscriptions onto one shared
-    /// `/api/control/sync` WebSocket. Returns `true` if the socket opened; `false` triggers SSE fallback.
+    /// `/api/control/sync` WebSocket. Returns whether the socket opened, closed cleanly, or must fall back to SSE.
     private func runMultiplexedControlSync(
         missionId: String?,
         sinceSeq: Int64?,
@@ -874,11 +1078,11 @@ final class OrbCore {
         generation: Int,
         onDiagnostic: ((ControlStreamDiagnostic) -> Void)?,
         onEvent: @escaping (String, [String: Any]) -> Void
-    ) async -> Bool {
+    ) async -> MultiplexSyncOutcome {
         let currentEndpoint = endpoint
         let scope = "\(currentEndpoint)|\(token)"
         if let existing = syncHub, existing.closed || existing.scope != scope {
-            existing.closeAll()
+            existing.closeAll(intentional: true)
             syncHub = nil
         }
         let hub: ControlSyncHub
@@ -886,15 +1090,29 @@ final class OrbCore {
             hub = existing
         } else {
             let candidates = orderedCandidateEndpoints(for: currentEndpoint)
-            guard !candidates.isEmpty else { return false }
-            let created = ControlSyncHub(scope: scope, candidates: candidates, token: token)
+            guard !candidates.isEmpty else {
+                return MultiplexSyncOutcome(opened: false, cleanClose: false, fallbackToSSE: true, httpStatus: nil)
+            }
+            let created = ControlSyncHub(
+                scope: scope,
+                candidates: candidates,
+                token: token,
+                onSocketReady: { [weak self] in
+                    self?.transportEpoch.noteWsReady(nowMs: Self.nowEpochMs())
+                },
+                onSocketFailure: { [weak self] status in
+                    guard let self else { return true }
+                    let outcome = self.transportEpoch.noteWsFailure(httpStatus: status, nowMs: Self.nowEpochMs())
+                    return outcome.fallbackToSse
+                }
+            )
             syncHub = created
             hub = created
         }
 
         let subId = UUID()
         return await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            await withCheckedContinuation { (continuation: CheckedContinuation<MultiplexSyncOutcome, Never>) in
                 var resumed = false
                 let sub = ControlSyncHub.Subscriber(
                     id: subId,
@@ -905,10 +1123,10 @@ final class OrbCore {
                     onDiagnostic: onDiagnostic,
                     onEvent: onEvent,
                     openedNotified: false,
-                    finish: { didOpen in
+                    finish: { outcome in
                         guard !resumed else { return }
                         resumed = true
-                        continuation.resume(returning: didOpen)
+                        continuation.resume(returning: outcome)
                     }
                 )
                 hub.addSubscriber(sub)
@@ -1546,6 +1764,217 @@ final class OrbCore {
 /// crosses back to the consumer actor, after which the producer is gone.
 private struct DecodedBox<T>: @unchecked Sendable {
     let value: T
+}
+
+struct OrbTransportEpochState: Equatable, Sendable {
+    static let modeWsActive = 0
+    static let modeSseFallback = 1
+    static let modeWsReprobe = 2
+
+    static let eventWsReady = 0
+    static let eventTransientWsFailure = 1
+    static let eventHttpStatusFailure = 2
+    static let eventCooldownCheck = 3
+    static let eventServerBuildChanged = 4
+
+    static let defaultFailThreshold: UInt32 = 3
+    static let defaultCooldownMs: UInt64 = 30_000
+
+    var mode: Int = modeWsActive
+    var everReady: Bool = false
+    var stickyUnsupported: Bool = false
+    var endpointClass: Int = 3
+    var normalizedBaseURL: String = ""
+    var serverBuild: String? = nil
+    var failureStreak: UInt32 = 0
+    var cooldownUntilMs: UInt64 = 0
+    var failThreshold: UInt32 = defaultFailThreshold
+    var cooldownDurationMs: UInt64 = defaultCooldownMs
+
+    static func classifyEndpoint(_ url: String) -> Int {
+        let lower = OrbConnection.normalize(url).lowercased()
+        if lower == OrbConnection.defaultBaseURL { return 0 }
+        if lower == OrbConnection.orbcoreBaseURL { return 1 }
+        if lower == OrbConnection.knownDirectBaseURL { return 2 }
+        return 3
+    }
+
+    private static func packSinceSeq(_ sinceSeq: Int64?) -> (Bool, UInt32) {
+        guard let sinceSeq, sinceSeq >= 0 else { return (false, 0) }
+        let clamped = sinceSeq > Int64(UInt32.max) ? UInt32.max : UInt32(sinceSeq)
+        return (true, clamped)
+    }
+
+    private static func unpackSinceSeq(_ verdict: OrbKernel.TransportEpochVerdict, original: Int64?) -> Int64? {
+        guard verdict.hasPreservedSinceSeq else { return nil }
+        if let original, original > Int64(UInt32.max) { return original }
+        return Int64(verdict.preservedSinceSeq32)
+    }
+
+    @discardableResult
+    mutating func applyEndpoint(_ url: String, nowMs: UInt64, sinceSeq: Int64? = nil) -> Int64? {
+        let clean = OrbConnection.normalize(url)
+        let newClass = Self.classifyEndpoint(clean)
+        if normalizedBaseURL.isEmpty {
+            normalizedBaseURL = clean
+            endpointClass = newClass
+            return sinceSeq
+        }
+        guard clean != normalizedBaseURL else { return sinceSeq }
+        let prevClass = endpointClass
+        normalizedBaseURL = clean
+        endpointClass = newClass
+        serverBuild = nil
+        let event = newClass != prevClass ? Self.eventCooldownCheck : Self.eventServerBuildChanged
+        let (hasSeq, seq32) = Self.packSinceSeq(sinceSeq)
+        let verdict = OrbKernel.transportEpochStep(
+            mode: mode,
+            eventKind: event,
+            everReady: everReady,
+            stickyUnsupported: stickyUnsupported,
+            endpointClass: newClass,
+            prevEndpointClass: prevClass,
+            hasSinceSeq: hasSeq,
+            failureStreak: failureStreak,
+            failThreshold: failThreshold,
+            httpStatus: 0,
+            sinceSeq32: seq32,
+            nowMs: nowMs,
+            cooldownUntilMs: cooldownUntilMs
+        )
+        applyVerdict(verdict)
+        cooldownUntilMs = 0
+        everReady = false
+        return Self.unpackSinceSeq(verdict, original: sinceSeq)
+    }
+
+    @discardableResult
+    mutating func noteServerBuild(_ build: String?, nowMs: UInt64, sinceSeq: Int64? = nil) -> Int64? {
+        let trimmed = build?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = (trimmed?.isEmpty == false) ? trimmed : nil
+        guard let normalized else { return sinceSeq }
+        if serverBuild == nil {
+            serverBuild = normalized
+            return sinceSeq
+        }
+        guard serverBuild != normalized else { return sinceSeq }
+        serverBuild = normalized
+        let (hasSeq, seq32) = Self.packSinceSeq(sinceSeq)
+        let verdict = OrbKernel.transportEpochStep(
+            mode: mode,
+            eventKind: Self.eventServerBuildChanged,
+            everReady: everReady,
+            stickyUnsupported: stickyUnsupported,
+            endpointClass: endpointClass,
+            prevEndpointClass: endpointClass,
+            hasSinceSeq: hasSeq,
+            failureStreak: failureStreak,
+            failThreshold: failThreshold,
+            httpStatus: 0,
+            sinceSeq32: seq32,
+            nowMs: nowMs,
+            cooldownUntilMs: cooldownUntilMs
+        )
+        applyVerdict(verdict)
+        cooldownUntilMs = 0
+        return Self.unpackSinceSeq(verdict, original: sinceSeq)
+    }
+
+    mutating func noteWsReady(nowMs: UInt64) {
+        let verdict = OrbKernel.transportEpochStep(
+            mode: mode,
+            eventKind: Self.eventWsReady,
+            everReady: true,
+            stickyUnsupported: stickyUnsupported,
+            endpointClass: endpointClass,
+            prevEndpointClass: endpointClass,
+            hasSinceSeq: false,
+            failureStreak: failureStreak,
+            failThreshold: failThreshold,
+            httpStatus: 0,
+            sinceSeq32: 0,
+            nowMs: nowMs,
+            cooldownUntilMs: cooldownUntilMs
+        )
+        everReady = true
+        applyVerdict(verdict)
+        cooldownUntilMs = 0
+    }
+
+    @discardableResult
+    mutating func noteWsFailure(httpStatus: Int?, nowMs: UInt64, sinceSeq: Int64? = nil) -> (fallbackToSse: Bool, sinceSeq: Int64?) {
+        let (hasSeq, seq32) = Self.packSinceSeq(sinceSeq)
+        let event = httpStatus != nil ? Self.eventHttpStatusFailure : Self.eventTransientWsFailure
+        let normalizedStatus = Self.isPermanentUnsupportedHttpStatus(httpStatus) ? 404 : max(0, httpStatus ?? 0)
+        let statusWord = UInt32(normalizedStatus)
+        let verdict = OrbKernel.transportEpochStep(
+            mode: mode,
+            eventKind: event,
+            everReady: everReady,
+            stickyUnsupported: stickyUnsupported,
+            endpointClass: endpointClass,
+            prevEndpointClass: endpointClass,
+            hasSinceSeq: hasSeq,
+            failureStreak: failureStreak,
+            failThreshold: failThreshold,
+            httpStatus: statusWord,
+            sinceSeq32: seq32,
+            nowMs: nowMs,
+            cooldownUntilMs: cooldownUntilMs
+        )
+        applyVerdict(verdict)
+        if verdict.fallbackActiveNext && !verdict.stickyUnsupportedNext {
+            cooldownUntilMs = nowMs &+ cooldownDurationMs
+        } else if verdict.stickyUnsupportedNext {
+            cooldownUntilMs = UInt64.max
+        }
+        return (verdict.fallbackActiveNext, Self.unpackSinceSeq(verdict, original: sinceSeq))
+    }
+
+    mutating func evaluateForConnect(url: String, nowMs: UInt64, sinceSeq: Int64? = nil) -> (allowWebSocket: Bool, sinceSeq: Int64?) {
+        let syncedSeq = applyEndpoint(url, nowMs: nowMs, sinceSeq: sinceSeq)
+        guard mode == Self.modeSseFallback else {
+            return (mode != Self.modeSseFallback, syncedSeq)
+        }
+        let (hasSeq, seq32) = Self.packSinceSeq(syncedSeq)
+        let verdict = OrbKernel.transportEpochStep(
+            mode: mode,
+            eventKind: Self.eventCooldownCheck,
+            everReady: everReady,
+            stickyUnsupported: stickyUnsupported,
+            endpointClass: endpointClass,
+            prevEndpointClass: endpointClass,
+            hasSinceSeq: hasSeq,
+            failureStreak: failureStreak,
+            failThreshold: failThreshold,
+            httpStatus: 0,
+            sinceSeq32: seq32,
+            nowMs: nowMs,
+            cooldownUntilMs: cooldownUntilMs
+        )
+        applyVerdict(verdict)
+        return (!verdict.fallbackActiveNext, Self.unpackSinceSeq(verdict, original: syncedSeq))
+    }
+
+    var allowsWebSocketNow: Bool {
+        mode != Self.modeSseFallback
+    }
+
+    func reprobeDelayMs(nowMs: UInt64) -> UInt64? {
+        guard mode == Self.modeSseFallback, !stickyUnsupported else { return nil }
+        return cooldownUntilMs > nowMs ? (cooldownUntilMs - nowMs) : 0
+    }
+
+    static func isPermanentUnsupportedHttpStatus(_ status: Int?) -> Bool {
+        status == 404 || status == 405 || status == 501 || status == 426
+    }
+
+    private mutating func applyVerdict(_ verdict: OrbKernel.TransportEpochVerdict) {
+        guard verdict.admitted else { return }
+        mode = verdict.nextMode
+        stickyUnsupported = verdict.stickyUnsupportedNext
+        failureStreak = UInt32(verdict.nextFailureStreak)
+    }
 }
 
 /// Result of a `/missions/:id/events` fetch. `maxSequence` is the response's

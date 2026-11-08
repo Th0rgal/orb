@@ -340,6 +340,140 @@ final class OrbStreamTextTests: XCTestCase {
         XCTAssertEqual(liveSuffix.renders, 1, "50 incremental suffix text_op insert frames render once")
     }
 
+    func testOpenTailCapBoundsUnclosedFenceReparseBytes() {
+        let capBytes = 2048
+        let parser = OrbStreamBlocks(maxOpenTailBytes: capBytes)
+        var acc = "Intro paragraph.\n\n~~~rust\n"
+        var prevParsed = 0
+        var lastBlocks: [OrbNativeMarkdownView.Block] = []
+        for frame in 0..<64 {
+            acc += String(repeating: "let v_\(frame) = \"é😀 | a | b\";\n", count: 24)
+            lastBlocks = parser.blocks(acc)
+            let frameParsed = parser.parsedBytes - prevParsed
+            prevParsed = parser.parsedBytes
+            if frame > 0 {
+                XCTAssertLessThanOrEqual(frameParsed, capBytes, "frame \(frame) tail re-parse must stay within maxOpenTailBytes")
+            }
+        }
+        XCTAssertTrue(parser.openFenceCapped)
+        XCTAssertGreaterThan(acc.utf8.count, 20_480)
+        XCTAssertLessThanOrEqual(parser.parsedBytes, 64 * capBytes + 256)
+        XCTAssertEqual(lastBlocks, OrbNativeMarkdownView.parseBlocks(acc))
+
+        acc += "~~~\n"
+        XCTAssertEqual(parser.blocks(acc), OrbNativeMarkdownView.parseBlocks(acc))
+        acc += "\nTrailing summary."
+        XCTAssertEqual(parser.blocks(acc), OrbNativeMarkdownView.parseBlocks(acc))
+
+        let backtickParser = OrbStreamBlocks(maxOpenTailBytes: capBytes)
+        var tickAcc = "Header.\n\n```rust\n"
+        for frame in 0..<32 {
+            tickAcc += String(repeating: "pub fn f_\(frame)() -> usize { \(frame) }\n", count: 24)
+            XCTAssertEqual(backtickParser.blocks(tickAcc), OrbNativeMarkdownView.parseBlocks(tickAcc))
+        }
+        XCTAssertGreaterThan(tickAcc.utf8.count, 20_480)
+        tickAcc += "```"
+        XCTAssertEqual(backtickParser.blocks(tickAcc), OrbNativeMarkdownView.parseBlocks(tickAcc))
+        tickAcc += "\nNext line without blank separator"
+        XCTAssertEqual(backtickParser.blocks(tickAcc), OrbNativeMarkdownView.parseBlocks(tickAcc))
+    }
+
+    func testOpenTailCapPreservesParagraphContinuationAndBlockParityAcrossStrides() {
+        let pad = "Paragraph prefix padding to exceed the 128-byte open tail cap cleanly without any blank line before the tricky continuation token arrives in the stream."
+        let docs = [
+            "\(pad)\n---\n1. continued item\n>\nstill same paragraph\n##### ignored h5\n#alsoIgnored\n#\nafter non-heading hash",
+            "\(pad)\n---",
+            "\(pad)\n1. item that continues paragraph",
+            "\(pad)\n>",
+            "\(pad)\n~~~\ncol1 | col2 | col3\nval1 | val2 | val3\n~~~\n\ncol1 | col2 | col3\n10 | 20 | 30\n\nsingle | unmatched | loose\nnext prose line",
+            "\(pad)\nprose before glued fence```swift\nlet x = 1\n```\n##### skipped\nnext paragraph\nprose```mermaid\ngraph TD\nA-->B\n"
+        ]
+        for stride in [1, 5, 19] {
+            for (idx, doc) in docs.enumerated() {
+                let parser = OrbStreamBlocks(maxOpenTailBytes: 128)
+                let scalars = Array(doc.unicodeScalars)
+                var end = 0
+                while end < scalars.count {
+                    end = min(scalars.count, end + stride)
+                    let prefix = String(String.UnicodeScalarView(scalars[0..<end]))
+                    XCTAssertEqual(
+                        parser.blocks(prefix),
+                        OrbNativeMarkdownView.parseBlocks(prefix),
+                        "doc \(idx) stride \(stride) end \(end)"
+                    )
+                }
+            }
+        }
+    }
+
+    func testOpenTailCapBoundsUnclosedNonFenceBlocksToO1PerFrame() {
+        let capBytes = 256
+        struct UnclosedCase {
+            let name: String
+            let header: String
+            let lineFn: (Int) -> String
+            let closeSuffix: String
+        }
+        let cases: [UnclosedCase] = [
+            UnclosedCase(
+                name: "math",
+                header: "Intro.\n\n$$\n",
+                lineFn: { i in "x_{\(i)} + y_{\(i)} = z_{\(i)} + \\alpha_{\(i)} + \\beta_{\(i)} + \\gamma_{\(i)}\n" },
+                closeSuffix: "$$\n\nDone."
+            ),
+            UnclosedCase(
+                name: "quote",
+                header: "Intro.\n\n",
+                lineFn: { i in i % 7 == 4 ? ">\n" : "> quoted streaming line number \(i) with extra words for payload\n" },
+                closeSuffix: "\nDone."
+            ),
+            UnclosedCase(
+                name: "unorderedList",
+                header: "Intro.\n\n",
+                lineFn: { i in "- unordered streaming item \(i) with enough text to cross cap quickly\n" },
+                closeSuffix: "\nDone."
+            ),
+            UnclosedCase(
+                name: "orderedList",
+                header: "Intro.\n\n",
+                lineFn: { i in "\((i % 99) + 1). ordered streaming item \(i) with enough text to cross cap quickly\n" },
+                closeSuffix: "\nDone."
+            ),
+            UnclosedCase(
+                name: "table",
+                header: "Intro.\n\n| Metric | Value | Delta |\n| --- | ---: | ---: |\n",
+                lineFn: { i in "| streaming_metric_row_\(i) | \(i * 10) milliseconds | +\(i) ms |\n" },
+                closeSuffix: "\nDone."
+            ),
+            UnclosedCase(
+                name: "loosePipeTable",
+                header: "Intro.\n\nMetric | Value | Delta\n",
+                lineFn: { i in "streaming_metric_row_\(i) | \(i * 10) milliseconds | +\(i) ms\n" },
+                closeSuffix: "\nDone."
+            )
+        ]
+
+        for c in cases {
+            let parser = OrbStreamBlocks(maxOpenTailBytes: capBytes)
+            var acc = c.header
+            var prevParsed = 0
+            for i in 0..<90 {
+                acc += c.lineFn(i)
+                let blocks = parser.blocks(acc)
+                let delta = parser.parsedBytes - prevParsed
+                prevParsed = parser.parsedBytes
+                if i > 4 {
+                    XCTAssertLessThanOrEqual(delta, capBytes * 2, "\(c.name) frame \(i) delta \(delta)")
+                }
+                XCTAssertEqual(blocks, OrbNativeMarkdownView.parseBlocks(acc), "\(c.name) frame \(i)")
+            }
+            XCTAssertGreaterThan(acc.utf8.count, 3_500, c.name)
+            XCTAssertLessThanOrEqual(parser.parsedBytes, 90 * capBytes + 512, c.name)
+            acc += c.closeSuffix
+            XCTAssertEqual(parser.blocks(acc), OrbNativeMarkdownView.parseBlocks(acc), "\(c.name) after close")
+        }
+    }
+
     static func chunks(_ doc: String) -> [Substring] {
         var out: [Substring] = []; var rest = Substring(doc)
         while !rest.isEmpty { out.append(rest.prefix(4)); rest = rest.dropFirst(4) }

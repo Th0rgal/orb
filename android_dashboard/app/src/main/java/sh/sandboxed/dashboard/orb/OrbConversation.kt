@@ -1258,12 +1258,18 @@ fun OrbConversationPage(
             lastMissionSequence(events, id) ?: Long.MIN_VALUE,
             lastMissionSequence(messages, id) ?: Long.MIN_VALUE
         ).takeIf { it != Long.MIN_VALUE }
-        val rows = orbTry(OrbLog.Category.Network, "/api/control/queue") {
-            OrbJSON.dictList(core.request("/api/control/queue?mission_id=${core.encodeComponent(id)}"))
+        val rawQueue = orbTry(OrbLog.Category.Network, "/api/control/queue") {
+            core.request("/api/control/queue?mission_id=${core.encodeComponent(id)}")
         }.getOrNull()
         if (id != missionId) return
-        if (rows != null) {
-            followUps = followUps.withServer(OrbFollowUpQueue.parse(rows, id), fetchedAtMs = fetchedAtMs, lastSequence = lastSequence)
+        if (rawQueue != null) {
+            val parsedQueue = OrbFollowUpQueue.parseResponse(rawQueue, id)
+            followUps = followUps.withServer(
+                parsedQueue.rows,
+                fetchedAtMs = fetchedAtMs,
+                lastSequence = lastSequence,
+                incomingServerRev = parsedQueue.revision
+            )
         }
         followUps = followUps.reconciled(deliveredMessagesFrom(messages, events, id))
     }
@@ -1585,7 +1591,13 @@ fun OrbConversationPage(
             return
         }
         val wireContent = OrbMessagePresentation.replaceUserText(before.content, content)
-        followUps = followUps.edit(queueId, wireContent)
+        val expectedRev = followUps.expectedRevision(queueId)
+        val staged = followUps.edit(queueId, wireContent, expectedServerRev = expectedRev)
+        if (staged.edits[queueId] != wireContent) {
+            errorMessage = "This message was already sent, so the edit was not applied."
+            return
+        }
+        followUps = staged
         scope.launch {
             try {
                 OrbCyberAccess.requireFollowUp(core, id, content)
@@ -1596,17 +1608,21 @@ fun OrbConversationPage(
                 errorMessage = OrbCyberAccess.error(e)
                 return@launch
             }
+            val patchBody = mutableMapOf<String, Any>("content" to wireContent)
+            if (expectedRev != null) patchBody["expected_revision"] = expectedRev
+            var errorDetail = ""
             val status = try {
-                core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "PATCH", body = mapOf("content" to wireContent))
+                core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "PATCH", body = patchBody)
                 200
             } catch (e: OrbError) {
+                errorDetail = e.message.orEmpty()
                 e.status ?: -1
             } catch (e: Throwable) {
                 -1
             }
             when (OrbSendFlow.editOutcome(status.takeIf { it >= 0 })) {
                 OrbEditOutcome.Edited -> {
-                    followUps = followUps.editConfirmed(queueId, wireContent)
+                    followUps = followUps.editConfirmed(queueId, wireContent, expectedServerRev = expectedRev)
                     UsageTelemetry.trackAction(UsageTelemetry.Action.MessageEdit, "followup_queue")
                 }
                 OrbEditOutcome.Unsupported -> {
@@ -1615,7 +1631,12 @@ fun OrbConversationPage(
                 }
                 OrbEditOutcome.AlreadySent -> {
                     followUps = followUps.editReverted(queueId)
-                    errorMessage = "This message was already sent, so the edit was not applied."
+                    val isRevConflict = status == 409 && (errorDetail.contains("revision", ignoreCase = true) || errorDetail.contains("stale", ignoreCase = true))
+                    errorMessage = if (isRevConflict) {
+                        "Queue changed on another client; refreshed queue before editing."
+                    } else {
+                        "This message was already sent, so the edit was not applied."
+                    }
                     loadHistory(id)
                 }
                 OrbEditOutcome.Failed -> {

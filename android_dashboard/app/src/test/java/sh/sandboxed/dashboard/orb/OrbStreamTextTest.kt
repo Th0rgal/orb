@@ -202,6 +202,176 @@ class OrbStreamTextTest {
         assertEquals(suffixAcc.toString(), liveSuffix.text)
     }
 
+    @Test
+    fun openTailCapBoundsUnclosedFenceReparseBytesAndSingleBufferLiveText() {
+        val capBytes = 2048
+        val parser = OrbStreamBlocks(maxOpenTailBytes = capBytes)
+        val acc = StringBuilder("Intro paragraph.\n\n~~~rust\n")
+        var prevParsed = 0
+        var lastBlocks: List<OrbMdBlock> = emptyList()
+        for (frame in 0 until 64) {
+            repeat(24) { acc.append("val v_$frame = \"é😀 | a | b\"\n") }
+            lastBlocks = parser.blocks(acc.toString())
+            val frameParsed = parser.parsedBytes - prevParsed
+            prevParsed = parser.parsedBytes
+            if (frame > 0) {
+                check(frameParsed <= capBytes) { "frame $frame parsed $frameParsed > cap $capBytes" }
+            }
+        }
+        check(parser.openFenceCapped) { "expected openFenceCapped once open tail exceeds $capBytes bytes" }
+        check(acc.toString().toByteArray(Charsets.UTF_8).size > 20_480)
+        check(parser.parsedBytes <= 64 * capBytes + 256) { "parsedBytes=${parser.parsedBytes} exceeded linear bound" }
+        assertEquals(parseMdBlocks(acc.toString()), lastBlocks)
+
+        acc.append("~~~\n")
+        assertEquals(parseMdBlocks(acc.toString()), parser.blocks(acc.toString()))
+        acc.append("\nTrailing summary.")
+        assertEquals(parseMdBlocks(acc.toString()), parser.blocks(acc.toString()))
+
+        val backtickParser = OrbStreamBlocks(maxOpenTailBytes = capBytes)
+        val tickAcc = StringBuilder("Header.\n\n```rust\n")
+        for (frame in 0 until 32) {
+            repeat(24) { tickAcc.append("pub fn f_$frame() -> usize { $frame }\n") }
+            val snap = tickAcc.toString()
+            assertEquals(parseMdBlocks(snap), backtickParser.blocks(snap))
+        }
+        check(tickAcc.toString().toByteArray(Charsets.UTF_8).size > 20_480)
+        tickAcc.append("```")
+        assertEquals(parseMdBlocks(tickAcc.toString()), backtickParser.blocks(tickAcc.toString()))
+        tickAcc.append("\nNext line without blank separator")
+        assertEquals(parseMdBlocks(tickAcc.toString()), backtickParser.blocks(tickAcc.toString()))
+
+        val live = OrbLiveText(
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined),
+            frameMs = 3_600_000L,
+            frameDispatcher = kotlinx.coroutines.Dispatchers.Unconfined
+        )
+        live.append("hello ")
+        live.append("world")
+        assertEquals("", live.text)
+        assertEquals("hello world", live.received)
+        assertEquals(0, live.renders)
+        live.flush()
+        assertEquals("hello world", live.text)
+        assertEquals(1, live.renders)
+
+        live.append(" stale-tail")
+        live.replace("fresh")
+        assertEquals("fresh", live.text)
+        assertEquals("fresh", live.received)
+        assertEquals(1, live.renders)
+
+        live.resetTurn(5L)
+        assertEquals("", live.text)
+        assertEquals("", live.received)
+        assertEquals(1, live.renders)
+    }
+
+    @Test
+    fun openTailCapPreservesParagraphContinuationAndBlockParityAcrossStrides() {
+        val pad = "Paragraph prefix padding to exceed the 128-byte open tail cap cleanly without any blank line before the tricky continuation token arrives in the stream."
+        val docs = listOf(
+            "$pad\n---\n1. continued item\n>\nstill same paragraph\n##### ignored h5\n#alsoIgnored\n#\nafter non-heading hash",
+            "$pad\n---",
+            "$pad\n1. item that continues paragraph",
+            "$pad\n>",
+            "$pad\n~~~\ncol1 | col2 | col3\nval1 | val2 | val3\n~~~\n\ncol1 | col2 | col3\n10 | 20 | 30\n",
+            "$pad\nprose before glued fence```kotlin\nval x = 1\n```\n##### skipped\nnext paragraph\nprose```mermaid\ngraph TD\nA-->B\n"
+        )
+        for (stride in listOf(1, 5, 19)) {
+            for ((idx, doc) in docs.withIndex()) {
+                val parser = OrbStreamBlocks(maxOpenTailBytes = 128)
+                val cleanParser = OrbStreamBlocks(maxOpenTailBytes = 128)
+                var end = 0
+                while (end < doc.length) {
+                    end = minOf(doc.length, end + stride)
+                    val prefix = doc.substring(0, end)
+                    assertEquals("doc $idx stride $stride end $end", parseMdBlocks(prefix), parser.blocks(prefix))
+                    val cleaned = cleanRichText(prefix, streaming = true)
+                    assertEquals("clean doc $idx stride $stride end $end", parseMdBlocks(cleaned), cleanParser.blocks(cleaned))
+                }
+                val finalClean = cleanRichText(doc, streaming = false)
+                assertEquals("final clean doc $idx stride $stride", parseMdBlocks(finalClean), cleanParser.blocks(finalClean))
+            }
+        }
+    }
+
+    @Test
+    fun openTailCapBoundsUnclosedNonFenceBlocksToO1PerFrame() {
+        val capBytes = 256
+        data class UnclosedCase(
+            val name: String,
+            val header: String,
+            val lineFn: (Int) -> String,
+            val closeSuffix: String
+        )
+        val cases = listOf(
+            UnclosedCase(
+                name = "math",
+                header = "Intro.\n\n$$\n",
+                lineFn = { i -> "x_{$i} + y_{$i} = z_{$i} + \\alpha_{$i} + \\beta_{$i} + \\gamma_{$i}\n" },
+                closeSuffix = "$$\n\nDone."
+            ),
+            UnclosedCase(
+                name = "quote",
+                header = "Intro.\n\n",
+                lineFn = { i -> if (i % 7 == 4) ">\n" else "> quoted streaming line number $i with extra words for payload\n" },
+                closeSuffix = "\nDone."
+            ),
+            UnclosedCase(
+                name = "unorderedList",
+                header = "Intro.\n\n",
+                lineFn = { i -> "- unordered streaming item $i with enough text to cross cap quickly\n" },
+                closeSuffix = "\nDone."
+            ),
+            UnclosedCase(
+                name = "orderedList",
+                header = "Intro.\n\n",
+                lineFn = { i -> "${(i % 99) + 1}. ordered streaming item $i with enough text to cross cap quickly\n" },
+                closeSuffix = "\nDone."
+            ),
+            UnclosedCase(
+                name = "table",
+                header = "Intro.\n\n| Metric | Value | Delta |\n| --- | ---: | ---: |\n",
+                lineFn = { i -> "| streaming_metric_row_$i | ${i * 10} milliseconds | +$i ms |\n" },
+                closeSuffix = "\nDone."
+            ),
+            UnclosedCase(
+                name = "loosePipeTable",
+                header = "Intro.\n\nMetric | Value | Delta\n",
+                lineFn = { i -> "streaming_metric_row_$i | ${i * 10} milliseconds | +$i ms\n" },
+                closeSuffix = "\nDone."
+            )
+        )
+
+        for (c in cases) {
+            val parser = OrbStreamBlocks(maxOpenTailBytes = capBytes)
+            val acc = StringBuilder(c.header)
+            var prevParsed = 0
+            for (i in 0 until 90) {
+                acc.append(c.lineFn(i))
+                val rawSnap = acc.toString()
+                val snap = if (c.name == "loosePipeTable") cleanRichText(rawSnap, streaming = true) else rawSnap
+                val blocks = parser.blocks(snap)
+                val delta = parser.parsedBytes - prevParsed
+                prevParsed = parser.parsedBytes
+                if (i > 4) {
+                    check(delta <= capBytes * 2) { "${c.name} frame $i parsed delta $delta > ${capBytes * 2}" }
+                }
+                assertEquals("${c.name} frame $i", parseMdBlocks(snap), blocks)
+            }
+            val totalUtf8 = acc.toString().toByteArray(Charsets.UTF_8).size
+            check(totalUtf8 > 3_500) { "${c.name} expected > 3.5 KB, got $totalUtf8" }
+            check(parser.parsedBytes <= 90 * capBytes + 512) {
+                "${c.name} parsedBytes=${parser.parsedBytes} exceeded linear bound"
+            }
+            acc.append(c.closeSuffix)
+            val rawClosed = acc.toString()
+            val closedSnap = if (c.name == "loosePipeTable") cleanRichText(rawClosed, streaming = false) else rawClosed
+            assertEquals("${c.name} after close", parseMdBlocks(closedSnap), parser.blocks(closedSnap))
+        }
+    }
+
     private fun longReply(sections: Int): String = buildString {
         append("STREAM_LONG_OK: here is the full report.")
         for (k in 0 until sections) {

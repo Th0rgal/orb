@@ -256,7 +256,7 @@ extension OrbConversation {
                 ? savedHistory.compactMap { $0["sequence"].doubleValue }.max().map { Int64($0) } : nil
             async let conversationTask = knownCloud ? nil : (try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: OrbConversationHistory.eventTypes, limit: 400, sinceSeq: conversationCursor).events)
             let queueFetchedAt = Date()
-            async let queueTask: OrbJSON = knownCloud ? .null : ((try? await api.call("/api/control/queue")) ?? .null)
+            async let queueTask: OrbJSON = knownCloud ? .null : ((try? await api.call("/api/control/queue?mission_id=\(OrbCore.escape(id))")) ?? .null)
 
             var value = try await valueTask
             if value["history"].items.isEmpty && !mission["history"].items.isEmpty, case var .object(dict) = value {
@@ -327,9 +327,18 @@ extension OrbConversation {
                 attachLiveStreamIfNeeded()
                 let queueResp = await queueTask
                 if queueResp != .null {
-                    queued = queueResp.items.filter { $0["mission_id"].text == id }
-                    let next = followUps.withServer(OrbFollowUpQueue.parse(queueResp.items, missionID: id), fetchedAt: queueFetchedAt, lastSequence: sinceSeq)
-                        .reconciled(with: deliveredUserMessages)
+                    let rawItems: [OrbJSON] = {
+                        if case .object = queueResp { return queueResp["items"].items }
+                        return queueResp.items
+                    }()
+                    queued = rawItems.filter { $0["mission_id"].text == id }
+                    let parsedQueue = OrbFollowUpQueue.parseResponse(queueResp, missionID: id)
+                    let next = followUps.withServer(
+                        parsedQueue.rows,
+                        fetchedAt: queueFetchedAt,
+                        lastSequence: sinceSeq,
+                        incomingServerRev: parsedQueue.revision
+                    ).reconciled(with: deliveredUserMessages)
                     if next != followUps { withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next } }
                 }
                 else {
@@ -801,22 +810,39 @@ extension OrbConversation {
             return
         }
         let wireContent = OrbMessagePresentation.replaceUserText(before.content, with: content)
-        followUps = followUps.edit(queueID, wireContent)
+        let expectedRev = followUps.expectedRevision(for: queueID)
+        let staged = followUps.edit(queueID, wireContent, expectedServerRev: expectedRev)
+        guard staged.edits[queueID] == wireContent else {
+            error = "This message was already sent, so the edit was not applied."
+            return
+        }
+        followUps = staged
+        var patchFields: [String: OrbJSON] = ["content": .string(wireContent)]
+        if let expectedRev { patchFields["expected_revision"] = .number(Double(expectedRev)) }
         var status: Int? = nil
+        var errorDetail = ""
         do {
-            _ = try await api.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "PATCH", body: .object(["content": .string(wireContent)]))
+            _ = try await api.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "PATCH", body: .object(patchFields))
             status = 200
-        } catch let e as OrbHTTPError { status = e.status } catch { status = nil }
+        } catch let e as OrbHTTPError {
+            status = e.status
+            errorDetail = e.detail
+        } catch {
+            status = nil
+        }
         switch OrbSendFlow.editOutcome(status: status) {
         case .edited:
-            followUps = followUps.editConfirmed(queueID, wireContent)
+            followUps = followUps.editConfirmed(queueID, wireContent, expectedServerRev: expectedRev)
             OrbUsageTelemetry.shared.trackAction(.messageEdit, surface: "queue")
         case .unsupported:
             followUps = followUps.editReverted(queueID)
             error = "This edit cannot be saved atomically. The queued messages have not been changed."
         case .alreadySent:
             followUps = followUps.editReverted(queueID)
-            error = "This message was already sent, so the edit was not applied."
+            let isRevConflict = status == 409 && (errorDetail.localizedCaseInsensitiveContains("revision") || errorDetail.localizedCaseInsensitiveContains("stale"))
+            error = isRevConflict
+                ? "Queue changed on another client; refreshed queue before editing."
+                : "This message was already sent, so the edit was not applied."
         case .failed:
             followUps = followUps.editReverted(queueID)
             error = "Couldn’t save the edit."

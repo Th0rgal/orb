@@ -454,4 +454,64 @@ class OrbSendFlowTest {
             OrbSkillSlash.validateSkillSelection(ninePrompt, "codex", nine.toSet())
         )
     }
+
+    @Test fun followUpQueueRevisionCASDuplicateEnqueueAndTurnSeqPollRetire() {
+        var q = OrbFollowUpQueue()
+        assertEquals(1L, q.serverRev)
+        assertFalse(q.hasServerRevision)
+        assertEquals(null, q.expectedRevision("c1"))
+
+        q = q.enqueue("c1", "first", lastSequence = 10L)
+        val dup = q.enqueue("c1", "changed-duplicate", lastSequence = 10L)
+        assertEquals(listOf("first"), dup.rows.map { it.content })
+        assertEquals(1, dup.pending.size)
+
+        q = q.posted("c1", queued = true, atMs = 100_000L)
+        q = q.withServer(listOf(OrbQueuedRow("c1", "first")), incomingServerRev = 5L)
+        assertEquals(5L, q.serverRev)
+        assertTrue(q.hasServerRevision)
+        assertEquals(5L, q.expectedRevision("c1"))
+
+        val stalePoll = q.withServer(emptyList(), incomingServerRev = 4L)
+        assertEquals(q, stalePoll)
+
+        val staleEdit = q.edit("c1", "stale", expectedServerRev = 4L)
+        assertEquals(q, staleEdit)
+
+        val staged = q.edit("c1", "updated", expectedServerRev = 5L)
+        assertEquals(5L, staged.serverRev)
+        assertEquals(listOf("updated"), staged.rows.map { it.content })
+
+        val reverted = staged.editReverted("c1")
+        assertEquals(5L, reverted.serverRev)
+        val pollAfterRevert = reverted.withServer(listOf(OrbQueuedRow("c1", "first", revision = 5L)), incomingServerRev = 5L)
+        assertEquals(listOf("first"), pollAfterRevert.rows.map { it.content })
+
+        val confirmed = staged.editConfirmed("c1", "updated", expectedServerRev = 5L)
+        assertEquals(6L, confirmed.serverRev)
+        assertTrue(confirmed.edits.isEmpty())
+        assertEquals(listOf("updated"), confirmed.server.map { it.content })
+        assertEquals(6L, confirmed.server.first().revision)
+
+        val envelope = mapOf(
+            "revision" to 9,
+            "items" to listOf(
+                mapOf("id" to "m1", "content" to "hi", "mission_id" to "m", "revision" to 11),
+                mapOf("id" to "other", "content" to "no", "mission_id" to "x", "revision" to 99)
+            )
+        )
+        val parsed = OrbFollowUpQueue.parseResponse(envelope, "m")
+        assertEquals(listOf("m1"), parsed.rows.map { it.id })
+        assertEquals(11L, parsed.rows.first().revision)
+        assertEquals(11L, parsed.revision)
+
+        var p = OrbFollowUpQueue()
+            .enqueue("p1", "queued", lastSequence = 20L)
+            .posted("p1", queued = true, atMs = 200_000L)
+        p = p.withServer(emptyList(), incomingServerRev = 2L, turnSeq = 20L)
+        assertEquals(1, p.count)
+        p = p.withServer(emptyList(), incomingServerRev = 3L, turnSeq = 21L)
+        assertEquals(0, p.count)
+        assertTrue("p1" in p.delivered)
+    }
 }
