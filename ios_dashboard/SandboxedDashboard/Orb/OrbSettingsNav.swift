@@ -48,7 +48,7 @@ enum OrbSettingsSection: String, CaseIterable, Identifiable {
     /// Page ids and labels; ids shared with desktop keep desktop's label.
     var pages: [(id: String, label: String)] {
         switch self {
-        case .account: [("settings", "Account"), ("usage-telemetry", "Usage telemetry"), ("dictation", "Dictation"), ("debug", "Advanced")]
+        case .account: [("settings", "Account"), ("users-settings", "Users"), ("usage-telemetry", "Usage telemetry"), ("dictation", "Dictation"), ("debug", "Advanced")]
         case .models: [("routing", "Fallback Chains"), ("providers", "Providers"), ("usage-settings", "Usage"), ("routing-keys", "API Keys")]
         case .agents: [("skills-settings", "Skills"), ("hermes-settings", "Assistant"), ("btw-settings", "Quick questions (/btw)"), ("inbox-summaries", "Inbox & summaries"), ("machines", "Machines"), ("resources", "Resources")]
         case .security: [("security-settings", "Access"), ("bitwarden-settings", "Secrets vault")]
@@ -74,11 +74,18 @@ struct OrbSettingsHome: View {
     private var attention: Set<OrbSettingsSection> {
         OrbSettingsSection.attention(bunkerActive: OrbPrivilegeAccessMonitor.shared.bunkerState > 0, deviceEnrolled: deviceEnrolled, quotaExhausted: quotaExhausted)
     }
+    private var visibleSections: [OrbSettingsSection] {
+        OrbSettingsSection.allCases.filter { $0 != .security || OrbCore.shared.isAdminUser }
+    }
+    private func visiblePages(for section: OrbSettingsSection) -> [(id: String, label: String)] {
+        section.pages.filter { $0.id != "users-settings" || OrbCore.shared.isAdminUser }
+    }
     var body: some View {
         NavigationStack {
-            List(OrbSettingsSection.allCases) { section in
+            List(visibleSections) { section in
+                let pages = visiblePages(for: section)
                 NavigationLink {
-                    if section.pages.count == 1, let single = section.pages.first {
+                    if pages.count == 1, let single = pages.first {
                         destination(single.id)
                             .orbTrackPage("settings.\(single.id)", surface: .pane, entryPoint: "settings.\(section.rawValue)")
                     } else {
@@ -112,7 +119,7 @@ struct OrbSettingsHome: View {
     private func page(_ section: OrbSettingsSection) -> some View {
         List {
             Section {
-                ForEach(section.pages, id: \.id) { p in
+                ForEach(visiblePages(for: section), id: \.id) { p in
                     NavigationLink { destination(p.id).orbTrackPage("settings.\(p.id)", surface: .pane, entryPoint: "settings.\(section.rawValue)") } label: { Text(p.label) }
                         .accessibilityIdentifier(p.id == "settings" ? "settings.backend" : "settings.\(p.id)")
                 }
@@ -125,6 +132,7 @@ struct OrbSettingsHome: View {
     @ViewBuilder private func destination(_ id: String) -> some View {
         switch id {
         case "settings": SetupSheet(onComplete: onBackendChanged, allowsDismissal: true, embedded: true)
+        case "users-settings": OrbUsersSettings()
         case "usage-telemetry": OrbUsageTelemetrySettings()
         case "dictation": OrbDictationSettingsView()
         case "debug": OrbDebugInfoView()
@@ -146,13 +154,18 @@ struct OrbSettingsHome: View {
     }
 
     private func loadAttention() async {
-        async let privRefresh = OrbPrivilegeAccessMonitor.shared.refresh()
-        async let devicesReq = client.call("/api/approvals/devices")
+        await OrbCore.shared.refreshCurrentUser()
         async let usageReq = client.call("/api/ai/providers/usage")
-        _ = await privRefresh
-        if let d = try? await devicesReq {
-            let mine = OrbApprovalKey.publicKey
-            deviceEnrolled = !SecureEnclave.isAvailable || d["devices"].items.contains { mine != nil && $0["public_key"].text == mine }
+        if OrbCore.shared.isAdminUser {
+            async let privRefresh = OrbPrivilegeAccessMonitor.shared.refresh()
+            async let devicesReq = client.call("/api/approvals/devices")
+            _ = await privRefresh
+            if let d = try? await devicesReq {
+                let mine = OrbApprovalKey.publicKey
+                deviceEnrolled = !SecureEnclave.isAvailable || d["devices"].items.contains { mine != nil && $0["public_key"].text == mine }
+            }
+        } else {
+            deviceEnrolled = true
         }
         if let usage = (try? await usageReq)?["entries"], case .object(let entries) = usage {
             quotaExhausted = entries.values.contains { OrbProviderQuota.quotaStatus(OrbProviderQuota.windows($0))?.level == .exhausted }

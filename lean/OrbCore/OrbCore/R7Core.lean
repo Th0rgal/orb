@@ -52,8 +52,33 @@ def validContextPath (path : String) : Except String Unit := do
        name.endsWith ".pem" || name.endsWith ".key" then
       throw s!"excluded context path: {path}"
 
+def validRawProjectSlug (slug : String) : Bool :=
+  (validContextPath slug).isOk && !slug.contains '/' && !slug.contains ':'
+
 def validProjectSlug (slug : String) : Bool :=
-  (validContextPath slug).isOk && !slug.contains '/'
+  match slug.splitOn ":" with
+  | [raw] => validRawProjectSlug raw
+  | [uid, raw] =>
+    !uid.isEmpty && uid.length ≤ 64 &&
+    uid.all (fun c => c.isAlphanum || c == '_' || c == '-') &&
+    validRawProjectSlug raw
+  | _ => false
+
+/-- Scope a user's raw project slug (`"lean-campaign"`) to an isolated storage key in `projects.db`
+    and `project-context/<scoped>/blobs` so two users can own identically named projects without
+    colliding or disclosing existence (`409` probing). Bootstrap admin retains unsuffixed slugs for
+    in-place compatibility with pre-existing single-user databases. -/
+def scopeProjectSlug (callerUserId bootstrapAdminId rawSlug : String) : Option String :=
+  if !validRawProjectSlug rawSlug then none
+  else if callerUserId.isEmpty || callerUserId == bootstrapAdminId then some rawSlug
+  else some s!"{callerUserId}:{rawSlug}"
+
+def unscopeProjectSlugForOwner (callerUserId bootstrapAdminId storedSlug : String) : Option String :=
+  if callerUserId.isEmpty || callerUserId == bootstrapAdminId then
+    if !storedSlug.contains ':' then some storedSlug else none
+  else
+    let pfx := callerUserId ++ ":"
+    if storedSlug.startsWith pfx then some (storedSlug.drop pfx.length).toString else none
 
 private def hexNib? (c : Char) : Option UInt8 :=
   if '0' ≤ c && c ≤ '9' then some (c.toNat - '0'.toNat).toUInt8
@@ -275,10 +300,15 @@ def executeDeploy (observed live : DeployObservation) (dryRun : Bool) : DeployRe
     dryRun := dryRun
     restart := gated == 1 && verdictCode == 257 && !dryRun }
 
-def readInboxStateJson (st : CoreStore) : IO (Except String String) := do
+def readInboxStateJson (st : CoreStore) (userId? : Option String := none) : IO (Except String String) := do
   let rows ← st.askDb.mu.atomically <|
-    sqliteQueryRowsRaw st.askDb.handle
-      "SELECT entry_key,kind,payload_json,stamp,version FROM inbox_state ORDER BY entry_key;" #[]
+    match userId? with
+    | none =>
+      sqliteQueryRowsRaw st.askDb.handle
+        "SELECT entry_key,kind,payload_json,stamp,version FROM inbox_state ORDER BY entry_key;" #[]
+    | some uid =>
+      sqliteQueryRowsRaw st.askDb.handle
+        "SELECT entry_key,kind,payload_json,stamp,version FROM user_inbox_state WHERE user_id=?1 ORDER BY entry_key;" #[uid]
   match rows with
   | .error e => return .error e
   | .ok rs =>
@@ -336,8 +366,12 @@ def parseInboxPut (path : String) (jv : JVal) : Except String InboxPut := do
     if stampI == 0 then throw "bad_stamp"
     return { key, kind := "seen", payload := "", stamp := stampI, clientId, mutationSeq := seq, expected }
 
-private def snapshotInboxVersionsSql (h : UInt64) (ensureKey? : Option (String × Nat)) : IO String := do
-  let snap ← sqliteQueryRowsRaw h "SELECT entry_key,version FROM inbox_state ORDER BY entry_key;" #[]
+private def snapshotInboxVersionsSql
+    (h : UInt64) (ensureKey? : Option (String × Nat)) (userId? : Option String := none) : IO String := do
+  let snap ←
+    match userId? with
+    | none => sqliteQueryRowsRaw h "SELECT entry_key,version FROM inbox_state ORDER BY entry_key;" #[]
+    | some uid => sqliteQueryRowsRaw h "SELECT entry_key,version FROM user_inbox_state WHERE user_id=?1 ORDER BY entry_key;" #[uid]
   match snap with
   | .ok srs =>
     let mut xs : Array String := #[]
@@ -357,12 +391,18 @@ private def snapshotInboxVersionsSql (h : UInt64) (ensureKey? : Option (String �
     | some (tk, tv) => return s!"{jsonEscape tk}:{tv}"
     | none => return ""
 
-def putInboxState (st : CoreStore) (p : InboxPut) : IO (Nat × String) := do
+def putInboxState (st : CoreStore) (p : InboxPut) (userId? : Option String := none) : IO (Nat × String) := do
   st.askDb.mu.atomically do
     if let .error e ← sqliteExecRaw st.askDb.handle "BEGIN IMMEDIATE;" then
       return (500, s!"\{\"error\":{jsonEscape e}}")
-    let q ← sqliteQueryRowsRaw st.askDb.handle
-      "SELECT version,client_id,mutation_seq FROM inbox_state WHERE entry_key=?1;" #[p.key]
+    let q ←
+      match userId? with
+      | none =>
+        sqliteQueryRowsRaw st.askDb.handle
+          "SELECT version,client_id,mutation_seq FROM inbox_state WHERE entry_key=?1;" #[p.key]
+      | some uid =>
+        sqliteQueryRowsRaw st.askDb.handle
+          "SELECT version,client_id,mutation_seq FROM user_inbox_state WHERE user_id=?1 AND entry_key=?2;" #[uid, p.key]
     match q with
     | .error e =>
       discard <| sqliteExecRaw st.askDb.handle "ROLLBACK;"
@@ -375,24 +415,35 @@ def putInboxState (st : CoreStore) (p : InboxPut) : IO (Nat × String) := do
       let pathKind : UInt8 := if p.kind == "preferences" then 1 else 2
       let gate := verifyInboxCas pathKind 1 1 1 1 stored.toUInt64 p.expected.toUInt64 (if same then 1 else 0)
       if same then
-        let vers ← snapshotInboxVersionsSql st.askDb.handle (some (p.key, stored))
+        let vers ← snapshotInboxVersionsSql st.askDb.handle (some (p.key, stored)) userId?
         if let .error e ← sqliteExecRaw st.askDb.handle "COMMIT;" then
           discard <| sqliteExecRaw st.askDb.handle "ROLLBACK;"
           return (500, s!"\{\"error\":{jsonEscape e}}")
         return (200, s!"\{\"ok\":true,\"replayed\":true,\"_versions\":\{{vers}}}")
       else if gate != 1 || stored != p.expected then
-        let vers ← snapshotInboxVersionsSql st.askDb.handle (some (p.key, stored))
+        let vers ← snapshotInboxVersionsSql st.askDb.handle (some (p.key, stored)) userId?
         discard <| sqliteExecRaw st.askDb.handle "ROLLBACK;"
         return (409, s!"\{\"_versions\":\{{vers}}}")
       else
         let next := stored + 1
-        let wr ← sqliteQueryRowsRaw st.askDb.handle
-          ("INSERT INTO inbox_state(entry_key,kind,payload_json,stamp,version,client_id,mutation_seq) " ++
-           "VALUES(?1,?2,?3,?4,?5,?6,?7) " ++
-           "ON CONFLICT(entry_key) DO UPDATE SET kind=excluded.kind,payload_json=excluded.payload_json," ++
-           "stamp=excluded.stamp,version=excluded.version,client_id=excluded.client_id,mutation_seq=excluded.mutation_seq " ++
-           "WHERE inbox_state.version=?8;")
-          #[p.key, p.kind, p.payload, s!"{p.stamp}", s!"{next}", p.clientId, s!"{p.mutationSeq}", s!"{stored}"]
+        let wr ←
+          match userId? with
+          | none =>
+            sqliteQueryRowsRaw st.askDb.handle
+              ("INSERT INTO inbox_state(entry_key,kind,payload_json,stamp,version,client_id,mutation_seq) " ++
+               "VALUES(?1,?2,?3,?4,?5,?6,?7) " ++
+               "ON CONFLICT(entry_key) DO UPDATE SET kind=excluded.kind,payload_json=excluded.payload_json," ++
+               "stamp=excluded.stamp,version=excluded.version,client_id=excluded.client_id,mutation_seq=excluded.mutation_seq " ++
+               "WHERE inbox_state.version=?8;")
+              #[p.key, p.kind, p.payload, s!"{p.stamp}", s!"{next}", p.clientId, s!"{p.mutationSeq}", s!"{stored}"]
+          | some uid =>
+            sqliteQueryRowsRaw st.askDb.handle
+              ("INSERT INTO user_inbox_state(user_id,entry_key,kind,payload_json,stamp,version,client_id,mutation_seq,updated_at) " ++
+               "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'') " ++
+               "ON CONFLICT(user_id,entry_key) DO UPDATE SET kind=excluded.kind,payload_json=excluded.payload_json," ++
+               "stamp=excluded.stamp,version=excluded.version,client_id=excluded.client_id,mutation_seq=excluded.mutation_seq " ++
+               "WHERE user_inbox_state.version=?9;")
+              #[uid, p.key, p.kind, p.payload, s!"{p.stamp}", s!"{next}", p.clientId, s!"{p.mutationSeq}", s!"{stored}"]
         match wr with
         | .error e =>
           discard <| sqliteExecRaw st.askDb.handle "ROLLBACK;"
@@ -401,10 +452,10 @@ def putInboxState (st : CoreStore) (p : InboxPut) : IO (Nat × String) := do
           let ch ← sqliteQueryRowsRaw st.askDb.handle "SELECT changes();" #[]
           let n := match ch with | .ok crs => cellNat (crs[1]?.getD #[]) 0 | .error _ => 0
           if n == 0 then
-            let vers ← snapshotInboxVersionsSql st.askDb.handle (some (p.key, stored))
+            let vers ← snapshotInboxVersionsSql st.askDb.handle (some (p.key, stored)) userId?
             discard <| sqliteExecRaw st.askDb.handle "ROLLBACK;"
             return (409, s!"\{\"_versions\":\{{vers}}}")
-          let vers ← snapshotInboxVersionsSql st.askDb.handle (some (p.key, next))
+          let vers ← snapshotInboxVersionsSql st.askDb.handle (some (p.key, next)) userId?
           if let .error e ← sqliteExecRaw st.askDb.handle "COMMIT;" then
             discard <| sqliteExecRaw st.askDb.handle "ROLLBACK;"
             return (500, s!"\{\"error\":{jsonEscape e}}")

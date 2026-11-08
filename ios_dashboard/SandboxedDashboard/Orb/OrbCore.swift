@@ -258,6 +258,11 @@ struct OrbRow: Identifiable, Hashable, Sendable {
         self.raw = raw
     }
     var isPlaceholder: Bool { raw["orb_placeholder"].flag }
+    var isParticipant: Bool { raw["viewer_role"].text == "participant" }
+    var ownerUsername: String? {
+        let u = raw["owner_username"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return u.isEmpty ? nil : u
+    }
     /// The conversation this one was forked from (a `fork-of:` tag, or an older fork stored as a child).
     var forkSource: String? {
         if let tag = raw["tags"].items.map(\.text).first(where: { $0.hasPrefix("fork-of:") }) { return String(tag.dropFirst(8)) }

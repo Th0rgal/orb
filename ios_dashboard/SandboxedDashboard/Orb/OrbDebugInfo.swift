@@ -124,7 +124,7 @@ struct OrbDebugInfoView: View {
                 }
                 .accessibilityIdentifier("debug.clear-caches")
             }
-            if OrbCore.shared.isConfigured && (OrbCore.shared.isAuthenticated || !OrbCore.shared.authRequired) {
+            if OrbCore.shared.isConfigured && (OrbCore.shared.isAuthenticated || !OrbCore.shared.authRequired) && OrbCore.shared.isAdminUser {
                 workspaceCleanupSection
                 backupRestoreSection
             }
@@ -242,7 +242,9 @@ struct OrbDebugInfoView: View {
             _ = try? await OrbCore.shared.checkHealth()
             await OrbNotificationCenter.shared.refreshAuthorizationStatus()
             notificationStatus = OrbNotificationCenter.shared.authorizationStatus
-            await loadCleanupSettings()
+            if OrbCore.shared.isAdminUser {
+                await loadCleanupSettings()
+            }
         }
     }
 

@@ -31869,6 +31869,622 @@ goto v___jp_12588_;
 }
 }
 
+LEAN_EXPORT uint32_t orb_multiuser_rbac_step(uint8_t v_callerAuthed_12711_, uint8_t v_callerDisabled_12712_, uint8_t v_epochMatches_12713_, uint8_t v_callerRole_12714_, uint8_t v_opClass_12715_, uint8_t v_isOwner_12716_, uint8_t v_isSharedParticipant_12717_){
+_start:
+{
+uint8_t v___x_12718_; uint8_t v___x_12719_;
+v___x_12718_ = 1;
+v___x_12719_ = lean_uint8_dec_eq(v_callerAuthed_12711_, v___x_12718_);
+if (v___x_12719_ == 0)
+{
+uint32_t v___x_12720_;
+v___x_12720_ = 131874;
+return v___x_12720_;
+}
+else
+{
+uint8_t v___x_12721_;
+v___x_12721_ = lean_uint8_dec_eq(v_epochMatches_12713_, v___x_12718_);
+if (v___x_12721_ == 0)
+{
+uint32_t v___x_12722_;
+v___x_12722_ = 131874;
+return v___x_12722_;
+}
+else
+{
+uint8_t v___x_12723_; uint8_t v___x_12724_;
+v___x_12723_ = 0;
+v___x_12724_ = lean_uint8_dec_eq(v_callerDisabled_12712_, v___x_12723_);
+if (v___x_12724_ == 0)
+{
+uint32_t v___x_12725_;
+v___x_12725_ = 262950;
+return v___x_12725_;
+}
+else
+{
+uint8_t v___x_12726_;
+v___x_12726_ = lean_uint8_dec_lt(v___x_12718_, v_callerRole_12714_);
+if (v___x_12726_ == 0)
+{
+uint8_t v___x_12727_;
+v___x_12727_ = lean_uint8_dec_eq(v_opClass_12715_, v___x_12723_);
+if (v___x_12727_ == 0)
+{
+uint8_t v___x_12728_;
+v___x_12728_ = lean_uint8_dec_eq(v_opClass_12715_, v___x_12718_);
+if (v___x_12728_ == 0)
+{
+uint8_t v___x_12729_; uint8_t v___x_12730_;
+v___x_12729_ = 2;
+v___x_12730_ = lean_uint8_dec_eq(v_opClass_12715_, v___x_12729_);
+if (v___x_12730_ == 0)
+{
+uint8_t v___x_12731_; uint8_t v___x_12732_;
+v___x_12731_ = 3;
+v___x_12732_ = lean_uint8_dec_eq(v_opClass_12715_, v___x_12731_);
+if (v___x_12732_ == 0)
+{
+uint8_t v___x_12733_; uint8_t v___x_12734_;
+v___x_12733_ = 4;
+v___x_12734_ = lean_uint8_dec_eq(v_opClass_12715_, v___x_12733_);
+if (v___x_12734_ == 0)
+{
+uint32_t v___x_12735_;
+v___x_12735_ = 787238;
+return v___x_12735_;
+}
+else
+{
+uint8_t v___x_12736_;
+v___x_12736_ = lean_uint8_dec_eq(v_isOwner_12716_, v___x_12718_);
+if (v___x_12736_ == 0)
+{
+uint32_t v___x_12737_;
+v___x_12737_ = 525096;
+return v___x_12737_;
+}
+else
+{
+uint32_t v___x_12738_;
+v___x_12738_ = 401;
+return v___x_12738_;
+}
+}
+}
+else
+{
+uint8_t v___x_12739_;
+v___x_12739_ = lean_uint8_dec_eq(v_isOwner_12716_, v___x_12718_);
+if (v___x_12739_ == 0)
+{
+uint8_t v___x_12740_;
+v___x_12740_ = lean_uint8_dec_eq(v_isSharedParticipant_12717_, v___x_12718_);
+if (v___x_12740_ == 0)
+{
+uint32_t v___x_12741_;
+v___x_12741_ = 525096;
+return v___x_12741_;
+}
+else
+{
+uint32_t v___x_12742_;
+v___x_12742_ = 656166;
+return v___x_12742_;
+}
+}
+else
+{
+uint32_t v___x_12743_;
+v___x_12743_ = 401;
+return v___x_12743_;
+}
+}
+}
+else
+{
+uint8_t v___x_12744_;
+v___x_12744_ = lean_uint8_dec_eq(v_isOwner_12716_, v___x_12718_);
+if (v___x_12744_ == 0)
+{
+uint8_t v___x_12745_;
+v___x_12745_ = lean_uint8_dec_eq(v_isSharedParticipant_12717_, v___x_12718_);
+if (v___x_12745_ == 0)
+{
+uint32_t v___x_12746_;
+v___x_12746_ = 525096;
+return v___x_12746_;
+}
+else
+{
+uint32_t v___x_12747_;
+v___x_12747_ = 401;
+return v___x_12747_;
+}
+}
+else
+{
+uint32_t v___x_12748_;
+v___x_12748_ = 401;
+return v___x_12748_;
+}
+}
+}
+else
+{
+uint8_t v___x_12749_;
+v___x_12749_ = lean_uint8_dec_eq(v_callerRole_12714_, v___x_12718_);
+if (v___x_12749_ == 0)
+{
+uint32_t v___x_12750_;
+v___x_12750_ = 394022;
+return v___x_12750_;
+}
+else
+{
+uint32_t v___x_12751_;
+v___x_12751_ = 401;
+return v___x_12751_;
+}
+}
+}
+else
+{
+uint32_t v___x_12752_;
+v___x_12752_ = 401;
+return v___x_12752_;
+}
+}
+else
+{
+uint32_t v___x_12753_;
+v___x_12753_ = 787238;
+return v___x_12753_;
+}
+}
+}
+}
+}
+}
+
+LEAN_EXPORT uint8_t orb_placement_role_admit(uint8_t v_callerRole_12770_, uint8_t v_targetKind_12771_, uint8_t v_nodeAdminOnly_12772_, uint8_t v_hasValidUnixUser_12773_){
+_start:
+{
+uint8_t v___x_12774_; uint8_t v___x_12775_;
+v___x_12774_ = 4;
+v___x_12775_ = lean_uint8_dec_lt(v___x_12774_, v_targetKind_12771_);
+if (v___x_12775_ == 0)
+{
+uint8_t v___x_12776_; uint8_t v___x_12777_;
+v___x_12776_ = 1;
+v___x_12777_ = lean_uint8_dec_eq(v_callerRole_12770_, v___x_12776_);
+if (v___x_12777_ == 0)
+{
+uint8_t v___x_12778_; uint8_t v___x_12782_;
+v___x_12778_ = 0;
+v___x_12782_ = lean_uint8_dec_eq(v_callerRole_12770_, v___x_12778_);
+if (v___x_12782_ == 0)
+{
+return v___x_12778_;
+}
+else
+{
+uint8_t v___x_12783_;
+v___x_12783_ = lean_uint8_dec_eq(v_targetKind_12771_, v___x_12774_);
+if (v___x_12783_ == 0)
+{
+uint8_t v___x_12784_; uint8_t v___x_12785_;
+v___x_12784_ = 2;
+v___x_12785_ = lean_uint8_dec_eq(v_targetKind_12771_, v___x_12784_);
+if (v___x_12785_ == 0)
+{
+uint8_t v___x_12786_; uint8_t v___x_12787_;
+v___x_12786_ = 3;
+v___x_12787_ = lean_uint8_dec_eq(v_targetKind_12771_, v___x_12786_);
+if (v___x_12787_ == 0)
+{
+return v___x_12778_;
+}
+else
+{
+goto v___jp_12779_;
+}
+}
+else
+{
+goto v___jp_12779_;
+}
+}
+else
+{
+return v___x_12776_;
+}
+}
+v___jp_12779_:
+{
+uint8_t v___x_12780_;
+v___x_12780_ = lean_uint8_dec_eq(v_nodeAdminOnly_12772_, v___x_12778_);
+if (v___x_12780_ == 0)
+{
+return v___x_12778_;
+}
+else
+{
+uint8_t v___x_12781_;
+v___x_12781_ = lean_uint8_dec_eq(v_hasValidUnixUser_12773_, v___x_12776_);
+if (v___x_12781_ == 0)
+{
+return v___x_12778_;
+}
+else
+{
+return v___x_12776_;
+}
+}
+}
+}
+else
+{
+return v___x_12776_;
+}
+}
+else
+{
+uint8_t v___x_12788_;
+v___x_12788_ = 0;
+return v___x_12788_;
+}
+}
+}
+
+LEAN_EXPORT uint64_t orb_user_spend_cap_step(uint8_t v_globalCapActive_12799_, uint32_t v_globalSpentCents_12800_, uint32_t v_globalCapCents_12801_, uint8_t v_userCapActive_12802_, uint32_t v_userSpentCents_12803_, uint32_t v_userCapCents_12804_, uint32_t v_deltaCents_12805_){
+_start:
+{
+uint64_t v___y_12807_; uint8_t v___y_12808_; uint64_t v___y_12809_; uint64_t v___y_12810_; uint8_t v___y_12811_; uint64_t v___y_12812_; uint8_t v___y_12813_; uint8_t v___y_12842_; uint64_t v___y_12843_; uint8_t v___y_12844_; uint64_t v___y_12845_; uint64_t v___y_12846_; uint64_t v___y_12847_; uint8_t v___y_12848_; uint64_t v___y_12854_; uint64_t v___y_12855_; uint64_t v___y_12856_; uint64_t v___y_12857_; uint8_t v___y_12858_; uint64_t v_maxLedger64_12864_; uint64_t v___x_12865_; uint64_t v___y_12867_; uint64_t v___y_12868_; uint64_t v___y_12869_; uint64_t v___y_12876_; uint8_t v___x_12879_;
+v_maxLedger64_12864_ = 1073741823ULL;
+v___x_12865_ = lean_uint32_to_uint64(v_globalSpentCents_12800_);
+v___x_12879_ = lean_uint64_dec_le(v___x_12865_, v_maxLedger64_12864_);
+if (v___x_12879_ == 0)
+{
+v___y_12876_ = v_maxLedger64_12864_;
+goto v___jp_12875_;
+}
+else
+{
+v___y_12876_ = v___x_12865_;
+goto v___jp_12875_;
+}
+v___jp_12806_:
+{
+if (v___y_12811_ == 0)
+{
+if (v___y_12813_ == 0)
+{
+if (v___y_12808_ == 0)
+{
+uint64_t v___x_12814_; uint64_t v___x_12815_; uint64_t v___x_12816_; uint64_t v___x_12817_; uint64_t v___x_12818_; uint64_t v___x_12819_; uint64_t v___x_12820_;
+v___x_12814_ = 1ULL;
+v___x_12815_ = 4ULL;
+v___x_12816_ = lean_uint64_shift_left(v___y_12809_, v___x_12815_);
+v___x_12817_ = lean_uint64_lor(v___x_12814_, v___x_12816_);
+v___x_12818_ = 34ULL;
+v___x_12819_ = lean_uint64_shift_left(v___y_12810_, v___x_12818_);
+v___x_12820_ = lean_uint64_lor(v___x_12817_, v___x_12819_);
+return v___x_12820_;
+}
+else
+{
+uint64_t v___x_12821_; uint64_t v___x_12822_; uint64_t v___x_12823_; uint64_t v___x_12824_; uint64_t v___x_12825_; uint64_t v___x_12826_; uint64_t v___x_12827_;
+v___x_12821_ = 6ULL;
+v___x_12822_ = 4ULL;
+v___x_12823_ = lean_uint64_shift_left(v___y_12807_, v___x_12822_);
+v___x_12824_ = lean_uint64_lor(v___x_12821_, v___x_12823_);
+v___x_12825_ = 34ULL;
+v___x_12826_ = lean_uint64_shift_left(v___y_12812_, v___x_12825_);
+v___x_12827_ = lean_uint64_lor(v___x_12824_, v___x_12826_);
+return v___x_12827_;
+}
+}
+else
+{
+uint64_t v___x_12828_; uint64_t v___x_12829_; uint64_t v___x_12830_; uint64_t v___x_12831_; uint64_t v___x_12832_; uint64_t v___x_12833_;
+v___x_12828_ = 4ULL;
+v___x_12829_ = lean_uint64_shift_left(v___y_12807_, v___x_12828_);
+v___x_12830_ = lean_uint64_lor(v___x_12828_, v___x_12829_);
+v___x_12831_ = 34ULL;
+v___x_12832_ = lean_uint64_shift_left(v___y_12812_, v___x_12831_);
+v___x_12833_ = lean_uint64_lor(v___x_12830_, v___x_12832_);
+return v___x_12833_;
+}
+}
+else
+{
+uint64_t v___x_12834_; uint64_t v___x_12835_; uint64_t v___x_12836_; uint64_t v___x_12837_; uint64_t v___x_12838_; uint64_t v___x_12839_; uint64_t v___x_12840_;
+v___x_12834_ = 2ULL;
+v___x_12835_ = 4ULL;
+v___x_12836_ = lean_uint64_shift_left(v___y_12807_, v___x_12835_);
+v___x_12837_ = lean_uint64_lor(v___x_12834_, v___x_12836_);
+v___x_12838_ = 34ULL;
+v___x_12839_ = lean_uint64_shift_left(v___y_12812_, v___x_12838_);
+v___x_12840_ = lean_uint64_lor(v___x_12837_, v___x_12839_);
+return v___x_12840_;
+}
+}
+v___jp_12841_:
+{
+uint8_t v___x_12849_;
+v___x_12849_ = lean_uint8_dec_eq(v_userCapActive_12802_, v___y_12842_);
+if (v___x_12849_ == 0)
+{
+uint64_t v___x_12850_; uint8_t v___x_12851_;
+v___x_12850_ = lean_uint32_to_uint64(v_userCapCents_12804_);
+v___x_12851_ = lean_uint64_dec_lt(v___x_12850_, v___y_12846_);
+v___y_12807_ = v___y_12843_;
+v___y_12808_ = v___y_12844_;
+v___y_12809_ = v___y_12845_;
+v___y_12810_ = v___y_12846_;
+v___y_12811_ = v___y_12848_;
+v___y_12812_ = v___y_12847_;
+v___y_12813_ = v___x_12851_;
+goto v___jp_12806_;
+}
+else
+{
+uint8_t v___x_12852_;
+v___x_12852_ = 0;
+v___y_12807_ = v___y_12843_;
+v___y_12808_ = v___y_12844_;
+v___y_12809_ = v___y_12845_;
+v___y_12810_ = v___y_12846_;
+v___y_12811_ = v___y_12848_;
+v___y_12812_ = v___y_12847_;
+v___y_12813_ = v___x_12852_;
+goto v___jp_12806_;
+}
+}
+v___jp_12853_:
+{
+uint8_t v___x_12859_; uint8_t v___x_12860_;
+v___x_12859_ = 0;
+v___x_12860_ = lean_uint8_dec_eq(v_globalCapActive_12799_, v___x_12859_);
+if (v___x_12860_ == 0)
+{
+uint64_t v___x_12861_; uint8_t v___x_12862_;
+v___x_12861_ = lean_uint32_to_uint64(v_globalCapCents_12801_);
+v___x_12862_ = lean_uint64_dec_lt(v___x_12861_, v___y_12855_);
+v___y_12842_ = v___x_12859_;
+v___y_12843_ = v___y_12854_;
+v___y_12844_ = v___y_12858_;
+v___y_12845_ = v___y_12855_;
+v___y_12846_ = v___y_12856_;
+v___y_12847_ = v___y_12857_;
+v___y_12848_ = v___x_12862_;
+goto v___jp_12841_;
+}
+else
+{
+uint8_t v___x_12863_;
+v___x_12863_ = 0;
+v___y_12842_ = v___x_12859_;
+v___y_12843_ = v___y_12854_;
+v___y_12844_ = v___y_12858_;
+v___y_12845_ = v___y_12855_;
+v___y_12846_ = v___y_12856_;
+v___y_12847_ = v___y_12857_;
+v___y_12848_ = v___x_12863_;
+goto v___jp_12841_;
+}
+}
+v___jp_12866_:
+{
+uint64_t v___x_12870_; uint64_t v_rawG64_12871_; uint64_t v_rawU64_12872_; uint8_t v___x_12873_;
+v___x_12870_ = lean_uint32_to_uint64(v_deltaCents_12805_);
+v_rawG64_12871_ = lean_uint64_add(v___x_12865_, v___x_12870_);
+v_rawU64_12872_ = lean_uint64_add(v___y_12868_, v___x_12870_);
+v___x_12873_ = lean_uint64_dec_lt(v_maxLedger64_12864_, v_rawG64_12871_);
+if (v___x_12873_ == 0)
+{
+uint8_t v___x_12874_;
+v___x_12874_ = lean_uint64_dec_lt(v_maxLedger64_12864_, v_rawU64_12872_);
+v___y_12854_ = v___y_12867_;
+v___y_12855_ = v_rawG64_12871_;
+v___y_12856_ = v_rawU64_12872_;
+v___y_12857_ = v___y_12869_;
+v___y_12858_ = v___x_12874_;
+goto v___jp_12853_;
+}
+else
+{
+v___y_12854_ = v___y_12867_;
+v___y_12855_ = v_rawG64_12871_;
+v___y_12856_ = v_rawU64_12872_;
+v___y_12857_ = v___y_12869_;
+v___y_12858_ = v___x_12873_;
+goto v___jp_12853_;
+}
+}
+v___jp_12875_:
+{
+uint64_t v___x_12877_; uint8_t v___x_12878_;
+v___x_12877_ = lean_uint32_to_uint64(v_userSpentCents_12803_);
+v___x_12878_ = lean_uint64_dec_le(v___x_12877_, v_maxLedger64_12864_);
+if (v___x_12878_ == 0)
+{
+v___y_12867_ = v___y_12876_;
+v___y_12868_ = v___x_12877_;
+v___y_12869_ = v_maxLedger64_12864_;
+goto v___jp_12866_;
+}
+else
+{
+v___y_12867_ = v___y_12876_;
+v___y_12868_ = v___x_12877_;
+v___y_12869_ = v___x_12877_;
+goto v___jp_12866_;
+}
+}
+}
+}
+
+LEAN_EXPORT uint32_t orb_privd_user_exec_step(uint8_t v_peerIsNodeUid_12896_, uint8_t v_leaseVerified_12897_, uint8_t v_nodeAdminOnly_12898_, uint8_t v_callerRole_12899_, uint8_t v_usernameValid_12900_, uint32_t v_targetUid_12901_, uint32_t v_targetGid_12902_, uint8_t v_gidDisjointPriv_12903_, uint8_t v_homeConfinedNoSymlink_12904_, uint8_t v_elanRootOwned_12905_){
+_start:
+{
+uint8_t v___x_12906_; uint8_t v___x_12927_;
+v___x_12906_ = 1;
+v___x_12927_ = lean_uint8_dec_eq(v_peerIsNodeUid_12896_, v___x_12906_);
+if (v___x_12927_ == 0)
+{
+uint32_t v___x_12928_;
+v___x_12928_ = 256;
+return v___x_12928_;
+}
+else
+{
+uint8_t v___x_12929_;
+v___x_12929_ = lean_uint8_dec_eq(v_leaseVerified_12897_, v___x_12906_);
+if (v___x_12929_ == 0)
+{
+uint32_t v___x_12930_;
+v___x_12930_ = 512;
+return v___x_12930_;
+}
+else
+{
+uint8_t v___x_12931_;
+v___x_12931_ = lean_uint8_dec_lt(v___x_12906_, v_callerRole_12899_);
+if (v___x_12931_ == 0)
+{
+uint8_t v___x_12932_; uint8_t v___x_12933_;
+v___x_12932_ = 0;
+v___x_12933_ = lean_uint8_dec_eq(v_callerRole_12899_, v___x_12932_);
+if (v___x_12933_ == 0)
+{
+goto v___jp_12907_;
+}
+else
+{
+uint8_t v___x_12934_;
+v___x_12934_ = lean_uint8_dec_eq(v_nodeAdminOnly_12898_, v___x_12932_);
+if (v___x_12934_ == 0)
+{
+uint32_t v___x_12935_;
+v___x_12935_ = 1024;
+return v___x_12935_;
+}
+else
+{
+goto v___jp_12907_;
+}
+}
+}
+else
+{
+uint32_t v___x_12936_;
+v___x_12936_ = 768;
+return v___x_12936_;
+}
+}
+}
+v___jp_12907_:
+{
+uint8_t v___x_12908_;
+v___x_12908_ = lean_uint8_dec_eq(v_usernameValid_12900_, v___x_12906_);
+if (v___x_12908_ == 0)
+{
+uint32_t v___x_12909_;
+v___x_12909_ = 1280;
+return v___x_12909_;
+}
+else
+{
+uint32_t v___x_12910_; uint8_t v___x_12911_;
+v___x_12910_ = 2000;
+v___x_12911_ = lean_uint32_dec_lt(v_targetUid_12901_, v___x_12910_);
+if (v___x_12911_ == 0)
+{
+uint32_t v___x_12912_; uint8_t v___x_12913_;
+v___x_12912_ = 65534;
+v___x_12913_ = lean_uint32_dec_le(v___x_12912_, v_targetUid_12901_);
+if (v___x_12913_ == 0)
+{
+uint8_t v___x_12914_;
+v___x_12914_ = lean_uint32_dec_lt(v_targetGid_12902_, v___x_12910_);
+if (v___x_12914_ == 0)
+{
+uint8_t v___x_12915_;
+v___x_12915_ = lean_uint32_dec_le(v___x_12912_, v_targetGid_12902_);
+if (v___x_12915_ == 0)
+{
+uint8_t v___x_12916_;
+v___x_12916_ = lean_uint8_dec_eq(v_gidDisjointPriv_12903_, v___x_12906_);
+if (v___x_12916_ == 0)
+{
+uint32_t v___x_12917_;
+v___x_12917_ = 1792;
+return v___x_12917_;
+}
+else
+{
+uint8_t v___x_12918_;
+v___x_12918_ = lean_uint8_dec_eq(v_homeConfinedNoSymlink_12904_, v___x_12906_);
+if (v___x_12918_ == 0)
+{
+uint32_t v___x_12919_;
+v___x_12919_ = 2048;
+return v___x_12919_;
+}
+else
+{
+uint8_t v___x_12920_;
+v___x_12920_ = lean_uint8_dec_eq(v_elanRootOwned_12905_, v___x_12906_);
+if (v___x_12920_ == 0)
+{
+uint32_t v___x_12921_;
+v___x_12921_ = 2304;
+return v___x_12921_;
+}
+else
+{
+uint32_t v___x_12922_;
+v___x_12922_ = 1;
+return v___x_12922_;
+}
+}
+}
+}
+else
+{
+uint32_t v___x_12923_;
+v___x_12923_ = 1536;
+return v___x_12923_;
+}
+}
+else
+{
+uint32_t v___x_12924_;
+v___x_12924_ = 1536;
+return v___x_12924_;
+}
+}
+else
+{
+uint32_t v___x_12925_;
+v___x_12925_ = 1536;
+return v___x_12925_;
+}
+}
+else
+{
+uint32_t v___x_12926_;
+v___x_12926_ = 1536;
+return v___x_12926_;
+}
+}
+}
+}
+}
+
 LEAN_EXPORT uint8_t leansys_verify_slice_bounds(uint64_t v_off_143_, uint64_t v_len_144_, uint64_t v_cap_145_){
 _start:
 {

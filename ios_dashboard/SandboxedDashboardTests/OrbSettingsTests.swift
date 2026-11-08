@@ -235,4 +235,90 @@ final class OrbSettingsTests: XCTestCase {
         XCTAssertEqual(OrbProviderKeyEditor.parseOptionalCap("100001", min: 1, max: 100_000), .invalid)
     }
 
+    func testMultiUserUnixUsernameAndFailClosedRBAC() {
+        XCTAssertTrue(OrbUsersModel.validUnixUsername("orb_alice"))
+        XCTAssertTrue(OrbUsersModel.validUnixUsername("_svc01"))
+        XCTAssertFalse(OrbUsersModel.validUnixUsername("1bad"))
+        XCTAssertFalse(OrbUsersModel.validUnixUsername("Alice"))
+        XCTAssertFalse(OrbUsersModel.validUnixUsername(""))
+        XCTAssertEqual(OrbUsersModel.defaultUnixUsernameFor("Alice.Dev"), "orb-alice-dev")
+
+        let savedMode = OrbCore.shared.authMode
+        let savedUser = OrbCore.shared.currentUser
+        defer {
+            OrbCore.shared.authMode = savedMode
+            OrbCore.shared.currentUser = savedUser
+        }
+        OrbCore.shared.authMode = .multiUser
+        OrbCore.shared.currentUser = nil
+        XCTAssertFalse(OrbCore.shared.isAdminUser, "Multi-user mode must fail closed before /api/auth/me resolves")
+
+        OrbCore.shared.currentUser = OrbCore.CurrentUser(
+            id: "u1",
+            username: "alice",
+            role: "member",
+            unixUsername: "orb_alice",
+            dailySpendCapCents: 1500,
+            spentTodayCents: 325
+        )
+        XCTAssertFalse(OrbCore.shared.isAdminUser)
+
+        OrbCore.shared.currentUser = OrbCore.CurrentUser(
+            id: "u0",
+            username: "admin",
+            role: "admin",
+            unixUsername: "orb_admin",
+            dailySpendCapCents: nil,
+            spentTodayCents: 0
+        )
+        XCTAssertTrue(OrbCore.shared.isAdminUser)
+    }
+
+    func testAdminOnlyNodeFilteringAndSharedSenderAttribution() {
+        let coreNode: OrbJSON = .object(["id": .string("core"), "status": .string("online")])
+        let sparkAdmin: OrbJSON = .object(["id": .string("dgx-spark-admin"), "status": .string("online")])
+        let labelledAdmin: OrbJSON = .object(["id": .string("gpu-priv"), "status": .string("online"), "labels": .array([.string("admin-only")])])
+        let memberNode: OrbJSON = .object(["id": .string("cpu-worker-1"), "status": .string("online")])
+        XCTAssertTrue(OrbManaged.isAdminOnlyNode(coreNode))
+        XCTAssertTrue(OrbManaged.isAdminOnlyNode(sparkAdmin))
+        XCTAssertTrue(OrbManaged.isAdminOnlyNode(labelledAdmin))
+        XCTAssertFalse(OrbManaged.isAdminOnlyNode(memberNode))
+        XCTAssertEqual(
+            OrbSelection.sortedComputeNodes([coreNode, sparkAdmin, labelledAdmin, memberNode], includeAdminNodes: false).map { $0["id"].text },
+            ["cpu-worker-1"]
+        )
+
+        let events = [
+            StoredEvent(
+                id: 1,
+                missionId: "m1",
+                sequence: 1,
+                eventType: "user_message",
+                timestamp: "2026-11-08T00:00:00Z",
+                eventId: "e1",
+                toolCallId: nil,
+                toolName: nil,
+                content: "Can you check the logs?",
+                metadata: ["sender_username": AnyCodable("bob")]
+            ),
+            StoredEvent(
+                id: 2,
+                missionId: "m1",
+                sequence: 2,
+                eventType: "assistant_message",
+                timestamp: "2026-11-08T00:00:02Z",
+                eventId: "e2",
+                toolCallId: nil,
+                toolName: nil,
+                content: "Checking now.",
+                metadata: [:]
+            ),
+        ]
+        let model = OrbTranscriptModel()
+        model.events = events
+        _ = model.rebuildHistory(isCloud: false, turns: [], mission: .object([:]), optimisticPrompt: nil)
+        XCTAssertEqual(model.history.count, 2)
+        XCTAssertEqual(model.senderByItemID["turn-0-user"], "bob")
+    }
+
 }

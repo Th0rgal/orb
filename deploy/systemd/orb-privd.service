@@ -9,6 +9,9 @@ Group=root
 UMask=0007
 NoNewPrivileges=false
 Environment=ORB_PRIVD_SOCKET_GROUP=sandboxed-node
+Environment=ORB_PRIVD_HOME_ROOT=/home
+Environment=ORB_PRIVD_SHARED_ELAN=/opt/orb/elan
+Environment=ORB_PRIVD_STATE_DIR=/run/orb-privd-jobs
 EnvironmentFile=-/etc/orb-privd.env
 EnvironmentFile=-/etc/orb-node.env
 EnvironmentFile=-/etc/sandboxed-node.env

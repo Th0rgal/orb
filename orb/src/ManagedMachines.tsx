@@ -1,5 +1,5 @@
 import { For, Index, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
-import { api, connectionVersion, isConnected, type RemoteNodeView } from "./api";
+import { api, connectionVersion, isAdminUser, isConnected, type RemoteNodeView } from "./api";
 import { swallow } from "./log";
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
@@ -11,7 +11,7 @@ import { useNow } from "./time";
 import * as Ic from "./icons";
 import {
   MANAGED_GROUP_PREVIEW_LIMIT, allowedSizes, budgetFull, budgetLeft, budgetLine, canStopMachine, costLine, credentialSourceLabel, groupMachinesByProvider, isProviderEnabled, isProviderUsable, listManagedProviders, managedSectionTitle, providerGroupSummary, providerLabel, providerStatusLine, sizeLabel, specLine, stopManagedMachine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
-  isStarting, listManagedMachines, liveCost, machineName, managedNodeIds, managedError, minutesLabel, recentMachines, sizeSpec, stateLabel, ttlLeft, ttlUrgent, updateManagedProvider,
+  isStarting, listManagedMachines, liveCost, machineName, managedNodeIds, managedError, minutesLabel, recentMachines, setManagedProviderPreference, sizeSpec, stateLabel, ttlLeft, ttlUrgent, updateManagedProvider,
   spendDayDetail, spendFraction, spendSummary, spendWeekday,
   machineOwner, reapLine, usd, usdPerHour, isStopped, resumeManagedMachine, listManagedSnapshots, deleteManagedSnapshot, snapshotLine, type ManagedSnapshot, type CreateManagedMachine, type DailySpend, type ManagedBudget, type ManagedMachine, type ManagedMachinesResponse, type ManagedProviderInfo, type ManagedProviderPatch, type ManagedSize,
 } from "./managedMachineModel";
@@ -296,14 +296,23 @@ export function MachineProvidersCard(p: { providers?: readonly ManagedProviderIn
 
   const toggle = async (pr: ManagedProviderInfo, targetEnabled = !isProviderEnabled(pr)) => {
     const previous = pr;
-    const optimistic: ManagedProviderInfo = { ...pr, enabled: targetEnabled };
+    const admin = isAdminUser();
+    const optimistic: ManagedProviderInfo = admin
+      ? { ...pr, enabled: targetEnabled, globally_enabled: targetEnabled, effective_enabled: targetEnabled && pr.user_enabled !== false }
+      : { ...pr, user_enabled: targetEnabled, effective_enabled: pr.globally_enabled !== false && targetEnabled };
     setErr(null);
     setBusyProvider(pr.provider);
     setLocalOverrides(m => new Map(m).set(pr.provider, optimistic));
     try {
-      const saved = await updateManagedProvider(pr.provider, { enabled: targetEnabled });
-      window.dispatchEvent(new CustomEvent("orb:managed-providers-changed", { detail: saved }));
-      applyUpdate(saved);
+      if (admin) {
+        const saved = await updateManagedProvider(pr.provider, { enabled: targetEnabled });
+        window.dispatchEvent(new CustomEvent("orb:managed-providers-changed", { detail: saved }));
+        applyUpdate(saved);
+      } else {
+        await setManagedProviderPreference(pr.provider, targetEnabled);
+        window.dispatchEvent(new CustomEvent("orb:managed-providers-changed", { detail: optimistic }));
+        applyUpdate(optimistic);
+      }
     } catch (e) {
       setLocalOverrides(m => {
         const next = new Map(m);
@@ -345,18 +354,20 @@ export function MachineProvidersCard(p: { providers?: readonly ManagedProviderIn
                   class={`toggle ${isProviderEnabled(pr()) ? "on" : ""}`}
                   role="switch"
                   aria-checked={isProviderEnabled(pr())}
-                  aria-label={`Enable ${label()}`}
-                  disabled={busyProvider() === id}
+                  aria-label={isAdminUser() ? `Enable ${label()}` : `Use ${label()} for my missions`}
+                  disabled={busyProvider() === id || (!isAdminUser() && (pr().globally_enabled === false || !pr().configured))}
                   onClick={() => void toggle(pr())}
                 />
-                <button
-                  type="button"
-                  class="s-btn sm quiet"
-                  aria-label={`Configure ${label()}`}
-                  onClick={() => setEditing(pr())}
-                >
-                  {pr().configured ? "Configure" : "Set up"}
-                </button>
+                <Show when={isAdminUser()}>
+                  <button
+                    type="button"
+                    class="s-btn sm quiet"
+                    aria-label={`Configure ${label()}`}
+                    onClick={() => setEditing(pr())}
+                  >
+                    {pr().configured ? "Configure" : "Set up"}
+                  </button>
+                </Show>
               </div>
             </div>
           </Show>;

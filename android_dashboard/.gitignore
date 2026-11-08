@@ -7,6 +7,7 @@ captures/
 .externalNativeBuild/
 .cxx/
 .kotlin/
+app/src/test/resources/jni/liborb_kernel.dylib
 
 # Throwaway dev signing material — generate your own and pass via env vars.
 keys/

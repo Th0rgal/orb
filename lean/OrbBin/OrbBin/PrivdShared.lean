@@ -45,8 +45,63 @@ def unsafeEnvKeys : Array String := #[
   "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "LD_DEBUG", "DYLD_INSERT_LIBRARIES",
   "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "NODE_OPTIONS", "RUBYLIB", "RUBYOPT",
   "PERL5LIB", "PERL5OPT", "BASH_ENV", "ENV", "PROMPT_COMMAND", "IFS", "PATH",
-  "GCONV_PATH", "LOCPATH", "ORB_CORE_API_URL", "ORB_CORE_API_TOKEN"
+  "GCONV_PATH", "LOCPATH", "ORB_CORE_API_URL", "ORB_CORE_API_TOKEN",
+  "ORB_NODE_TOKEN", "SANDBOXED_NODE_TOKEN", "SANDBOXED_SH_TOKEN", "ORB_API_TOKEN"
 ]
+
+def privilegedUnixGroups : Array String := #[
+  "root", "sudo", "wheel", "docker", "adm", "shadow", "sandboxed-node", "orb-node"
+]
+
+def isSafeJobUnitIdent (s : String) : Bool :=
+  !s.isEmpty && s.length ≤ 80 &&
+  s.all (fun c => c.isAlphanum || c == '-' || c == '_')
+
+def isSafeMissionDirIdent (s : String) : Bool :=
+  !s.isEmpty && s.length ≤ 128 &&
+  s != "." && s != ".." &&
+  s.all (fun c => c.isAlphanum || c == '-' || c == '_')
+
+def scrubUserJobEnv (envPairs : Array (String × String)) (homeDir : String) : Array (String × String) := Id.run do
+  let mut out : Array (String × String) := #[]
+  for (kRaw, vRaw) in envPairs do
+    let k := kRaw.trimAscii.toString
+    let ku := k.toUpper
+    if isSafeEnvIdent k &&
+       !unsafeEnvKeys.any (· == ku) &&
+       !ku.startsWith "LD_" && !ku.startsWith "DYLD_" &&
+       !(vRaw.any (· == '\x00')) then
+      out := (out.filter (fun (ek, _) => ek != k)).push (k, vRaw)
+  let userPath := s!"{homeDir}/.elan/bin:/opt/orb-tools/bin:/opt/sandboxed-tools/bin:/usr/local/bin:/usr/bin:/bin"
+  out := (out.filter (fun (ek, _) => ek != "HOME" && ek != "PATH" && ek != "ELAN_HOME"))
+    |>.push ("HOME", homeDir)
+    |>.push ("ELAN_HOME", s!"{homeDir}/.elan")
+    |>.push ("PATH", userPath)
+  return out
+
+def checkUserExecAdmission
+    (peerIsNodeUid : Bool)
+    (leaseVerified : Bool)
+    (nodeAdminOnly : Bool)
+    (callerRole : String)
+    (unixUsername : String)
+    (targetUid targetGid : UInt32)
+    (gidDisjointPriv : Bool)
+    (homeConfinedNoSymlink : Bool)
+    (elanRootOwned : Bool) : UInt32 :=
+  let roleBit : UInt8 := if callerRole == "admin" then 1 else 0
+  let uValid : UInt8 := if Orb.Kernel.validUnixUsername unixUsername then 1 else 0
+  Orb.Kernel.privdUserExecStep
+    (if peerIsNodeUid then 1 else 0)
+    (if leaseVerified then 1 else 0)
+    (if nodeAdminOnly then 1 else 0)
+    roleBit
+    uValid
+    targetUid
+    targetGid
+    (if gidDisjointPriv then 1 else 0)
+    (if homeConfinedNoSymlink then 1 else 0)
+    (if elanRootOwned then 1 else 0)
 
 def allowedHarnesses : Array String := #[
   "claude", "codex", "opencode", "grok", "vibe"

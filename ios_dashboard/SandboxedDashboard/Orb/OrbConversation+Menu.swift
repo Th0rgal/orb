@@ -26,7 +26,8 @@ extension OrbConversation {
             local: !isCloud,
             canFork: !isCloud || canCloudHandoff,
             forkTitle: isCloud ? "Continue in workspace" : "Fork",
-            hasProject: !effectiveProjectSlug.isEmpty
+            hasProject: !effectiveProjectSlug.isEmpty,
+            isParticipant: isParticipant
         ) { action in
             switch action {
             case .rename: title = mission["title"].text; rename = true
@@ -39,6 +40,18 @@ extension OrbConversation {
             case .fork: forking = true
             case .clone: cloning = true
             case .context: showContext = true
+            case .share: sharing = true
+            case .leave:
+                Task {
+                    do {
+                        if let id {
+                            try await OrbMissionSharing.leaveSharedMission(missionID: id)
+                            dismissConversation()
+                        }
+                    } catch {
+                        self.error = error.localizedDescription
+                    }
+                }
             }
         }
         .equatable()

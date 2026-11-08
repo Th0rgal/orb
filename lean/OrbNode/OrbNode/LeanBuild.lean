@@ -70,6 +70,9 @@ def prepareSharedMissionEnv (workDir cwd : String) : IO (Array (String × String
       if ← (p / "toolchains").isDir then pure p else pure wElan
     else if ← (System.FilePath.mk "/opt/orb/elan/toolchains").isDir then
       pure (System.FilePath.mk "/opt/orb/elan")
+    else if let some h ← getEnvNonEmpty "HOME" then
+      let p := System.FilePath.mk h / ".elan"
+      if ← (p / "toolchains").isDir then pure p else pure wElan
     else pure wElan
   let tl := caches / "turbo-lean"
   let bin := caches / "bin"
@@ -698,6 +701,9 @@ def buildLeanJobEnv
       if ← (p / "toolchains").isDir then pure p else pure wElan
     else if ← (System.FilePath.mk "/opt/orb/elan/toolchains").isDir then
       pure (System.FilePath.mk "/opt/orb/elan")
+    else if let some h ← getEnvNonEmpty "HOME" then
+      let p := System.FilePath.mk h / ".elan"
+      if ← (p / "toolchains").isDir then pure p else pure wElan
     else pure wElan
   let repoHash16 := (bytesToHexLower (sha256Bytes repo.toUTF8)).take 16 |>.toString
   let tlHome := caches / "turbo-lean" / repoHash16

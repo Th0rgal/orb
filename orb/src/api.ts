@@ -421,7 +421,7 @@ function disconnectNativeSync(){
 export function setConnection(url: string, token: string) {
   const changed = url.replace(/\/+$/,"")!==getApiUrl() || token!==getJwt();
   if(getJwt() && changed)disconnectNativeSync();
-  if(changed){resetMissionHierarchy();ancestorCache.clear();void clearPersistentCache();}
+  if(changed){resetMissionHierarchy();ancestorCache.clear();void clearPersistentCache();resetCurrentUserState();}
   resetNetworkHealth();
   setApiUrl(url);
   localStorage.setItem(JWT_KEY, token);
@@ -437,6 +437,7 @@ export function clearConnection() {
   resetMissionHierarchy();
   ancestorCache.clear();
   resetNetworkHealth();
+  resetCurrentUserState();
   void clearPersistentCache();
   const hadConnection = connected() || !!getJwt();
   localStorage.removeItem(JWT_KEY);
@@ -446,6 +447,135 @@ export function clearConnection() {
   invalidateReads();
   cacheReset();
   bumpConnectionVersion(v => v + 1);
+}
+
+export interface CurrentUser {
+  id: string;
+  username: string;
+  role: "admin" | "member";
+  unix_username: string | null;
+  daily_spend_cap_cents: number | null;
+  spent_today_cents: number;
+}
+
+export interface AuthCapabilities {
+  can_manage_users: boolean;
+  can_use_core_target: boolean;
+  can_manage_global_providers: boolean;
+}
+
+export interface AuthStatusInfo {
+  auth_mode: "disabled" | "single_tenant" | "multi_user" | string;
+  password_source: "dashboard" | "environment" | "users" | "env" | "none" | string;
+  password_changed_at?: string | null;
+  dev_mode: boolean;
+  auth_required?: boolean;
+  authenticated?: boolean;
+  user?: CurrentUser | null;
+  capabilities?: AuthCapabilities | null;
+}
+
+export type AuthMeResponse = AuthStatusInfo;
+
+const [currentUserSignal, setCurrentUserSignal] = createSignal<CurrentUser | null>(null);
+const [authCapabilitiesSignal, setAuthCapabilitiesSignal] = createSignal<AuthCapabilities | null>(null);
+const [authModeSignal, setAuthModeSignal] = createSignal<string>("single_tenant");
+const [currentUserLoadingSignal, setCurrentUserLoadingSignal] = createSignal<boolean>(false);
+
+export const currentUser = currentUserSignal;
+export const authCapabilities = authCapabilitiesSignal;
+export const authModeState = authModeSignal;
+export const currentUserLoading = currentUserLoadingSignal;
+
+export function resetCurrentUserState(nextAuthMode = "single_tenant"): void {
+  setCurrentUserSignal(null);
+  setAuthCapabilitiesSignal(null);
+  setAuthModeSignal(nextAuthMode);
+  setCurrentUserLoadingSignal(false);
+}
+
+export function applyAuthMeResponse(info: Partial<AuthMeResponse> | null | undefined): void {
+  if (!info) {
+    resetCurrentUserState();
+    return;
+  }
+  const mode = typeof info.auth_mode === "string" && info.auth_mode ? info.auth_mode : "single_tenant";
+  setAuthModeSignal(mode);
+  if (info.user && typeof info.user.id === "string" && typeof info.user.username === "string") {
+    const role = info.user.role === "member" ? "member" : "admin";
+    setCurrentUserSignal({
+      id: info.user.id,
+      username: info.user.username,
+      role,
+      unix_username: typeof info.user.unix_username === "string" && info.user.unix_username ? info.user.unix_username : null,
+      daily_spend_cap_cents:
+        typeof info.user.daily_spend_cap_cents === "number" && Number.isFinite(info.user.daily_spend_cap_cents)
+          ? info.user.daily_spend_cap_cents
+          : null,
+      spent_today_cents:
+        typeof info.user.spent_today_cents === "number" && Number.isFinite(info.user.spent_today_cents)
+          ? info.user.spent_today_cents
+          : 0,
+    });
+  } else {
+    setCurrentUserSignal(null);
+  }
+  if (info.capabilities && typeof info.capabilities === "object") {
+    setAuthCapabilitiesSignal({
+      can_manage_users: Boolean(info.capabilities.can_manage_users),
+      can_use_core_target: Boolean(info.capabilities.can_use_core_target),
+      can_manage_global_providers: Boolean(info.capabilities.can_manage_global_providers),
+    });
+  } else {
+    setAuthCapabilitiesSignal(null);
+  }
+}
+
+export function isAdminUser(): boolean {
+  const u = currentUserSignal();
+  if (u) return u.role === "admin";
+  const caps = authCapabilitiesSignal();
+  if (caps) return caps.can_manage_users;
+  return authModeSignal() !== "multi_user";
+}
+
+let inflightAuthMe: { version: number; promise: Promise<AuthMeResponse | null> } | null = null;
+
+export async function refreshCurrentUser(force = false): Promise<AuthMeResponse | null> {
+  if (!isConnected()) {
+    resetCurrentUserState();
+    return null;
+  }
+  const version = connectionVersion();
+  if (!force && inflightAuthMe && inflightAuthMe.version === version) {
+    return inflightAuthMe.promise;
+  }
+  setCurrentUserLoadingSignal(true);
+  let tracked: Promise<AuthMeResponse | null> | null = null;
+  const promise = (async (): Promise<AuthMeResponse | null> => {
+    try {
+      const me = await api<AuthMeResponse>("/api/auth/me", force ? { method: "GET" } : undefined);
+      if (version === connectionVersion()) applyAuthMeResponse(me);
+      return me;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        try {
+          const st = await api<AuthStatusInfo>("/api/auth/status");
+          if (version === connectionVersion()) applyAuthMeResponse(st);
+          return st;
+        } catch {
+          // Legacy server without /api/auth/status
+        }
+      }
+      return null;
+    } finally {
+      if (version === connectionVersion()) setCurrentUserLoadingSignal(false);
+      if (tracked && inflightAuthMe?.promise === tracked) inflightAuthMe = null;
+    }
+  })();
+  tracked = promise;
+  inflightAuthMe = { version, promise };
+  return promise;
 }
 
 export interface ServerHealthInfo {
@@ -790,6 +920,8 @@ export interface RemoteNodeView {
   error: string | null;
   cordoned: boolean;
   quarantined_harnesses?: string[];
+  admin_only?: boolean;
+  core_colocated?: boolean;
 }
 
 /**
@@ -844,6 +976,9 @@ export interface AIProvider {
   rpm_limit?: number | null;
   max_concurrency?: number | null;
   enabled: boolean;
+  globally_enabled?: boolean;
+  user_enabled?: boolean;
+  effective_enabled?: boolean;
   uses_oauth: boolean;
   has_api_key?: boolean;
   has_oauth?: boolean;
@@ -937,8 +1072,17 @@ export interface Mission {
   first_viewed_at?: string | null;
   last_output_at?: string | null;
   metadata_updated_at?: string | null;
+  owner_user_id?: string | null;
+  owner_username?: string | null;
+  viewer_role?: "owner" | "participant" | string | null;
+  shared_with?: Array<{ user_id: string; username: string; created_at?: string }>;
   created_at: string;
   updated_at: string;
+}
+
+/** True when the signed-in user is viewing a mission owned by another user via an explicit share. */
+export function isMissionParticipant(mission?: Pick<Mission, "viewer_role"> | null): boolean {
+  return mission?.viewer_role === "participant";
 }
 
 export interface CreateMissionBody {
@@ -1104,6 +1248,15 @@ export async function setRemoteNodeCordoned(
 export async function setProviderEnabled(id: string, enabled: boolean): Promise<AIProvider> {
   return api<AIProvider>(`/api/ai/providers/${encodeURIComponent(id)}`, {
     method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }),
+  });
+}
+
+/** Per-user preference for whether this globally configured provider account may be used for the caller's missions. */
+export async function setProviderUserPreference(id: string, enabled: boolean): Promise<{ ok?: boolean; provider_id?: string; user_enabled?: boolean }> {
+  return api(`/api/ai/providers/${encodeURIComponent(id)}/preference`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
   });
 }
 

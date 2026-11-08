@@ -500,3 +500,23 @@ JNIEXPORT jlong JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_orbClientLinkBudgetStep(JNIEnv *env, jclass clazz, jint srttMs, jint rttVarMs, jint consecutiveFailures, jint isConstrained, jint p0InFlight) {
     return (jlong)orb_client_link_budget_step((uint32_t)srttMs, (uint32_t)rttVarMs, (uint32_t)consecutiveFailures, (uint8_t)isConstrained, (uint32_t)p0InFlight);
 }
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbMultiuserRbacStep(JNIEnv *env, jclass clazz, jint callerAuthed, jint callerDisabled, jint epochMatches, jint callerRole, jint opClass, jint isOwner, jint isSharedParticipant) {
+    return (jint)orb_multiuser_rbac_step((uint8_t)callerAuthed, (uint8_t)callerDisabled, (uint8_t)epochMatches, (uint8_t)callerRole, (uint8_t)opClass, (uint8_t)isOwner, (uint8_t)isSharedParticipant);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbPlacementRoleAdmit(JNIEnv *env, jclass clazz, jint callerRole, jint targetKind, jint nodeAdminOnly, jint hasValidUnixUser) {
+    return (jint)orb_placement_role_admit((uint8_t)callerRole, (uint8_t)targetKind, (uint8_t)nodeAdminOnly, (uint8_t)hasValidUnixUser);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbUserSpendCapStep(JNIEnv *env, jclass clazz, jint globalCapActive, jint globalSpentCents, jint globalCapCents, jint userCapActive, jint userSpentCents, jint userCapCents, jint deltaCents) {
+    return (jlong)orb_user_spend_cap_step((uint8_t)globalCapActive, (uint32_t)globalSpentCents, (uint32_t)globalCapCents, (uint8_t)userCapActive, (uint32_t)userSpentCents, (uint32_t)userCapCents, (uint32_t)deltaCents);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbPrivdUserExecStep(JNIEnv *env, jclass clazz, jint peerIsNodeUid, jint leaseVerified, jint nodeAdminOnly, jint callerRole, jint usernameValid, jint targetUid, jint targetGid, jint gidDisjointPriv, jint homeConfinedNoSymlink, jint elanRootOwned) {
+    return (jint)orb_privd_user_exec_step((uint8_t)peerIsNodeUid, (uint8_t)leaseVerified, (uint8_t)nodeAdminOnly, (uint8_t)callerRole, (uint8_t)usernameValid, (uint32_t)targetUid, (uint32_t)targetGid, (uint8_t)gidDisjointPriv, (uint8_t)homeConfinedNoSymlink, (uint8_t)elanRootOwned);
+}

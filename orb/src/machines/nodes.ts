@@ -237,3 +237,16 @@ export const nodeLabel = (id: string) => {
     : id === "dgx-spark-admin" ? "DGX Spark · Administration"
     : id);
 };
+
+export const isAdminOnlyNode = (
+  node:
+    | { id?: string | null; admin_only?: boolean | null; core_colocated?: boolean | null; labels?: readonly string[] | null }
+    | null
+    | undefined,
+): boolean => {
+  if (!node) return false;
+  if (node.id === "core" || node.id === "agent-core" || node.id === "dgx-spark-admin") return true;
+  if (node.admin_only === true || node.core_colocated === true) return true;
+  return Boolean(node.labels?.some(l => l.trim().toLowerCase() === "admin-only"));
+};
+

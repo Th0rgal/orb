@@ -6168,6 +6168,158 @@
         "method": "orbClientLinkBudgetStep",
         "ret": "jlong"
       }
+    },
+    {
+      "name": "orb_multiuser_rbac_step",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "callerAuthed",
+          "type": "uint8_t"
+        },
+        {
+          "name": "callerDisabled",
+          "type": "uint8_t"
+        },
+        {
+          "name": "epochMatches",
+          "type": "uint8_t"
+        },
+        {
+          "name": "callerRole",
+          "type": "uint8_t"
+        },
+        {
+          "name": "opClass",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isOwner",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isSharedParticipant",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbMultiuserRbacStep",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "orb_placement_role_admit",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "callerRole",
+          "type": "uint8_t"
+        },
+        {
+          "name": "targetKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "nodeAdminOnly",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasValidUnixUser",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbPlacementRoleAdmit",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "orb_user_spend_cap_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "globalCapActive",
+          "type": "uint8_t"
+        },
+        {
+          "name": "globalSpentCents",
+          "type": "uint32_t"
+        },
+        {
+          "name": "globalCapCents",
+          "type": "uint32_t"
+        },
+        {
+          "name": "userCapActive",
+          "type": "uint8_t"
+        },
+        {
+          "name": "userSpentCents",
+          "type": "uint32_t"
+        },
+        {
+          "name": "userCapCents",
+          "type": "uint32_t"
+        },
+        {
+          "name": "deltaCents",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbUserSpendCapStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_privd_user_exec_step",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "peerIsNodeUid",
+          "type": "uint8_t"
+        },
+        {
+          "name": "leaseVerified",
+          "type": "uint8_t"
+        },
+        {
+          "name": "nodeAdminOnly",
+          "type": "uint8_t"
+        },
+        {
+          "name": "callerRole",
+          "type": "uint8_t"
+        },
+        {
+          "name": "usernameValid",
+          "type": "uint8_t"
+        },
+        {
+          "name": "targetUid",
+          "type": "uint32_t"
+        },
+        {
+          "name": "targetGid",
+          "type": "uint32_t"
+        },
+        {
+          "name": "gidDisjointPriv",
+          "type": "uint8_t"
+        },
+        {
+          "name": "homeConfinedNoSymlink",
+          "type": "uint8_t"
+        },
+        {
+          "name": "elanRootOwned",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbPrivdUserExecStep",
+        "ret": "jint"
+      }
     }
   ]
 }

@@ -837,7 +837,13 @@ private fun MissionSettingsCard(
 /** Full-screen Mission settings page on Android: Runway forecast + Budget + Bandwidth & pacing +
  * Machine limit + Subagents. Optimistic, with rollback and Retry on refusal. */
 @Composable
-fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, onDismiss: () -> Unit) {
+fun OrbMissionSettingsDialog(
+    core: OrbCore,
+    missionId: String,
+    title: String,
+    readOnly: Boolean = false,
+    onDismiss: () -> Unit,
+) {
     val scope = rememberCoroutineScope()
     val path = "/api/control/missions/${core.encodeComponent(missionId)}/budget"
     var view by remember { mutableStateOf<OrbMissionBudget?>(null) }
@@ -913,6 +919,7 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
     LaunchedEffect(missionId) { load() }
 
     fun commit(amount: Double?) {
+        if (readOnly) return
         val before = view ?: return
         if (busy) return
         busy = true; saveError = null; retry = null
@@ -935,6 +942,7 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
     }
 
     fun commitVmLimits(limits: OrbMissionBudget.VmConcurrencyLimits?) {
+        if (readOnly) return
         val before = view ?: return
         if (busy) return
         busy = true; vmSaveError = null; vmRetry = null
@@ -958,6 +966,7 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
     }
 
     fun commitBandwidth(limits: OrbMissionBudget.BandwidthLimits?) {
+        if (readOnly) return
         val before = view ?: return
         if (busy) return
         busy = true; bwSaveError = null; bwRetry = null
@@ -1000,9 +1009,14 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Mission settings", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
-                        if (title.isNotEmpty()) {
+                        val sub = when {
+                            readOnly && title.isNotEmpty() -> "$title · Shared conversation (read-only)"
+                            readOnly -> "Shared conversation · read-only"
+                            else -> title
+                        }
+                        if (sub.isNotEmpty()) {
                             Text(
-                                title,
+                                sub,
                                 color = OrbStyle.textSecondary,
                                 fontSize = 12.sp,
                                 maxLines = 1,
@@ -1095,7 +1109,7 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                     }
                                     Switch(
                                         checked = v.mode == "own",
-                                        enabled = !busy,
+                                        enabled = !busy && !readOnly,
                                         onCheckedChange = { on ->
                                             if (!on) commit(null) else {
                                                 val initial = v.maxGrant?.let { minOf(5.0, floor(it * 100) / 100) } ?: 5.0
@@ -1119,7 +1133,8 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                             if (draft.isEmpty()) Text("Amount (USD)", color = OrbStyle.textMuted, fontSize = 14.sp)
                                             BasicTextField(
                                                 value = draft,
-                                                onValueChange = { draft = it },
+                                                onValueChange = { if (!readOnly) draft = it },
+                                                enabled = !readOnly,
                                                 singleLine = true,
                                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                                 textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
@@ -1127,19 +1142,21 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                                 modifier = Modifier.fillMaxWidth().testTag("mission.settings.budget.amount"),
                                             )
                                         }
-                                        TextButton(
-                                            enabled = !busy && draft != formatAmount(v.ownBudget),
-                                            onClick = {
-                                                val amount = OrbMissionBudget.parseAmount(draft)
-                                                val max = v.maxGrant
-                                                saveError = when {
-                                                    amount == null -> "Enter a positive amount"
-                                                    max != null && amount > max + 1e-9 -> "The parent pool has ${OrbMissionBudget.money(max)} left to grant"
-                                                    else -> null
-                                                }
-                                                if (saveError == null && amount != null) commit(amount)
-                                            },
-                                        ) { Text("Save", color = Color.White) }
+                                        if (!readOnly) {
+                                            TextButton(
+                                                enabled = !busy && draft != formatAmount(v.ownBudget),
+                                                onClick = {
+                                                    val amount = OrbMissionBudget.parseAmount(draft)
+                                                    val max = v.maxGrant
+                                                    saveError = when {
+                                                        amount == null -> "Enter a positive amount"
+                                                        max != null && amount > max + 1e-9 -> "The parent pool has ${OrbMissionBudget.money(max)} left to grant"
+                                                        else -> null
+                                                    }
+                                                    if (saveError == null && amount != null) commit(amount)
+                                                },
+                                            ) { Text("Save", color = Color.White) }
+                                        }
                                     }
                                     v.maxGrant?.let {
                                         Text("Up to ${OrbMissionBudget.money(it)} from the parent pool.", color = OrbStyle.textSecondary, fontSize = 12.sp)
@@ -1180,7 +1197,7 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                     }
                                     Switch(
                                         checked = v.bandwidthMode == "own",
-                                        enabled = !busy,
+                                        enabled = !busy && !readOnly,
                                         onCheckedChange = { on ->
                                             if (!on) commitBandwidth(null) else {
                                                 val ancTpm = v.effectiveBandwidth?.ancestorTokensPerMin
@@ -1235,7 +1252,8 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                             if (bwTokensDraft.isEmpty()) Text("e.g. 120k", color = OrbStyle.textMuted, fontSize = 13.sp)
                                             BasicTextField(
                                                 value = bwTokensDraft,
-                                                onValueChange = { bwTokensDraft = it },
+                                                onValueChange = { if (!readOnly) bwTokensDraft = it },
+                                                enabled = !readOnly,
                                                 singleLine = true,
                                                 textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
                                                 cursorBrush = SolidColor(Color.White),
@@ -1256,7 +1274,8 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                             if (bwVcpuDraft.isEmpty()) Text("Optional", color = OrbStyle.textMuted, fontSize = 13.sp)
                                             BasicTextField(
                                                 value = bwVcpuDraft,
-                                                onValueChange = { bwVcpuDraft = it },
+                                                onValueChange = { if (!readOnly) bwVcpuDraft = it },
+                                                enabled = !readOnly,
                                                 singleLine = true,
                                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                                 textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
@@ -1278,7 +1297,8 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                             if (bwUsdHDraft.isEmpty()) Text("Optional", color = OrbStyle.textMuted, fontSize = 13.sp)
                                             BasicTextField(
                                                 value = bwUsdHDraft,
-                                                onValueChange = { bwUsdHDraft = it },
+                                                onValueChange = { if (!readOnly) bwUsdHDraft = it },
+                                                enabled = !readOnly,
                                                 singleLine = true,
                                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                                 textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
@@ -1294,27 +1314,29 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                         }
                                         Switch(
                                             checked = bwProtectRoot,
-                                            enabled = !busy,
+                                            enabled = !busy && !readOnly,
                                             onCheckedChange = { bwProtectRoot = it },
                                             modifier = Modifier.testTag("mission.settings.bandwidth.protect_root"),
                                         )
                                     }
-                                    Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                                        TextButton(
-                                            enabled = !busy && bwDraftDirty(v),
-                                            onClick = {
-                                                OrbMissionBudget.parseBandwidthLimits(
-                                                    tokensPerMinRaw = bwTokensDraft,
-                                                    computeVcpuRaw = bwVcpuDraft,
-                                                    computeUsdPerHRaw = bwUsdHDraft,
-                                                    protectRoot = bwProtectRoot,
-                                                    view = v,
-                                                )
-                                                    .onSuccess { commitBandwidth(it) }
-                                                    .onFailure { bwSaveError = it.message }
-                                            },
-                                            modifier = Modifier.testTag("mission.settings.bandwidth.save"),
-                                        ) { Text("Save bandwidth", color = Color.White) }
+                                    if (!readOnly) {
+                                        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                                            TextButton(
+                                                enabled = !busy && bwDraftDirty(v),
+                                                onClick = {
+                                                    OrbMissionBudget.parseBandwidthLimits(
+                                                        tokensPerMinRaw = bwTokensDraft,
+                                                        computeVcpuRaw = bwVcpuDraft,
+                                                        computeUsdPerHRaw = bwUsdHDraft,
+                                                        protectRoot = bwProtectRoot,
+                                                        view = v,
+                                                    )
+                                                        .onSuccess { commitBandwidth(it) }
+                                                        .onFailure { bwSaveError = it.message }
+                                                },
+                                                modifier = Modifier.testTag("mission.settings.bandwidth.save"),
+                                            ) { Text("Save bandwidth", color = Color.White) }
+                                        }
                                     }
                                 }
                                 bwSaveError?.let { err ->
@@ -1335,7 +1357,7 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                     }
                                     Switch(
                                         checked = v.vmLimitsMode == "own",
-                                        enabled = !busy,
+                                        enabled = !busy && !readOnly,
                                         onCheckedChange = { on ->
                                             if (!on) commitVmLimits(null) else {
                                                 val ancMax = v.effectiveVmLimits?.ancestorMaxConcurrent
@@ -1383,7 +1405,8 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                             if (vmTotalDraft.isEmpty()) Text("Optional", color = OrbStyle.textMuted, fontSize = 13.sp)
                                             BasicTextField(
                                                 value = vmTotalDraft,
-                                                onValueChange = { vmTotalDraft = it },
+                                                onValueChange = { if (!readOnly) vmTotalDraft = it },
+                                                enabled = !readOnly,
                                                 singleLine = true,
                                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                                 textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
@@ -1424,7 +1447,8 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                                     if (curVal.isEmpty()) Text("No cap (0=off)", color = OrbStyle.textMuted, fontSize = 12.sp)
                                                     BasicTextField(
                                                         value = curVal,
-                                                        onValueChange = { next -> vmProviderDrafts = vmProviderDrafts + (id to next) },
+                                                        onValueChange = { next -> if (!readOnly) vmProviderDrafts = vmProviderDrafts + (id to next) },
+                                                        enabled = !readOnly,
                                                         singleLine = true,
                                                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                                         textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
@@ -1435,16 +1459,18 @@ fun OrbMissionSettingsDialog(core: OrbCore, missionId: String, title: String, on
                                             }
                                         }
                                     }
-                                    Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                                        TextButton(
-                                            enabled = !busy && vmDraftDirty(v),
-                                            onClick = {
-                                                OrbMissionBudget.parseVmLimits(vmTotalDraft, vmProviderDrafts, v)
-                                                    .onSuccess { commitVmLimits(it) }
-                                                    .onFailure { vmSaveError = it.message }
-                                            },
-                                            modifier = Modifier.testTag("mission.settings.vmlimits.save"),
-                                        ) { Text("Save machine limit", color = Color.White) }
+                                    if (!readOnly) {
+                                        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                                            TextButton(
+                                                enabled = !busy && vmDraftDirty(v),
+                                                onClick = {
+                                                    OrbMissionBudget.parseVmLimits(vmTotalDraft, vmProviderDrafts, v)
+                                                        .onSuccess { commitVmLimits(it) }
+                                                        .onFailure { vmSaveError = it.message }
+                                                },
+                                                modifier = Modifier.testTag("mission.settings.vmlimits.save"),
+                                            ) { Text("Save machine limit", color = Color.White) }
+                                        }
                                     }
                                 }
                                 vmSaveError?.let { err ->

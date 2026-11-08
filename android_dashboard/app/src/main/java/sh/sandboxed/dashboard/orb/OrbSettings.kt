@@ -99,6 +99,7 @@ enum class OrbSettingsRoute {
     Section,
     Fido,
     Backend,
+    Users,
     FallbackChains,
     Providers,
     ProxyKeys,
@@ -127,10 +128,18 @@ fun OrbSettingsSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var route by remember { mutableStateOf(initialRoute) }
     var section by remember { mutableStateOf(OrbSettingsSection.of(initialRoute)) }
+    val currentUser by core.currentUserFlow.collectAsState()
+    val coreAuthMode by core.authModeFlow.collectAsState()
+    val isAdmin = OrbCore.computeIsAdmin(coreAuthMode, currentUser)
+    fun visiblePages(sec: OrbSettingsSection): List<Triple<String, String, OrbSettingsRoute>> =
+        if (isAdmin) sec.pages else sec.pages.filterNot { it.first == "users-settings" }
+    val visibleSections = remember(isAdmin) {
+        OrbSettingsSection.entries.filter { isAdmin || it != OrbSettingsSection.Security }
+    }
     // A page returns to its section unless the section has only one page, which returns directly to Root.
     val back = {
         val sec = section
-        if (route != OrbSettingsRoute.Section && sec != null && sec.pages.size > 1) {
+        if (route != OrbSettingsRoute.Section && sec != null && visiblePages(sec).size > 1) {
             route = OrbSettingsRoute.Section
         } else {
             section = null
@@ -146,31 +155,43 @@ fun OrbSettingsSheet(
     var bunkerActive by remember { mutableStateOf(false) }
     var deviceEnrolled by remember { mutableStateOf(true) }
     var quotaExhausted by remember { mutableStateOf(false) }
-    val attention = OrbSettingsSection.attention(bunkerActive, deviceEnrolled, quotaExhausted)
-    LaunchedEffect(baseURL) {
+    val attention = OrbSettingsSection.attention(
+        if (isAdmin) bunkerActive else false,
+        if (isAdmin) deviceEnrolled else true,
+        quotaExhausted
+    )
+    LaunchedEffect(baseURL, isAdmin) {
         coroutineScope {
-            val bunkerTask = async {
+            val bunkerTask = if (isAdmin) async {
                 runCatching { (OrbJSON.dict(core.request("/api/privilege-access"))?.get("bunker_state") as? Number)?.toInt() ?: 0 }
-            }
-            val devicesTask = async {
+            } else null
+            val devicesTask = if (isAdmin) async {
                 runCatching {
                     val mine = OrbApprovalKey.publicKey()
                     val devices = OrbJSON.dictList(OrbJSON.dict(core.request("/api/approvals/devices"))?.get("devices"))
                     mine == null || devices.any { it["public_key"] == mine }
                 }
-            }
+            } else null
             val usageTask = async {
                 runCatching {
                     val entries = OrbJSON.dict(core.fetchDict("/api/ai/providers/usage")["entries"]) ?: emptyMap()
                     entries.values.any { v -> quotaStatus(providerQuotaWindows(OrbJSON.dict(v)))?.level == OrbQuotaLevel.Exhausted }
                 }
             }
-            bunkerTask.await()
-                .onFailure { if (it is CancellationException) throw it }
-                .onSuccess { bunkerActive = it > 0 }
-            devicesTask.await()
-                .onFailure { if (it is CancellationException) throw it }
-                .onSuccess { deviceEnrolled = it }
+            if (bunkerTask != null) {
+                bunkerTask.await()
+                    .onFailure { if (it is CancellationException) throw it }
+                    .onSuccess { bunkerActive = it > 0 }
+            } else {
+                bunkerActive = false
+            }
+            if (devicesTask != null) {
+                devicesTask.await()
+                    .onFailure { if (it is CancellationException) throw it }
+                    .onSuccess { deviceEnrolled = it }
+            } else {
+                deviceEnrolled = true
+            }
             usageTask.await()
                 .onFailure { if (it is CancellationException) throw it }
                 .onSuccess { quotaExhausted = it }
@@ -244,7 +265,8 @@ fun OrbSettingsSheet(
                         }
 
                         OrbSettingsGroup {
-                            OrbSettingsSection.entries.forEachIndexed { i, sec ->
+                            visibleSections.forEachIndexed { i, sec ->
+                                val secPages = visiblePages(sec)
                                 if (i > 0) HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 52.dp))
                                 OrbSettingsRow(
                                     icon = sectionIcon(sec),
@@ -254,9 +276,9 @@ fun OrbSettingsSheet(
                                     } else sec.mobileSummary,
                                     attention = sec in attention,
                                     onClick = {
-                                        if (sec.pages.size == 1) {
+                                        if (secPages.size == 1) {
                                             section = sec
-                                            route = sec.pages[0].third
+                                            route = secPages[0].third
                                         } else {
                                             section = sec
                                             route = OrbSettingsRoute.Section
@@ -269,6 +291,7 @@ fun OrbSettingsSheet(
                 }
                 OrbSettingsRoute.Section -> {
                     val sec = section ?: OrbSettingsSection.Account
+                    val secPages = visiblePages(sec)
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
@@ -295,12 +318,12 @@ fun OrbSettingsSheet(
                             Spacer(modifier = Modifier.width(38.dp))
                         }
                         OrbSettingsGroup {
-                            sec.pages.forEachIndexed { i, (_, label, target) ->
+                            secPages.forEachIndexed { i, (_, label, target) ->
                                 if (i > 0) HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 52.dp))
                                 OrbSettingsRow(
                                     icon = sectionIcon(sec),
                                     title = label,
-                                    subtitle = pageSubtitle(target, baseURL, providers.size, nodes.size),
+                                    subtitle = pageSubtitle(target, baseURL, providers.size, nodes.count { isAdmin || !OrbManagedMachines.isAdminOnlyNode(it) }),
                                     onClick = { route = target }
                                 )
                             }
@@ -314,6 +337,9 @@ fun OrbSettingsSheet(
                         onBack = back,
                         onConnected = back
                     )
+                }
+                OrbSettingsRoute.Users -> {
+                    OrbUsersSettingsPage(core = core, onBack = back)
                 }
                 OrbSettingsRoute.FallbackChains -> {
                     OrbRoutingSettingsPage(core = core, onBack = back)
@@ -416,6 +442,7 @@ private fun sectionIcon(section: OrbSettingsSection): ImageVector = when (sectio
 
 private fun pageSubtitle(route: OrbSettingsRoute, baseURL: String, providers: Int, nodes: Int): String = when (route) {
     OrbSettingsRoute.Backend -> baseURL.ifEmpty { "Not connected" }
+    OrbSettingsRoute.Users -> "Accounts, Linux confinement & spend caps"
     OrbSettingsRoute.FallbackChains -> "Ordered fallback chains and provider health"
     OrbSettingsRoute.Providers -> "$providers configured"
     OrbSettingsRoute.ProxyKeys -> "OpenAI-compatible router keys"
@@ -524,6 +551,7 @@ fun OrbSetupView(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val signedInToken by core.tokenFlow.collectAsState()
+    val currentUser by core.currentUserFlow.collectAsState()
     val bgSyncState by OrbBackgroundSyncMonitor.stateFlow.collectAsState()
     val isConnectedSession = onBack != null && core.isConfigured && (!signedInToken.isNullOrEmpty() || authMode == "disabled")
 
@@ -816,10 +844,47 @@ fun OrbSetupView(
         }
 
         if (isConnectedSession) {
-            if (authMode == "single_tenant") {
+            currentUser?.let { u ->
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "SERVER PASSWORD",
+                        text = "SIGNED IN AS",
+                        color = OrbStyle.textMuted,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.6.sp
+                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(OrbStyle.surface)
+                            .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "@${u.username} · ${if (u.role == "admin") "Admin" else "Member"}",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        val meta = buildList {
+                            if (!u.unixUsername.isNullOrEmpty()) add("/home/${u.unixUsername}")
+                            add("${OrbUsersModel.formatUsdFromCents(u.spentTodayCents)} / ${OrbUsersModel.formatUsdFromCents(u.dailySpendCapCents)} today")
+                        }.joinToString(" · ")
+                        Text(
+                            text = meta,
+                            color = OrbStyle.textMuted,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            }
+
+            if (authMode == "single_tenant" || authMode == "multi_user") {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = if (authMode == "multi_user") "ACCOUNT PASSWORD" else "SERVER PASSWORD",
                         color = OrbStyle.textMuted,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
@@ -836,8 +901,18 @@ fun OrbSetupView(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text("Single-tenant password", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                            Text("Rotate the password required to sign in to this server.", color = OrbStyle.textMuted, fontSize = 12.sp)
+                            Text(
+                                if (authMode == "multi_user") "Account password" else "Single-tenant password",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                if (authMode == "multi_user") "Rotate your account password and sign-in sessions."
+                                else "Rotate the password required to sign in to this server.",
+                                color = OrbStyle.textMuted,
+                                fontSize = 12.sp
+                            )
                         }
                         Box(
                             modifier = Modifier

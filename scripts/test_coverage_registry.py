@@ -16,8 +16,8 @@ class CoverageRegistryTests(unittest.TestCase):
     def test_inventory_roundtrip(self):
         registry.validate_registry(self.value)
         self.assertEqual(self.value["acceptance"], "INCOMPLETE")
-        self.assertEqual(self.value["total_exports"], 188)
-        self.assertEqual(self.value["counts_by_status"], {"partial": 110, "unconnected": 78})
+        self.assertEqual(self.value["total_exports"], 192)
+        self.assertEqual(self.value["counts_by_status"], {"partial": 110, "unconnected": 82})
         self.assertTrue(all(e["blockers"] for e in self.value["entries"]))
 
     def test_reject_unsupported_links_and_claims(self):
@@ -225,23 +225,23 @@ class CoverageRegistryTests(unittest.TestCase):
         self.assertNotIn("2aedbc0207ccf866c41d0392b82c7187c3941ee6", formal_audit)
         roadmap = (root / "docs/TRUSTWORTHY_SHARED_LEAN_ROADMAP.md").read_text(encoding="utf-8")
         self.assertIn("P0–P7 remain unaccepted.", roadmap)
-        self.assertIn("110 partial / 78 unconnected", roadmap)
+        self.assertIn("110 partial / 82 unconnected", roadmap)
         self.assertIn("BLOCKED_PHYSICAL_DEVICE", roadmap)
         self.assertIn("BLOCKED_HOST_UNREACHABLE", roadmap)
         self.assertIn(pin, roadmap)
         p1_doc = (root / "docs/P1_SHARED_KERNEL_CONFORMANCE.md").read_text(encoding="utf-8")
-        self.assertIn("146 Orb exports and 41 LeanSys exports", p1_doc)
-        self.assertIn("1496 base cases", p1_doc)
-        self.assertIn("1532 cases", p1_doc)
-        self.assertIn("110 partial / 78", p1_doc)
+        self.assertIn("150 Orb exports and 41 LeanSys exports", p1_doc)
+        self.assertIn("1528 base cases", p1_doc)
+        self.assertIn("1564 cases", p1_doc)
+        self.assertIn("110 partial / 82", p1_doc)
         self.assertIn("3c70e5ada278a4e37e0180255f360aa2ff5fe86c", p1_doc)
         p2_doc = (root / "docs/P2_SHARED_WASM_ARTIFACT.md").read_text(encoding="utf-8")
-        self.assertIn("all 188 exported function names", p2_doc)
-        self.assertIn("187 public-prefix exports and one compiler helper", p2_doc)
+        self.assertIn("all 192 exported function names", p2_doc)
+        self.assertIn("191 public-prefix exports and one compiler helper", p2_doc)
         p3_doc = (root / "docs/P3_TARGET_QUALIFICATION_REPORT.md").read_text(encoding="utf-8")
         self.assertIn("QUALIFIED_WITH_HONEST_DEVICE_BLOCKERS", p3_doc)
-        self.assertIn("110 partial / 78 unconnected", p3_doc)
-        self.assertIn("188 manifest entries / 187", p3_doc)
+        self.assertIn("110 partial / 82 unconnected", p3_doc)
+        self.assertIn("192 manifest entries / 191", p3_doc)
 
 
 if __name__ == "__main__":

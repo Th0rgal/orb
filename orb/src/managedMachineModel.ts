@@ -70,6 +70,9 @@ export interface ManagedProviderInfo {
   display_name: string;
   configured: boolean;
   enabled?: boolean;
+  globally_enabled?: boolean;
+  user_enabled?: boolean;
+  effective_enabled?: boolean;
   credential_source?: string | null;
   key_hint?: string | null;
   region?: string | null;
@@ -213,13 +216,49 @@ export const updateManagedProvider = (provider: string, body: ManagedProviderPat
     body: JSON.stringify(body),
   });
 
-export const isProviderEnabled = (p: Pick<ManagedProviderInfo, "enabled">): boolean => p.enabled !== false;
-export const isProviderUsable = (p: Pick<ManagedProviderInfo, "configured" | "enabled">): boolean => p.configured && p.enabled !== false;
+export const setManagedProviderPreference = (provider: string, enabled: boolean) =>
+  api<{ ok: boolean; provider: string; enabled: boolean }>(
+    `/api/managed-machines/providers/${encodeURIComponent(provider)}/preference`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+
+export const isProviderEnabled = (
+  p: Pick<ManagedProviderInfo, "enabled" | "globally_enabled" | "user_enabled" | "effective_enabled">,
+): boolean => {
+  if (p.effective_enabled !== undefined) return p.effective_enabled !== false;
+  if (p.globally_enabled === false) return false;
+  if (p.user_enabled === false) return false;
+  return p.enabled !== false;
+};
+export const isProviderUsable = (
+  p: Pick<ManagedProviderInfo, "configured" | "enabled" | "globally_enabled" | "user_enabled" | "effective_enabled">,
+): boolean => p.configured && isProviderEnabled(p);
 
 export const credentialSourceLabel = (source?: string | null): string =>
   source === "settings" ? "Settings" : source === "bitwarden" ? "Bitwarden" : source === "environment" ? "Environment" : source || "";
 
-export function providerStatusLine(p: Pick<ManagedProviderInfo, "configured" | "enabled" | "credential_source" | "key_hint" | "region" | "project_id" | "max_concurrent" | "availability">): string {
+export function providerStatusLine(
+  p: Pick<
+    ManagedProviderInfo,
+    | "configured"
+    | "enabled"
+    | "globally_enabled"
+    | "user_enabled"
+    | "effective_enabled"
+    | "credential_source"
+    | "key_hint"
+    | "region"
+    | "project_id"
+    | "max_concurrent"
+    | "availability"
+  >,
+): string {
+  if (p.globally_enabled === false) return p.configured ? "Disabled by admin" : "Disabled · Not configured";
+  if (p.user_enabled === false) return p.configured ? "Skipped for your missions" : "Not configured";
   const enabled = isProviderEnabled(p);
   if (!p.configured) return enabled ? "Not configured" : "Disabled · Not configured";
   const cred = [credentialSourceLabel(p.credential_source), p.key_hint ?? ""].filter(Boolean).join(" ");

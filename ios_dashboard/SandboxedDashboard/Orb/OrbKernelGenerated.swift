@@ -464,6 +464,18 @@ internal func orb_rtt_ewma_step(_ srttMs: UInt32, _ rttVarMs: UInt32, _ sampleMs
 @_silgen_name("orb_client_link_budget_step")
 internal func orb_client_link_budget_step(_ srttMs: UInt32, _ rttVarMs: UInt32, _ consecutiveFailures: UInt32, _ isConstrained: UInt8, _ p0InFlight: UInt32) -> UInt64
 
+@_silgen_name("orb_multiuser_rbac_step")
+internal func orb_multiuser_rbac_step(_ callerAuthed: UInt8, _ callerDisabled: UInt8, _ epochMatches: UInt8, _ callerRole: UInt8, _ opClass: UInt8, _ isOwner: UInt8, _ isSharedParticipant: UInt8) -> UInt32
+
+@_silgen_name("orb_placement_role_admit")
+internal func orb_placement_role_admit(_ callerRole: UInt8, _ targetKind: UInt8, _ nodeAdminOnly: UInt8, _ hasValidUnixUser: UInt8) -> UInt8
+
+@_silgen_name("orb_user_spend_cap_step")
+internal func orb_user_spend_cap_step(_ globalCapActive: UInt8, _ globalSpentCents: UInt32, _ globalCapCents: UInt32, _ userCapActive: UInt8, _ userSpentCents: UInt32, _ userCapCents: UInt32, _ deltaCents: UInt32) -> UInt64
+
+@_silgen_name("orb_privd_user_exec_step")
+internal func orb_privd_user_exec_step(_ peerIsNodeUid: UInt8, _ leaseVerified: UInt8, _ nodeAdminOnly: UInt8, _ callerRole: UInt8, _ usernameValid: UInt8, _ targetUid: UInt32, _ targetGid: UInt32, _ gidDisjointPriv: UInt8, _ homeConfinedNoSymlink: UInt8, _ elanRootOwned: UInt8) -> UInt32
+
 enum OrbKernel {
     struct WorkfoldVerdict: Equatable, Sendable {
         let foldItem: Bool
@@ -1570,6 +1582,119 @@ enum OrbKernel {
             connectDeadlineMs: Int((raw >> 16) & 0xFFFF),
             pongDeadlineMs: Int((raw >> 32) & 0xFFFF),
             wakePongDeadlineMs: Int((raw >> 48) & 0xFFFF)
+        )
+    }
+
+    struct MultiuserRbacResult: Equatable, Sendable {
+        let admitted: Bool
+        let httpStatus: Int
+        let reasonCode: Int
+    }
+
+    static func multiuserRbacStep(
+        callerAuthed: Bool,
+        callerDisabled: Bool,
+        epochMatches: Bool,
+        callerRole: Int,
+        opClass: Int,
+        isOwner: Bool,
+        isSharedParticipant: Bool
+    ) -> MultiuserRbacResult {
+        let raw = orb_multiuser_rbac_step(
+            b8(callerAuthed),
+            b8(callerDisabled),
+            b8(epochMatches),
+            enum8(callerRole),
+            enum8(opClass),
+            b8(isOwner),
+            b8(isSharedParticipant)
+        )
+        return MultiuserRbacResult(
+            admitted: (raw & 1) != 0,
+            httpStatus: Int((raw >> 1) & 0xFFFF),
+            reasonCode: Int((raw >> 17) & 0xF)
+        )
+    }
+
+    static func placementRoleAdmit(
+        callerRole: Int,
+        targetKind: Int,
+        nodeAdminOnly: Bool,
+        hasValidUnixUser: Bool
+    ) -> Bool {
+        orb_placement_role_admit(
+            enum8(callerRole),
+            enum8(targetKind),
+            b8(nodeAdminOnly),
+            b8(hasValidUnixUser)
+        ) != 0
+    }
+
+    struct UserSpendCapResult: Equatable, Sendable {
+        let admitted: Bool
+        let denyReason: Int
+        let nextGlobalSpentCents: Int
+        let nextUserSpentCents: Int
+    }
+
+    static func userSpendCapStep(
+        globalCapActive: Bool,
+        globalSpentCents: Int,
+        globalCapCents: Int,
+        userCapActive: Bool,
+        userSpentCents: Int,
+        userCapCents: Int,
+        deltaCents: Int
+    ) -> UserSpendCapResult {
+        let raw = orb_user_spend_cap_step(
+            b8(globalCapActive),
+            satU32(globalSpentCents),
+            satU32(globalCapCents),
+            b8(userCapActive),
+            satU32(userSpentCents),
+            satU32(userCapCents),
+            satU32(deltaCents)
+        )
+        return UserSpendCapResult(
+            admitted: (raw & 1) != 0,
+            denyReason: Int((raw >> 1) & 0x7),
+            nextGlobalSpentCents: Int((raw >> 4) & 0x3FFF_FFFF),
+            nextUserSpentCents: Int((raw >> 34) & 0x3FFF_FFFF)
+        )
+    }
+
+    struct PrivdUserExecResult: Equatable, Sendable {
+        let admitted: Bool
+        let denyReason: Int
+    }
+
+    static func privdUserExecStep(
+        peerIsNodeUid: Bool,
+        leaseVerified: Bool,
+        nodeAdminOnly: Bool,
+        callerRole: Int,
+        usernameValid: Bool,
+        targetUid: Int,
+        targetGid: Int,
+        gidDisjointPriv: Bool,
+        homeConfinedNoSymlink: Bool,
+        elanRootOwned: Bool
+    ) -> PrivdUserExecResult {
+        let raw = orb_privd_user_exec_step(
+            b8(peerIsNodeUid),
+            b8(leaseVerified),
+            b8(nodeAdminOnly),
+            enum8(callerRole),
+            b8(usernameValid),
+            satU32(targetUid),
+            satU32(targetGid),
+            b8(gidDisjointPriv),
+            b8(homeConfinedNoSymlink),
+            b8(elanRootOwned)
+        )
+        return PrivdUserExecResult(
+            admitted: (raw & 1) != 0,
+            denyReason: Int((raw >> 8) & 0xFF)
         )
     }
 }

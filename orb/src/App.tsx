@@ -64,6 +64,8 @@ const Settings=lazy(()=>import("./Settings").then(module=>({default:module.Setti
 const LocalAgentsSettings=lazy(()=>import("./Settings").then(module=>({default:module.LocalAgentsSettings})));
 const SecuritySettings=lazy(()=>import("./SettingsShell").then(module=>({default:module.SecuritySettings})));
 const SettingsShell=lazy(()=>import("./SettingsShell").then(module=>({default:module.SettingsShell})));
+const UsersSettings=lazy(()=>import("./UsersSettings").then(module=>({default:module.UsersSettings})));
+const ShareMissionDialog=lazy(()=>import("./ShareMissionDialog").then(module=>({default:module.ShareMissionDialog})));
 import { SETTINGS_PAGE_IDS, SETTINGS_SECTIONS, settingsAttention, settingsPageId, settingsSectionFor, skillPageName } from "./settingsNav";
 const SkillPage = lazy(() => import("./SkillPage").then(module => ({ default: module.SkillPage })));
 import { quotaStatus, usageWindows } from "./providerUsage";
@@ -81,6 +83,7 @@ const RoutingSettings = lazy(() =>
 const Machines = lazy(() => import("./Machines").then(module => ({ default: module.Machines })));
 import {
   MACHINES,
+  isAdminOnlyNode,
   isAgentSpawnedManagedNode,
   isAutoManagedTarget,
   isManagedNode,
@@ -103,10 +106,6 @@ import { loadTranscript, noteLiveMissionIds, peekReadyTranscript, prefetchTransc
 import { loadPersistedSidebar, savePersistedSidebar } from "./persistentCache";
 import { historyScope } from "./resourceCache";
 import { mergeById, pollWhileVisible } from "./poll";
-import { syncApprovalQueue, syncBunkerNotice } from "./approvalQueueNotices";
-import { getApprovalQueue } from "./approvalQueue";
-import { getPrivilegeAccess } from "./privilegeAccessApi";
-import { listApprovalDevices, localApprovalKey, thisDeviceEnrollment } from "./deviceApproval";
 import { LiveProjectsSection, ProjectFileView, isMissionDeleting } from "./ProjectFiles";
 const ProjectSettings=lazy(()=>import("./ProjectSettings").then(module=>({default:module.ProjectSettings})));
 const MissionSettings=lazy(()=>import("./MissionSettings").then(module=>({default:module.MissionSettings})));
@@ -126,12 +125,15 @@ import {
   createMission,
   getMission,
   getRemoteNodes,
+  isAdminUser,
   isConnected,
+  isMissionParticipant,
   listCompletedMissions,
   listMissions,
   listProjectMissions,
   listProjects,
   readMissionSyncCursor,
+  refreshCurrentUser,
   shortModelLabel,
   createProject,
   bumpProjects,
@@ -259,6 +261,7 @@ export default function App() {
   const [newMachine, setNewMachine] = createSignal(
     (initialStoredMachine === "dgx-spark-admin" || isAutoManagedTarget(initialStoredMachine) ? "core" : initialStoredMachine) || "core",
   );
+  const [titleShareMission, setTitleShareMission] = createSignal<Mission | null>(null);
   const [providerSubmenu, setProviderSubmenu] = createSignal<ActiveProviderSubmenu | undefined>();
   const [agentVmsOpen, setAgentVmsOpen] = createSignal(false);
   const [pending24hPick, setPending24hPick] = createSignal<Pending24hLeasePrompt | null>(null);
@@ -272,10 +275,16 @@ export default function App() {
     });
   };
   const chooseMachine = (id: string) => {
+    const safeId = !isAdminUser() && (id === "core" || id === "dgx-spark-admin") ? "local" : id;
     setExplicitMachine(true);
-    setNewMachine(id);
-    writeString(MACHINE_KEY, id === "dgx-spark-admin" || isAutoManagedTarget(id) ? "core" : id);
-    if (id === "local") void refreshLocalAgents(false);
+    setNewMachine(safeId);
+    writeString(
+      MACHINE_KEY,
+      safeId === "dgx-spark-admin" || isAutoManagedTarget(safeId)
+        ? (isAdminUser() ? "core" : "local")
+        : safeId,
+    );
+    if (safeId === "local") void refreshLocalAgents(false);
   };
   const [workingDirectory, setWorkingDirectory] = createSignal("");
   const directoryKey = () => `orb.directory:${getApiUrl()}:${effectiveNewProject()}:${newMachine()}`;
@@ -288,6 +297,11 @@ export default function App() {
     writeString(directoryKey(), value); // Kept in memory when storage refuses it.
   };
   const [palomaAvailable, setPalomaAvailable] = createSignal(false);
+  createEffect(
+    on([isConnected, connectionVersion], ([connected]) => {
+      if (connected) void refreshCurrentUser(true);
+    }),
+  );
   createEffect(() => {
     connectionVersion();
     if (!isConnected()) {
@@ -657,7 +671,8 @@ export default function App() {
   // Usable machines first; among them the least busy, then the one with most free memory.
   const usableNode = (node: RemoteNodeView) => node.status === "online" && (!node.cordoned || isAdministrationNode(node));
   const sortedNodes = createMemo(() => {
-    const nodes = preferSparkAdministration([...fleetNodes()], node => node.id);
+    const visible = fleetNodes().filter(node => isAdminUser() || !isAdminOnlyNode(node));
+    const nodes = preferSparkAdministration(visible, node => node.id);
     return [...byLeastLoaded(nodes.filter(usableNode), node => node.id), ...nodes.filter(node => !usableNode(node))];
   });
   const currentAutoBackend = () => harnessPick()?.backend ?? harnessChoices()[0]?.backend.id;
@@ -669,12 +684,22 @@ export default function App() {
   };
   const firstNodeId = createMemo(() => (canAutoSelectRemote() ? firstAvailableNodeId(sortedNodes(), currentAutoBackend()) : null));
   createEffect(() => {
-    if (!isConnected() || explicitMachine() || creating() || launchPreview()) return;
+    if (!isConnected() || creating() || launchPreview()) return;
+    if (!isAdminUser()) {
+      const cur = newMachine();
+      const forbiddenNode = fleetNodes().find(n => n.id === cur && isAdminOnlyNode(n));
+      if (cur === "core" || cur === "dgx-spark-admin" || Boolean(forbiddenNode)) {
+        const first = firstNodeId();
+        setNewMachine(first ?? "local");
+        return;
+      }
+    }
+    if (explicitMachine()) return;
     const first = firstNodeId();
     if (first) {
       if (newMachine() !== first) setNewMachine(first);
     } else if (remoteLaunch().state === "ready" && newMachine() !== "core" && newMachine() !== "local") {
-      setNewMachine("core");
+      setNewMachine(isAdminUser() ? "core" : "local");
     }
   });
   const machineLabel = () => {
@@ -1184,8 +1209,14 @@ export default function App() {
     // Learn this Mac's approval device id so notifications sign approvals too.
     // An unenrolled device that could approve puts a dot on Security.
     const loadEnrollment = () => {
-      if (!isConnected()) return;
-      void Promise.all([listApprovalDevices().then((d) => thisDeviceEnrollment(d.devices)), localApprovalKey()])
+      if (!isConnected() || !isAdminUser()) {
+        setDeviceUnenrolled(false);
+        return;
+      }
+      void import("./deviceApproval")
+        .then((da) =>
+          Promise.all([da.listApprovalDevices().then((d) => da.thisDeviceEnrollment(d.devices)), da.localApprovalKey()]),
+        )
         .then(([mine, key]) => setDeviceUnenrolled(key.available && !mine))
         .catch(swallow("app.approvalDevices"));
     };
@@ -1197,28 +1228,40 @@ export default function App() {
     void loadQuota();
     const stopQuota = pollWhileVisible(loadQuota, 60000, "app.quota");
     onCleanup(stopQuota);
-    const loadApprovals = () =>
-        isConnected()
-          ? getApprovalQueue()
-              .then(({ items }) => {
-                // One queue for every kind: the card shows them all, the badges count each.
-                setSecretRequests(items.filter((i) => i.kind === "secret").length);
-                setAccessRequests(items.filter((i) => i.kind === "mission_access").length);
-                setPrivilegeRequests(items.filter((i) => i.kind === "privilege").length);
-                syncApprovalQueue(items, () => open("bitwarden-settings"));
-              })
-              .catch(swallow("app.approvalQueue"))
-          : undefined;
+    const loadApprovals = () => {
+      if (!isConnected() || !isAdminUser()) {
+        setSecretRequests(0);
+        setAccessRequests(0);
+        setPrivilegeRequests(0);
+        return undefined;
+      }
+      return Promise.all([import("./approvalQueue"), import("./approvalQueueNotices")])
+        .then(([aq, notices]) =>
+          aq.getApprovalQueue().then(({ items }) => {
+            // One queue for every kind: the card shows them all, the badges count each.
+            setSecretRequests(items.filter((i) => i.kind === "secret").length);
+            setAccessRequests(items.filter((i) => i.kind === "mission_access").length);
+            setPrivilegeRequests(items.filter((i) => i.kind === "privilege").length);
+            notices.syncApprovalQueue(items, () => open("bitwarden-settings"));
+          }),
+        )
+        .catch(swallow("app.approvalQueue"));
+    };
     const stopApprovals = pollWhileVisible(loadApprovals, 10000, "app.approvalQueue");
-    const loadBunkerState = () =>
-        isConnected()
-          ? getPrivilegeAccess()
-              .then((snap) => {
-                setBunkerActive(snap.bunker_state > 0);
-                syncBunkerNotice(snap.bunker_state, () => open("security-settings"));
-              })
-              .catch(swallow("app.bunkerState"))
-          : undefined;
+    const loadBunkerState = () => {
+      if (!isConnected() || !isAdminUser()) {
+        setBunkerActive(false);
+        return undefined;
+      }
+      return Promise.all([import("./privilegeAccessApi"), import("./approvalQueueNotices")])
+        .then(([pa, notices]) =>
+          pa.getPrivilegeAccess().then((snap) => {
+            setBunkerActive(snap.bunker_state > 0);
+            notices.syncBunkerNotice(snap.bunker_state, () => open("security-settings"));
+          }),
+        )
+        .catch(swallow("app.bunkerState"));
+    };
     const stopBunkerState = pollWhileVisible(loadBunkerState, 10000, "app.bunkerState");
     void loadBunkerState();
     onCleanup(stopBunkerState);
@@ -1393,7 +1436,7 @@ export default function App() {
               <span class="row-label">Back</span>
             </button>
             <div class="settings-nav-gap" />
-            <For each={SETTINGS_SECTIONS}>{(sec) => {
+            <For each={SETTINGS_SECTIONS.filter((sec) => sec.id !== "security" || isAdminUser())}>{(sec) => {
               const count = () => sec.id === "security" ? secretRequests() + accessRequests() + privilegeRequests() : 0;
               return <button class={`row ${settingsSectionFor(selected())?.id === sec.id ? "active" : ""}`} data-settings-section={sec.id}
                 aria-current={settingsSectionFor(selected())?.id === sec.id ? "page" : undefined} onClick={() => open(sec.tabs[0].id)}>
@@ -1467,11 +1510,28 @@ export default function App() {
               {(mid) => <span>{resolveMissionTitle(mid()) ?? `Agent ${mid().slice(0, 8)}`} · Settings</span>}
             </Match>
             <Match when={currentMissionId()}>
-              {(id) => (
-                <>
-                  <Show when={sessionPreview().destination === "Paloma"}><ProviderLogo type="hermes" /></Show><SessionPreview data={sessionPreview()} plan={previewPlan()?.id === id() ? previewPlan()?.data : undefined} goal={!!missionGoal(openMission()?.id === id() ? openMission() : missions().find((m) => m.id === id()))} onOpenSettings={isConnected() ? () => open(`ms:${id()}`) : undefined} />
-                </>
-              )}
+              {(id) => {
+                const activeM = () => (openMission()?.id === id() ? openMission() : missions().find((m) => m.id === id()));
+                const canShareTitle = () =>
+                  isConnected() &&
+                  Boolean(activeM()) &&
+                  !isMissionParticipant(activeM()) &&
+                  !activeM()?.tags?.includes("placement:client");
+                return (
+                  <>
+                    <Show when={sessionPreview().destination === "Paloma"}><ProviderLogo type="hermes" /></Show>
+                    <SessionPreview
+                      data={sessionPreview()}
+                      plan={previewPlan()?.id === id() ? previewPlan()?.data : undefined}
+                      goal={!!missionGoal(activeM())}
+                      participant={isMissionParticipant(activeM())}
+                      ownerUsername={activeM()?.owner_username}
+                      onOpenSettings={isConnected() ? () => open(`ms:${id()}`) : undefined}
+                      onShare={canShareTitle() ? () => setTitleShareMission(activeM()!) : undefined}
+                    />
+                  </>
+                );
+              }}
             </Match>
             <Match when={currentProjectFile()}>
               {(pf) => (
@@ -1597,7 +1657,7 @@ export default function App() {
                                 )}
                               </For>
                               <div class="menu-sep" />
-                              <For each={MACHINES.filter((m) => m.id !== "local")}>
+                              <For each={MACHINES.filter((m) => m.id !== "local" && (isAdminUser() || (!isAdminOnlyNode(m) && m.id !== "core")))}>
                                 {(m) => (
                                   <button
                                     class={`menu-item ${m.id === newMachine() ? "on" : ""}`}
@@ -1638,24 +1698,26 @@ export default function App() {
                             </span>
                             <MachineLoadBadge machine="client" />
                           </button>
-                          <div class="menu-sep" />
-                          <div class="machine-section-label">Remote</div>
-                          <button
-                            class={`menu-item ${newMachine() === "core" ? "on" : ""}`}
-                                    aria-pressed={newMachine() === "core"}
-                            onClick={() => {
-                              chooseMachine("core");
-                              setEnvOpen(null);
-                            }}
-                          >
-                            <span class="menu-ico">
-                              <Ic.CoreServerIcon />
-                            </span>
-                            <span class="menu-col">
-                              <span class="menu-title">Core</span><span class="machine-inline-note">agent-core</span>
-                            </span>
-                            <MachineLoadBadge machine="core" />
-                          </button>
+                          <Show when={isAdminUser()}>
+                            <div class="menu-sep" />
+                            <div class="machine-section-label">Remote</div>
+                            <button
+                              class={`menu-item ${newMachine() === "core" ? "on" : ""}`}
+                                      aria-pressed={newMachine() === "core"}
+                              onClick={() => {
+                                chooseMachine("core");
+                                setEnvOpen(null);
+                              }}
+                            >
+                              <span class="menu-ico">
+                                <Ic.CoreServerIcon />
+                              </span>
+                              <span class="menu-col">
+                                <span class="menu-title">Core</span><span class="machine-inline-note">agent-core</span>
+                              </span>
+                              <MachineLoadBadge machine="core" />
+                            </button>
+                          </Show>
                           <Show when={sortedNodes().some(n => !isManagedNode(n))}>
                             <div class="menu-sep" />
                             <div class="machine-section-label machine-nodes-label">Compute nodes</div>
@@ -1880,6 +1942,7 @@ export default function App() {
               <SettingsShell page={selected()!} onOpen={open}>
                 <Switch>
                   <Match when={selected() === "settings"}><Settings onOpenPage={open} /></Match>
+                  <Match when={selected() === "users-settings"}>{isAdminUser() ? <UsersSettings /> : <Settings onOpenPage={open} />}</Match>
                   <Match when={selected() === "usage-telemetry"}><UsageTelemetrySettings /></Match>
                   <Match when={selected() === "routing" || selected() === "routing-providers" || selected() === "routing-keys"}>
                     <RoutingSettings onOpenClient={() => open("settings")} tab={selected() === "routing-providers" ? "health" : selected() === "routing-keys" ? "keys" : "chains"} />
@@ -1890,8 +1953,8 @@ export default function App() {
                   <Match when={selected() === "btw-settings"}><BtwSettings/></Match>
                   <Match when={selected() === "inbox-summaries"}><InboxSummariesSettings /></Match>
                   <Match when={selected() === "local-agents"}><LocalAgentsSettings /></Match>
-                  <Match when={selected() === "security-settings"}><SecuritySettings /></Match>
-                  <Match when={selected() === "bitwarden-settings"}><BitwardenSettings /></Match>
+                  <Match when={selected() === "security-settings"}>{isAdminUser() ? <SecuritySettings /> : <Settings onOpenPage={open} />}</Match>
+                  <Match when={selected() === "bitwarden-settings"}>{isAdminUser() ? <BitwardenSettings /> : <Settings onOpenPage={open} />}</Match>
                   <Match when={selected() === "inbox-settings"}><InboxSettings onOpenPage={open} /></Match>
                 </Switch>
               </SettingsShell>
@@ -1939,6 +2002,9 @@ export default function App() {
                       title={resolveMissionTitle(id) ?? `Agent ${id.slice(0, 8)}`}
                       titleOf={resolveMissionTitle}
                       onOpen={open}
+                      readOnly={isMissionParticipant(
+                        missions().find((m) => m.id === id) ?? (openMission()?.id === id ? openMission() : null),
+                      )}
                     />
                   )}
                 </Show>
@@ -1958,6 +2024,13 @@ export default function App() {
         {(c) => <PopupMenu x={c().x} y={c().y} items={c().items} onClose={() => setCtx(null)} />}
       </Show>
       <Show when={newProjectDraft()}><ProjectCreation anchor={projectCreationAnchor()} existingIds={projectChoices(liveProjects()).map(p => p.id)} onCreate={submitNewProject} onClose={() => setNewProjectDraft(false)} /></Show>
+      <Show when={titleShareMission()}>
+        {m => (
+          <Suspense>
+            <ShareMissionDialog mission={m()} onClose={() => setTitleShareMission(null)} />
+          </Suspense>
+        )}
+      </Show>
       <Show when={searchOpen()}>
         <Suspense
           fallback={

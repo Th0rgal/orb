@@ -53,6 +53,7 @@ import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -139,6 +140,9 @@ fun OrbAppRoot(
     val hasLoaded by core.hasLoadedSuccessfully.collectAsState()
     val projects by core.projects.collectAsState()
     val missions by core.missions.collectAsState()
+    val currentUser by core.currentUserFlow.collectAsState()
+    val authMode by core.authModeFlow.collectAsState()
+    val isAdmin = OrbCore.computeIsAdmin(authMode, currentUser)
     val pendingFocus by core.pendingProjectFocus.collectAsState()
     val pendingMission by core.pendingMissionFocus.collectAsState()
     val pendingDocs by core.pendingDocumentsFocus.collectAsState()
@@ -203,8 +207,15 @@ fun OrbAppRoot(
             }
     }
 
-    LaunchedEffect(baseURL, lifecycleOwner) {
+    LaunchedEffect(baseURL, lifecycleOwner, isAdmin) {
         if (baseURL.trim().isEmpty()) return@LaunchedEffect
+        if (!isAdmin) {
+            bunkerState = 0
+            bunkerReason = null
+            approvalQueueCount = null
+            approvalEnrolled = true
+            return@LaunchedEffect
+        }
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             while (true) {
                 core.refreshSecretRequests()
@@ -323,9 +334,9 @@ fun OrbAppRoot(
         },
         surface = UsageTelemetry.Surface.Screen
     )
-    val totalWaitingApprovals = approvalQueueCount ?: pendingSecrets
-    val showBunkerBanner = OrbPrivilegeAccess.showsBunkerCard(bunkerState, bunkerDismissedLevel)
-    val showEnrollBanner = OrbPrivilegeAccess.shouldPromptEnrollment(approvalMode, approvalEnrolled, enrollDismissedMode)
+    val totalWaitingApprovals = if (isAdmin) (approvalQueueCount ?: pendingSecrets) else 0
+    val showBunkerBanner = isAdmin && OrbPrivilegeAccess.showsBunkerCard(bunkerState, bunkerDismissedLevel)
+    val showEnrollBanner = isAdmin && OrbPrivilegeAccess.shouldPromptEnrollment(approvalMode, approvalEnrolled, enrollDismissedMode)
 
     @Composable
     fun BunkerBannerContent() {
@@ -599,9 +610,22 @@ fun OrbHomeScreen(
     var newProjectRepo by remember { mutableStateOf("") }
 
     var contextMenuProject by remember { mutableStateOf<OrbRow?>(null) }
+    var contextMenuSharedMission by remember { mutableStateOf<OrbRow?>(null) }
     var renameProjectTarget by remember { mutableStateOf<OrbRow?>(null) }
     var renameDraft by remember { mutableStateOf("") }
     var colorPickerProject by remember { mutableStateOf<OrbRow?>(null) }
+
+    val sharedMissions = remember(missions, searchQuery) {
+        val q = searchQuery.trim()
+        missions.filter { m ->
+            m.isParticipant &&
+                !OrbMissionTree.isArchived(m) &&
+                OrbMissionTree.parentId(m) == null &&
+                (q.isEmpty() ||
+                    OrbInboxModel.missionHeadline(m).contains(q, ignoreCase = true) ||
+                    m.ownerUsername?.contains(q, ignoreCase = true) == true)
+        }
+    }
 
     val inboxCount = remember(projects, missions, placementVersion, OrbInboxModel.revision, OrbMissionUnreadStore.revision) {
         OrbInboxModel.actionableCount(projects, missions)
@@ -798,11 +822,129 @@ fun OrbHomeScreen(
                             }
                         }
 
-                        if (isLoading && visibleProjects.isEmpty()) {
+                        if (isLoading && visibleProjects.isEmpty() && sharedMissions.isEmpty()) {
                             items(5) {
                                 OrbSkeletonRow()
                             }
                         } else {
+                            if (sharedMissions.isNotEmpty()) {
+                                item(key = "shared_with_me_header") {
+                                    Text(
+                                        text = "SHARED WITH ME",
+                                        color = OrbStyle.textMuted,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        letterSpacing = 0.6.sp,
+                                        modifier = Modifier.padding(top = 6.dp, bottom = 4.dp)
+                                    )
+                                }
+                                items(sharedMissions, key = { "shared-${it.id}" }) { m ->
+                                    val mTitle = OrbMissionTree.forkTitle(OrbInboxModel.missionHeadline(m))
+                                    val mLive = OrbMissionTree.isLive(m)
+                                    val backendRaw = m.str("backend", "harness", "backend_id") ?: "claudecode"
+                                    val stateRaw = (m.str("status", "state") ?: "completed").lowercase()
+                                    val subParts = buildList {
+                                        m.ownerUsername?.let { add("@$it") }
+                                        val svc = serviceName(backendRaw)
+                                        if (svc.isNotEmpty()) add(svc)
+                                        val st = statusLabel(stateRaw)
+                                        if (st.isNotEmpty()) add(st)
+                                    }.joinToString(" · ")
+                                    val relTime = OrbJSON.relative(m.str("updated_at", "completed_at", "started_at", "created_at"))
+                                    val sharedProj = remember {
+                                        OrbRow("shared", mapOf("id" to "shared", "slug" to "shared", "name" to "Shared"))
+                                    }
+                                    Box {
+                                        Column {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .combinedClickable(
+                                                        onClick = {
+                                                            OrbMissionUnreadStore.markSeen(m)
+                                                            onSelectMission(m, sharedProj)
+                                                        },
+                                                        onLongClick = { contextMenuSharedMission = m }
+                                                    )
+                                                    .padding(vertical = 10.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                            ) {
+                                                if (mLive) {
+                                                    OrbRunningDots(color = Color.White, dotSize = 2.4.dp, spacing = 2.1.dp)
+                                                } else {
+                                                    OrbSfIcons.CpuIcon(color = OrbStyle.icon, size = 17.dp)
+                                                }
+                                                Column(
+                                                    modifier = Modifier.weight(1f),
+                                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                                ) {
+                                                    Text(
+                                                        text = mTitle,
+                                                        color = Color.White,
+                                                        fontSize = 15.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Text(
+                                                        text = subParts,
+                                                        color = OrbStyle.textMuted,
+                                                        fontSize = 12.sp,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                                if (relTime.isNotEmpty()) {
+                                                    Text(
+                                                        text = relTime,
+                                                        color = OrbStyle.textMuted,
+                                                        fontSize = 11.sp,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        maxLines = 1,
+                                                        softWrap = false
+                                                    )
+                                                }
+                                            }
+                                            HorizontalDivider(
+                                                color = OrbStyle.border,
+                                                thickness = 0.5.dp,
+                                                modifier = Modifier.padding(start = 29.dp)
+                                            )
+                                        }
+                                        DropdownMenu(
+                                            expanded = contextMenuSharedMission?.id == m.id,
+                                            onDismissRequest = { contextMenuSharedMission = null },
+                                            containerColor = OrbStyle.elevated
+                                        ) {
+                                            DropdownMenuItem(
+                                                text = { Text("Leave shared conversation", color = OrbStyle.error) },
+                                                leadingIcon = { Icon(Icons.Default.Close, contentDescription = null, tint = OrbStyle.error) },
+                                                onClick = {
+                                                    contextMenuSharedMission = null
+                                                    scope.launch {
+                                                        orbTry(OrbLog.Category.Network, "leaveSharedMission") {
+                                                            OrbMissionSharing.leaveSharedMission(core, m.id)
+                                                        }
+                                                    }
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                                if (visibleProjects.isNotEmpty()) {
+                                    item(key = "shared_projects_spacer") {
+                                        Text(
+                                            text = "PROJECTS",
+                                            color = OrbStyle.textMuted,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            letterSpacing = 0.6.sp,
+                                            modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)
+                                        )
+                                    }
+                                }
+                            }
                             items(visibleProjects, key = { it.id }) { proj ->
                                 val pName = proj.str("title", "name", "slug") ?: proj.id
                                 val pColor = OrbProjectAppearance.color(proj)
@@ -1270,6 +1412,7 @@ fun OrbProjectPage(
     var deleteMissionTarget by remember { mutableStateOf<OrbRow?>(null) }
     var renameMissionTarget by remember { mutableStateOf<OrbRow?>(null) }
     var settingsMissionTarget by remember { mutableStateOf<OrbRow?>(null) }
+    var shareMissionTarget by remember { mutableStateOf<OrbRow?>(null) }
     var renameMissionDraft by remember { mutableStateOf("") }
 
     val projectSlug = remember(liveProject) {
@@ -1929,6 +2072,19 @@ fun OrbProjectPage(
                                 contextMenuMission = null
                                 settingsMissionTarget = node.mission
                             },
+                            onShare = {
+                                contextMenuMission = null
+                                shareMissionTarget = node.mission
+                            },
+                            onLeaveShare = {
+                                contextMenuMission = null
+                                scope.launch {
+                                    orbTry(OrbLog.Category.Network, "leaveSharedMission") {
+                                        OrbMissionSharing.leaveSharedMission(core, node.mission.id)
+                                        loadProjectData()
+                                    }
+                                }
+                            },
                             onMove = {
                                 contextMenuMission = null
                                 OrbMoveClipboard.pick(node.mission, projectSlug, projectMissions)
@@ -2114,6 +2270,19 @@ fun OrbProjectPage(
                                     onSettings = {
                                         contextMenuMission = null
                                         settingsMissionTarget = node.mission
+                                    },
+                                    onShare = {
+                                        contextMenuMission = null
+                                        shareMissionTarget = node.mission
+                                    },
+                                    onLeaveShare = {
+                                        contextMenuMission = null
+                                        scope.launch {
+                                            orbTry(OrbLog.Category.Network, "leaveSharedMission") {
+                                                OrbMissionSharing.leaveSharedMission(core, node.mission.id)
+                                                loadProjectData()
+                                            }
+                                        }
                                     },
                                     onMove = {
                                         contextMenuMission = null
@@ -2337,7 +2506,17 @@ fun OrbProjectPage(
             core = core,
             missionId = target.id,
             title = OrbJSON.cleanTitle(target.str("title", "name") ?: ""),
+            readOnly = target.isParticipant,
             onDismiss = { settingsMissionTarget = null },
+        )
+    }
+
+    shareMissionTarget?.let { target ->
+        OrbShareMissionDialog(
+            core = core,
+            missionId = target.id,
+            title = OrbJSON.cleanTitle(target.str("title", "name") ?: ""),
+            onDismiss = { shareMissionTarget = null }
         )
     }
 
@@ -2545,6 +2724,8 @@ private fun OrbMissionListItem(
     onDismissContextMenu: () -> Unit,
     onRename: () -> Unit,
     onSettings: () -> Unit,
+    onShare: () -> Unit = {},
+    onLeaveShare: () -> Unit = {},
     onMove: () -> Unit,
     onArchive: () -> Unit,
     onPause: () -> Unit,
@@ -2570,11 +2751,12 @@ private fun OrbMissionListItem(
     val stateRaw = (mission.str("status", "state") ?: if (isPlaceholder) "unknown" else "completed").lowercase()
     val serviceLabel = if (backendRaw.isEmpty()) "" else serviceName(backendRaw)
     val stateLabel = if (stateRaw == "unknown" || stateRaw.isEmpty()) "" else statusLabel(stateRaw)
+    val ownerPrefix = if (mission.isParticipant) mission.ownerUsername?.let { "@$it" }.orEmpty() else ""
     val subtitle = if (isPlaceholder && serviceLabel.isEmpty() && stateLabel.isEmpty()) {
         val sourceProj = mission.str("project")?.takeIf { it.isNotEmpty() && it != currentProjectSlug }
         sourceProj ?: "Parent conversation"
     } else {
-        listOf(serviceLabel, stateLabel).filter { it.isNotEmpty() }.joinToString(" · ")
+        listOf(ownerPrefix, serviceLabel, stateLabel).filter { it.isNotEmpty() }.joinToString(" · ")
     }
 
     Box {
@@ -2751,60 +2933,79 @@ private fun OrbMissionListItem(
             onDismissRequest = onDismissContextMenu,
             containerColor = OrbStyle.elevated
         ) {
-            // Rename and Move work at any time; a live agent is stopped before it is archived.
-            val isArchived = OrbMissionTree.isArchived(mission)
-            DropdownMenuItem(
-                text = { Text("Rename", color = Color.White) },
-                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, tint = Color.White) },
-                onClick = onRename
-            )
-            DropdownMenuItem(
-                text = { Text("Move…", color = Color.White) },
-                leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = Color.White) },
-                onClick = onMove
-            )
-            DropdownMenuItem(
-                text = { Text("Mission settings…", color = Color.White) },
-                leadingIcon = { Icon(Icons.Default.Tune, contentDescription = null, tint = Color.White) },
-                onClick = onSettings
-            )
-            HorizontalDivider(color = OrbStyle.border)
-            DropdownMenuItem(
-                text = {
-                    Text(
-                        if (isArchived) "Unarchive" else if (isLive) "Stop & archive" else "Archive",
-                        color = if (!isArchived && isLive) OrbStyle.error else Color.White
-                    )
-                },
-                leadingIcon = {
-                    Icon(
-                        imageVector = if (isArchived) Icons.Default.Unarchive else Icons.Default.Archive,
-                        contentDescription = null,
-                        tint = if (!isArchived && isLive) OrbStyle.error else Color.White
-                    )
-                },
-                onClick = onArchive
-            )
-            val isPaused = stateRaw == "paused"
-            if (isLive || isPaused) {
+            if (mission.isParticipant) {
                 DropdownMenuItem(
-                    text = { Text(if (isPaused) "Resume" else "Pause", color = Color.White) },
-                    leadingIcon = {
-                        Icon(
-                            imageVector = if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
-                            contentDescription = null,
-                            tint = Color.White
+                    text = { Text("Mission settings…", color = Color.White) },
+                    leadingIcon = { Icon(Icons.Default.Tune, contentDescription = null, tint = Color.White) },
+                    onClick = onSettings
+                )
+                HorizontalDivider(color = OrbStyle.border)
+                DropdownMenuItem(
+                    text = { Text("Leave shared conversation", color = OrbStyle.error) },
+                    leadingIcon = { Icon(Icons.Default.Close, contentDescription = null, tint = OrbStyle.error) },
+                    onClick = onLeaveShare
+                )
+            } else {
+                // Rename and Move work at any time; a live agent is stopped before it is archived.
+                val isArchived = OrbMissionTree.isArchived(mission)
+                DropdownMenuItem(
+                    text = { Text("Rename", color = Color.White) },
+                    leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, tint = Color.White) },
+                    onClick = onRename
+                )
+                DropdownMenuItem(
+                    text = { Text("Share…", color = Color.White) },
+                    leadingIcon = { Icon(Icons.Default.Share, contentDescription = null, tint = Color.White) },
+                    onClick = onShare
+                )
+                DropdownMenuItem(
+                    text = { Text("Move…", color = Color.White) },
+                    leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = Color.White) },
+                    onClick = onMove
+                )
+                DropdownMenuItem(
+                    text = { Text("Mission settings…", color = Color.White) },
+                    leadingIcon = { Icon(Icons.Default.Tune, contentDescription = null, tint = Color.White) },
+                    onClick = onSettings
+                )
+                HorizontalDivider(color = OrbStyle.border)
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            if (isArchived) "Unarchive" else if (isLive) "Stop & archive" else "Archive",
+                            color = if (!isArchived && isLive) OrbStyle.error else Color.White
                         )
                     },
-                    onClick = onPause
+                    leadingIcon = {
+                        Icon(
+                            imageVector = if (isArchived) Icons.Default.Unarchive else Icons.Default.Archive,
+                            contentDescription = null,
+                            tint = if (!isArchived && isLive) OrbStyle.error else Color.White
+                        )
+                    },
+                    onClick = onArchive
+                )
+                val isPaused = stateRaw == "paused"
+                if (isLive || isPaused) {
+                    DropdownMenuItem(
+                        text = { Text(if (isPaused) "Resume" else "Pause", color = Color.White) },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                                contentDescription = null,
+                                tint = Color.White
+                            )
+                        },
+                        onClick = onPause
+                    )
+                }
+                HorizontalDivider(color = OrbStyle.border)
+                DropdownMenuItem(
+                    text = { Text("Delete…", color = OrbStyle.error) },
+                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = OrbStyle.error) },
+                    onClick = onDelete
                 )
             }
-            HorizontalDivider(color = OrbStyle.border)
-            DropdownMenuItem(
-                text = { Text("Delete…", color = OrbStyle.error) },
-                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = OrbStyle.error) },
-                onClick = onDelete
-            )
         }
     }
 }
@@ -2833,6 +3034,7 @@ fun missionsForProject(
 ): List<OrbRow> {
     val targetSlug = OrbProjectAppearance.slug(project)
     return missions.filter { m ->
+        if (m.isParticipant) return@filter false
         val resolved = OrbInboxModel.resolveProject(m, allProjects)
         OrbProjectAppearance.slug(resolved) == targetSlug
     }

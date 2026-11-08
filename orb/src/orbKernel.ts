@@ -1531,3 +1531,121 @@ export function orbClientLinkBudgetStep(input: {
   };
 }
 
+export type MultiuserRbacVerdict = {
+  admitted: boolean;
+  httpStatus: number;
+  reasonCode: number;
+};
+
+export function orbMultiuserRbacStep(input: {
+  callerAuthed: boolean;
+  callerDisabled: boolean;
+  epochMatches: boolean;
+  callerRole: number;
+  opClass: number;
+  isOwner: boolean;
+  isSharedParticipant: boolean;
+}): MultiuserRbacVerdict {
+  const raw =
+    kernel.orb_multiuser_rbac_step(
+      b8(input.callerAuthed),
+      b8(input.callerDisabled),
+      b8(input.epochMatches),
+      enum8(input.callerRole),
+      enum8(input.opClass),
+      b8(input.isOwner),
+      b8(input.isSharedParticipant),
+    ) >>> 0;
+  return {
+    admitted: (raw & 1) !== 0,
+    httpStatus: (raw >>> 1) & 0xffff,
+    reasonCode: (raw >>> 17) & 0xf,
+  };
+}
+
+export function orbPlacementRoleAdmit(input: {
+  callerRole: number;
+  targetKind: number;
+  nodeAdminOnly: boolean;
+  hasValidUnixUser: boolean;
+}): boolean {
+  return (
+    kernel.orb_placement_role_admit(
+      enum8(input.callerRole),
+      enum8(input.targetKind),
+      b8(input.nodeAdminOnly),
+      b8(input.hasValidUnixUser),
+    ) !== 0
+  );
+}
+
+export type UserSpendCapVerdict = {
+  admitted: boolean;
+  denyReason: number;
+  nextGlobalSpentCents: number;
+  nextUserSpentCents: number;
+};
+
+export function orbUserSpendCapStep(input: {
+  globalCapActive: boolean;
+  globalSpentCents: number;
+  globalCapCents: number;
+  userCapActive: boolean;
+  userSpentCents: number;
+  userCapCents: number;
+  deltaCents: number;
+}): UserSpendCapVerdict {
+  const raw = kernel.orb_user_spend_cap_step(
+    b8(input.globalCapActive),
+    sat32(input.globalSpentCents),
+    sat32(input.globalCapCents),
+    b8(input.userCapActive),
+    sat32(input.userSpentCents),
+    sat32(input.userCapCents),
+    sat32(input.deltaCents),
+  );
+  return {
+    admitted: (raw & 1n) !== 0n,
+    denyReason: Number((raw >> 1n) & 0x7n),
+    nextGlobalSpentCents: Number((raw >> 4n) & 0x3fff_ffffn),
+    nextUserSpentCents: Number((raw >> 34n) & 0x3fff_ffffn),
+  };
+}
+
+export type PrivdUserExecVerdict = {
+  admitted: boolean;
+  denyReason: number;
+};
+
+export function orbPrivdUserExecStep(input: {
+  peerIsNodeUid: boolean;
+  leaseVerified: boolean;
+  nodeAdminOnly: boolean;
+  callerRole: number;
+  usernameValid: boolean;
+  targetUid: number;
+  targetGid: number;
+  gidDisjointPriv: boolean;
+  homeConfinedNoSymlink: boolean;
+  elanRootOwned: boolean;
+}): PrivdUserExecVerdict {
+  const raw =
+    kernel.orb_privd_user_exec_step(
+      b8(input.peerIsNodeUid),
+      b8(input.leaseVerified),
+      b8(input.nodeAdminOnly),
+      enum8(input.callerRole),
+      b8(input.usernameValid),
+      sat32(input.targetUid),
+      sat32(input.targetGid),
+      b8(input.gidDisjointPriv),
+      b8(input.homeConfinedNoSymlink),
+      b8(input.elanRootOwned),
+    ) >>> 0;
+  return {
+    admitted: (raw & 1) !== 0,
+    denyReason: (raw >>> 8) & 0xff,
+  };
+}
+
+

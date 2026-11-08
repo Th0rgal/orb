@@ -46,6 +46,7 @@ structure ManagedMachine where
   deletableAtSec : UInt64 := 0
   ownerKind : String := ""
   requestedByMissionId : String := ""
+  ownerUserId : String := ""
   deriving Repr, DecidableEq
 
 /-- Managed fleet budget & concurrency state. -/
@@ -70,12 +71,72 @@ def admitManagedSpawn (st : ManagedFleetState) (reqCents : UInt64) (ttlMins : UI
     let totalSpent : UInt64 := st.spentTodayCents + reqCents
     vmStep 0 1 3 0 0 0 0 0 active cap ttlMins 720 20 totalSpent st.dailyCapCents == 1
 
-/-- Render `/api/managed-machines/spend` & budget summary JSON. -/
-def renderManagedBudgetJson (st : ManagedFleetState) : String :=
-  let active := (st.machines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
-  let enStr := if st.enabled then "true" else "false"
-  let boatStr := if st.boatEnabled then "true" else "false"
-  s!"\{\"enabled\":{enStr},\"boat_enabled\":{boatStr},\"active_machines\":{active},\"max_concurrent\":{st.maxConcurrent},\"spent_today_cents\":{st.spentTodayCents},\"daily_cap_cents\":{st.dailyCapCents}}"
+private def clampSpendU32 (v : UInt64) : UInt32 :=
+  if v > 0xFFFFFFFF then 0xFFFFFFFF else v.toUInt32
+
+/-- Dual global + per-user spend-cap and concurrency VM spawn admission via
+    `Orb.Kernel.userSpendCapStep` + `admitManagedSpawn`.
+    Returns `0` when admitted, `1` when global cap or concurrency rejects, `2` when user cap rejects. -/
+def admitManagedSpawnMultiUser
+    (st : ManagedFleetState)
+    (reqCents : UInt64)
+    (userSpentTodayCents : UInt64)
+    (userDailyCapCents? : Option UInt64)
+    (ttlMins : UInt32 := 60) : UInt8 :=
+  let globalActive : UInt8 := 1
+  let userActive : UInt8 := if userDailyCapCents?.isSome then 1 else 0
+  let userCapU32 : UInt32 := clampSpendU32 (userDailyCapCents?.getD 0)
+  let capWord :=
+    userSpendCapStep
+      globalActive (clampSpendU32 st.spentTodayCents) (clampSpendU32 st.dailyCapCents)
+      userActive (clampSpendU32 userSpentTodayCents) userCapU32
+      (clampSpendU32 reqCents)
+  let capAdmit := (capWord &&& 1) == 1
+  let denyReason := ((capWord >>> 1) &&& 0x7).toUInt8
+  if !capAdmit then
+    if denyReason == 2 then 2 else 1
+  else if !admitManagedSpawn st reqCents ttlMins then
+    1
+  else
+    0
+
+private def formatCentsUsd2 (cents : UInt64) : String :=
+  let dollars := cents / 100
+  let rem := cents % 100
+  let pad := if rem < 10 then s!"0{rem}" else s!"{rem}"
+  s!"{dollars}.{pad}"
+
+/-- Render `/api/managed-machines/spend` & budget summary JSON.
+    When `callerUserId?` is `none`, preserves the exact single-tenant wire fields. -/
+def renderManagedBudgetJson
+    (st : ManagedFleetState)
+    (callerUserId? : Option String := none)
+    (userSpentTodayCents : UInt64 := 0)
+    (userDailyCapCents? : Option UInt64 := none) : String :=
+  match callerUserId? with
+  | none =>
+    let active := (st.machines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
+    let enStr := if st.enabled then "true" else "false"
+    let boatStr := if st.boatEnabled then "true" else "false"
+    s!"\{\"enabled\":{enStr},\"boat_enabled\":{boatStr},\"active_machines\":{active},\"max_concurrent\":{st.maxConcurrent},\"spent_today_cents\":{st.spentTodayCents},\"daily_cap_cents\":{st.dailyCapCents}}"
+  | some uid =>
+    let ownMachines := st.machines.filter (fun m => m.ownerUserId == uid)
+    let active := (ownMachines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
+    let enStr := if st.enabled then "true" else "false"
+    let boatStr := if st.boatEnabled then "true" else "false"
+    let uCapCentsJson := match userDailyCapCents? with | some c => s!"{c}" | none => "null"
+    let uCapUsdJson := match userDailyCapCents? with | some c => formatCentsUsd2 c | none => "null"
+    let effSpentCents := userSpentTodayCents
+    let exhaustedScope :=
+      match userDailyCapCents? with
+      | some uc => if effSpentCents ≥ uc then "\"user\"" else if st.spentTodayCents ≥ st.dailyCapCents then "\"global\"" else "null"
+      | none => if st.spentTodayCents ≥ st.dailyCapCents then "\"global\"" else "null"
+    s!"\{\"enabled\":{enStr},\"boat_enabled\":{boatStr},\"active\":{active},\"active_machines\":{active},\"max_concurrent\":{st.maxConcurrent}," ++
+    s!"\"spent_today_cents\":{effSpentCents},\"daily_cap_cents\":{st.dailyCapCents}," ++
+    s!"\"spent_today_usd\":{formatCentsUsd2 effSpentCents},\"daily_cap_usd\":{formatCentsUsd2 st.dailyCapCents}," ++
+    s!"\"user_spent_today_cents\":{effSpentCents},\"user_daily_cap_cents\":{uCapCentsJson}," ++
+    s!"\"user_spent_today_usd\":{formatCentsUsd2 effSpentCents},\"user_daily_cap_usd\":{uCapUsdJson}," ++
+    s!"\"budget_exhausted_scope\":{exhaustedScope},\"default_ttl_minutes\":60,\"max_ttl_minutes\":720,\"default_size\":\"small\",\"max_size\":\"xlarge\"}"
 
 /-- Map systemd unit alias (`sandboxed-sh`, `sandboxed-sh-prod`, `sandboxed-sh-dev`,
     `orb-core`, `orb-core-dev`, `sandboxed-node`, `orb-node`, `orb-privd`) to
@@ -146,7 +207,12 @@ def managedComputeDdl : String :=
   "status TEXT NOT NULL,owner_mission TEXT NOT NULL,ttl_minutes INTEGER NOT NULL," ++
   "spent_cents INTEGER NOT NULL,cordoned INTEGER NOT NULL,node_boot_epoch INTEGER NOT NULL," ++
   "deletable_at_sec INTEGER NOT NULL,owner_kind TEXT NOT NULL,requested_by_mission_id TEXT NOT NULL," ++
-  "phase_code INTEGER NOT NULL,active_compute_eligible INTEGER NOT NULL);" ++
+  "phase_code INTEGER NOT NULL,active_compute_eligible INTEGER NOT NULL," ++
+  "owner_user_id TEXT NOT NULL DEFAULT '');" ++
+  "CREATE INDEX IF NOT EXISTS idx_managed_machines_owner ON managed_machines(owner_user_id);" ++
+  "CREATE TABLE IF NOT EXISTS user_managed_provider_prefs(" ++
+  "user_id TEXT NOT NULL,provider TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1," ++
+  "updated_at TEXT NOT NULL DEFAULT '',PRIMARY KEY(user_id,provider));" ++
   "CREATE TABLE IF NOT EXISTS managed_vm_claims(" ++
   "machine_id TEXT PRIMARY KEY,reservation_id INTEGER NOT NULL,phase_code INTEGER NOT NULL," ++
   "claim_boot INTEGER NOT NULL,owner_mission TEXT NOT NULL);" ++
@@ -161,6 +227,11 @@ def managedComputeDdl : String :=
   "singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1)," ++
   "enabled INTEGER NOT NULL,boat_enabled INTEGER NOT NULL," ++
   "daily_cap_cents INTEGER NOT NULL,spent_today_cents INTEGER NOT NULL,max_concurrent INTEGER NOT NULL);"
+
+def managedAdditiveAlters : Array String := #[
+  "ALTER TABLE managed_machines ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
+  "CREATE INDEX IF NOT EXISTS idx_managed_machines_owner ON managed_machines(owner_user_id);"
+]
 
 def knownProviders : Array String :=
   #["boat", "boost", "hetzner", "vastai", "scaleway", "colab"]
@@ -204,6 +275,7 @@ private def machineFromRow (row : Array String) : ManagedMachine :=
     deletableAtSec := cellU64 row 10
     ownerKind := cell row 11
     requestedByMissionId := cell row 12
+    ownerUserId := cell row 15
   }
 
 private def vmSliceOf (row : Array String) : VmSliceState :=
@@ -215,16 +287,49 @@ private def vmSliceOf (row : Array String) : VmSliceState :=
   }
 
 def openManagedComputeStore (path : String) : IO (Except String ManagedComputeStore) := do
-  match ← openSqliteDb path managedComputeDdl #[] false with
+  match ← openSqliteDb path managedComputeDdl managedAdditiveAlters false with
   | .error e => return .error e
   | .ok db => return .ok { db := db }
 
 def closeManagedComputeStore (st : ManagedComputeStore) : IO Unit :=
   st.db.mu.atomically (sqliteCloseRaw st.db.handle)
 
+def backfillManagedMachineOwner (st : ManagedComputeStore) (bootstrapAdminId : String) : IO (Except String Unit) := do
+  if bootstrapAdminId.isEmpty then return .ok ()
+  match ← execParamQuery st.db
+      "UPDATE managed_machines SET owner_user_id=?1 WHERE owner_user_id='';" #[bootstrapAdminId] with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
+
+def getUserManagedPrefs (st : ManagedComputeStore) (userId : String) : IO (Array (String × Bool)) := do
+  match ← execParamQuery st.db
+      "SELECT provider,enabled FROM user_managed_provider_prefs WHERE user_id=?1;" #[userId] with
+  | .error _ => return #[]
+  | .ok rows =>
+    let mut out : Array (String × Bool) := #[]
+    for i in [1:rows.size] do
+      let r := rows[i]!
+      out := out.push (cell r 0, cell r 1 != "0")
+    return out
+
+def isUserManagedProviderEnabled (prefs : Array (String × Bool)) (provider : String) : Bool :=
+  match prefs.find? (fun (p, _) => p == provider) with
+  | some (_, en) => en
+  | none => true
+
+def setUserManagedPref (st : ManagedComputeStore) (userId provider : String) (enabled : Bool) (nowAt : String) :
+    IO (Except String Unit) := do
+  if !isKnownProvider provider then
+    return .error "unknown_provider"
+  match ← execParamQuery st.db
+      "INSERT INTO user_managed_provider_prefs(user_id,provider,enabled,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(user_id,provider) DO UPDATE SET enabled=excluded.enabled,updated_at=excluded.updated_at;"
+      #[userId, provider, if enabled then "1" else "0", nowAt] with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
+
 private def loadMachineRows (db : SqliteDb) : IO (Except String (Array (Array String))) :=
   execParamQuery db
-    "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible FROM managed_machines ORDER BY id ASC;" #[]
+    "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id FROM managed_machines ORDER BY id ASC;" #[]
 
 def saveManagedFleetConfig (st : ManagedComputeStore) (enabled boatEnabled : Bool)
     (dailyCapCents spentTodayCents maxConcurrent : UInt64) : IO (Except String Unit) := do
@@ -342,15 +447,15 @@ private def machineParams (m : ManagedMachine) (slice : VmSliceState) : Array St
     m.id, m.sandboxName, m.provider, m.size, statusOfPhase slice.phaseCode, m.ownerMission,
     s!"{m.ttlMinutes}", s!"{m.spentCents}", if m.cordoned then "1" else "0",
     s!"{slice.nodeBootEpoch}", s!"{slice.deletableAt}", m.ownerKind, m.requestedByMissionId,
-    s!"{slice.phaseCode}", s!"{slice.activeComputeEligible}"
+    s!"{slice.phaseCode}", s!"{slice.activeComputeEligible}", m.ownerUserId
   ]
 
 private def upsertMachineTx (db : SqliteDb) (m : ManagedMachine) (slice : VmSliceState) :
     IO (Except String Unit) := do
   let sql :=
-    "INSERT INTO managed_machines(id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible) " ++
-    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) " ++
-    "ON CONFLICT(id) DO UPDATE SET sandbox_name=excluded.sandbox_name,provider=excluded.provider,size=excluded.size,status=excluded.status,owner_mission=excluded.owner_mission,ttl_minutes=excluded.ttl_minutes,spent_cents=excluded.spent_cents,cordoned=excluded.cordoned,node_boot_epoch=excluded.node_boot_epoch,deletable_at_sec=excluded.deletable_at_sec,owner_kind=excluded.owner_kind,requested_by_mission_id=excluded.requested_by_mission_id,phase_code=excluded.phase_code,active_compute_eligible=excluded.active_compute_eligible;"
+    "INSERT INTO managed_machines(id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id) " ++
+    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) " ++
+    "ON CONFLICT(id) DO UPDATE SET sandbox_name=excluded.sandbox_name,provider=excluded.provider,size=excluded.size,status=excluded.status,owner_mission=excluded.owner_mission,ttl_minutes=excluded.ttl_minutes,spent_cents=excluded.spent_cents,cordoned=excluded.cordoned,node_boot_epoch=excluded.node_boot_epoch,deletable_at_sec=excluded.deletable_at_sec,owner_kind=excluded.owner_kind,requested_by_mission_id=excluded.requested_by_mission_id,phase_code=excluded.phase_code,active_compute_eligible=excluded.active_compute_eligible,owner_user_id=excluded.owner_user_id;"
   match ← execParamQueryUnlocked db sql (machineParams m slice) with
   | .error e => return .error e
   | .ok _ => return .ok ()
@@ -358,12 +463,19 @@ private def upsertMachineTx (db : SqliteDb) (m : ManagedMachine) (slice : VmSlic
 private def selectMachineTx (db : SqliteDb) (machineId : String) :
     IO (Except String (Option (ManagedMachine × VmSliceState))) := do
   match ← execParamQueryUnlocked db
-      "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible FROM managed_machines WHERE id=?1;"
+      "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id FROM managed_machines WHERE id=?1;"
       #[machineId] with
   | .error e => return .error e
   | .ok rows =>
     if rows.size ≤ 1 then return .ok none
     else return .ok (some (machineFromRow rows[1]!, vmSliceOf rows[1]!))
+
+def getManagedMachine? (st : ManagedComputeStore) (machineId : String) :
+    IO (Option (ManagedMachine × VmSliceState)) := do
+  if machineId.isEmpty then return none
+  match ← st.db.mu.atomically (selectMachineTx st.db machineId) with
+  | .ok v => return v
+  | .error _ => return none
 
 /-- Apply one lifecycle event through `verifyVmLifecycleAdmit` / `stepVmSlice` and persist it in one
     immediate transaction. `resume` and `replace` store the successor boot epoch the reducer returns.
@@ -765,19 +877,79 @@ def applyProviderObservation (st : ManagedComputeStore) (obs : ProviderObservati
       | .error e => return .error e
       | .ok _ => return .ok []
 
-def renderManagedMachinesJson (st : ManagedFleetState) : String :=
-  let active := (st.machines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
-  let enStr := if st.enabled then "true" else "false"
-  let boatStr := if st.boatEnabled then "true" else "false"
-  let items := st.machines.map fun m =>
-    s!"\{\"id\":{jsonEscape m.id},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"size\":{jsonEscape m.size},\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"node_boot_epoch\":{m.nodeBootEpoch},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cordoned\":{if m.cordoned then "true" else "false"}}"
-  s!"\{\"enabled\":{enStr},\"boat_enabled\":{boatStr},\"active_machines\":{active},\"max_concurrent\":{st.maxConcurrent},\"spent_today_cents\":{st.spentTodayCents},\"daily_cap_cents\":{st.dailyCapCents},\"machines\":[{String.intercalate "," items.toList}],\"budget\":{renderManagedBudgetJson st}}"
+private def providerDisplayName (p : String) : String :=
+  match p with
+  | "boat" => "boat.dev"
+  | "boost" => "boost.ci"
+  | "hetzner" => "Hetzner"
+  | "vastai" => "Vast.ai"
+  | "scaleway" => "Scaleway"
+  | "colab" => "Google Colab"
+  | _ => p
 
-def renderRemoteNodesJson (st : ManagedFleetState) : String :=
-  let nodes := st.machines.filterMap fun m =>
+def renderManagedProvidersJson
+    (st : ManagedFleetState)
+    (isAdmin : Bool := true)
+    (userPrefs : Array (String × Bool) := #[])
+    (configuredProviders : Array String := #[]) : String :=
+  let items := knownProviders.map fun p =>
+    let globallyConfigured := configuredProviders.any (· == p) || (p == "boat" && st.boatEnabled)
+    let globallyEnabled := st.enabled && (if p == "boat" then st.boatEnabled else globallyConfigured)
+    let userEnabled := isUserManagedProviderEnabled userPrefs p
+    let effectiveEnabled := globallyEnabled && userEnabled
+    let cfgStr := if globallyConfigured then "true" else "false"
+    let globStr := if globallyEnabled then "true" else "false"
+    let usrStr := if userEnabled then "true" else "false"
+    let effStr := if effectiveEnabled then "true" else "false"
+    let credFields :=
+      if isAdmin && globallyConfigured then
+        ",\"credential_source\":\"settings\",\"key_hint\":\"••••\""
+      else
+        ",\"credential_source\":null,\"key_hint\":null"
+    s!"\{\"provider\":{jsonEscape p},\"display_name\":{jsonEscape (providerDisplayName p)},\"configured\":{cfgStr},\"enabled\":{effStr},\"globally_enabled\":{globStr},\"user_enabled\":{usrStr},\"effective_enabled\":{effStr}{credFields},\"supports_snapshots\":true,\"supports_free_stop\":true,\"sizes\":[]}"
+  "[" ++ String.intercalate "," items.toList ++ "]"
+
+def renderManagedMachineItemJson (m : ManagedMachine) : String :=
+  s!"\{\"id\":{jsonEscape m.id},\"name\":{jsonEscape m.sandboxName},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"provider_id\":{jsonEscape m.id},\"node_id\":{jsonEscape s!"managed-{m.id}"},\"image\":\"ubuntu-24.04\",\"size\":{jsonEscape m.size},\"cpu\":4,\"ram_gb\":8,\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"owner_mission_id\":{if m.ownerMission.isEmpty then "null" else jsonEscape m.ownerMission},\"owner_kind\":{if m.ownerKind.isEmpty then "\"user\"" else jsonEscape m.ownerKind},\"node_boot_epoch\":{m.nodeBootEpoch},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cost_usd\":{formatCentsUsd2 m.spentCents},\"usd_per_hour\":0.10,\"ledger_closed\":{if m.status == "destroyed" then "true" else "false"},\"cordoned\":{if m.cordoned then "true" else "false"}}"
+
+def renderManagedMachinesJson
+    (st : ManagedFleetState)
+    (callerUserId? : Option String := none)
+    (isAdmin : Bool := true)
+    (userPrefs : Array (String × Bool) := #[])
+    (userSpentTodayCents : UInt64 := 0)
+    (userDailyCapCents? : Option UInt64 := none)
+    (configuredProviders : Array String := #[]) : String :=
+  match callerUserId? with
+  | none =>
+    let active := (st.machines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
+    let enStr := if st.enabled then "true" else "false"
+    let boatStr := if st.boatEnabled then "true" else "false"
+    let items := st.machines.map fun m =>
+      s!"\{\"id\":{jsonEscape m.id},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"size\":{jsonEscape m.size},\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"node_boot_epoch\":{m.nodeBootEpoch},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cordoned\":{if m.cordoned then "true" else "false"}}"
+    s!"\{\"enabled\":{enStr},\"boat_enabled\":{boatStr},\"active_machines\":{active},\"max_concurrent\":{st.maxConcurrent},\"spent_today_cents\":{st.spentTodayCents},\"daily_cap_cents\":{st.dailyCapCents},\"machines\":[{String.intercalate "," items.toList}],\"budget\":{renderManagedBudgetJson st}}"
+  | some uid =>
+    let visible := st.machines.filter (fun m => m.ownerUserId == uid)
+    let active := (visible.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
+    let enStr := if st.enabled then "true" else "false"
+    let boatStr := if st.boatEnabled then "true" else "false"
+    let items := visible.map renderManagedMachineItemJson
+    let budgetJson := renderManagedBudgetJson st (some uid) userSpentTodayCents userDailyCapCents?
+    let provsJson := renderManagedProvidersJson st isAdmin userPrefs configuredProviders
+    s!"\{\"enabled\":{enStr},\"boat_enabled\":{boatStr},\"active_machines\":{active},\"max_concurrent\":{st.maxConcurrent},\"spent_today_cents\":{userSpentTodayCents},\"daily_cap_cents\":{st.dailyCapCents},\"machines\":[{String.intercalate "," items.toList}],\"sizes\":[],\"providers\":{provsJson},\"budget\":{budgetJson},\"daily_spend\":[]}"
+
+def renderRemoteNodesJson
+    (st : ManagedFleetState)
+    (callerUserId? : Option String := none)
+    (userSpentTodayCents : UInt64 := 0)
+    (userDailyCapCents? : Option UInt64 := none) : String :=
+  let visible := match callerUserId? with
+    | none => st.machines
+    | some uid => st.machines.filter (fun m => m.ownerUserId == uid)
+  let nodes := visible.filterMap fun m =>
     if m.status == "destroyed" then none
-    else some s!"\{\"id\":{jsonEscape s!"managed-{m.id}"},\"machine_id\":{jsonEscape m.id},\"provider\":{jsonEscape m.provider},\"status\":{jsonEscape m.status},\"node_boot_epoch\":{m.nodeBootEpoch}}"
-  s!"\{\"nodes\":[{String.intercalate "," nodes.toList}],\"managed_compute\":{renderManagedBudgetJson st}}"
+    else some s!"\{\"id\":{jsonEscape s!"managed-{m.id}"},\"machine_id\":{jsonEscape m.id},\"provider\":{jsonEscape m.provider},\"status\":{jsonEscape m.status},\"node_boot_epoch\":{m.nodeBootEpoch},\"labels\":[\"managed\",{jsonEscape s!"provider={m.provider}"}]}"
+  s!"\{\"nodes\":[{String.intercalate "," nodes.toList}],\"managed_compute\":{renderManagedBudgetJson st callerUserId? userSpentTodayCents userDailyCapCents?}}"
 
 def renderRelayPollJson (cmd : ManagedRelayCommand) : String :=
   s!"[\{\"id\":{jsonEscape cmd.commandId},\"lease_id\":{cmd.heldLeaseId},\"lease_deadline\":{cmd.leaseDeadline},\"node_boot_epoch\":{cmd.nodeBootEpoch},\"payload\":{cmd.payloadJson}}]"

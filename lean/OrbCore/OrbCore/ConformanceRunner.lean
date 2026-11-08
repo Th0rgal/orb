@@ -387,6 +387,14 @@ private opaque c_fn_185 (a0 : UInt32) (a1 : UInt32) (a2 : UInt32) (a3 : UInt32) 
 private opaque c_fn_186 (a0 : UInt32) (a1 : UInt32) (a2 : UInt32) : UInt64
 @[extern "orb_client_link_budget_step"]
 private opaque c_fn_187 (a0 : UInt32) (a1 : UInt32) (a2 : UInt32) (a3 : UInt8) (a4 : UInt32) : UInt64
+@[extern "orb_multiuser_rbac_step"]
+private opaque c_fn_188 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt8) (a6 : UInt8) : UInt32
+@[extern "orb_placement_role_admit"]
+private opaque c_fn_189 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) : UInt8
+@[extern "orb_user_spend_cap_step"]
+private opaque c_fn_190 (a0 : UInt8) (a1 : UInt32) (a2 : UInt32) (a3 : UInt8) (a4 : UInt32) (a5 : UInt32) (a6 : UInt32) : UInt64
+@[extern "orb_privd_user_exec_step"]
+private opaque c_fn_191 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt32) (a6 : UInt32) (a7 : UInt8) (a8 : UInt8) (a9 : UInt8) : UInt32
 
 private def callExportChunk0? (sym : String) (args : Array UInt64) : Option UInt64 :=
   if sym == "orb_verify_writer_reuse" && args.size == 6 then some ((c_fn_0 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt8).toUInt64)
@@ -598,9 +606,13 @@ private def callExportChunk7? (sym : String) (args : Array UInt64) : Option UInt
   else if sym == "orb_stream_open_tail_cap_step" && args.size == 7 then some (c_fn_185 (args[0]!).toUInt32 (args[1]!).toUInt32 (args[2]!).toUInt32 (args[3]!).toUInt32 (args[4]!).toUInt32 (args[5]!).toUInt32 (args[6]!).toUInt8)
   else if sym == "orb_rtt_ewma_step" && args.size == 3 then some (c_fn_186 (args[0]!).toUInt32 (args[1]!).toUInt32 (args[2]!).toUInt32)
   else if sym == "orb_client_link_budget_step" && args.size == 5 then some (c_fn_187 (args[0]!).toUInt32 (args[1]!).toUInt32 (args[2]!).toUInt32 (args[3]!).toUInt8 (args[4]!).toUInt32)
+  else if sym == "orb_multiuser_rbac_step" && args.size == 7 then some ((c_fn_188 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt8 (args[6]!).toUInt8).toUInt64)
+  else if sym == "orb_placement_role_admit" && args.size == 4 then some ((c_fn_189 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8).toUInt64)
+  else if sym == "orb_user_spend_cap_step" && args.size == 7 then some (c_fn_190 (args[0]!).toUInt8 (args[1]!).toUInt32 (args[2]!).toUInt32 (args[3]!).toUInt8 (args[4]!).toUInt32 (args[5]!).toUInt32 (args[6]!).toUInt32)
+  else if sym == "orb_privd_user_exec_step" && args.size == 10 then some ((c_fn_191 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt32 (args[6]!).toUInt32 (args[7]!).toUInt8 (args[8]!).toUInt8 (args[9]!).toUInt8).toUInt64)
   else none
 
-/-- Dispatch any of the 188 C-ABI exports by symbol name and `UInt64` argument vector. -/
+/-- Dispatch any of the 192 C-ABI exports by symbol name and `UInt64` argument vector. -/
 def callExportU64? (sym : String) (args : Array UInt64) : Option UInt64 :=
   (callExportChunk0? sym args) <|> (callExportChunk1? sym args) <|> (callExportChunk2? sym args) <|> (callExportChunk3? sym args) <|> (callExportChunk4? sym args) <|> (callExportChunk5? sym args) <|> (callExportChunk6? sym args) <|> (callExportChunk7? sym args)
 
@@ -961,6 +973,80 @@ def runSharedFixtures (fixturesDir : String) : IO UInt32 := do
        wakeMs != ((e.fieldUInt64? "wake_pong_deadline_ms").getD 999999) then
       let cname := (c.fieldStr? "name").getD ""
       IO.eprintln s!"[orb-spec-runner] FAIL: link_budget mismatch {cname}"
+      return 1
+
+  let muRaw ← IO.FS.readFile s!"{fixturesDir}/multiuser-rbac.json"
+  let .ok muDoc := parse muRaw
+    | do IO.eprintln "[orb-spec-runner] FAIL: parse multiuser-rbac.json"; return 1
+  for c in (muDoc.fieldArr? "rbac_cases").getD #[] do
+    let a0 := ((c.fieldUInt64? "caller_authed").getD 0).toUInt8
+    let a1 := ((c.fieldUInt64? "caller_disabled").getD 0).toUInt8
+    let a2 := ((c.fieldUInt64? "epoch_matches").getD 0).toUInt8
+    let a3 := ((c.fieldUInt64? "caller_role").getD 0).toUInt8
+    let a4 := ((c.fieldUInt64? "op_class").getD 0).toUInt8
+    let a5 := ((c.fieldUInt64? "is_owner").getD 0).toUInt8
+    let a6 := ((c.fieldUInt64? "is_shared_participant").getD 0).toUInt8
+    let raw := Orb.Kernel.multiuserRbacStep a0 a1 a2 a3 a4 a5 a6
+    let e := c.fieldOrNull "expected"
+    let adm := (raw &&& 1) != 0
+    let status := ((raw >>> 1) &&& 0xFFFF).toUInt64
+    let reason := ((raw >>> 17) &&& 0xF).toUInt64
+    if adm != ((e.fieldBool? "admitted").getD false) ||
+       status != ((e.fieldUInt64? "http_status").getD 999) ||
+       reason != ((e.fieldUInt64? "reason_code").getD 999) then
+      let cname := (c.fieldStr? "name").getD ""
+      IO.eprintln s!"[orb-spec-runner] FAIL: multiuser rbac mismatch {cname}"
+      return 1
+  for c in (muDoc.fieldArr? "placement_cases").getD #[] do
+    let r := ((c.fieldUInt64? "caller_role").getD 0).toUInt8
+    let tk := ((c.fieldUInt64? "target_kind").getD 0).toUInt8
+    let ao := ((c.fieldUInt64? "node_admin_only").getD 0).toUInt8
+    let vu := ((c.fieldUInt64? "has_valid_unix_user").getD 0).toUInt8
+    let adm := (Orb.Kernel.placementRoleAdmit r tk ao vu) != 0
+    if adm != ((c.fieldBool? "expected_admitted").getD false) then
+      let cname := (c.fieldStr? "name").getD ""
+      IO.eprintln s!"[orb-spec-runner] FAIL: multiuser placement mismatch {cname}"
+      return 1
+  for c in (muDoc.fieldArr? "spend_cap_cases").getD #[] do
+    let ga := ((c.fieldUInt64? "global_cap_active").getD 0).toUInt8
+    let gs := ((c.fieldUInt64? "global_spent_cents").getD 0).toUInt32
+    let gc := ((c.fieldUInt64? "global_cap_cents").getD 0).toUInt32
+    let ua := ((c.fieldUInt64? "user_cap_active").getD 0).toUInt8
+    let us := ((c.fieldUInt64? "user_spent_cents").getD 0).toUInt32
+    let uc := ((c.fieldUInt64? "user_cap_cents").getD 0).toUInt32
+    let dc := ((c.fieldUInt64? "delta_cents").getD 0).toUInt32
+    let raw := Orb.Kernel.userSpendCapStep ga gs gc ua us uc dc
+    let e := c.fieldOrNull "expected"
+    let adm := (raw &&& 1) != 0
+    let dr := (raw >>> 1) &&& 0x7
+    let ng := (raw >>> 4) &&& 0x3FFFFFFF
+    let nu := (raw >>> 34) &&& 0x3FFFFFFF
+    if adm != ((e.fieldBool? "admitted").getD false) ||
+       dr != ((e.fieldUInt64? "deny_reason").getD 99) ||
+       ng != ((e.fieldUInt64? "next_global_spent_cents").getD 999999999) ||
+       nu != ((e.fieldUInt64? "next_user_spent_cents").getD 999999999) then
+      let cname := (c.fieldStr? "name").getD ""
+      IO.eprintln s!"[orb-spec-runner] FAIL: multiuser spend_cap mismatch {cname}"
+      return 1
+  for c in (muDoc.fieldArr? "privd_exec_cases").getD #[] do
+    let p0 := ((c.fieldUInt64? "peer_is_node_uid").getD 0).toUInt8
+    let p1 := ((c.fieldUInt64? "lease_verified").getD 0).toUInt8
+    let p2 := ((c.fieldUInt64? "node_admin_only").getD 0).toUInt8
+    let p3 := ((c.fieldUInt64? "caller_role").getD 0).toUInt8
+    let p4 := ((c.fieldUInt64? "username_valid").getD 0).toUInt8
+    let p5 := ((c.fieldUInt64? "target_uid").getD 0).toUInt32
+    let p6 := ((c.fieldUInt64? "target_gid").getD 0).toUInt32
+    let p7 := ((c.fieldUInt64? "gid_disjoint_priv").getD 0).toUInt8
+    let p8 := ((c.fieldUInt64? "home_confined_no_symlink").getD 0).toUInt8
+    let p9 := ((c.fieldUInt64? "elan_root_owned").getD 0).toUInt8
+    let raw := Orb.Kernel.privdUserExecStep p0 p1 p2 p3 p4 p5 p6 p7 p8 p9
+    let e := c.fieldOrNull "expected"
+    let adm := (raw &&& 1) != 0
+    let dr := ((raw >>> 8) &&& 0xFF).toUInt64
+    if adm != ((e.fieldBool? "admitted").getD false) ||
+       dr != ((e.fieldUInt64? "deny_reason").getD 99) then
+      let cname := (c.fieldStr? "name").getD ""
+      IO.eprintln s!"[orb-spec-runner] FAIL: multiuser privd_exec mismatch {cname}"
       return 1
 
   IO.println "test result: ok. 5 passed; 0 failed; 0 ignored"

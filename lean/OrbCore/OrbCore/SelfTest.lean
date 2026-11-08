@@ -3168,10 +3168,19 @@ private def runR4cHarnessSessionTests (store : CoreStore) (tmpRoot : String) : I
      parsedObs.actualStartTicks != 88776655 || parsedObs.fieldsAfterComm < 20 then
     IO.eprintln s!"[orb-core-test] FAIL: SM-17 parseProcStatContent failed on parens/spaces comm: {repr parsedObs}"
     return 1
-  -- Live `/proc/self/stat` check on Linux
+  -- Live `/proc/self/stat` check on Linux (or synthetic procRoot fixture on macOS without procfs)
   let selfPid ← OrbBin.PosixExt.getpid
-  let selfTicks? ← readLiveProcStartTicks? selfPid
-  if selfPid == 0 || selfTicks?.isNone then
+  let hasLinuxProc := (← OrbBin.PosixExt.statPath "/proc/self/stat").exists_
+  let procRootForSelf ←
+    if hasLinuxProc then
+      pure (System.FilePath.mk "/proc")
+    else do
+      let fakeProc := System.FilePath.mk s!"{tmpRoot}/fake-proc"
+      IO.FS.createDirAll (fakeProc / s!"{selfPid}")
+      IO.FS.writeFile (fakeProc / s!"{selfPid}" / "stat") trickyStat
+      pure fakeProc
+  let selfTicks? ← readLiveProcStartTicks? selfPid procRootForSelf
+  if selfPid == 0 || selfTicks?.isNone || (!hasLinuxProc && selfTicks? != some 88776655) then
     IO.eprintln s!"[orb-core-test] FAIL: SM-17 readLiveProcStartTicks? failed on current PID {selfPid}"
     return 1
 
@@ -3691,6 +3700,317 @@ private def runR4cHarnessSessionTests (store : CoreStore) (tmpRoot : String) : I
      legitCliEvs != #[.TextDelta "m-oc-dupidle-bind" "Legit CLI output"] then
     IO.eprintln s!"[orb-core-test] FAIL: legitimate CLI line was blocked after duplicate sseSessionIdle: {repr afterLegitCli.openCode} evs={repr legitCliEvs}"
     return 1
+  return 0
+
+set_option maxRecDepth 8000 in
+private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
+  let muTs ← IO.monoNanosNow
+  let muRoot := s!"/tmp/orb-core-multiuser-{muTs}"
+  let .ok store ← openCoreStore muRoot
+    | do IO.eprintln "[orb-core-test] FAIL: multiuser openCoreStore failed"; return 1
+  let .ok mStore ← openManagedComputeStore s!"{muRoot}/managed_compute.db"
+    | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: multiuser openManagedComputeStore failed"; return 1
+  let fail (msg : String) : IO UInt32 := do
+    closeManagedComputeStore mStore
+    closeCoreStore store
+    discard <| (IO.FS.removeDirAll muRoot).toBaseIO
+    IO.eprintln s!"[orb-core-test] FAIL (multiuser): {msg}"
+    return 1
+
+  -- 1. PBKDF2-HMAC-SHA256 hash/verify & legacy row seeding BEFORE bootstrap
+  let hSample ← hashPasswordPbkdf2 "correct-horse-battery-staple"
+  let vOk ← verifyPasswordPbkdf2 "correct-horse-battery-staple" hSample
+  let vBad ← verifyPasswordPbkdf2 "wrong-horse-battery-staple" hSample
+  if !vOk || vBad then
+    return (← fail "PBKDF2 password verification mismatch")
+
+  let nowSec ← coreEpochSec
+  let .ok () ← upsertMission store {
+    id := "m-legacy-boot", title := "Legacy Pre-Bootstrap Mission", status := "completed",
+    backend := "opencode", modelOverride := "", workingDirectory := muRoot,
+    project := "legacy-proj", updatedAt := "2026-11-08T00:00:00Z", ownerUserId := ""
+  } | return (← fail "seed legacy mission failed")
+  if let .ok putLeg := parseInboxPut "preferences"
+      (.obj #[("clientId", .str "c-leg"), ("mutationSeq", .num "1"), ("expectedVersion", .num "0"),
+              ("aiSummary", .bool true), ("includeAutonomous", .bool false), ("model", .str "gpt-5")]) then
+    discard <| putInboxState store putLeg none
+
+  discard <| saveManagedFleetConfig mStore true true 50000 0 10
+  let initFleet : ManagedFleetState := { enabled := true, boatEnabled := true, dailyCapCents := 50000, spentTodayCents := 0, maxConcurrent := 10 }
+  let .ok _ ← provisionManagedMachine mStore initFleet {
+    id := "vm-legacy-1", sandboxName := "orb-managed-leg", provider := "boat", size := "small",
+    status := "ready", nodeBootEpoch := store.bootEpoch, deletableAtSec := nowSec, ownerUserId := ""
+  } nowSec | return (← fail "seed legacy managed VM failed")
+
+  let seedAdmins := #[("admin", prodValid.dashboardPassword), ("opsadmin", "opsadmin-strong-pass-123")]
+  let .ok bootAdminId ← bootstrapUsersAndBackfill store seedAdmins s!"{nowSec}"
+    | return (← fail "bootstrapUsersAndBackfill failed")
+  let .ok () ← backfillManagedMachineOwner mStore bootAdminId
+    | return (← fail "backfillManagedMachineOwner failed")
+  -- Idempotence check: second bootstrap returns exact same admin id and does not duplicate users
+  let .ok bootAdminId2 ← bootstrapUsersAndBackfill store seedAdmins s!"{nowSec}"
+    | return (← fail "idempotent bootstrapUsersAndBackfill failed")
+  if bootAdminId.isEmpty || bootAdminId != bootAdminId2 then
+    return (← fail s!"bootstrap admin id mismatch: {bootAdminId} vs {bootAdminId2}")
+  let some legAfter ← getMission? store "m-legacy-boot"
+    | return (← fail "legacy mission disappeared after bootstrap")
+  let .ok mfBoot ← loadManagedFleet mStore true true 50000 0 10
+    | return (← fail "loadManagedFleet after backfill failed")
+  if legAfter.ownerUserId != bootAdminId ||
+     (mfBoot.machines[0]?).map (·.ownerUserId) != some bootAdminId then
+    return (← fail "bootstrap backfill did not assign legacy mission/VM to bootstrapAdminId")
+  let managedRef ← IO.mkRef mfBoot
+
+  let chainsRef ← IO.mkRef (#[
+    {
+      id := "default"
+      name := "Default Chain"
+      targets := #[
+        { accountId := "prov-a", provider := "openai", baseUrl := "http://127.0.0.1:9999", apiKey := "sk-a", modelId := "gpt-5" },
+        { accountId := "prov-b", provider := "anthropic", baseUrl := "http://127.0.0.1:9998", apiKey := "sk-b", modelId := "claude-4" }
+      ]
+    }
+  ] : Array RoutingChain)
+  let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
+  let seqRef ← IO.mkRef (1 : UInt64)
+  let bunkerRef ← IO.mkRef (0 : UInt8)
+  let app : CoreAppState := {
+    cfg := { prodValid with workingDir := muRoot, usersJson := "" }
+    store := store
+    searchIdx? := none
+    managedRef := managedRef
+    chainsRef := chainsRef
+    proxyCooldownsRef := cooldownsRef
+    seqRef := seqRef
+    bunkerStateRef? := some bunkerRef
+    managedStore? := some mStore
+    bootstrapAdminId := bootAdminId
+    proxyMockTransport? := some (fun tgt => do
+      let body := s!"\{\"id\":\"resp-1\",\"acct\":{jsonEscape tgt.accountId},\"usage\":\{\"input_tokens\":10000,\"output_tokens\":10000}}"
+      return .ok {
+        status := 200
+        headers := #[("Content-Type", "application/json"), ("X-Orb-Cost-Cents", "30")]
+        body := body.toUTF8
+      })
+  }
+
+  let sendReq (method target tok body : String) : IO (Nat × String × Array (String × String)) := do
+    let authHdr := if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n"
+    let raw :=
+      if body.isEmpty then
+        s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}\r\n"
+      else
+        s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}Content-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+    match parseRequest raw.toUTF8 none with
+    | .error e => return (0, s!"parse_err:{e}", #[])
+    | .ok req =>
+      match ← dispatchCoreRequest app req nowSec with
+      | .error _ => return (0, "dispatch_err", #[])
+      | .ok resp => return (resp.status, (String.fromUTF8? resp.body).getD "", resp.extraHdrs)
+
+  -- 2. Admin login (`orb-jwt-v2`), `/api/auth/me`, and `/api/admin/users` CRUD
+  let (admLoginSt, admLoginBody, _) ← sendReq "POST" "/api/auth/login" "" s!"\{\"username\":\"admin\",\"password\":{jsonEscape prodValid.dashboardPassword}}"
+  let admLoginJv := (OrbBin.Json.parse admLoginBody).toOption.getD (.obj #[])
+  let adminTok := (admLoginJv.fieldStr? "token").getD ""
+  if admLoginSt != 200 || !adminTok.startsWith "orb-jwt-v2:" then
+    return (← fail s!"admin login failed: st={admLoginSt} body={admLoginBody}")
+
+  let (meAdmSt, meAdmBody, _) ← sendReq "GET" "/api/auth/me" adminTok ""
+  if meAdmSt != 200 || (meAdmBody.splitOn "\"role\":\"admin\"").length != 2 ||
+     (meAdmBody.splitOn "\"can_manage_users\":true").length != 2 then
+    return (← fail s!"admin /api/auth/me mismatch: {meAdmBody}")
+
+  -- Create `alice` (member, cap = 50 cents) and `bob` (member)
+  let (cAliceSt, cAliceBody, _) ← sendReq "POST" "/api/admin/users" adminTok
+    "{\"username\":\"alice\",\"password\":\"alice-passphrase-1234\",\"role\":\"member\",\"daily_spend_cap_cents\":50}"
+  let aliceJv := (OrbBin.Json.parse cAliceBody).toOption.getD (.obj #[])
+  let aliceId := (aliceJv.fieldStr? "id").getD ""
+  let aliceUnix := (aliceJv.fieldStr? "unix_username").getD ""
+  let (cBobSt, cBobBody, _) ← sendReq "POST" "/api/admin/users" adminTok
+    "{\"username\":\"bob\",\"password\":\"bob-passphrase-123456\",\"role\":\"member\"}"
+  let bobJv := (OrbBin.Json.parse cBobBody).toOption.getD (.obj #[])
+  let bobId := (bobJv.fieldStr? "id").getD ""
+  if cAliceSt != 201 || aliceId.isEmpty || aliceUnix != "orb-alice" || cBobSt != 201 || bobId.isEmpty then
+    return (← fail s!"create alice/bob failed: alice={cAliceSt}:{cAliceBody} bob={cBobSt}:{cBobBody}")
+
+  -- Reserved unix_username (`root`) rejected with 400
+  let (badRootSt, _, _) ← sendReq "POST" "/api/admin/users" adminTok
+    "{\"username\":\"mallory\",\"password\":\"mallory-passphrase-1234\",\"role\":\"member\",\"unix_username\":\"root\"}"
+  if badRootSt != 400 then
+    return (← fail s!"reserved unix_username root was not rejected: {badRootSt}")
+
+  -- Login as `alice` & `bob`
+  let (alLogSt, alLogBody, _) ← sendReq "POST" "/api/auth/login" "" "{\"username\":\"alice\",\"password\":\"alice-passphrase-1234\"}"
+  let aliceTok0 := ((OrbBin.Json.parse alLogBody).toOption.getD (.obj #[]) |>.fieldStr? "token").getD ""
+  let (boLogSt, boLogBody, _) ← sendReq "POST" "/api/auth/login" "" "{\"username\":\"bob\",\"password\":\"bob-passphrase-123456\"}"
+  let bobTok := ((OrbBin.Json.parse boLogBody).toOption.getD (.obj #[]) |>.fieldStr? "token").getD ""
+  if alLogSt != 200 || boLogSt != 200 || !aliceTok0.startsWith "orb-jwt-v2:" || !bobTok.startsWith "orb-jwt-v2:" then
+    return (← fail "alice/bob login failed")
+
+  -- Session epoch revocation: password reset bumps `session_epoch`, immediately invalidating `aliceTok0`!
+  let (rstSt, _, _) ← sendReq "POST" s!"/api/admin/users/{aliceId}/reset-password" adminTok "{\"password\":\"alice-newpass-123456\"}"
+  let (staleMeSt, _, _) ← sendReq "GET" "/api/auth/me" aliceTok0 ""
+  let (alLog2St, alLog2Body, _) ← sendReq "POST" "/api/auth/login" "" "{\"username\":\"alice\",\"password\":\"alice-newpass-123456\"}"
+  let aliceTok := ((OrbBin.Json.parse alLog2Body).toOption.getD (.obj #[]) |>.fieldStr? "token").getD ""
+  if rstSt != 200 || staleMeSt != 401 || alLog2St != 200 || aliceTok.isEmpty then
+    return (← fail s!"session_epoch revocation failed: rst={rstSt} staleMe={staleMeSt} reLogin={alLog2St}")
+
+  -- Self password change (`/api/auth/change-password`) works and bumps epoch; re-login `alice`
+  let (chgSt, _, _) ← sendReq "POST" "/api/auth/change-password" aliceTok
+    "{\"current_password\":\"alice-newpass-123456\",\"new_password\":\"alice-finalpass-1234\"}"
+  let (staleAfterChgSt, _, _) ← sendReq "GET" "/api/auth/me" aliceTok ""
+  let (_, alLog3Body, _) ← sendReq "POST" "/api/auth/login" "" "{\"username\":\"alice\",\"password\":\"alice-finalpass-1234\"}"
+  let aliceTok := ((OrbBin.Json.parse alLog3Body).toOption.getD (.obj #[]) |>.fieldStr? "token").getD ""
+  if chgSt != 200 || staleAfterChgSt != 401 || aliceTok.isEmpty then
+    return (← fail s!"change-password failed: chg={chgSt} stale={staleAfterChgSt}")
+
+  -- Member gets `403` on `/api/admin/users`, `/api/system/deploy`, global provider mutations
+  let (memUsersSt, _, _) ← sendReq "GET" "/api/admin/users" aliceTok ""
+  let (memDeploySt, _, _) ← sendReq "POST" "/api/system/deploy" aliceTok "{\"unit\":\"sandboxed-sh\"}"
+  let (memAddProvSt, _, _) ← sendReq "POST" "/api/ai/providers" aliceTok "{\"name\":\"Evil\",\"provider_type\":\"openai\",\"api_key\":\"sk-1\"}"
+  if memUsersSt != 403 || memDeploySt != 403 || memAddProvSt != 403 then
+    return (← fail s!"member admin-route confinement failed: users={memUsersSt} deploy={memDeploySt} prov={memAddProvSt}")
+
+  -- Last-active-admin protection: disable/demote `opsadmin` first (so `admin` is sole active admin), then verify `admin` cannot be disabled/demoted/deleted!
+  let opsOpt ← getUserByUsername? store "opsadmin"
+  if let some opsU := opsOpt then
+    let (disOpsSt, _, _) ← sendReq "PATCH" s!"/api/admin/users/{opsU.id}" adminTok "{\"disabled\":true}"
+    if disOpsSt != 200 then return (← fail "disable opsadmin failed")
+  let (selfDemoteSt, _, _) ← sendReq "PATCH" s!"/api/admin/users/{bootAdminId}" adminTok "{\"role\":\"member\"}"
+  let (selfDisableSt, _, _) ← sendReq "PATCH" s!"/api/admin/users/{bootAdminId}" adminTok "{\"disabled\":true}"
+  let (selfDelSt, _, _) ← sendReq "DELETE" s!"/api/admin/users/{bootAdminId}" adminTok ""
+  if selfDemoteSt != 400 || selfDisableSt != 400 || selfDelSt != 400 then
+    return (← fail s!"last-active-admin invariant violated: demote={selfDemoteSt} disable={selfDisableSt} del={selfDelSt}")
+
+  -- 3. Placement confinement (`member` blocked from Core & colocated/admin-only nodes; allowed on `ashur`, `auto-managed`, and staged `/api/uploads`)
+  let (alCoreMisSt, _, _) ← sendReq "POST" "/api/control/missions" aliceTok
+    s!"\{\"title\":\"Escape to Core\",\"backend\":\"opencode\",\"working_directory\":{jsonEscape muRoot}}"
+  let (alColocMisSt, _, _) ← sendReq "POST" "/api/control/missions" aliceTok
+    "{\"title\":\"Escape to Colocated\",\"backend\":\"opencode\",\"remote_node_id\":\"agent-core\",\"working_directory\":\"/tmp\"}"
+  let (alWsSt, _, _) ← sendReq "POST" "/api/workspaces" aliceTok "{\"name\":\"core-ws\"}"
+  let (alNodesSt, alNodesBody, _) ← sendReq "GET" "/api/nodes" aliceTok ""
+  let (admNodesSt, admNodesBody, _) ← sendReq "GET" "/api/nodes" adminTok ""
+  if alCoreMisSt != 403 || alColocMisSt != 403 || alWsSt != 403 || alNodesSt != 200 || admNodesSt != 200 ||
+     (alNodesBody.splitOn "\"id\":\"core\"").length != 1 ||
+     (admNodesBody.splitOn "\"id\":\"core\"").length < 2 then
+    return (← fail s!"member placement confinement failed: core={alCoreMisSt} coloc={alColocMisSt} ws={alWsSt} alNodes={alNodesBody} admNodes={admNodesBody}")
+
+  let (alUploadSt, alUploadBody, _) ← sendReq "POST" "/api/uploads?name=spec.md" aliceTok "hello-staged-attachment"
+  if alUploadSt != 201 || (alUploadBody.splitOn s!"\"owner_user_id\":{jsonEscape aliceId}").length < 2 then
+    return (← fail s!"member staged upload failed or unconfined: st={alUploadSt} body={alUploadBody}")
+
+  -- `alice` creates mission on dedicated fleet node `ashur` with project `lean-campaign`
+  let (alMisSt, alMisBody, _) ← sendReq "POST" "/api/control/missions" aliceTok
+    "{\"title\":\"Alice Private Theorem\",\"backend\":\"opencode\",\"remote_node_id\":\"ashur\",\"working_directory\":\"/home/orb-alice/work\",\"project\":\"lean-campaign\"}"
+  let alMisId := ((OrbBin.Json.parse alMisBody).toOption.getD (.obj #[]) |>.fieldStr? "id").getD ""
+  if alMisSt != 201 || alMisId.isEmpty || (alMisBody.splitOn "\"project\":\"lean-campaign\"").length < 2 then
+    return (← fail s!"alice remote mission create failed: st={alMisSt} body={alMisBody}")
+
+  -- Active mission_runs lock prevents changing `alice`'s `unix_username` (`409`)
+  let insRun ← execParamQuery store.missionsDb
+    "INSERT INTO mission_runs(id,mission_id,generation,execution_state,updated_at) VALUES('run-al-1',?1,1,'running','t1');" #[alMisId]
+  if !insRun.isOk then
+    return (← fail s!"insert active mission_run failed: {reprStr insRun}")
+  let (renBusySt, _, _) ← sendReq "PATCH" s!"/api/admin/users/{aliceId}" adminTok "{\"unix_username\":\"orb-alice2\"}"
+  let _ ← execParamQuery store.missionsDb "UPDATE mission_runs SET execution_state='terminal' WHERE id='run-al-1';" #[]
+  if renBusySt != 409 then
+    return (← fail s!"expected 409 when mutating unix_username with active mission_run, got {renBusySt}")
+
+  -- 4. Strict owner privacy EVEN FROM `admin` (`404` non-disclosure, isolated projects, isolated inbox, isolated VMs, zero counts in `/api/admin/users`)
+  let (admGetAlSt, _, _) ← sendReq "GET" s!"/api/control/missions/{alMisId}" adminTok ""
+  let (admDelAlSt, _, _) ← sendReq "DELETE" s!"/api/control/missions/{alMisId}" adminTok ""
+  let (admEvAlSt, _, _) ← sendReq "GET" s!"/api/control/missions/{alMisId}/events" adminTok ""
+  let (admShAlSt, _, _) ← sendReq "GET" s!"/api/control/missions/{alMisId}/shares" adminTok ""
+  let (_, admListBody, _) ← sendReq "GET" "/api/control/missions" adminTok ""
+  let (_, admUsersBody, _) ← sendReq "GET" "/api/admin/users" adminTok ""
+  if admGetAlSt != 404 || admDelAlSt != 404 || admEvAlSt != 404 || admShAlSt != 404 ||
+     (admListBody.splitOn "Alice Private Theorem").length != 1 ||
+     (admListBody.splitOn "Legacy Pre-Bootstrap Mission").length < 2 ||
+     (admUsersBody.splitOn "Alice Private Theorem").length != 1 ||
+     (admUsersBody.splitOn "mission_count").length != 1 then
+    return (← fail s!"strict owner privacy from admin violated: get={admGetAlSt} del={admDelAlSt} ev={admEvAlSt} sh={admShAlSt} list={admListBody}")
+
+  -- Isolated per-user project namespace (`lean-campaign` for `alice` vs `admin`) & isolated inbox state
+  let (alBoardPutSt, _, _) ← sendReq "POST" "/api/projects/lean-campaign/tracks" aliceTok
+    "{\"track\":\"proof-track\",\"desired_condition\":\"Alice Secret Track\"}"
+  let (_, admBoardBody, _) ← sendReq "GET" "/api/projects/lean-campaign/board" adminTok ""
+  let (_, alBoardBody, _) ← sendReq "GET" "/api/projects/lean-campaign/board" aliceTok ""
+  let (alInbPutSt, _, _) ← sendReq "PUT" "/api/control/inbox-state/seen/m-secret" aliceTok
+    "{\"clientId\":\"c-al\",\"mutationSeq\":1,\"expectedVersion\":0,\"stamp\":42}"
+  let (_, admInbBody, _) ← sendReq "GET" "/api/control/inbox-state" adminTok ""
+  if alBoardPutSt != 200 || (alBoardBody.splitOn "proof-track").length < 2 ||
+     (admBoardBody.splitOn "proof-track").length != 1 ||
+     alInbPutSt != 200 || (admInbBody.splitOn "m-secret").length != 1 then
+    return (← fail s!"project/inbox namespace isolation failed: alBoard={alBoardBody} admBoard={admBoardBody} admInb={admInbBody}")
+
+  -- 5. Mission sharing (`owner` -> `bob` `participant`: read/message/queue/cancel allowed, destructive ops `403`, self-leave `200` -> `404`)
+  let (bobPreSt, _, _) ← sendReq "GET" s!"/api/control/missions/{alMisId}" bobTok ""
+  let (shCreateSt, shCreateBody, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/shares" aliceTok "{\"username\":\"bob\"}"
+  let (bobGetSt, bobGetBody, _) ← sendReq "GET" s!"/api/control/missions/{alMisId}" bobTok ""
+  let (bobMsgSt, _, _) ← sendReq "POST" "/api/control/message" bobTok
+    s!"\{\"mission_id\":{jsonEscape alMisId},\"content\":\"Hi Alice from Bob\"}"
+  let (_, alEvsBody, _) ← sendReq "GET" s!"/api/control/missions/{alMisId}/events" aliceTok ""
+  let (bobCancelSt, _, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/cancel" bobTok "{}"
+  let (bobDelSt, _, _) ← sendReq "DELETE" s!"/api/control/missions/{alMisId}" bobTok ""
+  let (bobArcSt, _, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/archive" bobTok "{}"
+  let (bobForkSt, _, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/fork" bobTok "{}"
+  let (bobTxSt, _, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/machine-transfer" bobTok "{\"destination\":\"ashur\"}"
+  let (bobReShareSt, _, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/shares" bobTok "{\"username\":\"admin\"}"
+  let (bobLeaveSt, _, _) ← sendReq "DELETE" s!"/api/control/missions/{alMisId}/shares/{bobId}" bobTok ""
+  let (bobAfterLeaveSt, _, _) ← sendReq "GET" s!"/api/control/missions/{alMisId}" bobTok ""
+  if bobPreSt != 404 || (shCreateSt != 200 && shCreateSt != 201) || bobGetSt != 200 ||
+     (bobGetBody.splitOn "\"viewer_role\":\"participant\"").length < 2 ||
+     (bobGetBody.splitOn "\"owner_username\":\"alice\"").length < 2 ||
+     bobMsgSt != 200 || (alEvsBody.splitOn "\"sender_username\":\"bob\"").length < 2 ||
+     bobCancelSt != 200 ||
+     bobDelSt != 403 || bobArcSt != 403 || bobForkSt != 403 || bobTxSt != 403 || bobReShareSt != 403 ||
+     bobLeaveSt != 200 || bobAfterLeaveSt != 404 then
+    return (← fail s!"mission sharing RBAC mismatch: pre={bobPreSt} sh={shCreateSt}:{shCreateBody} get={bobGetSt}:{bobGetBody} msg={bobMsgSt} evs={alEvsBody} del={bobDelSt} arc={bobArcSt} fork={bobForkSt} tx={bobTxSt} reshare={bobReShareSt} leave={bobLeaveSt} after={bobAfterLeaveSt}")
+
+  -- 6. Inference provider redaction, per-user provider preferences, `mission_proxy_token`, and per-user daily spend cap (`50` cents)
+  let _ ← upsertAIProvider store { id := "prov-a", name := "OpenAI Primary", providerType := "openai", baseUrl := "https://internal-a.example/v1", apiKey := "sk-secret-openai-9999", enabled := true, updatedAt := "t1" }
+  let _ ← upsertAIProvider store { id := "prov-b", name := "Anthropic Backup", providerType := "anthropic", baseUrl := "https://internal-b.example/v1", apiKey := "sk-secret-anth-8888", enabled := true, updatedAt := "t1" }
+  let (alProvsSt, alProvsBody, _) ← sendReq "GET" "/api/ai/providers" aliceTok ""
+  let (admProvsSt, admProvsBody, _) ← sendReq "GET" "/api/ai/providers" adminTok ""
+  if alProvsSt != 200 || admProvsSt != 200 ||
+     (alProvsBody.splitOn "sk-secret").length != 1 ||
+     (alProvsBody.splitOn "internal-a.example").length != 1 ||
+     (admProvsBody.splitOn "internal-a.example").length < 2 then
+    return (← fail s!"provider secret/baseUrl redaction mismatch: al={alProvsBody} adm={admProvsBody}")
+
+  -- `alice` disables `prov-a` for her missions; mints `mission_proxy_token`; `/v1/responses` routes `alice` to `prov-b` while `admin` still uses `prov-a`!
+  let (alPrefSt, _, _) ← sendReq "PUT" "/api/ai/providers/prov-a/preference" aliceTok "{\"enabled\":false}"
+  let (mptSt, mptBody, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/proxy-token" aliceTok "{}"
+  let mptTok := ((OrbBin.Json.parse mptBody).toOption.getD (.obj #[]) |>.fieldStr? "token").getD ""
+  let (alProxy1St, alProxy1Body, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi\"}"
+  let (admProxy1St, admProxy1Body, _) ← sendReq "POST" "/v1/responses" adminTok "{\"model\":\"gpt-5\",\"input\":\"hi\"}"
+  -- Second call (`30` cents each -> `30 < 50` admitted, becomes `60 >= 50`), third call hits `alice`'s 50-cent daily cap -> `429`!
+  let (alProxy2St, _, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi2\"}"
+  let (alProxy3St, alProxy3Body, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi3\"}"
+  if alPrefSt != 200 || (mptSt != 200 && mptSt != 201) || !mptTok.startsWith "orb-mpt-v1_" ||
+     alProxy1St != 200 || (alProxy1Body.splitOn "\"acct\":\"prov-b\"").length < 2 ||
+     admProxy1St != 200 || (admProxy1Body.splitOn "\"acct\":\"prov-a\"").length < 2 ||
+     alProxy2St != 200 || alProxy3St != 429 ||
+     (alProxy3Body.splitOn "daily_spend_cap_exceeded").length < 2 then
+    return (← fail s!"per-user proxy routing or spend cap failed: pref={alPrefSt} mpt={mptSt} p1={alProxy1St}:{alProxy1Body} adm={admProxy1St}:{admProxy1Body} p2={alProxy2St} p3={alProxy3St}:{alProxy3Body}")
+
+  -- Managed VMs: `alice` hitting daily spend cap gets `429` on `POST /api/managed-machines`, while `bob` (`no cap`, disables `boat`) spawns an auto VM (`boost`) owned by `bob`, invisible to `admin` (`404` on `DELETE`)!
+  let (alVmCapSt, _, _) ← sendReq "POST" "/api/managed-machines" aliceTok "{\"provider\":\"boat\",\"name\":\"alice-vm\"}"
+  let (bobPrefBoatSt, _, _) ← sendReq "PUT" "/api/managed-machines/providers/boat/preference" bobTok "{\"enabled\":false}"
+  let (bobVmAutoSt, bobVmAutoBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\"}"
+  let bobVmId := ((OrbBin.Json.parse bobVmAutoBody).toOption.getD (.obj #[]) |>.fieldStr? "id").getD ""
+  let (_, admVmsBody, _) ← sendReq "GET" "/api/managed-machines" adminTok ""
+  let (admDelBobVmSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{bobVmId}" adminTok ""
+  let (bobDelBobVmSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{bobVmId}" bobTok ""
+  if alVmCapSt != 429 || bobPrefBoatSt != 200 || bobVmAutoSt != 201 || bobVmId.isEmpty ||
+     (bobVmAutoBody.splitOn "\"provider\":\"boost\"").length < 2 ||
+     (admVmsBody.splitOn bobVmId).length != 1 ||
+     admDelBobVmSt != 404 || bobDelBobVmSt != 200 then
+    return (← fail s!"managed VM multi-user isolation/prefs/cap failed: alCap={alVmCapSt} bobVm={bobVmAutoSt}:{bobVmAutoBody} admVms={admVmsBody} admDel={admDelBobVmSt} bobDel={bobDelBobVmSt}")
+
+  closeManagedComputeStore mStore
+  closeCoreStore store
+  discard <| (IO.FS.removeDirAll muRoot).toBaseIO
   return 0
 
 set_option maxRecDepth 4000 in
@@ -4804,6 +5124,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     return 1
   if (← runR5bManagedStoreTests prodValid) != 0 then return 1
   if (← runR7CoreTests prodValid) != 0 then return 1
+  if (← runMultiUserCoreTests prodValid) != 0 then return 1
 
   IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":9,\"host_tests\":85}"
   return 0

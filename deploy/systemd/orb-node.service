@@ -12,6 +12,8 @@ EnvironmentFile=-/etc/orb/node.env
 EnvironmentFile=-/etc/sandboxed-node.env
 Environment="AGENT_SOFTWARE_STATE_DIR=/var/lib/orb-software"
 Environment="ORB_PRIVD_SOCKET=/run/orb-privd.sock"
+# On Core-colocated nodes (e.g. sepolia / agent-core), set ORB_NODE_ADMIN_ONLY=1 in /etc/orb/node.env
+# so member leases are rejected even before touching orb-privd.
 Environment="PATH=/opt/orb-tools/bin:/opt/sandboxed-tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 NoNewPrivileges=true
 ReadOnlyPaths=/usr/local/bin

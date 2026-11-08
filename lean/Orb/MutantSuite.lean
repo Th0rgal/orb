@@ -978,4 +978,67 @@ theorem kill_m41_rttEwma_noColdVarianceFloor :
       rttEwmaStep 0 0 40 := by
   decide
 
+/-- Mutant 15.1 (`orb_multiuser_rbac_step`):
+    Admin privacy leak — lets `callerRole == 1` (`admin`) read unowned missions (`opClass == 2`). -/
+@[inline, export orb_mut_m42]
+def m42_multiuserRbac_adminReadsUnowned
+    (callerAuthed callerDisabled epochMatches callerRole opClass isOwner isSharedParticipant : UInt8) : UInt32 :=
+  if opClass == 2 && callerRole == 1 then
+    multiuserRbacStep callerAuthed callerDisabled epochMatches callerRole opClass 1 isSharedParticipant
+  else
+    multiuserRbacStep callerAuthed callerDisabled epochMatches callerRole opClass isOwner isSharedParticipant
+
+theorem kill_m42_multiuserRbac_adminReadsUnowned :
+    m42_multiuserRbac_adminReadsUnowned 1 0 1 1 2 0 0 ≠
+      multiuserRbacStep 1 0 1 1 2 0 0 := by
+  decide
+
+/-- Mutant 15.2 (`orb_placement_role_admit`):
+    Core placement leak — lets `member` (`callerRole == 0`) target `core_colocated_node` (`1`). -/
+@[inline, export orb_mut_m43]
+def m43_placementRole_memberUsesColocated
+    (callerRole targetKind nodeAdminOnly hasValidUnixUser : UInt8) : UInt8 :=
+  if callerRole == 0 && targetKind == 1 && nodeAdminOnly == 0 && hasValidUnixUser == 1 then
+    1
+  else
+    placementRoleAdmit callerRole targetKind nodeAdminOnly hasValidUnixUser
+
+theorem kill_m43_placementRole_memberUsesColocated :
+    m43_placementRole_memberUsesColocated 0 1 0 1 ≠
+      placementRoleAdmit 0 1 0 1 := by
+  decide
+
+/-- Mutant 15.3 (`orb_user_spend_cap_step`):
+    Per-user spend cap ignored when global cap still has headroom. -/
+@[inline, export orb_mut_m44]
+def m44_userSpendCap_ignoresUserCap
+    (globalCapActive : UInt8)
+    (globalSpentCents globalCapCents : UInt32)
+    (userCapActive : UInt8)
+    (userSpentCents userCapCents deltaCents : UInt32) : UInt64 :=
+  let _ := userCapActive
+  userSpendCapStep globalCapActive globalSpentCents globalCapCents 0 userSpentCents userCapCents deltaCents
+
+theorem kill_m44_userSpendCap_ignoresUserCap :
+    m44_userSpendCap_ignoresUserCap 1 200 1000 1 450 500 100 ≠
+      userSpendCapStep 1 200 1000 1 450 500 100 := by
+  decide
+
+/-- Mutant 15.4 (`orb_privd_user_exec_step`):
+    UID floor bypass — admits system/root UIDs below `2000`. -/
+@[inline, export orb_mut_m45]
+def m45_privdUserExec_rootUidBypass
+    (peerIsNodeUid leaseVerified nodeAdminOnly callerRole usernameValid : UInt8)
+    (targetUid targetGid : UInt32)
+    (gidDisjointPriv homeConfinedNoSymlink elanRootOwned : UInt8) : UInt32 :=
+  let effUid : UInt32 := if targetUid < 2000 then 2000 else targetUid
+  privdUserExecStep
+    peerIsNodeUid leaseVerified nodeAdminOnly callerRole usernameValid
+    effUid targetGid gidDisjointPriv homeConfinedNoSymlink elanRootOwned
+
+theorem kill_m45_privdUserExec_rootUidBypass :
+    m45_privdUserExec_rootUidBypass 1 1 0 0 1 0 2001 1 1 1 ≠
+      privdUserExecStep 1 1 0 0 1 0 2001 1 1 1 := by
+  decide
+
 end Orb.MutantSuite

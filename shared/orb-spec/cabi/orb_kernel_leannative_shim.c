@@ -202,6 +202,10 @@ extern uint64_t probe_orb_transport_epoch_step(uint64_t, uint64_t, uint64_t, uin
 extern uint64_t probe_orb_stream_open_tail_cap_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 extern uint64_t probe_orb_rtt_ewma_step(uint64_t, uint64_t, uint64_t);
 extern uint64_t probe_orb_client_link_budget_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+extern uint64_t probe_orb_multiuser_rbac_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+extern uint64_t probe_orb_placement_role_admit(uint64_t, uint64_t, uint64_t, uint64_t);
+extern uint64_t probe_orb_user_spend_cap_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+extern uint64_t probe_orb_privd_user_exec_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 uint8_t orb_verify_writer_reuse(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5) { return (uint8_t)probe_orb_verify_writer_reuse((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5); }
 uint8_t orb_verify_lease_mode(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3) { return (uint8_t)probe_orb_verify_lease_mode((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3); }
@@ -391,3 +395,7 @@ uint64_t orb_transport_epoch_step(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3
 uint64_t orb_stream_open_tail_cap_step(uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5, uint8_t a6) { return (uint64_t)probe_orb_stream_open_tail_cap_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6); }
 uint64_t orb_rtt_ewma_step(uint32_t a0, uint32_t a1, uint32_t a2) { return (uint64_t)probe_orb_rtt_ewma_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2); }
 uint64_t orb_client_link_budget_step(uint32_t a0, uint32_t a1, uint32_t a2, uint8_t a3, uint32_t a4) { return (uint64_t)probe_orb_client_link_budget_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4); }
+uint32_t orb_multiuser_rbac_step(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5, uint8_t a6) { return (uint32_t)probe_orb_multiuser_rbac_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6); }
+uint8_t orb_placement_role_admit(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3) { return (uint8_t)probe_orb_placement_role_admit((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3); }
+uint64_t orb_user_spend_cap_step(uint8_t a0, uint32_t a1, uint32_t a2, uint8_t a3, uint32_t a4, uint32_t a5, uint32_t a6) { return (uint64_t)probe_orb_user_spend_cap_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6); }
+uint32_t orb_privd_user_exec_step(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint32_t a5, uint32_t a6, uint8_t a7, uint8_t a8, uint8_t a9) { return (uint32_t)probe_orb_privd_user_exec_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6, (uint64_t)a7, (uint64_t)a8, (uint64_t)a9); }

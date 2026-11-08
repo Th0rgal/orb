@@ -81,9 +81,12 @@ struct OrbConversation: View {
     /// Shared file being previewed from a chip, and the Files tab.
     @State var fileRef: OrbFileRef?
     @State var showFiles = false
+    @State var sharing = false
     @FocusState var composerFocused: Bool
     @Environment(\.scenePhase) var phase
+    @Environment(\.dismiss) var dismissConversation
     let api = OrbCore.shared
+    var isParticipant: Bool { mission["viewer_role"].text == "participant" }
     var fileScope: OrbFileService.Scope {
         OrbFileService.Scope(missionID: id, workspaceID: mission["workspace_id"].text.isEmpty ? nil : mission["workspace_id"].text)
     }
@@ -334,6 +337,12 @@ struct OrbConversation: View {
                 moveApprovalMessage
             }
             .sheet(isPresented: $forking) { OrbForkSheet(mission: mission) { forkedMission = $0["id"].text }.orbTrackPage("fork", surface: .sheet) }
+            .sheet(isPresented: $sharing) {
+                if let id {
+                    OrbShareMissionSheet(missionID: id, title: resolvedNavigationTitle)
+                        .presentationDetents([.medium, .large])
+                }
+            }
             .sheet(item: $sideQuestion) { OrbSideQuestionSheet(parentID: $0.parent, question: $0.question).orbTrackPage("btw", surface: .sheet) }
             // Warm the /btw history so the side sheet opens on it, not on a spinner.
             .task(id: id) {
@@ -468,10 +477,11 @@ struct OrbConversation: View {
             }
             if !defaultedToPaloma {
                 let resolveAutoNode: ([OrbJSON]) -> String = { items in
-                    if selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let fallback = api.isAdminUser ? "core" : ""
+                    if api.isAdminUser && selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         return "core"
                     }
-                    return OrbSelection.firstAvailableNodeID(items, backend: selection.backend) ?? "core"
+                    return OrbSelection.firstAvailableNodeID(items, backend: selection.backend, includeAdminNodes: api.isAdminUser) ?? fallback
                 }
                 if selection.node.isEmpty, let cached = OrbReadCache.read("catalog:agent") {
                     selection.node = resolveAutoNode(cached["nodes"]["nodes"].items)

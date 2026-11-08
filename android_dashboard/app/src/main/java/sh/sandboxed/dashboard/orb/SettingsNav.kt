@@ -29,6 +29,7 @@ enum class OrbSettingsSection(val id: String, val label: String, val subtitle: S
         get() = when (this) {
             Account -> listOf(
                 Triple("settings", "Account", OrbSettingsRoute.Backend),
+                Triple("users-settings", "Users", OrbSettingsRoute.Users),
                 Triple("usage-telemetry", "Usage telemetry", OrbSettingsRoute.UsageTelemetry),
                 Triple("dictation", "Dictation", OrbSettingsRoute.Dictation),
                 Triple("debug", "Advanced", OrbSettingsRoute.DebugInfo),

@@ -10,9 +10,11 @@ import * as Ic from "./icons";
 import {
   clearConnection,
   connectionVersion,
+  currentUser,
   getApiUrl,
   getGlobalSettings,
   getJwt,
+  isAdminUser,
   isConnected,
   login,
   probeHealth,
@@ -28,6 +30,7 @@ import {
   disconnectGitHubIntegration,
   downloadSettingsBackup,
   effectiveCleanupDays,
+  formatUsdFromCents,
   getAuthStatus,
   getGitHubIntegrationStatus,
   interpretRestoreResponse,
@@ -703,13 +706,14 @@ function BackendTab() {
 
   const requiresCurrentPassword = () => {
     const st = authStatus();
+    if (st?.auth_mode === "multi_user") return true;
     return Boolean(st && !st.dev_mode && st.password_source !== "none");
   };
 
   const submitPasswordChange = async () => {
     if (pwBusy()) return;
     if (requiresCurrentPassword() && !currentPw().trim()) {
-      setPwError("Enter your current server password.");
+      setPwError("Enter your current password.");
       return;
     }
     if (newPw().trim().length < 8) {
@@ -728,7 +732,7 @@ function BackendTab() {
       setCurrentPw("");
       setNewPw("");
       setConfirmPw("");
-      setNotice("Server password updated.");
+      setNotice(authStatus()?.auth_mode === "multi_user" ? "Account password updated." : "Server password updated.");
       void getAuthStatus().then(setAuthStatus).catch(() => {});
     } catch (e) {
       setPwError(e instanceof Error ? e.message : String(e));
@@ -798,10 +802,46 @@ function BackendTab() {
             </button>
           </Show>
         </Row>
-        <Show when={isConnected() && authStatus()?.auth_mode === "single_tenant"}>
+        <Show when={isConnected() && currentUser()}>
+          {(u) => (
+            <Row
+              title={`@${u().username} · ${u().role === "admin" ? "Admin" : "Member"}`}
+              desc={[
+                u().unix_username ? `Linux home /home/${u().unix_username}` : null,
+                `Today ${formatUsdFromCents(u().spent_today_cents ?? 0)} / ${
+                  u().daily_spend_cap_cents != null ? formatUsdFromCents(u().daily_spend_cap_cents!) : "Unlimited"
+                }`,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            >
+              <Show when={isAdminUser()}>
+                <button
+                  type="button"
+                  class="s-btn"
+                  onClick={() => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: "users-settings" }))}
+                >
+                  Manage users
+                </button>
+              </Show>
+            </Row>
+          )}
+        </Show>
+        <Show
+          when={
+            isConnected() &&
+            (authStatus()?.auth_mode === "single_tenant" || authStatus()?.auth_mode === "multi_user")
+          }
+        >
           <Row
-            title="Server password"
-            desc={authStatus()?.password_source === "dashboard" ? "Managed in Core settings." : "Override the environment password with a stored hash."}
+            title={authStatus()?.auth_mode === "multi_user" ? "Account password" : "Server password"}
+            desc={
+              authStatus()?.auth_mode === "multi_user"
+                ? "Updates your multi-user password and rotates active sessions."
+                : authStatus()?.password_source === "dashboard"
+                  ? "Managed in Core settings."
+                  : "Override the environment password with a stored hash."
+            }
           >
             <button
               type="button"
@@ -823,8 +863,12 @@ function BackendTab() {
       <Show when={passwordDialog()}>
         <Dialog
           size="compact"
-          title="Change server password"
-          description="Updates the single-tenant login password on Core."
+          title={authStatus()?.auth_mode === "multi_user" ? "Change account password" : "Change server password"}
+          description={
+            authStatus()?.auth_mode === "multi_user"
+              ? "Updates your password on Core and signs out older sessions."
+              : "Updates the single-tenant login password on Core."
+          }
           busy={pwBusy()}
           dirty={Boolean(currentPw() || newPw() || confirmPw())}
           onClose={() => setPasswordDialog(false)}
@@ -944,8 +988,10 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
         <details class="settings-advanced" onToggle={e => { if (e.currentTarget.open) setAdvancedMounted(true); }}>
           <summary>Advanced <Ic.ChevronDown size={14} /></summary>
           <Show when={advancedMounted()}>
-            <WorkspaceCleanupCard />
-            <BackupRestoreCard />
+            <Show when={isAdminUser()}>
+              <WorkspaceCleanupCard />
+              <BackupRestoreCard />
+            </Show>
             <BackgroundSyncCard />
             <DiagnosticsCard />
           </Show>

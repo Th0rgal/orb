@@ -103,6 +103,9 @@ struct ContentView: View {
             authRequired = api.authRequired
             if authRequired && !api.isAuthenticated && !api.authSessionExpired { await api.restoreSavedSession() }
             isAuthenticated = api.isAuthenticated || !authRequired
+            if isAuthenticated {
+                await api.refreshCurrentUser()
+            }
         } catch {
             // If health check fails, assume we need auth
             authRequired = true
@@ -265,6 +268,17 @@ struct SetupSheet: View {
                                 .font(.caption.monospaced())
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
+                            if let me = api.currentUser {
+                                let roleLabel = me.role == "admin" ? "Admin" : "Member"
+                                let unixPart = me.unixUsername.map { " · /home/\($0)" } ?? ""
+                                let capPart = me.dailySpendCapCents.map {
+                                    " · \(OrbUsersModel.formatUsdFromCents(me.spentTodayCents)) / \(OrbUsersModel.formatUsdFromCents($0)) today"
+                                } ?? ""
+                                Text("@\(me.username) · \(roleLabel)\(unixPart)\(capPart)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
                         }
                         Spacer(minLength: 8)
                         if api.authRequired {
@@ -323,13 +337,13 @@ struct SetupSheet: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                if isConnectedSession && api.authRequired && api.authMode == .singleTenant {
+                if isConnectedSession && api.authRequired && (api.authMode == .singleTenant || api.authMode == .multiUser) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Server password").font(.subheadline).foregroundStyle(.secondary)
+                        Text(api.authMode == .multiUser ? "Account password" : "Server password").font(.subheadline).foregroundStyle(.secondary)
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Single-tenant password").font(.subheadline.weight(.medium))
-                                Text("Rotate the password stored on Core.").font(.footnote).foregroundStyle(.secondary)
+                                Text(api.authMode == .multiUser ? "Personal password" : "Single-tenant password").font(.subheadline.weight(.medium))
+                                Text(api.authMode == .multiUser ? "Rotate your password and active session." : "Rotate the password stored on Core.").font(.footnote).foregroundStyle(.secondary)
                             }
                             Spacer(minLength: 8)
                             Button("Change…") { showChangePassword = true }
@@ -403,13 +417,24 @@ struct SetupSheet: View {
             if api.authRequired {
                 if !password.isEmpty {
                     _ = try await api.login(password: password, username: api.authMode == .multiUser ? username : nil)
+                    if api.authMode == .multiUser {
+                        let trimmedUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmedUser.isEmpty {
+                            UserDefaults.standard.set(trimmedUser, forKey: "last_username")
+                        }
+                    }
                 } else if !api.isAuthenticated || api.authSessionExpired {
                     api.baseURL = originalURL
                     errorMessage = "Enter your password to connect."
                     isTestingConnection = false
                     return
+                } else {
+                    await api.refreshCurrentUser()
                 }
-            } else { api.authSessionExpired = false }
+            } else {
+                api.authSessionExpired = false
+                await api.refreshCurrentUser()
+            }
             password = ""
             api.connectionGeneration += 1
             OrbHaptics.success()

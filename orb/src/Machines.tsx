@@ -12,6 +12,7 @@ import {
   MANAGED_FLEET_COLLAPSE_AFTER,
   formatNodeSlotBadge,
   groupManagedNodesByProvider,
+  isAdminOnlyNode,
   isManagedNode,
   managedFleetGroupSummary,
   nodeProvider,
@@ -24,7 +25,7 @@ import { pollWhileVisible } from "./poll";
 import * as Ic from "./icons";
 import { readPalomaPub } from "./pubKey";
 import { recordFleet } from "./machineLoad";
-import { connectionVersion, getRemoteNodes, getApiUrl, getJwt, isConnected, setRemoteNodeCordoned, updateRemoteNodeCapacity, type RemoteNodeView } from "./api";
+import { connectionVersion, getRemoteNodes, getApiUrl, getJwt, isAdminUser, isConnected, setRemoteNodeCordoned, updateRemoteNodeCapacity, type RemoteNodeView } from "./api";
 
 export { MACHINES, type Machine };
 
@@ -126,7 +127,7 @@ function FleetRow(p: {
       <Resource label="Disk" used={disk()} total={p.node?.disk_total_bytes ?? p.core?.disk_total} />
       <Show when={p.node?.resource_history?.some(s => s.gpu != null)}><Resource label="GPU" value={p.node!.resource_history!.at(-1)?.gpu != null ? `${Math.round(p.node!.resource_history!.at(-1)!.gpu!)}%` : "Unavailable"} /></Show>
     </div>
-      <Show when={p.node && !isManagedNode(p.node)}>
+      <Show when={isAdminUser() && p.node && !isManagedNode(p.node)}>
         <div class="machine-capacity-editor">
           <SettingsRow
             title="Job slot limit"
@@ -288,8 +289,10 @@ function MachinesPage() {
       <h3 class="s-section-title">Remote</h3>
       <div class="m-list s-card">
         <Show when={isConnected()}>
-          <FleetRow core={core()} live={live()} history={history()} />
-          <For each={(nodes() ?? []).filter(n => !isManagedNode(n)).map(n => n.id)}>{id => <FleetRow node={nodes()?.find(n => n.id === id)} onCapacitySaved={mergeUpdatedNode} />}</For>
+          <Show when={isAdminUser()}>
+            <FleetRow core={core()} live={live()} history={history()} />
+          </Show>
+          <For each={(nodes() ?? []).filter(n => !isManagedNode(n) && (isAdminUser() || !isAdminOnlyNode(n))).map(n => n.id)}>{id => <FleetRow node={nodes()?.find(n => n.id === id)} onCapacitySaved={mergeUpdatedNode} />}</For>
           <For each={managedFleetGroups().map(g => g.provider)}>{provider => {
             const group = () => managedFleetGroups().find(g => g.provider === provider)!;
             const open = () => fleetGroupOpen()[provider] ?? (group().nodes.length <= MANAGED_FLEET_COLLAPSE_AFTER);

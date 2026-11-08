@@ -17,6 +17,7 @@ import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
 import {
   api,
   connectionVersion,
+  currentUser,
   getAllProviderUsage,
   getProviderUsage,
   setMistralUsageSession,
@@ -25,9 +26,11 @@ import {
   getSubscriptionLogin,
   startProviderOAuth,
   completeProviderOAuth,
+  isAdminUser,
   isConnected,
   listProviders,
   setProviderEnabled,
+  setProviderUserPreference,
   setProviderAutoResetOnLimit,
   reorderProviders,
   openExternalUrl,
@@ -37,6 +40,7 @@ import {
   type AIProvider,
   type ProviderUsage,
 } from "./api";
+import { formatUsdFromCents } from "./missionSharesApi";
 import { nativeInvoke } from "./clientRuns";
 import { listHealth, type AccountHealthSnapshot } from "./routingApi";
 import { applyOrder, moveAccount, orderAccounts } from "./accountOrder";
@@ -263,13 +267,22 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
   };
   /** Position of `a` among its provider's accounts in `group`, when there are several. */
   const rankIn = (group: () => AIProvider[], a: AIProvider): AccountRank | undefined => {
+    if (!isAdminUser()) return undefined;
     const peers = group().filter(x => x.provider_type === a.provider_type);
     if (peers.length < 2) return undefined;
     return { index: peers.findIndex(x => x.id === a.id), count: peers.length, move: to => reorder(group(), a, to) };
   };
   const toggle = (a: AIProvider, enabled: boolean) => {
     setToggleError(null);
-    void setProviderEnabled(a.id, enabled).then(p.onRefresh, () => setToggleError(`Could not ${enabled ? "enable" : "disable"} ${a.name}. Nothing changed.`));
+    const req = isAdminUser() ? setProviderEnabled(a.id, enabled) : setProviderUserPreference(a.id, enabled);
+    void req.then(p.onRefresh, () => setToggleError(`Could not ${enabled ? "enable" : "disable"} ${a.name}. Nothing changed.`));
+  };
+  const toggleUserPref = (a: AIProvider, enabled: boolean) => {
+    setToggleError(null);
+    void setProviderUserPreference(a.id, enabled).then(
+      p.onRefresh,
+      () => setToggleError(`Could not update your preference for ${a.name}. Nothing changed.`),
+    );
   };
   const toggleAutoReset = async (a: AIProvider, autoReset: boolean) => {
     setToggleError(null);
@@ -334,16 +347,28 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
           <Ic.RefreshIcon size={13} /> Refresh
         </button>
       </div>
-      <p class="s-lead">Subscriptions, cloud connectors, and API keys on the connected Core backend.</p>
+      <p class="s-lead">
+        {isAdminUser()
+          ? "Subscriptions, cloud connectors, and API keys on the connected Core backend."
+          : "Shared inference accounts on Core. Toggle which accounts your missions may use."}
+        <Show when={currentUser()?.daily_spend_cap_cents ?? undefined}>
+          {(cap) => ` · Daily cap ${formatUsdFromCents(currentUser()?.spent_today_cents ?? 0)} / ${formatUsdFromCents(cap())}`}
+        </Show>
+      </p>
       <ErrorToast title="Could not refresh providers" error={p.loadError} background action={{ label: "Try again", run: p.onRefresh }} />
       <ErrorToast error={toggleError()} title="Couldn’t update the provider" onDismiss={() => setToggleError(null)} />
 
       <section class="s-sec">
-        <div class="section-row"><h3>Subscriptions</h3><button class="s-btn sm quiet" disabled={!loginOptions()?.available} onClick={() => { setAddType(loginOptions()?.providers[0]?.id ?? ""); setAdding(true); }}><Ic.PlusIcon size={12}/> Add subscription account</button></div>
-        <Show when={loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
+        <div class="section-row">
+          <h3>Subscriptions</h3>
+          <Show when={isAdminUser()}>
+            <button class="s-btn sm quiet" disabled={!loginOptions()?.available} onClick={() => { setAddType(loginOptions()?.providers[0]?.id ?? ""); setAdding(true); }}><Ic.PlusIcon size={12}/> Add subscription account</button>
+          </Show>
+        </div>
+        <Show when={isAdminUser() && loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
           <For each={oauth()}>
-            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} onUseReset={() => setResetting(a)} onToggleAutoReset={autoReset => toggleAutoReset(a, autoReset)} />}
+            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={isAdminUser() ? () => setReauth(a) : undefined} onRemove={isAdminUser() ? () => { setRemoveError(null); setRemoving(a); } : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} onUseReset={isAdminUser() ? () => setResetting(a) : undefined} onToggleAutoReset={isAdminUser() ? autoReset => toggleAutoReset(a, autoReset) : undefined} />}
           </For>
           <Show when={oauth().length === 0}>
             <div class="s-row"><div class="s-row-desc">No subscription accounts connected.</div></div>
@@ -356,18 +381,25 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
           <h3>Model connections</h3>
           <p class="s-row-desc p-section-description">Model access through connected credentials, separate from subscription accounts.</p>
           <div class="s-card">
-            <For each={modelConnections()}>{a => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} usage={usage()[a.id]} health={p.health?.[a.id]} onReconnect={() => setReauth(a)} onToggle={enabled => toggle(a, enabled)} />}</For>
+            <For each={modelConnections()}>{a => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} usage={usage()[a.id]} health={p.health?.[a.id]} onReconnect={isAdminUser() ? () => setReauth(a) : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} />}</For>
           </div>
         </section>
       </Show>
 
-      <CloudProviders />
+      <Show when={isAdminUser()}>
+        <CloudProviders />
+      </Show>
 
       <section class="s-sec">
-        <div class="section-row"><h3>API keys</h3><button class="s-btn sm quiet" onClick={() => setKeyEditor("new")}><Ic.PlusIcon size={12}/> Add API key</button></div>
+        <div class="section-row">
+          <h3>API keys</h3>
+          <Show when={isAdminUser()}>
+            <button class="s-btn sm quiet" onClick={() => setKeyEditor("new")}><Ic.PlusIcon size={12}/> Add API key</button>
+          </Show>
+        </div>
         <div class="s-card">
           <For each={keys()}>
-            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(keys, a)} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(keys, a)} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={isAdminUser() ? () => setReauth(a) : undefined} onEditKey={isAdminUser() ? () => setKeyEditor(a) : undefined} onRemove={isAdminUser() ? () => { setRemoveError(null); setRemoving(a); } : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} />}
           </For>
           <Show when={keys().length === 0}>
             <div class="s-row"><div class="s-row-desc">No API keys configured.</div></div>
@@ -1059,8 +1091,11 @@ function RankControls(p: { rank: AccountRank; name: string; title: string }) {
 
 const RANK_DRAG_TYPE = "application/x-orb-account-rank";
 
-function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boolean) => void; rank?: AccountRank; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void; onUseReset?: () => void; onToggleAutoReset?: (autoReset: boolean) => Promise<boolean> }) {
+function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boolean) => void; rank?: AccountRank; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect?: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void; onToggleUserPref?: (enabled: boolean) => void; onUseReset?: () => void; onToggleAutoReset?: (autoReset: boolean) => Promise<boolean> }) {
   const a = p.a;
+  const globallyDisabled = () => a.globally_enabled === false || (a.globally_enabled === undefined && a.enabled === false);
+  const userSkipped = () => a.user_enabled === false;
+  const rowDisabled = () => globallyDisabled() || (!isAdminUser() && userSkipped());
   const status = () => effectiveProviderStatus(a, p.usage, p.health);
   const quota = () => p.usage ? quotaStatus(usageWindows(p.usage)) : null;
   const resetSupported = () => supportsSubscriptionReset(a) && !!p.onToggleAutoReset;
@@ -1083,14 +1118,14 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
   };
   // Quota severity uses the shared level colors (warning 80-99%, danger exhausted).
   const stClass = () => status() === "connected" ? "connected" : ["quota_exhausted", "pool_exhausted", "out_of_credit"].includes(status()) ? "exhausted" : status() === "quota_warning" ? "warning" : ["needs_reauth", "needs_verification", "error", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
-  const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", needs_verification: "Verification required", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
+  const stLabel = () => (!isAdminUser() && globallyDisabled() ? "Disabled by admin" : !isAdminUser() && userSkipped() ? "Skipped for your missions" : ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", needs_verification: "Verification required", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown"));
   // Pool names and percentages already live in the quota summary.
   const statusText = () => a.provider_type === "antigravity" && quota()
     ? ["quota_exhausted", "pool_exhausted"].includes(status()) ? "Limit reached"
       : status() === "quota_warning" ? "Near limit" : stLabel()
     : stLabel();
-  const canReconnect = () => reconnectable(a);
-  const mistralSubscription = () => a.provider_type === "mistral" && a.uses_oauth;
+  const canReconnect = () => !!p.onReconnect && reconnectable(a);
+  const mistralSubscription = () => isAdminUser() && a.provider_type === "mistral" && a.uses_oauth;
   const expandable = () => !!p.rank || resetSupported() || !!resetInfo() || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
   const [localOpen, setLocalOpen] = createSignal(false);
   const open = () => p.open ?? localOpen();
@@ -1115,12 +1150,23 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
     : p.usage?.muse_plan || p.usage?.mistral_plan || undefined;
   const title = () => a.provider_type === "antigravity" ? "Google Antigravity" : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "Gemini API" : "Gemini model access") : email() ? a.name.replace(`(${email()})`, "").trim() : a.name;
   const menuItems = (): MenuEntry[] => {
+    if (!isAdminUser()) {
+      return [
+        {
+          kind: "item",
+          label: userSkipped() ? "Use for my missions" : "Skip for my missions",
+          icon: userSkipped() ? Ic.CheckIcon : Ic.BanIcon,
+          disabled: globallyDisabled(),
+          onClick: () => p.onToggle(userSkipped()),
+        },
+      ];
+    }
     const authItems: MenuEntry[] = status() === "needs_verification"
       ? [{ kind: "item", label: "Verify account", icon: Ic.ExternalIcon, onClick: verify }, { kind: "item", label: "Check again", icon: Ic.RefreshIcon, onClick: () => void checkAgain() }]
       : p.onEditKey
       ? [{ kind: "item", label: "Edit API key", icon: Ic.PencilIcon, onClick: p.onEditKey }]
       : canReconnect()
-      ? [{ kind: "item", label: needsAuth() ? "Reconnect" : "Re-authenticate", icon: Ic.RefreshIcon, onClick: p.onReconnect }]
+      ? [{ kind: "item", label: needsAuth() ? "Reconnect" : "Re-authenticate", icon: Ic.RefreshIcon, onClick: p.onReconnect! }]
       : [];
     const rankItems: MenuEntry[] = [
       ...(p.rank && p.rank.index > 0 ? [{ kind: "item" as const, label: "Try earlier", icon: Ic.FindPrevIcon, onClick: () => p.rank!.move(p.rank!.index - 1) }] : []),
@@ -1132,11 +1178,19 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
       ...rankItems,
       ...(rankItems.length > 0 ? [{ kind: "sep" as const }] : []),
       { kind: "item", label: a.enabled === false ? "Enable" : "Disable", icon: a.enabled === false ? Ic.CheckIcon : Ic.BanIcon, onClick: () => p.onToggle(a.enabled === false) },
+      ...(p.onToggleUserPref && currentUser()
+        ? [{
+            kind: "item" as const,
+            label: userSkipped() ? "Use for my missions" : "Skip for my missions",
+            icon: userSkipped() ? Ic.CheckIcon : Ic.BanIcon,
+            onClick: () => p.onToggleUserPref!(userSkipped()),
+          }]
+        : []),
       ...(p.onRemove ? [{ kind: "sep" as const }, { kind: "item" as const, label: "Remove provider…", icon: Ic.TrashIcon, danger: true, onClick: p.onRemove }] : []),
     ];
   };
   return (
-    <div class="p-acc-wrap" classList={{ "p-drop": dropping(), "is-disabled": a.enabled === false }}
+    <div class="p-acc-wrap" classList={{ "p-drop": dropping(), "is-disabled": rowDisabled() }}
       onDragOver={e => { if (p.rank && e.dataTransfer?.types.includes(RANK_DRAG_TYPE)) { e.preventDefault(); setDropping(true); } }}
       onDragLeave={() => setDropping(false)}
       onDrop={e => { setDropping(false); const from = e.dataTransfer?.getData(RANK_DRAG_TYPE); if (p.rank && from) { e.preventDefault(); if (Number(from) !== p.rank.index) p.rank.move(p.rank.index); } }}>

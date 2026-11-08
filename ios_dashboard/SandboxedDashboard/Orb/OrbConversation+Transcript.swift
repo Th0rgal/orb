@@ -247,7 +247,14 @@ extension OrbConversation {
                 let displayBody = OrbSkillSlash.skillPreview(rawBody)
                 let skillNames = Array(NSOrderedSet(array: OrbSkillSlash.skillTokens(rawBody).map(\.name))) as? [String] ?? []
                 let isPendingTurn = working && item.0 == lastUserItemID
+                let sender = transcript.senderByItemID[item.0] ?? ""
                 OrbUserBubble(copyText: displayBody, pending: isPendingTurn) {
+                    if !sender.isEmpty && sender != (api.currentUser?.username ?? "") {
+                        Text("@\(sender)")
+                            .font(.caption2.monospaced().weight(.semibold))
+                            .foregroundStyle(OrbStyle.textSecondary)
+                            .accessibilityIdentifier("message.sender.\(sender)")
+                    }
                     if !images.paths.isEmpty { OrbImageStrip(images: images, missionID: id) }
                     if goalObj != nil || planObj != nil || !skillNames.isEmpty || presentation.attached {
                         HStack(spacing: 6) {

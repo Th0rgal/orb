@@ -123,7 +123,7 @@ test("right-click an agent row: Copy mission ID copies the raw UUID and changes 
   // Context selection highlights the row while its menu is open without opening its conversation.
   await expect(row).toHaveClass(/active/);
   // Identity actions only — no project/file creation leaking onto an agent row.
-  await expect(menu.getByRole("menuitem")).toHaveText(["Delete agent…", /^Transfer to another agent/, "Move", "Rename", "Copy mission ID", "Mission settings"]);
+  await expect(menu.getByRole("menuitem")).toHaveText(["Delete agent…", /^Transfer to another agent/, "Move", "Rename", "Share…", "Copy mission ID", "Mission settings"]);
 
   await menu.getByRole("menuitem", { name: "Copy mission ID" }).click();
   expect(await copied(page)).toEqual([MISSION_ID]);

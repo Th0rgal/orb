@@ -209,7 +209,8 @@ fun OrbChangePasswordDialog(
                                     allowAuthRetry = false
                                 )
                             )
-                            core.configureSession(core.baseURL, core.token, newPassword, core.savedUsername())
+                            val rotatedToken = OrbJSON.str(res, "token")?.takeIf { it.isNotEmpty() } ?: core.token
+                            core.configureSession(core.baseURL, rotatedToken, newPassword, core.savedUsername())
                             val msg = OrbJSON.str(res, "message") ?: "Server password updated."
                             onSaved(msg)
                         } catch (e: CancellationException) {

@@ -126,6 +126,9 @@ structure JobRecord where
   startTicks      : UInt64 := 0
   phaseCode       : UInt8 := 0
   procPhase       : UInt8 := 0
+  ownerUserId     : String := ""
+  execUnixUser    : String := ""
+  execUid         : UInt32 := 0
   deriving Repr, Inhabited
 
 def JobRecord.toJson (r : JobRecord) (logTail? : Option String := none) : JVal :=
@@ -152,7 +155,10 @@ def JobRecord.toJson (r : JobRecord) (logTail? : Option String := none) : JVal :
       , ("pid", JVal.uint64 r.pid)
       , ("start_ticks", JVal.uint64 r.startTicks)
       , ("phase_code", JVal.uint64 r.phaseCode.toUInt64)
-      , ("proc_phase", JVal.uint64 r.procPhase.toUInt64) ]
+      , ("proc_phase", JVal.uint64 r.procPhase.toUInt64)
+      , ("owner_user_id", .str r.ownerUserId)
+      , ("exec_unix_user", .str r.execUnixUser)
+      , ("exec_uid", JVal.uint64 r.execUid.toUInt64) ]
   let extra : Array (String × JVal) :=
     (match r.cancellation? with
      | some c => #[("cancellation", c.toJson)]
@@ -182,7 +188,10 @@ def JobRecord.toStatusJson (r : JobRecord) (logTail? : Option String := none) : 
       , ("forced", .bool r.forced)
       , ("operation_id", .str r.operationId)
       , ("node_boot_epoch", JVal.uint64 r.nodeBootEpoch)
-      , ("phase_code", JVal.uint64 r.phaseCode.toUInt64) ]
+      , ("phase_code", JVal.uint64 r.phaseCode.toUInt64)
+      , ("owner_user_id", .str r.ownerUserId)
+      , ("exec_unix_user", .str r.execUnixUser)
+      , ("exec_uid", JVal.uint64 r.execUid.toUInt64) ]
   .obj fields
 
 def defaultPhaseCodeForState : JobState → UInt8
@@ -236,6 +245,9 @@ def JobRecord.fromStoreJson? (v : JVal) : Option JobRecord := do
   let rawPhase := ((v.fieldUInt64? "phase_code").getD 0).toUInt8
   let phaseCode := if rawPhase == 0 || rawPhase > 5 then defaultPhaseCodeForState state else rawPhase
   let procPhase := ((v.fieldUInt64? "proc_phase").getD 0).toUInt8
+  let ownerUserId := (v.fieldStr? "owner_user_id").getD ""
+  let execUnixUser := (v.fieldStr? "exec_unix_user").getD ""
+  let execUid := ((v.fieldUInt64? "exec_uid").getD 0).toUInt32
   return {
     jobId := jobId
     missionId := missionId
@@ -262,6 +274,9 @@ def JobRecord.fromStoreJson? (v : JVal) : Option JobRecord := do
     startTicks := startTicks
     phaseCode := phaseCode
     procPhase := if procPhase > 4 then 0 else procPhase
+    ownerUserId := ownerUserId
+    execUnixUser := execUnixUser
+    execUid := execUid
   }
 
 def formatEpochIso (epochSecs : UInt64) : String :=
@@ -638,6 +653,9 @@ private def legacyJobAdditiveAlters : Array String := #[
   "ALTER TABLE jobs ADD COLUMN start_ticks INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE jobs ADD COLUMN phase_code INTEGER NOT NULL DEFAULT 1;",
   "ALTER TABLE jobs ADD COLUMN proc_phase INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE jobs ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE jobs ADD COLUMN exec_unix_user TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE jobs ADD COLUMN exec_uid INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE node_scratch ADD COLUMN node_boot_epoch INTEGER NOT NULL DEFAULT 1;",
   "ALTER TABLE node_scratch ADD COLUMN claim_seq INTEGER NOT NULL DEFAULT 1;"
 ]
@@ -647,7 +665,7 @@ private def ensureLegacySqliteSchema (workDir : String) (backend : SqliteBackend
   let ddl :=
     "PRAGMA journal_mode=WAL; " ++
     "CREATE TABLE IF NOT EXISTS node_boot_state (singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1), boot_epoch INTEGER NOT NULL DEFAULT 1); " ++
-    "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, log_path TEXT, error TEXT, artifacts_json TEXT, cancellation_json TEXT, authority_mode TEXT NOT NULL DEFAULT 'writer', placement_kind TEXT NOT NULL DEFAULT 'managed', superseded_by_mission_id TEXT NOT NULL DEFAULT '', orphaned_at TEXT NOT NULL DEFAULT '', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, state_revision INTEGER NOT NULL DEFAULT 1, operation_id TEXT NOT NULL DEFAULT '', node_boot_epoch INTEGER NOT NULL DEFAULT 0, pid INTEGER NOT NULL DEFAULT 0, start_ticks INTEGER NOT NULL DEFAULT 0, phase_code INTEGER NOT NULL DEFAULT 1, proc_phase INTEGER NOT NULL DEFAULT 0); " ++
+    "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, log_path TEXT, error TEXT, artifacts_json TEXT, cancellation_json TEXT, authority_mode TEXT NOT NULL DEFAULT 'writer', placement_kind TEXT NOT NULL DEFAULT 'managed', superseded_by_mission_id TEXT NOT NULL DEFAULT '', orphaned_at TEXT NOT NULL DEFAULT '', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, state_revision INTEGER NOT NULL DEFAULT 1, operation_id TEXT NOT NULL DEFAULT '', node_boot_epoch INTEGER NOT NULL DEFAULT 0, pid INTEGER NOT NULL DEFAULT 0, start_ticks INTEGER NOT NULL DEFAULT 0, phase_code INTEGER NOT NULL DEFAULT 1, proc_phase INTEGER NOT NULL DEFAULT 0, owner_user_id TEXT NOT NULL DEFAULT '', exec_unix_user TEXT NOT NULL DEFAULT '', exec_uid INTEGER NOT NULL DEFAULT 0); " ++
     "CREATE TABLE IF NOT EXISTS node_scratch (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, job_id TEXT, node_boot_epoch INTEGER NOT NULL DEFAULT 1, claim_seq INTEGER NOT NULL DEFAULT 1, parent_identity TEXT NOT NULL, directory_identity TEXT NOT NULL, retired_at TEXT); " ++
     "CREATE TABLE IF NOT EXISTS container_leaders (workspace_id TEXT NOT NULL, machine_name TEXT NOT NULL, leader_pid INTEGER NOT NULL, start_ticks INTEGER NOT NULL, node_boot_epoch INTEGER NOT NULL, proc_phase INTEGER NOT NULL DEFAULT 1, job_id TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (workspace_id, machine_name)); " ++
     "CREATE TABLE IF NOT EXISTS workspace_builds (workspace_id TEXT PRIMARY KEY, build_generation INTEGER NOT NULL, operation_id TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('idle','building','completed','failed')), started_at_epoch INTEGER NOT NULL, updated_at_epoch INTEGER NOT NULL);"
@@ -693,8 +711,8 @@ private def jobUpsertSql (r : JobRecord) : String :=
   let opId := if r.operationId.isEmpty then r.jobId else r.operationId
   let ph := if r.phaseCode == 0 || r.phaseCode > 5 then defaultPhaseCodeForState r.state else r.phaseCode
   let pPh := if r.procPhase > 4 then 0 else r.procPhase
-  "INSERT INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json, authority_mode, placement_kind, superseded_by_mission_id, orphaned_at, reserved_disk_gib, state_revision, operation_id, node_boot_epoch, pid, start_ticks, phase_code, proc_phase) VALUES (" ++
-  s!"{sqlEsc r.jobId}, {sqlEsc r.missionId}, {sqlEsc r.payloadJson}, {sqlEsc r.state.asString}, {exitSql}, {sqlEsc r.createdAt}, {sqlOptStr r.startedAt?}, {sqlOptStr r.finishedAt?}, {sqlOptStr r.logPath?}, {sqlOptStr r.error?}, {artsSql}, {cancSql}, {sqlEsc r.authorityMode}, {sqlEsc r.placementKind}, {sqlEsc r.supersededById}, {sqlEsc r.orphanedAt}, {r.reservedDiskGib}, {rev}, {sqlEsc opId}, {r.nodeBootEpoch}, {r.pid}, {r.startTicks}, {ph}, {pPh}) " ++
+  "INSERT INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json, authority_mode, placement_kind, superseded_by_mission_id, orphaned_at, reserved_disk_gib, state_revision, operation_id, node_boot_epoch, pid, start_ticks, phase_code, proc_phase, owner_user_id, exec_unix_user, exec_uid) VALUES (" ++
+  s!"{sqlEsc r.jobId}, {sqlEsc r.missionId}, {sqlEsc r.payloadJson}, {sqlEsc r.state.asString}, {exitSql}, {sqlEsc r.createdAt}, {sqlOptStr r.startedAt?}, {sqlOptStr r.finishedAt?}, {sqlOptStr r.logPath?}, {sqlOptStr r.error?}, {artsSql}, {cancSql}, {sqlEsc r.authorityMode}, {sqlEsc r.placementKind}, {sqlEsc r.supersededById}, {sqlEsc r.orphanedAt}, {r.reservedDiskGib}, {rev}, {sqlEsc opId}, {r.nodeBootEpoch}, {r.pid}, {r.startTicks}, {ph}, {pPh}, {sqlEsc r.ownerUserId}, {sqlEsc r.execUnixUser}, {r.execUid}) " ++
   "ON CONFLICT(id) DO UPDATE SET " ++
   "state = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN jobs.state ELSE excluded.state END, " ++
   "exit_code = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN COALESCE(jobs.exit_code, excluded.exit_code) ELSE excluded.exit_code END, " ++
@@ -710,7 +728,10 @@ private def jobUpsertSql (r : JobRecord) : String :=
   "operation_id = excluded.operation_id, node_boot_epoch = excluded.node_boot_epoch, " ++
   "pid = excluded.pid, start_ticks = excluded.start_ticks, " ++
   "phase_code = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN jobs.phase_code ELSE excluded.phase_code END, " ++
-  "proc_phase = excluded.proc_phase " ++
+  "proc_phase = excluded.proc_phase, " ++
+  "owner_user_id = CASE WHEN excluded.owner_user_id = '' THEN jobs.owner_user_id ELSE excluded.owner_user_id END, " ++
+  "exec_unix_user = CASE WHEN excluded.exec_unix_user = '' THEN jobs.exec_unix_user ELSE excluded.exec_unix_user END, " ++
+  "exec_uid = CASE WHEN excluded.exec_uid = 0 THEN jobs.exec_uid ELSE excluded.exec_uid END " ++
   "WHERE excluded.state_revision >= jobs.state_revision;"
 
 def containerLeaderUpsertSql (c : ContainerLeaderRecord) : String :=
@@ -772,7 +793,7 @@ private def importLegacySqliteJobs (workDir : String) (backend : SqliteBackend) 
   let dbPath : System.FilePath := System.FilePath.mk workDir / "jobs.db"
   if !(← dbPath.pathExists) then return .ok #[]
   let query :=
-    "SELECT id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json, authority_mode, placement_kind, superseded_by_mission_id, orphaned_at, reserved_disk_gib, state_revision, operation_id, node_boot_epoch, pid, start_ticks, phase_code, proc_phase FROM jobs ORDER BY created_at ASC;"
+    "SELECT id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json, authority_mode, placement_kind, superseded_by_mission_id, orphaned_at, reserved_disk_gib, state_revision, operation_id, node_boot_epoch, pid, start_ticks, phase_code, proc_phase, owner_user_id, exec_unix_user, exec_uid FROM jobs ORDER BY created_at ASC;"
   let res ← match backend with
     | .cli =>
       (IO.Process.output {
@@ -841,6 +862,9 @@ private def importLegacySqliteJobs (workDir : String) (backend : SqliteBackend) 
         startTicks := (row.fieldUInt64? "start_ticks").getD 0
         phaseCode := phaseCode
         procPhase := if procPh > 4 then 0 else procPh
+        ownerUserId := (row.fieldStr? "owner_user_id").getD ""
+        execUnixUser := (row.fieldStr? "exec_unix_user").getD ""
+        execUid := ((row.fieldUInt64? "exec_uid").getD 0).toUInt32
       }
   return .ok out
 

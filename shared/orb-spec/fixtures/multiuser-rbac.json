@@ -1,0 +1,252 @@
+{
+  "rbac_cases": [
+    {
+      "name": "unauthed_rejected_401",
+      "caller_authed": 0,
+      "caller_disabled": 0,
+      "epoch_matches": 1,
+      "caller_role": 1,
+      "op_class": 0,
+      "is_owner": 1,
+      "is_shared_participant": 0,
+      "expected": { "admitted": false, "http_status": 401, "reason_code": 1 }
+    },
+    {
+      "name": "stale_epoch_rejected_401",
+      "caller_authed": 1,
+      "caller_disabled": 0,
+      "epoch_matches": 0,
+      "caller_role": 1,
+      "op_class": 0,
+      "is_owner": 1,
+      "is_shared_participant": 0,
+      "expected": { "admitted": false, "http_status": 401, "reason_code": 1 }
+    },
+    {
+      "name": "disabled_account_rejected_403",
+      "caller_authed": 1,
+      "caller_disabled": 1,
+      "epoch_matches": 1,
+      "caller_role": 1,
+      "op_class": 0,
+      "is_owner": 1,
+      "is_shared_participant": 0,
+      "expected": { "admitted": false, "http_status": 403, "reason_code": 2 }
+    },
+    {
+      "name": "member_blocked_from_admin_users_403",
+      "caller_authed": 1,
+      "caller_disabled": 0,
+      "epoch_matches": 1,
+      "caller_role": 0,
+      "op_class": 1,
+      "is_owner": 0,
+      "is_shared_participant": 0,
+      "expected": { "admitted": false, "http_status": 403, "reason_code": 3 }
+    },
+    {
+      "name": "admin_allowed_admin_users_200",
+      "caller_authed": 1,
+      "caller_disabled": 0,
+      "epoch_matches": 1,
+      "caller_role": 1,
+      "op_class": 1,
+      "is_owner": 0,
+      "is_shared_participant": 0,
+      "expected": { "admitted": true, "http_status": 200, "reason_code": 0 }
+    },
+    {
+      "name": "admin_cannot_read_unowned_mission_404",
+      "caller_authed": 1,
+      "caller_disabled": 0,
+      "epoch_matches": 1,
+      "caller_role": 1,
+      "op_class": 2,
+      "is_owner": 0,
+      "is_shared_participant": 0,
+      "expected": { "admitted": false, "http_status": 404, "reason_code": 4 }
+    },
+    {
+      "name": "participant_can_read_and_participate_200",
+      "caller_authed": 1,
+      "caller_disabled": 0,
+      "epoch_matches": 1,
+      "caller_role": 0,
+      "op_class": 2,
+      "is_owner": 0,
+      "is_shared_participant": 1,
+      "expected": { "admitted": true, "http_status": 200, "reason_code": 0 }
+    },
+    {
+      "name": "participant_cannot_destroy_or_share_403",
+      "caller_authed": 1,
+      "caller_disabled": 0,
+      "epoch_matches": 1,
+      "caller_role": 0,
+      "op_class": 3,
+      "is_owner": 0,
+      "is_shared_participant": 1,
+      "expected": { "admitted": false, "http_status": 403, "reason_code": 5 }
+    },
+    {
+      "name": "admin_cannot_mutate_unowned_mission_404",
+      "caller_authed": 1,
+      "caller_disabled": 0,
+      "epoch_matches": 1,
+      "caller_role": 1,
+      "op_class": 3,
+      "is_owner": 0,
+      "is_shared_participant": 0,
+      "expected": { "admitted": false, "http_status": 404, "reason_code": 4 }
+    },
+    {
+      "name": "admin_cannot_read_unowned_project_or_vm_404",
+      "caller_authed": 1,
+      "caller_disabled": 0,
+      "epoch_matches": 1,
+      "caller_role": 1,
+      "op_class": 4,
+      "is_owner": 0,
+      "is_shared_participant": 1,
+      "expected": { "admitted": false, "http_status": 404, "reason_code": 4 }
+    }
+  ],
+  "placement_cases": [
+    {
+      "name": "member_blocked_from_core_local",
+      "caller_role": 0,
+      "target_kind": 0,
+      "node_admin_only": 0,
+      "has_valid_unix_user": 1,
+      "expected_admitted": false
+    },
+    {
+      "name": "member_blocked_from_core_colocated_node",
+      "caller_role": 0,
+      "target_kind": 1,
+      "node_admin_only": 0,
+      "has_valid_unix_user": 1,
+      "expected_admitted": false
+    },
+    {
+      "name": "member_blocked_from_admin_only_node",
+      "caller_role": 0,
+      "target_kind": 2,
+      "node_admin_only": 1,
+      "has_valid_unix_user": 1,
+      "expected_admitted": false
+    },
+    {
+      "name": "member_allowed_dedicated_node_with_unix_user",
+      "caller_role": 0,
+      "target_kind": 2,
+      "node_admin_only": 0,
+      "has_valid_unix_user": 1,
+      "expected_admitted": true
+    },
+    {
+      "name": "member_allowed_managed_vm_with_unix_user",
+      "caller_role": 0,
+      "target_kind": 3,
+      "node_admin_only": 0,
+      "has_valid_unix_user": 1,
+      "expected_admitted": true
+    },
+    {
+      "name": "member_allowed_client_local_without_unix_user",
+      "caller_role": 0,
+      "target_kind": 4,
+      "node_admin_only": 0,
+      "has_valid_unix_user": 0,
+      "expected_admitted": true
+    },
+    {
+      "name": "admin_allowed_core_local",
+      "caller_role": 1,
+      "target_kind": 0,
+      "node_admin_only": 1,
+      "has_valid_unix_user": 0,
+      "expected_admitted": true
+    }
+  ],
+  "spend_cap_cases": [
+    {
+      "name": "both_caps_satisfied",
+      "global_cap_active": 1,
+      "global_spent_cents": 1500,
+      "global_cap_cents": 10000,
+      "user_cap_active": 1,
+      "user_spent_cents": 400,
+      "user_cap_cents": 1000,
+      "delta_cents": 250,
+      "expected": {
+        "admitted": true,
+        "deny_reason": 0,
+        "next_global_spent_cents": 1750,
+        "next_user_spent_cents": 650
+      }
+    },
+    {
+      "name": "user_cap_exceeded",
+      "global_cap_active": 1,
+      "global_spent_cents": 1500,
+      "global_cap_cents": 10000,
+      "user_cap_active": 1,
+      "user_spent_cents": 900,
+      "user_cap_cents": 1000,
+      "delta_cents": 250,
+      "expected": {
+        "admitted": false,
+        "deny_reason": 2,
+        "next_global_spent_cents": 1500,
+        "next_user_spent_cents": 900
+      }
+    },
+    {
+      "name": "global_cap_exceeded",
+      "global_cap_active": 1,
+      "global_spent_cents": 9900,
+      "global_cap_cents": 10000,
+      "user_cap_active": 1,
+      "user_spent_cents": 100,
+      "user_cap_cents": 1000,
+      "delta_cents": 250,
+      "expected": {
+        "admitted": false,
+        "deny_reason": 1,
+        "next_global_spent_cents": 9900,
+        "next_user_spent_cents": 100
+      }
+    }
+  ],
+  "privd_exec_cases": [
+    {
+      "name": "dedicated_member_uid_admitted",
+      "peer_is_node_uid": 1,
+      "lease_verified": 1,
+      "node_admin_only": 0,
+      "caller_role": 0,
+      "username_valid": 1,
+      "target_uid": 2001,
+      "target_gid": 2001,
+      "gid_disjoint_priv": 1,
+      "home_confined_no_symlink": 1,
+      "elan_root_owned": 1,
+      "expected": { "admitted": true, "deny_reason": 0 }
+    },
+    {
+      "name": "root_uid_rejected",
+      "peer_is_node_uid": 1,
+      "lease_verified": 1,
+      "node_admin_only": 0,
+      "caller_role": 0,
+      "username_valid": 1,
+      "target_uid": 0,
+      "target_gid": 2001,
+      "gid_disjoint_priv": 1,
+      "home_confined_no_symlink": 1,
+      "elan_root_owned": 1,
+      "expected": { "admitted": false, "deny_reason": 6 }
+    }
+  ]
+}

@@ -225,10 +225,16 @@ internal fun quotaStatus(windows: List<Pair<String, Double>>): OrbQuotaStatus? {
 internal fun quotaExhaustedLabel(windows: List<Pair<String, Double>>): String? =
     quotaStatus(windows)?.takeIf { it.level == OrbQuotaLevel.Exhausted }?.label
 
+internal fun effectiveProviderEnabled(provider: OrbRow): Boolean =
+    provider.bool("effective_enabled") ?: (
+        (provider.bool("globally_enabled") ?: (provider.bool("enabled") != false)) &&
+            (provider.bool("user_enabled") != false)
+        )
+
 /** Quota severity of a provider row; null when another state (disabled, reconnect, error) wins or all is below 80%. */
 internal fun providerQuotaStatus(provider: OrbRow, detail: OrbDict?): OrbQuotaStatus? {
     val statusType = OrbJSON.str(provider.dict("status"), "type") ?: provider.str("status", "state")
-    if (provider.bool("enabled") == false || statusType == "needs_reauth" || OrbJSON.str(detail, "status") == "needs_reauth" || !OrbJSON.str(detail, "error").isNullOrEmpty()) return null
+    if (!effectiveProviderEnabled(provider) || statusType == "needs_reauth" || OrbJSON.str(detail, "status") == "needs_reauth" || !OrbJSON.str(detail, "error").isNullOrEmpty()) return null
     return quotaStatus(providerQuotaWindows(detail))
 }
 
@@ -325,7 +331,7 @@ internal fun providerStatusSubtitle(provider: OrbRow, detail: OrbDict?): String 
     val detailError = OrbJSON.str(detail, "error") ?: ""
     var showResetBadge = false
     val state = when {
-        provider.bool("enabled") == false -> "Disabled"
+        !effectiveProviderEnabled(provider) -> if (provider.bool("globally_enabled") == false) "Disabled by admin" else "Disabled"
         detailStatus == "needs_verification" -> "Verification required"
         statusType == "needs_reauth" || detailStatus == "needs_reauth" -> "Reconnect"
         detailError.isNotEmpty() -> "Usage unavailable"
@@ -406,6 +412,9 @@ fun OrbProvidersSettingsPage(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val cachedProviders by core.providers.collectAsState()
+    val currentUser by core.currentUserFlow.collectAsState()
+    val authMode by core.authModeFlow.collectAsState()
+    val isAdmin = OrbCore.computeIsAdmin(authMode, currentUser)
     var providers by remember(cachedProviders) { mutableStateOf(cachedProviders) }
     var usageEntries by remember { mutableStateOf<Map<String, OrbDict>>(emptyMap()) }
     var cloudAccounts by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
@@ -704,12 +713,18 @@ fun OrbProvidersSettingsPage(
 
     fun toggleProvider(provider: OrbRow) {
         if (busy) return
+        if (!isAdmin && provider.bool("globally_enabled") == false) return
         busy = true
-        val currentlyEnabled = provider.bool("enabled") != false
+        val currentlyEnabled = effectiveProviderEnabled(provider)
         scope.launch {
             try {
+                val path = if (isAdmin) {
+                    "/api/ai/providers/${core.encodeComponent(provider.id)}"
+                } else {
+                    "/api/ai/providers/${core.encodeComponent(provider.id)}/preference"
+                }
                 core.request(
-                    path = "/api/ai/providers/${core.encodeComponent(provider.id)}",
+                    path = path,
                     method = "PUT",
                     body = mapOf("enabled" to !currentlyEnabled)
                 )
@@ -923,6 +938,45 @@ fun OrbProvidersSettingsPage(
                     }
                 }
 
+                currentUser?.let { u ->
+                    if (authMode == "multi_user" || u.dailySpendCapCents != null) {
+                        item {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                    text = "DAILY SPEND",
+                                    color = OrbStyle.textMuted,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 0.7.sp
+                                )
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .background(OrbStyle.surface)
+                                        .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                                        .padding(horizontal = 16.dp, vertical = 13.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "Spent today",
+                                        color = Color.White,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Text(
+                                        text = "${OrbUsersModel.formatUsdFromCents(u.spentTodayCents)} / ${OrbUsersModel.formatUsdFromCents(u.dailySpendCapCents)} today",
+                                        color = OrbStyle.textSecondary,
+                                        fontSize = 13.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Section("Accounts")
                 item {
                     Text(
@@ -972,8 +1026,9 @@ fun OrbProvidersSettingsPage(
                                 val expanded = expandedIds.contains(pid)
                                 val windows = providerQuotaWindows(detail)
                                 val usesOauth = provider.bool("uses_oauth") == true
-                                val canEditKey = provider.bool("has_api_key") == true || !usesOauth
-                                val enabled = provider.bool("enabled") != false
+                                val canEditKey = isAdmin && (provider.bool("has_api_key") == true || !usesOauth)
+                                val enabled = effectiveProviderEnabled(provider)
+                                val globallyDisabled = !isAdmin && provider.bool("globally_enabled") == false
 
                                 Column(
                                     modifier = Modifier
@@ -1076,8 +1131,8 @@ fun OrbProvidersSettingsPage(
                                             }
 
                                             val resetSummary = subscriptionResetSummary(detail)
-                                            val canResetSub = supportsSubscriptionReset(provider)
-                                            if (resetSummary != null || canResetSub) {
+                                            val canResetSub = isAdmin && supportsSubscriptionReset(provider)
+                                            if (isAdmin && (resetSummary != null || canResetSub)) {
                                                 HorizontalDivider(color = OrbStyle.border)
                                                 if (resetSummary != null) {
                                                     Row(
@@ -1141,7 +1196,7 @@ fun OrbProvidersSettingsPage(
                                             }
 
                                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                                if (usesOauth && !unverified) {
+                                                if (isAdmin && usesOauth && !unverified) {
                                                     Box(
                                                         modifier = Modifier
                                                             .clip(CircleShape)
@@ -1197,12 +1252,20 @@ fun OrbProvidersSettingsPage(
                                                         .clip(CircleShape)
                                                         .background(OrbStyle.card)
                                                         .border(1.dp, OrbStyle.border, CircleShape)
-                                                        .orbPressClickable { toggleProvider(provider) }
+                                                        .orbPressClickable(enabled = !globallyDisabled) { toggleProvider(provider) }
                                                         .padding(horizontal = 12.dp, vertical = 6.dp)
                                                 ) {
                                                     Text(
-                                                        text = if (enabled) "Disable" else "Enable",
-                                                        color = if (enabled) OrbStyle.textSecondary else OrbStyle.success,
+                                                        text = when {
+                                                            globallyDisabled -> "Disabled by admin"
+                                                            enabled -> "Disable"
+                                                            else -> "Enable"
+                                                        },
+                                                        color = when {
+                                                            globallyDisabled -> OrbStyle.textMuted
+                                                            enabled -> OrbStyle.textSecondary
+                                                            else -> OrbStyle.success
+                                                        },
                                                         fontSize = 12.sp,
                                                         fontWeight = FontWeight.Medium,
                                                         maxLines = 1,
@@ -1423,7 +1486,7 @@ fun OrbProvidersSettingsPage(
                 }
 
                 // Bottom action section ("Connect subscription", "Add API key")
-                item {
+                if (isAdmin) item {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()

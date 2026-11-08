@@ -15,6 +15,7 @@ import OrbNode.Lease
 import OrbNode.Store
 import OrbNode.LeanBuild
 import OrbNode.FileBrowser
+import OrbNode.PrivdClient
 
 namespace OrbNode.Runner
 
@@ -26,6 +27,7 @@ open OrbNode.Lease
 open OrbNode.Store
 open OrbNode.LeanBuild
 open OrbNode.FileBrowser
+open OrbNode.PrivdClient
 
 structure NodeConfig where
   bindHost            : String := "127.0.0.1"
@@ -37,6 +39,8 @@ structure NodeConfig where
   envFile             : String := "/etc/sandboxed-node.env"
   labels              : Array String := #[]
   allowRoot           : Bool := false
+  adminOnly           : Bool := false
+  privdSocket         : String := "/run/orb-privd.sock"
   capacityTotal       : UInt32 := 1
   sideCapacity        : UInt32 := 2
   coordinatorCapacity : UInt32 := 2
@@ -95,6 +99,12 @@ def loadConfigFromEnv : IO NodeConfig := do
   let labelsRaw := (← IO.getEnv "SANDBOXED_NODE_LABELS").getD ""
   let labels := (labelsRaw.splitOn ",").toArray.map (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty)
   let allowRoot := isTruthyEnv (← IO.getEnv "SANDBOXED_NODE_ALLOW_ROOT")
+  let adminOnly :=
+    isTruthyEnv (← IO.getEnv "ORB_NODE_ADMIN_ONLY") ||
+    isTruthyEnv (← IO.getEnv "SANDBOXED_NODE_ADMIN_ONLY")
+  let privdSocket :=
+    ((← IO.getEnv "ORB_PRIVD_SOCKET").map (·.trimAscii.toString)
+      |>.filter (!·.isEmpty)).getD "/run/orb-privd.sock"
   let cap := ((← IO.getEnv "SANDBOXED_NODE_CAPACITY") >>= String.toNat?).getD 1
   let capClamped : UInt32 := (max 1 (min 256 cap)).toUInt32
   let sideCap := ((← IO.getEnv "SANDBOXED_NODE_SIDE_CAPACITY") >>= String.toNat?).getD 2
@@ -116,6 +126,8 @@ def loadConfigFromEnv : IO NodeConfig := do
     envFile := envFile
     labels := labels
     allowRoot := allowRoot
+    adminOnly := adminOnly
+    privdSocket := privdSocket
     capacityTotal := capClamped
     sideCapacity := (max 1 (min 16 sideCap)).toUInt32
     coordinatorCapacity := (max 1 (min 16 coordCap)).toUInt32
@@ -1004,6 +1016,8 @@ structure LiveProc where
   machineName?     : Option String := none
   workspaceId      : String := ""
   steerAfterTool   : Bool := false
+  execUnixUser     : String := ""
+  execUid          : UInt32 := 0
   deriving Repr, Inhabited
 
 structure PreparedJobSpec where
@@ -1022,7 +1036,15 @@ structure PreparedJobSpec where
   prog             : String
   args             : Array String
   envKv            : Array String
+  envPairs         : Array (String × String) := #[]
   artifacts        : Array String
+  execUnixUser     : String := ""
+  execUid          : UInt32 := 0
+  callerRole       : String := "admin"
+  memMax?          : Option UInt64 := none
+  memHigh?         : Option UInt64 := none
+  cpuWeight?       : Option Nat := none
+  cpuQuota?        : Option String := none
   deriving Repr, Inhabited
 
 structure NodeRuntime where
@@ -1225,6 +1247,7 @@ def buildHeartbeatJson (rt : NodeRuntime) : IO JVal := do
     ]),
     ("min_free_disk_bytes", JVal.uint64 rt.cfg.minFreeDiskBytes),
     ("disk_pressure_pinned", .bool diskPinned),
+    ("admin_only", .bool rt.cfg.adminOnly),
     ("managed_auth", .arr (advAuth.map .str))
   ]
 
@@ -1244,12 +1267,29 @@ private def cleanupIsolatedCheckout (iso? : Option String) : IO Unit := do
 
 private def prepareJobOutsideLockInner
     (cfg : NodeConfig) (jid missionId : String) (payload : JVal) (logPath : String)
-    (forced sideLane coordLane : Bool) : IO (Except String PreparedJobSpec) := do
+    (forced sideLane coordLane : Bool)
+    (execUnixUser : String := "") (callerRole : String := "admin") : IO (Except String PreparedJobSpec) := do
   let kind := (payload.fieldStr? "kind").getD "raw_command"
-  let missionDir := (System.FilePath.mk cfg.workDir / missionId).toString
-  IO.FS.createDirAll missionDir
+  let isUserConfined := !execUnixUser.isEmpty
+  if isUserConfined && kind == "lean_build" then
+    return .error "lean_build jobs are not supported on confined per-user slots; use raw_command"
   let timeoutSecs? := computeJobTimeoutSecs kind payload cfg.maxJobSecs
-  let mut cwd := missionDir
+  let mut cwd := (System.FilePath.mk cfg.workDir / missionId).toString
+  let mut provisionedUid : UInt32 := 0
+  if isUserConfined then
+    let mut wsFiles : Array (String × String) := #[]
+    if let some fArr := payload.fieldArr? "workspace_files" then
+      for item in fArr do
+        if let (some p, some c) := (item.fieldStr? "path", item.fieldStr? "content") then
+          wsFiles := wsFiles.push (p, c)
+    match ← ensureMissionUser cfg.privdSocket execUnixUser missionId callerRole cfg.adminOnly wsFiles with
+    | .error err => return .error s!"ensure_mission_user failed: {err}"
+    | .ok prov =>
+      cwd := prov.missionCwd
+      provisionedUid := prov.uid
+  else
+    IO.FS.createDirAll cwd
+  let missionDir := cwd
   let mut isolatedCheckout : Option String := none
   let mut prog := "bash"
   let mut args : Array String := #[]
@@ -1313,25 +1353,72 @@ private def prepareJobOutsideLockInner
   else
     let cmdStr := (payload.fieldStr? "command").getD "true"
     args := #["-lc", cmdStr]
-    envPairs ← prepareSharedMissionEnv cfg.workDir missionDir
-    envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" missionId
-    envPairs := mergeEnvPair envPairs "SANDBOXED_JOB_ID" jid
-    if let some envObj := (payload.field? "env") >>= JVal.asObj? then
-      for (ek, ev) in envObj do
-        if let some sv := ev.asStr? then
-          envPairs := mergeEnvPair envPairs ek sv
-    let reqProfiles := ((payload.fieldArr? "managed_auth").getD #[]).filterMap JVal.asStr?
-    if !reqProfiles.isEmpty then
-      match ← prepareManagedAuthWorkspace cfg.managedAuth reqProfiles missionDir with
-      | .error err => return .error err
-      | .ok authEnv =>
-        for (ak, av) in authEnv do
-          envPairs := mergeEnvPair envPairs ak av
+    if isUserConfined then
+      envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" missionId
+      envPairs := mergeEnvPair envPairs "SANDBOXED_JOB_ID" jid
+      envPairs := mergeEnvPair envPairs "SANDBOXED_REMOTE_EXECUTION" "1"
+      if let some envObj := (payload.field? "env") >>= JVal.asObj? then
+        for (ek, ev) in envObj do
+          if let some sv := ev.asStr? then
+            envPairs := mergeEnvPair envPairs ek sv
+      -- Mandatory Multi-User Gate: NEVER copy host/admin managed_auth OAuth credential files
+      -- into confined per-user `/home/<unix_username>` or for `member` leases!
+      if let some arts := payload.fieldArr? "artifacts" then
+        artifacts := arts.filterMap JVal.asStr?
+    else
+      envPairs ← prepareSharedMissionEnv cfg.workDir missionDir
+      envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" missionId
+      envPairs := mergeEnvPair envPairs "SANDBOXED_JOB_ID" jid
+      if let some envObj := (payload.field? "env") >>= JVal.asObj? then
+        for (ek, ev) in envObj do
+          if let some sv := ev.asStr? then
+            envPairs := mergeEnvPair envPairs ek sv
+      if callerRole != "member" then
+        let reqProfiles := ((payload.fieldArr? "managed_auth").getD #[]).filterMap JVal.asStr?
+        if !reqProfiles.isEmpty then
+          match ← prepareManagedAuthWorkspace cfg.managedAuth reqProfiles missionDir with
+          | .error err => return .error err
+          | .ok authEnv =>
+            for (ak, av) in authEnv do
+              envPairs := mergeEnvPair envPairs ak av
+      if let some arts := payload.fieldArr? "artifacts" then
+        artifacts := arts.filterMap JVal.asStr?
   let scratchCand := (System.FilePath.mk cfg.workDir / ".scratch" / s!"job-{jid}").toString
   IO.FS.createDirAll scratchCand
   let wsId := ((payload.fieldStr? "workspace_id").orElse (fun _ => payload.fieldStr? "companion_of")).getD missionId
   let machName? := ((payload.fieldStr? "machine_name").orElse (fun _ => payload.fieldStr? "container_machine")).map
     (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty)
+  if isUserConfined then
+    let memMax ← computeJobMemoryLimitBytes cfg
+    let memHigh := (memMax / 10) * 9
+    let cpuW? := (parseJobCpuWeight (← IO.getEnv "SANDBOXED_NODE_JOB_CPU_WEIGHT")) >>= String.toNat?
+    let cpuQ? := parseJobCpuQuota (← IO.getEnv "SANDBOXED_NODE_JOB_CPU_QUOTA")
+    return .ok {
+      jid := jid
+      forced := forced
+      sideLane := sideLane
+      coordLane := coordLane
+      timeoutSecs? := timeoutSecs?
+      logPath := logPath
+      cwd := cwd
+      isolatedCheckout := none
+      systemdScope? := none
+      scratchDir? := some scratchCand
+      machineName? := none
+      workspaceId := wsId
+      prog := prog
+      args := args
+      envKv := flattenEnvKv envPairs
+      envPairs := envPairs
+      artifacts := artifacts
+      execUnixUser := execUnixUser
+      execUid := provisionedUid
+      callerRole := callerRole
+      memMax? := some memMax
+      memHigh? := some memHigh
+      cpuWeight? := cpuW?
+      cpuQuota? := cpuQ?
+    }
   let (wrappedProg, wrappedArgs, wrappedEnvPairs, scope?) ←
     wrapWithSystemdScope cfg false jid timeoutSecs? prog args envPairs
   return .ok {
@@ -1350,7 +1437,11 @@ private def prepareJobOutsideLockInner
     prog := wrappedProg
     args := wrappedArgs
     envKv := flattenEnvKv wrappedEnvPairs
+    envPairs := wrappedEnvPairs
     artifacts := artifacts
+    execUnixUser := ""
+    execUid := 0
+    callerRole := callerRole
   }
 
 /-- Clean up any partial per-job isolated checkout directory `<workDir>/checkouts/<repoHash16>/jobs/<jid>`. -/
@@ -1366,8 +1457,10 @@ private def cleanupPartialJobCheckout (workDir : String) (jid : String) (payload
     so `launching` slots and disk checkouts can never strand! -/
 def prepareJobOutsideLock
     (cfg : NodeConfig) (jid missionId : String) (payload : JVal) (logPath : String)
-    (forced sideLane coordLane : Bool) : IO (Except String PreparedJobSpec) := do
-  match ← (prepareJobOutsideLockInner cfg jid missionId payload logPath forced sideLane coordLane).toBaseIO with
+    (forced sideLane coordLane : Bool)
+    (execUnixUser : String := "") (callerRole : String := "admin") : IO (Except String PreparedJobSpec) := do
+  match ← (prepareJobOutsideLockInner cfg jid missionId payload logPath forced sideLane coordLane
+      execUnixUser callerRole).toBaseIO with
   | .ok (.ok spec) => return .ok spec
   | .ok (.error msg) =>
     cleanupPartialJobCheckout cfg.workDir jid payload
@@ -1450,6 +1543,85 @@ def commitPreparedJob
           retiredAt? := none
         } ++ " "
     let nowEp ← OrbNode.Posix.nowEpoch
+    if !spec.execUnixUser.isEmpty then
+      let argv := #[spec.prog] ++ spec.args
+      match ← spawnUserJob rt.cfg.privdSocket spec.execUnixUser spec.callerRole rt.cfg.adminOnly
+          jid cur.missionId argv spec.envPairs spec.logPath spec.timeoutSecs?
+          spec.memMax? spec.memHigh? spec.cpuWeight? spec.cpuQuota? with
+      | .error spawnErr =>
+        teardownJobResourcesAsync none spec.isolatedCheckout
+          (scratchFinOf cur.nodeBootEpoch curClaimSeq spec.scratchDir?)
+        if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
+          r with
+          state := .failed
+          finishedAt? := some nowTs
+          error? := some spawnErr
+          forced := spec.forced
+          execUnixUser := spec.execUnixUser
+          execUid := spec.execUid
+        }) preExtraSql then
+          rt := { rt with ledger := l' }
+        return releaseDebt rt
+      | .ok spawned =>
+        let postSpawnUpdateRes ← match injectPostSpawnUpdateErr? with
+          | some simErr => pure (.error simErr)
+          | none =>
+            rt.ledger.updateJob jid (fun r => .ok {
+              r with
+              state := .running
+              startedAt? := some nowTs
+              logPath? := some spec.logPath
+              forced := spec.forced
+              pid := spawned.pid
+              startTicks := 0
+              procPhase := 1
+              execUnixUser := spec.execUnixUser
+              execUid := spec.execUid
+            }) preExtraSql
+        match postSpawnUpdateRes with
+        | .ok (l', _) =>
+          let lp : LiveProc := {
+            pid := spawned.pid
+            startTicks := 0
+            bootId := ""
+            procPhase := 1
+            startedEp := nowEp
+            timeoutSecs? := spec.timeoutSecs?
+            forced := spec.forced
+            sideLane := spec.sideLane
+            coordLane := spec.coordLane
+            artifacts := spec.artifacts
+            cwd := spec.cwd
+            isolatedCheckout := none
+            systemdScope? := none
+            scratchDir? := spec.scratchDir?
+            machineName? := none
+            workspaceId := if spec.workspaceId.isEmpty then cur.missionId else spec.workspaceId
+            execUnixUser := spec.execUnixUser
+            execUid := spec.execUid
+          }
+          return { rt with ledger := l', liveProcs := rt.liveProcs.insert jid lp }
+        | .error updErr =>
+          discard <| controlUserJob rt.cfg.privdSocket "kill" jid spec.execUnixUser
+          teardownJobResourcesAsync none spec.isolatedCheckout
+            (scratchFinOf cur.nodeBootEpoch curClaimSeq spec.scratchDir?)
+          let recErr := s!"post_spawn_ledger_update_failed: {updErr}"
+          if let .ok (lErr, _) ← rt.ledger.updateJob jid (fun r => .ok {
+            r with
+            state := .failed
+            startedAt? := some nowTs
+            finishedAt? := some nowTs
+            logPath? := some spec.logPath
+            forced := spec.forced
+            pid := spawned.pid
+            startTicks := 0
+            procPhase := 2
+            execUnixUser := spec.execUnixUser
+            execUid := spec.execUid
+            error? := some recErr
+          }) then
+            rt := { rt with ledger := lErr }
+          return releaseDebt rt
     match ← (OrbNode.Posix.spawnJobPgrp spec.prog spec.args spec.envKv spec.cwd spec.logPath).toBaseIO with
     | .error e =>
       teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
@@ -1582,14 +1754,16 @@ def commitPreparedJob
         return releaseDebt rt
 
 structure PendingAsyncLaunch where
-  cfg       : NodeConfig
-  jid       : String
-  missionId : String
-  payload   : JVal
-  logPath   : String
-  forced    : Bool
-  sideLane  : Bool
-  coordLane : Bool
+  cfg          : NodeConfig
+  jid          : String
+  missionId    : String
+  payload      : JVal
+  logPath      : String
+  forced       : Bool
+  sideLane     : Bool
+  coordLane    : Bool
+  execUnixUser : String := ""
+  callerRole   : String := "admin"
 
 /-- Reap exited/timed-out/steered process groups (`-pgid` + detached `SIGKILL` systemd scope teardown)
     and reserve lane slots for eligible queued jobs, returning `(updatedRuntime, jobsToLaunchOutsideLock)`. -/
@@ -1623,14 +1797,26 @@ def tickRuntimeReserve
           }
         else ""
       | none => ""
-    let w ← OrbNode.Posix.pollPid lp.pid
-    let done := (w &&& 1) == 1
+    let (done, codeInt) ←
+      if !lp.execUnixUser.isEmpty then
+        match ← controlUserJob rt.cfg.privdSocket "status" jid lp.execUnixUser with
+        | .ok st => pure (st.done, st.exitCode)
+        | .error _ => pure (false, (0 : Int))
+      else do
+        let w ← OrbNode.Posix.pollPid lp.pid
+        let d := (w &&& 1) == 1
+        let codeU32 := (w >>> 32).toUInt32
+        let ci : Int := if codeU32 == 0xFFFFFFFF then -1 else Int.ofNat codeU32.toNat
+        pure (d, ci)
     if done then
-      let codeU32 := (w >>> 32).toUInt32
-      let codeInt : Int := if codeU32 == 0xFFFFFFFF then -1 else Int.ofNat codeU32.toNat
-      if lp.startTicks != 0 then
-        discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
-      let arts ← collectArtifactsConfined lp.cwd lp.artifacts
+      let missionIdStr := (recJob?.map (·.missionId)).getD lp.workspaceId
+      let arts ←
+        if !lp.execUnixUser.isEmpty then
+          collectUserArtifacts rt.cfg.privdSocket lp.execUnixUser missionIdStr lp.artifacts
+        else do
+          if lp.startTicks != 0 then
+            discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
+          collectArtifactsConfined lp.cwd lp.artifacts
       teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout scratchFin
       let nowTs ← nowRfc3339
       let nextState : JobState := if codeInt == 0 then .succeeded else .failed
@@ -1648,9 +1834,12 @@ def tickRuntimeReserve
         rt := { rt with shrinkDebt := rt.shrinkDebt - 1 }
     else if let some limitSecs := lp.timeoutSecs? then
       if nowEp > lp.startedEp + limitSecs then
-        if lp.startTicks != 0 then
-          discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
-        discard <| OrbNode.Posix.pollPid lp.pid
+        if !lp.execUnixUser.isEmpty then
+          discard <| controlUserJob rt.cfg.privdSocket "kill" jid lp.execUnixUser
+        else do
+          if lp.startTicks != 0 then
+            discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
+          discard <| OrbNode.Posix.pollPid lp.pid
         teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout scratchFin
         let nowTs ← nowRfc3339
         if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
@@ -1666,11 +1855,16 @@ def tickRuntimeReserve
         if !lp.forced && !lp.sideLane && !lp.coordLane && rt.shrinkDebt > 0 then
           rt := { rt with shrinkDebt := rt.shrinkDebt - 1 }
       else if lp.steerAfterTool then
-        let inflight ← collectVerifiedInflightChildTools lp.pid (lp.systemdScope?.map (·.unit)) lp.startTicks lp.bootId
+        let inflight ←
+          if !lp.execUnixUser.isEmpty then pure #[]
+          else collectVerifiedInflightChildTools lp.pid (lp.systemdScope?.map (·.unit)) lp.startTicks lp.bootId
         if inflight.isEmpty then
-          if lp.startTicks != 0 then
-            discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
-          discard <| OrbNode.Posix.pollPid lp.pid
+          if !lp.execUnixUser.isEmpty then
+            discard <| controlUserJob rt.cfg.privdSocket "kill" jid lp.execUnixUser
+          else do
+            if lp.startTicks != 0 then
+              discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
+            discard <| OrbNode.Posix.pollPid lp.pid
           teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout scratchFin
           let nowTs ← nowRfc3339
           let cInfo : JobCancellation := {
@@ -1685,11 +1879,16 @@ def tickRuntimeReserve
           if !lp.forced && !lp.sideLane && !lp.coordLane && rt.shrinkDebt > 0 then
             rt := { rt with shrinkDebt := rt.shrinkDebt - 1 }
     else if lp.steerAfterTool then
-      let inflight ← collectVerifiedInflightChildTools lp.pid (lp.systemdScope?.map (·.unit)) lp.startTicks lp.bootId
+      let inflight ←
+        if !lp.execUnixUser.isEmpty then pure #[]
+        else collectVerifiedInflightChildTools lp.pid (lp.systemdScope?.map (·.unit)) lp.startTicks lp.bootId
       if inflight.isEmpty then
-        if lp.startTicks != 0 then
-          discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
-        discard <| OrbNode.Posix.pollPid lp.pid
+        if !lp.execUnixUser.isEmpty then
+          discard <| controlUserJob rt.cfg.privdSocket "kill" jid lp.execUnixUser
+        else do
+          if lp.startTicks != 0 then
+            discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
+          discard <| OrbNode.Posix.pollPid lp.pid
         teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout scratchFin
         let nowTs ← nowRfc3339
         let cInfo : JobCancellation := {
@@ -1744,6 +1943,8 @@ def tickRuntimeReserve
               forced := false
               sideLane := sideLane
               coordLane := coordLane
+              execUnixUser := rec.execUnixUser
+              callerRole := if rec.execUnixUser.isEmpty then "admin" else "member"
             }
           | none =>
             remQueue := remQueue.push jid
@@ -1756,7 +1957,7 @@ def tickRuntime
   let mut rt := rtReserved
   for item in launches do
     let prepRes ← prepareJobOutsideLock item.cfg item.jid item.missionId item.payload item.logPath
-      item.forced item.sideLane item.coordLane
+      item.forced item.sideLane item.coordLane item.execUnixUser item.callerRole
     rt ← commitPreparedJob rt item.jid prepRes
   return rt
 
@@ -1776,14 +1977,20 @@ def cancelJob
   if cur.state == .lost then
     let scopeStopped ← match lostScopeVerified? with
       | some ok => pure ok
-      | none => stopLostJobScopeOutsideLock rt.cfg.nodeId rt.cfg.workDir jid
+      | none =>
+        if !cur.execUnixUser.isEmpty then
+          match ← controlUserJob rt.cfg.privdSocket "kill" jid cur.execUnixUser with
+          | .ok _ => pure true
+          | .error _ => pure false
+        else
+          stopLostJobScopeOutsideLock rt.cfg.nodeId rt.cfg.workDir jid
     if !scopeStopped then
       match ← rt.ledger.updateJob jid (fun r =>
         if r.state != .lost then .ok r
         else .ok { r with cancellation? := some cInfo }) with
       | .error e => return .error e
       | .ok (l', updated) => return .ok ({ rt with ledger := l' }, updated, false)
-    if cur.nodeBootEpoch == rt.ledger.nodeBootEpoch && cur.pid > 1 && cur.startTicks != 0 then
+    if cur.execUnixUser.isEmpty && cur.nodeBootEpoch == rt.ledger.nodeBootEpoch && cur.pid > 1 && cur.startTicks != 0 then
       let lostBoot ← readKernelBootId
       discard <| terminateVerifiedPgrp cur.procPhase cur.pid cur.startTicks none lostBoot
     let lostOpStr := if cur.operationId.isEmpty then jid else cur.operationId
@@ -1795,9 +2002,12 @@ def cancelJob
   let mut releasedRegular := false
   let mut cancelLeaderSql := ""
   if let some lp := rt.liveProcs.get? jid then
-    if lp.startTicks != 0 then
-      discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
-    discard <| OrbNode.Posix.pollPid lp.pid
+    if !lp.execUnixUser.isEmpty then
+      discard <| controlUserJob rt.cfg.privdSocket "kill" jid lp.execUnixUser
+    else do
+      if lp.startTicks != 0 then
+        discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
+      discard <| OrbNode.Posix.pollPid lp.pid
     let scratchFin : Option (String × SqliteBackend × String × String × UInt64 × UInt64) :=
       lp.scratchDir?.map (fun sd => (rt.cfg.workDir, rt.ledger.sqliteBackend, jid, sd, cur.nodeBootEpoch, curCancelSeq))
     teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout scratchFin
@@ -1887,6 +2097,8 @@ def reserveForceJob (rt : NodeRuntime) (jid : String) :
     forced := true
     sideLane := false
     coordLane := false
+    execUnixUser := cur.execUnixUser
+    callerRole := if cur.execUnixUser.isEmpty then "admin" else "member"
   }
   return (rt', launch, cur)
 
@@ -1895,7 +2107,7 @@ def forceJob (rt : NodeRuntime) (jid : String) : IO (Except String (NodeRuntime 
   | .error e => return .error e
   | .ok (rtReserved, launch, cur) =>
     let prepRes ← prepareJobOutsideLock launch.cfg launch.jid launch.missionId launch.payload launch.logPath
-      launch.forced launch.sideLane launch.coordLane
+      launch.forced launch.sideLane launch.coordLane launch.execUnixUser launch.callerRole
     let rt' ← commitPreparedJob rtReserved jid prepRes
     let updated := (rt'.ledger.jobs.get? jid).getD cur
     return .ok (rt', updated)
@@ -1937,7 +2149,9 @@ def interruptJob (rt : NodeRuntime) (jid mode : String) : IO (Except String (Nod
       ], none)
   let scopeUnit? := lp.systemdScope?.map (·.unit)
   if mode == "steer_between_tools" then
-    let inflight ← collectVerifiedInflightChildTools lp.pid scopeUnit? lp.startTicks lp.bootId
+    let inflight ←
+      if !lp.execUnixUser.isEmpty then pure #[]
+      else collectVerifiedInflightChildTools lp.pid scopeUnit? lp.startTicks lp.bootId
     if inflight.isEmpty then
       match ← cancelJob rt jid "core" "Steered between tool calls" with
       | .error e => return .error e
@@ -1960,7 +2174,9 @@ def interruptJob (rt : NodeRuntime) (jid mode : String) : IO (Except String (Nod
         ("deferred_until_tool_finishes", .bool true)
       ], some lp.pid)
   else
-    let sigCount ← sigintInflightChildTools lp.pid scopeUnit? lp.startTicks lp.bootId
+    let sigCount ←
+      if !lp.execUnixUser.isEmpty then pure 0
+      else sigintInflightChildTools lp.pid scopeUnit? lp.startTicks lp.bootId
     if sigCount > 0 then
       IO.sleep 60
     match ← cancelJob rt jid "core" "Interrupted in-flight tool via SIGINT for immediate controller steering" with
@@ -2037,18 +2253,70 @@ def runBoundedOutput
   let stderr := (← IO.wait errTask).toOption.getD ""
   return { exitCode, stdout, stderr }
 
-/-- Run cleared-env synchronous `POST /execute` command under `<cfg.workDir>/<missionId>`,
+/-- Run cleared-env synchronous `POST /execute` command under `<cfg.workDir>/<missionId>` (or confined
+    per-user `/home/<unixUsername>/.orb-missions/<missionId>` via `orb-privd` when `execUnixUser != ""`),
     fenced via `jobs.db` and contained in a transient `systemd-run --scope` unit (or `setsid` process group
     fallback) so all spawned descendants are terminated as soon as the top-level command exits. -/
 def execClearedLeaseCommand
     (cfg : NodeConfig) (sqliteBackend : SqliteBackend) (missionId command : String)
     (nodeBootEpoch : UInt64 := 1)
-    (postWaitSampleOverride? : Option ProcLivenessSample := none) :
+    (postWaitSampleOverride? : Option ProcLivenessSample := none)
+    (execUnixUser : String := "")
+    (callerRole : String := "admin") :
     IO (Except String JVal) := do
   let execId ← newUuidV4
   let scratchDir ← match ← acquireExecFenceReceipt cfg.workDir sqliteBackend execId missionId nodeBootEpoch with
     | .ok sd => pure sd
     | .error fenceErr => return .error fenceErr
+  if !execUnixUser.isEmpty then
+    let logPath := (System.FilePath.mk cfg.workDir / "logs" / s!"sync-{execId}.log").toString
+    try
+      match ← ensureMissionUser cfg.privdSocket execUnixUser missionId callerRole cfg.adminOnly with
+      | .error err => return .error s!"ensure_mission_user failed: {err}"
+      | .ok _ =>
+        let envPairs := #[
+          ("SANDBOXED_MISSION_ID", missionId),
+          ("SANDBOXED_REMOTE_EXECUTION", "1")
+        ]
+        match ← spawnUserJob cfg.privdSocket execUnixUser callerRole cfg.adminOnly
+            execId missionId #["bash", "-lc", command] envPairs logPath (some cfg.maxJobSecs) with
+        | .error err => return .error s!"spawn_user_job failed: {err}"
+        | .ok _ =>
+          let startEp ← OrbNode.Posix.nowEpoch
+          let mut exitInt : Int := -1
+          while true do
+            match ← controlUserJob cfg.privdSocket "status" execId execUnixUser with
+            | .ok st =>
+              if st.done then
+                exitInt := st.exitCode
+                break
+            | .error err =>
+              discard <| controlUserJob cfg.privdSocket "kill" execId execUnixUser
+              return .error err
+            let nowEp ← OrbNode.Posix.nowEpoch
+            if nowEp > startEp + max 1 cfg.maxJobSecs then
+              discard <| controlUserJob cfg.privdSocket "kill" execId execUnixUser
+              exitInt := 124
+              break
+            IO.sleep 50
+          let outText ← match ← (IO.FS.readBinFile logPath).toBaseIO with
+            | .ok raw =>
+              let capped := if raw.size > syncExecOutputCapBytes then raw.extract 0 syncExecOutputCapBytes else raw
+              let clean := trimIncompleteUtf8Suffix capped
+              let mut t := decodeUtf8LossyPreservingValid clean
+              if raw.size > syncExecOutputCapBytes then
+                t := t ++ "\n[node output truncated to fit 16 MiB JSON limit]\n"
+              pure t
+            | .error _ => pure ""
+          return .ok (.obj #[
+            ("accepted", .bool true),
+            ("exit_code", JVal.int exitInt),
+            ("stdout", .str outText),
+            ("stderr", .str "")
+          ])
+    finally
+      try IO.FS.removeFile logPath catch _ => pure ()
+      releaseExecFenceReceipt cfg.workDir sqliteBackend execId missionId scratchDir nodeBootEpoch
   let mut activeScope? : Option SystemdScope := none
   try
     let missionDir := (System.FilePath.mk cfg.workDir / missionId).toString
@@ -2104,14 +2372,16 @@ def execClearedLeaseCommand
 /-- Single-threaded synchronous `POST /execute` helper (used by direct `handleRequest` tests). -/
 def runSyncExecute
     (rt : NodeRuntime) (missionId command : String) (sideLane : Bool := false)
-    (postWaitSampleOverride? : Option ProcLivenessSample := none) : IO (Nat × JVal) := do
+    (postWaitSampleOverride? : Option ProcLivenessSample := none)
+    (execUnixUser : String := "")
+    (callerRole : String := "admin") : IO (Nat × JVal) := do
   if sideLane then
     if activeSideCount rt >= rt.cfg.sideCapacity then
       return (429, .str "node side-lane capacity exhausted")
   else if activeRegularCount rt + rt.shrinkDebt >= rt.cfg.capacityTotal then
     return (429, .str "node capacity exhausted")
   match ← execClearedLeaseCommand rt.cfg rt.ledger.sqliteBackend missionId command rt.ledger.nodeBootEpoch
-      postWaitSampleOverride? with
+      postWaitSampleOverride? execUnixUser callerRole with
   | .ok resp => return (200, resp)
   | .error fenceErr => return (503, .str fenceErr)
 

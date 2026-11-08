@@ -49,7 +49,8 @@ struct OrbMachinesSettings: View {
                                           onOpenMission: { startedMission = $0 })
             }
             Section("Fleet") {
-                let fleetNodes = managed == nil ? nodes : nodes.filter { !OrbManaged.isManagedNode($0) }
+                let visibleNodes = OrbCore.shared.isAdminUser ? nodes : nodes.filter { !OrbManaged.isAdminOnlyNode($0) }
+                let fleetNodes = managed == nil ? visibleNodes : visibleNodes.filter { !OrbManaged.isManagedNode($0) }
                 if loading && fleetNodes.isEmpty { ProgressView() }
                 if fleetReady && fleetNodes.isEmpty { Text("No static fleet nodes registered.").foregroundStyle(.secondary) }
                 ForEach(fleetNodes, id: \.selfID) { node in
@@ -65,7 +66,7 @@ struct OrbMachinesSettings: View {
                         if let cpu = sample["cpu"].number { LabeledContent("CPU", value: "\(Int(cpu))%") }
                         else if let cores = node["cpu_total"].number { LabeledContent("CPU", value: "\(Int(cores)) cores") }
                         if let gpu = sample["gpu"].number { LabeledContent("GPU", value: "\(Int(gpu))%") }
-                        if !OrbManaged.isManagedNode(node), node["capacity_total"].number != nil {
+                        if OrbCore.shared.isAdminUser, !OrbManaged.isManagedNode(node), node["capacity_total"].number != nil {
                             HStack(spacing: 10) {
                                 Text("Job slot limit")
                                 Spacer()
@@ -98,8 +99,10 @@ struct OrbMachinesSettings: View {
                                 }
                             }
                         }
-                        Button(node["cordoned"].flag ? "Allow new jobs" : "Pause new jobs") { Task { await toggle(node) } }
-                            .disabled(busy || !fleetReady)
+                        if OrbCore.shared.isAdminUser {
+                            Button(node["cordoned"].flag ? "Allow new jobs" : "Pause new jobs") { Task { await toggle(node) } }
+                                .disabled(busy || !fleetReady)
+                        }
                     } label: {
                         HStack {
                             VStack(alignment: .leading) {
@@ -124,7 +127,10 @@ struct OrbMachinesSettings: View {
                     }
                 }
             }
-            OrbAgentSoftwareSection(nodes: nodes, reloadToken: softwareReloadToken)
+            OrbAgentSoftwareSection(
+                nodes: OrbCore.shared.isAdminUser ? nodes : nodes.filter { !OrbManaged.isAdminOnlyNode($0) },
+                reloadToken: softwareReloadToken
+            )
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle("Machines").navigationBarTitleDisplayMode(.inline)
@@ -187,14 +193,28 @@ struct OrbMachinesSettings: View {
     /// Optimistic provider enable/disable toggle with rollback on failure.
     private func toggleProvider(_ pr: OrbManagedProviderInfo, enabled: Bool) async {
         guard busyProvider == nil, let before = managed else { return }
+        let isAdmin = OrbCore.shared.isAdminUser
         busyProvider = pr.provider
         defer { busyProvider = nil }
-        if var copy = managed, let idx = copy.providers?.firstIndex(where: { $0.provider == pr.provider }) {
-            copy.providers?[idx].enabled = enabled
+        if var copy = managed, var list = copy.providers, let idx = list.firstIndex(where: { $0.provider == pr.provider }) {
+            var item = list[idx]
+            if isAdmin {
+                item.enabled = enabled
+                item.globally_enabled = enabled
+                item.effective_enabled = enabled && (item.user_enabled != false)
+            } else {
+                item.user_enabled = enabled
+                item.effective_enabled = enabled && (item.globally_enabled != false)
+            }
+            list[idx] = item
+            copy.providers = list
             managed = copy
         }
         do {
-            _ = try await client.call("/api/managed-machines/providers/\(OrbCore.escape(pr.provider))", method: "PUT", body: .object(["enabled": .bool(enabled)]))
+            let endpoint = isAdmin
+                ? "/api/managed-machines/providers/\(OrbCore.escape(pr.provider))"
+                : "/api/managed-machines/providers/\(OrbCore.escape(pr.provider))/preference"
+            _ = try await client.call(endpoint, method: "PUT", body: .object(["enabled": .bool(enabled)]))
             fleetError = ""
             await loadManaged()
         } catch is CancellationError {}

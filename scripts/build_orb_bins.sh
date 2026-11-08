@@ -136,16 +136,18 @@ else
 fi
 
 ORB_BIN_TARGETS=()
-BUILD_ORB_NODE=0
-BUILD_ORB_CORE=0
-BUILD_ORB_LOCALD=0
+ORB_NODE_TARGETS=()
+ORB_CORE_TARGETS=()
+ORB_LOCALD_TARGETS=()
 for bin in "${BINS_TO_STAGE[@]}"; do
   if [[ "$bin" == "sandboxed-node" ]]; then
-    BUILD_ORB_NODE=1
-  elif [[ "$bin" == "sandboxed-sh" ]]; then
-    BUILD_ORB_CORE=1
-  elif [[ "$bin" == "orb-locald" ]]; then
-    BUILD_ORB_LOCALD=1
+    ORB_NODE_TARGETS+=("orb-node")
+  elif [[ "$bin" == "orb-node-test" ]]; then
+    ORB_NODE_TARGETS+=("orb-node-test")
+  elif [[ "$bin" == "sandboxed-sh" || "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" ]]; then
+    ORB_CORE_TARGETS+=("$bin")
+  elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
+    ORB_LOCALD_TARGETS+=("$bin")
   elif [[ "$bin" == "lean-mesh" ]]; then
     ORB_BIN_TARGETS+=("lean-mesh-cli")
   else
@@ -202,16 +204,16 @@ if [[ ${#ORB_BIN_TARGETS[@]} -gt 0 ]]; then
   run_lean_pkg_build "$ROOT_DIR/lean/OrbBin" "${ORB_BIN_TARGETS[@]}"
 fi
 
-if [[ "$BUILD_ORB_NODE" == "1" ]]; then
-  run_lean_pkg_build "$ROOT_DIR/lean/OrbNode" orb-node
+if [[ ${#ORB_NODE_TARGETS[@]} -gt 0 ]]; then
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbNode" "${ORB_NODE_TARGETS[@]}"
 fi
 
-if [[ "$BUILD_ORB_CORE" == "1" ]]; then
-  run_lean_pkg_build "$ROOT_DIR/lean/OrbCore" sandboxed-sh
+if [[ ${#ORB_CORE_TARGETS[@]} -gt 0 ]]; then
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbCore" "${ORB_CORE_TARGETS[@]}"
 fi
 
-if [[ "$BUILD_ORB_LOCALD" == "1" ]]; then
-  run_lean_pkg_build "$ROOT_DIR/lean/OrbLocald" orb-locald
+if [[ ${#ORB_LOCALD_TARGETS[@]} -gt 0 ]]; then
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbLocald" "${ORB_LOCALD_TARGETS[@]}"
 fi
 
 if [[ ${#OUT_DIRS[@]} -eq 0 ]]; then
@@ -226,12 +228,12 @@ LAKE_LOCALD_BIN_DIR="$ROOT_DIR/lean/OrbLocald/.lake/build/bin"
 for out_dir in "${OUT_DIRS[@]}"; do
   mkdir -p "$out_dir"
   for bin in "${BINS_TO_STAGE[@]}"; do
-    if [[ "$bin" == "sandboxed-node" ]]; then
-      src="$LAKE_NODE_BIN_DIR/sandboxed-node"
-    elif [[ "$bin" == "sandboxed-sh" ]]; then
-      src="$LAKE_CORE_BIN_DIR/sandboxed-sh"
-    elif [[ "$bin" == "orb-locald" ]]; then
-      src="$LAKE_LOCALD_BIN_DIR/orb-locald"
+    if [[ "$bin" == "sandboxed-node" || "$bin" == "orb-node-test" ]]; then
+      src="$LAKE_NODE_BIN_DIR/$bin"
+    elif [[ "$bin" == "sandboxed-sh" || "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" ]]; then
+      src="$LAKE_CORE_BIN_DIR/$bin"
+    elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
+      src="$LAKE_LOCALD_BIN_DIR/$bin"
     else
       src="$LAKE_BIN_DIR/$bin"
     fi

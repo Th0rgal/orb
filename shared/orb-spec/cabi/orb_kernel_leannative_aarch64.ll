@@ -9509,6 +9509,143 @@ entry:
   ret i64 %alu_457.i
 }
 
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define dso_local i32 @orb_multiuser_rbac_step(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3, i8 zeroext %a4, i8 zeroext %a5, i8 zeroext %a6) local_unnamed_addr #0 {
+entry:
+  %ext0 = zext i8 %a0 to i64
+  %ext2 = zext i8 %a2 to i64
+  %0 = xor i64 %ext0, -2
+  %alu_15.neg.i = add nsw i64 %0, 1
+  %1 = xor i64 %ext2, -2
+  %alu_29.neg.i = add nsw i64 %1, 1
+  %alu_2235.i = or i64 %alu_29.neg.i, %alu_15.neg.i
+  %2 = icmp eq i8 %a1, 0
+  %3 = icmp ult i8 %a3, 2
+  %.not.i = icmp eq i8 %a3, 1
+  %alu_91.i = select i1 %.not.i, i32 401, i32 394022
+  %4 = icmp eq i8 %a5, 1
+  %5 = icmp eq i8 %a6, 1
+  %alu_11836.i = or i1 %4, %5
+  %alu_130.i = select i1 %alu_11836.i, i32 401, i32 525096
+  %alu_142.i = select i1 %5, i32 656166, i32 525096
+  %alu_155.i = select i1 %4, i32 401, i32 %alu_142.i
+  %alu_160.i = select i1 %4, i32 401, i32 525096
+  %.not41.i = icmp eq i8 %a4, 0
+  %.not40.i = icmp eq i8 %a4, 1
+  %.not39.i = icmp eq i8 %a4, 2
+  %.not38.i = icmp eq i8 %a4, 3
+  %.not37.i = icmp eq i8 %a4, 4
+  %alu_231.i = select i1 %.not37.i, i32 %alu_160.i, i32 787238
+  %alu_245.i = select i1 %.not38.i, i32 %alu_155.i, i32 %alu_231.i
+  %alu_259.i = select i1 %.not39.i, i32 %alu_130.i, i32 %alu_245.i
+  %alu_273.i = select i1 %.not40.i, i32 %alu_91.i, i32 %alu_259.i
+  %isneg42.i = icmp slt i64 %alu_2235.i, 0
+  %6 = select i1 %.not41.i, i32 401, i32 %alu_273.i
+  %7 = select i1 %3, i32 %6, i32 787238
+  %8 = select i1 %2, i32 %7, i32 262950
+  %res = select i1 %isneg42.i, i32 131874, i32 %8
+  ret i32 %res
+}
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define dso_local zeroext i8 @orb_placement_role_admit(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3) local_unnamed_addr #0 {
+entry:
+  %0 = icmp ult i8 %a1, 5
+  %1 = and i8 %a1, -2
+  %alu_5114.i = icmp eq i8 %1, 2
+  %2 = icmp eq i8 %a2, 0
+  %alu_6415.i = and i1 %alu_5114.i, %2
+  %3 = icmp eq i8 %a3, 1
+  %alu_7916.i = and i1 %alu_6415.i, %3
+  %4 = icmp eq i8 %a1, 4
+  %alu_9417.i = or i1 %4, %alu_7916.i
+  %5 = icmp eq i8 %a0, 1
+  %6 = icmp eq i8 %a0, 0
+  %alu_11918.i = and i1 %6, %alu_9417.i
+  %alu_12219.i = or i1 %5, %alu_11918.i
+  %alu_12520.i = and i1 %0, %alu_12219.i
+  %res = zext i1 %alu_12520.i to i8
+  ret i8 %res
+}
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define dso_local i64 @orb_user_spend_cap_step(i8 zeroext %a0, i32 %a1, i32 %a2, i8 zeroext %a3, i32 %a4, i32 %a5, i32 %a6) local_unnamed_addr #0 {
+entry:
+  %ext1 = zext i32 %a1 to i64
+  %ext2 = zext i32 %a2 to i64
+  %ext4 = zext i32 %a4 to i64
+  %ext5 = zext i32 %a5 to i64
+  %ext6 = zext i32 %a6 to i64
+  %alu_43.i = tail call i64 @llvm.umin.i64(i64 %ext1, i64 1073741823)
+  %alu_73.i = tail call i64 @llvm.umin.i64(i64 %ext4, i64 1073741823)
+  %alu_76.i = add nuw nsw i64 %ext6, %ext1
+  %alu_79.i = add nuw nsw i64 %ext6, %ext4
+  %0 = or i64 %alu_76.i, %alu_79.i
+  %alu_11235.i = icmp ult i64 %0, 1073741824
+  %1 = icmp eq i8 %a0, 0
+  %2 = icmp ule i64 %alu_76.i, %ext2
+  %alu_14136.not.i = or i1 %1, %2
+  %3 = icmp eq i8 %a3, 0
+  %4 = icmp ule i64 %alu_79.i, %ext5
+  %alu_17037.not.i = or i1 %3, %4
+  %alu_172.i = shl nuw nsw i64 %alu_43.i, 4
+  %alu_174.i = shl nuw i64 %alu_73.i, 34
+  %alu_177.i = or disjoint i64 %alu_174.i, %alu_172.i
+  %alu_179.i = shl nuw nsw i64 %alu_76.i, 4
+  %alu_183.i = shl i64 %alu_79.i, 34
+  %alu_181.i = or i64 %alu_179.i, %alu_183.i
+  %alu_186.i = or disjoint i64 %alu_181.i, 1
+  %alu_188.i = or disjoint i64 %alu_177.i, 2
+  %alu_190.i = or disjoint i64 %alu_177.i, 4
+  %alu_192.i = or disjoint i64 %alu_177.i, 6
+  %alu_206.i = select i1 %alu_11235.i, i64 %alu_186.i, i64 %alu_192.i
+  %alu_220.i = select i1 %alu_17037.not.i, i64 %alu_206.i, i64 %alu_190.i
+  %alu_234.i = select i1 %alu_14136.not.i, i64 %alu_220.i, i64 %alu_188.i
+  ret i64 %alu_234.i
+}
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define dso_local i32 @orb_privd_user_exec_step(i8 zeroext %a0, i8 zeroext %a1, i8 zeroext %a2, i8 zeroext %a3, i8 zeroext %a4, i32 %a5, i32 %a6, i8 zeroext %a7, i8 zeroext %a8, i8 zeroext %a9) local_unnamed_addr #0 {
+entry:
+  %ext1 = zext i8 %a1 to i32
+  %ext8 = zext i8 %a8 to i32
+  %0 = add i32 %a5, -2000
+  %1 = icmp ult i32 %0, 63534
+  %2 = add i32 %a6, -2000
+  %3 = icmp ult i32 %2, 63534
+  %alu_9231.not.i = and i1 %1, %3
+  %4 = xor i32 %ext1, 1022
+  %alu_108.neg.i = add nuw nsw i32 %4, 1
+  %5 = icmp ult i8 %a3, 2
+  %6 = icmp ne i8 %a3, 0
+  %7 = icmp eq i8 %a2, 0
+  %alu_15632.not.i = or i1 %7, %6
+  %8 = xor i32 %ext8, 4094
+  %alu_186.neg.i = add nuw nsw i32 %8, 1
+  %isneg.not.i = icmp eq i8 %a9, 1
+  %alu_217.i = select i1 %isneg.not.i, i32 0, i32 2304
+  %alu_221.i = zext i1 %isneg.not.i to i32
+  %alu_224.i = or disjoint i32 %alu_217.i, %alu_221.i
+  %alu_229.i = and i32 %alu_186.neg.i, 2048
+  %isneg.not33.i = icmp eq i8 %a8, 1
+  %alu_234.i = select i1 %isneg.not33.i, i32 %alu_224.i, i32 0
+  %alu_237.i = or i32 %alu_234.i, %alu_229.i
+  %isneg.not35.i = icmp eq i8 %a7, 1
+  %alu_250.i = select i1 %isneg.not35.i, i32 %alu_237.i, i32 1792
+  %alu_263.i = select i1 %alu_9231.not.i, i32 %alu_250.i, i32 1536
+  %isneg.not38.i = icmp eq i8 %a4, 1
+  %alu_276.i = select i1 %isneg.not38.i, i32 %alu_263.i, i32 1280
+  %alu_289.i = select i1 %alu_15632.not.i, i32 %alu_276.i, i32 1024
+  %alu_302.i = select i1 %5, i32 %alu_289.i, i32 768
+  %alu_307.i = and i32 %alu_108.neg.i, 512
+  %isneg.not40.i = icmp eq i8 %a1, 1
+  %alu_312.i = select i1 %isneg.not40.i, i32 %alu_302.i, i32 0
+  %alu_315.i = or i32 %alu_312.i, %alu_307.i
+  %isneg.not42.i = icmp eq i8 %a0, 1
+  %res = select i1 %isneg.not42.i, i32 %alu_315.i, i32 256
+  ret i32 %res
+}
 attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable }
 attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
 

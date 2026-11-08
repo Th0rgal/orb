@@ -119,9 +119,10 @@ struct OrbSelection {
         if let backend, !backend.isEmpty, node["quarantined_harnesses"].items.contains(where: { $0.text == backend }) { return false }
         return true
     }
-    static func sortedComputeNodes(_ rawNodes: [OrbJSON]) -> [OrbJSON] {
-        let hasSparkAdmin = rawNodes.contains { $0["id"].text == "dgx-spark-admin" && $0["status"].text == "online" }
-        let filtered = hasSparkAdmin ? rawNodes.filter { $0["id"].text != "dgx-spark" } : rawNodes
+    static func sortedComputeNodes(_ rawNodes: [OrbJSON], includeAdminNodes: Bool = true) -> [OrbJSON] {
+        let baseNodes = includeAdminNodes ? rawNodes : rawNodes.filter { !OrbManaged.isAdminOnlyNode($0) }
+        let hasSparkAdmin = baseNodes.contains { $0["id"].text == "dgx-spark-admin" && $0["status"].text == "online" }
+        let filtered = hasSparkAdmin ? baseNodes.filter { $0["id"].text != "dgx-spark" } : baseNodes
         return filtered.sorted { a, b in
             let aUsable = isUsableComputeNode(a)
             let bUsable = isUsableComputeNode(b)
@@ -135,8 +136,8 @@ struct OrbSelection {
             return a["id"].text < b["id"].text
         }
     }
-    static func firstAvailableNodeID(_ rawNodes: [OrbJSON], backend: String? = nil) -> String? {
-        let sorted = sortedComputeNodes(rawNodes)
+    static func firstAvailableNodeID(_ rawNodes: [OrbJSON], backend: String? = nil, includeAdminNodes: Bool = true) -> String? {
+        let sorted = sortedComputeNodes(rawNodes, includeAdminNodes: includeAdminNodes)
         guard let first = sorted.first(where: { isAutoSchedulableNode($0, backend: backend) }) else { return nil }
         let id = first["id"].text
         return id.isEmpty ? nil : id
@@ -249,22 +250,24 @@ struct OrbAgentPicker: View {
                     }
                     if !existing {
                         Section("Machine") {
-                            Button {
-                                selectNode("core")
-                            } label: {
-                                HStack {
-                                    Text("Core").foregroundStyle(.primary)
-                                    Spacer()
-                                    if selection.node.isEmpty || selection.node == "core" {
-                                        Image(systemName: "checkmark")
-                                            .font(.subheadline.weight(.semibold))
-                                            .foregroundStyle(.primary)
+                            if OrbCore.shared.isAdminUser {
+                                Button {
+                                    selectNode("core")
+                                } label: {
+                                    HStack {
+                                        Text("Core").foregroundStyle(.primary)
+                                        Spacer()
+                                        if selection.node.isEmpty || selection.node == "core" {
+                                            Image(systemName: "checkmark")
+                                                .font(.subheadline.weight(.semibold))
+                                                .foregroundStyle(.primary)
+                                        }
                                     }
+                                    .contentShape(Rectangle())
                                 }
-                                .contentShape(Rectangle())
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("picker.machine.core")
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("picker.machine.core")
 
                             ForEach(staticComputeNodes, id: \.["id"].text) { node in
                                 machineNodeRow(node)
@@ -377,19 +380,22 @@ struct OrbAgentPicker: View {
     }
     private func recomputeAutoNodeIfNeeded() {
         guard !existing, !selection.cloud, !selection.nodePinnedByUser else { return }
-        if selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let isAdmin = OrbCore.shared.isAdminUser
+        if isAdmin && selection.backend == "opencode" && selection.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             selection.node = "core"
             return
         }
         if !nodes.isEmpty {
-            selection.node = OrbSelection.firstAvailableNodeID(nodes, backend: selection.backend) ?? "core"
+            selection.node = OrbSelection.firstAvailableNodeID(nodes, backend: selection.backend, includeAdminNodes: isAdmin) ?? (isAdmin ? "core" : "")
+        } else if !isAdmin && selection.node == "core" {
+            selection.node = ""
         }
     }
     private func applyAgentCatalog(_ catalog: OrbJSON) {
         let response = catalog["backends"]
         let rawBackends = response.items.isEmpty ? response["backends"].items : response.items
         backends = rawBackends.filter { $0["id"].text != "gemini" }
-        nodes = OrbSelection.sortedComputeNodes(catalog["nodes"]["nodes"].items)
+        nodes = OrbSelection.sortedComputeNodes(catalog["nodes"]["nodes"].items, includeAdminNodes: OrbCore.shared.isAdminUser)
         if catalog["managed"] != .null, let decoded = try? OrbManaged.decode(catalog["managed"]) {
             managedResponse = decoded
         }

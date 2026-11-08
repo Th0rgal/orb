@@ -192,6 +192,10 @@ uint64_t orb_transport_epoch_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, u
 uint64_t orb_stream_open_tail_cap_step(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint8_t);
 uint64_t orb_rtt_ewma_step(uint32_t, uint32_t, uint32_t);
 uint64_t orb_client_link_budget_step(uint32_t, uint32_t, uint32_t, uint8_t, uint32_t);
+uint32_t orb_multiuser_rbac_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint8_t orb_placement_role_admit(uint8_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_user_spend_cap_step(uint8_t, uint32_t, uint32_t, uint8_t, uint32_t, uint32_t, uint32_t);
+uint32_t orb_privd_user_exec_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint8_t, uint8_t, uint8_t);
 #ifdef __cplusplus
 }
 #endif

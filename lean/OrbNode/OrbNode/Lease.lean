@@ -40,11 +40,14 @@ def LeaseScope.asString : LeaseScope → String
   | .nodeCapacity   => "node:capacity"
 
 structure LeaseClaims where
-  missionId : String
-  nodeId    : String
-  scope     : LeaseScope
-  expiresAt : UInt64
-  jobId?    : Option String := none
+  missionId    : String
+  nodeId       : String
+  scope        : LeaseScope
+  expiresAt    : UInt64
+  jobId?       : Option String := none
+  ownerUserId  : String := ""
+  callerRole   : String := "admin"
+  unixUsername : Option String := none
   deriving Repr, DecidableEq, BEq
 
 /-! ### RFC 4648 §5 Unpadded Base64URL Encode / Decode -/
@@ -153,9 +156,15 @@ def signLeaseToken (secret : String) (claims : LeaseClaims) : String :=
      , ("node_id", .str claims.nodeId)
      , ("scope", .str claims.scope.asString)
      , ("expires_at", JVal.uint64 claims.expiresAt) ] ++
-    match claims.jobId? with
-    | some jid => #[("job_id", .str jid)]
-    | none => #[]
+    (match claims.jobId? with
+     | some jid => #[("job_id", .str jid)]
+     | none => #[]) ++
+    (if claims.ownerUserId.isEmpty then #[] else #[("owner_user_id", .str claims.ownerUserId)]) ++
+    (if claims.callerRole == "admin" && claims.ownerUserId.isEmpty && claims.unixUsername.isNone then #[]
+     else #[("caller_role", .str claims.callerRole)]) ++
+    (match claims.unixUsername with
+     | some u => #[("unix_username", .str u)]
+     | none => #[])
   let jsonBytes := (renderCompact (.obj fields)).toUTF8
   let b64 := base64UrlEncodeUnpadded jsonBytes
   let sigHex := hmacSha256Hex secret b64
@@ -196,6 +205,11 @@ def verifyLeaseToken
   let some expiresAt := jval.fieldUInt64? "expires_at"
     | throw "lease missing expires_at"
   let jobId? := jval.fieldStr? "job_id"
+  let ownerUserId := ((jval.fieldStr? "owner_user_id").getD "").trimAscii.toString
+  let callerRoleRaw := ((jval.fieldStr? "caller_role").getD "admin").trimAscii.toString.toLower
+  if callerRoleRaw != "admin" && callerRoleRaw != "member" then
+    throw s!"invalid lease caller_role: {callerRoleRaw}"
+  let unixUsername? := (jval.fieldStr? "unix_username").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
   let nodeMatches : UInt8 := if claimNodeId == expectedNodeId then 1 else 0
   let jobMatches : UInt8 :=
     match expectedJobId?, jobId? with
@@ -212,6 +226,9 @@ def verifyLeaseToken
     scope := claimScope
     expiresAt := expiresAt
     jobId? := jobId?
+    ownerUserId := ownerUserId
+    callerRole := callerRoleRaw
+    unixUsername := unixUsername?
   }
 
 end OrbNode.Lease
