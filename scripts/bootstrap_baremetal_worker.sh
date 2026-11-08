@@ -61,7 +61,16 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \
-  ca-certificates curl git jq lsof mdadm rsync sqlite3 wireguard-tools xz-utils zstd build-essential pkg-config
+  ca-certificates curl git jq lsof mdadm nftables rsync sqlite3 wireguard-tools xz-utils zstd build-essential pkg-config
+
+# Ubuntu 26.04 LTS ships /etc/apparmor.d/wg which denies /etc/lean-mesh/wg-leanmesh0.conf unless allowed locally
+if [ -d /etc/apparmor.d ]; then
+  install -d -m 0755 /etc/apparmor.d/local
+  if ! grep -qF "/etc/lean-mesh/wg-leanmesh0.conf" /etc/apparmor.d/local/wg 2>/dev/null; then
+    echo "/etc/lean-mesh/wg-leanmesh0.conf r," >> /etc/apparmor.d/local/wg
+    apparmor_parser -r /etc/apparmor.d/wg 2>/dev/null || true
+  fi
+fi
 
 # 1. Dedicated unprivileged service user
 if ! id -u "$NODE_USER" >/dev/null 2>&1; then
@@ -76,7 +85,9 @@ install -d -m 0700 -o "$NODE_USER" -g "$NODE_USER" \
   "$NODE_WORK_DIR/caches/git-mirrors" \
   "$NODE_WORK_DIR/checkouts" \
   "$NODE_WORK_DIR/.scratch"
-install -d -m 0755 /opt/orb/bin /usr/local/lib/sandboxed-sh /var/log/sandboxed-sh
+install -d -m 0755 /opt/orb/bin /opt/sandboxed-tools /usr/local/lib/sandboxed-sh /var/log/sandboxed-sh
+install -d -m 0755 -o "$NODE_USER" -g "$NODE_USER" /var/lib/orb-software
+loginctl enable-linger "$NODE_USER" 2>/dev/null || true
 
 # 2. Single read-only shared Lean toolchain at /opt/orb/elan
 if [ ! -x "$SHARED_ELAN/toolchains/leanprover--lean4---v${LEAN_VERSION}/bin/lean" ]; then
@@ -105,7 +116,15 @@ link_elan_home() {
     ln -sfn "$tc" "$dest/toolchains/$(basename "$tc")"
     chown -h "$owner:$owner" "$dest/toolchains/$(basename "$tc")"
   done
-  if [ -f "$SHARED_ELAN/settings.toml" ] && [ ! -f "$dest/settings.toml" ]; then
+  if [ ! -f "$SHARED_ELAN/settings.toml" ] || ! grep -q '^version = ' "$SHARED_ELAN/settings.toml" 2>/dev/null; then
+    cat >"$SHARED_ELAN/settings.toml" <<EOF
+default_toolchain = "leanprover/lean4:v${LEAN_VERSION}"
+telemetry = false
+version = "12"
+EOF
+    chmod 0644 "$SHARED_ELAN/settings.toml"
+  fi
+  if [ ! -f "$dest/settings.toml" ]; then
     install -m 0644 -o "$owner" -g "$owner" "$SHARED_ELAN/settings.toml" "$dest/settings.toml"
   fi
 }
