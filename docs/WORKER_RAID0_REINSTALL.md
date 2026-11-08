@@ -6,11 +6,12 @@ This runbook doubles usable SSD/NVMe storage across the three legacy RAID1 bare-
 
 ## Target Hardware & Firmware Matrix
 
-| Host | Firmware | Disks | Profile in `deploy/autoinstall/ubuntu-26.04-worker-raid0.yaml` | Target `/` Capacity | Co-located Services to Preserve |
+| Host | Firmware | Disks | Profile / Layout | Resulting Capacity | Co-located Services Preserved |
 | --- | --- | --- | --- | --- | --- |
-| `babylon` | **UEFI** | 2x 419.2G Intel NVMe (`nvme0n1`, `nvme1n1`) | **Profile A** (UEFI NVMe) | **~820 GiB** (`md2` RAID0 XFS) | `sandboxed-node`, `lean-mesh`, `orb-privd` |
-| `ashur` | **Legacy BIOS** | 2x 476.9G Micron SATA (`sda`, `sdb`) | **Profile B** (BIOS SATA) | **~920 GiB** (`md2` RAID0 XFS) | `sandboxed-node`, `lean-mesh`, `orb-privd`, 1 GitHub runner (`verity-medium-1`) |
-| `nippur` | **Legacy BIOS** | 2x 447.1G Intel SATA (`sda`, `sdb`) | **Profile B** (BIOS SATA) | **~875 GiB** (`md2` RAID0 XFS) | `sandboxed-node`, `lean-mesh`, `orb-privd`, 3 GitHub runners (`bench`, `verity-build`, `verity-ocr`), `orb-canary-auditd` |
+| `lagash` (`10.88.0.15`, ex-`media-exit`) | **UEFI** | 2x 419.2G Intel NVMe (`nvme0n1`, `nvme1n1`) | **Profile A** (OVH RAID0 XFS `md4` + RAID1 `/boot`) | **`819 GiB`** (`/` XFS, Ubuntu 26.04.1 LTS) | `sandboxed-node`, `lean-mesh`, `orb-privd` |
+| `babylon` (`10.88.0.12`) | **UEFI** | 2x 419.2G Intel NVMe (`nvme0n1`, `nvme1n1`) | **Profile A** (OVH RAID0 XFS `md4` + RAID1 `/boot`) | **`819 GiB`** (`/` XFS, Ubuntu 26.04.1 LTS) | `sandboxed-node`, `lean-mesh`, `orb-privd` |
+| `nippur` (`10.88.0.13`) | **Legacy BIOS** | 2x 447.1G Intel SATA (`sda`, `sdb`) | **Profile B** (OVH RAID0 XFS `md4` + RAID1 `/boot`) | **`876 GiB`** (`/` XFS, Ubuntu 26.04.1 LTS) | `sandboxed-node`, `lean-mesh`, `orb-privd`, 3 GitHub runners (`bench`, `verity-build`, `verity-ocr`), `orb-canary-auditd` |
+| `ashur` (`10.88.0.11`) | **Legacy BIOS** | 2x 476.9G Micron NVMe (`sda`, `sdb`) | **Online Dual-XFS Split** (`sda3` `/` + `sdb3` `/var/lib/sandboxed-node` + RAID1 `/boot` & `swap`) | **`888 GiB`** (`444 GiB` `/` + `444 GiB` `/var/lib/sandboxed-node`) | `sandboxed-node`, `lean-mesh`, `orb-privd`, 1 GitHub runner (`verity-medium-1`) |
 
 ## Rolling Procedure (Per Host)
 
