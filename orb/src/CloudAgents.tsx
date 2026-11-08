@@ -9,6 +9,11 @@ import { api, getMission, getRemoteNodes, openExternalUrl, type Mission, type Re
 import { ForkMission, type CloudHandoffTarget } from './ForkMission';
 import { harnessChoices, refreshHarnessChoices, refreshNodeAntigravityModels } from './harnessPick';
 import { orbCloudHandoffStep } from './orbKernel';
+import {
+  normalizeFollowupPrompt,
+  stepFollowupEnqueueOptimistic,
+  stepFollowupTurnReconcile,
+} from './followupQueueState';
 import { cloudAccounts, cloudAccountLabel, cloudAttachmentBlock, cloudLaunchSeeds, defaultCloudProvider, readCloudProvider, writeCloudProvider, type CloudLaunchSeed, cloudCanSend, cloudExecution, cloudNames, cloudPhase, launchCloud, safeCloudUrl, type CloudAccount, type CloudExecution, type CloudProvider, type CloudTurn } from './cloudAgentApi';
 import './cloudAgents.css';
 import { ProviderLogo } from './ProviderLogo';
@@ -230,8 +235,16 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
   const selection = () => execution()?.selection ?? (seed() ? { provider: seed()!.provider, account: seed()!.account ?? '' } : undefined);
   const account = () => accounts().find(a => a.id === selection()?.account && a.provider === selection()?.provider);
   // Optimistic send, like a mission follow-up: the message is in the transcript
-  // the moment it is sent, and leaves once the provider reports it as a turn.
-  const [outgoing, setOutgoing] = createSignal<{id: string; text: string; images: DraftImage[]; turns: number}[]>([]);
+  // the moment it is sent, and leaves only once `orbFollowupQueueStep` (`SM-24`)
+  // confirms its `(client_msg_id, posted_after_seq)` turn landed on the provider.
+  const [outgoing, setOutgoing] = createSignal<{
+    id: string;
+    clientMsgId: string;
+    text: string;
+    sentPrompt: string;
+    images: DraftImage[];
+    postedAfterSeq: number;
+  }[]>([]);
   const [sendError, setSendError] = createSignal<string | null>(null);
   const pin = createPinnedScroll({ key: () => p.id });
   let scroller: HTMLDivElement | undefined;
@@ -239,19 +252,68 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
   const send = async (text: string, images: DraftImage[] = []) => {
     if ((!text.trim() && !images.length) || !execution() || !cloudCanSend(execution()!)) return false;
     const signature = JSON.stringify({ text, images: images.map(i => i.id), model: model(), params: modelParams() });
-    const row = { id: crypto.randomUUID(), text, images, turns: execution()!.turns.length + outgoing().length };
+    const clientMsgId = attempt?.signature === signature ? attempt.key : crypto.randomUUID();
+    const postedAfterSeq = execution()!.turns.length;
+    const enqueueStep = stepFollowupEnqueueOptimistic({
+      serverRev: execution()!.revision || 1,
+      clientMsgId,
+      trackedMsgId: outgoing().find(r => r.clientMsgId === clientMsgId)?.clientMsgId,
+      postedAfterSeq,
+      alreadyDelivered: false,
+    });
+    if (!enqueueStep.admitted) return false;
+    const row = { id: clientMsgId, clientMsgId, text, sentPrompt: attempt?.signature === signature ? attempt.text : text, images, postedAfterSeq };
     setOutgoing(rows => [...rows, row]); setSendError(null); pin.pin();
     try {
       if (attempt?.signature !== signature) {
         const sent = images.length ? imagePrompt(text, await stageRemoteImages(images, undefined, "core"), images) : text;
-        attempt = { signature, text: sent, key: crypto.randomUUID(), model: model(), params: modelParams() };
+        attempt = { signature, text: sent, key: clientMsgId, model: model(), params: modelParams() };
+        setOutgoing(rows => rows.map(r => r.id === row.id ? { ...r, sentPrompt: sent } : r));
       }
       await api('/api/control/message', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({mission_id: p.id, content: attempt.text, client_message_id: attempt.key,...(attempt.model || attempt.params.length || execution()?.selection.provider==='hermes' ? {cloud_model:attempt.model,cloud_model_params:attempt.params}: {})})});
       attempt = undefined; await refresh(); return true;
     } catch(e) { setOutgoing(rows => rows.filter(r => r.id !== row.id)); setSendError(String(e)); return false; }
   };
-  // A sent row is replaced by the turn the provider opens for it.
-  createEffect(() => { const n = execution()?.turns.length ?? 0; setOutgoing(rows => { const kept = rows.filter(r => n <= r.turns); return kept.length === rows.length ? rows : kept; }); });
+  // A sent row is retired only when `orbFollowupQueueStep` (`op = 3`) matches
+  // either its `client_message_id` (`turn.key`) or its prompt on a strictly later
+  // turn (`turnSeq > postedAfterSeq`), preventing historical `"yes"`/`"continue"`
+  // turns or unrelated concurrent turns from prematurely retiring the draft.
+  createEffect(() => {
+    const e = execution();
+    const turns = e?.turns ?? [];
+    if (!turns.length) return;
+    const rev = e?.revision || 1;
+    setOutgoing(rows => {
+      if (!rows.length) return rows;
+      const consumedTurnIndices = new Set<number>();
+      const kept = rows.filter(row => {
+        const wantText = normalizeFollowupPrompt(row.text);
+        const wantSent = normalizeFollowupPrompt(row.sentPrompt);
+        for (let idx = 0; idx < turns.length; idx++) {
+          if (consumedTurnIndices.has(idx)) continue;
+          const t = turns[idx];
+          const turnSeq = idx + 1;
+          const turnPrompt = normalizeFollowupPrompt(t.prompt ?? '');
+          const contentMatched = Boolean(turnPrompt) && (turnPrompt === wantSent || turnPrompt === wantText);
+          const idMatched = Boolean(t.key) && t.key === row.clientMsgId;
+          const step = stepFollowupTurnReconcile({
+            serverRev: rev,
+            clientMsgId: row.clientMsgId,
+            deliveredMsgId: idMatched ? t.key : null,
+            postedAfterSeq: row.postedAfterSeq,
+            turnSeq,
+            contentMatched,
+          });
+          if (step.retiredNow) {
+            consumedTurnIndices.add(idx);
+            return false;
+          }
+        }
+        return true;
+      });
+      return kept.length === rows.length ? rows : kept;
+    });
+  });
   const cancel = async () => { setBusy(true); setError(''); try { await api(`/api/control/missions/${p.id}/cloud/cancel`, {method:'POST'}); } catch(e) { setError(String(e)); } finally { setBusy(false); } };
   const approve = async (run_id:string, request_id:string|undefined, choice:string) => {
     setBusy(true); setError('');

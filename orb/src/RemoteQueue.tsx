@@ -4,6 +4,15 @@ import { For, Show, batch, createEffect, createMemo, createSignal, onCleanup, un
 import { ErrorToast } from "./toast";
 import { isBtwWrappedPrompt, messagePresentation, replaceMessageUserText } from "./messagePresentation";
 import { api, ApiError, connectionVersion, editQueuedMessage, listQueuedMessages, type QueuedMessage } from "./api";
+import {
+  clearObservedMissionQueueRevision,
+  noteObservedMissionQueueRevision,
+  peekObservedMissionQueueRevision,
+  stepFollowupEditCas,
+  stepFollowupEnqueueOptimistic,
+  stepFollowupPollReconcile,
+  stepFollowupTurnReconcile,
+} from "./followupQueueState";
 import * as Ic from "./icons";
 
 export interface RemoteQueueHandle {
@@ -49,7 +58,8 @@ export function RemoteQueue(p: {
   liveEdit?: { id: string; content: string; at: number } | { id: string; content: string; at: number }[];
   ref?: (handle: RemoteQueueHandle) => void;
 }) {
-  let revision = 0, destroyed = false, inboxClock = 0;
+  let revision = 0, destroyed = false, inboxClock = 0, serverQueueRev = 1;
+  let hasExplicitServerRev = false;
   const deletedIds = new Set<string>();
   const [liveEdits, setLiveEdits] = createSignal<ReadonlyMap<string, { content: string; at: number; epoch: number }>>(new Map());
   const [settledPollEpoch, setSettledPollEpoch] = createSignal(0);
@@ -62,21 +72,34 @@ export function RemoteQueue(p: {
     return Array.isArray(p.pending) ? p.pending : [p.pending];
   };
   const delivered = () => new Set(p.delivered ?? []);
+  const isRowRetiredByTurn = (id: string, sent: ReadonlySet<string>): boolean => {
+    if (!sent.has(id)) return false;
+    return stepFollowupTurnReconcile({
+      serverRev: serverQueueRev,
+      clientMsgId: id,
+      deliveredMsgId: id,
+      postedAfterSeq: 0,
+      turnSeq: 1,
+      contentMatched: true,
+      serverListed: true,
+      alreadyDelivered: false,
+    }).retiredNow;
+  };
   const visibleRows = () => {
     const sent = delivered();
     const known = new Map<string,QueuedMessage & {attached?:boolean}>();
-    for (const row of rows()) if (!deletedIds.has(row.id) && !sent.has(row.id)) known.set(row.id, row);
+    for (const row of rows()) if (!deletedIds.has(row.id) && !isRowRetiredByTurn(row.id, sent)) known.set(row.id, row);
     // A live edit newer than the last inbox poll wins until the next poll.
     // An older confirmed copy must not hide an edit another client already
     // wrote into the inbox.
     for (const [id, edit] of liveEdits()) {
-      if (deletedIds.has(id) || sent.has(id) || edit.epoch <= settledPollEpoch()) continue;
+      if (deletedIds.has(id) || isRowRetiredByTurn(id, sent) || edit.epoch <= settledPollEpoch()) continue;
       const current = known.get(id);
       if (current) known.set(id, { ...current, content: edit.content });
       else known.set(id, { id, mission_id: p.mission, content: edit.content, source: "remote-queue" });
     }
     for (const row of p.confirmed ?? []) {
-      if (deletedIds.has(row.id) || sent.has(row.id) || known.has(row.id)) continue;
+      if (deletedIds.has(row.id) || isRowRetiredByTurn(row.id, sent) || known.has(row.id)) continue;
       known.set(row.id, row);
     }
     return [...known.values()];
@@ -90,12 +113,19 @@ export function RemoteQueue(p: {
     for (const row of visibleRows()) confirmedMap.set(row.id, row);
     const out: (QueuedMessage & { attached?: boolean; sending?: boolean })[] = [];
     const seen = new Set<string>();
+    const sent = delivered();
     for (const row of visibleRows()) {
       seen.add(row.id);
       out.push({ ...edited(row), sending: false });
     }
     for (const item of pendingList()) {
-      if (deletedIds.has(item.id) || seen.has(item.id) || delivered().has(item.id)) continue;
+      if (deletedIds.has(item.id) || seen.has(item.id)) continue;
+      const enqueueStep = stepFollowupEnqueueOptimistic({
+        serverRev: serverQueueRev,
+        clientMsgId: item.id,
+        alreadyDelivered: sent.has(item.id),
+      });
+      if (!enqueueStep.admitted || !enqueueStep.optimisticLiveNext) continue;
       seen.add(item.id);
       const confirmed = confirmedMap.get(item.id);
       if (confirmed) out.push({ ...edited(confirmed), sending: false });
@@ -107,10 +137,15 @@ export function RemoteQueue(p: {
   const [cancelling, setCancelling] = createSignal<string>();
   const [working, setWorking] = createSignal(false);
   const [collapsed, setCollapsed] = createSignal(false);
+  let refreshInbox: (() => Promise<void>) | undefined;
   createEffect(() => {
     const mission = p.mission, version = connectionVersion();
+    const scopeKey = `${version}:${mission}`;
     deletedIds.clear();
     inboxClock = 0;
+    serverQueueRev = 1;
+    hasExplicitServerRev = false;
+    clearObservedMissionQueueRevision(scopeKey);
     untrack(() => { setSettledPollEpoch(0); setRows([]); setLiveEdits(new Map()); setError(""); p.onRows([]); });
     let disposed = false, loading = false;
     const refresh = async () => {
@@ -119,20 +154,39 @@ export function RemoteQueue(p: {
       const pollEpoch = ++inboxClock;
       const started = revision;
       try {
-        const pending = (await listQueuedMessages(mission)).filter(row => !row.inflight && !deletedIds.has(row.id) && (row.source === "remote-queue" || row.source?.startsWith("host-queue:api:")));
+        const fetched = await listQueuedMessages(mission);
+        const pending = fetched.filter(row => !row.inflight && !deletedIds.has(row.id) && (row.source === "remote-queue" || row.source?.startsWith("host-queue:api:")));
         if (disposed || started !== revision || version !== connectionVersion()) return;
+        let explicitMaxRev = peekObservedMissionQueueRevision(scopeKey);
+        for (const row of fetched) {
+          if (typeof row.revision === "number" && Number.isFinite(row.revision) && row.revision > 0) {
+            const revInt = Math.trunc(row.revision) >>> 0;
+            if (explicitMaxRev === undefined || revInt > explicitMaxRev) explicitMaxRev = revInt;
+          }
+        }
+        if (explicitMaxRev !== undefined && explicitMaxRev > 0) {
+          const pollStep = stepFollowupPollReconcile({
+            serverRev: serverQueueRev,
+            incomingServerRev: explicitMaxRev,
+          });
+          if (!pollStep.admitted) return;
+          serverQueueRev = pollStep.nextServerRev;
+          hasExplicitServerRev = true;
+          noteObservedMissionQueueRevision(scopeKey, serverQueueRev);
+        }
         const sent = untrack(delivered);
         batch(() => {
           setSettledPollEpoch(pollEpoch);
           setRows(pending);
         });
-        p.onRows(pending.filter(row => !sent.has(row.id)).map(row => row.id));
+        p.onRows(pending.filter(row => !isRowRetiredByTurn(row.id, sent)).map(row => row.id));
       } catch { /* Keep the last confirmed inbox during a network interruption. */ }
       finally { loading = false; }
     };
+    refreshInbox = refresh;
     void refresh();
     const stop = pollWhileVisible(refresh, 3000, "remoteQueue.refresh");
-    onCleanup(() => { disposed = true; stop(); });
+    onCleanup(() => { disposed = true; if (refreshInbox === refresh) refreshInbox = undefined; stop(); });
   });
   const cancel = async (id: string) => {
     setError("");
@@ -251,6 +305,23 @@ export function RemoteQueue(p: {
       return "failed";
     }
     const version = connectionVersion(), mission = p.mission;
+    const scopeKey = `${version}:${mission}`;
+    const expectedRev = hasExplicitServerRev
+      ? serverQueueRev
+      : typeof target.revision === "number" && Number.isFinite(target.revision) && target.revision > 0
+        ? (Math.trunc(target.revision) >>> 0)
+        : peekObservedMissionQueueRevision(scopeKey);
+    const casStep = stepFollowupEditCas({
+      serverRev: expectedRev ?? serverQueueRev,
+      expectedServerRev: expectedRev ?? serverQueueRev,
+      clientMsgId: id,
+      serverListed: true,
+      alreadyDelivered: delivered().has(id),
+    });
+    if (!casStep.admitted) {
+      setError("This message was already sent, so the edit was not applied.");
+      return "failed";
+    }
     const previous = edits()[id];
     setError("");
     setEdits(all => ({ ...all, [id]: nextContent }));
@@ -260,11 +331,20 @@ export function RemoteQueue(p: {
       return next;
     });
     try {
-      await editQueuedMessage(id, nextContent);
+      if (expectedRev !== undefined && expectedRev > 0) {
+        await editQueuedMessage(id, nextContent, expectedRev);
+      } else {
+        await editQueuedMessage(id, nextContent);
+      }
       if (destroyed || version !== connectionVersion() || mission !== p.mission) return "edited";
       batch(() => {
         revision++;
-        setRows(list => list.map(row => row.id === id ? { ...row, content: nextContent } : row));
+        if (expectedRev !== undefined && expectedRev > 0) {
+          serverQueueRev = casStep.nextServerRev;
+          hasExplicitServerRev = true;
+          noteObservedMissionQueueRevision(scopeKey, serverQueueRev);
+        }
+        setRows(list => list.map(row => row.id === id ? { ...row, content: nextContent, ...(expectedRev !== undefined && expectedRev > 0 ? { revision: casStep.nextServerRev } : {}) } : row));
         p.onEdited?.(id, nextContent);
         setEdits(all => { const next = { ...all }; delete next[id]; return next; });
       });
@@ -272,7 +352,17 @@ export function RemoteQueue(p: {
     } catch (e) {
       revert();
       if (!destroyed && version === connectionVersion() && mission === p.mission) {
-        setError(e instanceof ApiError && (e.status === 409 || e.status === 404) ? "This message was already sent, so the edit was not applied." : `Couldn’t save the edit: ${e instanceof Error ? e.message : String(e)}`);
+        const isConflictOrGone = e instanceof ApiError && (e.status === 409 || e.status === 404);
+        const detail = e instanceof ApiError ? e.detail : "";
+        const isRevisionConflict = e instanceof ApiError && e.status === 409 && /revision|stale/i.test(detail);
+        if (isRevisionConflict) void refreshInbox?.();
+        setError(
+          isRevisionConflict
+            ? "Queue changed on another client; refreshed queue before editing."
+            : isConflictOrGone
+              ? "This message was already sent, so the edit was not applied."
+              : `Couldn’t save the edit: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
       return "failed";
     }

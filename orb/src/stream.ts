@@ -1,5 +1,5 @@
 import {batch} from "solid-js";
-import { ApiError, InvalidApiResponseError, api, clearConnection, getJwt, connectionVersion, isAbortError, isTransientNetworkError, noteAbort, orderedApiCandidates, REQUEST_TIMEOUT_MS, RequestTimeoutError, transportFetch } from "./api";
+import { ApiError, InvalidApiResponseError, api, clearConnection, getApiUrl, getJwt, getServerBuildHash, hashStringU64, connectionVersion, isAbortError, isTransientNetworkError, noteAbort, orderedApiCandidates, recordServerBuild, REQUEST_TIMEOUT_MS, RequestTimeoutError, transportFetch } from "./api";
 import { nativeInvoke } from "./native";
 import { requestDone, streamLoad, timed } from "./diagnostics";
 import {
@@ -15,6 +15,7 @@ import {
 } from "./networkHealth";
 import {
   orbKernelScratchSliceStep,
+  orbTransportEpochStep,
   orbWireStreamSliceStep,
 } from "./orbKernel";
 import {
@@ -318,6 +319,96 @@ export function setMultiplexSyncEnabledForTest(enabled: boolean): void {
   }
 }
 
+export const SYNC_WS_REPROBE_COOLDOWN_MS = 30_000;
+export const SYNC_WS_EVER_READY_FAIL_THRESHOLD = 6;
+
+export interface TransportEpochSnapshot {
+  mode: 0 | 1 | 2;
+  failureStreak: number;
+  everReady: boolean;
+  stickyUnsupported: boolean;
+  endpointClass: number;
+  serverBuild: bigint;
+  hasSinceSeq: boolean;
+  sinceSeq: number;
+  cooldownUntilMs: bigint;
+}
+
+export function stepTransportEpochState(
+  prev: TransportEpochSnapshot,
+  event: {
+    eventKind: 0 | 1 | 2 | 3 | 4;
+    httpStatus?: number;
+    failThreshold: number;
+    cooldownElapsed?: boolean;
+    nowMs?: bigint | number;
+    cooldownUntilMs?: bigint | number;
+    endpointClass?: number;
+    serverBuild?: bigint;
+    sinceSeq?: number;
+  },
+) {
+  const endpointClass = ((event.endpointClass ?? prev.endpointClass) >>> 0) & 0x3;
+  const serverBuild = event.serverBuild ?? prev.serverBuild;
+  const buildChanged = prev.serverBuild !== 0n && serverBuild !== 0n && serverBuild !== prev.serverBuild;
+  const effectiveEventKind = buildChanged && event.eventKind !== 0 ? 4 : event.eventKind;
+  const hasSinceSeq = event.sinceSeq !== undefined ? true : prev.hasSinceSeq;
+  const rawSince = event.sinceSeq !== undefined ? event.sinceSeq : prev.sinceSeq;
+  const sinceSeq32 = hasSinceSeq && Number.isFinite(rawSince) && rawSince >= 0 ? Math.min(0xffffffff, Math.trunc(rawSince)) : 0;
+  const baseCooldown = event.cooldownUntilMs !== undefined ? BigInt(Math.max(0, Math.trunc(Number(event.cooldownUntilMs)))) : prev.cooldownUntilMs;
+  const nowMs =
+    event.nowMs !== undefined
+      ? BigInt(Math.max(0, Math.trunc(Number(event.nowMs))))
+      : event.cooldownElapsed
+        ? baseCooldown
+        : BigInt(Math.max(0, Date.now()));
+  const res = orbTransportEpochStep({
+    mode: prev.mode,
+    eventKind: effectiveEventKind,
+    everReady: prev.everReady,
+    stickyUnsupported: prev.stickyUnsupported,
+    endpointClass,
+    prevEndpointClass: prev.endpointClass & 0x3,
+    hasSinceSeq,
+    failureStreak: Math.min(255, Math.max(0, prev.failureStreak)),
+    failThreshold: Math.min(255, Math.max(1, event.failThreshold)),
+    httpStatus: Math.max(0, Math.trunc(event.httpStatus ?? 0)),
+    sinceSeq32,
+    nowMs,
+    cooldownUntilMs: baseCooldown,
+  });
+  const nextMode = (res.nextMode === 1 || res.nextMode === 2 ? res.nextMode : 0) as 0 | 1 | 2;
+  const nextEverReady = prev.everReady || (res.admitted && effectiveEventKind === 0);
+  const nextCooldownUntilMs =
+    nextMode === 1 && prev.mode !== 1
+      ? nowMs + BigInt(SYNC_WS_REPROBE_COOLDOWN_MS)
+      : nextMode === 0
+        ? 0n
+        : baseCooldown;
+  return {
+    ...res,
+    snapshot: {
+      mode: nextMode,
+      failureStreak: res.nextFailureStreak,
+      everReady: nextEverReady,
+      stickyUnsupported: res.stickyUnsupportedNext,
+      endpointClass,
+      serverBuild: serverBuild !== 0n ? serverBuild : prev.serverBuild,
+      hasSinceSeq: res.hasPreservedSinceSeq,
+      sinceSeq: res.preservedSinceSeq32,
+      cooldownUntilMs: nextCooldownUntilMs,
+    } satisfies TransportEpochSnapshot,
+  };
+}
+
+function endpointClassByte(url = getApiUrl()): number {
+  const clean = url.trim().replace(/\/+$/, "").toLowerCase();
+  if (!clean) return 0;
+  if (clean.includes("orbcore.")) return 1;
+  if (clean.includes("nico-best-pc-ever") || clean.includes("127.0.0.1") || clean.includes("localhost")) return 2;
+  return (Number(hashStringU64(clean) & 1n) === 0 ? 1 : 3);
+}
+
 export function isMultiplexSyncActive(): boolean {
   if (!forceMultiplexSyncForTest && !nativeInvoke()) return false;
   if (typeof WebSocket === "undefined") return false;
@@ -333,6 +424,7 @@ type SyncListener = {
   onDisconnected?: () => void;
   onCaughtUp?: (cursor: number | null, replayed: number) => void;
   startFallback: () => void;
+  stopFallback: () => void;
 };
 
 type MultiplexSyncHub = {
@@ -340,6 +432,7 @@ type MultiplexSyncHub = {
   listeners: Set<SyncListener>;
   destroy: () => void;
   refreshSubscriptions: () => void;
+  notifyHttpStatus: (status: number) => void;
 };
 
 let activeSyncHub: MultiplexSyncHub | null = null;
@@ -362,22 +455,46 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
   const listeners = new Set<SyncListener>();
   let socket: WebSocket | null = null;
   let ready = false;
-  let everReady = false;
   let closed = false;
-  let consecutiveFailures = 0;
   let candidateIdx = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let reprobeTimer: ReturnType<typeof setTimeout> | undefined;
   let pingTimer: ReturnType<typeof setInterval> | undefined;
   let pongTimer: ReturnType<typeof setTimeout> | undefined;
   let idleCloseTimer: ReturnType<typeof setTimeout> | undefined;
   const subscribedOnSocket = new Set<string>();
   let presentationSent: boolean | null = null;
+  let epochState: TransportEpochSnapshot = {
+    mode: 0,
+    failureStreak: 0,
+    everReady: false,
+    stickyUnsupported: false,
+    endpointClass: endpointClassByte(),
+    serverBuild: getServerBuildHash(),
+    hasSinceSeq: false,
+    sinceSeq: 0,
+    cooldownUntilMs: 0n,
+  };
+
+  const minTrackedSinceSeq = (): number | undefined => {
+    let minSeq: number | undefined;
+    for (const l of listeners) {
+      if (!l.missionId) continue;
+      const s = l.getSinceSeq();
+      if (s !== undefined) minSeq = minSeq === undefined ? s : Math.min(minSeq, s);
+    }
+    return minSeq;
+  };
+
+  const currentFailThreshold = (candidateCount: number): number =>
+    epochState.everReady ? Math.max(SYNC_WS_EVER_READY_FAIL_THRESHOLD, candidateCount * 2) : Math.max(2, candidateCount);
 
   const clearTimers = () => {
     if (reconnectTimer) clearTimeout(reconnectTimer);
+    if (reprobeTimer) clearTimeout(reprobeTimer);
     if (pingTimer) clearInterval(pingTimer);
     if (pongTimer) clearTimeout(pongTimer);
-    reconnectTimer = pingTimer = pongTimer = undefined;
+    reconnectTimer = reprobeTimer = pingTimer = pongTimer = undefined;
   };
 
   const sendJson = (msg: Record<string, unknown>) => {
@@ -424,20 +541,43 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
   };
 
   const detachWakeListeners = () => {
-    if (typeof window !== "undefined") window.removeEventListener("online", handleWakeOrOnline);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("online", handleWakeOrOnline);
+      window.removeEventListener("orb:server-build-changed", handleServerBuildChanged as EventListener);
+    }
     if (typeof document !== "undefined") document.removeEventListener("visibilitychange", handleWakeOrOnline);
   };
 
-  const triggerFallbackAll = () => {
-    closed = true;
-    clearTimers();
-    detachWakeListeners();
+  const scheduleWsReprobe = (candidateCount: number) => {
+    if (closed || !listeners.size || epochState.stickyUnsupported) return;
+    if (reprobeTimer) clearTimeout(reprobeTimer);
+    reprobeTimer = setTimeout(() => {
+      reprobeTimer = undefined;
+      if (closed || !listeners.size || epochState.mode !== 1) return;
+      const stepped = stepTransportEpochState(epochState, {
+        eventKind: 3,
+        failThreshold: currentFailThreshold(candidateCount),
+        cooldownElapsed: true,
+        endpointClass: endpointClassByte(),
+        serverBuild: getServerBuildHash(),
+        sinceSeq: minTrackedSinceSeq(),
+      });
+      epochState = stepped.snapshot;
+      if (epochState.mode === 2) {
+        openSocket();
+      }
+    }, SYNC_WS_REPROBE_COOLDOWN_MS);
+  };
+
+  const enterSseFallback = (candidateCount: number) => {
+    if (closed) return;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = undefined; }
+    if (pingTimer) { clearInterval(pingTimer); pingTimer = undefined; }
+    if (pongTimer) { clearTimeout(pongTimer); pongTimer = undefined; }
     if (socket) { try { socket.close(); } catch { /* ignore */ } socket = null; }
-    if (activeSyncHub === hub) activeSyncHub = null;
-    for (const l of [...listeners]) {
-      listeners.delete(l);
-      l.startFallback();
-    }
+    ready = false;
+    for (const l of listeners) l.startFallback();
+    scheduleWsReprobe(Math.max(1, candidateCount));
   };
 
   const openSocket = () => {
@@ -448,17 +588,32 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
     }
     const candidates = orderedApiCandidates();
     if (!candidates.length) {
-      triggerFallbackAll();
+      epochState = { ...epochState, mode: 1 };
+      enterSseFallback(1);
       return;
     }
     const base = candidates[candidateIdx % candidates.length];
+    const epByte = endpointClassByte(base);
+    const curBuild = getServerBuildHash(base);
+    if (epochState.stickyUnsupported && epByte === epochState.endpointClass && curBuild === epochState.serverBuild) {
+      enterSseFallback(candidates.length);
+      return;
+    }
     const token = getJwt();
     const protocols = token ? ["orb-sync.v1", `jwt.${token}`] : ["orb-sync.v1"];
     let ws: WebSocket;
     try {
       ws = new WebSocket(toWsUrl(base, "/api/control/sync"), protocols);
     } catch {
-      triggerFallbackAll();
+      const stepped = stepTransportEpochState(epochState, {
+        eventKind: 1,
+        failThreshold: 1,
+        endpointClass: epByte,
+        serverBuild: curBuild,
+        sinceSeq: minTrackedSinceSeq(),
+      });
+      epochState = stepped.snapshot;
+      enterSseFallback(candidates.length);
       return;
     }
     socket = ws;
@@ -475,11 +630,22 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
     ws.onopen = () => {
       if (socket !== ws || closed) return;
       clearTimeout(connectDeadline);
+      if (reprobeTimer) { clearTimeout(reprobeTimer); reprobeTimer = undefined; }
+      const wasSseOrReprobe = epochState.mode === 1 || epochState.mode === 2;
+      const hadFailures = epochState.failureStreak > 0;
+      const stepped = stepTransportEpochState(epochState, {
+        eventKind: 0,
+        failThreshold: currentFailThreshold(candidates.length),
+        endpointClass: epByte,
+        serverBuild: getServerBuildHash(base),
+        sinceSeq: minTrackedSinceSeq(),
+      });
+      epochState = stepped.snapshot;
       ready = true;
-      everReady = true;
       recordSyncWsState(true);
-      const hadFailures = consecutiveFailures > 0;
-      consecutiveFailures = 0;
+      if (wasSseOrReprobe) {
+        for (const l of listeners) l.stopFallback();
+      }
       syncSubscriptions();
       for (const l of listeners) {
         if (l.onReady) l.onReady();
@@ -553,6 +719,10 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
         return;
       }
       if (!eventType || eventType === "sync_ready" || eventType === "heartbeat" || eventType === "subscribed" || eventType === "unsubscribed") {
+        if (eventType === "sync_ready") {
+          const buildVal = typeof parsed.server_build === "string" ? parsed.server_build : typeof parsed.version === "string" ? parsed.version : null;
+          if (buildVal) recordServerBuild(buildVal, base);
+        }
         return;
       }
       streamLoad("sync-ws", 1, rawText.length);
@@ -589,7 +759,9 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
     const handleDisconnect = () => {
       if (socket !== ws) return;
       clearTimeout(connectDeadline);
-      clearTimers();
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = undefined; }
+      if (pingTimer) { clearInterval(pingTimer); pingTimer = undefined; }
+      if (pongTimer) { clearTimeout(pongTimer); pongTimer = undefined; }
       socket = null;
       const wasReady = ready;
       ready = false;
@@ -597,20 +769,24 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
       if (closed || !listeners.size) return;
       recordSyncWsState(false);
       if (wasReady) reportSyncUnexpectedDisconnect();
-      consecutiveFailures++;
       candidateIdx++;
-      // Only fall back to individual SSE streams if `/api/control/sync` has NEVER
-      // completed a handshake on this session (e.g. legacy backend without WS upgrade).
-      // Once `everReady` is true, backend deploys or sleep/wake reconnect on `sync-ws`
-      // instead of permanently splitting into N HTTP/1.1 SSE streams.
-      if (!everReady && consecutiveFailures >= Math.max(2, candidates.length)) {
-        triggerFallbackAll();
+      const nextBase = candidates[candidateIdx % candidates.length] ?? base;
+      const stepped = stepTransportEpochState(epochState, {
+        eventKind: 1,
+        failThreshold: currentFailThreshold(candidates.length),
+        endpointClass: endpointClassByte(nextBase),
+        serverBuild: getServerBuildHash(nextBase),
+        sinceSeq: minTrackedSinceSeq(),
+      });
+      epochState = stepped.snapshot;
+      if (epochState.mode === 1) {
+        enterSseFallback(candidates.length);
         return;
       }
       if (wasReady) {
         for (const l of listeners) if (l.getSinceSeq() === undefined) l.onLagged();
       }
-      const delay = Math.min(400 * 2 ** Math.min(consecutiveFailures - 1, 5), 5_000);
+      const delay = Math.min(400 * 2 ** Math.min(Math.max(0, epochState.failureStreak - 1), 5), 5_000);
       reconnectTimer = setTimeout(openSocket, delay);
     };
 
@@ -618,14 +794,46 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
     ws.onclose = handleDisconnect;
   };
 
+  function handleServerBuildChanged() {
+    if (closed || !listeners.size) return;
+    const candidates = orderedApiCandidates();
+    const stepped = stepTransportEpochState(epochState, {
+      eventKind: 4,
+      failThreshold: currentFailThreshold(Math.max(1, candidates.length)),
+      endpointClass: endpointClassByte(),
+      serverBuild: getServerBuildHash(),
+      sinceSeq: minTrackedSinceSeq(),
+    });
+    epochState = stepped.snapshot;
+    if (!socket && epochState.mode !== 1) {
+      if (reprobeTimer) { clearTimeout(reprobeTimer); reprobeTimer = undefined; }
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = undefined; }
+      openSocket();
+    }
+  }
+
   function handleWakeOrOnline() {
     if (closed || !listeners.size) return;
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
     if (!socket && reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = undefined;
-      consecutiveFailures = 0;
       openSocket();
+    } else if (!socket && epochState.mode === 1 && !epochState.stickyUnsupported) {
+      const candidates = orderedApiCandidates();
+      const stepped = stepTransportEpochState(epochState, {
+        eventKind: 3,
+        failThreshold: currentFailThreshold(Math.max(1, candidates.length)),
+        cooldownElapsed: true,
+        endpointClass: endpointClassByte(),
+        serverBuild: getServerBuildHash(),
+        sinceSeq: minTrackedSinceSeq(),
+      });
+      epochState = stepped.snapshot;
+      if (epochState.mode === 2) {
+        if (reprobeTimer) { clearTimeout(reprobeTimer); reprobeTimer = undefined; }
+        openSocket();
+      }
     } else if (socket && socket.readyState === WebSocket.OPEN && ready && !pongTimer) {
       sendJson({ op: "ping", ts: Date.now() });
       const activeWs = socket;
@@ -638,12 +846,31 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
     }
   }
 
-  if (typeof window !== "undefined") window.addEventListener("online", handleWakeOrOnline);
+  if (typeof window !== "undefined") {
+    window.addEventListener("online", handleWakeOrOnline);
+    window.addEventListener("orb:server-build-changed", handleServerBuildChanged as EventListener);
+  }
   if (typeof document !== "undefined") document.addEventListener("visibilitychange", handleWakeOrOnline);
 
   const hub: MultiplexSyncHub = {
     connVer: ver,
     listeners,
+    notifyHttpStatus(status: number) {
+      if (closed) return;
+      const candidates = orderedApiCandidates();
+      const stepped = stepTransportEpochState(epochState, {
+        eventKind: 2,
+        httpStatus: status,
+        failThreshold: currentFailThreshold(Math.max(1, candidates.length)),
+        endpointClass: endpointClassByte(),
+        serverBuild: getServerBuildHash(),
+        sinceSeq: minTrackedSinceSeq(),
+      });
+      epochState = stepped.snapshot;
+      if (epochState.mode === 1) {
+        enterSseFallback(Math.max(1, candidates.length));
+      }
+    },
     refreshSubscriptions() {
       if (idleCloseTimer) {
         clearTimeout(idleCloseTimer);
@@ -654,6 +881,13 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
         idleCloseTimer = setTimeout(() => {
           if (!listeners.size) hub.destroy();
         }, 5_000);
+        return;
+      }
+      if (epochState.mode === 1) {
+        for (const l of listeners) l.startFallback();
+        if (!reprobeTimer && !epochState.stickyUnsupported) {
+          scheduleWsReprobe(Math.max(1, orderedApiCandidates().length));
+        }
         return;
       }
       if (!socket && !reconnectTimer && !closed) openSocket();
@@ -727,9 +961,20 @@ export function streamMission(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let controller: AbortController | undefined;
   let detachSyncListener: (() => void) | undefined;
+  let sseFallbackActive = false;
+
+  const stopSseFallback = () => {
+    sseFallbackActive = false;
+    if (timer) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+    controller?.abort();
+    controller = undefined;
+  };
 
   const connect = async () => {
-    if (stopped) return;
+    if (stopped || (detachSyncListener && !sseFallbackActive)) return;
     controller = new AbortController();
     try {
       const jwt = getJwt();
@@ -810,7 +1055,7 @@ export function streamMission(
       flush();
       throw new Error("stream ended");
     } catch (e) {
-      if (stopped || (e instanceof DOMException && e.name === "AbortError")) return;
+      if (stopped || (detachSyncListener && !sseFallbackActive) || (e instanceof DOMException && e.name === "AbortError")) return;
       onDisconnected?.();
       if(retry===0)onLagged();
       retry = Math.min(retry + 1, 5);
@@ -829,8 +1074,13 @@ export function streamMission(
       onDisconnected,
       onCaughtUp: handleCaughtUp,
       startFallback: () => {
-        detachSyncListener = undefined;
-        if (!stopped) void connect();
+        if (stopped || sseFallbackActive) return;
+        sseFallbackActive = true;
+        retry = 0;
+        void connect();
+      },
+      stopFallback: () => {
+        stopSseFallback();
       },
     };
     syncHub.listeners.add(listener);
@@ -840,16 +1090,16 @@ export function streamMission(
       syncHub.refreshSubscriptions();
     };
   } else {
+    sseFallbackActive = true;
     void connect();
   }
 
   return () => {
     stopped = true;
+    stopSseFallback();
     detachSyncListener?.();
     detachSyncListener = undefined;
     clearTimeout(paint);fragments=[];
-    if (timer) clearTimeout(timer);
-    controller?.abort();
   };
 }
 

@@ -6,7 +6,14 @@ const backend = vi.hoisted(() => ({ list: vi.fn(), api: vi.fn() }));
 vi.mock('../src/api', () => ({
   listQueuedMessages: backend.list,
   api: backend.api,
-  editQueuedMessage: (id: string, content: string) => backend.api(`/api/control/queue/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) }),
+  editQueuedMessage: (id: string, content: string, expectedRevision?: number) => backend.api(
+    `/api/control/queue/${encodeURIComponent(id)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(expectedRevision !== undefined ? { content, expected_revision: expectedRevision } : { content }),
+    },
+  ),
   connectionVersion: () => 1,
   ApiError: class ApiError extends Error { constructor(public status: number, public detail: string) { super(`${status} ${detail}`); } },
 }));
@@ -396,4 +403,31 @@ it('keeps a live edit that lands while a poll is in flight until a later poll', 
   backend.list.mockResolvedValue([{ id: 'q1', mission_id: 'remote', content: 'Later poll', source: 'remote-queue' }]);
   await waitFor(() => expect(screen.getByText('Later poll')).toBeTruthy(), { timeout: 4000 });
   expect(screen.queryByText('Live during poll')).toBeNull();
+});
+
+it('refuses to CAS-edit a delivered queue row and refreshes on a typed 409 revision conflict (SM-24)', async () => {
+  backend.list.mockResolvedValue([{ id: 'q1', mission_id: 'remote', content: 'Original', source: 'remote-queue', revision: 4 }]);
+  const { ApiError } = await import('../src/api');
+  let conflicted = false;
+  backend.api.mockImplementation(async (url: string) => {
+    if (String(url).endsWith('/q1') && !conflicted) {
+      conflicted = true;
+      throw new ApiError(409, JSON.stringify({ code: 'revision_conflict', current_revision: 7 }));
+    }
+    return { ok: true };
+  });
+  let handle!: RemoteQueueHandle;
+  const [delivered, setDelivered] = createSignal<string[]>([]);
+  render(() => <RemoteQueue mission="remote" delivered={delivered()} ref={value => { handle = value; }} onRows={() => {}} onCancel={() => {}} />);
+  await screen.findByText('Original');
+  expect(await handle.editInPlace('q1', 'Edited text')).toBe('failed');
+  const patch = backend.api.mock.calls.find(([url, init]: [string, RequestInit]) => String(url).endsWith('/q1') && init?.method === 'PATCH');
+  expect(patch).toBeTruthy();
+  expect(JSON.parse(patch![1].body as string)).toEqual({ content: 'Edited text', expected_revision: 4 });
+  expect((await screen.findByRole('alert')).textContent).toMatch(/Queue changed on another client/);
+  await waitFor(() => expect(backend.list.mock.calls.length).toBeGreaterThan(1));
+  expect(screen.getByText('Original')).toBeTruthy();
+  setDelivered(['q1']);
+  expect(await handle.editInPlace('q1', 'too late')).toBe('failed');
+  expect(backend.api.mock.calls.filter(([url, init]: [string, RequestInit]) => String(url).endsWith('/q1') && init?.method === 'PATCH')).toHaveLength(1);
 });

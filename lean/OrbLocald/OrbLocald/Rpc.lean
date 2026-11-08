@@ -456,6 +456,191 @@ def InteractiveToolHubState.reconcileRun
       let nextHub := upsertRunTable hub existingTbl
       return (existingTbl, nextHub)
 
+/-- Outbound journal frame buffered on `orb-locald` until Core acknowledges `seq` (`SM-26`). -/
+structure ClientLinkJournalFrame where
+  seq       : UInt64
+  missionId : String
+  payload   : JVal
+  deriving Repr, Inhabited, BEq
+
+/-- Start-result receipt recorded by `client_link_start_result` (`SM-26`). -/
+structure ClientLinkStartReceipt where
+  requestId : String
+  ok        : Bool
+  missionId : Option String := none
+  errorMsg  : Option String := none
+  deriving Repr, Inhabited, BEq
+
+/-- Epoch-scoped capability latch, 256-frame outbound journal ring, and reconnect resync state (`SM-26`). -/
+structure ClientLinkState where
+  connected          : Bool := false
+  endpoint           : String := ""
+  serverBuild        : String := ""
+  unsupportedLatched : Bool := false
+  maxCap             : UInt16 := maxClientLinkOutboundFrames.toUInt16
+  lastAckedSeq       : UInt64 := 0
+  headSeq            : UInt64 := 0
+  unackedFrames      : Array ClientLinkJournalFrame := #[]
+  harnesses          : JVal := .arr #[]
+  startReceipts      : Array ClientLinkStartReceipt := #[]
+  deriving Repr, Inhabited
+
+private def normalizeEndpointKey (raw : String) : String :=
+  OrbBin.PosixExt.stripTrailingSlash raw.trimAscii.toString
+
+/-- Update `(endpoint, server_build)` capability latch via `verifyCapabilityLatch` (`OrbLocald.Spec`). -/
+def ClientLinkState.stepEndpointEpoch
+    (cl : ClientLinkState)
+    (rawEndpoint : String)
+    (observedBuild? : Option String := none)
+    (observedHttpStatus : UInt16 := 0) : ClientLinkState :=
+  let nextEp := normalizeEndpointKey rawEndpoint
+  let cleanBuild? := observedBuild?.map (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty)
+  let sameEp : UInt8 := if !cl.endpoint.isEmpty && cl.endpoint == nextEp then 1 else 0
+  let hasObsB : UInt8 := if cleanBuild?.isSome then 1 else 0
+  let sameB : UInt8 :=
+    match cleanBuild? with
+    | none => 1
+    | some b => if !cl.serverBuild.isEmpty && cl.serverBuild == b then 1 else 0
+  let prevL : UInt8 := if cl.unsupportedLatched then 1 else 0
+  let latchedNext : Bool :=
+    verifyCapabilityLatch prevL sameEp sameB observedHttpStatus hasObsB == 1
+  let nextBuild : String :=
+    if sameEp == 0 then cleanBuild?.getD ""
+    else match cleanBuild? with
+      | some b => b
+      | none => cl.serverBuild
+  let nextConnected : Bool :=
+    if latchedNext then false
+    else if sameEp == 0 then false
+    else cl.connected
+  { cl with
+      endpoint := if nextEp.isEmpty then cl.endpoint else nextEp
+      serverBuild := nextBuild
+      unsupportedLatched := latchedNext
+      connected := nextConnected }
+
+/-- Enqueue one outbound client-link journal frame gated by `verifyJournalRingStep` (`op = 0`).
+    Returns `"client_link_journal_backpressure"` at 256 unacked frames instead of overwriting. -/
+def ClientLinkState.enqueueFrame
+    (cl : ClientLinkState)
+    (missionId : String)
+    (payload : JVal) : Except String (ClientLinkJournalFrame × ClientLinkState) := do
+  if cl.unsupportedLatched then
+    throw "client_link_unsupported_for_epoch"
+  let unackedU16 := UInt16.ofNat (min cl.unackedFrames.size 65535)
+  let targetSeq := if cl.headSeq < 0xFFFFFFFFFFFFFFFF then cl.headSeq + 1 else cl.headSeq
+  if verifyJournalRingStep 0 unackedU16 cl.maxCap cl.lastAckedSeq cl.headSeq targetSeq != 1 then
+    throw "client_link_journal_backpressure"
+  let frame : ClientLinkJournalFrame := {
+    seq := targetSeq
+    missionId := missionId.trimAscii.toString
+    payload := payload
+  }
+  let nextFrames := cl.unackedFrames.push frame
+  return (frame, { cl with headSeq := targetSeq, unackedFrames := nextFrames })
+
+/-- Apply cumulative `ackSeq` gated by `verifyJournalRingStep` (`op = 1`). -/
+def ClientLinkState.ackUpTo
+    (cl : ClientLinkState)
+    (ackSeq : UInt64) : Except String ClientLinkState := do
+  let unackedU16 := UInt16.ofNat (min cl.unackedFrames.size 65535)
+  if verifyJournalRingStep 1 unackedU16 cl.maxCap cl.lastAckedSeq cl.headSeq ackSeq != 1 then
+    throw "client_link_invalid_ack_seq"
+  let remaining := cl.unackedFrames.filter (fun f => f.seq > ackSeq)
+  return { cl with lastAckedSeq := ackSeq, unackedFrames := remaining }
+
+/-- Compute reconnect resync replay window `(replayFromSeq, framesToReplay)` gated by `verifyJournalRingStep` (`op = 2`). -/
+def ClientLinkState.resyncWindow
+    (cl : ClientLinkState)
+    (peerAckSeq : UInt64) : Except String (UInt64 × Array ClientLinkJournalFrame) := do
+  let unackedU16 := UInt16.ofNat (min cl.unackedFrames.size 65535)
+  if verifyJournalRingStep 2 unackedU16 cl.maxCap cl.lastAckedSeq cl.headSeq peerAckSeq != 1 then
+    throw "client_link_invalid_resync_cursor"
+  let floorSeq := if peerAckSeq > cl.lastAckedSeq then peerAckSeq else cl.lastAckedSeq
+  let window := cl.unackedFrames.filter (fun f => f.seq > floorSeq)
+  return (floorSeq, window)
+
+def ClientLinkState.hasPendingForMission (cl : ClientLinkState) (missionId : String) : Bool :=
+  let clean := missionId.trimAscii.toString
+  if clean.isEmpty then !cl.unackedFrames.isEmpty
+  else cl.unackedFrames.any (fun f => f.missionId == clean)
+
+def ClientLinkState.toSummaryJson (cl : ClientLinkState) : JVal :=
+  .obj #[
+    ("active", .bool (cl.connected && !cl.unsupportedLatched)),
+    ("connected", .bool cl.connected),
+    ("endpoint", .str cl.endpoint),
+    ("server_build", .str cl.serverBuild),
+    ("unsupported_latched", .bool cl.unsupportedLatched),
+    ("max_cap", JVal.nat cl.maxCap.toNat),
+    ("last_acked_seq", JVal.uint64 cl.lastAckedSeq),
+    ("head_seq", JVal.uint64 cl.headSeq),
+    ("unacked_count", JVal.nat cl.unackedFrames.size)
+  ]
+
+/-- Parse a typed `409 Conflict` tag (`1..5`) from explicit code or structured payload (`SM-23` / `SM-26`). -/
+def parseConflictTagCode (code : String) : UInt8 :=
+  let c := code.trimAscii.toString.toLower
+  if c == "stopping" || c == "remote_job_still_running" then 1
+  else if c == "non_terminal_run" || c == "already_running" then 2
+  else if c == "already_ended" then 3
+  else if c == "moved" || c == "transferred" then 4
+  else if c == "stale_receipt" || c == "fenced_receipt" then 5
+  else 0
+
+def conflictTagName : UInt8 → String
+  | 1 => "stopping"
+  | 2 => "non_terminal_run"
+  | 3 => "already_ended"
+  | 4 => "moved"
+  | 5 => "stale_receipt"
+  | _ => "unclassified"
+
+/-- Classify an HTTP status + typed conflict code via `verifyLocalConflictDisposition` (`OrbLocald.Spec`). -/
+def classifyLocalOriginConflict (httpStatus : UInt16) (code : String) : Option (UInt8 × Bool) :=
+  let tag := parseConflictTagCode code
+  if verifyLocalConflictDisposition httpStatus tag 1 == 1 then
+    some (tag, true)
+  else if verifyLocalConflictDisposition httpStatus tag 0 == 1 then
+    some (tag, false)
+  else
+    none
+
+/-- Durable in-memory local-origin mission row managed by `local_origin_*` (`SM-26`). -/
+structure LocalOriginEntry where
+  id               : String
+  endpoint         : String
+  title            : String
+  status           : String := "active"
+  backend          : String := "opencode"
+  workingDirectory : String := "."
+  deliveredPrompt  : String := ""
+  localSyncPending : Bool := true
+  localRunActive   : Bool := true
+  observedAt       : UInt64 := 0
+  lastConflictCode : Option String := none
+  retryableConflict : Bool := false
+  deriving Repr, Inhabited
+
+def LocalOriginEntry.toMissionJson (e : LocalOriginEntry) : JVal :=
+  let base : Array (String × JVal) := #[
+    ("id", .str e.id),
+    ("title", .str e.title),
+    ("status", .str e.status),
+    ("backend", .str e.backend),
+    ("working_directory", .str e.workingDirectory),
+    ("delivered_prompt", .str e.deliveredPrompt),
+    ("local_sync_pending", .bool e.localSyncPending),
+    ("local_run_active", .bool e.localRunActive),
+    ("total_cost_cents", JVal.nat 0)
+  ]
+  let withConflict := match e.lastConflictCode with
+    | some code =>
+      (base.push ("conflict_code", .str code)).push ("conflict_retryable", .bool e.retryableConflict)
+    | none => base
+  .obj withConflict
+
 structure LocaldState where
   launchToken         : String
   rpcPort             : UInt16 := 19479
@@ -466,7 +651,8 @@ structure LocaldState where
   bindingsRevision    : Nat := 0
   bindingsEntries     : Array (String × JVal) := #[]
   toolHub             : InteractiveToolHubState := {}
-  clientLinkConnected : Bool := false
+  clientLink          : ClientLinkState := {}
+  localOrigins        : Array LocalOriginEntry := #[]
   approvalGraceSecs   : Nat := 300
   approvalGraceUntil  : UInt64 := 0
   approvalKeyPath     : String := ""
@@ -1340,11 +1526,115 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         | .ok jv => return .ok (.bool ((jv.fieldStr? "authenticated") == some "true"))
         | .error _ => return .ok (.bool false)
   | "client_link_active" =>
-    return .ok (.bool st.clientLinkConnected)
+    if (args.fieldBool? "inspect").getD false then
+      return .ok st.clientLink.toSummaryJson
+    return .ok (.bool (st.clientLink.connected && !st.clientLink.unsupportedLatched))
   | "client_link_connect" =>
-    stRef.modify fun s => { s with clientLinkConnected := true }
-    return .ok (.bool true)
-  | "client_link_flush" | "client_link_set_capabilities" | "client_link_start_result" =>
+    let connObj := (args.field? "connection").getD args
+    let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD st.bridge.configuredTarget
+    let build? := (args.fieldStr? "server_build").orElse (fun _ =>
+      (args.fieldStr? "serverBuild").orElse (fun _ => connObj.fieldStr? "server_build"))
+    let obsStatusNat := ((args.fieldNat? "observed_http_status").orElse (fun _ => args.fieldNat? "httpStatus")).getD 0
+    let obsStatus := UInt16.ofNat (min obsStatusNat 65535)
+    let peerAck? := (args.fieldUInt64? "peer_ack_seq").orElse (fun _ => args.fieldUInt64? "peerAckSeq")
+    let res ← stRef.modifyGet fun s =>
+      let stepped := s.clientLink.stepEndpointEpoch epRaw build? obsStatus
+      if stepped.unsupportedLatched then
+        (.ok (.bool false), { s with clientLink := stepped })
+      else
+        let connectedCl := { stepped with connected := true }
+        match peerAck? with
+        | none =>
+          (.ok (.bool true), { s with clientLink := connectedCl })
+        | some peerAck =>
+          match connectedCl.resyncWindow peerAck with
+          | .error e => (.error e, { s with clientLink := connectedCl })
+          | .ok (floorSeq, replayFrames) =>
+            let ackedCl := match connectedCl.ackUpTo floorSeq with
+              | .ok c => c
+              | .error _ => connectedCl
+            let summary := (ackedCl.toSummaryJson.setField "replay_from_seq" (JVal.uint64 floorSeq)).setField
+              "replay_frames" (.arr (replayFrames.map fun f => .obj #[
+                ("seq", JVal.uint64 f.seq),
+                ("mission", .str f.missionId),
+                ("payload", f.payload)
+              ]))
+            if (args.fieldBool? "inspect").getD false then
+              (.ok summary, { s with clientLink := ackedCl })
+            else
+              (.ok (.bool true), { s with clientLink := ackedCl })
+    return res
+  | "client_link_flush" =>
+    let action? := (args.fieldStr? "action").map (·.trimAscii.toString.toLower)
+    let missionId := ((args.fieldStr? "mission").orElse (fun _ => args.fieldStr? "id")).getD ""
+    match action? with
+    | some "enqueue" =>
+      let payload := (args.field? "payload").getD (.obj #[])
+      let maxCap? := args.fieldNat? "max_cap"
+      let res ← stRef.modifyGet fun s =>
+        let cl0 := match maxCap? with
+          | some cap =>
+            let c16 := UInt16.ofNat (min cap 65535)
+            if 1 ≤ c16 && c16 ≤ 256 then { s.clientLink with maxCap := c16 } else s.clientLink
+          | none => s.clientLink
+        match cl0.enqueueFrame missionId payload with
+        | .error e => (.error e, { s with clientLink := cl0 })
+        | .ok (frame, clNext) =>
+          (.ok (.obj #[
+            ("seq", JVal.uint64 frame.seq),
+            ("unacked_count", JVal.nat clNext.unackedFrames.size),
+            ("last_acked_seq", JVal.uint64 clNext.lastAckedSeq),
+            ("head_seq", JVal.uint64 clNext.headSeq)
+          ]), { s with clientLink := clNext })
+      return res
+    | some "ack" =>
+      let ackSeq := ((args.fieldUInt64? "ack_seq").orElse (fun _ => args.fieldUInt64? "ackSeq")).getD 0
+      let res ← stRef.modifyGet fun s =>
+        match s.clientLink.ackUpTo ackSeq with
+        | .error e => (.error e, s)
+        | .ok clNext => (.ok clNext.toSummaryJson, { s with clientLink := clNext })
+      return res
+    | some "resync" =>
+      let peerAck := ((args.fieldUInt64? "peer_ack_seq").orElse (fun _ => args.fieldUInt64? "peerAckSeq")).getD st.clientLink.lastAckedSeq
+      match st.clientLink.resyncWindow peerAck with
+      | .error e => return .error e
+      | .ok (floorSeq, replayFrames) =>
+        return .ok (.obj #[
+          ("replay_from_seq", JVal.uint64 floorSeq),
+          ("head_seq", JVal.uint64 st.clientLink.headSeq),
+          ("replay_count", JVal.nat replayFrames.size),
+          ("frames", .arr (replayFrames.map fun f => .obj #[
+            ("seq", JVal.uint64 f.seq),
+            ("mission", .str f.missionId),
+            ("payload", f.payload)
+          ]))
+        ])
+    | _ =>
+      let activeOk := st.clientLink.connected && !st.clientLink.unsupportedLatched
+      let drained := activeOk && !st.clientLink.hasPendingForMission missionId
+      return .ok (.bool drained)
+  | "client_link_set_capabilities" =>
+    let connObj := (args.field? "connection").getD args
+    let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD st.clientLink.endpoint
+    let build? := (args.fieldStr? "server_build").orElse (fun _ => args.fieldStr? "serverBuild")
+    let obsStatusNat := ((args.fieldNat? "observed_http_status").orElse (fun _ => args.fieldNat? "httpStatus")).getD 0
+    let obsStatus := UInt16.ofNat (min obsStatusNat 65535)
+    let harnesses := (args.field? "harnesses").getD st.clientLink.harnesses
+    stRef.modify fun s =>
+      let stepped := s.clientLink.stepEndpointEpoch epRaw build? obsStatus
+      { s with clientLink := { stepped with harnesses := harnesses } }
+    return .ok .null
+  | "client_link_start_result" =>
+    let reqId := ((args.fieldStr? "requestId").orElse (fun _ => args.fieldStr? "request_id")).getD ""
+    let okFlag := (args.fieldBool? "ok").getD false
+    let mid? := ((args.fieldStr? "missionId").orElse (fun _ => args.fieldStr? "mission_id")).filter (fun m => !m.isEmpty)
+    let err? := (args.fieldStr? "error").filter (fun e => !e.isEmpty)
+    if !reqId.trimAscii.toString.isEmpty then
+      stRef.modify fun s =>
+        let cleanReq := reqId.trimAscii.toString
+        let kept := s.clientLink.startReceipts.filter (fun r => r.requestId != cleanReq)
+        let nextRecs := kept.push { requestId := cleanReq, ok := okFlag, missionId := mid?, errorMsg := err? }
+        { s with clientLink := { s.clientLink with startReceipts := nextRecs } }
     return .ok .null
   | "local_bindings_refresh" =>
     return .ok st.bindingsSnapshotJson
@@ -1471,7 +1761,13 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     return .ok .null
   | "software_inventory" =>
     return .ok (.arr #[])
-  | "local_origin_list" | "local_agents_scan" | "local_antigravity_models"
+  | "local_origin_list" =>
+    let connObj := (args.field? "connection").getD args
+    let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD st.bridge.configuredTarget
+    let ep := normalizeEndpointKey epRaw
+    let filtered := st.localOrigins.filter (fun row => ep.isEmpty || row.endpoint.isEmpty || row.endpoint == ep)
+    return .ok (.arr (filtered.map LocalOriginEntry.toMissionJson))
+  | "local_agents_scan" | "local_antigravity_models"
   | "local_claude_models" | "project_context_workers"
   | "local_skill_source_files" =>
     return .ok (.arr #[])
@@ -1681,8 +1977,80 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     return res
   | "local_wakeups_sync" =>
     return .ok (.obj #[("pending", .arr #[]), ("changed", .bool false), ("cancelled", .arr #[])])
-  | "local_wakeups_cancel" | "local_wakeups_discard"
-  | "local_origin_confirm" | "local_origin_disconnect" =>
+  | "local_wakeups_cancel" | "local_wakeups_discard" =>
+    return .ok .null
+  | "local_origin_confirm" =>
+    let connObj := (args.field? "connection").getD args
+    let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD st.bridge.configuredTarget
+    let ep := normalizeEndpointKey epRaw
+    if let some statusNat := (args.fieldNat? "http_status").orElse (fun _ => args.fieldNat? "httpStatus") then
+      let code := ((args.fieldStr? "conflict_code").orElse (fun _ => args.fieldStr? "conflictCode")).getD ""
+      let statusU16 := UInt16.ofNat (min statusNat 65535)
+      let targetId := ((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "mission_id")).getD ""
+      match classifyLocalOriginConflict statusU16 code with
+      | none => return .error "unclassified_local_origin_conflict"
+      | some (tag, retryable) =>
+        let tagName := conflictTagName tag
+        if !targetId.trimAscii.toString.isEmpty then
+          stRef.modify fun s =>
+            let cleanId := targetId.trimAscii.toString
+            let updated := s.localOrigins.map fun row =>
+              if row.id == cleanId && (ep.isEmpty || row.endpoint.isEmpty || row.endpoint == ep) then
+                { row with
+                    localSyncPending := retryable
+                    localRunActive := if retryable then row.localRunActive else false
+                    status := if retryable then row.status else (if tag == 3 then "completed" else "failed")
+                    lastConflictCode := some tagName
+                    retryableConflict := retryable }
+              else row
+            { s with localOrigins := updated }
+        return .ok (.obj #[
+          ("conflict_tag", JVal.nat tag.toNat),
+          ("conflict_code", .str tagName),
+          ("retry", .bool retryable)
+        ])
+    let confs := (args.fieldArr? "confirmations").getD #[]
+    stRef.modify fun s =>
+      let nextRows := confs.foldl (fun acc c =>
+        let cid := (c.fieldStr? "id").getD ""
+        if cid.isEmpty then acc
+        else
+          let obsAt := (c.fieldUInt64? "observed_at").getD 0
+          let isDel := (c.fieldBool? "deleted").getD false
+          if isDel then
+            acc.filter (fun row => !(row.id == cid && (ep.isEmpty || row.endpoint.isEmpty || row.endpoint == ep) && !row.localSyncPending))
+          else
+            acc.map fun row =>
+              if row.id != cid || (!ep.isEmpty && !row.endpoint.isEmpty && row.endpoint != ep) then row
+              else if row.localSyncPending && !(c.fieldBool? "synced").getD false then row
+              else if obsAt < row.observedAt then row
+              else
+                let nextSt := (c.fieldStr? "status").getD row.status
+                let nextTitle := match c.fieldStr? "title" with | some t => t | none => row.title
+                let clearSync := (c.fieldBool? "synced").getD false
+                let clearRun := (c.fieldBool? "run_active").getD (if clearSync then false else row.localRunActive)
+                { row with
+                    status := nextSt
+                    title := nextTitle
+                    localSyncPending := if clearSync then false else row.localSyncPending
+                    localRunActive := clearRun
+                    observedAt := obsAt }) s.localOrigins
+      { s with localOrigins := nextRows }
+    return .ok .null
+  | "local_origin_disconnect" =>
+    let connObj := (args.field? "connection").getD args
+    let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD ""
+    let ep := normalizeEndpointKey epRaw
+    stRef.modify fun s =>
+      let nextCl :=
+        if ep.isEmpty || s.clientLink.endpoint == ep then
+          { s.clientLink with connected := false }
+        else
+          s.clientLink
+      let nextRows :=
+        if ep.isEmpty then #[]
+        else s.localOrigins.filter (fun row => row.endpoint != ep)
+      { s with clientLink := nextCl, localOrigins := nextRows }
     return .ok .null
   | "local_agents_stop" =>
     let runId := (((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).orElse
@@ -1773,15 +2141,25 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       let rawId ← randomUuidV4
       let mid := (OrbBin.PosixExt.parseUuidCanonical? rawId).getD rawId
       let title := (((args.field? "draft").bind (·.fieldStr? "title")).orElse (fun _ => reqObj.fieldStr? "title")).getD "Local Mission"
-      return .ok (.obj #[
-        ("id", .str mid),
-        ("title", .str title),
-        ("status", .str "active"),
-        ("backend", .str (if harness.isEmpty then "opencode" else harness)),
-        ("working_directory", .str cwd),
-        ("delivered_prompt", .str deliveredPrompt),
-        ("total_cost_cents", JVal.nat 0)
-      ])
+      let connObj := (args.field? "connection").getD args
+      let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD st.bridge.configuredTarget
+      let ep := normalizeEndpointKey epRaw
+      let backendName := if harness.isEmpty then "opencode" else harness
+      let entry : LocalOriginEntry := {
+        id := mid
+        endpoint := ep
+        title := title
+        status := "active"
+        backend := backendName
+        workingDirectory := cwd
+        deliveredPrompt := deliveredPrompt
+        localSyncPending := true
+        localRunActive := true
+      }
+      stRef.modify fun s =>
+        let kept := s.localOrigins.filter (fun r => r.id != mid)
+        { s with localOrigins := kept.push entry }
+      return .ok entry.toMissionJson
     return .ok (.obj #[("ok", .bool true), ("command", .str cmd), ("delivered_prompt", .str deliveredPrompt)])
   | _ =>
     if supportedDesktopCommands.contains cmd then

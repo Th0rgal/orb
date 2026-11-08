@@ -16,6 +16,7 @@ import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from 's
 import { connectionVersion, isTransientNetworkError, sendMissionMessage, type QueuedMessage } from './api';
 import { consumeSideQuestionOpenHint, peekSavedSideQuestion, readSideQuestion, peekSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion, type SavedSideQuestion } from './sideQuestionStorage';
 import { RemoteQueue, type PendingRemoteQueueItem, type RemoteQueueHandle } from './RemoteQueue';
+import { stepFollowupEnqueueOptimistic, stepFollowupTurnReconcile } from './followupQueueState';
 import { QueuedMessages } from './QueuedMessages';
 import { createQueuedEdit } from './queuedEdit';
 import { queuedLocalMessages, sendQueuedNow } from './localMessageQueue';
@@ -159,7 +160,17 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   let unmigratedLegacyQueue:QueuedSideQuestion[]=[];
   const markDelivered=(id?:string)=>{
    if(!id)return;
-   setDeliveredQueuedIds(prev=>prev.includes(id)?prev:[...prev,id]);
+   setDeliveredQueuedIds(prev=>{
+    if(prev.includes(id))return prev;
+    const step=stepFollowupTurnReconcile({
+     clientMsgId:id,
+     deliveredMsgId:id,
+     postedAfterSeq:0,
+     turnSeq:1,
+     contentMatched:true,
+    });
+    return step.retiredNow?[...prev,id]:prev;
+   });
    setPendingQueued(prev=>prev.filter(item=>item.id!==id));
    if(handoffId()===id)setHandoffId(undefined);
   };
@@ -500,7 +511,18 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   }
   const queueFn=btwMod.queueBtwFollowUp;
   if(!replace){
-   setPendingQueued(rows=>[...rows,{id:clientMessageId,content:text,attached:attachments.length>0||undefined}]);
+   setPendingQueued(rows=>{
+    const step=stepFollowupEnqueueOptimistic({
+     serverRev:1,
+     clientMsgId:clientMessageId,
+     trackedMsgId:rows.find(r=>r.id===clientMessageId)?.id,
+     postedAfterSeq:history().length,
+     alreadyDelivered:deliveredQueuedIds().includes(clientMessageId),
+    });
+    return step.admitted&&step.optimisticLiveNext
+     ? [...rows,{id:clientMessageId,content:text,attached:attachments.length>0||undefined}]
+     : rows;
+   });
   }
   setOpen(true);side?.show();setDraft('');
   revealSentQuestion();
@@ -593,10 +615,21 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     pendingBaselineHistory=history();
     currentQuestion=event.question;
     if(event.messageId){
-     setDeliveredQueuedIds(prev=>prev.includes(event.messageId!)?prev:[...prev,event.messageId!]);
-     setPendingQueued(prev=>prev.filter(item=>item.id!==event.messageId));
-     if(handoffId()===event.messageId)setHandoffId(undefined);
-     setTurnId(event.messageId as ReturnType<typeof crypto.randomUUID>);
+     const deliveredId=event.messageId;
+     setDeliveredQueuedIds(prev=>{
+      if(prev.includes(deliveredId))return prev;
+      const step=stepFollowupTurnReconcile({
+       clientMsgId:deliveredId,
+       deliveredMsgId:deliveredId,
+       postedAfterSeq:0,
+       turnSeq:1,
+       contentMatched:true,
+      });
+      return step.retiredNow?[...prev,deliveredId]:prev;
+     });
+     setPendingQueued(prev=>prev.filter(item=>item.id!==deliveredId));
+     if(handoffId()===deliveredId)setHandoffId(undefined);
+     setTurnId(deliveredId as ReturnType<typeof crypto.randomUUID>);
     }else setTurnId(crypto.randomUUID());
     setStartedAt(event.startedAt??new Date().toISOString());
     setQuestion(event.question);setAnswer('');setNarration([]);setError('');setNotSent(false);setPendingAttachments([]);

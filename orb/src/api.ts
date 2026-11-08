@@ -10,6 +10,7 @@ import { createSignal } from "solid-js";
 import { getProjectCronFromJob, hermesPatch, normalizeControllerView, type HermesControllerView, type HermesJob } from "./cronSchema";
 import { applyProjectRoster } from "./projectAppearance";
 import { note, requestDone } from "./diagnostics";
+import { noteObservedMissionQueueRevision, peekObservedMissionQueueRevision } from "./followupQueueState";
 import {
   recordTransportFailure,
   recordTransportRttSample,
@@ -427,6 +428,8 @@ export function clearConnection() {
 export interface ServerHealthInfo {
   status?: string;
   version?: string;
+  server_build?: string;
+  build_id?: string;
   dev_mode?: boolean;
   auth_required?: boolean;
   auth_mode?: "disabled" | "single_tenant" | "multi_user" | string;
@@ -434,14 +437,68 @@ export interface ServerHealthInfo {
   github_oauth_client_state?: boolean;
 }
 
+const serverBuildByEndpoint = new Map<string, string>();
+const [serverBuildVersion, bumpServerBuildVersion] = createSignal(0);
+export { serverBuildVersion };
+
+function normalizeEndpointKey(url = getApiUrl()): string {
+  return url.trim().replace(/\/+$/, "");
+}
+
+/** Deterministic 64-bit FNV-1a hash of an arbitrary string for WASM kernel `serverBuild` / IDs (`SM-24`, `SM-26`). */
+export function hashStringU64(value: string): bigint {
+  let hash = 0xcbf29ce484222325n;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= BigInt(value.charCodeAt(i) & 0xffff);
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash === 0n ? 1n : hash;
+}
+
+/** Record an observed `server_build` / `version` token for an endpoint (`SM-26`). Returns `true` when it changed from a previously known build. */
+export function recordServerBuild(build: string | null | undefined, endpoint = getApiUrl()): boolean {
+  const cleanBuild = build?.trim();
+  const key = normalizeEndpointKey(endpoint);
+  if (!cleanBuild || !key) return false;
+  const prev = serverBuildByEndpoint.get(key);
+  if (prev === cleanBuild) return false;
+  serverBuildByEndpoint.set(key, cleanBuild);
+  bumpServerBuildVersion((v) => v + 1);
+  if (prev !== undefined && typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("orb:server-build-changed", { detail: { endpoint: key, previousBuild: prev, serverBuild: cleanBuild } }));
+  }
+  return prev !== undefined;
+}
+
+export function getServerBuild(endpoint = getApiUrl()): string | null {
+  return serverBuildByEndpoint.get(normalizeEndpointKey(endpoint)) ?? null;
+}
+
+export function getServerBuildHash(endpoint = getApiUrl()): bigint {
+  const b = getServerBuild(endpoint);
+  return b ? hashStringU64(b) : 0n;
+}
+
+/** Scoped epoch key `(endpoint, server_build, connectionVersion)` for capability latches (`SM-26`). */
+export function currentCapabilityEpochKey(endpoint = getApiUrl()): string {
+  serverBuildVersion();
+  const key = normalizeEndpointKey(endpoint);
+  const build = serverBuildByEndpoint.get(key) ?? "";
+  return `${connectionVersion()}|${key}|${build}`;
+}
+
 export async function probeHealth(baseUrl?: string, signal?: AbortSignal): Promise<ServerHealthInfo> {
+  const target = baseUrl ?? getApiUrl();
   const res = await transportFetch(
     "/api/health",
     { method: "GET", signal: signal ?? AbortSignal.timeout(8_000) },
     baseUrl,
   );
   if (!res.ok) throw new Error(`Health check failed (${res.status})`);
-  return (await res.json()) as ServerHealthInfo;
+  const headerBuild = res.headers?.get?.("x-orb-server-build") ?? res.headers?.get?.("x-orb-version");
+  const info = (await res.json()) as ServerHealthInfo;
+  recordServerBuild(info.server_build ?? info.build_id ?? headerBuild ?? info.version, target);
+  return info;
 }
 
 export async function login(password: string, username?: string): Promise<void> {
@@ -461,8 +518,29 @@ export async function login(password: string, username?: string): Promise<void> 
   setConnection(getApiUrl(), data.token);
 }
 
+import { classifyConflictError, parseConflictCodeFromDetail } from "./conflictClassification";
+export { classifyConflictError };
+
 export class ApiError extends Error {
-  constructor(public status: number, public detail: string) { super(`${status} ${detail}`.trim()); }
+  public readonly conflictCode?: ConflictDispositionTag;
+  constructor(public status: number, public detail: string) {
+    super(`${status} ${detail}`.trim());
+    this.conflictCode = status === 409 ? parseConflictCodeFromDetail(detail) : undefined;
+  }
+}
+
+/** Typed `409 Conflict` classifications aligned with `OrbLocald.Spec.verifyLocalConflictDisposition` (`SM-23`, `SM-26`). */
+export type ConflictDispositionTag =
+  | "stopping"
+  | "non_terminal_run"
+  | "already_ended"
+  | "moved"
+  | "stale_receipt";
+
+export interface ConflictClassification {
+  tag: ConflictDispositionTag;
+  /** `true` when transient (`stopping` / `non_terminal_run`); `false` when terminal (`already_ended` / `moved` / `stale_receipt`). */
+  retryable: boolean;
 }
 
 export class InvalidApiResponseError extends Error {
@@ -627,6 +705,10 @@ async function sendRequestOnce<T>(
     }
     if (connectionVersion() === version) clearConnection();
     throw new Error("401 Unauthorized — reconnect in Settings → Backend");
+  }
+  const observedBuildHeader = res.headers?.get?.("x-orb-server-build") ?? res.headers?.get?.("x-orb-version");
+  if (observedBuildHeader && connectionVersion() === version) {
+    recordServerBuild(observedBuildHeader, explicitBase ?? getApiUrl());
   }
   if (!res.ok) {
     const text = (await res.text().catch(() => "")).trim();
@@ -1811,23 +1893,49 @@ export interface QueuedMessage {
   /** Durable run-start proof, independent of mission busy/terminal status. */
   inflight?: boolean;
   mission_id?: string | null;
+  /** Monotonic server queue revision when projected by Core (`SM-24`). */
+  revision?: number | null;
 }
+
+export function getObservedQueueRevision(missionId: string): bigint | undefined {
+  const rev = peekObservedMissionQueueRevision(`${connectionVersion()}:${missionId}`);
+  return rev !== undefined ? BigInt(rev) : undefined;
+}
+
 /** This endpoint reads the authenticated user's durable control queue. */
 export async function listQueuedMessages(missionId: string): Promise<QueuedMessage[]> {
   // Native launch precedes Core registration. Its follow-ups live in the local
   // durable queue until synchronization; querying Core here races that POST.
   const local = (await import("./localOrigins").then(m => m.localOrigins(missionId))).find(row => row.id === missionId);
   if (local?.local_sync_pending) return [];
-  const rows = await api<QueuedMessage[]>(`/api/control/queue?mission_id=${encodeURIComponent(missionId)}`);
+  const raw = await api<QueuedMessage[] | { items?: QueuedMessage[]; revision?: number }>(`/api/control/queue?mission_id=${encodeURIComponent(missionId)}`);
+  const rows = Array.isArray(raw) ? raw : raw?.items;
+  const envelopeRev = !Array.isArray(raw) && typeof raw?.revision === "number" && Number.isFinite(raw.revision) && raw.revision >= 0 ? BigInt(Math.trunc(raw.revision)) : undefined;
   if (!Array.isArray(rows) || rows.some(row => !row || typeof row.id !== "string" || typeof row.content !== "string")) throw new Error("Invalid queue response");
-  return rows.filter(row => row.mission_id === missionId);
+  const filtered = rows.filter(row => row.mission_id === missionId);
+  let maxRowRev = envelopeRev;
+  for (const row of filtered) {
+    if (typeof row.revision === "number" && Number.isFinite(row.revision) && row.revision >= 0) {
+      const r = BigInt(Math.trunc(row.revision));
+      if (maxRowRev === undefined || r > maxRowRev) maxRowRev = r;
+    }
+  }
+  if (maxRowRev !== undefined && maxRowRev > 0n) {
+    noteObservedMissionQueueRevision(`${connectionVersion()}:${missionId}`, maxRowRev);
+  }
+  return filtered;
 }
 
-export async function editQueuedMessage(id: string, content: string): Promise<void> {
+export async function editQueuedMessage(id: string, content: string, expectedRevision?: number | bigint): Promise<void> {
+  const payload: { content: string; expected_revision?: number } = { content };
+  if (expectedRevision !== undefined) {
+    const revNum = typeof expectedRevision === "bigint" ? Number(expectedRevision) : Math.trunc(expectedRevision);
+    if (Number.isSafeInteger(revNum) && revNum >= 0) payload.expected_revision = revNum;
+  }
   await api(`/api/control/queue/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify(payload),
   });
 }
 

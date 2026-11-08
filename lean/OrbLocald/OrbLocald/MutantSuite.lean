@@ -1,7 +1,7 @@
 import OrbLocald.Spec
 
 /-
-  OrbLocald.MutantSuite — 7-mutant kill & agreement witnesses covering all 5 gates in OrbLocald.Spec (`0 sorryAx`).
+  OrbLocald.MutantSuite — 13-mutant kill & agreement witnesses covering all 8 gates in OrbLocald.Spec (`0 sorryAx`).
 -/
 
 namespace OrbLocald.MutantSuite
@@ -109,6 +109,99 @@ theorem kill_mutantToolSlotNativeBypass :
       mutantToolSlotNativeBypass 64 64 2 2 1 0 1 0 1 ∧
     verifyInteractiveToolSlotAdmit 0 64 2 2 1 1 0 0 0 =
       mutantToolSlotNativeBypass 0 64 2 2 1 1 0 0 0 := by
+  decide
+
+/-- Mutant 8: process-lifetime capability latch persists across `server_build` changes (`sameServerBuild == 0`). -/
+def mutantCapLatchProcessLifetime
+    (prevLatched sameEndpoint sameServerBuild : UInt8)
+    (observedHttpStatus : UInt16)
+    (hasObservedBuild : UInt8) : UInt8 :=
+  if prevLatched ≤ 1 && sameEndpoint ≤ 1 && sameServerBuild ≤ 1 && hasObservedBuild ≤ 1 &&
+     sameEndpoint == 1 &&
+     (prevLatched == 1 || observedHttpStatus == 404 || observedHttpStatus == 501) then 1 else 0
+
+theorem kill_mutantCapLatchProcessLifetime :
+    verifyCapabilityLatch 1 1 0 200 1 ≠ mutantCapLatchProcessLifetime 1 1 0 200 1 ∧
+    verifyCapabilityLatch 1 1 1 200 1 = mutantCapLatchProcessLifetime 1 1 1 200 1 := by
+  decide
+
+/-- Mutant 9: transient `502`/`503` gateway error permanently latches client-link capability as unsupported. -/
+def mutantCapLatchTransient503
+    (prevLatched sameEndpoint sameServerBuild : UInt8)
+    (observedHttpStatus : UInt16)
+    (hasObservedBuild : UInt8) : UInt8 :=
+  if prevLatched ≤ 1 && sameEndpoint ≤ 1 && sameServerBuild ≤ 1 && hasObservedBuild ≤ 1 &&
+     sameEndpoint == 1 &&
+     (hasObservedBuild == 0 || sameServerBuild == 1) &&
+     (prevLatched == 1 || observedHttpStatus ≥ 404) then 1 else 0
+
+theorem kill_mutantCapLatchTransient503 :
+    verifyCapabilityLatch 0 1 1 503 1 ≠ mutantCapLatchTransient503 0 1 1 503 1 ∧
+    verifyCapabilityLatch 0 1 1 404 1 = mutantCapLatchTransient503 0 1 1 404 1 := by
+  decide
+
+/-- Mutant 10: silently overwrites the 256-frame outbound journal ring when `unackedFrames == maxCap`. -/
+def mutantJournalRingSilentEvict
+    (op : UInt8)
+    (unackedFrames maxCap : UInt16)
+    (lastAckedSeq headSeq targetSeq : UInt64) : UInt8 :=
+  if 1 ≤ maxCap && maxCap ≤ 256 &&
+     unackedFrames ≤ maxCap &&
+     lastAckedSeq ≤ headSeq &&
+     headSeq - lastAckedSeq == unackedFrames.toUInt64 &&
+     ((op == 0 && unackedFrames ≤ maxCap && headSeq < 0xFFFFFFFFFFFFFFFF && targetSeq == headSeq + 1) ||
+      (op == 1 && lastAckedSeq ≤ targetSeq && targetSeq ≤ headSeq) ||
+      (op == 2 && targetSeq ≤ headSeq)) then 1 else 0
+
+theorem kill_mutantJournalRingSilentEvict :
+    verifyJournalRingStep 0 256 256 10 266 267 ≠
+      mutantJournalRingSilentEvict 0 256 256 10 266 267 ∧
+    verifyJournalRingStep 0 255 256 10 265 266 =
+      mutantJournalRingSilentEvict 0 255 256 10 265 266 := by
+  decide
+
+/-- Mutant 11: accepts an out-of-range cumulative ACK beyond `headSeq` (corrupting reconnect resync). -/
+def mutantJournalRingAckBeyondHead
+    (op : UInt8)
+    (unackedFrames maxCap : UInt16)
+    (lastAckedSeq headSeq targetSeq : UInt64) : UInt8 :=
+  if 1 ≤ maxCap && maxCap ≤ 256 &&
+     unackedFrames ≤ maxCap &&
+     lastAckedSeq ≤ headSeq &&
+     headSeq - lastAckedSeq == unackedFrames.toUInt64 &&
+     ((op == 0 && unackedFrames < maxCap && headSeq < 0xFFFFFFFFFFFFFFFF && targetSeq == headSeq + 1) ||
+      (op == 1 && lastAckedSeq ≤ targetSeq) ||
+      (op == 2 && targetSeq ≤ headSeq)) then 1 else 0
+
+theorem kill_mutantJournalRingAckBeyondHead :
+    verifyJournalRingStep 1 4 256 10 14 15 ≠
+      mutantJournalRingAckBeyondHead 1 4 256 10 14 15 ∧
+    verifyJournalRingStep 1 4 256 10 14 14 =
+      mutantJournalRingAckBeyondHead 1 4 256 10 14 14 := by
+  decide
+
+/-- Mutant 12: coarse `"409"` status matching retries terminal `stale_receipt` (`conflictTag == 5`). -/
+def mutantConflictCoarse409Retry
+    (httpStatus : UInt16) (conflictTag wantRetry : UInt8) : UInt8 :=
+  if httpStatus == 409 && wantRetry ≤ 1 &&
+     ((wantRetry == 1 && conflictTag ≥ 1 && conflictTag ≤ 5) ||
+      (wantRetry == 0 && (conflictTag == 3 || conflictTag == 4 || conflictTag == 5))) then 1 else 0
+
+theorem kill_mutantConflictCoarse409Retry :
+    verifyLocalConflictDisposition 409 5 1 ≠ mutantConflictCoarse409Retry 409 5 1 ∧
+    verifyLocalConflictDisposition 409 2 1 = mutantConflictCoarse409Retry 409 2 1 := by
+  decide
+
+/-- Mutant 13: retires transient `stopping` (`conflictTag == 1`) as terminal instead of retrying. -/
+def mutantConflictRetireStopping
+    (httpStatus : UInt16) (conflictTag wantRetry : UInt8) : UInt8 :=
+  if httpStatus == 409 && wantRetry ≤ 1 &&
+     ((wantRetry == 1 && conflictTag == 2) ||
+      (wantRetry == 0 && (conflictTag == 1 || conflictTag == 3 || conflictTag == 4 || conflictTag == 5))) then 1 else 0
+
+theorem kill_mutantConflictRetireStopping :
+    verifyLocalConflictDisposition 409 1 0 ≠ mutantConflictRetireStopping 409 1 0 ∧
+    verifyLocalConflictDisposition 409 3 0 = mutantConflictRetireStopping 409 3 0 := by
   decide
 
 end OrbLocald.MutantSuite

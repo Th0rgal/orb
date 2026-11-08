@@ -4,6 +4,7 @@
  * response can never deliver it twice.
  */
 import type { Mission, MissionAttachment, MessageReceipt } from "../api";
+import { classifyConflictError } from "../conflictClassification";
 import { messagePresentation } from "../messagePresentation";
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -24,8 +25,13 @@ export async function retry<T>(attempt: (index: number) => Promise<T>, o: { atte
   }
 }
 
-/** Core answers this while the previous turn is still stopping. */
-export const stillStopping = (error: unknown) => /still has a remote job|stopping|409/i.test(error instanceof Error ? error.message : String(error));
+/** Core answers this while the previous turn is still stopping (`stopping` / `non_terminal_run`); terminal `409`s (`already_ended` / `moved` / `stale_receipt`) fail fast. */
+export const stillStopping = (error: unknown) => {
+  const classified = classifyConflictError(error);
+  if (classified) return classified.retryable;
+  const msg = error instanceof Error ? error.message : String(error);
+  return /still has a remote job|stopping/i.test(msg);
+};
 
 export type QueuedRow = { id: string; content: string; attached?: boolean };
 type Send = (mission: string, text: string, attachments: MissionAttachment[], id: string) => Promise<MessageReceipt>;
