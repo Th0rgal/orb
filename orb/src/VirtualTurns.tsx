@@ -51,6 +51,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
   }
   return rows;
  }));
+ const rowByKey=createMemo(()=>{const m=new Map<string,{item:T;top:number;height:number}>();for(const r of layout())m.set(r.item.key,r);return m;});
  const total=()=>{const rows=layout(),last=rows.at(-1);return last?last.top+last.height:0;};
  const update=()=>{
   const rect=root.getBoundingClientRect(),box=scroller?.getBoundingClientRect();
@@ -116,6 +117,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
  type Segment={key:string;item?:T;height:number};
  const stable=new Map<string,Segment>();
  const [segments,setSegments]=createSignal<Segment[]>([]);
+ const spacerHeights=createMemo(()=>{const m=new Map<string,number>();for(const s of segments())if(!s.item)m.set(s.key,s.height);return m;});
  createEffect(()=>timed("turns segments",()=>{
   const rows=layout(),v=viewport(),keep=pinned(),out:Segment[]=[];let gap=0,gapStart='';
   const spacer=()=>{if(!gap)return;const key=`gap:${gapStart}`;let row=stable.get(key);if(!row){row={key,height:gap};stable.set(key,row);}row.height=gap;out.push(row);gap=0;};
@@ -140,7 +142,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
    resizes.observe(element);
    onCleanup(()=>{resizes.unobserve(element);nodes.delete(key);measureQueue.delete(key);});
   });
-  return props.segment.item?<div ref={element} data-turn-key={props.segment.key} style={{display:'flow-root'}}>{p.children(props.segment.item)}</div>:<div aria-hidden="true" style={{height:`${segments().find(s=>s.key===props.segment.key)?.height??0}px`}}/>;
+  return props.segment.item?<div ref={element} data-turn-key={props.segment.key} style={{display:'flow-root'}}>{p.children(props.segment.item)}</div>:<div aria-hidden="true" style={{height:`${spacerHeights().get(props.segment.key)??props.segment.height}px`}}/>;
  }
  createEffect(()=>{p.items.length;queueMicrotask(schedule);});
  onMount(()=>{
@@ -152,12 +154,12 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
    needsPrepare:()=>p.needsPrepare?.()??Boolean(p.prepare),
    mountedTurn:key=>{const n=nodes.get(key);return n?.isConnected?n:undefined;},
    turnRange:key=>{
-    const row=layout().find(r=>r.item.key===key);if(!row)return undefined;
+    const row=rowByKey().get(key);if(!row)return undefined;
     const offset=scroller?root.getBoundingClientRect().top-scroller.getBoundingClientRect().top+scroller.scrollTop:0;
     return {top:offset+row.top,height:row.height};
    },
    async reveal(hit,options){
-    const row=layout().find(row=>row.item.key===hit.key);if(!row)return;
+    const row=rowByKey().get(hit.key);if(!row)return;
     if(options?.scroll===false){
      const existing=nodes.get(hit.key);
      if(existing?.isConnected)return existing;
@@ -170,7 +172,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
      if(options?.scroll===false){
       if(scroller){
        const offset=root.getBoundingClientRect().top-scroller.getBoundingClientRect().top+scroller.scrollTop;
-       const latest=layout().find(r=>r.item.key===hit.key)??row;
+       const latest=rowByKey().get(hit.key)??row;
        markScrollIntent(scroller);
        scroller.scrollTop=Math.max(0,offset+latest.top-72);
        update();

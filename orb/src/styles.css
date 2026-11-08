@@ -1475,8 +1475,8 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
 
 .cs-advanced { margin-top: 20px; }
 .cs-advanced > summary { cursor: pointer; color: var(--fg-2); padding: 8px 0; font-size: 12px; }
-.project-search { width: 100%; height: 28px; padding: 0 8px; border: 0; background: none; color: var(--fg); font: inherit; }
-.project-search:focus, .project-search:focus-visible { outline: none; box-shadow: inset 0 -1px var(--stroke-strong); border-radius: 0; }
+.project-search { width: 100%; height: 28px; padding: 0 8px; border: 0; border-bottom: 1px solid transparent; background: none; color: var(--fg); font: inherit; }
+.project-search:focus, .project-search:focus-visible { outline: none; border-bottom-color: var(--focus-border); box-shadow: none; border-radius: 0; }
 .project-search::placeholder { color: var(--fg-4); }
 .project-empty { margin: 8px; font-size: 12px; color: var(--fg-3); }
 .project-create { display: flex; flex-direction: column; gap: 14px; }
@@ -2135,7 +2135,7 @@ button.fork-trigger:hover { color: var(--fg); }
 /* Title hover card sits outside the draggable/clipped toolbar. */
 .session-title { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; min-width: 0; border: 0; border-radius: var(--session-radius); padding: var(--session-inset) 7px; margin-left: 0; color: inherit; background: transparent; font: inherit; text-align: left; -webkit-app-region: drag; }
 .session-title:hover, .session-title:focus-visible, .session-title[aria-describedby] { background: var(--bg-btn); color: var(--fg); }
-.session-title:focus-visible { outline: 1px solid var(--stroke); outline-offset: 2px; }
+.session-title:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 2px; }
 .session-title > .session-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-title > svg { flex: none; width: 15px; height: 15px; opacity: .7; }
 .session-preview { padding: 12px; overflow-y: auto; color: var(--fg-2); font-size: 12px; line-height: 1.5; user-select: text; -webkit-app-region: no-drag; }
@@ -2957,7 +2957,7 @@ select.orb-select-native:disabled { cursor: default; }
 /* Floating PDF controls preserve the page width and remain outside the scroll flow. */
 .file-preview:has(.pdf-viewer) { padding:8px;overflow:hidden; }
 .pdf-viewer { position:relative;display:flex;flex-direction:column;flex:1;min-height:0;outline:none; }
-.pdf-viewer:focus-visible { box-shadow:inset 0 0 0 1px var(--stroke);border-radius:8px; }
+.pdf-viewer:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; box-shadow: none; border-radius: 8px; }
 .pdf-toolbar { white-space:nowrap;position:absolute;z-index:2;bottom:16px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:8px;padding:5px;border:1px solid var(--stroke);border-radius:12px;background:var(--bg-elev);box-shadow:0 4px 18px #0003;opacity:.75;transition:opacity .15s; }
 .pdf-toolbar:hover,.pdf-toolbar:focus-within,.pdf-viewer:focus-visible .pdf-toolbar { opacity:1; }
 .pdf-toolbar .s-btn { background:transparent;border:0;min-width:30px;height:30px;padding:3px 8px; }
@@ -3611,8 +3611,7 @@ select.orb-select-native:disabled { cursor: default; }
 }
 .force-slot-btn:focus-visible {
   border-color: var(--focus-border);
-  outline: 1px solid var(--focus-border);
-  outline-offset: 0;
+  outline: none;
   box-shadow: none;
 }
 .force-slot-btn:disabled {
@@ -4007,8 +4006,8 @@ select.orb-select-native:disabled { cursor: default; }
   box-shadow: none;
 }
 /* Fields that are deliberately borderless keep their own look. */
-.composer textarea:focus, .composer textarea:focus-visible, .prompt-editor:focus, .prompt-editor:focus-visible, .cs-prompt:focus, .project-search:focus, .picker-search:focus, .picker-search:focus-visible, .find-bar input:focus, .find-bar input:focus-visible { box-shadow: none; }
-.project-search:focus, .project-search:focus-visible { box-shadow: inset 0 -1px var(--stroke-strong); }
+.composer textarea:focus, .composer textarea:focus-visible, .prompt-editor:focus, .prompt-editor:focus-visible, .cs-prompt:focus, .project-search:focus, .project-search:focus-visible, .picker-search:focus, .picker-search:focus-visible, .find-bar input:focus, .find-bar input:focus-visible { box-shadow: none; }
+.project-search:focus, .project-search:focus-visible { border-bottom-color: var(--focus-border); }
 /* An edited message focuses as one field (like Cursor): the bubble, never a box inside it. */
 .user.editing:focus-within { border-color: var(--focus-border); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 5%, transparent); }
 
@@ -4094,12 +4093,12 @@ select.orb-select-native:disabled { cursor: default; }
 .managed-form { display: flex; flex-direction: column; gap: 14px; }
 .managed-sizes { display: flex; flex-direction: column; gap: 4px; }
 .managed-size {
-  display: grid; grid-template-columns: minmax(70px, auto) 1fr auto; align-items: center; gap: 12px;
+  display: grid; grid-template-columns: 16px minmax(70px, auto) 1fr auto; align-items: center; gap: 12px;
   padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--overlay-border);
   background: var(--overlay-field); color: var(--fg-2); text-align: left; font: 13px var(--sans);
 }
 .managed-size:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
-.managed-size.on { border-color: var(--focus-border); color: var(--fg); }
+.managed-size.on { background: color-mix(in srgb, var(--toggle) 10%, var(--overlay-field)); border-color: var(--focus-border); color: var(--fg); }
 .managed-size-name { font-weight: 500; }
 .managed-size-spec, .managed-size-rate { font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 .managed-estimate { display: flex; justify-content: space-between; font-size: 13px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
@@ -4109,8 +4108,6 @@ select.orb-select-native:disabled { cursor: default; }
 .managed-spinner { color: var(--fg-3); flex: none; margin: 0 -2px; }
 .managed-fading { opacity: .45; transition: opacity .3s ease; }
 .managed-error { color: var(--red); }
-.managed-size { grid-template-columns: 16px minmax(70px, auto) 1fr auto; }
-.managed-size.on { background: color-mix(in srgb, var(--toggle) 10%, var(--overlay-field)); border-color: var(--toggle); box-shadow: 0 0 0 1px var(--toggle) inset; }
 .managed-size-check { display: inline-flex; color: var(--toggle); }
 .fleet-group-label { padding: 10px 14px 4px; border-top: 1px solid var(--stroke-soft); }
 .p-native-managed { display: inline-flex; align-items: center; gap: 8px; color: var(--fg-2); font-size: 12px; }

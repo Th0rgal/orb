@@ -615,23 +615,33 @@ def classifyLocalOriginConflict (httpStatus : UInt16) (code : String) : Option (
 
 /-- Durable in-memory local-origin mission row managed by `local_origin_*` (`SM-26`). -/
 structure LocalOriginEntry where
-  id               : String
-  endpoint         : String
-  title            : String
-  status           : String := "active"
-  backend          : String := "opencode"
-  workingDirectory : String := "."
-  deliveredPrompt  : String := ""
-  localSyncPending : Bool := true
-  localRunActive   : Bool := true
-  observedAt       : UInt64 := 0
-  lastConflictCode : Option String := none
+  id                : String
+  endpoint          : String
+  title             : String
+  status            : String := "active"
+  backend           : String := "opencode"
+  workingDirectory  : String := "."
+  deliveredPrompt   : String := ""
+  localSyncPending  : Bool := true
+  localRunActive    : Bool := true
+  observedAt        : UInt64 := 0
+  lastConflictCode  : Option String := none
   retryableConflict : Bool := false
+  project           : String := ""
+  folder            : Option String := none
+  tags              : Array String := #["placement:client"]
+  modelOverride     : Option String := none
+  modelEffort       : Option String := none
+  serviceTier       : Option String := none
+  createdAt         : String := ""
+  updatedAt         : String := ""
+  history           : Array JVal := #[]
   deriving Repr, Inhabited
 
 def LocalOriginEntry.toMissionJson (e : LocalOriginEntry) : JVal :=
   let base : Array (String × JVal) := #[
     ("id", .str e.id),
+    ("endpoint", .str e.endpoint),
     ("title", .str e.title),
     ("status", .str e.status),
     ("backend", .str e.backend),
@@ -639,38 +649,116 @@ def LocalOriginEntry.toMissionJson (e : LocalOriginEntry) : JVal :=
     ("delivered_prompt", .str e.deliveredPrompt),
     ("local_sync_pending", .bool e.localSyncPending),
     ("local_run_active", .bool e.localRunActive),
-    ("total_cost_cents", JVal.nat 0)
+    ("total_cost_cents", JVal.nat 0),
+    ("tags", .arr (e.tags.map .str)),
+    ("history", .arr e.history),
+    ("created_at", .str (if e.createdAt.isEmpty then "1970-01-01T00:00:00Z" else e.createdAt)),
+    ("updated_at", .str (if e.updatedAt.isEmpty then "1970-01-01T00:00:00Z" else e.updatedAt))
   ]
+  let withProj :=
+    if e.project.isEmpty then base else base.push ("project", .str e.project)
+  let withFolder :=
+    match e.folder with | some f => withProj.push ("folder", .str f) | none => withProj
+  let withModel :=
+    match e.modelOverride with | some m => withFolder.push ("model_override", .str m) | none => withFolder
+  let withEffort :=
+    match e.modelEffort with | some ef => withModel.push ("model_effort", .str ef) | none => withModel
+  let withTier :=
+    match e.serviceTier with | some st => withEffort.push ("service_tier", .str st) | none => withEffort
   let withConflict := match e.lastConflictCode with
     | some code =>
-      (base.push ("conflict_code", .str code)).push ("conflict_retryable", .bool e.retryableConflict)
-    | none => base
+      (withTier.push ("conflict_code", .str code)).push ("conflict_retryable", .bool e.retryableConflict)
+    | none => withTier
   .obj withConflict
 
+def LocalOriginEntry.fromMissionJson? (jv : JVal) : Option LocalOriginEntry := do
+  let id ← jv.fieldStr? "id"
+  let ep := (jv.fieldStr? "endpoint").getD ""
+  let title := (jv.fieldStr? "title").getD "Local Mission"
+  let status := (jv.fieldStr? "status").getD "active"
+  let backend := (jv.fieldStr? "backend").getD "opencode"
+  let cwd := (jv.fieldStr? "working_directory").getD "."
+  let prompt := (jv.fieldStr? "delivered_prompt").getD ""
+  let syncPend := (jv.fieldBool? "local_sync_pending").getD false
+  let runAct := (jv.fieldBool? "local_run_active").getD false
+  let obsAt := (jv.fieldUInt64? "observed_at").getD 0
+  let confCode := jv.fieldStr? "conflict_code"
+  let confRetry := (jv.fieldBool? "conflict_retryable").getD false
+  let proj := (jv.fieldStr? "project").getD ""
+  let folder := jv.fieldStr? "folder"
+  let tags : Array String := match jv.fieldArr? "tags" with
+    | some xs => xs.filterMap (·.asStr?)
+    | none => #["placement:client"]
+  let modelOv := jv.fieldStr? "model_override"
+  let modelEf := jv.fieldStr? "model_effort"
+  let svcTier := jv.fieldStr? "service_tier"
+  let createdAt := (jv.fieldStr? "created_at").getD ""
+  let updatedAt := (jv.fieldStr? "updated_at").getD ""
+  let hist := (jv.fieldArr? "history").getD #[]
+  return {
+    id, endpoint := ep, title, status, backend, workingDirectory := cwd,
+    deliveredPrompt := prompt, localSyncPending := syncPend, localRunActive := runAct,
+    observedAt := obsAt, lastConflictCode := confCode, retryableConflict := confRetry,
+    project := proj, folder, tags, modelOverride := modelOv, modelEffort := modelEf,
+    serviceTier := svcTier, createdAt, updatedAt, history := hist
+  }
+
+structure LocalRunRecord where
+  id           : String
+  runUuid      : String
+  generation   : Nat := 1
+  harness      : String := ""
+  text         : String := ""
+  done         : Bool := true
+  exitCode?    : Option Int := none
+  sessionId?   : Option String := none
+  error?       : Option String := none
+  retryable    : Bool := false
+  resumed      : Bool := false
+  activities   : Array JVal := #[]
+  pid?         : Option Int64 := none
+  deriving Repr, Inhabited
+
 structure LocaldState where
-  launchToken         : String
-  rpcPort             : UInt16 := 19479
-  bridge              : TransportBridgeState := {}
-  nextSubToken        : Nat := 1
-  subscriptions       : Array SubscriptionEntry := #[]
-  queuedChannelEvents : Array (Nat × JVal) := #[]
-  bindingsRevision    : Nat := 0
-  bindingsEntries     : Array (String × JVal) := #[]
-  toolHub             : InteractiveToolHubState := {}
-  clientLink          : ClientLinkState := {}
-  localOrigins        : Array LocalOriginEntry := #[]
-  approvalGraceSecs   : Nat := 300
-  approvalGraceUntil  : UInt64 := 0
-  approvalKeyPath     : String := ""
-  orbStateDir         : String := ""
-  homeDir             : String := ""
-  machineId           : String := ""
-  grantedFolders      : Array String := #[]
-  connectionJson      : JVal := .null
-  hostOs              : String := "linux"
-  signerBin?          : Option String := none
-  originHealth        : Array OriginHealthEntry := #[]
-  h2Pool?             : Option OrbNetLeaf.H2Pool.H2ClientPool := none
+  launchToken          : String
+  rpcPort              : UInt16 := 19479
+  bridge               : TransportBridgeState := {}
+  nextSubToken         : Nat := 1
+  subscriptions        : Array SubscriptionEntry := #[]
+  queuedChannelEvents  : Array (Nat × JVal) := #[]
+  nextSseSubId         : Nat := 1
+  sseSubscribers       : Array (Nat × Array JVal) := #[]
+  bindingsLoaded       : Bool := false
+  bindingsRevision     : Nat := 0
+  bindingsEntries      : Array (String × JVal) := #[]
+  originsLoaded        : Bool := false
+  toolHub              : InteractiveToolHubState := {}
+  clientLink           : ClientLinkState := {}
+  localOrigins         : Array LocalOriginEntry := #[]
+  localRuns            : Array LocalRunRecord := #[]
+  softwareJobs         : Array JVal := #[]
+  approvalGraceSecs    : Nat := 300
+  approvalGraceUntil   : UInt64 := 0
+  approvalKeyPath      : String := ""
+  orbStateDir          : String := ""
+  homeDir              : String := ""
+  machineId            : String := ""
+  grantedFolders       : Array String := #[]
+  grantedUploadFiles   : Array String := #[]
+  offeredUploadBatches : Array (String × Array String × Array (String × String)) := #[]
+  grantedUploadBatches : Array (String × Array String) := #[]
+  grantedBrowseRoots   : Array String := #[]
+  cachedMemTotal       : Nat := 0
+  cachedLogicalCpu     : Nat := 0
+  lastMetricsMonoMs    : Nat := 0
+  lastMetricsDetails   : Bool := false
+  lastMetricsSnap      : JVal := .null
+  metricsHistory       : Array (Nat × JVal) := #[]
+  connectionJson       : JVal := .null
+  hostOs               : String := "linux"
+  signerBin?           : Option String := none
+  originHealth         : Array OriginHealthEntry := #[]
+  h2Pool?              : Option OrbNetLeaf.H2Pool.H2ClientPool := none
   deriving Inhabited
 
 /-- Record an upstream RTT sample (`orb_rtt_ewma_step`) and clear cooldown on `origin`, returning updated `srttMs`. -/
@@ -733,23 +821,43 @@ def LocaldState.activeInteractionJson (st : LocaldState) (runId : String) : JVal
     | some slot => slot.toClientRequestJson
     | none      => .null
 
+def LocaldState.enqueueTokenEvent (st : LocaldState) (tok : Nat) (payload : JVal) : LocaldState :=
+  let evObj : JVal := .obj #[("token", JVal.nat tok), ("payload", payload)]
+  let nextSse := st.sseSubscribers.map fun (sid, q) => (sid, q.push evObj)
+  { st with
+      queuedChannelEvents := st.queuedChannelEvents.push (tok, payload)
+      sseSubscribers := nextSse }
+
+def LocaldState.enqueueNamedEvent (st : LocaldState) (eventName : String) (payload : JVal) : LocaldState :=
+  let evObj : JVal := .obj #[("event", .str eventName), ("payload", payload)]
+  let nextSse := st.sseSubscribers.map fun (sid, q) => (sid, q.push evObj)
+  { st with sseSubscribers := nextSse }
+
+def LocaldState.publishChannelEvent (st : LocaldState) (channel : String) (payload : JVal) (target? : Option String := none) : LocaldState :=
+  let matching := st.subscriptions.filter fun e =>
+    e.active && e.channel == channel &&
+    (match target?, e.target? with
+     | some reqT, some subT => reqT == subT
+     | _, _ => true)
+  matching.foldl (fun acc e => acc.enqueueTokenEvent e.token payload) st
+
 def LocaldState.publishInteractionSnapshot (st : LocaldState) (runId : String) : LocaldState :=
   let clean := runId.trimAscii.toString
   let snap := st.activeInteractionJson clean
-  let pushed := (st.subscriptions.filter fun e =>
+  (st.subscriptions.filter fun e =>
       e.active && e.channel == "local_interaction" &&
       (match e.target? with | none => true | some t => t == clean)).foldl
-    (fun acc e => acc.push (e.token, snap)) st.queuedChannelEvents
-  { st with queuedChannelEvents := pushed }
+    (fun acc e => acc.enqueueTokenEvent e.token snap) st
 
 def LocaldState.subscribe (st : LocaldState) (channel : String) (initialEvent? : Option JVal := none)
     (target? : Option String := none) : (Nat × LocaldState) :=
   let tok := st.nextSubToken
   let entry : SubscriptionEntry := { token := tok, channel := channel, target? := target?, active := true }
-  let q := match initialEvent? with
-    | some ev => st.queuedChannelEvents.push (tok, ev)
-    | none    => st.queuedChannelEvents
-  (tok, { st with nextSubToken := tok + 1, subscriptions := st.subscriptions.push entry, queuedChannelEvents := q })
+  let st1 := { st with nextSubToken := tok + 1, subscriptions := st.subscriptions.push entry }
+  let st2 := match initialEvent? with
+    | some ev => st1.enqueueTokenEvent tok ev
+    | none    => st1
+  (tok, st2)
 
 def LocaldState.unsubscribe (st : LocaldState) (tok : Nat) : LocaldState :=
   { st with
@@ -758,6 +866,22 @@ def LocaldState.unsubscribe (st : LocaldState) (tok : Nat) : LocaldState :=
 
 def LocaldState.clearAllSubscriptions (st : LocaldState) : LocaldState :=
   { st with subscriptions := #[], queuedChannelEvents := #[] }
+
+def LocaldState.registerSseSubscriber (st : LocaldState) : (Nat × LocaldState) :=
+  let sid := st.nextSseSubId
+  (sid, { st with nextSseSubId := sid + 1, sseSubscribers := st.sseSubscribers.push (sid, #[]) })
+
+def LocaldState.unregisterSseSubscriber (st : LocaldState) (sid : Nat) : LocaldState :=
+  { st with sseSubscribers := st.sseSubscribers.filter (fun (id, _) => id != sid) }
+
+def LocaldState.drainSseSubscriber (st : LocaldState) (sid : Nat) : (Array JVal × LocaldState) :=
+  match st.sseSubscribers.find? (fun (id, _) => id == sid) with
+  | none => (#[], st)
+  | some (_, q) =>
+    if q.isEmpty then (#[], st)
+    else
+      let nextSubs := st.sseSubscribers.map fun (id, cur) => if id == sid then (id, #[]) else (id, cur)
+      (q, { st with sseSubscribers := nextSubs })
 
 /-- Validate loopback host + ≥32-byte non-placeholder per-launch bearer token via `verifyLocaldRpcAuth`. -/
 def checkRpcAuth (remoteHost : String) (providedToken : String) (expectedToken : String) : Bool :=
@@ -1129,6 +1253,16 @@ def formatUtcYmd (epochSecs : UInt64) : String :=
   let pad2 (n : Nat) : String := if n < 10 then s!"0{n}" else s!"{n}"
   s!"{yr}-{pad2 m}-{pad2 d}"
 
+/-- Convert Unix epoch seconds to `YYYY-MM-DDTHH:MM:SSZ` (UTC). -/
+def formatUtcIso8601 (epochSecs : UInt64) : String :=
+  let ymd := formatUtcYmd epochSecs
+  let dayRem := epochSecs.toNat % 86400
+  let hh := dayRem / 3600
+  let mm := (dayRem % 3600) / 60
+  let ss := dayRem % 60
+  let pad2 (n : Nat) : String := if n < 10 then s!"0{n}" else s!"{n}"
+  s!"{ymd}T{pad2 hh}:{pad2 mm}:{pad2 ss}Z"
+
 private def resolveOrbStateDir (st : LocaldState) : Option System.FilePath :=
   let raw := st.orbStateDir.trimAscii.toString
   if raw.isEmpty then none else some (System.FilePath.mk raw)
@@ -1136,8 +1270,85 @@ private def resolveOrbStateDir (st : LocaldState) : Option System.FilePath :=
 private def connectionFilePath? (st : LocaldState) : Option System.FilePath :=
   (resolveOrbStateDir st).map (· / "connection.json")
 
+private def bindingsFilePath? (st : LocaldState) : Option System.FilePath :=
+  (resolveOrbStateDir st).map (· / "local-bindings.json")
+
+private def originsFilePath? (st : LocaldState) : Option System.FilePath :=
+  (resolveOrbStateDir st).map (· / "local-origins.json")
+
 private def logsDirPath? (st : LocaldState) : Option System.FilePath :=
   (resolveOrbStateDir st).map (· / "logs")
+
+def ensurePersistedBindingsLoaded (stRef : IO.Ref LocaldState) : IO Unit := do
+  let st ← stRef.get
+  if st.bindingsLoaded then return ()
+  match bindingsFilePath? st with
+  | none =>
+    stRef.modify fun s => { s with bindingsLoaded := true }
+  | some path =>
+    if !(← path.pathExists) then
+      stRef.modify fun s => { s with bindingsLoaded := true }
+    else
+      try
+        let raw ← IO.FS.readFile path
+        match OrbBin.Json.parse raw.trimAscii.toString with
+        | .ok jv =>
+          let diskRev := (jv.fieldNat? "revision").getD 0
+          let diskEntries : Array (String × JVal) :=
+            match jv.field? "bindings" with
+            | some (.obj kvs) => kvs
+            | _ =>
+              match jv with
+              | .obj kvs => kvs.filter (fun (k, _) => k != "revision" && k != "bindings")
+              | _ => #[]
+          stRef.modify fun s =>
+            if s.bindingsLoaded then s
+            else
+              let merged := diskEntries.foldl (fun acc (k, v) =>
+                if acc.any (fun (ek, _) => ek == k) then acc else acc.push (k, v)) s.bindingsEntries
+              let rev := max s.bindingsRevision (max diskRev merged.size)
+              { s with bindingsLoaded := true, bindingsRevision := rev, bindingsEntries := merged }
+        | .error _ =>
+          stRef.modify fun s => { s with bindingsLoaded := true }
+      catch _ =>
+        stRef.modify fun s => { s with bindingsLoaded := true }
+
+private def persistBindingsSnapshot (st : LocaldState) : IO Unit := do
+  if let some path := bindingsFilePath? st then
+    let payload := (renderCompact st.bindingsSnapshotJson ++ "\n").toUTF8
+    discard <| OrbBin.PosixExt.writeAtomicPrivate0600 path payload
+
+def ensurePersistedOriginsLoaded (stRef : IO.Ref LocaldState) : IO Unit := do
+  let st ← stRef.get
+  if st.originsLoaded then return ()
+  match originsFilePath? st with
+  | none =>
+    stRef.modify fun s => { s with originsLoaded := true }
+  | some path =>
+    if !(← path.pathExists) then
+      stRef.modify fun s => { s with originsLoaded := true }
+    else
+      try
+        let raw ← IO.FS.readFile path
+        match OrbBin.Json.parse raw.trimAscii.toString with
+        | .ok (.arr xs) =>
+          let parsed := xs.filterMap LocalOriginEntry.fromMissionJson?
+          stRef.modify fun s =>
+            if s.originsLoaded then s
+            else
+              let merged := parsed.foldl (fun acc row =>
+                if acc.any (fun r => r.id == row.id) then acc else acc.push row) s.localOrigins
+              { s with originsLoaded := true, localOrigins := merged }
+        | _ =>
+          stRef.modify fun s => { s with originsLoaded := true }
+      catch _ =>
+        stRef.modify fun s => { s with originsLoaded := true }
+
+private def persistOriginsSnapshot (st : LocaldState) : IO Unit := do
+  if let some path := originsFilePath? st then
+    let arr := st.localOrigins.map LocalOriginEntry.toMissionJson
+    let payload := (renderCompact (.arr arr) ++ "\n").toUTF8
+    discard <| OrbBin.PosixExt.writeAtomicPrivate0600 path payload
 
 private def isSafeHttpUrl (raw : String) : Bool :=
   let u := raw.trimAscii.toString
@@ -1183,17 +1394,61 @@ private def readCommandStdout? (cmd : String) (args : Array String) : IO (Option
   catch _ =>
     return none
 
-private def sampleHostMetrics (hostOs : String) : IO JVal := do
+private def sampleHostConsumers (hostOs : String) : IO (Array JVal) := do
+  let psArgs := if hostOs == "macos" then #["-axo", "rss=,comm="] else #["-eo", "rss=,comm="]
+  let some psOut ← readCommandStdout? "/bin/ps" psArgs | return #[]
+  let mut orbRss : Nat := 0
+  let mut orbProcs : Nat := 0
+  let mut voiceRss : Nat := 0
+  let mut voiceProcs : Nat := 0
+  let mut agentRss : Nat := 0
+  let mut agentProcs : Nat := 0
+  for ln in psOut.splitOn "\n" do
+    let t := ln.trimAscii.toString
+    if !t.isEmpty then
+      let cols := (t.splitOn " ").filter (fun s => !s.isEmpty)
+      if let rssStr :: commParts := cols then
+        let rssBytes := (rssStr.toNat?.getD 0) * 1024
+        let commFull := (String.intercalate " " commParts).trimAscii.toString
+        let base := ((commFull.splitOn "/").getLast?.getD commFull).toLower
+        if base == "orb" || base == "orb-locald" || base == "orb-signer" then
+          orbRss := orbRss + rssBytes
+          orbProcs := orbProcs + 1
+        else if ((commFull.toLower.splitOn "voice/worker.py").length > 1) || ((commFull.toLower.splitOn "orb-voice").length > 1) then
+          voiceRss := voiceRss + rssBytes
+          voiceProcs := voiceProcs + 1
+        else if base == "claude" || base == "codex" || base == "opencode" || base == "grok" || base == "agy" || base == "vibe" then
+          agentRss := agentRss + rssBytes
+          agentProcs := agentProcs + 1
+  return #[
+    .obj #[("label", .str "Orb"), ("memory", JVal.nat orbRss), ("processes", JVal.nat orbProcs)],
+    .obj #[("label", .str "Voice"), ("memory", JVal.nat voiceRss), ("processes", JVal.nat voiceProcs)],
+    .obj #[("label", .str "Local agents"), ("memory", JVal.nat agentRss), ("processes", JVal.nat agentProcs)]
+  ]
+
+private def sampleHostMetricsCached (stRef : IO.Ref LocaldState) (details : Bool) : IO JVal := do
+  let nowMono ← IO.monoMsNow
+  let st ← stRef.get
+  if st.lastMetricsMonoMs > 0 && nowMono - st.lastMetricsMonoMs < 2500 &&
+     st.lastMetricsSnap != .null && (!details || st.lastMetricsDetails) then
+    return st.lastMetricsSnap
   let nowSec ← OrbBin.PosixExt.nowEpoch
   let sampledAtMs := nowSec.toNat * 1000
-  let mut memTotal : Nat := 0
+  let hostOs := st.hostOs
+  let mut memTotal := st.cachedMemTotal
+  let mut ncpu := st.cachedLogicalCpu
   let mut memUsed : Nat := 0
   let mut diskTotal : Nat := 0
   let mut diskUsed : Nat := 0
-  let mut cpuPct? : Option String := none
+  let mut cpuPct? : Option Nat := none
   if hostOs == "macos" then
-    if let some hwOut ← readCommandStdout? "/usr/sbin/sysctl" #["-n", "hw.memsize"] then
-      memTotal := hwOut.toNat?.getD 0
+    if memTotal == 0 then
+      if let some hwOut ← readCommandStdout? "/usr/sbin/sysctl" #["-n", "hw.memsize"] then
+        memTotal := hwOut.toNat?.getD 0
+    if ncpu == 0 then
+      if let some cpuOut ← readCommandStdout? "/usr/sbin/sysctl" #["-n", "hw.logicalcpu"] then
+        ncpu := max 1 (cpuOut.toNat?.getD 1)
+    if ncpu == 0 then ncpu := 1
     if let some vmOut ← readCommandStdout? "/usr/bin/vm_stat" #[] then
       let lines := vmOut.splitOn "\n"
       let mut pageSize : Nat := 16384
@@ -1225,12 +1480,8 @@ private def sampleHostMetrics (hostOs : String) : IO JVal := do
             let d1 := ((f.take 1).toString.toNat?).getD 0
             tenthsSum := tenthsSum + (w.toNat?.getD 0) * 10 + d1
           | _ => pure ()
-      let ncpu ← do
-        match ← readCommandStdout? "/usr/sbin/sysctl" #["-n", "hw.logicalcpu"] with
-        | some s => pure (max 1 (s.toNat?.getD 1))
-        | none => pure 1
       let normPct := min 100 ((tenthsSum / ncpu + 5) / 10)
-      cpuPct? := some s!"{normPct}"
+      cpuPct? := some normPct
   else
     try
       let memInfo ← IO.FS.readFile "/proc/meminfo"
@@ -1240,7 +1491,7 @@ private def sampleHostMetrics (hostOs : String) : IO JVal := do
             for tok in (ln.drop k.length).toString.splitOn " " do
               if let some n := tok.trimAscii.toString.toNat? then return n * 1024
         return 0
-      memTotal := parseKb "MemTotal:"
+      if memTotal == 0 then memTotal := parseKb "MemTotal:"
       let avail := parseKb "MemAvailable:"
       if memTotal > avail && avail > 0 then memUsed := memTotal - avail
     catch _ => pure ()
@@ -1250,19 +1501,43 @@ private def sampleHostMetrics (hostOs : String) : IO JVal := do
       if cols.length ≥ 4 then
         diskTotal := (cols[1]!.toNat?.getD 0) * 1024
         diskUsed := (cols[2]!.toNat?.getD 0) * 1024
-  let cpuVal : JVal := match cpuPct? with | some s => .num s | none => .null
-  return .obj #[
-    ("sampled_at", JVal.nat sampledAtMs),
-    ("cpu_percent", cpuVal),
-    ("gpu_percent", .null),
-    ("memory_used", JVal.nat memUsed),
-    ("memory_total", JVal.nat memTotal),
-    ("memory_used_bytes", JVal.nat memUsed),
-    ("memory_total_bytes", JVal.nat memTotal),
-    ("disk_used", JVal.nat diskUsed),
-    ("disk_total", JVal.nat diskTotal),
-    ("consumers", .arr #[])
+  let consumers ← if details then sampleHostConsumers hostOs else pure #[]
+  let cpuVal : JVal := match cpuPct? with | some n => JVal.nat n | none => .null
+  let memPctVal : JVal :=
+    if memTotal > 0 then
+      let tenths := (memUsed * 1000 + memTotal / 2) / memTotal
+      .num s!"{tenths / 10}.{tenths % 10}"
+    else .null
+  let histPoint : JVal := .obj #[
+    ("time", JVal.nat sampledAtMs),
+    ("cpu", cpuVal),
+    ("gpu", .null),
+    ("memory", memPctVal)
   ]
+  let snap ← stRef.modifyGet fun s =>
+    let cutoff := if sampledAtMs > 60000 then sampledAtMs - 60000 else 0
+    let keptHist := (s.metricsHistory.filter (fun (ts, _) => ts ≥ cutoff)).push (sampledAtMs, histPoint)
+    let out : JVal := .obj #[
+      ("sampled_at", JVal.nat sampledAtMs),
+      ("cpu_percent", cpuVal),
+      ("gpu_percent", .null),
+      ("memory_used", JVal.nat memUsed),
+      ("memory_total", JVal.nat memTotal),
+      ("memory_used_bytes", JVal.nat memUsed),
+      ("memory_total_bytes", JVal.nat memTotal),
+      ("disk_used", JVal.nat diskUsed),
+      ("disk_total", JVal.nat diskTotal),
+      ("history", .arr (keptHist.map (·.2))),
+      ("consumers", .arr consumers)
+    ]
+    (out, { s with
+        cachedMemTotal := if memTotal > 0 then memTotal else s.cachedMemTotal
+        cachedLogicalCpu := if ncpu > 0 then ncpu else s.cachedLogicalCpu
+        lastMetricsMonoMs := nowMono
+        lastMetricsDetails := details
+        lastMetricsSnap := out
+        metricsHistory := keptHist })
+  return snap
 
 private def appendDiagnosticsLines (st : LocaldState) (lines : Array String) : IO Unit := do
   let some logsDir := logsDirPath? st | return ()
@@ -1312,10 +1587,693 @@ private def ensureMachineId (stRef : IO.Ref LocaldState) : IO String := do
       stRef.modify fun s => { s with machineId := fresh }
       return fresh
 
-private def isGrantedUploadPath (st : LocaldState) (rawPath : String) : Bool :=
+private def canonicalizeExistingPath? (raw : String) : IO (Option String) := do
+  let p := raw.trimAscii.toString
+  if p.isEmpty || (p.splitOn "/").contains ".." then return none
+  try
+    let rp ← IO.FS.realPath (System.FilePath.mk p)
+    let s := OrbBin.PosixExt.stripTrailingSlash rp.toString
+    return some (if s.isEmpty then "/" else s)
+  catch _ =>
+    return none
+
+private def isCanonicalWithinRoot (candReal rootReal : String) : Bool :=
+  rootReal != "/" && !rootReal.isEmpty &&
+  (candReal == rootReal || candReal.startsWith (if rootReal.endsWith "/" then rootReal else rootReal ++ "/"))
+
+private def checkCanonicalUploadRead (st : LocaldState) (rawPath : String) : IO (Option System.FilePath) := do
   let p := rawPath.trimAscii.toString
-  !p.isEmpty && p.startsWith "/" && !(p.splitOn "/").contains ".." &&
-  st.grantedFolders.any (fun g => p == g || p.startsWith (if g.endsWith "/" then g else g ++ "/"))
+  if p.isEmpty || !p.startsWith "/" || (p.splitOn "/").contains ".." then
+    return none
+  let lstat ← OrbBin.PosixExt.statPath p
+  if !lstat.exists_ || !lstat.isReg || lstat.isSymlink then
+    return none
+  let some candReal ← canonicalizeExistingPath? p | return none
+  if st.grantedUploadFiles.contains candReal then
+    return some (System.FilePath.mk candReal)
+  if st.grantedUploadBatches.any (fun (_, files) => files.contains candReal) then
+    return some (System.FilePath.mk candReal)
+  for g in st.grantedFolders do
+    if let some rootReal ← canonicalizeExistingPath? g then
+      if isCanonicalWithinRoot candReal rootReal then
+        return some (System.FilePath.mk candReal)
+  return none
+
+private def collectAllowedBrowseRoots (st : LocaldState) : IO (Array String) := do
+  let mut rawRoots : Array String := st.grantedBrowseRoots ++ st.grantedFolders
+  for (_, bval) in st.bindingsEntries do
+    if let some cwd := bval.fieldStr? "cwd" then
+      rawRoots := rawRoots.push cwd
+  for orig in st.localOrigins do
+    if !orig.workingDirectory.isEmpty && orig.workingDirectory != "." then
+      rawRoots := rawRoots.push orig.workingDirectory
+  if let some sdir := resolveOrbStateDir st then
+    rawRoots := rawRoots.push (sdir / "local-workspaces").toString
+    rawRoots := rawRoots.push (sdir / "project-context").toString
+    rawRoots := rawRoots.push (sdir / "staged-uploads").toString
+  if !st.homeDir.trimAscii.toString.isEmpty then
+    let h := System.FilePath.mk st.homeDir.trimAscii.toString
+    rawRoots := rawRoots.push (h / ".orb" / "local-workspaces").toString
+  let mut canon : Array String := #[]
+  for r in rawRoots do
+    if let some rp ← canonicalizeExistingPath? r then
+      if rp != "/" && !canon.contains rp then
+        canon := canon.push rp
+  return canon
+
+private def checkCanonicalBrowseRoot (st : LocaldState) (rawRoot : String) : IO (Option String) := do
+  let some rootReal ← canonicalizeExistingPath? rawRoot | return none
+  if rootReal == "/" then return none
+  let lstat ← OrbBin.PosixExt.statPath rootReal
+  if !lstat.exists_ || !lstat.isDir then return none
+  let allowed ← collectAllowedBrowseRoots st
+  if allowed.any (fun ar => isCanonicalWithinRoot rootReal ar) then
+    return some rootReal
+  return none
+
+def isSecretRelPath (rel : String) : Bool := Id.run do
+  let norm := (rel.replace "\\" "/").toLower
+  let parts := (norm.splitOn "/").filter (fun s => !s.isEmpty)
+  let name := parts.getLast?.getD norm
+  if parts.any (fun p => p == ".git" || p == ".ssh" || p == ".aws" || p == ".codex" || p == ".claude" || p == ".env" || p.startsWith ".env.") then
+    return true
+  return name == ".env" || name.startsWith ".env." || name.endsWith ".pem" || name.endsWith ".key" ||
+    name == "id_rsa" || name.startsWith "id_rsa." || name.startsWith "id_ed25519" ||
+    ((name.splitOn "credentials").length > 1) || name == "auth.json" || name == "secrets" ||
+    name == "secrets.yaml" || name == "secrets.yml" || name == "secrets.json" ||
+    name.endsWith ".p12" || name.endsWith ".pfx"
+
+private def isSafeRelSubpath (rel : String) : Option String := Id.run do
+  let norm := rel.replace "\\" "/"
+  if norm.startsWith "/" then return none
+  let parts := norm.splitOn "/"
+  if parts.any (fun p => p == ".." || p.toList.any (fun c => c.toNat < 0x20 || c.toNat == 0x7F)) then
+    return none
+  let clean := parts.filter (fun p => !p.isEmpty && p != ".")
+  if clean.isEmpty then return none
+  return some (String.intercalate "/" clean)
+
+private def sanitizeSlug (raw : String) : String :=
+  let chars := raw.trimAscii.toString.toList.map fun c =>
+    if ('a' ≤ c && c ≤ 'z') || ('A' ≤ c && c ≤ 'Z') || ('0' ≤ c && c ≤ '9') || c == '-' || c == '_' || c == '.' then c
+    else '-'
+  let s := (String.ofList chars).trimAscii.toString
+  if s.isEmpty || s == "." || s == ".." then "default" else (s.take 80).toString
+
+/-! ### Persistent Local Voice Worker (`orb/voice/worker.py`) -/
+
+private def supportedVoiceLanguages : Array String := #[
+  "en", "fr", "de", "es", "it", "pt", "nl", "pl", "el", "ar", "ja", "zh", "vi", "ko"
+]
+
+private def pinnedVoiceModelRepo : String :=
+  "MarkChen1214/cohere-transcribe-03-2026-MLX-Mixed-2bit3bit4bit"
+
+private def pinnedVoiceModelRevision : String :=
+  "553445e84959f9ec3fcd43443bce75ea05c400f3"
+
+private structure VoiceWorkerProc where
+  pythonBin : String
+  scriptPath : String
+  nextReqId : Nat := 1
+  stdinH    : IO.FS.Handle
+  child     : IO.Process.Child { stdin := .null, stdout := .piped, stderr := .null }
+
+initialize voiceWorkerMutex : Std.Mutex (Option VoiceWorkerProc) ← Std.Mutex.new none
+
+private def stopVoiceWorkerProc (srv? : Option VoiceWorkerProc) : IO Unit := do
+  if let some srv := srv? then
+    try srv.child.kill catch _ => pure ()
+    try discard <| srv.child.wait catch _ => pure ()
+
+private def resolveVoiceHome (st : LocaldState) : System.FilePath :=
+  if st.hostOs == "macos" && !st.homeDir.trimAscii.toString.isEmpty then
+    System.FilePath.mk st.homeDir.trimAscii.toString / "Library" / "Application Support" / "Orb" / "voice"
+  else if !st.orbStateDir.trimAscii.toString.isEmpty then
+    System.FilePath.mk st.orbStateDir.trimAscii.toString / "voice"
+  else
+    System.FilePath.mk "/tmp/orb-voice"
+
+private def resolveVoiceScriptPath? (st : LocaldState) : IO (Option String) := do
+  if let some envScript ← OrbBin.PosixExt.getEnvNonEmpty "ORB_VOICE_WORKER" then
+    if (← System.FilePath.pathExists envScript) then return some envScript
+  let appPath ← IO.appPath
+  let mut cands : Array System.FilePath := #[
+    System.FilePath.mk "orb/voice/worker.py",
+    resolveVoiceHome st / "runtime" / "worker.py"
+  ]
+  if let some binDir := appPath.parent then
+    cands := cands.push (binDir / ".." / "Resources" / "voice" / "worker.py")
+    cands := cands.push (binDir / ".." / ".." / ".." / ".." / "orb" / "voice" / "worker.py")
+    cands := cands.push (binDir / ".." / ".." / ".." / "orb" / "voice" / "worker.py")
+  for c in cands do
+    if (← c.pathExists) then
+      if let some rp ← canonicalizeExistingPath? c.toString then
+        return some rp
+      return some c.toString
+  return none
+
+private def resolveVoicePython? (st : LocaldState) (fakeMode : Bool) : IO (Option String) := do
+  if let some envPy ← OrbBin.PosixExt.getEnvNonEmpty "ORB_VOICE_PYTHON" then
+    if (← System.FilePath.pathExists envPy) then return some envPy
+  let vhome := resolveVoiceHome st
+  let mut cands : Array String := #[
+    (vhome / ".venv" / "bin" / "python3").toString,
+    (vhome / ".venv" / "bin" / "python").toString
+  ]
+  if !st.homeDir.trimAscii.toString.isEmpty then
+    let h := System.FilePath.mk st.homeDir.trimAscii.toString
+    cands := cands.push (h / ".orb" / "voice" / ".venv" / "bin" / "python3").toString
+    cands := cands.push (h / ".orb" / "voice" / "venv" / "bin" / "python3").toString
+  if fakeMode then
+    cands := cands ++ #["/opt/homebrew/bin/python3", "/usr/bin/python3", "/usr/local/bin/python3"]
+  for c in cands do
+    if (← System.FilePath.pathExists c) then
+      return some c
+  return none
+
+private def resolveVoiceModelDir (st : LocaldState) : IO String := do
+  if let some envDir ← OrbBin.PosixExt.getEnvNonEmpty "ORB_VOICE_MODEL_DIR" then
+    return envDir
+  if let some hfCache ← OrbBin.PosixExt.getEnvNonEmpty "HF_HUB_CACHE" then
+    return (System.FilePath.mk hfCache / "models--MarkChen1214--cohere-transcribe-03-2026-MLX-Mixed-2bit3bit4bit" / "snapshots" / pinnedVoiceModelRevision).toString
+  let home := if st.homeDir.trimAscii.toString.isEmpty then "/tmp" else st.homeDir.trimAscii.toString
+  return (System.FilePath.mk home / ".cache" / "huggingface" / "hub" / "models--MarkChen1214--cohere-transcribe-03-2026-MLX-Mixed-2bit3bit4bit" / "snapshots" / pinnedVoiceModelRevision).toString
+
+private def isVoiceModelPresent (modelDir : String) : IO Bool := do
+  let d := System.FilePath.mk modelDir
+  return (← (d / "config.json").pathExists) && (← (d / "model.safetensors").pathExists)
+
+private def detectHostArch : IO String := do
+  match ← readCommandStdout? "/usr/bin/uname" #["-m"] with
+  | some a =>
+    let clean := a.trimAscii.toString.toLower
+    if clean == "arm64" || clean == "aarch64" then return "aarch64"
+    return clean
+  | none => return "unknown"
+
+private def sendVoiceWorkerOp (st : LocaldState) (op : String) (extraFields : Array (String × JVal) := #[])
+    (rawAudio : ByteArray := ByteArray.empty) : IO (Except String JVal) := do
+  let fakeMode := ((← OrbBin.PosixExt.getEnvNonEmpty "ORB_VOICE_FAKE").getD "") == "1"
+  let some scriptPath ← resolveVoiceScriptPath? st
+    | return .error "python_missing: voice worker script not found"
+  let some pyBin ← resolveVoicePython? st fakeMode
+    | return .error "python_missing: Voice runtime not installed"
+  let modelDir ← resolveVoiceModelDir st
+  if !fakeMode && !(← isVoiceModelPresent modelDir) && (op == "load" || op == "transcribe") then
+    return .error "model_missing: Speech model not downloaded"
+  voiceWorkerMutex.atomically do
+    let mut cur ← get
+    if let some existing := cur then
+      if existing.pythonBin != pyBin || existing.scriptPath != scriptPath then
+        stopVoiceWorkerProc (some existing)
+        cur := none
+      else if (← try existing.child.tryWait catch _ => pure (some 1)).isSome then
+        stopVoiceWorkerProc (some existing)
+        cur := none
+    let srv ← match cur with
+      | some s => pure s
+      | none =>
+        try
+          let envPairs ← OrbBin.PosixExt.currentEnvPairs
+          let mut childEnv : Array (String × Option String) := envPairs.map fun (k, v) => (k, some v)
+          childEnv := childEnv.push ("ORB_VOICE_MODEL_DIR", some modelDir)
+          if fakeMode then
+            childEnv := childEnv.push ("ORB_VOICE_FAKE", some "1")
+          let rawChild ← IO.Process.spawn {
+            cmd := pyBin
+            args := #[scriptPath]
+            env := childEnv
+            stdin := .piped
+            stdout := .piped
+            stderr := .null
+          }
+          let (stdinH, child) ← rawChild.takeStdin
+          let fresh : VoiceWorkerProc := { pythonBin := pyBin, scriptPath := scriptPath, nextReqId := 1, stdinH := stdinH, child := child }
+          set (some fresh)
+          pure fresh
+        catch e =>
+          set (none : Option VoiceWorkerProc)
+          return .error s!"python_missing: {e}"
+    let reqId := srv.nextReqId
+    set (some { srv with nextReqId := reqId + 1 })
+    let mut fields : Array (String × JVal) := #[("id", JVal.nat reqId), ("op", .str op)] ++ extraFields
+    if !rawAudio.isEmpty then
+      fields := fields.push ("audio_bytes", JVal.nat rawAudio.size)
+    let hdrLine := renderCompact (.obj fields) ++ "\n"
+    try
+      srv.stdinH.putStr hdrLine
+      if !rawAudio.isEmpty then
+        srv.stdinH.write rawAudio
+      srv.stdinH.flush
+      let line ← srv.child.stdout.getLine
+      let trimmed := line.trimAscii.toString
+      if trimmed.isEmpty then
+        let curNow ← get
+        stopVoiceWorkerProc curNow
+        set (none : Option VoiceWorkerProc)
+        return .error "worker_exited"
+      match OrbBin.Json.parse trimmed with
+      | .error e =>
+        let curNow ← get
+        stopVoiceWorkerProc curNow
+        set (none : Option VoiceWorkerProc)
+        return .error s!"protocol: {e}"
+      | .ok resp =>
+        if (resp.fieldBool? "ok") == some true then
+          return .ok ((resp.field? "result").getD (.obj #[]))
+        else
+          let errObj := (resp.field? "error").getD (.obj #[])
+          let code := (errObj.fieldStr? "code").getD "error"
+          let msg := (errObj.fieldStr? "message").getD "Voice worker error"
+          return .error s!"{code}: {msg}"
+    catch e =>
+      let curNow ← get
+      stopVoiceWorkerProc curNow
+      set (none : Option VoiceWorkerProc)
+      return .error s!"worker_exited: {e}"
+
+private def cancelVoiceWorker : IO Bool := do
+  voiceWorkerMutex.atomically do
+    let cur ← get
+    set (none : Option VoiceWorkerProc)
+    match cur with
+    | none => return false
+    | some srv =>
+      stopVoiceWorkerProc (some srv)
+      return true
+
+/-! ### Local CLI Agent Discovery, Execution & Skills Sync -/
+
+private def candidateAgentBinDirs (homeDir : String) : Array String :=
+  let h := homeDir.trimAscii.toString
+  let userDirs :=
+    if h.isEmpty then #[]
+    else #[
+      s!"{h}/.local/bin",
+      s!"{h}/.opencode/bin",
+      s!"{h}/.cargo/bin",
+      s!"{h}/.bun/bin",
+      s!"{h}/bin"
+    ]
+  userDirs ++ #["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+
+private def resolveAgentExecutable? (homeDir : String) (binName : String) (override? : Option String) : IO (Option String) := do
+  if let some ov := override? then
+    let clean := ov.trimAscii.toString
+    if !clean.isEmpty then
+      let st ← OrbBin.PosixExt.statPath clean
+      if st.exists_ && (st.isReg || st.isSymlink) then
+        return some clean
+      return none
+  let pathEnv := ((← IO.getEnv "PATH").getD "").splitOn ":" |>.filter (fun s => !s.trimAscii.toString.isEmpty)
+  let searchDirs := pathEnv.toArray ++ candidateAgentBinDirs homeDir
+  for d in searchDirs do
+    let cand := (System.FilePath.mk d.trimAscii.toString / binName).toString
+    if (← System.FilePath.pathExists cand) then
+      let st ← OrbBin.PosixExt.statPath cand
+      if st.exists_ && !st.isDir then
+        return some cand
+  return none
+
+private def localHarnessSpecs : Array (String × String × String × Bool × String) := #[
+  ("claudecode", "Claude Code", "claude", true, "npm install -g @anthropic-ai/claude-code"),
+  ("codex", "Codex", "codex", false, "npm install -g @openai/codex"),
+  ("grok", "Grok", "grok", false, "Install the Grok CLI in ~/.local/bin or /opt/homebrew/bin"),
+  ("opencode", "OpenCode", "opencode", true, "curl -fsSL https://opencode.ai/install | bash"),
+  ("antigravity", "Antigravity CLI", "agy", false, "Install Google Antigravity (`agy`)"),
+  ("vibe", "Mistral Vibe", "vibe", true, "uv tool install mistral-vibe")
+]
+
+private def scanLocalAgents (st : LocaldState) (overridesObj : JVal) : IO (Array JVal) := do
+  let tasks ← localHarnessSpecs.mapM fun (hid, _label, defaultBin, planSup, _instr) =>
+    IO.asTask (prio := .dedicated) do
+      let ov? := overridesObj.fieldStr? hid
+      let resolved? ← resolveAgentExecutable? st.homeDir defaultBin ov?
+      match resolved? with
+      | none =>
+        return JVal.obj #[
+          ("id", .str hid),
+          ("bin", .str defaultBin),
+          ("path", .null),
+          ("version", .null),
+          ("installed", .bool false),
+          ("plan_supported", .bool planSup)
+        ]
+      | some binPath =>
+        let verOut? ← readCommandStdout? binPath #["--version"]
+        let verFirst := verOut?.map fun v => ((v.splitOn "\n").head?.getD v).trimAscii.toString
+        return JVal.obj #[
+          ("id", .str hid),
+          ("bin", .str defaultBin),
+          ("path", .str binPath),
+          ("version", match verFirst with | some v => (if v.isEmpty then .null else .str v) | none => .null),
+          ("installed", .bool true),
+          ("plan_supported", .bool planSup)
+        ]
+  let mut rows : Array JVal := Array.mkEmpty tasks.size
+  for t in tasks do
+    match t.get with
+    | .ok row => rows := rows.push row
+    | .error _ => pure ()
+  return rows
+
+private def extractStreamLineDelta (harness line : String) : (String × Option String) := Id.run do
+  let trimmed := line.trimAscii.toString
+  if trimmed.isEmpty then return ("", none)
+  if !trimmed.startsWith "{" then
+    return (line ++ "\n", none)
+  match OrbBin.Json.parse trimmed with
+  | .error _ => return (line ++ "\n", none)
+  | .ok jv =>
+    let sid? := (jv.fieldStr? "session_id").orElse (fun _ =>
+      (jv.fieldStr? "sessionId").orElse (fun _ => jv.fieldStr? "thread_id"))
+    let typ := (jv.fieldStr? "type").getD ""
+    if harness == "claudecode" then
+      if typ == "assistant" then
+        if let some msg := jv.field? "message" then
+          if let some blocks := msg.fieldArr? "content" then
+            let mut acc := ""
+            for b in blocks do
+              if (b.fieldStr? "type") == some "text" then
+                if let some tx := b.fieldStr? "text" then acc := acc ++ tx
+            if !acc.isEmpty then return (acc, sid?)
+      if typ == "result" then
+        if let some resTxt := jv.fieldStr? "result" then
+          return (resTxt, sid?)
+      return ("", sid?)
+    else if harness == "codex" then
+      if typ == "item.completed" then
+        if let some item := jv.field? "item" then
+          if (item.fieldStr? "type") == some "agent_message" then
+            if let some tx := item.fieldStr? "text" then
+              return (tx ++ "\n", sid?)
+      return ("", sid?)
+    else if harness == "opencode" then
+      if typ == "text" then
+        if let some part := jv.field? "part" then
+          if let some tx := part.fieldStr? "text" then return (tx, sid?)
+        if let some tx := jv.fieldStr? "text" then return (tx, sid?)
+      return ("", sid?)
+    else
+      if let some tx := jv.fieldStr? "text" then return (tx, sid?)
+      return ("", sid?)
+
+private def localRunRecordToPollJson (r : LocalRunRecord) : JVal :=
+  .obj #[
+    ("text", .str r.text),
+    ("done", .bool r.done),
+    ("exit_code", match r.exitCode? with | some c => .num (toString c) | none => .null),
+    ("session_id", match r.sessionId? with | some s => .str s | none => .null),
+    ("error", match r.error? with | some e => .str e | none => .null),
+    ("retryable", .bool r.retryable),
+    ("resumed", .bool r.resumed),
+    ("activities", .arr r.activities)
+  ]
+
+private def buildLocalAgentSpawnArgs (harness prompt model effort sessionId : String) (planMode : Bool) : Array String := Id.run do
+  if harness == "claudecode" then
+    let mut a := #["-p", "--output-format", "stream-json", "--verbose"]
+    if planMode then a := a ++ #["--permission-mode", "plan"]
+    else a := a ++ #["--dangerously-skip-permissions"]
+    if !model.isEmpty then a := a ++ #["--model", model]
+    if !sessionId.isEmpty then a := a ++ #["--resume", sessionId]
+    return a.push prompt
+  else if harness == "codex" then
+    let mut a := #["exec", "--json", "--dangerously-bypass-approvals-and-sandbox"]
+    if !model.isEmpty then a := a ++ #["-m", model]
+    if !effort.isEmpty then a := a ++ #["-c", s!"model_reasoning_effort=\"{effort}\""]
+    return a.push prompt
+  else if harness == "opencode" then
+    let mut a := #["run", "--format", "json"]
+    if !model.isEmpty then a := a ++ #["-m", model]
+    if planMode then a := a ++ #["--agent", "plan"]
+    if !sessionId.isEmpty then a := a ++ #["-s", sessionId]
+    return a.push prompt
+  else if harness == "grok" then
+    let mut a := #["-p", prompt]
+    if !model.isEmpty then a := a ++ #["-m", model]
+    return a
+  else
+    return #[prompt]
+
+private def spawnLocalAgentRunner
+    (stRef : IO.Ref LocaldState)
+    (missionId runUuid harness binPath cwd prompt model effort sessionId : String)
+    (generation : Nat) (planMode : Bool) : IO Unit := do
+  let cliArgs := buildLocalAgentSpawnArgs harness prompt model effort sessionId planMode
+  discard <| IO.asTask (prio := .dedicated) do
+    let mut fullText := ""
+    let mut finalSession? : Option String := if sessionId.isEmpty then none else some sessionId
+    let mut exitCode? : Option Int := none
+    let mut errMsg? : Option String := none
+    try
+      let child ← IO.Process.spawn {
+        cmd := binPath
+        args := cliArgs
+        cwd := some (System.FilePath.mk cwd)
+        stdin := .null
+        stdout := .piped
+        stderr := .piped
+      }
+      let errTask ← IO.asTask child.stderr.readToEnd Task.Priority.dedicated
+      let mut eof := false
+      while !eof do
+        let line ← try child.stdout.getLine catch _ => pure ""
+        if line.isEmpty then
+          eof := true
+        else
+          let (delta, sid?) := extractStreamLineDelta harness line
+          if let some sid := sid? then finalSession? := some sid
+          if !delta.isEmpty then
+            fullText := fullText ++ delta
+            stRef.modify fun s =>
+              let curRuns := s.localRuns.map fun r =>
+                if r.id == missionId && r.runUuid == runUuid then { r with text := fullText, sessionId? := finalSession? } else r
+              let evPayload : JVal := .obj #[("text", .str delta), ("reset", .bool false)]
+              ({ s with localRuns := curRuns }).publishChannelEvent "local_agents" evPayload (some missionId)
+      let code ← child.wait
+      let errStr ← IO.ofExcept errTask.get
+      exitCode? := some (Int.ofNat code.toNat)
+      if code != 0 && fullText.trimAscii.toString.isEmpty then
+        let cleanErr := errStr.trimAscii.toString
+        errMsg? := some (if cleanErr.isEmpty then s!"{harness} exited with status {code}" else cleanErr)
+    catch e =>
+      errMsg? := some (toString e)
+    let nowIso := formatUtcIso8601 (← OrbBin.PosixExt.nowEpoch)
+    let stAfter ← stRef.modifyGet fun s =>
+      let finalRec : LocalRunRecord := {
+        id := missionId
+        runUuid := runUuid
+        generation := generation
+        harness := harness
+        text := fullText
+        done := true
+        exitCode? := exitCode?
+        sessionId? := finalSession?
+        error? := errMsg?
+        retryable := false
+        resumed := !sessionId.isEmpty
+      }
+      let nextRuns :=
+        if s.localRuns.any (fun r => r.id == missionId) then
+          s.localRuns.map fun r => if r.id == missionId then finalRec else r
+        else s.localRuns.push finalRec
+      let nextOrigins := s.localOrigins.map fun orig =>
+        if orig.id == missionId then
+          let nextHist :=
+            if fullText.trimAscii.toString.isEmpty then orig.history
+            else orig.history.push (.obj #[("role", .str "assistant"), ("content", .str fullText)])
+          { orig with
+              localRunActive := false
+              status := if errMsg?.isSome then "failed" else "completed"
+              updatedAt := nowIso
+              history := nextHist }
+        else orig
+      let pollJson := localRunRecordToPollJson finalRec
+      let termEv : JVal := .obj #[("text", .str ""), ("reset", .bool false), ("state", pollJson)]
+      let s1 := ({ s with localRuns := nextRuns, localOrigins := nextOrigins }).publishChannelEvent "local_agents" termEv (some missionId)
+      (s1, s1)
+    persistOriginsSnapshot stAfter
+
+/-! ### Local Skills Inspection & Sync (`local_skills_status` / `local_skills_sync`) -/
+
+private def skillHarnessDisplayNames : Array (String × String) := #[
+  ("claudecode", "Claude Code"),
+  ("codex", "Codex"),
+  ("antigravity", "Antigravity CLI"),
+  ("opencode", "OpenCode"),
+  ("grok", "Grok"),
+  ("vibe", "Mistral Vibe")
+]
+
+private def countLines (s : String) : Nat :=
+  if s.isEmpty then 0 else (s.splitOn "\n").length
+
+private def buildLocalSkillsReport (st : LocaldState) (libSkills : Array JVal) : IO JVal := do
+  let checkedAt := (← OrbBin.PosixExt.nowEpoch).toNat * 1000
+  let envHome := (← IO.getEnv "HOME").getD "/tmp"
+  let homeStr := if st.homeDir.trimAscii.toString.isEmpty then envHome else st.homeDir
+  let homeFp := System.FilePath.mk homeStr
+  let pyVer? ← readCommandStdout? "python3" #["--version"]
+  let idReady ← if st.homeDir.trimAscii.toString.isEmpty then pure false else (homeFp / ".ssh" / "paloma.pub").pathExists
+  let preflight : JVal := .obj #[
+    ("python3_ready", .bool pyVer?.isSome),
+    ("python3_version", match pyVer? with | some v => .str v | none => .null),
+    ("pyyaml_ready", .bool true),
+    ("preflight_error", .null),
+    ("identity_ready", .bool idReady),
+    ("identity_fingerprint", .null),
+    ("identity_updated_at", .null)
+  ]
+  let libNames : Array (String × String) := libSkills.filterMap fun item => do
+    let n ← item.fieldStr? "name"
+    let c := (item.fieldStr? "content").getD ""
+    return (n, c)
+  let mut harnessTargets : Array JVal := #[]
+  let mut discoveredMap : Array (String × Option String × Array String × Bool × Option String) := #[]
+  for (hid, hname) in skillHarnessDisplayNames do
+    if let some (globalRel, projectRel) := harnessSkillTargets hid then
+      let gdir := homeFp / globalRel
+      let existsDir ← gdir.pathExists
+      let entries ← if existsDir then (try gdir.readDir catch _ => pure #[]) else pure #[]
+      let mut skillCount := 0
+      let mut syncedCount := 0
+      let mut presentNames : Array String := #[]
+      let mut outdated : Array String := #[]
+      let mut staleManaged : Array String := #[]
+      for ent in entries do
+        let sname := ent.fileName
+        if validSkillIdentifier sname then
+          let md := ent.path / "SKILL.md"
+          let mst ← OrbBin.PosixExt.statPath md.toString
+          if mst.exists_ && mst.isReg && !mst.isSymlink then
+            skillCount := skillCount + 1
+            presentNames := presentNames.push sname
+            let content ← try IO.FS.readFile md catch _ => pure ""
+            let isManaged ← (ent.path / ".managed-by-orb-skills").pathExists
+            match libNames.find? (fun (ln, _) => ln == sname) with
+            | some (_, libContent) =>
+              if content.trimAscii.toString == libContent.trimAscii.toString then
+                syncedCount := syncedCount + 1
+              else
+                outdated := outdated.push sname
+            | none =>
+              if isManaged && !libNames.isEmpty then
+                staleManaged := staleManaged.push sname
+            let desc? := extractSkillDescription content
+            let preview := (content.take 400).toString
+            if let some idx := discoveredMap.findIdx? (fun (dn, _, _, _, _) => dn == sname) then
+              let (dn, dd, dhs, dm, dp) := discoveredMap[idx]!
+              discoveredMap := discoveredMap.set! idx (dn, dd.orElse (fun _ => desc?), dhs.push hid, dm || isManaged, dp)
+            else
+              discoveredMap := discoveredMap.push (sname, desc?, #[hid], isManaged, some preview)
+      let missing := libNames.filterMap fun (ln, _) =>
+        if presentNames.contains ln then none else some ln
+      harnessTargets := harnessTargets.push (.obj #[
+        ("id", .str hid),
+        ("name", .str hname),
+        ("global_rel", .str globalRel),
+        ("global_path", .str gdir.toString),
+        ("project_rel", .str projectRel),
+        ("exists", .bool existsDir),
+        ("skill_count", JVal.nat skillCount),
+        ("synced_count", JVal.nat syncedCount),
+        ("canonical_total", JVal.nat libNames.size),
+        ("missing_skills", .arr (missing.map .str)),
+        ("outdated_skills", .arr (outdated.map .str)),
+        ("stale_managed", .arr (staleManaged.map .str))
+      ])
+  for (ln, lc) in libNames do
+    if !(discoveredMap.any (fun (dn, _, _, _, _) => dn == ln)) then
+      discoveredMap := discoveredMap.push (ln, extractSkillDescription lc, #[], true, some (lc.take 400).toString)
+  let skillsJson : Array JVal := (discoveredMap.qsort (fun a b => a.1 < b.1)).map fun (sname, desc?, hlist, managed, prev?) =>
+    let inLib := libNames.any (fun (ln, _) => ln == sname)
+    .obj #[
+      ("name", .str sname),
+      ("description", match desc? with | some d => .str d | none => .null),
+      ("origin", .str (if inLib then "library" else "local")),
+      ("source_path", .null),
+      ("harnesses", .arr (hlist.map .str)),
+      ("managed", .bool managed),
+      ("content_preview", match prev? with | some p => .str p | none => .null),
+      ("in_library", .bool inLib),
+      ("desired", .bool inLib),
+      ("lines", JVal.nat (match prev? with | some p => countLines p | none => 0))
+    ]
+  return .obj #[
+    ("checked_at", JVal.nat checkedAt),
+    ("home_dir", .str homeStr),
+    ("preflight", preflight),
+    ("sources", .arr #[]),
+    ("harnesses", .arr harnessTargets),
+    ("skills", .arr skillsJson),
+    ("library_known", .bool (!libSkills.isEmpty))
+  ]
+
+/-! ### Loopback Desktop GitHub OAuth Listener (`github_oauth_sign_in`) -/
+
+private def percentEncodeComponent (s : String) : String := Id.run do
+  let hex := "0123456789ABCDEF".toList.toArray
+  let mut out := ""
+  for b in s.toUTF8 do
+    let isUnreserved :=
+      (0x41 ≤ b && b ≤ 0x5A) || (0x61 ≤ b && b ≤ 0x7A) || (0x30 ≤ b && b ≤ 0x39) ||
+      b == 0x2D || b == 0x2E || b == 0x5F || b == 0x7E
+    if isUnreserved then
+      out := out.push (Char.ofNat b.toNat)
+    else
+      let hi := hex[((b >>> 4) &&& 0x0F).toNat]!
+      let lo := hex[(b &&& 0x0F).toNat]!
+      out := out ++ "%" ++ String.ofList [hi, lo]
+  return out
+
+private def runGitHubDesktopOAuth (hostOs apiUrl : String) (state? : Option String) : IO (Except String JVal) := do
+  let cleanBase := OrbBin.PosixExt.stripTrailingSlash apiUrl.trimAscii.toString
+  if !isSafeHttpUrl cleanBase then
+    return .error "Enter a valid http:// or https:// API URL first"
+  let (listenFd, boundPort) ← match ← LeanSys.Posix.tcpListen "127.0.0.1" 0 4 with
+    | .ok pair => pure pair
+    | .error e => return .error s!"Could not start local sign-in listener: {e}"
+  try
+    let redirectUri := s!"http://127.0.0.1:{boundPort}/auth/callback"
+    let mut startUrl := s!"{cleanBase}/api/auth/github/start?redirect={percentEncodeComponent redirectUri}"
+    if let some stVal := state? then
+      if !stVal.trimAscii.toString.isEmpty then
+        startUrl := startUrl ++ s!"&state={percentEncodeComponent stVal.trimAscii.toString}"
+    if let .error e ← runDetachedOpen hostOs #[startUrl] then
+      return .error s!"Could not open browser for GitHub sign-in: {e}"
+    let t0 ← IO.monoMsNow
+    let deadlineMs : Nat := 180000
+    let mut callbackUrl? : Option String := none
+    while callbackUrl?.isNone && (← IO.monoMsNow) - t0 < deadlineMs do
+      match ← LeanSys.Posix.tcpAcceptPoll listenFd 250 with
+      | .error _ => pure ()
+      | .ok cfd =>
+        try
+          match ← LeanSys.Http.readHttpRequestFromFd cfd none 5000 with
+          | .error _ => pure ()
+          | .ok req =>
+            if req.path.startsWith "/auth/callback" then
+              let html :=
+                "<!doctype html><html><head><meta charset=\"utf-8\"><title>Orb Sign-In</title>" ++
+                "<style>body{font-family:-apple-system,system-ui,sans-serif;background:#111;color:#eee;display:grid;place-items:center;height:100vh;margin:0}</style></head>" ++
+                "<body><div><h2>Signed in to Orb</h2><p>You can close this tab and return to Orb.</p></div></body></html>"
+              let body := html.toUTF8
+              let head :=
+                s!"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {body.size}\r\nConnection: close\r\n\r\n"
+              discard <| LeanSys.Posix.writeAll cfd (head.toUTF8 ++ body) false
+              callbackUrl? := some s!"http://127.0.0.1:{boundPort}{req.path}"
+            else
+              let head := "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+              discard <| LeanSys.Posix.writeAll cfd head.toUTF8 false
+        finally
+          discard <| LeanSys.Posix.closeFd cfd
+    match callbackUrl? with
+    | some u => return .ok (.str u)
+    | none => return .error "GitHub sign-in timed out before completing in the browser."
+  finally
+    discard <| LeanSys.Posix.closeFd listenFd
 
 /-- Parse an origin URL (`https://host[:port][/pfx]` or bracketed IPv6 `https://[::1][:port][/pfx]`)
     into `(isTls, bareHost, port, pathPrefix)`. -/
@@ -1357,12 +2315,212 @@ def parseOriginHostPort (raw : String) : Option (Bool × String × UInt16 × Str
           | none => none
       | _ => none
 
+/-- Execute `local_machine_transfer` operations confined to a canonical workspace root. -/
+private def handleLocalMachineTransfer (stRef : IO.Ref LocaldState) (args : JVal) : IO (Except String JVal) := do
+  ensurePersistedBindingsLoaded stRef
+  let st ← stRef.get
+  let missionId := ((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "mission_id")).getD ""
+  let transferId := ((args.fieldStr? "transferId").orElse (fun _ => args.fieldStr? "transfer_id")).getD "default"
+  let side := (args.fieldStr? "side").getD "source"
+  let opObj := (args.field? "operation").getD (.obj #[])
+  let op := (opObj.fieldStr? "op").getD ""
+  let resolveRoot : IO (Except String String) := do
+    if side == "destination" then
+      let baseDir : System.FilePath :=
+        match resolveOrbStateDir st with
+        | some d => d / "local-workspaces" / s!"transfer-{sanitizeSlug transferId}"
+        | none =>
+          let h := if st.homeDir.trimAscii.toString.isEmpty then "/tmp" else st.homeDir.trimAscii.toString
+          System.FilePath.mk h / ".orb" / "local-workspaces" / s!"transfer-{sanitizeSlug transferId}"
+      IO.FS.createDirAll baseDir
+      match ← canonicalizeExistingPath? baseDir.toString with
+      | some rp =>
+        stRef.modify fun s =>
+          if s.grantedBrowseRoots.contains rp then s else { s with grantedBrowseRoots := s.grantedBrowseRoots.push rp }
+        return .ok rp
+      | none => return .error "Could not resolve transfer destination workspace"
+    else
+      let cwd? := (st.bindingsEntries.find? (fun (k, _) => k == missionId)).bind (fun (_, bv) => bv.fieldStr? "cwd")
+        |>.orElse (fun _ => (st.localOrigins.find? (fun o => o.id == missionId)).map (·.workingDirectory))
+      let some rawCwd := cwd? | return .error "The source workspace is unavailable on this computer."
+      match ← canonicalizeExistingPath? rawCwd with
+      | some rp =>
+        if rp == "/" then return .error "Refusing root filesystem in machine transfer"
+        return .ok rp
+      | none => return .error "Source workspace directory does not exist"
+  let rootReal ← match ← resolveRoot with
+    | .ok r => pure r
+    | .error e => return .error e
+  let rootFp := System.FilePath.mk rootReal
+  let collectWorkspaceFiles : IO (Array (String × Nat × String × Bool) × Array JVal × Nat) := do
+    let mut files : Array (String × Nat × String × Bool) := #[]
+    let mut skipped : Array JVal := #[]
+    let mut protectedCount : Nat := 0
+    let mut stack : Array String := #[""]
+    while !stack.isEmpty && files.size < 5000 do
+      let relDir := stack.back!
+      stack := stack.pop
+      let curFp := if relDir.isEmpty then rootFp else rootFp / relDir
+      let entries ← try curFp.readDir catch _ => pure #[]
+      for ent in entries do
+        let name := ent.fileName
+        if !name.isEmpty && name != "." && name != ".." && name != "node_modules" && name != ".lake" && name != "target" then
+          let relPath := if relDir.isEmpty then name else s!"{relDir}/{name}"
+          if isSecretRelPath relPath then
+            protectedCount := protectedCount + 1
+            skipped := skipped.push (.obj #[("path", .str relPath), ("reason", .str "protected")])
+          else
+            let lst ← OrbBin.PosixExt.statPath ent.path.toString
+            if lst.isSymlink then
+              skipped := skipped.push (.obj #[("path", .str relPath), ("reason", .str "symlink")])
+            else if lst.isDir then
+              if let some subReal ← canonicalizeExistingPath? ent.path.toString then
+                if isCanonicalWithinRoot subReal rootReal then
+                  stack := stack.push relPath
+            else if lst.isReg then
+              if let some fReal ← canonicalizeExistingPath? ent.path.toString then
+                if isCanonicalWithinRoot fReal rootReal then
+                  let raw ← try IO.FS.readBinFile (System.FilePath.mk fReal) catch _ => pure ByteArray.empty
+                  let sha := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes raw)
+                  let exec := (lst.mode &&& 0o111) != 0
+                  files := files.push (relPath, raw.size, sha, exec)
+    let sorted := files.qsort (fun a b => a.1 < b.1)
+    return (sorted, skipped, protectedCount)
+  match op with
+  | "inventory" =>
+    let (files, _, protectedCount) ← collectWorkspaceFiles
+    let totalBytes := files.foldl (fun acc (_, b, _, _) => acc + b) 0
+    let rows : Array JVal := (files.take 200).map fun (p, b, _, _) =>
+      .obj #[("path", .str p), ("folder", .bool false), ("state", .str "moved"), ("bytes", JVal.nat b), ("files", JVal.nat 1)]
+    return .ok (.obj #[
+      ("rows", .arr rows),
+      ("bytes", JVal.nat totalBytes),
+      ("files", JVal.nat files.size),
+      ("truncated", .bool (files.size > 200)),
+      ("protected", JVal.nat protectedCount),
+      ("limits", .obj #[("bytes", JVal.nat (512 * 1024 * 1024)), ("files", JVal.nat 5000)])
+    ])
+  | "select" =>
+    return .ok (.obj #[("ok", .bool true)])
+  | "snapshot" =>
+    let (files, skipped, _) ← collectWorkspaceFiles
+    let totalBytes := files.foldl (fun acc (_, b, _, _) => acc + b) 0
+    let filesJson : Array JVal := files.map fun (p, b, sha, exec) =>
+      .obj #[("path", .str p), ("bytes", JVal.nat b), ("sha256", .str sha), ("executable", .bool exec)]
+    return .ok (.obj #[
+      ("files", .arr filesJson),
+      ("excluded", .arr #[]),
+      ("bytes", JVal.nat totalBytes),
+      ("links", .arr #[]),
+      ("skipped", .arr skipped)
+    ])
+  | "stage" =>
+    let manifest := (opObj.field? "manifest").getD (.obj #[])
+    let mfiles := (manifest.fieldArr? "files").getD #[]
+    let mut received : Array (String × JVal) := #[]
+    for mf in mfiles do
+      if let some p := (mf.fieldStr? "path").bind isSafeRelSubpath then
+        let fp := rootFp / p
+        let lst ← OrbBin.PosixExt.statPath fp.toString
+        if lst.exists_ && lst.isReg && !lst.isSymlink then
+          let m ← try pure (some (← fp.metadata)) catch _ => pure none
+          if let some meta_ := m then
+            received := received.push (p, JVal.nat meta_.byteSize.toNat)
+    let manifestBytes ← IO.FS.writeFile (rootFp / ".orb-transfer-manifest.json") (renderCompact manifest)
+    let _ := manifestBytes
+    return .ok (.obj #[("sealed", .bool false), ("received", .obj received)])
+  | "read" =>
+    let some rel := (opObj.fieldStr? "path").bind isSafeRelSubpath
+      | return .error "Invalid transfer file path"
+    let offset := (opObj.fieldNat? "offset").getD 0
+    let target := rootFp / rel
+    let lst ← OrbBin.PosixExt.statPath target.toString
+    if !lst.exists_ || !lst.isReg || lst.isSymlink then
+      return .error "Transfer source file missing or symlink"
+    let some realTarget ← canonicalizeExistingPath? target.toString
+      | return .error "Cannot canonicalize transfer source file"
+    if !isCanonicalWithinRoot realTarget rootReal then
+      return .error "Transfer source file escapes workspace root"
+    let h ← IO.FS.Handle.mk (System.FilePath.mk realTarget) .read
+    h.rewind
+    let mut skipped : Nat := 0
+    while skipped < offset do
+      let step := min (offset - skipped) 1048576
+      let chunk ← h.read step.toUSize
+      if chunk.isEmpty then skipped := offset else skipped := skipped + chunk.size
+    let block ← h.read (1048576 : USize)
+    return .ok (.obj #[("data", .str (OrbBin.PosixExt.base64Encode block))])
+  | "write" =>
+    let some rel := (opObj.fieldStr? "path").bind isSafeRelSubpath
+      | return .error "Invalid transfer write path"
+    if isSecretRelPath rel then
+      return .error "Refusing to write protected path"
+    let offset := (opObj.fieldNat? "offset").getD 0
+    let dataB64 := (opObj.fieldStr? "data").getD ""
+    let some rawBytes := OrbBin.PosixExt.base64Decode? dataB64
+      | return .error "Invalid base64 block in transfer write"
+    let target := rootFp / rel
+    if let some parent := target.parent then
+      IO.FS.createDirAll parent
+      let some parentReal ← canonicalizeExistingPath? parent.toString
+        | return .error "Cannot resolve transfer destination directory"
+      if !isCanonicalWithinRoot parentReal rootReal then
+        return .error "Transfer destination parent escapes workspace root"
+    let lst ← OrbBin.PosixExt.statPath target.toString
+    if lst.isSymlink then
+      return .error "Refusing to overwrite symlink in transfer destination"
+    if offset == 0 || !lst.exists_ then
+      IO.FS.writeBinFile target rawBytes
+    else
+      let existing ← IO.FS.readBinFile target
+      let prefixBytes := if existing.size > offset then existing.extract 0 offset else existing
+      IO.FS.writeBinFile target (prefixBytes ++ rawBytes)
+    return .ok (.obj #[("written", JVal.nat rawBytes.size)])
+  | "verify" =>
+    let manifestPath := rootFp / ".orb-transfer-manifest.json"
+    let mut totalBytes := 0
+    let mut fileCount := 0
+    let mut digestInput := ""
+    if (← manifestPath.pathExists) then
+      let mraw ← IO.FS.readFile manifestPath
+      if let .ok mjv := OrbBin.Json.parse mraw then
+        for mf in (mjv.fieldArr? "files").getD #[] do
+          if let some rel := (mf.fieldStr? "path").bind isSafeRelSubpath then
+            let expectedSha := (mf.fieldStr? "sha256").getD ""
+            let exec := (mf.fieldBool? "executable").getD false
+            let fp := rootFp / rel
+            let lst ← OrbBin.PosixExt.statPath fp.toString
+            if !lst.exists_ || !lst.isReg || lst.isSymlink then
+              return .error s!"Missing transferred file: {rel}"
+            let bytes ← IO.FS.readBinFile fp
+            let actualSha := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes bytes)
+            if !expectedSha.isEmpty && actualSha != expectedSha.toLower then
+              return .error s!"Digest mismatch on transferred file: {rel}"
+            if exec then
+              discard <| OrbBin.PosixExt.chmod fp.toString 0o755
+            totalBytes := totalBytes + bytes.size
+            fileCount := fileCount + 1
+            digestInput := digestInput ++ s!"{rel}:{actualSha}\n"
+      try IO.FS.removeFile manifestPath catch _ => pure ()
+    let digest := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes digestInput.toUTF8)
+    return .ok (.obj #[
+      ("root", .str rootReal),
+      ("bytes", JVal.nat totalBytes),
+      ("files", JVal.nat fileCount),
+      ("digest", .str digest)
+    ])
+  | "check_source" =>
+    return .ok (.obj #[("ok", .bool true), ("root", .str rootReal)])
+  | _ =>
+    return .error s!"Unsupported machine transfer operation: {op}"
+
 /-- Pure/IO dispatcher for all desktop IPC commands plus internal `__orb_poll_events`. -/
 def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal) : IO (Except String JVal) := do
   let st ← stRef.get
   match cmd with
   | "plugin:app|version" =>
-    return .ok (.str "0.13.0")
+    let ver := (← OrbBin.PosixExt.getEnvNonEmpty "ORB_APP_VERSION").getD "0.13.0"
+    return .ok (.str ver)
   | "transport_bridge_configure" =>
     let shardCountU8 : UInt8 := UInt8.ofNat st.bridge.shardPorts.size
     if verifySseShardConfig shardCountU8 st.bridge.proxyPort != 1 ||
@@ -1383,10 +2541,18 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           pool.prewarm host port true 6000
     return .ok nextBridge.toJson
   | "__orb_poll_events" =>
+    let tokFilter? : Option (Array Nat) := (args.fieldArr? "tokens").map (fun xs => xs.filterMap (·.asNat?))
     let evs ← stRef.modifyGet fun s =>
-      let items := s.queuedChannelEvents.map fun (tok, payload) =>
-        JVal.obj #[("token", JVal.nat tok), ("payload", payload)]
-      (JVal.arr items, { s with queuedChannelEvents := #[] })
+      match tokFilter? with
+      | none =>
+        let items := s.queuedChannelEvents.map fun (tok, payload) =>
+          JVal.obj #[("token", JVal.nat tok), ("payload", payload)]
+        (JVal.arr items, { s with queuedChannelEvents := #[] })
+      | some wanted =>
+        let (matched, remaining) := s.queuedChannelEvents.partition (fun (tok, _) => wanted.contains tok)
+        let items := matched.map fun (tok, payload) =>
+          JVal.obj #[("token", JVal.nat tok), ("payload", payload)]
+        (JVal.arr items, { s with queuedChannelEvents := remaining })
     return .ok evs
   | "desktop_connection_load" =>
     match connectionFilePath? st with
@@ -1444,17 +2610,24 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let name := (args.fieldStr? "name").getD ""
     if !isSafeBasename name || st.homeDir.trimAscii.toString.isEmpty then
       return .error "Could not reveal download"
-    let dlPath := System.FilePath.mk st.homeDir.trimAscii.toString / "Downloads" / name.trimAscii.toString
-    if !(← dlPath.pathExists) then
+    let dlDir := System.FilePath.mk st.homeDir.trimAscii.toString / "Downloads"
+    let dlPath := dlDir / name.trimAscii.toString
+    if (← dlPath.pathExists) then
+      let openArgs := if st.hostOs == "macos" then #["-R", dlPath.toString] else #[dlDir.toString]
+      match ← runDetachedOpen st.hostOs openArgs with
+      | .ok () => return .ok .null
+      | .error e => return .error s!"Could not reveal download: {e}"
+    else if (← dlDir.pathExists) then
+      match ← runDetachedOpen st.hostOs #[dlDir.toString] with
+      | .ok () => return .ok .null
+      | .error e => return .error s!"Could not open Downloads folder: {e}"
+    else
       return .error "Download file not found"
-    let openArgs := if st.hostOs == "macos" then #["-R", dlPath.toString] else #[(dlPath.parent.getD (System.FilePath.mk st.homeDir)).toString]
-    match ← runDetachedOpen st.hostOs openArgs with
-    | .ok () => return .ok .null
-    | .error e => return .error s!"Could not reveal download: {e}"
   | "set_window_theme" =>
     return .ok .null
   | "local_machine_metrics" =>
-    let snap ← sampleHostMetrics st.hostOs
+    let details := (args.fieldBool? "details").getD false
+    let snap ← sampleHostMetricsCached stRef details
     return .ok snap
   | "paloma_ssh_pubkey" =>
     if st.homeDir.trimAscii.toString.isEmpty then return .ok .null
@@ -1532,25 +2705,64 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       resetSignerServer
     return .ok .null
   | "biometric_status" =>
-    let avail := st.hostOs == "macos"
-    return .ok (.obj #[
-      ("available", .bool avail),
-      ("kind", .str (if avail then "touch_id" else "none")),
-      ("label", .str (if avail then "Touch ID" else "")),
-      ("biometry_type", .str (if avail then "touch_id" else "none"))
-    ])
+    if st.hostOs != "macos" then
+      return .ok (.obj #[
+        ("available", .bool false),
+        ("kind", .str "none"),
+        ("label", .str ""),
+        ("biometry_type", .str "none")
+      ])
+    match st.signerBin? with
+    | some bin =>
+      if (← System.FilePath.pathExists bin) then
+        match ← runOrbSigner bin #["status"] none with
+        | .ok jv =>
+          let avail := (jv.fieldStr? "available") == some "true" || (jv.fieldBool? "available") == some true
+          let kind := (jv.fieldStr? "kind").getD (if avail then "touch_id" else "none")
+          let label := (jv.fieldStr? "label").getD (if avail then "Touch ID" else "")
+          return .ok (.obj #[
+            ("available", .bool avail),
+            ("kind", .str kind),
+            ("label", .str label),
+            ("biometry_type", .str kind)
+          ])
+        | .error _ =>
+          return .ok (.obj #[
+            ("available", .bool true),
+            ("kind", .str "touch_id"),
+            ("label", .str "Touch ID"),
+            ("biometry_type", .str "touch_id")
+          ])
+      else
+        return .ok (.obj #[
+          ("available", .bool false),
+          ("kind", .str "none"),
+          ("label", .str ""),
+          ("biometry_type", .str "none")
+        ])
+    | none =>
+      return .ok (.obj #[
+        ("available", .bool true),
+        ("kind", .str "touch_id"),
+        ("label", .str "Touch ID"),
+        ("biometry_type", .str "touch_id")
+      ])
   | "biometric_authenticate" =>
     if st.hostOs != "macos" then
-      return .ok (.bool false)
-    else
-      match st.signerBin? with
-      | none => return .ok (.bool false)
-      | some bin =>
-        let rawReason := (args.fieldStr? "reason").getD "Authenticate"
-        let cleanReason := if rawReason.trimAscii.toString.isEmpty then "Authenticate" else rawReason.trimAscii.toString
-        match ← runOrbSigner bin #["auth", "--reason", cleanReason] none with
-        | .ok jv => return .ok (.bool ((jv.fieldStr? "authenticated") == some "true"))
-        | .error _ => return .ok (.bool false)
+      return .error "Biometric authentication is only available on macOS"
+    match st.signerBin? with
+    | none =>
+      return .error "orb-signer binary not found"
+    | some bin =>
+      let rawReason := (args.fieldStr? "reason").getD "Authenticate"
+      let cleanReason := if rawReason.trimAscii.toString.isEmpty then "Authenticate" else rawReason.trimAscii.toString
+      match ← runOrbSigner bin #["auth", "--reason", cleanReason] none with
+      | .ok jv =>
+        let ok := (jv.fieldStr? "authenticated") == some "true" || (jv.fieldBool? "authenticated") == some true
+        if ok then return .ok (.bool true)
+        else return .error "biometric_failed"
+      | .error (2, _) => return .error "biometric_cancelled"
+      | .error (_, msg) => return .error msg
   | "client_link_active" =>
     if (args.fieldBool? "inspect").getD false then
       return .ok st.clientLink.toSummaryJson
@@ -1663,24 +2875,36 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         { s with clientLink := { s.clientLink with startReceipts := nextRecs } }
     return .ok .null
   | "local_bindings_refresh" =>
-    return .ok st.bindingsSnapshotJson
+    ensurePersistedBindingsLoaded stRef
+    let cur ← stRef.get
+    return .ok cur.bindingsSnapshotJson
   | "local_binding_set" =>
+    ensurePersistedBindingsLoaded stRef
     let bid := (args.fieldStr? "id").getD ""
     let bval := (args.field? "binding").getD (.obj #[])
     let ifAbsent := (args.fieldBool? "ifAbsent").getD false
-    let snap ← stRef.modifyGet fun s =>
+    let cwdCanon? ← match bval.fieldStr? "cwd" with
+      | some c => canonicalizeExistingPath? c
+      | none => pure none
+    let (snap, didChange, stAfter) ← stRef.modifyGet fun s =>
       if bid.isEmpty || (ifAbsent && (s.bindingsEntries.any (fun (k, _) => k == bid))) then
-        (s.bindingsSnapshotJson, s)
+        ((s.bindingsSnapshotJson, false, s), s)
       else
         let filtered := s.bindingsEntries.filter (fun (k, _) => k != bid)
         let nextEntries := filtered.push (bid, bval)
         let nextRev := s.bindingsRevision + 1
         let nextSnap : JVal := .obj #[("revision", JVal.nat nextRev), ("bindings", .obj nextEntries)]
-        let pushed := (s.subscriptions.filter (fun e => e.active && e.channel == "local_bindings")).foldl
-          (fun acc e => acc.push (e.token, nextSnap)) s.queuedChannelEvents
-        (nextSnap, { s with bindingsRevision := nextRev, bindingsEntries := nextEntries, queuedChannelEvents := pushed })
+        let nextRoots := match cwdCanon? with
+          | some rp => if rp != "/" && !s.grantedBrowseRoots.contains rp then s.grantedBrowseRoots.push rp else s.grantedBrowseRoots
+          | none => s.grantedBrowseRoots
+        let s1 := { s with bindingsRevision := nextRev, bindingsEntries := nextEntries, grantedBrowseRoots := nextRoots }
+        let s2 := s1.publishChannelEvent "local_bindings" nextSnap
+        ((nextSnap, true, s2), s2)
+    if didChange then
+      persistBindingsSnapshot stAfter
     return .ok snap
   | "local_bindings_subscribe" =>
+    ensurePersistedBindingsLoaded stRef
     let tok ← stRef.modifyGet fun s =>
       s.subscribe "local_bindings" (some s.bindingsSnapshotJson)
     return .ok (JVal.nat tok)
@@ -1697,31 +2921,118 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       s.subscribe "project_context" none
     return .ok (JVal.nat tok)
   | "local_agents_subscribe" =>
+    let rawId := ((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).getD ""
+    let cleanId := rawId.trimAscii.toString
+    let target? : Option String := if cleanId.isEmpty then none else some cleanId
     let tok ← stRef.modifyGet fun s =>
-      s.subscribe "local_agents" none
+      s.subscribe "local_agents" none target?
     return .ok (JVal.nat tok)
   | "local_bindings_unsubscribe" | "local_interaction_unsubscribe"
   | "project_context_unsubscribe" | "local_agents_unsubscribe" =>
     let tok := (args.fieldNat? "token").getD 0
     stRef.modify fun s => s.unsubscribe tok
     return .ok .null
-  | "grant_upload_folder" =>
-    let p := ((args.fieldStr? "path").orElse (fun _ => args.fieldStr? "batch")).getD ""
-    if !p.isEmpty then
-      stRef.modify fun s =>
-        if s.grantedFolders.contains p then s
-        else { s with grantedFolders := s.grantedFolders.push p }
+  | "offer_upload_folder" =>
+    let batch := (args.fieldStr? "batch").getD ""
+    if batch.trimAscii.toString.isEmpty then
+      return .error "Missing upload batch token"
+    let rawRoots := ((args.fieldArr? "roots").getD #[]).filterMap (·.asStr?)
+    let mut canonRoots : Array String := #[]
+    for r in rawRoots do
+      if let some rp ← canonicalizeExistingPath? r then
+        if rp != "/" && !canonRoots.contains rp then
+          canonRoots := canonRoots.push rp
+    if canonRoots.isEmpty then
+      return .error "No valid folder root for upload offer"
+    let rawFiles := (args.fieldArr? "files").getD #[]
+    let mut allowedPairs : Array (String × String) := #[]
+    for item in rawFiles do
+      let rel := (item.fieldStr? "path").getD ""
+      let lp := ((item.fieldStr? "local_path").orElse (fun _ => item.fieldStr? "localPath")).getD ""
+      if !rel.isEmpty && !lp.isEmpty then
+        let lst ← OrbBin.PosixExt.statPath lp
+        if lst.exists_ && lst.isReg && !lst.isSymlink then
+          if let some fpReal ← canonicalizeExistingPath? lp then
+            if canonRoots.any (fun r => isCanonicalWithinRoot fpReal r) then
+              allowedPairs := allowedPairs.push (rel, fpReal)
+    let cleanBatch := batch.trimAscii.toString
+    stRef.modify fun s =>
+      let kept := s.offeredUploadBatches.filter (fun (b, _, _) => b != cleanBatch)
+      { s with offeredUploadBatches := kept.push (cleanBatch, canonRoots, allowedPairs) }
     return .ok .null
+  | "grant_upload_files" =>
+    let rawPaths := ((args.fieldArr? "paths").getD #[]).filterMap (·.asStr?)
+    let mut canonFiles : Array String := #[]
+    for p in rawPaths do
+      let lst ← OrbBin.PosixExt.statPath p
+      if lst.exists_ && lst.isReg && !lst.isSymlink then
+        if let some fpReal ← canonicalizeExistingPath? p then
+          if !canonFiles.contains fpReal then
+            canonFiles := canonFiles.push fpReal
+    if !canonFiles.isEmpty then
+      stRef.modify fun s =>
+        let merged := canonFiles.foldl (fun acc f => if acc.contains f then acc else acc.push f) s.grantedUploadFiles
+        { s with grantedUploadFiles := merged }
+    return .ok .null
+  | "grant_browse_root" =>
+    let rawPath := (args.fieldStr? "path").getD ""
+    let some rp ← canonicalizeExistingPath? rawPath
+      | return .error "Directory does not exist"
+    if rp == "/" then return .error "Refusing root filesystem for browse grant"
+    let lst ← OrbBin.PosixExt.statPath rp
+    if !lst.exists_ || !lst.isDir then return .error "Browse grant path is not a directory"
+    stRef.modify fun s =>
+      if s.grantedBrowseRoots.contains rp then s
+      else { s with grantedBrowseRoots := s.grantedBrowseRoots.push rp }
+    return .ok .null
+  | "grant_upload_folder" =>
+    let key := ((args.fieldStr? "batch").orElse (fun _ => args.fieldStr? "path")).getD ""
+    let cleanKey := key.trimAscii.toString
+    if cleanKey.isEmpty then return .ok .null
+    let relFilter? : Option (Array String) :=
+      (args.fieldArr? "relativePaths").orElse (fun _ => args.fieldArr? "relative_paths")
+        |>.map (fun xs => xs.filterMap (·.asStr?))
+    let curSt ← stRef.get
+    if let some (_, roots, pairs) := curSt.offeredUploadBatches.find? (fun (b, _, _) => b == cleanKey) then
+      let selectedFiles : Array String := pairs.filterMap fun (rel, fpReal) =>
+        match relFilter? with
+        | none => some fpReal
+        | some wanted => if wanted.isEmpty || wanted.contains rel then some fpReal else none
+      stRef.modify fun s =>
+        let kept := s.grantedUploadBatches.filter (fun (b, _) => b != cleanKey)
+        let mergedRoots := roots.foldl (fun acc r => if acc.contains r then acc else acc.push r) s.grantedBrowseRoots
+        { s with
+            grantedUploadBatches := kept.push (cleanKey, selectedFiles)
+            grantedBrowseRoots := mergedRoots }
+      return .ok .null
+    else
+      if let some rp ← canonicalizeExistingPath? cleanKey then
+        if rp != "/" then
+          let lst ← OrbBin.PosixExt.statPath rp
+          if lst.exists_ && lst.isDir then
+            stRef.modify fun s =>
+              let gf := if s.grantedFolders.contains rp then s.grantedFolders else s.grantedFolders.push rp
+              let gb := if s.grantedBrowseRoots.contains rp then s.grantedBrowseRoots else s.grantedBrowseRoots.push rp
+              { s with grantedFolders := gf, grantedBrowseRoots := gb }
+      return .ok .null
   | "revoke_upload_folder" =>
-    let p := ((args.fieldStr? "path").orElse (fun _ => args.fieldStr? "batch")).getD ""
-    stRef.modify fun s => { s with grantedFolders := s.grantedFolders.filter (· != p) }
+    let key := ((args.fieldStr? "batch").orElse (fun _ => args.fieldStr? "path")).getD ""
+    let cleanKey := key.trimAscii.toString
+    let canon? ← canonicalizeExistingPath? cleanKey
+    stRef.modify fun s =>
+      let matchLegacy (g : String) : Bool :=
+        g == cleanKey || (match canon? with | some rp => g == rp | none => false)
+      { s with
+          offeredUploadBatches := s.offeredUploadBatches.filter (fun (b, _, _) => b != cleanKey)
+          grantedUploadBatches := s.grantedUploadBatches.filter (fun (b, _) => b != cleanKey)
+          grantedFolders := s.grantedFolders.filter (fun g => !matchLegacy g) }
     return .ok .null
   | "stat_upload_file" =>
     let p := (args.fieldStr? "path").getD ""
-    if !isGrantedUploadPath st p then
-      return .error "File was not granted for upload"
+    let some canonFp ← checkCanonicalUploadRead st p
+      | return .error "File was not granted for upload"
     try
-      let m ← (System.FilePath.mk p).metadata
+      let m ← canonFp.metadata
       let modMs := m.modified.sec.toNat * 1000
       return .ok (.obj #[("size", JVal.nat m.byteSize.toNat), ("modified", JVal.nat modMs)])
     catch e =>
@@ -1729,14 +3040,13 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "read_upload_file" =>
     let p := (args.fieldStr? "path").getD ""
     let maxBytes := (args.fieldNat? "maxBytes").getD (20 * 1024 * 1024)
-    if !isGrantedUploadPath st p then
-      return .error "File was not granted for upload"
+    let some canonFp ← checkCanonicalUploadRead st p
+      | return .error "File was not granted for upload"
     try
-      let fp := System.FilePath.mk p
-      let m ← fp.metadata
+      let m ← canonFp.metadata
       if m.byteSize.toNat > maxBytes then
         return .error s!"File exceeds maximum size ({maxBytes} bytes)"
-      let raw ← IO.FS.readBinFile fp
+      let raw ← IO.FS.readBinFile canonFp
       return .ok (.str (OrbBin.PosixExt.base64Encode raw))
     catch e =>
       return .error s!"Cannot read upload file: {e}"
@@ -1744,10 +3054,10 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let p := (args.fieldStr? "path").getD ""
     let offset := (args.fieldNat? "offset").getD 0
     let length := min ((args.fieldNat? "length").getD (4 * 1024 * 1024)) (8 * 1024 * 1024)
-    if !isGrantedUploadPath st p then
-      return .error "File was not granted for upload"
+    let some canonFp ← checkCanonicalUploadRead st p
+      | return .error "File was not granted for upload"
     try
-      let h ← IO.FS.Handle.mk (System.FilePath.mk p) .read
+      let h ← IO.FS.Handle.mk canonFp .read
       h.rewind
       let mut skipped : Nat := 0
       while skipped < offset do
@@ -1759,16 +3069,81 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       return .ok (.str (OrbBin.PosixExt.base64Encode data))
     catch e =>
       return .error s!"Cannot read upload file chunk: {e}"
+  | "stage_upload_file" =>
+    let name := (args.fieldStr? "name").getD ""
+    let b64 := ((args.fieldStr? "dataBase64").orElse (fun _ => args.fieldStr? "data_base64")).getD ""
+    if !isSafeBasename name then
+      return .error "Invalid upload filename"
+    let some rawBytes := OrbBin.PosixExt.base64Decode? b64
+      | return .error "Invalid base64 upload payload"
+    let baseRoot : System.FilePath :=
+      match resolveOrbStateDir st with
+      | some d => d / "staged-uploads"
+      | none => System.FilePath.mk "/tmp/orb-staged-uploads"
+    let uid ← randomUuidV4
+    let stageDir := baseRoot / uid
+    try
+      IO.FS.createDirAll stageDir
+      let _ ← OrbBin.PosixExt.chmod stageDir.toString 0o700
+      let destFp := stageDir / name.trimAscii.toString
+      IO.FS.writeBinFile destFp rawBytes
+      let _ ← OrbBin.PosixExt.chmod destFp.toString 0o600
+      let canonPath := (← canonicalizeExistingPath? destFp.toString).getD destFp.toString
+      let canonDir := (← canonicalizeExistingPath? stageDir.toString).getD stageDir.toString
+      stRef.modify fun s =>
+        let gf := if s.grantedUploadFiles.contains canonPath then s.grantedUploadFiles else s.grantedUploadFiles.push canonPath
+        let gb := if s.grantedBrowseRoots.contains canonDir then s.grantedBrowseRoots else s.grantedBrowseRoots.push canonDir
+        { s with grantedUploadFiles := gf, grantedBrowseRoots := gb }
+      return .ok (.str canonPath)
+    catch e =>
+      return .error s!"Could not stage upload file: {e}"
+  | "stage_upload_file_from_path" =>
+    let srcRaw := (args.fieldStr? "path").getD ""
+    let nameRaw := (args.fieldStr? "name").getD ""
+    let some srcFp ← checkCanonicalUploadRead st srcRaw
+      | return .error "File was not granted for upload"
+    let fallbackName := srcFp.fileName.getD "attachment.bin"
+    let safeName := if isSafeBasename nameRaw then nameRaw.trimAscii.toString else fallbackName
+    if !isSafeBasename safeName then
+      return .error "Invalid staged filename"
+    let baseRoot : System.FilePath :=
+      match resolveOrbStateDir st with
+      | some d => d / "staged-uploads"
+      | none => System.FilePath.mk "/tmp/orb-staged-uploads"
+    let uid ← randomUuidV4
+    let stageDir := baseRoot / uid
+    try
+      let rawBytes ← IO.FS.readBinFile srcFp
+      IO.FS.createDirAll stageDir
+      let _ ← OrbBin.PosixExt.chmod stageDir.toString 0o700
+      let destFp := stageDir / safeName
+      IO.FS.writeBinFile destFp rawBytes
+      let _ ← OrbBin.PosixExt.chmod destFp.toString 0o600
+      let canonPath := (← canonicalizeExistingPath? destFp.toString).getD destFp.toString
+      let canonDir := (← canonicalizeExistingPath? stageDir.toString).getD stageDir.toString
+      stRef.modify fun s =>
+        let gf := if s.grantedUploadFiles.contains canonPath then s.grantedUploadFiles else s.grantedUploadFiles.push canonPath
+        let gb := if s.grantedBrowseRoots.contains canonDir then s.grantedBrowseRoots else s.grantedBrowseRoots.push canonDir
+        { s with grantedUploadFiles := gf, grantedBrowseRoots := gb }
+      return .ok (.str canonPath)
+    catch e =>
+      return .error s!"Could not stage upload file from path: {e}"
   | "save_file_as" =>
-    let destPath := (args.fieldStr? "destPath").getD ""
+    let destRaw := (args.fieldStr? "destPath").getD ""
+    let nameRaw := (args.fieldStr? "name").getD ""
     let b64 := (args.fieldStr? "dataBase64").getD ""
-    if destPath.trimAscii.toString.isEmpty then
+    let targetPath : String :=
+      if !destRaw.trimAscii.toString.isEmpty then destRaw.trimAscii.toString
+      else if isSafeBasename nameRaw && !st.homeDir.trimAscii.toString.isEmpty then
+        (System.FilePath.mk st.homeDir.trimAscii.toString / "Downloads" / nameRaw.trimAscii.toString).toString
+      else ""
+    if targetPath.isEmpty then
       return .ok .null
     match OrbBin.PosixExt.base64Decode? b64 with
     | none => return .error "Invalid base64 file data"
     | some bytes =>
       try
-        let fp := System.FilePath.mk destPath.trimAscii.toString
+        let fp := System.FilePath.mk targetPath
         if let some parent := fp.parent then
           IO.FS.createDirAll parent
         IO.FS.writeBinFile fp bytes
@@ -1782,42 +3157,279 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "pick_upload_folder" =>
     return .ok (.obj #[("batch", .null), ("files", .arr #[])])
   | "voice_capability" =>
-    return .ok (.obj #[("available", .bool false), ("backend", .str "none")])
-  | "voice_prewarm" | "voice_cancel" =>
-    return .ok .null
+    let fakeMode := ((← OrbBin.PosixExt.getEnvNonEmpty "ORB_VOICE_FAKE").getD "") == "1"
+    let arch ← detectHostArch
+    let py? ← resolveVoicePython? st fakeMode
+    let script? ← resolveVoiceScriptPath? st
+    let modelDir ← resolveVoiceModelDir st
+    let modelReady ← if fakeMode then pure true else isVoiceModelPresent modelDir
+    let workerWarm ← voiceWorkerMutex.atomically do
+      let cur ← get
+      return cur.isSome
+    let supported := fakeMode || (st.hostOs == "macos" && arch == "aarch64")
+    let reasonVal : JVal :=
+      if !supported then .str "Speech-to-text requires Orb Desktop on Apple Silicon (macOS arm64)."
+      else .null
+    let pyReady := py?.isSome && script?.isSome
+    return .ok (.obj #[
+      ("supported", .bool supported),
+      ("reason", reasonVal),
+      ("platform", .str st.hostOs),
+      ("arch", .str arch),
+      ("python", match py? with | some p => .str p | none => .null),
+      ("python_ready", .bool pyReady),
+      ("model_repo", .str pinnedVoiceModelRepo),
+      ("model_revision", .str pinnedVoiceModelRevision),
+      ("model_dir", .str modelDir),
+      ("model_ready", .bool modelReady),
+      ("worker", .str (if workerWarm then "warm" else "off")),
+      ("languages", .arr (supportedVoiceLanguages.map .str)),
+      ("max_seconds", JVal.nat 120),
+      ("idle_seconds", JVal.nat 600)
+    ])
+  | "voice_prewarm" =>
+    match ← sendVoiceWorkerOp st "load" with
+    | .ok res => return .ok res
+    | .error e => return .error e
+  | "voice_transcribe" =>
+    let b64 := (args.fieldStr? "__binaryBase64").getD ((args.fieldStr? "audioBase64").getD "")
+    let some wavBytes := OrbBin.PosixExt.base64Decode? b64
+      | return .error "invalid_wav: missing or corrupt audio bytes"
+    if wavBytes.isEmpty then
+      return .error "empty_audio: no speech audio recorded"
+    let hdrLang? := (args.field? "__headers").bind fun h =>
+      (h.fieldStr? "x-language").orElse (fun _ => h.fieldStr? "X-Language")
+    let lang := (hdrLang?.orElse (fun _ => args.fieldStr? "language")).getD "en"
+    let cleanLang := if supportedVoiceLanguages.contains lang.trimAscii.toString.toLower then lang.trimAscii.toString.toLower else "en"
+    match ← sendVoiceWorkerOp st "transcribe" #[("language", .str cleanLang), ("punctuation", .bool true)] wavBytes with
+    | .ok res => return .ok res
+    | .error e => return .error e
+  | "voice_cancel" =>
+    let killed ← cancelVoiceWorker
+    return .ok (.bool killed)
   | "software_inventory" =>
-    return .ok (.arr #[])
+    let overrides := (args.field? "overrides").getD (.obj #[])
+    let scanned ← scanLocalAgents st overrides
+    let nowMs := (← OrbBin.PosixExt.nowEpoch).toNat * 1000
+    let appVer := (← OrbBin.PosixExt.getEnvNonEmpty "ORB_APP_VERSION").getD "0.13.0"
+    let appPath ← try pure (some (← IO.appPath).toString) catch _ => pure none
+    let components : Array JVal := scanned.map fun row =>
+      let hid := (row.fieldStr? "id").getD ""
+      let spec? := localHarnessSpecs.find? (fun (id, _, _, _, _) => id == hid)
+      let dispName := match spec? with | some (_, nm, _, _, _) => nm | none => hid
+      let instr := match spec? with | some (_, _, _, _, ins) => ins | none => ""
+      let inst := (row.fieldBool? "installed").getD false
+      .obj #[
+        ("id", .str hid),
+        ("name", .str dispName),
+        ("version", (row.field? "version").getD .null),
+        ("path", (row.field? "path").getD .null),
+        ("installed", .bool inst),
+        ("owner", .str "user"),
+        ("update_supported", .bool false),
+        ("latest", .null),
+        ("release_error", .null),
+        ("running", .arr #[]),
+        ("instructions", .str instr),
+        ("ready", .bool inst),
+        ("ready_detail", .null)
+      ]
+    return .ok (.obj #[
+      ("checked_at", JVal.nat nowMs),
+      ("components", .arr components),
+      ("runtime", .obj #[
+        ("name", .str "Orb Desktop"),
+        ("version", .str appVer),
+        ("build", .str "lean4"),
+        ("path", match appPath with | some p => .str p | none => .null),
+        ("restart_required", .bool false),
+        ("running", .arr #[])
+      ]),
+      ("jobs", .arr st.softwareJobs)
+    ])
+  | "software_update" =>
+    return .error "Local CLI installations are managed externally (Homebrew, npm, or uv)."
+  | "software_cancel" =>
+    let jid := (args.fieldStr? "id").getD ""
+    if !jid.isEmpty then
+      stRef.modify fun s => { s with softwareJobs := s.softwareJobs.filter (fun j => j.fieldStr? "id" != some jid) }
+    return .ok .null
   | "local_origin_list" =>
+    ensurePersistedOriginsLoaded stRef
+    let cur ← stRef.get
     let connObj := (args.field? "connection").getD args
-    let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD st.bridge.configuredTarget
+    let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD cur.bridge.configuredTarget
     let ep := normalizeEndpointKey epRaw
-    let filtered := st.localOrigins.filter (fun row => ep.isEmpty || row.endpoint.isEmpty || row.endpoint == ep)
+    let filtered := cur.localOrigins.filter (fun row => ep.isEmpty || row.endpoint.isEmpty || row.endpoint == ep)
     return .ok (.arr (filtered.map LocalOriginEntry.toMissionJson))
-  | "local_agents_scan" | "local_antigravity_models"
-  | "local_claude_models" | "project_context_workers"
-  | "local_skill_source_files" =>
+  | "local_agents_scan" =>
+    let reqObj := (args.field? "request").getD args
+    let ov := (reqObj.field? "overrides").getD (.obj #[])
+    let rows ← scanLocalAgents st ov
+    return .ok (.arr rows)
+  | "local_claude_models" =>
+    return .ok (.arr #[
+      .arr #[.str "claude-sonnet-4-6", .str "Claude Sonnet 4.6"],
+      .arr #[.str "claude-opus-4-6", .str "Claude Opus 4.6"],
+      .arr #[.str "claude-haiku-4-5", .str "Claude Haiku 4.5"]
+    ])
+  | "local_antigravity_models" =>
+    let path := (args.fieldStr? "path").getD ""
+    if path.trimAscii.toString.isEmpty || !(← System.FilePath.pathExists path.trimAscii.toString) then
+      return .ok (.arr #[])
+    match ← readCommandStdout? path.trimAscii.toString #["models"] with
+    | none => return .ok (.arr #[])
+    | some out =>
+      let mut pairs : Array JVal := #[]
+      for ln in out.splitOn "\n" do
+        let tok := ((ln.trimAscii.toString.splitOn " ").head?.getD "").trimAscii.toString
+        if !tok.isEmpty && !tok.startsWith "-" && !tok.startsWith "#" && tok.toLower != "model" && tok.toLower != "models" && tok.toLower != "id" then
+          pairs := pairs.push (.arr #[.str tok, .str tok])
+      return .ok (.arr pairs)
+  | "local_agents_directory" =>
+    let rawPath := (args.fieldStr? "path").getD ""
+    let some rp ← canonicalizeExistingPath? rawPath
+      | return .error "Selected local folder does not exist."
+    if rp == "/" then
+      return .error "Refusing root filesystem `/` as a working directory."
+    let lst ← OrbBin.PosixExt.statPath rp
+    if !lst.exists_ || !lst.isDir then
+      return .error "Selected path is not a folder."
+    stRef.modify fun s =>
+      if s.grantedBrowseRoots.contains rp then s else { s with grantedBrowseRoots := s.grantedBrowseRoots.push rp }
+    return .ok (.str rp)
+  | "local_agents_workspace" =>
+    let reqObj := (args.field? "request").getD args
+    let slug := sanitizeSlug ((reqObj.fieldStr? "slug").getD "workspace")
+    let baseDir : System.FilePath :=
+      match resolveOrbStateDir st with
+      | some d => d / "local-workspaces" / slug
+      | none =>
+        let h := if st.homeDir.trimAscii.toString.isEmpty then "/tmp" else st.homeDir.trimAscii.toString
+        System.FilePath.mk h / ".orb" / "local-workspaces" / slug
+    try
+      IO.FS.createDirAll baseDir
+      let canon := (← canonicalizeExistingPath? baseDir.toString).getD baseDir.toString
+      stRef.modify fun s =>
+        if s.grantedBrowseRoots.contains canon then s else { s with grantedBrowseRoots := s.grantedBrowseRoots.push canon }
+      return .ok (.str canon)
+    catch e =>
+      return .error s!"Could not create local workspace: {e}"
+  | "local_agents_write" =>
+    let reqObj := (args.field? "request").getD args
+    let rootRaw := (reqObj.fieldStr? "root").getD ""
+    let some rootReal ← canonicalizeExistingPath? rootRaw
+      | return .error "Workspace folder does not exist"
+    if rootReal == "/" then
+      return .error "Refusing to write into `/`"
+    let rootFp := System.FilePath.mk rootReal
+    let files := (reqObj.fieldArr? "files").getD #[]
+    let mut written : Nat := 0
+    let mut skipped : Array String := #[]
+    for f in files do
+      let relRaw := (f.fieldStr? "rel").getD ""
+      match isSafeRelSubpath relRaw with
+      | none => skipped := skipped.push relRaw
+      | some cleanRel =>
+        if isSecretRelPath cleanRel then
+          skipped := skipped.push cleanRel
+        else
+          let content := (f.fieldStr? "content").getD ""
+          let enc := (f.fieldStr? "encoding").getD "utf8"
+          let bytes? : Option ByteArray :=
+            if enc == "base64" then OrbBin.PosixExt.base64Decode? content
+            else some content.toUTF8
+          match bytes? with
+          | none => skipped := skipped.push cleanRel
+          | some bytes =>
+            let target := rootFp / cleanRel
+            let okWrite ← try
+              if let some parent := target.parent then
+                IO.FS.createDirAll parent
+                let some pReal ← canonicalizeExistingPath? parent.toString | pure false
+                if !isCanonicalWithinRoot pReal rootReal then pure false
+                else
+                  let lst ← OrbBin.PosixExt.statPath target.toString
+                  if lst.isSymlink then pure false
+                  else
+                    IO.FS.writeBinFile target bytes
+                    pure true
+              else pure false
+            catch _ => pure false
+            if okWrite then written := written + 1
+            else skipped := skipped.push cleanRel
+    return .ok (.obj #[
+      ("binary_supported", .bool true),
+      ("written", JVal.nat written),
+      ("skipped", .arr (skipped.map .str))
+    ])
+  | "project_context_workers" =>
     return .ok (.arr #[])
+  | "local_skill_source_files" =>
+    let sname := (args.fieldStr? "name").getD ""
+    let sourceId := (args.fieldStr? "sourceId").getD ""
+    let rels := ((args.fieldArr? "rels").getD #[]).filterMap (·.asStr?)
+    if !validSkillIdentifier sname || rels.isEmpty then
+      return .ok (.arr #[])
+    let envHome := (← IO.getEnv "HOME").getD ""
+    let homeStr := if st.homeDir.trimAscii.toString.isEmpty then envHome else st.homeDir
+    if homeStr.isEmpty then return .ok (.arr #[])
+    let some (globalRel, _) := harnessSkillTargets sourceId | return .ok (.arr #[])
+    let skillDir := System.FilePath.mk homeStr / globalRel / sname
+    let some skillReal ← canonicalizeExistingPath? skillDir.toString | return .ok (.arr #[])
+    let mut out : Array JVal := #[]
+    for r in rels do
+      if let some cleanRel := isSafeRelSubpath r then
+        if !isSecretRelPath cleanRel then
+          let fp := System.FilePath.mk skillReal / cleanRel
+          let lst ← OrbBin.PosixExt.statPath fp.toString
+          if lst.exists_ && lst.isReg && !lst.isSymlink then
+            if let some fpReal ← canonicalizeExistingPath? fp.toString then
+              if isCanonicalWithinRoot fpReal skillReal then
+                let txt ← try IO.FS.readFile (System.FilePath.mk fpReal) catch _ => pure ""
+                out := out.push (.obj #[("rel", .str cleanRel), ("content", .str txt)])
+    return .ok (.arr out)
   | "browse_local_files" =>
+    ensurePersistedBindingsLoaded stRef
+    ensurePersistedOriginsLoaded stRef
+    let curSt ← stRef.get
     let rootRaw := (args.fieldStr? "root").getD ""
     let reqObj := (args.field? "request").getD (.obj #[])
     let action := (reqObj.fieldStr? "action").getD "list"
     let relRaw := (reqObj.fieldStr? "path").getD ""
-    if rootRaw.trimAscii.toString.isEmpty || (relRaw.splitOn "/").contains ".." then
+    if rootRaw.trimAscii.toString.isEmpty || (relRaw.splitOn "/").contains ".." || (relRaw.splitOn "\\").contains ".." then
       return .error "Invalid local browse path"
-    let rootFp := System.FilePath.mk rootRaw.trimAscii.toString
-    let cleanRel := (relRaw.splitOn "/").filter (fun s => !s.isEmpty && s != ".") |> String.intercalate "/"
+    let some rootReal ← checkCanonicalBrowseRoot curSt rootRaw
+      | return .error "Local folder was not granted for browsing"
+    let rootFp := System.FilePath.mk rootReal
+    let cleanRel := (relRaw.replace "\\" "/" |>.splitOn "/").filter (fun s => !s.isEmpty && s != ".") |> String.intercalate "/"
     let targetFp := if cleanRel.isEmpty then rootFp else rootFp / cleanRel
     if action == "reveal" then
-      let openArgs := if st.hostOs == "macos" then #["-R", targetFp.toString] else #[(targetFp.parent.getD rootFp).toString]
-      match ← runDetachedOpen st.hostOs openArgs with
+      let lst ← OrbBin.PosixExt.statPath targetFp.toString
+      if !lst.exists_ || lst.isSymlink then
+        return .error "Could not reveal this file"
+      let some targetReal ← canonicalizeExistingPath? targetFp.toString
+        | return .error "Could not reveal this file"
+      if !isCanonicalWithinRoot targetReal rootReal then
+        return .error "Refusing path outside browsed workspace"
+      let openArgs := if curSt.hostOs == "macos" then #["-R", targetReal] else #[(System.FilePath.mk targetReal |>.parent.getD rootFp).toString]
+      match ← runDetachedOpen curSt.hostOs openArgs with
       | .ok () => return .ok (.obj #[])
       | .error _ => return .error "Could not reveal this file"
     else if action == "read" then
+      let lst ← OrbBin.PosixExt.statPath targetFp.toString
+      if !lst.exists_ || !lst.isReg || lst.isSymlink then
+        return .error "Could not read local file"
+      let some targetReal ← canonicalizeExistingPath? targetFp.toString
+        | return .error "Could not read local file"
+      if !isCanonicalWithinRoot targetReal rootReal then
+        return .error "Refusing to read file outside browsed workspace"
       try
-        let m ← targetFp.metadata
+        let realFp := System.FilePath.mk targetReal
+        let m ← realFp.metadata
         if m.byteSize.toNat > 2 * 1024 * 1024 then
           return .error "File is too large to preview"
-        let content ← IO.FS.readFile targetFp
+        let content ← IO.FS.readFile realFp
         return .ok (.obj #[("content", .str content), ("size", JVal.nat m.byteSize.toNat)])
       catch _ =>
         return .error "Could not read local file"
@@ -1826,37 +3438,61 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       let mut results : Array JVal := #[]
       for pVal in paths do
         if let some refStr := pVal.asStr? then
-          let cleanRef := (refStr.splitOn "/").filter (fun s => !s.isEmpty && s != "." && s != "..") |> String.intercalate "/"
+          let hasDotDot := (refStr.splitOn "/").contains ".." || (refStr.splitOn "\\").contains ".."
+          let cleanRef := (refStr.replace "\\" "/" |>.splitOn "/").filter (fun s => !s.isEmpty && s != "." && s != "..") |> String.intercalate "/"
           let cand := if cleanRef.isEmpty then rootFp else rootFp / cleanRef
-          let existsFile ← try
-            let m ← cand.metadata
-            pure (m.type != .dir)
-          catch _ => pure false
+          let existsSafe ←
+            if hasDotDot || cleanRef.isEmpty then pure false
+            else do
+              let lst ← OrbBin.PosixExt.statPath cand.toString
+              if !lst.exists_ || !lst.isReg || lst.isSymlink then pure false
+              else
+                match ← canonicalizeExistingPath? cand.toString with
+                | some cr => pure (isCanonicalWithinRoot cr rootReal)
+                | none => pure false
           let matchesArr : Array JVal :=
-            if existsFile then
+            if existsSafe then
               let fname := cand.fileName.getD cleanRef
               #[.obj #[("name", .str fname), ("path", .str cleanRef), ("kind", .str "file")]]
             else #[]
           results := results.push (.obj #[("reference", .str refStr), ("matches", .arr matchesArr)])
       return .ok (.obj #[("results", .arr results)])
     else
+      let lstDir ← OrbBin.PosixExt.statPath targetFp.toString
+      if !lstDir.exists_ || !lstDir.isDir || lstDir.isSymlink then
+        return .error "Directory not found"
+      let some targetReal ← canonicalizeExistingPath? targetFp.toString
+        | return .error "Directory not found"
+      if !isCanonicalWithinRoot targetReal rootReal then
+        return .error "Refusing to list directory outside browsed workspace"
       try
-        let dirEntries ← targetFp.readDir
+        let dirEntries ← (System.FilePath.mk targetReal).readDir
         let mut out : Array JVal := #[]
         for entry in dirEntries do
           let name := entry.fileName
           if !name.isEmpty && name != "." && name != ".." then
-            let m? ← try pure (some (← entry.path.metadata)) catch _ => pure none
-            let kind := match m? with | some m => (if m.type == .dir then "dir" else "file") | none => "file"
-            let sz := match m? with | some m => m.byteSize.toNat | none => 0
-            let entryPath := if cleanRel.isEmpty then name else s!"{cleanRel}/{name}"
-            out := out.push (.obj #[("name", .str name), ("path", .str entryPath), ("kind", .str kind), ("size", JVal.nat sz)])
-        return .ok (.obj #[("entries", .arr out)])
+            let elst ← OrbBin.PosixExt.statPath entry.path.toString
+            if !elst.isSymlink then
+              if let some erp ← canonicalizeExistingPath? entry.path.toString then
+                if isCanonicalWithinRoot erp rootReal then
+                  let m? ← try pure (some (← entry.path.metadata)) catch _ => pure none
+                  let kind := if elst.isDir then "dir" else "file"
+                  let sz := match m? with | some m => m.byteSize.toNat | none => 0
+                  let entryPath := if cleanRel.isEmpty then name else s!"{cleanRel}/{name}"
+                  out := out.push (.obj #[("name", .str name), ("path", .str entryPath), ("kind", .str kind), ("size", JVal.nat sz)])
+        let sorted := out.qsort fun a b =>
+          let ka := (a.fieldStr? "kind").getD "file"
+          let kb := (b.fieldStr? "kind").getD "file"
+          if ka != kb then ka == "dir"
+          else ((a.fieldStr? "name").getD "") < ((b.fieldStr? "name").getD "")
+        return .ok (.obj #[("entries", .arr sorted)])
       catch _ =>
         return .ok (.obj #[("entries", .arr #[])])
   | "local_machine_identity" =>
     let mid ← ensureMachineId stRef
     return .ok (.str mid)
+  | "local_machine_transfer" =>
+    handleLocalMachineTransfer stRef args
   | "project_context_file" | "project_context_status" | "project_context_sync"
   | "project_context_prepare" | "project_skills_prepare"
   | "project_context_disconnect" | "project_context_stop" =>
@@ -1872,8 +3508,89 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       let branch? ← readCommandStdout? "git" #["-C", cwd.trimAscii.toString, "symbolic-ref", "--short", "HEAD"]
       let branchVal : JVal := match branch? with | some b => (if b.isEmpty then .null else .str b) | none => .null
       return .ok (.obj #[("repository", .str repoName), ("branch", branchVal)])
-  | "mistral_usage_sign_in" | "local_skills_status" =>
+  | "mistral_usage_sign_in" =>
     return .ok .null
+  | "github_oauth_sign_in" =>
+    let apiUrl := ((args.fieldStr? "apiUrl").orElse (fun _ => args.fieldStr? "api_url")).getD st.bridge.configuredTarget
+    let state? := args.fieldStr? "state"
+    runGitHubDesktopOAuth st.hostOs apiUrl state?
+  | "local_skills_status" =>
+    let reqObj := (args.field? "request").getD args
+    let libSkills := (reqObj.fieldArr? "library_skills").getD #[]
+    let report ← buildLocalSkillsReport st libSkills
+    return .ok report
+  | "local_skills_sync" =>
+    let reqObj := (args.field? "request").getD args
+    let libSkills := (reqObj.fieldArr? "library_skills").getD #[]
+    let pruneRemoved := (reqObj.fieldBool? "prune_removed").getD false
+    let replaceUnmanaged := ((reqObj.fieldArr? "replace_unmanaged").getD #[]).filterMap (·.asStr?)
+    let envHome := (← IO.getEnv "HOME").getD "/tmp"
+    let homeStr := if st.homeDir.trimAscii.toString.isEmpty then envHome else st.homeDir
+    let homeFp := System.FilePath.mk homeStr
+    let mut syncedSkills : Nat := 0
+    let mut harnessesUpdated : Nat := 0
+    let mut skippedUnmanaged : Array String := #[]
+    let mut pruned : Array String := #[]
+    let validLib : Array JVal := libSkills.filter fun item =>
+      match item.fieldStr? "name" with
+      | some n => validSkillIdentifier n
+      | none => false
+    let validNames : Array String := validLib.filterMap (·.fieldStr? "name")
+    for (hid, _) in skillHarnessDisplayNames do
+      if let some (globalRel, _) := harnessSkillTargets hid then
+        let gdir := homeFp / globalRel
+        let mut touchedHarness := false
+        try IO.FS.createDirAll gdir catch _ => pure ()
+        for item in validLib do
+          let sname := (item.fieldStr? "name").getD ""
+          let content := (item.fieldStr? "content").getD ""
+          let audience? := (item.fieldArr? "audience").map (fun xs => xs.filterMap (·.asStr?))
+          let allowedForHarness := match audience? with
+            | none => true
+            | some aud => aud.isEmpty || aud.contains hid
+          if allowedForHarness then
+            let sdir := gdir / sname
+            let md := sdir / "SKILL.md"
+            let marker := sdir / ".managed-by-orb-skills"
+            let mdExists ← md.pathExists
+            let isManaged ← marker.pathExists
+            if mdExists && !isManaged && !(replaceUnmanaged.contains sname) then
+              if !(skippedUnmanaged.contains sname) then
+                skippedUnmanaged := skippedUnmanaged.push sname
+            else
+              try
+                IO.FS.createDirAll sdir
+                IO.FS.writeFile md content
+                IO.FS.writeFile marker "managed-by-orb\n"
+                for rf in (item.fieldArr? "files").getD #[] do
+                  if let some cleanRel := (rf.fieldStr? "rel").bind isSafeRelSubpath then
+                    if !isSecretRelPath cleanRel && cleanRel != "SKILL.md" && cleanRel != ".managed-by-orb-skills" then
+                      let rfp := sdir / cleanRel
+                      if let some rp := rfp.parent then IO.FS.createDirAll rp
+                      IO.FS.writeFile rfp ((rf.fieldStr? "content").getD "")
+                touchedHarness := true
+              catch _ => pure ()
+        if pruneRemoved then
+          let entries ← try gdir.readDir catch _ => pure #[]
+          for ent in entries do
+            let sname := ent.fileName
+            if validSkillIdentifier sname && !(validNames.contains sname) then
+              if (← (ent.path / ".managed-by-orb-skills").pathExists) then
+                try
+                  IO.FS.removeDirAll ent.path
+                  touchedHarness := true
+                  if !(pruned.contains sname) then pruned := pruned.push sname
+                catch _ => pure ()
+        if touchedHarness then harnessesUpdated := harnessesUpdated + 1
+    syncedSkills := validNames.filter (fun n => !(skippedUnmanaged.contains n)) |>.size
+    let report ← buildLocalSkillsReport st libSkills
+    return .ok (.obj #[
+      ("synced_skills", JVal.nat syncedSkills),
+      ("harnesses_updated", JVal.nat harnessesUpdated),
+      ("skipped_unmanaged", .arr (skippedUnmanaged.map .str)),
+      ("pruned", .arr (pruned.map .str)),
+      ("report", report)
+    ])
   | "local_interaction" =>
     let runId := (((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).orElse
       (fun _ => args.fieldStr? "runId")).getD ""
@@ -1884,8 +3601,6 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     match action? with
     | none =>
       if reqId?.isNone then
-        -- Legacy / desktop initial probe (`local_interaction` with `{}` or `{id}`):
-        -- return active pending interaction request for `id`, or `.null` if idle.
         return .ok (st.activeInteractionJson runId)
       else
         let reqId := reqId?.getD ""
@@ -2006,8 +3721,10 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "local_wakeups_cancel" | "local_wakeups_discard" =>
     return .ok .null
   | "local_origin_confirm" =>
+    ensurePersistedOriginsLoaded stRef
+    let cur ← stRef.get
     let connObj := (args.field? "connection").getD args
-    let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD st.bridge.configuredTarget
+    let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD cur.bridge.configuredTarget
     let ep := normalizeEndpointKey epRaw
     if let some statusNat := (args.fieldNat? "http_status").orElse (fun _ => args.fieldNat? "httpStatus") then
       let code := ((args.fieldStr? "conflict_code").orElse (fun _ => args.fieldStr? "conflictCode")).getD ""
@@ -2018,7 +3735,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       | some (tag, retryable) =>
         let tagName := conflictTagName tag
         if !targetId.trimAscii.toString.isEmpty then
-          stRef.modify fun s =>
+          let stAfter ← stRef.modifyGet fun s =>
             let cleanId := targetId.trimAscii.toString
             let updated := s.localOrigins.map fun row =>
               if row.id == cleanId && (ep.isEmpty || row.endpoint.isEmpty || row.endpoint == ep) then
@@ -2029,14 +3746,16 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
                     lastConflictCode := some tagName
                     retryableConflict := retryable }
               else row
-            { s with localOrigins := updated }
+            let s' := { s with localOrigins := updated }
+            (s', s')
+          persistOriginsSnapshot stAfter
         return .ok (.obj #[
           ("conflict_tag", JVal.nat tag.toNat),
           ("conflict_code", .str tagName),
           ("retry", .bool retryable)
         ])
     let confs := (args.fieldArr? "confirmations").getD #[]
-    stRef.modify fun s =>
+    let stAfter ← stRef.modifyGet fun s =>
       let nextRows := confs.foldl (fun acc c =>
         let cid := (c.fieldStr? "id").getD ""
         if cid.isEmpty then acc
@@ -2061,13 +3780,16 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
                     localSyncPending := if clearSync then false else row.localSyncPending
                     localRunActive := clearRun
                     observedAt := obsAt }) s.localOrigins
-      { s with localOrigins := nextRows }
+      let s' := { s with localOrigins := nextRows }
+      (s', s')
+    persistOriginsSnapshot stAfter
     return .ok .null
   | "local_origin_disconnect" =>
+    ensurePersistedOriginsLoaded stRef
     let connObj := (args.field? "connection").getD args
     let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD ""
     let ep := normalizeEndpointKey epRaw
-    stRef.modify fun s =>
+    let stAfter ← stRef.modifyGet fun s =>
       let nextCl :=
         if ep.isEmpty || s.clientLink.endpoint == ep then
           { s.clientLink with connected := false }
@@ -2076,16 +3798,35 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       let nextRows :=
         if ep.isEmpty then #[]
         else s.localOrigins.filter (fun row => row.endpoint != ep)
-      { s with clientLink := nextCl, localOrigins := nextRows }
+      let s' := { s with clientLink := nextCl, localOrigins := nextRows }
+      (s', s')
+    persistOriginsSnapshot stAfter
     return .ok .null
   | "local_agents_stop" =>
+    ensurePersistedOriginsLoaded stRef
     let runId := (((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).orElse
       (fun _ => args.fieldStr? "runId")).getD ""
-    if !runId.trimAscii.toString.isEmpty then
+    let cleanId := runId.trimAscii.toString
+    if !cleanId.isEmpty then
       let bump := (args.fieldBool? "bump_epoch").getD true
-      stRef.modify fun s =>
-        let (_, _, nextHub) := s.toolHub.cancelRunSlots runId "stopped" bump
-        ({ s with toolHub := nextHub }).publishInteractionSnapshot runId
+      let (pidToKill?, stAfter) ← stRef.modifyGet fun s =>
+        let (_, _, nextHub) := s.toolHub.cancelRunSlots cleanId "stopped" bump
+        let existingRec? := s.localRuns.find? (fun r => r.id == cleanId)
+        let pid? := existingRec?.bind (·.pid?)
+        let nextRuns := s.localRuns.map fun r =>
+          if r.id == cleanId then { r with done := true, pid? := none } else r
+        let nextOrigins := s.localOrigins.map fun orig =>
+          if orig.id == cleanId then { orig with localRunActive := false } else orig
+        let s1 := ({ s with toolHub := nextHub, localRuns := nextRuns, localOrigins := nextOrigins }).publishInteractionSnapshot cleanId
+        let s2 := match nextRuns.find? (fun r => r.id == cleanId) with
+          | some rec =>
+            let termEv : JVal := .obj #[("text", .str ""), ("reset", .bool false), ("state", localRunRecordToPollJson rec)]
+            s1.publishChannelEvent "local_agents" termEv (some cleanId)
+          | none => s1
+        ((pid?, s2), s2)
+      if let some pid := pidToKill? then
+        discard <| OrbBin.PosixExt.killSig pid 15
+      persistOriginsSnapshot stAfter
     return .ok .null
   | "local_run_reconcile" =>
     let runId := (((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).orElse
@@ -2113,9 +3854,17 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           (.ok .null, s')
     return res
   | "local_agents_poll" =>
-    return .ok (.obj #[("text", .str ""), ("done", .bool true), ("resumed", .bool false)])
+    let cleanId := ((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).getD "" |>.trimAscii.toString
+    match st.localRuns.find? (fun r => r.id == cleanId) with
+    | some rec => return .ok (localRunRecordToPollJson rec)
+    | none => return .ok (.obj #[("text", .str ""), ("done", .bool true), ("resumed", .bool false)])
   | "local_codex_speed_options" =>
-    return .ok (.obj #[("tiers", .arr #[])])
+    return .ok (.obj #[
+      ("tiers", .arr #[
+        .obj #[("id", .str "standard"), ("available", .bool true)],
+        .obj #[("id", .str "fast"), ("available", .bool true)]
+      ])
+    ])
   | "local_agents_cyber_capabilities" =>
     return .ok (JVal.nat 2)
   | "local_invocable_skills" =>
@@ -2142,11 +3891,19 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         ("path", .str s.path)
       ]))
   | "local_origin_launch" | "local_run_launch" =>
+    ensurePersistedBindingsLoaded stRef
+    ensurePersistedOriginsLoaded stRef
+    let curSt ← stRef.get
     let reqObj := (args.field? "request").getD args
     let harness := (reqObj.fieldStr? "harness").getD ""
     let cwd := (reqObj.fieldStr? "cwd").getD "."
     let prompt := (reqObj.fieldStr? "prompt").getD (((args.field? "draft").bind (·.fieldStr? "prompt")).getD "")
     let model := (reqObj.fieldStr? "model").getD ""
+    let effort := (reqObj.fieldStr? "effort").getD ""
+    let svcTier? := (reqObj.fieldStr? "service_tier").orElse (fun _ => reqObj.fieldStr? "serviceTier")
+    let binPath := (reqObj.fieldStr? "bin").getD "" |>.trimAscii.toString
+    let sessionId := ((reqObj.fieldStr? "session_id").orElse (fun _ => reqObj.fieldStr? "sessionId")).getD "" |>.trimAscii.toString
+    let planMode := (reqObj.fieldBool? "planMode").getD ((reqObj.fieldBool? "plan_mode").getD false)
     let cyber := (reqObj.fieldStr? "cyberAccess").getD ((reqObj.fieldStr? "cyber_access").getD "automatic")
     let hasImgs := (((reqObj.fieldArr? "image_paths").orElse (fun _ => reqObj.fieldArr? "imagePaths")).map (fun xs => !xs.isEmpty)).getD false
     let mut selectedSkills : Array (String × String × UInt8) := #[]
@@ -2154,7 +3911,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       let home? ← do
         match ← OrbBin.PosixExt.firstEnvNonEmpty ["ORB_SKILLS_TEST_HOME", "HOME"] with
         | some h => pure (some h)
-        | none => pure (if st.homeDir.isEmpty then none else some st.homeDir)
+        | none => pure (if curSt.homeDir.isEmpty then none else some curSt.homeDir)
       if let some home := home? then
         match ← selectLocalSkillsIn (System.FilePath.mk home) (System.FilePath.mk cwd) harness prompt with
         | .error e => return .error e
@@ -2163,12 +3920,23 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         if let .error e := validateLocalCodexLaunch prompt model cyber hasImgs then
           return .error e
     let deliveredPrompt := withLocalSkillDirective prompt selectedSkills
+    let runUuid ← randomUuidV4
+    let shouldSpawn ←
+      if binPath.isEmpty then pure false
+      else System.FilePath.pathExists binPath
+    let cwdCanon? ← canonicalizeExistingPath? cwd
+    let nowIso := formatUtcIso8601 (← OrbBin.PosixExt.nowEpoch)
     if cmd == "local_origin_launch" then
       let rawId ← randomUuidV4
       let mid := (OrbBin.PosixExt.parseUuidCanonical? rawId).getD rawId
-      let title := (((args.field? "draft").bind (·.fieldStr? "title")).orElse (fun _ => reqObj.fieldStr? "title")).getD "Local Mission"
+      let draftObj := (args.field? "draft").getD (.obj #[])
+      let title := ((draftObj.fieldStr? "title").orElse (fun _ => reqObj.fieldStr? "title")).getD "Local Mission"
+      let proj := ((draftObj.fieldStr? "project").orElse (fun _ => reqObj.fieldStr? "project")).getD ""
+      let folder? := ((draftObj.fieldStr? "folder").orElse (fun _ => reqObj.fieldStr? "folder")).filter (!·.isEmpty)
+      let rawTags := ((draftObj.fieldArr? "tags").getD #[]).filterMap (·.asStr?)
+      let tags := if rawTags.contains "placement:client" then rawTags else rawTags.push "placement:client"
       let connObj := (args.field? "connection").getD args
-      let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD st.bridge.configuredTarget
+      let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD curSt.bridge.configuredTarget
       let ep := normalizeEndpointKey epRaw
       let backendName := if harness.isEmpty then "opencode" else harness
       let entry : LocalOriginEntry := {
@@ -2181,12 +3949,90 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         deliveredPrompt := deliveredPrompt
         localSyncPending := true
         localRunActive := true
+        project := proj
+        folder := folder?
+        tags := tags
+        modelOverride := if model.isEmpty then none else some model
+        modelEffort := if effort.isEmpty then none else some effort
+        serviceTier := svcTier?
+        createdAt := nowIso
+        updatedAt := nowIso
+        history := #[.obj #[("role", .str "user"), ("content", .str prompt)]]
+      }
+      let initRec : LocalRunRecord := {
+        id := mid
+        runUuid := runUuid
+        generation := 1
+        harness := backendName
+        done := !shouldSpawn
+        resumed := !sessionId.isEmpty
+      }
+      let (stAfter, bindChanged) ← stRef.modifyGet fun s =>
+        let keptOrigins := s.localOrigins.filter (fun r => r.id != mid)
+        let keptRuns := s.localRuns.filter (fun r => r.id != mid)
+        let nextRoots := match cwdCanon? with
+          | some rp => if rp != "/" && !s.grantedBrowseRoots.contains rp then s.grantedBrowseRoots.push rp else s.grantedBrowseRoots
+          | none => s.grantedBrowseRoots
+        let (nextRev, nextBinds, bChanged, sPub) :=
+          if !binPath.isEmpty then
+            let bObj : JVal := .obj #[
+              ("harness", .str backendName),
+              ("bin", .str binPath),
+              ("cwd", .str cwd),
+              ("planMode", .bool planMode)
+            ]
+            let filtB := s.bindingsEntries.filter (fun (k, _) => k != mid)
+            let nb := filtB.push (mid, bObj)
+            let nr := s.bindingsRevision + 1
+            let snap : JVal := .obj #[("revision", JVal.nat nr), ("bindings", .obj nb)]
+            let sTmp := ({ s with bindingsRevision := nr, bindingsEntries := nb }).publishChannelEvent "local_bindings" snap
+            (nr, nb, true, sTmp)
+          else
+            (s.bindingsRevision, s.bindingsEntries, false, s)
+        let sFinal := { sPub with
+          bindingsRevision := nextRev
+          bindingsEntries := nextBinds
+          localOrigins := keptOrigins.push entry
+          localRuns := keptRuns.push initRec
+          grantedBrowseRoots := nextRoots
+        }
+        ((sFinal, bChanged), sFinal)
+      persistOriginsSnapshot stAfter
+      if bindChanged then persistBindingsSnapshot stAfter
+      if shouldSpawn then
+        spawnLocalAgentRunner stRef mid runUuid backendName binPath cwd deliveredPrompt model effort sessionId 1 planMode
+      return .ok entry.toMissionJson
+    else
+      let reqId := (reqObj.fieldStr? "id").getD "" |>.trimAscii.toString
+      let mid := if reqId.isEmpty then runUuid else reqId
+      if curSt.localRuns.any (fun r => r.id == mid && !r.done) then
+        return .error "This mission already has non-terminal run"
+      let prevGen := ((curSt.localRuns.find? (fun r => r.id == mid)).map (·.generation)).getD 0
+      let nextGen := prevGen + 1
+      let backendName := if harness.isEmpty then "opencode" else harness
+      let initRec : LocalRunRecord := {
+        id := mid
+        runUuid := runUuid
+        generation := nextGen
+        harness := backendName
+        done := !shouldSpawn
+        resumed := !sessionId.isEmpty
       }
       stRef.modify fun s =>
-        let kept := s.localOrigins.filter (fun r => r.id != mid)
-        { s with localOrigins := kept.push entry }
-      return .ok entry.toMissionJson
-    return .ok (.obj #[("ok", .bool true), ("command", .str cmd), ("delivered_prompt", .str deliveredPrompt)])
+        let keptRuns := s.localRuns.filter (fun r => r.id != mid)
+        let nextRoots := match cwdCanon? with
+          | some rp => if rp != "/" && !s.grantedBrowseRoots.contains rp then s.grantedBrowseRoots.push rp else s.grantedBrowseRoots
+          | none => s.grantedBrowseRoots
+        { s with localRuns := keptRuns.push initRec, grantedBrowseRoots := nextRoots }
+      if shouldSpawn then
+        spawnLocalAgentRunner stRef mid runUuid backendName binPath cwd deliveredPrompt model effort sessionId nextGen planMode
+      return .ok (.obj #[
+        ("ok", .bool true),
+        ("command", .str cmd),
+        ("run_id", .str runUuid),
+        ("generation", JVal.nat nextGen),
+        ("delivered_prompt", .str deliveredPrompt)
+      ])
   | _ =>
     if supportedDesktopCommands.contains cmd then
       return .error s!"{cmd} is not supported in this local runtime"
@@ -2207,6 +4053,7 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "(() => {\n" ++
   "  const _fetch = window.fetch.bind(window);\n" ++
   "  const _jsonStringify = JSON.stringify;\n" ++
+  "  const _btoa = window.btoa.bind(window);\n" ++
   s!"  const ORB_LOCALD_URL = {urlLit};\n" ++
   s!"  const ORB_EVENTS_URL = {sseLit};\n" ++
   s!"  const ORB_TOKEN = {tokLit};\n" ++
@@ -2216,17 +4063,38 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "  class Channel {\n" ++
   "    constructor() { this.onmessage = () => {}; }\n" ++
   "  }\n" ++
+  "  function emitLocalEvent(name, payload) {\n" ++
+  "    const set = listeners.get(name);\n" ++
+  "    if (!set) return;\n" ++
+  "    for (const fn of Array.from(set)) {\n" ++
+  "      try { fn({ event: name, payload }); } catch {}\n" ++
+  "    }\n" ++
+  "  }\n" ++
+  "  window.__ORB_EMIT__ = emitLocalEvent;\n" ++
+  "  function dispatchSseItem(ev) {\n" ++
+  "    if (!ev || typeof ev !== 'object') return;\n" ++
+  "    if (typeof ev.event === 'string') emitLocalEvent(ev.event, ev.payload);\n" ++
+  "    else if (typeof ev.token === 'number') channels.get(ev.token)?.onmessage(ev.payload);\n" ++
+  "  }\n" ++
+  "  function bytesToBase64(u8) {\n" ++
+  "    let bin = '';\n" ++
+  "    for (let i = 0; i < u8.length; i += 0x8000) {\n" ++
+  "      bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));\n" ++
+  "    }\n" ++
+  "    return _btoa(bin);\n" ++
+  "  }\n" ++
   "  async function drain() {\n" ++
   "    if (!channels.size) return;\n" ++
   "    try {\n" ++
+  "      const tokens = Array.from(channels.keys());\n" ++
   "      const r = await _fetch(ORB_LOCALD_URL, {\n" ++
   "        method: 'POST',\n" ++
   "        headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN },\n" ++
-  "        body: _jsonStringify({ command: '__orb_poll_events', args: {} })\n" ++
+  "        body: _jsonStringify({ command: '__orb_poll_events', args: { tokens } })\n" ++
   "      });\n" ++
   "      const b = await r.json();\n" ++
   "      if (Array.isArray(b.result)) {\n" ++
-  "        for (const ev of b.result) channels.get(ev.token)?.onmessage(ev.payload);\n" ++
+  "        for (const ev of b.result) dispatchSseItem(ev);\n" ++
   "      }\n" ++
   "    } catch {}\n" ++
   "  }\n" ++
@@ -2234,11 +4102,11 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "    if (streamCtrl) { streamCtrl.abort(); streamCtrl = null; }\n" ++
   "  }\n" ++
   "  function ensureStream() {\n" ++
-  "    if (streamCtrl || !channels.size) return;\n" ++
+  "    if (streamCtrl || (!channels.size && !listeners.size)) return;\n" ++
   "    const ctrl = new AbortController();\n" ++
   "    streamCtrl = ctrl;\n" ++
   "    (async () => {\n" ++
-  "      while (!ctrl.signal.aborted && channels.size) {\n" ++
+  "      while (!ctrl.signal.aborted && (channels.size || listeners.size)) {\n" ++
   "        try {\n" ++
   "          const r = await _fetch(ORB_EVENTS_URL, {\n" ++
   "            headers: { 'Accept': 'text/event-stream', 'X-Orb-Token': ORB_TOKEN },\n" ++
@@ -2248,7 +4116,7 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "          const reader = r.body.getReader();\n" ++
   "          const dec = new TextDecoder();\n" ++
   "          let buf = '';\n" ++
-  "          while (!ctrl.signal.aborted && channels.size) {\n" ++
+  "          while (!ctrl.signal.aborted && (channels.size || listeners.size)) {\n" ++
   "            const { value, done } = await reader.read();\n" ++
   "            if (done) break;\n" ++
   "            buf += dec.decode(value, { stream: true });\n" ++
@@ -2259,13 +4127,13 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "              for (const ln of frame.split('\\n')) {\n" ++
   "                if (ln.startsWith('data: ')) {\n" ++
   "                  const arr = JSON.parse(ln.slice(6));\n" ++
-  "                  if (Array.isArray(arr)) for (const ev of arr) channels.get(ev.token)?.onmessage(ev.payload);\n" ++
+  "                  if (Array.isArray(arr)) for (const ev of arr) dispatchSseItem(ev);\n" ++
   "                }\n" ++
   "              }\n" ++
   "            }\n" ++
   "          }\n" ++
   "        } catch {\n" ++
-  "          if (ctrl.signal.aborted || !channels.size) break;\n" ++
+  "          if (ctrl.signal.aborted || (!channels.size && !listeners.size)) break;\n" ++
   "          await new Promise(res => setTimeout(res, 1500));\n" ++
   "          if (!ctrl.signal.aborted && channels.size) await drain();\n" ++
   "        }\n" ++
@@ -2273,16 +4141,26 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "      if (streamCtrl === ctrl) streamCtrl = null;\n" ++
   "    })();\n" ++
   "  }\n" ++
-  "  async function invoke(command, args = {}, _options = {}) {\n" ++
-  "    const cleanArgs = { ...(args || {}) };\n" ++
+  "  async function invoke(command, args = {}, options = {}) {\n" ++
+  "    let cleanArgs;\n" ++
   "    let boundChan = null;\n" ++
-  "    if (cleanArgs.onEvent instanceof Channel) {\n" ++
-  "      boundChan = cleanArgs.onEvent;\n" ++
-  "      delete cleanArgs.onEvent;\n" ++
+  "    if (args instanceof Uint8Array) {\n" ++
+  "      cleanArgs = { __binaryBase64: bytesToBase64(args) };\n" ++
+  "    } else if (args instanceof ArrayBuffer) {\n" ++
+  "      cleanArgs = { __binaryBase64: bytesToBase64(new Uint8Array(args)) };\n" ++
+  "    } else {\n" ++
+  "      cleanArgs = { ...(args || {}) };\n" ++
+  "      if (cleanArgs.onEvent instanceof Channel) {\n" ++
+  "        boundChan = cleanArgs.onEvent;\n" ++
+  "        delete cleanArgs.onEvent;\n" ++
+  "      }\n" ++
+  "    }\n" ++
+  "    if (options && typeof options === 'object' && options.headers && typeof options.headers === 'object') {\n" ++
+  "      cleanArgs.__headers = { ...options.headers };\n" ++
   "    }\n" ++
   "    if (command.endsWith('_unsubscribe') && typeof cleanArgs.token === 'number') {\n" ++
   "      channels.delete(cleanArgs.token);\n" ++
-  "      if (!channels.size) stopStream();\n" ++
+  "      if (!channels.size && !listeners.size) stopStream();\n" ++
   "    }\n" ++
   "    let res = await (async () => {\n" ++
   "      for (let attempt = 0; ; attempt++) {\n" ++
@@ -2310,7 +4188,12 @@ def renderWebviewInitScript (rpcPort : UInt16) (launchToken : String) : String :
   "  async function listen(name, handler) {\n" ++
   "    if (!listeners.has(name)) listeners.set(name, new Set());\n" ++
   "    listeners.get(name).add(handler);\n" ++
-  "    return () => listeners.get(name)?.delete(handler);\n" ++
+  "    ensureStream();\n" ++
+  "    return () => {\n" ++
+  "      listeners.get(name)?.delete(handler);\n" ++
+  "      if (listeners.get(name)?.size === 0) listeners.delete(name);\n" ++
+  "      if (!channels.size && !listeners.size) stopStream();\n" ++
+  "    };\n" ++
   "  }\n" ++
   "  const desktop = {\n" ++
   "    core: { invoke, Channel },\n" ++
@@ -2488,5 +4371,197 @@ def extractStreamingResponseHead? (buf : ByteArray) :
   match ← extractStreamingResponseHeadEx? buf with
   | none => return none
   | some (statusNat, parsedHdrs, _, _, rest) => return some (statusNat, parsedHdrs, rest)
+
+def maxLocaldRpcBodyBytes : Nat := 37748736   -- 36 MiB (headroom for 24 MiB WAV base64)
+def maxLocaldProxyBodyBytes : Nat := 67108864 -- 64 MiB (context/blob/file uploads & responses)
+
+private def validateLocaldHeaders (hdrLines : List String) (maxBody : Nat) :
+    Except String (Array (String × String) × Option Nat × Option String) := Id.run do
+  let mut headers : Array (String × String) := #[]
+  let mut seenContentLen : Option Nat := none
+  let mut seenAuthorization := false
+  let mut authBearer : Option String := none
+  for ln in hdrLines do
+    if !ln.isEmpty then
+      let lnBytes := ln.toUTF8
+      let b0 := if lnBytes.size > 0 then lnBytes.get! 0 else 0
+      if b0 == 32 || b0 == 9 then
+        return .error "obs_fold_header_rejected"
+      if LeanSys.Http.hasHttpFieldControlByte ln then
+        return .error "invalid_header_value"
+      match ln.splitOn ":" with
+      | [] | [_] =>
+        return .error "malformed_header_line"
+      | k :: rest =>
+        if !LeanSys.Http.isHttpToken k then
+          return .error "invalid_header_name"
+        let kTrim := k.trimAscii.toString
+        let vTrim := (String.intercalate ":" rest).trimAscii.toString
+        headers := headers.push (kTrim, vTrim)
+        if headers.size > 32 then
+          return .error "too_many_headers"
+        if LeanSys.Http.asciiEqIgnoreCase kTrim "transfer-encoding" then
+          return .error "unsupported_transfer_encoding"
+        else if LeanSys.Http.asciiEqIgnoreCase kTrim "content-length" then
+          match LeanSys.Http.parseStrictContentLength? vTrim with
+          | none =>
+            return .error "invalid_content_length"
+          | some parsedLen =>
+            if parsedLen > maxBody then
+              return .error "payload_too_large"
+            if seenContentLen.isSome then
+              return .error "conflicting_content_length"
+            seenContentLen := some parsedLen
+        else if LeanSys.Http.asciiEqIgnoreCase kTrim "authorization" then
+          if seenAuthorization then
+            return .error "duplicate_authorization"
+          seenAuthorization := true
+          if vTrim.startsWith "Bearer " then
+            authBearer := some (vTrim.drop 7).trimAscii.toString
+  return .ok (headers, seenContentLen, authBearer)
+
+/-- Smuggling-safe RFC 9112 request framer for `orb-locald` supporting `36 MiB` RPC bodies,
+    `64 MiB` `/__orb_tx/` proxy bodies, and returning `(req, remainder)` for HTTP/1.1 keep-alive. -/
+def parseLocaldHttpRequestHead (raw : ByteArray) (isProxyPort : Bool := false) :
+    Except String (String × String × String × Array (String × String) × Nat × Option String × Nat) := do
+  let some bodyStart := LeanSys.Http.findHeaderEnd? raw
+    | .error "missing_header_terminator"
+  if bodyStart - 4 > LeanSys.Http.maxHttpHeaderBytes then
+    .error "headers_too_large"
+  let some headStr := String.fromUTF8? (raw.extract 0 (bodyStart - 4))
+    | .error "invalid_utf8_headers"
+  match headStr.splitOn "\r\n" with
+  | [] => .error "empty_request_line"
+  | reqLine :: hdrLines =>
+    let parts := reqLine.trimAscii.toString.splitOn " "
+    let (method, path, proto) ← match parts with
+      | [m, p, v] => .ok (m.trimAscii.toString, p.trimAscii.toString, v.trimAscii.toString)
+      | _ => .error "malformed_request_line"
+    if method.isEmpty || !LeanSys.Http.isHttpToken method || !path.startsWith "/" then
+      .error "malformed_request_line"
+    if proto != "HTTP/1.1" && proto != "HTTP/1.0" then
+      .error "unsupported_http_version"
+    let maxBody :=
+      if isProxyPort || path.startsWith "/__orb_tx/" then maxLocaldProxyBodyBytes
+      else maxLocaldRpcBodyBytes
+    let (headers, cl?, authBearer) ← validateLocaldHeaders hdrLines maxBody
+    return (method, path, proto, headers, cl?.getD 0, authBearer, bodyStart)
+
+def parseLocaldHttpRequestFrame (raw : ByteArray) (isProxyPort : Bool := false) :
+    Except String (LeanSys.Http.HttpRequest × ByteArray) := do
+  let (method, path, proto, headers, contentLen, authBearer, bodyStart) ← parseLocaldHttpRequestHead raw isProxyPort
+  if raw.size - bodyStart < contentLen then
+    .error "content_length_mismatch"
+  let exact := raw.extract 0 (bodyStart + contentLen)
+  let rem := if bodyStart + contentLen < raw.size then raw.extract (bodyStart + contentLen) raw.size else ByteArray.empty
+  let rootSlice := LeanSys.Posix.ByteSlice.ofByteArray exact
+  let some bodySlice := LeanSys.Posix.ByteSlice.subSlice? rootSlice bodyStart contentLen
+    | .error "invalid_body_slice"
+  return ({
+    method := method
+    path := path
+    version := proto
+    headers := headers
+    contentLength := contentLen
+    authBearer := authBearer
+    bodySlice := bodySlice
+  }, rem)
+
+def readLocaldHttpRequestFromFd
+    (fd : LeanSys.Posix.Fd)
+    (carry : ByteArray := ByteArray.empty)
+    (isProxyPort : Bool := false)
+    (timeoutMs : UInt32 := 15000) :
+    IO (Except String (LeanSys.Http.HttpRequest × ByteArray)) := do
+  let tStart ← IO.monoNanosNow
+  let budgetMs : Nat := Nat.max 50 timeoutMs.toNat
+  let mut buf := carry
+  while (LeanSys.Http.findHeaderEnd? buf).isNone do
+    if buf.size > LeanSys.Http.maxHttpHeaderBytes + 4 then
+      return .error "headers_too_large"
+    let now ← IO.monoNanosNow
+    let elapsedMs := (now - tStart) / 1000000
+    if elapsedMs >= budgetMs then
+      return .error (if buf.isEmpty then "empty_socket_read" else "request_timeout")
+    let remMs : UInt32 := (budgetMs - elapsedMs).toUInt32
+    match ← LeanSys.Posix.pollReadable fd remMs with
+    | .error .eagain =>
+      return .error (if buf.isEmpty then "empty_socket_read" else "request_timeout")
+    | .error _ =>
+      return .error "socket_poll_error"
+    | .ok () =>
+      let chunk ← LeanSys.Posix.readStreamChunk fd 16384
+      if chunk.isEmpty then
+        return .error (if buf.isEmpty then "empty_socket_read" else "missing_header_terminator")
+      buf := if buf.isEmpty then chunk else buf ++ chunk
+  let (_, _, _, _, expectedBody, _, bodyStart) ← match parseLocaldHttpRequestHead buf isProxyPort with
+    | .ok tup => pure tup
+    | .error e => return .error e
+  let bodyBudgetMs : Nat := if expectedBody > 4194304 then Nat.max budgetMs 60000 else budgetMs
+  while buf.size - bodyStart < expectedBody do
+    let now ← IO.monoNanosNow
+    let elapsedMs := (now - tStart) / 1000000
+    if elapsedMs >= bodyBudgetMs then
+      return .error "request_timeout"
+    let remMs : UInt32 := (bodyBudgetMs - elapsedMs).toUInt32
+    match ← LeanSys.Posix.pollReadable fd remMs with
+    | .error .eagain =>
+      return .error "request_timeout"
+    | .error _ =>
+      return .error "socket_poll_error"
+    | .ok () =>
+      let missing := expectedBody - (buf.size - bodyStart)
+      let chunk ← LeanSys.Posix.readStreamChunk fd (Nat.min missing 65536)
+      if chunk.isEmpty then
+        return .error "content_length_mismatch"
+      buf := buf ++ chunk
+  return parseLocaldHttpRequestFrame buf isProxyPort
+
+def streamLocalEventsSse (stRef : IO.Ref LocaldState) (clientFd : LeanSys.Posix.Fd) (origin? : Option String) : IO Unit := do
+  let corsHdr :=
+    match origin? with
+    | none => ""
+    | some raw =>
+      let o := raw.trimAscii.toString
+      if !o.isEmpty && isAllowedLocaldOrigin (some o) then
+        s!"Access-Control-Allow-Origin: {o}\r\nVary: Origin\r\n"
+      else ""
+  let head :=
+    "HTTP/1.1 200 OK\r\n" ++
+    corsHdr ++
+    "Content-Type: text/event-stream\r\n" ++
+    "Cache-Control: no-cache\r\n" ++
+    "Connection: close\r\n\r\n: ready\n\n"
+  match ← LeanSys.Posix.writeAll clientFd head.toUTF8 false with
+  | .error _ => return ()
+  | .ok _ =>
+    let sid ← stRef.modifyGet LocaldState.registerSseSubscriber
+    try
+      let mut alive := true
+      let mut idleTicks : Nat := 0
+      while alive do
+        let evs ← stRef.modifyGet (·.drainSseSubscriber sid)
+        if !evs.isEmpty then
+          idleTicks := 0
+          let frame := "data: " ++ renderCompact (.arr evs) ++ "\n\n"
+          match ← LeanSys.Posix.writeAll clientFd frame.toUTF8 false with
+          | .ok _ => pure ()
+          | .error _ => alive := false
+        else
+          match ← LeanSys.Posix.pollReadable clientFd 10 with
+          | .ok () =>
+            let chunk ← LeanSys.Posix.readStreamChunk clientFd 64
+            if chunk.isEmpty then alive := false
+          | .error .eagain =>
+            idleTicks := idleTicks + 1
+            if idleTicks ≥ 1500 then
+              idleTicks := 0
+              match ← LeanSys.Posix.writeAll clientFd ": keepalive\n\n".toUTF8 false with
+              | .ok _ => pure ()
+              | .error _ => alive := false
+          | .error _ =>
+            alive := false
+    finally
+      stRef.modify (·.unregisterSseSubscriber sid)
 
 end OrbLocald.Rpc

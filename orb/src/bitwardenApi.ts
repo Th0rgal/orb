@@ -67,7 +67,8 @@ export async function getBiometricStatus(): Promise<BiometricStatus> {
 export async function authenticateBiometric(reason: string): Promise<void> {
   const invoke = nativeInvoke();
   if (!invoke) return;
-  await invoke("biometric_authenticate", { reason });
+  const ok = await invoke("biometric_authenticate", { reason });
+  if (ok === false) throw new Error("biometric_failed");
 }
 
 export const getBitwardenStatus = () =>

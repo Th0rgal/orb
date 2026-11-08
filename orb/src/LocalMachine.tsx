@@ -46,7 +46,7 @@ export function LocalMachine() {
     <Show when={sample()}>{s => <span class="s-row-desc">RAM {percent(s().memory_used, s().memory_total)}</span>}</Show>
     <span class={`chev p-acc-chev ${open() ? "open" : ""}`}>›</span>
   </button><Show when={open()}><div class="p-acc-body machine-expanded">
-    <Show when={sample()} fallback={<p class="s-row-desc">{error() || "Reading local metrics…"}</p>}>{s => <>
+    <Show when={sample()} fallback={<Show when={error()} fallback={<div role="status" aria-label="Reading local metrics"><span class="sr-only">Reading local metrics…</span><div class="sk-bar" style={{ width: "100%", height: "76px" }} /><div class="machine-resources"><div class="machine-resource"><span><ResourceIcon kind="CPU"/>CPU</span><span class="sk-bar" style={{ width: "44px", height: "14px" }} /></div><div class="machine-resource"><span><ResourceIcon kind="Memory"/>Memory</span><span class="sk-bar" style={{ width: "56px", height: "14px" }} /></div><div class="machine-resource"><span><ResourceIcon kind="Disk"/>Disk</span><span class="sk-bar" style={{ width: "56px", height: "14px" }} /></div><div class="machine-resource"><span><ResourceIcon kind="GPU"/>GPU</span><span class="sk-bar" style={{ width: "68px", height: "14px" }} /></div></div></div>}>{msg => <p class="s-row-desc">{msg()}</p>}</Show>}>{s => <>
       <ResourceHistory samples={history()} live={!error()} />
       <div class="machine-resources">
         <div class="machine-resource"><span><ResourceIcon kind="CPU"/>CPU</span><strong>{s().cpu_percent == null ? "Sampling…" : `${Math.round(s().cpu_percent!)}%`}</strong></div>

@@ -43,16 +43,20 @@ private def corsHeaderBlock (origin? : Option String) : String :=
     else
       ""
 
-private def sendJsonHttp (fd : Fd) (status : Nat) (origin? : Option String) (jsonPayload : String) : IO Unit := do
+private def sendJsonHttp (fd : Fd) (status : Nat) (origin? : Option String) (jsonPayload : String)
+    (keepAlive : Bool := false) : IO Bool := do
   let reason := HttpResponse.reasonPhrase status
   let body := jsonPayload.toUTF8
+  let connHdr := if keepAlive then "Connection: keep-alive\r\nKeep-Alive: timeout=15\r\n\r\n" else "Connection: close\r\n\r\n"
   let head :=
     s!"HTTP/1.1 {status} {reason}\r\n" ++
     corsHeaderBlock origin? ++
     "Content-Type: application/json\r\n" ++
     s!"Content-Length: {body.size}\r\n" ++
-    "Connection: close\r\n\r\n"
-  discard <| writeAll fd (head.toUTF8 ++ body) false
+    connHdr
+  match ← writeAll fd (head.toUTF8 ++ body) false with
+  | .ok _ => return true
+  | .error _ => return false
 
 private def sendPreflight204 (fd : Fd) (origin? : Option String) : IO Unit := do
   let head :=
@@ -213,7 +217,7 @@ private def handleTransportProxyRequest (stRef : IO.Ref LocaldState) (isShardPor
   let st ← stRef.get
   let expectedPfx := s!"/__orb_tx/{st.bridge.bridgeUuid}"
   if !req.path.startsWith expectedPfx then
-    sendJsonHttp fd 403 origin? "{\"error\":\"invalid_bridge_token\"}"
+    discard <| sendJsonHttp fd 403 origin? "{\"error\":\"invalid_bridge_token\"}"
   else if req.method == "OPTIONS" then
     sendPreflight204 fd origin?
   else
@@ -234,7 +238,7 @@ private def handleTransportProxyRequest (stRef : IO.Ref LocaldState) (isShardPor
     let origins := rankFailoverOrigins baseOrigins st.originHealth nowInitMs
     let wantSse := isSseStreamRequest isShardPort req && reqBody.isEmpty
     if origins.isEmpty then
-      sendJsonHttp fd 503 origin? "{\"error\":\"no_failover_origins\"}"
+      discard <| sendJsonHttp fd 503 origin? "{\"error\":\"no_failover_origins\"}"
     else
       let mut idx : Nat := 0
       let mut done := false
@@ -254,13 +258,13 @@ private def handleTransportProxyRequest (stRef : IO.Ref LocaldState) (isShardPor
               if canFailoverRequest req.method hasIdem (idx + 1) origins then
                 idx := idx + 1
               else
-                sendJsonHttp fd 502 origin? "{\"error\":\"upstream_stream_unreachable\"}"
+                discard <| sendJsonHttp fd 502 origin? "{\"error\":\"upstream_stream_unreachable\"}"
                 done := true
           | _ =>
             if canFailoverRequest req.method hasIdem (idx + 1) origins then
               idx := idx + 1
             else
-              sendJsonHttp fd 502 origin? "{\"error\":\"invalid_stream_origin\"}"
+              discard <| sendJsonHttp fd 502 origin? "{\"error\":\"invalid_stream_origin\"}"
               done := true
         else
           let isLongProvision :=
@@ -279,10 +283,10 @@ private def handleTransportProxyRequest (stRef : IO.Ref LocaldState) (isShardPor
             | some (true, host, port, pfx) =>
               match st.h2Pool? with
               | some pool =>
-                pool.request prio req.method host port (pfx ++ relPath) fwdHdrs reqBody 16777216 true connTimeoutMs upTimeoutMs
+                pool.request prio req.method host port (pfx ++ relPath) fwdHdrs reqBody maxLocaldProxyBodyBytes true connTimeoutMs upTimeoutMs
               | none =>
                 let t0 ← IO.monoMsNow
-                match ← httpsRequest req.method host port (pfx ++ relPath) fwdHdrs reqBody 16777216 true upTimeoutMs with
+                match ← httpsRequest req.method host port (pfx ++ relPath) fwdHdrs reqBody maxLocaldProxyBodyBytes true upTimeoutMs with
                 | .ok up =>
                   let t1 ← IO.monoMsNow
                   pure (.ok { response := up, rttMs := (Nat.min (Nat.max 1 (t1 - t0)) 60000).toUInt32, reusedConn := false })
@@ -319,7 +323,7 @@ private def handleTransportProxyRequest (stRef : IO.Ref LocaldState) (isShardPor
               let isGzip := (encVal == "gzip" || encVal == "x-gzip") && req.method.toUpper != "HEAD"
               let decodedRes : Except String (ByteArray × Bool) :=
                 if isGzip && !up.body.isEmpty then
-                  match OrbNetLeaf.Gzip.gunzipBounded up.body 33554432 with
+                  match OrbNetLeaf.Gzip.gunzipBounded up.body maxLocaldProxyBodyBytes with
                   | .ok plain => .ok (plain, true)
                   | .error e => .error e
                 else if isGzip && up.body.isEmpty then
@@ -333,7 +337,7 @@ private def handleTransportProxyRequest (stRef : IO.Ref LocaldState) (isShardPor
                 if canFailoverRequest req.method hasIdem (idx + 1) origins then
                   idx := idx + 1
                 else
-                  sendJsonHttp fd 502 origin? "{\"error\":\"upstream_invalid_gzip\"}"
+                  discard <| sendJsonHttp fd 502 origin? "{\"error\":\"upstream_invalid_gzip\"}"
                   done := true
               | .ok (finalBody, strippedEnc) =>
                 let ctype := (findHeaderVal? up.headers "content-type").getD "application/json"
@@ -357,92 +361,74 @@ private def handleTransportProxyRequest (stRef : IO.Ref LocaldState) (isShardPor
             if canFailoverRequest req.method hasIdem (idx + 1) origins then
               idx := idx + 1
             else
-              sendJsonHttp fd 502 origin? "{\"error\":\"upstream_unreachable\"}"
+              discard <| sendJsonHttp fd 502 origin? "{\"error\":\"upstream_unreachable\"}"
               done := true
-
-private def streamLocalEventsSse (stRef : IO.Ref LocaldState) (clientFd : Fd) (origin? : Option String) : IO Unit := do
-  let head :=
-    "HTTP/1.1 200 OK\r\n" ++
-    corsHeaderBlock origin? ++
-    "Content-Type: text/event-stream\r\n" ++
-    "Cache-Control: no-cache\r\n" ++
-    "Connection: close\r\n\r\n: ready\n\n"
-  match ← writeAll clientFd head.toUTF8 false with
-  | .error _ => return ()
-  | .ok _ =>
-    let mut alive := true
-    let mut idleTicks : Nat := 0
-    while alive do
-      let evs ← stRef.modifyGet fun s =>
-        if s.queuedChannelEvents.isEmpty then
-          (#[], s)
-        else
-          let items := s.queuedChannelEvents.map fun (tok, payload) =>
-            JVal.obj #[("token", JVal.nat tok), ("payload", payload)]
-          (items, { s with queuedChannelEvents := #[] })
-      if !evs.isEmpty then
-        idleTicks := 0
-        let frame := "data: " ++ renderCompact (.arr evs) ++ "\n\n"
-        match ← writeAll clientFd frame.toUTF8 false with
-        | .ok _ => pure ()
-        | .error _ => alive := false
-      else
-        match ← pollReadable clientFd 500 with
-        | .ok () =>
-          let chunk ← readStreamChunk clientFd 64
-          if chunk.isEmpty then alive := false
-        | .error .eagain =>
-          idleTicks := idleTicks + 1
-          if idleTicks ≥ 30 then
-            idleTicks := 0
-            match ← writeAll clientFd ": keepalive\n\n".toUTF8 false with
-            | .ok _ => pure ()
-            | .error _ => alive := false
-        | .error _ =>
-          alive := false
 
 private def handleClientConnection (stRef : IO.Ref LocaldState) (portIdx : Nat) (clientFd : Fd) : IO Unit := do
   try
-    match ← readHttpRequestFromFd clientFd none 5000 with
-    | .error errMsg =>
-      let code := statusForParseError errMsg
-      sendJsonHttp clientFd code none (renderCompact (.obj #[("error", .str errMsg)]))
-    | .ok req =>
-      let origin? := findHeaderVal? req.headers "origin"
-      if !isAllowedLocaldOrigin origin? then
-        sendJsonHttp clientFd 403 none "{\"error\":\"forbidden_origin\"}"
-      else
-        let st ← stRef.get
-        if portIdx > 0 || req.path.startsWith "/__orb_tx/" then
-          handleTransportProxyRequest stRef (portIdx ≥ 2) clientFd req origin?
-        else if req.method == "OPTIONS" && (req.path == "/__orb_rpc" || req.path == "/__orb_events") then
-          sendPreflight204 clientFd origin?
-        else if req.method == "GET" && req.path == "/__orb_events" then
-          let provided := (findHeaderVal? req.headers "x-orb-token").getD ""
-          if !checkRpcAuth "127.0.0.1" provided st.launchToken then
-            sendJsonHttp clientFd 401 origin? "{\"error\":\"unauthorized\"}"
-          else
-            streamLocalEventsSse stRef clientFd origin?
-        else if req.method != "POST" || req.path != "/__orb_rpc" then
-          sendJsonHttp clientFd 404 origin? "{\"error\":\"not_found\"}"
+    let isProxyPort := portIdx > 0
+    let mut keepLoop := true
+    let mut carry := ByteArray.empty
+    let mut reqCount : Nat := 0
+    while keepLoop && reqCount < 1024 do
+      let tmo : UInt32 := if reqCount == 0 then 10000 else 15000
+      match ← readLocaldHttpRequestFromFd clientFd carry isProxyPort tmo with
+      | .error "empty_socket_read" =>
+        keepLoop := false
+      | .error errMsg =>
+        let code := statusForParseError errMsg
+        discard <| sendJsonHttp clientFd code none (renderCompact (.obj #[("error", .str errMsg)])) false
+        keepLoop := false
+      | .ok (req, remBytes) =>
+        reqCount := reqCount + 1
+        carry := remBytes
+        let origin? := findHeaderVal? req.headers "origin"
+        if !isAllowedLocaldOrigin origin? then
+          discard <| sendJsonHttp clientFd 403 none "{\"error\":\"forbidden_origin\"}" false
+          keepLoop := false
         else
-          let provided := (findHeaderVal? req.headers "x-orb-token").getD ""
-          if !checkRpcAuth "127.0.0.1" provided st.launchToken then
-            sendJsonHttp clientFd 401 origin? "{\"error\":\"unauthorized\"}"
+          let st ← stRef.get
+          if isProxyPort || req.path.startsWith "/__orb_tx/" then
+            handleTransportProxyRequest stRef (portIdx ≥ 2) clientFd req origin?
+            keepLoop := false
+          else if req.method == "OPTIONS" && (req.path == "/__orb_rpc" || req.path == "/__orb_events") then
+            sendPreflight204 clientFd origin?
+            keepLoop := false
+          else if req.method == "GET" && req.path == "/__orb_events" then
+            let provided := (findHeaderVal? req.headers "x-orb-token").getD ""
+            if !checkRpcAuth "127.0.0.1" provided st.launchToken then
+              discard <| sendJsonHttp clientFd 401 origin? "{\"error\":\"unauthorized\"}" false
+            else
+              streamLocalEventsSse stRef clientFd origin?
+            keepLoop := false
+          else if req.method != "POST" || req.path != "/__orb_rpc" then
+            discard <| sendJsonHttp clientFd 404 origin? "{\"error\":\"not_found\"}" false
+            keepLoop := false
           else
-            let bodyStr := String.fromUTF8? req.bodySlice.toByteArray |>.getD ""
-            match OrbBin.Json.parse bodyStr with
-            | .error e =>
-              sendJsonHttp clientFd 400 origin? (renderCompact (.obj #[("error", .str e)]))
-            | .ok jv =>
-              let cmd := (jv.fieldStr? "command").getD ""
-              let cargs := (jv.field? "args").getD (.obj #[])
-              let out ← dispatchRpcCommand stRef cmd cargs
-              match out with
-              | .ok res =>
-                sendJsonHttp clientFd 200 origin? (renderCompact (.obj #[("result", res)]))
-              | .error msg =>
-                sendJsonHttp clientFd 400 origin? (renderCompact (.obj #[("error", .str msg)]))
+            let connHdr := ((findHeaderVal? req.headers "connection").getD "").toLower
+            let clientWantsClose := req.version == "HTTP/1.0" || ((connHdr.splitOn "close").length > 1)
+            let keepAlive := !clientWantsClose
+            let provided := (findHeaderVal? req.headers "x-orb-token").getD ""
+            if !checkRpcAuth "127.0.0.1" provided st.launchToken then
+              discard <| sendJsonHttp clientFd 401 origin? "{\"error\":\"unauthorized\"}" false
+              keepLoop := false
+            else
+              let bodyStr := String.fromUTF8? req.bodySlice.toByteArray |>.getD ""
+              match OrbBin.Json.parse bodyStr with
+              | .error e =>
+                let sent ← sendJsonHttp clientFd 400 origin? (renderCompact (.obj #[("error", .str e)])) keepAlive
+                keepLoop := keepAlive && sent
+              | .ok jv =>
+                let cmd := (jv.fieldStr? "command").getD ""
+                let cargs := (jv.field? "args").getD (.obj #[])
+                let out ← dispatchRpcCommand stRef cmd cargs
+                match out with
+                | .ok res =>
+                  let sent ← sendJsonHttp clientFd 200 origin? (renderCompact (.obj #[("result", res)])) keepAlive
+                  keepLoop := keepAlive && sent
+                | .error msg =>
+                  let sent ← sendJsonHttp clientFd 400 origin? (renderCompact (.obj #[("error", .str msg)])) keepAlive
+                  keepLoop := keepAlive && sent
   finally
     discard <| closeFd clientFd
 
@@ -612,4 +598,6 @@ def main (args : List String) : IO UInt32 := do
         | none => none
       OrbBin.PosixExt.installTermTrap
       let stRef ← IO.mkRef initState
+      ensurePersistedBindingsLoaded stRef
+      ensurePersistedOriginsLoaded stRef
       acceptMuxLoop stRef rpcFd (#[proxyFd] ++ shardFds) parentPid? 0

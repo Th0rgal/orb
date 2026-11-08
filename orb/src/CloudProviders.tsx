@@ -35,7 +35,7 @@ export function CloudProviders() {
  onMount(()=>{const stop=pollWhileVisible(()=>refresh(false),60000);const onRefresh=()=>{void refresh(true);};window.addEventListener('orb:providers-refresh',onRefresh);onCleanup(()=>{disposed=true;stop();window.removeEventListener('orb:providers-refresh',onRefresh);});});
   return <section class="s-sec" aria-label="Cloud agents"><h3>Cloud agents</h3><div class="s-card">
   <ErrorToast error={error()} title="Couldn’t load cloud accounts" background action={{label:'Retry',run:()=>refresh(true)}}/>
-  <Show when={loaded()} fallback={<div class="s-row" role="status">Loading cloud accounts…</div>}>
+  <Show when={loaded()} fallback={<div role="status" aria-label="Loading cloud accounts"><span class="sr-only">Loading cloud accounts…</span><div class="s-row p-skeleton-row"><span class="sk-bar p-sk-logo"/><div class="p-sk-lines"><span class="sk-bar p-sk-title"/><span class="sk-bar p-sk-sub"/></div></div><div class="s-row p-skeleton-row"><span class="sk-bar p-sk-logo"/><div class="p-sk-lines"><span class="sk-bar p-sk-title"/><span class="sk-bar p-sk-sub"/></div></div></div>}>
    <For each={services.filter(service=>accounts().some(a=>a.provider===service))}>{service=><CloudProviderRow provider={service} accounts={accounts().filter(a=>a.provider===service)} usage={usage()[accounts().find(a=>a.provider===service)?.id??'']}/>}</For>
    <Show when={!error()&&!accounts().length}><div class="s-row"><span class="s-row-desc">No cloud accounts configured.</span></div></Show>
    <Show when={error()&&!accounts().length}><div class="s-row"><span class="s-row-desc">Cloud accounts could not be loaded.</span><button class="s-btn sm" onClick={()=>void refresh(true)}>Retry</button></div></Show>
