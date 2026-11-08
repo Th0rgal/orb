@@ -86,19 +86,26 @@ static char *build_init_script(unsigned port, const char *token) {
         "  const ORB_LOCALD_URL = \"http://127.0.0.1:%u/__orb_rpc\", ORB_TOKEN = %s;\n"
         "  class Channel { constructor() { this.onmessage = () => {}; } }\n"
         "  const listeners = new Map(), channels = new Map(); let timer = 0;\n"
+        "  const emit = (name, payload) => { const s = listeners.get(name); if (s) for (const h of s) { try { h({ event: name, payload }); } catch {} } };\n"
+        "  window.__ORB_EMIT__ = emit;\n"
         "  async function drain() {\n"
-        "    if (!channels.size) { if (timer) { clearInterval(timer); timer = 0; } return; }\n"
+        "    if (!channels.size && !listeners.size) { if (timer) { clearInterval(timer); timer = 0; } return; }\n"
         "    try {\n"
         "      const r = await _fetch(ORB_LOCALD_URL, { method: 'POST',\n"
         "        headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN },\n"
-        "        body: _jsonStringify({ command: '__orb_poll_events', args: {} }) });\n"
+        "        body: _jsonStringify({ command: '__orb_poll_events', args: { tokens: Array.from(channels.keys()) } }) });\n"
         "      const b = await r.json();\n"
-        "      if (Array.isArray(b.result)) for (const ev of b.result) channels.get(ev.token)?.onmessage(ev.payload);\n"
+        "      if (Array.isArray(b.result)) for (const ev of b.result) {\n"
+        "        if (typeof ev.event === 'string') emit(ev.event, ev.payload);\n"
+        "        else channels.get(ev.token)?.onmessage(ev.payload);\n"
+        "      }\n"
         "    } catch {}\n"
         "  }\n"
-        "  async function invoke(command, args = {}) {\n"
-        "    const clean = { ...(args || {}) }; let bound = null;\n"
-        "    if (clean.onEvent instanceof Channel) { bound = clean.onEvent; delete clean.onEvent; }\n"
+        "  async function invoke(command, args = {}, options = {}) {\n"
+        "    const isBin = args instanceof Uint8Array || args instanceof ArrayBuffer;\n"
+        "    const clean = isBin ? { __binaryBase64: btoa(Array.from(args instanceof Uint8Array ? args : new Uint8Array(args), c => String.fromCharCode(c)).join('')), __headers: options?.headers || {} } : { ...(args || {}) };\n"
+        "    let bound = null;\n"
+        "    if (!isBin && clean.onEvent instanceof Channel) { bound = clean.onEvent; delete clean.onEvent; }\n"
         "    if (command.endsWith('_unsubscribe') && typeof clean.token === 'number') channels.delete(clean.token);\n"
         "    let r; for (let i = 0; ; i++) { try { r = await _fetch(ORB_LOCALD_URL, { method: 'POST',\n"
         "      headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN },\n"
@@ -106,16 +113,13 @@ static char *build_init_script(unsigned port, const char *token) {
         "      catch (e) { if (i >= 8) throw e; await new Promise(w => setTimeout(w, 75)); } }\n"
         "    const b = await r.json();\n"
         "    if (!r.ok || b.error) throw new Error(b.error || command);\n"
-        "    if (bound && typeof b.result === 'number') {\n"
-        "      channels.set(b.result, bound);\n"
-        "      if (!timer) timer = setInterval(drain, 250);\n"
-        "      void drain();\n"
-        "    }\n"
+        "    if (bound && typeof b.result === 'number') { channels.set(b.result, bound); if (!timer) timer = setInterval(drain, 250); void drain(); }\n"
         "    return b.result;\n"
         "  }\n"
         "  async function listen(n, h) {\n"
         "    if (!listeners.has(n)) listeners.set(n, new Set());\n"
-        "    listeners.get(n).add(h); return () => listeners.get(n)?.delete(h);\n"
+        "    listeners.get(n).add(h); if (!timer) timer = setInterval(drain, 250);\n"
+        "    return () => listeners.get(n)?.delete(h);\n"
         "  }\n"
         "  window.__TAURI_INTERNALS__ = { invoke };\n"
         "  window.__ORB_DESKTOP__ = window.__TAURI__ = { core: { invoke, Channel }, event: { listen },\n"
@@ -162,23 +166,21 @@ int main(int argc, char **argv) {
     if (!init_js) return 1;
 
     if (argc > 1 && strcmp(argv[1], "--self-test") == 0) {
-        int ok = strstr(init_js, "__ORB_DESKTOP__") != NULL && strstr(init_js, "__orb_poll_events") != NULL &&
+        int ok = strstr(init_js, "__ORB_DESKTOP__") != NULL && strstr(init_js, "__ORB_EMIT__") != NULL &&
                  strstr(init_js, "const _fetch = window.fetch.bind(window)") != NULL &&
-                 is_confined_shell_uri("http://127.0.0.1:5173") && is_confined_shell_uri("http://localhost/") &&
+                 is_confined_shell_uri("http://127.0.0.1:1430") && is_confined_shell_uri("http://localhost/") &&
                  !is_confined_shell_uri("http://127.0.0.1:80@evil.com/") && !is_confined_shell_uri("https://evil.example");
-        free(init_js);
-        return ok ? (printf("orb-linux-shell self-test: ok\n"), 0) : 1;
+        return free(init_js), ok ? (printf("orb-linux-shell self-test: ok\n"), 0) : 1;
     }
-
     pid_t locald_pid = -1;
     const char *locald_bin = getenv("ORB_LOCALD_BIN");
     if (locald_bin && *locald_bin && (locald_pid = fork()) == 0) {
-        static const char *const keep[] = { "HOME", "PATH", "TMPDIR", "USER", "LANG", "ORB_SIGNER_BIN", "ORB_APPROVAL_KEY_PATH" };
-        char pkv[40], tkv[4200], kv[7][1024], *envp[10];
+        static const char *const keep[] = { "HOME", "PATH", "TMPDIR", "USER", "LANG", "ORB_STATE_DIR", "ORB_SIGNER_BIN", "ORB_APPROVAL_KEY_PATH" };
+        char pkv[40], tkv[4200], kv[8][1024], *envp[11];
         size_t n = 0;
         snprintf(pkv, sizeof(pkv), "ORB_LOCALD_PORT=%u", port); envp[n++] = pkv;
         snprintf(tkv, sizeof(tkv), "ORB_LOCALD_TOKEN=%s", token); envp[n++] = tkv;
-        for (size_t i = 0; i < 7; ++i) {
+        for (size_t i = 0; i < 8; ++i) {
             const char *v = getenv(keep[i]);
             if (v && (size_t)snprintf(kv[i], sizeof(kv[i]), "%s=%s", keep[i], v) < sizeof(kv[i])) envp[n++] = kv[i];
         }
@@ -186,7 +188,6 @@ int main(int argc, char **argv) {
         execle(locald_bin, locald_bin, (char *)NULL, envp);
         _exit(127);
     }
-
 #if defined(ORB_HAS_WEBKITGTK)
     gtk_init(&argc, &argv);
     GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
@@ -195,19 +196,17 @@ int main(int argc, char **argv) {
     GdkGeometry geom = { .min_width = 720, .min_height = 480 };
     gtk_window_set_geometry_hints(GTK_WINDOW(win), NULL, &geom, GDK_HINT_MIN_SIZE);
     g_signal_connect(win, "destroy", G_CALLBACK(gtk_main_quit), NULL);
-
     static const gchar *const allow_list[] = { "http://127.0.0.1/*", "http://localhost/*", "file:///*", NULL };
     WebKitUserContentManager *ucm = webkit_user_content_manager_new();
     WebKitUserScript *script = webkit_user_script_new(
         init_js, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, allow_list, NULL);
     webkit_user_content_manager_add_script(ucm, script);
     webkit_user_script_unref(script);
-
     GtkWidget *wv = webkit_web_view_new_with_user_content_manager(ucm);
     g_signal_connect(wv, "decide-policy", G_CALLBACK(on_decide_policy), NULL);
     gtk_container_add(GTK_CONTAINER(win), wv);
     const char *url = getenv("ORB_DEV_URL");
-    webkit_web_view_load_uri(WEBKIT_WEB_VIEW(wv), (url && is_confined_shell_uri(url)) ? url : "http://127.0.0.1:5173");
+    webkit_web_view_load_uri(WEBKIT_WEB_VIEW(wv), (url && is_confined_shell_uri(url)) ? url : "http://127.0.0.1:1430");
     gtk_widget_show_all(win);
     gtk_main();
 #else

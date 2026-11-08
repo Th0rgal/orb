@@ -51,7 +51,7 @@ if [[ "$UI_ONLY" == "1" ]]; then
       rm -rf "$APP_BUNDLE/Contents/Resources/dist"
       cp -R "$ROOT_DIR/orb/dist" "$APP_BUNDLE/Contents/Resources/dist"
       /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GIT_SHA" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
-      codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1 || true
+      codesign --force --deep --entitlements "$ROOT_DIR/macos_shell/Entitlements.plist" --sign - "$APP_BUNDLE" >/dev/null 2>&1 || true
       echo "==> Updated dist/ in $APP_BUNDLE (CFBundleVersion=$GIT_SHA)"
     fi
     if [[ "$INSTALL_APP" == "1" ]]; then
@@ -63,7 +63,7 @@ if [[ "$UI_ONLY" == "1" ]]; then
       # JS/CSS chunks from its previous bundle while index.html points to the new build.
       rsync -a "$ROOT_DIR/orb/dist/" "/Applications/Orb.app/Contents/Resources/dist/"
       /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GIT_SHA" "/Applications/Orb.app/Contents/Info.plist" 2>/dev/null || true
-      codesign --force --deep --sign - "/Applications/Orb.app" >/dev/null 2>&1 || true
+      codesign --force --deep --entitlements "$ROOT_DIR/macos_shell/Entitlements.plist" --sign - "/Applications/Orb.app" >/dev/null 2>&1 || true
       echo "==> Synced orb/dist into /Applications/Orb.app (CFBundleVersion=$GIT_SHA)"
     fi
   else
@@ -88,6 +88,7 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
     -framework Security \
     "$ROOT_DIR/macos_shell/main.swift" \
     -o "$STAGE_BIN_DIR/orb"
+  codesign --force --entitlements "$ROOT_DIR/macos_shell/Entitlements.plist" --sign - "$STAGE_BIN_DIR/orb" >/dev/null 2>&1 || true
   python3 "$ROOT_DIR/orb/scripts/build-signer.py"
 elif [[ "$OS_NAME" == "Linux" ]]; then
   echo "==> Compiling native linux_shell..."
@@ -170,7 +171,7 @@ if [[ "$MODE" == "bundle" ]]; then
 </dict>
 </plist>
 EOF
-    codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1 || true
+    codesign --force --deep --entitlements "$ROOT_DIR/macos_shell/Entitlements.plist" --sign - "$APP_BUNDLE" >/dev/null 2>&1 || true
     echo "==> Staged standalone bundle at $APP_BUNDLE"
 
     if [[ "$INSTALL_APP" == "1" ]]; then

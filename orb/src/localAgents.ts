@@ -136,8 +136,19 @@ export function restoreLocalBindings(): Promise<void> {
    void (async()=>{
     let legacy:Record<string,LocalBinding>={};
     try{legacy=JSON.parse(localStorage.getItem(BIND_KEY)||'{}');}catch{/* Invalid legacy data is not imported. */}
-    if(legacy&&typeof legacy==='object'&&!Array.isArray(legacy))for(const [id,binding] of Object.entries(legacy)){
-     if(!snapshot.bindings[id]&&binding&&['harness','bin','cwd'].every(key=>typeof (binding as unknown as Record<string,unknown>)[key]==='string'))await desktopInvoke()!('local_binding_set',{id,binding,ifAbsent:true});
+    const invoke=desktopInvoke();
+    let migrated=0;
+    if(invoke&&legacy&&typeof legacy==='object'&&!Array.isArray(legacy)){
+     for(const [id,binding] of Object.entries(legacy)){
+      if(!snapshot.bindings[id]&&binding&&['harness','bin','cwd'].every(key=>typeof (binding as unknown as Record<string,unknown>)[key]==='string')){
+       await invoke('local_binding_set',{id,binding,ifAbsent:true});
+       migrated++;
+      }
+     }
+    }
+    if(migrated>0&&invoke){
+     const refreshed=await invoke('local_bindings_refresh') as BindingSnapshot;
+     applyBindings(refreshed);
     }
     localStorage.removeItem(BIND_KEY);resolve();
    })().catch(error=>{bindingsReady=undefined;stop();reject(error);});
@@ -287,8 +298,8 @@ export async function materializeMentions(
     if (!invoke && required) throw new Error("Shared context requires the Orb desktop app on this computer.");
     try {
       if (invoke) {
-        const result = await invoke("project_context_prepare", {request:{endpoint:getApiUrl(),token:getJwt()??"",project:slug,paths:contextMentions.map(m=>m.value)}}) as {root:string;state:{error?:string};resolved_paths:string[]};
-        if(!Array.isArray(result.resolved_paths)||result.resolved_paths.length!==contextMentions.length)throw Error("Restart Orb to load the updated context resolver. Your draft is kept.");
+        const result = await invoke("project_context_prepare", {request:{endpoint:getApiUrl(),token:getJwt()??"",project:slug,paths:contextMentions.map(m=>m.value)}}) as {root:string;state:{error?:string};resolved_paths:string[]} | null;
+        if(!result||!Array.isArray(result.resolved_paths)||result.resolved_paths.length!==contextMentions.length)throw Error("Restart Orb to load the updated context resolver. Your draft is kept.");
         for (const [index, mention] of contextMentions.entries()) {
           if (explicitContext(mention.value) && result.resolved_paths[index] !== mention.value.replace(/\/$/, "")) throw Error("The referenced path no longer exists. Select it again; your draft is kept.");
         }

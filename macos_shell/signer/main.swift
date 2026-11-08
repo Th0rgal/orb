@@ -39,21 +39,50 @@ func option(_ name: String) -> String? {
     guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
     return args[i + 1]
 }
-guard let command = args.first else { fail("usage: orb-signer create|public|sign|auth --key PATH") }
+guard let command = args.first else { fail("usage: orb-signer create|public|sign|auth|status --key PATH") }
+if command == "status" {
+    let bioContext = LAContext()
+    var bioError: NSError?
+    if bioContext.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &bioError) {
+        emit(["available": "true", "kind": "touch_id", "label": "Touch ID"])
+        exit(0)
+    }
+    let authContext = LAContext()
+    var authError: NSError?
+    if authContext.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) {
+        emit(["available": "true", "kind": "passcode", "label": "Touch ID or Mac Password"])
+        exit(0)
+    }
+    emit(["available": "false", "kind": "none", "label": "Unavailable"])
+    exit(0)
+}
 if command == "auth" {
     let reason = (option("--reason") ?? "Authenticate").trimmingCharacters(in: .whitespacesAndNewlines)
     let context = LAContext()
     context.localizedCancelTitle = "Cancel"
+    var bioError: NSError?
+    let policy: LAPolicy
+    if context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &bioError) {
+        policy = .deviceOwnerAuthenticationWithBiometrics
+    } else {
+        var devError: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &devError) else {
+            let msg = (bioError ?? devError)?.localizedDescription ?? "Authentication is unavailable on this Mac"
+            fail("Touch ID: \(msg)", code: 1)
+        }
+        policy = .deviceOwnerAuthentication
+    }
     let semaphore = DispatchSemaphore(value: 0)
     var authError: Error?
-    context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason.isEmpty ? "Authenticate" : reason) { ok, error in
+    context.evaluatePolicy(policy, localizedReason: reason.isEmpty ? "Authenticate" : reason) { ok, error in
         if !ok { authError = error ?? NSError(domain: "orb-signer", code: 1) }
         semaphore.signal()
     }
     semaphore.wait()
     if let authError {
         let code = (authError as? LAError)?.code
-        fail("Touch ID: \(authError.localizedDescription)", code: code == .userCancel || code == .appCancel ? 2 : 1)
+        let cancelled = code == .userCancel || code == .appCancel || code == .systemCancel
+        fail("Touch ID: \(authError.localizedDescription)", code: cancelled ? 2 : 1)
     }
     emit(["authenticated": "true"])
     exit(0)

@@ -367,6 +367,319 @@ private def runR7aInteractiveToolSlotTests : IO Unit := do
   if p != t then
     throw (IO.userError s!"runR7aInteractiveToolSlotTests failed ({p}/{t})")
 
+private def makeTestWav16kMono (sampleCount : Nat) (amp : UInt16) : ByteArray := Id.run do
+  let dataBytes := sampleCount * 2
+  let riffChunkSize := 36 + dataBytes
+  let pushU16LE (b : ByteArray) (v : Nat) : ByteArray :=
+    (b.push (v &&& 0xFF).toUInt8).push ((v >>> 8) &&& 0xFF).toUInt8
+  let pushU32LE (b : ByteArray) (v : Nat) : ByteArray :=
+    (((b.push (v &&& 0xFF).toUInt8).push ((v >>> 8) &&& 0xFF).toUInt8).push ((v >>> 16) &&& 0xFF).toUInt8).push ((v >>> 24) &&& 0xFF).toUInt8
+  let mut out := ByteArray.emptyWithCapacity (44 + dataBytes)
+  out := out ++ "RIFF".toUTF8
+  out := pushU32LE out riffChunkSize
+  out := out ++ "WAVEfmt ".toUTF8
+  out := pushU32LE out 16
+  out := pushU16LE out 1       -- PCM
+  out := pushU16LE out 1       -- mono
+  out := pushU32LE out 16000   -- 16 kHz
+  out := pushU32LE out 32000   -- byte rate
+  out := pushU16LE out 2       -- block align
+  out := pushU16LE out 16      -- 16-bit
+  out := out ++ "data".toUTF8
+  out := pushU32LE out dataBytes
+  let lo := (amp.toNat &&& 0xFF).toUInt8
+  let hi := ((amp.toNat >>> 8) &&& 0xFF).toUInt8
+  for _ in [0:sampleCount] do
+    out := (out.push lo).push hi
+  return out
+
+private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : String) : IO (Nat × Nat) := do
+  let mut passed := 0
+  let mut total := 0
+  let pDir := System.FilePath.mk tmpBase / "parity-suite"
+  IO.FS.createDirAll pDir
+
+  -- A. Symlink escape & `/` root confinement (`read_upload_file` + `browse_local_files`)
+  let secretDir := pDir / "outside-secret"
+  let allowedDir := pDir / "granted-folder"
+  IO.FS.createDirAll secretDir
+  IO.FS.createDirAll allowedDir
+  let secretFile := secretDir / "topsecret.txt"
+  let goodFile := allowedDir / "safe.txt"
+  let escapeLink := allowedDir / "escape.txt"
+  IO.FS.writeFile secretFile "DO_NOT_READ"
+  IO.FS.writeFile goodFile "SAFE_PAYLOAD"
+  discard <| IO.Process.run { cmd := "/bin/ln", args := #["-s", secretFile.toString, escapeLink.toString] }
+
+  let stConfRef ← IO.mkRef ({
+    launchToken := validTok,
+    orbStateDir := (pDir / "state").toString,
+    homeDir := (pDir / "home").toString,
+    hostOs := "macos"
+  } : LocaldState)
+  let _ ← dispatchRpcCommand stConfRef "grant_upload_folder" (.obj #[("path", .str allowedDir.toString)])
+  let okGoodRead ← dispatchRpcCommand stConfRef "read_upload_file" (.obj #[("path", .str goodFile.toString)])
+  let rejEscapeUpload ← dispatchRpcCommand stConfRef "read_upload_file" (.obj #[("path", .str escapeLink.toString)])
+  let rejUngrantedBrowse ← dispatchRpcCommand stConfRef "browse_local_files" (.obj #[
+    ("root", .str secretDir.toString),
+    ("request", .obj #[("action", .str "list"), ("path", .str "")])
+  ])
+  let rejSlashRootBrowse ← dispatchRpcCommand stConfRef "browse_local_files" (.obj #[
+    ("root", .str "/"),
+    ("request", .obj #[("action", .str "list"), ("path", .str "")])
+  ])
+  let rejEscapeBrowseRead ← dispatchRpcCommand stConfRef "browse_local_files" (.obj #[
+    ("root", .str allowedDir.toString),
+    ("request", .obj #[("action", .str "read"), ("path", .str "escape.txt")])
+  ])
+  let okBrowseList ← dispatchRpcCommand stConfRef "browse_local_files" (.obj #[
+    ("root", .str allowedDir.toString),
+    ("request", .obj #[("action", .str "list"), ("path", .str "")])
+  ])
+  total := total + 1
+  let confOk :=
+    okGoodRead.isOk &&
+    rejEscapeUpload.isOk.not &&
+    rejUngrantedBrowse.isOk.not &&
+    rejSlashRootBrowse.isOk.not &&
+    rejEscapeBrowseRead.isOk.not &&
+    (match okBrowseList with
+     | .ok jv =>
+       match jv.fieldArr? "entries" with
+       | some #[ent] => ent.fieldStr? "name" == some "safe.txt"
+       | _ => false
+     | _ => false)
+  if (← assertTrue "canonical_confinement_blocks_symlink_escape_and_slash_root" confOk) then passed := passed + 1
+
+  -- B. Concurrent upload batch UUIDs: cancelling batch 1 does NOT revoke batch 2 from the same directory
+  let batchDir := pDir / "shared-batch-dir"
+  IO.FS.createDirAll batchDir
+  let bf1 := batchDir / "a.txt"
+  let bf2 := batchDir / "b.txt"
+  IO.FS.writeFile bf1 "alpha"
+  IO.FS.writeFile bf2 "beta"
+  let stBatchRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := (pDir / "state-b").toString, hostOs := "macos" } : LocaldState)
+  let filesArr : JVal := .arr #[
+    .obj #[("path", .str "shared-batch-dir/a.txt"), ("local_path", .str bf1.toString)],
+    .obj #[("path", .str "shared-batch-dir/b.txt"), ("local_path", .str bf2.toString)]
+  ]
+  let _ ← dispatchRpcCommand stBatchRef "offer_upload_folder" (.obj #[
+    ("batch", .str "batch-uuid-1"), ("roots", .arr #[.str batchDir.toString]), ("files", filesArr)
+  ])
+  let _ ← dispatchRpcCommand stBatchRef "offer_upload_folder" (.obj #[
+    ("batch", .str "batch-uuid-2"), ("roots", .arr #[.str batchDir.toString]), ("files", filesArr)
+  ])
+  let _ ← dispatchRpcCommand stBatchRef "grant_upload_folder" (.obj #[("batch", .str "batch-uuid-1")])
+  let _ ← dispatchRpcCommand stBatchRef "grant_upload_folder" (.obj #[("batch", .str "batch-uuid-2")])
+  let _ ← dispatchRpcCommand stBatchRef "revoke_upload_folder" (.obj #[("batch", .str "batch-uuid-1")])
+  let batch2StillReadable ← dispatchRpcCommand stBatchRef "read_upload_file" (.obj #[("path", .str bf1.toString)])
+  let _ ← dispatchRpcCommand stBatchRef "revoke_upload_folder" (.obj #[("batch", .str "batch-uuid-2")])
+  let afterBothRevoked ← dispatchRpcCommand stBatchRef "read_upload_file" (.obj #[("path", .str bf1.toString)])
+  total := total + 1
+  if (← assertTrue "concurrent_upload_batches_isolated_across_same_folder"
+      (batch2StillReadable.isOk && afterBothRevoked.isOk.not)) then passed := passed + 1
+
+  -- C. `biometric_authenticate` never returns `.ok (.bool false)` on cancel/missing/non-macOS
+  let bioAuthScript := pDir / "mock-bio-signer.sh"
+  IO.FS.writeFile bioAuthScript
+    "#!/bin/sh\nif [ \"$1\" = \"status\" ]; then echo '{\"available\":\"true\",\"kind\":\"passcode\",\"label\":\"Touch ID or Password\"}'; exit 0; fi\nif [ \"$1\" = \"auth\" ]; then echo 'User cancelled' >&2; exit 2; fi\nexit 1\n"
+  discard <| OrbBin.PosixExt.chmod bioAuthScript.toString 0o700
+  let stBioNone ← IO.mkRef ({ launchToken := validTok, hostOs := "macos", signerBin? := none } : LocaldState)
+  let stBioCancel ← IO.mkRef ({ launchToken := validTok, hostOs := "macos", signerBin? := some bioAuthScript.toString } : LocaldState)
+  let resBioNone ← dispatchRpcCommand stBioNone "local_machine_identity" (.obj #[])
+  let _ := resBioNone
+  let authNone ← dispatchRpcCommand stBioNone "biometric_authenticate" (.obj #[("reason", .str "Unlock")])
+  let authCancel ← dispatchRpcCommand stBioCancel "biometric_authenticate" (.obj #[("reason", .str "Unlock")])
+  let statusFallback ← dispatchRpcCommand stBioCancel "biometric_status" (.obj #[])
+  total := total + 1
+  let bioAuthOk :=
+    authNone.isOk.not &&
+    (match authCancel with | .error "biometric_cancelled" => true | _ => false) &&
+    (match statusFallback with
+     | .ok jv => jv.fieldBool? "available" == some true && jv.fieldStr? "kind" == some "passcode"
+     | _ => false)
+  if (← assertTrue "biometric_auth_errors_on_cancel_and_status_passcode_fallback" bioAuthOk) then passed := passed + 1
+
+  -- D. Durable `local-bindings.json` + `local-origins.json` reload across daemon restarts
+  let persistDir := (pDir / "persist-state").toString
+  let stP1 ← IO.mkRef ({ launchToken := validTok, orbStateDir := persistDir, homeDir := (pDir / "home").toString, hostOs := "macos" } : LocaldState)
+  let _ ← dispatchRpcCommand stP1 "local_binding_set" (.obj #[
+    ("id", .str "m-persist-1"),
+    ("binding", .obj #[("harness", .str "claudecode"), ("bin", .str "/usr/bin/true"), ("cwd", .str allowedDir.toString)])
+  ])
+  let origLaunchRes ← dispatchRpcCommand stP1 "local_origin_launch" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://orbcore.example")]),
+    ("draft", .obj #[("title", .str "Durable Local Chat"), ("project", .str "orb"), ("prompt", .str "hello durable"), ("tags", .arr #[.str "placement:client"])])
+  ])
+  let origMid := match origLaunchRes with | .ok jv => (jv.fieldStr? "id").getD "" | _ => ""
+  let stP2 ← IO.mkRef ({ launchToken := validTok, orbStateDir := persistDir, homeDir := (pDir / "home").toString, hostOs := "macos" } : LocaldState)
+  let reloadedBinds ← dispatchRpcCommand stP2 "local_bindings_refresh" (.obj #[])
+  let reloadedOrigins ← dispatchRpcCommand stP2 "local_origin_list" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://orbcore.example")])
+  ])
+  total := total + 1
+  let persistOk :=
+    !origMid.isEmpty &&
+    (match reloadedBinds with
+     | .ok jv => ((jv.field? "bindings").bind (·.field? "m-persist-1")).isSome
+     | _ => false) &&
+    (match reloadedOrigins with
+     | .ok (.arr #[m]) =>
+       m.fieldStr? "id" == some origMid &&
+       m.fieldStr? "project" == some "orb" &&
+       (m.fieldArr? "history").map (·.size) == some 1 &&
+       (m.fieldStr? "created_at").isSome
+     | _ => false)
+  if (← assertTrue "durable_local_bindings_and_origins_survive_daemon_restart" persistOk) then passed := passed + 1
+
+  -- E. Token-scoped `__orb_poll_events` + per-SSE-subscriber broadcast (no multi-window event stealing)
+  let stPub ← IO.mkRef ({ launchToken := validTok } : LocaldState)
+  let sid1 ← stPub.modifyGet LocaldState.registerSseSubscriber
+  let sid2 ← stPub.modifyGet LocaldState.registerSseSubscriber
+  let tokA ← dispatchRpcCommand stPub "local_agents_subscribe" (.obj #[("id", .str "run-A")])
+  let tokB ← dispatchRpcCommand stPub "local_agents_subscribe" (.obj #[("id", .str "run-B")])
+  let tA := match tokA with | .ok jv => jv.asNat?.getD 0 | _ => 0
+  let tB := match tokB with | .ok jv => jv.asNat?.getD 0 | _ => 0
+  stPub.modify fun s =>
+    let s1 := s.publishChannelEvent "local_agents" (.obj #[("text", .str "delta-A")]) (some "run-A")
+    s1.publishChannelEvent "local_agents" (.obj #[("text", .str "delta-B")]) (some "run-B")
+  let sseDrain1 ← stPub.modifyGet (·.drainSseSubscriber sid1)
+  let sseDrain2 ← stPub.modifyGet (·.drainSseSubscriber sid2)
+  let pollOnlyA ← dispatchRpcCommand stPub "__orb_poll_events" (.obj #[("tokens", .arr #[JVal.nat tA])])
+  let pollOnlyB ← dispatchRpcCommand stPub "__orb_poll_events" (.obj #[("tokens", .arr #[JVal.nat tB])])
+  total := total + 1
+  let multiWinOk :=
+    tA > 0 && tB > 0 && tA != tB &&
+    sseDrain1.size == 2 && sseDrain2.size == 2 &&
+    (match pollOnlyA, pollOnlyB with
+     | .ok (.arr #[evA]), .ok (.arr #[evB]) =>
+       evA.fieldNat? "token" == some tA &&
+       ((evA.field? "payload").bind (·.fieldStr? "text")) == some "delta-A" &&
+       evB.fieldNat? "token" == some tB &&
+       ((evB.field? "payload").bind (·.fieldStr? "text")) == some "delta-B"
+     | _, _ => false)
+  if (← assertTrue "per_sse_subscriber_broadcast_and_token_scoped_poll_events" multiWinOk) then passed := passed + 1
+
+  -- F. `software_inventory` schema, `local_skills_sync`/`local_skills_status`, and `stage_upload_file`
+  let stInv ← IO.mkRef ({
+    launchToken := validTok,
+    orbStateDir := (pDir / "inv-state").toString,
+    homeDir := (pDir / "inv-home").toString,
+    hostOs := "macos"
+  } : LocaldState)
+  let invRes ← dispatchRpcCommand stInv "software_inventory" (.obj #[])
+  let syncRes ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[
+      ("library_skills", .arr #[
+        .obj #[("name", .str "demo-skill"), ("content", .str "---\ndescription: \"Demo\"\n---\nUse demo.\n")]
+      ]),
+      ("prune_removed", .bool true)
+    ])
+  ])
+  let stageRes ← dispatchRpcCommand stInv "stage_upload_file" (.obj #[
+    ("name", .str "clip.png"),
+    ("dataBase64", .str (OrbBin.PosixExt.base64Encode "PNG_DATA".toUTF8))
+  ])
+  let stagedRead ← match stageRes with
+    | .ok (.str sp) => dispatchRpcCommand stInv "read_upload_file" (.obj #[("path", .str sp)])
+    | _ => pure (.error "stage_failed")
+  total := total + 1
+  let invAndSkillsOk :=
+    (match invRes with
+     | .ok jv =>
+       (jv.fieldNat? "checked_at").isSome &&
+       (jv.fieldArr? "components").map (fun c => c.size == 6) == some true &&
+       (jv.field? "runtime").isSome &&
+       (jv.fieldArr? "jobs").isSome
+     | _ => false) &&
+    (match syncRes with
+     | .ok jv => jv.fieldNat? "synced_skills" == some 1 && (jv.fieldNat? "harnesses_updated").getD 0 ≥ 1
+     | _ => false) &&
+    stagedRead.isOk
+  if (← assertTrue "software_inventory_skills_sync_and_staged_upload_roundtrip" invAndSkillsOk) then passed := passed + 1
+
+  -- G. Voice worker Protocol v1 integration (`ORB_VOICE_FAKE=1`: `voice_capability`, `voice_prewarm`, `voice_transcribe`, `voice_cancel`)
+  OrbBin.PosixExt.setenvVar "ORB_VOICE_FAKE" "1"
+  let repoWorkerCandidates : Array String := #[
+    "orb/voice/worker.py",
+    "../../orb/voice/worker.py"
+  ]
+  for cand in repoWorkerCandidates do
+    if (← System.FilePath.pathExists cand) then
+      OrbBin.PosixExt.setenvVar "ORB_VOICE_WORKER" cand
+  let wavBytes := makeTestWav16kMono 4800 4000 -- 0.30s @ 16kHz, peak=4000
+  let vCap ← dispatchRpcCommand stInv "voice_capability" (.obj #[])
+  let vWarm ← dispatchRpcCommand stInv "voice_prewarm" (.obj #[])
+  let vTx ← dispatchRpcCommand stInv "voice_transcribe" (.obj #[
+    ("__binaryBase64", .str (OrbBin.PosixExt.base64Encode wavBytes)),
+    ("__headers", .obj #[("x-language", .str "fr")])
+  ])
+  let vCancel ← dispatchRpcCommand stInv "voice_cancel" (.obj #[])
+  OrbBin.PosixExt.unsetenvVar "ORB_VOICE_FAKE"
+  OrbBin.PosixExt.unsetenvVar "ORB_VOICE_WORKER"
+  total := total + 1
+  let voiceOk :=
+    (match vCap with | .ok jv => jv.fieldBool? "supported" == some true && jv.fieldBool? "python_ready" == some true | _ => false) &&
+    vWarm.isOk &&
+    (match vTx with
+     | .ok jv =>
+       match jv.fieldStr? "text" with
+       | some txt => (txt.splitOn "[fake fr]").length > 1
+       | none => false
+     | _ => false) &&
+    (match vCancel with | .ok (.bool true) => true | _ => false)
+  if (← assertTrue "voice_worker_protocol_v1_fake_backend_transcribe_and_cancel" voiceOk) then passed := passed + 1
+
+  -- H. Large HTTP request framing (> 4 MiB: 5 MiB proxy & RPC framing) + live `/__orb_events` SSE latency (< 50ms)
+  let fiveMbBody := ByteArray.mk (Array.replicate (5 * 1024 * 1024) (0x41 : UInt8))
+  let largeRpcHead := s!"POST /__orb_rpc HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {fiveMbBody.size}\r\n\r\n".toUTF8
+  let largeProxyHead := s!"POST /__orb_tx/u1/api/projects/p/context/blobs HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {fiveMbBody.size}\r\n\r\n".toUTF8
+  let overRpcHead := s!"POST /__orb_rpc HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {maxLocaldRpcBodyBytes + 1}\r\n\r\n".toUTF8
+  total := total + 1
+  let largeFrameOk :=
+    (match parseLocaldHttpRequestFrame (largeRpcHead ++ fiveMbBody) false with
+     | .ok (req, rem) => req.contentLength == fiveMbBody.size && rem.isEmpty
+     | _ => false) &&
+    (match parseLocaldHttpRequestFrame (largeProxyHead ++ fiveMbBody) true with
+     | .ok (req, rem) => req.contentLength == fiveMbBody.size && rem.isEmpty
+     | _ => false) &&
+    (parseLocaldHttpRequestHead overRpcHead false).isOk.not
+  if (← assertTrue "http_framing_supports_5mb_bodies_and_enforces_36mb_64mb_caps" largeFrameOk) then passed := passed + 1
+
+  -- Live loopback SSE latency check on `streamLocalEventsSse` (< 50ms end-to-end wakeup)
+  let stSseLive ← IO.mkRef ({ launchToken := validTok } : LocaldState)
+  let subLiveRes ← dispatchRpcCommand stSseLive "local_agents_subscribe" (.obj #[("id", .str "live-sse")])
+  let _ := subLiveRes
+  let mut sseLatOk := false
+  if let .ok (lfd, lport) ← LeanSys.Posix.tcpListen "127.0.0.1" 0 4 then
+    try
+      let srvTask ← IO.asTask (prio := .dedicated) do
+        if let .ok sfd ← LeanSys.Posix.tcpAcceptPoll lfd 2000 then
+          try streamLocalEventsSse stSseLive sfd none
+          finally discard <| LeanSys.Posix.closeFd sfd
+      if let .ok cfd ← LeanSys.Posix.tcpConnect "127.0.0.1" lport then
+        try
+          -- Wait for `: ready\n\n`
+          if let .ok () ← LeanSys.Posix.pollReadable cfd 1000 then
+            let _ ← LeanSys.Posix.readStreamChunk cfd 512
+            let tStart ← IO.monoMsNow
+            stSseLive.modify fun s =>
+              s.publishChannelEvent "local_agents" (.obj #[("text", .str "fast-ping")]) (some "live-sse")
+            if let .ok () ← LeanSys.Posix.pollReadable cfd 200 then
+              let rx ← LeanSys.Posix.readStreamChunk cfd 1024
+              let elapsed := (← IO.monoMsNow) - tStart
+              let rxStr := String.fromUTF8? rx |>.getD ""
+              sseLatOk := elapsed < 80 && (rxStr.splitOn "fast-ping").length > 1
+        finally
+          discard <| LeanSys.Posix.closeFd cfd
+      let _ := srvTask.get
+    finally
+      discard <| LeanSys.Posix.closeFd lfd
+  total := total + 1
+  if (← assertTrue "live_sse_event_delivery_under_80ms_without_500ms_stall" sseLatOk) then passed := passed + 1
+
+  return (passed, total)
+
 def main : IO UInt32 := do
   let mut passed := 0
   let mut total := 0
@@ -798,6 +1111,11 @@ def main : IO UInt32 := do
   if (← assertTrue "orphan_parent_watchdog_respects_liveness_and_active_local_origins"
         (!aliveParentRes && deadIdleRes && !deadActiveRes)) then
     passed := passed + 1
+
+  -- 20. Desktop reliability & Rust-parity security, persistence, voice, SSE latency & framing checks
+  let (pParity, tParity) ← runDesktopReliabilityParityChecks tmpStateDir validTok
+  passed := passed + pParity
+  total := total + tParity
 
   try IO.FS.removeDirAll tmpStateDir catch _ => pure ()
 

@@ -69,7 +69,7 @@ export function DebugInfoPanel() {
   };
   return (
     <div class="debug-info" data-testid="debug-info">
-      <Show when={snapshot()} fallback={<div class="s-row-desc">Loading…</div>}>{s => <>
+      <Show when={snapshot()} fallback={<div role="status" aria-label="Loading diagnostics"><span class="sr-only">Loading…</span><dl class="debug-info-facts"><dt>App</dt><dd><span class="sk-bar" style={{ display: "inline-block", width: "136px", height: "13px", "vertical-align": "middle" }} /></dd><dt>Backend</dt><dd><span class="sk-bar" style={{ display: "inline-block", width: "184px", height: "13px", "vertical-align": "middle" }} /></dd><dt>Core</dt><dd><span class="sk-bar" style={{ display: "inline-block", width: "104px", height: "13px", "vertical-align": "middle" }} /></dd></dl><div class="debug-info-actions"><span class="sk-bar" style={{ width: "112px", height: "28px" }} /><span class="sk-bar" style={{ width: "68px", height: "28px" }} /></div><div class="sk-bar" style={{ width: "100%", height: "72px" }} /></div>}>{s => <>
         <dl class="debug-info-facts">
           <dt>App</dt><dd>{s().version} (build {s().build}){s().desktop ? "" : " · web"}</dd>
           <dt>Backend</dt><dd>{s().backend ?? "Not connected"}</dd>
