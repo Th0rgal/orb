@@ -23,7 +23,8 @@ export type SharedInboxPreferences = {
   model: string;
 };
 export type SharedInboxState = Record<string, unknown> & { preferences?: SharedInboxPreferences };
-type OutboxEntry = { body: unknown; serial: number; minServerVersion: number; rebased?: boolean; conflict?: boolean; failed?: boolean };
+const MAX_OUTBOX_FAILURES = 3;
+type OutboxEntry = { body: unknown; serial: number; minServerVersion: number; attempts?: number; rebased?: boolean; conflict?: boolean; failed?: boolean };
 function nextMutationSeq(floor = 0): number {
   const stored = Number(localStorage.getItem("orb.inbox.sequence.v1") ?? 0);
   const sequence = Math.max(Number.isSafeInteger(stored) && stored >= 0 ? stored : 0, floor) + 1;
@@ -43,6 +44,7 @@ function loadOutbox(): string {
     const stored = readJson<Record<string, unknown>>(key, {}, isRecord);
     for (const [path, raw] of Object.entries(stored)) {
       if (!record(raw) || !record(raw.body) || !Number.isSafeInteger(raw.serial) || (raw.serial as number) < 0
+        || (raw.attempts !== undefined && (!Number.isSafeInteger(raw.attempts) || (raw.attempts as number) < 0))
         || ![raw.rebased, raw.conflict, raw.failed].every(value => value === undefined || typeof value === "boolean")
         || raw.failed) continue;
       const body = raw.body;
@@ -54,7 +56,13 @@ function loadOutbox(): string {
         try { decodeURIComponent(path.slice(5)); } catch { continue; }
         if (!Number.isSafeInteger(body.stamp) || body.stamp === 0) continue;
       } else continue;
-      const entry = { ...raw, body, serial: raw.serial as number, minServerVersion: (body.expectedVersion as number) + 1 };
+      const entry = {
+        ...raw,
+        body,
+        serial: raw.serial as number,
+        ...(typeof raw.attempts === "number" ? { attempts: raw.attempts } : {}),
+        minServerVersion: (body.expectedVersion as number) + 1,
+      };
       outbox[path] = entry; local[path] = entry;
     }
     persist();
@@ -140,7 +148,8 @@ function flush(path: string, entry: OutboxEntry): void {
         continue;
       }
       if (!response.ok) {
-        if (response.status === 404 && path.startsWith("seen/")) {
+        const permanentClientError = response.status >= 400 && response.status < 500 && response.status !== 401 && response.status !== 408 && response.status !== 429;
+        if (permanentClientError) {
           entry.failed = true;
           if (current()) { delete outbox[path]; persist(); }
           return;
@@ -150,7 +159,18 @@ function flush(path: string, entry: OutboxEntry): void {
       if (current()) { delete outbox[path]; persist(); }
       return;
     }
-  }).catch(swallow("inboxState.outbox", { path })).finally(() => {
+  }).catch(e => {
+    if (current()) {
+      const attempts = (entry.attempts ?? 0) + 1;
+      entry.attempts = attempts;
+      if (attempts >= MAX_OUTBOX_FAILURES) {
+        entry.failed = true;
+        delete outbox[path];
+      }
+      persist();
+    }
+    swallow("inboxState.outbox", { path })(e);
+  }).finally(() => {
     if (writes.get(queueKey) === task) writes.delete(queueKey);
   });
   writes.set(queueKey, task);

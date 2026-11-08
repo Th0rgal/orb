@@ -3,13 +3,13 @@ import {render,screen,fireEvent,waitFor,cleanup} from '@solidjs/testing-library'
 import {createSignal} from 'solid-js';
 import {MissionGlyph} from '../src/MissionGlyph';
 import {NativeInteraction} from '../src/NativeInteraction';
-import {api} from '../src/api';
+import {api,bumpConnectionVersion,clearConnection,connectionVersion,setApiUrl,setConnection} from '../src/api';
 vi.mock('../src/api',async importOriginal=>({...await importOriginal<typeof import('../src/api')>(),api:vi.fn()}));
 import {composerModes,modePrompt} from '../src/goal';
 
 let emitted:any;
 const previousTauri=(window as any).__TAURI__;
-beforeEach(()=>{(window as any).__TAURI__={core:{Channel:class {onmessage=(value:any)=>{};constructor(){emitted=this;}}}};});
+beforeEach(()=>{localStorage.clear();sessionStorage.clear();(window as any).__TAURI__={core:{Channel:class {onmessage=(value:any)=>{};constructor(){emitted=this;}}}};});
 afterEach(()=>{(window as any).__TAURI__=previousTauri;});
 function transport(read:(command:string,args?:any)=>Promise<any>){return async(command:string,args:any)=>{
  if(command==='local_interaction_subscribe'){args.onEvent.onmessage(await read('local_interaction',{}));return 1;}
@@ -119,8 +119,7 @@ describe('question focus during refresh',()=>{
   host.__TAURI_INTERNALS__={invoke:transport(invoke)};
   try {
    render(()=><NativeInteraction mission="focus-local" active/>);
-   await vi.advanceTimersByTimeAsync(0);
-   const input=screen.getByRole('textbox',{name:'Other answer: Phone number?'}) as HTMLInputElement;
+   const input=await screen.findByRole('textbox',{name:'Other answer: Phone number?'}) as HTMLInputElement;
    input.focus();fireEvent.input(input,{target:{value:'+33 612345678'}});input.setSelectionRange(4,7);
    for(let i=0;i<20;i++)emitted.onmessage(structuredClone(question));
    await vi.advanceTimersByTimeAsync(6000);
@@ -131,12 +130,12 @@ describe('question focus during refresh',()=>{
    expect([input.selectionStart,input.selectionEnd]).toEqual([4,7]);
   } finally {cleanup();host.__TAURI_INTERNALS__=previous;vi.useRealTimers();}
  });
- it('preserves focus across remote snapshots but updates changed requests',()=>{
+ it('preserves focus across remote snapshots but updates changed requests',async()=>{
   const item={kind:'tool' as const,key:'focus-tool',callId:question.id,name:'ui_native_request',args:question,done:false};
   const [items,setItems]=createSignal([item]);
   try {
    render(()=><NativeInteraction mission="focus-remote" active remote items={items()}/>);
-   const input=screen.getByRole('textbox',{name:'Other answer: Phone number?'}) as HTMLInputElement;
+   const input=await screen.findByRole('textbox',{name:'Other answer: Phone number?'}) as HTMLInputElement;
    input.focus();fireEvent.input(input,{target:{value:'My answer'}});input.setSelectionRange(2,5);
    for(let i=0;i<5;i++)setItems(JSON.parse(JSON.stringify([item])));
    expect(document.activeElement).toBe(input);
@@ -173,7 +172,124 @@ it('keeps a new native request that arrives before the previous answer resolves'
   render(()=><NativeInteraction mission="consecutive-requests" active/>);
   fireEvent.click(await screen.findByRole('radio',{name:'Local'}));
   fireEvent.click(screen.getByRole('button',{name:'Continue'}));
-  await screen.findByRole('button',{name:'Implement plan'});
-  expect(screen.getByText('Save locally')).toBeTruthy();
+   await screen.findByRole('button',{name:'Implement plan'});
+   expect(screen.getByText('Save locally')).toBeTruthy();
+  }finally{cleanup();host.__TAURI_INTERNALS__=previous;}
+ });
+
+it('persists answered ui_native_request tool_call_id per mission across remounts without blocking other missions',async()=>{
+ vi.mocked(api).mockResolvedValue({delivered:true});
+ const remoteTool={kind:'tool' as const,key:'tool-1',callId:'call-remount-1',name:'ui_native_request',args:{method:'permission',params:{tool:'Bash',input:{description:'Run tests'}}},done:false};
+ try{
+  const first=render(()=><NativeInteraction mission="mission-a" active remote items={[remoteTool]}/>);
+  fireEvent.click(await screen.findByRole('button',{name:'Allow once'}));
+  await waitFor(()=>expect(screen.queryByRole('button',{name:'Allow once'})).toBeNull());
+  first.unmount();
+
+  const remounted=render(()=><NativeInteraction mission="mission-a" active remote items={[remoteTool]}/>);
+  expect(screen.queryByRole('button',{name:'Allow once'})).toBeNull();
+  remounted.unmount();
+
+  sessionStorage.clear();
+  const reopened=render(()=><NativeInteraction mission="mission-a" active remote items={[remoteTool]}/>);
+  expect(screen.queryByRole('button',{name:'Allow once'})).toBeNull();
+  reopened.unmount();
+
+  render(()=><NativeInteraction mission="mission-b" active remote items={[remoteTool]}/>);
+  expect(await screen.findByRole('button',{name:'Allow once'})).toBeTruthy();
+ }finally{cleanup();}
+});
+
+it('persists answered local native request IDs across remounts',async()=>{
+ const pending={id:'native-remount-1',method:'permission',params:{tool:'Bash',input:{description:'Allow git status'}}};
+ const host=window as any,previous=host.__TAURI_INTERNALS__;
+ const invoke=vi.fn(async(cmd:string)=>cmd==='local_interaction'?pending:null);
+ host.__TAURI_INTERNALS__={invoke:transport(invoke)};
+ try{
+  const first=render(()=><NativeInteraction mission="local-remount" active/>);
+  fireEvent.click(await screen.findByRole('button',{name:'Allow once'}));
+  await waitFor(()=>expect(screen.queryByRole('button',{name:'Allow once'})).toBeNull());
+  first.unmount();
+
+  render(()=><NativeInteraction mission="local-remount" active/>);
+  await new Promise(resolve=>setTimeout(resolve,0));
+  expect(screen.queryByRole('button',{name:'Allow once'})).toBeNull();
  }finally{cleanup();host.__TAURI_INTERNALS__=previous;}
+});
+
+function fakeJwt(sub: string): string {
+ const enc = (obj: Record<string, unknown>) =>
+  btoa(JSON.stringify(obj)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+ return `${enc({ alg: "none", typ: "JWT" })}.${enc({ sub })}.sig`;
+}
+
+it("retains answered requests across cold reload at connectionVersion 0, isolates endpoints/accounts, and purges on sign-out", async () => {
+ vi.mocked(api).mockResolvedValue({ delivered: true });
+ const remoteTool = {
+  kind: "tool" as const,
+  key: "tool-reload",
+  callId: "call-reload-1",
+  name: "ui_native_request",
+  args: { method: "permission", params: { tool: "Bash", input: { description: "Deploy service" } } },
+  done: false,
+ };
+ try {
+  // Session 1: desktop connection initialized -> connectionVersion bumps to 1 or 2.
+  setConnection("https://orb-alpha.example", fakeJwt("alice"));
+  setConnection("https://orb-alpha.example/", fakeJwt("alice"));
+  expect(connectionVersion()).toBeGreaterThanOrEqual(2);
+
+  const first = render(() => <NativeInteraction mission="mission-reload" active remote items={[remoteTool]} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Allow once" }));
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Allow once" })).toBeNull());
+  first.unmount();
+
+  // Simulate full browser reload: sessionStorage cleared and connectionVersion starts back at 0
+  // while localStorage still holds the same (url, jwt).
+  sessionStorage.clear();
+  bumpConnectionVersion(0);
+  expect(connectionVersion()).toBe(0);
+
+  const reloadedSame = render(() => <NativeInteraction mission="mission-reload" active remote items={[remoteTool]} />);
+  expect(screen.queryByRole("button", { name: "Allow once" })).toBeNull();
+  reloadedSame.unmount();
+
+  // Different endpoint at connectionVersion() === 0 must not collide.
+  setApiUrl("https://orb-beta.example");
+  expect(connectionVersion()).toBe(0);
+  const diffEndpoint = render(() => <NativeInteraction mission="mission-reload" active remote items={[remoteTool]} />);
+  expect(await screen.findByRole("button", { name: "Allow once" })).toBeTruthy();
+  diffEndpoint.unmount();
+
+  // Restore alpha endpoint, switch account JWT at connectionVersion() === 0 -> isolated.
+  setApiUrl("https://orb-alpha.example");
+  localStorage.setItem("orb.jwt", fakeJwt("bob"));
+  const diffUser = render(() => <NativeInteraction mission="mission-reload" active remote items={[remoteTool]} />);
+  expect(await screen.findByRole("button", { name: "Allow once" })).toBeTruthy();
+  diffUser.unmount();
+
+  // Restore alice -> still remembered before sign-out.
+  localStorage.setItem("orb.jwt", fakeJwt("alice"));
+  const aliceAgain = render(() => <NativeInteraction mission="mission-reload" active remote items={[remoteTool]} />);
+  expect(screen.queryByRole("button", { name: "Allow once" })).toBeNull();
+  aliceAgain.unmount();
+
+  // Sign-out via clearConnection() purges all orb.native.answered:* keys from storage.
+  clearConnection();
+  for (let i = 0; i < localStorage.length; i++) {
+   expect(localStorage.key(i)?.startsWith("orb.native.answered:")).toBe(false);
+  }
+  for (let i = 0; i < sessionStorage.length; i++) {
+   expect(sessionStorage.key(i)?.startsWith("orb.native.answered:")).toBe(false);
+  }
+
+  // Signed-out render does not inherit alice's answered state.
+  const signedOut = render(() => <NativeInteraction mission="mission-reload" active remote items={[remoteTool]} />);
+  expect(await screen.findByRole("button", { name: "Allow once" })).toBeTruthy();
+  signedOut.unmount();
+ } finally {
+  cleanup();
+  clearConnection();
+  bumpConnectionVersion(0);
+ }
 });

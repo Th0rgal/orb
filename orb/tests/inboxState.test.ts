@@ -404,4 +404,31 @@ it("seeds empty Core preferences from existing settings and imports existing rem
   applySharedInboxPreferences(remote);
   expect(inboxConfig()).toEqual(remote);
   expect(write).not.toHaveBeenCalled();
+  vi.doUnmock("../src/inboxState");
+});
+
+it("retires repeatedly failing outbox entries so a stuck pending write never starves readInboxState", async () => {
+  const fetcher = vi.fn(async (_url: string, init?: RequestInit) => init?.method
+    ? new Response("upstream down", { status: 503 })
+    : new Response(JSON.stringify({ "seen:mission": 777, _versions: { "seen:mission": 4 } })));
+  vi.stubGlobal("fetch", fetcher);
+  const { readInboxState, writeInboxState } = await import("../src/inboxState");
+
+  writeInboxState("seen/mission", { stamp: 100 });
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+  await new Promise(resolve => setTimeout(resolve, 0));
+
+  const firstRead = await readInboxState();
+  expect(firstRead?.["seen:mission"]).toBe(100);
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+  await new Promise(resolve => setTimeout(resolve, 0));
+
+  await readInboxState();
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(5));
+  await new Promise(resolve => setTimeout(resolve, 0));
+
+  const converged = await readInboxState();
+  expect(converged?.["seen:mission"]).toBe(777);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(fetcher).toHaveBeenCalledTimes(6);
 });

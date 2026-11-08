@@ -129,18 +129,35 @@ object OrbFido {
         OrbFidoSettings.trust.clear()
     }
 
+    internal fun syncPending(listed: Collection<OrbFidoRequest>, nowMs: Long = System.currentTimeMillis()) {
+        val active = listed.filterNot { it.isExpired(nowMs) }
+        active.forEach(::enqueue)
+        val listedIds = active.map { it.requestId }.toSet()
+        val inFlight = _inFlight.value
+        val errors = _errors.value
+        _pending.update { cur ->
+            cur.filter { req ->
+                req.requestId in listedIds || req.requestId in inFlight || req.requestId in errors
+            }
+        }
+    }
+
     /**
      * Stream until cancelled (the caller scopes this to "signed in and visible").
-     * Returns at once if the session has no endpoint or token.
+     * Returns at once if the session has no endpoint or token. A failed pending
+     * fetch is a network error: unanswered prompts stay on screen. A successful
+     * fetch drops prompts that Core no longer lists (resolved elsewhere).
      */
     suspend fun listen(core: OrbCore) {
         var attempt = 0
         while (true) {
             if (!core.isConfigured || core.token.isNullOrBlank()) return
             val error: Throwable? = try {
-                // Requests made while the app was closed or the stream was down.
                 val now = System.currentTimeMillis()
-                parsePending(core.request(PENDING_PATH)).filterNot { it.isExpired(now) }.forEach(::enqueue)
+                val pendingFetch = runCatching { parsePending(core.request(PENDING_PATH)) }
+                if (pendingFetch.isSuccess) {
+                    syncPending(pendingFetch.getOrThrow(), now)
+                }
                 streamOnce(core) { attempt = 0 }
             } catch (c: CancellationException) {
                 throw c

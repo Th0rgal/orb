@@ -232,4 +232,19 @@ class OrbFidoTest {
         assertEquals(1, calls)
         assertTrue(OrbFido.pending.value.isEmpty())
     }
+
+    @Test
+    fun syncPendingRemovesResolvedPromptsWhilePreservingErroredAndActiveOnes() = runBlocking {
+        val r1 = OrbFido.parse(null, event)!!
+        val r2 = OrbFido.parse(null, event.replace("r1", "r2"))!!
+        val r3 = OrbFido.parse(null, event.replace("r1", "r3"))!!
+        OrbFido.enqueue(r1)
+        OrbFido.enqueue(r2)
+        assertFalse(OrbFido.respond(OrbFido.Transport { _, _ -> throw IOException("network down") }, "r2", approved = true))
+        assertTrue(OrbFido.errors.value.containsKey("r2"))
+
+        val nowMs = OrbJSON.dateEpochMs("2026-10-19T12:00:00Z")!!
+        OrbFido.syncPending(listOf(r3), nowMs = nowMs)
+        assertEquals(listOf("r2", "r3"), OrbFido.pending.value.map { it.requestId })
+    }
 }
