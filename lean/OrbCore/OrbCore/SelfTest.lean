@@ -26,6 +26,7 @@ open OrbCore.MemoryAndCloud
 open OrbCore.Cyber
 open OrbCore.Skills
 open OrbCore.QueueCont
+open OrbCore.R7Core
 open OrbCore.Control
 open OrbCore.HostTests
 open OrbCore.HarnessSessionRegistry
@@ -1889,6 +1890,386 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
     return 1
   return 0
 
+private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
+  if verifyInboxCas 1 1 1 1 1 4 4 0 != 1 ||
+     verifyInboxCas 1 1 1 1 1 4 5 0 != 0 ||
+     verifyContextOpCas 1 1 1 1 1 7 7 1 1 != 1 ||
+     verifyContextOpCas 1 1 1 1 1 7 3 1 1 != 0 ||
+     verifyContextOpCas 1 1 1 1 1 0 0 0 1 != 0 ||
+     verifyContextOpCas 1 1 1 1 1 0 0 0 0 != 1 ||
+     verifyBoardTrack 1 1 1 1 0 != 1 ||
+     verifyBoardTrack 1 1 1 1 1 != 0 ||
+     verifyDeployRecheck 1 2 0 9 9 4 4 10 20 8 8 != 257 ||
+     verifyDeployRecheck 1 2 0 9 9 4 5 10 20 8 8 == 257 ||
+     Orb.Kernel.deployGateStep 1 1 0 1 0 1 0 0 != 1 ||
+     Orb.Kernel.authToctouExecuteStep 2 0 9 9 4 4 10 20 8 8 != 257 ||
+     Orb.Kernel.verifyBoardSlots 4 1 0 != 1 ||
+     Orb.Kernel.verifyBoardRetry 0 3 0 0 0 != 1 then
+    IO.eprintln "[orb-core-test] FAIL: R7 kernel gates rejected their own witnesses"
+    return 1
+  let r7Ts ← IO.monoNanosNow
+  let r7Root := s!"/tmp/orb-core-r7-{r7Ts}"
+  let .ok store ← openCoreStore r7Root
+    | do IO.eprintln "[orb-core-test] FAIL: R7 openCoreStore failed"; return 1
+  let managedRef ← IO.mkRef { enabled := true }
+  let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
+  let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
+  let seqRef ← IO.mkRef (1 : UInt64)
+  let bunkerRef ← IO.mkRef (0 : UInt8)
+  let app : CoreAppState := {
+    cfg := { prodValid with workingDir := r7Root }, store := store, searchIdx? := none,
+    managedRef := managedRef, chainsRef := chainsRef,
+    proxyCooldownsRef := cooldownsRef, seqRef := seqRef,
+    bunkerStateRef? := some bunkerRef
+  }
+  let nowSec ← coreEpochSec
+  let jwt := mintSessionToken prodValid.jwtSecret (nowSec + 3600)
+  let dispatch (raw : String) : IO (Option CoreHttpResponse) := do
+    match parseRequest raw.toUTF8 none with
+    | .ok req =>
+      match ← dispatchCoreRequest app req nowSec with
+      | .ok resp => return some resp
+      | .error _ => return none
+    | .error _ => return none
+  let unauth ← dispatch "GET /api/control/inbox-state HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+  let get0 ← dispatch s!"GET /api/control/inbox-state HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+  let prefBody := "{\"clientId\":\"c1\",\"mutationSeq\":1,\"expectedVersion\":0,\"aiSummary\":true,\"includeAutonomous\":false,\"model\":\"m\",\"inboxEnabled\":true}"
+  let prefRaw := s!"PUT /api/control/inbox-state/preferences HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {prefBody.utf8ByteSize}\r\n\r\n{prefBody}"
+  let put1 ← dispatch prefRaw
+  let replay ← dispatch prefRaw
+  let staleBody := "{\"clientId\":\"c2\",\"mutationSeq\":2,\"expectedVersion\":0,\"aiSummary\":false,\"includeAutonomous\":true,\"model\":\"n\"}"
+  let stale ← dispatch s!"PUT /api/control/inbox-state/preferences HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {staleBody.utf8ByteSize}\r\n\r\n{staleBody}"
+  let seenBody := "{\"clientId\":\"c1\",\"mutationSeq\":3,\"expectedVersion\":0,\"stamp\":9}"
+  let seen ← dispatch s!"PUT /api/control/inbox-state/seen/q%2F1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {seenBody.utf8ByteSize}\r\n\r\n{seenBody}"
+  let negSeenBody := "{\"clientId\":\"c1\",\"mutationSeq\":4,\"expectedVersion\":1,\"stamp\":-1}"
+  let negSeen ← dispatch s!"PUT /api/control/inbox-state/seen/q%2F1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {negSeenBody.utf8ByteSize}\r\n\r\n{negSeenBody}"
+  let get1 ← dispatch s!"GET /api/control/inbox-state HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+  let zeroSeenBody := "{\"clientId\":\"c1\",\"mutationSeq\":5,\"expectedVersion\":2,\"stamp\":0}"
+  let badStamp ← dispatch s!"PUT /api/control/inbox-state/seen/q%2F1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {zeroSeenBody.utf8ByteSize}\r\n\r\n{zeroSeenBody}"
+  let g0 := (get0.map (·.body)).bind String.fromUTF8? |>.getD ""
+  let p1 := (put1.map (·.body)).bind String.fromUTF8? |>.getD ""
+  let rp := (replay.map (·.body)).bind String.fromUTF8? |>.getD ""
+  let stl := (stale.map (·.body)).bind String.fromUTF8? |>.getD ""
+  let g1 := (get1.map (·.body)).bind String.fromUTF8? |>.getD ""
+  if unauth.map (·.status) != some 401 || get0.map (·.status) != some 200 ||
+     (g0.splitOn "_versions").length < 2 || put1.map (·.status) != some 200 ||
+     (p1.splitOn "\"preferences\":1").length < 2 || replay.map (·.status) != some 200 ||
+     (rp.splitOn "\"replayed\":true").length < 2 || stale.map (·.status) != some 409 ||
+     (stl.splitOn "_versions").length < 2 || seen.map (·.status) != some 200 ||
+     negSeen.map (·.status) != some 200 ||
+     (g1.splitOn "\"seen:q/1\":-1").length < 2 || badStamp.map (·.status) != some 400 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: inbox CAS wire contract mismatch: {g1}"
+    return 1
+  let blob := "project-context-bytes".toUTF8
+  let blobRaw := s!"POST /api/projects/orb/context/blobs HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {blob.size}\r\n\r\nproject-context-bytes"
+  let blobResp ← dispatch blobRaw
+  let blobJson := (blobResp.map (·.body)).bind String.fromUTF8? |>.getD ""
+  let hash := (OrbBin.Json.parse blobJson).toOption.bind (·.fieldStr? "hash") |>.getD ""
+  let readBlob ← dispatch s!"GET /api/projects/orb/context/blobs/{hash} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+  let opBody := s!"\{\"id\":\"op-1\",\"path\":\"docs/a.txt\",\"base\":null,\"hash\":\"{hash}\",\"directory\":false,\"delete\":false,\"source\":\"Orb\"}"
+  let opResp ← dispatch s!"POST /api/projects/orb/context/operations HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {opBody.utf8ByteSize}\r\n\r\n{opBody}"
+  let staleOp := s!"\{\"id\":\"op-2\",\"path\":\"docs/a.txt\",\"base\":0,\"hash\":\"{hash}\",\"directory\":false,\"delete\":false,\"source\":\"Orb\"}"
+  let staleOpResp ← dispatch s!"POST /api/projects/orb/context/operations HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {staleOp.utf8ByteSize}\r\n\r\n{staleOp}"
+  let conflicts ← dispatch s!"GET /api/projects/orb/context/conflicts HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+  let manifest ← dispatch s!"GET /api/projects/orb/context/manifest HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+  let historyResp ← dispatch s!"GET /api/projects/orb/context/history HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+  let streamResp ← dispatch s!"GET /api/projects/orb/context/stream HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+  let travBody := "{\"id\":\"op-3\",\"path\":\"../x\",\"delete\":true}"
+  let traversal ← dispatch s!"POST /api/projects/orb/context/operations HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {travBody.utf8ByteSize}\r\n\r\n{travBody}"
+  let blobDirStat ← OrbBin.PosixExt.statPath (contextBlobDir r7Root "orb").toString
+  let fiveMib := ByteArray.mk (Array.replicate (5 * 1024 * 1024) (65 : UInt8))
+  let fiveMibStatus ← do
+    let hdrs := s!"POST /api/projects/orb/context/blobs HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {fiveMib.size}\r\n\r\n".toUTF8
+    match parseCoreHttpRequest (hdrs ++ fiveMib) with
+    | .ok req =>
+      match ← dispatchCoreRequest app req nowSec with
+      | .ok resp => pure (some resp.status)
+      | .error _ => pure none
+    | .error _ => pure none
+  let big := ByteArray.mk (Array.replicate (contextFileLimit + 1) (1 : UInt8))
+  let bigHttp ← do
+    let hdrs := s!"POST /api/projects/orb/context/blobs HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {big.size}\r\n\r\n".toUTF8
+    match parseCoreHttpRequest (hdrs ++ big) with
+    | .ok req =>
+      match ← dispatchCoreRequest app req nowSec with
+      | .ok resp => pure (some resp.status)
+      | .error _ => pure none
+    | .error e => pure (some (statusForParseError e))
+  let opText := (opResp.map (·.body)).bind String.fromUTF8? |>.getD ""
+  let staleText := (staleOpResp.map (·.body)).bind String.fromUTF8? |>.getD ""
+  let conflictText := (conflicts.map (·.body)).bind String.fromUTF8? |>.getD ""
+   let manifestText := (manifest.map (·.body)).bind String.fromUTF8? |>.getD ""
+   let sameOp := s!"\{\"id\":\"op-same\",\"path\":\"docs/a.txt\",\"base\":null,\"hash\":\"{hash}\",\"directory\":false,\"delete\":false}"
+   let sameResp ← dispatch s!"POST /api/projects/orb/context/operations HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {sameOp.utf8ByteSize}\r\n\r\n{sameOp}"
+   let blob2 := "other-context-bytes".toUTF8
+   let blob2Resp ← dispatch s!"POST /api/projects/orb/context/blobs HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {blob2.size}\r\n\r\nother-context-bytes"
+   let hash2 := ((blob2Resp.map (·.body)).bind String.fromUTF8?).bind (fun s => (OrbBin.Json.parse s).toOption.bind (·.fieldStr? "hash")) |>.getD ""
+   let clashOp := s!"\{\"id\":\"op-clash\",\"path\":\"docs/a.txt\",\"base\":null,\"hash\":\"{hash2}\",\"directory\":false,\"delete\":false,\"source\":\"Agent\"}"
+   let clashResp ← dispatch s!"POST /api/projects/orb/context/operations HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {clashOp.utf8ByteSize}\r\n\r\n{clashOp}"
+   let conflicts2 ← dispatch s!"GET /api/projects/orb/context/conflicts HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+   let conflict2Text := (conflicts2.map (·.body)).bind String.fromUTF8? |>.getD ""
+   let conflict2Jv := (OrbBin.Json.parse conflict2Text).toOption.getD (.obj #[])
+   let op2Obj? := conflict2Jv.field? "op-2"
+   let clashObj? := conflict2Jv.field? "op-clash"
+   let resolveOp := s!"\{\"id\":\"op-resolve\",\"path\":\"docs/a.txt\",\"base\":1,\"hash\":\"{hash2}\",\"directory\":false,\"delete\":false,\"source\":\"Orb\"}"
+   let resolveResp ← dispatch s!"POST /api/projects/orb/context/conflicts/op-clash HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {resolveOp.utf8ByteSize}\r\n\r\n{resolveOp}"
+   let missingConflictOp := s!"\{\"id\":\"op-missing-conf\",\"path\":\"docs/a.txt\",\"base\":2,\"hash\":\"{hash2}\",\"directory\":false,\"delete\":false,\"source\":\"Orb\"}"
+   let missingConflictResp ← dispatch s!"POST /api/projects/orb/context/conflicts/no-such-id HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {missingConflictOp.utf8ByteSize}\r\n\r\n{missingConflictOp}"
+   let conflicts3 ← dispatch s!"GET /api/projects/orb/context/conflicts HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+   let conflict3Jv := ((conflicts3.map (·.body)).bind String.fromUTF8?).bind (fun s => (OrbBin.Json.parse s).toOption) |>.getD (.obj #[])
+   let history2Resp ← dispatch s!"GET /api/projects/orb/context/history HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+   let historyText := (historyResp.map (·.body)).bind String.fromUTF8? |>.getD ""
+   let history2Text := (history2Resp.map (·.body)).bind String.fromUTF8? |>.getD ""
+   let historyArr := match OrbBin.Json.parse historyText with | .ok (.arr xs) => xs | _ => #[]
+   let history2Arr := match OrbBin.Json.parse history2Text with | .ok (.arr xs) => xs | _ => #[]
+   let streamText := (streamResp.map (·.body)).bind String.fromUTF8? |>.getD ""
+   let sameText := (sameResp.map (·.body)).bind String.fromUTF8? |>.getD ""
+   let clashText := (clashResp.map (·.body)).bind String.fromUTF8? |>.getD ""
+   if blobResp.map (·.status) != some 200 || !isSha256Hex hash ||
+      (blobDirStat.mode &&& 0o777) != 0o700 ||
+      readBlob.map (·.status) != some 200 || readBlob.map (·.body) != some blob ||
+      opResp.map (·.status) != some 200 || (opText.splitOn "\"conflict\":false").length < 2 ||
+      staleOpResp.map (·.status) != some 200 || (staleText.splitOn "\"conflict\":true").length < 2 ||
+      sameResp.map (·.status) != some 200 || (sameText.splitOn "\"conflict\":false").length < 2 ||
+      clashResp.map (·.status) != some 200 || (clashText.splitOn "\"conflict\":true").length < 2 ||
+      (conflictText.splitOn "\"op-2\"").length < 2 ||
+      op2Obj?.bind (·.fieldStr? "path") != some "docs/a.txt" ||
+      op2Obj?.bind (·.fieldNat? "base") != some 0 ||
+      op2Obj?.bind (·.fieldStr? "hash") != some hash ||
+      op2Obj?.bind (·.fieldBool? "directory") != some false ||
+      op2Obj?.bind (·.fieldBool? "delete") != some false ||
+      op2Obj?.bind (·.fieldStr? "source") != some "Orb" ||
+      clashObj?.bind (·.fieldStr? "path") != some "docs/a.txt" ||
+      clashObj?.bind (·.field? "base") != some .null ||
+      clashObj?.bind (·.fieldStr? "source") != some "Agent" ||
+      resolveResp.map (·.status) != some 200 ||
+      missingConflictResp.map (·.status) != some 404 ||
+      (conflict3Jv.field? "op-clash").isSome ||
+      historyResp.map (·.status) != some 200 || historyArr.size != 1 ||
+      (historyArr[0]?).bind (·.fieldNat? "revision") != some 1 ||
+      (historyArr[0]?).bind (·.fieldStr? "path") != some "docs/a.txt" ||
+      (historyArr[0]?).bind (·.fieldStr? "source") != some "Orb" ||
+      history2Arr.size != 2 ||
+      (history2Arr[0]?).bind (·.fieldNat? "revision") != some 1 ||
+      (history2Arr[1]?).bind (·.fieldNat? "revision") != some 2 ||
+      streamResp.map (·.status) != some 200 ||
+      streamResp.map (·.contentType) != some "text/event-stream" ||
+      !streamText.startsWith "data: {" || !streamText.endsWith "\n\n" ||
+      (manifestText.splitOn "\"docs/a.txt\"").length < 2 ||
+      (stl.splitOn "\"preferences\":1").length < 2 ||
+      traversal.map (·.status) != some 400 || fiveMibStatus != some 200 || bigHttp != some 413 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: project context wire contract mismatch: {manifestText}"
+    return 1
+   let trackBody := "{\"track\":\"core\",\"desired_condition\":\"ship\",\"status\":\"open\"}"
+   let trackResp ← dispatch s!"POST /api/projects/orb/tracks HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {trackBody.utf8ByteSize}\r\n\r\n{trackBody}"
+   for mid in ["m1", "m2", "m3", "m4"] do
+     let .ok () ← insertNewMission store {
+       id := mid, title := mid, status := "running", backend := "opencode",
+       modelOverride := "", workingDirectory := r7Root, project := "orb", updatedAt := s!"{nowSec}"
+     } | do closeCoreStore store; return 1
+   let staleTrackBody := "{\"track\":\"core\",\"desired_condition\":\"stale\",\"status\":\"open\",\"expected_revision\":99}"
+  let staleTrack ← dispatch s!"POST /api/projects/orb/tracks HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {staleTrackBody.utf8ByteSize}\r\n\r\n{staleTrackBody}"
+  let taskBody := "{\"project_slug\":\"orb\",\"track\":\"core\",\"task_key\":\"t1\",\"attempt_seq\":0,\"max_attempts\":3}"
+  let taskResp ← dispatch s!"POST /api/control/missions/m1/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {taskBody.utf8ByteSize}\r\n\r\n{taskBody}"
+  let dupTask ← dispatch s!"POST /api/control/missions/m1/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {taskBody.utf8ByteSize}\r\n\r\n{taskBody}"
+  let retryBody := "{\"project_slug\":\"orb\",\"track\":\"core\",\"task_key\":\"t-retry\",\"attempt_seq\":3,\"max_attempts\":3}"
+  let retryRej ← dispatch s!"POST /api/control/missions/m1/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {retryBody.utf8ByteSize}\r\n\r\n{retryBody}"
+  let task2Body := "{\"project_slug\":\"orb\",\"track\":\"core\",\"task_key\":\"t2\",\"attempt_seq\":0,\"max_attempts\":3}"
+  let task3Body := "{\"project_slug\":\"orb\",\"track\":\"core\",\"task_key\":\"t3\",\"attempt_seq\":0,\"max_attempts\":3}"
+  let task4Body := "{\"project_slug\":\"orb\",\"track\":\"core\",\"task_key\":\"t4\",\"attempt_seq\":0,\"max_attempts\":3}"
+  let t2Resp ← dispatch s!"POST /api/control/missions/m2/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {task2Body.utf8ByteSize}\r\n\r\n{task2Body}"
+  let t3Resp ← dispatch s!"POST /api/control/missions/m3/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {task3Body.utf8ByteSize}\r\n\r\n{task3Body}"
+  let fullResp ← dispatch s!"POST /api/control/missions/m4/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {task4Body.utf8ByteSize}\r\n\r\n{task4Body}"
+  let missBody := "{\"project_slug\":\"orb\",\"track\":\"missing\",\"task_key\":\"t-miss\",\"attempt_seq\":0}"
+  let missing ← dispatch s!"POST /api/control/missions/m1/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {missBody.utf8ByteSize}\r\n\r\n{missBody}"
+   let board ← dispatch s!"GET /api/projects/orb/board HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+   let badProj ← dispatch s!"GET /api/projects/%ZZ/board HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+   let _ ← execParamQuery store.missionsDb "UPDATE mission_board_tasks SET status='failed' WHERE task_key='t1';" #[]
+   let reopen ← dispatch s!"POST /api/control/missions/m1/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {taskBody.utf8ByteSize}\r\n\r\n{taskBody}"
+   let ghost ← dispatch s!"POST /api/control/missions/missing-mission/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {taskBody.utf8ByteSize}\r\n\r\n{taskBody}"
+  let boardText := (board.map (·.body)).bind String.fromUTF8? |>.getD ""
+  let dupText := (dupTask.map (·.body)).bind String.fromUTF8? |>.getD ""
+  let missText := (missing.map (·.body)).bind String.fromUTF8? |>.getD ""
+  let retryText := (retryRej.map (·.body)).bind String.fromUTF8? |>.getD ""
+  let fullText := (fullResp.map (·.body)).bind String.fromUTF8? |>.getD ""
+  if trackResp.map (·.status) != some 200 || staleTrack.map (·.status) != some 409 ||
+     taskResp.map (·.status) != some 200 || t2Resp.map (·.status) != some 200 ||
+     t3Resp.map (·.status) != some 200 ||
+     dupTask.map (·.status) != some 409 || (dupText.splitOn "duplicate_task").length < 2 ||
+     retryRej.map (·.status) != some 409 || (retryText.splitOn "board_retry_suppressed").length < 2 ||
+     fullResp.map (·.status) != some 409 || (fullText.splitOn "board_slots_full").length < 2 ||
+      missing.map (·.status) != some 409 || (missText.splitOn "unknown_track").length < 2 ||
+      badProj.map (·.status) != some 400 ||
+      reopen.map (·.status) != some 200 || ghost.map (·.status) != some 404 ||
+      (boardText.splitOn "\"task_key\":\"t1\"").length < 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: project board wire contract mismatch: {boardText}"
+    return 1
+   let cap1TrackBody := "{\"track\":\"cap1\",\"desired_condition\":\"one-slot\",\"status\":\"open\"}"
+   let cap1Track ← dispatch s!"POST /api/projects/orbcap/tracks HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {cap1TrackBody.utf8ByteSize}\r\n\r\n{cap1TrackBody}"
+   let _ ← execParamQuery store.projectsDb
+     "INSERT OR REPLACE INTO project_grant(slug,parallel_missions,updated_at) VALUES('orbcap',2,?1);" #[s!"{nowSec}"]
+   let .ok cap1TaskA := OrbBin.Json.parse "{\"project_slug\":\"orbcap\",\"track\":\"cap1\",\"task_key\":\"cap-a\",\"attempt_seq\":0,\"max_attempts\":3}"
+     | do closeCoreStore store; return 1
+   let .ok cap1TaskB := OrbBin.Json.parse "{\"project_slug\":\"orbcap\",\"track\":\"cap1\",\"task_key\":\"cap-b\",\"attempt_seq\":0,\"max_attempts\":3}"
+     | do closeCoreStore store; return 1
+   let taskFiberA ← IO.asTask (prio := .dedicated) (postBoardTask store "m1" cap1TaskA)
+   let taskFiberB ← IO.asTask (prio := .dedicated) (postBoardTask store "m2" cap1TaskB)
+   let .ok (capCodeA, _) ← IO.wait taskFiberA | do closeCoreStore store; return 1
+   let .ok (capCodeB, _) ← IO.wait taskFiberB | do closeCoreStore store; return 1
+   let capOpenRes ← countOpenBoardSlots store "orbcap"
+   let capOpenCount := match capOpenRes with | .ok n => n | .error _ => 99
+   let cancelTrackBody := "{\"track\":\"cap1\",\"desired_condition\":\"cancelled\",\"status\":\"cancelled\"}"
+   let cancelTrack ← dispatch s!"POST /api/projects/orbcap/tracks HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {cancelTrackBody.utf8ByteSize}\r\n\r\n{cancelTrackBody}"
+   let _ ← execParamQuery store.missionsDb "UPDATE mission_board_tasks SET status='failed' WHERE project_slug='orbcap';" #[]
+   let .ok cap1TaskC := OrbBin.Json.parse "{\"project_slug\":\"orbcap\",\"track\":\"cap1\",\"task_key\":\"cap-c\",\"attempt_seq\":0,\"max_attempts\":3}"
+     | do closeCoreStore store; return 1
+   let (capCancelCode, capCancelBody) ← postBoardTask store "m3" cap1TaskC
+   if cap1Track.map (·.status) != some 200 ||
+      !((capCodeA == 200 && capCodeB == 409) || (capCodeA == 409 && capCodeB == 200)) ||
+      capOpenCount != 1 ||
+      cancelTrack.map (·.status) != some 200 ||
+      capCancelCode != 409 || (capCancelBody.splitOn "board_rejected").length < 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: concurrent 1-slot board cap / track cancel mismatch: a={capCodeA} b={capCodeB} open={capOpenCount} cancel={capCancelCode}"
+    return 1
+   let dryBody := "{\"service\":\"sandboxed-sh-dev\",\"dry_run\":true}"
+   let noLease ← dispatch s!"POST /api/system/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nX-Paloma-Approval: approved\r\nContent-Length: {dryBody.utf8ByteSize}\r\n\r\n{dryBody}"
+   let privExp := nowSec + 240
+   let .ok () ← upsertPrivilegeLease store {
+     grantId := "grant-r7", leaseToken := "lease-r7-live-01", missionId := "m-r7",
+     targetHost := "self", scope := "service_deploy", allowedUnitsJson := "[\"sandboxed-sh-dev.service\"]",
+     requireForceCmd := false, biometricSigned := true, revoked := false, expiresAtEpoch := privExp
+   } | do closeCoreStore store; return 1
+   let dryBody2 := "{\"service\":\"sandboxed-sh-dev\",\"dry_run\":true,\"lease_token\":\"lease-r7-live-01\"}"
+   let dry ← dispatch s!"POST /api/system/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {dryBody2.utf8ByteSize}\r\n\r\n{dryBody2}"
+   let dryText := (dry.map (·.body)).bind String.fromUTF8? |>.getD ""
+   let prodLie := "{\"service\":\"sandboxed-sh\",\"dry_run\":true,\"is_prod\":false,\"lease_token\":\"lease-r7-unsigned\"}"
+   let .ok () ← upsertPrivilegeLease store {
+     grantId := "grant-unsigned", leaseToken := "lease-r7-unsigned", missionId := "m-r7",
+     targetHost := "self", scope := "service_deploy", allowedUnitsJson := "[\"*\"]",
+     requireForceCmd := false, biometricSigned := false, revoked := false, expiresAtEpoch := privExp
+   } | do closeCoreStore store; return 1
+   let prodDeny ← dispatch s!"POST /api/system/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {prodLie.utf8ByteSize}\r\n\r\n{prodLie}"
+   let some liveLease ← lookupPrivilegeLease? store "lease-r7-live-01" | do closeCoreStore store; return 1
+   let deb0 ← observeDeployLive store "sandboxed-sh-dev.service" false true false (some liveLease) nowSec
+   let _ ← persistDeployReceipt store {
+     unitName := "sandboxed-sh-dev.service", observedDigest := 1, execDigest := 1,
+     verdictCode := 257, verdict := "admitted", dryRun := false, restart := false
+   } s!"{nowSec - 10}"
+   let deb1 ← observeDeployLive store "sandboxed-sh-dev.service" false true false (some liveLease) nowSec
+   let _ ← execParamQuery store.missionsDb
+     "UPDATE deploy_receipts SET created_at=?1 WHERE unit_name='sandboxed-sh-dev.service';" #[s!"{nowSec - 60}"]
+   let badUnitBody := "{\"service\":\"../evil\",\"dry_run\":true}"
+   let badUnit ← dispatch s!"POST /api/system/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {badUnitBody.utf8ByteSize}\r\n\r\n{badUnitBody}"
+   let defaultDryBody := "{\"service\":\"../evil\"}"
+   let defaultDryUnit ← dispatch s!"POST /api/system/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {defaultDryBody.utf8ByteSize}\r\n\r\n{defaultDryBody}"
+   let noDryNoLeaseBody := "{\"expected_service\":\"sandboxed-sh-dev.service\"}"
+   let noDryNoLease ← dispatch s!"POST /api/system/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {noDryNoLeaseBody.utf8ByteSize}\r\n\r\n{noDryNoLeaseBody}"
+   let privVerifyBody := "{\"mission_id\":\"m-r7\",\"lease_token\":\"lease-r7-live-01\",\"target_host\":\"self\",\"executing_host\":\"self\",\"command\":\"systemctl restart sandboxed-sh-dev.service\",\"argv\":[\"systemctl\",\"restart\",\"sandboxed-sh-dev.service\"]}"
+   let privVerifyRaw := s!"POST /api/privilege-access/verify-and-log HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {privVerifyBody.utf8ByteSize}\r\n\r\n{privVerifyBody}"
+   let privOk ← dispatch privVerifyRaw
+   let privOkText := (privOk.map (·.body)).bind String.fromUTF8? |>.getD ""
+   let .ok () ← writePersistedBunkerState store 1 | do closeCoreStore store; return 1
+   bunkerRef.set 1
+   let privBunker ← dispatch privVerifyRaw
+   let privBunkerText := (privBunker.map (·.body)).bind String.fromUTF8? |>.getD ""
+   let bunker ← dispatch s!"POST /api/system/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {dryBody2.utf8ByteSize}\r\n\r\n{dryBody2}"
+   let bunkerText := (bunker.map (·.body)).bind String.fromUTF8? |>.getD ""
+   let .ok () ← writePersistedBunkerState store 0 | do closeCoreStore store; return 1
+   bunkerRef.set 0
+   let shPayload := "{\"expected_service\":\"sandboxed-sh-dev.service\",\"force\":false,\"skip_build\":true,\"repo_path\":\"/tmp/orb\",\"calling_mission_id\":\"m-r7\",\"git_ref\":\"HEAD\",\"dry_run\":true}"
+   let hdrLeaseDeploy ← dispatch s!"POST /api/system/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nX-Orb-Lease: lease-r7-live-01\r\nContent-Length: {shPayload.utf8ByteSize}\r\n\r\n{shPayload}"
+   let hdrLeaseText := (hdrLeaseDeploy.map (·.body)).bind String.fromUTF8? |>.getD ""
+   let .ok () ← upsertPrivilegeLease store {
+     grantId := "grant-revoke", leaseToken := "lease-r7-revoke-01", missionId := "m-r7",
+     targetHost := "self", scope := "service_deploy", allowedUnitsJson := "[\"sandboxed-sh-dev.service\"]",
+     requireForceCmd := false, biometricSigned := true, revoked := false,
+     expiresAtEpoch := privExp, leaseEpoch := 42
+   } | do closeCoreStore store; return 1
+   let some preRevokeLease ← lookupPrivilegeLease? store "lease-r7-revoke-01" | do closeCoreStore store; return 1
+   let revokeObs ← observeDeployLive store "sandboxed-sh-dev.service" false false false (some preRevokeLease) nowSec
+   let .ok () ← upsertPrivilegeLease store { preRevokeLease with revoked := true } | do closeCoreStore store; return 1
+   let revokeRestarted ← IO.mkRef false
+   let reobserveRevoked : IO DeployObservation := do
+     let cur? ← lookupPrivilegeLease? store "lease-r7-revoke-01"
+     observeDeployLive store "sandboxed-sh-dev.service" false false false cur? nowSec
+   let .ok revokeRcpt ← runGuardedDeploy store revokeObs reobserveRevoked false s!"{nowSec}"
+       (some (fun _ => do revokeRestarted.set true; return .ok ()))
+     | do closeCoreStore store; return 1
+   let wasRevokeRestarted ← revokeRestarted.get
+   let postRevokeObs ← reobserveRevoked
+   let restartCalled ← IO.mkRef false
+   let driftObs : DeployObservation := {
+     unitName := "sandboxed-sh.service", isProd := true, serviceMatches := true,
+     callingOnSelf := false, debounceOk := true, forceFlag := false, biometric := true,
+     bunkerState := 0, liveWriters := 0, principalKind := 2, targetId := 1,
+     leaseEpoch := nowSec + 300, expiryTick := nowSec + 300, digest := 777, nowTick := nowSec
+   }
+   let driftLive := { driftObs with leaseEpoch := 0, expiryTick := 0 }
+   let .ok driftRcpt ← runGuardedDeploy store driftObs (pure driftLive) false s!"{nowSec}"
+       (some (fun _ => do restartCalled.set true; return .ok ()))
+     | do closeCoreStore store; return 1
+   let wasRestarted ← restartCalled.get
+   let execFailRes ← runGuardedDeploy store driftObs (pure driftObs) false s!"{nowSec}"
+       (some (fun _ => pure (.error "boom")))
+   let failRows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM deploy_receipts WHERE verdict='exec_failed';" #[]
+   let nExecFailed := match failRows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
+   let admRows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM deploy_receipts WHERE unit_name='sandboxed-sh.service' AND verdict='admitted';" #[]
+   let nFalseAdmitted := match admRows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 99
+   let rows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM deploy_receipts;" #[]
+   let nReceipts := match rows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
+   closeCoreStore store
+   let cliNoLease ← IO.Process.output {
+     cmd := "./lean/OrbCore/.lake/build/bin/sandboxed-sh"
+     args := #["deploy", "--service", "sandboxed-sh-dev.service", "--dry-run"]
+     env := #[("WORKING_DIR", some r7Root), ("DEV_MODE", some "true")]
+   }
+   let cliSubRoot := s!"{r7Root}-cli"
+   let .ok cliStore ← openCoreStore s!"{cliSubRoot}/.sandboxed-sh" | do IO.FS.removeDirAll r7Root; return 1
+   let .ok () ← upsertPrivilegeLease cliStore {
+     grantId := "grant-cli", leaseToken := "lease-r7-cli-01", missionId := "m-cli",
+     targetHost := "self", scope := "service_deploy", allowedUnitsJson := "[\"sandboxed-sh-dev.service\"]",
+     requireForceCmd := false, biometricSigned := true, revoked := false, expiresAtEpoch := privExp
+   } | do closeCoreStore cliStore; IO.FS.removeDirAll r7Root; return 1
+   closeCoreStore cliStore
+   let cliWithLease ← IO.Process.output {
+     cmd := "./lean/OrbCore/.lake/build/bin/sandboxed-sh"
+     args := #["deploy", "--service", "sandboxed-sh-dev.service", "--dry-run", "--lease", "lease-r7-cli-01", "--force"]
+     env := #[("WORKING_DIR", some cliSubRoot), ("DEV_MODE", some "true")]
+   }
+   IO.FS.removeDirAll cliSubRoot
+   IO.FS.removeDirAll r7Root
+   if       noLease.map (·.status) != some 403 ||
+      noDryNoLease.map (·.status) != some 403 ||
+      defaultDryUnit.map (·.status) != some 400 ||
+      dry.map (·.status) != some 200 || (dryText.splitOn "dry_run_admitted").length < 2 ||
+      prodDeny.map (·.status) != some 409 ||
+      deb0.debounceOk != true || deb1.debounceOk != false ||
+      badUnit.map (·.status) != some 400 ||
+      privOk.map (·.status) != some 200 ||
+      (privOkText.splitOn "\"bunker_state\":0").length < 2 ||
+      (privOkText.splitOn s!"\"expires_at\":{privExp}").length < 2 ||
+      (privOkText.splitOn s!"\"lease_epoch\":{privExp}").length < 2 ||
+      privBunker.map (·.status) != some 403 ||
+      (privBunkerText.splitOn "\"bunker_state\":1").length < 2 ||
+      (privBunkerText.splitOn "\"allow_exec\":false").length < 2 ||
+      bunker.map (·.status) != some 409 ||
+      (bunkerText.splitOn "gate_denied").length < 2 ||
+      driftRcpt.verdict != "reconciliation_required" || driftRcpt.restart || wasRestarted ||
+      hdrLeaseDeploy.map (·.status) != some 200 || (hdrLeaseText.splitOn "dry_run_admitted").length < 2 ||
+      revokeObs.leaseEpoch != 42 || postRevokeObs.leaseEpoch != 0 ||
+      revokeRcpt.verdict != "reconciliation_required" || revokeRcpt.verdictCode != 516 ||
+      revokeRcpt.restart || wasRevokeRestarted ||
+      execFailRes.isOk || nExecFailed != 1 || nFalseAdmitted != 0 ||
+      cliNoLease.exitCode == 0 || cliWithLease.exitCode != 0 ||
+      nReceipts < 2 then
+    IO.eprintln s!"[orb-core-test] FAIL: guarded deploy / privilege bunker wire contract mismatch: hdr={hdrLeaseDeploy.map (·.status)}:{hdrLeaseText} revObs={revokeObs.leaseEpoch}->{postRevokeObs.leaseEpoch} revRcpt={revokeRcpt.verdict}:{revokeRcpt.verdictCode} cliNo={cliNoLease.exitCode} cliWith={cliWithLease.exitCode}:{cliWithLease.stderr} ok={privOkText} bunker={privBunkerText}"
+    return 1
+  return 0
+
 private def runR4dUnitTests (r4dRoot : String) (r4dChain : RoutingChain) : IO UInt32 := do
   -- (A) `OrbCore.Proxy`: sticky `firstByteCommitted` lock (`abortCommittedLock = 4` on mid-stream failure,
   -- `passCommittedStream = 8` on committed 2xx), pre-commit failover, stale `attemptGeneration` fencing (`0`),
@@ -3354,7 +3735,10 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if sandboxNamePrefixFor "/usr/local/bin/sandboxed-sh" != "orb-managed-" ||
      sandboxNamePrefixFor "/usr/local/bin/sandboxed-sh-prod" != "orb-managed-" ||
      sandboxNamePrefixFor "/usr/local/bin/sandboxed-sh-dev" != "orb-managed-dev-" ||
-     !exceptStrEq (validateDeployServiceUnit "sandboxed-sh") (.ok "sandboxed-sh.service") ||
+     !exceptStrEq (validateDeployServiceUnit "sandboxed-sh-prod") (.ok "sandboxed-sh-prod.service") ||
+     !exceptStrEq (validateDeployServiceUnit "sandboxed-sh-dev") (.ok "sandboxed-sh-dev.service") ||
+     deployUnitIsProd "sandboxed-sh-prod.service" != true ||
+     deployUnitIsProd "sandboxed-sh-dev.service" != false ||
      !exceptStrEq (validateDeployServiceUnit "orb-node") (.ok "sandboxed-node.service") ||
      !exceptStrEq (validateDeployServiceUnit "orb-privd.service") (.ok "orb-privd.service") ||
      (validateDeployServiceUnit "../sandboxed-sh").isOk ||
@@ -4419,8 +4803,9 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln "[orb-core-test] FAIL: OrbCore.HostTests failed"
     return 1
   if (← runR5bManagedStoreTests prodValid) != 0 then return 1
+  if (← runR7CoreTests prodValid) != 0 then return 1
 
-  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":7,\"harness_contracts\":9,\"host_tests\":85}"
+  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":9,\"host_tests\":85}"
   return 0
 
 end OrbCore.SelfTest

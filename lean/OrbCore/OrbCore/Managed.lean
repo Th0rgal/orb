@@ -77,7 +77,8 @@ def renderManagedBudgetJson (st : ManagedFleetState) : String :=
   let boatStr := if st.boatEnabled then "true" else "false"
   s!"\{\"enabled\":{enStr},\"boat_enabled\":{boatStr},\"active_machines\":{active},\"max_concurrent\":{st.maxConcurrent},\"spent_today_cents\":{st.spentTodayCents},\"daily_cap_cents\":{st.dailyCapCents}}"
 
-/-- Map systemd unit alias (`sandboxed-sh`, `orb-core`, `sandboxed-node`, `orb-node`, `orb-privd`) to
+/-- Map systemd unit alias (`sandboxed-sh`, `sandboxed-sh-prod`, `sandboxed-sh-dev`,
+    `orb-core`, `orb-core-dev`, `sandboxed-node`, `orb-node`, `orb-privd`) to
     allowlisted `unitCode` (`1..3`) and validate via `verifyDeployUnitName` (`OrbCore.Spec`). -/
 def validateDeployServiceUnit (rawUnit : String) : Except String String :=
   let trimmed := rawUnit.trimAscii.toString
@@ -87,6 +88,8 @@ def validateDeployServiceUnit (rawUnit : String) : Except String String :=
   let canonical := if leaf.endsWith ".service" then (leaf.dropEnd 8).toString else leaf
   let (unitCode, systemdUnit) : UInt8 × String :=
     if canonical == "sandboxed-sh" || canonical == "orb-core" then (1, "sandboxed-sh.service")
+    else if canonical == "sandboxed-sh-prod" then (1, "sandboxed-sh-prod.service")
+    else if canonical == "sandboxed-sh-dev" || canonical == "orb-core-dev" then (1, "sandboxed-sh-dev.service")
     else if canonical == "sandboxed-node" || canonical == "orb-node" then (2, "sandboxed-node.service")
     else if canonical == "orb-privd" then (3, "orb-privd.service")
     else (0, "")
@@ -94,6 +97,10 @@ def validateDeployServiceUnit (rawUnit : String) : Except String String :=
     .error s!"forbidden or invalid deploy unit `{rawUnit}`"
   else
     .ok systemdUnit
+
+/-- Production units require biometric deploy approval. Dev/staging aliases do not. -/
+def deployUnitIsProd (systemdUnit : String) : Bool :=
+  systemdUnit != "sandboxed-sh-dev.service" && systemdUnit != "orb-core-dev.service"
 
 /-! ## R5-B (`SM-19`): one SQLite authority, sealed credentials, leased relay -/
 

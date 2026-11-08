@@ -1,12 +1,9 @@
 /-
-  OrbCore.Spec: Two-Layer Non-Tautological Specifications (`0 import Lean`, `0 sorryAx`)
-  for Wave 4 Core Gateway (`sandboxed-sh`): Startup Secret/Dev-Mode Posture, Console WS Auth,
-  Machine-Transfer Single-Active Fence, Upstream Proxy Failover, Deploy Unit Confinement,
-  Proactive Provider Pacing, and Remote Replay Supersession Lineage Fence.
-
-  Every unboxed scalar gate is proved equivalent (`MetaGateSpec`, `ScopedAuthority`,
-  `StickyFence`) to an independent domain model over typed protocol ADTs, finite unit catalogs,
-  and natural-number budgets rather than mirroring the gate's boolean formula.
+  OrbCore.Spec: Two-Layer Non-Tautological Specifications for Wave 4 + Phase R7 Core Gateway
+  (`sandboxed-sh`): Startup Secret/Dev-Mode Posture, Console WS Auth, Machine-Transfer
+  Single-Active Fence, Upstream Proxy Failover, Deploy Unit Confinement, Proactive Provider Pacing,
+  Remote Replay Supersession Lineage Fence, Inbox CAS, Project Context CAS, Board Track Admission,
+  and Guarded Deploy Re-check.
 -/
 namespace OrbCore.Spec
 
@@ -526,14 +523,14 @@ def ManagedSystemdUnit.decode? : Nat → Option ManagedSystemdUnit
   | _ => none
 
 /-- Accepted alias length bounds for each `ManagedSystemdUnit` (e.g. `"orb-core"` = 8 ..
-    `"sandboxed-node.service"` = 22). -/
+    `"sandboxed-sh-prod.service"` = 25). -/
 def ManagedSystemdUnit.minAliasBytes : ManagedSystemdUnit → Nat
   | .sandboxedSh   => 8  -- "orb-core"
   | .sandboxedNode => 8  -- "orb-node"
   | .orbPrivd      => 9  -- "orb-privd"
 
 def ManagedSystemdUnit.maxAliasBytes : ManagedSystemdUnit → Nat
-  | .sandboxedSh   => 20 -- "sandboxed-sh.service"
+  | .sandboxedSh   => 25 -- "sandboxed-sh-prod.service"
   | .sandboxedNode => 22 -- "sandboxed-node.service"
   | .orbPrivd      => 17 -- "orb-privd.service"
 
@@ -556,7 +553,7 @@ def DeployUnitDomainSafe (c : DeployUnitCheck) : Prop :=
 @[inline, export orb_core_verify_deploy_unit]
 def verifyDeployUnitName (unitCode hasPathTraversal : UInt8) (unitLen : UInt32) : UInt8 :=
   if hasPathTraversal == 0 &&
-     ((unitCode == 1 && unitLen ≥ 8 && unitLen ≤ 20) ||
+     ((unitCode == 1 && unitLen ≥ 8 && unitLen ≤ 25) ||
       (unitCode == 2 && unitLen ≥ 8 && unitLen ≤ 22) ||
       (unitCode == 3 && unitLen ≥ 9 && unitLen ≤ 17)) then 1 else 0
 
@@ -569,12 +566,12 @@ def deployUnitMetaGate : MetaGateSpec DeployUnitCheck DeployUnitDomainSafe where
     unfold verifyDeployUnitName at h
     have hc :
         (pt == 0 &&
-         ((uc == 1 && uL ≥ 8 && uL ≤ 20) ||
+         ((uc == 1 && uL ≥ 8 && uL ≤ 25) ||
           (uc == 2 && uL ≥ 8 && uL ≤ 22) ||
           (uc == 3 && uL ≥ 9 && uL ≤ 17))) = true := by
       cases hb :
           (pt == 0 &&
-           ((uc == 1 && uL ≥ 8 && uL ≤ 20) ||
+           ((uc == 1 && uL ≥ 8 && uL ≤ 25) ||
             (uc == 2 && uL ≥ 8 && uL ≤ 22) ||
             (uc == 3 && uL ≥ 9 && uL ≤ 17)))
       · rw [hb] at h; contradiction
@@ -602,7 +599,7 @@ def deployUnitMetaGate : MetaGateSpec DeployUnitCheck DeployUnitDomainSafe where
         subst hdec
         have hucB : (uc == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat uc 1 (by omega) hu
         have hge : uL ≥ 8 := UInt32.le_iff_toNat_le.mpr hl1
-        have hle : uL ≤ 20 := UInt32.le_iff_toNat_le.mpr hl2
+        have hle : uL ≤ 25 := UInt32.le_iff_toNat_le.mpr hl2
         simp [hptB, hucB, hge, hle]
       · simp [ManagedSystemdUnit.decode?, hu] at hdec
         subst hdec
@@ -923,5 +920,472 @@ def remoteReplaySupersessionFence : StickyFence RemoteReplaySupersessionCheck wh
     | abortedPreDispatchChain =>
       rcases hkind with ⟨hrt, hdf, _, hljp⟩
       exact Or.inr ⟨hrt, hdf, hljp⟩
+
+/-! ### 8. Inbox single-owner CAS (`SM-18`) -/
+
+inductive InboxEntryKind where
+  | preferences
+  | seen
+  deriving Repr, DecidableEq
+
+def InboxEntryKind.decode? : Nat → Option InboxEntryKind
+  | 1 => some .preferences
+  | 2 => some .seen
+  | _ => none
+
+structure InboxCasCheck where
+  flags    : UInt8 × UInt8 × UInt8 × UInt8 × UInt8
+  versions : UInt64 × UInt64
+  replay   : UInt8
+  deriving Repr, DecidableEq
+
+/-- Independent inbox CAS domain model:
+    `pathKind` decodes to preferences or seen, every required field flag is exactly `1`,
+    the presented version matches the stored version, and the replay bit is canonical (`0` or `1`). -/
+def InboxCasDomainSafe (c : InboxCasCheck) : Prop :=
+  c.flags.2.1.toNat = 1 ∧
+  c.flags.2.2.1.toNat = 1 ∧
+  c.flags.2.2.2.1.toNat = 1 ∧
+  c.flags.2.2.2.2.toNat = 1 ∧
+  (c.replay.toNat = 0 ∨ c.replay.toNat = 1) ∧
+  c.versions.1.toNat = c.versions.2.toNat ∧
+  (InboxEntryKind.decode? c.flags.1.toNat).isSome = true
+
+@[inline, export orb_core_verify_inbox_cas]
+def verifyInboxCas
+    (pathKind clientOk seqOk expectedOk bodyOk : UInt8)
+    (storedVer expectedVer : UInt64)
+    (sameMutation : UInt8) : UInt8 :=
+  if pathKind ≥ 1 && pathKind ≤ 2 && clientOk == 1 && seqOk == 1 && expectedOk == 1 &&
+     bodyOk == 1 && storedVer == expectedVer && sameMutation ≤ 1 then 1 else 0
+
+def inboxCasMetaGate : MetaGateSpec InboxCasCheck InboxCasDomainSafe where
+  gate c :=
+    verifyInboxCas c.flags.1 c.flags.2.1 c.flags.2.2.1 c.flags.2.2.2.1 c.flags.2.2.2.2
+      c.versions.1 c.versions.2 c.replay == 1
+  sound c h := by
+    rcases c with ⟨⟨pk, cl, sq, ex, bd⟩, ⟨sv, ev⟩, rp⟩
+    change (verifyInboxCas pk cl sq ex bd sv ev rp == 1) = true at h
+    dsimp [InboxCasDomainSafe]
+    unfold verifyInboxCas at h
+    have hc :
+        (pk ≥ 1 && pk ≤ 2 && cl == 1 && sq == 1 && ex == 1 && bd == 1 &&
+         sv == ev && rp ≤ 1) = true := by
+      cases hb : (pk ≥ 1 && pk ≤ 2 && cl == 1 && sq == 1 && ex == 1 && bd == 1 && sv == ev && rp ≤ 1)
+      · rw [hb] at h; contradiction
+      · rfl
+    simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hc
+    rcases hc with ⟨⟨⟨⟨⟨⟨⟨hpk1, hpk2⟩, hcl⟩, hsq⟩, hex⟩, hbd⟩, hrev⟩, hrp⟩
+    subst hcl
+    subst hsq
+    subst hex
+    subst hbd
+    subst hrev
+    have hpkN1 : 1 ≤ pk.toNat := UInt8.le_iff_toNat_le.mp hpk1
+    have hpkN2 : pk.toNat ≤ 2 := UInt8.le_iff_toNat_le.mp hpk2
+    refine ⟨rfl, rfl, rfl, rfl, u8_le_one_cases rp hrp, rfl, ?_⟩
+    cases hk : pk.toNat with
+    | zero => omega
+    | succ n =>
+      rcases n with _ | _ | n2
+      · simp [InboxEntryKind.decode?]
+      · simp [InboxEntryKind.decode?]
+      · omega
+  complete c h := by
+    rcases c with ⟨⟨pk, cl, sq, ex, bd⟩, ⟨sv, ev⟩, rp⟩
+    change (verifyInboxCas pk cl sq ex bd sv ev rp == 1) = true
+    dsimp [InboxCasDomainSafe] at h
+    rcases h with ⟨hcl, hsq, hex, hbd, hrp, hrev, hkind⟩
+    unfold verifyInboxCas
+    have hclB : (cl == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat cl 1 (by omega) hcl
+    have hsqB : (sq == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat sq 1 (by omega) hsq
+    have hexB : (ex == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat ex 1 (by omega) hex
+    have hbdB : (bd == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat bd 1 (by omega) hbd
+    have hrevB : (sv == ev) = true := by rw [beq_iff_eq]; exact u64_eq_of_toNat_eq sv ev hrev
+    have hrpB : rp ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change rp.toNat ≤ 1; omega
+    cases hk : pk.toNat with
+    | zero => simp [InboxEntryKind.decode?, hk] at hkind
+    | succ n =>
+      rcases n with _ | _ | n2
+      · have hpk1 : pk ≥ 1 := by apply UInt8.le_iff_toNat_le.mpr; change 1 ≤ pk.toNat; omega
+        have hpk2 : pk ≤ 2 := by apply UInt8.le_iff_toNat_le.mpr; change pk.toNat ≤ 2; omega
+        simp [hpk1, hpk2, hclB, hsqB, hexB, hbdB, hrevB, hrpB]
+      · have hpk1 : pk ≥ 1 := by apply UInt8.le_iff_toNat_le.mpr; change 1 ≤ pk.toNat; omega
+        have hpk2 : pk ≤ 2 := by apply UInt8.le_iff_toNat_le.mpr; change pk.toNat ≤ 2; omega
+        simp [hpk1, hpk2, hclB, hsqB, hexB, hbdB, hrevB, hrpB]
+      · simp [InboxEntryKind.decode?, hk] at hkind
+  posWitness := { flags := (1, 1, 1, 1, 1), versions := (4, 4), replay := 0 }
+  negWitness := { flags := (1, 1, 1, 1, 1), versions := (4, 5), replay := 0 }
+  nonVacuous := by decide
+  tight := by decide
+
+theorem inbox_cas_rejects_version_mismatch
+    (pk cl sq ex bd : UInt8) (sv ev : UInt64) (rp : UInt8)
+    (hne : sv.toNat ≠ ev.toNat) :
+    verifyInboxCas pk cl sq ex bd sv ev rp = 0 := by
+  have hbad : ¬ InboxCasDomainSafe ⟨(pk, cl, sq, ex, bd), (sv, ev), rp⟩ := by
+    rintro ⟨_, _, _, _, _, hrev, _⟩
+    exact hne hrev
+  have hf := inboxCasMetaGate.rejects_unsafe ⟨(pk, cl, sq, ex, bd), (sv, ev), rp⟩ hbad
+  unfold inboxCasMetaGate at hf
+  dsimp at hf
+  unfold verifyInboxCas at hf ⊢
+  exact bit_gate_eq_zero hf
+
+/-! ### 9. Project-context operation CAS (`SM-18`) -/
+
+structure ContextOpCheck where
+  guards : UInt8 × UInt8 × UInt8 × UInt8 × UInt8
+  revs   : UInt64 × UInt64
+  cas    : UInt8 × UInt8
+  deriving Repr, DecidableEq
+
+/-- Independent context-op CAS domain model:
+    path, size, entry-count, project, and blob guards are all exactly `1`,
+    `basePresent` and `entryPresent` are canonical bits (`0 | 1`), and per-entry CAS matches
+    (`basePresent = 0` requires `entryPresent = 0`; `basePresent = 1` requires `entryPresent = 1`
+    and `entryRev = baseRev`). -/
+def ContextOpDomainSafe (c : ContextOpCheck) : Prop :=
+  c.guards.1.toNat = 1 ∧
+  c.guards.2.1.toNat = 1 ∧
+  c.guards.2.2.1.toNat = 1 ∧
+  c.guards.2.2.2.1.toNat = 1 ∧
+  c.guards.2.2.2.2.toNat = 1 ∧
+  (c.cas.1.toNat = 0 ∨ c.cas.1.toNat = 1) ∧
+  (c.cas.2.toNat = 0 ∨ c.cas.2.toNat = 1) ∧
+  ((c.cas.1.toNat = 0 ∧ c.cas.2.toNat = 0) ∨
+   (c.cas.1.toNat = 1 ∧ c.cas.2.toNat = 1 ∧ c.revs.1.toNat = c.revs.2.toNat))
+
+@[inline, export orb_core_verify_context_op]
+def verifyContextOpCas
+    (pathOk sizeOk countOk projectOk blobOk : UInt8)
+    (entryRev baseRev : UInt64)
+    (basePresent entryPresent : UInt8) : UInt8 :=
+  if pathOk == 1 && sizeOk == 1 && countOk == 1 && projectOk == 1 && blobOk == 1 &&
+     basePresent ≤ 1 && entryPresent ≤ 1 &&
+     ((basePresent == 0 && entryPresent == 0) ||
+      (basePresent == 1 && entryPresent == 1 && entryRev == baseRev)) then 1 else 0
+
+def contextOpMetaGate : MetaGateSpec ContextOpCheck ContextOpDomainSafe where
+  gate c :=
+    verifyContextOpCas c.guards.1 c.guards.2.1 c.guards.2.2.1 c.guards.2.2.2.1 c.guards.2.2.2.2
+      c.revs.1 c.revs.2 c.cas.1 c.cas.2 == 1
+  sound c h := by
+    rcases c with ⟨⟨po, so, co, pr, bo⟩, ⟨hr, br⟩, ⟨bp, ep⟩⟩
+    change (verifyContextOpCas po so co pr bo hr br bp ep == 1) = true at h
+    dsimp [ContextOpDomainSafe]
+    unfold verifyContextOpCas at h
+    have hc :
+        (po == 1 && so == 1 && co == 1 && pr == 1 && bo == 1 &&
+         bp ≤ 1 && ep ≤ 1 &&
+         ((bp == 0 && ep == 0) || (bp == 1 && ep == 1 && hr == br))) = true := by
+      cases hb :
+          (po == 1 && so == 1 && co == 1 && pr == 1 && bo == 1 &&
+           bp ≤ 1 && ep ≤ 1 &&
+           ((bp == 0 && ep == 0) || (bp == 1 && ep == 1 && hr == br)))
+      · rw [hb] at h; contradiction
+      · rfl
+    simp only [Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq, decide_eq_true_eq] at hc
+    rcases hc with ⟨⟨⟨⟨⟨⟨⟨hpo, hso⟩, hco⟩, hpr⟩, hbo⟩, hbp⟩, hep⟩, hmatch⟩
+    subst hpo
+    subst hso
+    subst hco
+    subst hpr
+    subst hbo
+    refine ⟨rfl, rfl, rfl, rfl, rfl, u8_le_one_cases bp hbp, u8_le_one_cases ep hep, ?_⟩
+    rcases hmatch with ⟨hbz, hez⟩ | ⟨⟨hb1, he1⟩, heq⟩
+    · subst hbz
+      subst hez
+      exact Or.inl ⟨rfl, rfl⟩
+    · subst hb1
+      subst he1
+      subst heq
+      exact Or.inr ⟨rfl, rfl, rfl⟩
+  complete c h := by
+    rcases c with ⟨⟨po, so, co, pr, bo⟩, ⟨hr, br⟩, ⟨bp, ep⟩⟩
+    change (verifyContextOpCas po so co pr bo hr br bp ep == 1) = true
+    dsimp [ContextOpDomainSafe] at h
+    rcases h with ⟨hpo, hso, hco, hpr, hbo, hbp, hep, hmatch⟩
+    unfold verifyContextOpCas
+    have hpoB : (po == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat po 1 (by omega) hpo
+    have hsoB : (so == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat so 1 (by omega) hso
+    have hcoB : (co == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat co 1 (by omega) hco
+    have hprB : (pr == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat pr 1 (by omega) hpr
+    have hboB : (bo == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat bo 1 (by omega) hbo
+    have hbpB : bp ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change bp.toNat ≤ 1; omega
+    have hepB : ep ≤ 1 := by apply UInt8.le_iff_toNat_le.mpr; change ep.toNat ≤ 1; omega
+    rcases hmatch with ⟨hbz, hez⟩ | ⟨hb1, he1, heq⟩
+    · have hbzB : (bp == 0) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat bp 0 (by omega) hbz
+      have hezB : (ep == 0) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat ep 0 (by omega) hez
+      simp [hpoB, hsoB, hcoB, hprB, hboB, hbpB, hepB, hbzB, hezB]
+    · have hb1B : (bp == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat bp 1 (by omega) hb1
+      have he1B : (ep == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat ep 1 (by omega) he1
+      have heqB : (hr == br) = true := by rw [beq_iff_eq]; exact u64_eq_of_toNat_eq hr br heq
+      simp [hpoB, hsoB, hcoB, hprB, hboB, hbpB, hepB, hb1B, he1B, heqB]
+  posWitness := { guards := (1, 1, 1, 1, 1), revs := (7, 7), cas := (1, 1) }
+  negWitness := { guards := (1, 1, 1, 1, 1), revs := (7, 3), cas := (1, 1) }
+  nonVacuous := by decide
+  tight := by decide
+
+theorem context_op_rejects_stale_base
+    (po so co pr bo ep : UInt8) (hr br : UInt64)
+    (hne : hr.toNat ≠ br.toNat) :
+    verifyContextOpCas po so co pr bo hr br 1 ep = 0 := by
+  have hbad : ¬ ContextOpDomainSafe ⟨(po, so, co, pr, bo), (hr, br), (1, ep)⟩ := by
+    rintro ⟨_, _, _, _, _, _, _, hmatch⟩
+    rcases hmatch with ⟨hbz, _⟩ | ⟨_, _, heq⟩
+    · cases hbz
+    · exact hne heq
+  have hf := contextOpMetaGate.rejects_unsafe ⟨(po, so, co, pr, bo), (hr, br), (1, ep)⟩ hbad
+  unfold contextOpMetaGate at hf
+  dsimp at hf
+  unfold verifyContextOpCas at hf ⊢
+  exact bit_gate_eq_zero hf
+
+/-! ### 10. Board track admission (`SM-13`) -/
+
+structure BoardTrackCheck where
+  flags : UInt8 × UInt8 × UInt8 × UInt8 × UInt8
+  deriving Repr, DecidableEq
+
+/-- Independent board-track domain model:
+    the track exists, its status is canonical, slot and retry kernel bits are `1`,
+    and there is no duplicate open task. -/
+def BoardTrackDomainSafe (c : BoardTrackCheck) : Prop :=
+  c.flags.1.toNat = 1 ∧
+  c.flags.2.1.toNat = 1 ∧
+  c.flags.2.2.1.toNat = 1 ∧
+  c.flags.2.2.2.1.toNat = 1 ∧
+  c.flags.2.2.2.2.toNat = 0
+
+@[inline, export orb_core_verify_board_track]
+def verifyBoardTrack
+    (trackExists statusOk slotsOk retryOk duplicateOpen : UInt8) : UInt8 :=
+  if trackExists == 1 && statusOk == 1 && slotsOk == 1 && retryOk == 1 && duplicateOpen == 0 then 1 else 0
+
+def boardTrackMetaGate : MetaGateSpec BoardTrackCheck BoardTrackDomainSafe where
+  gate c :=
+    verifyBoardTrack c.flags.1 c.flags.2.1 c.flags.2.2.1 c.flags.2.2.2.1 c.flags.2.2.2.2 == 1
+  sound c h := by
+    rcases c with ⟨⟨te, st, sl, rt, du⟩⟩
+    change (verifyBoardTrack te st sl rt du == 1) = true at h
+    dsimp [BoardTrackDomainSafe]
+    unfold verifyBoardTrack at h
+    have hc :
+        (te == 1 && st == 1 && sl == 1 && rt == 1 && du == 0) = true := by
+      cases hb : (te == 1 && st == 1 && sl == 1 && rt == 1 && du == 0)
+      · rw [hb] at h; contradiction
+      · rfl
+    simp only [Bool.and_eq_true, beq_iff_eq] at hc
+    rcases hc with ⟨⟨⟨⟨hte, hst⟩, hsl⟩, hrt⟩, hdu⟩
+    subst hte
+    subst hst
+    subst hsl
+    subst hrt
+    subst hdu
+    exact ⟨rfl, rfl, rfl, rfl, rfl⟩
+  complete c h := by
+    rcases c with ⟨⟨te, st, sl, rt, du⟩⟩
+    change (verifyBoardTrack te st sl rt du == 1) = true
+    dsimp [BoardTrackDomainSafe] at h
+    rcases h with ⟨hte, hst, hsl, hrt, hdu⟩
+    unfold verifyBoardTrack
+    have hteB : (te == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat te 1 (by omega) hte
+    have hstB : (st == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat st 1 (by omega) hst
+    have hslB : (sl == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat sl 1 (by omega) hsl
+    have hrtB : (rt == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat rt 1 (by omega) hrt
+    have hduB : (du == 0) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat du 0 (by omega) hdu
+    simp [hteB, hstB, hslB, hrtB, hduB]
+  posWitness := { flags := (1, 1, 1, 1, 0) }
+  negWitness := { flags := (1, 1, 1, 1, 1) }
+  nonVacuous := by decide
+  tight := by decide
+
+theorem board_track_rejects_duplicate_open
+    (te st sl rt : UInt8) :
+    verifyBoardTrack te st sl rt 1 = 0 := by
+  have hbad : ¬ BoardTrackDomainSafe ⟨(te, st, sl, rt, 1)⟩ := by
+    rintro ⟨_, _, _, _, hdu⟩
+    cases hdu
+  have hf := boardTrackMetaGate.rejects_unsafe ⟨(te, st, sl, rt, 1)⟩ hbad
+  unfold boardTrackMetaGate at hf
+  dsimp at hf
+  unfold verifyBoardTrack at hf ⊢
+  exact bit_gate_eq_zero hf
+
+/-! ### 11. Deploy observe → gate → re-check (`SM-22` / `G-ORB-7`) -/
+
+structure DeployRecheckCheck where
+  flags   : UInt8 × UInt8 × UInt8
+  targets : UInt32 × UInt32
+  leases  : UInt64 × UInt64
+  tail    : (UInt64 × UInt64) × (UInt64 × UInt64)
+  deriving Repr, DecidableEq
+
+/-- Independent deploy re-check domain model:
+    the initial deploy gate passed, the principal is in `1..3`, bunker is clear,
+    the live target, lease, and digest still match the observation, and the lease has not expired. -/
+def DeployRecheckDomainSafe (c : DeployRecheckCheck) : Prop :=
+  c.flags.1.toNat = 1 ∧
+  1 ≤ c.flags.2.1.toNat ∧
+  c.flags.2.1.toNat ≤ 3 ∧
+  c.flags.2.2.toNat = 0 ∧
+  c.targets.1.toNat ≠ 0 ∧
+  c.targets.1.toNat = c.targets.2.toNat ∧
+  c.leases.1.toNat ≠ 0 ∧
+  c.leases.1.toNat = c.leases.2.toNat ∧
+  c.tail.1.1.toNat < c.tail.1.2.toNat ∧
+  c.tail.2.1.toNat ≠ 0 ∧
+  c.tail.2.1.toNat = c.tail.2.2.toNat
+
+private theorem u32_eq_of_toNat_eq (a b : UInt32) (h : a.toNat = b.toNat) : a = b :=
+  UInt32.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h)
+
+@[inline, export orb_core_verify_deploy_recheck]
+def verifyDeployRecheck
+    (gateOk principalKind bunkerState : UInt8)
+    (observedTarget execTarget : UInt32)
+    (observedLease liveLease nowTick expiryTick observedDigest execDigest : UInt64) : UInt32 :=
+  if gateOk != 1 then 512
+  else if bunkerState != 0 then 513
+  else if !(principalKind ≥ 1 && principalKind ≤ 3) then 514
+  else if !(nowTick < expiryTick) then 515
+  else if !(observedLease != 0 && observedLease == liveLease) then 516
+  else if !(observedTarget != 0 && observedTarget == execTarget) then 517
+  else if !(observedDigest != 0 && observedDigest == execDigest) then 518
+  else 257
+
+def deployRecheckMetaGate : MetaGateSpec DeployRecheckCheck DeployRecheckDomainSafe where
+  gate c :=
+    verifyDeployRecheck c.flags.1 c.flags.2.1 c.flags.2.2
+      c.targets.1 c.targets.2 c.leases.1 c.leases.2
+      c.tail.1.1 c.tail.1.2 c.tail.2.1 c.tail.2.2 == 257
+  sound c h := by
+    rcases c with ⟨⟨g, pk, bk⟩, ⟨ot, et⟩, ⟨ol, ll⟩, ⟨⟨nw, ex⟩, ⟨od, ed⟩⟩⟩
+    change (verifyDeployRecheck g pk bk ot et ol ll nw ex od ed == 257) = true at h
+    dsimp [DeployRecheckDomainSafe]
+    unfold verifyDeployRecheck at h
+    have hc :
+        (g == 1 && bk == 0 && pk ≥ 1 && pk ≤ 3 && nw < ex &&
+         ol != 0 && ol == ll && ot != 0 && ot == et && od != 0 && od == ed) = true := by
+      split at h
+      · contradiction
+      · rename_i hgNot
+        split at h
+        · contradiction
+        · rename_i hbkNot
+          split at h
+          · contradiction
+          · rename_i hpkNot
+            split at h
+            · contradiction
+            · rename_i hclkNot
+              split at h
+              · contradiction
+              · rename_i hlsNot
+                split at h
+                · contradiction
+                · rename_i htgNot
+                  split at h
+                  · contradiction
+                  · rename_i hdgNot
+                    simp only [bne_iff_ne, Decidable.not_not, Bool.not_eq_true] at hgNot hbkNot hpkNot hclkNot hlsNot htgNot hdgNot
+                    subst hgNot; subst hbkNot
+                    have hpkB : (pk ≥ 1 && pk ≤ 3) = true := by
+                      cases hpk0 : (pk ≥ 1 && pk ≤ 3)
+                      · rw [hpk0] at hpkNot; contradiction
+                      · rfl
+                    have hclkB : decide (nw < ex) = true := by
+                      cases hclk0 : decide (nw < ex)
+                      · rw [hclk0] at hclkNot; contradiction
+                      · rfl
+                    have hlsB : (ol != 0 && ol == ll) = true := by
+                      cases hls0 : (ol != 0 && ol == ll)
+                      · rw [hls0] at hlsNot; contradiction
+                      · rfl
+                    have htgB : (ot != 0 && ot == et) = true := by
+                      cases htg0 : (ot != 0 && ot == et)
+                      · rw [htg0] at htgNot; contradiction
+                      · rfl
+                    have hdgB : (od != 0 && od == ed) = true := by
+                      cases hdg0 : (od != 0 && od == ed)
+                      · rw [hdg0] at hdgNot; contradiction
+                      · rfl
+                    simp only [Bool.and_eq_true] at hpkB hlsB htgB hdgB ⊢
+                    refine ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨by decide, by decide⟩, hpkB.1⟩, hpkB.2⟩, hclkB⟩,
+                      hlsB.1⟩, hlsB.2⟩, htgB.1⟩, htgB.2⟩, hdgB.1⟩, hdgB.2⟩
+    simp only [Bool.and_eq_true, bne_iff_ne, beq_iff_eq, decide_eq_true_eq] at hc
+    rcases hc with ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨hg, hbk⟩, hpk1⟩, hpk2⟩, hclk⟩, hol⟩, heql⟩, hot⟩, heqt⟩, hod⟩, heqd⟩
+    subst hg
+    subst hbk
+    subst heql
+    subst heqt
+    subst heqd
+    exact ⟨rfl,
+      UInt8.le_iff_toNat_le.mp hpk1, UInt8.le_iff_toNat_le.mp hpk2,
+      rfl,
+      fun hz => hot (u32_eq_of_toNat_eq ot 0 hz), rfl,
+      fun hz => hol (u64_eq_of_toNat_eq ol 0 hz), rfl,
+      UInt64.lt_iff_toNat_lt.mp hclk,
+      fun hz => hod (u64_eq_of_toNat_eq od 0 hz), rfl⟩
+  complete c h := by
+    rcases c with ⟨⟨g, pk, bk⟩, ⟨ot, et⟩, ⟨ol, ll⟩, ⟨⟨nw, ex⟩, ⟨od, ed⟩⟩⟩
+    change (verifyDeployRecheck g pk bk ot et ol ll nw ex od ed == 257) = true
+    dsimp [DeployRecheckDomainSafe] at h
+    rcases h with ⟨hg, hpk1, hpk2, hbk, hot, heqt, hol, heql, hclk, hod, heqd⟩
+    unfold verifyDeployRecheck
+    have hgEq : g = 1 := u8_eq_of_toNat g 1 (by omega) hg
+    have hbkEq : bk = 0 := u8_eq_of_toNat bk 0 (by omega) hbk
+    subst hgEq; subst hbkEq
+    have hpkB : (pk ≥ 1 && pk ≤ 3) = true := by
+      have a : pk ≥ 1 := by apply UInt8.le_iff_toNat_le.mpr; change 1 ≤ pk.toNat; omega
+      have b : pk ≤ 3 := by apply UInt8.le_iff_toNat_le.mpr; change pk.toNat ≤ 3; omega
+      simp [a, b]
+    have hclkLt : nw < ex := UInt64.lt_iff_toNat_lt.mpr hclk
+    have hlsB : (ol != 0 && ol == ll) = true := by
+      have holB : (ol != 0) = true := by
+        rw [bne_iff_ne]
+        intro hz
+        exact hol (by rw [hz]; rfl)
+      have heqB : (ol == ll) = true := by rw [beq_iff_eq]; exact u64_eq_of_toNat_eq ol ll heql
+      simp [holB, heqB]
+    have htgB : (ot != 0 && ot == et) = true := by
+      have hotB : (ot != 0) = true := by
+        rw [bne_iff_ne]
+        intro hz
+        exact hot (by rw [hz]; rfl)
+      have heqB : (ot == et) = true := by rw [beq_iff_eq]; exact u32_eq_of_toNat_eq ot et heqt
+      simp [hotB, heqB]
+    have hdgB : (od != 0 && od == ed) = true := by
+      have hodB : (od != 0) = true := by
+        rw [bne_iff_ne]
+        intro hz
+        exact hod (by rw [hz]; rfl)
+      have heqB : (od == ed) = true := by rw [beq_iff_eq]; exact u64_eq_of_toNat_eq od ed heqd
+      simp [hodB, heqB]
+    simp [hpkB, hclkLt, hlsB, htgB, hdgB]
+  posWitness := {
+    flags := (1, 2, 0)
+    targets := (9, 9)
+    leases := (4, 4)
+    tail := ((10, 20), (8, 8))
+  }
+  negWitness := {
+    flags := (1, 2, 0)
+    targets := (9, 9)
+    leases := (4, 5)
+    tail := ((10, 20), (8, 8))
+  }
+  nonVacuous := by decide
+  tight := by decide
+
+theorem deploy_recheck_rejects_lease_drift
+    (g pk bk : UInt8) (ot et : UInt32) (ol ll nw ex od ed : UInt64)
+    (hne : ol.toNat ≠ ll.toNat) :
+    (verifyDeployRecheck g pk bk ot et ol ll nw ex od ed == 257) = false := by
+  have hbad : ¬ DeployRecheckDomainSafe ⟨(g, pk, bk), (ot, et), (ol, ll), ((nw, ex), (od, ed))⟩ := by
+    rintro ⟨_, _, _, _, _, _, _, heql, _, _, _⟩
+    exact hne heql
+  exact deployRecheckMetaGate.rejects_unsafe ⟨(g, pk, bk), (ot, et), (ol, ll), ((nw, ex), (od, ed))⟩ hbad
 
 end OrbCore.Spec

@@ -9,12 +9,16 @@
 import OrbCore.Control
 import OrbCore.Managed
 import OrbCore.Harness
+import OrbCore.Store
+import OrbCore.R7Core
 
 namespace OrbCore.CliMain
 
 open OrbCore.Control
 open OrbCore.Managed
 open OrbCore.Harness
+open OrbCore.Store
+open OrbCore.R7Core
 
 private def findFlagVal? (args : List String) (flag : String) : Option String :=
   match args with
@@ -32,19 +36,46 @@ def runDeploySubcommand (args : List String) : IO UInt32 := do
     return 1
   | .ok unitName =>
     let dryRun := args.contains "--dry-run"
-    if dryRun then
-      IO.println s!"\{\"ok\":true,\"dry_run\":true,\"unit\":\"{unitName}\"}"
-      return 0
-    let sysCtlCmd ← if ← System.FilePath.pathExists "/bin/systemctl" then pure "/bin/systemctl" else pure "/usr/bin/systemctl"
-    let res ← IO.Process.output {
-      cmd := sysCtlCmd
-      args := #["restart", unitName]
-    }
-    if res.exitCode != 0 then
-      IO.eprintln s!"[sandboxed-sh deploy] systemctl restart {unitName} failed: {res.stderr}"
+    let forceFlag := args.contains "--force"
+    let cfg ← loadConfigFromEnv
+    let normWork := cfg.workingDir.trimAscii.toString
+    let dataRoot :=
+      if normWork.endsWith "/.sandboxed-sh" || normWork == ".sandboxed-sh" then normWork
+      else s!"{normWork}/.sandboxed-sh"
+    let nowSec ← coreEpochSec
+    match ← openCoreStore dataRoot with
+    | .error e =>
+      IO.eprintln s!"[sandboxed-sh deploy] store open failed: {e}"
       return 1
-    IO.println s!"\{\"ok\":true,\"unit\":\"{unitName}\"}"
-    return 0
+    | .ok st =>
+      let leaseTok := (findFlagVal? args "--lease").getD ""
+      if leaseTok.isEmpty then
+        IO.eprintln "[sandboxed-sh deploy] ERROR: --lease is required"
+        closeCoreStore st
+        return 1
+      let some lease ← lookupPrivilegeLease? st leaseTok
+        | do
+          IO.eprintln "[sandboxed-sh deploy] ERROR: unknown lease"
+          closeCoreStore st
+          return 1
+      let obs ← observeDeployLive st unitName forceFlag dryRun true (some lease) nowSec
+      let reobserveLive : IO DeployObservation := do
+        let liveSec ← coreEpochSec
+        let liveLease? ← lookupPrivilegeLease? st leaseTok
+        observeDeployLive st unitName forceFlag dryRun true liveLease? liveSec
+      let res ← runGuardedDeploy st obs reobserveLive dryRun s!"{nowSec}" none
+      closeCoreStore st
+      match res with
+      | .error e =>
+        IO.eprintln s!"[sandboxed-sh deploy] {e}"
+        return 1
+      | .ok rcpt =>
+        if rcpt.verdict != "admitted" && rcpt.verdict != "dry_run_admitted" then
+          IO.eprintln s!"[sandboxed-sh deploy] rejected ({rcpt.verdict})"
+          return 1
+        let drStr := if dryRun then "\"dry_run\":true," else ""
+        IO.println s!"\{\"ok\":true,{drStr}\"unit\":\"{unitName}\",\"verdict\":\"{rcpt.verdict}\"}"
+        return 0
 
 end OrbCore.CliMain
 
