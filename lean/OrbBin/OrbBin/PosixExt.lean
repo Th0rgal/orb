@@ -22,6 +22,9 @@ private opaque rawPeerCred (fd : Int32) : IO ByteArray
 @[extern "orb_bin_lstat_info"]
 opaque lstatInfo (path : @& String) : IO UInt32
 
+@[extern "orb_bin_stat_identity"]
+private opaque rawStatIdentity (path : @& String) (follow : UInt8) : IO ByteArray
+
 @[extern "orb_bin_geteuid"]
 opaque geteuid : IO UInt32
 
@@ -61,6 +64,9 @@ opaque pollTermTrap : IO UInt32
 @[extern "orb_bin_spawn_pgrp"]
 private opaque rawSpawnPgrp (prog : @& String) (args : @& Array String) (env : @& Array String) (pipeStdin : UInt8) : IO ByteArray
 
+@[extern "orb_bin_waitpid_block"]
+opaque waitpidBlock (pid : Int64) : IO UInt32
+
 @[extern "orb_bin_waitpid_wnohang"]
 opaque waitpidWnohang (pid : Int64) : IO UInt32
 
@@ -76,12 +82,14 @@ opaque unsetenvVar (key : @& String) : IO Unit
 structure SpawnedPgrp where
   pid       : Int64
   stdinFd   : Int32
+  stdoutFd  : Int32 := -1
   deriving Repr, BEq
 
 def spawnPgrp
     (prog : String) (args : Array String) (env : Array String)
-    (pipeStdin : Bool := false) (nullStdio : Bool := false) : IO SpawnedPgrp := do
-  let flags : UInt8 := (if pipeStdin then 1 else 0) ||| (if nullStdio then 2 else 0)
+    (pipeStdin : Bool := false) (nullStdio : Bool := false) (pipeStdout : Bool := false) : IO SpawnedPgrp := do
+  let flags : UInt8 :=
+    (if pipeStdin then 1 else 0) ||| (if nullStdio then 2 else 0) ||| (if pipeStdout then 4 else 0)
   let raw ← rawSpawnPgrp prog args env flags
   let mut pidU64 : UInt64 := 0
   for i in [0:8] do
@@ -89,9 +97,13 @@ def spawnPgrp
   let mut fdU32 : UInt32 := 0
   for i in [0:4] do
     fdU32 := fdU32 ||| ((raw.get! (8 + i)).toUInt32 <<< (i * 8).toUInt32)
+  let mut outU32 : UInt32 := 0
+  for i in [0:4] do
+    outU32 := outU32 ||| ((raw.get! (12 + i)).toUInt32 <<< (i * 8).toUInt32)
   let pid : Int64 := Int64.ofBitVec (BitVec.ofNat 64 pidU64.toNat)
   let stdinFd : Int32 := Int32.ofBitVec (BitVec.ofNat 32 fdU32.toNat)
-  return { pid, stdinFd }
+  let stdoutFd : Int32 := Int32.ofBitVec (BitVec.ofNat 32 outU32.toNat)
+  return { pid, stdinFd, stdoutFd }
 
 /-- Read current process environment as `(key, value)` pairs. -/
 def currentEnvPairs : IO (Array (String × String)) := do
@@ -132,21 +144,54 @@ structure StatFlags where
   isReg       : Bool
   isSymlink   : Bool
   ownedByEuid : Bool
+  ownedByRoot : Bool := false
   mode        : UInt32
   deriving Repr, BEq
 
 def statPath (path : String) : IO StatFlags := do
   let bits ← lstatInfo path
   if (bits &&& 1) == 0 then
-    return { exists_ := false, isDir := false, isReg := false, isSymlink := false, ownedByEuid := false, mode := 0 }
+    return { exists_ := false, isDir := false, isReg := false, isSymlink := false, ownedByEuid := false, ownedByRoot := false, mode := 0 }
   return {
     exists_     := true
     isDir       := (bits &&& 2) != 0
     isReg       := (bits &&& 4) != 0
     isSymlink   := (bits &&& 8) != 0
     ownedByEuid := (bits &&& 16) != 0
+    ownedByRoot := (bits &&& 32) != 0
     mode        := (bits >>> 8) &&& 0o7777
   }
+
+structure StatIdentity where
+  exists_ : Bool
+  dev     : UInt64
+  ino     : UInt64
+  size    : UInt64
+  mtime   : UInt64
+  uid     : UInt32
+  gid     : UInt32
+  mode    : UInt32
+  deriving Repr, BEq, DecidableEq
+
+private def readU64LE (b : ByteArray) (off : Nat) : UInt64 := Id.run do
+  if off + 8 > b.size then return 0
+  let mut v : UInt64 := 0
+  for i in [0:8] do
+    v := v ||| ((b.get! (off + i)).toUInt64 <<< (i * 8).toUInt64)
+  return v
+
+def statIdentity (path : String) (followSymlinks : Bool := false) : IO StatIdentity := do
+  let raw ← rawStatIdentity path (if followSymlinks then 1 else 0)
+  let dev := readU64LE raw 0
+  let ino := readU64LE raw 8
+  let sz := readU64LE raw 16
+  let mt := readU64LE raw 24
+  let uid := readU32LE raw 32
+  let gid := readU32LE raw 36
+  let mode := readU32LE raw 40
+  if mode == 0 && ino == 0 && dev == 0 then
+    return { exists_ := false, dev := 0, ino := 0, size := 0, mtime := 0, uid := 0, gid := 0, mode := 0 }
+  return { exists_ := true, dev, ino, size := sz, mtime := mt, uid, gid, mode }
 
 /-- Read an environment variable, returning `none` if unset or empty. -/
 def getEnvNonEmpty (name : String) : IO (Option String) := do

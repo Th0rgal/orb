@@ -9,6 +9,7 @@ import OrbBin.PosixExt
 import OrbBin.Json
 import OrbBin.HttpClient
 import OrbBin.McpCatalog
+import OrbBin.McpRegistry
 import OrbBin.StdioMcpServer
 
 namespace OrbBin.SandboxedMcp
@@ -169,6 +170,7 @@ structure McpClient where
   preflightCache?    : Option System.FilePath
   sessionLock        : Std.Mutex (Option (String × Int))
   resolvedSessionId  : Std.Mutex (Option String)
+  stdioRegistry      : OrbBin.McpRegistry.McpStdioRegistry
 
 def McpClient.create
     (rawApiUrl inlineToken : String)
@@ -185,6 +187,7 @@ def McpClient.create
   | .ok apiUrl =>
     let sessionLock ← Std.Mutex.new none
     let resolvedSessionId ← Std.Mutex.new (decodeMcpTokenSessionId? inlineToken)
+    let stdioRegistry ← OrbBin.McpRegistry.McpStdioRegistry.new
     return .ok {
       apiUrl
       inlineToken
@@ -198,6 +201,7 @@ def McpClient.create
       preflightCache?
       sessionLock
       resolvedSessionId
+      stdioRegistry
     }
 
 private def readCredentialRaw (c : McpClient) : IO (Except String String) := do
@@ -305,37 +309,56 @@ def McpClient.getToken
       set (some (newTok, exp))
       return .ok newTok
 
-def McpClient.request
+inductive CoreRequestOutcome where
+  | ok (payload : JVal)
+  | preflightFailed (message : String)
+  | httpRejected (status : Nat) (message : String) (payload? : Option JVal)
+  | transportUncertain (message : String)
+
+def CoreRequestOutcome.toExcept : CoreRequestOutcome → Except String JVal
+  | .ok j => .ok j
+  | .preflightFailed m => .error m
+  | .httpRejected _ m _ => .error m
+  | .transportUncertain m => .error m
+
+def McpClient.requestDetailed
     (c : McpClient)
     (path : String)
     (body? : Option JVal := none)
-    (cancelled? : Option (IO.Ref Bool) := none) : IO (Except String JVal) := do
+    (cancelled? : Option (IO.Ref Bool) := none) : IO CoreRequestOutcome := do
   for attempt in [0:2] do
     if let some cRef := cancelled? then
       if (← cRef.get) then
-        return .error "Request cancelled; accepted actions continue"
+        return .preflightFailed "Request cancelled; accepted actions continue"
     let tok ← match (← c.getToken cancelled?) with
       | .ok t => pure t
-      | .error e => return .error e
+      | .error e => return .preflightFailed e
     if let some cRef := cancelled? then
       if (← cRef.get) then
-        return .error "Request cancelled; accepted actions continue"
+        return .preflightFailed "Request cancelled; accepted actions continue"
     let method := if body?.isSome then "POST" else "GET"
     match (← sendJsonRequest method s!"{c.apiUrl}{path}" (some tok) body?) with
     | .error _ =>
-      return .error "Core connection failed; acceptance is unknown for a submitted mutation"
+      return .transportUncertain "Core connection failed; acceptance is unknown for a submitted mutation"
     | .ok (status, _, respJson?) =>
       if status == 401 && attempt == 0 then
         c.sessionLock.atomically do
           if let some (stTok, _) ← get then
             set (some (stTok, (0 : Int)))
       else if status < 200 || status ≥ 300 then
-        return .error s!"Core rejected request ({status})"
+        return .httpRejected status s!"Core rejected request ({status})" respJson?
       else
         match respJson? with
         | some j => return .ok j
-        | none => return .error "Invalid Core response"
-  return .error "Core rejected the renewed scoped session; check mission authorization"
+        | none => return .transportUncertain "Invalid Core response"
+  return .httpRejected 401 "Core rejected the renewed scoped session; check mission authorization" none
+
+def McpClient.request
+    (c : McpClient)
+    (path : String)
+    (body? : Option JVal := none)
+    (cancelled? : Option (IO.Ref Bool) := none) : IO (Except String JVal) := do
+  return (← c.requestDetailed path body? cancelled?).toExcept
 
 def preflightCacheMaxTtlSecs : UInt64 := 300
 
@@ -491,6 +514,169 @@ def McpClient.fetchSecretFile
       return .error s!"Unexpected response from secret_get for `{trimmed}`: {st}"
   return .error "unreachable"
 
+structure ActionReceiptOutcome where
+  outcome          : OrbBin.Spec.McpActionOutcomeKind
+  receiptSettled   : Bool
+  durableSuccess   : Bool
+  mayRetryFreshKey : Bool
+  packedWord       : UInt32
+  deriving Repr, DecidableEq
+
+private def parseReceiptStateTag (s : String) : UInt8 :=
+  match s.trimAscii.toString.toLower with
+  | "" | "queued" | "pending" => 0
+  | "running" | "dispatching" | "in_progress" => 1
+  | "completed" | "succeeded" | "settled" => 2
+  | "failed" | "rejected" | "cancelled" | "canceled" => 3
+  | "reconciliation_required" | "uncertain" => 4
+  | _ => 5
+
+private def parseAcceptedJValTag (v : JVal) : UInt8 :=
+  match v with
+  | .null => 0
+  | .bool true => 1
+  | .bool false => 2
+  | .str s =>
+    match s.trimAscii.toString.toLower with
+    | "yes" | "true" => 1
+    | "no" | "false" => 2
+    | "unknown" => 3
+    | _ => 4
+  | _ => 4
+
+def parseAcceptedTag (receipt : JVal) : UInt8 :=
+  let errObj := receipt.fieldOrNull "error"
+  match receipt.field? "accepted" with
+  | some .null | none =>
+    match errObj.field? "accepted" with
+    | some v => parseAcceptedJValTag v
+    | none => 0
+  | some v => parseAcceptedJValTag v
+
+/-- Classify a single Core action receipt through `OrbBin.Spec.verifyMcpActionOutcome`,
+    keeping `receipt_settled` (`bit 8`) strictly separate from `action_outcome` (`bits 0..7`). -/
+def classifyMcpActionReceipt (receipt : JVal) (transportDropped : Bool := false) : ActionReceiptOutcome :=
+  let dropFlag : UInt8 := if transportDropped then 1 else 0
+  let stateRaw := ((receipt.fieldStr? "state").orElse (fun _ => receipt.fieldStr? "status")).getD ""
+  let statusRaw := ((receipt.fieldStr? "status").orElse (fun _ => receipt.fieldStr? "state")).getD ""
+  let stTag := parseReceiptStateTag stateRaw
+  let hasErr := match receipt.field? "error" with
+    | some .null | none => false
+    | some _ => true
+  let hasRes : UInt8 :=
+    match receipt.field? "result" with
+    | some .null | none => 0
+    | some _ => if hasErr then 0 else 1
+  let accTag := parseAcceptedTag receipt
+  let rsTag : UInt8 :=
+    let base := parseReceiptStateTag statusRaw
+    if base == 0 && statusRaw.isEmpty then
+      if accTag == 3 then 4
+      else if hasErr || accTag == 2 then 3
+      else if hasRes == 1 then 2
+      else 0
+    else if base == 2 && hasErr then 3
+    else base
+  let stClean : UInt8 := if stTag ≤ 4 then stTag else 3
+  let word := OrbBin.Spec.verifyMcpActionOutcome rsTag accTag stClean dropFlag hasRes
+  let kind : OrbBin.Spec.McpActionOutcomeKind :=
+    match word &&& 255 with
+    | 0 => .pending
+    | 1 => .accepted
+    | 3 => .uncertainReconciliationRequired
+    | _ => .rejected
+  { outcome          := kind
+    receiptSettled   := ((word >>> 8) &&& 1) == 1
+    durableSuccess   := ((word >>> 16) &&& 1) == 1
+    mayRetryFreshKey := ((word >>> 24) &&& 1) == 1
+    packedWord       := word }
+
+private def annotateActionReceiptJson (receipt : JVal) (transportDropped : Bool := false) : JVal :=
+  match receipt with
+  | .obj _ =>
+    let cls := classifyMcpActionReceipt receipt transportDropped
+    let r1 := receipt.setField "receipt_settled" (.bool cls.receiptSettled)
+    let r2 := r1.setField "action_outcome" (.str cls.outcome.toWire)
+    let r3 := r2.setField "durable_success" (.bool cls.durableSuccess)
+    r3.setField "may_retry_fresh_key" (.bool cls.mayRetryFreshKey)
+  | other => other
+
+private def isActionReceiptLike (v : JVal) : Bool :=
+  match v with
+  | .obj _ =>
+    (v.field? "action_id").isSome ||
+    (v.field? "accepted").isSome ||
+    (v.fieldStr? "state") == some "reconciliation_required" ||
+    ((v.fieldOrNull "error").field? "accepted").isSome
+  | _ => false
+
+/-- Normalize `get_action`, `wait_actions`, and `get_fleet_sweep` payloads so settled receipts
+    with `reconciliation_required` or `accepted:"unknown"` never report durable action success. -/
+def normalizeWaitActionsResult (payload : JVal) (transportDropped : Bool := false) : JVal := Id.run do
+  let mut out := payload
+  if isActionReceiptLike out || transportDropped then
+    out := annotateActionReceiptJson out transportDropped
+  let mut annotatedAny := false
+  let mut allSettled := true
+  let mut allAccepted := true
+  let mut anyReconcile := false
+  let mut count : Nat := 0
+  for arrKey in ["receipts", "actions"] do
+    if let some xs := out.fieldArr? arrKey then
+      annotatedAny := true
+      let mut mapped : Array JVal := Array.mkEmpty xs.size
+      for item in xs do
+        let cls := classifyMcpActionReceipt item false
+        count := count + 1
+        if !cls.receiptSettled then allSettled := false
+        if !cls.durableSuccess then allAccepted := false
+        if cls.outcome == .uncertainReconciliationRequired then anyReconcile := true
+        mapped := mapped.push (annotateActionReceiptJson item false)
+      out := out.setField arrKey (.arr mapped)
+  if annotatedAny then
+    let aggOutcome : OrbBin.Spec.McpActionOutcomeKind :=
+      if anyReconcile then .uncertainReconciliationRequired
+      else if count > 0 && !allSettled then .pending
+      else if count > 0 && allAccepted then .accepted
+      else if count == 0 then .accepted
+      else .rejected
+    out := out.setField "receipt_settled" (.bool (count == 0 || allSettled))
+    out := out.setField "action_outcome" (.str aggOutcome.toWire)
+    out := out.setField "all_succeeded" (.bool (count == 0 || (allSettled && allAccepted && !anyReconcile)))
+    out := out.setField "reconciliation_required" (.bool anyReconcile)
+  return out
+
+private def loadConfiguredStdioMcps (reg : OrbBin.McpRegistry.McpStdioRegistry) : IO Unit := do
+  let some raw ← getEnvNonEmpty "SANDBOXED_MCP_STDIO_SERVERS" | return
+  let .ok (.arr entries) := Json.parse raw | return
+  for item in entries do
+    if let some name := item.fieldStr? "name" then
+      if !name.isEmpty && name != "sandboxed" then
+        if let some cmd := item.fieldStr? "command" then
+          if !cmd.isEmpty then
+            let args := match item.fieldArr? "args" with
+              | some xs => xs.filterMap JVal.asStr?
+              | none => #[]
+            let timeoutMs : UInt32 := ((item.fieldNat? "timeout_ms").getD 5000).toUInt32
+            let mut envPairs : Array (String × String) := #[]
+            if let some envObj := (item.field? "env") >>= JVal.asObj? then
+              for (ek, ev) in envObj do
+                if let some sv := ev.asStr? then
+                  envPairs := envPairs.push (ek, sv)
+            let _ ← OrbBin.McpRegistry.connect reg name cmd args timeoutMs envPairs
+
+private def parseNamespacedStdioTool? (toolName : String) : Option (String × String) :=
+  match toolName.splitOn "." with
+  | srv :: rest =>
+    if !srv.isEmpty && !rest.isEmpty then
+      let inner := String.intercalate "." rest
+      if !inner.isEmpty then some (srv, inner) else none
+    else none
+  | _ => none
+
+def McpClient.shutdown (c : McpClient) : IO Unit :=
+  OrbBin.McpRegistry.shutdownAll c.stdioRegistry
+
 def McpClient.handleRpc (c : McpClient) (req : JVal) (cancelled : IO.Ref Bool) : IO JVal := do
   let idVal := req.fieldOrNull "id"
   let method := (req.fieldStr? "method").getD ""
@@ -510,7 +696,14 @@ def McpClient.handleRpc (c : McpClient) (req : JVal) (cancelled : IO.Ref Bool) :
     return jsonRpcSuccess idVal (.obj #[])
   | "tools/list" =>
     match (← c.preflight (some cancelled)) with
-    | .ok v => return jsonRpcSuccess idVal (.obj #[("tools", v.fieldOrNull "tools")])
+    | .ok v =>
+      let coreTools := (v.fieldArr? "tools").getD #[]
+      let extPairs ← OrbBin.McpRegistry.listConnectedTools c.stdioRegistry
+      let mut merged := coreTools
+      for (srvName, tObj) in extPairs do
+        if let some tName := tObj.fieldStr? "name" then
+          merged := merged.push (tObj.setField "name" (.str s!"{srvName}.{tName}"))
+      return jsonRpcSuccess idVal (.obj #[("tools", .arr merged)])
     | .error e => return jsonRpcError idVal (-32000) e
   | "tools/call" =>
     let params := req.fieldOrNull "params"
@@ -518,30 +711,130 @@ def McpClient.handleRpc (c : McpClient) (req : JVal) (cancelled : IO.Ref Bool) :
     | none => return jsonRpcError idVal (-32602) "Missing tool name"
     | some toolName =>
       let arguments := (params.field? "arguments").getD (.obj #[])
+      if let some (srvName, extTool) := parseNamespacedStdioTool? toolName then
+        if let some _ ← OrbBin.McpRegistry.getEntry? c.stdioRegistry srvName then
+          let extParams := JVal.obj #[("name", .str extTool), ("arguments", arguments)]
+          match (← OrbBin.McpRegistry.request c.stdioRegistry srvName "tools/call" (some extParams)) with
+          | .ok extRes =>
+            match extRes with
+            | .obj _ =>
+              if (extRes.field? "content").isSome then
+                return jsonRpcSuccess idVal extRes
+              else
+                let res := JVal.obj #[
+                  ("isError", .bool false),
+                  ("structuredContent", extRes),
+                  ("content", .arr #[.obj #[("type", .str "text"), ("text", .str (renderCompact extRes))]])
+                ]
+                return jsonRpcSuccess idVal res
+            | other =>
+              let wrapped := JVal.obj #[("data", other)]
+              let res := JVal.obj #[
+                ("isError", .bool false),
+                ("structuredContent", wrapped),
+                ("content", .arr #[.obj #[("type", .str "text"), ("text", .str (renderCompact wrapped))]])
+              ]
+              return jsonRpcSuccess idVal res
+          | .error errMsg =>
+            let errPayload := JVal.obj #[
+              ("error", .obj #[
+                ("code", .str "external_mcp_error"),
+                ("message", .str errMsg),
+                ("retryable", .bool true)
+              ])
+            ]
+            let res := JVal.obj #[
+              ("isError", .bool true),
+              ("structuredContent", errPayload),
+              ("content", .arr #[.obj #[("type", .str "text"), ("text", .str (renderCompact errPayload))]])
+            ]
+            return jsonRpcSuccess idVal res
+      let isMutating :=
+        OrbBin.McpCatalog.isMutatingControlTool toolName ||
+        (arguments.field? "idempotency_key").isSome
       let callBody := JVal.obj #[("name", .str toolName), ("arguments", arguments)]
-      let reply ← match (← c.request "/api/mcp/call" (some callBody) (some cancelled)) with
-        | .ok r => pure r
-        | .error message =>
-          pure <| JVal.obj #[
-            ("ok", .bool false),
-            ("error", .obj #[
-              ("code", .str "transport_unavailable"),
-              ("message", .str message),
-              ("accepted", .str "unknown"),
-              ("retryable", .bool false)
+      let (transportDropped, reply) ← match (← c.requestDetailed "/api/mcp/call" (some callBody) (some cancelled)) with
+        | .ok r => pure (false, r)
+        | .preflightFailed message =>
+          let errFields : Array (String × JVal) :=
+            if isMutating then
+              #[("code", .str "preflight_failed"), ("message", .str message), ("accepted", .str "no"), ("retryable", .bool true)]
+            else
+              #[("code", .str "preflight_failed"), ("message", .str message), ("retryable", .bool true)]
+          pure (false, JVal.obj #[("ok", .bool false), ("error", .obj errFields)])
+        | .httpRejected status message respJson? =>
+          let parsedObj? := match respJson? with | some (.obj _) => respJson? | _ => none
+          let explicitAccTag : UInt8 := match parsedObj? with | some j => parseAcceptedTag j | none => 0
+          let isAmbiguous5xx := status ≥ 500 && explicitAccTag != 2
+          if isAmbiguous5xx && isMutating then
+            let msg := (((parsedObj?.bind (·.field? "error")) >>= (·.fieldStr? "message"))).getD message
+            pure (true, JVal.obj #[
+              ("ok", .bool false),
+              ("error", .obj #[
+                ("code", .str "transport_unavailable"),
+                ("message", .str msg),
+                ("accepted", .str "unknown"),
+                ("retryable", .bool false)
+              ])
             ])
-          ]
-      let failed := (reply.fieldBool? "ok") != some true
-      let payload ←
-        if failed then
+          else if let some j := parsedObj? then
+            let errBase := match j.field? "error" with
+              | some (.obj fs) => JVal.obj fs
+              | _ => JVal.obj #[("code", .str s!"http_{status}"), ("message", .str message), ("retryable", .bool (status ≥ 500))]
+            let errFixed :=
+              if isMutating && explicitAccTag == 0 then
+                errBase.setField "accepted" (.str "no")
+              else
+                errBase
+            pure (false, (j.setField "ok" (.bool false)).setField "error" errFixed)
+          else
+            let errFields : Array (String × JVal) :=
+              if isMutating then
+                #[("code", .str s!"http_{status}"), ("message", .str message), ("accepted", .str "no"), ("retryable", .bool false)]
+              else
+                #[("code", .str s!"http_{status}"), ("message", .str message), ("retryable", .bool (status ≥ 500))]
+            pure (false, JVal.obj #[("ok", .bool false), ("error", .obj errFields)])
+        | .transportUncertain message =>
+          if isMutating then
+            pure (true, JVal.obj #[
+              ("ok", .bool false),
+              ("error", .obj #[
+                ("code", .str "transport_unavailable"),
+                ("message", .str message),
+                ("accepted", .str "unknown"),
+                ("retryable", .bool false)
+              ])
+            ])
+          else
+            pure (false, JVal.obj #[
+              ("ok", .bool false),
+              ("error", .obj #[
+                ("code", .str "transport_unavailable"),
+                ("message", .str message),
+                ("retryable", .bool true)
+              ])
+            ])
+      let rawFailed := (reply.fieldBool? "ok") != some true
+      let rawPayload ←
+        if rawFailed then
           pure <| JVal.obj #[("error", reply.fieldOrNull "error")]
         else
           let dir ← c.secretsDir
           deliverSecretIn dir (reply.fieldOrNull "result")
+      let normalized :=
+        if toolName == "get_action" || toolName == "wait_actions" || toolName == "get_fleet_sweep" ||
+           isActionReceiptLike rawPayload || (transportDropped && isMutating) then
+          normalizeWaitActionsResult rawPayload (transportDropped && isMutating)
+        else
+          rawPayload
       let structured :=
-        match payload with
-        | .obj _ => payload
+        match normalized with
+        | .obj _ => normalized
         | other => JVal.obj #[("data", other)]
+      let failed :=
+        rawFailed ||
+        (structured.fieldStr? "action_outcome") == some "reconciliation_required" ||
+        ((isActionReceiptLike structured) && (structured.fieldStr? "action_outcome") == some "rejected")
       let res := JVal.obj #[
         ("isError", .bool failed),
         ("structuredContent", structured),
@@ -1267,6 +1560,7 @@ def runMain (args : List String) : IO UInt32 := do
       ]
       IO.println (renderCompact summary)
       return 0
+  loadConfiguredStdioMcps client.stdioRegistry
   -- Background 60s credential renewal loop while stdio server is active
   let stopRenew ← IO.mkRef false
   let _ ← IO.asTask do
@@ -1276,8 +1570,11 @@ def runMain (args : List String) : IO UInt32 := do
       if !(← stopRenew.get) then
         if let .error _ ← client.getToken then
           IO.eprintln "sandboxed-mcp: session renewal unavailable; retrying"
-  serveStdio (fun req cancelRef => client.handleRpc req cancelRef)
-  stopRenew.set true
+  try
+    serveStdio (fun req cancelRef => client.handleRpc req cancelRef)
+  finally
+    stopRenew.set true
+    client.shutdown
   return 0
 
 end OrbBin.SandboxedMcp

@@ -48,42 +48,37 @@ LEAN_EXPORT lean_obj_res orb_bin_peercred(int32_t fd, lean_obj_arg w) {
     return lean_io_result_mk_ok(ba);
 }
 
-/* Bits: 0=exists, 1=is_dir, 2=is_reg, 3=is_symlink, 4=owned_by_euid; bits 8..19 = mode & 07777 */
+/* Bits: 0=exists, 1=is_dir, 2=is_reg, 3=is_symlink, 4=owned_by_euid, 5=owned_by_root; bits 8..19 = mode & 07777 */
 LEAN_EXPORT lean_obj_res orb_bin_lstat_info(b_lean_obj_arg path, lean_obj_arg w) {
-    (void)w;
-    struct stat st;
+    (void)w; struct stat st;
     if (lstat(lean_string_cstr(path), &st) != 0) return lean_io_result_mk_ok(lean_box_uint32(0u));
     uint32_t flags = 1u | (S_ISDIR(st.st_mode) ? 2u : 0u) | (S_ISREG(st.st_mode) ? 4u : 0u)
-                   | (S_ISLNK(st.st_mode) ? 8u : 0u) | (st.st_uid == geteuid() ? 16u : 0u)
-                   | (((uint32_t)(st.st_mode & 07777)) << 8);
+        | (S_ISLNK(st.st_mode) ? 8u : 0u) | (st.st_uid == geteuid() ? 16u : 0u)
+        | (st.st_uid == 0 ? 32u : 0u) | (((uint32_t)(st.st_mode & 07777)) << 8);
     return lean_io_result_mk_ok(lean_box_uint32(flags));
+}
+
+LEAN_EXPORT lean_obj_res orb_bin_stat_identity(b_lean_obj_arg path, uint8_t follow, lean_obj_arg w) {
+    (void)w; struct stat st;
+    int rc = follow ? stat(lean_string_cstr(path), &st) : lstat(lean_string_cstr(path), &st);
+    lean_object *ba = lean_alloc_sarray(1, 44, 44);
+    uint8_t *p = lean_sarray_cptr(ba); memset(p, 0, 44);
+    if (rc == 0) {
+        uint64_t dev = (uint64_t)st.st_dev, ino = (uint64_t)st.st_ino, sz = (uint64_t)st.st_size, mt = (uint64_t)st.st_mtime;
+        uint32_t uid = (uint32_t)st.st_uid, gid = (uint32_t)st.st_gid, mode = (uint32_t)st.st_mode;
+        memcpy(p, &dev, 8); memcpy(p + 8, &ino, 8); memcpy(p + 16, &sz, 8); memcpy(p + 24, &mt, 8);
+        memcpy(p + 32, &uid, 4); memcpy(p + 36, &gid, 4); memcpy(p + 40, &mode, 4);
+    }
+    return lean_io_result_mk_ok(ba);
 }
 
 LEAN_EXPORT lean_obj_res orb_bin_geteuid(lean_obj_arg w) { (void)w; return lean_io_result_mk_ok(lean_box_uint32((uint32_t)geteuid())); }
 LEAN_EXPORT lean_obj_res orb_bin_getpid(lean_obj_arg w) { (void)w; return lean_io_result_mk_ok(lean_box_uint32((uint32_t)getpid())); }
 
-LEAN_EXPORT lean_obj_res orb_bin_shutdown_wr(int32_t fd, lean_obj_arg w) {
-    (void)w;
-    return lean_io_result_mk_ok(lean_box_uint32(shutdown(fd, SHUT_WR) == 0 ? 0u : 1u));
-}
-
-LEAN_EXPORT lean_obj_res orb_bin_kill_sig(int64_t pid, int32_t sig, lean_obj_arg w) {
-    (void)w;
-    return lean_io_result_mk_ok(lean_box_uint32(kill((pid_t)pid, (int)sig) == 0 ? 0u : (uint32_t)errno));
-}
-
-LEAN_EXPORT lean_obj_res orb_bin_now_epoch(lean_obj_arg w) {
-    (void)w;
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return lean_io_result_mk_ok(lean_box_uint64((uint64_t)ts.tv_sec));
-}
-
-LEAN_EXPORT lean_obj_res orb_bin_hostname(lean_obj_arg w) {
-    (void)w;
-    char buf[256] = {0};
-    return lean_io_result_mk_ok(lean_mk_string(gethostname(buf, sizeof(buf) - 1) == 0 ? buf : "localhost"));
-}
+LEAN_EXPORT lean_obj_res orb_bin_shutdown_wr(int32_t fd, lean_obj_arg w) { (void)w; return lean_io_result_mk_ok(lean_box_uint32(shutdown(fd, SHUT_WR) == 0 ? 0u : 1u)); }
+LEAN_EXPORT lean_obj_res orb_bin_kill_sig(int64_t pid, int32_t sig, lean_obj_arg w) { (void)w; return lean_io_result_mk_ok(lean_box_uint32(kill((pid_t)pid, (int)sig) == 0 ? 0u : (uint32_t)errno)); }
+LEAN_EXPORT lean_obj_res orb_bin_now_epoch(lean_obj_arg w) { (void)w; struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); return lean_io_result_mk_ok(lean_box_uint64((uint64_t)ts.tv_sec)); }
+LEAN_EXPORT lean_obj_res orb_bin_hostname(lean_obj_arg w) { (void)w; char buf[256] = {0}; return lean_io_result_mk_ok(lean_mk_string(gethostname(buf, sizeof(buf) - 1) == 0 ? buf : "localhost")); }
 
 LEAN_EXPORT lean_obj_res orb_bin_read_fd_chunk(int32_t fd, size_t max_bytes, lean_obj_arg w) {
     (void)w;
@@ -123,74 +118,69 @@ LEAN_EXPORT lean_obj_res orb_bin_flock_exclusive_nb(b_lean_obj_arg path, lean_ob
 }
 
 LEAN_EXPORT lean_obj_res orb_bin_install_term_trap(lean_obj_arg w) {
-    (void)w;
-    g_term_received = 0;
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = orb_bin_sig_handler;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGTERM, &sa, NULL);
-    sigaction(SIGINT, &sa, NULL);
-    signal(SIGPIPE, SIG_IGN);
+    (void)w; g_term_received = 0; struct sigaction sa; memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = orb_bin_sig_handler; sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); signal(SIGPIPE, SIG_IGN);
     return lean_io_result_mk_ok(lean_box(0));
 }
-
-LEAN_EXPORT lean_obj_res orb_bin_poll_term_trap(lean_obj_arg w) {
-    (void)w;
-    return lean_io_result_mk_ok(lean_box_uint32(g_term_received ? 1u : 0u));
-}
+LEAN_EXPORT lean_obj_res orb_bin_poll_term_trap(lean_obj_arg w) { (void)w; return lean_io_result_mk_ok(lean_box_uint32(g_term_received ? 1u : 0u)); }
 
 LEAN_EXPORT lean_obj_res orb_bin_spawn_pgrp(
     b_lean_obj_arg prog, b_lean_obj_arg args_arr, b_lean_obj_arg env_arr, uint8_t pipe_stdin, lean_obj_arg w
 ) {
     (void)w;
-    uint8_t use_pipe = pipe_stdin & 1u, null_out = (pipe_stdin >> 1) & 1u;
-    int in_pipe[2] = {-1, -1};
-    if (use_pipe && pipe(in_pipe) != 0)
+    uint8_t use_pipe = pipe_stdin & 1u, null_out = (pipe_stdin >> 1) & 1u, use_out_pipe = (pipe_stdin >> 2) & 1u;
+    int in_pipe[2] = {-1, -1}, out_pipe[2] = {-1, -1};
+    if ((use_pipe && pipe(in_pipe) != 0) || (use_out_pipe && pipe(out_pipe) != 0)) {
+        if (in_pipe[0] >= 0) { close(in_pipe[0]); close(in_pipe[1]); }
         return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("pipe() failed")));
+    }
     if (use_pipe) fcntl(in_pipe[1], F_SETFD, FD_CLOEXEC);
+    if (use_out_pipe) fcntl(out_pipe[0], F_SETFD, FD_CLOEXEC);
     size_t argc = lean_array_size(args_arr), envc = lean_array_size(env_arr);
-    char **argv = (char **)calloc(argc + 2, sizeof(char *));
-    char **envp = (char **)calloc(envc + 1, sizeof(char *));
+    char **argv = (char **)calloc(argc + 2, sizeof(char *)), **envp = (char **)calloc(envc + 1, sizeof(char *));
     if (!argv || !envp) {
         free(argv); free(envp);
         if (use_pipe) { close(in_pipe[0]); close(in_pipe[1]); }
+        if (use_out_pipe) { close(out_pipe[0]); close(out_pipe[1]); }
         return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("calloc failed")));
     }
     argv[0] = (char *)lean_string_cstr(prog);
     for (size_t i = 0; i < argc; i++) argv[i + 1] = (char *)lean_string_cstr(lean_array_get_core(args_arr, i));
     for (size_t i = 0; i < envc; i++) envp[i] = (char *)lean_string_cstr(lean_array_get_core(env_arr, i));
-
     pid_t pid = fork();
     if (pid < 0) {
         free(argv); free(envp);
         if (use_pipe) { close(in_pipe[0]); close(in_pipe[1]); }
+        if (use_out_pipe) { close(out_pipe[0]); close(out_pipe[1]); }
         return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("fork() failed")));
     }
     if (pid == 0) {
         setpgid(0, 0);
-        if (!null_out && isatty(0) == 1) {
-            void (*prev)(int) = signal(SIGTTOU, SIG_IGN);
-            tcsetpgrp(0, getpgrp());
-            signal(SIGTTOU, prev);
+        if (!null_out && !use_out_pipe && isatty(0) == 1) {
+            void (*prev)(int) = signal(SIGTTOU, SIG_IGN); tcsetpgrp(0, getpgrp()); signal(SIGTTOU, prev);
         }
         if (use_pipe) { close(in_pipe[1]); dup2(in_pipe[0], 0); if (in_pipe[0] != 0) close(in_pipe[0]); }
-        if (null_out) { int dn = open("/dev/null", O_RDWR); if (dn >= 0) { if (!use_pipe) dup2(dn, 0); dup2(dn, 1); dup2(dn, 2); if (dn > 2) close(dn); } }
+        if (use_out_pipe) { close(out_pipe[0]); dup2(out_pipe[1], 1); if (out_pipe[1] != 1) close(out_pipe[1]); }
+        if (null_out) { int dn = open("/dev/null", O_RDWR); if (dn >= 0) { if (!use_pipe) dup2(dn, 0); if (!use_out_pipe) dup2(dn, 1); dup2(dn, 2); if (dn > 2) close(dn); } }
         signal(SIGTERM, SIG_DFL); signal(SIGINT, SIG_DFL); signal(SIGPIPE, SIG_DFL);
-        extern char **environ;
-        environ = envp;
-        execvp(argv[0], argv);
-        _exit(127);
+        extern char **environ; environ = envp; execvp(argv[0], argv); _exit(127);
     }
-    setpgid(pid, pid);
-    free(argv); free(envp);
-    int32_t write_fd = -1;
+    setpgid(pid, pid); free(argv); free(envp);
+    int32_t write_fd = -1, read_fd = -1;
     if (use_pipe) { close(in_pipe[0]); write_fd = (int32_t)in_pipe[1]; }
-    lean_object *res = lean_alloc_sarray(1, 12, 12);
-    uint8_t *rp = lean_sarray_cptr(res);
-    int64_t pid64 = (int64_t)pid;
-    memcpy(rp, &pid64, 8); memcpy(rp + 8, &write_fd, 4);
+    if (use_out_pipe) { close(out_pipe[1]); read_fd = (int32_t)out_pipe[0]; }
+    lean_object *res = lean_alloc_sarray(1, 16, 16);
+    uint8_t *rp = lean_sarray_cptr(res); int64_t pid64 = (int64_t)pid;
+    memcpy(rp, &pid64, 8); memcpy(rp + 8, &write_fd, 4); memcpy(rp + 12, &read_fd, 4);
     return lean_io_result_mk_ok(res);
+}
+
+LEAN_EXPORT lean_obj_res orb_bin_waitpid_block(int64_t pid, lean_obj_arg w) {
+    (void)w; int status = 0; pid_t rc;
+    do { rc = waitpid((pid_t)pid, &status, 0); } while (rc < 0 && errno == EINTR);
+    if (rc < 0) return lean_io_result_mk_ok(lean_box_uint32(1u));
+    return lean_io_result_mk_ok(lean_box_uint32(WIFEXITED(status) ? (uint32_t)WEXITSTATUS(status) : (WIFSIGNALED(status) ? (uint32_t)(128 + WTERMSIG(status)) : 1u)));
 }
 
 LEAN_EXPORT lean_obj_res orb_bin_waitpid_wnohang(int64_t pid, lean_obj_arg w) {
