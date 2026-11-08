@@ -27,6 +27,7 @@ open OrbCore.Cyber
 open OrbCore.Skills
 open OrbCore.QueueCont
 open OrbCore.R7Core
+open OrbCore.TelemetryAndVoice
 open OrbCore.Control
 open OrbCore.HostTests
 open OrbCore.HarnessSessionRegistry
@@ -3774,6 +3775,8 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
   let seqRef ← IO.mkRef (1 : UInt64)
   let bunkerRef ← IO.mkRef (0 : UInt8)
+  let telSink ← newTelemetrySink
+  let voiceSlots ← newVoiceRelaySlots
   let app : CoreAppState := {
     cfg := { prodValid with workingDir := muRoot, usersJson := "" }
     store := store
@@ -3785,6 +3788,8 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
     bunkerStateRef? := some bunkerRef
     managedStore? := some mStore
     bootstrapAdminId := bootAdminId
+    telemetrySink? := some telSink
+    voiceSlots? := some voiceSlots
     proxyMockTransport? := some (fun tgt => do
       let body := s!"\{\"id\":\"resp-1\",\"acct\":{jsonEscape tgt.accountId},\"usage\":\{\"input_tokens\":10000,\"output_tokens\":10000}}"
       return .ok {
@@ -4007,6 +4012,159 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (admVmsBody.splitOn bobVmId).length != 1 ||
      admDelBobVmSt != 404 || bobDelBobVmSt != 200 then
     return (← fail s!"managed VM multi-user isolation/prefs/cap failed: alCap={alVmCapSt} bobVm={bobVmAutoSt}:{bobVmAutoBody} admVms={admVmsBody} admDel={admDelBobVmSt} bobDel={bobDelBobVmSt}")
+
+  -- 7. Multi-user Opt-In Usage Telemetry & Speaker-Attributed Voice Relay (`/api/usage-telemetry/*`, `/api/voice/transcribe`)
+  -- 7a. `scrubSecrets` covers API keys, hub tokens, GitHub tokens, Bearer headers, and password pairs without mangling prose
+  if scrubSecrets "use sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv to call" != "use [REDACTED] to call" ||
+     scrubSecrets "token tl_live_0123456789abcdef please" != "token [REDACTED] please" ||
+     scrubSecrets "curl -H 'Authorization: Bearer abc.def-ghi_jklmnopqrstu'" != "curl -H 'Authorization: Bearer [REDACTED]'" ||
+     scrubSecrets "password: hunter2hunter2" != "password: [REDACTED]" ||
+     scrubSecrets "fix the token refresh bug in auth.rs" != "fix the token refresh bug in auth.rs" then
+    return (← fail "scrubSecrets fixture regression")
+
+  -- 7b. Non-admin `member` (`alice`) cannot mutate `PUT /api/usage-telemetry/config` (`403`), and `community` namespace is rejected (`400`)
+  let (alTelCfgSt, _, _) ← sendReq "PUT" "/api/usage-telemetry/config" aliceTok
+    "{\"enabled\":true,\"namespace\":\"th0rgal\",\"token\":\"tl_live_evil\"}"
+  let (badNsSt, _, _) ← sendReq "PUT" "/api/usage-telemetry/config" adminTok
+    "{\"enabled\":true,\"namespace\":\"community\",\"token\":\"tl_live_0123456789abcdef\"}"
+  if alTelCfgSt != 403 || badNsSt != 400 then
+    return (← fail s!"telemetry config RBAC/namespace guard failed: alCfg={alTelCfgSt} badNs={badNsSt}")
+
+  -- 7c. Admin configures loopback hub (`prompts_enabled=true`), token is encrypted at rest and never returned in `GET /api/usage-telemetry`
+  let .ok (mockHubFd, mockHubPort) ← tcpListen "127.0.0.1" 0 8
+    | return (← fail "tcpListen mock telemetry hub failed")
+  let hubCfgBody :=
+    s!"\{\"enabled\":true,\"prompts_enabled\":true,\"hub_url\":\"http://127.0.0.1:{mockHubPort}\",\"namespace\":\"th0rgal\",\"token\":\"tl_live_secret_hub_token_1234\"}"
+  let (admTelCfgSt, admTelCfgBody, _) ← sendReq "PUT" "/api/usage-telemetry/config" adminTok hubCfgBody
+  let (getTelSt, getTelBody, _) ← sendReq "GET" "/api/usage-telemetry" aliceTok ""
+  let rawSavedTelCfg ← try IO.FS.readFile (System.FilePath.mk store.rootDir / "telemetry_config.json") catch _ => pure ""
+  if admTelCfgSt != 200 || getTelSt != 200 ||
+     (admTelCfgBody.splitOn "\"active\":true").length < 2 ||
+     (getTelBody.splitOn "tl_live_secret_hub_token_1234").length != 1 ||
+     (rawSavedTelCfg.splitOn "tl_live_secret_hub_token_1234").length != 1 ||
+     (rawSavedTelCfg.splitOn "\"v1:").length < 2 then
+    discard <| closeFd mockHubFd
+    return (← fail s!"telemetry config encryption/redaction failed: put={admTelCfgSt}:{admTelCfgBody} saved={rawSavedTelCfg}")
+
+  -- 7d. `alice` sends a client event attempting to spoof `"username":"admin"` and `"user_id":"spoof"`:
+  --     Core strips the spoofed fields and stamps authoritative `"username":"alice"` + `"user_id":aliceId`!
+  --     Also `alice` (`member`) sending `POST /api/control/message` MUST NOT emit `orb.prompt.v1`, whereas `admin` DOES!
+  let (alEvPostSt, alEvPostBody, _) ← sendReq "POST" "/api/usage-telemetry/events" aliceTok
+    "{\"events\":[{\"schema\":\"orb.page.v1\",\"event_id\":\"evt-al-1\",\"client\":\"desktop\",\"screen\":\"mission\",\"surface\":\"screen\",\"dwell_ms\":1200,\"username\":\"admin\",\"user_id\":\"spoof-admin\",\"secret\":\"drop-me\"}]}"
+  let (admEvPostSt, _, _) ← sendReq "POST" "/api/usage-telemetry/events" adminTok
+    "{\"events\":[{\"schema\":\"orb.action.v1\",\"event_id\":\"evt-adm-1\",\"client\":\"ios\",\"action\":\"fork\",\"count\":1}]}"
+  let _ ← sendReq "POST" "/api/control/message" aliceTok
+    s!"\{\"mission_id\":{jsonEscape alMisId},\"content\":\"Alice private prompt sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv\"}"
+  let _ ← sendReq "POST" "/api/control/message" adminTok
+    "{\"mission_id\":\"m-legacy-boot\",\"content\":\"Admin prompt with token tl_live_9999888877776666\"}"
+  if alEvPostSt != 202 || admEvPostSt != 202 || (alEvPostBody.splitOn "\"accepted\":1").length < 2 then
+    discard <| closeFd mockHubFd
+    return (← fail s!"POST /api/usage-telemetry/events failed: al={alEvPostSt}:{alEvPostBody} adm={admEvPostSt}")
+
+  let findHdr (hdrs : Array (String × String)) (name : String) : String :=
+    ((hdrs.find? fun (k, _) => k.toLower == name.toLower).map (·.2)).getD ""
+  let hubServerTask ← IO.asTask (prio := .dedicated) do
+    match ← tcpAcceptPoll mockHubFd 5000 with
+    | .error _ => return ""
+    | .ok cfd =>
+      let reqRes ← readCoreHttpRequestFromFd cfd 5000
+      let respBytes := encodeCoreHttpResponse (jsonResponse 200 "{\"accepted\":3}")
+      discard <| writeAll cfd respBytes false
+      discard <| closeFd cfd
+      match reqRes with
+      | .error _ => return ""
+      | .ok r =>
+        let authH := findHdr r.headers "authorization"
+        let bStr := (String.fromUTF8? r.bodySlice.toByteArray).getD ""
+        return s!"{r.path}\n{authH}\n{bStr}"
+  let flushRes ← flushTelemetryOnce telSink nowSec
+  let hubWire := match hubServerTask.get with
+    | .ok s => s
+    | .error _ => ""
+  discard <| closeFd mockHubFd
+  let flushedCount := match flushRes with
+    | .ok n => n
+    | .error _ => 0
+  if flushedCount != 3 ||
+     (hubWire.splitOn "/v2/ns/th0rgal/ingest").length < 2 ||
+     (hubWire.splitOn "Bearer tl_live_secret_hub_token_1234").length < 2 ||
+     (hubWire.splitOn "\"username\":\"alice\"").length < 2 ||
+     (hubWire.splitOn s!"\"user_id\":{jsonEscape aliceId}").length < 2 ||
+     (hubWire.splitOn "spoof-admin").length != 1 ||
+     (hubWire.splitOn "drop-me").length != 1 ||
+     (hubWire.splitOn "\"quick_close\":true").length < 2 ||
+     (hubWire.splitOn "Alice private prompt").length != 1 ||
+     (hubWire.splitOn "Admin prompt with token [REDACTED]").length < 2 then
+    return (← fail s!"telemetry hub flush attribution/privacy mismatch: res={reprStr flushRes} wire={hubWire}")
+
+  -- 7e. `POST /api/voice/transcribe?language=fr` validates WAV and stamps `X-Spark-Speaker-Id: bob` + `X-Orb-Username: bob` + `X-Orb-User-Id`
+  let .ok (mockAsrFd, mockAsrPort) ← tcpListen "127.0.0.1" 0 8
+    | return (← fail "tcpListen mock ASR failed")
+  let appVoice : CoreAppState := { app with voiceEndpointOverride? := some s!"http://127.0.0.1:{mockAsrPort}/v1/audio/transcriptions" }
+  let mkValidWav (pcmLen : Nat) : ByteArray := Id.run do
+    let total := 44 + pcmLen
+    let pushU16 (acc : ByteArray) (v : Nat) : ByteArray :=
+      acc.push (v &&& 0xFF).toUInt8 |>.push ((v >>> 8) &&& 0xFF).toUInt8
+    let pushU32 (acc : ByteArray) (v : Nat) : ByteArray :=
+      acc.push (v &&& 0xFF).toUInt8 |>.push ((v >>> 8) &&& 0xFF).toUInt8
+         |>.push ((v >>> 16) &&& 0xFF).toUInt8 |>.push ((v >>> 24) &&& 0xFF).toUInt8
+    let mut b := "RIFF".toUTF8
+    b := pushU32 b (total - 8)
+    b := b ++ "WAVEfmt ".toUTF8
+    b := pushU32 b 16
+    b := pushU16 b 1
+    b := pushU16 b 1
+    b := pushU32 b 16000
+    b := pushU32 b 32000
+    b := pushU16 b 2
+    b := pushU16 b 16
+    b := b ++ "data".toUTF8
+    b := pushU32 b pcmLen
+    for _ in [0:pcmLen] do
+      b := b.push 0
+    return b
+  let validWav := mkValidWav 3200
+  -- Reject bad WAV (`400`) and unsupported language (`400`) before hitting upstream
+  let (badLangSt, _, _) ← sendReq "POST" "/api/voice/transcribe?language=zz" bobTok "RIFF"
+  let (badWavSt, _, _) ← sendReq "POST" "/api/voice/transcribe?language=fr" bobTok "not-a-wav"
+  if badLangSt != 400 || badWavSt != 400 then
+    discard <| closeFd mockAsrFd
+    return (← fail s!"voice validation failed: lang={badLangSt} wav={badWavSt}")
+
+  let asrServerTask ← IO.asTask (prio := .dedicated) do
+    match ← tcpAcceptPoll mockAsrFd 5000 with
+    | .error _ => return ""
+    | .ok cfd =>
+      let reqRes ← readCoreHttpRequestFromFd cfd 5000
+      let respBytes := encodeCoreHttpResponse (jsonResponse 200 "{\"text\":\"  bonjour de bob  \"}")
+      discard <| writeAll cfd respBytes false
+      discard <| closeFd cfd
+      match reqRes with
+      | .error _ => return ""
+      | .ok r =>
+        let spk := findHdr r.headers "x-spark-speaker-id"
+        let src := findHdr r.headers "x-spark-audio-source"
+        let uHdr := findHdr r.headers "x-orb-username"
+        let uidHdr := findHdr r.headers "x-orb-user-id"
+        let prefixStr := (String.fromUTF8? (r.bodySlice.toByteArray.extract 0 (Nat.min 512 r.bodySlice.len))).getD ""
+        return s!"spk={spk}|src={src}|u={uHdr}|uid={uidHdr}|body={prefixStr}"
+  let voiceHead :=
+    s!"POST /api/voice/transcribe?language=fr HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bobTok}\r\nContent-Type: audio/wav\r\nContent-Length: {validWav.size}\r\n\r\n".toUTF8
+  let .ok voiceReq := parseRequest (voiceHead ++ validWav) none
+    | do discard <| closeFd mockAsrFd; return (← fail "parse voice request failed")
+  let .ok voiceResp ← dispatchCoreRequest appVoice voiceReq nowSec
+    | do discard <| closeFd mockAsrFd; return (← fail "dispatch voice request failed")
+  let voiceRespBody := (String.fromUTF8? voiceResp.body).getD ""
+  let asrWire := match asrServerTask.get with
+    | .ok s => s
+    | .error _ => ""
+  discard <| closeFd mockAsrFd
+  if voiceResp.status != 200 ||
+     voiceRespBody != "{\"text\":\"bonjour de bob\"}" ||
+     (asrWire.splitOn "spk=bob|src=orb-voice|u=bob|").length < 2 ||
+     (asrWire.splitOn s!"uid={bobId}|").length < 2 ||
+     (asrWire.splitOn "name=\"speaker_id\"\r\n\r\nbob").length < 2 then
+    return (← fail s!"voice speaker attribution relay mismatch: st={voiceResp.status} resp={voiceRespBody} wire={asrWire}")
 
   closeManagedComputeStore mStore
   closeCoreStore store
