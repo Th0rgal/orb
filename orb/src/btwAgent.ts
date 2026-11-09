@@ -701,6 +701,7 @@ export async function queueBtwFollowUp(
  * continues, newest first. */
 const chains=new Map<string,Promise<string[]>>();
 const BTW_EVENT_TYPES='user_message,assistant_message,assistant_message_canonical,text_delta';
+const BTW_TERMINAL_EVENT_TYPES='user_message,assistant_message,assistant_message_canonical';
 export function btwThreadChain(parent:string):Promise<string[]>{
  const key=`${connectionVersion()}:${parent}`;
  let chain=chains.get(key);
@@ -1675,6 +1676,10 @@ export async function reconcileBtwServerHistory(
  );
  if (!valid.length) return finalize({ history: localHistory });
  const sorted = [...valid].sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+ // The newest thread is the one with the latest activity: each /btw question
+ // re-dispatches a job on the same mission, so an old thread can be the live one.
+ const latest = [...sorted].sort((a, b) => btwActivity(a).localeCompare(btwActivity(b))).at(-1);
+ const latestId = latest?.id;
  // Load newest/active threads first with bounded concurrency and memoize
  // terminal threads so older multi-page /btw logs never delay live recovery.
  const byId = new Map<string, Omit<ParsedBtwThread, 'stamp'>>();
@@ -1690,6 +1695,7 @@ export async function reconcileBtwServerHistory(
     const m = prioritized[cursor++];
     if (signal?.aborted || connectionVersion() !== version) return;
     const live = ACTIVE.includes(m.status);
+    const keepLiveCache = live || m.id === latestId;
     const cacheKey = `${version}:${m.id}`,
      stamp = `${btwActivity(m)}\u0000${m.status}`;
     if (!live) {
@@ -1701,25 +1707,33 @@ export async function reconcileBtwServerHistory(
     } else {
      terminalThreadCache.delete(cacheKey);
     }
-    // History filtered to /btw-relevant types: skips tool_call/tool_result/thinking/text_op
-    // while keeping text_delta so repairedFinal still repairs truncated final answers.
+    // History filtered to /btw-relevant types: live or latest resumable threads
+    // retain incremental event caches (keeping text_delta so repairedFinal repairs
+    // truncated final answers); older historical terminal threads fetch only
+    // conversational message rows without retaining raw event maps (matching mobile #1605).
     let events: StoredEvent[];
     try {
-     let known = liveThreadEventCache.get(cacheKey) ?? new Map<number, StoredEvent>();
-     const maxKnown = maxDurableBtwSequence(known);
-     if (maxKnown !== undefined) {
-      const delta = await getMissionEvents(m.id, { view: 'history', types: BTW_EVENT_TYPES, since: maxKnown });
-      if (delta.length && Math.max(...delta.map(e => e.sequence)) < maxKnown) {
-       known = new Map<number, StoredEvent>();
-       for (const ev of await getMissionEvents(m.id, { view: 'history', types: BTW_EVENT_TYPES })) upsertBtwStoredRow(known, ev);
-      } else {
-       for (const ev of delta) upsertBtwStoredRow(known, ev);
-      }
+     const cachedKnown = liveThreadEventCache.get(cacheKey);
+     if (!keepLiveCache && !cachedKnown) {
+      events = await getMissionEvents(m.id, { view: 'history', types: BTW_TERMINAL_EVENT_TYPES });
      } else {
-      for (const ev of await getMissionEvents(m.id, { view: 'history', types: BTW_EVENT_TYPES })) upsertBtwStoredRow(known, ev);
+      let known = cachedKnown ?? new Map<number, StoredEvent>();
+      const maxKnown = maxDurableBtwSequence(known);
+      const types = live ? BTW_EVENT_TYPES : BTW_TERMINAL_EVENT_TYPES;
+      if (maxKnown !== undefined) {
+       const delta = await getMissionEvents(m.id, { view: 'history', types, since: maxKnown });
+       if (delta.length && Math.max(...delta.map(e => e.sequence)) < maxKnown) {
+        known = new Map<number, StoredEvent>();
+        for (const ev of await getMissionEvents(m.id, { view: 'history', types })) upsertBtwStoredRow(known, ev);
+       } else {
+        for (const ev of delta) upsertBtwStoredRow(known, ev);
+       }
+      } else {
+       for (const ev of await getMissionEvents(m.id, { view: 'history', types })) upsertBtwStoredRow(known, ev);
+      }
+      events = [...known.values()].sort((a, b) => a.sequence - b.sequence);
+      setBounded(liveThreadEventCache, cacheKey, known, 64);
      }
-     events = [...known.values()].sort((a, b) => a.sequence - b.sequence);
-     setBounded(liveThreadEventCache, cacheKey, known, 64);
     } catch {
      authoritative = false;
      continue;
@@ -1742,9 +1756,6 @@ export async function reconcileBtwServerHistory(
   serverTurns.push(...parsed.turns);
   if (parsed.active) latestActive = parsed.active;
  }
- // The newest thread is the one with the latest activity: each /btw question
- // re-dispatches a job on the same mission, so an old thread can be the live one.
- const latest = [...sorted].sort((a, b) => btwActivity(a).localeCompare(btwActivity(b))).at(-1);
  let existing = btwSession(parent);
  // A session saved as running whose thread Core reports finished (or that is
  // no longer listed on an authoritative read) is stale: persist active=false

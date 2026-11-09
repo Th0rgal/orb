@@ -899,5 +899,157 @@ it('clears a persisted pending error banner when server reconciliation returns t
  await waitFor(()=>expect(screen.queryByText(/idempotency_conflict/)).toBeNull());
 });
 
+it('preserves and reopens /btw automatically when switching across mission tabs and top-level pages unless explicitly closed',async()=>{
+ const {Show}=await import('solid-js');
+ const {FilePanelProvider,FilePanelButton}=await import('../src/FilePanel');
+ const {readSideQuestion,sideQuestionKey}=await import('../src/sideQuestionStorage');
+ vi.stubGlobal('fetch',vi.fn(async()=>response([{type:'done',answer:'Mission A side answer.'}])));
+
+ const missionRecord=(id:string)=>({id,project:'orb',status:'active' as const,title:id,history:[],created_at:'',updated_at:''});
+ const [missionOpen,setMissionOpen]=createSignal<string|null>('mission-a');
+ // Simulate `fileScopeMission()` arriving asynchronously after `missionOpen` on archived/project missions:
+ const [scopeMission,setScopeMission]=createSignal<ReturnType<typeof missionRecord>|undefined>(undefined);
+
+ const view=render(()=>(
+  <div class="app">
+   <FilePanelProvider missionOpen={missionOpen()} scope={{mission:scopeMission()}}>
+    <FilePanelButton/>
+    <Show when={missionOpen()??undefined} keyed>
+     {id=><SideQuestions mission={id} items={[]} ref={()=>{}} onTransfer={()=>{}}/>}
+    </Show>
+   </FilePanelProvider>
+  </div>
+ ));
+ const appEl=view.container.querySelector('.app') as HTMLElement;
+ const sideAside=()=>view.container.querySelector('.btw-sidebar') as HTMLElement;
+
+ // Open /btw on mission-a before scope.mission finishes hydrating:
+ fireEvent.click(screen.getByRole('button',{name:'Side question'}));
+ expect(await screen.findByPlaceholderText('Ask a side question…')).toBeTruthy();
+ expect(appEl.dataset.filesOpen).toBe('true');
+ expect(sideAside().style.display).not.toBe('none');
+
+ // Late `fileScopeMission()` resolution for the SAME mission must not close `/btw`:
+ setScopeMission(missionRecord('mission-a'));
+ expect(appEl.dataset.filesOpen).toBe('true');
+ expect(sideAside().style.display).not.toBe('none');
+
+ const sideInput=screen.getByPlaceholderText('Ask a side question…');
+ fireEvent.input(sideInput,{target:{value:'Keep me open across tabs'}});
+ fireEvent.keyDown(sideInput,{key:'Enter'});
+ expect(await screen.findByText('Mission A side answer.')).toBeTruthy();
+
+ // 1. Switch from mission-a (/btw open) to mission-b (/btw never opened):
+ setMissionOpen('mission-b');
+ setScopeMission(missionRecord('mission-b'));
+ await waitFor(()=>expect(appEl.dataset.filesOpen).toBe('false'));
+ expect(sideAside().style.display).toBe('none');
+ expect((await readSideQuestion(sideQuestionKey('mission-a')))?.open).toBe(true);
+
+ // 2. Switch back to mission-a: /btw reopens automatically on frame 0 without clicking again!
+ setMissionOpen('mission-a');
+ setScopeMission(undefined);
+ expect(appEl.dataset.filesOpen).toBe('true');
+ expect(sideAside().style.display).not.toBe('none');
+ expect(await screen.findByText('Mission A side answer.')).toBeTruthy();
+ setScopeMission(missionRecord('mission-a'));
+ expect(appEl.dataset.filesOpen).toBe('true');
+
+ // 3. Switch from mission-a (/btw open) to a top-level page (Inbox / New Agent: missionOpen = null) and back:
+ setMissionOpen(null);
+ setScopeMission(undefined);
+ expect(appEl.dataset.filesOpen).toBe('false');
+ expect(sideAside().style.display).toBe('none');
+ expect((await readSideQuestion(sideQuestionKey('mission-a')))?.open).toBe(true);
+
+ setMissionOpen('mission-a');
+ expect(appEl.dataset.filesOpen).toBe('true');
+ expect(sideAside().style.display).not.toBe('none');
+ expect(await screen.findByText('Mission A side answer.')).toBeTruthy();
+
+ // 4. Cold reload (in-memory hints cleared, IndexedDB still holds open: true) with missionOpen passed:
+ view.unmount();
+ resetSideQuestionStorageForTest();
+ const coldView=render(()=>(
+  <div class="app">
+   <FilePanelProvider missionOpen={missionOpen()} scope={{mission:missionRecord(missionOpen()??'mission-a')}}>
+    <FilePanelButton/>
+    <Show when={missionOpen()??undefined} keyed>
+     {id=><SideQuestions mission={id} items={[]} ref={()=>{}} onTransfer={()=>{}}/>}
+    </Show>
+   </FilePanelProvider>
+  </div>
+ ));
+ const coldApp=coldView.container.querySelector('.app') as HTMLElement;
+ await waitFor(()=>expect(coldApp.dataset.filesOpen).toBe('true'));
+ expect(await screen.findByText('Mission A side answer.')).toBeTruthy();
+
+ // 5. Explicit user close persists closed across tab switches:
+ fireEvent.click(screen.getByRole('button',{name:'Close side questions'}));
+ expect(coldApp.dataset.filesOpen).toBe('false');
+ await waitFor(async()=>expect((await readSideQuestion(sideQuestionKey('mission-a')))?.open).toBe(false));
+ setMissionOpen('mission-b');
+ setMissionOpen('mission-a');
+ await new Promise(r=>setTimeout(r,20));
+ expect(coldApp.dataset.filesOpen).toBe('false');
+});
+
+it('windows long /btw history to the latest 20 turns on open and expands on demand',async()=>{
+ const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ const turns=Array.from({length:45},(_,i)=>({
+  id:`turn-${i+1}`,
+  question:`Side question #${i+1}`,
+  answer:`Side answer #${i+1}`,
+  at:`2026-11-09T12:${String(Math.floor(i/60)).padStart(2,'0')}:${String(i%60).padStart(2,'0')}Z`,
+ }));
+ await writeSideQuestion(sideQuestionKey('mission-windowed'),{
+  history:turns,
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:null,
+ });
+ serverReconcile.fn=async()=>({history:turns,authoritative:true});
+ const view=render(()=><SideQuestions mission="mission-windowed" items={[]} ref={()=>{}} onTransfer={()=>{}}/>);
+ await screen.findByText('Side answer #45');
+ expect(view.container.querySelectorAll('[data-side-turn]').length).toBe(20);
+ expect(screen.queryByText('Side answer #25')).toBeNull();
+ expect(screen.getByText('Side answer #26')).toBeTruthy();
+
+ const loadMore=screen.getByRole('button',{name:'Load earlier side questions (25)'});
+ fireEvent.click(loadMore);
+ await waitFor(()=>expect(view.container.querySelectorAll('[data-side-turn]').length).toBe(40));
+ expect(screen.getByText('Side answer #6')).toBeTruthy();
+ expect(screen.queryByText('Side answer #5')).toBeNull();
+
+ fireEvent.click(screen.getByRole('button',{name:'Load earlier side questions (5)'}));
+ await waitFor(()=>expect(view.container.querySelectorAll('[data-side-turn]').length).toBe(45));
+ expect(screen.getByText('Side answer #1')).toBeTruthy();
+ expect(screen.queryByRole('button',{name:/Load earlier side questions/})).toBeNull();
+});
+
+it('shows SideQuestionSkeleton instead of premature empty-state copy while cold server reconciliation is in flight',async()=>{
+ let resolveServer!:(v:{history:Array<{id:string;question:string;answer:string;at:string}>;authoritative:boolean})=>void;
+ serverReconcile.fn=()=>new Promise(resolve=>{resolveServer=resolve;});
+
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="mission-cold-skeleton" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ handle.open();
+
+ expect(await screen.findByRole('status',{name:'Loading side questions'})).toBeTruthy();
+ expect(screen.queryByText(/Ask a question or give the side agent a task/)).toBeNull();
+
+ await waitFor(()=>expect(typeof resolveServer).toBe('function'));
+ resolveServer({
+  history:[{id:'btw:m1:1',question:'Cold question',answer:'Hydrated side answer',at:'2026-11-09T12:00:00Z'}],
+  authoritative:true,
+ });
+ expect(await screen.findByText('Hydrated side answer')).toBeTruthy();
+ expect(screen.queryByRole('status',{name:'Loading side questions'})).toBeNull();
+});
+
+
+
 
 

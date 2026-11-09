@@ -2121,7 +2121,7 @@ private def spawnLocalAgentRunner
 private def skillHarnessDisplayNames : Array (String × String) := #[
   ("claudecode", "Claude Code"),
   ("codex", "Codex"),
-  ("antigravity", "Antigravity CLI"),
+  ("antigravity", "Antigravity"),
   ("opencode", "OpenCode"),
   ("grok", "Grok"),
   ("vibe", "Mistral Vibe")
@@ -2130,28 +2130,224 @@ private def skillHarnessDisplayNames : Array (String × String) := #[
 private def countLines (s : String) : Nat :=
   if s.isEmpty then 0 else (s.splitOn "\n").length
 
+private def unquoteSkillYaml (raw : String) : String :=
+  let v := raw.trimAscii.toString
+  if v.length ≥ 2 && ((v.startsWith "\"" && v.endsWith "\"") || (v.startsWith "'" && v.endsWith "'")) then
+    (((v.drop 1).dropEnd 1).toString).trimAscii.toString
+  else
+    v
+
+/-- Parse `metadata.sandboxed.audience` and `metadata.sandboxed.scope` from `SKILL.md` YAML frontmatter. -/
+private def parseSandboxedSkillMeta (markdown : String) : Option (Array String) × Option String := Id.run do
+  let text := (markdown.replace "\r\n" "\n").replace "\uFEFF" ""
+  if !text.startsWith "---\n" then
+    return (none, none)
+  let rest := (text.drop 4).toString
+  let lines := rest.splitOn "\n"
+  let mut yaml : Array String := #[]
+  let mut closed := false
+  for line in lines do
+    if !closed then
+      if line == "---" then closed := true
+      else yaml := yaml.push line
+  if !closed then
+    return (none, none)
+  let indentOf (s : String) : Nat := s.length - s.trimAsciiStart.toString.length
+  let mut audience? : Option (Array String) := none
+  let mut scope? : Option String := none
+  let mut metaIndent? : Option Nat := none
+  let mut sandIndent? : Option Nat := none
+  let mut i : Nat := 0
+  while i < yaml.size do
+    let line := yaml[i]!
+    let trimmed := line.trimAscii.toString
+    if trimmed.isEmpty || trimmed.startsWith "#" then
+      i := i + 1
+      continue
+    let ind := indentOf line
+    if let some si := sandIndent? then
+      if ind ≤ si then sandIndent? := none
+    if let some mi := metaIndent? then
+      if ind ≤ mi then
+        metaIndent? := none
+        sandIndent? := none
+    if metaIndent?.isNone then
+      if trimmed == "metadata:" then metaIndent? := some ind
+      i := i + 1
+      continue
+    if sandIndent?.isNone then
+      if trimmed == "sandboxed:" then sandIndent? := some ind
+      i := i + 1
+      continue
+    if trimmed.startsWith "audience:" then
+      let val := ((trimmed.drop 9).toString).trimAscii.toString
+      if val.isEmpty then
+        let mut items : Array String := #[]
+        let mut j := i + 1
+        while j < yaml.size do
+          let t := yaml[j]!.trimAscii.toString
+          if t.startsWith "-" then
+            let item := unquoteSkillYaml ((t.drop 1).toString)
+            if !item.isEmpty then items := items.push item
+            j := j + 1
+          else if t.isEmpty then
+            j := j + 1
+          else
+            break
+        audience? := some items
+        i := j
+        continue
+      else
+        let inner :=
+          if val.startsWith "[" && val.endsWith "]" && val.length ≥ 2 then
+            ((val.drop 1).dropEnd 1).toString
+          else val
+        let items := (inner.splitOn ",").toArray.filterMap fun part =>
+          let u := unquoteSkillYaml part
+          if u.isEmpty then none else some u
+        audience? := some items
+    else if trimmed.startsWith "scope:" then
+      let v := unquoteSkillYaml ((trimmed.drop 6).toString)
+      if !v.isEmpty then scope? := some v
+    i := i + 1
+  return (audience?, scope?)
+
+private def effectiveSkillAudience (explicit? : Option (Array String)) (content : String) : Array String :=
+  let raw := match explicit? with
+    | some xs => xs
+    | none => (parseSandboxedSkillMeta content).1.getD #["mission", "local"]
+  raw.filterMap fun a =>
+    let clean := a.trimAscii.toString.toLower
+    if clean.isEmpty then none else some clean
+
+private def isManagedSkillDir (dir : System.FilePath) : IO Bool := do
+  if ← (dir / ".managed-by-orb-skills").pathExists then return true
+  (dir / ".managed-by-agent-skills-repo").pathExists
+
+private def normalizeSkillBody (s : String) : String :=
+  ((s.replace "\r\n" "\n").replace "\uFEFF" "").trimAscii.toString
+
+private structure CanonicalSkillEntry where
+  name          : String
+  content       : String
+  files         : Array (String × String)
+  copyDir?      : Option System.FilePath
+  inLibrary     : Bool
+  isIdentity    : Bool
+  audience      : Array String
+  scope?        : Option String
+  desiredLocal  : Bool
+  deriving Inhabited
+
+private def buildCanonicalSkillCatalog (homeFp : System.FilePath) (libSkills : Array JVal) :
+    IO (Array CanonicalSkillEntry × Bool) := do
+  let mut entries : Array CanonicalSkillEntry := #[]
+  for item in libSkills do
+    if let some rawName := item.fieldStr? "name" then
+      let name := rawName.trimAscii.toString
+      let content := (item.fieldStr? "content").getD ""
+      if validSkillIdentifier name && !content.trimAscii.toString.isEmpty then
+        let explicitAud? := (item.fieldArr? "audience").map (fun xs => xs.filterMap (·.asStr?))
+        let explicitScope? := (item.fieldStr? "scope").bind fun s =>
+          let clean := s.trimAscii.toString
+          if clean.isEmpty then none else some clean
+        let (_, parsedScope?) := parseSandboxedSkillMeta content
+        let aud := effectiveSkillAudience explicitAud? content
+        let files := ((item.fieldArr? "files").getD #[]).filterMap fun rf => do
+          let rel ← rf.fieldStr? "rel"
+          return (rel, (rf.fieldStr? "content").getD "")
+        let entry : CanonicalSkillEntry := {
+          name := name
+          content := content
+          files := files
+          copyDir? := none
+          inLibrary := true
+          isIdentity := false
+          audience := aud
+          scope? := explicitScope?.orElse (fun _ => parsedScope?)
+          desiredLocal := aud.contains "local"
+        }
+        if let some idx := entries.findIdx? (fun e => e.name == name) then
+          entries := entries.set! idx entry
+        else
+          entries := entries.push entry
+  let idDir := homeFp / ".config" / "sandboxed-sh" / "development-identity" / "current" / "skill"
+  let idMd := idDir / "SKILL.md"
+  let idSt ← OrbBin.PosixExt.statPath idMd.toString
+  let mut idReady := false
+  if idSt.exists_ && idSt.isReg && !idSt.isSymlink then
+    let idContent ← try IO.FS.readFile idMd catch _ => pure ""
+    if !idContent.trimAscii.toString.isEmpty then
+      idReady := true
+      let (parsedAud?, parsedScope?) := parseSandboxedSkillMeta idContent
+      let aud := effectiveSkillAudience parsedAud? idContent
+      if let some idx := entries.findIdx? (fun e => e.name == "development-identity") then
+        let prev := entries[idx]!
+        -- Keep the provisioned machine-local `development-identity` mirror installed even offline,
+        -- while letting an explicit Library payload stay canonical when connected.
+        entries := entries.set! idx { prev with isIdentity := true, desiredLocal := true }
+      else
+        entries := entries.push {
+          name := "development-identity"
+          content := idContent
+          files := #[]
+          copyDir? := some idDir
+          inLibrary := false
+          isIdentity := true
+          audience := aud
+          scope? := parsedScope?
+          desiredLocal := true
+        }
+  return (entries, idReady)
+
 private def buildLocalSkillsReport (st : LocaldState) (libSkills : Array JVal) : IO JVal := do
   let checkedAt := (← OrbBin.PosixExt.nowEpoch).toNat * 1000
   let envHome := (← IO.getEnv "HOME").getD "/tmp"
   let homeStr := if st.homeDir.trimAscii.toString.isEmpty then envHome else st.homeDir
   let homeFp := System.FilePath.mk homeStr
-  let pyVer? ← readCommandStdout? "python3" #["--version"]
-  let idReady ← if st.homeDir.trimAscii.toString.isEmpty then pure false else (homeFp / ".ssh" / "paloma.pub").pathExists
+  let pyVerRaw? ← readCommandStdout? "python3" #["--version"]
+  let pyVer? := pyVerRaw?.map fun v =>
+    let clean := v.trimAscii.toString
+    if clean.startsWith "Python " then ((clean.drop 7).toString).trimAscii.toString else clean
+  let receiptFp := homeFp / ".config" / "sandboxed-sh" / "development-identity" / "current" / "receipt.json"
+  let receiptJson? : Option JVal ← if ← receiptFp.pathExists then
+    let raw ← try IO.FS.readFile receiptFp catch _ => pure ""
+    pure (OrbBin.Json.parse raw).toOption
+  else pure none
+  let idFingerprint? := receiptJson?.bind (·.fieldStr? "signing_fingerprint")
+  let idUpdatedAt? := receiptJson?.bind (·.fieldNat? "created_at")
+  let (catalog, idSkillExists) ← buildCanonicalSkillCatalog homeFp libSkills
+  let sshKeyExists ← if st.homeDir.trimAscii.toString.isEmpty then pure false else (homeFp / ".ssh" / "paloma.pub").pathExists
+  let idReady := (receiptJson?.isSome && idSkillExists) || sshKeyExists
   let preflight : JVal := .obj #[
     ("python3_ready", .bool pyVer?.isSome),
     ("python3_version", match pyVer? with | some v => .str v | none => .null),
     ("pyyaml_ready", .bool true),
     ("preflight_error", .null),
     ("identity_ready", .bool idReady),
-    ("identity_fingerprint", .null),
-    ("identity_updated_at", .null)
+    ("identity_fingerprint", match idFingerprint? with | some fp => .str fp | none => .null),
+    ("identity_updated_at", match idUpdatedAt? with | some ts => JVal.nat ts | none => .null)
   ]
-  let libNames : Array (String × String) := libSkills.filterMap fun item => do
-    let n ← item.fieldStr? "name"
-    let c := (item.fieldStr? "content").getD ""
-    return (n, c)
+  let libraryKnown := !libSkills.isEmpty
+  let desiredEntries := catalog.filter (·.desiredLocal)
+  let idDir := homeFp / ".config" / "sandboxed-sh" / "development-identity" / "current" / "skill"
+  let sourcesJson : Array JVal := #[
+    .obj #[
+      ("id", .str "development-identity"),
+      ("label", .str "Development Identity"),
+      ("path", .str idDir.toString),
+      ("exists", .bool idSkillExists),
+      ("skill_count", JVal.nat (if idSkillExists then 1 else 0)),
+      ("legacy", .bool false)
+    ]
+  ]
   let mut harnessTargets : Array JVal := #[]
-  let mut discoveredMap : Array (String × Option String × Array String × Bool × Option String) := #[]
+  -- `(name, desc?, harnesses, managed, preview?, staleHarnesses, editedCopy?, removedFromLib)`
+  let mut discoveredMap : Array (String × Option String × Array String × Bool × Option String × Array String × Option (String × String × String) × Bool) := #[]
+  for entry in catalog do
+    let desc? := extractSkillDescription entry.content
+    let prev := (entry.content.take 4000).toString
+    discoveredMap := discoveredMap.push (entry.name, desc?, #[], false, some prev, #[], none, false)
   for (hid, hname) in skillHarnessDisplayNames do
     if let some (globalRel, projectRel) := harnessSkillTargets hid then
       let gdir := homeFp / globalRel
@@ -2165,70 +2361,108 @@ private def buildLocalSkillsReport (st : LocaldState) (libSkills : Array JVal) :
       for ent in entries do
         let sname := ent.fileName
         if validSkillIdentifier sname then
+          let entSt ← OrbBin.PosixExt.statPath ent.path.toString
           let md := ent.path / "SKILL.md"
           let mst ← OrbBin.PosixExt.statPath md.toString
           if mst.exists_ && mst.isReg && !mst.isSymlink then
             skillCount := skillCount + 1
             presentNames := presentNames.push sname
             let content ← try IO.FS.readFile md catch _ => pure ""
-            let isManaged ← (ent.path / ".managed-by-orb-skills").pathExists
-            match libNames.find? (fun (ln, _) => ln == sname) with
-            | some (_, libContent) =>
-              if content.trimAscii.toString == libContent.trimAscii.toString then
+            let isManaged ← if entSt.isSymlink then pure false else isManagedSkillDir ent.path
+            let catEntry? := catalog.find? (fun e => e.name == sname)
+            let mut staleHere := false
+            let mut editHere? : Option (String × String × String) := none
+            let mut removedHere := false
+            match desiredEntries.find? (fun e => e.name == sname) with
+            | some want =>
+              if normalizeSkillBody content == normalizeSkillBody want.content then
                 syncedCount := syncedCount + 1
               else
                 outdated := outdated.push sname
+                staleHere := true
+                if !isManaged && want.inLibrary then
+                  editHere? := some (hname, ent.path.toString, content)
             | none =>
-              if isManaged && !libNames.isEmpty then
-                staleManaged := staleManaged.push sname
+              if isManaged then
+                if libraryKnown then
+                  staleManaged := staleManaged.push sname
+                  if !(catEntry?.map (·.inLibrary) |>.getD false) && sname != "development-identity" then
+                    removedHere := true
             let desc? := extractSkillDescription content
-            let preview := (content.take 400).toString
-            if let some idx := discoveredMap.findIdx? (fun (dn, _, _, _, _) => dn == sname) then
-              let (dn, dd, dhs, dm, dp) := discoveredMap[idx]!
-              discoveredMap := discoveredMap.set! idx (dn, dd.orElse (fun _ => desc?), dhs.push hid, dm || isManaged, dp)
+            let preview := (content.take 4000).toString
+            if let some idx := discoveredMap.findIdx? (fun (dn, _, _, _, _, _, _, _) => dn == sname) then
+              let (dn, dd, dhs, dm, dp, dstale, dedit, drem) := discoveredMap[idx]!
+              let nextHarnesses := if dhs.contains hid then dhs else dhs.push hid
+              let nextStale := if staleHere && !dstale.contains hid then dstale.push hid else dstale
+              let nextEdit := dedit.orElse (fun _ => editHere?)
+              discoveredMap := discoveredMap.set! idx (dn, dd.orElse (fun _ => desc?), nextHarnesses, dm || isManaged, dp.orElse (fun _ => some preview), nextStale, nextEdit, drem || removedHere)
             else
-              discoveredMap := discoveredMap.push (sname, desc?, #[hid], isManaged, some preview)
-      let missing := libNames.filterMap fun (ln, _) =>
-        if presentNames.contains ln then none else some ln
+              let initStale := if staleHere then #[hid] else #[]
+              discoveredMap := discoveredMap.push (sname, desc?, #[hid], isManaged, some preview, initStale, editHere?, removedHere)
+      let missing := (desiredEntries.filterMap fun e =>
+        if presentNames.contains e.name then none else some e.name).qsort (· < ·)
       harnessTargets := harnessTargets.push (.obj #[
         ("id", .str hid),
         ("name", .str hname),
-        ("global_rel", .str globalRel),
+        ("global_rel", .str s!"~/{globalRel}"),
         ("global_path", .str gdir.toString),
         ("project_rel", .str projectRel),
         ("exists", .bool existsDir),
         ("skill_count", JVal.nat skillCount),
         ("synced_count", JVal.nat syncedCount),
-        ("canonical_total", JVal.nat libNames.size),
+        ("canonical_total", JVal.nat desiredEntries.size),
         ("missing_skills", .arr (missing.map .str)),
-        ("outdated_skills", .arr (outdated.map .str)),
-        ("stale_managed", .arr (staleManaged.map .str))
+        ("outdated_skills", .arr ((outdated.qsort (· < ·)).map .str)),
+        ("stale_managed", .arr ((staleManaged.qsort (· < ·)).map .str))
       ])
-  for (ln, lc) in libNames do
-    if !(discoveredMap.any (fun (dn, _, _, _, _) => dn == ln)) then
-      discoveredMap := discoveredMap.push (ln, extractSkillDescription lc, #[], true, some (lc.take 400).toString)
-  let skillsJson : Array JVal := (discoveredMap.qsort (fun a b => a.1 < b.1)).map fun (sname, desc?, hlist, managed, prev?) =>
-    let inLib := libNames.any (fun (ln, _) => ln == sname)
+  let skillsJson : Array JVal := (discoveredMap.qsort (fun a b => a.1 < b.1)).map fun (sname, desc?, hlist, managed, prev?, staleH, edit?, removed) =>
+    let catEntry? := catalog.find? (fun e => e.name == sname)
+    let inLib := catEntry?.map (·.inLibrary) |>.getD false
+    let isDesired := catEntry?.map (·.desiredLocal) |>.getD false
+    let isId := catEntry?.map (·.isIdentity) |>.getD false
+    let aud := catEntry?.map (·.audience) |>.getD #[]
+    let scope? := catEntry?.bind (·.scope?)
+    let origin := if inLib then "Library" else if isId then "Development Identity" else "User global"
+    let editedVal : JVal := match edit? with
+      | some (eh, ep, ec) => .obj #[("harness", .str eh), ("path", .str ep), ("content", .str ec)]
+      | none => .null
+    let sourcesVal : Array JVal :=
+      if isId then #[.obj #[
+        ("id", .str "development-identity"),
+        ("label", .str "Development Identity"),
+        ("path", .str idDir.toString),
+        ("legacy", .bool false),
+        ("hash", .str ""),
+        ("lines", JVal.nat (match prev? with | some p => countLines p | none => 0)),
+        ("content", .null),
+        ("files", .arr #[])
+      ]] else #[]
     .obj #[
       ("name", .str sname),
       ("description", match desc? with | some d => .str d | none => .null),
-      ("origin", .str (if inLib then "library" else "local")),
-      ("source_path", .null),
+      ("origin", .str origin),
+      ("source_path", if isId && !inLib then .str idDir.toString else .null),
       ("harnesses", .arr (hlist.map .str)),
       ("managed", .bool managed),
       ("content_preview", match prev? with | some p => .str p | none => .null),
+      ("sources", .arr sourcesVal),
       ("in_library", .bool inLib),
-      ("desired", .bool inLib),
+      ("desired", .bool isDesired),
+      ("audience", .arr (aud.map .str)),
+      ("scope", match scope? with | some sc => .str sc | none => .null),
+      ("stale_harnesses", .arr (staleH.map .str)),
+      ("removed_from_library", .bool removed),
+      ("edited_copy", editedVal),
       ("lines", JVal.nat (match prev? with | some p => countLines p | none => 0))
     ]
   return .obj #[
     ("checked_at", JVal.nat checkedAt),
     ("home_dir", .str homeStr),
     ("preflight", preflight),
-    ("sources", .arr #[]),
+    ("sources", .arr sourcesJson),
     ("harnesses", .arr harnessTargets),
     ("skills", .arr skillsJson),
-    ("library_known", .bool (!libSkills.isEmpty))
+    ("library_known", .bool libraryKnown)
   ]
 
 /-! ### Loopback Desktop GitHub OAuth Listener (`github_oauth_sign_in`) -/
@@ -3547,62 +3781,100 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let envHome := (← IO.getEnv "HOME").getD "/tmp"
     let homeStr := if st.homeDir.trimAscii.toString.isEmpty then envHome else st.homeDir
     let homeFp := System.FilePath.mk homeStr
-    let mut syncedSkills : Nat := 0
+    let (catalog, _) ← buildCanonicalSkillCatalog homeFp libSkills
+    let desiredEntries := catalog.filter (·.desiredLocal)
+    let desiredNames := desiredEntries.map (·.name)
+    let prune := pruneRemoved && !libSkills.isEmpty
     let mut harnessesUpdated : Nat := 0
     let mut skippedUnmanaged : Array String := #[]
+    let mut skippedNames : Array String := #[]
     let mut pruned : Array String := #[]
-    let validLib : Array JVal := libSkills.filter fun item =>
-      match item.fieldStr? "name" with
-      | some n => validSkillIdentifier n
-      | none => false
-    let validNames : Array String := validLib.filterMap (·.fieldStr? "name")
+    let installSkillEntry (sdir : System.FilePath) (entry : CanonicalSkillEntry) : IO Bool := do
+      try
+        let sdirSt ← OrbBin.PosixExt.statPath sdir.toString
+        if sdirSt.exists_ || sdirSt.isSymlink then
+          if sdirSt.isSymlink then
+            IO.FS.removeFile sdir
+          else
+            IO.FS.removeDirAll sdir
+        IO.FS.createDirAll sdir
+        if let some srcDir := entry.copyDir? then
+          let srcEntries ← try srcDir.readDir catch _ => pure #[]
+          for se in srcEntries do
+            let fname := se.fileName
+            if fname != ".git" && fname != ".DS_Store" then
+              let seSt ← OrbBin.PosixExt.statPath se.path.toString
+              if seSt.exists_ && seSt.isReg && !seSt.isSymlink then
+                let bytes ← IO.FS.readBinFile se.path
+                IO.FS.writeBinFile (sdir / fname) bytes
+        else
+          IO.FS.writeFile (sdir / "SKILL.md") entry.content
+          for (rawRel, rfContent) in entry.files do
+            if let some cleanRel := isSafeRelSubpath rawRel then
+              if !isSecretRelPath cleanRel && cleanRel != "SKILL.md" &&
+                 cleanRel != ".managed-by-orb-skills" && cleanRel != ".managed-by-agent-skills-repo" then
+                let rfp := sdir / cleanRel
+                if let some rp := rfp.parent then IO.FS.createDirAll rp
+                IO.FS.writeFile rfp rfContent
+        IO.FS.writeFile (sdir / ".managed-by-orb-skills") "managed-by-orb-skills\n"
+        return true
+      catch _ =>
+        return false
     for (hid, _) in skillHarnessDisplayNames do
       if let some (globalRel, _) := harnessSkillTargets hid then
         let gdir := homeFp / globalRel
-        let mut touchedHarness := false
-        try IO.FS.createDirAll gdir catch _ => pure ()
-        for item in validLib do
-          let sname := (item.fieldStr? "name").getD ""
-          let content := (item.fieldStr? "content").getD ""
-          let audience? := (item.fieldArr? "audience").map (fun xs => xs.filterMap (·.asStr?))
-          let allowedForHarness := match audience? with
-            | none => true
-            | some aud => aud.isEmpty || aud.contains hid
-          if allowedForHarness then
+        let gdirMeta ← OrbBin.PosixExt.statPath gdir.toString
+        if !gdirMeta.isSymlink then
+          let mut touchedHarness := false
+          try IO.FS.createDirAll gdir catch _ => pure ()
+          for entry in desiredEntries do
+            let sname := entry.name
             let sdir := gdir / sname
-            let md := sdir / "SKILL.md"
-            let marker := sdir / ".managed-by-orb-skills"
-            let mdExists ← md.pathExists
-            let isManaged ← marker.pathExists
-            if mdExists && !isManaged && !(replaceUnmanaged.contains sname) then
-              if !(skippedUnmanaged.contains sname) then
-                skippedUnmanaged := skippedUnmanaged.push sname
+            let sdirSt ← OrbBin.PosixExt.statPath sdir.toString
+            if sdirSt.isSymlink then
+              -- Preserve unbroken user symlinks; replace broken ones.
+              let targetExists ← sdir.pathExists
+              if !targetExists then
+                if (← installSkillEntry sdir entry) then touchedHarness := true
+            else if sdirSt.exists_ && sdirSt.isDir then
+              let md := sdir / "SKILL.md"
+              let existingMd ← try IO.FS.readFile md catch _ => pure ""
+              let same := normalizeSkillBody existingMd == normalizeSkillBody entry.content
+              let isManaged ← isManagedSkillDir sdir
+              if !isManaged then
+                if same then
+                  -- Adopt identical unmanaged copy without overwriting reference files.
+                  try IO.FS.writeFile (sdir / ".managed-by-orb-skills") "managed-by-orb-skills\n" catch _ => pure ()
+                else if replaceUnmanaged.contains sname then
+                  if (← installSkillEntry sdir entry) then touchedHarness := true
+                else
+                  let skipPath := s!"~/{globalRel}/{sname}"
+                  if !(skippedUnmanaged.contains skipPath) then skippedUnmanaged := skippedUnmanaged.push skipPath
+                  if !(skippedNames.contains sname) then skippedNames := skippedNames.push sname
+              else
+                if same && entry.copyDir?.isSome then
+                  pure ()
+                else
+                  let ok ← installSkillEntry sdir entry
+                  if ok && !same then touchedHarness := true
             else
-              try
-                IO.FS.createDirAll sdir
-                IO.FS.writeFile md content
-                IO.FS.writeFile marker "managed-by-orb\n"
-                for rf in (item.fieldArr? "files").getD #[] do
-                  if let some cleanRel := (rf.fieldStr? "rel").bind isSafeRelSubpath then
-                    if !isSecretRelPath cleanRel && cleanRel != "SKILL.md" && cleanRel != ".managed-by-orb-skills" then
-                      let rfp := sdir / cleanRel
-                      if let some rp := rfp.parent then IO.FS.createDirAll rp
-                      IO.FS.writeFile rfp ((rf.fieldStr? "content").getD "")
-                touchedHarness := true
-              catch _ => pure ()
-        if pruneRemoved then
-          let entries ← try gdir.readDir catch _ => pure #[]
-          for ent in entries do
-            let sname := ent.fileName
-            if validSkillIdentifier sname && !(validNames.contains sname) then
-              if (← (ent.path / ".managed-by-orb-skills").pathExists) then
-                try
-                  IO.FS.removeDirAll ent.path
-                  touchedHarness := true
-                  if !(pruned.contains sname) then pruned := pruned.push sname
-                catch _ => pure ()
-        if touchedHarness then harnessesUpdated := harnessesUpdated + 1
-    syncedSkills := validNames.filter (fun n => !(skippedUnmanaged.contains n)) |>.size
+              if (← installSkillEntry sdir entry) then touchedHarness := true
+          if prune then
+            let entries ← try gdir.readDir catch _ => pure #[]
+            for ent in entries do
+              let sname := ent.fileName
+              if validSkillIdentifier sname && !(desiredNames.contains sname) then
+                let entSt ← OrbBin.PosixExt.statPath ent.path.toString
+                if entSt.exists_ && entSt.isDir && !entSt.isSymlink then
+                  if (← isManagedSkillDir ent.path) then
+                    try
+                      IO.FS.removeDirAll ent.path
+                      touchedHarness := true
+                      let pPath := s!"~/{globalRel}/{sname}"
+                      if !(pruned.contains pPath) then pruned := pruned.push pPath
+                    catch _ => pure ()
+          if touchedHarness then harnessesUpdated := harnessesUpdated + 1
+    let syncedSkills := desiredNames.filter (fun n => !(skippedNames.contains n)) |>.size
     let report ← buildLocalSkillsReport st libSkills
     return .ok (.obj #[
       ("synced_skills", JVal.nat syncedSkills),

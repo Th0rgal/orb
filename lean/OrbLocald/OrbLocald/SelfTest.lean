@@ -568,12 +568,35 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
     homeDir := (pDir / "inv-home").toString,
     hostOs := "macos"
   } : LocaldState)
+  let invHome := pDir / "inv-home"
+  IO.FS.createDirAll (invHome / ".claude" / "skills" / "retired-managed")
+  IO.FS.writeFile (invHome / ".claude" / "skills" / "retired-managed" / "SKILL.md") "---\nname: retired-managed\n---\nOld.\n"
+  IO.FS.writeFile (invHome / ".claude" / "skills" / "retired-managed" / ".managed-by-orb-skills") "managed-by-orb-skills\n"
+  IO.FS.createDirAll (invHome / ".claude" / "skills" / "user-edited")
+  IO.FS.writeFile (invHome / ".claude" / "skills" / "user-edited" / "SKILL.md") "---\nname: user-edited\n---\nMy local edit.\n"
   let invRes ← dispatchRpcCommand stInv "software_inventory" (.obj #[])
+  let libPayloads : Array JVal := #[
+    .obj #[
+      ("name", .str "demo-skill"),
+      ("content", .str "---\nname: demo-skill\ndescription: \"Demo\"\nmetadata:\n  sandboxed:\n    audience: [mission, coordinator, local]\n    scope: on-demand\n---\nUse demo.\n"),
+      ("audience", .arr #[.str "mission", .str "coordinator", .str "local"]),
+      ("scope", .str "on-demand")
+    ],
+    .obj #[
+      ("name", .str "proton-mail"),
+      ("content", .str "---\nname: proton-mail\ndescription: \"Coord mail\"\nmetadata:\n  sandboxed:\n    audience: [coordinator]\n    scope: on-demand\n---\nCoord only.\n"),
+      ("audience", .arr #[.str "coordinator"]),
+      ("scope", .str "on-demand")
+    ],
+    .obj #[
+      ("name", .str "user-edited"),
+      ("content", .str "---\nname: user-edited\ndescription: \"Lib version\"\n---\nLibrary body.\n")
+    ]
+  ]
+  let preStatus ← dispatchRpcCommand stInv "local_skills_status" (.obj #[("request", .obj #[("library_skills", .arr libPayloads)])])
   let syncRes ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
     ("request", .obj #[
-      ("library_skills", .arr #[
-        .obj #[("name", .str "demo-skill"), ("content", .str "---\ndescription: \"Demo\"\n---\nUse demo.\n")]
-      ]),
+      ("library_skills", .arr libPayloads),
       ("prune_removed", .bool true)
     ])
   ])
@@ -585,6 +608,41 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
     | .ok (.str sp) => dispatchRpcCommand stInv "read_upload_file" (.obj #[("path", .str sp)])
     | _ => pure (.error "stage_failed")
   total := total + 1
+  let preStatusOk :=
+    match preStatus with
+    | .ok rep =>
+      let hs := (rep.fieldArr? "harnesses").getD #[]
+      let claude? := hs.find? (fun h => h.fieldStr? "id" == some "claudecode")
+      let sks := (rep.fieldArr? "skills").getD #[]
+      let retired? := sks.find? (fun s => s.fieldStr? "name" == some "retired-managed")
+      let edited? := sks.find? (fun s => s.fieldStr? "name" == some "user-edited")
+      let proton? := sks.find? (fun s => s.fieldStr? "name" == some "proton-mail")
+      claude?.bind (·.fieldNat? "canonical_total") == some 2 &&
+      claude?.bind (·.fieldNat? "synced_count") == some 0 &&
+      retired?.bind (·.fieldBool? "removed_from_library") == some true &&
+      (edited?.bind (·.field? "edited_copy")).map (fun v => v != .null) == some true &&
+      proton?.bind (·.fieldBool? "desired") == some false
+    | _ => false
+  let postSyncOk :=
+    match syncRes with
+    | .ok jv =>
+      let rep := (jv.field? "report").getD (.obj #[])
+      let hs := (rep.fieldArr? "harnesses").getD #[]
+      let claude? := hs.find? (fun h => h.fieldStr? "id" == some "claudecode")
+      let codex? := hs.find? (fun h => h.fieldStr? "id" == some "codex")
+      let prunedArr := ((jv.fieldArr? "pruned").getD #[]).filterMap (·.asStr?)
+      let skippedArr := ((jv.fieldArr? "skipped_unmanaged").getD #[]).filterMap (·.asStr?)
+      jv.fieldNat? "synced_skills" == some 1 &&
+      jv.fieldNat? "harnesses_updated" == some 6 &&
+      prunedArr.contains "~/.claude/skills/retired-managed" &&
+      skippedArr.contains "~/.claude/skills/user-edited" &&
+      claude?.bind (·.fieldNat? "canonical_total") == some 2 &&
+      claude?.bind (·.fieldNat? "synced_count") == some 1 &&
+      codex?.bind (·.fieldNat? "canonical_total") == some 2 &&
+      codex?.bind (·.fieldNat? "synced_count") == some 2
+    | _ => false
+  let protonExists ← (invHome / ".claude" / "skills" / "proton-mail").pathExists
+  let protonAbsent := !protonExists
   let invAndSkillsOk :=
     (match invRes with
      | .ok jv =>
@@ -593,9 +651,9 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
        (jv.field? "runtime").isSome &&
        (jv.fieldArr? "jobs").isSome
      | _ => false) &&
-    (match syncRes with
-     | .ok jv => jv.fieldNat? "synced_skills" == some 1 && (jv.fieldNat? "harnesses_updated").getD 0 ≥ 1
-     | _ => false) &&
+    preStatusOk &&
+    postSyncOk &&
+    protonAbsent &&
     stagedRead.isOk
   if (← assertTrue "software_inventory_skills_sync_and_staged_upload_roundtrip" invAndSkillsOk) then passed := passed + 1
 

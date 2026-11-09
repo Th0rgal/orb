@@ -1678,7 +1678,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           <Show when={mission()?.local_sync_pending}><div class="dim" role="status">{mission()?.local_sync_error || "Saved on this computer · syncing to Core…"}</div></Show>
           <ErrorToast error={sendError()} title="Couldn’t send your message" onDismiss={() => setSendError(null)}
             action={optimistic() ? { label: "Retry", run: () => { const draft = optimistic(); if (draft?.retry) draft.retry(); else if (draft) void sendMsg(draft.text, draft.images, followAttach(), draft.id); } } : undefined} />
-          <ErrorToast error={error() || queueError()} title="Couldn’t load the conversation" onDismiss={() => { setError(null); setQueueError(null); }} />
+          <ErrorToast error={error() || queueError()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(null); setQueueError(null); return Promise.all([refresh(true), resync(true)]); } }} onDismiss={() => { setError(null); setQueueError(null); }} />
           <MissionDock mission={mission()} items={viewItems()} destination={missionDestination(mission(), receipt)} syncing={syncing()} onMission={applyDockMission} onError={setError} onFork={p.onFork} />
         </div>
       </div>

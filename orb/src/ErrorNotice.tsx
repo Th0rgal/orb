@@ -93,6 +93,7 @@ export function describeError(raw: string, fallback = "Something went wrong", ba
   const agyLimit = raw.match(/Antigravity prompts must be at most (\d+ KiB)/i);
   if (agyLimit) return { nonResumable: true, title: `Antigravity prompt exceeds ${agyLimit[1]}`, message: `Shorten the message or put large context in workspace files so the prompt stays within ${agyLimit[1]}. Your draft is kept.` };
   if (/Failed to fetch|NetworkError|Load failed|fetch failed/i.test(raw)) return { title: "Can’t reach the backend", message: "Check your connection and backend settings, then try again." };
+  if (/The server is taking too long to answer|\bTimeoutError\b/i.test(raw)) return { title: "The server is taking too long to answer", message: "Please retry; nothing was lost." };
   if (/Workspace exceeds transfer limit/.test(raw)) {
     const found = raw.match(/: (.+?) in (\d+) files\. Largest: (.+)$/);
     const folders = found && [...found[3].matchAll(/(.+?) \(([\d.]+ [MG]iB), (\d+) files\)(?:, |$)/g)].map(f => `${f[1]}  ·  ${f[2]}, ${Number(f[3]).toLocaleString("en-US")} files`);
@@ -111,8 +112,14 @@ export function describeError(raw: string, fallback = "Something went wrong", ba
     };
   }
   if (raw.trim() === "Model error") return { title: fallback, message: "The run ended with an error before returning a response. Your workspace and conversation history are preserved." };
-  const technical = raw.length > 260 || /(?:^\s*[{[]|\\n|Traceback|Internal error|statvfs:)/.test(raw);
-  return { title: fallback, message: technical ? "The request could not be completed. See details for the backend response." : raw };
+  let cleaned = raw.trim();
+  const normalize = (s: string) => s.replace(/[\u2018\u2019]/g, "'").toLowerCase();
+  if (fallback && normalize(cleaned).startsWith(`${normalize(fallback)}:`)) {
+    cleaned = cleaned.slice(fallback.length + 1).trim();
+  }
+  cleaned = cleaned.replace(/^(?:(?:Error|TypeError|DOMException|ApiError|RequestTimeoutError|TimeoutError):\s*)+/i, "").trim() || raw.trim();
+  const technical = cleaned.length > 260 || /(?:^\s*[{[]|\\n|Traceback|Internal error|statvfs:)/.test(cleaned);
+  return { title: fallback, message: technical ? "The request could not be completed. See details for the backend response." : cleaned };
 }
 
 /** Inline, non-modal feedback. Never truncates or discards the original error. */

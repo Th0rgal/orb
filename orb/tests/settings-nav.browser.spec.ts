@@ -32,9 +32,9 @@ test("settings has five sections with subtitles, tabs and attention dots", async
   await expect(title(page)).toHaveText("Account");
   await expect(page.locator(".settings-subtitle")).toHaveText("Your server connection, connected accounts, how Orb looks and usage telemetry.");
 
-  // Bunker Mode is active and a provider quota is spent.
+  // Bunker Mode is active; Models never shows a quota attention dot.
   await expect(page.locator('[data-settings-section="security"] .row-dot')).toBeVisible();
-  await expect(page.locator('[data-settings-section="models"] .row-dot')).toBeVisible();
+  await expect(page.locator('[data-settings-section="models"] .row-dot')).toHaveCount(0);
   await expect(page.locator('[data-settings-section="account"] .row-dot')).toHaveCount(0);
 
   await rows.filter({ hasText: "Models" }).click();

@@ -82,7 +82,7 @@ final class OrbSettingsTests: XCTestCase {
         }
         for c in try XCTUnwrap(spec["attention"] as? [[String: Any]]) {
             let s = try XCTUnwrap(c["state"] as? [String: Bool])
-            let got = OrbSettingsSection.attention(bunkerActive: s["bunkerActive"]!, deviceEnrolled: s["deviceEnrolled"]!, quotaExhausted: s["quotaExhausted"]!)
+            let got = OrbSettingsSection.attention(bunkerActive: s["bunkerActive"]!, deviceEnrolled: s["deviceEnrolled"]!)
             XCTAssertEqual(Set(got.map(\.rawValue)), Set(c["expected"] as? [String] ?? []), c["name"] as? String ?? "?")
         }
     }

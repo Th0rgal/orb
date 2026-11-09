@@ -240,6 +240,18 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
 
 .row-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .row kbd { font: inherit; font-size: 11px; color: var(--fg-4); }
+.inbox-sb-badge {
+  flex: none; min-width: 16px; height: 16px; padding: 0 4.5px; margin-right: -2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  color: var(--fg-3);
+  font: 400 11px/16px var(--sans); text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.row:hover .inbox-sb-badge, .row.active .inbox-sb-badge {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--fg-2);
+}
 .row.project { color: var(--fg-2); }
 .row.project:hover { color: var(--fg); background: var(--bg-hover); }
 .row-main { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; height: 100%; text-align: left; }
@@ -2635,6 +2647,9 @@ select.orb-select-native:disabled { cursor: default; }
 .btw-question { font-weight:500; margin:0 0 10px; white-space:pre-wrap; overflow-wrap:anywhere; }
 .btw-transfer,.btw-reopen { border:0; background:transparent; color:var(--fg-2); font:inherit; font-size:12px; cursor:pointer; padding:6px 0; }
 .btw-transfer:hover,.btw-reopen:hover { color:var(--amber); }
+.btw-load-earlier { display:block; width:100%; margin:8px 0 4px; padding:7px 12px; border:1px solid var(--stroke); border-radius:999px; background:color-mix(in srgb, var(--fg) 3%, transparent); color:var(--fg-2); font:500 12px/1.3 var(--sans); text-align:center; cursor:pointer; }
+.btw-load-earlier:hover { background:color-mix(in srgb, var(--fg) 6%, transparent); color:var(--fg); }
+.btw-skeleton .sk-transcript { padding:8px 0 12px; }
 .btw-panel form { display:flex; flex-shrink:0; gap:8px; margin:12px 16px 16px; padding:8px 9px 8px 16px; min-height:42px; align-items:flex-end; background:var(--bg-elev); border:1px solid var(--stroke); border-radius:21px; cursor:text; }
 .btw-panel form:focus-within { border-color:var(--focus-border); }
 .btw-panel textarea:not(.composer textarea):not(.prompt-editor) { resize:none; max-height:120px; min-width:0; flex:1; background:transparent; color:inherit; font:inherit; font-size:13px; line-height:24px; padding:0; border:0; outline:none; }
@@ -3742,8 +3757,8 @@ select.orb-select-native:disabled { cursor: default; }
   gap: 4px;
 }
 
-/* Bottom notifications (toast.tsx). Window-centered across the full app (including over the sidebar); shared by errors, approvals, and undo. */
-.toaster { position: fixed; left: 50%; transform: translateX(-50%); z-index: 90; display: flex; flex-direction: column; align-items: center; gap: 8px; width: max-content; max-width: min(580px, calc(100vw - 32px)); pointer-events: none; }
+/* Bottom notifications (toast.tsx). Workspace-centered across active panels (excluding the left sidebar); shared by errors, approvals, and undo. */
+.toaster { position: fixed; left: 50%; transform: translateX(-50%); z-index: 90; display: flex; flex-direction: column; align-items: center; gap: 8px; width: max-content; max-width: min(var(--col, 748px), calc(100vw - 32px)); pointer-events: none; }
 .toaster.fit .toast.secret, .toaster.fit .toast.error, .toaster.fit .toast.warning { align-self: stretch; }
 .toast { pointer-events: auto; display: flex; align-items: center; gap: 10px; max-width: 100%; padding: 8px 8px 8px 14px; border-radius: 8px; background: var(--overlay-surface); border: 1px solid var(--overlay-border); box-shadow: var(--shadow-lg); color: var(--fg-2); font-size: 12px; animation: toast-in 140ms ease-out; }
 .toast.error, .toast.warning { align-items: flex-start; padding-top: 10px; padding-bottom: 10px; }
@@ -3895,7 +3910,11 @@ select.orb-select-native:disabled { cursor: default; }
   color: var(--fg-2); background: var(--hover-3);
 }
 .gear-count { color: #fff; background: color-mix(in srgb, var(--purple) 85%, transparent); }
-.bw-access .bw-section-head { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.bw-access .bw-section-head { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 12px; }
+.bw-access .bw-section-head h3 { margin: 0 !important; }
+.bw-access .bw-section-head > .s-row-desc { margin-top: 0; color: var(--fg-3); line-height: 1.45; }
+.bw-access > [data-testid="bunker-mode-card"] { margin-bottom: 10px; }
+.bw-access .s-row-ctrl > .s-btn { white-space: nowrap; }
 .bw-requests { margin-bottom: 10px; border-color: color-mix(in srgb, var(--purple) 35%, var(--stroke-soft)); }
 .bw-request-row { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; padding: 10px 12px; flex-wrap: wrap; }
 .bw-request-row + .bw-request-row { border-top: 1px solid var(--stroke-soft); }
@@ -3950,17 +3969,20 @@ select.orb-select-native:disabled { cursor: default; }
 .bw-subhead { font-size: 12px; font-weight: 500; color: var(--fg-3); margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.04em; }
 
 /* Secrets page: pending requests in the notification card's shape. */
-.bw-requests { display: block; border: 1px solid var(--overlay-border); border-radius: 10px; overflow: hidden; background: var(--overlay-surface); margin-bottom: 10px; }
-.bw-requests .secret-row.bw-request-row { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; padding: 8px 10px 8px 14px; }
+.bw-requests { display: block; border: 1px solid var(--overlay-border); border-radius: var(--radius-lg); overflow: hidden; background: var(--overlay-surface); margin-bottom: 10px; }
+.bw-requests .secret-row.bw-request-row { display: flex; flex-wrap: nowrap; align-items: center; gap: 10px; padding: 12px 14px; }
 .bw-request-row > :not(.bw-request-body) { flex: none; }
-.bw-request-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 12px; }
-.bw-request-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.bw-request-line > .secret-row-key { flex: 0 1 auto; min-width: 0; }
+.bw-request-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; line-height: 16px; }
+.bw-request-body > .s-row-desc { margin-top: 0; font-size: 12px; color: var(--fg-3); }
+.bw-request-line { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.bw-request-line > .secret-row-key { flex: 0 1 auto; min-width: 84px; }
+[data-testid="privilege-access-settings"] .secret-row-key,
+[data-testid="mission-access-settings"] .secret-row-key { font: 600 13px/1.35 var(--sans); }
 .bw-request-line > .bw-tier { flex: none; }
-.bw-request-line .bw-request-meta { flex: 0 1 auto; min-width: 0; margin-left: auto; color: var(--fg-3); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bw-request-row .s-btn { min-height: 26px; padding: 0 10px; font-size: 12px; }
+.bw-request-line .bw-request-meta { flex: 0 1 auto; min-width: 48px; color: var(--fg-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bw-request-row .s-btn { height: 28px; padding: 0 10px; font-size: 13px; white-space: nowrap; }
 .bw-request-ok { display: inline-flex; align-items: center; gap: 6px; }
-.bw-requests .secret-bar { padding: 6px 10px 6px 14px; }
+.bw-requests .secret-bar { padding: 8px 14px; }
 .bw-grace-setting { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-3); font-size: 11px; white-space: nowrap; }
 
 /* First paint of a mission: hidden for two frames while it lands at the bottom. */

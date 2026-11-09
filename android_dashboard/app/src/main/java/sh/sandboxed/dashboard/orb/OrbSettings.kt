@@ -154,11 +154,9 @@ fun OrbSettingsSheet(
     val nodes by core.nodes.collectAsState()
     var bunkerActive by remember { mutableStateOf(false) }
     var deviceEnrolled by remember { mutableStateOf(true) }
-    var quotaExhausted by remember { mutableStateOf(false) }
     val attention = OrbSettingsSection.attention(
         if (isAdmin) bunkerActive else false,
-        if (isAdmin) deviceEnrolled else true,
-        quotaExhausted
+        if (isAdmin) deviceEnrolled else true
     )
     LaunchedEffect(baseURL, isAdmin) {
         coroutineScope {
@@ -172,12 +170,6 @@ fun OrbSettingsSheet(
                     mine == null || devices.any { it["public_key"] == mine }
                 }
             } else null
-            val usageTask = async {
-                runCatching {
-                    val entries = OrbJSON.dict(core.fetchDict("/api/ai/providers/usage")["entries"]) ?: emptyMap()
-                    entries.values.any { v -> quotaStatus(providerQuotaWindows(OrbJSON.dict(v)))?.level == OrbQuotaLevel.Exhausted }
-                }
-            }
             if (bunkerTask != null) {
                 bunkerTask.await()
                     .onFailure { if (it is CancellationException) throw it }
@@ -192,9 +184,6 @@ fun OrbSettingsSheet(
             } else {
                 deviceEnrolled = true
             }
-            usageTask.await()
-                .onFailure { if (it is CancellationException) throw it }
-                .onSuccess { quotaExhausted = it }
         }
     }
 

@@ -7,10 +7,11 @@ import { swallow } from "./log";
 import { hasInteractiveOverlay } from "./overlayLayer";
 
 /**
- * Unified floating bottom notifications centered across the app window:
- * connection/reachability, page/panel load & refresh, failed actions,
- * undoable changes, and biometric approvals. Inline ErrorNotice stays only
- * inside active modals/popovers or persisted historical timeline turns/ticks.
+ * Unified floating bottom notifications across all active workspace panels
+ * (excluding the left navigation sidebar): connection/reachability, page/panel
+ * load & refresh, failed actions, undoable changes, and biometric approvals.
+ * Inline ErrorNotice stays only inside active modals/popovers or persisted
+ * historical timeline turns/ticks.
  */
 export type ToastAction = {
   label: string;
@@ -320,28 +321,70 @@ function ToastItem(p: { toast: Toast }) {
   </div>;
 }
 
-/** Mount once at the app root. Centered across the app window (including over the sidebar); never covers a bottom composer or save bar. */
+/**
+ * Mount once at the app root. Centered across the active workspace panels
+ * (excluding the left navigation sidebar): aligns flush with the centered
+ * content column when a single panel is open, straddles the split when two
+ * panels are open, and never covers a bottom composer or save bar.
+ */
 export function Toaster() {
   toasterMounted = true;
   onCleanup(() => { toasterMounted = false; });
   const [pos, setPos] = createSignal<{ bottom: number; left: string; width?: number }>({ bottom: 20, left: "50%" });
   const place = () => {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    if (vw <= 0) return setPos({ bottom: 20, left: "50%" });
     const rects = (sel: string) =>
       [...document.querySelectorAll(sel)]
         .map(el => el.getBoundingClientRect())
-        .filter(r => r.height > 0 && r.width > 0 && r.top < window.innerHeight && r.bottom > 0 && r.left < window.innerWidth && r.right > 0);
-    const vw = window.innerWidth;
-    if (vw <= 0) return setPos({ bottom: 20, left: "50%" });
-    const center = vw / 2;
-    const pad = vw < 520 ? 32 : 48;
-    const width = Math.min(580, Math.max(0, vw - pad)) || undefined;
+        .filter(r => r.height > 0 && r.width > 0 && r.top < vh && r.bottom > 0 && r.left < vw && r.right > 0);
+    const panes = rects(".main, .file-panel, .btw-sidebar");
+    let center: number;
+    let width: number | undefined;
+    if (!panes.length) {
+      center = vw / 2;
+      const pad = vw < 520 ? 32 : 48;
+      width = Math.min(580, Math.max(0, vw - pad)) || undefined;
+    } else {
+      const wsLeft = Math.max(0, Math.min(...panes.map(r => r.left)));
+      const wsRight = Math.min(vw, Math.max(...panes.map(r => r.right)));
+      const wsWidth = Math.max(0, wsRight - wsLeft);
+      const sideOpen = rects(".file-panel, .btw-sidebar").some(r => r.left > wsLeft + 24);
+      if (sideOpen) {
+        center = wsLeft + wsWidth / 2;
+        const pad = wsWidth < 520 ? 32 : 48;
+        width = Math.min(580, Math.max(0, wsWidth - pad)) || undefined;
+      } else {
+        const composer = rects(".dock .composer")[0];
+        const colEl = rects(".main .col, .main .new-inner")[0];
+        const inner = rects(".main .s-inner")[0];
+        const col = composer ?? colEl ?? inner;
+        if (col) {
+          center = col.left + col.width / 2;
+          const colInset = !composer && !colEl && inner
+            ? (() => {
+                const el = [...document.querySelectorAll<HTMLElement>(".main .s-inner")].find(e => e.getBoundingClientRect().width > 0);
+                if (!el) return 40;
+                const cs = getComputedStyle(el);
+                return (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+              })()
+            : 0;
+          width = Math.min(748, Math.max(0, col.width - colInset)) || undefined;
+        } else {
+          center = wsLeft + wsWidth / 2;
+          const pad = wsWidth < 520 ? 32 : 48;
+          width = Math.min(640, Math.max(0, wsWidth - pad)) || undefined;
+        }
+      }
+    }
     const half = (width ?? Math.min(580, Math.max(0, vw - 32))) / 2;
     const toastLeft = center - half;
     const toastRight = center + half;
     const bars = rects(".dock .composer, .composer, .btw-composer-dock, .cs-savebar")
-      .filter(r => r.right > toastLeft && r.left < toastRight && window.innerHeight - r.bottom < 120 && r.top > window.innerHeight * 0.35);
+      .filter(r => r.right > toastLeft && r.left < toastRight && vh - r.bottom < 120 && r.top > vh * 0.35);
     const bottom = bars.length
-      ? Math.max(20, ...bars.map(r => Math.round(window.innerHeight - r.top + 12)))
+      ? Math.max(20, ...bars.map(r => Math.round(vh - r.top + 12)))
       : 20;
     setPos({ bottom, left: `${Math.round(center)}px`, width: width ? Math.round(width) : undefined });
   };
