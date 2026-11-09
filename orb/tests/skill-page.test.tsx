@@ -22,7 +22,10 @@ beforeEach(() => {
     const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
     if (url === "/api/library/skill/agent-browser") {
       if (method === "PUT") { content = JSON.parse(String(init?.body)).content; return new Response("Skill saved successfully"); }
-      return ok({ name: "agent-browser", path: "skill/agent-browser", content, files: [], references: ["references/selectors.md"] });
+      return ok({ name: "agent-browser", path: "skill/agent-browser", audience: ["mission", "local"], scope: "on-demand", content, files: [], references: ["references/selectors.md"] });
+    }
+    if (url === "/api/library/skill/agent-browser/files/references/selectors.md") {
+      return new Response("# Selectors\n");
     }
     if (url === "/api/library/commit") return commitFails ? new Response("git commit failed: gpg failed to sign the data", { status: 500 }) : new Response("Committed successfully");
     if (url === "/api/library/push") return new Response("Pushed successfully");
@@ -72,6 +75,29 @@ describe("skill page", () => {
     expect(screen.getByRole("menuitem", { name: "History" })).toBeTruthy();
     expect(screen.getByRole("menuitem", { name: "Discard local edits" })).toBeTruthy();
     expect(screen.getByRole("menuitem", { name: /Delete/ })).toBeTruthy();
+
+    let syncedReq: unknown = null;
+    (window as unknown as { __TAURI__: { core: { invoke: (_cmd: string, args?: { request?: unknown }) => Promise<unknown> } } }).__TAURI__ = {
+      core: {
+        invoke: async (_cmd, args) => {
+          syncedReq = args?.request ?? null;
+          return { synced_skills: 1, harnesses_updated: 1, skipped_unmanaged: [], report: { skills: [], harnesses: [], sources: [] } };
+        },
+      },
+    };
+    fireEvent.click(screen.getByRole("menuitem", { name: "Discard local edits" }));
+    await waitFor(() => expect(syncedReq).not.toBeNull());
+    expect(syncedReq).toMatchObject({
+      replace_unmanaged: ["agent-browser"],
+      library_skills: [
+        {
+          name: "agent-browser",
+          audience: ["mission", "local"],
+          scope: "on-demand",
+          files: [{ rel: "references/selectors.md", content: "# Selectors\n" }],
+        },
+      ],
+    });
   });
 });
 
