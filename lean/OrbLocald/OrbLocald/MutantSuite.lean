@@ -1,7 +1,7 @@
 import OrbLocald.Spec
 
 /-
-  OrbLocald.MutantSuite — 13-mutant kill & agreement witnesses covering all 8 gates in OrbLocald.Spec (`0 sorryAx`).
+  OrbLocald.MutantSuite — 15-mutant kill & agreement witnesses covering all 9 gates in OrbLocald.Spec (`0 sorryAx`).
 -/
 
 namespace OrbLocald.MutantSuite
@@ -204,11 +204,11 @@ theorem kill_mutantConflictRetireStopping :
     verifyLocalConflictDisposition 409 3 0 = mutantConflictRetireStopping 409 3 0 := by
   decide
 
-/-- Mutant 14: reuses a cached `~/.orb/mcp/credential` across different Core endpoints (`sameEndpoint == 0`). -/
+/-- Mutant 14: reuses a cached `~/.orb/mcp/credential` across different Core endpoints (`sameEndpoint ≤ 1`). -/
 def mutantMcpCredCrossEndpointReuse
-    (isPrivateRegular0600 _sameEndpoint roleCode : UInt8)
+    (isPrivateRegular0600 sameEndpoint roleCode : UInt8)
     (nowEpochSec hardExpiresAt : UInt64) : UInt8 :=
-  if isPrivateRegular0600 == 1 && roleCode ≤ 1 &&
+  if isPrivateRegular0600 == 1 && sameEndpoint ≤ 1 && roleCode ≤ 1 &&
      nowEpochSec < hardExpiresAt &&
      hardExpiresAt - nowEpochSec ≥ 300 then 1 else 0
 
