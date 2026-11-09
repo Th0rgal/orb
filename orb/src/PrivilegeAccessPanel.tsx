@@ -138,7 +138,7 @@ export function PrivilegeAccessPanel(p: { onError: (message: string) => void; in
                 <div class="bw-request-body">
                   <div class="bw-request-line">
                     <strong class="secret-row-key" title={requestTitle(r)}>{requestTitle(r)}</strong>
-                    <span class="bw-request-meta" title={requesterLabel(r)}>{requesterLabel(r)} · {since(r.created_at)}</span>
+                    <span class="bw-request-meta" title={requesterLabel(r)}>· {requesterLabel(r)} · {since(r.created_at)}</span>
                   </div>
                   <span class="secret-row-reason" title={r.reason}>{r.reason}</span>
                   <span class="s-row-desc">Allows {scopeUnlocks(r)} · {lifetimeLabel(r)}</span>

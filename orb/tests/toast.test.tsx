@@ -88,39 +88,91 @@ describe("unified workspace ErrorToast & Toaster", () => {
     vi.doUnmock("../src/api");
   });
 
-  it("centers across the full app window (including over the sidebar) and lifts above any overlapping bottom composer", () => {
-    Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 });
+  it("merges simultaneous TimeoutError cascades across views, strips redundant prefixes, and runs all owners on Retry", async () => {
+    const retryArchives = vi.fn();
+    const dismissAction = vi.fn();
+    const dismissRename = vi.fn();
+    const timeoutMsg = "TimeoutError: The server is taking too long to answer. Please retry; nothing was lost.";
+    const [errAction, setErrAction] = createSignal<string | null>("The server is taking too long to answer. Please retry; nothing was lost.");
+    const [errRename, setErrRename] = createSignal<string | null>(timeoutMsg);
+    const [errArchives, setErrArchives] = createSignal<string | null>(`Couldn’t load archives: ${timeoutMsg}`);
+
+    render(() => (
+      <>
+        <ErrorToast error={errAction()} title="This action couldn’t be completed" onDismiss={() => { dismissAction(); setErrAction(null); }} />
+        <ErrorToast error={errRename()} title="Couldn’t rename the project" onDismiss={() => { dismissRename(); setErrRename(null); }} />
+        <ErrorToast error={errArchives()} title="Couldn’t load archives" background action={{ label: "Retry", run: retryArchives }} />
+      </>
+    ));
+
+    const alerts = screen.getAllByRole("alert");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].querySelector(".toast-title")?.textContent).toBe("The server is taking too long to answer");
+    expect(alerts[0].querySelector(".toast-message")?.textContent).toBe("Please retry; nothing was lost.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retryArchives).toHaveBeenCalledOnce();
+
+    setErrAction(null);
+    setErrRename(null);
+    setErrArchives(null);
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("strips duplicate caller title and Error prefixes from custom error messages", () => {
+    render(() => (
+      <ErrorToast
+        error="Couldn't load archives: Error: Archive storage unavailable"
+        title="Couldn’t load archives"
+      />
+    ));
+    const alert = screen.getByRole("alert");
+    expect(alert.querySelector(".toast-title")?.textContent).toBe("Couldn’t load archives");
+    expect(alert.querySelector(".toast-message")?.textContent).toBe("Archive storage unavailable");
+  });
+
+  it("excludes the left sidebar: straddles open workspace panels at 580px in 2-panel mode and matches the centered column in 1-panel mode", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
 
     const sidebar = document.createElement("aside");
     sidebar.className = "sidebar";
-    sidebar.getBoundingClientRect = () => rect(0, 0, 240, 900);
+    sidebar.getBoundingClientRect = () => rect(0, 0, 220, 900);
 
     const main = document.createElement("main");
     main.className = "main";
-    main.getBoundingClientRect = () => rect(240, 35, 700, 900);
+    main.getBoundingClientRect = () => rect(220, 35, 820, 900);
 
     const dock = document.createElement("div");
     dock.className = "dock";
     const composer = document.createElement("div");
     composer.className = "composer";
-    composer.getBoundingClientRect = () => rect(274, 818, 666, 884);
+    composer.getBoundingClientRect = () => rect(254, 818, 786, 884);
     dock.append(composer);
     main.append(dock);
 
     const filePanel = document.createElement("aside");
     filePanel.className = "file-panel";
-    filePanel.getBoundingClientRect = () => rect(700, 35, 900, 900);
+    filePanel.getBoundingClientRect = () => rect(820, 35, 1440, 900);
 
     document.body.append(sidebar, main, filePanel);
     try {
       notify({ key: "approval-queue", kind: "info", variant: "secret", title: "Touch ID required" });
       window.dispatchEvent(new Event("resize"));
       const toaster = document.querySelector<HTMLElement>(".toaster")!;
-      // Window spans 0..900 -> exact center is 450px (580px wide spans 160..740, overlapping sidebar 0..240).
-      expect(toaster.style.left).toBe("450px");
+      // 2 panels open: workspace spans 220..1440 (excluding 0..220 sidebar) -> center 830px, straddle width 580px.
+      expect(toaster.style.left).toBe("830px");
       expect(toaster.style.width).toBe("580px");
       // Overlaps the docked composer at top=818 -> lifts to 900 - 818 + 12 = 94px.
+      expect(toaster.style.bottom).toBe("94px");
+
+      // Close side panel -> 1 panel open: main spans 220..1440, centered 748px composer spans 456..1204 (center 830px).
+      filePanel.remove();
+      main.getBoundingClientRect = () => rect(220, 35, 1440, 900);
+      composer.getBoundingClientRect = () => rect(456, 818, 1204, 884);
+      window.dispatchEvent(new Event("resize"));
+      expect(toaster.style.left).toBe("830px");
+      expect(toaster.style.width).toBe("748px");
       expect(toaster.style.bottom).toBe("94px");
     } finally {
       sidebar.remove();
