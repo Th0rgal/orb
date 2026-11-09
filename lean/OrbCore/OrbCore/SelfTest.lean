@@ -809,7 +809,8 @@ private def runR3cdRound3BlockerTests
      csRunSt != "terminal" || csRunTr != "hosted_stop" || csLiveCnt != 0 then
     return (← failWith s!"R3-BLOCK-3 hostedStop clean state mismatch: nextGen={stopNextGen} st={csStatus} gen={csGen} cont={csContPh} eff={csEffPh} run={csRunSt} tr={csRunTr} liveCnt={csLiveCnt}")
   -- Verify `isMissionIdleForCyberChange` (`PATCH /api/control/missions/:id/cyber`) sees zero live runs after `hostedStop`:
-  let .ok (sCyberAfterStop, _) ← sendTestHttp appSt validJwt "PATCH" "/api/control/missions/m-r3b-stop-tx/cyber"
+  let appStTmp := { appSt with cfg := { appSt.cfg with workingDir := store.rootDir } }
+  let .ok (sCyberAfterStop, _) ← sendTestHttp appStTmp validJwt "PATCH" "/api/control/missions/m-r3b-stop-tx/cyber"
     "{\"mode\":\"daybreak\"}" nowSec
     | return (← failWith "PATCH cyber after hostedStop")
   if sCyberAfterStop != 200 then
@@ -1448,7 +1449,7 @@ private def runFastMemoryBrokerTests
     IO.eprintln s!"[orb-core-test] FAIL: SM-02 client mission create expected placement_kind=client: {clientCreateResp.status} {clientCreateStr}"
     return 1
   let _ ← execParamQuery store.missionsDb
-    "UPDATE missions SET tags='[\"managed-fake\",\"placement:managed_vm\"]' WHERE id='m-sm02-client';" #[]
+    "UPDATE missions SET tags='[\"managed-fake\",\"placement:managed_vm\",\"remote-node:auto-managed\"]' WHERE id='m-sm02-client';" #[]
   let clientSessBody := "{\"mission_id\":\"m-sm02-client\",\"role\":\"worker\",\"project\":\"orb\"}"
   let clientSessRaw := s!"POST /api/mcp/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {clientSessBody.utf8ByteSize}\r\n\r\n{clientSessBody}".toUTF8
   let .ok clientSessReq := parseRequest clientSessRaw none | do closeCoreStore store; return 1
@@ -1472,6 +1473,49 @@ private def runFastMemoryBrokerTests
   if mgdCallResp.status != 200 || (mgdCallStr.splitOn "untrusted managed compute nodes").length != 2 then
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: SM-02 /api/mcp/call should deny typed placement_kind=managed_vm: {mgdCallStr}"
+    return 1
+  let vmCreateBody := "{\"id\":\"m-sm02-vm\",\"title\":\"Managed VM\",\"project\":\"orb\",\"remote_node_id\":\"auto-managed:boat:xlarge\"}"
+  let vmCreateRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {vmCreateBody.utf8ByteSize}\r\n\r\n{vmCreateBody}".toUTF8
+  let .ok vmCreateReq := parseRequest vmCreateRaw none | do closeCoreStore store; return 1
+  let .ok vmCreateResp ← dispatchCoreRequest appSt vmCreateReq nowSec | do closeCoreStore store; return 1
+  let vmCreateStr := String.fromUTF8! vmCreateResp.body
+  if vmCreateResp.status != 201 || (vmCreateStr.splitOn "\"placement_kind\":\"managed_vm\"").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: SM-02 auto-managed create expected placement_kind=managed_vm: {vmCreateResp.status} {vmCreateStr}"
+    return 1
+  let beginVmBody := "{\"run_id\":\"run-sm02-vm\",\"owner_epoch\":1}"
+  let beginVmRaw := s!"POST /api/control/missions/m-sm02-vm/runs/begin HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {beginVmBody.utf8ByteSize}\r\n\r\n{beginVmBody}".toUTF8
+  let .ok beginVmReq := parseRequest beginVmRaw none | do closeCoreStore store; return 1
+  let .ok beginVmResp ← dispatchCoreRequest appSt beginVmReq nowSec | do closeCoreStore store; return 1
+  let beginVmStr := String.fromUTF8! beginVmResp.body
+  if beginVmResp.status != 201 || (beginVmStr.splitOn "\"placement_kind\":\"managed_vm\"").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: SM-10 managed_vm beginMissionRun expected 201: {beginVmResp.status} {beginVmStr}"
+    return 1
+  let vmSessBody := "{\"mission_id\":\"m-sm02-vm\",\"role\":\"worker\",\"project\":\"orb\"}"
+  let vmSessRaw := s!"POST /api/mcp/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {vmSessBody.utf8ByteSize}\r\n\r\n{vmSessBody}".toUTF8
+  let .ok vmSessReq := parseRequest vmSessRaw none | do closeCoreStore store; return 1
+  let .ok vmSessResp ← dispatchCoreRequest appSt vmSessReq nowSec | do closeCoreStore store; return 1
+  let .ok vmSessJson := OrbBin.Json.parseBytes vmSessResp.body | do closeCoreStore store; return 1
+  let vmMcpTok := (vmSessJson.fieldStr? "token").getD ""
+  let vmCallBody := "{\"name\":\"memory_search_knowledge\",\"arguments\":{\"query\":\"Orb\"}}"
+  let vmCallRaw := s!"POST /api/mcp/call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {vmMcpTok}\r\nContent-Length: {vmCallBody.utf8ByteSize}\r\n\r\n{vmCallBody}".toUTF8
+  let .ok vmCallReq := parseRequest vmCallRaw none | do closeCoreStore store; return 1
+  let .ok vmCallResp ← dispatchCoreRequest appSt vmCallReq nowSec | do closeCoreStore store; return 1
+  let vmCallStr := String.fromUTF8! vmCallResp.body
+  if vmCallResp.status != 200 || (vmCallStr.splitOn "untrusted managed compute nodes").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: SM-02 auto-managed /api/mcp/call should deny memory_search_knowledge: {vmCallStr}"
+    return 1
+  let bogusBeginBody := "{\"run_id\":\"run-sm02-bogus\",\"owner_epoch\":1}"
+  let _ ← execParamQuery store.missionsDb "UPDATE missions SET placement_kind='' WHERE id='m-sm02-client';" #[]
+  let bogusBeginRaw := s!"POST /api/control/missions/m-sm02-client/runs/begin HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {bogusBeginBody.utf8ByteSize}\r\n\r\n{bogusBeginBody}".toUTF8
+  let .ok bogusBeginReq := parseRequest bogusBeginRaw none | do closeCoreStore store; return 1
+  let .ok bogusBeginResp ← dispatchCoreRequest appSt bogusBeginReq nowSec | do closeCoreStore store; return 1
+  let bogusBeginStr := String.fromUTF8! bogusBeginResp.body
+  if bogusBeginResp.status != 400 || (bogusBeginStr.splitOn "invalid_placement_kind:").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: SM-10 empty placement_kind expected 400: {bogusBeginResp.status} {bogusBeginStr}"
     return 1
   return 0
 
@@ -1527,9 +1571,50 @@ private def runCloudHandoffTests
      (handoffStr.splitOn "\"turns_copied\":2").length != 2 ||
      (handoffStr.splitOn "\"used_cloud_turns\":true").length != 2 ||
      (handoffStr.splitOn "\"fresh_workspace\":true").length != 2 ||
+     (handoffStr.splitOn "\"placement_kind\":\"remote\"").length != 2 ||
      (handoffStr.splitOn "fork-workspace:").length != 1 then
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: cloud-to-workspace handoff response mismatch: status={validHandoffResp.status} body={handoffStr}"
+    return 1
+  let beginBabBody := "{\"run_id\":\"run-handoff-babylon\",\"owner_epoch\":1}"
+  let beginBabRaw := s!"POST /api/control/missions/m-handoff-ok/runs/begin HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {beginBabBody.utf8ByteSize}\r\n\r\n{beginBabBody}".toUTF8
+  let .ok beginBabReq := parseRequest beginBabRaw none | do closeCoreStore store; return 1
+  let .ok beginBabResp ← dispatchCoreRequest appSt beginBabReq nowSec | do closeCoreStore store; return 1
+  let beginBabStr := String.fromUTF8! beginBabResp.body
+  if beginBabResp.status != 201 || (beginBabStr.splitOn "\"placement_kind\":\"remote\"").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: SM-10 fleet fork beginMissionRun expected 201 remote: {beginBabResp.status} {beginBabStr}"
+    return 1
+  let vmForkBody := "{\"id\":\"m-fork-vm\",\"backend\":\"codex\",\"remote_node_id\":\"auto-managed\",\"working_directory\":\"/var/lib/sandboxed-node/work/orb\"}"
+  let vmForkRaw := s!"POST /api/control/missions/m-paloma-1/fork HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {vmForkBody.utf8ByteSize}\r\n\r\n{vmForkBody}".toUTF8
+  let .ok vmForkReq := parseRequest vmForkRaw none | do closeCoreStore store; return 1
+  let .ok vmForkResp ← dispatchCoreRequest appSt vmForkReq nowSec | do closeCoreStore store; return 1
+  let vmForkStr := String.fromUTF8! vmForkResp.body
+  if vmForkResp.status != 201 || (vmForkStr.splitOn "\"placement_kind\":\"managed_vm\"").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: auto-managed fork expected placement_kind=managed_vm: {vmForkResp.status} {vmForkStr}"
+    return 1
+  let beginForkBody := "{\"run_id\":\"run-fork-vm\",\"owner_epoch\":1}"
+  let beginForkRaw := s!"POST /api/control/missions/m-fork-vm/runs/begin HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {beginForkBody.utf8ByteSize}\r\n\r\n{beginForkBody}".toUTF8
+  let .ok beginForkReq := parseRequest beginForkRaw none | do closeCoreStore store; return 1
+  let .ok beginForkResp ← dispatchCoreRequest appSt beginForkReq nowSec | do closeCoreStore store; return 1
+  if beginForkResp.status != 201 || ((String.fromUTF8! beginForkResp.body).splitOn "\"placement_kind\":\"managed_vm\"").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: SM-10 forked managed_vm beginMissionRun expected 201: {beginForkResp.status}"
+    return 1
+  let forkSessBody := "{\"mission_id\":\"m-fork-vm\",\"role\":\"worker\",\"project\":\"orb\"}"
+  let forkSessRaw := s!"POST /api/mcp/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {forkSessBody.utf8ByteSize}\r\n\r\n{forkSessBody}".toUTF8
+  let .ok forkSessReq := parseRequest forkSessRaw none | do closeCoreStore store; return 1
+  let .ok forkSessResp ← dispatchCoreRequest appSt forkSessReq nowSec | do closeCoreStore store; return 1
+  let .ok forkSessJson := OrbBin.Json.parseBytes forkSessResp.body | do closeCoreStore store; return 1
+  let forkMcpTok := (forkSessJson.fieldStr? "token").getD ""
+  let forkCallBody := "{\"name\":\"memory_search_knowledge\",\"arguments\":{\"query\":\"Orb\"}}"
+  let forkCallRaw := s!"POST /api/mcp/call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {forkMcpTok}\r\nContent-Length: {forkCallBody.utf8ByteSize}\r\n\r\n{forkCallBody}".toUTF8
+  let .ok forkCallReq := parseRequest forkCallRaw none | do closeCoreStore store; return 1
+  let .ok forkCallResp ← dispatchCoreRequest appSt forkCallReq nowSec | do closeCoreStore store; return 1
+  if forkCallResp.status != 200 || ((String.fromUTF8! forkCallResp.body).splitOn "untrusted managed compute nodes").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: SM-02 forked managed_vm /api/mcp/call should deny memory: {String.fromUTF8! forkCallResp.body}"
     return 1
   return 0
 
@@ -1831,6 +1916,26 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let .ok ackReq := parseRequest ackRaw none | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
   let .ok ackResp ← dispatchCoreRequest r5App ackReq 69 | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
   let opJwt := mintSessionToken prodValid.jwtSecret 3660
+  let .ok () ← upsertMission r5Store {
+    id := "m-owner-1", title := "Managed VM Owner", status := "active",
+    backend := "codex", modelOverride := "", workingDirectory := r5Root,
+    project := "orb", placementKind := "managed", updatedAt := "70"
+  } | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let ownerSessBody := "{\"mission_id\":\"m-owner-1\",\"role\":\"worker\",\"project\":\"orb\"}"
+  let ownerSessRaw := s!"POST /api/mcp/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {opJwt}\r\nContent-Length: {ownerSessBody.utf8ByteSize}\r\n\r\n{ownerSessBody}".toUTF8
+  let .ok ownerSessReq := parseRequest ownerSessRaw none | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok ownerSessResp ← dispatchCoreRequest r5App ownerSessReq 70 | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok ownerSessJson := OrbBin.Json.parseBytes ownerSessResp.body | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let ownerMcpTok := (ownerSessJson.fieldStr? "token").getD ""
+  let ownerMemBody := "{\"name\":\"memory_search_knowledge\",\"arguments\":{\"query\":\"Orb\"}}"
+  let ownerMemRaw := s!"POST /api/mcp/call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {ownerMcpTok}\r\nContent-Length: {ownerMemBody.utf8ByteSize}\r\n\r\n{ownerMemBody}".toUTF8
+  let .ok ownerMemReq := parseRequest ownerMemRaw none | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok ownerMemResp ← dispatchCoreRequest r5App ownerMemReq 70 | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  if ownerMemResp.status != 200 || (((String.fromUTF8? ownerMemResp.body).getD "").splitOn "untrusted managed compute nodes").length != 2 then
+    closeCoreStore r5Store
+    closeManagedComputeStore mst
+    IO.eprintln s!"[orb-core-test] FAIL: SM-02 managedStore active VM claim did not deny memory_search_knowledge: {(String.fromUTF8? ownerMemResp.body).getD ""}"
+    return 1
   let mmListRaw := s!"GET /api/managed-machines HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {opJwt}\r\n\r\n".toUTF8
   let .ok mmListReq := parseRequest mmListRaw none | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
   let .ok mmListResp ← dispatchCoreRequest r5App mmListReq 70 | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1

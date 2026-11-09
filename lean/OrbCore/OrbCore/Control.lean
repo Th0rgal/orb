@@ -1344,6 +1344,14 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
                 onManagedNode := true
               if !activeClaims.isExternal && (!mProj.isEmpty || mTags.contains "skill:spark-memory") then
                 hasProjSkill := true
+          if !onManagedNode then
+            if let some mst := st.managedStore? then
+              if let .ok vmRs ← execParamQuery mst.db
+                  ("SELECT 1 FROM managed_machines WHERE owner_mission=?1 AND status<>'destroyed' " ++
+                   "UNION ALL SELECT 1 FROM managed_vm_claims WHERE owner_mission=?1 AND phase_code=1 LIMIT 1;")
+                  #[activeClaims.missionId] then
+                if vmRs.size > 1 then
+                  onManagedNode := true
         let bunkerSt ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
         let memCache ← match st.memTokenCache? with | some c => pure c | none => newMemoryTokenCache
         let ctx : MemoryCallerContext := {
@@ -2016,6 +2024,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
           s!"\{\"id\":{jsonEscape out.missionId},\"title\":{jsonEscape out.title},\"status\":\"awaiting_user\"," ++
           s!"\"backend\":{jsonEscape out.backend},\"model_override\":{modOvJson},\"model_effort\":{effJson}," ++
           s!"\"working_directory\":{jsonEscape out.workingDirectory},\"remote_node_id\":{rnJson}," ++
+          s!"\"placement_kind\":{jsonEscape out.placementKind}," ++
           s!"\"forked_from\":{jsonEscape out.forkedFrom},\"turns_copied\":{out.turnsCopied}," ++
           s!"\"used_cloud_turns\":{cloudTurnsStr},\"fresh_workspace\":{freshWsStr}," ++
           s!"\"state_revision\":1,\"tags\":{out.tagsJson}}"
@@ -2270,11 +2279,24 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         | none => baseReqTags
       let placement? := JsonTape.lookupString? tape "placement"
       let clientPlaced := isClientPlacement placement? reqTags
-      let placeKind := (JsonTape.lookupString? tape "placement_kind").getD (if clientPlaced then "client" else "managed")
-      let (tKind, nAdmin) := classifyMissionPlacementTarget clientPlaced placeKind remoteNodeId? reqTags
+      let rawPlaceKind? := JsonTape.lookupString? tape "placement_kind"
+      let prelimPlaceKind :=
+        match rawPlaceKind? with
+        | some pk => pk.trimAscii.toString.toLower
+        | none => if clientPlaced then "client" else "managed"
+      if let some _ := rawPlaceKind? then
+        if prelimPlaceKind != "managed" && prelimPlaceKind != "managed_vm" && !(prelimPlaceKind.startsWith "managed-") &&
+           prelimPlaceKind != "client" && prelimPlaceKind != "local" && prelimPlaceKind != "remote" && prelimPlaceKind != "remote_node" then
+          abortIdem
+          return .ok (mkJson 400 s!"\{\"error\":{jsonEscape s!"invalid_placement_kind:{prelimPlaceKind}"}}")
+      let (tKind, nAdmin) := classifyMissionPlacementTarget clientPlaced prelimPlaceKind remoteNodeId? reqTags
       if let some (cCode, cBody) := checkPlacementForCaller caller tKind nAdmin then
         abortIdem
         return .ok (mkJson cCode cBody)
+      let placeKind :=
+        match rawPlaceKind? with
+        | some _ => if tKind == 3 then "managed_vm" else prelimPlaceKind
+        | none => if clientPlaced then "client" else if tKind == 3 then "managed_vm" else "managed"
       let rawWorkDir := (JsonTape.lookupString? tape "working_directory").getD st.cfg.workingDir
       let safeWorkDirRes : Except String String ← do
         if tKind != 0 && (JsonTape.lookupString? tape "working_directory").isSome then

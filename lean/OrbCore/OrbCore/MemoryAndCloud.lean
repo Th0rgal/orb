@@ -899,6 +899,7 @@ structure ForkMissionOutcome where
   modelEffort         : String
   workingDirectory    : String
   remoteNodeId?       : Option String
+  placementKind       : String := "managed"
   turnsCopied         : Nat
   usedCloudTurns      : Bool
   sharedSourceWorkdir : Bool
@@ -1053,9 +1054,16 @@ def forkOrHandoffMission
 
   let nextAuthMode := if req.sideQuestion then "readonly" else srcAuthMode
   let nextPlacement :=
-    if remoteNodeClean?.isSome then "remote_node"
-    else if srcIsCloud then "local"
-    else srcPlacement
+    match remoteNodeClean? with
+    | some rn =>
+      let low := rn.toLower
+      if low == "auto-managed" || low.startsWith "auto-managed:" || low.startsWith "managed-" then
+        "managed_vm"
+      else
+        "remote"
+    | none =>
+      if srcIsCloud then "local"
+      else srcPlacement
   let nextTitle :=
     match req.title? with
     | some t => if t.trimAscii.toString.isEmpty then srcTitle else t.trimAscii.toString
@@ -1126,6 +1134,7 @@ def forkOrHandoffMission
       modelEffort := nextEffort
       workingDirectory := resolvedWorkDir
       remoteNodeId? := remoteNodeClean?
+      placementKind := nextPlacement
       turnsCopied := finalTurns.size
       usedCloudTurns := useCloudTurns
       sharedSourceWorkdir := shareSourceWs
