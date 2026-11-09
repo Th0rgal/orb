@@ -1,5 +1,13 @@
 import { swallow } from "../log";
 import {CodexSpeedPicker} from '../CodexSpeedPicker';
+import {
+  ClaudePermissionPicker,
+  WorktreeLaunchPicker,
+  draftClaudePermission,
+  draftWorktreeMode,
+  setDraftClaudePermission,
+  setDraftWorktreeMode,
+} from "../ClaudePermissionPicker";
 import { Picker } from "../Picker";
 import { Menu } from "../Menu";
 import { Popover } from "../Popover";
@@ -926,6 +934,13 @@ export function Composer(p: {
           <Show when={pick()?.backend === "codex"}>
             <span class="picks-sep">·</span><CodexSpeedPicker model={pick()?.model??""} value={pick()?.service_tier??"standard"} local={p.uploadTarget==="local"} onChange={tier=>setHarnessPick({...pick()!,service_tier:tier})}/>
             <span class="picks-sep">·</span><CyberPicker value={draftCyber()} model={pick()?.model??""} goal={mode()==="goal"||/^\s*\/goal(?:\s|$)/.test(text())} remote={!!p.uploadTarget&&p.uploadTarget!=="core"&&p.uploadTarget!=="local"} onChange={setDraftCyber}/>
+          </Show>
+          <Show when={pick()?.backend === "claudecode"}>
+            <span class="picks-sep">·</span>
+            <ClaudePermissionPicker value={draftClaudePermission()} onChange={setDraftClaudePermission} />
+          </Show>
+          <Show when={!p.missionId && p.localCwd?.trim()}>
+            <WorktreeLaunchPicker cwd={p.localCwd} value={draftWorktreeMode()} onChange={setDraftWorktreeMode} />
           </Show>
         </Show>
       </div>

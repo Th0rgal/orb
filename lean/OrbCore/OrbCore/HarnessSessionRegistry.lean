@@ -310,7 +310,7 @@ def foldEmittedAgentEventIntoSession
       (sess, { dc with lastNormWord := w }, [], some ev)
     else
       (sess, { dc with lastNormWord := w }, [], none)
-  | .ToolCall _ callId _ =>
+  | .ToolCall _ callId _ _ =>
     let isDup : UInt32 := if !callId.isEmpty && dc.completedCallIds.contains callId then 1 else 0
     let w := Orb.Kernel.agentEventNormalizeStep harnessKind 4 0 1 sessionMatches isDup payloadBytes maxBytes
     if checkNormalizerAdmitted w then
@@ -827,7 +827,7 @@ def stepStandardHarnessLine
         match rawVibeEv with
         | .TextDelta _ d       => .TextDelta handle.missionId d
         | .Thinking _ c done   => .Thinking handle.missionId c done
-        | .ToolCall _ cid nm   => .ToolCall handle.missionId cid nm
+        | .ToolCall _ cid nm argsJson => .ToolCall handle.missionId cid nm argsJson
         | .ToolResult _ c n o  => .ToolResult handle.missionId c n o
         | .AssistantMessage _ t => .AssistantMessage handle.missionId t
         | .TurnResult _ err m  => .TurnResult handle.missionId err m

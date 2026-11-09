@@ -308,6 +308,7 @@ extension OrbConversation {
                     selection.backend = value["backend"].text
                     selection.model = value["model_override"].text
                     selection.serviceTier = OrbCodexSpeed.of(value)
+                    selection.permissionMode = OrbClaudePermissionMode.parse(value["permission_mode"].text).rawValue
                 }
                 selection.node = OrbContinuation.remoteNodeID(for: value) == "core" ? value["remote_node_id"].text : OrbContinuation.remoteNodeID(for: value)
                 if selection.model.isEmpty { selection.model = value["model_override"].text; selection.serviceTier = OrbCodexSpeed.of(value) }
@@ -641,6 +642,12 @@ extension OrbConversation {
                     if !selection.cloud {
                         body["backend"] = .string(selection.backend)
                         body["model_override"] = .string(selection.model)
+                        if selection.backend == "claudecode" {
+                            body["permission_mode"] = .string(selection.permissionMode)
+                        }
+                        if selection.worktreeMode != "auto" {
+                            body["worktree_mode"] = .string(selection.worktreeMode)
+                        }
                         if !selection.node.isEmpty && selection.node != "core" {
                             body["remote_node_id"] = .string(selection.node)
                             if selection.allow24hCommitment && OrbManaged.isAutoManagedTarget(selection.node) {
@@ -951,6 +958,26 @@ extension OrbConversation {
         }
         let nextModel = selection.model
         let nextTier = selection.serviceTier
+        let currentPermission = OrbClaudePermissionMode.parse(mission["permission_mode"].text).rawValue
+        let nextPermission = selection.permissionMode
+        let permissionChanged = selection.backend == "claudecode" && nextPermission != currentPermission
+        if permissionChanged {
+            if case var .object(fields) = mission {
+                fields["permission_mode"] = .string(nextPermission)
+                mission = .object(fields)
+            }
+            Task {
+                do {
+                    _ = try await api.call(
+                        "/api/control/missions/\(OrbCore.escape(id))/permission-mode",
+                        method: "POST",
+                        body: .object(["permission_mode": .string(nextPermission)])
+                    )
+                } catch {
+                    self.error = error.localizedDescription
+                }
+            }
+        }
         let modelChanged = nextModel != currentModel
         let tierChanged = selection.backend == "codex" && nextTier != currentTier
         guard modelChanged || tierChanged else { return }

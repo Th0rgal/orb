@@ -7,6 +7,7 @@ import LeanSys
 import Orb.Kernel
 import Orb.HarnessCloud
 import OrbBin.Json
+import OrbBin.ClaudeControl
 
 namespace OrbCore.Harness
 
@@ -29,7 +30,7 @@ def isOpenCodeCompactionSummary (text : String) : Bool :=
 inductive AgentEvent where
   | TextDelta (missionId : String) (delta : String)
   | Thinking (missionId : String) (content : String) (done : Bool)
-  | ToolCall (missionId : String) (callId : String) (name : String)
+  | ToolCall (missionId : String) (callId : String) (name : String) (argsJson : String := "{}")
   | ToolResult (missionId : String) (callId : String) (toolName : String) (output : String)
   | AssistantMessage (missionId : String) (text : String)
   | TurnResult (missionId : String) (isError : Bool) (message : String)
@@ -71,12 +72,32 @@ def stepHarnessJsonLine (st : HarnessParserState) (line : String) : HarnessParse
       else
         let delta := (JsonTape.lookupString? tape "delta").getD ((JsonTape.lookupString? tape "text").getD "")
         { st with emittedEvents := st.emittedEvents.push (.TextDelta st.missionId delta) }
+    else if evType == "control_request" then
+      match (OrbBin.Json.parse trimmed).toOption.bind OrbBin.ClaudeControl.parseClaudeControlRequest? with
+      | none => st
+      | some cr =>
+        let callId := cr.requestId
+        let name := "ui_native_request"
+        let argsJson := renderCompact (.obj #[
+          ("method", .str cr.method),
+          ("params", cr.uiParams)
+        ])
+        let baseCalls := if st.pendingCalls.size ≥ 1024 then st.pendingCalls.extract 1 st.pendingCalls.size else st.pendingCalls
+        let calls' := baseCalls.push (callId, name)
+        { st with sawActivity := true, pendingCalls := calls', emittedEvents := st.emittedEvents.push (.ToolCall st.missionId callId name argsJson) }
     else if evType == "tool_call" || evType == "tool_use" then
       let callId := (JsonTape.lookupString? tape "id").getD ((JsonTape.lookupString? tape "call_id").getD "")
       let name := (JsonTape.lookupString? tape "name").getD "tool"
+      let argsJson :=
+        match OrbBin.Json.parse trimmed with
+        | .ok jv =>
+          match (jv.field? "input").orElse (fun _ => jv.field? "args") with
+          | some a => renderCompact a
+          | none => "{}"
+        | .error _ => "{}"
       let baseCalls := if st.pendingCalls.size ≥ 1024 then st.pendingCalls.extract 1 st.pendingCalls.size else st.pendingCalls
       let calls' := baseCalls.push (callId, name)
-      { st with pendingCalls := calls', emittedEvents := st.emittedEvents.push (.ToolCall st.missionId callId name) }
+      { st with pendingCalls := calls', emittedEvents := st.emittedEvents.push (.ToolCall st.missionId callId name argsJson) }
     else if evType == "tool_result" then
       let callId := (JsonTape.lookupString? tape "tool_use_id").getD ((JsonTape.lookupString? tape "call_id").getD "")
       let toolName := lookupToolName st.pendingCalls callId
@@ -359,6 +380,18 @@ def opencode_raced_sse_idle_vs_nonzero_cli_exit_contract : Bool :=
   resClean == some (false, "end_turn") &&
   !sReset.sawUserText && !sReset.sawActivity && sReset.emittedEvents.isEmpty
 
+def claude_control_request_emits_ui_native_request : Bool :=
+  let line := "{\"type\":\"control_request\",\"request_id\":\"req-perm-9\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Bash\",\"input\":{\"command\":\"git status\"}}}"
+  let s1 := stepHarnessJsonLine { missionId := "m9" } line
+  let s2 := stepHarnessJsonLine s1 "{\"type\":\"tool_result\",\"tool_use_id\":\"req-perm-9\",\"output\":\"accepted\"}"
+  let ev0? : Option AgentEvent := s2.emittedEvents[0]?
+  let ev1? : Option AgentEvent := s2.emittedEvents[1]?
+  match ev0?, ev1? with
+  | some (AgentEvent.ToolCall "m9" "req-perm-9" "ui_native_request" argsJson),
+    some (AgentEvent.ToolResult "m9" "req-perm-9" "ui_native_request" "accepted") =>
+    (argsJson.splitOn "\"method\":\"permission\"").length > 1
+  | _, _ => false
+
 def runAllHarnessContractTests : Bool :=
   text_delta_does_not_contain_thinking_content &&
   thinking_produces_thinking_event &&
@@ -370,6 +403,7 @@ def runAllHarnessContractTests : Bool :=
   test_parse_result_event &&
   vibe_acp_session_update_contract &&
   opencode_empty_stop_after_reasoning_or_compaction_is_flagged &&
-  opencode_raced_sse_idle_vs_nonzero_cli_exit_contract
+  opencode_raced_sse_idle_vs_nonzero_cli_exit_contract &&
+  claude_control_request_emits_ui_native_request
 
 end OrbCore.Harness

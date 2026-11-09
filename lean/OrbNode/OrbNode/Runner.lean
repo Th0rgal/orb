@@ -1018,6 +1018,7 @@ structure LiveProc where
   steerAfterTool   : Bool := false
   execUnixUser     : String := ""
   execUid          : UInt32 := 0
+  stdinFd          : Int32 := -1
   deriving Repr, Inhabited
 
 structure PreparedJobSpec where
@@ -1045,6 +1046,7 @@ structure PreparedJobSpec where
   memHigh?         : Option UInt64 := none
   cpuWeight?       : Option Nat := none
   cpuQuota?        : Option String := none
+  pipeStdin        : Bool := false
   deriving Repr, Inhabited
 
 structure NodeRuntime where
@@ -1388,6 +1390,7 @@ private def prepareJobOutsideLockInner
   let wsId := ((payload.fieldStr? "workspace_id").orElse (fun _ => payload.fieldStr? "companion_of")).getD missionId
   let machName? := ((payload.fieldStr? "machine_name").orElse (fun _ => payload.fieldStr? "container_machine")).map
     (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty)
+  let pipeStdin := (payload.fieldBool? "pipe_stdin").getD false
   if isUserConfined then
     let memMax ← computeJobMemoryLimitBytes cfg
     let memHigh := (memMax / 10) * 9
@@ -1418,6 +1421,7 @@ private def prepareJobOutsideLockInner
       memHigh? := some memHigh
       cpuWeight? := cpuW?
       cpuQuota? := cpuQ?
+      pipeStdin := pipeStdin
     }
   let (wrappedProg, wrappedArgs, wrappedEnvPairs, scope?) ←
     wrapWithSystemdScope cfg false jid timeoutSecs? prog args envPairs
@@ -1442,6 +1446,7 @@ private def prepareJobOutsideLockInner
     execUnixUser := ""
     execUid := 0
     callerRole := callerRole
+    pipeStdin := pipeStdin
   }
 
 /-- Clean up any partial per-job isolated checkout directory `<workDir>/checkouts/<repoHash16>/jobs/<jid>`. -/
@@ -1468,6 +1473,44 @@ def prepareJobOutsideLock
   | .error ioErr =>
     cleanupPartialJobCheckout cfg.workDir jid payload
     return .error s!"job preparation I/O error: {ioErr}"
+
+/-- Spawn a `-pgid` job with an open writable `stdin` pipe (`OrbBin.PosixExt.spawnPgrp`), redirecting
+    `stdout` and `stderr` to `logPath` without touching `orb_node_posix.c`. -/
+private def spawnJobPgrpPipedStdin
+    (prog : String) (args : Array String) (envKv : Array String) (cwd logPath : String) : IO (UInt64 × Int32) := do
+  if let some parent := (System.FilePath.mk logPath).parent then
+    IO.FS.createDirAll parent
+  let mut envStrs : Array String := Array.mkEmpty (envKv.size / 2)
+  let mut idx := 0
+  while idx + 1 < envKv.size do
+    envStrs := envStrs.push s!"{envKv[idx]!}={envKv[idx + 1]!}"
+    idx := idx + 2
+  let shArgs := #["-c", "cd \"$1\" && exec >>\"$2\" 2>&1 && shift 2 && exec \"$@\"", "sh", cwd, logPath, prog] ++ args
+  let sp ← spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := true) (nullStdio := true) (pipeStdout := false)
+  if sp.pid <= 0 then
+    throw (IO.userError s!"spawnJobPgrpPipedStdin failed for {prog}")
+  return (sp.pid.toUInt64, sp.stdinFd)
+
+/-- Close a job's piped `stdinFd` if open (`>= 0`). -/
+def closeLiveStdinIfOpen (lp : LiveProc) : IO Unit := do
+  if lp.stdinFd >= 0 then
+    closeFdRaw lp.stdinFd
+
+/-- Write a single NDJSON / text line (`line ++ "\n"`) to a live `pipe_stdin` job's stdin pipe. -/
+def writeJobStdinLine (rt : NodeRuntime) (jid line : String) : IO (Except String Unit) := do
+  let some cur := rt.ledger.jobs.get? jid
+    | return .error "not_found"
+  if cur.state != .running then
+    return .error "job_not_running"
+  let some lp := rt.liveProcs.get? jid
+    | return .error "job_not_running"
+  if lp.stdinFd < 0 then
+    return .error "stdin_not_piped"
+  let payload := if line.endsWith "\n" then line.toUTF8 else (line ++ "\n").toUTF8
+  let rc ← writeFdAll lp.stdinFd payload
+  if rc != 0 then
+    return .error "stdin_pipe_closed"
+  return .ok ()
 
 /-- Commit a `PreparedJobSpec` into `NodeRuntime` (clearing its `launching` reservation and `queuedPayloads`,
     and spawning `-pgid` / transient `systemd-run --scope` unless cancelled while preparing). -/
@@ -1622,7 +1665,12 @@ def commitPreparedJob
           }) then
             rt := { rt with ledger := lErr }
           return releaseDebt rt
-    match ← (OrbNode.Posix.spawnJobPgrp spec.prog spec.args spec.envKv spec.cwd spec.logPath).toBaseIO with
+    let spawnOutcome ←
+      if spec.pipeStdin then
+        (spawnJobPgrpPipedStdin spec.prog spec.args spec.envKv spec.cwd spec.logPath).toBaseIO
+      else
+        (do let p ← OrbNode.Posix.spawnJobPgrp spec.prog spec.args spec.envKv spec.cwd spec.logPath; pure (p, (-1 : Int32))).toBaseIO
+    match spawnOutcome with
     | .error e =>
       teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
         (scratchFinOf cur.nodeBootEpoch curClaimSeq spec.scratchDir?)
@@ -1631,13 +1679,14 @@ def commitPreparedJob
       }) then
         rt := { rt with ledger := l' }
       return releaseDebt rt
-    | .ok pid =>
+    | .ok (pid, spawnedStdinFd) =>
       let sample ← match postSpawnSampleOverride? with
         | some s => pure s
         | none => sampleProcLiveness pid
       let initTicks := sample.actualTicks
       let initBootId := sample.bootId
       if sample.procMissing == 1 || initTicks == 0 || initBootId.isEmpty then
+        if spawnedStdinFd >= 0 then closeFdRaw spawnedStdinFd
         let wFast ← OrbNode.Posix.pollPid pid
         let doneFast := (wFast &&& 1) == 1
         if doneFast && postSpawnSampleOverride?.isNone then
@@ -1728,9 +1777,11 @@ def commitPreparedJob
           scratchDir? := spec.scratchDir?
           machineName? := spec.machineName?
           workspaceId := if spec.workspaceId.isEmpty then cur.missionId else spec.workspaceId
+          stdinFd := spawnedStdinFd
         }
         return { rt with ledger := l', liveProcs := rt.liveProcs.insert jid lp }
       | .error updErr =>
+        if spawnedStdinFd >= 0 then closeFdRaw spawnedStdinFd
         let mut postPh ← terminateVerifiedPgrp initProcPh pid initTicks none initBootId
         if postPh == 3 then
           postPh ← terminateVerifiedPgrp 3 pid initTicks none initBootId
@@ -1809,6 +1860,7 @@ def tickRuntimeReserve
         let ci : Int := if codeU32 == 0xFFFFFFFF then -1 else Int.ofNat codeU32.toNat
         pure (d, ci)
     if done then
+      closeLiveStdinIfOpen lp
       let missionIdStr := (recJob?.map (·.missionId)).getD lp.workspaceId
       let arts ←
         if !lp.execUnixUser.isEmpty then
@@ -1834,6 +1886,7 @@ def tickRuntimeReserve
         rt := { rt with shrinkDebt := rt.shrinkDebt - 1 }
     else if let some limitSecs := lp.timeoutSecs? then
       if nowEp > lp.startedEp + limitSecs then
+        closeLiveStdinIfOpen lp
         if !lp.execUnixUser.isEmpty then
           discard <| controlUserJob rt.cfg.privdSocket "kill" jid lp.execUnixUser
         else do
@@ -1859,6 +1912,7 @@ def tickRuntimeReserve
           if !lp.execUnixUser.isEmpty then pure #[]
           else collectVerifiedInflightChildTools lp.pid (lp.systemdScope?.map (·.unit)) lp.startTicks lp.bootId
         if inflight.isEmpty then
+          closeLiveStdinIfOpen lp
           if !lp.execUnixUser.isEmpty then
             discard <| controlUserJob rt.cfg.privdSocket "kill" jid lp.execUnixUser
           else do
@@ -1883,6 +1937,7 @@ def tickRuntimeReserve
         if !lp.execUnixUser.isEmpty then pure #[]
         else collectVerifiedInflightChildTools lp.pid (lp.systemdScope?.map (·.unit)) lp.startTicks lp.bootId
       if inflight.isEmpty then
+        closeLiveStdinIfOpen lp
         if !lp.execUnixUser.isEmpty then
           discard <| controlUserJob rt.cfg.privdSocket "kill" jid lp.execUnixUser
         else do
@@ -2002,6 +2057,7 @@ def cancelJob
   let mut releasedRegular := false
   let mut cancelLeaderSql := ""
   if let some lp := rt.liveProcs.get? jid then
+    closeLiveStdinIfOpen lp
     if !lp.execUnixUser.isEmpty then
       discard <| controlUserJob rt.cfg.privdSocket "kill" jid lp.execUnixUser
     else do

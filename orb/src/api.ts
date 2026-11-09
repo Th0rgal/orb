@@ -1089,6 +1089,7 @@ export interface Mission {
   model_override?: string | null;
   /** Reasoning effort in force for the next turn. Absent means backend default. */
   model_effort?: string | null;
+  permission_mode?: string | null;
   fast_mode?: boolean;
   service_tier?: CodexServiceTier;
   config_profile?: string | null;
@@ -1163,6 +1164,8 @@ export interface CreateMissionBody {
   /** Model id understood by that harness, e.g. claude-fable-5-1. */
   model_override?: string;
   model_effort?: string;
+  permission_mode?: string;
+  worktree_mode?: "local" | "worktree" | "auto";
   attachments?: MissionAttachment[];
   /** `"client"` records the mission and leaves execution to this Orb process. */
   placement?: "client";

@@ -4,6 +4,8 @@ import Orb.Kernel
 import OrbNetLeaf
 import OrbBin.Json
 import OrbBin.PosixExt
+import OrbBin.GitWorkspace
+import OrbBin.ClaudeControl
 import OrbLocald.Spec
 
 /-
@@ -724,22 +726,6 @@ def LocalOriginEntry.fromMissionJson? (jv : JVal) : Option LocalOriginEntry := d
     serviceTier := svcTier, createdAt, updatedAt, history := hist
   }
 
-structure LocalRunRecord where
-  id           : String
-  runUuid      : String
-  generation   : Nat := 1
-  harness      : String := ""
-  text         : String := ""
-  done         : Bool := true
-  exitCode?    : Option Int := none
-  sessionId?   : Option String := none
-  error?       : Option String := none
-  retryable    : Bool := false
-  resumed      : Bool := false
-  activities   : Array JVal := #[]
-  pid?         : Option Int64 := none
-  deriving Repr, Inhabited
-
 structure LocaldState where
   launchToken          : String
   rpcPort              : UInt16 := 19479
@@ -756,7 +742,6 @@ structure LocaldState where
   toolHub              : InteractiveToolHubState := {}
   clientLink           : ClientLinkState := {}
   localOrigins         : Array LocalOriginEntry := #[]
-  localRuns            : Array LocalRunRecord := #[]
   softwareJobs         : Array JVal := #[]
   approvalGraceSecs    : Nat := 300
   approvalGraceUntil   : UInt64 := 0
@@ -780,6 +765,8 @@ structure LocaldState where
   signerBin?           : Option String := none
   originHealth         : Array OriginHealthEntry := #[]
   h2Pool?              : Option OrbNetLeaf.H2Pool.H2ClientPool := none
+  warmMgr?             : Option OrbBin.ClaudeControl.WarmHarnessManager := none
+  runGenerations       : Array (String × UInt64) := #[]
   deriving Inhabited
 
 /-- Record an upstream RTT sample (`orb_rtt_ewma_step`) and clear cooldown on `origin`, returning updated `srttMs`. -/
@@ -870,6 +857,17 @@ def LocaldState.publishInteractionSnapshot (st : LocaldState) (runId : String) :
       (match e.target? with | none => true | some t => t == clean)).foldl
     (fun acc e => acc.enqueueTokenEvent e.token snap) st
 
+def ensureWarmManager (stRef : IO.Ref LocaldState) : IO OrbBin.ClaudeControl.WarmHarnessManager := do
+  let cur ← stRef.get
+  match cur.warmMgr? with
+  | some m => return m
+  | none =>
+    let fresh ← OrbBin.ClaudeControl.newWarmHarnessManager
+    stRef.modifyGet fun s =>
+      match s.warmMgr? with
+      | some existing => (existing, s)
+      | none => (fresh, { s with warmMgr? := some fresh })
+
 def LocaldState.subscribe (st : LocaldState) (channel : String) (initialEvent? : Option JVal := none)
     (target? : Option String := none) : (Nat × LocaldState) :=
   let tok := st.nextSubToken
@@ -956,7 +954,10 @@ def supportedDesktopCommands : Array String := #[
   "project_context_sync", "project_context_disconnect", "project_context_workers", "project_context_stop",
   "software_inventory", "software_update", "software_cancel",
   "local_skills_status", "local_skills_sync", "local_skill_source_files", "local_invocable_skills",
-  "voice_capability", "voice_prewarm", "voice_transcribe", "voice_cancel"
+  "voice_capability", "voice_prewarm", "voice_transcribe", "voice_cancel",
+  "local_checkpoints_list", "local_checkpoint_diff", "local_checkpoint_restore",
+  "local_worktree_status", "local_worktree_create", "local_worktree_remove",
+  "local_permission_mode_set"
 ]
 
 structure InvocableSkill where
@@ -1958,164 +1959,6 @@ private def scanLocalAgents (st : LocaldState) (overridesObj : JVal) : IO (Array
     | .ok row => rows := rows.push row
     | .error _ => pure ()
   return rows
-
-private def extractStreamLineDelta (harness line : String) : (String × Option String) := Id.run do
-  let trimmed := line.trimAscii.toString
-  if trimmed.isEmpty then return ("", none)
-  if !trimmed.startsWith "{" then
-    return (line ++ "\n", none)
-  match OrbBin.Json.parse trimmed with
-  | .error _ => return (line ++ "\n", none)
-  | .ok jv =>
-    let sid? := (jv.fieldStr? "session_id").orElse (fun _ =>
-      (jv.fieldStr? "sessionId").orElse (fun _ => jv.fieldStr? "thread_id"))
-    let typ := (jv.fieldStr? "type").getD ""
-    if harness == "claudecode" then
-      if typ == "assistant" then
-        if let some msg := jv.field? "message" then
-          if let some blocks := msg.fieldArr? "content" then
-            let mut acc := ""
-            for b in blocks do
-              if (b.fieldStr? "type") == some "text" then
-                if let some tx := b.fieldStr? "text" then acc := acc ++ tx
-            if !acc.isEmpty then return (acc, sid?)
-      if typ == "result" then
-        if let some resTxt := jv.fieldStr? "result" then
-          return (resTxt, sid?)
-      return ("", sid?)
-    else if harness == "codex" then
-      if typ == "item.completed" then
-        if let some item := jv.field? "item" then
-          if (item.fieldStr? "type") == some "agent_message" then
-            if let some tx := item.fieldStr? "text" then
-              return (tx ++ "\n", sid?)
-      return ("", sid?)
-    else if harness == "opencode" then
-      if typ == "text" then
-        if let some part := jv.field? "part" then
-          if let some tx := part.fieldStr? "text" then return (tx, sid?)
-        if let some tx := jv.fieldStr? "text" then return (tx, sid?)
-      return ("", sid?)
-    else
-      if let some tx := jv.fieldStr? "text" then return (tx, sid?)
-      return ("", sid?)
-
-private def localRunRecordToPollJson (r : LocalRunRecord) : JVal :=
-  .obj #[
-    ("text", .str r.text),
-    ("done", .bool r.done),
-    ("exit_code", match r.exitCode? with | some c => .num (toString c) | none => .null),
-    ("session_id", match r.sessionId? with | some s => .str s | none => .null),
-    ("error", match r.error? with | some e => .str e | none => .null),
-    ("retryable", .bool r.retryable),
-    ("resumed", .bool r.resumed),
-    ("activities", .arr r.activities)
-  ]
-
-private def buildLocalAgentSpawnArgs (harness prompt model effort sessionId : String) (planMode : Bool) : Array String := Id.run do
-  if harness == "claudecode" then
-    let mut a := #["-p", "--output-format", "stream-json", "--verbose"]
-    if planMode then a := a ++ #["--permission-mode", "plan"]
-    else a := a ++ #["--dangerously-skip-permissions"]
-    if !model.isEmpty then a := a ++ #["--model", model]
-    if !sessionId.isEmpty then a := a ++ #["--resume", sessionId]
-    return a.push prompt
-  else if harness == "codex" then
-    let mut a := #["exec", "--json", "--dangerously-bypass-approvals-and-sandbox"]
-    if !model.isEmpty then a := a ++ #["-m", model]
-    if !effort.isEmpty then a := a ++ #["-c", s!"model_reasoning_effort=\"{effort}\""]
-    return a.push prompt
-  else if harness == "opencode" then
-    let mut a := #["run", "--format", "json"]
-    if !model.isEmpty then a := a ++ #["-m", model]
-    if planMode then a := a ++ #["--agent", "plan"]
-    if !sessionId.isEmpty then a := a ++ #["-s", sessionId]
-    return a.push prompt
-  else if harness == "grok" then
-    let mut a := #["-p", prompt]
-    if !model.isEmpty then a := a ++ #["-m", model]
-    return a
-  else
-    return #[prompt]
-
-private def spawnLocalAgentRunner
-    (stRef : IO.Ref LocaldState)
-    (missionId runUuid harness binPath cwd prompt model effort sessionId : String)
-    (generation : Nat) (planMode : Bool) : IO Unit := do
-  let cliArgs := buildLocalAgentSpawnArgs harness prompt model effort sessionId planMode
-  discard <| IO.asTask (prio := .dedicated) do
-    let mut fullText := ""
-    let mut finalSession? : Option String := if sessionId.isEmpty then none else some sessionId
-    let mut exitCode? : Option Int := none
-    let mut errMsg? : Option String := none
-    try
-      let child ← IO.Process.spawn {
-        cmd := binPath
-        args := cliArgs
-        cwd := some (System.FilePath.mk cwd)
-        stdin := .null
-        stdout := .piped
-        stderr := .piped
-      }
-      let errTask ← IO.asTask child.stderr.readToEnd Task.Priority.dedicated
-      let mut eof := false
-      while !eof do
-        let line ← try child.stdout.getLine catch _ => pure ""
-        if line.isEmpty then
-          eof := true
-        else
-          let (delta, sid?) := extractStreamLineDelta harness line
-          if let some sid := sid? then finalSession? := some sid
-          if !delta.isEmpty then
-            fullText := fullText ++ delta
-            stRef.modify fun s =>
-              let curRuns := s.localRuns.map fun r =>
-                if r.id == missionId && r.runUuid == runUuid then { r with text := fullText, sessionId? := finalSession? } else r
-              let evPayload : JVal := .obj #[("text", .str delta), ("reset", .bool false)]
-              ({ s with localRuns := curRuns }).publishChannelEvent "local_agents" evPayload (some missionId)
-      let code ← child.wait
-      let errStr ← IO.ofExcept errTask.get
-      exitCode? := some (Int.ofNat code.toNat)
-      if code != 0 && fullText.trimAscii.toString.isEmpty then
-        let cleanErr := errStr.trimAscii.toString
-        errMsg? := some (if cleanErr.isEmpty then s!"{harness} exited with status {code}" else cleanErr)
-    catch e =>
-      errMsg? := some (toString e)
-    let nowIso := formatUtcIso8601 (← OrbBin.PosixExt.nowEpoch)
-    let stAfter ← stRef.modifyGet fun s =>
-      let finalRec : LocalRunRecord := {
-        id := missionId
-        runUuid := runUuid
-        generation := generation
-        harness := harness
-        text := fullText
-        done := true
-        exitCode? := exitCode?
-        sessionId? := finalSession?
-        error? := errMsg?
-        retryable := false
-        resumed := !sessionId.isEmpty
-      }
-      let nextRuns :=
-        if s.localRuns.any (fun r => r.id == missionId) then
-          s.localRuns.map fun r => if r.id == missionId then finalRec else r
-        else s.localRuns.push finalRec
-      let nextOrigins := s.localOrigins.map fun orig =>
-        if orig.id == missionId then
-          let nextHist :=
-            if fullText.trimAscii.toString.isEmpty then orig.history
-            else orig.history.push (.obj #[("role", .str "assistant"), ("content", .str fullText)])
-          { orig with
-              localRunActive := false
-              status := if errMsg?.isSome then "failed" else "completed"
-              updatedAt := nowIso
-              history := nextHist }
-        else orig
-      let pollJson := localRunRecordToPollJson finalRec
-      let termEv : JVal := .obj #[("text", .str ""), ("reset", .bool false), ("state", pollJson)]
-      let s1 := ({ s with localRuns := nextRuns, localOrigins := nextOrigins }).publishChannelEvent "local_agents" termEv (some missionId)
-      (s1, s1)
-    persistOriginsSnapshot stAfter
 
 /-! ### Local Skills Inspection & Sync (`local_skills_status` / `local_skills_sync`) -/
 
@@ -3600,8 +3443,17 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let rawId := ((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).getD ""
     let cleanId := rawId.trimAscii.toString
     let target? : Option String := if cleanId.isEmpty then none else some cleanId
+    let mgr ← ensureWarmManager stRef
+    let snap? ← if cleanId.isEmpty then pure none else OrbBin.ClaudeControl.getRunState? mgr cleanId
+    let initEv? : Option JVal := snap?.map fun rs =>
+      .obj #[
+        ("text", .str rs.text),
+        ("reset", .bool true),
+        ("activities", .arr (rs.activities.map OrbBin.ClaudeControl.LocalActivityItem.toJVal)),
+        ("state", if rs.done then rs.toPollJVal else .null)
+      ]
     let tok ← stRef.modifyGet fun s =>
-      s.subscribe "local_agents" none target?
+      s.subscribe "local_agents" initEv? target?
     return .ok (JVal.nat tok)
   | "local_bindings_unsubscribe" | "local_interaction_unsubscribe"
   | "project_context_unsubscribe" | "local_agents_unsubscribe" =>
@@ -3941,29 +3793,20 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "local_agents_scan" =>
     let reqObj := (args.field? "request").getD args
     let ov := (reqObj.field? "overrides").getD (.obj #[])
-    let rows ← scanLocalAgents st ov
-    return .ok (.arr rows)
+    let rows ← OrbBin.ClaudeControl.scanInstalledHarnesses ov
+    return .ok rows
   | "local_claude_models" =>
-    return .ok (.arr #[
-      .arr #[.str "claude-sonnet-4-6", .str "Claude Sonnet 4.6"],
-      .arr #[.str "claude-opus-4-6", .str "Claude Opus 4.6"],
-      .arr #[.str "claude-haiku-4-5", .str "Claude Haiku 4.5"]
-    ])
+    let p := (args.fieldStr? "path").getD ""
+    match ← OrbBin.ClaudeControl.probeClaudeModels p with
+    | .ok models => return .ok (.arr (models.map fun (id, lbl) => .arr #[.str id, .str lbl]))
+    | .error e => return .error e
   | "local_antigravity_models" =>
-    let path := (args.fieldStr? "path").getD ""
-    if path.trimAscii.toString.isEmpty || !(← System.FilePath.pathExists path.trimAscii.toString) then
-      return .ok (.arr #[])
-    match ← readCommandStdout? path.trimAscii.toString #["models"] with
-    | none => return .ok (.arr #[])
-    | some out =>
-      let mut pairs : Array JVal := #[]
-      for ln in out.splitOn "\n" do
-        let tok := ((ln.trimAscii.toString.splitOn " ").head?.getD "").trimAscii.toString
-        if !tok.isEmpty && !tok.startsWith "-" && !tok.startsWith "#" && tok.toLower != "model" && tok.toLower != "models" && tok.toLower != "id" then
-          pairs := pairs.push (.arr #[.str tok, .str tok])
-      return .ok (.arr pairs)
+    let p := (args.fieldStr? "path").getD ""
+    match ← OrbBin.ClaudeControl.probeAntigravityModels p with
+    | .ok models => return .ok (.arr (models.map fun (id, lbl) => .arr #[.str id, .str lbl]))
+    | .error e => return .error e
   | "local_agents_directory" =>
-    let rawPath := (args.fieldStr? "path").getD ""
+    let rawPath := ((args.fieldStr? "path").orElse (fun _ => (args.field? "request").bind (·.fieldStr? "path"))).getD ""
     let some rp ← canonicalizeExistingPath? rawPath
       | return .error "Selected local folder does not exist."
     if rp == "/" then
@@ -3976,15 +3819,16 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     return .ok (.str rp)
   | "local_agents_workspace" =>
     let reqObj := (args.field? "request").getD args
-    let slug := sanitizeSlug ((reqObj.fieldStr? "slug").getD "workspace")
+    let rawSlug := (reqObj.fieldStr? "slug").getD "default"
+    let slug := OrbBin.GitWorkspace.sanitizeGitToken rawSlug "default" 64
     let baseDir : System.FilePath :=
       match resolveOrbStateDir st with
-      | some d => d / "local-workspaces" / slug
+      | some d => d / "workspaces" / slug
       | none =>
-        let h := if st.homeDir.trimAscii.toString.isEmpty then "/tmp" else st.homeDir.trimAscii.toString
-        System.FilePath.mk h / ".orb" / "local-workspaces" / slug
+        let h := if st.homeDir.trimAscii.toString.isEmpty then "/tmp/orb-local" else s!"{st.homeDir.trimAscii.toString}/.orb"
+        System.FilePath.mk h / "workspaces" / slug
     try
-      IO.FS.createDirAll baseDir
+      IO.FS.createDirAll (baseDir / ".paloma" / "attach")
       let canon := (← canonicalizeExistingPath? baseDir.toString).getD baseDir.toString
       stRef.modify fun s =>
         if s.grantedBrowseRoots.contains canon then s else { s with grantedBrowseRoots := s.grantedBrowseRoots.push canon }
@@ -4000,44 +3844,51 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       return .error "Refusing to write into `/`"
     let rootFp := System.FilePath.mk rootReal
     let files := (reqObj.fieldArr? "files").getD #[]
-    let mut written : Nat := 0
-    let mut skipped : Array String := #[]
+    let mut written : Array JVal := #[]
+    let mut skipped : Array JVal := #[]
     for f in files do
       let relRaw := (f.fieldStr? "rel").getD ""
       match isSafeRelSubpath relRaw with
-      | none => skipped := skipped.push relRaw
+      | none => skipped := skipped.push (.str relRaw)
       | some cleanRel =>
         if isSecretRelPath cleanRel then
-          skipped := skipped.push cleanRel
+          skipped := skipped.push (.str cleanRel)
         else
           let content := (f.fieldStr? "content").getD ""
           let enc := (f.fieldStr? "encoding").getD "utf8"
-          let bytes? : Option ByteArray :=
-            if enc == "base64" then OrbBin.PosixExt.base64Decode? content
-            else some content.toUTF8
-          match bytes? with
-          | none => skipped := skipped.push cleanRel
-          | some bytes =>
-            let target := rootFp / cleanRel
-            let okWrite ← try
-              if let some parent := target.parent then
-                IO.FS.createDirAll parent
-                let some pReal ← canonicalizeExistingPath? parent.toString | pure false
-                if !isCanonicalWithinRoot pReal rootReal then pure false
-                else
-                  let lst ← OrbBin.PosixExt.statPath target.toString
-                  if lst.isSymlink then pure false
+          let maxLen := if enc == "base64" then 14 * 1024 * 1024 else 512 * 1024
+          if content.utf8ByteSize > maxLen then
+            skipped := skipped.push (.str cleanRel)
+          else
+            let bytes? : Option ByteArray :=
+              if enc == "base64" then OrbBin.PosixExt.base64Decode? content
+              else if enc == "utf8" || enc.isEmpty then some content.toUTF8
+              else none
+            match bytes? with
+            | none =>
+              if enc == "base64" then return .error "Invalid base64 attachment payload"
+              else return .error "Unsupported attachment encoding"
+            | some bytes =>
+              let target := rootFp / cleanRel
+              let okWrite ← try
+                if let some parent := target.parent then
+                  IO.FS.createDirAll parent
+                  let some pReal ← canonicalizeExistingPath? parent.toString | pure false
+                  if !isCanonicalWithinRoot pReal rootReal then pure false
                   else
-                    IO.FS.writeBinFile target bytes
-                    pure true
-              else pure false
-            catch _ => pure false
-            if okWrite then written := written + 1
-            else skipped := skipped.push cleanRel
+                    let lst ← OrbBin.PosixExt.statPath target.toString
+                    if lst.isSymlink then pure false
+                    else
+                      IO.FS.writeBinFile target bytes
+                      pure true
+                else pure false
+              catch _ => pure false
+              if okWrite then written := written.push (.str cleanRel)
+              else skipped := skipped.push (.str cleanRel)
     return .ok (.obj #[
       ("binary_supported", .bool true),
-      ("written", JVal.nat written),
-      ("skipped", .arr (skipped.map .str))
+      ("written", .arr written),
+      ("skipped", .arr skipped)
     ])
   | "project_context_workers" =>
     return .ok (.arr #[])
@@ -4380,6 +4231,9 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         | .ok (slot, nextHub) =>
           let s' := ({ s with toolHub := nextHub }).publishInteractionSnapshot runId
           (.ok slot.toSummaryJson, s')
+      if res.isOk && !runId.trimAscii.toString.isEmpty then
+        let mgr ← ensureWarmManager stRef
+        discard <| OrbBin.ClaudeControl.respondToControlRequest mgr runId.trimAscii.toString reqId.trimAscii.toString ansVal
       return res
     | some "poll" =>
       let cleanRun := runId.trimAscii.toString
@@ -4444,6 +4298,9 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       | .ok (_, nextHub) =>
         let s' := ({ s with toolHub := nextHub }).publishInteractionSnapshot runId
         (.ok .null, s')
+    if res.isOk && !runId.trimAscii.toString.isEmpty then
+      let mgr ← ensureWarmManager stRef
+      discard <| OrbBin.ClaudeControl.respondToControlRequest mgr runId.trimAscii.toString reqId.trimAscii.toString ansVal
     return res
   | "local_wakeups_sync" =>
     return .ok (.obj #[("pending", .arr #[]), ("changed", .bool false), ("cancelled", .arr #[])])
@@ -4535,26 +4392,17 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     ensurePersistedOriginsLoaded stRef
     let runId := (((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).orElse
       (fun _ => args.fieldStr? "runId")).getD ""
-    let cleanId := runId.trimAscii.toString
-    if !cleanId.isEmpty then
+    if !runId.trimAscii.toString.isEmpty then
+      let cleanId := runId.trimAscii.toString
       let bump := (args.fieldBool? "bump_epoch").getD true
-      let (pidToKill?, stAfter) ← stRef.modifyGet fun s =>
+      let stAfter ← stRef.modifyGet fun s =>
         let (_, _, nextHub) := s.toolHub.cancelRunSlots cleanId "stopped" bump
-        let existingRec? := s.localRuns.find? (fun r => r.id == cleanId)
-        let pid? := existingRec?.bind (·.pid?)
-        let nextRuns := s.localRuns.map fun r =>
-          if r.id == cleanId then { r with done := true, pid? := none } else r
-        let nextOrigins := s.localOrigins.map fun orig =>
-          if orig.id == cleanId then { orig with localRunActive := false } else orig
-        let s1 := ({ s with toolHub := nextHub, localRuns := nextRuns, localOrigins := nextOrigins }).publishInteractionSnapshot cleanId
-        let s2 := match nextRuns.find? (fun r => r.id == cleanId) with
-          | some rec =>
-            let termEv : JVal := .obj #[("text", .str ""), ("reset", .bool false), ("state", localRunRecordToPollJson rec)]
-            s1.publishChannelEvent "local_agents" termEv (some cleanId)
-          | none => s1
-        ((pid?, s2), s2)
-      if let some pid := pidToKill? then
-        discard <| OrbBin.PosixExt.killSig pid 15
+        let nextOrigins := s.localOrigins.map fun row =>
+          if row.id == cleanId then { row with localRunActive := false } else row
+        let s' := ({ s with toolHub := nextHub, localOrigins := nextOrigins }).publishInteractionSnapshot cleanId
+        (s', s')
+      let mgr ← ensureWarmManager stRef
+      OrbBin.ClaudeControl.stopHarnessRun mgr cleanId
       persistOriginsSnapshot stAfter
     return .ok .null
   | "local_run_reconcile" =>
@@ -4583,9 +4431,13 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           (.ok .null, s')
     return res
   | "local_agents_poll" =>
-    let cleanId := ((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).getD "" |>.trimAscii.toString
-    match st.localRuns.find? (fun r => r.id == cleanId) with
-    | some rec => return .ok (localRunRecordToPollJson rec)
+    let runId := (((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).orElse
+      (fun _ => args.fieldStr? "runId")).getD ""
+    if runId.trimAscii.toString.isEmpty then
+      return .ok (.obj #[("text", .str ""), ("done", .bool true), ("resumed", .bool false)])
+    let mgr ← ensureWarmManager stRef
+    match ← OrbBin.ClaudeControl.getRunState? mgr runId.trimAscii.toString with
+    | some rs => return .ok rs.toPollJVal
     | none => return .ok (.obj #[("text", .str ""), ("done", .bool true), ("resumed", .bool false)])
   | "local_codex_speed_options" =>
     return .ok (.obj #[
@@ -4625,16 +4477,21 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let curSt ← stRef.get
     let reqObj := (args.field? "request").getD args
     let harness := (reqObj.fieldStr? "harness").getD ""
+    let binPath := (reqObj.fieldStr? "bin").getD ""
     let cwd := (reqObj.fieldStr? "cwd").getD "."
     let prompt := (reqObj.fieldStr? "prompt").getD (((args.field? "draft").bind (·.fieldStr? "prompt")).getD "")
     let model := (reqObj.fieldStr? "model").getD ""
-    let effort := (reqObj.fieldStr? "effort").getD ""
+    let effort? := (reqObj.fieldStr? "effort").filter (!·.trimAscii.toString.isEmpty)
     let svcTier? := (reqObj.fieldStr? "service_tier").orElse (fun _ => reqObj.fieldStr? "serviceTier")
-    let binPath := (reqObj.fieldStr? "bin").getD "" |>.trimAscii.toString
-    let sessionId := ((reqObj.fieldStr? "session_id").orElse (fun _ => reqObj.fieldStr? "sessionId")).getD "" |>.trimAscii.toString
+    let sessionId? := ((reqObj.fieldStr? "session_id").orElse (fun _ => reqObj.fieldStr? "sessionId")).filter (!·.trimAscii.toString.isEmpty)
     let planMode := (reqObj.fieldBool? "planMode").getD ((reqObj.fieldBool? "plan_mode").getD false)
+    let permModeStr := ((reqObj.fieldStr? "permission_mode").orElse (fun _ => reqObj.fieldStr? "permissionMode")).getD "bypassPermissions"
+    let permMode := OrbBin.ClaudeControl.parsePermissionMode permModeStr
+    let worktreeMode := ((reqObj.fieldStr? "worktree_mode").orElse (fun _ => reqObj.fieldStr? "worktreeMode")).getD "local"
     let cyber := (reqObj.fieldStr? "cyberAccess").getD ((reqObj.fieldStr? "cyber_access").getD "automatic")
-    let hasImgs := (((reqObj.fieldArr? "image_paths").orElse (fun _ => reqObj.fieldArr? "imagePaths")).map (fun xs => !xs.isEmpty)).getD false
+    let rawImgs := ((reqObj.fieldArr? "image_paths").orElse (fun _ => reqObj.fieldArr? "imagePaths")).getD #[]
+    let imgPaths := rawImgs.filterMap JVal.asStr?
+    let hasImgs := !imgPaths.isEmpty
     let mut selectedSkills : Array (String × String × UInt8) := #[]
     if !harness.isEmpty then
       let home? ← do
@@ -4649,15 +4506,106 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         if let .error e := validateLocalCodexLaunch prompt model cyber hasImgs then
           return .error e
     let deliveredPrompt := withLocalSkillDirective prompt selectedSkills
-    let runUuid ← randomUuidV4
-    let shouldSpawn ←
-      if binPath.isEmpty then pure false
-      else System.FilePath.pathExists binPath
-    let cwdCanon? ← canonicalizeExistingPath? cwd
-    let nowIso := formatUtcIso8601 (← OrbBin.PosixExt.nowEpoch)
+    let rawRunUuid ← randomUuidV4
+    let runReceiptId := (OrbBin.PosixExt.parseUuidCanonical? rawRunUuid).getD rawRunUuid
+    let targetMissionId ←
+      if cmd == "local_origin_launch" then
+        let rawId ← randomUuidV4
+        pure ((OrbBin.PosixExt.parseUuidCanonical? rawId).getD rawId)
+      else
+        let rid := ((reqObj.fieldStr? "id").orElse (fun _ => args.fieldStr? "id")).getD ""
+        pure (if rid.trimAscii.toString.isEmpty then runReceiptId else rid.trimAscii.toString)
+
+    let nextGen ← stRef.modifyGet fun s =>
+      let prevGen := ((s.runGenerations.find? (fun (k, _) => k == targetMissionId)).map Prod.snd).getD 0
+      let g := prevGen + 1
+      let others := s.runGenerations.filter (fun (k, _) => k != targetMissionId)
+      (g, { s with runGenerations := others.push (targetMissionId, g) })
+
+    let mut effectiveWorkingDir := cwd
+    let mut activeSessionId? := sessionId?
+    let shouldSpawnProcess := !binPath.trimAscii.toString.isEmpty || ((reqObj.fieldBool? "spawn").getD false)
+    if shouldSpawnProcess && !harness.isEmpty then
+      let mgr ← ensureWarmManager stRef
+      let cbs : OrbBin.ClaudeControl.HarnessCallbacks := {
+        onOutputEvent := fun ev => do
+          stRef.modify fun s => s.publishChannelEvent "local_agents" ev (some targetMissionId)
+        onControlRequest := fun ctrlReq => do
+          let payload := JVal.obj #[
+            ("id", .str ctrlReq.requestId),
+            ("method", .str ctrlReq.method),
+            ("params", ctrlReq.uiParams)
+          ]
+          stRef.modify fun s =>
+            let curEp := ((s.toolHub.findRun? targetMissionId).map (·.currentEpoch)).getD 1
+            match s.toolHub.admitSlot targetMissionId curEp ctrlReq.requestId payload false with
+            | .ok (_, _, nextHub) =>
+              ({ s with toolHub := nextHub }).publishInteractionSnapshot targetMissionId
+            | .error _ => s
+        onTurnFinished := fun finalRs => do
+          let finIso := formatUtcIso8601 (← OrbBin.PosixExt.nowEpoch)
+          let (stFin, bindChangedFin) ← stRef.modifyGet fun (s : LocaldState) =>
+            let nextOrigins := s.localOrigins.map fun row =>
+              if row.id == targetMissionId then
+                let nextHist :=
+                  if finalRs.text.trimAscii.toString.isEmpty then row.history
+                  else row.history.push (.obj #[("role", .str "assistant"), ("content", .str finalRs.text)])
+                { row with
+                  localRunActive := false
+                  status := if finalRs.error?.isSome then "failed" else "awaiting_user"
+                  updatedAt := finIso
+                  history := nextHist }
+              else row
+            let (nextBinds, bChanged) :=
+              match finalRs.sessionId? with
+              | none => (s.bindingsEntries, false)
+              | some sid =>
+                let updated := s.bindingsEntries.map fun (bk, (bv : JVal)) =>
+                  if bk == targetMissionId then (bk, JVal.setField bv "sessionId" (.str sid)) else (bk, bv)
+                (updated, s.bindingsEntries.any (fun (bk, _) => bk == targetMissionId))
+            let s' := { s with localOrigins := nextOrigins, bindingsEntries := nextBinds }
+            ((s', bChanged), s')
+          persistOriginsSnapshot stFin
+          if bindChangedFin then persistBindingsSnapshot stFin
+      }
+      match ← OrbBin.ClaudeControl.startHarnessTurn
+          mgr targetMissionId harness binPath cwd deliveredPrompt nextGen
+          (if model.isEmpty then none else some model) effort? sessionId?
+          permMode worktreeMode imgPaths cbs with
+      | .error e => return .error e
+      | .ok rs =>
+        effectiveWorkingDir := rs.cwd
+        activeSessionId? := rs.sessionId?.orElse (fun _ => sessionId?)
+
+    let cwdCanon? ← canonicalizeExistingPath? effectiveWorkingDir
+    if !binPath.trimAscii.toString.isEmpty && !harness.isEmpty then
+      let mut bindFields : Array (String × JVal) := #[
+        ("harness", .str harness),
+        ("bin", .str binPath),
+        ("cwd", .str effectiveWorkingDir),
+        ("planMode", .bool planMode),
+        ("permissionMode", .str permMode.toUiWire)
+      ]
+      if !model.isEmpty then bindFields := bindFields.push ("model", .str model)
+      if let some eff := effort? then bindFields := bindFields.push ("effort", .str eff)
+      if let some sid := activeSessionId? then bindFields := bindFields.push ("sessionId", .str sid)
+      let bindVal := JVal.obj bindFields
+      let stBind ← stRef.modifyGet fun s =>
+        let filtered := s.bindingsEntries.filter (fun (k, _) => k != targetMissionId)
+        let nextEntries := filtered.push (targetMissionId, bindVal)
+        let nextRev := s.bindingsRevision + 1
+        let nextSnap : JVal := .obj #[("revision", JVal.nat nextRev), ("bindings", .obj nextEntries)]
+        let sPub := ({ s with bindingsRevision := nextRev, bindingsEntries := nextEntries }).publishChannelEvent "local_bindings" nextSnap
+        (sPub, sPub)
+      persistBindingsSnapshot stBind
+
+    if let some rp := cwdCanon? then
+      if rp != "/" then
+        stRef.modify fun s =>
+          if s.grantedBrowseRoots.contains rp then s else { s with grantedBrowseRoots := s.grantedBrowseRoots.push rp }
+
     if cmd == "local_origin_launch" then
-      let rawId ← randomUuidV4
-      let mid := (OrbBin.PosixExt.parseUuidCanonical? rawId).getD rawId
+      let nowIso := formatUtcIso8601 (← OrbBin.PosixExt.nowEpoch)
       let draftObj := (args.field? "draft").getD (.obj #[])
       let title := ((draftObj.fieldStr? "title").orElse (fun _ => reqObj.fieldStr? "title")).getD "Local Mission"
       let proj := ((draftObj.fieldStr? "project").orElse (fun _ => reqObj.fieldStr? "project")).getD ""
@@ -4669,12 +4617,12 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       let ep := normalizeEndpointKey epRaw
       let backendName := if harness.isEmpty then "opencode" else harness
       let entry : LocalOriginEntry := {
-        id := mid
+        id := targetMissionId
         endpoint := ep
         title := title
         status := "active"
         backend := backendName
-        workingDirectory := cwd
+        workingDirectory := effectiveWorkingDir
         deliveredPrompt := deliveredPrompt
         localSyncPending := true
         localRunActive := true
@@ -4682,86 +4630,118 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         folder := folder?
         tags := tags
         modelOverride := if model.isEmpty then none else some model
-        modelEffort := if effort.isEmpty then none else some effort
+        modelEffort := effort?
         serviceTier := svcTier?
         createdAt := nowIso
         updatedAt := nowIso
         history := #[.obj #[("role", .str "user"), ("content", .str prompt)]]
       }
-      let initRec : LocalRunRecord := {
-        id := mid
-        runUuid := runUuid
-        generation := 1
-        harness := backendName
-        done := !shouldSpawn
-        resumed := !sessionId.isEmpty
-      }
-      let (stAfter, bindChanged) ← stRef.modifyGet fun s =>
-        let keptOrigins := s.localOrigins.filter (fun r => r.id != mid)
-        let keptRuns := s.localRuns.filter (fun r => r.id != mid)
-        let nextRoots := match cwdCanon? with
-          | some rp => if rp != "/" && !s.grantedBrowseRoots.contains rp then s.grantedBrowseRoots.push rp else s.grantedBrowseRoots
-          | none => s.grantedBrowseRoots
-        let (nextRev, nextBinds, bChanged, sPub) :=
-          if !binPath.isEmpty then
-            let bObj : JVal := .obj #[
-              ("harness", .str backendName),
-              ("bin", .str binPath),
-              ("cwd", .str cwd),
-              ("planMode", .bool planMode)
-            ]
-            let filtB := s.bindingsEntries.filter (fun (k, _) => k != mid)
-            let nb := filtB.push (mid, bObj)
-            let nr := s.bindingsRevision + 1
-            let snap : JVal := .obj #[("revision", JVal.nat nr), ("bindings", .obj nb)]
-            let sTmp := ({ s with bindingsRevision := nr, bindingsEntries := nb }).publishChannelEvent "local_bindings" snap
-            (nr, nb, true, sTmp)
-          else
-            (s.bindingsRevision, s.bindingsEntries, false, s)
-        let sFinal := { sPub with
-          bindingsRevision := nextRev
-          bindingsEntries := nextBinds
-          localOrigins := keptOrigins.push entry
-          localRuns := keptRuns.push initRec
-          grantedBrowseRoots := nextRoots
-        }
-        ((sFinal, bChanged), sFinal)
+      let stAfter ← stRef.modifyGet fun s =>
+        let kept := s.localOrigins.filter (fun r => r.id != targetMissionId)
+        let s' := { s with localOrigins := kept.push entry }
+        (s', s')
       persistOriginsSnapshot stAfter
-      if bindChanged then persistBindingsSnapshot stAfter
-      if shouldSpawn then
-        spawnLocalAgentRunner stRef mid runUuid backendName binPath cwd deliveredPrompt model effort sessionId 1 planMode
       return .ok entry.toMissionJson
-    else
-      let reqId := (reqObj.fieldStr? "id").getD "" |>.trimAscii.toString
-      let mid := if reqId.isEmpty then runUuid else reqId
-      if curSt.localRuns.any (fun r => r.id == mid && !r.done) then
-        return .error "This mission already has non-terminal run"
-      let prevGen := ((curSt.localRuns.find? (fun r => r.id == mid)).map (·.generation)).getD 0
-      let nextGen := prevGen + 1
-      let backendName := if harness.isEmpty then "opencode" else harness
-      let initRec : LocalRunRecord := {
-        id := mid
-        runUuid := runUuid
-        generation := nextGen
-        harness := backendName
-        done := !shouldSpawn
-        resumed := !sessionId.isEmpty
-      }
-      stRef.modify fun s =>
-        let keptRuns := s.localRuns.filter (fun r => r.id != mid)
-        let nextRoots := match cwdCanon? with
-          | some rp => if rp != "/" && !s.grantedBrowseRoots.contains rp then s.grantedBrowseRoots.push rp else s.grantedBrowseRoots
-          | none => s.grantedBrowseRoots
-        { s with localRuns := keptRuns.push initRec, grantedBrowseRoots := nextRoots }
-      if shouldSpawn then
-        spawnLocalAgentRunner stRef mid runUuid backendName binPath cwd deliveredPrompt model effort sessionId nextGen planMode
-      return .ok (.obj #[
-        ("ok", .bool true),
-        ("command", .str cmd),
-        ("run_id", .str runUuid),
-        ("generation", JVal.nat nextGen),
-        ("delivered_prompt", .str deliveredPrompt)
-      ])
+    return .ok (.obj #[
+      ("ok", .bool true),
+      ("command", .str cmd),
+      ("run_id", .str runReceiptId),
+      ("generation", JVal.uint64 nextGen),
+      ("cwd", .str effectiveWorkingDir),
+      ("delivered_prompt", .str deliveredPrompt)
+    ])
+  | "local_checkpoints_list" =>
+    ensurePersistedBindingsLoaded stRef
+    ensurePersistedOriginsLoaded stRef
+    let curSt ← stRef.get
+    let cwdRaw := (args.fieldStr? "cwd").getD ""
+    let some safeCwd ← checkCanonicalBrowseRoot curSt cwdRaw
+      | return .error "Local folder was not granted for checkpoints"
+    let mid := ((args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id")).getD ""
+    match ← OrbBin.GitWorkspace.listCheckpoints safeCwd mid with
+    | .ok cps => return .ok (.obj #[("checkpoints", .arr (cps.map OrbBin.GitWorkspace.CheckpointMeta.toJVal))])
+    | .error e => return .error e
+  | "local_checkpoint_diff" =>
+    ensurePersistedBindingsLoaded stRef
+    ensurePersistedOriginsLoaded stRef
+    let curSt ← stRef.get
+    let cwdRaw := (args.fieldStr? "cwd").getD ""
+    let some safeCwd ← checkCanonicalBrowseRoot curSt cwdRaw
+      | return .error "Local folder was not granted for checkpoint diff"
+    let fromRef := ((args.fieldStr? "from_ref").orElse (fun _ => args.fieldStr? "fromRef")).getD "HEAD"
+    let toRef := ((args.fieldStr? "to_ref").orElse (fun _ => args.fieldStr? "toRef")).getD "WORKTREE"
+    let since? := (args.fieldUInt64? "since_epoch").orElse (fun _ => args.fieldUInt64? "sinceEpoch")
+    match ← OrbBin.GitWorkspace.diffCheckpoints safeCwd fromRef toRef since? with
+    | .ok rep => return .ok rep.toJVal
+    | .error e => return .error e
+  | "local_checkpoint_restore" =>
+    ensurePersistedBindingsLoaded stRef
+    ensurePersistedOriginsLoaded stRef
+    let curSt ← stRef.get
+    let cwdRaw := (args.fieldStr? "cwd").getD ""
+    let some safeCwd ← checkCanonicalBrowseRoot curSt cwdRaw
+      | return .error "Local folder was not granted for checkpoint restore"
+    let mid := ((args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id")).getD "local"
+    let targetRef := ((args.fieldStr? "ref").orElse (fun _ => args.fieldStr? "target_ref")).getD ""
+    let turn? := args.fieldNat? "turn"
+    match ← OrbBin.GitWorkspace.restoreCheckpoint safeCwd mid targetRef turn? with
+    | .ok res => return .ok res
+    | .error e => return .error e
+  | "local_worktree_status" =>
+    ensurePersistedBindingsLoaded stRef
+    ensurePersistedOriginsLoaded stRef
+    let curSt ← stRef.get
+    let cwdRaw := (args.fieldStr? "cwd").getD ""
+    let some safeCwd ← checkCanonicalBrowseRoot curSt cwdRaw
+      | return .error "Local folder was not granted for worktree status"
+    let mid := ((args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id")).getD "new"
+    let preferWt := ((args.fieldBool? "prefer_worktree").orElse (fun _ => args.fieldBool? "preferWorktree")).getD false
+    let mgr ← ensureWarmManager stRef
+    let otherCwds ← OrbBin.ClaudeControl.activeRunCwdsExcept mgr mid
+    let stWt ← OrbBin.GitWorkspace.inspectWorktreeStatus safeCwd mid otherCwds preferWt
+    return .ok stWt.toJVal
+  | "local_worktree_create" =>
+    ensurePersistedBindingsLoaded stRef
+    ensurePersistedOriginsLoaded stRef
+    let curSt ← stRef.get
+    let cwdRaw := (args.fieldStr? "cwd").getD ""
+    let some safeCwd ← checkCanonicalBrowseRoot curSt cwdRaw
+      | return .error "Local folder was not granted for worktree creation"
+    let mid := ((args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id")).getD "new"
+    let baseBranch? := (args.fieldStr? "base_branch").orElse (fun _ => args.fieldStr? "baseBranch")
+    match ← OrbBin.GitWorkspace.createMissionWorktree safeCwd mid baseBranch? with
+    | .ok wt =>
+      if let some wtCanon ← canonicalizeExistingPath? wt.worktreePath then
+        if wtCanon != "/" then
+          stRef.modify fun s =>
+            if s.grantedBrowseRoots.contains wtCanon then s else { s with grantedBrowseRoots := s.grantedBrowseRoots.push wtCanon }
+      return .ok wt.toJVal
+    | .error e => return .error e
+  | "local_worktree_remove" =>
+    ensurePersistedBindingsLoaded stRef
+    ensurePersistedOriginsLoaded stRef
+    let curSt ← stRef.get
+    let wtPath := ((args.fieldStr? "worktree_path").orElse (fun _ => args.fieldStr? "path")).getD ""
+    let some wtCanon ← checkCanonicalBrowseRoot curSt wtPath
+      | return .error "Worktree folder was not granted"
+    let force := (args.fieldBool? "force").getD false
+    match ← OrbBin.GitWorkspace.removeMissionWorktree wtCanon force with
+    | .ok res => return .ok res
+    | .error e => return .error e
+  | "local_permission_mode_set" =>
+    let mid := ((args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id")).getD ""
+    let rawMode := (args.fieldStr? "mode").getD "bypassPermissions"
+    let parsedMode := OrbBin.ClaudeControl.parsePermissionMode rawMode
+    let mgr ← ensureWarmManager stRef
+    let ok ← OrbBin.ClaudeControl.setSessionPermissionMode mgr mid parsedMode
+    if !mid.trimAscii.toString.isEmpty then
+      let stBind ← stRef.modifyGet fun (s : LocaldState) =>
+        let nextEntries := s.bindingsEntries.map fun (bk, (bv : JVal)) =>
+          if bk == mid.trimAscii.toString then (bk, JVal.setField bv "permissionMode" (.str parsedMode.toUiWire)) else (bk, bv)
+        let s' := { s with bindingsEntries := nextEntries }
+        (s', s')
+      persistBindingsSnapshot stBind
+    return .ok (.obj #[("ok", .bool ok), ("mode", .str parsedMode.toUiWire)])
   | _ =>
     if supportedDesktopCommands.contains cmd then
       return .error s!"{cmd} is not supported in this local runtime"

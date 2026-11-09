@@ -18,6 +18,8 @@ import OrbBin.SandboxedMcpMain
 import OrbBin.WorkspaceMcpMain
 import OrbBin.DesktopMcpMain
 import OrbBin.AutomationMcpMain
+import OrbBin.GitWorkspace
+import OrbBin.ClaudeControl
 
 namespace OrbBin.SelfTest
 
@@ -33,6 +35,8 @@ open OrbBin.MeshCli
 open OrbBin.PalomaCtl
 open OrbBin.SandboxedMcp
 open OrbBin.WorkspaceMcp
+open OrbBin.GitWorkspace
+open OrbBin.ClaudeControl
 
 private def assertEq {α : Type} [BEq α] [Repr α] (label : String) (got expected : α) : IO Unit := do
   if got != expected then
@@ -499,7 +503,7 @@ private def runR7bMcpAndPrivdTests (tmpDir : System.FilePath) : IO Unit := do
 
   let privTrustedRaw := tmpDir / "privd-trusted-bin"
   IO.FS.createDirAll privTrustedRaw
-  let privTrustedDir ← IO.FS.realPath privTrustedRaw
+  let privTrustedDir ← try IO.FS.realPath privTrustedRaw catch _ => pure privTrustedRaw
   let privWorkDirA := tmpDir / "privd-cwd-a"
   let privWorkDirB := tmpDir / "privd-cwd-b"
   let markerSwap := tmpDir / "swap-executed.marker"
@@ -1252,6 +1256,162 @@ def runAllTests : IO UInt32 := do
   -- 11. R7-B / R7-C SM-22 + G-ORB-7 MCP & orb-privd lifecycle / TOCTOU tests
   runR7bMcpAndPrivdTests tmpDir
   runMultiUserPrivdBrokerTests tmpDir
+
+  -- 12. Warm Claude bidirectional stdio control protocol, hidden git checkpoints & sibling worktrees
+  IO.println "--- Warm Claude Control Protocol, Hidden Git Checkpoints & Worktree Isolation ---"
+  assertEq "parsePermissionMode supervised -> default CLI wire"
+    (parsePermissionMode "supervised").toCliWire "default"
+  assertEq "parsePermissionMode acceptEdits -> acceptEdits CLI wire"
+    (parsePermissionMode "auto-edit").toCliWire "acceptEdits"
+  assertEq "parsePermissionMode auto -> auto CLI wire"
+    (parsePermissionMode "auto").toCliWire "auto"
+  assertEq "parsePermissionMode full-access -> bypassPermissions CLI wire"
+    (parsePermissionMode "full-access").toCliWire "bypassPermissions"
+
+  let sampleCtrlEv := JVal.obj #[
+    ("type", .str "control_request"),
+    ("request_id", .str "req-perm-1"),
+    ("request", .obj #[
+      ("subtype", .str "can_use_tool"),
+      ("tool_name", .str "Bash"),
+      ("input", .obj #[("command", .str "cargo test")]),
+      ("permission_suggestions", .arr #[.obj #[("type", .str "addRules"), ("destination", .str "session")]])
+    ])
+  ]
+  let parsedPerm? := parseClaudeControlRequest? sampleCtrlEv
+  assertTrue "parseClaudeControlRequest? recognizes Bash can_use_tool" parsedPerm?.isSome
+  let parsedPerm := parsedPerm?.get!
+  assertEq "parsedPerm.method == permission" parsedPerm.method "permission"
+  let (allowSessJson, _) := buildClaudeControlResponse parsedPerm (.obj #[("action", .str "accept_session")])
+  assertTrue "accept_session includes updatedPermissions"
+    ((allowSessJson.splitOn "updatedPermissions").length > 1)
+  let (denyJson, _) := buildClaudeControlResponse parsedPerm (.obj #[("action", .str "revise"), ("feedback", .str "Use pnpm test instead")])
+  assertTrue "revise sends behavior:deny with inline feedback"
+    ((denyJson.splitOn "\"behavior\":\"deny\"").length > 1 && (denyJson.splitOn "Use pnpm test instead").length > 1)
+
+  let initRespRaw := "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"orb-model-discovery\",\"response\":{\"models\":[{\"value\":\"default\",\"resolvedModel\":\"claude-sonnet-5-5\"},{\"value\":\"opus\",\"resolvedModel\":\"claude-opus-5-5\"},{\"value\":\"sonnet\",\"resolvedModel\":\"claude-sonnet-5-5\"}]}}}"
+  let initModels := (OrbBin.Json.parse initRespRaw).toOption.bind (parseClaudeInitializeModels? · "orb-model-discovery")
+  assertEq "parseClaudeInitializeModels? extracts class releases"
+    initModels (some #[("claude-opus-5-5", "Claude Opus 5.5"), ("claude-sonnet-5-5", "Claude Sonnet 5.5")])
+
+  -- Live mock warm Claude process test (2 turns + interactive `can_use_tool` over open stdin/stdout pipes!)
+  let mockClaudeScript := tmpDir / "mock-warm-claude.py"
+  let pyCode :=
+    "#!/usr/bin/env python3\n" ++
+    "import sys, json\n" ++
+    "turn = 0\n" ++
+    "for raw in sys.stdin:\n" ++
+    "    line = raw.strip()\n" ++
+    "    if not line: continue\n" ++
+    "    msg = json.loads(line)\n" ++
+    "    if msg.get('type') == 'control_request' and msg.get('request', {}).get('subtype') == 'initialize':\n" ++
+    "        print(json.dumps({'type':'system','subtype':'init','session_id':'warm-sid-42'}), flush=True)\n" ++
+    "        continue\n" ++
+    "    if msg.get('type') == 'user':\n" ++
+    "        turn += 1\n" ++
+    "        if turn == 1:\n" ++
+    "            print(json.dumps({'type':'control_request','request_id':'req-1','request':{'subtype':'can_use_tool','tool_name':'Bash','input':{'command':'ls'}}}), flush=True)\n" ++
+    "        else:\n" ++
+    "            print(json.dumps({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'text_delta','text':'Warm turn 2!'}}}), flush=True)\n" ++
+    "            print(json.dumps({'type':'result','num_turns':1,'is_error':False,'result':'Warm turn 2!','session_id':'warm-sid-42'}), flush=True)\n" ++
+    "    elif msg.get('type') == 'control_response':\n" ++
+    "        beh = msg.get('response', {}).get('response', {}).get('behavior', '')\n" ++
+    "        txt = f'Turn 1 ({beh})'\n" ++
+    "        print(json.dumps({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'text_delta','text':txt}}}), flush=True)\n" ++
+    "        print(json.dumps({'type':'result','num_turns':1,'is_error':False,'result':txt,'session_id':'warm-sid-42'}), flush=True)\n"
+  IO.FS.writeFile mockClaudeScript pyCode
+  let _ ← chmod mockClaudeScript.toString 0o755
+
+  -- Set up a temporary git repository to test hidden checkpoints, diffing, restore & worktree isolation simultaneously
+  let repoDir := tmpDir / "git-checkpoint-repo"
+  IO.FS.createDirAll repoDir
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", repoDir.toString, "init", "-b", "main"] }
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", repoDir.toString, "config", "user.email", "test@orb.local"] }
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", repoDir.toString, "config", "user.name", "Orb Test"] }
+  IO.FS.writeFile (repoDir / "app.txt") "v1\n"
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", repoDir.toString, "add", "app.txt"] }
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", repoDir.toString, "commit", "-m", "initial"] }
+
+  let warmMgr ← newWarmHarnessManager
+  let seenCtrlRef ← IO.mkRef (none : Option PendingControlRequest)
+  let cbs : HarnessCallbacks := {
+    onControlRequest := fun req => seenCtrlRef.set (some req)
+  }
+  let launch1 ← startHarnessTurn warmMgr "m-warm-1" "claudecode" mockClaudeScript.toString repoDir.toString "Run ls"
+    1 none none none .supervised "local" #[] cbs
+  assertTrue "Warm Claude turn 1 launches cleanly" launch1.toOption.isSome
+
+  let mut waitedCtrl := 0
+  while waitedCtrl < 3000 && (← seenCtrlRef.get).isNone do
+    IO.sleep 25
+    waitedCtrl := waitedCtrl + 25
+  let some pendingCtrl ← seenCtrlRef.get
+    | throw <| IO.userError "Expected warm Claude control_request on turn 1"
+  assertEq "Warm Claude emits Bash permission request" pendingCtrl.toolName "Bash"
+  let answered ← respondToControlRequest warmMgr "m-warm-1" pendingCtrl.requestId (.obj #[("action", .str "accept_session")])
+  assertEq "respondToControlRequest succeeds over open stdin" answered true
+
+  let mut waitedTurn1 := 0
+  while waitedTurn1 < 3000 do
+    if let some st ← getRunState? warmMgr "m-warm-1" then
+      if st.done then break
+    IO.sleep 25
+    waitedTurn1 := waitedTurn1 + 25
+  let st1 := (← getRunState? warmMgr "m-warm-1").get!
+  assertEq "Warm Claude turn 1 completes with allow response" st1.text "Turn 1 (allow)"
+  assertEq "Warm Claude turn 1 binds session_id" st1.sessionId? (some "warm-sid-42")
+
+  -- Mutate working tree between turns, then run Turn 2 on the SAME warm process (zero respawn!)
+  IO.FS.writeFile (repoDir / "app.txt") "v2-modified\n"
+  IO.FS.writeFile (repoDir / "extra.txt") "untracked-file\n"
+  let launch2 ← startHarnessTurn warmMgr "m-warm-1" "claudecode" mockClaudeScript.toString repoDir.toString "Second prompt"
+    2 none none st1.sessionId? .acceptEdits "local" #[] cbs
+  assertTrue "Warm Claude turn 2 reuses open process" launch2.toOption.isSome
+  let mut waitedTurn2 := 0
+  while waitedTurn2 < 3000 do
+    if let some st ← getRunState? warmMgr "m-warm-1" then
+      if st.done then break
+    IO.sleep 25
+    waitedTurn2 := waitedTurn2 + 25
+  let st2 := (← getRunState? warmMgr "m-warm-1").get!
+  assertEq "Warm Claude turn 2 output" st2.text "Warm turn 2!"
+  stopHarnessRun warmMgr "m-warm-1"
+
+  -- Verify hidden git checkpoints (`refs/orb/checkpoints/...`), diffing, and atomic rollback!
+  let cpsRes ← listCheckpoints repoDir.toString "m-warm-1"
+  let cps := cpsRes.toOption.getD #[]
+  assertTrue "Hidden git checkpoints captured automatically across turns (Turn 0, 1, 2)" (cps.size == 3)
+  assertEq "Checkpoint 0 turn_index == 0" cps[0]!.turnIndex 0
+  assertEq "Checkpoint 1 turn_index == 1" cps[1]!.turnIndex 1
+  assertEq "Checkpoint 2 turn_index == 2" cps[2]!.turnIndex 2
+  let crossRefRej ← restoreCheckpoint repoDir.toString "other-mission" cps[0]!.ref
+  assertTrue "restoreCheckpoint rejects cross-mission checkpoint ref" crossRefRej.isOk.not
+  let badBranchRej ← createMissionWorktree repoDir.toString "m-wt-bad" (some "--upload-pack=evil")
+  assertTrue "createMissionWorktree rejects leading-dash baseBranch" badBranchRej.isOk.not
+  let diffRes ← diffCheckpoints repoDir.toString "HEAD" "WORKTREE"
+  let diffRep := diffRes.toOption.get!
+  assertTrue "diffCheckpoints detects modified + untracked files" (diffRep.files.size == 2)
+  assertTrue "diffCheckpoints includes unified patch hunks" (diffRep.files.any (fun f => !f.patch.isEmpty))
+
+  -- Restore to turn 1 pre-checkpoint (`app.txt == "v1\n"` and `extra.txt` removed!)
+  let firstCp := cps[0]!
+  let restoreRes ← restoreCheckpoint repoDir.toString "m-warm-1" firstCp.ref
+  assertTrue "restoreCheckpoint succeeds" restoreRes.toOption.isSome
+  let restoredContent ← IO.FS.readFile (repoDir / "app.txt")
+  assertEq "restoreCheckpoint reverts tracked file to v1" restoredContent "v1\n"
+  let extraStillExists ← System.FilePath.pathExists (repoDir / "extra.txt")
+  assertEq "restoreCheckpoint cleans untracked file added after checkpoint" extraStillExists false
+
+  -- Verify `inspectWorktreeStatus` (`Orb.Kernel.worktreeDecisionStep`) + `createMissionWorktree` + `removeMissionWorktree`
+  let wtBusy ← inspectWorktreeStatus repoDir.toString "m-wt-2" #[repoDir.toString] false
+  assertEq "Occupied repo triggers worktreeDecisionStep == 513" wtBusy.decisionWord 513
+  assertEq "Occupied repo recommends isolated worktree" wtBusy.createWorktree true
+  let wtCreatedRes ← createMissionWorktree repoDir.toString "m-wt-2" none
+  assertTrue "createMissionWorktree succeeds" wtCreatedRes.toOption.isSome
+  let wtCreated := wtCreatedRes.toOption.get!
+  assertTrue "Sibling worktree path exists on disk" (← System.FilePath.pathExists wtCreated.worktreePath)
+  let wtRemovedRes ← removeMissionWorktree wtCreated.worktreePath true
+  assertTrue "removeMissionWorktree cleans up sibling worktree" wtRemovedRes.toOption.isSome
 
   try IO.FS.removeDirAll tmpDir catch _ => pure ()
   IO.println "=== ALL ORB-BIN WAVE 1 SELF-TESTS PASSED ==="

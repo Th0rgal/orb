@@ -218,6 +218,15 @@ export default function NativeInteractionPrompt(p: {
                 >
                   {r().method === "plan" ? "Request changes" : "Decline"}
                 </button>
+                <Show when={r().method === "permission"}>
+                  <button
+                    class="s-btn native-secondary"
+                    disabled={sending()}
+                    onClick={() => void reply("accept_session")}
+                  >
+                    Allow for session
+                  </button>
+                </Show>
                 <button class="s-btn native-primary" disabled={sending()} onClick={() => void reply("accept")}>
                   {r().method === "plan" ? "Implement plan" : "Allow once"}
                 </button>

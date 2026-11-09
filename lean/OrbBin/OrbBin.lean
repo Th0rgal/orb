@@ -21,3 +21,5 @@ import OrbBin.SandboxedMcpMain
 import OrbBin.WorkspaceMcpMain
 import OrbBin.DesktopMcpMain
 import OrbBin.AutomationMcpMain
+import OrbBin.GitWorkspace
+import OrbBin.ClaudeControl

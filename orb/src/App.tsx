@@ -22,6 +22,12 @@ import { missionParent } from "./missionTree";
 import { btwParentId, isBtwMission, isPartialList, mergeMission, normalizeMissionFolder, reconcileMissionList, type Misses, type PlacementCommitItem, resetMissionHierarchy, resolvedParent } from "./missionHierarchy";
 import { hintSideQuestionOpen, sideQuestionKey } from "./sideQuestionStorage";
 import { draftCyber, setDraftCyber, requireCyberSupport } from "./cyberAccess";
+import {
+  draftClaudePermission,
+  draftWorktreeMode,
+  setDraftClaudePermission,
+  setDraftWorktreeMode,
+} from "./ClaudePermissionPicker";
 import {trackScrollbarHover} from "./scrollbarHover";
 import {WorkingDirectoryPicker} from "./WorkingDirectoryPicker";
 import {MentionProjectContext} from "./PromptEditor";
@@ -922,9 +928,11 @@ export default function App() {
       return m.id;
     }
     if (launchAttempt?.signature !== signature) launchAttempt = { signature, key: crypto.randomUUID() };
-    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,...(folder ? {folder} : {}),prompt:body.prompt,tags:body.tags});
+    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,permissionMode:pick.backend === "claudecode" ? draftClaudePermission() : undefined,worktreeMode:draftWorktreeMode(),imagePaths}, {key:launchAttempt.key,title,project:projectSlug,...(folder ? {folder} : {}),prompt:body.prompt,tags:body.tags});
     launchAttempt = undefined;
     setDraftCyber("automatic");
+    setDraftClaudePermission("supervised");
+    setDraftWorktreeMode("auto");
     setAttachChips([]);
     rememberLaunch(m.id, {messageKey:launchPreview()?.messageKey,prompt:imagePrompt(typed,imagePaths,images),images,nodeId:"local",destination:"This computer"});
     launchedViewKeys.set(m.id, launchViewKey());
@@ -1015,12 +1023,14 @@ export default function App() {
           ? confirmed24hTarget() === machine ||
             await import("./managedMachineModel").then(m => m.is24hCommitmentSize(m.findManagedSize(autoTarget.provider, autoTarget.size)))
           : false;
-        const body = {...(pick.backend === "codex" ? {cyber_access:selectedCyber,service_tier:pick.service_tier??"standard"} : {}),...(pick.backend === "vibe" && planObjective(prompt) !== null ? {agent:"plan"} : {}),title,prompt:sentPrompt,working_directory:autoTarget ? undefined : (workingDirectory().trim() || undefined),project:projectSlug,...(folder ? {folder} : {}),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(allow24h ? {managed_allow_24h_commitment:true} : {}),...(attachments.length ? {attachments} : {})};
+        const body = {...(pick.backend === "codex" ? {cyber_access:selectedCyber,service_tier:pick.service_tier??"standard"} : {}),...(pick.backend === "claudecode" && draftClaudePermission() !== "supervised" ? {permission_mode:draftClaudePermission()} : {}),...(draftWorktreeMode() !== "auto" && !autoTarget && workingDirectory().trim() ? {worktree_mode:draftWorktreeMode()} : {}),...(pick.backend === "vibe" && planObjective(prompt) !== null ? {agent:"plan"} : {}),title,prompt:sentPrompt,working_directory:autoTarget ? undefined : (workingDirectory().trim() || undefined),project:projectSlug,...(folder ? {folder} : {}),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(allow24h ? {managed_allow_24h_commitment:true} : {}),...(attachments.length ? {attachments} : {})};
         const signature = JSON.stringify(body);
         if (launchAttempt?.signature !== signature) launchAttempt = {signature,key:crypto.randomUUID()};
         const m = await createMission({...body,idempotency_key:launchAttempt.key});
         launchAttempt = undefined;
         setDraftCyber("automatic");
+        setDraftClaudePermission("supervised");
+        setDraftWorktreeMode("auto");
         setAttachChips([]);
         if (autoTarget) warmManagedCatalog(true);
         const resolvedNode = m.remote_node_id ?? machine;

@@ -37,6 +37,7 @@ extension OrbConversation {
             case .stop: Task { await cancel() }
             case .sideQuestion: sideQuestion = OrbSideQuestionRequest(parent: id ?? "", question: "")
             case .files: showFiles = true
+            case .changes: showChanges = true
             case .fork: forking = true
             case .clone: cloning = true
             case .context: showContext = true

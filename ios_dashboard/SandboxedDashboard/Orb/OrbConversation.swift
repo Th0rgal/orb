@@ -82,6 +82,7 @@ struct OrbConversation: View {
     @State var fileRef: OrbFileRef?
     @State var showFiles = false
     @State var sharing = false
+    @State var showChanges = false
     @FocusState var composerFocused: Bool
     @Environment(\.scenePhase) var phase
     @Environment(\.dismiss) var dismissConversation
@@ -313,6 +314,12 @@ struct OrbConversation: View {
             .environment(\.orbFiles, OrbFileContext(scope: fileScope, shared: transcript.sharedFiles) { fileRef = $0 })
             .sheet(item: $fileRef) { OrbFileViewerSheet(ref: $0, scope: fileScope).orbTrackPage("file_viewer", surface: .sheet, entryPoint: "mission") }
             .sheet(isPresented: $showFiles) { OrbFilesSheet(scope: fileScope).orbTrackPage("files", surface: .sheet, entryPoint: "mission") }
+            .sheet(isPresented: $showChanges) {
+                if let id, !id.isEmpty {
+                    OrbChangesSheet(missionID: id, onRestored: { Task { await refresh(force: true) } })
+                        .orbTrackPage("changes", surface: .sheet, entryPoint: "mission")
+                }
+            }
             .sheet(item: $preview) { OrbPreviewSheet(file: $0).orbTrackPage("attachment_preview", surface: .sheet) }
             .sheet(isPresented: $showSelection, onDismiss: {
                 if transferRequested { transferRequested = false; transferring = true }
@@ -435,6 +442,7 @@ struct OrbConversation: View {
                 selection.node = resolvedNode == "core" ? mission["remote_node_id"].text : resolvedNode
                 selection.model = mission["model_override"].text
                 selection.serviceTier = OrbCodexSpeed.of(mission)
+                selection.permissionMode = OrbClaudePermissionMode.parse(mission["permission_mode"].text).rawValue
             }
             OrbPresentation.remember(id)
             if mission["history"].items.isEmpty {

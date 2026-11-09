@@ -838,13 +838,103 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
 
   return (passed, total)
 
+private def runWarmClaudeRpcE2eChecks (validTok tmpStateDir : String) : IO (Nat × Nat) := do
+  let warmRpcDir := System.FilePath.mk tmpStateDir / "warm-rpc-repo"
+  IO.FS.createDirAll warmRpcDir
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", warmRpcDir.toString, "init", "-b", "main"] }
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", warmRpcDir.toString, "config", "user.email", "rpc@orb.local"] }
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", warmRpcDir.toString, "config", "user.name", "Orb RPC"] }
+  IO.FS.writeFile (warmRpcDir / "hello.txt") "before\n"
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", warmRpcDir.toString, "add", "hello.txt"] }
+  let _ ← IO.Process.output { cmd := "git", args := #["-C", warmRpcDir.toString, "commit", "-m", "init"] }
+
+  let mockClaudeRpc := System.FilePath.mk tmpStateDir / "mock-claude-rpc.py"
+  IO.FS.writeFile mockClaudeRpc (
+    "#!/usr/bin/env python3\n" ++
+    "import sys, json\n" ++
+    "for raw in sys.stdin:\n" ++
+    "    line = raw.strip()\n" ++
+    "    if not line: continue\n" ++
+    "    msg = json.loads(line)\n" ++
+    "    if msg.get('type') == 'control_request' and msg.get('request', {}).get('subtype') == 'initialize':\n" ++
+    "        print(json.dumps({'type':'system','subtype':'init','session_id':'rpc-sid-1'}), flush=True)\n" ++
+    "    elif msg.get('type') == 'user':\n" ++
+    "        print(json.dumps({'type':'control_request','request_id':'rpc-perm-1','request':{'subtype':'can_use_tool','tool_name':'Bash','input':{'command':'pwd'}}}), flush=True)\n" ++
+    "    elif msg.get('type') == 'control_response':\n" ++
+    "        with open('hello.txt', 'w') as f: f.write('after-turn\\n')\n" ++
+    "        print(json.dumps({'type':'result','num_turns':1,'is_error':False,'result':'Done via RPC','session_id':'rpc-sid-1'}), flush=True)\n"
+  )
+  let _ ← OrbBin.PosixExt.chmod mockClaudeRpc.toString 0o755
+
+  let warmStRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := tmpStateDir, homeDir := tmpStateDir } : LocaldState)
+  let scanRes ← dispatchRpcCommand warmStRef "local_agents_scan" (.obj #[("request", .obj #[("overrides", .obj #[("claudecode", .str mockClaudeRpc.toString)])])])
+  let wsPathRes ← dispatchRpcCommand warmStRef "local_agents_workspace" (.obj #[("request", .obj #[("slug", .str "demo-proj")])])
+  let writeRes ← dispatchRpcCommand warmStRef "local_agents_write" (.obj #[("request", .obj #[
+    ("root", .str warmRpcDir.toString),
+    ("files", .arr #[
+      .obj #[("rel", .str "note.md"), ("content", .str "# Note\n")],
+      .obj #[("rel", .str ".env"), ("content", .str "SECRET=1\n")]
+    ])
+  ])])
+  let runLaunchRes ← dispatchRpcCommand warmStRef "local_run_launch" (.obj #[("request", .obj #[
+    ("id", .str "m-rpc-1"),
+    ("harness", .str "claudecode"),
+    ("bin", .str mockClaudeRpc.toString),
+    ("cwd", .str warmRpcDir.toString),
+    ("prompt", .str "edit file"),
+    ("permission_mode", .str "supervised")
+  ])])
+  let mut waitedPerm := 0
+  let mut activeReqId := ""
+  while waitedPerm < 3000 && activeReqId.isEmpty do
+    if let .ok jv ← dispatchRpcCommand warmStRef "local_interaction" (.obj #[("id", .str "m-rpc-1")]) then
+      activeReqId := (jv.fieldStr? "id").getD ""
+    if activeReqId.isEmpty then
+      IO.sleep 25
+      waitedPerm := waitedPerm + 25
+  let _ ← dispatchRpcCommand warmStRef "local_interaction_answer" (.obj #[
+    ("id", .str "m-rpc-1"),
+    ("requestId", .str "rpc-perm-1"),
+    ("answer", .obj #[("action", .str "accept_session")])
+  ])
+  let mut waitedDone := 0
+  let mut pollTxt := ""
+  while waitedDone < 3000 do
+    if let .ok pj ← dispatchRpcCommand warmStRef "local_agents_poll" (.obj #[("id", .str "m-rpc-1")]) then
+      if (pj.fieldBool? "done") == some true then
+        pollTxt := (pj.fieldStr? "text").getD ""
+        break
+    IO.sleep 25
+    waitedDone := waitedDone + 25
+  let _ ← dispatchRpcCommand warmStRef "local_agents_stop" (.obj #[("id", .str "m-rpc-1")])
+  let ungrantedDir := System.FilePath.mk tmpStateDir / "ungranted-repo"
+  IO.FS.createDirAll ungrantedDir
+  let ungrantedListRes ← dispatchRpcCommand warmStRef "local_checkpoints_list" (.obj #[("cwd", .str ungrantedDir.toString), ("mission_id", .str "m-rpc-1")])
+  let cpListRes ← dispatchRpcCommand warmStRef "local_checkpoints_list" (.obj #[("cwd", .str warmRpcDir.toString), ("mission_id", .str "m-rpc-1")])
+  let cpDiffRes ← dispatchRpcCommand warmStRef "local_checkpoint_diff" (.obj #[("cwd", .str warmRpcDir.toString)])
+  let wtStatRes ← dispatchRpcCommand warmStRef "local_worktree_status" (.obj #[("cwd", .str warmRpcDir.toString), ("mission_id", .str "m-rpc-2"), ("prefer_worktree", .bool true)])
+
+  let rpcE2eOk :=
+    (match scanRes with | .ok (.arr rows) => rows.size == 6 | _ => false) &&
+    (match wsPathRes with | .ok (.str p) => !p.isEmpty | _ => false) &&
+    (match writeRes with | .ok jv => ((jv.fieldArr? "written").map Array.size) == some 1 && ((jv.fieldArr? "skipped").map Array.size) == some 1 | _ => false) &&
+    (match runLaunchRes with | .ok jv => (jv.fieldStr? "run_id").isSome && (jv.fieldUInt64? "generation") == some 1 | _ => false) &&
+    activeReqId == "rpc-perm-1" &&
+    pollTxt == "Done via RPC" &&
+    ungrantedListRes.isOk.not &&
+    (match cpListRes with | .ok jv => ((jv.fieldArr? "checkpoints").map (fun cps => decide (cps.size >= 2))).getD false | _ => false) &&
+    (match cpDiffRes with | .ok jv => ((jv.fieldArr? "files").map (fun fs => decide (fs.size >= 1))).getD false && !(jv.fieldStr? "raw_diff" |>.getD "").isEmpty | _ => false) &&
+    (match wtStatRes with | .ok jv => (jv.fieldBool? "is_git_repo") == some true && (jv.fieldNat? "decision_word") == some 513 | _ => false)
+  let ok ← assertTrue "warm_claude_rpc_checkpoints_diff_and_worktree_e2e" rpcE2eOk
+  return (if ok then 1 else 0, 1)
+
 def main : IO UInt32 := do
   let mut passed := 0
   let mut total := 0
 
-  -- 1. Command table size (88 desktop commands + plugin:app|version = 89)
+  -- 1. Command table size (95 desktop commands + plugin:app|version = 96)
   total := total + 1
-  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 89) then passed := passed + 1
+  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 96) then passed := passed + 1
 
   -- 2. Loopback RPC auth gate (>= 32-byte non-placeholder secret + local Origin confinement)
   let validTok := "0123456789abcdef0123456789abcdef"
@@ -1288,6 +1378,13 @@ def main : IO UInt32 := do
   let (pParity, tParity) ← runDesktopReliabilityParityChecks tmpStateDir validTok
   passed := passed + pParity
   total := total + tParity
+
+  -- 21. Warm Claude RPC integration (`local_agents_scan`, `local_agents_workspace`, `local_agents_write`,
+  --     `local_run_launch`, `local_interaction_answer`, `local_checkpoints_list`, `local_checkpoint_diff`,
+  --     `local_checkpoint_restore`, `local_worktree_status`)
+  let (warmPassed, warmTotal) ← runWarmClaudeRpcE2eChecks validTok tmpStateDir
+  passed := passed + warmPassed
+  total := total + warmTotal
 
   try IO.FS.removeDirAll tmpStateDir catch _ => pure ()
 

@@ -4,6 +4,8 @@ import { canForceSlot, executionPhaseLabel, isArchived, isFailedStatus, isLive, 
 import { errorText, log, swallow } from "../log";
 import { flushClientLink } from "../clientLink";
 import {CodexSpeedPicker, missionSpeed} from '../CodexSpeedPicker';
+import { MissionClaudePermission } from "../ClaudePermissionPicker";
+import { ConfirmDialog } from "../Dialog";
 import { Picker } from "../Picker";
 import { Popover } from "../Popover";
 import { RemoteQueue, type RemoteQueueHandle } from "../RemoteQueue";
@@ -31,7 +33,8 @@ import { shallowEqual } from "../poll";
 import { Show, Suspense, batch, createMemo, createSignal, createEffect, lazy, on, onCleanup, onMount } from "solid-js";
 import { Portal } from "solid-js/web";
 import * as Ic from "../icons";
-import { ForkMission, observeTransferDestination, stopSource, transferForDestination } from "../ForkMission";
+import { observeTransferDestination, stopSource, transferForDestination } from "../forkTransfer";
+const ForkMission = lazy(() => import("../ForkMission").then(module => ({ default: module.ForkMission })));
 import { forkSource } from "../missionTree";
 import { fullToolCall, heldAfterHistory, isMultiplexSyncActive, type StreamEvent } from "../stream";
 import { localActivitiesToStreamItems } from "../workModel";
@@ -80,6 +83,9 @@ import {
   refreshLocalAgents,
   stopLocal,
   writeLocalFiles,
+  listMissionCheckpoints,
+  restoreMissionCheckpoint,
+  type CheckpointMeta,
 } from "../localAgents";
 import { timed } from "../diagnostics";
 import {
@@ -313,7 +319,7 @@ function MissionDock(p: {
         <div class="fork-anchor">
           <Show when={!participant()} fallback={<span class="under-harness">{harnessName()}</span>}>
             <button class="under-harness fork-trigger" title="Transfer to another agent" aria-label="Transfer to another agent" onClick={() => setForkOpen(true)}>{harnessName()} <Ic.ChevronDown size={10} /></button>
-            <Show when={forkOpen() && p.mission}>{m => <ForkMission mission={m()} choices={harnessChoices(catalogMachine())} onOpen={() => { if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine()); }} destination={p.destination} onClose={() => setForkOpen(false)} onFork={forked => { setForkOpen(false); p.onFork?.(forked); }} />}</Show>
+            <Show when={forkOpen() && p.mission}>{m => <Suspense><ForkMission mission={m()} choices={harnessChoices(catalogMachine())} onOpen={() => { if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine()); }} destination={p.destination} onClose={() => setForkOpen(false)} onFork={forked => { setForkOpen(false); p.onFork?.(forked); }} /></Suspense>}</Show>
           </Show>
         </div>
         <span class="under-sep" aria-hidden="true">·</span>
@@ -388,6 +394,7 @@ function MissionDock(p: {
           }}/>
         </Show>
         <Show when={p.mission?.backend === "codex" && !participant()}><MissionCyber mission={p.mission!} onError={p.onError}/></Show>
+        <Show when={p.mission?.backend === "claudecode" && !participant() ? p.mission : undefined}>{m => <MissionClaudePermission mission={m()} onMission={p.onMission} onError={p.onError} />}</Show>
       </Show>
       <Show when={isConnected() && (networkHealth() === "reconnecting" || (networkHealth() === "slow" && (p.syncing || isWorking(p.mission?.status))))}>
         <span
@@ -524,6 +531,39 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   const [error, setError] = createSignal<string | null>(null);
   const [queueError, setQueueError] = createSignal<string | null>(cached?.queueError ?? null);
   const [sendError, setSendError] = createSignal<string | null>(null);
+  const [checkpoints, setCheckpoints] = createSignal<CheckpointMeta[]>([]);
+  const [pendingCheckpointRevert, setPendingCheckpointRevert] = createSignal<CheckpointMeta | null>(null);
+  const [revertingCheckpoint, setRevertingCheckpoint] = createSignal(false);
+  createEffect(() => {
+    const id = p.id;
+    const cwd = localBinding(id)?.cwd ?? mission()?.working_directory ?? "";
+    const status = mission()?.status;
+    if (!id || !cwd.trim()) {
+      setCheckpoints([]);
+      return;
+    }
+    let current = true;
+    onCleanup(() => { current = false; });
+    void listMissionCheckpoints(id, cwd)
+      .then((rows) => { if (current && status !== undefined) setCheckpoints(rows); })
+      .catch(() => { if (current) setCheckpoints([]); });
+  });
+  const confirmRevertCheckpoint = async () => {
+    const target = pendingCheckpointRevert();
+    const id = boundMissionId || p.id;
+    if (!target || !id || revertingCheckpoint()) return;
+    setRevertingCheckpoint(true);
+    try {
+      const cwd = localBinding(id)?.cwd ?? mission()?.working_directory ?? undefined;
+      await restoreMissionCheckpoint(id, target.ref, cwd);
+      setPendingCheckpointRevert(null);
+      window.dispatchEvent(new Event("orb:refresh"));
+    } catch (e) {
+      setSendError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRevertingCheckpoint(false);
+    }
+  };
   const drafts = createOptimisticList<{id:ReturnType<typeof crypto.randomUUID>;text:string; images:DraftImage[];waiting:boolean;postedAfterSeq:number;failed?:boolean;retry?:()=>void}>();
   const optimisticList = drafts.items;
   const optimistic = drafts.first;
@@ -1540,7 +1580,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             <Show when={mission() && !(awaitingTurn() || optimisticList().some(item => !item.waiting && !item.failed)) && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
               <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} onResetRedeemed={() => void refresh()} recoveryPending={recoveryPending()} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} />
             </Show>
-            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.promoted ? handoff()?.id : undefined} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} prepareSearch={prepareSearch} needsPrepareSearch={needsPrepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id && !participant() ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && ((missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled") || visibleViewItems().some(item => item.kind === "error" && item.terminal)) ? resume : undefined} />
+            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.promoted ? handoff()?.id : undefined} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} prepareSearch={prepareSearch} needsPrepareSearch={needsPrepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id && !participant() ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && ((missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled") || visibleViewItems().some(item => item.kind === "error" && item.terminal)) ? resume : undefined} checkpoints={checkpoints()} onRestoreCheckpoint={!participant() ? setPendingCheckpointRevert : undefined} />
             <Show when={awaiting() && items().length > 0}><ActivitySkeleton /></Show>
             <TurnRecap mission={mission() ?? undefined} items={viewItems()} busy={busy()} onDraft={text=>setSideRevision({text,append:false})} />
             <ErrorToast
@@ -1691,6 +1731,18 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           <MissionDock mission={mission()} items={viewItems()} destination={missionDestination(mission(), receipt)} syncing={syncing()} onMission={applyDockMission} onError={setError} onFork={p.onFork} />
         </div>
       </div>
+      <Show when={pendingCheckpointRevert()}>
+        {(cp) => (
+          <ConfirmDialog
+            title={`Revert workspace to Turn ${cp().turn}?`}
+            description={`Uncommitted changes since Turn ${cp().turn} (${cp().commit.slice(0, 7)}) will be replaced. Orb saves an automatic backup ref before restoring.`}
+            action={revertingCheckpoint() ? "Reverting…" : "Revert workspace"}
+            destructive
+            onConfirm={() => void confirmRevertCheckpoint()}
+            onClose={() => { if (!revertingCheckpoint()) setPendingCheckpointRevert(null); }}
+          />
+        )}
+      </Show>
     </>
   );
 }
