@@ -46,6 +46,7 @@ import {
   attachMissionStream,
   clearWarmMissionSettingsPatch,
   extractMissionSettingsPatch,
+  hasFreshNetworkTranscript,
   isMissionDirtyWhileUnfocused,
   isMissionWarmLive,
   loadOlderTranscript,
@@ -461,7 +462,8 @@ export function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
     if (p.id) void loadTranscript(p.id).catch(swallow("mission.loadTranscript", { mission: p.id }));
     if (!resolved()) void getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e)));
   });
-  return <Show when={Boolean(resolved())} fallback={<><ErrorToast error={error()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(""); return getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e))); } }} onDismiss={() => setError("")} /><ConversationSkeleton /></>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} onMission={handleMission} />}>{(() => { const mod = peekCloudAgentsModule(); return mod ? <mod.CloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /> : <Suspense fallback={<ConversationSkeleton />}><LazyCloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /></Suspense>; })()}</Show></Show>;
+  const canRenderBody = () => Boolean(resolved()) || (!error() && (transcriptVersion(), Boolean(peekTranscript(p.id)?.items.length)));
+  return <Show when={canRenderBody()} fallback={<><ErrorToast error={error()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(""); return getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e))); } }} onDismiss={() => setError("")} /><ConversationSkeleton /></>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} onMission={handleMission} />}>{(() => { const mod = peekCloudAgentsModule(); return mod ? <mod.CloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /> : <Suspense fallback={<ConversationSkeleton />}><LazyCloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /></Suspense>; })()}</Show></Show>;
 }
 
 export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null, authoritative?: boolean) => void; onFork?: (mission: Mission) => void }) {
@@ -511,7 +513,13 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       return;
     }
     const preview = peekTranscript(p.id);
-    if (preview?.detailsPending) setItems(reuseUnchanged(items(), preview.items));
+    if (preview?.detailsPending) {
+      const hadItems = items().length > 0;
+      setItems(reuseUnchanged(items(), preview.items));
+      if (!hadItems && preview.items.length > 0 && !hasPendingSearchTarget(p.id)) {
+        queueMicrotask(() => { if (!disposed && !hasPendingSearchTarget(p.id)) landAtBottom(); });
+      }
+    }
   }));
   const [error, setError] = createSignal<string | null>(null);
   const [queueError, setQueueError] = createSignal<string | null>(cached?.queueError ?? null);
@@ -822,7 +830,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     // unless the mission is already WarmLive or clean on an unbroken sync WS.
     let initialReady = true;
     let streamHealthy = warmLiveOnMount;
-    if (warmLiveOnMount || cleanStaleOnMount) {
+    const justFetchedFromNetwork = hasFreshNetworkTranscript(id);
+    if (warmLiveOnMount || cleanStaleOnMount || justFetchedFromNetwork) {
       queueMicrotask(() => {
         if (!disposed && !hasPendingSearchTarget(p.id)) scrollIfPinned();
       });
@@ -1432,7 +1441,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         for (let poll = 0; poll < 75; poll++) {
           if (staleMission() || p.id !== targetMissionId) return;
           try {
-            const current = await getMission(targetMissionId);
+            const current = await getMission(targetMissionId, { includeHistory: false });
             if (staleMission() || p.id !== targetMissionId) return;
             setMission(current);
             const stillStopping =

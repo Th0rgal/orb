@@ -654,7 +654,10 @@ private partial def runH2OriginWorkerWithOps
                                 bodyBytes := nextBytes
                                 unackedRecv := remUnacked
                               }
-            if pendingOff >= 32768 && pendingOff * 2 >= pendingBuf.size then
+            if pendingOff == pendingBuf.size then
+              pendingBuf := ByteArray.empty
+              pendingOff := 0
+            else if pendingOff >= 32768 && pendingOff * 2 >= pendingBuf.size then
               pendingBuf := pendingBuf.extract pendingOff pendingBuf.size
               pendingOff := 0
   finally

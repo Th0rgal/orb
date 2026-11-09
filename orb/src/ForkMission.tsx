@@ -383,7 +383,7 @@ export function ForkMission(p: {
 
 /** Stops a conversation that another version replaces, if it is still running. */
 export async function stopSource(id: string): Promise<void> {
-  const current = await getMission(id);
+  const current = await getMission(id, { includeHistory: false });
   if (sourceStopped(current)) return;
   if (current.backend?.startsWith("cloud_")) {
     await api(`/api/control/missions/${encodeURIComponent(id)}/cloud/cancel`, { method: "POST" });
@@ -391,7 +391,7 @@ export async function stopSource(id: string): Promise<void> {
     await cancelMission(id);
   }
   for (let i = 0; i < 20; i++) {
-    const m = await getMission(id);
+    const m = await getMission(id, { includeHistory: false });
     if (sourceStopped(m)) return;
     await new Promise((r) => setTimeout(r, 500));
   }

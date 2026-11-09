@@ -71,7 +71,8 @@ def classifyProxyRequestPriority (method relPath : String) (explicitPrio? : Opti
             p.startsWith "/api/antigravity-models" || p.startsWith "/api/crons" ||
             p.startsWith "/api/library/skill-delivery" || p.startsWith "/api/ai/providers/usage" ||
             p.startsWith "/api/usage-telemetry" || p.startsWith "/api/remote-nodes" ||
-            p.endsWith "/context/conflicts" ||
+            p.endsWith "/context/conflicts" || p.endsWith "/context/manifest" ||
+            p.endsWith "/automations" || p.endsWith "/machine-transfer" ||
             p.endsWith "/files" || (p.splitOn "/files/").length > 1 then
       2
     else

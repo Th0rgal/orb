@@ -494,10 +494,11 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     };
    let generation=0;
    // Only the newest read applies: an older, slower one never rolls back history.
-   const sync=(local:Parameters<typeof reconcile>[1],force=false,initialCold=false)=>{
+   const sync=(local:Parameters<typeof reconcile>[1],force=false,background=false,initialCold=false)=>{
     const mine=++generation;inFlight++;
     if(initialCold)setInitialSyncPending(true);
-    void reconcile(missionId,local,undefined,force?{force:true}:undefined).then(reconciled=>{
+    const opts=force&&background?{force:true,priority:'p2' as const}:force?{force:true}:background?{priority:'p2' as const}:undefined;
+    void reconcile(missionId,local,undefined,opts).then(reconciled=>{
      if(stale||key()!==current||mine!==generation)return;
      applyReconciled(reconciled);
     }).catch(e=>{
@@ -517,7 +518,17 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    };
    resync=()=>{if(!stale)sync(history(),true);};
    const coldEmpty=!initialHistory.length&&!(warmNow&&warmNow.clean);
-   sync(initialHistory,Boolean((saved?.pending&&!warmAnsweredPending)||(warmNow&&(!warmNow.clean||Boolean(warmNow.activeSession)))),coldEmpty);
+   const needsImmediateSync=Boolean(
+    shouldOpen||
+    (side?.visible())||
+    launching||
+    agent?.active||
+    awaitingServerPending||
+    unmigratedLegacyQueue.length||
+    (saved?.pending&&!warmAnsweredPending)||
+    (warmNow&&(!warmNow.clean||Boolean(warmNow.activeSession))),
+   );
+   sync(initialHistory,Boolean((saved?.pending&&!warmAnsweredPending)||(warmNow&&(!warmNow.clean||Boolean(warmNow.activeSession)))),!needsImmediateSync,coldEmpty);
   }
   };
   if(cachedSaved){

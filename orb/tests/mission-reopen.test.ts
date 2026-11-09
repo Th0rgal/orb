@@ -54,20 +54,21 @@ it("succeeds without re-POSTing when Core parent cascade already archived a chil
 
   const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    if (init?.method === "POST" && url.endsWith("/missions/parent/status")) {
+    const pathname = new URL(url, "https://core.example").pathname;
+    if (init?.method === "POST" && pathname.endsWith("/missions/parent/status")) {
       state.parent = "acknowledged";
       state.child = "acknowledged"; // Core cascades acknowledged to idle children
       releaseChildGet();
       return new Response("{}");
     }
-    if (init?.method === "POST" && url.endsWith("/missions/child/status")) {
+    if (init?.method === "POST" && pathname.endsWith("/missions/child/status")) {
       return new Response("{}");
     }
-    if (url.endsWith("/missions/child")) {
+    if (pathname.endsWith("/missions/child")) {
       await childGetGate;
       return Response.json({ id: "child", status: state.child });
     }
-    if (url.endsWith("/missions/parent")) {
+    if (pathname.endsWith("/missions/parent")) {
       return Response.json({ id: "parent", status: state.parent });
     }
     throw new Error(`unexpected fetch: ${url}`);

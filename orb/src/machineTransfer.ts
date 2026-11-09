@@ -2,6 +2,7 @@ import { api, ApiError, getMission, type Mission } from "./api";
 import { machineIdentity, nativeInvoke } from "./clientRuns";
 import { localBinding, refreshLocalAgents, rememberBinding } from "./localAgents";
 import { nodeLabel } from "./machines/nodes";
+import type { RequestPriority } from "./transportScheduler";
 export type Machine = { kind: "core" } | { kind: "node" | "client"; id: string };
 export interface TransferFile { path: string; bytes: number; sha256: string; executable: boolean }
 export interface TransferLink { path: string; target: string }
@@ -23,8 +24,8 @@ export interface TransferView { version: number; source?: Machine; features?: st
 export const machineLabel = (m: Machine) => m.kind === "core" ? "Core" : m.kind === "client" ? "This computer" : nodeLabel(m.id);
 export const sameMachine = (a: Machine, b: Machine) => a.kind === b.kind && (a.kind === "core" || (b.kind !== "core" && a.id === b.id));
 export const activeTransfer = (a: TransferAction) => !["activated", "cancelled"].includes(a.phase);
-export async function inspectTransfer(id: string): Promise<TransferView> {
-  try { return await api<TransferView>(`/api/control/missions/${id}/machine-transfer`); }
+export async function inspectTransfer(id: string, priority?: RequestPriority): Promise<TransferView> {
+  try { return await api<TransferView>(`/api/control/missions/${id}/machine-transfer`, undefined, undefined, priority); }
   catch (e) { if (e instanceof ApiError && [404, 405].includes(e.status)) throw new Error("Update the connected backend to enable machine transfer. The conversation has not moved."); throw e; }
 }
 export const transferRequest = <T = TransferAction>(id: string, body: Record<string, unknown>, signal?: AbortSignal) => api<T>(`/api/control/missions/${id}/machine-transfer`, {
@@ -165,7 +166,7 @@ export async function adoptTransferredWorkspace(action: TransferAction) {
   if (!action.destination_root) throw new Error("Destination receipt has no workspace.");
   const old = localBinding(action.mission_id);
   if (old?.cwd === action.destination_root && (!["antigravity", "vibe"].includes(action.backend) || old.transferId === action.id)) return; // retain the new native session on subsequent reads
-  const missionPromise = action.backend === "vibe" ? getMission(action.mission_id) : undefined;
+  const missionPromise = action.backend === "vibe" ? getMission(action.mission_id, { includeHistory: false }) : undefined;
   missionPromise?.catch(() => {});
   const rows = await refreshLocalAgents();
   const cli = rows.find(r => r.id === action.backend && r.installed && r.path);
@@ -183,5 +184,5 @@ export async function activateTransfer(action: TransferAction): Promise<Mission>
   }
   const receipt = await transferRequest(action.mission_id, { op: "activate", transfer_id: action.id, client_source_verified: clientSourceVerified });
   await adoptTransferredWorkspace(receipt);
-  return getMission(action.mission_id);
+  return getMission(action.mission_id, { includeHistory: false });
 }

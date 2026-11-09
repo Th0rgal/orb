@@ -610,7 +610,7 @@ export function startLocalQueueWorker(){
      if(row.state==='error'&&queuedBehind.length>0){
       let superseded=!!row.userSynced&&queuedBehind.some(r=>!r.delegated&&!r.scheduled);
       if(!superseded&&row.receipt?.generation!=null){
-       const currentMission=await getMission(row.mission).catch(()=>undefined);
+       const currentMission=await getMission(row.mission,{includeHistory:false}).catch(()=>undefined);
        superseded=currentMission?.execution?.generation!=null&&currentMission.execution.generation>row.receipt.generation;
       }
       if(superseded){
@@ -664,7 +664,7 @@ export function startLocalQueueWorker(){
       else await reconcileLocalRun(row.mission);
       continue;}}catch(error){if(!/no local run/i.test(String(error)))throw error;}
      await reconcileLocalRun(row.mission);if(!valid())return;
-     const mission=await getMission(row.mission);
+     const mission=await getMission(row.mission,{includeHistory:false});
      if(!isClientPlacement(mission)||binding.cwd!==row.request.cwd)throw Error('This conversation changed machines or folders. Remove this message and send it again.');
      if(isRunning(mission.status)||mission.status==='pending'&&!row.delegated)continue;
      if(!valid())return;

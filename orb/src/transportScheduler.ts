@@ -20,6 +20,10 @@ let p2Active = 0;
 const p1Queue: QueuedTask[] = [];
 const p2Queue: QueuedTask[] = [];
 
+export function isP2QueuePaused(): boolean {
+  return p2Queue.length > 0 && currentLinkBudget().p2Cap <= 0;
+}
+
 export function classifyClientRequestPriority(
   methodRaw: string | undefined,
   path: string,
@@ -58,6 +62,9 @@ export function classifyClientRequestPriority(
     cleanPath.startsWith("/api/usage-telemetry") ||
     cleanPath.startsWith("/api/remote-nodes") ||
     cleanPath.endsWith("/context/conflicts") ||
+    cleanPath.endsWith("/context/manifest") ||
+    cleanPath.endsWith("/automations") ||
+    path.includes("exclude_content=true") ||
     cleanPath.endsWith("/files") ||
     cleanPath.includes("/files/")
   ) {

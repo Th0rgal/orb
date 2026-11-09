@@ -28,6 +28,8 @@ import {
   type SyncCursorState,
 } from "./clientCore";
 
+import type { RequestPriority } from "./transportScheduler";
+
 export const STREAM_MAX_OPEN_TAIL_BYTES = 16_384;
 
 export type StreamTailCommitState = {
@@ -136,7 +138,7 @@ export interface StreamEvent {
 
 async function apiRawOnce(
   path: string,
-  opts?: { priority?: import("./transportScheduler").RequestPriority; signal?: AbortSignal },
+  opts?: { priority?: RequestPriority; signal?: AbortSignal },
 ): Promise<Response> {
   const version = connectionVersion();
   const jwt = getJwt();
@@ -172,7 +174,7 @@ async function apiRawOnce(
 
 async function apiRaw(
   path: string,
-  opts?: { priority?: import("./transportScheduler").RequestPriority; signal?: AbortSignal },
+  opts?: { priority?: RequestPriority; signal?: AbortSignal },
 ): Promise<Response> {
   const from = performance.now(), label = `GET ${path.slice(0, 160)}`;
   try {
@@ -205,7 +207,7 @@ export async function fullToolCall(missionId:string,callId:string):Promise<{args
 }
 export async function getMissionEventPage(
  id:string,
- cursor:{since?:number;before?:number;view?:'transcript'|'trace'|'history'|'all';types?:string;limit?:number;priority?:import("./transportScheduler").RequestPriority;signal?:AbortSignal}={},
+ cursor:{since?:number;before?:number;view?:'transcript'|'trace'|'history'|'all';types?:string;limit?:number;priority?:RequestPriority;signal?:AbortSignal}={},
 ):Promise<EventPage>{
  // Large tool outputs arrive shortened; a row loads its full call when opened
  // (fullToolCall). Older Cores ignore the parameter.
@@ -256,10 +258,10 @@ export function getMissionEventPreview(
  * long thread (a /btw thread easily exceeds it with tool rows). This walks
  * back with the exclusive `before` cursor until the history is complete, or
  * until `enough` says the rows read so far suffice (e.g. the latest turn). */
-export async function getMissionEvents(id:string,options:{view?:'transcript'|'trace'|'history'|'all';types?:string;since?:number;limit?:number;enough?:(newestFirst:StoredEvent[])=>boolean}={}):Promise<StoredEvent[]>{
+export async function getMissionEvents(id:string,options:{view?:'transcript'|'trace'|'history'|'all';types?:string;since?:number;limit?:number;priority?:RequestPriority;enough?:(newestFirst:StoredEvent[])=>boolean}={}):Promise<StoredEvent[]>{
  const bySequence=new Map<number,StoredEvent>();
  const pageLimit=options.limit!==undefined?{limit:options.limit}:{};
- const filterOpts={...(options.view?{view:options.view}:{}),...(options.types?{types:options.types}:{})};
+ const filterOpts={...(options.view?{view:options.view}:{}),...(options.types?{types:options.types}:{}),...(options.priority?{priority:options.priority}:{})};
  if(options.since!==undefined){
   let since=options.since,reset=false;
   for(let pages=0;pages<500;pages++){
