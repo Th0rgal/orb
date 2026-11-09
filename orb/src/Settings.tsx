@@ -1,6 +1,6 @@
 import { HARNESS_IDS, harnessName } from "./harnesses";
 import { cloudAccounts, cloudNames, type CloudAccount } from "./cloudAgentApi";
-import { cachePeek, cachePut } from "./pageCache";
+import { cachePeek, cachePeekArray, cachePut } from "./pageCache";
 import { ErrorToast } from "./toast";
 import { ExecutionSettings } from "./ExecutionSettings";
 import { MachineProvidersCard } from "./ManagedMachines";
@@ -79,7 +79,7 @@ function openExternalUrl(url: string) {
 
 function CloudAccountsCard(p: { onOpenPage?: (id: string) => void }) {
   const [accounts, setAccounts] = createSignal<CloudAccount[]>(
-    isConnected() ? (cachePeek<CloudAccount[]>("settings:cloud-accounts") ?? []) : [],
+    isConnected() ? (cachePeekArray<CloudAccount>("settings:cloud-accounts") ?? []) : [],
   );
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
@@ -88,9 +88,10 @@ function CloudAccountsCard(p: { onOpenPage?: (id: string) => void }) {
     const version = connectionVersion();
     setBusy(true);
     try {
-      const list = await cloudAccounts();
+      const raw = await cloudAccounts();
+      const list = Array.isArray(raw) ? raw : [];
       if (connectionVersion() === version) {
-        cachePut("settings:cloud-accounts", list);
+        if (Array.isArray(raw)) cachePut("settings:cloud-accounts", list);
         setAccounts(list);
         setError("");
       }
@@ -102,7 +103,7 @@ function CloudAccountsCard(p: { onOpenPage?: (id: string) => void }) {
   // after every (re)connect instead of keeping a pre-login failure on screen.
   // connectionVersion bumps on every connect and disconnect (which also resets pageCache).
   createEffect(on(connectionVersion, () => {
-    setAccounts(isConnected() ? (cachePeek<CloudAccount[]>("settings:cloud-accounts") ?? []) : []);
+    setAccounts(isConnected() ? (cachePeekArray<CloudAccount>("settings:cloud-accounts") ?? []) : []);
     setError("");
     void refresh();
   }));

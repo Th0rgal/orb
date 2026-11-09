@@ -315,6 +315,10 @@ export default function App() {
     import("./cloudAgentApi")
       .then((m) => m.cloudAccounts())
       .then((rows) => {
+        if (!Array.isArray(rows)) {
+          setPalomaAvailable(false);
+          return;
+        }
         cachePut("settings:cloud-accounts", rows);
         setPalomaAvailable(rows.some((row) => row.provider === "hermes" && row.available));
       })
@@ -407,7 +411,7 @@ export default function App() {
   const [remoteLaunch, setRemoteLaunch] = createSignal<{ state: "loading" | "ready" | "error"; capability: RemoteLaunchCapability | null }>({ state: "loading", capability: null });
   const acceptFleet = (fleet: RemoteNodesResponse) => {
     setFleetNodes(fleet.nodes);
-    cachePut("machines:nodes", fleet.nodes);
+    if (Array.isArray(fleet.nodes)) cachePut("machines:nodes", fleet.nodes);
     recordFleet(fleet.nodes);
     setRemoteLaunch({ state: "ready", capability: fleet.remote_launch ?? null });
   };

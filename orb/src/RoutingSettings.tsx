@@ -1,5 +1,5 @@
 import { pollWhileVisible } from "./poll";
-import { cachePeek, cachePut } from "./pageCache";
+import { cachePeek, cachePeekArray, cachePut } from "./pageCache";
 import { Select } from "./Select";
 import { ErrorToast } from "./toast";
 import { RoutingPicker } from "./RoutingPicker";
@@ -55,16 +55,16 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
   let copyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
   onCleanup(() => clearTimeout(copyFeedbackTimer));
   const [chains, setChains] = createSignal<R.ModelChain[]>(
-    isConnected() ? (cachePeek<R.ModelChain[]>("routing:chains") ?? []) : [],
+    isConnected() ? (cachePeekArray<R.ModelChain>("routing:chains") ?? []) : [],
   );
   const [health, setHealth] = createSignal<R.AccountHealthSnapshot[]>(
-    isConnected() ? (cachePeek<R.AccountHealthSnapshot[]>("routing:health") ?? []) : [],
+    isConnected() ? (cachePeekArray<R.AccountHealthSnapshot>("routing:health") ?? []) : [],
   );
   const [catalog, setCatalog] = createSignal<R.RoutingCatalog>(
     isConnected() ? (cachePeek<R.RoutingCatalog>("routing:catalog") ?? { providers: [] }) : { providers: [] },
   );
   const [accounts, setAccounts] = createSignal<AIProvider[]>(
-    isConnected() ? (cachePeek<AIProvider[]>("providers:list") ?? []) : [],
+    isConnected() ? (cachePeekArray<AIProvider>("providers:list") ?? []) : [],
   );
   const [errors, setErrors] = createSignal<Record<string, string>>({});
   const [updated, setUpdated] = createSignal<string>();
@@ -167,11 +167,11 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
       }
     };
     await Promise.all([
-      ...(full ? [read("Fallback Chains", () => R.listChains(force), v => { cachePut("routing:chains", v); setChains(v); })] : []),
+      ...(full ? [read("Fallback Chains", () => R.listChains(force), v => { if (Array.isArray(v)) { cachePut("routing:chains", v); setChains(v); } })] : []),
       ...(tab() === "health" ? [
-        read("Provider Health", R.listHealth, v => { cachePut("routing:health", v); setHealth(v); }),
+        read("Provider Health", R.listHealth, v => { if (Array.isArray(v)) { cachePut("routing:health", v); setHealth(v); } }),
         ...(full ? [
-          read("Accounts", listProviders, v => { cachePut("providers:list", v); setAccounts(v); }),
+          read("Accounts", listProviders, v => { if (Array.isArray(v)) { cachePut("providers:list", v); setAccounts(v); } }),
           getGlobalSettings().then((s) => {
             if (epoch === generation && !googleCapDirty() && s.google_max_concurrency != null) {
               setGoogleCapDraft(String(s.google_max_concurrency));
@@ -206,9 +206,9 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
     queuedFullRefresh = false;
     queuedForceRefresh = false;
     queuedManualRefresh = false;
-    setChains(connected ? (cachePeek<R.ModelChain[]>("routing:chains") ?? []) : []);
-    setHealth(connected ? (cachePeek<R.AccountHealthSnapshot[]>("routing:health") ?? []) : []);
-    setAccounts(connected ? (cachePeek<AIProvider[]>("providers:list") ?? []) : []);
+    setChains(connected ? (cachePeekArray<R.ModelChain>("routing:chains") ?? []) : []);
+    setHealth(connected ? (cachePeekArray<R.AccountHealthSnapshot>("routing:health") ?? []) : []);
+    setAccounts(connected ? (cachePeekArray<AIProvider>("providers:list") ?? []) : []);
     setCatalog(connected ? (cachePeek<R.RoutingCatalog>("routing:catalog") ?? { providers: [] }) : { providers: [] });
     setLeaveRequest(null);
     setDeleteTarget(null);

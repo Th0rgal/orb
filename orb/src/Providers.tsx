@@ -1,5 +1,5 @@
 import { pollWhileVisible } from "./poll";
-import { cachePeek, cachePut } from "./pageCache";
+import { cachePeek, cachePeekArray, cachePut } from "./pageCache";
 import { swallow } from "./log";
 import { AntigravityProvider } from "./AntigravityProvider";
 import { ErrorToast } from "./toast";
@@ -121,7 +121,7 @@ const KINDS: Kind[] = [
 
 export function Providers() {
   const [remote, setRemote] = createSignal<AIProvider[] | null>(
-    isConnected() ? (cachePeek<AIProvider[]>("providers:list") ?? null) : null,
+    isConnected() ? (cachePeekArray<AIProvider>("providers:list") ?? null) : null,
   );
   // Router circuit-breaker state per account ("Out of credit", "Auth failed").
   const [health, setHealth] = createSignal<Record<string, AccountHealthSnapshot>>(
@@ -174,7 +174,7 @@ export function Providers() {
     const connected = isConnected();
     request?.abort();
     ++generation;
-    setRemote(connected ? (cachePeek<AIProvider[]>("providers:list") ?? null) : null);
+    setRemote(connected ? (cachePeekArray<AIProvider>("providers:list") ?? null) : null);
     setHealth(connected ? (cachePeek<Record<string, AccountHealthSnapshot>>("providers:health") ?? {}) : {});
     setLoadError(null);
     if (connected) void reloadRemote();

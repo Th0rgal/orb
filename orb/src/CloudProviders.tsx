@@ -2,7 +2,7 @@ import {For,Show,createSignal,createEffect,on,onCleanup,onMount} from 'solid-js'
 import {cloudAccounts,cloudAccountLabel,cloudNames,type CloudAccount,type CloudProvider} from './cloudAgentApi';
 import {api,connectionVersion,openExternalUrl} from './api';
 import * as Api from './api';
-import {cachePeek,cachePut} from './pageCache';
+import {cachePeek,cachePeekArray,cachePut} from './pageCache';
 import {ProviderUsageMeter} from './ProviderUsageMeter';
 import {ChevronRight,FlaskIcon} from './icons';
 import {ProviderLogo} from './ProviderLogo';
@@ -20,7 +20,7 @@ export function cloudAccountStatus(account:CloudAccount):string {
 }
 const canUseCache=()=>{try{return Api.isConnected();}catch{return false;}};
 export function CloudProviders() {
- const initialAccounts=canUseCache()?cachePeek<CloudAccount[]>('settings:cloud-accounts'):undefined;
+ const initialAccounts=canUseCache()?cachePeekArray<CloudAccount>('settings:cloud-accounts'):undefined;
  const [accounts,setAccounts]=createSignal<CloudAccount[]>(initialAccounts??[]);
  const [usage,setUsage]=createSignal<Record<string,AccountUsage>>(canUseCache()?(cachePeek<Record<string,AccountUsage>>('providers:cloud-usage')??{}):{});
  let usageGeneration=0;
@@ -35,7 +35,7 @@ export function CloudProviders() {
   catch(e){if(!disposed&&version===connectionVersion()){setError(e instanceof Error?e.message:String(e));setLoaded(true);}}
   finally{busy=false;if(!disposed&&(version!==connectionVersion()||queuedManual)){const m=queuedManual;queuedManual=false;void refresh(m);}}
  };
- createEffect(on(connectionVersion,()=>{const cached=canUseCache()?cachePeek<CloudAccount[]>('settings:cloud-accounts'):undefined;setAccounts(cached??[]);setUsage(canUseCache()?(cachePeek<Record<string,AccountUsage>>('providers:cloud-usage')??{}):{});setLoaded(cached!==undefined);setError('');void refresh();}));
+ createEffect(on(connectionVersion,()=>{const cached=canUseCache()?cachePeekArray<CloudAccount>('settings:cloud-accounts'):undefined;setAccounts(cached??[]);setUsage(canUseCache()?(cachePeek<Record<string,AccountUsage>>('providers:cloud-usage')??{}):{});setLoaded(cached!==undefined);setError('');void refresh();}));
  onMount(()=>{const stop=pollWhileVisible(()=>refresh(false),60000);const onRefresh=()=>{void refresh(true);};window.addEventListener('orb:providers-refresh',onRefresh);onCleanup(()=>{disposed=true;stop();window.removeEventListener('orb:providers-refresh',onRefresh);});});
   return <section class="s-sec" aria-label="Cloud agents"><h3>Cloud agents</h3><div class="s-card">
   <ErrorToast error={error()} title="Couldn’t load cloud accounts" background action={{label:'Retry',run:()=>refresh(true)}}/>

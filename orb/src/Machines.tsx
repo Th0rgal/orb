@@ -22,7 +22,7 @@ import {
 } from "./machines/nodes";
 import { For, Show, createSignal, createMemo, createEffect, untrack, onCleanup, onMount } from "solid-js";
 import { pollWhileVisible } from "./poll";
-import { cachePeek, cachePut } from "./pageCache";
+import { cachePeek, cachePeekArray, cachePut } from "./pageCache";
 import * as Ic from "./icons";
 import { readPalomaPub } from "./pubKey";
 import { recordFleet } from "./machineLoad";
@@ -205,7 +205,7 @@ function MachinesPage() {
   const [pub, setPub] = createSignal(cachePeek<string>("machines:paloma-pub") ?? "");
   const [copied, setCopied] = createSignal(false);
   const [nodes, setNodes] = createSignal<RemoteNodeView[] | null>(
-    isConnected() ? (cachePeek<RemoteNodeView[]>("machines:nodes") ?? null) : null,
+    isConnected() ? (cachePeekArray<RemoteNodeView>("machines:nodes") ?? null) : null,
   );
   const [fleetGroupOpen, setFleetGroupOpen] = createSignal<Readonly<Record<string, boolean>>>({});
   const managedFleetGroups = createMemo(() => groupManagedNodesByProvider(nodes() ?? []));

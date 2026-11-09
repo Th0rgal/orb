@@ -2,6 +2,7 @@ import { render, fireEvent, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
 import { Providers } from '../src/Providers';
 import { clearConnection, setConnection } from '../src/api';
+import { cachePut } from '../src/pageCache';
 afterEach(() => { clearConnection(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 const ok = (body: unknown) => new Response(JSON.stringify(body));
 it('replaces a failed initial load with a retry that can recover', async () => {
@@ -79,4 +80,17 @@ it('renders cached providers immediately on remount without flashing the loading
   expect(second.getByText('Cached Claude')).toBeTruthy();
   expect(second.queryByRole('status')).toBeNull();
   second.unmount();
+});
+it('survives non-array cloud-accounts payloads without wedging on the loading skeleton', async () => {
+  setConnection('http://core.test', 'test');
+  cachePut('settings:cloud-accounts', { job: null, runs: [] } as unknown);
+  vi.stubGlobal('fetch', vi.fn((url: string) =>
+    Promise.resolve(ok(url.endsWith('/api/ai/providers')
+      ? [{id:'claude',name:'Claude (work)',provider_type:'anthropic',uses_oauth:true,status:{type:'connected'}}]
+      : { job: null, runs: [] })),
+  ));
+  const ui = render(() => <Providers />);
+  await waitFor(() => expect(ui.getByRole('button', { name: 'Usage history' })).toBeTruthy());
+  expect(ui.getByText(/Claude/)).toBeTruthy();
+  ui.unmount();
 });
