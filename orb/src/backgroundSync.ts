@@ -1,4 +1,5 @@
 import { createSignal } from "solid-js";
+import { readString, writeString } from "./storage";
 
 export type BackgroundSyncMode = "auto" | "on" | "off";
 
@@ -25,9 +26,11 @@ export const RECOVERY_COOLDOWN_MS = 30_000;
 
 const STORAGE_KEY = "orb:background-sync-mode";
 
+export type BackgroundSyncLinkPauseReason = "slow_rtt" | "lagged" | "unstable";
+
 export interface BackgroundSyncMonitorState {
   mode: BackgroundSyncMode;
-  autoPausedReason: BackgroundSyncPauseReason | null;
+  autoPausedReason: BackgroundSyncLinkPauseReason | null;
   dataSaver: boolean;
   slowLink: boolean;
   highRttStreak: number;
@@ -83,20 +86,11 @@ export function stepBackgroundSyncMonitor(
 
     case "network": {
       const constrained = event.dataSaver || event.slowLink;
-      let autoPausedReason = prev.autoPausedReason;
-      let lowRttStreak = prev.lowRttStreak;
-      if (constrained) {
-        autoPausedReason = "data_saver";
-        lowRttStreak = 0;
-      } else if (autoPausedReason === "data_saver") {
-        autoPausedReason = prev.lastPenaltyAtMs !== null ? "slow_rtt" : null;
-      }
       return {
         ...prev,
         dataSaver: event.dataSaver,
         slowLink: event.slowLink,
-        autoPausedReason,
-        lowRttStreak,
+        lowRttStreak: constrained ? 0 : prev.lowRttStreak,
       };
     }
 
@@ -146,6 +140,7 @@ export function stepBackgroundSyncMonitor(
         const canRecover =
           !prev.dataSaver &&
           !prev.slowLink &&
+          prev.autoPausedReason !== null &&
           lowRttStreak >= LOW_RTT_CONSECUTIVE_RECOVER &&
           cooldownMet;
         return {
@@ -227,24 +222,40 @@ export function selectWarmMissionIds(params: {
         warmParents.push(id);
       }
     }
-    const out = [...warmParents];
-    if (params.btwByParent) {
+  }
+
+  const btwParents: string[] = [];
+  const btwParentSet = new Set<string>();
+  if (params.btwByParent) {
+    if (params.backgroundActive) {
       for (const parentId of warmParents) {
-        const btwId = params.btwByParent[parentId];
-        if (btwId && !seen.has(btwId)) {
-          seen.add(btwId);
-          out.push(btwId);
+        if (params.btwByParent[parentId] && !btwParentSet.has(parentId)) {
+          btwParentSet.add(parentId);
+          btwParents.push(parentId);
+        }
+      }
+    } else if (params.openBtwParentIds?.length) {
+      const openSet = new Set(params.openBtwParentIds);
+      for (const parentId of warmParents) {
+        if (openSet.has(parentId) && params.btwByParent[parentId] && !btwParentSet.has(parentId)) {
+          btwParentSet.add(parentId);
+          btwParents.push(parentId);
         }
       }
     }
-    return out;
+    if (params.openBtwParentIds?.length) {
+      for (const parentId of params.openBtwParentIds) {
+        if (parentId && params.btwByParent[parentId] && !btwParentSet.has(parentId)) {
+          btwParentSet.add(parentId);
+          btwParents.push(parentId);
+        }
+      }
+    }
   }
 
   const out = [...warmParents];
-  if (params.btwByParent && params.openBtwParentIds?.length) {
-    const openSet = new Set(params.openBtwParentIds);
-    for (const parentId of warmParents) {
-      if (!openSet.has(parentId)) continue;
+  if (params.btwByParent) {
+    for (const parentId of btwParents) {
       const btwId = params.btwByParent[parentId];
       if (btwId && !seen.has(btwId)) {
         seen.add(btwId);
@@ -281,14 +292,7 @@ export function describeBackgroundSyncStatus(verdict: BackgroundSyncVerdict): st
 }
 
 function readStoredMode(): BackgroundSyncMode {
-  try {
-    if (typeof localStorage !== "undefined") {
-      return normalizeBackgroundSyncMode(localStorage.getItem(STORAGE_KEY));
-    }
-  } catch {
-    /* ignore storage errors */
-  }
-  return "auto";
+  return normalizeBackgroundSyncMode(readString(STORAGE_KEY));
 }
 
 type BrowserConnectionInfo = {
@@ -355,13 +359,7 @@ export function getBackgroundSyncMode(): BackgroundSyncMode {
 
 export function setBackgroundSyncMode(mode: BackgroundSyncMode): void {
   const clean = normalizeBackgroundSyncMode(mode);
-  try {
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem(STORAGE_KEY, clean);
-    }
-  } catch {
-    /* ignore */
-  }
+  writeString(STORAGE_KEY, clean);
   dispatchMonitorEvent({ type: "mode", mode: clean });
 }
 

@@ -24,11 +24,16 @@ enum OrbInboxAccount {
 @MainActor
 final class OrbSharedInboxState {
     static let shared = OrbSharedInboxState()
+    nonisolated static let maxPersistedOutboxBytes = 512 * 1024
+    nonisolated static func shouldPersistEncodedOutbox(_ data: Data) -> Bool {
+        data.count <= maxPersistedOutboxBytes
+    }
     private var mutation = 0
     private var pending = 0
     private var tail: Task<Void, Never>?
     private var scope = ""
     private var outbox: [String: OrbJSON] = [:]
+    private var rebasedPaths = Set<String>()
     private var revisions: [String: Double] = [:]
     private(set) var seen: [String: Double] = [:]
     var applying = false
@@ -36,13 +41,52 @@ final class OrbSharedInboxState {
     static func outboxKey(_ account: String) -> String {
         "orb.inbox.outbox.v1:" + SHA256.hash(data: Data(account.utf8)).map { String(format: "%02x", $0) }.joined()
     }
+    enum ConflictResolution: Equatable, Sendable {
+        case retire
+        case rebase(expectedVersion: Double, mutationSeq: Int)
+    }
+    nonisolated static func resolveConflict(
+        path: String,
+        currentBody: OrbJSON,
+        state: OrbJSON,
+        alreadyRebased: Bool,
+        currentRevision: Double,
+        storedSeq: Int
+    ) -> ConflictResolution? {
+        let entry = path.hasPrefix("seen/") ? "seen:" + (String(path.dropFirst(5)).removingPercentEncoding ?? String(path.dropFirst(5))) : path
+        guard let revision = state["_versions"][entry].doubleValue, revision >= 0 else { return nil }
+        let mergedRevision = max(currentRevision, revision)
+        let remoteStamp = state[entry].doubleValue
+        let localStamp = currentBody["stamp"].doubleValue
+        let satisfied = path.hasPrefix("seen/")
+            && localStamp != nil
+            && remoteStamp != nil
+            && (remoteStamp == localStamp || (localStamp! > 0 && remoteStamp! >= localStamp!))
+        if satisfied || alreadyRebased {
+            return .retire
+        }
+        let prevSeq = Int(currentBody["mutationSeq"].doubleValue ?? 0)
+        let nextSeq = max(max(0, storedSeq), prevSeq) + 1
+        return .rebase(expectedVersion: mergedRevision, mutationSeq: nextSeq)
+    }
+    private func entryKey(_ path: String) -> String {
+        path.hasPrefix("seen/") ? "seen:" + (String(path.dropFirst(5)).removingPercentEncoding ?? String(path.dropFirst(5))) : path
+    }
+    private func nextMutationSeq(floor: Int = 0) -> Int {
+        let stored = UserDefaults.standard.integer(forKey: "orb.inbox.sequence.v1")
+        let next = max(max(0, stored), floor) + 1
+        UserDefaults.standard.set(next, forKey: "orb.inbox.sequence.v1")
+        return next
+    }
     private func persistOutbox() {
-        if let data = try? JSONEncoder().encode(outbox) { UserDefaults.standard.set(data, forKey: Self.outboxKey(scope)) }
+        guard let data = try? JSONEncoder().encode(outbox),
+              Self.shouldPersistEncodedOutbox(data) else { return }
+        UserDefaults.standard.set(data, forKey: Self.outboxKey(scope))
     }
     private func ensureScope() {
         let current = account
         guard scope != current else { return }
-        scope = current; seen = [:]; revisions = [:]
+        scope = current; seen = [:]; revisions = [:]; rebasedPaths.removeAll()
         OrbInboxSettings.shared.bindAccount(current)
         var stored = UserDefaults.standard.data(forKey: Self.outboxKey(current)).flatMap { try? JSONDecoder().decode([String: OrbJSON].self, from: $0) } ?? [:]
         var purgedInvalid = false
@@ -58,6 +102,14 @@ final class OrbSharedInboxState {
         outbox = stored
         if purgedInvalid { persistOutbox() }
     }
+    private func updateVersions(_ raw: OrbJSON) {
+        guard case let .object(values) = raw["_versions"] else { return }
+        for (key, value) in values {
+            if let v = value.doubleValue, v >= 0 {
+                revisions[key] = max(revisions[key] ?? 0, v)
+            }
+        }
+    }
     func write(_ path: String, _ input: OrbJSON) {
         if applying { return }
         let expected = account
@@ -67,15 +119,15 @@ final class OrbSharedInboxState {
             fields.removeValue(forKey: "mutationAt")
             if fields["clientId"] == nil || fields["mutationSeq"] == nil {
                 let client = UserDefaults.standard.string(forKey: "orb.inbox.client.v1") ?? UUID().uuidString
-                let sequence = UserDefaults.standard.integer(forKey: "orb.inbox.sequence.v1") + 1
+                let sequence = nextMutationSeq()
                 UserDefaults.standard.set(client, forKey: "orb.inbox.client.v1")
-                UserDefaults.standard.set(sequence, forKey: "orb.inbox.sequence.v1")
-                let entry = path.hasPrefix("seen/") ? "seen:" + (String(path.dropFirst(5)).removingPercentEncoding ?? String(path.dropFirst(5))) : path
+                let entry = entryKey(path)
                 fields["clientId"] = .string(client); fields["mutationSeq"] = .number(Double(sequence))
                 fields["expectedVersion"] = .number(revisions[entry] ?? 0)
             }
             body = .object(fields)
         }
+        rebasedPaths.remove(path)
         outbox[path] = body
         persistOutbox()
         mutation += 1; pending += 1
@@ -83,14 +135,63 @@ final class OrbSharedInboxState {
         tail = Task {
             await previous?.value
             if expected == account {
-                do {
-                    _ = try await OrbCore.shared.call("/api/control/inbox-state/" + path, method: "PUT", body: body)
-                    if expected == account && outbox[path] == body { outbox.removeValue(forKey: path); persistOutbox() }
-                } catch {
-                    if let http = error as? OrbHTTPError, (http.status == 400 || http.status == 404), path.hasPrefix("seen/"), expected == account, outbox[path] == body {
-                        outbox.removeValue(forKey: path); persistOutbox()
+                var currentBody = body
+                for _ in 0..<2 {
+                    guard expected == account, outbox[path] == currentBody else { break }
+                    do {
+                        _ = try await OrbCore.shared.call("/api/control/inbox-state/" + path, method: "PUT", body: currentBody)
+                        if expected == account && outbox[path] == currentBody {
+                            outbox.removeValue(forKey: path)
+                            rebasedPaths.remove(path)
+                            persistOutbox()
+                        }
+                        break
+                    } catch {
+                        guard let http = error as? OrbHTTPError else { break }
+                        if (http.status == 400 || http.status == 404), path.hasPrefix("seen/"), expected == account, outbox[path] == currentBody {
+                            outbox.removeValue(forKey: path)
+                            rebasedPaths.remove(path)
+                            persistOutbox()
+                            break
+                        }
+                        if http.status == 409, expected == account, outbox[path] == currentBody {
+                            let entry = entryKey(path)
+                            var conflictState: OrbJSON? = http.detail.data(using: .utf8).flatMap { try? JSONDecoder().decode(OrbJSON.self, from: $0) }
+                            if conflictState?["_versions"][entry].doubleValue == nil {
+                                conflictState = try? await OrbCore.shared.call("/api/control/inbox-state")
+                            }
+                            guard expected == account, outbox[path] == currentBody, let state = conflictState else { break }
+                            let storedSeq = UserDefaults.standard.integer(forKey: "orb.inbox.sequence.v1")
+                            guard let resolution = Self.resolveConflict(
+                                path: path,
+                                currentBody: currentBody,
+                                state: state,
+                                alreadyRebased: rebasedPaths.contains(path),
+                                currentRevision: revisions[entry] ?? 0,
+                                storedSeq: storedSeq
+                            ) else { break }
+                            updateVersions(state)
+                            switch resolution {
+                            case .retire:
+                                outbox.removeValue(forKey: path)
+                                rebasedPaths.remove(path)
+                                persistOutbox()
+                            case .rebase(let expectedVersion, let mutationSeq):
+                                guard case var .object(fields) = currentBody else { break }
+                                UserDefaults.standard.set(mutationSeq, forKey: "orb.inbox.sequence.v1")
+                                fields["expectedVersion"] = .number(expectedVersion)
+                                fields["mutationSeq"] = .number(Double(mutationSeq))
+                                let rebased = OrbJSON.object(fields)
+                                currentBody = rebased
+                                outbox[path] = rebased
+                                rebasedPaths.insert(path)
+                                persistOutbox()
+                                continue
+                            }
+                            break
+                        }
+                        break
                     }
-                    // Other failures retry before the next shared-state read.
                 }
             }
             pending -= 1
@@ -133,7 +234,13 @@ final class OrbSharedInboxState {
         }
         let expected = account, serial = mutation
         guard let raw = await Log.attempt(.network, "inbox-state refresh", { try await OrbCore.shared.call("/api/control/inbox-state") }), expected == account, serial == mutation else { return }
-        if case let .object(values) = raw["_versions"] { revisions = values.compactMapValues { $0.doubleValue } }
+        if case let .object(values) = raw["_versions"] {
+            for (key, value) in values {
+                if let v = value.doubleValue, v >= 0 {
+                    revisions[key] = max(revisions[key] ?? 0, v)
+                }
+            }
+        }
         let changedAccount = scope != expected
         var changedSeen = changedAccount
         if changedAccount { seen = [:]; scope = expected }

@@ -432,3 +432,36 @@ it("retires repeatedly failing outbox entries so a stuck pending write never sta
   await new Promise(resolve => setTimeout(resolve, 0));
   expect(fetcher).toHaveBeenCalledTimes(6);
 });
+
+it("caps persisted outbox JSON at 512 KiB and survives SecurityError storage failures", async () => {
+  vi.doUnmock("../src/inboxState");
+  const fetcher = vi.fn(() => new Promise<Response>(() => {}));
+  vi.stubGlobal("fetch", fetcher);
+  const { MAX_INBOX_OUTBOX_BYTES, writeInboxState } = await import("../src/inboxState");
+  const { sideQuestionKey } = await import("../src/sideQuestionStorage");
+  const key = sideQuestionKey("inbox-state:outbox:v1");
+
+  writeInboxState("seen/small", { stamp: 100 });
+  const baseline = localStorage.getItem(key);
+  expect(baseline).toBeTruthy();
+
+  writeInboxState("preferences", {
+    aiSummary: true,
+    includeAutonomous: false,
+    model: "x".repeat(MAX_INBOX_OUTBOX_BYTES + 1024),
+  });
+  expect(localStorage.getItem(key)).toBe(baseline);
+
+  const spyGet = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+    throw new DOMException("Blocked", "SecurityError");
+  });
+  const spySet = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+    throw new DOMException("Blocked", "SecurityError");
+  });
+  try {
+    expect(() => writeInboxState("seen/no-storage", { stamp: 200 })).not.toThrow();
+  } finally {
+    spyGet.mockRestore();
+    spySet.mockRestore();
+  }
+});
