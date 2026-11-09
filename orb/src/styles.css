@@ -2646,6 +2646,9 @@ select.orb-select-native:disabled { cursor: default; }
 .btw-question { font-weight:500; margin:0 0 10px; white-space:pre-wrap; overflow-wrap:anywhere; }
 .btw-transfer,.btw-reopen { border:0; background:transparent; color:var(--fg-2); font:inherit; font-size:12px; cursor:pointer; padding:6px 0; }
 .btw-transfer:hover,.btw-reopen:hover { color:var(--amber); }
+.btw-load-earlier { display:block; width:100%; margin:8px 0 4px; padding:7px 12px; border:1px solid var(--stroke); border-radius:999px; background:color-mix(in srgb, var(--fg) 3%, transparent); color:var(--fg-2); font:500 12px/1.3 var(--sans); text-align:center; cursor:pointer; }
+.btw-load-earlier:hover { background:color-mix(in srgb, var(--fg) 6%, transparent); color:var(--fg); }
+.btw-skeleton .sk-transcript { padding:8px 0 12px; }
 .btw-panel form { display:flex; flex-shrink:0; gap:8px; margin:12px 16px 16px; padding:8px 9px 8px 16px; min-height:42px; align-items:flex-end; background:var(--bg-elev); border:1px solid var(--stroke); border-radius:21px; cursor:text; }
 .btw-panel form:focus-within { border-color:var(--focus-border); }
 .btw-panel textarea:not(.composer textarea):not(.prompt-editor) { resize:none; max-height:120px; min-width:0; flex:1; background:transparent; color:inherit; font:inherit; font-size:13px; line-height:24px; padding:0; border:0; outline:none; }

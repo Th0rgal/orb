@@ -25,12 +25,16 @@ import { ErrorToast } from './toast';
 import { usageTelemetry } from './usageTelemetry';
 import { UserTurn, ThoughtSequence } from "./Transcript";
 import { MdView } from './Markdown';
+import { SideQuestionSkeleton } from './Skeleton';
 import { ErrorNotice } from './ErrorNotice';
 import { remoteLog } from './remoteLog';
 import { doesTurnAnswerPending, sideContext, sideAttachments, type SideAttachment, type SideExchange } from './sideQuestionClient';
+import { ensureUniqueIds, hiddenTurnCount, visibleTurnCount } from './transcriptGates';
 import { formatElapsed, useNow } from './time';
 import type { StreamItem } from './transcriptModel';
 import * as Ic from './icons';
+export const BTW_INITIAL_VISIBLE_TURNS = 20;
+export const BTW_VISIBLE_TURNS_STEP = 20;
 // A finished answer may already be in Core's history (a reconcile ran first).
 function appendTurn(rows:SideExchange[],turn:SideExchange):SideExchange[]{
  const last=rows.at(-1);
@@ -78,16 +82,44 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  let asking=false;
  let pendingBaselineHistory:SideExchange[]=[];
  let launchAbort:AbortController|undefined;
- const pin=createPinnedScroll({key:()=>(open()?loadedKey():'')});
+ const [expandedSteps,setExpandedSteps]=createSignal(0);
+ const [pinnedExtraTurns,setPinnedExtraTurns]=createSignal(0);
+ const [initialSyncPending,setInitialSyncPending]=createSignal(false);
+ const baseTurnLimit=()=>BTW_INITIAL_VISIBLE_TURNS+pinnedExtraTurns();
+ const visibleLimit=()=>visibleTurnCount(history().length,baseTurnLimit(),expandedSteps(),BTW_VISIBLE_TURNS_STEP);
+ const hiddenCount=()=>hiddenTurnCount(history().length,baseTurnLimit(),expandedSteps(),BTW_VISIBLE_TURNS_STEP);
+ const loadEarlierTurns=()=>{
+  if(hiddenCount()<=0)return;
+  setExpandedSteps(n=>n+1);
+ };
+ const pin=createPinnedScroll({
+  key:()=>(open()?loadedKey():''),
+  onUpwardAtTop:()=>{if(hiddenCount()>0)loadEarlierTurns();},
+ });
  // Sending explicitly returns to the latest turn, even after reading older replies.
- const revealSentQuestion=()=>pin.pin();
+ const revealSentQuestion=()=>{setPinnedExtraTurns(0);pin.pin();};
  // The thread opens at its end, like the main conversation, and follows
  // streaming and resizes through the shared pinned-scroll owner.
- let shown='';
- createEffect(()=>{answer();history();busy();btwActivities(p.mission).length;const now=open()?loadedKey():'';const opened=now!==shown;shown=now;
-  if(!now)return;
-  if(opened)pin.pin();
-  else queueMicrotask(pin.scrollIfPinned);});
+ let shown='',prevHistoryLen=0;
+ createEffect(()=>{
+  const curLen=history().length;
+  answer();busy();btwActivities(p.mission).length;
+  const now=open()?loadedKey():'';
+  const opened=now!==shown;
+  shown=now;
+  if(!now){prevHistoryLen=curLen;return;}
+  if(opened){
+   prevHistoryLen=curLen;
+   pin.pin();
+  }else{
+   const grew=curLen-prevHistoryLen;
+   if(grew>0&&!pin.pinned()&&prevHistoryLen>=visibleLimit()){
+    setPinnedExtraTurns(extra=>extra+grew);
+   }
+   prevHistoryLen=curLen;
+   queueMicrotask(pin.scrollIfPinned);
+  }
+ });
  const [storageError,setStorageError]=createSignal(false);
  const [queueToast,setQueueToast]=createSignal('');
  const [pendingAttachments,setPendingAttachments]=createSignal<SideAttachment[]>([]);
@@ -142,6 +174,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  createEffect(on(key,current=>{
   abort?.abort();queuedEdit.finish(true);
   pendingBaselineHistory=[];
+  setExpandedSteps(0);setPinnedExtraTurns(0);setInitialSyncPending(false);
   setLoadedKey('');setBusy(false);setHistory([]);setError('');setQueue([]);setQueueToast('');setStartedAt(undefined);
   setSideSessionId('');setSideSessionLocal(false);
   setPendingQueued([]);setConfirmedQueued([]);setSideLiveEdits([]);setDeliveredQueuedIds([]);setRemoteQueuedIds([]);setHandoffId(undefined);
@@ -453,8 +486,9 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    };
    let generation=0;
    // Only the newest read applies: an older, slower one never rolls back history.
-   const sync=(local:Parameters<typeof reconcile>[1],force=false)=>{
+   const sync=(local:Parameters<typeof reconcile>[1],force=false,initialCold=false)=>{
     const mine=++generation;inFlight++;
+    if(initialCold)setInitialSyncPending(true);
     void reconcile(missionId,local,undefined,force?{force:true}:undefined).then(reconciled=>{
      if(stale||key()!==current||mine!==generation)return;
      applyReconciled(reconciled);
@@ -468,10 +502,14 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
       }
      }
      swallow("sideQuestions.reconcile")(e);
-    }).finally(()=>{inFlight=Math.max(0,inFlight-1);});
+    }).finally(()=>{
+     inFlight=Math.max(0,inFlight-1);
+     if(initialCold&&!stale&&key()===current&&mine===generation)setInitialSyncPending(false);
+    });
    };
    resync=()=>{if(!stale)sync(history(),true);};
-   sync(initialHistory,Boolean((saved?.pending&&!warmAnsweredPending)||(warmNow&&(!warmNow.clean||Boolean(warmNow.activeSession)))));
+   const coldEmpty=!initialHistory.length&&!(warmNow&&warmNow.clean);
+   sync(initialHistory,Boolean((saved?.pending&&!warmAnsweredPending)||(warmNow&&(!warmNow.clean||Boolean(warmNow.activeSession)))),coldEmpty);
   }
   };
   if(cachedSaved){
@@ -727,13 +765,21 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  const cancel=()=>{launchAbort?.abort();void stopBtw(p.mission).then(()=>{abort?.abort();setConfirmedQueued([]);setSideLiveEdits([]);setPendingQueued([]);setBusy(false);setStartedAt(undefined);setRunStatus('');setError('Side agent stopped.');}).catch(e=>setError(String(e)));};
  const retry=()=>{const asked=question(),files=pendingAttachments();void ask(asked,[],[],files,true);};
  const dismiss=()=>{pendingBaselineHistory=[];setError('');setNotSent(false);setStartedAt(undefined);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);queueMicrotask(sendNext);};
- // Reconcile the same turn through preparation, streaming and persistence.
+ // Reconcile the same turn through preparation, streaming and persistence,
+ // bounded to the visible window (`visibleTurnCount`, parity with iOS/Android)
+ // so opening `/btw` on a 200-turn campaign never blocks on 200 Markdown mounts.
  const [turns,setTurns]=createStore<Array<SideExchange & {id:string;pending?:boolean;error?:string}>>([]);
  createEffect(()=>{
-  const rows=history().map((row,index)=>({...row,id:row.id??`saved:${loadedKey()}:${index}`}));
+  const allHistory=history();
+  const limit=visibleLimit();
+  const start=Math.max(0,allHistory.length-limit);
+  const windowed=allHistory.slice(start);
+  const uniqueIds=ensureUniqueIds(windowed.map((row,index)=>row.id??`saved:${loadedKey()}:${start+index}`));
+  const rows=windowed.map((row,index)=>({...row,id:uniqueIds[index]}));
   if((preparing()||busy()||error())&&!rows.some(row=>row.id===turnId()))rows.push({id:turnId(),question:question(),answer:answer(),narration:narration(),attachments:pendingAttachments(),pending:preparing()||busy(),error:error()} as typeof rows[number]);
   setTurns(reconcile(rows,{key:'id'}));
  });
+ const coldHydrating=()=>!history().length&&!question()&&!busy()&&!error()&&(loadedKey()!==key()||initialSyncPending());
  const prepareSend=(draft:{text:string}|null)=>{
   if(!draft){setPreparing(false);return;}
   if(busy()||editingQueued())return;
@@ -755,6 +801,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   <Show when={open()}><Portal mount={side ? side.target() : inline}><section class="btw-panel" aria-label="Side questions">
    <header data-orb-drag-region><div><strong>Side question</strong></div><div class="btw-actions"><Show when={canStartFreshSession()}><button class="icon-btn" aria-label="New side session" title={freshSession()?"Next question starts a new side session":"New side session"} disabled={busy()||!btwSession(p.mission)||freshSession()} onClick={startFreshSession}><Ic.PlusIcon size={15}/></button></Show><button class="icon-btn" aria-label="Close side questions" onClick={()=>{markClosed();side?.hide();}}><Ic.CloseIcon size={16}/></button></div></header>
    <div class="btw-thread" ref={pin.ref} onScroll={pin.onScroll}>
+    <Show when={hiddenCount()>0}><button type="button" class="btw-load-earlier" onClick={loadEarlierTurns}>Load earlier side questions ({hiddenCount()})</button></Show>
     <For each={turns}>{exchange=>{
      const content=()=>remoteLog(exchange.answer);
      return <article data-side-turn={exchange.id}>
@@ -771,7 +818,11 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      <header><span class="queue-count">{queue().length} Queued</span></header>
      <ol><For each={queue()}>{row=><li class="queue-row"><div class="queue-line"><span class="queue-text" title={row.question}>{row.question}</span><span class="queue-row-actions"><button type="button" title="Remove" aria-label={`Remove queued side question: ${row.question}`} onClick={()=>setQueue(rows=>rows.filter(other=>other.id!==row.id))}><Ic.TrashIcon size={14}/></button></span></div></li>}</For></ol>
     </section></Show>
-    <Show when={!history().length&&!question()}><p class="dim">Ask a question or give the side agent a task. It shares the main agent’s workspace.</p></Show>
+    <Show when={!history().length&&!question()&&!busy()&&!error()}>
+     <Show when={coldHydrating()} fallback={<p class="dim">Ask a question or give the side agent a task. It shares the main agent’s workspace.</p>}>
+      <SideQuestionSkeleton/>
+     </Show>
+    </Show>
     <Show when={busy()}><p class="dim btw-progress" role="status">{
       // Queue states ("Waiting to start…") are stale once the side agent has acted.
       btwActivities(p.mission).some(a => a.kind !== "status" && a.id !== "antigravity:status") || answer() || narration().length ? "Working…" : runStatus() || "Thinking…"
