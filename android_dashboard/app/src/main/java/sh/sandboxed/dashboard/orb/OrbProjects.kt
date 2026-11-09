@@ -2382,7 +2382,7 @@ fun OrbProjectPage(
                                             loadProjectData()
                                         }
                                     }) {
-                                        Text("Retry", color = OrbStyle.accent)
+                                        Text("Retry", color = OrbStyle.textPrimary)
                                     }
                                 }
                             }

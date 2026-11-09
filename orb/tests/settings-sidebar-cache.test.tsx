@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, waitFor } from "@solidjs/testing-library";
+import "../src/SearchDialog";
+import "../src/Settings";
+import "../src/SettingsShell";
+import "../src/MachineCloudMenu";
+import "../src/managedMachineModel";
+import "../src/cloudAgentApi";
+import "../src/deviceApproval";
 import App from "../src/App";
 import { clearConnection, setConnection, type Mission } from "../src/api";
 

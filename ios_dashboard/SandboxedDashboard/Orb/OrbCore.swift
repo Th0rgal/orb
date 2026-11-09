@@ -1859,21 +1859,23 @@ enum OrbReadCache {
                 .prefix(max(1, p2Cap * 3))
         )
         let maxConcurrent = min(3, max(1, p2Cap))
-        await withTaskGroup(of: Void.self) { group in
-            var iterator = combined.makeIterator()
-            for _ in 0..<min(maxConcurrent, combined.count) {
-                if let row = iterator.next() {
-                    group.addTask { @MainActor in
-                        await prefetchRow(row)
-                    }
+        let workerCount = min(maxConcurrent, combined.count)
+        let workers: [Task<Void, Never>] = (0..<workerCount).map { lane in
+            Task { @MainActor in
+                var idx = lane
+                while !Task.isCancelled, idx < combined.count {
+                    await prefetchRow(combined[idx])
+                    idx += workerCount
                 }
             }
-            while await group.next() != nil {
-                if !Task.isCancelled, let row = iterator.next() {
-                    group.addTask { @MainActor in
-                        await prefetchRow(row)
-                    }
-                }
+        }
+        await withTaskCancellationHandler {
+            for worker in workers {
+                await worker.value
+            }
+        } onCancel: {
+            for worker in workers {
+                worker.cancel()
             }
         }
         OrbWarmSyncCoordinator.shared.reconcile()
