@@ -3363,9 +3363,9 @@ private def runR4cHarnessSessionTests (store : CoreStore) (tmpRoot : String) : I
   let holderTask ← IO.asTask (prio := .dedicated) do
     hContended.mu.atomically do
       enteredLock.resolve ()
-      let _ := releaseLock.result!.get
+      let _ := releaseLock.result?.get
       pure ()
-  let _ := enteredLock.result!.get
+  let _ := enteredLock.result?.get
   let vWhileLocked ← forceKillHandleNonBlocking hContended 15
   releaseLock.resolve ()
   let _ ← IO.wait holderTask

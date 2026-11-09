@@ -2317,7 +2317,7 @@ def execClearedLeaseCommand
     finally
       try IO.FS.removeFile logPath catch _ => pure ()
       releaseExecFenceReceipt cfg.workDir sqliteBackend execId missionId scratchDir nodeBootEpoch
-  let mut activeScope? : Option SystemdScope := none
+  let activeScopeRef ← IO.mkRef (none : Option SystemdScope)
   try
     let missionDir := (System.FilePath.mk cfg.workDir / missionId).toString
     IO.FS.createDirAll missionDir
@@ -2335,7 +2335,7 @@ def execClearedLeaseCommand
       else #["-lc", command]
     let (wrappedProg, wrappedArgs, wrappedEnv, scope?) ←
       wrapWithSystemdScope cfg true execId (some cfg.maxJobSecs) baseProg baseArgs envPairs
-    activeScope? := scope?
+    activeScopeRef.set scope?
     let out ←
       if scope?.isSome then
         let r ← runBoundedOutput {
@@ -2343,8 +2343,8 @@ def execClearedLeaseCommand
           args := wrappedArgs
           cwd := some missionDir
           env := wrappedEnv.map (fun (k, v) => (k, some v))
-        } activeScope? false
-        activeScope? := none
+        } scope? false
+        activeScopeRef.set none
         pure r
       else
         let mut envArgs : Array String := #["-i"]
@@ -2366,7 +2366,7 @@ def execClearedLeaseCommand
       ("stderr", .str out.stderr)
     ])
   finally
-    stopSystemdScope activeScope?
+    stopSystemdScope (← activeScopeRef.get)
     releaseExecFenceReceipt cfg.workDir sqliteBackend execId missionId scratchDir nodeBootEpoch
 
 /-- Single-threaded synchronous `POST /execute` helper (used by direct `handleRequest` tests). -/

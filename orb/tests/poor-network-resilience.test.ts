@@ -59,6 +59,7 @@ describe("poor-network resilience suite", () => {
     expect(classifyClientRequestPriority("GET", "/api/health")).toBe("p0");
     expect(classifyClientRequestPriority("GET", "/api/control/missions")).toBe("p1");
     expect(classifyClientRequestPriority("GET", "/api/software?force=false")).toBe("p2");
+    expect(classifyClientRequestPriority("GET", "/api/providers/antigravity-models")).toBe("p2");
     expect(classifyClientRequestPriority("POST", "/api/control/missions/m1/inbox-digest")).toBe("p1");
     expect(classifyClientRequestPriority("POST", "/api/file-resources")).toBe("p1");
     expect(classifyClientRequestPriority("POST", "/api/control/missions/m1/opened")).toBe("p1");
@@ -231,7 +232,137 @@ describe("poor-network resilience suite", () => {
 
     await transportFetch("/api/control/missions/m1/inbox-digest", { method: "POST", body: "{}" });
     await transportFetch("/api/file-resources", { method: "POST", body: "{}" });
+    await transportFetch("/api/providers/antigravity-models");
+    await transportFetch("/api/ai/providers/usage");
+    await transportFetch("/api/ai/providers/claude/usage?force=true");
+    await transportFetch("/api/resources/overview?range=6h");
+    await transportFetch("/api/usage/summary?window=24h");
+    await transportFetch("/api/proxy-health?window=24h");
     expect(networkHealthSnapshot().srttMs).toBe(85);
     expect(networkHealthSnapshot().status).toBe("healthy");
+  });
+
+  it("keeps cached projects in memory when localStorage hits QuotaExceededError and avoids invalidating sharedRead on telemetry flushes", async () => {
+    const { api, listProjects, peekCachedProjects } = await import("../src/api");
+    const { sharedRead } = await import("../src/sharedReads");
+    const { usageTelemetry } = await import("../src/usageTelemetry");
+    setConnection("https://orbcore.thomas.md", "tok-quota");
+
+    const origSetItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, k: string, v: string) {
+      if (k.startsWith("orb.catalog:")) {
+        throw new DOMException("QuotaExceededError", "QuotaExceededError");
+      }
+      return origSetItem.call(this, k, v);
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/projects")) {
+          return Response.json({
+            projects: [{ slug: "omarchnix", title: "Omarchnix", status: "active", updated_at: "2026-11-09T15:00:00Z" }],
+          });
+        }
+        return Response.json({ ok: true });
+      }),
+    );
+
+    const listed = await listProjects();
+    expect(listed.map((p) => p.slug)).toEqual(["omarchnix"]);
+    // Even though localStorage.setItem threw QuotaExceededError, in-memory catalogMemory serves synchronous hydration:
+    expect(peekCachedProjects()?.map((p) => p.slug)).toEqual(["omarchnix"]);
+
+    // Verify usage-telemetry POST does not wipe in-flight sharedRead entries:
+    let resolveInflight!: (val: string) => void;
+    const inflight = sharedRead("test:inflight", () => new Promise<string>((r) => { resolveInflight = r; }));
+    usageTelemetry.setActive(true);
+    const closePage = usageTelemetry.page("settings", "screen", "mission");
+    closePage();
+    await usageTelemetry.flush();
+    const joined = sharedRead("test:inflight", () => Promise.resolve("fresh-after-invalidation"));
+    expect(joined).toBe(inflight);
+    resolveInflight("original-inflight");
+    expect(await joined).toBe("original-inflight");
+    usageTelemetry.setActive(false);
+
+    // Clearing connection wipes catalogMemory immediately:
+    clearConnection();
+    expect(peekCachedProjects()).toBeNull();
+  });
+
+  it("hydrates cached projects synchronously via peekCachedProjects and isolates P2 transcript prefetches from foreground P1 opens", async () => {
+    const { listProjects, peekCachedProjects } = await import("../src/api");
+    const { forgetPrefetchPauses, loadTranscript, prefetchTranscript } = await import("../src/missionCache");
+    setConnection("https://orbcore.thomas.md", "tok-prefetch");
+    expect(peekCachedProjects()).toBeNull();
+
+    const fetchedUrls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        fetchedUrls.push(url);
+        if (url.endsWith("/api/projects")) {
+          return Response.json({
+            projects: [
+              { slug: "orb", title: "Orb", status: "active", updated_at: "2026-11-09T15:00:00Z" },
+              { slug: "old", title: "Old", status: "archived", updated_at: "2026-11-09T15:00:00Z" },
+            ],
+          });
+        }
+        if (url.includes("/api/control/queue")) {
+          return Response.json({ items: [], revision: 1 });
+        }
+        if (url.includes("/events")) {
+          return new Response(
+            JSON.stringify([
+              { id: 1, sequence: 1, event_type: "user_message", timestamp: "2026-11-09T15:00:00Z", content: "hi" },
+            ]),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orb-Events-Protocol": "1",
+                "X-Has-More": "false",
+                "X-Next-Cursor": "1",
+                "X-Page-Max-Sequence": "1",
+                "X-Max-Sequence": "1",
+              },
+            },
+          );
+        }
+        return Response.json({ profile: "presentation", events: [] });
+      }),
+    );
+
+    const listed = await listProjects();
+    expect(listed.map((p) => p.slug)).toEqual(["orb"]);
+    expect(peekCachedProjects()?.map((p) => p.slug)).toEqual(["orb"]);
+
+    // Hold a P0 slot so p2Cap === 0 while p1Cap remains open: any P2 prefetch must stay gated
+    // (zero wire fetches), proving background transcript prefetches never leak into P1!
+    let releaseP0Gate!: () => void;
+    const p0Gate = scheduleTransportRequest(
+      "p0",
+      null,
+      () => new Promise<void>((resolve) => { releaseP0Gate = resolve; }),
+    );
+    expect(currentLinkBudget().p2Cap).toBe(0);
+    fetchedUrls.length = 0;
+    prefetchTranscript("m-bg-gated");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchedUrls.some((u) => u.includes("m-bg-gated"))).toBe(false);
+
+    // Opening the mission in the foreground (`loadTranscript`) preempts the gated P2 prefetch
+    // and completes immediately on the P1 lane even while P2 is still paused.
+    const snap = await loadTranscript("m-bg-gated");
+    expect(snap.items.length).toBeGreaterThan(0);
+    expect(fetchedUrls.some((u) => u.includes("/missions/m-bg-gated/events"))).toBe(true);
+
+    releaseP0Gate();
+    await p0Gate;
+    forgetPrefetchPauses();
   });
 });

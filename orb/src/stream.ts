@@ -134,18 +134,28 @@ export interface StreamEvent {
   data: Record<string, unknown>;
 }
 
-async function apiRawOnce(path: string): Promise<Response> {
+async function apiRawOnce(
+  path: string,
+  opts?: { priority?: import("./transportScheduler").RequestPriority; signal?: AbortSignal },
+): Promise<Response> {
   const version = connectionVersion();
   const jwt = getJwt();
   const started = performance.now();
   let res: Response;
   try {
-    res = await transportFetch(path, {
-      headers: jwt ? { Authorization: `Bearer ${jwt}` } : {},
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    res = await transportFetch(
+      path,
+      {
+        headers: jwt ? { Authorization: `Bearer ${jwt}` } : {},
+        ...(opts?.signal ? { signal: opts.signal } : {}),
+      },
+      undefined,
+      opts?.priority,
+      REQUEST_TIMEOUT_MS,
+    );
   } catch (error) {
     if (isAbortError(error)) {
+      if (opts?.signal?.aborted) throw error;
       noteAbort(`GET ${path}`, "timeout", performance.now() - started);
       throw new RequestTimeoutError();
     }
@@ -160,16 +170,20 @@ async function apiRawOnce(path: string): Promise<Response> {
   return res;
 }
 
-async function apiRaw(path: string): Promise<Response> {
+async function apiRaw(
+  path: string,
+  opts?: { priority?: import("./transportScheduler").RequestPriority; signal?: AbortSignal },
+): Promise<Response> {
   const from = performance.now(), label = `GET ${path.slice(0, 160)}`;
   try {
     let res: Response;
     try {
-      res = await apiRawOnce(path);
+      res = await apiRawOnce(path, opts);
     } catch (error) {
-      if (error instanceof RequestTimeoutError || !isTransientNetworkError(error)) throw error;
+      if (opts?.signal?.aborted || error instanceof RequestTimeoutError || !isTransientNetworkError(error)) throw error;
       await new Promise((resolve) => setTimeout(resolve, 200 + Math.floor(Math.random() * 200)));
-      res = await apiRawOnce(path);
+      if (opts?.signal?.aborted) throw error;
+      res = await apiRawOnce(path, opts);
     }
     requestDone(label, performance.now() - from, true);
     return res;
@@ -189,7 +203,10 @@ export async function fullToolCall(missionId:string,callId:string):Promise<{args
  for(const row of rows){const event=storedToStream(row);if(event?.type==='tool_call')out.args=event.data.args;else if(event?.type==='tool_result')out.result=event.data.result;}
  return out;
 }
-export async function getMissionEventPage(id:string, cursor:{since?:number;before?:number;view?:'transcript'|'trace'|'history'|'all';types?:string;limit?:number}={}):Promise<EventPage>{
+export async function getMissionEventPage(
+ id:string,
+ cursor:{since?:number;before?:number;view?:'transcript'|'trace'|'history'|'all';types?:string;limit?:number;priority?:import("./transportScheduler").RequestPriority;signal?:AbortSignal}={},
+):Promise<EventPage>{
  // Large tool outputs arrive shortened; a row loads its full call when opened
  // (fullToolCall). Older Cores ignore the parameter.
  const query=new URLSearchParams({limit:String(cursor.limit??200),include_counts:'false',max_payload:String(MAX_EVENT_PAYLOAD)});
@@ -197,12 +214,13 @@ export async function getMissionEventPage(id:string, cursor:{since?:number;befor
  if(cursor.types)query.set('types',cursor.types);
  if(cursor.since!==undefined)query.set('since_seq',String(cursor.since));
  if(cursor.before!==undefined)query.set('before_seq',String(cursor.before));
- const response=await apiRaw(`/api/control/missions/${id}/events?${query}`);
+ const response=await apiRaw(`/api/control/missions/${id}/events?${query}`, { priority: cursor.priority, signal: cursor.signal });
  let events:StoredEvent[];
  try{
   events=await response.json() as StoredEvent[];
  }catch(cause){
   if(isAbortError(cause)){
+   if(cursor.signal?.aborted)throw cause;
    noteAbort(`GET /api/control/missions/${id}/events`, "timeout", 0);
    throw new RequestTimeoutError();
   }
@@ -215,12 +233,23 @@ export async function getMissionEventPage(id:string, cursor:{since?:number;befor
  return {events,reset:cursor.since!==undefined&&max!==undefined&&cursor.since>max,nextCursor,pageMax,hasMore:more==='true'};
 }
 /** First paint needs the newest message, not hundreds of activity payloads. */
-export function getMissionEventPreview(id:string):Promise<EventPage>{
- return api<{profile?:string;activity?:string;events:StoredEvent[]}>(`/api/control/missions/${id}/snapshot?profile=presentation`)
+export function getMissionEventPreview(
+ id:string,
+ opts?:{priority?:import("./transportScheduler").RequestPriority;signal?:AbortSignal},
+):Promise<EventPage>{
+ return api<{profile?:string;activity?:string;events:StoredEvent[]}>(
+  `/api/control/missions/${id}/snapshot?profile=presentation`,
+  opts?.signal ? { signal: opts.signal } : undefined,
+  undefined,
+  opts?.priority,
+ )
   .then(snapshot => {
    if(snapshot.profile!=="presentation" || !Array.isArray(snapshot.events)) throw Error("Presentation profile unavailable");
    return {events:snapshot.events,activity:snapshot.activity,hasMore:true} as EventPage;
-  }).catch(()=>getMissionEventPage(id,{view:'transcript',limit:2}));
+  }).catch(err => {
+   if (opts?.signal?.aborted) throw err;
+   return getMissionEventPage(id,{view:'transcript',limit:2,priority:opts?.priority,signal:opts?.signal});
+  });
 }
 /** The mission's stored events, oldest first, newest last. The endpoint pages
  * 200 rows from the tail, so a single page silently drops older turns of a

@@ -114,9 +114,28 @@ struct OrbProvidersSettings: View {
                     ProgressView(value: min(1.0, max(0.0, Double(user.spentTodayCents) / Double(max(1, cap)))))
                 }
             }
-            if loading && providers.isEmpty { ProgressView("Loading providers…") }
             Section("Accounts") {
-                if ready && providers.isEmpty { Text("No providers configured.").foregroundStyle(.secondary) }
+                if loading && providers.isEmpty {
+                    ForEach(0..<3, id: \.self) { idx in
+                        HStack(spacing: 12) {
+                            OrbListIcon(symbol: "key")
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(idx.isMultiple(of: 2) ? "Provider account" : "Subscription account")
+                                    .font(.body.weight(.medium))
+                                Text("oauth · connected")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .redacted(reason: .placeholder)
+                            Spacer()
+                        }
+                        .padding(.vertical, 4)
+                        .orbShimmer(active: true)
+                        .allowsHitTesting(false)
+                    }
+                } else if ready && providers.isEmpty {
+                    Text("No providers configured.").foregroundStyle(.secondary)
+                }
                 ForEach(providers, id: \.selfID) { provider in
                     DisclosureGroup {
                         let detail = usage[provider["id"].text]
@@ -215,8 +234,8 @@ struct OrbProvidersSettings: View {
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle("Providers").navigationBarTitleDisplayMode(.inline)
-        .refreshable { await load() }
-        .toolbar { Button("Refresh", systemImage: "arrow.clockwise") { Task { await load() } }.disabled(loading) }
+        .refreshable { await load(forceUsage: true) }
+        .toolbar { Button("Refresh", systemImage: "arrow.clockwise") { Task { await load(forceUsage: true) } }.disabled(loading) }
         .task {
             await load()
             await Poller.run(every: .seconds(30), immediately: false, while: { scenePhase == .active }) { await load(); return true }
@@ -323,50 +342,93 @@ struct OrbProvidersSettings: View {
         guard Self.isEffectiveEnabled(p), p["status"]["type"].text != "needs_reauth", detail["status"].text != "needs_reauth", detail["error"].text.isEmpty else { return nil }
         return OrbProviderQuota.quotaStatus(OrbProviderQuota.windows(detail))
     }
-    private func load() async {
-        guard !loading, client.current else { return }; loading = true; defer { loading = false }
+    private static let quotaProbeProviderTypes: Set<String> = [
+        "kimi", "minimax", "zai", "muse-code", "mistral"
+    ]
+    private static let maxConcurrentUsageProbes = 4
+
+    private func load(forceUsage: Bool = false) async {
+        guard !loading, client.current else { return }
+        loading = true
         async let providersReq = client.call("/api/ai/providers")
         async let usageReq = client.call("/api/ai/providers/usage")
         do {
             let response = try await providersReq
             providers = response["providers"] == .null ? response.items : response["providers"].items
             ready = true; error = ""
-        } catch is CancellationError { return }
-        catch { ready = false; self.error = error.localizedDescription; return }
+        } catch is CancellationError {
+            loading = false
+            return
+        } catch let urlError as URLError where urlError.code == .cancelled {
+            loading = false
+            return
+        } catch {
+            loading = false
+            ready = false
+            self.error = error.localizedDescription
+            return
+        }
         do {
-            usage = try await usageReq["entries"]; usageError = ""
-            // The bulk endpoint may only have a cache; request current subscription windows in parallel.
-            let targets = providers.filter { ["kimi", "minimax", "zai"].contains($0["provider_type"].text) || $0["uses_oauth"].flag }
+            let bulkEntries = try await usageReq["entries"]
+            usage = bulkEntries
+            usageError = ""
+            loading = false
+            var entries: [String: OrbJSON] = {
+                if case .object(let existing) = bulkEntries { return existing }
+                return [:]
+            }()
+            // Only probe per-account windows when missing, marked stale by the bulk cache, or explicitly forced.
+            let targets = providers.filter { provider in
+                let type = provider["provider_type"].text
+                guard Self.quotaProbeProviderTypes.contains(type) || provider["uses_oauth"].flag else { return false }
+                if forceUsage { return true }
+                let id = provider["id"].text
+                guard let cached = entries[id] else { return true }
+                return cached["stale"] == .bool(true)
+            }
             guard !targets.isEmpty else { return }
             let localClient = client
             var failed = false
             await withTaskGroup(of: (String, OrbJSON?).self) { group in
-                for provider in targets {
-                    let id = provider["id"].text
-                    group.addTask {
-                        do {
-                            let value = try await localClient.call("/api/ai/providers/\(OrbCore.escape(id))/usage")
+                var iterator = targets.makeIterator()
+                for _ in 0..<min(Self.maxConcurrentUsageProbes, targets.count) {
+                    if let next = iterator.next() {
+                        let id = next["id"].text
+                        group.addTask {
+                            let value = try? await localClient.call("/api/ai/providers/\(OrbCore.escape(id))/usage")
                             return (id, value)
-                        } catch {
-                            return (id, nil)
                         }
                     }
                 }
-                var entries: [String: OrbJSON] = {
-                    if case .object(let existing) = usage { return existing }
-                    return [:]
-                }()
-                for await (id, value) in group {
-                    if let value { entries[id] = value }
-                    else { failed = true }
+                while let (id, value) = await group.next() {
+                    if let value {
+                        entries[id] = value
+                        usage = .object(entries)
+                    } else {
+                        failed = true
+                    }
+                    if !Task.isCancelled, let next = iterator.next() {
+                        let nextId = next["id"].text
+                        group.addTask {
+                            let val = try? await localClient.call("/api/ai/providers/\(OrbCore.escape(nextId))/usage")
+                            return (nextId, val)
+                        }
+                    }
                 }
-                usage = .object(entries)
             }
             if failed && !Task.isCancelled {
                 usageError = "Some usage details are unavailable. Pull to refresh."
             }
-        } catch is CancellationError { return }
-        catch { usageError = "Usage is unavailable. \(error.localizedDescription)" }
+        } catch is CancellationError {
+            loading = false
+            return
+        } catch let urlError as URLError where urlError.code == .cancelled {
+            loading = false
+            return
+        } catch {
+            loading = false
+            usageError = "Usage is unavailable. \(error.localizedDescription)"
+        }
     }
     /// "Check again" after verifying the account with Google.
     private func recheck(_ provider: OrbJSON) async {

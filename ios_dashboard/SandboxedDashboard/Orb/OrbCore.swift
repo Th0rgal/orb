@@ -1845,29 +1845,51 @@ enum OrbReadCache {
         }
     }
     static func prefetch(_ rows: [OrbRow]) async {
+        let p2Cap = OrbBackgroundSyncMonitor.shared.linkBudget.p2Cap
+        guard p2Cap > 0 else {
+            OrbWarmSyncCoordinator.shared.reconcile()
+            return
+        }
         let liveTargets = rows.filter { $0.active && !$0.cloud && $0.mobile }.prefix(8)
         let topTargets = rows.prefix(5)
         var seen = Set<String>()
-        let combined = (Array(liveTargets) + Array(topTargets)).filter { !$0.id.isEmpty && seen.insert($0.id).inserted }
-        let tasks: [Task<Void, Never>] = combined.map { row in
-            Task { @MainActor in
-                guard !Task.isCancelled else { return }
-                if row.raw != .null && !row.raw["history"].items.isEmpty {
-                    seedMemory("mission:\(row.id)", value: row.raw)
-                } else {
-                    _ = try? await conversation(row.id)
+        let combined = Array(
+            (Array(liveTargets) + Array(topTargets))
+                .filter { !$0.id.isEmpty && seen.insert($0.id).inserted }
+                .prefix(max(1, p2Cap * 3))
+        )
+        let maxConcurrent = min(3, max(1, p2Cap))
+        await withTaskGroup(of: Void.self) { group in
+            var iterator = combined.makeIterator()
+            for _ in 0..<min(maxConcurrent, combined.count) {
+                if let row = iterator.next() {
+                    group.addTask { @MainActor in
+                        await prefetchRow(row)
+                    }
                 }
-                if row.cloud {
-                    _ = try? await cloud(row.id)
-                } else if readEvents(row.id).isEmpty {
-                    _ = await Log.attempt(.cache, "events prefetch", path: row.id) { try await events(row.id, limit: 150) }
+            }
+            while await group.next() != nil {
+                if !Task.isCancelled, let row = iterator.next() {
+                    group.addTask { @MainActor in
+                        await prefetchRow(row)
+                    }
                 }
             }
         }
-        for t in tasks {
-            await t.value
-        }
         OrbWarmSyncCoordinator.shared.reconcile()
+    }
+    private static func prefetchRow(_ row: OrbRow) async {
+        guard !Task.isCancelled else { return }
+        if row.raw != .null && !row.raw["history"].items.isEmpty {
+            seedMemory("mission:\(row.id)", value: row.raw)
+        } else {
+            _ = try? await conversation(row.id)
+        }
+        if row.cloud {
+            _ = try? await cloud(row.id)
+        } else if readEvents(row.id).isEmpty {
+            _ = await Log.attempt(.cache, "events prefetch", path: row.id) { try await events(row.id, limit: 150) }
+        }
     }
 }
 

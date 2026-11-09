@@ -303,11 +303,7 @@ private def handleTransportProxyRequest (stRef : IO.Ref LocaldState) (isShardPor
             if retryStatus && canFailoverRequest req.method hasIdem (idx + 1) origins then
               idx := idx + 1
             else
-              let isComputeBound :=
-                !isSafeHttpMethod req.method ||
-                relPath == "/api/file-resources" ||
-                relPath.endsWith "/inbox-digest" ||
-                (relPath.splitOn "/inbox-digest?").length > 1
+              let isComputeBound := isComputeBoundProxyRequest req.method relPath
               let srtt ←
                 if retryStatus then
                   pure pooled.rttMs

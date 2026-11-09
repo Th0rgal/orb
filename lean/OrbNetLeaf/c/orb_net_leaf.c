@@ -154,7 +154,7 @@ static int onl_ssl_write_all(SSL *ssl, b_lean_obj_arg buf) {
     if (!ssl) return 0;
     for (size_t sent = 0, blen = lean_sarray_size(buf); sent < blen; ) {
         int w = SSL_write(ssl, lean_sarray_cptr(buf) + sent, (int)((blen - sent) > 0x40000000ULL ? 0x40000000ULL : (blen - sent)));
-        if (w <= 0) return 0; else sent += (size_t)w;
+        if (w > 0) sent += (size_t)w; else if (errno != EINTR) return 0;
     }
     return 1;
 }

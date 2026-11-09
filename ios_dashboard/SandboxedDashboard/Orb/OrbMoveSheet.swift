@@ -13,16 +13,33 @@ struct OrbMoveSheet: View {
     @State private var projects: [OrbRow] = []
     @State private var folders: [String] = []
     @State private var loading = true
+    @State private var loadError = ""
     private let appearance = OrbProjectAppearance.shared
 
     var body: some View {
         NavigationStack {
             Form {
                 if !error.isEmpty { OrbNotice(message: error) }
+                if !loadError.isEmpty {
+                    Section {
+                        OrbNotice(message: loadError)
+                        Button("Retry") { Task { await load() } }
+                    }
+                }
                 Section("Project") {
                     if projects.isEmpty && loading {
-                        ProgressView().frame(maxWidth: .infinity)
-                    } else if projects.isEmpty {
+                        ForEach(0..<3, id: \.self) { idx in
+                            HStack(spacing: 12) {
+                                OrbListIcon(symbol: "folder")
+                                Text(idx.isMultiple(of: 2) ? "Project workspace" : "Project name")
+                                    .redacted(reason: .placeholder)
+                                Spacer()
+                            }
+                            .frame(minHeight: 44)
+                            .orbShimmer(active: true)
+                            .allowsHitTesting(false)
+                        }
+                    } else if projects.isEmpty && loadError.isEmpty {
                         Text("No projects available").foregroundStyle(OrbStyle.textSecondary)
                     }
                     ForEach(projects) { row in
@@ -87,12 +104,29 @@ struct OrbMoveSheet: View {
     }
 
     private func load() async {
+        if projects.isEmpty { loading = true }
         defer { loading = false }
-        if let cached = OrbDisk.read("projects", as: OrbJSON.self) { projects = Self.rows(cached) }
+        if let cached = await OrbDisk.readAsync("projects", as: OrbJSON.self) {
+            let cachedRows = Self.rows(cached)
+            if !cachedRows.isEmpty {
+                projects = cachedRows
+                loading = false
+            }
+        }
         folders = Self.folders(in: project)
-        if let fresh = try? await OrbCore.shared.call("/api/projects") {
-            let rows = Self.rows(fresh)
-            if !rows.isEmpty { projects = rows }
+        do {
+            let fresh = try await OrbCore.shared.call("/api/projects")
+            guard !Task.isCancelled else { return }
+            projects = Self.rows(fresh)
+            loadError = ""
+        } catch is CancellationError {
+            return
+        } catch let urlError as URLError where urlError.code == .cancelled {
+            return
+        } catch {
+            if projects.isEmpty {
+                loadError = error.localizedDescription
+            }
         }
     }
 

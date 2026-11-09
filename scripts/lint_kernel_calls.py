@@ -2,15 +2,20 @@
 """Lint client call sites of the verified Orb kernel admission checks.
 
 Rules (each one guards a bug class that shipped before):
-  duplicated-count   gfmPipeRowAdmitted(..., colCount, sepCols) passes the same
-                     `x.size`/`x.length`/`x.count` twice, so the separator check
-                     is vacuous.
-  synthetic-length   richTagAdmitted/gfmPipeRowAdmitted gets a fabricated span
-                     (`len + 7`, `max(1, n)`, literal 0 offset) instead of the
-                     real offsets in the source buffer.
-  stale-tag-kind     a tag-kind range still admits kind 4 (`tagKind <= 4`,
-                     `1...4`, `1..4`); the kernel only admits kinds 1..3.
-  jni-arity          a Kotlin `external fun` disagrees with kernel_abi.json.
+  duplicated-count          gfmPipeRowAdmitted(..., colCount, sepCols) passes the same
+                            `x.size`/`x.length`/`x.count` twice, so the separator check
+                            is vacuous.
+  synthetic-length          richTagAdmitted/gfmPipeRowAdmitted gets a fabricated span
+                            (`len + 7`, `max(1, n)`, literal 0 offset) instead of the
+                            real offsets in the source buffer.
+  stale-tag-kind            a tag-kind range still admits kind 4 (`tagKind <= 4`,
+                            `1...4`, `1..4`); the kernel only admits kinds 1..3.
+  jni-arity                 a Kotlin `external fun` disagrees with kernel_abi.json.
+  lean-finally-let-mut      a Lean `finally` block references a `let mut` binding
+                            declared before `try` (`tryFinally` captures the pre-`try`
+                            state value; use `IO.Ref` across `try ... finally`).
+  lean-promise-result-bang  a Lean file calls `IO.Promise.result!` (blocks forever if
+                            dropped unfulfilled; use `.result?` instead).
 """
 from __future__ import annotations
 
@@ -44,6 +49,10 @@ STALE_KIND = [
 ]
 JNI_KT = {"uint8_t": "Int", "uint32_t": "Int", "uint64_t": "Long"}
 JNI_KT_RET = {"jbyte": "Byte", "jint": "Int", "jlong": "Long"}
+LEAN_LET_MUT = re.compile(r"\blet\s+mut\s+([A-Za-z_][A-Za-z0-9_']*)\b")
+LEAN_RESULT_BANG = re.compile(r"\.result!(?![A-Za-z0-9_'])")
+LEAN_TRY_KW = re.compile(r"^\s*try\b")
+LEAN_FINALLY_KW = re.compile(r"^(\s*)finally\b(.*)$")
 
 
 @dataclass(frozen=True)
@@ -144,6 +153,152 @@ def lint_jni(manifest: dict, kt_rel: str, kt: str) -> list[Finding]:
     return out
 
 
+def strip_lean_comments_and_strings(text: str) -> str:
+    """Replace Lean comments (`-- ...`, nested `/- ... -/`) and string literals with spaces, preserving newlines."""
+    out: list[str] = []
+    i, n, block_depth, in_str = 0, len(text), 0, False
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if block_depth > 0:
+            if c == "/" and nxt == "-":
+                block_depth += 1
+                out.append("  ")
+                i += 2
+            elif c == "-" and nxt == "/":
+                block_depth -= 1
+                out.append("  ")
+                i += 2
+            else:
+                out.append("\n" if c == "\n" else " ")
+                i += 1
+        elif in_str:
+            if c == "\\" and i + 1 < n:
+                out.append(" ")
+                out.append("\n" if nxt == "\n" else " ")
+                i += 2
+            elif c == '"':
+                in_str = False
+                out.append(" ")
+                i += 1
+            else:
+                out.append("\n" if c == "\n" else " ")
+                i += 1
+        else:
+            if c == "/" and nxt == "-":
+                block_depth = 1
+                out.append("  ")
+                i += 2
+            elif c == "-" and nxt == "-":
+                while i < n and text[i] != "\n":
+                    out.append(" ")
+                    i += 1
+            elif c == '"':
+                in_str = True
+                out.append(" ")
+                i += 1
+            else:
+                out.append(c)
+                i += 1
+    return "".join(out)
+
+
+def lint_lean(rel: str, text: str) -> list[Finding]:
+    out: list[Finding] = []
+    clean = strip_lean_comments_and_strings(text)
+    lines = clean.splitlines()
+
+    for lineno, ln in enumerate(lines, 1):
+        if LEAN_RESULT_BANG.search(ln):
+            out.append(
+                Finding(
+                    rel,
+                    lineno,
+                    "lean-promise-result-bang",
+                    "use `IO.Promise.result?` instead of `.result!` so dropped promises fail closed instead of hanging",
+                )
+            )
+
+    # Track in-scope `let mut` bindings by indentation column and snapshot them at each `try`.
+    active_muts: list[tuple[str, int, int]] = []  # (name, col, decl_line)
+    try_stack: list[tuple[int, dict[str, int]]] = []  # (try_col, {name: decl_line})
+
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        stripped = ln.lstrip(" ")
+        if not stripped:
+            i += 1
+            continue
+        col = len(ln) - len(stripped)
+
+        # Top-level declaration resets local state; dedent drops deeper bindings.
+        if col == 0:
+            active_muts.clear()
+            try_stack.clear()
+        else:
+            active_muts = [m for m in active_muts if m[1] <= col]
+            try_stack = [t for t in try_stack if t[0] <= col]
+
+        m_fin = LEAN_FINALLY_KW.match(ln)
+        if m_fin:
+            fin_col = len(m_fin.group(1))
+            captured: dict[str, int] = {}
+            while try_stack and try_stack[-1][0] >= fin_col:
+                t_col, snap = try_stack.pop()
+                if t_col == fin_col:
+                    captured = snap
+                    break
+            if captured:
+                fin_lines: list[tuple[int, str]] = []
+                inline_rest = m_fin.group(2).strip()
+                if inline_rest:
+                    fin_lines.append((i + 1, inline_rest))
+                j = i + 1
+                while j < len(lines):
+                    sub = lines[j]
+                    sub_s = sub.lstrip(" ")
+                    if not sub_s:
+                        j += 1
+                        continue
+                    sub_col = len(sub) - len(sub_s)
+                    if sub_col <= fin_col:
+                        break
+                    fin_lines.append((j + 1, sub))
+                    j += 1
+
+                shadowed: set[str] = set()
+                for fline, ftxt in fin_lines:
+                    for m_redecl in LEAN_LET_MUT.finditer(ftxt):
+                        shadowed.add(m_redecl.group(1))
+                    for var_name, decl_line in captured.items():
+                        if var_name in shadowed:
+                            continue
+                        if re.search(rf"(?<![A-Za-z0-9_.']){re.escape(var_name)}(?![A-Za-z0-9_'])", ftxt):
+                            out.append(
+                                Finding(
+                                    rel,
+                                    fline,
+                                    "lean-finally-let-mut",
+                                    f"`finally` reads `let mut {var_name}` (declared at line {decl_line} before `try`), "
+                                    f"which captures the stale pre-`try` value; use `IO.Ref` instead",
+                                )
+                            )
+            i += 1
+            continue
+
+        if LEAN_TRY_KW.match(ln):
+            snap = {name: dline for (name, mcol, dline) in active_muts if mcol <= col}
+            try_stack.append((col, snap))
+
+        for m_mut in LEAN_LET_MUT.finditer(ln):
+            active_muts.append((m_mut.group(1), col, i + 1))
+
+        i += 1
+
+    return out
+
+
 def lint_repo(root: Path = ROOT) -> list[Finding]:
     findings: list[Finding] = []
     for d in SCAN_DIRS:
@@ -153,6 +308,12 @@ def lint_repo(root: Path = ROOT) -> list[Finding]:
         for p in sorted(base.rglob("*")):
             if p.suffix in SUFFIXES and p.is_file():
                 findings += lint_source(str(p.relative_to(root)), p.read_text())
+    lean_base = root / "lean"
+    if lean_base.is_dir():
+        for p in sorted(lean_base.rglob("*.lean")):
+            if ".lake" in p.parts or not p.is_file():
+                continue
+            findings += lint_lean(str(p.relative_to(root)), p.read_text())
     manifest = json.loads((root / MANIFEST.relative_to(ROOT)).read_text())
     kt = root / KOTLIN_KERNEL.relative_to(ROOT)
     if kt.exists():

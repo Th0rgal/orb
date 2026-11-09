@@ -1,5 +1,6 @@
 import { HARNESS_IDS, harnessName } from "./harnesses";
 import { cloudAccounts, cloudNames, type CloudAccount } from "./cloudAgentApi";
+import { cachePeek, cachePut } from "./pageCache";
 import { ErrorToast } from "./toast";
 import { ExecutionSettings } from "./ExecutionSettings";
 import { MachineProvidersCard } from "./ManagedMachines";
@@ -77,22 +78,31 @@ function openExternalUrl(url: string) {
 }
 
 function CloudAccountsCard(p: { onOpenPage?: (id: string) => void }) {
-  const [accounts, setAccounts] = createSignal<CloudAccount[]>([]);
+  const [accounts, setAccounts] = createSignal<CloudAccount[]>(
+    isConnected() ? (cachePeek<CloudAccount[]>("settings:cloud-accounts") ?? []) : [],
+  );
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const refresh = async () => {
     if (!isConnected()) return;
     const version = connectionVersion();
     setBusy(true);
-    try { const list = await cloudAccounts(); if (connectionVersion() === version) { setAccounts(list); setError(""); } }
+    try {
+      const list = await cloudAccounts();
+      if (connectionVersion() === version) {
+        cachePut("settings:cloud-accounts", list);
+        setAccounts(list);
+        setError("");
+      }
+    }
     catch (e) { if (connectionVersion() === version) setError(String(e)); }
     finally { setBusy(false); }
   };
   // Accounts belong to the connected Core: drop them on disconnect and reload
   // after every (re)connect instead of keeping a pre-login failure on screen.
-  // connectionVersion bumps on every connect and disconnect.
+  // connectionVersion bumps on every connect and disconnect (which also resets pageCache).
   createEffect(on(connectionVersion, () => {
-    setAccounts([]);
+    setAccounts(isConnected() ? (cachePeek<CloudAccount[]>("settings:cloud-accounts") ?? []) : []);
     setError("");
     void refresh();
   }));
@@ -109,7 +119,9 @@ function CloudAccountsCard(p: { onOpenPage?: (id: string) => void }) {
 }
 
 function GitHubIntegrationCard() {
-  const [status, setStatus] = createSignal<GitHubIntegrationStatus | null>(null);
+  const [status, setStatus] = createSignal<GitHubIntegrationStatus | null>(
+    isConnected() ? (cachePeek<GitHubIntegrationStatus>("settings:github-status") ?? null) : null,
+  );
   const [busy, setBusy] = createSignal(false);
   const [copied, setCopied] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -123,6 +135,7 @@ function GitHubIntegrationCard() {
     try {
       const next = await getGitHubIntegrationStatus();
       if (connectionVersion() === version) {
+        cachePut("settings:github-status", next);
         setStatus(next);
         setError(null);
       }
@@ -134,7 +147,7 @@ function GitHubIntegrationCard() {
   };
 
   createEffect(on(connectionVersion, () => {
-    setStatus(null);
+    setStatus(isConnected() ? (cachePeek<GitHubIntegrationStatus>("settings:github-status") ?? null) : null);
     setError(null);
     if (isConnected()) void refresh();
   }));
@@ -598,8 +611,12 @@ function BackendTab() {
   const [githubBusy, setGithubBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
-  const [health, setHealth] = createSignal<ServerHealthInfo | null>(null);
-  const [authStatus, setAuthStatus] = createSignal<AuthStatusInfo | null>(null);
+  const [health, setHealth] = createSignal<ServerHealthInfo | null>(
+    cachePeek<ServerHealthInfo>(`settings:health:${getApiUrl().trim()}`) ?? null,
+  );
+  const [authStatus, setAuthStatus] = createSignal<AuthStatusInfo | null>(
+    isConnected() ? (cachePeek<AuthStatusInfo>("settings:auth-status") ?? null) : null,
+  );
   const [passwordDialog, setPasswordDialog] = createSignal(false);
   const [currentPw, setCurrentPw] = createSignal("");
   const [newPw, setNewPw] = createSignal("");
@@ -613,11 +630,18 @@ function BackendTab() {
       setHealth(null);
       return;
     }
+    const cached = cachePeek<ServerHealthInfo>(`settings:health:${target}`);
+    if (cached !== undefined) setHealth(cached);
     const ctrl = new AbortController();
     const timer = setTimeout(() => {
       void probeHealth(target, ctrl.signal)
-        .then((info) => { if (!ctrl.signal.aborted) setHealth(info); })
-        .catch(() => { if (!ctrl.signal.aborted) setHealth(null); });
+        .then((info) => {
+          if (!ctrl.signal.aborted) {
+            if (info) cachePut(`settings:health:${target}`, info);
+            setHealth(info);
+          }
+        })
+        .catch(() => { if (!ctrl.signal.aborted && !cached) setHealth(null); });
     }, 250);
     onCleanup(() => {
       clearTimeout(timer);
@@ -626,11 +650,16 @@ function BackendTab() {
   });
 
   createEffect(on(connectionVersion, () => {
-    setAuthStatus(null);
+    setAuthStatus(isConnected() ? (cachePeek<AuthStatusInfo>("settings:auth-status") ?? null) : null);
     if (!isConnected()) return;
     const version = connectionVersion();
     void getAuthStatus()
-      .then((st) => { if (connectionVersion() === version) setAuthStatus(st); })
+      .then((st) => {
+        if (connectionVersion() === version) {
+          cachePut("settings:auth-status", st);
+          setAuthStatus(st);
+        }
+      })
       .catch(() => {});
   }));
 

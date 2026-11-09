@@ -202,4 +202,56 @@ class OrbConnectionIssueTest {
         assertFalse(epoch.stickyUnsupported)
         assertEquals(20L, switched.sinceSeq)
     }
+
+    @Test fun syncHubTeardownDrainsActiveSubscribersWithoutStrandingWaiters() {
+        val dummyReq = okhttp3.Request.Builder().url("https://orbcore.thomas.md/api/control/stream").build()
+        var closedFirst = 0
+        var closedSecond = 0
+        var closedCancelled = 0
+        val reprobeJob = kotlinx.coroutines.Job()
+
+        val throwingSub = OrbCore.SyncStreamSub(
+            id = "sub-1",
+            missionId = "m-1",
+            kindFilter = null,
+            sinceSeq = 10L,
+            request = dummyReq,
+            onEvent = { _, _ -> },
+            onClosed = {
+                closedFirst += 1
+                throw IllegalStateException("listener error must not abort remaining drain")
+            },
+            fallbackFactory = {},
+            reprobeJob = reprobeJob,
+        )
+        val healthySub = OrbCore.SyncStreamSub(
+            id = "sub-2",
+            missionId = null,
+            kindFilter = "presentation",
+            sinceSeq = null,
+            request = dummyReq,
+            onEvent = { _, _ -> },
+            onClosed = { closedSecond += 1 },
+            fallbackFactory = {},
+        )
+        val cancelledSub = OrbCore.SyncStreamSub(
+            id = "sub-3",
+            missionId = "m-3",
+            kindFilter = null,
+            sinceSeq = 5L,
+            request = dummyReq,
+            onEvent = { _, _ -> },
+            onClosed = { closedCancelled += 1 },
+            fallbackFactory = {},
+            cancelled = true,
+        )
+
+        OrbCore.drainSyncSubscribersOnHubClose(null, listOf(throwingSub, healthySub, cancelledSub))
+
+        assertTrue(reprobeJob.isCancelled)
+        assertNull(throwingSub.reprobeJob)
+        assertEquals(1, closedFirst)
+        assertEquals(1, closedSecond)
+        assertEquals(0, closedCancelled)
+    }
 }

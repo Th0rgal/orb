@@ -1796,6 +1796,21 @@ class OrbCore private constructor(context: Context) {
 
         val shared: OrbCore
             get() = checkNotNull(instance) { "OrbCore.getInstance(context) must be called first" }
+
+        internal fun drainSyncSubscribersOnHubClose(
+            closingHub: Any?,
+            toNotify: List<SyncStreamSub>,
+        ) {
+            for (sub in toNotify) {
+                if (sub.currentHub === closingHub) sub.currentHub = null
+                sub.reprobeJob?.cancel()
+                sub.reprobeJob = null
+                sub.delegateSource?.cancel()
+                if (!sub.cancelled) {
+                    runCatching { sub.onClosed(null) }
+                }
+            }
+        }
     }
 
     private val prefs: SharedPreferences =
@@ -2016,6 +2031,9 @@ class OrbCore private constructor(context: Context) {
                 ?: prefs.getString("$TOKEN_FALLBACK_KEY.$cleanBase", null)
         }
         _token.value = loadedToken
+        if (cleanBase.isNotEmpty() && !loadedToken.isNullOrEmpty()) {
+            _isLoading.value = true
+        }
         OrbDisk.setAccountScope(cleanBase, loadedToken)
         scope.launch(Dispatchers.IO) {
             loadCachedSnapshots()
@@ -2200,6 +2218,7 @@ class OrbCore private constructor(context: Context) {
         _nodes.value = n
         if (p.isNotEmpty() || m.isNotEmpty() || h.isNotEmpty()) {
             _hasLoadedSuccessfully.value = true
+            _isLoading.value = false
         }
     }
 
@@ -2383,6 +2402,8 @@ class OrbCore private constructor(context: Context) {
 
     suspend fun refreshMissionsQuietly(forceDiskFlush: Boolean = false, forceFull: Boolean = false) {
         if (!quietRefreshMutex.tryLock()) return
+        var liveRows: List<OrbRow> = emptyList()
+        var prefetchTargets: List<OrbRow> = emptyList()
         try {
             coroutineScope {
                 val mDeferred = async { syncRecentMissions(limit = 100, forceFull = forceFull) }
@@ -2406,30 +2427,47 @@ class OrbCore private constructor(context: Context) {
                         OrbDisk.write("missions", m.map { it.raw })
                         OrbDisk.write("projects", p.map { it.raw })
                     }
-                    val liveRows = m.filter { OrbMissionTree.isLive(it) && it.str("backend")?.startsWith("cloud_") != true }.take(8)
-                    val prefetchTargets = (liveRows + m.take(5)).distinctBy { it.id }.filter { it.id.isNotEmpty() && it.str("backend")?.startsWith("cloud_") != true }
-                    coroutineScope {
-                        prefetchTargets.map { row ->
-                            async {
-                                val evKey = "mission_events_${row.id}"
-                                if (OrbReadCache.loadRows(evKey).isEmpty()) {
-                                    val evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
-                                        fetchRows("/api/control/missions/${encodeComponent(row.id)}/events?limit=150&max_payload=${OrbReadCache.RESULT_KEEP_CHARS}", "events")
-                                    }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
-                                    if (evs.isNotEmpty()) {
-                                        OrbReadCache.saveRows(evKey, evs)
-                                    }
-                                }
-                            }
-                        }.awaitAll()
-                    }
-                    OrbWarmSyncCoordinator.noteLiveMissionIds(this@OrbCore, liveRows.map { it.id })
                 }
+                liveRows = m.filter { OrbMissionTree.isLive(it) && it.str("backend")?.startsWith("cloud_") != true }.take(8)
+                prefetchTargets = (liveRows + m.take(5)).distinctBy { it.id }.filter { it.id.isNotEmpty() && it.str("backend")?.startsWith("cloud_") != true }
             }
         } catch (t: Throwable) {
             if (t !is CancellationException) OrbLog.w(OrbLog.Category.Network, "quiet missions refresh failed", t)
+            return
         } finally {
             quietRefreshMutex.unlock()
+        }
+
+        // Run background warm sync & P2-bounded event prefetches outside `quietRefreshMutex`
+        // so foreground/periodic mission refreshes never stall behind speculative event downloads.
+        withContext(Dispatchers.IO) {
+            OrbWarmSyncCoordinator.noteLiveMissionIds(this@OrbCore, liveRows.map { it.id })
+            val p2Cap = OrbBackgroundSyncMonitor.linkBudget.p2Cap
+            if (p2Cap > 0 && prefetchTargets.isNotEmpty()) {
+                val prefetchSem = kotlinx.coroutines.sync.Semaphore(minOf(3, p2Cap))
+                coroutineScope {
+                    prefetchTargets.map { row ->
+                        async {
+                            if (OrbBackgroundSyncMonitor.linkBudget.p2Cap <= 0) return@async
+                            val evKey = "mission_events_${row.id}"
+                            if (OrbReadCache.loadRows(evKey).isEmpty()) {
+                                prefetchSem.acquire()
+                                val evs = try {
+                                    if (OrbBackgroundSyncMonitor.linkBudget.p2Cap <= 0) emptyList()
+                                    else orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                                        fetchRows("/api/control/missions/${encodeComponent(row.id)}/events?limit=150&max_payload=${OrbReadCache.RESULT_KEEP_CHARS}", "events")
+                                    }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
+                                } finally {
+                                    prefetchSem.release()
+                                }
+                                if (evs.isNotEmpty()) {
+                                    OrbReadCache.saveRows(evKey, evs)
+                                }
+                            }
+                        }
+                    }.awaitAll()
+                }
+            }
         }
     }
 
@@ -2514,7 +2552,8 @@ class OrbCore private constructor(context: Context) {
                 _assistantStatus.value = status
             }
 
-            if (anyCoreSuccess) {
+            val projectsFailedWhileEmpty = pResult.isFailure && _projects.value.isEmpty()
+            if (anyCoreSuccess && !projectsFailedWhileEmpty) {
                 _lastRefreshAtMs.value = System.currentTimeMillis()
                 _hasLoadedSuccessfully.value = true
                 _lastError.value = null
@@ -2525,16 +2564,20 @@ class OrbCore private constructor(context: Context) {
                 if (err != null) {
                     _lastError.value = err.message ?: "Request failed"
                     recordErrorLog("baseURL=${_baseURL.value}\nerror=${err.message}", "refresh failed: ${err.message}")
-                    val failedBase = _baseURL.value
-                    val proxy = systemProxyFor(failedBase)
-                    _connectionIssue.value = OrbConnection.issue(failedBase, err.message, defaultReachable = null, proxy = proxy)
-                    if (OrbConnection.shouldProbeDefault(failedBase, err.message)) {
-                        launch(Dispatchers.IO) {
-                            val reachable = probeDefaultServer()
-                            if (_baseURL.value == failedBase && _connectionIssue.value != null) {
-                                _connectionIssue.value = OrbConnection.issue(failedBase, err.message, reachable, proxy)
+                    if (!anyCoreSuccess) {
+                        val failedBase = _baseURL.value
+                        val proxy = systemProxyFor(failedBase)
+                        _connectionIssue.value = OrbConnection.issue(failedBase, err.message, defaultReachable = null, proxy = proxy)
+                        if (OrbConnection.shouldProbeDefault(failedBase, err.message)) {
+                            launch(Dispatchers.IO) {
+                                val reachable = probeDefaultServer()
+                                if (_baseURL.value == failedBase && _connectionIssue.value != null) {
+                                    _connectionIssue.value = OrbConnection.issue(failedBase, err.message, reachable, proxy)
+                                }
                             }
                         }
+                    } else {
+                        _connectionIssue.value = null
                     }
                 }
             }
@@ -2976,7 +3019,7 @@ class OrbCore private constructor(context: Context) {
         return emptyList()
     }
 
-    private data class SyncStreamSub(
+    internal data class SyncStreamSub(
         val id: String,
         val missionId: String?,
         val kindFilter: String?,
@@ -3211,7 +3254,7 @@ class OrbCore private constructor(context: Context) {
         }
     }
 
-    private inner class ControlSyncHub(
+    internal inner class ControlSyncHub(
         val hubScope: String,
         private val candidates: List<String>,
         private val token: String
@@ -3519,12 +3562,7 @@ class OrbCore private constructor(context: Context) {
             ws?.close(1000, null)
             ws = null
             if (activeSyncHub === this) activeSyncHub = null
-            for (sub in toNotify) {
-                if (sub.currentHub === this) sub.currentHub = null
-                sub.reprobeJob?.cancel()
-                sub.reprobeJob = null
-                sub.delegateSource?.cancel()
-            }
+            drainSyncSubscribersOnHubClose(this, toNotify)
         }
     }
 

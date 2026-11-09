@@ -1,6 +1,8 @@
 import {For,Show,createSignal,createEffect,on,onCleanup,onMount} from 'solid-js';
 import {cloudAccounts,cloudAccountLabel,cloudNames,type CloudAccount,type CloudProvider} from './cloudAgentApi';
 import {api,connectionVersion,openExternalUrl} from './api';
+import * as Api from './api';
+import {cachePeek,cachePut} from './pageCache';
 import {ProviderUsageMeter} from './ProviderUsageMeter';
 import {ChevronRight,FlaskIcon} from './icons';
 import {ProviderLogo} from './ProviderLogo';
@@ -16,22 +18,24 @@ export function cloudAccountStatus(account:CloudAccount):string {
  if(/RequiresLogin|reconnect|login|sign.?in/i.test(account.reason??''))return 'Reconnect';
  return 'Unavailable';
 }
+const canUseCache=()=>{try{return Api.isConnected();}catch{return false;}};
 export function CloudProviders() {
- const [accounts,setAccounts]=createSignal<CloudAccount[]>([]);
- const [usage,setUsage]=createSignal<Record<string,AccountUsage>>({});
+ const initialAccounts=canUseCache()?cachePeek<CloudAccount[]>('settings:cloud-accounts'):undefined;
+ const [accounts,setAccounts]=createSignal<CloudAccount[]>(initialAccounts??[]);
+ const [usage,setUsage]=createSignal<Record<string,AccountUsage>>(canUseCache()?(cachePeek<Record<string,AccountUsage>>('providers:cloud-usage')??{}):{});
  let usageGeneration=0;
- const refreshUsage=async()=>{const generation=++usageGeneration,version=connectionVersion();try{const data=await api<{accounts?:Record<string,AccountUsage>}>('/api/cloud/usage');if(!disposed&&generation===usageGeneration&&version===connectionVersion())setUsage(data.accounts??{});}catch{if(!disposed&&generation===usageGeneration)setUsage({});}};
- const [loaded,setLoaded]=createSignal(false),[error,setError]=createSignal('');
+ const refreshUsage=async()=>{const generation=++usageGeneration,version=connectionVersion();try{const data=await api<{accounts?:Record<string,AccountUsage>}>('/api/cloud/usage');if(!disposed&&generation===usageGeneration&&version===connectionVersion()){const next=data.accounts??{};if(canUseCache())cachePut('providers:cloud-usage',next);setUsage(next);}}catch{if(!disposed&&generation===usageGeneration&&!Object.keys(usage()).length)setUsage({});}};
+ const [loaded,setLoaded]=createSignal(initialAccounts!==undefined),[error,setError]=createSignal('');
  let disposed=false,busy=false,queuedManual=false;
  const refresh=async(manual=false)=>{
   if(manual)setError('');
   if(busy){queuedManual||=manual;return;}
   busy=true;const version=connectionVersion();void refreshUsage();
-  try {const next=await cloudAccounts();if(!Array.isArray(next))throw new Error('Cloud accounts could not be read. Refresh to retry.');if(!disposed&&version===connectionVersion()){setAccounts(previous=>mergeById(previous,next));setError('');setLoaded(true);}}
+  try {const next=await cloudAccounts();if(!Array.isArray(next))throw new Error('Cloud accounts could not be read. Refresh to retry.');if(!disposed&&version===connectionVersion()){setAccounts(previous=>{const merged=mergeById(previous,next);if(canUseCache())cachePut('settings:cloud-accounts',merged);return merged;});setError('');setLoaded(true);}}
   catch(e){if(!disposed&&version===connectionVersion()){setError(e instanceof Error?e.message:String(e));setLoaded(true);}}
   finally{busy=false;if(!disposed&&(version!==connectionVersion()||queuedManual)){const m=queuedManual;queuedManual=false;void refresh(m);}}
  };
- createEffect(on(connectionVersion,()=>{setAccounts([]);setUsage({});setLoaded(false);setError('');void refresh();}));
+ createEffect(on(connectionVersion,()=>{const cached=canUseCache()?cachePeek<CloudAccount[]>('settings:cloud-accounts'):undefined;setAccounts(cached??[]);setUsage(canUseCache()?(cachePeek<Record<string,AccountUsage>>('providers:cloud-usage')??{}):{});setLoaded(cached!==undefined);setError('');void refresh();}));
  onMount(()=>{const stop=pollWhileVisible(()=>refresh(false),60000);const onRefresh=()=>{void refresh(true);};window.addEventListener('orb:providers-refresh',onRefresh);onCleanup(()=>{disposed=true;stop();window.removeEventListener('orb:providers-refresh',onRefresh);});});
   return <section class="s-sec" aria-label="Cloud agents"><h3>Cloud agents</h3><div class="s-card">
   <ErrorToast error={error()} title="Couldn’t load cloud accounts" background action={{label:'Retry',run:()=>refresh(true)}}/>

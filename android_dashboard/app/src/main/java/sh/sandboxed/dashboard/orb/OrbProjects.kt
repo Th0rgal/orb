@@ -1422,6 +1422,12 @@ fun OrbProjectPage(
     var fetchedProjectMissions by remember(projectSlug) {
         mutableStateOf(OrbReadCache.readMemoryRows("project_missions_$projectSlug"))
     }
+    var isInitialProjectLoading by remember(projectSlug) {
+        mutableStateOf(OrbReadCache.readMemoryRows("project_missions_$projectSlug").isEmpty())
+    }
+    var projectLoadError by remember(projectSlug) {
+        mutableStateOf<String?>(null)
+    }
     var loadedArchived by remember(projectSlug) {
         mutableStateOf(false)
     }
@@ -1441,17 +1447,20 @@ fun OrbProjectPage(
             val missionsTask = async {
                 orbTry(OrbLog.Category.Network, "/api/control/missions") {
                     core.projectMissions(projectSlug, includeArchived = includeArchived)
-                }.getOrNull()
+                }
             }
             val manifestTask = async {
                 orbTry(OrbLog.Category.Network, "/api/projects") {
                     core.fetchDict("/api/projects/$encoded/context/manifest")
                 }.getOrNull()
             }
-            val mobile = missionsTask.await()
+            val missionsRes = missionsTask.await()
+            val mobile = missionsRes.getOrNull()
             if (mobile != null) {
                 if (includeArchived) loadedArchived = true
                 fetchedProjectMissions = mobile
+                projectLoadError = null
+                isInitialProjectLoading = false
                 OrbReadCache.saveRows("project_missions_$projectSlug", mobile)
                 for (m in mobile) {
                     val hist = m.rows("history")
@@ -1459,23 +1468,40 @@ fun OrbProjectPage(
                         OrbReadCache.saveRows("mission_msgs_${m.id}", hist)
                     }
                 }
-                // Prefetch top 5 missions' events in background
-                launch(kotlinx.coroutines.Dispatchers.IO) {
-                    coroutineScope {
-                        mobile.take(5).map { m ->
-                            async {
-                                val evKey = "mission_events_${m.id}"
-                                if (OrbReadCache.loadRowsAsync(evKey).isEmpty()) {
-                                    val evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
-                                        core.fetchRows("/api/control/missions/${core.encodeComponent(m.id)}/events?limit=150", "events")
-                                    }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
-                                    if (evs.isNotEmpty()) {
-                                        OrbReadCache.saveRows(evKey, evs)
+                // Prefetch top 5 missions' events in background bounded by linkBudget.p2Cap
+                val p2Cap = OrbBackgroundSyncMonitor.linkBudget.p2Cap
+                if (p2Cap > 0) {
+                    launch(kotlinx.coroutines.Dispatchers.IO) {
+                        val sem = kotlinx.coroutines.sync.Semaphore(minOf(3, p2Cap))
+                        coroutineScope {
+                            mobile.take(5).map { m ->
+                                async {
+                                    if (OrbBackgroundSyncMonitor.linkBudget.p2Cap <= 0) return@async
+                                    val evKey = "mission_events_${m.id}"
+                                    if (OrbReadCache.loadRowsAsync(evKey).isEmpty()) {
+                                        sem.acquire()
+                                        val evs = try {
+                                            orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                                                core.fetchRows("/api/control/missions/${core.encodeComponent(m.id)}/events?limit=150", "events")
+                                            }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
+                                        } finally {
+                                            sem.release()
+                                        }
+                                        if (evs.isNotEmpty()) {
+                                            OrbReadCache.saveRows(evKey, evs)
+                                        }
                                     }
                                 }
-                            }
-                        }.awaitAll()
+                            }.awaitAll()
+                        }
                     }
+                }
+            } else {
+                val err = missionsRes.exceptionOrNull()
+                if (err is CancellationException) throw err
+                isInitialProjectLoading = false
+                if (fetchedProjectMissions.isEmpty()) {
+                    projectLoadError = err?.message ?: "Couldn't load conversations"
                 }
             }
             val manifest = manifestTask.await()
@@ -1500,7 +1526,10 @@ fun OrbProjectPage(
             val manifestTask = if (needManifest) async { OrbReadCache.loadDictAsync("project_manifest_$projectSlug") } else null
             rowsTask.await() to manifestTask?.await()
         }
-        if (fetchedProjectMissions.isEmpty() && cached.isNotEmpty()) fetchedProjectMissions = cached
+        if (fetchedProjectMissions.isEmpty() && cached.isNotEmpty()) {
+            fetchedProjectMissions = cached
+            isInitialProjectLoading = false
+        }
         if (manifestFolders.isEmpty()) {
             val entries = OrbJSON.dict(cachedManifest?.get("entries"))
             if (entries != null) {
@@ -2308,25 +2337,76 @@ fun OrbProjectPage(
                     }
 
                     if (flatUnfiled.isEmpty() && foldersMap.isEmpty()) {
-                        item(key = "empty_proj_missions") {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 64.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Text(
-                                    text = if (searchQuery.isNotEmpty() || filter != OrbProjectFilter.All) "No matching conversations" else "No conversations yet",
-                                    color = OrbStyle.textSecondary,
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                Text(
-                                    text = if (searchQuery.isNotEmpty() || filter != OrbProjectFilter.All) "Try another search or filter." else "Start an agent with the + button.",
-                                    color = OrbStyle.textMuted,
-                                    fontSize = 13.sp
-                                )
+                        if (isInitialProjectLoading) {
+                            item(key = "loading_proj_missions") {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .background(OrbStyle.surface)
+                                        .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                                ) {
+                                    repeat(3) { idx ->
+                                        OrbSkeletonRow()
+                                        if (idx < 2) {
+                                            HorizontalDivider(color = OrbStyle.border, thickness = 0.5.dp)
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (projectLoadError != null) {
+                            item(key = "error_proj_missions") {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 48.dp, horizontal = 24.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Text(
+                                        text = "Couldn't load conversations",
+                                        color = OrbStyle.textSecondary,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Text(
+                                        text = projectLoadError ?: "Request failed",
+                                        color = OrbStyle.textMuted,
+                                        fontSize = 13.sp
+                                    )
+                                    TextButton(onClick = {
+                                        scope.launch {
+                                            isInitialProjectLoading = true
+                                            projectLoadError = null
+                                            loadProjectData()
+                                        }
+                                    }) {
+                                        Text("Retry", color = OrbStyle.accent)
+                                    }
+                                }
+                            }
+                        } else {
+                            item(key = "empty_proj_missions") {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 64.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Text(
+                                        text = if (searchQuery.isNotEmpty() || filter != OrbProjectFilter.All) "No matching conversations" else "No conversations yet",
+                                        color = OrbStyle.textSecondary,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Text(
+                                        text = if (searchQuery.isNotEmpty() || filter != OrbProjectFilter.All) "Try another search or filter." else "Start an agent with the + button.",
+                                        color = OrbStyle.textMuted,
+                                        fontSize = 13.sp
+                                    )
+                                }
                             }
                         }
                     }

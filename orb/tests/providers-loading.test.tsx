@@ -58,3 +58,25 @@ it('ignores the previous backend response and cancels work on unmount', async ()
   expect(ui.queryByText('Old account')).toBeNull();
   ui.unmount();
 });
+it('renders cached providers immediately on remount without flashing the loading skeleton', async () => {
+  setConnection('http://core.test', 'test');
+  let holdSecondFetch = false;
+  vi.stubGlobal('fetch', vi.fn((url: string) => {
+    if (holdSecondFetch) {
+      return new Promise<Response>(() => {});
+    }
+    return Promise.resolve(ok(url.endsWith('/providers') ? [{id:'cached',name:'Cached Claude',provider_type:'anthropic',uses_oauth:true,status:{type:'connected'}}] : []));
+  }));
+  const first = render(() => <Providers />);
+  await waitFor(() => expect(first.getByText('Cached Claude')).toBeTruthy());
+  await waitFor(() => expect(first.queryByRole('status')).toBeNull());
+  first.unmount();
+
+  // Remounting (e.g. returning from Settings) renders cached accounts & cloud connectors
+  // synchronously even while all background refreshes are still in flight, with zero skeleton flash.
+  holdSecondFetch = true;
+  const second = render(() => <Providers />);
+  expect(second.getByText('Cached Claude')).toBeTruthy();
+  expect(second.queryByRole('status')).toBeNull();
+  second.unmount();
+});

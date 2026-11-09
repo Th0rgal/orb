@@ -1,4 +1,5 @@
 import { pollWhileVisible } from "./poll";
+import { cachePeek, cachePut } from "./pageCache";
 import { swallow } from "./log";
 import { AntigravityProvider } from "./AntigravityProvider";
 import { ErrorToast } from "./toast";
@@ -119,9 +120,13 @@ const KINDS: Kind[] = [
 ];
 
 export function Providers() {
-  const [remote, setRemote] = createSignal<AIProvider[] | null>(null);
+  const [remote, setRemote] = createSignal<AIProvider[] | null>(
+    isConnected() ? (cachePeek<AIProvider[]>("providers:list") ?? null) : null,
+  );
   // Router circuit-breaker state per account ("Out of credit", "Auth failed").
-  const [health, setHealth] = createSignal<Record<string, AccountHealthSnapshot>>({});
+  const [health, setHealth] = createSignal<Record<string, AccountHealthSnapshot>>(
+    isConnected() ? (cachePeek<Record<string, AccountHealthSnapshot>>("providers:health") ?? {}) : {},
+  );
 
   const [loading, setLoading] = createSignal(false);
   const [loadError, setLoadError] = createSignal<string | null>(null);
@@ -142,9 +147,18 @@ export function Providers() {
     const active = () => current === generation && version === connectionVersion() && isConnected();
     try {
       const providers = await listProviders(controller.signal);
-      if (active()) setRemote(providers);
+      if (active()) {
+        cachePut("providers:list", providers);
+        setRemote(providers);
+      }
       listHealth()
-        .then(list => { if (active() && Array.isArray(list)) setHealth(Object.fromEntries(list.map(h => [h.account_id, h]))); })
+        .then(list => {
+          if (active() && Array.isArray(list)) {
+            const nextHealth = Object.fromEntries(list.map(h => [h.account_id, h]));
+            cachePut("providers:health", nextHealth);
+            setHealth(nextHealth);
+          }
+        })
         .catch(() => {});
     } catch (error) {
       if (active()) setLoadError(controller.signal.aborted
@@ -160,7 +174,8 @@ export function Providers() {
     const connected = isConnected();
     request?.abort();
     ++generation;
-    setRemote(null);
+    setRemote(connected ? (cachePeek<AIProvider[]>("providers:list") ?? null) : null);
+    setHealth(connected ? (cachePeek<Record<string, AccountHealthSnapshot>>("providers:health") ?? {}) : {});
     setLoadError(null);
     if (connected) void reloadRemote();
   });
@@ -206,12 +221,16 @@ const SUBSCRIPTION_META: Record<string, { vendor: string; desc: string }> = {
 };
 
 function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountHealthSnapshot>; onRefresh: () => void; loading?: boolean; loadError?: string | null }) {
-  const [usage, setUsage] = createSignal<Record<string, ProviderUsage>>({});
+  const [usage, setUsage] = createSignal<Record<string, ProviderUsage>>(
+    cachePeek<Record<string, ProviderUsage>>("providers:usage") ?? {},
+  );
   const sharedOrgs = createMemo(() => sharedAnthropicOrganizations(usage()));
   const [keyEditor, setKeyEditor] = createSignal<AIProvider | "new" | null>(null);
   const [reauth, setReauth] = createSignal<AIProvider | null>(null);
   const [adding, setAdding] = createSignal(false);
-  const [loginOptions, setLoginOptions] = createSignal<{available: boolean; providers: {id: string; name: string}[]; reason?: string}>();
+  const [loginOptions, setLoginOptions] = createSignal<{available: boolean; providers: {id: string; name: string}[]; reason?: string} | undefined>(
+    cachePeek<{available: boolean; providers: {id: string; name: string}[]; reason?: string}>("providers:login-options"),
+  );
   const [addType, setAddType] = createSignal("");
   const [removing, setRemoving] = createSignal<AIProvider | null>(null);
   const [removeBusy, setRemoveBusy] = createSignal(false);
@@ -231,15 +250,20 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
     finally { setRemoveBusy(false); }
   };
   onMount(() => {
+    const version = connectionVersion();
     void api<{available: boolean; providers: {id: string; name: string}[]; reason?: string}>("/api/ai/providers/cli-proxy-login")
       .then(res => {
         const providers = Array.isArray(res.providers) ? [...res.providers] : [];
         if (!providers.some(p => p.id === "mistral")) {
           providers.push({ id: "mistral", name: "Mistral Vibe" });
         }
-        setLoginOptions({ ...res, available: true, providers });
+        const next = { ...res, available: true, providers };
+        if (version === connectionVersion()) cachePut("providers:login-options", next);
+        setLoginOptions(next);
       })
-      .catch(() => setLoginOptions({available: false, providers: [], reason: "Update the backend to add subscription accounts here."}));
+      .catch(() => {
+        if (!loginOptions()) setLoginOptions({available: false, providers: [], reason: "Update the backend to add subscription accounts here."});
+      });
   });
   // uses_oauth describes what a provider supports, not the credential in use.
   // Vibe browser sign-in provisions an API key. For Mistral, uses_oauth is
@@ -298,25 +322,56 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
 
   let disposed = false;
   let fetching = false;
-  const refreshUsage = async () => {
+  const refreshUsage = async (foreground = false) => {
     if (fetching) return;
     fetching = true;
+    const prio = foreground ? "p1" : "p2";
+    const version = connectionVersion();
     try {
-      const snapshot = await getAllProviderUsage();
-      if (!disposed) setUsage(snapshot);
+      const snapshot = (await getAllProviderUsage(prio)) ?? {};
+      if (!disposed) {
+        setUsage(prev => {
+          const merged = { ...prev, ...snapshot };
+          if (version === connectionVersion()) cachePut("providers:usage", merged);
+          return merged;
+        });
+      }
       // The bulk endpoint returns its cache before starting background probes.
-      // Await subscription accounts so the first visit receives their result too.
-      await Promise.allSettled(p.list.filter(a => ["kimi", "minimax", "zai", "muse-code", "mistral"].includes(a.provider_type) || (a.uses_oauth && (a.provider_type === "openai" || a.provider_type === "xai" || (a.provider_type === "anthropic" && !snapshot[a.id])))).map(async a => {
-        const value = await getProviderUsage(a.id);
-        if (!disposed && value && !Array.isArray(value) && typeof value.provider_type === "string") {
-          setUsage(previous => ({ ...previous, [a.id]: value }));
-        }
-      }));
+      // Probe only missing/stale subscription accounts with bounded concurrency (4).
+      const candidates = p.list.filter(a => {
+        const cached = snapshot[a.id];
+        if (cached && cached.stale === false && !foreground) return false;
+        return (
+          ["kimi", "minimax", "zai", "muse-code", "mistral"].includes(a.provider_type) ||
+          (a.uses_oauth && (a.provider_type === "openai" || a.provider_type === "xai" || (a.provider_type === "anthropic" && !cached)))
+        );
+      });
+      let idx = 0;
+      const workerCount = Math.min(4, candidates.length);
+      await Promise.allSettled(
+        Array.from({ length: workerCount }, async () => {
+          while (!disposed && idx < candidates.length) {
+            const a = candidates[idx++]!;
+            try {
+              const value = await getProviderUsage(a.id, false, prio);
+              if (!disposed && value && !Array.isArray(value) && typeof value.provider_type === "string") {
+                setUsage(previous => {
+                  const merged = { ...previous, [a.id]: value };
+                  if (version === connectionVersion()) cachePut("providers:usage", merged);
+                  return merged;
+                });
+              }
+            } catch {
+              // Keep existing snapshot entry if an individual account probe fails.
+            }
+          }
+        }),
+      );
     } finally { fetching = false; }
   };
   onMount(() => {
-    void refreshUsage().catch(swallow("providers.usage"));
-    const stop = pollWhileVisible(refreshUsage, 30_000, "providers.usage");
+    void refreshUsage(true).catch(swallow("providers.usage"));
+    const stop = pollWhileVisible(() => refreshUsage(false), 30_000, "providers.usage");
     onCleanup(() => { disposed = true; stop(); });
   });
 
@@ -343,7 +398,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         <button class="s-btn quiet" onClick={() => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: "usage-settings" }))}>
           <Ic.UsageIcon size={13} /> Usage history
         </button>
-        <button class="s-btn" disabled={p.loading} onClick={() => { void refreshUsage().catch(swallow("providers.usage")); p.onRefresh(); }}>
+        <button class="s-btn" disabled={p.loading} onClick={() => { void refreshUsage(true).catch(swallow("providers.usage")); p.onRefresh(); }}>
           <Ic.RefreshIcon size={13} /> Refresh
         </button>
       </div>

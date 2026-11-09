@@ -67,6 +67,7 @@ def classifyProxyRequestPriority (method relPath : String) (explicitPrio? : Opti
     else if p == "/api/health" || p.startsWith "/api/auth/" || p.startsWith "/api/bitwarden/" || p.startsWith "/api/privilege-access/" then
       0
     else if p.startsWith "/api/software" || p.startsWith "/api/stats" ||
+            p.startsWith "/api/providers/antigravity-models" ||
             p.startsWith "/api/antigravity-models" || p.startsWith "/api/crons" ||
             p.startsWith "/api/library/skill-delivery" || p.startsWith "/api/ai/providers/usage" ||
             p.startsWith "/api/usage-telemetry" || p.startsWith "/api/remote-nodes" ||
@@ -75,6 +76,24 @@ def classifyProxyRequestPriority (method relPath : String) (explicitPrio? : Opti
       2
     else
       1
+
+/-- True when an upstream proxy request's latency reflects server-side subprocess/provider work
+    rather than network link RTT, so it must not update `originHealth.srttMs`. -/
+def isComputeBoundProxyRequest (method relPath : String) : Bool :=
+  let m := method.trimAscii.toString.toUpper
+  let p := (relPath.splitOn "?").head?.getD relPath
+  (m != "GET" && m != "HEAD" && m != "OPTIONS") ||
+  p == "/api/file-resources" ||
+  p.endsWith "/inbox-digest" ||
+  p.startsWith "/api/software" ||
+  p.startsWith "/api/stats" ||
+  p.startsWith "/api/resources/" ||
+  p.startsWith "/api/usage" ||
+  p.startsWith "/api/proxy-health" ||
+  p.startsWith "/api/providers/antigravity-models" ||
+  p.startsWith "/api/antigravity-models" ||
+  p == "/api/ai/providers/usage" ||
+  (p.startsWith "/api/ai/providers/" && p.endsWith "/usage")
 
 /-- Per-origin EWMA RTT and cooldown health tracked inside `orb-locald`. -/
 structure OriginHealthEntry where
