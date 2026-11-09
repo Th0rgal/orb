@@ -36,9 +36,8 @@ export const settingsSectionFor = (id: string | null | undefined): SettingsSecti
 export const SETTINGS_PAGE_IDS: string[] = [...SETTINGS_SECTIONS.flatMap(s => s.tabs.map(t => t.id)), ...Object.keys(LEGACY_PAGES)];
 
 /** Which sections need the user: drives the sidebar's attention dots. */
-export function settingsAttention(s: { bunkerActive: boolean; deviceEnrolled: boolean; quotaExhausted: boolean }): Set<SettingsSectionId> {
+export function settingsAttention(s: { bunkerActive: boolean; deviceEnrolled: boolean }): Set<SettingsSectionId> {
   const out = new Set<SettingsSectionId>();
   if (s.bunkerActive || !s.deviceEnrolled) out.add("security");
-  if (s.quotaExhausted) out.add("models");
   return out;
 }

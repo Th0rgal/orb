@@ -57,10 +57,9 @@ enum OrbSettingsSection: String, CaseIterable, Identifiable {
     }
 
     /// Sections that need the user (sidebar attention dot).
-    static func attention(bunkerActive: Bool, deviceEnrolled: Bool, quotaExhausted: Bool) -> Set<OrbSettingsSection> {
+    static func attention(bunkerActive: Bool, deviceEnrolled: Bool) -> Set<OrbSettingsSection> {
         var out = Set<OrbSettingsSection>()
         if bunkerActive || !deviceEnrolled { out.insert(.security) }
-        if quotaExhausted { out.insert(.models) }
         return out
     }
 }
@@ -70,9 +69,8 @@ struct OrbSettingsHome: View {
     @Environment(\.dismiss) private var dismiss
     @State private var client = OrbSettingsClient()
     @State private var deviceEnrolled = true
-    @State private var quotaExhausted = false
     private var attention: Set<OrbSettingsSection> {
-        OrbSettingsSection.attention(bunkerActive: OrbPrivilegeAccessMonitor.shared.bunkerState > 0, deviceEnrolled: deviceEnrolled, quotaExhausted: quotaExhausted)
+        OrbSettingsSection.attention(bunkerActive: OrbPrivilegeAccessMonitor.shared.bunkerState > 0, deviceEnrolled: deviceEnrolled)
     }
     private var visibleSections: [OrbSettingsSection] {
         OrbSettingsSection.allCases.filter { $0 != .security || OrbCore.shared.isAdminUser }
@@ -155,7 +153,6 @@ struct OrbSettingsHome: View {
 
     private func loadAttention() async {
         await OrbCore.shared.refreshCurrentUser()
-        async let usageReq = client.call("/api/ai/providers/usage")
         if OrbCore.shared.isAdminUser {
             async let privRefresh = OrbPrivilegeAccessMonitor.shared.refresh()
             async let devicesReq = client.call("/api/approvals/devices")
@@ -166,9 +163,6 @@ struct OrbSettingsHome: View {
             }
         } else {
             deviceEnrolled = true
-        }
-        if let usage = (try? await usageReq)?["entries"], case .object(let entries) = usage {
-            quotaExhausted = entries.values.contains { OrbProviderQuota.quotaStatus(OrbProviderQuota.windows($0))?.level == .exhausted }
         }
     }
 }
