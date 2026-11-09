@@ -338,7 +338,8 @@ private def runR6bClientLinkAndConflictChecks
   total := total + 1
   let originConflictOk :=
     !mid.isEmpty &&
-    (match listRes1 with | .ok (.arr #[jv]) => jv.fieldStr? "id" == some mid && jv.fieldBool? "local_sync_pending" == some true | _ => false) &&
+    (match launchRes with | .ok jv => jv.fieldStr? "placement_kind" == some "client" | _ => false) &&
+    (match listRes1 with | .ok (.arr #[jv]) => jv.fieldStr? "id" == some mid && jv.fieldBool? "local_sync_pending" == some true && jv.fieldStr? "placement_kind" == some "client" | _ => false) &&
     (match confStopping with | .ok jv => jv.fieldBool? "retry" == some true && jv.fieldStr? "conflict_code" == some "stopping" | _ => false) &&
     (match confStale with | .ok jv => jv.fieldBool? "retry" == some false && jv.fieldStr? "conflict_code" == some "stale_receipt" | _ => false) &&
     (match confUnknown with | .error "unclassified_local_origin_conflict" => true | _ => false) &&

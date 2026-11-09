@@ -30,7 +30,7 @@ added the repo-owned 384-case (`192 * 2` on current manifest) Ed25519-signed loc
 receipt and `ORB_KERNEL_BACKEND=stock-c` rollback alongside committed `LeanNative` textual LLVM IR (`orb_kernel_leannative_{x86_64,aarch64}.ll`) without retroactively
 relabeling the `3c70e5ada` multi-target run.
 
-That local evidence is not phase acceptance: **110 partial / 82 unconnected**
+That local evidence is not phase acceptance: **129 partial / 63 unconnected**
 coverage entries remain across the current 192-entry manifest (`acceptance:
 INCOMPLETE`; 23 partial / 106 unconnected at `3c70e5ada`); physical iPhone 13
 mini and Pixel 8 stay `BLOCKED_PHYSICAL_DEVICE`, the MacBook Air host is
@@ -58,14 +58,14 @@ those checks.
 
 The coverage registry remains incomplete: 106 entries were unconnected and 23
 had explicit partial evidence in `shared/orb-spec/coverage_evidence.json` at the
-2026-10-28 handoff (on current `master`, after `#1488`, live node capacity / coordinator lane exports, Phase R1 host-gate evidence, Phase R2b `OrbWire` slice I/O evidence, Phase R3 authoritative Cluster 1–4 evidence, the `dgx-spark` / `lean-sys` `c8449e0` fleet & stream-relay gates, Phase R4 Scroll / Stream / Transcript zero-copy slice ABI evidence, `orb_placement_merge_step`, Wave 3.2 / Wave 4 scanner, pacer, confinement, DAG, FTS5, UTF-16, and `LeanSys` host-gate evidence, `orb_model_account_{admit,score}`, the Phase R2-A epoch fence, effect outbox, and crash boundary exports, `orb_activation_rollback_admit` / `orb_remote_replay_step`, the fast memory / Paloma handoff exports, the `#1497` / `#1553` / `#1552` / `#352` gates, `orb_sidebar_{move_target_admit,drag_step}`, the Phase R6-A `orb_followup_queue_step`, `orb_transport_epoch_step`, and `orb_stream_open_tail_cap_step` exports, and client link-budget / EWMA RTT pacing `orb_{rtt_ewma,client_link_budget}_step`, 78 entries are unconnected and 110 partial across 188
-manifest entries: 146 `orb_*` + 41 `leansys_*` + 1 compiler helper).
+2026-10-28 handoff (on current `master`, after `#1488`, live node capacity / coordinator lane exports, Phase R1 host-gate evidence, Phase R2b `OrbWire` slice I/O evidence, Phase R3 authoritative Cluster 1–4 evidence, the `dgx-spark` / `lean-sys` `c8449e0` fleet & stream-relay gates, Phase R4 Scroll / Stream / Transcript zero-copy slice ABI evidence, `orb_placement_merge_step`, Wave 3.2 / Wave 4 scanner, pacer, confinement, DAG, FTS5, UTF-16, and `LeanSys` host-gate evidence, `orb_model_account_{admit,score}`, the Phase R2-A epoch fence, effect outbox, and crash boundary exports, `orb_activation_rollback_admit` / `orb_remote_replay_step`, the fast memory / Paloma handoff exports, the `#1497` / `#1553` / `#1552` / `#352` gates, `orb_sidebar_{move_target_admit,drag_step}`, the Phase R6-A `orb_followup_queue_step`, `orb_transport_epoch_step`, and `orb_stream_open_tail_cap_step` exports, client link-budget / EWMA RTT pacing `orb_{rtt_ewma,client_link_budget}_step`, and multi-user RBAC / placement / spend / `orb-privd` user confinement `orb_{multiuser_rbac_step,placement_role_admit,user_spend_cap_step,privd_user_exec_step}`, 63 entries are unconnected and 129 partial across 192
+manifest entries: 150 `orb_*` + 41 `leansys_*` + 1 compiler helper).
 Source hashes bind local host-test receipts to the linked theorem declarations
 and observers; these links do not establish authoritative callers or adapter parity.
 At that handoff its 129 manifest entries were 95 `orb_*` exports (`Orb.Kernel.*`), 33 `leansys_*`
 exports (`LeanSys.Spec.*`, verified against pinned `lean-sys` by `gen_orb_kernel_unboxed.py`),
 and the compiler helper `lp_orb_x2dspec_Orb_Kernel_accessStep___redArg` (`model: null`).
-Those 128 public exports covered all public Orb/LeanSys exports at that head (187 on
+Those 128 public exports covered all public Orb/LeanSys exports at that head (191 on
 current `master`); the helper
 remains inventoried separately rather than being counted as an extra public gate.
 Shadow observations now count missing host HOME poststates as unobserved,

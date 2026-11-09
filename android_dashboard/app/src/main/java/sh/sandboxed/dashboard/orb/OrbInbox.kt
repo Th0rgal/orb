@@ -891,10 +891,10 @@ object OrbInboxModel {
     }
 
     fun isSubagent(mission: OrbRow): Boolean {
-        val tags = OrbJSON.strList(mission.raw, "tags")
-        if (tags.any { it == "superseded" || it.startsWith("superseded-by:") }) return true
+        if (mission.hasTypedSuperseded()) return true
         if (OrbInboxSettings.includeAutonomous) return false
         if (!OrbMissionTree.parentId(mission).isNullOrEmpty()) return true
+        val tags = OrbJSON.strList(mission.raw, "tags")
         if (mission.str("origin") == "hermes" || tags.any { it.startsWith("worker-dispatch:") || it == "origin:hermes" || it == "origin:hermes-assistant" }) return true
         return Regex("^you are a sub-?agent\\b", RegexOption.IGNORE_CASE).containsMatchIn((mission.str("title", "name") ?: "").trim())
     }
@@ -945,8 +945,7 @@ object OrbInboxModel {
             if (MissionState.of(state)?.live == true) continue
 
             val rawSlug = OrbMissionTree.effectiveProject(mission).trim().lowercase()
-            val tags = OrbJSON.strList(mission.raw, "tags")
-            val isClient = tags.contains("placement:client")
+            val isClient = mission.isClientPlacement()
             if (activeProjects.isNotEmpty()) {
                 if (rawSlug.isEmpty() && !isClient) continue
                 val slug = if (rawSlug.isEmpty()) "default" else rawSlug
@@ -1070,8 +1069,7 @@ object OrbInboxModel {
             val st = (m.str("status", "state") ?: "").lowercase()
             if (MissionState.of(st)?.live != true || isSubagent(m) || OrbMissionTree.isArchived(m)) return@filter false
             val rawSlug = (m.str("project", "project_slug") ?: "").trim().lowercase()
-            val tags = OrbJSON.strList(m.raw, "tags")
-            val isClient = tags.contains("placement:client")
+            val isClient = m.isClientPlacement()
             if (activeProjects.isNotEmpty()) {
                 if (rawSlug.isEmpty() && !isClient) return@filter false
                 val slug = if (rawSlug.isEmpty()) "default" else rawSlug

@@ -4,7 +4,7 @@ import { isQueued, WORKING_STATUSES } from "./missionStatus";
 import { swallow } from "./log";
 import {deliverAssistantText,flushClientLink} from './clientLink';
 import {prepareBtwContext,type ConversationCursor} from './btwContext';
-import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion,isTransientNetworkError} from './api';
+import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion,hasTypedSuperseded,isClientPlacement,isTransientNetworkError,supersededSuccessorId} from './api';
 import {note} from './diagnostics';
 import {btwConfig} from './btwSettings';
 import {reconcileSavedSideQuestion,resetSideQuestionStorageForTest,sideQuestionKey,BTW_HISTORY_LIMIT} from './sideQuestionStorage';
@@ -166,10 +166,10 @@ async function currentSide(parent:string,s:BtwSession,signal?:AbortSignal,versio
  const check=()=>{if(version!==connectionVersion())throw new Error('Connection changed.');if(signal?.aborted)throw new Error('Side question cancelled.');};
  check();
  let mission=await getMission(s.id,{includeHistory:false});check();
- for(let hop=0;hop<16;hop++){
-  seen.add(mission.id);
-  const next=mission.tags?.find(tag=>tag.startsWith('superseded_by:'))?.slice('superseded_by:'.length);
-  if(!next){
+  for(let hop=0;hop<16;hop++){
+   seen.add(mission.id);
+   const next=supersededSuccessorId(mission);
+   if(!next){
    if(mission.id!==s.id){syncSessionCursors(parent,s);s.id=mission.id;s.baseline=0;delete s.afterSequence;delete s.brokenSession;s.active=ACTIVE.includes(mission.status);save(parent,s);}
    return mission;
   }
@@ -454,7 +454,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   // says placement:client after a transfer, so read Core's record directly.
   const source=await getMission(parent,{coreOnly:true,includeHistory:false}),config=btwConfig();
   const machine=source.machine_transfer?.destination;
-  let local=machine?machine.kind==='client':source.tags?.includes('placement:client')??false;
+  let local=machine?machine.kind==='client':isClientPlacement(source);
   const node=machine?.kind==='node'?machine.id:machine?.kind==='core'?undefined:missionAssignedNode(source);
   const destination=local?'local':node??'core';
   const placement=JSON.stringify([local,node,source.working_directory,source.workspace_id]);
@@ -507,7 +507,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
    });
    // Core owns placement. A stale local view must not launch a native run for
    // a side session Core already started elsewhere.
-   if(local&&!m.tags?.includes('placement:client'))local=false;
+   if(local&&!isClientPlacement(m))local=false;
    s={id:m.id,question,harness:config.harness,model:config.model,local,placement,active:!local,baseline:0,turnCount:1,startedAt:m.created_at||new Date().toISOString()};save(parent,s);localStorage.removeItem(attemptKey);accepted=true;
   };
   if(!reuse)await createSide();
@@ -623,7 +623,7 @@ export async function queueBtwFollowUp(
  ]);
  const config=btwConfig();
  const machine=source.machine_transfer?.destination;
- const local=s.local||(machine?machine.kind==='client':source.tags?.includes('placement:client')??false);
+ const local=s.local||(machine?machine.kind==='client':isClientPlacement(source));
  const node=machine?.kind==='node'?machine.id:machine?.kind==='core'?undefined:missionAssignedNode(source);
  const destination=local?'local':node??'core';
  const [uploadedPaths] = await Promise.all([
@@ -771,7 +771,7 @@ function parseBtwThread(m:Mission,events:StoredEvent[]):Omit<ParsedBtwThread,'st
  }
  let active:BtwSession|undefined;
  if(ACTIVE.includes(m.status)&&curQuestion){
-  const local=m.tags?.includes('placement:client')??false;
+  const local=isClientPlacement(m);
   const startedAt=curAt||(!turns.length?m.created_at||undefined:undefined);
   active={id:m.id,question:curQuestion,harness:m.backend||'opencode',model:m.model_override||'builtin/smart',local,active:true,baseline:0,turnCount:turns.length+1,lastSequence,...(startedAt?{startedAt}:{})};
  }else if(curQuestion){
@@ -800,7 +800,7 @@ export async function reconnectBtwSession(parent:string,sideId:string):Promise<B
  }
  const isActive=ACTIVE.includes(mission.status);
  if(!startedAt&&isActive&&!sawPriorReply&&mission.created_at)startedAt=mission.created_at;
- const local=mission.tags?.includes('placement:client')??false;
+ const local=isClientPlacement(mission);
  const session:BtwSession={
   id:mission.id,
   question:question||'Side question',
@@ -972,7 +972,8 @@ function makeBtwMissionMeta(
       history: [],
       backend: session?.harness || "opencode",
       model_override: session?.model || "builtin/smart",
-      tags: [`btw-parent:${parent}`, ...(session?.local ? ["placement:client"] : [])],
+      placement_kind: session?.local ? "client" : undefined,
+      tags: [`btw-parent:${parent}`],
       created_at: session?.startedAt || now,
       updated_at: now,
      }),
@@ -1613,7 +1614,7 @@ export async function reconcileBtwServerHistory(
    let direct = await getMission(knownSession.id, { coreOnly: true, includeHistory: false });
    const visited = new Set<string>();
    for (let hop = 0; hop < 16; hop++) {
-    const nextId = direct?.tags?.find(tag => tag.startsWith('superseded_by:'))?.slice('superseded_by:'.length);
+    const nextId = supersededSuccessorId(direct);
     if (!nextId || visited.has(nextId)) break;
     visited.add(direct.id);
     if (seen.has(nextId)) {
@@ -1628,7 +1629,7 @@ export async function reconcileBtwServerHistory(
     !seen.has(direct.id) &&
     Array.isArray(direct.tags) &&
     chain.some(id => direct.tags!.includes(`btw-parent:${id}`)) &&
-    !direct.tags.includes('superseded')
+    !hasTypedSuperseded(direct)
    ) {
     seen.add(direct.id);
     rows.push(direct);
@@ -1670,7 +1671,7 @@ export async function reconcileBtwServerHistory(
    typeof m.id === 'string' &&
    Array.isArray(m.tags) &&
    chain.some(id => m.tags!.includes(`btw-parent:${id}`)) &&
-   !m.tags.includes('superseded'),
+   !hasTypedSuperseded(m),
  );
  if (!valid.length) return finalize({ history: localHistory });
  const sorted = [...valid].sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
@@ -1766,7 +1767,7 @@ export async function reconcileBtwServerHistory(
  ) {
   save(parent, existing?.id === latestActive.id ? syncSessionCursors(parent, { ...existing, ...latestActive }) : latestActive);
  } else if (latest && RESUMABLE.includes(latest.status) && !existing?.active) {
-  const local = latest.tags?.includes('placement:client') ?? false;
+  const local = isClientPlacement(latest);
   const latestParsed = byId.get(latest.id);
   const turnCount = latestParsed?.turns.length ?? existing?.turnCount;
   const lastSequence = latestParsed?.lastSequence ?? existing?.lastSequence;

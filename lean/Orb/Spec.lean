@@ -3702,18 +3702,22 @@ def nodeGcMetaStepSpec : MetaStepSpec UInt8 NodeGcCheck UInt8 where
   }
   cost := {
     step := nodeGcMachineStep
-    cpuFuel := fun _ _ => 1
+    cpuFuel := fun s g => 1 + ((nodeGcMachineStep s g).2).length
     inputBytes := fun _ => 56
-    outputBytes := fun _ _ => 8
-    c0 := 1
+    outputBytes := fun s g => 8 + 4 * ((nodeGcMachineStep s g).2).length
+    c0 := 2
     c1 := 1
     maxEffects := 1
-    maxOutBytes := 8
-    fuel_bound := fun _ _ => by omega
+    maxOutBytes := 12
+    fuel_bound := fun s g => by
+      dsimp [nodeGcMachineStep]
+      split <;> simp
     eff_bound := fun s g => by
       dsimp [nodeGcMachineStep]
       split <;> simp
-    out_bound := fun _ _ => by omega
+    out_bound := fun s g => by
+      dsimp [nodeGcMachineStep]
+      split <;> simp
   }
   sameStep := ⟨rfl, rfl⟩
 

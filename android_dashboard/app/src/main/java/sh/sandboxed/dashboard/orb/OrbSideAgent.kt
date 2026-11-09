@@ -293,7 +293,7 @@ object OrbSideAgent {
         val tag = "btw-parent:$parentId"
         return rows.filter { m ->
             val tags = OrbJSON.strList(m.raw, "tags")
-            m.id.isNotEmpty() && tag in tags && "superseded" !in tags
+            m.id.isNotEmpty() && tag in tags && !m.hasTypedSuperseded()
         }.sortedBy { it.str("created_at").orEmpty() }
     }
 
@@ -865,9 +865,7 @@ fun OrbSideAgentSheet(
         }
         val latest = OrbSideAgent.latestThread(matching) ?: matching.last()
         var target = latest
-        val superseded = OrbJSON.strList(target.raw, "tags")
-            .firstOrNull { it.startsWith("superseded_by:") }
-            ?.removePrefix("superseded_by:")
+        val superseded = target.supersededSuccessorId()
         try {
             val detailId = if (!superseded.isNullOrEmpty() && superseded != target.id) superseded else target.id
             target = OrbRow(detailId, core.fetchDict("/api/control/missions/${core.encodeComponent(detailId)}?include_history=false"))

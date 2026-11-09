@@ -1066,6 +1066,9 @@ export interface Mission {
   project?: string | null;
   folder?: string;
   placement_revision?: number;
+  authority_mode?: string | null;
+  placement_kind?: string | null;
+  superseded_by_mission_id?: string | null;
   track?: string | null;
   github_pr?: string | null;
   tags?: string[];
@@ -1084,6 +1087,19 @@ export interface Mission {
 export function isMissionParticipant(mission?: Pick<Mission, "viewer_role"> | null): boolean {
   return mission?.viewer_role === "participant";
 }
+
+import {
+  hasTypedSuperseded,
+  isClientPlacement,
+  isMissionWriter,
+  supersededSuccessorId,
+} from "./missionTree";
+export {
+  hasTypedSuperseded,
+  isClientPlacement,
+  isMissionWriter,
+  supersededSuccessorId,
+};
 
 export interface CreateMissionBody {
   cloud?: import("./cloudAgentApi").CloudSelection;
@@ -2140,7 +2156,7 @@ function remoteReplacementBody(mission: Mission, text: string, attachments: Miss
     folder: normalizeMissionFolder(mission.folder) || undefined,
     track: mission.track ?? undefined,
     github_pr: mission.github_pr ?? undefined,
-    writer: mission.tags?.includes("pr-writer") ?? false,
+    writer: isMissionWriter(mission),
     // The nil ID is the server's bookkeeping host workspace, not this node's
     // worktree. Passing it explicitly invokes occupancy checks against unrelated
     // local/client missions. Keep genuine dedicated workspace bindings only.
@@ -2255,7 +2271,7 @@ export async function sendMissionMessage(
     ? { project: mission.project ?? null, track: mission.track, github_pr: mission.github_pr ?? null }
     : undefined;
   let cyberAssertion: { cyber_access: string; cyber_revision: string } | undefined;
-  if (mission.backend === "codex" && !mission.tags?.includes("placement:client") && !isWorking(mission.status)) {
+  if (mission.backend === "codex" && !isClientPlacement(mission) && !isWorking(mission.status)) {
     const sel = await api<{ mode: string; revision: string }>(`/api/control/missions/${encodeURIComponent(id)}/cyber`, { cache: "no-store" });
     if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
     cyberAssertion = { cyber_access: sel.mode, cyber_revision: sel.revision };

@@ -229,13 +229,15 @@ final class OrbTurnSummaryTests: XCTestCase {
     }
 
     func testBtwBindsToTheThreadWithLatestActivityAndOrdersTurnsByTime() {
-        func thread(_ id: String, created: String, activity: String, tags: [String] = ["btw-parent:p"]) -> OrbJSON {
-            .object(["id": .string(id), "created_at": .string(created), "updated_at": .string(created), "last_activity_at": .string(activity), "tags": .array(tags.map { .string($0) })])
+        func thread(_ id: String, created: String, activity: String, tags: [String] = ["btw-parent:p"], supersededBy: String? = nil) -> OrbJSON {
+            var dict: [String: OrbJSON] = ["id": .string(id), "created_at": .string(created), "updated_at": .string(created), "last_activity_at": .string(activity), "tags": .array(tags.map { .string($0) })]
+            if let supersededBy { dict["superseded_by_mission_id"] = .string(supersededBy) }
+            return .object(dict)
         }
         let rows = [
             thread("new", created: "2026-10-20T09:00:00Z", activity: "2026-10-20T09:10:00Z"),
             thread("old", created: "2026-10-20T08:00:00Z", activity: "2026-10-20T11:00:00Z"),
-            thread("gone", created: "2026-10-20T07:00:00Z", activity: "2026-10-20T12:00:00Z", tags: ["btw-parent:p", "superseded"]),
+            thread("gone", created: "2026-10-20T07:00:00Z", activity: "2026-10-20T12:00:00Z", tags: ["btw-parent:p", "superseded"], supersededBy: "new"),
             thread("other", created: "2026-10-20T07:00:00Z", activity: "2026-10-20T12:00:00Z", tags: ["btw-parent:q"]),
         ]
         let threads = OrbBtwThreads.threads(rows, parent: "p")

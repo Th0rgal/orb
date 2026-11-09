@@ -196,7 +196,10 @@ test("long-dead open missions beyond the page stay hidden; live and recent ones 
   const age = (r: Row) => now - Date.parse(String(r.updated_at));
   const stale = open.filter(r => !live.has(String(r.status)) && age(r) > week);
   // Side agents (btw) and superseded attempts are never sidebar rows.
-  const hidden = (r: Row) => (r.tags as string[]).some(t => t.startsWith("btw-parent:") || t.startsWith("superseded"));
+  const hidden = (r: Row) =>
+    r.status === "superseded" ||
+    Boolean((r as { superseded_by_mission_id?: string | null }).superseded_by_mission_id) ||
+    (r.tags as string[]).some(t => t.startsWith("btw-parent:") || t.startsWith("superseded"));
   const shownRoots = open.filter(r => !r.parent_mission_id && !hidden(r) && (live.has(String(r.status)) || age(r) <= week));
   const children = open.filter(r => r.parent_mission_id);
   const core = new Core();

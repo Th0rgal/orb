@@ -59,7 +59,7 @@ describe("Inbox creation scope", () => {
     const sections = buildInboxSections(rows, projects, () => question, undefined, Date.now(), undefined, scope);
     expect([...sections.needsYou, ...sections.ready]).toHaveLength(rows.length);
     expect(countUnreadInboxMissions(rows, projects, () => question, undefined, undefined, scope)).toBe(rows.length);
-    expect(classifyInboxMission(mission("old", { tags: ["superseded"] }), undefined, scope)).toBe("hidden");
+    expect(classifyInboxMission(mission("old", { superseded_by_mission_id: "new", tags: ["superseded"] }), undefined, scope)).toBe("hidden");
   });
 
   it("keeps a manual agent visible after an automatic watchdog message", () => {

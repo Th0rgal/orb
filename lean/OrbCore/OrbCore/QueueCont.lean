@@ -1015,7 +1015,8 @@ def beginMissionRun
     let .ok rs := rows | return .error "begin_run_select_failed"
     if rs.size ≤ 1 then return .error "mission_not_found"
     let placement := cell (rs[1]!) 0
-    if placement != "managed" && placement != "client" && placement != "local" && placement != "remote" then
+    if placement != "managed" && placement != "managed_vm" && !(placement.startsWith "managed-") &&
+       placement != "client" && placement != "local" && placement != "remote" && placement != "remote_node" then
       return .error s!"invalid_placement_kind:{placement}"
     let curGen := cellNat (rs[1]!) 1 |>.toUInt64
     let owner := cellNat (rs[1]!) 2 |>.toUInt64

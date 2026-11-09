@@ -1,6 +1,6 @@
 import { missionParent } from "./missionTree";
 import { compactAgo } from "./time";
-import { isBtwMission, type Mission, type ProjectSummary } from "./api";
+import { hasTypedSuperseded, isBtwMission, isClientPlacement, type Mission, type ProjectSummary } from "./api";
 import { backgroundWake as parseBackgroundWake } from "./backgroundWake";
 import { DEFAULT_PROJECT } from "./defaultProject";
 import { displayTitle } from "./goal";
@@ -300,7 +300,7 @@ export function extractInboxInteraction(
   if (HIDDEN_STATUSES.has(mission.status) || mission.status === "completed" || mission.status === "failed" || mission.status === "not_feasible") {
     return undefined;
   }
-  const clientPlaced = Boolean(mission.tags?.includes("placement:client"));
+  const clientPlaced = isClientPlacement(mission);
   const unresolvedTool = items
     ?.slice()
     .reverse()
@@ -419,16 +419,13 @@ export function extractInboxInteraction(
 
 /** Child worker missions belong nested inside their parent orchestrator in the sidebar, not as standalone Inbox items. */
 export function isSubagentMission(
-  mission: Pick<Mission, "title" | "parent_mission_id" | "callback_parent_mission_id" | "tags">,
+  mission: Pick<Mission, "title" | "parent_mission_id" | "callback_parent_mission_id" | "tags" | "status" | "superseded_by_mission_id">,
 ): boolean {
   if (missionParent(mission)) return true;
+  if (hasTypedSuperseded(mission)) return true;
   if (
     mission.tags?.some(
-      (tag) =>
-        tag.startsWith("worker-dispatch:") ||
-        tag === "superseded" ||
-        tag.startsWith("superseded_by:") ||
-        tag.startsWith("superseded-by:"),
+      (tag) => tag.startsWith("worker-dispatch:"),
     )
   ) {
     return true;
@@ -455,14 +452,7 @@ export function isAutonomousInboxMission(mission: Mission): boolean {
 
 function isInInboxScope(mission: Mission, scope: InboxScope): boolean {
   // Superseded attempts stay hidden even when showing autonomous agents.
-  if (
-    mission.tags?.some(
-      (tag) =>
-        tag === "superseded" ||
-        tag.startsWith("superseded_by:") ||
-        tag.startsWith("superseded-by:"),
-    )
-  ) {
+  if (hasTypedSuperseded(mission)) {
     return false;
   }
   return Boolean(scope.includeAutonomous) || !isAutonomousInboxMission(mission);
@@ -650,7 +640,7 @@ function resolveBadgeAndTone(
 }
 
 function resolveMachine(mission: Mission): string | undefined {
-  if (mission.tags?.includes("placement:client")) return "This computer";
+  if (isClientPlacement(mission)) return "This computer";
   if (mission.backend?.startsWith("cloud_")) {
     return (
       {
@@ -1603,7 +1593,7 @@ export function listUnreadInboxCandidates(
   for (const m of missions) {
     if (!scope.includeAutonomous) break;
     if (isBtwMission(m, byId) || HIDDEN_STATUSES.has(m.status || "")) continue;
-    if (m.tags?.some((t) => t === "superseded" || t.startsWith("superseded_by:") || t.startsWith("superseded-by:"))) continue;
+    if (hasTypedSuperseded(m)) continue;
     const parentId = missionParent(m);
     if (!parentId) continue;
     if (
@@ -1620,7 +1610,7 @@ export function listUnreadInboxCandidates(
     const rawSlug = mission.project?.trim();
     const observed = getInteraction?.(mission.id);
     if (liveSlugs) {
-      if (!rawSlug && !mission.tags?.includes("placement:client") && !observed) {
+      if (!rawSlug && !isClientPlacement(mission) && !observed) {
         continue;
       }
       const slug = rawSlug || DEFAULT_PROJECT.slug;
@@ -1746,7 +1736,7 @@ export function buildInboxSections(
   const childrenByParent = new Map<string, InboxChildSummary>();
   for (const m of missions) {
     if (isBtwMission(m, byId) || HIDDEN_STATUSES.has(m.status || "")) continue;
-    if (m.tags?.some((t) => t === "superseded" || t.startsWith("superseded_by:") || t.startsWith("superseded-by:"))) continue;
+    if (hasTypedSuperseded(m)) continue;
     const parentId = missionParent(m);
     if (!parentId) continue;
     let group = childrenByParent.get(parentId);
@@ -1782,7 +1772,7 @@ export function buildInboxSections(
     const observed = getInteraction?.(mission.id);
     if (liveSlugs) {
       // Exclude unassigned probe missions that don't belong to any project unless they are client-placed or asking a live question.
-      if (!rawSlug && !mission.tags?.includes("placement:client") && !observed) {
+      if (!rawSlug && !isClientPlacement(mission) && !observed) {
         continue;
       }
       const slug = rawSlug || DEFAULT_PROJECT.slug;

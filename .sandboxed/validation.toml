@@ -5,7 +5,7 @@ profile = "state-machines-r0-r8"
 [[gates]]
 id = "state-inventory"
 description = "Verify SM-01..SM-27 and G-ORB-1..G-ORB-8 obligation inventory and validation DAG"
-command = ["python3", "scripts/check_state_inventory.py"]
+command = ["python3", "scripts/check_state_inventory.py", "--require-all-completed"]
 required = true
 mode = "incremental"
 reuse = true

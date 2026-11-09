@@ -1,6 +1,6 @@
 /-
   OrbCore.HostTests: Pure-Lean Host Evidence Test Suite (`0 import Lean`, `0 sorryAx`)
-   verifying all 85 host-evidence test invariants over `OrbCore.HostObservers` and `OrbCore.ConformanceRunner`
+   verifying all 101 host-evidence test invariants over `OrbCore.HostObservers` and `OrbCore.ConformanceRunner`
   with concrete expected C-ABI outputs on distinct admit vs. reject witness vectors (zero reflexive tautologies).
 -/
 import OrbCore.ConformanceRunner
@@ -683,6 +683,107 @@ def codex_goal_skills_worktree_and_repo_diff_kernel_steps_roundtrip (_ : Unit :=
   (evaluate_host_worktree_decision 0 != evaluate_host_worktree_decision 1) &&
   (evaluate_host_repo_diff_budget 0 != evaluate_host_repo_diff_budget 1)
 
+def r8_model_account_admit_rejects_unknown_under_eap_and_ineligible (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_model_account_admit" #[1, 0, 2, 1] == some 1) &&
+  (callExportU64? "orb_model_account_admit" #[1, 0, 1, 1] == some 0) &&
+  (callExportU64? "orb_model_account_admit" #[1, 0, 1, 0] == some 1) &&
+  (callExportU64? "orb_model_account_admit" #[0, 0, 2, 0] == some 0) &&
+  (observe_model_account_admit_shadow 0 != observe_model_account_admit_shadow 1)
+
+def r8_model_account_score_orders_entitled_unspent_before_unknown_and_inadmissible (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_model_account_score" #[1, 0, 2, 1, 1, 3, 0] == some 3) &&
+  (callExportU64? "orb_model_account_score" #[1, 0, 1, 0, 1, 3, 0] == some 1125899906842627) &&
+  (callExportU64? "orb_model_account_score" #[1, 0, 1, 1, 1, 3, 0] == some 18446744073709551615) &&
+  (observe_model_account_score_shadow 0 != observe_model_account_score_shadow 1)
+
+def r8_memory_tool_gate_blocks_managed_nodes_bunker_external_and_mutations (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_memory_tool_gate" #[0, 0, 0, 0, 0, 1, 0, 0, 10, 20, 512, 2048] == some 1) &&
+  (callExportU64? "orb_memory_tool_gate" #[0, 0, 0, 0, 1, 1, 1, 0, 10, 20, 512, 2048] == some 0) &&
+  (callExportU64? "orb_memory_tool_gate" #[4, 2, 0, 0, 0, 1, 1, 0, 10, 20, 512, 2048] == some 0) &&
+  (callExportU64? "orb_memory_tool_gate" #[0, 2, 1, 1, 0, 0, 1, 0, 10, 20, 512, 2048] == some 0) &&
+  (observe_memory_tool_gate_shadow 0 != observe_memory_tool_gate_shadow 1)
+
+def r8_upload_cleanup_gate_retains_live_shared_library_archive_until_gc_expiry (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_upload_cleanup_gate" #[1, 0, 0] == some 1) &&
+  (callExportU64? "orb_upload_cleanup_gate" #[1, 1, 0] == some 0) &&
+  (callExportU64? "orb_upload_cleanup_gate" #[1, 1, 1] == some 1) &&
+  (callExportU64? "orb_upload_cleanup_gate" #[0, 0, 1] == some 0) &&
+  (observe_upload_cleanup_gate_shadow 0 != observe_upload_cleanup_gate_shadow 1)
+
+def r8_proxy_exhaustion_partitions_billing_overflow_auth_server_and_quota (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_proxy_exhaustion_step" #[0, 0, 0, 0, 0, 0] == some 1) &&
+  (callExportU64? "orb_proxy_exhaustion_step" #[0, 1, 0, 0, 0, 0] == some 4) &&
+  (callExportU64? "orb_proxy_exhaustion_step" #[0, 0, 1, 0, 0, 0] == some 5) &&
+  (callExportU64? "orb_proxy_exhaustion_step" #[2, 0, 0, 1, 0, 0] == some 7) &&
+  (observe_proxy_exhaustion_shadow 0 != observe_proxy_exhaustion_shadow 1)
+
+def r8_composer_default_step_distinguishes_unpinned_paloma_from_pinned_workspace (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_composer_default_step" #[1, 0, 1, 1] == some 0) &&
+  (callExportU64? "orb_composer_default_step" #[0, 0, 1, 1] == some 1) &&
+  (callExportU64? "orb_composer_default_step" #[0, 1, 1, 1] == some 2) &&
+  (callExportU64? "orb_composer_default_step" #[0, 1, 0, 0] == some 3) &&
+  (observe_composer_default_shadow 0 != observe_composer_default_shadow 1)
+
+def r8_cloud_handoff_step_isolates_cloud_workspace_and_blocks_cloud_side_question (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_cloud_handoff_step" #[1, 0, 1, 1, 1] == some 16777473) &&
+  (callExportU64? "orb_cloud_handoff_step" #[0, 0, 1, 0, 1] == some 65537) &&
+  (callExportU64? "orb_cloud_handoff_step" #[1, 1, 1, 1, 1] == some 0) &&
+  (observe_cloud_handoff_shadow 0 != observe_cloud_handoff_shadow 1)
+
+def r8_fast_poll_delay_ms_ramps_from_burst_to_steady_and_clamps_backoff (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_fast_poll_delay_ms" #[0, 1000, 0] == some 80) &&
+  (callExportU64? "orb_fast_poll_delay_ms" #[0, 8000, 0] == some 200) &&
+  (callExportU64? "orb_fast_poll_delay_ms" #[1, 1000, 0] == some 500) &&
+  (callExportU64? "orb_fast_poll_delay_ms" #[0, 1000, 4] == some 5000) &&
+  (observe_fast_poll_delay_shadow 0 != observe_fast_poll_delay_shadow 1)
+
+def r8_mcp_preflight_cache_gate_enforces_identity_contract_session_and_ttl (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_mcp_preflight_cache_gate" #[1, 1, 1, 1, 30, 120] == some 1) &&
+  (callExportU64? "orb_mcp_preflight_cache_gate" #[1, 1, 1, 1, 150, 120] == some 0) &&
+  (callExportU64? "orb_mcp_preflight_cache_gate" #[1, 0, 1, 1, 30, 120] == some 0) &&
+  (callExportU64? "orb_mcp_preflight_cache_gate" #[1, 1, 1, 1, 30, 301] == some 0) &&
+  (observe_mcp_preflight_cache_shadow 0 != observe_mcp_preflight_cache_shadow 1)
+
+def r8_sidebar_move_target_admit_rejects_folder_cycles_and_same_container_noop (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_sidebar_move_target_admit" #[0, 0, 1, 2, 0, 1, 3] == some 1) &&
+  (callExportU64? "orb_sidebar_move_target_admit" #[0, 0, 1, 2, 0, 1, 2] == some 0) &&
+  (callExportU64? "orb_sidebar_move_target_admit" #[1, 1, 1, 2, 0, 1, 3] == some 0) &&
+  (observe_sidebar_move_target_shadow 0 != observe_sidebar_move_target_shadow 1)
+
+def r8_sidebar_drag_step_arms_long_press_picker_and_cancels_unadmitted_drop (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_sidebar_drag_step" #[1, 1, 1, 0, 0, 4, 300, 0, 0, 0, 100, 100] == some 258) &&
+  (callExportU64? "orb_sidebar_drag_step" #[2, 4, 1, 0, 0, 4, 300, 0, 0, 0, 100, 100] == some 66816) &&
+  (callExportU64? "orb_sidebar_drag_step" #[3, 4, 1, 0, 1, 64, 300, 0, 5, 0, 100, 100] == some 66560) &&
+  (callExportU64? "orb_sidebar_drag_step" #[3, 4, 1, 0, 0, 64, 300, 0, 5, 0, 100, 100] == some 67072) &&
+  (observe_sidebar_drag_shadow 0 != observe_sidebar_drag_shadow 1)
+
+def r8_followup_queue_step_retires_strictly_after_posted_seq_and_blocks_duplicates (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_followup_queue_step" #[3, 5, 5, 5, 42, 42, 0, 10, 11, 0, 0, 1, 0] == some 21474837761) &&
+  (callExportU64? "orb_followup_queue_step" #[3, 5, 5, 5, 42, 42, 0, 10, 10, 0, 0, 1, 0] == some 21474836996) &&
+  (callExportU64? "orb_followup_queue_step" #[2, 5, 5, 5, 42, 42, 0, 10, 10, 0, 0, 0, 0] == some 21474836995) &&
+  (observe_followup_queue_shadow 0 != observe_followup_queue_shadow 1)
+
+def r8_transport_epoch_step_falls_back_after_ever_ready_and_latches_404_until_build_change (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_transport_epoch_step" #[0, 1, 1, 0, 1, 1, 1, 2, 3, 0, 77, 1000, 5000] == some 330712683777) &&
+  (callExportU64? "orb_transport_epoch_step" #[0, 2, 1, 0, 1, 1, 1, 0, 3, 404, 77, 1000, 5000] == some 330712684289) &&
+  (callExportU64? "orb_transport_epoch_step" #[1, 4, 1, 1, 1, 1, 1, 3, 3, 0, 77, 1000, 5000] == some 330712488194) &&
+  (observe_transport_epoch_shadow 0 != observe_transport_epoch_shadow 1)
+
+def r8_stream_open_tail_cap_step_bounds_unclosed_fence_tail_and_rejects_zero_cap (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_stream_open_tail_cap_step" #[1000, 0, 0, 5000, 0, 4096, 1] == some 3882650437377) &&
+  (callExportU64? "orb_stream_open_tail_cap_step" #[1000, 0, 0, 5000, 0, 0, 1] == some 0) &&
+  (observe_stream_open_tail_cap_shadow 0 != observe_stream_open_tail_cap_shadow 1)
+
+def r8_rtt_ewma_step_initializes_cold_start_and_smooths_samples (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_rtt_ewma_step" #[0, 0, 200] == some 429496729800) &&
+  (callExportU64? "orb_rtt_ewma_step" #[200, 100, 600] == some 751619277050) &&
+  (observe_rtt_ewma_shadow 0 != observe_rtt_ewma_shadow 1)
+
+def r8_client_link_budget_step_preempts_p2_under_p0_or_degraded_rtt (_ : Unit := ()) : Bool :=
+  (callExportU64? "orb_client_link_budget_step" #[100, 50, 0, 0, 0] == some 1688884220526593030) &&
+  (callExportU64? "orb_client_link_budget_step" #[1500, 300, 2, 1, 1] == some 1688884220703539202) &&
+  (observe_client_link_budget_shadow 0 != observe_client_link_budget_shadow 1)
+
 def runAllHostTests (emitLogPath? : Option String := none) : IO Bool := do
   let cases : Array (String × Bool) := #[
     ("shadow_state_observation_detects_independent_host_poststate_and_effect_divergences", shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ()),
@@ -769,7 +870,23 @@ def runAllHostTests (emitLogPath? : Option String := none) : IO Bool := do
     ("wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts", wave4_hot_path_scanners_pacer_and_confinement_cabi_verdicts ()),
     ("r2a_epoch_fence_effect_outbox_and_crash_boundary_diverge_on_stale_and_corrupt_inputs", r2a_epoch_fence_effect_outbox_and_crash_boundary_diverge_on_stale_and_corrupt_inputs ()),
     ("remote_replay_rollback_and_stranded_pending_gates_diverge_on_enospc_and_archive", remote_replay_rollback_and_stranded_pending_gates_diverge_on_enospc_and_archive ()),
-    ("codex_goal_skills_worktree_and_repo_diff_kernel_steps_roundtrip", codex_goal_skills_worktree_and_repo_diff_kernel_steps_roundtrip ())
+    ("codex_goal_skills_worktree_and_repo_diff_kernel_steps_roundtrip", codex_goal_skills_worktree_and_repo_diff_kernel_steps_roundtrip ()),
+    ("r8_model_account_admit_rejects_unknown_under_eap_and_ineligible", r8_model_account_admit_rejects_unknown_under_eap_and_ineligible ()),
+    ("r8_model_account_score_orders_entitled_unspent_before_unknown_and_inadmissible", r8_model_account_score_orders_entitled_unspent_before_unknown_and_inadmissible ()),
+    ("r8_memory_tool_gate_blocks_managed_nodes_bunker_external_and_mutations", r8_memory_tool_gate_blocks_managed_nodes_bunker_external_and_mutations ()),
+    ("r8_upload_cleanup_gate_retains_live_shared_library_archive_until_gc_expiry", r8_upload_cleanup_gate_retains_live_shared_library_archive_until_gc_expiry ()),
+    ("r8_proxy_exhaustion_partitions_billing_overflow_auth_server_and_quota", r8_proxy_exhaustion_partitions_billing_overflow_auth_server_and_quota ()),
+    ("r8_composer_default_step_distinguishes_unpinned_paloma_from_pinned_workspace", r8_composer_default_step_distinguishes_unpinned_paloma_from_pinned_workspace ()),
+    ("r8_cloud_handoff_step_isolates_cloud_workspace_and_blocks_cloud_side_question", r8_cloud_handoff_step_isolates_cloud_workspace_and_blocks_cloud_side_question ()),
+    ("r8_fast_poll_delay_ms_ramps_from_burst_to_steady_and_clamps_backoff", r8_fast_poll_delay_ms_ramps_from_burst_to_steady_and_clamps_backoff ()),
+    ("r8_mcp_preflight_cache_gate_enforces_identity_contract_session_and_ttl", r8_mcp_preflight_cache_gate_enforces_identity_contract_session_and_ttl ()),
+    ("r8_sidebar_move_target_admit_rejects_folder_cycles_and_same_container_noop", r8_sidebar_move_target_admit_rejects_folder_cycles_and_same_container_noop ()),
+    ("r8_sidebar_drag_step_arms_long_press_picker_and_cancels_unadmitted_drop", r8_sidebar_drag_step_arms_long_press_picker_and_cancels_unadmitted_drop ()),
+    ("r8_followup_queue_step_retires_strictly_after_posted_seq_and_blocks_duplicates", r8_followup_queue_step_retires_strictly_after_posted_seq_and_blocks_duplicates ()),
+    ("r8_transport_epoch_step_falls_back_after_ever_ready_and_latches_404_until_build_change", r8_transport_epoch_step_falls_back_after_ever_ready_and_latches_404_until_build_change ()),
+    ("r8_stream_open_tail_cap_step_bounds_unclosed_fence_tail_and_rejects_zero_cap", r8_stream_open_tail_cap_step_bounds_unclosed_fence_tail_and_rejects_zero_cap ()),
+    ("r8_rtt_ewma_step_initializes_cold_start_and_smooths_samples", r8_rtt_ewma_step_initializes_cold_start_and_smooths_samples ()),
+    ("r8_client_link_budget_step_preempts_p2_under_p0_or_degraded_rtt", r8_client_link_budget_step_preempts_p2_under_p0_or_degraded_rtt ())
   ]
   let mut passed : Nat := 0
   let mut failed : Nat := 0

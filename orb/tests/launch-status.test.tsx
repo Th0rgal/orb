@@ -75,7 +75,7 @@ it("shows waiting for first output instead of a silent prompt-only active missio
 });
 
 it("describes a Core restart as an interruption, not a failed native task", () => {
-  const [mission, setMission] = createSignal({ id: "native", status: "interrupted", terminal_reason: "service_restart", tags: ["placement:client"] } as Mission);
+  const [mission, setMission] = createSignal({ id: "native", status: "interrupted", terminal_reason: "service_restart", placement_kind: "client", tags: ["placement:client"] } as Mission);
   const { container } = render(() => <MissionFailure mission={mission()} />);
   expect(container.textContent).toContain("Mission interrupted");
   expect(container.textContent).toContain("does not confirm that the agent on your computer stopped");

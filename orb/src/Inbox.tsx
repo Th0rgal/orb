@@ -27,6 +27,7 @@ import {
   archiveMission,
   cancelMission,
   connectionVersion,
+  isClientPlacement,
   isConnected,
   reopenMission,
   sendMissionMessage,
@@ -844,7 +845,7 @@ export function InboxPage(p: {
     markItemAndChildrenRead(item);
     try {
       const mission = item.mission;
-      const clientPlaced = Boolean(mission.tags?.includes("placement:client"));
+      const clientPlaced = isClientPlacement(mission);
       const msgId = crypto.randomUUID();
       if (clientPlaced) {
         const sendVersion = connectionVersion();
@@ -1282,7 +1283,7 @@ export function InboxPage(p: {
 
           const uploadTarget = createMemo(() => {
             const m = currentItem().mission;
-            if (m.tags?.includes("placement:client")) return "local";
+            if (isClientPlacement(m)) return "local";
             return missionAssignedNode(m) ?? "core";
           });
           const stableProjectSlug = createMemo(() => currentItem().mission.project ?? undefined);

@@ -76,7 +76,7 @@ jobs:
             test "$lines" -le 220
           done
           python3 scripts/lint_kernel_calls.py
-          python3 scripts/check_state_inventory.py
+          python3 scripts/check_state_inventory.py --require-all-completed
 
   harness-contract:
     name: Harness Contract Tests

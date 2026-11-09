@@ -1,6 +1,6 @@
 import { missionNode, rememberNodeNames } from "./machines/nodes";
 import { Show, createMemo, createRoot, createSignal } from "solid-js";
-import type { Mission, RemoteNodeView } from "./api";
+import { isClientPlacement, type Mission, type RemoteNodeView } from "./api";
 import { Bot } from "./sidebarIcons";
 
 /** How busy each machine is, derived once from lists Orb already keeps fresh
@@ -20,7 +20,7 @@ export const recordLocalMemory = (free: number | undefined) => { setLocalMemory(
 /** `client`, `core`, or a node id: the keys both machine menus use. */
 export function missionMachine(mission: Mission): string | undefined {
   if (mission.backend?.startsWith("cloud_")) return undefined;
-  if (mission.tags?.includes("placement:client")) return "client";
+  if (isClientPlacement(mission)) return "client";
   return missionNode(mission) ?? "core";
 }
 

@@ -83,6 +83,7 @@ import {
 import { timed } from "../diagnostics";
 import {
   getMission,
+  isClientPlacement,
   isConnected,
   isMissionParticipant,
   modelPickerItems,
@@ -902,7 +903,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     });
   }));
 
-  const localMissionId=createMemo(()=>mission()?.tags?.includes("placement:client")?p.id:null);
+  const localMissionId=createMemo(()=>isClientPlacement(mission())?p.id:null);
   createEffect(() => {
     const id=localMissionId();
     if(!id)return;
@@ -921,7 +922,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const transfer = mission()?.machine_transfer;
     if (transfer) void adoptTransferredWorkspace(transfer).catch(e => setSendError(String(e)));
   });
-  const clientPlaced = () => !!mission()?.tags?.includes("placement:client");
+  const clientPlaced = () => isClientPlacement(mission());
   createEffect(() => {
     const status = mission()?.status;
     if (!p.id || !clientPlaced() || !status || !localFailure(p.id) || localRunActive(p.id)) return;

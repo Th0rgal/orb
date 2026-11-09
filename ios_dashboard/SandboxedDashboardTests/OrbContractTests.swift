@@ -197,8 +197,9 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(fresh, .string("v2"))
     }
     func testClientMissionsAreVisibleAndSideMissionsAreExcluded() throws {
-        let client = OrbRow(.object(["id": .string("local"), "tags": .array([.string("placement:client")])]))
+        let client = OrbRow(.object(["id": .string("local"), "placement_kind": .string("client"), "tags": .array([.string("placement:client")])]))
         XCTAssertTrue(client.mobile)
+        XCTAssertTrue(client.isClientPlacement)
         let btw = OrbRow(.object(["id": .string("side"), "tags": .array([.string("btw-parent:123")])]))
         XCTAssertFalse(btw.mobile)
         let cloud = OrbRow(.object(["id": .string("cloud"), "backend": .string("cloud_grok_bot")]))
@@ -840,6 +841,7 @@ final class OrbContractTests: XCTestCase {
         let supParent = OrbRow(.object([
             "id": .string("sup-p"),
             "status": .string("completed"),
+            "superseded_by_mission_id": .string("new-p"),
             "tags": .array([.string("superseded_by:new-p")])
         ]))
         let supChild = OrbRow(.object([
@@ -850,6 +852,7 @@ final class OrbContractTests: XCTestCase {
         let liveSup = OrbRow(.object([
             "id": .string("sup-live"),
             "status": .string("active"),
+            "superseded_by_mission_id": .string("new-live"),
             "tags": .array([.string("superseded")])
         ]))
         let supMap = [supParent.id: supParent, supChild.id: supChild, liveSup.id: liveSup]
