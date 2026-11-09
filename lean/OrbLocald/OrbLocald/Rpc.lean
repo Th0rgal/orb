@@ -647,6 +647,7 @@ def LocalOriginEntry.toMissionJson (e : LocalOriginEntry) : JVal :=
     ("backend", .str e.backend),
     ("working_directory", .str e.workingDirectory),
     ("delivered_prompt", .str e.deliveredPrompt),
+    ("placement_kind", .str "client"),
     ("local_sync_pending", .bool e.localSyncPending),
     ("local_run_active", .bool e.localRunActive),
     ("total_cost_cents", JVal.nat 0),

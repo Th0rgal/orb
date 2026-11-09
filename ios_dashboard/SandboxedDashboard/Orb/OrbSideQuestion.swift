@@ -216,7 +216,7 @@ enum OrbBtwThreads {
         let tag = "btw-parent:\(parent)"
         return rows.filter { m in
             let tags = m["tags"].items.map(\.text)
-            return !m["id"].text.isEmpty && tags.contains(tag) && !tags.contains("superseded")
+            return !m["id"].text.isEmpty && tags.contains(tag) && !OrbRow.hasTypedSuperseded(m)
         }
         .sorted { $0["created_at"].text < $1["created_at"].text }
     }
@@ -1332,7 +1332,7 @@ struct OrbSideQuestionSheet: View {
         do {
             if !store.loaded { try await store.refresh() }
             let parent = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(parentID))?include_history=false")
-            if parent["tags"].items.contains(where: { $0.text == "placement:client" }) {
+            if OrbRow.isClientPlacement(parent) {
                 throw OrbHTTPError(status: 409, detail: "This conversation runs on a computer. Ask side questions from Orb on that computer.")
             }
             let rotateIdle = !running && followUps.count == 0 && OrbBtwThreads.shouldRotateSession(turnCount: store.boundTurnCount, maxSequence: store.boundMaxSequence)

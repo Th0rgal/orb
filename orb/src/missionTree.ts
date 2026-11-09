@@ -5,7 +5,36 @@ import { isArchived, isWorking } from "./missionStatus";
  * version leads and earlier versions are listed inside it (`version`). */
 export interface NestedMission<M> { mission: M; children: NestedMission<M>[]; version?: boolean }
 
-type Linked = { id: string; parent_mission_id?: string | null; callback_parent_mission_id?: string | null; title?: string | null; tags?: readonly string[] | null; status?: string | null };
+export function isClientPlacement(
+  mission: { placement_kind?: string | null } | null | undefined,
+): boolean {
+  const pk = mission?.placement_kind;
+  return pk === "client" || Boolean(pk?.startsWith("client:"));
+}
+
+export function isMissionWriter(
+  mission: { authority_mode?: string | null } | null | undefined,
+): boolean {
+  return mission?.authority_mode === "writer";
+}
+
+export function supersededSuccessorId(
+  mission: { superseded_by_mission_id?: string | null } | null | undefined,
+): string | undefined {
+  const next = mission?.superseded_by_mission_id?.trim();
+  return next ? next : undefined;
+}
+
+export function hasTypedSuperseded(
+  mission: { status?: string | null; superseded_by_mission_id?: string | null } | null | undefined,
+): boolean {
+  return (
+    mission?.status?.trim().toLowerCase() === "superseded" ||
+    Boolean(supersededSuccessorId(mission))
+  );
+}
+
+type Linked = { id: string; parent_mission_id?: string | null; callback_parent_mission_id?: string | null; title?: string | null; tags?: readonly string[] | null; status?: string | null; superseded_by_mission_id?: string | null };
 type Dated = { updated_at?: string | null; created_at?: string | null };
 
 const LEGACY_FORK_TITLE = /\s·\sfork$/i;
@@ -35,7 +64,7 @@ export const versionLabel = (mission: { backend?: string | null; model_override?
 const activity = (mission: Dated) => Date.parse(mission.updated_at || mission.created_at || "") || 0;
 const createdAt = (mission: Dated) => Date.parse(mission.created_at || "") || 0;
 const isRetiredVersion = (mission: Omit<Linked, "id">) =>
-  isArchived(mission.status?.toLowerCase()) || hasSupersededTag(mission.tags);
+  isArchived(mission.status?.toLowerCase()) || hasTypedSuperseded(mission);
 
 /** Groups the listed forks of one conversation; maps each version to its group's leader
  * using the normative (unretired, live, effectiveActivity, forkDepth) rank (F1). */
@@ -190,25 +219,18 @@ export function archiveOnlyRows<M extends {id:string;status:string}>(archived:M[
 }
 
 
-export function hasSupersededTag(tags?: readonly string[] | null): boolean {
-  return Boolean(
-    tags?.some(
-      tag =>
-        tag === "superseded" ||
-        tag.startsWith("superseded_by:") ||
-        tag.startsWith("superseded-by:"),
-    ),
-  );
-}
-
 /** True when a mission was explicitly superseded by a replacement attempt and is no longer running. */
-export function isSupersededMission(mission: { status?: string | null; tags?: readonly string[] | null }): boolean {
+export function isSupersededMission(mission: {
+  status?: string | null;
+  superseded_by_mission_id?: string | null;
+  tags?: readonly string[] | null;
+}): boolean {
   if (isWorking(mission.status)) return false;
-  return hasSupersededTag(mission.tags);
+  return hasTypedSuperseded(mission);
 }
 
 /** True when a mission or any of its ancestors is superseded and this mission is not actively running. */
-export function isSupersededInTree<M extends Linked & { status?: string | null; tags?: readonly string[] | null }>(
+export function isSupersededInTree<M extends Linked & { status?: string | null; superseded_by_mission_id?: string | null; tags?: readonly string[] | null }>(
   mission: M,
   byId: ReadonlyMap<string, M>,
 ): boolean {

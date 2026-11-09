@@ -60,8 +60,7 @@ object OrbCyberAccess {
         mission.dict("machine_transfer")?.let { transfer ->
             OrbJSON.dict(transfer["destination"])?.let { return OrbJSON.str(it, "kind") == "node" }
         }
-        val tags = mission.raw["tags"] as? List<*>
-        return tags?.contains("placement:client") != true && mission.bool("local_run_active") != true &&
+        return !mission.isClientPlacement() && mission.bool("local_run_active") != true &&
             (!mission.str("remote_node_id").isNullOrBlank() || !OrbJSON.str(mission.dict("remote_job"), "node_id").isNullOrBlank())
     }
 

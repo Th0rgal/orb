@@ -17,7 +17,7 @@ class CoverageRegistryTests(unittest.TestCase):
         registry.validate_registry(self.value)
         self.assertEqual(self.value["acceptance"], "INCOMPLETE")
         self.assertEqual(self.value["total_exports"], 192)
-        self.assertEqual(self.value["counts_by_status"], {"partial": 110, "unconnected": 82})
+        self.assertEqual(self.value["counts_by_status"], {"partial": 129, "unconnected": 63})
         self.assertTrue(all(e["blockers"] for e in self.value["entries"]))
 
     def test_reject_unsupported_links_and_claims(self):
@@ -170,6 +170,25 @@ class CoverageRegistryTests(unittest.TestCase):
                 "orb_skill_slash_step",
                 "orb_worktree_decision_step",
                 "orb_repo_diff_budget_step",
+                "orb_model_account_admit",
+                "orb_model_account_score",
+                "orb_epoch_fence_step",
+                "orb_effect_outbox_step",
+                "orb_crash_boundary_step",
+                "orb_memory_tool_gate",
+                "orb_upload_cleanup_gate",
+                "orb_proxy_exhaustion_step",
+                "orb_composer_default_step",
+                "orb_cloud_handoff_step",
+                "orb_fast_poll_delay_ms",
+                "orb_mcp_preflight_cache_gate",
+                "orb_sidebar_move_target_admit",
+                "orb_sidebar_drag_step",
+                "orb_followup_queue_step",
+                "orb_transport_epoch_step",
+                "orb_stream_open_tail_cap_step",
+                "orb_rtt_ewma_step",
+                "orb_client_link_budget_step",
             },
         )
         for entry in partial:
@@ -225,7 +244,7 @@ class CoverageRegistryTests(unittest.TestCase):
         self.assertNotIn("2aedbc0207ccf866c41d0392b82c7187c3941ee6", formal_audit)
         roadmap = (root / "docs/TRUSTWORTHY_SHARED_LEAN_ROADMAP.md").read_text(encoding="utf-8")
         self.assertIn("P0–P7 remain unaccepted.", roadmap)
-        self.assertIn("110 partial / 82 unconnected", roadmap)
+        self.assertIn("129 partial / 63 unconnected", roadmap)
         self.assertIn("BLOCKED_PHYSICAL_DEVICE", roadmap)
         self.assertIn("BLOCKED_HOST_UNREACHABLE", roadmap)
         self.assertIn(pin, roadmap)
@@ -233,14 +252,14 @@ class CoverageRegistryTests(unittest.TestCase):
         self.assertIn("150 Orb exports and 41 LeanSys exports", p1_doc)
         self.assertIn("1528 base cases", p1_doc)
         self.assertIn("1564 cases", p1_doc)
-        self.assertIn("110 partial / 82", p1_doc)
+        self.assertIn("129 partial / 63", p1_doc)
         self.assertIn("3c70e5ada278a4e37e0180255f360aa2ff5fe86c", p1_doc)
         p2_doc = (root / "docs/P2_SHARED_WASM_ARTIFACT.md").read_text(encoding="utf-8")
         self.assertIn("all 192 exported function names", p2_doc)
         self.assertIn("191 public-prefix exports and one compiler helper", p2_doc)
         p3_doc = (root / "docs/P3_TARGET_QUALIFICATION_REPORT.md").read_text(encoding="utf-8")
         self.assertIn("QUALIFIED_WITH_HONEST_DEVICE_BLOCKERS", p3_doc)
-        self.assertIn("110 partial / 82 unconnected", p3_doc)
+        self.assertIn("129 partial / 63 unconnected", p3_doc)
         self.assertIn("192 manifest entries / 191", p3_doc)
 
 

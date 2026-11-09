@@ -248,13 +248,15 @@ class OrbMissionTreeTest {
         assertFalse(OrbMissionTree.isPlaceholder(released[0].mission))
 
         // 4. `isSupersededInTree`: hides non-live superseded missions and descendants, never live missions.
-        val supParent = m("sup-p", "status" to "completed", "tags" to listOf("superseded_by:new-p"))
+        val supParent = m("sup-p", "status" to "completed", "superseded_by_mission_id" to "new-p", "tags" to listOf("superseded_by:new-p"))
         val supChild = m("sup-c", "status" to "completed", "parent_mission_id" to "sup-p")
-        val liveSup = m("sup-live", "status" to "active", "tags" to listOf("superseded"))
-        val supMap = listOf(supParent, supChild, liveSup).associateBy { it.id }
+        val liveSup = m("sup-live", "status" to "active", "superseded_by_mission_id" to "new-live", "tags" to listOf("superseded"))
+        val legacyTagOnly = m("sup-legacy-tag-only", "status" to "completed", "tags" to listOf("superseded", "superseded_by:new-p"))
+        val supMap = listOf(supParent, supChild, liveSup, legacyTagOnly).associateBy { it.id }
         assertTrue(OrbMissionTree.isSupersededInTree(supParent, supMap))
         assertTrue(OrbMissionTree.isSupersededInTree(supChild, supMap))
         assertFalse(OrbMissionTree.isSupersededInTree(liveSup, supMap))
+        assertFalse(OrbMissionTree.isSupersededInTree(legacyTagOnly, supMap))
         OrbMissionTree.resetHierarchy()
     }
 

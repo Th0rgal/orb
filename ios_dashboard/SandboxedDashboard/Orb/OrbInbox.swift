@@ -1123,12 +1123,12 @@ enum OrbInboxModel {
 
     static func isSubagent(row: OrbRow, includeAutonomous: Bool = false) -> Bool {
         if !includeAutonomous && row.parentMissionID != nil { return true }
-        let tags = row.raw["tags"].items.map(\.text)
-        if tags.contains("superseded") || tags.contains(where: { $0.hasPrefix("superseded-by:") }) { return true }
+        if row.hasTypedSuperseded { return true }
         if includeAutonomous { return false }
+        let tags = row.raw["tags"].items.map(\.text)
         if row.raw["origin"].text == "hermes" || tags.contains("origin:hermes") || tags.contains("origin:hermes-assistant") { return true }
         if row.raw["tags"].items.contains(where: {
-            $0.text.hasPrefix("worker-dispatch:") || $0.text == "superseded" || $0.text.hasPrefix("superseded-by:")
+            $0.text.hasPrefix("worker-dispatch:")
         }) {
             return true
         }
@@ -1326,7 +1326,7 @@ enum OrbInboxModel {
     }
 
     static func resolveMachine(row: OrbRow) -> String {
-        if row.raw["tags"].items.contains(where: { $0.text == "placement:client" }) {
+        if row.isClientPlacement {
             return "This computer"
         }
         if row.backend.hasPrefix("cloud_") {
@@ -1366,7 +1366,7 @@ enum OrbInboxModel {
             seen.insert(row.id)
             let rawSlug = row.raw["project"].text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !projects.isEmpty {
-                let isClient = row.raw["tags"].items.contains(where: { $0.text == "placement:client" })
+                let isClient = row.isClientPlacement
                 if rawSlug.isEmpty && !isClient { continue }
                 let slug = rawSlug.isEmpty ? "default" : rawSlug
                 if !projectsBySlug.contains(slug) { continue }
@@ -1492,7 +1492,7 @@ enum OrbInboxModel {
             seen.insert(row.id)
             let rawSlug = row.raw["project"].text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !projects.isEmpty {
-                let isClient = row.raw["tags"].items.contains(where: { $0.text == "placement:client" })
+                let isClient = row.isClientPlacement
                 if rawSlug.isEmpty && !isClient { continue }
                 let slug = rawSlug.isEmpty ? "default" : rawSlug
                 if projectsBySlug[slug] == nil { continue }

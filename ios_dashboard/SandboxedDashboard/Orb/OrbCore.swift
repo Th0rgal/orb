@@ -306,6 +306,18 @@ struct OrbRow: Identifiable, Hashable, Sendable {
     static func hasDirectBtwTag(in value: OrbJSON) -> Bool {
         value["tags"].items.map(\.text).contains { $0.hasPrefix("btw-parent:") || $0 == "btw-subagent" }
     }
+    static func isClientPlacement(_ value: OrbJSON) -> Bool {
+        let pk = value["placement_kind"].text
+        return pk == "client" || pk.hasPrefix("client:")
+    }
+    static func hasTypedSuperseded(_ value: OrbJSON) -> Bool {
+        let st = value["status"].text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if st == "superseded" { return true }
+        let next = value["superseded_by_mission_id"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !next.isEmpty
+    }
+    var isClientPlacement: Bool { Self.isClientPlacement(raw) }
+    var hasTypedSuperseded: Bool { Self.hasTypedSuperseded(raw) }
     var mobile: Bool { !OrbHierarchy.isBtw(self) }
     var active: Bool { missionState?.isActive ?? false }
 }
@@ -903,15 +915,9 @@ enum OrbMissionTree {
         return Int64((date.timeIntervalSince1970 * 1000.0).rounded())
     }
 
-    static func hasSupersededTag(_ mission: OrbRow) -> Bool {
-        mission.raw["tags"].items.map(\.text).contains {
-            $0 == "superseded" || $0.hasPrefix("superseded_by:") || $0.hasPrefix("superseded-by:")
-        }
-    }
-
     static func isSuperseded(_ mission: OrbRow) -> Bool {
         if mission.active { return false }
-        return hasSupersededTag(mission)
+        return mission.hasTypedSuperseded
     }
 
     /// True when a mission or any of its ancestors is superseded and this mission is not actively running.
@@ -1187,7 +1193,7 @@ enum OrbMissionTree {
     private static func isRetiredVersion(_ mission: OrbRow) -> Bool {
         let lower = mission.state.lowercased()
         if lower == "acknowledged" || lower == "archived" { return true }
-        return hasSupersededTag(mission) || mission.raw["tags"].items.contains { $0.text.lowercased() == "orb-archived" }
+        return mission.hasTypedSuperseded || mission.raw["tags"].items.contains { $0.text.lowercased() == "orb-archived" }
     }
 
     /// Maps each listed fork to its conversation's leader using the normative

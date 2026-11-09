@@ -1210,8 +1210,7 @@ struct OrbHome: View {
         for row in rows where row.mobile && !seen.contains(row.id) {
             seen.insert(row.id)
             guard activeStates.contains(row.state) else { continue }
-            let tags = row.raw["tags"].items.map(\.text)
-            if tags.contains("superseded") || tags.contains(where: { $0.hasPrefix("superseded-by:") }) { continue }
+            if row.hasTypedSuperseded { continue }
             let rawSlug = row.raw["project"].text.trimmingCharacters(in: .whitespacesAndNewlines)
             let slug = rawSlug.isEmpty ? "default" : rawSlug
             counts[slug, default: 0] += 1

@@ -16,7 +16,7 @@
  *  - `reparentMission` is the only way to change or clear a remembered link.
  */
 import { createSignal } from "solid-js";
-import { forkSource } from "./missionTree";
+import { forkSource, hasTypedSuperseded } from "./missionTree";
 import { orbHierarchyMergeStep, orbPlacementMergeStep, type PlacementSourceKind } from "./orbKernel";
 import { shallowEqual } from "./poll";
 
@@ -29,6 +29,7 @@ export type HierarchyFields = {
   project?: string | null;
   folder?: string | null;
   placement_revision?: number;
+  superseded_by_mission_id?: string | null;
   status?: string;
 };
 
@@ -316,13 +317,12 @@ export function authoritativePlacement(id: string): Readonly<PlacementState> | u
 
 /** Tags that place a mission inside another one (or out of the root list). */
 export const isHierarchyTag = (tag: string) =>
-  tag.startsWith("worker-dispatch:") || tag === "superseded" || tag.startsWith("superseded_by:") ||
-  tag.startsWith("superseded-by:") || tag.startsWith("fork-of:") || tag.startsWith("btw-parent:") ||
+  tag.startsWith("worker-dispatch:") || tag.startsWith("fork-of:") || tag.startsWith("btw-parent:") ||
   tag === "btw-subagent";
 
 const isDirectBtwTag = (tag: string) => tag.startsWith("btw-parent:") || tag === "btw-subagent";
 
-type Link = { parent?: string; callback?: string; tags: string[] };
+type Link = { parent?: string; callback?: string; supersededBy?: string; superseded?: boolean; tags: string[] };
 type Seen = { title?: string | null; project?: string | null; folder?: string; status?: string };
 
 const links = new Map<string, Link>();
@@ -340,19 +340,21 @@ const internParentOrd = (id: string | undefined): number => {
   }
   return ord;
 };
-const isSupersededTag = (tag: string) =>
-  tag === "superseded" || tag.startsWith("superseded_by:") || tag.startsWith("superseded-by:");
 const nonEmpty = (v: string | null | undefined): string | undefined => (typeof v === "string" && v.trim() ? v : undefined);
 
 /** Remember hierarchy links and display facts from an existing local row without re-observing its placement as a fresh server snapshot. */
 function observeHierarchyFactsOnly(m: HierarchyFields | null | undefined): void {
   if (!m || typeof m.id !== "string") return;
   const parent = nonEmpty(m.parent_mission_id), callback = nonEmpty(m.callback_parent_mission_id);
+  const supersededBy = nonEmpty(m.superseded_by_mission_id);
+  const superseded = hasTypedSuperseded(m);
   const tags = (m.tags ?? []).filter(isHierarchyTag);
-  if (parent || callback || tags.length) {
+  if (parent || callback || supersededBy || superseded || tags.length) {
     const link = links.get(m.id) ?? { tags: [] };
     if (parent) link.parent = parent;
     if (callback) link.callback = callback;
+    if (supersededBy) link.supersededBy = supersededBy;
+    if (superseded) link.superseded = true;
     for (const tag of tags) if (!link.tags.includes(tag)) link.tags.push(tag);
     links.set(m.id, link);
   }
@@ -392,6 +394,7 @@ export function withHierarchy<M extends HierarchyFields>(m: M): M {
   if (link) {
     if (link.parent && !nonEmpty(m.parent_mission_id)) set("parent_mission_id", link.parent);
     if (link.callback && !nonEmpty(m.callback_parent_mission_id)) set("callback_parent_mission_id", link.callback);
+    if (link.supersededBy && !nonEmpty(m.superseded_by_mission_id)) set("superseded_by_mission_id", link.supersededBy);
     if (link.tags.length) {
       const tags = m.tags ?? [];
       const missing = link.tags.filter(t => !tags.includes(t));
@@ -432,8 +435,8 @@ export function mergeMission<M extends HierarchyFields>(prev: M | undefined, nex
   const curParentOrd = internParentOrd(prevLink?.parent ?? nonEmpty(prev?.parent_mission_id));
   const incParent = nonEmpty(next.parent_mission_id);
   const incParentOrd = internParentOrd(incParent);
-  const curSuperseded = !!(prevLink?.tags.some(isSupersededTag) || prev?.tags?.some(isSupersededTag));
-  const incSupersede = curSuperseded || !!(next.tags?.some(isSupersededTag));
+  const curSuperseded = Boolean(prevLink?.superseded || hasTypedSuperseded(prev));
+  const incSupersede = curSuperseded || hasTypedSuperseded(next);
   const curArchived = curSuperseded || prev?.status === "completed" || prev?.status === "acknowledged";
   const incArchive = incSupersede || next.status === "completed" || next.status === "acknowledged";
   const incUnarchive = !incArchive && curArchived;

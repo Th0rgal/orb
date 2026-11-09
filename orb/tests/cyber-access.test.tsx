@@ -2,7 +2,7 @@ import {render,screen,fireEvent,cleanup,waitFor} from '@solidjs/testing-library'
 import {afterEach,describe,it,expect,vi} from 'vitest';
 import {CyberPicker,MissionCyber,cyberCompatibility,draftCyber,setDraftCyber,requireCyberSupport} from '../src/cyberAccess';
 import {describeError} from '../src/ErrorNotice';
-vi.mock('../src/api',()=>({api:vi.fn(),connectionVersion:()=>0}));
+vi.mock('../src/api',()=>({api:vi.fn(),connectionVersion:()=>0,isClientPlacement:(m:any)=>m?.placement_kind==='client'||Boolean(m?.placement_kind?.startsWith('client:'))}));
 import {api} from '../src/api';
 afterEach(()=>{vi.mocked(api).mockReset();cleanup();setDraftCyber('automatic');});
 describe('cyber selection',()=>{
@@ -58,7 +58,7 @@ describe('cyber selection',()=>{
  it('keeps client-owned sessions editable despite historical remote placement',async()=>{
   vi.mocked(api).mockImplementation(async path=>String(path).endsWith('/cyber')
    ?{mode:'standard',status:'requested',revision:'saved'}:{version:2,route_supported:false});
-  render(()=><MissionCyber mission={{id:'client-mission',status:'paused',title:'Client',history:[],tags:['placement:client'],backend:'codex',model_override:'gpt-6.1-sol',remote_node_id:'ashur'}}/>);
+  render(()=><MissionCyber mission={{id:'client-mission',status:'paused',title:'Client',history:[],placement_kind:'client',tags:['placement:client'],backend:'codex',model_override:'gpt-6.1-sol',remote_node_id:'ashur'}}/>);
   await fireEvent.click(await screen.findByRole('button',{name:'Cyber program: Standard'}));
   expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).disabled).toBe(false);
   expect(vi.mocked(api).mock.calls.some(([path])=>String(path).includes('remote=true'))).toBe(false);

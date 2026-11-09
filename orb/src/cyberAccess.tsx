@@ -1,7 +1,7 @@
 import { pollWhileVisible } from "./poll";
 import { Menu } from "./Menu";
 import { createEffect, createResource, createSignal, For, onCleanup, Show } from "solid-js";
-import { api, connectionVersion, type Mission } from "./api";
+import { api, connectionVersion, isClientPlacement, type Mission } from "./api";
 import "./cyberAccess.css";
 export type CyberMode = "standard" | "daybreak" | "automatic";
 export interface CyberSelection { mode: CyberMode; status: "requested" | "confirmed"; confirmed_program?: string | null; confirmed_model?: string | null; revision: string }
@@ -61,7 +61,7 @@ export function MissionCyber(p:{mission:Mission;onError?:(message:string)=>void}
   catch(e){p.onError?.(cyberError(e));}finally{setSaving(false);}
  };
  return <><span class="under-sep">·</span><Show when={!selection.error} fallback={<span class="under-model" title="The connected backend does not expose cyber settings, or the request failed. Update or reconnect before changing this option.">Cyber: unavailable</span>}>
-  <CyberPicker remote={p.mission.machine_transfer?p.mission.machine_transfer.destination.kind==="node":!p.mission.tags?.includes("placement:client")&&!p.mission.local_run_active&&!!(p.mission.remote_node_id||p.mission.remote_job?.node_id)} value={selection()?.mode??'automatic'} model={p.mission.model_override??''} disabled={selection.loading||saving()} note="Applies to the next turn." confirmed={!selection.loading&&selection()?.status==='confirmed'&&!!selection()?.confirmed_program} onChange={update}/>
+  <CyberPicker remote={p.mission.machine_transfer?p.mission.machine_transfer.destination.kind==="node":!isClientPlacement(p.mission)&&!p.mission.local_run_active&&!!(p.mission.remote_node_id||p.mission.remote_job?.node_id)} value={selection()?.mode??'automatic'} model={p.mission.model_override??''} disabled={selection.loading||saving()} note="Applies to the next turn." confirmed={!selection.loading&&selection()?.status==='confirmed'&&!!selection()?.confirmed_program} onChange={update}/>
  </Show></>;
 }
 

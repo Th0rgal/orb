@@ -3,7 +3,7 @@ import { swallow } from "./log";
 import {createSignal,batch} from 'solid-js';
 import {mergeById} from './poll';
 import {deliverAssistantText,flushClientLink} from './clientLink';
-import {connectionVersion,getMission,reopenMission,appendClientTranscript,setClientMissionStatus} from './api';
+import {connectionVersion,getMission,isClientPlacement,reopenMission,appendClientTranscript,setClientMissionStatus} from './api';
 import {classifyConflictError} from './conflictClassification';
 import type {ClientRunReceipt} from './clientRuns';
 import {readSideThread,saveSideThread} from './composerDrafts';
@@ -665,7 +665,7 @@ export function startLocalQueueWorker(){
       continue;}}catch(error){if(!/no local run/i.test(String(error)))throw error;}
      await reconcileLocalRun(row.mission);if(!valid())return;
      const mission=await getMission(row.mission);
-     if(!mission.tags?.includes('placement:client')||binding.cwd!==row.request.cwd)throw Error('This conversation changed machines or folders. Remove this message and send it again.');
+     if(!isClientPlacement(mission)||binding.cwd!==row.request.cwd)throw Error('This conversation changed machines or folders. Remove this message and send it again.');
      if(isRunning(mission.status)||mission.status==='pending'&&!row.delegated)continue;
      if(!valid())return;
      // Only the durable claim is locked: enqueue/cancel never waits for the network.

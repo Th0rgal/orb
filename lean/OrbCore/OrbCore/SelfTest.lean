@@ -1436,6 +1436,43 @@ private def runFastMemoryBrokerTests
     closeCoreStore store
     IO.eprintln "[orb-core-test] FAIL: /api/mcp/capabilities missing memory_* tools"
     return 1
+  -- SM-02: POST /api/control/missions with client placement persists placement_kind='client',
+  -- and POST /api/mcp/call classifies onManagedNode strictly from typed placement_kind (ignoring legacy tags).
+  let clientCreateBody := "{\"id\":\"m-sm02-client\",\"title\":\"Client Placed\",\"placement\":\"client\",\"project\":\"orb\"}"
+  let clientCreateRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {clientCreateBody.utf8ByteSize}\r\n\r\n{clientCreateBody}".toUTF8
+  let .ok clientCreateReq := parseRequest clientCreateRaw none | do closeCoreStore store; return 1
+  let .ok clientCreateResp ← dispatchCoreRequest appSt clientCreateReq nowSec | do closeCoreStore store; return 1
+  let clientCreateStr := String.fromUTF8! clientCreateResp.body
+  if clientCreateResp.status != 201 || (clientCreateStr.splitOn "\"placement_kind\":\"client\"").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: SM-02 client mission create expected placement_kind=client: {clientCreateResp.status} {clientCreateStr}"
+    return 1
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE missions SET tags='[\"managed-fake\",\"placement:managed_vm\"]' WHERE id='m-sm02-client';" #[]
+  let clientSessBody := "{\"mission_id\":\"m-sm02-client\",\"role\":\"worker\",\"project\":\"orb\"}"
+  let clientSessRaw := s!"POST /api/mcp/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {clientSessBody.utf8ByteSize}\r\n\r\n{clientSessBody}".toUTF8
+  let .ok clientSessReq := parseRequest clientSessRaw none | do closeCoreStore store; return 1
+  let .ok clientSessResp ← dispatchCoreRequest appSt clientSessReq nowSec | do closeCoreStore store; return 1
+  let .ok clientSessJson := OrbBin.Json.parseBytes clientSessResp.body | do closeCoreStore store; return 1
+  let clientMcpTok := (clientSessJson.fieldStr? "token").getD ""
+  let badLimitCallBody := "{\"name\":\"memory_search_knowledge\",\"arguments\":{\"query\":\"Orb\",\"limit\":0}}"
+  let clientCallRaw := s!"POST /api/mcp/call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {clientMcpTok}\r\nContent-Length: {badLimitCallBody.utf8ByteSize}\r\n\r\n{badLimitCallBody}".toUTF8
+  let .ok clientCallReq := parseRequest clientCallRaw none | do closeCoreStore store; return 1
+  let .ok clientCallResp ← dispatchCoreRequest appSt clientCallReq nowSec | do closeCoreStore store; return 1
+  let clientCallStr := String.fromUTF8! clientCallResp.body
+  if clientCallResp.status != 200 || (clientCallStr.splitOn "untrusted managed compute nodes").length != 1 || (clientCallStr.splitOn "`limit` must be between").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: SM-02 /api/mcp/call should ignore managed-* tags when placement_kind=client: {clientCallStr}"
+    return 1
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE missions SET placement_kind='managed_vm', tags='[]' WHERE id='m-sm02-client';" #[]
+  let .ok mgdCallReq := parseRequest clientCallRaw none | do closeCoreStore store; return 1
+  let .ok mgdCallResp ← dispatchCoreRequest appSt mgdCallReq nowSec | do closeCoreStore store; return 1
+  let mgdCallStr := String.fromUTF8! mgdCallResp.body
+  if mgdCallResp.status != 200 || (mgdCallStr.splitOn "untrusted managed compute nodes").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: SM-02 /api/mcp/call should deny typed placement_kind=managed_vm: {mgdCallStr}"
+    return 1
   return 0
 
 private def runCloudHandoffTests
@@ -5284,7 +5321,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runR7CoreTests prodValid) != 0 then return 1
   if (← runMultiUserCoreTests prodValid) != 0 then return 1
 
-  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":9,\"host_tests\":85}"
+  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":9,\"host_tests\":101}"
   return 0
 
 end OrbCore.SelfTest

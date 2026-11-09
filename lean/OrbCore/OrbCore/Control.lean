@@ -1340,7 +1340,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
               let pk := (mRs[1]?.bind (·[0]?)).getD ""
               let mProj := (mRs[1]?.bind (·[1]?)).getD ""
               let mTags := parseStringJsonArray ((mRs[1]?.bind (·[2]?)).getD "[]")
-              if pk == "managed_vm" || pk.startsWith "managed-" || mTags.any (fun t => t.startsWith "managed-" || t == "placement:managed_vm") then
+              if pk == "managed_vm" || pk.startsWith "managed-" then
                 onManagedNode := true
               if !activeClaims.isExternal && (!mProj.isEmpty || mTags.contains "skill:spark-memory") then
                 hasProjSkill := true
@@ -2251,7 +2251,6 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         | do abortIdem; return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
       let track := (JsonTape.lookupString? tape "track").getD ""
       let repo := ((JsonTape.lookupString? tape "github_pr").orElse (fun _ => JsonTape.lookupString? tape "repo")).getD ""
-      let placeKind := (JsonTape.lookupString? tape "placement_kind").getD "managed"
       let rawDiskNat := (JsonTape.lookupNat? tape "estimated_disk_gib").getD 0
       if rawDiskNat > maxReservedDiskGib.toNat then
         abortIdem
@@ -2271,6 +2270,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         | none => baseReqTags
       let placement? := JsonTape.lookupString? tape "placement"
       let clientPlaced := isClientPlacement placement? reqTags
+      let placeKind := (JsonTape.lookupString? tape "placement_kind").getD (if clientPlaced then "client" else "managed")
       let (tKind, nAdmin) := classifyMissionPlacementTarget clientPlaced placeKind remoteNodeId? reqTags
       if let some (cCode, cBody) := checkPlacementForCaller caller tKind nAdmin then
         abortIdem

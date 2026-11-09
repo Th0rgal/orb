@@ -1,5 +1,5 @@
 import { swallow } from "./log";
-import { api, connectionVersion, getMission, type Mission } from './api';
+import { api, connectionVersion, getMission, isClientPlacement, type Mission } from './api';
 import { machineIdentity, nativeInvoke } from './clientRuns';
 import { localBinding, localDirectory, recordLocalFailure, refreshLocalAgents, rememberBinding, restoreLocalBindings } from './localAgents';
 import { captureWakeupFences, enqueueLocalMessage } from './localMessageQueue';
@@ -17,8 +17,8 @@ export function startClientDelegations(missions: () => Mission[]) {
     busy = true;
     try {
       const [clientId] = await Promise.all([machineIdentity(), restoreLocalBindings()]);
-      const anchor = missions().find(mission => mission.tags?.includes('placement:client') &&
-        (mission.tags.includes(`worker-client:${clientId}`) || !!localBinding(mission.id)));
+      const anchor = missions().find(mission => isClientPlacement(mission) &&
+        (mission.tags?.includes(`worker-client:${clientId}`) || !!localBinding(mission.id)));
       if (!anchor || !valid()) return;
       const post = <T>(id:string,body:object) => api<T>(`/api/control/missions/${id}/client-run`, {
         method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_id:clientId,...body}),

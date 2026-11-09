@@ -175,7 +175,7 @@ it("keeps the project/model catalog available offline, without crossing accounts
 
 it("replaces a remote explicit-track refusal through create admission with context and identity", async () => {
   setConnection('http://replacement.test','token');
-  const source = {id:'source',workspace_id:'00000000-0000-0000-0000-000000000000',remote_job:{node_id:'dgx-spark'},project:'default',track:'mission-original',github_pr:'org/repo#12',tags:['pr-writer'],backend:'claudecode',model_override:'opus',model_effort:'high',history:[{role:'user',content:'Find an address'},{role:'assistant',content:'Result found'}]};
+  const source = {id:'source',workspace_id:'00000000-0000-0000-0000-000000000000',remote_job:{node_id:'dgx-spark'},project:'default',track:'mission-original',github_pr:'org/repo#12',authority_mode:'writer',tags:['pr-writer'],backend:'claudecode',model_override:'opus',model_effort:'high',history:[{role:'user',content:'Find an address'},{role:'assistant',content:'Result found'}]};
   const fetcher = vi.fn(async (url:string, init?:RequestInit) => {
     if (url.endsWith('/source')) return Response.json(source);
     if (url.endsWith('/message')) return new Response('REMOTE_RESUME_REQUIRES_REPLACEMENT: PR or explicit-track missions need create admission',{status:409});

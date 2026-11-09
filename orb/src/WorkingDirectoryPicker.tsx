@@ -4,7 +4,7 @@ import { isAutoManagedTarget, missionNode } from "./machines/nodes";
 import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
-import { api, ApiError, type Mission } from "./api";
+import { api, ApiError, isClientPlacement, type Mission } from "./api";
 import {
   CheckIcon,
   ChevronRight,
@@ -92,7 +92,7 @@ function missionMatchesMachine(m: Mission, machine: string): boolean {
       : transfer.kind === "core"
         ? "core"
         : transfer.id
-    : m.tags?.includes("placement:client")
+    : isClientPlacement(m)
       ? "local"
       : missionNode(m) ?? "core";
   return dest === machine;

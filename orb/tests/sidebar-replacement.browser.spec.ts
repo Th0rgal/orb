@@ -5,7 +5,7 @@ import {test,expect} from '@playwright/test';
 // list the conversation twice, in any frame.
 test('a replacement send never shows the conversation twice in the sidebar',async({page})=>{
  await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');localStorage.setItem('orb.machine','core');});
- const old={id:'c7592dff-6b9c-491d-b546-07466b26930e',title:'Verity',backend:'antigravity',status:'interrupted',project:'verity-core',track:'solidity-import-coordinator',tags:['pr-writer'],remote_node_id:'babylon',remote_job:{job_id:'j1',node_id:'babylon',phase:'finished',node_state:'cancelled',finished_at:'2026-10-20T12:00:00Z'},history:[],created_at:'2026-10-20T10:00:00Z',updated_at:'2026-10-20T12:00:00Z'};
+ const old={id:'c7592dff-6b9c-491d-b546-07466b26930e',title:'Verity',backend:'antigravity',status:'interrupted',project:'verity-core',track:'solidity-import-coordinator',authority_mode:'writer',tags:['pr-writer'],remote_node_id:'babylon',remote_job:{job_id:'j1',node_id:'babylon',phase:'finished',node_state:'cancelled',finished_at:'2026-10-20T12:00:00Z'},history:[],created_at:'2026-10-20T10:00:00Z',updated_at:'2026-10-20T12:00:00Z'};
  const next={...old,id:'0db534df-6e9f-42d8-95e1-791ca6a6173b',status:'active',remote_job:{job_id:'j2',node_id:'babylon',phase:'running',node_state:'running'},created_at:'2026-10-20T12:43:36Z',updated_at:'2026-10-20T12:43:41Z'};
  let missions:any[]=[old];
  await page.route('**/api/**',async route=>{
@@ -14,7 +14,7 @@ test('a replacement send never shows the conversation twice in the sidebar',asyn
   if(path==='/api/control/missions'&&method==='POST'){
    // Core: create the replacement and archive the original. The list read
    // that the sidebar has in flight still sees the original.
-   missions=[next,{...old,status:'acknowledged',tags:['pr-writer','superseded',`superseded_by:${next.id}`]}];
+   missions=[next,{...old,status:'acknowledged',superseded_by_mission_id:next.id,tags:['pr-writer','superseded',`superseded_by:${next.id}`]}];
    return route.fulfill({json:next});
   }
   if(path==='/api/control/missions'){await new Promise(r=>setTimeout(r,200));return route.fulfill({json:missions.filter(m=>m.status!=='acknowledged')});}

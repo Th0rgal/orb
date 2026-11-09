@@ -15,7 +15,8 @@
 "history": [],
 "created_at": "2026-09-28T06:27:38.061971354+00:00",
 "updated_at": "2026-09-28T06:36:16.856932374+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "readonly"
 },
 {
 "id": "affeaef1-5b6d-4474-8672-ad72e7a64b07",
@@ -52,7 +53,8 @@
 "history": [],
 "created_at": "2026-08-16T21:12:04.936926872+00:00",
 "updated_at": "2026-08-16T21:19:58.416264718+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "readonly"
 },
 {
 "id": "c759737c-e3f5-499c-9ce4-a17e76e31491",
@@ -73,7 +75,8 @@
 "history": [],
 "created_at": "2026-08-17T12:07:27.315575920+00:00",
 "updated_at": "2026-08-17T12:08:27.074581281+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "readonly"
 },
 {
 "id": "067ef3a9-7668-4065-9dda-66067ab58224",
@@ -99,7 +102,8 @@
 "history": [],
 "created_at": "2026-08-17T18:43:36.050556376+00:00",
 "updated_at": "2026-08-17T19:50:55.375157055+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "readonly"
 },
 {
 "id": "babae390-c215-412d-aa95-3af1f106cec1",
@@ -117,7 +121,8 @@
 "history": [],
 "created_at": "2026-10-08T08:37:14.753157234+00:00",
 "updated_at": "2026-10-08T08:51:07.288145677+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "readonly"
 },
 {
 "id": "3dd189b2-a9d0-4c17-9c45-512d48af79c0",
@@ -148,7 +153,8 @@
 "history": [],
 "created_at": "2026-10-07T09:39:15.591426400+00:00",
 "updated_at": "2026-10-07T10:51:17.700200310+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "readonly"
 },
 {
 "id": "606d5a5c-7bc7-48d7-a332-6bd39f8f8900",
@@ -186,7 +192,8 @@
 "history": [],
 "created_at": "2026-08-14T01:54:33.865771870+00:00",
 "updated_at": "2026-08-14T03:22:09.614599285+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "e3e56317-5ef3-4143-9210-d9e61f5a058c",
@@ -234,7 +241,8 @@
 "history": [],
 "created_at": "2026-09-02T14:02:13.958762328+00:00",
 "updated_at": "2026-09-02T14:37:29.700778+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "dd767810-37bf-4923-b2b2-6ca6c7343ec4",
@@ -257,7 +265,8 @@
 "history": [],
 "created_at": "2026-08-21T06:53:18.982943310+00:00",
 "updated_at": "2026-08-21T07:10:35.485430734+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "readonly"
 },
 {
 "id": "1ffdc382-7c06-47fa-8e9c-53659a421167",
@@ -301,7 +310,8 @@
 "history": [],
 "created_at": "2026-10-07T09:39:23.691630795+00:00",
 "updated_at": "2026-10-07T10:52:30.569313621+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "readonly"
 },
 {
 "id": "0c935ac7-7cd1-40fc-9dc5-84e4b03f8ab5",
@@ -369,7 +379,8 @@
 "history": [],
 "created_at": "2026-08-17T08:44:07.316992188+00:00",
 "updated_at": "2026-08-17T08:53:09.613210058+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "a0c3dedf-74f1-4847-86ed-a2aeb87ba1bb",
@@ -416,7 +427,8 @@
 "history": [],
 "created_at": "2026-08-27T02:14:01.734565916+00:00",
 "updated_at": "2026-08-27T02:48:07.530468186+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "404b5a1a-02d1-4b50-a312-d0aeedceb12f",
@@ -455,7 +467,8 @@
 "history": [],
 "created_at": "2026-08-13T22:45:14.997903225+00:00",
 "updated_at": "2026-08-13T23:00:58.733431924+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "d3f12434-24d1-4477-8894-af1ace453faf",
@@ -508,7 +521,8 @@
 "history": [],
 "created_at": "2026-08-18T11:22:54.011774524+00:00",
 "updated_at": "2026-08-18T11:44:54.110845501+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "readonly"
 },
 {
 "id": "d595fcf9-7abb-4b3b-804f-9470d91634b8",
@@ -549,7 +563,8 @@
 "history": [],
 "created_at": "2026-08-19T00:33:34.368463753+00:00",
 "updated_at": "2026-08-19T00:51:58.526941033+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "6b74fddb-4039-4dd0-9e30-7d336e94bcf9",
@@ -600,7 +615,8 @@
 "history": [],
 "created_at": "2026-08-21T17:40:23.159340551+00:00",
 "updated_at": "2026-08-21T17:40:49.524878486+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "429d4714-fa49-4a53-91df-1ccee26fef67",
@@ -621,7 +637,8 @@
 "history": [],
 "created_at": "2026-08-17T12:51:09.299298342+00:00",
 "updated_at": "2026-08-17T13:26:50.977340666+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "readonly"
 },
 {
 "id": "939ffda2-daa3-4db2-abca-369f85c413c1",
@@ -645,7 +662,9 @@
 "history": [],
 "created_at": "2026-08-22T06:37:30.953134179+00:00",
 "updated_at": "2026-08-22T09:31:06.880475385+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "readonly",
+"superseded_by_mission_id": "superseded-successor"
 },
 {
 "id": "ae3d2807-b801-4ea5-89c8-f2c13bda477f",
@@ -695,7 +714,8 @@
 "history": [],
 "created_at": "2026-08-11T18:22:30.999428490+00:00",
 "updated_at": "2026-08-11T18:44:22.631675797+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "b63ff3ed-47f3-4eb5-8466-28caa7beccd6",
@@ -720,7 +740,8 @@
 "history": [],
 "created_at": "2026-08-18T02:41:14.437904685+00:00",
 "updated_at": "2026-08-18T03:10:30.943925799+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "774e7fbc-cbfc-401c-b743-51abd8c65a61",
@@ -761,7 +782,8 @@
 "history": [],
 "created_at": "2026-08-18T23:43:54.424556646+00:00",
 "updated_at": "2026-08-19T00:18:52.074956780+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "e12f38d6-75b6-4bbf-93b1-322504456fc7",
@@ -788,7 +810,8 @@
 "history": [],
 "created_at": "2026-08-16T17:32:36.619993233+00:00",
 "updated_at": "2026-08-16T18:33:09.488662860+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "readonly"
 },
 {
 "id": "c599c57b-0337-4b1e-b6cb-296df719f8ea",
@@ -804,7 +827,8 @@
 "history": [],
 "created_at": "2026-08-13T21:08:44.414670047+00:00",
 "updated_at": "2026-08-13T21:58:36.410656317+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "f3f3d3a3-1575-4160-baf2-4d4a78ba7a4c",
@@ -828,7 +852,8 @@
 "history": [],
 "created_at": "2026-08-30T01:45:34.841983205+00:00",
 "updated_at": "2026-08-30T01:47:39.987158626+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "2fdbfe04-acd8-48c3-ad6d-878c044c005f",
@@ -858,7 +883,8 @@
 "history": [],
 "created_at": "2026-08-17T13:27:26.133164725+00:00",
 "updated_at": "2026-08-17T13:42:31.028315219+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "4ccb2f45-1950-4cd5-afbc-f543c831374b",
@@ -881,7 +907,8 @@
 "history": [],
 "created_at": "2026-08-20T06:20:28.550359257+00:00",
 "updated_at": "2026-08-20T07:34:32.075382960+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "0162c9d6-7132-4c0a-bfb8-8fed132e22e9",
@@ -900,7 +927,9 @@
 "history": [],
 "created_at": "2026-09-15T09:29:35.364903122+00:00",
 "updated_at": "2026-09-15T09:34:01.434036512+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "readonly",
+"superseded_by_mission_id": "6be0c21d-4781-4b8f-8e38-bc782d5a4bb3"
 },
 {
 "id": "9096378b-f9fc-4101-bf88-5513474ed4ad",
@@ -935,7 +964,8 @@
 "history": [],
 "created_at": "2026-09-04T05:25:00.607977188+00:00",
 "updated_at": "2026-09-18T16:01:43.393544809+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "921bb21a-f153-4a17-b6ed-8bd938cf8366",
@@ -953,7 +983,8 @@
 "history": [],
 "created_at": "2026-10-08T08:37:14.952678431+00:00",
 "updated_at": "2026-10-08T10:35:25.000211747+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "readonly"
 },
 {
 "id": "6d1377ec-7734-4c40-88da-54b22078fed3",
@@ -1015,7 +1046,8 @@
 "history": [],
 "created_at": "2026-08-14T09:59:19.296054014+00:00",
 "updated_at": "2026-08-14T10:48:03.424507443+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "427371dc-3a1a-4cbd-acbe-1498c322563c",
@@ -1039,7 +1071,8 @@
 "history": [],
 "created_at": "2026-08-19T11:12:21.897858764+00:00",
 "updated_at": "2026-08-19T11:29:53.719257968+00:00",
-"_parent_status": null
+"_parent_status": null,
+"authority_mode": "writer"
 },
 {
 "id": "839c146a-44b7-416d-be03-4cba3e9910e4",
@@ -1096,7 +1129,8 @@
 "history": [],
 "created_at": "2026-10-07T09:39:28.905596399+00:00",
 "updated_at": "2026-10-07T11:57:12.834054454+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "readonly"
 },
 {
 "id": "927a0c7e-5818-4400-887b-a031803c51c2",
@@ -1129,7 +1163,8 @@
 "history": [],
 "created_at": "2026-09-25T19:44:19.460905096+00:00",
 "updated_at": "2026-09-26T07:11:39.921375330+00:00",
-"_parent_status": null
+"_parent_status": null,
+"placement_kind": "client"
 },
 {
 "id": "49469af1-1c17-4d2d-a85e-02a08a283f17",
@@ -1216,7 +1251,8 @@
 "history": [],
 "created_at": "2026-10-22T08:37:21.079745796+00:00",
 "updated_at": "2026-10-22T09:05:39.557956855+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer"
 },
 {
 "id": "bb4e48a7-5528-4b27-84d1-65b6d87cc1c3",
@@ -1264,7 +1300,8 @@
 "history": [],
 "created_at": "2026-10-21T13:51:51.066529083+00:00",
 "updated_at": "2026-10-21T14:00:04.785110591+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer"
 },
 {
 "id": "eb1d6b44-8630-47aa-be05-d045ddd51b27",
@@ -1282,7 +1319,8 @@
 "history": [],
 "created_at": "2026-10-21T13:51:58.982485352+00:00",
 "updated_at": "2026-10-21T13:59:36.696689086+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer"
 },
 {
 "id": "933e19f0-1072-40c0-b330-25daa0fe3a2d",
@@ -1300,7 +1338,8 @@
 "history": [],
 "created_at": "2026-10-21T13:51:54.830525403+00:00",
 "updated_at": "2026-10-21T13:59:35.046198045+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer"
 },
 {
 "id": "98b7f003-e292-4c14-9b6f-83a4887be76f",
@@ -1318,7 +1357,8 @@
 "history": [],
 "created_at": "2026-10-21T13:51:56.534151702+00:00",
 "updated_at": "2026-10-21T13:56:32.211378738+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer"
 },
 {
 "id": "63e41a8c-6e77-40ad-885f-afdc9eef0c3f",
@@ -1352,7 +1392,8 @@
 "history": [],
 "created_at": "2026-10-21T11:29:27.617527442+00:00",
 "updated_at": "2026-10-21T12:59:26.249701159+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "readonly"
 },
 {
 "id": "3a44f9cc-50e4-49f8-8935-79f27c85f747",
@@ -1371,7 +1412,8 @@
 "history": [],
 "created_at": "2026-10-21T11:29:26.135349982+00:00",
 "updated_at": "2026-10-21T11:35:34.090395514+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "readonly"
 },
 {
 "id": "958b301c-d569-48d8-a9b1-492ee6c61e91",
@@ -1390,7 +1432,8 @@
 "history": [],
 "created_at": "2026-10-21T06:48:03.824405371+00:00",
 "updated_at": "2026-10-21T07:01:57.136552458+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "readonly"
 },
 {
 "id": "e4608c64-a155-4ca3-bbd8-a2b8ccd5794e",
@@ -1409,7 +1452,8 @@
 "history": [],
 "created_at": "2026-10-21T06:43:21.032736828+00:00",
 "updated_at": "2026-10-21T07:01:55.232931648+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "readonly"
 },
 {
 "id": "4364f669-5aad-4ffe-bf60-22f9e9dd1bbc",
@@ -1428,7 +1472,8 @@
 "history": [],
 "created_at": "2026-10-20T18:45:58.542326341+00:00",
 "updated_at": "2026-10-20T20:09:40.515160626+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer"
 },
 {
 "id": "28e25db9-75e5-4cfb-a646-122dd0c5c499",
@@ -1447,7 +1492,8 @@
 "history": [],
 "created_at": "2026-10-20T18:47:27.590957786+00:00",
 "updated_at": "2026-10-20T19:10:59.253705554+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer"
 },
 {
 "id": "848bbf39-5be7-42c9-84b5-f947839738c1",
@@ -1466,7 +1512,8 @@
 "history": [],
 "created_at": "2026-10-20T18:47:25.802528505+00:00",
 "updated_at": "2026-10-20T19:10:58.735127881+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer"
 },
 {
 "id": "8507d58d-a352-4deb-83aa-3aca28fcd25f",
@@ -1485,7 +1532,8 @@
 "history": [],
 "created_at": "2026-10-20T18:46:01.853359340+00:00",
 "updated_at": "2026-10-20T19:09:41.883229631+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer"
 },
 {
 "id": "fc45c543-8b21-4354-a615-25a045e03de5",
@@ -1506,7 +1554,9 @@
 "history": [],
 "created_at": "2026-10-18T16:45:25.856121819+00:00",
 "updated_at": "2026-10-20T07:44:16.053798457+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "c2c656b3-2213-462b-9b75-6aef19534e85"
 },
 {
 "id": "157a7319-b8a0-4e81-8c1b-95d7bbf206e9",
@@ -1527,7 +1577,9 @@
 "history": [],
 "created_at": "2026-10-18T16:37:53.156996936+00:00",
 "updated_at": "2026-10-20T07:44:16.031286165+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "fc45c543-8b21-4354-a615-25a045e03de5"
 },
 {
 "id": "3e83c639-6906-48a9-8ff9-3e9e41388763",
@@ -1548,7 +1600,9 @@
 "history": [],
 "created_at": "2026-10-18T12:32:10.687373608+00:00",
 "updated_at": "2026-10-20T07:44:15.993217187+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "024f9e2c-b3b8-479e-8b55-ed3f2743598d"
 },
 {
 "id": "c36ff3f3-e3ea-4d82-aa3f-52214cb09850",
@@ -1569,7 +1623,9 @@
 "history": [],
 "created_at": "2026-10-18T09:26:36.211128669+00:00",
 "updated_at": "2026-10-20T07:44:15.968520919+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "7ed6b191-123f-4453-943e-851d33181876"
 },
 {
 "id": "d89085a5-f0d2-4975-9e04-42f2d3d3db44",
@@ -1590,7 +1646,9 @@
 "history": [],
 "created_at": "2026-10-18T09:24:41.433240545+00:00",
 "updated_at": "2026-10-20T07:44:15.929459036+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "c961d7d0-a325-4c04-98d1-a7fe66058593"
 },
 {
 "id": "e04a9a10-ce9d-4c01-933f-0a871127cdba",
@@ -1611,7 +1669,9 @@
 "history": [],
 "created_at": "2026-10-18T07:04:00.864233220+00:00",
 "updated_at": "2026-10-20T07:44:15.890005683+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "d89085a5-f0d2-4975-9e04-42f2d3d3db44"
 },
 {
 "id": "3abffdd4-a4a4-4c42-b098-dc3d8fd5bce9",
@@ -1632,7 +1692,9 @@
 "history": [],
 "created_at": "2026-10-18T07:02:58.145191805+00:00",
 "updated_at": "2026-10-20T07:44:15.874920186+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "c36ff3f3-e3ea-4d82-aa3f-52214cb09850"
 },
 {
 "id": "1cb23975-9b7a-42da-8d3d-590a49601a60",
@@ -1653,7 +1715,9 @@
 "history": [],
 "created_at": "2026-10-18T07:01:14.084593731+00:00",
 "updated_at": "2026-10-20T07:44:15.851837757+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "3abffdd4-a4a4-4c42-b098-dc3d8fd5bce9"
 },
 {
 "id": "59016132-c1ba-4185-925e-eb6105dd24f2",
@@ -1674,7 +1738,9 @@
 "history": [],
 "created_at": "2026-10-18T07:01:12.629809716+00:00",
 "updated_at": "2026-10-20T07:44:15.809283041+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "e04a9a10-ce9d-4c01-933f-0a871127cdba"
 },
 {
 "id": "50e770d0-689b-4d00-9ad9-b2e3c12f525a",
@@ -1695,7 +1761,9 @@
 "history": [],
 "created_at": "2026-10-17T17:19:33.142419682+00:00",
 "updated_at": "2026-10-20T07:44:15.795015314+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "18f11242-fb29-4184-bc66-0e211ef86aad"
 },
 {
 "id": "de6147da-220d-468e-8f9a-b23b4495f62f",
@@ -1716,7 +1784,9 @@
 "history": [],
 "created_at": "2026-10-17T17:18:35.572953775+00:00",
 "updated_at": "2026-10-20T07:44:15.758912418+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "50e770d0-689b-4d00-9ad9-b2e3c12f525a"
 },
 {
 "id": "4bc45429-39e8-4ab2-bf42-be8262795801",
@@ -1737,7 +1807,9 @@
 "history": [],
 "created_at": "2026-10-17T17:17:32.008677040+00:00",
 "updated_at": "2026-10-20T07:44:15.701982427+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "522e12b1-9c7f-4879-bda2-f679720d9780"
 },
 {
 "id": "bfb8c3d6-d97a-4bc3-8ed0-2beeff6a12b2",
@@ -1758,7 +1830,9 @@
 "history": [],
 "created_at": "2026-10-17T17:15:40.762194517+00:00",
 "updated_at": "2026-10-20T07:44:15.667148460+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "4bc45429-39e8-4ab2-bf42-be8262795801"
 },
 {
 "id": "28b61770-29f2-4a6a-8d99-4c20ea636341",
@@ -1779,7 +1853,9 @@
 "history": [],
 "created_at": "2026-10-17T17:15:36.206041420+00:00",
 "updated_at": "2026-10-20T07:44:15.641767058+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "de6147da-220d-468e-8f9a-b23b4495f62f"
 },
 {
 "id": "938bba18-dd96-4ea9-9133-f72bbbd3f15b",
@@ -1800,7 +1876,9 @@
 "history": [],
 "created_at": "2026-10-17T10:50:55.774344230+00:00",
 "updated_at": "2026-10-20T07:44:15.611259553+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "bfb8c3d6-d97a-4bc3-8ed0-2beeff6a12b2"
 },
 {
 "id": "8ebd2cbf-7610-4abc-8404-cda470f0ddf3",
@@ -1821,7 +1899,9 @@
 "history": [],
 "created_at": "2026-10-17T10:49:31.097612582+00:00",
 "updated_at": "2026-10-20T07:44:15.585208798+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "d4031c0b-f2c2-42b4-87c3-4f56e417ba5f"
 },
 {
 "id": "64aa91b8-278c-408c-a943-96ed34826250",
@@ -1842,7 +1922,9 @@
 "history": [],
 "created_at": "2026-10-17T10:12:47.279378796+00:00",
 "updated_at": "2026-10-20T07:44:15.561356189+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "bfb8c3d6-d97a-4bc3-8ed0-2beeff6a12b2"
 },
 {
 "id": "1dbb43b3-0525-430b-85f2-f8e601991311",
@@ -1863,7 +1945,9 @@
 "history": [],
 "created_at": "2026-10-17T10:10:17.663821090+00:00",
 "updated_at": "2026-10-20T07:44:15.517427776+00:00",
-"_parent_status": "completed"
+"_parent_status": "completed",
+"authority_mode": "writer",
+"superseded_by_mission_id": "28b61770-29f2-4a6a-8d99-4c20ea636341"
 },
 {
 "id": "be0d6896-3d48-4739-8e8d-8b1af18cc8d5",

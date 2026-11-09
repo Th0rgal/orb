@@ -1,4 +1,4 @@
-running 85 tests
+running 101 tests
 test OrbCore.HostTests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test OrbCore.HostTests::production_mission_control_gate_enforces_archive_lease_dedupe_and_codex_rollout ... ok
 test OrbCore.HostTests::mission_control_rejects_store_supersession_with_stale_caller_snapshot ... ok
@@ -84,5 +84,21 @@ test OrbCore.HostTests::wave4_hot_path_scanners_pacer_and_confinement_cabi_verdi
 test OrbCore.HostTests::r2a_epoch_fence_effect_outbox_and_crash_boundary_diverge_on_stale_and_corrupt_inputs ... ok
 test OrbCore.HostTests::remote_replay_rollback_and_stranded_pending_gates_diverge_on_enospc_and_archive ... ok
 test OrbCore.HostTests::codex_goal_skills_worktree_and_repo_diff_kernel_steps_roundtrip ... ok
+test OrbCore.HostTests::r8_model_account_admit_rejects_unknown_under_eap_and_ineligible ... ok
+test OrbCore.HostTests::r8_model_account_score_orders_entitled_unspent_before_unknown_and_inadmissible ... ok
+test OrbCore.HostTests::r8_memory_tool_gate_blocks_managed_nodes_bunker_external_and_mutations ... ok
+test OrbCore.HostTests::r8_upload_cleanup_gate_retains_live_shared_library_archive_until_gc_expiry ... ok
+test OrbCore.HostTests::r8_proxy_exhaustion_partitions_billing_overflow_auth_server_and_quota ... ok
+test OrbCore.HostTests::r8_composer_default_step_distinguishes_unpinned_paloma_from_pinned_workspace ... ok
+test OrbCore.HostTests::r8_cloud_handoff_step_isolates_cloud_workspace_and_blocks_cloud_side_question ... ok
+test OrbCore.HostTests::r8_fast_poll_delay_ms_ramps_from_burst_to_steady_and_clamps_backoff ... ok
+test OrbCore.HostTests::r8_mcp_preflight_cache_gate_enforces_identity_contract_session_and_ttl ... ok
+test OrbCore.HostTests::r8_sidebar_move_target_admit_rejects_folder_cycles_and_same_container_noop ... ok
+test OrbCore.HostTests::r8_sidebar_drag_step_arms_long_press_picker_and_cancels_unadmitted_drop ... ok
+test OrbCore.HostTests::r8_followup_queue_step_retires_strictly_after_posted_seq_and_blocks_duplicates ... ok
+test OrbCore.HostTests::r8_transport_epoch_step_falls_back_after_ever_ready_and_latches_404_until_build_change ... ok
+test OrbCore.HostTests::r8_stream_open_tail_cap_step_bounds_unclosed_fence_tail_and_rejects_zero_cap ... ok
+test OrbCore.HostTests::r8_rtt_ewma_step_initializes_cold_start_and_smooths_samples ... ok
+test OrbCore.HostTests::r8_client_link_budget_step_preempts_p2_under_p0_or_degraded_rtt ... ok
 
-test result: ok. 85 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 101 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out

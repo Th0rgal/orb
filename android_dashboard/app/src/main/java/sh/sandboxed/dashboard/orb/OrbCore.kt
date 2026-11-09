@@ -265,6 +265,19 @@ data class OrbRow(
     val ownerUsername: String?
         get() = str("owner_username")?.trim()?.takeIf { it.isNotEmpty() }
 
+    fun isClientPlacement(): Boolean {
+        val pk = str("placement_kind") ?: ""
+        return pk == "client" || pk.startsWith("client:")
+    }
+
+    fun supersededSuccessorId(): String? =
+        str("superseded_by_mission_id")?.trim()?.takeIf { it.isNotEmpty() }
+
+    fun hasTypedSuperseded(): Boolean {
+        val st = (str("status") ?: "").trim().lowercase()
+        return st == "superseded" || supersededSuccessorId() != null
+    }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is OrbRow) return false
@@ -1045,7 +1058,7 @@ object OrbMissionTree {
 
     fun isSuperseded(mission: OrbRow): Boolean {
         if (isLive(mission)) return false
-        return hasSupersededTag(mission)
+        return mission.hasTypedSuperseded()
     }
 
     /** True when a mission or any of its ancestors is superseded and this mission is not actively running. */
@@ -1260,12 +1273,7 @@ object OrbMissionTree {
     private fun activityMs(mission: OrbRow): Long = OrbJSON.dateEpochMs(mission.str("updated_at", "created_at")) ?: 0L
     private fun createdAtMs(mission: OrbRow): Long = OrbJSON.dateEpochMs(mission.str("created_at")) ?: 0L
 
-    fun hasSupersededTag(mission: OrbRow): Boolean =
-        OrbJSON.strList(mission.raw, "tags").any {
-            it == "superseded" || it.startsWith("superseded_by:") || it.startsWith("superseded-by:")
-        }
-
-    private fun isRetiredVersion(mission: OrbRow): Boolean = isArchived(mission) || hasSupersededTag(mission)
+    private fun isRetiredVersion(mission: OrbRow): Boolean = isArchived(mission) || mission.hasTypedSuperseded()
 
     /** Maps each listed fork to its conversation's leader using the normative
      * `(unretired, live, effectiveActivity, forkDepth)` rank (`docs/specs/sidebar-hierarchy.md` F1). */

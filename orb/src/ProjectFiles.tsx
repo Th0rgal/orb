@@ -35,6 +35,7 @@ import {
   api,
   currentUser,
   getApiUrl,
+  isClientPlacement,
   isConnected,
   isMissionParticipant,
   ApiError,
@@ -2022,7 +2023,7 @@ export function LiveProjectsSection(p: {
       ? pasteMenuEntries(slug, folder)
       : [];
     const pasteSection: MenuEntry[] = pasteEntries.length ? [...pasteEntries, { kind: "sep" }] : [];
-    const canShare = isConnected() && !mission.tags?.includes("placement:client");
+    const canShare = isConnected() && !isClientPlacement(mission);
     return selectedFor(mission.id).length > 1 ? [
       ...pasteSection,
       {kind: "item", label: `Move ${selectedFor(mission.id).length} agents`, icon: Ic.CutIcon, onClick: () => startMoveSelection(mission.id)},

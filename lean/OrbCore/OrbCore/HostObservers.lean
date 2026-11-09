@@ -564,4 +564,68 @@ def evaluate_host_repo_diff_budget (seed : UInt64 := 0) : UInt64 :=
   if (seed &&& 1) == 0 then (callExportU64? "orb_repo_diff_budget_step" #[1, 1, 0, 3, 1, 2, 1, 500000, 200, 262144]).getD 0
   else (callExportU64? "orb_repo_diff_budget_step" #[0, 1, 0, 3, 1, 2, 1, 500000, 200, 262144]).getD 0
 
+def observe_model_account_admit_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_model_account_admit" #[1, 0, 2, 1]).getD 0
+  else (callExportU64? "orb_model_account_admit" #[1, 0, 1, 1]).getD 0
+
+def observe_model_account_score_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_model_account_score" #[1, 0, 2, 1, 1, 3, 0]).getD 0
+  else (callExportU64? "orb_model_account_score" #[1, 0, 1, 1, 1, 3, 0]).getD 0
+
+def observe_memory_tool_gate_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_memory_tool_gate" #[0, 0, 0, 0, 0, 1, 0, 0, 10, 20, 512, 2048]).getD 0
+  else (callExportU64? "orb_memory_tool_gate" #[0, 0, 0, 0, 1, 1, 1, 0, 10, 20, 512, 2048]).getD 0
+
+def observe_upload_cleanup_gate_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_upload_cleanup_gate" #[1, 0, 0]).getD 0
+  else (callExportU64? "orb_upload_cleanup_gate" #[1, 1, 0]).getD 0
+
+def observe_proxy_exhaustion_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_proxy_exhaustion_step" #[0, 1, 0, 0, 0, 0]).getD 0
+  else (callExportU64? "orb_proxy_exhaustion_step" #[2, 0, 0, 1, 0, 0]).getD 0
+
+def observe_composer_default_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_composer_default_step" #[0, 0, 1, 1]).getD 0
+  else (callExportU64? "orb_composer_default_step" #[0, 1, 1, 1]).getD 0
+
+def observe_cloud_handoff_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_cloud_handoff_step" #[1, 0, 1, 1, 1]).getD 0
+  else (callExportU64? "orb_cloud_handoff_step" #[1, 1, 1, 1, 1]).getD 0
+
+def observe_fast_poll_delay_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_fast_poll_delay_ms" #[0, 1000, 0]).getD 0
+  else (callExportU64? "orb_fast_poll_delay_ms" #[0, 1000, 4]).getD 0
+
+def observe_mcp_preflight_cache_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_mcp_preflight_cache_gate" #[1, 1, 1, 1, 30, 120]).getD 0
+  else (callExportU64? "orb_mcp_preflight_cache_gate" #[1, 1, 1, 1, 150, 120]).getD 0
+
+def observe_sidebar_move_target_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_sidebar_move_target_admit" #[0, 0, 1, 2, 0, 1, 3]).getD 0
+  else (callExportU64? "orb_sidebar_move_target_admit" #[1, 1, 1, 2, 0, 1, 3]).getD 0
+
+def observe_sidebar_drag_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_sidebar_drag_step" #[1, 1, 1, 0, 0, 4, 300, 0, 0, 0, 100, 100]).getD 0
+  else (callExportU64? "orb_sidebar_drag_step" #[3, 4, 1, 0, 0, 64, 300, 0, 5, 0, 100, 100]).getD 0
+
+def observe_followup_queue_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_followup_queue_step" #[3, 5, 5, 5, 42, 42, 0, 10, 11, 0, 0, 1, 0]).getD 0
+  else (callExportU64? "orb_followup_queue_step" #[3, 5, 5, 5, 42, 42, 0, 10, 10, 0, 0, 1, 0]).getD 0
+
+def observe_transport_epoch_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_transport_epoch_step" #[0, 1, 1, 0, 1, 1, 1, 2, 3, 0, 77, 1000, 5000]).getD 0
+  else (callExportU64? "orb_transport_epoch_step" #[0, 2, 1, 0, 1, 1, 1, 0, 3, 404, 77, 1000, 5000]).getD 0
+
+def observe_stream_open_tail_cap_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_stream_open_tail_cap_step" #[1000, 0, 0, 5000, 0, 4096, 1]).getD 0
+  else (callExportU64? "orb_stream_open_tail_cap_step" #[1000, 0, 0, 5000, 0, 0, 1]).getD 0
+
+def observe_rtt_ewma_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_rtt_ewma_step" #[0, 0, 200]).getD 0
+  else (callExportU64? "orb_rtt_ewma_step" #[200, 100, 600]).getD 0
+
+def observe_client_link_budget_shadow (seed : UInt64 := 0) : UInt64 :=
+  if (seed &&& 1) == 0 then (callExportU64? "orb_client_link_budget_step" #[100, 50, 0, 0, 0]).getD 0
+  else (callExportU64? "orb_client_link_budget_step" #[1500, 300, 2, 1, 1]).getD 0
+
 end OrbCore.HostObservers

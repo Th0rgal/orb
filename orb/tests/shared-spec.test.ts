@@ -112,12 +112,14 @@ describe("shared/orb-spec/fixtures/projection-invariants.json", () => {
       const parent = {
         id: "parent",
         status: "completed",
+        superseded_by_mission_id: c.input.ancestor_superseded ? "parent-next" : undefined,
         tags: c.input.ancestor_superseded ? ["superseded"] : [],
       };
       const target = {
         id: "target",
         parent_mission_id: c.input.ancestor_superseded ? "parent" : undefined,
         status: c.input.is_working ? "running" : c.input.is_archived ? "acknowledged" : "completed",
+        superseded_by_mission_id: c.input.is_superseded ? "target-next" : undefined,
         tags: c.input.is_superseded ? ["superseded"] : [],
       };
       const child = {

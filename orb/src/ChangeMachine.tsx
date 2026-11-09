@@ -37,7 +37,7 @@ import {connectionVersion, isAdminUser} from "./api";
 import { Select } from "./Select";
 import { For, Show, createMemo, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { ErrorNotice } from "./ErrorNotice";
-import { cancelMission, getMission, type HarnessChoice, type Mission } from "./api";
+import { cancelMission, getMission, isClientPlacement, type HarnessChoice, type Mission } from "./api";
 import { machineIdentity, nativeInvoke } from "./clientRuns";
 import { localBinding, localRunActive, pollLocal, refreshLocalAgents, stopLocal } from "./localAgents";
 import { setClientMissionStatus } from "./api";
@@ -121,7 +121,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
     const inspected = viewSource();
     if (inspected) return inspected.kind === "client" && inspected.id === "unknown" && client ? { kind: "client", id: client } : inspected;
     if (p.mission.machine_transfer?.destination) return p.mission.machine_transfer.destination;
-    if (p.mission.tags?.includes("placement:client") || recalledLaunch(p.mission.id)?.nodeId === "local") return { kind: "client", id: client ?? "unknown" };
+    if (isClientPlacement(p.mission) || recalledLaunch(p.mission.id)?.nodeId === "local") return { kind: "client", id: client ?? "unknown" };
     const node = missionNode(p.mission) ?? recalledRemoteNode() ?? lastMissionNode(p.mission.id);
     return node ? { kind: "node", id: node } : { kind: "core" };
   };

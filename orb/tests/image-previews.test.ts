@@ -33,7 +33,7 @@ it('reads an initial Core upload outside the mission workspace using the authent
 });
 it('never sends local or remote-node paths to the Core download API',async()=>{
  const fetcher=vi.spyOn(globalThis,'fetch');
- for(const m of [{...mission,remote_node_id:'ashur'},{...mission,tags:['placement:client']}]) expect(await createFileClient({mission:m}).loadUploadedImage('/context/a.png')).toBeNull();
+ for(const m of [{...mission,remote_node_id:'ashur'},{...mission,placement_kind:'client',tags:['placement:client']}]) expect(await createFileClient({mission:m}).loadUploadedImage('/context/a.png')).toBeNull();
  expect(fetcher).not.toHaveBeenCalled();
 });
 it('does not retry authentication failures against another path resolver',async()=>{

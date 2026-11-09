@@ -1,12 +1,12 @@
 import {afterEach,beforeEach,expect,it,vi} from 'vitest';
 const mocks=vi.hoisted(()=>({api:vi.fn(),enqueue:vi.fn(),directory:vi.fn(),remember:vi.fn(),failure:vi.fn(),version:1}));
-vi.mock('../src/api',()=>({api:mocks.api,connectionVersion:()=>mocks.version}));
+vi.mock('../src/api',()=>({api:mocks.api,connectionVersion:()=>mocks.version,isClientPlacement:(m:any)=>m?.placement_kind==='client'||Boolean(m?.placement_kind?.startsWith('client:'))}));
 vi.mock('../src/clientRuns',()=>({nativeInvoke:()=>true,machineIdentity:async()=> 'computer'}));
 vi.mock('../src/localMessageQueue',()=>({enqueueLocalMessage:mocks.enqueue,captureWakeupFences:async()=>({})}));
 vi.mock('../src/localAgents',()=>({localBinding:()=>undefined,localDirectory:mocks.directory,recordLocalFailure:mocks.failure,rememberBinding:mocks.remember,restoreLocalBindings:async()=>{},refreshLocalAgents:async()=>[{id:'codex',path:'/bin/codex',installed:true}]}));
 import {startClientDelegations} from '../src/clientDelegations';
 let stop:()=>void;
-const mission={id:'child',parent_mission_id:'parent',tags:['placement:client','worker-client:computer'],working_directory:'/plain',backend:'codex'};
+const mission={id:'child',parent_mission_id:'parent',placement_kind:'client',tags:['placement:client','worker-client:computer'],working_directory:'/plain',backend:'codex'};
 beforeEach(()=>{vi.useFakeTimers();vi.clearAllMocks();mocks.version=1;mocks.remember.mockResolvedValue(undefined);mocks.directory.mockResolvedValue('/plain');mocks.enqueue.mockResolvedValue(undefined);mocks.api.mockImplementation(async(_path,options)=>JSON.parse(options.body).op==='inbox_all'?{messages:[{id:'message',content:'Do the task'}]}:{});});
 afterEach(()=>{stop?.();vi.useRealTimers();});
 it('persists a delegated task before acknowledging the server',async()=>{

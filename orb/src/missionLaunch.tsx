@@ -7,7 +7,7 @@ import type { DraftImage } from "./imageAttachments";
 import { remoteContinuation } from "./remoteContinuation";
 import { ErrorNotice, isNonResumableError } from "./ErrorNotice";
 import { Show, Suspense, lazy } from "solid-js";
-import { ApiError, getApiUrl, type Mission, type RemoteLaunchCapability, type RemoteNodesResponse } from "./api";
+import { ApiError, getApiUrl, isClientPlacement, type Mission, type RemoteLaunchCapability, type RemoteNodesResponse } from "./api";
 import { goalObjective, GoalTag } from "./goal";
 import type { StreamItem } from "./Transcript";
 
@@ -56,7 +56,7 @@ export function lastMissionNode(id: string | undefined): string | undefined {
 export function missionDestination(mission: Mission | null, receipt?: LaunchReceipt) {
   const destination = mission?.machine_transfer?.destination;
   if (destination) return destination.kind === "core" ? "Core" : destination.kind === "client" ? "This computer" : nodeLabel(destination.id);
-  if (mission?.tags?.includes("placement:client") || receipt?.nodeId === "local") return "This computer";
+  if (isClientPlacement(mission) || receipt?.nodeId === "local") return "This computer";
   // Server-owned remote placement or the accepted selection takes precedence
   // over workspace_name, which can still name the host's bookkeeping workspace.
   const node = missionNode(mission);
@@ -279,7 +279,7 @@ export function missionPhase(mission: Mission | null, activity: boolean): {label
     if (reason && classified[reason]) return {...classified[reason], moving: false, failed: true};
     return { label: status === "interrupted" ? "Interrupted" : status.startsWith("cancel") ? "Cancelled" : "Failed", moving: false, failed: true,
       detail: status === "interrupted" && ["service_restart", "server_shutdown"].includes(reason ?? "")
-        ? mission?.tags?.includes("placement:client")
+        ? isClientPlacement(mission)
           ? "The backend restarted and marked this conversation interrupted. This does not confirm that the agent on your computer stopped."
           : "The backend restarted during this run. The conversation is preserved; send a follow-up to continue if it does not resume."
         : reason === "stalled" || reason === "watchdog_stalled" ? "Core stopped this execution after no progress was detected. Resume to inspect existing work and continue."

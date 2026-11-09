@@ -41,7 +41,7 @@ it('follows multiple recovered side missions with a fresh sequence boundary',asy
  const {getMissionEvents,streamMission}=await import('../src/stream');
  const {watchBtw}=await import('../src/btwAgent');
  localStorage.setItem('agent:'+sideQuestionKey('recovered-parent'),JSON.stringify({id:'old-side',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:999,afterSequence:9000}));
- vi.mocked(getMission).mockImplementation(async id=>({id,status:'awaiting_user',history:[],tags:id==='old-side'?['superseded_by:middle-side']:id==='middle-side'?['superseded_by:new-side']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'awaiting_user',history:[],superseded_by_mission_id:id==='old-side'?'middle-side':id==='middle-side'?'new-side':undefined,tags:id==='old-side'?['superseded_by:middle-side']:id==='middle-side'?['superseded_by:new-side']:[],title:null,created_at:'',updated_at:''}));
  vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'user_message',content:'Q',sequence:1,id:1,timestamp:''},{event_type:'assistant_message',content:'Recovered answer',sequence:2,id:2,timestamp:''}]);
  const events:any[]=[];
  await watchBtw('recovered-parent',new AbortController().signal,event=>events.push(event));
@@ -71,7 +71,7 @@ it('reconnects to a replacement and rejects late events from the old stream',asy
  let replaced=false,finished=false;
  const receive=vi.fn();
  localStorage.setItem('agent:'+sideQuestionKey('stream-parent'),JSON.stringify({id:'old-stream',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,afterSequence:500}));
- vi.mocked(getMission).mockImplementation(async id=>({id,status:finished?'awaiting_user':'active',history:[],tags:id==='old-stream'&&replaced?['superseded_by:new-stream']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:finished?'awaiting_user':'active',history:[],superseded_by_mission_id:id==='old-stream'&&replaced?'new-stream':undefined,tags:id==='old-stream'&&replaced?['superseded_by:new-stream']:[],title:null,created_at:'',updated_at:''}));
  vi.mocked(getMissionEvents).mockImplementation(async()=>finished?[{event_type:'assistant_message',content:'Final new answer',sequence:1,id:1,timestamp:''}]:[]);
  vi.mocked(streamMission).mockImplementation((id,callback)=>{callbacks.set(id,callback);const dispose=vi.fn();disposes.set(id,dispose);return dispose;});
  const abort=new AbortController();
@@ -105,7 +105,7 @@ it('does not accept the old streamed answer when a replacement completes empty',
  const {watchBtw}=await import('../src/btwAgent');
  let replaced=false;
  localStorage.setItem('agent:'+sideQuestionKey('empty-replacement-parent'),JSON.stringify({id:'empty-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0}));
- vi.mocked(getMission).mockImplementation(async id=>({id,status:replaced?'awaiting_user':'active',history:[],tags:id==='empty-old'&&replaced?['superseded_by:empty-new']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:replaced?'awaiting_user':'active',history:[],superseded_by_mission_id:id==='empty-old'&&replaced?'empty-new':undefined,tags:id==='empty-old'&&replaced?['superseded_by:empty-new']:[],title:null,created_at:'',updated_at:''}));
  vi.mocked(getMissionEvents).mockResolvedValue([]);
  vi.mocked(streamMission).mockImplementation((id,callback)=>{if(id==='empty-old')callback({type:'text_delta',data:{content:'Old answer'}});return vi.fn();});
  const abort=new AbortController();
@@ -120,7 +120,7 @@ it('refuses cyclic replacement chains without changing the saved session',async(
  const {watchBtw}=await import('../src/btwAgent');
  const saved={id:'cycle-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,afterSequence:88};
  localStorage.setItem('agent:'+sideQuestionKey('cycle-parent'),JSON.stringify(saved));
- vi.mocked(getMission).mockImplementation(async id=>({id,status:'completed',history:[],tags:[`superseded_by:${id==='cycle-old'?'cycle-new':'cycle-old'}`],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'completed',history:[],superseded_by_mission_id:id==='cycle-old'?'cycle-new':'cycle-old',tags:[`superseded_by:${id==='cycle-old'?'cycle-new':'cycle-old'}`],title:null,created_at:'',updated_at:''}));
  await expect(watchBtw('cycle-parent',new AbortController().signal,()=>{})).rejects.toThrow('cycle');
  expect(btwSession('cycle-parent')).toEqual(saved);
 });
@@ -129,7 +129,7 @@ it('preserves a pending replacement after a lookup failure instead of starting a
  const {sideQuestionKey}=await import('../src/sideQuestionStorage');
  const saved={id:'missing-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,afterSequence:88};
  localStorage.setItem('agent:'+sideQuestionKey('missing-parent'),JSON.stringify(saved));
- vi.mocked(getMission).mockImplementation(async id=>{if(id==='missing-new')throw new ApiError(404,'Not found');return {id,status:'completed',history:[],tags:['superseded_by:missing-new'],title:null,created_at:'',updated_at:''};});
+ vi.mocked(getMission).mockImplementation(async id=>{if(id==='missing-new')throw new ApiError(404,'Not found');return {id,status:'completed',history:[],superseded_by_mission_id:'missing-new',tags:['superseded_by:missing-new'],title:null,created_at:'',updated_at:''};});
  await expect(askBtwAgent('missing-parent','Next','context',[],new AbortController().signal,()=>{})).rejects.toThrow('Recovered side session is unavailable');
  expect(btwSession('missing-parent')).toEqual(saved);
  expect(api).not.toHaveBeenCalled();
@@ -142,7 +142,7 @@ it('does not save replacement identities after cancellation',async()=>{
  const abort=new AbortController();
  const saved={id:'cancel-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0};
  localStorage.setItem('agent:'+sideQuestionKey('cancel-parent'),JSON.stringify(saved));
- vi.mocked(getMission).mockImplementation(async id=>{if(id==='cancel-new')abort.abort();return {id,status:'completed',history:[],tags:id==='cancel-old'?['superseded_by:cancel-new']:[],title:null,created_at:'',updated_at:''};});
+ vi.mocked(getMission).mockImplementation(async id=>{if(id==='cancel-new')abort.abort();return {id,status:'completed',history:[],superseded_by_mission_id:id==='cancel-old'?'cancel-new':undefined,tags:id==='cancel-old'?['superseded_by:cancel-new']:[],title:null,created_at:'',updated_at:''};});
  await expect(watchBtw('cancel-parent',abort.signal,()=>{})).rejects.toThrow('cancelled');
  expect(btwSession('cancel-parent')).toEqual(saved);
 });
@@ -153,7 +153,7 @@ it('does not save replacement identities after the backend connection changes',a
  const {watchBtw}=await import('../src/btwAgent');
  const saved={id:'connection-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0};
  localStorage.setItem('agent:'+sideQuestionKey('connection-parent'),JSON.stringify(saved));
- vi.mocked(getMission).mockImplementation(async id=>{if(id==='connection-new')bumpConnectionVersion(version=>version+1);return {id,status:'completed',history:[],tags:id==='connection-old'?['superseded_by:connection-new']:[],title:null,created_at:'',updated_at:''};});
+ vi.mocked(getMission).mockImplementation(async id=>{if(id==='connection-new')bumpConnectionVersion(version=>version+1);return {id,status:'completed',history:[],superseded_by_mission_id:id==='connection-old'?'connection-new':undefined,tags:id==='connection-old'?['superseded_by:connection-new']:[],title:null,created_at:'',updated_at:''};});
  await expect(watchBtw('connection-parent',new AbortController().signal,()=>{})).rejects.toThrow('Connection changed');
  expect(btwSession('connection-parent')).toEqual(saved);
 });
@@ -161,7 +161,7 @@ it('does not save replacement identities after the backend connection changes',a
 it('stops the recovered side agent instead of its superseded predecessor',async()=>{
  const {sideQuestionKey}=await import('../src/sideQuestionStorage');
  localStorage.setItem('agent:'+sideQuestionKey('stop-parent'),JSON.stringify({id:'stop-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0}));
- vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],tags:id==='stop-old'?['superseded_by:stop-new']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],superseded_by_mission_id:id==='stop-old'?'stop-new':undefined,tags:id==='stop-old'?['superseded_by:stop-new']:[],title:null,created_at:'',updated_at:''}));
  await stopBtw('stop-parent');
  expect(cancelMission).toHaveBeenCalledWith('stop-new');
 });
@@ -171,7 +171,7 @@ it('sends a follow-up to the recovered session using its own sequence boundary',
  const {getMissionEvents}=await import('../src/stream');
  localStorage.setItem('agent:'+sideQuestionKey('follow-parent'),JSON.stringify({id:'follow-old',question:'First',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0,afterSequence:9000,contextVersion:2,conversationCursor:{sequence:10,visibleHash:'hash'},placement:JSON.stringify([false,undefined,undefined,undefined])}));
  let sent=false;
- vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='follow-parent'?'active':'awaiting_user',history:[],tags:id==='follow-old'?['superseded_by:follow-new']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='follow-parent'?'active':'awaiting_user',history:[],superseded_by_mission_id:id==='follow-old'?'follow-new':undefined,tags:id==='follow-old'?['superseded_by:follow-new']:[],title:null,created_at:'',updated_at:''}));
  vi.mocked(getMissionEvents).mockImplementation(async()=>sent?[{event_type:'user_message',content:'Next',sequence:2,id:2,timestamp:''},{event_type:'assistant_message',content:'Follow-up answer',sequence:3,id:3,timestamp:''}]:[{event_type:'assistant_message',content:'Earlier recovered answer',sequence:1,id:1,timestamp:''}]);
  vi.mocked(sendMissionMessage).mockImplementationOnce(async()=>{sent=true;return {} as any;});
  const receive=vi.fn();
@@ -187,7 +187,7 @@ it('includes the terminal mission reason when a recovered session has no respons
  const {getMissionEvents}=await import('../src/stream');
  const {watchBtw}=await import('../src/btwAgent');
  localStorage.setItem('agent:'+sideQuestionKey('reason-parent'),JSON.stringify({id:'reason-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0}));
- vi.mocked(getMission).mockImplementation(async id=>({id,status:'completed',history:[],tags:id==='reason-old'?['superseded_by:reason-new']:[],status_message:'No assistant output recorded',title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'completed',history:[],superseded_by_mission_id:id==='reason-old'?'reason-new':undefined,tags:id==='reason-old'?['superseded_by:reason-new']:[],status_message:'No assistant output recorded',title:null,created_at:'',updated_at:''}));
  vi.mocked(getMissionEvents).mockResolvedValue([]);
  await expect(watchBtw('reason-parent',new AbortController().signal,()=>{})).rejects.toThrow('completed: No assistant output recorded');
 });
@@ -200,8 +200,8 @@ it('a missing agent endpoint fails without falling back to a normal fork',async(
 
 it('launches locally in the parent folder with a fresh session identity',async()=>{
  vi.mocked(localBinding).mockImplementation(id=>id==='local-parent'?{cwd:'/work/shared',harness:'claudecode',bin:'/bin/claude',sessionId:'never-reuse-parent'}:undefined);
- vi.mocked(getMission).mockImplementation(async(id)=>({id,status:id==='local-parent'?'active':'awaiting_user',history:[],tags:id==='local-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
- vi.mocked(api).mockResolvedValue({id:'local-child',tags:['placement:client']});
+ vi.mocked(getMission).mockImplementation(async(id)=>({id,status:id==='local-parent'?'active':'awaiting_user',history:[],placement_kind:id==='local-parent'?'client':undefined,tags:id==='local-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValue({id:'local-child',placement_kind:'client',tags:['placement:client']});
  await askBtwAgent('local-parent','Read this folder','context',[],new AbortController().signal,()=>{});
  expect(startLocal).toHaveBeenCalledWith(expect.objectContaining({id:'local-child',cwd:'/work/shared',harness:'opencode',model:'builtin/smart',sessionId:undefined,sharedCwdWith:'local-parent'}));
 });
@@ -316,8 +316,8 @@ it('replaces an explicitly refused side session only through the btw route and r
 
 it('finishes a local side response without waiting for Core to persist terminal status',async()=>{
  vi.mocked(localBinding).mockImplementation(id=>id==='native-parent'?{cwd:'/work/shared',harness:'opencode',bin:'/bin/opencode'}:undefined);
- vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],tags:id==='native-parent'?['placement:client']:[],created_at:'',updated_at:''}));
- vi.mocked(api).mockResolvedValue({id:'native-child',tags:['placement:client']});
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],placement_kind:id==='native-parent'?'client':undefined,tags:id==='native-parent'?['placement:client']:[],created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValue({id:'native-child',placement_kind:'client',tags:['placement:client']});
  const receive=vi.fn();
  await askBtwAgent('native-parent','Q','context',[],new AbortController().signal,receive);
  expect(receive).toHaveBeenCalledWith({type:'done',answer:'Read fixture'});
@@ -328,8 +328,8 @@ it('finishes a local side response without waiting for Core to persist terminal 
 it('reconciles a restored local side run before subscribing',async()=>{
  const {reconcileLocalRun,followLocal}=await import('../src/localAgents');
  vi.mocked(localBinding).mockImplementation(id=>id==='recovery-parent'?{cwd:'/work/shared',harness:'claudecode',bin:'/bin/claude'}:undefined);
- vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='recovery-parent'?'active':'awaiting_user',history:[],tags:id==='recovery-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
- vi.mocked(api).mockResolvedValue({id:'recovery-child',tags:['placement:client']});
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='recovery-parent'?'active':'awaiting_user',history:[],placement_kind:id==='recovery-parent'?'client':undefined,tags:id==='recovery-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValue({id:'recovery-child',placement_kind:'client',tags:['placement:client']});
  await askBtwAgent('recovery-parent','Check progress','context',[],new AbortController().signal,()=>{});
  expect(reconcileLocalRun).toHaveBeenCalledWith('recovery-child');
  expect(vi.mocked(reconcileLocalRun).mock.invocationCallOrder.at(-1)).toBeLessThan(vi.mocked(followLocal).mock.invocationCallOrder.at(-1)!);
@@ -416,8 +416,8 @@ it('waits for local completion synchronization before admitting a queued follow-
  vi.mocked(setClientMissionStatus).mockImplementationOnce(()=>pending);
  vi.mocked(localBinding).mockImplementation(()=>({cwd:'/work/shared',harness:'opencode',bin:'/bin/opencode'}));
  vi.mocked(getMissionEvents).mockResolvedValue([]);
- vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='sync-parent'?'active':synced?'awaiting_user':'pending',history:[],tags:id==='sync-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
- vi.mocked(api).mockResolvedValue({id:'sync-child',tags:['placement:client']});
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='sync-parent'?'active':synced?'awaiting_user':'pending',history:[],placement_kind:id==='sync-parent'?'client':undefined,tags:id==='sync-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValue({id:'sync-child',placement_kind:'client',tags:['placement:client']});
  await askBtwAgent('sync-parent','First','context',[],new AbortController().signal,()=>{});
  const starts=vi.mocked(startLocal).mock.calls.length;
  const next=askBtwAgent('sync-parent','Next','context',[],new AbortController().signal,()=>{});
@@ -433,7 +433,7 @@ it('installs completion synchronization before announcing a restored local run a
  const {setClientMissionStatus}=await import('../src/api');
  localStorage.setItem('agent:'+sideQuestionKey('restored-parent'),JSON.stringify({id:'restored-child',question:'First',harness:'opencode',model:'builtin/smart',local:true,active:true,baseline:0}));
  let release!:()=>void;
- vi.mocked(getMission).mockImplementationOnce(()=>new Promise(resolve=>{release=()=>resolve({id:'restored-child',status:'pending',history:[],tags:['placement:client'],title:null,created_at:'',updated_at:''});}));
+ vi.mocked(getMission).mockImplementationOnce(()=>new Promise(resolve=>{release=()=>resolve({id:'restored-child',status:'pending',history:[],placement_kind:'client',tags:['placement:client'],title:null,created_at:'',updated_at:''});}));
  const events:any[]=[];
  const watching=watchBtw('restored-parent',new AbortController().signal,event=>events.push(event));
  await new Promise(resolve=>setTimeout(resolve,0));
@@ -448,8 +448,8 @@ it('recovers a failed native launch before retrying its pending Core mission',as
  const {setClientMissionStatus}=await import('../src/api');
  let settled=false;
  vi.mocked(localBinding).mockImplementation(()=>({cwd:'/work/shared',harness:'opencode',bin:'/bin/opencode'}));
- vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='failed-launch-parent'?'active':settled?'interrupted':'pending',history:[],tags:id==='failed-launch-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
- vi.mocked(api).mockResolvedValueOnce({id:'failed-launch-child',tags:['placement:client']}).mockResolvedValueOnce({id:'retry-launch-child',tags:['placement:client']});
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='failed-launch-parent'?'active':settled?'interrupted':'pending',history:[],placement_kind:id==='failed-launch-parent'?'client':undefined,tags:id==='failed-launch-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValueOnce({id:'failed-launch-child',placement_kind:'client',tags:['placement:client']}).mockResolvedValueOnce({id:'retry-launch-child',placement_kind:'client',tags:['placement:client']});
  vi.mocked(startLocal).mockRejectedValueOnce(new Error('native launch failed'));
  const ask=()=>askBtwAgent('failed-launch-parent','Q','context',[],new AbortController().signal,()=>{});
  await expect(ask()).rejects.toThrow('native launch failed');
@@ -611,7 +611,7 @@ it('follows Core placement when a stale local view of a moved parent claims this
  const {rememberBinding}=await import('../src/localAgents');
  vi.mocked(localBinding).mockImplementation(()=>({cwd:'/work/shared',harness:'codex',bin:'/bin/codex'}));
  // Offline fallback: the local-origin journal always reports `placement:client`.
- vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='moved-parent'?'active':'awaiting_user',history:[],tags:id==='moved-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='moved-parent'?'active':'awaiting_user',history:[],placement_kind:id==='moved-parent'?'client':undefined,tags:id==='moved-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
  vi.mocked(api).mockResolvedValueOnce({id:'node-side',tags:['btw-parent:moved-parent']});
  await askBtwAgent('moved-parent','Q','context',[],new AbortController().signal,()=>{});
  expect(startLocal).not.toHaveBeenCalled();
@@ -950,7 +950,7 @@ it('preserves existing Attachment trailer and imagePaths when editing a local qu
  Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async(_name:string,fn:()=>Promise<unknown>)=>fn()}});
  vi.mocked(localBinding).mockImplementation(id=>id==='local-parent'||id==='local-side'?{cwd:'/work/local',harness:'opencode',bin:'/bin/opencode',sessionId:'sess-1'}:undefined);
  localStorage.setItem('agent:'+sideQuestionKey('local-parent'),JSON.stringify({id:'local-side',question:'Initial?',harness:'opencode',model:'builtin/smart',local:true,active:true,baseline:0,conversationCursor:{sequence:3,visibleHash:'h3'}}));
- vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],tags:['placement:client','btw-parent:local-parent'],title:null,created_at:'',updated_at:''} as any));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],placement_kind:'client',tags:['placement:client','btw-parent:local-parent'],title:null,created_at:'',updated_at:''} as any));
  try{
   const msgId='22222222-3333-4444-8555-666666666666' as ReturnType<typeof crypto.randomUUID>;
   await queueBtwFollowUp('local-parent','Inspect this screenshot','ctx',[], [{name:'diagram.png',media_type:'image/png',data_base64:btoa('png')}],msgId,false);
@@ -1250,7 +1250,7 @@ it('heals persisted sideQuestionStorage pending turn during background reconcile
     return {id:'earlier-parent',status:'completed',tags:[],history:[],title:'Earlier',created_at:'',updated_at:''} as any;
    }
    if(id==='old-superseded-side'){
-    return {id,status:'interrupted',tags:[`btw-parent:${parentId}`,'superseded','superseded_by:1013a4da-replacement'],history:[],title:null,created_at:'2026-11-05T11:19:00Z',updated_at:'2026-11-05T11:19:30Z'} as any;
+    return {id,status:'interrupted',superseded_by_mission_id:'1013a4da-replacement',tags:[`btw-parent:${parentId}`,'superseded','superseded_by:1013a4da-replacement'],history:[],title:null,created_at:'2026-11-05T11:19:00Z',updated_at:'2026-11-05T11:19:30Z'} as any;
    }
    if(id==='1013a4da-replacement'){
     return {id,status:'completed',backend:'opencode',model_override:'builtin/smart',tags:[`btw-parent:${parentId}`],history:[],title:null,created_at:'2026-11-05T11:20:00Z',updated_at:'2026-11-05T11:20:54Z'} as any;

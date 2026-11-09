@@ -303,7 +303,7 @@ it('keeps one continuous Sending → Working state through a Send now stop',asyn
 it('shows one Working on This computer… line for local Antigravity runs without duplicate AgentActivity status rows',async()=>{
  const {getMission}=await import('../src/api');
  const {localActivities}=await import('../src/localAgents');
- const localMission:Mission={id:'local-agy',backend:'antigravity',status:'active',tags:['placement:client'],history:[{role:'user',content:'Hello'}],created_at:'',updated_at:''};
+ const localMission:Mission={id:'local-agy',backend:'antigravity',status:'active',placement_kind:'client',tags:['placement:client'],history:[{role:'user',content:'Hello'}],created_at:'',updated_at:''};
  vi.mocked(getMission).mockImplementation(async()=>localMission);
  vi.stubGlobal('fetch',vi.fn(async()=>Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0'}})));
  const host=window as any,prevInternal=host.__TAURI_INTERNALS__,prevTauri=host.__TAURI__;

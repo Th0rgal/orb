@@ -126,6 +126,7 @@ import {
   getMission,
   getRemoteNodes,
   isAdminUser,
+  isClientPlacement,
   isConnected,
   isMissionParticipant,
   listCompletedMissions,
@@ -771,7 +772,7 @@ export default function App() {
     const mission = found ? movedMission(found) : found;
     if (mission?.backend?.startsWith("cloud_")) return { id, title: displayTitle(renamedTitle("mission", id, mission.title)) || "Cloud agent", local: false, destination: ({cloud_grok_bot:"Grok Bot",cloud_cursor:"Cursor Cloud",cloud_hermes:"Paloma"} as Record<string,string>)[mission.backend], project: mission.project, context: null };
     const binding = localBinding(id);
-    const local = !!binding || !!mission?.tags?.includes("placement:client");
+    const local = !!binding || isClientPlacement(mission);
     const backend = mission?.backend || binding?.harness;
     const choice = harnessChoices(local ? "local" : "core").find(c => c.backend.id === backend);
     const model = mission?.model_override || binding?.model;
@@ -1516,7 +1517,7 @@ export default function App() {
                   isConnected() &&
                   Boolean(activeM()) &&
                   !isMissionParticipant(activeM()) &&
-                  !activeM()?.tags?.includes("placement:client");
+                  !isClientPlacement(activeM());
                 return (
                   <>
                     <Show when={sessionPreview().destination === "Paloma"}><ProviderLogo type="hermes" /></Show>
