@@ -2281,7 +2281,392 @@ private def buildCanonicalSkillCatalog (homeFp : System.FilePath) (libSkills : A
         }
   return (entries, idReady)
 
-private def buildLocalSkillsReport (st : LocaldState) (libSkills : Array JVal) : IO JVal := do
+/-! ### Local Control-Plane MCP Provisioning (`~/.orb/mcp` + Local Harness MCP Configs) -/
+
+private def localMcpDir (homeFp : System.FilePath) : System.FilePath :=
+  homeFp / ".orb" / "mcp"
+
+private def localMcpCredentialPath (homeFp : System.FilePath) : System.FilePath :=
+  localMcpDir homeFp / "credential"
+
+private def localMcpSessionMetaPath (homeFp : System.FilePath) : System.FilePath :=
+  localMcpDir homeFp / "session.json"
+
+private def isAllowedLocalMcpApiUrl (raw : String) : Bool :=
+  let u := OrbBin.PosixExt.stripTrailingSlash raw.trimAscii.toString
+  isSafeHttpUrl u &&
+  (u.startsWith "https://" ||
+   u == "http://127.0.0.1" || u.startsWith "http://127.0.0.1:" || u.startsWith "http://127.0.0.1/" ||
+   u == "http://localhost" || u.startsWith "http://localhost:" || u.startsWith "http://localhost/" ||
+   u == "http://[::1]" || u.startsWith "http://[::1]:" || u.startsWith "http://[::1]/")
+
+private def localMcpRoleCode? (raw : String) : Option UInt8 :=
+  match raw.trimAscii.toString.toLower with
+  | "executor"    => some 0
+  | "coordinator" => some 1
+  | _             => none
+
+private def harnessMcpConfigRel? (hid : String) : Option String :=
+  match hid with
+  | "claudecode"  => some ".claude.json"
+  | "codex"       => some ".codex/config.toml"
+  | "antigravity" => some ".gemini/config/mcp_config.json"
+  | "opencode"    => some ".config/opencode/opencode.json"
+  | _             => none
+
+private def isHarnessMcpTargetPresent (homeFp : System.FilePath) (hid : String) : IO Bool := do
+  match hid with
+  | "claudecode"  =>
+    if ← (homeFp / ".claude").pathExists then return true
+    (homeFp / ".claude.json").pathExists
+  | "codex"       => (homeFp / ".codex").pathExists
+  | "antigravity" => (homeFp / ".gemini").pathExists
+  | "opencode"    => (homeFp / ".config" / "opencode").pathExists
+  | _             => pure false
+
+private def isValidRegularNonSymlink (fp : System.FilePath) : IO Bool := do
+  let st ← OrbBin.PosixExt.statPath fp.toString
+  return st.exists_ && st.isReg && !st.isSymlink
+
+private def resolveSandboxedMcpBin? (st : LocaldState) (homeFp : System.FilePath) : IO (Option String) := do
+  if let some ov ← IO.getEnv "SANDBOXED_MCP_BIN" then
+    let clean := ov.trimAscii.toString
+    if !clean.isEmpty then
+      let ovFp := System.FilePath.mk clean
+      if ← isValidRegularNonSymlink ovFp then
+        return some ovFp.toString
+  let appPathStr ← try (·.toString) <$> IO.appPath catch _ => pure ""
+  let sibling? : Option System.FilePath :=
+    if appPathStr.isEmpty then none
+    else ((System.FilePath.mk appPathStr).parent).map (· / "sandboxed-mcp")
+  let candidates : Array System.FilePath :=
+    if !st.homeDir.trimAscii.toString.isEmpty then
+      let base := #[homeFp / ".local" / "bin" / "sandboxed-mcp"]
+      match sibling? with | some sb => base.push sb | none => base
+    else
+      let appRootInstalled :=
+        appPathStr.startsWith "/Applications/" ||
+        appPathStr.startsWith "/usr/" ||
+        appPathStr.startsWith (homeFp / "Applications").toString
+      let sysPaths : Array System.FilePath := #[
+        System.FilePath.mk "/Applications/Orb.app/Contents/MacOS/sandboxed-mcp",
+        homeFp / ".local" / "bin" / "sandboxed-mcp",
+        System.FilePath.mk "/usr/local/bin/sandboxed-mcp",
+        System.FilePath.mk "/opt/homebrew/bin/sandboxed-mcp"
+      ]
+      match sibling? with
+      | none => sysPaths
+      | some sb => if appRootInstalled then #[sb] ++ sysPaths else sysPaths.push sb
+  for cand in candidates do
+    if ← isValidRegularNonSymlink cand then
+      return some cand.toString
+  return none
+
+private structure LocalMcpCredentialState where
+  ready         : Bool
+  hasToken      : Bool
+  storedApiUrl  : String
+  targetApiUrl  : String
+  sessionId?    : Option String
+  role          : String
+  hardExpiresAt : UInt64
+  deriving Inhabited
+
+private def persistLocalMcpSession (homeFp : System.FilePath) (sessObj : JVal) : IO (Except String Unit) := do
+  let token := ((sessObj.fieldStr? "token").getD "").trimAscii.toString
+  if !token.startsWith "mcp1." then
+    return .error "External MCP credential must begin with `mcp1.`"
+  let apiUrl := normalizeEndpointKey ((sessObj.fieldStr? "api_url").getD "")
+  if !isAllowedLocalMcpApiUrl apiUrl then
+    return .error "External MCP session requires an HTTPS or loopback Core URL"
+  let roleStr := (((sessObj.fieldStr? "role").getD "coordinator").trimAscii.toString).toLower
+  if (localMcpRoleCode? roleStr).isNone then
+    return .error "External MCP session role must be `coordinator` or `executor`"
+  let expiresAt := (sessObj.fieldUInt64? "expires_at").getD 0
+  let hardExpiresAt := (sessObj.fieldUInt64? "hard_expires_at").getD expiresAt
+  if hardExpiresAt == 0 then
+    return .error "External MCP session is missing `hard_expires_at`"
+  let sessionId? := (sessObj.fieldStr? "session_id").bind OrbBin.PosixExt.parseUuidCanonical?
+  let dir := localMcpDir homeFp
+  if let .error e ← OrbBin.PosixExt.ensurePrivateDir0700 dir then
+    return .error e
+  let credFp := localMcpCredentialPath homeFp
+  if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 credFp (token ++ "\n").toUTF8 then
+    return .error e
+  let metaJv : JVal := .obj #[
+    ("api_url", .str apiUrl),
+    ("session_id", match sessionId? with | some sid => .str sid | none => .null),
+    ("role", .str roleStr),
+    ("expires_at", JVal.uint64 expiresAt),
+    ("hard_expires_at", JVal.uint64 hardExpiresAt)
+  ]
+  let metaFp := localMcpSessionMetaPath homeFp
+  if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 metaFp (OrbBin.Json.renderPretty metaJv ++ "\n").toUTF8 then
+    return .error e
+  return .ok ()
+
+private def inspectLocalMcpCredential
+    (homeFp : System.FilePath)
+    (requestedApiUrl? : Option String) : IO LocalMcpCredentialState := do
+  let nowSec ← OrbBin.PosixExt.nowEpoch
+  let credFp := localMcpCredentialPath homeFp
+  let metaFp := localMcpSessionMetaPath homeFp
+  let credSt ← OrbBin.PosixExt.statPath credFp.toString
+  let metaSt ← OrbBin.PosixExt.statPath metaFp.toString
+  let credRaw ←
+    if credSt.exists_ && credSt.isReg && !credSt.isSymlink then
+      try IO.FS.readFile credFp catch _ => pure ""
+    else pure ""
+  let credTrim := credRaw.trimAscii.toString
+  let hasPrefix := credTrim.startsWith "mcp1."
+  let isPriv0600 : UInt8 :=
+    if credSt.exists_ && credSt.isReg && !credSt.isSymlink && credSt.ownedByEuid &&
+       (credSt.mode &&& 0o777) == 0o600 && hasPrefix && !metaSt.isSymlink then 1 else 0
+  let metaJv : JVal ←
+    if metaSt.exists_ && metaSt.isReg && !metaSt.isSymlink then
+      let mraw ← try IO.FS.readFile metaFp catch _ => pure ""
+      pure ((OrbBin.Json.parse mraw).toOption.getD (.obj #[]))
+    else pure (.obj #[])
+  let storedApi := normalizeEndpointKey ((metaJv.fieldStr? "api_url").getD "")
+  let targetApi := match requestedApiUrl? with
+    | some reqUrl => normalizeEndpointKey reqUrl
+    | none        => storedApi
+  let roleStr := (((metaJv.fieldStr? "role").getD "coordinator").trimAscii.toString).toLower
+  let roleCode : UInt8 := (localMcpRoleCode? roleStr).getD 255
+  let hardExp := (metaJv.fieldUInt64? "hard_expires_at").getD 0
+  let sessionId? := (metaJv.fieldStr? "session_id").bind OrbBin.PosixExt.parseUuidCanonical?
+  let sameEp : UInt8 :=
+    if isAllowedLocalMcpApiUrl targetApi && !storedApi.isEmpty && storedApi == targetApi then 1 else 0
+  let gateOk :=
+    OrbLocald.Spec.verifyLocalMcpCredentialReuse isPriv0600 sameEp roleCode nowSec hardExp == 1
+  return {
+    ready := gateOk
+    hasToken := hasPrefix
+    storedApiUrl := storedApi
+    targetApiUrl := targetApi
+    sessionId? := sessionId?
+    role := if roleCode == 0 then "executor" else "coordinator"
+    hardExpiresAt := hardExp
+  }
+
+private def expectedLocalMcpArgs (apiUrl : String) (credPath : System.FilePath) (role : String) : Array String :=
+  #["--api-url", apiUrl, "--token-file", credPath.toString, "--profile", role]
+
+private def isOrbManagedMcpCommand (cmdStr : String) : Bool :=
+  let clean := cmdStr.trimAscii.toString
+  clean == "sandboxed-mcp" || clean.endsWith "/sandboxed-mcp" || clean.endsWith "\\sandboxed-mcp"
+
+private def renderCodexSandboxedTomlBlock (binPath : String) (srvArgs : Array String) : Array String :=
+  let argsRendered := "[" ++ String.intercalate ", " (srvArgs.toList.map OrbBin.Json.escapeJsonString) ++ "]"
+  #[
+    "[mcp_servers.sandboxed]",
+    s!"command = {OrbBin.Json.escapeJsonString binPath}",
+    s!"args = {argsRendered}",
+    "startup_timeout_sec = 30",
+    "tool_timeout_sec = 60",
+    "enabled = true"
+  ]
+
+private def isTomlSectionHeader (line : String) : Bool :=
+  let t := line.trimAscii.toString
+  t.startsWith "[" && t.endsWith "]" && !(t.contains '=')
+
+private def trimTrailingEmptyLines (xs : Array String) : Array String := Id.run do
+  let mut endIdx := xs.size
+  while endIdx > 0 && xs[endIdx - 1]!.trimAscii.toString.isEmpty do
+    endIdx := endIdx - 1
+  return xs.extract 0 endIdx
+
+private def checkHarnessMcpSynced
+    (homeFp : System.FilePath)
+    (hid binPath : String)
+    (srvArgs : Array String) : IO Bool := do
+  let some rel := harnessMcpConfigRel? hid | return false
+  let cfgFp := homeFp / rel
+  let st ← OrbBin.PosixExt.statPath cfgFp.toString
+  if !st.exists_ || !st.isReg || st.isSymlink then
+    return false
+  let raw ← try IO.FS.readFile cfgFp catch _ => return false
+  if hid == "antigravity" || hid == "claudecode" then
+    let .ok root := OrbBin.Json.parse raw | return false
+    let expected := JVal.obj #[("command", .str binPath), ("args", .arr (srvArgs.map .str))]
+    return ((root.field? "mcpServers").bind (·.field? "sandboxed")) == some expected
+  else if hid == "opencode" then
+    let .ok root := OrbBin.Json.parse raw | return false
+    let some sb := (root.field? "mcp").bind (·.field? "sandboxed") | return false
+    let wantCmd := (#[binPath] ++ srvArgs).map JVal.str
+    return sb.fieldStr? "type" == some "local" &&
+           sb.fieldBool? "enabled" == some true &&
+           sb.field? "command" == some (.arr wantCmd)
+  else if hid == "codex" then
+    let norm := (raw.replace "\r\n" "\n").splitOn "\n" |>.toArray
+    let some sIdx := norm.findIdx? (fun l => l.trimAscii.toString == "[mcp_servers.sandboxed]")
+      | return false
+    let mut eIdx := sIdx + 1
+    while eIdx < norm.size && !isTomlSectionHeader norm[eIdx]! do
+      eIdx := eIdx + 1
+    let sec := trimTrailingEmptyLines (norm.extract sIdx eIdx)
+    return sec == renderCodexSandboxedTomlBlock binPath srvArgs
+  else
+    return false
+
+private def syncJsonMcpServersConfig
+    (cfgFp : System.FilePath)
+    (binPath : String)
+    (srvArgs : Array String)
+    (replaceUnmanaged : Bool) : IO Bool := do
+  let st ← OrbBin.PosixExt.statPath cfgFp.toString
+  if st.isSymlink then return false
+  if let some p := cfgFp.parent then
+    let pst ← OrbBin.PosixExt.statPath p.toString
+    if pst.isSymlink then return false
+  let existingRaw ←
+    if st.exists_ && st.isReg then
+      try IO.FS.readFile cfgFp catch _ => return false
+    else pure ""
+  let trimmed := existingRaw.trimAscii.toString
+  let root ←
+    if trimmed.isEmpty then
+      pure (JVal.obj #[])
+    else
+      match OrbBin.Json.parse trimmed with
+      | .ok v =>
+        if v.asObj?.isSome then pure v else return false
+      | .error _ => return false
+  let servers ←
+    match root.field? "mcpServers" with
+    | none => pure (JVal.obj #[])
+    | some sv =>
+      if sv.asObj?.isSome then pure sv else return false
+  let desired := JVal.obj #[("command", .str binPath), ("args", .arr (srvArgs.map .str))]
+  if let some cur := servers.field? "sandboxed" then
+    if cur == desired then return true
+    let curCmd := (cur.fieldStr? "command").getD ""
+    if !replaceUnmanaged && !isOrbManagedMcpCommand curCmd then
+      return false
+  let updated := root.setField "mcpServers" (servers.setField "sandboxed" desired)
+  let rendered := (OrbBin.Json.renderPretty updated ++ "\n").toUTF8
+  match ← OrbBin.PosixExt.writeAtomicPrivate0600 cfgFp rendered with
+  | .ok () => return true
+  | .error _ => return false
+
+private def syncOpenCodeMcpConfig
+    (cfgFp : System.FilePath)
+    (binPath : String)
+    (srvArgs : Array String)
+    (replaceUnmanaged : Bool) : IO Bool := do
+  let st ← OrbBin.PosixExt.statPath cfgFp.toString
+  if st.isSymlink then return false
+  if let some p := cfgFp.parent then
+    let pst ← OrbBin.PosixExt.statPath p.toString
+    if pst.isSymlink then return false
+  let existingRaw ←
+    if st.exists_ && st.isReg then
+      try IO.FS.readFile cfgFp catch _ => return false
+    else pure ""
+  let trimmed := existingRaw.trimAscii.toString
+  let root ←
+    if trimmed.isEmpty then
+      pure (JVal.obj #[])
+    else
+      match OrbBin.Json.parse trimmed with
+      | .ok v =>
+        if v.asObj?.isSome then pure v else return false
+      | .error _ => return false
+  let mcpObj ←
+    match root.field? "mcp" with
+    | none => pure (JVal.obj #[])
+    | some mv =>
+      if mv.asObj?.isSome then pure mv else return false
+  let cmdArr := (#[binPath] ++ srvArgs).map JVal.str
+  let desired := JVal.obj #[
+    ("type", .str "local"),
+    ("command", .arr cmdArr),
+    ("enabled", .bool true),
+    ("timeout", JVal.nat 60000)
+  ]
+  if let some cur := mcpObj.field? "sandboxed" then
+    if cur == desired then return true
+    let curCmd0 := match cur.fieldArr? "command" with
+      | some xs => (xs[0]?.bind (·.asStr?)).getD ""
+      | none    => (cur.fieldStr? "command").getD ""
+    if !replaceUnmanaged && !isOrbManagedMcpCommand curCmd0 then
+      return false
+  let updated := root.setField "mcp" (mcpObj.setField "sandboxed" desired)
+  let rendered := (OrbBin.Json.renderPretty updated ++ "\n").toUTF8
+  match ← OrbBin.PosixExt.writeAtomicPrivate0600 cfgFp rendered with
+  | .ok () => return true
+  | .error _ => return false
+
+private def syncCodexMcpConfig
+    (cfgFp : System.FilePath)
+    (binPath : String)
+    (srvArgs : Array String)
+    (replaceUnmanaged : Bool) : IO Bool := do
+  let st ← OrbBin.PosixExt.statPath cfgFp.toString
+  if st.isSymlink then return false
+  if let some p := cfgFp.parent then
+    let pst ← OrbBin.PosixExt.statPath p.toString
+    if pst.isSymlink then return false
+  let existingRaw ←
+    if st.exists_ && st.isReg then
+      try IO.FS.readFile cfgFp catch _ => return false
+    else pure ""
+  let desiredBlock := renderCodexSandboxedTomlBlock binPath srvArgs
+  let normLines :=
+    if existingRaw.trimAscii.toString.isEmpty then (#[] : Array String)
+    else (existingRaw.replace "\r\n" "\n").splitOn "\n" |>.toArray
+  let rebuilt : Array String ←
+    match normLines.findIdx? (fun l => l.trimAscii.toString == "[mcp_servers.sandboxed]") with
+    | none =>
+      let base := trimTrailingEmptyLines normLines
+      pure (if base.isEmpty then desiredBlock else base ++ #[""] ++ desiredBlock)
+    | some sIdx =>
+      let mut eIdx := sIdx + 1
+      while eIdx < normLines.size && !isTomlSectionHeader normLines[eIdx]! do
+        eIdx := eIdx + 1
+      let curSec := trimTrailingEmptyLines (normLines.extract sIdx eIdx)
+      if curSec == desiredBlock then
+        return true
+      let hasCmdLine := curSec.any (fun l => l.trimAscii.toString.startsWith "command")
+      let mentionsSandboxedMcp := curSec.any (fun l => (l.splitOn "sandboxed-mcp").length > 1)
+      if !replaceUnmanaged && hasCmdLine && !mentionsSandboxedMcp then
+        return false
+      let pfx := trimTrailingEmptyLines (normLines.extract 0 sIdx)
+      let sfx := normLines.extract eIdx normLines.size
+      let head := if pfx.isEmpty then desiredBlock else pfx ++ #[""] ++ desiredBlock
+      pure (if sfx.isEmpty then head else head ++ #[""] ++ sfx)
+  let rendered := (String.intercalate "\n" rebuilt.toList ++ "\n").toUTF8
+  match ← OrbBin.PosixExt.writeAtomicPrivate0600 cfgFp rendered with
+  | .ok () => return true
+  | .error _ => return false
+
+private def syncLocalHarnessesMcp
+    (homeFp : System.FilePath)
+    (binPath apiUrl role : String)
+    (replaceUnmanaged : Bool) : IO (Array String) := do
+  let credFp := localMcpCredentialPath homeFp
+  let srvArgs := expectedLocalMcpArgs apiUrl credFp role
+  let mut synced : Array String := #[]
+  for hid in #["claudecode", "codex", "antigravity", "opencode"] do
+    if ← isHarnessMcpTargetPresent homeFp hid then
+      if let some rel := harnessMcpConfigRel? hid then
+        let cfgFp := homeFp / rel
+        let ok ←
+          if hid == "antigravity" || hid == "claudecode" then
+            syncJsonMcpServersConfig cfgFp binPath srvArgs replaceUnmanaged
+          else if hid == "opencode" then
+            syncOpenCodeMcpConfig cfgFp binPath srvArgs replaceUnmanaged
+          else if hid == "codex" then
+            syncCodexMcpConfig cfgFp binPath srvArgs replaceUnmanaged
+          else pure false
+        if ok then synced := synced.push hid
+  return synced
+
+private def buildLocalSkillsReport
+    (st : LocaldState)
+    (libSkills : Array JVal)
+    (requestedApiUrl? : Option String := none) : IO JVal := do
   let checkedAt := (← OrbBin.PosixExt.nowEpoch).toNat * 1000
   let envHome := (← IO.getEnv "HOME").getD "/tmp"
   let homeStr := if st.homeDir.trimAscii.toString.isEmpty then envHome else st.homeDir
@@ -2323,6 +2708,12 @@ private def buildLocalSkillsReport (st : LocaldState) (libSkills : Array JVal) :
     ]
   ]
   let mut harnessTargets : Array JVal := #[]
+  let mcpBin? ← resolveSandboxedMcpBin? st homeFp
+  let credSt ← inspectLocalMcpCredential homeFp requestedApiUrl?
+  let mcpCredPath := localMcpCredentialPath homeFp
+  let mcpExpectedArgs := expectedLocalMcpArgs credSt.targetApiUrl mcpCredPath credSt.role
+  let mut mcpSyncedHarnesses : Array String := #[]
+  let mut mcpMissingHarnesses : Array String := #[]
   -- `(name, desc?, harnesses, managed, preview?, staleHarnesses, editedCopy?, removedFromLib)`
   let mut discoveredMap : Array (String × Option String × Array String × Bool × Option String × Array String × Option (String × String × String) × Bool) := #[]
   for entry in catalog do
@@ -2382,6 +2773,18 @@ private def buildLocalSkillsReport (st : LocaldState) (libSkills : Array JVal) :
               discoveredMap := discoveredMap.push (sname, desc?, #[hid], isManaged, some preview, initStale, editHere?, removedHere)
       let missing := (desiredEntries.filterMap fun e =>
         if presentNames.contains e.name then none else some e.name).qsort (· < ·)
+      let mcpRel? := harnessMcpConfigRel? hid
+      let mcpSupported := mcpRel?.isSome
+      let mcpTargetPresent ← if mcpSupported then isHarnessMcpTargetPresent homeFp hid else pure false
+      let mcpSynced ←
+        match mcpBin?, credSt.ready, mcpSupported with
+        | some binPath, true, true => checkHarnessMcpSynced homeFp hid binPath mcpExpectedArgs
+        | _, _, _                  => pure false
+      if mcpSupported && mcpTargetPresent then
+        if mcpSynced then
+          mcpSyncedHarnesses := mcpSyncedHarnesses.push hid
+        else
+          mcpMissingHarnesses := mcpMissingHarnesses.push hid
       harnessTargets := harnessTargets.push (.obj #[
         ("id", .str hid),
         ("name", .str hname),
@@ -2394,7 +2797,10 @@ private def buildLocalSkillsReport (st : LocaldState) (libSkills : Array JVal) :
         ("canonical_total", JVal.nat desiredEntries.size),
         ("missing_skills", .arr (missing.map .str)),
         ("outdated_skills", .arr ((outdated.qsort (· < ·)).map .str)),
-        ("stale_managed", .arr ((staleManaged.qsort (· < ·)).map .str))
+        ("stale_managed", .arr ((staleManaged.qsort (· < ·)).map .str)),
+        ("mcp_supported", .bool mcpSupported),
+        ("mcp_config_rel", match mcpRel? with | some r => .str s!"~/{r}" | none => .null),
+        ("mcp_synced", .bool mcpSynced)
       ])
   let skillsJson : Array JVal := (discoveredMap.qsort (fun a b => a.1 < b.1)).map fun (sname, desc?, hlist, managed, prev?, staleH, edit?, removed) =>
     let catEntry? := catalog.find? (fun e => e.name == sname)
@@ -2436,10 +2842,25 @@ private def buildLocalSkillsReport (st : LocaldState) (libSkills : Array JVal) :
       ("edited_copy", editedVal),
       ("lines", JVal.nat (match prev? with | some p => countLines p | none => 0))
     ]
+  let mcpNeedsToken := mcpBin?.isSome && isAllowedLocalMcpApiUrl credSt.targetApiUrl && !credSt.ready
+  let mcpJson : JVal := .obj #[
+    ("ready", .bool (mcpBin?.isSome && credSt.ready)),
+    ("needs_token", .bool mcpNeedsToken),
+    ("binary_ready", .bool mcpBin?.isSome),
+    ("binary_path", match mcpBin? with | some b => .str b | none => .null),
+    ("credential_path", .str mcpCredPath.toString),
+    ("api_url", if credSt.targetApiUrl.isEmpty then .null else .str credSt.targetApiUrl),
+    ("session_id", match credSt.sessionId? with | some sid => .str sid | none => .null),
+    ("role", .str credSt.role),
+    ("hard_expires_at", if credSt.hardExpiresAt > 0 then JVal.uint64 credSt.hardExpiresAt else .null),
+    ("synced_harnesses", .arr (mcpSyncedHarnesses.map .str)),
+    ("missing_harnesses", .arr (mcpMissingHarnesses.map .str))
+  ]
   return .obj #[
     ("checked_at", JVal.nat checkedAt),
     ("home_dir", .str homeStr),
     ("preflight", preflight),
+    ("mcp", mcpJson),
     ("sources", .arr sourcesJson),
     ("harnesses", .arr harnessTargets),
     ("skills", .arr skillsJson),
@@ -3752,13 +4173,17 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "local_skills_status" =>
     let reqObj := (args.field? "request").getD args
     let libSkills := (reqObj.fieldArr? "library_skills").getD #[]
-    let report ← buildLocalSkillsReport st libSkills
+    let requestedApiUrl? := (reqObj.fieldStr? "api_url").orElse (fun _ => reqObj.fieldStr? "apiUrl")
+    let report ← buildLocalSkillsReport st libSkills requestedApiUrl?
     return .ok report
   | "local_skills_sync" =>
     let reqObj := (args.field? "request").getD args
     let libSkills := (reqObj.fieldArr? "library_skills").getD #[]
     let pruneRemoved := (reqObj.fieldBool? "prune_removed").getD false
     let replaceUnmanaged := ((reqObj.fieldArr? "replace_unmanaged").getD #[]).filterMap (·.asStr?)
+    let mcpSess? := (reqObj.field? "mcp_session").filter (!·.isNull)
+    let requestedApiUrl? := ((reqObj.fieldStr? "api_url").orElse (fun _ => reqObj.fieldStr? "apiUrl")).orElse
+      (fun _ => mcpSess?.bind (·.fieldStr? "api_url"))
     let envHome := (← IO.getEnv "HOME").getD "/tmp"
     let homeStr := if st.homeDir.trimAscii.toString.isEmpty then envHome else st.homeDir
     let homeFp := System.FilePath.mk homeStr
@@ -3855,13 +4280,24 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
                       if !(pruned.contains pPath) then pruned := pruned.push pPath
                     catch _ => pure ()
           if touchedHarness then harnessesUpdated := harnessesUpdated + 1
+    let mut mcpErr? : Option String := none
+    if let some sessObj := mcpSess? then
+      if let .error e ← persistLocalMcpSession homeFp sessObj then
+        mcpErr? := some e
+    let mut mcpSyncedNow : Array String := #[]
+    let credSt ← inspectLocalMcpCredential homeFp requestedApiUrl?
+    if credSt.ready then
+      if let some binPath ← resolveSandboxedMcpBin? st homeFp then
+        mcpSyncedNow ← syncLocalHarnessesMcp homeFp binPath credSt.targetApiUrl credSt.role (replaceUnmanaged.contains "sandboxed")
     let syncedSkills := desiredNames.filter (fun n => !(skippedNames.contains n)) |>.size
-    let report ← buildLocalSkillsReport st libSkills
+    let report ← buildLocalSkillsReport st libSkills requestedApiUrl?
     return .ok (.obj #[
       ("synced_skills", JVal.nat syncedSkills),
       ("harnesses_updated", JVal.nat harnessesUpdated),
       ("skipped_unmanaged", .arr (skippedUnmanaged.map .str)),
       ("pruned", .arr (pruned.map .str)),
+      ("mcp_synced_harnesses", .arr (mcpSyncedNow.map .str)),
+      ("mcp_error", match mcpErr? with | some e => .str e | none => .null),
       ("report", report)
     ])
   | "local_interaction" =>

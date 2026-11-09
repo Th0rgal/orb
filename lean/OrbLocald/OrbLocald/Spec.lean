@@ -9,6 +9,7 @@
     6. Scoped `(endpoint, server_build)` client-link capability latch (`ScopedAuthority`, SM-26)
     7. 256-frame outbound client-link journal ring backpressure & reconnect resync (`ConservedResource`, SM-26)
     8. Typed HTTP `409` local-origin conflict disposition gate (`ScopedAuthority`, SM-23 / SM-26)
+    9. Local external MCP credential reuse & endpoint-fencing gate (`ScopedAuthority`)
 -/
 
 namespace OrbLocald.Spec
@@ -1087,5 +1088,153 @@ theorem verifyLocalConflictDisposition_iff
       LocalConflictDispositionDomainSafe ⟨httpStatus, conflictTag, wantRetry⟩ :=
   ⟨localConflictDispositionMetaGate.sound ⟨httpStatus, conflictTag, wantRetry⟩,
    localConflictDispositionMetaGate.complete ⟨httpStatus, conflictTag, wantRetry⟩⟩
+
+/-! ### 9. Local External MCP Credential Reuse & Endpoint-Fencing Gate -/
+
+inductive LocalMcpRoleScope where
+  | executor
+  | coordinator
+  deriving Repr, DecidableEq
+
+def LocalMcpRoleScope.decode? (roleCode : Nat) : Option LocalMcpRoleScope :=
+  match roleCode with
+  | 0 => some .executor
+  | 1 => some .coordinator
+  | _ => none
+
+def minLocalMcpHardExpiryMarginSec : Nat := 300
+
+structure LocalMcpCredentialCheck where
+  isPrivateRegular0600 : UInt8
+  sameEndpoint         : UInt8
+  roleCode             : UInt8
+  nowEpochSec          : UInt64
+  hardExpiresAt        : UInt64
+  deriving Repr, DecidableEq
+
+/-- Admits silent reuse of `~/.orb/mcp/credential` during local skill/MCP sync iff:
+    1. `isPrivateRegular0600 == 1` (owned regular non-symlink `0600` `mcp1.*` credential),
+    2. `sameEndpoint == 1` (credential `api_url` matches the connected Core endpoint),
+    3. `roleCode ≤ 1` (`executor` or `coordinator`; `operator` is never admitted externally),
+    4. `nowEpochSec < hardExpiresAt` with at least `300` seconds remaining before hard expiry. -/
+@[inline, export orb_locald_verify_mcp_credential_reuse]
+def verifyLocalMcpCredentialReuse
+    (isPrivateRegular0600 sameEndpoint roleCode : UInt8)
+    (nowEpochSec hardExpiresAt : UInt64) : UInt8 :=
+  if isPrivateRegular0600 == 1 && sameEndpoint == 1 && roleCode ≤ 1 &&
+     nowEpochSec < hardExpiresAt &&
+     hardExpiresAt - nowEpochSec ≥ 300 then 1 else 0
+
+def LocalMcpCredentialDomainSafe (c : LocalMcpCredentialCheck) : Prop :=
+  c.isPrivateRegular0600.toNat = 1 ∧
+  c.sameEndpoint.toNat = 1 ∧
+  (LocalMcpRoleScope.decode? c.roleCode.toNat).isSome = true ∧
+  c.nowEpochSec.toNat + minLocalMcpHardExpiryMarginSec ≤ c.hardExpiresAt.toNat
+
+private theorem u64_sub_toNat_of_lt (a b : UInt64) (h : a < b) :
+    (b - a).toNat = b.toNat - a.toNat := by
+  have hlt : a.toNat < b.toNat := UInt64.lt_iff_toNat_lt.mp h
+  have hb : b.toNat < UInt64.size := b.toBitVec.isLt
+  change (b.toBitVec - a.toBitVec).toNat = b.toNat - a.toNat
+  rw [BitVec.toNat_sub]
+  change (UInt64.size - a.toNat + b.toNat) % UInt64.size = b.toNat - a.toNat
+  have hsum : UInt64.size - a.toNat + b.toNat = UInt64.size + (b.toNat - a.toNat) := by omega
+  rw [hsum, Nat.add_mod_left, Nat.mod_eq_of_lt (by omega)]
+
+def localMcpCredentialReuseMetaGate :
+    MetaGateSpec LocalMcpCredentialCheck LocalMcpCredentialDomainSafe where
+  gate c :=
+    verifyLocalMcpCredentialReuse
+      c.isPrivateRegular0600 c.sameEndpoint c.roleCode c.nowEpochSec c.hardExpiresAt == 1
+  sound c h := by
+    rcases c with ⟨pr, se, rc, now, exp⟩
+    change (verifyLocalMcpCredentialReuse pr se rc now exp == 1) = true at h
+    dsimp [LocalMcpCredentialDomainSafe]
+    unfold verifyLocalMcpCredentialReuse at h
+    have hc :
+        (pr == 1 && se == 1 && rc ≤ 1 && now < exp && exp - now ≥ 300) = true := by
+      cases hb : (pr == 1 && se == 1 && rc ≤ 1 && now < exp && exp - now ≥ 300)
+      · rw [hb] at h; contradiction
+      · rfl
+    simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
+    rcases hc with ⟨⟨⟨⟨hpr, hse⟩, hrc⟩, hlt⟩, hdiff⟩
+    have hrcCases := u8_le_one_cases rc hrc
+    have hsub := u64_sub_toNat_of_lt now exp hlt
+    have hge : 300 ≤ (exp - now).toNat := UInt64.le_iff_toNat_le.mp hdiff
+    have hltNat : now.toNat < exp.toNat := UInt64.lt_iff_toNat_lt.mp hlt
+    refine ⟨by subst hpr; rfl, by subst hse; rfl, ?_, ?_⟩
+    · rcases hrcCases with h0 | h1
+      · simp [LocalMcpRoleScope.decode?, h0]
+      · simp [LocalMcpRoleScope.decode?, h1]
+    · unfold minLocalMcpHardExpiryMarginSec
+      omega
+  complete c h := by
+    rcases c with ⟨pr, se, rc, now, exp⟩
+    change (verifyLocalMcpCredentialReuse pr se rc now exp == 1) = true
+    dsimp [LocalMcpCredentialDomainSafe] at h
+    rcases h with ⟨hpr, hse, hrole, hexp⟩
+    unfold minLocalMcpHardExpiryMarginSec at hexp
+    unfold verifyLocalMcpCredentialReuse
+    have hprB : (pr == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat pr 1 (by omega) hpr
+    have hseB : (se == 1) = true := by rw [beq_iff_eq]; exact u8_eq_of_toNat se 1 (by omega) hse
+    have hrcLeNat : rc.toNat ≤ 1 := by
+      unfold LocalMcpRoleScope.decode? at hrole
+      cases hrcN : rc.toNat with
+      | zero => omega
+      | succ m =>
+        cases m with
+        | zero => omega
+        | succ _ => simp [hrcN] at hrole
+    have hrcB : rc ≤ 1 := UInt8.le_iff_toNat_le.mpr hrcLeNat
+    have hltB : now < exp := UInt64.lt_iff_toNat_lt.mpr (by omega)
+    have hsub := u64_sub_toNat_of_lt now exp hltB
+    have hdiffB : exp - now ≥ 300 := by
+      apply UInt64.le_iff_toNat_le.mpr
+      change 300 ≤ (exp - now).toNat
+      omega
+    simp [hprB, hseB, hrcB, hltB, hdiffB]
+  posWitness := {
+    isPrivateRegular0600 := 1
+    sameEndpoint := 1
+    roleCode := 1
+    nowEpochSec := 1000
+    hardExpiresAt := 3600
+  }
+  negWitness := {
+    isPrivateRegular0600 := 1
+    sameEndpoint := 0
+    roleCode := 1
+    nowEpochSec := 1000
+    hardExpiresAt := 3600
+  }
+  nonVacuous := by decide
+  tight := by decide
+
+def localMcpCredentialScoped : ScopedAuthority LocalMcpCredentialCheck where
+  admit := localMcpCredentialReuseMetaGate.gate
+  scopeValid c :=
+    c.isPrivateRegular0600.toNat = 1 ∧ c.sameEndpoint.toNat = 1 ∧ c.roleCode.toNat ≤ 1
+  sound c h := by
+    rcases localMcpCredentialReuseMetaGate.sound c h with ⟨hpr, hse, hrole, _⟩
+    refine ⟨hpr, hse, ?_⟩
+    unfold LocalMcpRoleScope.decode? at hrole
+    cases hrcN : c.roleCode.toNat with
+    | zero => omega
+    | succ m =>
+      cases m with
+      | zero => omega
+      | succ _ => simp [hrcN] at hrole
+
+theorem verifyLocalMcpCredentialReuse_iff
+    (isPrivateRegular0600 sameEndpoint roleCode : UInt8)
+    (nowEpochSec hardExpiresAt : UInt64) :
+    (verifyLocalMcpCredentialReuse
+      isPrivateRegular0600 sameEndpoint roleCode nowEpochSec hardExpiresAt == 1) = true ↔
+      LocalMcpCredentialDomainSafe
+        ⟨isPrivateRegular0600, sameEndpoint, roleCode, nowEpochSec, hardExpiresAt⟩ :=
+  ⟨localMcpCredentialReuseMetaGate.sound
+      ⟨isPrivateRegular0600, sameEndpoint, roleCode, nowEpochSec, hardExpiresAt⟩,
+   localMcpCredentialReuseMetaGate.complete
+      ⟨isPrivateRegular0600, sameEndpoint, roleCode, nowEpochSec, hardExpiresAt⟩⟩
 
 end OrbLocald.Spec

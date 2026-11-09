@@ -405,4 +405,199 @@ describe("SkillsSettings", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "Remove copies" }));
     await waitFor(() => expect(syncCalls.some((c) => c.prune_removed)).toBe(true));
   });
+
+  it("auto-mints a local coordinator MCP session and wires sandboxed-mcp when skills sync", async () => {
+    setConnection("https://agent-backend.thomas.md", "test-jwt");
+    let mcpReady = false;
+    const syncCalls: any[] = [];
+    const extSessionPosts: any[] = [];
+
+    const buildMcpReport = (): LocalSkillsReport => ({
+      ...sampleLocalReport(true),
+      mcp: mcpReady
+        ? {
+            ready: true,
+            needs_token: false,
+            binary_ready: true,
+            binary_path: "/Applications/Orb.app/Contents/MacOS/sandboxed-mcp",
+            credential_path: "/Users/thomas/.orb/mcp/credential",
+            api_url: "https://agent-backend.thomas.md",
+            session_id: "sess-local-1",
+            role: "coordinator",
+            hard_expires_at: Math.floor(Date.now() / 1000) + 86400 * 30,
+            synced_harnesses: ["claudecode", "codex", "antigravity", "opencode"],
+            missing_harnesses: [],
+          }
+        : {
+            ready: false,
+            needs_token: true,
+            binary_ready: true,
+            binary_path: "/Applications/Orb.app/Contents/MacOS/sandboxed-mcp",
+            credential_path: "/Users/thomas/.orb/mcp/credential",
+            api_url: "https://agent-backend.thomas.md",
+            session_id: null,
+            role: "coordinator",
+            hard_expires_at: null,
+            synced_harnesses: [],
+            missing_harnesses: ["claudecode", "codex", "antigravity", "opencode"],
+          },
+    });
+
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string, args?: any) => {
+          if (cmd === "local_skills_status") return buildMcpReport();
+          if (cmd === "approval_key_status") return { available: false, public_key: null };
+          if (cmd === "local_skills_sync") {
+            syncCalls.push(args.request);
+            if (args.request?.mcp_session?.token) mcpReady = true;
+            return {
+              synced_skills: 1,
+              harnesses_updated: 0,
+              skipped_unmanaged: [],
+              pruned: [],
+              mcp_synced_harnesses: mcpReady ? ["claudecode", "codex", "antigravity", "opencode"] : [],
+              mcp_error: null,
+              report: buildMcpReport(),
+            };
+          }
+          return null;
+        },
+      },
+    };
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.endsWith("/api/library/skill")) return ok([{ name: "paloma-backends", path: "skill/paloma-backends" }]);
+      if (url.endsWith("/api/library/skill/paloma-backends")) return ok({ name: "paloma-backends", path: "skill/paloma-backends", content: "---\nname: paloma-backends\n---\n", files: [], references: [] });
+      if (url.endsWith("/api/mcp/external-sessions") && init?.method === "POST") {
+        extSessionPosts.push(JSON.parse(String(init.body ?? "{}")));
+        return ok({
+          token: "mcp1.local-test-token",
+          session_id: "sess-local-1",
+          role: "coordinator",
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          hard_expires_at: Math.floor(Date.now() / 1000) + 86400 * 30,
+        });
+      }
+      return ok({});
+    });
+
+    const { container } = render(() => <SkillsSettings />);
+    await waitFor(() => expect(syncCalls).toHaveLength(1));
+    expect(extSessionPosts).toEqual([
+      {
+        role: "coordinator",
+        client_kind: "local_mcp",
+        client_label: "Local Harnesses",
+        ttl_days: 30,
+      },
+    ]);
+    expect(syncCalls[0]).toMatchObject({
+      api_url: "https://agent-backend.thomas.md",
+      mcp_session: {
+        api_url: "https://agent-backend.thomas.md",
+        token: "mcp1.local-test-token",
+        session_id: "sess-local-1",
+        role: "coordinator",
+      },
+    });
+
+    const advanced = container.querySelector<HTMLDetailsElement>("details.skills-advanced")!;
+    advanced.open = true;
+    fireEvent(advanced, new Event("toggle"));
+    expect(await screen.findByText("Synced · 4 harnesses")).toBeTruthy();
+  });
+
+  it("still syncs SKILL.md files cleanly and offers Connect MCP if external session minting fails", async () => {
+    setConnection("https://mx-fail.thomas.md", "test-jwt");
+    const syncCalls: any[] = [];
+    let allowMint = false;
+    let mcpReady = false;
+
+    const buildDriftedMcpReport = (skillsSynced: boolean): LocalSkillsReport => ({
+      ...sampleLocalReport(skillsSynced),
+      mcp: mcpReady
+        ? {
+            ready: true,
+            needs_token: false,
+            binary_ready: true,
+            binary_path: "/Applications/Orb.app/Contents/MacOS/sandboxed-mcp",
+            credential_path: "/Users/thomas/.orb/mcp/credential",
+            api_url: "https://mx-fail.thomas.md",
+            session_id: "sess-retry-2",
+            role: "coordinator",
+            hard_expires_at: Math.floor(Date.now() / 1000) + 86400 * 30,
+            synced_harnesses: ["claudecode", "codex", "antigravity", "opencode"],
+            missing_harnesses: [],
+          }
+        : {
+            ready: false,
+            needs_token: true,
+            binary_ready: true,
+            binary_path: "/Applications/Orb.app/Contents/MacOS/sandboxed-mcp",
+            credential_path: "/Users/thomas/.orb/mcp/credential",
+            api_url: "https://mx-fail.thomas.md",
+            session_id: null,
+            role: "coordinator",
+            hard_expires_at: null,
+            synced_harnesses: [],
+            missing_harnesses: ["antigravity"],
+          },
+    });
+
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string, args?: any) => {
+          if (cmd === "local_skills_status") return buildDriftedMcpReport(syncCalls.length > 0);
+          if (cmd === "approval_key_status") return { available: false, public_key: null };
+          if (cmd === "local_skills_sync") {
+            syncCalls.push(args.request);
+            if (args.request?.mcp_session?.token) mcpReady = true;
+            return {
+              synced_skills: 1,
+              harnesses_updated: 2,
+              skipped_unmanaged: [],
+              pruned: [],
+              mcp_synced_harnesses: mcpReady ? ["claudecode", "codex", "antigravity", "opencode"] : [],
+              mcp_error: null,
+              report: buildDriftedMcpReport(true),
+            };
+          }
+          return null;
+        },
+      },
+    };
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.endsWith("/api/library/skill")) return ok([{ name: "paloma-backends", path: "skill/paloma-backends" }]);
+      if (url.endsWith("/api/library/skill/paloma-backends")) return ok({ name: "paloma-backends", path: "skill/paloma-backends", content: "---\nname: paloma-backends\n---\n", files: [], references: [] });
+      if (url.endsWith("/api/mcp/external-sessions") && init?.method === "POST") {
+        if (!allowMint) return new Response(JSON.stringify({ error: "device_approval_required" }), { status: 403 });
+        return ok({
+          token: "mcp1.retry-token",
+          session_id: "sess-retry-2",
+          role: "coordinator",
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          hard_expires_at: Math.floor(Date.now() / 1000) + 86400 * 30,
+        });
+      }
+      return ok({});
+    });
+
+    const { container } = render(() => <SkillsSettings />);
+    await waitFor(() => expect(syncCalls).toHaveLength(1));
+    expect(syncCalls[0].mcp_session).toBeUndefined();
+
+    const advanced = container.querySelector<HTMLDetailsElement>("details.skills-advanced")!;
+    advanced.open = true;
+    fireEvent(advanced, new Event("toggle"));
+    const connectBtn = await screen.findByRole("button", { name: "Connect MCP" });
+    allowMint = true;
+    fireEvent.click(connectBtn);
+    expect(await screen.findByText("Synced · 4 harnesses")).toBeTruthy();
+  });
 });

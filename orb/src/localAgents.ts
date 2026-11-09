@@ -12,7 +12,8 @@ import { rememberClientRunReceipt, type ClientRunReceipt } from "./clientRuns";
 import { bufferedOutput, type OutputEvent } from "./localStream";
 import { createSignal } from "solid-js";
 import { scanMentions, type AttachChip } from "./attach";
-import { getApiUrl, getJwt, listProjectFiles, readProjectFile, getProjectController } from "./api";
+import { getApiUrl, getJwt, isConnected, listProjectFiles, readProjectFile, getProjectController } from "./api";
+import { ApprovalCancelled, signedApi } from "./deviceApproval";
 import { classifyConflictError } from "./conflictClassification";
 
 function savedLocalFailures(): Record<string,string> {
@@ -669,6 +670,32 @@ export interface HarnessSkillTarget {
   outdated_skills?: string[];
   /** Orb-managed entries no longer desired; a pruning sync removes them. */
   stale_managed?: string[];
+  mcp_supported?: boolean;
+  mcp_config_rel?: string | null;
+  mcp_synced?: boolean;
+}
+
+export interface LocalMcpStatus {
+  ready: boolean;
+  needs_token: boolean;
+  binary_ready: boolean;
+  binary_path?: string | null;
+  credential_path?: string;
+  api_url?: string | null;
+  session_id?: string | null;
+  role?: string;
+  hard_expires_at?: number | null;
+  synced_harnesses: string[];
+  missing_harnesses: string[];
+}
+
+export interface McpSessionPayload {
+  api_url: string;
+  token: string;
+  session_id: string;
+  role?: string;
+  expires_at?: number;
+  hard_expires_at?: number;
 }
 
 export interface SkillSourceInfo {
@@ -728,6 +755,7 @@ export interface LocalSkillsReport {
   checked_at: number;
   home_dir: string;
   preflight: PreflightStatus;
+  mcp?: LocalMcpStatus;
   sources: SkillSourceInfo[];
   harnesses: HarnessSkillTarget[];
   skills: DiscoveredSkill[];
@@ -747,26 +775,129 @@ export interface SyncSkillsResult {
   harnesses_updated: number;
   skipped_unmanaged: string[];
   pruned?: string[];
+  mcp_synced_harnesses?: string[];
+  mcp_error?: string | null;
   report: LocalSkillsReport;
+}
+
+const mcpMintDismissedFor = new Set<string>();
+const mcpMintFailedFor = new Map<string, string>();
+let mcpMintInFlight: Promise<{ session?: McpSessionPayload; error?: string }> | null = null;
+
+function normalizedConnectedApiUrl(): string {
+  return isConnected() ? getApiUrl().trim().replace(/\/+$/, "") : "";
+}
+
+async function mintLocalMcpSessionIfNeeded(
+  invoke: NonNullable<ReturnType<typeof desktopInvoke>>,
+  apiUrl: string,
+  forcePrompt = false,
+): Promise<{ session?: McpSessionPayload; error?: string }> {
+  if (!apiUrl) return {};
+  if (forcePrompt) {
+    mcpMintDismissedFor.delete(apiUrl);
+    mcpMintFailedFor.delete(apiUrl);
+  }
+  const status = (await invoke("local_skills_status", {
+    request: { library_skills: [], api_url: apiUrl },
+  }).catch(() => null)) as LocalSkillsReport | null;
+  if (status?.mcp?.needs_token !== true) return {};
+  if (!forcePrompt && (mcpMintDismissedFor.has(apiUrl) || mcpMintFailedFor.has(apiUrl))) {
+    return { error: mcpMintFailedFor.get(apiUrl) };
+  }
+  if (mcpMintInFlight) return mcpMintInFlight;
+  mcpMintInFlight = (async () => {
+    try {
+      const minted = await signedApi<{
+        token: string;
+        session_id: string;
+        expires_at?: number;
+        hard_expires_at?: number;
+        role?: string;
+      }>(
+        "POST",
+        "/api/mcp/external-sessions",
+        {
+          role: "coordinator",
+          client_kind: "local_mcp",
+          client_label: "Local Harnesses",
+          ttl_days: 30,
+        },
+        "Mint coordinator MCP session for local harnesses (30d)",
+      );
+      mcpMintFailedFor.delete(apiUrl);
+      mcpMintDismissedFor.delete(apiUrl);
+      return {
+        session: {
+          api_url: apiUrl,
+          token: minted.token,
+          session_id: minted.session_id,
+          role: minted.role ?? "coordinator",
+          expires_at: minted.expires_at,
+          hard_expires_at: minted.hard_expires_at,
+        },
+      };
+    } catch (error) {
+      if (error instanceof ApprovalCancelled) {
+        mcpMintDismissedFor.add(apiUrl);
+        return {};
+      }
+      const msg = error instanceof Error ? error.message : String(error);
+      mcpMintFailedFor.set(apiUrl, msg);
+      return { error: msg };
+    }
+  })().finally(() => {
+    mcpMintInFlight = null;
+  });
+  return mcpMintInFlight;
 }
 
 /** Inspect local harnesses against the given Library snapshot (canonical source). */
 export async function localSkillsStatus(librarySkills?: SyncSkillPayload[]): Promise<LocalSkillsReport | null> {
   const invoke = desktopInvoke();
   if (!invoke) return null;
-  return (await invoke("local_skills_status", { request: { library_skills: librarySkills ?? [] } })) as LocalSkillsReport;
+  const apiUrl = normalizedConnectedApiUrl();
+  return (await invoke("local_skills_status", {
+    request: {
+      library_skills: librarySkills ?? [],
+      ...(apiUrl ? { api_url: apiUrl } : {}),
+    },
+  })) as LocalSkillsReport;
 }
 
-export async function localSkillsSync(options: { librarySkills?: SyncSkillPayload[]; pruneRemoved?: boolean; replaceUnmanaged?: string[] } = {}): Promise<SyncSkillsResult> {
+export async function localSkillsSync(
+  options: {
+    librarySkills?: SyncSkillPayload[];
+    pruneRemoved?: boolean;
+    replaceUnmanaged?: string[];
+    mcpSession?: McpSessionPayload;
+    forceMcpPrompt?: boolean;
+    skipMcpMint?: boolean;
+  } = {},
+): Promise<SyncSkillsResult> {
   const invoke = desktopInvoke();
   if (!invoke) throw new Error("Unified local skill sync requires the Orb desktop app.");
-  return (await invoke("local_skills_sync", {
+  const apiUrl = normalizedConnectedApiUrl();
+  let mcpSession = options.mcpSession;
+  let mintError: string | undefined;
+  if (!mcpSession && !options.skipMcpMint && apiUrl) {
+    const minted = await mintLocalMcpSessionIfNeeded(invoke, apiUrl, options.forceMcpPrompt);
+    mcpSession = minted.session;
+    mintError = minted.error;
+  }
+  const result = (await invoke("local_skills_sync", {
     request: {
       library_skills: options.librarySkills ?? [],
       prune_removed: options.pruneRemoved ?? false,
       replace_unmanaged: options.replaceUnmanaged ?? [],
+      ...(apiUrl ? { api_url: apiUrl } : {}),
+      ...(mcpSession ? { mcp_session: mcpSession } : {}),
     },
   })) as SyncSkillsResult;
+  if (!result.mcp_error && mintError) {
+    return { ...result, mcp_error: mintError };
+  }
+  return result;
 }
 
 async function requireLocalCyber(invoke:NonNullable<ReturnType<typeof desktopInvoke>>){

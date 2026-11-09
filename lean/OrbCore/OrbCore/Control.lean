@@ -1269,12 +1269,126 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     let unitsRaw := if lease.allowedUnitsJson.startsWith "[" then lease.allowedUnitsJson else "[]"
     return .ok (mkJson 200 s!"\{\"allow_exec\":true,\"allowed\":true,\"grant_id\":{jsonEscape lease.grantId},\"scope\":{jsonEscape lease.scope},\"allowed_units\":{unitsRaw},\"require_force_cmd\":{rfStr},\"bunker_state\":{bunkerState.toNat},\"expires_at\":{lease.expiresAtEpoch},\"lease_epoch\":{liveLeaseEp}}")
 
-  -- 5b. Unified Control-Plane MCP Gateway (`/api/mcp/session`, `/api/mcp/renew`, `/api/mcp/capabilities`, `/api/mcp/call`)
+  -- 5b. Unified Control-Plane MCP Gateway (`/api/mcp/session`, `/api/mcp/external-sessions`, `/api/mcp/renew`, `/api/mcp/capabilities`, `/api/mcp/call`)
   if cleanPath.startsWith "/api/mcp/" then
     let bearerTok? := extractBearerToken? req.headers nowEpochSec
-    let scopedClaims? := bearerTok?.bind (verifyScopedMcpToken? st.cfg.jwtSecret · nowEpochSec)
+    let rawScopedClaims? := bearerTok?.bind (verifyScopedMcpToken? st.cfg.jwtSecret · nowEpochSec)
+    let scopedClaims? ← match rawScopedClaims? with
+      | none => pure none
+      | some c =>
+        match ← execParamQuery st.store.projectsDb
+            "SELECT revoked, hard_expires_at FROM mcp_sessions_v1 WHERE id=?1;" #[c.sessionId] with
+        | .ok rs =>
+          if rs.size ≤ 1 then
+            pure (if c.isExternal then none else some c)
+          else
+            let rev := ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0
+            let hExp := (((rs[1]?.bind (·[1]?)).bind String.toNat?).getD 0).toUInt64
+            if rev != 0 || (hExp > 0 && nowEpochSec ≥ hExp) then pure none
+            else pure (some { c with hardExpiresAt := if hExp > 0 then hExp else c.hardExpiresAt })
+        | .error _ => pure none
     let mcpCaller? ← resolveCallerPrincipal? st req.headers nowEpochSec
     let coreAuthed := mcpCaller?.isSome
+
+    if req.method == "POST" && cleanPath == "/api/mcp/external-sessions" then
+      let some mcpCaller := mcpCaller?
+        | return .ok (mkJson 401 "{\"error\":\"unauthorized_mcp_session\"}")
+      let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD (.obj #[])
+      let rawRole := (jv.fieldStr? "role").getD "executor"
+      let role := normalizeMcpRole rawRole
+      if role == "operator" then
+        return .ok (mkJson 403 "{\"error\":\"External MCP sessions cannot hold the operator role\"}")
+      let bunkerSt ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
+      if bunkerSt ≥ 2 then
+        return .ok (mkJson 403 "{\"error\":\"Bunker HardLockdown is active; external MCP sessions cannot be minted\"}")
+      let ttlDays? := jv.fieldNat? "ttl_days"
+      let hardHours? := jv.fieldNat? "hard_ttl_hours"
+      if ttlDays?.isSome && hardHours?.isSome then
+        return .ok (mkJson 400 "{\"error\":\"Specify either ttl_days or hard_ttl_hours, not both\"}")
+      let hours := match hardHours?, ttlDays? with
+        | some h, none => h
+        | none, some d => d * 24
+        | _, _         => 7 * 24
+      if hours == 0 || hours > 30 * 24 then
+        return .ok (mkJson 400 "{\"error\":\"External session TTL must be between 1 hour and 30 days\"}")
+      let proj := ((jv.fieldStr? "project").getD "").trimAscii.toString
+      let clientLabel := ((jv.fieldStr? "client_label").getD "local_mcp").trimAscii.toString
+      let hostHint := ((jv.fieldStr? "host_hint").getD "").trimAscii.toString
+      let sid ← nextMcpSessionUuid st
+      let hardExp := nowEpochSec + (hours * 3600).toUInt64
+      let rollingExp := min (nowEpochSec + 3600) hardExp
+      let claims : McpSessionClaims := {
+        sessionId := sid, missionId := "", role := role,
+        project := proj, isExternal := true, expiresAt := rollingExp, hardExpiresAt := hardExp
+      }
+      let scopedTok := mintScopedMcpToken st.cfg.jwtSecret claims
+      let insRes ← execParamQuery st.store.projectsDb
+        ("INSERT INTO mcp_sessions_v1(id,owner,mission_id,expires_at,revoked,subject_kind,client_label,host_hint,project_scope,hard_expires_at) " ++
+         "VALUES(?1,?2,'',?3,0,'external_session',?4,?5,?6,?7);")
+        #[sid, mcpCaller.userId, toString rollingExp, clientLabel, hostHint, proj, toString hardExp]
+      if let .error _ := insRes then
+        return .ok (mkJson 503 "{\"error\":\"session_store_unavailable\"}")
+      let projJson : JVal := if proj.isEmpty then .null else .str proj
+      let outJv := JVal.obj #[
+        ("token", .str scopedTok),
+        ("expires_at", JVal.uint64 rollingExp),
+        ("hard_expires_at", JVal.uint64 hardExp),
+        ("session_id", .str sid),
+        ("role", .str role),
+        ("project", projJson),
+        ("contract_version", .str OrbBin.McpCatalog.contractVersion)
+      ]
+      return .ok (mkJson 200 (renderCompact outJv))
+
+    if req.method == "GET" && cleanPath == "/api/mcp/external-sessions" then
+      let some mcpCaller := mcpCaller?
+        | return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")
+      match ← execParamQuery st.store.projectsDb
+          ("SELECT id, expires_at, revoked, client_label, host_hint, project_scope, hard_expires_at " ++
+           "FROM mcp_sessions_v1 WHERE owner=?1 AND subject_kind='external_session' " ++
+           "ORDER BY hard_expires_at DESC LIMIT 200;")
+          #[mcpCaller.userId] with
+      | .error _ => return .ok (mkJson 503 "{\"error\":\"session_store_unavailable\"}")
+      | .ok rs =>
+        let mut items : Array JVal := #[]
+        for i in [1:rs.size] do
+          let r := rs[i]!
+          let sid := (r[0]?).getD ""
+          let exp := (((r[1]?).bind String.toNat?).getD 0).toUInt64
+          let rev := (((r[2]?).bind String.toNat?).getD 0) != 0
+          let lbl := (r[3]?).getD ""
+          let hh := (r[4]?).getD ""
+          let pj := (r[5]?).getD ""
+          let hExp := (((r[6]?).bind String.toNat?).getD 0).toUInt64
+          let active := !rev && (hExp == 0 || nowEpochSec < hExp)
+          items := items.push (.obj #[
+            ("session_id", .str sid),
+            ("expires_at", JVal.uint64 exp),
+            ("hard_expires_at", if hExp > 0 then JVal.uint64 hExp else .null),
+            ("revoked", .bool rev),
+            ("active", .bool active),
+            ("client_label", if lbl.isEmpty then .null else .str lbl),
+            ("host_hint", if hh.isEmpty then .null else .str hh),
+            ("project", if pj.isEmpty then .null else .str pj)
+          ])
+        return .ok (mkJson 200 (renderCompact (.obj #[("sessions", .arr items)])))
+
+    if req.method == "DELETE" then
+      if let some params := matchRoutePattern? "/api/mcp/external-sessions/:id" cleanPath then
+        let some mcpCaller := mcpCaller?
+          | return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")
+        let sid := ((params.find? (fun (k, _) => k == "id")).map Prod.snd).getD ""
+        match ← execParamQuery st.store.projectsDb
+            "SELECT 1 FROM mcp_sessions_v1 WHERE id=?1 AND owner=?2 AND subject_kind='external_session';"
+            #[sid, mcpCaller.userId] with
+        | .error _ => return .ok (mkJson 503 "{\"error\":\"session_store_unavailable\"}")
+        | .ok rs =>
+          if rs.size ≤ 1 then
+            return .ok (mkJson 404 "{\"error\":\"not_found\"}")
+          let _ ← execParamQuery st.store.projectsDb
+            "UPDATE mcp_sessions_v1 SET revoked=1 WHERE id=?1 AND owner=?2 AND subject_kind='external_session';"
+            #[sid, mcpCaller.userId]
+          return .ok (mkJson 200 (renderCompact (.obj #[("revoked", .bool true), ("session_id", .str sid)])))
 
     if req.method == "POST" && cleanPath == "/api/mcp/session" then
       let some mcpCaller := mcpCaller?
@@ -1297,10 +1411,34 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       return .ok (mkJson 200 s!"\{\"token\":{jsonEscape scopedTok},\"session_id\":{jsonEscape sid},\"expires_at\":{exp}}")
 
     if req.method == "POST" && cleanPath == "/api/mcp/renew" then
-      let some prev := scopedClaims?
+      let renewClaims? := bearerTok?.bind (verifyScopedMcpTokenForRenew? st.cfg.jwtSecret · nowEpochSec)
+      let some prev := renewClaims?
         | return .ok (mkJson 401 "{\"error\":\"invalid_or_expired_scoped_token\"}")
-      let nextExp := nowEpochSec + 3600
-      let renewed : McpSessionClaims := { prev with expiresAt := nextExp }
+      if prev.isExternal then
+        let bunkerSt ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
+        if bunkerSt ≥ 2 then
+          return .ok (mkJson 403 "{\"error\":\"Bunker HardLockdown is active; external MCP sessions cannot renew\"}")
+      let mut effHardExp := prev.hardExpiresAt
+      match ← execParamQuery st.store.projectsDb
+          "SELECT revoked, hard_expires_at FROM mcp_sessions_v1 WHERE id=?1;" #[prev.sessionId] with
+      | .error _ => return .ok (mkJson 503 "{\"error\":\"session_store_unavailable\"}")
+      | .ok rs =>
+        if rs.size ≤ 1 then
+          if prev.isExternal then
+            return .ok (mkJson 401 "{\"error\":\"mcp_session_revoked\"}")
+        else
+          let rev := ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0
+          let dbHard := (((rs[1]?.bind (·[1]?)).bind String.toNat?).getD 0).toUInt64
+          if dbHard > 0 then effHardExp := dbHard
+          if rev != 0 || (effHardExp > 0 && nowEpochSec ≥ effHardExp) then
+            return .ok (mkJson 401 "{\"error\":\"mcp_session_revoked_or_expired\"}")
+      let rawNextExp := nowEpochSec + 3600
+      let nextExp := if effHardExp > 0 then min rawNextExp effHardExp else rawNextExp
+      if prev.isExternal then
+        let _ ← execParamQuery st.store.projectsDb
+          "UPDATE mcp_sessions_v1 SET expires_at=?2 WHERE id=?1 AND revoked=0;"
+          #[prev.sessionId, toString nextExp]
+      let renewed : McpSessionClaims := { prev with expiresAt := nextExp, hardExpiresAt := effHardExp }
       let nextTok := mintScopedMcpToken st.cfg.jwtSecret renewed
       return .ok (mkJson 200 s!"\{\"token\":{jsonEscape nextTok},\"session_id\":{jsonEscape renewed.sessionId},\"expires_at\":{nextExp}}")
 

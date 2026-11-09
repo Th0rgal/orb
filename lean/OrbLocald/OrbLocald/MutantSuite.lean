@@ -204,4 +204,34 @@ theorem kill_mutantConflictRetireStopping :
     verifyLocalConflictDisposition 409 3 0 = mutantConflictRetireStopping 409 3 0 := by
   decide
 
+/-- Mutant 14: reuses a cached `~/.orb/mcp/credential` across different Core endpoints (`sameEndpoint == 0`). -/
+def mutantMcpCredCrossEndpointReuse
+    (isPrivateRegular0600 _sameEndpoint roleCode : UInt8)
+    (nowEpochSec hardExpiresAt : UInt64) : UInt8 :=
+  if isPrivateRegular0600 == 1 && roleCode ≤ 1 &&
+     nowEpochSec < hardExpiresAt &&
+     hardExpiresAt - nowEpochSec ≥ 300 then 1 else 0
+
+theorem kill_mutantMcpCredCrossEndpointReuse :
+    verifyLocalMcpCredentialReuse 1 0 1 1000 3600 ≠
+      mutantMcpCredCrossEndpointReuse 1 0 1 1000 3600 ∧
+    verifyLocalMcpCredentialReuse 1 1 1 1000 3600 =
+      mutantMcpCredCrossEndpointReuse 1 1 1 1000 3600 := by
+  decide
+
+/-- Mutant 15: admits an external MCP credential claiming the `operator` role (`roleCode == 2`). -/
+def mutantMcpCredAdmitOperatorRole
+    (isPrivateRegular0600 sameEndpoint roleCode : UInt8)
+    (nowEpochSec hardExpiresAt : UInt64) : UInt8 :=
+  if isPrivateRegular0600 == 1 && sameEndpoint == 1 && roleCode ≤ 2 &&
+     nowEpochSec < hardExpiresAt &&
+     hardExpiresAt - nowEpochSec ≥ 300 then 1 else 0
+
+theorem kill_mutantMcpCredAdmitOperatorRole :
+    verifyLocalMcpCredentialReuse 1 1 2 1000 3600 ≠
+      mutantMcpCredAdmitOperatorRole 1 1 2 1000 3600 ∧
+    verifyLocalMcpCredentialReuse 1 1 1 1000 3600 =
+      mutantMcpCredAdmitOperatorRole 1 1 1 1000 3600 := by
+  decide
+
 end OrbLocald.MutantSuite

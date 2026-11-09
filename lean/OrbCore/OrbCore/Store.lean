@@ -825,7 +825,13 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) : IO (Except Stri
         "PRIMARY KEY(project_slug, revision));" ++
         "CREATE TABLE IF NOT EXISTS context_receipts (" ++
         "op_id TEXT PRIMARY KEY, project_slug TEXT NOT NULL, conflict INTEGER NOT NULL, " ++
-        "revision INTEGER NOT NULL);"
+        "revision INTEGER NOT NULL);" ++
+        "CREATE TABLE IF NOT EXISTS mcp_sessions_v1 (" ++
+        "id TEXT PRIMARY KEY, owner TEXT NOT NULL DEFAULT '', mission_id TEXT NOT NULL DEFAULT '', " ++
+        "expires_at INTEGER NOT NULL DEFAULT 0, revoked INTEGER NOT NULL DEFAULT 0, " ++
+        "subject_kind TEXT NOT NULL DEFAULT 'mission', client_label TEXT NOT NULL DEFAULT '', " ++
+        "host_hint TEXT NOT NULL DEFAULT '', project_scope TEXT NOT NULL DEFAULT '', " ++
+        "hard_expires_at INTEGER NOT NULL DEFAULT 0);"
       let r7ProjAlters : Array String := #[
         "ALTER TABLE context_entries ADD COLUMN source TEXT NOT NULL DEFAULT '';",
         "ALTER TABLE context_conflicts ADD COLUMN base_present INTEGER NOT NULL DEFAULT 0;",

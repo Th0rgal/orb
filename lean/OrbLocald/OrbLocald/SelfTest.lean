@@ -657,6 +657,105 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
     stagedRead.isOk
   if (← assertTrue "software_inventory_skills_sync_and_staged_upload_roundtrip" invAndSkillsOk) then passed := passed + 1
 
+  -- F2. Local MCP auto-provisioning (`~/.orb/mcp/credential` `0600`, 0-byte Antigravity `mcp_config.json`, Claude/Codex/OpenCode preservation & endpoint fencing)
+  IO.FS.createDirAll (invHome / ".local" / "bin")
+  let fakeMcpBin := invHome / ".local" / "bin" / "sandboxed-mcp"
+  IO.FS.writeFile fakeMcpBin "#!/bin/sh\nexit 0\n"
+  discard <| OrbBin.PosixExt.chmod fakeMcpBin.toString 0o755
+  IO.FS.writeFile (invHome / ".gemini" / "config" / "mcp_config.json") ""
+  IO.FS.writeFile (invHome / ".claude.json") "{\"oauthAccount\":\"u1\",\"mcpServers\":{\"playwright\":{\"command\":\"npx\",\"args\":[]}}}\n"
+  IO.FS.writeFile (invHome / ".codex" / "config.toml") "model = \"gpt-5.4\"\n"
+  IO.FS.writeFile (invHome / ".config" / "opencode" / "opencode.json") "{\"$schema\":\"https://opencode.ai/config.json\",\"mcp\":{}}\n"
+  let nowSecMcp ← OrbBin.PosixExt.nowEpoch
+  let mcpPreStatus ← dispatchRpcCommand stInv "local_skills_status" (.obj #[
+    ("request", .obj #[
+      ("library_skills", .arr libPayloads),
+      ("api_url", .str "https://orbcore.thomas.md")
+    ])
+  ])
+  let mcpSync1 ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[
+      ("library_skills", .arr libPayloads),
+      ("api_url", .str "https://orbcore.thomas.md"),
+      ("mcp_session", .obj #[
+        ("api_url", .str "https://orbcore.thomas.md"),
+        ("token", .str "mcp1.eyJhbGciOiJIUzI1NiJ9.eyJzZXNzaW9uX2lkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDQyIn0.abcd"),
+        ("session_id", .str "00000000-0000-4000-8000-000000000042"),
+        ("role", .str "coordinator"),
+        ("expires_at", JVal.uint64 (nowSecMcp + 3600)),
+        ("hard_expires_at", JVal.uint64 (nowSecMcp + 86400))
+      ])
+    ])
+  ])
+  -- Reset Antigravity config to 0 bytes and verify silent repair without passing `mcp_session`
+  IO.FS.writeFile (invHome / ".gemini" / "config" / "mcp_config.json") ""
+  let mcpRepairSync ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[
+      ("library_skills", .arr libPayloads),
+      ("api_url", .str "https://orbcore.thomas.md")
+    ])
+  ])
+  let mcpOtherEpStatus ← dispatchRpcCommand stInv "local_skills_status" (.obj #[
+    ("request", .obj #[
+      ("library_skills", .arr libPayloads),
+      ("api_url", .str "https://other-core.example.com")
+    ])
+  ])
+  let mcpOperatorReject ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[
+      ("library_skills", .arr #[]),
+      ("mcp_session", .obj #[
+        ("api_url", .str "https://orbcore.thomas.md"),
+        ("token", .str "mcp1.a.b.c"),
+        ("role", .str "operator"),
+        ("hard_expires_at", JVal.uint64 (nowSecMcp + 86400))
+      ])
+    ])
+  ])
+  let credSt ← OrbBin.PosixExt.statPath (invHome / ".orb" / "mcp" / "credential").toString
+  let claudeAfterRaw ← try IO.FS.readFile (invHome / ".claude.json") catch _ => pure ""
+  let codexAfterRaw ← try IO.FS.readFile (invHome / ".codex" / "config.toml") catch _ => pure ""
+  let agyAfterRaw ← try IO.FS.readFile (invHome / ".gemini" / "config" / "mcp_config.json") catch _ => pure ""
+  let opencodeAfterRaw ← try IO.FS.readFile (invHome / ".config" / "opencode" / "opencode.json") catch _ => pure ""
+  total := total + 1
+  let mcpAutoSyncOk :=
+    credSt.exists_ && credSt.isReg && !credSt.isSymlink && (credSt.mode &&& 0o777) == 0o600 &&
+    (match mcpPreStatus with
+     | .ok rep =>
+       let m := (rep.field? "mcp").getD (.obj #[])
+       m.fieldBool? "ready" == some false && m.fieldBool? "needs_token" == some true && m.fieldBool? "binary_ready" == some true
+     | _ => false) &&
+    (match mcpSync1, mcpRepairSync with
+     | .ok s1, .ok s2 =>
+       let r1 := ((s1.field? "report").getD (.obj #[])).fieldOrNull "mcp"
+       let r2 := ((s2.field? "report").getD (.obj #[])).fieldOrNull "mcp"
+       r1.fieldBool? "ready" == some true &&
+       (r1.fieldArr? "synced_harnesses").map (·.size) == some 4 &&
+       (r1.fieldArr? "missing_harnesses").map (·.size) == some 0 &&
+       r2.fieldBool? "ready" == some true &&
+       (r2.fieldArr? "synced_harnesses").map (·.size) == some 4
+     | _, _ => false) &&
+    (match mcpOtherEpStatus with
+     | .ok rep =>
+       let m := rep.fieldOrNull "mcp"
+       m.fieldBool? "ready" == some false && m.fieldBool? "needs_token" == some true
+     | _ => false) &&
+    (match mcpOperatorReject with
+     | .ok jv => (jv.fieldStr? "mcp_error").isSome
+     | _ => false) &&
+    (match OrbBin.Json.parse claudeAfterRaw, OrbBin.Json.parse agyAfterRaw, OrbBin.Json.parse opencodeAfterRaw with
+     | .ok cj, .ok aj, .ok oj =>
+       cj.fieldStr? "oauthAccount" == some "u1" &&
+       ((cj.field? "mcpServers").bind (·.field? "playwright")).isSome &&
+       ((cj.field? "mcpServers").bind (·.field? "sandboxed")).isSome &&
+       ((aj.field? "mcpServers").bind (·.field? "sandboxed")).isSome &&
+       oj.fieldStr? "$schema" == some "https://opencode.ai/config.json" &&
+       ((oj.field? "mcp").bind (·.field? "sandboxed")).isSome
+     | _, _, _ => false) &&
+    (codexAfterRaw.splitOn "model = \"gpt-5.4\"").length == 2 &&
+    (codexAfterRaw.splitOn "[mcp_servers.sandboxed]").length == 2
+  if (← assertTrue "local_mcp_auto_sync_repairs_0byte_agy_preserves_configs_and_fences_endpoint" mcpAutoSyncOk) then passed := passed + 1
+
   -- G. Voice worker Protocol v1 integration (`ORB_VOICE_FAKE=1`: `voice_capability`, `voice_prewarm`, `voice_transcribe`, `voice_cancel`)
   OrbBin.PosixExt.setenvVar "ORB_VOICE_FAKE" "1"
   let repoWorkerCandidates : Array String := #[
