@@ -13,6 +13,7 @@ import {
   bandwidthModeLine,
   computeRunwayForecast,
   exceedsGrant,
+  formatDurationEta,
   formatTokensPerMin,
   getMissionBudget,
   managedProviderLabel,
@@ -32,6 +33,7 @@ import {
   putMissionVmLimits,
   vmLimitsModeLine,
   type BandwidthLimits,
+  type BudgetResetPeriod,
   type ChildBudget,
   type MissionBudget,
   type VmConcurrencyLimits,
@@ -70,7 +72,7 @@ export function MissionSettings(p: {
   load?: (id: string) => Promise<MissionBudget>;
   pollIntervalMs?: number;
   loadResources?: (id: string) => Promise<MissionResourcesResponse | null>;
-  save?: (id: string, budget: number | null) => Promise<MissionBudget>;
+  save?: (id: string, budget: number | null, resetPeriod?: BudgetResetPeriod) => Promise<MissionBudget>;
   saveVmLimits?: (id: string, limits: VmConcurrencyLimits | null) => Promise<MissionBudget>;
   saveBandwidthLimits?: (id: string, limits: BandwidthLimits | null) => Promise<MissionBudget>;
   loadStats?: typeof getMissionStats;
@@ -83,7 +85,8 @@ export function MissionSettings(p: {
       : isConnected()
         ? getMissionResources(id).catch(() => null)
         : Promise.resolve(null);
-  const saveBudgetApi = (id: string, budget: number | null) => (p.save ?? putMissionBudget)(id, budget);
+  const saveBudgetApi = (id: string, budget: number | null, resetPeriod?: BudgetResetPeriod) =>
+    (p.save ?? putMissionBudget)(id, budget, resetPeriod);
   const saveLimitsApi = (id: string, limits: VmConcurrencyLimits | null) =>
     (p.saveVmLimits ?? putMissionVmLimits)(id, limits);
   const saveBandwidthApi = (id: string, limits: BandwidthLimits | null) =>
@@ -102,6 +105,7 @@ export function MissionSettings(p: {
   const locked = () => Boolean(p.readOnly) || busy();
 
   const [draft, setDraft] = createSignal("");
+  const [resetPeriodDraft, setResetPeriodDraft] = createSignal<BudgetResetPeriod>("total");
   const [budgetEdited, setBudgetEdited] = createSignal(false);
   const [fieldError, setFieldError] = createSignal<string | null>(null);
 
@@ -112,11 +116,22 @@ export function MissionSettings(p: {
   const [providersOpen, setProvidersOpen] = createSignal(false);
 
   const [bwTokensDraft, setBwTokensDraft] = createSignal("");
+  const [bwInfUsdHDraft, setBwInfUsdHDraft] = createSignal("");
   const [bwVcpuDraft, setBwVcpuDraft] = createSignal("");
   const [bwUsdHDraft, setBwUsdHDraft] = createSignal("");
   const [bwProtectRoot, setBwProtectRoot] = createSignal(true);
   const [bwEdited, setBwEdited] = createSignal(false);
   const [bwFieldError, setBwFieldError] = createSignal<string | null>(null);
+
+  const syncBudgetDrafts = (v: MissionBudget) => {
+    setDraft(v.own_budget_usd != null ? String(v.own_budget_usd) : "");
+    setResetPeriodDraft(
+      v.max_grant_usd != null
+        ? "total"
+        : (v.own_budget_reset_period ?? v.pool?.reset_period ?? "total"),
+    );
+    setBudgetEdited(false);
+  };
 
   const syncLimitDrafts = (v: MissionBudget) => {
     const own = v.own_vm_limits;
@@ -140,6 +155,7 @@ export function MissionSettings(p: {
   const syncBandwidthDrafts = (v: MissionBudget) => {
     const own = v.own_bandwidth_limits;
     setBwTokensDraft(own?.tokens_per_min != null ? String(own.tokens_per_min) : "");
+    setBwInfUsdHDraft(own?.inference_usd_per_hour != null ? String(own.inference_usd_per_hour) : "");
     setBwVcpuDraft(own?.compute_vcpu_per_min != null ? String(own.compute_vcpu_per_min) : "");
     setBwUsdHDraft(own?.compute_usd_per_hour != null ? String(own.compute_usd_per_hour) : "");
     setBwProtectRoot(own?.protect_root ?? true);
@@ -162,7 +178,7 @@ export function MissionSettings(p: {
       if (genAtStart !== mutationGen || busy()) return;
       setView(v);
       if (res) setResources(res);
-      if (!budgetEdited()) setDraft(v.own_budget_usd != null ? String(v.own_budget_usd) : "");
+      if (!budgetEdited()) syncBudgetDrafts(v);
       if (!vmEdited()) syncLimitDrafts(v);
       if (!bwEdited()) syncBandwidthDrafts(v);
     } catch (e) {
@@ -180,30 +196,27 @@ export function MissionSettings(p: {
   });
 
   /** Optimistic budget write with rollback. */
-  const commit = async (amount: number | null) => {
+  const commit = async (amount: number | null, period?: BudgetResetPeriod) => {
     const before = view();
     if (!before || busy()) return;
     mutationGen += 1;
     setBusy(true);
     setSaveError(null);
     setRetry(null);
-    const opt = optimisticBudget(before, amount);
+    const opt = optimisticBudget(before, amount, period);
     setView(opt);
-    setDraft(opt.own_budget_usd != null ? String(opt.own_budget_usd) : "");
-    setBudgetEdited(false);
+    syncBudgetDrafts(opt);
     try {
-      const next = await saveBudgetApi(p.missionId, amount);
+      const next = await saveBudgetApi(p.missionId, amount, period);
       mutationGen += 1;
       setView(next);
-      setDraft(next.own_budget_usd != null ? String(next.own_budget_usd) : "");
-      setBudgetEdited(false);
+      syncBudgetDrafts(next);
     } catch (e) {
       mutationGen += 1;
       setView(before);
-      setDraft(before.own_budget_usd != null ? String(before.own_budget_usd) : "");
-      setBudgetEdited(false);
+      syncBudgetDrafts(before);
       setSaveError(e instanceof Error ? e.message : String(e));
-      setRetry(() => () => void commit(amount));
+      setRetry(() => () => void commit(amount, period));
     } finally {
       setBusy(false);
     }
@@ -270,7 +283,12 @@ export function MissionSettings(p: {
   const budgetDirty = () => {
     const v = view();
     if (!v || !enabled()) return false;
-    return draft().trim() !== String(v.own_budget_usd ?? "");
+    const serverPeriod: BudgetResetPeriod =
+      v.max_grant_usd != null
+        ? "total"
+        : (v.own_budget_reset_period ?? v.pool?.reset_period ?? "total");
+    const periodDirty = v.max_grant_usd == null && resetPeriodDraft() !== serverPeriod;
+    return draft().trim() !== String(v.own_budget_usd ?? "") || periodDirty;
   };
 
   const currentDraftNormalized = () => {
@@ -293,9 +311,16 @@ export function MissionSettings(p: {
   };
 
   const currentBandwidthNormalized = () => {
-    const parsed = parseBandwidthLimits(bwTokensDraft(), bwVcpuDraft(), bwUsdHDraft(), bwProtectRoot());
+    const parsed = parseBandwidthLimits(
+      bwTokensDraft(),
+      bwVcpuDraft(),
+      bwUsdHDraft(),
+      bwProtectRoot(),
+      undefined,
+      bwInfUsdHDraft(),
+    );
     if ("error" in parsed) {
-      return `draft:${bwTokensDraft().trim()}|${bwVcpuDraft().trim()}|${bwUsdHDraft().trim()}|${bwProtectRoot()}`;
+      return `draft:${bwTokensDraft().trim()}|${bwInfUsdHDraft().trim()}|${bwVcpuDraft().trim()}|${bwUsdHDraft().trim()}|${bwProtectRoot()}`;
     }
     return normalizeBandwidthLimits(parsed.value);
   };
@@ -314,7 +339,8 @@ export function MissionSettings(p: {
     const over = exceedsGrant(v, parsed.value);
     if (over) return setFieldError(over);
     setFieldError(null);
-    void commit(parsed.value);
+    const period = v.max_grant_usd != null ? undefined : resetPeriodDraft();
+    void commit(parsed.value, period);
   };
 
   const saveLimits = () => {
@@ -329,7 +355,14 @@ export function MissionSettings(p: {
   const saveBandwidth = () => {
     const v = view();
     if (!v) return;
-    const parsed = parseBandwidthLimits(bwTokensDraft(), bwVcpuDraft(), bwUsdHDraft(), bwProtectRoot(), v);
+    const parsed = parseBandwidthLimits(
+      bwTokensDraft(),
+      bwVcpuDraft(),
+      bwUsdHDraft(),
+      bwProtectRoot(),
+      v,
+      bwInfUsdHDraft(),
+    );
     if ("error" in parsed) return setBwFieldError(parsed.error);
     setBwFieldError(null);
     void commitBandwidth(parsed.value);
@@ -342,7 +375,7 @@ export function MissionSettings(p: {
     const initial = v.max_grant_usd != null ? Math.min(5, Math.floor(v.max_grant_usd * 100) / 100) : 5;
     if (initial <= 0) return setFieldError("The parent pool has nothing left to grant");
     setFieldError(null);
-    void commit(initial);
+    void commit(initial, v.max_grant_usd != null ? undefined : "total");
   };
 
   const toggleVmLimits = () => {
@@ -369,11 +402,13 @@ export function MissionSettings(p: {
     const defaultTpm = ancTpm != null ? Math.min(120_000, ancTpm) : 120_000;
     setBwFieldError(null);
     setBwTokensDraft(String(defaultTpm));
+    setBwInfUsdHDraft("");
     setBwVcpuDraft("");
     setBwUsdHDraft("");
     setBwProtectRoot(true);
     void commitBandwidth({
       tokens_per_min: defaultTpm,
+      inference_usd_per_hour: null,
       compute_vcpu_per_min: null,
       compute_usd_per_hour: null,
       protect_root: true,
@@ -398,6 +433,8 @@ export function MissionSettings(p: {
       budget: view(),
       resources: resources(),
       draftBudgetUsd: enabled() ? draft() : undefined,
+      draftResetPeriod: enabled() && view()?.max_grant_usd == null ? resetPeriodDraft() : undefined,
+      draftInferenceUsdPerH: bandwidthEnabled() ? bwInfUsdHDraft() : undefined,
       draftComputeUsdPerH: bandwidthEnabled() ? bwUsdHDraft() : undefined,
       draftComputeVcpu: bandwidthEnabled() ? bwVcpuDraft() : undefined,
       bandwidthEnabled: bandwidthEnabled() || view()?.effective_bandwidth?.source === "mission",
@@ -598,6 +635,45 @@ export function MissionSettings(p: {
                   />
                 </SettingsRow>
                 <Show when={enabled()}>
+                  <Show when={v().max_grant_usd == null}>
+                    <SettingsRow
+                      title="Reset cadence"
+                      desc={
+                        resetPeriodDraft() === "daily"
+                          ? "Resets every day at 00:00 UTC while preserving lifetime spend telemetry."
+                          : resetPeriodDraft() === "weekly"
+                            ? "Resets every Monday at 00:00 UTC while preserving lifetime spend telemetry."
+                            : "One-time spending cap across the mission's full lifetime."
+                      }
+                    >
+                      <div class="ms-period" role="radiogroup" aria-label="Reset cadence">
+                        <For
+                          each={[
+                            ["total", "Total"],
+                            ["daily", "Daily"],
+                            ["weekly", "Weekly"],
+                          ] as const}
+                        >
+                          {([val, label]) => (
+                            <button
+                              type="button"
+                              role="radio"
+                              aria-checked={resetPeriodDraft() === val}
+                              classList={{ on: resetPeriodDraft() === val }}
+                              disabled={locked()}
+                              onClick={() => {
+                                setBudgetEdited(true);
+                                setResetPeriodDraft(val);
+                                setFieldError(null);
+                              }}
+                            >
+                              {label}
+                            </button>
+                          )}
+                        </For>
+                      </div>
+                    </SettingsRow>
+                  </Show>
                   <SettingsRow
                     title={<label for="ms-budget-amount">Amount (USD)</label>}
                     desc={
@@ -654,7 +730,16 @@ export function MissionSettings(p: {
                       />
                       <Legend items={BUDGET_LEGEND} />
                       <dl class="ms-stats">
-                        <div><dt>Spent</dt><dd>{money(pool().spent_usd)}</dd></div>
+                        <div>
+                          <dt>
+                            {pool().reset_period === "daily"
+                              ? "Spent today"
+                              : pool().reset_period === "weekly"
+                                ? "Spent this week"
+                                : "Spent"}
+                          </dt>
+                          <dd>{money(pool().spent_usd)}</dd>
+                        </div>
                         <div><dt>Reserved</dt><dd>{money(pool().reserved_usd)}</dd></div>
                         <div><dt>Sub-budgets</dt><dd>{money(pool().carved_usd)}</dd></div>
                         <div>
@@ -666,6 +751,9 @@ export function MissionSettings(p: {
                       </dl>
                       <p class="ms-hint">
                         Reserved holds up to 60 minutes of each running machine; machines extend in 30 minute steps while busy, within the budget.
+                        <Show when={pool().reset_period && pool().reset_period !== "total"}>
+                          {` Lifetime direct spend: ${money(pool().lifetime_spent_usd ?? pool().spent_usd)}${forecast().resetsInSecs != null ? ` · resets in ${formatDurationEta(forecast().resetsInSecs!)}` : ""}.`}
+                        </Show>
                       </p>
                     </div>
                   )}
@@ -683,6 +771,7 @@ export function MissionSettings(p: {
                           const eff = () => v().effective_bandwidth!;
                           const summary = () => bandwidthLimitsSummary({
                             tokens_per_min: eff().tokens_per_min,
+                            inference_usd_per_hour: eff().inference_usd_per_hour,
                             compute_vcpu_per_min: eff().compute_vcpu_per_min,
                             compute_usd_per_hour: eff().compute_usd_per_hour,
                           });
@@ -737,6 +826,30 @@ export function MissionSettings(p: {
                       onInput={e => {
                         setBwEdited(true);
                         setBwTokensDraft(e.currentTarget.value);
+                        setBwFieldError(null);
+                      }}
+                      onKeyDown={e => e.key === "Enter" && saveBandwidth()}
+                    />
+                  </SettingsRow>
+                  <SettingsRow
+                    title={<label for="ms-bw-inf-usdh">Inference burn ceiling ($/h)</label>}
+                    desc={
+                      v().effective_bandwidth?.ancestor_inference_usd_per_hour != null
+                        ? `Up to ${money(v().effective_bandwidth!.ancestor_inference_usd_per_hour!)}/h within the parent pool.`
+                        : "Caps hourly LLM spend rate across model calls; bursts pace smoothly instead of failing."
+                    }
+                  >
+                    <input
+                      id="ms-bw-inf-usdh"
+                      aria-label="Inference burn ceiling ($/h)"
+                      class="s-input ms-num-input"
+                      inputmode="decimal"
+                      placeholder="Optional"
+                      value={bwInfUsdHDraft()}
+                      disabled={locked()}
+                      onInput={e => {
+                        setBwEdited(true);
+                        setBwInfUsdHDraft(e.currentTarget.value);
                         setBwFieldError(null);
                       }}
                       onKeyDown={e => e.key === "Enter" && saveBandwidth()}

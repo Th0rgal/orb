@@ -2288,6 +2288,76 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok () => return .ok (mkJson 200 "{\"ok\":true}")
 
+  -- Mission Budget, Reset Cadence, VM Concurrency & Bandwidth Pacing (`GET|PUT /api/control/missions/:id/budget`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/budget" rawTarget then
+    let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+    if req.method == "GET" then
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
+        return .ok (mkJson cCode cBody)
+      let some _ ← getMission? st.store mid
+        | return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      let mf0 ← st.managedRef.get
+      let live ← match st.managedStore? with
+        | some mst =>
+          match ← loadManagedFleet mst mf0.enabled mf0.boatEnabled mf0.dailyCapCents mf0.spentTodayCents mf0.maxConcurrent with
+          | .ok l => st.managedRef.set l; pure l
+          | .error _ => pure mf0
+        | none => pure mf0
+      let cfg ← match st.managedStore? with
+        | some mst => getMissionBudgetConfig mst mid
+        | none => pure { missionId := mid }
+      return .ok (mkJson 200 (renderMissionBudgetJson live cfg nowEpochSec))
+    else if req.method == "PUT" || req.method == "PATCH" then
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid true) then
+        return .ok (mkJson cCode cBody)
+      let some _ ← getMission? st.store mid
+        | return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      let some mst := st.managedStore?
+        | return .ok (mkJson 503 "{\"error\":\"managed_store_unavailable\"}")
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let cur ← getMissionBudgetConfig mst mid
+      let mut nextCfg := cur
+      if let some bv := jv.field? "budget_usd" then
+        if bv.isNull then
+          nextCfg := { nextCfg with budgetDeciMilliUsd? := none, resetPeriod := "total" }
+        else
+          match parseDeciMilliUsd? bv 100 1000000000 with
+          | some dm => nextCfg := { nextCfg with budgetDeciMilliUsd? := some dm }
+          | none =>
+            return .ok (mkJson 400 "{\"error\":\"invalid_budget\",\"message\":\"budget_usd must be null or between 0.01 and 100000\"}")
+      if let some rpv := jv.field? "budget_reset_period" then
+        if !rpv.isNull then
+          match rpv.asStr? with
+          | some rpRaw =>
+            let rp := rpRaw.trimAscii.toString.toLower
+            if !isValidBudgetResetPeriod rp then
+              return .ok (mkJson 400 "{\"error\":\"invalid_budget_period\",\"message\":\"budget_reset_period must be total, daily, or weekly\"}")
+            if nextCfg.budgetDeciMilliUsd?.isNone then
+              return .ok (mkJson 400 "{\"error\":\"invalid_budget_period\",\"message\":\"Enable a mission budget (budget_usd) before setting budget_reset_period\"}")
+            nextCfg := { nextCfg with resetPeriod := rp }
+          | none =>
+            return .ok (mkJson 400 "{\"error\":\"invalid_budget_period\",\"message\":\"budget_reset_period must be total, daily, or weekly\"}")
+      if let some vmv := jv.field? "vm_limits" then
+        match validateVmLimitsPatch vmv with
+        | .ok vmJson => nextCfg := { nextCfg with vmLimitsJson := vmJson }
+        | .error (errCode, errMsg) =>
+          return .ok (mkJson 400 s!"\{\"error\":{jsonEscape errCode},\"message\":{jsonEscape errMsg}}")
+      if let some bwv := jv.field? "bandwidth_limits" then
+        match validateBandwidthLimitsPatch bwv with
+        | .ok bwJson => nextCfg := { nextCfg with bandwidthLimitsJson := bwJson }
+        | .error (errCode, errMsg) =>
+          return .ok (mkJson 400 s!"\{\"error\":{jsonEscape errCode},\"message\":{jsonEscape errMsg}}")
+      nextCfg := { nextCfg with updatedAt := nowEpochSec }
+      if let .error e ← saveMissionBudgetConfig mst nextCfg then
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      let mf0 ← st.managedRef.get
+      let live ← match ← loadManagedFleet mst mf0.enabled mf0.boatEnabled mf0.dailyCapCents mf0.spentTodayCents mf0.maxConcurrent with
+        | .ok l => st.managedRef.set l; pure l
+        | .error _ => pure mf0
+      let savedCfg ← getMissionBudgetConfig mst mid
+      return .ok (mkJson 200 (renderMissionBudgetJson live savedCfg nowEpochSec))
+
   -- Mission Remote Wait Arm (`POST /api/control/missions/:id/remote-wait`)
   if let some params := matchRoutePattern? "/api/control/missions/:id/remote-wait" rawTarget then
     if req.method == "POST" then

@@ -73,6 +73,145 @@ class OrbMissionBudgetTest {
         val clearedBw = dedicated.optimisticBandwidthLimits(null)
         assertEquals("none", clearedBw.bandwidthMode)
         assertNull(clearedBw.ownBandwidthLimits)
+
+        val dailySust = OrbMissionBudget.from(root["daily_sustainable_with_lease_cliff"])
+        assertEquals(OrbMissionBudget.BudgetResetPeriod.DAILY, dailySust.ownBudgetResetPeriod)
+        assertEquals(920.0, dailySust.pool?.lifetimeSpent ?: 0.0, 1e-9)
+        assertEquals(
+            "150k tok/min · $18/h LLM · 64 vCPU/min · $10/h",
+            OrbMissionBudget.bandwidthLimitsSummary(dailySust.ownBandwidthLimits),
+        )
+        assertTrue(dailySust.modeLine.contains("Own daily budget"))
+        val fc = dailySust.computeRunwayForecast(
+            bandwidthEnabled = true,
+            budgetEnabled = true,
+            nowMs = 1_793_922_300_000L,
+        )
+        assertTrue(fc.sustainsUntilReset)
+        assertEquals(900.0, fc.resetsInSecs ?: 0.0, 1.0)
+        assertEquals(0.0, fc.leaseCliffSecs ?: -1.0, 1e-6)
+        assertEquals("Sustains until daily reset", fc.headline)
+        assertTrue(fc.subline.contains("VM auto-extensions paused ($2.00 < $2.50 30m step)"))
+        assertEquals(OrbMissionBudget.RunwayForecast.Tone.WARNING, fc.tone)
+
+        val pooledChild = dailySust.copy(
+            ownBudget = null,
+            ownBudgetResetPeriod = OrbMissionBudget.BudgetResetPeriod.TOTAL,
+            mode = "pooled",
+            maxGrant = 2.0,
+        )
+        val pooledFc = pooledChild.computeRunwayForecast(
+            bandwidthEnabled = true,
+            nowMs = 1_793_922_300_000L,
+        )
+        assertEquals(OrbMissionBudget.BudgetResetPeriod.DAILY, pooledFc.resetPeriod)
+        assertTrue(pooledFc.sustainsUntilReset)
+        assertEquals("Sustains until daily reset", pooledFc.headline)
+
+        val immediateFleetBatch = dailySust.copy(
+            pool = dailySust.pool!!.copy(
+                liveMachines = 10,
+                liveLeases = emptyList(),
+                spent = 255.8333,
+                carved = 40.0,
+                reserved = 1.6667,
+                available = 2.5,
+            ),
+        )
+        val immediateFleetFc = immediateFleetBatch.computeRunwayForecast(
+            bandwidthEnabled = true,
+            budgetEnabled = true,
+            nowMs = 1_793_922_300_000L,
+        )
+        assertTrue(immediateFleetFc.sustainsUntilReset)
+        assertEquals(0.0, immediateFleetFc.leaseCliffSecs ?: -1.0, 1e-6)
+        assertTrue(immediateFleetFc.subline.contains("VM auto-extensions paused ($2.50 left across 10 VMs)"))
+
+        val staggeredCliff = dailySust.copy(
+            pool = dailySust.pool!!.copy(
+                liveMachines = 2,
+                liveLeases = listOf(
+                    OrbMissionBudget.LiveLease(remainingSecs = 900.0, usdPerHour = 5.0),
+                    OrbMissionBudget.LiveLease(remainingSecs = 1500.0, usdPerHour = 5.0),
+                ),
+                spent = 246.6667,
+                carved = 47.5,
+                reserved = 3.3333,
+                available = 2.5,
+            ),
+        )
+        val staggeredFc = staggeredCliff.computeRunwayForecast(
+            bandwidthEnabled = true,
+            budgetEnabled = true,
+            nowMs = 1_793_919_600_000L,
+        )
+        assertEquals(900.0, staggeredFc.leaseCliffSecs ?: 0.0, 1.0)
+        assertTrue(staggeredFc.subline.contains("VM extensions pause in ~15m"))
+
+        val singleVmDaily = dailySust.copy(
+            pool = dailySust.pool!!.copy(
+                liveMachines = 1,
+                liveLeases = listOf(OrbMissionBudget.LiveLease(remainingSecs = 1800.0, usdPerHour = 10.0)),
+                spent = 290.0,
+                carved = 0.0,
+                reserved = 5.0,
+                available = 5.0,
+            ),
+        )
+        val singleVmDailyFc = singleVmDaily.computeRunwayForecast(
+            bandwidthEnabled = true,
+            budgetEnabled = true,
+            nowMs = 1_793_922_300_000L,
+        )
+        assertTrue((singleVmDailyFc.leaseCliffSecs ?: 0.0) > 86_400.0)
+        assertTrue(!singleVmDailyFc.subline.contains("VM extensions pause"))
+        assertEquals(OrbMissionBudget.RunwayForecast.Tone.OK, singleVmDailyFc.tone)
+
+        val singleVmTotalFc = singleVmDaily.computeRunwayForecast(
+            draftResetPeriod = OrbMissionBudget.BudgetResetPeriod.TOTAL,
+            bandwidthEnabled = true,
+            budgetEnabled = true,
+            nowMs = 1_793_922_300_000L,
+        )
+        assertEquals(3_000.0, singleVmTotalFc.leaseCliffSecs ?: 0.0, 1.0)
+
+        val cappedBandwidthVm = dailySust.copy(
+            pool = dailySust.pool!!.copy(
+                liveMachines = 1,
+                liveLeases = listOf(OrbMissionBudget.LiveLease(remainingSecs = 600.0, usdPerHour = 10.0)),
+                spent = 297.3333,
+                carved = 0.0,
+                reserved = 1.6667,
+                available = 1.0,
+            ),
+        )
+        val cappedBwFc = cappedBandwidthVm.computeRunwayForecast(
+            draftComputeUsdPerH = "2.0",
+            bandwidthEnabled = true,
+            budgetEnabled = true,
+            nowMs = 1_793_922_300_000L,
+        )
+        assertEquals(0.0, cappedBwFc.leaseCliffSecs ?: -1.0, 1e-6)
+        assertTrue(cappedBwFc.subline.contains("VM auto-extensions paused ($1.00 < $5.00 30m step)"))
+
+        val closedChildReset = OrbMissionBudget.from(root["daily_closed_child_reset_release"])
+        val closedChildFc = closedChildReset.computeRunwayForecast(
+            budgetEnabled = true,
+            nowMs = 1_793_922_300_000L,
+        )
+        assertTrue((closedChildFc.leaseCliffSecs ?: 0.0) > 86_400.0)
+        assertFalse(closedChildFc.subline.contains("VM extensions pause"))
+        assertEquals(OrbMissionBudget.RunwayForecast.Tone.OK, closedChildFc.tone)
+
+        val openChildGrant = closedChildReset.copy(
+            pool = closedChildReset.pool!!.copy(persistentCarved = 96.0),
+        )
+        val openChildFc = openChildGrant.computeRunwayForecast(
+            budgetEnabled = true,
+            nowMs = 1_793_922_300_000L,
+        )
+        assertEquals(3_000.0, openChildFc.leaseCliffSecs ?: 0.0, 1.0)
+        assertTrue(openChildFc.subline.contains("VM extensions pause in ~50m"))
     }
 
     @Test fun validatesVmAndBandwidthInputsAndForecast() {
@@ -87,6 +226,8 @@ class OrbMissionBudgetTest {
         assertEquals(120_000, bw.tokensPerMin)
         assertEquals(32, bw.computeVcpuPerMin)
         assertEquals(2.5, bw.computeUsdPerHour ?: 0.0, 1e-9)
+        val bwInf = OrbMissionBudget.parseBandwidthLimits("", "", "", true, inferenceUsdPerHRaw = "$12.5").getOrThrow()
+        assertEquals(12.5, bwInf.inferenceUsdPerHour ?: 0.0, 1e-9)
         assertTrue(OrbMissionBudget.parseBandwidthLimits("", "", "", true).isFailure)
 
         val base10 = own(10.0)

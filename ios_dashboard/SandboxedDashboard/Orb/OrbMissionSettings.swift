@@ -5,9 +5,33 @@ struct OrbMissionBudget: Equatable {
     static let maxVmConcurrency = 128
     static let minTokensPerMin = 1_000
     static let maxTokensPerMin = 100_000_000
+    static let minInferenceUsdPerHour = 0.01
+    static let maxInferenceUsdPerHour = 10_000.0
     static let maxComputeVcpuPerMin = 4_096
     static let minComputeUsdPerHour = 0.01
     static let maxComputeUsdPerHour = 10_000.0
+
+    enum BudgetResetPeriod: String, CaseIterable, Equatable {
+        case total
+        case daily
+        case weekly
+
+        var label: String {
+            switch self {
+            case .total: return "Total"
+            case .daily: return "Daily"
+            case .weekly: return "Weekly"
+            }
+        }
+
+        init(wire: String) {
+            switch wire.lowercased() {
+            case "daily": self = .daily
+            case "weekly": self = .weekly
+            default: self = .total
+            }
+        }
+    }
 
     static let providers: [(id: String, label: String)] = [
         ("boat", "boat.dev"),
@@ -23,8 +47,24 @@ struct OrbMissionBudget: Equatable {
         var errorDescription: String? { message }
     }
 
+    struct LiveLease: Equatable {
+        var remainingSecs: Double
+        var usdPerHour: Double
+    }
+
     struct Pool: Equatable {
-        var budget: Double, spent: Double, reserved: Double, carved: Double, available: Double
+        var budget: Double
+        var spent: Double
+        var lifetimeSpent: Double = 0
+        var reserved: Double
+        var carved: Double
+        var persistentCarved: Double? = nil
+        var available: Double
+        var liveMachines: Int = 0
+        var liveLeases: [LiveLease] = []
+        var resetPeriod: BudgetResetPeriod = .total
+        var periodStartedAt: String? = nil
+        var periodResetsAt: String? = nil
     }
 
     struct VmConcurrencyLimits: Equatable {
@@ -106,17 +146,20 @@ struct OrbMissionBudget: Equatable {
 
     struct BandwidthLimits: Equatable {
         var tokensPerMin: Int?
+        var inferenceUsdPerHour: Double?
         var computeVcpuPerMin: Int?
         var computeUsdPerHour: Double?
         var protectRoot: Bool
 
         init(
             tokensPerMin: Int? = nil,
+            inferenceUsdPerHour: Double? = nil,
             computeVcpuPerMin: Int? = nil,
             computeUsdPerHour: Double? = nil,
             protectRoot: Bool = true
         ) {
             self.tokensPerMin = tokensPerMin
+            self.inferenceUsdPerHour = inferenceUsdPerHour
             self.computeVcpuPerMin = computeVcpuPerMin
             self.computeUsdPerHour = computeUsdPerHour
             self.protectRoot = protectRoot
@@ -125,6 +168,7 @@ struct OrbMissionBudget: Equatable {
         init?(_ j: OrbJSON) {
             guard case .object(let d) = j else { return nil }
             tokensPerMin = d["tokens_per_min"]?.doubleValue.map(Int.init)
+            inferenceUsdPerHour = d["inference_usd_per_hour"]?.doubleValue
             computeVcpuPerMin = d["compute_vcpu_per_min"]?.doubleValue.map(Int.init)
             computeUsdPerHour = d["compute_usd_per_hour"]?.doubleValue
             protectRoot = (d["protect_root"] ?? .null).flag
@@ -133,6 +177,7 @@ struct OrbMissionBudget: Equatable {
         func toJSON() -> OrbJSON {
             .object([
                 "tokens_per_min": tokensPerMin.map { .number(Double($0)) } ?? .null,
+                "inference_usd_per_hour": inferenceUsdPerHour.map { .number($0) } ?? .null,
                 "compute_vcpu_per_min": computeVcpuPerMin.map { .number(Double($0)) } ?? .null,
                 "compute_usd_per_hour": computeUsdPerHour.map { .number($0) } ?? .null,
                 "protect_root": .bool(protectRoot),
@@ -144,32 +189,40 @@ struct OrbMissionBudget: Equatable {
         var source: String
         var poolId: String?
         var tokensPerMin: Int?
+        var inferenceUsdPerHour: Double?
         var computeVcpuPerMin: Int?
         var computeUsdPerHour: Double?
         var protectRoot: Bool
         var currentTokensPerMin: Int
+        var currentInferenceUsdPerHour: Double
         var currentVcpuPerMin: Int
         var currentComputeUsdPerHour: Double
         var pacingActive: Bool
         var pacedDelayMs: Int
         var ancestorTokensPerMin: Int?
+        var ancestorInferenceUsdPerHour: Double?
         var ancestorComputeVcpuPerMin: Int?
         var ancestorComputeUsdPerHour: Double?
 
         init(
-            source: String, poolId: String?, tokensPerMin: Int?, computeVcpuPerMin: Int?,
-            computeUsdPerHour: Double?, protectRoot: Bool, currentTokensPerMin: Int,
+            source: String, poolId: String?, tokensPerMin: Int?, inferenceUsdPerHour: Double? = nil,
+            computeVcpuPerMin: Int?, computeUsdPerHour: Double?, protectRoot: Bool,
+            currentTokensPerMin: Int, currentInferenceUsdPerHour: Double = 0,
             currentVcpuPerMin: Int, currentComputeUsdPerHour: Double, pacingActive: Bool,
-            pacedDelayMs: Int, ancestorTokensPerMin: Int?, ancestorComputeVcpuPerMin: Int?,
-            ancestorComputeUsdPerHour: Double?
+            pacedDelayMs: Int, ancestorTokensPerMin: Int?, ancestorInferenceUsdPerHour: Double? = nil,
+            ancestorComputeVcpuPerMin: Int?, ancestorComputeUsdPerHour: Double?
         ) {
             self.source = source; self.poolId = poolId
-            self.tokensPerMin = tokensPerMin; self.computeVcpuPerMin = computeVcpuPerMin
+            self.tokensPerMin = tokensPerMin; self.inferenceUsdPerHour = inferenceUsdPerHour
+            self.computeVcpuPerMin = computeVcpuPerMin
             self.computeUsdPerHour = computeUsdPerHour; self.protectRoot = protectRoot
-            self.currentTokensPerMin = currentTokensPerMin; self.currentVcpuPerMin = currentVcpuPerMin
+            self.currentTokensPerMin = currentTokensPerMin
+            self.currentInferenceUsdPerHour = currentInferenceUsdPerHour
+            self.currentVcpuPerMin = currentVcpuPerMin
             self.currentComputeUsdPerHour = currentComputeUsdPerHour
             self.pacingActive = pacingActive; self.pacedDelayMs = pacedDelayMs
             self.ancestorTokensPerMin = ancestorTokensPerMin
+            self.ancestorInferenceUsdPerHour = ancestorInferenceUsdPerHour
             self.ancestorComputeVcpuPerMin = ancestorComputeVcpuPerMin
             self.ancestorComputeUsdPerHour = ancestorComputeUsdPerHour
         }
@@ -179,15 +232,18 @@ struct OrbMissionBudget: Equatable {
             source = j["source"].text.isEmpty ? "none" : j["source"].text
             poolId = j["pool_id"].text.isEmpty ? nil : j["pool_id"].text
             tokensPerMin = j["tokens_per_min"].doubleValue.map(Int.init)
+            inferenceUsdPerHour = j["inference_usd_per_hour"].doubleValue
             computeVcpuPerMin = j["compute_vcpu_per_min"].doubleValue.map(Int.init)
             computeUsdPerHour = j["compute_usd_per_hour"].doubleValue
             protectRoot = j["protect_root"].flag
             currentTokensPerMin = j["current_tokens_per_min"].doubleValue.map(Int.init) ?? 0
+            currentInferenceUsdPerHour = j["current_inference_usd_per_hour"].doubleValue ?? 0
             currentVcpuPerMin = j["current_vcpu_per_min"].doubleValue.map(Int.init) ?? 0
             currentComputeUsdPerHour = j["current_compute_usd_per_hour"].doubleValue ?? 0
             pacingActive = j["pacing_active"].flag
             pacedDelayMs = j["paced_delay_ms"].doubleValue.map(Int.init) ?? 0
             ancestorTokensPerMin = j["ancestor_tokens_per_min"].doubleValue.map(Int.init)
+            ancestorInferenceUsdPerHour = j["ancestor_inference_usd_per_hour"].doubleValue
             ancestorComputeVcpuPerMin = j["ancestor_compute_vcpu_per_min"].doubleValue.map(Int.init)
             ancestorComputeUsdPerHour = j["ancestor_compute_usd_per_hour"].doubleValue
         }
@@ -203,6 +259,10 @@ struct OrbMissionBudget: Equatable {
         var availableUsd: Double
         var observedComputeBurnUsdPerH: Double
         var shapedComputeBurnUsdPerH: Double
+        var resetPeriod: BudgetResetPeriod
+        var resetsInSecs: Double?
+        var sustainsUntilReset: Bool
+        var leaseCliffSecs: Double?
         var etaSecs: Double?
         var etaGainSecs: Double?
         var tone: Tone
@@ -229,6 +289,7 @@ struct OrbMissionBudget: Equatable {
 
     var missionId: String
     var ownBudget: Double?
+    var ownBudgetResetPeriod: BudgetResetPeriod = .total
     var poolId: String?
     var mode: String
     var pool: Pool?
@@ -246,12 +307,31 @@ struct OrbMissionBudget: Equatable {
     init(_ j: OrbJSON) {
         missionId = j["mission_id"].text
         ownBudget = j["own_budget_usd"].doubleValue
+        ownBudgetResetPeriod = BudgetResetPeriod(wire: j["own_budget_reset_period"].text)
         poolId = j["pool_id"].text.isEmpty ? nil : j["pool_id"].text
         mode = j["mode"].text.isEmpty ? "none" : j["mode"].text
         let p = j["pool"]
-        pool = p == .null ? nil : Pool(budget: p["budget_usd"].doubleValue ?? 0, spent: p["spent_usd"].doubleValue ?? 0,
-                                       reserved: p["reserved_usd"].doubleValue ?? 0, carved: p["carved_usd"].doubleValue ?? 0,
-                                       available: p["available_usd"].doubleValue ?? 0)
+        let pSpent = p["spent_usd"].doubleValue ?? 0
+        let pCarved = p["carved_usd"].doubleValue ?? 0
+        pool = p == .null ? nil : Pool(
+            budget: p["budget_usd"].doubleValue ?? 0,
+            spent: pSpent,
+            lifetimeSpent: p["lifetime_spent_usd"].doubleValue ?? pSpent,
+            reserved: p["reserved_usd"].doubleValue ?? 0,
+            carved: pCarved,
+            persistentCarved: p["persistent_carved_usd"].doubleValue,
+            available: p["available_usd"].doubleValue ?? 0,
+            liveMachines: p["live_machines"].doubleValue.map(Int.init) ?? 0,
+            liveLeases: p["live_leases"].items.map {
+                LiveLease(
+                    remainingSecs: $0["remaining_secs"].doubleValue ?? 0,
+                    usdPerHour: $0["usd_per_hour"].doubleValue ?? 0
+                )
+            },
+            resetPeriod: BudgetResetPeriod(wire: p["reset_period"].text),
+            periodStartedAt: p["period_started_at"].text.isEmpty ? nil : p["period_started_at"].text,
+            periodResetsAt: p["period_resets_at"].text.isEmpty ? nil : p["period_resets_at"].text
+        )
         maxGrant = j["max_grant_usd"].doubleValue
         ownVmLimits = VmConcurrencyLimits(j["own_vm_limits"])
         vmLimitsMode = j["vm_limits_mode"].text.isEmpty ? (ownVmLimits != nil ? "own" : "global") : j["vm_limits_mode"].text
@@ -278,19 +358,25 @@ struct OrbMissionBudget: Equatable {
     }
 
     /// Same derivation as desktop `optimisticBudget`.
-    func optimistic(_ amount: Double?) -> OrbMissionBudget {
+    func optimistic(_ amount: Double?, resetPeriod: BudgetResetPeriod? = nil) -> OrbMissionBudget {
         var next = self
         guard let amount else {
             next.mode = (mode == "own" && maxGrant != nil) ? "pooled" : "none"
-            next.ownBudget = nil; next.pool = nil; next.poolId = nil
+            next.ownBudget = nil; next.ownBudgetResetPeriod = .total; next.pool = nil; next.poolId = nil
             return next
         }
+        let effPeriod: BudgetResetPeriod = maxGrant != nil
+            ? .total
+            : (resetPeriod ?? pool?.resetPeriod ?? ownBudgetResetPeriod)
         if var p = pool, mode == "own" {
-            p.available += amount - p.budget; p.budget = amount; next.pool = p
+            p.available += amount - p.budget; p.budget = amount; p.resetPeriod = effPeriod; next.pool = p
         } else {
-            next.pool = Pool(budget: amount, spent: 0, reserved: 0, carved: 0, available: amount)
+            next.pool = Pool(
+                budget: amount, spent: 0, lifetimeSpent: 0, reserved: 0, carved: 0,
+                available: amount, resetPeriod: effPeriod
+            )
         }
-        next.ownBudget = amount; next.mode = "own"; next.poolId = missionId
+        next.ownBudget = amount; next.ownBudgetResetPeriod = effPeriod; next.mode = "own"; next.poolId = missionId
         return next
     }
 
@@ -351,14 +437,16 @@ struct OrbMissionBudget: Equatable {
         var next = self
         let prev = effectiveBandwidth
         let ancTpm = prev?.ancestorTokensPerMin
+        let ancInfUsdH = prev?.ancestorInferenceUsdPerHour
         let ancVcpu = prev?.ancestorComputeVcpuPerMin
         let ancUsdH = prev?.ancestorComputeUsdPerHour
         let curTpm = prev?.currentTokensPerMin ?? 0
+        let curInfUsdH = prev?.currentInferenceUsdPerHour ?? 0
         let curVcpu = prev?.currentVcpuPerMin ?? 0
         let curUsdH = prev?.currentComputeUsdPerHour ?? 0
 
         guard let limits else {
-            let inherited = bandwidthMode == "own" && (ancTpm != nil || ancVcpu != nil || ancUsdH != nil)
+            let inherited = bandwidthMode == "own" && (ancTpm != nil || ancInfUsdH != nil || ancVcpu != nil || ancUsdH != nil)
             next.ownBandwidthLimits = nil
             next.bandwidthMode = inherited ? "pooled" : "none"
             next.bandwidthPoolId = nil
@@ -366,15 +454,18 @@ struct OrbMissionBudget: Equatable {
                 source: inherited ? "mission" : "none",
                 poolId: nil,
                 tokensPerMin: ancTpm,
+                inferenceUsdPerHour: ancInfUsdH,
                 computeVcpuPerMin: ancVcpu,
                 computeUsdPerHour: ancUsdH,
                 protectRoot: false,
                 currentTokensPerMin: curTpm,
+                currentInferenceUsdPerHour: curInfUsdH,
                 currentVcpuPerMin: curVcpu,
                 currentComputeUsdPerHour: curUsdH,
                 pacingActive: false,
                 pacedDelayMs: 0,
                 ancestorTokensPerMin: ancTpm,
+                ancestorInferenceUsdPerHour: ancInfUsdH,
                 ancestorComputeVcpuPerMin: ancVcpu,
                 ancestorComputeUsdPerHour: ancUsdH
             )
@@ -384,6 +475,9 @@ struct OrbMissionBudget: Equatable {
         let effTpm = (limits.tokensPerMin != nil && ancTpm != nil)
             ? min(limits.tokensPerMin!, ancTpm!)
             : (limits.tokensPerMin ?? ancTpm)
+        let effInfUsdH = (limits.inferenceUsdPerHour != nil && ancInfUsdH != nil)
+            ? min(limits.inferenceUsdPerHour!, ancInfUsdH!)
+            : (limits.inferenceUsdPerHour ?? ancInfUsdH)
         let effVcpu = (limits.computeVcpuPerMin != nil && ancVcpu != nil)
             ? min(limits.computeVcpuPerMin!, ancVcpu!)
             : (limits.computeVcpuPerMin ?? ancVcpu)
@@ -398,15 +492,18 @@ struct OrbMissionBudget: Equatable {
             source: "mission",
             poolId: missionId,
             tokensPerMin: effTpm,
+            inferenceUsdPerHour: effInfUsdH,
             computeVcpuPerMin: effVcpu,
             computeUsdPerHour: effUsdH,
             protectRoot: limits.protectRoot,
             currentTokensPerMin: curTpm,
+            currentInferenceUsdPerHour: curInfUsdH,
             currentVcpuPerMin: curVcpu,
             currentComputeUsdPerHour: curUsdH,
             pacingActive: prev?.pacingActive ?? false,
             pacedDelayMs: prev?.pacedDelayMs ?? 0,
             ancestorTokensPerMin: ancTpm,
+            ancestorInferenceUsdPerHour: ancInfUsdH,
             ancestorComputeVcpuPerMin: ancVcpu,
             ancestorComputeUsdPerHour: ancUsdH
         )
@@ -415,7 +512,19 @@ struct OrbMissionBudget: Equatable {
 
     var modeLine: String {
         switch mode {
-        case "own": return maxGrant != nil ? "Own sub-budget, carved from the parent's pool. Its subagents share it." : "Own budget. Subagents share it unless you give one a sub-budget."
+        case "own":
+            if maxGrant != nil {
+                return "Own sub-budget, carved from the parent's pool. Its subagents share it."
+            }
+            let period = pool?.resetPeriod ?? ownBudgetResetPeriod
+            switch period {
+            case .daily:
+                return "Own daily budget (resets 00:00 UTC). Subagents share it unless you give one a sub-budget."
+            case .weekly:
+                return "Own weekly budget (resets Mon 00:00 UTC). Subagents share it unless you give one a sub-budget."
+            case .total:
+                return "Own budget. Subagents share it unless you give one a sub-budget."
+            }
         case "pooled": return "Shares the pool of an ancestor agent."
         default: return "No budget. Only the daily managed-machine cap applies."
         }
@@ -498,9 +607,39 @@ struct OrbMissionBudget: Equatable {
         guard let limits else { return "" }
         var parts: [String] = []
         if let t = limits.tokensPerMin { parts.append(formatTokensPerMin(t)) }
+        if let i = limits.inferenceUsdPerHour { parts.append("\(money(i))/h LLM") }
         if let v = limits.computeVcpuPerMin { parts.append("\(v) vCPU/min") }
         if let u = limits.computeUsdPerHour { parts.append("\(money(u))/h") }
         return parts.joined(separator: " · ")
+    }
+
+    static func nextBudgetResetMs(_ period: BudgetResetPeriod, nowMs: Double) -> Double? {
+        if period == .total { return nil }
+        var cal = Calendar(identifier: .iso8601)
+        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        let nowDate = Date(timeIntervalSince1970: nowMs / 1000.0)
+        let startOfToday = cal.startOfDay(for: nowDate)
+        switch period {
+        case .total:
+            return nil
+        case .daily:
+            return cal.date(byAdding: .day, value: 1, to: startOfToday).map { $0.timeIntervalSince1970 * 1000.0 }
+        case .weekly:
+            // ISO8601 weekday in Foundation: 1=Sun, 2=Mon .. 7=Sat -> daysSinceMonday = (weekday + 5) % 7
+            let wd = cal.component(.weekday, from: startOfToday)
+            let daysSinceMonday = (wd + 5) % 7
+            return cal.date(byAdding: .day, value: 7 - daysSinceMonday, to: startOfToday)
+                .map { $0.timeIntervalSince1970 * 1000.0 }
+        }
+    }
+
+    private static func parseIso8601Ms(_ raw: String) -> Double? {
+        let f1 = ISO8601DateFormatter()
+        f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f1.date(from: raw) { return d.timeIntervalSince1970 * 1000.0 }
+        let f2 = ISO8601DateFormatter()
+        f2.formatOptions = [.withInternetDateTime]
+        return f2.date(from: raw).map { $0.timeIntervalSince1970 * 1000.0 }
     }
 
     private static func parseWholeInt(_ raw: String, min: Int, max: Int, label: String) -> Result<Int, ParseError> {
@@ -586,7 +725,8 @@ struct OrbMissionBudget: Equatable {
         computeVcpuRaw: String,
         computeUsdPerHRaw: String,
         protectRoot: Bool,
-        view: OrbMissionBudget? = nil
+        view: OrbMissionBudget? = nil,
+        inferenceUsdPerHRaw: String = ""
     ) -> Result<BandwidthLimits, ParseError> {
         let eff = view?.effectiveBandwidth
         var tokensPerMin: Int? = nil
@@ -600,6 +740,19 @@ struct OrbMissionBudget: Equatable {
                 }
                 tokensPerMin = v
             }
+        }
+
+        var inferenceUsdH: Double? = nil
+        let infUsdTrim = inferenceUsdPerHRaw.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "$", with: "")
+        if !infUsdTrim.isEmpty {
+            guard let n = Double(infUsdTrim), n.isFinite, n >= minInferenceUsdPerHour, n <= maxInferenceUsdPerHour else {
+                return .failure(ParseError(message: "Inference burn ceiling must be between $\(minInferenceUsdPerHour) and $\(Int(maxInferenceUsdPerHour))/h"))
+            }
+            let rounded = (n * 10000).rounded() / 10000
+            if let anc = eff?.ancestorInferenceUsdPerHour, rounded > anc + 1e-9 {
+                return .failure(ParseError(message: "Inference burn ceiling cannot exceed the parent pool (\(money(anc))/h)"))
+            }
+            inferenceUsdH = rounded
         }
 
         var computeVcpu: Int? = nil
@@ -628,12 +781,13 @@ struct OrbMissionBudget: Equatable {
             computeUsdH = rounded
         }
 
-        if tokensPerMin == nil && computeVcpu == nil && computeUsdH == nil {
-            return .failure(ParseError(message: "Enter at least one bandwidth limit (tokens/min, vCPU/min, or $/h)"))
+        if tokensPerMin == nil && inferenceUsdH == nil && computeVcpu == nil && computeUsdH == nil {
+            return .failure(ParseError(message: "Enter at least one bandwidth limit (tokens/min, LLM $/h, vCPU/min, or VM $/h)"))
         }
 
         return .success(BandwidthLimits(
             tokensPerMin: tokensPerMin,
+            inferenceUsdPerHour: inferenceUsdH,
             computeVcpuPerMin: computeVcpu,
             computeUsdPerHour: computeUsdH,
             protectRoot: protectRoot
@@ -642,10 +796,12 @@ struct OrbMissionBudget: Equatable {
 
     func computeRunwayForecast(
         draftBudgetUsd: String? = nil,
+        draftResetPeriod: BudgetResetPeriod? = nil,
         draftComputeUsdPerH: String? = nil,
         draftComputeVcpu: String? = nil,
         bandwidthEnabled: Bool? = nil,
-        budgetEnabled: Bool? = nil
+        budgetEnabled: Bool? = nil,
+        nowMs: Double? = nil
     ) -> RunwayForecast {
         let budgetOn = budgetEnabled ?? (mode == "own" || mode == "pooled")
         var capUsd: Double? = pool?.budget ?? ownBudget
@@ -655,9 +811,38 @@ struct OrbMissionBudget: Equatable {
         }
         if !budgetOn { capUsd = nil }
 
+        let effectiveMode: String = {
+            if let budgetEnabled {
+                return budgetEnabled ? "own" : (maxGrant != nil ? "pooled" : "none")
+            }
+            return mode
+        }()
+
+        let resetPeriod: BudgetResetPeriod = {
+            guard capUsd != nil else { return .total }
+            if effectiveMode == "pooled" {
+                return pool?.resetPeriod ?? .total
+            }
+            if effectiveMode == "own", maxGrant == nil {
+                if let draftResetPeriod { return draftResetPeriod }
+                return pool?.resetPeriod ?? ownBudgetResetPeriod
+            }
+            return .total
+        }()
+
+        let refNowMs = nowMs ?? (Date().timeIntervalSince1970 * 1000.0)
+        let resetsInSecs: Double? = {
+            guard capUsd != nil, resetPeriod != .total else { return nil }
+            if pool?.resetPeriod == resetPeriod, let raw = pool?.periodResetsAt, let serverMs = Self.parseIso8601Ms(raw) {
+                return max(0, (serverMs - refNowMs) / 1000.0)
+            }
+            return Self.nextBudgetResetMs(resetPeriod, nowMs: refNowMs).map { max(0, ($0 - refNowMs) / 1000.0) }
+        }()
+
         let spentUsd = pool?.spent ?? 0
         let reservedUsd = pool?.reserved ?? 0
         let carvedUsd = pool?.carved ?? 0
+        let persistentCarvedUsd = pool?.persistentCarved ?? carvedUsd
         let committedPreReserved = spentUsd + carvedUsd
         let committedTotal = committedPreReserved + reservedUsd
         let availableUsd = capUsd.map { max(0, $0 - committedTotal) } ?? 0
@@ -690,9 +875,37 @@ struct OrbMissionBudget: Equatable {
         }
 
         let etaSecs: Double? = {
-            guard let capUsd else { return nil }
+            guard capUsd != nil else { return nil }
             if runwayUsd <= 0 { return 0 }
             return shapedCompute > 0.005 ? (runwayUsd / shapedCompute) * 3600.0 : nil
+        }()
+        let sustainsUntilReset: Bool = {
+            guard capUsd != nil, resetPeriod != .total, let rSecs = resetsInSecs, runwayUsd > 0 else { return false }
+            guard let e = etaSecs else { return true }
+            return e >= rSecs
+        }()
+        let simLeases = Self.buildSimulatedLeases(pool: pool, reservedUsd: reservedUsd, actualCompute: obsCompute)
+        let liveMachineCount = max(1, simLeases.isEmpty ? (pool?.liveMachines ?? 1) : simLeases.count)
+        let minExtensionStepUsd: Double = {
+            if let minUsdH = simLeases.map(\.usdPerHour).min() {
+                return minUsdH * 0.5
+            }
+            return (obsCompute / Double(liveMachineCount)) * 0.5
+        }()
+        let leaseCliffSecs: Double? = {
+            guard let capUsd, runwayUsd > 0, reservedUsd > 0.005, !simLeases.isEmpty, availableUsd < runwayUsd - 0.005 else {
+                return nil
+            }
+            return Self.simulateLeaseCliffSecs(
+                leases: simLeases,
+                capUsd: capUsd,
+                spentUsd: spentUsd,
+                carvedUsd: carvedUsd,
+                persistentCarvedUsd: persistentCarvedUsd,
+                availableUsd: availableUsd,
+                resetsInSecs: resetsInSecs,
+                resetPeriod: resetPeriod
+            )
         }()
         let unshapedEtaSecs: Double? = (capUsd != nil && runwayUsd > 0 && obsCompute > 0.005)
             ? (runwayUsd / obsCompute) * 3600.0 : nil
@@ -703,9 +916,10 @@ struct OrbMissionBudget: Equatable {
 
         var tone: RunwayForecast.Tone = .ok
         if let capUsd {
-            if runwayUsd <= 0 || (etaSecs != nil && etaSecs! < 1800) {
+            if runwayUsd <= 0 || (!sustainsUntilReset && etaSecs != nil && etaSecs! < 1800) {
                 tone = .danger
-            } else if (etaSecs != nil && etaSecs! < 7200) || (capUsd > 0 && runwayUsd < capUsd * 0.15) {
+            } else if (!sustainsUntilReset && ((etaSecs != nil && etaSecs! < 7200) || (capUsd > 0 && runwayUsd < capUsd * 0.15)))
+                        || (leaseCliffSecs != nil && leaseCliffSecs! < 3600) {
                 tone = .warning
             }
         }
@@ -715,21 +929,54 @@ struct OrbMissionBudget: Equatable {
         if let capUsd {
             if runwayUsd <= 0 {
                 headline = "Budget exhausted"
-                subline = "\(Self.money(committedPreReserved)) spent of \(Self.money(capUsd)) pool"
+                var parts = ["\(Self.money(committedPreReserved)) spent of \(Self.money(capUsd)) pool"]
+                if resetPeriod != .total, let rSecs = resetsInSecs {
+                    parts.append("resets in \(Self.formatDurationEta(rSecs))")
+                }
+                subline = parts.joined(separator: " · ")
             } else if let etaSecs {
-                headline = "\(Self.formatDurationEta(etaSecs)) runway left"
+                headline = sustainsUntilReset
+                    ? "Sustains until \(resetPeriod.rawValue) reset"
+                    : "\(Self.formatDurationEta(etaSecs)) runway left"
                 let remPart = reservedUsd > 0.005
                     ? "\(Self.money(availableUsd)) unallocated (\(Self.money(reservedUsd)) reserved · \(Self.money(capUsd)) cap)"
                     : "\(Self.money(availableUsd)) left (\(Self.money(capUsd)) cap)"
                 var parts = ["\(Self.money(shapedCompute))/h compute burn", remPart]
+                if resetPeriod != .total, let rSecs = resetsInSecs {
+                    if sustainsUntilReset {
+                        parts.append("resets in \(Self.formatDurationEta(rSecs)) (\(Self.formatDurationEta(etaSecs)) runway)")
+                    } else {
+                        parts.append("exhausts \(Self.formatDurationEta(rSecs - etaSecs)) before \(resetPeriod.rawValue) reset")
+                    }
+                }
+                if let cliff = leaseCliffSecs, cliff < 3600 {
+                    if cliff <= 0 {
+                        if availableUsd <= 0.005 {
+                            parts.append("VM auto-extensions paused (0 unallocated)")
+                        } else if availableUsd + 1e-6 < minExtensionStepUsd {
+                            parts.append("VM auto-extensions paused (\(Self.money(availableUsd)) < \(Self.money(minExtensionStepUsd)) 30m step)")
+                        } else {
+                            parts.append("VM auto-extensions paused (\(Self.money(availableUsd)) left across \(liveMachineCount) VMs)")
+                        }
+                    } else {
+                        parts.append("VM extensions pause in \(Self.formatDurationEta(cliff))")
+                    }
+                }
                 if let gain = etaGainSecs {
                     let clean = Self.formatDurationEta(gain).replacingOccurrences(of: "~", with: "")
                     parts.append("+\(clean) from bandwidth cap")
                 }
                 subline = parts.joined(separator: " · ")
             } else {
-                headline = "\(Self.money(availableUsd)) available (\(Self.money(capUsd)) cap)"
-                subline = "No active managed-machine burn right now"
+                headline = sustainsUntilReset
+                    ? "Sustains until \(resetPeriod.rawValue) reset"
+                    : "\(Self.money(availableUsd)) available (\(Self.money(capUsd)) cap)"
+                let baseSub = "No active managed-machine burn right now"
+                if resetPeriod != .total, let rSecs = resetsInSecs {
+                    subline = "\(baseSub) · resets in \(Self.formatDurationEta(rSecs))"
+                } else {
+                    subline = baseSub
+                }
             }
         } else {
             headline = obsCompute > 0.005 ? "\(Self.money(obsCompute))/h current compute burn" : "No spending cap"
@@ -747,6 +994,10 @@ struct OrbMissionBudget: Equatable {
             availableUsd: availableUsd,
             observedComputeBurnUsdPerH: obsCompute,
             shapedComputeBurnUsdPerH: shapedCompute,
+            resetPeriod: resetPeriod,
+            resetsInSecs: resetsInSecs,
+            sustainsUntilReset: sustainsUntilReset,
+            leaseCliffSecs: leaseCliffSecs,
             etaSecs: etaSecs,
             etaGainSecs: etaGainSecs,
             tone: tone,
@@ -756,6 +1007,97 @@ struct OrbMissionBudget: Equatable {
     }
 
     static func money(_ v: Double) -> String { v < 10 ? String(format: "$%.2f", v) : String(format: "$%.0f", v) }
+
+    private static func buildSimulatedLeases(pool: Pool?, reservedUsd: Double, actualCompute: Double) -> [LiveLease] {
+        let raw = (pool?.liveLeases ?? []).filter { $0.usdPerHour > 0 }
+        if !raw.isEmpty {
+            return raw.map {
+                LiveLease(remainingSecs: max(0, $0.remainingSecs), usdPerHour: $0.usdPerHour)
+            }.sorted { $0.remainingSecs < $1.remainingSecs }
+        }
+        guard actualCompute > 0.005 else { return [] }
+        let count = max(1, pool?.liveMachines ?? 1)
+        let perVmUsdPerH = actualCompute / Double(count)
+        let avgRemainingSecs = max(0, ((reservedUsd / actualCompute) * 3600.0).rounded())
+        return Array(repeating: LiveLease(remainingSecs: avgRemainingSecs, usdPerHour: perVmUsdPerH), count: count)
+    }
+
+    private static func simulateLeaseCliffSecs(
+        leases: [LiveLease],
+        capUsd: Double,
+        spentUsd: Double,
+        carvedUsd: Double,
+        persistentCarvedUsd: Double,
+        availableUsd: Double,
+        resetsInSecs: Double?,
+        resetPeriod: BudgetResetPeriod
+    ) -> Double? {
+        guard !leases.isEmpty else { return nil }
+        var remSecs = leases.map(\.remainingSecs)
+        let heldCarvedUsd = max(0.0, min(carvedUsd, persistentCarvedUsd))
+        let resettableUsd = max(0.0, spentUsd) + max(0.0, carvedUsd - heldCarvedUsd)
+        var remAvail = max(0.0, availableUsd)
+        var elapsed = 0.0
+        var nextResetAt: Double? = (resetPeriod != .total && (resetsInSecs ?? 0) > 0) ? resetsInSecs : nil
+        let periodLenSecs: Double = resetPeriod == .daily ? 86_400.0 : (resetPeriod == .weekly ? 604_800.0 : 0.0)
+
+        func advanceTime(_ dt: Double) {
+            guard dt > 0 else { return }
+            for i in 0..<remSecs.count {
+                let unreservedSecs = max(0.0, min(dt, remSecs[i] - 3600.0))
+                if unreservedSecs > 0 {
+                    remAvail -= (unreservedSecs / 3600.0) * leases[i].usdPerHour
+                }
+                remSecs[i] = max(0.0, remSecs[i] - dt)
+            }
+            elapsed += dt
+        }
+
+        func refreshAtResetBoundary() {
+            var curReserved = 0.0
+            for i in 0..<remSecs.count {
+                curReserved += (min(3600.0, max(0.0, remSecs[i])) / 3600.0) * leases[i].usdPerHour
+            }
+            remAvail = max(0.0, capUsd - heldCarvedUsd - curReserved)
+        }
+
+        if resetPeriod != .total, let r = resetsInSecs, r <= 0, resettableUsd > 0 {
+            refreshAtResetBoundary()
+            nextResetAt = periodLenSecs > 0 ? periodLenSecs : nil
+        }
+
+        let maxSteps = min(4096, max(64, leases.count * 16))
+        for _ in 0..<maxSteps {
+            var bestIdx = 0
+            var bestWait = max(0.0, remSecs[0] - 600.0)
+            for i in 1..<remSecs.count {
+                let w = max(0.0, remSecs[i] - 600.0)
+                if w < bestWait {
+                    bestWait = w
+                    bestIdx = i
+                }
+            }
+            while let nr = nextResetAt, elapsed + bestWait >= nr {
+                let toReset = max(0.0, nr - elapsed)
+                advanceTime(toReset)
+                bestWait = max(0.0, bestWait - toReset)
+                refreshAtResetBoundary()
+                nextResetAt = periodLenSecs > 0 ? (nr + periodLenSecs) : nil
+                if elapsed > 86_400.0 { return elapsed }
+            }
+            if bestWait > 0 {
+                advanceTime(bestWait)
+            }
+            if elapsed > 86_400.0 { return elapsed }
+            let stepUsd = leases[bestIdx].usdPerHour * 0.5
+            if remAvail + 1e-6 < stepUsd {
+                return elapsed
+            }
+            remAvail = max(0.0, remAvail - stepUsd)
+            remSecs[bestIdx] += 1800.0
+        }
+        return elapsed
+    }
 }
 
 /// Long-press "Mission settings" on a mission row: Runway forecast + Budget +
@@ -768,8 +1110,9 @@ struct OrbMissionSettingsSheet: View {
     @State private var view: OrbMissionBudget?
     @State private var loadError: String?
     @State private var saveError: String?
-    @State private var pendingRetry: Double??
+    @State private var pendingRetry: (amount: Double?, period: OrbMissionBudget.BudgetResetPeriod?)?
     @State private var draft = ""
+    @State private var resetPeriodDraft: OrbMissionBudget.BudgetResetPeriod = .total
     @State private var vmSaveError: String?
     @State private var pendingVmRetry: OrbMissionBudget.VmConcurrencyLimits??
     @State private var vmTotalDraft = ""
@@ -778,6 +1121,7 @@ struct OrbMissionSettingsSheet: View {
     @State private var bwSaveError: String?
     @State private var pendingBwRetry: OrbMissionBudget.BandwidthLimits??
     @State private var bwTokensDraft = ""
+    @State private var bwInfUsdHDraft = ""
     @State private var bwVcpuDraft = ""
     @State private var bwUsdHDraft = ""
     @State private var bwProtectRoot = true
@@ -792,6 +1136,7 @@ struct OrbMissionSettingsSheet: View {
                 if let v = view {
                     let fc = v.computeRunwayForecast(
                         draftBudgetUsd: v.mode == "own" ? draft : nil,
+                        draftResetPeriod: (v.mode == "own" && v.maxGrant == nil) ? resetPeriodDraft : nil,
                         draftComputeUsdPerH: v.bandwidthMode == "own" ? bwUsdHDraft : nil,
                         draftComputeVcpu: v.bandwidthMode == "own" ? bwVcpuDraft : nil,
                         bandwidthEnabled: v.bandwidthMode == "own" || v.effectiveBandwidth?.source == "mission",
@@ -839,17 +1184,33 @@ struct OrbMissionSettingsSheet: View {
                             .accessibilityIdentifier("mission.settings.budget.toggle")
                         Text(v.modeLine).font(.footnote).foregroundStyle(.secondary)
                         if v.mode == "own" {
+                            if v.maxGrant == nil {
+                                Picker("Reset cadence", selection: $resetPeriodDraft) {
+                                    ForEach(OrbMissionBudget.BudgetResetPeriod.allCases, id: \.self) { p in
+                                        Text(p.label).tag(p)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+                                .disabled(busy || readOnly)
+                                .accessibilityIdentifier("mission.settings.budget.reset_period")
+                            }
+                            let serverPeriod = v.pool?.resetPeriod ?? v.ownBudgetResetPeriod
+                            let isBudgetDirty = draft != format(v.ownBudget) || (v.maxGrant == nil && resetPeriodDraft != serverPeriod)
                             HStack {
                                 TextField("Amount (USD)", text: $draft).keyboardType(.decimalPad)
                                     .disabled(readOnly)
                                     .accessibilityIdentifier("mission.settings.budget.amount")
-                                Button("Save") { save() }.disabled(busy || readOnly || draft == format(v.ownBudget))
+                                Button("Save") { save() }.disabled(busy || readOnly || !isBudgetDirty)
                             }
                             if let max = v.maxGrant { Text("Up to \(OrbMissionBudget.money(max)) from the parent pool.").font(.footnote).foregroundStyle(.secondary) }
                         }
                         if let p = v.pool {
                             ProgressView(value: min(1, max(0, (p.spent + p.reserved + p.carved) / max(p.budget, 0.0001))))
-                            LabeledContent("Spent", value: OrbMissionBudget.money(p.spent))
+                            let spentLabel = p.resetPeriod == .daily ? "Spent today" : (p.resetPeriod == .weekly ? "Spent this week" : "Spent")
+                            LabeledContent(spentLabel, value: OrbMissionBudget.money(p.spent))
+                            if p.resetPeriod != .total {
+                                LabeledContent("Lifetime spent", value: OrbMissionBudget.money(p.lifetimeSpent))
+                            }
                             LabeledContent("Reserved", value: OrbMissionBudget.money(p.reserved))
                             LabeledContent("Sub-budgets", value: OrbMissionBudget.money(p.carved))
                             LabeledContent("Remaining", value: "\(OrbMissionBudget.money(max(0, p.available))) of \(OrbMissionBudget.money(p.budget))")
@@ -862,7 +1223,7 @@ struct OrbMissionSettingsSheet: View {
                     }
                     if let saveError {
                         Text("Budget not saved: \(saveError)").font(.footnote).foregroundStyle(OrbStyle.warning)
-                        if let retry = pendingRetry { Button("Retry") { commit(retry) } }
+                        if let retry = pendingRetry { Button("Retry") { commit(retry.amount, resetPeriod: retry.period) } }
                     }
                 } header: { Text("Budget") } footer: {
                     Text("Caps what this agent and its subagents spend on managed machines. Reserved holds up to 60 minutes of each running machine.")
@@ -877,6 +1238,7 @@ struct OrbMissionSettingsSheet: View {
                         if let eff = v.effectiveBandwidth, eff.source == "mission" {
                             let summary = OrbMissionBudget.bandwidthLimitsSummary(OrbMissionBudget.BandwidthLimits(
                                 tokensPerMin: eff.tokensPerMin,
+                                inferenceUsdPerHour: eff.inferenceUsdPerHour,
                                 computeVcpuPerMin: eff.computeVcpuPerMin,
                                 computeUsdPerHour: eff.computeUsdPerHour,
                                 protectRoot: eff.protectRoot
@@ -897,6 +1259,16 @@ struct OrbMissionSettingsSheet: View {
                                     .multilineTextAlignment(.trailing)
                                     .frame(maxWidth: 130)
                                     .accessibilityIdentifier("mission.settings.bandwidth.tpm")
+                            }
+                            HStack {
+                                Text("Inference ceiling ($/h)")
+                                Spacer()
+                                TextField("Optional", text: $bwInfUsdHDraft)
+                                    .disabled(readOnly)
+                                    .keyboardType(.decimalPad)
+                                    .multilineTextAlignment(.trailing)
+                                    .frame(maxWidth: 130)
+                                    .accessibilityIdentifier("mission.settings.bandwidth.inf_usdh")
                             }
                             HStack {
                                 Text("Compute (vCPU / min)")
@@ -1053,8 +1425,14 @@ struct OrbMissionSettingsSheet: View {
         }
     }
 
+    private func syncBudgetDrafts(_ v: OrbMissionBudget) {
+        draft = format(v.ownBudget)
+        resetPeriodDraft = v.maxGrant != nil ? .total : (v.pool?.resetPeriod ?? v.ownBudgetResetPeriod)
+    }
+
     private func syncBandwidthDrafts(_ v: OrbMissionBudget) {
         bwTokensDraft = v.ownBandwidthLimits?.tokensPerMin.map(String.init) ?? ""
+        bwInfUsdHDraft = format(v.ownBandwidthLimits?.inferenceUsdPerHour)
         bwVcpuDraft = v.ownBandwidthLimits?.computeVcpuPerMin.map(String.init) ?? ""
         bwUsdHDraft = format(v.ownBandwidthLimits?.computeUsdPerHour)
         bwProtectRoot = v.ownBandwidthLimits?.protectRoot ?? true
@@ -1073,10 +1451,12 @@ struct OrbMissionSettingsSheet: View {
     private func bwDraftDirty(_ v: OrbMissionBudget) -> Bool {
         let own = v.ownBandwidthLimits
         let curT = own?.tokensPerMin.map(String.init) ?? ""
+        let curI = format(own?.inferenceUsdPerHour)
         let curV = own?.computeVcpuPerMin.map(String.init) ?? ""
         let curU = format(own?.computeUsdPerHour)
         let curP = own?.protectRoot ?? true
         return bwTokensDraft.trimmingCharacters(in: .whitespaces) != curT
+            || bwInfUsdHDraft.trimmingCharacters(in: .whitespaces) != curI
             || bwVcpuDraft.trimmingCharacters(in: .whitespaces) != curV
             || bwUsdHDraft.trimmingCharacters(in: .whitespaces) != curU
             || bwProtectRoot != curP
@@ -1086,7 +1466,7 @@ struct OrbMissionSettingsSheet: View {
         loadError = nil
         do {
             let v = OrbMissionBudget(try await api.call(path))
-            view = v; draft = format(v.ownBudget); syncVmDrafts(v); syncBandwidthDrafts(v)
+            view = v; syncBudgetDrafts(v); syncVmDrafts(v); syncBandwidthDrafts(v)
         } catch { loadError = error.localizedDescription }
     }
 
@@ -1095,7 +1475,7 @@ struct OrbMissionSettingsSheet: View {
         if !on { return commit(nil) }
         let initial = v.maxGrant.map { min(5, ($0 * 100).rounded(.down) / 100) } ?? 5
         guard initial > 0 else { saveError = "The parent pool has nothing left to grant"; return }
-        commit(initial)
+        commit(initial, resetPeriod: v.maxGrant == nil ? .total : nil)
     }
 
     private func save() {
@@ -1103,24 +1483,29 @@ struct OrbMissionSettingsSheet: View {
             saveError = "Enter a positive amount"; return
         }
         if let max = view?.maxGrant, value > max + 1e-9 { saveError = "The parent pool has \(OrbMissionBudget.money(max)) left to grant"; return }
-        commit(value)
+        let period: OrbMissionBudget.BudgetResetPeriod? = view?.maxGrant == nil ? resetPeriodDraft : nil
+        commit(value, resetPeriod: period)
     }
 
-    private func commit(_ amount: Double?) {
+    private func commit(_ amount: Double?, resetPeriod: OrbMissionBudget.BudgetResetPeriod? = nil) {
         guard let before = view, !busy else { return }
         busy = true; saveError = nil; pendingRetry = nil
-        view = before.optimistic(amount)
+        let opt = before.optimistic(amount, resetPeriod: resetPeriod)
+        view = opt; syncBudgetDrafts(opt)
         Task {
             defer { busy = false }
             do {
-                let body: OrbJSON = .object(["budget_usd": amount.map { .number($0) } ?? .null])
-                let next = OrbMissionBudget(try await api.call(path, method: "PUT", body: body))
-                view = next; draft = format(next.ownBudget); syncVmDrafts(next); syncBandwidthDrafts(next)
+                var obj: [String: OrbJSON] = ["budget_usd": amount.map { .number($0) } ?? .null]
+                if amount != nil, let resetPeriod {
+                    obj["budget_reset_period"] = .string(resetPeriod.rawValue)
+                }
+                let next = OrbMissionBudget(try await api.call(path, method: "PUT", body: .object(obj)))
+                view = next; syncBudgetDrafts(next); syncVmDrafts(next); syncBandwidthDrafts(next)
                 OrbHaptics.selection()
             } catch {
-                view = before; draft = format(before.ownBudget)
+                view = before; syncBudgetDrafts(before)
                 saveError = error.localizedDescription
-                pendingRetry = .some(amount)
+                pendingRetry = (amount: amount, period: resetPeriod)
             }
         }
     }
@@ -1180,7 +1565,8 @@ struct OrbMissionSettingsSheet: View {
             computeVcpuRaw: bwVcpuDraft,
             computeUsdPerHRaw: bwUsdHDraft,
             protectRoot: bwProtectRoot,
-            view: view
+            view: view,
+            inferenceUsdPerHRaw: bwInfUsdHDraft
         ) {
         case .failure(let err):
             bwSaveError = err.message
