@@ -1,11 +1,4 @@
 /* Inbox keeps quiet surfaces with rounded message cards matching the rest of Orb. */
-.inbox-sb-badge {
-  flex: none; min-width: 17px; height: 16px; padding: 0 5px;
-  border-radius: 4px; background: var(--bg-active); color: var(--fg-2);
-  font-size: 10.5px; font-weight: 500; line-height: 16px; text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-.row.active .inbox-sb-badge { color: var(--fg-strong); }
 
 .page.inbox-page {
   padding: 16px max(16px, calc((100% - 960px) / 2)) 32px;

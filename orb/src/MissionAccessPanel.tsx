@@ -88,7 +88,7 @@ export function MissionAccessPanel(p: { onError: (message: string) => void; init
                   <div class="bw-request-body">
                     <div class="bw-request-line">
                       <strong class="secret-row-key" title={`${isControl() ? "Control" : "Read"} ${target(r)}`}>{isControl() ? "Control" : "Read"} {target(r)}</strong>
-                      <span class="bw-request-meta" title={who(r)}>{who(r)} · {since(r.created_at)}</span>
+                      <span class="bw-request-meta" title={who(r)}>· {who(r)} · {since(r.created_at)}</span>
                     </div>
                     <span class="secret-row-reason" title={r.reason}>{r.reason}</span>
                   </div>

@@ -171,7 +171,7 @@ export function SecretAccessPanel(p: {
                       <Show when={r.kind === "move"}>
                         <span class="bw-request-meta">→ {projectName(r.target_project_id)}</span>
                       </Show>
-                      <span class="bw-request-meta" title={who(r)}>{who(r)} · {since(r.created_at)}</span>
+                      <span class="bw-request-meta" title={who(r)}>· {who(r)} · {since(r.created_at)}</span>
                     </div>
                     <Show when={r.reason}>
                       <span class="secret-row-reason" title={r.reason!}>{r.reason}</span>
