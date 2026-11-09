@@ -230,7 +230,14 @@ function shouldSampleTransportRtt(methodRaw: string | undefined, path: string): 
     cleanPath === "/api/file-resources" ||
     cleanPath.endsWith("/inbox-digest") ||
     cleanPath.startsWith("/api/software") ||
-    cleanPath.startsWith("/api/stats")
+    cleanPath.startsWith("/api/stats") ||
+    cleanPath.startsWith("/api/resources/") ||
+    cleanPath.startsWith("/api/usage") ||
+    cleanPath.startsWith("/api/proxy-health") ||
+    cleanPath.startsWith("/api/providers/antigravity-models") ||
+    cleanPath.startsWith("/api/antigravity-models") ||
+    cleanPath === "/api/ai/providers/usage" ||
+    (cleanPath.startsWith("/api/ai/providers/") && cleanPath.endsWith("/usage"))
   ) {
     return false;
   }
@@ -286,8 +293,15 @@ export function transportFetch(
     // scheduler queueing so P2 requests paused behind a degraded link never
     // fire spurious RequestTimeoutError banners while waiting locally.
     const wireInit: RequestInit | undefined =
-      !init?.signal && !streaming && defaultWireTimeoutMs && defaultWireTimeoutMs > 0
-        ? { ...(init ?? {}), signal: AbortSignal.timeout(defaultWireTimeoutMs) }
+      !streaming && defaultWireTimeoutMs && defaultWireTimeoutMs > 0
+        ? {
+            ...(init ?? {}),
+            signal: init?.signal
+              ? (typeof AbortSignal.any === "function"
+                  ? AbortSignal.any([init.signal, AbortSignal.timeout(defaultWireTimeoutMs)])
+                  : init.signal)
+              : AbortSignal.timeout(defaultWireTimeoutMs),
+          }
         : init;
     if (transportBridgeEnabled && nativeInvoke()) {
       const targetInit = withTargetHeader(wireInit, target);
@@ -428,6 +442,7 @@ export function setConnection(url: string, token: string) {
   setConnected(true);
   persistDesktopConnection({api_url:getApiUrl(),token});
   invalidateReads();
+  catalogMemory.clear();
   cacheReset();
   bumpConnectionVersion(v => v + 1);
 }
@@ -443,6 +458,7 @@ export function clearConnection() {
   localStorage.removeItem(JWT_KEY);
   persistDesktopConnection(null);
   setConnected(false);
+  catalogMemory.clear();
   if (!hadConnection) return;
   invalidateReads();
   cacheReset();
@@ -749,18 +765,32 @@ export function api<T>(
   explicitBase?: string,
   explicitPriority?: RequestPriority,
 ): Promise<T> {
-  // Explicit signals/options retain independent cancellation semantics.
+  // Explicit signals/options retain independent cancellation semantics; keep
+  // priority lanes isolated in `sharedRead` so a parked `p2` prefetch never
+  // blocks a foreground `p1` reader for the same URL.
   if (!init && !explicitBase) {
-    return sharedRead(`${connectionVersion()}:${getApiUrl()}:${path}`, () =>
+    return sharedRead(`${connectionVersion()}:${getApiUrl()}:${explicitPriority ?? "default"}:${path}`, () =>
       apiRequest<T>(path, undefined, false, undefined, explicitPriority),
     );
   }
-  if (init?.method && init.method.toUpperCase() !== 'GET') invalidateReads();
+  if (
+    init?.method &&
+    init.method.toUpperCase() !== "GET" &&
+    !path.startsWith("/api/usage-telemetry/events")
+  ) {
+    invalidateReads();
+  }
   return apiRequest<T>(path, init, false, explicitBase, explicitPriority);
 }
 /** Like `api`, for endpoints that answer with plain text (e.g. Library save receipts). */
 export function apiText(path: string, init?: RequestInit): Promise<string> {
-  if (init?.method && init.method.toUpperCase() !== 'GET') invalidateReads();
+  if (
+    init?.method &&
+    init.method.toUpperCase() !== "GET" &&
+    !path.startsWith("/api/usage-telemetry/events")
+  ) {
+    invalidateReads();
+  }
   return apiRequest<string>(path, init, true);
 }
 function redactDiagnosticPath(path: string): string {
@@ -1163,6 +1193,10 @@ export interface HarnessChoice {
   models: BackendModelOption[];
 }
 
+/** In-memory mirror of `orb.catalog:*` entries so synchronous hydration and
+ * offline fallback still work when WebKit `localStorage` hits its 5 MB quota. */
+const catalogMemory = new Map<string, unknown>();
+
 function catalogStorageKey(path: string, token = getJwt()): string {
   let hash = 2166136261;
   for (const c of `${getApiUrl()}:${token ?? ""}`) hash = Math.imul(hash ^ c.charCodeAt(0), 16777619);
@@ -1173,10 +1207,11 @@ function catalogStorageKey(path: string, token = getJwt()): string {
 async function cachedCatalog<T>(path:string, valid?: (value: unknown) => boolean, force = false):Promise<T>{
  const version=connectionVersion(),token=getJwt();
  const key=catalogStorageKey(path,token);
- try{const value=await api<T>(path,force?{method:"GET"}:undefined);if(valid && !valid(value))throw new Error("Couldn’t load projects. The server returned an invalid response.");if(version===connectionVersion())try{localStorage.setItem(key,JSON.stringify(value));}catch{}return value;}
+ try{const value=await api<T>(path,force?{method:"GET"}:undefined);if(valid && !valid(value))throw new Error("Couldn’t load projects. The server returned an invalid response.");if(version===connectionVersion()){catalogMemory.set(key,value);try{localStorage.setItem(key,JSON.stringify(value));}catch{}}return value;}
  catch(error){
   if(version!==connectionVersion()||getJwt()!==token||error instanceof ApiError)throw error;
-  const stored=localStorage.getItem(key);if(stored){try{const value=JSON.parse(stored);if(!valid || valid(value))return value as T;}catch{}}
+  if(catalogMemory.has(key)){const mem=catalogMemory.get(key);if(!valid || valid(mem))return mem as T;}
+  const stored=localStorage.getItem(key);if(stored){try{const value=JSON.parse(stored);if(!valid || valid(value)){catalogMemory.set(key,value);return value as T;}}catch{}}
   throw error;
  }
 }
@@ -1399,10 +1434,15 @@ export interface ProviderUsage {
   zai_tokens_reset?: number;
   zai_mcp_percentage?: number;
   zai_mcp_reset?: number;
+  stale?: boolean;
 }
 
-export async function getProviderUsage(id: string, force = false): Promise<ProviderUsage> {
-  return api(`/api/ai/providers/${encodeURIComponent(id)}/usage${force ? "?force=true" : ""}`);
+export async function getProviderUsage(
+  id: string,
+  force = false,
+  priority?: RequestPriority,
+): Promise<ProviderUsage> {
+  return api(`/api/ai/providers/${encodeURIComponent(id)}/usage${force ? "?force=true" : ""}`, undefined, undefined, priority);
 }
 
 /** Redeem a banked subscription usage-limit reset on an Anthropic or OpenAI account. */
@@ -1435,8 +1475,8 @@ export async function clearMistralUsageSession(id: string): Promise<ProviderUsag
   return api(`/api/ai/providers/${encodeURIComponent(id)}/mistral-usage-session`, { method: "DELETE" });
 }
 
-export async function getAllProviderUsage(): Promise<Record<string, ProviderUsage>> {
-  const data = await api<{ entries?: Record<string, ProviderUsage> }>("/api/ai/providers/usage");
+export async function getAllProviderUsage(priority?: RequestPriority): Promise<Record<string, ProviderUsage>> {
+  const data = await api<{ entries?: Record<string, ProviderUsage> }>("/api/ai/providers/usage", undefined, undefined, priority);
   return data.entries ?? {};
 }
 
@@ -1557,6 +1597,33 @@ export async function archiveProject(slug: string): Promise<void> {
   archivedSlugs.add(slug);
 }
 
+export function peekCachedProjects(): ProjectSummary[] | null {
+  if (!isConnected()) return null;
+  try {
+    const key = catalogStorageKey("/api/projects");
+    let parsed: { projects?: unknown } | null = null;
+    if (catalogMemory.has(key)) {
+      parsed = catalogMemory.get(key) as { projects?: unknown };
+    } else {
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      parsed = JSON.parse(raw) as { projects?: unknown };
+      if (parsed && typeof parsed === "object" && Array.isArray(parsed.projects)) {
+        catalogMemory.set(key, parsed);
+      }
+    }
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.projects)) return null;
+    if (!parsed.projects.every((p) => !!p && typeof p === "object" && typeof (p as { slug?: unknown }).slug === "string")) {
+      return null;
+    }
+    return (parsed.projects as ProjectSummary[]).filter(
+      (p) => p.status !== "archived" && p.status !== "deleted" && !archivedSlugs.has(p.slug),
+    );
+  } catch {
+    return null;
+  }
+}
+
 export async function listProjects(force = false): Promise<ProjectSummary[]> {
   const fetchedAt = Date.now(), url = getApiUrl();
   const data = await cachedCatalog<{ projects: ProjectSummary[] }>("/api/projects",
@@ -1668,8 +1735,10 @@ export async function updateController(slug: string, patch: ControllerPatch): Pr
   }));
 }
 
-export async function getProjectController(slug: string, limit = 40): Promise<ControllerView> {
-  return normalizeControllerView(await api<HermesControllerView>(`/api/projects/${encodeURIComponent(slug)}/controller?limit=${limit}`));
+export async function getProjectController(slug: string, limit = 40, priority?: RequestPriority): Promise<ControllerView> {
+  return normalizeControllerView(
+    await api<HermesControllerView>(`/api/projects/${encodeURIComponent(slug)}/controller?limit=${limit}`, undefined, undefined, priority),
+  );
 }
 
 export async function controllerAction(slug: string, action: "pause" | "resume" | "run" | "archive" | "restore" | "delete"): Promise<ControllerView> {
@@ -1691,8 +1760,8 @@ export async function deleteProjectController(slug: string): Promise<ControllerV
 }
 
 /** Additional Hermes jobs explicitly bound to this project by the core. */
-export async function listProjectCrons(slug: string): Promise<ControllerJob[]> {
-  const data = await api<{ jobs?: HermesJob[] }>(`/api/projects/${encodeURIComponent(slug)}/crons`);
+export async function listProjectCrons(slug: string, priority?: RequestPriority): Promise<ControllerJob[]> {
+  const data = await api<{ jobs?: HermesJob[] }>(`/api/projects/${encodeURIComponent(slug)}/crons`, undefined, undefined, priority);
   return (data.jobs ?? []).map((job) => getProjectCronFromJob(slug, job).job!);
 }
 
@@ -1796,23 +1865,23 @@ async function includeAncestors(rows: Mission[], project?: string): Promise<Miss
 /** A project's recent history (archived included) plus the open missions
  * older than that page that still matter (`openBeyondPage`): a page of recent
  * history alone drops live missions that newer (often archived) ones pushed off. */
-async function projectRows(slug: string): Promise<Mission[]> {
+async function projectRows(slug: string, priority?: RequestPriority): Promise<Mission[]> {
   const project = encodeURIComponent(slug);
   const [history, ...live] = await Promise.all([
-    api<Mission[]>(`/api/control/missions?project=${project}&limit=100&all=true`),
-    api<Mission[]>(`/api/control/missions?project=${project}&limit=200`),
+    api<Mission[]>(`/api/control/missions?project=${project}&limit=100&all=true`, undefined, undefined, priority),
+    api<Mission[]>(`/api/control/missions?project=${project}&limit=200`, undefined, undefined, priority),
   ]);
   for (let offset = 200; live[live.length - 1].length === 200 && offset < 1000; offset += 200)
-    live.push(await api<Mission[]>(`/api/control/missions?project=${project}&limit=200&offset=${offset}`));
+    live.push(await api<Mission[]>(`/api/control/missions?project=${project}&limit=200&offset=${offset}`, undefined, undefined, priority));
   const byId = new Map<string, Mission>();
   for (const row of [...history, ...openBeyondPage(history, live.flat())]) if (!byId.has(row.id)) byId.set(row.id, row);
   const at = (m: Mission) => Date.parse(m.updated_at || m.created_at || "") || 0;
   return [...byId.values()].sort((a, b) => at(b) - at(a));
 }
 /** Missions tagged with this project (exact slug match on the backend). */
-export async function listProjectMissions(slug: string): Promise<Mission[]> {
+export async function listProjectMissions(slug: string, opts?: { background?: boolean }): Promise<Mission[]> {
   const origins=await import("./localOrigins"),observedAt=origins.observe();
-  const remotePromise=projectRows(slug).then(rows=>includeAncestors(rows,slug));
+  const remotePromise=projectRows(slug, opts?.background ? "p2" : undefined).then(rows=>includeAncestors(rows,slug));
   remotePromise.catch(()=>{});
   const local=excludeBtwMissions(await origins.localOrigins()).filter(m=>m.project===slug);
   try{const remote=await remotePromise;await origins.rememberCoreState(local,remote,observedAt);const pending=excludeBtwMissions(local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id)))));return [...pending,...excludeBtwMissions(remote).filter(m=>!pending.some(l=>l.id===m.id))];}catch(error){if(local.length)return partialList(local);throw error;}
@@ -2095,12 +2164,20 @@ export function getObservedQueueRevision(missionId: string): bigint | undefined 
 }
 
 /** This endpoint reads the authenticated user's durable control queue. */
-export async function listQueuedMessages(missionId: string): Promise<QueuedMessage[]> {
+export async function listQueuedMessages(
+  missionId: string,
+  opts?: { priority?: RequestPriority; signal?: AbortSignal },
+): Promise<QueuedMessage[]> {
   // Native launch precedes Core registration. Its follow-ups live in the local
   // durable queue until synchronization; querying Core here races that POST.
   const local = (await import("./localOrigins").then(m => m.localOrigins(missionId))).find(row => row.id === missionId);
   if (local?.local_sync_pending) return [];
-  const raw = await api<QueuedMessage[] | { items?: QueuedMessage[]; revision?: number }>(`/api/control/queue?mission_id=${encodeURIComponent(missionId)}`);
+  const raw = await api<QueuedMessage[] | { items?: QueuedMessage[]; revision?: number }>(
+    `/api/control/queue?mission_id=${encodeURIComponent(missionId)}`,
+    opts?.signal ? { signal: opts.signal } : undefined,
+    undefined,
+    opts?.priority,
+  );
   const rows = Array.isArray(raw) ? raw : raw?.items;
   const envelopeRev = !Array.isArray(raw) && typeof raw?.revision === "number" && Number.isFinite(raw.revision) && raw.revision >= 0 ? BigInt(Math.trunc(raw.revision)) : undefined;
   if (!Array.isArray(rows) || rows.some(row => !row || typeof row.id !== "string" || typeof row.content !== "string")) throw new Error("Invalid queue response");

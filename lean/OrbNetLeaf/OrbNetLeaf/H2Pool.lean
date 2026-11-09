@@ -76,7 +76,6 @@ private structure ActiveStream where
   bodyChunks     : Array ByteArray := #[]
   bodyBytes      : Nat := 0
   pendingEnd     : Bool := false
-  rxDone         : Bool := false
   promise        : IO.Promise StreamOutcome
 
 private structure ConnSharedState where
@@ -164,12 +163,13 @@ private def insertByPriority (arr : Array ActiveStream) (s : ActiveStream) : Arr
   return out
 
 private def removeStreamById (arr : Array ActiveStream) (sid : UInt32) : Array ActiveStream :=
-  arr.filter (fun s => s.streamId != sid)
+  arr.filter (fun s => !s.headersSent || s.streamId != sid)
 
 private def findStreamIdx? (arr : Array ActiveStream) (sid : UInt32) : Option Nat := Id.run do
+  if sid == 0 then return none
   for i in [0:arr.size] do
     if let some item := arr[i]? then
-      if item.streamId == sid then
+      if item.headersSent && item.streamId == sid then
         return some i
   return none
 
@@ -195,12 +195,26 @@ private def failPendingRequests (reqs : Array PendingRequest) (out : StreamOutco
   for r in reqs do
     r.promise.resolve out
 
-/-- Single-owner actor loop driving one persistent TLS 1.3 `ALPN "h2"` connection. -/
-private partial def runH2OriginWorker
-    (pool : H2ClientPool) (entry : OriginPoolEntry) (sess : TlsSession) : IO Unit := do
+private structure WorkerWireOps where
+  writeAll  : ByteArray → IO Bool
+  readChunk : Nat → UInt32 → IO TlsReadOutcome
+  close     : IO Unit
+
+private def mkTlsWorkerWireOps (sess : TlsSession) : WorkerWireOps := {
+  writeAll := fun bytes => writeTlsSessionAll sess bytes
+  readChunk := fun maxBytes timeoutMs => readTlsSessionChunk sess maxBytes timeoutMs
+  close := closeTlsSession sess
+}
+
+/-- Single-owner actor loop driving one persistent multiplexed HTTP/2 connection.
+    Active streams and fatal wire status live in `IO.Ref` cells rather than `let mut` bindings across
+    `try ... finally` so Lean's `tryFinally` closure always drains every live waiter on exit. -/
+private partial def runH2OriginWorkerWithOps
+    (pool : H2ClientPool) (entry : OriginPoolEntry) (ops : WorkerWireOps) : IO Unit := do
   let connOpenedMs ← IO.monoMsNow
+  let streamsRef ← IO.mkRef (#[] : Array ActiveStream)
+  let fatalErrRef ← IO.mkRef (none : Option String)
   let mut nextStreamId : UInt32 := 1
-  let mut streams : Array ActiveStream := #[]
   let mut hpackTbl : HpackDecoderTable := {}
   let mut peerInitWin : Int := 65535
   let mut peerConnWin : Int := 65535
@@ -211,7 +225,6 @@ private partial def runH2OriginWorker
   let mut awaitingContSid? : Option UInt32 := none
   let mut hdrAccum := ByteArray.empty
   let mut goingAway := false
-  let mut fatalErr? : Option String := none
   let mut lastActivityMs ← IO.monoMsNow
   let mut lastRxMs : Nat := lastActivityMs
   let mut lastPingSentMs : Nat := lastActivityMs
@@ -219,27 +232,32 @@ private partial def runH2OriginWorker
   let mut firstStreamUsed := false
 
   try
-    while fatalErr?.isNone && !(goingAway && streams.isEmpty) do
+    while (← fatalErrRef.get).isNone && !(goingAway && (← streamsRef.get).isEmpty) do
       let nowMs ← IO.monoMsNow
 
-      -- 1. Pull newly submitted requests from mutex queue when capacity allows
-      if !goingAway && streams.size < peerMaxConcurrent && nextStreamId < 0x3FFFFFFF then
+      -- 1. Pull newly submitted requests from mutex queue when capacity allows.
+      --    Order incoming batch by priority (`P0` -> `P1` -> `P2`) before admitting to `peerMaxConcurrent`,
+      --    and defer `nextStreamId` allocation until wire `HEADERS` emission in Step 3(a) so priority
+      --    reordering never opens streams out of monotonic ID order (RFC 9113 §5.1.1).
+      if !goingAway && (← streamsRef.get).size < peerMaxConcurrent && nextStreamId < 0x3FFFFFFF then
         let incoming ← drainPendingQueue entry.shared
+        let incomingOrdered :=
+          incoming.filter (fun r => r.priority == 0) ++
+          incoming.filter (fun r => r.priority == 1) ++
+          incoming.filter (fun r => r.priority >= 2)
         let mut overflow : Array PendingRequest := #[]
-        for req in incoming do
+        for req in incomingOrdered do
           if nowMs >= req.deadlineMs then
             req.promise.resolve (.error "HTTP/2 request timed out before dispatch")
-          else if streams.size < peerMaxConcurrent && nextStreamId < 0x3FFFFFFF then
+          else if (← streamsRef.get).size < peerMaxConcurrent && nextStreamId < 0x3FFFFFFF then
             match buildPseudoAndAppHeaders req.method req.authority req.path req.headers req.body.size with
             | .error e =>
               req.promise.resolve (.error e)
             | .ok allHdrs =>
-              let sid := nextStreamId
-              nextStreamId := nextStreamId + 2
               let reused := firstStreamUsed || (nowMs - connOpenedMs >= 5)
               firstStreamUsed := true
               let s : ActiveStream := {
-                streamId := sid
+                streamId := 0
                 priority := req.priority
                 method := req.method
                 hpackBlock := encodeHeadersBlock allHdrs
@@ -251,7 +269,7 @@ private partial def runH2OriginWorker
                 reusedConn := reused
                 promise := req.promise
               }
-              streams := insertByPriority streams s
+              streamsRef.modify fun cur => insertByPriority cur s
               lastActivityMs := nowMs
           else
             overflow := overflow.push req
@@ -262,44 +280,59 @@ private partial def runH2OriginWorker
         if nextStreamId >= 0x3FFFFFFF then
           goingAway := true
 
-      -- 2. Fail any individual stream whose deadline expired (sending RST_STREAM CANCEL = 0x08)
-      let mut expiredIds : Array UInt32 := #[]
-      for s in streams do
+      -- 2. Fail any individual stream whose deadline expired (sending RST_STREAM CANCEL = 0x08 if opened)
+      let curForDeadline ← streamsRef.get
+      let mut keptAfterDeadline : Array ActiveStream := Array.mkEmpty curForDeadline.size
+      for s in curForDeadline do
         if nowMs >= s.deadlineMs then
-          expiredIds := expiredIds.push s.streamId
           s.promise.resolve (.error "HTTP/2 stream deadline exceeded")
           if s.headersSent then
             if let some rst := buildRstStreamFrame? s.streamId 0x08 then
-              discard <| writeTlsSessionAll sess rst
-      if !expiredIds.isEmpty then
-        streams := streams.filter (fun s => !expiredIds.contains s.streamId)
+              discard <| ops.writeAll rst
+        else
+          keptAfterDeadline := keptAfterDeadline.push s
+      if keptAfterDeadline.size != curForDeadline.size then
+        streamsRef.set keptAfterDeadline
 
       -- 3. Priority-ordered outbound frame flush:
-      --    (a) Send HEADERS (+ CONTINUATION) in priority order (`P0` -> `P1` -> `P2`)
-      for idx in [0:streams.size] do
-        if fatalErr?.isNone then
-          if let some s := streams[idx]? then
-            if !s.headersSent then
-              let endStream := s.body.isEmpty
-              match encodeH2HeadersWithContinuation s.streamId s.hpackBlock endStream 16384 with
-              | .error e =>
-                s.promise.resolve (.error e)
-                streams := streams.setIfInBounds idx { s with headersSent := true, rxDone := true }
-              | .ok hdrWire =>
-                if !(← writeTlsSessionAll sess hdrWire) then
-                  fatalErr? := some "HTTP/2 TLS write failed during HEADERS"
-                else
-                  streams := streams.setIfInBounds idx { s with headersSent := true }
-                  lastActivityMs := nowMs
-      streams := streams.filter (fun s => !(s.headersSent && s.rxDone))
+      --    (a) Allocate odd client `streamId`s (`1, 3, 5, ...`) strictly at wire `HEADERS` flush time
+      --        in priority order (`P0` -> `P1` -> `P2`) per `H2ClientStreamOrderSpec` (RFC 9113 §5.1.1).
+      let curHdrStreams ← streamsRef.get
+      let mut postHdrStreams : Array ActiveStream := Array.mkEmpty curHdrStreams.size
+      for s in curHdrStreams do
+        if s.headersSent then
+          postHdrStreams := postHdrStreams.push s
+        else if (← fatalErrRef.get).isSome then
+          postHdrStreams := postHdrStreams.push s
+        else if nextStreamId > 0x7FFFFFFF then
+          goingAway := true
+          s.promise.resolve (.retryUnprocessed "HTTP/2 stream ID space exhausted")
+        else
+          let sid := nextStreamId
+          let endStream := s.body.isEmpty
+          match encodeH2HeadersWithContinuation sid s.hpackBlock endStream 16384 with
+          | .error e =>
+            s.promise.resolve (.error e)
+          | .ok hdrWire =>
+            if !(← ops.writeAll hdrWire) then
+              fatalErrRef.set (some "HTTP/2 TLS write failed during HEADERS")
+              postHdrStreams := postHdrStreams.push s
+            else
+              nextStreamId := sid + 2
+              if nextStreamId >= 0x3FFFFFFF then
+                goingAway := true
+              postHdrStreams := postHdrStreams.push { s with streamId := sid, headersSent := true }
+              lastActivityMs := nowMs
+      streamsRef.set postHdrStreams
 
       --    (b) Send one 16 KiB DATA quantum per pass in strict priority order (`P0` preempts `P1`/`P2`)
       let mut madeWriteProgress := true
-      while madeWriteProgress && fatalErr?.isNone && peerConnWin > 0 do
+      while madeWriteProgress && (← fatalErrRef.get).isNone && peerConnWin > 0 do
         madeWriteProgress := false
-        for idx in [0:streams.size] do
-          if !madeWriteProgress && fatalErr?.isNone && peerConnWin > 0 then
-            if let some s := streams[idx]? then
+        let dataPassCount := (← streamsRef.get).size
+        for idx in [0:dataPassCount] do
+          if !madeWriteProgress && (← fatalErrRef.get).isNone && peerConnWin > 0 then
+            if let some s := (← streamsRef.get)[idx]? then
               if s.headersSent && s.sentBody < s.body.size && s.peerSendWin > 0 then
                 let minWin : Int := if peerConnWin < s.peerSendWin then peerConnWin else s.peerSendWin
                 let avail := minWin.toNat
@@ -310,51 +343,54 @@ private partial def runH2OriginWorker
                   let chunk := s.body.extract s.sentBody (s.sentBody + chunkLen)
                   match encodeFrame? { frameType := .data, flags := dFlags, streamId := s.streamId, payload := chunk } 16384 chunkLen.toUInt64 with
                   | none =>
-                    fatalErr? := some "failed to encode HTTP/2 DATA frame"
+                    fatalErrRef.set (some "failed to encode HTTP/2 DATA frame")
                   | some dFrame =>
-                    if !(← writeTlsSessionAll sess dFrame) then
-                      fatalErr? := some "HTTP/2 TLS write failed during DATA"
+                    if !(← ops.writeAll dFrame) then
+                      fatalErrRef.set (some "HTTP/2 TLS write failed during DATA")
                     else
                       let sent' := s.sentBody + chunkLen
                       peerConnWin := peerConnWin - (chunkLen : Int)
-                      streams := streams.setIfInBounds idx { s with
+                      streamsRef.modify fun cur => cur.setIfInBounds idx { s with
                         sentBody := sent'
                         peerSendWin := s.peerSendWin - (chunkLen : Int)
                       }
                       lastActivityMs := nowMs
                       madeWriteProgress := true
 
-      -- 4. Idle timeout (`90 s`) & liveness `PING` probe (`3 s` rx-silence + `4 s` ACK deadline when streams wait)
-      if fatalErr?.isNone then
+      -- 4. Idle timeout (`90 s`) & liveness `PING` probe (`3 s` rx-silence + `10 s` ACK deadline when streams wait)
+      if (← fatalErrRef.get).isNone then
+        let curStreams ← streamsRef.get
         let hasQueued ← entry.shared.atomically do return !(← get).queue.isEmpty
-        if streams.isEmpty && !hasQueued && (nowMs - lastActivityMs >= 90000) then
+        if curStreams.isEmpty && !hasQueued && (nowMs - lastActivityMs >= 90000) then
           goingAway := true
         else
           if let some (_, pingSentAt) := inFlightPingToken? then
-            let pingDeadlineMs : Nat := if !streams.isEmpty then 4000 else 12000
+            let pingDeadlineMs : Nat := if !curStreams.isEmpty then 10000 else 12000
             if nowMs - pingSentAt >= pingDeadlineMs then
-              fatalErr? := some "HTTP/2 keepalive PING timed out"
-          else if (!streams.isEmpty && nowMs - lastRxMs >= 3000 && nowMs - lastPingSentMs >= 3000) ||
-                  (!streams.isEmpty && nowMs - lastPingSentMs >= 15000) ||
-                  (streams.isEmpty && nowMs - lastPingSentMs >= 30000) then
+              fatalErrRef.set (some "HTTP/2 keepalive PING timed out")
+          else if (!curStreams.isEmpty && nowMs - lastRxMs >= 3000 && nowMs - lastPingSentMs >= 3000) ||
+                  (!curStreams.isEmpty && nowMs - lastPingSentMs >= 15000) ||
+                  (curStreams.isEmpty && nowMs - lastPingSentMs >= 30000) then
             let tok : UInt64 := nowMs.toUInt64 ^^^ 0x4F52424832504E47
-            if !(← writeTlsSessionAll sess (encodePingFrame tok)) then
-              fatalErr? := some "HTTP/2 PING write failed"
+            if !(← ops.writeAll (encodePingFrame tok)) then
+              fatalErrRef.set (some "HTTP/2 PING write failed")
             else
               lastPingSentMs := nowMs
               inFlightPingToken? := some (tok, nowMs)
 
       -- 5. Poll inbound TLS records with short timeout (`4 ms` when streams active, `8 ms` when idle)
-      if fatalErr?.isNone && !(goingAway && streams.isEmpty) then
+      let fatalBeforePoll ← fatalErrRef.get
+      let streamsBeforePoll ← streamsRef.get
+      if fatalBeforePoll.isNone && !(goingAway && streamsBeforePoll.isEmpty) then
         let hasQueuedNow ← entry.shared.atomically do return !(← get).queue.isEmpty
-        let pollMs : UInt32 := if hasQueuedNow then 1 else if !streams.isEmpty then 4 else 8
-        match ← readTlsSessionChunk sess 16384 pollMs with
+        let pollMs : UInt32 := if hasQueuedNow then 1 else if !streamsBeforePoll.isEmpty then 4 else 8
+        match ← ops.readChunk 16384 pollMs with
         | .closeNotify | .tcpEof =>
-          fatalErr? := some "HTTP/2 peer closed TLS connection"
+          fatalErrRef.set (some "HTTP/2 peer closed TLS connection")
         | .timeout =>
           pure ()
         | .transportError =>
-          fatalErr? := some "HTTP/2 TLS read error"
+          fatalErrRef.set (some "HTTP/2 TLS read error")
         | .chunk c =>
           if !c.isEmpty then
             let rxAtMs ← IO.monoMsNow
@@ -362,7 +398,7 @@ private partial def runH2OriginWorker
             lastRxMs := rxAtMs
             pendingBuf := pendingBuf ++ c
             let mut scanMore := true
-            while scanMore && fatalErr?.isNone do
+            while scanMore && (← fatalErrRef.get).isNone do
               if pendingBuf.size - pendingOff < 9 then
                 scanMore := false
               else
@@ -371,7 +407,7 @@ private partial def runH2OriginWorker
                 let b2 := (pendingBuf.get! (pendingOff + 2)).toNat
                 let payLen := (b0 <<< 16) ||| (b1 <<< 8) ||| b2
                 if payLen > 16384 then
-                  fatalErr? := some s!"HTTP/2 inbound frame exceeds 16384 maxFrameSize ({payLen})"
+                  fatalErrRef.set (some s!"HTTP/2 inbound frame exceeds 16384 maxFrameSize ({payLen})")
                 else if pendingBuf.size - pendingOff < 9 + payLen then
                   scanMore := false
                 else
@@ -387,14 +423,14 @@ private partial def runH2OriginWorker
                   let canonFt := H2FrameType.ofByte ty
                   if verifyH2FrameHeader payLen.toUInt32 16384 ty fl sid 16777216 (9 + payLen).toUInt64 != 1 ||
                      !payloadStructurallyValid canonFt fl (ByteSource.ofByteArray pay) then
-                    fatalErr? := some "HTTP/2 inbound frame rejected by verifyH2FrameHeader"
+                    fatalErrRef.set (some "HTTP/2 inbound frame rejected by verifyH2FrameHeader")
                   else if awaitingContSid?.isSome && (ty != 9 || awaitingContSid? != some sid) then
-                    fatalErr? := some "HTTP/2 connection-level CONTINUATION lock violated"
+                    fatalErrRef.set (some "HTTP/2 connection-level CONTINUATION lock violated")
                   else if ty == 5 then
-                    fatalErr? := some "HTTP/2 server PUSH_PROMISE forbidden (ENABLE_PUSH=0)"
+                    fatalErrRef.set (some "HTTP/2 server PUSH_PROMISE forbidden (ENABLE_PUSH=0)")
                   else if ty == 4 && sid == 0 then
                     match validatePeerSettingsPayload fl pay with
-                    | .error e => fatalErr? := some e
+                    | .error e => fatalErrRef.set (some e)
                     | .ok newWin? =>
                       if (fl &&& 0x01) == 0 then
                         -- Parse SETTINGS_MAX_CONCURRENT_STREAMS (0x0003) if present
@@ -412,15 +448,14 @@ private partial def runH2OriginWorker
                         if let some nw := newWin? then
                           let delta : Int := (nw : Int) - peerInitWin
                           peerInitWin := (nw : Int)
-                          for k in [0:streams.size] do
-                            if let some sk := streams[k]? then
-                              streams := streams.setIfInBounds k { sk with peerSendWin := sk.peerSendWin + delta }
-                        if !(← writeTlsSessionAll sess h2SettingsAckFrame) then
-                          fatalErr? := some "HTTP/2 SETTINGS ACK write failed"
+                          streamsRef.modify fun cur =>
+                            cur.map fun sk => { sk with peerSendWin := sk.peerSendWin + delta }
+                        if !(← ops.writeAll h2SettingsAckFrame) then
+                          fatalErrRef.set (some "HTTP/2 SETTINGS ACK write failed")
                   else if ty == 6 && sid == 0 && pay.size == 8 then
                     if (fl &&& 0x01) == 0 then
-                      if !(← writeTlsSessionAll sess (buildH2PingAckFrame pay)) then
-                        fatalErr? := some "HTTP/2 PING ACK write failed"
+                      if !(← ops.writeAll (buildH2PingAckFrame pay)) then
+                        fatalErrRef.set (some "HTTP/2 PING ACK write failed")
                     else
                       if let some (expectedTok, sentAt) := inFlightPingToken? then
                         if decodeU64BE pay == expectedTok then
@@ -438,18 +473,21 @@ private partial def runH2OriginWorker
                     if sid == 0 then
                       peerConnWin := peerConnWin + (inc.toNat : Int)
                       if peerConnWin > (0x7FFFFFFF : Int) then
-                        fatalErr? := some "HTTP/2 connection send window overflow"
-                    else if let some sIdx := findStreamIdx? streams sid then
-                      if let some sk := streams[sIdx]? then
-                        let nextWin := sk.peerSendWin + (inc.toNat : Int)
-                        if nextWin > (0x7FFFFFFF : Int) then
-                          sk.promise.resolve (.error "HTTP/2 stream send window overflow")
-                          streams := removeStreamById streams sid
-                        else
-                          streams := streams.setIfInBounds sIdx { sk with peerSendWin := nextWin }
+                        fatalErrRef.set (some "HTTP/2 connection send window overflow")
+                    else
+                      let curStreams ← streamsRef.get
+                      if let some sIdx := findStreamIdx? curStreams sid then
+                        if let some sk := curStreams[sIdx]? then
+                          let nextWin := sk.peerSendWin + (inc.toNat : Int)
+                          if nextWin > (0x7FFFFFFF : Int) then
+                            sk.promise.resolve (.error "HTTP/2 stream send window overflow")
+                            streamsRef.modify fun cur => removeStreamById cur sid
+                          else
+                            streamsRef.modify fun cur => cur.setIfInBounds sIdx { sk with peerSendWin := nextWin }
                   else if ty == 3 then
-                    if let some sIdx := findStreamIdx? streams sid then
-                      if let some sk := streams[sIdx]? then
+                    let curStreams ← streamsRef.get
+                    if let some sIdx := findStreamIdx? curStreams sid then
+                      if let some sk := curStreams[sIdx]? then
                         let e0 := if pay.size >= 4 then (pay.get! 0).toUInt32 else 0
                         let e1 := if pay.size >= 4 then (pay.get! 1).toUInt32 else 0
                         let e2 := if pay.size >= 4 then (pay.get! 2).toUInt32 else 0
@@ -460,22 +498,23 @@ private partial def runH2OriginWorker
                           sk.promise.resolve (.retryUnprocessed "HTTP/2 REFUSED_STREAM")
                         else
                           sk.promise.resolve (.error s!"HTTP/2 peer reset stream (RST_STREAM err={errCode})")
-                        streams := removeStreamById streams sid
+                        streamsRef.modify fun cur => removeStreamById cur sid
                   else if ty == 7 then
                     match parseGoawayPayload pay with
-                    | .error e => fatalErr? := some e
+                    | .error e => fatalErrRef.set (some e)
                     | .ok (lastSid, errCode) =>
                       goingAway := true
                       if errCode != 0 then
-                        fatalErr? := some s!"HTTP/2 GOAWAY error {errCode}"
+                        fatalErrRef.set (some s!"HTTP/2 GOAWAY error {errCode}")
                       else
+                        let curStreams ← streamsRef.get
                         let mut kept : Array ActiveStream := #[]
-                        for sk in streams do
-                          if sk.streamId > lastSid then
+                        for sk in curStreams do
+                          if !sk.headersSent || sk.streamId > lastSid then
                             sk.promise.resolve (.retryUnprocessed "HTTP/2 GOAWAY unprocessed stream")
                           else
                             kept := kept.push sk
-                        streams := kept
+                        streamsRef.set kept
                   else if ty == 1 || ty == 9 then
                     -- Always decode HPACK blocks even if stream was already reset/timed-out so dynamic table stays synchronized!
                     let mut fragOk := true
@@ -490,19 +529,20 @@ private partial def runH2OriginWorker
                       frameEndHeaders := (fl &&& 0x04) != 0
                       frameEndStream := (fl &&& 0x01) != 0
                       if hdrAccum.size + fragLen > 65536 then
-                        fatalErr? := some "HTTP/2 header block exceeds 64 KiB cap"
+                        fatalErrRef.set (some "HTTP/2 header block exceeds 64 KiB cap")
                         fragOk := false
                       else
                         hdrAccum := hdrAccum ++ pay.extract minHdr (minHdr + fragLen)
                         if !frameEndHeaders then
                           awaitingContSid? := some sid
-                          if let some sIdx := findStreamIdx? streams sid then
-                            if let some sk := streams[sIdx]? then
-                              streams := streams.setIfInBounds sIdx { sk with pendingEnd := frameEndStream }
+                          let curStreams ← streamsRef.get
+                          if let some sIdx := findStreamIdx? curStreams sid then
+                            if let some sk := curStreams[sIdx]? then
+                              streamsRef.modify fun cur => cur.setIfInBounds sIdx { sk with pendingEnd := frameEndStream }
                     else
                       frameEndHeaders := (fl &&& 0x04) != 0
                       if hdrAccum.size + pay.size > 65536 then
-                        fatalErr? := some "HTTP/2 header block exceeds 64 KiB cap"
+                        fatalErrRef.set (some "HTTP/2 header block exceeds 64 KiB cap")
                         fragOk := false
                       else
                         hdrAccum := hdrAccum ++ pay
@@ -511,12 +551,13 @@ private partial def runH2OriginWorker
                     if fragOk && frameEndHeaders then
                       match decodeRfc7541BlockWithTable? hpackTbl (ByteSource.ofByteArray hdrAccum) with
                       | none =>
-                        fatalErr? := some "HTTP/2 HPACK decode failed"
+                        fatalErrRef.set (some "HTTP/2 HPACK decode failed")
                       | some (fields, hpackTbl') =>
                         hpackTbl := hpackTbl'
                         hdrAccum := ByteArray.empty
-                        if let some sIdx := findStreamIdx? streams sid then
-                          if let some sk := streams[sIdx]? then
+                        let curStreams ← streamsRef.get
+                        if let some sIdx := findStreamIdx? curStreams sid then
+                          if let some sk := curStreams[sIdx]? then
                             let effEndStream := if ty == 1 then frameEndStream else sk.pendingEnd
                             let mut skNext := { sk with pendingEnd := false }
                             let mut streamErr? : Option String := none
@@ -547,7 +588,7 @@ private partial def runH2OriginWorker
                                   }
                             if let some serr := streamErr? then
                               skNext.promise.resolve (.error serr)
-                              streams := removeStreamById streams sid
+                              streamsRef.modify fun cur => removeStreamById cur sid
                             else if effEndStream then
                               if !skNext.sawFinalStatus then
                                 skNext.promise.resolve (.error "HTTP/2 stream ended without final :status")
@@ -558,23 +599,24 @@ private partial def runH2OriginWorker
                                 | .ok resp =>
                                   let dur := Nat.max 1 (rxAtMs - skNext.startedMs)
                                   skNext.promise.resolve (.ok resp (Nat.min dur 60000).toUInt32 skNext.reusedConn)
-                              streams := removeStreamById streams sid
+                              streamsRef.modify fun cur => removeStreamById cur sid
                             else
-                              streams := streams.setIfInBounds sIdx skNext
+                              streamsRef.modify fun cur => cur.setIfInBounds sIdx skNext
                   else if ty == 0 then
                     -- Replenish connection window regardless of whether stream is still active
                     unackedConnRecv := unackedConnRecv + payLen
                     if unackedConnRecv >= 2097152 then
                       if let some wuConn := buildWindowUpdateFrame? 0 unackedConnRecv.toUInt32 then
-                        if !(← writeTlsSessionAll sess wuConn) then
-                          fatalErr? := some "HTTP/2 connection WINDOW_UPDATE write failed"
+                        if !(← ops.writeAll wuConn) then
+                          fatalErrRef.set (some "HTTP/2 connection WINDOW_UPDATE write failed")
                         else
                           unackedConnRecv := 0
-                    if let some sIdx := findStreamIdx? streams sid then
-                      if let some sk := streams[sIdx]? then
+                    let curStreams ← streamsRef.get
+                    if let some sIdx := findStreamIdx? curStreams sid then
+                      if let some sk := curStreams[sIdx]? then
                         if !sk.sawFinalStatus || sk.sawTrailers then
                           sk.promise.resolve (.error "HTTP/2 DATA frame outside response body phase")
-                          streams := removeStreamById streams sid
+                          streamsRef.modify fun cur => removeStreamById cur sid
                         else
                           let padded := (fl &&& 0x08) != 0
                           let dStart := if padded then 1 else 0
@@ -583,8 +625,8 @@ private partial def runH2OriginWorker
                           if sk.bodyBytes + dLen > sk.maxRespBytes then
                             sk.promise.resolve (.error s!"HTTP/2 response body exceeds maxRespBytes ({sk.maxRespBytes})")
                             if let some rst := buildRstStreamFrame? sid 0x08 then
-                              discard <| writeTlsSessionAll sess rst
-                            streams := removeStreamById streams sid
+                              discard <| ops.writeAll rst
+                            streamsRef.modify fun cur => removeStreamById cur sid
                           else
                             let payloadSlice := pay.extract dStart (dStart + dLen)
                             let nextChunks := if dLen > 0 then sk.bodyChunks.push payloadSlice else sk.bodyChunks
@@ -598,16 +640,16 @@ private partial def runH2OriginWorker
                               | .ok resp =>
                                 let dur := Nat.max 1 (rxAtMs - sk.startedMs)
                                 sk.promise.resolve (.ok resp (Nat.min dur 60000).toUInt32 sk.reusedConn)
-                              streams := removeStreamById streams sid
+                              streamsRef.modify fun cur => removeStreamById cur sid
                             else
                               let mut remUnacked := nextUnacked
                               if remUnacked >= 2097152 then
                                 if let some wuStrm := buildWindowUpdateFrame? sid remUnacked.toUInt32 then
-                                  if !(← writeTlsSessionAll sess wuStrm) then
-                                    fatalErr? := some "HTTP/2 stream WINDOW_UPDATE write failed"
+                                  if !(← ops.writeAll wuStrm) then
+                                    fatalErrRef.set (some "HTTP/2 stream WINDOW_UPDATE write failed")
                                   else
                                     remUnacked := 0
-                              streams := streams.setIfInBounds sIdx { sk with
+                              streamsRef.modify fun cur => cur.setIfInBounds sIdx { sk with
                                 bodyChunks := nextChunks
                                 bodyBytes := nextBytes
                                 unackedRecv := remUnacked
@@ -616,19 +658,22 @@ private partial def runH2OriginWorker
               pendingBuf := pendingBuf.extract pendingOff pendingBuf.size
               pendingOff := 0
   finally
-    closeTlsSession sess
+    ops.close
     let leftover ← markConnClosedAndDrain entry.shared
     pool.mu.atomically do
       let st ← get
       set { st with entries := st.entries.filter (fun e => e.generation != entry.generation) }
-    let errMsg := fatalErr?.getD "HTTP/2 connection closed"
-    -- Any request still queued in `leftover` or active without `headersSent` was never transmitted and can safely retry!
+    let errMsg := (← fatalErrRef.get).getD "HTTP/2 connection closed"
+    let remStreams ← streamsRef.swap #[]
     failPendingRequests leftover (.retryUnprocessed errMsg)
-    for sk in streams do
-      if !sk.headersSent then
-        sk.promise.resolve (.retryUnprocessed errMsg)
-      else
-        sk.promise.resolve (.error errMsg)
+    for sk in remStreams do
+      match classifyTeardownWaiter sk.headersSent with
+      | .retryUnprocessed => sk.promise.resolve (.retryUnprocessed errMsg)
+      | .terminalError => sk.promise.resolve (.error errMsg)
+
+private def runH2OriginWorker
+    (pool : H2ClientPool) (entry : OriginPoolEntry) (sess : TlsSession) : IO Unit :=
+  runH2OriginWorkerWithOps pool entry (mkTlsWorkerWireOps sess)
 
 /-- Ensure a live HTTP/2 connection worker exists for `(host, port, verifyPeer)`, coalescing
     concurrent cold-start handshakes onto a single in-flight TLS 1.3 dial per origin, and falling
@@ -656,9 +701,12 @@ private def getOrConnectOrigin
     return res
   if !isLeader then
     match waiter? with
-    | some prom => return prom.result!.get
+    | some prom =>
+      match prom.result?.get with
+      | some out => return out
+      | none => return .failed s!"in-flight HTTP/2 connect promise dropped for {host}:{port}"
     | none => return .failed s!"missing in-flight connect promise for {host}:{port}"
-  let mut resolved := false
+  let resolvedRef ← IO.mkRef false
   try
     match ← openH2PersistentSessionOutcome host port verifyPeer connectTimeoutMs with
     | .ok sess =>
@@ -683,8 +731,8 @@ private def getOrConnectOrigin
       else
         discard <| IO.asTask (prio := .dedicated) (runH2OriginWorker pool chosen sess)
       let out := OriginConnectResult.ok chosen
+      resolvedRef.set true
       freshProm.resolve out
-      resolved := true
       return out
     | .alpnFallbackH1 =>
       pool.mu.atomically do
@@ -694,8 +742,8 @@ private def getOrConnectOrigin
         let h1' := if st.h1OnlyHosts.contains (host, port) then st.h1OnlyHosts else st.h1OnlyHosts.push (host, port)
         set { st with inFlightConnects := remInflight, h1OnlyHosts := h1' }
       let out := OriginConnectResult.fallbackH1
+      resolvedRef.set true
       freshProm.resolve out
-      resolved := true
       return out
     | .transportError msg =>
       pool.mu.atomically do
@@ -704,11 +752,11 @@ private def getOrConnectOrigin
           (fun c => !(c.host == host && c.port == port && c.verifyPeer == verifyPeer))
         set { st with inFlightConnects := remInflight }
       let out := OriginConnectResult.failed msg
+      resolvedRef.set true
       freshProm.resolve out
-      resolved := true
       return out
   finally
-    if !resolved then
+    if !(← resolvedRef.get) then
       pool.mu.atomically do
         let st ← get
         let remInflight := st.inFlightConnects.filter
@@ -767,16 +815,18 @@ def H2ClientPool.request
         if attempt >= 2 then
           return .error s!"HTTP/2 connection to {host}:{port} closed before enqueue"
       else
-        match prom.result!.get with
-        | .ok resp rttMs reused =>
+        match prom.result?.get with
+        | some (.ok resp rttMs reused) =>
           let pingRtt ← entry.shared.atomically do return (← get).lastPingRttMs
           let effRtt := if pingRtt > 0 && pingRtt < rttMs then pingRtt else rttMs
           return .ok { response := resp, rttMs := effRtt, reusedConn := reused }
-        | .retryUnprocessed reason =>
+        | some (.retryUnprocessed reason) =>
           if attempt >= 2 then
             return .error reason
-        | .error msg =>
+        | some (.error msg) =>
           return .error msg
+        | none =>
+          return .error s!"HTTP/2 stream promise dropped for {host}:{port}"
     | .fallbackH1 =>
       let t0 ← IO.monoMsNow
       match ← httpsRequest method host port path headers body maxRespBytes verifyPeer totalTimeoutMs with
@@ -789,5 +839,74 @@ def H2ClientPool.request
     | .failed errMsg =>
       return .error errMsg
   return .error s!"HTTP/2 pool exhausted retries for {host}:{port}"
+
+/-- Self-test harness exercising `runH2OriginWorkerWithOps` `try ... finally` teardown when a peer
+    closes mid-flight with both a transmitted stream (`headersSent = true`) and an untransmitted
+    stream (`headersSent = false`), plus unfulfilled `IO.Promise.result?` drop safety. -/
+def H2ClientPool.testTeardownDrainsActiveAndQueuedWaiters : IO Bool := do
+  let pool ← H2ClientPool.new
+  let shared ← Std.Mutex.new {}
+  let entry : OriginPoolEntry := {
+    host := "teardown.orb.test", port := 443, verifyPeer := true, shared := shared, generation := 1
+  }
+  pool.mu.atomically do
+    modify fun st => { st with nextGen := 2, entries := #[entry] }
+  let nowMs ← IO.monoMsNow
+  let promSent ← IO.Promise.new
+  let promUnsent ← IO.Promise.new
+  -- Enqueue `reqUnsent` (`P2`) BEFORE `reqSent` (`P0`): `H2Pool` must reorder `P0` ahead of `P2`
+  -- while still assigning strictly increasing wire stream IDs (`streamId = 1` to `P0`, `streamId = 3` to `P2`)!
+  let reqUnsent : PendingRequest := {
+    priority := 2, method := "GET", authority := "teardown.orb.test", path := "/api/usage-telemetry",
+    headers := #[], body := ByteArray.empty, maxRespBytes := 4096,
+    deadlineMs := nowMs + 30000, enqueuedMs := nowMs, promise := promUnsent
+  }
+  let reqSent : PendingRequest := {
+    priority := 0, method := "POST", authority := "teardown.orb.test", path := "/api/projects",
+    headers := #[], body := ByteArray.empty, maxRespBytes := 4096,
+    deadlineMs := nowMs + 30000, enqueuedMs := nowMs, promise := promSent
+  }
+  shared.atomically do
+    modify fun st => { st with queue := #[reqUnsent, reqSent] }
+  let wireFramesRef ← IO.mkRef (#[] : Array ByteArray)
+  let closedRef ← IO.mkRef false
+  let ops : WorkerWireOps := {
+    -- First HEADERS write (`reqSent`, `P0`, `streamId = 1`) succeeds;
+    -- second HEADERS write (`reqUnsent`, `P2`, `streamId = 3`) fails (`headersSent = false`),
+    -- immediately exiting the worker loop into `finally`!
+    writeAll := fun frame => do
+      let n ← wireFramesRef.modifyGet fun fs => (fs.size, fs.push frame)
+      return n == 0
+    readChunk := fun _ _ => pure .closeNotify
+    close := closedRef.set true
+  }
+  let workerTask ← IO.asTask (prio := .dedicated) (runH2OriginWorkerWithOps pool entry ops)
+  let _ ← IO.ofExcept workerTask.get
+  let sentOut? := promSent.result?.get
+  let unsentOut? := promUnsent.result?.get
+  let closedOk ← closedRef.get
+  let poolCleaned ← pool.mu.atomically do return (← get).entries.isEmpty
+  let wireFrames ← wireFramesRef.get
+  let decodeFrameSid (f : ByteArray) : UInt32 :=
+    if f.size < 9 then 0
+    else
+      let s0 := (f.get! 5).toUInt32 &&& 0x7F
+      let s1 := (f.get! 6).toUInt32
+      let s2 := (f.get! 7).toUInt32
+      let s3 := (f.get! 8).toUInt32
+      (s0 <<< 24) ||| (s1 <<< 16) ||| (s2 <<< 8) ||| s3
+  let wireMonotoneOk :=
+    wireFrames.size == 2 &&
+    (wireFrames[0]?.map (fun f => f.get! 3 == 1 && decodeFrameSid f == 1)).getD false &&
+    (wireFrames[1]?.map (fun f => f.get! 3 == 1 && decodeFrameSid f == 3)).getD false
+  -- Also verify that dropping an unfulfilled `IO.Promise StreamOutcome` resolves `result?` to `none` without hanging.
+  let droppedTask ← IO.asTask (prio := .dedicated) do
+    let orphanProm ← IO.Promise.new (α := StreamOutcome)
+    return orphanProm.result?
+  let orphanResTask ← IO.ofExcept droppedTask.get
+  let orphanVal? := orphanResTask.get
+  let sentTerminal := match sentOut? with | some (.error _) => true | _ => false
+  let unsentRetry := match unsentOut? with | some (.retryUnprocessed _) => true | _ => false
+  return closedOk && poolCleaned && wireMonotoneOk && sentTerminal && unsentRetry && orphanVal?.isNone
 
 end OrbNetLeaf.H2Pool

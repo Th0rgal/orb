@@ -50,6 +50,7 @@ export function classifyClientRequestPriority(
   if (
     cleanPath.startsWith("/api/software") ||
     cleanPath.startsWith("/api/stats") ||
+    cleanPath.startsWith("/api/providers/antigravity-models") ||
     cleanPath.startsWith("/api/antigravity-models") ||
     cleanPath.startsWith("/api/crons") ||
     cleanPath.startsWith("/api/library/skill-delivery") ||

@@ -1,4 +1,5 @@
 import { pollWhileVisible } from "./poll";
+import { cachePeek, cachePeekArray, cachePut } from "./pageCache";
 import { Select } from "./Select";
 import { ErrorToast } from "./toast";
 import { RoutingPicker } from "./RoutingPicker";
@@ -53,12 +54,18 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
   const [copiedId, setCopiedId] = createSignal("");
   let copyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
   onCleanup(() => clearTimeout(copyFeedbackTimer));
-  const [chains, setChains] = createSignal<R.ModelChain[]>([]);
-  const [health, setHealth] = createSignal<R.AccountHealthSnapshot[]>([]);
-  const [catalog, setCatalog] = createSignal<R.RoutingCatalog>({
-    providers: [],
-  });
-  const [accounts, setAccounts] = createSignal<AIProvider[]>([]);
+  const [chains, setChains] = createSignal<R.ModelChain[]>(
+    isConnected() ? (cachePeekArray<R.ModelChain>("routing:chains") ?? []) : [],
+  );
+  const [health, setHealth] = createSignal<R.AccountHealthSnapshot[]>(
+    isConnected() ? (cachePeekArray<R.AccountHealthSnapshot>("routing:health") ?? []) : [],
+  );
+  const [catalog, setCatalog] = createSignal<R.RoutingCatalog>(
+    isConnected() ? (cachePeek<R.RoutingCatalog>("routing:catalog") ?? { providers: [] }) : { providers: [] },
+  );
+  const [accounts, setAccounts] = createSignal<AIProvider[]>(
+    isConnected() ? (cachePeekArray<AIProvider>("providers:list") ?? []) : [],
+  );
   const [errors, setErrors] = createSignal<Record<string, string>>({});
   const [updated, setUpdated] = createSignal<string>();
   const [loading, setLoading] = createSignal(false);
@@ -160,11 +167,11 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
       }
     };
     await Promise.all([
-      ...(full ? [read("Fallback Chains", () => R.listChains(force), setChains)] : []),
+      ...(full ? [read("Fallback Chains", () => R.listChains(force), v => { if (Array.isArray(v)) { cachePut("routing:chains", v); setChains(v); } })] : []),
       ...(tab() === "health" ? [
-        read("Provider Health", R.listHealth, setHealth),
+        read("Provider Health", R.listHealth, v => { if (Array.isArray(v)) { cachePut("routing:health", v); setHealth(v); } }),
         ...(full ? [
-          read("Accounts", listProviders, setAccounts),
+          read("Accounts", listProviders, v => { if (Array.isArray(v)) { cachePut("providers:list", v); setAccounts(v); } }),
           getGlobalSettings().then((s) => {
             if (epoch === generation && !googleCapDirty() && s.google_max_concurrency != null) {
               setGoogleCapDraft(String(s.google_max_concurrency));
@@ -199,10 +206,10 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
     queuedFullRefresh = false;
     queuedForceRefresh = false;
     queuedManualRefresh = false;
-    setChains([]);
-    setHealth([]);
-    setAccounts([]);
-    setCatalog({ providers: [] });
+    setChains(connected ? (cachePeekArray<R.ModelChain>("routing:chains") ?? []) : []);
+    setHealth(connected ? (cachePeekArray<R.AccountHealthSnapshot>("routing:health") ?? []) : []);
+    setAccounts(connected ? (cachePeekArray<AIProvider>("providers:list") ?? []) : []);
+    setCatalog(connected ? (cachePeek<R.RoutingCatalog>("routing:catalog") ?? { providers: [] }) : { providers: [] });
     setLeaveRequest(null);
     setDeleteTarget(null);
     setErrors({});
@@ -250,7 +257,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
       if (force) await R.refreshModelDiscovery();
       const [value, evidence] = await Promise.all([R.routingCatalog(force), R.modelDiscovery().catch(() => undefined)]);
       if (epoch === generation) setDiscovery(evidence);
-      if (epoch === generation) { setCatalog(value); clearError("Model catalog"); }
+      if (epoch === generation) { cachePut("routing:catalog", value); setCatalog(value); clearError("Model catalog"); }
     } catch (error) {
       if (epoch === generation) clearError("Model catalog", message(error));
     } finally { if (epoch === generation) setCatalogLoading(false); }

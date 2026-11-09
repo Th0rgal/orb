@@ -44,6 +44,7 @@ import {
   listProjectFiles,
   listProjectMissions,
   listProjects,
+  peekCachedProjects,
   updateProject,
   renameMission,
   archiveMission,
@@ -157,10 +158,15 @@ export function LiveProjectsSection(p: {
   onProjectMissions?: (slug: string, rows: Mission[]) => void;
   /** "+" on the section header: create a project (opens the picker flow). */
   onNewProject: (anchor: HTMLButtonElement) => void;
+  /** False while Settings hides the main sidebar so background sweeps pause without unmounting state. */
+  active?: () => boolean;
 }) {
+  const isSidebarActive = () => (p.active ? p.active() : true);
   const rowEffectiveStatus = (m: Mission) =>
     presentedStatus(m, missionActivity(m, [], { localRun: localRunActive(m.id) }));
-  const [projects, setProjects] = createSignal<ProjectSummary[]>([]);
+  const initialCachedProjects = isConnected() ? peekCachedProjects() : null;
+  const [projects, setProjects] = createSignal<ProjectSummary[]>(initialCachedProjects ?? []);
+  const [projectsLoading, setProjectsLoading] = createSignal<boolean>(isConnected() && initialCachedProjects === null);
   const [error, setError] = createSignal<string | null>(null);
   const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
   const [archiveMenu, setArchiveMenu] = createSignal<{ x: number; y: number; slug?: string } | null>(null);
@@ -837,10 +843,10 @@ export function LiveProjectsSection(p: {
   const warmed = new Set<string>();
   const warmupQueue: string[] = [];
   let warmupActive = 0;
-  const loadController = (slug: string, force = true) => {
+  const loadController = (slug: string, force = true, background = false) => {
     if (!isConnected()) return Promise.resolve();
     const version = connectionVersion();
-    return requests.read(`controller:${version}:${slug}`, () => getProjectController(slug, 3), force)
+    return requests.read(`controller:${version}:${slug}`, () => getProjectController(slug, 3, background ? "p2" : undefined), force)
       .then((view) => { if (currentConnection(version)) setControllers(slug, reconcile(view)); })
       .catch(swallow("projectFiles.loadController", { slug }));
   };
@@ -850,7 +856,7 @@ export function LiveProjectsSection(p: {
     else { setCronRetryable(slug, !(error instanceof ApiError) || error.status >= 500 || [408, 429].includes(error.status)); setCronErrors(slug, error instanceof Error ? error.message : String(error)); }
   };
   const cronLoads = new Map<string, Promise<void>>();
-  const loadCrons = (slug: string, force = false): Promise<void> => {
+  const loadCrons = (slug: string, force = false, background = false): Promise<void> => {
     if (!isConnected() || (cronUnsupported() && !force)) return Promise.resolve();
     const version = connectionVersion();
     const key = `${version}:${slug}`;
@@ -858,7 +864,7 @@ export function LiveProjectsSection(p: {
     if (pending) return pending;
     const request = (async () => {
       try {
-        const jobs = await requests.read(`crons:${version}:${slug}`, () => listProjectCrons(slug), force);
+        const jobs = await requests.read(`crons:${version}:${slug}`, () => listProjectCrons(slug, background ? "p2" : undefined), force);
         if (!currentConnection(version)) return;
         setCrons(slug, reconcile(jobs, {key: "id"})); setCronErrors(slug, null); setCronUnsupported(false);
       } catch (error) { if (currentConnection(version)) cronFailure(slug, error); }
@@ -880,7 +886,10 @@ export function LiveProjectsSection(p: {
     setCronInfo(null);
     requests.clear();
     cancelIntent(); setError(null);
-    setProjects([]); setMissions(reconcile({})); setDirs(reconcile({}));
+    const cachedOnSwitch = isConnected() ? peekCachedProjects() : null;
+    setProjects(cachedOnSwitch ?? []);
+    setProjectsLoading(isConnected() && cachedOnSwitch === null);
+    setMissions(reconcile({})); setDirs(reconcile({}));
     setControllers(reconcile({})); setCrons(reconcile({}));
     setDirErrors(reconcile({})); setCronErrors(reconcile({}));
     warmed.clear();
@@ -910,24 +919,34 @@ export function LiveProjectsSection(p: {
 
   let refreshGeneration = 0;
   const refresh = (force = false) => {
-    if (!isConnected()) return;
+    if (!isConnected()) {
+      setProjectsLoading(false);
+      return;
+    }
     const version = connectionVersion();
     const gen = ++refreshGeneration;
+    if (projects().length === 0) setProjectsLoading(true);
     listProjects(force)
       .then((list) => {
         if (!currentConnection(version) || gen !== refreshGeneration) return;
-        setProjects(list);
-        setError(null);
+        batch(() => {
+          setProjects(list);
+          setProjectsLoading(false);
+          setError(null);
+        });
         warmupProjects(list);
       })
       .catch((e) => {
         if (!currentConnection(version) || gen !== refreshGeneration) return;
         const msg = e instanceof Error ? e.message : String(e);
-        setError(
-          /^(404|405)\b/.test(msg)
-            ? "This backend build doesn't expose projects yet — update the core."
-            : msg,
-        );
+        batch(() => {
+          setProjectsLoading(false);
+          setError(
+            /^(404|405)\b/.test(msg)
+              ? "This backend build doesn't expose projects yet — update the core."
+              : msg,
+          );
+        });
       });
   };
   createEffect(on(projectsVersion, () => {
@@ -1049,16 +1068,19 @@ export function LiveProjectsSection(p: {
     };
     window.addEventListener("orb:cron-changed", onCronChanged);
     const onVisible = () => {
-      if (document.visibilityState === "visible") pumpWarmup();
+      if (document.visibilityState === "visible" && isSidebarActive()) pumpWarmup();
     };
     document.addEventListener("visibilitychange", onVisible);
+    createEffect(on(isSidebarActive, (active) => {
+      if (active) pumpWarmup();
+    }, { defer: true }));
     // Mission statuses under expanded projects already react immediately to
     // `activityMissions` (SSE + global poll); keep a calm, concurrency-bounded
     // fallback sweep so 7+ expanded projects never fire 35+ simultaneous HTTP/2
     // requests on a single tick.
     let projectSweepBusy = false;
     const stop = pollWhileVisible(async () => {
-      if (!isConnected() || projectSweepBusy) return;
+      if (!isConnected() || !isSidebarActive() || projectSweepBusy) return;
       projectSweepBusy = true;
       try {
         if (error()) refresh();
@@ -1092,11 +1114,11 @@ export function LiveProjectsSection(p: {
   });
 
   const newerThan = (a: Mission, b: Mission) => (Date.parse(a.updated_at || "") || 0) > (Date.parse(b.updated_at || "") || 0);
-  const loadMissions = (slug: string, opts?: { transcripts?: boolean; cached?: boolean }) => {
+  const loadMissions = (slug: string, opts?: { transcripts?: boolean; cached?: boolean; background?: boolean }) => {
     if (!isConnected()) return Promise.resolve();
     const version = connectionVersion();
     const revision = missionRevision;
-    return requests.read(`missions:${version}:${revision}:${slug}`, () => listProjectMissions(slug), !opts?.cached)
+    return requests.read(`missions:${version}:${revision}:${slug}`, () => listProjectMissions(slug, opts?.background ? { background: true } : undefined), !opts?.cached)
       .then((list) => {
         if (!currentConnection(version)) return;
         if (revision !== missionRevision) return;
@@ -1193,10 +1215,10 @@ export function LiveProjectsSection(p: {
   const warmupOne = async (slug: string) => {
     const isOpen = !!expanded[slug];
     await Promise.all([
-      loadMissions(slug, { transcripts: false, cached: true }),
+      loadMissions(slug, { transcripts: false, cached: true, background: !isOpen }),
       loadDir(slug, "", false, !isOpen),
-      loadController(slug, false),
-      loadCrons(slug),
+      loadController(slug, false, !isOpen),
+      loadCrons(slug, false, !isOpen),
     ]);
   };
   const pumpWarmup = () => {
@@ -2393,7 +2415,7 @@ export function LiveProjectsSection(p: {
     const editableTarget = (t: EventTarget | null) =>
       t instanceof Element && !!t.closest('input, textarea, [contenteditable="true"], [role="dialog"], dialog');
     const onCutOrCopy = (event: ClipboardEvent) => {
-      if (editableTarget(event.target)) return;
+      if (!isSidebarActive() || editableTarget(event.target)) return;
       if (!(window.getSelection()?.isCollapsed ?? true)) return;
       const copy = event.type === "copy";
       const entryId = event.target instanceof Element ? event.target.closest<HTMLElement>(".tree-entry")?.dataset.treeId : undefined;
@@ -2407,7 +2429,7 @@ export function LiveProjectsSection(p: {
       }
     };
     const onPasteEvent = (event: ClipboardEvent) => {
-      if (editableTarget(event.target)) return;
+      if (!isSidebarActive() || editableTarget(event.target)) return;
       const entryId = event.target instanceof Element ? event.target.closest<HTMLElement>(".tree-entry")?.dataset.treeId : undefined;
       let dest = entryId ? resolveTreeDestination(entryId) : null;
       if (!dest) {
@@ -2759,7 +2781,14 @@ export function LiveProjectsSection(p: {
         }}
       </For>
       <div ref={dropTree} onPointerDown={rowDrag.onPointerDown} onPointerMove={e => { pointerPos = { x: e.clientX, y: e.clientY }; }} onPointerLeave={() => { pointerPos = null; }} onDragOver={e=>{if(!Array.from(e.dataTransfer?.types??[]).includes('Files'))return;e.preventDefault();const target=dropAt(e.clientX,e.clientY);dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));target?.classList.add('drop-active');if(e.dataTransfer)e.dataTransfer.dropEffect=target?'copy':'none';}} onDragLeave={e=>{if(!dropTree?.contains(e.relatedTarget as globalThis.Node))dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));}} onDrop={e=>{e.preventDefault();e.stopPropagation();dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));const target=dropAt(e.clientX,e.clientY);if(target)void importFiles(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})),target);}} onKeyDown={moveKey}><SidebarTree nodes={tree()} label="Projects" selected={p.selected()} selectedIds={selectedRowIds()} render={renderRow} /></div>
-      <Show when={projects().length === 0 && !error()}>
+      <Show when={projectsLoading() && projects().length === 0 && !error()}>
+        <div class="sidebar-projects-skeleton" role="status" aria-label="Loading projects">
+          <div class="row note sidebar-skel-row"><span class="sk-bar sidebar-sk-bar w1" /></div>
+          <div class="row note sidebar-skel-row"><span class="sk-bar sidebar-sk-bar w2" /></div>
+          <div class="row note sidebar-skel-row"><span class="sk-bar sidebar-sk-bar w3" /></div>
+        </div>
+      </Show>
+      <Show when={!projectsLoading() && projects().length === 0 && !error()}>
         <div class="row note">No projects on the core backend.</div>
       </Show>
       <button class="section archive-section-toggle" aria-expanded={archivesOpen()} aria-controls="sidebar-archives" onClick={toggleArchives} onContextMenu={e => openArchiveMenu(e)}>

@@ -422,6 +422,7 @@ fun OrbProvidersSettingsPage(
     var expandedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var expandedCloudIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var isRefreshing by remember { mutableStateOf(false) }
+    var hasLoadedProviders by remember(cachedProviders) { mutableStateOf(cachedProviders.isNotEmpty()) }
     var editingProvider by remember { mutableStateOf<OrbRow?>(null) }
     var showAddKeyModal by remember { mutableStateOf(false) }
     var addKeyProviderType by remember { mutableStateOf("openai") }
@@ -501,13 +502,19 @@ fun OrbProvidersSettingsPage(
                 if (refreshTargets.isNotEmpty() || needsFollowupSnapshot) {
                     usageRefreshJob = scope.launch {
                         val refreshedIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+                        val probeSem = kotlinx.coroutines.sync.Semaphore(4)
                         val jobs = refreshTargets.map { target ->
                             launch {
                                 val id = target.id
                                 val query = if (forceUsage) "?force=true" else ""
-                                val detail = orbTry(OrbLog.Category.Network, "/api/ai/providers") {
-                                    core.fetchDict("/api/ai/providers/${core.encodeComponent(id)}/usage$query")
-                                }.getOrNull()
+                                probeSem.acquire()
+                                val detail = try {
+                                    orbTry(OrbLog.Category.Network, "/api/ai/providers") {
+                                        core.fetchDict("/api/ai/providers/${core.encodeComponent(id)}/usage$query")
+                                    }.getOrNull()
+                                } finally {
+                                    probeSem.release()
+                                }
                                 if (detail != null && detail.isNotEmpty()) {
                                     refreshedIds.add(id)
                                     usageEntries = usageEntries + (id to detail)
@@ -702,6 +709,7 @@ fun OrbProvidersSettingsPage(
             try {
                 loadProvidersAndUsage()
             } finally {
+                hasLoadedProviders = true
                 if (showInitialSpinner) isRefreshing = false
             }
             while (isActive) {
@@ -988,13 +996,32 @@ fun OrbProvidersSettingsPage(
                     )
                 }
 
-                if (providers.isEmpty() && !isRefreshing) {
+                if (providers.isEmpty() && (!hasLoadedProviders || (isRefreshing && errorBanner == null))) {
                     item {
-                        Text(
-                            text = "No providers configured.",
-                            color = OrbStyle.textMuted,
-                            fontSize = 14.sp
-                        )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(OrbStyle.surface)
+                                .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                        ) {
+                            repeat(3) { idx ->
+                                OrbSkeletonRow()
+                                if (idx < 2) {
+                                    HorizontalDivider(color = OrbStyle.border, thickness = 0.5.dp)
+                                }
+                            }
+                        }
+                    }
+                } else if (providers.isEmpty()) {
+                    if (errorBanner == null) {
+                        item {
+                            Text(
+                                text = "No providers configured.",
+                                color = OrbStyle.textMuted,
+                                fontSize = 14.sp
+                            )
+                        }
                     }
                 } else {
                     item {

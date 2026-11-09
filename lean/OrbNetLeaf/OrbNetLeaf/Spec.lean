@@ -834,4 +834,343 @@ theorem pty_window_rejects_zero_area (w : PtyWindowInput)
   unfold verifyPtyWindow at hf ⊢
   exact bit_gate_eq_zero hf
 
+/-! ## Spec Block 6: `PoolTeardownDrainSpec` (Multiplexed Connection Teardown Total-Drain & Replay Partition) -/
+
+/-- Outcome assigned to a multiplexed connection waiter when the session closes. -/
+inductive TeardownDisposition where
+  | retryUnprocessed
+  | terminalError
+  deriving Repr, DecidableEq
+
+/-- Observable stream waiter state at session teardown (`waiterId` + whether `HEADERS` reached the wire). -/
+structure InFlightWaiter where
+  waiterId    : Nat
+  headersSent : Bool
+  deriving Repr, DecidableEq
+
+/-- Deterministic waiter resolution classification used by `OrbNetLeaf.H2Pool` on session close:
+    untransmitted waiters (`headersSent = false`) safely retry on a fresh session (RFC 9113 §8.7),
+    whereas transmitted waiters (`headersSent = true`) fail closed without automatic replay. -/
+@[inline]
+def classifyTeardownWaiter (headersSent : Bool) : TeardownDisposition :=
+  if headersSent then .terminalError else .retryUnprocessed
+
+/-- Canonical total-drain over queued (`headersSent = false`) and active stream waiters. -/
+def drainTeardownWaiters
+    (queuedIds : List Nat) (active : List InFlightWaiter) : List (Nat × TeardownDisposition) :=
+  (queuedIds.map fun wid => (wid, TeardownDisposition.retryUnprocessed)) ++
+  (active.map fun w => (w.waiterId, classifyTeardownWaiter w.headersSent))
+
+/-- Plain observable contract for multiplexed pool teardown:
+    1. Total drain: every queued and active waiter ID is resolved in order (zero dropped promises).
+    2. Mutually exclusive replay safety: queued waiters resolve to `retryUnprocessed`, and active
+       waiters resolve to `retryUnprocessed` iff `headersSent = false` (`terminalError` iff `true`). -/
+def PoolTeardownDrainSpec
+    (drain : List Nat → List InFlightWaiter → List (Nat × TeardownDisposition)) : Prop :=
+  ∀ (queuedIds : List Nat) (active : List InFlightWaiter),
+    (drain queuedIds active).map Prod.fst = queuedIds ++ active.map InFlightWaiter.waiterId ∧
+    (∀ p ∈ drain queuedIds active,
+      (p.1 ∈ queuedIds ∧ p.2 = .retryUnprocessed) ∨
+      (∃ w ∈ active, w.waiterId = p.1 ∧
+        ((w.headersSent = false ∧ p.2 = .retryUnprocessed) ∨
+         (w.headersSent = true ∧ p.2 = .terminalError))))
+
+private theorem map_fst_queued (qs : List Nat) :
+    (qs.map fun wid => (wid, TeardownDisposition.retryUnprocessed)).map Prod.fst = qs := by
+  induction qs with
+  | nil => rfl
+  | cons q rest ih => simp [ih]
+
+private theorem map_fst_active (as : List InFlightWaiter) :
+    (as.map fun w => (w.waiterId, classifyTeardownWaiter w.headersSent)).map Prod.fst =
+      as.map InFlightWaiter.waiterId := by
+  induction as with
+  | nil => rfl
+  | cons a rest ih => simp [ih]
+
+theorem drainTeardownWaiters_spec : PoolTeardownDrainSpec drainTeardownWaiters := by
+  intro queuedIds active
+  refine ⟨?_, ?_⟩
+  · unfold drainTeardownWaiters
+    rw [List.map_append, map_fst_queued, map_fst_active]
+  · intro p hp
+    unfold drainTeardownWaiters at hp
+    rw [List.mem_append] at hp
+    rcases hp with hq | ha
+    · rw [List.mem_map] at hq
+      rcases hq with ⟨wid, hMem, rfl⟩
+      exact Or.inl ⟨hMem, rfl⟩
+    · rw [List.mem_map] at ha
+      rcases ha with ⟨w, hMem, rfl⟩
+      refine Or.inr ⟨w, hMem, rfl, ?_⟩
+      cases w.headersSent <;> simp [classifyTeardownWaiter]
+
+/-- Positive safety entailment: any implementation satisfying `PoolTeardownDrainSpec` resolves
+    every active in-flight stream waiter (zero unfulfilled promises left to drop/deadlock). -/
+theorem pool_teardown_no_stranded_waiter
+    (drain : List Nat → List InFlightWaiter → List (Nat × TeardownDisposition))
+    (hSpec : PoolTeardownDrainSpec drain)
+    (queuedIds : List Nat) (active : List InFlightWaiter) (w : InFlightWaiter)
+    (hw : w ∈ active) :
+    ∃ disp : TeardownDisposition, (w.waiterId, disp) ∈ drain queuedIds active := by
+  have hFst := (hSpec queuedIds active).1
+  have hInRhs : w.waiterId ∈ queuedIds ++ active.map InFlightWaiter.waiterId := by
+    rw [List.mem_append]
+    exact Or.inr (List.mem_map.mpr ⟨w, hw, rfl⟩)
+  rw [← hFst, List.mem_map] at hInRhs
+  rcases hInRhs with ⟨⟨wid, disp⟩, hMem, hEq⟩
+  dsimp at hEq
+  subst hEq
+  exact ⟨disp, hMem⟩
+
+/-- Two-sided refutation (`H2Pool` `try ... finally` `let mut streams := #[]` regression):
+    any teardown routine that drains `queuedIds` while reading the pre-`try` empty `[]` instead of
+    live `active` strands in-flight stream waiters and violates `PoolTeardownDrainSpec`. -/
+theorem preTryEmptyActiveRegression_not_spec :
+    ¬ PoolTeardownDrainSpec (fun queuedIds _active => drainTeardownWaiters queuedIds []) := by
+  intro hSpec
+  rcases pool_teardown_no_stranded_waiter
+      (fun queuedIds _active => drainTeardownWaiters queuedIds [])
+      hSpec [1] [{ waiterId := 3, headersSent := true }]
+      { waiterId := 3, headersSent := true } (by simp) with ⟨disp, hYes⟩
+  simp [drainTeardownWaiters] at hYes
+
+/-! ## Spec Block 7: `H2ClientStreamOrderSpec` (RFC 9113 §5.1.1 Priority-Ordered Client Stream IDs) -/
+
+/-- Queued outbound HTTP/2 request awaiting wire `HEADERS` scheduling (`priority`: `0 = P0`, `1 = P1`, `2 = P2`). -/
+structure QueuedStreamReq where
+  reqId    : Nat
+  priority : Nat
+  deriving Repr, DecidableEq
+
+/-- Observable outbound HTTP/2 `HEADERS` frame opening a client stream on the wire. -/
+structure EmittedHeadersFrame where
+  reqId    : Nat
+  priority : Nat
+  streamId : Nat
+  deriving Repr, DecidableEq
+
+/-- Stable priority insertion (`0 < 1 < 2`, FIFO within equal priority). -/
+def insertQueuedByPriority (item : QueuedStreamReq) : List QueuedStreamReq → List QueuedStreamReq
+  | [] => [item]
+  | head :: tail =>
+    if item.priority < head.priority then item :: head :: tail
+    else head :: insertQueuedByPriority item tail
+
+/-- Order a batch of queued requests by priority while preserving FIFO order within each class. -/
+def orderQueuedByPriority (reqs : List QueuedStreamReq) : List QueuedStreamReq :=
+  reqs.foldl (fun acc r => insertQueuedByPriority r acc) []
+
+/-- Allocate odd client stream identifiers (`nextSid, nextSid + 2, ...`) at wire `HEADERS` emission time. -/
+def assignWireStreamIds (nextSid : Nat) : List QueuedStreamReq → List EmittedHeadersFrame
+  | [] => []
+  | r :: rest =>
+    { reqId := r.reqId, priority := r.priority, streamId := nextSid } ::
+      assignWireStreamIds (nextSid + 2) rest
+
+/-- Canonical outbound HTTP/2 batch scheduler: order by priority first, then allocate wire `streamId`s. -/
+def scheduleH2ClientBatch (firstSid : Nat) (reqs : List QueuedStreamReq) : List EmittedHeadersFrame :=
+  assignWireStreamIds firstSid (orderQueuedByPriority reqs)
+
+/-- Plain observable RFC 9113 §5.1.1 + priority-scheduling contract for client-initiated streams:
+    1. Odd lower-bounded client IDs: every emitted `streamId` satisfies `sid % 2 = 1` and `firstSid ≤ sid`.
+    2. Strict wire monotonicity (RFC 9113 §5.1.1): emitted `streamId`s satisfy `List.Pairwise (· < ·)`.
+    3. Priority order: emitted frames satisfy `List.Pairwise (fun a b => a.priority ≤ b.priority)`.
+    4. Request conservation: frame count equals `reqs.length` and every queued `(reqId, priority)` is emitted. -/
+def H2ClientStreamOrderSpec
+    (schedule : Nat → List QueuedStreamReq → List EmittedHeadersFrame) : Prop :=
+  ∀ (firstSid : Nat) (reqs : List QueuedStreamReq),
+    firstSid % 2 = 1 →
+    let wire := schedule firstSid reqs
+    (∀ f ∈ wire, f.streamId % 2 = 1 ∧ firstSid ≤ f.streamId) ∧
+    List.Pairwise (· < ·) (wire.map EmittedHeadersFrame.streamId) ∧
+    List.Pairwise (fun a b => a.priority ≤ b.priority) wire ∧
+    wire.length = reqs.length ∧
+    (∀ r ∈ reqs, ∃ f ∈ wire, f.reqId = r.reqId ∧ f.priority = r.priority)
+
+private theorem length_insertQueuedByPriority (item : QueuedStreamReq) (xs : List QueuedStreamReq) :
+    (insertQueuedByPriority item xs).length = xs.length + 1 := by
+  induction xs with
+  | nil => rfl
+  | cons h t ih =>
+    unfold insertQueuedByPriority
+    split <;> simp [ih]
+
+private theorem mem_insertQueuedByPriority (x item : QueuedStreamReq) (xs : List QueuedStreamReq) :
+    x ∈ insertQueuedByPriority item xs ↔ x = item ∨ x ∈ xs := by
+  induction xs with
+  | nil => simp [insertQueuedByPriority]
+  | cons h t ih =>
+    unfold insertQueuedByPriority
+    split
+    · simp
+    · simp [ih, or_left_comm]
+
+private theorem pairwise_insertQueuedByPriority (item : QueuedStreamReq) (xs : List QueuedStreamReq)
+    (hSorted : List.Pairwise (fun a b => a.priority ≤ b.priority) xs) :
+    List.Pairwise (fun a b => a.priority ≤ b.priority) (insertQueuedByPriority item xs) := by
+  induction xs with
+  | nil => simp [insertQueuedByPriority]
+  | cons h t ih =>
+    rcases List.pairwise_cons.mp hSorted with ⟨hHead, hTail⟩
+    unfold insertQueuedByPriority
+    split
+    · next hLt =>
+      refine List.pairwise_cons.mpr ⟨?_, hSorted⟩
+      intro y hy
+      rcases List.mem_cons.mp hy with rfl | hInT
+      · omega
+      · have hle := hHead y hInT
+        omega
+    · next hNotLt =>
+      refine List.pairwise_cons.mpr ⟨?_, ih hTail⟩
+      intro y hy
+      rcases (mem_insertQueuedByPriority y item t).mp hy with rfl | hInT
+      · omega
+      · exact hHead y hInT
+
+private theorem foldl_insertQueued_invariants
+    (acc reqs : List QueuedStreamReq)
+    (hAccSorted : List.Pairwise (fun a b => a.priority ≤ b.priority) acc) :
+    let out := reqs.foldl (fun a r => insertQueuedByPriority r a) acc
+    List.Pairwise (fun a b => a.priority ≤ b.priority) out ∧
+    out.length = acc.length + reqs.length ∧
+    (∀ x, x ∈ out ↔ x ∈ acc ∨ x ∈ reqs) := by
+  induction reqs generalizing acc with
+  | nil =>
+    refine ⟨hAccSorted, by simp, ?_⟩
+    intro x
+    simp
+  | cons r rs ih =>
+    have hNextSorted := pairwise_insertQueuedByPriority r acc hAccSorted
+    rcases ih (insertQueuedByPriority r acc) hNextSorted with ⟨hOutSorted, hOutLen, hOutMem⟩
+    refine ⟨hOutSorted, ?_, ?_⟩
+    · rw [List.foldl_cons, hOutLen, length_insertQueuedByPriority]
+      simp only [List.length_cons]
+      omega
+    · intro x
+      rw [List.foldl_cons, hOutMem, mem_insertQueuedByPriority]
+      simp only [List.mem_cons]
+      constructor
+      · intro h
+        rcases h with (rfl | hAcc) | hRs
+        · exact Or.inr (Or.inl rfl)
+        · exact Or.inl hAcc
+        · exact Or.inr (Or.inr hRs)
+      · intro h
+        rcases h with hAcc | rfl | hRs
+        · exact Or.inl (Or.inr hAcc)
+        · exact Or.inl (Or.inl rfl)
+        · exact Or.inr hRs
+
+private theorem assignWireStreamIds_odd_and_ge
+    (nextSid : Nat) (xs : List QueuedStreamReq) (hOdd : nextSid % 2 = 1) :
+    ∀ f ∈ assignWireStreamIds nextSid xs, f.streamId % 2 = 1 ∧ nextSid ≤ f.streamId := by
+  induction xs generalizing nextSid with
+  | nil =>
+    intro f hf
+    cases hf
+  | cons r rest ih =>
+    intro f hf
+    rcases List.mem_cons.mp hf with rfl | hInRest
+    · exact ⟨hOdd, Nat.le_refl _⟩
+    · have hNextOdd : (nextSid + 2) % 2 = 1 := by omega
+      rcases ih (nextSid + 2) hNextOdd f hInRest with ⟨hfOdd, hfGe⟩
+      exact ⟨hfOdd, by omega⟩
+
+private theorem assignWireStreamIds_strictly_increasing
+    (nextSid : Nat) (xs : List QueuedStreamReq) (hOdd : nextSid % 2 = 1) :
+    List.Pairwise (· < ·) ((assignWireStreamIds nextSid xs).map EmittedHeadersFrame.streamId) := by
+  induction xs generalizing nextSid with
+  | nil => simp [assignWireStreamIds]
+  | cons r rest ih =>
+    have hNextOdd : (nextSid + 2) % 2 = 1 := by omega
+    simp only [assignWireStreamIds, List.map_cons]
+    refine List.pairwise_cons.mpr ⟨?_, ih (nextSid + 2) hNextOdd⟩
+    intro sid hSid
+    rw [List.mem_map] at hSid
+    rcases hSid with ⟨f, hfMem, rfl⟩
+    have hGe := (assignWireStreamIds_odd_and_ge (nextSid + 2) rest hNextOdd f hfMem).2
+    omega
+
+private theorem assignWireStreamIds_preserves_priority
+    (nextSid : Nat) (xs : List QueuedStreamReq)
+    (hSorted : List.Pairwise (fun a b => a.priority ≤ b.priority) xs) :
+    List.Pairwise (fun a b => a.priority ≤ b.priority) (assignWireStreamIds nextSid xs) := by
+  induction xs generalizing nextSid with
+  | nil => simp [assignWireStreamIds]
+  | cons r rest ih =>
+    rcases List.pairwise_cons.mp hSorted with ⟨hHead, hTail⟩
+    simp only [assignWireStreamIds]
+    refine List.pairwise_cons.mpr ⟨?_, ih (nextSid + 2) hTail⟩
+    intro f hf
+    have hExists : ∃ q ∈ rest, f.priority = q.priority := by
+      clear ih hSorted hHead hTail r
+      induction rest generalizing nextSid with
+      | nil => cases hf
+      | cons q qs ihMem =>
+        rcases List.mem_cons.mp hf with rfl | hInQs
+        · exact ⟨q, List.mem_cons_self, rfl⟩
+        · rcases ihMem (nextSid + 2) hInQs with ⟨q', hqMem, hEq⟩
+          exact ⟨q', List.mem_cons_of_mem _ hqMem, hEq⟩
+    rcases hExists with ⟨q, hqMem, hPrioEq⟩
+    rw [hPrioEq]
+    exact hHead q hqMem
+
+private theorem assignWireStreamIds_length (nextSid : Nat) (xs : List QueuedStreamReq) :
+    (assignWireStreamIds nextSid xs).length = xs.length := by
+  induction xs generalizing nextSid with
+  | nil => rfl
+  | cons _ rest ih => simp [assignWireStreamIds, ih]
+
+private theorem assignWireStreamIds_mem_of_mem
+    (nextSid : Nat) (xs : List QueuedStreamReq) (r : QueuedStreamReq) (hr : r ∈ xs) :
+    ∃ f ∈ assignWireStreamIds nextSid xs, f.reqId = r.reqId ∧ f.priority = r.priority := by
+  induction xs generalizing nextSid with
+  | nil => cases hr
+  | cons q qs ih =>
+    rcases List.mem_cons.mp hr with rfl | hInQs
+    · exact ⟨{ reqId := r.reqId, priority := r.priority, streamId := nextSid },
+        List.mem_cons_self, rfl, rfl⟩
+    · rcases ih (nextSid + 2) hInQs with ⟨f, hfMem, hId, hPr⟩
+      exact ⟨f, List.mem_cons_of_mem _ hfMem, hId, hPr⟩
+
+theorem scheduleH2ClientBatch_spec : H2ClientStreamOrderSpec scheduleH2ClientBatch := by
+  intro firstSid reqs hOdd
+  dsimp
+  unfold scheduleH2ClientBatch orderQueuedByPriority
+  rcases foldl_insertQueued_invariants [] reqs List.Pairwise.nil with ⟨hSorted, hLen, hMem⟩
+  dsimp at hSorted hLen hMem
+  refine ⟨assignWireStreamIds_odd_and_ge firstSid _ hOdd,
+    assignWireStreamIds_strictly_increasing firstSid _ hOdd,
+    assignWireStreamIds_preserves_priority firstSid _ hSorted,
+    ?_, ?_⟩
+  · rw [assignWireStreamIds_length, hLen]
+    omega
+  · intro r hr
+    have hrOrd : r ∈ reqs.foldl (fun acc x => insertQueuedByPriority x acc) [] :=
+      (hMem r).mpr (Or.inr hr)
+    exact assignWireStreamIds_mem_of_mem firstSid _ r hrOrd
+
+/-- Pre-sort stream-ID allocation bug (`H2Pool` regression): assigning `nextStreamId` in FIFO
+    arrival order *before* priority insertion emits higher stream IDs before lower ones whenever a
+    `P0` request arrives behind a `P2` request, triggering peer `GOAWAY(PROTOCOL_ERROR)` (RFC 9113 §5.1.1). -/
+def insertEmittedByPriority (item : EmittedHeadersFrame) : List EmittedHeadersFrame → List EmittedHeadersFrame
+  | [] => [item]
+  | head :: tail =>
+    if item.priority < head.priority then item :: head :: tail
+    else head :: insertEmittedByPriority item tail
+
+def assignThenReorderBuggy (firstSid : Nat) (reqs : List QueuedStreamReq) : List EmittedHeadersFrame :=
+  (assignWireStreamIds firstSid reqs).foldl (fun acc f => insertEmittedByPriority f acc) []
+
+theorem assignThenReorderBuggy_not_spec : ¬ H2ClientStreamOrderSpec assignThenReorderBuggy := by
+  intro hSpec
+  have hInst := hSpec 1 [{ reqId := 10, priority := 2 }, { reqId := 20, priority := 0 }] (by decide)
+  dsimp [assignThenReorderBuggy, assignWireStreamIds, insertEmittedByPriority] at hInst
+  rcases hInst with ⟨_, hMono, _, _, _⟩
+  rcases List.pairwise_cons.mp hMono with ⟨hHeadLt, _⟩
+  have hBad : 3 < 1 := hHeadLt 1 (by simp)
+  omega
+
 end OrbNetLeaf.Spec

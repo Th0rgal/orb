@@ -1364,6 +1364,7 @@ struct OrbHome: View {
     }
     private func load() async {
         let scope = api.endpoint + (api.authToken ?? "")
+        if projects.isEmpty { loading = true }
         defer { loading = false }
         let needCachedProjects = projects.isEmpty
         async let cachedProjectsTask: OrbJSON? = needCachedProjects ? OrbDisk.readAsync("projects", as: OrbJSON.self) : nil
@@ -1422,6 +1423,10 @@ struct OrbHome: View {
                 _ = await catalogWarm
                 for t in projectTasks { await t.value }
             }
+        } catch is CancellationError {
+            return
+        } catch let urlError as URLError where urlError.code == .cancelled {
+            return
         } catch {
             self.error = error.localizedDescription
             await reportConnectionIssue(error)
@@ -2061,7 +2066,11 @@ struct OrbProjectPage: View {
             self.error = "The agent is still stopping. Try archiving again in a moment."
             invalidate(row)
             await load(force: true)
-        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+        } catch is CancellationError {
+            return
+        } catch let urlError as URLError where urlError.code == .cancelled {
+            return
+        } catch { self.error = error.localizedDescription }
     }
     private func drop(into folder: String) async {
         do {
@@ -2101,7 +2110,11 @@ struct OrbProjectPage: View {
             if includeArchived { loadedArchived = true }
             apply(value); loading = false; error = ""
             await OrbReadCache.prefetch(nestedRoots.map(\.mission))
-        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+        } catch is CancellationError {
+            return
+        } catch let urlError as URLError where urlError.code == .cancelled {
+            return
+        } catch { self.error = error.localizedDescription }
     }
     private func mkdir() async {
         let trimmed = folderName.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))

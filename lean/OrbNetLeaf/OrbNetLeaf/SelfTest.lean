@@ -111,7 +111,10 @@ def main : IO Unit := do
   try IO.FS.removeFile tmpPath catch _ => pure ()
   assertTrue "createExclFile0600 creates new owner-only file" (← createExclFile0600 tmpPath).isOk
   assertTrue "createExclFile0600 rejects existing path (O_EXCL)" (← createExclFile0600 tmpPath).isOk.not
-  let stOut ← IO.Process.output { cmd := "stat", args := #["-c", "%a", tmpPath.toString] }
+  let statArgs :=
+    if System.Platform.isOSX then #["-f", "%Lp", tmpPath.toString]
+    else #["-c", "%a", tmpPath.toString]
+  let stOut ← IO.Process.output { cmd := "stat", args := statArgs }
   try IO.FS.removeFile tmpPath catch _ => pure ()
   assertTrue "createExclFile0600 sets mode 600" (stOut.stdout.trimAscii.toString == "600")
 
@@ -576,5 +579,8 @@ def main : IO Unit := do
   let tPool1 ← IO.monoMsNow
   assertTrue "H2ClientPool coalesces concurrent cold connects and fails fast without 65s H1 fallback stall"
     (allFailedCleanly && (tPool1 - tPool0) < 3000)
+
+  assertTrue "H2ClientPool worker teardown drains active & queued streams without promise deadlock"
+    (← H2ClientPool.testTeardownDrainsActiveAndQueuedWaiters)
 
   IO.println "[OrbNetLeaf] ALL SELF-TESTS PASSED"

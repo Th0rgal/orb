@@ -91,3 +91,74 @@ test("Inference links to usage history, which opens the Models › Usage tab", a
   await expect(title(page)).toHaveText("Models");
   await expect(page.locator('[data-settings-section="models"]')).toHaveAttribute("aria-current", "page");
 });
+
+test("opening and leaving Settings preserves loaded sidebar projects and expanded state without reloading", async ({ page }) => {
+  let projectsCalls = 0;
+  let projectMissionsCalls = 0;
+  await page.addInitScript(() => {
+    localStorage.setItem("orb.apiUrl", location.origin);
+    localStorage.setItem("orb.jwt", "test");
+  });
+  await page.route("**/api/**", (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (path === "/api/projects") {
+      projectsCalls += 1;
+      return route.fulfill({
+        json: {
+          projects: [
+            { slug: "omarchnix", title: "Omarchnix", status: "active", updated_at: "2026-11-09T15:00:00Z" },
+          ],
+        },
+      });
+    }
+    if (path === "/api/control/missions" && url.searchParams.get("project") === "omarchnix") {
+      projectMissionsCalls += 1;
+      return route.fulfill({
+        json: [
+          {
+            id: "m-omarch-1",
+            title: "Please fix the repo commit push and merge",
+            project: "omarchnix",
+            status: "paused",
+            created_at: "2026-11-09T15:00:00Z",
+            updated_at: "2026-11-09T15:05:00Z",
+          },
+        ],
+      });
+    }
+    const json =
+      path === "/api/privilege-access" ? privilegeSnapshot(0)
+      : path === "/api/ai/providers" ? []
+      : path === "/api/ai/providers/usage" ? { entries: {} }
+      : path === "/api/control/missions" ? []
+      : { job: null, runs: [] };
+    return route.fulfill({ json });
+  });
+
+  await page.goto("/");
+  const projectBtn = page.locator('[data-project-navigation]').getByRole("button", { name: "Omarchnix", exact: true });
+  await expect(projectBtn).toBeVisible();
+  await projectBtn.click();
+  await expect(page.locator('[data-project-navigation]').getByText("Please fix the repo commit push and merge")).toBeVisible();
+
+  const projectsCallsBeforeSettings = projectsCalls;
+  const missionsCallsBeforeSettings = projectMissionsCalls;
+
+  // Open Settings, switch tabs, and return via Back:
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(title(page)).toHaveText("Account");
+  await expect(projectBtn).toBeHidden();
+
+  await page.locator('[data-settings-section="models"]').click();
+  await expect(title(page)).toHaveText("Models");
+
+  await page.locator("button.settings-back").click();
+
+  // Sidebar project and its expanded conversation remain immediately visible with zero reload or empty-state flash:
+  await expect(projectBtn).toBeVisible();
+  await expect(page.locator('[data-project-navigation]').getByText("Please fix the repo commit push and merge")).toBeVisible();
+  await expect(page.locator(".sb-scroll")).not.toContainText("No projects on the core backend.");
+  expect(projectsCalls).toBe(projectsCallsBeforeSettings);
+  expect(projectMissionsCalls).toBe(missionsCallsBeforeSettings);
+});

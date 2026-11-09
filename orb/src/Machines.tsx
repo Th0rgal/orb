@@ -22,6 +22,7 @@ import {
 } from "./machines/nodes";
 import { For, Show, createSignal, createMemo, createEffect, untrack, onCleanup, onMount } from "solid-js";
 import { pollWhileVisible } from "./poll";
+import { cachePeek, cachePeekArray, cachePut } from "./pageCache";
 import * as Ic from "./icons";
 import { readPalomaPub } from "./pubKey";
 import { recordFleet } from "./machineLoad";
@@ -199,29 +200,45 @@ export function Machines() {
 function MachinesPage() {
   const cacheScope = historyScope();
   const [history, setHistory] = createSignal<ResourceSample[]>(readHistory("core", cacheScope));
-  const [core, setCore] = createSignal<Metrics>();
+  const [core, setCore] = createSignal<Metrics | undefined>(cachePeek<Metrics>("machines:core"));
   const [live, setLive] = createSignal(false);
-  const [pub, setPub] = createSignal("");
+  const [pub, setPub] = createSignal(cachePeek<string>("machines:paloma-pub") ?? "");
   const [copied, setCopied] = createSignal(false);
-  const [nodes, setNodes] = createSignal<RemoteNodeView[] | null>(null);
+  const [nodes, setNodes] = createSignal<RemoteNodeView[] | null>(
+    isConnected() ? (cachePeekArray<RemoteNodeView>("machines:nodes") ?? null) : null,
+  );
   const [fleetGroupOpen, setFleetGroupOpen] = createSignal<Readonly<Record<string, boolean>>>({});
   const managedFleetGroups = createMemo(() => groupManagedNodesByProvider(nodes() ?? []));
   const destroyedNodes = new Set<string>();
-  const dropNodes = (ids: string[]) => { ids.forEach(id => destroyedNodes.add(id)); setNodes(ns => ns && ns.filter(n => !destroyedNodes.has(n.id))); void refresh(); };
+  const dropNodes = (ids: string[]) => {
+    ids.forEach(id => destroyedNodes.add(id));
+    setNodes(ns => {
+      if (!ns) return ns;
+      const next = ns.filter(n => !destroyedNodes.has(n.id));
+      cachePut("machines:nodes", next);
+      return next;
+    });
+    void refresh();
+  };
   const mergeUpdatedNode = (updated: RemoteNodeView) => {
     setNodes(ns => {
       if (!ns) return ns;
       const next = ns.map(n => (n.id === updated.id ? { ...n, ...updated } : n));
+      cachePut("machines:nodes", next);
       recordFleet(next);
       return next;
     });
   };
 
   const refresh = async () => {
+    const version = connectionVersion();
     try {
       const r = await getRemoteNodes();
+      if (version !== connectionVersion()) return;
       // A destroyed managed machine keeps heartbeating "online" until it times out.
-      setNodes(r.nodes.filter(n => !destroyedNodes.has(n.id)));
+      const filtered = r.nodes.filter(n => !destroyedNodes.has(n.id));
+      cachePut("machines:nodes", filtered);
+      setNodes(filtered);
       recordFleet(r.nodes);
     } catch {
       /* keep last good snapshot */
@@ -229,7 +246,10 @@ function MachinesPage() {
   };
 
   onMount(() => {
-    void readPalomaPub().then(setPub);
+    void readPalomaPub().then(k => {
+      if (k) cachePut("machines:paloma-pub", k);
+      setPub(k);
+    });
     if (isConnected()) void refresh();
     onCleanup(pollWhileVisible(() => (isConnected() ? refresh() : undefined), 15000));
   });
@@ -248,7 +268,7 @@ function MachinesPage() {
         try {
           const data = JSON.parse(event.data);
           const sample = data.type === "history" ? data.history?.at(-1) : data;
-          if (sample && Number.isFinite(sample.cpu_percent) && Number.isFinite(sample.timestamp_ms)) { setCore(sample); setLive(true);
+          if (sample && Number.isFinite(sample.cpu_percent) && Number.isFinite(sample.timestamp_ms)) { cachePut("machines:core", sample); setCore(sample); setLive(true);
             const samples: Metrics[] = data.type === "history" ? data.history : [sample];
             setHistory(old => freshSamples(appendSamples(old, samples.map(s => ({ time: s.timestamp_ms, cpu: s.cpu_percent, memory: s.memory_total > 0 ? s.memory_used / s.memory_total * 100 : null })))));
             saveHistory("core", history(), false, cacheScope); }

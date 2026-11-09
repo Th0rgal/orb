@@ -110,7 +110,14 @@ export function createUsageTelemetry(o: { transport: Transport; client?: string;
 }
 
 export const usageTelemetry = createUsageTelemetry({
-  transport: async events => { await api("/api/usage-telemetry/events", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ events }) }); },
+  transport: async events => {
+    await api(
+      "/api/usage-telemetry/events",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ events }) },
+      undefined,
+      "p2",
+    );
+  },
 });
 
 export const getUsageTelemetryStatus = () => api<UsageTelemetryStatus>("/api/usage-telemetry");

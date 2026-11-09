@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js";
 import "./usage.css";
 import { connectionVersion, isConnected } from "./api";
+import { cachePeek, cachePut } from "./pageCache";
 import { ErrorToast } from "./toast";
 import { Select } from "./Select";
 import {
@@ -63,17 +64,22 @@ function Tile(p: { label: string; value: string; title?: string }) {
 /** Router reliability: success, first token and failures per provider·model·account, ranked by impact. */
 export function ReliabilitySection() {
   const [window, setWindow] = createSignal("24h");
-  const [health, setHealth] = createSignal<ProxyHealth | null>(null);
+  const [health, setHealth] = createSignal<ProxyHealth | null>(
+    isConnected() ? (cachePeek<ProxyHealth>("usage:proxy-health:24h") ?? null) : null,
+  );
   const [error, setError] = createSignal("");
   let request = 0;
   async function load() {
     const id = ++request;
+    const w = window();
     if (!isConnected()) { setHealth(null); return; }
+    const cached = cachePeek<ProxyHealth>(`usage:proxy-health:${w}`);
+    if (cached !== undefined) setHealth(cached);
     try {
-      const next = await getProxyHealth(window());
-      if (id === request) { setHealth(next); setError(""); }
+      const next = await getProxyHealth(w);
+      if (id === request) { cachePut(`usage:proxy-health:${w}`, next); setHealth(next); setError(""); }
     } catch (e) {
-      if (id === request) { setHealth(null); setError(e instanceof Error ? e.message : String(e)); }
+      if (id === request) { if (!cached) setHealth(null); setError(e instanceof Error ? e.message : String(e)); }
     }
   }
   createEffect(on([connectionVersion, window], () => void load()));
@@ -100,24 +106,37 @@ export function UsageSettings() {
   const [allSpenders, setAllSpenders] = createSignal(false);
   const [metric, setMetric] = createSignal<Metric>("cost");
   const [granularity, setGranularity] = createSignal<Granularity>("hour");
-  const [summary, setSummary] = createSignal<UsageSummary | null>(null);
-  const [options, setOptions] = createSignal<UsageSummary | null>(null);
+  const [summary, setSummary] = createSignal<UsageSummary | null>(
+    isConnected() ? (cachePeek<UsageSummary>("usage:summary:24h:{}") ?? null) : null,
+  );
+  const [options, setOptions] = createSignal<UsageSummary | null>(
+    isConnected() ? (cachePeek<UsageSummary>("usage:options:24h") ?? null) : null,
+  );
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal("");
   let request = 0;
 
   async function load() {
     const id = ++request;
+    const w = window();
+    const f = filters();
+    const summaryKey = `usage:summary:${w}:${JSON.stringify(f)}`;
+    const optionsKey = `usage:options:${w}`;
     if (!isConnected()) { setSummary(null); return; }
+    const cachedSummary = cachePeek<UsageSummary>(summaryKey);
+    const cachedOptions = cachePeek<UsageSummary>(optionsKey);
+    if (cachedSummary !== undefined) setSummary(cachedSummary);
+    if (cachedOptions !== undefined) setOptions(cachedOptions);
     setLoading(true); setError("");
     try {
-      const f = filters();
       const [next, unfiltered] = await Promise.all([
-        getUsageSummary(window(), f),
+        getUsageSummary(w, f),
         // Filter choices come from the whole window so a filter never hides its own alternatives.
-        Object.values(f).some(Boolean) ? getUsageSummary(window()) : Promise.resolve(null),
+        Object.values(f).some(Boolean) ? getUsageSummary(w) : Promise.resolve(null),
       ]);
       if (id !== request) return;
+      cachePut(summaryKey, next);
+      cachePut(optionsKey, unfiltered ?? next);
       setSummary(next); setOptions(unfiltered ?? next);
     } catch (e) {
       if (id === request) setError(e instanceof Error ? e.message : String(e));

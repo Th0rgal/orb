@@ -156,16 +156,19 @@ object OrbApprovalKey {
                 ContextCompat.getMainExecutor(activity),
                 object : BiometricPrompt.AuthenticationCallback() {
                     override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                        if (!cont.isActive) return
                         try {
                             val s = result.cryptoObject?.signature ?: error("No signature object")
                             s.update(payload.toByteArray(Charsets.UTF_8))
-                            cont.resume(Base64.encodeToString(s.sign(), Base64.NO_WRAP))
+                            val sig = Base64.encodeToString(s.sign(), Base64.NO_WRAP)
+                            if (cont.isActive) cont.resume(sig)
                         } catch (e: Exception) {
-                            cont.resumeWithException(e)
+                            if (cont.isActive) cont.resumeWithException(e)
                         }
                     }
 
                     override fun onAuthenticationError(code: Int, message: CharSequence) {
+                        if (!cont.isActive) return
                         if (code == BiometricPrompt.ERROR_USER_CANCELED || code == BiometricPrompt.ERROR_NEGATIVE_BUTTON ||
                             code == BiometricPrompt.ERROR_CANCELED
                         ) {
@@ -176,6 +179,9 @@ object OrbApprovalKey {
                     }
                 }
             )
+            cont.invokeOnCancellation {
+                runCatching { prompt.cancelAuthentication() }
+            }
             val info = BiometricPrompt.PromptInfo.Builder()
                 .setTitle("Approve")
                 // Core writes the summary into the signed payload: show that, not caller text.

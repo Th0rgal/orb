@@ -1123,12 +1123,23 @@ def main : IO UInt32 := do
     classifyProxyRequestPriority "GET" "/api/health" none == 0 &&
     classifyProxyRequestPriority "GET" "/api/control/missions/m1/events" none == 1 &&
     classifyProxyRequestPriority "GET" "/api/software" none == 2 &&
+    classifyProxyRequestPriority "GET" "/api/providers/antigravity-models" none == 2 &&
     classifyProxyRequestPriority "POST" "/api/control/missions/m1/inbox-digest" none == 1 &&
     classifyProxyRequestPriority "POST" "/api/file-resources" none == 1 &&
     classifyProxyRequestPriority "POST" "/api/control/missions/m1/opened" none == 1 &&
     classifyProxyRequestPriority "GET" "/api/control/missions/m1/events" (some "p2") == 2 &&
-    classifyProxyRequestPriority "GET" "/api/software" (some "p0") == 0
+    classifyProxyRequestPriority "GET" "/api/software" (some "p0") == 0 &&
+    isComputeBoundProxyRequest "GET" "/api/providers/antigravity-models" &&
+    isComputeBoundProxyRequest "GET" "/api/software?force=false" &&
+    isComputeBoundProxyRequest "GET" "/api/ai/providers/claude/usage?force=true" &&
+    !isComputeBoundProxyRequest "GET" "/api/projects" &&
+    !isComputeBoundProxyRequest "GET" "/api/ai/providers"
   if (← assertTrue "proxy_request_priority_classification" prioOk) then passed := passed + 1
+
+  total := total + 1
+  if (← assertTrue "h2_pool_teardown_drains_active_and_queued_waiters"
+        (← OrbNetLeaf.H2Pool.H2ClientPool.testTeardownDrainsActiveAndQueuedWaiters)) then
+    passed := passed + 1
 
   let stRankRef ← IO.mkRef ({ launchToken := validTok } : LocaldState)
   let srtt1 ← recordOriginSuccess stRankRef "https://orbcore.thomas.md" 800

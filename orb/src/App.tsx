@@ -99,7 +99,7 @@ const Resources = lazy(() => import("./Resources"));
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { mdSource, toggleMdSource } from "./Markdown";
 import { applyPendingMoves } from "./missionMove";
-import { cacheRecents } from "./pageCache";
+import { cachePut, cacheRecents } from "./pageCache";
 import { effortLabel, normalizeEffort } from "./effort";
 import { loadTranscript, noteLiveMissionIds, peekReadyTranscript, prefetchTranscript, selectLivePrefetchIds, transcriptVersion } from "./missionCache";
 import { loadPersistedSidebar, savePersistedSidebar } from "./persistentCache";
@@ -132,6 +132,7 @@ import {
   listMissions,
   listProjectMissions,
   listProjects,
+  peekCachedProjects,
   readMissionSyncCursor,
   refreshCurrentUser,
   shortModelLabel,
@@ -231,7 +232,9 @@ export default function App() {
     setNewProjectDraft(false);
     window.dispatchEvent(new CustomEvent("orb:project-created", { detail: created }));
   };
-  const [rawLiveProjects, setLiveProjects] = createSignal<ProjectSummary[]>([]);
+  const [rawLiveProjects, setLiveProjects] = createSignal<ProjectSummary[]>(
+    isConnected() ? (peekCachedProjects() ?? []) : [],
+  );
   // Pending renames show in every view before the next project list arrives.
   const liveProjects = createMemo(() => withRenamedTitles("project", rawLiveProjects(), project => project.slug));
   const effectiveNewProject = createMemo(() => isConnected()
@@ -308,7 +311,14 @@ export default function App() {
     }
     import("./cloudAgentApi")
       .then((m) => m.cloudAccounts())
-      .then((rows) => setPalomaAvailable(rows.some((row) => row.provider === "hermes" && row.available)))
+      .then((rows) => {
+        if (!Array.isArray(rows)) {
+          setPalomaAvailable(false);
+          return;
+        }
+        cachePut("settings:cloud-accounts", rows);
+        setPalomaAvailable(rows.some((row) => row.provider === "hermes" && row.available));
+      })
       .catch(() => setPalomaAvailable(false));
   });
   const showAskPaloma = createMemo(
@@ -398,6 +408,7 @@ export default function App() {
   const [remoteLaunch, setRemoteLaunch] = createSignal<{ state: "loading" | "ready" | "error"; capability: RemoteLaunchCapability | null }>({ state: "loading", capability: null });
   const acceptFleet = (fleet: RemoteNodesResponse) => {
     setFleetNodes(fleet.nodes);
+    if (Array.isArray(fleet.nodes)) cachePut("machines:nodes", fleet.nodes);
     recordFleet(fleet.nodes);
     setRemoteLaunch({ state: "ready", capability: fleet.remote_launch ?? null });
   };
@@ -719,6 +730,10 @@ export default function App() {
   // effect, which re-polled the fleet — an endless fetch loop.
   createEffect(on(isConnected, (connected) => {
     if (connected) {
+      const syncCachedProjects = peekCachedProjects();
+      if (rawLiveProjects().length === 0 && syncCachedProjects && syncCachedProjects.length > 0) {
+        setLiveProjects(syncCachedProjects);
+      }
       const ver = connectionVersion();
       void loadPersistedSidebar<Mission, ProjectSummary>(historyScope()).then((cachedSidebar) => {
         if (!cachedSidebar || ver !== connectionVersion()) return;
@@ -805,6 +820,8 @@ export default function App() {
   };
 
 
+  let sbScrollEl: HTMLElement | undefined;
+  let savedSidebarScrollTop = 0;
   let navigationVersion = 0;
   const open = (id: string | null, push = true) => {
     if (id?.startsWith("m:") && isMissionDeleting(id.slice(2))) return false;
@@ -817,6 +834,11 @@ export default function App() {
     }
     if (id) id = settingsPageId(id);
     if (selected() === "routing" && id !== "routing" && !confirmLeaveRouting(() => open(id, push))) return false;
+    const wasOnSettings = onSettings();
+    const nextOnSettings = Boolean(settingsSectionFor(id));
+    if (!wasOnSettings && nextOnSettings && sbScrollEl) {
+      savedSidebarScrollTop = sbScrollEl.scrollTop;
+    }
     navigationVersion++;
     if (window.matchMedia("(max-width: 720px)").matches) setSidebar(false);
     batch(() => {
@@ -828,6 +850,15 @@ export default function App() {
         setHIdx(h.length - 1);
       }
     });
+    if (!wasOnSettings && nextOnSettings && sbScrollEl) {
+      sbScrollEl.scrollTop = 0;
+    } else if (wasOnSettings && !nextOnSettings && sbScrollEl) {
+      const restore = savedSidebarScrollTop;
+      sbScrollEl.scrollTop = restore;
+      queueMicrotask(() => {
+        if (sbScrollEl && !onSettings()) sbScrollEl.scrollTop = restore;
+      });
+    }
     if (id?.startsWith("m:")) {
       const mid = id.slice(2);
       const known = inboxMissions().find((m) => m.id === mid) ?? missions().find((m) => m.id === mid);
@@ -1317,64 +1348,64 @@ export default function App() {
       <button class="sidebar-backdrop" aria-label="Close sidebar" onClick={() => setSidebar(false)} tabIndex={-1} />
       <aside id="orb-sidebar" class="sidebar">
         <div class="sb-top" data-orb-drag-region />
-        <nav class="sb-scroll" onContextMenu={(e) => e.preventDefault()}>
-          <Show
-            when={onSettings()}
-            fallback={
-              <>
-                <button class={`row ${selected() === null ? "active" : ""}`} onClick={() => open(null)}>
-                  <span class="row-ico"><Ic.NewAgentIcon /></span>
-                  <span class="row-label">New Agent</span>
-                  <kbd>⌘N</kbd>
-                </button>
-                <Show when={inboxConfig().inboxEnabled}>
-                  <button class={`row ${selected() === "inbox" ? "active" : ""}`} title={selected() === "inbox" ? "Space to return to the Inbox list" : undefined} onClick={() => open("inbox")}>
-                    <span class="row-ico"><Ic.InboxIcon /></span>
-                    <span class="row-label">Inbox</span>
-                    <Show when={inboxCount() > 0}><span class="inbox-sb-badge" aria-label={`${inboxCount()} need attention`}>{inboxCount()}</span></Show>
-                    <kbd aria-hidden="true">{shortcutLabel("inbox")}</kbd>
-                  </button>
-                </Show>
-                <button class={`row ${selected() === "cloud-agent" ? "active" : ""}`} onClick={() => open("cloud-agent")}>
-                  <span class="row-ico"><Ic.CloudIcon /></span><span class="row-label">Cloud agent</span><kbd aria-hidden="true">{shortcutLabel("cloud-agent")}</kbd>
-                </button>
-                <button class={`row ${selected() === "machines" ? "active" : ""}`} onClick={() => open("machines")}>
-                  <span class="row-ico"><Ic.MachinesIcon /></span>
-                  <span class="row-label">Machines</span><kbd aria-hidden="true">{shortcutLabel("machines")}</kbd>
-                </button>
-                <button class={`row ${selected() === "providers" ? "active" : ""}`} onClick={() => open("providers")}>
-                  <span class="row-ico"><Ic.CubeIcon /></span>
-                  <span class="row-label">Inference</span><kbd aria-hidden="true">{shortcutLabel("providers")}</kbd>
-                </button>
-                <button class={`row ${selected() === "resources" || Boolean(currentResourcesMissionId()) ? "active" : ""}`} data-testid="sb-resources" onClick={() => open("resources")}>
-                  <span class="row-ico"><Ic.ResourcesIcon /></span>
-                  <span class="row-label">Resources</span><kbd aria-hidden="true">{shortcutLabel("resources")}</kbd>
-                </button>
+        <nav ref={sbScrollEl} class="sb-scroll" onContextMenu={(e) => e.preventDefault()}>
+          <div class="sb-main-nav" hidden={onSettings()}>
+            <button class={`row ${selected() === null ? "active" : ""}`} onClick={() => open(null)}>
+              <span class="row-ico"><Ic.NewAgentIcon /></span>
+              <span class="row-label">New Agent</span>
+              <kbd>⌘N</kbd>
+            </button>
+            <Show when={inboxConfig().inboxEnabled}>
+              <button class={`row ${selected() === "inbox" ? "active" : ""}`} title={selected() === "inbox" ? "Space to return to the Inbox list" : undefined} onClick={() => open("inbox")}>
+                <span class="row-ico"><Ic.InboxIcon /></span>
+                <span class="row-label">Inbox</span>
+                <Show when={inboxCount() > 0}><span class="inbox-sb-badge" aria-label={`${inboxCount()} need attention`}>{inboxCount()}</span></Show>
+                <kbd aria-hidden="true">{shortcutLabel("inbox")}</kbd>
+              </button>
+            </Show>
+            <button class={`row ${selected() === "cloud-agent" ? "active" : ""}`} onClick={() => open("cloud-agent")}>
+              <span class="row-ico"><Ic.CloudIcon /></span><span class="row-label">Cloud agent</span><kbd aria-hidden="true">{shortcutLabel("cloud-agent")}</kbd>
+            </button>
+            <button class={`row ${selected() === "machines" ? "active" : ""}`} onClick={() => open("machines")}>
+              <span class="row-ico"><Ic.MachinesIcon /></span>
+              <span class="row-label">Machines</span><kbd aria-hidden="true">{shortcutLabel("machines")}</kbd>
+            </button>
+            <button class={`row ${selected() === "providers" ? "active" : ""}`} onClick={() => open("providers")}>
+              <span class="row-ico"><Ic.CubeIcon /></span>
+              <span class="row-label">Inference</span><kbd aria-hidden="true">{shortcutLabel("providers")}</kbd>
+            </button>
+            <button class={`row ${selected() === "resources" || Boolean(currentResourcesMissionId()) ? "active" : ""}`} data-testid="sb-resources" onClick={() => open("resources")}>
+              <span class="row-ico"><Ic.ResourcesIcon /></span>
+              <span class="row-label">Resources</span><kbd aria-hidden="true">{shortcutLabel("resources")}</kbd>
+            </button>
 
-                <Show
-                  when={isConnected()}
-                  fallback={
-                    <>
-                      <div class="section">Projects</div>
-                      <div class="sb-empty">
-                        No backend connected.
-                        <button class="sb-link" onClick={() => openSettings()}>
-                          Connect
-                        </button>
-                      </div>
-                    </>
-                  }
-                >
-                  <div data-project-navigation tabindex="-1" aria-label="Projects" aria-keyshortcuts="Meta+5" onKeyDown={event => {
-                    if (event.defaultPrevented || !['ArrowDown','ArrowUp','Home','End'].includes(event.key) || (event.target as HTMLElement).matches('input,textarea,[contenteditable]')) return;
-                    const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button.row-main, button.row.agent:not(:disabled)')).filter(row => row.getClientRects().length > 0);
-                    if (!rows.length) return;
-                    event.preventDefault();
-                    const current = rows.indexOf(document.activeElement as HTMLButtonElement);
-                    const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
-                    rows[next].focus();
-                  }}>
+            <Show
+              when={isConnected() ? connectionVersion() + 1 : 0}
+              keyed
+              fallback={
+                <>
+                  <div class="section">Projects</div>
+                  <div class="sb-empty">
+                    No backend connected.
+                    <button class="sb-link" onClick={() => openSettings()}>
+                      Connect
+                    </button>
+                  </div>
+                </>
+              }
+            >
+              {(_ver) => (
+                <div data-project-navigation tabindex="-1" aria-label="Projects" aria-keyshortcuts="Meta+5" onKeyDown={event => {
+                  if (event.defaultPrevented || !['ArrowDown','ArrowUp','Home','End'].includes(event.key) || (event.target as HTMLElement).matches('input,textarea,[contenteditable]')) return;
+                  const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button.row-main, button.row.agent:not(:disabled)')).filter(row => row.getClientRects().length > 0);
+                  if (!rows.length) return;
+                  event.preventDefault();
+                  const current = rows.indexOf(document.activeElement as HTMLButtonElement);
+                  const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
+                  rows[next].focus();
+                }}>
                   <LiveProjectsSection
+                    active={() => !onSettings()}
                     deleteRequest={deleteMissionRequest()}
                     onDeleteRequestHandled={() => setDeleteMissionRequest(null)}
                     activityMissions={missions()}
@@ -1418,12 +1449,11 @@ export default function App() {
                       setNewProjectDraft(true);
                     }}
                   />
-                  </div>
-                </Show>
-
-              </>
-            }
-          >
+                </div>
+              )}
+            </Show>
+          </div>
+          <Show when={onSettings()}>
             <button class="row settings-back" onClick={leaveSettings}>
               <span class="row-ico"><Ic.ArrowLeft /></span>
               <span class="row-label">Back</span>

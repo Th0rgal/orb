@@ -2,6 +2,7 @@ import { render, fireEvent, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
 import { Providers } from '../src/Providers';
 import { clearConnection, setConnection } from '../src/api';
+import { cachePut } from '../src/pageCache';
 afterEach(() => { clearConnection(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 const ok = (body: unknown) => new Response(JSON.stringify(body));
 it('replaces a failed initial load with a retry that can recover', async () => {
@@ -56,5 +57,40 @@ it('ignores the previous backend response and cancels work on unmount', async ()
   release(ok([{id:'old',name:'Old account',provider_type:'openai',uses_oauth:true,status:{type:'connected'}}]));
   await Promise.resolve();
   expect(ui.queryByText('Old account')).toBeNull();
+  ui.unmount();
+});
+it('renders cached providers immediately on remount without flashing the loading skeleton', async () => {
+  setConnection('http://core.test', 'test');
+  let holdSecondFetch = false;
+  vi.stubGlobal('fetch', vi.fn((url: string) => {
+    if (holdSecondFetch) {
+      return new Promise<Response>(() => {});
+    }
+    return Promise.resolve(ok(url.endsWith('/providers') ? [{id:'cached',name:'Cached Claude',provider_type:'anthropic',uses_oauth:true,status:{type:'connected'}}] : []));
+  }));
+  const first = render(() => <Providers />);
+  await waitFor(() => expect(first.getByText('Cached Claude')).toBeTruthy());
+  await waitFor(() => expect(first.queryByRole('status')).toBeNull());
+  first.unmount();
+
+  // Remounting (e.g. returning from Settings) renders cached accounts & cloud connectors
+  // synchronously even while all background refreshes are still in flight, with zero skeleton flash.
+  holdSecondFetch = true;
+  const second = render(() => <Providers />);
+  expect(second.getByText('Cached Claude')).toBeTruthy();
+  expect(second.queryByRole('status')).toBeNull();
+  second.unmount();
+});
+it('survives non-array cloud-accounts payloads without wedging on the loading skeleton', async () => {
+  setConnection('http://core.test', 'test');
+  cachePut('settings:cloud-accounts', { job: null, runs: [] } as unknown);
+  vi.stubGlobal('fetch', vi.fn((url: string) =>
+    Promise.resolve(ok(url.endsWith('/api/ai/providers')
+      ? [{id:'claude',name:'Claude (work)',provider_type:'anthropic',uses_oauth:true,status:{type:'connected'}}]
+      : { job: null, runs: [] })),
+  ));
+  const ui = render(() => <Providers />);
+  await waitFor(() => expect(ui.getByRole('button', { name: 'Usage history' })).toBeTruthy());
+  expect(ui.getByText(/Claude/)).toBeTruthy();
   ui.unmount();
 });

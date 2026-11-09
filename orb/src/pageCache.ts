@@ -65,6 +65,11 @@ export function cachePeek<T>(key: string): T | undefined {
   return hit.value;
 }
 
+export function cachePeekArray<T>(key: string): T[] | undefined {
+  const hit = cachePeek<unknown>(key);
+  return Array.isArray(hit) ? (hit as T[]) : undefined;
+}
+
 export function cacheDelete(key:string){remove(key);}
 
 export function cachePut<T>(key: string, value: T): T {

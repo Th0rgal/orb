@@ -586,6 +586,7 @@ def materializeLeanCheckout
           IO.sleep 100
     if lockFd == 0xFFFFFFFF then
       return .error "timed out acquiring seed checkout lock"
+    let heldLockFd := lockFd
     try
       if !(← seedDir.isDir) then
         let nonce ← newUuidV4
@@ -642,7 +643,7 @@ def materializeLeanCheckout
       if cpRes.exitCode != 0 then
         return .error s!"failed cloning isolated job checkout: {cpRes.stderr.trimAscii}"
     finally
-      closeFdRaw (Int32.ofBitVec (BitVec.ofNat 32 lockFd.toNat))
+      closeFdRaw (Int32.ofBitVec (BitVec.ofNat 32 heldLockFd.toNat))
   if let some bnd := bundle? then
     let deleted := ((bnd.fieldArr? "deleted_paths").getD #[]).filterMap JVal.asStr?
     for dp in deleted do
