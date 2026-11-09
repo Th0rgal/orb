@@ -24,7 +24,7 @@ test("moves from the footer with an inventory and no automatic execution", async
     }
     await route.fulfill({ json: result });
   });
-  await page.route("**/api/control/missions/test", route => route.fulfill({ json: { id: "test", status: "awaiting_user", machine_transfer: action } }));
+  await page.route(url => url.pathname === "/api/control/missions/test", route => route.fulfill({ json: { id: "test", status: "awaiting_user", machine_transfer: action } }));
   await page.goto("/tests/machine-transfer.html");
   await page.getByRole("button", { name: "Change machine: Core" }).click();
   await expect(page.getByRole("menuitem", { name: /Core/ })).toBeDisabled();
@@ -106,7 +106,7 @@ test("transfers a queued remote mission with an unmaterialized workspace to Core
     else if (body.op === "activate") { action.phase = "activated"; result = action; }
     await route.fulfill({ json: result });
   });
-  await page.route("**/api/control/missions/test", route =>
+  await page.route(url => url.pathname === "/api/control/missions/test", route =>
     route.fulfill({
       json: {
         id: "test",
@@ -180,7 +180,7 @@ test("defaults to light mode and moves conversation with no workspace files tran
       await route.fulfill({ json: { ok: true } });
     }
   });
-  await page.route("**/api/control/missions/test", route =>
+  await page.route(url => url.pathname === "/api/control/missions/test", route =>
     route.fulfill({ json: { id: "test", status: "awaiting_user", machine_transfer: action } }),
   );
 

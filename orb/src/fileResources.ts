@@ -105,6 +105,8 @@ export function createFileClient(scope: FileScope) {
     const eventsPromise = scope.mission
       ? api<unknown>(
           `/api/control/missions/${scope.mission.id}/events?limit=4000&types=assistant_message&include_counts=false&exclude_content=true`,
+          undefined,
+          "p2",
         ).catch(() => null)
       : Promise.resolve(null);
     try {

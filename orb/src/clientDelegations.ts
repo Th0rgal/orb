@@ -30,7 +30,7 @@ export function startClientDelegations(missions: () => Mission[]) {
         if (!valid()) return;
         const id = message.target_mission_id ?? anchor.id;
         try {
-          const mission = missions().find(m => m.id === id) ?? await getMission(id);
+          const mission = missions().find(m => m.id === id) ?? await getMission(id, { includeHistory: false });
           if (!valid()) return;
           let binding = localBinding(id);
           if (!binding) {

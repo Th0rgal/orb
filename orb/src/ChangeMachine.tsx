@@ -47,15 +47,18 @@ import { lastMissionNode, recalledLaunch, rememberMissionNode } from "./missionL
 import { TransferInventory, formatBytes } from "./TransferInventory";
 import { TransferSelection, selectionRequest, selectionTotals, type Choice } from "./TransferSelection";
 import { activeTransfer, activateTransfer, copyTransfer, inspectTransfer, inventoryTransfer, machineLabel, sameMachine, selectTransfer, snapshotTransfer, transferRequest, verifyTransfer, type Destination, type Machine, type TransferAction, type TransferView, type WorkspaceInventory } from "./machineTransfer";
+import { isP2QueuePaused, type RequestPriority } from "./transportScheduler";
 
 type Loaded = { view: TransferView; rows: Destination[]; client?: string };
-const loads = new Map<string, Promise<Loaded>>();
+const loads = new Map<string, { promise: Promise<Loaded>; priority?: RequestPriority }>();
 /** Shares an in-flight request, e.g. a preload, with the menu that opens meanwhile.
  * A settled result is never reused: transfer actions must be read fresh. */
-export function loadMachineDestinations(missionId: string, force = false): Promise<Loaded> {
+export function loadMachineDestinations(missionId: string, force = false, priority?: RequestPriority): Promise<Loaded> {
   const key = `${connectionVersion()}:${missionId}`;
   const pending = loads.get(key);
-  if (pending && !force) return pending;
+  if (pending && !force && (pending.priority !== "p2" || priority === "p2" || !isP2QueuePaused())) {
+    return pending.promise;
+  }
   const version = connectionVersion();
   const promise = (async () => {
     const local = async (): Promise<Destination> => {
@@ -64,7 +67,7 @@ export function loadMachineDestinations(missionId: string, force = false): Promi
       const [id, installed] = await Promise.all([machineIdentity(), refreshLocalAgents(false)]);
       return { machine: { kind: "client", id }, label: "This computer", available: true, harnesses: installed.filter(c => c.installed).map(c => c.id) };
     };
-    const [view, computer] = await Promise.all([inspectTransfer(missionId), local()]);
+    const [view, computer] = await Promise.all([inspectTransfer(missionId, priority), local()]);
     if (view.version !== 1) throw new Error("Update the connected backend to enable machine transfer.");
     const rows = preferSparkAdministration([computer, ...view.destinations], row => row.machine.kind === "node" ? row.machine.id : undefined)
       .map(row => row.machine.kind === "node" && row.machine.id === "dgx-spark-admin" ? { ...row, label: nodeLabel(row.machine.id) }
@@ -72,15 +75,16 @@ export function loadMachineDestinations(missionId: string, force = false): Promi
     if (version === connectionVersion()) cacheMachineDestinations(rows);
     return { view, rows, client: computer.machine.kind === "client" ? computer.machine.id : undefined };
   })();
-  loads.set(key, promise);
-  const settle = () => { if (loads.get(key) === promise) loads.delete(key); };
+  const entry = { promise, priority };
+  loads.set(key, entry);
+  const settle = () => { if (loads.get(key) === entry) loads.delete(key); };
   promise.then(settle, settle);
   return promise;
 }
 /** Forget reusable loads (connection reset, tests). */
 export function forgetMachineDestinationLoads() { loads.clear(); }
 /** Warm the machine list in the background; failures surface when the menu opens. */
-export function preloadMachineDestinations(missionId: string) { void loadMachineDestinations(missionId).catch(swallow("changeMachine.preload", { mission: missionId })); }
+export function preloadMachineDestinations(missionId: string) { void loadMachineDestinations(missionId, false, "p2").catch(swallow("changeMachine.preload", { mission: missionId })); }
 
 export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; choicesFor?: (machine: Machine) => HarnessChoice[]; onDestination?: (machine: Machine) => void; onClose: () => void; onMoved: (mission: Mission) => void }) {
   const [destinations, setDestinations] = createSignal<Destination[]>(cachedMachineDestinations());
@@ -236,19 +240,19 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       const result = await pollLocal(p.mission.id);
       if (!result.done) throw new Error("The local agent has not stopped yet.");
       // A normal completion handler may already have saved/settled this run.
-      const latest = await getMission(p.mission.id);
+      const latest = await getMission(p.mission.id, { includeHistory: false });
       if (["active", "pending"].includes(latest.status)) {
         try {
           await deliverAssistantText(p.mission.id, result.text);
           await setClientMissionStatus(p.mission.id, "interrupted");
         } catch (error) {
-          if (["active", "pending"].includes((await getMission(p.mission.id)).status)) throw error;
+          if (["active", "pending"].includes((await getMission(p.mission.id, { includeHistory: false })).status)) throw error;
         }
       }
     } else {
       await cancelMission(p.mission.id);
       for (let i = 0; i < 40; i++) {
-        const latest = await getMission(p.mission.id);
+        const latest = await getMission(p.mission.id, { includeHistory: false });
         if (!["active", "pending"].includes(latest.status) && (!latest.execution?.state || latest.execution.state === "terminal")) return;
         await new Promise(resolve => setTimeout(resolve, 250));
       }

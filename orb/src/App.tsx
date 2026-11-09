@@ -6,7 +6,7 @@ import {
   refreshPresentationPreview,
 } from "./missionCache";
 import { markUnfocusedBtwDirty, noteBtwPresentationHint } from "./btwAgent";
-import { lookupMissionById } from "./missionLookup";
+import { lookupMissionById, resetMissionLookup } from "./missionLookup";
 import { movedMission, withMovedMissions } from "./moves";
 import { applyServerPlacementEvent } from "./missionMove";
 import { MissionLookupContext } from "./orchestrationModel";
@@ -19,7 +19,7 @@ import { connectClientLink, reportClientHarnesses, type RemoteStart } from "./cl
 import {requireSpeedSupport} from './CodexSpeedPicker';
 import { Menu } from "./Menu";
 import { missionParent } from "./missionTree";
-import { btwParentId, isBtwMission, isPartialList, mergeMission, normalizeMissionFolder, reconcileMissionList, type Misses, type PlacementCommitItem, resetMissionHierarchy } from "./missionHierarchy";
+import { btwParentId, isBtwMission, isPartialList, mergeMission, normalizeMissionFolder, reconcileMissionList, type Misses, type PlacementCommitItem, resetMissionHierarchy, resolvedParent } from "./missionHierarchy";
 import { hintSideQuestionOpen, sideQuestionKey } from "./sideQuestionStorage";
 import { draftCyber, setDraftCyber, requireCyberSupport } from "./cyberAccess";
 import {trackScrollbarHover} from "./scrollbarHover";
@@ -488,7 +488,7 @@ export default function App() {
         }
         for (const m of vanished) {
           if (!m.project?.trim()) {
-            void getMission(m.id)
+            void getMission(m.id, { includeHistory: false })
               .then(updated => {
                 if (isMissionDeleting(updated.id) || isBtwMission(updated)) return;
                 const slug = updated.project?.trim() || DEFAULT_PROJECT.slug;
@@ -545,6 +545,7 @@ export default function App() {
     setProjectMissions({});
     setCompletedMissions([]);
     resetMissionHierarchy();
+    resetMissionLookup();
   }, { defer: true }));
   let prevInboxMissions: Mission[] = [];
   const inboxMissions = createMemo(() => {
@@ -590,6 +591,7 @@ export default function App() {
       (openMission()?.id === id ? openMission() ?? undefined : undefined) ??
       missions().find(m => m.id === id) ??
       inboxMissions().find(m => m.id === id) ??
+      resolvedParent<Mission>(id) ??
       lookupMissionById(id)
     );
   };

@@ -1124,6 +1124,9 @@ def main : IO UInt32 := do
     classifyProxyRequestPriority "GET" "/api/control/missions/m1/events" none == 1 &&
     classifyProxyRequestPriority "GET" "/api/software" none == 2 &&
     classifyProxyRequestPriority "GET" "/api/providers/antigravity-models" none == 2 &&
+    classifyProxyRequestPriority "GET" "/api/control/missions/m1/automations" none == 2 &&
+    classifyProxyRequestPriority "GET" "/api/control/missions/m1/machine-transfer" none == 2 &&
+    classifyProxyRequestPriority "GET" "/api/projects/orb/context/manifest" none == 2 &&
     classifyProxyRequestPriority "POST" "/api/control/missions/m1/inbox-digest" none == 1 &&
     classifyProxyRequestPriority "POST" "/api/file-resources" none == 1 &&
     classifyProxyRequestPriority "POST" "/api/control/missions/m1/opened" none == 1 &&

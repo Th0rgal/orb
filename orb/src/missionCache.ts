@@ -226,6 +226,15 @@ function saveSnapshot(scope: string, snapshot: TranscriptSnap, persist = true) {
   bumpTranscriptVersion();
 }
 
+const lastNetworkFetchAt = new Map<string, number>();
+
+export function hasFreshNetworkTranscript(id: string, maxAgeMs = 1500): boolean {
+  const scope = key(id);
+  if (dirtyMissions.has(scope)) return false;
+  const at = lastNetworkFetchAt.get(scope);
+  return at !== undefined && Date.now() - at <= maxAgeMs && Boolean(peekReadyTranscript(id));
+}
+
 const hydratingFromDisk = new Map<string, Promise<TranscriptSnap | undefined>>();
 
 let observedConnectionVersion = untrack(connectionVersionSafe);
@@ -239,6 +248,9 @@ function cleanupStaleConnectionState(nextVer: number) {
   }
   for (const scope of [...hydratingFromDisk.keys()]) {
     if (!scope.startsWith(prefix)) hydratingFromDisk.delete(scope);
+  }
+  for (const scope of [...lastNetworkFetchAt.keys()]) {
+    if (!scope.startsWith(prefix)) lastNetworkFetchAt.delete(scope);
   }
   for (const [scope, sub] of [...warmSubs]) {
     if (sub.connVer !== nextVer) {
@@ -885,6 +897,7 @@ async function fetchTranscript(
   const queueEvents: StreamEvent[] = queued.map(row => ({ type: "user_message", eventId: row.id, data: { id: row.id, content: row.content, queued: row.inflight !== true } }));
   const retainedLive = previous?.liveTail?.length ? heldAfterHistory(stream, previous.liveTail) : [];
   // History first puts accepted user turns at their actual transcript positions.
+  lastNetworkFetchAt.set(key(id), Date.now());
   return { items: buildTranscript([...stream, ...retainedLive, ...queueEvents], sessionFor(id)), stream, ...(retainedLive.length ? { liveTail: retainedLive } : {}), fromLog: true, spineComplete, ...(spineBefore !== undefined ? { spineBefore } : {}), queueError, cursor, before, hasOlder };
 }
 
@@ -992,6 +1005,7 @@ export function forgetPrefetchPauses(){
   for (const [, timer] of persistTimers) clearTimeout(timer);
   persistTimers.clear();
   hydratingFromDisk.clear();
+  lastNetworkFetchAt.clear();
   for (const [, sub] of warmSubs) sub.stop();
   warmSubs.clear();
   dirtyMissions.clear();

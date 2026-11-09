@@ -2100,14 +2100,14 @@ export async function listCompletedMissions(limit = 100): Promise<Mission[] | nu
 
 /** `coreOnly` skips the local-origin fallback: callers that need Core's
  * placement must not see a journal row that predates a machine transfer. */
-export async function getMission(id: string, options: { coreOnly?: boolean; fresh?: boolean; includeHistory?: boolean } = {}): Promise<Mission> {
+export async function getMission(id: string, options: { coreOnly?: boolean; fresh?: boolean; includeHistory?: boolean; priority?: RequestPriority } = {}): Promise<Mission> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const path = options.includeHistory === false
     ? `/api/control/missions/${id}?include_history=false`
     : `/api/control/missions/${id}`;
   const read = async () => {
     // `fresh`: never join a read that started before the caller's newer event.
-    const value = await api<Mission>(path, options.fresh ? {} : undefined);
+    const value = await api<Mission>(path, options.fresh ? {} : undefined, options.priority);
     if (!value || typeof value !== "object" || value.id !== id) throw new InvalidApiResponseError(`GET ${path}`);
     return value;
   };
@@ -2322,16 +2322,18 @@ export async function sendMissionMessage(
   };
   const retry = remoteReplacements.get(replacementKey);
   if (retry) return createReplacement(retry);
-  // When `MissionView` supplies `knownMission`, omit full legacy `history` JSON
-  // on the pre-send metadata check; if Core later responds with 409
-  // `REMOTE_RESUME_REQUIRES_REPLACEMENT:`, full history is fetched on demand below.
+  // When `MissionView` supplies `knownMission` for a live/working turn, skip the
+  // pre-send `GET /missions/:id` round-trip (`queue_followup: true` queues directly);
+  // for idle turns, read lightweight metadata (`include_history=false`) so
+  // `continue_identity`, archived/paused reopen, and cyber revision stay exact.
   const hasKnownContext = Boolean(knownMission && knownMission.id === id);
   const usedKnownMission = Boolean(hasKnownContext && isWorking(knownMission!.status));
   let mission = usedKnownMission
     ? knownMission!
     : await getMission(id, hasKnownContext ? { includeHistory: false } : undefined);
   if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
-  if (mission.status === "acknowledged" || mission.status === "paused") {
+  const reopenIfNeeded = async (cur: Mission): Promise<Mission> => {
+    if (cur.status !== "acknowledged" && cur.status !== "paused") return cur;
     await api(`/api/control/missions/${encodeURIComponent(id)}/status`, withIdempotencyKey({
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2339,14 +2341,17 @@ export async function sendMissionMessage(
     }, `status-awaiting:${id}:${clientMessageId}`));
     if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
     await confirmCoreChange({ id, status: "awaiting_user" });
-    mission = { ...mission, status: "awaiting_user" };
-  }
+    return { ...cur, status: "awaiting_user" };
+  };
+  mission = await reopenIfNeeded(mission);
   // A reply continues the selected conversation. Send the exact current identity
   // so mentions of other PRs are not mistaken for silently retasking a writer.
   // Remote-node continuation currently accepts content only.
-  const continue_identity = mission.track?.trim() && !mission.remote_node_id && !mission.remote_job
-    ? { project: mission.project ?? null, track: mission.track, github_pr: mission.github_pr ?? null }
-    : undefined;
+  const buildContinueIdentity = (cur: Mission) =>
+    cur.track?.trim() && !cur.remote_node_id && !cur.remote_job
+      ? { project: cur.project ?? null, track: cur.track, github_pr: cur.github_pr ?? null }
+      : undefined;
+  let continue_identity = buildContinueIdentity(mission);
   let cyberAssertion: { cyber_access: string; cyber_revision: string } | undefined;
   if (mission.backend === "codex" && !isClientPlacement(mission) && !isWorking(mission.status)) {
     const sel = await api<{ mode: string; revision: string }>(`/api/control/missions/${encodeURIComponent(id)}/cyber`, { cache: "no-store" });
@@ -2370,21 +2375,39 @@ export async function sendMissionMessage(
       const found = queued?.find(row => row.id === clientMessageId);
       if (found) return { id: clientMessageId, queued: !found.inflight, message_accepted: true };
     }
-    if (!(error instanceof ApiError) || error.status !== 409 || !error.detail.startsWith("REMOTE_RESUME_REQUIRES_REPLACEMENT:")) throw error;
-    if (hasKnownContext && !mission.history?.length) {
-      mission = await getMission(id, { fresh: true, includeHistory: true });
+    if (
+      usedKnownMission &&
+      error instanceof ApiError &&
+      (error.status === 400 || error.status === 409) &&
+      !error.detail.startsWith("REMOTE_RESUME_REQUIRES_REPLACEMENT:")
+    ) {
+      const latest = await getMission(id, { fresh: true, includeHistory: false }).catch(() => null);
       if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
+      if (latest && (latest.status === "acknowledged" || latest.status === "paused")) {
+        mission = await reopenIfNeeded(latest);
+        continue_identity = buildContinueIdentity(mission);
+        receipt = await postWhileTurnRuns(post, () => connectionVersion() !== version);
+      } else {
+        throw error;
+      }
+    } else if (!(error instanceof ApiError) || error.status !== 409 || !error.detail.startsWith("REMOTE_RESUME_REQUIRES_REPLACEMENT:")) {
+      throw error;
+    } else {
+      if (hasKnownContext && !mission.history?.length) {
+        mission = await getMission(id, { fresh: true, includeHistory: true });
+        if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
+      }
+      // Side conversations must keep their archive, parent and sidebar identity.
+      // Their caller handles this explicit refusal through the dedicated /btw route.
+      if (isBtwMission(mission)) throw error;
+      if (["active", "pending", "waiting_background"].includes(mission.status) ||
+          ["queued", "running"].includes(mission.remote_job?.node_state ?? "")) {
+        throw new Error("This mission still has a remote job. Wait for it to finish or stop it before retrying. Your draft is kept.");
+      }
+      const body = remoteReplacementBody(mission, text, attachments, clientMessageId);
+      remoteReplacements.set(replacementKey, body);
+      return createReplacement(body);
     }
-    // Side conversations must keep their archive, parent and sidebar identity.
-    // Their caller handles this explicit refusal through the dedicated /btw route.
-    if (isBtwMission(mission)) throw error;
-    if (["active", "pending", "waiting_background"].includes(mission.status) ||
-        ["queued", "running"].includes(mission.remote_job?.node_state ?? "")) {
-      throw new Error("This mission still has a remote job. Wait for it to finish or stop it before retrying. Your draft is kept.");
-    }
-    const body = remoteReplacementBody(mission, text, attachments, clientMessageId);
-    remoteReplacements.set(replacementKey, body);
-    return createReplacement(body);
   }
   if (receipt?.message_accepted === false) throw new MessageRejectedError("Message was not accepted. Your draft is kept.");
   if (!receipt || typeof receipt.id !== "string" || !receipt.id || typeof receipt.queued !== "boolean") throw new Error("Invalid message receipt. Your draft is kept.");
@@ -2445,7 +2468,7 @@ export function listArchivedMissions(offset = 0): Promise<Mission[]> {
 /** Acknowledge an idle conversation, retaining its transcript and original location. */
 export async function archiveMission(id: string): Promise<void> {
   const version = connectionVersion();
-  const mission = await getMission(id, { fresh: true });
+  const mission = await getMission(id, { fresh: true, includeHistory: false });
   if (connectionVersion() !== version) throw new Error("Connection changed. Try again.");
   if (mission.execution?.state === "running") throw new Error("Wait for the mission to stop before archiving it.");
   if (isArchived(mission.status)) {
@@ -2464,7 +2487,7 @@ export async function archiveMission(id: string): Promise<void> {
 /** Reopen for manual follow-up without dispatching a runner or autoresuming work. */
 export async function reopenMission(id: string): Promise<void> {
   const version = connectionVersion();
-  const mission = await getMission(id, { fresh: true });
+  const mission = await getMission(id, { fresh: true, includeHistory: false });
   if (connectionVersion() !== version) throw new Error("Connection changed. Try again.");
   if (mission.execution?.state === "running") throw new Error("This mission is no longer finished. Refresh its status before reopening it.");
   if (mission.status === "paused") {

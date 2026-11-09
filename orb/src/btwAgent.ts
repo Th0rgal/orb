@@ -16,6 +16,7 @@ import {getMissionEvents,isMultiplexSyncActive,storedToStream,type StoredEvent,t
 import {isBackgroundSyncActive,onBackgroundSyncActiveChange} from './backgroundSync';
 import {attachMissionStream,reconcileWarmSubscriptions,registerWarmBtwTargets,warmRecentMissionIds} from './missionCache';
 import {TranscriptReducer,type StreamItem} from './transcriptModel';
+import type {RequestPriority} from './transportScheduler';
 const [agentItems,setAgentItems]=createSignal<Record<string,StreamItem[]>>({});
 export function btwItems(parent:string){const s=btwSession(parent);return s?agentItems()[s.id]??[]:[];}
 type Thought=Extract<StreamItem,{kind:'think'}>;
@@ -702,14 +703,14 @@ export async function queueBtwFollowUp(
 const chains=new Map<string,Promise<string[]>>();
 const BTW_EVENT_TYPES='user_message,assistant_message,assistant_message_canonical,text_delta';
 const BTW_TERMINAL_EVENT_TYPES='user_message,assistant_message,assistant_message_canonical';
-export function btwThreadChain(parent:string):Promise<string[]>{
+export function btwThreadChain(parent:string,priority?:RequestPriority):Promise<string[]>{
  const key=`${connectionVersion()}:${parent}`;
  let chain=chains.get(key);
  if(!chain){
   chain=(async()=>{
    const ids=[parent];
    for(let id=parent;ids.length<16;){
-    const mission=await getMission(id,{coreOnly:true,includeHistory:false}).catch(err=>{
+    const mission=await getMission(id,{coreOnly:true,includeHistory:false,priority}).catch(err=>{
      if(err instanceof ApiError&&err.status===404)return {} as Mission;
      throw err;
     });
@@ -1568,10 +1569,11 @@ export async function reconcileBtwServerHistory(
  parent: string,
  localHistory: SideExchange[],
  signal?: AbortSignal,
- options?: { force?: boolean },
+ options?: { force?: boolean; priority?: RequestPriority },
 ): Promise<{ history: SideExchange[]; activeSession?: BtwSession; latest?: string; authoritative?: boolean }> {
  const version = connectionVersion();
  const k = `${version}:${parent}`;
+ const priority = options?.priority;
  if (!options?.force && isMultiplexSyncActive() && !pendingDirtyBtwParents.has(k) && !btwSession(parent)?.active) {
   const cached = warmBtwByParent.get(k);
   if (cached && !cached.dirty && !cached.activeSession) {
@@ -1585,14 +1587,14 @@ export async function reconcileBtwServerHistory(
  }
  let authoritative = true;
  let rows: Mission[] = [];
- const chain = await btwThreadChain(parent).catch(() => {
+ const chain = await btwThreadChain(parent, priority).catch(() => {
   authoritative = false;
   return [parent];
  });
  const seen = new Set<string>();
  try {
   const pages = await Promise.all(
-   chain.map(id => api<Mission[]>(`/api/control/missions?tag=${encodeURIComponent(`btw-parent:${id}`)}&all=true&limit=50`)),
+   chain.map(id => api<Mission[]>(`/api/control/missions?tag=${encodeURIComponent(`btw-parent:${id}`)}&all=true&limit=50`, undefined, priority)),
   );
   for (const res of pages) {
    if (Array.isArray(res)) {
@@ -1612,7 +1614,7 @@ export async function reconcileBtwServerHistory(
  const knownSession = btwSession(parent);
  if (knownSession?.id && !seen.has(knownSession.id)) {
   try {
-   let direct = await getMission(knownSession.id, { coreOnly: true, includeHistory: false });
+   let direct = await getMission(knownSession.id, { coreOnly: true, includeHistory: false, priority });
    const visited = new Set<string>();
    for (let hop = 0; hop < 16; hop++) {
     const nextId = supersededSuccessorId(direct);
@@ -1622,7 +1624,7 @@ export async function reconcileBtwServerHistory(
      direct = undefined as unknown as Mission;
      break;
     }
-    direct = await getMission(nextId, { coreOnly: true, includeHistory: false });
+    direct = await getMission(nextId, { coreOnly: true, includeHistory: false, priority });
    }
    if (
     direct &&
@@ -1715,21 +1717,21 @@ export async function reconcileBtwServerHistory(
     try {
      const cachedKnown = liveThreadEventCache.get(cacheKey);
      if (!keepLiveCache && !cachedKnown) {
-      events = await getMissionEvents(m.id, { view: 'history', types: BTW_TERMINAL_EVENT_TYPES });
+      events = await getMissionEvents(m.id, { view: 'history', types: BTW_TERMINAL_EVENT_TYPES, priority });
      } else {
       let known = cachedKnown ?? new Map<number, StoredEvent>();
       const maxKnown = maxDurableBtwSequence(known);
       const types = live ? BTW_EVENT_TYPES : BTW_TERMINAL_EVENT_TYPES;
       if (maxKnown !== undefined) {
-       const delta = await getMissionEvents(m.id, { view: 'history', types, since: maxKnown });
+       const delta = await getMissionEvents(m.id, { view: 'history', types, since: maxKnown, priority });
        if (delta.length && Math.max(...delta.map(e => e.sequence)) < maxKnown) {
         known = new Map<number, StoredEvent>();
-        for (const ev of await getMissionEvents(m.id, { view: 'history', types })) upsertBtwStoredRow(known, ev);
+        for (const ev of await getMissionEvents(m.id, { view: 'history', types, priority })) upsertBtwStoredRow(known, ev);
        } else {
         for (const ev of delta) upsertBtwStoredRow(known, ev);
        }
       } else {
-       for (const ev of await getMissionEvents(m.id, { view: 'history', types })) upsertBtwStoredRow(known, ev);
+       for (const ev of await getMissionEvents(m.id, { view: 'history', types, priority })) upsertBtwStoredRow(known, ev);
       }
       events = [...known.values()].sort((a, b) => a.sequence - b.sequence);
       setBounded(liveThreadEventCache, cacheKey, known, 64);
