@@ -76,14 +76,17 @@ const loadSaved = (key: string): Saved => {
     return { tabs: [], expanded: [], open: false };
   }
 };
+type SidePanelRegistration = {
+  open: () => void;
+  close: () => void;
+};
 const SidePanelContext = createContext<{
   target: () => HTMLDivElement | undefined;
   available: () => boolean;
   visible: () => boolean;
-  standalone?: boolean;
-  show: (opts?: { focus?: boolean }) => void;
-  hide: () => void;
-  register: (open: (() => void) | undefined) => void;
+  show: (opts?: { focus?: boolean; restore?: boolean }) => void;
+  hide: (opts?: { restore?: boolean }) => void;
+  register: (handle: SidePanelRegistration) => () => void;
 }>();
 export const useSidePanel = () => useContext(SidePanelContext);
 
@@ -127,7 +130,7 @@ export function FilePanelProvider(p: {
     generation = 0;
   const [sideVisible, setSideVisible] = createSignal(false);
   const [sideTarget, setSideTarget] = createSignal<HTMLDivElement>();
-  const [openSide, setOpenSide] = createSignal<(() => void)>();
+  const [openSide, setOpenSide] = createSignal<SidePanelRegistration>();
   const [opened, setFilesOpened] = createSignal(false),
     [sources, setSources] = createSignal<FileSource[]>([]),
     [tabs, setTabs] = createSignal<Tab[]>([]),
@@ -139,9 +142,16 @@ export function FilePanelProvider(p: {
     usageTelemetry.action("file_viewer_open", "files");
     onCleanup(usageTelemetry.page("files", "pane"));
   }));
-  const setOpened = (value: boolean | ((previous: boolean) => boolean)) => {
+  const closeSidePanel = () => {
     setSideVisible(false);
-    return setFilesOpened(value);
+    rightPaneFocused = false;
+    openSide()?.close();
+  };
+  const setOpened = (value: boolean | ((previous: boolean) => boolean)) => {
+    const next = typeof value === "function" ? value(untrack(opened)) : value;
+    if (next) closeSidePanel();
+    else setSideVisible(false);
+    return setFilesOpened(next);
   };
   const [directories, setDirectories] = createSignal<
       Record<string, FileEntry[]>
@@ -267,9 +277,12 @@ export function FilePanelProvider(p: {
       setTabs(saved.tabs);
       setActive(saved.active);
       setExpanded(saved.expanded);
-      const owner = untrack(() => p.scope.mission?.id ?? `project:${p.scope.project ?? ""}:${p.scope.controller ?? ""}`);
-      if (owner === shownFor) setFilesOpened(saved.open);
-      else setOpened(saved.open);
+      const owner = untrack(() => p.missionOpen ?? p.scope.mission?.id ?? `project:${p.scope.project ?? ""}:${p.scope.controller ?? ""}`);
+      setFilesOpened(saved.open);
+      if (owner !== shownFor) {
+        zenRestore = null;
+        if (saved.open) setSideVisible(false);
+      }
       shownFor = owner;
       setDirectories({});
       setSources([]);
@@ -581,7 +594,7 @@ export function FilePanelProvider(p: {
             else if (restore.panel === "side" && openSide()) {
               setFilesOpened(false);
               setSideVisible(true);
-              openSide()?.();
+              openSide()?.open();
             }
           } else {
             p.onSetSidebar(true);
@@ -620,14 +633,14 @@ export function FilePanelProvider(p: {
         if (sideVisible()) {
           const sideComposer = sideTarget()?.querySelector<HTMLTextAreaElement>("textarea");
           if (e.shiftKey || (sideComposer && document.activeElement === sideComposer)) {
-            setSideVisible(false);
+            closeSidePanel();
           } else {
             focusSideComposer();
           }
         } else {
           setFilesOpened(false);
           setSideVisible(true);
-          openSide()?.();
+          openSide()?.open();
           rightPaneFocused = true;
           focusSideComposer();
         }
@@ -678,7 +691,7 @@ export function FilePanelProvider(p: {
       event.preventDefault();
       if (maximized()) setMaximized(false);
       else if (split()) setSplit(false);
-      else { setSideVisible(false); rightPaneFocused = false; }
+      else closeSidePanel();
     }
   };
   onMount(() => window.addEventListener("keydown", closeSideOnEscape));
@@ -943,26 +956,40 @@ export function FilePanelProvider(p: {
       target: sideTarget,
       available: () => !!openSide(),
       visible: sideVisible,
-      standalone: p.missionOpen === undefined,
-      show: (opts?: { focus?: boolean }) => {
+      show: (opts?: { focus?: boolean; restore?: boolean }) => {
         if (!openSide()) return;
+        if (opts?.restore) {
+          if (untrack(opened)) return;
+          setSideVisible(true);
+          return;
+        }
         zenRestore = null;
         setFilesOpened(false);
         setSideVisible(true);
-        openSide()?.();
+        openSide()?.open();
         if (opts?.focus) {
           rightPaneFocused = true;
           focusSideComposer();
         }
       },
-      hide: () => { setSideVisible(false); rightPaneFocused = false; },
-      register: fn => {
-        setOpenSide(() => fn);
+      hide: (opts?: { restore?: boolean }) => {
+        if (opts?.restore) {
+          setSideVisible(false);
+          rightPaneFocused = false;
+          return;
+        }
+        closeSidePanel();
+      },
+      register: handle => {
+        setOpenSide(() => handle);
         // A side question that unmounts and immediately mounts again (a
         // re-render of the mission view) keeps the pane open; only a real
         // removal hides it. Hide in an effect too, so a missed microtask
         // cannot leave the empty column reserved.
-        if (!fn) queueMicrotask(() => { if (!openSide()) setSideVisible(false); });
+        return () => {
+          setOpenSide(prev => (prev === handle ? undefined : prev));
+          queueMicrotask(() => { if (!openSide()) setSideVisible(false); });
+        };
       },
     }}>
     <PanelContext.Provider

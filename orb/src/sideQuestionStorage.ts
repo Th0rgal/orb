@@ -49,6 +49,14 @@ export function hintSideQuestionOpen(key: string): void {
   forcedOpen.add(key);
   openHints.set(key, true);
 }
+export function rememberSideQuestionOpen(key: string, open: boolean): void {
+  if (!open) forcedOpen.delete(key);
+  openHints.set(key, open);
+  const cached = savedCache.get(key);
+  if (cached && cached.open !== open) {
+    savedCache.set(key, { ...cached, open });
+  }
+}
 export function consumeSideQuestionOpenHint(key: string): boolean {
   const forced = forcedOpen.delete(key);
   if (forced) openHints.set(key, true);
@@ -103,8 +111,10 @@ export async function readSideQuestion(key: string): Promise<SavedSideQuestion |
         savedCache.delete(key);
         return undefined;
       }
-      cacheSavedSideQuestion(key, normalized);
-      return normalized;
+      const hintedOpen = openHints.get(key);
+      const effective = hintedOpen !== undefined ? { ...normalized, open: hintedOpen } : normalized;
+      cacheSavedSideQuestion(key, effective);
+      return effective;
     } catch { return undefined; }
   });
 }
@@ -152,7 +162,7 @@ export async function reconcileSavedSideQuestion(
           : localByPair.get(`${row.question.trim()}\u0000${row.answer.trim()}`);
         return { ...row, ...(attached?.length ? { attachments: attached } : {}) };
       });
-      return { ...saved, history: mergedHistory, pending: undefined };
+      return { ...saved, open: openHints.get(key) ?? saved.open, history: mergedHistory, pending: undefined };
     };
     try {
       let updated = false;
