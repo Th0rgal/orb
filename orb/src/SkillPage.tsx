@@ -170,12 +170,18 @@ export function SkillPage(p: { name: string; initialView?: "edit" | "history"; o
     const s = await fetchLibrarySkill(p.name).catch(() => null);
     if (!s) return;
     setSkill(s);
-    await localSkillsSync({ librarySkills: [{ name: s.name, content: s.content, files: (s.files ?? []).filter((f) => (f.path || f.name) !== SKILL_MD).map((f) => ({ rel: f.path || f.name, content: f.content })) }] }).catch(() => null);
+    const inlineFiles = (s.files ?? []).filter((f) => (f.path || f.name) !== SKILL_MD).map((f) => ({ rel: f.path || f.name, content: f.content }));
+    const missingRefs = (s.references ?? []).filter((r) => r && r !== SKILL_MD && !inlineFiles.some((f) => f.rel === r));
+    const extraFiles = await Promise.all(missingRefs.map(async (rel) => ({ rel, content: await readSkillFile(s.name, rel).catch(() => "") })));
+    await localSkillsSync({ librarySkills: [{ name: s.name, content: s.content, files: [...inlineFiles, ...extraFiles], audience: s.audience ?? null, scope: s.scope ?? null }] }).catch(() => null);
   };
   const discardLocal = async () => {
     const s = skill();
     if (!s) return;
-    await localSkillsSync({ librarySkills: [{ name: s.name, content: s.content }], replaceUnmanaged: [s.name] });
+    const inlineFiles = (s.files ?? []).filter((f) => (f.path || f.name) !== SKILL_MD).map((f) => ({ rel: f.path || f.name, content: f.content }));
+    const missingRefs = (s.references ?? []).filter((r) => r && r !== SKILL_MD && !inlineFiles.some((f) => f.rel === r));
+    const extraFiles = await Promise.all(missingRefs.map(async (rel) => ({ rel, content: await readSkillFile(s.name, rel).catch(() => "") })));
+    await localSkillsSync({ librarySkills: [{ name: s.name, content: s.content, files: [...inlineFiles, ...extraFiles], audience: s.audience ?? null, scope: s.scope ?? null }], replaceUnmanaged: [s.name] });
   };
   const remove = async () => {
     setDeleteBusy(true); setDeleteError(null);
