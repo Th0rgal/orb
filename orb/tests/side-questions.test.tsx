@@ -994,6 +994,62 @@ it('preserves and reopens /btw automatically when switching across mission tabs 
  expect(coldApp.dataset.filesOpen).toBe('false');
 });
 
+it('windows long /btw history to the latest 20 turns on open and expands on demand',async()=>{
+ const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ const turns=Array.from({length:45},(_,i)=>({
+  id:`turn-${i+1}`,
+  question:`Side question #${i+1}`,
+  answer:`Side answer #${i+1}`,
+  at:`2026-11-09T12:${String(Math.floor(i/60)).padStart(2,'0')}:${String(i%60).padStart(2,'0')}Z`,
+ }));
+ await writeSideQuestion(sideQuestionKey('mission-windowed'),{
+  history:turns,
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:null,
+ });
+ serverReconcile.fn=async()=>({history:turns,authoritative:true});
+ const view=render(()=><SideQuestions mission="mission-windowed" items={[]} ref={()=>{}} onTransfer={()=>{}}/>);
+ await screen.findByText('Side answer #45');
+ expect(view.container.querySelectorAll('[data-side-turn]').length).toBe(20);
+ expect(screen.queryByText('Side answer #25')).toBeNull();
+ expect(screen.getByText('Side answer #26')).toBeTruthy();
+
+ const loadMore=screen.getByRole('button',{name:'Load earlier side questions (25)'});
+ fireEvent.click(loadMore);
+ await waitFor(()=>expect(view.container.querySelectorAll('[data-side-turn]').length).toBe(40));
+ expect(screen.getByText('Side answer #6')).toBeTruthy();
+ expect(screen.queryByText('Side answer #5')).toBeNull();
+
+ fireEvent.click(screen.getByRole('button',{name:'Load earlier side questions (5)'}));
+ await waitFor(()=>expect(view.container.querySelectorAll('[data-side-turn]').length).toBe(45));
+ expect(screen.getByText('Side answer #1')).toBeTruthy();
+ expect(screen.queryByRole('button',{name:/Load earlier side questions/})).toBeNull();
+});
+
+it('shows SideQuestionSkeleton instead of premature empty-state copy while cold server reconciliation is in flight',async()=>{
+ let resolveServer!:(v:{history:Array<{id:string;question:string;answer:string;at:string}>;authoritative:boolean})=>void;
+ serverReconcile.fn=()=>new Promise(resolve=>{resolveServer=resolve;});
+
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="mission-cold-skeleton" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ handle.open();
+
+ expect(await screen.findByRole('status',{name:'Loading side questions'})).toBeTruthy();
+ expect(screen.queryByText(/Ask a question or give the side agent a task/)).toBeNull();
+
+ await waitFor(()=>expect(typeof resolveServer).toBe('function'));
+ resolveServer({
+  history:[{id:'btw:m1:1',question:'Cold question',answer:'Hydrated side answer',at:'2026-11-09T12:00:00Z'}],
+  authoritative:true,
+ });
+ expect(await screen.findByText('Hydrated side answer')).toBeTruthy();
+ expect(screen.queryByRole('status',{name:'Loading side questions'})).toBeNull();
+});
+
+
 
 
 

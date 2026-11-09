@@ -81,6 +81,23 @@ export function ConversationSkeleton() {
   </div>;
 }
 
+/** Quiet turn-sized placeholder shown only when a cold `/btw` side conversation
+ * is opened before IndexedDB or Core reconciliation settles. */
+export function SideQuestionSkeleton() {
+  return (
+    <div class="btw-skeleton" role="status" aria-label="Loading side questions" aria-busy="true">
+      <div class="sk-transcript" aria-hidden="true">
+        <div class="user sk-user" style={{ width: "64%", height: "34px", margin: "12px 0 16px auto" }} />
+        <div class="sk-lines">
+          <i style={{ width: "88%" }} />
+          <i style={{ width: "71%" }} />
+          <i style={{ width: "54%" }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Two-line placeholders matching the Inbox list geometry. */
 export function InboxSkeleton() {
   return (
