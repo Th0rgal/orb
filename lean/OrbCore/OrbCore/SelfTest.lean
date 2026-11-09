@@ -4274,6 +4274,27 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
     s!"\{\"mission_id\":{jsonEscape alMisId},\"content\":\"Hi Alice from Bob\"}"
   let (_, alEvsBody, _) ← sendReq "GET" s!"/api/control/missions/{alMisId}/events" aliceTok ""
   let (bobCancelSt, _, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/cancel" bobTok "{}"
+  -- Mission budget & reset cadence (`#1565`): owner `PUT` sets daily budget + `inference_usd_per_hour`, shared `participant` can `GET` (`200`) and is denied `PUT` (`403`)
+  let (alBudInitSt, alBudInitBody, _) ← sendReq "GET" s!"/api/control/missions/{alMisId}/budget" aliceTok ""
+  let (alBudBadPeriodSt, _, _) ← sendReq "PUT" s!"/api/control/missions/{alMisId}/budget" aliceTok "{\"budget_reset_period\":\"daily\"}"
+  let (alBudPutSt, alBudPutBody, _) ← sendReq "PUT" s!"/api/control/missions/{alMisId}/budget" aliceTok
+    "{\"budget_usd\":300,\"budget_reset_period\":\"daily\",\"vm_limits\":{\"max_concurrent\":4,\"provider_max_concurrent\":{\"boat\":2}},\"bandwidth_limits\":{\"tokens_per_min\":50000,\"inference_usd_per_hour\":18.5,\"compute_usd_per_hour\":6.0,\"protect_root\":true}}"
+  let (bobBudGetSt, bobBudGetBody, _) ← sendReq "GET" s!"/api/control/missions/{alMisId}/budget" bobTok ""
+  let (bobBudPutSt, _, _) ← sendReq "PUT" s!"/api/control/missions/{alMisId}/budget" bobTok "{\"budget_usd\":500}"
+  let (admBudGetSt, _, _) ← sendReq "GET" s!"/api/control/missions/{alMisId}/budget" adminTok ""
+  let (alBudClrSt, alBudClrBody, _) ← sendReq "PUT" s!"/api/control/missions/{alMisId}/budget" aliceTok "{\"budget_usd\":null,\"vm_limits\":null,\"bandwidth_limits\":null}"
+  if alBudInitSt != 200 || (alBudInitBody.splitOn "\"mode\":\"none\"").length < 2 ||
+     alBudBadPeriodSt != 400 || alBudPutSt != 200 ||
+     (alBudPutBody.splitOn "\"own_budget_reset_period\":\"daily\"").length < 2 ||
+     (alBudPutBody.splitOn "\"reset_period\":\"daily\"").length < 2 ||
+     (alBudPutBody.splitOn "\"period_resets_at\":\"20").length < 2 ||
+     (alBudPutBody.splitOn "\"persistent_carved_usd\":0.0").length < 2 ||
+     (alBudPutBody.splitOn "\"inference_usd_per_hour\":18.5").length < 2 ||
+     (alBudPutBody.splitOn "\"max_concurrent\":4").length < 2 ||
+     bobBudGetSt != 200 || (bobBudGetBody.splitOn "\"own_budget_usd\":300.0").length < 2 ||
+     bobBudPutSt != 403 || admBudGetSt != 404 ||
+     alBudClrSt != 200 || (alBudClrBody.splitOn "\"mode\":\"none\"").length < 2 then
+    return (← fail s!"mission budget (#1565) mismatch: init={alBudInitSt}:{alBudInitBody} badPeriod={alBudBadPeriodSt} put={alBudPutSt}:{alBudPutBody} bobGet={bobBudGetSt} bobPut={bobBudPutSt} admGet={admBudGetSt} clr={alBudClrSt}:{alBudClrBody}")
   let (bobDelSt, _, _) ← sendReq "DELETE" s!"/api/control/missions/{alMisId}" bobTok ""
   let (bobArcSt, _, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/archive" bobTok "{}"
   let (bobForkSt, _, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/fork" bobTok "{}"

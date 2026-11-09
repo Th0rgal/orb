@@ -226,11 +226,18 @@ def managedComputeDdl : String :=
   "CREATE TABLE IF NOT EXISTS managed_fleet_state(" ++
   "singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1)," ++
   "enabled INTEGER NOT NULL,boat_enabled INTEGER NOT NULL," ++
-  "daily_cap_cents INTEGER NOT NULL,spent_today_cents INTEGER NOT NULL,max_concurrent INTEGER NOT NULL);"
+  "daily_cap_cents INTEGER NOT NULL,spent_today_cents INTEGER NOT NULL,max_concurrent INTEGER NOT NULL);" ++
+  "CREATE TABLE IF NOT EXISTS mission_budgets(" ++
+  "mission_id TEXT PRIMARY KEY,budget_deci_milli_usd INTEGER," ++
+  "reset_period TEXT NOT NULL DEFAULT 'total'," ++
+  "vm_limits_json TEXT NOT NULL DEFAULT ''," ++
+  "bandwidth_limits_json TEXT NOT NULL DEFAULT ''," ++
+  "updated_at INTEGER NOT NULL DEFAULT 0);"
 
 def managedAdditiveAlters : Array String := #[
   "ALTER TABLE managed_machines ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
-  "CREATE INDEX IF NOT EXISTS idx_managed_machines_owner ON managed_machines(owner_user_id);"
+  "CREATE INDEX IF NOT EXISTS idx_managed_machines_owner ON managed_machines(owner_user_id);",
+  "CREATE TABLE IF NOT EXISTS mission_budgets(mission_id TEXT PRIMARY KEY,budget_deci_milli_usd INTEGER,reset_period TEXT NOT NULL DEFAULT 'total',vm_limits_json TEXT NOT NULL DEFAULT '',bandwidth_limits_json TEXT NOT NULL DEFAULT '',updated_at INTEGER NOT NULL DEFAULT 0);"
 ]
 
 def knownProviders : Array String :=
@@ -953,5 +960,313 @@ def renderRemoteNodesJson
 
 def renderRelayPollJson (cmd : ManagedRelayCommand) : String :=
   s!"[\{\"id\":{jsonEscape cmd.commandId},\"lease_id\":{cmd.heldLeaseId},\"lease_deadline\":{cmd.leaseDeadline},\"node_boot_epoch\":{cmd.nodeBootEpoch},\"payload\":{cmd.payloadJson}}]"
+
+/-! ## Mission Budget, Reset Cadence, VM Concurrency & Bandwidth Pacing (`/api/control/missions/:id/budget`) -/
+
+structure MissionBudgetConfig where
+  missionId           : String
+  budgetDeciMilliUsd? : Option UInt64 := none
+  resetPeriod         : String := "total"
+  vmLimitsJson        : String := ""
+  bandwidthLimitsJson : String := ""
+  updatedAt           : UInt64 := 0
+  deriving Repr, DecidableEq
+
+/-- Parse a positive finite JSON number into `1e-4` USD integer units (`$1.00 = 10000`). -/
+def parseDeciMilliUsd? (v : JVal) (minDm maxDm : UInt64) : Option UInt64 :=
+  match v with
+  | .num raw =>
+    let s := raw.trimAscii.toString
+    if s.isEmpty || s.startsWith "-" || s.contains 'e' || s.contains 'E' then none
+    else
+      match s.splitOn "." with
+      | [wholeStr] => do
+        let w ← wholeStr.toNat?
+        let dm := (w * 10000).toUInt64
+        if minDm ≤ dm && dm ≤ maxDm then some dm else none
+      | [wholeStr, fracStr] => do
+        let w ← if wholeStr.isEmpty then some 0 else wholeStr.toNat?
+        if fracStr.isEmpty || !fracStr.all Char.isDigit then none
+        else
+          let padded := (fracStr ++ "0000").take 4 |>.toString
+          let f ← padded.toNat?
+          let roundUp :=
+            if fracStr.length > 4 then
+              let d5 := (fracStr.drop 4).take 1 |>.toString
+              d5 ≥ "5"
+            else false
+          let dm := (w * 10000 + f + (if roundUp then 1 else 0)).toUInt64
+          if minDm ≤ dm && dm ≤ maxDm then some dm else none
+      | _ => none
+  | _ => none
+
+def formatDeciMilliUsd (dm : UInt64) : String :=
+  let whole := dm / 10000
+  let rem := dm % 10000
+  if rem == 0 then
+    s!"{whole}.0"
+  else
+    let pad4 :=
+      if rem < 10 then s!"000{rem}"
+      else if rem < 100 then s!"00{rem}"
+      else if rem < 1000 then s!"0{rem}"
+      else s!"{rem}"
+    let revTrim := pad4.toList.reverse.dropWhile (· == '0')
+    let frac := if revTrim.isEmpty then "0" else String.ofList revTrim.reverse
+    s!"{whole}.{frac}"
+
+def isValidBudgetResetPeriod (s : String) : Bool :=
+  s == "total" || s == "daily" || s == "weekly"
+
+/-- Return `(periodStartedAt?, periodResetsAt?)` in UTC ISO-8601 (`YYYY-MM-DDTHH:MM:SSZ`). -/
+def budgetResetWindowBounds (resetPeriod : String) (nowEpochSec : UInt64) : Option String × Option String :=
+  if resetPeriod == "daily" then
+    let startSec := nowEpochSec - (nowEpochSec % 86400)
+    let endSec := startSec + 86400
+    (some (formatEpochIso8601Utc startSec), some (formatEpochIso8601Utc endSec))
+  else if resetPeriod == "weekly" then
+    let dayNum := nowEpochSec / 86400
+    -- 1970-01-01 was Thursday (3 days after Monday)
+    let daysFromMonday := (dayNum + 3) % 7
+    let mondayStartSec := (dayNum - daysFromMonday) * 86400
+    let nextMondaySec := mondayStartSec + 604800
+    (some (formatEpochIso8601Utc mondayStartSec), some (formatEpochIso8601Utc nextMondaySec))
+  else
+    (none, none)
+
+def validateVmLimitsPatch (v : JVal) : Except (String × String) String := do
+  match v with
+  | .null => return ""
+  | .obj kvs =>
+    let mut maxConcJson := "null"
+    let mut hasMaxConc := false
+    if let some mv := (kvs.find? (fun (k, _) => k == "max_concurrent")).map Prod.snd then
+      match mv with
+      | .null => maxConcJson := "null"
+      | _ =>
+        match mv.asNat? with
+        | some n =>
+          if 1 ≤ n && n ≤ 128 then
+            maxConcJson := s!"{n}"
+            hasMaxConc := true
+          else
+            throw ("invalid_vm_limits", "vm_limits.max_concurrent must be between 1 and 128")
+        | none =>
+          throw ("invalid_vm_limits", "vm_limits.max_concurrent must be an integer between 1 and 128")
+    let mut provPairs : Array String := #[]
+    if let some pv := (kvs.find? (fun (k, _) => k == "provider_max_concurrent")).map Prod.snd then
+      match pv with
+      | .null => pure ()
+      | .obj pkvs =>
+        for (pkRaw, pval) in pkvs do
+          let pk := pkRaw.trimAscii.toString.toLower
+          if !isKnownProvider pk then
+            throw ("invalid_vm_limits", s!"Unknown cloud provider `{pkRaw}` in provider_max_concurrent")
+          match pval.asNat? with
+          | some n =>
+            if n ≤ 128 then
+              provPairs := provPairs.push s!"{jsonEscape pk}:{n}"
+            else
+              throw ("invalid_vm_limits", s!"Provider concurrency cap for `{pk}` must be between 0 and 128")
+          | none =>
+            throw ("invalid_vm_limits", s!"Provider concurrency cap for `{pk}` must be an integer between 0 and 128")
+      | _ =>
+        throw ("invalid_vm_limits", "vm_limits.provider_max_concurrent must be an object")
+    if !hasMaxConc && provPairs.isEmpty then
+      return ""
+    return s!"\{\"max_concurrent\":{maxConcJson},\"provider_max_concurrent\":\{{String.intercalate "," provPairs.toList}}}"
+  | _ =>
+    throw ("invalid_vm_limits", "vm_limits must be an object or null")
+
+def validateBandwidthLimitsPatch (v : JVal) : Except (String × String) String := do
+  match v with
+  | .null => return ""
+  | .obj kvs =>
+    let mut tokJson := "null"
+    let mut infUsdJson := "null"
+    let mut vcpuJson := "null"
+    let mut cmpUsdJson := "null"
+    let mut hasAnyCap := false
+    if let some tv := (kvs.find? (fun (k, _) => k == "tokens_per_min")).map Prod.snd then
+      if !tv.isNull then
+        match tv.asNat? with
+        | some n =>
+          if 1000 ≤ n && n ≤ 100000000 then
+            tokJson := s!"{n}"
+            hasAnyCap := true
+          else
+            throw ("invalid_bandwidth_limits", "bandwidth_limits.tokens_per_min must be between 1000 and 100000000")
+        | none =>
+          throw ("invalid_bandwidth_limits", "bandwidth_limits.tokens_per_min must be an integer")
+    if let some iv := (kvs.find? (fun (k, _) => k == "inference_usd_per_hour")).map Prod.snd then
+      if !iv.isNull then
+        match parseDeciMilliUsd? iv 100 100000000 with
+        | some dm =>
+          infUsdJson := formatDeciMilliUsd dm
+          hasAnyCap := true
+        | none =>
+          throw ("invalid_bandwidth_limits", "bandwidth_limits.inference_usd_per_hour must be between 0.01 and 10000")
+    if let some vv := (kvs.find? (fun (k, _) => k == "compute_vcpu_per_min")).map Prod.snd then
+      if !vv.isNull then
+        match vv.asNat? with
+        | some n =>
+          if 1 ≤ n && n ≤ 4096 then
+            vcpuJson := s!"{n}"
+            hasAnyCap := true
+          else
+            throw ("invalid_bandwidth_limits", "bandwidth_limits.compute_vcpu_per_min must be between 1 and 4096")
+        | none =>
+          throw ("invalid_bandwidth_limits", "bandwidth_limits.compute_vcpu_per_min must be an integer")
+    if let some cv := (kvs.find? (fun (k, _) => k == "compute_usd_per_hour")).map Prod.snd then
+      if !cv.isNull then
+        match parseDeciMilliUsd? cv 100 100000000 with
+        | some dm =>
+          cmpUsdJson := formatDeciMilliUsd dm
+          hasAnyCap := true
+        | none =>
+          throw ("invalid_bandwidth_limits", "bandwidth_limits.compute_usd_per_hour must be between 0.01 and 10000")
+    let protectRoot :=
+      match (kvs.find? (fun (k, _) => k == "protect_root")).map Prod.snd with
+      | some (.bool b) => b
+      | _ => true
+    if !hasAnyCap then
+      throw ("invalid_bandwidth_limits", "Set at least one rate cap or pass bandwidth_limits: null to clear")
+    let prStr := if protectRoot then "true" else "false"
+    return s!"\{\"tokens_per_min\":{tokJson},\"inference_usd_per_hour\":{infUsdJson},\"compute_vcpu_per_min\":{vcpuJson},\"compute_usd_per_hour\":{cmpUsdJson},\"protect_root\":{prStr}}"
+  | _ =>
+    throw ("invalid_bandwidth_limits", "bandwidth_limits must be an object or null")
+
+def getMissionBudgetConfig (st : ManagedComputeStore) (missionId : String) : IO MissionBudgetConfig := do
+  match ← execParamQuery st.db
+      "SELECT budget_deci_milli_usd,reset_period,vm_limits_json,bandwidth_limits_json,updated_at FROM mission_budgets WHERE mission_id=?1;"
+      #[missionId] with
+  | .ok rows =>
+    if rows.size > 1 then
+      let r := rows[1]!
+      let bRaw := (cell r 0).trimAscii.toString
+      let bOpt := if bRaw.isEmpty then none else (bRaw.toNat?).map Nat.toUInt64
+      let rpRaw := (cell r 1).trimAscii.toString
+      let rp := if isValidBudgetResetPeriod rpRaw then rpRaw else "total"
+      return {
+        missionId := missionId
+        budgetDeciMilliUsd? := bOpt
+        resetPeriod := if bOpt.isSome then rp else "total"
+        vmLimitsJson := (cell r 2).trimAscii.toString
+        bandwidthLimitsJson := (cell r 3).trimAscii.toString
+        updatedAt := cellU64 r 4
+      }
+    else
+      return { missionId := missionId }
+  | .error _ =>
+    return { missionId := missionId }
+
+def saveMissionBudgetConfig (st : ManagedComputeStore) (cfg : MissionBudgetConfig) : IO (Except String Unit) := do
+  if cfg.budgetDeciMilliUsd?.isNone && cfg.vmLimitsJson.isEmpty && cfg.bandwidthLimitsJson.isEmpty then
+    match ← execParamQuery st.db "DELETE FROM mission_budgets WHERE mission_id=?1;" #[cfg.missionId] with
+    | .error e => return .error e
+    | .ok _ => return .ok ()
+  else
+    let sql :=
+      "INSERT INTO mission_budgets(mission_id,budget_deci_milli_usd,reset_period,vm_limits_json,bandwidth_limits_json,updated_at) " ++
+      "VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(mission_id) DO UPDATE SET " ++
+      "budget_deci_milli_usd=excluded.budget_deci_milli_usd,reset_period=excluded.reset_period," ++
+      "vm_limits_json=excluded.vm_limits_json,bandwidth_limits_json=excluded.bandwidth_limits_json,updated_at=excluded.updated_at;"
+    let bParam := match cfg.budgetDeciMilliUsd? with | some dm => s!"{dm}" | none => ""
+    let rp := if cfg.budgetDeciMilliUsd?.isSome && isValidBudgetResetPeriod cfg.resetPeriod then cfg.resetPeriod else "total"
+    match ← execParamQuery st.db sql #[cfg.missionId, bParam, rp, cfg.vmLimitsJson, cfg.bandwidthLimitsJson, s!"{cfg.updatedAt}"] with
+    | .error e => return .error e
+    | .ok _ => return .ok ()
+
+def renderMissionBudgetJson
+    (fleet : ManagedFleetState)
+    (cfg : MissionBudgetConfig)
+    (nowEpochSec : UInt64) : String :=
+  let ownMachines := fleet.machines.filter (fun m => m.ownerMission == cfg.missionId)
+  let liveMachines := ownMachines.filter (fun m => m.status == "ready" || m.status == "provisioning")
+  let globalActive := (fleet.machines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
+  let spentDm : UInt64 := ownMachines.foldl (fun acc m => acc + m.spentCents * 100) 0
+  let reservedDm : UInt64 := liveMachines.foldl (fun acc m =>
+    let remSecs : UInt64 := if m.deletableAtSec > nowEpochSec then m.deletableAtSec - nowEpochSec else m.ttlMinutes * 60
+    -- Default $0.10/h = 1000 deci-milli-USD/hour
+    acc + (remSecs * 1000) / 3600) 0
+  let leasesJsonItems := liveMachines.map fun m =>
+    let remSecs : UInt64 := if m.deletableAtSec > nowEpochSec then m.deletableAtSec - nowEpochSec else m.ttlMinutes * 60
+    s!"\{\"remaining_secs\":{remSecs},\"usd_per_hour\":0.1}"
+  let (ownBudgetJson, resetPeriodJson, poolIdJson, modeJson, poolJson, maxGrantJson) :=
+    match cfg.budgetDeciMilliUsd? with
+    | none =>
+      ("null", "\"total\"", "null", "\"none\"", "null", "null")
+    | some capDm =>
+      let rp := if isValidBudgetResetPeriod cfg.resetPeriod then cfg.resetPeriod else "total"
+      let (pStart?, pEnd?) := budgetResetWindowBounds rp nowEpochSec
+      let pStartJson := match pStart? with | some s => jsonEscape s | none => "null"
+      let pEndJson := match pEnd? with | some s => jsonEscape s | none => "null"
+      let usedDm := spentDm + reservedDm
+      let availDm : UInt64 := if capDm > usedDm then capDm - usedDm else 0
+      let pJson :=
+        s!"\{\"pool_id\":{jsonEscape cfg.missionId},\"budget_usd\":{formatDeciMilliUsd capDm}," ++
+        s!"\"spent_usd\":{formatDeciMilliUsd spentDm},\"lifetime_spent_usd\":{formatDeciMilliUsd spentDm}," ++
+        s!"\"reserved_usd\":{formatDeciMilliUsd reservedDm},\"carved_usd\":0.0,\"persistent_carved_usd\":0.0," ++
+        s!"\"available_usd\":{formatDeciMilliUsd availDm},\"live_machines\":{liveMachines.size}," ++
+        s!"\"live_leases\":[{String.intercalate "," leasesJsonItems.toList}]," ++
+        s!"\"reset_period\":{jsonEscape rp},\"period_started_at\":{pStartJson},\"period_resets_at\":{pEndJson}}"
+      (formatDeciMilliUsd capDm, jsonEscape rp, jsonEscape cfg.missionId, "\"own\"", pJson, formatDeciMilliUsd availDm)
+  let (ownVmJson, vmModeJson, vmPoolIdJson, effVmJson) :=
+    if cfg.vmLimitsJson.isEmpty then
+      let eff :=
+        s!"\{\"source\":\"global\",\"pool_id\":null,\"active\":{liveMachines.size},\"max_concurrent\":null," ++
+        s!"\"global_active\":{globalActive},\"global_max_concurrent\":{fleet.maxConcurrent}," ++
+        s!"\"ancestor_max_concurrent\":null,\"provider_limits\":[]}"
+      ("null", "\"global\"", "null", eff)
+    else
+      let parsedVm := (OrbBin.Json.parse cfg.vmLimitsJson).toOption.getD (.obj #[])
+      let mcJson := match parsedVm.fieldNat? "max_concurrent" with | some n => s!"{n}" | none => "null"
+      let provItems : Array String :=
+        match parsedVm.field? "provider_max_concurrent" with
+        | some (.obj pkvs) =>
+          pkvs.filterMap fun (pk, pv) =>
+            pv.asNat?.map fun capN =>
+              let actP := (liveMachines.filter (fun m => m.provider == pk)).size
+              s!"\{\"provider\":{jsonEscape pk},\"active\":{actP},\"max_concurrent\":{capN}}"
+        | _ => #[]
+      let eff :=
+        s!"\{\"source\":\"mission\",\"pool_id\":{jsonEscape cfg.missionId},\"active\":{liveMachines.size},\"max_concurrent\":{mcJson}," ++
+        s!"\"global_active\":{globalActive},\"global_max_concurrent\":{fleet.maxConcurrent}," ++
+        s!"\"ancestor_max_concurrent\":null,\"provider_limits\":[{String.intercalate "," provItems.toList}]}"
+      (cfg.vmLimitsJson, "\"own\"", jsonEscape cfg.missionId, eff)
+  let (ownBwJson, bwModeJson, bwPoolIdJson, effBwJson) :=
+    if cfg.bandwidthLimitsJson.isEmpty then
+      let eff :=
+        "{\"source\":\"none\",\"pool_id\":null,\"tokens_per_min\":null,\"inference_usd_per_hour\":null," ++
+        "\"compute_vcpu_per_min\":null,\"compute_usd_per_hour\":null,\"protect_root\":true," ++
+        "\"current_tokens_per_min\":0,\"current_inference_usd_per_hour\":0.0,\"current_vcpu_per_min\":0.0," ++
+        "\"current_compute_usd_per_hour\":0.0,\"pacing_active\":false,\"paced_delay_ms\":0," ++
+        "\"ancestor_tokens_per_min\":null,\"ancestor_inference_usd_per_hour\":null," ++
+        "\"ancestor_compute_vcpu_per_min\":null,\"ancestor_compute_usd_per_hour\":null}"
+      ("null", "\"none\"", "null", eff)
+    else
+      let parsedBw := (OrbBin.Json.parse cfg.bandwidthLimitsJson).toOption.getD (.obj #[])
+      let rawFieldJson (k : String) : String :=
+        match parsedBw.field? k with
+        | some v => OrbBin.Json.renderCompact v
+        | none => "null"
+      let prStr := if (parsedBw.fieldBool? "protect_root").getD true then "true" else "false"
+      let eff :=
+        s!"\{\"source\":\"mission\",\"pool_id\":{jsonEscape cfg.missionId}," ++
+        s!"\"tokens_per_min\":{rawFieldJson "tokens_per_min"}," ++
+        s!"\"inference_usd_per_hour\":{rawFieldJson "inference_usd_per_hour"}," ++
+        s!"\"compute_vcpu_per_min\":{rawFieldJson "compute_vcpu_per_min"}," ++
+        s!"\"compute_usd_per_hour\":{rawFieldJson "compute_usd_per_hour"}," ++
+        s!"\"protect_root\":{prStr}," ++
+        "\"current_tokens_per_min\":0,\"current_inference_usd_per_hour\":0.0,\"current_vcpu_per_min\":0.0," ++
+        "\"current_compute_usd_per_hour\":0.0,\"pacing_active\":false,\"paced_delay_ms\":0," ++
+        "\"ancestor_tokens_per_min\":null,\"ancestor_inference_usd_per_hour\":null," ++
+        "\"ancestor_compute_vcpu_per_min\":null,\"ancestor_compute_usd_per_hour\":null}"
+      (cfg.bandwidthLimitsJson, "\"own\"", jsonEscape cfg.missionId, eff)
+  s!"\{\"mission_id\":{jsonEscape cfg.missionId},\"own_budget_usd\":{ownBudgetJson},\"own_budget_reset_period\":{resetPeriodJson}," ++
+  s!"\"pool_id\":{poolIdJson},\"mode\":{modeJson},\"pool\":{poolJson},\"max_grant_usd\":{maxGrantJson}," ++
+  s!"\"own_vm_limits\":{ownVmJson},\"vm_limits_mode\":{vmModeJson},\"vm_limits_pool_id\":{vmPoolIdJson},\"effective_vm_limits\":{effVmJson}," ++
+  s!"\"own_bandwidth_limits\":{ownBwJson},\"bandwidth_mode\":{bwModeJson},\"bandwidth_pool_id\":{bwPoolIdJson},\"effective_bandwidth\":{effBwJson}," ++
+  "\"children\":[]}"
 
 end OrbCore.Managed

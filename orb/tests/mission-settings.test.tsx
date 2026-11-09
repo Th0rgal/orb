@@ -117,10 +117,31 @@ it("parses total and per-provider machine limits and enforces bounds", () => {
 
 it("parses bandwidth limits, shorthand k/M tokens, and enforces ancestor ceilings", () => {
   expect(parseBandwidthLimits("120k", "32", "$2.5", true)).toEqual({
-    value: { tokens_per_min: 120_000, compute_vcpu_per_min: 32, compute_usd_per_hour: 2.5, protect_root: true },
+    value: {
+      tokens_per_min: 120_000,
+      inference_usd_per_hour: null,
+      compute_vcpu_per_min: 32,
+      compute_usd_per_hour: 2.5,
+      protect_root: true,
+    },
   });
   expect(parseBandwidthLimits("1.5M", "", "", false)).toEqual({
-    value: { tokens_per_min: 1_500_000, compute_vcpu_per_min: null, compute_usd_per_hour: null, protect_root: false },
+    value: {
+      tokens_per_min: 1_500_000,
+      inference_usd_per_hour: null,
+      compute_vcpu_per_min: null,
+      compute_usd_per_hour: null,
+      protect_root: false,
+    },
+  });
+  expect(parseBandwidthLimits("", "", "", true, undefined, "$12.5")).toEqual({
+    value: {
+      tokens_per_min: null,
+      inference_usd_per_hour: 12.5,
+      compute_vcpu_per_min: null,
+      compute_usd_per_hour: null,
+      protect_root: true,
+    },
   });
   expect(parseBandwidthLimits("", "", "", true)).toHaveProperty("error");
   expect(parseBandwidthLimits("500", "", "", true)).toHaveProperty("error");
@@ -129,15 +150,18 @@ it("parses bandwidth limits, shorthand k/M tokens, and enforces ancestor ceiling
       source: "mission",
       pool_id: "root",
       tokens_per_min: 80_000,
+      inference_usd_per_hour: 10.0,
       compute_vcpu_per_min: 16,
       compute_usd_per_hour: 1.5,
       protect_root: true,
       current_tokens_per_min: 0,
+      current_inference_usd_per_hour: 0,
       current_vcpu_per_min: 0,
       current_compute_usd_per_hour: 0,
       pacing_active: false,
       paced_delay_ms: 0,
       ancestor_tokens_per_min: 80_000,
+      ancestor_inference_usd_per_hour: 10.0,
       ancestor_compute_vcpu_per_min: 16,
       ancestor_compute_usd_per_hour: 1.5,
     },
@@ -145,6 +169,7 @@ it("parses bandwidth limits, shorthand k/M tokens, and enforces ancestor ceiling
   expect(parseBandwidthLimits("100k", "", "", true, childView)).toHaveProperty("error");
   expect(parseBandwidthLimits("40k", "24", "", true, childView)).toHaveProperty("error");
   expect(parseBandwidthLimits("40k", "8", "2.0", true, childView)).toHaveProperty("error");
+  expect(parseBandwidthLimits("40k", "8", "1.0", true, childView, "15.0")).toHaveProperty("error");
 });
 
 it("computes runway forecast from unspent pool funds without double-counting live VM reservations", () => {
@@ -247,8 +272,10 @@ it("turns bandwidth limits on, updates live runway preview, and saves pace setti
   await waitFor(() => expect((screen.getByLabelText("Tokens per minute") as HTMLInputElement).value).toBe("120000"));
 
   const tpmInput = screen.getByLabelText("Tokens per minute") as HTMLInputElement;
+  const infUsdHInput = screen.getByLabelText("Inference burn ceiling ($/h)") as HTMLInputElement;
   const usdHInput = screen.getByLabelText("Compute burn ceiling ($/h)") as HTMLInputElement;
   fireEvent.input(tpmInput, { target: { value: "90k" } });
+  fireEvent.input(infUsdHInput, { target: { value: "15" } });
   fireEvent.input(usdHInput, { target: { value: "1.0" } });
 
   // Forecast card updates live before saving.
@@ -257,10 +284,36 @@ it("turns bandwidth limits on, updates live runway preview, and saves pace setti
   fireEvent.click(screen.getByRole("button", { name: "Save bandwidth" }));
   await waitFor(() => expect(savedBw).toEqual({
     tokens_per_min: 90_000,
+    inference_usd_per_hour: 15,
     compute_vcpu_per_min: null,
     compute_usd_per_hour: 1,
     protect_root: true,
   }));
+});
+
+it("switches budget reset cadence to Daily, previews reset sustainability, and saves reset_period", async () => {
+  let savedArgs: { amount: number | null; period?: string } | null = null;
+  render(() => (
+    <MissionSettings
+      missionId="m1"
+      title="evm.fast"
+      onClose={() => {}}
+      load={async () => own(10)}
+      loadStats={pendingStats}
+      save={async (_id, amount, period) => {
+        savedArgs = { amount, period };
+        return optimisticBudget(own(amount ?? 10), amount, period);
+      }}
+    />
+  ));
+  const dailyRadio = await screen.findByRole("radio", { name: "Daily" });
+  expect(dailyRadio.getAttribute("aria-checked")).toBe("false");
+  fireEvent.click(dailyRadio);
+  expect(dailyRadio.getAttribute("aria-checked")).toBe("true");
+
+  fireEvent.click(screen.getByRole("button", { name: "Save budget" }));
+  await waitFor(() => expect(savedArgs).toEqual({ amount: 10, period: "daily" }));
+  expect(screen.getByText("Spent today")).toBeTruthy();
 });
 
 it("ignores stale background poll responses captured before a settings mutation", async () => {
@@ -374,10 +427,180 @@ it("hides duplicate idle subagent pool rows when off and folds $0 rows when on",
 it("matches the shared cross-client mission-budget fixture", () => {
   const globalDefault = missionBudgetFixture.global_default as MissionBudget;
   const dedicated = missionBudgetFixture.dedicated_override as MissionBudget;
+  const dailySust = missionBudgetFixture.daily_sustainable_with_lease_cliff as MissionBudget;
   expect(vmLimitsModeLine(globalDefault)).toBe("Uses the global limit (16 concurrent across Orb).");
   expect(bandwidthModeLine(globalDefault)).toBe("Unthrottled. Requests and spawns run at full speed.");
   expect(providerLimitsSummary(dedicated.own_vm_limits)).toBe("Hetzner: off · Vast.ai: 2");
   expect(bandwidthLimitsSummary(dedicated.own_bandwidth_limits)).toBe("120k tok/min · 32 vCPU/min · $2.50/h");
+  expect(bandwidthLimitsSummary(dailySust.own_bandwidth_limits)).toBe("150k tok/min · $18/h LLM · 64 vCPU/min · $10/h");
+  expect(modeLine(dailySust)).toContain("Own daily budget");
   expect(optimisticVmLimits(dedicated, null).effective_vm_limits?.max_concurrent).toBe(16);
   expect(optimisticBandwidthLimits(dedicated, null).bandwidth_mode).toBe("none");
+
+  const fc = computeRunwayForecast({
+    budget: dailySust,
+    budgetEnabled: true,
+    bandwidthEnabled: true,
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
+  });
+  expect(fc.resetPeriod).toBe("daily");
+  expect(fc.sustainsUntilReset).toBe(true);
+  expect(fc.resetsInSecs).toBe(900);
+  expect(fc.leaseCliffSecs).toBe(0);
+  expect(fc.headline).toBe("Sustains until daily reset");
+  expect(fc.subline).toContain("VM auto-extensions paused ($2.00 < $2.50 30m step)");
+  expect(fc.tone).toBe("warning");
+
+  // Pooled child sharing a daily ancestor pool (`max_grant_usd != null`) keeps the ancestor's daily reset cadence.
+  const pooledChild: MissionBudget = {
+    ...dailySust,
+    mission_id: "child-pooled",
+    own_budget_usd: null,
+    own_budget_reset_period: "total",
+    mode: "pooled",
+    max_grant_usd: 2.0,
+  };
+  const pooledFc = computeRunwayForecast({
+    budget: pooledChild,
+    bandwidthEnabled: true,
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
+  });
+  expect(pooledFc.resetPeriod).toBe("daily");
+  expect(pooledFc.sustainsUntilReset).toBe(true);
+  expect(pooledFc.headline).toBe("Sustains until daily reset");
+
+  // Ten $1/h VMs all at 10m remaining (`<= 600s`) with $2.50 available ($0.50 30m step):
+  // five VMs extend in the immediate reaper sweep and the sixth is rejected immediately (`0s`).
+  const immediateFleetBatch: MissionBudget = {
+    ...dailySust,
+    pool: {
+      ...dailySust.pool!,
+      live_machines: 10,
+      live_leases: undefined,
+      reserved_usd: 1.6667,
+      available_usd: 2.5,
+      spent_usd: 255.8333,
+      carved_usd: 40.0,
+    },
+  };
+  const immediateFleetFc = computeRunwayForecast({
+    budget: immediateFleetBatch,
+    budgetEnabled: true,
+    bandwidthEnabled: true,
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
+  });
+  expect(immediateFleetFc.sustainsUntilReset).toBe(true);
+  expect(immediateFleetFc.leaseCliffSecs).toBe(0);
+  expect(immediateFleetFc.subline).toContain("VM auto-extensions paused ($2.50 left across 10 VMs)");
+
+  // Two staggered $5/h VMs with per-VM `live_leases` (15m and 25m remaining) and $2.50 available at 23:00Z
+  // (60m before midnight reset): VM 0 extends at 5m (300s), consuming the $2.50, and VM 1 hits the cliff at 15m (900s).
+  const staggeredCliff: MissionBudget = {
+    ...dailySust,
+    pool: {
+      ...dailySust.pool!,
+      live_machines: 2,
+      live_leases: [
+        { remaining_secs: 900, usd_per_hour: 5.0 },
+        { remaining_secs: 1500, usd_per_hour: 5.0 },
+      ],
+      reserved_usd: 3.3333,
+      available_usd: 2.5,
+      spent_usd: 246.6667,
+      carved_usd: 47.5,
+    },
+  };
+  const staggeredFc = computeRunwayForecast({
+    budget: staggeredCliff,
+    budgetEnabled: true,
+    bandwidthEnabled: true,
+    nowMs: Date.parse("2026-11-05T23:00:00Z"),
+  });
+  expect(staggeredFc.leaseCliffSecs).toBeCloseTo(900, 0);
+  expect(staggeredFc.subline).toContain("VM extensions pause in ~15m");
+
+  // Single $10/h VM, 30m left ($5 reserved), $5 available ($5 30m step):
+  // - On a non-resetting (`total`) pool, first trigger in 20m (1,200s) is admitted (+1,800s) and the second at 50m (3,000s) is rejected.
+  // - On a `daily` pool at 23:45Z (reset in 15m = 900s), midnight clears the $290 spend before the 20m trigger so there is no near-term cliff!
+  const singleVmDaily: MissionBudget = {
+    ...dailySust,
+    pool: {
+      ...dailySust.pool!,
+      live_machines: 1,
+      live_leases: [{ remaining_secs: 1800, usd_per_hour: 10.0 }],
+      reserved_usd: 5.0,
+      available_usd: 5.0,
+      spent_usd: 290.0,
+      carved_usd: 0.0,
+    },
+  };
+  const singleVmDailyFc = computeRunwayForecast({
+    budget: singleVmDaily,
+    budgetEnabled: true,
+    bandwidthEnabled: true,
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
+  });
+  expect(singleVmDailyFc.leaseCliffSecs).toBeGreaterThan(86_400);
+  expect(singleVmDailyFc.subline).not.toContain("VM extensions pause");
+  expect(singleVmDailyFc.tone).toBe("ok");
+
+  const singleVmTotalFc = computeRunwayForecast({
+    budget: singleVmDaily,
+    draftResetPeriod: "total",
+    budgetEnabled: true,
+    bandwidthEnabled: true,
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
+  });
+  expect(singleVmTotalFc.leaseCliffSecs).toBeCloseTo(3000, 0);
+
+  // Lowering a compute bandwidth ceiling (`$2/h`) paces new spawns/resumes, NOT existing VM rates (`$10/h`),
+  // so a `$10/h` VM at 10m remaining with `$1` available still needs a `$5` 30m step and pauses immediately (`0s`).
+  const cappedBandwidthVm: MissionBudget = {
+    ...dailySust,
+    pool: {
+      ...dailySust.pool!,
+      live_machines: 1,
+      live_leases: [{ remaining_secs: 600, usd_per_hour: 10.0 }],
+      reserved_usd: 1.6667,
+      available_usd: 1.0,
+      spent_usd: 297.3333,
+      carved_usd: 0.0,
+    },
+  };
+  const cappedBwFc = computeRunwayForecast({
+    budget: cappedBandwidthVm,
+    draftComputeUsdPerH: "2.0",
+    budgetEnabled: true,
+    bandwidthEnabled: true,
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
+  });
+  expect(cappedBwFc.leaseCliffSecs).toBe(0);
+  expect(cappedBwFc.subline).toContain("VM auto-extensions paused ($1.00 < $5.00 30m step)");
+
+  // Completed child current-window spend (`carved_usd: 96, persistent_carved_usd: 0`) is released
+  // at midnight reset, whereas an open child grant (`persistent_carved_usd: 96`) stays carved.
+  const closedChildReset = missionBudgetFixture.daily_closed_child_reset_release as MissionBudget;
+  const closedChildFc = computeRunwayForecast({
+    budget: closedChildReset,
+    budgetEnabled: true,
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
+  });
+  expect(closedChildFc.leaseCliffSecs).toBeGreaterThan(86_400);
+  expect(closedChildFc.subline).not.toContain("VM extensions pause");
+  expect(closedChildFc.tone).toBe("ok");
+
+  const openChildGrant: MissionBudget = {
+    ...closedChildReset,
+    pool: {
+      ...closedChildReset.pool!,
+      persistent_carved_usd: 96.0,
+    },
+  };
+  const openChildFc = computeRunwayForecast({
+    budget: openChildGrant,
+    budgetEnabled: true,
+    nowMs: Date.parse("2026-11-05T23:45:00Z"),
+  });
+  expect(openChildFc.leaseCliffSecs).toBeCloseTo(3000, 0);
+  expect(openChildFc.subline).toContain("VM extensions pause in ~50m");
 });

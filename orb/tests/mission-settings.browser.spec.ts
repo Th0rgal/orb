@@ -52,6 +52,7 @@ test("bandwidth pacing limits shape the forecast runway and save optimistically"
   await bwSwitch.click();
   await expect(bwSwitch).toHaveAttribute("aria-checked", "true");
   await view.getByLabel("Tokens per minute").fill("90k");
+  await view.getByLabel("Inference burn ceiling ($/h)").fill("14");
   await view.getByLabel("Compute per minute (vCPU)").fill("24");
   await view.getByLabel("Compute burn ceiling ($/h)").fill("0.75");
 
@@ -60,7 +61,13 @@ test("bandwidth pacing limits shape the forecast runway and save optimistically"
   await expect(view.getByTestId("mission-forecast-card")).toContainText("from bandwidth cap");
 
   await view.getByRole("button", { name: "Save bandwidth" }).click();
-  await expect(view.getByText("90k tok/min · 24 vCPU/min · $0.75/h")).toBeVisible();
+  await expect(view.getByText("90k tok/min · $14/h LLM · 24 vCPU/min · $0.75/h")).toBeVisible();
+
+  // Switch spending budget cadence to Daily and verify forecast sustainability + label update.
+  await view.getByRole("radiogroup", { name: "Reset cadence" }).getByRole("radio", { name: "Daily" }).click();
+  await view.getByRole("button", { name: "Save budget" }).click();
+  await expect(view.getByText("Own daily budget (resets 00:00 UTC). Subagents share it unless you give one a sub-budget.")).toBeVisible();
+  await expect(view.getByText("Spent today")).toBeVisible();
   await shot(page, "mission-settings-bandwidth");
 });
 

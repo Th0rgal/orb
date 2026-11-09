@@ -157,5 +157,146 @@
         "live_machines": 0
       }
     ]
+  },
+  "daily_sustainable_with_lease_cliff": {
+    "mission_id": "77700000-0000-0000-0000-000000000003",
+    "own_budget_usd": 300.0,
+    "own_budget_reset_period": "daily",
+    "pool_id": "77700000-0000-0000-0000-000000000003",
+    "mode": "own",
+    "pool": {
+      "pool_id": "77700000-0000-0000-0000-000000000003",
+      "budget_usd": 300.0,
+      "spent_usd": 240.0,
+      "lifetime_spent_usd": 920.0,
+      "reserved_usd": 1.6667,
+      "carved_usd": 56.3333,
+      "persistent_carved_usd": 40.0,
+      "available_usd": 2.0,
+      "live_machines": 2,
+      "live_leases": [
+        { "remaining_secs": 600, "usd_per_hour": 5.0 },
+        { "remaining_secs": 600, "usd_per_hour": 5.0 }
+      ],
+      "reset_period": "daily",
+      "period_started_at": "2026-11-05T00:00:00Z",
+      "period_resets_at": "2026-11-06T00:00:00Z"
+    },
+    "max_grant_usd": null,
+    "own_vm_limits": null,
+    "vm_limits_mode": "global",
+    "vm_limits_pool_id": null,
+    "effective_vm_limits": {
+      "source": "global",
+      "pool_id": null,
+      "active": 10,
+      "max_concurrent": 32,
+      "global_active": 10,
+      "global_max_concurrent": 32,
+      "ancestor_max_concurrent": null,
+      "provider_limits": []
+    },
+    "own_bandwidth_limits": {
+      "tokens_per_min": 150000,
+      "inference_usd_per_hour": 18.0,
+      "compute_vcpu_per_min": 64,
+      "compute_usd_per_hour": 10.0,
+      "protect_root": true
+    },
+    "bandwidth_mode": "own",
+    "bandwidth_pool_id": "77700000-0000-0000-0000-000000000003",
+    "effective_bandwidth": {
+      "source": "mission",
+      "pool_id": "77700000-0000-0000-0000-000000000003",
+      "tokens_per_min": 150000,
+      "inference_usd_per_hour": 18.0,
+      "compute_vcpu_per_min": 64,
+      "compute_usd_per_hour": 10.0,
+      "protect_root": true,
+      "current_tokens_per_min": 96000,
+      "current_inference_usd_per_hour": 12.5,
+      "current_vcpu_per_min": 40,
+      "current_compute_usd_per_hour": 10.0,
+      "pacing_active": false,
+      "paced_delay_ms": 0,
+      "ancestor_tokens_per_min": null,
+      "ancestor_inference_usd_per_hour": null,
+      "ancestor_compute_vcpu_per_min": null,
+      "ancestor_compute_usd_per_hour": null
+    },
+    "children": []
+  },
+  "daily_closed_child_reset_release": {
+    "mission_id": "77700000-0000-0000-0000-000000000004",
+    "own_budget_usd": 100.0,
+    "own_budget_reset_period": "daily",
+    "pool_id": "77700000-0000-0000-0000-000000000004",
+    "mode": "own",
+    "pool": {
+      "pool_id": "77700000-0000-0000-0000-000000000004",
+      "budget_usd": 100.0,
+      "spent_usd": 0.0,
+      "lifetime_spent_usd": 0.0,
+      "reserved_usd": 2.0,
+      "carved_usd": 96.0,
+      "persistent_carved_usd": 0.0,
+      "available_usd": 2.0,
+      "live_machines": 1,
+      "live_leases": [
+        { "remaining_secs": 1800, "usd_per_hour": 4.0 }
+      ],
+      "reset_period": "daily",
+      "period_started_at": "2026-11-05T00:00:00Z",
+      "period_resets_at": "2026-11-06T00:00:00Z"
+    },
+    "max_grant_usd": null,
+    "own_vm_limits": null,
+    "vm_limits_mode": "global",
+    "vm_limits_pool_id": null,
+    "effective_vm_limits": {
+      "source": "global",
+      "pool_id": null,
+      "active": 1,
+      "max_concurrent": 32,
+      "global_active": 1,
+      "global_max_concurrent": 32,
+      "ancestor_max_concurrent": null,
+      "provider_limits": []
+    },
+    "own_bandwidth_limits": null,
+    "bandwidth_mode": "none",
+    "bandwidth_pool_id": null,
+    "effective_bandwidth": {
+      "source": "none",
+      "pool_id": null,
+      "tokens_per_min": null,
+      "inference_usd_per_hour": null,
+      "compute_vcpu_per_min": null,
+      "compute_usd_per_hour": null,
+      "protect_root": false,
+      "current_tokens_per_min": 24000,
+      "current_inference_usd_per_hour": 3.0,
+      "current_vcpu_per_min": 8,
+      "current_compute_usd_per_hour": 4.0,
+      "pacing_active": false,
+      "paced_delay_ms": 0,
+      "ancestor_tokens_per_min": null,
+      "ancestor_inference_usd_per_hour": null,
+      "ancestor_compute_vcpu_per_min": null,
+      "ancestor_compute_usd_per_hour": null
+    },
+    "children": [
+      {
+        "mission_id": "c1a00001-0000-0000-0000-000000000099",
+        "mode": "sub_budget",
+        "budget_usd": 96.0,
+        "spent_usd": 96.0,
+        "reserved_usd": 0.0,
+        "has_vm_limits": false,
+        "vm_max_concurrent": null,
+        "has_bandwidth_limits": false,
+        "live_machines": 0
+      }
+    ]
   }
 }

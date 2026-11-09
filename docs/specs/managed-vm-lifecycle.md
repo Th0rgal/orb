@@ -187,11 +187,21 @@ Each VM records `budget_pool_id` at create (the pool of its owner, or of the
 child it is claimed for). Per pool, derived from the registry
 (`src/managed/budget.rs`):
 
-- `spent` = metered (or estimated so far) cost of its VMs;
+- `spent` = metered (or estimated so far) cost of its VMs within the pool's
+  active window (`total` = lifetime, `daily` = `[00:00 UTC, +24h)`, `weekly` =
+  `[ISO Monday 00:00 UTC, +7d)`, attributed per ownership/run segment in
+  `billed_segments` so pool transfers and stopped idle gaps never leak across
+  reset boundaries; `lifetime_spent_usd` always reports cumulative all-time pool spend);
 - `reserved` = for each live VM, `min(remaining TTL, 60 min) × usd_per_hour`;
-- `carved` = each child pool's budget while its owner runs, only its use
-  once the owner is terminal (unused money returns);
+- `carved` = each child pool's budget while its owner runs, and once the owner
+  is terminal only what that child used inside the parent pool's active window
+  (unused money — and prior-period spend on daily/weekly root pools — returns);
 - `available = budget − spent − reserved − carved`.
+
+Root budget pools (`parent_pool_id = None`) may set `budget_reset_period` to
+`"total"` (default), `"daily"`, or `"weekly"`. Sub-budgets carved from an
+ancestor pool (`parent_pool_id = Some(_)`) must use `"total"` so a child grant
+cannot reset independently and overdraw its parent pool.
 
 Checked under the admission lock at `spawn_managed_machine`, marketplace
 fallback offer re-quotes, `resume`, `start_mission` auto-managed (before
@@ -257,6 +267,9 @@ and `vm_limits`):
 - `tokens_per_min`: optional LLM throughput ceiling (`1_000..=100_000_000`
   tokens/min across uncached + cached input + output tokens; reasoning tokens
   are already included in output and never double-counted) for the pool's subtree;
+- `inference_usd_per_hour`: optional LLM dollar burn ceiling (`0.01..=10_000.0`
+  USD/hour estimated from model token pricing, including cache read/write rates)
+  for the pool's subtree;
 - `compute_vcpu_per_min`: optional active managed-VM vCPU bandwidth ceiling
   (`1..=4_096` vCPU-min/min, i.e., active vCPU across live VMs in the pool);
 - `compute_usd_per_hour`: optional active managed-VM dollar burn rate ceiling
@@ -271,20 +284,21 @@ Hierarchical inheritance & pace/delay enforcement:
 
 1. **Ancestor monotonicity:** A child mission's `bandwidth_limits` cannot exceed
    any ancestor bandwidth pool's configured `tokens_per_min`,
-   `compute_vcpu_per_min`, or `compute_usd_per_hour` (`sub_bandwidth_exceeds_pool`).
-   Removing or editing `bandwidth_limits` re-attaches descendant bandwidth pools
-   and live VMs' `bandwidth_pool_id` to the nearest ancestor bandwidth pool, and
-   immediately wakes any in-flight paced requests.
-2. **Inference token pacing (`src/managed/pacing.rs` & `src/api/proxy.rs`):**
+   `inference_usd_per_hour`, `compute_vcpu_per_min`, or `compute_usd_per_hour`
+   (`sub_bandwidth_exceeds_pool`). Removing or editing `bandwidth_limits`
+   re-attaches descendant bandwidth pools and live VMs' `bandwidth_pool_id` to
+   the nearest ancestor bandwidth pool, and immediately wakes any in-flight
+   paced requests.
+2. **Inference token & dollar pacing (`src/managed/pacing.rs` & `src/api/proxy.rs`):**
    Every routed LLM proxy request (`/v1/chat/completions`, `/v1/responses`,
    `/v1/messages`) attributed to a mission checks all bandwidth pools in its
    lineage (skipping a pool whose `pool_id == mission_id` when `protect_root` is
-   `true`). Each pool maintains a continuous-refill token-bucket debt ledger
+   `true`). Each pool maintains continuous-refill token and USD debt ledgers
    charged on response/stream completion (`record_proxy_usage`). When a pool's
-   token debt is positive, incoming requests sleep transparently before upstream
-   dispatch (`delay_ms = min(debt / rate, 30_000 ms)`) while keeping
-   `proxy_liveness` active so stall watchdogs never misclassify intentional
-   pacing as a hung CLI. No synthetic `429` is returned to the harness.
+   token or inference-USD debt is positive, incoming requests sleep transparently
+   before upstream dispatch (`delay_ms = min(max(token_delay, usd_delay), 30_000 ms)`)
+   while keeping `proxy_liveness` active so stall watchdogs never misclassify
+   intentional pacing as a hung CLI. No synthetic `429` is returned to the harness.
 3. **Managed compute bandwidth pacing (`ManagedManager::spawn` & `resume`):**
    Before acquiring the final admission lock, if the mission's governing
    bandwidth pool sets `compute_vcpu_per_min` or `compute_usd_per_hour`:
@@ -299,15 +313,20 @@ Hierarchical inheritance & pace/delay enforcement:
      admission consumed capacity), as well as re-evaluating marketplace fallback
      offers before accepting higher CPU or hourly burn.
 4. **Surface & runway forecast:** `GET /api/control/missions/:id/budget` and MCP
-   `list_managed_machines` return `own_bandwidth_limits`, `bandwidth_mode`
-   (`"own" | "pooled" | "none"`), `bandwidth_pool_id`, and `effective_bandwidth`
-   (including live `current_tokens_per_min`, `current_vcpu_per_min`,
+   `list_managed_machines` return `own_budget_reset_period`, `own_bandwidth_limits`,
+   `bandwidth_mode` (`"own" | "pooled" | "none"`), `bandwidth_pool_id`, and
+   `effective_bandwidth` (including live `current_tokens_per_min`,
+   `current_inference_usd_per_hour`, `current_vcpu_per_min`,
    `current_compute_usd_per_hour`, `pacing_active`, and `paced_delay_ms`). Orb
    renders Mission Settings as a full-page view (`ms:<id>`) with a top compact
    spend/runway forecast chart showing observed burn, `now`, reserved hold, cap
-   line, and estimated time until budget exhaustion computed from unspent pool
-   funds (`max(0, cap_usd - spent_usd - carved_usd)`) at the effective (or draft
-   shaped) burn rate so live 60-minute VM reservations are not subtracted twice.
+   line, estimated time until budget exhaustion (`max(0, cap_usd - spent_usd - carved_usd)`),
+   periodic reset sustainability when `eta_secs >= resets_in_secs` (inherited by
+   `pooled` child missions sharing a daily/weekly ancestor pool), and live VM
+   lease-extension cliff based on the `30m` auto-extend reservation threshold
+   (`extension_step_usd = 0.5h × per_vm_usd_per_h` at `<= 10m` remaining lease)
+   when active reservations or insufficient unallocated headroom will pause
+   auto-extensions before unspent funds hit zero.
 
 ## Provisioning
 
