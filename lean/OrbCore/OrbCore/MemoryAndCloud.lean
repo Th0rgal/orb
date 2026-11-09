@@ -292,12 +292,13 @@ def executeMemoryMcpTool
 /-! ### 2. Scoped MCP Session Credentials (`mcp1.*`) & Capabilities Payload -/
 
 structure McpSessionClaims where
-  sessionId  : String
-  missionId  : String
-  role       : String
-  project    : String := ""
-  isExternal : Bool   := false
-  expiresAt  : UInt64
+  sessionId     : String
+  missionId     : String
+  role          : String
+  project       : String := ""
+  isExternal    : Bool   := false
+  expiresAt     : UInt64
+  hardExpiresAt : UInt64 := 0
   deriving Repr, DecidableEq
 
 def roleCodeFor (role : String) : UInt8 :=
@@ -316,21 +317,24 @@ def normalizeMcpRole (role : String) : String :=
 def mintScopedMcpToken (secret : String) (claims : McpSessionClaims) : String :=
   let effSec := if secret.isEmpty then "dev-mode-ephemeral-mcp-secret-012345" else secret
   let hdrB64 := base64Encode "{\"alg\":\"HS256\",\"typ\":\"MCP1\"}".toUTF8 false false
-  let payloadJson := renderCompact (.obj #[
+  let baseFields : Array (String × JVal) := #[
     ("session_id", .str claims.sessionId),
     ("mission_id", .str claims.missionId),
     ("role", .str (normalizeMcpRole claims.role)),
     ("project", .str claims.project),
     ("external", .bool claims.isExternal),
     ("exp", .nat claims.expiresAt.toNat)
-  ])
+  ]
+  let allFields :=
+    if claims.hardExpiresAt > 0 then baseFields.push ("hard_exp", .nat claims.hardExpiresAt.toNat)
+    else baseFields
+  let payloadJson := renderCompact (.obj allFields)
   let payB64 := base64Encode payloadJson.toUTF8 false false
   let signingInput := s!"mcp1.{hdrB64}.{payB64}"
   let sigHex := hmacSha256Hex effSec signingInput
   s!"{signingInput}.{sigHex}"
 
-/-- Verify an `mcp1.<hdrB64>.<payloadB64>.<sigHex>` credential against `secret` and `nowEpochSec`. -/
-def verifyScopedMcpToken? (secret token : String) (nowEpochSec : UInt64) : Option McpSessionClaims := do
+private def verifyScopedMcpTokenCore? (secret token : String) (nowEpochSec : UInt64) (forRenew : Bool) : Option McpSessionClaims := do
   if !token.startsWith "mcp1." then none
   let effSec := if secret.isEmpty then "dev-mode-ephemeral-mcp-secret-012345" else secret
   let rest := (token.drop 5).toString
@@ -345,7 +349,9 @@ def verifyScopedMcpToken? (secret token : String) (nowEpochSec : UInt64) : Optio
       let jv ← (OrbBin.Json.parseBytes payBytes).toOption
       let expNat ← jv.fieldNat? "exp"
       let exp := expNat.toUInt64
-      if nowEpochSec ≥ exp then none
+      let hardExp := ((jv.fieldNat? "hard_exp").getD 0).toUInt64
+      if hardExp > 0 && nowEpochSec ≥ hardExp then none
+      else if !forRenew && nowEpochSec ≥ exp then none
       else
         let sid := (jv.fieldStr? "session_id").getD "00000000-0000-0000-0000-000000000001"
         let mid := (jv.fieldStr? "mission_id").getD ""
@@ -359,8 +365,17 @@ def verifyScopedMcpToken? (secret token : String) (nowEpochSec : UInt64) : Optio
           project := proj
           isExternal := ext
           expiresAt := exp
+          hardExpiresAt := hardExp
         }
   | _ => none
+
+/-- Verify an `mcp1.<hdrB64>.<payloadB64>.<sigHex>` credential against `secret` and `nowEpochSec`. -/
+def verifyScopedMcpToken? (secret token : String) (nowEpochSec : UInt64) : Option McpSessionClaims :=
+  verifyScopedMcpTokenCore? secret token nowEpochSec false
+
+/-- Verify an `mcp1.*` credential for `/api/mcp/renew` (admitting expired rolling `exp` within `hard_exp`). -/
+def verifyScopedMcpTokenForRenew? (secret token : String) (nowEpochSec : UInt64) : Option McpSessionClaims :=
+  verifyScopedMcpTokenCore? secret token nowEpochSec true
 
 /-- Render `/api/mcp/capabilities` response with deterministic `OrbBin.McpCatalog.toolsForRole`. -/
 def buildMcpCapabilitiesJson (claims : McpSessionClaims) : String :=

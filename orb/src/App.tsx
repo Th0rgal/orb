@@ -110,9 +110,12 @@ const ProjectSettings=lazy(()=>import("./ProjectSettings").then(module=>({defaul
 const MissionSettings=lazy(()=>import("./MissionSettings").then(module=>({default:module.MissionSettings})));
 import {
   bindWorkspace,
+  desktopInvoke,
   installedIds,
   localBinding,
   localAgentsScanning,
+  localSkillsStatus,
+  localSkillsSync,
   localWorkspace,
   localDirectory,
   materializeMentions,
@@ -770,6 +773,18 @@ export default function App() {
       const sel = selected();
       if (sel && !sel.includes(":") && !PAGES.has(sel)) open(null);
       if (newMachine() === "local") void refreshLocalAgents(false);
+      if (desktopInvoke()) {
+        const repairTimer = setTimeout(() => {
+          void localSkillsStatus()
+            .then((rep) => {
+              if (rep?.mcp?.ready && rep.mcp.missing_harnesses.length > 0) {
+                return localSkillsSync({ pruneRemoved: false, skipMcpMint: true });
+              }
+            })
+            .catch(swallow("app.localMcpRepair"));
+        }, 1500);
+        onCleanup(() => clearTimeout(repairTimer));
+      }
     } else {
       // Backend views (missions, hosted files) can't render offline — e.g.
       // after a 401 cleared the token mid-session.

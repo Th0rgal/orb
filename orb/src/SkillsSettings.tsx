@@ -453,7 +453,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const filteredRows = createMemo(() => (attentionOnly() ? searched().filter(needsAttention) : searched()).filter((row) => !isOldCopy(row) && !deleting().has(row.name)));
 
   /** Sync local harnesses from the Library snapshot. Pruning removes Orb-managed leftovers only. */
-  const syncNow = async (prune: boolean, label?: string, replaceUnmanaged: string[] = []) => {
+  const syncNow = async (prune: boolean, label?: string, replaceUnmanaged: string[] = [], forceMcpPrompt = false) => {
     setSyncing(true);
     setSyncNotice(null);
     setSyncError(null);
@@ -466,11 +466,15 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
         const extra = await Promise.all(refs.map(async (rel) => ({ rel, content: await readSkillFile(pl.name, rel).catch(() => "") })));
         return { ...pl, files: [...(pl.files ?? []), ...extra] };
       }));
-      const result = await localSkillsSync({ librarySkills: payloads, pruneRemoved: prune && libraryLoaded(), replaceUnmanaged });
+      const result = await localSkillsSync({ librarySkills: payloads, pruneRemoved: prune && libraryLoaded(), replaceUnmanaged, forceMcpPrompt });
       setLocalReport(result.report);
       rememberKnownSkillNames(result.report.skills.map((s) => s.name));
       rememberSkillsReport(result.report);
-      if (label) setSyncNotice(label);
+      if (forceMcpPrompt && result.mcp_error) {
+        setSyncError(`Couldn’t connect Orb MCP: ${result.mcp_error}`);
+      } else if (label && (!forceMcpPrompt || result.report.mcp?.ready)) {
+        setSyncNotice(label);
+      }
     } catch (e) {
       setSyncError(errorText(e));
     } finally {
@@ -568,8 +572,12 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   // Orb's own copies of skills the Library dropped are pruned: they carry Orb's marker.
   let autoSynced = false;
   const removedCount = createMemo(() => rows().filter((row) => row.removed).length);
+  const mcpNeedsSync = createMemo(() => {
+    const m = localReport()?.mcp;
+    return Boolean(isConnected() && m?.binary_ready && (m.ready ? m.missing_harnesses.length > 0 : m.needs_token));
+  });
   createEffect(() => {
-    if (!autoSynced && libraryLoaded() && (driftCount() > 0 || removedCount() > 0) && !syncing()) { autoSynced = true; void syncNow(true); }
+    if (!autoSynced && libraryLoaded() && (driftCount() > 0 || removedCount() > 0 || mcpNeedsSync()) && !syncing()) { autoSynced = true; void syncNow(true); }
   });
 
   /** Keep this Mac's edit: it becomes the Library version. */
@@ -921,6 +929,50 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
                         ? `Active · ${pf().identity_fingerprint?.slice(-8) ?? "verified"}`
                         : "Not provisioned locally"}
                     </span>
+                  )}
+                </Show>
+              </div>
+            </div>
+
+            <div class="s-row">
+              <div class="s-row-text">
+                <div class="s-row-title">Orb control-plane MCP (<code>sandboxed-mcp</code>)</div>
+                <div class="s-row-desc">
+                  Wires <code>sandboxed-mcp</code> into Claude Code, Codex, Antigravity, and OpenCode when skills sync.
+                </div>
+              </div>
+              <div class="s-row-ctrl">
+                <Show
+                  when={localReport()?.mcp}
+                  fallback={<span class="skills-badge missing">Desktop required</span>}
+                >
+                  {(mcp) => (
+                    <Show
+                      when={mcp().ready && mcp().missing_harnesses.length === 0}
+                      fallback={
+                        <Show
+                          when={isConnected() && mcp().binary_ready}
+                          fallback={
+                            <span class="skills-badge missing">
+                              {!isConnected() ? "Connect backend" : "Binary missing"}
+                            </span>
+                          }
+                        >
+                          <button
+                            type="button"
+                            class="s-btn sm"
+                            disabled={syncing()}
+                            onClick={() => void syncNow(false, "Connected Orb MCP across local harnesses.", [], true)}
+                          >
+                            Connect MCP
+                          </button>
+                        </Show>
+                      }
+                    >
+                      <span class="skills-badge synced">
+                        Synced · {mcp().synced_harnesses.length} harness{mcp().synced_harnesses.length === 1 ? "" : "es"}
+                      </span>
+                    </Show>
                   )}
                 </Show>
               </div>

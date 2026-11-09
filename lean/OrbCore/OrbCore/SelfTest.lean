@@ -1437,6 +1437,35 @@ private def runFastMemoryBrokerTests
     closeCoreStore store
     IO.eprintln "[orb-core-test] FAIL: /api/mcp/capabilities missing memory_* tools"
     return 1
+
+  -- External MCP sessions (`/api/mcp/external-sessions` mint, idle renew, list, revoke)
+  let extOpBody := "{\"role\":\"operator\",\"ttl_days\":7}"
+  let extOpRaw := s!"POST /api/mcp/external-sessions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {extOpBody.utf8ByteSize}\r\n\r\n{extOpBody}".toUTF8
+  let .ok extOpReq := parseRequest extOpRaw none | do closeCoreStore store; return 1
+  let .ok extOpResp ← dispatchCoreRequest appSt extOpReq nowSec | do closeCoreStore store; return 1
+  let extCoordBody := "{\"role\":\"coordinator\",\"client_kind\":\"local_mcp\",\"client_label\":\"Local Harnesses\",\"ttl_days\":30}"
+  let extCoordRaw := s!"POST /api/mcp/external-sessions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {extCoordBody.utf8ByteSize}\r\n\r\n{extCoordBody}".toUTF8
+  let .ok extCoordReq := parseRequest extCoordRaw none | do closeCoreStore store; return 1
+  let .ok extCoordResp ← dispatchCoreRequest appSt extCoordReq nowSec | do closeCoreStore store; return 1
+  let .ok extCoordJson := OrbBin.Json.parseBytes extCoordResp.body | do closeCoreStore store; return 1
+  let extTok := (extCoordJson.fieldStr? "token").getD ""
+  let extSid := (extCoordJson.fieldStr? "session_id").getD ""
+  let extListRaw := s!"GET /api/mcp/external-sessions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
+  let .ok extListReq := parseRequest extListRaw none | do closeCoreStore store; return 1
+  let .ok extListResp ← dispatchCoreRequest appSt extListReq nowSec | do closeCoreStore store; return 1
+  let extIdleRenewRaw := s!"POST /api/mcp/renew HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {extTok}\r\nContent-Length: 2\r\n\r\n\{}".toUTF8
+  let .ok extIdleRenewReq := parseRequest extIdleRenewRaw none | do closeCoreStore store; return 1
+  let .ok extIdleRenewResp ← dispatchCoreRequest appSt extIdleRenewReq (nowSec + 7200) | do closeCoreStore store; return 1
+  let extDelRaw := s!"DELETE /api/mcp/external-sessions/{extSid} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
+  let .ok extDelReq := parseRequest extDelRaw none | do closeCoreStore store; return 1
+  let .ok extDelResp ← dispatchCoreRequest appSt extDelReq (nowSec + 1800) | do closeCoreStore store; return 1
+  let .ok extRevokedRenewResp ← dispatchCoreRequest appSt extIdleRenewReq (nowSec + 7201) | do closeCoreStore store; return 1
+  if extOpResp.status != 403 || extCoordResp.status != 200 || !extTok.startsWith "mcp1." ||
+     extListResp.status != 200 || extIdleRenewResp.status != 200 ||
+     extDelResp.status != 200 || extRevokedRenewResp.status != 401 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: /api/mcp/external-sessions lifecycle failed: op={extOpResp.status} coord={extCoordResp.status} renew={extIdleRenewResp.status} del={extDelResp.status} afterDel={extRevokedRenewResp.status}"
+    return 1
   -- SM-02: POST /api/control/missions with client placement persists placement_kind='client',
   -- and POST /api/mcp/call classifies onManagedNode strictly from typed placement_kind (ignoring legacy tags).
   let clientCreateBody := "{\"id\":\"m-sm02-client\",\"title\":\"Client Placed\",\"placement\":\"client\",\"project\":\"orb\"}"
