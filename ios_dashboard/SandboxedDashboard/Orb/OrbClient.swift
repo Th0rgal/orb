@@ -209,6 +209,8 @@ final class OrbCore {
         let modeRaw = info["auth_mode"].text
         if let mode = AuthMode(rawValue: modeRaw) {
             authMode = mode
+        } else {
+            authMode = .singleTenant
         }
         let u = info["user"]
         if u != .null, !u["id"].text.isEmpty, !u["username"].text.isEmpty {

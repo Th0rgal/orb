@@ -48,6 +48,35 @@ export interface AdminUserRecord {
   created_at: string;
 }
 
+export interface AdminUsersLoadResult {
+  users: AdminUserRecord[];
+  legacySingleTenant: boolean;
+}
+
+export function isLegacySingleTenantUsersFallback(
+  httpStatus: number | null | undefined,
+  authMode: string | null | undefined,
+): boolean {
+  if (httpStatus !== 404) return false;
+  const normalized = (authMode ?? "single_tenant").trim().toLowerCase();
+  return normalized !== "multi_user";
+}
+
+export function buildSingleTenantAdminUser(
+  current: CurrentUser | null | undefined = currentUser(),
+): AdminUserRecord {
+  return {
+    id: current?.id?.trim() || "admin",
+    username: current?.username?.trim() || "admin",
+    role: "admin",
+    unix_username: current?.unix_username ?? null,
+    disabled: false,
+    daily_spend_cap_cents: current?.daily_spend_cap_cents ?? null,
+    spent_today_cents: current?.spent_today_cents ?? 0,
+    created_at: "",
+  };
+}
+
 const RESERVED_UNIX_USERNAMES = new Set([
   "root",
   "daemon",
@@ -129,6 +158,28 @@ export async function listAdminUsers(): Promise<AdminUserRecord[]> {
   const data = await api<AdminUserRecord[] | { users?: AdminUserRecord[] }>("/api/admin/users");
   if (Array.isArray(data)) return data;
   return Array.isArray(data?.users) ? data.users : [];
+}
+
+export async function loadAdminUsersForSettings(): Promise<AdminUsersLoadResult> {
+  try {
+    const users = await listAdminUsers();
+    return { users, legacySingleTenant: false };
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) {
+      let mode = authModeState();
+      if (mode === "multi_user") {
+        const refreshed = await refreshCurrentUser(true).catch(() => null);
+        if (refreshed) mode = refreshed.auth_mode || authModeState();
+      }
+      if (isLegacySingleTenantUsersFallback(404, mode)) {
+        return {
+          users: [buildSingleTenantAdminUser()],
+          legacySingleTenant: true,
+        };
+      }
+    }
+    throw err;
+  }
 }
 
 export interface CreateAdminUserInput {

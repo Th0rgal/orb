@@ -41,6 +41,9 @@ opaque coreEpochSec : IO UInt64
 @[extern "orb_pbkdf2_sha256"]
 opaque pbkdf2Sha256HexRaw (password : @& String) (salt : @& String) (iterations : UInt32) : IO String
 
+@[extern "orb_sd_notify"]
+opaque sdNotifyRaw (socketPath : @& String) (payload : @& String) : IO UInt32
+
 /-- Typed SQLite handle opened in WAL mode with an exclusive `Std.Mutex` serializing C `sqlite3*` access. -/
 structure SqliteDb where
   handle : UInt64
@@ -283,6 +286,12 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE missions ADD COLUMN project TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN authority_mode TEXT NOT NULL DEFAULT 'writer';",
   "ALTER TABLE missions ADD COLUMN placement_kind TEXT NOT NULL DEFAULT 'managed';",
+  "ALTER TABLE missions ADD COLUMN deferred_goal TEXT;",
+  "ALTER TABLE missions ADD COLUMN terminal_reason TEXT;",
+  "ALTER TABLE missions ADD COLUMN model_override TEXT;",
+  "ALTER TABLE missions ADD COLUMN model_effort TEXT;",
+  "ALTER TABLE missions ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';",
+  "ALTER TABLE missions ADD COLUMN total_cost_cents INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE missions ADD COLUMN superseded_by_mission_id TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN orphaned_at TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN reserved_disk_gib INTEGER NOT NULL DEFAULT 0;",
@@ -296,8 +305,10 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE missions ADD COLUMN scheduled_remote_job_id TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE missions ADD COLUMN resume_intent INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE mission_runs ADD COLUMN id TEXT;",
   "ALTER TABLE mission_runs ADD COLUMN terminal_reason TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE mission_runs ADD COLUMN remote_job_id TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE mission_runs ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE remote_message_queue ADD COLUMN phase INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE remote_message_queue ADD COLUMN claimed_generation INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE remote_message_queue ADD COLUMN claim_boot_epoch INTEGER NOT NULL DEFAULT 0;",
@@ -730,18 +741,107 @@ private def allocateNextBootEpoch (mDb : SqliteDb) : IO (Except String UInt64) :
         return .error s!"boot_epoch_commit_failed:{ce}"
       return .ok ep.toUInt64
 
+/-- Insert a `mission_runs` row compatibly across both fresh (`id PRIMARY KEY`) and legacy (`run_id PRIMARY KEY`) schemas. -/
+def insertMissionRunUnlocked
+    (db : SqliteDb)
+    (runId missionId generation executionState terminalReason remoteJobId updatedAt : String)
+    (orReplace : Bool := false) : IO (Except String (Array (Array String))) := do
+  let colsRes ← sqliteQueryRowsRaw db.handle "PRAGMA table_info(mission_runs);" #[]
+  let mut hasRunId := false
+  let mut hasStartedAt := false
+  if let .ok cols := colsRes then
+    for i in [1:cols.size] do
+      let colName := ((cols[i]?.bind (·[1]?)).getD "").toLower
+      if colName == "run_id" then hasRunId := true
+      if colName == "started_at" then hasStartedAt := true
+  let verb := if orReplace then "INSERT OR REPLACE" else "INSERT"
+  if hasRunId && hasStartedAt then
+    sqliteQueryRowsRaw db.handle
+      s!"{verb} INTO mission_runs(run_id,id,mission_id,generation,execution_state,terminal_reason,remote_job_id,started_at,updated_at) VALUES(?1,?1,?2,?3,?4,?5,?6,?7,?7);"
+      #[runId, missionId, generation, executionState, terminalReason, remoteJobId, updatedAt]
+  else if hasRunId then
+    sqliteQueryRowsRaw db.handle
+      s!"{verb} INTO mission_runs(run_id,id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?1,?2,?3,?4,?5,?6,?7);"
+      #[runId, missionId, generation, executionState, terminalReason, remoteJobId, updatedAt]
+  else
+    sqliteQueryRowsRaw db.handle
+      s!"{verb} INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7);"
+      #[runId, missionId, generation, executionState, terminalReason, remoteJobId, updatedAt]
+/-- Normalize a legacy single-tenant `mission_runs` table (`run_id TEXT PRIMARY KEY NOT NULL`)
+    by backfilling `id` and `updated_at` from `run_id` and `started_at`. -/
+private def migrateLegacyMissionRunsUnlocked (h : UInt64) : IO (Except String Unit) := do
+  let colsRes ← sqliteQueryRowsRaw h "PRAGMA table_info(mission_runs);" #[]
+  let .ok cols := colsRes | return .error (match colsRes with | .error e => e | .ok _ => "pragma_failed")
+  let mut hasRunId := false
+  let mut hasStartedAt := false
+  for i in [1:cols.size] do
+    let colName := ((cols[i]?.bind (·[1]?)).getD "").toLower
+    if colName == "run_id" then hasRunId := true
+    if colName == "started_at" then hasStartedAt := true
+  if !hasRunId then
+    return .ok ()
+  let backfillUpd :=
+    if hasStartedAt then
+      "UPDATE mission_runs SET id = COALESCE(NULLIF(id,''), run_id), updated_at = COALESCE(NULLIF(updated_at,''), started_at, '') WHERE COALESCE(id,'') = '' OR COALESCE(updated_at,'') = '';"
+    else
+      "UPDATE mission_runs SET id = COALESCE(NULLIF(id,''), run_id) WHERE COALESCE(id,'') = '';"
+  let ddl :=
+    backfillUpd ++
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_runs_id_compat ON mission_runs(id) WHERE id IS NOT NULL AND id <> '';" ++
+    "DROP TRIGGER IF EXISTS orb_mission_runs_legacy_fill_run_id;" ++
+    "DROP TRIGGER IF EXISTS orb_mission_runs_legacy_fill_id;"
+  sqliteExecRaw h ddl
+
+/-- Resolve `(missionsDbPath, askDbPath)` in `trimmedRoot`, honoring legacy `missions/missions-<singleTenantUserId>.db`
+    and `missions/ask.db` layouts when the root `missions.db` / `ask.db` is missing or empty (`0` bytes). -/
+def resolveCoreStoreDbPaths (trimmedRoot : String) (singleTenantUserId : String := "") : IO (String × String) := do
+  let defaultMissions := s!"{trimmedRoot}/missions.db"
+  let defaultAsk := s!"{trimmedRoot}/ask.db"
+  let defaultMStat ← statIdentity defaultMissions true
+  let cleanTenant := singleTenantUserId.trimAscii.toString
+  let mut missionsPath := defaultMissions
+  if !defaultMStat.exists_ || defaultMStat.size == 0 then
+    let mut candidates : Array String := #[]
+    if !cleanTenant.isEmpty && (cleanTenant.splitOn "/").length == 1 && cleanTenant != "." && cleanTenant != ".." then
+      candidates := candidates.push s!"{trimmedRoot}/missions/missions-{cleanTenant}.db"
+    candidates := candidates.push s!"{trimmedRoot}/missions/missions-prod.db"
+    candidates := candidates.push s!"{trimmedRoot}/missions/missions.db"
+    for cand in candidates do
+      if missionsPath == defaultMissions then
+        let st ← statIdentity cand true
+        if st.exists_ && st.size > 0 then
+          missionsPath := cand
+  let defaultAStat ← statIdentity defaultAsk true
+  let legacyAsk := s!"{trimmedRoot}/missions/ask.db"
+  let legacyAStat ← statIdentity legacyAsk true
+  let askPath :=
+    if (!defaultAStat.exists_ || defaultAStat.size == 0) && legacyAStat.exists_ && legacyAStat.size > 0 then
+      legacyAsk
+    else
+      defaultAsk
+  return (missionsPath, askPath)
+
 /-- Open or initialize the full `CoreStore` SQLite bundle in `rootDir` (preserving existing DB files in-place
     and failing closed on any persistent open/schema/recovery failure without in-memory fallback).
     When `bootEpoch == 0` (the default), atomically increments and persists `boot_epoch` in `core_boot_state`. -/
-def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) : IO (Except String CoreStore) := do
+def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUserId : String := "") : IO (Except String CoreStore) := do
   let trimmedRoot := rootDir.trimAscii.toString
   if trimmedRoot.isEmpty || trimmedRoot == ":memory:" then
     return .error "core_store_invalid_root"
   let createRes ← (IO.FS.createDirAll trimmedRoot).toBaseIO
   if let .error ioErr := createRes then
     return .error s!"core_store_mkdir_failed:{ioErr}"
-  let mRes ← openSqliteDb s!"{trimmedRoot}/missions.db" missionsSchemaSql missionsAdditiveAlters
+  let envFromOs ← IO.getEnv "SANDBOXED_SINGLE_TENANT_USER_ID"
+  let envTenant :=
+    if !singleTenantUserId.trimAscii.isEmpty then singleTenantUserId
+    else envFromOs.getD ""
+  let (missionsPath, askPath) ← resolveCoreStoreDbPaths trimmedRoot envTenant
+  let mRes ← openSqliteDb missionsPath missionsSchemaSql missionsAdditiveAlters
   let .ok mDb := mRes | return .error (match mRes with | .error e => e | .ok _ => "err")
+  let legacyRunsRes ← mDb.mu.atomically (migrateLegacyMissionRunsUnlocked mDb.handle)
+  if let .error legErr := legacyRunsRes then
+    sqliteCloseRaw mDb.handle
+    return .error s!"core_store_legacy_runs_migration_failed:{legErr}"
   let contInitRes : Except String Unit ← mDb.mu.atomically do
     if let .error e ← sqliteQueryRowsRaw mDb.handle harnessContinuitySchemaSql #[] then
       return .error e
@@ -758,7 +858,7 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) : IO (Except Stri
     return .error (match effBootRes with | .error e => e | .ok _ => "boot_epoch_failed")
   let pRes ← openSqliteDb s!"{trimmedRoot}/projects.db" projectsSchemaSql projectsAdditiveAlters
   let .ok pDb := pRes | do sqliteCloseRaw mDb.handle; return .error (match pRes with | .error e => e | .ok _ => "err")
-  let aRes ← openSqliteDb s!"{trimmedRoot}/ask.db" askSchemaSql
+  let aRes ← openSqliteDb askPath askSchemaSql
   let .ok aDb := aRes | do sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; return .error (match aRes with | .error e => e | .ok _ => "err")
   let askNotesInitRes : Except String Unit ← aDb.mu.atomically do
     if let .error e ← sqliteQueryRowsRaw aDb.handle askMidturnSchemaSql #[] then
@@ -1671,9 +1771,8 @@ def startMachineTransfer (st : CoreStore) (t : TransferRecord) : IO (Except Stri
       "INSERT INTO machine_transfers(id,mission_id,request_key,revision,phase,data,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7);"
       #[outRec.id, outRec.missionId, outRec.requestKey, "0", outRec.phase, dataJson, outRec.createdAt]
     let .ok _ := ins | return .error (match ins with | .error e => e | .ok _ => "transfer_insert_failed")
-    let runIns ← execParamQueryUnlocked st.missionsDb
-      "INSERT OR REPLACE INTO mission_runs(id,mission_id,generation,execution_state,updated_at) VALUES(?1,?2,?3,'terminal',?4);"
-      #[s!"txrun-{outRec.id}", outRec.missionId, s!"{nextGen}", outRec.createdAt]
+    let runIns ← insertMissionRunUnlocked st.missionsDb
+      s!"txrun-{outRec.id}" outRec.missionId s!"{nextGen}" "terminal" "" "" outRec.createdAt true
     match runIns with
     | .error e => return .error e
     | .ok _ => return .ok outRec
@@ -2565,9 +2664,8 @@ def stepRemoteMissionReplay
         return .error "remote_replay_revision_overflow"
       let finalRev := preRev + 1
       let newReplays := replays + 1
-      let insRun ← execParamQueryUnlocked st.missionsDb
-        "INSERT INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,'running','',?4,?5);"
-        #[s!"remote-job:{candidateJobId}", missionId, s!"{nextGen}", candidateJobId, updatedAt]
+      let insRun ← insertMissionRunUnlocked st.missionsDb
+        s!"remote-job:{candidateJobId}" missionId s!"{nextGen}" "running" "" candidateJobId updatedAt
       if let .error re := insRun then return .error re
       let updOk ← execParamQueryUnlocked st.missionsDb
         "UPDATE missions SET status='active',terminal_reason='',not_before=0,resume_intent=0,run_generation=?2,state_revision=?3,updated_at=?4 WHERE id=?1 AND status='pending' AND COALESCE(state_revision,0)=CAST(?5 AS INTEGER);"
@@ -2607,9 +2705,8 @@ def stepRemoteMissionReplay
           callerEpoch := ownerEpoch, nowEpoch := nowEpoch, reqNotBefore := rbNotBefore, markSuperseded := 0 }
       if rbEffs.isEmpty then
         return .error "remote_replay_rollback_lifecycle_rejected"
-      let insAborted ← execParamQueryUnlocked st.missionsDb
-        "INSERT INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,'terminal','remote_dispatch_failed',?4,?5);"
-        #[s!"remote-job:{candidateJobId}", missionId, s!"{curRunGen}", candidateJobId, updatedAt]
+      let insAborted ← insertMissionRunUnlocked st.missionsDb
+        s!"remote-job:{candidateJobId}" missionId s!"{curRunGen}" "terminal" "remote_dispatch_failed" candidateJobId updatedAt
       if let .error re := insAborted then return .error re
       let restoredSchedJob :=
         if isScheduledOrigin && mustRestoreOrigin then previousOriginJob else tentativeSchedJob
@@ -2648,9 +2745,8 @@ def stepRemoteMissionReplay
       if failEffs.isEmpty then
         return .error "remote_replay_fail_lifecycle_rejected"
       let termReason := if action == 2 then "remote_wait_deadline_exceeded" else "remote_replay_exhausted"
-      let insAborted ← execParamQueryUnlocked st.missionsDb
-        "INSERT INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,'terminal','remote_dispatch_failed',?4,?5);"
-        #[s!"remote-job:{candidateJobId}", missionId, s!"{curRunGen}", candidateJobId, updatedAt]
+      let insAborted ← insertMissionRunUnlocked st.missionsDb
+        s!"remote-job:{candidateJobId}" missionId s!"{curRunGen}" "terminal" "remote_dispatch_failed" candidateJobId updatedAt
       if let .error re := insAborted then return .error re
       let restoredSchedJob :=
         if isScheduledOrigin && mustRestoreOrigin then previousOriginJob else tentativeSchedJob

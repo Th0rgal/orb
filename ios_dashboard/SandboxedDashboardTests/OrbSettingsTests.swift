@@ -272,6 +272,18 @@ final class OrbSettingsTests: XCTestCase {
             spentTodayCents: 0
         )
         XCTAssertTrue(OrbCore.shared.isAdminUser)
+
+        XCTAssertTrue(OrbUsersModel.isLegacySingleTenantFallback(status: 404, authMode: "single_tenant"))
+        XCTAssertTrue(OrbUsersModel.isLegacySingleTenantFallback(status: 404, authMode: "disabled"))
+        XCTAssertFalse(OrbUsersModel.isLegacySingleTenantFallback(status: 404, authMode: "multi_user"))
+        XCTAssertFalse(OrbUsersModel.isLegacySingleTenantFallback(status: 502, authMode: "single_tenant"))
+        XCTAssertEqual(OrbUsersModel.resetPasswordPath(for: "usr-1"), "/api/admin/users/usr-1/reset-password")
+
+        let synth = OrbAdminUser.singleTenantAdmin()
+        XCTAssertEqual(synth.id, "admin")
+        XCTAssertEqual(synth.username, "admin")
+        XCTAssertEqual(synth.role, "admin")
+        XCTAssertFalse(synth.disabled)
     }
 
     func testAdminOnlyNodeFilteringAndSharedSenderAttribution() {
