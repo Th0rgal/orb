@@ -68,7 +68,6 @@ const UsersSettings=lazy(()=>import("./UsersSettings").then(module=>({default:mo
 const ShareMissionDialog=lazy(()=>import("./ShareMissionDialog").then(module=>({default:module.ShareMissionDialog})));
 import { SETTINGS_PAGE_IDS, SETTINGS_SECTIONS, settingsAttention, settingsPageId, settingsSectionFor, skillPageName } from "./settingsNav";
 const SkillPage = lazy(() => import("./SkillPage").then(module => ({ default: module.SkillPage })));
-import { quotaStatus, usageWindows } from "./providerUsage";
 import { ProviderLogo } from "./ProviderLogo";
 import { SessionPreview, type SessionPreviewData } from "./SessionPreview";
 let routingConfirmLeave: ((onDiscard?: () => void) => boolean) | null = null;
@@ -140,7 +139,6 @@ import {
   bumpProjects,
   projectsVersion,
   connectionVersion,
-  getAllProviderUsage,
   getApiUrl,
   type Mission,
   type ProjectSummary,
@@ -179,7 +177,6 @@ export default function App() {
   const [privilegeRequests, setPrivilegeRequests] = createSignal(0);
   const [bunkerActive, setBunkerActive] = createSignal(false);
   const [deviceUnenrolled, setDeviceUnenrolled] = createSignal(false);
-  const [quotaExhausted, setQuotaExhausted] = createSignal(false);
   const [searchOpen, setSearchOpen] = createSignal(false);
   const [searchQuery, setSearchQuery] = createSignal("");
   const [searchReturnFocus, setSearchReturnFocus] = createSignal<HTMLElement | null>(null);
@@ -197,7 +194,7 @@ export default function App() {
     const warm = setTimeout(() => { void import("./SearchDialog"); }, 400);
     onCleanup(() => clearTimeout(warm));
   });
-  const settingsDots = createMemo(() => settingsAttention({ bunkerActive: bunkerActive(), deviceEnrolled: !deviceUnenrolled(), quotaExhausted: quotaExhausted() }));
+  const settingsDots = createMemo(() => settingsAttention({ bunkerActive: bunkerActive(), deviceEnrolled: !deviceUnenrolled() }));
   onMount(() => onCleanup(trackScrollbarHover()));
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
@@ -1224,11 +1221,6 @@ export default function App() {
     loadEnrollment();
     window.addEventListener("orb:approval-devices-changed", loadEnrollment);
     onCleanup(() => window.removeEventListener("orb:approval-devices-changed", loadEnrollment));
-    // A spent provider quota puts a dot on Models.
-    const loadQuota = () => (isConnected() ? getAllProviderUsage().then((u) => setQuotaExhausted(Object.values(u).some((x) => quotaStatus(usageWindows(x))?.level === "exhausted"))).catch(swallow("app.quota")) : undefined);
-    void loadQuota();
-    const stopQuota = pollWhileVisible(loadQuota, 60000, "app.quota");
-    onCleanup(stopQuota);
     const loadApprovals = () => {
       if (!isConnected() || !isAdminUser()) {
         setSecretRequests(0);

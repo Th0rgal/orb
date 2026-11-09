@@ -60,9 +60,8 @@ enum class OrbSettingsSection(val id: String, val label: String, val subtitle: S
         fun of(route: OrbSettingsRoute): OrbSettingsSection? = entries.firstOrNull { s -> s.pages.any { it.third == route } }
 
         /** Sections that need the user (attention dot). */
-        fun attention(bunkerActive: Boolean, deviceEnrolled: Boolean, quotaExhausted: Boolean): Set<OrbSettingsSection> = buildSet {
+        fun attention(bunkerActive: Boolean, deviceEnrolled: Boolean): Set<OrbSettingsSection> = buildSet {
             if (bunkerActive || !deviceEnrolled) add(Security)
-            if (quotaExhausted) add(Models)
         }
     }
 }

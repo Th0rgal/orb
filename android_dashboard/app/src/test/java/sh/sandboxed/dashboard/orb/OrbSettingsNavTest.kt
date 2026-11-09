@@ -23,7 +23,7 @@ class OrbSettingsNavTest {
     fun attentionMatchesSharedFixture() {
         for (c in OrbJSON.dictList(spec["attention"])) {
             val s = OrbJSON.dict(c["state"])!!
-            val got = OrbSettingsSection.attention(s["bunkerActive"] as Boolean, s["deviceEnrolled"] as Boolean, s["quotaExhausted"] as Boolean)
+            val got = OrbSettingsSection.attention(s["bunkerActive"] as Boolean, s["deviceEnrolled"] as Boolean)
             assertEquals(c["name"] as String, (c["expected"] as List<*>).toSet(), got.map { it.id }.toSet())
         }
     }
