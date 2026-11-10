@@ -4021,7 +4021,7 @@ private def runR4cHarnessSessionTests (store : CoreStore) (tmpRoot : String) : I
     return 1
   return 0
 
-set_option maxHeartbeats 600000 in
+set_option maxHeartbeats 1000000 in
 set_option maxRecDepth 8000 in
 private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let muTs ← IO.monoNanosNow
@@ -4630,6 +4630,7 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
 
   return 0
 
+set_option maxHeartbeats 800000 in
 set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
