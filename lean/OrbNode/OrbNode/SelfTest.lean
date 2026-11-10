@@ -1227,6 +1227,136 @@ private def runRound3RegressionTests
   rt ← mtx.atomically get
   return rt
 
+/-- Regression test for `openLedger` startup scalability (`nippur` 225 MiB `jobs.db` / 231 MiB `state.wal` incident):
+    1. Settled (`succeeded`/`failed`/`cancelled` + prior-boot `lost`) payloads redact to `"{}"` and compact `state.wal`.
+    2. `openLedger` delta-imports missing `jobs.db` rows without loading historical terminal `payload_json`,
+       updates ONLY genuinely transitioned/unsynced rows in `jobs.db` (zero terminal-row rewrites),
+       and preserves chronological `listRecent` ordering across restarts. -/
+private def runOpenLedgerDeltaPerfTests
+    (check : String → Bool → IO Unit)
+    (tmpRoot missionId : String) : IO Unit := do
+  let perfRoot := s!"{tmpRoot}/openledger-delta-perf"
+  IO.FS.createDirAll perfRoot
+  let .ok lPerf0 ← OrbNode.Store.openLedger perfRoot
+    | throw (IO.userError "openLedger perfRoot 0 failed")
+  let bigPad := String.ofList (List.replicate 65536 'P')
+  let bigPayload := renderCompact (.obj #[("kind", .str "raw_command"), ("prompt", .str bigPad)])
+  let .ok lPerfA ← lPerf0.insertQueued {
+    jobId := "job-perf-old", missionId := missionId, payloadJson := bigPayload,
+    state := .queued, createdAt := "2026-11-01T00:00:00Z"
+  } | throw (IO.userError "insertQueued job-perf-old failed")
+  let .ok (lPerfB, jPerfOldDone) ← lPerfA.updateJob "job-perf-old" (fun r => .ok {
+    r with state := .succeeded, exitCode? := some 0, finishedAt? := some "2026-11-01T00:01:00Z"
+  }) | throw (IO.userError "updateJob job-perf-old failed")
+  let .ok lPerfC ← lPerfB.insertQueued {
+    jobId := "job-perf-mid", missionId := missionId, payloadJson := bigPayload,
+    state := .queued, createdAt := "2026-11-02T00:00:00Z"
+  } | throw (IO.userError "insertQueued job-perf-mid failed")
+  let .ok (lPerfD, _) ← lPerfC.updateJob "job-perf-mid" (fun r => .ok {
+    r with state := .failed, exitCode? := some 1, finishedAt? := some "2026-11-02T00:01:00Z", error? := some "boom"
+  }) | throw (IO.userError "updateJob job-perf-mid failed")
+  let .ok lPerfE ← lPerfD.insertQueued {
+    jobId := "job-perf-live", missionId := missionId, payloadJson := bigPayload,
+    state := .running, createdAt := "2026-11-04T00:00:00Z"
+  } | throw (IO.userError "insertQueued job-perf-live failed")
+  let bloatedRec : JobRecord := {
+    jobId := "job-perf-bloated-wal", missionId := missionId, payloadJson := bigPayload,
+    state := .succeeded, exitCode? := some 0,
+    createdAt := "2026-11-02T12:00:00Z", finishedAt? := some "2026-11-02T12:01:00Z",
+    nodeBootEpoch := lPerfE.nodeBootEpoch, phaseCode := 3, stateRevision := 2
+  }
+  let .ok _ ← LeanSys.Store.putString lPerfE.store "job/job-perf-bloated-wal" (renderCompact (bloatedRec.toJson none))
+    | throw (IO.userError "seed bloated WAL frame failed")
+  let perfDbPath := (System.FilePath.mk perfRoot / "jobs.db").toString
+  let seedSqlOut ← IO.Process.output {
+    cmd := "python3"
+    args := #[
+      "-c",
+      "import sqlite3, sys\n" ++
+      "db, mission_id, big_payload = sys.argv[1:4]\n" ++
+      "con = sqlite3.connect(db)\n" ++
+      "old_pay = con.execute(\"SELECT payload_json FROM jobs WHERE id='job-perf-old'\").fetchone()[0]\n" ++
+      "con.execute(\"INSERT INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, finished_at, state_revision, phase_code) VALUES (?, ?, ?, 'succeeded', 0, '2026-11-02T12:00:00Z', '2026-11-02T12:01:00Z', 2, 3)\", ('job-perf-bloated-wal', mission_id, big_payload))\n" ++
+      "con.execute(\"INSERT INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, finished_at, state_revision, phase_code) VALUES (?, ?, ?, 'succeeded', 0, '2026-11-03T00:00:00Z', '2026-11-03T00:01:00Z', 1, 3)\", ('job-perf-legacy-term', mission_id, big_payload))\n" ++
+      "con.execute(\"INSERT INTO jobs (id, mission_id, payload_json, state, created_at, started_at, state_revision, phase_code) VALUES (?, ?, '{\\\"kind\\\":\\\"sync_execute\\\"}', 'running', '2026-11-05T00:00:00Z', '2026-11-05T00:00:00Z', 1, 1)\", ('job-perf-legacy-exec', mission_id))\n" ++
+      "con.execute(\"CREATE TABLE _job_update_log (job_id TEXT NOT NULL)\")\n" ++
+      "con.execute(\"CREATE TRIGGER trg_job_upd AFTER UPDATE ON jobs BEGIN INSERT INTO _job_update_log(job_id) VALUES (NEW.id); END\")\n" ++
+      "con.commit()\n" ++
+      "print(old_pay)\n",
+      perfDbPath, missionId, bigPayload
+    ]
+  }
+  if seedSqlOut.exitCode != 0 then
+    throw (IO.userError s!"seedSqlOut failed: {seedSqlOut.stderr}")
+  let .ok lPerf1 ← OrbNode.Store.openLedger perfRoot
+    | throw (IO.userError "reopen openLedger perfRoot 1 failed")
+  let updLog1Out ← IO.Process.output {
+    cmd := "python3"
+    args := #[
+      "-c",
+      "import sqlite3, sys\n" ++
+      "con = sqlite3.connect(sys.argv[1])\n" ++
+      "ids = sorted(r[0] for r in con.execute('SELECT job_id FROM _job_update_log').fetchall())\n" ++
+      "con.execute('DELETE FROM _job_update_log')\n" ++
+      "con.commit()\n" ++
+      "print(','.join(ids))\n",
+      perfDbPath
+    ]
+  }
+  let walPath := System.FilePath.mk perfRoot / "orb-node.store" / "state.wal"
+  let walBytes ← (IO.FS.readBinFile walPath).map (·.size)
+  let recentIds1 := (lPerf1.listRecent 10).map (·.jobId)
+  let .ok lPerf2 ← OrbNode.Store.openLedger perfRoot
+    | throw (IO.userError "reopen openLedger perfRoot 2 failed")
+  let updLog2Out ← IO.Process.output {
+    cmd := "python3"
+    args := #[
+      "-c",
+      "import sqlite3, sys\n" ++
+      "con = sqlite3.connect(sys.argv[1])\n" ++
+      "print(con.execute('SELECT COUNT(*) FROM _job_update_log').fetchone()[0])\n",
+      perfDbPath
+    ]
+  }
+  let recentIds2 := (lPerf2.listRecent 10).map (·.jobId)
+  let expectedRecent := #[
+    "job-perf-legacy-exec", "job-perf-live", "job-perf-legacy-term",
+    "job-perf-bloated-wal", "job-perf-mid", "job-perf-old"
+  ]
+  check "openLedger delta-imports jobs.db, skips terminal SQLite rewrites, compacts settled WAL payloads, and preserves listRecent order"
+    (jPerfOldDone.payloadJson == "{}" &&
+     seedSqlOut.stdout.trimAscii.toString == "{}" &&
+     updLog1Out.stdout.trimAscii.toString == "job-perf-legacy-exec,job-perf-live" &&
+     updLog2Out.stdout.trimAscii.toString == "0" &&
+     (lPerf1.jobs.get? "job-perf-live").map (·.state) == some .lost &&
+     (lPerf1.jobs.get? "job-perf-legacy-exec").map (·.state) == some .lost &&
+     (lPerf1.jobs.get? "job-perf-legacy-term").map (·.payloadJson) == some "{}" &&
+     (lPerf1.jobs.get? "job-perf-bloated-wal").map (·.payloadJson) == some "{}" &&
+     walBytes < 16384 &&
+     recentIds1 == expectedRecent &&
+     recentIds2 == expectedRecent)
+
+  -- >16 MiB (`walMaxPayload`) bundle admission preserves full in-RAM `payloadJson` without poisoning `state.wal`
+  let mut chunk17 := "X"
+  for _ in [0:24] do
+    chunk17 := chunk17 ++ chunk17
+  let hugePayload := "{\"kind\":\"lean_build\",\"bundle\":\"" ++ chunk17 ++ "extra\"}"
+  let .ok lHuge1 ← lPerf2.insertQueued {
+    jobId := "job-perf-17mb-bundle", missionId := missionId, payloadJson := hugePayload,
+    state := .queued, createdAt := "2026-11-06T00:00:00Z"
+  } | throw (IO.userError "insertQueued 17 MiB bundle failed")
+  let inMemHugeBytes := ((lHuge1.jobs.get? "job-perf-17mb-bundle").map (·.payloadJson.utf8ByteSize)).getD 0
+  let .ok (lHuge2, _) ← lHuge1.updateJob "job-perf-17mb-bundle" (fun r => .ok {
+    r with state := .succeeded, exitCode? := some 0, finishedAt? := some "2026-11-06T00:01:00Z"
+  }) | throw (IO.userError "updateJob 17 MiB bundle failed")
+  let _ := lHuge2
+  let .ok lHugeReopen ← OrbNode.Store.openLedger perfRoot
+    | throw (IO.userError "reopen openLedger after 17 MiB bundle failed (state.wal poisoned!)")
+  check "Oversized (>16 MiB walMaxPayload) job payload stays in RAM during execution without poisoning state.wal on restart"
+    (inMemHugeBytes > 16777216 &&
+     (lHugeReopen.jobs.get? "job-perf-17mb-bundle").map (·.state) == some .succeeded &&
+     (lHugeReopen.jobs.get? "job-perf-17mb-bundle").map (·.payloadJson) == some "{}")
+
 set_option maxRecDepth 2048 in
 def runTests : IO UInt32 := do
   let passedRef ← IO.mkRef (0 : Nat)
@@ -2726,6 +2856,8 @@ def runTests : IO UInt32 := do
   try daemonChild.kill catch _ => pure ()
   let _ ← daemonChild.wait.toBaseIO
   check "runServerLoop serves /heartbeat promptly under LEAN_NUM_THREADS=1 without background pool starvation" hb1tOk
+
+  runOpenLedgerDeltaPerfTests check tmpRoot missionId
 
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get

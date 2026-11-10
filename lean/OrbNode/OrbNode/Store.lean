@@ -201,6 +201,40 @@ def defaultPhaseCodeForState : JobState → UInt8
   | .cancelled         => 5
   | .lost              => 2
 
+/-- Redact launch `payloadJson` to `"{}"` once a job reaches an absorbing terminal state
+    (`succeeded` / `failed` / `cancelled`) or is `lost` from a prior `node_boot_epoch`.
+    `Runner` only parses `payloadJson` while `state ∈ {queued, running}`, and public HTTP status
+    projections (`toStatusJson`) omit `payload_json`. Same-boot `lost` (`Uncertain`) claims retain
+    `payloadJson` so `SM-20` `confirmNotDeliveredRetry` (`opCode = 10`) can re-queue them. -/
+def JobRecord.redactSettledPayload (r : JobRecord) (liveBootEpoch : UInt64 := 0) : JobRecord :=
+  let settled :=
+    r.state.isTerminal ||
+    (r.state == .lost && liveBootEpoch != 0 && r.nodeBootEpoch != liveBootEpoch)
+  if settled && r.payloadJson != "{}" then
+    { r with payloadJson := "{}" }
+  else
+    r
+
+/-- Maximum inline `payloadJson` UTF-8 byte length serialized into `LeanSys.Store` WAL frames (`4 MiB`).
+    `LeanSys.Spec.walMaxPayload` caps each WAL frame at `16 MiB` (`16,777,216` bytes), while `OrbNode`
+    accepts `POST /jobs` bundles up to `128 MiB` (`maxBodyBytes`). Capping inline WAL `payload_json`
+    guarantees every serialized WAL frame stays strictly below `walMaxPayload` so `LeanSys.Store.openStore`
+    never rejects an oversized mid-log frame with `.eio`, while `Ledger.jobs` in RAM and `jobs.db` retain
+    the full `payloadJson` for active execution and same-boot `SM-20` retries. -/
+def maxInlineWalPayloadBytes : Nat := 4 * 1024 * 1024
+
+def JobRecord.serializeForWal (r : JobRecord) : String :=
+  let walRec :=
+    if r.payloadJson.utf8ByteSize > maxInlineWalPayloadBytes then
+      { r with payloadJson := "{}" }
+    else
+      r
+  let rendered := renderCompact (walRec.toJson none)
+  if rendered.utf8ByteSize + 256 > LeanSys.Spec.walMaxPayload.toNat then
+    renderCompact ({ walRec with payloadJson := "{}" }.toJson none)
+  else
+    rendered
+
 def operationIdToken (raw : String) : UInt64 := Id.run do
   let clean := raw.trimAscii.toString
   if clean.isEmpty then
@@ -469,7 +503,7 @@ private def runSqliteQueryJson (backend : SqliteBackend) (dbPath sql : String) :
     | .cli =>
       (IO.Process.output {
         cmd := "sqlite3"
-        args := #["-json", dbPath, sql]
+        args := #["-json", "-cmd", ".timeout 5000", dbPath, sql]
       }).toBaseIO
     | .python3 =>
       (IO.Process.output {
@@ -677,6 +711,10 @@ private def ensureLegacySqliteSchema (workDir : String) (backend : SqliteBackend
     | .error e =>
       if (e.toLower.splitOn "duplicate column name").length ≤ 1 then
         return .error e
+  let idxDdl :=
+    "CREATE INDEX IF NOT EXISTS idx_jobs_state_rev_id ON jobs(state, state_revision, id);"
+  if let .error e ← runSqliteStdinWithRetry backend dbPath idxDdl 5000 3 then
+    return .error e
   return .ok ()
 
 private def allocateNextNodeBootEpoch
@@ -714,6 +752,7 @@ private def jobUpsertSql (r : JobRecord) : String :=
   "INSERT INTO jobs (id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json, authority_mode, placement_kind, superseded_by_mission_id, orphaned_at, reserved_disk_gib, state_revision, operation_id, node_boot_epoch, pid, start_ticks, phase_code, proc_phase, owner_user_id, exec_unix_user, exec_uid) VALUES (" ++
   s!"{sqlEsc r.jobId}, {sqlEsc r.missionId}, {sqlEsc r.payloadJson}, {sqlEsc r.state.asString}, {exitSql}, {sqlEsc r.createdAt}, {sqlOptStr r.startedAt?}, {sqlOptStr r.finishedAt?}, {sqlOptStr r.logPath?}, {sqlOptStr r.error?}, {artsSql}, {cancSql}, {sqlEsc r.authorityMode}, {sqlEsc r.placementKind}, {sqlEsc r.supersededById}, {sqlEsc r.orphanedAt}, {r.reservedDiskGib}, {rev}, {sqlEsc opId}, {r.nodeBootEpoch}, {r.pid}, {r.startTicks}, {ph}, {pPh}, {sqlEsc r.ownerUserId}, {sqlEsc r.execUnixUser}, {r.execUid}) " ++
   "ON CONFLICT(id) DO UPDATE SET " ++
+  "payload_json = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') OR excluded.state IN ('succeeded', 'failed', 'cancelled') THEN '{}' ELSE jobs.payload_json END, " ++
   "state = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN jobs.state ELSE excluded.state END, " ++
   "exit_code = CASE WHEN jobs.state IN ('succeeded', 'failed', 'cancelled') THEN COALESCE(jobs.exit_code, excluded.exit_code) ELSE excluded.exit_code END, " ++
   "started_at = COALESCE(excluded.started_at, jobs.started_at), " ++
@@ -788,88 +827,112 @@ private def syncJobToLegacySqlite
     (if extraSql.isEmpty then "" else " " ++ extraSql) ++ " COMMIT;"
   runSqliteStdinWithRetry backend dbPath sql timeoutMs attempts
 
-/-- Import legacy SQLite `<work_dir>/jobs.db` rows idempotently when `jobs.db` exists. -/
-private def importLegacySqliteJobs (workDir : String) (backend : SqliteBackend) : IO (Except String (Array JobRecord)) := do
+/-- Read lightweight `(id -> (state, normalized_state_revision))` metadata from `<work_dir>/jobs.db`
+    via covering index `idx_jobs_state_rev_id` without touching `payload_json` overflow pages. -/
+private def queryLegacySqliteIndex
+    (workDir : String) (backend : SqliteBackend) :
+    IO (Except String (Std.HashMap String (String × UInt32))) := do
   let dbPath : System.FilePath := System.FilePath.mk workDir / "jobs.db"
-  if !(← dbPath.pathExists) then return .ok #[]
-  let query :=
-    "SELECT id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json, authority_mode, placement_kind, superseded_by_mission_id, orphaned_at, reserved_disk_gib, state_revision, operation_id, node_boot_epoch, pid, start_ticks, phase_code, proc_phase, owner_user_id, exec_unix_user, exec_uid FROM jobs ORDER BY created_at ASC;"
-  let res ← match backend with
-    | .cli =>
-      (IO.Process.output {
-        cmd := "sqlite3"
-        args := #["-json", dbPath.toString, query]
-      }).toBaseIO
-    | .python3 =>
-      (IO.Process.output {
-        cmd := "python3"
-        args := #["-c", pySqliteQueryJsonSnippet, dbPath.toString]
-      } (input? := some query)).toBaseIO
-  let .ok outRes := res | return .error "failed reading legacy jobs.db"
-  if outRes.exitCode != 0 then
-    return .error s!"legacy jobs.db query failed: {outRes.stderr.trimAscii}"
-  if outRes.stdout.trimAscii.isEmpty then return .ok #[]
-  let .ok (.arr rows) := OrbBin.Json.parse outRes.stdout
-    | return .error "corrupt JSON output while importing legacy jobs.db"
-  let mut out : Array JobRecord := #[]
+  if !(← dbPath.pathExists) then return .ok {}
+  let rows ← match ← runSqliteQueryJson backend dbPath.toString
+      "SELECT id, state, state_revision FROM jobs;" with
+    | .ok rs => pure rs
+    | .error e => return .error s!"legacy jobs.db index query failed: {e}"
+  let mut idx : Std.HashMap String (String × UInt32) := {}
   for row in rows do
     if let some id := row.fieldStr? "id" then
-      let missionId := (row.fieldStr? "mission_id").getD "00000000-0000-0000-0000-000000000000"
-      let payloadJson := (row.fieldStr? "payload_json").getD "{}"
-      let state := ((row.fieldStr? "state") >>= JobState.ofString?).getD .lost
-      let createdAt := (row.fieldStr? "created_at").getD "1970-01-01T00:00:00Z"
-      let artifacts : Array ArtifactEntry :=
-        match row.fieldStr? "artifacts_json" with
-        | some s =>
-          match OrbBin.Json.parse s with
-          | .ok (.arr xs) => xs.filterMap ArtifactEntry.fromJson?
-          | _ => #[]
-        | none => #[]
-      let cancellation? : Option JobCancellation :=
-        match row.fieldStr? "cancellation_json" with
-        | some s =>
-          match OrbBin.Json.parse s with
-          | .ok cv => JobCancellation.fromJson? cv
-          | _ => none
-        | none => none
+      let stRaw := (row.fieldStr? "state").getD "lost"
       let revRaw := ((row.fieldUInt64? "state_revision").getD 1).toUInt32
-      let rawPhase := ((row.fieldUInt64? "phase_code").getD 0).toUInt8
-      let phaseCode := if rawPhase == 0 || rawPhase > 5 then defaultPhaseCodeForState state else rawPhase
-      let opIdRaw := (row.fieldStr? "operation_id").getD ""
-      let procPh := ((row.fieldUInt64? "proc_phase").getD 0).toUInt8
-      out := out.push {
-        jobId := id
-        missionId := missionId
-        payloadJson := payloadJson
-        state := state
-        exitCode? := row.fieldInt? "exit_code"
-        createdAt := createdAt
-        startedAt? := row.fieldStr? "started_at"
-        finishedAt? := row.fieldStr? "finished_at"
-        logPath? := row.fieldStr? "log_path"
-        error? := row.fieldStr? "error"
-        artifacts := artifacts
-        cancellation? := cancellation?
-        authorityMode := (row.fieldStr? "authority_mode").getD "writer"
-        placementKind := (row.fieldStr? "placement_kind").getD "managed"
-        supersededById := (row.fieldStr? "superseded_by_mission_id").getD ""
-        orphanedAt := (row.fieldStr? "orphaned_at").getD ""
-        reservedDiskGib := (row.fieldUInt64? "reserved_disk_gib").getD 0
-        stateRevision := if revRaw == 0 then 1 else revRaw
-        operationId := if opIdRaw.isEmpty then id else opIdRaw
-        nodeBootEpoch := (row.fieldUInt64? "node_boot_epoch").getD 0
-        pid := (row.fieldUInt64? "pid").getD 0
-        startTicks := (row.fieldUInt64? "start_ticks").getD 0
-        phaseCode := phaseCode
-        procPhase := if procPh > 4 then 0 else procPh
-        ownerUserId := (row.fieldStr? "owner_user_id").getD ""
-        execUnixUser := (row.fieldStr? "exec_unix_user").getD ""
-        execUid := ((row.fieldUInt64? "exec_uid").getD 0).toUInt32
-      }
+      let rev := if revRaw == 0 then 1 else revRaw
+      idx := idx.insert id (stRaw, rev)
+  return .ok idx
+
+private def decodeLegacySqliteJobRow? (row : JVal) : Option JobRecord := do
+  let id ← row.fieldStr? "id"
+  let missionId := (row.fieldStr? "mission_id").getD "00000000-0000-0000-0000-000000000000"
+  let payloadJson := (row.fieldStr? "payload_json").getD "{}"
+  let state := ((row.fieldStr? "state") >>= JobState.ofString?).getD .lost
+  let createdAt := (row.fieldStr? "created_at").getD "1970-01-01T00:00:00Z"
+  let artifacts : Array ArtifactEntry :=
+    match row.fieldStr? "artifacts_json" with
+    | some s =>
+      match OrbBin.Json.parse s with
+      | .ok (.arr xs) => xs.filterMap ArtifactEntry.fromJson?
+      | _ => #[]
+    | none => #[]
+  let cancellation? : Option JobCancellation :=
+    match row.fieldStr? "cancellation_json" with
+    | some s =>
+      match OrbBin.Json.parse s with
+      | .ok cv => JobCancellation.fromJson? cv
+      | _ => none
+    | none => none
+  let revRaw := ((row.fieldUInt64? "state_revision").getD 1).toUInt32
+  let rawPhase := ((row.fieldUInt64? "phase_code").getD 0).toUInt8
+  let phaseCode := if rawPhase == 0 || rawPhase > 5 then defaultPhaseCodeForState state else rawPhase
+  let opIdRaw := (row.fieldStr? "operation_id").getD ""
+  let procPh := ((row.fieldUInt64? "proc_phase").getD 0).toUInt8
+  return {
+    jobId := id
+    missionId := missionId
+    payloadJson := payloadJson
+    state := state
+    exitCode? := row.fieldInt? "exit_code"
+    createdAt := createdAt
+    startedAt? := row.fieldStr? "started_at"
+    finishedAt? := row.fieldStr? "finished_at"
+    logPath? := row.fieldStr? "log_path"
+    error? := row.fieldStr? "error"
+    artifacts := artifacts
+    cancellation? := cancellation?
+    authorityMode := (row.fieldStr? "authority_mode").getD "writer"
+    placementKind := (row.fieldStr? "placement_kind").getD "managed"
+    supersededById := (row.fieldStr? "superseded_by_mission_id").getD ""
+    orphanedAt := (row.fieldStr? "orphaned_at").getD ""
+    reservedDiskGib := (row.fieldUInt64? "reserved_disk_gib").getD 0
+    stateRevision := if revRaw == 0 then 1 else revRaw
+    operationId := if opIdRaw.isEmpty then id else opIdRaw
+    nodeBootEpoch := (row.fieldUInt64? "node_boot_epoch").getD 0
+    pid := (row.fieldUInt64? "pid").getD 0
+    startTicks := (row.fieldUInt64? "start_ticks").getD 0
+    phaseCode := phaseCode
+    procPhase := if procPh > 4 then 0 else procPh
+    ownerUserId := (row.fieldStr? "owner_user_id").getD ""
+    execUnixUser := (row.fieldStr? "exec_unix_user").getD ""
+    execUid := ((row.fieldUInt64? "exec_uid").getD 0).toUInt32
+  }
+
+/-- Import only missing or SQLite-newer `<work_dir>/jobs.db` rows in bounded ID chunks,
+    eliding multi-hundred-KiB `payload_json` blobs on already settled rows. -/
+private def importLegacySqliteJobsByIds
+    (workDir : String) (backend : SqliteBackend) (ids : Array String) :
+    IO (Except String (Array JobRecord)) := do
+  if ids.isEmpty then return .ok #[]
+  let dbPath : System.FilePath := System.FilePath.mk workDir / "jobs.db"
+  if !(← dbPath.pathExists) then return .ok #[]
+  let mut out : Array JobRecord := Array.mkEmpty ids.size
+  let mut start : Nat := 0
+  while start < ids.size do
+    let stop := Nat.min (start + 200) ids.size
+    let inClause := String.intercalate ", " ((ids.extract start stop).toList.map sqlEsc)
+    let query :=
+      "SELECT id, mission_id, " ++
+      "CASE WHEN state IN ('queued', 'running') THEN payload_json ELSE '{}' END AS payload_json, " ++
+      "state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json, " ++
+      "authority_mode, placement_kind, superseded_by_mission_id, orphaned_at, reserved_disk_gib, state_revision, " ++
+      "operation_id, node_boot_epoch, pid, start_ticks, phase_code, proc_phase, owner_user_id, exec_unix_user, exec_uid " ++
+      s!"FROM jobs WHERE id IN ({inClause}) ORDER BY created_at ASC;"
+    let rows ← match ← runSqliteQueryJson backend dbPath.toString query with
+      | .ok rs => pure rs
+      | .error e => return .error s!"legacy jobs.db query failed: {e}"
+    for row in rows do
+      if let some rec := decodeLegacySqliteJobRow? row then
+        out := out.push rec
+    start := stop
   return .ok out
 
 /-- Open `<work_dir>/orb-node.store`, require SQLite support for `jobs.db` compatibility and
-    rolling-upgrade fencing (failing closed if unavailable), replay WAL, import/initialize `jobs.db`,
+    rolling-upgrade fencing (failing closed if unavailable), replay WAL, delta-import `jobs.db`,
     and flip any in-flight (`queued` / `running`) job on daemon startup to `lost`. -/
 def openLedger (workDir : String) (explicitBootEpoch : UInt64 := 0) : IO (Except String Ledger) := do
   IO.FS.createDirAll (System.FilePath.mk workDir / "logs")
@@ -888,35 +951,50 @@ def openLedger (workDir : String) (explicitBootEpoch : UInt64 := 0) : IO (Except
     | .error e => return .error s!"LeanSys.Store.openStore failed: {repr e}"
   let mut h := h0
   let mut jobs : Std.HashMap String JobRecord := {}
-  let mut order : Array String := #[]
-  for (k, v) in h.kv.toList do
+  let mut compactedKv := h0.kv
+  let mut walUpdates : Std.HashMap String ByteArray := {}
+  let mut redactedAny := false
+  for (k, v) in h0.kv.toList do
     if k.startsWith "job/" then
       if let some raw := String.fromUTF8? v then
         if let .ok jv := OrbBin.Json.parse raw then
-          if let some rec := JobRecord.fromStoreJson? jv then
-            jobs := jobs.insert rec.jobId rec
-            order := order.push rec.jobId
-  let legacyRows ← match ← importLegacySqliteJobs workDir sqliteBackend with
+          if let some rec0 := JobRecord.fromStoreJson? jv then
+            let jobRec := rec0.redactSettledPayload liveBootEpoch
+            if jobRec.payloadJson != rec0.payloadJson then
+              compactedKv := compactedKv.insert k jobRec.serializeForWal.toUTF8
+              redactedAny := true
+            jobs := jobs.insert jobRec.jobId jobRec
+  let sqliteIndex ← match ← queryLegacySqliteIndex workDir sqliteBackend with
+    | .ok idx => pure idx
+    | .error idxErr => return .error idxErr
+  let mut idsToImport : Array String := #[]
+  for (id, (sqStateRaw, sqRev)) in sqliteIndex.toList do
+    match jobs.get? id with
+    | none =>
+      idsToImport := idsToImport.push id
+    | some storeRec =>
+      let sqState := (JobState.ofString? sqStateRaw).getD .lost
+      if (sqState.isTerminal && !storeRec.state.isTerminal) || sqRev > storeRec.stateRevision then
+        idsToImport := idsToImport.push id
+  let legacyRows ← match ← importLegacySqliteJobsByIds workDir sqliteBackend idsToImport with
     | .ok rows => pure rows
     | .error importErr => return .error importErr
-  for rec in legacyRows do
-    if !jobs.contains rec.jobId then
-      let serialized := renderCompact (rec.toJson none)
-      if let .ok h' ← LeanSys.Store.putString h (jobKey rec.jobId) serialized then
-        h := h'
-        jobs := jobs.insert rec.jobId rec
-        order := order.push rec.jobId
+  for rec0 in legacyRows do
+    let jobRec := rec0.redactSettledPayload liveBootEpoch
+    let k := jobKey jobRec.jobId
+    let ser := jobRec.serializeForWal.toUTF8
+    jobs := jobs.insert jobRec.jobId jobRec
+    walUpdates := walUpdates.insert k ser
   let nowTs ← nowRfc3339
-  let mut batchSql := "BEGIN IMMEDIATE; "
+  let mut sqlStmts : Array String := #["BEGIN IMMEDIATE;"]
   for (jid, rec) in jobs.toList do
     let nonTerminalOrStaleBoot :=
       !rec.state.isTerminal &&
       (rec.state == .queued || rec.state == .running || rec.nodeBootEpoch != liveBootEpoch)
-    if nonTerminalOrStaleBoot then
-      let canFlip := rec.state == .lost || canTransitionTo rec.state .lost
-      if canFlip then
+    let (nextRec, recChanged) :=
+      if nonTerminalOrStaleBoot && (rec.state == .lost || canTransitionTo rec.state .lost) then
         let curRev := if rec.stateRevision == 0 then 1 else rec.stateRevision
-        let lostRec : JobRecord := {
+        let cand0 : JobRecord := {
           rec with
           state := .lost
           phaseCode := 2
@@ -925,19 +1003,54 @@ def openLedger (workDir : String) (explicitBootEpoch : UInt64 := 0) : IO (Except
           error? := some (rec.error?.getD "node restarted while the job was in flight")
           stateRevision := if rec.state == .lost then curRev else curRev + 1
         }
-        let serialized := renderCompact (lostRec.toJson none)
-        if let .ok h' ← LeanSys.Store.putString h (jobKey jid) serialized then
-          h := h'
-          jobs := jobs.insert jid lostRec
-          batchSql := batchSql ++ jobUpsertSql lostRec ++ " "
+        let cand := cand0.redactSettledPayload liveBootEpoch
+        let changed :=
+          cand.state != rec.state ||
+          cand.phaseCode != rec.phaseCode ||
+          cand.procPhase != rec.procPhase ||
+          cand.finishedAt? != rec.finishedAt? ||
+          cand.error? != rec.error? ||
+          cand.stateRevision != rec.stateRevision ||
+          cand.payloadJson != rec.payloadJson
+        (cand, changed)
       else
-        batchSql := batchSql ++ jobUpsertSql rec ++ " "
-    else
-      batchSql := batchSql ++ jobUpsertSql rec ++ " "
-  batchSql := batchSql ++ s!"UPDATE container_leaders SET proc_phase = 2 WHERE node_boot_epoch != {liveBootEpoch} AND proc_phase != 2; COMMIT;"
+        (rec, false)
+    if recChanged then
+      jobs := jobs.insert jid nextRec
+      walUpdates := walUpdates.insert (jobKey jid) nextRec.serializeForWal.toUTF8
+    let needsSqliteUpsert :=
+      match sqliteIndex.get? jid with
+      | none => true
+      | some (sqStateRaw, sqRev) =>
+        recChanged || sqStateRaw != nextRec.state.asString || sqRev < nextRec.stateRevision
+    if needsSqliteUpsert then
+      sqlStmts := sqlStmts.push (jobUpsertSql nextRec)
+  for (k, v) in walUpdates.toList do
+    compactedKv := compactedKv.insert k v
+  if redactedAny || h.framesCount > compactedKv.size * 2 + 64 then
+    match ← LeanSys.Store.compact { h with kv := compactedKv } with
+    | .ok h' => h := h'
+    | .error e => return .error s!"LeanSys.Store.compact failed: {repr e}"
+  else if !walUpdates.isEmpty then
+    let mut batchEntries : Array (String × LeanSys.Posix.ByteSlice) := Array.mkEmpty walUpdates.size
+    for (k, v) in walUpdates.toList do
+      batchEntries := batchEntries.push (k, LeanSys.Posix.ByteSlice.ofByteArray v)
+    match ← LeanSys.Store.putBatch h batchEntries with
+    | .ok h' => h := h'
+    | .error e => return .error s!"LeanSys.Store.putBatch failed: {repr e}"
+  sqlStmts := sqlStmts.push
+    s!"UPDATE container_leaders SET proc_phase = 2 WHERE node_boot_epoch != {liveBootEpoch} AND proc_phase != 2;"
+  sqlStmts := sqlStmts.push "COMMIT;"
+  let batchSql := String.intercalate " " sqlStmts.toList
   let dbPath := (System.FilePath.mk workDir / "jobs.db").toString
   if let .error syncErr ← runSqliteStdinWithRetry sqliteBackend dbPath batchSql 10000 4 then
     return .error s!"jobs.db startup reconciliation failed: {syncErr}"
+  let mut records : Array JobRecord := Array.mkEmpty jobs.size
+  for (_, r) in jobs.toList do
+    records := records.push r
+  let sortedRecs := records.qsort (fun a b =>
+    if a.createdAt == b.createdAt then a.jobId < b.jobId else a.createdAt < b.createdAt)
+  let order := sortedRecs.map (·.jobId)
   return .ok {
     workDir := workDir
     sqliteBackend := sqliteBackend
@@ -954,10 +1067,12 @@ namespace Ledger
 def flushPendingSqlite (l : Ledger) : IO Ledger := do
   if l.pendingSqliteSync.isEmpty then
     return l
-  let mut sql := "BEGIN IMMEDIATE; "
+  let mut stmts : Array String := Array.mkEmpty (l.pendingSqliteSync.size + 2)
+  stmts := stmts.push "BEGIN IMMEDIATE;"
   for (_, rec) in l.pendingSqliteSync.toList do
-    sql := sql ++ jobUpsertSql rec ++ " "
-  sql := sql ++ "COMMIT;"
+    stmts := stmts.push (jobUpsertSql rec)
+  stmts := stmts.push "COMMIT;"
+  let sql := String.intercalate " " stmts.toList
   let dbPath := (System.FilePath.mk l.workDir / "jobs.db").toString
   match ← runSqliteStdin l.sqliteBackend dbPath sql 500 with
   | .ok () => return { l with pendingSqliteSync := {} }
@@ -994,7 +1109,7 @@ def insertQueued
     extraSql := extraSql ++ containerLeaderUpsertSql { cl with nodeBootEpoch := l.nodeBootEpoch } ++ " "
   if let .error e ← syncJobToLegacySqlite l.workDir l.sqliteBackend acceptedRec 1500 1 extraSql then
     return .error e
-  let serialized := renderCompact (acceptedRec.toJson none)
+  let serialized := acceptedRec.serializeForWal
   match ← LeanSys.Store.putString l.store (jobKey acceptedRec.jobId) serialized with
   | .error e =>
     let dbPath := (System.FilePath.mk l.workDir / "jobs.db").toString
@@ -1061,14 +1176,15 @@ def updateJob
     let curRev := if cur.stateRevision == 0 then 1 else cur.stateRevision
     let fenceWord := Orb.Kernel.epochFenceStep 1 1 1 1 1 1 curRev curRev 1
     let bumpedRev := if (fenceWord &&& 256) != 0 then (fenceWord >>> 32).toUInt32 else curRev + 1
-    let next : JobRecord := {
+    let nextRaw : JobRecord := {
       next0 with
       operationId := if next0.operationId.isEmpty then heldOpStr else next0.operationId
       nodeBootEpoch := if next0.nodeBootEpoch == 0 then opBoot else next0.nodeBootEpoch
       phaseCode := nextPhase
       stateRevision := bumpedRev
     }
-    let serialized := renderCompact (next.toJson none)
+    let next := nextRaw.redactSettledPayload l.nodeBootEpoch
+    let serialized := next.serializeForWal
     match ← LeanSys.Store.putString l.store (jobKey jobId) serialized with
     | .error e => return .error s!"WAL write failed: {repr e}"
     | .ok h' =>
@@ -1132,7 +1248,7 @@ def stepJobClaim
   let fenceWord := Orb.Kernel.epochFenceStep 1 1 1 1 1 1 curRev curRev 1
   let bumpedRev := if (fenceWord &&& 256) != 0 then (fenceWord >>> 32).toUInt32 else curRev + 1
   let isTerm := nextState.isTerminal
-  let next : JobRecord := {
+  let nextRaw : JobRecord := {
     cur with
     state := nextState
     operationId := nextOpStr
@@ -1142,9 +1258,10 @@ def stepJobClaim
     error? := if nextState == .queued || nextState == .running then none else cur.error?
     stateRevision := bumpedRev
   }
+  let next := nextRaw.redactSettledPayload l.nodeBootEpoch
   if let .error e ← syncJobToLegacySqlite l.workDir l.sqliteBackend next 1500 2 then
     return .error e
-  let serialized := renderCompact (next.toJson none)
+  let serialized := next.serializeForWal
   match ← LeanSys.Store.putString l.store (jobKey jobId) serialized with
   | .error e => return .error s!"WAL write failed: {repr e}"
   | .ok h' =>
@@ -1184,7 +1301,7 @@ def updateJobAuthorityCas
     reservedDiskGib := nextReservedDiskGib
     stateRevision := nextRev
   }
-  let serialized := renderCompact (next.toJson none)
+  let serialized := next.serializeForWal
   match ← LeanSys.Store.putString l.store (jobKey jobId) serialized with
   | .error e => return .error s!"WAL write failed: {repr e}"
   | .ok h' =>
