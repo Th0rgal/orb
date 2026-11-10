@@ -6,7 +6,8 @@
 # Core and all companion binaries are compiled directly from the repository's
 # Pure Lean 4 packages (`lean/OrbBin`, `lean/OrbNode`, `lean/OrbCore`,
 # `lean/OrbLocald`) with the pinned Lean 4 v4.35.0 toolchain (`lean/lean-toolchain`)
-# and linked against OpenSSL (`libssl`, `libcrypto`) and SQLite (`libsqlite3`).
+# via `turbo-lean` + `clang`/`lld` and linked against OpenSSL (`libssl`, `libcrypto`)
+# and SQLite (`libsqlite3`).
 #
 # Programs Core spawns at runtime (git, python3, bash, the harness CLIs) are
 # looked up on PATH; the service that runs Core provides them.
@@ -16,13 +17,19 @@
   fetchurl,
   fetchFromGitHub,
   autoPatchelfHook,
+  binutils,
+  callPackage,
   cctools,
+  clang,
   git,
   gnutar,
+  lld,
   openssl,
+  patchelf,
   python3,
   sqlite,
   zstd,
+  turbo-lean ? null,
 }: let
   orbPackageJson = lib.importJSON ../orb/package.json;
   coreLakeManifest = lib.importJSON ../lean/OrbCore/lake-manifest.json;
@@ -88,6 +95,11 @@
     inherit (leanSysPkg) rev;
     hash = "sha256-TKE6Zhx4mWHFkJJbZEOQLwPQomAAYU5L3fYAiDMGwi8=";
   };
+
+  resolvedTurboLean =
+    if turbo-lean != null
+    then turbo-lean
+    else callPackage ./turbo-lean.nix {inherit leanToolchain;};
 in
   stdenv.mkDerivation {
     pname = "sandboxed-sh";
@@ -106,16 +118,26 @@ in
     nativeBuildInputs =
       [
         leanToolchain
+        resolvedTurboLean
+        clang
+        lld
+        binutils
         git
         python3
         zstd
       ]
+      ++ lib.optionals stdenv.hostPlatform.isLinux [patchelf]
       ++ lib.optionals stdenv.hostPlatform.isDarwin [cctools];
 
     buildInputs = [
       openssl
       sqlite
     ];
+
+    # OrbCore loads libsqlite3 and libcrypto via dlopen() (`orb_core_sqlite.c`),
+    # so expose their runtime library paths to `nix develop` (`inputsFrom`) and
+    # bake them into DT_RUNPATH during `installPhase` on Linux.
+    LD_LIBRARY_PATH = lib.makeLibraryPath [openssl sqlite];
 
     dontConfigure = true;
 
@@ -124,21 +146,58 @@ in
 
       export HOME="$TMPDIR/home"
       mkdir -p "$HOME"
+      export PATH="${clang}/bin:${lld}/bin:${binutils}/bin:${leanToolchain}/bin:$PATH"
       export LEAN_BIN_DIR="${leanToolchain}/bin"
-      export ORB_SKIP_TURBO_LEAN=1
-      export SANDBOXED_ALLOW_RAW_LAKE=1
+      export CC="${clang}/bin/clang"
+      export LEAN_CC="${clang}/bin/clang"
+      export TURBO_LEAN_BIN="${leanToolchain}/bin/lean"
+      export TURBO_LEAN_HOME="$TMPDIR/turbo-lean-state"
+      export TURBO_LEAN_STATE_DIR="$TMPDIR/turbo-lean-state"
+      export TURBO_LEAN_EMIT_C=1
+      export TURBO_LEAN_NO_DAEMON=1
+      export TURBO_LEAN_TELEMETRY=off
       export CPATH="${lib.makeSearchPathOutput "dev" "include" [openssl sqlite]}''${CPATH:+:$CPATH}"
-      export LIBRARY_PATH="${lib.makeLibraryPath [openssl sqlite]}''${LIBRARY_PATH:+:$LIBRARY_PATH}"
+      export LIBRARY_PATH="${leanToolchain}/lib:${lib.makeLibraryPath [openssl sqlite]}''${LIBRARY_PATH:+:$LIBRARY_PATH}"
 
-      # Pre-populate the pinned `lean-sys` package in every Lake workspace so
-      # `scripts/build_orb_bins.sh` builds strictly offline inside the Nix sandbox.
-      for pkg in OrbNetLeaf OrbBin OrbNode OrbCore OrbLocald; do
-        if [ -d "lean/$pkg" ]; then
-          mkdir -p "lean/$pkg/.lake/packages/lean-sys"
-          cp -R "${pinnedLeanSys}/." "lean/$pkg/.lake/packages/lean-sys/"
-          chmod -R u+w "lean/$pkg/.lake/packages/lean-sys"
-        fi
-      done
+      # Stage pinned `lean-sys` as a sibling path package so `turbo-lean` and Lake 4.35
+      # build strictly offline inside the Nix sandbox without `.git` network fetches.
+      if [ ! -d "lean/lean-sys" ]; then
+        cp -R "${pinnedLeanSys}" lean/lean-sys
+        chmod -R u+w lean/lean-sys
+        python3 - <<'PY'
+      import glob, json, pathlib, re
+
+      lf = pathlib.Path("lean/OrbNetLeaf/lakefile.lean")
+      lf.write_text(
+          re.sub(
+              r'require\s+«lean-sys»\s+from\s+git\s+"[^"]+"\s*@\s*"[^"]+"',
+              'require «lean-sys» from "../lean-sys"',
+              lf.read_text(),
+          )
+      )
+
+      for path in glob.glob("lean/*/lake-manifest.json"):
+          p = pathlib.Path(path)
+          data = json.loads(p.read_text())
+          new_pkgs = []
+          for entry in data.get("packages", []):
+              if entry.get("name") in ("«lean-sys»", "lean-sys"):
+                  new_pkgs.append({
+                      "type": "path",
+                      "scope": entry.get("scope", ""),
+                      "name": entry["name"],
+                      "manifestFile": entry.get("manifestFile", "lake-manifest.json"),
+                      "inherited": entry.get("inherited", False),
+                      "dir": "../lean-sys",
+                      "copy": False,
+                      "configFile": entry.get("configFile", "lakefile.lean"),
+                  })
+              else:
+                  new_pkgs.append(entry)
+          data["packages"] = new_pkgs
+          p.write_text(json.dumps(data, indent=1) + "\n")
+      PY
+      fi
 
       patchShebangs scripts/build_orb_bins.sh
       mkdir -p "$TMPDIR/orb-bins"
@@ -151,7 +210,12 @@ in
       runHook preInstall
 
       mkdir -p "$out/bin"
-      install -m 0755 "$TMPDIR/orb-bins"/* "$out/bin/"
+      for f in "$TMPDIR/orb-bins"/*; do
+        install -m 0755 "$f" "$out/bin/"
+        ${lib.optionalString stdenv.hostPlatform.isLinux ''
+          patchelf --add-rpath "${lib.makeLibraryPath [openssl sqlite]}" "$out/bin/$(basename "$f")"
+        ''}
+      done
 
       runHook postInstall
     '';

@@ -79,12 +79,11 @@ function statusDotClass(status: string | undefined): string {
   return "res-status-dot";
 }
 
+const CLOCK_FMT_7D = new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "2-digit" });
+const CLOCK_FMT_HM = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
+
 function formatClockTick(ms: number, range: string): string {
-  const d = new Date(ms);
-  if (range === "7d") {
-    return d.toLocaleDateString(undefined, { weekday: "short", hour: "2-digit" });
-  }
-  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return range === "7d" ? CLOCK_FMT_7D.format(ms) : CLOCK_FMT_HM.format(ms);
 }
 
 function eqIds(a: string[], b: string[]): boolean {
@@ -266,11 +265,26 @@ export default function Resources(props: {
     ),
   );
 
+  let scrubRect: { el: Element; left: number; width: number } | null = null;
+  let scrubRaf = 0;
+  let pendingScrubFrac: number | null = null;
+
+  function clearPointerScrub() {
+    scrubRect = null;
+    pendingScrubFrac = null;
+    if (scrubRaf) {
+      cancelAnimationFrame(scrubRaf);
+      scrubRaf = 0;
+    }
+    setHoverFrac(null);
+  }
+
   onMount(() => {
     const stop = pollWhileVisible(() => refresh(false, true), 10_000, "app.resources");
     onCleanup(() => {
       stop();
       activeAbort?.abort();
+      if (scrubRaf) cancelAnimationFrame(scrubRaf);
     });
   });
 
@@ -287,12 +301,14 @@ export default function Resources(props: {
       observeWidth(sankeyEl, (w) =>
         setSankeyWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev)),
       );
-      observeWidth(dagLaneEl, (w) =>
-        setDagLaneWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev)),
-      );
-      observeWidth(curveSvgEl, (w) =>
-        setCurveWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev)),
-      );
+      observeWidth(dagLaneEl, (w) => {
+        scrubRect = null;
+        setDagLaneWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev));
+      });
+      observeWidth(curveSvgEl, (w) => {
+        scrubRect = null;
+        setCurveWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev));
+      });
     });
   });
 
@@ -812,10 +828,25 @@ export default function Resources(props: {
   }
 
   function handlePointerScrub(e: MouseEvent, el: Element, padLeft = 0, padRight = 0) {
-    const rect = el.getBoundingClientRect();
-    const inner = Math.max(1, rect.width - padLeft - padRight);
-    const frac = Math.max(0, Math.min(1, (e.clientX - rect.left - padLeft) / inner));
-    setHoverFrac(frac);
+    if (!scrubRect || scrubRect.el !== el) {
+      const r = el.getBoundingClientRect();
+      scrubRect = { el, left: r.left, width: r.width };
+    }
+    const inner = Math.max(1, scrubRect.width - padLeft - padRight);
+    const frac = Math.max(0, Math.min(1, (e.clientX - scrubRect.left - padLeft) / inner));
+    if (scrubRaf === 0) {
+      setHoverFrac(frac);
+      scrubRaf = requestAnimationFrame(() => {
+        scrubRaf = 0;
+        if (pendingScrubFrac !== null) {
+          const next = pendingScrubFrac;
+          pendingScrubFrac = null;
+          setHoverFrac(next);
+        }
+      });
+    } else {
+      pendingScrubFrac = frac;
+    }
   }
 
   const rawUnitLabel = createMemo(() => (lens() === "compute" ? "vCPU" : "B tok/h"));
@@ -1303,8 +1334,9 @@ export default function Resources(props: {
                       <div
                         class="res-dag-canvas"
                         ref={dagLaneEl}
+                        onMouseEnter={() => { scrubRect = null; }}
                         onMouseMove={(e) => handlePointerScrub(e, e.currentTarget, 8, 8)}
-                        onMouseLeave={() => setHoverFrac(null)}
+                        onMouseLeave={clearPointerScrub}
                       >
                         <svg
                           class="res-dag-svg"
@@ -1596,10 +1628,11 @@ export default function Resources(props: {
                 ref={curveSvgEl}
                 class="res-curve-svg"
                 viewBox={`0 0 ${cg().width} ${cg().height}`}
+                onMouseEnter={() => { scrubRect = null; }}
                 onMouseMove={(e) =>
                   handlePointerScrub(e, e.currentTarget, cg().padX, cg().padX)
                 }
-                onMouseLeave={() => setHoverFrac(null)}
+                onMouseLeave={clearPointerScrub}
               >
                 <defs>
                   <linearGradient id="resCurveGrad" x1="0" y1="0" x2="0" y2="1">

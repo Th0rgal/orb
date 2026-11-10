@@ -79,6 +79,9 @@ opaque setenvVar (key : @& String) (val : @& String) : IO Unit
 @[extern "orb_bin_unsetenv"]
 opaque unsetenvVar (key : @& String) : IO Unit
 
+@[extern "orb_bin_statvfs_bytes"]
+private opaque rawStatvfsBytes (path : @& String) : IO ByteArray
+
 structure SpawnedPgrp where
   pid       : Int64
   stdinFd   : Int32
@@ -192,6 +195,11 @@ def statIdentity (path : String) (followSymlinks : Bool := false) : IO StatIdent
   if mode == 0 && ino == 0 && dev == 0 then
     return { exists_ := false, dev := 0, ino := 0, size := 0, mtime := 0, uid := 0, gid := 0, mode := 0 }
   return { exists_ := true, dev, ino, size := sz, mtime := mt, uid, gid, mode }
+
+/-- Return `(totalBytes, usedBytes)` for the filesystem containing `path` via POSIX `statvfs`. -/
+def statvfsBytes (path : String) : IO (UInt64 × UInt64) := do
+  let raw ← rawStatvfsBytes path
+  return (readU64LE raw 0, readU64LE raw 8)
 
 /-- Read an environment variable, returning `none` if unset or empty. -/
 def getEnvNonEmpty (name : String) : IO (Option String) := do

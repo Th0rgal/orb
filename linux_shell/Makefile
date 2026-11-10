@@ -1,4 +1,4 @@
-CC ?= cc
+CC ?= $(shell command -v clang >/dev/null 2>&1 && echo clang || echo cc)
 PKG_CONFIG ?= pkg-config
 WEBKIT_PKGS := gtk+-3.0 webkit2gtk-4.1
 

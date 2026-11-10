@@ -484,7 +484,7 @@ private def runR7bMcpAndPrivdTests (tmpDir : System.FilePath) : IO Unit := do
     ("mission_id", .str "m-1"),
     ("lease_token", .str "orb-jit-dead"),
     ("target_host", .str "self"),
-    ("argv", .arr #[.str "/bin/true"])
+    ("argv", .arr #[.str "true"])
   ])
   let _ ← LeanSys.Posix.closeFd repFd2
   match Json.parse (← IO.FS.readFile repPath2) with

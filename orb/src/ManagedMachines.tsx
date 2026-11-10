@@ -90,8 +90,19 @@ function TtlRing(p: { fraction: number; urgent: boolean }) {
 }
 
 function ManagedRow(p: { m: ManagedMachine; fetchedAt: number; disk?: number | null; activeJobs?: number | null; muted?: boolean } & RowActions) {
-  const now = useNow(1000);
   const live = () => isLive(p.m);
+  const needsClock = createMemo(() => live() || Boolean(p.m.reap_at));
+  const [clockAcc, setClockAcc] = createSignal<() => number>(() => p.fetchedAt || Date.now());
+  createEffect(() => {
+    if (needsClock()) {
+      const tick = useNow(1000);
+      setClockAcc(() => tick);
+    } else {
+      setClockAcc(() => () => p.fetchedAt || Date.now());
+    }
+  });
+  const now = () => clockAcc()();
+  const expiresTitle = createMemo(() => p.m.expires_at ? `Expires ${new Date(p.m.expires_at).toLocaleString()}` : undefined);
   const starting = () => isStarting(p.m);
   const failed = () => p.m.state === "failed";
   const destroying = () => p.m.state === "destroying";
@@ -128,7 +139,7 @@ function ManagedRow(p: { m: ManagedMachine; fetchedAt: number; disk?: number | n
       <div class="managed-line2">
         <span class="managed-spec">{specLine({ cpu: p.m.cpu, ram_gb: p.m.ram_gb, disk_gb: p.disk })}</span>
         <Show when={live()} fallback={<Show when={!failed() || p.m.destroyed_at}><span class="managed-cost">Final {usd(p.m.cost_usd)}{p.m.ledger_closed ? " · ledger closed" : " · ledger open"}</span></Show>}>
-          <Show when={p.m.expires_at}><span class="managed-ttl" classList={{ "managed-urgent": ttlUrgent(p.m.expires_at, now()) }} title={`Expires ${new Date(p.m.expires_at).toLocaleString()}`}>
+          <Show when={p.m.expires_at}><span class="managed-ttl" classList={{ "managed-urgent": ttlUrgent(p.m.expires_at, now()) }} title={expiresTitle()}>
             <TtlRing fraction={ttlFraction(p.m.created_at, p.m.expires_at, now())} urgent={ttlUrgent(p.m.expires_at, now())} />{ttlShort(p.m.expires_at, now())}</span></Show>
           <span class="managed-cost">{costLine(liveCost(p.m, p.fetchedAt, now()), p.m.usd_per_hour)}</span>
         </Show>

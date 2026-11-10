@@ -68,10 +68,10 @@ def macro(width, op):
 
 
 def orb_c(out_dir):
-    turbo_bin = os.environ.get("TURBO_LEAN_BIN") or shutil.which("turbo-lean")
+    turbo_bin = os.environ.get("TURBO_LEAN_CLI") or shutil.which("turbo-lean")
     if turbo_bin and pathlib.Path(turbo_bin).is_file():
         res = subprocess.run([turbo_bin, "build", "--project-dir", str(ROOT / "lean"), "Orb.Kernel"],
-                             cwd=ROOT, capture_output=True, text=True)
+                             cwd=ROOT, env={**os.environ, "TURBO_LEAN_EMIT_C": "1"}, capture_output=True, text=True)
         ir_c = ROOT / "lean/.lake/build/ir/Orb/Kernel.c"
         if res.returncode == 0 and ir_c.is_file():
             return ir_c

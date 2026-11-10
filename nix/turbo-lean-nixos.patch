@@ -1,0 +1,290 @@
+diff --git a/crates/turbo-lean/src/module_builder.rs b/crates/turbo-lean/src/module_builder.rs
+index eef590e..a038641 100644
+--- a/crates/turbo-lean/src/module_builder.rs
++++ b/crates/turbo-lean/src/module_builder.rs
+@@ -1668,6 +1668,15 @@ fn resolve_toolchain_compiler_with_roots(
+             candidate_bins.push(exact_tc);
+         }
+     }
++    if candidate_bins.is_empty() {
++        if let Some(nix_lean) = option_env!("TURBO_LEAN_NIX_DEFAULT_LEAN").filter(|s| !s.is_empty())
++        {
++            let p = PathBuf::from(nix_lean);
++            if p.is_file() {
++                candidate_bins.push(p);
++            }
++        }
++    }
+     let strict_tc = is_untrusted
+         || !is_toolchain_eligible_for_fleet_fallback(toolchain)
+         || std::env::var("TURBO_LEAN_STRICT_TOOLCHAIN")
+@@ -1782,7 +1791,7 @@ fn resolve_toolchain_compiler_with_roots(
+         }
+     }
+     let githash_out = Command::new(&canon_bin)
+-        .env("PATH", "/usr/bin:/bin")
++        .env("PATH", crate::trusted_tools::trusted_sys_path())
+         .arg("--githash")
+         .output()
+         .context("Failed to execute `lean --githash`")?;
+@@ -1807,7 +1816,12 @@ fn resolve_toolchain_compiler_with_roots(
+         && has_specific_tc
+         && !path_has_toolchain_component(&canon_bin, &tc_dir_name)
+     {
+-        if is_untrusted
++        let is_nix_default = option_env!("TURBO_LEAN_NIX_DEFAULT_LEAN")
++            .filter(|s| !s.is_empty())
++            .and_then(|p| Path::new(p).canonicalize().ok())
++            .as_deref()
++            == Some(canon_bin.as_path());
++        if (is_untrusted && !is_nix_default)
+             || path_is_inside_any_toolchains_dir(&canon_bin)
+             || path_is_elan_proxy_bin(&canon_bin)
+         {
+@@ -1842,7 +1856,7 @@ fn resolve_toolchain_compiler_with_roots(
+             .unwrap_or(false)
+         {
+             let ver_out = Command::new(&canon_bin)
+-                .env("PATH", "/usr/bin:/bin")
++                .env("PATH", crate::trusted_tools::trusted_sys_path())
+                 .arg("--version")
+                 .output()
+                 .context("Failed to execute `lean --version` for toolchain verification")?;
+@@ -2027,9 +2041,10 @@ impl PackageConfig {
+ 
+ /// Only the resolved toolchain and fixed system utilities, never caller/project bins.
+ pub(crate) fn verifier_path(lean: &Path) -> String {
++    let sys = crate::trusted_tools::trusted_sys_path();
+     match lean.parent().filter(|p| p.is_absolute()) {
+-        Some(bin) => format!("{}:/usr/bin:/bin", bin.display()),
+-        None => "/usr/bin:/bin".into(),
++        Some(bin) => format!("{}:{sys}", bin.display()),
++        None => sys,
+     }
+ }
+ 
+@@ -20030,6 +20045,12 @@ fn lake_cc_and_flags(cfg: &ProjectConfig) -> Result<LakeCcSpec> {
+             validate_cc_outside_workspace(cfg, Path::new(&lean_cc))?,
+             true,
+         )
++    } else if let Some(nix_cc) = option_env!("TURBO_LEAN_NIX_DEFAULT_CC").filter(|s| !s.is_empty())
++    {
++        (
++            validate_cc_outside_workspace(cfg, Path::new(nix_cc))?,
++            true,
++        )
+     } else if bundled_clang.is_file() {
+         let canon_clang = bundled_clang.canonicalize().with_context(|| {
+             format!(
+@@ -21283,17 +21304,23 @@ pub(crate) fn probe_bwrap_sandbox(project: &Path) -> Option<PathBuf> {
+         }
+         return None;
+     }
+-    probe_bwrap_candidates(project, &["/usr/bin/bwrap", "/bin/bwrap"])
++    let mut cands = Vec::new();
++    if let Some(nix_bw) = option_env!("TURBO_LEAN_NIX_BWRAP").filter(|s| !s.is_empty()) {
++        cands.push(nix_bw);
++    }
++    cands.extend(["/usr/bin/bwrap", "/bin/bwrap", "/run/current-system/sw/bin/bwrap"]);
++    probe_bwrap_candidates(project, &cands)
+ }
+ 
+ fn probe_bwrap_candidates(project: &Path, candidates: &[&str]) -> Option<PathBuf> {
++    let sys_path = crate::trusted_tools::trusted_sys_path();
+     for candidate in candidates {
+         let Ok(cand) = crate::trusted_tools::system_executable(Path::new(candidate), project)
+         else {
+             continue;
+         };
+         let mut probe = Command::new(&cand);
+-        probe.env_clear().env("PATH", "/usr/bin:/bin");
++        probe.env_clear().env("PATH", &sys_path);
+         probe.args([
+             "--unshare-all",
+             "--new-session",
+@@ -21301,7 +21328,7 @@ fn probe_bwrap_candidates(project: &Path, candidates: &[&str]) -> Option<PathBuf
+             "--clearenv",
+             "--setenv",
+             "PATH",
+-            "/usr/bin:/bin",
++            &sys_path,
+             "--dev",
+             "/dev",
+             "--proc",
+@@ -21309,14 +21336,23 @@ fn probe_bwrap_candidates(project: &Path, candidates: &[&str]) -> Option<PathBuf
+             "--tmpfs",
+             "/tmp",
+         ]);
+-        for sys_dir in ["/usr", "/bin", "/lib", "/lib64", "/etc"] {
++        for sys_dir in ["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix", "/run/current-system/sw"]
++        {
+             let p = Path::new(sys_dir);
+             if p.exists() {
+                 probe.arg("--ro-bind").arg(p).arg(p);
+             }
+         }
++        let probe_bin = ["/usr/bin/true", "/bin/true", "/run/current-system/sw/bin/true"]
++            .into_iter()
++            .find(|p| Path::new(p).exists())
++            .unwrap_or("/bin/sh");
++        if probe_bin == "/bin/sh" {
++            probe.args(["/bin/sh", "-c", "true"]);
++        } else {
++            probe.arg(probe_bin);
++        }
+         if probe
+-            .arg("/usr/bin/true")
+             .output()
+             .map(|o| o.status.success())
+             .unwrap_or(false)
+@@ -21608,6 +21644,8 @@ fn build_module_compile_command(
+             "/bin",
+             "/lib",
+             "/lib64",
++            "/nix",
++            "/run/current-system/sw",
+             "/etc/ld.so.cache",
+             "/etc/localtime",
+         ] {
+diff --git a/crates/turbo-lean/src/trusted_tools.rs b/crates/turbo-lean/src/trusted_tools.rs
+index a3fcbb9..78baa7a 100644
+--- a/crates/turbo-lean/src/trusted_tools.rs
++++ b/crates/turbo-lean/src/trusted_tools.rs
+@@ -6,7 +6,26 @@ use std::path::{Path, PathBuf};
+ use std::process::Command;
+ use std::sync::OnceLock;
+ 
+-const SYSTEM_BINS: [&str; 5] = ["/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin"];
++const SYSTEM_BINS: [&str; 6] = [
++    "/usr/bin",
++    "/bin",
++    "/usr/local/bin",
++    "/usr/sbin",
++    "/sbin",
++    "/run/current-system/sw/bin",
++];
++
++pub(crate) fn trusted_sys_path() -> String {
++    match option_env!("TURBO_LEAN_NIX_SYS_PATH") {
++        Some(nix_p) if !nix_p.is_empty() => {
++            format!("{nix_p}:/run/current-system/sw/bin:/usr/bin:/bin")
++        }
++        _ if Path::new("/run/current-system/sw/bin").is_dir() => {
++            "/run/current-system/sw/bin:/usr/bin:/bin".to_string()
++        }
++        _ => "/usr/bin:/bin".to_string(),
++    }
++}
+ 
+ pub(crate) fn outside_checkout(path: &Path, project: &Path) -> Result<PathBuf> {
+     anyhow::ensure!(
+@@ -46,11 +65,17 @@ pub(crate) fn outside_checkout(path: &Path, project: &Path) -> Result<PathBuf> {
+ 
+ pub(crate) fn system_executable(path: &Path, project: &Path) -> Result<PathBuf> {
+     let path = outside_checkout(path, project)?;
++    let in_nix_store_bin = path.starts_with("/nix/store/")
++        && path
++            .parent()
++            .and_then(|p| p.file_name())
++            .is_some_and(|n| n == "bin");
+     anyhow::ensure!(
+-        SYSTEM_BINS
+-            .iter()
+-            .filter_map(|p| Path::new(p).canonicalize().ok())
+-            .any(|bin| path.parent() == Some(bin.as_path())),
++        in_nix_store_bin
++            || SYSTEM_BINS
++                .iter()
++                .filter_map(|p| Path::new(p).canonicalize().ok())
++                .any(|bin| path.parent() == Some(bin.as_path())),
+         "Executable is outside trusted system bin directories: {}",
+         path.display()
+     );
+@@ -59,12 +84,20 @@ pub(crate) fn system_executable(path: &Path, project: &Path) -> Result<PathBuf>
+ 
+ pub(crate) fn system_command(name: &str) -> Result<Command> {
+     let project = std::env::current_dir()?;
+-    let bin = SYSTEM_BINS
+-        .iter()
+-        .find_map(|dir| system_executable(&Path::new(dir).join(name), &project).ok())
++    let nix_bin = option_env!("TURBO_LEAN_NIX_SYS_PATH")
++        .into_iter()
++        .flat_map(|s| s.split(':'))
++        .filter(|d| !d.is_empty())
++        .find_map(|dir| system_executable(&Path::new(dir).join(name), &project).ok());
++    let bin = nix_bin
++        .or_else(|| {
++            SYSTEM_BINS
++                .iter()
++                .find_map(|dir| system_executable(&Path::new(dir).join(name), &project).ok())
++        })
+         .with_context(|| format!("No trusted system executable for {name}"))?;
+     let mut command = Command::new(bin);
+-    command.env_clear().env("PATH", "/usr/bin:/bin");
++    command.env_clear().env("PATH", trusted_sys_path());
+     Ok(command)
+ }
+ 
+@@ -132,7 +165,7 @@ fn checked_git(path: PathBuf) -> Result<PathBuf> {
+     let out = Command::new(&path)
+         .arg("version")
+         .env_clear()
+-        .env("PATH", "/usr/bin:/bin")
++        .env("PATH", trusted_sys_path())
+         .env("GIT_CONFIG_NOSYSTEM", "1")
+         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+         .current_dir("/")
+@@ -176,11 +209,16 @@ fn resolve_trusted_git_uncached(project: &Path) -> Result<PathBuf> {
+             .with_context(|| format!("Invalid TURBO_LEAN_GIT={}", raw.display()))?;
+         return checked_git(vetted);
+     }
++    if let Some(nix_git) = option_env!("TURBO_LEAN_NIX_DEFAULT_GIT").filter(|s| !s.is_empty()) {
++        if let Ok(vetted) = outside_checkout(Path::new(nix_git), project) {
++            return checked_git(vetted);
++        }
++    }
+     let candidate = SYSTEM_BINS
+         .iter()
+         .find_map(|dir| system_executable(&Path::new(dir).join("git"), project).ok())
+         .context(
+-            "No trusted system Git in /usr/bin, /bin, /usr/local/bin, /usr/sbin, or /sbin; \
++            "No trusted system Git in /usr/bin, /bin, /usr/local/bin, /usr/sbin, /sbin, or /run/current-system/sw/bin; \
+              set TURBO_LEAN_GIT=/abs/path/to/git outside all checkouts",
+         )?;
+     checked_git(candidate)
+@@ -199,11 +237,12 @@ pub(crate) fn git(project: &Path) -> Result<GitCommand> {
+         .map_err(|e| anyhow::anyhow!("Trusted Git unavailable: {e}"))?;
+     let program = outside_checkout(program, project)?;
+     let home = PrivateHome::new()?;
++    let sys_path = trusted_sys_path();
+     let prepare = |extra: &[String]| {
+         let mut command = Command::new(&program);
+         command
+             .env_clear()
+-            .env("PATH", "/usr/bin:/bin")
++            .env("PATH", &sys_path)
+             .env("HOME", &home.0)
+             .env("XDG_CONFIG_HOME", &home.0)
+             .env("GIT_CONFIG_NOSYSTEM", "1")
+diff --git a/lean/LeanNative/Driver/CoreCLI.lean b/lean/LeanNative/Driver/CoreCLI.lean
+index 30bea84..bedea9b 100644
+--- a/lean/LeanNative/Driver/CoreCLI.lean
++++ b/lean/LeanNative/Driver/CoreCLI.lean
+@@ -752,9 +752,15 @@ def runCoreSelfTest (tag : String) : IO UInt32 := do
+     TargetArch.wasm32.triple == "wasm32-unknown-unknown" && TargetArch.iosSimArm64.symbolPrefix == "_"
+   let sve2AsmOk ← do
+     let androidIr := emitLLVMOptimized optMod .androidArm64
+-    let tmpLl := "/tmp/ln_sve2_verify.ll"
++    let tmpDir := (← IO.getEnv "TMPDIR").getD "/tmp"
++    let tmpLl := s!"{tmpDir}/ln_sve2_verify.ll"
+     let home := (← IO.getEnv "HOME").getD "/root"
+-    let clangCandidates := [s!"{home}/.elan/toolchains/leanprover--lean4---v4.35.0/bin/clang", s!"{home}/.elan/toolchains/leanprover--lean4---v4.31.0/bin/clang", "/var/lib/sandboxed-node/.elan/toolchains/leanprover--lean4---v4.35.0/bin/clang", "/var/lib/sandboxed-node/caches/elan/toolchains/leanprover--lean4---v4.35.0/bin/clang"]
++    let sysroot := (← IO.getEnv "LEAN_SYSROOT").getD ""
++    let rawClangEnv := (← IO.getEnv "LEAN_NATIVE_CLANG_RAW").getD ""
++    let clangCandidates :=
++      (if rawClangEnv.isEmpty then [] else [rawClangEnv]) ++
++      (if sysroot.isEmpty then [] else [s!"{sysroot}/bin/clang"]) ++
++      [s!"{home}/.elan/toolchains/leanprover--lean4---v4.35.0/bin/clang", s!"{home}/.elan/toolchains/leanprover--lean4---v4.31.0/bin/clang", "/var/lib/sandboxed-node/.elan/toolchains/leanprover--lean4---v4.35.0/bin/clang", "/var/lib/sandboxed-node/caches/elan/toolchains/leanprover--lean4---v4.35.0/bin/clang"]
+     let mut clangCmd := "clang"
+     for cand in clangCandidates do
+       if ← System.FilePath.pathExists cand then clangCmd := cand; break

@@ -303,7 +303,6 @@
 
 .res-sankey-link {
   cursor: pointer;
-  transition: fill-opacity 120ms ease, stroke-opacity 120ms ease;
 }
 
 .res-sankey-node-group {
