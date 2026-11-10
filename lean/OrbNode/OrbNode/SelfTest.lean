@@ -1336,6 +1336,27 @@ private def runOpenLedgerDeltaPerfTests
      recentIds1 == expectedRecent &&
      recentIds2 == expectedRecent)
 
+  -- >16 MiB (`walMaxPayload`) bundle admission preserves full in-RAM `payloadJson` without poisoning `state.wal`
+  let mut chunk17 := "X"
+  for _ in [0:24] do
+    chunk17 := chunk17 ++ chunk17
+  let hugePayload := "{\"kind\":\"lean_build\",\"bundle\":\"" ++ chunk17 ++ "extra\"}"
+  let .ok lHuge1 ← lPerf2.insertQueued {
+    jobId := "job-perf-17mb-bundle", missionId := missionId, payloadJson := hugePayload,
+    state := .queued, createdAt := "2026-11-06T00:00:00Z"
+  } | throw (IO.userError "insertQueued 17 MiB bundle failed")
+  let inMemHugeBytes := ((lHuge1.jobs.get? "job-perf-17mb-bundle").map (·.payloadJson.utf8ByteSize)).getD 0
+  let .ok (lHuge2, _) ← lHuge1.updateJob "job-perf-17mb-bundle" (fun r => .ok {
+    r with state := .succeeded, exitCode? := some 0, finishedAt? := some "2026-11-06T00:01:00Z"
+  }) | throw (IO.userError "updateJob 17 MiB bundle failed")
+  let _ := lHuge2
+  let .ok lHugeReopen ← OrbNode.Store.openLedger perfRoot
+    | throw (IO.userError "reopen openLedger after 17 MiB bundle failed (state.wal poisoned!)")
+  check "Oversized (>16 MiB walMaxPayload) job payload stays in RAM during execution without poisoning state.wal on restart"
+    (inMemHugeBytes > 16777216 &&
+     (lHugeReopen.jobs.get? "job-perf-17mb-bundle").map (·.state) == some .succeeded &&
+     (lHugeReopen.jobs.get? "job-perf-17mb-bundle").map (·.payloadJson) == some "{}")
+
 set_option maxRecDepth 2048 in
 def runTests : IO UInt32 := do
   let passedRef ← IO.mkRef (0 : Nat)

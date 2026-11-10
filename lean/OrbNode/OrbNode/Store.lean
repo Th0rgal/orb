@@ -215,6 +215,26 @@ def JobRecord.redactSettledPayload (r : JobRecord) (liveBootEpoch : UInt64 := 0)
   else
     r
 
+/-- Maximum inline `payloadJson` UTF-8 byte length serialized into `LeanSys.Store` WAL frames (`4 MiB`).
+    `LeanSys.Spec.walMaxPayload` caps each WAL frame at `16 MiB` (`16,777,216` bytes), while `OrbNode`
+    accepts `POST /jobs` bundles up to `128 MiB` (`maxBodyBytes`). Capping inline WAL `payload_json`
+    guarantees every serialized WAL frame stays strictly below `walMaxPayload` so `LeanSys.Store.openStore`
+    never rejects an oversized mid-log frame with `.eio`, while `Ledger.jobs` in RAM and `jobs.db` retain
+    the full `payloadJson` for active execution and same-boot `SM-20` retries. -/
+def maxInlineWalPayloadBytes : Nat := 4 * 1024 * 1024
+
+def JobRecord.serializeForWal (r : JobRecord) : String :=
+  let walRec :=
+    if r.payloadJson.utf8ByteSize > maxInlineWalPayloadBytes then
+      { r with payloadJson := "{}" }
+    else
+      r
+  let rendered := renderCompact (walRec.toJson none)
+  if rendered.utf8ByteSize + 256 > LeanSys.Spec.walMaxPayload.toNat then
+    renderCompact ({ walRec with payloadJson := "{}" }.toJson none)
+  else
+    rendered
+
 def operationIdToken (raw : String) : UInt64 := Id.run do
   let clean := raw.trimAscii.toString
   if clean.isEmpty then
@@ -941,7 +961,7 @@ def openLedger (workDir : String) (explicitBootEpoch : UInt64 := 0) : IO (Except
           if let some rec0 := JobRecord.fromStoreJson? jv then
             let jobRec := rec0.redactSettledPayload liveBootEpoch
             if jobRec.payloadJson != rec0.payloadJson then
-              compactedKv := compactedKv.insert k (renderCompact (jobRec.toJson none)).toUTF8
+              compactedKv := compactedKv.insert k jobRec.serializeForWal.toUTF8
               redactedAny := true
             jobs := jobs.insert jobRec.jobId jobRec
   let sqliteIndex ← match ← queryLegacySqliteIndex workDir sqliteBackend with
@@ -962,7 +982,7 @@ def openLedger (workDir : String) (explicitBootEpoch : UInt64 := 0) : IO (Except
   for rec0 in legacyRows do
     let jobRec := rec0.redactSettledPayload liveBootEpoch
     let k := jobKey jobRec.jobId
-    let ser := (renderCompact (jobRec.toJson none)).toUTF8
+    let ser := jobRec.serializeForWal.toUTF8
     jobs := jobs.insert jobRec.jobId jobRec
     walUpdates := walUpdates.insert k ser
   let nowTs ← nowRfc3339
@@ -997,7 +1017,7 @@ def openLedger (workDir : String) (explicitBootEpoch : UInt64 := 0) : IO (Except
         (rec, false)
     if recChanged then
       jobs := jobs.insert jid nextRec
-      walUpdates := walUpdates.insert (jobKey jid) (renderCompact (nextRec.toJson none)).toUTF8
+      walUpdates := walUpdates.insert (jobKey jid) nextRec.serializeForWal.toUTF8
     let needsSqliteUpsert :=
       match sqliteIndex.get? jid with
       | none => true
@@ -1089,7 +1109,7 @@ def insertQueued
     extraSql := extraSql ++ containerLeaderUpsertSql { cl with nodeBootEpoch := l.nodeBootEpoch } ++ " "
   if let .error e ← syncJobToLegacySqlite l.workDir l.sqliteBackend acceptedRec 1500 1 extraSql then
     return .error e
-  let serialized := renderCompact (acceptedRec.toJson none)
+  let serialized := acceptedRec.serializeForWal
   match ← LeanSys.Store.putString l.store (jobKey acceptedRec.jobId) serialized with
   | .error e =>
     let dbPath := (System.FilePath.mk l.workDir / "jobs.db").toString
@@ -1164,7 +1184,7 @@ def updateJob
       stateRevision := bumpedRev
     }
     let next := nextRaw.redactSettledPayload l.nodeBootEpoch
-    let serialized := renderCompact (next.toJson none)
+    let serialized := next.serializeForWal
     match ← LeanSys.Store.putString l.store (jobKey jobId) serialized with
     | .error e => return .error s!"WAL write failed: {repr e}"
     | .ok h' =>
@@ -1241,7 +1261,7 @@ def stepJobClaim
   let next := nextRaw.redactSettledPayload l.nodeBootEpoch
   if let .error e ← syncJobToLegacySqlite l.workDir l.sqliteBackend next 1500 2 then
     return .error e
-  let serialized := renderCompact (next.toJson none)
+  let serialized := next.serializeForWal
   match ← LeanSys.Store.putString l.store (jobKey jobId) serialized with
   | .error e => return .error s!"WAL write failed: {repr e}"
   | .ok h' =>
@@ -1281,7 +1301,7 @@ def updateJobAuthorityCas
     reservedDiskGib := nextReservedDiskGib
     stateRevision := nextRev
   }
-  let serialized := renderCompact (next.toJson none)
+  let serialized := next.serializeForWal
   match ← LeanSys.Store.putString l.store (jobKey jobId) serialized with
   | .error e => return .error s!"WAL write failed: {repr e}"
   | .ok h' =>
