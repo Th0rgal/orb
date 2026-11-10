@@ -1,6 +1,5 @@
 import Lake
-open Lake DSL
-open System (FilePath)
+open System Lake DSL
 
 package «orb-net-leaf» where
   version := v!"0.1.0"
@@ -17,7 +16,7 @@ target orb_net_leaf_o pkg : FilePath := do
   let oFile := pkg.buildDir / "c" / "orb_net_leaf.o"
   let srcJob ← inputTextFile <| pkg.dir / "c" / "orb_net_leaf.c"
   let leanIncludeDir ← getLeanIncludeDir
-  buildO oFile srcJob #["-I", leanIncludeDir.toString] #["-std=gnu11", "-O3", "-fPIC", "-Wall", "-Wextra", "-Werror"] "cc"
+  buildO oFile srcJob #["-I", leanIncludeDir.toString] #["-std=gnu11", "-O3", "-fPIC", "-Wall", "-Wextra", "-Werror"] ((← IO.getEnv "LEAN_CC").getD "cc")
 
 extern_lib liborb_net_leaf_shim pkg := do
   let shimO ← orb_net_leaf_o.fetch

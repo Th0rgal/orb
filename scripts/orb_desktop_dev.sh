@@ -32,6 +32,10 @@ while [[ $# -gt 0 ]]; do
       MODE="bundle"
       shift
       ;;
+    --static|--preview)
+      MODE="static"
+      shift
+      ;;
     --ui-only)
       MODE="bundle"
       UI_ONLY=1
@@ -148,6 +152,15 @@ if [[ "$OS_NAME" == "Linux" && -e /etc/NIXOS ]]; then
     echo "==> Entering nix develop environment for $ROOT_DIR..."
     exec nix develop "$ROOT_DIR" -c env ORB_IN_NIX_SHELL=1 "$ROOT_DIR/scripts/orb_desktop_dev.sh" "${ORIG_ARGS[@]}"
   fi
+  if [[ -d /run/opengl-driver/share && ":${XDG_DATA_DIRS:-}:" != *":/run/opengl-driver/share:"* ]]; then
+    export XDG_DATA_DIRS="/run/opengl-driver/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  elif [[ -d /run/opengl-driver/share ]]; then
+    export XDG_DATA_DIRS="/run/opengl-driver/share:${XDG_DATA_DIRS//\/run\/opengl-driver\/share:/}"
+  fi
+  [[ -d /run/opengl-driver/lib ]] && export LD_LIBRARY_PATH="/run/opengl-driver/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  [[ -d /run/opengl-driver/lib/dri ]] && export LIBGL_DRIVERS_PATH="/run/opengl-driver/lib/dri"
+  [[ -d /run/opengl-driver/lib/gbm ]] && export GBM_BACKENDS_PATH="/run/opengl-driver/lib/gbm"
+  [[ -d /run/opengl-driver/share/glvnd/egl_vendor.d ]] && export __EGL_VENDOR_LIBRARY_DIRS="/run/opengl-driver/share/glvnd/egl_vendor.d"
 fi
 
 if [[ "$OS_NAME" == "Linux" ]]; then
@@ -401,7 +414,11 @@ MIME = {
 class Handler(SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args): return
     def end_headers(self):
-        self.send_header("Cache-Control", "no-cache")
+        req_p = getattr(self, "path", "").split("?", 1)[0]
+        if req_p.startswith(("/assets/", "/provider-icons/")) or req_p.endswith((".woff2", ".woff", ".ttf", ".wasm")):
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        else:
+            self.send_header("Cache-Control", "no-cache")
         super().end_headers()
     def guess_type(self, path):
         return MIME.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
@@ -433,6 +450,21 @@ APP_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")/.." && pwd)"
 export PATH="\$APP_DIR/bin:/etc/profiles/per-user/\${USER:-\$(id -un)}/bin:/run/current-system/sw/bin:\$PATH"
 export ORB_LOCALD_BIN="\$APP_DIR/bin/orb-locald"
 export ORB_SIGNER_BIN="\$APP_DIR/bin/orb-signer"
+if [[ -d /run/opengl-driver/share ]]; then
+  export XDG_DATA_DIRS="/run/opengl-driver/share:\${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+fi
+if [[ -d /run/opengl-driver/lib ]]; then
+  export LD_LIBRARY_PATH="/run/opengl-driver/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+fi
+if [[ -d /run/opengl-driver/lib/dri ]]; then
+  export LIBGL_DRIVERS_PATH="/run/opengl-driver/lib/dri"
+fi
+if [[ -d /run/opengl-driver/lib/gbm ]]; then
+  export GBM_BACKENDS_PATH="/run/opengl-driver/lib/gbm"
+fi
+if [[ -d /run/opengl-driver/share/glvnd/egl_vendor.d ]]; then
+  export __EGL_VENDOR_LIBRARY_DIRS="/run/opengl-driver/share/glvnd/egl_vendor.d"
+fi
 if [[ " \$* " == *" --self-test "* ]]; then
   exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
 fi
@@ -614,7 +646,38 @@ PY
   echo "==> Connected desktop state ($CONN_FILE) to local orb-server (${SERVER_URL})"
 fi
 
-if ! curl -fsS "http://127.0.0.1:${VITE_PORT}/" >/dev/null 2>&1; then
+if [[ "$MODE" == "static" ]]; then
+  if [[ ! -f "$ROOT_DIR/orb/dist/index.html" || "$FORCE_REBUILD" == "1" ]]; then
+    echo "==> Building frontend dist/ for static mode (zero vite/esbuild runtime overhead)..."
+    (cd "$ROOT_DIR/orb" && pnpm build)
+  fi
+  echo "==> Starting lightweight static asset server on http://127.0.0.1:${VITE_PORT}/..."
+  python3 - "$ROOT_DIR/orb/dist" "$VITE_PORT" <<'PY' &
+import os, sys
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+ROOT, PORT = os.path.realpath(sys.argv[1]), int(sys.argv[2])
+MIME = {".html":"text/html; charset=utf-8",".js":"text/javascript; charset=utf-8",".mjs":"text/javascript; charset=utf-8",".css":"text/css; charset=utf-8",".wasm":"application/wasm",".json":"application/json; charset=utf-8",".svg":"image/svg+xml",".png":"image/png",".webp":"image/webp",".ico":"image/x-icon",".woff2":"font/woff2"}
+class H(SimpleHTTPRequestHandler):
+    def log_message(self, *a): return
+    def end_headers(self):
+        p = getattr(self, "path", "").split("?", 1)[0]
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable" if p.startswith(("/assets/","/provider-icons/")) or p.endswith((".woff2",".wasm")) else "no-cache")
+        super().end_headers()
+    def guess_type(self, p): return MIME.get(os.path.splitext(p)[1].lower(), "application/octet-stream")
+    def translate_path(self, p):
+        rel = p.split("?",1)[0].split("#",1)[0].lstrip("/") or "index.html"
+        c = os.path.normpath(os.path.join(ROOT, rel))
+        if not (c == ROOT or c.startswith(ROOT + os.sep)): return os.path.join(ROOT, "__missing__")
+        return c if os.path.isfile(c) else (os.path.join(ROOT, "index.html") if not os.path.splitext(rel)[1] else os.path.join(ROOT, "__missing__"))
+class S(ThreadingHTTPServer): allow_reuse_address = True
+S(("127.0.0.1", PORT), H).serve_forever()
+PY
+  VITE_PID="$!"
+  for _ in {1..40}; do
+    curl -fsS "http://127.0.0.1:${VITE_PORT}/" >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+elif ! curl -fsS "http://127.0.0.1:${VITE_PORT}/" >/dev/null 2>&1; then
   echo "==> Starting Vite dev server on http://127.0.0.1:${VITE_PORT}/..."
   if command -v setsid >/dev/null 2>&1; then
     (

@@ -14,10 +14,10 @@ open OrbBin.Json
 def defaultPrivdSocket : String := "/run/orb-privd.sock"
 
 def trustedExecDirs : Array String := #[
-  "/bin", "/usr/bin", "/sbin", "/usr/sbin"
+  "/bin", "/usr/bin", "/sbin", "/usr/sbin", "/run/current-system/sw/bin", "/run/current-system/sw/sbin"
 ]
 
-def trustedExecPath : String := "/usr/sbin:/usr/bin:/sbin:/bin"
+def trustedExecPath : String := "/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/sbin:/run/current-system/sw/bin"
 
 def opsReadBinaries : Array String := #[
   "journalctl", "systemctl", "docker", "nft", "ss", "ps", "df", "du",
@@ -72,7 +72,7 @@ def scrubUserJobEnv (envPairs : Array (String × String)) (homeDir : String) : A
        !ku.startsWith "LD_" && !ku.startsWith "DYLD_" &&
        !(vRaw.any (· == '\x00')) then
       out := (out.filter (fun (ek, _) => ek != k)).push (k, vRaw)
-  let userPath := s!"{homeDir}/.elan/bin:/opt/orb-tools/bin:/opt/sandboxed-tools/bin:/usr/local/bin:/usr/bin:/bin"
+  let userPath := s!"{homeDir}/.elan/bin:/opt/orb-tools/bin:/opt/sandboxed-tools/bin:/usr/local/bin:/usr/bin:/bin:/run/current-system/sw/bin"
   out := (out.filter (fun (ek, _) => ek != "HOME" && ek != "PATH" && ek != "ELAN_HOME"))
     |>.push ("HOME", homeDir)
     |>.push ("ELAN_HOME", s!"{homeDir}/.elan")
@@ -151,6 +151,21 @@ def hasShellMetacharOrBypass (scopeStr : String) (argv : Array String) : UInt8 :
         return 1
   return 0
 
+def isNixStoreBinDir (dir : String) : Bool :=
+  match dir.splitOn "/" with
+  | ["", "nix", "store", pkg, sub] =>
+    !pkg.isEmpty && pkg != "." && pkg != ".." && (sub == "bin" || sub == "sbin")
+  | _ => false
+
+def isTrustedResolvedTarget (resolvedPath : String) (execDirs : Array String := trustedExecDirs) : IO Bool := do
+  let realDir := ((System.FilePath.mk resolvedPath).parent.map toString).getD ""
+  if execDirs.contains realDir then
+    return true
+  if execDirs.any trustedExecDirs.contains && isNixStoreBinDir realDir then
+    let rst ← statPath resolvedPath
+    return rst.exists_ && rst.isReg && rst.ownedByRoot && (rst.mode &&& 0o022) == 0 && (rst.mode &&& 0o111) != 0
+  return false
+
 def isTrustedExecutableToken (rawExe : String) (execDirs : Array String := trustedExecDirs) : IO Bool := do
   if rawExe.isEmpty || rawExe == "." || rawExe == ".." then return false
   if !(rawExe.any (· == '/')) && !(rawExe.any (· == '\\')) then
@@ -164,8 +179,7 @@ def isTrustedExecutableToken (rawExe : String) (execDirs : Array String := trust
   if st.exists_ && st.isSymlink then
     try
       let real ← IO.FS.realPath (System.FilePath.mk rawExe)
-      let realDir := (real.parent.map toString).getD ""
-      if !execDirs.contains realDir then return false
+      if !(← isTrustedResolvedTarget real.toString execDirs) then return false
     catch _ =>
       return false
   return true
@@ -302,8 +316,7 @@ private def isTrustedResolvedBinary (cand : String) (execDirs : Array String := 
   if st.isSymlink then
     try
       let real ← IO.FS.realPath (System.FilePath.mk cand)
-      let realDir := (real.parent.map toString).getD ""
-      if !execDirs.contains realDir then return none
+      if !(← isTrustedResolvedTarget real.toString execDirs) then return none
       let rst ← statPath real.toString
       if rst.exists_ && rst.isReg then return some real.toString
       return none

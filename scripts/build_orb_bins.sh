@@ -40,6 +40,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "${LEAN_CC:-}" && ( -n "${NIX_CC:-}" || -e /etc/NIXOS ) ]]; then
+  if command -v clang >/dev/null 2>&1; then
+    export LEAN_CC="$(command -v clang)"
+  elif command -v cc >/dev/null 2>&1; then
+    export LEAN_CC="$(command -v cc)"
+  fi
+elif [[ -n "${LEAN_CC:-}" && "${LEAN_CC}" != /* ]] && command -v "${LEAN_CC}" >/dev/null 2>&1; then
+  export LEAN_CC="$(command -v "${LEAN_CC}")"
+fi
+
 # Discover `lake` on common toolchain paths before optionally bootstrapping.
 for candidate_dir in \
   "${LEAN_BIN_DIR:-}" \
@@ -54,6 +64,16 @@ do
     break
   fi
 done
+
+if [[ -n "${LEAN_CC:-}" && -x "${LEAN_CC}" ]]; then
+  export PATH="$(dirname "${LEAN_CC}"):$PATH"
+  if command -v lean >/dev/null 2>&1; then
+    lean_prefix="$(lean --print-prefix 2>/dev/null || true)"
+    if [[ -n "$lean_prefix" && -d "$lean_prefix/lib" ]]; then
+      export LIBRARY_PATH="$lean_prefix/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+    fi
+  fi
+fi
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
   for ossl_dir in "/opt/homebrew/opt/openssl@3" "/usr/local/opt/openssl@3"; do
@@ -194,9 +214,19 @@ run_lean_pkg_build() {
   (
     cd "$pkg_dir"
     if [[ "${ORB_SKIP_TURBO_LEAN:-0}" != "1" ]] && command -v turbo-lean >/dev/null 2>&1; then
-      turbo-lean build --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}" || true
+      local -a tl_flags=(--no-telemetry --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}")
+      if [[ "${TURBO_LEAN_NO_DAEMON:-0}" == "1" ]]; then
+        tl_flags+=(--no-daemon)
+      fi
+      if [[ -n "${TURBO_LEAN_HOME:-}" ]]; then
+        tl_flags+=(--cache-dir "${TURBO_LEAN_HOME}")
+      fi
+      RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
+        turbo-lean "${tl_flags[@]}" build "$@" \
+        || SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
+    else
+      SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
     fi
-    SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
   )
 }
 
@@ -251,12 +281,17 @@ for out_dir in "${OUT_DIRS[@]}"; do
 done
 
 if [[ "$WITH_TESTS" == "1" ]]; then
-  (cd "$ROOT_DIR/lean/OrbNetLeaf" && SANDBOXED_ALLOW_RAW_LAKE=1 lake build -- -DwarningAsError=true && ./.lake/build/bin/orb-net-leaf-test)
-  (cd "$ROOT_DIR/lean/OrbBin" && SANDBOXED_ALLOW_RAW_LAKE=1 lake build orb-bin-test -- -DwarningAsError=true && ./.lake/build/bin/orb-bin-test)
-  (cd "$ROOT_DIR/lean/OrbNode" && SANDBOXED_ALLOW_RAW_LAKE=1 lake build orb-node-test -- -DwarningAsError=true && ./.lake/build/bin/orb-node-test)
-  (cd "$ROOT_DIR/lean/OrbClient" && SANDBOXED_ALLOW_RAW_LAKE=1 lake build -- -DwarningAsError=true && ./.lake/build/bin/orb-client-test)
-  (cd "$ROOT_DIR/lean/OrbCore" && SANDBOXED_ALLOW_RAW_LAKE=1 lake build orb-core-test orb-spec-runner -- -DwarningAsError=true)
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbNetLeaf" orb-net-leaf-test
+  "$ROOT_DIR/lean/OrbNetLeaf/.lake/build/bin/orb-net-leaf-test"
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbBin" orb-bin-test
+  "$ROOT_DIR/lean/OrbBin/.lake/build/bin/orb-bin-test"
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbNode" orb-node-test
+  "$ROOT_DIR/lean/OrbNode/.lake/build/bin/orb-node-test"
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbClient" orb-client-test
+  "$ROOT_DIR/lean/OrbClient/.lake/build/bin/orb-client-test"
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbCore" orb-core-test orb-spec-runner
   "$ROOT_DIR/lean/OrbCore/.lake/build/bin/orb-core-test"
   "$ROOT_DIR/lean/OrbCore/.lake/build/bin/orb-spec-runner" --fixtures "$ROOT_DIR/shared/orb-spec/fixtures"
-  (cd "$ROOT_DIR/lean/OrbLocald" && SANDBOXED_ALLOW_RAW_LAKE=1 lake build orb-locald-test -- -DwarningAsError=true && ./.lake/build/bin/orb-locald-test)
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbLocald" orb-locald-test
+  "$ROOT_DIR/lean/OrbLocald/.lake/build/bin/orb-locald-test"
 fi

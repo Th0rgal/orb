@@ -137,8 +137,7 @@ def validateExecBinaryIdentity
     else
       pure binPath
   if requireTrustedDir then
-    let dir := ((System.FilePath.mk resolved).parent.map toString).getD ""
-    if !execDirs.contains dir then
+    if !(← isTrustedResolvedTarget resolved execDirs) then
       return .error s!"Executable `{resolved}` is outside trusted system directories"
   let stTarget ← statPath resolved
   if !stTarget.exists_ || stTarget.isSymlink || !stTarget.isReg then
@@ -750,7 +749,7 @@ def handleSpawnUserJob (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : Peer
     "if req['nonroot']:\n" ++
     "  rc_path = req['meta_path'] + '.rc'\n" ++
     "  runner = 'import os, subprocess, sys\\np = subprocess.run(sys.argv[2:], env=os.environ)\\nopen(sys.argv[1], \"w\").write(str(p.returncode))\\nsys.exit(p.returncode)\\n'\n" ++
-    "  proc = subprocess.Popen(['python3', '-c', runner, rc_path, *req['argv']], cwd=req['cwd'], env=env_map, stdin=subprocess.DEVNULL, stdout=lfd, stderr=lfd, start_new_session=True)\n" ++
+    "  proc = subprocess.Popen([sys.executable, '-c', runner, rc_path, *req['argv']], cwd=req['cwd'], env=env_map, stdin=subprocess.DEVNULL, stdout=lfd, stderr=lfd, start_new_session=True)\n" ++
     "  os.close(lfd)\n" ++
     "  meta = {'unix_username': req['unix_username'], 'unit': req['unit'], 'pid': proc.pid, 'rc_path': rc_path, 'mode': 'nonroot'}\n" ++
     "  open(req['meta_path'], 'w').write(json.dumps(meta))\n" ++

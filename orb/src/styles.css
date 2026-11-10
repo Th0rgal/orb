@@ -1065,6 +1065,7 @@ button.under-model { color: inherit; }
 .p-st.not_configured { color: var(--fg-4); }
 .p-dot { margin: 0 5px; color: var(--fg-4); }
 .p-acc-wrap { border-bottom: 1px solid var(--stroke-soft); }
+.s-card > .p-acc-wrap:not(:has([aria-expanded="true"])) { content-visibility: auto; contain-intrinsic-size: auto 56px; }
 .s-card .p-acc-wrap:last-child { border-bottom: 0; }
 .p-acc-btn { width: 100%; text-align: left; border-bottom: 0 !important; }
 .p-acc-btn:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; border-radius: var(--radius-sm); }

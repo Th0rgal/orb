@@ -1,6 +1,5 @@
 import Lake
-open Lake DSL
-open System (FilePath)
+open System Lake DSL
 
 package «orb-bin» where
   version := v!"1.3.0"
@@ -18,7 +17,7 @@ target orb_bin_posix_o pkg : FilePath := do
   let oFile := pkg.buildDir / "c" / "orb_bin_posix.o"
   let srcJob ← inputTextFile <| pkg.dir / "c" / "orb_bin_posix.c"
   let leanIncludeDir ← getLeanIncludeDir
-  buildO oFile srcJob #["-I", leanIncludeDir.toString] #["-std=gnu11", "-O3", "-fPIC", "-Wall", "-Wextra", "-Werror"] "cc"
+  buildO oFile srcJob #["-I", leanIncludeDir.toString] #["-std=gnu11", "-O3", "-fPIC", "-Wall", "-Wextra", "-Werror"] ((← IO.getEnv "LEAN_CC").getD "cc")
 
 extern_lib liborb_bin_posix pkg := do
   let shimO ← orb_bin_posix_o.fetch

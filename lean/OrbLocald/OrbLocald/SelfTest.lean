@@ -1240,6 +1240,8 @@ def main : IO UInt32 := do
   let idRes1 ← dispatchRpcCommand stDiskRef "local_machine_identity" (.obj #[])
   let idRes2 ← dispatchRpcCommand stReloadRef "local_machine_identity" (.obj #[])
   let metricsRes ← dispatchRpcCommand stDiskRef "local_machine_metrics" (.obj #[])
+  let stHostRef ← IO.mkRef ({ launchToken := validTok, hostOs := if System.Platform.isOSX then "macos" else "linux" } : LocaldState)
+  let hostMetricsRes ← dispatchRpcCommand stHostRef "local_machine_metrics" (.obj #[("details", .bool true)])
   total := total + 1
   let idAndMetricsOk :=
     (match idRes1, idRes2 with
@@ -1249,7 +1251,15 @@ def main : IO UInt32 := do
      | .ok jv =>
        (jv.fieldNat? "memory_total").isSome &&
        (jv.fieldNat? "memory_used").isSome &&
+       (jv.fieldNat? "disk_total").getD 0 > 0 &&
        (jv.fieldArr? "consumers").isSome
+     | _ => false) &&
+    (match hostMetricsRes with
+     | .ok jv =>
+       (jv.fieldNat? "memory_total").getD 0 > 0 &&
+       (jv.fieldNat? "disk_total").getD 0 > 0 &&
+       (jv.fieldNat? "cpu_percent").isSome &&
+       (match jv.fieldArr? "consumers" with | some cs => cs.size == 3 | none => false)
      | _ => false)
   if (← assertTrue "local_machine_identity_string_and_metrics_schema" idAndMetricsOk) then passed := passed + 1
   let bioStatusRes ← dispatchRpcCommand stDiskRef "biometric_status" (.obj #[])

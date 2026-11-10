@@ -10,6 +10,7 @@
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -206,3 +207,14 @@ LEAN_EXPORT lean_obj_res orb_bin_environ_list(lean_obj_arg w) {
 
 LEAN_EXPORT lean_obj_res orb_bin_setenv(b_lean_obj_arg key, b_lean_obj_arg val, lean_obj_arg w) { (void)w; setenv(lean_string_cstr(key), lean_string_cstr(val), 1); return lean_io_result_mk_ok(lean_box(0)); }
 LEAN_EXPORT lean_obj_res orb_bin_unsetenv(b_lean_obj_arg key, lean_obj_arg w) { (void)w; unsetenv(lean_string_cstr(key)); return lean_io_result_mk_ok(lean_box(0)); }
+LEAN_EXPORT lean_obj_res orb_bin_statvfs_bytes(b_lean_obj_arg path, lean_obj_arg w) {
+    (void)w; struct statvfs st; uint64_t tot = 0, used = 0;
+    if (statvfs(lean_string_cstr(path), &st) == 0) {
+        uint64_t fr = st.f_frsize ? (uint64_t)st.f_frsize : (uint64_t)st.f_bsize;
+        tot = (uint64_t)st.f_blocks * fr;
+        used = st.f_blocks >= st.f_bavail ? (uint64_t)(st.f_blocks - st.f_bavail) * fr : 0;
+    }
+    lean_object *ba = lean_alloc_sarray(1, 16, 16); uint8_t *p = lean_sarray_cptr(ba);
+    memcpy(p, &tot, 8); memcpy(p + 8, &used, 8);
+    return lean_io_result_mk_ok(ba);
+}

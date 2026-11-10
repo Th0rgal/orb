@@ -756,6 +756,8 @@ structure LocaldState where
   grantedBrowseRoots   : Array String := #[]
   cachedMemTotal       : Nat := 0
   cachedLogicalCpu     : Nat := 0
+  prevCpuTotal         : Nat := 0
+  prevCpuIdle          : Nat := 0
   lastMetricsMonoMs    : Nat := 0
   lastMetricsDetails   : Bool := false
   lastMetricsSnap      : JVal := .null
@@ -1496,6 +1498,19 @@ private def runDetachedOpen (hostOs : String) (args : Array String) : IO (Except
   catch e =>
     return .error (toString e)
 
+private def resolveExecutableInPath? (name : String) (fallbacks : Array String := #[]) : IO (Option String) := do
+  let pathEnv := (← IO.getEnv "PATH").getD ""
+  for dir in pathEnv.splitOn ":" do
+    let d := dir.trimAscii.toString
+    if !d.isEmpty then
+      let cand := (System.FilePath.mk d / name).toString
+      if (← System.FilePath.pathExists cand) then
+        return some cand
+  for fb in fallbacks do
+    if (← System.FilePath.pathExists fb) then
+      return some fb
+  return none
+
 private def readCommandStdout? (cmd : String) (args : Array String) : IO (Option String) := do
   try
     let child ← IO.Process.spawn {
@@ -1511,32 +1526,76 @@ private def readCommandStdout? (cmd : String) (args : Array String) : IO (Option
   catch _ =>
     return none
 
+private def readSystemToolStdout? (name : String) (fallbacks : Array String) (args : Array String) : IO (Option String) := do
+  match ← resolveExecutableInPath? name fallbacks with
+  | some bin => readCommandStdout? bin args
+  | none => readCommandStdout? name args
+
+private def readProcCpuJiffies : IO (Option (Nat × Nat)) := do
+  let raw ← try IO.FS.readFile "/proc/stat" catch _ => pure ""
+  let some first := (raw.splitOn "\n").head? | return none
+  if !(first.startsWith "cpu ") then return none
+  let nums := ((first.drop 4).toString.splitOn " ").filterMap (fun s => s.trimAscii.toString.toNat?)
+  if nums.length < 4 then return none
+  let total := nums.foldl (· + ·) 0
+  let idle := nums[3]! + (if h : 4 < nums.length then nums[4] else 0)
+  return if total > 0 then some (total, idle) else none
+
 private def sampleHostConsumers (hostOs : String) : IO (Array JVal) := do
-  let psArgs := if hostOs == "macos" then #["-axo", "rss=,comm="] else #["-eo", "rss=,comm="]
-  let some psOut ← readCommandStdout? "/bin/ps" psArgs | return #[]
   let mut orbRss : Nat := 0
   let mut orbProcs : Nat := 0
   let mut voiceRss : Nat := 0
   let mut voiceProcs : Nat := 0
   let mut agentRss : Nat := 0
   let mut agentProcs : Nat := 0
-  for ln in psOut.splitOn "\n" do
-    let t := ln.trimAscii.toString
-    if !t.isEmpty then
-      let cols := (t.splitOn " ").filter (fun s => !s.isEmpty)
-      if let rssStr :: commParts := cols then
-        let rssBytes := (rssStr.toNat?.getD 0) * 1024
-        let commFull := (String.intercalate " " commParts).trimAscii.toString
-        let base := ((commFull.splitOn "/").getLast?.getD commFull).toLower
-        if base == "orb" || base == "orb-locald" || base == "orb-signer" then
-          orbRss := orbRss + rssBytes
-          orbProcs := orbProcs + 1
-        else if ((commFull.toLower.splitOn "voice/worker.py").length > 1) || ((commFull.toLower.splitOn "orb-voice").length > 1) then
-          voiceRss := voiceRss + rssBytes
-          voiceProcs := voiceProcs + 1
-        else if base == "claude" || base == "codex" || base == "opencode" || base == "grok" || base == "agy" || base == "vibe" then
-          agentRss := agentRss + rssBytes
-          agentProcs := agentProcs + 1
+  if hostOs != "macos" then
+    let procEntries ← try (System.FilePath.mk "/proc").readDir catch _ => pure #[]
+    for ent in procEntries do
+      if ent.fileName.toNat?.isSome then
+        let stTxt ← try IO.FS.readFile (ent.path / "status") catch _ => pure ""
+        if !stTxt.isEmpty then
+          let mut nm := ""
+          let mut rssBytes : Nat := 0
+          for ln in stTxt.splitOn "\n" do
+            if ln.startsWith "Name:" then
+              nm := (ln.drop 5).toString.trimAscii.toString.toLower
+            else if rssBytes == 0 && ln.startsWith "VmRSS:" then
+              for tok in (ln.drop 6).toString.splitOn " " do
+                if rssBytes == 0 then
+                  if let some kb := tok.trimAscii.toString.toNat? then
+                    rssBytes := kb * 1024
+          if rssBytes > 0 && !nm.isEmpty then
+            if nm == "orb" || nm == "orb-desktop" || nm == ".orb-desktop-un" || nm == "orb-locald" || nm == "orb-signer" ||
+               nm.startsWith "webkitwebproces" || nm.startsWith "webkitnetworkpr" then
+              orbRss := orbRss + rssBytes
+              orbProcs := orbProcs + 1
+            else if nm == "claude" || nm == "codex" || nm == "opencode" || nm == "grok" || nm == "agy" || nm == "vibe" then
+              agentRss := agentRss + rssBytes
+              agentProcs := agentProcs + 1
+            else if nm.startsWith "python" || nm == "orb-voice" then
+              let cmdRaw ← try IO.FS.readBinFile (ent.path / "cmdline") catch _ => pure ByteArray.empty
+              let cmdStr := (String.ofList (cmdRaw.data.toList.map fun b => if b < 32 || b >= 127 then ' ' else Char.ofNat b.toNat)).toLower
+              if ((cmdStr.splitOn "voice/worker.py").length > 1) || ((cmdStr.splitOn "orb-voice").length > 1) then
+                voiceRss := voiceRss + rssBytes
+                voiceProcs := voiceProcs + 1
+  else if let some psOut ← readSystemToolStdout? "ps" #["/bin/ps", "/usr/bin/ps"] #["-axo", "rss=,comm="] then
+    for ln in psOut.splitOn "\n" do
+      let t := ln.trimAscii.toString
+      if !t.isEmpty then
+        let cols := (t.splitOn " ").filter (fun s => !s.isEmpty)
+        if let rssStr :: commParts := cols then
+          let rssBytes := (rssStr.toNat?.getD 0) * 1024
+          let commFull := (String.intercalate " " commParts).trimAscii.toString
+          let base := ((commFull.splitOn "/").getLast?.getD commFull).toLower
+          if base == "orb" || base == "orb-locald" || base == "orb-signer" then
+            orbRss := orbRss + rssBytes
+            orbProcs := orbProcs + 1
+          else if ((commFull.toLower.splitOn "voice/worker.py").length > 1) || ((commFull.toLower.splitOn "orb-voice").length > 1) then
+            voiceRss := voiceRss + rssBytes
+            voiceProcs := voiceProcs + 1
+          else if base == "claude" || base == "codex" || base == "opencode" || base == "grok" || base == "agy" || base == "vibe" then
+            agentRss := agentRss + rssBytes
+            agentProcs := agentProcs + 1
   return #[
     .obj #[("label", .str "Orb"), ("memory", JVal.nat orbRss), ("processes", JVal.nat orbProcs)],
     .obj #[("label", .str "Voice"), ("memory", JVal.nat voiceRss), ("processes", JVal.nat voiceProcs)],
@@ -1554,19 +1613,21 @@ private def sampleHostMetricsCached (stRef : IO.Ref LocaldState) (details : Bool
   let hostOs := st.hostOs
   let mut memTotal := st.cachedMemTotal
   let mut ncpu := st.cachedLogicalCpu
+  let mut nextCpuTotal := st.prevCpuTotal
+  let mut nextCpuIdle := st.prevCpuIdle
   let mut memUsed : Nat := 0
   let mut diskTotal : Nat := 0
   let mut diskUsed : Nat := 0
   let mut cpuPct? : Option Nat := none
   if hostOs == "macos" then
     if memTotal == 0 then
-      if let some hwOut ← readCommandStdout? "/usr/sbin/sysctl" #["-n", "hw.memsize"] then
+      if let some hwOut ← readSystemToolStdout? "sysctl" #["/usr/sbin/sysctl", "/sbin/sysctl"] #["-n", "hw.memsize"] then
         memTotal := hwOut.toNat?.getD 0
     if ncpu == 0 then
-      if let some cpuOut ← readCommandStdout? "/usr/sbin/sysctl" #["-n", "hw.logicalcpu"] then
+      if let some cpuOut ← readSystemToolStdout? "sysctl" #["/usr/sbin/sysctl", "/sbin/sysctl"] #["-n", "hw.logicalcpu"] then
         ncpu := max 1 (cpuOut.toNat?.getD 1)
     if ncpu == 0 then ncpu := 1
-    if let some vmOut ← readCommandStdout? "/usr/bin/vm_stat" #[] then
+    if let some vmOut ← readSystemToolStdout? "vm_stat" #["/usr/bin/vm_stat"] #[] then
       let lines := vmOut.splitOn "\n"
       let mut pageSize : Nat := 16384
       if let some first := lines.head? then
@@ -1586,7 +1647,7 @@ private def sampleHostMetricsCached (stRef : IO.Ref LocaldState) (details : Bool
       let usedCandidate := (active + wired + comp) * pageSize
       if memTotal > 0 then
         memUsed := min usedCandidate memTotal
-    if let some psOut ← readCommandStdout? "/bin/ps" #["-A", "-o", "%cpu="] then
+    if let some psOut ← readSystemToolStdout? "ps" #["/bin/ps", "/usr/bin/ps"] #["-A", "-o", "%cpu="] then
       let mut tenthsSum : Nat := 0
       for ln in psOut.splitOn "\n" do
         let t := ln.trimAscii.toString
@@ -1600,8 +1661,8 @@ private def sampleHostMetricsCached (stRef : IO.Ref LocaldState) (details : Bool
       let normPct := min 100 ((tenthsSum / ncpu + 5) / 10)
       cpuPct? := some normPct
   else
-    try
-      let memInfo ← IO.FS.readFile "/proc/meminfo"
+    let memInfo ← try IO.FS.readFile "/proc/meminfo" catch _ => pure ""
+    if !memInfo.isEmpty then
       let parseKb (k : String) : Nat := Id.run do
         for ln in memInfo.splitOn "\n" do
           if ln.startsWith k then
@@ -1611,8 +1672,36 @@ private def sampleHostMetricsCached (stRef : IO.Ref LocaldState) (details : Bool
       if memTotal == 0 then memTotal := parseKb "MemTotal:"
       let avail := parseKb "MemAvailable:"
       if memTotal > avail && avail > 0 then memUsed := memTotal - avail
-    catch _ => pure ()
-  if let some dfOut ← readCommandStdout? "/bin/df" #["-k", "/"] then
+    if let some (curTot, curIdle) ← readProcCpuJiffies then
+      if st.prevCpuTotal > 0 && curTot > st.prevCpuTotal then
+        let dTot := curTot - st.prevCpuTotal
+        let dIdle := if curIdle ≥ st.prevCpuIdle then curIdle - st.prevCpuIdle else 0
+        let dBusy := if dTot ≥ dIdle then dTot - dIdle else 0
+        cpuPct? := some (min 100 ((dBusy * 100 + dTot / 2) / dTot))
+        nextCpuTotal := curTot
+        nextCpuIdle := curIdle
+      else
+        IO.sleep 25
+        if let some (curTot2, curIdle2) ← readProcCpuJiffies then
+          if curTot2 > curTot then
+            let dTot := curTot2 - curTot
+            let dIdle := if curIdle2 ≥ curIdle then curIdle2 - curIdle else 0
+            let dBusy := if dTot ≥ dIdle then dTot - dIdle else 0
+            cpuPct? := some (min 100 ((dBusy * 100 + dTot / 2) / dTot))
+            nextCpuTotal := curTot2
+            nextCpuIdle := curIdle2
+          else
+            cpuPct? := some 0
+            nextCpuTotal := curTot2
+            nextCpuIdle := curIdle2
+        else
+          nextCpuTotal := curTot
+          nextCpuIdle := curIdle
+  let (vfsTot, vfsUsed) ← OrbBin.PosixExt.statvfsBytes "/"
+  if vfsTot > 0 then
+    diskTotal := vfsTot.toNat
+    diskUsed := vfsUsed.toNat
+  else if let some dfOut ← readSystemToolStdout? "df" #["/bin/df", "/usr/bin/df", "/run/current-system/sw/bin/df"] #["-k", "/"] then
     if let some dataLn := (dfOut.splitOn "\n").drop 1 |>.head? then
       let cols := (dataLn.splitOn " ").filter (fun s => !s.trimAscii.toString.isEmpty)
       if cols.length ≥ 4 then
@@ -1650,6 +1739,8 @@ private def sampleHostMetricsCached (stRef : IO.Ref LocaldState) (details : Bool
     (out, { s with
         cachedMemTotal := if memTotal > 0 then memTotal else s.cachedMemTotal
         cachedLogicalCpu := if ncpu > 0 then ncpu else s.cachedLogicalCpu
+        prevCpuTotal := if nextCpuTotal > 0 then nextCpuTotal else s.prevCpuTotal
+        prevCpuIdle := if nextCpuTotal > 0 then nextCpuIdle else s.prevCpuIdle
         lastMetricsMonoMs := nowMono
         lastMetricsDetails := details
         lastMetricsSnap := out
@@ -1841,6 +1932,8 @@ private def resolveVoiceScriptPath? (st : LocaldState) : IO (Option String) := d
   ]
   if let some binDir := appPath.parent then
     cands := cands.push (binDir / ".." / "Resources" / "voice" / "worker.py")
+    cands := cands.push (binDir / ".." / "share" / "orb-desktop" / "voice" / "worker.py")
+    cands := cands.push (binDir / ".." / "voice" / "worker.py")
     cands := cands.push (binDir / ".." / ".." / ".." / ".." / "orb" / "voice" / "worker.py")
     cands := cands.push (binDir / ".." / ".." / ".." / "orb" / "voice" / "worker.py")
   for c in cands do
@@ -1862,14 +1955,17 @@ private def resolveVoicePython? (st : LocaldState) (fakeMode : Bool) : IO (Optio
     let h := System.FilePath.mk st.homeDir.trimAscii.toString
     cands := cands.push (h / ".orb" / "voice" / ".venv" / "bin" / "python3").toString
     cands := cands.push (h / ".orb" / "voice" / "venv" / "bin" / "python3").toString
-  if fakeMode then
-    cands := cands ++ #["/opt/homebrew/bin/python3", "/usr/bin/python3", "/usr/local/bin/python3"]
-    let pathDirs := ((← IO.getEnv "PATH").getD "").splitOn ":" |>.filter (fun s => !s.trimAscii.toString.isEmpty)
-    for d in pathDirs do
-      cands := cands.push (System.FilePath.mk d / "python3").toString
   for c in cands do
     if (← System.FilePath.pathExists c) then
       return some c
+  let hasLinuxCohere ← (OrbBin.PosixExt.getEnvNonEmpty "VOICED_COHERE_LIB").map Option.isSome
+  if fakeMode || hasLinuxCohere then
+    return (← resolveExecutableInPath? "python3" #[
+      "/opt/homebrew/bin/python3",
+      "/usr/bin/python3",
+      "/usr/local/bin/python3",
+      "/run/current-system/sw/bin/python3"
+    ])
   return none
 
 private def resolveVoiceModelDir (st : LocaldState) : IO String := do
@@ -1885,7 +1981,7 @@ private def isVoiceModelPresent (modelDir : String) : IO Bool := do
   return (← (d / "config.json").pathExists) && (← (d / "model.safetensors").pathExists)
 
 private def detectHostArch : IO String := do
-  match ← readCommandStdout? "/usr/bin/uname" #["-m"] with
+  match ← readSystemToolStdout? "uname" #["/usr/bin/uname", "/bin/uname", "/run/current-system/sw/bin/uname"] #["-m"] with
   | some a =>
     let clean := a.trimAscii.toString.toLower
     if clean == "arm64" || clean == "aarch64" then return "aarch64"
@@ -3833,7 +3929,8 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let workerWarm ← voiceWorkerMutex.atomically do
       let cur ← get
       return cur.isSome
-    let supported := fakeMode || (st.hostOs == "macos" && arch == "aarch64")
+    let hasLinuxCohere ← (OrbBin.PosixExt.getEnvNonEmpty "VOICED_COHERE_LIB").map Option.isSome
+    let supported := fakeMode || (st.hostOs == "macos" && arch == "aarch64") || (st.hostOs == "linux" && hasLinuxCohere)
     let reasonVal : JVal :=
       if !supported then .str "Speech-to-text requires Orb Desktop on Apple Silicon (macOS arm64)."
       else .null
