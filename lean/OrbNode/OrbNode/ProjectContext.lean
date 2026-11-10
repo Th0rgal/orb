@@ -677,9 +677,11 @@ def prepareNodeProjectContext (workDir : String) (jv : JVal) : IO (Except String
     ("manifest", manifest.toJson)
   ])
 
-/-- Background 2-second replica refresh loop (`src/node/project_context.rs::start`). -/
+/-- Background 2-second replica refresh loop (`src/node/project_context.rs::start`).
+    Runs on `Task.Priority.dedicated` so its `IO.sleep` / socket I/O never starves
+    Lean's default worker pool on 1-2 vCPU hosts (`LEAN_NUM_THREADS=1`). -/
 def startProjectContextDaemon (workDir : String) (stopRef : IO.Ref Bool) : IO (Task (Except IO.Error Unit)) :=
-  IO.asTask do
+  IO.asTask (prio := Task.Priority.dedicated) do
     let root := System.FilePath.mk workDir / "project-context"
     while !(← stopRef.get) do
       if ← root.isDir then

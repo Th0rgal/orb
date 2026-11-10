@@ -615,11 +615,19 @@ def materializeLeanCheckout
               let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmp.toString] }
               return .error s!"source archive git import failed: {r2.stderr} {r3.stderr}"
         else
+          let fetchEnv : Array (String × Option String) ← do
+            match ← IO.getEnv "SANDBOXED_NODE_GIT_SSH_KEY" with
+            | some raw =>
+              let key := raw.trimAscii.toString
+              if key.isEmpty then pure #[]
+              else pure #[("GIT_SSH_COMMAND", some s!"ssh -i {shellSingleQuote key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new")]
+            | none => pure #[]
           let r1 ← IO.Process.output { cmd := "git", args := #["init", "--quiet"], cwd := some tmp.toString }
           let r2 ← IO.Process.output {
             cmd := "git"
             args := #["-c", "protocol.file.allow=never", "fetch", "--depth", "1", "--no-tags", repo, commit]
             cwd := some tmp.toString
+            env := fetchEnv
           }
           let r3 ← IO.Process.output {
             cmd := "git", args := #["checkout", "--quiet", "--detach", "FETCH_HEAD"], cwd := some tmp.toString

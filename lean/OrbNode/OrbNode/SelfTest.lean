@@ -891,8 +891,13 @@ private def runRound2RegressionTests
     rt ← tickRuntime rt
     if (rt.ledger.jobs.get? archJobId).map (·.state) == some .succeeded then
       break
+  let t1ErrOk := match (rt.ledger.jobs.get? "99999999-9999-4999-8999-999999999991").bind (·.error?) with
+    | some e => e == "timed out after 1s" || e.startsWith "command exited with Some("
+    | none => false
   check "timed-out regular jobs repay shrinkDebt=0 and queued archive-backed lean_build succeeds on cold seed"
-    (rt.shrinkDebt == 0 && (rt.ledger.jobs.get? archJobId).map (·.state) == some .succeeded)
+    (rt.shrinkDebt == 0 &&
+     t1ErrOk &&
+     (rt.ledger.jobs.get? archJobId).map (·.state) == some .succeeded)
   return rt
 
 /-- Section 13: Round-3 regression checks (terminal vs running incomplete UTF-8 log drain,
@@ -2536,6 +2541,192 @@ def runTests : IO UInt32 := do
   runNodeStdinStreamAndGitWorkspaceTests tmpRoot rt authHdrs
   check "Node bidirectional stdin relay, SSE log stream, and confined git checkpoints/worktrees" true
 
+  -- Regression test for Ubuntu 26.04+ (`systemd >= 256`) `systemd-run --scope` argv expansion:
+  -- without `--expand-environment=no`, `systemd-run` expands `${fork_root%/*}` to `""` and prints
+  -- `Invalid environment variable name evaluates to an empty string: fork_root%/*`, breaking `/btw`
+  -- and native fork-workspace missions with exit 78 (`Fork workspace unavailable`).
+  let forkCmd :=
+    "fork_root=$(pwd -P); fork_root=${fork_root%/*}; " ++
+    "fork_dir=\"$fork_root/23bad383-5b27-4b83-9a84-d86d34223509\"; " ++
+    "[ -d \"$fork_dir\" ] && [ ! -L \"$fork_dir\" ] || { echo 'Fork workspace unavailable' >&2; exit 78; }; " ++
+    "cd -- \"$fork_dir\" || exit 78; " ++
+    "printf 'FORK_OK|%s|%s\\n' \"$(cat canary.txt)\" \"${_orb_unset_check:-literal}\""
+  let pureUserArgs := buildSystemdScopeArgs .user "u.scope" 1073741824 966367641 (some "100") none (some 60)
+    "/usr/local/bin/sandboxed-node" #["PATH", "HOME"] "bash" #["-lc", forkCmd]
+  let pureSysArgs := buildSystemdScopeArgs .system "s.scope" 1073741824 966367641 none (some "200%") none
+    "/usr/local/bin/sandboxed-node" #["PATH"] "bash" #["-lc", forkCmd]
+  let idxDashUser := (pureUserArgs.findIdx? (· == "--")).getD 999
+  let idxNoExpUser := (pureUserArgs.findIdx? (· == "--expand-environment=no")).getD 999
+  let idxDashSys := (pureSysArgs.findIdx? (· == "--")).getD 999
+  let idxNoExpSys := (pureSysArgs.findIdx? (· == "--expand-environment=no")).getD 999
+  check "buildSystemdScopeArgs passes --expand-environment=no before '--' in user and system modes"
+    (pureUserArgs[0]? == some "--user" &&
+     idxNoExpUser < idxDashUser &&
+     pureUserArgs.back? == some forkCmd &&
+     pureSysArgs[0]? == some "--scope" &&
+     idxNoExpSys < idxDashSys &&
+     pureSysArgs.back? == some forkCmd)
+  let legacyScopeArgs := buildSystemdScopeArgs .user "u.scope" 1073741824 966367641 (some "100") none (some 60)
+    "/usr/local/bin/sandboxed-node" #["PATH"] "bash" #["-lc", forkCmd] false
+  check "buildSystemdScopeArgs omits --expand-environment=no when systemd-run lacks support (Debian 12 systemd 252)"
+    (!legacyScopeArgs.contains "--expand-environment=no" &&
+     legacyScopeArgs[0]? == some "--user" &&
+     legacyScopeArgs[1]? == some "--scope" &&
+     legacyScopeArgs.back? == some forkCmd &&
+     systemdHelpSupportsExpandEnvironment "  --expand-environment=BOOL  Expand $" &&
+     !systemdHelpSupportsExpandEnvironment "systemd-run 252 (252.26-1~deb12u2)")
+
+  let parentWs := System.FilePath.mk tmpRoot / "23bad383-5b27-4b83-9a84-d86d34223509"
+  IO.FS.createDirAll parentWs
+  IO.FS.writeFile (parentWs / "canary.txt") "babylon-parent"
+  let btwMissionId := "5efa8e14-8b45-497a-af7c-c9e4517085f3"
+  let nowForkEp ← OrbNode.Posix.nowEpoch
+  let execForkLease := signLeaseToken rt.cfg.token {
+    missionId := btwMissionId, nodeId := rt.cfg.nodeId, scope := .missionExecute, expiresAt := nowForkEp + 600
+  }
+  let (rtAfterSyncFork, rSyncFork) ← handleRequest rt {
+    method := "POST", rawPath := "/execute", path := "/execute", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[
+      ("mission_id", .str btwMissionId),
+      ("node_id", .str rt.cfg.nodeId),
+      ("lease_token", .str execForkLease),
+      ("command", .str forkCmd)
+    ])).toUTF8
+  }
+  rt := rtAfterSyncFork
+  let .ok syncForkJv := OrbBin.Json.parse (String.fromUTF8? rSyncFork.body |>.getD "{}")
+    | throw (IO.userError "failed parsing sync fork /execute JSON")
+  let syncForkOut := (syncForkJv.fieldStr? "stdout").getD ""
+  let syncForkErr := (syncForkJv.fieldStr? "stderr").getD ""
+  check "POST /execute under systemd-run --scope preserves ${fork_root%/*} without argv expansion"
+    (rSyncFork.status == 200 &&
+     syncForkJv.fieldInt? "exit_code" == some 0 &&
+     syncForkOut.trimAscii.toString == "FORK_OK|babylon-parent|literal" &&
+     syncForkErr.trimAscii.isEmpty)
+
+  let forkJobId := "ef7e8c9a-3cdb-4f80-9233-01162184601c"
+  let submitForkLease := signLeaseToken rt.cfg.token {
+    missionId := btwMissionId, nodeId := rt.cfg.nodeId, scope := .jobSubmit,
+    expiresAt := nowForkEp + 600, jobId? := some forkJobId
+  }
+  let mtxFork ← Std.Mutex.new rt
+  let xferFork ← Std.Mutex.new ()
+  let rSubFork ← handleRequestConcurrent mtxFork xferFork {
+    method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[
+      ("job_id", .str forkJobId),
+      ("mission_id", .str btwMissionId),
+      ("lease_token", .str submitForkLease),
+      ("payload", .obj #[
+        ("kind", .str "raw_command"),
+        ("side_question", .bool true),
+        ("command", .str forkCmd)
+      ])
+    ])).toUTF8
+  }
+  let mut forkJobRec? : Option JobRecord := none
+  for _ in [0:60] do
+    IO.sleep 50
+    let _ ← handleRequestConcurrent mtxFork xferFork {
+      method := "GET", rawPath := s!"/jobs/{forkJobId}", path := s!"/jobs/{forkJobId}",
+      query := #[], headers := authHdrs, body := ByteArray.empty
+    }
+    let curRt ← mtxFork.atomically get
+    let r? := curRt.ledger.jobs.get? forkJobId
+    if r?.any (fun jr => jr.state.isTerminal) then
+      forkJobRec? := r?
+      break
+  let forkLogResp ← handleRequestConcurrent mtxFork xferFork {
+    method := "GET", rawPath := s!"/jobs/{forkJobId}/log", path := s!"/jobs/{forkJobId}/log",
+    query := #[("offset", "0")], headers := authHdrs, body := ByteArray.empty
+  }
+  let .ok forkLogJv := OrbBin.Json.parse (String.fromUTF8? forkLogResp.body |>.getD "{}")
+    | throw (IO.userError "failed parsing fork job log JSON")
+  let forkLogData := (forkLogJv.fieldStr? "data").getD ""
+  check "POST /jobs side_question under systemd-run --scope preserves ${fork_root%/*} and exits 0"
+    (rSubFork.status == 202 &&
+     forkJobRec?.map (·.state) == some .succeeded &&
+     forkJobRec?.bind (·.exitCode?) == some 0 &&
+     (forkJobRec?.bind (·.error?)).isNone &&
+     forkLogData.trimAscii.toString == "FORK_OK|babylon-parent|literal" &&
+     (forkLogData.splitOn "Invalid environment variable name").length == 1)
+
+  -- Also verify genuine non-zero exit populates `error == "command exited with Some(78)"`
+  let missForkJobId := "ef7e8c9a-3cdb-4f80-9233-01162184601d"
+  let missForkLease := signLeaseToken rt.cfg.token {
+    missionId := btwMissionId, nodeId := rt.cfg.nodeId, scope := .jobSubmit,
+    expiresAt := nowForkEp + 600, jobId? := some missForkJobId
+  }
+  let missingForkCmd :=
+    "fork_root=$(pwd -P); fork_root=${fork_root%/*}; " ++
+    "fork_dir=\"$fork_root/00000000-0000-4000-8000-000000000000\"; " ++
+    "[ -d \"$fork_dir\" ] && [ ! -L \"$fork_dir\" ] || { echo 'Fork workspace unavailable' >&2; exit 78; }"
+  let _ ← handleRequestConcurrent mtxFork xferFork {
+    method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[
+      ("job_id", .str missForkJobId),
+      ("mission_id", .str btwMissionId),
+      ("lease_token", .str missForkLease),
+      ("payload", .obj #[
+        ("kind", .str "raw_command"),
+        ("side_question", .bool true),
+        ("command", .str missingForkCmd)
+      ])
+    ])).toUTF8
+  }
+  let mut missJobRec? : Option JobRecord := none
+  for _ in [0:60] do
+    IO.sleep 50
+    let _ ← handleRequestConcurrent mtxFork xferFork {
+      method := "GET", rawPath := s!"/jobs/{missForkJobId}", path := s!"/jobs/{missForkJobId}",
+      query := #[], headers := authHdrs, body := ByteArray.empty
+    }
+    let curRt ← mtxFork.atomically get
+    let r? := curRt.ledger.jobs.get? missForkJobId
+    if r?.any (fun jr => jr.state.isTerminal) then
+      missJobRec? := r?
+      break
+  rt ← mtxFork.atomically get
+  check "non-zero job exit records error == 'command exited with Some(78)'"
+    (missJobRec?.map (·.state) == some .failed &&
+     missJobRec?.bind (·.exitCode?) == some 78 &&
+     missJobRec?.bind (·.error?) == some "command exited with Some(78)")
+
+  -- Regression test for 1-2 vCPU worker nodes (`LEAN_NUM_THREADS=1`, e.g. `nimrud`):
+  -- `startProjectContextDaemon` and per-connection HTTP tasks must run with `Task.Priority.dedicated`
+  -- so `/heartbeat` never starves behind background `IO.sleep` loops.
+  let daemonWorkDir := s!"{tmpRoot}/daemon-1t"
+  IO.FS.createDirAll daemonWorkDir
+  let selfExe ← IO.appPath
+  let daemonChild ← IO.Process.spawn {
+    cmd := selfExe.toString
+    args := #["--sandboxed-test-daemon"]
+    env := #[
+      ("LEAN_NUM_THREADS", some "1"),
+      ("SANDBOXED_NODE_BIND", some "127.0.0.1:19499"),
+      ("SANDBOXED_NODE_ID", some "nimrud-1t"),
+      ("SANDBOXED_NODE_TOKEN", some "tok-1t-secret"),
+      ("SANDBOXED_NODE_WORK_DIR", some daemonWorkDir),
+      ("SANDBOXED_NODE_ALLOW_ROOT", some "1")
+    ]
+    stdin := .null
+    stdout := .null
+    stderr := .null
+  }
+  let mut hb1tOk := false
+  for _ in [0:15] do
+    IO.sleep 100
+    let hbOut ← IO.Process.output {
+      cmd := "curl"
+      args := #["-fsS", "--max-time", "2", "-H", "Authorization: Bearer tok-1t-secret", "http://127.0.0.1:19499/heartbeat"]
+    }
+    if hbOut.exitCode == 0 && (hbOut.stdout.splitOn "\"node_id\":\"nimrud-1t\"").length > 1 then
+      hb1tOk := true
+      break
+  try daemonChild.kill catch _ => pure ()
+  let _ ← daemonChild.wait.toBaseIO
+  check "runServerLoop serves /heartbeat promptly under LEAN_NUM_THREADS=1 without background pool starvation" hb1tOk
+
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get
   IO.println s!"OrbNode self-test: {passed}/{passed} assertions PASSED"
@@ -2546,5 +2737,7 @@ end OrbNode.SelfTest
 def main (args : List String) : IO UInt32 := do
   if args.head? == some "--sandboxed-scope-exec-cleared-env" then
     OrbNode.Main.runCli args
+  else if args.head? == some "--sandboxed-test-daemon" then
+    OrbNode.Main.runCli []
   else
     OrbNode.SelfTest.runTests

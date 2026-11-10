@@ -618,6 +618,64 @@ def handleEnsureMissionUser (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer :
 private def privdStateDir : IO String := do
   return stripTrailingSlash ((← getEnvNonEmpty "ORB_PRIVD_STATE_DIR").getD "/run/orb-privd-jobs")
 
+initialize privdSystemdExpandEnvCache : IO.Ref (Option Bool) ← IO.mkRef none
+
+def escapeSystemdExecArgDollar (arg : String) : String :=
+  String.intercalate "$$" (arg.splitOn "$")
+
+def detectPrivdSystemdExpandEnvironment : IO Bool := do
+  if let some cached ← privdSystemdExpandEnvCache.get then
+    return cached
+  let res ← (IO.Process.output { cmd := "/usr/bin/systemd-run", args := #["--help"] }).toBaseIO
+  let supported := match res with
+    | .ok out => ((out.stdout ++ out.stderr).splitOn "--expand-environment").length > 1
+    | .error _ => false
+  privdSystemdExpandEnvCache.set (some supported)
+  return supported
+
+/-- Build the confined `/usr/bin/systemd-run` command vector for `spawn_user_job`.
+    When `supportsExpandEnvNo` is `true` (`systemd >= 254`), passes `--expand-environment=no`
+    so systemd never expands `${...}`, `$VAR`, or `$$` inside `argv`. On older hosts such as
+    Debian 12 (`systemd 252`), omits `--expand-environment=no` and doubles `$` -> `$$` in `argv`
+    so transient service `ExecStart` unescaping preserves every literal `$` losslessly. -/
+def buildPrivdSystemdRunCmd
+    (unit : String) (uid gid : UInt32) (cwd homeDir logPath : String)
+    (timeoutSecs : Nat)
+    (memMax? memHigh? : Option UInt64)
+    (cpuWeight? : Option Nat) (cpuQuota? : Option String)
+    (cleanEnv : Array (String × String))
+    (argv : Array String)
+    (supportsExpandEnvNo : Bool := true) : Array String := Id.run do
+  let mut cmd : Array String := #["/usr/bin/systemd-run", "--system"]
+  if supportsExpandEnvNo then
+    cmd := cmd.push "--expand-environment=no"
+  cmd := cmd ++ #[
+    "--quiet", "--collect",
+    s!"--unit={unit}",
+    s!"--uid={uid}", s!"--gid={gid}",
+    s!"--working-directory={cwd}",
+    "--property=RemainAfterExit=yes",
+    "--property=Slice=missions.slice",
+    "--property=KillMode=control-group",
+    "--property=NoNewPrivileges=yes",
+    "--property=SupplementaryGroups=",
+    "--property=PrivateTmp=yes",
+    "--property=ProtectSystem=strict",
+    s!"--property=ReadWritePaths={homeDir}",
+    s!"--property=StandardOutput=file:{logPath}",
+    s!"--property=StandardError=file:{logPath}",
+    s!"--property=RuntimeMaxSec={max 1 timeoutSecs}"
+  ]
+  if let some m := memMax? then cmd := cmd.push s!"--property=MemoryMax={m}"
+  if let some m := memHigh? then cmd := cmd.push s!"--property=MemoryHigh={m}"
+  if let some w := cpuWeight? then cmd := cmd.push s!"--property=CPUWeight={w}"
+  if let some q := cpuQuota? then cmd := cmd.push s!"--property=CPUQuota={q}"
+  for (k, v) in cleanEnv do cmd := cmd.push s!"--setenv={k}={v}"
+  cmd := cmd.push "--"
+  let safeArgv := if supportsExpandEnvNo then argv else argv.map escapeSystemdExecArgDollar
+  cmd := cmd ++ safeArgv
+  return cmd
+
 def handleSpawnUserJob (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (req : JVal) : IO Unit := do
   let peerOk ← resolveAllowedNodePeer peer
   if !peerOk then
@@ -676,6 +734,9 @@ def handleSpawnUserJob (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : Peer
   let memHigh? := req.fieldUInt64? "mem_high"
   let cpuWeight? := req.fieldNat? "cpu_weight"
   let cpuQuota? := req.fieldStr? "cpu_quota"
+  let supportsExpandEnv ← if isNonRootTest then pure true else detectPrivdSystemdExpandEnvironment
+  let systemdCmd := buildPrivdSystemdRunCmd cleanJobUnit uid gid missionCwd homeDir logPath
+    timeoutSecs memMax? memHigh? cpuWeight? cpuQuota? cleanEnv argv supportsExpandEnv
   let pySpawn :=
     "import json, os, stat, subprocess, sys\n" ++
     "req = json.loads(sys.stdin.read())\n" ++
@@ -695,32 +756,8 @@ def handleSpawnUserJob (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : Peer
     "  open(req['meta_path'], 'w').write(json.dumps(meta))\n" ++
     "  print(json.dumps({'ok': True, 'unit': req['unit'], 'pid': proc.pid}))\n" ++
     "else:\n" ++
-    "  cmd = [\n" ++
-    "    '/usr/bin/systemd-run', '--system', '--quiet', '--collect',\n" ++
-    "    f\"--unit={req['unit']}\",\n" ++
-    "    f\"--uid={req['uid']}\", f\"--gid={req['gid']}\",\n" ++
-    "    f\"--working-directory={req['cwd']}\",\n" ++
-    "    '--property=RemainAfterExit=yes',\n" ++
-    "    '--property=Slice=missions.slice',\n" ++
-    "    '--property=KillMode=control-group',\n" ++
-    "    '--property=NoNewPrivileges=yes',\n" ++
-    "    '--property=SupplementaryGroups=',\n" ++
-    "    '--property=PrivateTmp=yes',\n" ++
-    "    '--property=ProtectSystem=strict',\n" ++
-    "    f\"--property=ReadWritePaths={req['home_dir']}\",\n" ++
-    "    f\"--property=StandardOutput=file:{lp}\",\n" ++
-    "    f\"--property=StandardError=file:{lp}\",\n" ++
-    "    f\"--property=RuntimeMaxSec={max(1, int(req['timeout_secs']))}\",\n" ++
-    "  ]\n" ++
-    "  if req.get('mem_max'): cmd.append(f\"--property=MemoryMax={req['mem_max']}\")\n" ++
-    "  if req.get('mem_high'): cmd.append(f\"--property=MemoryHigh={req['mem_high']}\")\n" ++
-    "  if req.get('cpu_weight'): cmd.append(f\"--property=CPUWeight={req['cpu_weight']}\")\n" ++
-    "  if req.get('cpu_quota'): cmd.append(f\"--property=CPUQuota={req['cpu_quota']}\")\n" ++
-    "  for k, v in env_map.items(): cmd.append(f'--setenv={k}={v}')\n" ++
-    "  cmd.append('--')\n" ++
-    "  cmd.extend(req['argv'])\n" ++
     "  os.close(lfd)\n" ++
-    "  r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)\n" ++
+    "  r = subprocess.run(req['systemd_cmd'], capture_output=True, text=True, timeout=20)\n" ++
     "  if r.returncode != 0:\n" ++
     "    print(json.dumps({'ok': False, 'stderr': r.stderr.strip() or r.stdout.strip()}))\n" ++
     "    sys.exit(0)\n" ++
@@ -733,21 +770,14 @@ def handleSpawnUserJob (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : Peer
   let spawnInput := renderCompact <| JVal.obj #[
     ("nonroot", .bool isNonRootTest),
     ("unix_username", .str uName),
-    ("uid", .nat uid.toNat),
-    ("gid", .nat gid.toNat),
     ("group_gid", match peer.gid with | some g => .nat g.toNat | none => .null),
-    ("home_dir", .str homeDir),
     ("cwd", .str missionCwd),
     ("log_path", .str logPath),
     ("unit", .str cleanJobUnit),
     ("meta_path", .str metaPath),
-    ("timeout_secs", .nat timeoutSecs),
-    ("mem_max", match memMax? with | some m => .uint64 m | none => .null),
-    ("mem_high", match memHigh? with | some m => .uint64 m | none => .null),
-    ("cpu_weight", match cpuWeight? with | some w => .nat w | none => .null),
-    ("cpu_quota", match cpuQuota? with | some q => .str q | none => .null),
     ("env", .arr envJsonArr),
-    ("argv", .arr (argv.map .str))
+    ("argv", .arr (argv.map .str)),
+    ("systemd_cmd", .arr (systemdCmd.map .str))
   ]
   match ← (IO.Process.output { cmd := "python3", args := #["-c", pySpawn] } (input? := some spawnInput)).toBaseIO with
   | .error e => return (← replyError cfd s!"spawn_user_job failed: {e}" 126)

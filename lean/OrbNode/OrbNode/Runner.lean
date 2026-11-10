@@ -819,6 +819,69 @@ private def resolveTrampolineExe : IO (Option String) := do
     return none
   | .error _ => return none
 
+initialize systemdExpandEnvCache : IO.Ref (Option Bool) ← IO.mkRef none
+
+def systemdHelpSupportsExpandEnvironment (helpText : String) : Bool :=
+  (helpText.splitOn "--expand-environment").length > 1
+
+/-- Probe once whether the host's `systemd-run` supports `--expand-environment` (`systemd >= 254`).
+    On older hosts such as Debian 12 (`systemd 252`), `--expand-environment` does not exist and
+    `systemd-run --scope` already leaves `argv` unexpanded by default. -/
+def detectSystemdExpandEnvironmentFlag : IO Bool := do
+  if let some cached ← systemdExpandEnvCache.get then
+    return cached
+  let res ← (IO.Process.output { cmd := "systemd-run", args := #["--help"] }).toBaseIO
+  let supported := match res with
+    | .ok out => systemdHelpSupportsExpandEnvironment (out.stdout ++ out.stderr)
+    | .error _ => false
+  systemdExpandEnvCache.set (some supported)
+  return supported
+
+/-- Build the `systemd-run` argument vector for a transient scope unit.
+    When `supportsExpandEnvNo` is `true` (`systemd >= 254`), passes `--expand-environment=no`
+    so `systemd >= 256` (`replace_env_argv`) never expands `${...}`, `$VAR`, or `$$` in `argv`
+    (preventing corruption of shell parameter expansions such as `fork_root=${fork_root%/*}`
+    on Ubuntu 26.04+). When `false` (`systemd <= 253`, e.g. Debian 12 `systemd 252`), omits
+    the unrecognized flag since `--scope` expansion is already disabled by default there. -/
+def buildSystemdScopeArgs
+    (mode : SystemdScopeMode) (unit : String)
+    (memMax memHigh : UInt64)
+    (cpuWeight? cpuQuota? : Option String)
+    (timeoutSecs? : Option UInt64)
+    (trampExe : String)
+    (envKeys : Array String)
+    (prog : String) (args : Array String)
+    (supportsExpandEnvNo : Bool := true) : Array String := Id.run do
+  let mut sArgs : Array String := #[]
+  if mode == .user then
+    sArgs := sArgs.push "--user"
+  sArgs := sArgs.push "--scope"
+  if supportsExpandEnvNo then
+    sArgs := sArgs.push "--expand-environment=no"
+  sArgs := sArgs ++ #[
+    "--quiet",
+    s!"--unit={unit}",
+    "--property=KillMode=control-group",
+    s!"--property=MemoryMax={memMax}",
+    s!"--property=MemoryHigh={memHigh}",
+    "--property=MemorySwapMax=0"
+  ]
+  if let some w := cpuWeight? then
+    sArgs := sArgs.push s!"--property=CPUWeight={w}"
+  if let some q := cpuQuota? then
+    sArgs := sArgs.push s!"--property=CPUQuota={q}"
+  if let some secs := timeoutSecs? then
+    sArgs := sArgs.push s!"--property=RuntimeMaxSec={max 1 secs}"
+  sArgs := sArgs.push "--"
+  sArgs := sArgs.push trampExe
+  sArgs := sArgs.push "--sandboxed-scope-exec-cleared-env"
+  for k in envKeys do
+    sArgs := sArgs.push k
+  sArgs := sArgs.push "--"
+  sArgs := sArgs.push prog
+  sArgs := sArgs ++ args
+  return sArgs
+
 /-- Wrap `(prog, args, envPairs)` in a transient `systemd-run --scope` unit when a usable systemd
     manager is available on Linux; degrades cleanly to direct `-pgid` spawn in container/test hosts. -/
 private def wrapWithSystemdScope
@@ -837,10 +900,8 @@ private def wrapWithSystemdScope
   let memHigh := (memMax / 10) * 9
   let cpuWeight? := parseJobCpuWeight (← IO.getEnv "SANDBOXED_NODE_JOB_CPU_WEIGHT")
   let cpuQuota? := parseJobCpuQuota (← IO.getEnv "SANDBOXED_NODE_JOB_CPU_QUOTA")
-  let mut sArgs : Array String := #[]
   let mut sEnv := envPairs
   if mode == .user then
-    sArgs := sArgs.push "--user"
     if let some rtDir := userRt? then
       sEnv := (sEnv.filter (fun (k, _) => k != "XDG_RUNTIME_DIR" && k != "DBUS_SESSION_BUS_ADDRESS"))
         |>.push ("XDG_RUNTIME_DIR", rtDir)
@@ -848,29 +909,9 @@ private def wrapWithSystemdScope
   if let some pathVal ← IO.getEnv "PATH" then
     if !(sEnv.any (fun (k, _) => k == "PATH")) then
       sEnv := sEnv.push ("PATH", pathVal)
-  sArgs := sArgs ++ #[
-    "--scope",
-    "--quiet",
-    s!"--unit={unit}",
-    "--property=KillMode=control-group",
-    s!"--property=MemoryMax={memMax}",
-    s!"--property=MemoryHigh={memHigh}",
-    "--property=MemorySwapMax=0"
-  ]
-  if let some w := cpuWeight? then
-    sArgs := sArgs.push s!"--property=CPUWeight={w}"
-  if let some q := cpuQuota? then
-    sArgs := sArgs.push s!"--property=CPUQuota={q}"
-  if let some secs := timeoutSecs? then
-    sArgs := sArgs.push s!"--property=RuntimeMaxSec={max 1 secs}"
-  sArgs := sArgs.push "--"
-  sArgs := sArgs.push trampExe
-  sArgs := sArgs.push "--sandboxed-scope-exec-cleared-env"
-  for (k, _) in envPairs do
-    sArgs := sArgs.push k
-  sArgs := sArgs.push "--"
-  sArgs := sArgs.push prog
-  sArgs := sArgs ++ args
+  let supportsExpandEnv ← detectSystemdExpandEnvironmentFlag
+  let sArgs := buildSystemdScopeArgs mode unit memMax memHigh cpuWeight? cpuQuota?
+    timeoutSecs? trampExe (envPairs.map Prod.fst) prog args supportsExpandEnv
   return ("systemd-run", sArgs, sEnv, some scope)
 
 /-- Immediately send `SIGKILL` to every process in `SystemdScope` (`systemctl kill --kill-who=all --signal=SIGKILL`),
@@ -955,7 +996,7 @@ def teardownJobResourcesAsync
     (scope? : Option SystemdScope) (iso? : Option String)
     (scratchFinalize? : Option (String × SqliteBackend × String × String × UInt64 × UInt64) := none) : IO Unit := do
   if scope?.isNone && iso?.isNone && scratchFinalize?.isNone then return
-  discard <| IO.asTask do
+  discard <| IO.asTask (prio := Task.Priority.dedicated) do
     stopSystemdScope scope?
     if let some dir := iso? then
       if !dir.isEmpty then
@@ -1696,6 +1737,8 @@ def commitPreparedJob
           teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
             (scratchFinOf cur.nodeBootEpoch curClaimSeq spec.scratchDir?)
           let nextState : JobState := if codeInt == 0 then .succeeded else .failed
+          let failErr? : Option String :=
+            if codeInt == 0 then none else some s!"command exited with Some({codeInt})"
           if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
             r with
             state := if r.state == .cancelled then .cancelled else nextState
@@ -1708,6 +1751,7 @@ def commitPreparedJob
             startTicks := 0
             procPhase := 2
             artifacts := arts
+            error? := if r.state == .cancelled then r.error? else r.error?.orElse (fun _ => failErr?)
           }) preExtraSql then
             rt := { rt with ledger := l' }
           return releaseDebt rt
@@ -1872,6 +1916,8 @@ def tickRuntimeReserve
       teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout scratchFin
       let nowTs ← nowRfc3339
       let nextState : JobState := if codeInt == 0 then .succeeded else .failed
+      let failErr? : Option String :=
+        if codeInt == 0 then none else some s!"command exited with Some({codeInt})"
       if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
         r with
         state := if r.state == .cancelled then .cancelled else nextState
@@ -1879,6 +1925,7 @@ def tickRuntimeReserve
         finishedAt? := some nowTs
         artifacts := arts
         procPhase := 2
+        error? := if r.state == .cancelled then r.error? else r.error?.orElse (fun _ => failErr?)
       }) (mkLeaderDeadSql nowTs) then
         rt := { rt with ledger := l' }
       rt := { rt with liveProcs := rt.liveProcs.erase jid }
@@ -1900,7 +1947,7 @@ def tickRuntimeReserve
           state := .failed
           exitCode? := some 124
           finishedAt? := some nowTs
-          error? := some s!"job timed out after {limitSecs}s"
+          error? := some s!"timed out after {limitSecs}s"
           procPhase := 2
         }) (mkLeaderDeadSql nowTs) then
           rt := { rt with ledger := l' }

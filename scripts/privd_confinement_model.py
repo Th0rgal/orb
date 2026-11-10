@@ -1001,6 +1001,22 @@ def handle_ensure_mission_user(req: dict, peer_uid: int) -> dict:
     }
 
 
+_SYSTEMD_EXPAND_ENV_CACHE: bool | None = None
+
+
+def _systemd_supports_expand_environment(systemd_run: str = "/usr/bin/systemd-run") -> bool:
+    global _SYSTEMD_EXPAND_ENV_CACHE
+    if _SYSTEMD_EXPAND_ENV_CACHE is not None:
+        return _SYSTEMD_EXPAND_ENV_CACHE
+    try:
+        res = subprocess.run([systemd_run, "--help"], capture_output=True, text=True, timeout=5)
+        supported = "--expand-environment" in ((res.stdout or "") + (res.stderr or ""))
+    except OSError:
+        supported = False
+    _SYSTEMD_EXPAND_ENV_CACHE = supported
+    return supported
+
+
 def handle_spawn_user_job(req: dict, peer_uid: int, peer_gid: int) -> dict:
     import stat
 
@@ -1075,9 +1091,11 @@ def handle_spawn_user_job(req: dict, peer_uid: int, peer_gid: int) -> dict:
         return {"ok": True, "unit": unit, "pid": child_pid}
     os.close(lfd)
     timeout_secs = max(1, int(req.get("timeout_secs") or 14400))
-    cmd = [
-        "/usr/bin/systemd-run",
-        "--system",
+    supports_expand_env = _systemd_supports_expand_environment()
+    cmd = ["/usr/bin/systemd-run", "--system"]
+    if supports_expand_env:
+        cmd.append("--expand-environment=no")
+    cmd.extend([
         "--quiet",
         "--collect",
         f"--unit={unit}",
@@ -1095,7 +1113,7 @@ def handle_spawn_user_job(req: dict, peer_uid: int, peer_gid: int) -> dict:
         f"--property=StandardOutput=file:{log_path}",
         f"--property=StandardError=file:{log_path}",
         f"--property=RuntimeMaxSec={timeout_secs}",
-    ]
+    ])
     if req.get("mem_max"):
         cmd.append(f"--property=MemoryMax={int(req['mem_max'])}")
     if req.get("mem_high"):
@@ -1107,7 +1125,7 @@ def handle_spawn_user_job(req: dict, peer_uid: int, peer_gid: int) -> dict:
     for k, v in clean_env.items():
         cmd.append(f"--setenv={k}={v}")
     cmd.append("--")
-    cmd.extend(argv)
+    cmd.extend(argv if supports_expand_env else [arg.replace("$", "$$") for arg in argv])
     run_proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
     if run_proc.returncode != 0:
         return {"ok": False, "exit_code": 126, "stderr": run_proc.stderr.strip() or run_proc.stdout.strip()}
