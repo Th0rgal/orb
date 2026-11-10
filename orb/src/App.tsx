@@ -35,6 +35,7 @@ import { startLocalWakeups } from "./localWakeups";
 import { startClientDelegations } from "./clientDelegations";
 import {
   hasPrimaryModifier,
+  isBtwShortcut,
   isFindShortcut,
   isSearchShortcut,
   navigationShortcut,
@@ -1061,7 +1062,7 @@ export default function App() {
     const sidebarFocused =
       isFindShortcut(e) &&
       !!document.getElementById("orb-sidebar")?.contains(document.activeElement);
-    if (isSearchShortcut(e) || sidebarFocused) {
+    if (isSearchShortcut(e) || (!e.shiftKey && isBtwShortcut(e)) || sidebarFocused) {
       if (searchOpen()) {
         e.preventDefault();
         searchInputEl?.focus({ preventScroll: true });

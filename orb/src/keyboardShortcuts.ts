@@ -27,13 +27,6 @@ export function hasPrimaryModifier(event: KeyboardEvent): boolean {
     : event.metaKey !== event.ctrlKey;
 }
 
-/** Strict platform modifier for chords where Control+letter has native macOS editing meaning (e.g. Ctrl+K). */
-function hasStrictPlatformModifier(event: KeyboardEvent): boolean {
-  return isMacKeyboardPlatform()
-    ? event.metaKey && !event.ctrlKey
-    : event.ctrlKey && !event.metaKey;
-}
-
 export const searchShortcutLabel = () => (isMacKeyboardPlatform() ? "⌘⇧F" : "Ctrl+Shift+F");
 export const btwShortcutLabel = () => (isMacKeyboardPlatform() ? "⌘K" : "Ctrl+K");
 export const filesShortcutLabel = () => (isMacKeyboardPlatform() ? "⌘J" : "Ctrl+J");
@@ -41,11 +34,11 @@ export const fileTreeShortcutLabel = () => (isMacKeyboardPlatform() ? "⌘⇧B" 
 export const expandShortcutLabel = () => (isMacKeyboardPlatform() ? "⌘\\" : "Ctrl+\\");
 export const sidebarShortcutLabel = () => (isMacKeyboardPlatform() ? "⌘B" : "Ctrl+B");
 
-/** Command-Shift-F on macOS, Control-Shift-F elsewhere; ignores IME composition and extra modifiers. */
+/** Command-Shift-F on macOS, Command/Control-Shift-F elsewhere; ignores IME composition and extra modifiers. */
 export function isSearchShortcut(event: KeyboardEvent): boolean {
   if (event.isComposing || event.defaultPrevented || event.altKey || !event.shiftKey) return false;
   const keyMatches = event.code === "KeyF" || event.key.toLowerCase() === "f";
-  return keyMatches && hasStrictPlatformModifier(event);
+  return keyMatches && hasPrimaryModifier(event);
 }
 
 /** Command-F on macOS, Control-F elsewhere (local Find, or global search when sidebar has focus). */
