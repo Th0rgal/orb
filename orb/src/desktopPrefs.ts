@@ -174,7 +174,21 @@ async function drainFlushQueue(): Promise<void> {
         lastRev = out.rev;
       }
     } catch {
-      // Best-effort local mirror; localStorage already holds the in-window copy.
+      // Restore unsaved mutations without overriding newer pending edits queued while RPC was in flight.
+      if (!pendingClear) {
+        if (clearAll) {
+          pendingClear = true;
+        } else {
+          for (const k of removeArr) {
+            if (!pendingSet.has(k)) pendingRemove.add(k);
+          }
+        }
+        for (const [k, v] of Object.entries(setObj)) {
+          if (!pendingSet.has(k) && !pendingRemove.has(k)) {
+            pendingSet.set(k, v);
+          }
+        }
+      }
       break;
     }
   }
@@ -249,7 +263,12 @@ function installStorageHooks(): void {
 
 export async function pullDesktopPrefs(checkConnection = false): Promise<void> {
   if (pullInFlight || flushRunning !== null) return;
-  if (pendingClear || pendingSet.size > 0 || pendingRemove.size > 0) return;
+  if (pendingClear || pendingSet.size > 0 || pendingRemove.size > 0) {
+    await flushDesktopPrefs();
+    if (pullInFlight || flushRunning !== null || pendingClear || pendingSet.size > 0 || pendingRemove.size > 0) {
+      return;
+    }
+  }
   const invoke = nativeInvoke();
   if (!invoke) return;
 

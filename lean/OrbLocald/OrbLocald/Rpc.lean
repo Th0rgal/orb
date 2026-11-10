@@ -1369,19 +1369,22 @@ private def canonicalUiPrefs (kvs : Array (String × JVal)) : JVal × String :=
   let rev := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes canon.toUTF8)
   (obj, rev)
 
-private def readUiPrefsFromDisk (path? : Option System.FilePath) : IO (JVal × String) := do
+private def readUiPrefsFromDisk (path? : Option System.FilePath) : IO (Except String (JVal × String)) := do
   match path? with
-  | none => return canonicalUiPrefs #[]
+  | none => return .ok (canonicalUiPrefs #[])
   | some path =>
-    if !(← path.pathExists) then
-      return canonicalUiPrefs #[]
+    let st ← OrbBin.PosixExt.statPath path.toString
+    if !st.exists_ then
+      return .ok (canonicalUiPrefs #[])
+    if st.isSymlink || !st.isReg then
+      return .error "Invalid saved UI preferences path"
     try
       let raw ← IO.FS.readFile path
       match OrbBin.Json.parse raw.trimAscii.toString with
-      | .ok (.obj kvs) => return canonicalUiPrefs kvs
-      | _ => return canonicalUiPrefs #[]
+      | .ok (.obj kvs) => return .ok (canonicalUiPrefs kvs)
+      | _ => return .error "Invalid saved UI preferences"
     catch _ =>
-      return canonicalUiPrefs #[]
+      return .error "Cannot read saved UI preferences"
 
 private def logsDirPath? (st : LocaldState) : Option System.FilePath :=
   (resolveOrbStateDir st).map (· / "logs")
@@ -3195,17 +3198,24 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "desktop_prefs_load" =>
     let sinceRev? := args.fieldStr? "since_rev"
     uiPrefsMutex.atomically do
-      let (prefsObj, rev) ← readUiPrefsFromDisk (uiPrefsFilePath? st)
-      if sinceRev? == some rev then
-        return .ok (.obj #[("unchanged", .bool true), ("rev", .str rev)])
-      return .ok (.obj #[("unchanged", .bool false), ("rev", .str rev), ("prefs", prefsObj)])
+      match ← readUiPrefsFromDisk (uiPrefsFilePath? st) with
+      | .error e => return .error e
+      | .ok (prefsObj, rev) =>
+        if sinceRev? == some rev then
+          return .ok (.obj #[("unchanged", .bool true), ("rev", .str rev)])
+        return .ok (.obj #[("unchanged", .bool false), ("rev", .str rev), ("prefs", prefsObj)])
   | "desktop_prefs_patch" =>
     let setKvs := ((args.field? "set").bind (·.asObj?)).getD #[]
     let removeKeys := ((args.fieldArr? "remove").getD #[]).filterMap (·.asStr?)
     let clearAll := (args.fieldBool? "clear").getD false
     let path? := uiPrefsFilePath? st
     withUiPrefsLock path? do
-      let (curObj, _) ← if clearAll then pure (JVal.obj #[], "") else readUiPrefsFromDisk path?
+      let curObj ←
+        if clearAll then pure (JVal.obj #[])
+        else
+          match ← readUiPrefsFromDisk path? with
+          | .ok (obj, _) => pure obj
+          | .error e => return .error e
       let curKvs := (curObj.asObj?).getD #[]
       let afterRem := curKvs.filter (fun (k, _) => !removeKeys.contains k)
       let merged := afterRem ++ setKvs

@@ -98,7 +98,7 @@ Terminal=false
 Type=Application
 Categories=Development;Utility;
 Keywords=orb;dev;hmr;ui;
-StartupWMClass=orb
+StartupWMClass=orb-desktop
 EOF
   chmod 0644 "$DESKTOP_FILE"
   echo "==> Installed XDG launcher entry ($DESKTOP_FILE) and hicolor icons ($HICOLOR_DIR)"
@@ -410,10 +410,13 @@ class Handler(SimpleHTTPRequestHandler):
             return cand
         return os.path.join(ROOT, "index.html") if not os.path.splitext(rel)[1] else os.path.join(ROOT, "__missing__")
 
+class ReusableServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
 try:
-    srv = ThreadingHTTPServer(("127.0.0.1", 1431), Handler)
+    srv = ReusableServer(("127.0.0.1", 1431), Handler)
 except OSError:
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    srv = ReusableServer(("127.0.0.1", 0), Handler)
 sys.stdout.write(str(srv.server_address[1]) + "\n")
 sys.stdout.flush()
 srv.serve_forever()
@@ -429,20 +432,38 @@ export ORB_SIGNER_BIN="\$APP_DIR/bin/orb-signer"
 if [[ " \$* " == *" --self-test "* ]]; then
   exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
 fi
+server_pid=""
+cleanup_orb() {
+  if [[ -n "\$server_pid" ]]; then
+    kill "\$server_pid" 2>/dev/null || true
+    wait "\$server_pid" 2>/dev/null || true
+  fi
+}
 if [[ -z "\${ORB_DEV_URL:-}" ]]; then
   fifo="\$(mktemp -u)"
   mkfifo "\$fifo"
   "${PY_BIN}" "\$APP_DIR/bin/.orb-static-server" "\$APP_DIR/share/orb" >"\$fifo" &
   server_pid=\$!
+  trap cleanup_orb EXIT HUP INT TERM
   IFS= read -r port <"\$fifo" || true
   rm -f "\$fifo"
-  trap 'kill "\$server_pid" 2>/dev/null || true' EXIT HUP INT TERM
+  if [[ -z "\${port:-}" ]]; then
+    echo "error: failed to start local static asset server" >&2
+    exit 1
+  fi
   export ORB_DEV_URL="http://127.0.0.1:\$port/"
 fi
 if [[ -z "\${ORB_LOCALD_PORT:-}" ]]; then
   export ORB_LOCALD_PORT=\$("${PY_BIN}" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 fi
-exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
+if [[ -z "\$server_pid" ]]; then
+  exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
+fi
+set +e
+"\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
+rc=\$?
+set -e
+exit "\$rc"
 EOF
       chmod 0755 "$LINUX_APP_DIR/bin/orb"
       cat > "$XDG_DATA/applications/orb.desktop" <<EOF

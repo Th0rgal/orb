@@ -595,7 +595,16 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
     (match sameRevRes with
      | .ok jv => jv.fieldBool? "unchanged" == some true && (jv.field? "prefs").isNone
      | _ => false)
-  if (← assertTrue "desktop_prefs_shared_across_daemons" prefsShareOk) then passed := passed + 1
+  -- Malformed existing ui-prefs.json must return an RPC error rather than wiping saved preferences
+  IO.FS.writeFile (System.FilePath.mk persistDir / "ui-prefs.json") "{corrupt"
+  let corruptLoadRes ← dispatchRpcCommand stP2 "desktop_prefs_load" (.obj #[])
+  let corruptPatchRes ← dispatchRpcCommand stP2 "desktop_prefs_patch" (.obj #[("set", .obj #[("orb-theme", .str "dark")])])
+  let corruptClearRes ← dispatchRpcCommand stP2 "desktop_prefs_patch" (.obj #[("clear", .bool true), ("set", .obj #[("orb-theme", .str "dark")])])
+  let corruptOk :=
+    (match corruptLoadRes with | .error _ => true | .ok _ => false) &&
+    (match corruptPatchRes with | .error _ => true | .ok _ => false) &&
+    (match corruptClearRes with | .ok _ => true | .error _ => false)
+  if (← assertTrue "desktop_prefs_shared_across_daemons" (prefsShareOk && corruptOk)) then passed := passed + 1
 
   -- E. Token-scoped `__orb_poll_events` + per-SSE-subscriber broadcast (no multi-window event stealing)
   let stPub ← IO.mkRef ({ launchToken := validTok } : LocaldState)

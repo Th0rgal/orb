@@ -206,5 +206,36 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
     expect(disk["orb.voiceLang"]).toBe("fr");
     expect(localStorage.getItem("orb.voiceLang")).toBe("fr");
     expect(localStorage.getItem("orb.hugePref")).toBe(hugeValue);
+
+    // Failed patch must stay queued so a subsequent external poll retries instead of overwriting it:
+    let failNextPatch = true;
+    invoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "desktop_prefs_load") {
+        return { unchanged: false, rev: `r-${revCounter}`, prefs: { ...disk } };
+      }
+      if (cmd === "desktop_prefs_patch") {
+        if (failNextPatch) {
+          failNextPatch = false;
+          throw new Error("lock busy");
+        }
+        const setObj = (args?.set as Record<string, string> | undefined) ?? {};
+        for (const [k, v] of Object.entries(setObj)) disk[k] = v;
+        revCounter++;
+        return { rev: `r-${revCounter}`, prefs: { ...disk } };
+      }
+      if (cmd === "set_window_theme" || cmd === "desktop_connection_load") return null;
+      return undefined;
+    });
+
+    localStorage.setItem("orb.voiceLang", "de");
+    await flushDesktopPrefs();
+    // Disk still has "fr", and another client also updates "orb-theme" to "light":
+    disk["orb-theme"] = "light";
+    revCounter++;
+
+    await pullDesktopPrefs(false);
+    expect(disk["orb.voiceLang"]).toBe("de");
+    expect(localStorage.getItem("orb.voiceLang")).toBe("de");
+    expect(localStorage.getItem("orb-theme")).toBe("light");
   });
 });
