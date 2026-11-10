@@ -151,7 +151,7 @@ For a review, second opinion or very hard read-only question, call
 `consult_model` instead of hand-building a `start_mission`:
 
 ```
-consult_model(model="gpt-6-astra",        # or "fable-5.1", "opus-5.5", or a full "openai/gpt-6-astra"
+consult_model(model="gpt-6-astra",        # or "fable-5.2", "opus-5.5", or a full "openai/gpt-6-astra"
               question="<self-contained question + expected decision/artifact>",
               files=["docs/plan.md"],      # optional: paths the consultant must read
               idempotency_key="<stable key>")
@@ -203,7 +203,7 @@ mcp_sandboxed_assistant_start_mission(
 # zai, minimax, kimi, spark
 ```
 
-**Fable 5.1 via `claudecode` only.** Virtuals is deprecated and no longer available. For demanding reasoning and long-horizon agentic work, launch via `backend="claudecode"` with the exact catalog ID `model_override="claude-fable-5-1"`. The older `claude-fable-5` remains available only for explicit compatibility. Do NOT use `opencode` + `virtuals/claude-fable-5-1` — Virtuals has been removed from the provider catalog.
+**Fable 5.2 and Mythos 5.2.** Virtuals is deprecated and no longer available. Claude Code defaults to Opus (`claude-opus-5-5`). For demanding reasoning and long-horizon agentic work, pass `model_override="claude-fable-5-2"` on `backend="claudecode"` (or `anthropic/claude-fable-5-2` on `opencode`); for Mythos-class reasoning on verified organizations, pass `model_override="claude-mythos-5-2"`. Older `claude-fable-5-1` / `claude-fable-5` IDs remain only for explicit compatibility and are never selected by default. Do NOT use `opencode` + `virtuals/...` — Virtuals has been removed from the provider catalog.
 
 **Model ID gotchas:**
 - Z.AI: `glm-5.2`, `glm-5.1`, `glm-5-turbo` (lowercase, hyphenated)

@@ -17,9 +17,29 @@
       "description": "Anthropic Claude via OpenRouter"
     },
     {
+      "id": "anthropic/claude-fable-5.2",
+      "name": "Claude Fable 5.2",
+      "description": "Anthropic Claude Fable 5.2 via OpenRouter"
+    },
+    {
+      "id": "anthropic/claude-mythos-5.2",
+      "name": "Claude Mythos 5.2",
+      "description": "Anthropic Claude Mythos 5.2 via OpenRouter"
+    },
+    {
       "id": "anthropic/claude-sonnet-4.6",
       "name": "Claude Sonnet 4.6",
       "description": "Anthropic Claude via OpenRouter"
+    },
+    {
+      "id": "meta/muse-wonder",
+      "name": "Meta Muse Wonder 1.0",
+      "description": "Meta Muse Wonder 1.0 via OpenRouter"
+    },
+    {
+      "id": "meta/muse-ember",
+      "name": "Meta Muse Ember 1.0",
+      "description": "Meta Muse Ember 1.0 via OpenRouter"
     },
     {
       "id": "google/gemini-3.1-pro-preview",

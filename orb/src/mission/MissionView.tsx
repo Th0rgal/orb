@@ -1243,7 +1243,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         const sent = seededPrompt(imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images), next?.seed);
         if(connectionVersion()!==sendVersion||staleMission()||p.id!==sendMission)throw new Error("Conversation changed. Your draft is kept.");
         if (optEntry && !drafts.has(attemptId)) return true;
-        await enqueueLocalMessage({id:sendMission,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:mission()?.model_override ?? binding.model,effort:binding.harness === "antigravity" ? normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined : undefined,service_tier:binding.harness === "codex" ? missionSpeed(mission()??{}) : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optEntry?.waiting??busy()});
+        await enqueueLocalMessage({id:sendMission,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:mission()?.model_override ?? binding.model,effort:normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined,service_tier:binding.harness === "codex" ? missionSpeed(mission()??{}) : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optEntry?.waiting??busy()});
         if (next?.seed) seedDelivered(sendMission);
         drafts.remove(attemptId);
         if (chips === followAttach()) setFollowAttach([]);

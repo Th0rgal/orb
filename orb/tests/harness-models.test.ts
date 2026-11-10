@@ -63,6 +63,20 @@ describe("this computer's Claude Code models", () => {
     destinationHarnessChoices(core,"local",[],false,local);
     expect(core[0].models[0].value).toBe("claude-sonnet-5");
   });
+  it("orders Opus first even if local CLI discovery emitted Fable or Mythos ahead of Opus", () => {
+    const unordered: [string,string][] = [
+      ["claude-fable-5-2","Claude Fable 5.2"],
+      ["claude-mythos-5-2","Claude Mythos 5.2"],
+      ["claude-opus-5-5","Claude Opus 5.5"],
+      ["claude-sonnet-5-5","Claude Sonnet 5.5"],
+    ];
+    expect(destinationHarnessChoices([claude],"local",[],false,unordered)[0].models.map(m=>m.value)).toEqual([
+      "claude-opus-5-5",
+      "claude-fable-5-2",
+      "claude-mythos-5-2",
+      "claude-sonnet-5-5",
+    ]);
+  });
 });
 
 it("drops retired Gemini CLI from stale Core choices without removing Antigravity models", () => {

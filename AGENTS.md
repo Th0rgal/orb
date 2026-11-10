@@ -242,7 +242,7 @@ execution context:
 - There is no browser/web-UI harness. To get a review or second opinion from
   another model, start an `opencode` mission with
   `model_override=<provider>/<model>` (e.g. `openai/gpt-6-astra`,
-  `anthropic/claude-fable-5-1`).
+  `anthropic/claude-fable-5-2`).
 
 ### Antigravity and Grok
 

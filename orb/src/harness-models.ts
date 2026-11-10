@@ -14,9 +14,14 @@ export function destinationHarnessChoices(
 ): HarnessChoice[] {
   const coreAntigravity = core.find(choice => choice.backend.id === "antigravity");
   const choices = core.filter(choice => choice.backend.id !== "antigravity" && choice.backend.id !== "gemini");
-  // This computer's Claude Code lists what its own sign-in can run.
+  // This computer's Claude Code lists what its own sign-in can run, always keeping Opus first as default.
   if (machine === "local" && localClaudeModels.length) {
-    const models = localClaudeModels.map(([value, label]) => ({ value, label: `This computer — ${label}` }));
+    const ordered = [...localClaudeModels].sort(([a], [b]) => {
+      const aOpus = a.startsWith("claude-opus") ? 0 : 1;
+      const bOpus = b.startsWith("claude-opus") ? 0 : 1;
+      return aOpus - bOpus;
+    });
+    const models = ordered.map(([value, label]) => ({ value, label: `This computer — ${label}` }));
     const index = choices.findIndex(choice => choice.backend.id === "claudecode");
     if (index >= 0) choices[index] = { ...choices[index], models };
     else choices.unshift({ backend: { id: "claudecode", name: "Claude Code" }, models });

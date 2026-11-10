@@ -594,6 +594,16 @@ it.each(['high', null])('uses the current Antigravity effort at dispatch, includ
  expect(mocks.launch.mock.calls[0][0]).toMatchObject({harness:'antigravity',model:'agy-demo',effort:effort??undefined,sessionId:'latest'});
 });
 
+it.each(['xhigh', 'max', null])('uses the current Claude Code effort at dispatch for Fable 5.2 / Mythos 5.2 (%s)',async(effort)=>{
+ await enqueueLocalMessage({...request,harness:'claudecode',bin:'claude',model:'claude-fable-5-2',effort:'low'},'queued before settings change');
+ stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(10);
+ expect(mocks.launch).not.toHaveBeenCalled();
+ mocks.effort=effort;mocks.active=false;
+ window.dispatchEvent(new Event('orb:queue-wake'));await vi.advanceTimersByTimeAsync(10);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(mocks.launch.mock.calls[0][0]).toMatchObject({harness:'claudecode',model:'claude-fable-5-2',effort:effort??undefined,sessionId:'latest'});
+});
+
 it('syncs durable cross-tab tombstones via BroadcastChannel and normalizes discriminated LocalQueueEntry variants (SM-23)', async () => {
  const listeners = new Map<string, Set<(ev: { data: unknown }) => void>>();
  class FakeBroadcastChannel {

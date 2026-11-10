@@ -386,7 +386,44 @@ def formatClaudeModelDisplayName (id : String) : String := Id.run do
   let base := if words.isEmpty then "Claude" else "Claude " ++ String.intercalate " " words.toList
   return if vers.isEmpty then base else base ++ " " ++ String.intercalate "." vers.toList
 
-/-- Extract `(modelId, displayLabel)` pairs from Claude's `control_response` to `initialize`. -/
+private def isValidClaudeModelId (s : String) : Bool :=
+  s.startsWith "claude-" && s.length > 7 && s.length <= 100 &&
+  s.toList.all (fun c => c.isLower || c.isDigit || c == '-')
+
+private def claudeClassAndVersion (modelId : String) : String × Array Nat := Id.run do
+  let body := if modelId.startsWith "claude-" then (modelId.drop 7).toString else modelId
+  let mut words : Array String := #[]
+  let mut vers : Array Nat := #[]
+  for part in body.splitOn "-" do
+    if part.length >= 8 && part.toList.all Char.isDigit then
+      break
+    else if let some n := part.toNat? then
+      vers := vers.push n
+    else if !part.isEmpty then
+      words := words.push part
+  return (String.intercalate "-" words.toList, vers)
+
+private def versionArrGt (a b : Array Nat) : Bool := Id.run do
+  let n := Nat.max a.size b.size
+  for i in [0:n] do
+    let va := (a[i]?).getD 0
+    let vb := (b[i]?).getD 0
+    if va != vb then return va > vb
+  return false
+
+private def claudeClassRank (cls : String) : Nat :=
+  match cls with
+  | "opus"   => 0
+  | "fable"  => 1
+  | "mythos" => 2
+  | "sonnet" => 3
+  | "haiku"  => 4
+  | _        => 5
+
+/-- Extract `(modelId, displayLabel)` pairs from Claude's `control_response` to `initialize`.
+    Deduplicates to the newest release per Claude model class (including exact `claude-*` entries
+    without a short alias such as `claude-mythos-5-2`) and always orders Opus first so Fable is
+    never selected by default. -/
 def parseClaudeInitializeModels? (jv : JVal) (expectedReqId : String := "orb-model-discovery") : Option (Array (String × String)) := do
   guard ((jv.fieldStr? "type") == some "control_response")
   let resp := jv.fieldOrNull "response"
@@ -395,16 +432,28 @@ def parseClaudeInitializeModels? (jv : JVal) (expectedReqId : String := "orb-mod
     | some r => r
     | none => resp
   let modelsArr ← inner.fieldArr? "models"
-  let mut out : Array (String × String) := #[]
+  let mut byClass : Array (String × Array Nat × String) := #[]
   for entry in modelsArr do
-    let alias := (entry.fieldStr? "value").getD ""
-    if !alias.isEmpty && alias != "default" && !alias.startsWith "claude-" then
-      if let some resolved := entry.fieldStr? "resolvedModel" then
-        if resolved.startsWith "claude-" && resolved.length <= 100 &&
-           resolved.toList.all (fun c => c.isLower || c.isDigit || c == '-') then
-          if !out.any (fun (k, _) => k == resolved) then
-            out := out.push (resolved, formatClaudeModelDisplayName resolved)
-  return out
+    let rawVal := (entry.fieldStr? "value").getD ""
+    if !rawVal.isEmpty && rawVal != "default" then
+      let cand? : Option String :=
+        match entry.fieldStr? "resolvedModel" with
+        | some resolved => if isValidClaudeModelId resolved then some resolved else if isValidClaudeModelId rawVal then some rawVal else none
+        | none => if isValidClaudeModelId rawVal then some rawVal else none
+      if let some modelId := cand? then
+        let (cls, ver) := claudeClassAndVersion modelId
+        if !cls.isEmpty then
+          match byClass.findIdx? (fun (c, _, _) => c == cls) with
+          | none => byClass := byClass.push (cls, ver, modelId)
+          | some idx =>
+            let (_, prevVer, _) := byClass[idx]!
+            if versionArrGt ver prevVer then
+              byClass := byClass.set! idx (cls, ver, modelId)
+  let sorted := byClass.qsort fun (c1, _, m1) (c2, _, m2) =>
+    let r1 := claudeClassRank c1
+    let r2 := claudeClassRank c2
+    if r1 != r2 then r1 < r2 else m1 < m2
+  return sorted.map fun (_, _, modelId) => (modelId, formatClaudeModelDisplayName modelId)
 
 /-- Group Antigravity model variants (`agy-model-{low,medium,high}`) into base `(id, label)` pairs. -/
 def groupAntigravityModels (raw : Array (String × String)) : Array (String × String) := Id.run do

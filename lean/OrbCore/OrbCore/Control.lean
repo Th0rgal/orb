@@ -563,6 +563,123 @@ private def matchProviderForChainTarget? (providers : Array AIProviderRecord) (a
   providers.find? fun p =>
     p.enabled && (p.id == acctId || p.id == stripped || (!provId.startsWith "custom:" && p.providerType == provId))
 
+private def defaultProviderBaseUrl (provType : String) : String :=
+  match provType with
+  | "muse"        => "https://api.meta.ai"
+  | "anthropic"   => "https://api.anthropic.com"
+  | "xai"         => "https://api.x.ai"
+  | "open-router" => "https://openrouter.ai/api"
+  | "cerebras"    => "https://api.cerebras.ai"
+  | "groq"        => "https://api.groq.com/openai"
+  | "mistral"     => "https://api.mistral.ai"
+  | "minimax"     => "https://api.minimax.io"
+  | _             => "https://api.openai.com"
+
+private def loadSnapshotModelsForProvider (pid : String) : IO (Array (String × String × String)) := do
+  let mut out : Array (String × String × String) := #[]
+  for prof in #["oauth", "api"] do
+    let fp : System.FilePath := s!"catalog/snapshots/{pid}-{prof}.json"
+    if (← fp.pathExists) then
+      if let some raw ← (try some <$> IO.FS.readFile fp catch _ => pure none) then
+        if let .ok jv := OrbBin.Json.parse raw then
+          if let some arr := jv.fieldArr? "models" then
+            for m in arr do
+              let mid := (m.fieldStr? "id").getD ""
+              if !mid.isEmpty && !out.any (fun (k, _, _) => k == mid) then
+                let mname := (m.fieldStr? "name").getD mid
+                let mdesc := (m.fieldStr? "description").getD ""
+                out := out.push (mid, mname, mdesc)
+  return out
+
+private def fallbackCatalogProviders : Array (String × String × String × String × Array (String × String × String)) := #[
+  ("anthropic", "Claude (Subscription)", "subscription", "Included in Claude Max", #[
+    ("claude-opus-5-5", "Claude Opus 5.5", "Default for complex agentic coding, always-adaptive thinking, 1M context"),
+    ("claude-opus-5", "Claude Opus 5", "Complex agentic coding, adaptive thinking, 1M context"),
+    ("claude-fable-5-2", "Claude Fable 5.2", "Demanding reasoning and long-horizon agentic work, adaptive thinking (efforts low..max), 1M context"),
+    ("claude-mythos-5-2", "Claude Mythos 5.2", "Mythos-class reasoning and cyber/life-sciences research (requires verified organization access), 1M context"),
+    ("claude-sonnet-5-5", "Claude Sonnet 5.5", "Latest Sonnet, efficient for routine tasks"),
+    ("claude-sonnet-4-6", "Claude Sonnet 4.6", "Balanced speed and capability"),
+    ("claude-haiku-5-5", "Claude Haiku 5.5", "Latest Haiku, fastest for quick answers")
+  ]),
+  ("openai", "OpenAI (Subscription)", "subscription", "ChatGPT Plus/Pro via OAuth", #[
+    ("gpt-6.1-sol", "GPT-6.1 Sol", "Newest Codex flagship (efforts low..ultra). Default."),
+    ("gpt-6.1-terra", "GPT-6.1 Terra", "GPT-6.1 model with lower cost than Sol (efforts low..ultra)."),
+    ("gpt-6-astra", "GPT-6 Astra", "OpenAI's GPT-6 flagship in Codex (efforts low..ultra)."),
+    ("gpt-6-sol", "GPT-6 Sol", "GPT-6 model for complex reasoning and coding (efforts low..ultra)."),
+    ("gpt-6-luna", "GPT-6 Luna", "GPT-6 model optimized for speed and cost (efforts low..max)."),
+    ("gpt-5.6", "GPT-5.6", "Flagship GPT-5.6 reasoning and coding model")
+  ]),
+  ("muse", "Meta Muse", "api_key", "Meta's Muse family via api.meta.ai (OpenCode native meta Responses provider)", #[
+    ("muse-wonder-1.0", "Muse Wonder 1.0", "Flagship frontier reasoning and planning model for complex agentic coding, 1M context (standard API tier)"),
+    ("muse-ember-1.0", "Muse Ember 1.0", "Fast, low-cost reasoning model for high-volume agent subtasks and tool calls, 1M context"),
+    ("muse-spark-1.3-contributor", "Muse Spark 1.3 Contributor", "Spark 1.3, data-sharing tier (~12x cheaper)"),
+    ("muse-spark-1.3", "Muse Spark 1.3", "Spark 1.3, no-training tier")
+  ]),
+  ("xai", "xAI (API Key)", "pay-per-token", "Grok models via xAI API key", #[
+    ("grok-4.7", "Grok 4.7", "Latest flagship Grok model"),
+    ("grok-4.7-build-fast", "Grok 4.7 Build (Fast)", "Faster Grok 4.7 variant for coding agents"),
+    ("grok-4.6", "Grok 4.6", "Previous flagship Grok model")
+  ]),
+  ("open-router", "OpenRouter (API Key)", "pay-per-token", "Aggregator routing through OpenRouter", #[
+    ("anthropic/claude-opus-5.5", "Claude Opus 5.5", "Anthropic Claude via OpenRouter"),
+    ("anthropic/claude-opus-5", "Claude Opus 5", "Anthropic Claude via OpenRouter"),
+    ("anthropic/claude-fable-5.2", "Claude Fable 5.2", "Anthropic Claude Fable 5.2 via OpenRouter"),
+    ("anthropic/claude-mythos-5.2", "Claude Mythos 5.2", "Anthropic Claude Mythos 5.2 via OpenRouter"),
+    ("meta/muse-wonder", "Meta Muse Wonder 1.0", "Meta Muse Wonder 1.0 via OpenRouter"),
+    ("meta/muse-ember", "Meta Muse Ember 1.0", "Meta Muse Ember 1.0 via OpenRouter"),
+    ("openai/gpt-6.1-sol", "GPT-6.1 Sol", "OpenAI GPT-6.1 Sol via OpenRouter"),
+    ("openai/gpt-6-astra", "OpenAI GPT-6 Astra", "OpenAI GPT-6 Astra via OpenRouter")
+  ])
+]
+
+private def renderProviderCatalogJson (st : CoreStore) : IO String := do
+  let dbProviders ← listAIProviders st
+  let mut configuredIds : Array String := #[]
+  for p in dbProviders do
+    if p.enabled then
+      let cid := if p.providerType == "custom" then s!"custom:{p.id}" else p.providerType
+      if !cid.isEmpty && !configuredIds.contains cid then
+        configuredIds := configuredIds.push cid
+  let providersFile : System.FilePath := "catalog/providers.json"
+  let mut catalogEntries : Array (String × String × String × String × Array (String × String × String)) := #[]
+  if (← providersFile.pathExists) then
+    if let some raw ← (try some <$> IO.FS.readFile providersFile catch _ => pure none) then
+      if let .ok jv := OrbBin.Json.parse raw then
+        if let some provArr := jv.fieldArr? "providers" then
+          for pr in provArr do
+            let pid := (pr.fieldStr? "id").getD ""
+            if !pid.isEmpty then
+              let pname := (pr.fieldStr? "name").getD pid
+              let pbilling := (pr.fieldStr? "billing").getD ""
+              let pdesc := (pr.fieldStr? "description").getD ""
+              let snapModels ← loadSnapshotModelsForProvider pid
+              catalogEntries := catalogEntries.push (pid, pname, pbilling, pdesc, snapModels)
+  if catalogEntries.isEmpty then
+    catalogEntries := fallbackCatalogProviders
+  for p in dbProviders do
+    if p.enabled && p.providerType == "custom" then
+      let cModels := p.customModels.filterMap fun cm =>
+        let mid := cm.id.trimAscii.toString
+        if mid.isEmpty then none else some (mid, (cm.name?.getD mid).trimAscii.toString, "")
+      catalogEntries := catalogEntries.push (s!"custom:{p.id}", p.name, "api_key", p.baseUrl, cModels)
+  let provJsons : Array JVal := catalogEntries.map fun (pid, pname, pbilling, pdesc, models) =>
+    let mJsons : Array JVal := models.map fun (mid, mname, mdesc) =>
+      if mdesc.isEmpty then
+        .obj #[("id", .str mid), ("name", .str mname)]
+      else
+        .obj #[("id", .str mid), ("name", .str mname), ("description", .str mdesc)]
+    .obj #[
+      ("id", .str pid),
+      ("name", .str pname),
+      ("billing", .str pbilling),
+      ("description", .str pdesc),
+      ("models", .arr mJsons)
+    ]
+  return renderCompact (.obj #[
+    ("providers", .arr provJsons),
+    ("configured_ids", .arr (configuredIds.map JVal.str))
+  ])
+
 /-- Parse `models_json` array into `ProviderTarget` list for `RoutingChain` hydration,
     enriching targets with account & per-model pacing limits from `ai_providers`. -/
 def parseChainTargetsJson (rawJson : String) (providers : Array AIProviderRecord := #[]) : Array ProviderTarget := Id.run do
@@ -578,10 +695,11 @@ def parseChainTargetsJson (rawJson : String) (providers : Array AIProviderRecord
       let matchedProv? := matchProviderForChainTarget? providers acctRaw provRaw
       let matchedModel? := matchedProv?.bind (fun p => p.customModels.find? (fun cm => cm.id == mdl))
       let acct := match matchedProv? with | some p => p.id | none => acctRaw
+      let effProvType := match matchedProv? with | some p => p.providerType | none => provRaw
       let url :=
         (it.fieldStr? "base_url").orElse (fun _ => it.fieldStr? "baseUrl")
         |>.orElse (fun _ => matchedProv?.bind (fun p => if p.baseUrl.isEmpty then none else some p.baseUrl))
-        |>.getD "https://api.openai.com"
+        |>.getD (defaultProviderBaseUrl effProvType)
       let key :=
         (it.fieldStr? "api_key").orElse (fun _ => it.fieldStr? "apiKey")
         |>.orElse (fun _ => matchedProv?.map (·.apiKey))
@@ -3195,6 +3313,107 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
           let refreshed ← loadRoutingChainsFromStore st.store
           discard <| publishRoutingChainsUpdate st refreshed
           return .ok (mkJson 200 "{\"ok\":true}")
+
+  -- Harness Backends & Curated Provider Model Catalog (`/api/backends`, `/api/providers`, `/api/providers/backend-models`, `/api/providers/antigravity-models`)
+  if req.method == "GET" && cleanPath == "/api/backends" then
+    let backendsJson :=
+      "[" ++
+      "{\"id\":\"claudecode\",\"name\":\"Claude Code\",\"native_plan\":true}," ++
+      "{\"id\":\"codex\",\"name\":\"Codex\",\"native_plan\":true}," ++
+      "{\"id\":\"grok\",\"name\":\"Grok\",\"native_plan\":false}," ++
+      "{\"id\":\"opencode\",\"name\":\"OpenCode\",\"native_plan\":false}," ++
+      "{\"id\":\"antigravity\",\"name\":\"Antigravity CLI\",\"native_plan\":true}," ++
+      "{\"id\":\"vibe\",\"name\":\"Mistral Vibe\",\"native_plan\":false}" ++
+      "]"
+    return .ok (mkJson 200 backendsJson)
+
+  if req.method == "GET" && cleanPath == "/api/providers" then
+    return .ok (mkJson 200 (← renderProviderCatalogJson st.store))
+
+  if req.method == "GET" && (cleanPath == "/api/providers/antigravity-models" || cleanPath == "/api/antigravity-models") then
+    let agyBin? ← OrbBin.ClaudeControl.resolveHarnessBinary? "agy" none
+    match agyBin? with
+    | none => return .ok (mkJson 200 "[]")
+    | some binPath =>
+      match ← OrbBin.ClaudeControl.probeAntigravityModels binPath with
+      | .ok pairs =>
+        let rendered := pairs.map fun (mId, mLbl) => s!"[{jsonEscape mId},{jsonEscape mLbl}]"
+        return .ok (mkJson 200 ("[" ++ String.intercalate "," rendered.toList ++ "]"))
+      | .error _ => return .ok (mkJson 200 "[]")
+
+  if req.method == "GET" && cleanPath == "/api/providers/backend-models" then
+    let mkOpt (val lbl desc : String) : String :=
+      if desc.isEmpty then
+        s!"\{\"value\":{jsonEscape val},\"label\":{jsonEscape lbl}}"
+      else
+        s!"\{\"value\":{jsonEscape val},\"label\":{jsonEscape lbl},\"description\":{jsonEscape desc}}"
+    let claudeModels : Array String := #[
+      mkOpt "claude-opus-5-5" "Claude (Subscription) — Claude Opus 5.5" "Default for complex agentic coding, always-adaptive thinking, 1M context",
+      mkOpt "claude-opus-5" "Claude (Subscription) — Claude Opus 5" "Complex agentic coding, adaptive thinking, 1M context",
+      mkOpt "claude-fable-5-2" "Claude (Subscription) — Claude Fable 5.2" "Demanding reasoning and long-horizon agentic work, adaptive thinking (efforts low..max), 1M context",
+      mkOpt "claude-mythos-5-2" "Claude (Subscription) — Claude Mythos 5.2" "Mythos-class reasoning and cyber/life-sciences research (requires verified organization access), 1M context",
+      mkOpt "claude-sonnet-5-5" "Claude (Subscription) — Claude Sonnet 5.5" "Latest Sonnet, efficient for routine tasks",
+      mkOpt "claude-sonnet-4-6" "Claude (Subscription) — Claude Sonnet 4.6" "Balanced speed and capability",
+      mkOpt "claude-haiku-5-5" "Claude (Subscription) — Claude Haiku 5.5" "Latest Haiku, fastest for quick answers"
+    ]
+    let codexModels : Array String := #[
+      mkOpt "gpt-6.1-sol" "OpenAI (Subscription) — GPT-6.1 Sol" "Newest Codex flagship (efforts low..ultra). Default.",
+      mkOpt "gpt-6.1-terra" "OpenAI (Subscription) — GPT-6.1 Terra" "GPT-6.1 model with lower cost than Sol (efforts low..ultra).",
+      mkOpt "gpt-6-astra" "OpenAI (Subscription) — GPT-6 Astra" "OpenAI's GPT-6 flagship in Codex (efforts low..ultra).",
+      mkOpt "gpt-6-sol" "OpenAI (Subscription) — GPT-6 Sol" "GPT-6 model for complex reasoning and coding (efforts low..ultra).",
+      mkOpt "gpt-6-luna" "OpenAI (Subscription) — GPT-6 Luna" "GPT-6 model optimized for speed and cost (efforts low..max).",
+      mkOpt "gpt-5.6" "OpenAI (Subscription) — GPT-5.6" "Flagship GPT-5.6 reasoning and coding model",
+      mkOpt "gpt-5.5-codex" "OpenAI (Subscription) — GPT-5.5 Codex" "Codex-optimized coding model"
+    ]
+    let grokModels : Array String := #[
+      mkOpt "grok-4.7" "xAI — Grok 4.7" "Latest flagship Grok model",
+      mkOpt "grok-4.7-build-fast" "xAI — Grok 4.7 Build (Fast)" "Faster Grok 4.7 variant for coding agents",
+      mkOpt "grok-4.6" "xAI — Grok 4.6" "Previous flagship Grok model",
+      mkOpt "grok-build-latest" "xAI — Grok Build (Latest)" "Rolling Grok Build alias"
+    ]
+    let mut opencodeModels : Array String := #[
+      mkOpt "anthropic/claude-opus-5-5" "Anthropic — Claude Opus 5.5" "",
+      mkOpt "anthropic/claude-opus-5" "Anthropic — Claude Opus 5" "",
+      mkOpt "anthropic/claude-fable-5-2" "Anthropic — Claude Fable 5.2" "",
+      mkOpt "anthropic/claude-mythos-5-2" "Anthropic — Claude Mythos 5.2" "",
+      mkOpt "anthropic/claude-sonnet-5-5" "Anthropic — Claude Sonnet 5.5" "",
+      mkOpt "anthropic/claude-sonnet-4-6" "Anthropic — Claude Sonnet 4.6" "",
+      mkOpt "openai/gpt-6.1-sol" "OpenAI — GPT-6.1 Sol" "",
+      mkOpt "openai/gpt-6-astra" "OpenAI — GPT-6 Astra" "",
+      mkOpt "xai/grok-4.7" "xAI — Grok 4.7" "",
+      mkOpt "muse/muse-wonder-1.0" "Meta Muse — Muse Wonder 1.0" "",
+      mkOpt "muse/muse-ember-1.0" "Meta Muse — Muse Ember 1.0" "",
+      mkOpt "muse/muse-spark-1.3-contributor" "Meta Muse — Muse Spark 1.3 Contributor" "",
+      mkOpt "muse/muse-spark-1.3" "Meta Muse — Muse Spark 1.3" ""
+    ]
+    let dbProviders ← listAIProviders st.store
+    for p in dbProviders do
+      if p.enabled then
+        for cm in p.customModels do
+          let mid := cm.id.trimAscii.toString
+          if !mid.isEmpty then
+            let rawLbl := (cm.name?.getD "").trimAscii.toString
+            let mlbl := if rawLbl.isEmpty then mid else rawLbl
+            opencodeModels := opencodeModels.push (mkOpt s!"{p.id}/{mid}" s!"{p.name} — {mlbl}" "")
+    let mut agyModels : Array String := #[]
+    if let some binPath ← OrbBin.ClaudeControl.resolveHarnessBinary? "agy" none then
+      if let .ok pairs ← OrbBin.ClaudeControl.probeAntigravityModels binPath then
+        for (mId, mLbl) in pairs do
+          agyModels := agyModels.push (mkOpt mId mLbl "")
+    let vibeModels : Array String := #[
+      mkOpt "mistral/mistral-vibe-cli-latest" "Mistral Vibe" "Native Mistral Vibe CLI"
+    ]
+    let renderArr (xs : Array String) : String := "[" ++ String.intercalate "," xs.toList ++ "]"
+    let payload :=
+      "{\"backends\":{" ++
+      s!"\"claudecode\":{renderArr claudeModels}," ++
+      s!"\"codex\":{renderArr codexModels}," ++
+      s!"\"grok\":{renderArr grokModels}," ++
+      s!"\"opencode\":{renderArr opencodeModels}," ++
+      s!"\"antigravity\":{renderArr agyModels}," ++
+      s!"\"vibe\":{renderArr vibeModels}" ++
+      "}}"
+    return .ok (mkJson 200 payload)
 
   -- Model Routing Controls (`"/api/model-routing"` / `/api/model-routing/chains`)
   if cleanPath.startsWith "/api/model-routing" then

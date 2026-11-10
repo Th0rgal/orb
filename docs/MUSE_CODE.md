@@ -13,7 +13,12 @@ login owned by CLIProxyAPI; it never falls back to the Meta API provider.
    code in the browser. An active Muse Code subscription is required. An account
    with a payment method alone is not sufficient.
 4. Choose a model exposed by the connected account's live catalog. For example:
-   `muse-code/muse-spark-1.3`.
+   `muse-code/muse-wonder-1.0`, `muse-code/muse-ember-1.0`, or
+   `muse-code/muse-spark-1.3` (higher-tier subscriptions may also expose
+   subscription-only models such as Muse Wonder Full via live catalog discovery;
+   the pay-as-you-go Meta API offers `muse/muse-wonder-1.0`,
+   `muse/muse-ember-1.0`, `muse/muse-spark-1.3-contributor`, and
+   `muse/muse-spark-1.3`).
 
 CLIProxyAPI's native Meta adapter exchanges the device token for a Muse Code
 credential. It does not launch the Muse Code CLI process. Account files must
