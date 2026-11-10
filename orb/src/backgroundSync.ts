@@ -363,6 +363,11 @@ export function setBackgroundSyncMode(mode: BackgroundSyncMode): void {
   dispatchMonitorEvent({ type: "mode", mode: clean });
 }
 
+/** Reconcile the background-sync monitor and notify active-state listeners from localStorage. */
+export function reloadBackgroundSyncMode(): void {
+  dispatchMonitorEvent({ type: "mode", mode: readStoredMode() });
+}
+
 export function getBackgroundSyncVerdict(): BackgroundSyncVerdict {
   return evaluateBackgroundSync(monitorState());
 }

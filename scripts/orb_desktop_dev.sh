@@ -250,9 +250,9 @@ else
 fi
 
 if [[ "$OS_NAME" == "Darwin" ]]; then
-  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb" || ! -x "$STAGE_BIN_DIR/orb-signer" || "$ROOT_DIR/macos_shell/main.swift" -nt "$STAGE_BIN_DIR/orb" ]]; then
+  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/macos_shell/main.swift" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/macos_shell/Entitlements.plist" -nt "$STAGE_BIN_DIR/orb" ]]; then
     notify_gui_build
-    echo "==> Compiling native macos_shell + orb-signer..."
+    echo "==> Compiling native macos_shell..."
     swiftc -O \
       -framework AppKit \
       -framework WebKit \
@@ -260,6 +260,10 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
       "$ROOT_DIR/macos_shell/main.swift" \
       -o "$STAGE_BIN_DIR/orb"
     codesign --force --entitlements "$ROOT_DIR/macos_shell/Entitlements.plist" --sign - "$STAGE_BIN_DIR/orb" >/dev/null 2>&1 || true
+  fi
+  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb-signer" || "$ROOT_DIR/macos_shell/signer/main.swift" -nt "$STAGE_BIN_DIR/orb-signer" || "$ROOT_DIR/orb/scripts/build-signer.py" -nt "$STAGE_BIN_DIR/orb-signer" ]]; then
+    notify_gui_build
+    echo "==> Compiling native macOS orb-signer..."
     python3 "$ROOT_DIR/orb/scripts/build-signer.py"
   fi
 elif [[ "$OS_NAME" == "Linux" ]]; then

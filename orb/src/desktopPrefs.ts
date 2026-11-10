@@ -1,4 +1,5 @@
 import { clearConnection, getApiUrl, getJwt, setConnection } from "./api";
+import { reloadBackgroundSyncMode } from "./backgroundSync";
 import { reloadApprovalGraceSecs } from "./deviceApproval";
 import { nativeInvoke } from "./native";
 import { notifyExternalStorageChange } from "./storage";
@@ -56,6 +57,7 @@ let lastRev = "";
 let lastSyncedConnSig: string | null = null;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let cleanupWindowListeners: (() => void) | null = null;
 
 const pendingSet = new Map<string, string>();
 const pendingRemove = new Set<string>();
@@ -90,6 +92,9 @@ function reconcileModuleOwners(changed: readonly string[]): void {
   }
   if (changed.includes("orb.approvalGraceSecs")) {
     reloadApprovalGraceSecs();
+  }
+  if (changed.includes("orb:background-sync-mode")) {
+    reloadBackgroundSyncMode();
   }
 }
 
@@ -372,9 +377,15 @@ export async function initDesktopPrefs(): Promise<void> {
     if (document.visibilityState === "hidden") void flushDesktopPrefs();
     else void pullDesktopPrefs(true);
   };
+  const onPageHide = () => { void flushDesktopPrefs(); };
   window.addEventListener("focus", onFocus);
   document.addEventListener("visibilitychange", onVisibility);
-  window.addEventListener("pagehide", () => { void flushDesktopPrefs(); });
+  window.addEventListener("pagehide", onPageHide);
+  cleanupWindowListeners = () => {
+    window.removeEventListener("focus", onFocus);
+    document.removeEventListener("visibilitychange", onVisibility);
+    window.removeEventListener("pagehide", onPageHide);
+  };
 
   pollTimer = setInterval(() => {
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
@@ -384,6 +395,10 @@ export async function initDesktopPrefs(): Promise<void> {
 
 /** Test hook: unhook Storage.prototype and clear module state. */
 export function resetDesktopPrefsForTest(): void {
+  if (cleanupWindowListeners) {
+    cleanupWindowListeners();
+    cleanupWindowListeners = null;
+  }
   if (flushTimer !== null) {
     clearTimeout(flushTimer);
     flushTimer = null;

@@ -1,4 +1,5 @@
 import { api, ApiError, createMission, type Mission } from './api';
+import { readString } from './storage';
 export type CloudProvider = 'grok_bot' | 'cursor_cloud' | 'hermes';
 export const cloudNames: Record<CloudProvider, string> = { grok_bot: 'Grok Bot', cursor_cloud: 'Cursor Cloud', hermes: 'Hermes' };
 export interface ModelParam {id:string;value:string}
@@ -91,7 +92,7 @@ export function defaultCloudProvider(accounts: CloudAccount[], persisted?: strin
     ?? order.find(p => accounts.some(a => a.provider === p))
     ?? 'hermes';
 }
-export function readCloudProvider(): string | null { try { return localStorage.getItem(CLOUD_PROVIDER_KEY); } catch { return null; } }
+export function readCloudProvider(): string | null { return readString(CLOUD_PROVIDER_KEY); }
 export function writeCloudProvider(value: CloudProvider) { try { localStorage.setItem(CLOUD_PROVIDER_KEY, value); } catch { /* kept in memory */ } }
 /** Why "+" is unavailable for this account, or undefined when it accepts attachments. */
 export function cloudAttachmentBlock(provider: CloudProvider, account?: CloudAccount): string | undefined {

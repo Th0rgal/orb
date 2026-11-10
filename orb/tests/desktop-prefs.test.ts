@@ -1,5 +1,11 @@
 import { createEffect, createRoot } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  getBackgroundSyncMode,
+  isBackgroundSyncActive,
+  onBackgroundSyncActiveChange,
+  resetBackgroundSyncMonitorForTest,
+} from "../src/backgroundSync";
 import { approvalGraceSecs } from "../src/deviceApproval";
 import {
   flushDesktopPrefs,
@@ -16,6 +22,7 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
     resetDesktopPrefsForTest();
     resetStorageCache();
     localStorage.clear();
+    resetBackgroundSyncMonitorForTest();
     delete (window as unknown as { __ORB_DESKTOP__?: unknown }).__ORB_DESKTOP__;
   });
 
@@ -53,6 +60,7 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
       "orb-theme": "light",
       "orb.approvalGraceSecs": "600",
       "orb.voiceLang": "ja",
+      "orb:background-sync-mode": "off",
     };
     let diskRev = "rev-1";
 
@@ -84,6 +92,11 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
     localStorage.setItem("orb.apiUrl", "https://orbcore.thomas.md");
     localStorage.setItem("orb.catalog:1:/api/projects", "[]");
 
+    const activeTransitions: boolean[] = [];
+    const unsubscribeBgSync = onBackgroundSyncActiveChange(() => {
+      activeTransitions.push(isBackgroundSyncActive());
+    });
+
     await initDesktopPrefs();
 
     // Hydrated from shared disk + module-owned signals + seeded local key back to disk:
@@ -92,6 +105,9 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
     expect(localStorage.getItem("orb.approvalGraceSecs")).toBe("600");
     expect(approvalGraceSecs()).toBe(600);
     expect(voiceLanguage()).toBe("ja");
+    expect(getBackgroundSyncMode()).toBe("off");
+    expect(isBackgroundSyncActive()).toBe(false);
+    expect(activeTransitions).toEqual([false]);
     expect(disk["orb.files.width"]).toBe("540");
     expect(disk["orb.jwt"]).toBeUndefined();
     expect(disk["orb.apiUrl"]).toBeUndefined();
@@ -122,10 +138,11 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
       expect(observedHarness).toEqual(["opencode"]);
       expect(picked().mode).toBe("fast");
 
-      // Simulate prod Orb changing theme, voice language, approval grace, btw config, and jsonSignal on shared disk:
+      // Simulate prod Orb changing theme, voice language, approval grace, background sync, btw config, and jsonSignal on shared disk:
       disk["orb-theme"] = "dark";
       disk["orb.voiceLang"] = "es";
       disk["orb.approvalGraceSecs"] = "0";
+      disk["orb:background-sync-mode"] = "on";
       disk["orb.btw.cfg"] = JSON.stringify({ harness: "claudecode" });
       disk["orb.pick"] = JSON.stringify({ mode: "deep" });
       delete disk["orb.voice.lang"];
@@ -137,10 +154,14 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
       expect(document.documentElement.dataset.theme).toBe("dark");
       expect(voiceLanguage()).toBe("es");
       expect(approvalGraceSecs()).toBe(0);
+      expect(getBackgroundSyncMode()).toBe("on");
+      expect(isBackgroundSyncActive()).toBe(true);
+      expect(activeTransitions).toEqual([false, true]);
       expect(localStorage.getItem("orb.voice.lang")).toBeNull();
       expect(observedHarness).toEqual(["opencode", "claudecode"]);
       expect(picked().mode).toBe("deep");
     } finally {
+      unsubscribeBgSync();
       dispose();
     }
 
