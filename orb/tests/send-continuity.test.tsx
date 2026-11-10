@@ -392,3 +392,124 @@ it('mounts MissionView immediately without skeleton wait when initial mission re
  expect(view.container.querySelector('.skeleton-conversation')).toBeNull();
  resolveMission?.(completedProjectMission);
 });
+
+it('reconciles missing final output on mount and status poll when reopening a settled mission from a stale recovery snapshot',async()=>{
+ const {getMission}=await import('../src/api');
+ const {putTranscript,isMissionDirtyWhileUnfocused}=await import('../src/missionCache');
+ const {cacheReset}=await import('../src/pageCache');
+ const {setMultiplexSyncEnabledForTest}=await import('../src/stream');
+ const {buildTranscript}=await import('../src/transcriptModel');
+ setMultiplexSyncEnabledForTest(true);
+ try{
+  cacheReset();
+  const id='7fd6aff9-b25a-4e0f-8fd3-88ee366858cd';
+  const staleEvents=[
+   {type:'user_message' as const,eventId:'u1',sequence:1,data:{id:'u1',content:'Cross-check PPL and India dates',queued:false}},
+   {type:'assistant_message' as const,eventId:'e79',sequence:79,data:{id:'e79',content:'Inference connection interrupted',success:false,resumable:true}},
+   {type:'user_message' as const,eventId:'u82',sequence:82,data:{id:'u82',content:'[Automatic recovery] Inference connection interrupted stopped your previous turn.',source:'api:usage-limit-replay',queued:false}},
+  ];
+  putTranscript(id,{items:buildTranscript(staleEvents),stream:staleEvents,fromLog:true,cursor:82});
+  expect(isMissionDirtyWhileUnfocused(id)).toBe(false);
+
+  const completedMission:Mission={
+   id,
+   status:'completed',
+   remote_node_id:'ashur',
+   history:[],
+   created_at:'',
+   updated_at:'2',
+  };
+  vi.mocked(getMission).mockResolvedValue(completedMission);
+  const fetchedUrls:string[]=[];
+  vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
+   const url=String(input);
+   fetchedUrls.push(url);
+   if(url.includes('/queue?'))return Response.json([]);
+   if(url.includes(`/missions/${id}/events?`)){
+    return new Response(JSON.stringify([
+     {
+      id:8599000,
+      mission_id:id,
+      sequence:134,
+      event_type:'assistant_message',
+      event_id:'a134',
+      timestamp:'2026-11-10T18:30:10Z',
+      content:'Voici le bilan croisé final.',
+      metadata:{success:true},
+     },
+    ]),{
+     status:200,
+     headers:{
+      'Content-Type':'application/json',
+      'X-Orb-Events-Protocol':'1',
+      'X-Has-More':'false',
+      'X-Next-Cursor':'134',
+      'X-Page-Max-Sequence':'134',
+      'X-Max-Sequence':'134',
+     },
+    });
+   }
+   return Response.json([]);
+  }));
+
+  const view=render(()=><NativeMissionView id={id} initial={completedMission}/>);
+  await waitFor(()=>expect(screen.getByText('Voici le bilan croisé final.')).toBeDefined());
+  expect(fetchedUrls.some(u=>u.includes(`/missions/${id}/events?`)&&u.includes('since_seq=82'))).toBe(true);
+  expect(view.container.textContent).not.toContain('The mission completed without transcript output.');
+  view.unmount();
+
+  // Also verify poll reconciliation when a prior turn's error item precedes off-screen completion.
+  vi.useFakeTimers();
+  try{
+   cacheReset();
+   const pollId='7fd6aff9-poll-error-tail';
+   const preRecoveryErrorEvents=staleEvents.slice(0,2);
+   putTranscript(pollId,{items:buildTranscript(preRecoveryErrorEvents),stream:preRecoveryErrorEvents,fromLog:true,cursor:79});
+   vi.mocked(getMission).mockResolvedValue({...completedMission,id:pollId});
+   const pollFetched:string[]=[];
+   let allowReply=false;
+   vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
+    const url=String(input);
+    pollFetched.push(url);
+    if(url.includes('/queue?'))return Response.json([]);
+    if(url.includes(`/missions/${pollId}/events?`)){
+     const rows=allowReply?[{
+      id:8599001,
+      mission_id:pollId,
+      sequence:134,
+      event_type:'assistant_message',
+      event_id:'a134-poll',
+      timestamp:'2026-11-10T18:30:10Z',
+      content:'Recovered synthesis from poll.',
+      metadata:{success:true},
+     }]:[];
+     return new Response(JSON.stringify(rows),{
+      status:200,
+      headers:{
+       'Content-Type':'application/json',
+       'X-Orb-Events-Protocol':'1',
+       'X-Has-More':'false',
+       'X-Next-Cursor':allowReply?'134':'79',
+       'X-Page-Max-Sequence':allowReply?'134':'79',
+       'X-Max-Sequence':allowReply?'134':'79',
+      },
+     });
+    }
+    return Response.json([]);
+   }));
+   const pollView=render(()=><NativeMissionView id={pollId} initial={{...completedMission,id:pollId}}/>);
+   await vi.advanceTimersByTimeAsync(50);
+   pollFetched.length=0;
+   allowReply=true;
+   await vi.advanceTimersByTimeAsync(10_100);
+   expect(pollFetched.some(u=>u.includes(`/missions/${pollId}/events?`))).toBe(true);
+   expect(pollView.container.textContent).toContain('Recovered synthesis from poll.');
+   pollView.unmount();
+  }finally{
+   vi.useRealTimers();
+  }
+ }finally{
+  setMultiplexSyncEnabledForTest(false);
+  cacheReset();
+ }
+});
