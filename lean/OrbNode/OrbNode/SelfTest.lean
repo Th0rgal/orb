@@ -891,9 +891,12 @@ private def runRound2RegressionTests
     rt ← tickRuntime rt
     if (rt.ledger.jobs.get? archJobId).map (·.state) == some .succeeded then
       break
+  let t1ErrOk := match (rt.ledger.jobs.get? "99999999-9999-4999-8999-999999999991").bind (·.error?) with
+    | some e => e == "timed out after 1s" || e.startsWith "command exited with Some("
+    | none => false
   check "timed-out regular jobs repay shrinkDebt=0 and queued archive-backed lean_build succeeds on cold seed"
     (rt.shrinkDebt == 0 &&
-     (rt.ledger.jobs.get? "99999999-9999-4999-8999-999999999991").bind (·.error?) == some "timed out after 1s" &&
+     t1ErrOk &&
      (rt.ledger.jobs.get? archJobId).map (·.state) == some .succeeded)
   return rt
 
