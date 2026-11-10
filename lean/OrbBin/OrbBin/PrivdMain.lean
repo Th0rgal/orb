@@ -748,9 +748,10 @@ def handleSpawnUserJob (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : Peer
     "  except OSError: pass\n" ++
     "env_map = dict(req['env'])\n" ++
     "if req['nonroot']:\n" ++
+    "  if os.environ.get('PATH'): env_map['PATH'] = env_map.get('PATH', '') + ':' + os.environ['PATH']\n" ++
     "  rc_path = req['meta_path'] + '.rc'\n" ++
     "  runner = 'import os, subprocess, sys\\np = subprocess.run(sys.argv[2:], env=os.environ)\\nopen(sys.argv[1], \"w\").write(str(p.returncode))\\nsys.exit(p.returncode)\\n'\n" ++
-    "  proc = subprocess.Popen(['python3', '-c', runner, rc_path, *req['argv']], cwd=req['cwd'], env=env_map, stdin=subprocess.DEVNULL, stdout=lfd, stderr=lfd, start_new_session=True)\n" ++
+    "  proc = subprocess.Popen([sys.executable, '-c', runner, rc_path, *req['argv']], cwd=req['cwd'], env=env_map, stdin=subprocess.DEVNULL, stdout=lfd, stderr=lfd, start_new_session=True)\n" ++
     "  os.close(lfd)\n" ++
     "  meta = {'unix_username': req['unix_username'], 'unit': req['unit'], 'pid': proc.pid, 'rc_path': rc_path, 'mode': 'nonroot'}\n" ++
     "  open(req['meta_path'], 'w').write(json.dumps(meta))\n" ++
