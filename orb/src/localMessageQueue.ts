@@ -8,7 +8,7 @@ import {classifyConflictError} from './conflictClassification';
 import type {ClientRunReceipt} from './clientRuns';
 import {readSideThread,saveSideThread} from './composerDrafts';
 import {sideQuestionKey} from './sideQuestionStorage';
-import {normalizeEffort} from './effort';
+import {harnessSupportsEffort,normalizeEffort} from './effort';
 import {providerLimit} from './usageLimit';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
 import {usageTelemetry} from './usageTelemetry';
@@ -689,8 +689,10 @@ export function startLocalQueueWorker(){
       // Read model & effort at dispatch, not enqueue: changes made while a turn is
       // running apply to its next follow-up, including a cleared override.
       const model = mission.model_override ?? row.request.model;
-      const effort = row.request.harness === 'antigravity'
-       ? normalizeEffort(mission.model_effort, row.request.harness) ?? undefined
+      const effort = harnessSupportsEffort(row.request.harness)
+       ? (mission.model_effort !== undefined
+          ? normalizeEffort(mission.model_effort, row.request.harness) ?? undefined
+          : normalizeEffort(row.request.effort, row.request.harness) ?? undefined)
        : row.request.effort;
       return {pending:startLocal({...row.request,model,effort,service_tier:row.request.harness==='codex' ? mission.service_tier ?? (mission.fast_mode ? 'fast' : 'standard') : undefined,prompt:row.autoResumed?resumedPrompt(row.request.prompt,row.cut):row.request.prompt,sessionId:localBinding(row.mission)?.sessionId,permissionMode:localBinding(row.mission)?.permissionMode ?? row.request.permissionMode})};
      });

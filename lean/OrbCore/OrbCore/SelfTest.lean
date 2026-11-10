@@ -4194,6 +4194,24 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   if memUsersSt != 403 || memDeploySt != 403 || memAddProvSt != 403 then
     return (← fail s!"member admin-route confinement failed: users={memUsersSt} deploy={memDeploySt} prov={memAddProvSt}")
 
+  -- Backend model catalog & routing catalog: Opus 5.5 is default (index 0), Fable 5.2 + Mythos 5.2 + Meta Muse Wonder/Ember present, Fable 5.1 absent from picker
+  let (bmSt, bmBody, _) ← sendReq "GET" "/api/providers/backend-models" adminTok ""
+  let bmJv := (OrbBin.Json.parse bmBody).toOption.getD (.obj #[])
+  let ccModels := ((bmJv.fieldOrNull "backends").fieldArr? "claudecode").getD #[]
+  let firstCcVal := (ccModels[0]?.bind (·.fieldStr? "value")).getD ""
+  let (catSt, catBody, _) ← sendReq "GET" "/api/providers" adminTok ""
+  let museTargets := parseChainTargetsJson "[{\"provider_id\":\"muse\",\"model_id\":\"muse-wonder-1.0\"}]" #[]
+  if bmSt != 200 || firstCcVal != "claude-opus-5-5" ||
+     (bmBody.splitOn "claude-fable-5-2").length < 2 ||
+     (bmBody.splitOn "claude-mythos-5-2").length < 2 ||
+     (bmBody.splitOn "claude-fable-5-1").length != 1 ||
+     (bmBody.splitOn "muse/muse-wonder-1.0").length < 2 ||
+     (bmBody.splitOn "muse/muse-ember-1.0").length < 2 ||
+     catSt != 200 || (catBody.splitOn "muse-wonder-1.0").length < 2 ||
+     (catBody.splitOn "muse-ember-1.0").length < 2 ||
+     (museTargets[0]?).map (·.baseUrl) != some "https://api.meta.ai" then
+    return (← fail s!"backend-models / catalog check failed: firstCc={firstCcVal} bmSt={bmSt} catSt={catSt}")
+
   -- Last-active-admin protection: disable/demote `opsadmin` first (so `admin` is sole active admin), then verify `admin` cannot be disabled/demoted/deleted!
   let opsOpt ← getUserByUsername? store "opsadmin"
   if let some opsU := opsOpt then

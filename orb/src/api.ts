@@ -1175,7 +1175,7 @@ export interface CreateMissionBody {
    * `parse_goal_objective`).
    */
   backend?: string;
-  /** Model id understood by that harness, e.g. claude-fable-5-1. */
+  /** Model id understood by that harness, e.g. claude-fable-5-2. */
   model_override?: string;
   model_effort?: string;
   permission_mode?: string;

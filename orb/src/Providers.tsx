@@ -104,6 +104,7 @@ const KINDS: Kind[] = [
     name: "GitHub Copilot",
     methods: [{ label: "GitHub Copilot", kind: "oauth", desc: "OAuth subscription." }],
   },
+  { id: "muse", name: "Meta Muse", methods: [{ label: "API key", kind: "api", desc: "META_API_KEY" }] },
   { id: "open-router", name: "OpenRouter", methods: [{ label: "API key", kind: "api", desc: "OPENROUTER_API_KEY" }] },
   { id: "groq", name: "Groq", methods: [{ label: "API key", kind: "api", desc: "GROQ_API_KEY" }] },
   {
@@ -578,6 +579,7 @@ const API_KEY_HINTS: Record<string, { env: string; placeholder: string }> = {
   anthropic: { env: "ANTHROPIC_API_KEY", placeholder: "sk-ant-…" },
   xai: { env: "XAI_API_KEY", placeholder: "xai-…" },
   google: { env: "GEMINI_API_KEY", placeholder: "AIza…" },
+  muse: { env: "META_API_KEY", placeholder: "Meta API key" },
   "open-router": { env: "OPENROUTER_API_KEY", placeholder: "sk-or-v1-…" },
   groq: { env: "GROQ_API_KEY", placeholder: "gsk_…" },
   mistral: { env: "MISTRAL_API_KEY", placeholder: "Mistral API key" },

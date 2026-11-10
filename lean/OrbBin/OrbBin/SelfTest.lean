@@ -1313,6 +1313,16 @@ def runAllTests : IO UInt32 := do
   assertEq "parseClaudeInitializeModels? extracts class releases"
     initModels (some #[("claude-opus-5-5", "Claude Opus 5.5"), ("claude-sonnet-5-5", "Claude Sonnet 5.5")])
 
+  let initFableMythosRaw := "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"orb-model-discovery\",\"response\":{\"models\":[{\"value\":\"default\",\"resolvedModel\":\"claude-fable-5-1\"},{\"value\":\"fable\",\"resolvedModel\":\"claude-fable-5-2\"},{\"value\":\"claude-fable-5-1\"},{\"value\":\"claude-mythos-5-1\"},{\"value\":\"claude-mythos-5-2\"},{\"value\":\"claude-mythos-5-2[1m]\"},{\"value\":\"sonnet\",\"resolvedModel\":\"claude-sonnet-5-5\"},{\"value\":\"opus\",\"resolvedModel\":\"claude-opus-5-5\"}]}}}"
+  let initFableMythos := (OrbBin.Json.parse initFableMythosRaw).toOption.bind (parseClaudeInitializeModels? · "orb-model-discovery")
+  assertEq "parseClaudeInitializeModels? keeps Opus first and picks Fable 5.2 + Mythos 5.2"
+    initFableMythos (some #[
+      ("claude-opus-5-5", "Claude Opus 5.5"),
+      ("claude-fable-5-2", "Claude Fable 5.2"),
+      ("claude-mythos-5-2", "Claude Mythos 5.2"),
+      ("claude-sonnet-5-5", "Claude Sonnet 5.5")
+    ])
+
   -- Live mock warm Claude process test (2 turns + interactive `can_use_tool` over open stdin/stdout pipes!)
   let mockClaudeScript := tmpDir / "mock-warm-claude.py"
   let pyCode :=

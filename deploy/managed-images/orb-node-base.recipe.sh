@@ -39,9 +39,9 @@ ELAN_HOME_DIR=$NODE_WORK/caches/elan
 ORB_BIN=/opt/orb/bin
 
 # ---------------------------------------------------------------- pins
-CLAUDE_VERSION=2.1.306
+CLAUDE_VERSION=2.1.322
 CLAUDE_URL=https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-$CLAUDE_VERSION.tgz
-CLAUDE_SHA256=20d4bced0c1cab2b608d5431188cbd0c141cf7074dafb49afbdac8c13006bb75
+CLAUDE_SHA256=3cc175d82980c20ab66057d345bd2d913244f8cf1791d10722a1225214b57219
 CODEX_VERSION=0.166.0
 CODEX_URL=https://registry.npmjs.org/@openai/codex/-/codex-$CODEX_VERSION-linux-x64.tgz
 CODEX_SHA256=cbc00a26d3d0e2ceefc4be8891f8a81ef1e349b3b175bc0ae308762bc001fd93

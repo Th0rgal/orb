@@ -21,6 +21,12 @@ import {
  * harness does not accept that level (see `effort.ts`). */
 export type HarnessPick = { backend: string; model: string; effort?: string; service_tier?: CodexServiceTier };
 const PICK_KEY = "orb.harnessPick";
+const RETIRED_DEFAULT_MODELS = new Set([
+  "claude-fable-5-1",
+  "anthropic/claude-fable-5-1",
+  "claude-fable-5",
+  "anthropic/claude-fable-5",
+]);
 export const [remoteHarnessChoices, setRemoteHarnessChoices] = createSignal<HarnessChoice[]>([]);
 export const [nodeAntigravityModels, setNodeAntigravityModels] = createSignal<Record<string, [string,string][]>>({});
 const nodeModelRequests = new Set<string>();
@@ -58,6 +64,13 @@ export const effectivePick = (machine = "core"): HarnessPick | null => {
   const stored = harnessPick();
   if (stored) {
     const effort = normalizeEffort(stored.effort, stored.backend);
+    if (RETIRED_DEFAULT_MODELS.has(stored.model)) {
+      const choice = choices.find((c) => c.backend.id === stored.backend);
+      const fallback = choice?.models[0]?.value;
+      if (fallback && !RETIRED_DEFAULT_MODELS.has(fallback)) {
+        return { ...stored, model: fallback, effort: effort ?? undefined };
+      }
+    }
     return { ...stored, effort: effort ?? undefined };
   }
   const first = choices.find((c) => c.backend.id === "claudecode") ?? choices[0];

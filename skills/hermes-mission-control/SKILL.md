@@ -251,7 +251,7 @@ everywhere you write instructions for an agent:
    state the decision or artifact expected.
 2. To consult another model, start an opencode mission with
    `model_override=<provider>/<model>` (e.g. `openai/gpt-6-astra`,
-   `anthropic/claude-fable-5-1`), `backend: opencode`, and `writer: false`.
+   `anthropic/claude-fable-5-2`), `backend: opencode`, and `writer: false`.
    Persist the returned mission ID before doing anything else.
 3. Poll `get_mission_health` or `get_mission_digest`; do not submit
    replacements while the same mission is active.

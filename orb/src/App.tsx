@@ -923,13 +923,13 @@ export default function App() {
     const signature = JSON.stringify({...body, cyber_access:selectedCyber});
     if (remote) {
       // The request id makes a retried remote start idempotent.
-      const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,imagePaths}, {key:remote.key,title,project:projectSlug,...(folder ? {folder} : {}),prompt:body.prompt,tags:body.tags});
+      const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:effort ?? undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,imagePaths}, {key:remote.key,title,project:projectSlug,...(folder ? {folder} : {}),prompt:body.prompt,tags:body.tags});
       setMissions(prev=>[m,...prev.filter(old=>old.id!==m.id)]);
       void refreshMissions();
       return m.id;
     }
     if (launchAttempt?.signature !== signature) launchAttempt = { signature, key: crypto.randomUUID() };
-    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,permissionMode:pick.backend === "claudecode" ? draftClaudePermission() : undefined,worktreeMode:draftWorktreeMode(),imagePaths}, {key:launchAttempt.key,title,project:projectSlug,...(folder ? {folder} : {}),prompt:body.prompt,tags:body.tags});
+    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:effort ?? undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,permissionMode:pick.backend === "claudecode" ? draftClaudePermission() : undefined,worktreeMode:draftWorktreeMode(),imagePaths}, {key:launchAttempt.key,title,project:projectSlug,...(folder ? {folder} : {}),prompt:body.prompt,tags:body.tags});
     launchAttempt = undefined;
     setDraftCyber("automatic");
     setDraftClaudePermission("supervised");

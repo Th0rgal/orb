@@ -139,7 +139,7 @@ Security choices from the dev smoke:
 For exceptional read-only research or design-conflict questions, Hermes may
 consult another model: start an opencode mission with
 `model_override=<provider>/<model>` (e.g. `openai/gpt-6-astra`,
-`anthropic/claude-fable-5-1`) and `writer=false`. The mission is asynchronous
+`anthropic/claude-fable-5-2`) and `writer=false`. The mission is asynchronous
 like every other Sandboxed mission; repository work remains owned by normal
 coding backends.
 
