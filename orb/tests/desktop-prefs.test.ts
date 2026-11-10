@@ -471,4 +471,75 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
     expect(getJwt()).toBeNull();
     expect(localStorage.getItem("orb.voiceLang")).toBe("de");
   });
+
+  it("applies synchronized connections without writing back or clobbering a concurrent external sign-out", async () => {
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: (query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    });
+
+    let sharedConn: { api_url?: string; token?: string } | null = {
+      api_url: "https://orbcore.thomas.md",
+      token: "token-A",
+    };
+    let pauseConnLoad = false;
+    let releaseConnLoad: (() => void) | null = null;
+    const savedConnections: unknown[] = [];
+
+    const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "desktop_prefs_load") {
+        return { unchanged: true, exists: true, rev: "r-1", prefs: {} };
+      }
+      if (cmd === "desktop_connection_load") {
+        const snapshot = sharedConn ? { ...sharedConn } : null;
+        if (pauseConnLoad) {
+          pauseConnLoad = false;
+          await new Promise<void>((resolve) => {
+            releaseConnLoad = resolve;
+          });
+        }
+        return snapshot;
+      }
+      if (cmd === "desktop_connection_save") {
+        savedConnections.push(args?.connection);
+        sharedConn = (args?.connection as { api_url?: string; token?: string } | null) ?? null;
+        return null;
+      }
+      if (cmd === "set_window_theme") return null;
+      return undefined;
+    });
+
+    (window as unknown as { __ORB_DESKTOP__?: unknown }).__ORB_DESKTOP__ = { core: { invoke } };
+
+    setConnection("https://orbcore.thomas.md", "token-A");
+    await vi.waitFor(() => expect(savedConnections).toHaveLength(1));
+    savedConnections.length = 0;
+
+    await initDesktopPrefs();
+
+    // Another client rotates to token-B; this client begins reading token-B slowly:
+    sharedConn = { api_url: "https://orbcore.thomas.md", token: "token-B" };
+    pauseConnLoad = true;
+    const delayedPull = pullDesktopPrefs(true);
+    await Promise.resolve();
+
+    // Before the delayed load resolves, the other client signs out (writing null to connection.json):
+    sharedConn = null;
+    releaseConnLoad!();
+    await delayedPull;
+
+    // Reconciliation must NOT have written token-B back over the sign-out on disk:
+    expect(savedConnections).toEqual([]);
+    expect(sharedConn).toBeNull();
+
+    // And the next poll converges cleanly to the signed-out state, again without write-back:
+    await pullDesktopPrefs(true);
+    expect(getJwt()).toBeNull();
+    expect(savedConnections).toEqual([]);
+  });
 });

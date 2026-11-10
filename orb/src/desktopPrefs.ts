@@ -1,4 +1,11 @@
-import { clearConnection, connectionVersion, getApiUrl, getJwt, setConnection } from "./api";
+import {
+  clearConnection,
+  connectionVersion,
+  getApiUrl,
+  getJwt,
+  isDesktopConnectionSaving,
+  setConnection,
+} from "./api";
 import { reloadBackgroundSyncMode } from "./backgroundSync";
 import { reloadApprovalGraceSecs } from "./deviceApproval";
 import { nativeInvoke } from "./native";
@@ -291,10 +298,11 @@ function installStorageHooks(): void {
 async function reconcileDesktopConnection(
   invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>,
 ): Promise<void> {
+  if (isDesktopConnectionSaving()) return;
   const verBefore = connectionVersion();
   const localSigBefore = connSig(getApiUrl(), getJwt());
   const saved = await invoke<{ api_url?: string; token?: string } | null>("desktop_connection_load").catch(() => undefined);
-  if (saved === undefined || connectionVersion() !== verBefore) return;
+  if (saved === undefined || connectionVersion() !== verBefore || isDesktopConnectionSaving()) return;
   const nextSig = connSig(saved?.api_url, saved?.token);
   if (verBefore !== lastObservedConnVersion) {
     if (nextSig === localSigBefore) {
@@ -304,10 +312,10 @@ async function reconcileDesktopConnection(
       lastSyncedConnSig = nextSig;
       if (saved?.api_url && saved?.token) {
         if (connSig(getApiUrl(), getJwt()) !== nextSig) {
-          setConnection(saved.api_url, saved.token);
+          setConnection(saved.api_url, saved.token, { persist: false });
         }
       } else if (getJwt()) {
-        clearConnection();
+        clearConnection({ persist: false });
       }
       lastObservedConnVersion = connectionVersion();
     }
@@ -317,10 +325,10 @@ async function reconcileDesktopConnection(
     lastSyncedConnSig = nextSig;
     if (saved?.api_url && saved?.token) {
       if (connSig(getApiUrl(), getJwt()) !== nextSig) {
-        setConnection(saved.api_url, saved.token);
+        setConnection(saved.api_url, saved.token, { persist: false });
       }
     } else if (getJwt()) {
-      clearConnection();
+      clearConnection({ persist: false });
     }
     lastObservedConnVersion = connectionVersion();
   } else if (lastSyncedConnSig === null) {
