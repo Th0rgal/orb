@@ -1,5 +1,6 @@
 import { createEffect, createRoot } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getApiUrl, getJwt } from "../src/api";
 import {
   getBackgroundSyncMode,
   isBackgroundSyncActive,
@@ -275,5 +276,78 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
     expect(disk["orb.voiceLang"]).toBe("de");
     expect(localStorage.getItem("orb.voiceLang")).toBe("de");
     expect(localStorage.getItem("orb-theme")).toBe("light");
+  });
+
+  it("retries initialization after a transient load failure while preserving local edits and syncing connection", async () => {
+    vi.useFakeTimers();
+    try {
+      Object.defineProperty(window, "matchMedia", {
+        writable: true,
+        value: (query: string) => ({
+          matches: false,
+          media: query,
+          addEventListener: () => {},
+          removeEventListener: () => {},
+        }),
+      });
+
+      const disk: Record<string, string> = {
+        "orb-theme": "dark",
+        "orb:background-sync-mode": "off",
+      };
+      let loadFails = true;
+      let sharedConn: { api_url?: string; token?: string } | null = null;
+      let patchCount = 0;
+
+      const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "desktop_prefs_load") {
+          if (loadFails) throw new Error("daemon starting up");
+          return { unchanged: false, exists: true, rev: "r-recovered", prefs: { ...disk } };
+        }
+        if (cmd === "desktop_prefs_patch") {
+          patchCount++;
+          const setObj = (args?.set as Record<string, string> | undefined) ?? {};
+          for (const [k, v] of Object.entries(setObj)) disk[k] = v;
+          return { rev: `r-patched-${patchCount}`, prefs: { ...disk } };
+        }
+        if (cmd === "desktop_connection_load") return sharedConn;
+        if (cmd === "desktop_connection_save") return null;
+        if (cmd === "set_window_theme") return null;
+        return undefined;
+      });
+
+      (window as unknown as { __ORB_DESKTOP__?: unknown }).__ORB_DESKTOP__ = { core: { invoke } };
+
+      // Pre-existing local preference + local edit during transient failure:
+      localStorage.setItem("orb.files.width", "480");
+
+      await initDesktopPrefs();
+      expect(localStorage.getItem("orb.files.width")).toBe("480");
+      expect(patchCount).toBe(0);
+
+      // While ui-prefs load is still failing, user edits a preference and prod client updates connection:
+      localStorage.setItem("orb.voiceLang", "it");
+      expect(patchCount).toBe(0);
+      sharedConn = { api_url: "https://orbcore.thomas.md", token: "jwt-from-prod" };
+
+      await pullDesktopPrefs(true);
+      expect(getApiUrl()).toBe("https://orbcore.thomas.md");
+      expect(getJwt()).toBe("jwt-from-prod");
+      expect(localStorage.getItem("orb.voiceLang")).toBe("it");
+
+      // Daemon recovers; scheduled retry timer hydrates remote prefs and flushes pending local edits:
+      loadFails = false;
+      await vi.advanceTimersByTimeAsync(1_300);
+
+      expect(localStorage.getItem("orb-theme")).toBe("dark");
+      expect(document.documentElement.dataset.theme).toBe("dark");
+      expect(getBackgroundSyncMode()).toBe("off");
+      expect(isBackgroundSyncActive()).toBe(false);
+      expect(disk["orb.files.width"]).toBe("480");
+      expect(disk["orb.voiceLang"]).toBe("it");
+      expect(localStorage.getItem("orb.voiceLang")).toBe("it");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

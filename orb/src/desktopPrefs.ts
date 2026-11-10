@@ -7,6 +7,7 @@ import { getThemePref, setThemePref } from "./theme";
 import { reloadVoiceLanguage } from "./voice";
 
 const POLL_VISIBLE_MS = 1_200;
+const INIT_RETRY_MS = 1_200;
 const FLUSH_DEBOUNCE_MS = 35;
 const MIGRATED_KEY = "orb.desktopPrefsMigrated.v1";
 export const MAX_SHARED_PREF_BYTES = 65_536;
@@ -49,12 +50,15 @@ type PrefsLoadResponse = {
 };
 
 let initialized = false;
+let hadFailedInit = false;
+let initInFlight: Promise<void> | null = null;
 let storageHooked = false;
 let applyingRemote = false;
 let pullInFlight = false;
 let flushRunning: Promise<void> | null = null;
 let lastRev = "";
 let lastSyncedConnSig: string | null = null;
+let initRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let cleanupWindowListeners: (() => void) | null = null;
@@ -213,6 +217,7 @@ export async function flushDesktopPrefs(): Promise<void> {
     clearTimeout(flushTimer);
     flushTimer = null;
   }
+  if (!initialized) return;
   if (flushRunning) {
     await flushRunning;
     if (!pendingClear && pendingSet.size === 0 && pendingRemove.size === 0) return;
@@ -226,7 +231,7 @@ export async function flushDesktopPrefs(): Promise<void> {
 }
 
 function scheduleFlush(): void {
-  if (flushTimer !== null) return;
+  if (!initialized || flushTimer !== null) return;
   flushTimer = setTimeout(() => {
     flushTimer = null;
     void flushDesktopPrefs();
@@ -275,7 +280,72 @@ function installStorageHooks(): void {
   };
 }
 
+async function reconcileDesktopConnection(
+  invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>,
+): Promise<void> {
+  const saved = await invoke<{ api_url?: string; token?: string } | null>("desktop_connection_load").catch(() => undefined);
+  if (saved === undefined) return;
+  const nextSig = connSig(saved?.api_url, saved?.token);
+  if (lastSyncedConnSig !== null && nextSig !== lastSyncedConnSig) {
+    lastSyncedConnSig = nextSig;
+    if (saved?.api_url && saved?.token) {
+      if (connSig(getApiUrl(), getJwt()) !== nextSig) {
+        setConnection(saved.api_url, saved.token);
+      }
+    } else if (getJwt()) {
+      clearConnection();
+    }
+  } else if (lastSyncedConnSig === null) {
+    lastSyncedConnSig = nextSig;
+  }
+}
+
+function ensureRuntimeWiring(): void {
+  installStorageHooks();
+  if (lastSyncedConnSig === null) {
+    lastSyncedConnSig = connSig(getApiUrl(), getJwt());
+  }
+  if (!cleanupWindowListeners && typeof window !== "undefined" && typeof document !== "undefined") {
+    const onFocus = () => { void pullDesktopPrefs(true); };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") void flushDesktopPrefs();
+      else void pullDesktopPrefs(true);
+    };
+    const onPageHide = () => { void flushDesktopPrefs(); };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", onPageHide);
+    cleanupWindowListeners = () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", onPageHide);
+    };
+  }
+  if (pollTimer === null && typeof window !== "undefined") {
+    pollTimer = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void pullDesktopPrefs(true);
+    }, POLL_VISIBLE_MS);
+  }
+}
+
+function scheduleInitRetry(): void {
+  if (initialized || initRetryTimer !== null) return;
+  initRetryTimer = setTimeout(() => {
+    initRetryTimer = null;
+    if (!initialized) void initDesktopPrefs();
+  }, INIT_RETRY_MS);
+}
+
 export async function pullDesktopPrefs(checkConnection = false): Promise<void> {
+  if (!initialized) {
+    const invoke = nativeInvoke();
+    if (invoke && checkConnection) {
+      await reconcileDesktopConnection(invoke);
+    }
+    await initDesktopPrefs();
+    return;
+  }
   if (pullInFlight || flushRunning !== null) return;
   if (pendingClear || pendingSet.size > 0 || pendingRemove.size > 0) {
     await flushDesktopPrefs();
@@ -288,82 +358,93 @@ export async function pullDesktopPrefs(checkConnection = false): Promise<void> {
 
   pullInFlight = true;
   try {
-    const res = await invoke<PrefsLoadResponse>("desktop_prefs_load", lastRev ? { since_rev: lastRev } : {});
-    if (res && typeof res === "object") {
-      if (res.unchanged === true) {
-        if (typeof res.rev === "string" && res.rev) lastRev = res.rev;
-      } else if (res.prefs && typeof res.prefs === "object") {
-        if (!pendingClear && pendingSet.size === 0 && pendingRemove.size === 0 && flushRunning === null) {
-          applyRemoteSnapshot(res.prefs, true);
+    try {
+      const res = await invoke<PrefsLoadResponse>("desktop_prefs_load", lastRev ? { since_rev: lastRev } : {});
+      if (res && typeof res === "object") {
+        if (res.unchanged === true) {
           if (typeof res.rev === "string" && res.rev) lastRev = res.rev;
+        } else if (res.prefs && typeof res.prefs === "object") {
+          if (!pendingClear && pendingSet.size === 0 && pendingRemove.size === 0 && flushRunning === null) {
+            applyRemoteSnapshot(res.prefs, true);
+            if (typeof res.rev === "string" && res.rev) lastRev = res.rev;
+          }
         }
       }
+    } catch {
+      // Ignore transient ui-prefs RPC errors while still reconciling connection.json below.
     }
     if (checkConnection) {
-      const saved = await invoke<{ api_url?: string; token?: string } | null>("desktop_connection_load").catch(() => undefined);
-      if (saved !== undefined) {
-        const nextSig = connSig(saved?.api_url, saved?.token);
-        if (lastSyncedConnSig !== null && nextSig !== lastSyncedConnSig) {
-          lastSyncedConnSig = nextSig;
-          if (saved?.api_url && saved?.token) {
-            if (connSig(getApiUrl(), getJwt()) !== nextSig) {
-              setConnection(saved.api_url, saved.token);
-            }
-          } else if (getJwt()) {
-            clearConnection();
-          }
-        } else if (lastSyncedConnSig === null) {
-          lastSyncedConnSig = nextSig;
-        }
-      }
+      await reconcileDesktopConnection(invoke);
     }
-  } catch {
-    // Ignore transient RPC errors when daemon is shutting down.
   } finally {
     pullInFlight = false;
   }
 }
 
-export async function initDesktopPrefs(): Promise<void> {
+async function runInitDesktopPrefs(): Promise<void> {
   if (initialized || typeof window === "undefined" || typeof localStorage === "undefined") return;
   const invoke = nativeInvoke();
   if (!invoke) return;
+
+  ensureRuntimeWiring();
 
   let initial: PrefsLoadResponse | undefined;
   try {
     initial = await invoke<PrefsLoadResponse>("desktop_prefs_load", {});
   } catch {
+    hadFailedInit = true;
+    await reconcileDesktopConnection(invoke);
+    scheduleInitRetry();
     return;
   }
   if (!initial || typeof initial !== "object" || !initial.prefs || typeof initial.prefs !== "object") {
+    hadFailedInit = true;
+    await reconcileDesktopConnection(invoke);
+    scheduleInitRetry();
     return;
   }
 
-  initialized = true;
+  if (initRetryTimer !== null) {
+    clearTimeout(initRetryTimer);
+    initRetryTimer = null;
+  }
   if (typeof initial.rev === "string") lastRev = initial.rev;
 
   // Seed local keys only once per origin (or when shared ~/.orb/ui-prefs.json does not exist yet),
   // so reopening an already-migrated client never resurrects preferences removed by another client.
   const alreadyMigrated = localStorage.getItem(MIGRATED_KEY) === "1" && initial.exists !== false;
   const seed: Record<string, string> = {};
-  if (!alreadyMigrated) {
+  if (!alreadyMigrated && !pendingClear) {
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (!k || !isSharedDesktopPrefKey(k)) continue;
-      if (!(k in initial.prefs)) {
+      if (!(k in initial.prefs) && !pendingRemove.has(k) && !pendingSet.has(k)) {
         const v = localStorage.getItem(k);
         if (v !== null && utf8ByteLength(v) <= MAX_SHARED_PREF_BYTES) seed[k] = v;
       }
     }
   }
 
-  const mergedInitial = { ...seed, ...initial.prefs };
-  applyRemoteSnapshot(mergedInitial, false);
-  installStorageHooks();
-  lastSyncedConnSig = connSig(getApiUrl(), getJwt());
+  const mergedInitial: Record<string, string> = pendingClear ? {} : { ...seed, ...initial.prefs };
+  if (!pendingClear) {
+    for (const k of pendingRemove) delete mergedInitial[k];
+  }
+  for (const [k, v] of pendingSet) {
+    mergedInitial[k] = v;
+  }
 
-  if (Object.keys(seed).length > 0) {
-    for (const [k, v] of Object.entries(seed)) pendingSet.set(k, v);
+  applyRemoteSnapshot(mergedInitial, hadFailedInit);
+
+  if (!pendingClear) {
+    for (const [k, v] of Object.entries(seed)) {
+      if (!pendingSet.has(k) && !pendingRemove.has(k)) pendingSet.set(k, v);
+    }
+  }
+
+  initialized = true;
+  hadFailedInit = false;
+
+  if (pendingClear || pendingSet.size > 0 || pendingRemove.size > 0) {
     await flushDesktopPrefs();
     if (!pendingClear && pendingSet.size === 0 && pendingRemove.size === 0) {
       rawSet(localStorage, MIGRATED_KEY, "1");
@@ -371,26 +452,16 @@ export async function initDesktopPrefs(): Promise<void> {
   } else if (!alreadyMigrated) {
     rawSet(localStorage, MIGRATED_KEY, "1");
   }
+}
 
-  const onFocus = () => { void pullDesktopPrefs(true); };
-  const onVisibility = () => {
-    if (document.visibilityState === "hidden") void flushDesktopPrefs();
-    else void pullDesktopPrefs(true);
-  };
-  const onPageHide = () => { void flushDesktopPrefs(); };
-  window.addEventListener("focus", onFocus);
-  document.addEventListener("visibilitychange", onVisibility);
-  window.addEventListener("pagehide", onPageHide);
-  cleanupWindowListeners = () => {
-    window.removeEventListener("focus", onFocus);
-    document.removeEventListener("visibilitychange", onVisibility);
-    window.removeEventListener("pagehide", onPageHide);
-  };
-
-  pollTimer = setInterval(() => {
-    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-    void pullDesktopPrefs(true);
-  }, POLL_VISIBLE_MS);
+export async function initDesktopPrefs(): Promise<void> {
+  if (initialized) return;
+  if (initInFlight) return initInFlight;
+  const p = runInitDesktopPrefs().finally(() => {
+    if (initInFlight === p) initInFlight = null;
+  });
+  initInFlight = p;
+  return p;
 }
 
 /** Test hook: unhook Storage.prototype and clear module state. */
@@ -398,6 +469,10 @@ export function resetDesktopPrefsForTest(): void {
   if (cleanupWindowListeners) {
     cleanupWindowListeners();
     cleanupWindowListeners = null;
+  }
+  if (initRetryTimer !== null) {
+    clearTimeout(initRetryTimer);
+    initRetryTimer = null;
   }
   if (flushTimer !== null) {
     clearTimeout(flushTimer);
@@ -414,6 +489,8 @@ export function resetDesktopPrefsForTest(): void {
   }
   storageHooked = false;
   initialized = false;
+  hadFailedInit = false;
+  initInFlight = null;
   applyingRemote = false;
   pullInFlight = false;
   flushRunning = null;
