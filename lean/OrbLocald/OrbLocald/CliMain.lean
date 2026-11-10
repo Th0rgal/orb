@@ -47,7 +47,7 @@ private def sendJsonHttp (fd : Fd) (status : Nat) (origin? : Option String) (jso
     (keepAlive : Bool := false) : IO Bool := do
   let reason := HttpResponse.reasonPhrase status
   let body := jsonPayload.toUTF8
-  let connHdr := if keepAlive then "Connection: keep-alive\r\nKeep-Alive: timeout=15\r\n\r\n" else "Connection: close\r\n\r\n"
+  let connHdr := if keepAlive then "Connection: keep-alive\r\nKeep-Alive: timeout=10\r\n\r\n" else "Connection: close\r\n\r\n"
   let head :=
     s!"HTTP/1.1 {status} {reason}\r\n" ++
     corsHeaderBlock origin? ++
@@ -59,7 +59,7 @@ private def sendJsonHttp (fd : Fd) (status : Nat) (origin? : Option String) (jso
   | .error _ => return false
 
 private def sendPreflight204 (fd : Fd) (origin? : Option String) (keepAlive : Bool := false) : IO Bool := do
-  let connHdr := if keepAlive then "Connection: keep-alive\r\nKeep-Alive: timeout=15\r\n\r\n" else "Connection: close\r\n\r\n"
+  let connHdr := if keepAlive then "Connection: keep-alive\r\nKeep-Alive: timeout=10\r\n\r\n" else "Connection: close\r\n\r\n"
   let head :=
     "HTTP/1.1 204 No Content\r\n" ++
     corsHeaderBlock origin? ++
@@ -345,7 +345,7 @@ private def handleTransportProxyRequest (stRef : IO.Ref LocaldState) (isShardPor
                 let extra := sanitizeUpstreamHeaders up.headers strippedEnc
                 let cleanOrig := if isHeaderValueClean orig then orig else "https://orb"
                 let reason := HttpResponse.reasonPhrase up.status
-                let connHdr := if keepAlive then "Connection: keep-alive\r\nKeep-Alive: timeout=15\r\n\r\n" else "Connection: close\r\n\r\n"
+                let connHdr := if keepAlive then "Connection: keep-alive\r\nKeep-Alive: timeout=10\r\n\r\n" else "Connection: close\r\n\r\n"
                 let head :=
                   s!"HTTP/1.1 {up.status} {reason}\r\n" ++
                   corsHeaderBlock origin? ++
@@ -377,7 +377,7 @@ private def handleClientConnection (stRef : IO.Ref LocaldState) (portIdx : Nat) 
     let mut carry := ByteArray.empty
     let mut reqCount : Nat := 0
     while keepLoop && reqCount < 1024 do
-      let tmo : UInt32 := if reqCount == 0 then 10000 else 15000
+      let tmo : UInt32 := if reqCount == 0 then 10000 else 25000
       match ← readLocaldHttpRequestFromFd clientFd carry isProxyPort tmo with
       | .error "empty_socket_read" =>
         keepLoop := false

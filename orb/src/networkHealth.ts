@@ -120,9 +120,23 @@ export function recordTransportFailure(): void {
   notifyBudgetListeners();
 }
 
-export function recordSyncWsState(connected: boolean): void {
+export function recordTransportRecovery(upstreamOrigin?: string | null): void {
   const prev = currentState;
-  const nextFailures = connected ? 0 : prev.consecutiveFailures;
+  const nextOrigin = upstreamOrigin?.trim() ? upstreamOrigin.trim() : prev.lastUpstreamOrigin;
+  if (prev.consecutiveFailures === 0 && nextOrigin === prev.lastUpstreamOrigin) return;
+  const nextStatus = deriveStatus(prev.srttMs, 0, prev.wsConnected);
+  commitState({
+    ...prev,
+    consecutiveFailures: 0,
+    lastUpstreamOrigin: nextOrigin,
+    status: nextStatus,
+  });
+  notifyBudgetListeners();
+}
+
+export function recordSyncWsState(connected: boolean | null): void {
+  const prev = currentState;
+  const nextFailures = connected === true ? 0 : prev.consecutiveFailures;
   const nextStatus = deriveStatus(prev.srttMs, nextFailures, connected);
   commitState({
     ...prev,
