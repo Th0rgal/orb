@@ -126,10 +126,12 @@ static char *build_init_script(unsigned port, const char *token) {
     if (buf) snprintf(buf, need, tmpl, port, tok_lit);
     return free(tok_lit), buf;
 }
-
 #if defined(ORB_HAS_WEBKITGTK)
 static gboolean on_wv_event(GtkWidget *wv, GdkEvent *ev, gpointer ud) {
     (void)ud;
+    guint *st = (ev->type == GDK_KEY_PRESS || ev->type == GDK_KEY_RELEASE) ? &ev->key.state :
+        ((ev->type == GDK_BUTTON_PRESS || ev->type == GDK_BUTTON_RELEASE) ? &ev->button.state : (ev->type == GDK_SCROLL ? &ev->scroll.state : NULL));
+    if (st && (*st & (GDK_SUPER_MASK | GDK_MOD4_MASK)) && !(*st & GDK_CONTROL_MASK)) *st |= GDK_META_MASK;
     if (ev->type != GDK_TOUCHPAD_PINCH) return FALSE;
     const GdkEventTouchpadPinch *p = &ev->touchpad_pinch;
     if (p->phase == GDK_TOUCHPAD_GESTURE_PHASE_BEGIN || p->phase == GDK_TOUCHPAD_GESTURE_PHASE_UPDATE) {
@@ -151,7 +153,6 @@ static gboolean on_decide_policy(WebKitWebView *wv, WebKitPolicyDecision *dec, W
     return FALSE;
 }
 #endif
-
 int main(int argc, char **argv) {
     unsigned port = 19479;
     const char *port_env = getenv("ORB_LOCALD_PORT");

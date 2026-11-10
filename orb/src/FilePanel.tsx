@@ -625,20 +625,7 @@ export function FilePanelProvider(p: {
         return;
       }
     }
-    if (!available()) return;
-    if (opened() && hasPrimaryModifier(e) && !e.altKey && e.shiftKey && (e.code === "KeyB" || e.key.toLowerCase() === "b")) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      if (!e.repeat) setTree(v => !v);
-      return;
-    }
-    if ((opened() || sideVisible()) && hasPrimaryModifier(e) && !e.altKey && e.shiftKey && (e.code === "KeyE" || e.key.toLowerCase() === "e")) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      if (!e.repeat) { setMaximized(false); setSplit(v => !v); }
-      return;
-    }
-    if (openSide() && isBtwShortcut(e)) {
+    if (openSide() && onMission() && isBtwShortcut(e)) {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (!e.repeat) {
@@ -658,6 +645,19 @@ export function FilePanelProvider(p: {
           focusSideComposer();
         }
       }
+      return;
+    }
+    if (!available()) return;
+    if (opened() && hasPrimaryModifier(e) && !e.altKey && e.shiftKey && (e.code === "KeyB" || e.key.toLowerCase() === "b")) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (!e.repeat) setTree(v => !v);
+      return;
+    }
+    if ((opened() || sideVisible()) && hasPrimaryModifier(e) && !e.altKey && e.shiftKey && (e.code === "KeyE" || e.key.toLowerCase() === "e")) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (!e.repeat) { setMaximized(false); setSplit(v => !v); }
       return;
     }
     if (hasPrimaryModifier(e) && !e.altKey && !e.shiftKey && (e.code === "KeyJ" || e.key.toLowerCase() === "j")) {

@@ -70,7 +70,21 @@ describe("conversation search and side panel keyboard shortcuts", () => {
       isSearchShortcut(
         new KeyboardEvent("keydown", { key: "F", code: "KeyF", metaKey: true, shiftKey: true }),
       ),
+    ).toBe(true);
+    expect(
+      isSearchShortcut(
+        new KeyboardEvent("keydown", {
+          key: "F",
+          code: "KeyF",
+          metaKey: true,
+          ctrlKey: true,
+          shiftKey: true,
+        }),
+      ),
     ).toBe(false);
+    expect(
+      isBtwShortcut(new KeyboardEvent("keydown", { key: "k", code: "KeyK", metaKey: true })),
+    ).toBe(true);
     expect(
       isBtwShortcut(new KeyboardEvent("keydown", { key: "k", code: "KeyK", ctrlKey: true })),
     ).toBe(true);
