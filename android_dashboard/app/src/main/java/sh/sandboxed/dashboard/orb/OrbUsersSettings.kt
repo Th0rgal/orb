@@ -96,6 +96,14 @@ object OrbUsersModel {
         }
         return Result.success((num * 100.0).roundToInt())
     }
+
+    fun isLegacySingleTenantFallback(status: Int?, authMode: String?): Boolean {
+        if (status != 404) return false
+        return (authMode ?: "single_tenant").trim().lowercase(Locale.US) != "multi_user"
+    }
+
+    fun resetPasswordPath(encodedUserId: String): String =
+        "/api/admin/users/$encodedUserId/reset-password"
 }
 
 data class OrbAdminUser(
@@ -110,6 +118,22 @@ data class OrbAdminUser(
     val lastLoginAt: String?,
 ) {
     companion object {
+        fun singleTenantAdmin(current: OrbCore.CurrentUser? = null): OrbAdminUser {
+            val cleanId = current?.id?.trim().orEmpty()
+            val cleanUser = current?.username?.trim().orEmpty()
+            return OrbAdminUser(
+                id = cleanId.ifEmpty { "admin" },
+                username = cleanUser.ifEmpty { "admin" },
+                role = "admin",
+                unixUsername = current?.unixUsername,
+                dailySpendCapCents = current?.dailySpendCapCents,
+                spentTodayCents = current?.spentTodayCents ?: 0,
+                disabled = false,
+                createdAt = "",
+                lastLoginAt = null,
+            )
+        }
+
         fun from(d: OrbDict): OrbAdminUser? {
             val id = OrbJSON.str(d, "id")?.trim().orEmpty()
             val username = OrbJSON.str(d, "username")?.trim().orEmpty()
@@ -143,9 +167,11 @@ fun OrbUsersSettingsPage(
 ) {
     val scope = rememberCoroutineScope()
     val currentUser by core.currentUserFlow.collectAsState()
+    val authMode by core.authModeFlow.collectAsState()
     var users by remember { mutableStateOf<List<OrbAdminUser>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
     var ready by remember { mutableStateOf(false) }
+    var legacySingleTenant by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
     var creating by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<OrbAdminUser?>(null) }
@@ -157,10 +183,27 @@ fun OrbUsersSettingsPage(
             val res = core.request("/api/admin/users")
             val rawItems = OrbJSON.dictList(OrbJSON.dict(res)?.get("users") ?: res)
             users = rawItems.mapNotNull { OrbAdminUser.from(it) }
+            legacySingleTenant = false
             ready = true
             error = ""
         } catch (ce: CancellationException) {
             throw ce
+        } catch (err: OrbError) {
+            if (err.status == 404) {
+                if (core.authModeFlow.value == "multi_user") {
+                    runCatching { core.refreshCurrentUser() }
+                }
+                if (OrbUsersModel.isLegacySingleTenantFallback(404, core.authModeFlow.value)) {
+                    users = listOf(OrbAdminUser.singleTenantAdmin(core.currentUserFlow.value))
+                    legacySingleTenant = true
+                    ready = true
+                    error = ""
+                } else {
+                    error = err.message ?: "Failed to load users."
+                }
+            } else {
+                error = err.message ?: "Failed to load users."
+            }
         } catch (t: Throwable) {
             error = t.message ?: "Failed to load users."
         } finally {
@@ -177,6 +220,9 @@ fun OrbUsersSettingsPage(
     }
 
     fun subtitleFor(user: OrbAdminUser): String {
+        if (legacySingleTenant) {
+            return "Server password · Full Core & fleet access · No daily cap"
+        }
         val parts = mutableListOf<String>()
         if (!user.unixUsername.isNullOrEmpty()) {
             parts.add("/home/${user.unixUsername}")
@@ -233,13 +279,16 @@ fun OrbUsersSettingsPage(
                     .clip(CircleShape)
                     .background(OrbStyle.surface)
                     .border(1.dp, OrbStyle.border, CircleShape)
-                    .orbPressClickable { creating = true },
+                    .then(
+                        if (!legacySingleTenant) Modifier.orbPressClickable { creating = true }
+                        else Modifier
+                    ),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.Add,
                     contentDescription = "New user",
-                    tint = Color.White,
+                    tint = if (legacySingleTenant) OrbStyle.textMuted else Color.White,
                     modifier = Modifier.size(18.dp)
                 )
             }
@@ -309,7 +358,10 @@ fun OrbUsersSettingsPage(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .orbPressClickable { editing = user }
+                                    .then(
+                                        if (!legacySingleTenant) Modifier.orbPressClickable { editing = user }
+                                        else Modifier
+                                    )
                                     .padding(horizontal = 14.dp, vertical = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -339,6 +391,18 @@ fun OrbUsersSettingsPage(
                                                 .background(Color.White.copy(alpha = 0.08f))
                                                 .padding(horizontal = 6.dp, vertical = 2.dp)
                                         )
+                                        if (legacySingleTenant || currentUser?.id == user.id) {
+                                            Text(
+                                                text = "You",
+                                                color = OrbStyle.textSecondary,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(999.dp))
+                                                    .background(Color.White.copy(alpha = 0.08f))
+                                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
                                         if (user.disabled) {
                                             Text(
                                                 text = "Disabled",
@@ -360,12 +424,14 @@ fun OrbUsersSettingsPage(
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
-                                Icon(
-                                    imageVector = Icons.Default.ChevronRight,
-                                    contentDescription = null,
-                                    tint = OrbStyle.textMuted,
-                                    modifier = Modifier.size(18.dp)
-                                )
+                                if (!legacySingleTenant) {
+                                    Icon(
+                                        imageVector = Icons.Default.ChevronRight,
+                                        contentDescription = null,
+                                        tint = OrbStyle.textMuted,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -374,7 +440,11 @@ fun OrbUsersSettingsPage(
 
             item {
                 Text(
-                    text = "Each user runs in their own Linux home directory on shared compute nodes. User workspaces and missions remain private.",
+                    text = if (legacySingleTenant && authMode != "multi_user") {
+                        "Connected Core server is running in single-tenant mode. Upgrade Core to add or manage multi-user accounts."
+                    } else {
+                        "Each user runs in their own Linux home directory on shared compute nodes. User workspaces and missions remain private."
+                    },
                     color = OrbStyle.textMuted,
                     fontSize = 12.sp
                 )
@@ -630,9 +700,9 @@ private fun OrbEditUserDialog(
         scope.launch {
             try {
                 core.request(
-                    "/api/admin/users/${core.encodeComponent(user.id)}/password",
+                    OrbUsersModel.resetPasswordPath(core.encodeComponent(user.id)),
                     method = "POST",
-                    body = mapOf("new_password" to newPassword)
+                    body = mapOf("password" to newPassword, "new_password" to newPassword)
                 )
                 newPassword = ""
                 resetNotice = "Password updated and active sessions rotated."

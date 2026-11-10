@@ -59,6 +59,15 @@ enum OrbUsersModel {
         }
         return .some(Int((num * 100.0).rounded()))
     }
+
+    nonisolated static func isLegacySingleTenantFallback(status: Int?, authMode: String) -> Bool {
+        guard status == 404 else { return false }
+        return authMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "multi_user"
+    }
+
+    nonisolated static func resetPasswordPath(for userId: String) -> String {
+        "/api/admin/users/\(OrbCore.escape(userId))/reset-password"
+    }
 }
 
 struct OrbAdminUser: Identifiable, Equatable {
@@ -71,6 +80,47 @@ struct OrbAdminUser: Identifiable, Equatable {
     var disabled: Bool
     var createdAt: String
     var lastLoginAt: String?
+
+    init(
+        id: String,
+        username: String,
+        role: String,
+        unixUsername: String? = nil,
+        dailySpendCapCents: Int? = nil,
+        spentTodayCents: Int = 0,
+        disabled: Bool = false,
+        createdAt: String = "",
+        lastLoginAt: String? = nil
+    ) {
+        self.id = id
+        self.username = username
+        self.role = role
+        self.unixUsername = unixUsername
+        self.dailySpendCapCents = dailySpendCapCents
+        self.spentTodayCents = spentTodayCents
+        self.disabled = disabled
+        self.createdAt = createdAt
+        self.lastLoginAt = lastLoginAt
+    }
+
+    nonisolated static func singleTenantAdmin(
+        id: String? = nil,
+        username: String? = nil,
+        unixUsername: String? = nil,
+        dailySpendCapCents: Int? = nil,
+        spentTodayCents: Int = 0
+    ) -> Self {
+        let cleanId = id?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let cleanUser = username?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return Self(
+            id: cleanId.isEmpty ? "admin" : cleanId,
+            username: cleanUser.isEmpty ? "admin" : cleanUser,
+            role: "admin",
+            unixUsername: unixUsername,
+            dailySpendCapCents: dailySpendCapCents,
+            spentTodayCents: spentTodayCents
+        )
+    }
 
     init?(_ j: OrbJSON) {
         let id = j["id"].text
@@ -95,6 +145,7 @@ struct OrbUsersSettings: View {
     @State private var users: [OrbAdminUser] = []
     @State private var loading = false
     @State private var ready = false
+    @State private var legacySingleTenant = false
     @State private var error = ""
     @State private var creating = false
     @State private var editing: OrbAdminUser?
@@ -116,7 +167,9 @@ struct OrbUsersSettings: View {
                 }
                 ForEach(users) { user in
                     Button {
-                        editing = user
+                        if !legacySingleTenant {
+                            editing = user
+                        }
                     } label: {
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 3) {
@@ -130,6 +183,14 @@ struct OrbUsersSettings: View {
                                         .padding(.horizontal, 6)
                                         .padding(.vertical, 2)
                                         .background(Color.white.opacity(0.08), in: Capsule())
+                                    if legacySingleTenant || OrbCore.shared.currentUser?.id == user.id {
+                                        Text("You")
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(OrbStyle.textSecondary)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.white.opacity(0.08), in: Capsule())
+                                    }
                                     if user.disabled {
                                         Text("Disabled")
                                             .font(.caption2.weight(.semibold))
@@ -145,19 +206,26 @@ struct OrbUsersSettings: View {
                                     .lineLimit(1)
                             }
                             Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.tertiary)
+                            if !legacySingleTenant {
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
                         }
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .disabled(legacySingleTenant)
                     .accessibilityIdentifier("users.row.\(user.username)")
                 }
             } header: {
                 Text("Accounts")
             } footer: {
-                Text("Each user runs in their own Linux home directory on shared compute nodes. User workspaces and missions remain private.")
+                if legacySingleTenant {
+                    Text("Connected Core server is running in single-tenant mode. Upgrade Core to add or manage multi-user accounts.")
+                } else {
+                    Text("Each user runs in their own Linux home directory on shared compute nodes. User workspaces and missions remain private.")
+                }
             }
         }
         .scrollContentBackground(.hidden)
@@ -172,6 +240,7 @@ struct OrbUsersSettings: View {
                 } label: {
                     Image(systemName: "plus")
                 }
+                .disabled(legacySingleTenant)
                 .accessibilityLabel("New user")
                 .accessibilityIdentifier("users.create")
             }
@@ -193,6 +262,9 @@ struct OrbUsersSettings: View {
     }
 
     private func subtitle(for user: OrbAdminUser) -> String {
+        if legacySingleTenant {
+            return "Server password · Full Core & fleet access · No daily cap"
+        }
         var parts: [String] = []
         if let unix = user.unixUsername {
             parts.append("/home/\(unix)")
@@ -216,10 +288,32 @@ struct OrbUsersSettings: View {
             let res = try await client.call("/api/admin/users")
             let rawItems = res["users"] == .null ? res.items : res["users"].items
             users = rawItems.compactMap(OrbAdminUser.init)
+            legacySingleTenant = false
             ready = true
             error = ""
         } catch is CancellationError {
             return
+        } catch let http as OrbHTTPError where http.status == 404 {
+            if OrbCore.shared.authMode == .multiUser {
+                await OrbCore.shared.refreshCurrentUser()
+            }
+            if OrbUsersModel.isLegacySingleTenantFallback(status: 404, authMode: OrbCore.shared.authMode.rawValue) {
+                let cur = OrbCore.shared.currentUser
+                users = [
+                    OrbAdminUser.singleTenantAdmin(
+                        id: cur?.id,
+                        username: cur?.username,
+                        unixUsername: cur?.unixUsername,
+                        dailySpendCapCents: cur?.dailySpendCapCents,
+                        spentTodayCents: cur?.spentTodayCents ?? 0
+                    )
+                ]
+                legacySingleTenant = true
+                ready = true
+                error = ""
+            } else {
+                self.error = http.localizedDescription
+            }
         } catch {
             self.error = error.localizedDescription
         }
@@ -477,9 +571,9 @@ private struct OrbEditUserSheet: View {
         defer { saving = false }
         do {
             _ = try await client.call(
-                "/api/admin/users/\(OrbCore.escape(user.id))/password",
+                OrbUsersModel.resetPasswordPath(for: user.id),
                 method: "POST",
-                body: .object(["new_password": .string(newPassword)])
+                body: .object(["password": .string(newPassword), "new_password": .string(newPassword)])
             )
             newPassword = ""
             resetNotice = "Password updated and active sessions rotated."

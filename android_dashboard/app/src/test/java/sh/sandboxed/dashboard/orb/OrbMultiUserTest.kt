@@ -161,5 +161,18 @@ class OrbMultiUserTest {
         val participantMission = OrbRow("m-shared", mapOf("id" to "m-shared", "viewer_role" to "participant", "owner_username" to "thomas"))
         assertTrue(participantMission.isParticipant)
         assertEquals("thomas", participantMission.ownerUsername)
+
+        assertTrue(OrbUsersModel.isLegacySingleTenantFallback(404, "single_tenant"))
+        assertTrue(OrbUsersModel.isLegacySingleTenantFallback(404, "disabled"))
+        assertTrue(OrbUsersModel.isLegacySingleTenantFallback(404, null))
+        assertFalse(OrbUsersModel.isLegacySingleTenantFallback(404, "multi_user"))
+        assertFalse(OrbUsersModel.isLegacySingleTenantFallback(502, "single_tenant"))
+        assertEquals("/api/admin/users/usr-1/reset-password", OrbUsersModel.resetPasswordPath("usr-1"))
+
+        val synth = OrbAdminUser.singleTenantAdmin()
+        assertEquals("admin", synth.id)
+        assertEquals("admin", synth.username)
+        assertEquals("admin", synth.role)
+        assertFalse(synth.disabled)
     }
 }

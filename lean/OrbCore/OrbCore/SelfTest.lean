@@ -4178,6 +4178,14 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   if rstSt != 200 || staleMeSt != 401 || alLog2St != 200 || aliceTok.isEmpty then
     return (← fail s!"session_epoch revocation failed: rst={rstSt} staleMe={staleMeSt} reLogin={alLog2St}")
 
+  -- Legacy mobile route alias `/api/admin/users/:id/password` with `new_password` also rotates epoch
+  let (bobPwdAliasSt, _, _) ← sendReq "POST" s!"/api/admin/users/{bobId}/password" adminTok "{\"new_password\":\"bob-passphrase-654321\"}"
+  let (bobStaleMeSt, _, _) ← sendReq "GET" "/api/auth/me" bobTok ""
+  let (boLog2St, boLog2Body, _) ← sendReq "POST" "/api/auth/login" "" "{\"username\":\"bob\",\"password\":\"bob-passphrase-654321\"}"
+  let bobTok := ((OrbBin.Json.parse boLog2Body).toOption.getD (.obj #[]) |>.fieldStr? "token").getD ""
+  if bobPwdAliasSt != 200 || bobStaleMeSt != 401 || boLog2St != 200 || bobTok.isEmpty then
+    return (← fail s!"/password alias revocation failed: st={bobPwdAliasSt} stale={bobStaleMeSt} reLogin={boLog2St}")
+
   -- Self password change (`/api/auth/change-password`) works and bumps epoch; re-login `alice`
   let (chgSt, _, _) ← sendReq "POST" "/api/auth/change-password" aliceTok
     "{\"current_password\":\"alice-newpass-123456\",\"new_password\":\"alice-finalpass-1234\"}"
@@ -4526,6 +4534,54 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   closeManagedComputeStore mStore
   closeCoreStore store
   discard <| (IO.FS.removeDirAll muRoot).toBaseIO
+
+  -- 8. Legacy single-tenant DB layout (`missions/missions-prod.db`, `mission_runs.run_id` PK, `not_before` TEXT) + `sdNotifyRaw` safety
+  let legRoot := s!"/tmp/orb_legacy_compat_{muTs}"
+  discard <| (IO.FS.removeDirAll legRoot).toBaseIO
+  IO.FS.createDirAll (System.FilePath.mk s!"{legRoot}/missions")
+  IO.FS.writeFile (System.FilePath.mk s!"{legRoot}/missions.db") ""
+  let legMissionsPath := s!"{legRoot}/missions/missions-prod.db"
+  let legAskPath := s!"{legRoot}/missions/ask.db"
+  let legacySeedSchema :=
+    "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', working_directory TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', not_before TEXT);" ++
+    "CREATE TABLE IF NOT EXISTS mission_runs (run_id TEXT PRIMARY KEY NOT NULL, mission_id TEXT NOT NULL, generation INTEGER NOT NULL, execution_state TEXT NOT NULL, started_at TEXT NOT NULL);" ++
+    "INSERT INTO missions(id,title,status,backend,working_directory,updated_at,not_before) VALUES('m-leg-prod','Legacy Prod Mission','awaiting_user','opencode','/tmp','2026-11-06T00:00:00Z','2026-11-06T01:00:00Z');" ++
+    "INSERT INTO mission_runs(run_id,mission_id,generation,execution_state,started_at) VALUES('run-leg-0','m-leg-prod',1,'terminal','2026-11-06T00:05:00Z');"
+  let .ok preM ← openSqliteDb legMissionsPath legacySeedSchema #[]
+    | do discard <| (IO.FS.removeDirAll legRoot).toBaseIO; IO.eprintln "[orb-core-test] FAIL: open legacy missions-prod.db failed"; return 1
+  sqliteCloseRaw preM.handle
+  let .ok preA ← openSqliteDb legAskPath askSchemaSql #[]
+    | do discard <| (IO.FS.removeDirAll legRoot).toBaseIO; IO.eprintln "[orb-core-test] FAIL: open legacy missions/ask.db failed"; return 1
+  sqliteCloseRaw preA.handle
+  let legOpenRes ← openCoreStore legRoot 0 "prod"
+  let .ok legStore := legOpenRes
+    | do
+      let errStr := match legOpenRes with | .error e => e | .ok _ => ""
+      discard <| (IO.FS.removeDirAll legRoot).toBaseIO
+      IO.eprintln s!"[orb-core-test] FAIL: openCoreStore on legacy layout failed: {errStr}"
+      return 1
+  let .ok () ← ensureQueueContSchema legStore
+    | do closeCoreStore legStore; discard <| (IO.FS.removeDirAll legRoot).toBaseIO; IO.eprintln "[orb-core-test] FAIL: ensureQueueContSchema on legacy layout failed"; return 1
+  let backfilledRows ← execParamQuery legStore.missionsDb
+    "SELECT id, updated_at FROM mission_runs WHERE run_id='run-leg-0';" #[]
+  let bfId := match backfilledRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let bfUpd := match backfilledRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  let beginLeg ← beginMissionRun legStore "m-leg-prod" "run-leg-2" "2026-11-09T19:00:00Z" 1
+  let detLeg ← missionDetailJson legStore "m-leg-prod" none ""
+  let sdEmpty ← sdNotifyRaw "" "READY=1\n"
+  let sdMissing ← sdNotifyRaw s!"{legRoot}/nonexistent_notify.sock" "WATCHDOG=1\n"
+  closeCoreStore legStore
+  discard <| (IO.FS.removeDirAll legRoot).toBaseIO
+  let detStr := match detLeg with | .ok (some s) => s | _ => ""
+  if legStore.missionsDb.path != legMissionsPath ||
+     legStore.askDb.path != legAskPath ||
+     bfId != "run-leg-0" || bfUpd != "2026-11-06T00:05:00Z" ||
+     !beginLeg.isOk ||
+     (detStr.splitOn "\"id\":\"m-leg-prod\"").length < 2 ||
+     sdEmpty != 0 || sdMissing != 0 then
+    IO.eprintln s!"[orb-core-test] FAIL: legacy layout/sd_notify regression: mPath={legStore.missionsDb.path} aPath={legStore.askDb.path} bf={bfId}/{bfUpd} begin={reprStr beginLeg} sd={sdEmpty}/{sdMissing}"
+    return 1
+
   return 0
 
 set_option maxRecDepth 4000 in

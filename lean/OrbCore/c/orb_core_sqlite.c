@@ -7,8 +7,13 @@
 #include <lean/lean.h>
 #include <limits.h>
 #include <pthread.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <time.h>
+#include <unistd.h>
 
 #define SQLITE_OK 0
 #define SQLITE_ROW 100
@@ -179,4 +184,23 @@ LEAN_EXPORT lean_obj_res orb_pbkdf2_sha256(b_lean_obj_arg pass_obj, b_lean_obj_a
     for (int i = 0; i < 32; i++) { out[i * 2] = hx[dk[i] >> 4]; out[i * 2 + 1] = hx[dk[i] & 0x0f]; }
     out[64] = '\0';
     return lean_io_result_mk_ok(lean_mk_string(out));
+}
+
+LEAN_EXPORT lean_obj_res orb_sd_notify(b_lean_obj_arg sock_obj, b_lean_obj_arg msg_obj, lean_obj_arg w) {
+    (void)w;
+    const char *sp = lean_string_cstr(sock_obj), *msg = lean_string_cstr(msg_obj);
+    size_t slen = strlen(sp), mlen = strlen(msg);
+    struct sockaddr_un addr;
+    if (slen == 0 || mlen == 0 || (*sp != '/' && *sp != '@') || slen >= sizeof(addr.sun_path))
+        return lean_io_result_mk_ok(lean_box_uint32(0u));
+    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) return lean_io_result_mk_ok(lean_box_uint32(0u));
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, sp, slen);
+    socklen_t alen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + slen + 1);
+    if (addr.sun_path[0] == '@') { addr.sun_path[0] = '\0'; alen--; }
+    ssize_t rc = sendto(fd, msg, mlen, 0, (const struct sockaddr *)&addr, alen);
+    close(fd);
+    return lean_io_result_mk_ok(lean_box_uint32(rc == (ssize_t)mlen ? 1u : 0u));
 }

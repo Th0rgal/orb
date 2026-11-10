@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   applyAuthMeResponse,
+  buildSingleTenantAdminUser,
   currentUser,
   defaultUnixUsernameFor,
   isAdminUser,
+  isLegacySingleTenantUsersFallback,
   resetCurrentUserState,
   validUnixUsername,
 } from "../src/accountAdmin";
@@ -153,5 +155,20 @@ describe("multi-user RBAC, confinement, and sharing models", () => {
     expect(users).toHaveLength(2);
     expect(users[0]?.kind === "user" ? users[0].senderUsername : undefined).toBe("alice");
     expect(users[1]?.kind === "user" ? users[1].senderUsername : undefined).toBe("bob");
+  });
+
+  it("synthesizes @admin fallback only on 404 against non-multi_user servers", () => {
+    expect(isLegacySingleTenantUsersFallback(404, "single_tenant")).toBe(true);
+    expect(isLegacySingleTenantUsersFallback(404, "disabled")).toBe(true);
+    expect(isLegacySingleTenantUsersFallback(404, null)).toBe(true);
+    expect(isLegacySingleTenantUsersFallback(404, "multi_user")).toBe(false);
+    expect(isLegacySingleTenantUsersFallback(500, "single_tenant")).toBe(false);
+
+    resetCurrentUserState("single_tenant");
+    const fallback = buildSingleTenantAdminUser();
+    expect(fallback.id).toBe("admin");
+    expect(fallback.username).toBe("admin");
+    expect(fallback.role).toBe("admin");
+    expect(fallback.disabled).toBe(false);
   });
 });

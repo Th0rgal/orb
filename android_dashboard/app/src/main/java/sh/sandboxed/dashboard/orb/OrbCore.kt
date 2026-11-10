@@ -1959,9 +1959,11 @@ class OrbCore private constructor(context: Context) {
         } catch (err: OrbError) {
             if (err.status == 404) {
                 runCatching {
-                    val health = OrbJSON.dict(request("/api/health"))
-                    OrbJSON.str(health, "auth_mode")?.trim()?.takeIf { it.isNotEmpty() }?.let {
-                        _authModeFlow.value = it
+                    val st = OrbJSON.dict(request("/api/auth/status"))
+                    if (st != null) {
+                        _authModeFlow.value = OrbJSON.str(st, "auth_mode")?.trim()?.takeIf { it.isNotEmpty() } ?: "single_tenant"
+                        _currentUserFlow.value = null
+                        _authCapabilitiesFlow.value = null
                     }
                 }
             }

@@ -1039,9 +1039,8 @@ def beginMissionRun
     let proposed := curGen + 1
     let admit := verifyRunLifecycleAdmit phase 0 superseded 0 0 0 0 curGen proposed owner callerOwnerEpoch
     if admit != 1 then return .error "begin_run_rejected"
-    let ins ← execParamQueryUnlocked st.missionsDb
-      "INSERT INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,'claimed','','',?4);"
-      #[runId, missionId, s!"{proposed}", updatedAt]
+    let ins ← insertMissionRunUnlocked st.missionsDb
+      runId missionId s!"{proposed}" "claimed" "" "" updatedAt
     if let .error e := ins then return .error e
     let staleRows ← execParamQueryUnlocked st.missionsDb
       "SELECT id,phase,run_generation,due_epoch FROM mission_continuations WHERE mission_id=?1 AND phase=1 AND run_generation<CAST(?2 AS INTEGER);"

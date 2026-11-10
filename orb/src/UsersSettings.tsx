@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js";
 import {
   type AdminUserRecord,
   createAdminUser,
@@ -6,7 +6,7 @@ import {
   defaultUnixUsernameFor,
   deleteAdminUser,
   isAdminUser,
-  listAdminUsers,
+  loadAdminUsersForSettings,
   refreshCurrentUser,
   resetAdminUserPassword,
   updateAdminUser,
@@ -21,6 +21,8 @@ import { SettingsCard, SettingsRow } from "./SettingsCard";
 export function UsersSettings() {
   const [users, setUsers] = createSignal<AdminUserRecord[]>([]);
   const [loading, setLoading] = createSignal(true);
+  const [ready, setReady] = createSignal(false);
+  const [legacySingleTenant, setLegacySingleTenant] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
 
@@ -61,6 +63,9 @@ export function UsersSettings() {
   const load = async () => {
     if (!isConnected() || !isAdminUser()) {
       setUsers([]);
+      setReady(false);
+      setLegacySingleTenant(false);
+      setError(null);
       setLoading(false);
       return;
     }
@@ -68,9 +73,11 @@ export function UsersSettings() {
     setLoading(true);
     setError(null);
     try {
-      const list = await listAdminUsers();
+      const res = await loadAdminUsersForSettings();
       if (ver !== connectionVersion()) return;
-      setUsers(list);
+      setUsers(res.users);
+      setLegacySingleTenant(res.legacySingleTenant);
+      setReady(true);
     } catch (e) {
       if (ver !== connectionVersion()) return;
       setError(e instanceof Error ? e.message : String(e));
@@ -79,9 +86,15 @@ export function UsersSettings() {
     }
   };
 
-  onMount(() => {
-    void load();
-  });
+  createEffect(
+    on([connectionVersion, isConnected, isAdminUser], () => {
+      setUsers([]);
+      setReady(false);
+      setLegacySingleTenant(false);
+      setNotice(null);
+      void load();
+    }),
+  );
 
   const openCreate = () => {
     setNewUsername("");
@@ -282,13 +295,31 @@ export function UsersSettings() {
           hint="Missions, workspaces, and projects are private to their owner. Administrators manage accounts, Linux homes, and daily spend caps without access to another user's private work."
         >
           <SettingsRow
-            title="Multi-user accounts"
-            desc={`${users().length} ${users().length === 1 ? "account" : "accounts"} configured on Core.`}
+            title={legacySingleTenant() ? "Single-tenant administrator" : "Multi-user accounts"}
+            desc={
+              legacySingleTenant()
+                ? "Connected Core server is running in single-tenant mode. Upgrade Core to add or manage multi-user accounts."
+                : ready()
+                  ? `${users().length} ${users().length === 1 ? "account" : "accounts"} configured on Core.`
+                  : loading()
+                    ? "Checking accounts on Core…"
+                    : "Account list unavailable."
+            }
           >
             <button type="button" class="s-btn" onClick={() => void load()} disabled={loading()}>
               Refresh
             </button>
-            <button type="button" class="s-btn primary" onClick={openCreate}>
+            <button
+              type="button"
+              class="s-btn primary"
+              onClick={openCreate}
+              disabled={legacySingleTenant()}
+              title={
+                legacySingleTenant()
+                  ? "Upgrade Core to create multi-user accounts."
+                  : undefined
+              }
+            >
               Add user…
             </button>
           </SettingsRow>
@@ -308,89 +339,109 @@ export function UsersSettings() {
           </Show>
         </SettingsCard>
 
-        <SettingsCard title="Accounts">
-          <Show
-            when={!loading()}
-            fallback={
-              <div class="s-row" role="status" aria-label="Loading users" aria-busy="true">
-                <div class="s-row-text" style={{ width: "100%" }}>
-                  <div class="sk-bar" style={{ width: "34%", height: "14px", "margin-bottom": "8px" }} />
-                  <div class="sk-bar" style={{ width: "62%", height: "12px" }} />
-                </div>
-              </div>
-            }
-          >
+        <Show when={loading() || ready() || users().length > 0}>
+          <SettingsCard title="Accounts">
             <Show
-              when={users().length > 0}
-              fallback={<SettingsRow title="No user accounts yet" desc="Create a user account to enable multi-user sign-in." />}
+              when={!loading()}
+              fallback={
+                <div class="s-row" role="status" aria-label="Loading users" aria-busy="true">
+                  <div class="s-row-text" style={{ width: "100%" }}>
+                    <div class="sk-bar" style={{ width: "34%", height: "14px", "margin-bottom": "8px" }} />
+                    <div class="sk-bar" style={{ width: "62%", height: "12px" }} />
+                  </div>
+                </div>
+              }
             >
-              <For each={users()}>
-                {(u) => {
-                  const spendDesc = () => {
-                    const spent = formatUsdFromCents(u.spent_today_cents);
-                    return u.daily_spend_cap_cents !== null && u.daily_spend_cap_cents !== undefined
-                      ? `${spent} / ${formatUsdFromCents(u.daily_spend_cap_cents)} today`
-                      : `${spent} today · no cap`;
-                  };
-                  const soleAdmin = () => isSoleActiveAdmin(u);
-                  return (
-                    <SettingsRow
-                      title={
-                        <span>
-                          <strong>@{u.username}</strong>{" "}
-                          <span class="muted">
-                            · {u.role === "admin" ? "Admin" : "Member"}
-                            {u.disabled ? " · Disabled" : ""}
-                            {currentUser()?.id === u.id ? " · You" : ""}
-                          </span>
-                        </span>
-                      }
-                      desc={
-                        <span>
-                          {u.unix_username ? `/home/${u.unix_username}` : "No Linux home assigned"} · {spendDesc()}
-                        </span>
-                      }
-                    >
-                      <button type="button" class="s-btn" onClick={() => openEdit(u)}>
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        class="s-btn"
-                        onClick={() => {
-                          setResetTarget(u);
-                          setResetPwd("");
-                          setResetConfirm("");
-                          setResetError(null);
-                        }}
-                      >
-                        Reset password
-                      </button>
-                      <button
-                        type="button"
-                        class="s-btn danger"
-                        disabled={soleAdmin() || currentUser()?.id === u.id}
+              <Show
+                when={users().length > 0}
+                fallback={<SettingsRow title="No user accounts yet" desc="Create a user account to enable multi-user sign-in." />}
+              >
+                <For each={users()}>
+                  {(u) => {
+                    const spendDesc = () => {
+                      const spent = formatUsdFromCents(u.spent_today_cents);
+                      return u.daily_spend_cap_cents !== null && u.daily_spend_cap_cents !== undefined
+                        ? `${spent} / ${formatUsdFromCents(u.daily_spend_cap_cents)} today`
+                        : `${spent} today · no cap`;
+                    };
+                    const soleAdmin = () => isSoleActiveAdmin(u);
+                    const isSelf = () => legacySingleTenant() || currentUser()?.id === u.id;
+                    return (
+                      <SettingsRow
                         title={
-                          soleAdmin()
-                            ? "At least one active administrator account must remain."
-                            : currentUser()?.id === u.id
-                              ? "Sign in as another administrator to remove your own account."
-                              : undefined
+                          <span>
+                            <strong>@{u.username}</strong>{" "}
+                            <span class="muted">
+                              · {u.role === "admin" ? "Admin" : "Member"}
+                              {u.disabled ? " · Disabled" : ""}
+                              {isSelf() ? " · You" : ""}
+                            </span>
+                          </span>
                         }
-                        onClick={() => {
-                          setDeleteError(null);
-                          setDeleteTarget(u);
-                        }}
+                        desc={
+                          legacySingleTenant() ? (
+                            <span>Server password · Full Core &amp; fleet access · no daily cap</span>
+                          ) : (
+                            <span>
+                              {u.unix_username ? `/home/${u.unix_username}` : "No Linux home assigned"} · {spendDesc()}
+                            </span>
+                          )
+                        }
                       >
-                        Delete
-                      </button>
-                    </SettingsRow>
-                  );
-                }}
-              </For>
+                        <Show
+                          when={!legacySingleTenant()}
+                          fallback={
+                            <button
+                              type="button"
+                              class="s-btn"
+                              onClick={() => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: "account-settings" }))}
+                            >
+                              Account settings
+                            </button>
+                          }
+                        >
+                          <button type="button" class="s-btn" onClick={() => openEdit(u)}>
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            class="s-btn"
+                            onClick={() => {
+                              setResetTarget(u);
+                              setResetPwd("");
+                              setResetConfirm("");
+                              setResetError(null);
+                            }}
+                          >
+                            Reset password
+                          </button>
+                          <button
+                            type="button"
+                            class="s-btn danger"
+                            disabled={soleAdmin() || isSelf()}
+                            title={
+                              soleAdmin()
+                                ? "At least one active administrator account must remain."
+                                : isSelf()
+                                  ? "Sign in as another administrator to remove your own account."
+                                  : undefined
+                            }
+                            onClick={() => {
+                              setDeleteError(null);
+                              setDeleteTarget(u);
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </Show>
+                      </SettingsRow>
+                    );
+                  }}
+                </For>
+              </Show>
             </Show>
-          </Show>
-        </SettingsCard>
+          </SettingsCard>
+        </Show>
       </Show>
 
       <Show when={creating()}>

@@ -2082,7 +2082,9 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
           s!"\{\"id\":{jsonEscape created.id},\"username\":{jsonEscape created.username},\"role\":{jsonEscape created.role}," ++
           s!"\"unix_username\":{unixJson},\"disabled\":false,\"daily_spend_cap_cents\":{capJson}," ++
           s!"\"spent_today_cents\":0,\"created_at\":{jsonEscape created.createdAt}}"))
-    else if let some params := matchRoutePattern? "/api/admin/users/:id/reset-password" rawTarget then
+    else if let some params :=
+        (matchRoutePattern? "/api/admin/users/:id/reset-password" rawTarget).orElse
+          (fun _ => matchRoutePattern? "/api/admin/users/:id/password" rawTarget) then
       if req.method == "POST" then
         let targetUid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
         let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
@@ -4633,6 +4635,13 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to bind {bindHost}:{cfg.port}"
         return 1
     IO.eprintln s!"[sandboxed-sh] listening on http://{bindHost}:{boundPort} (dev_mode={cfg.devMode})"
+    let notifySock := ((← IO.getEnv "NOTIFY_SOCKET").getD "").trimAscii.toString
+    let watchdogUsec := ((← IO.getEnv "WATCHDOG_USEC").bind String.toNat?).getD 0
+    let wdIntervalSec : UInt64 :=
+      if watchdogUsec > 0 then (max 1 (watchdogUsec / 2000000)).toUInt64 else 15
+    if !notifySock.isEmpty then
+      discard <| sdNotifyRaw notifySock s!"READY=1\nSTATUS=Listening on {bindHost}:{boundPort}\n"
+    let mut lastWatchdogSec : UInt64 := nowBootSec
     let mut lastTelFlushSec : UInt64 := nowBootSec
     let mut served : Nat := 0
     while (match maxRequests? with | some lim => decide (served < lim) | none => true) do
@@ -4640,6 +4649,9 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       | .error _ =>
         if maxRequests?.isNone then
           let curSec ← coreEpochSec
+          if !notifySock.isEmpty && curSec ≥ lastWatchdogSec + wdIntervalSec then
+            lastWatchdogSec := curSec
+            discard <| sdNotifyRaw notifySock "WATCHDOG=1\n"
           if curSec ≥ lastTelFlushSec + 30 then
             lastTelFlushSec := curSec
             discard <| IO.asTask (prio := .dedicated) (do discard <| flushTelemetryOnce telemetrySink curSec)
@@ -4648,7 +4660,14 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           handleClientConn appState cfd
         else
           discard <| IO.asTask (prio := .dedicated) (handleClientConn appState cfd)
+          if !notifySock.isEmpty then
+            let curSec ← coreEpochSec
+            if curSec ≥ lastWatchdogSec + wdIntervalSec then
+              lastWatchdogSec := curSec
+              discard <| sdNotifyRaw notifySock "WATCHDOG=1\n"
         served := served + 1
+    if !notifySock.isEmpty then
+      discard <| sdNotifyRaw notifySock "STOPPING=1\n"
     discard <| closeFd listenFd
     closeManagedComputeStore managedStore
     closeCoreStore store
