@@ -1,6 +1,6 @@
 import { createEffect, createRoot } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getApiUrl, getJwt } from "../src/api";
+import { getApiUrl, getJwt, setConnection } from "../src/api";
 import {
   getBackgroundSyncMode,
   isBackgroundSyncActive,
@@ -419,5 +419,56 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
 
     await pullDesktopPrefs(false);
     expect(seenSinceRevs.at(-1)).toBe("r-3-after-flush");
+  });
+
+  it("continues reconciling connection changes when preference patches fail persistently", async () => {
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: (query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    });
+
+    let sharedConn: { api_url?: string; token?: string } | null = {
+      api_url: "https://orbcore.thomas.md",
+      token: "jwt-initial",
+    };
+
+    const invoke = vi.fn(async (cmd: string) => {
+      if (cmd === "desktop_prefs_load") {
+        return { unchanged: false, exists: true, rev: "r-init", prefs: { "orb-theme": "dark" } };
+      }
+      if (cmd === "desktop_prefs_patch") {
+        throw new Error("ui-prefs.json is malformed");
+      }
+      if (cmd === "desktop_connection_load") return sharedConn;
+      if (cmd === "desktop_connection_save") return null;
+      if (cmd === "set_window_theme") return null;
+      return undefined;
+    });
+
+    (window as unknown as { __ORB_DESKTOP__?: unknown }).__ORB_DESKTOP__ = { core: { invoke } };
+
+    setConnection("https://orbcore.thomas.md", "jwt-initial");
+    await initDesktopPrefs();
+
+    // Local preference edit fails to patch persistently:
+    setVoiceLanguage("de");
+    await flushDesktopPrefs();
+    expect(localStorage.getItem("orb.voiceLang")).toBe("de");
+
+    // Another desktop client switches token and then signs out while ui-prefs.json remains broken:
+    sharedConn = { api_url: "https://orbcore.thomas.md", token: "jwt-rotated" };
+    await pullDesktopPrefs(true);
+    expect(getJwt()).toBe("jwt-rotated");
+    expect(localStorage.getItem("orb.voiceLang")).toBe("de");
+
+    sharedConn = null;
+    await pullDesktopPrefs(true);
+    expect(getJwt()).toBeNull();
+    expect(localStorage.getItem("orb.voiceLang")).toBe("de");
   });
 });

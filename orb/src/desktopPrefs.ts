@@ -55,6 +55,7 @@ let initInFlight: Promise<void> | null = null;
 let storageHooked = false;
 let applyingRemote = false;
 let pullInFlight = false;
+let connCheckInFlight = false;
 let flushRunning: Promise<void> | null = null;
 let mutationEpoch = 0;
 let lastRev = "";
@@ -299,6 +300,16 @@ async function reconcileDesktopConnection(
     if (nextSig === localSigBefore) {
       lastObservedConnVersion = verBefore;
       lastSyncedConnSig = nextSig;
+    } else if (nextSig !== lastSyncedConnSig) {
+      lastSyncedConnSig = nextSig;
+      if (saved?.api_url && saved?.token) {
+        if (connSig(getApiUrl(), getJwt()) !== nextSig) {
+          setConnection(saved.api_url, saved.token);
+        }
+      } else if (getJwt()) {
+        clearConnection();
+      }
+      lastObservedConnVersion = connectionVersion();
     }
     return;
   }
@@ -356,15 +367,22 @@ function scheduleInitRetry(): void {
   }, INIT_RETRY_MS);
 }
 
-export async function pullDesktopPrefs(checkConnection = false): Promise<void> {
-  if (!initialized) {
-    const invoke = nativeInvoke();
-    if (invoke && checkConnection) {
-      await reconcileDesktopConnection(invoke);
-    }
-    await initDesktopPrefs();
-    return;
+async function maybeReconcileConnection(
+  checkConnection: boolean,
+  invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>,
+): Promise<void> {
+  if (!checkConnection || connCheckInFlight) return;
+  connCheckInFlight = true;
+  try {
+    await reconcileDesktopConnection(invoke);
+  } finally {
+    connCheckInFlight = false;
   }
+}
+
+async function pullPrefsOnly(
+  invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>,
+): Promise<void> {
   if (pullInFlight || flushRunning !== null) return;
   if (pendingClear || pendingSet.size > 0 || pendingRemove.size > 0) {
     await flushDesktopPrefs();
@@ -372,39 +390,42 @@ export async function pullDesktopPrefs(checkConnection = false): Promise<void> {
       return;
     }
   }
-  const invoke = nativeInvoke();
-  if (!invoke) return;
 
   pullInFlight = true;
   try {
-    try {
-      const loadEpoch = mutationEpoch;
-      const res = await invoke<PrefsLoadResponse>("desktop_prefs_load", lastRev ? { since_rev: lastRev } : {});
-      if (
-        res &&
-        typeof res === "object" &&
-        mutationEpoch === loadEpoch &&
-        !pendingClear &&
-        pendingSet.size === 0 &&
-        pendingRemove.size === 0 &&
-        flushRunning === null
-      ) {
-        if (res.unchanged === true) {
-          if (typeof res.rev === "string" && res.rev) lastRev = res.rev;
-        } else if (res.prefs && typeof res.prefs === "object") {
-          applyRemoteSnapshot(res.prefs, true);
-          if (typeof res.rev === "string" && res.rev) lastRev = res.rev;
-        }
+    const loadEpoch = mutationEpoch;
+    const res = await invoke<PrefsLoadResponse>("desktop_prefs_load", lastRev ? { since_rev: lastRev } : {});
+    if (
+      res &&
+      typeof res === "object" &&
+      mutationEpoch === loadEpoch &&
+      !pendingClear &&
+      pendingSet.size === 0 &&
+      pendingRemove.size === 0 &&
+      flushRunning === null
+    ) {
+      if (res.unchanged === true) {
+        if (typeof res.rev === "string" && res.rev) lastRev = res.rev;
+      } else if (res.prefs && typeof res.prefs === "object") {
+        applyRemoteSnapshot(res.prefs, true);
+        if (typeof res.rev === "string" && res.rev) lastRev = res.rev;
       }
-    } catch {
-      // Ignore transient ui-prefs RPC errors while still reconciling connection.json below.
     }
-    if (checkConnection) {
-      await reconcileDesktopConnection(invoke);
-    }
+  } catch {
+    // Ignore transient ui-prefs RPC errors.
   } finally {
     pullInFlight = false;
   }
+}
+
+export async function pullDesktopPrefs(checkConnection = false): Promise<void> {
+  const invoke = nativeInvoke();
+  if (!invoke) return;
+  if (!initialized) {
+    await Promise.all([maybeReconcileConnection(checkConnection, invoke), initDesktopPrefs()]);
+    return;
+  }
+  await Promise.all([pullPrefsOnly(invoke), maybeReconcileConnection(checkConnection, invoke)]);
 }
 
 async function runInitDesktopPrefs(): Promise<void> {
@@ -419,13 +440,13 @@ async function runInitDesktopPrefs(): Promise<void> {
     initial = await invoke<PrefsLoadResponse>("desktop_prefs_load", {});
   } catch {
     hadFailedInit = true;
-    await reconcileDesktopConnection(invoke);
+    await maybeReconcileConnection(true, invoke);
     scheduleInitRetry();
     return;
   }
   if (!initial || typeof initial !== "object" || !initial.prefs || typeof initial.prefs !== "object") {
     hadFailedInit = true;
-    await reconcileDesktopConnection(invoke);
+    await maybeReconcileConnection(true, invoke);
     scheduleInitRetry();
     return;
   }
@@ -519,6 +540,7 @@ export function resetDesktopPrefsForTest(): void {
   initInFlight = null;
   applyingRemote = false;
   pullInFlight = false;
+  connCheckInFlight = false;
   flushRunning = null;
   mutationEpoch = 0;
   lastRev = "";
