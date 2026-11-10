@@ -7,11 +7,35 @@
  * Values returned by `readJson` may be shared with later readers: copy before
  * mutating unless the result is written back with `writeJson`.
  */
-import { createSignal, type Accessor } from "solid-js";
+import { createSignal, getListener, onCleanup, type Accessor } from "solid-js";
 import { log } from "./log";
 
 type Entry = { raw: string | null; value: unknown; unsaved?: boolean };
 const memory = new Map<string, Entry>();
+const keySignals = new Map<string, [Accessor<number>, (fn: (n: number) => number) => void]>();
+const jsonSignalSyncers = new Map<string, Set<() => void>>();
+
+function trackKey(key: string): void {
+  if (!getListener()) return;
+  let sig = keySignals.get(key);
+  if (!sig) {
+    sig = createSignal(0);
+    keySignals.set(key, sig);
+  }
+  sig[0]();
+}
+
+function bumpKey(key: string): void {
+  keySignals.get(key)?.[1]((n) => n + 1);
+  const syncs = jsonSignalSyncers.get(key);
+  if (syncs) for (const fn of syncs) fn();
+}
+
+/** Invalidate cached entry for `key` and wake fine-grained readers after an external storage sync. */
+export function notifyExternalStorageChange(key: string): void {
+  memory.delete(key);
+  bumpKey(key);
+}
 
 function storage(): Storage | undefined {
   try { return typeof localStorage === "undefined" ? undefined : localStorage; } catch { return undefined; }
@@ -19,6 +43,7 @@ function storage(): Storage | undefined {
 
 /** The stored text, or `null`. Never throws. */
 export function readString(key: string): string | null {
+  trackKey(key);
   const held = memory.get(key);
   if (held?.unsaved) return typeof held.value === "string" ? held.value : held.raw;
   try { return storage()?.getItem(key) ?? null; } catch { return held?.raw ?? null; }
@@ -49,6 +74,7 @@ export function removeKey(key: string): void {
  * rejected by `valid`.
  */
 export function readJson<T>(key: string, fallback: T, valid?: (value: unknown) => boolean): T {
+  trackKey(key);
   const held = memory.get(key);
   if (held?.unsaved) return held.value as T;
   let raw: string | null;
@@ -82,6 +108,14 @@ export function writeJson(key: string, value: unknown): boolean {
 /** A signal persisted as JSON at `key`. */
 export function jsonSignal<T>(key: string, fallback: T, valid?: (value: unknown) => boolean): [Accessor<T>, (next: T) => void] {
   const [value, setValue] = createSignal<T>(readJson(key, fallback, valid));
+  const sync = () => setValue(() => readJson(key, fallback, valid));
+  let set = jsonSignalSyncers.get(key);
+  if (!set) {
+    set = new Set();
+    jsonSignalSyncers.set(key, set);
+  }
+  set.add(sync);
+  if (getListener()) onCleanup(() => set?.delete(sync));
   return [value, (next: T) => { setValue(() => next); writeJson(key, next); }];
 }
 

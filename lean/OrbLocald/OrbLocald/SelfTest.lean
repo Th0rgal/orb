@@ -410,7 +410,7 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
   let escapeLink := allowedDir / "escape.txt"
   IO.FS.writeFile secretFile "DO_NOT_READ"
   IO.FS.writeFile goodFile "SAFE_PAYLOAD"
-  discard <| IO.Process.run { cmd := "/bin/ln", args := #["-s", secretFile.toString, escapeLink.toString] }
+  discard <| IO.Process.run { cmd := "ln", args := #["-s", secretFile.toString, escapeLink.toString] }
 
   let stConfRef ← IO.mkRef ({
     launchToken := validTok,
@@ -501,6 +501,22 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
      | _ => false)
   if (← assertTrue "biometric_auth_errors_on_cancel_and_status_passcode_fallback" bioAuthOk) then passed := passed + 1
 
+  -- C2. Linux `approval_key_status`, `approval_key_create`, and `approval_sign` via `orb-signer`
+  let linuxSigner := pDir / "mock-linux-signer.sh"
+  IO.FS.writeFile linuxSigner
+    "#!/bin/sh\nif [ \"$1\" = \"status\" ]; then echo '{\"available\":\"true\",\"kind\":\"passcode\",\"label\":\"Touch ID or Password\"}'; exit 0; fi\nif [ \"$1\" = \"public\" ]; then exit 4; fi\nif [ \"$1\" = \"create\" ]; then echo '{\"public_key\":\"TEST_LINUX_PUBKEY\"}'; exit 0; fi\nif [ \"$1\" = \"serve\" ]; then read line; echo '{\"signature\":\"TEST_LINUX_SIG\",\"grace_until\":\"9999999999\"}'; exit 0; fi\nexit 1\n"
+  discard <| OrbBin.PosixExt.chmod linuxSigner.toString 0o700
+  let stLinuxKey ← IO.mkRef ({ launchToken := validTok, orbStateDir := (pDir / "state-lnx").toString, approvalKeyPath := (pDir / "lnx-key.bin").toString, hostOs := "linux", signerBin? := some linuxSigner.toString } : LocaldState)
+  let lnxKeyStatus ← dispatchRpcCommand stLinuxKey "approval_key_status" (.obj #[])
+  let lnxKeyCreate ← dispatchRpcCommand stLinuxKey "approval_key_create" (.obj #[])
+  let lnxKeySign ← dispatchRpcCommand stLinuxKey "approval_sign" (.obj #[("payload", .str "paloma-approval-v1\nid\nPOST /api/approvals/approve-all\nhash\n9999999999\nAllow"), ("reason", .str "Allow")])
+  total := total + 1
+  let lnxSignerOk :=
+    (match lnxKeyStatus with | .ok jv => jv.fieldBool? "available" == some true && jv.fieldBool? "enrolled" == some false | _ => false) &&
+    (match lnxKeyCreate with | .ok (.str "TEST_LINUX_PUBKEY") => true | _ => false) &&
+    (match lnxKeySign with | .ok (.str "TEST_LINUX_SIG") => true | _ => false)
+  if (← assertTrue "linux_orb_signer_status_create_and_sign" lnxSignerOk) then passed := passed + 1
+
   -- D. Durable `local-bindings.json` + `local-origins.json` reload across daemon restarts
   let persistDir := (pDir / "persist-state").toString
   let stP1 ← IO.mkRef ({ launchToken := validTok, orbStateDir := persistDir, homeDir := (pDir / "home").toString, hostOs := "macos" } : LocaldState)
@@ -532,6 +548,38 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
        (m.fieldStr? "created_at").isSome
      | _ => false)
   if (← assertTrue "durable_local_bindings_and_origins_survive_daemon_restart" persistOk) then passed := passed + 1
+
+  -- D2. Shared `ui-prefs.json` (`desktop_prefs_load` / `desktop_prefs_patch`) across prod & dev daemons
+  let patchRes ← dispatchRpcCommand stP1 "desktop_prefs_patch" (.obj #[
+    ("set", .obj #[
+      ("orb-theme", .str "light"),
+      ("orb.approval.graceSecs", .str "600"),
+      ("orb.jwt", .str "MUST_NOT_PERSIST"),
+      ("orb.catalog:123:/api/projects", .str "MUST_NOT_PERSIST")
+    ])
+  ])
+  let rev1 := match patchRes with | .ok jv => (jv.fieldStr? "rev").getD "" | _ => ""
+  let loadRes ← dispatchRpcCommand stP2 "desktop_prefs_load" (.obj #[])
+  let sameRevRes ← dispatchRpcCommand stP2 "desktop_prefs_load" (.obj #[("since_rev", .str rev1)])
+  total := total + 1
+  let prefsShareOk :=
+    !rev1.isEmpty &&
+    (match loadRes with
+     | .ok jv =>
+       jv.fieldBool? "unchanged" == some false &&
+       jv.fieldStr? "rev" == some rev1 &&
+       (match jv.field? "prefs" with
+        | some p =>
+          p.fieldStr? "orb-theme" == some "light" &&
+          p.fieldStr? "orb.approval.graceSecs" == some "600" &&
+          (p.field? "orb.jwt").isNone &&
+          (p.field? "orb.catalog:123:/api/projects").isNone
+        | none => false)
+     | _ => false) &&
+    (match sameRevRes with
+     | .ok jv => jv.fieldBool? "unchanged" == some true && (jv.field? "prefs").isNone
+     | _ => false)
+  if (← assertTrue "desktop_prefs_shared_across_daemons" prefsShareOk) then passed := passed + 1
 
   -- E. Token-scoped `__orb_poll_events` + per-SSE-subscriber broadcast (no multi-window event stealing)
   let stPub ← IO.mkRef ({ launchToken := validTok } : LocaldState)
@@ -932,9 +980,9 @@ def main : IO UInt32 := do
   let mut passed := 0
   let mut total := 0
 
-  -- 1. Command table size (95 desktop commands + plugin:app|version = 96)
+  -- 1. Command table size (97 desktop commands + plugin:app|version = 98)
   total := total + 1
-  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 96) then passed := passed + 1
+  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 98) then passed := passed + 1
 
   -- 2. Loopback RPC auth gate (>= 32-byte non-placeholder secret + local Origin confinement)
   let validTok := "0123456789abcdef0123456789abcdef"

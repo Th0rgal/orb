@@ -2,7 +2,10 @@
 # Fast Orb Desktop developer loop & macOS/Linux bundle staging.
 #
 # Usage:
-#   ./scripts/orb_desktop_dev.sh                     # HMR dev loop: Vite on 127.0.0.1:1430 + native shell + orb-locald
+#   ./scripts/orb_desktop_dev.sh                     # UI HMR dev loop: Vite on 127.0.0.1:1430 + native shell + orb-locald (shares ~/.orb prod connection)
+#   ./scripts/orb_desktop_dev.sh --local-server      # Isolated full-stack loop: also starts local orb-server in .orb-dev/
+#   ./scripts/orb_desktop_dev.sh --rebuild           # Force rebuild of Lean/native binaries even if sources are unchanged
+#   ./scripts/orb_desktop_dev.sh --install-desktop   # Install 'Orb Dev' XDG desktop launcher entry (~/.local/share/applications/orb-dev.desktop)
 #   ./scripts/orb_desktop_dev.sh --bundle            # Stage standalone macos_shell/build/Orb.app (or linux_shell/build)
 #   ./scripts/orb_desktop_dev.sh --bundle --install  # Also sync staged Orb.app into /Applications/Orb.app
 #   ./scripts/orb_desktop_dev.sh --ui-only --install # ~10s UI-only update: rebuild orb/dist + sync into Orb.app (skips Lean/Swift)
@@ -12,9 +15,16 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 ORIG_ARGS=("$@")
 MODE="dev"
 INSTALL_APP=0
+INSTALL_DESKTOP=0
+FORCE_REBUILD=0
 UI_ONLY=0
+NO_SERVER="${ORB_NO_LOCAL_SERVER:-1}"
+if [[ "${ORB_WITH_LOCAL_SERVER:-0}" == "1" ]]; then
+  NO_SERVER=0
+fi
 VITE_PORT="${ORB_VITE_PORT:-1430}"
-LOCALD_PORT="${ORB_LOCALD_PORT:-19477}"
+LOCALD_PORT="${ORB_LOCALD_PORT:-}"
+SERVER_PORT="${ORB_SERVER_PORT:-3000}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,14 +41,86 @@ while [[ $# -gt 0 ]]; do
       INSTALL_APP=1
       shift
       ;;
+    --install-desktop)
+      INSTALL_DESKTOP=1
+      shift
+      ;;
+    --rebuild)
+      FORCE_REBUILD=1
+      shift
+      ;;
+    --local-server)
+      NO_SERVER=0
+      shift
+      ;;
+    --no-server)
+      NO_SERVER=1
+      shift
+      ;;
     *)
-      echo "error: unknown option '$1' (expected --bundle, --ui-only, or --install)" >&2
+      echo "error: unknown option '$1' (expected --bundle, --ui-only, --install, --install-desktop, --rebuild, --local-server, or --no-server)" >&2
       exit 2
       ;;
   esac
 done
 
 OS_NAME="$(uname -s)"
+
+if [[ "$INSTALL_DESKTOP" == "1" ]]; then
+  if [[ "$OS_NAME" != "Linux" ]]; then
+    echo "error: --install-desktop is only supported on Linux XDG desktops" >&2
+    exit 1
+  fi
+  DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+  APPS_DIR="$DATA_HOME/applications"
+  HICOLOR_DIR="$DATA_HOME/icons/hicolor"
+  mkdir -p \
+    "$APPS_DIR" \
+    "$HICOLOR_DIR/32x32/apps" \
+    "$HICOLOR_DIR/128x128/apps" \
+    "$HICOLOR_DIR/128x128@2/apps" \
+    "$HICOLOR_DIR/256x256/apps"
+  for icon_name in orb orb-dev; do
+    install -m 0644 "$ROOT_DIR/macos_shell/icons/32x32.png" "$HICOLOR_DIR/32x32/apps/${icon_name}.png"
+    install -m 0644 "$ROOT_DIR/macos_shell/icons/128x128.png" "$HICOLOR_DIR/128x128/apps/${icon_name}.png"
+    install -m 0644 "$ROOT_DIR/macos_shell/icons/128x128@2x.png" "$HICOLOR_DIR/128x128@2/apps/${icon_name}.png"
+    install -m 0644 "$ROOT_DIR/macos_shell/icons/icon.png" "$HICOLOR_DIR/256x256/apps/${icon_name}.png"
+  done
+  DESKTOP_FILE="$APPS_DIR/orb-dev.desktop"
+  cat > "$DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Name=Orb Dev
+GenericName=Orb UI Dev Client
+Comment=Orb UI from ${ROOT_DIR} (Vite HMR + orb-locald, shared ~/.orb connection)
+Exec=${ROOT_DIR}/scripts/orb_desktop_dev.sh
+Icon=orb-dev
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+Keywords=orb;dev;hmr;ui;
+StartupWMClass=orb
+EOF
+  chmod 0644 "$DESKTOP_FILE"
+  echo "==> Installed XDG launcher entry ($DESKTOP_FILE) and hicolor icons ($HICOLOR_DIR)"
+  exit 0
+fi
+
+# When launched from an app launcher (fuzzel/rofi/dmenu, non-TTY stdout), log to
+# .orb-dev/orb-dev.log and surface build errors via desktop notifications.
+LAUNCHED_FROM_GUI=0
+if [[ ! -t 1 && -z "${ORB_DEV_LOGGED:-}" ]]; then
+  LAUNCHED_FROM_GUI=1
+  mkdir -p "$ROOT_DIR/.orb-dev"
+  chmod 0700 "$ROOT_DIR/.orb-dev"
+  LOG_FILE="$ROOT_DIR/.orb-dev/orb-dev.log"
+  export ORB_DEV_LOGGED=1
+  exec >"$LOG_FILE" 2>&1
+fi
+if [[ "${ORB_DEV_LOGGED:-}" == "1" ]]; then
+  LAUNCHED_FROM_GUI=1
+  LOG_FILE="$ROOT_DIR/.orb-dev/orb-dev.log"
+  trap 'command -v notify-send >/dev/null 2>&1 && notify-send -u critical "Orb Dev failed to start" "Check ${LOG_FILE}" || true' ERR
+fi
 
 # Ensure NixOS user/system profile directories are on PATH (GUI launchers may have a minimal PATH),
 # and transparently enter `nix develop` if pnpm, GTK/WebKitGTK dev headers, or GIO TLS modules are missing.
@@ -104,33 +186,100 @@ if [[ "$UI_ONLY" == "1" ]]; then
     rm -rf "$STAGE_BIN_DIR/dist"
     cp -R "$ROOT_DIR/orb/dist" "$STAGE_BIN_DIR/dist"
     echo "==> Synced orb/dist into $STAGE_BIN_DIR/dist"
+    if [[ "$INSTALL_APP" == "1" ]]; then
+      LINUX_APP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/orb-app"
+      if [[ ! -x "$LINUX_APP_DIR/bin/orb" ]]; then
+        echo "error: $LINUX_APP_DIR not found; run './scripts/orb_desktop_dev.sh --bundle --install' once first" >&2
+        exit 1
+      fi
+      rsync -a "$ROOT_DIR/orb/dist/" "$LINUX_APP_DIR/share/orb/"
+      echo "==> Synced orb/dist into $LINUX_APP_DIR/share/orb"
+    fi
   fi
   exit 0
 fi
 
-echo "==> Building orb-locald + sandboxed-mcp via turbo-lean / lake..."
-"$ROOT_DIR/scripts/build_orb_bins.sh" \
-  --out-dir "$STAGE_BIN_DIR" \
-  --only orb-locald \
-  --only sandboxed-mcp
+SERVER_BIN="sandboxed-sh"
+if grep -q '"orb-server"' "$ROOT_DIR/scripts/build_orb_bins.sh" 2>/dev/null; then
+  SERVER_BIN="orb-server"
+fi
+
+BINS_ARGS=(--only orb-locald --only sandboxed-mcp)
+REQUIRED_LEAN_BINS=("$STAGE_BIN_DIR/orb-locald" "$STAGE_BIN_DIR/sandboxed-mcp")
+if [[ "$MODE" == "dev" && "$NO_SERVER" == "0" ]]; then
+  BINS_ARGS+=(--only "$SERVER_BIN" --only workspace-mcp)
+  REQUIRED_LEAN_BINS+=("$STAGE_BIN_DIR/$SERVER_BIN" "$STAGE_BIN_DIR/workspace-mcp")
+fi
+
+NEED_LEAN_BUILD=0
+LEAN_WATCH_DIRS=("$ROOT_DIR/lean/Orb" "$ROOT_DIR/lean/OrbBin" "$ROOT_DIR/lean/OrbNetLeaf" "$ROOT_DIR/lean/OrbLocald" "$ROOT_DIR/lean/LeanSys")
+if [[ "$MODE" == "dev" && "$NO_SERVER" == "0" ]]; then
+  LEAN_WATCH_DIRS=("$ROOT_DIR/lean")
+fi
+if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" ]]; then
+  NEED_LEAN_BUILD=1
+else
+  for bin_path in "${REQUIRED_LEAN_BINS[@]}"; do
+    if [[ ! -x "$bin_path" ]]; then
+      NEED_LEAN_BUILD=1
+      break
+    fi
+    if [[ -n "$(find "${LEAN_WATCH_DIRS[@]}" \( -name .lake -prune \) -o \( -name '*.lean' -o -name '*.c' -o -name '*.h' -o -name 'lakefile.lean' \) -newer "$bin_path" -print -quit 2>/dev/null)" ]]; then
+      NEED_LEAN_BUILD=1
+      break
+    fi
+  done
+fi
+
+GUI_BUILD_NOTIFIED=0
+notify_gui_build() {
+  if [[ "$LAUNCHED_FROM_GUI" == "1" && "$GUI_BUILD_NOTIFIED" == "0" ]]; then
+    GUI_BUILD_NOTIFIED=1
+    command -v notify-send >/dev/null 2>&1 && notify-send "Orb Dev" "Building local Orb binaries..." || true
+  fi
+}
+
+if [[ "$NEED_LEAN_BUILD" == "1" ]]; then
+  notify_gui_build
+  echo "==> Building ${BINS_ARGS[*]} via turbo-lean / lake..."
+  "$ROOT_DIR/scripts/build_orb_bins.sh" \
+    --out-dir "$STAGE_BIN_DIR" \
+    "${BINS_ARGS[@]}"
+else
+  echo "==> Lean binaries in $STAGE_BIN_DIR are up to date (pass --rebuild to force)."
+fi
 
 if [[ "$OS_NAME" == "Darwin" ]]; then
-  echo "==> Compiling native macos_shell + orb-signer..."
-  swiftc -O \
-    -framework AppKit \
-    -framework WebKit \
-    -framework Security \
-    "$ROOT_DIR/macos_shell/main.swift" \
-    -o "$STAGE_BIN_DIR/orb"
-  codesign --force --entitlements "$ROOT_DIR/macos_shell/Entitlements.plist" --sign - "$STAGE_BIN_DIR/orb" >/dev/null 2>&1 || true
-  python3 "$ROOT_DIR/orb/scripts/build-signer.py"
+  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb" || ! -x "$STAGE_BIN_DIR/orb-signer" || "$ROOT_DIR/macos_shell/main.swift" -nt "$STAGE_BIN_DIR/orb" ]]; then
+    notify_gui_build
+    echo "==> Compiling native macos_shell + orb-signer..."
+    swiftc -O \
+      -framework AppKit \
+      -framework WebKit \
+      -framework Security \
+      "$ROOT_DIR/macos_shell/main.swift" \
+      -o "$STAGE_BIN_DIR/orb"
+    codesign --force --entitlements "$ROOT_DIR/macos_shell/Entitlements.plist" --sign - "$STAGE_BIN_DIR/orb" >/dev/null 2>&1 || true
+    python3 "$ROOT_DIR/orb/scripts/build-signer.py"
+  fi
 elif [[ "$OS_NAME" == "Linux" ]]; then
-  echo "==> Compiling native linux_shell..."
-  make -C "$ROOT_DIR/linux_shell"
-  install -m 0755 "$ROOT_DIR/linux_shell/orb-linux-shell" "$STAGE_BIN_DIR/orb"
+  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/main.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/Makefile" -nt "$STAGE_BIN_DIR/orb" ]]; then
+    notify_gui_build
+    echo "==> Compiling native linux_shell..."
+    make -C "$ROOT_DIR/linux_shell"
+    install -m 0755 "$ROOT_DIR/linux_shell/orb-desktop" "$STAGE_BIN_DIR/orb"
+  fi
+  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb-signer" || "$ROOT_DIR/linux_shell/signer/orb-signer.py" -nt "$STAGE_BIN_DIR/orb-signer" || "$ROOT_DIR/orb/scripts/build-signer.py" -nt "$STAGE_BIN_DIR/orb-signer" ]]; then
+    python3 "$ROOT_DIR/orb/scripts/build-signer.py"
+  fi
 else
   echo "error: unsupported OS '$OS_NAME'" >&2
   exit 1
+fi
+
+if [[ ! -d "$ROOT_DIR/orb/node_modules" ]]; then
+  echo "==> Installing frontend dependencies (pnpm install --frozen-lockfile)..."
+  (cd "$ROOT_DIR/orb" && CI=true pnpm install --frozen-lockfile)
 fi
 
 if [[ "$MODE" == "bundle" ]]; then
@@ -216,18 +365,188 @@ EOF
     rm -rf "$STAGE_BIN_DIR/dist"
     cp -R "$ROOT_DIR/orb/dist" "$STAGE_BIN_DIR/dist"
     echo "==> Staged Linux desktop build in $STAGE_BIN_DIR"
+    if [[ "$INSTALL_APP" == "1" ]]; then
+      XDG_DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+      LINUX_APP_DIR="$XDG_DATA/orb-app"
+      PY_BIN="$(command -v python3)"
+      mkdir -p "$LINUX_APP_DIR/bin" "$LINUX_APP_DIR/share/orb" "$XDG_DATA/applications" "$XDG_DATA/icons/hicolor/256x256/apps"
+      install -m 0755 "$STAGE_BIN_DIR/orb" "$LINUX_APP_DIR/bin/.orb-desktop-unwrapped"
+      install -m 0755 "$STAGE_BIN_DIR/orb-locald" "$LINUX_APP_DIR/bin/orb-locald"
+      install -m 0755 "$STAGE_BIN_DIR/orb-signer" "$LINUX_APP_DIR/bin/orb-signer"
+      install -m 0755 "$STAGE_BIN_DIR/sandboxed-mcp" "$LINUX_APP_DIR/bin/sandboxed-mcp"
+      rm -rf "$LINUX_APP_DIR/share/orb"
+      cp -R "$ROOT_DIR/orb/dist" "$LINUX_APP_DIR/share/orb"
+      if [[ -f "$ROOT_DIR/macos_shell/icons/icon.png" ]]; then
+        install -m 0644 "$ROOT_DIR/macos_shell/icons/icon.png" "$XDG_DATA/icons/hicolor/256x256/apps/orb.png"
+      fi
+      cat > "$LINUX_APP_DIR/bin/.orb-static-server" <<EOF
+#!${PY_BIN}
+import os, sys
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+ROOT = os.path.realpath(sys.argv[1])
+MIME = {
+    ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+    ".wasm": "application/wasm", ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg", ".webp": "image/webp", ".ico": "image/x-icon",
+    ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf",
+}
+
+class Handler(SimpleHTTPRequestHandler):
+    def log_message(self, fmt, *args): return
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+    def guess_type(self, path):
+        return MIME.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
+    def translate_path(self, path):
+        rel = path.split("?", 1)[0].split("#", 1)[0].lstrip("/") or "index.html"
+        cand = os.path.normpath(os.path.join(ROOT, rel))
+        if not (cand == ROOT or cand.startswith(ROOT + os.sep)):
+            return os.path.join(ROOT, "__missing__")
+        if os.path.isfile(cand):
+            return cand
+        return os.path.join(ROOT, "index.html") if not os.path.splitext(rel)[1] else os.path.join(ROOT, "__missing__")
+
+try:
+    srv = ThreadingHTTPServer(("127.0.0.1", 1431), Handler)
+except OSError:
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+sys.stdout.write(str(srv.server_address[1]) + "\n")
+sys.stdout.flush()
+srv.serve_forever()
+EOF
+      chmod 0755 "$LINUX_APP_DIR/bin/.orb-static-server"
+      cat > "$LINUX_APP_DIR/bin/orb" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+APP_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")/.." && pwd)"
+export PATH="\$APP_DIR/bin:/etc/profiles/per-user/\${USER:-\$(id -un)}/bin:/run/current-system/sw/bin:\$PATH"
+export ORB_LOCALD_BIN="\$APP_DIR/bin/orb-locald"
+export ORB_SIGNER_BIN="\$APP_DIR/bin/orb-signer"
+if [[ " \$* " == *" --self-test "* ]]; then
+  exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
+fi
+if [[ -z "\${ORB_DEV_URL:-}" ]]; then
+  fifo="\$(mktemp -u)"
+  mkfifo "\$fifo"
+  "${PY_BIN}" "\$APP_DIR/bin/.orb-static-server" "\$APP_DIR/share/orb" >"\$fifo" &
+  server_pid=\$!
+  IFS= read -r port <"\$fifo" || true
+  rm -f "\$fifo"
+  trap 'kill "\$server_pid" 2>/dev/null || true' EXIT HUP INT TERM
+  export ORB_DEV_URL="http://127.0.0.1:\$port/"
+fi
+if [[ -z "\${ORB_LOCALD_PORT:-}" ]]; then
+  export ORB_LOCALD_PORT=\$("${PY_BIN}" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+fi
+exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
+EOF
+      chmod 0755 "$LINUX_APP_DIR/bin/orb"
+      cat > "$XDG_DATA/applications/orb.desktop" <<EOF
+[Desktop Entry]
+Name=Orb
+Comment=All your AI providers, machines, and agent harnesses in one place
+Exec=$LINUX_APP_DIR/bin/orb
+Icon=orb
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+StartupWMClass=orb-desktop
+EOF
+      chmod 0644 "$XDG_DATA/applications/orb.desktop"
+      echo "==> Installed standalone Orb app to $LINUX_APP_DIR ($XDG_DATA/applications/orb.desktop)"
+    fi
   fi
   exit 0
 fi
 
-# Dev HMR mode: start Vite on 127.0.0.1:$VITE_PORT if not already listening, then launch native shell.
+# Dev HMR mode: start local orb-server (unless --no-server), Vite on 127.0.0.1:$VITE_PORT, then launch native shell.
 VITE_PID=""
+SERVER_PID=""
 cleanup_dev() {
   if [[ -n "$VITE_PID" ]]; then
+    pkill -P "$VITE_PID" >/dev/null 2>&1 || true
     kill "$VITE_PID" >/dev/null 2>&1 || true
   fi
+  if [[ -n "$SERVER_PID" ]]; then
+    pkill -P "$SERVER_PID" >/dev/null 2>&1 || true
+    kill "$SERVER_PID" >/dev/null 2>&1 || true
+  fi
 }
-trap cleanup_dev EXIT INT TERM
+trap cleanup_dev EXIT HUP INT TERM
+
+if [[ -z "$LOCALD_PORT" ]]; then
+  LOCALD_PORT="$(python3 - <<'PY'
+import socket
+s = socket.socket()
+try:
+    s.bind(("127.0.0.1", 19477))
+    print(19477)
+except OSError:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+finally:
+    s.close()
+PY
+)"
+fi
+
+DEV_STATE_DIR="${ORB_STATE_DIR:-}"
+if [[ "$NO_SERVER" == "0" ]]; then
+  DEV_STATE_DIR="${DEV_STATE_DIR:-$ROOT_DIR/.orb-dev}"
+  mkdir -p "$DEV_STATE_DIR/server"
+  chmod 0700 "$DEV_STATE_DIR"
+  SERVER_URL="http://127.0.0.1:${SERVER_PORT}"
+  if ! curl -fsS "${SERVER_URL}/api/health" >/dev/null 2>&1; then
+    echo "==> Starting local orb-server on ${SERVER_URL} (state: ${DEV_STATE_DIR}/server)..."
+    (
+      export HOST="127.0.0.1"
+      export PORT="$SERVER_PORT"
+      export DEV_MODE="true"
+      export WORKING_DIR="$DEV_STATE_DIR/server"
+      export LIBRARY_PATH="$DEV_STATE_DIR/server/.sandboxed-sh/library"
+      exec "$STAGE_BIN_DIR/$SERVER_BIN"
+    ) &
+    SERVER_PID="$!"
+    for _ in {1..60}; do
+      if curl -fsS "${SERVER_URL}/api/health" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.25
+    done
+  fi
+  CONN_FILE="$DEV_STATE_DIR/connection.json"
+  python3 - "$SERVER_URL" "$CONN_FILE" <<'PY'
+import json, os, sys, urllib.request
+server_url, conn_file = sys.argv[1], sys.argv[2]
+if os.path.exists(conn_file):
+    try:
+        existing = json.loads(open(conn_file).read())
+        if isinstance(existing, dict) and existing.get("api_url", "").rstrip("/") not in ("", server_url.rstrip("/")):
+            sys.exit(0)
+    except Exception:
+        pass
+req = urllib.request.Request(
+    f"{server_url}/api/auth/login",
+    data=b'{"password":""}',
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(req, timeout=5) as resp:
+    tok = json.loads(resp.read().decode()).get("token", "")
+if tok:
+    tmp = conn_file + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"api_url": server_url, "token": tok}, f)
+        f.write("\n")
+    os.replace(tmp, conn_file)
+PY
+  echo "==> Connected desktop state ($CONN_FILE) to local orb-server (${SERVER_URL})"
+fi
 
 if ! curl -fsS "http://127.0.0.1:${VITE_PORT}/" >/dev/null 2>&1; then
   echo "==> Starting Vite dev server on http://127.0.0.1:${VITE_PORT}/..."
@@ -245,6 +564,8 @@ if ! curl -fsS "http://127.0.0.1:${VITE_PORT}/" >/dev/null 2>&1; then
 fi
 
 echo "==> Launching native Orb shell against http://127.0.0.1:${VITE_PORT}/ (orb-locald port ${LOCALD_PORT})..."
+ORB_APP_ICON="$ROOT_DIR/macos_shell/icons/icon.icns" \
+ORB_STATE_DIR="$DEV_STATE_DIR" \
 ORB_LOCALD_PORT="$LOCALD_PORT" \
 ORB_LOCALD_BIN="$STAGE_BIN_DIR/orb-locald" \
 ORB_SIGNER_BIN="$STAGE_BIN_DIR/orb-signer" \

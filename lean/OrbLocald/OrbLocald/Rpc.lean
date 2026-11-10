@@ -926,11 +926,12 @@ def isAllowedLocaldOrigin (origin? : Option String) : Bool :=
       o.startsWith "http://127.0.0.1:" || o.startsWith "http://localhost:" ||
       o == "http://127.0.0.1" || o == "http://localhost"
 
-/-- Canonical list of all 89 desktop IPC commands (`88` commands + `plugin:app|version`). -/
+/-- Canonical list of all desktop IPC commands (`plugin:app|version` + native RPCs). -/
 def supportedDesktopCommands : Array String := #[
   "plugin:app|version",
   "transport_bridge_configure",
-  "desktop_connection_load", "desktop_connection_save", "diagnostics_append",
+  "desktop_connection_load", "desktop_connection_save",
+  "desktop_prefs_load", "desktop_prefs_patch", "diagnostics_append",
   "reveal_logs", "local_machine_metrics", "paloma_ssh_pubkey",
   "open_url", "reveal_download", "save_file_as", "set_window_theme", "mistral_usage_sign_in",
   "approval_key_status", "approval_key_create", "approval_sign",
@@ -1297,6 +1298,46 @@ private def bindingsFilePath? (st : LocaldState) : Option System.FilePath :=
 
 private def originsFilePath? (st : LocaldState) : Option System.FilePath :=
   (resolveOrbStateDir st).map (· / "local-origins.json")
+
+private def uiPrefsFilePath? (st : LocaldState) : Option System.FilePath :=
+  (resolveOrbStateDir st).map (· / "ui-prefs.json")
+
+initialize uiPrefsMutex : Std.Mutex Unit ← Std.Mutex.new ()
+
+private def isAllowedUiPrefKey (k : String) : Bool :=
+  !k.isEmpty && k.utf8ByteSize ≤ 512 &&
+  k != "orb.jwt" &&
+  !k.startsWith "orb.catalog:" &&
+  !k.startsWith "orb.software.inventory."
+
+private def canonicalUiPrefs (kvs : Array (String × JVal)) : JVal × String :=
+  let filtered := kvs.foldl (init := (#[] : Array (String × JVal))) fun acc (k, v) =>
+    match v.asStr? with
+    | some s =>
+      if isAllowedUiPrefKey k && s.utf8ByteSize ≤ 65536 then
+        let rest := acc.filter (fun (ek, _) => ek != k)
+        rest.push (k, .str s)
+      else acc
+    | none => acc
+  let sorted := filtered.qsort (fun a b => a.1 < b.1)
+  let obj := JVal.obj sorted
+  let canon := renderCompact obj
+  let rev := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes canon.toUTF8)
+  (obj, rev)
+
+private def readUiPrefsFromDisk (path? : Option System.FilePath) : IO (JVal × String) := do
+  match path? with
+  | none => return canonicalUiPrefs #[]
+  | some path =>
+    if !(← path.pathExists) then
+      return canonicalUiPrefs #[]
+    try
+      let raw ← IO.FS.readFile path
+      match OrbBin.Json.parse raw.trimAscii.toString with
+      | .ok (.obj kvs) => return canonicalUiPrefs kvs
+      | _ => return canonicalUiPrefs #[]
+    catch _ =>
+      return canonicalUiPrefs #[]
 
 private def logsDirPath? (st : LocaldState) : Option System.FilePath :=
   (resolveOrbStateDir st).map (· / "logs")
@@ -3107,6 +3148,29 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path payload then
         return .error e
     return .ok .null
+  | "desktop_prefs_load" =>
+    let sinceRev? := args.fieldStr? "since_rev"
+    uiPrefsMutex.atomically do
+      let (prefsObj, rev) ← readUiPrefsFromDisk (uiPrefsFilePath? st)
+      if sinceRev? == some rev then
+        return .ok (.obj #[("unchanged", .bool true), ("rev", .str rev)])
+      return .ok (.obj #[("unchanged", .bool false), ("rev", .str rev), ("prefs", prefsObj)])
+  | "desktop_prefs_patch" =>
+    let setKvs := ((args.field? "set").bind (·.asObj?)).getD #[]
+    let removeKeys := ((args.fieldArr? "remove").getD #[]).filterMap (·.asStr?)
+    let clearAll := (args.fieldBool? "clear").getD false
+    uiPrefsMutex.atomically do
+      let path? := uiPrefsFilePath? st
+      let (curObj, _) ← if clearAll then pure (JVal.obj #[], "") else readUiPrefsFromDisk path?
+      let curKvs := (curObj.asObj?).getD #[]
+      let afterRem := curKvs.filter (fun (k, _) => !removeKeys.contains k)
+      let merged := afterRem ++ setKvs
+      let (nextObj, rev) := canonicalUiPrefs merged
+      if let some path := path? then
+        let payload := (renderCompact nextObj ++ "\n").toUTF8
+        if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path payload then
+          return .error e
+      return .ok (.obj #[("rev", .str rev)])
   | "diagnostics_append" =>
     let lines : Array String := match args.fieldArr? "lines" with
       | some xs => xs.filterMap (·.asStr?)
@@ -3163,13 +3227,23 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "approval_key_status" =>
     match st.signerBin? with
     | some bin =>
-      if st.hostOs == "macos" && (← System.FilePath.pathExists bin) then
+      if (st.hostOs == "macos" || st.hostOs == "linux") && (← System.FilePath.pathExists bin) then
         match ← runOrbSigner bin (resolveApprovalKeyArgs st "public") with
         | .ok jv =>
           let pk := (jv.fieldStr? "public_key").getD ""
           return .ok (.obj #[("available", .bool true), ("enrolled", .bool (!pk.isEmpty)), ("public_key", if pk.isEmpty then .null else .str pk)])
+        | .error (3, _) =>
+          return .ok (.obj #[("available", .bool false), ("enrolled", .bool false), ("public_key", .null)])
         | .error _ =>
-          return .ok (.obj #[("available", .bool true), ("enrolled", .bool false), ("public_key", .null)])
+          if st.hostOs == "linux" then
+            match ← runOrbSigner bin #["status"] none with
+            | .ok sjv =>
+              let avail := (sjv.fieldStr? "available") == some "true" || (sjv.fieldBool? "available") == some true
+              return .ok (.obj #[("available", .bool avail), ("enrolled", .bool false), ("public_key", .null)])
+            | .error _ =>
+              return .ok (.obj #[("available", .bool false), ("enrolled", .bool false), ("public_key", .null)])
+          else
+            return .ok (.obj #[("available", .bool true), ("enrolled", .bool false), ("public_key", .null)])
       else
         return .ok (.obj #[("available", .bool false), ("enrolled", .bool false), ("public_key", .null)])
     | none =>
@@ -3177,7 +3251,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "approval_key_create" =>
     match st.signerBin? with
     | some bin =>
-      if st.hostOs == "macos" then
+      if st.hostOs == "macos" || st.hostOs == "linux" then
         resetSignerServer
         stRef.modify fun s => { s with approvalGraceUntil := 0 }
         match ← runOrbSigner bin (resolveApprovalKeyArgs st "create") with
@@ -3186,13 +3260,13 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           if pk.isEmpty then return .error "orb-signer returned empty public_key"
           return .ok (.str pk)
         | .error (_, msg) => return .error msg
-      else return .error "Secure Enclave is only available on macOS"
-    | none => return .error "Secure Enclave is only available on macOS"
+      else return .error "Approval key signing is unavailable on this host"
+    | none => return .error "Approval key signing is unavailable on this host"
   | "approval_sign" =>
     let payload := (args.fieldStr? "payload").getD ""
     match st.signerBin? with
     | some bin =>
-      if st.hostOs == "macos" then
+      if st.hostOs == "macos" || st.hostOs == "linux" then
         match ← signViaOrbSignerServer bin (resolveApprovalKeyPath st) st.approvalGraceSecs payload with
         | .ok jv =>
           let sig := (jv.fieldStr? "signature").getD ""
@@ -3209,8 +3283,8 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         | .error (_, msg) =>
           stRef.modify fun s => { s with approvalGraceUntil := 0 }
           return .error msg
-      else return .error "Secure Enclave signing unavailable on this host"
-    | none => return .error "Secure Enclave signing unavailable on this host"
+      else return .error "Approval key signing unavailable on this host"
+    | none => return .error "Approval key signing unavailable on this host"
   | "approval_grace_until" =>
     let nowSec ← OrbBin.PosixExt.nowEpoch
     let rem : Nat := if st.approvalGraceUntil > nowSec then st.approvalGraceUntil.toNat else 0
@@ -3227,7 +3301,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       resetSignerServer
     return .ok .null
   | "biometric_status" =>
-    if st.hostOs != "macos" then
+    if st.hostOs != "macos" && (st.hostOs != "linux" || st.signerBin?.isNone) then
       return .ok (.obj #[
         ("available", .bool false),
         ("kind", .str "none"),
@@ -3249,11 +3323,12 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
             ("biometry_type", .str kind)
           ])
         | .error _ =>
+          let fallbackAvail := st.hostOs == "macos"
           return .ok (.obj #[
-            ("available", .bool true),
-            ("kind", .str "touch_id"),
-            ("label", .str "Touch ID"),
-            ("biometry_type", .str "touch_id")
+            ("available", .bool fallbackAvail),
+            ("kind", .str (if fallbackAvail then "touch_id" else "none")),
+            ("label", .str (if fallbackAvail then "Touch ID" else "")),
+            ("biometry_type", .str (if fallbackAvail then "touch_id" else "none"))
           ])
       else
         return .ok (.obj #[
@@ -3270,8 +3345,8 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         ("biometry_type", .str "touch_id")
       ])
   | "biometric_authenticate" =>
-    if st.hostOs != "macos" then
-      return .error "Biometric authentication is only available on macOS"
+    if st.hostOs != "macos" && st.hostOs != "linux" then
+      return .error "Biometric authentication is unavailable on this host"
     match st.signerBin? with
     | none =>
       return .error "orb-signer binary not found"
