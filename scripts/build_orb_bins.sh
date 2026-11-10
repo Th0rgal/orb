@@ -40,6 +40,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "${LEAN_CC:-}" && ( -n "${NIX_CC:-}" || -e /etc/NIXOS ) ]]; then
+  if command -v clang >/dev/null 2>&1; then
+    export LEAN_CC="$(command -v clang)"
+  elif command -v cc >/dev/null 2>&1; then
+    export LEAN_CC="$(command -v cc)"
+  fi
+elif [[ -n "${LEAN_CC:-}" && "${LEAN_CC}" != /* ]] && command -v "${LEAN_CC}" >/dev/null 2>&1; then
+  export LEAN_CC="$(command -v "${LEAN_CC}")"
+fi
+
 # Discover `lake` on common toolchain paths before optionally bootstrapping.
 for candidate_dir in \
   "${LEAN_BIN_DIR:-}" \
@@ -55,15 +65,6 @@ do
   fi
 done
 
-if [[ -z "${LEAN_CC:-}" && ( -n "${NIX_CC:-}" || -e /etc/NIXOS ) ]]; then
-  if command -v clang >/dev/null 2>&1; then
-    export LEAN_CC="$(command -v clang)"
-  elif command -v cc >/dev/null 2>&1; then
-    export LEAN_CC="$(command -v cc)"
-  fi
-elif [[ -n "${LEAN_CC:-}" && "${LEAN_CC}" != /* ]] && command -v "${LEAN_CC}" >/dev/null 2>&1; then
-  export LEAN_CC="$(command -v "${LEAN_CC}")"
-fi
 if [[ -n "${LEAN_CC:-}" && -x "${LEAN_CC}" ]]; then
   export PATH="$(dirname "${LEAN_CC}"):$PATH"
   if command -v lean >/dev/null 2>&1; then

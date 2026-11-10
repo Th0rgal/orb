@@ -18,8 +18,8 @@
   turboLeanSrc ? fetchFromGitHub {
     owner = "Th0rgal";
     repo = "turbo-lean";
-    rev = "82a940653812ad7552ae7087f2c5a3164e56e7ff";
-    hash = "sha256-Bhd+j5gauHXItURXUENWKe1p57zMA6P5tcvFPKHt680=";
+    rev = "f240450af444a302a0e02d5a5f8af00351089386";
+    hash = "sha256-Ovtl0aJsBASBuEk2eZjEF/uVfsDgOW+B3p7XI6DPWs0=";
   },
   leanToolchain ? null,
 }:
@@ -150,9 +150,6 @@ let
 
     postPatch = ''
       chmod -R u+w crates lean
-      if ! grep -q 'TURBO_LEAN_NIX_SYS_PATH' crates/turbo-lean/src/trusted_tools.rs; then
-        patch -p1 < ${./turbo-lean-nixos.patch}
-      fi
 
       awk '
         /^require «lean-sys» from git/ {
