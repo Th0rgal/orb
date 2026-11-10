@@ -719,7 +719,7 @@ private def runMultiUserPrivdBrokerTests (tmpDir : System.FilePath) : IO Unit :=
   let privdSdCmd := buildPrivdSystemdRunCmd "orb-job-u1" 2500 2500
     "/home/orb-alice/.orb-missions/m1" "/home/orb-alice" "/var/log/orb/j1.log"
     3600 (some 2147483648) (some 1932735283) (some 100) (some "200%")
-    scrubbed #["bash", "-lc", privdForkSnippet]
+    scrubbed #["bash", "-lc", privdForkSnippet] true
   let idxPrivdNoExp := (privdSdCmd.findIdx? (· == "--expand-environment=no")).getD 999
   let idxPrivdDash := (privdSdCmd.findIdx? (· == "--")).getD 999
   assertTrue "buildPrivdSystemdRunCmd passes --expand-environment=no before '--' and preserves ${fork_root%/*}"
@@ -727,6 +727,13 @@ private def runMultiUserPrivdBrokerTests (tmpDir : System.FilePath) : IO Unit :=
      privdSdCmd[1]? == some "--system" &&
      idxPrivdNoExp < idxPrivdDash &&
      privdSdCmd.back? == some privdForkSnippet)
+  let privdLegacyCmd := buildPrivdSystemdRunCmd "orb-job-u1" 2500 2500
+    "/home/orb-alice/.orb-missions/m1" "/home/orb-alice" "/var/log/orb/j1.log"
+    3600 (some 2147483648) (some 1932735283) (some 100) (some "200%")
+    scrubbed #["bash", "-lc", privdForkSnippet] false
+  assertTrue "buildPrivdSystemdRunCmd omits --expand-environment=no and doubles $ on pre-254 systemd"
+    (!privdLegacyCmd.contains "--expand-environment=no" &&
+     privdLegacyCmd.back? == some "fork_root=$$(pwd -P); fork_root=$${fork_root%/*}; printf '%s' \"$$fork_root\"")
 
   let homeRoot := tmpDir / "privd-homes"
   let stateDir := tmpDir / "privd-state"

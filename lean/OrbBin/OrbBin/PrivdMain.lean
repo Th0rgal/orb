@@ -618,18 +618,39 @@ def handleEnsureMissionUser (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer :
 private def privdStateDir : IO String := do
   return stripTrailingSlash ((← getEnvNonEmpty "ORB_PRIVD_STATE_DIR").getD "/run/orb-privd-jobs")
 
+initialize privdSystemdExpandEnvCache : IO.Ref (Option Bool) ← IO.mkRef none
+
+def escapeSystemdExecArgDollar (arg : String) : String :=
+  String.intercalate "$$" (arg.splitOn "$")
+
+def detectPrivdSystemdExpandEnvironment : IO Bool := do
+  if let some cached ← privdSystemdExpandEnvCache.get then
+    return cached
+  let res ← (IO.Process.output { cmd := "/usr/bin/systemd-run", args := #["--help"] }).toBaseIO
+  let supported := match res with
+    | .ok out => ((out.stdout ++ out.stderr).splitOn "--expand-environment").length > 1
+    | .error _ => false
+  privdSystemdExpandEnvCache.set (some supported)
+  return supported
+
 /-- Build the confined `/usr/bin/systemd-run` command vector for `spawn_user_job`.
-    Always passes `--expand-environment=no` so systemd never expands `${...}`, `$VAR`,
-    or `$$` inside `argv` (preserving POSIX parameter expansions such as `${fork_root%/*}`). -/
+    When `supportsExpandEnvNo` is `true` (`systemd >= 254`), passes `--expand-environment=no`
+    so systemd never expands `${...}`, `$VAR`, or `$$` inside `argv`. On older hosts such as
+    Debian 12 (`systemd 252`), omits `--expand-environment=no` and doubles `$` -> `$$` in `argv`
+    so transient service `ExecStart` unescaping preserves every literal `$` losslessly. -/
 def buildPrivdSystemdRunCmd
     (unit : String) (uid gid : UInt32) (cwd homeDir logPath : String)
     (timeoutSecs : Nat)
     (memMax? memHigh? : Option UInt64)
     (cpuWeight? : Option Nat) (cpuQuota? : Option String)
     (cleanEnv : Array (String × String))
-    (argv : Array String) : Array String := Id.run do
-  let mut cmd : Array String := #[
-    "/usr/bin/systemd-run", "--system", "--expand-environment=no", "--quiet", "--collect",
+    (argv : Array String)
+    (supportsExpandEnvNo : Bool := true) : Array String := Id.run do
+  let mut cmd : Array String := #["/usr/bin/systemd-run", "--system"]
+  if supportsExpandEnvNo then
+    cmd := cmd.push "--expand-environment=no"
+  cmd := cmd ++ #[
+    "--quiet", "--collect",
     s!"--unit={unit}",
     s!"--uid={uid}", s!"--gid={gid}",
     s!"--working-directory={cwd}",
@@ -651,7 +672,8 @@ def buildPrivdSystemdRunCmd
   if let some q := cpuQuota? then cmd := cmd.push s!"--property=CPUQuota={q}"
   for (k, v) in cleanEnv do cmd := cmd.push s!"--setenv={k}={v}"
   cmd := cmd.push "--"
-  cmd := cmd ++ argv
+  let safeArgv := if supportsExpandEnvNo then argv else argv.map escapeSystemdExecArgDollar
+  cmd := cmd ++ safeArgv
   return cmd
 
 def handleSpawnUserJob (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (req : JVal) : IO Unit := do
@@ -712,8 +734,9 @@ def handleSpawnUserJob (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : Peer
   let memHigh? := req.fieldUInt64? "mem_high"
   let cpuWeight? := req.fieldNat? "cpu_weight"
   let cpuQuota? := req.fieldStr? "cpu_quota"
+  let supportsExpandEnv ← if isNonRootTest then pure true else detectPrivdSystemdExpandEnvironment
   let systemdCmd := buildPrivdSystemdRunCmd cleanJobUnit uid gid missionCwd homeDir logPath
-    timeoutSecs memMax? memHigh? cpuWeight? cpuQuota? cleanEnv argv
+    timeoutSecs memMax? memHigh? cpuWeight? cpuQuota? cleanEnv argv supportsExpandEnv
   let pySpawn :=
     "import json, os, stat, subprocess, sys\n" ++
     "req = json.loads(sys.stdin.read())\n" ++

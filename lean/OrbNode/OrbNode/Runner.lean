@@ -819,10 +819,30 @@ private def resolveTrampolineExe : IO (Option String) := do
     return none
   | .error _ => return none
 
+initialize systemdExpandEnvCache : IO.Ref (Option Bool) ← IO.mkRef none
+
+def systemdHelpSupportsExpandEnvironment (helpText : String) : Bool :=
+  (helpText.splitOn "--expand-environment").length > 1
+
+/-- Probe once whether the host's `systemd-run` supports `--expand-environment` (`systemd >= 254`).
+    On older hosts such as Debian 12 (`systemd 252`), `--expand-environment` does not exist and
+    `systemd-run --scope` already leaves `argv` unexpanded by default. -/
+def detectSystemdExpandEnvironmentFlag : IO Bool := do
+  if let some cached ← systemdExpandEnvCache.get then
+    return cached
+  let res ← (IO.Process.output { cmd := "systemd-run", args := #["--help"] }).toBaseIO
+  let supported := match res with
+    | .ok out => systemdHelpSupportsExpandEnvironment (out.stdout ++ out.stderr)
+    | .error _ => false
+  systemdExpandEnvCache.set (some supported)
+  return supported
+
 /-- Build the `systemd-run` argument vector for a transient scope unit.
-    Always passes `--expand-environment=no` so `systemd >= 256` (`replace_env_argv`)
-    never expands `${...}`, `$VAR`, or `$$` in `argv` (preventing corruption of shell
-    parameter expansions such as `fork_root=${fork_root%/*}` on Ubuntu 26.04+). -/
+    When `supportsExpandEnvNo` is `true` (`systemd >= 254`), passes `--expand-environment=no`
+    so `systemd >= 256` (`replace_env_argv`) never expands `${...}`, `$VAR`, or `$$` in `argv`
+    (preventing corruption of shell parameter expansions such as `fork_root=${fork_root%/*}`
+    on Ubuntu 26.04+). When `false` (`systemd <= 253`, e.g. Debian 12 `systemd 252`), omits
+    the unrecognized flag since `--scope` expansion is already disabled by default there. -/
 def buildSystemdScopeArgs
     (mode : SystemdScopeMode) (unit : String)
     (memMax memHigh : UInt64)
@@ -830,13 +850,15 @@ def buildSystemdScopeArgs
     (timeoutSecs? : Option UInt64)
     (trampExe : String)
     (envKeys : Array String)
-    (prog : String) (args : Array String) : Array String := Id.run do
+    (prog : String) (args : Array String)
+    (supportsExpandEnvNo : Bool := true) : Array String := Id.run do
   let mut sArgs : Array String := #[]
   if mode == .user then
     sArgs := sArgs.push "--user"
+  sArgs := sArgs.push "--scope"
+  if supportsExpandEnvNo then
+    sArgs := sArgs.push "--expand-environment=no"
   sArgs := sArgs ++ #[
-    "--scope",
-    "--expand-environment=no",
     "--quiet",
     s!"--unit={unit}",
     "--property=KillMode=control-group",
@@ -887,8 +909,9 @@ private def wrapWithSystemdScope
   if let some pathVal ← IO.getEnv "PATH" then
     if !(sEnv.any (fun (k, _) => k == "PATH")) then
       sEnv := sEnv.push ("PATH", pathVal)
+  let supportsExpandEnv ← detectSystemdExpandEnvironmentFlag
   let sArgs := buildSystemdScopeArgs mode unit memMax memHigh cpuWeight? cpuQuota?
-    timeoutSecs? trampExe (envPairs.map Prod.fst) prog args
+    timeoutSecs? trampExe (envPairs.map Prod.fst) prog args supportsExpandEnv
   return ("systemd-run", sArgs, sEnv, some scope)
 
 /-- Immediately send `SIGKILL` to every process in `SystemdScope` (`systemctl kill --kill-who=all --signal=SIGKILL`),

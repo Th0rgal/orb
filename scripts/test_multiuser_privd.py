@@ -77,8 +77,11 @@ class MultiUserPrivdTests(unittest.TestCase):
                 '[ -d "$fork_dir" ] && [ ! -L "$fork_dir" ] || { echo "Fork workspace unavailable" >&2; exit 78; }'
             )
             captured_cmds: list[list[str]] = []
+            help_text = "--expand-environment=BOOL\n"
 
             def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if cmd == ["/usr/bin/systemd-run", "--help"]:
+                    return subprocess.CompletedProcess(cmd, 0, stdout=help_text, stderr="")
                 captured_cmds.append(list(cmd))
                 if cmd[0] == "/usr/bin/systemd-run":
                     return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -94,6 +97,7 @@ class MultiUserPrivdTests(unittest.TestCase):
             os.environ["ORB_PRIVD_HOME_ROOT"] = str(home_root)
             os.environ["ORB_PRIVD_STATE_DIR"] = str(state_dir)
             try:
+                pcm._SYSTEMD_EXPAND_ENV_CACHE = None
                 with (
                     mock.patch.object(pcm, "_peer_is_node_uid", return_value=True),
                     mock.patch.object(
@@ -115,14 +119,36 @@ class MultiUserPrivdTests(unittest.TestCase):
                         peer_uid=0,
                         peer_gid=0,
                     )
-                self.assertTrue(res.get("ok"), res)
-                self.assertGreaterEqual(len(captured_cmds), 1)
-                sd_cmd = captured_cmds[0]
-                self.assertEqual(sd_cmd[0], "/usr/bin/systemd-run")
-                self.assertIn("--expand-environment=no", sd_cmd)
-                self.assertLess(sd_cmd.index("--expand-environment=no"), sd_cmd.index("--"))
-                self.assertEqual(sd_cmd[-1], fork_cmd)
+                    self.assertTrue(res.get("ok"), res)
+                    self.assertEqual(len(captured_cmds), 2)
+                    sd_cmd = captured_cmds[0]
+                    self.assertEqual(sd_cmd[0], "/usr/bin/systemd-run")
+                    self.assertIn("--expand-environment=no", sd_cmd)
+                    self.assertLess(sd_cmd.index("--expand-environment=no"), sd_cmd.index("--"))
+                    self.assertEqual(sd_cmd[-1], fork_cmd)
+
+                    # Debian 12 (systemd 252) lacks --expand-environment: omit flag and escape $ -> $$
+                    captured_cmds.clear()
+                    help_text = "systemd-run [OPTIONS...] COMMAND\n"
+                    pcm._SYSTEMD_EXPAND_ENV_CACHE = None
+                    res_legacy = pcm.handle_spawn_user_job(
+                        {
+                            "unix_username": "orb-alice",
+                            "job_id": "ef7e8c9a-3cdb-4f80-9233-01162184601d",
+                            "mission_id": "m-fork-01",
+                            "log_path": str(logs_dir / "fork-legacy.log"),
+                            "argv": ["/bin/bash", "-lc", fork_cmd],
+                            "env": {"SANDBOXED_MISSION_ID": "m-fork-01"},
+                        },
+                        peer_uid=0,
+                        peer_gid=0,
+                    )
+                    self.assertTrue(res_legacy.get("ok"), res_legacy)
+                    sd_legacy = captured_cmds[0]
+                    self.assertNotIn("--expand-environment=no", sd_legacy)
+                    self.assertEqual(sd_legacy[-1], fork_cmd.replace("$", "$$"))
             finally:
+                pcm._SYSTEMD_EXPAND_ENV_CACHE = None
                 for k, v in old_env.items():
                     if v is None:
                         os.environ.pop(k, None)

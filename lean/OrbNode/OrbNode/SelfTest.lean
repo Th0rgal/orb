@@ -2566,6 +2566,15 @@ def runTests : IO UInt32 := do
      pureSysArgs[0]? == some "--scope" &&
      idxNoExpSys < idxDashSys &&
      pureSysArgs.back? == some forkCmd)
+  let legacyScopeArgs := buildSystemdScopeArgs .user "u.scope" 1073741824 966367641 (some "100") none (some 60)
+    "/usr/local/bin/sandboxed-node" #["PATH"] "bash" #["-lc", forkCmd] false
+  check "buildSystemdScopeArgs omits --expand-environment=no when systemd-run lacks support (Debian 12 systemd 252)"
+    (!legacyScopeArgs.contains "--expand-environment=no" &&
+     legacyScopeArgs[0]? == some "--user" &&
+     legacyScopeArgs[1]? == some "--scope" &&
+     legacyScopeArgs.back? == some forkCmd &&
+     systemdHelpSupportsExpandEnvironment "  --expand-environment=BOOL  Expand $" &&
+     !systemdHelpSupportsExpandEnvironment "systemd-run 252 (252.26-1~deb12u2)")
 
   let parentWs := System.FilePath.mk tmpRoot / "23bad383-5b27-4b83-9a84-d86d34223509"
   IO.FS.createDirAll parentWs
