@@ -48,8 +48,10 @@ it("strips scripts, handlers and links from rendered SVG", () => {
 });
 
 it("serialises sanitised SVG as XML so it decodes as an image", () => {
-  const out = sanitizeSvg(DOMPurify, '<svg viewBox="0 0 10 10"><foreignObject><div xmlns="http://www.w3.org/1999/xhtml"><p>Théorème&nbsp;racine<br>ligne 2</p></div></foreignObject></svg>');
+  const out = sanitizeSvg(DOMPurify, '<svg width="100%" viewBox="0 0 10 10"><foreignObject><div xmlns="http://www.w3.org/1999/xhtml"><p>Théorème&nbsp;racine<br>ligne 2</p></div></foreignObject></svg>');
   expect(out).toMatch(/^<svg[^>]*xmlns="http:\/\/www.w3.org\/2000\/svg"/);
+  expect(out).toContain('width="10"');
+  expect(out).toContain('height="10"');
   expect(out).toMatch(/<br\s*\/>/);
   expect(new DOMParser().parseFromString(out, "image/svg+xml").querySelector("parsererror")).toBeNull();
 });
@@ -93,4 +95,33 @@ it("caps mermaid viewer bitmap density inside GPU texture bounds while keeping z
   expect(mermaidRasterDensity(800, 600, 3, 2)).toBeCloseTo(4096 / 800, 4);
   const wide = mermaidRasterDensity(5000, 400, 2, 2);
   expect(5000 * wide).toBeLessThanOrEqual(4096.01);
+});
+
+it("opens expanded diagram at <= 100% without upscaling and handles pinch-zoom, Ctrl shortcuts and bounds clamping", async () => {
+  render(() => <MdView text={"```mermaid\nflowchart LR\n  A-->B\n```"} />);
+  const expand = await waitFor(() => {
+    const btn = screen.getByRole("button", { name: "Expand diagram" });
+    expect(btn.hasAttribute("disabled")).toBe(false);
+    return btn;
+  });
+  expand.click();
+  const dialog = await screen.findByRole("dialog", { name: "Diagram" });
+  const stage = dialog.querySelector(".mermaid-stage") as HTMLDivElement;
+  Object.defineProperty(stage, "clientWidth", { configurable: true, value: 1200 });
+  Object.defineProperty(stage, "clientHeight", { configurable: true, value: 800 });
+  stage.getBoundingClientRect = () => ({ left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800, x: 0, y: 0, toJSON: () => ({}) });
+
+  const fitBtn = screen.getByRole("button", { name: "Fit" });
+  fitBtn.click();
+  await new Promise((r) => requestAnimationFrame(() => r(null)));
+  const level = screen.getByRole("button", { name: "Actual size" });
+  expect(level.textContent).toBe("100%");
+
+  stage.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -50, clientX: 600, clientY: 400 }));
+  await new Promise((r) => requestAnimationFrame(() => r(null)));
+  expect(Number.parseInt(level.textContent ?? "0", 10)).toBeGreaterThan(150);
+
+  dialog.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "0", ctrlKey: true }));
+  await new Promise((r) => requestAnimationFrame(() => r(null)));
+  expect(level.textContent).toBe("100%");
 });

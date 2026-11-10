@@ -87,9 +87,15 @@ test("zoomed diagram drag-panning coalesces frame updates on a static bitmap wit
   await block.getByRole("button", { name: "Expand diagram" }).click();
   const dialog = page.getByRole("dialog", { name: "Diagram", exact: true });
   await expect(dialog.locator("canvas.mermaid-zoom")).toBeVisible();
+  // Small diagrams open at <= 100% (never blown up to 200% on open).
+  expect(Number.parseInt((await dialog.locator(".mermaid-zoom-level").textContent()) ?? "999", 10)).toBeLessThanOrEqual(100);
+  // Residual scroll inertia right after opening never nudges or zooms the fitted diagram.
+  const initialTransform = await dialog.locator("canvas.mermaid-zoom").evaluate((el: HTMLElement) => el.style.transform);
+  await dialog.locator(".mermaid-stage").dispatchEvent("wheel", { deltaY: 90, deltaX: 30, bubbles: true, cancelable: true });
+  expect(await dialog.locator("canvas.mermaid-zoom").evaluate((el: HTMLElement) => el.style.transform)).toBe(initialTransform);
+
   // Zoom past 200% and let the debounced rasterization settle.
-  await dialog.getByRole("button", { name: "Zoom in" }).click();
-  await dialog.getByRole("button", { name: "Zoom in" }).click();
+  for (let i = 0; i < 4; i++) await dialog.getByRole("button", { name: "Zoom in" }).click();
   await expect.poll(async () => Number.parseInt((await dialog.locator(".mermaid-zoom-level").textContent()) ?? "0", 10)).toBeGreaterThan(200);
   await page.waitForTimeout(220);
 
@@ -129,6 +135,26 @@ test("zoomed diagram drag-panning coalesces frame updates on a static bitmap wit
   expect(panMetrics.handlerMs).toBeLessThan(8);
   expect(panMetrics.afterTransform).toContain("translate3d(");
   expect(panMetrics.afterTransform).not.toBe(panMetrics.beforeTransform);
+
+  // Trackpad pinch (ctrl+wheel), 2D wheel pan, Ctrl shortcuts, double-click and bounds clamping stay reliable.
+  const stage = dialog.locator(".mermaid-stage");
+  const bounds = (await stage.boundingBox())!;
+  await page.keyboard.press("Control+0");
+  await expect(dialog.locator(".mermaid-zoom-level")).toHaveText("100%");
+  await stage.dispatchEvent("wheel", { deltaY: -40, ctrlKey: true, clientX: bounds.x + bounds.width / 2, clientY: bounds.y + bounds.height / 2, bubbles: true, cancelable: true });
+  await expect.poll(async () => Number.parseInt((await dialog.locator(".mermaid-zoom-level").textContent()) ?? "0", 10)).toBeGreaterThan(120);
+  // Extreme wheel pan never loses the diagram completely outside the viewport.
+  await stage.dispatchEvent("wheel", { deltaX: 50000, deltaY: 50000, bubbles: true, cancelable: true });
+  const clamped = (await dialog.locator("canvas.mermaid-zoom").boundingBox())!;
+  expect(clamped.x + clamped.width).toBeGreaterThan(bounds.x + 16);
+  expect(clamped.y + clamped.height).toBeGreaterThan(bounds.y + 16);
+  // Double-click returns a zoomed diagram to Fit, and double-click again zooms in.
+  await stage.dblclick({ position: { x: bounds.width / 2, y: bounds.height / 2 } });
+  await expect(dialog.locator(".mermaid-zoom-level")).toHaveText("100%");
+  await stage.dblclick({ position: { x: bounds.width / 2, y: bounds.height / 2 } });
+  await expect(dialog.locator(".mermaid-zoom-level")).toHaveText("200%");
+  await dialog.getByRole("button", { name: "Actual size" }).click();
+  await expect(dialog.locator(".mermaid-zoom-level")).toHaveText("100%");
 });
 
 test("a single click on the diagram opens the zoom view", async ({ page }) => {

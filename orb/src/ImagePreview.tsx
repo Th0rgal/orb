@@ -89,11 +89,12 @@ export default function ImagePreview(p: { name: string; load?: (signal: AbortSig
   onCleanup(() => { abort.abort(); cancelAnimationFrame(frame); if (url) URL.revokeObjectURL(url); });
   const endDrag = () => { drag = undefined; viewport.classList.remove("is-dragging"); };
   return <section class="pdf-viewer image-viewer" ref={root} tabIndex={0} aria-label={`Image: ${p.name}`} aria-keyshortcuts="Meta+= Meta+- Meta+0 + - 0 1" onKeyDown={e => {
-    if (e.altKey || e.ctrlKey || e.isComposing || (e.target as HTMLElement).closest("input,textarea,select")) return;
-    // ⌘ +/−/0 match the browser zoom keys; bare keys stay for quick use. Arrows pan
+    if (e.altKey || e.isComposing || (e.target as HTMLElement).closest("input,textarea,select")) return;
+    // ⌘/Ctrl +/−/0 match the browser zoom keys; bare keys stay for quick use. Arrows pan
     // only when zoomed in, so an enclosing lightbox keeps ←/→ to change image.
-    const pan = !fitting && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key);
-    if (e.metaKey ? !["+", "=", "-", "0"].includes(e.key) : !["+", "=", "-", "0", "1"].includes(e.key) && !pan) return;
+    const mod = e.metaKey || e.ctrlKey;
+    const pan = !mod && !fitting && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key);
+    if (mod ? !["+", "=", "-", "0", "1"].includes(e.key) : !["+", "=", "-", "0", "1"].includes(e.key) && !pan) return;
     e.preventDefault(); e.stopPropagation();
     if (e.key === "0") fit();
     else if (e.key === "1") zoom(1);

@@ -2066,12 +2066,12 @@ button.fork-trigger:hover { color: var(--fg); }
 .mermaid-error strong { color: var(--red); font-weight: 500; }
 .mermaid-error span { font: 11.5px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg-3); }
 .dlg-mermaid .dlg-body { flex: 1; overflow: hidden; padding: 0; display: flex; }
-.mermaid-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; cursor: grab; user-select: none; touch-action: none; background: var(--bg-inset); }
+.mermaid-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; cursor: grab; user-select: none; touch-action: none; overscroll-behavior: none; outline: none; background: var(--bg-inset); }
 .mermaid-stage.is-dragging { cursor: grabbing; }
 .mermaid-zoom, .mermaid-zoom-fallback { max-width: none; user-select: none; pointer-events: none; position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; backface-visibility: hidden; }
 .mermaid-zoom-controls { position: absolute; right: 16px; bottom: 16px; display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--bg-btn); border: 1px solid var(--stroke); box-shadow: var(--composer-shadow); font: 12px var(--sans); color: var(--fg-2); cursor: default; }
 .mermaid-zoom-controls .icon-btn { font-size: 15px; }
-.mermaid-zoom-level { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; }
+.mermaid-zoom-level { min-width: 48px; padding: 0 6px; text-align: center; font-variant-numeric: tabular-nums; }
 .mermaid-fit { height: 24px; padding: 0 8px; border-radius: var(--radius-sm); color: var(--fg-2); font: 12px var(--sans); }
 .mermaid-fit:hover { background: var(--bg-active); color: var(--fg); }
 /* Opaque so long lines never show through; only the icon is quiet until hover. */

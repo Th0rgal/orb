@@ -125,7 +125,7 @@ function errorMessage(e: unknown): string {
 }
 
 function size(svg: string): { width: number; height: number } {
-  const vb = /viewBox="\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)/.exec(svg);
+  const vb = /viewBox="\s*[+-]?[\d.]+(?:e[+-]?\d+)?[\s,]+[+-]?[\d.]+(?:e[+-]?\d+)?[\s,]+([\d.]+(?:e[+-]?\d+)?)[\s,]+([\d.]+(?:e[+-]?\d+)?)/i.exec(svg);
   return vb ? { width: Number(vb[1]), height: Number(vb[2]) } : { width: 0, height: 0 };
 }
 
@@ -182,6 +182,14 @@ export function sanitizeSvg(purify: Purify, svg: string): string {
   // leaving only its alt text. Serialise the sanitised tree as XML instead.
   const root = [...fragment.childNodes].find((n): n is Element => n.nodeType === 1 && (n as Element).localName === "svg");
   if (!root) return "";
+  // Stamp intrinsic pixel dimensions from viewBox so <img> naturalWidth/Height and
+  // 2D canvas drawImage match the diagram's geometry across WebKit, Chromium and Firefox.
+  const vb = root.getAttribute("viewBox");
+  const dims = vb ? size(`viewBox="${vb}"`) : { width: 0, height: 0 };
+  if (dims.width > 0 && dims.height > 0) {
+    root.setAttribute("width", String(dims.width));
+    root.setAttribute("height", String(dims.height));
+  }
   // Elements keep their real namespaces, which the serialiser declares itself; a
   // copied `xmlns` attribute would be written a second time by some engines.
   for (const el of [root, ...root.querySelectorAll("*")]) if (el.hasAttribute("xmlns")) el.removeAttribute("xmlns");

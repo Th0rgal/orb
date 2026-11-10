@@ -16,16 +16,13 @@
 #include <gtk/gtk.h>
 #include <webkit2/webkit2.h>
 #endif
-
 static int parse_valid_port(const char *s, unsigned *out_port) {
     if (!s || !*s) return 0;
     unsigned v = 0;
-    for (const char *p = s; *p; ++p) {
+    for (const char *p = s; *p; ++p)
         if (*p < '0' || *p > '9' || (v = v * 10u + (unsigned)(*p - '0')) > 65535u) return 0;
-    }
     return v >= 1024u ? (*out_port = v, 1) : 0;
 }
-
 static int gen_csprng_hex(char out_hex[65]) {
     unsigned char raw[32];
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
@@ -85,20 +82,22 @@ static char *build_init_script(unsigned port, const char *token) {
         "  const _fetch = window.fetch.bind(window), _jsonStringify = JSON.stringify;\n"
         "  const ORB_LOCALD_URL = \"http://127.0.0.1:%u/__orb_rpc\", ORB_TOKEN = %s;\n"
         "  class Channel { constructor() { this.onmessage = () => {}; } }\n"
-        "  const listeners = new Map(), channels = new Map(); let timer = 0;\n"
+        "  const listeners = new Map(), channels = new Map(); let timer = 0, ps = 10000;\n"
         "  const emit = (name, payload) => { const s = listeners.get(name); if (s) for (const h of s) { try { h({ event: name, payload }); } catch {} } };\n"
         "  window.__ORB_EMIT__ = emit;\n"
+        "  window.__ORB_PINCH__ = (ph, x16, y16, s10k, dx16, dy16) => {\n"
+        "    if (ph === 0) { ps = s10k > 0 ? s10k : 10000; return; }\n"
+        "    if (ph !== 1 || s10k <= 0 || ps <= 0) return;\n"
+        "    const x = x16 / 16, y = y16 / 16, el = document.elementFromPoint(x, y) || document.documentElement;\n"
+        "    if (s10k !== ps) { const dy = -Math.log(s10k / ps) * 100; ps = s10k; el.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, clientX: x, clientY: y, deltaY: dy })); }\n"
+        "    if ((dx16 || dy16) && el.closest('.mermaid-stage, .image-viewport')) el.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, clientX: x, clientY: y, deltaX: -dx16 / 16, deltaY: -dy16 / 16 }));\n"
+        "  };\n"
         "  async function drain() {\n"
         "    if (!channels.size && !listeners.size) { if (timer) { clearInterval(timer); timer = 0; } return; }\n"
         "    try {\n"
-        "      const r = await _fetch(ORB_LOCALD_URL, { method: 'POST',\n"
-        "        headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN },\n"
-        "        body: _jsonStringify({ command: '__orb_poll_events', args: { tokens: Array.from(channels.keys()) } }) });\n"
+        "      const r = await _fetch(ORB_LOCALD_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN }, body: _jsonStringify({ command: '__orb_poll_events', args: { tokens: Array.from(channels.keys()) } }) });\n"
         "      const b = await r.json();\n"
-        "      if (Array.isArray(b.result)) for (const ev of b.result) {\n"
-        "        if (typeof ev.event === 'string') emit(ev.event, ev.payload);\n"
-        "        else channels.get(ev.token)?.onmessage(ev.payload);\n"
-        "      }\n"
+        "      if (Array.isArray(b.result)) for (const ev of b.result) { if (typeof ev.event === 'string') emit(ev.event, ev.payload); else channels.get(ev.token)?.onmessage(ev.payload); }\n"
         "    } catch {}\n"
         "  }\n"
         "  async function invoke(command, args = {}, options = {}) {\n"
@@ -107,10 +106,7 @@ static char *build_init_script(unsigned port, const char *token) {
         "    let bound = null;\n"
         "    if (!isBin && clean.onEvent instanceof Channel) { bound = clean.onEvent; delete clean.onEvent; }\n"
         "    if (command.endsWith('_unsubscribe') && typeof clean.token === 'number') channels.delete(clean.token);\n"
-        "    let r; for (let i = 0; ; i++) { try { r = await _fetch(ORB_LOCALD_URL, { method: 'POST',\n"
-        "      headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN },\n"
-        "      body: _jsonStringify({ command, args: clean }) }); break; }\n"
-        "      catch (e) { if (i >= 8) throw e; await new Promise(w => setTimeout(w, 75)); } }\n"
+        "    let r; for (let i = 0; ; i++) { try { r = await _fetch(ORB_LOCALD_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN }, body: _jsonStringify({ command, args: clean }) }); break; } catch (e) { if (i >= 8) throw e; await new Promise(w => setTimeout(w, 75)); } }\n"
         "    const b = await r.json();\n"
         "    if (!r.ok || b.error) throw new Error(b.error || command);\n"
         "    if (bound && typeof b.result === 'number') { channels.set(b.result, bound); if (!timer) timer = setInterval(drain, 250); void drain(); }\n"
@@ -118,31 +114,36 @@ static char *build_init_script(unsigned port, const char *token) {
         "  }\n"
         "  async function listen(n, h) {\n"
         "    if (!listeners.has(n)) listeners.set(n, new Set());\n"
-        "    listeners.get(n).add(h); if (!timer) timer = setInterval(drain, 250);\n"
-        "    return () => listeners.get(n)?.delete(h);\n"
+        "    listeners.get(n).add(h); if (!timer) timer = setInterval(drain, 250); return () => listeners.get(n)?.delete(h);\n"
         "  }\n"
         "  window.__TAURI_INTERNALS__ = { invoke };\n"
         "  window.__ORB_DESKTOP__ = window.__TAURI__ = { core: { invoke, Channel }, event: { listen },\n"
-        "    window: { getCurrentWindow: () => ({\n"
-        "      innerSize: async () => { const s = window.devicePixelRatio || 1; return { width: Math.round(window.innerWidth * s), height: Math.round(window.innerHeight * s) }; },\n"
-        "      scaleFactor: async () => window.devicePixelRatio || 1 }) },\n"
+        "    window: { getCurrentWindow: () => ({ innerSize: async () => { const s = window.devicePixelRatio || 1; return { width: Math.round(window.innerWidth * s), height: Math.round(window.innerHeight * s) }; }, scaleFactor: async () => window.devicePixelRatio || 1 }) },\n"
         "    webview: { getCurrentWebview: () => ({ label: 'main' }) } };\n"
         "})();\n";
     size_t need = sizeof(tmpl) + strlen(tok_lit) + 32;
     char *buf = malloc(need);
     if (buf) snprintf(buf, need, tmpl, port, tok_lit);
-    free(tok_lit);
-    return buf;
+    return free(tok_lit), buf;
 }
 
 #if defined(ORB_HAS_WEBKITGTK)
-static gboolean on_decide_policy(WebKitWebView *wv, WebKitPolicyDecision *dec,
-                                 WebKitPolicyDecisionType dtype, gpointer ud) {
+static gboolean on_wv_event(GtkWidget *wv, GdkEvent *ev, gpointer ud) {
+    (void)ud;
+    if (ev->type != GDK_TOUCHPAD_PINCH) return FALSE;
+    const GdkEventTouchpadPinch *p = &ev->touchpad_pinch;
+    if (p->phase == GDK_TOUCHPAD_GESTURE_PHASE_BEGIN || p->phase == GDK_TOUCHPAD_GESTURE_PHASE_UPDATE) {
+        char js[160];
+        snprintf(js, sizeof(js), "window.__ORB_PINCH__&&window.__ORB_PINCH__(%d,%ld,%ld,%ld,%ld,%ld)",
+            (int)p->phase, (long)(p->x * 16.0), (long)(p->y * 16.0), (long)(p->scale * 10000.0), (long)(p->dx * 16.0), (long)(p->dy * 16.0));
+        webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(wv), js, -1, NULL, NULL, NULL, NULL, NULL);
+    }
+    return TRUE;
+}
+static gboolean on_decide_policy(WebKitWebView *wv, WebKitPolicyDecision *dec, WebKitPolicyDecisionType dtype, gpointer ud) {
     (void)wv; (void)ud;
-    if (dtype == WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION ||
-        dtype == WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION) {
-        WebKitNavigationAction *act = webkit_navigation_policy_decision_get_navigation_action(
-            WEBKIT_NAVIGATION_POLICY_DECISION(dec));
+    if (dtype == WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION || dtype == WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION) {
+        WebKitNavigationAction *act = webkit_navigation_policy_decision_get_navigation_action(WEBKIT_NAVIGATION_POLICY_DECISION(dec));
         const char *uri = webkit_uri_request_get_uri(webkit_navigation_action_get_request(act));
         if (dtype == WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION || !is_confined_shell_uri(uri))
             return webkit_policy_decision_ignore(dec), TRUE;
@@ -166,7 +167,7 @@ int main(int argc, char **argv) {
     if (!init_js) return 1;
 
     if (argc > 1 && strcmp(argv[1], "--self-test") == 0) {
-        int ok = strstr(init_js, "__ORB_DESKTOP__") != NULL && strstr(init_js, "__ORB_EMIT__") != NULL &&
+        int ok = strstr(init_js, "__ORB_DESKTOP__") != NULL && strstr(init_js, "__ORB_EMIT__") != NULL && strstr(init_js, "__ORB_PINCH__") != NULL &&
                  strstr(init_js, "const _fetch = window.fetch.bind(window)") != NULL &&
                  is_confined_shell_uri("http://127.0.0.1:1430") && is_confined_shell_uri("http://localhost/") &&
                  !is_confined_shell_uri("http://127.0.0.1:80@evil.com/") && !is_confined_shell_uri("https://evil.example");
@@ -184,9 +185,7 @@ int main(int argc, char **argv) {
             const char *v = getenv(keep[i]);
             if (v && (size_t)snprintf(kv[i], sizeof(kv[i]), "%s=%s", keep[i], v) < sizeof(kv[i])) envp[n++] = kv[i];
         }
-        envp[n] = NULL;
-        execle(locald_bin, locald_bin, (char *)NULL, envp);
-        _exit(127);
+        envp[n] = NULL; execle(locald_bin, locald_bin, (char *)NULL, envp); _exit(127);
     }
 #if defined(ORB_HAS_WEBKITGTK)
     gtk_init(&argc, &argv);
@@ -204,6 +203,7 @@ int main(int argc, char **argv) {
     webkit_user_script_unref(script);
     GtkWidget *wv = webkit_web_view_new_with_user_content_manager(ucm);
     g_signal_connect(wv, "decide-policy", G_CALLBACK(on_decide_policy), NULL);
+    g_signal_connect(wv, "event", G_CALLBACK(on_wv_event), NULL);
     gtk_container_add(GTK_CONTAINER(win), wv);
     const char *url = getenv("ORB_DEV_URL");
     webkit_web_view_load_uri(WEBKIT_WEB_VIEW(wv), (url && is_confined_shell_uri(url)) ? url : "http://127.0.0.1:1430");

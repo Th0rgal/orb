@@ -114,84 +114,141 @@ export function mermaidRasterDensity(width: number, height: number, targetScale:
   return Math.max(0.05, Math.min(cap, Math.max(2, targetScale) * Math.max(1, dpr)));
 }
 
-/** Fullscreen zoom and pan: wheel or pinch zooms around the pointer, drag pans, 0 fits, +/- step. */
+/** Fullscreen zoom and pan: pinch or Ctrl/⌘+wheel zooms around the pointer, scroll or drag pans, double-click toggles zoom, 0 fits, 1 resets to 100%. */
 function MermaidViewer(p: { svg: string; width: number; height: number; onClose: () => void }) {
   let stage!: HTMLDivElement, canvas!: HTMLCanvasElement, fallbackImg!: HTMLImageElement;
   const src = svgDataUrl(p.svg);
   const [percent, setPercent] = createSignal(100);
+  const [stageReady, setStageReady] = createSignal(false);
   const [bitmapReady, setBitmapReady] = createSignal(false);
   let scale = 1, x = 0, y = 0, fitting = true, frame = 0, settleTimer: ReturnType<typeof setTimeout> | undefined;
-  let rasterDensity = 0, decoded: HTMLImageElement | undefined, alive = true;
-  let drag: { id: number; x: number; y: number; ox: number; oy: number } | undefined;
+  let rasterDensity = 0, decoded: HTMLImageElement | undefined, alive = true, openedAt = 0;
+  const pointers = new Map<number, { x: number; y: number }>();
 
   const applyTransform = () => {
     const t = `translate3d(${x}px, ${y}px, 0) scale(${scale})`;
     canvas.style.transform = t;
-    fallbackImg.style.transform = t;
+    if (!bitmapReady()) fallbackImg.style.transform = t;
     setPercent(Math.round(scale * 100));
   };
   const paint = () => {
     if (frame) return;
     frame = requestAnimationFrame(() => { frame = 0; applyTransform(); });
   };
-  const rasterize = (targetScale: number) => {
-    if (!alive || !decoded) return;
-    const dpr = typeof devicePixelRatio === "number" ? devicePixelRatio : 1;
-    const next = mermaidRasterDensity(p.width, p.height, targetScale, dpr);
-    if (bitmapReady() && Math.abs(next - rasterDensity) / (rasterDensity || 1) < 0.15) return;
-    const cw = Math.max(1, Math.round(p.width * next)), ch = Math.max(1, Math.round(p.height * next));
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    canvas.width = cw;
-    canvas.height = ch;
-    ctx.setTransform(cw / Math.max(1, p.width), 0, 0, ch / Math.max(1, p.height), 0, 0);
-    ctx.clearRect(0, 0, Math.max(1, p.width), Math.max(1, p.height));
-    ctx.drawImage(decoded, 0, 0, Math.max(1, p.width), Math.max(1, p.height));
-    rasterDensity = next;
-    if (!bitmapReady()) setBitmapReady(true);
+  const constrain = () => {
+    const sw = stage.clientWidth, sh = stage.clientHeight;
+    if (!sw || !sh) return;
+    const dw = p.width * scale, dh = p.height * scale;
+    const padX = Math.min(96, sw * 0.25, dw * 0.5);
+    const padY = Math.min(96, sh * 0.25, dh * 0.5);
+    x = Math.max(padX - dw, Math.min(sw - padX, x));
+    y = Math.max(padY - dh, Math.min(sh - padY, y));
   };
   const scheduleRaster = () => {
     clearTimeout(settleTimer);
     settleTimer = setTimeout(() => rasterize(scale), 140);
   };
-  const fit = () => {
-    if (!stage.clientWidth || !stage.clientHeight) return;
+  const rasterize = (targetScale: number) => {
+    if (!alive || !decoded) return;
+    if (pointers.size > 0) { scheduleRaster(); return; }
+    const dpr = typeof devicePixelRatio === "number" && devicePixelRatio > 0 ? devicePixelRatio : 1;
+    const bucket = targetScale <= 2 ? 2 : targetScale <= 4 ? 4 : 8;
+    const next = mermaidRasterDensity(p.width, p.height, bucket, dpr);
+    if (bitmapReady() && Math.abs(next - rasterDensity) / (rasterDensity || 1) < 0.15) return;
+    const cw = Math.max(1, Math.round(p.width * next)), ch = Math.max(1, Math.round(p.height * next));
+    const buf = document.createElement("canvas");
+    buf.width = cw;
+    buf.height = ch;
+    const bctx = buf.getContext("2d");
+    if (!bctx) return;
+    bctx.setTransform(cw / Math.max(1, p.width), 0, 0, ch / Math.max(1, p.height), 0, 0);
+    bctx.drawImage(decoded, 0, 0, Math.max(1, p.width), Math.max(1, p.height));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    canvas.width = cw;
+    canvas.height = ch;
+    ctx.drawImage(buf, 0, 0);
+    rasterDensity = next;
+    if (!bitmapReady()) setBitmapReady(true);
+  };
+  const fit = (immediate = false) => {
+    const sw = stage.clientWidth, sh = stage.clientHeight;
+    if (!sw || !sh) return;
     fitting = true;
-    const w = stage.clientWidth - 48, h = stage.clientHeight - 48;
-    scale = Math.max(0.02, Math.min(2, w / (p.width || 1), h / (p.height || 1)));
-    x = (stage.clientWidth - p.width * scale) / 2;
-    y = (stage.clientHeight - p.height * scale) / 2;
-    paint();
+    const w = Math.max(1, sw - 48), h = Math.max(1, sh - 48);
+    // Fit inside the viewport without upscaling small diagrams past 100%.
+    scale = Math.max(0.02, Math.min(1, w / (p.width || 1), h / (p.height || 1)));
+    x = (sw - p.width * scale) / 2;
+    y = (sh - p.height * scale) / 2;
+    if (immediate || !stageReady()) {
+      if (frame) { cancelAnimationFrame(frame); frame = 0; }
+      applyTransform();
+      if (!stageReady()) setStageReady(true);
+    } else {
+      paint();
+    }
     scheduleRaster();
   };
-  const zoomAt = (factor: number, cx = stage.clientWidth / 2, cy = stage.clientHeight / 2) => {
+  const zoomTo = (target: number, cx = stage.clientWidth / 2, cy = stage.clientHeight / 2) => {
     fitting = false;
-    const next = Math.max(0.02, Math.min(8, scale * factor)), k = next / scale;
+    const next = Math.max(0.02, Math.min(8, target)), k = next / scale;
     x = cx - (cx - x) * k;
     y = cy - (cy - y) * k;
     scale = next;
+    constrain();
     paint();
     scheduleRaster();
   };
-  const endDrag = () => { drag = undefined; stage.classList.remove("is-dragging"); };
+  const zoomAt = (factor: number, cx?: number, cy?: number) => zoomTo(scale * factor, cx, cy);
+  const syncDragClass = () => stage.classList.toggle("is-dragging", pointers.size > 0);
+  const dropPointer = (id: number) => {
+    if (!pointers.delete(id)) return;
+    syncDragClass();
+    if (pointers.size === 0) scheduleRaster();
+  };
+  const clearPointers = () => {
+    if (!pointers.size) return;
+    pointers.clear();
+    syncDragClass();
+    scheduleRaster();
+  };
 
   onMount(() => {
-    requestAnimationFrame(fit);
-    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => { if (fitting) fit(); }) : undefined;
+    openedAt = typeof performance !== "undefined" ? performance.now() : 0;
+    fit(true);
+    if (!stageReady()) requestAnimationFrame(() => { if (alive && !stageReady()) fit(true); });
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => {
+      if (fitting) fit(true);
+      else { constrain(); paint(); }
+    }) : undefined;
     ro?.observe(stage);
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const r = stage.getBoundingClientRect();
-      zoomAt(Math.exp(-e.deltaY * (e.ctrlKey || e.metaKey ? 0.01 : 0.0025)), e.clientX - r.left, e.clientY - r.top);
+      e.stopPropagation();
+      if (e.ctrlKey || e.metaKey) {
+        const r = stage.getBoundingClientRect();
+        const dy = Math.max(-120, Math.min(120, e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY));
+        zoomAt(Math.exp(-dy * 0.01), e.clientX - r.left, e.clientY - r.top);
+      } else {
+        // Ignore residual transcript scroll inertia right after clicking the inline diagram.
+        if (fitting && (typeof performance !== "undefined" ? performance.now() - openedAt : 999) < 220) return;
+        const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? stage.clientHeight : 1;
+        fitting = false;
+        x -= e.deltaX * unit;
+        y -= e.deltaY * unit;
+        constrain();
+        paint();
+      }
     };
     // WKWebView exposes native trackpad pinch as GestureEvent rather than wheel.
     let gestureBase = 1;
-    const onGestureStart = (e: Event) => { e.preventDefault(); gestureBase = scale; };
+    const onGestureStart = (e: Event) => { e.preventDefault(); e.stopPropagation(); gestureBase = scale; };
     const onGestureChange = (e: Event) => {
       e.preventDefault();
+      e.stopPropagation();
       const g = e as Event & { scale: number; clientX: number; clientY: number };
       const r = stage.getBoundingClientRect();
-      if (g.scale > 0) zoomAt((gestureBase * g.scale) / scale, g.clientX - r.left, g.clientY - r.top);
+      if (g.scale > 0) zoomTo(gestureBase * g.scale, g.clientX - r.left, g.clientY - r.top);
     };
     stage.addEventListener("wheel", onWheel, { passive: false });
     stage.addEventListener("gesturestart", onGestureStart);
@@ -205,48 +262,101 @@ function MermaidViewer(p: { svg: string; width: number; height: number; onClose:
 
     const img = new Image();
     img.decoding = "async";
+    img.width = Math.max(1, Math.round(p.width));
+    img.height = Math.max(1, Math.round(p.height));
     img.src = src;
-    void img.decode().then(() => {
+    const decodedReady = typeof img.decode === "function"
+      ? img.decode()
+      : new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error("decode")); });
+    void decodedReady.then(() => {
       if (!alive) return;
       decoded = img;
+      if (!stageReady()) fit(true);
       rasterize(scale);
     }).catch(() => { /* Keep vector fallback <img> visible if canvas decode fails. */ });
   });
   onCleanup(() => { alive = false; cancelAnimationFrame(frame); clearTimeout(settleTimer); });
 
   return (
-    <Dialog size="fullscreen" class="dlg-mermaid" title="Diagram" hint="Scroll to zoom · drag to pan · 0 to fit" onClose={p.onClose}
+    <Dialog size="fullscreen" class="dlg-mermaid" title="Diagram" hint="Pinch or Ctrl+scroll to zoom · drag or scroll to pan · double-click or 0 to fit" onClose={p.onClose}
+      initialFocus={() => stage}
       onKeyDown={(e) => {
-        if (e.isComposing || e.ctrlKey || e.altKey) return;
-        if (e.metaKey && !["+", "=", "-", "0"].includes(e.key)) return;
-        if (e.key === "+" || e.key === "=") { e.preventDefault(); zoomAt(1.25); }
-        else if (e.key === "-") { e.preventDefault(); zoomAt(0.8); }
-        else if (e.key === "0") { e.preventDefault(); fit(); }
+        if (e.isComposing || e.altKey || (e.target as HTMLElement | null)?.closest("input,textarea,select")) return;
+        const mod = e.metaKey || e.ctrlKey;
+        const pan = !mod && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key);
+        if (mod ? !["+", "=", "-", "_", "0", "1"].includes(e.key) : !["+", "=", "-", "_", "0", "1"].includes(e.key) && !pan) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === "+" || e.key === "=") zoomAt(1.25);
+        else if (e.key === "-" || e.key === "_") zoomAt(0.8);
+        else if (e.key === "0") fit();
+        else if (e.key === "1") zoomTo(1);
+        else {
+          fitting = false;
+          x += e.key === "ArrowLeft" ? 48 : e.key === "ArrowRight" ? -48 : 0;
+          y += e.key === "ArrowUp" ? 48 : e.key === "ArrowDown" ? -48 : 0;
+          constrain();
+          paint();
+        }
       }}>
-      <div class="mermaid-stage" ref={stage}
+      <div class="mermaid-stage" ref={stage} tabIndex={-1}
+        onDblClick={(e) => {
+          if ((e.target as Element).closest(".mermaid-zoom-controls")) return;
+          const r = stage.getBoundingClientRect();
+          if (fitting) zoomTo(scale < 0.95 ? 1 : 2, e.clientX - r.left, e.clientY - r.top);
+          else fit();
+        }}
         onPointerDown={(e) => {
-          if (e.button !== 0 || (e.target as Element).closest(".mermaid-zoom-controls")) return;
+          if ((e.pointerType === "mouse" && e.button !== 0) || (e.target as Element).closest(".mermaid-zoom-controls")) return;
           e.preventDefault();
+          stage.focus({ preventScroll: true });
           try { stage.setPointerCapture(e.pointerId); } catch { /* synthetic pointer events */ }
-          drag = { id: e.pointerId, x: e.clientX, y: e.clientY, ox: x, oy: y };
-          stage.classList.add("is-dragging");
+          pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+          syncDragClass();
         }}
         onPointerMove={(e) => {
-          if (!drag || drag.id !== e.pointerId) return;
-          fitting = false;
-          x = drag.ox + e.clientX - drag.x;
-          y = drag.oy + e.clientY - drag.y;
-          paint();
+          const prev = pointers.get(e.pointerId);
+          if (!prev) return;
+          if (pointers.size === 1) {
+            fitting = false;
+            x += e.clientX - prev.x;
+            y += e.clientY - prev.y;
+            prev.x = e.clientX;
+            prev.y = e.clientY;
+            constrain();
+            paint();
+          } else if (pointers.size === 2) {
+            const other = [...pointers.entries()].find(([id]) => id !== e.pointerId)?.[1];
+            if (!other) return;
+            const mx0 = (prev.x + other.x) / 2, my0 = (prev.y + other.y) / 2;
+            const d0 = Math.hypot(prev.x - other.x, prev.y - other.y);
+            prev.x = e.clientX;
+            prev.y = e.clientY;
+            const mx1 = (prev.x + other.x) / 2, my1 = (prev.y + other.y) / 2;
+            const d1 = Math.hypot(prev.x - other.x, prev.y - other.y);
+            fitting = false;
+            x += mx1 - mx0;
+            y += my1 - my0;
+            if (d0 > 4 && d1 > 4) {
+              const r = stage.getBoundingClientRect();
+              zoomTo(scale * (d1 / d0), mx1 - r.left, my1 - r.top);
+            } else {
+              constrain();
+              paint();
+            }
+          }
         }}
-        onPointerUp={(e) => { try { if (stage.hasPointerCapture(e.pointerId)) stage.releasePointerCapture(e.pointerId); } catch {} endDrag(); }}
-        onPointerCancel={endDrag} onLostPointerCapture={endDrag}>
-        <canvas ref={canvas} class="mermaid-zoom" role="img" aria-label="Diagram" style={{ width: `${p.width}px`, height: `${p.height}px`, visibility: bitmapReady() ? "visible" : "hidden" }} />
-        <img ref={fallbackImg} class="mermaid-zoom-fallback" alt="" aria-hidden="true" draggable={false} src={src} style={{ width: `${p.width}px`, height: `${p.height}px`, display: bitmapReady() ? "none" : "block" }} />
+        onPointerUp={(e) => { try { if (stage.hasPointerCapture(e.pointerId)) stage.releasePointerCapture(e.pointerId); } catch {} dropPointer(e.pointerId); }}
+        onPointerCancel={(e) => dropPointer(e.pointerId)}
+        onLostPointerCapture={(e) => dropPointer(e.pointerId)}
+        onBlur={clearPointers}>
+        <canvas ref={canvas} class="mermaid-zoom" role="img" aria-label="Diagram" style={{ width: `${p.width}px`, height: `${p.height}px`, visibility: stageReady() && bitmapReady() ? "visible" : "hidden" }} />
+        <img ref={fallbackImg} class="mermaid-zoom-fallback" alt="" aria-hidden="true" draggable={false} src={src} style={{ width: `${p.width}px`, height: `${p.height}px`, visibility: stageReady() ? "visible" : "hidden", display: bitmapReady() ? "none" : "block" }} />
         <div class="mermaid-zoom-controls">
-          <button type="button" class="icon-btn" aria-label="Zoom out" onClick={() => zoomAt(0.8)}>−</button>
-          <span class="mermaid-zoom-level">{percent()}%</span>
-          <button type="button" class="icon-btn" aria-label="Zoom in" onClick={() => zoomAt(1.25)}>+</button>
-          <button type="button" class="mermaid-fit" onClick={fit}>Fit</button>
+          <button type="button" class="icon-btn" aria-label="Zoom out" title="Zoom out (−)" onClick={() => zoomAt(0.8)}>−</button>
+          <button type="button" class="mermaid-zoom-level mermaid-fit" aria-label="Actual size" title="Actual size (1)" onClick={() => zoomTo(1)}>{percent()}%</button>
+          <button type="button" class="icon-btn" aria-label="Zoom in" title="Zoom in (+)" onClick={() => zoomAt(1.25)}>+</button>
+          <button type="button" class="mermaid-fit" title="Fit to window (0)" onClick={() => fit()}>Fit</button>
         </div>
       </div>
     </Dialog>
