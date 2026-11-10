@@ -37,6 +37,7 @@ import {
   peekReadyTranscript,
   peekWarmMissionPatch,
   prefetchTranscript,
+  putTranscript,
   retainTranscript,
 } from "../src/missionCache";
 import { cacheReset } from "../src/pageCache";
@@ -1581,5 +1582,63 @@ describe("warm background sync & off-mode quickness", () => {
 
     detach1();
     detach2();
+  });
+
+  it("marks unfocused missions dirty on mission_activity hints, live warm-sub eviction, and pageCache snapshot eviction", async () => {
+    setConnection("http://warm.test", "jwt-tok");
+    setMultiplexSyncEnabledForTest(true);
+    vi.stubGlobal("WebSocket", FakeSyncSocket as unknown as typeof WebSocket);
+
+    // 1. Unsubscribed mission receiving mission_activity presentation hints becomes dirty.
+    putTranscript("m-activity", {
+      items: [{ kind: "user", key: "u1", text: "hi" }],
+      stream: [],
+      fromLog: true,
+      cursor: 1,
+    });
+    expect(isMissionDirtyWhileUnfocused("m-activity")).toBe(false);
+    noteMissionPresentationHint("m-activity", "mission_activity");
+    expect(isMissionDirtyWhileUnfocused("m-activity")).toBe(true);
+
+    // 2. Live mission whose warm subscription is torn down (e.g. background mode paused / hidden) becomes dirty.
+    setBackgroundSyncMode("on");
+    putTranscript("m-live-recover", {
+      items: [{ kind: "user", key: "u2", text: "[Automatic recovery] Resume your work" }],
+      stream: [],
+      fromLog: true,
+      cursor: 82,
+    });
+    noteLiveMissionIds(["m-live-recover"]);
+    await vi.waitFor(() => expect(FakeSyncSocket.instances).toHaveLength(1));
+    await vi.waitFor(() => expect(isMissionWarmLive("m-live-recover")).toBe(true));
+
+    setBackgroundSyncMode("off");
+    expect(isMissionDirtyWhileUnfocused("m-live-recover")).toBe(true);
+
+    // 3. Warm subscription whose in-memory transcript snapshot was evicted marks dirty if events arrive.
+    setBackgroundSyncMode("on");
+    putTranscript("m-evicted-tx", {
+      items: [{ kind: "user", key: "u3", text: "run report" }],
+      stream: [],
+      fromLog: true,
+      cursor: 10,
+    });
+    noteLiveMissionIds(["m-evicted-tx"]);
+    await vi.waitFor(() => expect(isMissionWarmLive("m-evicted-tx")).toBe(true));
+
+    cacheReset();
+    const sock = FakeSyncSocket.instances[0];
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: "assistant_message",
+        mission_id: "m-evicted-tx",
+        id: "a-134",
+        sequence: 134,
+        content: "Final report",
+        success: true,
+      }),
+    });
+    expect(isMissionWarmLive("m-evicted-tx")).toBe(false);
+    expect(isMissionDirtyWhileUnfocused("m-evicted-tx")).toBe(true);
   });
 });

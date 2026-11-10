@@ -4021,6 +4021,7 @@ private def runR4cHarnessSessionTests (store : CoreStore) (tmpRoot : String) : I
     return 1
   return 0
 
+set_option maxHeartbeats 600000 in
 set_option maxRecDepth 8000 in
 private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let muTs ← IO.monoNanosNow

@@ -970,9 +970,7 @@ object OrbWarmSyncCoordinator {
             }
             val sub = warmSubs[missionId]
             if (sub == null || !sub.isCaughtUpHealthy) {
-                if (kind != "mission_activity") {
-                    dirtyMissions.add(missionId)
-                }
+                dirtyMissions.add(missionId)
             }
         }
         if (shouldReconcile) reconcile(core)
@@ -1000,7 +998,7 @@ object OrbWarmSyncCoordinator {
             ensureScopeLocked(core)
             if (!appForegrounded) {
                 for ((mid, sub) in warmSubs) {
-                    if (!sub.isCaughtUpHealthy) dirtyMissions.add(mid)
+                    if (!sub.isCaughtUpHealthy || mid in liveIds) dirtyMissions.add(mid)
                     sub.cancel()
                 }
                 warmSubs.clear()
@@ -1041,7 +1039,7 @@ object OrbWarmSyncCoordinator {
             while (subIter.hasNext()) {
                 val (mid, sub) = subIter.next()
                 if (sub.listeners.isEmpty() && mid !in wantedMissions) {
-                    if (!sub.isCaughtUpHealthy) dirtyMissions.add(mid)
+                    if (!sub.isCaughtUpHealthy || mid in liveIds) dirtyMissions.add(mid)
                     sub.cancel()
                     subIter.remove()
                 }

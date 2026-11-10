@@ -857,9 +857,21 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     );
     const warmLiveOnMount = isMissionWarmLive(id);
     const readyOnMount = peekReadyTranscript(id);
+    const hasSettledOutputOnMount = (() => {
+      if (!readyOnMount) return false;
+      const list = readyOnMount.items;
+      const lastUser = list.reduce((last, item, idx) => (item.kind === "user" && !item.queued ? idx : last), -1);
+      if (lastUser < 0) return false;
+      const status = mission()?.status ?? "";
+      if (["completed", "done", "awaiting_user", "waiting_user"].includes(status)) {
+        return list.slice(lastUser + 1).some((i) => i.kind === "text" && !i.live && !!i.text.trim());
+      }
+      return true;
+    })();
     const cleanStaleOnMount =
       !warmLiveOnMount &&
       Boolean(readyOnMount) &&
+      hasSettledOutputOnMount &&
       isMultiplexSyncActive() &&
       !isMissionDirtyWhileUnfocused(id) &&
       !missionPhase(mission(), false).moving;
@@ -924,23 +936,32 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     });
     // Slow status poll — the stream is authoritative for content, but the
     // composer busy state shouldn't depend on it alone.
+    let settledEmptyVerified = false;
     const stopPoll = pollWhileVisible(async () => {
       const wasMoving = missionPhase(mission(), activity()).moving;
       await refresh();
       const nowMoving = missionPhase(mission(), activity()).moving;
+      if (nowMoving) settledEmptyVerified = false;
       // Reconcile through completion even if the live stream misses output.
       const transcript = items();
       const lastUser = transcript.reduce((last, item, index) => item.kind === "user" && !item.queued ? index : last, -1);
-      // Partial text, thinking, and tools are activity, not a final reply.
+      const status = mission()?.status ?? "";
+      const isCompletedStatus = status === "completed" || status === "done";
+      // Partial text, thinking, and tools are activity, not a final reply; a prior
+      // interrupted turn's error row is not a final reply once completed.
       const hasFinalReply = transcript.slice(lastUser + 1).some(item =>
-        (item.kind === "text" && !item.live && !!item.text.trim()) || item.kind === "error");
-      const waitingForReply = ["awaiting_user", "waiting_user", "completed", "done"].includes(mission()?.status ?? "")
-        && !hasFinalReply && viewItems().some(item => item.kind === "user" && !item.queued);
+        (item.kind === "text" && !item.live && !!item.text.trim()) || (!isCompletedStatus && item.kind === "error"));
+      const waitingForReply = ["awaiting_user", "waiting_user", "completed", "done"].includes(status)
+        && !hasFinalReply
+        && (viewItems().some(item => item.kind === "user" && !item.queued) || (!settledEmptyVerified && transcript.length === 0));
       // When `streamHealthy` is true and the mission is still actively moving,
       // live events are already streaming over `/api/control/sync` — re-paging
       // 400 KB raw event batches every 10 s would saturate slow links.
       const stoppedMoving = wasMoving && !nowMoving;
-      if (((wasMoving || nowMoving) && !streamHealthy) || stoppedMoving || waitingForReply) await resync(true);
+      if (((wasMoving || nowMoving) && !streamHealthy) || stoppedMoving || waitingForReply) {
+        if (transcript.length === 0 && !nowMoving) settledEmptyVerified = true;
+        await resync(true);
+      }
       // Queue failures are recoverable independently of the mission stream.
       // A healthy stream must not leave a transient startup warning forever.
       if (queueError()) await resync(true);

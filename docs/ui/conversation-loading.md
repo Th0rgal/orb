@@ -50,7 +50,8 @@ Desktop, iOS and Android share these invariants:
 ## Regression scenarios
 
 Replay summary before events, preview before raw tail, completion before stale
-activity, disk after network, switch-account during image load, concurrent image
+activity, offscreen automatic-recovery completion reopened from a pre-recovery
+snapshot, disk after network, switch-account during image load, concurrent image
 mounts, reopen offline, filtered-stream cross-mission events, stream reconnect,
 and pagination after a partial preview. Measure first readable paint separately
 from full hydration and report actual payload sizes and foreground bandwidth.
@@ -169,8 +170,23 @@ Android (`OrbBackgroundSync.kt`) share one per-device **Background sync** policy
    - While unfocused in `Off` / paused mode on an unbroken `/api/control/sync`
      connection, clients track per-mission and `/btw` dirty flags from
      `mission_presentation` hints so returning to an untouched conversation skips
-     redundant metadata, queue, and `/btw` history fetches. Disk-persisted `/btw`
-     drafts never overwrite warm `/btw` state or mark it clean, pending turns
-     always force authoritative Core reconciliation, and any partial `/btw` event
-     fetch failure keeps the parent marked dirty (see
-     [`docs/specs/side-questions.md`](../specs/side-questions.md)).
+     redundant metadata, queue, and `/btw` history fetches:
+     - **Every** `mission_presentation` hint (including `mission_activity`) on an
+       unfocused mission without a caught-up `WarmMissionSub`, tearing down a warm
+       subscription while the mission is live, or receiving offscreen live events
+       after `pageCache` evicted the in-memory `:tx` snapshot marks that mission
+       dirty (`dirtyMissions`).
+     - Even when `dirtyMissions` is clear on an active `/api/control/sync`
+       socket, `cleanStaleOnMount` only skips `resync(true)` on a settled
+       (`completed` / `done` / `awaiting_user` / `waiting_user`) mission if the
+       cached snapshot already contains a delivered `user` turn and a finalized
+       non-empty assistant `text` reply after `lastUser`. A snapshot captured
+       right after an `[Automatic recovery]` prompt or an earlier interrupted
+       turn's `error` item always reconciles `/events` on mount and during status
+       polling (where a prior turn's `error` row does not satisfy `hasFinalReply`
+       once `status` is `completed` / `done`) instead of rendering `"The mission
+       completed without transcript output."`
+     - Disk-persisted `/btw` drafts never overwrite warm `/btw` state or mark it
+       clean, pending turns always force authoritative Core reconciliation, and
+       any partial `/btw` event fetch failure keeps the parent marked dirty (see
+       [`docs/specs/side-questions.md`](../specs/side-questions.md)).
