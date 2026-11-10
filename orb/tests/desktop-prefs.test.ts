@@ -16,7 +16,7 @@ import {
   resetDesktopPrefsForTest,
 } from "../src/desktopPrefs";
 import { jsonSignal, readJson, resetStorageCache } from "../src/storage";
-import { voiceLanguage } from "../src/voice";
+import { setVoiceLanguage, voiceLanguage } from "../src/voice";
 
 describe("desktopPrefs shared prod/dev settings sync", () => {
   afterEach(() => {
@@ -349,5 +349,75 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("rejects an in-flight preference load superseded by a completed local flush", async () => {
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: (query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    });
+
+    const disk: Record<string, string> = { "orb.voiceLang": "en" };
+    let diskRev = "r-1";
+    let releaseSlowLoad: (() => void) | null = null;
+    let pauseNextLoad = false;
+    const seenSinceRevs: Array<string | undefined> = [];
+
+    const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "desktop_prefs_load") {
+        seenSinceRevs.push(args?.since_rev as string | undefined);
+        const snapshot = { ...disk };
+        const rev = diskRev;
+        if (pauseNextLoad) {
+          pauseNextLoad = false;
+          await new Promise<void>((resolve) => {
+            releaseSlowLoad = resolve;
+          });
+        }
+        if (args?.since_rev === rev) return { unchanged: true, exists: true, rev };
+        return { unchanged: false, exists: true, rev, prefs: snapshot };
+      }
+      if (cmd === "desktop_prefs_patch") {
+        const setObj = (args?.set as Record<string, string> | undefined) ?? {};
+        for (const [k, v] of Object.entries(setObj)) disk[k] = v;
+        diskRev = "r-3-after-flush";
+        return { rev: diskRev, prefs: { ...disk } };
+      }
+      if (cmd === "set_window_theme" || cmd === "desktop_connection_load") return null;
+      return undefined;
+    });
+
+    (window as unknown as { __ORB_DESKTOP__?: unknown }).__ORB_DESKTOP__ = { core: { invoke } };
+
+    await initDesktopPrefs();
+    expect(voiceLanguage()).toBe("en");
+
+    // External update bumps disk to r-2 ("es"), and a poll begins loading r-2 slowly:
+    disk["orb.voiceLang"] = "es";
+    diskRev = "r-2-stale";
+    pauseNextLoad = true;
+    const inFlightPull = pullDesktopPrefs(false);
+    await Promise.resolve();
+
+    // Before the r-2 load returns, user selects "fr" and the flush completes (disk -> r-3):
+    setVoiceLanguage("fr");
+    await flushDesktopPrefs();
+    expect(disk["orb.voiceLang"]).toBe("fr");
+    expect(localStorage.getItem("orb.voiceLang")).toBe("fr");
+
+    // Now the older r-2 load resolves; it must NOT overwrite "fr" or regress lastRev to r-2:
+    releaseSlowLoad!();
+    await inFlightPull;
+
+    expect(localStorage.getItem("orb.voiceLang")).toBe("fr");
+    expect(voiceLanguage()).toBe("fr");
+
+    await pullDesktopPrefs(false);
+    expect(seenSinceRevs.at(-1)).toBe("r-3-after-flush");
   });
 });

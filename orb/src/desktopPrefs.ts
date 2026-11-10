@@ -1,4 +1,4 @@
-import { clearConnection, getApiUrl, getJwt, setConnection } from "./api";
+import { clearConnection, connectionVersion, getApiUrl, getJwt, setConnection } from "./api";
 import { reloadBackgroundSyncMode } from "./backgroundSync";
 import { reloadApprovalGraceSecs } from "./deviceApproval";
 import { nativeInvoke } from "./native";
@@ -56,8 +56,10 @@ let storageHooked = false;
 let applyingRemote = false;
 let pullInFlight = false;
 let flushRunning: Promise<void> | null = null;
+let mutationEpoch = 0;
 let lastRev = "";
 let lastSyncedConnSig: string | null = null;
+let lastObservedConnVersion = 0;
 let initRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -171,6 +173,7 @@ async function drainFlushQueue(): Promise<void> {
     pendingSet.clear();
     pendingRemove.clear();
     pendingClear = false;
+    const patchEpoch = mutationEpoch;
 
     try {
       const out = await invoke<{ rev?: string; prefs?: Record<string, string> }>("desktop_prefs_patch", {
@@ -184,6 +187,7 @@ async function drainFlushQueue(): Promise<void> {
         out.rev &&
         out.prefs &&
         typeof out.prefs === "object" &&
+        mutationEpoch === patchEpoch &&
         !pendingClear &&
         pendingSet.size === 0 &&
         pendingRemove.size === 0
@@ -249,6 +253,7 @@ function installStorageHooks(): void {
     const strVal = String(value);
     origSetItem!.call(this, key, strVal);
     if (!applyingRemote && this === window.localStorage && isSharedDesktopPrefKey(key)) {
+      mutationEpoch++;
       if (utf8ByteLength(strVal) <= MAX_SHARED_PREF_BYTES) {
         pendingRemove.delete(key);
         pendingSet.set(key, strVal);
@@ -263,6 +268,7 @@ function installStorageHooks(): void {
   Storage.prototype.removeItem = function (key: string): void {
     origRemoveItem!.call(this, key);
     if (!applyingRemote && this === window.localStorage && isSharedDesktopPrefKey(key)) {
+      mutationEpoch++;
       pendingSet.delete(key);
       pendingRemove.add(key);
       scheduleFlush();
@@ -272,6 +278,7 @@ function installStorageHooks(): void {
   Storage.prototype.clear = function (): void {
     origClear!.call(this);
     if (!applyingRemote && this === window.localStorage) {
+      mutationEpoch++;
       pendingSet.clear();
       pendingRemove.clear();
       pendingClear = true;
@@ -283,9 +290,18 @@ function installStorageHooks(): void {
 async function reconcileDesktopConnection(
   invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>,
 ): Promise<void> {
+  const verBefore = connectionVersion();
+  const localSigBefore = connSig(getApiUrl(), getJwt());
   const saved = await invoke<{ api_url?: string; token?: string } | null>("desktop_connection_load").catch(() => undefined);
-  if (saved === undefined) return;
+  if (saved === undefined || connectionVersion() !== verBefore) return;
   const nextSig = connSig(saved?.api_url, saved?.token);
+  if (verBefore !== lastObservedConnVersion) {
+    if (nextSig === localSigBefore) {
+      lastObservedConnVersion = verBefore;
+      lastSyncedConnSig = nextSig;
+    }
+    return;
+  }
   if (lastSyncedConnSig !== null && nextSig !== lastSyncedConnSig) {
     lastSyncedConnSig = nextSig;
     if (saved?.api_url && saved?.token) {
@@ -295,8 +311,10 @@ async function reconcileDesktopConnection(
     } else if (getJwt()) {
       clearConnection();
     }
+    lastObservedConnVersion = connectionVersion();
   } else if (lastSyncedConnSig === null) {
     lastSyncedConnSig = nextSig;
+    lastObservedConnVersion = verBefore;
   }
 }
 
@@ -304,6 +322,7 @@ function ensureRuntimeWiring(): void {
   installStorageHooks();
   if (lastSyncedConnSig === null) {
     lastSyncedConnSig = connSig(getApiUrl(), getJwt());
+    lastObservedConnVersion = connectionVersion();
   }
   if (!cleanupWindowListeners && typeof window !== "undefined" && typeof document !== "undefined") {
     const onFocus = () => { void pullDesktopPrefs(true); };
@@ -359,15 +378,22 @@ export async function pullDesktopPrefs(checkConnection = false): Promise<void> {
   pullInFlight = true;
   try {
     try {
+      const loadEpoch = mutationEpoch;
       const res = await invoke<PrefsLoadResponse>("desktop_prefs_load", lastRev ? { since_rev: lastRev } : {});
-      if (res && typeof res === "object") {
+      if (
+        res &&
+        typeof res === "object" &&
+        mutationEpoch === loadEpoch &&
+        !pendingClear &&
+        pendingSet.size === 0 &&
+        pendingRemove.size === 0 &&
+        flushRunning === null
+      ) {
         if (res.unchanged === true) {
           if (typeof res.rev === "string" && res.rev) lastRev = res.rev;
         } else if (res.prefs && typeof res.prefs === "object") {
-          if (!pendingClear && pendingSet.size === 0 && pendingRemove.size === 0 && flushRunning === null) {
-            applyRemoteSnapshot(res.prefs, true);
-            if (typeof res.rev === "string" && res.rev) lastRev = res.rev;
-          }
+          applyRemoteSnapshot(res.prefs, true);
+          if (typeof res.rev === "string" && res.rev) lastRev = res.rev;
         }
       }
     } catch {
@@ -494,8 +520,10 @@ export function resetDesktopPrefsForTest(): void {
   applyingRemote = false;
   pullInFlight = false;
   flushRunning = null;
+  mutationEpoch = 0;
   lastRev = "";
   lastSyncedConnSig = null;
+  lastObservedConnVersion = 0;
   pendingSet.clear();
   pendingRemove.clear();
   pendingClear = false;
