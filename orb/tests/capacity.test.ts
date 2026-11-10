@@ -78,6 +78,14 @@ describe("cap slot accounting mirrors the core", () => {
       expect(holdsCapSlot(status)).toBe(false);
     }
   });
+
+  it("excludes /btw side sessions from project cap slot accounting and admission", () => {
+    const store = readFileSync(STORE_LEAN, "utf8");
+    const control = readFileSync(CONTROL_LEAN, "utf8");
+    expect(store).toContain('tag == "side-question" || tag == "btw-subagent" || tag.startsWith "btw-parent:"');
+    expect(store).toContain("if !isBtwMissionTagsJson tagsJson then");
+    expect(control).toContain("if !isBtwReq then");
+  });
 });
 
 /**

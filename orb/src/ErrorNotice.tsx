@@ -77,7 +77,8 @@ export function describeError(raw: string, fallback = "Something went wrong", ba
   if (/\[claude-code:unrecognized_model\]/.test(raw)) return { title: "Claude Code does not recognize this model", message: "Update Claude Code on the machine running this conversation (claude update), then retry. If it persists, choose a model available to that Claude account." };
   const disk = raw.match(/\((\d+(?:\.\d+)?) GiB required\), but only (\d+(?:\.\d+)?) GiB is free/i);
   if (disk) return { title: "Not enough disk space", message: `${disk[2]} GiB available · ${disk[1]} GiB required, including the safety reserve. Choose another machine or free up space.` };
-  if (/parallel_missions_cap|maximum.*parallel|parallel mission limit/i.test(raw)) return { title: "Mission limit reached", message: "Wait for a mission to finish or adjust the parallel mission limit in settings." };
+  if (/parallel_missions_cap/i.test(raw)) return { title: "Project agent limit reached", message: "Finish an agent in this project or increase the limit in Project settings." };
+  if (/maximum.*parallel|parallel mission limit/i.test(raw)) return { title: "Mission limit reached", message: "Wait for a mission to finish or adjust the parallel mission limit in settings." };
   const writer = raw.match(/writer_conflict: Project (\S+) already has a writer for (.+?) \(mission ([\da-f-]+)\)/);
   if (writer) return { title: "That project already has a writer", message: `Project ${writer[1]} already has a writer for ${writer[2]} (mission ${writer[3].slice(0, 8)}). The conversation has not moved.` };
   if (/local_run_in_progress/.test(raw)) return { title: "A local run is in progress", message: "This computer is still running a turn in the current folder. Wait for it to finish, then move the conversation." };

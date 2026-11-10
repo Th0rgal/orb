@@ -901,6 +901,7 @@ structure ForkMissionRequest where
   title?           : Option String := none
   sideQuestion     : Bool          := false
   sidePrompt?      : Option String := none
+  incrementalSide  : Bool          := false
   ownerUserId      : String        := ""
   nowAt            : String
   deriving Repr, DecidableEq
@@ -913,6 +914,7 @@ structure ForkMissionOutcome where
   modelOverride       : String
   modelEffort         : String
   workingDirectory    : String
+  project             : String := ""
   remoteNodeId?       : Option String
   placementKind       : String := "managed"
   turnsCopied         : Nat
@@ -1063,7 +1065,11 @@ def forkOrHandoffMission
   if shareSourceWs && !freshWs then
     customTags := customTags.push s!"fork-workspace:{req.sourceMissionId}"
   if req.sideQuestion then
-    customTags := customTags.push "side-question"
+    if !customTags.contains "side-question" then
+      customTags := customTags.push "side-question"
+    let btwTag := s!"btw-parent:{req.sourceMissionId}"
+    if !customTags.contains btwTag then
+      customTags := customTags.push btwTag
   if let some rn := remoteNodeClean? then
     customTags := customTags.push s!"remote-node:{rn}"
 
@@ -1082,7 +1088,7 @@ def forkOrHandoffMission
   let nextTitle :=
     match req.title? with
     | some t => if t.trimAscii.toString.isEmpty then srcTitle else t.trimAscii.toString
-    | none => srcTitle
+    | none => if req.sideQuestion then s!"{srcTitle} · btw" else srcTitle
   let nextModelOv :=
     match req.modelOverride? with
     | some m => m.trimAscii.toString
@@ -1092,7 +1098,7 @@ def forkOrHandoffMission
     | some e => e.trimAscii.toString.toLower
     | none => if srcIsCloud then "" else srcEffort
 
-  let mut finalTurns := turns
+  let mut finalTurns := if req.sideQuestion && req.incrementalSide then #[] else turns
   if let some sp := req.sidePrompt? then
     let trimmedSp := sp.trimAscii.toString
     if !trimmedSp.isEmpty then
@@ -1148,6 +1154,7 @@ def forkOrHandoffMission
       modelOverride := nextModelOv
       modelEffort := nextEffort
       workingDirectory := resolvedWorkDir
+      project := srcProject
       remoteNodeId? := remoteNodeClean?
       placementKind := nextPlacement
       turnsCopied := finalTurns.size

@@ -4904,6 +4904,53 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln s!"[orb-core-test] FAIL: parallel_missions_cap contract mismatch ({capHitResp.status}): {capHitStr}"
     return 1
 
+  -- `/btw` side questions bypass `parallel_missions_cap` AND never consume project cap slots!
+  let btwAgentBody := "{\"id\":\"m-btw-cap-1\",\"backend\":\"opencode\",\"model_override\":\"builtin/smart\",\"idempotency_key\":\"idem-btw-cap-1\",\"side_question\":\"How far are we?\",\"side_context_mode\":\"incremental\"}"
+  let btwAgentRaw := s!"POST /api/control/missions/m-exp-lease/btw/agent HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {btwAgentBody.utf8ByteSize}\r\n\r\n{btwAgentBody}".toUTF8
+  let .ok btwAgentReq := parseRequest btwAgentRaw none | do closeCoreStore store; return 1
+  let .ok btwAgentResp ← dispatchCoreRequest appSt btwAgentReq nowSec | do closeCoreStore store; return 1
+  let btwAgentStr := String.fromUTF8! btwAgentResp.body
+  if btwAgentResp.status != 201 ||
+     (btwAgentStr.splitOn "\"btw-parent:m-exp-lease\"").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: /btw/agent blocked by parallel_missions_cap ({btwAgentResp.status}): {btwAgentStr}"
+    return 1
+
+  let btwDirectBody := "{\"id\":\"m-btw-cap-2\",\"title\":\"Side 2\",\"backend\":\"opencode\",\"project_slug\":\"proj-cap\",\"tags\":[\"btw-parent:m-exp-lease\"]}"
+  let btwDirectRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {btwDirectBody.utf8ByteSize}\r\n\r\n{btwDirectBody}".toUTF8
+  let .ok btwDirectReq := parseRequest btwDirectRaw none | do closeCoreStore store; return 1
+  let .ok btwDirectResp ← dispatchCoreRequest appSt btwDirectReq nowSec | do closeCoreStore store; return 1
+  if btwDirectResp.status != 201 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: tagged /btw mission blocked by parallel_missions_cap ({btwDirectResp.status}): {String.fromUTF8! btwDirectResp.body}"
+    return 1
+
+  -- Raise `proj-cap` to 2: `m-exp-lease` holds 1 slot while `m-btw-cap-1` + `m-btw-cap-2` hold 0 slots,
+  -- so a 2nd regular mission `m-cap-reg-2` succeeds (201) and a 3rd `m-cap-reg-3` hits 429 (`active:2`)!
+  let _ ← execParamQuery store.projectsDb upsertProjectGrantSql
+    #["proj-cap", "owner", "1h", "2", "", "", "high", "propose", "2026-11-06T00:01:00Z"]
+  let reg2Body := "{\"id\":\"m-cap-reg-2\",\"title\":\"Second Regular\",\"backend\":\"codex\",\"project_slug\":\"proj-cap\"}"
+  let reg2Raw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {reg2Body.utf8ByteSize}\r\n\r\n{reg2Body}".toUTF8
+  let .ok reg2Req := parseRequest reg2Raw none | do closeCoreStore store; return 1
+  let .ok reg2Resp ← dispatchCoreRequest appSt reg2Req nowSec | do closeCoreStore store; return 1
+  if reg2Resp.status != 201 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: idle /btw missions consumed project cap slots ({reg2Resp.status}): {String.fromUTF8! reg2Resp.body}"
+    return 1
+  let reg3Body := "{\"id\":\"m-cap-reg-3\",\"title\":\"Third Regular\",\"backend\":\"codex\",\"project_slug\":\"proj-cap\"}"
+  let reg3Raw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {reg3Body.utf8ByteSize}\r\n\r\n{reg3Body}".toUTF8
+  let .ok reg3Req := parseRequest reg3Raw none | do closeCoreStore store; return 1
+  let .ok reg3Resp ← dispatchCoreRequest appSt reg3Req nowSec | do closeCoreStore store; return 1
+  let reg3Str := String.fromUTF8! reg3Resp.body
+  if reg3Resp.status != 429 || (reg3Str.splitOn "\"active\":2").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: expected 429 active:2 on 3rd regular mission ({reg3Resp.status}): {reg3Str}"
+    return 1
+  -- Clean up `/btw` cap test rows so subsequent `listMissionsJson` fixture counts stay unchanged.
+  let _ ← execParamQuery store.missionsDb "DELETE FROM missions WHERE id IN ('m-btw-cap-1','m-btw-cap-2','m-cap-reg-2');" #[]
+  let _ ← execParamQuery store.projectsDb upsertProjectGrantSql
+    #["proj-cap", "owner", "1h", "1", "", "", "high", "propose", "2026-11-06T00:01:00Z"]
+
   -- Symlinked-ancestor confinement: `<tmpRoot>/escape_link -> /etc` with non-existent leaf must fail closed!
   let symOut ← IO.Process.output { cmd := "/bin/ln", args := #["-s", "/etc", s!"{tmpRoot}/escape_link"] }
   if symOut.exitCode == 0 then
