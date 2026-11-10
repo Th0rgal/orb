@@ -1315,6 +1315,8 @@ private def isAllowedUiPrefKey (k : String) : Bool :=
   k != "orb.projectedMove" &&
   k != "orb.localFailures" &&
   k != "orb.localFolderSeed" &&
+  k != "orb.desktopPrefsMigrated.v1" &&
+  !k.startsWith "orb.projectColorSync:" &&
   !k.startsWith "orb.catalog:" &&
   !k.startsWith "orb.software.inventory." &&
   !k.startsWith "orb.inbox." &&
@@ -1369,19 +1371,24 @@ private def canonicalUiPrefs (kvs : Array (String × JVal)) : JVal × String :=
   let rev := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes canon.toUTF8)
   (obj, rev)
 
-private def readUiPrefsFromDisk (path? : Option System.FilePath) : IO (Except String (JVal × String)) := do
+private def readUiPrefsFromDisk (path? : Option System.FilePath) : IO (Except String (JVal × String × Bool)) := do
   match path? with
-  | none => return .ok (canonicalUiPrefs #[])
+  | none =>
+    let (obj, rev) := canonicalUiPrefs #[]
+    return .ok (obj, rev, false)
   | some path =>
     let st ← OrbBin.PosixExt.statPath path.toString
     if !st.exists_ then
-      return .ok (canonicalUiPrefs #[])
+      let (obj, rev) := canonicalUiPrefs #[]
+      return .ok (obj, rev, false)
     if st.isSymlink || !st.isReg then
       return .error "Invalid saved UI preferences path"
     try
       let raw ← IO.FS.readFile path
       match OrbBin.Json.parse raw.trimAscii.toString with
-      | .ok (.obj kvs) => return .ok (canonicalUiPrefs kvs)
+      | .ok (.obj kvs) =>
+        let (obj, rev) := canonicalUiPrefs kvs
+        return .ok (obj, rev, true)
       | _ => return .error "Invalid saved UI preferences"
     catch _ =>
       return .error "Cannot read saved UI preferences"
@@ -3200,10 +3207,10 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     uiPrefsMutex.atomically do
       match ← readUiPrefsFromDisk (uiPrefsFilePath? st) with
       | .error e => return .error e
-      | .ok (prefsObj, rev) =>
-        if sinceRev? == some rev then
-          return .ok (.obj #[("unchanged", .bool true), ("rev", .str rev)])
-        return .ok (.obj #[("unchanged", .bool false), ("rev", .str rev), ("prefs", prefsObj)])
+      | .ok (prefsObj, rev, existed) =>
+        if existed && sinceRev? == some rev then
+          return .ok (.obj #[("unchanged", .bool true), ("rev", .str rev), ("exists", .bool true)])
+        return .ok (.obj #[("unchanged", .bool false), ("rev", .str rev), ("exists", .bool existed), ("prefs", prefsObj)])
   | "desktop_prefs_patch" =>
     let setKvs := ((args.field? "set").bind (·.asObj?)).getD #[]
     let removeKeys := ((args.fieldArr? "remove").getD #[]).filterMap (·.asStr?)
@@ -3214,7 +3221,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         if clearAll then pure (JVal.obj #[])
         else
           match ← readUiPrefsFromDisk path? with
-          | .ok (obj, _) => pure obj
+          | .ok (obj, _, _) => pure obj
           | .error e => return .error e
       let curKvs := (curObj.asObj?).getD #[]
       let afterRem := curKvs.filter (fun (k, _) => !removeKeys.contains k)

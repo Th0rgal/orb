@@ -1,5 +1,6 @@
 import { createEffect, createRoot } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { approvalGraceSecs } from "../src/deviceApproval";
 import {
   flushDesktopPrefs,
   initDesktopPrefs,
@@ -8,6 +9,7 @@ import {
   resetDesktopPrefsForTest,
 } from "../src/desktopPrefs";
 import { jsonSignal, readJson, resetStorageCache } from "../src/storage";
+import { voiceLanguage } from "../src/voice";
 
 describe("desktopPrefs shared prod/dev settings sync", () => {
   afterEach(() => {
@@ -49,14 +51,15 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
 
     const disk: Record<string, string> = {
       "orb-theme": "light",
-      "orb.approval.graceSecs": "600",
+      "orb.approvalGraceSecs": "600",
+      "orb.voiceLang": "ja",
     };
     let diskRev = "rev-1";
 
     const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "desktop_prefs_load") {
-        if (args?.since_rev === diskRev) return { unchanged: true, rev: diskRev };
-        return { unchanged: false, rev: diskRev, prefs: { ...disk } };
+        if (args?.since_rev === diskRev) return { unchanged: true, exists: true, rev: diskRev };
+        return { unchanged: false, exists: true, rev: diskRev, prefs: { ...disk } };
       }
       if (cmd === "desktop_prefs_patch") {
         const rem = (args?.remove as string[] | undefined) ?? [];
@@ -83,10 +86,12 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
 
     await initDesktopPrefs();
 
-    // Hydrated from shared disk + seeded local key back to disk (without leaking jwt/apiUrl/catalog):
+    // Hydrated from shared disk + module-owned signals + seeded local key back to disk:
     expect(localStorage.getItem("orb-theme")).toBe("light");
     expect(document.documentElement.dataset.theme).toBe("light");
-    expect(localStorage.getItem("orb.approval.graceSecs")).toBe("600");
+    expect(localStorage.getItem("orb.approvalGraceSecs")).toBe("600");
+    expect(approvalGraceSecs()).toBe(600);
+    expect(voiceLanguage()).toBe("ja");
     expect(disk["orb.files.width"]).toBe("540");
     expect(disk["orb.jwt"]).toBeUndefined();
     expect(disk["orb.apiUrl"]).toBeUndefined();
@@ -117,8 +122,10 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
       expect(observedHarness).toEqual(["opencode"]);
       expect(picked().mode).toBe("fast");
 
-      // Simulate prod Orb changing theme, btw config, and jsonSignal on shared disk:
+      // Simulate prod Orb changing theme, voice language, approval grace, btw config, and jsonSignal on shared disk:
       disk["orb-theme"] = "dark";
+      disk["orb.voiceLang"] = "es";
+      disk["orb.approvalGraceSecs"] = "0";
       disk["orb.btw.cfg"] = JSON.stringify({ harness: "claudecode" });
       disk["orb.pick"] = JSON.stringify({ mode: "deep" });
       delete disk["orb.voice.lang"];
@@ -128,12 +135,22 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
 
       expect(localStorage.getItem("orb-theme")).toBe("dark");
       expect(document.documentElement.dataset.theme).toBe("dark");
+      expect(voiceLanguage()).toBe("es");
+      expect(approvalGraceSecs()).toBe(0);
       expect(localStorage.getItem("orb.voice.lang")).toBeNull();
       expect(observedHarness).toEqual(["opencode", "claudecode"]);
       expect(picked().mode).toBe("deep");
     } finally {
       dispose();
     }
+
+    // Reopening an already-migrated client must not resurrect a preference removed on disk while closed:
+    resetDesktopPrefsForTest();
+    delete disk["orb.files.width"];
+    diskRev = "rev-removed-while-closed";
+    await initDesktopPrefs();
+    expect(localStorage.getItem("orb.files.width")).toBeNull();
+    expect(disk["orb.files.width"]).toBeUndefined();
   });
 
   it("preserves oversized local values and serializes overlapping client flushes in order", async () => {

@@ -1,10 +1,13 @@
 import { clearConnection, getApiUrl, getJwt, setConnection } from "./api";
+import { reloadApprovalGraceSecs } from "./deviceApproval";
 import { nativeInvoke } from "./native";
 import { notifyExternalStorageChange } from "./storage";
 import { getThemePref, setThemePref } from "./theme";
+import { reloadVoiceLanguage } from "./voice";
 
 const POLL_VISIBLE_MS = 1_200;
 const FLUSH_DEBOUNCE_MS = 35;
+const MIGRATED_KEY = "orb.desktopPrefsMigrated.v1";
 export const MAX_SHARED_PREF_BYTES = 65_536;
 
 const utf8Encoder = new TextEncoder();
@@ -25,6 +28,8 @@ export function isSharedDesktopPrefKey(key: string): boolean {
     key !== "orb.projectedMove" &&
     key !== "orb.localFailures" &&
     key !== "orb.localFolderSeed" &&
+    key !== MIGRATED_KEY &&
+    !key.startsWith("orb.projectColorSync:") &&
     !key.startsWith("orb.catalog:") &&
     !key.startsWith("orb.software.inventory.") &&
     !key.startsWith("orb.inbox.") &&
@@ -37,6 +42,7 @@ export function isSharedDesktopPrefKey(key: string): boolean {
 
 type PrefsLoadResponse = {
   unchanged?: boolean;
+  exists?: boolean;
   rev?: string;
   prefs?: Record<string, string>;
 };
@@ -75,17 +81,20 @@ function connSig(url: string | null | undefined, token: string | null | undefine
   return cleanTok ? `${cleanUrl}\n${cleanTok}` : "";
 }
 
+function reconcileModuleOwners(changed: readonly string[]): void {
+  if (changed.includes("orb-theme")) {
+    setThemePref(getThemePref());
+  }
+  if (changed.includes("orb.voiceLang")) {
+    reloadVoiceLanguage();
+  }
+  if (changed.includes("orb.approvalGraceSecs")) {
+    reloadApprovalGraceSecs();
+  }
+}
+
 function dispatchStorageChange(key: string, oldValue: string | null, newValue: string | null): void {
   notifyExternalStorageChange(key);
-  if (key === "orb-theme") {
-    const prev = applyingRemote;
-    applyingRemote = true;
-    try {
-      setThemePref(getThemePref());
-    } finally {
-      applyingRemote = prev;
-    }
-  }
   if (typeof window !== "undefined" && typeof StorageEvent === "function") {
     try {
       window.dispatchEvent(new StorageEvent("storage", { key, oldValue, newValue }));
@@ -128,8 +137,8 @@ function applyRemoteSnapshot(remote: Record<string, string>, dispatchEvents: boo
         else notifyExternalStorageChange(k);
       }
     }
-    if (!dispatchEvents && changed.includes("orb-theme")) {
-      setThemePref(getThemePref());
+    if (changed.length > 0) {
+      reconcileModuleOwners(changed);
     }
   } finally {
     applyingRemote = false;
@@ -276,10 +285,12 @@ export async function pullDesktopPrefs(checkConnection = false): Promise<void> {
   try {
     const res = await invoke<PrefsLoadResponse>("desktop_prefs_load", lastRev ? { since_rev: lastRev } : {});
     if (res && typeof res === "object") {
-      if (typeof res.rev === "string" && res.rev) lastRev = res.rev;
-      if (res.unchanged === false && res.prefs && typeof res.prefs === "object") {
-        if (!pendingClear && pendingSet.size === 0 && pendingRemove.size === 0) {
+      if (res.unchanged === true) {
+        if (typeof res.rev === "string" && res.rev) lastRev = res.rev;
+      } else if (res.prefs && typeof res.prefs === "object") {
+        if (!pendingClear && pendingSet.size === 0 && pendingRemove.size === 0 && flushRunning === null) {
           applyRemoteSnapshot(res.prefs, true);
+          if (typeof res.rev === "string" && res.rev) lastRev = res.rev;
         }
       }
     }
@@ -326,14 +337,18 @@ export async function initDesktopPrefs(): Promise<void> {
   initialized = true;
   if (typeof initial.rev === "string") lastRev = initial.rev;
 
-  // Collect local keys not yet present in shared ~/.orb/ui-prefs.json so first-run settings seed it.
+  // Seed local keys only once per origin (or when shared ~/.orb/ui-prefs.json does not exist yet),
+  // so reopening an already-migrated client never resurrects preferences removed by another client.
+  const alreadyMigrated = localStorage.getItem(MIGRATED_KEY) === "1" && initial.exists !== false;
   const seed: Record<string, string> = {};
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    if (!k || !isSharedDesktopPrefKey(k)) continue;
-    if (!(k in initial.prefs)) {
-      const v = localStorage.getItem(k);
-      if (v !== null && utf8ByteLength(v) <= MAX_SHARED_PREF_BYTES) seed[k] = v;
+  if (!alreadyMigrated) {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !isSharedDesktopPrefKey(k)) continue;
+      if (!(k in initial.prefs)) {
+        const v = localStorage.getItem(k);
+        if (v !== null && utf8ByteLength(v) <= MAX_SHARED_PREF_BYTES) seed[k] = v;
+      }
     }
   }
 
@@ -345,6 +360,11 @@ export async function initDesktopPrefs(): Promise<void> {
   if (Object.keys(seed).length > 0) {
     for (const [k, v] of Object.entries(seed)) pendingSet.set(k, v);
     await flushDesktopPrefs();
+    if (!pendingClear && pendingSet.size === 0 && pendingRemove.size === 0) {
+      rawSet(localStorage, MIGRATED_KEY, "1");
+    }
+  } else if (!alreadyMigrated) {
+    rawSet(localStorage, MIGRATED_KEY, "1");
   }
 
   const onFocus = () => { void pullDesktopPrefs(true); };
