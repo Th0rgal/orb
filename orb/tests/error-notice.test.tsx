@@ -56,5 +56,7 @@ describe("provider usage limits", () => {
     expect(describeError("Remote antigravity job failed: CLI error: Antigravity ended without a SUCCESS result; resume this conversation before retrying work")).toMatchObject({ title: "Antigravity stopped before completing its turn" });
     expect(describeError("Remote job failed: write /tmp/out: No space left on device (ENOSPC)")).toMatchObject({ title: "Disk full on the execution machine" });
     expect(describeError("Increased the rate of the limit checker loop.").tone).toBeUndefined();
+    expect(describeError('{"error":"parallel_missions_cap","cap":50,"active":51}')).toMatchObject({ title: "Project agent limit reached", message: expect.stringContaining("Project settings") });
+    expect(describeError("Maximum parallel missions (4) reached. 4 running.")).toMatchObject({ title: "Mission limit reached" });
   });
 });

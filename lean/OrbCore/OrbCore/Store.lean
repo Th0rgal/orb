@@ -1442,15 +1442,28 @@ def listMissionStatuses (st : CoreStore) : IO (Except String (Array String)) := 
         out := out.push ((rs[i]![0]?).getD "")
       return out)
 
-/-- List mission status strings scoped to a specific `project` slug in `missions.db`. -/
+/-- True when a single mission tag marks a `/btw` side session or its subagent. -/
+def isBtwMissionTag (tag : String) : Bool :=
+  tag == "side-question" || tag == "btw-subagent" || tag.startsWith "btw-parent:"
+
+/-- True when a JSON tags array marks a `/btw` side session or its subagent. -/
+def isBtwMissionTagsJson (tagsJson : String) : Bool :=
+  (parseStringJsonArray tagsJson).any isBtwMissionTag
+
+/-- List non-`/btw` mission status strings scoped to a specific `project` slug in `missions.db`.
+    Side-question (`/btw`) sessions share an active workspace for read-only inspection and never
+    consume a project's `parallel_missions` campaign slot. -/
 def listProjectMissionStatuses (st : CoreStore) (proj : String) : IO (Except String (Array String)) := do
-  let rows ← execParamQuery st.missionsDb "SELECT status FROM missions WHERE project=?1;" #[proj]
+  let rows ← execParamQuery st.missionsDb "SELECT status, COALESCE(tags, '[]') FROM missions WHERE project=?1;" #[proj]
   return rows.map (fun rs =>
     if rs.size ≤ 1 then #[]
     else Id.run do
       let mut out : Array String := Array.mkEmpty (rs.size - 1)
       for i in [1:rs.size] do
-        out := out.push ((rs[i]![0]?).getD "")
+        let r := rs[i]!
+        let tagsJson := (r[1]?).getD "[]"
+        if !isBtwMissionTagsJson tagsJson then
+          out := out.push ((r[0]?).getD "")
       return out)
 
 /-- Look up optional `parallel_missions` grant integer for `slug` in `projects.db`. -/

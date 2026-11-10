@@ -2563,6 +2563,97 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     | .ok n => return .ok (mkJson 200 s!"\{\"ok\":true,\"reconciled\":{n}}")
     | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
 
+  -- Side-Question Context Staging (`POST /api/control/missions/:id/btw/context`)
+  if let some params := matchRoutePattern? "/api/control/missions/:id/btw/context" rawTarget then
+    if req.method == "POST" then
+      let srcMid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller srcMid true) then
+        return .ok (mkJson cCode cBody)
+      let some _ ← getMission? st.store srcMid
+        | return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let manifestId := ((jv.fieldStr? "manifest_id").getD "").trimAscii.toString
+      if manifestId.isEmpty then
+        return .ok (mkJson 400 "{\"error\":\"missing_manifest_id\"}")
+      return .ok (mkJson 200 "{\"ok\":true}")
+
+  -- Side-Question Child Agent (`POST /api/control/missions/:id/btw/agent`)
+  -- Read-only `/btw` side sessions bypass project `parallel_missions_cap` and track leases.
+  if let some params := matchRoutePattern? "/api/control/missions/:id/btw/agent" rawTarget then
+    if req.method == "POST" then
+      let srcMid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller srcMid true) then
+        return .ok (mkJson cCode cBody)
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let hdrIdemKey := (lookupHeaderCI req.headers "idempotency-key").map (·.trimAscii.toString) |>.getD ""
+      let bodyIdemKey := ((jv.fieldStr? "idempotency_key").getD "").trimAscii.toString
+      let idemKey := if !hdrIdemKey.isEmpty then hdrIdemKey else bodyIdemKey
+      if idemKey.isEmpty then
+        return .ok (mkJson 400 "{\"error\":\"missing_idempotency_key\"}")
+      let idemScope := s!"btw_agent:{srcMid}"
+      match ← claimIdempotencySlot st.store idemScope idemKey s!"{nowEpochSec}" with
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      | .ok (.Replayed rec) => return .ok (mkJson rec.statusCode rec.bodyJson)
+      | .ok .InFlight => return .ok (mkJson 409 "{\"error\":\"idempotency_key_in_flight\"}")
+      | .ok .Claimed => pure ()
+      let abortBtwIdem : IO Unit :=
+        discard <| abortIdempotencySlot st.store idemScope idemKey
+      let reqBackend? := jv.fieldStr? "backend"
+      let reqModelOv? := jv.fieldStr? "model_override"
+      let rawEffort? := jv.fieldStr? "model_effort"
+      if let some re := rawEffort? then
+        let trimmedRe := re.trimAscii.toString
+        if !trimmedRe.isEmpty then
+          let checkBack := reqBackend?.orElse (fun _ => some "codex")
+          if (normalizeModelEffortForBackend checkBack trimmedRe).isNone then
+            abortBtwIdem
+            return .ok (mkJson 400 s!"\{\"error\":\"unsupported_model_effort\",\"effort\":{jsonEscape trimmedRe}}")
+      let sidePrompt? := (jv.fieldStr? "side_question").orElse (fun _ => jv.fieldStr? "prompt")
+      let ctxMode := ((jv.fieldStr? "side_context_mode").getD "").trimAscii.toString.toLower
+      let defaultSafeBase ← do
+        match ← confineWorkingDirectory st.cfg.workingDir st.cfg.workingDir with
+        | .ok b => pure b
+        | .error _ => pure st.cfg.workingDir
+      let defNewId ← nextUniqueId st "m" nowEpochSec
+      let newMid := (jv.fieldStr? "id").getD defNewId
+      if !isSafeMissionId newMid then
+        abortBtwIdem
+        return .ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}")
+      let forkReq : ForkMissionRequest := {
+        sourceMissionId := srcMid
+        newMissionId := newMid
+        targetBackend? := reqBackend?
+        modelOverride? := reqModelOv?
+        modelEffort? := rawEffort?.map (fun s => s.trimAscii.toString.toLower) |>.filter (!·.isEmpty)
+        sideQuestion := true
+        sidePrompt? := sidePrompt?
+        incrementalSide := ctxMode == "incremental"
+        ownerUserId := caller.userId
+        nowAt := s!"{nowEpochSec}"
+      }
+      match ← forkOrHandoffMission st.store defaultSafeBase forkReq with
+      | .error (code, msg) =>
+        abortBtwIdem
+        return .ok (mkJson code s!"\{\"error\":{jsonEscape msg}}")
+      | .ok out =>
+        let rnJson := match out.remoteNodeId? with | some rn => jsonEscape rn | none => "null"
+        let modOvJson := if out.modelOverride.isEmpty then "null" else jsonEscape out.modelOverride
+        let effJson := if out.modelEffort.isEmpty then "null" else jsonEscape out.modelEffort
+        let projField := if out.project.isEmpty then "" else s!",\"project\":{jsonEscape out.project}"
+        let body :=
+          s!"\{\"id\":{jsonEscape out.missionId},\"title\":{jsonEscape out.title},\"status\":\"awaiting_user\"," ++
+          s!"\"backend\":{jsonEscape out.backend},\"model_override\":{modOvJson},\"model_effort\":{effJson}," ++
+          s!"\"authority_mode\":\"readonly\",\"working_directory\":{jsonEscape out.workingDirectory},\"remote_node_id\":{rnJson}," ++
+          s!"\"placement_kind\":{jsonEscape out.placementKind}{projField},\"state_revision\":1,\"tags\":{out.tagsJson}}"
+        match ← recordOrReplayIdempotency st.store idemScope idemKey 201 body s!"{nowEpochSec}" with
+        | .ok rec => return .ok (mkJson rec.statusCode rec.bodyJson)
+        | .error e =>
+          discard <| execParamQuery st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[out.missionId]
+          abortBtwIdem
+          return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
   -- Mission Fork & Cloud-to-Workspace Handoff (`POST /api/control/missions/:id/fork`)
   if let some params := matchRoutePattern? "/api/control/missions/:id/fork" rawTarget then
     if req.method == "POST" then
@@ -2971,25 +3062,30 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         if let .error e := validateGoalSelection cyberMode (prompt?.bind parseGoalPrefix?).isSome then
           abortIdem
           return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
+      let isBtwReq :=
+        reqTags.any isBtwMissionTag ||
+        ((bodyVal?.bind (·.fieldBool? "side_question")).getD false)
       if !projSlug.isEmpty then
         if !caller.isLegacyUnscoped && !caller.userId.isEmpty then
           discard <| execParamQuery st.store.projectsDb
             "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
             #[projSlug, caller.userId, s!"{nowEpochSec}"]
-        let rawCap? ← queryProjectParallelMissions? st.store projSlug
-        if let some cap := enforcedProjectParallelCap? rawCap? then
-          if let .ok statuses ← listProjectMissionStatuses st.store projSlug then
-            let held := (statuses.filter campaignSlotHeldBy).size
-            if held ≥ cap then
-              abortIdem
-              return .ok (mkJson 429 s!"\{\"error\":\"parallel_missions_cap\",\"cap\":{cap},\"active\":{held}}")
+        if !isBtwReq then
+          let rawCap? ← queryProjectParallelMissions? st.store projSlug
+          if let some cap := enforcedProjectParallelCap? rawCap? then
+            if let .ok statuses ← listProjectMissionStatuses st.store projSlug then
+              let held := (statuses.filter campaignSlotHeldBy).size
+              if held ≥ cap then
+                abortIdem
+                return .ok (mkJson 429 s!"\{\"error\":\"parallel_missions_cap\",\"cap\":{cap},\"active\":{held}}")
       let initTagsJson := projectCompatibilityTagsJson authMode placeKind "" "" diskGib reqTags
+      let effTrack := if isBtwReq then "" else track
       let mRec : MissionRecord := {
         id := mid, title := title, status := "awaiting_user", backend := backend,
         modelOverride := modelOverride, modelEffort := normEffort, workingDirectory := safeWorkDir,
         project := projSlug, updatedAt := s!"{nowEpochSec}", totalCostCents := 0,
         authorityMode := authMode, placementKind := placeKind, reservedDiskGib := diskGib,
-        nodeBootEpoch := st.store.bootEpoch, tagsJson := initTagsJson, track := track, repo := repo,
+        nodeBootEpoch := st.store.bootEpoch, tagsJson := initTagsJson, track := effTrack, repo := repo,
         ownerUserId := caller.userId
       }
       match ← insertNewMission st.store mRec with
@@ -3001,12 +3097,12 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok () =>
         let mut leaseReservationId := ""
-        if !projSlug.isEmpty && !track.isEmpty then
+        if !isBtwReq && !projSlug.isEmpty && !effTrack.isEmpty then
           let resId ← nextUniqueId st "rsv" nowEpochSec
           leaseReservationId := resId
           let leaseReq : DispatchLeaseRequest := {
             reservationId := resId, missionId := mid, projectSlug := projSlug,
-            track := track, repo := repo, authorityMode := authMode,
+            track := effTrack, repo := repo, authorityMode := authMode,
             reservedDiskGib := diskGib, bootEpoch := st.store.bootEpoch, nowAt := s!"{nowEpochSec}"
           }
           if let .error leaseErr ← acquireDispatchTrackLease st.store leaseReq then
