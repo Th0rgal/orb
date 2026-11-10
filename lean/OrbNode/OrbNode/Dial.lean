@@ -127,7 +127,7 @@ private def forwardToLocal (localPort : UInt16) (reqJson : JVal) : IO JVal := do
 
 /-- Spawn background dial-out relay loop (`410 Gone` removes `node.cred` and flags `goneRef`). -/
 def spawnRelay (cred : DialCredential) (localPort : UInt16) (goneRef : IO.Ref Bool) : IO (Task (Except IO.Error Unit)) :=
-  IO.asTask do
+  IO.asTask (prio := Task.Priority.dedicated) do
     let pollUrl := s!"{cred.coreUrl}/api/managed-machines/relay/poll"
     let respondUrl := s!"{cred.coreUrl}/api/managed-machines/relay/respond"
     let extraHdrs := #[("x-orb-machine-id", cred.machineId)]
@@ -143,7 +143,7 @@ def spawnRelay (cred : DialCredential) (localPort : UInt16) (goneRef : IO.Ref Bo
         if 200 ≤ st && st < 300 then
           backoffMs := 1000
           for reqJson in reqs do
-            let _ ← IO.asTask do
+            let _ ← IO.asTask (prio := Task.Priority.dedicated) do
               let respJson ← forwardToLocal localPort reqJson
               let _ ← sendJsonRequest "POST" respondUrl (some cred.nodeToken) (some respJson) extraHdrs 600000
         else

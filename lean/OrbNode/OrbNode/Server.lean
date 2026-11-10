@@ -1226,7 +1226,7 @@ def handleNonExecRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRunti
     are ALWAYS cleaned up so a worker exception can never wedge node capacity! -/
 private partial def spawnAsyncLaunches (mtx : Std.Mutex NodeRuntime) (launches : Array PendingAsyncLaunch) : IO Unit := do
   for item in launches do
-    let _ ← IO.asTask do
+    let _ ← IO.asTask (prio := Task.Priority.dedicated) do
       let prepRes ← match ← (prepareJobOutsideLock item.cfg item.jid item.missionId item.payload item.logPath
           item.forced item.sideLane item.coordLane item.execUnixUser item.callerRole).toBaseIO with
         | .ok r => pure r
@@ -1267,7 +1267,7 @@ private partial def spawnAsyncLaunches (mtx : Std.Mutex NodeRuntime) (launches :
     even when no HTTP traffic arrives before the next `tcpAccept` timeout. -/
 private def spawnSteerWatchers (mtx : Std.Mutex NodeRuntime) (watchers : Array (String × UInt64)) : IO Unit := do
   for (jid, rootPid) in watchers do
-    let _ ← IO.asTask do
+    let _ ← IO.asTask (prio := Task.Priority.dedicated) do
       let mut done := false
       while !done do
         IO.sleep 100
@@ -1923,7 +1923,7 @@ def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCr
         if !launches.isEmpty then
           spawnAsyncLaunches mtx launches
       else
-        let _ ← IO.asTask do
+        let _ ← IO.asTask (prio := Task.Priority.dedicated) do
           try
             match ← readHttpRequest cfd workDirConst 134217728 authTokensConst with
             | .error "unauthorized" =>

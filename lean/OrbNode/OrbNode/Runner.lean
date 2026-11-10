@@ -973,7 +973,7 @@ def teardownJobResourcesAsync
     (scope? : Option SystemdScope) (iso? : Option String)
     (scratchFinalize? : Option (String × SqliteBackend × String × String × UInt64 × UInt64) := none) : IO Unit := do
   if scope?.isNone && iso?.isNone && scratchFinalize?.isNone then return
-  discard <| IO.asTask do
+  discard <| IO.asTask (prio := Task.Priority.dedicated) do
     stopSystemdScope scope?
     if let some dir := iso? then
       if !dir.isEmpty then

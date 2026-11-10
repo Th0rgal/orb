@@ -2683,6 +2683,41 @@ def runTests : IO UInt32 := do
      missJobRec?.bind (·.exitCode?) == some 78 &&
      missJobRec?.bind (·.error?) == some "command exited with Some(78)")
 
+  -- Regression test for 1-2 vCPU worker nodes (`LEAN_NUM_THREADS=1`, e.g. `nimrud`):
+  -- `startProjectContextDaemon` and per-connection HTTP tasks must run with `Task.Priority.dedicated`
+  -- so `/heartbeat` never starves behind background `IO.sleep` loops.
+  let daemonWorkDir := s!"{tmpRoot}/daemon-1t"
+  IO.FS.createDirAll daemonWorkDir
+  let selfExe ← IO.appPath
+  let daemonChild ← IO.Process.spawn {
+    cmd := selfExe.toString
+    args := #["--sandboxed-test-daemon"]
+    env := #[
+      ("LEAN_NUM_THREADS", some "1"),
+      ("SANDBOXED_NODE_BIND", some "127.0.0.1:19499"),
+      ("SANDBOXED_NODE_ID", some "nimrud-1t"),
+      ("SANDBOXED_NODE_TOKEN", some "tok-1t-secret"),
+      ("SANDBOXED_NODE_WORK_DIR", some daemonWorkDir),
+      ("SANDBOXED_NODE_ALLOW_ROOT", some "1")
+    ]
+    stdin := .null
+    stdout := .null
+    stderr := .null
+  }
+  let mut hb1tOk := false
+  for _ in [0:15] do
+    IO.sleep 100
+    let hbOut ← IO.Process.output {
+      cmd := "curl"
+      args := #["-fsS", "--max-time", "2", "-H", "Authorization: Bearer tok-1t-secret", "http://127.0.0.1:19499/heartbeat"]
+    }
+    if hbOut.exitCode == 0 && (hbOut.stdout.splitOn "\"node_id\":\"nimrud-1t\"").length > 1 then
+      hb1tOk := true
+      break
+  try daemonChild.kill catch _ => pure ()
+  let _ ← daemonChild.wait.toBaseIO
+  check "runServerLoop serves /heartbeat promptly under LEAN_NUM_THREADS=1 without background pool starvation" hb1tOk
+
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get
   IO.println s!"OrbNode self-test: {passed}/{passed} assertions PASSED"
@@ -2693,5 +2728,7 @@ end OrbNode.SelfTest
 def main (args : List String) : IO UInt32 := do
   if args.head? == some "--sandboxed-scope-exec-cleared-env" then
     OrbNode.Main.runCli args
+  else if args.head? == some "--sandboxed-test-daemon" then
+    OrbNode.Main.runCli []
   else
     OrbNode.SelfTest.runTests
