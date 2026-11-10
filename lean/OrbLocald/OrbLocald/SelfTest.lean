@@ -555,24 +555,40 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
       ("orb-theme", .str "light"),
       ("orb.approval.graceSecs", .str "600"),
       ("orb.jwt", .str "MUST_NOT_PERSIST"),
+      ("orb.apiUrl", .str "https://other.example"),
       ("orb.catalog:123:/api/projects", .str "MUST_NOT_PERSIST")
     ])
   ])
   let rev1 := match patchRes with | .ok jv => (jv.fieldStr? "rev").getD "" | _ => ""
+  let patchPrefsOk :=
+    match patchRes with
+    | .ok jv =>
+      match jv.field? "prefs" with
+      | some p => p.fieldStr? "orb-theme" == some "light" && (p.field? "orb.apiUrl").isNone && (p.field? "orb.jwt").isNone
+      | none => false
+    | _ => false
+  -- Concurrent patches across two daemon state refs must serialize via flock and preserve both keys
+  let tA ← IO.asTask (dispatchRpcCommand stP1 "desktop_prefs_patch" (.obj #[("set", .obj #[("orb.concurrent.a", .str "1")])]))
+  let tB ← IO.asTask (dispatchRpcCommand stP2 "desktop_prefs_patch" (.obj #[("set", .obj #[("orb.concurrent.b", .str "2")])]))
+  let _ ← IO.wait tA
+  let _ ← IO.wait tB
   let loadRes ← dispatchRpcCommand stP2 "desktop_prefs_load" (.obj #[])
-  let sameRevRes ← dispatchRpcCommand stP2 "desktop_prefs_load" (.obj #[("since_rev", .str rev1)])
+  let rev2 := match loadRes with | .ok jv => (jv.fieldStr? "rev").getD "" | _ => ""
+  let sameRevRes ← dispatchRpcCommand stP2 "desktop_prefs_load" (.obj #[("since_rev", .str rev2)])
   total := total + 1
   let prefsShareOk :=
-    !rev1.isEmpty &&
+    !rev1.isEmpty && !rev2.isEmpty && rev1 != rev2 && patchPrefsOk &&
     (match loadRes with
      | .ok jv =>
        jv.fieldBool? "unchanged" == some false &&
-       jv.fieldStr? "rev" == some rev1 &&
        (match jv.field? "prefs" with
         | some p =>
           p.fieldStr? "orb-theme" == some "light" &&
           p.fieldStr? "orb.approval.graceSecs" == some "600" &&
+          p.fieldStr? "orb.concurrent.a" == some "1" &&
+          p.fieldStr? "orb.concurrent.b" == some "2" &&
           (p.field? "orb.jwt").isNone &&
+          (p.field? "orb.apiUrl").isNone &&
           (p.field? "orb.catalog:123:/api/projects").isNone
         | none => false)
      | _ => false) &&

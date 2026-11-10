@@ -1307,8 +1307,40 @@ initialize uiPrefsMutex : Std.Mutex Unit ← Std.Mutex.new ()
 private def isAllowedUiPrefKey (k : String) : Bool :=
   !k.isEmpty && k.utf8ByteSize ≤ 512 &&
   k != "orb.jwt" &&
+  k != "orb.apiUrl" &&
   !k.startsWith "orb.catalog:" &&
   !k.startsWith "orb.software.inventory."
+
+private def acquireUiPrefsFlock (lockPath : String) : IO (Option Int32) := do
+  for _ in [0:200] do
+    let rc ← OrbBin.PosixExt.flockExclusiveNb lockPath
+    if rc != 0xFFFFFFFF && rc != 0xFFFFFFFE then
+      return some (Int32.ofBitVec (BitVec.ofNat 32 rc.toNat))
+    if rc == 0xFFFFFFFF then
+      return none
+    IO.sleep 5
+  return none
+
+private def withUiPrefsLock (path? : Option System.FilePath) (act : IO (Except String JVal)) : IO (Except String JVal) :=
+  uiPrefsMutex.atomically do
+    match path? with
+    | none => act
+    | some path =>
+      if let some dir := path.parent then
+        try
+          IO.FS.createDirAll dir
+          discard <| OrbBin.PosixExt.chmod dir.toString 0o700
+        catch _ => pure ()
+      let lockPath := path.toString ++ ".lock"
+      let lockSt ← OrbBin.PosixExt.statPath lockPath
+      if lockSt.isSymlink then
+        return .error "UI preferences lock must not be a symlink"
+      let some lockFd ← acquireUiPrefsFlock lockPath
+        | return .error "Cannot acquire UI preferences lock"
+      try
+        act
+      finally
+        OrbBin.PosixExt.closeFdRaw lockFd
 
 private def canonicalUiPrefs (kvs : Array (String × JVal)) : JVal × String :=
   let filtered := kvs.foldl (init := (#[] : Array (String × JVal))) fun acc (k, v) =>
@@ -3159,8 +3191,8 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let setKvs := ((args.field? "set").bind (·.asObj?)).getD #[]
     let removeKeys := ((args.fieldArr? "remove").getD #[]).filterMap (·.asStr?)
     let clearAll := (args.fieldBool? "clear").getD false
-    uiPrefsMutex.atomically do
-      let path? := uiPrefsFilePath? st
+    let path? := uiPrefsFilePath? st
+    withUiPrefsLock path? do
       let (curObj, _) ← if clearAll then pure (JVal.obj #[], "") else readUiPrefsFromDisk path?
       let curKvs := (curObj.asObj?).getD #[]
       let afterRem := curKvs.filter (fun (k, _) => !removeKeys.contains k)
@@ -3170,7 +3202,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         let payload := (renderCompact nextObj ++ "\n").toUTF8
         if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path payload then
           return .error e
-      return .ok (.obj #[("rev", .str rev)])
+      return .ok (.obj #[("rev", .str rev), ("prefs", nextObj)])
   | "diagnostics_append" =>
     let lines : Array String := match args.fieldArr? "lines" with
       | some xs => xs.filterMap (·.asStr?)

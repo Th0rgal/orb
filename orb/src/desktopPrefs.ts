@@ -11,6 +11,7 @@ export function isSharedDesktopPrefKey(key: string): boolean {
     key.length > 0 &&
     key.length <= 512 &&
     key !== "orb.jwt" &&
+    key !== "orb.apiUrl" &&
     !key.startsWith("orb.catalog:") &&
     !key.startsWith("orb.software.inventory.")
   );
@@ -136,12 +137,22 @@ export async function flushDesktopPrefs(): Promise<void> {
   pendingClear = false;
 
   try {
-    const out = await invoke<{ rev?: string }>("desktop_prefs_patch", {
+    const out = await invoke<{ rev?: string; prefs?: Record<string, string> }>("desktop_prefs_patch", {
       set: setObj,
       remove: removeArr,
       clear: clearAll,
     });
-    if (typeof out?.rev === "string" && out.rev) {
+    if (
+      out &&
+      typeof out.rev === "string" &&
+      out.rev &&
+      out.prefs &&
+      typeof out.prefs === "object" &&
+      !pendingClear &&
+      pendingSet.size === 0 &&
+      pendingRemove.size === 0
+    ) {
+      applyRemoteSnapshot(out.prefs, true);
       lastRev = out.rev;
     }
   } catch {
@@ -286,7 +297,7 @@ export async function initDesktopPrefs(): Promise<void> {
 
   pollTimer = setInterval(() => {
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-    void pullDesktopPrefs(false);
+    void pullDesktopPrefs(true);
   }, POLL_VISIBLE_MS);
 }
 
