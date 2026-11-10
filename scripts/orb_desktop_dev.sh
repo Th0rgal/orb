@@ -503,14 +503,27 @@ has_other_dev_shell() {
       pid="${pid%/environ}"
       [[ "$pid" == "$$" ]] && continue
       cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
-      [[ "$cmd" == *"/orb"* && "$cmd" != *"orb_desktop_dev.sh"* && "$cmd" != *"orb-locald"* && "$cmd" != *"orb-signer"* ]] || continue
+      [[ "$cmd" =~ (^|/)orb([[:space:]]|$) && "$cmd" != *"orb_desktop_dev.sh"* ]] || continue
       if tr '\0' '\n' <"$envf" 2>/dev/null | grep -Fqx "$needle"; then
         return 0
       fi
     done
     return 1
   fi
-  ps eww -o pid=,command= 2>/dev/null | grep -Fv "orb_desktop_dev.sh" | grep -Fq "$needle"
+  local pid cmd candidate_pids=","
+  while read -r pid cmd; do
+    [[ -z "$pid" || "$pid" == "$$" ]] && continue
+    if [[ "$cmd" =~ (^|/)orb([[:space:]]|$) && "$cmd" != *"orb_desktop_dev.sh"* ]]; then
+      candidate_pids+="${pid},"
+    fi
+  done < <(ps axww -o pid=,command= 2>/dev/null || true)
+  [[ "$candidate_pids" == "," ]] && return 1
+  while read -r pid cmd; do
+    if [[ "$candidate_pids" == *",${pid},"* && " $cmd " == *" $needle "* ]]; then
+      return 0
+    fi
+  done < <(ps axeww -o pid=,command= 2>/dev/null || true)
+  return 1
 }
 cleanup_dev() {
   if ! has_other_dev_shell; then
