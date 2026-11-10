@@ -17,10 +17,19 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
     delete (window as unknown as { __ORB_DESKTOP__?: unknown }).__ORB_DESKTOP__;
   });
 
-  it("filters transient catalog caches, API URL, and JWT while keeping UI settings", () => {
+  it("filters transient caches, outboxes, session state, API URL, and JWT while keeping UI settings", () => {
     expect(isSharedDesktopPrefKey("orb-theme")).toBe(true);
     expect(isSharedDesktopPrefKey("orb.approval.graceSecs")).toBe(true);
+    expect(isSharedDesktopPrefKey("orb:background-sync-mode")).toBe(true);
     expect(isSharedDesktopPrefKey("orb.btw:v1:[\"https://orbcore.thomas.md\",\"prod\",\"settings:inbox\"]")).toBe(true);
+    expect(isSharedDesktopPrefKey("orb.btw:v1:[\"https://orbcore.thomas.md\",\"prod\",\"settings:btw\"]")).toBe(true);
+    expect(isSharedDesktopPrefKey("orb.btw:v1:[\"https://orbcore.thomas.md\",\"prod\",\"inbox-state:outbox:v1\"]")).toBe(false);
+    expect(isSharedDesktopPrefKey("orb.btw:v1:[\"https://orbcore.thomas.md\",\"prod\",\"mission-123\"]")).toBe(false);
+    expect(isSharedDesktopPrefKey("orb.inbox.client.v1")).toBe(false);
+    expect(isSharedDesktopPrefKey("orb.inbox.sequence.v1")).toBe(false);
+    expect(isSharedDesktopPrefKey("orb:inbox-digest:v7")).toBe(false);
+    expect(isSharedDesktopPrefKey("orb.selectedConversation")).toBe(false);
+    expect(isSharedDesktopPrefKey("followups:orb.btw:v1:[\"https://orbcore.thomas.md\",\"prod\",\"queue\"]")).toBe(false);
     expect(isSharedDesktopPrefKey("orb.jwt")).toBe(false);
     expect(isSharedDesktopPrefKey("orb.apiUrl")).toBe(false);
     expect(isSharedDesktopPrefKey("orb.catalog:123:/api/projects")).toBe(false);
@@ -125,5 +134,77 @@ describe("desktopPrefs shared prod/dev settings sync", () => {
     } finally {
       dispose();
     }
+  });
+
+  it("preserves oversized local values and serializes overlapping client flushes in order", async () => {
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: (query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    });
+
+    const disk: Record<string, string> = { "orb-theme": "dark" };
+    let revCounter = 1;
+    let inFlightPatches = 0;
+    let maxConcurrentPatches = 0;
+    let releaseFirstPatch: (() => void) | null = null;
+
+    const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "desktop_prefs_load") {
+        return { unchanged: false, rev: `r-${revCounter}`, prefs: { ...disk } };
+      }
+      if (cmd === "desktop_prefs_patch") {
+        inFlightPatches++;
+        maxConcurrentPatches = Math.max(maxConcurrentPatches, inFlightPatches);
+        if (releaseFirstPatch === null) {
+          await new Promise<void>((resolve) => {
+            releaseFirstPatch = resolve;
+          });
+        }
+        try {
+          const setObj = (args?.set as Record<string, string> | undefined) ?? {};
+          for (const [k, v] of Object.entries(setObj)) {
+            if (isSharedDesktopPrefKey(k) && new TextEncoder().encode(v).byteLength <= 65_536) {
+              disk[k] = v;
+            }
+          }
+          revCounter++;
+          return { rev: `r-${revCounter}`, prefs: { ...disk } };
+        } finally {
+          inFlightPatches--;
+        }
+      }
+      if (cmd === "set_window_theme" || cmd === "desktop_connection_load") return null;
+      return undefined;
+    });
+
+    (window as unknown as { __ORB_DESKTOP__?: unknown }).__ORB_DESKTOP__ = { core: { invoke } };
+
+    const hugeValue = "x".repeat(70_000);
+    localStorage.setItem("orb.hugePref", hugeValue);
+
+    await initDesktopPrefs();
+    expect(localStorage.getItem("orb.hugePref")).toBe(hugeValue);
+    expect(disk["orb.hugePref"]).toBeUndefined();
+
+    // Start first flush and mutate the same key again before the first RPC finishes:
+    localStorage.setItem("orb.voiceLang", "en");
+    const firstFlush = flushDesktopPrefs();
+    await Promise.resolve();
+
+    localStorage.setItem("orb.voiceLang", "fr");
+    const secondFlush = flushDesktopPrefs();
+
+    releaseFirstPatch!();
+    await Promise.all([firstFlush, secondFlush]);
+
+    expect(maxConcurrentPatches).toBe(1);
+    expect(disk["orb.voiceLang"]).toBe("fr");
+    expect(localStorage.getItem("orb.voiceLang")).toBe("fr");
+    expect(localStorage.getItem("orb.hugePref")).toBe(hugeValue);
   });
 });

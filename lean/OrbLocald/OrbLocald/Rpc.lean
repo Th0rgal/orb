@@ -1306,10 +1306,22 @@ initialize uiPrefsMutex : Std.Mutex Unit ← Std.Mutex.new ()
 
 private def isAllowedUiPrefKey (k : String) : Bool :=
   !k.isEmpty && k.utf8ByteSize ≤ 512 &&
+  (k == "orb-theme" || k.startsWith "orb." || k.startsWith "orb:") &&
   k != "orb.jwt" &&
   k != "orb.apiUrl" &&
+  k != "orb.selectedConversation" &&
+  k != "orb.recentPages" &&
+  k != "orb.githubOAuthPending" &&
+  k != "orb.projectedMove" &&
+  k != "orb.localFailures" &&
+  k != "orb.localFolderSeed" &&
   !k.startsWith "orb.catalog:" &&
-  !k.startsWith "orb.software.inventory."
+  !k.startsWith "orb.software.inventory." &&
+  !k.startsWith "orb.inbox." &&
+  !k.startsWith "orb:inbox-digest:" &&
+  !k.startsWith "orb.native.answered:" &&
+  !k.startsWith "orb.turn-started:" &&
+  (!k.startsWith "orb.btw:" || k.endsWith ",\"settings:btw\"]" || k.endsWith ",\"settings:inbox\"]")
 
 private def acquireUiPrefsFlock (lockPath : String) : IO (Option Int32) := do
   for _ in [0:200] do

@@ -5,15 +5,33 @@ import { getThemePref, setThemePref } from "./theme";
 
 const POLL_VISIBLE_MS = 1_200;
 const FLUSH_DEBOUNCE_MS = 35;
+export const MAX_SHARED_PREF_BYTES = 65_536;
+
+const utf8Encoder = new TextEncoder();
+function utf8ByteLength(value: string): number {
+  return utf8Encoder.encode(value).byteLength;
+}
 
 export function isSharedDesktopPrefKey(key: string): boolean {
   return (
     key.length > 0 &&
-    key.length <= 512 &&
+    utf8ByteLength(key) <= 512 &&
+    (key === "orb-theme" || key.startsWith("orb.") || key.startsWith("orb:")) &&
     key !== "orb.jwt" &&
     key !== "orb.apiUrl" &&
+    key !== "orb.selectedConversation" &&
+    key !== "orb.recentPages" &&
+    key !== "orb.githubOAuthPending" &&
+    key !== "orb.projectedMove" &&
+    key !== "orb.localFailures" &&
+    key !== "orb.localFolderSeed" &&
     !key.startsWith("orb.catalog:") &&
-    !key.startsWith("orb.software.inventory.")
+    !key.startsWith("orb.software.inventory.") &&
+    !key.startsWith("orb.inbox.") &&
+    !key.startsWith("orb:inbox-digest:") &&
+    !key.startsWith("orb.native.answered:") &&
+    !key.startsWith("orb.turn-started:") &&
+    (!key.startsWith("orb.btw:") || key.endsWith(',"settings:btw"]') || key.endsWith(',"settings:inbox"]'))
   );
 }
 
@@ -27,6 +45,7 @@ let initialized = false;
 let storageHooked = false;
 let applyingRemote = false;
 let pullInFlight = false;
+let flushRunning: Promise<void> | null = null;
 let lastRev = "";
 let lastSyncedConnSig: string | null = null;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -90,6 +109,7 @@ function applyRemoteSnapshot(remote: Record<string, string>, dispatchEvents: boo
     for (const k of existingShared) {
       if (!(k in remote)) {
         const oldVal = store.getItem(k);
+        if (oldVal !== null && utf8ByteLength(oldVal) > MAX_SHARED_PREF_BYTES) continue;
         rawRemove(store, k);
         changed.push(k);
         if (dispatchEvents) dispatchStorageChange(k, oldVal, null);
@@ -98,7 +118,9 @@ function applyRemoteSnapshot(remote: Record<string, string>, dispatchEvents: boo
     }
     for (const [k, v] of Object.entries(remote)) {
       if (!isSharedDesktopPrefKey(k) || typeof v !== "string") continue;
+      if (utf8ByteLength(v) > MAX_SHARED_PREF_BYTES) continue;
       const oldVal = store.getItem(k);
+      if (oldVal !== null && utf8ByteLength(oldVal) > MAX_SHARED_PREF_BYTES) continue;
       if (oldVal !== v) {
         rawSet(store, k, v);
         changed.push(k);
@@ -118,46 +140,61 @@ function applyRemoteSnapshot(remote: Record<string, string>, dispatchEvents: boo
   return changed;
 }
 
+async function drainFlushQueue(): Promise<void> {
+  const invoke = nativeInvoke();
+  if (!invoke) return;
+
+  while (pendingClear || pendingSet.size > 0 || pendingRemove.size > 0) {
+    const setObj: Record<string, string> = {};
+    for (const [k, v] of pendingSet) setObj[k] = v;
+    const removeArr = Array.from(pendingRemove);
+    const clearAll = pendingClear;
+
+    pendingSet.clear();
+    pendingRemove.clear();
+    pendingClear = false;
+
+    try {
+      const out = await invoke<{ rev?: string; prefs?: Record<string, string> }>("desktop_prefs_patch", {
+        set: setObj,
+        remove: removeArr,
+        clear: clearAll,
+      });
+      if (
+        out &&
+        typeof out.rev === "string" &&
+        out.rev &&
+        out.prefs &&
+        typeof out.prefs === "object" &&
+        !pendingClear &&
+        pendingSet.size === 0 &&
+        pendingRemove.size === 0
+      ) {
+        applyRemoteSnapshot(out.prefs, true);
+        lastRev = out.rev;
+      }
+    } catch {
+      // Best-effort local mirror; localStorage already holds the in-window copy.
+      break;
+    }
+  }
+}
+
 export async function flushDesktopPrefs(): Promise<void> {
   if (flushTimer !== null) {
     clearTimeout(flushTimer);
     flushTimer = null;
   }
-  if (!pendingClear && pendingSet.size === 0 && pendingRemove.size === 0) return;
-  const invoke = nativeInvoke();
-  if (!invoke) return;
-
-  const setObj: Record<string, string> = {};
-  for (const [k, v] of pendingSet) setObj[k] = v;
-  const removeArr = Array.from(pendingRemove);
-  const clearAll = pendingClear;
-
-  pendingSet.clear();
-  pendingRemove.clear();
-  pendingClear = false;
-
-  try {
-    const out = await invoke<{ rev?: string; prefs?: Record<string, string> }>("desktop_prefs_patch", {
-      set: setObj,
-      remove: removeArr,
-      clear: clearAll,
-    });
-    if (
-      out &&
-      typeof out.rev === "string" &&
-      out.rev &&
-      out.prefs &&
-      typeof out.prefs === "object" &&
-      !pendingClear &&
-      pendingSet.size === 0 &&
-      pendingRemove.size === 0
-    ) {
-      applyRemoteSnapshot(out.prefs, true);
-      lastRev = out.rev;
-    }
-  } catch {
-    // Best-effort local mirror; localStorage already holds the in-window copy.
+  if (flushRunning) {
+    await flushRunning;
+    if (!pendingClear && pendingSet.size === 0 && pendingRemove.size === 0) return;
   }
+  if (!pendingClear && pendingSet.size === 0 && pendingRemove.size === 0) return;
+  const p = drainFlushQueue().finally(() => {
+    if (flushRunning === p) flushRunning = null;
+  });
+  flushRunning = p;
+  await p;
 }
 
 function scheduleFlush(): void {
@@ -179,9 +216,14 @@ function installStorageHooks(): void {
     const strVal = String(value);
     origSetItem!.call(this, key, strVal);
     if (!applyingRemote && this === window.localStorage && isSharedDesktopPrefKey(key)) {
-      pendingRemove.delete(key);
-      pendingSet.set(key, strVal);
-      scheduleFlush();
+      if (utf8ByteLength(strVal) <= MAX_SHARED_PREF_BYTES) {
+        pendingRemove.delete(key);
+        pendingSet.set(key, strVal);
+        scheduleFlush();
+      } else {
+        pendingSet.delete(key);
+        pendingRemove.delete(key);
+      }
     }
   };
 
@@ -206,7 +248,7 @@ function installStorageHooks(): void {
 }
 
 export async function pullDesktopPrefs(checkConnection = false): Promise<void> {
-  if (pullInFlight) return;
+  if (pullInFlight || flushRunning !== null) return;
   if (pendingClear || pendingSet.size > 0 || pendingRemove.size > 0) return;
   const invoke = nativeInvoke();
   if (!invoke) return;
@@ -272,7 +314,7 @@ export async function initDesktopPrefs(): Promise<void> {
     if (!k || !isSharedDesktopPrefKey(k)) continue;
     if (!(k in initial.prefs)) {
       const v = localStorage.getItem(k);
-      if (v !== null) seed[k] = v;
+      if (v !== null && utf8ByteLength(v) <= MAX_SHARED_PREF_BYTES) seed[k] = v;
     }
   }
 
@@ -320,6 +362,7 @@ export function resetDesktopPrefsForTest(): void {
   initialized = false;
   applyingRemote = false;
   pullInFlight = false;
+  flushRunning = null;
   lastRev = "";
   lastSyncedConnSig = null;
   pendingSet.clear();
