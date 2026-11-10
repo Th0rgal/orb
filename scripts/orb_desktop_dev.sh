@@ -489,12 +489,40 @@ EOF
 fi
 
 # Dev HMR mode: start local orb-server (unless --no-server), Vite on 127.0.0.1:$VITE_PORT, then launch native shell.
+mkdir -p "$ROOT_DIR/.orb-dev"
+chmod 0700 "$ROOT_DIR/.orb-dev"
+VITE_PID_FILE="$ROOT_DIR/.orb-dev/vite-${VITE_PORT}.pid"
 VITE_PID=""
 SERVER_PID=""
+has_other_dev_shell() {
+  local needle="ORB_DEV_URL=http://127.0.0.1:${VITE_PORT}/"
+  if [[ "$OS_NAME" == "Linux" ]]; then
+    local envf pid cmd
+    for envf in /proc/[0-9]*/environ; do
+      pid="${envf#/proc/}"
+      pid="${pid%/environ}"
+      [[ "$pid" == "$$" ]] && continue
+      cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+      [[ "$cmd" == *"/orb"* && "$cmd" != *"orb_desktop_dev.sh"* && "$cmd" != *"orb-locald"* && "$cmd" != *"orb-signer"* ]] || continue
+      if tr '\0' '\n' <"$envf" 2>/dev/null | grep -Fqx "$needle"; then
+        return 0
+      fi
+    done
+    return 1
+  fi
+  ps eww -o pid=,command= 2>/dev/null | grep -Fv "orb_desktop_dev.sh" | grep -Fq "$needle"
+}
 cleanup_dev() {
-  if [[ -n "$VITE_PID" ]]; then
-    pkill -P "$VITE_PID" >/dev/null 2>&1 || true
-    kill "$VITE_PID" >/dev/null 2>&1 || true
+  if ! has_other_dev_shell; then
+    local vpid="${VITE_PID:-}"
+    if [[ -z "$vpid" && -f "$VITE_PID_FILE" ]]; then
+      vpid="$(cat "$VITE_PID_FILE" 2>/dev/null || true)"
+    fi
+    if [[ -n "$vpid" && "$vpid" =~ ^[0-9]+$ ]]; then
+      pkill -P "$vpid" >/dev/null 2>&1 || true
+      kill "$vpid" >/dev/null 2>&1 || true
+    fi
+    rm -f "$VITE_PID_FILE"
   fi
   if [[ -n "$SERVER_PID" ]]; then
     pkill -P "$SERVER_PID" >/dev/null 2>&1 || true
@@ -575,11 +603,19 @@ fi
 
 if ! curl -fsS "http://127.0.0.1:${VITE_PORT}/" >/dev/null 2>&1; then
   echo "==> Starting Vite dev server on http://127.0.0.1:${VITE_PORT}/..."
-  (
-    cd "$ROOT_DIR/orb"
-    exec pnpm dev --host 127.0.0.1 --port "$VITE_PORT" --strictPort
-  ) &
+  if command -v setsid >/dev/null 2>&1; then
+    (
+      cd "$ROOT_DIR/orb"
+      exec setsid pnpm dev --host 127.0.0.1 --port "$VITE_PORT" --strictPort </dev/null
+    ) &
+  else
+    (
+      cd "$ROOT_DIR/orb"
+      exec pnpm dev --host 127.0.0.1 --port "$VITE_PORT" --strictPort </dev/null
+    ) &
+  fi
   VITE_PID="$!"
+  printf '%s\n' "$VITE_PID" >"$VITE_PID_FILE"
   for _ in {1..60}; do
     if curl -fsS "http://127.0.0.1:${VITE_PORT}/" >/dev/null 2>&1; then
       break

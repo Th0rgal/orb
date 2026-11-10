@@ -498,13 +498,11 @@ export function isMissionStreamCaughtUp(id: string): boolean {
   return Boolean(sub && sub.connVer === connectionVersionSafe() && sub.healthy && sub.caughtUp);
 }
 
-export function noteMissionPresentationHint(id: string, kind: unknown): void {
+export function noteMissionPresentationHint(id: string, _kind: unknown): void {
   const scope = key(id);
   const sub = warmSubs.get(scope);
   if (sub && sub.healthy && sub.caughtUp) return;
-  if (kind !== "mission_activity") {
-    dirtyMissions.add(scope);
-  }
+  dirtyMissions.add(scope);
 }
 
 export function markUnfocusedMissionsDirty(): void {
@@ -555,6 +553,9 @@ function ensureWarmSub(id: string, initialSinceSeq?: number): WarmMissionSub {
       for (const v of sub.views) v.onBatch(evs);
     } else if (peekTranscript(id)) {
       applyLiveEventsToTranscriptCache(id, evs);
+    } else {
+      sub.caughtUp = false;
+      dirtyMissions.add(scope);
     }
   };
 
@@ -748,7 +749,7 @@ export function reconcileWarmSubscriptions(): void {
     const wanted = new Set(warmRecentMissionIds(true));
     for (const [scope, sub] of [...warmSubs]) {
       if (sub.views.size === 0 && !wanted.has(sub.id)) {
-        if (!sub.caughtUp) dirtyMissions.add(scope);
+        if (!sub.caughtUp || liveMissionIds.has(scope)) dirtyMissions.add(scope);
         sub.stop();
         warmSubs.delete(scope);
       }

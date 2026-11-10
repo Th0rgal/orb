@@ -799,9 +799,7 @@ final class OrbWarmSyncCoordinator {
         if let sub = warmSubs[missionId], sub.isCaughtUpHealthy {
             return
         }
-        if kind != "mission_activity" {
-            dirtyMissions.insert(missionId)
-        }
+        dirtyMissions.insert(missionId)
     }
 
     func notePresentationStreamDisrupted() {
@@ -818,7 +816,7 @@ final class OrbWarmSyncCoordinator {
         ensureScope()
         if !appIsActive {
             for (_, sub) in warmSubs {
-                if !sub.isCaughtUpHealthy { dirtyMissions.insert(sub.missionId) }
+                if !sub.isCaughtUpHealthy || liveIds.contains(sub.missionId) { dirtyMissions.insert(sub.missionId) }
                 sub.cancel()
             }
             warmSubs.removeAll()
@@ -846,7 +844,7 @@ final class OrbWarmSyncCoordinator {
         let wantedMissions = Set(selection.missionIds)
         for (mid, sub) in Array(warmSubs) {
             if sub.listeners.isEmpty && !wantedMissions.contains(mid) {
-                if !sub.isCaughtUpHealthy { dirtyMissions.insert(mid) }
+                if !sub.isCaughtUpHealthy || liveIds.contains(mid) { dirtyMissions.insert(mid) }
                 sub.cancel()
                 warmSubs.removeValue(forKey: mid)
             }
