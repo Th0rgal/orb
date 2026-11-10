@@ -9,6 +9,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+ORIG_ARGS=("$@")
 MODE="dev"
 INSTALL_APP=0
 UI_ONLY=0
@@ -38,7 +39,40 @@ while [[ $# -gt 0 ]]; do
 done
 
 OS_NAME="$(uname -s)"
-STAGE_BIN_DIR="$ROOT_DIR/macos_shell/build"
+
+# Ensure NixOS user/system profile directories are on PATH (GUI launchers may have a minimal PATH),
+# and transparently enter `nix develop` if pnpm, GTK/WebKitGTK dev headers, or GIO TLS modules are missing.
+if [[ "$OS_NAME" == "Linux" && -e /etc/NIXOS ]]; then
+  for p in \
+    "$HOME/.nix-profile/bin" \
+    "$HOME/.local/state/nix/profile/bin" \
+    "/etc/profiles/per-user/${USER:-$(id -un)}/bin" \
+    "/run/current-system/sw/bin" \
+    "/nix/var/nix/profiles/default/bin"
+  do
+    if [[ -d "$p" && ":$PATH:" != *":$p:"* ]]; then
+      export PATH="$p:$PATH"
+    fi
+  done
+  export npm_config_manage_package_manager_versions="${npm_config_manage_package_manager_versions:-false}"
+  has_gio_tls_module() {
+    local IFS=':'
+    for d in ${GIO_EXTRA_MODULES:-}; do
+      [[ -n "$d" && -f "$d/libgiognutls.so" ]] && return 0
+    done
+    return 1
+  }
+  if [[ -z "${ORB_IN_NIX_SHELL:-}" ]] && { ! command -v pnpm >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 || ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists webkit2gtk-4.1 2>/dev/null || ! has_gio_tls_module; }; then
+    echo "==> Entering nix develop environment for $ROOT_DIR..."
+    exec nix develop "$ROOT_DIR" -c env ORB_IN_NIX_SHELL=1 "$ROOT_DIR/scripts/orb_desktop_dev.sh" "${ORIG_ARGS[@]}"
+  fi
+fi
+
+if [[ "$OS_NAME" == "Linux" ]]; then
+  STAGE_BIN_DIR="$ROOT_DIR/linux_shell/build"
+else
+  STAGE_BIN_DIR="$ROOT_DIR/macos_shell/build"
+fi
 mkdir -p "$STAGE_BIN_DIR"
 
 if [[ "$UI_ONLY" == "1" ]]; then

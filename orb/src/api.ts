@@ -13,6 +13,7 @@ import { note, requestDone } from "./diagnostics";
 import { noteObservedMissionQueueRevision, peekObservedMissionQueueRevision } from "./followupQueueState";
 import {
   recordTransportFailure,
+  recordTransportRecovery,
   recordTransportRttSample,
   resetNetworkHealth,
 } from "./networkHealth";
@@ -261,6 +262,8 @@ function recordFetchTelemetry(
   if (res.status < 500 && res.status !== 429) {
     if (shouldSampleTransportRtt(methodRaw, path)) {
       recordTransportRttSample(sampleMs, upstreamOrigin);
+    } else {
+      recordTransportRecovery(upstreamOrigin);
     }
   } else if (res.status >= 500) {
     recordTransportFailure();
@@ -713,8 +716,10 @@ export interface ConflictClassification {
 }
 
 export class InvalidApiResponseError extends Error {
-  constructor(path: string, options?: ErrorOptions) {
+  readonly streamReadFailed: boolean;
+  constructor(path: string, options?: ErrorOptions & { streamReadFailed?: boolean }) {
     super(`Couldn’t read the server response for ${path}. Please retry; your draft is kept.`, options);
+    this.streamReadFailed = options?.streamReadFailed === true;
   }
 }
 
@@ -827,7 +832,8 @@ function isFastRetryableError(error: unknown, init?: RequestInit): boolean {
   const method = (init?.method ?? "GET").toUpperCase();
   if (method !== "GET" && method !== "HEAD") return false;
   if (init?.signal?.aborted) return false;
-  if (error instanceof RequestTimeoutError || isAbortError(error) || error instanceof InvalidApiResponseError) return false;
+  if (error instanceof RequestTimeoutError || isAbortError(error)) return false;
+  if (error instanceof InvalidApiResponseError) return error.streamReadFailed;
   return error instanceof TypeError && /load failed|failed to fetch|networkerror|network connection|internet connection|could not connect/i.test(error.message);
 }
 
@@ -908,7 +914,11 @@ async function sendRequestOnce<T>(
       if (reason !== "caller-abort") throw new RequestTimeoutError();
       throw cause;
     }
-    throw new InvalidApiResponseError(`${init?.method ?? "GET"} ${redactDiagnosticPath(path)}`, { cause });
+    recordTransportFailure();
+    throw new InvalidApiResponseError(`${init?.method ?? "GET"} ${redactDiagnosticPath(path)}`, {
+      cause,
+      streamReadFailed: true,
+    });
   }
   if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
   if (text) return body as T;
@@ -2117,8 +2127,9 @@ export async function getMission(id: string, options: { coreOnly?: boolean; fres
   const remotePromise = (async () => {
     try { return await read(); }
     catch (error) {
-      if (!(error instanceof InvalidApiResponseError)) throw error;
-      // Retry only this read. Retrying a POST could duplicate a sent message.
+      if (!(error instanceof InvalidApiResponseError) || error.streamReadFailed) throw error;
+      // Retry only this read when JSON/schema was unusable (`streamReadFailed`
+      // was already retried once inside `sendRequest`).
       return await read();
     }
   })();

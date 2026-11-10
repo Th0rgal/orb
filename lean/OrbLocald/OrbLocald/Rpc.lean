@@ -1769,6 +1769,9 @@ private def resolveVoicePython? (st : LocaldState) (fakeMode : Bool) : IO (Optio
     cands := cands.push (h / ".orb" / "voice" / "venv" / "bin" / "python3").toString
   if fakeMode then
     cands := cands ++ #["/opt/homebrew/bin/python3", "/usr/bin/python3", "/usr/local/bin/python3"]
+    let pathDirs := ((← IO.getEnv "PATH").getD "").splitOn ":" |>.filter (fun s => !s.trimAscii.toString.isEmpty)
+    for d in pathDirs do
+      cands := cands.push (System.FilePath.mk d / "python3").toString
   for c in cands do
     if (← System.FilePath.pathExists c) then
       return some c
@@ -5241,11 +5244,11 @@ def streamLocalEventsSse (stRef : IO.Ref LocaldState) (clientFd : LeanSys.Posix.
     "Content-Type: text/event-stream\r\n" ++
     "Cache-Control: no-cache\r\n" ++
     "Connection: close\r\n\r\n: ready\n\n"
-  match ← LeanSys.Posix.writeAll clientFd head.toUTF8 false with
-  | .error _ => return ()
-  | .ok _ =>
-    let sid ← stRef.modifyGet LocaldState.registerSseSubscriber
-    try
+  let sid ← stRef.modifyGet LocaldState.registerSseSubscriber
+  try
+    match ← LeanSys.Posix.writeAll clientFd head.toUTF8 false with
+    | .error _ => return ()
+    | .ok _ =>
       let mut alive := true
       let mut idleTicks : Nat := 0
       while alive do
@@ -5270,7 +5273,7 @@ def streamLocalEventsSse (stRef : IO.Ref LocaldState) (clientFd : LeanSys.Posix.
               | .error _ => alive := false
           | .error _ =>
             alive := false
-    finally
-      stRef.modify (·.unregisterSseSubscriber sid)
+  finally
+    stRef.modify (·.unregisterSseSubscriber sid)
 
 end OrbLocald.Rpc

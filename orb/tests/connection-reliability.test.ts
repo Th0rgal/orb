@@ -26,22 +26,32 @@ import {
   selectLivePrefetchIds,
 } from "../src/missionCache";
 import { createFileClient } from "../src/fileResources";
+import {
+  networkHealth,
+  networkHealthSnapshot,
+  recordTransportFailure,
+  recordTransportRttSample,
+  resetNetworkHealth,
+} from "../src/networkHealth";
 import { SOFTWARE_CONCURRENCY, refreshSoftware } from "../src/softwareInventory";
-import { setMultiplexSyncEnabledForTest, streamMission, type StreamEvent } from "../src/stream";
+import { getMissionEventPage, setMultiplexSyncEnabledForTest, streamMission, type StreamEvent } from "../src/stream";
 
 beforeEach(() => {
   localStorage.clear();
   cacheReset();
   forgetPrefetchPauses();
   setTransportBridgeEnabled(false);
+  resetNetworkHealth();
   setApiUrl("http://core.test");
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   setMultiplexSyncEnabledForTest(false);
   clearConnection();
   setTransportBridgeEnabled(false);
   forgetPrefetchPauses();
+  resetNetworkHealth();
   delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
   vi.unstubAllGlobals();
 });
@@ -675,5 +685,193 @@ describe("connection reliability transport & prefetch bounds", () => {
         detail: JSON.stringify({ code: "already_ended" }),
       }),
     ).toEqual({ tag: "already_ended", retryable: false });
+  });
+
+  it("clears networkHealth 'reconnecting' once SSE fallback connects, stays quiet across background WS reprobes, and surfaces genuine SSE drops", async () => {
+    setConnection("http://single-core.test", "secret-jwt");
+    setMultiplexSyncEnabledForTest(true);
+
+    class FailingSocket {
+      static instances: FailingSocket[] = [];
+      static OPEN = 1;
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((ev: { data: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor(public url: string, public protocols?: string | string[]) {
+        FailingSocket.instances.push(this);
+        queueMicrotask(() => {
+          this.readyState = 3;
+          this.onerror?.();
+          this.onclose?.();
+        });
+      }
+      send() {}
+      close() {
+        this.readyState = 3;
+        this.onclose?.();
+      }
+    }
+    vi.stubGlobal("WebSocket", FailingSocket as unknown as typeof WebSocket);
+
+    let closeSseStream!: () => void;
+    let sseOpenCount = 0;
+    let failNextSse = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (!url.includes("/api/control/stream")) return Response.json({});
+        if (failNextSse) return new Response("Bad Gateway", { status: 502 });
+        sseOpenCount++;
+        const stream = new ReadableStream<Uint8Array>({
+          start(ctrl) {
+            ctrl.enqueue(
+              new TextEncoder().encode(
+                'event: mission_status_changed\ndata: {"mission_id":"m-sse","sequence":7,"status":"active"}\n\n',
+              ),
+            );
+            closeSseStream = () => {
+              try {
+                ctrl.close();
+              } catch {
+                /* already closed */
+              }
+            };
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream", "X-Orb-Transport-Rtt-Ms": "42" },
+        });
+      }),
+    );
+
+    const received: StreamEvent[] = [];
+    const stop = streamMission("m-sse", (ev) => received.push(ev), () => {});
+
+    // First WS attempt fails -> status enters "reconnecting" while retrying WS.
+    await vi.waitFor(() => expect(FailingSocket.instances.length).toBeGreaterThanOrEqual(1));
+    expect(networkHealth()).toBe("reconnecting");
+
+    // Second WS failure crosses threshold (2) -> SSE fallback opens and immediately clears "reconnecting"!
+    await vi.waitFor(() => expect(sseOpenCount).toBe(1), { timeout: 2500 });
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    expect(networkHealth()).toBe("healthy");
+    expect(networkHealthSnapshot().wsConnected).toBeNull();
+
+    // Trigger a background WS reprobe (`online` wake event while in mode=1 SSE fallback) -> WS fails again,
+    // but SSE fallback is still connected so `networkHealth()` MUST stay "healthy" without flashing "reconnecting"!
+    const beforeReprobe = FailingSocket.instances.length;
+    window.dispatchEvent(new Event("online"));
+    await vi.waitFor(() => expect(FailingSocket.instances.length).toBeGreaterThan(beforeReprobe));
+    expect(networkHealth()).toBe("healthy");
+    expect(networkHealthSnapshot().wsConnected).toBeNull();
+
+    // Now drop the active SSE stream while the backend is unreachable -> `networkHealth()` surfaces "reconnecting".
+    failNextSse = true;
+    closeSseStream();
+    await vi.waitFor(() => expect(networkHealth()).toBe("reconnecting"));
+
+    stop();
+    expect(networkHealthSnapshot().wsConnected).toBeNull();
+  });
+
+  it("clears consecutiveFailures on non-RTT-sampled routes without inflating SRTT", async () => {
+    setConnection("https://orbcore.thomas.md", "tok-rec");
+    recordTransportRttSample(60);
+    recordTransportFailure();
+    expect(networkHealth()).toBe("reconnecting");
+    expect(networkHealthSnapshot().srttMs).toBe(60);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            "X-Orb-Transport-Rtt-Ms": "9500",
+            "X-Orb-Upstream-Origin": "https://orbcore.thomas.md",
+          },
+        }),
+      ),
+    );
+
+    // P1 POST route is allowed through while P2 is paused on consecutiveFailures=1,
+    // and must clear consecutiveFailures on <500 recovery without polluting SRTT:
+    await transportFetch("/api/control/missions/m1/inbox-digest", { method: "POST", body: "{}" });
+    expect(networkHealth()).toBe("healthy");
+    expect(networkHealthSnapshot().consecutiveFailures).toBe(0);
+    expect(networkHealthSnapshot().srttMs).toBe(60);
+
+    // Once consecutiveFailures is 0, P2 compute-bound GETs also run without inflating SRTT:
+    recordTransportFailure();
+    expect(networkHealth()).toBe("reconnecting");
+    await transportFetch("/api/control/missions/m1/opened", { method: "POST", body: "{}" });
+    await transportFetch("/api/providers/antigravity-models");
+    expect(networkHealth()).toBe("healthy");
+    expect(networkHealthSnapshot().srttMs).toBe(60);
+  });
+
+  it("fast-retries GET once on mid-body stream reset while keeping malformed JSON non-retryable", async () => {
+    let missionCalls = 0;
+    let eventCalls = 0;
+    let badJsonCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/control/missions/m-drop/events")) {
+          if (++eventCalls === 1) {
+            return {
+              ok: true,
+              status: 200,
+              headers: new Headers({ "X-Orb-Events-Protocol": "1", "X-Has-More": "false" }),
+              text: async () => {
+                throw new TypeError("Load failed");
+              },
+            } as unknown as Response;
+          }
+          return new Response("[]", {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "X-Orb-Events-Protocol": "1",
+              "X-Has-More": "false",
+            },
+          });
+        }
+        if (url.endsWith("/api/bad-json")) {
+          badJsonCalls++;
+          return new Response("<html>not json</html>", { status: 200 });
+        }
+        if (++missionCalls === 1) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers(),
+            text: async () => {
+              throw new TypeError("Load failed");
+            },
+          } as unknown as Response;
+        }
+        return Response.json({ ok: true, calls: missionCalls });
+      }),
+    );
+
+    await expect(api<{ ok: boolean; calls: number }>("/api/health", {})).resolves.toEqual({
+      ok: true,
+      calls: 2,
+    });
+    expect(missionCalls).toBe(2);
+
+    const page = await getMissionEventPage("m-drop");
+    expect(page.events).toEqual([]);
+    expect(eventCalls).toBe(2);
+
+    await expect(api("/api/bad-json", {})).rejects.toThrow("Couldn’t read the server response");
+    expect(badJsonCalls).toBe(1);
   });
 });

@@ -10,7 +10,9 @@ import {
 } from "./backgroundSync";
 import {
   currentLinkBudget,
+  networkHealthSnapshot,
   recordSyncWsState,
+  recordTransportFailure,
   recordTransportRttSample,
 } from "./networkHealth";
 import {
@@ -216,17 +218,47 @@ export async function getMissionEventPage(
  if(cursor.types)query.set('types',cursor.types);
  if(cursor.since!==undefined)query.set('since_seq',String(cursor.since));
  if(cursor.before!==undefined)query.set('before_seq',String(cursor.before));
- const response=await apiRaw(`/api/control/missions/${id}/events?${query}`, { priority: cursor.priority, signal: cursor.signal });
+ const fetchPageOnce=async():Promise<{response:Response;events:StoredEvent[]}>=>{
+  const res=await apiRaw(`/api/control/missions/${id}/events?${query}`, { priority: cursor.priority, signal: cursor.signal });
+  if(typeof res.text!=='function'){
+   const parsed=await res.json() as StoredEvent[];
+   return {response:res,events:parsed};
+  }
+  const rawBody=await res.text();
+  try{
+   return {response:res,events:JSON.parse(rawBody) as StoredEvent[]};
+  }catch(cause){
+   throw new InvalidApiResponseError(`GET /api/control/missions/${id}/events`, { cause });
+  }
+ };
+ let response:Response;
  let events:StoredEvent[];
  try{
-  events=await response.json() as StoredEvent[];
- }catch(cause){
-  if(isAbortError(cause)){
-   if(cursor.signal?.aborted)throw cause;
+  ({response,events}=await fetchPageOnce());
+ }catch(firstErr){
+  if(isAbortError(firstErr)){
+   if(cursor.signal?.aborted)throw firstErr;
    noteAbort(`GET /api/control/missions/${id}/events`, "timeout", 0);
    throw new RequestTimeoutError();
   }
-  throw new InvalidApiResponseError(`GET /api/control/missions/${id}/events`, { cause });
+  if(cursor.signal?.aborted||firstErr instanceof RequestTimeoutError||firstErr instanceof ApiError||firstErr instanceof InvalidApiResponseError){
+   throw firstErr;
+  }
+  recordTransportFailure();
+  try{
+   await new Promise((resolve)=>setTimeout(resolve,200+Math.floor(Math.random()*200)));
+   if(cursor.signal?.aborted)throw firstErr;
+   ({response,events}=await fetchPageOnce());
+  }catch(retryErr){
+   if(isAbortError(retryErr)){
+    if(cursor.signal?.aborted)throw retryErr;
+    noteAbort(`GET /api/control/missions/${id}/events`, "timeout", 0);
+    throw new RequestTimeoutError();
+   }
+   if(retryErr instanceof ApiError||retryErr instanceof RequestTimeoutError||retryErr instanceof InvalidApiResponseError)throw retryErr;
+   recordTransportFailure();
+   throw new InvalidApiResponseError(`GET /api/control/missions/${id}/events`, { cause: retryErr, streamReadFailed: true });
+  }
  }
  if(!Array.isArray(events)||response.headers.get('X-Orb-Events-Protocol')!=='1'||!response.headers.has('X-Has-More'))throw Error('Invalid event page protocol. Redeploy Orb and the backend together.');
  const number=(name:string)=>{const value=response.headers.get(name);if(value===null)return undefined;const n=Number(value);if(!value.trim()||!Number.isSafeInteger(n)||n<0)throw Error(`Invalid event cursor: ${name}`);return n;};
@@ -464,6 +496,7 @@ type MultiplexSyncHub = {
   destroy: () => void;
   refreshSubscriptions: () => void;
   notifyHttpStatus: (status: number) => void;
+  notifyFallbackState: (listener: SyncListener, connected: boolean) => void;
 };
 
 let activeSyncHub: MultiplexSyncHub | null = null;
@@ -484,6 +517,7 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
   activeSyncHub?.destroy();
 
   const listeners = new Set<SyncListener>();
+  const fallbackConnectedListeners = new Set<SyncListener>();
   let socket: WebSocket | null = null;
   let ready = false;
   let closed = false;
@@ -636,6 +670,9 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
     try {
       ws = new WebSocket(toWsUrl(base, "/api/control/sync"), protocols);
     } catch {
+      if (fallbackConnectedListeners.size === 0) {
+        recordSyncWsState(false);
+      }
       const stepped = stepTransportEpochState(epochState, {
         eventKind: 1,
         failThreshold: 1,
@@ -672,6 +709,7 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
         sinceSeq: minTrackedSinceSeq(),
       });
       epochState = stepped.snapshot;
+      fallbackConnectedListeners.clear();
       ready = true;
       recordSyncWsState(true);
       if (wasSseOrReprobe) {
@@ -798,7 +836,9 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
       ready = false;
       for (const l of listeners) l.onDisconnected?.();
       if (closed || !listeners.size) return;
-      recordSyncWsState(false);
+      if (fallbackConnectedListeners.size === 0) {
+        recordSyncWsState(false);
+      }
       if (wasReady) reportSyncUnexpectedDisconnect();
       candidateIdx++;
       const nextBase = candidates[candidateIdx % candidates.length] ?? base;
@@ -924,13 +964,32 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
       if (!socket && !reconnectTimer && !closed) openSocket();
       else syncSubscriptions();
     },
+    notifyFallbackState(listener: SyncListener, connected: boolean) {
+      if (closed) return;
+      if (connected) {
+        if (!listeners.has(listener)) return;
+        fallbackConnectedListeners.add(listener);
+        if (!ready && networkHealthSnapshot().wsConnected === false) {
+          recordSyncWsState(null);
+        }
+      } else {
+        fallbackConnectedListeners.delete(listener);
+        if (listeners.size > 0 && !ready && fallbackConnectedListeners.size === 0) {
+          recordSyncWsState(false);
+        }
+      }
+    },
     destroy() {
       closed = true;
       clearTimers();
       detachWakeListeners();
       if (idleCloseTimer) clearTimeout(idleCloseTimer);
       if (socket) { try { socket.close(); } catch { /* ignore */ } socket = null; }
+      fallbackConnectedListeners.clear();
       listeners.clear();
+      if (networkHealthSnapshot().wsConnected === false) {
+        recordSyncWsState(null);
+      }
       if (activeSyncHub === hub) activeSyncHub = null;
     },
   };
@@ -992,7 +1051,9 @@ export function streamMission(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let controller: AbortController | undefined;
   let detachSyncListener: (() => void) | undefined;
+  let syncListenerRef: SyncListener | undefined;
   let sseFallbackActive = false;
+  const syncHub = getOrCreateSyncHub();
 
   const stopSseFallback = () => {
     sseFallbackActive = false;
@@ -1029,6 +1090,11 @@ export function streamMission(
       }
       if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
       if (profile === "presentation" && !res.headers.get("Content-Type")?.includes("text/event-stream")) throw new Error("Presentation stream unavailable");
+      if (syncHub && syncListenerRef) {
+        syncHub.notifyFallbackState(syncListenerRef, true);
+      } else if (networkHealthSnapshot().wsConnected === false) {
+        recordSyncWsState(null);
+      }
       if(onReady)onReady();
       else if (retry > 0) {
         // Events emitted while we were disconnected never reached us.
@@ -1087,6 +1153,9 @@ export function streamMission(
       throw new Error("stream ended");
     } catch (e) {
       if (stopped || (detachSyncListener && !sseFallbackActive) || (e instanceof DOMException && e.name === "AbortError")) return;
+      if (syncHub && syncListenerRef) {
+        syncHub.notifyFallbackState(syncListenerRef, false);
+      }
       onDisconnected?.();
       if(retry===0)onLagged();
       retry = Math.min(retry + 1, 5);
@@ -1094,7 +1163,6 @@ export function streamMission(
     }
   };
 
-  const syncHub = getOrCreateSyncHub();
   if (syncHub) {
     const listener: SyncListener = {
       missionId,
@@ -1114,10 +1182,15 @@ export function streamMission(
         stopSseFallback();
       },
     };
+    syncListenerRef = listener;
     syncHub.listeners.add(listener);
     syncHub.refreshSubscriptions();
     detachSyncListener = () => {
       syncHub.listeners.delete(listener);
+      syncHub.notifyFallbackState(listener, false);
+      if (!syncHub.listeners.size && networkHealthSnapshot().wsConnected === false) {
+        recordSyncWsState(null);
+      }
       syncHub.refreshSubscriptions();
     };
   } else {

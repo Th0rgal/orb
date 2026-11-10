@@ -32,6 +32,32 @@
     devShells = forAllSystems (pkgs: {
       default = pkgs.mkShell {
         inputsFrom = [self.packages.${pkgs.stdenv.hostPlatform.system}.sandboxed-sh];
+        LEAN_CC = "cc";
+        npm_config_manage_package_manager_versions = "false";
+        LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+          pkgs.openssl
+          pkgs.sqlite
+        ];
+        packages =
+          [
+            pkgs.curl
+            pkgs.nodejs
+            pkgs.openssl
+            pkgs.pkg-config
+            pkgs.pnpm_10
+            pkgs.python3
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            pkgs.dconf
+            pkgs.glib-networking
+            pkgs.gsettings-desktop-schemas
+            pkgs.gtk3
+            pkgs.webkitgtk_4_1
+          ];
+        shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+          export XDG_DATA_DIRS="${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}:''${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+          export GIO_EXTRA_MODULES="${pkgs.glib-networking}/lib/gio/modules:${pkgs.dconf.lib}/lib/gio/modules''${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
+        '';
       };
     });
   };
