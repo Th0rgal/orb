@@ -552,8 +552,10 @@ def main (args : List String) : IO UInt32 := do
         | none => "orb-signer"
       if (← System.FilePath.pathExists sibling) then
         pure (some sibling)
-      else
+      else if hostOs == "macos" then
         pure (some "macos_shell/build/orb-signer")
+      else
+        pure (some "linux_shell/build/orb-signer")
   let homeDir := ((← IO.getEnv "HOME").getD "/tmp").trimAscii.toString
   let rawStateEnv := ((← IO.getEnv "ORB_STATE_DIR").getD "").trimAscii.toString
   let orbStateDir := if rawStateEnv.isEmpty then s!"{homeDir}/.orb" else rawStateEnv

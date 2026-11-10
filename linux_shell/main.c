@@ -177,19 +177,17 @@ int main(int argc, char **argv) {
     pid_t locald_pid = -1;
     const char *locald_bin = getenv("ORB_LOCALD_BIN");
     if (locald_bin && *locald_bin && (locald_pid = fork()) == 0) {
-        static const char *const keep[] = { "HOME", "PATH", "TMPDIR", "USER", "LANG", "ORB_STATE_DIR", "ORB_SIGNER_BIN", "ORB_APPROVAL_KEY_PATH" };
-        char pkv[40], tkv[4200], kv[8][1024], *envp[11];
-        size_t n = 0;
+        static const char *const keep[] = { "HOME", "PATH", "TMPDIR", "USER", "LANG", "ORB_STATE_DIR", "ORB_SIGNER_BIN", "ORB_APPROVAL_KEY_PATH", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "DISPLAY" };
+        static char pkv[40], tkv[4200], kv[14][32768];
+        char *envp[17]; size_t n = 0;
         snprintf(pkv, sizeof(pkv), "ORB_LOCALD_PORT=%u", port); envp[n++] = pkv;
         snprintf(tkv, sizeof(tkv), "ORB_LOCALD_TOKEN=%s", token); envp[n++] = tkv;
-        for (size_t i = 0; i < 8; ++i) {
-            const char *v = getenv(keep[i]);
-            if (v && (size_t)snprintf(kv[i], sizeof(kv[i]), "%s=%s", keep[i], v) < sizeof(kv[i])) envp[n++] = kv[i];
-        }
+        for (size_t i = 0; i < 14; ++i)
+            if (getenv(keep[i]) && (size_t)snprintf(kv[i], sizeof(kv[i]), "%s=%s", keep[i], getenv(keep[i])) < sizeof(kv[i])) envp[n++] = kv[i];
         envp[n] = NULL; execle(locald_bin, locald_bin, (char *)NULL, envp); _exit(127);
     }
 #if defined(ORB_HAS_WEBKITGTK)
-    gtk_init(&argc, &argv);
+    g_set_prgname("orb-desktop"); gtk_init(&argc, &argv);
     GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(win), "Orb");
     gtk_window_set_default_size(GTK_WINDOW(win), 1470, 923);

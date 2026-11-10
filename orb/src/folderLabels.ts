@@ -1,5 +1,6 @@
 import { createSignal } from "solid-js";
 import { connectionVersion, getApiUrl, getJwt } from "./api";
+import { readString } from "./storage";
 
 // Labels leave folder identity intact, including open files and running agents.
 const revisionStore = import.meta.hot?.data?.folderLabelRevision ?? createSignal(0);
@@ -19,8 +20,7 @@ function key(slug: string, path: string): string {
 }
 export function folderLabel(slug: string, path: string): string {
   revision(); connectionVersion();
-  try { return localStorage.getItem(key(slug, path)) || basename(path); }
-  catch { return basename(path); }
+  return readString(key(slug, path)) || basename(path);
 }
 export function setFolderLabel(slug: string, path: string, raw: string): void {
   const label = raw.trim();

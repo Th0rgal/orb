@@ -416,9 +416,13 @@ export const isConnected = connected;
 export const [connectionVersion, bumpConnectionVersion] = createSignal(0);
 
 let connectionSave = Promise.resolve();
+let connectionSavesInFlight = 0;
+export const isDesktopConnectionSaving = (): boolean => connectionSavesInFlight > 0;
 function persistDesktopConnection(connection: {api_url:string;token:string}|null) {
   const invoke=nativeInvoke();
-  if(invoke)connectionSave=connectionSave.catch(()=>{}).then(()=>invoke('desktop_connection_save',{connection})).catch(swallow("api.connectionSave"));
+  if(!invoke)return;
+  connectionSavesInFlight++;
+  connectionSave=connectionSave.catch(()=>{}).then(()=>invoke('desktop_connection_save',{connection})).catch(swallow("api.connectionSave")).finally(()=>{connectionSavesInFlight--;});
 }
 export async function restoreDesktopConnection() {
   const invoke=nativeInvoke();
@@ -426,7 +430,7 @@ export async function restoreDesktopConnection() {
   // Migrate an existing web-origin login before consulting the desktop store.
   if(getJwt()){persistDesktopConnection({api_url:getApiUrl(),token:getJwt()!});return;}
   const saved=await invoke('desktop_connection_load').catch(()=>null);
-  if(saved?.api_url&&saved?.token)setConnection(saved.api_url,saved.token);
+  if(saved?.api_url&&saved?.token)setConnection(saved.api_url,saved.token,{persist:false});
 }
 
 function disconnectNativeSync(){
@@ -435,7 +439,7 @@ function disconnectNativeSync(){
   void invoke("project_context_disconnect",{request:{endpoint:getApiUrl(),token:getJwt(),project:"disconnect"}}).catch(swallow("api.disconnect.projectContext"));
   void invoke("local_origin_disconnect",{connection:{api_url:getApiUrl(),token:getJwt()}}).catch(swallow("api.disconnect.localOrigin"));
 }
-export function setConnection(url: string, token: string) {
+export function setConnection(url: string, token: string, options?: { persist?: boolean }) {
   const changed = url.replace(/\/+$/,"")!==getApiUrl() || token!==getJwt();
   if(getJwt() && changed)disconnectNativeSync();
   if(changed){resetMissionHierarchy();ancestorCache.clear();void clearPersistentCache();resetCurrentUserState();}
@@ -443,14 +447,14 @@ export function setConnection(url: string, token: string) {
   setApiUrl(url);
   localStorage.setItem(JWT_KEY, token);
   setConnected(true);
-  persistDesktopConnection({api_url:getApiUrl(),token});
+  if(options?.persist!==false)persistDesktopConnection({api_url:getApiUrl(),token});
   invalidateReads();
   catalogMemory.clear();
   cacheReset();
   bumpConnectionVersion(v => v + 1);
 }
 
-export function clearConnection() {
+export function clearConnection(options?: { persist?: boolean }) {
   disconnectNativeSync();
   resetMissionHierarchy();
   ancestorCache.clear();
@@ -459,7 +463,7 @@ export function clearConnection() {
   void clearPersistentCache();
   const hadConnection = connected() || !!getJwt();
   localStorage.removeItem(JWT_KEY);
-  persistDesktopConnection(null);
+  if(options?.persist!==false)persistDesktopConnection(null);
   setConnected(false);
   catalogMemory.clear();
   if (!hadConnection) return;

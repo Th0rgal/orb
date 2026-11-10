@@ -1,5 +1,6 @@
 import { createSignal } from "solid-js";
 import { api, connectionVersion, getApiUrl } from "./api";
+import { readString } from "./storage";
 
 export const projectColors = [
   { name: "Default", value: "" }, { name: "Blue", value: "#8aaed4" },
@@ -20,7 +21,7 @@ const key = (slug: string, url = getApiUrl()) => `orb.projectColor:${url}:${slug
 const syncKey = (slug: string, url = getApiUrl()) => `orb.projectColorSync:${url}:${slug}`;
 const wireName = (value: string) => projectColors.find(c => c.value === value && c.value)?.name.toLowerCase() ?? null;
 const fromWire = (name: string) => projectColors.find(c => c.value && c.name.toLowerCase() === name.trim().toLowerCase())?.value;
-const read = (name: string) => { try { return localStorage.getItem(name); } catch { return null; } };
+const read = (name: string) => readString(name);
 const write = (name: string, value: string | null) => { try { if (value) localStorage.setItem(name, value); else localStorage.removeItem(name); } catch { /* storage unavailable: the server copy still applies */ } };
 const stored = (slug: string, url?: string) => projectColors.find(c => c.value && c.value === read(key(slug, url)))?.value ?? "";
 

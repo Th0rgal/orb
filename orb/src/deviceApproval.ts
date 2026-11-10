@@ -391,6 +391,14 @@ export function setApprovalGraceSecs(secs: number) {
   if (call) void call("set_approval_grace", { secs }).then(() => refreshGrace(call)).catch(() => undefined);
 }
 
+/** Reconcile in-memory signal and local daemon grace window from localStorage. */
+export function reloadApprovalGraceSecs(): void {
+  const secs = storedGrace();
+  setGraceSecs(secs);
+  const call = invoke();
+  if (call) void call("set_approval_grace", { secs }).then(() => refreshGrace(call)).catch(() => undefined);
+}
+
 const [graceUntilSecs, setGraceUntil] = createSignal(0);
 /** Unix seconds until which secret-request decisions skip Touch ID (0: none). */
 export const graceUntil = graceUntilSecs;

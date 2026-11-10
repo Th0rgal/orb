@@ -926,11 +926,12 @@ def isAllowedLocaldOrigin (origin? : Option String) : Bool :=
       o.startsWith "http://127.0.0.1:" || o.startsWith "http://localhost:" ||
       o == "http://127.0.0.1" || o == "http://localhost"
 
-/-- Canonical list of all 89 desktop IPC commands (`88` commands + `plugin:app|version`). -/
+/-- Canonical list of all desktop IPC commands (`plugin:app|version` + native RPCs). -/
 def supportedDesktopCommands : Array String := #[
   "plugin:app|version",
   "transport_bridge_configure",
-  "desktop_connection_load", "desktop_connection_save", "diagnostics_append",
+  "desktop_connection_load", "desktop_connection_save",
+  "desktop_prefs_load", "desktop_prefs_patch", "diagnostics_append",
   "reveal_logs", "local_machine_metrics", "paloma_ssh_pubkey",
   "open_url", "reveal_download", "save_file_as", "set_window_theme", "mistral_usage_sign_in",
   "approval_key_status", "approval_key_create", "approval_sign",
@@ -1297,6 +1298,100 @@ private def bindingsFilePath? (st : LocaldState) : Option System.FilePath :=
 
 private def originsFilePath? (st : LocaldState) : Option System.FilePath :=
   (resolveOrbStateDir st).map (· / "local-origins.json")
+
+private def uiPrefsFilePath? (st : LocaldState) : Option System.FilePath :=
+  (resolveOrbStateDir st).map (· / "ui-prefs.json")
+
+initialize uiPrefsMutex : Std.Mutex Unit ← Std.Mutex.new ()
+
+private def isAllowedUiPrefKey (k : String) : Bool :=
+  !k.isEmpty && k.utf8ByteSize ≤ 512 &&
+  (k == "orb-theme" || k.startsWith "orb." || k.startsWith "orb:") &&
+  k != "orb.jwt" &&
+  k != "orb.apiUrl" &&
+  k != "orb.selectedConversation" &&
+  k != "orb.recentPages" &&
+  k != "orb.githubOAuthPending" &&
+  k != "orb.projectedMove" &&
+  k != "orb.localFailures" &&
+  k != "orb.localFolderSeed" &&
+  k != "orb.desktopPrefsMigrated.v1" &&
+  !k.startsWith "orb.projectColorSync:" &&
+  !k.startsWith "orb.catalog:" &&
+  !k.startsWith "orb.software.inventory." &&
+  !k.startsWith "orb.inbox." &&
+  !k.startsWith "orb:inbox-digest:" &&
+  !k.startsWith "orb.native.answered:" &&
+  !k.startsWith "orb.turn-started:" &&
+  (!k.startsWith "orb.btw:" || k.endsWith ",\"settings:btw\"]" || k.endsWith ",\"settings:inbox\"]")
+
+private def acquireUiPrefsFlock (lockPath : String) : IO (Option Int32) := do
+  for _ in [0:200] do
+    let rc ← OrbBin.PosixExt.flockExclusiveNb lockPath
+    if rc != 0xFFFFFFFF && rc != 0xFFFFFFFE then
+      return some (Int32.ofBitVec (BitVec.ofNat 32 rc.toNat))
+    if rc == 0xFFFFFFFF then
+      return none
+    IO.sleep 5
+  return none
+
+private def withUiPrefsLock (path? : Option System.FilePath) (act : IO (Except String JVal)) : IO (Except String JVal) :=
+  uiPrefsMutex.atomically do
+    match path? with
+    | none => act
+    | some path =>
+      if let some dir := path.parent then
+        try
+          IO.FS.createDirAll dir
+          discard <| OrbBin.PosixExt.chmod dir.toString 0o700
+        catch _ => pure ()
+      let lockPath := path.toString ++ ".lock"
+      let lockSt ← OrbBin.PosixExt.statPath lockPath
+      if lockSt.isSymlink then
+        return .error "UI preferences lock must not be a symlink"
+      let some lockFd ← acquireUiPrefsFlock lockPath
+        | return .error "Cannot acquire UI preferences lock"
+      try
+        act
+      finally
+        OrbBin.PosixExt.closeFdRaw lockFd
+
+private def canonicalUiPrefs (kvs : Array (String × JVal)) : JVal × String :=
+  let filtered := kvs.foldl (init := (#[] : Array (String × JVal))) fun acc (k, v) =>
+    match v.asStr? with
+    | some s =>
+      if isAllowedUiPrefKey k && s.utf8ByteSize ≤ 65536 then
+        let rest := acc.filter (fun (ek, _) => ek != k)
+        rest.push (k, .str s)
+      else acc
+    | none => acc
+  let sorted := filtered.qsort (fun a b => a.1 < b.1)
+  let obj := JVal.obj sorted
+  let canon := renderCompact obj
+  let rev := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes canon.toUTF8)
+  (obj, rev)
+
+private def readUiPrefsFromDisk (path? : Option System.FilePath) : IO (Except String (JVal × String × Bool)) := do
+  match path? with
+  | none =>
+    let (obj, rev) := canonicalUiPrefs #[]
+    return .ok (obj, rev, false)
+  | some path =>
+    let st ← OrbBin.PosixExt.statPath path.toString
+    if !st.exists_ then
+      let (obj, rev) := canonicalUiPrefs #[]
+      return .ok (obj, rev, false)
+    if st.isSymlink || !st.isReg then
+      return .error "Invalid saved UI preferences path"
+    try
+      let raw ← IO.FS.readFile path
+      match OrbBin.Json.parse raw.trimAscii.toString with
+      | .ok (.obj kvs) =>
+        let (obj, rev) := canonicalUiPrefs kvs
+        return .ok (obj, rev, true)
+      | _ => return .error "Invalid saved UI preferences"
+    catch _ =>
+      return .error "Cannot read saved UI preferences"
 
 private def logsDirPath? (st : LocaldState) : Option System.FilePath :=
   (resolveOrbStateDir st).map (· / "logs")
@@ -3107,6 +3202,36 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path payload then
         return .error e
     return .ok .null
+  | "desktop_prefs_load" =>
+    let sinceRev? := args.fieldStr? "since_rev"
+    uiPrefsMutex.atomically do
+      match ← readUiPrefsFromDisk (uiPrefsFilePath? st) with
+      | .error e => return .error e
+      | .ok (prefsObj, rev, existed) =>
+        if existed && sinceRev? == some rev then
+          return .ok (.obj #[("unchanged", .bool true), ("rev", .str rev), ("exists", .bool true)])
+        return .ok (.obj #[("unchanged", .bool false), ("rev", .str rev), ("exists", .bool existed), ("prefs", prefsObj)])
+  | "desktop_prefs_patch" =>
+    let setKvs := ((args.field? "set").bind (·.asObj?)).getD #[]
+    let removeKeys := ((args.fieldArr? "remove").getD #[]).filterMap (·.asStr?)
+    let clearAll := (args.fieldBool? "clear").getD false
+    let path? := uiPrefsFilePath? st
+    withUiPrefsLock path? do
+      let curObj ←
+        if clearAll then pure (JVal.obj #[])
+        else
+          match ← readUiPrefsFromDisk path? with
+          | .ok (obj, _, _) => pure obj
+          | .error e => return .error e
+      let curKvs := (curObj.asObj?).getD #[]
+      let afterRem := curKvs.filter (fun (k, _) => !removeKeys.contains k)
+      let merged := afterRem ++ setKvs
+      let (nextObj, rev) := canonicalUiPrefs merged
+      if let some path := path? then
+        let payload := (renderCompact nextObj ++ "\n").toUTF8
+        if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path payload then
+          return .error e
+      return .ok (.obj #[("rev", .str rev), ("prefs", nextObj)])
   | "diagnostics_append" =>
     let lines : Array String := match args.fieldArr? "lines" with
       | some xs => xs.filterMap (·.asStr?)
@@ -3163,13 +3288,23 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "approval_key_status" =>
     match st.signerBin? with
     | some bin =>
-      if st.hostOs == "macos" && (← System.FilePath.pathExists bin) then
+      if (st.hostOs == "macos" || st.hostOs == "linux") && (← System.FilePath.pathExists bin) then
         match ← runOrbSigner bin (resolveApprovalKeyArgs st "public") with
         | .ok jv =>
           let pk := (jv.fieldStr? "public_key").getD ""
           return .ok (.obj #[("available", .bool true), ("enrolled", .bool (!pk.isEmpty)), ("public_key", if pk.isEmpty then .null else .str pk)])
+        | .error (3, _) =>
+          return .ok (.obj #[("available", .bool false), ("enrolled", .bool false), ("public_key", .null)])
         | .error _ =>
-          return .ok (.obj #[("available", .bool true), ("enrolled", .bool false), ("public_key", .null)])
+          if st.hostOs == "linux" then
+            match ← runOrbSigner bin #["status"] none with
+            | .ok sjv =>
+              let avail := (sjv.fieldStr? "available") == some "true" || (sjv.fieldBool? "available") == some true
+              return .ok (.obj #[("available", .bool avail), ("enrolled", .bool false), ("public_key", .null)])
+            | .error _ =>
+              return .ok (.obj #[("available", .bool false), ("enrolled", .bool false), ("public_key", .null)])
+          else
+            return .ok (.obj #[("available", .bool true), ("enrolled", .bool false), ("public_key", .null)])
       else
         return .ok (.obj #[("available", .bool false), ("enrolled", .bool false), ("public_key", .null)])
     | none =>
@@ -3177,7 +3312,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "approval_key_create" =>
     match st.signerBin? with
     | some bin =>
-      if st.hostOs == "macos" then
+      if st.hostOs == "macos" || st.hostOs == "linux" then
         resetSignerServer
         stRef.modify fun s => { s with approvalGraceUntil := 0 }
         match ← runOrbSigner bin (resolveApprovalKeyArgs st "create") with
@@ -3186,13 +3321,13 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           if pk.isEmpty then return .error "orb-signer returned empty public_key"
           return .ok (.str pk)
         | .error (_, msg) => return .error msg
-      else return .error "Secure Enclave is only available on macOS"
-    | none => return .error "Secure Enclave is only available on macOS"
+      else return .error "Approval key signing is unavailable on this host"
+    | none => return .error "Approval key signing is unavailable on this host"
   | "approval_sign" =>
     let payload := (args.fieldStr? "payload").getD ""
     match st.signerBin? with
     | some bin =>
-      if st.hostOs == "macos" then
+      if st.hostOs == "macos" || st.hostOs == "linux" then
         match ← signViaOrbSignerServer bin (resolveApprovalKeyPath st) st.approvalGraceSecs payload with
         | .ok jv =>
           let sig := (jv.fieldStr? "signature").getD ""
@@ -3209,8 +3344,8 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         | .error (_, msg) =>
           stRef.modify fun s => { s with approvalGraceUntil := 0 }
           return .error msg
-      else return .error "Secure Enclave signing unavailable on this host"
-    | none => return .error "Secure Enclave signing unavailable on this host"
+      else return .error "Approval key signing unavailable on this host"
+    | none => return .error "Approval key signing unavailable on this host"
   | "approval_grace_until" =>
     let nowSec ← OrbBin.PosixExt.nowEpoch
     let rem : Nat := if st.approvalGraceUntil > nowSec then st.approvalGraceUntil.toNat else 0
@@ -3227,7 +3362,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       resetSignerServer
     return .ok .null
   | "biometric_status" =>
-    if st.hostOs != "macos" then
+    if st.hostOs != "macos" && (st.hostOs != "linux" || st.signerBin?.isNone) then
       return .ok (.obj #[
         ("available", .bool false),
         ("kind", .str "none"),
@@ -3249,11 +3384,12 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
             ("biometry_type", .str kind)
           ])
         | .error _ =>
+          let fallbackAvail := st.hostOs == "macos"
           return .ok (.obj #[
-            ("available", .bool true),
-            ("kind", .str "touch_id"),
-            ("label", .str "Touch ID"),
-            ("biometry_type", .str "touch_id")
+            ("available", .bool fallbackAvail),
+            ("kind", .str (if fallbackAvail then "touch_id" else "none")),
+            ("label", .str (if fallbackAvail then "Touch ID" else "")),
+            ("biometry_type", .str (if fallbackAvail then "touch_id" else "none"))
           ])
       else
         return .ok (.obj #[
@@ -3270,8 +3406,8 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         ("biometry_type", .str "touch_id")
       ])
   | "biometric_authenticate" =>
-    if st.hostOs != "macos" then
-      return .error "Biometric authentication is only available on macOS"
+    if st.hostOs != "macos" && st.hostOs != "linux" then
+      return .error "Biometric authentication is unavailable on this host"
     match st.signerBin? with
     | none =>
       return .error "orb-signer binary not found"
