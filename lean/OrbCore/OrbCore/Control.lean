@@ -632,11 +632,14 @@ private def fallbackCatalogProviders : Array (String × String × String × Stri
   ])
 ]
 
-private def renderProviderCatalogJson (st : CoreStore) : IO String := do
+private def renderProviderCatalogJson (st : CoreStore) (caller : CallerPrincipal) : IO String := do
+  let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
+  let uPrefs ← if caller.isLegacyUnscoped then pure #[] else getUserProviderPrefs st caller.userId
   let dbProviders ← listAIProviders st
   let mut configuredIds : Array String := #[]
   for p in dbProviders do
-    if p.enabled then
+    let effEn := if caller.isLegacyUnscoped then p.enabled else (p.enabled && (isAdm || !p.apiKey.isEmpty) && isUserProviderEnabled uPrefs p.id)
+    if effEn then
       let cid := if p.providerType == "custom" then s!"custom:{p.id}" else p.providerType
       if !cid.isEmpty && !configuredIds.contains cid then
         configuredIds := configuredIds.push cid
@@ -657,11 +660,13 @@ private def renderProviderCatalogJson (st : CoreStore) : IO String := do
   if catalogEntries.isEmpty then
     catalogEntries := fallbackCatalogProviders
   for p in dbProviders do
-    if p.enabled && p.providerType == "custom" then
+    let effEn := if caller.isLegacyUnscoped then p.enabled else (p.enabled && (isAdm || !p.apiKey.isEmpty) && isUserProviderEnabled uPrefs p.id)
+    if effEn && p.providerType == "custom" then
       let cModels := p.customModels.filterMap fun cm =>
         let mid := cm.id.trimAscii.toString
         if mid.isEmpty then none else some (mid, (cm.name?.getD mid).trimAscii.toString, "")
-      catalogEntries := catalogEntries.push (s!"custom:{p.id}", p.name, "api_key", p.baseUrl, cModels)
+      let cDesc := if isAdm then p.baseUrl else ""
+      catalogEntries := catalogEntries.push (s!"custom:{p.id}", p.name, "api_key", cDesc, cModels)
   let provJsons : Array JVal := catalogEntries.map fun (pid, pname, pbilling, pdesc, models) =>
     let mJsons : Array JVal := models.map fun (mid, mname, mdesc) =>
       if mdesc.isEmpty then
@@ -3431,9 +3436,12 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     return .ok (mkJson 200 backendsJson)
 
   if req.method == "GET" && cleanPath == "/api/providers" then
-    return .ok (mkJson 200 (← renderProviderCatalogJson st.store))
+    return .ok (mkJson 200 (← renderProviderCatalogJson st.store caller))
 
   if req.method == "GET" && (cleanPath == "/api/providers/antigravity-models" || cleanPath == "/api/antigravity-models") then
+    let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
+    if !isAdm then
+      return .ok (mkJson 200 "[]")
     let agyBin? ← OrbBin.ClaudeControl.resolveHarnessBinary? "agy" none
     match agyBin? with
     | none => return .ok (mkJson 200 "[]")
@@ -3445,6 +3453,8 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       | .error _ => return .ok (mkJson 200 "[]")
 
   if req.method == "GET" && cleanPath == "/api/providers/backend-models" then
+    let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
+    let uPrefs ← if caller.isLegacyUnscoped then pure #[] else getUserProviderPrefs st.store caller.userId
     let mkOpt (val lbl desc : String) : String :=
       if desc.isEmpty then
         s!"\{\"value\":{jsonEscape val},\"label\":{jsonEscape lbl}}"
@@ -3491,7 +3501,8 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     ]
     let dbProviders ← listAIProviders st.store
     for p in dbProviders do
-      if p.enabled then
+      let effEn := if caller.isLegacyUnscoped then p.enabled else (p.enabled && (isAdm || !p.apiKey.isEmpty) && isUserProviderEnabled uPrefs p.id)
+      if effEn then
         for cm in p.customModels do
           let mid := cm.id.trimAscii.toString
           if !mid.isEmpty then
@@ -3499,10 +3510,11 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
             let mlbl := if rawLbl.isEmpty then mid else rawLbl
             opencodeModels := opencodeModels.push (mkOpt s!"{p.id}/{mid}" s!"{p.name} — {mlbl}" "")
     let mut agyModels : Array String := #[]
-    if let some binPath ← OrbBin.ClaudeControl.resolveHarnessBinary? "agy" none then
-      if let .ok pairs ← OrbBin.ClaudeControl.probeAntigravityModels binPath then
-        for (mId, mLbl) in pairs do
-          agyModels := agyModels.push (mkOpt mId mLbl "")
+    if isAdm then
+      if let some binPath ← OrbBin.ClaudeControl.resolveHarnessBinary? "agy" none then
+        if let .ok pairs ← OrbBin.ClaudeControl.probeAntigravityModels binPath then
+          for (mId, mLbl) in pairs do
+            agyModels := agyModels.push (mkOpt mId mLbl "")
     let vibeModels : Array String := #[
       mkOpt "mistral/mistral-vibe-cli-latest" "Mistral Vibe" "Native Mistral Vibe CLI"
     ]
@@ -3525,6 +3537,9 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         return .ok (mkJson cCode cBody)
     if let some params := matchRoutePattern? "/api/model-routing/chains/:id/resolve" rawTarget then
       if req.method == "GET" then
+        if !caller.isLegacyUnscoped then
+          if let some (cCode, cBody) := requireAdminPrincipal caller then
+            return .ok (mkJson cCode cBody)
         let cid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
         let chains ← loadRoutingChainsFromStore st.store
         discard <| publishRoutingChainsUpdate st chains (forceBump := false)
@@ -3534,9 +3549,39 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
           let resolvedJson ← renderResolvedChainJson ch st.pacingTracker?
           return .ok (mkJson 200 resolvedJson)
     if req.method == "GET" && cleanPath == "/api/model-routing/chains" then
-      let rows ← execParamQuery st.store.missionsDb
-        "SELECT id,name,models_json,updated_at FROM model_routing_chains ORDER BY id ASC;" #[]
-      return .ok (mkJson 200 (match rows with | .ok rs => rowsToJsonArray rs | .error _ => "[]"))
+      let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
+      let sanitizeModelsJson (rawMj : String) : JVal :=
+        match OrbBin.Json.parse rawMj with
+        | .ok (.arr items) =>
+          .arr <| items.map fun
+            | .obj kvs =>
+              .obj <| kvs.filter fun (k, _) =>
+                k != "api_key" && k != "apiKey" &&
+                (isAdm || (
+                  k != "base_url" && k != "baseUrl" &&
+                  k != "rpm_limit" && k != "max_concurrency" &&
+                  k != "model_rpm_limit" && k != "model_tpm_limit" && k != "model_max_concurrency"))
+            | other => other
+        | _ => .arr #[]
+      match ← execParamQuery st.store.missionsDb
+        "SELECT id,name,models_json,updated_at FROM model_routing_chains ORDER BY id ASC;" #[] with
+      | .error _ => return .ok (mkJson 200 "[]")
+      | .ok rs =>
+        if rs.size ≤ 1 then return .ok (mkJson 200 "[]")
+        let mut out : Array JVal := Array.mkEmpty (rs.size - 1)
+        for i in [1:rs.size] do
+          let r := rs[i]!
+          let cid := (r[0]?).getD ""
+          let nm := (r[1]?).getD cid
+          let mj := sanitizeModelsJson ((r[2]?).getD "[]")
+          let up := (r[3]?).getD ""
+          out := out.push (.obj #[
+            ("id", .str cid),
+            ("name", .str nm),
+            ("models_json", mj),
+            ("updated_at", .str up)
+          ])
+        return .ok (mkJson 200 (renderCompact (.arr out)))
     else if (req.method == "POST" && cleanPath == "/api/model-routing/chains") ||
             (req.method == "PUT" && (matchRoutePattern? "/api/model-routing/chains/:id" rawTarget).isSome) then
       let pathCid? := (matchRoutePattern? "/api/model-routing/chains/:id" rawTarget).bind fun ps =>
