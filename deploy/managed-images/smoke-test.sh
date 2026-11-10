@@ -37,6 +37,9 @@ for _ in $(seq 1 30); do [ -S /run/user/$NUID/bus ] && break; sleep 0.5; done
 check "linger enabled for $NU (after boot)" sh -c "loginctl show-user $NU -p Linger | grep -q yes"
 check "user bus /run/user/$NUID/bus" test -S /run/user/$NUID/bus
 check "systemd-run --user --scope true (as $NU)" as_node timeout 30 systemd-run --user --scope --quiet true
+check "systemd-run --user --scope --expand-environment=no preserves shell parameter expansion (as $NU)" \
+  as_node timeout 30 systemd-run --user --scope --expand-environment=no --quiet -- \
+  bash -lc 'fork_root=/var/lib/orb-node/child; [ "${fork_root%/*}" = /var/lib/orb-node ]'
 
 # --- harnesses and tools, as orbnode
 for h in claude codex opencode gemini agy; do

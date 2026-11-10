@@ -1078,6 +1078,7 @@ def handle_spawn_user_job(req: dict, peer_uid: int, peer_gid: int) -> dict:
     cmd = [
         "/usr/bin/systemd-run",
         "--system",
+        "--expand-environment=no",
         "--quiet",
         "--collect",
         f"--unit={unit}",

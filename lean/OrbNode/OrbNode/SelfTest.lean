@@ -892,7 +892,9 @@ private def runRound2RegressionTests
     if (rt.ledger.jobs.get? archJobId).map (·.state) == some .succeeded then
       break
   check "timed-out regular jobs repay shrinkDebt=0 and queued archive-backed lean_build succeeds on cold seed"
-    (rt.shrinkDebt == 0 && (rt.ledger.jobs.get? archJobId).map (·.state) == some .succeeded)
+    (rt.shrinkDebt == 0 &&
+     (rt.ledger.jobs.get? "99999999-9999-4999-8999-999999999991").bind (·.error?) == some "timed out after 1s" &&
+     (rt.ledger.jobs.get? archJobId).map (·.state) == some .succeeded)
   return rt
 
 /-- Section 13: Round-3 regression checks (terminal vs running incomplete UTF-8 log drain,
@@ -2535,6 +2537,148 @@ def runTests : IO UInt32 := do
   check "R7 flock-ordered durable upload finalization and CAS workspace-build admission" true
   runNodeStdinStreamAndGitWorkspaceTests tmpRoot rt authHdrs
   check "Node bidirectional stdin relay, SSE log stream, and confined git checkpoints/worktrees" true
+
+  -- Regression test for Ubuntu 26.04+ (`systemd >= 256`) `systemd-run --scope` argv expansion:
+  -- without `--expand-environment=no`, `systemd-run` expands `${fork_root%/*}` to `""` and prints
+  -- `Invalid environment variable name evaluates to an empty string: fork_root%/*`, breaking `/btw`
+  -- and native fork-workspace missions with exit 78 (`Fork workspace unavailable`).
+  let forkCmd :=
+    "fork_root=$(pwd -P); fork_root=${fork_root%/*}; " ++
+    "fork_dir=\"$fork_root/23bad383-5b27-4b83-9a84-d86d34223509\"; " ++
+    "[ -d \"$fork_dir\" ] && [ ! -L \"$fork_dir\" ] || { echo 'Fork workspace unavailable' >&2; exit 78; }; " ++
+    "cd -- \"$fork_dir\" || exit 78; " ++
+    "printf 'FORK_OK|%s|%s\\n' \"$(cat canary.txt)\" \"${_orb_unset_check:-literal}\""
+  let pureUserArgs := buildSystemdScopeArgs .user "u.scope" 1073741824 966367641 (some "100") none (some 60)
+    "/usr/local/bin/sandboxed-node" #["PATH", "HOME"] "bash" #["-lc", forkCmd]
+  let pureSysArgs := buildSystemdScopeArgs .system "s.scope" 1073741824 966367641 none (some "200%") none
+    "/usr/local/bin/sandboxed-node" #["PATH"] "bash" #["-lc", forkCmd]
+  let idxDashUser := (pureUserArgs.findIdx? (· == "--")).getD 999
+  let idxNoExpUser := (pureUserArgs.findIdx? (· == "--expand-environment=no")).getD 999
+  let idxDashSys := (pureSysArgs.findIdx? (· == "--")).getD 999
+  let idxNoExpSys := (pureSysArgs.findIdx? (· == "--expand-environment=no")).getD 999
+  check "buildSystemdScopeArgs passes --expand-environment=no before '--' in user and system modes"
+    (pureUserArgs[0]? == some "--user" &&
+     idxNoExpUser < idxDashUser &&
+     pureUserArgs.back? == some forkCmd &&
+     pureSysArgs[0]? == some "--scope" &&
+     idxNoExpSys < idxDashSys &&
+     pureSysArgs.back? == some forkCmd)
+
+  let parentWs := System.FilePath.mk tmpRoot / "23bad383-5b27-4b83-9a84-d86d34223509"
+  IO.FS.createDirAll parentWs
+  IO.FS.writeFile (parentWs / "canary.txt") "babylon-parent"
+  let btwMissionId := "5efa8e14-8b45-497a-af7c-c9e4517085f3"
+  let nowForkEp ← OrbNode.Posix.nowEpoch
+  let execForkLease := signLeaseToken rt.cfg.token {
+    missionId := btwMissionId, nodeId := rt.cfg.nodeId, scope := .missionExecute, expiresAt := nowForkEp + 600
+  }
+  let (rtAfterSyncFork, rSyncFork) ← handleRequest rt {
+    method := "POST", rawPath := "/execute", path := "/execute", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[
+      ("mission_id", .str btwMissionId),
+      ("node_id", .str rt.cfg.nodeId),
+      ("lease_token", .str execForkLease),
+      ("command", .str forkCmd)
+    ])).toUTF8
+  }
+  rt := rtAfterSyncFork
+  let .ok syncForkJv := OrbBin.Json.parse (String.fromUTF8? rSyncFork.body |>.getD "{}")
+    | throw (IO.userError "failed parsing sync fork /execute JSON")
+  let syncForkOut := (syncForkJv.fieldStr? "stdout").getD ""
+  let syncForkErr := (syncForkJv.fieldStr? "stderr").getD ""
+  check "POST /execute under systemd-run --scope preserves ${fork_root%/*} without argv expansion"
+    (rSyncFork.status == 200 &&
+     syncForkJv.fieldInt? "exit_code" == some 0 &&
+     syncForkOut.trimAscii.toString == "FORK_OK|babylon-parent|literal" &&
+     syncForkErr.trimAscii.isEmpty)
+
+  let forkJobId := "ef7e8c9a-3cdb-4f80-9233-01162184601c"
+  let submitForkLease := signLeaseToken rt.cfg.token {
+    missionId := btwMissionId, nodeId := rt.cfg.nodeId, scope := .jobSubmit,
+    expiresAt := nowForkEp + 600, jobId? := some forkJobId
+  }
+  let mtxFork ← Std.Mutex.new rt
+  let xferFork ← Std.Mutex.new ()
+  let rSubFork ← handleRequestConcurrent mtxFork xferFork {
+    method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[
+      ("job_id", .str forkJobId),
+      ("mission_id", .str btwMissionId),
+      ("lease_token", .str submitForkLease),
+      ("payload", .obj #[
+        ("kind", .str "raw_command"),
+        ("side_question", .bool true),
+        ("command", .str forkCmd)
+      ])
+    ])).toUTF8
+  }
+  let mut forkJobRec? : Option JobRecord := none
+  for _ in [0:60] do
+    IO.sleep 50
+    let _ ← handleRequestConcurrent mtxFork xferFork {
+      method := "GET", rawPath := s!"/jobs/{forkJobId}", path := s!"/jobs/{forkJobId}",
+      query := #[], headers := authHdrs, body := ByteArray.empty
+    }
+    let curRt ← mtxFork.atomically get
+    let r? := curRt.ledger.jobs.get? forkJobId
+    if r?.any (fun jr => jr.state.isTerminal) then
+      forkJobRec? := r?
+      break
+  let forkLogResp ← handleRequestConcurrent mtxFork xferFork {
+    method := "GET", rawPath := s!"/jobs/{forkJobId}/log", path := s!"/jobs/{forkJobId}/log",
+    query := #[("offset", "0")], headers := authHdrs, body := ByteArray.empty
+  }
+  let .ok forkLogJv := OrbBin.Json.parse (String.fromUTF8? forkLogResp.body |>.getD "{}")
+    | throw (IO.userError "failed parsing fork job log JSON")
+  let forkLogData := (forkLogJv.fieldStr? "data").getD ""
+  check "POST /jobs side_question under systemd-run --scope preserves ${fork_root%/*} and exits 0"
+    (rSubFork.status == 202 &&
+     forkJobRec?.map (·.state) == some .succeeded &&
+     forkJobRec?.bind (·.exitCode?) == some 0 &&
+     (forkJobRec?.bind (·.error?)).isNone &&
+     forkLogData.trimAscii.toString == "FORK_OK|babylon-parent|literal" &&
+     (forkLogData.splitOn "Invalid environment variable name").length == 1)
+
+  -- Also verify genuine non-zero exit populates `error == "command exited with Some(78)"`
+  let missForkJobId := "ef7e8c9a-3cdb-4f80-9233-01162184601d"
+  let missForkLease := signLeaseToken rt.cfg.token {
+    missionId := btwMissionId, nodeId := rt.cfg.nodeId, scope := .jobSubmit,
+    expiresAt := nowForkEp + 600, jobId? := some missForkJobId
+  }
+  let missingForkCmd :=
+    "fork_root=$(pwd -P); fork_root=${fork_root%/*}; " ++
+    "fork_dir=\"$fork_root/00000000-0000-4000-8000-000000000000\"; " ++
+    "[ -d \"$fork_dir\" ] && [ ! -L \"$fork_dir\" ] || { echo 'Fork workspace unavailable' >&2; exit 78; }"
+  let _ ← handleRequestConcurrent mtxFork xferFork {
+    method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[
+      ("job_id", .str missForkJobId),
+      ("mission_id", .str btwMissionId),
+      ("lease_token", .str missForkLease),
+      ("payload", .obj #[
+        ("kind", .str "raw_command"),
+        ("side_question", .bool true),
+        ("command", .str missingForkCmd)
+      ])
+    ])).toUTF8
+  }
+  let mut missJobRec? : Option JobRecord := none
+  for _ in [0:60] do
+    IO.sleep 50
+    let _ ← handleRequestConcurrent mtxFork xferFork {
+      method := "GET", rawPath := s!"/jobs/{missForkJobId}", path := s!"/jobs/{missForkJobId}",
+      query := #[], headers := authHdrs, body := ByteArray.empty
+    }
+    let curRt ← mtxFork.atomically get
+    let r? := curRt.ledger.jobs.get? missForkJobId
+    if r?.any (fun jr => jr.state.isTerminal) then
+      missJobRec? := r?
+      break
+  rt ← mtxFork.atomically get
+  check "non-zero job exit records error == 'command exited with Some(78)'"
+    (missJobRec?.map (·.state) == some .failed &&
+     missJobRec?.bind (·.exitCode?) == some 78 &&
+     missJobRec?.bind (·.error?) == some "command exited with Some(78)")
 
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get
