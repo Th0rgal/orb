@@ -4793,24 +4793,127 @@ private structure SyncMissionSubState where
   replaying  : Bool := false
   queuedLive : Array (UInt64 × String) := #[]
 
+private structure SyncWsOutboundState where
+  frames   : Array ByteArray := #[]
+  bytes    : Nat := 0
+  draining : Bool := false
+  closed   : Bool := false
+  overflow : Bool := false
+
 /-- Multiplexed `/api/control/sync` WebSocket session (`orb-sync.v1`):
     supports `ping`/`pong`, `set_presentation`, `subscribe` (`since_seq` replay + `sync_caught_up`),
-    `unsubscribe`, `sync_resume`, live `appendMissionEvent` push, and compact `inbox_answer_push`. -/
+    `unsubscribe`, `sync_resume`, live `appendMissionEvent` push, and compact `inbox_answer_push`.
+    Outbound frames are queued into a bounded per-session ring (`512` frames / `2 MiB`) and flushed
+    asynchronously over a non-blocking socket so a slow or wedged client never blocks the store
+    dispatcher or other sessions. -/
 def runSyncWebSocketSessionLoop
     (st : CoreAppState)
     (wsCaller : CallerPrincipal)
     (cfd : Fd)
     (maxSteps? : Option Nat := none) : IO Unit := do
+  discard <| setNonBlocking cfd true
   let subMu ← Std.Mutex.new ({} : Std.HashMap String SyncMissionSubState)
+  let outMu ← Std.Mutex.new ({} : SyncWsOutboundState)
   let writeMu ← Std.Mutex.new ()
   let aliveRef ← IO.mkRef true
   let presRef ← IO.mkRef false
-  let sendWsBytes (wire : ByteArray) : IO Bool := do
+  let activeWriterRef ← IO.mkRef (none : Option (Task (Except IO.Error Unit)))
+  let maxOutFrames : Nat := 512
+  let maxOutBytes : Nat := 2 * 1024 * 1024
+  let writeWsBounded (wire : ByteArray) (maxWaitSlices : Nat := 40) (ignoreAlive : Bool := false) : IO Bool := do
     writeMu.atomically do
-      let ok := (← writeAll cfd wire false).isOk
-      if !ok then
+      let mut off : Nat := 0
+      let mut waits : Nat := 0
+      let mut failed := false
+      while off < wire.size && !failed do
+        if !ignoreAlive && !(← aliveRef.get) then
+          failed := true
+        else
+          match ← writeSlicePartial cfd { ba := wire, off := off, len := wire.size - off } with
+          | .ok n =>
+            if n == 0 then
+              failed := true
+            else
+              off := off + n
+              waits := 0
+          | .error .eagain =>
+            if waits >= maxWaitSlices then
+              failed := true
+            else
+              waits := waits + 1
+              discard <| pollFdSet #[cfd] 50 1
+          | .error _ =>
+            failed := true
+      if failed then
         aliveRef.set false
-      return ok
+        return false
+      return true
+  let popOutBatch : IO (Array ByteArray × Bool) :=
+    outMu.atomically do
+      let s ← get
+      if s.frames.isEmpty && !s.overflow then
+        set { s with draining := false }
+        return (#[], false)
+      else
+        let b := s.frames
+        let ov := s.overflow
+        set { s with frames := #[], bytes := 0, overflow := false, draining := true }
+        return (b, ov)
+  let markOutFinished (closeSession : Bool) : IO Unit :=
+    outMu.atomically do
+      modify fun s =>
+        if closeSession then
+          { s with frames := #[], bytes := 0, draining := false, closed := true, overflow := false }
+        else
+          { s with draining := false }
+  let startDrainTask : IO Unit := do
+    let t ← IO.asTask do
+      let mut running := true
+      while running do
+        let (batch, didOverflow) ← popOutBatch
+        if batch.isEmpty && !didOverflow then
+          running := false
+        else
+          let mut ok := true
+          for wire in batch do
+            if ok then
+              ok ← writeWsBounded wire 40 false
+          if didOverflow then
+            if ok then
+              if let some lagFrm := encodeFrame? { fin := true, opcode := .text, payload := "{\"type\":\"stream_lagged\"}".toUTF8 } none then
+                discard <| writeWsBounded lagFrm 2 true
+              if let some clsFrm := makeServerClose? 1008 "stream_lagged" then
+                discard <| writeWsBounded clsFrm 2 true
+            aliveRef.set false
+            markOutFinished true
+            running := false
+          else if !ok then
+            markOutFinished true
+            running := false
+    activeWriterRef.set (some t)
+  let sendWsBytes (wire : ByteArray) : IO Bool := do
+    if !(← aliveRef.get) then
+      return false
+    let res ← outMu.atomically do
+      let s ← get
+      if s.closed || s.overflow then
+        return (false, false)
+      else if s.frames.size ≥ maxOutFrames || s.bytes + wire.size > maxOutBytes then
+        let shouldSpawn := !s.draining
+        set { s with frames := #[], bytes := 0, draining := true, closed := true, overflow := true }
+        return (false, shouldSpawn)
+      else
+        let shouldSpawn := !s.draining
+        set { s with frames := s.frames.push wire, bytes := s.bytes + wire.size, draining := true }
+        return (true, shouldSpawn)
+    if !res.1 then
+      aliveRef.set false
+      if res.2 then
+        startDrainTask
+      return false
+    if res.2 then
+      startDrainTask
+    return true
   let sendWsText (txt : String) : IO Bool := do
     match encodeFrame? { fin := true, opcode := .text, payload := txt.toUTF8 } none with
     | none => return false
@@ -4882,28 +4985,32 @@ def runSyncWebSocketSessionLoop
                 discard <| sendWsText s!"\{\"type\":\"sync_caught_up\",\"mission_id\":{jsonEscape mid},\"cursor\":{finalSeq},\"replayed\":{sentCount}}"
     let mut rxBuf := ByteArray.empty
     let mut steps : Nat := 0
+    let mut loopOpen := true
     let pollMs : UInt32 := if maxSteps?.isSome then 2000 else 15000
-    while (← aliveRef.get) && (match maxSteps? with | some lim => decide (steps < lim) | none => true) do
+    while loopOpen && (← aliveRef.get) && (match maxSteps? with | some lim => decide (steps < lim) | none => true) do
       steps := steps + 1
       match ← pollReadable cfd pollMs with
       | .error .eagain =>
         if maxSteps?.isSome then
-          aliveRef.set false
+          loopOpen := false
         else
           discard <| sendWsText "{\"type\":\"heartbeat\"}"
       | .error _ =>
         aliveRef.set false
+        loopOpen := false
       | .ok () =>
         let chunk ← readStreamChunk cfd 65536
         if chunk.isEmpty then
           aliveRef.set false
+          loopOpen := false
         else
           rxBuf := rxBuf ++ chunk
           let mut drainFrames := true
-          while drainFrames && (← aliveRef.get) do
+          while drainFrames && loopOpen && (← aliveRef.get) do
             match decodeFramePrefix rxBuf true with
             | .error _ =>
               aliveRef.set false
+              loopOpen := false
               drainFrames := false
             | .ok none =>
               drainFrames := false
@@ -4916,7 +5023,7 @@ def runSyncWebSocketSessionLoop
               | .close =>
                 if let some cls := makeServerClose? 1000 "" then
                   discard <| sendWsBytes cls
-                aliveRef.set false
+                loopOpen := false
                 drainFrames := false
               | .text | .binary =>
                 if let some rawStr := String.fromUTF8? frame.payload then
@@ -4960,12 +5067,25 @@ def runSyncWebSocketSessionLoop
                           else if isSafeMissionId mid then
                             subMu.atomically do modify (·.erase mid)
               | _ => pure ()
-    if (← aliveRef.get) then
+    if loopOpen && (← aliveRef.get) then
       if let some cls := makeServerClose? 1000 "" then
         discard <| sendWsBytes cls
   finally
-    aliveRef.set false
     unregister
+    if (← aliveRef.get) then
+      let mut flushTicks : Nat := 0
+      while flushTicks < 40 && (← outMu.atomically (do return (← get).draining)) do
+        IO.sleep 5
+        flushTicks := flushTicks + 1
+    aliveRef.set false
+    outMu.atomically do
+      modify fun s => { s with frames := #[], bytes := 0, closed := true }
+    let mut stopTicks : Nat := 0
+    while stopTicks < 100 && (← outMu.atomically (do return (← get).draining)) do
+      IO.sleep 5
+      stopTicks := stopTicks + 1
+    if let some t ← activeWriterRef.get then
+      let _ := t.get
 
 /-- Serve an accepted TCP connection on `cfd`, supporting bounded HTTP/1.1 keep-alive reuse
     when `allowKeepAlive == true` and RFC 6455 WebSocket upgrade (`/api/control/sync` et al.). -/

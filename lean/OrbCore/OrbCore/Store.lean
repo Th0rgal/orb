@@ -157,18 +157,22 @@ structure PendingMissionEventNotice where
   payloadJson : String
   createdAt   : String
 
+/-- Lock-protected FIFO queue and single-drainer state for committed `mission_events` notices. -/
+structure MissionEventDispatchState where
+  queue    : Array PendingMissionEventNotice := #[]
+  draining : Bool := false
+
 /-- Core SQLite database bundle across `missions.db`, `projects.db`, `ask.db`, and `idempotency_keys.db`. -/
 structure CoreStore where
-  rootDir            : String
-  bootEpoch          : UInt64 := 1
-  missionsDb         : SqliteDb
-  projectsDb         : SqliteDb
-  askDb              : SqliteDb
-  idempotencyDb      : SqliteDb
-  closedRef          : IO.Ref Bool
-  eventListenersRef? : Option (IO.Ref (Array (UInt64 × (String → UInt64 → String → String → String → IO Unit)))) := none
-  eventNoticeQueue?  : Option (Std.Mutex (Array PendingMissionEventNotice)) := none
-  eventDispatchMu?   : Option (Std.Mutex Unit) := none
+  rootDir             : String
+  bootEpoch           : UInt64 := 1
+  missionsDb          : SqliteDb
+  projectsDb          : SqliteDb
+  askDb               : SqliteDb
+  idempotencyDb       : SqliteDb
+  closedRef           : IO.Ref Bool
+  eventListenersRef?  : Option (IO.Ref (Array (UInt64 × (String → UInt64 → String → String → String → IO Unit)))) := none
+  eventDispatchState? : Option (Std.Mutex MissionEventDispatchState) := none
 
 def transferSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS machine_transfers (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, request_key TEXT NOT NULL, revision INTEGER NOT NULL, phase TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(mission_id,request_key)); CREATE UNIQUE INDEX IF NOT EXISTS one_machine_transfer ON machine_transfers(mission_id) WHERE phase NOT IN ('activated','cancelled');"
@@ -986,14 +990,22 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
         return .error s!"core_store_r7_schema_failed:{r7Err}"
       let closedRef ← IO.mkRef false
       let evListenersRef ← IO.mkRef (#[] : Array (UInt64 × (String → UInt64 → String → String → String → IO Unit)))
-      let evNoticeQueue ← Std.Mutex.new (#[] : Array PendingMissionEventNotice)
-      let evDispatchMu ← Std.Mutex.new ()
-      return .ok { rootDir := trimmedRoot, bootEpoch := effBoot, missionsDb := mDb, projectsDb := pDb, askDb := aDb, idempotencyDb := iDb, closedRef := closedRef, eventListenersRef? := some evListenersRef, eventNoticeQueue? := some evNoticeQueue, eventDispatchMu? := some evDispatchMu }
+      let evDispatchState ← Std.Mutex.new ({} : MissionEventDispatchState)
+      return .ok { rootDir := trimmedRoot, bootEpoch := effBoot, missionsDb := mDb, projectsDb := pDb, askDb := aDb, idempotencyDb := iDb, closedRef := closedRef, eventListenersRef? := some evListenersRef, eventDispatchState? := some evDispatchState }
 
 /-- Idempotently close all SQLite handles in `CoreStore` (prevents double-close). -/
 def closeCoreStore (st : CoreStore) : IO Unit := do
   let already ← st.closedRef.swap true
   if !already then
+    if let some ref := st.eventListenersRef? then
+      ref.set #[]
+    if let some dMu := st.eventDispatchState? then
+      dMu.atomically do
+        modify fun s => { s with queue := #[] }
+      let mut waitTicks : Nat := 0
+      while waitTicks < 200 && (← dMu.atomically (do return (← get).draining)) do
+        IO.sleep 2
+        waitTicks := waitTicks + 1
     st.missionsDb.mu.atomically (sqliteCloseRaw st.missionsDb.handle)
     st.projectsDb.mu.atomically (sqliteCloseRaw st.projectsDb.handle)
     st.askDb.mu.atomically (sqliteCloseRaw st.askDb.handle)
@@ -3503,11 +3515,24 @@ def registerMissionEventListener
 
 /-- Append one event row to `mission_events` with monotonically increasing `seq` per mission,
     enqueue the notification in SQLite commit order before releasing `missionsDb.mu`, and drain
-    outside the SQLite write mutex through `eventDispatchMu?` so concurrent writers never deliver
-    `seq = N + 1` ahead of `seq = N`. -/
+    asynchronously on a single ordered dispatcher task so callers never block on listener or
+    socket backpressure while committed `seq` order is strictly preserved. -/
 def appendMissionEvent
     (st : CoreStore) (missionId eventType payloadJson createdAt : String) : IO (Except String UInt64) := do
-  let txRes ← st.missionsDb.mu.atomically do
+  let enqueueNotice (n : PendingMissionEventNotice) : IO Bool :=
+    match st.eventDispatchState? with
+    | none => pure false
+    | some dMu =>
+      dMu.atomically do
+        let s ← get
+        let nextQ := s.queue.push n
+        if s.draining then
+          set { s with queue := nextQ, draining := true }
+          return false
+        else
+          set { s with queue := nextQ, draining := true }
+          return true
+  let txRes : Except String (UInt64 × Bool) ← st.missionsDb.mu.atomically do
     match ← sqliteExecRaw st.missionsDb.handle "BEGIN IMMEDIATE;" with
     | .error e => return .error s!"tx_begin_failed:{e}"
     | .ok () =>
@@ -3530,41 +3555,46 @@ def appendMissionEvent
           discard <| sqliteExecRaw st.missionsDb.handle "ROLLBACK;"
           return .error s!"tx_commit_failed:{e}"
         | .ok () =>
-          if let some qMu := st.eventNoticeQueue? then
-            qMu.atomically do
-              modify fun q => q.push {
-                missionId := missionId
-                seq := nextSeq
-                eventType := eventType
-                payloadJson := payloadJson
-                createdAt := createdAt
-              }
-          return .ok nextSeq
-  if let .ok committedSeq := txRes then
-    match st.eventListenersRef?, st.eventNoticeQueue?, st.eventDispatchMu? with
-    | some ref, some qMu, some dMu =>
-      let popBatch : IO (Array PendingMissionEventNotice) :=
-        qMu.atomically do
-          let q ← get
-          set (#[] : Array PendingMissionEventNotice)
-          return q
-      dMu.atomically do
-        let mut keepDraining := true
-        while keepDraining do
-          let batch ← popBatch
-          if batch.isEmpty then
-            keepDraining := false
-          else
-            let listeners ← ref.get
-            for n in batch do
-              for (_, cb) in listeners do
-                try cb n.missionId n.seq n.eventType n.payloadJson n.createdAt catch _ => pure ()
-    | some ref, _, _ =>
+          let shouldSpawn ← enqueueNotice {
+            missionId := missionId
+            seq := nextSeq
+            eventType := eventType
+            payloadJson := payloadJson
+            createdAt := createdAt
+          }
+          return .ok (nextSeq, shouldSpawn)
+  match txRes with
+  | .error e => return .error e
+  | .ok (committedSeq, shouldSpawn) =>
+    match st.eventListenersRef?, st.eventDispatchState? with
+    | some ref, some dMu =>
+      if shouldSpawn then
+        let popBatch : IO (Array PendingMissionEventNotice) :=
+          dMu.atomically do
+            let s ← get
+            if s.queue.isEmpty then
+              set { s with queue := #[], draining := false }
+              return #[]
+            else
+              set { s with queue := #[], draining := true }
+              return s.queue
+        discard <| IO.asTask do
+          let mut keepDraining := true
+          while keepDraining do
+            let batch ← popBatch
+            if batch.isEmpty then
+              keepDraining := false
+            else
+              let listeners ← ref.get
+              for n in batch do
+                for (_, cb) in listeners do
+                  try cb n.missionId n.seq n.eventType n.payloadJson n.createdAt catch _ => pure ()
+    | some ref, none =>
       let listeners ← ref.get
       for (_, cb) in listeners do
         try cb missionId committedSeq eventType payloadJson createdAt catch _ => pure ()
-    | none, _, _ => pure ()
-  return txRes
+    | none, _ => pure ()
+    return .ok committedSeq
 
 /-- Render one `mission_events` row (`id`, `mission_id`, `seq`, `event_type`, `payload`, `created_at`)
     as the `StoredEvent` JSON object expected by Desktop, iOS, and Android clients. -/
