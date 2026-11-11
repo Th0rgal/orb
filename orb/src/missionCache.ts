@@ -233,6 +233,15 @@ function estimateStreamEventsBytes(evs: readonly StreamEvent[]): number {
   return acc;
 }
 
+function isNonTranscriptMetaEvent(ev: StreamEvent): boolean {
+  if (ev.type === "mission_settings_updated") return true;
+  if (ev.type === "mission_status_changed" || ev.type === "status") {
+    const st = typeof ev.data?.status === "string" ? ev.data.status : "";
+    return st !== "active" && st !== "running" && st !== "pending" && st !== "provisioning";
+  }
+  return false;
+}
+
 function buildSettledDigestSnapshot(snapshot: TranscriptSnap): TranscriptSnap {
   const cleared: TranscriptSnap = {
     ...snapshot,
@@ -245,6 +254,7 @@ function buildSettledDigestSnapshot(snapshot: TranscriptSnap): TranscriptSnap {
   // Find the highest sequence of a finalized assistant reply or terminal error so settled turns
   // hydrate in O(1) on cold restart without re-running `buildTranscript` across raw tool events.
   let settledSeq = 0;
+  let settledIdx = -1;
   for (let i = stream.length - 1; i >= 0; i--) {
     const ev = stream[i];
     if (
@@ -253,16 +263,24 @@ function buildSettledDigestSnapshot(snapshot: TranscriptSnap): TranscriptSnap {
         ev.type === "error")
     ) {
       settledSeq = ev.sequence;
+      settledIdx = i;
       break;
     }
   }
-  if (settledSeq <= 0) return cleared;
-  const maxStreamSeq = stream.reduce((m, e) => (typeof e.sequence === "number" && e.sequence > m ? e.sequence : m), 0);
-  if (settledSeq >= maxStreamSeq && (!snapshot.liveTail || snapshot.liveTail.length === 0)) {
+  if (settledSeq <= 0 || settledIdx < 0) return cleared;
+  let maxTrailingMetaSeq = settledSeq;
+  for (let i = settledIdx + 1; i < stream.length; i++) {
+    const trailing = stream[i];
+    if (!isNonTranscriptMetaEvent(trailing)) return cleared;
+    if (typeof trailing.sequence === "number" && trailing.sequence > maxTrailingMetaSeq) {
+      maxTrailingMetaSeq = trailing.sequence;
+    }
+  }
+  if (!snapshot.liveTail || snapshot.liveTail.length === 0) {
     return {
       ...snapshot,
       settledItems: snapshot.items,
-      settledSeq,
+      settledSeq: maxTrailingMetaSeq,
       openTailEvents: [],
     };
   }
@@ -280,11 +298,13 @@ function flushPersistScope(scope: string) {
   pendingPersistSnapshots.delete(scope);
   if (pending.ver !== connectionVersionSafe()) return;
   // Store `settledItems` once (pre-digested for O(1) cold-start hydration) while
-  // stripping duplicate `items: []` on disk to avoid ~2x payload duplication.
+  // stripping duplicate `items: []` on disk when settledItems is present; retain
+  // `items` when mid-turn so warm-tier compaction never loses historical work items.
   const digested = buildSettledDigestSnapshot(pending.snapshot);
+  const hasSettled = Array.isArray(digested.settledItems) && digested.settledItems.length > 0;
   void savePersistedTranscript(pending.persistScope, pending.missionId, {
     ...digested,
-    items: [],
+    items: hasSettled ? [] : digested.items,
   });
 }
 

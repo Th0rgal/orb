@@ -271,7 +271,7 @@ data class OrbRow(
             return pk == "client" || pk.startsWith("client:")
         }
         return str("origin") == "orb-client" ||
-            OrbJSON.strings(raw, "tags").contains("placement:client")
+            OrbJSON.strList(raw, "tags").contains("placement:client")
     }
 
     fun supersededSuccessorId(): String? =
