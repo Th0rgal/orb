@@ -1532,9 +1532,7 @@ fun OrbConversationPage(
             }
             while (isActive) {
                 delay(if (followUps.count > 0 || (isLive && !core.isMultiplexSyncHealthy)) 4_000L else 30_000L)
-                if (followUps.count > 0 || !streamConnected || !core.isMultiplexSyncHealthy) {
-                    refreshFollowUps(id)
-                }
+                refreshFollowUps(id)
             }
         }
     }

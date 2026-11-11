@@ -457,4 +457,83 @@ describe("Zero-Wait Conversation Loading & Two-Tier Answer Cache", () => {
     expect(rehydratedMidTurn?.items.some((i) => i.kind === "text" && i.text.includes("Streaming turn 3..."))).toBe(true);
     stop();
   });
+
+  it("backfills stripped tool activity on refresh after a conversation ages into the warm 33..250 tier", async () => {
+    setConnection("http://warm-backfill.test", "jwt-warm");
+    // Save 35 settled transcripts with tool calls so `m-warm-0` ages into the warm 33..250 tier (`activityCompacted: true`).
+    for (let i = 0; i < 35; i++) {
+      const stream: StreamEvent[] = [
+        { type: "user_message", sequence: 1, eventId: `u-${i}`, data: { id: `u-${i}`, content: `Prompt ${i}` } },
+        { type: "tool_call", sequence: 2, eventId: `tc-${i}`, data: { tool_call_id: `c-${i}`, name: "Bash", args: { command: "ls -la" } } },
+        { type: "tool_result", sequence: 3, eventId: `tr-${i}`, data: { tool_call_id: `c-${i}`, name: "Bash", result: "X".repeat(512) } },
+        { type: "assistant_message", sequence: 4, eventId: `a-${i}`, data: { id: `a-${i}`, content: `Answer ${i}`, success: true } },
+      ];
+      putTranscript(`m-warm-${i}`, {
+        fromLog: true,
+        cursor: 4,
+        before: 1,
+        hasOlder: false,
+        items: buildTranscript(stream),
+        stream,
+      });
+      flushPendingPersistedTranscripts();
+      await new Promise((r) => setTimeout(r, 2));
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    forgetPrefetchPauses();
+    cacheReset();
+
+    // Frame 0 cold hydration of `m-warm-0` immediately shows compacted settled items AND resets `cursor` for full tail backfill!
+    const frame0 = await hydrateTranscriptFromDisk("m-warm-0");
+    expect(frame0?.activityCompacted).toBe(true);
+    expect(frame0?.cursor).toBeUndefined();
+    expect(frame0?.items.some((it) => it.kind === "tool" && it.callId === "c-0")).toBe(true);
+
+    // Refreshing `m-warm-0` fetches `/open` WITHOUT `since_seq`, restoring full raw tool events instead of erasing them!
+    const requestedUrls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        requestedUrls.push(url);
+        return new Response(
+          JSON.stringify({
+            protocol: 1,
+            mission: {
+              id: "m-warm-0",
+              title: "Warm Backfill Mission",
+              status: "completed",
+              backend: "claudecode",
+              history: [],
+              created_at: "2026-11-11T07:00:00Z",
+              updated_at: "2026-11-11T07:05:00Z",
+            },
+            events: [
+              { id: 1, sequence: 1, event_id: "u-0", event_type: "user_message", content: "Prompt 0", timestamp: "2026-11-11T07:00:01Z" },
+              { id: 2, sequence: 2, event_id: "tc-0", event_type: "tool_call", tool_call_id: "c-0", tool_name: "Bash", content: JSON.stringify({ command: "ls -la" }), timestamp: "2026-11-11T07:00:02Z" },
+              { id: 3, sequence: 3, event_id: "tr-0", event_type: "tool_result", tool_call_id: "c-0", tool_name: "Bash", content: JSON.stringify("FULL_RESTORED_OUTPUT"), timestamp: "2026-11-11T07:00:03Z" },
+              { id: 4, sequence: 4, event_id: "a-0", event_type: "assistant_message", content: "Answer 0", timestamp: "2026-11-11T07:00:04Z" },
+            ],
+            spine: [],
+            queue: [],
+            max_seq: 4,
+            has_more: false,
+            next_cursor: 1,
+            page_max_seq: 4,
+            reset: false,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+
+    const refreshed = await refreshTranscript("m-warm-0");
+    expect(requestedUrls).toHaveLength(1);
+    expect(requestedUrls[0]).not.toContain("since_seq=");
+    expect(refreshed.activityCompacted).toBeUndefined();
+    expect(refreshed.cursor).toBe(4);
+    const restoredTool = refreshed.items.find((it) => it.kind === "tool" && it.callId === "c-0");
+    expect(restoredTool && restoredTool.kind === "tool" ? restoredTool.result : undefined).toBe("FULL_RESTORED_OUTPUT");
+  });
 });

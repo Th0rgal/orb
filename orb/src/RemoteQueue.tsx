@@ -194,11 +194,16 @@ export function RemoteQueue(p: {
     } else {
       void refresh();
     }
+    let idleSyncTicks = 0;
     const stop = pollWhileVisible(
       () => {
         // When multiplex WebSocket sync is healthy & caught up for this mission and no items sit
-        // in the queue, skip redundant 3 s HTTP `/api/control/queue` polls.
-        if (mission && isMissionWarmLive(mission) && untrack(rows).length === 0) return;
+        // in the local queue, step down from 3 s to a 15 s (every 5th tick) reconciliation poll
+        // so cross-client queue additions still surface while cutting idle queue traffic by 80%.
+        if (mission && isMissionWarmLive(mission) && untrack(rows).length === 0) {
+          if (++idleSyncTicks < 5) return;
+        }
+        idleSyncTicks = 0;
         return refresh();
       },
       3000,

@@ -45,6 +45,9 @@ export type TranscriptSnap = {
   settledItems?: StreamItem[];
   settledSeq?: number;
   openTailEvents?: StreamEvent[];
+  /** Set when warm-tier compaction stripped raw tool/thinking events from `stream`;
+   * frame-0 renders `settledItems` immediately while `fetchTranscript` backfills the full tail. */
+  activityCompacted?: boolean;
   estimatedBytes?: number;
   fromLog?: boolean;
   detailsPending?: boolean;
@@ -530,8 +533,9 @@ export function applyLiveEventsToTranscriptCache(
   let cursor = prev?.cursor;
   const sequenced: StreamEvent[] = [];
   const unsequenced: StreamEvent[] = [];
+  const keepCursorUnset = prev?.activityCompacted === true && prev.cursor === undefined;
   for (const ev of evs) {
-    if (typeof ev.sequence === "number" && Number.isSafeInteger(ev.sequence)) {
+    if (!keepCursorUnset && typeof ev.sequence === "number" && Number.isSafeInteger(ev.sequence)) {
       cursor = cursor === undefined ? ev.sequence : Math.max(cursor, ev.sequence);
       sequenced.push(ev);
     } else {
@@ -1040,7 +1044,10 @@ async function fetchTranscript(
       const queuedRows = Array.isArray(bundle.queue) ? bundle.queue : [];
       seedMissionOpenQueue(id, queuedRows);
       const tailEvents = bundle.events.map(storedToStream).filter((e): e is StreamEvent => e !== null);
-      let stream = mergeStreamBySequence(previous?.stream ?? [], tailEvents);
+      let stream =
+        previous?.cursor === undefined
+          ? tailEvents
+          : mergeStreamBySequence(previous.stream ?? [], tailEvents);
       let cursor = previous?.cursor;
       let before = previous?.before;
       let hasOlder = previous?.hasOlder;
@@ -1050,18 +1057,25 @@ async function fetchTranscript(
         before = bundle.next_cursor;
         hasOlder = Boolean(bundle.has_more);
         cursor = bundle.page_max_seq ?? bundle.max_seq ?? 0;
+        const firstTailConv = tailEvents.find(
+          (e) => e.type === "user_message" || (e.type === "assistant_message" && e.data.success !== false),
+        );
         if (!hasOlder) {
           spineComplete = true;
           spineBefore = undefined;
-        } else if (Array.isArray(bundle.spine) && bundle.spine.length > 0) {
-          const firstTailConv = tailEvents.find(
-            (e) => e.type === "user_message" || (e.type === "assistant_message" && e.data.success !== false),
-          );
-          const spine = spineAnswers(
-            bundle.spine.map(storedToStream).filter((e): e is StreamEvent => e !== null),
-            firstTailConv?.type === "assistant_message",
-          );
-          stream = mergeStreamBySequence(spine, stream);
+        } else {
+          const priorOlderSpine =
+            before !== undefined && previous?.stream?.length
+              ? previous.stream.filter((e) => e.sequence !== undefined && e.sequence < before!)
+              : [];
+          const serverSpine = Array.isArray(bundle.spine)
+            ? bundle.spine.map(storedToStream).filter((e): e is StreamEvent => e !== null)
+            : [];
+          const combinedSpineSrc = mergeStreamBySequence(priorOlderSpine, serverSpine);
+          if (combinedSpineSrc.length > 0) {
+            const spine = spineAnswers(combinedSpineSrc, firstTailConv?.type === "assistant_message");
+            stream = mergeStreamBySequence(spine, stream);
+          }
         }
       } else if (bundle.next_cursor !== undefined && bundle.next_cursor > cursor!) {
         cursor = bundle.next_cursor;
@@ -1118,8 +1132,8 @@ async function fetchTranscript(
         })
         .catch(() => {})
     : Promise.resolve();
-  let stream:StreamEvent[]=[...(previous?.stream??[])];
-  let retainedSpine:StreamEvent[]=[];
+  let stream:StreamEvent[]=previous?.cursor===undefined?[]:[...(previous?.stream??[])];
+  let retainedSpine:StreamEvent[]=previous?.cursor===undefined&&previous?.stream?.length?spineAnswers(previous.stream):[];
   let cursor=previous?.cursor, before=previous?.before, hasOlder=previous?.hasOlder;
   let spineComplete=previous?.spineComplete, spineBefore=previous?.spineBefore;
   let resets=0, forwardPages=0, jumpedForwardGap=false;
@@ -1160,8 +1174,9 @@ async function fetchTranscript(
       spineComplete = false;
      }
     }
-    if(retainedSpine.length){
-     stream = mergeStreamBySequence(retainedSpine, stream);
+    if(retainedSpine.length && hasOlder && before !== undefined){
+     const olderRetained = retainedSpine.filter(e => e.sequence !== undefined && e.sequence < before!);
+     if(olderRetained.length) stream = mergeStreamBySequence(olderRetained, stream);
     }
     break;
    }

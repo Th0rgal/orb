@@ -95,6 +95,7 @@ export function compactWarmTranscriptSnapshot<TSnap>(snapshot: TSnap): TSnap {
     rawItems.length === 0 && Array.isArray(rec.settledItems)
       ? (rec.settledItems as Array<Record<string, unknown>>).map(compactSingleItem)
       : undefined;
+  const activityCompacted = spineStream.length < (rec.stream as unknown[]).length;
   return {
     ...rec,
     items: compactItems,
@@ -102,8 +103,18 @@ export function compactWarmTranscriptSnapshot<TSnap>(snapshot: TSnap): TSnap {
     stream: spineStream,
     openTailEvents: undefined,
     liveTail: undefined,
-    spineComplete: false,
-    hasOlder: rec.hasOlder === true || spineStream.length < (rec.stream as unknown[]).length,
+    ...(activityCompacted
+      ? {
+          activityCompacted: true,
+          cursor: undefined,
+          before: undefined,
+          spineComplete: false,
+          hasOlder: true,
+        }
+      : {
+          spineComplete: false,
+          hasOlder: rec.hasOlder === true,
+        }),
   } as TSnap;
 }
 
