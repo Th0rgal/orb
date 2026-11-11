@@ -4878,6 +4878,28 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
   if !keepAliveOk || !wsSyncOk then
     return (← fail s!"keepAliveOk={keepAliveOk} wsSyncOk={wsSyncOk}")
 
+  -- 5. Concurrent `appendMissionEvent` writers deliver notifications in strictly monotonic committed `seq` order
+  let seenSeqsMu ← Std.Mutex.new (#[] : Array UInt64)
+  let unregOrder ← registerMissionEventListener store fun mid seq _ _ _ => do
+    if mid == "m-zw-order" then
+      -- Introduce jitter for odd sequences so an unordered post-commit broadcast would invert N+1 ahead of N
+      if seq % 2 == 1 then IO.sleep 5
+      seenSeqsMu.atomically do modify (·.push seq)
+  let mut writerTasks : Array (Task (Except IO.Error (Except String UInt64))) := #[]
+  for idx in [0:16] do
+    let t ← IO.asTask <|
+      appendMissionEvent store "m-zw-order" "tool_result"
+        s!"\{\"id\":\"ord-{idx}\",\"tool_call_id\":\"c-{idx}\",\"tool_name\":\"bash\",\"result\":\"ok\",\"success\":true}"
+        "2026-11-11T07:05:00Z"
+    writerTasks := writerTasks.push t
+  for t in writerTasks do
+    let _ ← IO.ofExcept t.get
+  unregOrder
+  let seenSeqs ← seenSeqsMu.atomically get
+  let expectedSeqs : Array UInt64 := (List.range 16).toArray.map (fun k => (k + 1).toUInt64)
+  if seenSeqs != expectedSeqs then
+    return (← fail s!"concurrent appendMissionEvent listener order inverted: got {repr seenSeqs}, expected {repr expectedSeqs}")
+
   closeCoreStore store
   cleanup
   return 0

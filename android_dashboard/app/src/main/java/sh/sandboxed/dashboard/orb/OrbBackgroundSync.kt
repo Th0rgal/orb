@@ -1186,6 +1186,7 @@ object OrbWarmSyncCoordinator {
                     listener(evType, parsed, null)
                 }
                 if (evType == "stream_lagged" && sub.listeners.isEmpty()) {
+                    val diskScopeSnapshot = OrbDisk.currentScope()
                     val tail = withContext(Dispatchers.IO) {
                         orbTry(OrbLog.Category.Network, "/api/control/missions") {
                             core.fetchRows(
@@ -1194,14 +1195,18 @@ object OrbWarmSyncCoordinator {
                             )
                         }.getOrDefault(emptyList())
                     }
-                    if (tail.isNotEmpty()) {
+                    val stillValid = diskScopeSnapshot == OrbDisk.currentScope() &&
+                        synchronized(lock) { activeScopeKey == scopeSnapshot && warmSubs[missionId] === sub }
+                    if (stillValid && tail.isNotEmpty()) {
                         val evKey = "mission_events_$missionId"
                         val existingEvs = OrbReadCache.readMemoryRows(evKey).ifEmpty { OrbReadCache.loadRows(evKey) }
                         val mergedEvs = OrbLiveEventReducer.mergeMissionEvents(existingEvs, tail)
-                        OrbReadCache.saveRows(evKey, mergedEvs)
+                        if (diskScopeSnapshot == OrbDisk.currentScope() && synchronized(lock) { activeScopeKey == scopeSnapshot && warmSubs[missionId] === sub }) {
+                            OrbReadCache.saveRows(evKey, mergedEvs)
+                        }
                         val lastSeq = mergedEvs.lastOrNull()?.int("sequence", "seq")?.toLong()
                         synchronized(lock) {
-                            if (activeScopeKey == scopeSnapshot && warmSubs[missionId] === sub) {
+                            if (activeScopeKey == scopeSnapshot && warmSubs[missionId] === sub && diskScopeSnapshot == OrbDisk.currentScope()) {
                                 if (lastSeq != null) sub.cursor = maxOf(sub.cursor ?: lastSeq, lastSeq)
                                 sub.healthy = true
                                 sub.caughtUp = true
@@ -1394,21 +1399,29 @@ object OrbWarmSyncCoordinator {
     fun ingestInboxAnswerPush(core: OrbCore, parsed: OrbDict) {
         val missionId = OrbJSON.str(parsed, "mission_id")?.trim().orEmpty()
         if (missionId.isEmpty()) return
-        val alreadyWarmHealthy = synchronized(lock) {
+        val expectedDiskScope = OrbDisk.currentScope()
+        val (alreadyWarmHealthy, expectedCoordScope) = synchronized(lock) {
             ensureScopeLocked(core)
-            warmSubs[missionId]?.isCaughtUpHealthy == true
+            (warmSubs[missionId]?.isCaughtUpHealthy == true) to activeScopeKey
         }
         if (alreadyWarmHealthy) return
         val storedRow = OrbLiveEventReducer.streamFrameToStoredRow(missionId, "assistant_message", parsed) ?: return
         val incomingSeq = storedRow.int("sequence", "seq")?.toLong() ?: 0L
         coordinatorScope.launch(Dispatchers.IO) {
+            val isSameScope: () -> Boolean = {
+                expectedDiskScope == OrbDisk.currentScope() &&
+                    synchronized(lock) { activeScopeKey == expectedCoordScope }
+            }
+            if (!isSameScope()) return@launch
             val evKey = "mission_events_$missionId"
             val existingEvs = OrbReadCache.readMemoryRows(evKey).ifEmpty { OrbReadCache.loadRows(evKey) }
+            if (!isSameScope()) return@launch
             val prevLastSeq = existingEvs.lastOrNull()?.int("sequence", "seq")?.toLong() ?: 0L
             if (prevLastSeq > 0L && incomingSeq in 1L..prevLastSeq) return@launch
             val isContiguous = prevLastSeq > 0L && incomingSeq == prevLastSeq + 1L
             if (isContiguous) {
                 val mergedEvs = OrbLiveEventReducer.mergeMissionEvents(existingEvs, listOf(storedRow))
+                if (!isSameScope()) return@launch
                 OrbReadCache.saveRows(evKey, mergedEvs)
             }
 
@@ -1416,6 +1429,7 @@ object OrbWarmSyncCoordinator {
             val existingMsgs = OrbReadCache.readMemoryRows(msgKey)
                 .ifEmpty { OrbReadCache.loadRows(msgKey) }
                 .filter { it.raw["inbox_preview"] != true }
+            if (!isSameScope()) return@launch
             val mergedMsgs = if (isContiguous) {
                 OrbConversationHistory.merge(existingMsgs, listOf(storedRow))
             } else {
@@ -1437,10 +1451,12 @@ object OrbWarmSyncCoordinator {
                 }
             }
             if (mergedMsgs.isNotEmpty()) {
+                if (!isSameScope()) return@launch
                 OrbReadCache.saveRows(msgKey, mergedMsgs)
             }
 
             synchronized(lock) {
+                if (activeScopeKey != expectedCoordScope || expectedDiskScope != OrbDisk.currentScope()) return@synchronized
                 if (isContiguous) {
                     savedCursors[missionId] = maxOf(savedCursors[missionId] ?: incomingSeq, incomingSeq)
                 } else {

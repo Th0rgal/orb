@@ -149,6 +149,14 @@ structure PrivilegeLeaseRecord where
   leaseEpoch       : UInt64 := 0
   deriving Repr, DecidableEq
 
+/-- Committed `mission_events` row queued in transaction order for ordered live dispatch. -/
+structure PendingMissionEventNotice where
+  missionId   : String
+  seq         : UInt64
+  eventType   : String
+  payloadJson : String
+  createdAt   : String
+
 /-- Core SQLite database bundle across `missions.db`, `projects.db`, `ask.db`, and `idempotency_keys.db`. -/
 structure CoreStore where
   rootDir            : String
@@ -159,6 +167,8 @@ structure CoreStore where
   idempotencyDb      : SqliteDb
   closedRef          : IO.Ref Bool
   eventListenersRef? : Option (IO.Ref (Array (UInt64 × (String → UInt64 → String → String → String → IO Unit)))) := none
+  eventNoticeQueue?  : Option (Std.Mutex (Array PendingMissionEventNotice)) := none
+  eventDispatchMu?   : Option (Std.Mutex Unit) := none
 
 def transferSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS machine_transfers (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, request_key TEXT NOT NULL, revision INTEGER NOT NULL, phase TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(mission_id,request_key)); CREATE UNIQUE INDEX IF NOT EXISTS one_machine_transfer ON machine_transfers(mission_id) WHERE phase NOT IN ('activated','cancelled');"
@@ -976,7 +986,9 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
         return .error s!"core_store_r7_schema_failed:{r7Err}"
       let closedRef ← IO.mkRef false
       let evListenersRef ← IO.mkRef (#[] : Array (UInt64 × (String → UInt64 → String → String → String → IO Unit)))
-      return .ok { rootDir := trimmedRoot, bootEpoch := effBoot, missionsDb := mDb, projectsDb := pDb, askDb := aDb, idempotencyDb := iDb, closedRef := closedRef, eventListenersRef? := some evListenersRef }
+      let evNoticeQueue ← Std.Mutex.new (#[] : Array PendingMissionEventNotice)
+      let evDispatchMu ← Std.Mutex.new ()
+      return .ok { rootDir := trimmedRoot, bootEpoch := effBoot, missionsDb := mDb, projectsDb := pDb, askDb := aDb, idempotencyDb := iDb, closedRef := closedRef, eventListenersRef? := some evListenersRef, eventNoticeQueue? := some evNoticeQueue, eventDispatchMu? := some evDispatchMu }
 
 /-- Idempotently close all SQLite handles in `CoreStore` (prevents double-close). -/
 def closeCoreStore (st : CoreStore) : IO Unit := do
@@ -3490,25 +3502,68 @@ def registerMissionEventListener
       ref.modify fun xs => xs.filter (fun (k, _) => k != uid)
 
 /-- Append one event row to `mission_events` with monotonically increasing `seq` per mission,
-    then broadcast outside the SQLite write mutex to active `/api/control/sync` listeners. -/
+    enqueue the notification in SQLite commit order before releasing `missionsDb.mu`, and drain
+    outside the SQLite write mutex through `eventDispatchMu?` so concurrent writers never deliver
+    `seq = N + 1` ahead of `seq = N`. -/
 def appendMissionEvent
     (st : CoreStore) (missionId eventType payloadJson createdAt : String) : IO (Except String UInt64) := do
-  let txRes ← withImmediateTx st.missionsDb do
-    let seqRes ← execParamQueryUnlocked st.missionsDb
-      "SELECT COALESCE(MAX(seq), 0) + 1 FROM mission_events WHERE mission_id=?1;" #[missionId]
-    let .ok srs := seqRes | return .error "mission_events_seq_failed"
-    let nextSeq : UInt64 := (((srs[1]?.bind (·[0]?)).bind String.toNat?).getD 1).toUInt64
-    let ins ← execParamQueryUnlocked st.missionsDb
-      "INSERT INTO mission_events(mission_id,seq,event_type,payload,created_at) VALUES(?1,?2,?3,?4,?5);"
-      #[missionId, s!"{nextSeq}", eventType, payloadJson, createdAt]
-    match ins with
-    | .error e => return .error e
-    | .ok _ => return .ok nextSeq
+  let txRes ← st.missionsDb.mu.atomically do
+    match ← sqliteExecRaw st.missionsDb.handle "BEGIN IMMEDIATE;" with
+    | .error e => return .error s!"tx_begin_failed:{e}"
+    | .ok () =>
+      let seqRes ← execParamQueryUnlocked st.missionsDb
+        "SELECT COALESCE(MAX(seq), 0) + 1 FROM mission_events WHERE mission_id=?1;" #[missionId]
+      let .ok srs := seqRes
+        | discard <| sqliteExecRaw st.missionsDb.handle "ROLLBACK;"
+          return .error "mission_events_seq_failed"
+      let nextSeq : UInt64 := (((srs[1]?.bind (·[0]?)).bind String.toNat?).getD 1).toUInt64
+      let ins ← execParamQueryUnlocked st.missionsDb
+        "INSERT INTO mission_events(mission_id,seq,event_type,payload,created_at) VALUES(?1,?2,?3,?4,?5);"
+        #[missionId, s!"{nextSeq}", eventType, payloadJson, createdAt]
+      match ins with
+      | .error e =>
+        discard <| sqliteExecRaw st.missionsDb.handle "ROLLBACK;"
+        return .error e
+      | .ok _ =>
+        match ← sqliteExecRaw st.missionsDb.handle "COMMIT;" with
+        | .error e =>
+          discard <| sqliteExecRaw st.missionsDb.handle "ROLLBACK;"
+          return .error s!"tx_commit_failed:{e}"
+        | .ok () =>
+          if let some qMu := st.eventNoticeQueue? then
+            qMu.atomically do
+              modify fun q => q.push {
+                missionId := missionId
+                seq := nextSeq
+                eventType := eventType
+                payloadJson := payloadJson
+                createdAt := createdAt
+              }
+          return .ok nextSeq
   if let .ok committedSeq := txRes then
-    if let some ref := st.eventListenersRef? then
+    match st.eventListenersRef?, st.eventNoticeQueue?, st.eventDispatchMu? with
+    | some ref, some qMu, some dMu =>
+      let popBatch : IO (Array PendingMissionEventNotice) :=
+        qMu.atomically do
+          let q ← get
+          set (#[] : Array PendingMissionEventNotice)
+          return q
+      dMu.atomically do
+        let mut keepDraining := true
+        while keepDraining do
+          let batch ← popBatch
+          if batch.isEmpty then
+            keepDraining := false
+          else
+            let listeners ← ref.get
+            for n in batch do
+              for (_, cb) in listeners do
+                try cb n.missionId n.seq n.eventType n.payloadJson n.createdAt catch _ => pure ()
+    | some ref, _, _ =>
       let listeners ← ref.get
       for (_, cb) in listeners do
         try cb missionId committedSeq eventType payloadJson createdAt catch _ => pure ()
+    | none, _, _ => pure ()
   return txRes
 
 /-- Render one `mission_events` row (`id`, `mission_id`, `seq`, `event_type`, `payload`, `created_at`)
