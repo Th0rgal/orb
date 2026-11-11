@@ -169,14 +169,14 @@ static void init_crypto_once(void) {
     cr.loaded = (cr.pbkdf2 && cr.sha256) ? 1 : -1;
 }
 
-LEAN_EXPORT lean_obj_res orb_pbkdf2_sha256(b_lean_obj_arg pass_obj, b_lean_obj_arg salt_obj, uint32_t iters, lean_obj_arg w) {
+LEAN_EXPORT lean_obj_res orb_pbkdf2_sha256(b_lean_obj_arg pass_obj, b_lean_obj_arg salt_ba, uint32_t iters, lean_obj_arg w) {
     (void)w;
     pthread_once(&cr_once, init_crypto_once);
     if (cr.loaded <= 0 || iters == 0) return lean_io_result_mk_ok(lean_mk_string(""));
     size_t plen = lean_string_size(pass_obj) > 0 ? lean_string_size(pass_obj) - 1 : 0;
-    size_t slen = lean_string_size(salt_obj) > 0 ? lean_string_size(salt_obj) - 1 : 0;
+    size_t slen = lean_sarray_size(salt_ba);
     unsigned char dk[32];
-    if (cr.pbkdf2(lean_string_cstr(pass_obj), (int)plen, (const unsigned char *)lean_string_cstr(salt_obj),
+    if (cr.pbkdf2(lean_string_cstr(pass_obj), (int)plen, (const unsigned char *)lean_sarray_cptr(salt_ba),
                   (int)slen, (int)iters, cr.sha256(), 32, dk) != 1)
         return lean_io_result_mk_ok(lean_mk_string(""));
     static const char hx[] = "0123456789abcdef";

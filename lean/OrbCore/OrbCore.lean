@@ -25,6 +25,11 @@ import OrbCore.MemoryAndCloud
 import OrbCore.QueueCont
 import OrbCore.R7Core
 import OrbCore.TelemetryAndVoice
+import OrbCore.LegacyHydrate
+import OrbCore.SecretAndApproval
+import OrbCore.RemoteFleetAndRelay
+import OrbCore.ProjectFilesAndController
+import OrbCore.McpGateway
 import OrbCore.Control
 import OrbCore.HostObservers
 import OrbCore.HostTests

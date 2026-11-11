@@ -52,9 +52,11 @@ def supervisionSchemaSql : String :=
 
 def projectDecisionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS project_decisions (" ++
-  "id TEXT PRIMARY KEY, project_slug TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', " ++
-  "question TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '', " ++
-  "updated_at TEXT NOT NULL DEFAULT '');"
+  "id TEXT PRIMARY KEY, slug TEXT NOT NULL DEFAULT '', at TEXT NOT NULL DEFAULT '', " ++
+  "project_slug TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', " ++
+  "question TEXT NOT NULL DEFAULT '', rationale TEXT, answered INTEGER NOT NULL DEFAULT 0, " ++
+  "kind TEXT, authority TEXT NOT NULL DEFAULT 'escalation', answer TEXT, answered_at TEXT, " ++
+  "evidence TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');"
 
 def queueContSchemaSql : String :=
   deferredBatchSchemaSql ++ queueReceiptsSchemaSql ++ continuationsSchemaSql ++ supervisionSchemaSql
@@ -74,11 +76,20 @@ def queueContAdditiveAlters : Array String := #[
 ]
 
 def projectsDecisionsAdditiveAlters : Array String := #[
+  "ALTER TABLE project_decisions ADD COLUMN slug TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE project_decisions ADD COLUMN at TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE project_decisions ADD COLUMN project_slug TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE project_decisions ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';",
   "ALTER TABLE project_decisions ADD COLUMN question TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE project_decisions ADD COLUMN rationale TEXT;",
+  "ALTER TABLE project_decisions ADD COLUMN answered INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE project_decisions ADD COLUMN kind TEXT;",
+  "ALTER TABLE project_decisions ADD COLUMN authority TEXT NOT NULL DEFAULT 'escalation';",
+  "ALTER TABLE project_decisions ADD COLUMN answer TEXT;",
+  "ALTER TABLE project_decisions ADD COLUMN answered_at TEXT;",
   "ALTER TABLE project_decisions ADD COLUMN evidence TEXT NOT NULL DEFAULT '';",
-  "ALTER TABLE project_decisions ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';"
+  "ALTER TABLE project_decisions ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_project_decisions_id ON project_decisions(id);"
 ]
 
 def isQueueContIntegerCol (col : String) : Bool :=
@@ -1089,17 +1100,37 @@ def putProjectDecision (st : CoreStore) (d : ProjectDecision) (answered? : Optio
   if let some flag := answered? then
     if flag != answeredOfStatus d.status then
       return .error "contradictory_answered"
-  let res ← execParamQuery st.projectsDb
-    ("INSERT INTO project_decisions(id,project_slug,status,question,evidence,updated_at) VALUES(?1,?2,?3,?4,?5,?6) " ++
-     "ON CONFLICT(id) DO UPDATE SET project_slug=excluded.project_slug,status=excluded.status,question=excluded.question,evidence=excluded.evidence,updated_at=excluded.updated_at;")
-    #[d.id, d.projectSlug, d.status, d.question, d.evidence, d.updatedAt]
-  match res with
-  | .error e => return .error e
-  | .ok _ => return .ok d
+  let ansFlag := if answeredOfStatus d.status then "1" else "0"
+  let effAt := if d.updatedAt.isEmpty then "1970-01-01T00:00:00Z" else d.updatedAt
+  if !d.projectSlug.isEmpty then
+    discard <| execParamQuery st.projectsDb
+      ("INSERT OR IGNORE INTO projects(slug, id, name, title, root_path, status, created_at, updated_at) " ++
+       "VALUES(?1, ?1, ?1, ?1, '', 'active', ?2, ?2);")
+      #[d.projectSlug, effAt]
+  let txRes ← withImmediateTx st.projectsDb do
+    let existing ← execParamQueryUnlocked st.projectsDb
+      "SELECT id FROM project_decisions WHERE id=?1;" #[d.id]
+    let .ok ers := existing | return .error "decision_select_failed"
+    if ers.size > 1 then
+      let upd ← execParamQueryUnlocked st.projectsDb
+        ("UPDATE project_decisions SET slug=?2, project_slug=?2, status=?3, answered=?4, question=?5, evidence=?6, updated_at=?7 " ++
+         "WHERE id=?1;")
+        #[d.id, d.projectSlug, d.status, ansFlag, d.question, d.evidence, effAt]
+      return upd.map (fun _ => d)
+    else
+      let ins ← execParamQueryUnlocked st.projectsDb
+        ("INSERT INTO project_decisions(id,slug,at,project_slug,status,answered,question,evidence,updated_at) " ++
+         "VALUES(?1,?2,?3,?2,?4,?5,?6,?7,?3);")
+        #[d.id, d.projectSlug, effAt, d.status, ansFlag, d.question, d.evidence]
+      return ins.map (fun _ => d)
+  return txRes
 
 def listProjectDecisionsJson (st : CoreStore) (slug : String) : IO (Except String String) := do
   let rows ← execParamQuery st.projectsDb
-    "SELECT id,project_slug,status,question,evidence,updated_at FROM project_decisions WHERE project_slug=?1 OR ?1='' ORDER BY updated_at DESC, id ASC;"
+    ("SELECT id,COALESCE(NULLIF(project_slug,''),slug,''),status,question,COALESCE(evidence,'')," ++
+     "COALESCE(NULLIF(updated_at,''),at,''),COALESCE(rationale,''),COALESCE(kind,''),COALESCE(authority,'escalation')," ++
+     "COALESCE(answer,''),COALESCE(answered_at,'') " ++
+     "FROM project_decisions WHERE COALESCE(NULLIF(project_slug,''),slug,'')=?1 OR ?1='' ORDER BY COALESCE(NULLIF(updated_at,''),at,'') DESC, id ASC;")
     #[slug]
   match rows with
   | .error e => return .error e
@@ -1110,9 +1141,15 @@ def listProjectDecisionsJson (st : CoreStore) (slug : String) : IO (Except Strin
       let r := rs[i]!
       let status := cell r 2
       let answered := if answeredOfStatus status then "true" else "false"
+      let ratJson := let v := cell r 6; if v.isEmpty then "null" else jsonEscape v
+      let kindJson := let v := cell r 7; if v.isEmpty then "null" else jsonEscape v
+      let ansJson := let v := cell r 9; if v.isEmpty then "null" else jsonEscape v
+      let ansAtJson := let v := cell r 10; if v.isEmpty then "null" else jsonEscape v
       items := items.push (
-        s!"\{\"id\":{jsonEscape (cell r 0)},\"project_slug\":{jsonEscape (cell r 1)},\"status\":{jsonEscape status}," ++
-        s!"\"answered\":{answered},\"question\":{jsonEscape (cell r 3)},\"evidence\":{jsonEscape (cell r 4)},\"updated_at\":{jsonEscape (cell r 5)}}")
+        s!"\{\"id\":{jsonEscape (cell r 0)},\"project_slug\":{jsonEscape (cell r 1)},\"slug\":{jsonEscape (cell r 1)},\"status\":{jsonEscape status}," ++
+        s!"\"answered\":{answered},\"question\":{jsonEscape (cell r 3)},\"rationale\":{ratJson},\"kind\":{kindJson}," ++
+        s!"\"authority\":{jsonEscape (cell r 8)},\"answer\":{ansJson},\"answered_at\":{ansAtJson}," ++
+        s!"\"evidence\":{jsonEscape (cell r 4)},\"at\":{jsonEscape (cell r 5)},\"updated_at\":{jsonEscape (cell r 5)}}")
     return .ok ("[" ++ String.intercalate "," items.toList ++ "]")
 
 def isMcpWakeupPayload (jv : JVal) : Bool :=
@@ -1195,8 +1232,13 @@ def missionDetailJson
     "(SELECT COUNT(*) FROM mission_events ev WHERE ev.mission_id=m.id),m.tags," ++
     "(SELECT COUNT(*) FROM mission_continuations c WHERE c.mission_id=m.id AND c.phase=1)," ++
     "COALESCE(e.verified,1)," ++
-    "COALESCE(m.project,''),COALESCE(m.track,''),COALESCE(m.repo,''),COALESCE(m.working_directory,''),COALESCE(m.total_cost_cents,0)," ++
-    "COALESCE(m.owner_user_id,''),COALESCE((SELECT u.username FROM users u WHERE u.id = m.owner_user_id),'') " ++
+    "COALESCE(m.project,''),COALESCE(m.track,''),COALESCE(NULLIF(m.github_pr,''),m.repo,''),COALESCE(m.working_directory,''),COALESCE(m.total_cost_cents,0)," ++
+    "COALESCE(m.owner_user_id,''),COALESCE((SELECT u.username FROM users u WHERE u.id = m.owner_user_id),'')," ++
+    "COALESCE(m.folder,''),COALESCE(m.placement_revision,0),COALESCE(m.parent_mission_id,'')," ++
+    "COALESCE(NULLIF(m.created_at,''),m.updated_at),COALESCE(m.metadata_updated_at,'')," ++
+    "COALESCE(m.short_description,''),COALESCE(m.workspace_id,'00000000-0000-0000-0000-000000000000')," ++
+    "COALESCE(m.workspace_name,''),COALESCE(m.agent,''),COALESCE(m.config_profile,''),COALESCE(m.resumable,0)," ++
+    "COALESCE(m.history_json,'[]') " ++
     "FROM missions m LEFT JOIN mission_terminal_evidence e ON e.mission_id=m.id WHERE m.id=?1;"
   let rows ← execParamQuery st.missionsDb sql #[missionId]
   match rows with
@@ -1234,12 +1276,32 @@ def missionDetailJson
           | [_, rest] => rest
           | _ => rawProj
       | none => rawProj
+    let projJson := if proj.isEmpty then "null" else jsonEscape proj
     let track := cell r 30
     let githubPr := cell r 31
     let workDir := cell r 32
     let totalCostCents := cellNat r 33
     let ownerUid := cell r 34
     let ownerUname := cell r 35
+    let folderVal := normalizeMissionFolder (cell r 36)
+    let placeRev := cellNat r 37
+    let parentMid := cell r 38
+    let parentJson := if parentMid.isEmpty then "null" else jsonEscape parentMid
+    let createdAtVal := cell r 39
+    let metaUpdVal := cell r 40
+    let metaUpdJson := if metaUpdVal.isEmpty then "null" else jsonEscape metaUpdVal
+    let shortDescVal := cell r 41
+    let shortDescJson := if shortDescVal.isEmpty then "null" else jsonEscape shortDescVal
+    let wsIdVal := cell r 42
+    let wsNameVal := cell r 43
+    let wsNameJson := if wsNameVal.isEmpty then "null" else jsonEscape wsNameVal
+    let agentVal := cell r 44
+    let agentJson := if agentVal.isEmpty then "null" else jsonEscape agentVal
+    let cfgProfVal := cell r 45
+    let cfgProfJson := if cfgProfVal.isEmpty then "null" else jsonEscape cfgProfVal
+    let resumableBool := (cellNat r 46) != 0
+    let rawHist := cell r 47
+    let histOut := if rawHist.startsWith "[" then rawHist else "[]"
     let viewerRole :=
       match callerUserId? with
       | some uid => if ownerUid == uid then "owner" else "participant"
@@ -1262,15 +1324,18 @@ def missionDetailJson
     return .ok (some (
       s!"\{\"id\":{jsonEscape (cell r 0)},\"title\":{jsonEscape (cell r 1)},\"status\":{jsonEscape status}," ++
       s!"\"backend\":{jsonEscape (cell r 3)},\"model_override\":{jsonEscape modelOverride},\"model_effort\":{jsonEscape modelEffort}," ++
-      s!"\"project\":{jsonEscape proj},\"track\":{jsonEscape track},\"github_pr\":{jsonEscape githubPr}," ++
-      s!"\"working_directory\":{jsonEscape workDir}," ++
-      s!"\"updated_at\":{jsonEscape (cell r 7)},\"total_cost_cents\":{totalCostCents}," ++
+      s!"\"project\":{projJson},\"folder\":{jsonEscape folderVal},\"placement_revision\":{placeRev}," ++
+      s!"\"parent_mission_id\":{parentJson},\"track\":{jsonEscape track},\"github_pr\":{jsonEscape githubPr}," ++
+      s!"\"working_directory\":{jsonEscape workDir},\"workspace_id\":{jsonEscape wsIdVal},\"workspace_name\":{wsNameJson}," ++
+      s!"\"agent\":{agentJson},\"config_profile\":{cfgProfJson},\"resumable\":{if resumableBool then "true" else "false"}," ++
+      s!"\"short_description\":{shortDescJson},\"created_at\":{jsonEscape createdAtVal}," ++
+      s!"\"updated_at\":{jsonEscape (cell r 7)},\"metadata_updated_at\":{metaUpdJson},\"total_cost_cents\":{totalCostCents}," ++
       s!"\"authority_mode\":{jsonEscape authMode},\"placement_kind\":{jsonEscape place}," ++
       s!"\"superseded_by_mission_id\":{jsonEscape superBy},\"orphaned_at\":{jsonEscape orph},\"reserved_disk_gib\":{diskGib}," ++
       s!"\"viewer_role\":{jsonEscape viewerRole},\"owner_username\":{jsonEscape ownerUname},\"shared_with\":{sharedWithJson}," ++
       s!"\"state_revision\":{cellNat r 14},\"not_before\":{cellNat r 17},\"resume_intent\":{cellNat r 18}," ++
       s!"\"run_generation\":{cellNat r 19},\"health_verdict\":{jsonEscape verdict}," ++
-      s!"\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut}}"))
+      s!"\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut},\"history\":{histOut}}"))
 
 def ensureQueueContSchema (st : CoreStore) : IO (Except String Unit) := do
   match ← st.missionsDb.mu.atomically (sqliteExecRaw st.missionsDb.handle queueContSchemaSql) with

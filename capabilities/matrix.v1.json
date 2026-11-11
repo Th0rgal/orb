@@ -10,7 +10,7 @@
         "evidence": [
           {
             "path": "lean/OrbCore/OrbCore/Store.lean",
-            "pattern": "history          : Array MissionHistoryEntry := #[]"
+            "pattern": "history           : Array MissionHistoryEntry := #[]"
           }
         ]
       },

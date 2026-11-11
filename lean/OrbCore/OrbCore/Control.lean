@@ -26,6 +26,11 @@ import OrbCore.HarnessSessionRegistry
 import OrbCore.QueueCont
 import OrbCore.R7Core
 import OrbCore.TelemetryAndVoice
+import OrbCore.LegacyHydrate
+import OrbCore.SecretAndApproval
+import OrbCore.RemoteFleetAndRelay
+import OrbCore.ProjectFilesAndController
+import OrbCore.McpGateway
 import OrbNetLeaf.TlsHttp
 import OrbNetLeaf.Gzip
 
@@ -53,6 +58,11 @@ open OrbCore.HarnessSessionRegistry
 open OrbCore.QueueCont
 open OrbCore.R7Core
 open OrbCore.TelemetryAndVoice
+open OrbCore.LegacyHydrate
+open OrbCore.SecretAndApproval
+open OrbCore.RemoteFleetAndRelay
+open OrbCore.ProjectFilesAndController
+open OrbCore.McpGateway
 open OrbNetLeaf.TlsHttp
 
 /-- Core runtime configuration parsed from environment variables (`HOST`, `PORT`, `WORKING_DIR`,
@@ -99,6 +109,8 @@ structure CoreAppState where
   warmMgr?        : Option OrbBin.ClaudeControl.WarmHarnessManager := none
   warmHarnessBinOverride? : Option String := none
   pendingControlCallsRef? : Option (IO.Ref (Array (String × String))) := none
+  broadcastHub?   : Option BroadcastHub := none
+  relayHub?       : Option RelayHub := none
 
 /-- Authenticated multi-user request principal resolved by `resolveCallerPrincipal?`. -/
 structure CallerPrincipal where
@@ -302,6 +314,8 @@ private def effectiveJwtSecret (cfg : CoreConfig) : String :=
 private def verifyAnySessionTokenExp? (secret token : String) (nowEpochSec : UInt64) : Option UInt64 :=
   if token.startsWith "orb-jwt-v2:" then
     (verifySessionTokenV2 secret token nowEpochSec).map (fun (_, _, _, exp) => exp)
+  else if token.startsWith "eyJ" then
+    (verifyHs256Jwt? secret token nowEpochSec).map (fun (_, _, exp) => exp)
   else
     verifySessionToken secret token nowEpochSec
 
@@ -412,6 +426,30 @@ def resolveCallerPrincipal?
       if (rbacWord &&& 1) != 1 then
         return none
       return some (CallerPrincipal.ofUserRecord u false)
+    if tok.startsWith "eyJ" then
+      let some (jwtSub, jwtUser, _exp) := verifyHs256Jwt? sec tok nowEpochSec
+        | return none
+      let multiUsers : Bool ← do
+        match ← execParamQuery st.store.missionsDb "SELECT COUNT(*) FROM users WHERE disabled=0;" #[] with
+        | .ok rows => pure (decide (((((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 0) > 1)))
+        | .error _ => pure false
+      let singleTenantUnscoped := !multiUsers && (parseConfiguredUsers st.cfg.usersJson).isEmpty
+      if let some u ← getUserById? st.store jwtSub then
+        if u.disabled then return none
+        return some (CallerPrincipal.ofUserRecord u singleTenantUnscoped)
+      if let some adm ← getBootstrapAdmin? st.store then
+        if adm.disabled then return none
+        return some (CallerPrincipal.ofUserRecord adm singleTenantUnscoped)
+      return some {
+        userId           := jwtSub
+        username         := if jwtUser.isEmpty then "admin" else jwtUser
+        role             := "admin"
+        unixUsername?    := none
+        sessionEpoch     := 1
+        disabled         := false
+        dailySpendCapCents? := none
+        isLegacyUnscoped := singleTenantUnscoped
+      }
   if !authenticateHttpBearer st.cfg hdrs nowEpochSec &&
      !(allowWsSubproto && authenticateConsoleWsUpgrade st.cfg hdrs nowEpochSec) then
     return none
@@ -446,6 +484,10 @@ def authenticateProxyRequest (st : CoreAppState) (hdrs : Array (String × String
         if let some u ← getUserById? st.store uid then
           return !u.disabled && u.sessionEpoch == tokEp
       return false
+    if pTok.startsWith "eyJ" then
+      return (verifyHs256Jwt? (effectiveJwtSecret st.cfg) pTok nowEpochSec).isSome
+    if (← verifyProxyApiKeyFile st.store.rootDir pTok (formatEpochIso8601Utc nowEpochSec)) then
+      return true
     if st.cfg.proxySecret.isEmpty &&
        ((verifySessionToken (effectiveJwtSecret st.cfg) pTok nowEpochSec).isSome ||
         verifyLoginCredentials st.cfg none pTok) then
@@ -1160,7 +1202,32 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
         let scopeStr := if denyReason == 2 then "user" else "global"
         return mkJson 429 s!"\{\"error\":\{\"type\":\"spend_cap_exceeded\",\"code\":\"daily_spend_cap_exceeded\",\"scope\":{jsonEscape scopeStr},\"message\":\"Daily spend cap reached\"}}"
   let chains ← st.chainsRef.get
-  let rawActiveChain := selectRoutingChainForBody chains req.bodySlice.toByteArray
+  let rawActiveChain0 := selectRoutingChainForBody chains req.bodySlice.toByteArray
+  let rawActiveChain ← do
+    if st.proxyMockTransport?.isSome then
+      pure rawActiveChain0
+    else
+      let cliKey := ((← IO.getEnv "CLI_PROXY_API_KEY").getD "").trimAscii.toString
+      let cliUrl := ((← IO.getEnv "CLI_PROXY_API_BASE_URL").getD "http://127.0.0.1:8317").trimAscii.toString
+      if cliKey.isEmpty then
+        pure rawActiveChain0
+      else
+        let cliTgt : ProviderTarget := {
+          accountId := "cliproxyapi"
+          provider := "openai"
+          baseUrl := cliUrl
+          apiKey := cliKey
+          modelId := canonicalAntigravityProxyModelId requestedModel
+        }
+        let exactMatch? := chains.find? (fun c =>
+          c.id == requestedModel || c.name == requestedModel || c.id == "default")
+        match exactMatch? with
+        | some mc => pure { mc with targets := mc.targets.push cliTgt }
+        | none =>
+          if rawActiveChain0.targets.isEmpty then
+            pure { id := "cliproxyapi", name := "CLIProxyAPI", targets := #[cliTgt] }
+          else
+            pure { id := requestedModel, name := requestedModel, targets := #[cliTgt] ++ rawActiveChain0.targets }
   let activeChain := filterChainTargetsForUserPrefs rawActiveChain userPrefs
   if proxyOwnerUserId?.isSome && !rawActiveChain.targets.isEmpty && activeChain.targets.isEmpty then
     return mkJson 403 "{\"error\":\"no_user_enabled_providers\",\"message\":\"All configured inference providers for this model are disabled in your preferences.\"}"
@@ -1631,7 +1698,7 @@ private def dispatchMissionControlAndGitRoutes?
 
   return none
 
-set_option maxHeartbeats 800000 in
+set_option maxHeartbeats 1600000 in
 private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowEpochSec : UInt64) : IO (Except ByteArray CoreHttpResponse) := do
   let rawTarget := req.path
   let cleanPath :=
@@ -1663,6 +1730,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       match user?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) with
       | some uname => getUserByUsername? st.store uname
       | none => getBootstrapAdmin? st.store
+    let settingsPwdOk ← do
+      let isAdmName := match user? with | none => true | some s => s.trimAscii.isEmpty || s.trimAscii.toString == "admin"
+      if isAdmName then verifySettingsPasswordHash st.store.rootDir supplied else pure false
     if let some u := dbUser? then
       if u.disabled then
         return .ok (mkJson 401 "{\"error\":\"account_disabled\"}")
@@ -1671,14 +1741,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let uJson := renderUserSummaryJson u
         return .ok (mkJson 200 s!"\{\"token\":{jsonEscape tok},\"exp\":{exp},\"expires_at\":{exp},\"user\":{uJson}}")
       -- If a specific non-admin DB account was named and PBKDF2 failed, reject unless static config matches
-      if !verifyLoginCredentials st.cfg user? supplied then
+      if !verifyLoginCredentials st.cfg user? supplied && !settingsPwdOk then
         return .ok (mkJson 401 "{\"error\":\"invalid_credentials\"}")
       let tok := mintSessionTokenV2 sec u.id u.role u.sessionEpoch exp
       let uJson := renderUserSummaryJson u
       return .ok (mkJson 200 s!"\{\"token\":{jsonEscape tok},\"exp\":{exp},\"expires_at\":{exp},\"user\":{uJson}}")
     else if user?.any (fun s => !s.trimAscii.isEmpty) && (← hasMultipleActiveUsers st.store) && !verifyLoginCredentials st.cfg user? supplied then
       return .ok (mkJson 401 "{\"error\":\"invalid_credentials\"}")
-    else if verifyLoginCredentials st.cfg user? supplied then
+    else if verifyLoginCredentials st.cfg user? supplied || settingsPwdOk then
       if let some adm ← getBootstrapAdmin? st.store then
         let tok := mintSessionTokenV2 sec adm.id adm.role adm.sessionEpoch exp
         let uJson := renderUserSummaryJson adm
@@ -1811,15 +1881,19 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | none => pure none
       | some c =>
         match ← execParamQuery st.store.projectsDb
-            "SELECT revoked, hard_expires_at FROM mcp_sessions_v1 WHERE id=?1;" #[c.sessionId] with
+            "SELECT revoked, hard_expires_at, COALESCE(project_scope,''), COALESCE(project_scoped,0) FROM mcp_sessions_v1 WHERE id=?1;" #[c.sessionId] with
         | .ok rs =>
           if rs.size ≤ 1 then
             pure (if c.isExternal then none else some c)
           else
             let rev := ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0
             let hExp := (((rs[1]?.bind (·[1]?)).bind String.toNat?).getD 0).toUInt64
+            let dbProj := (rs[1]?.bind (·[2]?)).getD ""
+            let dbProjScoped := (((rs[1]?.bind (·[3]?)).bind String.toNat?).getD 0) != 0
             if rev != 0 || (hExp > 0 && nowEpochSec ≥ hExp) then pure none
-            else pure (some { c with hardExpiresAt := if hExp > 0 then hExp else c.hardExpiresAt })
+            else
+              let liveProj := if dbProjScoped then dbProj else c.project
+              pure (some { c with project := liveProj, hardExpiresAt := if hExp > 0 then hExp else c.hardExpiresAt })
         | .error _ => pure none
     let mcpCaller? ← resolveCallerPrincipal? st req.headers nowEpochSec
     let coreAuthed := mcpCaller?.isSome
@@ -1937,6 +2011,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let proj := (jv.fieldStr? "project").getD ""
       let sid ← nextMcpSessionUuid st
       let exp := nowEpochSec + 3600
+      let projScopedFlag := if proj.trimAscii.toString.isEmpty then "0" else "1"
+      discard <| execParamQuery st.store.projectsDb
+        ("INSERT OR REPLACE INTO mcp_sessions_v1(id,owner,mission_id,expires_at,revoked,subject_kind,client_label,host_hint,project_scope,project_scoped,hard_expires_at) " ++
+         "VALUES(?1,?2,?3,?4,0,'mission','', '',?5,?6,?4);")
+        #[sid, mcpCaller.userId, mid, toString exp, proj.trimAscii.toString, projScopedFlag]
       let claims : McpSessionClaims := {
         sessionId := sid, missionId := mid, role := role,
         project := proj, isExternal := false, expiresAt := exp
@@ -2049,16 +2128,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           ])
           return .ok (mkJson 200 errJson)
       else
-        let unsupportedJson := renderCompact (.obj #[
-          ("ok", .bool false),
-          ("error", .obj #[
-            ("code", .str "unknown_tool"),
-            ("message", .str s!"Unknown or unsupported MCP tool `{toolName}`"),
-            ("accepted", .str "no"),
-            ("retryable", .bool false)
-          ])
-        ])
-        return .ok (mkJson 200 unsupportedJson)
+        let outJson ← dispatchMcpToolCall
+          st.store st.managedStore? st.relayHub? st.broadcastHub? (← st.managedRef.get)
+          st.cfg.workingDir activeClaims toolName args nowEpochSec
+        return .ok (mkJson 200 outJson)
 
   -- 5c. Managed Node Dial-Out Enrollment & Leased Relay
   if req.method == "POST" && cleanPath == "/api/managed-machines/enroll" then
@@ -2085,10 +2158,27 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     | .error "stale_boot_epoch" => return .ok (mkJson 410 "{\"error\":\"stale_boot_epoch\"}")
     | .error _ => return .ok (mkJson 401 "{\"error\":\"node_unauthorized\"}")
     | .ok vmBoot =>
+      if let some rHub := st.relayHub? then
+        recordMachinePollSeen rHub mid nowEpochSec
+        let httpReqs ← drainRelayHttpReqs rHub mid
+        if !httpReqs.isEmpty then
+          return .ok (mkJson 200 (renderRelayHttpReqsJson httpReqs))
       match ← pollRelayLease mst mid vmBoot nowEpochSec (nowEpochSec + 60) with
       | .error _ => return .ok (mkJson 410 "{\"error\":\"stale_boot_epoch\"}")
-      | .ok none => return .ok (mkJson 200 "[]")
       | .ok (some cmd) => return .ok (mkJson 200 (renderRelayPollJson cmd))
+      | .ok none =>
+        if let some rHub := st.relayHub? then
+          if rHub.longPollMs > 0 then
+            let mut waitedMs : Nat := 0
+            while waitedMs < rHub.longPollMs do
+              IO.sleep 100
+              waitedMs := waitedMs + 100
+              let liveSec ← coreEpochSec
+              recordMachinePollSeen rHub mid liveSec
+              let httpReqs ← drainRelayHttpReqs rHub mid
+              if !httpReqs.isEmpty then
+                return .ok (mkJson 200 (renderRelayHttpReqsJson httpReqs))
+        return .ok (mkJson 200 "[]")
 
   if req.method == "POST" && cleanPath == "/api/managed-machines/relay/respond" then
     let some mst := st.managedStore?
@@ -2102,6 +2192,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     | .ok vmBoot =>
       let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      if let some rHub := st.relayHub? then
+        recordMachinePollSeen rHub mid nowEpochSec
+      if (jv.fieldUInt64? "lease_id").isNone then
+        if let some rHub := st.relayHub? then
+          if let some httpResp := parseRelayHttpRespJson? jv then
+            deliverRelayHttpResp rHub httpResp
+            return .ok (mkJson 200 "{\"ok\":true}")
       let cmdId := (jv.fieldStr? "id").getD ""
       let leaseId := (jv.fieldUInt64? "lease_id").getD 0
       match ← stepRelayCommand mst cmdId {
@@ -2113,6 +2210,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | .error "stale_boot_epoch" => return .ok (mkJson 410 "{\"error\":\"stale_boot_epoch\"}")
       | .error e => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
       | .ok _ => return .ok (mkJson 200 "{\"ok\":true}")
+
+  if req.method == "GET" && cleanPath.startsWith "/api/managed-machines/bootstrap-binary/" then
+    if let some mst := st.managedStore? then
+      if let some (bStatus, bCtype, bBody) ← dispatchRemoteFleetAndRelayRoutes?
+          st.store mst st.relayHub? (← st.managedRef.get) req.method cleanPath rawTarget
+          req.headers req.bodySlice.toByteArray "" true true nowEpochSec (formatEpochIso8601Utc nowEpochSec) then
+        return .ok { status := bStatus, contentType := bCtype, corsOrigin? := reqOrigin?, body := bBody }
 
   -- 6. Protected Routes (`require_auth` + `resolveCallerPrincipal?`)
   let some caller ← resolveCallerPrincipal? st req.headers nowEpochSec
@@ -2855,9 +2959,15 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let effJson := if out.modelEffort.isEmpty then "null" else jsonEscape out.modelEffort
         let cloudTurnsStr := if out.usedCloudTurns then "true" else "false"
         let freshWsStr := if out.freshWorkspace then "true" else "false"
+        let dispForkProj :=
+          if out.project.isEmpty then "null"
+          else if caller.isLegacyUnscoped then jsonEscape out.project
+          else if out.project.startsWith (caller.userId ++ ":") then jsonEscape (out.project.drop (caller.userId.length + 1)).toString
+          else jsonEscape out.project
         let body :=
           s!"\{\"id\":{jsonEscape out.missionId},\"title\":{jsonEscape out.title},\"status\":\"awaiting_user\"," ++
           s!"\"backend\":{jsonEscape out.backend},\"model_override\":{modOvJson},\"model_effort\":{effJson}," ++
+          s!"\"project\":{dispForkProj},\"folder\":{jsonEscape out.folder},\"placement_revision\":1," ++
           s!"\"working_directory\":{jsonEscape out.workingDirectory},\"remote_node_id\":{rnJson}," ++
           s!"\"placement_kind\":{jsonEscape out.placementKind}," ++
           s!"\"forked_from\":{jsonEscape out.forkedFrom},\"turns_copied\":{out.turnsCopied}," ++
@@ -3044,17 +3154,33 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if req.method == "GET" then
       let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
       let qParams := parseQueryParams rawTarget
-      let proj? := ((qParams.find? (fun p => p.1 == "project")).map Prod.snd) >>= percentDecodeStrict
-      let updatedSince? := ((qParams.find? (fun p => p.1 == "updated_since")).map Prod.snd) >>= percentDecodeStrict
-      let statusRaw := (((qParams.find? (fun p => p.1 == "status")).map Prod.snd) >>= percentDecodeStrict).getD ""
+      let qLookup (k : String) : Option String :=
+        (qParams.find? (fun p => p.1 == k)).bind (fun p => percentDecodeStrict p.2)
+      let rawProjF? := (qLookup "project").orElse (fun _ => qLookup "project_slug")
+      let unassignedOnly := (qLookup "unassigned") == some "true" || rawProjF? == some "__unassigned__"
+      let statusRaw := (qLookup "status").getD ""
       let statusesArr :=
         if statusRaw.trimAscii.toString.isEmpty then #[]
         else (statusRaw.splitOn ",").toArray.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
-      let allParam? := ((qParams.find? (fun p => p.1 == "all")).map Prod.snd).map (·.trimAscii.toString.toLower)
+      let allParam? := (qLookup "all").map (·.trimAscii.toString.toLower)
       let includeArchived := allParam? == some "true" || allParam? == some "1"
-      let limit? := ((qParams.find? (fun p => p.1 == "limit")).bind (fun p => p.2.toNat?))
-      let offset := ((qParams.find? (fun p => p.1 == "offset")).bind (fun p => p.2.toNat?)).getD 0
-      match ← listMissionsJson st.store none callerOpt st.bootstrapAdminId proj? updatedSince? statusesArr includeArchived limit? offset with
+      let filter : MissionListFilter := {
+        limit?           := (qLookup "limit").bind String.toNat?
+        offset?          := (qLookup "offset").bind String.toNat?
+        updatedSince?    := (qLookup "updated_since").orElse (fun _ => qLookup "since_updated_at")
+        statusesFilter   := statusesArr
+        includeArchived  := includeArchived
+        bootstrapAdminId := st.bootstrapAdminId
+        project?         := if unassignedOnly then none else rawProjF?.filter (!·.isEmpty)
+        unassignedOnly   := unassignedOnly
+        folder?          := (qLookup "folder").map normalizeMissionFolder
+        folderPrefix?    := (qLookup "folder_prefix").map normalizeMissionFolder
+        track?           := (qLookup "track").filter (!·.isEmpty)
+        tag?             := (qLookup "tag").filter (!·.isEmpty)
+        originSessionId? := (qLookup "origin_session_id").filter (!·.isEmpty)
+        workspaceId?     := (qLookup "workspace_id").filter (!·.isEmpty)
+      }
+      match ← listMissionsJson st.store none callerOpt filter with
       | .ok j => return .ok (mkJson 200 j)
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
     else if req.method == "POST" then
@@ -3206,12 +3332,17 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               if held ≥ cap then
                 abortIdem
                 return .ok (mkJson 429 s!"\{\"error\":\"parallel_missions_cap\",\"cap\":{cap},\"active\":{held}}")
-      let initTagsJson := projectCompatibilityTagsJson authMode placeKind "" "" diskGib reqTags
+      let rawCreateFolder := (bodyVal?.bind (·.fieldStr? "folder")).getD ""
+      let .ok validCreateFolder := normalizeMissionFolderStrict rawCreateFolder
+        | do abortIdem; return .ok (mkJson 400 "{\"error\":\"invalid_folder\"}")
+      let normCreateFolder := if projSlug.isEmpty || isBtwReq then "" else validCreateFolder
+      let (strippedReqTags, _) := stripLegacyOrbFolderTags reqTags
+      let initTagsJson := projectCompatibilityTagsJson authMode placeKind "" "" diskGib strippedReqTags
       let effTrack := if isBtwReq then "" else track
       let mRec : MissionRecord := {
         id := mid, title := title, status := "awaiting_user", backend := backend,
         modelOverride := modelOverride, modelEffort := normEffort, workingDirectory := safeWorkDir,
-        project := projSlug, updatedAt := s!"{nowEpochSec}", totalCostCents := 0,
+        project := projSlug, folder := normCreateFolder, updatedAt := s!"{nowEpochSec}", totalCostCents := 0,
         authorityMode := authMode, placementKind := placeKind, reservedDiskGib := diskGib,
         nodeBootEpoch := st.store.bootEpoch, tagsJson := initTagsJson, track := effTrack, repo := repo,
         ownerUserId := caller.userId
@@ -3250,6 +3381,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           s!"\"model_override\":{jsonEscape modelOverride},\"model_effort\":{jsonEscape normEffort}," ++
           s!"\"authority_mode\":{jsonEscape authMode},\"placement_kind\":{jsonEscape placeKind}," ++
           s!"\"viewer_role\":\"owner\",\"owner_username\":{jsonEscape caller.username}{projField}," ++
+          s!"\"folder\":{jsonEscape normCreateFolder},\"placement_revision\":1," ++
           s!"\"state_revision\":1,\"total_cost_cents\":0{deliveredPromptField}}"
         let persistInitialCyber : IO Unit := do
           if backend == "codex" && cyberMode != .automatic then
@@ -3326,6 +3458,288 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
       let (code, body) ← postBoardTask st.store mid jv
       return .ok (mkJson code body)
+
+  -- Revisioned Mission Move (`POST /api/control/missions/move`, `#1545`)
+  if cleanPath == "/api/control/missions/move" then
+    if req.method != "POST" then
+      return .ok (mkJson 405 "{\"error\":\"method_not_allowed\"}")
+    let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+      | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+    let missionIds : Array String :=
+      match jv.fieldArr? "mission_ids" with
+      | some xs => xs.filterMap JVal.asStr? |>.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+      | none =>
+        match jv.fieldStr? "mission_id" with
+        | some s => let t := s.trimAscii.toString; if t.isEmpty then #[] else #[t]
+        | none => #[]
+    if missionIds.isEmpty || missionIds.size > 500 then
+      return .ok (mkJson 400 "{\"error\":\"mission_ids must contain between 1 and 500 mission IDs\"}")
+    let descendantIds : Array String :=
+      match jv.fieldArr? "descendant_ids" with
+      | some xs => xs.filterMap JVal.asStr? |>.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+      | none => #[]
+    let rawProjOpt : Option String :=
+      match jv.field? "project" with
+      | none | some .null => none
+      | some (.str s) =>
+        let t := s.trimAscii.toString
+        if t.isEmpty || t == "__unassigned__" then none else some t
+      | some _ => some "__INVALID__"
+    if rawProjOpt == some "__INVALID__" then
+      return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
+    let rawProjSlug := rawProjOpt.getD ""
+    let projSlugRes : Except String String :=
+      if rawProjSlug.isEmpty || caller.isLegacyUnscoped then .ok rawProjSlug
+      else match scopeProjectSlug caller.userId st.bootstrapAdminId rawProjSlug with
+        | some sp => .ok sp
+        | none => .error "invalid_project"
+    let .ok projSlug := projSlugRes
+      | return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
+    let rawFolderStr :=
+      match jv.field? "folder" with
+      | none | some .null => ""
+      | some (.str s) => s
+      | some _ => "\x00"
+    let .ok normReqFolder := normalizeMissionFolderStrict rawFolderStr
+      | return .ok (mkJson 400 "{\"error\":\"invalid_folder\"}")
+    if projSlug.isEmpty && !normReqFolder.isEmpty then
+      return .ok (mkJson 400 "{\"error\":\"Folders require a project\"}")
+    let policy := ((jv.fieldStr? "approval_policy").getD "check").trimAscii.toString.toLower
+    if policy != "check" && policy != "revoke" && policy != "keep" then
+      return .ok (mkJson 400 "{\"error\":\"invalid_approval_policy\"}")
+    let clientOpIdNum? : Option UInt32 :=
+      match jv.fieldNat? "client_op_id" with
+      | some n => some n.toUInt32
+      | none => ((jv.fieldStr? "client_op_id").bind String.toNat?).map (·.toUInt32)
+    let clientId? := (jv.fieldStr? "client_id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+    let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
+    let plan ← match ← planExpandedMoveFamily st.store missionIds descendantIds normReqFolder callerOpt with
+      | .ok p => pure p
+      | .error (code, msg) => return .ok (mkJson code s!"\{\"error\":{jsonEscape msg}}")
+    let crossProjIds := (plan.filter (fun m => m.currentProject != projSlug)).map (·.missionId)
+    if !crossProjIds.isEmpty && policy == "check" then
+      if let some confBody ← inspectCrossProjectSecretTransfer st.store.rootDir crossProjIds rawProjSlug nowEpochSec then
+        return .ok (mkJson 409 confBody)
+    if !projSlug.isEmpty && !caller.isLegacyUnscoped && !caller.userId.isEmpty then
+      discard <| execParamQuery st.store.projectsDb
+        "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
+        #[projSlug, caller.userId, s!"{nowEpochSec}"]
+    let nowIso := formatEpochIso8601Utc nowEpochSec
+    let updates : Array CheckedPlacementUpdate := plan.map fun m => {
+      missionId       := m.missionId
+      expectedProject := m.currentProject
+      nextProject     := projSlug
+      nextFolder      := m.targetFolder
+    }
+    let (allMoved, changedMoved) ← match ← batchSetMissionPlacementChecked st.store updates nowIso with
+      | .ok pair => pure pair
+      | .error (code, msg) => return .ok (mkJson code s!"\{\"error\":{jsonEscape msg}}")
+    if !crossProjIds.isEmpty && (policy == "revoke" || policy == "keep") then
+      applyCrossProjectSecretPolicy st.store.rootDir crossProjIds rawProjSlug policy nowIso nowEpochSec
+    rebindMovedMissionMcpSessions st.store changedMoved
+    let unscopeItem (it : MissionPlacementItem) : MissionPlacementItem :=
+      if caller.isLegacyUnscoped then it
+      else
+        let dispProj? := it.project?.map fun p =>
+          if p.startsWith (caller.userId ++ ":") then (p.drop (caller.userId.length + 1)).toString else p
+        { it with project? := dispProj? }
+    let clientAll := allMoved.map unscopeItem
+    let clientChanged := changedMoved.map unscopeItem
+    let opJson := match clientOpIdNum? with | some n => s!"{n}" | none => "null"
+    let cidJson := match clientId? with | some s => jsonEscape s | none => "null"
+    if !clientChanged.isEmpty then
+      let evPayload := renderMissionPlacementChangedEventJson clientChanged clientOpIdNum? clientId?
+      publishControlEvent st.broadcastHub? "mission_placement_changed" evPayload
+    let movedJson := "[" ++ String.intercalate "," (clientAll.map renderMissionPlacementItemJson).toList ++ "]"
+    return .ok (mkJson 200 s!"\{\"moved\":{movedJson},\"client_op_id\":{opJson},\"client_id\":{cidJson}}")
+
+  -- Mission Resolve (`GET /api/control/missions/resolve`)
+  if req.method == "GET" && cleanPath == "/api/control/missions/resolve" then
+    let qParams := parseQueryParams rawTarget
+    let rawPrefix := ((qParams.find? (fun p => p.1 == "id" || p.1 == "prefix")).bind (fun p => percentDecodeStrict p.2)).getD ""
+    let pfx := rawPrefix.trimAscii.toString
+    if pfx.isEmpty then
+      return .ok (mkJson 400 "{\"error\":\"missing_id\"}")
+    let sql :=
+      if caller.isLegacyUnscoped then
+        "SELECT id FROM missions WHERE id=?1 OR id LIKE (?1 || '%') ORDER BY updated_at DESC LIMIT 2;"
+      else
+        "SELECT id FROM missions WHERE (id=?1 OR id LIKE (?1 || '%')) AND (owner_user_id=?2 OR EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id=missions.id AND s.user_id=?2)) ORDER BY updated_at DESC LIMIT 2;"
+    let args := if caller.isLegacyUnscoped then #[pfx] else #[pfx, caller.userId]
+    match ← execParamQuery st.store.missionsDb sql args with
+    | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+    | .ok rs =>
+      if rs.size ≤ 1 then return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      let resolvedId := (rs[1]?.bind (·[0]?)).getD ""
+      let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
+      match ← missionDetailJson st.store resolvedId callerOpt st.bootstrapAdminId with
+      | .ok (some body) => return .ok (mkJson 200 body)
+      | _ => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+
+  -- Mission Control SSE Streams & Sync (`GET /api/control/stream`, `GET /api/control/missions/:id/stream`, `GET /api/control/sync`)
+  if req.method == "GET" && cleanPath == "/api/control/stream" then
+    let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
+    let listBody ← match ← listMissionsJson st.store none callerOpt { limit? := some 200 } with
+      | .ok j => pure j
+      | .error _ => pure "[]"
+    let sseBody := formatSseFrame "missions_snapshot" s!"\{\"missions\":{listBody}}" (some 1)
+    return .ok {
+      status := 200
+      contentType := "text/event-stream"
+      corsOrigin? := reqOrigin?
+      extraHdrs := #[("Cache-Control", "no-cache")]
+      body := sseBody.toUTF8
+    }
+
+  if let some params := matchRoutePattern? "/api/control/missions/:id/stream" rawTarget then
+    if req.method == "GET" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
+        return .ok (mkJson cCode cBody)
+      let evJson ← match ← queryMissionEventsPage st.store mid none none 100 #[] none with
+        | .ok pg => pure pg.eventsJson
+        | .error _ => pure "[]"
+      let sseBody := formatSseFrame "snapshot" s!"\{\"mission_id\":{jsonEscape mid},\"events\":{evJson}}" (some 1)
+      return .ok {
+        status := 200
+        contentType := "text/event-stream"
+        corsOrigin? := reqOrigin?
+        extraHdrs := #[("Cache-Control", "no-cache")]
+        body := sseBody.toUTF8
+      }
+
+  if req.method == "GET" && cleanPath == "/api/control/sync" then
+    let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
+    let qParams := parseQueryParams rawTarget
+    let since? := (qParams.find? (fun p => p.1 == "since" || p.1 == "updated_since")).bind (fun p => percentDecodeStrict p.2)
+    let listBody ← match ← listMissionsJson st.store none callerOpt { updatedSince? := since?, limit? := some 500 } with
+      | .ok j => pure j
+      | .error _ => pure "[]"
+    return .ok (mkJson 200 s!"\{\"missions\":{listBody},\"server_time\":{jsonEscape (formatEpochIso8601Utc nowEpochSec)}}")
+
+  -- Mission Settings, Title, Project, Snapshot, Digest & Message Endpoints
+  if let some params := (matchRoutePattern? "/api/control/missions/:id/settings" rawTarget).orElse
+      (fun _ => (matchRoutePattern? "/api/control/missions/:id/project" rawTarget).orElse
+      (fun _ => matchRoutePattern? "/api/control/missions/:id/title" rawTarget)) then
+    if req.method == "PATCH" || req.method == "POST" || req.method == "PUT" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid true) then
+        return .ok (mkJson cCode cBody)
+      let some existing ← getMission? st.store mid
+        | return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let nextTitle := (jv.fieldStr? "title").getD existing.title
+      let nextBackend := (jv.fieldStr? "backend").getD existing.backend
+      let nextModel :=
+        match jv.field? "model_override" with
+        | some .null => ""
+        | some (.str s) => s
+        | _ => existing.modelOverride
+      let nextEffort ← do
+        match jv.field? "model_effort" with
+        | none => pure existing.modelEffort
+        | some .null => pure ""
+        | some (.str s) =>
+          let t := s.trimAscii.toString
+          if t.isEmpty then pure ""
+          else match normalizeModelEffortForBackend (some nextBackend) t with
+            | some eff => pure eff
+            | none => pure "__INVALID__"
+        | _ => pure existing.modelEffort
+      if nextEffort == "__INVALID__" then
+        return .ok (mkJson 400 "{\"error\":\"unsupported_model_effort\"}")
+      let hasProjPatch := (jv.field? "project").isSome || (jv.field? "project_slug").isSome
+      let nextProj ← do
+        if !hasProjPatch then pure existing.project
+        else
+          let rawP :=
+            match (jv.field? "project").orElse (fun _ => jv.field? "project_slug") with
+            | some (.str s) => s.trimAscii.toString
+            | _ => ""
+          if rawP.isEmpty || caller.isLegacyUnscoped then pure rawP
+          else pure ((scopeProjectSlug caller.userId st.bootstrapAdminId rawP).getD existing.project)
+      let hasFolderPatch := (jv.field? "folder").isSome
+      let nextFolder ← do
+        if nextProj.isEmpty then pure ""
+        else if !hasFolderPatch then
+          pure (if nextProj != existing.project then "" else existing.folder)
+        else
+          match normalizeMissionFolderStrict ((jv.fieldStr? "folder").getD "") with
+          | .ok nf => pure nf
+          | .error _ => pure "__INVALID_FOLDER__"
+      if nextFolder == "__INVALID_FOLDER__" then
+        return .ok (mkJson 400 "{\"error\":\"invalid_folder\"}")
+      let nowIso := formatEpochIso8601Utc nowEpochSec
+      let placementChanged := nextProj != existing.project || nextFolder != existing.folder
+      if placementChanged then
+        discard <| execParamQuery st.store.missionsDb
+          ("UPDATE missions SET title=?2, backend=?3, model_override=?4, model_effort=?5, " ++
+           "project=?6, folder=?7, placement_revision=COALESCE(placement_revision,0)+1, " ++
+           "metadata_updated_at=?8, state_revision=state_revision+1 WHERE id=?1;")
+          #[mid, nextTitle, nextBackend, nextModel, nextEffort, nextProj, nextFolder, nowIso]
+      else
+        discard <| execParamQuery st.store.missionsDb
+          ("UPDATE missions SET title=?2, backend=?3, model_override=?4, model_effort=?5, " ++
+           "metadata_updated_at=?6, state_revision=state_revision+1 WHERE id=?1;")
+          #[mid, nextTitle, nextBackend, nextModel, nextEffort, nowIso]
+      if let some desc := jv.fieldStr? "short_description" then
+        discard <| execParamQuery st.store.missionsDb
+          "UPDATE missions SET short_description=?2 WHERE id=?1;" #[mid, desc]
+      if let some pr := jv.fieldStr? "github_pr" then
+        discard <| execParamQuery st.store.missionsDb
+          "UPDATE missions SET github_pr=?2, repo=?2 WHERE id=?1;" #[mid, pr]
+      let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
+      match ← missionDetailJson st.store mid callerOpt st.bootstrapAdminId with
+      | .ok (some body) => return .ok (mkJson 200 body)
+      | _ => return .ok (mkJson 200 "{\"ok\":true}")
+
+  if let some params := (matchRoutePattern? "/api/control/missions/:id/snapshot" rawTarget).orElse
+      (fun _ => matchRoutePattern? "/api/control/missions/:id/digest" rawTarget) then
+    if req.method == "GET" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
+        return .ok (mkJson cCode cBody)
+      let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
+      let some mBody ← (match ← missionDetailJson st.store mid callerOpt st.bootstrapAdminId with | .ok b => pure b | .error _ => pure none)
+        | return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      let evJson ← match ← queryMissionEventsPage st.store mid none none 100 #[] none with
+        | .ok pg => pure pg.eventsJson
+        | .error _ => pure "[]"
+      return .ok (mkJson 200 s!"\{\"mission\":{mBody},\"events\":{evJson}}")
+
+  if let some params := (matchRoutePattern? "/api/control/missions/:id/message" rawTarget).orElse
+      (fun _ => (matchRoutePattern? "/api/control/missions/:id/adopt" rawTarget).orElse
+      (fun _ => matchRoutePattern? "/api/control/missions/:id/acknowledge" rawTarget)) then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
+        return .ok (mkJson cCode cBody)
+      let some mRec ← getMission? st.store mid
+        | return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD (.obj #[])
+      let nowIso := formatEpochIso8601Utc nowEpochSec
+      if cleanPath.endsWith "/acknowledge" then
+        discard <| mark_mission_opened st.store mid nowIso
+        return .ok (mkJson 200 "{\"ok\":true}")
+      let content := ((jv.fieldStr? "content").orElse (fun _ => jv.fieldStr? "message")).getD ""
+      if !content.trimAscii.toString.isEmpty then
+        let pl := renderCompact (.obj #[
+          ("type", .str "user_message"),
+          ("content", .str content),
+          ("mission_id", .str mid),
+          ("sender_user_id", .str caller.userId),
+          ("sender_username", .str caller.username)
+        ])
+        discard <| appendMissionEvent st.store mid "user_message" pl nowIso
+        discard <| maybeSpawnWarmHarnessTurn
+          st caller mRec.placementKind mid mRec.backend mRec.workingDirectory
+          content mRec.modelOverride mRec.modelEffort "supervised" "" false
+      else if cleanPath.endsWith "/adopt" then
+        discard <| execParamQuery st.store.missionsDb
+          "UPDATE missions SET status='awaiting_user', orphaned_at='', state_revision=state_revision+1, updated_at=?2 WHERE id=?1;"
+          #[mid, nowIso]
+      return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}}")
 
   -- Mission Detail & Delete (`GET|DELETE /api/control/missions/:id`, `SM-01`, `SM-07`)
   if let some params := matchRoutePattern? "/api/control/missions/:id" rawTarget then
@@ -4738,6 +5152,81 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       vSlots lang req.bodySlice.toByteArray caller.userId caller.username caller.isLegacyUnscoped st.voiceEndpointOverride?
     return .ok (mkJson vCode vBody)
 
+  -- Settings, Proxy API Keys, Capabilities & Stats Parity Endpoints
+  if cleanPath == "/api/settings" && (req.method == "GET" || req.method == "PUT" || req.method == "PATCH") then
+    let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
+    if !isAdm then
+      return .ok (mkJson 403 "{\"error\":\"admin_required\"}")
+    if req.method == "GET" then
+      let rawSettings ← readSettingsJson st.store.rootDir
+      let safeSettings := (rawSettings.removeField "password_hash").removeField "bws_access_token"
+      return .ok (mkJson 200 (renderCompact safeSettings))
+    else
+      let .ok patchJv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let curSettings ← readSettingsJson st.store.rootDir
+      let merged :=
+        match curSettings, patchJv with
+        | .obj basePairs, .obj patchPairs =>
+          Id.run do
+            let mut acc := JVal.obj basePairs
+            for (k, v) in patchPairs do
+              if k != "password_hash" then
+                acc := acc.setField k v
+            return acc
+        | _, _ => curSettings
+      if let .error e ← writeSettingsJson st.store.rootDir merged then
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      return .ok (mkJson 200 (renderCompact ((merged.removeField "password_hash").removeField "bws_access_token")))
+
+  if cleanPath == "/api/proxy-keys" || cleanPath.startsWith "/api/proxy-keys/" then
+    let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
+    if !isAdm then
+      return .ok (mkJson 403 "{\"error\":\"admin_required\"}")
+    if req.method == "GET" && cleanPath == "/api/proxy-keys" then
+      return .ok (mkJson 200 (← listProxyApiKeysJson st.store.rootDir))
+    else if req.method == "POST" && cleanPath == "/api/proxy-keys" then
+      let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD (.obj #[])
+      let nm := (jv.fieldStr? "name").getD "Proxy Key"
+      match ← createProxyApiKeyJson st.store.rootDir nm (formatEpochIso8601Utc nowEpochSec) with
+      | .ok out => return .ok (mkJson 201 out)
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+    else if req.method == "DELETE" && cleanPath.startsWith "/api/proxy-keys/" then
+      let kid := (cleanPath.drop 16).toString
+      let deleted ← deleteProxyApiKey st.store.rootDir kid
+      if deleted then return .ok (mkJson 200 "{\"ok\":true}")
+      else return .ok (mkJson 404 "{\"error\":\"not_found\"}")
+
+  if req.method == "GET" && cleanPath == "/api/capabilities" then
+    return .ok (mkJson 200 "{\"mission_moves\":true,\"project_folders\":true,\"mcp_gateway\":true,\"managed_relay\":true}")
+
+  if req.method == "GET" && cleanPath == "/api/stats" then
+    let mCnt ← match ← execParamQuery st.store.missionsDb "SELECT COUNT(*) FROM missions;" #[] with
+      | .ok rs => pure (((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0)
+      | .error _ => pure 0
+    return .ok (mkJson 200 s!"\{\"missions\":{mCnt}}")
+
+  let isAdmCaller := caller.isLegacyUnscoped || caller.role == "admin"
+  let nowIsoDisp := formatEpochIso8601Utc nowEpochSec
+
+  if let some (sCode, sCtype, sBody) ← dispatchSecretAndApprovalRoutes?
+      st.store st.cfg.workingDir st.store.rootDir st.bunkerStateRef? isAdmCaller
+      req.method rawTarget cleanPath req.bodySlice.toByteArray nowEpochSec then
+    return .ok { status := sCode, contentType := sCtype, corsOrigin? := reqOrigin?, body := sBody.toUTF8 }
+
+  if let some mst := st.managedStore? then
+    if let some (rCode, rCtype, rBody) ← dispatchRemoteFleetAndRelayRoutes?
+        st.store mst st.relayHub? (← st.managedRef.get)
+        req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
+        caller.userId isAdmCaller caller.isLegacyUnscoped nowEpochSec nowIsoDisp then
+      return .ok { status := rCode, contentType := rCtype, corsOrigin? := reqOrigin?, body := rBody }
+
+  if let some (pCode, pCtype, pBody) ← dispatchProjectAndControllerRoutes?
+      st.store st.broadcastHub? st.cfg.workingDir
+      req.method cleanPath rawTarget req.bodySlice.toByteArray
+      caller.userId st.bootstrapAdminId isAdmCaller caller.isLegacyUnscoped nowIsoDisp then
+    return .ok { status := pCode, contentType := pCtype, corsOrigin? := reqOrigin?, body := pBody }
+
   return .ok (mkJson 404 s!"\{\"error\":\"not_found\",\"path\":{jsonEscape cleanPath}}")
 
 /-- Dispatch a parsed `HttpRequest` against `CoreAppState` (`routes` capability parity:
@@ -5369,6 +5858,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       | .ok aid => pure aid
       | .error _ => pure ""
     discard <| backfillManagedMachineOwner managedStore bootAdminId
+    hydrateLegacyDataDir cfg.workingDir dataRoot store managedStore bootAdminId cfg.devMode
     let effAskTmpRoot : System.FilePath :=
       let fromCfg := cfg.askSandboxTmpRoot.trimAscii.toString
       if !fromCfg.isEmpty then System.FilePath.mk fromCfg else System.FilePath.mk "/tmp"
@@ -5381,8 +5871,9 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     if askPendingNotes > 0 || !askReapedSandboxes.isEmpty then
       IO.eprintln s!"[sandboxed-sh] Ask sidecar bootstrap: pending_notes={askPendingNotes} reaped_sandboxes={askReapedSandboxes.size}"
     let searchRes ← openSearchIndex s!"{dataRoot}/search_index"
+    let boatKeyPresent := (← getBoatApiKey? cfg.workingDir dataRoot).isSome
     let initialManaged :=
-      match ← loadManagedFleet managedStore false false 2000 0 100 with
+      match ← loadManagedFleet managedStore boatKeyPresent boatKeyPresent 2000 0 100 with
       | .ok mf => mf
       | .error _ => ({} : ManagedFleetState)
     let managedRef ← IO.mkRef initialManaged
@@ -5411,6 +5902,8 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let voiceSlots ← newVoiceRelaySlots
     let warmMgr ← OrbBin.ClaudeControl.newWarmHarnessManager
     let pendingControlCallsRef ← IO.mkRef (#[] : Array (String × String))
+    let broadcastHub ← newBroadcastHub
+    let relayHub ← newRelayHub (if maxRequests?.isSome then 0 else 25000)
     let appState : CoreAppState := {
       cfg := cfg
       store := store
@@ -5433,6 +5926,8 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       voiceSlots? := some voiceSlots
       warmMgr? := some warmMgr
       pendingControlCallsRef? := some pendingControlCallsRef
+      broadcastHub? := some broadcastHub
+      relayHub? := some relayHub
     }
     let bindHost := if cfg.host == "localhost" then "127.0.0.1" else cfg.host
     let .ok (listenFd, boundPort) ← tcpListen bindHost cfg.port 128
@@ -5443,6 +5938,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         return 1
     IO.eprintln s!"[sandboxed-sh] listening on http://{bindHost}:{boundPort} (dev_mode={cfg.devMode})"
     let notifySock := ((← IO.getEnv "NOTIFY_SOCKET").getD "").trimAscii.toString
+    let simulateWedge := ((← IO.getEnv "SANDBOXED_SH_SIMULATE_WEDGE").getD "") == "1"
     let watchdogUsec := ((← IO.getEnv "WATCHDOG_USEC").bind String.toNat?).getD 0
     let wdIntervalSec : UInt64 :=
       if watchdogUsec > 0 then (max 1 (watchdogUsec / 2000000)).toUInt64 else 15
@@ -5456,7 +5952,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       | .error _ =>
         if maxRequests?.isNone then
           let curSec ← coreEpochSec
-          if !notifySock.isEmpty && curSec ≥ lastWatchdogSec + wdIntervalSec then
+          if !notifySock.isEmpty && !simulateWedge && curSec ≥ lastWatchdogSec + wdIntervalSec then
             lastWatchdogSec := curSec
             discard <| sdNotifyRaw notifySock "WATCHDOG=1\n"
           if curSec ≥ lastTelFlushSec + 30 then
@@ -5467,7 +5963,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           handleClientConn appState cfd false
         else
           discard <| IO.asTask (prio := .dedicated) (handleClientConn appState cfd true)
-          if !notifySock.isEmpty then
+          if !notifySock.isEmpty && !simulateWedge then
             let curSec ← coreEpochSec
             if curSec ≥ lastWatchdogSec + wdIntervalSec then
               lastWatchdogSec := curSec
