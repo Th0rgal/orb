@@ -160,4 +160,15 @@ class OrbReadCacheTest {
         assertTrue(staleWrite.isEmpty())
         assertFalse(OrbReadCache.hasRowsInMemory(evKey))
     }
+
+    @Test
+    fun shouldBlacklistOpenBundleExcludesMissionNotFound404() {
+        assertFalse(OrbCore.shouldBlacklistOpenBundle(404, "mission_not_found", "{\"error\":\"mission_not_found\"}"))
+        assertFalse(OrbCore.shouldBlacklistOpenBundle(404, "HTTP 404", "{\"error\":\"MISSION_NOT_FOUND\"}"))
+        assertTrue(OrbCore.shouldBlacklistOpenBundle(404, "not_found", "{\"error\":\"not_found\",\"path\":\"/api/control/missions/m1/open\"}"))
+        assertTrue(OrbCore.shouldBlacklistOpenBundle(404, "Not Found", ""))
+        assertTrue(OrbCore.shouldBlacklistOpenBundle(405, "Method Not Allowed", ""))
+        assertTrue(OrbCore.shouldBlacklistOpenBundle(501, "Not Implemented", ""))
+        assertFalse(OrbCore.shouldBlacklistOpenBundle(500, "internal", "{\"error\":\"internal\"}"))
+    }
 }

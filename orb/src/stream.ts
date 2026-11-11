@@ -287,6 +287,14 @@ export function resetMissionOpenCapabilityForTest(): void {
   unsupportedMissionOpenOrigins.clear();
 }
 
+export function shouldBlacklistOpenBundle(status: number, detail: string): boolean {
+  if (status === 405 || status === 501) return true;
+  if (status === 404) {
+    return !detail.toLowerCase().includes("mission_not_found");
+  }
+  return false;
+}
+
 /** Single-roundtrip mission open (`GET /api/control/missions/:id/open`) returning
  * `{ protocol: 1, mission, events, spine, queue, max_seq, has_more, next_cursor, page_max_seq, reset }`.
  * Latches unsupported origins per `(apiUrl, serverBuildHash)` and returns `null` so callers
@@ -325,11 +333,8 @@ export async function getMissionOpenBundle(
     return bundle as unknown as MissionOpenBundle;
   } catch (err) {
     if (opts?.signal?.aborted) throw err;
-    if (err instanceof ApiError && (err.status === 404 || err.status === 405 || err.status === 501)) {
-      // Only latch 404 when the mission itself exists on legacy servers (`detail` does not mention `mission_not_found`)
-      if (err.status !== 404 || !String(err.message || "").includes("mission_not_found")) {
-        unsupportedMissionOpenOrigins.add(originKey);
-      }
+    if (err instanceof ApiError && shouldBlacklistOpenBundle(err.status, err.detail || err.message || "")) {
+      unsupportedMissionOpenOrigins.add(originKey);
     }
     return null;
   }

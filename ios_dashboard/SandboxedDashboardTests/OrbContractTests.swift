@@ -1355,4 +1355,14 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(OrbReadCache.readEvents(missionId).map(\.sequence), [1, 10, 11])
         XCTAssertEqual(OrbReadCache.readEvents(missionId).last?.content, "Live stream answer")
     }
+
+    func testShouldBlacklistOpenBundleExcludesMissionNotFound404() {
+        XCTAssertFalse(OrbCore.shouldBlacklistOpenBundle(status: 404, detail: "{\"error\":\"mission_not_found\"}"))
+        XCTAssertFalse(OrbCore.shouldBlacklistOpenBundle(status: 404, detail: "MISSION_NOT_FOUND"))
+        XCTAssertTrue(OrbCore.shouldBlacklistOpenBundle(status: 404, detail: "{\"error\":\"not_found\",\"path\":\"/api/control/missions/m1/open\"}"))
+        XCTAssertTrue(OrbCore.shouldBlacklistOpenBundle(status: 404, detail: "Not Found"))
+        XCTAssertTrue(OrbCore.shouldBlacklistOpenBundle(status: 405, detail: "Method Not Allowed"))
+        XCTAssertTrue(OrbCore.shouldBlacklistOpenBundle(status: 501, detail: "Not Implemented"))
+        XCTAssertFalse(OrbCore.shouldBlacklistOpenBundle(status: 500, detail: "{\"error\":\"internal\"}"))
+    }
 }

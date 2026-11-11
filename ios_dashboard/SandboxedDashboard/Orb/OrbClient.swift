@@ -471,6 +471,16 @@ final class OrbCore {
         return MissionEventsResult(events: events, maxSequence: maxSequence)
     }
 
+    nonisolated static func shouldBlacklistOpenBundle(status: Int, detail: String) -> Bool {
+        if status == 405 || status == 501 {
+            return true
+        }
+        if status == 404 {
+            return !detail.localizedCaseInsensitiveContains("mission_not_found")
+        }
+        return false
+    }
+
     func getMissionOpenBundle(
         id: String,
         sinceSeq: Int64? = nil,
@@ -507,7 +517,7 @@ final class OrbCore {
             }
             return bundle
         } catch let http as OrbHTTPError {
-            if http.status == 404 || http.status == 405 || http.status == 501 {
+            if Self.shouldBlacklistOpenBundle(status: http.status, detail: http.detail) {
                 openBundleUnsupportedScopes.insert(scopeKey)
             }
             return nil

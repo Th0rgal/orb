@@ -36,8 +36,10 @@ import {
   savePersistedTranscript,
 } from "../src/persistentCache";
 import {
+  getMissionOpenBundle,
   resetMissionOpenCapabilityForTest,
   setMultiplexSyncEnabledForTest,
+  shouldBlacklistOpenBundle,
   streamMission,
   type StreamEvent,
 } from "../src/stream";
@@ -681,6 +683,96 @@ describe("Zero-Wait Conversation Loading & Two-Tier Answer Cache", () => {
     const resolved = await getMission("m-fence", { coreOnly: true });
     expect(resolved.model_override).toBe("fresh-from-server");
     expect(fetchCalls).toHaveLength(1);
+    clearConnection({ persist: false });
+  });
+
+  it("excludes mission_not_found 404s from /open capability blacklist and preserves concurrent live stream writes", async () => {
+    expect(shouldBlacklistOpenBundle(404, '{"error":"mission_not_found"}')).toBe(false);
+    expect(shouldBlacklistOpenBundle(404, "MISSION_NOT_FOUND")).toBe(false);
+    expect(shouldBlacklistOpenBundle(404, '{"error":"not_found"}')).toBe(true);
+    expect(shouldBlacklistOpenBundle(405, "Method Not Allowed")).toBe(true);
+    expect(shouldBlacklistOpenBundle(501, "Not Implemented")).toBe(true);
+    expect(shouldBlacklistOpenBundle(500, '{"error":"internal"}')).toBe(false);
+
+    resetMissionOpenCapabilityForTest();
+    setConnection("http://open-404-latch.test", "jwt-404");
+    const openCalls: string[] = [];
+    let releaseLiveOpen!: () => void;
+    const liveOpenGate = new Promise<void>((r) => {
+      releaseLiveOpen = r;
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        openCalls.push(url);
+        if (url.includes("/missions/deleted-m/open")) {
+          return new Response('{"error":"mission_not_found"}', {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.includes("/missions/live-m/open")) {
+          await liveOpenGate;
+          return new Response(
+            JSON.stringify({
+              protocol: 1,
+              mission: {
+                id: "live-m",
+                status: "active",
+                created_at: "2026-11-11T00:00:00Z",
+                updated_at: "2026-11-11T00:00:01Z",
+              },
+              events: [
+                {
+                  id: 10,
+                  sequence: 10,
+                  event_id: "a-10",
+                  event_type: "assistant_message",
+                  content: "Server reply 10",
+                  timestamp: "2026-11-11T00:00:01Z",
+                },
+              ],
+              spine: [],
+              queue: [],
+              max_seq: 10,
+              has_more: false,
+              next_cursor: 10,
+              page_max_seq: 10,
+              reset: false,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("{}", { status: 404 });
+      }),
+    );
+
+    const missing = await getMissionOpenBundle("deleted-m");
+    expect(missing).toBeNull();
+
+    // Next mission still uses `/open` because `mission_not_found` did not blacklist the origin!
+    const loading = loadTranscript("live-m");
+    await vi.waitFor(() => expect(openCalls.some((u) => u.includes("/missions/live-m/open"))).toBe(true));
+
+    // Concurrent live event arrives while `/open` is in flight:
+    applyLiveEventsToTranscriptCache("live-m", [
+      {
+        type: "assistant_message",
+        sequence: 11,
+        eventId: "a-11",
+        data: { id: "a-11", content: "Concurrent live 11", success: true },
+      },
+    ]);
+    releaseLiveOpen();
+
+    const snap = await loading;
+    expect(snap.cursor).toBe(11);
+    expect(snap.items.filter((i) => i.kind === "text").map((i) => (i.kind === "text" ? i.text : ""))).toEqual([
+      "Server reply 10",
+      "Concurrent live 11",
+    ]);
     clearConnection({ persist: false });
   });
 });

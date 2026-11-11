@@ -1952,6 +1952,15 @@ class OrbCore private constructor(context: Context) {
             if (authMode == "multi_user") user?.role == "admin"
             else (user == null || user.role == "admin")
 
+        internal fun shouldBlacklistOpenBundle(status: Int?, message: String?, body: String? = null): Boolean {
+            if (status == 405 || status == 501) return true
+            if (status == 404) {
+                val combined = "${message.orEmpty()}\n${body.orEmpty()}"
+                return !combined.contains("mission_not_found", ignoreCase = true)
+            }
+            return false
+        }
+
         @Volatile
         private var instance: OrbCore? = null
 
@@ -2790,7 +2799,7 @@ class OrbCore private constructor(context: Context) {
                 dict
             }
         } catch (err: OrbError) {
-            if (err.status == 404 || err.status == 405 || err.status == 501) {
+            if (shouldBlacklistOpenBundle(err.status, err.message, err.body)) {
                 openBundleUnsupportedScopes.add(scopeKey)
             }
             null

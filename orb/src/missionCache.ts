@@ -1029,6 +1029,45 @@ async function fetchTranscript(
 ): Promise<TranscriptSnap> {
   const version=connectionVersionSafe();const check=()=>{if(opts?.signal?.aborted)throw new DOMException("Aborted","AbortError");if(version!==connectionVersionSafe())throw Error("Connection changed during transcript load.");};
   const previous = peekReadyTranscript(id) ?? (await hydrateTranscriptFromDisk(id));
+  const baselineSnap = peekTranscript(id);
+  const baselineSeqs = new Set<number>();
+  for (const ev of baselineSnap?.stream ?? []) {
+    if (ev.sequence !== undefined) baselineSeqs.add(ev.sequence);
+  }
+  let previewSnap: TranscriptSnap | undefined;
+  const mergeConcurrentLive = (
+    baseStream: StreamEvent[],
+    baseCursor: number | undefined,
+    hadReset: boolean,
+  ): { stream: StreamEvent[]; cursor: number | undefined; retainedLive: StreamEvent[] } => {
+    let nextStream = baseStream;
+    let nextCursor = baseCursor;
+    const current = peekTranscript(id);
+    const hasConcurrent = Boolean(current && current !== baselineSnap && current !== previewSnap);
+    if (hasConcurrent && current?.stream?.length) {
+      const concurrentNewer = current.stream.filter(
+        (e) =>
+          e.sequence !== undefined &&
+          !baselineSeqs.has(e.sequence) &&
+          (nextCursor === undefined || e.sequence > nextCursor),
+      );
+      if (concurrentNewer.length > 0) {
+        nextStream = mergeStreamBySequence(nextStream, concurrentNewer);
+        for (const ev of concurrentNewer) {
+          if (ev.sequence !== undefined && (nextCursor === undefined || ev.sequence > nextCursor)) {
+            nextCursor = ev.sequence;
+          }
+        }
+      }
+    }
+    const liveSource = hasConcurrent
+      ? current?.liveTail
+      : hadReset
+        ? undefined
+        : (previous?.liveTail ?? baselineSnap?.liveTail);
+    const retainedLive = liveSource?.length ? heldAfterHistory(nextStream, liveSource) : [];
+    return { stream: nextStream, cursor: nextCursor, retainedLive };
+  };
   check();
   // Fast single-roundtrip path (`GET /api/control/missions/:id/open`) returning
   // `{ protocol: 1, mission, events, spine, queue, max_seq, has_more, next_cursor, page_max_seq, reset }`.
@@ -1111,21 +1150,10 @@ async function fetchTranscript(
         eventId: row.id,
         data: { id: row.id, content: row.content, queued: row.inflight !== true },
       }));
-      const latest = peekReadyTranscript(id) ?? previous;
-      if (latest?.stream?.length) {
-        const concurrentNewer = latest.stream.filter(
-          (e) => e.sequence !== undefined && (cursor === undefined || e.sequence > cursor),
-        );
-        if (concurrentNewer.length > 0) {
-          stream = mergeStreamBySequence(stream, concurrentNewer);
-          for (const ev of concurrentNewer) {
-            if (ev.sequence !== undefined && (cursor === undefined || ev.sequence > cursor)) {
-              cursor = ev.sequence;
-            }
-          }
-        }
-      }
-      const retainedLive = latest?.liveTail?.length ? heldAfterHistory(stream, latest.liveTail) : [];
+      const mergedLive = mergeConcurrentLive(stream, cursor, false);
+      stream = mergedLive.stream;
+      cursor = mergedLive.cursor;
+      const retainedLive = mergedLive.retainedLive;
       lastNetworkFetchAt.set(key(id), Date.now());
       return {
         items: buildTranscript([...stream, ...retainedLive, ...queueEvents], sessionFor(id)),
@@ -1159,13 +1187,15 @@ async function fetchTranscript(
           if (!page?.events.length || version !== connectionVersionSafe() || opts?.signal?.aborted) return;
           preview = spineAnswers(page.events.map(storedToStream).filter((e): e is StreamEvent => e !== null));
           if (!tailSettled && !peekReadyTranscript(id)) {
-            saveSnapshot(key(id), {
+            const savedPreview: TranscriptSnap = {
               activity: page.activity,
               items: buildTranscript(preview, previewSessionFor(id)),
               stream: preview,
               fromLog: true,
               detailsPending: true,
-            });
+            };
+            previewSnap = savedPreview;
+            saveSnapshot(key(id), savedPreview);
           }
         })
         .catch(() => {})
@@ -1240,21 +1270,10 @@ async function fetchTranscript(
   const queued = await queuedPromise;
   check();
   const queueEvents: StreamEvent[] = queued.map(row => ({ type: "user_message", eventId: row.id, data: { id: row.id, content: row.content, queued: row.inflight !== true } }));
-  const latest = peekReadyTranscript(id) ?? previous;
-  if (latest?.stream?.length) {
-    const concurrentNewer = latest.stream.filter(
-      (e) => e.sequence !== undefined && (cursor === undefined || e.sequence > cursor),
-    );
-    if (concurrentNewer.length > 0) {
-      stream = mergeStreamBySequence(stream, concurrentNewer);
-      for (const ev of concurrentNewer) {
-        if (ev.sequence !== undefined && (cursor === undefined || ev.sequence > cursor)) {
-          cursor = ev.sequence;
-        }
-      }
-    }
-  }
-  const retainedLive = latest?.liveTail?.length ? heldAfterHistory(stream, latest.liveTail) : [];
+  const mergedLive = mergeConcurrentLive(stream, cursor, resets > 0);
+  stream = mergedLive.stream;
+  cursor = mergedLive.cursor;
+  const retainedLive = mergedLive.retainedLive;
   // History first puts accepted user turns at their actual transcript positions.
   lastNetworkFetchAt.set(key(id), Date.now());
   return { items: buildTranscript([...stream, ...retainedLive, ...queueEvents], sessionFor(id)), stream, ...(retainedLive.length ? { liveTail: retainedLive } : {}), fromLog: true, spineComplete, ...(spineBefore !== undefined ? { spineBefore } : {}), queueError, cursor, before, hasOlder };
