@@ -1297,7 +1297,7 @@ export default function App() {
     const archivedBefore = new Map<string, Mission>();
     const onArchived = (e: Event) => {
       const { id } = (e as CustomEvent<{ id: string }>).detail;
-      keepAlivePool.evictMission(id);
+      if (id !== currentMissionId()) keepAlivePool.evictMission(id);
       setMissions(prev => { const m = prev.find(x => x.id === id); if (m) archivedBefore.set(id, m); return prev.filter(x => x.id !== id); });
     };
     const onArchiveFailed = (e: Event) => {
