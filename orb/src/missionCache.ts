@@ -968,23 +968,28 @@ function transcriptJob(id:string,kind:JobKind,load:()=>Promise<TranscriptSnap>):
 }
 const prefetchQueue=new Map<string,string>();
 const prefetchControllers=new Map<string,AbortController>();
+const prefetchInFlight=new Map<string,Promise<TranscriptSnap|null>>();
 let prefetchActive=0;
 function cancelPrefetch(scope:string){
  prefetchQueue.delete(scope);
+ prefetchInFlight.delete(scope);
  const ctl=prefetchControllers.get(scope);
  if(ctl){prefetchControllers.delete(scope);ctl.abort();}
 }
 export function refreshTranscript(id:string):Promise<TranscriptSnap>{
  const scope=key(id),initial=jobs.get(scope)?.pending.get('initial');
- cancelPrefetch(scope);
  if(initial&&!peekReadyTranscript(id))return initial;
+ if(!peekReadyTranscript(id)&&prefetchInFlight.has(scope))return loadTranscript(id);
+ cancelPrefetch(scope);
  return transcriptJob(id,'refresh',()=>fetchTranscript(id));
 }
 export function loadTranscript(id:string):Promise<TranscriptSnap>{
  const cached=peekReadyTranscript(id);
  if(cached)return Promise.resolve(cached);
- cancelPrefetch(key(id));
- return transcriptJob(id,'initial',async()=>await hydrateTranscriptFromDisk(id)??await fetchTranscript(id));
+ const scope=key(id);
+ prefetchQueue.delete(scope);
+ const adopted=prefetchInFlight.get(scope);
+ return transcriptJob(id,'initial',async()=>(adopted?await adopted:null)??await hydrateTranscriptFromDisk(id)??await fetchTranscript(id));
 }
 // A transcript the cache cannot hold (too large), evicted under LRU pressure,
 // or that could not load is not speculatively fetched again at every list
@@ -1023,22 +1028,27 @@ function pumpPrefetch(){
   const version=connectionVersionSafe();
   prefetchControllers.set(scope,ctl);
   prefetchActive++;
-  void (async()=>{
+  const run=(async():Promise<TranscriptSnap|null>=>{
    const hydrated=await hydrateTranscriptFromDisk(id);
-   if(ctl.signal.aborted||version!==connectionVersionSafe()||jobs.has(scope))return;
+   if(ctl.signal.aborted||version!==connectionVersionSafe())return null;
    const snap=hydrated??await fetchTranscript(id,{priority:"p2",signal:ctl.signal});
-   if(ctl.signal.aborted||version!==connectionVersionSafe()||jobs.has(scope)||peekReadyTranscript(id))return;
-   saveSnapshot(scope,snap);
-   dirtyMissions.delete(scope);
-   reconcileWarmSubscriptions();
-   if(!active.has(scope)&&cachePeek(scope)===undefined)prefetchPaused.set(scope,Date.now()+PREFETCH_PAUSE_MS);
+   if(ctl.signal.aborted||version!==connectionVersionSafe())return null;
+   if(!jobs.has(scope)&&!peekReadyTranscript(id)){
+    saveSnapshot(scope,snap);
+    dirtyMissions.delete(scope);
+    reconcileWarmSubscriptions();
+    if(!active.has(scope)&&cachePeek(scope)===undefined)prefetchPaused.set(scope,Date.now()+PREFETCH_PAUSE_MS);
+   }
+   return snap;
   })()
-   .catch(()=>{if(!ctl.signal.aborted)prefetchPaused.set(scope,Date.now()+PREFETCH_RETRY_MS);})
+   .catch(()=>{if(!ctl.signal.aborted)prefetchPaused.set(scope,Date.now()+PREFETCH_RETRY_MS);return null;})
    .finally(()=>{
     if(prefetchControllers.get(scope)===ctl)prefetchControllers.delete(scope);
+    if(prefetchInFlight.get(scope)===run)prefetchInFlight.delete(scope);
     prefetchActive--;
     pumpPrefetch();
    });
+  prefetchInFlight.set(scope,run);
  }
 }
 onBackgroundSyncActiveChange(()=>pumpPrefetch());
@@ -1053,6 +1063,7 @@ export function prefetchTranscript(id:string){
 export function forgetPrefetchPauses(){
   prefetchPaused.clear();
   prefetchQueue.clear();
+  prefetchInFlight.clear();
   for (const [, ctl] of prefetchControllers) ctl.abort();
   prefetchControllers.clear();
   for (const [, timer] of persistTimers) clearTimeout(timer);

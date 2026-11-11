@@ -1189,6 +1189,10 @@ export default function App() {
     }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r" && !e.altKey) {
       e.preventDefault();
+      if (e.shiftKey) {
+        window.location.reload();
+        return;
+      }
       window.dispatchEvent(new Event("orb:refresh"));
       void refreshMissions();
       return;
@@ -1452,10 +1456,10 @@ export default function App() {
     window.removeEventListener("keydown", onKey);
   });
 
-  const commitFork = (m: Mission) => {
+  const commitFork = (m: Mission, navigate = true) => {
     if (isBtwMission(m)) {
       const parent = btwParentId(m);
-      if (parent) {
+      if (parent && navigate) {
         hintSideQuestionOpen(sideQuestionKey(parent));
         open(`m:${parent}`, false);
       }
@@ -1463,10 +1467,10 @@ export default function App() {
     }
     batch(() => {
       setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]);
-      setOpenMission(m);
+      if (navigate) setOpenMission(m);
       window.dispatchEvent(new CustomEvent("orb:mission-forked", { detail: { mission: m } }));
       bumpProjects();
-      open(`m:${m.id}`);
+      if (navigate) open(`m:${m.id}`);
     });
   };
 
@@ -2084,7 +2088,13 @@ export default function App() {
                         onMission={syncOpenMission}
                         onPlan={(id, data) => setPreviewPlan({ id, data })}
                         onContext={(id, pct) => setPreviewContext({ id, pct })}
-                        onFork={commitFork}
+                        onFork={m => {
+                          const active = isActive();
+                          if (!active && slot.missionId() && m.id !== slot.missionId()) {
+                            keepAlivePool.evictMission(slot.missionId());
+                          }
+                          commitFork(m, active);
+                        }}
                       />
                     </MissionLookupContext.Provider>
                   }
@@ -2099,7 +2109,13 @@ export default function App() {
                     onMission={syncOpenMission}
                     onContext={(id, pct) => setPreviewContext({ id, pct })}
                     onPlan={(id, data) => setPreviewPlan({ id, data })}
-                    onFork={commitFork}
+                    onFork={m => {
+                      const active = isActive();
+                      if (!active && slot.missionId() && m.id !== slot.missionId()) {
+                        keepAlivePool.evictMission(slot.missionId());
+                      }
+                      commitFork(m, active);
+                    }}
                   />
                 </Show>
               </SlotActiveContext.Provider>

@@ -362,4 +362,73 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   const linuxSettings = await readSurfaceAlphas();
   expect(linuxSettings.sidebar).toBeCloseTo(0.78, 2);
   expect(linuxSettings.main).toBeCloseTo(0.94, 2);
+
+  // 7. Sidebar tooltip overlay (.overlay-popover.row-tip) is frosted translucent (< 1 alpha)
+  // and queue hover geometry (.followup-queue / .queue-row) has symmetric 4px insets.
+  const geometryAndOverlay = await page.evaluate(() => {
+    const parseAlpha = (bg: string): number => {
+      const m = bg.match(/rgba?\([^)]*[,/]\s*([0-9.]+)\s*\)/);
+      if (m) return Number(m[1]);
+      const srgb = bg.match(/color\(srgb [^/]+\/\s*([0-9.]+)\s*\)/);
+      if (srgb) return Number(srgb[1]);
+      return bg === "transparent" ? 0 : 1;
+    };
+    const tip = document.createElement("div");
+    tip.className = "overlay-popover row-tip";
+    document.body.appendChild(tip);
+    const tipAlpha = parseAlpha(getComputedStyle(tip).backgroundColor);
+    tip.remove();
+
+    const makeQueue = (withHeader: boolean) => {
+      const sec = document.createElement("section");
+      sec.className = "followup-queue";
+      sec.style.width = "400px";
+      sec.style.animation = "none";
+      if (withHeader) {
+        const h = document.createElement("header");
+        h.innerHTML = '<span class="queue-count">1 Queued</span>';
+        sec.appendChild(h);
+      }
+      const ol = document.createElement("ol");
+      ol.innerHTML =
+        '<li class="queue-row" style="animation:none"><div class="queue-line"><span class="queue-text">Test</span><span class="queue-row-actions" style="opacity:1"><button class="queue-action-btn" type="button"></button></span></div></li>';
+      sec.appendChild(ol);
+      document.body.appendChild(sec);
+      const secBox = sec.getBoundingClientRect();
+      const rowBox = sec.querySelector(".queue-row")!.getBoundingClientRect();
+      const btnBox = sec.querySelector(".queue-action-btn")!.getBoundingClientRect();
+      const headerBottom = withHeader ? sec.querySelector("header")!.getBoundingClientRect().bottom : secBox.top + 1;
+      const insets = {
+        top: Math.round(rowBox.top - headerBottom),
+        left: Math.round(rowBox.left - (secBox.left + 1)),
+        right: Math.round((secBox.right - 1) - rowBox.right),
+        bottom: Math.round((secBox.bottom - 1) - rowBox.bottom),
+        btnTop: Math.round(btnBox.top - rowBox.top),
+        btnBottom: Math.round(rowBox.bottom - btnBox.bottom),
+        btnRight: Math.round(rowBox.right - btnBox.right),
+      };
+      sec.remove();
+      return insets;
+    };
+    return { tipAlpha, headerless: makeQueue(false), headed: makeQueue(true) };
+  });
+  expect(geometryAndOverlay.tipAlpha).toBeCloseTo(0.84, 2);
+  expect(geometryAndOverlay.headerless).toEqual({
+    top: 4,
+    left: 4,
+    right: 4,
+    bottom: 4,
+    btnTop: 4,
+    btnBottom: 4,
+    btnRight: 4,
+  });
+  expect(geometryAndOverlay.headed).toEqual({
+    top: 4,
+    left: 4,
+    right: 4,
+    bottom: 4,
+    btnTop: 4,
+    btnBottom: 4,
+    btnRight: 4,
+  });
 });
