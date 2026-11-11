@@ -4021,7 +4021,7 @@ private def runR4cHarnessSessionTests (store : CoreStore) (tmpRoot : String) : I
     return 1
   return 0
 
-set_option maxHeartbeats 600000 in
+set_option maxHeartbeats 1000000 in
 set_option maxRecDepth 8000 in
 private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let muTs ← IO.monoNanosNow
@@ -4203,12 +4203,31 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   if memUsersSt != 403 || memDeploySt != 403 || memAddProvSt != 403 then
     return (← fail s!"member admin-route confinement failed: users={memUsersSt} deploy={memDeploySt} prov={memAddProvSt}")
 
-  -- Backend model catalog & routing catalog: Opus 5.5 is default (index 0), Fable 5.2 + Mythos 5.2 + Meta Muse Wonder/Ember present, Fable 5.1 absent from picker
+  -- Backend model catalog & routing catalog: Opus 5.5 is default (index 0), Fable 5.2 + Mythos 5.2 + Meta Muse Wonder/Ember present, Fable 5.1 absent from picker,
+  -- and non-admin `member` callers never receive internal custom-provider `base_url` hostnames or inline chain secrets on `/api/providers*` or `/api/model-routing/chains`.
+  let savedChainsBeforeCatalogCheck ← chainsRef.get
+  let (custAddSt, _, _) ← sendReq "POST" "/api/ai/providers" adminTok
+    "{\"id\":\"cust-vllm\",\"name\":\"Internal VLLM\",\"provider_type\":\"custom\",\"base_url\":\"http://vllm-internal.corp.local:8000\",\"api_key\":\"sk-vllm-1\",\"enabled\":true,\"custom_models\":[{\"id\":\"qwen3-coder\",\"name\":\"Qwen 3 Coder\"}]}"
+  let (chainAddSt, _, _) ← sendReq "POST" "/api/model-routing/chains" adminTok
+    "{\"id\":\"cust-chain\",\"name\":\"Custom Chain\",\"models\":[{\"provider_id\":\"custom:cust-vllm\",\"model_id\":\"qwen3-coder\",\"base_url\":\"http://vllm-internal.corp.local:8000\",\"api_key\":\"sk-inline-chain-secret\",\"rpm_limit\":120}]}"
   let (bmSt, bmBody, _) ← sendReq "GET" "/api/providers/backend-models" adminTok ""
+  let (alBmSt, alBmBody, _) ← sendReq "GET" "/api/providers/backend-models" aliceTok ""
   let bmJv := (OrbBin.Json.parse bmBody).toOption.getD (.obj #[])
   let ccModels := ((bmJv.fieldOrNull "backends").fieldArr? "claudecode").getD #[]
   let firstCcVal := (ccModels[0]?.bind (·.fieldStr? "value")).getD ""
   let (catSt, catBody, _) ← sendReq "GET" "/api/providers" adminTok ""
+  let (alCatSt, alCatBody, _) ← sendReq "GET" "/api/providers" aliceTok ""
+  let (admChainsSt, admChainsBody, _) ← sendReq "GET" "/api/model-routing/chains" adminTok ""
+  let (alChainsSt, alChainsBody, _) ← sendReq "GET" "/api/model-routing/chains" aliceTok ""
+  let (alResolveSt, _, _) ← sendReq "GET" "/api/model-routing/chains/cust-chain/resolve" aliceTok ""
+  -- When `alice` disables `cust-vllm` in her preferences, both `/api/providers` and `/api/providers/backend-models` omit `qwen3-coder` for `alice`
+  let (alDisableCustSt, _, _) ← sendReq "PUT" "/api/ai/providers/cust-vllm/preference" aliceTok "{\"enabled\":false}"
+  let (_, alCatDisabledBody, _) ← sendReq "GET" "/api/providers" aliceTok ""
+  let (_, alBmDisabledBody, _) ← sendReq "GET" "/api/providers/backend-models" aliceTok ""
+  -- Clean up temporary custom provider & chain and restore `chainsRef` before section 6's proxy routing test
+  let (custDelSt, _, _) ← sendReq "DELETE" "/api/ai/providers/cust-vllm" adminTok ""
+  discard <| execParamQuery store.missionsDb "DELETE FROM model_routing_chains WHERE id=?1;" #["cust-chain"]
+  discard <| publishRoutingChainsUpdate app savedChainsBeforeCatalogCheck
   let museTargets := parseChainTargetsJson "[{\"provider_id\":\"muse\",\"model_id\":\"muse-wonder-1.0\"}]" #[]
   let agyTargets := parseChainTargetsJson "[{\"provider_id\":\"antigravity\",\"model_id\":\"agy-model-high\"},{\"provider_id\":\"antigravity\",\"model_id\":\"agy-demo-low\"}]" #[]
   let agyGrouped := OrbBin.ClaudeControl.groupAntigravityModels #[
@@ -4217,20 +4236,35 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
     ("gemini-4-argon-medium", "Argon (Medium)")
   ]
   let (agyCliMdl, agyCliEff) := OrbBin.ClaudeControl.normalizeAntigravityCliModel "agy-model" (some "medium")
-  if bmSt != 200 || firstCcVal != "claude-opus-5-5" ||
+  if custAddSt != 201 || chainAddSt != 201 || custDelSt != 200 || alDisableCustSt != 200 ||
+     bmSt != 200 || alBmSt != 200 || firstCcVal != "claude-opus-5-5" ||
      (bmBody.splitOn "claude-fable-5-2").length < 2 ||
      (bmBody.splitOn "claude-mythos-5-2").length < 2 ||
      (bmBody.splitOn "claude-fable-5-1").length != 1 ||
      (bmBody.splitOn "muse/muse-wonder-1.0").length < 2 ||
      (bmBody.splitOn "muse/muse-ember-1.0").length < 2 ||
+     (alBmBody.splitOn "cust-vllm/qwen3-coder").length < 2 ||
+     (alBmBody.splitOn "vllm-internal.corp.local").length != 1 ||
+     (alBmDisabledBody.splitOn "qwen3-coder").length != 1 ||
      catSt != 200 || (catBody.splitOn "muse-wonder-1.0").length < 2 ||
      (catBody.splitOn "muse-ember-1.0").length < 2 ||
+     (catBody.splitOn "vllm-internal.corp.local").length < 2 ||
+     alCatSt != 200 || (alCatBody.splitOn "qwen3-coder").length < 2 ||
+     (alCatBody.splitOn "vllm-internal.corp.local").length != 1 ||
+     (alCatDisabledBody.splitOn "qwen3-coder").length != 1 ||
+     admChainsSt != 200 || (admChainsBody.splitOn "sk-inline-chain-secret").length != 1 ||
+     (admChainsBody.splitOn "vllm-internal.corp.local").length < 2 ||
+     alChainsSt != 200 || (alChainsBody.splitOn "cust-chain").length < 2 ||
+     (alChainsBody.splitOn "sk-inline-chain-secret").length != 1 ||
+     (alChainsBody.splitOn "vllm-internal.corp.local").length != 1 ||
+     (alChainsBody.splitOn "rpm_limit").length != 1 ||
+     alResolveSt != 403 ||
      (museTargets[0]?).map (·.baseUrl) != some "https://api.meta.ai" ||
      (agyTargets[0]?).map (·.modelId) != some "gemini-4-carbon-high" ||
      (agyTargets[1]?).map (·.modelId) != some "gemini-4-argon-low" ||
      agyGrouped != #[("gemini-4-carbon", "Carbon"), ("gemini-4-argon", "Argon")] ||
      agyCliMdl != "gemini-4-carbon-medium" || agyCliEff != none then
-    return (← fail s!"backend-models / catalog check failed: firstCc={firstCcVal} bmSt={bmSt} catSt={catSt}")
+    return (← fail s!"backend-models / catalog / chain redaction check failed: firstCc={firstCcVal} bmSt={bmSt} catSt={catSt} alCat={alCatBody} alChains={alChainsBody} alRes={alResolveSt}")
 
   -- Last-active-admin protection: disable/demote `opsadmin` first (so `admin` is sole active admin), then verify `admin` cannot be disabled/demoted/deleted!
   let opsOpt ← getUserByUsername? store "opsadmin"
@@ -4596,6 +4630,7 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
 
   return 0
 
+set_option maxHeartbeats 800000 in
 set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
