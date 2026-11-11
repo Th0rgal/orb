@@ -306,9 +306,10 @@ export function WorkingDirectoryPicker(p: {
       return;
     }
     const machine = p.machine;
+    const current = p.value.trim();
     setPicking(true);
     try {
-      const path = await invoke("pick_working_directory");
+      const path = await invoke<string | null>("pick_working_directory", current ? { path: current } : undefined);
       if (path && p.machine === machine) p.onChange(path);
     } catch (e) {
       setError(String(e));

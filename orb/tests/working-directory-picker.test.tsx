@@ -17,6 +17,7 @@ it("uses the native folder picker and keeps the selection on cancellation", asyn
   render(() => <WorkingDirectoryPicker machine="local" value="/Users/test/old" onChange={change} />);
   fireEvent.click(screen.getByRole("button", { name: "Choose working folder" }));
   await waitFor(() => expect(change).toHaveBeenCalledWith("/Users/test/repo"));
+  expect(invoke).toHaveBeenNthCalledWith(1, "pick_working_directory", { path: "/Users/test/old" });
   fireEvent.click(screen.getByRole("button", { name: "Choose working folder" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
   expect(change).toHaveBeenCalledTimes(1);
