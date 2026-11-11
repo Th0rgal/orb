@@ -90,10 +90,12 @@ static gboolean on_wv_event(GtkWidget *wv, GdkEvent *ev, gpointer ud) {
     return TRUE;
 }
 static gboolean on_decide_policy(WebKitWebView *wv, WebKitPolicyDecision *dec, WebKitPolicyDecisionType dtype, gpointer ud) {
-    (void)wv; (void)ud;
+    (void)ud;
     if (dtype == WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION || dtype == WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION) {
         const char *uri = webkit_uri_request_get_uri(webkit_navigation_action_get_request(webkit_navigation_policy_decision_get_navigation_action(WEBKIT_NAVIGATION_POLICY_DECISION(dec))));
         if (dtype == WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION || !is_confined_shell_uri(uri)) return webkit_policy_decision_ignore(dec), TRUE;
+        const char *cur = webkit_web_view_get_uri(wv);
+        if (cur && strncmp(cur, "http://127.0.0.1:", 17) == 0 && (strncmp(uri, "tauri://localhost/", 18) == 0 || strncmp(uri, "orb://localhost/", 16) == 0)) return webkit_web_view_load_uri(wv, uri), webkit_policy_decision_ignore(dec), TRUE;
     }
     return FALSE;
 }
