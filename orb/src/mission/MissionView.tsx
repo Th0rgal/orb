@@ -1076,10 +1076,12 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   // moment. Keep the Working row across that gap via deterministic `SM-24`
   // `orbFollowupQueueStep` reconciliation (clearing immediately when the new
   // turn starts, a failure lands, or all handover message IDs retire/cancel).
+  const hasMissionFailure = () =>
+    isFailedStatus(mission()?.status) || missionPhase(mission(), false).failed === true;
   const [queueHandoverState, setQueueHandoverState] = createSignal<{ ids: string[]; postedAfterSeq: number } | null>(null);
   createEffect(on(busy, (now, before) => {
     if (now) { setQueueHandoverState(null); return; }
-    if (!before || clientPlaced() || isFailedStatus(mission()?.status)) return;
+    if (!before || clientPlaced() || hasMissionFailure()) return;
     const queuedTranscriptIds = items().flatMap(i => i.kind === "user" && i.queued && i.messageId ? [i.messageId] : []);
     const candidateIds = [...new Set([...remoteQueuedIds(), ...queuedTranscriptIds])];
     if (!candidateIds.length) return;
@@ -1088,7 +1090,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   createEffect(() => {
     const handover = queueHandoverState();
     if (!handover) return;
-    if (busy() || clientPlaced() || isFailedStatus(mission()?.status)) {
+    if (busy() || clientPlaced() || hasMissionFailure()) {
       setQueueHandoverState(null);
       return;
     }
@@ -1657,7 +1659,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
             </Show>
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} onSend={text => sendMsg(text, [], [])} />
             <Show when={!sendError()}>
-              <MissionFailure mission={mission()} active={busy() || localQueueActive() || working() || !!sentOverStop() || (awaiting() && mission()?.status_message === "Model error") || (!clientPlaced() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} onOpenSource={openOriginalSource()} failureInTranscript={visibleViewItems().some(item => item.kind === "error")} />
+              <MissionFailure mission={mission()} active={busy() || localQueueActive() || working() || !!sentOverStop() || (awaiting() && mission()?.status_message === "Model error") || (!clientPlaced() && !hasMissionFailure() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} onOpenSource={openOriginalSource()} failureInTranscript={visibleViewItems().some(item => item.kind === "error")} />
             </Show>
           </Show>
 

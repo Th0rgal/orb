@@ -6,10 +6,15 @@ import { isArchived, isWorking } from "./missionStatus";
 export interface NestedMission<M> { mission: M; children: NestedMission<M>[]; version?: boolean }
 
 export function isClientPlacement(
-  mission: { placement_kind?: string | null } | null | undefined,
+  mission: {
+    placement_kind?: string | null;
+    origin?: string | null;
+    tags?: readonly string[] | null;
+  } | null | undefined,
 ): boolean {
-  const pk = mission?.placement_kind;
-  return pk === "client" || Boolean(pk?.startsWith("client:"));
+  const pk = mission?.placement_kind?.trim();
+  if (pk) return pk === "client" || pk.startsWith("client:");
+  return mission?.origin === "orb-client" || Boolean(mission?.tags?.includes("placement:client"));
 }
 
 export function isMissionWriter(

@@ -245,6 +245,17 @@ function shouldSampleTransportRtt(methodRaw: string | undefined, path: string): 
   return true;
 }
 
+function isWorkerNodeProxyPath(path: string): boolean {
+  const [cleanPath = path, query = ""] = path.split("?");
+  if (
+    cleanPath.startsWith("/api/providers/antigravity-models") ||
+    cleanPath.startsWith("/api/antigravity-models")
+  ) {
+    return /(?:^|&)node_id=(?!core(?:&|$))[^&]+/.test(query);
+  }
+  return false;
+}
+
 function recordFetchTelemetry(
   res: Response,
   startedMs: number,
@@ -265,7 +276,10 @@ function recordFetchTelemetry(
     } else {
       recordTransportRecovery(upstreamOrigin);
     }
-  } else if (res.status >= 500) {
+  } else if (
+    res.status >= 500 &&
+    !([502, 503, 504].includes(res.status) && isWorkerNodeProxyPath(path))
+  ) {
     recordTransportFailure();
   }
   return res;
@@ -380,6 +394,9 @@ async function transportFetchDirect(target: string, path: string, init?: Request
     const startedMs = performance.now();
     try {
       const res = await fetch(`${base}${path}`, init);
+      if ([502, 503, 504].includes(res.status) && isWorkerNodeProxyPath(path)) {
+        return res;
+      }
       if ([502, 503, 504, 522, 524].includes(res.status)) {
         endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
         recordTransportFailure();

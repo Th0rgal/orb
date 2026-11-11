@@ -307,8 +307,12 @@ struct OrbRow: Identifiable, Hashable, Sendable {
         value["tags"].items.map(\.text).contains { $0.hasPrefix("btw-parent:") || $0 == "btw-subagent" }
     }
     static func isClientPlacement(_ value: OrbJSON) -> Bool {
-        let pk = value["placement_kind"].text
-        return pk == "client" || pk.hasPrefix("client:")
+        let pk = value["placement_kind"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !pk.isEmpty {
+            return pk == "client" || pk.hasPrefix("client:")
+        }
+        return value["origin"].text == "orb-client"
+            || value["tags"].items.map(\.text).contains("placement:client")
     }
     static func hasTypedSuperseded(_ value: OrbJSON) -> Bool {
         let st = value["status"].text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
