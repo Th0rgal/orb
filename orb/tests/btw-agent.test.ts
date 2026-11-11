@@ -1444,4 +1444,52 @@ it('normalizes local OpenCode routing-chain models for client-placed /btw side t
  expect(events.at(-1)).toEqual({type:'done',answer:'Read fixture'});
 });
 
+it('tracks connectionVersion in btwSession and clears unsaved fallback sessions on 404 removal',async()=>{
+ const {createMemo,createRoot}=await import('solid-js');
+ const {setConnection}=await import('../src/api');
+ const {resetStorageCache}=await import('../src/storage');
+ setConnection('https://server-a.example.test',null);
+ localStorage.setItem('agent:'+sideQuestionKey('conn-parent'),JSON.stringify({
+  id:'side-on-a',
+  question:'Q',
+  harness:'opencode',
+  model:'builtin/smart',
+  local:false,
+  active:true,
+  baseline:0,
+ }));
+ let observedId:(()=>string|undefined)|undefined;
+ const dispose=createRoot(d=>{
+  observedId=createMemo(()=>btwSession('conn-parent')?.id);
+  expect(observedId()).toBe('side-on-a');
+  return d;
+ });
+ try{
+  setConnection('https://server-b.example.test',null);
+  expect(observedId?.()).toBeUndefined();
+ }finally{
+  dispose();
+  setConnection('',null);
+ }
 
+ const setItemSpy=vi.spyOn(Storage.prototype,'setItem').mockImplementation(()=>{
+  throw new DOMException('QuotaExceededError','QuotaExceededError');
+ });
+ try{
+  let deletedFirst=false;
+  vi.mocked(getMission).mockImplementation(async id=>{
+   if(id==='quota-child-1'&&deletedFirst)throw new ApiError(404,'Not found');
+   return {id,status:id==='quota-parent'?'active':'awaiting_user',history:[],tags:[],title:'Main',created_at:'',updated_at:''};
+  });
+  vi.mocked(api).mockResolvedValueOnce({id:'quota-child-1'}).mockResolvedValueOnce({id:'quota-child-2'});
+  await askBtwAgent('quota-parent','Check quota','ctx',[],new AbortController().signal,()=>{});
+  expect(btwSession('quota-parent')?.id).toBe('quota-child-1');
+  deletedFirst=true;
+  // 404 on the deleted session calls removeSession('quota-parent'), evicting the unsaved memory fallback before creating quota-child-2.
+  await askBtwAgent('quota-parent','Follow up after deletion','ctx',[],new AbortController().signal,()=>{});
+  expect(btwSession('quota-parent')?.id).toBe('quota-child-2');
+ }finally{
+  setItemSpy.mockRestore();
+  resetStorageCache();
+ }
+});

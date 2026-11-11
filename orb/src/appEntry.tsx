@@ -1,8 +1,10 @@
 import { bootstrapDesktopRuntime, getJwt, setTransportBridgeEnabled } from "./api";
+import { Suspense, lazy } from "solid-js";
 import { render } from "solid-js/web";
 import App from "./App";
-import { FindBar } from "./FindBar";
 import { Toaster } from "./toast";
+
+const FindBar = lazy(() => import("./FindBar").then((m) => ({ default: m.FindBar })));
 import "./styles.css";
 import { startDiagnostics } from "./diagnostics";
 import { hydrateTranscriptFromDisk } from "./missionCache";
@@ -45,5 +47,5 @@ export async function mountApp(root: HTMLElement): Promise<void> {
   await Promise.all([bootstrapDesktopRuntime(), preloadFrameZeroCache()]);
   await preloadFrameZeroCache();
   root.replaceChildren();
-  render(() => <><App /><FindBar /><Toaster /></>, root);
+  render(() => <><App /><Suspense><FindBar /></Suspense><Toaster /></>, root);
 }
