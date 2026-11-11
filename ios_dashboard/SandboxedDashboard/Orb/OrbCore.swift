@@ -1432,24 +1432,51 @@ private actor OrbDiskWriter {
 enum OrbDisk {
     private static var urlCache: [String: URL] = [:]
     private static var writesSincePrune = 0
+    /// Only per-entity read-cache records rebuildable from Core are eligible for
+    /// bounded disk eviction (`rc-*.json`). User-owned state (`draft:*`, `*:pending`,
+    /// `document:*`) and account bootstrap singletons (`projects`, `inbox:*`) are never evicted.
+    nonisolated static func isPrunableReadCacheKey(_ key: String) -> Bool {
+        key.hasPrefix("events:") ||
+        key.hasPrefix("mission:") ||
+        key.hasPrefix("cloud:") ||
+        key.hasPrefix("btw:turns:") ||
+        key.hasPrefix("project:") ||
+        key.hasPrefix("docfile:")
+    }
+    private static func legacyFallbackUrl(_ key: String, accountScope: String? = nil) -> URL? {
+        guard isPrunableReadCacheKey(key) else { return nil }
+        let scope = (accountScope ?? (OrbCore.shared.endpoint + ":" + (OrbCore.shared.authToken ?? ""))) + ":" + key
+        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Orb")
+        let name = SHA256.hash(data: Data(scope.utf8)).map { String(format: "%02x", $0) }.joined()
+        return root.appendingPathComponent(name + ".json")
+    }
     static func url(_ key: String, accountScope: String? = nil) -> URL {
         let scope = (accountScope ?? (OrbCore.shared.endpoint + ":" + (OrbCore.shared.authToken ?? ""))) + ":" + key
         if let cached = urlCache[scope] { return cached }
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Orb")
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let name = SHA256.hash(data: Data(scope.utf8)).map { String(format: "%02x", $0) }.joined()
-        let result = root.appendingPathComponent(name + ".json")
+        let prefix = isPrunableReadCacheKey(key) ? "rc-" : ""
+        let result = root.appendingPathComponent(prefix + name + ".json")
         if urlCache.count > 1024 { urlCache.removeAll(keepingCapacity: true) }
         urlCache[scope] = result
         return result
     }
     static func read<T: Decodable>(_ key: String, as type: T.Type, accountScope: String? = nil) -> T? {
-        guard let data = try? Data(contentsOf: url(key, accountScope: accountScope)) else { return nil }
+        let primary = url(key, accountScope: accountScope)
+        let data = (try? Data(contentsOf: primary))
+            ?? legacyFallbackUrl(key, accountScope: accountScope).flatMap { try? Data(contentsOf: $0) }
+        guard let data else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
     static func readAsync<T: Decodable & Sendable>(_ key: String, as type: T.Type) async -> T? {
         let target = url(key)
-        guard let data = await OrbDiskWriter.shared.read(from: target) else { return nil }
+        let fallback = legacyFallbackUrl(key)
+        var raw = await OrbDiskWriter.shared.read(from: target)
+        if raw == nil, let fallback {
+            raw = await OrbDiskWriter.shared.read(from: fallback)
+        }
+        guard let data = raw else { return nil }
         return await Task.detached(priority: .utility) {
             try? JSONDecoder().decode(type, from: data)
         }.value
@@ -1459,26 +1486,33 @@ enum OrbDisk {
     }
     static func saveAsync<T: Encodable & Sendable>(_ value: T, key: String, accountScope: String? = nil) {
         let target = url(key, accountScope: accountScope)
-        writesSincePrune &+= 1
-        let shouldPrune = (writesSincePrune & 63) == 0
+        let shouldPrune: Bool
+        if isPrunableReadCacheKey(key) {
+            writesSincePrune &+= 1
+            shouldPrune = (writesSincePrune & 63) == 0
+        } else {
+            shouldPrune = false
+        }
         Task.detached(priority: .utility) {
             if let data = try? JSONEncoder().encode(value) {
                 try? await OrbDiskWriter.shared.write(data, to: target)
             }
             if shouldPrune {
-                Self.pruneOldestFiles(in: target.deletingLastPathComponent(), maxFiles: 550)
+                Self.pruneReadCacheFiles(in: target.deletingLastPathComponent(), maxFiles: 550)
             }
         }
     }
-    nonisolated private static func pruneOldestFiles(in root: URL, maxFiles: Int) {
+    nonisolated static func pruneReadCacheFiles(in root: URL, maxFiles: Int) {
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]
         ) else { return }
-        let jsonFiles = urls.filter { $0.pathExtension == "json" }
-        guard jsonFiles.count > maxFiles else { return }
-        let dated: [(url: URL, date: Date)] = jsonFiles.map { file in
+        let cacheFiles = urls.filter {
+            $0.pathExtension == "json" && $0.lastPathComponent.hasPrefix("rc-")
+        }
+        guard cacheFiles.count > maxFiles else { return }
+        let dated: [(url: URL, date: Date)] = cacheFiles.map { file in
             let mod = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             return (file, mod)
         }.sorted { $0.date < $1.date }
@@ -1487,7 +1521,12 @@ enum OrbDisk {
             try? FileManager.default.removeItem(at: item.url)
         }
     }
-    static func remove(_ key: String) { try? FileManager.default.removeItem(at: url(key)) }
+    static func remove(_ key: String) {
+        try? FileManager.default.removeItem(at: url(key))
+        if let fallback = legacyFallbackUrl(key) {
+            try? FileManager.default.removeItem(at: fallback)
+        }
+    }
 }
 
 /// Account-scoped, bounded read-through cache. In-flight loads are shared with navigation.

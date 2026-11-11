@@ -1466,6 +1466,24 @@ object OrbDisk {
 
     private val writesSincePrune = java.util.concurrent.atomic.AtomicInteger(0)
 
+    /** Only per-entity read-cache records rebuildable from Core are eligible for
+     * bounded disk eviction; user-owned state (`draft_*`, `pending_*`, `document_*`)
+     * and account bootstrap singletons (`missions`, `projects`, `workspaces`, etc.) are never evicted. */
+    internal fun isPrunableReadCacheKey(key: String): Boolean =
+        key.startsWith("mission_events_") ||
+        key.startsWith("mission_msgs_") ||
+        key.startsWith("mission_") ||
+        key.startsWith("cloud_") ||
+        key.startsWith("project_missions_") ||
+        key.startsWith("presentation_") ||
+        key.startsWith("btw_turns_")
+
+    internal fun isPrunableReadCacheFileName(name: String): Boolean {
+        if (!name.endsWith(".json")) return false
+        val keyPart = name.removeSuffix(".json").substringAfter('_', "")
+        return isPrunableReadCacheKey(keyPart)
+    }
+
     fun write(key: String, value: Any?) {
         try {
             val f = file(key)
@@ -1475,19 +1493,24 @@ object OrbDisk {
                 tmp.copyTo(f, overwrite = true)
                 tmp.delete()
             }
-            if ((writesSincePrune.incrementAndGet() and 63) == 0) {
-                pruneOldestFiles(maxFiles = 550)
+            if (isPrunableReadCacheKey(key) && (writesSincePrune.incrementAndGet() and 63) == 0) {
+                pruneReadCacheFiles(maxFiles = 550)
             }
         } catch (t: Throwable) {
             OrbLog.w(OrbLog.Category.Cache, "disk write $key failed", t)
         }
     }
 
-    private fun pruneOldestFiles(maxFiles: Int) {
+    internal fun pruneReadCacheFiles(maxFiles: Int, scopeFilter: String? = null) {
         try {
-            val jsonFiles = rootDir().listFiles { f -> f.isFile && f.name.endsWith(".json") } ?: return
-            if (jsonFiles.size <= maxFiles) return
-            val sorted = jsonFiles.sortedBy { it.lastModified() }
+            val scopePrefix = scopeFilter?.let { "${it}_" }
+            val cacheFiles = rootDir().listFiles { f ->
+                f.isFile &&
+                    isPrunableReadCacheFileName(f.name) &&
+                    (scopePrefix == null || f.name.startsWith(scopePrefix))
+            } ?: return
+            if (cacheFiles.size <= maxFiles) return
+            val sorted = cacheFiles.sortedBy { it.lastModified() }
             val excess = sorted.size - maxFiles
             for (i in 0 until excess) {
                 sorted[i].delete()

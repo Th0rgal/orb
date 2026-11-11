@@ -137,6 +137,42 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(OrbDisk.read(key, as: OrbJSON.self), full)
     }
 
+    @MainActor func testDiskCachePruneNeverEvictsDraftsOrPendingSends() throws {
+        XCTAssertFalse(OrbDisk.isPrunableReadCacheKey("draft:m-1"))
+        XCTAssertFalse(OrbDisk.isPrunableReadCacheKey("draft:m-1:files"))
+        XCTAssertFalse(OrbDisk.isPrunableReadCacheKey("draft:m-1:pending"))
+        XCTAssertFalse(OrbDisk.isPrunableReadCacheKey("document:proj:README.md"))
+        XCTAssertFalse(OrbDisk.isPrunableReadCacheKey("projects"))
+        XCTAssertTrue(OrbDisk.isPrunableReadCacheKey("events:m-1"))
+        XCTAssertTrue(OrbDisk.isPrunableReadCacheKey("mission:m-1"))
+        XCTAssertTrue(OrbDisk.isPrunableReadCacheKey("docfile:proj:README.md"))
+
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent("orb-prune-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let draftFile = tempRoot.appendingPathComponent("00112233.json")
+        let pendingFile = tempRoot.appendingPathComponent("44556677.json")
+        let cacheOld = tempRoot.appendingPathComponent("rc-old.json")
+        let cacheMid = tempRoot.appendingPathComponent("rc-mid.json")
+        let cacheNew = tempRoot.appendingPathComponent("rc-new.json")
+        let payload = Data("{}".utf8)
+        for (idx, file) in [draftFile, pendingFile, cacheOld, cacheMid, cacheNew].enumerated() {
+            try payload.write(to: file)
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date(timeIntervalSince1970: Double(1_000 + idx * 10))],
+                ofItemAtPath: file.path
+            )
+        }
+
+        OrbDisk.pruneReadCacheFiles(in: tempRoot, maxFiles: 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: draftFile.path), "drafts must never be pruned")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pendingFile.path), "pending sends must never be pruned")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cacheOld.path), "oldest rc-* file should be evicted")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cacheMid.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cacheNew.path))
+    }
+
     @MainActor func testAsyncCacheReadKeepsFreshNetworkValue() async throws {
         let key = "test-cache:" + UUID().uuidString
         defer { OrbDisk.remove(key) }

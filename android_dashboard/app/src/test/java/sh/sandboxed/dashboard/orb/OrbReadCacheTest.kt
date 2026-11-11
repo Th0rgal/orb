@@ -91,4 +91,29 @@ class OrbReadCacheTest {
         OrbReadCache.seedProjectRows(key, listOf(OrbRow(mapOf("id" to "recent"))))
         assertEquals("recent", OrbReadCache.readMemoryRows("project_missions_$key").single().id)
     }
+
+    @Test
+    fun diskPrunePreservesNonReadCacheStateAndEvictsOldestReadCacheOnly() {
+        assertFalse(OrbDisk.isPrunableReadCacheKey("draft_m1"))
+        assertFalse(OrbDisk.isPrunableReadCacheKey("pending_m1"))
+        assertFalse(OrbDisk.isPrunableReadCacheKey("projects"))
+        assertFalse(OrbDisk.isPrunableReadCacheKey("missions"))
+        assertTrue(OrbDisk.isPrunableReadCacheKey("mission_events_m1"))
+        assertTrue(OrbDisk.isPrunableReadCacheKey("mission_msgs_m1"))
+
+        OrbDisk.write("draft_m1", mapOf("text" to "unsent draft"))
+        OrbDisk.write("projects", listOf(mapOf("slug" to "orb")))
+        OrbDisk.write("mission_events_old", listOf(mapOf("id" to "e-old")))
+        Thread.sleep(15)
+        OrbDisk.write("mission_events_mid", listOf(mapOf("id" to "e-mid")))
+        Thread.sleep(15)
+        OrbDisk.write("mission_events_new", listOf(mapOf("id" to "e-new")))
+
+        OrbDisk.pruneReadCacheFiles(maxFiles = 2, scopeFilter = OrbDisk.currentScope())
+        assertEquals("unsent draft", (OrbDisk.read("draft_m1") as? Map<*, *>)?.get("text"))
+        assertEquals(1, OrbJSON.dictList(OrbDisk.read("projects")).size)
+        assertNull(OrbDisk.read("mission_events_old"))
+        assertEquals(1, OrbJSON.dictList(OrbDisk.read("mission_events_mid")).size)
+        assertEquals(1, OrbJSON.dictList(OrbDisk.read("mission_events_new")).size)
+    }
 }
