@@ -3494,6 +3494,74 @@ private def runR4cHarnessSessionTests (store : CoreStore) (tmpRoot : String) : I
     IO.eprintln s!"[orb-core-test] FAIL: SM-16 CLI-exit-before-SSE-idle out-of-order settlement failed: ev1={repr evsExitFirst} ev2={repr evsTrailingIdle}"
     return 1
 
+  -- Case C: OpenCode `step_finish` `reason == "length"` after tool steps + oversize (>65536B) reasoning line + `CLI exit 0`
+  -- (`ashur` `c2dc6bee` incident replay):
+  --   1) nested `part` `tool_use` with `status == "completed"` emits paired `ToolCall` + `ToolResult` keeping `toolDepth == 0`;
+  --   2) `step_start` records `sawActivity = true` even when the subsequent `31,999`-token `reasoning` line exceeds `65536` bytes;
+  --   3) `step_finish(reason="length")` + `cliProcessExited 0` surfaces `failedSilentStop "OpenCode finished without assistant text (stop reason: length)."`
+  --      exactly once (never misclassifying as `completedClean` or masking `length` as `end_turn`);
+  --   4) warm turn reset clears `lastStopReason` so a resumed turn completes cleanly.
+  let .ok hLenStop ← mkHarnessSessionHandle "m-oc-len-stop" .openCode 6 | return 1
+  let .ok _ ← applySessionOp hLenStop .confirmReady 6 | return 1
+  let .ok _ ← applySessionOp hLenStop .beginTurn 6 | return 1
+  let .ok _ ← stepOpenCodeHandleInput hLenStop 6
+    (.cliJsonLine "{\"type\":\"step_start\",\"sessionID\":\"ses_ashur\",\"part\":{\"type\":\"step-start\"}}")
+    (requireCliExitForTurnDone := true) | return 1
+  let .ok (sAfterOcTool, _, evsOcTool) ← stepOpenCodeHandleInput hLenStop 6
+    (.cliJsonLine "{\"type\":\"tool_use\",\"sessionID\":\"ses_ashur\",\"part\":{\"type\":\"tool\",\"callID\":\"call_ashur_1\",\"tool\":\"sandboxed_get_mission_health\",\"state\":{\"status\":\"completed\",\"input\":{\"id\":\"m-oc-len-stop\"},\"output\":\"running\"}}}")
+    (requireCliExitForTurnDone := true) | return 1
+  if sAfterOcTool.slice.toolDepth != 0 ||
+     evsOcTool != #[
+       .ToolCall "m-oc-len-stop" "call_ashur_1" "sandboxed_get_mission_health" "{\"id\":\"m-oc-len-stop\"}",
+       .ToolResult "m-oc-len-stop" "call_ashur_1" "sandboxed_get_mission_health" "running"
+     ] then
+    IO.eprintln s!"[orb-core-test] FAIL: OpenCode nested completed tool_use did not keep toolDepth balanced: depth={sAfterOcTool.slice.toolDepth} evs={repr evsOcTool}"
+    return 1
+  let .ok _ ← stepOpenCodeHandleInput hLenStop 6
+    (.cliJsonLine "{\"type\":\"step_finish\",\"sessionID\":\"ses_ashur\",\"part\":{\"type\":\"step-finish\",\"reason\":\"tool-calls\"}}")
+    (requireCliExitForTurnDone := true) | return 1
+  let .ok _ ← stepOpenCodeHandleInput hLenStop 6
+    (.cliJsonLine "{\"type\":\"step_start\",\"sessionID\":\"ses_ashur\",\"part\":{\"type\":\"step-start\"}}")
+    (requireCliExitForTurnDone := true) | return 1
+  let hugeReasoningLine :=
+    s!"\{\"type\":\"reasoning\",\"sessionID\":\"ses_ashur\",\"part\":\{\"type\":\"reasoning\",\"text\":\"{hugePad}\"}}"
+  let .ok _ ← stepOpenCodeHandleInput hLenStop 6
+    (.cliJsonLine hugeReasoningLine)
+    (requireCliExitForTurnDone := true) | return 1
+  let .ok (sAfterLenFinish, _, evsLenFinish) ← stepOpenCodeHandleInput hLenStop 6
+    (.cliJsonLine "{\"type\":\"step_finish\",\"sessionID\":\"ses_ashur\",\"part\":{\"type\":\"step-finish\",\"reason\":\"length\",\"tokens\":{\"total\":139374,\"input\":107374,\"output\":1,\"reasoning\":31999}}}")
+    (requireCliExitForTurnDone := true) | return 1
+  let .ok (sAfterLenExit, _, evsLenExit) ← stepOpenCodeHandleInput hLenStop 6
+    (.cliProcessExited 0)
+    (requireCliExitForTurnDone := true) | return 1
+  let expectedLenMsg := "OpenCode finished without assistant text (stop reason: length)."
+  if sAfterLenFinish.openCode.verdict != .failedSilentStop expectedLenMsg ||
+     evsLenFinish != #[.TurnResult "m-oc-len-stop" true expectedLenMsg] ||
+     sAfterLenExit.openCode.verdict != .failedSilentStop expectedLenMsg ||
+     !evsLenExit.isEmpty then
+    IO.eprintln s!"[orb-core-test] FAIL: OpenCode step_finish(length) + exit 0 replay mismatch: finishEvs={repr evsLenFinish} exitEvs={repr evsLenExit} verdict={repr sAfterLenExit.openCode.verdict}"
+    return 1
+  -- Resume on warm handle (`finishTurnToReady` -> `beginTurn`) and verify `lastStopReason` is cleared
+  let .ok _ ← applySessionOp hLenStop .finishTurnToReady 6 (hasTurnIdleReceipt := true) (hasProcExitReceipt := true) | return 1
+  let .ok (sResumedTurn, _) ← applySessionOp hLenStop .beginTurn 6 | return 1
+  if !sResumedTurn.parser.lastStopReason.isEmpty || sResumedTurn.parser.sawActivity then
+    IO.eprintln s!"[orb-core-test] FAIL: warm turn reset did not clear lastStopReason: {repr sResumedTurn.parser}"
+    return 1
+  let .ok _ ← stepOpenCodeHandleInput hLenStop 6
+    (.cliJsonLine "{\"type\":\"text\",\"sessionID\":\"ses_ashur\",\"part\":{\"type\":\"text\",\"text\":\"Resumed cleanly\"}}")
+    (requireCliExitForTurnDone := true) | return 1
+  let .ok _ ← stepOpenCodeHandleInput hLenStop 6
+    (.cliJsonLine "{\"type\":\"step_finish\",\"sessionID\":\"ses_ashur\",\"part\":{\"type\":\"step-finish\",\"reason\":\"stop\"}}")
+    (requireCliExitForTurnDone := true) | return 1
+  let .ok (sResumedDone, _, evsResumedDone) ← stepOpenCodeHandleInput hLenStop 6
+    (.cliProcessExited 0)
+    (requireCliExitForTurnDone := true) | return 1
+  if sResumedDone.openCode.verdict != .completedClean ||
+     sResumedDone.slice.phaseCode != 1 ||
+     evsResumedDone != #[.TurnResult "m-oc-len-stop" false "end_turn"] then
+    IO.eprintln s!"[orb-core-test] FAIL: warm turn after length stop did not complete cleanly: {repr sResumedDone.openCode} evs={repr evsResumedDone}"
+    return 1
+
   -- 3. SM-17: Non-contended `ProcessKillHandle` (`procLivenessStep` + `/proc/<pid>/stat` parser + contended mutex test)
   let trickyStat :=
     "54321 (codex (worker) 1) S 1 54321 54321 0 -1 4194304 100 0 0 0 12 3 0 0 20 0 4 0 88776655 12345678 1024"

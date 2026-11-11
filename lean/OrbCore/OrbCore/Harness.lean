@@ -38,12 +38,19 @@ inductive AgentEvent where
 
 /-- Stateful parser reducer storing active `callId -> toolName` correlations across turns. -/
 structure HarnessParserState where
-  missionId     : String
-  pendingCalls  : Array (String × String) := #[]
-  emittedEvents : Array AgentEvent := #[]
-  sawUserText   : Bool := false
-  sawActivity   : Bool := false
+  missionId      : String
+  pendingCalls   : Array (String × String) := #[]
+  emittedEvents  : Array AgentEvent := #[]
+  sawUserText    : Bool := false
+  sawActivity    : Bool := false
+  lastStopReason : String := ""
   deriving Repr, DecidableEq
+
+/-- Normalize OpenCode / Vercel AI SDK `step_finish` stop reasons (`"stop"` -> `"end_turn"`),
+    preserving distinct terminal reasons such as `"length"`, `"max_tokens"`, `"content-filter"`, and `"error"`. -/
+def normalizeOpenCodeStopReason (rawReason : String) : String :=
+  let r := rawReason.trimAscii.toString
+  if r == "stop" || r == "end_turn" || r == "EndTurn" then "end_turn" else r
 
 private def lookupToolName (calls : Array (String × String)) (callId : String) : String :=
   match calls.findRev? (fun p => p.1 == callId) with
@@ -86,18 +93,54 @@ def stepHarnessJsonLine (st : HarnessParserState) (line : String) : HarnessParse
         let calls' := baseCalls.push (callId, name)
         { st with sawActivity := true, pendingCalls := calls', emittedEvents := st.emittedEvents.push (.ToolCall st.missionId callId name argsJson) }
     else if evType == "tool_call" || evType == "tool_use" then
-      let callId := (JsonTape.lookupString? tape "id").getD ((JsonTape.lookupString? tape "call_id").getD "")
-      let name := (JsonTape.lookupString? tape "name").getD "tool"
-      let argsJson :=
-        match OrbBin.Json.parse trimmed with
-        | .ok jv =>
-          match (jv.field? "input").orElse (fun _ => jv.field? "args") with
+      let parsedOpt := (OrbBin.Json.parse trimmed).toOption
+      let openCodePart? :=
+        match parsedOpt with
+        | some jv =>
+          if (jv.fieldStr? "name").isNone then
+            match jv.field? "part" with
+            | some part => if (part.fieldStr? "tool").isSome then some part else none
+            | none => none
+          else none
+        | none => none
+      match openCodePart? with
+      | some part =>
+        let toolName := (part.fieldStr? "tool").getD "tool"
+        let callId := (part.fieldStr? "callID").orElse (fun _ => part.fieldStr? "id") |>.getD ""
+        let stateOpt := part.field? "state"
+        let argsJson :=
+          match stateOpt.bind (fun s => s.field? "input") with
           | some a => renderCompact a
           | none => "{}"
-        | .error _ => "{}"
-      let baseCalls := if st.pendingCalls.size ≥ 1024 then st.pendingCalls.extract 1 st.pendingCalls.size else st.pendingCalls
-      let calls' := baseCalls.push (callId, name)
-      { st with pendingCalls := calls', emittedEvents := st.emittedEvents.push (.ToolCall st.missionId callId name argsJson) }
+        let status := (stateOpt.bind (fun s => s.fieldStr? "status")).getD ""
+        let evsCall := st.emittedEvents.push (.ToolCall st.missionId callId toolName argsJson)
+        if status == "completed" || status == "error" || status == "failed" || status == "cancelled" then
+          let out :=
+            (stateOpt.bind (fun s => s.fieldStr? "output"))
+              |>.orElse (fun _ => stateOpt.bind (fun s => s.fieldStr? "error"))
+              |>.getD ""
+          let calls' := st.pendingCalls.filter (fun p => p.1 != callId)
+          { st with
+            sawActivity := true
+            pendingCalls := calls'
+            emittedEvents := evsCall.push (.ToolResult st.missionId callId toolName out) }
+        else
+          let baseCalls := if st.pendingCalls.size ≥ 1024 then st.pendingCalls.extract 1 st.pendingCalls.size else st.pendingCalls
+          let calls' := baseCalls.push (callId, toolName)
+          { st with sawActivity := true, pendingCalls := calls', emittedEvents := evsCall }
+      | none =>
+        let callId := (JsonTape.lookupString? tape "id").getD ((JsonTape.lookupString? tape "call_id").getD "")
+        let name := (JsonTape.lookupString? tape "name").getD "tool"
+        let argsJson :=
+          match parsedOpt with
+          | some jv =>
+            match (jv.field? "input").orElse (fun _ => jv.field? "args") with
+            | some a => renderCompact a
+            | none => "{}"
+          | none => "{}"
+        let baseCalls := if st.pendingCalls.size ≥ 1024 then st.pendingCalls.extract 1 st.pendingCalls.size else st.pendingCalls
+        let calls' := baseCalls.push (callId, name)
+        { st with sawActivity := true, pendingCalls := calls', emittedEvents := st.emittedEvents.push (.ToolCall st.missionId callId name argsJson) }
     else if evType == "tool_result" then
       let callId := (JsonTape.lookupString? tape "tool_use_id").getD ((JsonTape.lookupString? tape "call_id").getD "")
       let toolName := lookupToolName st.pendingCalls callId
@@ -111,6 +154,29 @@ def stepHarnessJsonLine (st : HarnessParserState) (line : String) : HarnessParse
       let isErr := (JsonTape.lookupBool? tape "is_error").getD (subtype == "error")
       let msg := (JsonTape.lookupString? tape "error").getD ((JsonTape.lookupString? tape "result").getD "")
       { st with emittedEvents := st.emittedEvents.push (.TurnResult st.missionId isErr msg) }
+    else if evType == "error" then
+      let msg :=
+        match OrbBin.Json.parse trimmed with
+        | .ok jv =>
+          match jv.field? "error" with
+          | some (.str s) => if s.isEmpty then "opencode_error" else s
+          | some errObj =>
+            let dataMsg? := (errObj.field? "data").bind (fun d => d.fieldStr? "message")
+            let directMsg? := errObj.fieldStr? "message"
+            let nameStr? := errObj.fieldStr? "name"
+            match dataMsg?.orElse (fun _ => directMsg?) with
+            | some m =>
+              match nameStr? with
+              | some nm => if nm.isEmpty || m.startsWith nm then m else s!"{nm}: {m}"
+              | none => m
+            | none => renderCompact errObj
+          | none =>
+            let fallback := (jv.fieldStr? "message").getD ""
+            if fallback.isEmpty then "opencode_error" else fallback
+        | .error _ =>
+          let fallback := (JsonTape.lookupString? tape "message").getD ""
+          if fallback.isEmpty then "opencode_error" else fallback
+      { st with sawActivity := true, emittedEvents := st.emittedEvents.push (.TurnResult st.missionId true msg) }
     else
       -- OpenCode `run --format json` events carry a nested `"part": {...}` object with `"sessionID"`.
       match OrbBin.Json.parse trimmed with
@@ -119,7 +185,9 @@ def stepHarnessJsonLine (st : HarnessParserState) (line : String) : HarnessParse
         match jv.field? "part" with
         | none => st
         | some part =>
-          if evType == "reasoning" then
+          if evType == "step_start" then
+            { st with sawActivity := true }
+          else if evType == "reasoning" then
             let thought := (part.fieldStr? "text").getD ""
             { st with sawActivity := true, emittedEvents := st.emittedEvents.push (.Thinking st.missionId thought true) }
           else if evType == "text" then
@@ -131,13 +199,35 @@ def stepHarnessJsonLine (st : HarnessParserState) (line : String) : HarnessParse
             else
               { st with sawUserText := true, sawActivity := true, emittedEvents := st.emittedEvents.push (.TextDelta st.missionId txt) }
           else if evType == "step_finish" then
-            let reason := (part.fieldStr? "reason").getD ""
-            if reason == "stop" && st.sawActivity && !st.sawUserText then
-              { st with emittedEvents := st.emittedEvents.push (.TurnResult st.missionId true "OpenCode finished without assistant text (stop reason: end_turn).") }
-            else if reason == "stop" then
-              { st with emittedEvents := st.emittedEvents.push (.TurnResult st.missionId false "end_turn") }
+            let rawReason := (part.fieldStr? "reason").getD ""
+            let normReason := normalizeOpenCodeStopReason rawReason
+            if normReason.isEmpty || normReason == "tool-calls" || normReason == "tool_calls" then
+              { st with sawActivity := true, lastStopReason := normReason }
+            else if normReason == "end_turn" then
+              if st.sawActivity && !st.sawUserText then
+                { st with
+                  sawActivity := true
+                  lastStopReason := "end_turn"
+                  emittedEvents := st.emittedEvents.push (.TurnResult st.missionId true "OpenCode finished without assistant text (stop reason: end_turn).") }
+              else
+                { st with
+                  lastStopReason := "end_turn"
+                  emittedEvents := st.emittedEvents.push (.TurnResult st.missionId false "end_turn") }
+            else if !st.sawUserText then
+              { st with
+                sawActivity := true
+                lastStopReason := normReason
+                emittedEvents := st.emittedEvents.push (.TurnResult st.missionId true s!"OpenCode finished without assistant text (stop reason: {normReason}).") }
+            else if normReason == "length" || normReason == "max_tokens" then
+              { st with
+                sawActivity := true
+                lastStopReason := normReason
+                emittedEvents := st.emittedEvents.push (.TurnResult st.missionId true s!"OpenCode stopped at output token limit (stop reason: {normReason}).") }
             else
-              st
+              { st with
+                sawActivity := true
+                lastStopReason := normReason
+                emittedEvents := st.emittedEvents.push (.TurnResult st.missionId true s!"OpenCode stopped abnormally (stop reason: {normReason}).") }
           else
             st
 
@@ -153,13 +243,14 @@ def parseOpenCodeSseChunk (st : HarnessParserState) (ssePayload : String) : Harn
   return cur
 
 /-- Reset per-turn `HarnessParserState` latches on warm-session turn boundaries (`SM-15`) so
-    `sawUserText`, `sawActivity`, `pendingCalls`, and `emittedEvents` from turn `N` never bleed into turn `N + 1`. -/
+    `sawUserText`, `sawActivity`, `lastStopReason`, `pendingCalls`, and `emittedEvents` from turn `N` never bleed into turn `N + 1`. -/
 def HarnessParserState.resetForWarmTurn (st : HarnessParserState) : HarnessParserState :=
   { missionId := st.missionId
     pendingCalls := #[]
     emittedEvents := #[]
     sawUserText := false
-    sawActivity := false }
+    sawActivity := false
+    lastStopReason := "" }
 
 /-- Validate a native Vibe ACP JSON-RPC `session/update` or `session/new` message (`vibe::tests` contract). -/
 def parseVibeAcpNotification? (line : String) : Option (String × AgentEvent) :=
@@ -261,7 +352,11 @@ def reconcileOpenCodeSseAndCliExit
     (cliExited : Bool)
     (cliExitCode : Int32)
     (hasUserText : Bool)
-    (sawActivity : Bool) : HarnessSessionSliceState × Option (Bool × String) :=
+    (sawActivity : Bool)
+    (lastStopReason : String := "end_turn") : HarnessSessionSliceState × Option (Bool × String) :=
+  let normStop :=
+    let r := normalizeOpenCodeStopReason lastStopReason
+    if r.isEmpty || r == "tool-calls" || r == "tool_calls" then "end_turn" else r
   if sess.sessionGeneration == 0 || eventGeneration != sess.sessionGeneration ||
      sess.phaseCode == HarnessSessionPhase.encode .dead then
     (sess, none)
@@ -281,8 +376,12 @@ def reconcileOpenCodeSseAndCliExit
       (sDead, some (true, s!"opencode_cli_exit_{cliExitCode}"))
     else
       (sess, some (true, s!"opencode_cli_exit_{cliExitCode}"))
-  else if sawActivity && !hasUserText then
-    (sess, some (true, "OpenCode finished without assistant text (stop reason: end_turn)."))
+  else if (sawActivity || normStop != "end_turn") && !hasUserText then
+    (sess, some (true, s!"OpenCode finished without assistant text (stop reason: {normStop})."))
+  else if normStop == "length" || normStop == "max_tokens" then
+    (sess, some (true, s!"OpenCode stopped at output token limit (stop reason: {normStop})."))
+  else if normStop != "end_turn" then
+    (sess, some (true, s!"OpenCode stopped abnormally (stop reason: {normStop})."))
   else
     let _ := sawSseIdle
     let w := Orb.Kernel.agentEventNormalizeStep 3 6 1 (if hasUserText then 1 else 0) 1 0 32 4096
@@ -392,6 +491,36 @@ def claude_control_request_emits_ui_native_request : Bool :=
     (argsJson.splitOn "\"method\":\"permission\"").length > 1
   | _, _ => false
 
+def opencode_length_stop_and_nested_tool_use_contract : Bool :=
+  let s0 : HarnessParserState := { missionId := "m-len" }
+  let s1 := stepHarnessJsonLine s0 "{\"type\":\"step_start\",\"sessionID\":\"ses_len\",\"part\":{\"type\":\"step-start\"}}"
+  let s2 := stepHarnessJsonLine s1 "{\"type\":\"tool_use\",\"sessionID\":\"ses_len\",\"part\":{\"type\":\"tool\",\"callID\":\"call_h1\",\"tool\":\"sandboxed_get_mission_health\",\"state\":{\"status\":\"completed\",\"input\":{\"mission_id\":\"m-len\"},\"output\":\"healthy\"}}}"
+  let s3 := stepHarnessJsonLine s2 "{\"type\":\"step_finish\",\"sessionID\":\"ses_len\",\"part\":{\"type\":\"step-finish\",\"reason\":\"tool-calls\"}}"
+  let s4 := stepHarnessJsonLine s3 "{\"type\":\"step_start\",\"sessionID\":\"ses_len\",\"part\":{\"type\":\"step-start\"}}"
+  let s5 := stepHarnessJsonLine s4 "{\"type\":\"reasoning\",\"sessionID\":\"ses_len\",\"part\":{\"type\":\"reasoning\",\"text\":\"31999 tokens of reasoning\"}}"
+  let s6 := stepHarnessJsonLine s5 "{\"type\":\"step_finish\",\"sessionID\":\"ses_len\",\"part\":{\"type\":\"step-finish\",\"reason\":\"length\"}}"
+  -- Also verify partial text followed by `reason == "length"` surfaces token-limit truncation instead of clean completion,
+  -- and top-level OpenCode `type == "error"` surfaces `.TurnResult _ true`.
+  let t0 : HarnessParserState := { missionId := "m-trunc" }
+  let t1 := stepHarnessJsonLine t0 "{\"type\":\"text\",\"sessionID\":\"ses_t\",\"part\":{\"type\":\"text\",\"text\":\"Half-written sentence\"}}"
+  let t2 := stepHarnessJsonLine t1 "{\"type\":\"step_finish\",\"sessionID\":\"ses_t\",\"part\":{\"type\":\"step-finish\",\"reason\":\"length\"}}"
+  let e1 := stepHarnessJsonLine { missionId := "m-err" } "{\"type\":\"error\",\"sessionID\":\"ses_e\",\"error\":{\"name\":\"APIError\",\"data\":{\"message\":\"Context window exceeded\"}}}"
+  s6.pendingCalls.isEmpty &&
+  s6.lastStopReason == "length" &&
+  s6.emittedEvents == #[
+    .ToolCall "m-len" "call_h1" "sandboxed_get_mission_health" "{\"mission_id\":\"m-len\"}",
+    .ToolResult "m-len" "call_h1" "sandboxed_get_mission_health" "healthy",
+    .Thinking "m-len" "31999 tokens of reasoning" true,
+    .TurnResult "m-len" true "OpenCode finished without assistant text (stop reason: length)."
+  ] &&
+  t2.emittedEvents == #[
+    .TextDelta "m-trunc" "Half-written sentence",
+    .TurnResult "m-trunc" true "OpenCode stopped at output token limit (stop reason: length)."
+  ] &&
+  e1.emittedEvents == #[
+    .TurnResult "m-err" true "APIError: Context window exceeded"
+  ]
+
 def runAllHarnessContractTests : Bool :=
   text_delta_does_not_contain_thinking_content &&
   thinking_produces_thinking_event &&
@@ -404,6 +533,7 @@ def runAllHarnessContractTests : Bool :=
   vibe_acp_session_update_contract &&
   opencode_empty_stop_after_reasoning_or_compaction_is_flagged &&
   opencode_raced_sse_idle_vs_nonzero_cli_exit_contract &&
-  claude_control_request_emits_ui_native_request
+  claude_control_request_emits_ui_native_request &&
+  opencode_length_stop_and_nested_tool_use_contract
 
 end OrbCore.Harness
