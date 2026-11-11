@@ -80,6 +80,8 @@ export function Composer(p: {
   picker?: boolean;
   /** Conversation identity; dictation results for another scope are dropped. */
   scope?: string;
+  /** False when the enclosing keep-alive conversation slot is hidden. */
+  active?: boolean;
   /** Server-confirmed remote support for a harness on the selected machine (new agents only). */
   remoteSupport?: (backend: string) => { state: RemoteSupport; note: string };
   /** When set, the harness menu only lists these ids (This computer). */
@@ -1022,7 +1024,7 @@ export function Composer(p: {
   const voice = (
     <Show when={voiceAvailable()}>
       <div class="voice-slot" onPointerDown={(e) => e.stopPropagation()}>
-        <VoiceButton scope={p.scope} onText={insertDictation} onActive={setVoiceActive} />
+        <VoiceButton scope={p.scope} active={p.active} onText={insertDictation} onActive={setVoiceActive} />
       </div>
     </Show>
   );

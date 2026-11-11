@@ -36,6 +36,11 @@ let knownDbTranscriptIds: Set<string> | null = null;
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 let unsupportedInvoke: NativeInvoke | null = null;
 
+function isUnsupportedCacheCommandError(err: unknown): boolean {
+  const msg = String((err as Error)?.message ?? err ?? "");
+  return /unknown desktop command|is not supported in this local runtime/i.test(msg);
+}
+
 function activeLocaldCache(): NativeInvoke | null {
   const invoke = nativeInvoke();
   if (!invoke || invoke === unsupportedInvoke) return null;
@@ -101,8 +106,8 @@ export async function loadPersistedSidebar<TMission = unknown, TProject = unknow
         }
       }
       return null;
-    } catch {
-      unsupportedInvoke = invoke;
+    } catch (err) {
+      if (isUnsupportedCacheCommandError(err)) unsupportedInvoke = invoke;
     }
   }
   const db = await openDb();
@@ -154,8 +159,8 @@ export async function savePersistedSidebar<TMission = unknown, TProject = unknow
         raw: JSON.stringify(record),
       });
       return;
-    } catch {
-      unsupportedInvoke = invoke;
+    } catch (err) {
+      if (isUnsupportedCacheCommandError(err)) unsupportedInvoke = invoke;
     }
   }
   const db = await openDb();
@@ -197,8 +202,8 @@ export async function loadPersistedTranscript<TSnap = unknown>(
         }
       }
       return null;
-    } catch {
-      unsupportedInvoke = invoke;
+    } catch (err) {
+      if (isUnsupportedCacheCommandError(err)) unsupportedInvoke = invoke;
     }
   }
   const db = await openDb();
@@ -250,8 +255,8 @@ export async function savePersistedTranscript<TSnap = unknown>(
         raw: JSON.stringify(record),
       });
       return;
-    } catch {
-      unsupportedInvoke = invoke;
+    } catch (err) {
+      if (isUnsupportedCacheCommandError(err)) unsupportedInvoke = invoke;
     }
   }
   const db = await openDb();
@@ -297,12 +302,12 @@ export async function clearPersistentCache(): Promise<void> {
   memSidebar.clear();
   memTranscripts.clear();
   knownDbTranscriptIds = null;
-  const invoke = activeLocaldCache();
+  const invoke = nativeInvoke();
   if (invoke) {
     try {
       await invoke("ui_cache_clear", {});
-    } catch {
-      unsupportedInvoke = invoke;
+    } catch (err) {
+      if (isUnsupportedCacheCommandError(err)) unsupportedInvoke = invoke;
     }
   }
   const db = await openDb();

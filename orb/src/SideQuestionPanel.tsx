@@ -13,7 +13,7 @@ import { uploadToken, type UploadedFile } from "./uploads";
 import { Portal } from 'solid-js/web';
 import { useSidePanel } from './FilePanel';
 import { createPinnedScroll } from './mission/pinnedScroll';
-import { createEffect, createSignal, For, on, onCleanup, onMount, Show, untrack } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { connectionVersion, isTransientNetworkError, sendMissionMessage, type QueuedMessage } from './api';
 import { consumeSideQuestionOpenHint, peekSavedSideQuestion, readSideQuestion, peekSideQuestionOpen, rememberSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion, type SavedSideQuestion } from './sideQuestionStorage';
 import { RemoteQueue, type PendingRemoteQueueItem, type RemoteQueueHandle } from './RemoteQueue';
@@ -69,7 +69,7 @@ async function inheritSideQuestion(mission:string){
 }
 export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem[];ref:(handle:SideQuestionsHandle)=>void;onTransfer:(text:string)=>void;onOpenSession?:(id:string)=>void|Promise<void>}) {
  const side=useSidePanel();
- const isActive=()=>p.active!==false;
+ const isActive=createMemo(()=>p.active!==false);
  const showSide=(opts?:{focus?:boolean;restore?:boolean})=>{if(isActive())side?.show(opts);};
  const hideSide=(opts?:{restore?:boolean})=>{if(isActive())side?.hide(opts);};
  const key=()=>{connectionVersion();return sideQuestionKey(p.mission);};
@@ -911,6 +911,7 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
      </Show>
     </Show>
     <Composer
+     active={isActive()&&open()}
      allowConcurrentSend
      sideQuestion
      revision={draftRevision()}

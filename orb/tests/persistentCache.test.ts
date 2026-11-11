@@ -78,4 +78,48 @@ describe("persistentCache native orb-locald bridge", () => {
     resetPersistentCacheMemoryForTest();
     expect(await loadPersistedTranscript("scope-b", "m2")).toBeNull();
   });
+
+  it("does not disable orb-locald cache or skip sign-out wipe after an oversized payload error", async () => {
+    const disk = new Map<string, string>();
+    const calls: string[] = [];
+    win.__ORB_DESKTOP__ = {
+      core: {
+        invoke: async (cmd: string, args?: Record<string, unknown>) => {
+          calls.push(cmd);
+          if (cmd === "ui_cache_put") {
+            const raw = String(args?.raw ?? "");
+            if (raw.includes("oversized-entry")) {
+              throw new Error("UI cache payload exceeds 8 MiB limit");
+            }
+            disk.set(`${args?.kind}:${args?.key}`, raw);
+            return null;
+          }
+          if (cmd === "ui_cache_get") {
+            return disk.get(`${args?.kind}:${args?.key}`) ?? null;
+          }
+          if (cmd === "ui_cache_clear") {
+            disk.clear();
+            return null;
+          }
+          throw new Error(`unexpected ${cmd}`);
+        },
+      },
+    };
+
+    await savePersistedTranscript("scope-c", "m-valid", { text: "persisted on disk" });
+    expect(disk.size).toBe(1);
+
+    // Oversized write fails in orb-locald without permanently poisoning native cache invoke.
+    await savePersistedTranscript("scope-c", "m-huge", { text: "oversized-entry" });
+    expect(disk.size).toBe(1);
+
+    // Subsequent normal writes still use orb-locald.
+    await savePersistedTranscript("scope-c", "m-valid-2", { text: "still uses locald" });
+    expect(disk.size).toBe(2);
+
+    // Sign-out clear still invokes ui_cache_clear and wipes ~/.orb/ui-cache.
+    await clearPersistentCache();
+    expect(calls.filter((c) => c === "ui_cache_clear")).toHaveLength(1);
+    expect(disk.size).toBe(0);
+  });
 });

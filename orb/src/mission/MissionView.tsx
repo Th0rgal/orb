@@ -479,8 +479,9 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   const staleMission = () => disposed || Boolean(boundMissionId && p.id !== boundMissionId);
   const receipt = p.launch ?? recalledLaunch(p.id);
   let disposed=false;
+  const isSlotActive = createMemo(() => p.active !== false);
   onCleanup(()=>{disposed=true;});
-  createEffect(()=>{if(p.id)onCleanup(retainTranscript(p.id));});
+  createEffect(()=>{if(p.id && isSlotActive())onCleanup(retainTranscript(p.id));});
   const cached = p.id ? peekReadyTranscript(p.id) ?? (peekTranscript(p.id)?.detailsPending ? peekTranscript(p.id) : undefined) : undefined;
   const [mission, setMission] = createSignal<Mission | null>(
     applyWarmMissionPatch(p.initial, { preserveSettings: Boolean(p.id && inflightSettings.has(p.id)) }),
@@ -544,6 +545,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
       setCheckpoints([]);
       return;
     }
+    if (p.active === false) return;
     let current = true;
     const timer = setTimeout(() => {
       if (!current) return;
@@ -809,7 +811,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
 
   // A terminal snapshot from either SSE or polling reconciles durable output.
   createEffect(on(() => mission()?.status, (status, prev) => {
-    if (p.id && status && prev && prev !== status && !missionPhase({status} as Mission, false).moving) void resync(true);
+    if (p.id && p.active !== false && status && prev && prev !== status && !missionPhase({status} as Mission, false).moving) void resync(true);
   }, { defer: true }));
 
   let olderPending:Promise<void>|undefined;
@@ -849,9 +851,13 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     onCleanup(() => timers.forEach(clearTimeout));
   }));
 
-  createEffect(on(()=>p.id, id => {
-    setRemoteLiveEdits([]);
-    if(!id)return;
+  let prevSyncedId: string | undefined;
+  createEffect(on(()=>[p.id, isSlotActive()] as const, ([id, isActive]) => {
+    if (id !== prevSyncedId) {
+      prevSyncedId = id;
+      setRemoteLiveEdits([]);
+    }
+    if(!id || !isActive)return;
     const reload = async () => {
       if (p.active === false || refreshing()) return;
       setRefreshing(true);
@@ -865,6 +871,10 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     );
     const warmLiveOnMount = isMissionWarmLive(id);
     const readyOnMount = peekReadyTranscript(id);
+    if (readyOnMount) {
+      setItems(cur => reuseUnchanged(cur, readyOnMount.items));
+      setAwaiting(false);
+    }
     const hasSettledOutputOnMount = (() => {
       if (!readyOnMount) return false;
       const list = readyOnMount.items;
@@ -976,7 +986,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
       if (queueError()) await resync(true);
     }, 10000, "mission.status");
     onCleanup(() => {
-      if (scroller) putTranscriptHeight(p.id, scroller.scrollHeight);
+      if (scroller && scroller.scrollHeight > 0) putTranscriptHeight(p.id, scroller.scrollHeight);
       stopStream();
       stopPoll();
     });
@@ -1209,7 +1219,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   const estimatedTokens = createMemo(() => estimateTokens(viewItems()));
   const titleContext = createMemo(() => awaiting() ? null : contextPct(estimatedTokens(), contextWindow(mission()?.backend)));
   createEffect(() => { if (p.active !== false) p.onContext?.(p.id, titleContext()); });
-  createEffect(on(() => p.active !== false, (isActive, wasActive) => {
+  createEffect(on(isSlotActive, (isActive, wasActive) => {
     if (!isActive || wasActive !== false) return;
     queueMicrotask(() => {
       if (disposed || p.active === false) return;
@@ -1658,7 +1668,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
         <JumpToLatest pinned={pin.pinned} onJump={pin.pin} />
         <div class="col">
           <Show when={p.id}><SideQuestions mission={p.id} active={p.active !== false} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})}/></Show>
-          <RemoteQueue mission={p.id}
+          <RemoteQueue mission={p.id} active={p.active !== false}
             ref={handle => remoteQueue = handle}
             editing={editingQueued()}
             onEdit={row => void queuedEdit.start(row)}
@@ -1684,6 +1694,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
           }}/>
           <QueuedMessages mission={p.id} editing={editingQueued()} pending={clientPlaced() && !sendError() && !editingQueued() ? optimisticList().filter(item => item.waiting && !item.failed).map(item => ({id:item.id,text:item.text})) : undefined} onCancelPending={id => drafts.remove(id)} onEdit={row=>void queuedEdit.start(row)}/>
           <Composer
+            active={p.active !== false}
             allowConcurrentSend
             revision={sideRevision()}
             onBtw={(question,images,files)=>sideQuestions?.ask(question,images,files)??false}
