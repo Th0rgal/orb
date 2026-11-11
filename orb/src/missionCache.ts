@@ -1567,7 +1567,7 @@ export function forgetPrefetchPauses(){
 }
 export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{
  return transcriptJob(id,'older',async()=>{
-  const previous=peekReadyTranscript(id);if(!previous)return fetchTranscript(id);
+  let previous=peekReadyTranscript(id);if(!previous)return fetchTranscript(id);
   if(previous.diskStartIdx&&previous.diskStartIdx>0){
    const sliced=await loadPersistedTranscriptSlice<StreamEvent>(
     transcriptPersistScope(),
@@ -1593,11 +1593,21 @@ export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{
      hasOlder:nextHasOlder,
     };
    }
-   // SQLite prefix was cleared or unavailable: fall through to server `before` pagination.
-   const fallbackHasOlder=Boolean(previous.serverHasOlder);
-   if(!fallbackHasOlder||previous.before===undefined){
+   // SQLite prefix was evicted or unavailable: recover missing history from the server
+   // starting at the earliest visible event's sequence (`firstVisibleSeq`)!
+   const firstVisibleSeq=previous.stream.find((e):e is StreamEvent&{sequence:number}=>typeof e.sequence==='number'&&e.sequence>0)?.sequence;
+   const recoveryBefore=firstVisibleSeq??previous.before;
+   if(recoveryBefore===undefined||recoveryBefore<=1){
     return {...previous,diskStartIdx:undefined,serverHasOlder:undefined,hasOlder:false};
    }
+   previous={
+    ...previous,
+    diskStartIdx:undefined,
+    serverHasOlder:undefined,
+    before:recoveryBefore,
+    hasOlder:true,
+    spineComplete:false,
+   };
   }
   if(!previous.hasOlder||previous.before===undefined)return previous;
   const page=await getMissionEventPage(id,{before:previous.before});
@@ -1715,10 +1725,30 @@ export function prepareTranscriptSearch(id: string, signal?: AbortSignal): Promi
                 hasOlder: Boolean(current.serverHasOlder),
                 serverHasOlder: undefined,
               }
-            : {
-                diskStartIdx: remBefore,
-                hasOlder: true,
-              }),
+            : (() => {
+                const firstSeq = mergedLocal.find(
+                  (e): e is StreamEvent & { sequence: number } => typeof e.sequence === "number" && e.sequence > 0,
+                )?.sequence;
+                return {
+                  diskStartIdx: undefined,
+                  serverHasOlder: undefined,
+                  before: firstSeq ?? current.before,
+                  hasOlder: (firstSeq ?? current.before ?? 0) > 1 || Boolean(current.serverHasOlder),
+                  spineComplete: false,
+                };
+              })()),
+        };
+      } else if (!signal?.aborted) {
+        const firstSeq = current.stream.find(
+          (e): e is StreamEvent & { sequence: number } => typeof e.sequence === "number" && e.sequence > 0,
+        )?.sequence;
+        current = {
+          ...current,
+          diskStartIdx: undefined,
+          serverHasOlder: undefined,
+          before: firstSeq ?? current.before,
+          hasOlder: (firstSeq ?? current.before ?? 0) > 1 || Boolean(current.serverHasOlder),
+          spineComplete: false,
         };
       }
     }
