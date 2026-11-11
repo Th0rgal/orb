@@ -1,5 +1,5 @@
 import * as drafts from "./composerDrafts";
-import { getApiUrl, getJwt } from './api';
+import * as apiModule from './api';
 import { doesTurnAnswerPending, type SideAttachment, type SideExchange } from './sideQuestionClient';
 
 export type SavedSideQuestion = {
@@ -18,15 +18,21 @@ export type SavedSideQuestion = {
 export const BTW_HISTORY_LIMIT = 200;
 export type QueuedSideQuestion = { id: string; question: string; attachments?: SideAttachment[] };
 export function sideQuestionKey(mission: string): string {
+  try {
+    if ('connectionVersion' in apiModule && typeof apiModule.connectionVersion === 'function') {
+      apiModule.connectionVersion();
+    }
+  } catch { /* partial test mocks */ }
   let account = 'local';
   try {
-    const token = getJwt();
+    const token = apiModule.getJwt();
     if (token) {
       const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
       account = String(payload.sub ?? payload.user_id ?? 'authenticated');
     }
   } catch { account = 'authenticated'; }
-  return `orb.btw:v1:${JSON.stringify([getApiUrl().replace(/\/+$/, ''), account, mission])}`;
+  const apiUrl = 'getApiUrl' in apiModule && typeof apiModule.getApiUrl === 'function' ? apiModule.getApiUrl() : '';
+  return `orb.btw:v1:${JSON.stringify([apiUrl.replace(/\/+$/, ''), account, mission])}`;
 }
 // Last known open/closed state and full saved payload per thread, so a mission switch
 // can hydrate the /btw dock in the same frame as the transcript instead of flashing

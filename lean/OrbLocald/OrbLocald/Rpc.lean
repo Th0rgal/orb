@@ -638,14 +638,22 @@ def classifyLocalOriginConflict (httpStatus : UInt16) (code : String) : Option (
 /-- Durable in-memory local-origin mission row managed by `local_origin_*` (`SM-26`). -/
 structure LocalOriginEntry where
   id                : String
+  runId             : String := ""
   endpoint          : String
   title             : String
   status            : String := "active"
+  statusMessage     : Option String := none
   backend           : String := "opencode"
   workingDirectory  : String := "."
+  rawPrompt         : String := ""
   deliveredPrompt   : String := ""
   localSyncPending  : Bool := true
   localRunActive    : Bool := true
+  syncSeq           : UInt64 := 1
+  ackedSeq          : UInt64 := 0
+  syncText          : String := ""
+  syncError         : Option String := none
+  syncLocalOnly     : Bool := false
   observedAt        : UInt64 := 0
   lastConflictCode  : Option String := none
   retryableConflict : Bool := false
@@ -655,6 +663,7 @@ structure LocalOriginEntry where
   modelOverride     : Option String := none
   modelEffort       : Option String := none
   serviceTier       : Option String := none
+  cyberAccess       : Option String := none
   createdAt         : String := ""
   updatedAt         : String := ""
   history           : Array JVal := #[]
@@ -672,14 +681,27 @@ def LocalOriginEntry.toMissionJson (e : LocalOriginEntry) : JVal :=
     ("placement_kind", .str "client"),
     ("local_sync_pending", .bool e.localSyncPending),
     ("local_run_active", .bool e.localRunActive),
+    ("sync_seq", JVal.uint64 e.syncSeq),
+    ("acked_seq", JVal.uint64 e.ackedSeq),
+    ("sync_text", .str e.syncText),
     ("total_cost_cents", JVal.nat 0),
     ("tags", .arr (e.tags.map .str)),
     ("history", .arr e.history),
     ("created_at", .str (if e.createdAt.isEmpty then "1970-01-01T00:00:00Z" else e.createdAt)),
     ("updated_at", .str (if e.updatedAt.isEmpty then "1970-01-01T00:00:00Z" else e.updatedAt))
   ]
+  let withStatusMsg :=
+    match e.statusMessage with | some sm => base.push ("status_message", .str sm) | none => base
+  let withRun :=
+    if e.runId.isEmpty then withStatusMsg else withStatusMsg.push ("run_id", .str e.runId)
+  let withRawPrompt :=
+    if e.rawPrompt.isEmpty then withRun else withRun.push ("raw_prompt", .str e.rawPrompt)
+  let withSyncErr :=
+    match e.syncError with | some se => withRawPrompt.push ("local_sync_error", .str se) | none => withRawPrompt
+  let withLocalOnly :=
+    if e.syncLocalOnly then withSyncErr.push ("local_sync_local_only", .bool true) else withSyncErr
   let withProj :=
-    if e.project.isEmpty then base else base.push ("project", .str e.project)
+    if e.project.isEmpty then withLocalOnly else withLocalOnly.push ("project", .str e.project)
   let withFolder :=
     match e.folder with | some f => withProj.push ("folder", .str f) | none => withProj
   let withModel :=
@@ -688,22 +710,38 @@ def LocalOriginEntry.toMissionJson (e : LocalOriginEntry) : JVal :=
     match e.modelEffort with | some ef => withModel.push ("model_effort", .str ef) | none => withModel
   let withTier :=
     match e.serviceTier with | some st => withEffort.push ("service_tier", .str st) | none => withEffort
+  let withCyber :=
+    match e.cyberAccess with | some cy => withTier.push ("cyber_access", .str cy) | none => withTier
   let withConflict := match e.lastConflictCode with
     | some code =>
-      (withTier.push ("conflict_code", .str code)).push ("conflict_retryable", .bool e.retryableConflict)
-    | none => withTier
+      (withCyber.push ("conflict_code", .str code)).push ("conflict_retryable", .bool e.retryableConflict)
+    | none => withCyber
   .obj withConflict
 
 def LocalOriginEntry.fromMissionJson? (jv : JVal) : Option LocalOriginEntry := do
   let id ← jv.fieldStr? "id"
+  let runId := (jv.fieldStr? "run_id").getD ""
   let ep := (jv.fieldStr? "endpoint").getD ""
   let title := (jv.fieldStr? "title").getD "Local Mission"
   let status := (jv.fieldStr? "status").getD "active"
+  let rawStatusMsg := (jv.fieldStr? "status_message").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  let rawSyncErr := (jv.fieldStr? "local_sync_error").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  let migratedTurnErr :=
+    match rawStatusMsg, rawSyncErr with
+    | none, some se => if status == "failed" && !(se.startsWith "Core synchronization ") then some se else none
+    | _, _ => none
+  let statusMessage := rawStatusMsg.orElse (fun _ => migratedTurnErr)
+  let syncError := if migratedTurnErr.isSome then none else rawSyncErr
+  let syncLocalOnly := (jv.fieldBool? "local_sync_local_only").getD false
   let backend := (jv.fieldStr? "backend").getD "opencode"
   let cwd := (jv.fieldStr? "working_directory").getD "."
   let prompt := (jv.fieldStr? "delivered_prompt").getD ""
+  let rawPrompt := (jv.fieldStr? "raw_prompt").getD prompt
   let syncPend := (jv.fieldBool? "local_sync_pending").getD false
   let runAct := (jv.fieldBool? "local_run_active").getD false
+  let syncSeq := (jv.fieldUInt64? "sync_seq").getD 1
+  let ackedSeq := (jv.fieldUInt64? "acked_seq").getD (if syncPend then 0 else syncSeq)
+  let syncText := (jv.fieldStr? "sync_text").getD ""
   let obsAt := (jv.fieldUInt64? "observed_at").getD 0
   let confCode := jv.fieldStr? "conflict_code"
   let confRetry := (jv.fieldBool? "conflict_retryable").getD false
@@ -715,15 +753,17 @@ def LocalOriginEntry.fromMissionJson? (jv : JVal) : Option LocalOriginEntry := d
   let modelOv := jv.fieldStr? "model_override"
   let modelEf := jv.fieldStr? "model_effort"
   let svcTier := jv.fieldStr? "service_tier"
+  let cyberAcc := jv.fieldStr? "cyber_access"
   let createdAt := (jv.fieldStr? "created_at").getD ""
   let updatedAt := (jv.fieldStr? "updated_at").getD ""
   let hist := (jv.fieldArr? "history").getD #[]
   return {
-    id, endpoint := ep, title, status, backend, workingDirectory := cwd,
-    deliveredPrompt := prompt, localSyncPending := syncPend, localRunActive := runAct,
+    id, runId, endpoint := ep, title, status, statusMessage, backend, workingDirectory := cwd,
+    rawPrompt, deliveredPrompt := prompt, localSyncPending := syncPend, localRunActive := runAct,
+    syncSeq, ackedSeq, syncText, syncError, syncLocalOnly,
     observedAt := obsAt, lastConflictCode := confCode, retryableConflict := confRetry,
     project := proj, folder, tags, modelOverride := modelOv, modelEffort := modelEf,
-    serviceTier := svcTier, createdAt, updatedAt, history := hist
+    serviceTier := svcTier, cyberAccess := cyberAcc, createdAt, updatedAt, history := hist
   }
 
 structure LocaldState where
@@ -769,6 +809,8 @@ structure LocaldState where
   h2Pool?              : Option OrbNetLeaf.H2Pool.H2ClientPool := none
   warmMgr?             : Option OrbBin.ClaudeControl.WarmHarnessManager := none
   runGenerations       : Array (String × UInt64) := #[]
+  syncingOriginIds     : Array String := #[]
+  unsupportedOriginSyncEndpoints : Array String := #[]
   deriving Inhabited
 
 /-- Record an upstream RTT sample (`orb_rtt_ewma_step`) and clear cooldown on `origin`, returning updated `srttMs`. -/
@@ -924,16 +966,19 @@ def isAllowedLocaldOrigin (origin? : Option String) : Bool :=
     if raw.toList.any (fun c => c == '\r' || c == '\n' || c.toNat == 0) then false
     else
       let o := raw.trimAscii.toString
-      o.isEmpty || o == "null" || o == "file://" || o == "tauri://localhost" ||
+      o.isEmpty || o == "null" || o == "file://" || o == "orb://localhost" || o == "tauri://localhost" ||
       o.startsWith "http://127.0.0.1:" || o.startsWith "http://localhost:" ||
       o == "http://127.0.0.1" || o == "http://localhost"
 
 /-- Canonical list of all desktop IPC commands (`plugin:app|version` + native RPCs). -/
 def supportedDesktopCommands : Array String := #[
   "plugin:app|version",
+  "desktop_bootstrap",
   "transport_bridge_configure",
   "desktop_connection_load", "desktop_connection_save",
-  "desktop_prefs_load", "desktop_prefs_patch", "diagnostics_append",
+  "desktop_prefs_load", "desktop_prefs_patch",
+  "ui_cache_get", "ui_cache_put", "ui_cache_clear",
+  "diagnostics_append",
   "reveal_logs", "local_machine_metrics", "paloma_ssh_pubkey",
   "open_url", "reveal_download", "save_file_as", "set_window_theme", "mistral_usage_sign_in",
   "approval_key_status", "approval_key_create", "approval_sign",
@@ -945,7 +990,7 @@ def supportedDesktopCommands : Array String := #[
   "local_run_launch", "local_run_reconcile",
   "local_interaction", "local_interaction_subscribe", "local_interaction_unsubscribe", "local_interaction_answer",
   "local_agents_cyber_capabilities", "local_codex_speed_options", "local_agents_scan",
-  "local_antigravity_models", "local_claude_models", "local_agents_workspace", "local_agents_directory",
+  "local_antigravity_models", "local_claude_models", "local_opencode_models", "local_agents_workspace", "local_agents_directory",
   "local_agents_write", "local_agents_poll", "local_agents_subscribe", "local_agents_unsubscribe", "local_agents_stop",
   "local_wakeups_sync", "local_wakeups_cancel", "local_wakeups_discard",
   "local_session_git", "local_machine_transfer", "local_machine_identity",
@@ -1304,7 +1349,99 @@ private def originsFilePath? (st : LocaldState) : Option System.FilePath :=
 private def uiPrefsFilePath? (st : LocaldState) : Option System.FilePath :=
   (resolveOrbStateDir st).map (· / "ui-prefs.json")
 
+private def uiCacheDirPath? (st : LocaldState) : Option System.FilePath :=
+  (resolveOrbStateDir st).map (· / "ui-cache")
+
 initialize uiPrefsMutex : Std.Mutex Unit ← Std.Mutex.new ()
+initialize uiCacheMutex : Std.Mutex Unit ← Std.Mutex.new ()
+
+private def maxUiCacheRawBytes : Nat := 8388608
+private def hotUiCacheTranscripts : Nat := 32
+private def maxUiCacheTranscripts : Nat := 250
+
+private def isValidUiCacheKind (k : String) : Bool :=
+  k == "sidebar" || k == "transcript"
+
+private def uiCacheEntryPath (dir : System.FilePath) (kind key : String) : System.FilePath :=
+  let digest := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes key.toUTF8)
+  dir / s!"{kind}-{digest}.cache"
+
+private def parseUiCacheFile? (raw : String) (expectedKeyHex : String) : Option (Nat × String) :=
+  match raw.splitOn "\n" with
+  | tsStr :: rest0 =>
+    let tsParts := tsStr.trimAscii.toString.splitOn ":"
+    let savedAt := (tsParts[0]?.bind (·.toNat?)).getD 0
+    match rest0 with
+    | keyHex :: rest =>
+      if keyHex != expectedKeyHex then none
+      else
+        let payload := String.intercalate "\n" rest
+        if payload.isEmpty then none else some (savedAt, payload)
+    | _ => none
+  | _ => none
+
+private def hexNibble? (c : Char) : Option UInt8 :=
+  let n := c.toNat
+  if '0'.toNat ≤ n && n ≤ '9'.toNat then some (UInt8.ofNat (n - '0'.toNat))
+  else if 'a'.toNat ≤ n && n ≤ 'f'.toNat then some (UInt8.ofNat (10 + n - 'a'.toNat))
+  else if 'A'.toNat ≤ n && n ≤ 'F'.toNat then some (UInt8.ofNat (10 + n - 'A'.toNat))
+  else none
+
+private def decodeHexUtf8? (hex : String) : Option String := Id.run do
+  let cs := hex.trimAscii.toString.toList.toArray
+  if cs.size == 0 || cs.size % 2 != 0 then return none
+  let mut out := ByteArray.emptyWithCapacity (cs.size / 2)
+  let mut i := 0
+  while i + 1 < cs.size do
+    match hexNibble? cs[i]!, hexNibble? cs[i + 1]! with
+    | some hi, some lo =>
+      out := out.push ((hi <<< 4) ||| lo)
+      i := i + 2
+    | _, _ => return none
+  String.fromUTF8? out
+
+private def readUiCacheMeta (path : System.FilePath) : IO (Nat × String × String) := do
+  let st ← OrbBin.PosixExt.statPath path.toString
+  if !st.exists_ || st.isSymlink || !st.isReg then return (0, "warm", "")
+  try
+    let h ← IO.FS.Handle.mk path .read
+    let line1 ← h.getLine
+    let line2 ← h.getLine
+    let tsParts := line1.trimAscii.toString.splitOn ":"
+    let ts := (tsParts[0]?.bind (·.toNat?)).getD 0
+    let tier := match tsParts[1]? with
+      | some "warm" => "warm"
+      | _ => "hot"
+    let key := (decodeHexUtf8? line2).getD ""
+    return (ts, tier, key)
+  catch _ =>
+    return (0, "warm", "")
+
+/-- Evict transcripts beyond `maxUiCacheTranscripts` (`250`) and return keys of any
+    persisted hot records outside the newest `hotUiCacheTranscripts` (`32`) so the
+    renderer can compact and write back their warm-tier spine digests across restarts. -/
+private def reconcileUiCacheTranscripts (dir : System.FilePath) : IO (Array String) := do
+  let entries ← try dir.readDir catch _ => pure #[]
+  let txEntries := entries.filter fun e =>
+    e.fileName.startsWith "transcript-" && e.fileName.endsWith ".cache"
+  if txEntries.size ≤ hotUiCacheTranscripts then return #[]
+  let mut stamped : Array (Nat × String × String × System.FilePath) := Array.mkEmpty txEntries.size
+  for e in txEntries do
+    let (ts, tier, key) ← readUiCacheMeta e.path
+    stamped := stamped.push (ts, tier, key, e.path)
+  let sorted := stamped.qsort (fun a b => a.1 < b.1)
+  let dropCount := if sorted.size > maxUiCacheTranscripts then sorted.size - maxUiCacheTranscripts else 0
+  for i in [0:dropCount] do
+    if h : i < sorted.size then
+      try IO.FS.removeFile sorted[i].2.2.2 catch _ => pure ()
+  let warmEnd := if sorted.size > hotUiCacheTranscripts then sorted.size - hotUiCacheTranscripts else 0
+  let mut demoteKeys : Array String := #[]
+  for i in [dropCount:warmEnd] do
+    if h : i < sorted.size then
+      let (_, tier, key, _) := sorted[i]
+      if tier == "hot" && !key.isEmpty then
+        demoteKeys := demoteKeys.push key
+  return demoteKeys
 
 private def isAllowedUiPrefKey (k : String) : Bool :=
   !k.isEmpty && k.utf8ByteSize ≤ 512 &&
@@ -1412,21 +1549,44 @@ def ensurePersistedBindingsLoaded (stRef : IO.Ref LocaldState) : IO Unit := do
         let raw ← IO.FS.readFile path
         match OrbBin.Json.parse raw.trimAscii.toString with
         | .ok jv =>
+          let homeOv? := if st.homeDir.trimAscii.toString.isEmpty then none else some st.homeDir.trimAscii.toString
+          let (defModel?, provNames, cfgModels) ← OrbBin.ClaudeControl.readLocalOpenCodeConfigInfo homeOv?
+          let provIds := provNames.map Prod.fst
           let diskRev := (jv.fieldNat? "revision").getD 0
-          let diskEntries : Array (String × JVal) :=
+          let rawEntries : Array (String × JVal) :=
             match jv.field? "bindings" with
             | some (.obj kvs) => kvs
             | _ =>
               match jv with
               | .obj kvs => kvs.filter (fun (k, _) => k != "revision" && k != "bindings")
               | _ => #[]
-          stRef.modify fun s =>
-            if s.bindingsLoaded then s
+          let mut repairedAny := false
+          let mut diskEntries : Array (String × JVal) := Array.mkEmpty rawEntries.size
+          for (k, v) in rawEntries do
+            if v.fieldStr? "harness" == some "opencode" then
+              if let some m := v.fieldStr? "model" then
+                let resolved := (OrbBin.ClaudeControl.resolveOpenCodeModelForLocal (some m) defModel? provIds cfgModels).getD m
+                if resolved != m then
+                  repairedAny := true
+                  diskEntries := diskEntries.push (k, JVal.setField v "model" (.str resolved))
+                else
+                  diskEntries := diskEntries.push (k, v)
+              else
+                diskEntries := diskEntries.push (k, v)
+            else
+              diskEntries := diskEntries.push (k, v)
+          let stLoaded ← stRef.modifyGet fun s =>
+            if s.bindingsLoaded then (none, s)
             else
               let merged := diskEntries.foldl (fun acc (k, v) =>
                 if acc.any (fun (ek, _) => ek == k) then acc else acc.push (k, v)) s.bindingsEntries
-              let rev := max s.bindingsRevision (max diskRev merged.size)
-              { s with bindingsLoaded := true, bindingsRevision := rev, bindingsEntries := merged }
+              let baseRev := max s.bindingsRevision (max diskRev merged.size)
+              let rev := if repairedAny then baseRev + 1 else baseRev
+              let s' := { s with bindingsLoaded := true, bindingsRevision := rev, bindingsEntries := merged }
+              (if repairedAny then some s' else none, s')
+          if let some stToSave := stLoaded then
+            let payload := (renderCompact stToSave.bindingsSnapshotJson ++ "\n").toUTF8
+            discard <| OrbBin.PosixExt.writeAtomicPrivate0600 path payload
         | .error _ =>
           stRef.modify fun s => { s with bindingsLoaded := true }
       catch _ =>
@@ -1451,13 +1611,37 @@ def ensurePersistedOriginsLoaded (stRef : IO.Ref LocaldState) : IO Unit := do
         let raw ← IO.FS.readFile path
         match OrbBin.Json.parse raw.trimAscii.toString with
         | .ok (.arr xs) =>
-          let parsed := xs.filterMap LocalOriginEntry.fromMissionJson?
-          stRef.modify fun s =>
-            if s.originsLoaded then s
+          let homeOv? := if st.homeDir.trimAscii.toString.isEmpty then none else some st.homeDir.trimAscii.toString
+          let (defModel?, provNames, cfgModels) ← OrbBin.ClaudeControl.readLocalOpenCodeConfigInfo homeOv?
+          let provIds := provNames.map Prod.fst
+          let mut repairedAny := false
+          let rawParsed := xs.filterMap LocalOriginEntry.fromMissionJson?
+          let mut parsed : Array LocalOriginEntry := Array.mkEmpty rawParsed.size
+          for row in rawParsed do
+            if row.backend == "opencode" then
+              match row.modelOverride with
+              | some m =>
+                let resolved := (OrbBin.ClaudeControl.resolveOpenCodeModelForLocal (some m) defModel? provIds cfgModels).getD m
+                if resolved != m then
+                  repairedAny := true
+                  parsed := parsed.push { row with modelOverride := some resolved }
+                else
+                  parsed := parsed.push row
+              | none =>
+                parsed := parsed.push row
+            else
+              parsed := parsed.push row
+          let stLoaded ← stRef.modifyGet fun s =>
+            if s.originsLoaded then (none, s)
             else
               let merged := parsed.foldl (fun acc row =>
                 if acc.any (fun r => r.id == row.id) then acc else acc.push row) s.localOrigins
-              { s with originsLoaded := true, localOrigins := merged }
+              let s' := { s with originsLoaded := true, localOrigins := merged }
+              (if repairedAny then some s' else none, s')
+          if let some stToSave := stLoaded then
+            let arr := stToSave.localOrigins.map LocalOriginEntry.toMissionJson
+            let payload := (renderCompact (.arr arr) ++ "\n").toUTF8
+            discard <| OrbBin.PosixExt.writeAtomicPrivate0600 path payload
         | _ =>
           stRef.modify fun s => { s with originsLoaded := true }
       catch _ =>
@@ -2481,8 +2665,7 @@ private def ensureMachineId (stRef : IO.Ref LocaldState) : IO String := do
   if !st.machineId.isEmpty then return st.machineId
   match resolveOrbStateDir st with
   | none =>
-    let host ← OrbBin.PosixExt.getHostname
-    let fallback := if host.trimAscii.toString.isEmpty then "local-desktop" else host.trimAscii.toString
+    let fallback ← randomUuidV4
     stRef.modify fun s => { s with machineId := fallback }
     return fallback
   | some dir =>
@@ -2832,11 +3015,14 @@ private def candidateAgentBinDirs (homeDir : String) : Array String :=
     else #[
       s!"{h}/.local/bin",
       s!"{h}/.opencode/bin",
+      s!"{h}/.nix-profile/bin",
+      s!"{h}/.local/state/nix/profile/bin",
       s!"{h}/.cargo/bin",
       s!"{h}/.bun/bin",
+      s!"{h}/.npm-global/bin",
       s!"{h}/bin"
     ]
-  userDirs ++ #["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+  userDirs ++ #["/run/current-system/sw/bin", "/nix/var/nix/profiles/default/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
 
 private def resolveAgentExecutable? (homeDir : String) (binName : String) (override? : Option String) : IO (Option String) := do
   if let some ov := override? then
@@ -2847,7 +3033,9 @@ private def resolveAgentExecutable? (homeDir : String) (binName : String) (overr
         return some clean
       return none
   let pathEnv := ((← IO.getEnv "PATH").getD "").splitOn ":" |>.filter (fun s => !s.trimAscii.toString.isEmpty)
-  let searchDirs := pathEnv.toArray ++ candidateAgentBinDirs homeDir
+  let userEnv := ((← IO.getEnv "USER").getD "").trimAscii.toString
+  let nixUserDirs := if userEnv.isEmpty then #[] else #[s!"/etc/profiles/per-user/{userEnv}/bin"]
+  let searchDirs := pathEnv.toArray ++ nixUserDirs ++ candidateAgentBinDirs homeDir
   for d in searchDirs do
     let cand := (System.FilePath.mk d.trimAscii.toString / binName).toString
     if (← System.FilePath.pathExists cand) then
@@ -3772,6 +3960,335 @@ def parseOriginHostPort (raw : String) : Option (Bool × String × UInt16 × Str
           | none => none
       | _ => none
 
+/-- Synchronize a `LocalOriginEntry` snapshot (`sequence = 1` at launch, `sequence = 2+` at completion)
+    to Core's `POST /api/control/local-origins` endpoint so Turn 2+ follow-ups, `/btw`, and mobile clients
+    observe local-origin missions without blocking local launch latency. -/
+private def syncLocalOriginToCore (stRef : IO.Ref LocaldState) (missionId : String) (apiUrlRaw : String) (tokenRaw : String) : Nat → IO Unit
+  | 0 => pure ()
+  | remainingPasses + 1 => do
+  let tok := tokenRaw.trimAscii.toString
+  let apiUrl := apiUrlRaw.trimAscii.toString
+  let normEp := normalizeEndpointKey apiUrl
+  if tok.isEmpty || missionId.isEmpty || !apiUrl.startsWith "https://" then
+    return ()
+  let clientUuid ← ensureMachineId stRef
+  let fallbackRunUuid ← randomUuidV4
+  let claimedRow? ← stRef.modifyGet fun s =>
+    if s.syncingOriginIds.contains missionId || s.unsupportedOriginSyncEndpoints.contains normEp then
+      (none, s)
+    else
+      match s.localOrigins.find? (fun r => r.id == missionId) with
+      | none => (none, s)
+      | some r0 =>
+        if !r0.localSyncPending || r0.ackedSeq >= r0.syncSeq then
+          (none, s)
+        else if r0.project.trimAscii.toString.isEmpty then
+          let nextRows := s.localOrigins.map fun r =>
+            if r.id == missionId && !r.syncLocalOnly then { r with syncLocalOnly := true, syncError := none } else r
+          (none, { s with localOrigins := nextRows })
+        else
+          let assignedRunId := if r0.runId.isEmpty then fallbackRunUuid else r0.runId
+          let rClaimed := { r0 with runId := assignedRunId }
+          let nextRows := s.localOrigins.map fun r => if r.id == missionId then rClaimed else r
+          (some rClaimed, { s with localOrigins := nextRows, syncingOriginIds := s.syncingOriginIds.push missionId })
+  let some row := claimedRow?
+    | return ()
+  let mut shouldRetryNext := false
+  try
+    let st ← stRef.get
+    let runUuid := row.runId
+    let cleanFolder := ((row.folder.getD "").trimAscii.toString.dropWhile (· == '/')).dropEndWhile (· == '/') |>.toString
+    let folderTags := row.tags.filter (fun t => t.startsWith "orb-folder:" && t.length ≤ 1024)
+    let validEffort? : Option String :=
+      match row.modelEffort with
+      | none => none
+      | some eff =>
+        let ok :=
+          if row.backend == "antigravity" then eff == "low" || eff == "medium" || eff == "high"
+          else if row.backend == "codex" || row.backend == "claudecode" then
+            eff == "low" || eff == "medium" || eff == "high" || eff == "xhigh" || eff == "max"
+          else false
+        if ok then some eff else none
+    let mut originFields : Array (String × JVal) := #[
+      ("id", .str row.id),
+      ("run_id", .str runUuid),
+      ("client_id", .str clientUuid),
+      ("title", .str row.title),
+      ("project", .str row.project),
+      ("folder", .str cleanFolder),
+      ("backend", .str row.backend),
+      ("model", match row.modelOverride with | some m => (if m.isEmpty then .null else .str m) | none => .null),
+      ("cwd", .str row.workingDirectory),
+      ("prompt", .str (if row.rawPrompt.isEmpty then row.deliveredPrompt else row.rawPrompt)),
+      ("created_at", .str (if row.createdAt.isEmpty then "1970-01-01T00:00:00Z" else row.createdAt)),
+      ("tags", .arr (folderTags.map .str))
+    ]
+    if let some eff := validEffort? then
+      originFields := originFields.push ("effort", .str eff)
+    if row.backend == "codex" then
+      if let some stTier := row.serviceTier then
+        if stTier == "flex" || stTier == "priority" then
+          originFields := originFields.push ("service_tier", .str stTier)
+      if let some cy := row.cyberAccess then
+        if !cy.isEmpty then
+          originFields := originFields.push ("cyber_access", .str cy)
+    let sentSeq := row.syncSeq
+    let sentStatus :=
+      if row.status == "active" || row.status == "awaiting_user" || row.status == "failed" || row.status == "interrupted" then
+        row.status
+      else
+        "awaiting_user"
+    let snapPayload : JVal := .obj #[
+      ("origin", .obj originFields),
+      ("sequence", JVal.uint64 sentSeq),
+      ("text", .str row.syncText),
+      ("status", .str sentStatus),
+      ("error", match row.statusMessage with | some e => .str e | none => .null)
+    ]
+    let reqBody := (renderCompact snapPayload).toUTF8
+    let reqHdrs : Array (String × String) := #[
+      ("Authorization", s!"Bearer {tok}"),
+      ("Content-Type", "application/json")
+    ]
+    let origins := candidateOriginsFor apiUrl
+    let mut succeeded := false
+    let mut rejected409 := false
+    let mut unsupportedRoute := false
+    let mut lastErr? : Option String := none
+    for orig in origins do
+      if !succeeded && !rejected409 && !unsupportedRoute then
+        if let some (true, host, port, pfx) := parseOriginHostPort orig then
+          let relPath := pfx ++ "/api/control/local-origins"
+          let res ←
+            match st.h2Pool? with
+            | some pool =>
+              match ← pool.request 1 "POST" host port relPath reqHdrs reqBody (2 * 1024 * 1024) true 8000 15000 with
+              | .ok pooled => pure (.ok pooled.response)
+              | .error e => pure (.error e)
+            | none =>
+              OrbNetLeaf.TlsHttp.httpsRequest "POST" host port relPath reqHdrs reqBody (2 * 1024 * 1024) true 15000
+          match res with
+          | .ok up =>
+            if 200 ≤ up.status && up.status < 300 then
+              succeeded := true
+            else if up.status == 404 || up.status == 405 || up.status == 501 then
+              unsupportedRoute := true
+            else if up.status == 409 then
+              rejected409 := true
+              let det := ((String.fromUTF8? up.body).getD "").trimAscii.toString.take 240 |>.toString
+              lastErr? := some s!"Core synchronization refused (409): {det}"
+            else
+              let det := ((String.fromUTF8? up.body).getD "").trimAscii.toString.take 240 |>.toString
+              lastErr? := some s!"Core synchronization failed ({up.status}): {det}"
+          | .error _ =>
+            pure ()
+    let notifyPayload : JVal := .obj #[("id", .str missionId)]
+    if succeeded then
+      let stUpd ← stRef.modifyGet fun s =>
+        let nextRows := s.localOrigins.map fun r =>
+          if r.id == missionId then
+            let nextAck := if sentSeq > r.ackedSeq then sentSeq else r.ackedSeq
+            let stillPending := r.localRunActive || nextAck < r.syncSeq
+            { r with
+              runId := if r.runId.isEmpty then runUuid else r.runId
+              ackedSeq := nextAck
+              localSyncPending := stillPending
+              syncLocalOnly := false
+              syncError := none }
+          else r
+        let s' := ({ s with localOrigins := nextRows }).enqueueNamedEvent "orb-local-origins-changed" notifyPayload
+        (s', s')
+      persistOriginsSnapshot stUpd
+      let afterRow? := stUpd.localOrigins.find? (fun r => r.id == missionId)
+      if let some ar := afterRow? then
+        if ar.localSyncPending && ar.ackedSeq < ar.syncSeq then
+          shouldRetryNext := true
+    else if unsupportedRoute then
+      let stUnsup ← stRef.modifyGet fun s =>
+        let nextUnsup := if normEp.isEmpty || s.unsupportedOriginSyncEndpoints.contains normEp then s.unsupportedOriginSyncEndpoints else s.unsupportedOriginSyncEndpoints.push normEp
+        let nextRows := s.localOrigins.map fun r =>
+          if r.id == missionId || (!normEp.isEmpty && r.endpoint == normEp && r.localSyncPending) then
+            { r with syncLocalOnly := true, syncError := none }
+          else r
+        let s' := ({ s with localOrigins := nextRows, unsupportedOriginSyncEndpoints := nextUnsup }).enqueueNamedEvent "orb-local-origins-changed" notifyPayload
+        (s', s')
+      persistOriginsSnapshot stUnsup
+    else if rejected409 then
+      let stRej ← stRef.modifyGet fun s =>
+        let nextRows := s.localOrigins.map fun r =>
+          if r.id == missionId then
+            { r with
+              localSyncPending := false
+              syncError := lastErr?
+              lastConflictCode := some "conflict_409"
+              retryableConflict := false }
+          else r
+        let s' := ({ s with localOrigins := nextRows }).enqueueNamedEvent "orb-local-origins-changed" notifyPayload
+        (s', s')
+      persistOriginsSnapshot stRej
+    else if let some em := lastErr? then
+      let stErr ← stRef.modifyGet fun s =>
+        let nextRows := s.localOrigins.map fun r =>
+          if r.id == missionId then { r with syncError := some em } else r
+        let s' := ({ s with localOrigins := nextRows }).enqueueNamedEvent "orb-local-origins-changed" notifyPayload
+        (s', s')
+      persistOriginsSnapshot stErr
+  finally
+    stRef.modify fun s => { s with syncingOriginIds := s.syncingOriginIds.filter (· != missionId) }
+  if shouldRetryNext then
+    syncLocalOriginToCore stRef missionId apiUrl tok remainingPasses
+
+private def postCoreJson
+    (st : LocaldState)
+    (apiUrl : String)
+    (tok : String)
+    (subPath : String)
+    (payload : JVal)
+    (extraHdrs : Array (String × String) := #[])
+    : IO (Except String (Nat × ByteArray)) := do
+  let reqBody := (renderCompact payload).toUTF8
+  let reqHdrs : Array (String × String) := #[
+    ("Authorization", s!"Bearer {tok}"),
+    ("Content-Type", "application/json")
+  ] ++ extraHdrs
+  let origins := candidateOriginsFor apiUrl
+  let mut lastNetErr := "no candidate HTTPS origin"
+  for orig in origins do
+    if let some (true, host, port, pfx) := parseOriginHostPort orig then
+      let relPath := pfx ++ subPath
+      let res ←
+        match st.h2Pool? with
+        | some pool =>
+          match ← pool.request 1 "POST" host port relPath reqHdrs reqBody (2 * 1024 * 1024) true 8000 15000 with
+          | .ok pooled => pure (.ok pooled.response)
+          | .error e => pure (.error e)
+        | none =>
+          OrbNetLeaf.TlsHttp.httpsRequest "POST" host port relPath reqHdrs reqBody (2 * 1024 * 1024) true 15000
+      match res with
+      | .ok up => return .ok (up.status, up.body)
+      | .error e => lastNetErr := e
+  return .error s!"error sending request ({subPath}): {lastNetErr}"
+
+private def settleCoreClientRunReceipt
+    (st : LocaldState)
+    (missionId : String)
+    (apiUrl : String)
+    (tok : String)
+    (runId : String)
+    (gen : UInt64)
+    : IO (Except String Unit) := do
+  let settlePayload : JVal := .obj #[
+    ("status", .str "interrupted"),
+    ("run_id", .str runId),
+    ("generation", JVal.uint64 gen)
+  ]
+  let idemHdr := #[("Idempotency-Key", s!"cstatus:{missionId}:{runId}:interrupted")]
+  match ← postCoreJson st apiUrl tok s!"/api/control/missions/{missionId}/client-status" settlePayload idemHdr with
+  | .error e => return .error e
+  | .ok (setStatus, setBody) =>
+    if 200 ≤ setStatus && setStatus < 300 then
+      return .ok ()
+    let det := ((String.fromUTF8? setBody).getD "").trimAscii.toString.take 240 |>.toString
+    return .error s!"Could not reconcile previous run ({setStatus}): {det}"
+
+/-- Inspect and settle any orphaned Core `client-run` receipt on this machine.
+    Returns `.ok (some true)` when a receipt was settled, `.ok (some false)` when Core confirmed
+    no active run on this machine, or `.ok none` when Core/mission does not use `client-run`. -/
+private def reconcileCoreClientRunIfSupported
+    (stRef : IO.Ref LocaldState)
+    (missionId : String)
+    (apiUrlRaw : String)
+    (tokenRaw : String)
+    : IO (Except String (Option Bool)) := do
+  let tok := tokenRaw.trimAscii.toString
+  let apiUrl := apiUrlRaw.trimAscii.toString
+  if tok.isEmpty || missionId.isEmpty || !apiUrl.startsWith "https://" then
+    return .ok none
+  let st0 ← stRef.get
+  let isUnsyncedLocal := st0.localOrigins.any fun r =>
+    r.id == missionId && (r.localSyncPending || r.syncLocalOnly)
+  if isUnsyncedLocal then
+    return .ok none
+  let clientUuid ← ensureMachineId stRef
+  let st ← stRef.get
+  let runSubPath := s!"/api/control/missions/{missionId}/client-run"
+  let inspectPayload : JVal := .obj #[("op", .str "inspect"), ("client_id", .str clientUuid)]
+  match ← postCoreJson st apiUrl tok runSubPath inspectPayload with
+  | .error e => return .error e
+  | .ok (inspStatus, inspBody) =>
+    if inspStatus == 404 || inspStatus == 405 || inspStatus == 501 then
+      return .ok none
+    if 200 ≤ inspStatus && inspStatus < 300 then
+      match parseBytes inspBody with
+      | .error e => return .error s!"Invalid previous run receipt JSON: {e}"
+      | .ok inspJv =>
+        let some prevRunId := inspJv.fieldStr? "run_id"
+          | return .error "Invalid previous run receipt"
+        let some prevGen := inspJv.fieldUInt64? "generation"
+          | return .error "Invalid previous run receipt"
+        match ← settleCoreClientRunReceipt st missionId apiUrl tok prevRunId prevGen with
+        | .error e => return .error e
+        | .ok () => return .ok (some true)
+    let det := ((String.fromUTF8? inspBody).getD "").trimAscii.toString.take 240 |>.toString
+    if inspStatus == 409 && (det.splitOn "No active run on this computer").length > 1 then
+      return .ok (some false)
+    return .error s!"Could not inspect previous run ({inspStatus}): {det}"
+
+private def beginCoreClientRunIfSupported
+    (stRef : IO.Ref LocaldState)
+    (missionId : String)
+    (apiUrlRaw : String)
+    (tokenRaw : String)
+    (prompt : String)
+    (cwd : String)
+    (model : String)
+    (svcTier? : Option String)
+    (cyber : String)
+    (sessionId? : Option String)
+    : IO (Except String (Option (String × UInt64 × String))) := do
+  match ← reconcileCoreClientRunIfSupported stRef missionId apiUrlRaw tokenRaw with
+  | .error e => return .error e
+  | .ok none => return .ok none
+  | .ok (some _) =>
+    let tok := tokenRaw.trimAscii.toString
+    let apiUrl := apiUrlRaw.trimAscii.toString
+    let clientUuid ← ensureMachineId stRef
+    let st ← stRef.get
+    let runSubPath := s!"/api/control/missions/{missionId}/client-run"
+    let mut beginFields : Array (String × JVal) := #[
+      ("op", .str "begin"),
+      ("client_id", .str clientUuid),
+      ("prompt", .str prompt),
+      ("cwd", .str cwd),
+      ("model", if model.isEmpty then .null else .str model),
+      ("cyber_access", .str cyber)
+    ]
+    if let some stTier := svcTier? then
+      if !stTier.trimAscii.toString.isEmpty then
+        beginFields := beginFields.push ("service_tier", .str stTier)
+    if let some sid := sessionId? then
+      if !sid.trimAscii.toString.isEmpty then
+        beginFields := beginFields.push ("session_id", .str sid)
+    match ← postCoreJson st apiUrl tok runSubPath (.obj beginFields) with
+    | .error e => return .error e
+    | .ok (begStatus, begBody) =>
+      if begStatus == 404 || begStatus == 405 || begStatus == 501 then
+        return .ok none
+      let det := ((String.fromUTF8? begBody).getD "").trimAscii.toString.take 240 |>.toString
+      if begStatus == 409 then
+        return .error s!"Local launch rejected: 409: {det}"
+      if !(200 ≤ begStatus && begStatus < 300) then
+        return .error s!"{begStatus}: {det}"
+      match parseBytes begBody with
+      | .error e => return .error s!"Invalid client-run receipt JSON: {e}"
+      | .ok begJv =>
+        let some coreRunId := begJv.fieldStr? "run_id"
+          | return .error "Missing run identity in client-run receipt"
+        let some coreGen := begJv.fieldUInt64? "generation"
+          | return .error "Missing run generation in client-run receipt"
+        let corePrompt := (begJv.fieldStr? "prompt").getD prompt
+        return .ok (some (coreRunId, coreGen, corePrompt))
+
 /-- Execute `local_machine_transfer` operations confined to a canonical workspace root. -/
 private def handleLocalMachineTransfer (stRef : IO.Ref LocaldState) (args : JVal) : IO (Except String JVal) := do
   ensurePersistedBindingsLoaded stRef
@@ -3978,6 +4495,55 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "plugin:app|version" =>
     let ver := (← OrbBin.PosixExt.getEnvNonEmpty "ORB_APP_VERSION").getD "0.13.0"
     return .ok (.str ver)
+  | "desktop_bootstrap" =>
+    let shardCountU8 : UInt8 := UInt8.ofNat st.bridge.shardPorts.size
+    if verifySseShardConfig shardCountU8 st.bridge.proxyPort != 1 ||
+       !allShardPortsValid st.rpcPort st.bridge.proxyPort st.bridge.shardPorts then
+      return .error "invalid SSE shard configuration"
+    let connVal : JVal ← do
+      match connectionFilePath? st with
+      | none => pure st.connectionJson
+      | some path =>
+        if !(← path.pathExists) then pure st.connectionJson
+        else
+          try
+            let raw ← IO.FS.readFile path
+            match OrbBin.Json.parse raw.trimAscii.toString with
+            | .ok jv =>
+              stRef.modify fun s => { s with connectionJson := jv }
+              pure jv
+            | .error _ => pure st.connectionJson
+          catch _ => pure st.connectionJson
+    let sinceRev? := args.fieldStr? "since_rev"
+    let prefsRes ← uiPrefsMutex.atomically do
+      readUiPrefsFromDisk (uiPrefsFilePath? st)
+    let prefsVal : JVal :=
+      match prefsRes with
+      | .error _ => .obj #[("unchanged", .bool false), ("rev", .str ""), ("exists", .bool false), ("prefs", .obj #[])]
+      | .ok (prefsObj, rev, existed) =>
+        if existed && sinceRev? == some rev then
+          .obj #[("unchanged", .bool true), ("rev", .str rev), ("exists", .bool true)]
+        else
+          .obj #[("unchanged", .bool false), ("rev", .str rev), ("exists", .bool existed), ("prefs", prefsObj)]
+    let explicitUrl := ((args.fieldStr? "apiUrl").orElse (fun _ => args.fieldStr? "api_url")).getD ""
+    let savedUrl := ((connVal.fieldStr? "api_url").orElse (fun _ => connVal.fieldStr? "apiUrl")).getD ""
+    let rawUrl := if !explicitUrl.trimAscii.toString.isEmpty then explicitUrl else savedUrl
+    let cleanUrl := OrbBin.PosixExt.stripTrailingSlash rawUrl.trimAscii.toString
+    let nextBridge ← stRef.modifyGet fun s =>
+      if cleanUrl.startsWith "https://" && !(cleanUrl.toList.any (fun c => c.toNat ≤ 0x20 || c.toNat == 0x7F)) then
+        let b := { s.bridge with configuredTarget := cleanUrl, failoverOrigins := candidateOriginsFor cleanUrl }
+        (b, { s with bridge := b })
+      else
+        (s.bridge, s)
+    if let some pool := st.h2Pool? then
+      if let some primaryOrig := nextBridge.failoverOrigins[0]? then
+        if let some (true, host, port, _) := parseOriginHostPort primaryOrig then
+          pool.prewarm host port true 6000
+    return .ok (.obj #[
+      ("connection", connVal),
+      ("prefs", prefsVal),
+      ("transport", nextBridge.toJson)
+    ])
   | "transport_bridge_configure" =>
     let shardCountU8 : UInt8 := UInt8.ofNat st.bridge.shardPorts.size
     if verifySseShardConfig shardCountU8 st.bridge.proxyPort != 1 ||
@@ -4072,6 +4638,78 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path payload then
           return .error e
       return .ok (.obj #[("rev", .str rev), ("prefs", nextObj)])
+  | "ui_cache_get" =>
+    let kind := (args.fieldStr? "kind").getD ""
+    let key := (args.fieldStr? "key").getD ""
+    if !isValidUiCacheKind kind || key.isEmpty || key.utf8ByteSize > 512 then
+      return .error "Invalid ui_cache_get arguments"
+    match uiCacheDirPath? st with
+    | none => return .ok .null
+    | some dir =>
+      uiCacheMutex.atomically do
+        let dirSt ← OrbBin.PosixExt.statPath dir.toString
+        if !dirSt.exists_ then return .ok .null
+        if dirSt.isSymlink then return .error "UI cache directory must not be a symlink"
+        let path := uiCacheEntryPath dir kind key
+        let fileSt ← OrbBin.PosixExt.statPath path.toString
+        if !fileSt.exists_ || fileSt.isSymlink || !fileSt.isReg then return .ok .null
+        try
+          let raw ← IO.FS.readFile path
+          let keyHex := LeanSys.Auth.bytesToHexLower key.toUTF8
+          match parseUiCacheFile? raw keyHex with
+          | some (_, payload) => return .ok (.str payload)
+          | none => return .ok .null
+        catch _ =>
+          return .ok .null
+  | "ui_cache_put" =>
+    let kind := (args.fieldStr? "kind").getD ""
+    let key := (args.fieldStr? "key").getD ""
+    let rawJson := (args.fieldStr? "raw").getD ""
+    let savedAt := (args.fieldNat? "saved_at").getD 0
+    let tier := match args.fieldStr? "tier" with
+      | some "warm" => "warm"
+      | _ => if rawJson == "{}" then "warm" else "hot"
+    if !isValidUiCacheKind kind || key.isEmpty || key.utf8ByteSize > 512 then
+      return .error "Invalid ui_cache_put key"
+    if rawJson.isEmpty || rawJson.utf8ByteSize > maxUiCacheRawBytes then
+      return .error "Invalid ui_cache_put payload"
+    match uiCacheDirPath? st with
+    | none => return .ok .null
+    | some dir =>
+      uiCacheMutex.atomically do
+        try
+          IO.FS.createDirAll dir
+          discard <| OrbBin.PosixExt.chmod dir.toString 0o700
+        catch _ => pure ()
+        let dirSt ← OrbBin.PosixExt.statPath dir.toString
+        if dirSt.isSymlink then return .error "UI cache directory must not be a symlink"
+        let path := uiCacheEntryPath dir kind key
+        let (existingTs, _, _) ← readUiCacheMeta path
+        if existingTs > savedAt then
+          return .ok .null
+        let keyHex := LeanSys.Auth.bytesToHexLower key.toUTF8
+        let headerTs := if kind == "transcript" then s!"{savedAt}:{tier}" else s!"{savedAt}"
+        let wire := (s!"{headerTs}\n{keyHex}\n" ++ rawJson).toUTF8
+        if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path wire then
+          return .error e
+        if kind == "transcript" then
+          let demoteKeys ← reconcileUiCacheTranscripts dir
+          if !demoteKeys.isEmpty then
+            return .ok (.obj #[("demote_keys", .arr (demoteKeys.map .str))])
+        return .ok .null
+  | "ui_cache_clear" =>
+    match uiCacheDirPath? st with
+    | none => return .ok .null
+    | some dir =>
+      uiCacheMutex.atomically do
+        let dirSt ← OrbBin.PosixExt.statPath dir.toString
+        if !dirSt.exists_ || dirSt.isSymlink then return .ok .null
+        let entries ← try dir.readDir catch _ => pure #[]
+        for e in entries do
+          if (e.fileName.startsWith "sidebar-" || e.fileName.startsWith "transcript-") &&
+             e.fileName.endsWith ".cache" then
+            try IO.FS.removeFile e.path catch _ => pure ()
+        return .ok .null
   | "diagnostics_append" =>
     let lines : Array String := match args.fieldArr? "lines" with
       | some xs => xs.filterMap (·.asStr?)
@@ -4272,7 +4910,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let obsStatusNat := ((args.fieldNat? "observed_http_status").orElse (fun _ => args.fieldNat? "httpStatus")).getD 0
     let obsStatus := UInt16.ofNat (min obsStatusNat 65535)
     let peerAck? := (args.fieldUInt64? "peer_ack_seq").orElse (fun _ => args.fieldUInt64? "peerAckSeq")
-    let res ← stRef.modifyGet fun s =>
+    let res : Except String JVal ← stRef.modifyGet fun s =>
       let stepped := s.clientLink.stepEndpointEpoch epRaw build? obsStatus
       if stepped.unsupportedLatched then
         (.ok (.bool false), { s with clientLink := stepped })
@@ -4306,7 +4944,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     | some "enqueue" =>
       let payload := (args.field? "payload").getD (.obj #[])
       let maxCap? := args.fieldNat? "max_cap"
-      let res ← stRef.modifyGet fun s =>
+      let res : Except String JVal ← stRef.modifyGet fun s =>
         let cl0 := match maxCap? with
           | some cap =>
             let c16 := UInt16.ofNat (min cap 65535)
@@ -4324,7 +4962,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       return res
     | some "ack" =>
       let ackSeq := ((args.fieldUInt64? "ack_seq").orElse (fun _ => args.fieldUInt64? "ackSeq")).getD 0
-      let res ← stRef.modifyGet fun s =>
+      let res : Except String JVal ← stRef.modifyGet fun s =>
         match s.clientLink.ackUpTo ackSeq with
         | .error e => (.error e, s)
         | .ok clNext => (.ok clNext.toSummaryJson, { s with clientLink := clNext })
@@ -4836,17 +5474,35 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let cur ← stRef.get
     let connObj := (args.field? "connection").getD args
     let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD cur.bridge.configuredTarget
+    let tokRaw := (connObj.fieldStr? "token").getD ""
     let ep := normalizeEndpointKey epRaw
     let filtered := cur.localOrigins.filter (fun row => ep.isEmpty || row.endpoint.isEmpty || row.endpoint == ep)
+    if !tokRaw.trimAscii.toString.isEmpty && epRaw.trimAscii.toString.startsWith "https://" &&
+       !cur.unsupportedOriginSyncEndpoints.contains ep then
+      for row in filtered do
+        if row.localSyncPending && row.ackedSeq < row.syncSeq && !row.project.isEmpty &&
+           !cur.syncingOriginIds.contains row.id then
+          let mid := row.id
+          discard <| IO.asTask do
+            syncLocalOriginToCore stRef mid epRaw tokRaw 2
     return .ok (.arr (filtered.map LocalOriginEntry.toMissionJson))
   | "local_agents_scan" =>
+    let cur ← stRef.get
+    let homeOv? := if cur.homeDir.trimAscii.toString.isEmpty then none else some cur.homeDir.trimAscii.toString
     let reqObj := (args.field? "request").getD args
     let ov := (reqObj.field? "overrides").getD (.obj #[])
-    let rows ← OrbBin.ClaudeControl.scanInstalledHarnesses ov
+    let rows ← OrbBin.ClaudeControl.scanInstalledHarnesses ov homeOv?
     return .ok rows
   | "local_claude_models" =>
     let p := (args.fieldStr? "path").getD ""
     match ← OrbBin.ClaudeControl.probeClaudeModels p with
+    | .ok models => return .ok (.arr (models.map fun (id, lbl) => .arr #[.str id, .str lbl]))
+    | .error e => return .error e
+  | "local_opencode_models" =>
+    let cur ← stRef.get
+    let homeOv? := if cur.homeDir.trimAscii.toString.isEmpty then none else some cur.homeDir.trimAscii.toString
+    let p := (args.fieldStr? "path").getD ""
+    match ← OrbBin.ClaudeControl.probeOpenCodeModels p homeOv? with
     | .ok models => return .ok (.arr (models.map fun (id, lbl) => .arr #[.str id, .str lbl]))
     | .error e => return .error e
   | "local_antigravity_models" =>
@@ -5238,7 +5894,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         let payload := ((args.field? "payload").orElse (fun _ => args.field? "request")).getD
           (.obj #[("id", .str reqId), ("method", .str ((args.fieldStr? "method").getD "questions")),
                   ("params", (args.field? "params").getD (.obj #[]))])
-        let res ← stRef.modifyGet fun s =>
+        let res : Except String JVal ← stRef.modifyGet fun s =>
           match s.toolHub.admitSlot runId ep reqId payload false with
           | .error e => (.error e, s)
           | .ok (slot, replayed, nextHub) =>
@@ -5250,7 +5906,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     | some "register" | some "offer_early" =>
       let isEarly := action? == some "offer_early"
       let reqId := reqId?.getD ""
-      let res ← stRef.modifyGet fun s =>
+      let res : Except String JVal ← stRef.modifyGet fun s =>
         let curEp := ((s.toolHub.findRun? runId.trimAscii.toString).map (·.currentEpoch)).getD 1
         let ep := epoch?.getD curEp
         let payload := ((args.field? "payload").orElse (fun _ => args.field? "request")).getD
@@ -5274,7 +5930,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     | some "respond" | some "answer" =>
       let reqId := reqId?.getD ""
       let ansVal := ((args.field? "answer").orElse (fun _ => args.field? "response")).getD .null
-      let res ← stRef.modifyGet fun s =>
+      let res : Except String JVal ← stRef.modifyGet fun s =>
         match s.toolHub.answerSlot runId epoch? reqId ansVal with
         | .error e => (.error e, s)
         | .ok (slot, nextHub) =>
@@ -5317,7 +5973,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         ], s')
       return .ok out
     | some "reconcile" =>
-      let res ← stRef.modifyGet fun s =>
+      let res : Except String JVal ← stRef.modifyGet fun s =>
         match s.toolHub.reconcileRun runId epoch? with
         | .error e => (.error e, s)
         | .ok (tbl, nextHub) =>
@@ -5341,7 +5997,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let reqId := ((args.fieldStr? "requestId").orElse (fun _ => args.fieldStr? "request_id")).getD ""
     let epoch? := (args.fieldUInt64? "session_epoch").orElse (fun _ => args.fieldUInt64? "sessionEpoch")
     let ansVal := ((args.field? "answer").orElse (fun _ => args.field? "response")).getD .null
-    let res ← stRef.modifyGet fun s =>
+    let res : Except String JVal ← stRef.modifyGet fun s =>
       match s.toolHub.answerSlot runId epoch? reqId ansVal with
       | .error e => (.error e, s)
       | .ok (_, nextHub) =>
@@ -5447,7 +6103,12 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       let stAfter ← stRef.modifyGet fun s =>
         let (_, _, nextHub) := s.toolHub.cancelRunSlots cleanId "stopped" bump
         let nextOrigins := s.localOrigins.map fun row =>
-          if row.id == cleanId then { row with localRunActive := false } else row
+          if row.id == cleanId then
+            { row with
+              localRunActive := false
+              status := if row.status == "active" then "interrupted" else row.status
+              syncSeq := if row.localSyncPending && row.status == "active" then row.syncSeq + 1 else row.syncSeq }
+          else row
         let s' := ({ s with toolHub := nextHub, localOrigins := nextOrigins }).publishInteractionSnapshot cleanId
         (s', s')
       let mgr ← ensureWarmManager stRef
@@ -5461,8 +6122,14 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let includeSummary := (args.fieldBool? "include_slots").getD (epoch?.isSome)
     if runId.trimAscii.toString.isEmpty then
       return .ok .null
-    let res ← stRef.modifyGet fun s =>
-      match s.toolHub.reconcileRun runId epoch? with
+    let cleanRunId := runId.trimAscii.toString
+    if !includeSummary then
+      let mgr ← ensureWarmManager stRef
+      if let some activeRs ← OrbBin.ClaudeControl.getRunState? mgr cleanRunId then
+        if !activeRs.done then
+          return .error "This mission is still running locally or waiting for your answer."
+    let res : Except String JVal ← stRef.modifyGet fun s =>
+      match s.toolHub.reconcileRun cleanRunId epoch? with
       | .error e => (.error e, s)
       | .ok (tbl, nextHub) =>
         let s' := { s with toolHub := nextHub }
@@ -5477,8 +6144,21 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
             ("pending", .arr activeArr)
           ]), s')
         else
-          (.ok .null, s')
-    return res
+          (.ok (.bool false), s')
+    match res with
+    | .error e => return .error e
+    | .ok outJv =>
+      if includeSummary then
+        return .ok outJv
+      ensurePersistedOriginsLoaded stRef
+      let curSt ← stRef.get
+      let connObj := (args.field? "connection").getD args
+      let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD curSt.bridge.configuredTarget
+      let tokRaw := (connObj.fieldStr? "token").getD ""
+      match ← reconcileCoreClientRunIfSupported stRef cleanRunId epRaw tokRaw with
+      | .error e => return .error e
+      | .ok (some settled) => return .ok (.bool settled)
+      | .ok none => return .ok (.bool false)
   | "local_agents_poll" =>
     let runId := (((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).orElse
       (fun _ => args.fieldStr? "runId")).getD ""
@@ -5529,7 +6209,28 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let binPath := (reqObj.fieldStr? "bin").getD ""
     let cwd := (reqObj.fieldStr? "cwd").getD "."
     let prompt := (reqObj.fieldStr? "prompt").getD (((args.field? "draft").bind (·.fieldStr? "prompt")).getD "")
-    let model := (reqObj.fieldStr? "model").getD ""
+    let rawModel := (reqObj.fieldStr? "model").getD ""
+    let model ←
+      if harness == "opencode" then
+        let homeOv? := if curSt.homeDir.trimAscii.toString.isEmpty then none else some curSt.homeDir.trimAscii.toString
+        let reqMdl? := if rawModel.trimAscii.toString.isEmpty then none else some rawModel
+        let (defModel?, provNames, cfgModels) ← OrbBin.ClaudeControl.readLocalOpenCodeConfigInfo homeOv?
+        let firstChoice := (OrbBin.ClaudeControl.resolveOpenCodeModelForLocal
+          reqMdl? defModel? (provNames.map Prod.fst) cfgModels).getD rawModel
+        let needsCliProbe :=
+          defModel?.isNone && cfgModels.isEmpty && !binPath.trimAscii.toString.isEmpty &&
+          (let t := rawModel.trimAscii.toString
+           t.isEmpty || t.startsWith "builtin/" || t.startsWith "sandboxed-sh/" || !(t.contains '/'))
+        if needsCliProbe then
+          match ← OrbBin.ClaudeControl.probeOpenCodeModels binPath homeOv? with
+          | .ok probed =>
+            let probedIds := probed.map Prod.fst
+            pure ((OrbBin.ClaudeControl.resolveOpenCodeModelForLocal reqMdl? probedIds[0]? #[] probedIds).getD firstChoice)
+          | .error _ => pure firstChoice
+        else
+          pure firstChoice
+      else
+        pure rawModel
     let effort? := (reqObj.fieldStr? "effort").filter (!·.trimAscii.toString.isEmpty)
     let svcTier? := (reqObj.fieldStr? "service_tier").orElse (fun _ => reqObj.fieldStr? "serviceTier")
     let sessionId? := ((reqObj.fieldStr? "session_id").orElse (fun _ => reqObj.fieldStr? "sessionId")).filter (!·.trimAscii.toString.isEmpty)
@@ -5554,9 +6255,9 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       if harness == "codex" then
         if let .error e := validateLocalCodexLaunch prompt model cyber hasImgs then
           return .error e
-    let deliveredPrompt := withLocalSkillDirective prompt selectedSkills
+    let mut deliveredPrompt := withLocalSkillDirective prompt selectedSkills
     let rawRunUuid ← randomUuidV4
-    let runReceiptId := (OrbBin.PosixExt.parseUuidCanonical? rawRunUuid).getD rawRunUuid
+    let mut runReceiptId := (OrbBin.PosixExt.parseUuidCanonical? rawRunUuid).getD rawRunUuid
     let targetMissionId ←
       if cmd == "local_origin_launch" then
         let rawId ← randomUuidV4
@@ -5565,15 +6266,136 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         let rid := ((reqObj.fieldStr? "id").orElse (fun _ => args.fieldStr? "id")).getD ""
         pure (if rid.trimAscii.toString.isEmpty then runReceiptId else rid.trimAscii.toString)
 
-    let nextGen ← stRef.modifyGet fun s =>
+    let shouldSpawnProcess := !binPath.trimAscii.toString.isEmpty || ((reqObj.fieldBool? "spawn").getD false)
+    if shouldSpawnProcess && cmd == "local_run_launch" then
+      let mgr ← ensureWarmManager stRef
+      if let some activeRs ← OrbBin.ClaudeControl.getRunState? mgr targetMissionId then
+        if !activeRs.done then
+          return .error "This mission is still running locally or waiting for your answer."
+
+    let connObj := (args.field? "connection").getD args
+    let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD curSt.bridge.configuredTarget
+    let tokRaw := (connObj.fieldStr? "token").getD ""
+
+    let mut nextGen : UInt64 ← stRef.modifyGet fun s =>
       let prevGen := ((s.runGenerations.find? (fun (k, _) => k == targetMissionId)).map Prod.snd).getD 0
       let g := prevGen + 1
       let others := s.runGenerations.filter (fun (k, _) => k != targetMissionId)
       (g, { s with runGenerations := others.push (targetMissionId, g) })
 
+    let mut acquiredCoreReceipt := false
+    if cmd == "local_run_launch" then
+      match ← beginCoreClientRunIfSupported stRef targetMissionId epRaw tokRaw prompt cwd model svcTier? cyber sessionId? with
+      | .error e => return .error e
+      | .ok none => pure ()
+      | .ok (some (coreRunId, coreGen, corePrompt)) =>
+        acquiredCoreReceipt := true
+        runReceiptId := coreRunId
+        nextGen := coreGen
+        deliveredPrompt := withLocalSkillDirective corePrompt selectedSkills
+        stRef.modify fun s =>
+          let others := s.runGenerations.filter (fun (k, _) => k != targetMissionId)
+          { s with runGenerations := others.push (targetMissionId, coreGen) }
+    if cmd == "local_origin_launch" then
+      let initIso := formatUtcIso8601 (← OrbBin.PosixExt.nowEpoch)
+      let draftObj := (args.field? "draft").getD (.obj #[])
+      let title := ((draftObj.fieldStr? "title").orElse (fun _ => reqObj.fieldStr? "title")).getD "Local Mission"
+      let proj := ((draftObj.fieldStr? "project").orElse (fun _ => reqObj.fieldStr? "project")).getD ""
+      let draftPrompt := ((draftObj.fieldStr? "prompt").orElse (fun _ => reqObj.fieldStr? "prompt")).getD prompt
+      let folder? := ((draftObj.fieldStr? "folder").orElse (fun _ => reqObj.fieldStr? "folder")).filter (!·.isEmpty)
+      let rawTags := ((draftObj.fieldArr? "tags").getD #[]).filterMap (·.asStr?)
+      let tags := if rawTags.contains "placement:client" then rawTags else rawTags.push "placement:client"
+      let ep := normalizeEndpointKey epRaw
+      let backendName := if harness.isEmpty then "opencode" else harness
+      let initEntry : LocalOriginEntry := {
+        id := targetMissionId
+        runId := runReceiptId
+        endpoint := ep
+        title := title
+        status := "active"
+        backend := backendName
+        workingDirectory := cwd
+        rawPrompt := draftPrompt
+        deliveredPrompt := deliveredPrompt
+        localSyncPending := true
+        localRunActive := true
+        syncSeq := 1
+        ackedSeq := 0
+        project := proj
+        folder := folder?
+        tags := tags
+        modelOverride := if model.isEmpty then none else some model
+        modelEffort := effort?
+        serviceTier := if backendName == "codex" then svcTier? else none
+        cyberAccess := if backendName == "codex" then some cyber else none
+        createdAt := initIso
+        updatedAt := initIso
+        history := #[.obj #[("role", .str "user"), ("content", .str draftPrompt)]]
+      }
+      stRef.modify fun s =>
+        let kept := s.localOrigins.filter (fun r => r.id != targetMissionId)
+        { s with localOrigins := kept.push initEntry }
+    else
+      let resumeIso := formatUtcIso8601 (← OrbBin.PosixExt.nowEpoch)
+      let displayPrompt := ((reqObj.fieldStr? "display_prompt").orElse (fun _ => reqObj.fieldStr? "displayPrompt")).getD prompt
+      let messageId? := ((reqObj.fieldStr? "message_id").orElse (fun _ => reqObj.fieldStr? "messageId")).map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+      let cleanDisplay := displayPrompt.trimAscii.toString
+      let autoResumePrompt := "Your previous turn was interrupted before it finished. Check what is already done, then continue from there. Do not redo finished work."
+      let (stResumed, originChanged) ← stRef.modifyGet fun s =>
+        let found := s.localOrigins.any (fun r => r.id == targetMissionId)
+        let nextOrigins := s.localOrigins.map fun r =>
+          if r.id == targetMissionId then
+            let lastUserMatch :=
+              match r.history.back? with
+              | some lastJv =>
+                lastJv.fieldStr? "role" == some "user" &&
+                ((match messageId? with | some mid => lastJv.fieldStr? "id" == some mid | none => false) ||
+                 (lastJv.fieldStr? "content").map (·.trimAscii.toString) == some cleanDisplay)
+              | none => false
+            let userEntryFields : Array (String × JVal) :=
+              match messageId? with
+              | some mid => #[("id", .str mid), ("role", .str "user"), ("content", .str displayPrompt)]
+              | none => #[("role", .str "user"), ("content", .str displayPrompt)]
+            let nextHist :=
+              if !cleanDisplay.isEmpty && cleanDisplay != autoResumePrompt && !lastUserMatch then
+                r.history.push (.obj userEntryFields)
+              else
+                r.history
+            { r with
+              localRunActive := true
+              status := "active"
+              statusMessage := none
+              syncError := none
+              modelOverride := if model.isEmpty then r.modelOverride else some model
+              syncSeq := if r.localSyncPending then r.syncSeq + 1 else r.syncSeq
+              updatedAt := resumeIso
+              history := nextHist }
+          else r
+        let s' :=
+          if found then
+            ({ s with localOrigins := nextOrigins }).enqueueNamedEvent "orb-local-origins-changed" (.obj #[("id", .str targetMissionId)])
+          else
+            { s with localOrigins := nextOrigins }
+        ((s', found), s')
+      if originChanged then persistOriginsSnapshot stResumed
+
     let mut effectiveWorkingDir := cwd
     let mut activeSessionId? := sessionId?
-    let shouldSpawnProcess := !binPath.trimAscii.toString.isEmpty || ((reqObj.fieldBool? "spawn").getD false)
+    if !binPath.trimAscii.toString.isEmpty && !harness.isEmpty then
+      let mut preFields : Array (String × JVal) := #[
+        ("harness", .str harness),
+        ("bin", .str binPath),
+        ("cwd", .str cwd),
+        ("planMode", .bool planMode),
+        ("permissionMode", .str permMode.toUiWire)
+      ]
+      if !model.isEmpty then preFields := preFields.push ("model", .str model)
+      if let some eff := effort? then preFields := preFields.push ("effort", .str eff)
+      if let some sid := sessionId? then preFields := preFields.push ("sessionId", .str sid)
+      let preVal := JVal.obj preFields
+      stRef.modify fun s =>
+        let kept := s.bindingsEntries.filter (fun (k, _) => k != targetMissionId)
+        { s with bindingsEntries := kept.push (targetMissionId, preVal) }
     if shouldSpawnProcess && !harness.isEmpty then
       let mgr ← ensureWarmManager stRef
       let cbs : OrbBin.ClaudeControl.HarnessCallbacks := {
@@ -5593,15 +6415,25 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
             | .error _ => s
         onTurnFinished := fun finalRs => do
           let finIso := formatUtcIso8601 (← OrbBin.PosixExt.nowEpoch)
+          let termStatus :=
+            if finalRs.stopping || finalRs.exitCode? == some 137 || finalRs.exitCode? == some 143 then "interrupted"
+            else if finalRs.error?.isSome || (finalRs.exitCode?.isSome && finalRs.exitCode? != some 0) then "failed"
+            else "awaiting_user"
+          let cleanTurnErr := finalRs.error?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
           let (stFin, bindChangedFin) ← stRef.modifyGet fun (s : LocaldState) =>
             let nextOrigins := s.localOrigins.map fun row =>
               if row.id == targetMissionId then
                 let nextHist :=
                   if finalRs.text.trimAscii.toString.isEmpty then row.history
                   else row.history.push (.obj #[("role", .str "assistant"), ("content", .str finalRs.text)])
+                let keepSyncPending := cmd == "local_origin_launch" || row.localSyncPending
                 { row with
                   localRunActive := false
-                  status := if finalRs.error?.isSome then "failed" else "awaiting_user"
+                  localSyncPending := keepSyncPending
+                  syncSeq := if keepSyncPending then row.syncSeq + 1 else row.syncSeq
+                  syncText := if keepSyncPending then finalRs.text else row.syncText
+                  statusMessage := if termStatus == "failed" then cleanTurnErr else none
+                  status := termStatus
                   updatedAt := finIso
                   history := nextHist }
               else row
@@ -5612,16 +6444,39 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
                 let updated := s.bindingsEntries.map fun (bk, (bv : JVal)) =>
                   if bk == targetMissionId then (bk, JVal.setField bv "sessionId" (.str sid)) else (bk, bv)
                 (updated, s.bindingsEntries.any (fun (bk, _) => bk == targetMissionId))
-            let s' := { s with localOrigins := nextOrigins, bindingsEntries := nextBinds }
+            let sBase := ({ s with localOrigins := nextOrigins, bindingsEntries := nextBinds }).enqueueNamedEvent
+              "orb-local-origins-changed" (.obj #[("id", .str targetMissionId)])
+            let s' :=
+              if bChanged then
+                let nextRev := sBase.bindingsRevision + 1
+                let nextSnap : JVal := .obj #[("revision", JVal.nat nextRev), ("bindings", .obj nextBinds)]
+                ({ sBase with bindingsRevision := nextRev }).publishChannelEvent "local_bindings" nextSnap
+              else
+                sBase
             ((s', bChanged), s')
           persistOriginsSnapshot stFin
           if bindChangedFin then persistBindingsSnapshot stFin
+          let needsCoreSync :=
+            !tokRaw.trimAscii.toString.isEmpty &&
+            stFin.localOrigins.any (fun r => r.id == targetMissionId && r.localSyncPending && r.ackedSeq < r.syncSeq)
+          if needsCoreSync then
+            discard <| IO.asTask do
+              syncLocalOriginToCore stRef targetMissionId epRaw tokRaw 2
       }
       match ← OrbBin.ClaudeControl.startHarnessTurn
           mgr targetMissionId harness binPath cwd deliveredPrompt nextGen
           (if model.isEmpty then none else some model) effort? sessionId?
           permMode worktreeMode imgPaths cbs with
-      | .error e => return .error e
+      | .error e =>
+        if acquiredCoreReceipt then
+          let stSettle ← stRef.get
+          discard <| settleCoreClientRunReceipt stSettle targetMissionId epRaw.trimAscii.toString tokRaw.trimAscii.toString runReceiptId nextGen
+        if cmd == "local_origin_launch" then
+          stRef.modify fun s =>
+            { s with
+              localOrigins := s.localOrigins.filter (fun r => r.id != targetMissionId)
+              bindingsEntries := s.bindingsEntries.filter (fun (k, _) => k != targetMissionId) }
+        return .error e
       | .ok rs =>
         effectiveWorkingDir := rs.cwd
         activeSessionId? := rs.sessionId?.orElse (fun _ => sessionId?)
@@ -5637,9 +6492,19 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       ]
       if !model.isEmpty then bindFields := bindFields.push ("model", .str model)
       if let some eff := effort? then bindFields := bindFields.push ("effort", .str eff)
-      if let some sid := activeSessionId? then bindFields := bindFields.push ("sessionId", .str sid)
-      let bindVal := JVal.obj bindFields
+      let latestSid? ← do
+        if let some s := activeSessionId? then pure (some s)
+        else
+          let mgr ← ensureWarmManager stRef
+          pure ((← OrbBin.ClaudeControl.getRunState? mgr targetMissionId).bind (·.sessionId?))
       let stBind ← stRef.modifyGet fun s =>
+        let existingSid? :=
+          (s.bindingsEntries.find? (fun (k, _) => k == targetMissionId)).bind (fun (_, bv) => bv.fieldStr? "sessionId")
+        let mergedSid? := latestSid?.orElse (fun _ => existingSid?)
+        let finalFields := match mergedSid? with
+          | some sid => bindFields.push ("sessionId", .str sid)
+          | none => bindFields
+        let bindVal := JVal.obj finalFields
         let filtered := s.bindingsEntries.filter (fun (k, _) => k != targetMissionId)
         let nextEntries := filtered.push (targetMissionId, bindVal)
         let nextRev := s.bindingsRevision + 1
@@ -5654,43 +6519,17 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           if s.grantedBrowseRoots.contains rp then s else { s with grantedBrowseRoots := s.grantedBrowseRoots.push rp }
 
     if cmd == "local_origin_launch" then
-      let nowIso := formatUtcIso8601 (← OrbBin.PosixExt.nowEpoch)
-      let draftObj := (args.field? "draft").getD (.obj #[])
-      let title := ((draftObj.fieldStr? "title").orElse (fun _ => reqObj.fieldStr? "title")).getD "Local Mission"
-      let proj := ((draftObj.fieldStr? "project").orElse (fun _ => reqObj.fieldStr? "project")).getD ""
-      let folder? := ((draftObj.fieldStr? "folder").orElse (fun _ => reqObj.fieldStr? "folder")).filter (!·.isEmpty)
-      let rawTags := ((draftObj.fieldArr? "tags").getD #[]).filterMap (·.asStr?)
-      let tags := if rawTags.contains "placement:client" then rawTags else rawTags.push "placement:client"
-      let connObj := (args.field? "connection").getD args
-      let epRaw := ((connObj.fieldStr? "api_url").orElse (fun _ => connObj.fieldStr? "apiUrl")).getD curSt.bridge.configuredTarget
-      let ep := normalizeEndpointKey epRaw
-      let backendName := if harness.isEmpty then "opencode" else harness
-      let entry : LocalOriginEntry := {
-        id := targetMissionId
-        endpoint := ep
-        title := title
-        status := "active"
-        backend := backendName
-        workingDirectory := effectiveWorkingDir
-        deliveredPrompt := deliveredPrompt
-        localSyncPending := true
-        localRunActive := true
-        project := proj
-        folder := folder?
-        tags := tags
-        modelOverride := if model.isEmpty then none else some model
-        modelEffort := effort?
-        serviceTier := svcTier?
-        createdAt := nowIso
-        updatedAt := nowIso
-        history := #[.obj #[("role", .str "user"), ("content", .str prompt)]]
-      }
-      let stAfter ← stRef.modifyGet fun s =>
-        let kept := s.localOrigins.filter (fun r => r.id != targetMissionId)
-        let s' := { s with localOrigins := kept.push entry }
-        (s', s')
+      let (stAfter, retJson) ← stRef.modifyGet fun s =>
+        let nextOrigins := s.localOrigins.map fun r =>
+          if r.id == targetMissionId then { r with workingDirectory := effectiveWorkingDir } else r
+        let s' := { s with localOrigins := nextOrigins }
+        let outJv := (nextOrigins.find? (fun r => r.id == targetMissionId)).map LocalOriginEntry.toMissionJson |>.getD (.obj #[])
+        ((s', outJv), s')
       persistOriginsSnapshot stAfter
-      return .ok entry.toMissionJson
+      if !tokRaw.trimAscii.toString.isEmpty then
+        discard <| IO.asTask do
+          syncLocalOriginToCore stRef targetMissionId epRaw tokRaw 2
+      return .ok retJson
     return .ok (.obj #[
       ("ok", .bool true),
       ("command", .str cmd),
@@ -6306,13 +7145,13 @@ def streamLocalEventsSse (stRef : IO.Ref LocaldState) (clientFd : LeanSys.Posix.
           | .ok _ => pure ()
           | .error _ => alive := false
         else
-          match ← LeanSys.Posix.pollReadable clientFd 10 with
+          match ← LeanSys.Posix.pollReadable clientFd 20 with
           | .ok () =>
             let chunk ← LeanSys.Posix.readStreamChunk clientFd 64
             if chunk.isEmpty then alive := false
           | .error .eagain =>
             idleTicks := idleTicks + 1
-            if idleTicks ≥ 1500 then
+            if idleTicks ≥ 750 then
               idleTicks := 0
               match ← LeanSys.Posix.writeAll clientFd ": keepalive\n\n".toUTF8 false with
               | .ok _ => pure ()

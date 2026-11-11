@@ -1,11 +1,15 @@
-import { resolveTransportBase, restoreDesktopConnection, setTransportBridgeEnabled } from "./api";
-import { initDesktopPrefs } from "./desktopPrefs";
+import { bootstrapDesktopRuntime, getJwt, setTransportBridgeEnabled } from "./api";
+import { Suspense, lazy } from "solid-js";
 import { render } from "solid-js/web";
 import App from "./App";
-import { FindBar } from "./FindBar";
 import { Toaster } from "./toast";
+
+const FindBar = lazy(() => import("./FindBar").then((m) => ({ default: m.FindBar })));
 import "./styles.css";
 import { startDiagnostics } from "./diagnostics";
+import { hydrateTranscriptFromDisk } from "./missionCache";
+import { loadPersistedSidebar } from "./persistentCache";
+import { historyScope } from "./resourceCache";
 
 let viewportZoomGuarded = false;
 function guardViewportPinchZoom() {
@@ -18,15 +22,30 @@ function guardViewportPinchZoom() {
   window.addEventListener("gesturechange", (e) => e.preventDefault());
 }
 
+async function preloadFrameZeroCache(): Promise<void> {
+  if (!getJwt()) return;
+  const scope = historyScope();
+  const tasks: Promise<unknown>[] = [loadPersistedSidebar(scope).catch(() => null)];
+  try {
+    const saved = typeof localStorage !== "undefined" ? localStorage.getItem("orb.selectedConversation") : null;
+    if (saved && saved.startsWith("m:")) {
+      const mid = saved.slice(2).trim();
+      if (mid) tasks.push(hydrateTranscriptFromDisk(mid, { syncBump: true }).catch(() => undefined));
+    }
+  } catch {
+    /* ignore storage unavailability */
+  }
+  await Promise.all(tasks);
+}
+
 export async function mountApp(root: HTMLElement): Promise<void> {
   guardViewportPinchZoom();
   startDiagnostics();
   setTransportBridgeEnabled(true);
-  await restoreDesktopConnection().catch(() => {
-    console.warn("Orb could not restore the saved desktop connection");
-  });
-  await initDesktopPrefs().catch(() => null);
-  await resolveTransportBase().catch(() => null);
+  // Preload IndexedDB in parallel when web credentials are already in localStorage,
+  // then ensure any connection restored from `desktop_bootstrap` also hydrates frame-0 cache.
+  await Promise.all([bootstrapDesktopRuntime(), preloadFrameZeroCache()]);
+  await preloadFrameZeroCache();
   root.replaceChildren();
-  render(() => <><App /><FindBar /><Toaster /></>, root);
+  render(() => <><App /><Suspense><FindBar /></Suspense><Toaster /></>, root);
 }

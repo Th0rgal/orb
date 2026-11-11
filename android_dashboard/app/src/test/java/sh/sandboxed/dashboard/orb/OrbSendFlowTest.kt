@@ -514,4 +514,33 @@ class OrbSendFlowTest {
         assertEquals(0, p.count)
         assertTrue("p1" in p.delivered)
     }
+
+    @Test fun staleOutOfOrderBundleCannotDropPendingOrOverwriteNewerQueueFetch() {
+        val bundleStartedAtMs = 1_000L
+        var q = OrbFollowUpQueue()
+            .enqueue("f1", "queued during open", lastSequence = 10L)
+            .posted("f1", queued = true, atMs = 1_080L)
+
+        // 1. If the in-flight bundle finishes first using its pre-request timestamp, f1 stays pending.
+        val afterPreFlightBundle = q.withServer(emptyList(), fetchedAtMs = bundleStartedAtMs)
+        assertEquals(listOf("f1"), ids(afterPreFlightBundle))
+
+        // 2. If the post-POST refresh finishes first (fetchedAtMs = 1_090L) and moves f1 into server,
+        //    a late bundle from 1_000L must be rejected rather than erasing f1 from server.
+        q = q.withServer(listOf(OrbQueuedRow("f1", "queued during open")), fetchedAtMs = 1_090L)
+        assertEquals(listOf("f1"), ids(q))
+        assertTrue(q.pending.isEmpty())
+        val afterLateBundle = q.withServer(emptyList(), fetchedAtMs = bundleStartedAtMs)
+        assertEquals(listOf("f1"), ids(afterLateBundle))
+
+        // 3. Likewise, an edit confirmed at 1_200L is not reverted by a queue read started at 1_150L.
+        val edited = afterLateBundle
+            .edit("f1", "edited text")
+            .editConfirmed("f1", "edited text", confirmedAtMs = 1_200L)
+        val afterStalePreEditRead = edited.withServer(
+            listOf(OrbQueuedRow("f1", "queued during open")),
+            fetchedAtMs = 1_150L
+        )
+        assertEquals(listOf("edited text"), afterStalePreEditRead.rows.map { it.content })
+    }
 }

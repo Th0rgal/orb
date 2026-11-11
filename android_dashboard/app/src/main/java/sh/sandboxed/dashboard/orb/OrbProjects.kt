@@ -1,10 +1,13 @@
 package sh.sandboxed.dashboard.orb
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.LocalIndication
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -2085,6 +2088,14 @@ fun OrbProjectPage(
                             onToggleExpand = {
                                 expandedParents[node.id] = !(expandedParents[node.id] ?: false)
                             },
+                            onPressDown = {
+                                if (!OrbMissionTree.isPlaceholder(node.mission)) {
+                                    core.prefetchMissionSingle(
+                                        node.mission.id,
+                                        isCloud = node.mission.str("backend")?.startsWith("cloud_") == true
+                                    )
+                                }
+                            },
                             onClick = {
                                 OrbMissionUnreadStore.markSeen(node.mission)
                                 onOpenMission(node.mission)
@@ -2283,6 +2294,14 @@ fun OrbProjectPage(
                                     isExpanded = expandedParents[node.id] == true,
                                     onToggleExpand = {
                                         expandedParents[node.id] = !(expandedParents[node.id] ?: false)
+                                    },
+                                    onPressDown = {
+                                        if (!OrbMissionTree.isPlaceholder(node.mission)) {
+                                            core.prefetchMissionSingle(
+                                                node.mission.id,
+                                                isCloud = node.mission.str("backend")?.startsWith("cloud_") == true
+                                            )
+                                        }
                                     },
                                     onClick = {
                                         OrbMissionUnreadStore.markSeen(node.mission)
@@ -2798,6 +2817,7 @@ private fun OrbMissionListItem(
     node: OrbNestedMission,
     isExpanded: Boolean,
     onToggleExpand: () -> Unit,
+    onPressDown: (() -> Unit)? = null,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     showContextMenu: Boolean,
@@ -2814,6 +2834,11 @@ private fun OrbMissionListItem(
     currentProjectSlug: String = ""
 ) {
     val mission = node.mission
+    val rowInteractionSource = remember { MutableInteractionSource() }
+    val isRowPressed by rowInteractionSource.collectIsPressedAsState()
+    LaunchedEffect(isRowPressed) {
+        if (isRowPressed) onPressDown?.invoke()
+    }
     val isLive = OrbMissionTree.isLive(mission)
     val isGoal = OrbMissionTree.isGoal(mission)
     val unread = OrbMissionUnreadStore.isUnread(mission)
@@ -2845,6 +2870,8 @@ private fun OrbMissionListItem(
                 modifier = Modifier
                     .fillMaxWidth()
                     .combinedClickable(
+                        interactionSource = rowInteractionSource,
+                        indication = LocalIndication.current,
                         onClick = onClick,
                         onLongClick = onLongClick
                     )

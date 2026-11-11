@@ -1,15 +1,21 @@
-// Persistent IndexedDB cache (`orb-cache-v1`) for instant (< 15 ms) cold-start and offline
-// sidebar + conversation transcript rendering on slow or lossy networks.
+// Persistent cache (`orb-locald` native `~/.orb/ui-cache` on Desktop, IndexedDB `orb-cache-v1`
+// on Web) for instant (< 5 ms) cold-start and offline sidebar + transcript rendering.
 // - Scoped strictly by normalized `apiUrl` + auth token hash (`historyScope()`).
-// - LRU-bounded at `MAX_PERSISTED_TRANSCRIPTS = 24` ready transcripts.
+// - Two-tier LRU-bounded at `MAX_PERSISTED_TRANSCRIPTS = 250` ready transcripts:
+//   - Hot tier (`HOT_PERSISTED_TRANSCRIPTS = 32`): full settled `StreamItem[]` + recent raw tail.
+//   - Warm tier (`33..250`): compact conversational spine (prompts + received answers + work counts).
 // - Wiped immediately on `clearConnection()` so sign-out/disconnect leaves zero residual data.
-// - Degrades gracefully to a bounded in-memory mirror when `indexedDB` is unavailable (e.g. unit tests).
+// - Uses `orb-locald` (`ui_cache_*`) on Desktop to eliminate WebKit IndexedDB structured-clone stalls,
+//   falling back seamlessly to IndexedDB or bounded in-memory mirror on Web / unit tests.
+
+import { nativeInvoke, type NativeInvoke } from "./native";
 
 const DB_NAME = "orb-cache-v1";
 const DB_VERSION = 1;
 const STORE_SIDEBAR = "sidebar";
 const STORE_TRANSCRIPTS = "transcripts";
-export const MAX_PERSISTED_TRANSCRIPTS = 24;
+export const HOT_PERSISTED_TRANSCRIPTS = 32;
+export const MAX_PERSISTED_TRANSCRIPTS = 250;
 
 export type PersistedSidebarPayload<TMission = unknown, TProject = unknown> = {
   scope: string;
@@ -17,6 +23,7 @@ export type PersistedSidebarPayload<TMission = unknown, TProject = unknown> = {
   missions: TMission[];
   completedMissions: TMission[];
   projects: TProject[];
+  projectMissions?: Record<string, TMission[]>;
 };
 
 export type PersistedTranscriptRecord<TSnap = unknown> = {
@@ -24,19 +31,133 @@ export type PersistedTranscriptRecord<TSnap = unknown> = {
   scope: string;
   missionId: string;
   savedAt: number;
+  tier?: "hot" | "warm";
   snapshot: TSnap;
 };
+
+/** Compact a full transcript snapshot into a lightweight warm-tier spine digest
+ * (retaining user prompts, received assistant answers, errors, and pre-digested
+ * settled turn items with collapsed work-group counts while shedding raw tool blobs).
+ * Non-transcript test payloads pass through untouched. */
+export function compactWarmTranscriptSnapshot<TSnap>(snapshot: TSnap): TSnap {
+  if (!snapshot || typeof snapshot !== "object") return snapshot;
+  const rec = snapshot as Record<string, unknown>;
+  if (!Array.isArray(rec.stream) || !Array.isArray(rec.items)) return snapshot;
+  const spineStream = (rec.stream as Array<Record<string, unknown>>).filter((ev) => {
+    const t = ev?.type;
+    return (
+      t === "user_message" ||
+      t === "assistant_message" ||
+      t === "assistant_message_canonical" ||
+      t === "error" ||
+      t === "mission_status_changed"
+    );
+  });
+  const compactSingleItem = (it: Record<string, unknown>): Record<string, unknown> => {
+    if (!it || typeof it !== "object") return it;
+    if (it.kind === "tool") {
+      const shortRes =
+        typeof it.result === "string" && it.result.length > 160
+          ? it.result.slice(0, 160)
+          : it.result && typeof it.result === "object"
+            ? undefined
+            : it.result;
+      const shortArgs =
+        typeof it.args === "string" && it.args.length > 160
+          ? it.args.slice(0, 160)
+          : undefined;
+      return {
+        ...it,
+        ...(shortArgs !== undefined ? { args: shortArgs } : { args: {} }),
+        ...(shortRes !== undefined ? { result: shortRes } : { result: undefined }),
+        truncated: true,
+      };
+    }
+    if (it.kind === "think" && typeof it.text === "string" && it.text.length > 160) {
+      return { ...it, text: it.text.slice(0, 160) };
+    }
+    if (it.kind === "work" && Array.isArray(it.entries) && it.entries.length > 0) {
+      const strippedEntries = (it.entries as Array<Record<string, unknown>>).map((entry) => {
+        if (entry?.kind === "tool") {
+          return {
+            ...entry,
+            ...(typeof entry.result === "string" && entry.result.length > 256
+              ? { result: entry.result.slice(0, 256), truncated: true }
+              : {}),
+          };
+        }
+        return entry;
+      });
+      return { ...it, entries: strippedEntries };
+    }
+    return it;
+  };
+  const rawItems = rec.items as Array<Record<string, unknown>>;
+  const compactItems = rawItems.map(compactSingleItem);
+  const compactSettled =
+    rawItems.length === 0 && Array.isArray(rec.settledItems)
+      ? (rec.settledItems as Array<Record<string, unknown>>).map(compactSingleItem)
+      : undefined;
+  const activityCompacted = spineStream.length < (rec.stream as unknown[]).length;
+  return {
+    ...rec,
+    items: compactItems,
+    settledItems: compactSettled,
+    stream: spineStream,
+    openTailEvents: undefined,
+    liveTail: undefined,
+    ...(activityCompacted
+      ? {
+          activityCompacted: true,
+          cursor: undefined,
+          before: undefined,
+          spineComplete: false,
+          hasOlder: true,
+        }
+      : {
+          spineComplete: false,
+          hasOlder: rec.hasOlder === true,
+        }),
+  } as TSnap;
+}
 
 const memSidebar = new Map<string, PersistedSidebarPayload>();
 const memTranscripts = new Map<string, PersistedTranscriptRecord>();
 let knownDbTranscriptIds: Set<string> | null = null;
+let knownDbHotTranscriptIds: Set<string> | null = null;
 let dbPromise: Promise<IDBDatabase | null> | null = null;
+let dbSource: IDBFactory | null = null;
+let lastSavedStamp = 0;
+let nativeCacheGeneration = 0;
+let unsupportedInvoke: NativeInvoke | null = null;
+
+function nextSavedAt(): number {
+  const now = Date.now();
+  lastSavedStamp = now > lastSavedStamp ? now : lastSavedStamp + 1;
+  return lastSavedStamp;
+}
+
+function isUnsupportedCacheCommandError(err: unknown): boolean {
+  const msg = String((err as Error)?.message ?? err ?? "");
+  return /unknown desktop command|is not supported in this local runtime/i.test(msg);
+}
+
+function activeLocaldCache(): NativeInvoke | null {
+  const invoke = nativeInvoke();
+  if (!invoke || invoke === unsupportedInvoke) return null;
+  return invoke;
+}
 
 function openDb(): Promise<IDBDatabase | null> {
   if (typeof indexedDB === "undefined" || !indexedDB) {
+    dbPromise = null;
+    dbSource = null;
     return Promise.resolve(null);
   }
-  if (dbPromise) return dbPromise;
+  if (dbPromise && dbSource === indexedDB) return dbPromise;
+  dbSource = indexedDB;
+  knownDbTranscriptIds = null;
+  knownDbHotTranscriptIds = null;
   dbPromise = new Promise<IDBDatabase | null>((resolve) => {
     try {
       const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -64,13 +185,27 @@ function transcriptRecordKey(scope: string, missionId: string): string {
   return `${scope}::m:${missionId}`;
 }
 
-function evictMemoryTranscripts(): void {
-  if (memTranscripts.size <= MAX_PERSISTED_TRANSCRIPTS) return;
+function evictMemoryTranscripts(): PersistedTranscriptRecord[] {
+  if (memTranscripts.size <= HOT_PERSISTED_TRANSCRIPTS) return [];
   const sorted = [...memTranscripts.values()].sort((a, b) => a.savedAt - b.savedAt);
-  const excess = memTranscripts.size - MAX_PERSISTED_TRANSCRIPTS;
-  for (let i = 0; i < excess; i++) {
-    memTranscripts.delete(sorted[i].id);
+  if (memTranscripts.size > MAX_PERSISTED_TRANSCRIPTS) {
+    const excess = memTranscripts.size - MAX_PERSISTED_TRANSCRIPTS;
+    for (let i = 0; i < excess; i++) {
+      memTranscripts.delete(sorted[i].id);
+    }
+    sorted.splice(0, excess);
   }
+  const warmCutoff = sorted.length - HOT_PERSISTED_TRANSCRIPTS;
+  const demoted: PersistedTranscriptRecord[] = [];
+  for (let i = 0; i < warmCutoff; i++) {
+    const rec = sorted[i];
+    if (rec.tier !== "warm") {
+      rec.snapshot = compactWarmTranscriptSnapshot(rec.snapshot);
+      rec.tier = "warm";
+      demoted.push(rec);
+    }
+  }
+  return demoted;
 }
 
 export async function loadPersistedSidebar<TMission = unknown, TProject = unknown>(
@@ -79,6 +214,21 @@ export async function loadPersistedSidebar<TMission = unknown, TProject = unknow
   if (!scope) return null;
   const memHit = memSidebar.get(scope) as PersistedSidebarPayload<TMission, TProject> | undefined;
   if (memHit) return memHit;
+  const invoke = activeLocaldCache();
+  if (invoke) {
+    try {
+      const raw = await invoke<string | null>("ui_cache_get", { kind: "sidebar", key: scope });
+      if (typeof raw === "string" && raw) {
+        const row = JSON.parse(raw) as PersistedSidebarPayload<TMission, TProject>;
+        if (row && Array.isArray(row.missions) && Array.isArray(row.projects)) {
+          memSidebar.set(scope, row);
+          return row;
+        }
+      }
+    } catch (err) {
+      if (isUnsupportedCacheCommandError(err)) unsupportedInvoke = invoke;
+    }
+  }
   const db = await openDb();
   if (!db) return null;
   return new Promise((resolve) => {
@@ -107,17 +257,43 @@ export async function savePersistedSidebar<TMission = unknown, TProject = unknow
     missions: TMission[];
     completedMissions?: TMission[];
     projects: TProject[];
+    projectMissions?: Record<string, TMission[]>;
   },
 ): Promise<void> {
   if (!scope) return;
+  const prev = memSidebar.get(scope) as PersistedSidebarPayload<TMission, TProject> | undefined;
   const record: PersistedSidebarPayload<TMission, TProject> = {
     scope,
-    savedAt: Date.now(),
+    savedAt: nextSavedAt(),
     missions: payload.missions,
-    completedMissions: payload.completedMissions ?? [],
+    completedMissions: payload.completedMissions ?? prev?.completedMissions ?? [],
     projects: payload.projects,
+    projectMissions: payload.projectMissions ?? prev?.projectMissions,
   };
   memSidebar.set(scope, record);
+  const invoke = activeLocaldCache();
+  if (invoke) {
+    try {
+      await invoke("ui_cache_put", {
+        kind: "sidebar",
+        key: scope,
+        saved_at: record.savedAt,
+        raw: JSON.stringify(record),
+      });
+      return;
+    } catch (err) {
+      if (isUnsupportedCacheCommandError(err)) {
+        unsupportedInvoke = invoke;
+      } else {
+        await invoke("ui_cache_put", {
+          kind: "sidebar",
+          key: scope,
+          saved_at: record.savedAt,
+          raw: "{}",
+        }).catch(() => undefined);
+      }
+    }
+  }
   const db = await openDb();
   if (!db) return;
   await new Promise<void>((resolve) => {
@@ -141,8 +317,24 @@ export async function loadPersistedTranscript<TSnap = unknown>(
   const id = transcriptRecordKey(scope, missionId);
   const memHit = memTranscripts.get(id);
   if (memHit) {
-    memHit.savedAt = Date.now();
+    memHit.savedAt = nextSavedAt();
     return memHit.snapshot as TSnap;
+  }
+  const invoke = activeLocaldCache();
+  if (invoke) {
+    try {
+      const raw = await invoke<string | null>("ui_cache_get", { kind: "transcript", key: id });
+      if (typeof raw === "string" && raw) {
+        const row = JSON.parse(raw) as PersistedTranscriptRecord<TSnap>;
+        if (row && row.snapshot) {
+          memTranscripts.set(id, row);
+          evictMemoryTranscripts();
+          return row.snapshot;
+        }
+      }
+    } catch (err) {
+      if (isUnsupportedCacheCommandError(err)) unsupportedInvoke = invoke;
+    }
   }
   const db = await openDb();
   if (!db) return null;
@@ -178,11 +370,88 @@ export async function savePersistedTranscript<TSnap = unknown>(
     id,
     scope,
     missionId,
-    savedAt: Date.now(),
+    savedAt: nextSavedAt(),
+    tier: "hot",
     snapshot,
   };
   memTranscripts.set(id, record);
-  evictMemoryTranscripts();
+  const demoted = evictMemoryTranscripts();
+  const invoke = activeLocaldCache();
+  if (invoke) {
+    const gen = nativeCacheGeneration;
+    try {
+      const putRes = await invoke<{ demote_keys?: string[] } | null>("ui_cache_put", {
+        kind: "transcript",
+        key: id,
+        saved_at: record.savedAt,
+        tier: record.tier ?? "hot",
+        raw: JSON.stringify(record),
+      });
+      if (gen !== nativeCacheGeneration) return;
+      const handledKeys = new Set<string>();
+      for (const warmRec of demoted) {
+        const curMem = memTranscripts.get(warmRec.id);
+        if (curMem && curMem.savedAt > warmRec.savedAt) continue;
+        handledKeys.add(warmRec.id);
+        await invoke("ui_cache_put", {
+          kind: "transcript",
+          key: warmRec.id,
+          saved_at: warmRec.savedAt,
+          tier: "warm",
+          raw: JSON.stringify(warmRec),
+        }).catch(() => undefined);
+        if (gen !== nativeCacheGeneration) return;
+      }
+      const diskDemoteKeys = Array.isArray(putRes?.demote_keys) ? putRes.demote_keys : [];
+      for (const dKey of diskDemoteKeys) {
+        if (!dKey || handledKeys.has(dKey) || dKey === id) continue;
+        if (gen !== nativeCacheGeneration) return;
+        const memRow = memTranscripts.get(dKey);
+        if (memRow && memRow.savedAt > record.savedAt) continue;
+        const diskRaw = await invoke<string | null>("ui_cache_get", { kind: "transcript", key: dKey }).catch(() => null);
+        if (gen !== nativeCacheGeneration || typeof diskRaw !== "string" || !diskRaw) continue;
+        try {
+          const parsed = JSON.parse(diskRaw) as PersistedTranscriptRecord;
+          if (!parsed || !parsed.snapshot) continue;
+          const liveMem = memTranscripts.get(dKey);
+          if (liveMem && liveMem.savedAt > (parsed.savedAt ?? 0)) continue;
+          const warmRec: PersistedTranscriptRecord = {
+            ...parsed,
+            tier: "warm",
+            snapshot: compactWarmTranscriptSnapshot(parsed.snapshot),
+          };
+          if (liveMem && liveMem.savedAt === parsed.savedAt) {
+            memTranscripts.set(dKey, warmRec);
+          }
+          await invoke("ui_cache_put", {
+            kind: "transcript",
+            key: dKey,
+            saved_at: warmRec.savedAt,
+            tier: "warm",
+            raw: JSON.stringify(warmRec),
+          }).catch(() => undefined);
+        } catch {
+          /* ignore malformed disk cache entry */
+        }
+      }
+      return;
+    } catch (err) {
+      if (isUnsupportedCacheCommandError(err)) {
+        unsupportedInvoke = invoke;
+      } else if (gen === nativeCacheGeneration) {
+        const curMem = memTranscripts.get(id);
+        if (!curMem || curMem.savedAt <= record.savedAt) {
+          await invoke("ui_cache_put", {
+            kind: "transcript",
+            key: id,
+            saved_at: record.savedAt,
+            tier: "warm",
+            raw: "{}",
+          }).catch(() => undefined);
+        }
+      }
+    }
+  }
   const db = await openDb();
   if (!db) return;
   await new Promise<void>((resolve) => {
@@ -192,26 +461,66 @@ export async function savePersistedTranscript<TSnap = unknown>(
       store.put(record);
       const needsSweep =
         knownDbTranscriptIds === null ||
+        knownDbHotTranscriptIds === null ||
+        (!knownDbHotTranscriptIds.has(id) && knownDbHotTranscriptIds.size >= HOT_PERSISTED_TRANSCRIPTS) ||
         (!knownDbTranscriptIds.has(id) && knownDbTranscriptIds.size >= MAX_PERSISTED_TRANSCRIPTS);
-      if (!needsSweep && knownDbTranscriptIds) {
+      if (!needsSweep && knownDbTranscriptIds && knownDbHotTranscriptIds) {
         knownDbTranscriptIds.add(id);
+        knownDbHotTranscriptIds.add(id);
       } else {
-        const allReq = store.index("by_saved_at").getAllKeys();
-        allReq.onsuccess = () => {
-          const keys = allReq.result;
-          if (Array.isArray(keys)) {
-            const nextIds = new Set(keys.map(String));
+        const idx = store.index("by_saved_at") as IDBIndex & { getAll?: () => IDBRequest };
+        if (typeof idx.getAll === "function") {
+          const allReq = idx.getAll();
+          allReq.onsuccess = () => {
+            const rawRows = allReq.result as PersistedTranscriptRecord[] | undefined;
+            if (!Array.isArray(rawRows)) return;
+            const rows = [...rawRows].sort((a, b) => a.savedAt - b.savedAt);
+            const nextIds = new Set(rows.map((r) => String(r.id)));
+            nextIds.add(id);
+            let remaining = rows;
+            if (rows.length > MAX_PERSISTED_TRANSCRIPTS) {
+              const dropCount = rows.length - MAX_PERSISTED_TRANSCRIPTS;
+              for (let i = 0; i < dropCount; i++) {
+                store.delete(rows[i].id);
+                nextIds.delete(String(rows[i].id));
+              }
+              remaining = rows.slice(dropCount);
+            }
+            const hotStart = Math.max(0, remaining.length - HOT_PERSISTED_TRANSCRIPTS);
+            if (hotStart > 0) {
+              for (let i = 0; i < hotStart; i++) {
+                const r = remaining[i];
+                if (r.tier !== "warm") {
+                  store.put({
+                    ...r,
+                    tier: "warm",
+                    snapshot: compactWarmTranscriptSnapshot(r.snapshot),
+                  });
+                }
+              }
+            }
+            knownDbTranscriptIds = nextIds;
+            knownDbHotTranscriptIds = new Set(
+              remaining.slice(hotStart).map((r) => String(r.id)),
+            );
+          };
+        } else if (typeof idx.getAllKeys === "function") {
+          const keysReq = idx.getAllKeys();
+          keysReq.onsuccess = () => {
+            const keys = (keysReq.result as IDBValidKey[] | undefined) ?? [];
+            const nextIds = new Set(keys.map((k) => String(k)));
             nextIds.add(id);
             if (keys.length > MAX_PERSISTED_TRANSCRIPTS) {
               const dropCount = keys.length - MAX_PERSISTED_TRANSCRIPTS;
               for (let i = 0; i < dropCount; i++) {
-                store.delete(keys[i]);
+                store.delete(keys[i]!);
                 nextIds.delete(String(keys[i]));
               }
             }
             knownDbTranscriptIds = nextIds;
-          }
-        };
+            knownDbHotTranscriptIds = nextIds;
+          };
+        }
       }
       tx.oncomplete = () => resolve();
       tx.onerror = () => resolve();
@@ -223,9 +532,20 @@ export async function savePersistedTranscript<TSnap = unknown>(
 }
 
 export async function clearPersistentCache(): Promise<void> {
+  nativeCacheGeneration += 1;
   memSidebar.clear();
   memTranscripts.clear();
   knownDbTranscriptIds = null;
+  knownDbHotTranscriptIds = null;
+  lastSavedStamp = 0;
+  const invoke = nativeInvoke();
+  if (invoke) {
+    try {
+      await invoke("ui_cache_clear", {});
+    } catch (err) {
+      if (isUnsupportedCacheCommandError(err)) unsupportedInvoke = invoke;
+    }
+  }
   const db = await openDb();
   if (!db) return;
   await new Promise<void>((resolve) => {
@@ -240,4 +560,14 @@ export async function clearPersistentCache(): Promise<void> {
       resolve();
     }
   });
+}
+
+export function resetPersistentCacheMemoryForTest(): void {
+  nativeCacheGeneration += 1;
+  memSidebar.clear();
+  memTranscripts.clear();
+  knownDbTranscriptIds = null;
+  knownDbHotTranscriptIds = null;
+  lastSavedStamp = 0;
+  unsupportedInvoke = null;
 }

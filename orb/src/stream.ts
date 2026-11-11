@@ -266,6 +266,89 @@ export async function getMissionEventPage(
  if(!['true','false'].includes(more!)||((more==='true'||events.length>0)&&(nextCursor===undefined||pageMax===undefined)))throw Error('Incomplete event page cursor.');
  return {events,reset:cursor.since!==undefined&&max!==undefined&&cursor.since>max,nextCursor,pageMax,hasMore:more==='true'};
 }
+export type MissionOpenBundle = {
+  protocol: 1;
+  mission?: import("./api").Mission;
+  events: StoredEvent[];
+  spine?: StoredEvent[];
+  queue?: import("./api").QueuedMessage[];
+  max_seq?: number;
+  has_more?: boolean;
+  spine_has_more?: boolean;
+  spine_next_cursor?: number | null;
+  next_cursor?: number;
+  page_max_seq?: number;
+  reset?: boolean;
+};
+
+const unsupportedMissionOpenOrigins = new Set<string>();
+
+export function resetMissionOpenCapabilityForTest(): void {
+  unsupportedMissionOpenOrigins.clear();
+}
+
+export function shouldBlacklistOpenBundle(status: number, detail: string): boolean {
+  if (status === 405 || status === 501) return true;
+  if (status === 404) {
+    return !detail.toLowerCase().includes("mission_not_found");
+  }
+  return false;
+}
+
+/** Single-roundtrip mission open (`GET /api/control/missions/:id/open`) returning
+ * `{ protocol: 1, mission, events, spine, queue, max_seq, has_more, next_cursor, page_max_seq, reset }`.
+ * Latches unsupported origins per `(apiUrl, serverBuildHash)` and returns `null` so callers
+ * fall back cleanly to `/events` + `/queue` on legacy backends or test mocks. */
+export async function getMissionOpenBundle(
+  id: string,
+  opts?: {
+    since?: number;
+    limit?: number;
+    maxPayload?: number;
+    spineLimit?: number;
+    priority?: import("./transportScheduler").RequestPriority;
+    signal?: AbortSignal;
+  },
+): Promise<MissionOpenBundle | null> {
+  const base = getApiUrl();
+  const originKey = `${base}::${String(getServerBuildHash(base))}`;
+  if (unsupportedMissionOpenOrigins.has(originKey)) return null;
+  const params = new URLSearchParams();
+  if (opts?.since !== undefined) params.set("since_seq", String(opts.since));
+  if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+  params.set("max_payload", String(opts?.maxPayload ?? MAX_EVENT_PAYLOAD));
+  params.set("spine_limit", String(opts?.spineLimit ?? 80));
+  const qs = params.toString();
+  try {
+    const bundle = await api<Record<string, unknown>>(
+      `/api/control/missions/${encodeURIComponent(id)}/open?${qs}`,
+      opts?.signal ? { signal: opts.signal } : undefined,
+      undefined,
+      opts?.priority,
+    );
+    if (!bundle || typeof bundle !== "object" || bundle.protocol !== 1 || !Array.isArray(bundle.events)) {
+      unsupportedMissionOpenOrigins.add(originKey);
+      return null;
+    }
+    return bundle as unknown as MissionOpenBundle;
+  } catch (err) {
+    if (opts?.signal?.aborted) throw err;
+    if (err instanceof ApiError && shouldBlacklistOpenBundle(err.status, err.detail || err.message || "")) {
+      unsupportedMissionOpenOrigins.add(originKey);
+    }
+    return null;
+  }
+}
+
+const inboxAnswerPushListeners = new Set<(missionId: string, ev: StreamEvent) => void>();
+
+export function onInboxAnswerPush(cb: (missionId: string, ev: StreamEvent) => void): () => void {
+  inboxAnswerPushListeners.add(cb);
+  return () => {
+    inboxAnswerPushListeners.delete(cb);
+  };
+}
+
 /** First paint needs the newest message, not hundreds of activity payloads. */
 export function getMissionEventPreview(
  id:string,
@@ -718,7 +801,7 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
       syncSubscriptions();
       for (const l of listeners) {
         if (l.onReady) l.onReady();
-        else if (hadFailures) l.onLagged();
+        if (hadFailures && (!l.onReady || l.getSinceSeq() === undefined)) l.onLagged();
       }
       pingTimer = setInterval(() => {
         if (socket !== ws || ws.readyState !== WebSocket.OPEN) return;
@@ -807,6 +890,21 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
         const ev: StreamEvent = { type: eventType, data: parsed };
         for (const l of listeners) {
           if (l.missionId === null) l.deliver(ev);
+        }
+        return;
+      }
+      if (eventType === "inbox_answer_push") {
+        const targetMid = typeof parsed.mission_id === "string" ? parsed.mission_id : null;
+        if (targetMid && inboxAnswerPushListeners.size > 0) {
+          if (isPartialTurn(parsed)) parsed.partial = true;
+          if (typeof parsed.at !== "string") parsed.at = new Date().toISOString();
+          const ev: StreamEvent = {
+            type: "assistant_message",
+            data: parsed,
+            eventId: (parsed.event_id ?? parsed.id) as string | undefined,
+            sequence: typeof parsed.sequence === "number" ? parsed.sequence : undefined,
+          };
+          for (const cb of inboxAnswerPushListeners) cb(targetMid, ev);
         }
         return;
       }
@@ -1036,10 +1134,9 @@ export function streamMission(
   };
   let fragments:StreamEvent[]=[],paint:ReturnType<typeof setTimeout>|undefined;
   const flush=()=>{clearTimeout(paint);paint=undefined;const pending=fragments;fragments=[];if(pending.length)timed('stream text',()=>batch(()=>{if(onBatch)onBatch(pending);else for(const event of pending)onEvent(event);}));};
-  // Thinking deltas carry the whole thought so far; applied one by one each
-  // re-renders a growing block (up to 70 ms each on a long thought). They are
-  // painted together with text, once per frame.
-  const deliver=(event:StreamEvent)=>{if(typeof event.sequence==="number")advanceCursor(event.sequence);if(event.type==='text_delta'||event.type==='text_op'||(event.type==='thinking'&&event.data.done!==true)){fragments.push(event);paint??=setTimeout(flush,16);}else{flush();timed(`stream ${event.type}`,()=>onEvent(event));}};
+  // Thinking deltas and rapid tool_call/tool_result bursts are coalesced into
+  // the 16 ms frame batch so parallel tool waves run a single reconciliation pass.
+  const deliver=(event:StreamEvent)=>{if(typeof event.sequence==="number")advanceCursor(event.sequence);if(event.type==='text_delta'||event.type==='text_op'||event.type==='tool_call'||event.type==='tool_result'||(event.type==='thinking'&&event.data.done!==true)){fragments.push(event);paint??=setTimeout(flush,16);}else{flush();timed(`stream ${event.type}`,()=>onEvent(event));}};
   const handleCaughtUp = (cursor: number | null, replayed: number) => {
     flush();
     if (typeof cursor === "number") {
@@ -1086,6 +1183,21 @@ export function streamMission(
         // Token expired/revoked: reconnecting would loop forever.
         clearConnection();
         stopped = true;
+        return;
+      }
+      const nonTransientHttp =
+        (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) ||
+        res.status === 501;
+      if (nonTransientHttp) {
+        // Core answered HTTP cleanly (e.g. 404 while a local mission is still syncing
+        // or when a server does not mount SSE); do not latch global Reconnecting.
+        if (syncHub && syncListenerRef) {
+          syncHub.notifyFallbackState(syncListenerRef, true);
+        } else if (networkHealthSnapshot().wsConnected === false) {
+          recordSyncWsState(null);
+        }
+        onDisconnected?.();
+        timer = setTimeout(() => void connect(), missionId ? 15000 : 60000);
         return;
       }
       if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);

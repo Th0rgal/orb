@@ -31,6 +31,7 @@ const TURN_SELECTOR = "[data-turn-key], [data-side-turn]";
 const toBottom = (el: HTMLElement) => { if (typeof el.scrollTo === "function") el.scrollTo({ top: el.scrollHeight }); else el.scrollTop = el.scrollHeight; };
 const gapOf = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight;
 const editable = (t: EventTarget | null) => t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+const isHiddenEl = (el: Element | null | undefined) => Boolean(el?.closest("[hidden]"));
 
 export function createPinnedScroll(o: { key: () => string; onResize?: () => void; onUpwardAtTop?: () => void }) {
   let scroller: HTMLDivElement | undefined;
@@ -53,7 +54,7 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
     recordGeometry(el);
   };
   const remember = () => {
-    if (jumping) return;
+    if (jumping || isHiddenEl(scroller)) return;
     const el = scroller;
     recordGeometry(el);
     // Hit-testing forces layout: only a reader who is not following needs an anchor.
@@ -73,7 +74,7 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
   };
   /** Put the anchor back where the reader saw it. A folded-away anchor falls back to its turn. */
   const restore = () => {
-    if (jumping) return;
+    if (jumping || isHiddenEl(scroller)) return;
     const el = scroller;
     if (!el) return;
     const height = content?.offsetHeight ?? 0;
@@ -103,13 +104,14 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
   };
   /** Bring the position back in line with the contract after any layout change. */
   const settle = () => {
-    if (!scroller) return;
+    if (!scroller || isHiddenEl(scroller)) return;
     if (pinned()) { if (held) reserve(0); if (!scroller.querySelector(".user.editing")) syncBottom(scroller); }
     else restore();
   };
   const scrollIfPinned = () => {
+    if (!scroller || isHiddenEl(scroller)) return;
     if (pinned() && held) reserve(0);
-    if (pinned() && scroller && !scroller.querySelector(".user.editing")) { syncBottom(scroller); }
+    if (pinned() && !scroller.querySelector(".user.editing")) { syncBottom(scroller); }
   };
   const markIntent = () => { intentAt = performance.now(); };
   const onWheel = (e: WheelEvent) => {
@@ -120,7 +122,7 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
     } else if (e.deltaY > 0 && scroller && gapOf(scroller) < NEAR) setPinned(true);
   };
   const onKey = (e: KeyboardEvent) => {
-    if (scroller?.isConnected && NAV_KEYS.has(e.key) && !editable(e.target)) {
+    if (scroller?.isConnected && !isHiddenEl(scroller) && NAV_KEYS.has(e.key) && !editable(e.target)) {
       markIntent();
       if ((e.key === "ArrowUp" || e.key === "PageUp" || e.key === "Home") && scroller.scrollTop <= 1) {
         o.onUpwardAtTop?.();
@@ -129,7 +131,7 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
   };
   // A press on the scroller itself or the custom overlay thumb is a scrollbar drag.
   const onPointerDown = (e: PointerEvent) => {
-    if (!scroller?.isConnected) return;
+    if (!scroller?.isConnected || isHiddenEl(scroller)) return;
     if (e.target === scroller || (e.target instanceof Element && e.target.classList.contains("transcript-scroll-thumb"))) {
       dragging = true; markIntent();
     }
@@ -152,13 +154,14 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
     window.addEventListener("pointercancel", onPointerUp, true);
     window.addEventListener("keydown", onKey);
     const observer = new ResizeObserver(() => {
-      if (!el.isConnected) return;
+      if (!el.isConnected || isHiddenEl(el)) return;
       if (pinned()) scrollIfPinned();
       else restore();
       o.onResize?.();
     });
     const blocks = new MutationObserver(records => {
       for (const r of records) r.addedNodes.forEach(n => { if (n instanceof Element) observer.observe(n, { box: "border-box" }); });
+      if (isHiddenEl(el)) return;
       if (pinned()) scrollIfPinned();
       else restore();
     });
@@ -230,9 +233,21 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
       }
     },
     scrollIfPinned,
+    restoreVisible: () => {
+      const el = scroller;
+      if (!el || !el.isConnected || isHiddenEl(el)) return;
+      if (pinned()) {
+        scrollIfPinned();
+      } else {
+        if (lastTop > 0 && Math.abs(el.scrollTop - lastTop) >= 0.5) {
+          el.scrollTop = lastTop;
+        }
+        restore();
+      }
+    },
     onScroll: () => {
       const el = scroller;
-      if (!el || jumping) return;
+      if (!el || jumping || isHiddenEl(el)) return;
       const top = el.scrollTop, gap = gapOf(el);
       // A collapsing narration can clamp scrollTop before ResizeObserver runs.
       // This is layout, even inside the recent wheel-intent window. Preserve

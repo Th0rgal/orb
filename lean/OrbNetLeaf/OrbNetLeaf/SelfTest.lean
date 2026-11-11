@@ -563,6 +563,16 @@ def main : IO Unit := do
   assertTrue "gunzipBounded inflates FNAME + stored BTYPE=00 block"
     (match gunzipBounded gzStored 256 with | .ok out => out == rawHello | .error _ => false)
 
+  -- `gzipCompress` roundtrip (empty, small, and repetitive JSON payload with >3x compression)
+  let jsonSampleStr := String.intercalate "," (List.replicate 80 "{\"id\":\"mission-0001\",\"status\":\"completed\",\"backend\":\"claudecode\",\"title\":\"Verify cache hydration\"}")
+  let jsonSampleBytes := ("[" ++ jsonSampleStr ++ "]").toUTF8
+  let gzCompressed := gzipCompress jsonSampleBytes
+  let gzEmpty := gzipCompress ByteArray.empty
+  assertTrue "gzipCompress roundtrips repetitive JSON and achieves >3x compression"
+    (gzCompressed.size * 3 < jsonSampleBytes.size &&
+     (match gunzipBounded gzCompressed (jsonSampleBytes.size + 64) with | .ok out => out == jsonSampleBytes | .error _ => false) &&
+     (match gunzipBounded gzEmpty 64 with | .ok out => out.isEmpty | .error _ => false))
+
   -- H2ClientPool instantiation, concurrent cold-connect coalescing, and fast fail-closed connect timeout (`totalTimeoutMs = 65000` must NOT stall on transport failure)
   let h2Pool ← H2ClientPool.new
   let tPool0 ← IO.monoMsNow

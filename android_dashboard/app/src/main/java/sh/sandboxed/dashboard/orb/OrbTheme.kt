@@ -113,10 +113,14 @@ object OrbStyle {
 
 fun Modifier.orbPressClickable(
     enabled: Boolean = true,
+    onPressDown: (() -> Unit)? = null,
     onClick: () -> Unit
 ): Modifier = composed {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
+    LaunchedEffect(isPressed, enabled) {
+        if (isPressed && enabled) onPressDown?.invoke()
+    }
     val scale by animateFloatAsState(
         targetValue = if (isPressed) 0.985f else 1f,
         animationSpec = spring(dampingRatio = 0.82f, stiffness = 900f),
@@ -530,5 +534,62 @@ fun OrbSkeletonRow() {
                 .clip(RoundedCornerShape(4.dp))
                 .background(OrbStyle.surface)
         )
+    }
+}
+
+@Composable
+fun OrbConversationSkeleton() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 16.dp)
+            .orbShimmer(),
+        verticalArrangement = Arrangement.spacedBy(20.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.62f)
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(OrbStyle.card)
+            )
+        }
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(9.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.38f)
+                    .height(11.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(OrbStyle.surface)
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.92f)
+                    .height(14.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(OrbStyle.card)
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.84f)
+                    .height(14.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(OrbStyle.card)
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.56f)
+                    .height(14.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(OrbStyle.surface)
+            )
+        }
     }
 }

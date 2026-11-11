@@ -174,6 +174,24 @@ describe("connection reliability transport & prefetch bounds", () => {
     expect(invoke).toHaveBeenCalledTimes(1);
   });
 
+  it("bypasses the HTTPS-only loopback bridge when connected to a local http:// orb-server", async () => {
+    const invoke = vi.fn(async () => ({
+      proxy_base_url: "http://127.0.0.1:59123/__orb_tx/test-secret",
+      configured_target: "https://orbcore.thomas.md",
+    }));
+    (window as unknown as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    setTransportBridgeEnabled(true);
+    setApiUrl("http://127.0.0.1:3000");
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => Response.json({ url: String(input) }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await resolveTransportBase()).toBeNull();
+    const out = await api<{ url: string }>("/api/health", {});
+    expect(out.url).toBe("http://127.0.0.1:3000/api/health");
+    expect(invoke).not.toHaveBeenCalledWith("transport_bridge_configure", expect.anything());
+  });
+
   it("persists updated_since cursor with -2s overlap and marks delta responses as partialList", async () => {
     setConnection("http://cursor.test", "tok");
     let calls = 0;
@@ -182,11 +200,14 @@ describe("connection reliability transport & prefetch bounds", () => {
       const url = String(input);
       if (calls === 1) {
         expect(url).not.toContain("updated_since=");
+        expect(url).toContain("limit=200");
         return Response.json([
           { id: "m-1", title: "One", status: "active", updated_at: "2026-11-03T07:00:10.000Z" },
         ]);
       }
       expect(url).toContain("updated_since=2026-11-03T07%3A00%3A08.000Z");
+      expect(url).toContain("all=true");
+      expect(url).not.toContain("limit=");
       return Response.json([]);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -873,5 +894,107 @@ describe("connection reliability transport & prefetch bounds", () => {
 
     await expect(api("/api/bad-json", {})).rejects.toThrow("Couldn’t read the server response");
     expect(badJsonCalls).toBe(1);
+  });
+
+  it("does not degrade Core networkHealth when a remote worker node proxy returns 502", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/providers/antigravity-models?node_id=ashur")) {
+          return new Response(JSON.stringify({ error: "node ashur unreachable" }), {
+            status: 502,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.includes("/api/providers/antigravity-models?node_id=core")) {
+          return new Response(JSON.stringify({ error: "core upstream down" }), {
+            status: 502,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return Response.json({ ok: true });
+      }),
+    );
+
+    await transportFetch("/api/health");
+    expect(networkHealth()).toBe("healthy");
+
+    const workerRes = await transportFetch("/api/providers/antigravity-models?node_id=ashur");
+    expect(workerRes.status).toBe(502);
+    expect(networkHealth()).toBe("healthy");
+    expect(networkHealthSnapshot().consecutiveFailures).toBe(0);
+
+    const coreRes = await transportFetch("/api/providers/antigravity-models?node_id=core");
+    expect(coreRes.status).toBe(502);
+    expect(networkHealth()).toBe("reconnecting");
+
+    // Pre-response Core transport failure (DNS/TCP/TLS Load failed) on a worker-model GET
+    // still cools down the broken Core origin and fails over to a healthy Core standby.
+    resetNetworkHealth();
+    setApiUrl("https://orbcore.thomas.md");
+    const seenWorkerFailover: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        seenWorkerFailover.push(url);
+        if (url.startsWith("https://orbcore.thomas.md")) {
+          throw new TypeError("Load failed");
+        }
+        return Response.json({ models: [{ id: "gemini-2.5-pro" }] });
+      }),
+    );
+
+    const failoverRes = await transportFetch("/api/providers/antigravity-models?node_id=ashur");
+    expect(failoverRes.status).toBe(200);
+    expect(seenWorkerFailover).toEqual([
+      "https://orbcore.thomas.md/api/providers/antigravity-models?node_id=ashur",
+      "https://agent-backend.thomas.md/api/providers/antigravity-models?node_id=ashur",
+    ]);
+  });
+
+  it("does not latch global reconnecting when SSE stream returns 404 for an unsynced local mission", async () => {
+    setConnection("https://orbcore.thomas.md", "tok-sse-404");
+
+    class FailingSocket {
+      static instances: FailingSocket[] = [];
+      url: string;
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((ev: { data: unknown }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: ((ev: { code?: number; reason?: string }) => void) | null = null;
+      constructor(url: string) {
+        this.url = url;
+        FailingSocket.instances.push(this);
+        queueMicrotask(() => {
+          if (this.readyState === 3) return;
+          this.readyState = 3;
+          this.onerror?.();
+          this.onclose?.({ code: 1006, reason: "" });
+        });
+      }
+      send() {}
+      close() {
+        this.readyState = 3;
+      }
+    }
+    vi.stubGlobal("WebSocket", FailingSocket as unknown as typeof WebSocket);
+
+    let sseCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        sseCalls++;
+        return new Response("Not found", { status: 404 });
+      }),
+    );
+
+    const stop = streamMission("m-unsynced-local", () => {}, () => {});
+    await vi.waitFor(() => expect(sseCalls).toBeGreaterThanOrEqual(1), { timeout: 2500 });
+    expect(networkHealth()).toBe("healthy");
+    expect(networkHealthSnapshot().wsConnected).toBeNull();
+    stop();
   });
 });

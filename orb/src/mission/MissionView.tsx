@@ -145,6 +145,11 @@ export function mergeIncomingMission(prev: Mission | null, incoming: Mission): M
   if (!Number.isNaN(prevTs) && !Number.isNaN(nextTs) && nextTs < prevTs) {
     return prev.history === history ? prev : { ...prev, history };
   }
+  const reconciledSyncFlags: Pick<Mission, "local_sync_pending" | "local_sync_local_only" | "local_sync_error"> = {
+    local_sync_pending: incoming.local_sync_pending ?? false,
+    local_sync_local_only: incoming.local_sync_local_only ?? false,
+    local_sync_error: incoming.local_sync_error ?? null,
+  };
   const staleActiveEndedJob =
     !isLive(prev.status) &&
     isLive(incoming.status) &&
@@ -155,12 +160,13 @@ export function mergeIncomingMission(prev: Mission | null, incoming: Mission): M
     ? {
         ...prev,
         ...incoming,
+        ...reconciledSyncFlags,
         history,
         status: prev.status,
         terminal_reason: prev.terminal_reason ?? incoming.terminal_reason,
         status_message: prev.status_message ?? incoming.status_message,
       }
-    : { ...prev, ...incoming, history };
+    : { ...prev, ...incoming, ...reconciledSyncFlags, history };
   if (!inflightSettings.has(incoming.id)) return merged;
   return {
     ...merged,
@@ -174,8 +180,32 @@ export function mergeIncomingMission(prev: Mission | null, incoming: Mission): M
   };
 }
 
+export function localHistoryToStreamEvents(
+  missionId: string,
+  history: Mission["history"],
+  outstandingOutbox: ReadonlyArray<{ id: string; text: string }> = [],
+): StreamEvent[] {
+  const claimedIds = new Set<string>();
+  return history
+    .filter(row => row.content)
+    .map((row, index) => {
+      let id = typeof row.id === "string" && row.id ? row.id : "";
+      if (!id && row.role === "user") {
+        const clean = row.content.trim();
+        const match = outstandingOutbox.find(entry => !claimedIds.has(entry.id) && entry.text.trim() === clean);
+        if (match) id = match.id;
+      }
+      if (id) claimedIds.add(id);
+      return {
+        type: row.role === "user" ? "user_message" : "assistant_message",
+        data: { id: id || `local:${missionId}:${index}`, content: row.content },
+      };
+    });
+}
+
 function MissionDock(p: {
   mission: Mission | null;
+  active?: boolean;
   items: StreamItem[];
   usedTokens?: number;
   destination: string;
@@ -290,6 +320,15 @@ function MissionDock(p: {
   // A memo, not a bare accessor: `on` re-runs whenever its source re-runs, and
   // `p.mission` is replaced by every refresh even when the id is unchanged.
   const missionId = createMemo(() => p.mission?.id);
+  const [showReconnecting, setShowReconnecting] = createSignal(false);
+  createEffect(() => {
+    if (networkHealth() === "reconnecting") {
+      const timer = setTimeout(() => setShowReconnecting(true), 650);
+      onCleanup(() => clearTimeout(timer));
+    } else {
+      setShowReconnecting(false);
+    }
+  });
   createEffect(on(missionId, id => {
     if (!id || participant()) return;
     if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine());
@@ -394,10 +433,10 @@ function MissionDock(p: {
             void trackMissionSettings(mission.id, updateMissionSettings(mission.id,{service_tier:tier})).then(updated=>{if(missionSpeed(updated)!==tier)throw new Error('The backend did not save the selected speed. Update it before retrying.');const latest=p.mission&&p.mission.id===mission.id?p.mission:mission;p.onMission?.({...latest,service_tier:updated.service_tier,fast_mode:updated.fast_mode??latest.fast_mode,session_id:updated.session_id??latest.session_id,updated_at:updated.updated_at??latest.updated_at}, true);}).catch(e=>p.onError?.(launchError(e))).finally(()=>setSaving(false));
           }}/>
         </Show>
-        <Show when={p.mission?.backend === "codex" && !participant()}><MissionCyber mission={p.mission!} onError={p.onError}/></Show>
+        <Show when={p.mission?.backend === "codex" && !participant()}><MissionCyber mission={p.mission!} active={p.active} onError={p.onError}/></Show>
         <Show when={p.mission?.backend === "claudecode" && !participant() ? p.mission : undefined}>{m => <MissionClaudePermission mission={m()} onMission={p.onMission} onError={p.onError} />}</Show>
       </Show>
-      <Show when={isConnected() && (networkHealth() === "reconnecting" || (networkHealth() === "slow" && (p.syncing || isWorking(p.mission?.status))))}>
+      <Show when={isConnected() && ((networkHealth() === "reconnecting" && showReconnecting()) || (networkHealth() === "slow" && (p.syncing || isWorking(p.mission?.status))))}>
         <span
           class={`under-link-pill ${networkHealth()}`}
           role="status"
@@ -471,16 +510,17 @@ export function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
     if (!resolved()) void getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e)));
   });
   const canRenderBody = () => Boolean(resolved()) || (!error() && (transcriptVersion(), Boolean(peekTranscript(p.id)?.items.length)));
-  return <Show when={canRenderBody()} fallback={<><ErrorToast error={error()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(""); return getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e))); } }} onDismiss={() => setError("")} /><ConversationSkeleton /></>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} onMission={handleMission} />}>{(() => { const mod = peekCloudAgentsModule(); return mod ? <mod.CloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /> : <Suspense fallback={<ConversationSkeleton />}><LazyCloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /></Suspense>; })()}</Show></Show>;
+  return <Show when={canRenderBody()} fallback={<><ErrorToast error={error()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(""); return getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e))); } }} onDismiss={() => setError("")} /><ConversationSkeleton /></>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} onMission={handleMission} />}>{(() => { const mod = peekCloudAgentsModule(); return mod ? <mod.CloudConversation id={p.id} active={p.active} onMission={handleMission} onOpenMission={p.onFork} /> : <Suspense fallback={<ConversationSkeleton />}><LazyCloudConversation id={p.id} active={p.active} onMission={handleMission} onOpenMission={p.onFork} /></Suspense>; })()}</Show></Show>;
 }
 
-export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null, authoritative?: boolean) => void; onFork?: (mission: Mission) => void }) {
+export function NativeMissionView(p: { id: string; active?: boolean; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null, authoritative?: boolean) => void; onFork?: (mission: Mission) => void }) {
   const boundMissionId = p.id;
   const staleMission = () => disposed || Boolean(boundMissionId && p.id !== boundMissionId);
   const receipt = p.launch ?? recalledLaunch(p.id);
   let disposed=false;
+  const isSlotActive = createMemo(() => p.active !== false);
   onCleanup(()=>{disposed=true;});
-  createEffect(()=>{if(p.id)onCleanup(retainTranscript(p.id));});
+  createEffect(()=>{if(p.id && isSlotActive())onCleanup(retainTranscript(p.id));});
   const cached = p.id ? peekReadyTranscript(p.id) ?? (peekTranscript(p.id)?.detailsPending ? peekTranscript(p.id) : undefined) : undefined;
   const [mission, setMission] = createSignal<Mission | null>(
     applyWarmMissionPatch(p.initial, { preserveSettings: Boolean(p.id && inflightSettings.has(p.id)) }),
@@ -505,11 +545,12 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   });
   createEffect(() => {
     const m = mission();
+    if (p.active === false) return;
     const auth = authoritativeOnce;
     authoritativeOnce = false;
     p.onMission?.(m, auth);
   });
-  onCleanup(() => p.onMission?.(null));
+  onCleanup(() => { if (p.active !== false) p.onMission?.(null); });
   const [items, setItems] = createSignal<StreamItem[]>(cached?.items ?? []);
   const [awaiting, setAwaiting] = createSignal(!cached || !!cached.detailsPending);
   createEffect(on(transcriptVersion, () => {
@@ -543,6 +584,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       setCheckpoints([]);
       return;
     }
+    if (p.active === false) return;
     let current = true;
     const timer = setTimeout(() => {
       if (!current) return;
@@ -695,7 +737,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   const pin = createPinnedScroll({ key: () => p.id, onResize: () => older(false), onUpwardAtTop: () => older(true) });
   const { landAtBottom, scrollIfPinned } = pin;
   let scroller: HTMLDivElement | undefined;
-  createEffect(()=>{if(p.id)cacheRemember(`m:${p.id}`);});
+  createEffect(()=>{if(p.id && p.active !== false)cacheRemember(`m:${p.id}`);});
   pin.observe();
   onMount(() => {
     if (!scroller) return;
@@ -710,6 +752,15 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     if(!p.id)return;
     const since = statusSeen;
     try {
+      if (mission()?.local_sync_local_only) {
+        const local = (await import("../localOrigins").then(m => m.localOrigins(p.id)).catch(() => [])).find(m => m.id === p.id);
+        if (local) {
+          if (disposed || since !== statusSeen) return;
+          setMission(prev => mergeIncomingMission(prev, local));
+          setError(null);
+          return;
+        }
+      }
       const next=await getMission(p.id, { fresh, includeHistory: false });
       if(disposed||since!==statusSeen)return;
       setMission(prev => mergeIncomingMission(prev, next));
@@ -769,6 +820,19 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     held = [];
     let history: StreamEvent[] = [];
     try {
+      if (mission()?.local_sync_pending) {
+        const localPendingRow = (await import("../localOrigins").then(m => m.localOrigins(p.id)).catch(() => [])).find(m => m.id === p.id);
+        if (disposed) return;
+        if (localPendingRow?.local_sync_pending) {
+          const outbox = [...acceptedLocalMessages(p.id), ...queuedLocalMessages(p.id).filter(row => !row.error && (!row.waiting || row.state === "accepted" || row.state === "dispatching"))];
+          const events = localHistoryToStreamEvents(p.id, localPendingRow.history, outbox);
+          setItems(reuseUnchanged(items(), applyStreamEvents([], events)));
+          setQueueError(null);
+          setError(null);
+          return;
+        }
+        setMission(prev => (prev ? { ...prev, local_sync_pending: false, local_sync_error: null } : prev));
+      }
       const snap = await (fresh ? refreshTranscript(p.id) : loadTranscript(p.id));
       if(disposed)return;
       history = snap.stream;
@@ -790,7 +854,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       const local=(await import("../localOrigins").then(m=>m.localOrigins()).catch(()=>[])).find(m=>m.id===p.id);
       if(disposed)return;
       if(local){
-        const events:StreamEvent[]=local.history.filter(row=>row.content).map((row,index)=>({type:row.role==="user"?"user_message":"assistant_message",data:{id:`local:${p.id}:${index}`,content:row.content}}));
+        const outbox = [...acceptedLocalMessages(p.id), ...queuedLocalMessages(p.id).filter(row => !row.error && (!row.waiting || row.state === "accepted" || row.state === "dispatching"))];
+        const events = localHistoryToStreamEvents(p.id, local.history, outbox);
         setItems(applyStreamEvents([], events));setError(null);
       }else setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -808,7 +873,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
 
   // A terminal snapshot from either SSE or polling reconciles durable output.
   createEffect(on(() => mission()?.status, (status, prev) => {
-    if (p.id && status && prev && prev !== status && !missionPhase({status} as Mission, false).moving) void resync(true);
+    if (p.id && p.active !== false && status && prev && prev !== status && !missionPhase({status} as Mission, false).moving) void resync(true);
   }, { defer: true }));
 
   let olderPending:Promise<void>|undefined;
@@ -848,11 +913,15 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     onCleanup(() => timers.forEach(clearTimeout));
   }));
 
-  createEffect(on(()=>p.id, id => {
-    setRemoteLiveEdits([]);
-    if(!id)return;
+  let prevSyncedId: string | undefined;
+  createEffect(on(()=>[p.id, isSlotActive()] as const, ([id, isActive]) => {
+    if (id !== prevSyncedId) {
+      prevSyncedId = id;
+      setRemoteLiveEdits([]);
+    }
+    if(!id || !isActive)return;
     const reload = async () => {
-      if (refreshing()) return;
+      if (p.active === false || refreshing()) return;
       setRefreshing(true);
       try { await Promise.all([refresh(), resync(true)]); }
       finally { setRefreshing(false); }
@@ -864,6 +933,10 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     );
     const warmLiveOnMount = isMissionWarmLive(id);
     const readyOnMount = peekReadyTranscript(id);
+    if (readyOnMount) {
+      setItems(cur => reuseUnchanged(cur, readyOnMount.items));
+      setAwaiting(false);
+    }
     const hasSettledOutputOnMount = (() => {
       if (!readyOnMount) return false;
       const list = readyOnMount.items;
@@ -897,54 +970,68 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     } else {
       void resync(true).then(() => { if (!hasPendingSearchTarget(p.id)) scrollIfPinned(); });
     }
-    const stopStream = attachMissionStream(p.id, {
-      onEvent: (ev) => {
-        if (ev.type === "mission_settings_updated") {
-          const patch = extractMissionSettingsPatch(ev.data);
-          setMission(old => (old ? { ...old, ...patch } : old));
-          return;
-        }
-        if (ev.type === "mission_status_changed" || ev.type === "status") {
-          if (ev.type === "mission_status_changed" && typeof ev.data.status === "string") {
-            const status = ev.data.status;
-            statusSeen++;
-            // A new turn started: the previous turn's ended job is history,
-            // not a "Remote job stopped" failure, until the fresh read lands.
-            setMission(old => ({ ...(old ?? {id:p.id,title:null,history:[],created_at:"",updated_at:""}), status,
-              ...(isLive(status) && old?.remote_job && remoteJobEnded(old.remote_job) ? { remote_job: null, terminal_reason: null } : {}),
-              status_message: typeof ev.data.summary === "string" ? ev.data.summary : old?.status_message }));
-            if (!missionPhase({ status } as Mission, false).moving) void resync(true);
-          }
-          void refresh(true);
-          return;
-        }
-        if (replaying) held.push(ev);
-        else applyLive(ev);
-      },
-      onLagged: () => void resync(true),
-      onReady: () => {
-        streamHealthy = true;
-        if (initialReady) {
-          initialReady = false;
-          if (!hasPendingSearchTarget(p.id)) scrollIfPinned();
-          return;
-        }
-        if (!isMissionWarmLive(p.id)) {
-          void resync(true).then(() => { if (!hasPendingSearchTarget(p.id)) scrollIfPinned(); });
-        }
-      },
-      onBatch: (evs) => {
-        if (replaying) held.push(...evs);
-        else applyLiveBatch(evs);
-      },
-      onDisconnected: () => {
+    let stopStream = () => {};
+    const localSyncPending = createMemo(() => Boolean(mission()?.local_sync_pending));
+    createEffect(() => {
+      if (localSyncPending()) {
         streamHealthy = false;
-      },
+        return;
+      }
+      const detach = attachMissionStream(p.id, {
+        onEvent: (ev) => {
+          if (ev.type === "mission_settings_updated") {
+            const patch = extractMissionSettingsPatch(ev.data);
+            setMission(old => (old ? { ...old, ...patch } : old));
+            return;
+          }
+          if (ev.type === "mission_status_changed" || ev.type === "status") {
+            if (ev.type === "mission_status_changed" && typeof ev.data.status === "string") {
+              const status = ev.data.status;
+              statusSeen++;
+              // A new turn started: the previous turn's ended job is history,
+              // not a "Remote job stopped" failure, until the fresh read lands.
+              setMission(old => ({ ...(old ?? {id:p.id,title:null,history:[],created_at:"",updated_at:""}), status,
+                ...(isLive(status) && old?.remote_job && remoteJobEnded(old.remote_job) ? { remote_job: null, terminal_reason: null } : {}),
+                status_message: typeof ev.data.summary === "string" ? ev.data.summary : old?.status_message }));
+              if (!missionPhase({ status } as Mission, false).moving) void resync(true);
+            }
+            void refresh(true);
+            return;
+          }
+          if (replaying) held.push(ev);
+          else applyLive(ev);
+        },
+        onLagged: () => void resync(true),
+        onReady: () => {
+          streamHealthy = true;
+          if (initialReady) {
+            initialReady = false;
+            if (!hasPendingSearchTarget(p.id)) scrollIfPinned();
+            return;
+          }
+          if (!isMissionWarmLive(p.id)) {
+            void resync(true).then(() => { if (!hasPendingSearchTarget(p.id)) scrollIfPinned(); });
+          }
+        },
+        onBatch: (evs) => {
+          if (replaying) held.push(...evs);
+          else applyLiveBatch(evs);
+        },
+        onDisconnected: () => {
+          streamHealthy = false;
+        },
+      });
+      stopStream = detach;
+      onCleanup(() => {
+        detach();
+        if (stopStream === detach) stopStream = () => {};
+      });
     });
     // Slow status poll — the stream is authoritative for content, but the
     // composer busy state shouldn't depend on it alone.
     let settledEmptyVerified = false;
     const stopPoll = pollWhileVisible(async () => {
+      if (p.active === false) return;
       const wasMoving = missionPhase(mission(), activity()).moving;
       await refresh();
       const nowMoving = missionPhase(mission(), activity()).moving;
@@ -974,7 +1061,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       if (queueError()) await resync(true);
     }, 10000, "mission.status");
     onCleanup(() => {
-      if (scroller) putTranscriptHeight(p.id, scroller.scrollHeight);
+      if (scroller && scroller.scrollHeight > 0) putTranscriptHeight(p.id, scroller.scrollHeight);
       stopStream();
       stopPoll();
     });
@@ -990,9 +1077,13 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     };
     const refreshLocal = () => reconcile().catch(console.error);
     refreshLocal();
-    const stopPoll = pollWhileVisible(reconcile, 2000, "mission.localReconcile");
+    const stopPoll = pollWhileVisible(() => {
+      if (p.active === false && !localRunActive(id)) return Promise.resolve();
+      return reconcile();
+    }, 2000, "mission.localReconcile");
     window.addEventListener('orb:queue-wake',refreshLocal);
-    onCleanup(()=>{stopPoll();window.removeEventListener('orb:queue-wake',refreshLocal);});
+    window.addEventListener('orb:refresh',refreshLocal);
+    onCleanup(()=>{stopPoll();window.removeEventListener('orb:queue-wake',refreshLocal);window.removeEventListener('orb:refresh',refreshLocal);});
   });
 
   createEffect(() => {
@@ -1060,10 +1151,12 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   // moment. Keep the Working row across that gap via deterministic `SM-24`
   // `orbFollowupQueueStep` reconciliation (clearing immediately when the new
   // turn starts, a failure lands, or all handover message IDs retire/cancel).
+  const hasMissionFailure = () =>
+    isFailedStatus(mission()?.status) || missionPhase(mission(), false).failed === true;
   const [queueHandoverState, setQueueHandoverState] = createSignal<{ ids: string[]; postedAfterSeq: number } | null>(null);
   createEffect(on(busy, (now, before) => {
     if (now) { setQueueHandoverState(null); return; }
-    if (!before || clientPlaced() || isFailedStatus(mission()?.status)) return;
+    if (!before || clientPlaced() || hasMissionFailure()) return;
     const queuedTranscriptIds = items().flatMap(i => i.kind === "user" && i.queued && i.messageId ? [i.messageId] : []);
     const candidateIds = [...new Set([...remoteQueuedIds(), ...queuedTranscriptIds])];
     if (!candidateIds.length) return;
@@ -1072,7 +1165,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   createEffect(() => {
     const handover = queueHandoverState();
     if (!handover) return;
-    if (busy() || clientPlaced() || isFailedStatus(mission()?.status)) {
+    if (busy() || clientPlaced() || hasMissionFailure()) {
       setQueueHandoverState(null);
       return;
     }
@@ -1200,10 +1293,22 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   );
   const visibleViewItems = createMemo(() => visibleTranscript(viewItems()));
   const planProgress = createPlanProgress({get mission(){return p.id;},get items(){return viewItems();},get active(){return clientPlaced()?localRunActive(p.id):busy();}});
-  createEffect(()=>p.onPlan?.(p.id,planProgress()));
+  createEffect(() => { if (p.active !== false) p.onPlan?.(p.id, planProgress()); });
   const estimatedTokens = createMemo(() => estimateTokens(viewItems()));
   const titleContext = createMemo(() => awaiting() ? null : contextPct(estimatedTokens(), contextWindow(mission()?.backend)));
-  createEffect(() => p.onContext?.(p.id, titleContext()));
+  createEffect(() => { if (p.active !== false) p.onContext?.(p.id, titleContext()); });
+  createEffect(on(isSlotActive, (isActive, wasActive) => {
+    if (!isActive || wasActive !== false) return;
+    queueMicrotask(() => {
+      if (disposed || p.active === false) return;
+      scroller?.dispatchEvent(new Event("orb:slot-shown"));
+      pin.restoreVisible();
+    });
+    if (p.id && isMissionDirtyWhileUnfocused(p.id)) {
+      void refresh();
+      void resync(true);
+    }
+  }, { defer: true }));
   let fulfillingTargetId = 0;
   createEffect(() => {
     const target = pendingSearchTarget();
@@ -1574,7 +1679,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   return (
     <>
       {/* Centred in the title-bar row, just left of its icons (Codex / ChatGPT desktop). */}
-      <Show when={document.getElementById("tb-tools")}>{slot => <Portal mount={slot()}>
+      <Show when={p.active !== false && document.getElementById("tb-tools")}>{slot => <Portal mount={slot()}>
         <div class="mission-tools"><Chapters items={viewItems()} scroller={() => scroller} /></div>
       </Portal>}</Show>
       <div
@@ -1629,19 +1734,19 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             </Show>
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} onSend={text => sendMsg(text, [], [])} />
             <Show when={!sendError()}>
-              <MissionFailure mission={mission()} active={busy() || localQueueActive() || working() || !!sentOverStop() || (awaiting() && mission()?.status_message === "Model error") || (!clientPlaced() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} onOpenSource={openOriginalSource()} failureInTranscript={visibleViewItems().some(item => item.kind === "error")} />
+              <MissionFailure mission={mission()} active={busy() || localQueueActive() || working() || !!sentOverStop() || (awaiting() && mission()?.status_message === "Model error") || (!clientPlaced() && !hasMissionFailure() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} onOpenSource={openOriginalSource()} failureInTranscript={visibleViewItems().some(item => item.kind === "error")} />
             </Show>
           </Show>
 
-          <NextReminder mission={p.id} busy={busy()} archived={isArchived(mission()?.status)} />
+          <NextReminder mission={p.id} active={isSlotActive()} busy={busy()} archived={isArchived(mission()?.status)} />
           <Show when={refreshing()}><div class="agent-wait-status" role="status">Refreshing conversation…</div></Show>
         </div>
       </div>
       <div class="dock" ref={floatingDock}>
         <JumpToLatest pinned={pin.pinned} onJump={pin.pin} />
         <div class="col">
-          <Show when={p.id}><SideQuestions mission={p.id} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})}/></Show>
-          <RemoteQueue mission={p.id}
+          <Show when={p.id}><SideQuestions mission={p.id} active={p.active !== false} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})}/></Show>
+          <RemoteQueue mission={p.id} active={p.active !== false}
             ref={handle => remoteQueue = handle}
             editing={editingQueued()}
             onEdit={row => void queuedEdit.start(row)}
@@ -1667,6 +1772,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           }}/>
           <QueuedMessages mission={p.id} editing={editingQueued()} pending={clientPlaced() && !sendError() && !editingQueued() ? optimisticList().filter(item => item.waiting && !item.failed).map(item => ({id:item.id,text:item.text})) : undefined} onCancelPending={id => drafts.remove(id)} onEdit={row=>void queuedEdit.start(row)}/>
           <Composer
+            active={p.active !== false}
             allowConcurrentSend
             revision={sideRevision()}
             onBtw={(question,images,files)=>sideQuestions?.ask(question,images,files)??false}
@@ -1753,11 +1859,31 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             onAttachments={setFollowAttach}
           />
           <ErrorToast title="Couldn’t send your message" error={p.launchError} action={p.onRetryLaunch ? { label: "Retry", run: p.onRetryLaunch } : undefined} />
-          <Show when={mission()?.local_sync_pending}><div class="dim" role="status">{mission()?.local_sync_error || "Saved on this computer · syncing to Core…"}</div></Show>
+          <Show when={mission()?.local_sync_pending}>
+            {(() => {
+              const syncError = () => mission()?.local_sync_error;
+              const activelySyncing = () =>
+                !syncError() &&
+                isConnected() &&
+                !mission()?.local_sync_local_only &&
+                networkHealth() !== "reconnecting";
+              return (
+                <div
+                  class={`dock-sync-note${syncError() ? " is-error" : activelySyncing() ? " is-syncing" : ""}`}
+                  role="status"
+                >
+                  <i class="dock-sync-dot" aria-hidden="true" />
+                  <span>
+                    {syncError() || (activelySyncing() ? "Saved on this computer · syncing to Core…" : "Saved on this computer")}
+                  </span>
+                </div>
+              );
+            })()}
+          </Show>
           <ErrorToast error={sendError()} title="Couldn’t send your message" onDismiss={() => setSendError(null)}
             action={optimistic() ? { label: "Retry", run: () => { const draft = optimistic(); if (draft?.retry) draft.retry(); else if (draft) void sendMsg(draft.text, draft.images, followAttach(), draft.id); } } : undefined} />
           <ErrorToast error={error() || queueError()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(null); setQueueError(null); return Promise.all([refresh(true), resync(true)]); } }} onDismiss={() => { setError(null); setQueueError(null); }} />
-          <MissionDock mission={mission()} items={viewItems()} usedTokens={estimatedTokens()} destination={missionDestination(mission(), receipt)} syncing={syncing()} onMission={applyDockMission} onError={setError} onFork={p.onFork} />
+          <MissionDock mission={mission()} active={isSlotActive()} items={viewItems()} usedTokens={estimatedTokens()} destination={missionDestination(mission(), receipt)} syncing={syncing()} onMission={applyDockMission} onError={setError} onFork={p.onFork} />
         </div>
       </div>
       <Show when={pendingCheckpointRevert()}>

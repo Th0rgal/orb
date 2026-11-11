@@ -396,40 +396,107 @@ EOF
       if [[ -f "$ROOT_DIR/macos_shell/icons/icon.png" ]]; then
         install -m 0644 "$ROOT_DIR/macos_shell/icons/icon.png" "$XDG_DATA/icons/hicolor/256x256/apps/orb.png"
       fi
-      cat > "$LINUX_APP_DIR/bin/.orb-static-server" <<EOF
-#!${PY_BIN}
-import os, sys
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+      rm -f "$LINUX_APP_DIR/bin/.orb-static-server"
+      printf '#!%s\n' "${PY_BIN}" > "$LINUX_APP_DIR/bin/.orb-migrate-1431"
+      cat >> "$LINUX_APP_DIR/bin/.orb-migrate-1431" <<'PY'
+import hmac, json, os, secrets, sys, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
-ROOT = os.path.realpath(sys.argv[1])
-MIME = {
-    ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-    ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
-    ".wasm": "application/wasm", ".json": "application/json; charset=utf-8",
-    ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg", ".webp": "image/webp", ".ico": "image/x-icon",
-    ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf",
-}
+MIG_DONE = sys.argv[1]
+TARGET = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] in ("tauri://localhost", "orb://localhost") else "tauri://localhost"
+NONCE = secrets.token_hex(32)
+STAGED = {"body": None}
 
-class Handler(SimpleHTTPRequestHandler):
+HTML = ("""<!doctype html><meta charset="utf-8"><style>html,body{margin:0;background:#141414}</style><script>
+(async()=>{
+  const NONCE=%s,TARGET=%s;
+  const b64=(u8)=>{let s="";for(let i=0;i<u8.length;i+=0x8000)s+=String.fromCharCode.apply(null,u8.subarray(i,i+0x8000));return btoa(s);};
+  const enc=async(v)=>{
+    if(!v||typeof v!=="object")return v;
+    if(v instanceof File)return{__orb_t:"File",name:v.name,type:v.type,lastModified:v.lastModified,b64:b64(new Uint8Array(await v.arrayBuffer()))};
+    if(v instanceof Blob)return{__orb_t:"Blob",type:v.type,b64:b64(new Uint8Array(await v.arrayBuffer()))};
+    if(v instanceof Uint8Array)return{__orb_t:"Uint8Array",b64:b64(v)};
+    if(v instanceof ArrayBuffer)return{__orb_t:"ArrayBuffer",b64:b64(new Uint8Array(v))};
+    if(v instanceof Date)return{__orb_t:"Date",iso:v.toISOString()};
+    if(Array.isArray(v))return Promise.all(v.map(enc));
+    const o={};for(const[k,x]of Object.entries(v))o[k]=await enc(x);return o;
+  };
+  try{
+    const raw=await new Promise((res,rej)=>{
+      let missing=false;const rq=indexedDB.open("orb-composer-drafts");
+      rq.onupgradeneeded=(e)=>{if(e.oldVersion===0){missing=true;rq.transaction.abort();}};
+      rq.onerror=()=>missing?res([]):rej(rq.error);
+      rq.onsuccess=()=>{
+        const db=rq.result;if(!db.objectStoreNames.contains("drafts")){db.close();res([]);return;}
+        const out=[],tx=db.transaction("drafts","readonly"),cr=tx.objectStore("drafts").openCursor();
+        cr.onsuccess=()=>{const c=cr.result;if(c){if(typeof c.key==="string")out.push([c.key,c.value]);c.continue();}};
+        tx.oncomplete=()=>{db.close();res(out);};tx.onerror=()=>{db.close();rej(tx.error);};
+      };
+    });
+    const entries=await Promise.all(raw.map(async([k,v])=>[k,await enc(v)]));
+    const r=await fetch("/__orb_migrate_stage?nonce="+NONCE,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({entries})});
+    if(!r.ok)throw new Error("stage");
+    location.replace(TARGET+"/?migrate_1431="+NONCE);
+  }catch{
+    fetch("/__orb_migrate_abort?nonce="+NONCE,{method:"POST"}).catch(()=>{});
+    location.replace(TARGET+"/");
+  }
+})();
+</script>""" % (json.dumps(NONCE), json.dumps(TARGET))).encode("utf-8")
+
+class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): return
-    def end_headers(self):
-        req_p = getattr(self, "path", "").split("?", 1)[0]
-        if req_p.startswith(("/assets/", "/provider-icons/")) or req_p.endswith((".woff2", ".woff", ".ttf", ".wasm")):
-            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
-        else:
-            self.send_header("Cache-Control", "no-cache")
-        super().end_headers()
-    def guess_type(self, path):
-        return MIME.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
-    def translate_path(self, path):
-        rel = path.split("?", 1)[0].split("#", 1)[0].lstrip("/") or "index.html"
-        cand = os.path.normpath(os.path.join(ROOT, rel))
-        if not (cand == ROOT or cand.startswith(ROOT + os.sep)):
-            return os.path.join(ROOT, "__missing__")
-        if os.path.isfile(cand):
-            return cand
-        return os.path.join(ROOT, "index.html") if not os.path.splitext(rel)[1] else os.path.join(ROOT, "__missing__")
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", TARGET)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Cache-Control", "no-store")
+    def _valid(self):
+        u = urlsplit(self.path)
+        got = (parse_qs(u.query).get("nonce") or [""])[0]
+        return u.path, hmac.compare_digest(got, NONCE)
+    def do_OPTIONS(self):
+        self.send_response(204); self._cors(); self.end_headers()
+    def do_GET(self):
+        p, ok = self._valid()
+        if not ok:
+            self.send_response(403); self.end_headers(); return
+        if p == "/__orb_migrate":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; style-src 'unsafe-inline'")
+            self.send_header("Content-Length", str(len(HTML)))
+            self.end_headers(); self.wfile.write(HTML); return
+        if p == "/__orb_migrate_pull" and STAGED["body"] is not None:
+            b = STAGED["body"]
+            self.send_response(200); self._cors()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers(); self.wfile.write(b); return
+        self.send_response(404); self._cors(); self.end_headers()
+    def do_POST(self):
+        p, ok = self._valid()
+        if not ok:
+            self.send_response(403); self.end_headers(); return
+        n = int(self.headers.get("Content-Length") or "0")
+        body = self.rfile.read(n) if n > 0 else b""
+        if p == "/__orb_migrate_stage":
+            STAGED["body"] = body
+            self.send_response(204); self.send_header("Cache-Control", "no-store"); self.end_headers(); return
+        if p == "/__orb_migrate_ack":
+            d = os.path.dirname(MIG_DONE)
+            if d: os.makedirs(d, exist_ok=True)
+            tmp = MIG_DONE + ".tmp"
+            with open(tmp, "wb") as f: f.write(b"1\n")
+            os.replace(tmp, MIG_DONE)
+            self.send_response(204); self._cors(); self.end_headers()
+            threading.Thread(target=self.server.shutdown, daemon=True).start(); return
+        if p == "/__orb_migrate_abort":
+            self.send_response(204); self.end_headers()
+            threading.Thread(target=self.server.shutdown, daemon=True).start(); return
+        self.send_response(404); self.end_headers()
 
 class ReusableServer(ThreadingHTTPServer):
     allow_reuse_address = True
@@ -437,12 +504,13 @@ class ReusableServer(ThreadingHTTPServer):
 try:
     srv = ReusableServer(("127.0.0.1", 1431), Handler)
 except OSError:
-    srv = ReusableServer(("127.0.0.1", 0), Handler)
-sys.stdout.write(str(srv.server_address[1]) + "\n")
-sys.stdout.flush()
+    sys.stdout.write("skip\n"); sys.stdout.flush(); sys.exit(0)
+
+sys.stdout.write(NONCE + "\n"); sys.stdout.flush()
+t = threading.Timer(30.0, srv.shutdown); t.daemon = True; t.start()
 srv.serve_forever()
-EOF
-      chmod 0755 "$LINUX_APP_DIR/bin/.orb-static-server"
+PY
+      chmod 0755 "$LINUX_APP_DIR/bin/.orb-migrate-1431"
       cat > "$LINUX_APP_DIR/bin/orb" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -468,38 +536,35 @@ fi
 if [[ " \$* " == *" --self-test "* ]]; then
   exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
 fi
-server_pid=""
-cleanup_orb() {
-  if [[ -n "\$server_pid" ]]; then
-    kill "\$server_pid" 2>/dev/null || true
-    wait "\$server_pid" 2>/dev/null || true
+if [[ -z "\${ORB_DEV_URL:-}" && -z "\${ORB_DIST_DIR:-}" ]]; then
+  export ORB_DIST_DIR="\$APP_DIR/share/orb"
+fi
+mig_url=""
+state_dir="\${ORB_STATE_DIR:-\$HOME/.orb}"
+mig_done="\$state_dir/.linux-1431-drafts-migrated"
+if [[ -z "\${ORB_DEV_URL:-}" && ! -f "\$mig_done" ]]; then
+  if [[ ! -d "\${XDG_DATA_HOME:-\$HOME/.local/share}/orb-desktop" ]]; then
+    mkdir -p "\$state_dir" && : > "\$mig_done"
+  elif [[ -x "\$APP_DIR/bin/.orb-migrate-1431" ]]; then
+    target_origin="tauri://localhost"
+    [[ "\${ORB_URI_SCHEME:-}" == "orb" ]] && target_origin="orb://localhost"
+    fifo="\$(mktemp -u)"
+    mkfifo -m 0600 "\$fifo"
+    "\$APP_DIR/bin/.orb-migrate-1431" "\$mig_done" "\$target_origin" >"\$fifo" 2>/dev/null &
+    IFS= read -r mig_tok <"\$fifo" || true
+    rm -f "\$fifo"
+    if [[ "\${mig_tok:-}" =~ ^[0-9a-f]{64}\$ ]]; then
+      mig_url="http://127.0.0.1:1431/__orb_migrate?nonce=\$mig_tok"
+    fi
   fi
-}
-if [[ -z "\${ORB_DEV_URL:-}" ]]; then
-  fifo="\$(mktemp -u)"
-  mkfifo "\$fifo"
-  "${PY_BIN}" "\$APP_DIR/bin/.orb-static-server" "\$APP_DIR/share/orb" >"\$fifo" &
-  server_pid=\$!
-  trap cleanup_orb EXIT HUP INT TERM
-  IFS= read -r port <"\$fifo" || true
-  rm -f "\$fifo"
-  if [[ -z "\${port:-}" ]]; then
-    echo "error: failed to start local static asset server" >&2
-    exit 1
-  fi
-  export ORB_DEV_URL="http://127.0.0.1:\$port/"
 fi
 if [[ -z "\${ORB_LOCALD_PORT:-}" ]]; then
   export ORB_LOCALD_PORT=\$("${PY_BIN}" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 fi
-if [[ -z "\$server_pid" ]]; then
-  exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
+if [[ -n "\$mig_url" ]]; then
+  ORB_DEV_URL="\$mig_url" exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
 fi
-set +e
-"\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
-rc=\$?
-set -e
-exit "\$rc"
+exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
 EOF
       chmod 0755 "$LINUX_APP_DIR/bin/orb"
       cat > "$XDG_DATA/applications/orb.desktop" <<EOF

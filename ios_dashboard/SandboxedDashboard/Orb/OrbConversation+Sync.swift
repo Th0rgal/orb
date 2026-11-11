@@ -106,7 +106,8 @@ extension OrbConversation {
                 }
                 return
             }
-            if ["assistant_message", "assistant_message_canonical", "user_message", "tool_call", "tool_result", "thinking"].contains(type) {
+            if ["assistant_message", "assistant_message_canonical", "user_message", "tool_call", "tool_result"].contains(type),
+               (data["sequence"] as? NSNumber) == nil {
                 scheduleCoalescedRefresh()
             }
         }
@@ -249,25 +250,50 @@ extension OrbConversation {
             let streamEpochBefore = live.streamEpoch
             let settingsGenBefore = settingsSaveGeneration
             let settingsRemoteRevBefore = settingsRemoteRevision
-            async let valueTask = OrbReadCache.conversation(id, force: force)
-            async let batchTask = knownCloud ? nil : (try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 150, sinceSeq: sinceSeq))
-            let savedHistory = mission["history"].items
+            let savedHistory = mission["history"].items.filter { !$0["inbox_preview"].flag }
             let conversationCursor = savedHistory.allSatisfy { $0["sequence"].doubleValue != nil }
                 ? savedHistory.compactMap { $0["sequence"].doubleValue }.max().map { Int64($0) } : nil
-            async let conversationTask = knownCloud ? nil : (try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: OrbConversationHistory.eventTypes, limit: 400, sinceSeq: conversationCursor).events)
             let queueFetchedAt = Date()
-            async let queueTask: OrbJSON = knownCloud ? .null : ((try? await api.call("/api/control/queue?mission_id=\(OrbCore.escape(id))")) ?? .null)
+            let openBundle: MissionOpenBundleResult? = knownCloud ? nil : await api.getMissionOpenBundle(id: id, sinceSeq: sinceSeq)
 
-            var value = try await valueTask
+            var value: OrbJSON
+            let batch: MissionEventsResult?
+            let conversation: [StoredEvent]?
+            let queueResp: OrbJSON
+            if let openBundle {
+                value = openBundle.mission
+                let combinedIncoming = openBundle.spine + openBundle.events
+                batch = MissionEventsResult(events: combinedIncoming, maxSequence: openBundle.maxSeq)
+                let bundledMsgs = combinedIncoming.filter { OrbConversationHistory.eventTypes.contains($0.eventType) }
+                let needConversationBackfill =
+                    (sinceSeq != nil && (openBundle.hasMore == true || conversationCursor == nil)) ||
+                    (sinceSeq == nil && openBundle.isColdSpineTruncated)
+                if needConversationBackfill {
+                    conversation = (try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: OrbConversationHistory.eventTypes, limit: 400, sinceSeq: conversationCursor).events) ?? bundledMsgs
+                } else {
+                    conversation = bundledMsgs
+                }
+                queueResp = openBundle.queue
+            } else {
+                async let valueTask = OrbReadCache.conversation(id, force: force)
+                async let batchTask = knownCloud ? nil : (try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 150, sinceSeq: sinceSeq))
+                async let conversationTask = knownCloud ? nil : (try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: OrbConversationHistory.eventTypes, limit: 400, sinceSeq: conversationCursor).events)
+                async let queueTask: OrbJSON = knownCloud ? .null : ((try? await api.call("/api/control/queue?mission_id=\(OrbCore.escape(id))")) ?? .null)
+                value = try await valueTask
+                batch = await batchTask
+                conversation = await conversationTask
+                queueResp = await queueTask
+            }
+
             if value["history"].items.isEmpty && !mission["history"].items.isEmpty, case var .object(dict) = value {
                 dict["history"] = mission["history"]
                 value = .object(dict)
             }
-            let conversation = await conversationTask
             guard !Task.isCancelled, id == self.id, account == api.endpoint + (api.authToken ?? "") else { return }
             if !knownCloud, case var .object(fields) = value {
                 if let conversation, !conversation.isEmpty {
-                    fields["history"] = .array(OrbConversationHistory.merge(conversationCursor == nil ? [] : savedHistory, events: conversation))
+                    let seedHistory = (openBundle != nil && sinceSeq == nil && savedHistory.isEmpty) ? [] : (conversationCursor == nil ? [] : savedHistory)
+                    fields["history"] = .array(OrbConversationHistory.merge(seedHistory, events: conversation))
                 } else if conversationCursor != nil {
                     fields["history"] = .array(savedHistory)
                 }
@@ -285,7 +311,7 @@ extension OrbConversation {
                     if !mission["updated_at"].text.isEmpty { fields["updated_at"] = mission["updated_at"] }
                 }
                 value = .object(fields)
-                if confirmedRemoteStale && settingsSaveTask == nil {
+                if (openBundle != nil || confirmedRemoteStale) && settingsSaveTask == nil {
                     OrbReadCache.saveMission(id, value: value)
                 }
             }
@@ -315,7 +341,7 @@ extension OrbConversation {
                 if value["backend"].text == "codex", let cyber = try? await api.call("/api/control/missions/\(OrbCore.escape(id))/cyber"), OrbCyberAccess.modes.contains(cyber["mode"].text) {
                     selection.cyberMode = cyber["mode"].text
                 }
-                if let batch = await batchTask,
+                if let batch,
                    let merged = await fetchCaughtUpEvents(id: id, existing: events, initialBatch: batch) {
                     events = merged
                     await hydrateTurnStart(id)
@@ -326,21 +352,28 @@ extension OrbConversation {
                 OrbWarmSyncCoordinator.shared.reconcile()
                 live.reconcileStored(events, working: working, streamAdvanced: live.streamEpoch != streamEpochBefore)
                 attachLiveStreamIfNeeded()
-                let queueResp = await queueTask
                 if queueResp != .null {
-                    let rawItems: [OrbJSON] = {
-                        if case .object = queueResp { return queueResp["items"].items }
-                        return queueResp.items
-                    }()
-                    queued = rawItems.filter { $0["mission_id"].text == id }
                     let parsedQueue = OrbFollowUpQueue.parseResponse(queueResp, missionID: id)
+                    if !followUps.isStaleFetch(queueFetchedAt, incomingServerRev: parsedQueue.revision) {
+                        let rawItems: [OrbJSON] = {
+                            if case .object = queueResp { return queueResp["items"].items }
+                            return queueResp.items
+                        }()
+                        queued = rawItems.filter { $0["mission_id"].text == id }
+                    }
                     let next = followUps.withServer(
                         parsedQueue.rows,
                         fetchedAt: queueFetchedAt,
                         lastSequence: sinceSeq,
                         incomingServerRev: parsedQueue.revision
                     ).reconciled(with: deliveredUserMessages)
-                    if next != followUps { withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next } }
+                    if next != followUps {
+                        if next.rows != followUps.rows {
+                            withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next }
+                        } else {
+                            followUps = next
+                        }
+                    }
                 }
                 else {
                     let next = followUps.reconciled(with: deliveredUserMessages)
@@ -840,7 +873,7 @@ extension OrbConversation {
         }
         switch OrbSendFlow.editOutcome(status: status) {
         case .edited:
-            followUps = followUps.editConfirmed(queueID, wireContent, expectedServerRev: expectedRev)
+            followUps = followUps.editConfirmed(queueID, wireContent, expectedServerRev: expectedRev, confirmedAt: Date())
             OrbUsageTelemetry.shared.trackAction(.messageEdit, surface: "queue")
         case .unsupported:
             followUps = followUps.editReverted(queueID)

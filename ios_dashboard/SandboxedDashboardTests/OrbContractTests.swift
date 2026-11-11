@@ -137,6 +137,42 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(OrbDisk.read(key, as: OrbJSON.self), full)
     }
 
+    @MainActor func testDiskCachePruneNeverEvictsDraftsOrPendingSends() throws {
+        XCTAssertFalse(OrbDisk.isPrunableReadCacheKey("draft:m-1"))
+        XCTAssertFalse(OrbDisk.isPrunableReadCacheKey("draft:m-1:files"))
+        XCTAssertFalse(OrbDisk.isPrunableReadCacheKey("draft:m-1:pending"))
+        XCTAssertFalse(OrbDisk.isPrunableReadCacheKey("document:proj:README.md"))
+        XCTAssertFalse(OrbDisk.isPrunableReadCacheKey("projects"))
+        XCTAssertTrue(OrbDisk.isPrunableReadCacheKey("events:m-1"))
+        XCTAssertTrue(OrbDisk.isPrunableReadCacheKey("mission:m-1"))
+        XCTAssertTrue(OrbDisk.isPrunableReadCacheKey("docfile:proj:README.md"))
+
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent("orb-prune-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let draftFile = tempRoot.appendingPathComponent("00112233.json")
+        let pendingFile = tempRoot.appendingPathComponent("44556677.json")
+        let cacheOld = tempRoot.appendingPathComponent("rc-old.json")
+        let cacheMid = tempRoot.appendingPathComponent("rc-mid.json")
+        let cacheNew = tempRoot.appendingPathComponent("rc-new.json")
+        let payload = Data("{}".utf8)
+        for (idx, file) in [draftFile, pendingFile, cacheOld, cacheMid, cacheNew].enumerated() {
+            try payload.write(to: file)
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date(timeIntervalSince1970: Double(1_000 + idx * 10))],
+                ofItemAtPath: file.path
+            )
+        }
+
+        OrbDisk.pruneReadCacheFiles(in: tempRoot, maxFiles: 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: draftFile.path), "drafts must never be pruned")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pendingFile.path), "pending sends must never be pruned")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cacheOld.path), "oldest rc-* file should be evicted")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cacheMid.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cacheNew.path))
+    }
+
     @MainActor func testAsyncCacheReadKeepsFreshNetworkValue() async throws {
         let key = "test-cache:" + UUID().uuidString
         defer { OrbDisk.remove(key) }
@@ -200,6 +236,17 @@ final class OrbContractTests: XCTestCase {
         let client = OrbRow(.object(["id": .string("local"), "placement_kind": .string("client"), "tags": .array([.string("placement:client")])]))
         XCTAssertTrue(client.mobile)
         XCTAssertTrue(client.isClientPlacement)
+        let legacyOrigin = OrbRow(.object(["id": .string("legacy-origin"), "origin": .string("orb-client")]))
+        XCTAssertTrue(legacyOrigin.isClientPlacement)
+        let legacyTag = OrbRow(.object(["id": .string("legacy-tag"), "tags": .array([.string("placement:client")])]))
+        XCTAssertTrue(legacyTag.isClientPlacement)
+        let adoptedToServer = OrbRow(.object([
+            "id": .string("adopted"),
+            "placement_kind": .string("server"),
+            "origin": .string("orb-client"),
+            "tags": .array([.string("placement:client")])
+        ]))
+        XCTAssertFalse(adoptedToServer.isClientPlacement)
         let btw = OrbRow(.object(["id": .string("side"), "tags": .array([.string("btw-parent:123")])]))
         XCTAssertFalse(btw.mobile)
         let cloud = OrbRow(.object(["id": .string("cloud"), "backend": .string("cloud_grok_bot")]))
@@ -1223,5 +1270,110 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.pendingOpID, 0)
         XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.revision, 3)
         OrbHierarchy.reset()
+    }
+
+    func testOpenBundleDetectsTruncatedSpineOnColdOpen() throws {
+        let truncatedRaw = """
+        {
+          "protocol": 1,
+          "mission": {"id": "m-spine-trunc", "status": "active"},
+          "events": [],
+          "spine": [{"id": 90, "mission_id": "m-spine-trunc", "sequence": 90, "event_type": "user_message", "timestamp": "2026-11-11T00:00:00Z", "content": "Newer turn", "metadata": {}}],
+          "queue": [],
+          "max_seq": 250,
+          "has_more": true,
+          "spine_has_more": true,
+          "spine_next_cursor": 90,
+          "reset": false
+        }
+        """.data(using: .utf8)!
+        let truncated = try JSONDecoder().decode(MissionOpenBundleResult.self, from: truncatedRaw)
+        XCTAssertTrue(truncated.isColdSpineTruncated)
+
+        let completeRaw = """
+        {
+          "protocol": 1,
+          "mission": {"id": "m-spine-ok", "status": "completed"},
+          "events": [],
+          "spine": [{"id": 1, "mission_id": "m-spine-ok", "sequence": 1, "event_type": "user_message", "timestamp": "2026-11-11T00:00:00Z", "content": "First turn", "metadata": {}}],
+          "queue": [],
+          "max_seq": 250,
+          "has_more": true,
+          "spine_has_more": false,
+          "spine_next_cursor": null,
+          "reset": false
+        }
+        """.data(using: .utf8)!
+        let complete = try JSONDecoder().decode(MissionOpenBundleResult.self, from: completeRaw)
+        XCTAssertFalse(complete.isColdSpineTruncated)
+    }
+
+    @MainActor func testOpenBundleFencesNewerMissionAndStreamMutations() async throws {
+        let missionId = "m-open-fence-" + UUID().uuidString
+        let savedFetcher = OrbReadCache.openBundleFetcher
+        defer {
+            OrbReadCache.openBundleFetcher = savedFetcher
+            OrbDisk.remove("mission:\(missionId)")
+            OrbDisk.remove("events:\(missionId)")
+        }
+
+        OrbReadCache.openBundleFetcher = { id in
+            try? await Task.sleep(for: .milliseconds(40))
+            let raw = """
+            {
+              "protocol": 1,
+              "mission": {"id": "\(id)", "status": "active", "model_override": "stale-model", "updated_at": "2026-11-11T00:00:01Z"},
+              "events": [{"id": 10, "mission_id": "\(id)", "sequence": 10, "event_type": "assistant_message", "timestamp": "2026-11-11T00:00:01Z", "content": "Older reply", "metadata": {}}],
+              "spine": [{"id": 1, "mission_id": "\(id)", "sequence": 1, "event_type": "user_message", "timestamp": "2026-11-11T00:00:00Z", "content": "Prompt", "metadata": {}}],
+              "queue": [],
+              "max_seq": 10,
+              "has_more": false,
+              "spine_has_more": false,
+              "spine_next_cursor": null,
+              "reset": false
+            }
+            """.data(using: .utf8)!
+            return try? JSONDecoder().decode(MissionOpenBundleResult.self, from: raw)
+        }
+
+        async let bundleEvents = OrbReadCache.openBundle(missionId)
+        try await Task.sleep(for: .milliseconds(10))
+
+        OrbReadCache.saveMission(missionId, value: .object([
+            "id": .string(missionId),
+            "status": .string("active"),
+            "model_override": .string("fresh-model"),
+            "updated_at": .string("2026-11-11T00:00:05Z")
+        ]))
+        OrbReadCache.saveEvents(missionId, events: [
+            StoredEvent(
+                id: 11,
+                missionId: missionId,
+                sequence: 11,
+                eventType: "assistant_message",
+                timestamp: "2026-11-11T00:00:05Z",
+                eventId: nil,
+                toolCallId: nil,
+                toolName: nil,
+                content: "Live stream answer",
+                metadata: [:]
+            )
+        ])
+
+        let resolved = await bundleEvents
+        XCTAssertEqual(OrbReadCache.read("mission:\(missionId)")?["model_override"].text, "fresh-model")
+        XCTAssertEqual(resolved?.map(\.sequence), [1, 10, 11])
+        XCTAssertEqual(OrbReadCache.readEvents(missionId).map(\.sequence), [1, 10, 11])
+        XCTAssertEqual(OrbReadCache.readEvents(missionId).last?.content, "Live stream answer")
+    }
+
+    func testShouldBlacklistOpenBundleExcludesMissionNotFound404() {
+        XCTAssertFalse(OrbCore.shouldBlacklistOpenBundle(status: 404, detail: "{\"error\":\"mission_not_found\"}"))
+        XCTAssertFalse(OrbCore.shouldBlacklistOpenBundle(status: 404, detail: "MISSION_NOT_FOUND"))
+        XCTAssertTrue(OrbCore.shouldBlacklistOpenBundle(status: 404, detail: "{\"error\":\"not_found\",\"path\":\"/api/control/missions/m1/open\"}"))
+        XCTAssertTrue(OrbCore.shouldBlacklistOpenBundle(status: 404, detail: "Not Found"))
+        XCTAssertTrue(OrbCore.shouldBlacklistOpenBundle(status: 405, detail: "Method Not Allowed"))
+        XCTAssertTrue(OrbCore.shouldBlacklistOpenBundle(status: 501, detail: "Not Implemented"))
+        XCTAssertFalse(OrbCore.shouldBlacklistOpenBundle(status: 500, detail: "{\"error\":\"internal\"}"))
     }
 }

@@ -186,15 +186,28 @@ ensure_lean_sys_pkg() {
     return 0
   fi
   local rev
-  rev="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(next((p.get("rev","") for p in m.get("packages",[]) if p.get("name")=="lean-sys"), ""))' "$manifest" 2>/dev/null || true)"
+  rev="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(next((p.get("rev","") for p in m.get("packages",[]) if p.get("name","").strip("«»")=="lean-sys"), ""))' "$manifest" 2>/dev/null || true)"
   if [[ -z "$rev" ]]; then
     return 0
   fi
   mkdir -p "$pkg_parent/.lake/packages"
   rm -rf "$pkg_dir"
+  local common_root=""
+  if command -v git >/dev/null 2>&1; then
+    local git_common
+    git_common="$(git -C "$ROOT_DIR" rev-parse --git-common-dir 2>/dev/null || true)"
+    if [[ -n "$git_common" ]]; then
+      common_root="$(cd "$ROOT_DIR" && cd "$git_common/.." 2>/dev/null && pwd || true)"
+    fi
+  fi
   local seed=""
-  for cand in "$ROOT_DIR/lean/.lake/packages/lean-sys" "$ROOT_DIR/lean/OrbCore/.lake/packages/lean-sys"; do
-    if [[ -d "$cand/.git" ]]; then
+  for cand in \
+    "$ROOT_DIR/lean/.lake/packages/lean-sys" \
+    "$ROOT_DIR/lean/OrbCore/.lake/packages/lean-sys" \
+    "$ROOT_DIR/lean/OrbLocald/.lake/packages/lean-sys" \
+    "${common_root:+$common_root/lean/.lake/packages/lean-sys}" \
+    "${common_root:+$common_root/lean/OrbCore/.lake/packages/lean-sys}"; do
+    if [[ -n "$cand" && -d "$cand/.git" ]]; then
       seed="$cand"
       break
     fi

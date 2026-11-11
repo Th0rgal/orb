@@ -304,6 +304,47 @@ describe("VoiceButton flow", () => {
     expect(onText).not.toHaveBeenCalled();
   });
 
+  it("hiding a keep-alive slot cancels active recording and in-flight transcription", async () => {
+    let resolveTranscribe!: (v: { text: string; language: string; duration_secs: number; infer_secs: number; load_secs: number }) => void;
+    const bridge = fakeBridge({
+      transcribe: vi.fn(() => new Promise((r) => { resolveTranscribe = r; })),
+    });
+    const rec = fakeRecorder();
+    const onText = vi.fn();
+    const onActive = vi.fn();
+    const [active, setActive] = createSignal(true);
+    render(() => (
+      <VoiceButton
+        bridge={bridge}
+        recorder={rec.factory}
+        onText={onText}
+        onActive={onActive}
+        scope="m:keepalive"
+        active={active()}
+      />
+    ));
+
+    // 1. Mid-recording -> slot becomes inactive -> microphone is cancelled immediately.
+    fireEvent.click(button());
+    await waitFor(() => expect(button().getAttribute("aria-pressed")).toBe("true"));
+    setActive(false);
+    expect(rec.state.cancelled).toBe(1);
+    expect(button().getAttribute("title")).toBe("Dictate (EN)");
+    expect(onActive).toHaveBeenLastCalledWith(false);
+
+    // 2. Reactivate slot -> start & stop -> mid-transcription -> slot becomes inactive -> worker cancelled & late text dropped.
+    setActive(true);
+    fireEvent.click(button());
+    await waitFor(() => expect(button().getAttribute("aria-pressed")).toBe("true"));
+    fireEvent.click(button());
+    await waitFor(() => expect(bridge.transcribe).toHaveBeenCalledTimes(1));
+    setActive(false);
+    expect(bridge.cancel).toHaveBeenCalledTimes(1);
+    resolveTranscribe({ text: "hidden slot dictation", language: "en", duration_secs: 1, infer_secs: 0.1, load_secs: 0 });
+    await flush();
+    expect(onText).not.toHaveBeenCalled();
+  });
+
   it("shows a permission error when the microphone is refused", async () => {
     const bridge = fakeBridge();
     const rec = fakeRecorder();

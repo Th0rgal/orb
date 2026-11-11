@@ -759,16 +759,18 @@ fun OrbSideAgentSheet(
         }.getOrNull()
         if (rawQueue != null) {
             val parsedQueue = OrbFollowUpQueue.parseResponse(rawQueue, id)
-            val displayRows = parsedQueue.rows.map { row ->
-                rawQueuedById[row.id] = row.content
-                row.copy(content = OrbMessagePresentation.parse(row.content).text)
+            if (!followUps.isStaleFetch(fetchedAtMs, parsedQueue.revision)) {
+                val displayRows = parsedQueue.rows.map { row ->
+                    rawQueuedById[row.id] = row.content
+                    row.copy(content = OrbMessagePresentation.parse(row.content).text)
+                }
+                followUps = followUps.withServer(
+                    displayRows,
+                    fetchedAtMs = fetchedAtMs,
+                    lastSequence = lastSequence,
+                    incomingServerRev = parsedQueue.revision
+                )
             }
-            followUps = followUps.withServer(
-                displayRows,
-                fetchedAtMs = fetchedAtMs,
-                lastSequence = lastSequence,
-                incomingServerRev = parsedQueue.revision
-            )
         }
         parsedThread?.deliveredMessages?.takeIf { it.isNotEmpty() }?.let { followUps = followUps.reconciled(it) }
     }
@@ -1207,7 +1209,12 @@ fun OrbSideAgentSheet(
             when (OrbSendFlow.editOutcome(httpStatus.takeIf { it >= 0 })) {
                 OrbEditOutcome.Edited -> {
                     rawQueuedById[queueId] = wireContent
-                    followUps = followUps.editConfirmed(queueId, content, expectedServerRev = expectedRev)
+                    followUps = followUps.editConfirmed(
+                        queueId,
+                        content,
+                        expectedServerRev = expectedRev,
+                        confirmedAtMs = System.currentTimeMillis()
+                    )
                     UsageTelemetry.trackAction(UsageTelemetry.Action.MessageEdit, "btw_queue")
                 }
                 OrbEditOutcome.Unsupported -> {

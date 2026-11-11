@@ -1,5 +1,13 @@
-import { createContext, createSignal, useContext } from "solid-js";
+import { createContext, createSignal, useContext, type Accessor } from "solid-js";
 import { trapFocus } from "./focusScope";
+
+/**
+ * Scopes portalled overlays (`Dialog`, `Popover`) and global `Toaster` ownership
+ * (`ErrorToast`, `StatusToast`) to the currently visible keep-alive slot so
+ * hidden missions suspend modal focus/inert locks and notifications without
+ * discarding pending confirmation or draft state.
+ */
+export const SlotActiveContext = createContext<Accessor<boolean>>(() => true);
 
 // WebKit does not focus buttons on pointer clicks. Remember the real trigger so
 // anchored surfaces and focus restoration do not depend on that browser quirk.
@@ -143,7 +151,7 @@ export function mountOverlay(layer: OverlayLayer, options: {
     setLayers(current => current.filter(item => item !== layer));
     updateBackground();
     release?.();
-    if (!release && options.restoreFocus !== false && top && previous?.isConnected) previous.focus({preventScroll: true});
+    if (!release && options.restoreFocus !== false && top && previous?.isConnected && !previous.closest("[hidden], [inert]")) previous.focus({preventScroll: true});
     if (scrollLocked && !layers().some(item => item.modal)) {document.body.style.overflow = overflow; scrollLocked = false;}
     if (!layers().length) { observer?.disconnect(); observer = undefined; }
   };

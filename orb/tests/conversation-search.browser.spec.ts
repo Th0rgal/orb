@@ -489,7 +489,7 @@ test("global conversation search: <100ms open, draft safety, out-of-order reject
     // Command-K opens /btw on the open conversation; Command-\ from main hides both sidebar and /btw, then restores both.
     await page.keyboard.press(btwChord);
     await expect(page.locator(".btw-sidebar")).toBeVisible();
-    await page.locator(".main textarea").first().focus();
+    await page.locator(".mission-slot:not([hidden]) textarea").first().focus();
     await page.keyboard.press(zenChord);
     await expect(page.locator(".app")).toHaveClass(/sb-hidden/);
     await expect(page.locator(".btw-sidebar")).not.toBeVisible();

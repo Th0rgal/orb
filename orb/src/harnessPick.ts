@@ -30,19 +30,41 @@ const RETIRED_DEFAULT_MODELS = new Set([
 export const [remoteHarnessChoices, setRemoteHarnessChoices] = createSignal<HarnessChoice[]>([]);
 export const [nodeAntigravityModels, setNodeAntigravityModels] = createSignal<Record<string, [string,string][]>>({});
 const nodeModelRequests = new Set<string>();
+const nodeModelRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const nodeModelFailures = new Map<string, number>();
+const NODE_MODEL_RETRY_MS = [15_000, 45_000, 120_000] as const;
+
 export async function refreshNodeAntigravityModels(machine: string) {
   if (!machine || machine === "local" || machine === "side" || isAutoManagedTarget(machine)) return;
   const version = connectionVersion(), key = `${version}:${machine}`;
   if (nodeModelRequests.has(key)) return;
+  const pendingTimer = nodeModelRetryTimers.get(key);
+  if (pendingTimer !== undefined) {
+    clearTimeout(pendingTimer);
+    nodeModelRetryTimers.delete(key);
+  }
   nodeModelRequests.add(key);
   try {
     const models = await listNodeAntigravityModels(machine);
-    if (version === connectionVersion()) setNodeAntigravityModels(old => ({...old, [key]:models}));
+    if (version === connectionVersion()) {
+      nodeModelFailures.delete(key);
+      setNodeAntigravityModels(old => ({...old, [key]:models}));
+    }
   } catch (error) {
     // A slow or failed lookup must not hide Antigravity on this machine for the whole
-    // session: keep whatever was known and retry shortly unless the node does not exist.
+    // session: keep whatever was known and retry with bounded backoff unless permanent.
     const permanent = error instanceof ApiError && (error.status === 404 || error.status === 409);
-    if (!permanent && version === connectionVersion()) setTimeout(() => void refreshNodeAntigravityModels(machine), 15_000);
+    const attempt = nodeModelFailures.get(key) ?? 0;
+    if (!permanent && version === connectionVersion() && attempt < NODE_MODEL_RETRY_MS.length) {
+      nodeModelFailures.set(key, attempt + 1);
+      const delay = NODE_MODEL_RETRY_MS[attempt];
+      const timer = setTimeout(() => {
+        nodeModelRetryTimers.delete(key);
+        if (typeof document !== "undefined" && document.hidden) return;
+        void refreshNodeAntigravityModels(machine);
+      }, delay);
+      nodeModelRetryTimers.set(key, timer);
+    }
   }
   finally { nodeModelRequests.delete(key); }
 }
@@ -52,7 +74,8 @@ export const harnessChoices = (machine = "core"): HarnessChoice[] => {
     ? (localInstalled().find(row => row.id === "antigravity")?.models ?? [])
     : (nodeModels[`${version}:${machine}`]?.length ? nodeModels[`${version}:${machine}`] : (nodeModels[`${version}:core`] ?? []));
   const claude = machine === "local" ? (localInstalled().find(row => row.id === "claudecode")?.models ?? []) : [];
-  return destinationHarnessChoices(remoteHarnessChoices(), machine, models, localInstalled().some(row => row.id === "vibe" && row.installed), claude);
+  const opencode = machine === "local" ? (localInstalled().find(row => row.id === "opencode")?.models ?? []) : [];
+  return destinationHarnessChoices(remoteHarnessChoices(), machine, models, localInstalled().some(row => row.id === "vibe" && row.installed), claude, opencode);
 };
 export const [harnessPick, setHarnessPick] = jsonSignal<HarnessPick | null>(PICK_KEY, null);
 /** Preserve an explicit selection; launch validation reports unavailable models.
@@ -64,12 +87,28 @@ export const effectivePick = (machine = "core"): HarnessPick | null => {
   const stored = harnessPick();
   if (stored) {
     const effort = normalizeEffort(stored.effort, stored.backend);
+    const choice = choices.find((c) => c.backend.id === stored.backend);
     if (RETIRED_DEFAULT_MODELS.has(stored.model)) {
-      const choice = choices.find((c) => c.backend.id === stored.backend);
       const fallback = choice?.models[0]?.value;
       if (fallback && !RETIRED_DEFAULT_MODELS.has(fallback)) {
         return { ...stored, model: fallback, effort: effort ?? undefined };
       }
+    }
+    // On this computer, Core-scoped OpenCode IDs (e.g. `builtin/fast`) map to
+    // the local OpenCode provider namespace (e.g. `orbrouter/builtin/fast`) or
+    // the user's configured default local OpenCode model.
+    if (
+      machine === "local" &&
+      stored.backend === "opencode" &&
+      choice?.models.length &&
+      !choice.models.some((m) => m.value === stored.model)
+    ) {
+      const bare = stored.model.replace(/^sandboxed-sh\//, "");
+      const matched =
+        choice.models.find((m) => m.value === `orbrouter/${bare}`) ??
+        choice.models.find((m) => m.value.endsWith(`/${bare}`)) ??
+        choice.models[0];
+      return { ...stored, model: matched.value, effort: effort ?? undefined };
     }
     return { ...stored, effort: effort ?? undefined };
   }

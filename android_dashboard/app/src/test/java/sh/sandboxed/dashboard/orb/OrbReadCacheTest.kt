@@ -91,4 +91,84 @@ class OrbReadCacheTest {
         OrbReadCache.seedProjectRows(key, listOf(OrbRow(mapOf("id" to "recent"))))
         assertEquals("recent", OrbReadCache.readMemoryRows("project_missions_$key").single().id)
     }
+
+    @Test
+    fun diskPrunePreservesNonReadCacheStateAndEvictsOldestReadCacheOnly() {
+        assertFalse(OrbDisk.isPrunableReadCacheKey("draft_m1"))
+        assertFalse(OrbDisk.isPrunableReadCacheKey("pending_m1"))
+        assertFalse(OrbDisk.isPrunableReadCacheKey("projects"))
+        assertFalse(OrbDisk.isPrunableReadCacheKey("missions"))
+        assertTrue(OrbDisk.isPrunableReadCacheKey("mission_events_m1"))
+        assertTrue(OrbDisk.isPrunableReadCacheKey("mission_msgs_m1"))
+
+        OrbDisk.write("draft_m1", mapOf("text" to "unsent draft"))
+        OrbDisk.write("projects", listOf(mapOf("slug" to "orb")))
+        OrbDisk.write("mission_events_old", listOf(mapOf("id" to "e-old")))
+        Thread.sleep(15)
+        OrbDisk.write("mission_events_mid", listOf(mapOf("id" to "e-mid")))
+        Thread.sleep(15)
+        OrbDisk.write("mission_events_new", listOf(mapOf("id" to "e-new")))
+
+        OrbDisk.pruneReadCacheFiles(maxFiles = 2, scopeFilter = OrbDisk.currentScope())
+        assertEquals("unsent draft", (OrbDisk.read("draft_m1") as? Map<*, *>)?.get("text"))
+        assertEquals(1, OrbJSON.dictList(OrbDisk.read("projects")).size)
+        assertNull(OrbDisk.read("mission_events_old"))
+        assertEquals(1, OrbJSON.dictList(OrbDisk.read("mission_events_mid")).size)
+        assertEquals(1, OrbJSON.dictList(OrbDisk.read("mission_events_new")).size)
+    }
+
+    @Test
+    fun prefetchedEventsAndHistoryReconcileWithoutOverwritingNewerWrites() {
+        val mid = "m-prefetch-fence"
+        val evKey = "mission_events_$mid"
+        val msgKey = "mission_msgs_$mid"
+        val startAccount = OrbDisk.currentScope()
+        val startEpoch = OrbReadCache.clearEpoch()
+        val startGen = OrbReadCache.missionMutationGeneration(mid)
+
+        // Simulate live mutation + warm-stream event arriving while background `/open` is in flight.
+        OrbReadCache.noteMissionMutation(mid)
+        assertTrue(OrbReadCache.missionMutationGeneration(mid) > startGen)
+
+        val liveAnswer = OrbRow(
+            mapOf(
+                "id" to "e-11",
+                "mission_id" to mid,
+                "sequence" to 11,
+                "event_type" to "assistant_message",
+                "content" to "Live stream answer"
+            )
+        )
+        OrbReadCache.saveRows(evKey, listOf(liveAnswer))
+        OrbReadCache.saveRows(msgKey, OrbConversationHistory.merge(emptyList(), listOf(liveAnswer)))
+
+        val prefetchedBundleRows = listOf(
+            OrbRow(mapOf("id" to "e-1", "mission_id" to mid, "sequence" to 1, "event_type" to "user_message", "content" to "Prompt")),
+            OrbRow(mapOf("id" to "e-10", "mission_id" to mid, "sequence" to 10, "event_type" to "assistant_message", "content" to "Older reply"))
+        )
+        val reconciledEvents = OrbReadCache.reconcilePrefetchedEvents(evKey, prefetchedBundleRows, startAccount, startEpoch)
+        val reconciledHistory = OrbReadCache.reconcilePrefetchedHistory(msgKey, prefetchedBundleRows, startAccount, startEpoch)
+
+        assertEquals(listOf(1, 10, 11), reconciledEvents.map { it.int("sequence") })
+        assertEquals("Live stream answer", OrbReadCache.loadRows(evKey).last().str("content"))
+        assertEquals(listOf(1, 10, 11), reconciledHistory.map { it.int("sequence") })
+        assertEquals("Live stream answer", OrbReadCache.loadRows(msgKey).last().str("content"))
+
+        // If caches are cleared while `/open` was in flight, stale epoch writes are rejected.
+        OrbReadCache.clearMemory()
+        val staleWrite = OrbReadCache.reconcilePrefetchedEvents(evKey, prefetchedBundleRows, startAccount, startEpoch)
+        assertTrue(staleWrite.isEmpty())
+        assertFalse(OrbReadCache.hasRowsInMemory(evKey))
+    }
+
+    @Test
+    fun shouldBlacklistOpenBundleExcludesMissionNotFound404() {
+        assertFalse(OrbCore.shouldBlacklistOpenBundle(404, "mission_not_found", "{\"error\":\"mission_not_found\"}"))
+        assertFalse(OrbCore.shouldBlacklistOpenBundle(404, "HTTP 404", "{\"error\":\"MISSION_NOT_FOUND\"}"))
+        assertTrue(OrbCore.shouldBlacklistOpenBundle(404, "not_found", "{\"error\":\"not_found\",\"path\":\"/api/control/missions/m1/open\"}"))
+        assertTrue(OrbCore.shouldBlacklistOpenBundle(404, "Not Found", ""))
+        assertTrue(OrbCore.shouldBlacklistOpenBundle(405, "Method Not Allowed", ""))
+        assertTrue(OrbCore.shouldBlacklistOpenBundle(501, "Not Implemented", ""))
+        assertFalse(OrbCore.shouldBlacklistOpenBundle(500, "internal", "{\"error\":\"internal\"}"))
+    }
 }

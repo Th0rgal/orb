@@ -69,9 +69,10 @@ for (const target of [
       await efforts.getByRole("menuitem", { name: "High", exact: true }).click();
     }
     await expect(menu).toHaveCount(0);
-    await expect(page.locator(".under-harness")).toHaveText(target.name);
+    const activeMission = page.locator(".mission-slot:not([hidden])");
+    await expect(activeMission.locator(".under-harness")).toHaveText(target.name);
     // Before startup is confirmed, the destination announces Starting <Harness> and source is NOT yet archived.
-    await expect(page.locator('.scroll [role="status"]').first()).toContainText(`Starting ${target.shortName}`);
+    await expect(activeMission.locator('.scroll [role="status"]').first()).toContainText(`Starting ${target.shortName}`);
     expect(mutations.map(m => m.path)).toEqual(["/api/control/missions/original/cancel", "/api/control/missions/original/fork"]);
 
     // Confirm destination startup; source archives cleanly once.

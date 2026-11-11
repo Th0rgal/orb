@@ -55,6 +55,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
  const rowByKey=createMemo(()=>{const m=new Map<string,{item:T;top:number;height:number}>();for(const r of layout())m.set(r.item.key,r);return m;});
  const total=()=>{const rows=layout(),last=rows.at(-1);return last?last.top+last.height:0;};
  const update=()=>{
+  if(!root?.isConnected||root.closest('[hidden]'))return;
   const rect=root.getBoundingClientRect(),box=scroller?.getBoundingClientRect();
   // Keep the larger pre-render buffer on the side the reader is heading to:
   // a fast flick up otherwise outruns the two viewports mounted above and
@@ -82,6 +83,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
  let measureQueued=false;
  const flushMeasure=()=>timed("turn resized",()=>{
   measureQueued=false;if(!measureQueue.size)return;
+  if(!root?.isConnected||root.closest('[hidden]'))return;
   const scrollerTop=scroller?.getBoundingClientRect().top;
   const reads=[...measureQueue].map(([key,node])=>[key,node.getBoundingClientRect()] as const);
   measureQueue.clear();
@@ -127,7 +129,8 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
    const last=rows.at(-1),totalHeight=last?last.top+last.height:0;
    return p.initialBottom?{top:Math.max(0,totalHeight-vh),height:vh,up:true}:{top:0,height:vh,up:false};
   })();
-  const renderAll=(isMounted?(!scroller||scroller.clientHeight===0):!hasBrowserLayout)||rows.length<=8;
+  const isHidden=isMounted&&Boolean(root?.closest('[hidden]'));
+  const renderAll=(isMounted?(!isHidden&&(!scroller||scroller.clientHeight===0)):!hasBrowserLayout)||rows.length<=8;
   const spacer=()=>{if(!gap)return;const key=`gap:${gapStart}`;let row=stable.get(key);if(!row){row={key,height:gap};stable.set(key,row);}row.height=gap;out.push(row);gap=0;};
   rows.forEach((row,index)=>{
    const visible=renderAll||keep.has(row.item.key)||index===rows.length-1||(row.top+row.height>=v.top-(v.up?3:2)*v.height&&row.top<=v.top+(v.up?2:3)*v.height);
@@ -160,7 +163,8 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
    if(keeper)keeper();else scroller.scrollTop=scroller.scrollHeight;
   }
   setMounted(true);
-  const target=scroller??window;target.addEventListener('scroll',schedule,{passive:true});window.addEventListener('resize',schedule);document.addEventListener('selectionchange',schedule);root.addEventListener('focusin',schedule);root.addEventListener('focusout',schedule);root.addEventListener('click',schedule);
+  const onSlotShown=()=>{flushMeasure();schedule();};
+  const target=scroller??window;target.addEventListener('scroll',schedule,{passive:true});scroller?.addEventListener('orb:slot-shown',onSlotShown);window.addEventListener('resize',schedule);document.addEventListener('selectionchange',schedule);root.addEventListener('focusin',schedule);root.addEventListener('focusout',schedule);root.addEventListener('click',schedule);
   searches.set(root,{
    search:(query,sensitive,whole)=>p.items.flatMap(item=>matchOffsets(p.text(item),query,sensitive,whole).map((_,occurrence)=>({key:item.key,occurrence}))),
    prepare:signal=>p.prepare?.(signal)??Promise.resolve(),
@@ -207,7 +211,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
    },
   });update();
   requestAnimationFrame(()=>{rendered=true;});
-  onCleanup(()=>{searches.delete(root);cancelAnimationFrame(frame);target.removeEventListener('scroll',schedule);window.removeEventListener('resize',schedule);document.removeEventListener('selectionchange',schedule);root.removeEventListener('focusin',schedule);root.removeEventListener('focusout',schedule);root.removeEventListener('click',schedule);});
+  onCleanup(()=>{searches.delete(root);cancelAnimationFrame(frame);target.removeEventListener('scroll',schedule);scroller?.removeEventListener('orb:slot-shown',onSlotShown);window.removeEventListener('resize',schedule);document.removeEventListener('selectionchange',schedule);root.removeEventListener('focusin',schedule);root.removeEventListener('focusout',schedule);root.removeEventListener('click',schedule);});
  });
  return <div ref={root} data-virtual-transcript style={{'overflow-anchor':'none','min-height':`${Math.min(total(),1)}px`}}><For each={segments()}>{segment=><Row segment={segment}/>}</For></div>;
 }

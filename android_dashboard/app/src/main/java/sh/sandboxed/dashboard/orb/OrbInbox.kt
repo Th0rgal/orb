@@ -1752,6 +1752,7 @@ fun OrbInboxView(
         }
     }
     LaunchedEffect(missions, filterMode, OrbInboxSettings.inboxEnabled, OrbInboxSettings.aiSummary, OrbInboxSettings.summaryMode, OrbInboxSettings.model, OrbInboxSettings.includeAutonomous) {
+        val accountScope = OrbDisk.currentScope()
         val candidates = missions.filter { m ->
             val st = (m.str("status", "state") ?: "").lowercase()
             MissionState.of(st)?.unreadResponse == true && !OrbInboxModel.isSubagent(m)
@@ -1760,25 +1761,51 @@ fun OrbInboxView(
 
         var anyLoaded = false
         for ((idx, row) in candidates.withIndex()) {
+            if (accountScope != OrbDisk.currentScope()) return@LaunchedEffect
             val cacheKey = "mission_events_${row.id}"
             val wasInMemory = OrbReadCache.hasRowsInMemory(cacheKey)
             var evs = OrbReadCache.loadRowsAsync(cacheKey)
+            if (accountScope != OrbDisk.currentScope()) return@LaunchedEffect
             if (!wasInMemory && evs.isNotEmpty()) {
                 anyLoaded = true
             }
             if (evs.isEmpty() && idx < 12) {
-                evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
-                    core.fetchRows("/api/control/missions/${core.encodeComponent(row.id)}/events?limit=120", "events")
-                }.getOrDefault(emptyList())
-                if (evs.isNotEmpty()) {
-                    OrbReadCache.saveRows(cacheKey, evs)
-                    anyLoaded = true
+                val clearEp = OrbReadCache.clearEpoch()
+                val isCloudRow = row.str("backend")?.startsWith("cloud_") == true
+                val openBundle = if (!isCloudRow) core.fetchMissionOpenBundle(row.id, null, limit = 120) else null
+                if (accountScope != OrbDisk.currentScope() || clearEp != OrbReadCache.clearEpoch()) return@LaunchedEffect
+                if (openBundle != null) {
+                    val spineRows = OrbJSON.dictList(openBundle["spine"]).map { OrbRow(it) }
+                    val tailRows = OrbJSON.dictList(openBundle["events"]).map { OrbRow(it) }
+                    val spineHasMore = openBundle["spine_has_more"] as? Boolean
+                    val isColdSpineTruncated =
+                        OrbJSON.bool(openBundle, "has_more") == true &&
+                            (spineHasMore == true || (spineHasMore == null && spineRows.size >= 80))
+                    evs = OrbReadCache.reconcilePrefetchedEvents(cacheKey, spineRows + tailRows, accountScope, clearEp)
+                    val histCandidates = evs.filter { (it.str("event_type", "type") ?: "") in OrbConversationHistory.eventTypes }
+                    if (!isColdSpineTruncated && histCandidates.isNotEmpty()) {
+                        OrbReadCache.reconcilePrefetchedHistory("mission_msgs_${row.id}", histCandidates, accountScope, clearEp)
+                    }
+                    if (evs.isNotEmpty()) {
+                        anyLoaded = true
+                    }
+                } else {
+                    val fetched = orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                        core.fetchRows("/api/control/missions/${core.encodeComponent(row.id)}/events?limit=120", "events")
+                    }.getOrDefault(emptyList())
+                    if (accountScope != OrbDisk.currentScope() || clearEp != OrbReadCache.clearEpoch()) return@LaunchedEffect
+                    if (fetched.isNotEmpty()) {
+                        evs = OrbReadCache.reconcilePrefetchedEvents(cacheKey, fetched, accountScope, clearEp)
+                        if (evs.isNotEmpty()) {
+                            anyLoaded = true
+                        }
+                    }
                 }
             }
             val priority = if (OrbMissionUnreadStore.isUnread(row)) idx else idx + 20
             OrbInboxDigestStore.request(core, row, evs, priority = priority)
         }
-        if (anyLoaded) {
+        if (anyLoaded && accountScope == OrbDisk.currentScope()) {
             eventsVersion += 1
         }
     }
@@ -2273,7 +2300,14 @@ fun OrbInboxView(
                                         .fillMaxWidth()
                                         .drawBehind { drawLine(OrbStyle.border, Offset.Zero, Offset(size.width, 0f), 1.dp.toPx()) }
                                         .heightIn(min = 48.dp)
-                                        .orbPressClickable { onSelectMission(mission, project) }
+                                        .orbPressClickable(
+                                            onPressDown = {
+                                                core.prefetchMissionSingle(
+                                                    mission.id,
+                                                    isCloud = mission.str("backend")?.startsWith("cloud_") == true
+                                                )
+                                            }
+                                        ) { onSelectMission(mission, project) }
                                         .padding(horizontal = 12.dp, vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)

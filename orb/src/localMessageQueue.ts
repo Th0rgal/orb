@@ -5,7 +5,8 @@ import {mergeById} from './poll';
 import {deliverAssistantText,flushClientLink} from './clientLink';
 import {connectionVersion,getMission,isClientPlacement,reopenMission,appendClientTranscript,setClientMissionStatus} from './api';
 import {classifyConflictError} from './conflictClassification';
-import type {ClientRunReceipt} from './clientRuns';
+import {nativeInvoke,type ClientRunReceipt} from './clientRuns';
+import {localOrigins} from './localOrigins';
 import {readSideThread,saveSideThread} from './composerDrafts';
 import {sideQuestionKey} from './sideQuestionStorage';
 import {harnessSupportsEffort,normalizeEffort} from './effort';
@@ -454,19 +455,40 @@ export function startLocalQueueWorker(){
   clearRetryTimer();retryWakeAt=at;
   retryTimer=setTimeout(()=>{retryTimer=undefined;retryWakeAt=Infinity;if(valid())void tick();},Math.max(0,at-Date.now()));
  };
+ const isMissingOnCore=(error:unknown)=>{
+  const st=(error as {status?:number}|undefined)?.status;
+  return st===404||st===405||st===501||/\b(?:404|405|501)\b|Mission .*not found|Mission not found/i.test(String(error));
+ };
+ async function localOriginSyncFlags(missionId:string){
+  if(!nativeInvoke())return {localOnly:false,pending:false};
+  const rows=await localOrigins(missionId).catch(()=>[]);
+  const found=rows.find(r=>r.id===missionId);
+  return {localOnly:!!found?.local_sync_local_only,pending:!!found?.local_sync_pending};
+ }
+ async function syncCoreOrSettleLocalOrigin(missionId:string,op:()=>Promise<void>):Promise<boolean>{
+  if(!nativeInvoke()){await op();return false;}
+  const pre=await localOriginSyncFlags(missionId);
+  if(pre.localOnly)return true;
+  try{await op();return false;}
+  catch(error){
+   if(isMissingOnCore(error)&&(pre.pending||(await localOriginSyncFlags(missionId)).pending))return true;
+   throw error;
+  }
+ }
  async function persistResult(row:QueuedLocalMessage){
   if(!row.receipt)return;
   if(!row.userSynced){
-   await appendClientTranscript(row.mission,'user',row.text,row.id,row.receipt);
+   await syncCoreOrSettleLocalOrigin(row.mission,()=>appendClientTranscript(row.mission,'user',row.text,row.id,row.receipt));
    row.userSynced=true;
    await update(key,row.id,stored=>{stored.userSynced=true;});
   }
   if(row.result){
    const trimmed=row.result.text.trim();
+   const pre=await localOriginSyncFlags(row.mission);
    // An empty answer can still have journaled tool calls or an error.
-   if(!trimmed)await flushClientLink(row.mission);
+   if(!trimmed&&!pre.localOnly)await flushClientLink(row.mission);
    if(trimmed&&trimmed!==row.lastSyncedText){
-    await deliverAssistantText(row.mission,row.result.text,row.receipt,row.resultId);
+    await syncCoreOrSettleLocalOrigin(row.mission,()=>deliverAssistantText(row.mission,row.result!.text,row.receipt,row.resultId));
     row.lastSyncedText=trimmed;
     await update(key,row.id,stored=>{stored.lastSyncedText=trimmed;});
    }
@@ -475,8 +497,8 @@ export function startLocalQueueWorker(){
    const resume=!row.resultStatus&&cutByConnection(row.result)&&(row.resumes??0)<RESUME_LIMIT;
    recordLocalFailure(row.mission,failed&&!resume?(row.result.error||`Local process exited with code ${row.result.exit_code}`):null);
    const status=row.resultStatus??(resume?'interrupted':failed?'failed':'awaiting_user');
-   if(row.scheduled&&!resume)await setClientMissionStatus(row.mission,status,row.receipt,row.id);
-   else await setClientMissionStatus(row.mission,status,row.receipt);
+   if(row.scheduled&&!resume)await syncCoreOrSettleLocalOrigin(row.mission,()=>setClientMissionStatus(row.mission,status,row.receipt,row.id));
+   else await syncCoreOrSettleLocalOrigin(row.mission,()=>setClientMissionStatus(row.mission,status,row.receipt));
    if(!valid())return;
    if(resume){
     const cut=BACKGROUND_HANDOFF.test(row.result.error??'')?'background':'connection';
@@ -510,9 +532,10 @@ export function startLocalQueueWorker(){
    try {
     // Begin observing output immediately. A slow transcript write must not hide it.
     const output=followLocal(row.mission,()=>{});
-    const userSync=Promise.resolve(appendClientTranscript(row.mission,'user',row.text,row.id,row.receipt)).then(async()=>{
+    const attemptRunId=row.receipt?.run_id;
+    const userSync=(nativeInvoke()?syncCoreOrSettleLocalOrigin(row.mission,()=>appendClientTranscript(row.mission,'user',row.text,row.id,row.receipt)):Promise.resolve(appendClientTranscript(row.mission,'user',row.text,row.id,row.receipt))).then(async()=>{
      row.userSynced=true;
-     await update(key,row.id,stored=>{stored.userSynced=true;});
+     await update(key,row.id,stored=>{if(stored.receipt?.run_id===attemptRunId)stored.userSynced=true;});
     }).catch(swallow("localQueue.syncUser", { mission: row.mission, message: row.id }));
     const result=await output;await userSync;if(!valid())return;
     row={...row,result,resultId:crypto.randomUUID(),resultStatus:stopping.has(runKey)?'interrupted':undefined};
@@ -631,6 +654,23 @@ export function startLocalQueueWorker(){
      }
      continue;
     }
+    if(row.state==='error'&&!row.receipt&&!row.result&&/^Error:\s*This conversation changed machines or folders\./.test(row.error??'')){
+     const binding=localBinding(row.mission);
+     if(binding&&binding.cwd===row.request.cwd){
+      const mission=await getMission(row.mission,{includeHistory:false}).catch(()=>undefined);
+      if(!valid())return;
+      if(mission&&isClientPlacement(mission)){
+       await update(key,row.id,stored=>{
+        if(stored.state==='error'&&!stored.receipt&&!stored.result&&stored.error===row.error){
+         stored.state='queued';
+         delete stored.error;
+        }
+       });
+       again=true;
+       continue;
+      }
+     }
+    }
     if(row.state==='accepted'){
      if(row.result)await persistResult(row).catch(error=>syncFailed(row,error));else follow(row);
      continue;
@@ -664,7 +704,8 @@ export function startLocalQueueWorker(){
       else await reconcileLocalRun(row.mission);
       continue;}}catch(error){if(!/no local run/i.test(String(error)))throw error;}
      await reconcileLocalRun(row.mission);if(!valid())return;
-     const mission=await getMission(row.mission,{includeHistory:false});
+     const localOnlyOrigin=nativeInvoke()?(await localOrigins(row.mission).catch(()=>[])).find(r=>r.id===row.mission&&r.local_sync_local_only):undefined;
+     const mission=localOnlyOrigin??await getMission(row.mission,{includeHistory:false});
      if(!isClientPlacement(mission)||binding.cwd!==row.request.cwd)throw Error('This conversation changed machines or folders. Remove this message and send it again.');
      if(isRunning(mission.status)||mission.status==='pending'&&!row.delegated)continue;
      if(!valid())return;
@@ -674,7 +715,7 @@ export function startLocalQueueWorker(){
      row.state='dispatching';
      // Sending a saved follow-up explicitly reopens an archived conversation.
      // Do this after claiming it so another window cannot dispatch the same draft.
-     if(mission.status==='acknowledged'){
+     if(mission.status==='acknowledged'&&!mission.local_sync_local_only){
       try{await reopenMission(row.mission);}catch(error){
        await update(key,row.id,stored=>{stored.state='error';stored.error=String(error);});
        continue;
@@ -694,7 +735,7 @@ export function startLocalQueueWorker(){
           ? normalizeEffort(mission.model_effort, row.request.harness) ?? undefined
           : normalizeEffort(row.request.effort, row.request.harness) ?? undefined)
        : row.request.effort;
-      return {pending:startLocal({...row.request,model,effort,service_tier:row.request.harness==='codex' ? mission.service_tier ?? (mission.fast_mode ? 'fast' : 'standard') : undefined,prompt:row.autoResumed?resumedPrompt(row.request.prompt,row.cut):row.request.prompt,sessionId:localBinding(row.mission)?.sessionId,permissionMode:localBinding(row.mission)?.permissionMode ?? row.request.permissionMode})};
+      return {pending:startLocal({...row.request,model,effort,service_tier:row.request.harness==='codex' ? mission.service_tier ?? (mission.fast_mode ? 'fast' : 'standard') : undefined,prompt:row.autoResumed?resumedPrompt(row.request.prompt,row.cut):row.request.prompt,displayPrompt:row.text,messageId:row.id,sessionId:localBinding(row.mission)?.sessionId,permissionMode:localBinding(row.mission)?.permissionMode ?? row.request.permissionMode})};
      });
      if(!launch)continue;
      const receipt=await launch.pending;

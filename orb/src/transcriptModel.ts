@@ -104,6 +104,7 @@ export class TranscriptReducer {
       if (genMatch) maxGenerated = Math.max(maxGenerated, Number(genMatch[1]));
       if (item.kind === "user") {
         if (item.messageId) copy.users.set(item.messageId, i);
+        else if (item.sequence !== undefined) copy.seen.add(`user:${item.sequence}:${Boolean(item.queued)}`);
         if (!item.queued) {
           copy.lastUser = i;
           copy.bubbles.clear();
@@ -112,7 +113,10 @@ export class TranscriptReducer {
         }
       } else if (item.kind === "tool") {
         copy.tools.set(item.callId, i);
+        if (item.sequence !== undefined) copy.seen.add(`stored:${item.sequence}:tool_call`);
       } else if (item.kind === "text") {
+        if (item.eventId) copy.seen.add(`assistant_message:${item.eventId}`);
+        else if (item.sequence !== undefined) copy.seen.add(`stored:${item.sequence}:assistant_message`);
         if (item.key.startsWith("text:antigravity:") || item.key.startsWith("text:opencode:")) {
           const bubble = item.key.slice(5);
           if (item.live) {
@@ -763,6 +767,15 @@ export function buildTranscript(events: StreamEvent[]): StreamItem[];
 export function buildTranscript(events: StreamEvent[], session?: string): StreamItem[];
 export function buildTranscript(events: StreamEvent[]): StreamItem[] {
   return buildTranscriptForSession(events, arguments[1] as string | undefined);
+}
+
+/** Restore reducer indices (`users`, `tools`, `bubbles`, `seen`, `lastUser`, `lastFinal`)
+ * for pre-digested `settledItems` loaded from IndexedDB so subsequent `applyStreamEvents`
+ * deltas apply cleanly without full replay. */
+export function rehydrateTranscript(items: StreamItem[], session?: string): StreamItem[] {
+  const reducer = new TranscriptReducer().reindexFromItems(items);
+  bindReducer(session, reducer.items, reducer);
+  return reducer.items;
 }
 
 type UserItem = Extract<StreamItem, { kind: "user" }>;

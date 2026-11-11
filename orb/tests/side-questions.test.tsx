@@ -21,7 +21,8 @@ const launchMock=vi.hoisted(()=>({
  lastError:undefined as {error:string;notSent:boolean}|undefined,
 }));
 const sessionMock=vi.hoisted(()=>({current:undefined as any,rev:undefined as (()=>number)|undefined,bump:undefined as (()=>void)|undefined}));
-vi.mock('../src/btwAgent',async()=>{const {createSignal}=await import('solid-js');const [rev,setRev]=createSignal(0);sessionMock.rev=rev;sessionMock.bump=()=>setRev(v=>v+1);const client=await import('../src/sideQuestionClient');return {askBtwAgent:(...args:Parameters<typeof client.askSide>)=>(askMock.fn??client.askSide)(...args),btwSession:()=>{sessionMock.rev?.();return sessionMock.current;},clearStaleBtwSessionActive:()=>{if(sessionMock.current?.active){sessionMock.current={...sessionMock.current,active:false,startedAt:undefined};sessionMock.bump?.();}},noteBtwPanelOpen:()=>()=>{},btwLaunchPending:()=>launchMock.pending,btwLastLaunchError:()=>launchMock.lastError,startFreshBtwSession:()=>{if(sessionMock.current){sessionMock.current={...sessionMock.current,freshSession:true};sessionMock.bump?.();}},btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[],signal?:AbortSignal,options?:{force?:boolean})=>serverReconcile.fn(parent,local,signal,options),peekWarmBtwState:(parent:string)=>warmMock.current.get(parent),updateWarmBtwHistory:(...args:any[])=>warmMock.updateSpy(...args),get queueBtwFollowUp(){return queueFollowUpMock.enabled?queueFollowUpMock.fn:undefined;},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
+const itemsMock=vi.hoisted(()=>({current:[] as any[],rev:undefined as (()=>number)|undefined,bump:undefined as (()=>void)|undefined}));
+vi.mock('../src/btwAgent',async()=>{const {createSignal}=await import('solid-js');const [rev,setRev]=createSignal(0);const [itemsRev,setItemsRev]=createSignal(0);sessionMock.rev=rev;sessionMock.bump=()=>setRev(v=>v+1);itemsMock.rev=itemsRev;itemsMock.bump=()=>setItemsRev(v=>v+1);const client=await import('../src/sideQuestionClient');return {askBtwAgent:(...args:Parameters<typeof client.askSide>)=>(askMock.fn??client.askSide)(...args),btwSession:()=>{sessionMock.rev?.();return sessionMock.current;},clearStaleBtwSessionActive:()=>{if(sessionMock.current?.active){sessionMock.current={...sessionMock.current,active:false,startedAt:undefined};sessionMock.bump?.();}},noteBtwPanelOpen:()=>()=>{},btwLaunchPending:()=>launchMock.pending,btwLastLaunchError:()=>launchMock.lastError,startFreshBtwSession:()=>{if(sessionMock.current){sessionMock.current={...sessionMock.current,freshSession:true};sessionMock.bump?.();}},btwActivities:()=>[],btwItems:()=>{itemsMock.rev?.();return itemsMock.current;},btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[],signal?:AbortSignal,options?:{force?:boolean})=>serverReconcile.fn(parent,local,signal,options),peekWarmBtwState:(parent:string)=>warmMock.current.get(parent),updateWarmBtwHistory:(...args:any[])=>warmMock.updateSpy(...args),get queueBtwFollowUp(){return queueFollowUpMock.enabled?queueFollowUpMock.fn:undefined;},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
 const thoughts=vi.hoisted(()=>({value:[] as {kind:'think';key:string;text:string;done:boolean}[]}));
 const storage=vi.hoisted(()=>new Map<string,unknown>());
 vi.mock('../src/composerDrafts',()=>({
@@ -30,7 +31,7 @@ vi.mock('../src/composerDrafts',()=>({
  readSideThread:async(key:string)=>storage.get('thread:'+key),
  saveSideThread:async(key:string,value:unknown)=>{storage.set('thread:'+key,structuredClone(value));},
 }));
-afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();resetSideQuestionStorageForTest();thoughts.value=[];sessionMock.current=undefined;askMock.fn=undefined;launchMock.pending=undefined;launchMock.lastError=undefined;warmMock.current.clear();warmMock.updateSpy.mockReset();queueFollowUpMock.enabled=false;queueFollowUpMock.fn.mockReset();watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
+afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();resetSideQuestionStorageForTest();thoughts.value=[];sessionMock.current=undefined;itemsMock.current=[];askMock.fn=undefined;launchMock.pending=undefined;launchMock.lastError=undefined;warmMock.current.clear();warmMock.updateSpy.mockReset();queueFollowUpMock.enabled=false;queueFollowUpMock.fn.mockReset();watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
 it('routes /btw away from the working agent while it is busy',async()=>{
  const send=vi.fn(),ask=vi.fn(()=>true),stop=vi.fn();
  render(()=><Composer placeholder="Follow-up" busy onSend={send} onStop={stop} onBtw={ask}/>);
@@ -1049,7 +1050,210 @@ it('shows SideQuestionSkeleton instead of premature empty-state copy while cold 
  expect(screen.queryByRole('status',{name:'Loading side questions'})).toBeNull();
 });
 
+it('binds Cmd/Ctrl+K and .btw-sidebar exclusively to the active slot in a multi-mission keep-alive pool',async()=>{
+ const {For}=await import('solid-js');
+ const {FilePanelProvider,FilePanelButton}=await import('../src/FilePanel');
+ const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ const fs=await import('node:fs');
+ const path=await import('node:path');
 
+ await writeSideQuestion(sideQuestionKey('mission-keep-a'),{
+  history:[{id:'a-1',question:'Question A',answer:'Mission A exclusive side answer.',at:'2026-11-11T10:00:00Z'}],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:false,
+  docked:true,
+  pending:null,
+ });
+ await writeSideQuestion(sideQuestionKey('mission-keep-b'),{
+  history:[{id:'b-1',question:'Question B',answer:'Mission B exclusive side answer.',at:'2026-11-11T10:05:00Z'}],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:null,
+ });
 
+ const missionRecord=(id:string)=>({id,project:'orb',status:'active' as const,title:id,history:[],created_at:'',updated_at:''});
+ const [slots]=createSignal(['mission-keep-a','mission-keep-b']);
+ const [missionOpen,setMissionOpen]=createSignal<string|null>('mission-keep-a');
 
+ const view=render(()=>(
+  <div class="app">
+   <FilePanelProvider missionOpen={missionOpen()} scope={{mission:missionOpen()?missionRecord(missionOpen()!):undefined}}>
+    <FilePanelButton/>
+    <For each={slots()}>{id=>(
+     <div class="mission-slot" hidden={missionOpen()!==id}>
+      <SideQuestions mission={id} active={missionOpen()===id} items={[]} ref={()=>{}} onTransfer={()=>{}}/>
+     </div>
+    )}</For>
+   </FilePanelProvider>
+  </div>
+ ));
+ const appEl=view.container.querySelector('.app') as HTMLElement;
+ const sideAside=()=>view.container.querySelector('.btw-sidebar') as HTMLElement;
+ const isMac=/mac|iphone|ipad|ipod/i.test(navigator.platform);
+ const pressBtwShortcut=()=>fireEvent.keyDown(window,{key:'k',code:'KeyK',metaKey:isMac,ctrlKey:!isMac});
 
+ // 1. mission-keep-a starts with open=false even though mission-keep-b (mounted in background!) has open=true:
+ await waitFor(()=>expect(appEl.dataset.filesOpen).toBe('false'));
+ expect(sideAside().style.display).toBe('none');
+ expect(screen.queryByText('Mission B exclusive side answer.')).toBeNull();
+
+ // 2. Switch to mission-keep-b -> mission-keep-b's open=true restores immediately:
+ setMissionOpen('mission-keep-b');
+ await waitFor(()=>expect(appEl.dataset.filesOpen).toBe('true'));
+ expect(await screen.findByText('Mission B exclusive side answer.')).toBeTruthy();
+ expect(screen.queryByText('Mission A exclusive side answer.')).toBeNull();
+
+ // 3. Switch BACK to kept-alive mission-keep-a -> mission-keep-b's panel hides, and shortcut opens mission-keep-a's own /btw!
+ setMissionOpen('mission-keep-a');
+ await waitFor(()=>expect(appEl.dataset.filesOpen).toBe('false'));
+ expect(screen.queryByText('Mission B exclusive side answer.')).toBeNull();
+
+ pressBtwShortcut();
+ await waitFor(()=>expect(appEl.dataset.filesOpen).toBe('true'));
+ expect(await screen.findByText('Mission A exclusive side answer.')).toBeTruthy();
+ expect(screen.queryByText('Mission B exclusive side answer.')).toBeNull();
+ expect(sideAside().querySelectorAll('.btw-panel').length).toBe(1);
+
+ // 4. Leave missions (Inbox / New Agent) -> unregisters side handle and hides .btw-sidebar:
+ setMissionOpen(null);
+ await waitFor(()=>expect(appEl.dataset.filesOpen).toBe('false'));
+ expect(sideAside().style.display).toBe('none');
+ expect(screen.queryByRole('button',{name:'Side question'})).toBeNull();
+
+ // 5. CSS invariant: half-screen (<1150px) floating .file-panel uses opaque var(--bg) and respects --sb-w:
+ const css=fs.readFileSync(path.resolve(__dirname,'../src/styles.css'),'utf8');
+ expect(css).toContain('width:min(780px,calc(100vw - var(--sb-w)));background:var(--bg)');
+});
+
+it('suspends side-question stream retention and 15s reconciliation polling while slot is inactive',async()=>{
+ const missionCache=await import('../src/missionCache');
+ const attachSpy=vi.spyOn(missionCache,'attachMissionStream');
+ let activeStops=0;
+ attachSpy.mockImplementation(()=>()=>{activeStops+=1;});
+
+ let reconcileCalls=0;
+ serverReconcile.fn=async(_parent:string,local:any[])=>{
+  reconcileCalls+=1;
+  return {
+   history:local.length?local:[{id:'s-1',question:'Q1',answer:`Ans-${reconcileCalls}`,at:'2026-11-11T10:00:00Z'}],
+   latest:'side-child-1',
+   authoritative:true,
+  };
+ };
+
+ vi.useFakeTimers();
+ try{
+  const [active,setActive]=createSignal(true);
+  render(()=><SideQuestions mission="mission-sub-a" active={active()} items={[]} ref={()=>{}} onTransfer={()=>{}}/>);
+
+  await vi.waitFor(()=>{
+   expect(reconcileCalls).toBe(1);
+   expect(attachSpy).toHaveBeenCalledTimes(1);
+  });
+  expect(activeStops).toBe(0);
+
+  // Deactivate the slot -> immediately releases attachMissionStream and stops 15s timer!
+  setActive(false);
+  expect(activeStops).toBe(1);
+
+  const callsBeforeIdle=reconcileCalls;
+  await vi.advanceTimersByTimeAsync(45_000);
+  expect(reconcileCalls).toBe(callsBeforeIdle);
+  expect(attachSpy).toHaveBeenCalledTimes(1);
+
+  // Reactivate the slot -> re-attaches stream and reconciles missed side-question updates!
+  setActive(true);
+  await vi.waitFor(()=>{
+   expect(attachSpy).toHaveBeenCalledTimes(2);
+   expect(reconcileCalls).toBeGreaterThan(callsBeforeIdle);
+  });
+ }finally{
+  attachSpy.mockRestore();
+  vi.useRealTimers();
+ }
+});
+
+it('resets the asking latch when suspending an active side-question turn so reactivation reconnects or settles',async()=>{
+ askMock.fn=(_mission,q,_ctx,_hist,signal)=>new Promise<void>((resolve)=>{
+  sessionMock.current={id:'side-suspend-1',question:q,harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,startedAt:'2026-11-11T10:00:00Z'};
+  signal.addEventListener('abort',()=>resolve(),{once:true});
+ });
+ serverReconcile.fn=async(_parent,local)=>({
+  history:local,
+  latest:'side-suspend-1',
+  authoritative:true,
+ });
+
+ const [active,setActive]=createSignal(true);
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="mission-suspend-ask" active={active()} items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+
+ await handle.ask('First suspended question?');
+ expect(await screen.findByText('First suspended question?')).toBeTruthy();
+
+ // 1. Deactivate while `askBtwAgent` is in flight, then reactivate while the turn is still active on Core:
+ setActive(false);
+ let finishWatch!:()=>void;
+ watchMock.fn=(_parent,_signal,receive)=>new Promise<void>(resolve=>{
+  receive({type:'snapshot',text:'Resumed live partial…',narration:[]});
+  finishWatch=()=>{
+   receive({type:'done',answer:'Resumed final answer.'});
+   sessionMock.current={...sessionMock.current!,active:false};
+   resolve();
+  };
+ });
+ serverReconcile.fn=async(_parent,local)=>({
+  history:local,
+  activeSession:sessionMock.current?.active?sessionMock.current:undefined,
+  latest:'side-suspend-1',
+  authoritative:true,
+ });
+
+ setActive(true);
+ expect(await screen.findByText('Resumed live partial…')).toBeTruthy();
+ finishWatch();
+ expect(await screen.findByText('Resumed final answer.')).toBeTruthy();
+
+ // 2. Ask a second question, deactivate while in flight, let Core complete it while hidden, then reactivate:
+ await handle.ask('Second suspended question?');
+ expect(await screen.findByText('Second suspended question?')).toBeTruthy();
+ setActive(false);
+
+ sessionMock.current={...sessionMock.current!,active:false};
+ serverReconcile.fn=async()=>({
+  history:[
+   {id:'s-1',question:'First suspended question?',answer:'Resumed final answer.'},
+   {id:'s-2',question:'Second suspended question?',answer:'Settled while hidden.'},
+  ],
+  latest:'side-suspend-1',
+  authoritative:true,
+ });
+
+ setActive(true);
+ expect(await screen.findByText('Settled while hidden.')).toBeTruthy();
+ await waitFor(()=>expect(screen.queryByRole('status')).toBeNull());
+});
+
+it('does not crash NativeInteraction when btwSession becomes undefined mid-stream without bumping sessionRevision',async()=>{
+ vi.stubGlobal('fetch',vi.fn(async()=>new Response('[]',{status:200,headers:{'content-type':'application/json'}})));
+ askMock.fn=async(_parent,_question,_context,_history,_signal,receive)=>{
+  sessionMock.current={id:'side-live-session',question:'Why is this failing?',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0};
+  sessionMock.bump?.();
+  receive({type:'start',model:'opencode · builtin/smart'});
+  await new Promise(resolve=>setTimeout(resolve,0));
+  // Simulate storage/connection key shift making btwSession(parent) return undefined
+  // before sessionRevision bumps, followed by a synchronous stream item update.
+  sessionMock.current=undefined;
+  itemsMock.current=[{kind:'tool',key:'tool-1',id:'call-1',name:'bash',input:'ls',status:'running'}];
+  itemsMock.bump?.();
+  receive({type:'done',answer:'Side question completed cleanly.'});
+ };
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="mission-transient-session-loss" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ await handle.ask('Why is this failing?');
+ expect(await screen.findByText('Side question completed cleanly.')).toBeTruthy();
+ expect(screen.queryByText(/Couldn’t complete side question/)).toBeNull();
+});

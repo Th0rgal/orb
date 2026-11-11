@@ -103,8 +103,15 @@ test("Cursor-style files preserve chat, resolve references and navigate Markdown
   const expanded=await page.locator('.file-panel').boundingBox();
   expect(expanded!.x).toBe(220);expect(expanded!.width).toBe(1480);
   await page.locator('.app').evaluate(el=>el.classList.add('sb-hidden'));
-  const firstControl=await page.getByRole('button',{name:'Restore conversation',exact:true}).boundingBox();
-  expect(firstControl!.x).toBeGreaterThanOrEqual(82);
+  const restoreBtn=page.getByRole('button',{name:'Restore conversation',exact:true});
+  await page.evaluate(()=>{document.documentElement.dataset.platform='linux';});
+  const linuxControl=await restoreBtn.boundingBox();
+  expect(linuxControl!.x).toBeGreaterThanOrEqual(10);
+  expect(linuxControl!.x).toBeLessThan(24);
+  await page.evaluate(()=>{document.documentElement.dataset.platform='macos';});
+  const macControl=await restoreBtn.boundingBox();
+  expect(macControl!.x).toBeGreaterThanOrEqual(82);
+  await page.evaluate(()=>{delete document.documentElement.dataset.platform;});
   await page.locator('.app').evaluate(el=>el.classList.remove('sb-hidden'));
 
   await page.keyboard.press('Meta+j');

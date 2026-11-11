@@ -249,6 +249,14 @@ private def isSseSessionIdleJson (trimmed : String) : Option String :=
 def deriveOpenCodeTurnVerdict
     (dc : OpenCodeDualChannelState) (parser : HarnessParserState) (toolDepth : UInt32)
     (requireCliExitForTurnDone : Bool := true) : OpenCodeTurnVerdict :=
+  let normStop :=
+    let r := normalizeOpenCodeStopReason parser.lastStopReason
+    if r.isEmpty || r == "tool-calls" || r == "tool_calls" then "end_turn" else r
+  let hasEmittedProse :=
+    parser.emittedEvents.any (fun e => match e with
+      | .AssistantMessage _ t => !t.trimAscii.toString.isEmpty
+      | .TextDelta _ d => !d.trimAscii.toString.isEmpty
+      | _ => false)
   match dc.cliExitCode? with
   | some code =>
     if code != 0 then
@@ -259,9 +267,12 @@ def deriveOpenCodeTurnVerdict
         .failedSilentStop dc.explicitErrorMsg
       else
         .failedSseError dc.explicitErrorMsg
-    else if parser.sawActivity && !parser.sawUserText &&
-            !parser.emittedEvents.any (fun e => match e with | .AssistantMessage _ t => !t.trimAscii.toString.isEmpty | .TextDelta _ d => !d.trimAscii.toString.isEmpty | _ => false) then
-      .failedSilentStop "OpenCode finished without assistant text (stop reason: end_turn)."
+    else if (parser.sawActivity || normStop != "end_turn") && !parser.sawUserText && !hasEmittedProse then
+      .failedSilentStop s!"OpenCode finished without assistant text (stop reason: {normStop})."
+    else if normStop == "length" || normStop == "max_tokens" then
+      .failedSseError s!"OpenCode stopped at output token limit (stop reason: {normStop})."
+    else if normStop != "end_turn" then
+      .failedSseError s!"OpenCode stopped abnormally (stop reason: {normStop})."
     else if toolDepth == 0 then
       .completedClean
     else
@@ -272,7 +283,7 @@ def deriveOpenCodeTurnVerdict
         .failedSilentStop dc.explicitErrorMsg
       else
         .failedSseError dc.explicitErrorMsg
-    else if !requireCliExitForTurnDone && dc.sawSseIdle && dc.sawStepStop && parser.sawUserText && toolDepth == 0 then
+    else if !requireCliExitForTurnDone && dc.sawSseIdle && dc.sawStepStop && normStop == "end_turn" && parser.sawUserText && toolDepth == 0 then
       .completedClean
     else
       .inProgress
@@ -536,6 +547,7 @@ def resetWarmTurnLatches (parser : HarnessParserState) (dc : OpenCodeDualChannel
     emittedEvents := #[]
     sawUserText := false
     sawActivity := false
+    lastStopReason := ""
   }
   let cleanDc : OpenCodeDualChannelState := {
     expectedSessionId := dc.expectedSessionId

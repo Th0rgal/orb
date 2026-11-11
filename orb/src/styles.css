@@ -72,9 +72,14 @@
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", sans-serif;
   --mono: "SF Mono", ui-monospace, Menlo, Monaco, monospace;
   --tb-h: 35px;
+  --tb-traffic-left: 8px;
+  --tb-traffic-margin: 0px;
+  --col: 748px;
+}
+
+:root[data-platform="macos"] {
   --tb-traffic-left: 82px;
   --tb-traffic-margin: 70px;
-  --col: 748px;
 }
 
 :root[data-theme="light"] {
@@ -219,6 +224,8 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -
 .sidebar {
   grid-row: 1 / 3;
   /* A quiet dark sidebar; native vibrancy contributes only a faint tint. */
+  --bg-hover: color-mix(in srgb, var(--fg) 4.5%, transparent);
+  --bg-active: color-mix(in srgb, var(--fg) 7.5%, transparent);
   background: color-mix(in srgb, var(--bg-sidebar) var(--sidebar-opacity), transparent);
   isolation: isolate;
   border-right: 1px solid var(--stroke-soft);
@@ -228,6 +235,10 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+:root[data-theme="light"] .sidebar {
+  --bg-hover: color-mix(in srgb, var(--fg) 4%, transparent);
+  --bg-active: color-mix(in srgb, var(--fg) 6.5%, transparent);
 }
 .sb-top { height: var(--tb-h); flex: none; }
 /* Keyboard focus only (mouse clicks stay quiet). */
@@ -239,7 +250,7 @@ input:not([type=checkbox], [type=radio], [type=range]):focus, textarea:focus, se
    textarea inside must never draw its own ring (Cursor does the same). */
 .composer textarea:focus-visible, .composer textarea:focus { outline: 0; box-shadow: none; }
 button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focus:not(:focus-visible), select:focus:not(:focus-visible) { outline: 0; }
-.sb-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 6px 12px; scroll-padding-block: 8px; scrollbar-width: none; }
+.sb-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 6px 12px; scroll-padding-block: 8px; scrollbar-width: none; contain: layout style paint; }
 .sb-scroll::-webkit-scrollbar { display: none; }
 .sb-scroll > .row + .row, .sb-main-nav > .row + .row { margin-top: 1px; }
 .sb-main-nav[hidden] { display: none; }
@@ -490,7 +501,7 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
   color: var(--fg-2);
 }
 .gear-btn > svg { width: 16px; height: 16px; flex: none; }
-.gear-btn:hover { background: var(--hover-1); color: var(--fg); }
+.gear-btn:hover { background: var(--bg-hover); color: var(--fg); }
 /* In Settings the nav above already shows where you are: the footer button only
    marks the mode (filled icon colour, medium weight) instead of a heavy grey slab. */
 .gear-btn.on { background: transparent; color: var(--fg); font-weight: 500; cursor: default; }
@@ -541,6 +552,9 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
 
 /* ---------- main ---------- */
 .main { grid-column: 2; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.mission-slot { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; position: relative; }
+.mission-slot[hidden] { display: none !important; content-visibility: hidden; }
+[data-turn-key] { contain: layout style; }
 .scroll { flex: 1; overflow-x: hidden; overflow-y: auto; overflow-anchor: none; padding: 0 24px; scrollbar-gutter: stable both-edges; }
 /* The transcript continues behind the floating composer: no full-width fade. */
 .scroll:has(+ .dock) .col { padding-bottom: calc(var(--dock-height, 110px) + 24px); }
@@ -665,7 +679,7 @@ html[data-window-focused="false"] :is(.shimmer, .spin, .mermaid-skeleton span, .
 .st-think-fold-head .chev.open { transform: rotate(90deg); }
 .st-think-fold-body { margin: 2px 0 6px 5px; padding-left: 12px; border-left: 1px solid var(--stroke-soft); }
 .st-think-fold-body .st-think { margin: 0; }
-.st-work { margin: 4px 10px; }
+.st-work { margin: 4px 10px; contain: layout style; }
 .st-work-head {
   display: flex; align-items: center; gap: 6px; height: 24px; width: 100%; text-align: left;
   color: var(--fg-3); font-size: 12.5px;
@@ -893,6 +907,23 @@ textarea::placeholder { color: var(--placeholder); }
 .menu-ico svg { width: 14px; height: 14px; display: block; }
 .menu-sep { height: 1px; background: var(--stroke-soft); margin: 3px 6px; }
 .popup-menu { min-width: 168px; padding: 3px; }
+.dock-sync-note {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 7px 14px 0; color: var(--fg-3);
+  font-size: 11.5px; line-height: 16px; text-align: center;
+}
+.dock-sync-note > span { min-width: 0; overflow-wrap: anywhere; }
+.dock-sync-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--fg-3); opacity: .65; flex: none;
+}
+.dock-sync-note.is-syncing > .dock-sync-dot {
+  background: var(--blue); opacity: 1;
+  animation: launch-pulse 1.4s ease-in-out infinite;
+}
+.dock-sync-note.is-error { color: var(--warning); }
+.dock-sync-note.is-error > .dock-sync-dot { background: var(--warning); opacity: 1; }
+.dock-sync-note ~ .under { padding-top: 5px; }
 .under { display: flex; align-items: center; flex-wrap: nowrap; min-width: 0; gap: 6px; padding: 8px 12px 4px; color: var(--fg-3); font-size: 12px; white-space: nowrap; }
 .under-loc, .ctx, .under-harness, .under-model { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; white-space: nowrap; }
 .under-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -909,10 +940,11 @@ button.under-model { color: inherit; }
 .under-model svg, .under-loc svg:last-child, .under-harness svg:last-child { width: 10px; height: 10px; flex: none; }
 .under-model-menu { min-width: 180px; }
 .under-link-pill {
-  display: inline-flex; align-items: center; gap: 5px;
-  height: 18px; padding: 0 6px; border-radius: var(--radius-xs);
-  border: 1px solid var(--stroke-soft); background: var(--bg-elev);
-  color: var(--fg-3); font-size: 11px; line-height: 1; flex: none;
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 20px; padding: 0 8px; border-radius: 999px;
+  border: 1px solid var(--stroke-soft);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  color: var(--fg-3); font-size: 11.5px; line-height: 16px; flex: none;
 }
 .under-link-pill > i {
   width: 5px; height: 5px; border-radius: 50%;
@@ -922,9 +954,9 @@ button.under-model { color: inherit; }
 .under-link-pill.reconnecting { color: var(--fg-2); }
 .under-link-pill.reconnecting > i {
   background: var(--warning);
-  animation: rdot 1.4s ease-in-out infinite;
+  animation: launch-pulse 1.4s ease-in-out infinite;
 }
-.under-link-pill + .ctx-wrap { margin-left: 0; }
+.under-link-pill + .ctx-wrap { margin-left: 2px; }
 .under-link-pill { margin-left: auto; }
 .ctx-wrap, .ctx { margin-left: auto; flex: none; }
 .ctx-wrap { position: relative; }
@@ -934,7 +966,7 @@ button.under-model { color: inherit; }
   .under-verbose-prefix, .under-verbose-suffix { display: none; }
   .under-model { max-width: 130px; }
   .under-link-label { display: none; }
-  .under-link-pill { padding: 0 5px; }
+  .under-link-pill { padding: 0 6px; }
 }
 @container (max-width: 360px) {
   .under-loc > .under-label { display: none; }
@@ -1007,7 +1039,7 @@ button.under-model { color: inherit; }
 
 .rdots circle { opacity: .15; animation: rdot 1.1s ease-in-out infinite; }
 @keyframes rdot { 0%, 60%, 100% { opacity: .15; } 25% { opacity: .9; } }
-@media (prefers-reduced-motion: reduce) { .rdots circle, .spin, .shimmer { animation: none; } .rdots circle { opacity: .6; } }
+@media (prefers-reduced-motion: reduce) { .rdots circle, .spin, .shimmer, .under-link-pill.reconnecting > i, .dock-sync-note.is-syncing > .dock-sync-dot { animation: none; } .rdots circle { opacity: .6; } }
 
 /* ---------- settings / pages ---------- */
 .s-body, .page { flex: 1; overflow-y: auto; min-width: 0; min-height: 0; }
@@ -1376,6 +1408,11 @@ button.under-model { color: inherit; }
 .row.d1, .row.d2 { padding-left: 6px; }
 .row.depth { padding-left: calc(6px + (var(--depth, 1) - 1) * 12px); }
 .row-tip { pointer-events:none; white-space:normal; }
+.overlay-popover.row-tip, .queue-tooltip {
+  background: color-mix(in srgb, var(--overlay-surface) 84%, transparent);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
 .row-tip-title { color: var(--fg-strong); font-size: 12.5px; line-height: 16px; }
 .row-tip-meta { color: var(--fg-3); font-size: 11.5px; line-height: 15px; margin-top: 3px; }
 .row.note { font-size: 12px; color: var(--fg-3); height: auto; min-height: 24px; white-space: normal; line-height: 15px; padding-top: 3px; padding-bottom: 3px; cursor: default; }
@@ -1961,8 +1998,8 @@ button.fork-trigger:hover { color: var(--fg); }
 .file-actions summary { cursor:pointer;padding:5px;list-style:none; }
 .file-actions>div { position:absolute;right:0;top:100%;background:var(--bg);border:1px solid var(--stroke);box-shadow:var(--shadow-lg);border-radius: var(--radius-sm);padding:5px;z-index:5;min-width:140px; }
 .file-actions button { display:block;width:100%;text-align:left; }
-@media(max-width:1150px) { .app[data-files-open="true"] { grid-template-columns:var(--sb-w) 1fr; } .app.sb-hidden[data-files-open="true"] { grid-template-columns:0 1fr; } .file-panel { position:fixed;right:0;top:var(--tb-h);bottom:0;width:min(95vw,780px);z-index:30;box-shadow:var(--shadow-lg); } .file-panel-resize { display:none; } }
-@media(max-width:720px) { .file-tree { width:160px; } .file-preview { padding:12px; } .file-panel.maximized { left:0; } }
+@media(max-width:1150px) { .app[data-files-open="true"] { grid-template-columns:var(--sb-w) 1fr; } .app.sb-hidden[data-files-open="true"] { grid-template-columns:0 1fr; } .file-panel { position:fixed;right:0;top:var(--tb-h);bottom:0;width:min(780px,calc(100vw - var(--sb-w)));background:var(--bg);z-index:30;box-shadow:var(--shadow-lg); } .app.sb-hidden > .file-panel { width:min(95vw,780px); } .file-panel-resize { display:none; } }
+@media(max-width:720px) { .file-tree { width:160px; } .file-preview { padding:12px; } .file-panel { width:100vw; } .file-panel.maximized { left:0; } }
 
 .file-source-code code { background:none;padding:0;border-radius:0;font:inherit; }
 
@@ -2063,7 +2100,7 @@ button.fork-trigger:hover { color: var(--fg); }
 .message-image > span { position:absolute;bottom:3px;right:3px;background:#141414d9;color:#eee;font-size:10px;line-height:16px;padding:0 4px;border-radius: var(--radius-xs); }
 .message-image:not(:disabled):hover { border-color:var(--fg-3); }
 
-.md-code-block { position: relative; min-width: 0; margin: 0 0 14px; border: 1px solid var(--stroke); border-radius: var(--radius-md); background: var(--bg-inset); }
+.md-code-block { position: relative; min-width: 0; margin: 0 0 14px; border: 1px solid var(--stroke); border-radius: var(--radius-md); background: var(--bg-inset); contain: layout style paint; }
 .md .md-code-block pre { margin: 0; padding: 12px 44px 12px 14px; background: transparent; }
 .md.md-compact .md-code-block pre { margin: 0; padding: 8px 40px 8px 10px; }
 /* Mermaid diagrams: one frame for both views, header with view toggle, copy and expand. */
@@ -2797,10 +2834,10 @@ select.orb-select-native:disabled { cursor: default; }
 
 /* Follow-up queue: same width as the composer, quiet surface and compact header. */
 /* Queued follow-ups: one card above the composer, one line per message (Cursor-like). */
-.followup-queue { margin:0 0 8px; padding:10px 8px 6px; border:1px solid var(--stroke); border-radius:var(--radius-xl); background:var(--queue-bg); color:var(--fg-2); font:14px/20px var(--sans); animation:queue-card-reveal 140ms cubic-bezier(.16,1,.3,1) both; }
-.followup-queue.collapsed { padding-bottom:10px; }
-.followup-queue header { display:flex; align-items:center; gap:10px; min-height:24px; padding:0 4px 0 8px; }
-.queue-count { color:var(--fg-2); font-variant-numeric:tabular-nums; }
+.followup-queue { margin:0 0 8px; padding:6px 4px 4px; border:1px solid var(--stroke); border-radius:var(--radius-xl); background:var(--queue-bg); color:var(--fg-2); font:14px/20px var(--sans); animation:queue-card-reveal 140ms cubic-bezier(.16,1,.3,1) both; }
+.followup-queue.collapsed { padding:6px 4px; }
+.followup-queue header { display:flex; align-items:center; gap:10px; min-height:22px; padding:0 4px 0 10px; font-size:12px; }
+.queue-count { color:var(--fg-3); font-variant-numeric:tabular-nums; }
 .queue-hint { display:inline-flex; align-items:center; gap:4px; color:var(--fg-4); font-size:13px; }
 .queue-hint svg { width:13px; height:13px; }
 .queue-options { display:flex; align-items:center; gap:10px; margin-left:auto; }
@@ -2812,16 +2849,16 @@ select.orb-select-native:disabled { cursor: default; }
 .followup-queue.collapsed .queue-collapse { transform:rotate(180deg); }
 .followup-queue ol { list-style:none; margin:4px 0 0; padding:0; overflow:visible; }
 .followup-queue ol.scrollable { max-height:220px; overflow-y:auto; }
-.queue-row { border:1px solid transparent; border-radius:var(--radius-md); animation:queue-row-reveal 120ms cubic-bezier(.16,1,.3,1) both; }
+.queue-row { border:1px solid transparent; border-radius:calc(var(--radius-xl) - 5px); animation:queue-row-reveal 120ms cubic-bezier(.16,1,.3,1) both; }
 .queue-row:hover { background:var(--hover-1); }
 .queue-row.editing { background:var(--bg-active); border-color:var(--stroke-strong); }
-.queue-line { display:flex; align-items:center; gap:8px; min-height:34px; padding:0 8px; }
+.queue-line { display:flex; align-items:center; gap:8px; min-height:32px; padding:0 3px 0 9px; }
 .queue-text { flex:1; min-width:0; display:block; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .queue-text > .user-context { display:inline; margin-left:8px; padding:0; color:var(--fg-3); font-size:12px; }
 .queue-editing { flex:none; color:var(--fg-3); font-size:13px; }
 .queue-row-actions { flex:none; display:flex; align-items:center; gap:2px; opacity:0; transition:opacity .12s; }
 .queue-row:hover .queue-row-actions, .queue-row-actions:focus-within { opacity:1; }
-.queue-row-actions button, .queue-action-btn { position:relative; width:26px; height:26px; display:grid; place-items:center; border-radius:var(--radius-sm); color:var(--fg-3); }
+.queue-row-actions button, .queue-action-btn { position:relative; width:26px; height:26px; display:grid; place-items:center; border-radius:var(--radius-xs); color:var(--fg-3); }
 .queue-row-actions button:hover:not(:disabled), .queue-action-btn:hover:not(:disabled) { background:var(--hover-2); color:var(--fg); }
 .queue-row-actions button:disabled, .queue-action-btn:disabled { opacity:.35; }
 .queue-tooltip { position:absolute; bottom:calc(100% + 7px); left:50%; transform:translateX(-50%) translateY(2px); display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:7px; border:1px solid var(--stroke-strong); background:var(--menu-bg); color:var(--fg); font:500 12px/16px var(--sans); white-space:nowrap; box-shadow:var(--shadow-lg); pointer-events:none; opacity:0; visibility:hidden; transition:opacity .12s, transform .12s; z-index:30; }
@@ -4088,7 +4125,7 @@ select.orb-select-native:disabled { cursor: default; }
 /* In the side question pane it sits in the title-bar strip, so it takes no vertical space. */
 
 /* Queue: a single row keeps one layout from send to delivery. */
-.followup-queue:not(:has(header)) { padding:6px 8px; }
+.followup-queue:not(:has(header)) { padding:4px; }
 .followup-queue:not(:has(header)) ol { margin:0; }
 .queue-row-actions.pending { opacity:.35; }
 .queue-sending { width:10px; height:10px; flex:none; margin-right:6px; border-radius:50%; border:1.5px solid var(--fg-3); border-top-color:transparent; animation:queue-spin .8s linear infinite; }
@@ -4108,14 +4145,9 @@ select.orb-select-native:disabled { cursor: default; }
 /* ---------- smooth send: queue rows and handoff ---------- */
 /* Compact, Codex-like queue: a light one-line header, text · actions on hover.
    Each row reserves its action area, so "sending" → "confirmed" never resizes it. */
-.followup-queue { padding:6px 6px 4px; }
-.followup-queue header { min-height:22px; padding:0 2px 0 8px; font-size:12px; }
-.followup-queue header .queue-count { color:var(--fg-3); }
 .queue-hint-hidden { visibility:hidden; }
-.followup-queue ol { margin-top:2px; }
-.queue-line { min-height:32px; }
 .queue-trailing { position:relative; flex:none; display:flex; align-items:center; justify-content:flex-end; min-width:82px; height:26px; }
-.queue-trailing .queue-sending { position:absolute; right:8px; top:50%; margin:-5px 0 0; opacity:0; transition:opacity .15s ease-out; }
+.queue-trailing .queue-sending { position:absolute; right:5px; top:50%; margin:-5px 0 0; opacity:0; transition:opacity .15s ease-out; }
 .queue-trailing .queue-sending.visible { opacity:1; }
 .queue-row.sending .queue-row-actions { opacity:0; pointer-events:none; }
 /* A message handed to the agent but whose turn has not started yet. */

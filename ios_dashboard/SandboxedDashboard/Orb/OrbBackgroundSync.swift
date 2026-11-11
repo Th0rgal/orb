@@ -565,6 +565,7 @@ final class OrbWarmSyncCoordinator {
     private var recentlyOpened: [String] = []
     private var focusedBtwParents: Set<String> = []
     private var warmSubs: [String: WarmSubscription] = [:]
+    private var savedCursors: [String: Int64] = [:]
     private var dirtyMissions: Set<String> = []
     private var dirtyBtwParents: Set<String> = []
     private var checkedCleanBtwParents: Set<String> = []
@@ -605,6 +606,7 @@ final class OrbWarmSyncCoordinator {
         activeScope = scope
         for sub in warmSubs.values { sub.cancel() }
         warmSubs.removeAll()
+        savedCursors.removeAll()
         focusedCounts.removeAll()
         liveIds.removeAll()
         recentlyOpened.removeAll()
@@ -620,6 +622,7 @@ final class OrbWarmSyncCoordinator {
             sub.cancel()
         }
         warmSubs = warmSubs.filter { !$0.value.listeners.isEmpty }
+        savedCursors.removeAll()
         liveIds.removeAll()
         recentlyOpened.removeAll()
         dirtyMissions.removeAll()
@@ -716,8 +719,11 @@ final class OrbWarmSyncCoordinator {
     func markMissionSynced(_ missionId: String, lastSeq: Int64?) {
         ensureScope()
         dirtyMissions.remove(missionId)
-        if let lastSeq, let sub = warmSubs[missionId] {
-            sub.cursor = max(sub.cursor ?? lastSeq, lastSeq)
+        if let lastSeq {
+            savedCursors[missionId] = max(savedCursors[missionId] ?? lastSeq, lastSeq)
+            if let sub = warmSubs[missionId] {
+                sub.cursor = max(sub.cursor ?? lastSeq, lastSeq)
+            }
         }
     }
 
@@ -815,7 +821,11 @@ final class OrbWarmSyncCoordinator {
     func reconcile() {
         ensureScope()
         if !appIsActive {
+            OrbReadCache.flushPendingEventWrites()
             for (_, sub) in warmSubs {
+                if let cur = sub.cursor {
+                    savedCursors[sub.missionId] = max(savedCursors[sub.missionId] ?? cur, cur)
+                }
                 if !sub.isCaughtUpHealthy || liveIds.contains(sub.missionId) { dirtyMissions.insert(sub.missionId) }
                 sub.cancel()
             }
@@ -867,7 +877,7 @@ final class OrbWarmSyncCoordinator {
             }
             return existing
         }
-        let cachedSeq = sinceSeq ?? OrbReadCache.readEvents(missionId).last?.sequence
+        let cachedSeq = [sinceSeq, savedCursors[missionId], OrbReadCache.readEvents(missionId).last?.sequence].compactMap { $0 }.max()
         let created = WarmSubscription(missionId: missionId, initialCursor: cachedSeq)
         warmSubs[missionId] = created
         startStream(created)
@@ -963,14 +973,17 @@ final class OrbWarmSyncCoordinator {
         }
 
         if let seq = (data["sequence"] as? NSNumber)?.int64Value, seq > 0 {
-            sub.cursor = max(sub.cursor ?? seq, seq)
+            let nextCur = max(sub.cursor ?? seq, seq)
+            sub.cursor = nextCur
+            savedCursors[missionId] = max(savedCursors[missionId] ?? nextCur, nextCur)
         }
         let stored = StoredEvent.fromStreamFrame(missionId: missionId, type: type, data: data)
         if let stored {
             let existing = OrbReadCache.readEvents(missionId)
             let merged = OrbConversation.mergeStoredEvents(existing: existing, incoming: [stored])
-            OrbReadCache.saveEvents(missionId, events: merged)
-            if OrbConversationHistory.eventTypes.contains(stored.eventType),
+            let immediate = OrbConversationHistory.eventTypes.contains(stored.eventType)
+            OrbReadCache.saveEvents(missionId, events: merged, persistImmediately: immediate)
+            if immediate,
                let cachedMission = OrbReadCache.read("mission:\(missionId)"),
                case var .object(fields) = cachedMission {
                 let updatedHistory = OrbConversationHistory.merge(fields["history"]?.items ?? [], events: [stored])
@@ -1006,6 +1019,55 @@ final class OrbWarmSyncCoordinator {
 
         for listener in sub.listeners.values {
             listener(type, data, stored)
+        }
+    }
+
+    func ingestInboxAnswerPush(_ data: [String: Any]) {
+        ensureScope()
+        guard let rawMid = data["mission_id"] as? String else { return }
+        let missionId = rawMid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !missionId.isEmpty else { return }
+        // If already actively warm-subscribed and healthy, the subscription itself receives the event in order.
+        if let sub = warmSubs[missionId], sub.isCaughtUpHealthy { return }
+        guard let stored = StoredEvent.fromStreamFrame(missionId: missionId, type: "assistant_message", data: data) else { return }
+        let existing = OrbReadCache.readEvents(missionId)
+        let prevLastSeq = existing.last?.sequence ?? 0
+        if prevLastSeq > 0 && stored.sequence > 0 && stored.sequence <= prevLastSeq { return }
+        let isContiguous = prevLastSeq > 0 && stored.sequence == prevLastSeq + 1
+        if isContiguous {
+            let merged = OrbConversation.mergeStoredEvents(existing: existing, incoming: [stored])
+            OrbReadCache.saveEvents(missionId, events: merged, persistImmediately: true)
+            savedCursors[missionId] = max(savedCursors[missionId] ?? stored.sequence, stored.sequence)
+        } else {
+            dirtyMissions.insert(missionId)
+        }
+        if let cachedMission = OrbReadCache.read("mission:\(missionId)"),
+           case var .object(fields) = cachedMission {
+            if isContiguous {
+                let updatedHistory = OrbConversationHistory.merge(
+                    fields["history"]?.items.filter { !$0["inbox_preview"].flag } ?? [],
+                    events: [stored]
+                )
+                fields["history"] = .array(updatedHistory)
+            } else if !stored.content.isEmpty {
+                let baseHistory = (fields["history"]?.items ?? []).filter { !$0["inbox_preview"].flag }
+                let previewRow: OrbJSON = .object([
+                    "role": .string("assistant"),
+                    "content": .string(stored.content),
+                    "canonical": .bool(false),
+                    "bubble_id": .string(stored.metadata["bubble_id"]?.value as? String ?? "text_delta_latest"),
+                    "revision": .number((stored.metadata["revision"]?.value as? NSNumber)?.doubleValue ?? 0),
+                    "inbox_preview": .bool(true),
+                ])
+                fields["history"] = .array(baseHistory + [previewRow])
+            }
+            if let status = data["status"] as? String, !status.isEmpty {
+                fields["status"] = .string(status)
+            }
+            if let updatedAt = data["timestamp"] as? String, !updatedAt.isEmpty {
+                fields["updated_at"] = .string(updatedAt)
+            }
+            OrbReadCache.seed("mission:\(missionId)", value: .object(fields))
         }
     }
 }
