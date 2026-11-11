@@ -1475,9 +1475,9 @@ def main : IO UInt32 := do
   let mut passed := 0
   let mut total := 0
 
-  -- 1. Command table size (100 desktop commands + plugin:app|version = 101)
+  -- 1. Command table size (101 desktop commands + plugin:app|version = 102)
   total := total + 1
-  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 101) then passed := passed + 1
+  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 102) then passed := passed + 1
 
   -- 2. Loopback RPC auth gate (>= 32-byte non-placeholder secret + local Origin confinement)
   let validTok := "0123456789abcdef0123456789abcdef"

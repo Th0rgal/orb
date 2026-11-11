@@ -971,8 +971,9 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
       void resync(true).then(() => { if (!hasPendingSearchTarget(p.id)) scrollIfPinned(); });
     }
     let stopStream = () => {};
+    const localSyncPending = createMemo(() => Boolean(mission()?.local_sync_pending));
     createEffect(() => {
-      if (mission()?.local_sync_pending) {
+      if (localSyncPending()) {
         streamHealthy = false;
         return;
       }
