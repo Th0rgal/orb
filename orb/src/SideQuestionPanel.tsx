@@ -202,7 +202,7 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
   const effectOwner=getOwner();
   const registerCleanup=(fn:()=>void)=>{if(effectOwner)runWithOwner(effectOwner,()=>onCleanup(fn));};
   const registerEffect=(fn:()=>void)=>{if(effectOwner)runWithOwner(effectOwner,()=>createEffect(fn));else fn();};
-  abort?.abort();queuedEdit.finish(true);
+  asking=false;abort?.abort();abort=undefined;queuedEdit.finish(true);
   pendingBaselineHistory=[];
   setExpandedSteps(0);setPinnedExtraTurns(0);setInitialSyncPending(false);
   setLoadedKey('');setBusy(false);setHistory([]);setError('');setQueue([]);setQueueToast('');setStartedAt(undefined);
@@ -426,7 +426,7 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
   // side-question button still opens it.
   if(!hasReconcile){
    registerEffect(()=>{
-    if(!isActive()&&abort){abort.abort();abort=undefined;}
+    if(!isActive()&&abort){asking=false;abort.abort();abort=undefined;}
    });
   }
   if(hasReconcile){
@@ -444,6 +444,7 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
     if(poll!==undefined){clearInterval(poll);poll=undefined;}
     if(abort){
      if(untrack(busy))awaitingServerPending=true;
+     asking=false;
      abort.abort();abort=undefined;
     }
    };
@@ -503,11 +504,29 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
       awaitingServerPending=true;
      }
     }else if(awaitingServerPending&&!asking&&!reconciled.activeSession){
-     if(reconciled.authoritative===false){
+     let inflightLaunch:Promise<void>|undefined;
+     try{if('btwLaunchPending' in btwMod&&typeof btwMod.btwLaunchPending==='function')inflightLaunch=btwMod.btwLaunchPending(missionId);}catch{}
+     if(inflightLaunch){
+      setBusy(true);setRunStatus('Starting side agent…');
+      void inflightLaunch.then(()=>{
+       if(stale||key()!==current)return;
+       const launched=btwSession(missionId);
+       if(launched?.active&&untrack(isActive)){
+        awaitingServerPending=false;
+        watchActive(launched);
+        return;
+       }
+       resync?.();
+      });
+     }else if(reconciled.authoritative===false){
       setBusy(true);setRunStatus('Connection interrupted — reconnecting…');
      }else{
+      let launchErr:{error:string;notSent:boolean}|undefined;
+      try{if('btwLastLaunchError' in btwMod&&typeof btwMod.btwLastLaunchError==='function')launchErr=btwMod.btwLastLaunchError(missionId);}catch{}
       awaitingServerPending=false;
-      setBusy(false);setStartedAt(undefined);setRunStatus('');setError(interruptedError);
+      setBusy(false);setStartedAt(undefined);setRunStatus('');
+      if(launchErr?.notSent){setNotSent(true);setError(launchErr.error);}
+      else setError(launchErr?.error||interruptedError);
      }
     }
    };
@@ -858,7 +877,7 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
  };
  onMount(()=>window.addEventListener('keydown',escape));
  onCleanup(()=>window.removeEventListener('keydown',escape));
- const cancel=()=>{launchAbort?.abort();void stopBtw(p.mission).then(()=>{abort?.abort();setConfirmedQueued([]);setSideLiveEdits([]);setPendingQueued([]);setBusy(false);setStartedAt(undefined);setRunStatus('');setError('Side agent stopped.');}).catch(e=>setError(String(e)));};
+ const cancel=()=>{asking=false;launchAbort?.abort();void stopBtw(p.mission).then(()=>{abort?.abort();abort=undefined;setConfirmedQueued([]);setSideLiveEdits([]);setPendingQueued([]);setBusy(false);setStartedAt(undefined);setRunStatus('');setError('Side agent stopped.');}).catch(e=>setError(String(e)));};
  const retry=()=>{const asked=question(),files=pendingAttachments();void ask(asked,[],[],files,true);};
  const dismiss=()=>{pendingBaselineHistory=[];setError('');setNotSent(false);setStartedAt(undefined);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);queueMicrotask(sendNext);};
  // Reconcile the same turn through preparation, streaming and persistence,

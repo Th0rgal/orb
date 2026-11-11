@@ -1175,6 +1175,67 @@ it('suspends side-question stream retention and 15s reconciliation polling while
  }
 });
 
+it('resets the asking latch when suspending an active side-question turn so reactivation reconnects or settles',async()=>{
+ askMock.fn=(_mission,q,_ctx,_hist,signal)=>new Promise<void>((resolve)=>{
+  sessionMock.current={id:'side-suspend-1',question:q,harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,startedAt:'2026-11-11T10:00:00Z'};
+  signal.addEventListener('abort',()=>resolve(),{once:true});
+ });
+ serverReconcile.fn=async(_parent,local)=>({
+  history:local,
+  latest:'side-suspend-1',
+  authoritative:true,
+ });
+
+ const [active,setActive]=createSignal(true);
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="mission-suspend-ask" active={active()} items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+
+ await handle.ask('First suspended question?');
+ expect(await screen.findByText('First suspended question?')).toBeTruthy();
+
+ // 1. Deactivate while `askBtwAgent` is in flight, then reactivate while the turn is still active on Core:
+ setActive(false);
+ let finishWatch!:()=>void;
+ watchMock.fn=(_parent,_signal,receive)=>new Promise<void>(resolve=>{
+  receive({type:'snapshot',text:'Resumed live partial…',narration:[]});
+  finishWatch=()=>{
+   receive({type:'done',answer:'Resumed final answer.'});
+   sessionMock.current={...sessionMock.current!,active:false};
+   resolve();
+  };
+ });
+ serverReconcile.fn=async(_parent,local)=>({
+  history:local,
+  activeSession:sessionMock.current?.active?sessionMock.current:undefined,
+  latest:'side-suspend-1',
+  authoritative:true,
+ });
+
+ setActive(true);
+ expect(await screen.findByText('Resumed live partial…')).toBeTruthy();
+ finishWatch();
+ expect(await screen.findByText('Resumed final answer.')).toBeTruthy();
+
+ // 2. Ask a second question, deactivate while in flight, let Core complete it while hidden, then reactivate:
+ await handle.ask('Second suspended question?');
+ expect(await screen.findByText('Second suspended question?')).toBeTruthy();
+ setActive(false);
+
+ sessionMock.current={...sessionMock.current!,active:false};
+ serverReconcile.fn=async()=>({
+  history:[
+   {id:'s-1',question:'First suspended question?',answer:'Resumed final answer.'},
+   {id:'s-2',question:'Second suspended question?',answer:'Settled while hidden.'},
+  ],
+  latest:'side-suspend-1',
+  authoritative:true,
+ });
+
+ setActive(true);
+ expect(await screen.findByText('Settled while hidden.')).toBeTruthy();
+ await waitFor(()=>expect(screen.queryByRole('status')).toBeNull());
+});
+
 
 
 
