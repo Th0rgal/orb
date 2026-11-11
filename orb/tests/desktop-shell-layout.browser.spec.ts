@@ -310,6 +310,7 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
     });
 
   await page.evaluate(() => {
+    document.documentElement.style.setProperty("--t", "0ms");
     document.documentElement.dataset.platform = "macos";
     document.documentElement.dataset.theme = "dark";
   });
@@ -336,7 +337,7 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   expect(linuxDark.main).toBeCloseTo(0.94, 2);
   expect(linuxDark.titlebar).toBeCloseTo(0.94, 2);
   if (linuxDark.activeRow !== null) {
-    expect(linuxDark.activeRow).toBeCloseTo(0.075, 2);
+    await expect.poll(async () => (await readSurfaceAlphas()).activeRow).toBeCloseTo(0.075, 2);
   }
   const linuxTbLeft = (await page.locator(".titlebar .tb-left").boundingBox())!;
   expect(linuxTbLeft.x).toBe(8);
