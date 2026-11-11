@@ -56,18 +56,23 @@ import ImagePreview from "./ImagePreview";
 import { imageByteLimit, imageMime } from "./imageTypes";
 import { scrollKeeper } from "./mission/scrollPolicy";
 
-function lazyRetry<P extends Record<string, unknown>>(loader: () => Promise<{ default: Component<P> }>) {
-  let current = lazy(loader);
+export function lazyRetry<P extends Record<string, unknown>>(loader: () => Promise<{ default: Component<P> }>) {
+  const [Current, setCurrent] = createSignal<Component<P>>(lazy(loader));
   return {
-    get Component() {
-      return current;
-    },
+    Component: () => Current(),
     reset() {
-      current = lazy(loader);
+      setCurrent(() => lazy(loader));
     },
   };
 }
-const pdfPreviewLazy = lazyRetry(() => import("./PdfPreview"));
+let pdfRetryNonce = 0;
+const pdfPreviewLazy = lazyRetry(() => {
+  if (import.meta.env.DEV && pdfRetryNonce > 0) {
+    const retryUrl = new URL(`./PdfPreview.tsx?retry=${pdfRetryNonce}`, import.meta.url).href;
+    return import(/* @vite-ignore */ retryUrl).catch(() => import("./PdfPreview"));
+  }
+  return import("./PdfPreview");
+});
 const DiffViewer = lazy(() => import("./DiffViewer"));
 function isStaleChunkError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
@@ -1390,7 +1395,7 @@ export function FilePanelProvider(p: {
                                     : `Couldn’t load PDF viewer. ${err instanceof Error ? err.message : String(err)}`}
                                 </p>
                                 <div style={{ display: "flex", gap: "8px", "justify-content": "center" }}>
-                                  <button class="s-btn file-binary-action" onClick={() => { pdfPreviewLazy.reset(); reset(); }}>Retry</button>
+                                  <button class="s-btn file-binary-action" onClick={() => { pdfRetryNonce += 1; pdfPreviewLazy.reset(); reset(); }}>Retry</button>
                                   <Show when={isStaleChunkError(err)}>
                                     <button class="s-btn file-binary-action" onClick={() => location.reload()}>Reload Orb</button>
                                   </Show>
@@ -1398,7 +1403,7 @@ export function FilePanelProvider(p: {
                               </div>
                             )}>
                               <Suspense fallback={<p class="file-muted">Loading PDF viewer…</p>}>
-                                <Show when={pdfPreviewLazy.Component} keyed>
+                                <Show when={pdfPreviewLazy.Component()} keyed>
                                   {(PdfComp) => <PdfComp name={selected()?.name ?? "PDF"} load={loadPreviewBytes} close={() => setShowPdf(false)} />}
                                 </Show>
                               </Suspense>

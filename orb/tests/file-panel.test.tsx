@@ -2,7 +2,7 @@ import {createSignal,useContext} from "solid-js";
 import {FileReferenceContext,type ReferenceResolver} from "../src/fileReferenceContext";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
 import { it, expect, vi } from "vitest";
-import { FilePanelProvider, FilePanelButton } from "../src/FilePanel";
+import { FilePanelProvider, FilePanelButton, lazyRetry } from "../src/FilePanel";
 import { MdView } from "../src/Markdown";
 vi.mock("../src/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/api")>()),
@@ -109,4 +109,34 @@ it("reschedules file lookups after a scope change cancels a pending batch",async
  expect(await old).toEqual([]);
  const fresh=await resolver.resolve('note.md');
  expect(fresh).toEqual([expect.objectContaining({name:'note.md',source:'workspace'})]);
+});
+
+it("lazyRetry reactivity mounts the recovered component when reset() is clicked inside ErrorBoundary", async () => {
+  const { ErrorBoundary, Show, Suspense } = await import("solid-js");
+  let attempts = 0;
+  const retryable = lazyRetry(async () => {
+    attempts += 1;
+    if (attempts === 1) throw new TypeError("Importing a module script failed.");
+    return { default: (p: { label: string }) => <div data-testid="recovered-pdf">{p.label}</div> };
+  });
+  const { getByRole, getByTestId } = render(() => (
+    <ErrorBoundary
+      fallback={(err, reset) => (
+        <div role="alert">
+          <span>{err instanceof Error ? err.message : String(err)}</span>
+          <button onClick={() => { retryable.reset(); reset(); }}>Retry</button>
+        </div>
+      )}
+    >
+      <Suspense fallback={<p>Loading PDF viewer…</p>}>
+        <Show when={retryable.Component()} keyed>
+          {(Comp) => <Comp label="PDF Ready" />}
+        </Show>
+      </Suspense>
+    </ErrorBoundary>
+  ));
+  await waitFor(() => expect(getByRole("alert")).toBeTruthy());
+  fireEvent.click(getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(getByTestId("recovered-pdf").textContent).toBe("PDF Ready"));
+  expect(attempts).toBe(2);
 });

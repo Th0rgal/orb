@@ -1219,7 +1219,9 @@ async function fetchTranscript(
           : mergeStreamBySequence(previous.stream ?? [], tailEvents);
       let cursor = previous?.cursor;
       let before = previous?.before;
-      let hasOlder = previous?.hasOlder;
+      let diskStartIdx = previous?.cursor === undefined ? undefined : previous?.diskStartIdx;
+      let serverHasOlder = previous?.cursor === undefined ? undefined : previous?.serverHasOlder;
+      let hasOlder = diskStartIdx && diskStartIdx > 0 ? true : previous?.hasOlder;
       let spineComplete = previous?.spineComplete;
       let spineBefore = previous?.spineBefore;
       if (previous?.cursor === undefined) {
@@ -1289,7 +1291,8 @@ async function fetchTranscript(
         ...(spineBefore !== undefined ? { spineBefore } : {}),
         cursor,
         before,
-        hasOlder,
+        hasOlder: diskStartIdx && diskStartIdx > 0 ? true : hasOlder,
+        ...(diskStartIdx && diskStartIdx > 0 ? { diskStartIdx, serverHasOlder } : {}),
       };
     }
   }
@@ -1662,14 +1665,26 @@ export function prepareTranscriptSearch(id: string, signal?: AbortSignal): Promi
   return transcriptJob(id, "older", async () => {
     let current = peekReadyTranscript(id) ?? (await fetchTranscript(id));
     if (current.diskStartIdx && current.diskStartIdx > 0) {
-      const fullLocal = await loadPersistedTranscriptSlice<StreamEvent>(
-        transcriptPersistScope(),
-        id,
-        current.diskStartIdx,
-        current.diskStartIdx,
-      );
-      if (fullLocal && fullLocal.events.length > 0) {
-        const mergedLocal = mergeStreamBySequence(fullLocal.events, current.stream);
+      let remBefore = current.diskStartIdx;
+      const localSlices: StreamEvent[][] = [];
+      let reachedStart = false;
+      while (remBefore > 0 && !signal?.aborted) {
+        const page = await loadPersistedTranscriptSlice<StreamEvent>(
+          transcriptPersistScope(),
+          id,
+          remBefore,
+          Math.min(remBefore, 2000),
+        );
+        if (!page || page.events.length === 0 || page.startIdx >= remBefore) break;
+        localSlices.unshift(page.events);
+        remBefore = page.startIdx;
+        if (remBefore === 0) reachedStart = true;
+      }
+      if (localSlices.length > 0 && !signal?.aborted) {
+        let mergedLocal = current.stream;
+        for (let s = localSlices.length - 1; s >= 0; s--) {
+          mergedLocal = mergeStreamBySequence(localSlices[s], mergedLocal);
+        }
         const session = sessionFor(id);
         let items = buildTranscript([...mergedLocal, ...(current.liveTail ?? [])], session);
         for (const item of current.items) {
@@ -1694,9 +1709,16 @@ export function prepareTranscriptSearch(id: string, signal?: AbortSignal): Promi
           ...current,
           stream: mergedLocal,
           items,
-          diskStartIdx: undefined,
-          hasOlder: Boolean(current.serverHasOlder),
-          serverHasOlder: undefined,
+          ...(reachedStart
+            ? {
+                diskStartIdx: undefined,
+                hasOlder: Boolean(current.serverHasOlder),
+                serverHasOlder: undefined,
+              }
+            : {
+                diskStartIdx: remBefore,
+                hasOlder: true,
+              }),
         };
       }
     }

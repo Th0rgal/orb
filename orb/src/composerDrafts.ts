@@ -119,9 +119,14 @@ async function writeRecord<T>(key: string, value: T): Promise<void> {
     } catch (err) {
       if (isUnsupportedDraftCommandError(err)) {
         unsupportedDraftInvoke = invoke;
+      } else {
+        // Remove any older SQLite entry so the IndexedDB fallback cannot be shadowed on cold read.
+        await invoke("ui_draft_delete", { key }).catch(() => undefined);
       }
       // Fall through to IndexedDB on binary/oversized payload or older daemon.
     }
+  } else if (invoke) {
+    await invoke("ui_draft_delete", { key }).catch(() => undefined);
   }
   await idbPut(key, value);
 }

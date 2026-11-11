@@ -85,7 +85,11 @@ it("persists drafts and side threads in orb-locald SQLite and auto-migrates Inde
         const key = String(args?.key ?? "");
         if (cmd === "ui_draft_get") return sqlDrafts.get(key) ?? null;
         if (cmd === "ui_draft_put") {
-          sqlDrafts.set(key, String(args?.raw ?? ""));
+          const raw = String(args?.raw ?? "");
+          if (raw.includes("OVERSIZED_ATTACHMENT")) {
+            throw new Error("Draft exceeds 16 MiB limit");
+          }
+          sqlDrafts.set(key, raw);
           return null;
         }
         if (cmd === "ui_draft_delete") {
@@ -112,6 +116,20 @@ it("persists drafts and side threads in orb-locald SQLite and auto-migrates Inde
   expect(await readComposerDraft("m:native")).toEqual({
     mode: "plan",
     text: "build phase a2",
+    images: [],
+  });
+
+  // Oversized draft fallback deletes any stale SQLite entry so cold read returns the IndexedDB draft.
+  await saveComposerDraft("m:native", {
+    mode: "plan",
+    text: "updated with OVERSIZED_ATTACHMENT",
+    images: [],
+  });
+  expect(sqlDrafts.has("m:native")).toBe(false);
+  resetComposerDraftsMemoryForTest();
+  expect(await readComposerDraft("m:native")).toEqual({
+    mode: "plan",
+    text: "updated with OVERSIZED_ATTACHMENT",
     images: [],
   });
 
