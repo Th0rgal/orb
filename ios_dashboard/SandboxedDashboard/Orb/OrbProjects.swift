@@ -83,11 +83,15 @@ enum OrbStyle {
 /// Tactile press scale effect for interactive rows and buttons.
 struct OrbPressButtonStyle: ButtonStyle {
     var scale: CGFloat = 0.985
+    var onPressDown: (@MainActor () -> Void)? = nil
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? scale : 1.0)
             .opacity(configuration.isPressed ? 0.88 : 1.0)
             .animation(.spring(response: 0.22, dampingFraction: 0.78), value: configuration.isPressed)
+            .onChange(of: configuration.isPressed) { _, pressed in
+                if pressed { onPressDown?() }
+            }
     }
 }
 
@@ -925,7 +929,7 @@ struct OrbHome: View {
                 .padding(.vertical, 9)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(OrbPressButtonStyle())
+            .buttonStyle(OrbPressButtonStyle(onPressDown: { OrbReadCache.prefetchSingle(row.id, row: row) }))
             .accessibilityIdentifier("archive.mission.\(row.id)")
 
             if item.launched > 0 {
@@ -1069,7 +1073,7 @@ struct OrbHome: View {
                                 Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 34)
                             }
                         }
-                        .buttonStyle(OrbPressButtonStyle())
+                        .buttonStyle(OrbPressButtonStyle(onPressDown: { OrbReadCache.prefetchSingle(row.id, row: row) }))
                         .accessibilityIdentifier("shared.mission.\(row.id)")
                         .contextMenu {
                             Button(role: .destructive) {
@@ -1930,7 +1934,7 @@ struct OrbProjectPage: View {
                 .padding(.vertical, 10)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(OrbPressButtonStyle())
+            .buttonStyle(OrbPressButtonStyle(onPressDown: { OrbReadCache.prefetchSingle(row.id, row: row) }))
             .accessibilityIdentifier("mission.\(row.id)")
 
             if launched > 0 || versions > 0, let onToggleLaunched {

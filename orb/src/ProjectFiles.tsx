@@ -2697,7 +2697,7 @@ export function LiveProjectsSection(p: {
       onPointerDown={e => { if (e.button === 0 && !deleting()) { if (d.mission) { cancelHoverTranscript(); prefetchTranscript(d.mission.id); } else { cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); } } }}
       onPointerEnter={e => { if (deleting()) return; if (rowDrag.phase() === 0) rowTip.bind(tipDetail()).onPointerEnter(e); if (d.mission) scheduleHoverTranscript(d.mission.id); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }}
       onPointerLeave={() => { tip.onPointerLeave(); if (d.mission) cancelHoverTranscript(); }}
-      onFocus={e => rowTip.bind(tipDetail()).onFocus(e)}
+      onFocus={e => { rowTip.bind(tipDetail()).onFocus(e); if (!deleting() && d.mission) prefetchTranscript(d.mission.id); }}
       onContextMenu={e => { if (d.mission) { if (deleting()) { e.preventDefault(); e.stopPropagation(); return; } const dest = resolveTreeDestination(row.id); onMissionContext(e, d.mission, row.id, dest?.slug ?? (isArchived(d.mission) ? "" : d.slug), dest?.path ?? ""); } else {
         e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setControllerMenu(null); setMultiSelectMenu(null);
         const group = contextSelectRow(row.id);
@@ -2724,6 +2724,10 @@ export function LiveProjectsSection(p: {
                 type="button"
                 class={`row agent ${!LIVE.has(m.status) ? "done" : ""} ${isSelectedRow(`m:${m.id}`) ? "active" : ""}`}
                 aria-current={isSelectedRow(`m:${m.id}`) ? "page" : undefined}
+                onPointerEnter={() => scheduleHoverTranscript(m.id)}
+                onPointerLeave={cancelHoverTranscript}
+                onPointerDown={() => prefetchTranscript(m.id)}
+                onFocus={() => prefetchTranscript(m.id)}
                 onClick={() => p.open(`m:${m.id}`)}
                 onContextMenu={e => onMissionContext(e, m, `m:${m.id}`, "", "")}
               >

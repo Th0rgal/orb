@@ -37,6 +37,14 @@ struct OrbFollowUpQueue: Equatable {
     var consumedSequences: Set<Int64> = []
     var serverRev: UInt32 = 1
     var hasServerRevision = false
+    var lastFetchedAt: Date = .distantPast
+
+    func isStaleFetch(_ fetchedAt: Date, incomingServerRev: UInt32? = nil) -> Bool {
+        if let rev = incomingServerRev, rev > 0 {
+            return hasServerRevision && rev < serverRev
+        }
+        return fetchedAt != .distantPast && lastFetchedAt != .distantPast && fetchedAt < lastFetchedAt
+    }
 
     static func hashMessageId(_ id: String?) -> UInt64 {
         guard let id, !id.isEmpty else { return 0 }
@@ -85,6 +93,7 @@ struct OrbFollowUpQueue: Equatable {
         turnSeq: Int64? = nil
     ) -> OrbFollowUpQueue {
         let normalizedIncoming = incomingServerRev.flatMap { $0 > 0 ? $0 : nil }
+        if isStaleFetch(fetchedAt, incomingServerRev: normalizedIncoming) { return self }
         let effectiveRev = normalizedIncoming ?? serverRev
         let gate = OrbKernel.followupQueueStep(
             op: 0,
@@ -106,6 +115,9 @@ struct OrbFollowUpQueue: Equatable {
         var next = self
         next.serverRev = gate.nextServerRev
         if normalizedIncoming != nil { next.hasServerRevision = true }
+        if fetchedAt != .distantPast && fetchedAt > next.lastFetchedAt {
+            next.lastFetchedAt = fetchedAt
+        }
         let listed = Set(rows.map(\.id))
         next.server = rows.map { var r = $0; r.sending = false; return r }
         next.pending = pending.filter { row in
@@ -295,7 +307,8 @@ struct OrbFollowUpQueue: Equatable {
         _ id: String,
         _ content: String,
         expectedServerRev: UInt32? = nil,
-        confirmedServerRev: UInt32? = nil
+        confirmedServerRev: UInt32? = nil,
+        confirmedAt: Date = .distantPast
     ) -> OrbFollowUpQueue {
         guard !delivered.contains(id) else { return self }
         let expected = expectedServerRev ?? serverRev
@@ -336,6 +349,9 @@ struct OrbFollowUpQueue: Equatable {
         }
         next.pending = pending.map { var r = $0; if r.id == id { r.content = content }; return r }
         next.edits[id] = nil
+        if confirmedAt != .distantPast && confirmedAt > next.lastFetchedAt {
+            next.lastFetchedAt = confirmedAt
+        }
         return next
     }
 

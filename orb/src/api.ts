@@ -133,6 +133,27 @@ export function orderedApiCandidates(primary = getApiUrl()): string[] {
   return [...healthy, ...cooling];
 }
 
+type TransportBridgeInfo = {
+  proxy_base_url?: string;
+  stream_proxy_base_urls?: string[];
+  configured_target?: string;
+};
+
+function applyTransportBridgeInfo(cleanTarget: string, info: TransportBridgeInfo | null | undefined): string | null {
+  const proxy = typeof info?.proxy_base_url === "string" && info.proxy_base_url.startsWith("http://127.0.0.1:")
+    ? info.proxy_base_url.replace(/\/+$/, "")
+    : null;
+  const streams = Array.isArray(info?.stream_proxy_base_urls)
+    ? info.stream_proxy_base_urls
+        .filter((u): u is string => typeof u === "string" && u.startsWith("http://127.0.0.1:"))
+        .map((u) => u.replace(/\/+$/, ""))
+    : [];
+  bridgeTarget = cleanTarget;
+  bridgeBaseUrl = proxy;
+  bridgeStreamUrls = streams;
+  return proxy;
+}
+
 /** Resolve the native loopback transport URL (`http://127.0.0.1:<port>/__orb_tx/<token>`)
  * when running inside Tauri desktop; returns `null` in web/test environments. */
 export async function resolveTransportBase(apiUrl = getApiUrl()): Promise<string | null> {
@@ -144,26 +165,8 @@ export async function resolveTransportBase(apiUrl = getApiUrl()): Promise<string
   if (bridgeTarget === clean && bridgeBaseUrl) return bridgeBaseUrl;
   if (bridgePending && bridgeTarget === clean) return bridgePending;
   bridgeTarget = clean;
-  const pending = invoke<{
-    proxy_base_url?: string;
-    stream_proxy_base_urls?: string[];
-    configured_target?: string;
-  }>("transport_bridge_configure", { apiUrl: clean })
-    .then((info) => {
-      const proxy = typeof info?.proxy_base_url === "string" && info.proxy_base_url.startsWith("http://127.0.0.1:")
-        ? info.proxy_base_url.replace(/\/+$/, "")
-        : null;
-      const streams = Array.isArray(info?.stream_proxy_base_urls)
-        ? info.stream_proxy_base_urls
-            .filter((u): u is string => typeof u === "string" && u.startsWith("http://127.0.0.1:"))
-            .map((u) => u.replace(/\/+$/, ""))
-        : [];
-      if (bridgeTarget === clean) {
-        bridgeBaseUrl = proxy;
-        bridgeStreamUrls = streams;
-      }
-      return proxy;
-    })
+  const pending = invoke<TransportBridgeInfo>("transport_bridge_configure", { apiUrl: clean })
+    .then((info) => (bridgeTarget === clean ? applyTransportBridgeInfo(clean, info) : null))
     .catch((error) => {
       note(`transport.bridge.error: ${error instanceof Error ? error.message : String(error)}`);
       if (bridgeTarget === clean) {
@@ -451,6 +454,48 @@ export async function restoreDesktopConnection() {
   if(saved?.api_url&&saved?.token)setConnection(saved.api_url,saved.token,{persist:false});
 }
 
+/** Single-IPC desktop cold-start bootstrap (`desktop_bootstrap`) consolidating
+ * `desktop_connection_load`, `desktop_prefs_load`, and `transport_bridge_configure`,
+ * with automatic fallback to individual RPCs on older daemons or test mocks. */
+export async function bootstrapDesktopRuntime(): Promise<void> {
+  const invoke = nativeInvoke();
+  const { applyBootstrappedDesktopPrefs, initDesktopPrefs } = await import("./desktopPrefs");
+  if (!invoke) {
+    await initDesktopPrefs().catch(() => null);
+    return;
+  }
+  try {
+    const boot = await invoke<{
+      connection?: { api_url?: string; token?: string } | null;
+      prefs?: unknown;
+      transport?: TransportBridgeInfo;
+    }>("desktop_bootstrap", getJwt() ? { apiUrl: getApiUrl() } : {});
+    if (boot && typeof boot === "object" && ("connection" in boot || "prefs" in boot || "transport" in boot)) {
+      if (getJwt()) {
+        persistDesktopConnection({ api_url: getApiUrl(), token: getJwt()! });
+      } else if (boot.connection?.api_url && boot.connection?.token) {
+        setConnection(boot.connection.api_url, boot.connection.token, { persist: false });
+      }
+      const prefsApplied = await applyBootstrappedDesktopPrefs(boot.prefs).catch(() => false);
+      if (!prefsApplied) await initDesktopPrefs().catch(() => null);
+      const cleanUrl = getApiUrl().trim().replace(/\/+$/, "");
+      if (boot.transport && (!cleanUrl.startsWith("https://") || boot.transport.configured_target === cleanUrl)) {
+        applyTransportBridgeInfo(cleanUrl, boot.transport);
+      } else {
+        await resolveTransportBase(cleanUrl).catch(() => null);
+      }
+      return;
+    }
+  } catch {
+    // Fall back cleanly when `desktop_bootstrap` is unimplemented or mocked per-command.
+  }
+  await restoreDesktopConnection().catch(() => {
+    console.warn("Orb could not restore the saved desktop connection");
+  });
+  await initDesktopPrefs().catch(() => null);
+  await resolveTransportBase().catch(() => null);
+}
+
 function disconnectNativeSync(){
   const invoke=nativeInvoke();
   if(!invoke||!getJwt())return;
@@ -458,9 +503,10 @@ function disconnectNativeSync(){
   void invoke("local_origin_disconnect",{connection:{api_url:getApiUrl(),token:getJwt()}}).catch(swallow("api.disconnect.localOrigin"));
 }
 export function setConnection(url: string, token: string, options?: { persist?: boolean }) {
+  const hadJwt = !!getJwt();
   const changed = url.replace(/\/+$/,"")!==getApiUrl() || token!==getJwt();
-  if(getJwt() && changed)disconnectNativeSync();
-  if(changed){resetMissionHierarchy();ancestorCache.clear();void clearPersistentCache();resetCurrentUserState();}
+  if(hadJwt && changed)disconnectNativeSync();
+  if(changed){resetMissionHierarchy();ancestorCache.clear();if(hadJwt)void clearPersistentCache();resetCurrentUserState();}
   resetNetworkHealth();
   setApiUrl(url);
   localStorage.setItem(JWT_KEY, token);
@@ -1904,10 +1950,11 @@ async function includeAncestors(rows: Mission[], project?: string): Promise<Miss
  * history alone drops live missions that newer (often archived) ones pushed off. */
 async function projectRows(slug: string, priority?: RequestPriority): Promise<Mission[]> {
   const project = encodeURIComponent(slug);
-  const [history, ...live] = await Promise.all([
-    api<Mission[]>(`/api/control/missions?project=${project}&limit=100&all=true`, undefined, undefined, priority),
+  const [history, firstLive] = await Promise.all([
+    api<Mission[]>(`/api/control/missions?project=${project}&limit=200&all=true`, undefined, undefined, priority),
     api<Mission[]>(`/api/control/missions?project=${project}&limit=200`, undefined, undefined, priority),
   ]);
+  const live: Mission[][] = [firstLive];
   for (let offset = 200; live[live.length - 1].length === 200 && offset < 1000; offset += 200)
     live.push(await api<Mission[]>(`/api/control/missions?project=${project}&limit=200&offset=${offset}`, undefined, undefined, priority));
   const byId = new Map<string, Mission>();
@@ -2102,8 +2149,13 @@ export function recordMissionSyncCursor(rows: readonly Mission[], fullSync: bool
 export async function listMissions(limit = 200, options?: { updatedSince?: string }): Promise<Mission[]> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const isDelta = Boolean(options?.updatedSince);
-  const params = new URLSearchParams({ limit: String(limit) });
-  if (options?.updatedSince) params.set("updated_since", options.updatedSince);
+  const params = new URLSearchParams();
+  if (options?.updatedSince) {
+    params.set("updated_since", options.updatedSince);
+    params.set("all", "true");
+  } else {
+    params.set("limit", String(limit));
+  }
   const remotePromise = api<Mission[]>(`/api/control/missions?${params}`).then(rows => includeAncestors(rows));
   remotePromise.catch(() => {});
   const local = excludeBtwMissions(await origins.localOrigins());
@@ -2135,9 +2187,54 @@ export async function listCompletedMissions(limit = 100): Promise<Mission[] | nu
   }
 }
 
+const seededOpenMissions = new Map<string, { connVer: number; savedAt: number; mission: Mission }>();
+const lastMissionMutationAt = new Map<string, { connVer: number; at: number }>();
+
+/** Fence `seededOpenMissions` so any `/open` response started before a mission
+ * mutation (`PATCH /settings`, placement move, status/title change, send) cannot
+ * overwrite newer state. */
+export function noteMissionMutated(id: string): void {
+  if (!id) return;
+  seededOpenMissions.delete(id);
+  lastMissionMutationAt.set(id, { connVer: connectionVersion(), at: Date.now() });
+  while (lastMissionMutationAt.size > 256) {
+    lastMissionMutationAt.delete(lastMissionMutationAt.keys().next().value!);
+  }
+}
+
+/** Seed a fresh `Mission` returned inside a single-RTT `/open` bundle so a
+ * concurrent `getMission(id)` resolves in `0 ms` with zero extra HTTP calls. */
+export function seedCachedMission(mission: Mission | null | undefined, fetchedAt = Date.now()): void {
+  if (!mission || typeof mission !== "object" || typeof mission.id !== "string" || !mission.id) return;
+  const ver = connectionVersion();
+  const mutated = lastMissionMutationAt.get(mission.id);
+  if (mutated && mutated.connVer === ver && fetchedAt <= mutated.at) return;
+  seededOpenMissions.set(mission.id, {
+    connVer: ver,
+    savedAt: Date.now(),
+    mission,
+  });
+  while (seededOpenMissions.size > 64) {
+    seededOpenMissions.delete(seededOpenMissions.keys().next().value!);
+  }
+}
+
 /** `coreOnly` skips the local-origin fallback: callers that need Core's
  * placement must not see a journal row that predates a machine transfer. */
 export async function getMission(id: string, options: { coreOnly?: boolean; fresh?: boolean; includeHistory?: boolean; priority?: RequestPriority } = {}): Promise<Mission> {
+  if (options.fresh) {
+    seededOpenMissions.delete(id);
+  } else {
+    const seeded = seededOpenMissions.get(id);
+    if (seeded && seeded.connVer === connectionVersion() && Date.now() - seeded.savedAt <= 3000) {
+      seededOpenMissions.delete(id);
+      if (options.coreOnly) return seeded.mission;
+      const origins = await import("./localOrigins");
+      const local = (await origins.localOrigins(id)).find((row) => row.id === id);
+      if (local && origins.localPending(local)) return origins.withCoreEffort(local, seeded.mission);
+      return seeded.mission;
+    }
+  }
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const path = options.includeHistory === false
     ? `/api/control/missions/${id}?include_history=false`
@@ -2349,6 +2446,7 @@ export async function sendMissionMessage(
   clientMessageId: string = crypto.randomUUID(),
   knownMission?: Mission | null,
 ): Promise<MessageReceipt> {
+  noteMissionMutated(id);
   const version = connectionVersion();
   const replacementKey = `${version}:${id}:${clientMessageId}`;
   const createReplacement = async (body: CreateMissionBody): Promise<MessageReceipt> => {
@@ -2489,6 +2587,7 @@ export async function appendClientTranscript(id: string, role: "user" | "assista
 }
 
 export async function setClientMissionStatus(id: string, status: "completed" | "failed" | "interrupted" | "awaiting_user", receipt?: ClientRunReceipt, scheduledExecutionId?: string): Promise<void> {
+  noteMissionMutated(id);
   const resolvedReceipt = receipt ?? await import("./clientRuns").then(m => m.clientRunReceipt(id));
   const runPart = (resolvedReceipt as { run_id?: string } | undefined)?.run_id || scheduledExecutionId || crypto.randomUUID();
   await api(`/api/control/missions/${id}/client-status`, withIdempotencyKey({
@@ -2551,6 +2650,7 @@ export async function renameMission(id: string, title: string): Promise<void> {
 }
 /** Core accepted the change just now: any list requested earlier is older than this. */
 async function confirmCoreChange(change: { id: string; status?: string; title?: string }): Promise<void> {
+  noteMissionMutated(change.id);
   await import("./localOrigins").then(m => m.confirmLocalOrigins([{ ...change, observed_at: m.observe() }]));
 }
 
@@ -2610,12 +2710,16 @@ export interface MoveMissionsResponse {
 
 /** Atomically move one or more mission families between folders or projects. */
 export async function moveMissionsBatch(body: MoveMissionsRequest): Promise<MoveMissionsResponse> {
+  for (const mid of body.mission_ids ?? []) noteMissionMutated(mid);
+  for (const mid of body.descendant_ids ?? []) noteMissionMutated(mid);
   try {
-    return await api<MoveMissionsResponse>("/api/control/missions/move", withIdempotencyKey({
+    const res = await api<MoveMissionsResponse>("/api/control/missions/move", withIdempotencyKey({
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }));
+    for (const item of res.moved ?? []) noteMissionMutated(item.mission_id);
+    return res;
   } catch (error) {
     if (error instanceof ApiError && error.status === 409) {
       try {
@@ -2643,11 +2747,13 @@ export async function moveMissionsBatch(body: MoveMissionsRequest): Promise<Move
 }
 
 export async function cancelMission(id: string): Promise<void> {
+  noteMissionMutated(id);
   await api<void>(`/api/control/missions/${id}/cancel`, withIdempotencyKey({ method: "POST" }));
 }
 
 /** Force-start a slot-queued mission immediately using the bounded 1-extra operator bypass slot. */
 export async function forceMissionSlot(id: string): Promise<Mission> {
+  noteMissionMutated(id);
   return api<Mission>(`/api/control/missions/${encodeURIComponent(id)}/force-slot`, withIdempotencyKey({ method: "POST" }));
 }
 
@@ -2663,11 +2769,14 @@ export async function updateMissionSettings(
   id: string,
   body: { model_override?: string; backend?: string; model_effort?: string; service_tier?: CodexServiceTier; resume?: boolean },
 ): Promise<Mission> {
-  return api(`/api/control/missions/${id}/settings`, withIdempotencyKey({
+  noteMissionMutated(id);
+  const res = await api<Mission>(`/api/control/missions/${id}/settings`, withIdempotencyKey({
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ resume: false, ...body }),
   }));
+  noteMissionMutated(id);
+  return res;
 }
 
 /**

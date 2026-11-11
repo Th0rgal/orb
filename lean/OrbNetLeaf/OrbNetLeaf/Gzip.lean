@@ -430,4 +430,129 @@ def gunzipBounded (raw : ByteArray) (maxOutBytes : Nat := 16777216) : Except Str
     throw "empty gzip stream"
   return totalOut
 
+/-- Bit-level LSB-first writer state for RFC 1951 DEFLATE encoding. -/
+private structure BitWriter where
+  out    : ByteArray := ByteArray.empty
+  bitBuf : UInt64 := 0
+  bitCnt : Nat := 0
+
+private def BitWriter.writeBits (bw : BitWriter) (val : Nat) (n : Nat) : BitWriter := Id.run do
+  let mask : UInt64 := if n >= 64 then 0xFFFFFFFFFFFFFFFF else (1 <<< n.toUInt64) - 1
+  let mut buf := bw.bitBuf ||| ((val.toUInt64 &&& mask) <<< bw.bitCnt.toUInt64)
+  let mut cnt := bw.bitCnt + n
+  let mut o := bw.out
+  while cnt >= 8 do
+    o := o.push (buf &&& 0xFF).toUInt8
+    buf := buf >>> 8
+    cnt := cnt - 8
+  return { out := o, bitBuf := buf, bitCnt := cnt }
+
+private def BitWriter.flushAligned (bw : BitWriter) : ByteArray :=
+  if bw.bitCnt == 0 then bw.out
+  else bw.out.push (bw.bitBuf &&& 0xFF).toUInt8
+
+private def writeFixedLitSym (bw : BitWriter) (sym : Nat) : BitWriter :=
+  if sym <= 143 then
+    bw.writeBits (reverseBits (0x30 + sym) 8) 8
+  else if sym <= 255 then
+    bw.writeBits (reverseBits (0x190 + (sym - 144)) 9) 9
+  else if sym <= 279 then
+    bw.writeBits (reverseBits (sym - 256) 7) 7
+  else
+    bw.writeBits (reverseBits (0xC0 + (sym - 280)) 8) 8
+
+private def findLenIdx (len : Nat) : Nat := Id.run do
+  if len == 258 then return 28
+  let mut idx : Nat := 0
+  for i in [0:28] do
+    if len >= lenBaseTable[i]! then idx := i
+  return idx
+
+private def findDistIdx (dist : Nat) : Nat := Id.run do
+  let mut lo : Nat := 0
+  let mut hi : Nat := 29
+  while lo < hi do
+    let mid := (lo + hi + 1) / 2
+    if dist >= distBaseTable[mid]! then lo := mid else hi := mid - 1
+  return lo
+
+/-- Compress `raw` into a valid RFC 1952 `gzip` member using RFC 1951 fixed-Huffman
+    LZ77 (`32 KiB` sliding window, 4-byte hash table) + IEEE 802.3 CRC-32 + `ISIZE`. -/
+def gzipCompress (raw : ByteArray) : ByteArray := Id.run do
+  let hdr := ByteArray.mk #[0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03]
+  let mut bw : BitWriter := { out := hdr }
+  -- BFINAL=1 (1 bit), BTYPE=01 fixed Huffman (2 bits) => 0b011 = 3 in 3 LSB bits
+  bw := bw.writeBits 3 3
+  let n := raw.size
+  let hashBits : Nat := 12
+  let hashSize : Nat := 1 <<< hashBits
+  let hashMask : UInt32 := (hashSize - 1).toUInt32
+  -- Store `pos + 1` so `0` represents empty slot
+  let mut head : Array UInt32 := Array.replicate hashSize 0
+  let mut i : Nat := 0
+  while i < n do
+    let mut bestLen : Nat := 0
+    let mut bestDist : Nat := 0
+    if i + 4 <= n then
+      let b0 := (raw.get! i).toUInt32
+      let b1 := (raw.get! (i + 1)).toUInt32
+      let b2 := (raw.get! (i + 2)).toUInt32
+      let b3 := (raw.get! (i + 3)).toUInt32
+      let w4 := b0 ||| (b1 <<< 8) ||| (b2 <<< 16) ||| (b3 <<< 24)
+      let hIdx := (((w4 * 0x9E3779B1) >>> 20) &&& hashMask).toNat
+      let prev1 := head[hIdx]!
+      head := head.set! hIdx (i + 1).toUInt32
+      if prev1 > 0 then
+        let cand := prev1.toNat - 1
+        let dist := i - cand
+        if dist >= 1 && dist <= 32768 then
+          let maxL := Nat.min 258 (n - i)
+          if raw.get! cand == raw.get! i &&
+             raw.get! (cand + 1) == raw.get! (i + 1) &&
+             raw.get! (cand + 2) == raw.get! (i + 2) then
+            let mut l : Nat := 3
+            while l < maxL && raw.get! (cand + l) == raw.get! (i + l) do
+              l := l + 1
+            bestLen := l
+            bestDist := dist
+    if bestLen >= 4 then
+      let lIdx := findLenIdx bestLen
+      bw := writeFixedLitSym bw (257 + lIdx)
+      let lEx := lenExtraTable[lIdx]!
+      if lEx > 0 then
+        bw := bw.writeBits (bestLen - lenBaseTable[lIdx]!) lEx
+      let dIdx := findDistIdx bestDist
+      bw := bw.writeBits (reverseBits dIdx 5) 5
+      let dEx := distExtraTable[dIdx]!
+      if dEx > 0 then
+        bw := bw.writeBits (bestDist - distBaseTable[dIdx]!) dEx
+      -- Update intermediate 4-byte hashes so overlapping JSON keys still chain cleanly
+      let mut step : Nat := 1
+      let stepCap := Nat.min bestLen 16
+      while step < stepCap && i + step + 4 <= n do
+        let p := i + step
+        let w := (raw.get! p).toUInt32 ||| ((raw.get! (p + 1)).toUInt32 <<< 8) |||
+                 ((raw.get! (p + 2)).toUInt32 <<< 16) ||| ((raw.get! (p + 3)).toUInt32 <<< 24)
+        let idx2 := (((w * 0x9E3779B1) >>> 20) &&& hashMask).toNat
+        head := head.set! idx2 (p + 1).toUInt32
+        step := step + 1
+      i := i + bestLen
+    else
+      bw := writeFixedLitSym bw (raw.get! i).toNat
+      i := i + 1
+  -- End-of-block symbol 256
+  bw := writeFixedLitSym bw 256
+  let mut out := bw.flushAligned
+  let crc := crc32 raw
+  let isize : UInt32 := (n % 4294967296).toUInt32
+  out := out.push (crc &&& 0xFF).toUInt8
+  out := out.push ((crc >>> 8) &&& 0xFF).toUInt8
+  out := out.push ((crc >>> 16) &&& 0xFF).toUInt8
+  out := out.push ((crc >>> 24) &&& 0xFF).toUInt8
+  out := out.push (isize &&& 0xFF).toUInt8
+  out := out.push ((isize >>> 8) &&& 0xFF).toUInt8
+  out := out.push ((isize >>> 16) &&& 0xFF).toUInt8
+  out := out.push ((isize >>> 24) &&& 0xFF).toUInt8
+  return out
+
 end OrbNetLeaf.Gzip

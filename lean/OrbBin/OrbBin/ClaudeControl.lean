@@ -1294,7 +1294,7 @@ private def launchOrReuseWarmClaude
                   let (delta, turnDone, err?) ← ingestClaudeStdoutEvent stRef ev nowMs skipZeroRef
                   let snap ← stRef.get
                   if !delta.isEmpty then
-                    cb.onStructuredEvent "text_delta" (.obj #[("content", .str delta)])
+                    cb.onStructuredEvent "text_delta" (.obj #[("content", .str snap.text)])
                   cb.onOutputEvent (.obj #[
                     ("text", .str delta),
                     ("reset", .bool false),
@@ -1725,12 +1725,13 @@ def startHarnessTurn
                   ("activities", .arr (nextActs.map LocalActivityItem.toJVal))
                 ])
               if !parsed.textDelta.isEmpty then
-                let emittedDelta ← stRef.modifyGet fun s =>
+                let (emittedDelta, fullText) ← stRef.modifyGet fun s =>
                   let sep := if harness == "opencode" && !s.text.isEmpty && !s.text.endsWith "\n" && !parsed.textDelta.startsWith "\n" then "\n\n" else ""
                   let piece := sep ++ parsed.textDelta
-                  (piece, { s with text := s.text ++ piece })
+                  let nextText := s.text ++ piece
+                  ((piece, nextText), { s with text := nextText })
                 let cb ← getCallbacksFor mgr id
-                cb.onStructuredEvent "text_delta" (.obj #[("content", .str emittedDelta)])
+                cb.onStructuredEvent "text_delta" (.obj #[("content", .str fullText)])
                 cb.onOutputEvent (.obj #[("text", .str emittedDelta), ("reset", .bool false)])
       closeFdRaw spawned.stdoutFd
       let code ← waitpidBlock spawned.pid

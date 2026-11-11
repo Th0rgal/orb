@@ -436,27 +436,9 @@ export async function pullDesktopPrefs(checkConnection = false): Promise<void> {
   await Promise.all([pullPrefsOnly(invoke), maybeReconcileConnection(checkConnection, invoke)]);
 }
 
-async function runInitDesktopPrefs(): Promise<void> {
-  if (initialized || typeof window === "undefined" || typeof localStorage === "undefined") return;
-  const invoke = nativeInvoke();
-  if (!invoke) return;
-
-  ensureRuntimeWiring();
-
-  let initial: PrefsLoadResponse | undefined;
-  try {
-    initial = await invoke<PrefsLoadResponse>("desktop_prefs_load", {});
-  } catch {
-    hadFailedInit = true;
-    await maybeReconcileConnection(true, invoke);
-    scheduleInitRetry();
-    return;
-  }
+async function applyLoadedPrefsSnapshot(initial: PrefsLoadResponse): Promise<boolean> {
   if (!initial || typeof initial !== "object" || !initial.prefs || typeof initial.prefs !== "object") {
-    hadFailedInit = true;
-    await maybeReconcileConnection(true, invoke);
-    scheduleInitRetry();
-    return;
+    return false;
   }
 
   if (initRetryTimer !== null) {
@@ -506,6 +488,38 @@ async function runInitDesktopPrefs(): Promise<void> {
     }
   } else if (!alreadyMigrated) {
     rawSet(localStorage, MIGRATED_KEY, "1");
+  }
+  return true;
+}
+
+export async function applyBootstrappedDesktopPrefs(initial: unknown): Promise<boolean> {
+  if (initialized || typeof window === "undefined" || typeof localStorage === "undefined") {
+    return initialized;
+  }
+  ensureRuntimeWiring();
+  return applyLoadedPrefsSnapshot(initial as PrefsLoadResponse);
+}
+
+async function runInitDesktopPrefs(): Promise<void> {
+  if (initialized || typeof window === "undefined" || typeof localStorage === "undefined") return;
+  const invoke = nativeInvoke();
+  if (!invoke) return;
+
+  ensureRuntimeWiring();
+
+  let initial: PrefsLoadResponse | undefined;
+  try {
+    initial = await invoke<PrefsLoadResponse>("desktop_prefs_load", {});
+  } catch {
+    hadFailedInit = true;
+    await maybeReconcileConnection(true, invoke);
+    scheduleInitRetry();
+    return;
+  }
+  if (!(await applyLoadedPrefsSnapshot(initial!))) {
+    hadFailedInit = true;
+    await maybeReconcileConnection(true, invoke);
+    scheduleInitRetry();
   }
 }
 

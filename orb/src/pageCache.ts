@@ -72,9 +72,12 @@ export function cachePeekArray<T>(key: string): T[] | undefined {
 
 export function cacheDelete(key:string){remove(key);}
 
-export function cachePut<T>(key: string, value: T): T {
+export function cachePut<T>(key: string, value: T, knownBytes?: number): T {
   remove(key);
-  const size = estimateCacheBytes(value);
+  const size =
+    typeof knownBytes === "number" && Number.isFinite(knownBytes) && knownBytes >= 0
+      ? Math.round(knownBytes)
+      : estimateCacheBytes(value);
   // Oversized snapshots remain owned by the mounted view, not the cache.
   if (size > MAX_BYTES) return value;
   store.set(key, { value, at: Date.now(), bytes: size });

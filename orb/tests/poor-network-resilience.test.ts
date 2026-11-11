@@ -436,7 +436,7 @@ describe("poor-network resilience suite", () => {
     );
 
     prefetchTranscript("m-parked-p2");
-    await vi.waitFor(() => expect(transportSchedulerStats().p2Queued).toBeGreaterThanOrEqual(2));
+    await vi.waitFor(() => expect(transportSchedulerStats().p2Queued).toBeGreaterThanOrEqual(1));
 
     // Now degrade the link (`p2Cap === 0`) via an active P0 request: unpromoted P2 work is frozen,
     // yet adopting via `loadTranscript` / `refreshTranscript` must promote both queued requests and

@@ -2983,6 +2983,7 @@ struct OrbInboxView: View {
     }
 
     private func prefetchActiveEvents(for rows: [OrbRow]) async {
+        let accountScope = api.endpoint + ":" + (api.authToken ?? "")
         let candidates = rows.filter {
             ($0.missionState?.awaitsReview ?? false) && !OrbInboxModel.isSubagent(row: $0, includeAutonomous: OrbInboxSettings.shared.includeAutonomous)
         }
@@ -2990,7 +2991,7 @@ struct OrbInboxView: View {
         .prefix(16)
 
         for (idx, row) in candidates.enumerated() {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, accountScope == api.endpoint + ":" + (api.authToken ?? "") else { return }
             var events = eventsByMission[row.id] ?? []
             if events.isEmpty {
                 let diskCached = OrbReadCache.readEvents(row.id)
@@ -2998,7 +2999,14 @@ struct OrbInboxView: View {
                     eventsByMission[row.id] = diskCached
                     events = diskCached
                 } else if idx < 10 {
-                    if let fetched = await Log.attempt(.network, "inbox events", path: row.id, { try await OrbReadCache.events(row.id) }) {
+                    if !row.cloud, let combined = await OrbReadCache.openBundle(row.id) {
+                        guard !Task.isCancelled, accountScope == api.endpoint + ":" + (api.authToken ?? "") else { return }
+                        if !combined.isEmpty {
+                            eventsByMission[row.id] = combined
+                            events = combined
+                        }
+                    } else if let fetched = await Log.attempt(.network, "inbox events", path: row.id, { try await OrbReadCache.events(row.id) }) {
+                        guard !Task.isCancelled, accountScope == api.endpoint + ":" + (api.authToken ?? "") else { return }
                         eventsByMission[row.id] = fetched
                         events = fetched
                     }
@@ -3007,6 +3015,7 @@ struct OrbInboxView: View {
             let priority = unreadStore.isUnread(row: row) ? idx : idx + 20
             digestStore.request(row: row, events: events, priority: priority)
         }
+        guard !Task.isCancelled, accountScope == api.endpoint + ":" + (api.authToken ?? "") else { return }
         recomputeSections()
     }
 

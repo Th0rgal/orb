@@ -466,4 +466,29 @@ final class OrbSendFlowTests: XCTestCase {
         XCTAssertEqual(p.count, 0, "poll after turnSeq advances retires accepted unlisted row")
         XCTAssertTrue(p.delivered.contains("p1"))
     }
+
+    func testStaleOutOfOrderBundleCannotDropPendingOrOverwriteNewerQueueFetch() {
+        let bundleStartedAt = Date(timeIntervalSince1970: 1_000)
+        var q = OrbFollowUpQueue()
+            .enqueue("f1", "queued during open", lastSequence: 10)
+            .posted("f1", queued: true, at: Date(timeIntervalSince1970: 1_080))
+
+        let afterPreFlightBundle = q.withServer([], fetchedAt: bundleStartedAt)
+        XCTAssertEqual(ids(afterPreFlightBundle), ["f1"])
+
+        q = q.withServer([OrbQueuedRow(id: "f1", content: "queued during open")], fetchedAt: Date(timeIntervalSince1970: 1_090))
+        XCTAssertEqual(ids(q), ["f1"])
+        XCTAssertTrue(q.pending.isEmpty)
+        let afterLateBundle = q.withServer([], fetchedAt: bundleStartedAt)
+        XCTAssertEqual(ids(afterLateBundle), ["f1"])
+
+        let edited = afterLateBundle
+            .edit("f1", "edited text")
+            .editConfirmed("f1", "edited text", confirmedAt: Date(timeIntervalSince1970: 1_200))
+        let afterStalePreEditRead = edited.withServer(
+            [OrbQueuedRow(id: "f1", content: "queued during open")],
+            fetchedAt: Date(timeIntervalSince1970: 1_150)
+        )
+        XCTAssertEqual(afterStalePreEditRead.rows.map(\.content), ["edited text"])
+    }
 }

@@ -421,11 +421,26 @@ struct OrbConversation: View {
             }
         }
         if let id {
-            async let cachedMission = OrbReadCache.readAsync("mission:\(id)")
-            async let cachedExecution = OrbReadCache.readAsync("cloud:\(id)")
-            async let cachedEventsTask = OrbReadCache.readEventsAsync(id)
-            mission = await cachedMission ?? .null
-            execution = await cachedExecution ?? .null
+            let memMission = OrbReadCache.peekMemory("mission:\(id)")
+            let memExec = OrbReadCache.peekMemory("cloud:\(id)")
+            let memEvents = OrbReadCache.readMemoryEvents(id)
+            if memMission != nil || !memEvents.isEmpty {
+                if let memMission { mission = memMission }
+                if let memExec { execution = memExec }
+                if !memEvents.isEmpty {
+                    events = memEvents
+                    rebuildWorkModel()
+                    live.reconcileStored(events, working: working, streamAdvanced: false)
+                }
+                rebuildHistory()
+                if mission != .null || !history.isEmpty { loading = false }
+                scrollToBottomOnOpen(scroll: scroll)
+            }
+            async let cachedMission = memMission != nil ? nil : OrbReadCache.readAsync("mission:\(id)")
+            async let cachedExecution = memExec != nil ? nil : OrbReadCache.readAsync("cloud:\(id)")
+            async let cachedEventsTask = !memEvents.isEmpty ? [] : OrbReadCache.readEventsAsync(id)
+            if let diskMission = await cachedMission, mission == .null { mission = diskMission }
+            if let diskExec = await cachedExecution, execution == .null { execution = diskExec }
             let cachedEvents = await cachedEventsTask
             guard !Task.isCancelled, id == self.id else { return }
             if !cachedEvents.isEmpty {
@@ -445,7 +460,7 @@ struct OrbConversation: View {
                 selection.permissionMode = OrbClaudePermissionMode.parse(mission["permission_mode"].text).rawValue
             }
             OrbPresentation.remember(id)
-            if mission["history"].items.isEmpty {
+            if mission["history"].items.isEmpty && events.isEmpty {
                 let cached = await OrbReadCache.readAsync("presentation:\(id)")
                 var preview = cached
                 if preview == nil { preview = await OrbPresentation.load(id) }

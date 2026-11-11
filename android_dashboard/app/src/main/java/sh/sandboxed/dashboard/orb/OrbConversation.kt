@@ -1040,6 +1040,28 @@ fun OrbConversationPage(
         }
     }
 
+    suspend fun refreshFollowUps(id: String) {
+        val fetchedAtMs = System.currentTimeMillis()
+        val lastSequence = maxOf(
+            lastMissionSequence(events, id) ?: Long.MIN_VALUE,
+            lastMissionSequence(messages, id) ?: Long.MIN_VALUE
+        ).takeIf { it != Long.MIN_VALUE }
+        val rawQueue = orbTry(OrbLog.Category.Network, "/api/control/queue") {
+            core.request("/api/control/queue?mission_id=${core.encodeComponent(id)}")
+        }.getOrNull()
+        if (id != missionId) return
+        if (rawQueue != null) {
+            val parsedQueue = OrbFollowUpQueue.parseResponse(rawQueue, id)
+            followUps = followUps.withServer(
+                parsedQueue.rows,
+                fetchedAtMs = fetchedAtMs,
+                lastSequence = lastSequence,
+                incomingServerRev = parsedQueue.revision
+            )
+        }
+        followUps = followUps.reconciled(deliveredMessagesFrom(messages, events, id))
+    }
+
     suspend fun loadHistory(targetId: String) = historyLoadMutex.withLock {
         val account = OrbDisk.currentScope()
         val streamEpochBefore = live.streamEpoch
@@ -1047,6 +1069,9 @@ fun OrbConversationPage(
         val settingsRemoteRevBefore = settingsRemoteRevision
         var anyFetchOk = false
         var latestDetailForTarget: OrbRow? = null
+        var bundledQueuePresent = false
+        var bundledQueueForTarget: Any? = null
+        var bundledQueueFetchedAtMs = Long.MIN_VALUE
         try {
             val idsToLoad = if (chainIds.size > 1) chainIds.takeLast(3) else listOf(targetId)
             val allMsgs = mutableListOf<OrbRow>()
@@ -1057,30 +1082,78 @@ fun OrbConversationPage(
                     async(Dispatchers.IO) {
                         val existingForCid = OrbConversationHistory.forMission(if (cid == targetId) events else OrbReadCache.loadRowsAsync("mission_events_$cid"), cid)
                         val lastSeq = existingForCid.lastOrNull()?.int("sequence", "seq")
-                        val detailDef = async {
-                            orbTry(OrbLog.Category.Network, "/api/control/missions") { core.fetchDict("/api/control/missions/${core.encodeComponent(cid)}?include_history=false") }.getOrNull()
-                        }
                         val maxPayload = OrbReadCache.RESULT_KEEP_CHARS
-                        val evPath = if (lastSeq != null && lastSeq > 0) {
-                            "/api/control/missions/${core.encodeComponent(cid)}/events?limit=150&since_seq=$lastSeq&max_payload=$maxPayload"
-                        } else {
-                            "/api/control/missions/${core.encodeComponent(cid)}/events?limit=150&max_payload=$maxPayload"
-                        }
-                        val eventsDef = async {
-                            orbTry(OrbLog.Category.Network, "core.fetchRows") { core.fetchRows(evPath, "events") }.getOrDefault(emptyList())
-                        }
                         val savedHistory = OrbConversationHistory.forMission(OrbReadCache.loadRowsAsync("mission_msgs_$cid"), cid)
+                            .filter { it.raw["inbox_preview"] != true }
                         val conversationCursor = savedHistory.takeIf { it.isNotEmpty() && it.all { row -> row.int("sequence") != null } }?.maxOf { it.int("sequence")!! }
                         val conversationSuffix = conversationCursor?.let { "&since_seq=$it" } ?: ""
-                        val conversationDef = async {
-                            orbTry(OrbLog.Category.Network, "conversation messages") {
-                                core.fetchRows("/api/control/missions/${core.encodeComponent(cid)}/events?types=user_message,assistant_message,assistant_message_canonical&limit=400&max_payload=$maxPayload$conversationSuffix", "events")
-                            }.getOrNull()
+                        val knownCloudHint = allMissions.firstOrNull { it.id == cid }?.str("backend")?.startsWith("cloud_") == true ||
+                            (cid == targetId && isCloudMission)
+                        val queueFetchStartMs = System.currentTimeMillis()
+                        val openBundle = if (!knownCloudHint) {
+                            core.fetchMissionOpenBundle(cid, lastSeq?.toLong(), limit = 150, maxPayload = maxPayload)
+                        } else null
+
+                        val detail: Map<String, Any?>?
+                        val conversation: List<OrbRow>?
+                        val collectedEvs: MutableList<OrbRow>
+                        val tailCount: Int
+
+                        if (openBundle != null) {
+                            anyFetchOk = true
+                            detail = OrbJSON.dict(openBundle["mission"])
+                            val spineRows = OrbJSON.dictList(openBundle["spine"]).map { OrbRow(it) }
+                            val tailRows = OrbJSON.dictList(openBundle["events"]).map { OrbRow(it) }
+                            val hasMore = OrbJSON.bool(openBundle, "has_more") == true
+                            val spineHasMore = openBundle["spine_has_more"] as? Boolean
+                            val coldSpineTruncated =
+                                hasMore && (spineHasMore == true || (spineHasMore == null && spineRows.size >= 80))
+                            if (cid == targetId && openBundle.containsKey("queue")) {
+                                bundledQueuePresent = true
+                                bundledQueueForTarget = openBundle["queue"]
+                                bundledQueueFetchedAtMs = queueFetchStartMs
+                            }
+                            val bundledMsgs = (spineRows + tailRows).filter {
+                                (it.str("event_type", "type") ?: "") in OrbConversationHistory.eventTypes
+                            }
+                            val needConversationBackfill =
+                                ((lastSeq != null && lastSeq > 0) && (hasMore || conversationCursor == null)) ||
+                                    ((lastSeq == null || lastSeq <= 0) && coldSpineTruncated)
+                            conversation = if (needConversationBackfill) {
+                                orbTry(OrbLog.Category.Network, "conversation messages") {
+                                    core.fetchRows("/api/control/missions/${core.encodeComponent(cid)}/events?types=user_message,assistant_message,assistant_message_canonical&limit=400&max_payload=$maxPayload$conversationSuffix", "events")
+                                }.getOrNull() ?: bundledMsgs
+                            } else {
+                                bundledMsgs
+                            }
+                            collectedEvs = (spineRows + tailRows).toMutableList()
+                            tailCount = tailRows.size
+                        } else {
+                            val detailDef = async {
+                                orbTry(OrbLog.Category.Network, "/api/control/missions") { core.fetchDict("/api/control/missions/${core.encodeComponent(cid)}?include_history=false") }.getOrNull()
+                            }
+                            val evPath = if (lastSeq != null && lastSeq > 0) {
+                                "/api/control/missions/${core.encodeComponent(cid)}/events?limit=150&since_seq=$lastSeq&max_payload=$maxPayload"
+                            } else {
+                                "/api/control/missions/${core.encodeComponent(cid)}/events?limit=150&max_payload=$maxPayload"
+                            }
+                            val eventsDef = async {
+                                orbTry(OrbLog.Category.Network, "core.fetchRows") { core.fetchRows(evPath, "events") }.getOrDefault(emptyList())
+                            }
+                            val conversationDef = async {
+                                orbTry(OrbLog.Category.Network, "conversation messages") {
+                                    core.fetchRows("/api/control/missions/${core.encodeComponent(cid)}/events?types=user_message,assistant_message,assistant_message_canonical&limit=400&max_payload=$maxPayload$conversationSuffix", "events")
+                                }.getOrNull()
+                            }
+                            detail = detailDef.await()
+                            if (detail != null) anyFetchOk = true
+                            conversation = conversationDef.await()
+                            if (conversation != null) anyFetchOk = true
+                            val rawEvs = eventsDef.await()
+                            collectedEvs = rawEvs.toMutableList()
+                            tailCount = rawEvs.size
                         }
-                        val detail = detailDef.await()
-                        if (detail != null) anyFetchOk = true
-                        val conversation = conversationDef.await()
-                        if (conversation != null) anyFetchOk = true
+
                         if (account != OrbDisk.currentScope()) throw kotlinx.coroutines.CancellationException()
                         val isCloudCid = (detail?.get("backend") as? String)?.startsWith("cloud_") == true ||
                             allMissions.firstOrNull { it.id == cid }?.str("backend")?.startsWith("cloud_") == true
@@ -1118,8 +1191,7 @@ fun OrbConversationPage(
                         } else {
                             allMissions.firstOrNull { it.id == cid }?.rows("history") ?: emptyList()
                         }
-                        val collectedEvs = eventsDef.await().toMutableList()
-                        if (lastSeq != null && lastSeq > 0 && collectedEvs.size >= 150) {
+                        if (lastSeq != null && lastSeq > 0 && tailCount >= 150) {
                             var cursor = collectedEvs.lastOrNull()?.int("sequence", "seq") ?: lastSeq
                             var fullPage = true
                             for (page in 0 until 2) {
@@ -1246,10 +1318,28 @@ fun OrbConversationPage(
             val effectiveMission = latestDetailForTarget ?: liveRow
             val effectiveWorking = isSending || handoffActive || (effectiveMission != null && OrbMissionTree.isLive(effectiveMission))
             val targetEvents = OrbConversationHistory.forMission(events, targetId).ifEmpty { events }
-            if (targetId == missionId) followUps = followUps.reconciled(deliveredMessagesFrom(messages, events, targetId))
+            if (targetId == missionId) {
+                if (bundledQueuePresent) {
+                    val lastSequence = maxOf(
+                        lastMissionSequence(events, targetId) ?: Long.MIN_VALUE,
+                        lastMissionSequence(messages, targetId) ?: Long.MIN_VALUE
+                    ).takeIf { it != Long.MIN_VALUE }
+                    val parsedQueue = OrbFollowUpQueue.parseResponse(bundledQueueForTarget, targetId)
+                    followUps = followUps.withServer(
+                        parsedQueue.rows,
+                        fetchedAtMs = bundledQueueFetchedAtMs,
+                        lastSequence = lastSequence,
+                        incomingServerRev = parsedQueue.revision
+                    )
+                }
+                followUps = followUps.reconciled(deliveredMessagesFrom(messages, events, targetId))
+            }
             live.reconcileStored(targetEvents, working = effectiveWorking, streamAdvanced = live.streamEpoch != streamEpochBefore)
             OrbWarmSyncCoordinator.markMissionSynced(core, targetId, targetEvents.lastOrNull()?.int("sequence", "seq")?.toLong())
             liveRow?.let { OrbMissionUnreadStore.markSeen(it) }
+            if (targetId == missionId && !bundledQueuePresent) {
+                refreshFollowUps(targetId)
+            }
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException) throw t
             OrbLog.w(OrbLog.Category.Network, "conversation history load failed", t)
@@ -1271,28 +1361,6 @@ fun OrbConversationPage(
             coalescedEventRefreshJob = null
             if (targetId == missionId) loadHistory(targetId)
         }
-    }
-
-    suspend fun refreshFollowUps(id: String) {
-        val fetchedAtMs = System.currentTimeMillis()
-        val lastSequence = maxOf(
-            lastMissionSequence(events, id) ?: Long.MIN_VALUE,
-            lastMissionSequence(messages, id) ?: Long.MIN_VALUE
-        ).takeIf { it != Long.MIN_VALUE }
-        val rawQueue = orbTry(OrbLog.Category.Network, "/api/control/queue") {
-            core.request("/api/control/queue?mission_id=${core.encodeComponent(id)}")
-        }.getOrNull()
-        if (id != missionId) return
-        if (rawQueue != null) {
-            val parsedQueue = OrbFollowUpQueue.parseResponse(rawQueue, id)
-            followUps = followUps.withServer(
-                parsedQueue.rows,
-                fetchedAtMs = fetchedAtMs,
-                lastSequence = lastSequence,
-                incomingServerRev = parsedQueue.revision
-            )
-        }
-        followUps = followUps.reconciled(deliveredMessagesFrom(messages, events, id))
     }
 
     var streamConnected by remember(missionId) { mutableStateOf(false) }
@@ -1383,7 +1451,7 @@ fun OrbConversationPage(
                     evType == "stream_lagged" || evType == "disconnected" -> {
                         scope.launch(Dispatchers.Main) { loadHistory(id) }
                     }
-                    evType in setOf("user_message", "assistant_message", "assistant_message_canonical", "tool_call", "tool_result", "thinking") -> {
+                    evType in setOf("user_message", "assistant_message", "assistant_message_canonical", "tool_call", "tool_result") -> {
                         if (evType == "user_message" && OrbJSON.bool(parsed, "queued") == true) {
                             scope.launch(Dispatchers.Main) { refreshFollowUps(id) }
                         } else {
@@ -1393,7 +1461,9 @@ fun OrbConversationPage(
                                     followUps = followUps.withDelivered(setOf(cid))
                                 }
                             }
-                            scheduleCoalescedHistoryRefresh(id)
+                            if (parsed?.get("sequence") == null && parsed?.get("seq") == null) {
+                                scheduleCoalescedHistoryRefresh(id)
+                            }
                         }
                     }
                 }
@@ -1428,7 +1498,7 @@ fun OrbConversationPage(
             live.reconcileStored(targetEvents, working = isLive, streamAdvanced = false)
         }
         OrbPresentation.remember(id)
-        if (messages.isEmpty()) {
+        if (messages.isEmpty() && events.isEmpty()) {
             val preview = OrbReadCache.loadRowsAsync("presentation_$id").ifEmpty {
                 try { OrbPresentation.load(id, core) } catch (e: Exception) {
                     if (e is kotlinx.coroutines.CancellationException) throw e
@@ -1466,14 +1536,12 @@ fun OrbConversationPage(
     LaunchedEffect(missionId, lifecycleOwner) {
         val id = missionId ?: return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            if (!fastReopen || isLive || followUps.count > 0) {
+            if (followUps.count > 0) {
                 refreshFollowUps(id)
             }
             while (isActive) {
-                delay(if (isLive || followUps.count > 0) 4_000L else 30_000L)
-                if (isLive || followUps.count > 0 || !core.isMultiplexSyncHealthy) {
-                    refreshFollowUps(id)
-                }
+                delay(if (followUps.count > 0 || (isLive && !core.isMultiplexSyncHealthy)) 4_000L else 30_000L)
+                refreshFollowUps(id)
             }
         }
     }
@@ -1647,7 +1715,12 @@ fun OrbConversationPage(
             }
             when (OrbSendFlow.editOutcome(status.takeIf { it >= 0 })) {
                 OrbEditOutcome.Edited -> {
-                    followUps = followUps.editConfirmed(queueId, wireContent, expectedServerRev = expectedRev)
+                    followUps = followUps.editConfirmed(
+                        queueId,
+                        wireContent,
+                        expectedServerRev = expectedRev,
+                        confirmedAtMs = System.currentTimeMillis()
+                    )
                     UsageTelemetry.trackAction(UsageTelemetry.Action.MessageEdit, "followup_queue")
                 }
                 OrbEditOutcome.Unsupported -> {
@@ -2305,8 +2378,23 @@ fun OrbConversationPage(
         liveRow?.str("pr_url", "pull_request_url")
     }
 
-    val listState = rememberLazyListState()
-    var hasAnchoredInitial by remember(missionId) { mutableStateOf(false) }
+    val initialBottomIdx = remember(missionId) {
+        if (turns.isEmpty()) 0 else {
+            val preCount = (if (errorMessage != null) 1 else 0) +
+                (if (todos.isNotEmpty()) 1 else 0) +
+                (if (allTurns.size > visibleTurnLimit) 1 else 0)
+            val postCount = (if (!isLive && changedFiles.isNotEmpty()) 1 else 0) +
+                (if (activeQuestion != null || completedPlanTurnKey != null) 1 else 0)
+            maxOf(0, preCount + turns.size + postCount - 1)
+        }
+    }
+    val listState = remember(missionId) {
+        androidx.compose.foundation.lazy.LazyListState(
+            firstVisibleItemIndex = initialBottomIdx,
+            firstVisibleItemScrollOffset = if (turns.isEmpty()) 0 else 100_000
+        )
+    }
+    var hasAnchoredInitial by remember(missionId) { mutableStateOf(turns.isNotEmpty()) }
     val workStepCount = remember(turns) {
         turns.filterIsInstance<OrbTurn.WorkFold>().sumOf { it.steps.size }
     }
@@ -2602,17 +2690,7 @@ fun OrbConversationPage(
 
             if (OrbConversationLoadState.showLoading(turns.isEmpty(), historySettled, errorMessage != null)) {
                 item(key = "loading_conv") {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 72.dp),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OrbRunningDots(color = OrbStyle.icon, dotSize = 3.dp, spacing = 3.dp)
-                        Spacer(Modifier.size(10.dp))
-                        Text("Loading conversation…", color = OrbStyle.textSecondary, fontSize = 13.sp)
-                    }
+                    OrbConversationSkeleton()
                 }
             } else if (turns.isEmpty() && !isLive && historySettled) {
                 item(key = "empty_conv") {

@@ -14,7 +14,7 @@ import {
   onBackgroundSyncActiveChange,
   selectWarmMissionIds,
 } from "./backgroundSync";
-import { applyStreamEvent, applyStreamEvents, buildTranscript, clearTranscriptSessions, dropTranscriptSession, dropTranscriptSessionsByPrefixIfNot, transcriptSessionKey, type StreamItem } from "./transcriptModel";
+import { applyStreamEvent, applyStreamEvents, buildTranscript, clearTranscriptSessions, dropTranscriptSession, dropTranscriptSessionsByPrefixIfNot, rehydrateTranscript, transcriptSessionKey, type StreamItem } from "./transcriptModel";
 import * as streamModule from "./stream";
 import {
   getMissionEventPage,
@@ -24,7 +24,7 @@ import {
   type StoredEvent,
   type StreamEvent,
 } from "./stream";
-import { cacheDelete, cachePeek, cachePut, cacheRecents, onCacheEvict } from "./pageCache";
+import { cacheDelete, cachePeek, cachePut, cacheRecents, estimateCacheBytes, onCacheEvict } from "./pageCache";
 import { currentLinkBudget, onLinkBudgetChange } from "./networkHealth";
 import { loadPersistedTranscript, savePersistedTranscript } from "./persistentCache";
 import { promoteScheduledRequests, type RequestPriority } from "./transportScheduler";
@@ -43,6 +43,13 @@ export type TranscriptSnap = {
   items: StreamItem[];
   stream: StreamEvent[];
   liveTail?: StreamEvent[];
+  settledItems?: StreamItem[];
+  settledSeq?: number;
+  openTailEvents?: StreamEvent[];
+  /** Set when warm-tier compaction stripped raw tool/thinking events from `stream`;
+   * frame-0 renders `settledItems` immediately while `fetchTranscript` backfills the full tail. */
+  activityCompacted?: boolean;
+  estimatedBytes?: number;
   fromLog?: boolean;
   detailsPending?: boolean;
   spineComplete?: boolean;
@@ -65,7 +72,15 @@ const [transcriptVersion, setTranscriptVersion] = createSignal(0);
 export { transcriptVersion };
 
 let bumpTimer: ReturnType<typeof setTimeout> | undefined;
-function bumpTranscriptVersion() {
+function bumpTranscriptVersion(sync = false) {
+  if (sync) {
+    if (bumpTimer !== undefined) {
+      clearTimeout(bumpTimer);
+      bumpTimer = undefined;
+    }
+    setTranscriptVersion((v) => v + 1);
+    return;
+  }
   if (bumpTimer !== undefined) return;
   bumpTimer = setTimeout(() => {
     bumpTimer = undefined;
@@ -203,6 +218,75 @@ function missionIdFromScope(scope: string): string | null {
   return m ? m[1] : null;
 }
 
+function estimateStreamEventsBytes(evs: readonly StreamEvent[]): number {
+  let acc = 0;
+  for (const ev of evs) {
+    acc += 64 + ev.type.length * 2;
+    const d = ev.data;
+    if (d) {
+      for (const k in d) {
+        const v = d[k];
+        acc += k.length * 2 + (typeof v === "string" ? v.length * 2 : 24);
+      }
+    }
+  }
+  return acc;
+}
+
+function isNonTranscriptMetaEvent(ev: StreamEvent): boolean {
+  if (ev.type === "mission_settings_updated") return true;
+  if (ev.type === "mission_status_changed" || ev.type === "status") {
+    const st = typeof ev.data?.status === "string" ? ev.data.status : "";
+    return st !== "active" && st !== "running" && st !== "pending" && st !== "provisioning";
+  }
+  return false;
+}
+
+function buildSettledDigestSnapshot(snapshot: TranscriptSnap): TranscriptSnap {
+  const cleared: TranscriptSnap = {
+    ...snapshot,
+    settledItems: undefined,
+    settledSeq: undefined,
+    openTailEvents: undefined,
+  };
+  const stream = snapshot.stream ?? [];
+  if (!stream.length || !snapshot.items.length) return cleared;
+  // Find the highest sequence of a finalized assistant reply or terminal error so settled turns
+  // hydrate in O(1) on cold restart without re-running `buildTranscript` across raw tool events.
+  let settledSeq = 0;
+  let settledIdx = -1;
+  for (let i = stream.length - 1; i >= 0; i--) {
+    const ev = stream[i];
+    if (
+      typeof ev.sequence === "number" &&
+      ((ev.type === "assistant_message" && ev.data?.partial !== true && ev.data?.success !== false) ||
+        ev.type === "error")
+    ) {
+      settledSeq = ev.sequence;
+      settledIdx = i;
+      break;
+    }
+  }
+  if (settledSeq <= 0 || settledIdx < 0) return cleared;
+  let maxTrailingMetaSeq = settledSeq;
+  for (let i = settledIdx + 1; i < stream.length; i++) {
+    const trailing = stream[i];
+    if (!isNonTranscriptMetaEvent(trailing)) return cleared;
+    if (typeof trailing.sequence === "number" && trailing.sequence > maxTrailingMetaSeq) {
+      maxTrailingMetaSeq = trailing.sequence;
+    }
+  }
+  if (!snapshot.liveTail || snapshot.liveTail.length === 0) {
+    return {
+      ...snapshot,
+      settledItems: snapshot.items,
+      settledSeq: maxTrailingMetaSeq,
+      openTailEvents: [],
+    };
+  }
+  return cleared;
+}
+
 function flushPersistScope(scope: string) {
   const timer = persistTimers.get(scope);
   if (timer !== undefined) {
@@ -213,12 +297,14 @@ function flushPersistScope(scope: string) {
   if (!pending) return;
   pendingPersistSnapshots.delete(scope);
   if (pending.ver !== connectionVersionSafe()) return;
-  // Strip derived `items` before structured-cloning into IndexedDB: cold-start
-  // hydration always rebuilds `items` from `stream` + `liveTail` so reducer
-  // session indexes are restored, avoiding ~2x payload duplication on disk.
+  // Store `settledItems` once (pre-digested for O(1) cold-start hydration) while
+  // stripping duplicate `items: []` on disk when settledItems is present; retain
+  // `items` when mid-turn so warm-tier compaction never loses historical work items.
+  const digested = buildSettledDigestSnapshot(pending.snapshot);
+  const hasSettled = Array.isArray(digested.settledItems) && digested.settledItems.length > 0;
   void savePersistedTranscript(pending.persistScope, pending.missionId, {
-    ...pending.snapshot,
-    items: [],
+    ...digested,
+    items: hasSettled ? [] : digested.items,
   });
 }
 
@@ -260,20 +346,26 @@ export function registerTranscriptWarmer(fn: ((items: StreamItem[]) => void) | n
   transcriptWarmer = fn;
 }
 
-function saveSnapshot(scope: string, snapshot: TranscriptSnap, persist = true) {
+function saveSnapshot(scope: string, snapshot: TranscriptSnap, persist = true, syncBump = false) {
   cachedScopes.add(scope);
+  const estBytes =
+    typeof snapshot.estimatedBytes === "number" && snapshot.estimatedBytes > 0
+      ? snapshot.estimatedBytes
+      : estimateCacheBytes(snapshot);
+  const stamped: TranscriptSnap =
+    snapshot.estimatedBytes === estBytes ? snapshot : { ...snapshot, estimatedBytes: estBytes };
   const entry = active.get(scope);
-  if (entry) entry.snapshot = snapshot;
-  else cachePut(scope, snapshot);
+  if (entry) entry.snapshot = stamped;
+  else cachePut(scope, stamped, estBytes);
   const liveId = liveMissionIds.get(scope);
-  if (liveId && snapshot.fromLog && !snapshot.detailsPending) {
+  if (liveId && stamped.fromLog && !stamped.detailsPending) {
     rememberWarmRecent(scope, liveId);
   }
-  if (snapshot.fromLog && !snapshot.detailsPending && snapshot.items.length > 0) {
-    transcriptWarmer?.(snapshot.items);
+  if (stamped.fromLog && !stamped.detailsPending && stamped.items.length > 0) {
+    transcriptWarmer?.(stamped.items);
   }
-  if (persist) schedulePersistReadySnapshot(scope, snapshot);
-  bumpTranscriptVersion();
+  if (persist) schedulePersistReadySnapshot(scope, stamped);
+  bumpTranscriptVersion(syncBump);
 }
 
 const lastNetworkFetchAt = new Map<string, number>();
@@ -329,6 +421,9 @@ function cleanupStaleConnectionState(nextVer: number) {
   for (const scope of [...prefetchQueue.keys()]) {
     if (!scope.startsWith(prefix)) prefetchQueue.delete(scope);
   }
+  for (const [mid, q] of [...seededOpenQueues]) {
+    if (q.connVer !== nextVer) seededOpenQueues.delete(mid);
+  }
   const sessionPrefix = `c:${nextVer}:m:`;
   dropTranscriptSessionsByPrefixIfNot(sessionPrefix);
   observedConnectionVersion = nextVer;
@@ -350,7 +445,10 @@ createRoot(() => {
   });
 });
 
-export function hydrateTranscriptFromDisk(id: string): Promise<TranscriptSnap | undefined> {
+export function hydrateTranscriptFromDisk(
+  id: string,
+  options?: { syncBump?: boolean },
+): Promise<TranscriptSnap | undefined> {
   syncConnectionChange();
   const existingReady = peekReadyTranscript(id);
   if (existingReady) return Promise.resolve(existingReady);
@@ -366,12 +464,30 @@ export function hydrateTranscriptFromDisk(id: string): Promise<TranscriptSnap | 
       }
       if (!peekReadyTranscript(id)) {
         const session = sessionFor(id);
-        const rebuiltItems = buildTranscript(
-          [...(persisted.stream ?? []), ...(persisted.liveTail ?? [])],
-          session,
-        );
+        let rebuiltItems: StreamItem[];
+        const prebuiltBase =
+          Array.isArray(persisted.settledItems) && persisted.settledItems.length > 0
+            ? persisted.settledItems
+            : typeof persisted.settledSeq === "number" &&
+                persisted.settledSeq > 0 &&
+                Array.isArray(persisted.items) &&
+                persisted.items.length > 0
+              ? persisted.items
+              : undefined;
+        if (prebuiltBase) {
+          const boundBase = rehydrateTranscript(prebuiltBase, session);
+          const tail = [...(persisted.openTailEvents ?? []), ...(persisted.liveTail ?? [])];
+          rebuiltItems = tail.length > 0
+            ? applyStreamEvents(boundBase, tail, session)
+            : boundBase;
+        } else {
+          rebuiltItems = buildTranscript(
+            [...(persisted.stream ?? []), ...(persisted.liveTail ?? [])],
+            session,
+          );
+        }
         const hydrated: TranscriptSnap = { ...persisted, items: rebuiltItems };
-        saveSnapshot(scope, hydrated, false);
+        saveSnapshot(scope, hydrated, false, options?.syncBump === true);
         dirtyMissions.add(scope);
       }
       return peekReadyTranscript(id);
@@ -402,7 +518,7 @@ export function retainTranscript(id: string): () => void {
     const cur = active.get(scope);
     if (cur && --cur.refs === 0) {
       active.delete(scope);
-      if (cur.snapshot) cachePut(scope, cur.snapshot);
+      if (cur.snapshot) cachePut(scope, cur.snapshot, cur.snapshot.estimatedBytes);
       reconcileWarmSubscriptions();
     }
   };
@@ -446,8 +562,9 @@ export function applyLiveEventsToTranscriptCache(
   let cursor = prev?.cursor;
   const sequenced: StreamEvent[] = [];
   const unsequenced: StreamEvent[] = [];
+  const keepCursorUnset = prev?.activityCompacted === true && prev.cursor === undefined;
   for (const ev of evs) {
-    if (typeof ev.sequence === "number" && Number.isSafeInteger(ev.sequence)) {
+    if (!keepCursorUnset && typeof ev.sequence === "number" && Number.isSafeInteger(ev.sequence)) {
       cursor = cursor === undefined ? ev.sequence : Math.max(cursor, ev.sequence);
       sequenced.push(ev);
     } else {
@@ -460,12 +577,18 @@ export function applyLiveEventsToTranscriptCache(
   const priorTail = prev?.liveTail ?? [];
   const combinedTail = unsequenced.length ? [...priorTail, ...unsequenced] : priorTail;
   const liveTail = combinedTail.length > 256 ? combinedTail.slice(-256) : combinedTail;
+  const prevEst = prev?.estimatedBytes ?? 0;
+  const deltaBytes = estimateStreamEventsBytes(evs) * 2;
   saveSnapshot(scope, {
     ...(prev ?? {}),
     items,
     stream,
-    ...(liveTail.length ? { liveTail } : {}),
+    liveTail: liveTail.length ? liveTail : undefined,
+    settledItems: undefined,
+    settledSeq: undefined,
+    openTailEvents: undefined,
     ...(cursor !== undefined ? { cursor } : {}),
+    ...(prevEst > 0 ? { estimatedBytes: prevEst + deltaBytes } : {}),
     fromLog: prev?.fromLog === true,
   });
 }
@@ -767,7 +890,7 @@ export function warmRecentMissionIds(includeBtw = false): string[] {
     }
   }
   const bgActive =
-    Boolean(streamModule.isMultiplexSyncActive?.()) &&
+    Boolean("isMultiplexSyncActive" in streamModule && streamModule.isMultiplexSyncActive?.()) &&
     isBackgroundSyncActive() &&
     (typeof document === "undefined" || document.visibilityState !== "hidden");
   const btwTargets = includeBtw ? warmBtwProvider?.() : undefined;
@@ -825,6 +948,91 @@ if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => reconcileWarmSubscriptions());
 }
 
+const seededOpenQueues = new Map<
+  string,
+  { connVer: number; savedAt: number; rows: import("./api").QueuedMessage[] }
+>();
+
+function seedMissionOpenQueue(
+  id: string,
+  rows: import("./api").QueuedMessage[] | undefined,
+  startedAt: number = Date.now(),
+): void {
+  if (!Array.isArray(rows)) return;
+  const existing = seededOpenQueues.get(id);
+  if (existing && existing.connVer === connectionVersionSafe() && startedAt < existing.savedAt) {
+    return;
+  }
+  seededOpenQueues.set(id, {
+    connVer: connectionVersionSafe(),
+    savedAt: startedAt,
+    rows,
+  });
+  while (seededOpenQueues.size > 64) {
+    seededOpenQueues.delete(seededOpenQueues.keys().next().value!);
+  }
+}
+
+export function consumeMissionOpenQueue(id: string): import("./api").QueuedMessage[] | undefined {
+  const hit = seededOpenQueues.get(id);
+  if (!hit) return undefined;
+  seededOpenQueues.delete(id);
+  if (hit.connVer !== connectionVersionSafe() || Date.now() - hit.savedAt > 3500) {
+    return undefined;
+  }
+  return hit.rows;
+}
+
+if ("onInboxAnswerPush" in streamModule && typeof streamModule.onInboxAnswerPush === "function") {
+  streamModule.onInboxAnswerPush((missionId, ev) => {
+    const scope = key(missionId);
+    if (active.has(scope)) return;
+    const prior = peekTranscript(missionId);
+    if (prior?.fromLog && !prior.detailsPending) {
+      const prevCursor = prior.cursor ?? 0;
+      const evSeq = typeof ev.sequence === "number" && Number.isSafeInteger(ev.sequence) ? ev.sequence : undefined;
+      if (prevCursor > 0 && evSeq !== undefined && evSeq <= prevCursor) return;
+      if (prevCursor > 0 && evSeq === prevCursor + 1) {
+        applyLiveEventsToTranscriptCache(missionId, [ev]);
+        return;
+      }
+      // Gapped push (`evSeq > prevCursor + 1` or unknown cursor): render the pushed answer
+      // immediately via `liveTail` while keeping `prior.cursor` at the contiguous watermark
+      // so reopening calls `/open?since_seq=<prevCursor>` and backfills skipped user/tool turns.
+      const session = sessionFor(missionId);
+      const nextItems = applyStreamEvents(prior.items, [ev], session);
+      const combinedTail = [...(prior.liveTail ?? []), ev];
+      const liveTail = combinedTail.length > 256 ? combinedTail.slice(-256) : combinedTail;
+      saveSnapshot(
+        scope,
+        {
+          ...prior,
+          items: nextItems,
+          liveTail,
+          settledItems: undefined,
+          settledSeq: undefined,
+          openTailEvents: undefined,
+        },
+        false,
+      );
+      dirtyMissions.add(scope);
+      return;
+    }
+    const merged = mergeStreamBySequence(prior?.stream ?? [], [ev]);
+    saveSnapshot(scope, {
+      ...(prior ?? {}),
+      items: buildTranscript(merged, previewSessionFor(missionId)),
+      stream: merged,
+      settledItems: undefined,
+      settledSeq: undefined,
+      openTailEvents: undefined,
+      fromLog: true,
+      detailsPending: true,
+      ...(prior?.cursor !== undefined ? { cursor: prior.cursor } : {}),
+    }, false);
+  });
+}
+
 export function putTranscriptHeight(id: string, height: number) {
   if (height > 0) cachePut(heightKey(id), Math.round(height));
 }
@@ -861,6 +1069,180 @@ async function fetchTranscript(
       ? { ...(prio ? { priority: prio } : {}), ...(opts?.signal ? { signal: opts.signal } : {}) }
       : undefined;
   };
+  const previous = peekReadyTranscript(id) ?? (await hydrateTranscriptFromDisk(id));
+  const baselineSnap = peekTranscript(id);
+  const baselineSeqs = new Set<number>();
+  for (const ev of baselineSnap?.stream ?? []) {
+    if (ev.sequence !== undefined) baselineSeqs.add(ev.sequence);
+  }
+  let previewSnap: TranscriptSnap | undefined;
+  const mergeConcurrentLive = (
+    baseStream: StreamEvent[],
+    baseCursor: number | undefined,
+    hadReset: boolean,
+  ): { stream: StreamEvent[]; cursor: number | undefined; retainedLive: StreamEvent[] } => {
+    let nextStream = baseStream;
+    let nextCursor = baseCursor;
+    const current = peekTranscript(id);
+    const hasConcurrent = Boolean(current && current !== baselineSnap && current !== previewSnap);
+    if (hasConcurrent && current?.stream?.length) {
+      const concurrentNewer = current.stream.filter(
+        (e) =>
+          e.sequence !== undefined &&
+          !baselineSeqs.has(e.sequence) &&
+          (nextCursor === undefined || e.sequence > nextCursor),
+      );
+      if (concurrentNewer.length > 0) {
+        nextStream = mergeStreamBySequence(nextStream, concurrentNewer);
+        for (const ev of concurrentNewer) {
+          if (ev.sequence !== undefined && (nextCursor === undefined || ev.sequence > nextCursor)) {
+            nextCursor = ev.sequence;
+          }
+        }
+      }
+    }
+    const liveSource = hasConcurrent
+      ? current?.liveTail
+      : hadReset
+        ? undefined
+        : (previous?.liveTail ?? baselineSnap?.liveTail);
+    const retainedLive = liveSource?.length ? heldAfterHistory(nextStream, liveSource) : [];
+    return { stream: nextStream, cursor: nextCursor, retainedLive };
+  };
+  let preview: StreamEvent[] = [];
+  let tailSettled = false;
+  let previewStarted = false;
+  let previewPromise: Promise<void> = Promise.resolve();
+  const startPreview = () => {
+    if (previewStarted || previous || tailSettled || opts?.signal?.aborted) return;
+    previewStarted = true;
+    const pOpts = requestOpts();
+    previewPromise = (pOpts ? getMissionEventPreview(id, pOpts) : getMissionEventPreview(id))
+      .then((page) => {
+        if (!page?.events.length || version !== connectionVersionSafe() || opts?.signal?.aborted) return;
+        preview = spineAnswers(page.events.map(storedToStream).filter((e): e is StreamEvent => e !== null));
+        if (!tailSettled && !peekReadyTranscript(id)) {
+          const savedPreview: TranscriptSnap = {
+            activity: page.activity,
+            items: buildTranscript(preview, previewSessionFor(id)),
+            stream: preview,
+            fromLog: true,
+            detailsPending: true,
+          };
+          previewSnap = savedPreview;
+          saveSnapshot(key(id), savedPreview);
+        }
+      })
+      .catch(() => {});
+  };
+  if (currentPriority() === "p2") {
+    opts?.registerPromote?.(startPreview);
+  }
+  check();
+  // Fast single-roundtrip path (`GET /api/control/missions/:id/open`) returning
+  // `{ protocol: 1, mission, events, spine, queue, max_seq, has_more, next_cursor, page_max_seq, reset }`.
+  // Falls back cleanly to `/events` + `/queue` when `getMissionOpenBundle` returns `null`.
+  if (
+    "getApiUrl" in apiModule &&
+    typeof apiModule.getApiUrl === "function" &&
+    "getMissionOpenBundle" in streamModule &&
+    typeof streamModule.getMissionOpenBundle === "function"
+  ) {
+    const openStartedAt = Date.now();
+    const openReqOpts = requestOpts();
+    const bundle = await streamModule.getMissionOpenBundle(id, {
+      ...(previous?.cursor !== undefined ? { since: previous.cursor } : {}),
+      ...(openReqOpts ?? {}),
+    });
+    check();
+    if (bundle && bundle.protocol === 1 && !bundle.reset && !(previous?.cursor !== undefined && bundle.has_more)) {
+      tailSettled = true;
+      if ("seedCachedMission" in apiModule && typeof apiModule.seedCachedMission === "function") {
+        apiModule.seedCachedMission(bundle.mission, openStartedAt);
+      }
+      const queuedRows = Array.isArray(bundle.queue) ? bundle.queue : [];
+      seedMissionOpenQueue(id, queuedRows, openStartedAt);
+      const tailEvents = bundle.events.map(storedToStream).filter((e): e is StreamEvent => e !== null);
+      let stream =
+        previous?.cursor === undefined
+          ? tailEvents
+          : mergeStreamBySequence(previous.stream ?? [], tailEvents);
+      let cursor = previous?.cursor;
+      let before = previous?.before;
+      let hasOlder = previous?.hasOlder;
+      let spineComplete = previous?.spineComplete;
+      let spineBefore = previous?.spineBefore;
+      if (previous?.cursor === undefined) {
+        before = bundle.next_cursor;
+        hasOlder = Boolean(bundle.has_more);
+        cursor = bundle.page_max_seq ?? bundle.max_seq ?? 0;
+        const firstTailConv = tailEvents.find(
+          (e) => e.type === "user_message" || (e.type === "assistant_message" && e.data.success !== false),
+        );
+        if (!hasOlder) {
+          spineComplete = true;
+          spineBefore = undefined;
+        } else {
+          const priorOlderSpine =
+            before !== undefined && previous?.stream?.length
+              ? previous.stream.filter((e) => e.sequence !== undefined && e.sequence < before!)
+              : [];
+          const serverSpine = Array.isArray(bundle.spine)
+            ? bundle.spine
+                .map(storedToStream)
+                .filter(
+                  (e): e is StreamEvent =>
+                    e !== null && (before === undefined || (e.sequence !== undefined && e.sequence < before)),
+                )
+            : [];
+          if (typeof bundle.spine_has_more === "boolean") {
+            spineComplete = !bundle.spine_has_more;
+            spineBefore =
+              bundle.spine_has_more && typeof bundle.spine_next_cursor === "number"
+                ? bundle.spine_next_cursor
+                : undefined;
+          } else {
+            spineComplete = false;
+            spineBefore = serverSpine[0]?.sequence ?? before;
+          }
+          const combinedSpineSrc = mergeStreamBySequence(priorOlderSpine, serverSpine);
+          if (combinedSpineSrc.length > 0) {
+            const spine = spineAnswers(combinedSpineSrc, firstTailConv?.type === "assistant_message");
+            stream = mergeStreamBySequence(spine, stream);
+          }
+        }
+      } else if (bundle.next_cursor !== undefined && bundle.next_cursor > cursor!) {
+        cursor = bundle.next_cursor;
+      } else if (bundle.max_seq !== undefined && (cursor === undefined || bundle.max_seq > cursor)) {
+        cursor = bundle.max_seq;
+      }
+      await previewPromise;
+      if (preview.length > 0) {
+        stream = mergeStreamBySequence(preview, stream);
+      }
+      const queueEvents: StreamEvent[] = queuedRows.map((row) => ({
+        type: "user_message",
+        eventId: row.id,
+        data: { id: row.id, content: row.content, queued: row.inflight !== true },
+      }));
+      const mergedLive = mergeConcurrentLive(stream, cursor, false);
+      stream = mergedLive.stream;
+      cursor = mergedLive.cursor;
+      const retainedLive = mergedLive.retainedLive;
+      lastNetworkFetchAt.set(key(id), Date.now());
+      return {
+        items: buildTranscript([...stream, ...retainedLive, ...queueEvents], sessionFor(id)),
+        stream,
+        ...(retainedLive.length ? { liveTail: retainedLive } : {}),
+        fromLog: true,
+        spineComplete,
+        ...(spineBefore !== undefined ? { spineBefore } : {}),
+        cursor,
+        before,
+        hasOlder,
+      };
+    }
+  }
   // Start pending queue read in parallel with the event page read rather than
   // blocking the event log round-trip on /queue. Any delivery racing this read
   // wins by message identity in the reducer; held SSE fills the live boundary.
@@ -871,37 +1253,11 @@ async function fetchTranscript(
     queueError = `Queued messages could not refresh: ${error instanceof Error ? error.message : String(error)}`;
     return [];
   });
-  const previous = peekReadyTranscript(id) ?? (await hydrateTranscriptFromDisk(id));
   // Publish persisted messages before requesting activity, while racing the
   // full tail page in parallel so cold opens never pay an extra serial RTT.
-  let preview: StreamEvent[] = [];
-  let tailSettled = false;
-  let previewStarted = false;
-  let previewPromise: Promise<void> = Promise.resolve();
-  const startPreview = () => {
-    if (previewStarted || previous || tailSettled || opts?.signal?.aborted) return;
-    previewStarted = true;
-    const pOpts = requestOpts();
-    previewPromise = (pOpts ? getMissionEventPreview(id, pOpts) : getMissionEventPreview(id))
-      .then(page => {
-        if (!page?.events.length || version !== connectionVersionSafe() || opts?.signal?.aborted) return;
-        preview = spineAnswers(page.events.map(storedToStream).filter((e): e is StreamEvent => e !== null));
-        if (!tailSettled && !peekReadyTranscript(id)) {
-          saveSnapshot(key(id), {
-            activity: page.activity,
-            items: buildTranscript(preview, previewSessionFor(id)),
-            stream: preview,
-            fromLog: true,
-            detailsPending: true,
-          });
-        }
-      })
-      .catch(() => {});
-  };
   if (currentPriority() !== "p2") startPreview();
-  else opts?.registerPromote?.(startPreview);
-  let stream:StreamEvent[]=[...(previous?.stream??[])];
-  let retainedSpine:StreamEvent[]=[];
+  let stream:StreamEvent[]=previous?.cursor===undefined?[]:[...(previous?.stream??[])];
+  let retainedSpine:StreamEvent[]=previous?.cursor===undefined&&previous?.stream?.length?spineAnswers(previous.stream):[];
   let cursor=previous?.cursor, before=previous?.before, hasOlder=previous?.hasOlder;
   let spineComplete=previous?.spineComplete, spineBefore=previous?.spineBefore;
   let resets=0, forwardPages=0, jumpedForwardGap=false;
@@ -943,8 +1299,9 @@ async function fetchTranscript(
       spineComplete = false;
      }
     }
-    if(retainedSpine.length){
-     stream = mergeStreamBySequence(retainedSpine, stream);
+    if(retainedSpine.length && hasOlder && before !== undefined){
+     const olderRetained = retainedSpine.filter(e => e.sequence !== undefined && e.sequence < before!);
+     if(olderRetained.length) stream = mergeStreamBySequence(olderRetained, stream);
     }
     break;
    }
@@ -970,7 +1327,10 @@ async function fetchTranscript(
   const queued = await queuedPromise;
   check();
   const queueEvents: StreamEvent[] = queued.map(row => ({ type: "user_message", eventId: row.id, data: { id: row.id, content: row.content, queued: row.inflight !== true } }));
-  const retainedLive = previous?.liveTail?.length ? heldAfterHistory(stream, previous.liveTail) : [];
+  const mergedLive = mergeConcurrentLive(stream, cursor, resets > 0);
+  stream = mergedLive.stream;
+  cursor = mergedLive.cursor;
+  const retainedLive = mergedLive.retainedLive;
   // History first puts accepted user turns at their actual transcript positions.
   lastNetworkFetchAt.set(key(id), Date.now());
   return { items: buildTranscript([...stream, ...retainedLive, ...queueEvents], sessionFor(id)), stream, ...(retainedLive.length ? { liveTail: retainedLive } : {}), fromLog: true, spineComplete, ...(spineBefore !== undefined ? { spineBefore } : {}), queueError, cursor, before, hasOlder };
@@ -1132,6 +1492,7 @@ export function forgetPrefetchPauses(){
   recentlyOpened.clear();
   liveMissionIds.clear();
   cachedScopes.clear();
+  seededOpenQueues.clear();
   clearTranscriptSessions();
 }
 export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{

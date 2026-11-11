@@ -23,7 +23,7 @@ const invoke = (): Invoke | undefined => {
   return nativeInvoke();
 };
 const round = (value: number) => Math.round(value);
-const view = () => `${location.pathname}${location.hash}`.slice(0, 120);
+const view = () => (typeof location !== "undefined" ? `${location.pathname}${location.hash}`.slice(0, 120) : "");
 
 export function note(kind: string, data: Record<string, unknown> = {}): void {
   const entry: Entry = { at: new Date().toISOString(), kind, view: view(), ...data };
