@@ -1,6 +1,9 @@
 // Library skill CRUD, project skill selection and delivery preview.
 // Newer endpoints are feature-detected: a 404 means "backend too old", not an error.
-import { ApiError, api, apiText, getLibrarySkill, type LibrarySkill } from "./api";
+import { ApiError, api, apiText, connectionVersion, getLibrarySkill, type LibrarySkill } from "./api";
+import { createSidebarRequests } from "./sidebarRequests";
+
+const skillDeliveryCache = createSidebarRequests(20_000);
 
 const enc = encodeURIComponent;
 const skillPath = (name: string) => `/api/library/skill/${enc(name)}`;
@@ -17,10 +20,12 @@ export function fetchLibrarySkill(name: string): Promise<LibrarySkill> {
 
 export async function putLibrarySkill(name: string, content: string): Promise<void> {
   await apiText(skillPath(name), { method: "PUT", ...json({ content }) });
+  skillDeliveryCache.clear();
 }
 
 export async function deleteLibrarySkill(name: string): Promise<void> {
   await apiText(skillPath(name), { method: "DELETE" });
+  skillDeliveryCache.clear();
 }
 
 export function readSkillFile(name: string, rel: string): Promise<string> {
@@ -29,10 +34,12 @@ export function readSkillFile(name: string, rel: string): Promise<string> {
 
 export async function putSkillFile(name: string, rel: string, content: string): Promise<void> {
   await apiText(filePath(name, rel), { method: "PUT", ...json({ content }) });
+  skillDeliveryCache.clear();
 }
 
 export async function deleteSkillFile(name: string, rel: string): Promise<void> {
   await apiText(filePath(name, rel), { method: "DELETE" });
+  skillDeliveryCache.clear();
 }
 
 /** Reference files of a Library skill: markdown files come inline, others by path. */
@@ -64,6 +71,7 @@ export async function getProjectSkills(slug: string): Promise<ProjectSkillSelect
 export async function putProjectSkills(slug: string, skills: string[]): Promise<ProjectSkillSelection> {
   try {
     const res = await api<Partial<ProjectSkillSelection> | undefined>(`/api/projects/${enc(slug)}/skills`, { method: "PUT", ...json({ skills }) });
+    skillDeliveryCache.clear();
     return { skills: res?.skills ?? skills, missing: res?.missing ?? [] };
   } catch (e) {
     if (isNotFound(e)) throw new UnsupportedEndpoint("This backend does not support project skill selection yet.");
@@ -83,16 +91,21 @@ export interface SkillDelivery {
 }
 
 export async function getSkillDelivery(project: string, workspaceId?: string): Promise<SkillDelivery> {
-  const q = new URLSearchParams();
-  if (workspaceId) q.set("workspace_id", workspaceId);
-  if (project) q.set("project", project);
-  try {
-    const res = await api<Partial<SkillDelivery>>(`/api/library/skill-delivery?${q}`, { method: "GET" });
-    return { skills: res?.skills ?? [], missing: res?.missing ?? [] };
-  } catch (e) {
-    if (isNotFound(e)) throw new UnsupportedEndpoint("This backend does not report skill delivery yet.");
-    throw e;
-  }
+  return skillDeliveryCache.read(
+    `${connectionVersion()}:${project}:${workspaceId ?? ""}`,
+    async () => {
+      const q = new URLSearchParams();
+      if (workspaceId) q.set("workspace_id", workspaceId);
+      if (project) q.set("project", project);
+      try {
+        const res = await api<Partial<SkillDelivery>>(`/api/library/skill-delivery?${q}`, { method: "GET" });
+        return { skills: res?.skills ?? [], missing: res?.missing ?? [] };
+      } catch (e) {
+        if (isNotFound(e)) throw new UnsupportedEndpoint("This backend does not report skill delivery yet.");
+        throw e;
+      }
+    },
+  );
 }
 
 /** Library repo state for the Skills header ("Th0rgal/sandboxed-library · synced 2 min ago"). */
@@ -108,9 +121,17 @@ export interface LibraryStatus {
 }
 export const getLibraryStatus = () => api<LibraryStatus>("/api/library/status");
 /** Pull from the remote. */
-export const syncLibrary = () => apiText("/api/library/sync", { method: "POST" });
+export const syncLibrary = async () => {
+  const res = await apiText("/api/library/sync", { method: "POST" });
+  skillDeliveryCache.clear();
+  return res;
+};
 /** Reset local Library checkout to match the remote branch (`POST /api/library/force-sync`). */
-export const forceSyncLibrary = () => apiText("/api/library/force-sync", { method: "POST" });
+export const forceSyncLibrary = async () => {
+  const res = await apiText("/api/library/force-sync", { method: "POST" });
+  skillDeliveryCache.clear();
+  return res;
+};
 /** Force-push local Library commits over a diverged remote branch (`POST /api/library/force-push`). */
 export const forcePushLibrary = () => apiText("/api/library/force-push", { method: "POST" });
 
@@ -140,11 +161,11 @@ export function needsLibraryRemoteInit(
   return !sameLibraryRemote(nextRemote, activeRepoRemote);
 }
 
-export function updateLibraryRemote(
+export async function updateLibraryRemote(
   libraryRemote: string | null,
   forceReinitialize = false,
 ): Promise<UpdateLibraryRemoteResult> {
-  return api<UpdateLibraryRemoteResult>("/api/settings/library-remote", {
+  const res = await api<UpdateLibraryRemoteResult>("/api/settings/library-remote", {
     method: "PUT",
     ...json(
       forceReinitialize
@@ -152,6 +173,8 @@ export function updateLibraryRemote(
         : { library_remote: libraryRemote },
     ),
   });
+  skillDeliveryCache.clear();
+  return res;
 }
 
 export function isDivergedLibraryError(err: unknown): boolean {

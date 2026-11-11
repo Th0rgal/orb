@@ -607,11 +607,14 @@ code {
 .shimmer {
   background: linear-gradient(90deg, var(--fg-4) 30%, var(--fg) 50%, var(--fg-4) 70%) 0 0 / 200% 100%;
   -webkit-background-clip: text; background-clip: text; color: transparent;
-  animation: shimmer 1.6s linear infinite;
+  animation: shimmer 1.6s steps(16, end) infinite;
 }
 @keyframes shimmer { to { background-position: -200% 0; } }
 .spin { animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+html[data-window-focused="false"] :is(.shimmer, .spin, .mermaid-skeleton span, .live-pulse, .dot-pulse) {
+  animation-play-state: paused !important;
+}
 
 /* ---------- mission stream transcript ---------- */
 .st-text { padding: 0 10px; overflow-wrap: anywhere; overflow-x: auto; }
@@ -2059,7 +2062,7 @@ button.fork-trigger:hover { color: var(--fg); }
 .mermaid-svg { display: block; margin: 0 auto; max-width: 100%; user-select: none; }
 
 .mermaid-skeleton { display: grid; gap: 10px; padding: 22px 18px; }
-.mermaid-skeleton span { height: 12px; border-radius: var(--radius-xs); background: linear-gradient(90deg, var(--bg-code), var(--bg-active), var(--bg-code)); background-size: 200% 100%; animation: mermaid-shimmer 1.4s ease-in-out infinite; }
+.mermaid-skeleton span { height: 12px; border-radius: var(--radius-xs); background: linear-gradient(90deg, var(--bg-code), var(--bg-active), var(--bg-code)); background-size: 200% 100%; animation: mermaid-shimmer 1.4s steps(14, end) infinite; }
 .mermaid-skeleton span:nth-child(1) { width: 46%; } .mermaid-skeleton span:nth-child(2) { width: 72%; } .mermaid-skeleton span:nth-child(3) { width: 58%; }
 @keyframes mermaid-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @media (prefers-reduced-motion: reduce) { .mermaid-skeleton span { animation: none; } }

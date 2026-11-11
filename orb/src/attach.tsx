@@ -1,5 +1,6 @@
 import { contextManifest } from "./projectContext";
-import { listProjectFiles, type MissionAttachment } from "./api";
+import { connectionVersion, listProjectFiles, type MissionAttachment } from "./api";
+import { createSidebarRequests } from "./sidebarRequests";
 
 export type AttachKind = "file" | "folder" | "controller" | "context";
 
@@ -201,22 +202,30 @@ export function insertMention(
   };
 }
 
-export async function loadAttachItems(slug: string): Promise<AttachItem[]> {
-  try {
-    const manifest = await contextManifest(slug);
-    return Object.entries(manifest.entries)
-      .filter(([path]) => path !== "attachments" && !path.startsWith("attachments/"))
-      .map(([path, entry]) => ({
-        id: `context:${slug}:${path}`, kind: "context", project: slug, path,
-        label: `${path}${entry.directory ? "/" : ""}`,
-        section: entry.directory ? "Folders" : "Files",
-      }));
-  } catch {
-    // Older servers only expose the project file listing.
-    const items: AttachItem[] = [];
-    await walkFiles(slug, "", items, 0);
-    return items.map(item => ({...item, project: slug}));
-  }
+const attachItemsCache = createSidebarRequests(20_000);
+
+export async function loadAttachItems(slug: string, force = false): Promise<AttachItem[]> {
+  return attachItemsCache.read(
+    `${connectionVersion()}:${slug}`,
+    async () => {
+      try {
+        const manifest = await contextManifest(slug);
+        return Object.entries(manifest.entries)
+          .filter(([path]) => path !== "attachments" && !path.startsWith("attachments/"))
+          .map(([path, entry]) => ({
+            id: `context:${slug}:${path}`, kind: "context", project: slug, path,
+            label: `${path}${entry.directory ? "/" : ""}`,
+            section: entry.directory ? "Folders" : "Files",
+          }));
+      } catch {
+        // Older servers only expose the project file listing.
+        const items: AttachItem[] = [];
+        await walkFiles(slug, "", items, 0);
+        return items.map(item => ({...item, project: slug}));
+      }
+    },
+    force,
+  );
 }
 
 async function walkFiles(slug: string, path: string, items: AttachItem[], depth: number) {

@@ -27,13 +27,14 @@ function sizeCache(key?:string){
  while(sizeCaches.size>40)sizeCaches.delete(sizeCaches.keys().next().value!);
  return cache;
 }
-export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=>string;estimate?:(item:T)=>number;prepare?:(signal:AbortSignal)=>Promise<void>;needsPrepare?:()=>boolean;sizeKey?:string;children:(item:T)=>JSX.Element}){
+export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=>string;estimate?:(item:T)=>number;prepare?:(signal:AbortSignal)=>Promise<void>;needsPrepare?:()=>boolean;sizeKey?:string;initialBottom?:boolean;children:(item:T)=>JSX.Element}){
  let root!:HTMLDivElement,scroller:HTMLElement|undefined,frame=0;
  const sizes=sizeCache(p.sizeKey),nodes=new Map<string,HTMLElement>();
  // First estimate per row, kept fixed so an unmeasured gap never changes height.
  const estimates=new Map<string,number>();
  const guess=(item:T)=>{let h=estimates.get(item.key);if(h===undefined){h=Math.max(40,Math.round(p.estimate?.(item)??300));estimates.set(item.key,h);}return h;};
  const known=(key:string)=>sizes.get(key)??estimates.get(key)??300;
+ const [mounted,setMounted]=createSignal(false);
  const [revision,setRevision]=createSignal(0),[viewport,setViewport]=createSignal({top:0,height:800,up:false});
  const [pinned,setPinned]=createSignal(new Set<string>());
  const revealed=new Map<string,number>();
@@ -58,7 +59,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
   // Keep the larger pre-render buffer on the side the reader is heading to:
   // a fast flick up otherwise outruns the two viewports mounted above and
   // shows the gap spacer for a frame. The total mounted span is unchanged.
-  const top=(box?.top??0)-rect.top;
+  const top=scroller&&box&&box.height===0&&rect.height===0?scroller.scrollTop:(box?.top??0)-rect.top;
   setViewport(old=>({top,height:scroller?.clientHeight||innerHeight||800,up:top<old.top-1||(top<=old.top+1&&old.up)}));
   const selection=getSelection(),next=new Set<string>(revealed.keys());
   for(const [key,node]of nodes){
@@ -119,10 +120,17 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
  const [segments,setSegments]=createSignal<Segment[]>([]);
  const spacerHeights=createMemo(()=>{const m=new Map<string,number>();for(const s of segments())if(!s.item)m.set(s.key,s.height);return m;});
  createEffect(()=>timed("turns segments",()=>{
-  const rows=layout(),v=viewport(),keep=pinned(),out:Segment[]=[];let gap=0,gapStart='';
+  const rows=layout(),isMounted=mounted(),keep=pinned(),out:Segment[]=[];let gap=0,gapStart='';
+  const hasBrowserLayout=typeof document!=="undefined"&&document.documentElement.clientHeight>0;
+  const v=isMounted?viewport():(()=>{
+   const vh=(typeof window!=="undefined"&&window.innerHeight)||(typeof document!=="undefined"&&document.documentElement.clientHeight)||800;
+   const last=rows.at(-1),totalHeight=last?last.top+last.height:0;
+   return p.initialBottom?{top:Math.max(0,totalHeight-vh),height:vh,up:true}:{top:0,height:vh,up:false};
+  })();
+  const renderAll=(isMounted?(!scroller||scroller.clientHeight===0):!hasBrowserLayout)||rows.length<=8;
   const spacer=()=>{if(!gap)return;const key=`gap:${gapStart}`;let row=stable.get(key);if(!row){row={key,height:gap};stable.set(key,row);}row.height=gap;out.push(row);gap=0;};
   rows.forEach((row,index)=>{
-   const visible=!scroller||scroller.clientHeight===0||rows.length<=30||keep.has(row.item.key)||index===rows.length-1||(row.top+row.height>=v.top-(v.up?3:2)*v.height&&row.top<=v.top+(v.up?2:3)*v.height);
+   const visible=renderAll||keep.has(row.item.key)||index===rows.length-1||(row.top+row.height>=v.top-(v.up?3:2)*v.height&&row.top<=v.top+(v.up?2:3)*v.height);
    if(visible){spacer();let value=stable.get(row.item.key);if(!value){value={key:row.item.key,item:row.item,height:0};stable.set(value.key,value);}else{value.item=row.item;}out.push(value);}
    else{if(!gap)gapStart=row.item.key;gap+=row.height;}
   });spacer();setSegments(out);
@@ -147,6 +155,11 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
  createEffect(()=>{p.items.length;queueMicrotask(schedule);});
  onMount(()=>{
   scroller=root.closest<HTMLElement>('.scroll,[data-find-conversation]')??undefined;
+  if(p.initialBottom&&scroller&&(isScrollPinned(scroller)??true)){
+   const keeper=scrollKeeper(scroller);
+   if(keeper)keeper();else scroller.scrollTop=scroller.scrollHeight;
+  }
+  setMounted(true);
   const target=scroller??window;target.addEventListener('scroll',schedule,{passive:true});window.addEventListener('resize',schedule);document.addEventListener('selectionchange',schedule);root.addEventListener('focusin',schedule);root.addEventListener('focusout',schedule);root.addEventListener('click',schedule);
   searches.set(root,{
    search:(query,sensitive,whole)=>p.items.flatMap(item=>matchOffsets(p.text(item),query,sensitive,whole).map((_,occurrence)=>({key:item.key,occurrence}))),

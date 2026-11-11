@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, untrack, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSelector, createSignal, on, onCleanup, untrack, type JSX } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { visibleTree, type TreeNode, type TreeRow } from "./treeModel";
 
@@ -14,6 +14,7 @@ export function TreeConnectors(p: { row: TreeRow<unknown> }) {
 
 export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selected: string | null; selectedIds?: ReadonlySet<string> | string[]; render: (row: TreeRow<T>) => JSX.Element }) {
   const [pointerFocus, setPointerFocus] = createSignal(false);
+  const isSelected = createSelector(() => p.selected);
   const visible = createMemo(() => visibleTree(p.nodes));
   const selectedSet = createMemo(() => p.selectedIds ? (p.selectedIds instanceof Set ? p.selectedIds : new Set(p.selectedIds)) : undefined);
   const [rows, setRows] = createStore<TreeRow<T>[]>([]);
@@ -52,13 +53,24 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
   // operator's viewport instead of jumping back to the open conversation.
   let revealed: string | null = null;
   createEffect(on(() => p.selected, () => { revealed = null; }));
-  const visibleCurrent = createMemo(() => rows.some(row => row.id === p.selected) ? p.selected : null);
+  const visibleCurrent = createMemo(() => {
+    const sel = p.selected;
+    return sel && rows.some(row => row.id === sel) ? sel : null;
+  });
   createEffect(on(visibleCurrent, id => {
     if (!id || revealed === id) return;
     const frame = requestAnimationFrame(() => {
-      const row = [...(element?.querySelectorAll<HTMLElement>(".tree-entry") ?? [])].find(row => row.dataset.treeId === id);
-      if (row) revealed = id;
-      row?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      const escaped = typeof CSS !== "undefined" && typeof CSS.escape === "function" ? CSS.escape(id) : id.replace(/["\\]/g, "\\$&");
+      const row = element?.querySelector<HTMLElement>(`.tree-entry[data-tree-id="${escaped}"]`);
+      if (row) {
+        revealed = id;
+        const scroller = element?.closest<HTMLElement>(".sb-scroll");
+        if (scroller && scroller.clientHeight > 0) {
+          const r = row.getBoundingClientRect(), s = scroller.getBoundingClientRect();
+          if (r.top >= s.top && r.bottom <= s.bottom) return;
+        }
+        row.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
     });
     onCleanup(() => cancelAnimationFrame(frame));
   }));
@@ -101,8 +113,8 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
       if (button && e.currentTarget.contains(button)) button.focus({ preventScroll: true });
     }}>
     <For each={rows}>{row => <div class="tree-entry" data-tree-id={row.id} data-depth={row.depth}
-      role="treeitem" aria-current={p.selected === row.id ? "page" : undefined} aria-level={row.depth + 1} aria-posinset={row.position} aria-setsize={row.size}
-      aria-expanded={row.expanded} aria-selected={selectedSet() ? selectedSet()!.has(row.id) : p.selected === row.id}
+      role="treeitem" aria-current={isSelected(row.id) ? "page" : undefined} aria-level={row.depth + 1} aria-posinset={row.position} aria-setsize={row.size}
+      aria-expanded={row.expanded} aria-selected={selectedSet() ? selectedSet()!.has(row.id) : isSelected(row.id)}
       onContextMenu={e => { if ((e.currentTarget as HTMLElement).querySelector("button:disabled")) { e.preventDefault(); e.stopPropagation(); } }}
       style={{ "--depth": row.depth }}>
       {p.render(row)}<TreeConnectors row={row} />

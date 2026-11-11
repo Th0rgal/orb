@@ -696,7 +696,27 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[]; ended?: boolean; 
   );
 }
 
-export function Transcript(p: { sizeKey?: string; backend?: string | null; prepareSearch?:(signal:AbortSignal)=>Promise<void>; needsPrepareSearch?:()=>boolean; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; onForceSlot?: () => void; forceSlotPending?: boolean; /** `messageId`: the stored message being edited, which the new text replaces. */ onSend?: (text: string, messageId?: string) => boolean | Promise<boolean>; onResume?: () => void; onOpenSource?: () => void; loadToolCall?: ToolCallLoader; checkpoints?: import("./localAgents").CheckpointMeta[]; onRestoreCheckpoint?: (cp: import("./localAgents").CheckpointMeta) => void }) {
+function sameRecordEntry(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  const ka = Object.keys(a as Record<string, unknown>);
+  const kb = Object.keys(b as Record<string, unknown>);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if ((a as Record<string, unknown>)[k] !== (b as Record<string, unknown>)[k]) return false;
+  }
+  return true;
+}
+
+function sameFollowUpMap<V>(a: ReadonlyMap<string, V>, b: ReadonlyMap<string, V>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [k, v] of a) {
+    if (!b.has(k) || !sameRecordEntry(v, b.get(k))) return false;
+  }
+  return true;
+}
+
+export function Transcript(p: { sizeKey?: string; initialBottom?: boolean; backend?: string | null; prepareSearch?:(signal:AbortSignal)=>Promise<void>; needsPrepareSearch?:()=>boolean; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; onForceSlot?: () => void; forceSlotPending?: boolean; /** `messageId`: the stored message being edited, which the new text replaces. */ onSend?: (text: string, messageId?: string) => boolean | Promise<boolean>; onResume?: () => void; onOpenSource?: () => void; loadToolCall?: ToolCallLoader; checkpoints?: import("./localAgents").CheckpointMeta[]; onRestoreCheckpoint?: (cp: import("./localAgents").CheckpointMeta) => void }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
@@ -711,12 +731,9 @@ export function Transcript(p: { sizeKey?: string; backend?: string | null; prepa
     { actions: new Map(), missions: new Map(), machines: new Map() },
     {
       equals: (a, b) =>
-        a.actions.size === b.actions.size &&
-        a.missions.size === b.missions.size &&
-        a.machines.size === b.machines.size &&
-        [...a.actions].every(([k, v]) => JSON.stringify(b.actions.get(k)) === JSON.stringify(v)) &&
-        [...a.missions].every(([k, v]) => JSON.stringify(b.missions.get(k)) === JSON.stringify(v)) &&
-        [...a.machines].every(([k, v]) => JSON.stringify(b.machines.get(k)) === JSON.stringify(v)),
+        sameFollowUpMap(a.actions, b.actions) &&
+        sameFollowUpMap(a.missions, b.missions) &&
+        sameFollowUpMap(a.machines, b.machines),
     },
   );
   const nonQueuedItems = createMemo(() => {
@@ -781,7 +798,7 @@ export function Transcript(p: { sizeKey?: string; backend?: string | null; prepa
   const turnTip = useTooltip<TurnTiming>(TURN_TIP_ID, t => <><div class="row-tip-title">{turnDate(t.completedAt)}</div><Show when={t.workedMs !== undefined}><div class="row-tip-meta">Worked for {workedFor(t.workedMs!)}</div></Show></>, { placement: "top-end", width: 200, class: "turn-tip" });
   return (
     <TurnTipContext.Provider value={turnTip}><FollowUpsContext.Provider value={followUps}>
-      <ToolCallLoaderContext.Provider value={p.loadToolCall}><DisclosureState.Provider value={disclosures}><VirtualTurns items={turnStore} estimate={estimateTurn} text={searchText} prepare={p.prepareSearch} needsPrepare={p.needsPrepareSearch} sizeKey={p.sizeKey}>{turn=><For each={turn.items}>
+      <ToolCallLoaderContext.Provider value={p.loadToolCall}><DisclosureState.Provider value={disclosures}><VirtualTurns items={turnStore} estimate={estimateTurn} text={searchText} prepare={p.prepareSearch} needsPrepare={p.needsPrepareSearch} sizeKey={p.sizeKey} initialBottom={p.initialBottom}>{turn=><For each={turn.items}>
         {(item) => {
           switch (item.kind) {
             case "work":

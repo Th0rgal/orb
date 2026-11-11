@@ -64,4 +64,22 @@ it("collapses an expanded multiline textarea when switching to a scope without a
   expect(composer.classList.contains("tall")).toBe(false);
 });
 
+it("performs zero saveComposerDraft writes when switching across untouched scopes", async () => {
+  vi.mocked(readComposerDraft).mockImplementation(async scope =>
+    scope === "m:with-draft" ? { text: "Existing draft", images: [] } : undefined,
+  );
+  const [scope, setScope] = createSignal("m:empty-1");
+  const view = render(() => <Composer scope={scope()} placeholder="Reply" busy={false} onSend={() => {}} />);
+  await vi.waitFor(() => expect(readComposerDraft).toHaveBeenCalledWith("m:empty-1"));
+
+  setScope("m:with-draft");
+  await vi.waitFor(() => expect((screen.getByPlaceholderText("Reply") as HTMLTextAreaElement).value).toBe("Existing draft"));
+
+  setScope("m:empty-2");
+  await vi.waitFor(() => expect(readComposerDraft).toHaveBeenCalledWith("m:empty-2"));
+
+  view.unmount();
+  expect(saveComposerDraft).not.toHaveBeenCalled();
+});
+
 

@@ -190,11 +190,50 @@ export function extractMissionSettingsPatch(
   };
 }
 
+const PERSIST_TRANSCRIPT_DEBOUNCE_MS = 3_500;
 const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const pendingPersistSnapshots = new Map<
+  string,
+  { persistScope: string; missionId: string; ver: number; snapshot: TranscriptSnap }
+>();
 
 function missionIdFromScope(scope: string): string | null {
   const m = /^c:\d+:m:(.+):tx$/.exec(scope);
   return m ? m[1] : null;
+}
+
+function flushPersistScope(scope: string) {
+  const timer = persistTimers.get(scope);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    persistTimers.delete(scope);
+  }
+  const pending = pendingPersistSnapshots.get(scope);
+  if (!pending) return;
+  pendingPersistSnapshots.delete(scope);
+  if (pending.ver !== connectionVersionSafe()) return;
+  // Strip derived `items` before structured-cloning into IndexedDB: cold-start
+  // hydration always rebuilds `items` from `stream` + `liveTail` so reducer
+  // session indexes are restored, avoiding ~2x payload duplication on disk.
+  void savePersistedTranscript(pending.persistScope, pending.missionId, {
+    ...pending.snapshot,
+    items: [],
+  });
+}
+
+export function flushPendingPersistedTranscripts(): void {
+  for (const scope of [...pendingPersistSnapshots.keys()]) {
+    flushPersistScope(scope);
+  }
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", flushPendingPersistedTranscripts);
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushPendingPersistedTranscripts();
+  });
 }
 
 function schedulePersistReadySnapshot(scope: string, snapshot: TranscriptSnap) {
@@ -203,13 +242,15 @@ function schedulePersistReadySnapshot(scope: string, snapshot: TranscriptSnap) {
   if (!missionId) return;
   const existing = persistTimers.get(scope);
   if (existing !== undefined) clearTimeout(existing);
-  const persistScope = transcriptPersistScope();
-  const ver = connectionVersionSafe();
+  pendingPersistSnapshots.set(scope, {
+    persistScope: transcriptPersistScope(),
+    missionId,
+    ver: connectionVersionSafe(),
+    snapshot,
+  });
   const timer = setTimeout(() => {
-    persistTimers.delete(scope);
-    if (ver !== connectionVersionSafe()) return;
-    void savePersistedTranscript(persistScope, missionId, snapshot);
-  }, 250);
+    flushPersistScope(scope);
+  }, PERSIST_TRANSCRIPT_DEBOUNCE_MS);
   persistTimers.set(scope, timer);
 }
 
@@ -245,6 +286,9 @@ function cleanupStaleConnectionState(nextVer: number) {
       clearTimeout(timer);
       persistTimers.delete(scope);
     }
+  }
+  for (const scope of [...pendingPersistSnapshots.keys()]) {
+    if (!scope.startsWith(prefix)) pendingPersistSnapshots.delete(scope);
   }
   for (const scope of [...hydratingFromDisk.keys()]) {
     if (!scope.startsWith(prefix)) hydratingFromDisk.delete(scope);
@@ -1005,6 +1049,7 @@ export function forgetPrefetchPauses(){
   prefetchControllers.clear();
   for (const [, timer] of persistTimers) clearTimeout(timer);
   persistTimers.clear();
+  pendingPersistSnapshots.clear();
   hydratingFromDisk.clear();
   lastNetworkFetchAt.clear();
   for (const [, sub] of warmSubs) sub.stop();

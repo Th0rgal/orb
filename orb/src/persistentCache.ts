@@ -29,6 +29,7 @@ export type PersistedTranscriptRecord<TSnap = unknown> = {
 
 const memSidebar = new Map<string, PersistedSidebarPayload>();
 const memTranscripts = new Map<string, PersistedTranscriptRecord>();
+let knownDbTranscriptIds: Set<string> | null = null;
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
 function openDb(): Promise<IDBDatabase | null> {
@@ -189,16 +190,29 @@ export async function savePersistedTranscript<TSnap = unknown>(
       const tx = db.transaction(STORE_TRANSCRIPTS, "readwrite");
       const store = tx.objectStore(STORE_TRANSCRIPTS);
       store.put(record);
-      const allReq = store.index("by_saved_at").getAllKeys();
-      allReq.onsuccess = () => {
-        const keys = allReq.result;
-        if (Array.isArray(keys) && keys.length > MAX_PERSISTED_TRANSCRIPTS) {
-          const dropCount = keys.length - MAX_PERSISTED_TRANSCRIPTS;
-          for (let i = 0; i < dropCount; i++) {
-            store.delete(keys[i]);
+      const needsSweep =
+        knownDbTranscriptIds === null ||
+        (!knownDbTranscriptIds.has(id) && knownDbTranscriptIds.size >= MAX_PERSISTED_TRANSCRIPTS);
+      if (!needsSweep && knownDbTranscriptIds) {
+        knownDbTranscriptIds.add(id);
+      } else {
+        const allReq = store.index("by_saved_at").getAllKeys();
+        allReq.onsuccess = () => {
+          const keys = allReq.result;
+          if (Array.isArray(keys)) {
+            const nextIds = new Set(keys.map(String));
+            nextIds.add(id);
+            if (keys.length > MAX_PERSISTED_TRANSCRIPTS) {
+              const dropCount = keys.length - MAX_PERSISTED_TRANSCRIPTS;
+              for (let i = 0; i < dropCount; i++) {
+                store.delete(keys[i]);
+                nextIds.delete(String(keys[i]));
+              }
+            }
+            knownDbTranscriptIds = nextIds;
           }
-        }
-      };
+        };
+      }
       tx.oncomplete = () => resolve();
       tx.onerror = () => resolve();
       tx.onabort = () => resolve();
@@ -211,6 +225,7 @@ export async function savePersistedTranscript<TSnap = unknown>(
 export async function clearPersistentCache(): Promise<void> {
   memSidebar.clear();
   memTranscripts.clear();
+  knownDbTranscriptIds = null;
   const db = await openDb();
   if (!db) return;
   await new Promise<void>((resolve) => {

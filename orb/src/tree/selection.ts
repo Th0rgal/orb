@@ -1,4 +1,4 @@
-import { batch, createMemo, createSignal } from "solid-js";
+import { batch, createMemo, createSelector, createSignal } from "solid-js";
 import { visibleTree, type TreeRow } from "../treeModel";
 import { missionIdFromTreeId, type Node, type RowData } from "./TreeView";
 
@@ -47,9 +47,10 @@ export function createTreeSelection(deps: {
     const ctx = contextId();
     return ctx ? new Set([ctx]) : undefined;
   });
+  const isCommittedSelected = createSelector(() => deps.selected?.() ?? null);
   const isRowActive = (treeId: string): boolean => {
     const rows = selectedRowIds();
-    return rows ? rows.has(treeId) : (deps.selected?.() ?? null) === treeId;
+    return rows ? rows.has(treeId) : isCommittedSelected(treeId);
   };
   let anchor: string | null = null;
   const selectionAnchor = () => anchor;
