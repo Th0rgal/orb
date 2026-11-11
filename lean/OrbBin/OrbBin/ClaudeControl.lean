@@ -455,18 +455,25 @@ def parseClaudeInitializeModels? (jv : JVal) (expectedReqId : String := "orb-mod
     if r1 != r2 then r1 < r2 else m1 < m2
   return sorted.map fun (_, _, modelId) => (modelId, formatClaudeModelDisplayName modelId)
 
-/-- Group Antigravity model variants (`agy-model-{low,medium,high}`) into base `(id, label)` pairs. -/
+/-- Group Antigravity Carbon (`gemini-4-carbon-{low,medium,high}` / legacy `agy-model-{low,medium,high}`)
+    and Argon (`gemini-4-argon-{low,medium,high}` / legacy `agy-demo-{low,medium,high}`) variants into base `(id, label)` pairs. -/
 def groupAntigravityModels (raw : Array (String × String)) : Array (String × String) := Id.run do
   let mut seen : Array String := #[]
   let mut out : Array (String × String) := #[]
   for (rawId, rawLabel) in raw do
     let grouped? : Option (String × String) :=
-      if rawId.startsWith "agy-model-" then
+      if rawId.startsWith "gemini-4-carbon-" then
+        let lvl := (rawId.drop 16).toString
+        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("gemini-4-carbon", lvl) else none
+      else if rawId.startsWith "agy-model-" then
         let lvl := (rawId.drop 10).toString
-        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("agy-model", lvl) else none
+        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("gemini-4-carbon", lvl) else none
+      else if rawId.startsWith "gemini-4-argon-" then
+        let lvl := (rawId.drop 15).toString
+        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("gemini-4-argon", lvl) else none
       else if rawId.startsWith "agy-demo-" then
         let lvl := (rawId.drop 9).toString
-        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("agy-demo", lvl) else none
+        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("gemini-4-argon", lvl) else none
       else none
     let (id, label) := match grouped? with
       | some (base, lvl) =>
@@ -1137,6 +1144,37 @@ private def launchOrReuseWarmClaude
       cb.onTurnFinished finalSnap
   return .ok ()
 
+/-- Normalize an Antigravity model + optional effort for `agy` CLI 1.5+ (where Carbon and Argon
+    bake effort into `gemini-4-carbon-{low,medium,high}` and `gemini-4-argon-{low,medium,high}`). -/
+def normalizeAntigravityCliModel (rawModel : String) (eff? : Option String) : String × Option String :=
+  let m0 := rawModel.trimAscii.toString
+  let m := if m0.startsWith "antigravity/" then (m0.drop 12).toString else m0
+  let cleanEff? := eff?.map (·.trimAscii.toString.toLower) |>.filter (fun s => !s.isEmpty)
+  let validTier (s : String) : Bool := s == "low" || s == "medium" || s == "high"
+  let (baseKind?, variantLvl?) : Option String × Option String :=
+    if m == "gemini-4-carbon" || m == "gemini-4-carbon-eap" || m == "agy-model" then
+      (some "gemini-4-carbon", none)
+    else if m.startsWith "gemini-4-carbon-" && validTier (m.drop 16).toString then
+      (some "gemini-4-carbon", some (m.drop 16).toString)
+    else if m.startsWith "agy-model-" && validTier (m.drop 10).toString then
+      (some "gemini-4-carbon", some (m.drop 10).toString)
+    else if m == "gemini-4-argon" || m == "gemini-4-argon-eap" || m == "agy-demo" then
+      (some "gemini-4-argon", none)
+    else if m.startsWith "gemini-4-argon-" && validTier (m.drop 15).toString then
+      (some "gemini-4-argon", some (m.drop 15).toString)
+    else if m.startsWith "agy-demo-" && validTier (m.drop 9).toString then
+      (some "gemini-4-argon", some (m.drop 9).toString)
+    else
+      (none, none)
+  match baseKind? with
+  | some base =>
+    let lvl := match cleanEff?.orElse (fun _ => variantLvl?) with
+      | some "low" => "low"
+      | some "medium" => "medium"
+      | _ => "high"
+    (s!"{base}-{lvl}", none)
+  | none => (m, cleanEff?)
+
 /-- Build CLI invocation `(args, parseKind)` for non-Claude local harnesses (`codex`, `opencode`, `antigravity`, `grok`, `vibe`). -/
 private def buildOneShotHarnessArgs
     (harness : String)
@@ -1168,10 +1206,12 @@ private def buildOneShotHarnessArgs
   else if harness == "antigravity" then
     let mut args := #["--print"]
     if let some m := mdl? then
-      let fullMdl := match eff? with
-        | some e => if m == "agy-model" || m == "agy-demo" then s!"{m}-{e}" else m
-        | none => m
+      let (fullMdl, remEff?) := normalizeAntigravityCliModel m eff?
       args := args ++ #["--model", fullMdl]
+      if let some e := remEff? then
+        args := args ++ #["--effort", e]
+    else if let some e := eff?.map (·.trimAscii.toString.toLower) |>.filter (fun s => !s.isEmpty) then
+      args := args ++ #["--effort", e]
     args := args.push prompt
     return args
   else if harness == "grok" then

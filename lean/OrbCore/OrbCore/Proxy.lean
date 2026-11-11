@@ -151,20 +151,44 @@ def releaseTargetSlot (tracker : ProxyPacingTracker) (tgt : ProviderTarget) : IO
       modelInflight   := upsertAssoc st.modelInflight mKey (if mdlInf > 0 then mdlInf - 1 else 0)
     }
 
+/-- Canonicalize Antigravity proxy model IDs so retired `agy-model*` / `agy-demo*` and base
+    `gemini-4-carbon` / `gemini-4-argon` identifiers resolve to CLIProxyAPI's effort-baked Carbon/Argon IDs. -/
+def canonicalAntigravityProxyModelId (raw : String) : String :=
+  let m0 := raw.trimAscii.toString
+  let m := if m0.startsWith "antigravity/" then (m0.drop 12).toString else m0
+  if m == "agy-model" || m == "agy-model-high" || m == "gemini-4-carbon" || m == "gemini-4-carbon-eap" || m == "gemini-4-carbon-high" then
+    "gemini-4-carbon-high"
+  else if m == "agy-model-medium" || m == "gemini-4-carbon-medium" then
+    "gemini-4-carbon-medium"
+  else if m == "agy-model-low" || m == "gemini-4-carbon-low" then
+    "gemini-4-carbon-low"
+  else if m == "agy-demo" || m == "agy-demo-high" || m == "gemini-4-argon" || m == "gemini-4-argon-eap" || m == "gemini-4-argon-high" then
+    "gemini-4-argon-high"
+  else if m == "agy-demo-medium" || m == "gemini-4-argon-medium" then
+    "gemini-4-argon-medium"
+  else if m == "agy-demo-low" || m == "gemini-4-argon-low" then
+    "gemini-4-argon-low"
+  else
+    m0
+
 /-- Rewrite `"model"` in JSON request `body` when `tgt.modelId` is non-empty so fallback targets
-    receive their concrete upstream model identifier. -/
+    receive their concrete upstream model identifier (canonicalizing Antigravity Carbon/Argon IDs). -/
 def rewriteTargetModelBody (tgt : ProviderTarget) (body : ByteArray) : ByteArray :=
-  if tgt.modelId.isEmpty then body
+  let isAg := tgt.provider == "antigravity" || tgt.provider.startsWith "antigravity:"
+  if tgt.modelId.isEmpty && !isAg then body
   else
     match String.fromUTF8? body with
     | none => body
     | some raw =>
       match OrbBin.Json.parse raw with
       | .ok obj@(.obj _) =>
-        if (obj.field? "model").isSome then
-          (renderCompact (obj.setField "model" (.str tgt.modelId))).toUTF8
-        else
-          body
+        match obj.fieldStr? "model" with
+        | some reqMdl =>
+          let chosen := if tgt.modelId.isEmpty then reqMdl else tgt.modelId
+          let effMdl := if isAg then canonicalAntigravityProxyModelId chosen else chosen
+          if effMdl.isEmpty then body
+          else (renderCompact (obj.setField "model" (.str effMdl))).toUTF8
+        | none => body
       | _ => body
 
 /-- Model-routing chain configuration (`/api/model-routing/chains`). -/

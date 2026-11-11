@@ -4210,6 +4210,13 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let firstCcVal := (ccModels[0]?.bind (·.fieldStr? "value")).getD ""
   let (catSt, catBody, _) ← sendReq "GET" "/api/providers" adminTok ""
   let museTargets := parseChainTargetsJson "[{\"provider_id\":\"muse\",\"model_id\":\"muse-wonder-1.0\"}]" #[]
+  let agyTargets := parseChainTargetsJson "[{\"provider_id\":\"antigravity\",\"model_id\":\"agy-model-high\"},{\"provider_id\":\"antigravity\",\"model_id\":\"agy-demo-low\"}]" #[]
+  let agyGrouped := OrbBin.ClaudeControl.groupAntigravityModels #[
+    ("gemini-4-carbon-high", "Carbon (High)"),
+    ("agy-model-low", "Carbon (Low)"),
+    ("gemini-4-argon-medium", "Argon (Medium)")
+  ]
+  let (agyCliMdl, agyCliEff) := OrbBin.ClaudeControl.normalizeAntigravityCliModel "agy-model" (some "medium")
   if bmSt != 200 || firstCcVal != "claude-opus-5-5" ||
      (bmBody.splitOn "claude-fable-5-2").length < 2 ||
      (bmBody.splitOn "claude-mythos-5-2").length < 2 ||
@@ -4218,7 +4225,11 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (bmBody.splitOn "muse/muse-ember-1.0").length < 2 ||
      catSt != 200 || (catBody.splitOn "muse-wonder-1.0").length < 2 ||
      (catBody.splitOn "muse-ember-1.0").length < 2 ||
-     (museTargets[0]?).map (·.baseUrl) != some "https://api.meta.ai" then
+     (museTargets[0]?).map (·.baseUrl) != some "https://api.meta.ai" ||
+     (agyTargets[0]?).map (·.modelId) != some "gemini-4-carbon-high" ||
+     (agyTargets[1]?).map (·.modelId) != some "gemini-4-argon-low" ||
+     agyGrouped != #[("gemini-4-carbon", "Carbon"), ("gemini-4-argon", "Argon")] ||
+     agyCliMdl != "gemini-4-carbon-medium" || agyCliEff != none then
     return (← fail s!"backend-models / catalog check failed: firstCc={firstCcVal} bmSt={bmSt} catSt={catSt}")
 
   -- Last-active-admin protection: disable/demote `opsadmin` first (so `admin` is sole active admin), then verify `admin` cannot be disabled/demoted/deleted!

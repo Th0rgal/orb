@@ -198,7 +198,7 @@ function MissionDock(p: {
   const modelId = () => (p.mission?.backend === "antigravity" ? antigravityBaseModel(p.mission?.model_override) : p.mission?.model_override) || "";
   const modelLabel = createMemo(() => {
     const id = modelId();
-    const m = choice()?.models.find((x) => x.value === id);
+    const m = choice()?.models.find((x) => x.value === id || (p.mission?.backend === "antigravity" && antigravityBaseModel(x.value) === id));
     if (m) return dockModelLabel(harnessName(), shortModelLabel(m.label));
     return id ? dockModelLabel(harnessName(), shortModelLabel(id)) : "Default";
   });

@@ -329,6 +329,9 @@ if isinstance(data, dict):
                 None,
             )
             for target_id, desc in (
+                ("gemini-4-carbon-high", "Gemini 4 Carbon (High)"),
+                ("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)"),
+                ("gemini-4-carbon-low", "Gemini 4 Carbon (Low)"),
                 ("agy-model-high", "Gemini 4 Carbon (High)"),
                 ("agy-model-medium", "Gemini 4 Carbon (Medium)"),
                 ("agy-model-low", "Gemini 4 Carbon (Low)"),

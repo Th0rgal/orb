@@ -47,20 +47,28 @@ export function effortLabel(effort: string | null | undefined, backend?: string 
   return LABELS[value] ?? defaultEffortLabel(backend, model);
 }
 
-/** Native agy-model (Carbon) and agy-demo (Argon) require an effort; unset uses our explicit High default. */
+/** Native Carbon (`gemini-4-carbon` / legacy `agy-model`) and Argon (`gemini-4-argon` / legacy `agy-demo`) require an effort; unset uses our explicit High default. */
 export function defaultEffortLabel(backend?:string|null, model?:string|null):string {
   if (backend !== "antigravity" || !model) return DEFAULT_EFFORT_LABEL;
-  const variant = model.match(/^(?:agy-model|gemini-4-carbon|agy-demo)-(low|medium|high)$/)?.[1];
+  const variant = model.match(/^(?:gemini-4-carbon|agy-model|gemini-4-argon|agy-demo)-(low|medium|high)$/)?.[1];
   if (variant) return `Default (${LABELS[variant as Effort]})`;
-  if (model === "agy-model" || model === "gemini-4-carbon" || model === "gemini-4-carbon-eap" || model === "agy-demo") {
+  if (
+    model === "gemini-4-carbon" ||
+    model === "gemini-4-carbon-eap" ||
+    model === "agy-model" ||
+    model === "gemini-4-argon" ||
+    model === "gemini-4-argon-eap" ||
+    model === "agy-demo"
+  ) {
     return "Default (High)";
   }
   return DEFAULT_EFFORT_LABEL;
 }
 
-/** Compatibility for missions saved with the CLI's effort-specific Carbon/Argon IDs. */
+/** Compatibility for missions saved with legacy `agy-*` or CLI effort-specific Carbon/Argon IDs. */
 export function antigravityBaseModel(model?: string | null): string | undefined {
   if (!model) return undefined;
-  if (/^(?:agy-model|gemini-4-carbon)(?:-(?:low|medium|high)|-eap)?$/.test(model)) return "agy-model";
-  return model.replace(/^agy-demo-(low|medium|high)$/, "agy-demo");
+  if (/^(?:gemini-4-carbon|agy-model)(?:-(?:low|medium|high)|-eap)?$/.test(model)) return "gemini-4-carbon";
+  if (/^(?:gemini-4-argon|agy-demo)(?:-(?:low|medium|high)|-eap)?$/.test(model)) return "gemini-4-argon";
+  return model;
 }

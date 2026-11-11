@@ -691,11 +691,16 @@ def parseChainTargetsJson (rawJson : String) (providers : Array AIProviderRecord
       let defaultAcct :=
         if provRaw.startsWith "custom:" then (provRaw.drop 7).toString else "default"
       let acctRaw := (it.fieldStr? "account_id").orElse (fun _ => it.fieldStr? "accountId") |>.getD defaultAcct
-      let mdl := (it.fieldStr? "model_id").orElse (fun _ => it.fieldStr? "modelId") |>.getD ""
+      let mdlRaw := (it.fieldStr? "model_id").orElse (fun _ => it.fieldStr? "modelId") |>.getD ""
       let matchedProv? := matchProviderForChainTarget? providers acctRaw provRaw
-      let matchedModel? := matchedProv?.bind (fun p => p.customModels.find? (fun cm => cm.id == mdl))
       let acct := match matchedProv? with | some p => p.id | none => acctRaw
       let effProvType := match matchedProv? with | some p => p.providerType | none => provRaw
+      let mdl :=
+        if effProvType == "antigravity" || provRaw == "antigravity" || provRaw.startsWith "antigravity:" then
+          canonicalAntigravityProxyModelId mdlRaw
+        else
+          mdlRaw
+      let matchedModel? := matchedProv?.bind (fun p => p.customModels.find? (fun cm => cm.id == mdl || cm.id == mdlRaw))
       let url :=
         (it.fieldStr? "base_url").orElse (fun _ => it.fieldStr? "baseUrl")
         |>.orElse (fun _ => matchedProv?.bind (fun p => if p.baseUrl.isEmpty then none else some p.baseUrl))

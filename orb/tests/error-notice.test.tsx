@@ -58,5 +58,6 @@ describe("provider usage limits", () => {
     expect(describeError("Increased the rate of the limit checker loop.").tone).toBeUndefined();
     expect(describeError('{"error":"parallel_missions_cap","cap":50,"active":51}')).toMatchObject({ title: "Project agent limit reached", message: expect.stringContaining("Project settings") });
     expect(describeError("Maximum parallel missions (4) reached. 4 running.")).toMatchObject({ title: "Mission limit reached" });
+    expect(describeError('Remote opencode job failed: CLI error: {"data":{"isRetryable":true,"message":"Provider response headers timed out after 300000ms","metadata":{"code":"ProviderHeaderTimeoutError","timeoutMs":"300000"}},"name":"APIError"}')).toMatchObject({ title: "The server is taking too long to answer" });
   });
 });
