@@ -83,11 +83,16 @@ describe("normalizeEffort keeps an invalid selection out of a payload", () => {
 it("Antigravity offers only native efforts and makes the required default explicit",()=>{
  expect(supportedEfforts("antigravity")).toEqual(["low","medium","high"]);
  expect(normalizeEffort("xhigh","antigravity")).toBeNull();
+ expect(effortLabel(null,"antigravity","gemini-4-argon")).toBe("Default (High)");
  expect(effortLabel(null,"antigravity","agy-demo")).toBe("Default (High)");
- expect(effortLabel("low","antigravity","agy-demo")).toBe("Low");
+ expect(effortLabel("low","antigravity","gemini-4-argon")).toBe("Low");
  expect(effortLabel(null,"antigravity","agy-model")).toBe("Default (High)");
  expect(effortLabel(null,"antigravity","gemini-4-carbon")).toBe("Default (High)");
+ expect(effortLabel(null,"antigravity","gemini-4-carbon-medium")).toBe("Default (Medium)");
  expect(effortLabel(null,"antigravity","agy-model-medium")).toBe("Default (Medium)");
- expect(antigravityBaseModel("agy-model-high")).toBe("agy-model");
- expect(antigravityBaseModel("gemini-4-carbon-eap")).toBe("agy-model");
+ expect(antigravityBaseModel("gemini-4-carbon-high")).toBe("gemini-4-carbon");
+ expect(antigravityBaseModel("agy-model-high")).toBe("gemini-4-carbon");
+ expect(antigravityBaseModel("gemini-4-carbon-eap")).toBe("gemini-4-carbon");
+ expect(antigravityBaseModel("gemini-4-argon-low")).toBe("gemini-4-argon");
+ expect(antigravityBaseModel("agy-demo-low")).toBe("gemini-4-argon");
 });
