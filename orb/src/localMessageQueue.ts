@@ -631,6 +631,23 @@ export function startLocalQueueWorker(){
      }
      continue;
     }
+    if(row.state==='error'&&!row.receipt&&!row.result&&/^Error:\s*This conversation changed machines or folders\./.test(row.error??'')){
+     const binding=localBinding(row.mission);
+     if(binding&&binding.cwd===row.request.cwd){
+      const mission=await getMission(row.mission,{includeHistory:false}).catch(()=>undefined);
+      if(!valid())return;
+      if(mission&&isClientPlacement(mission)){
+       await update(key,row.id,stored=>{
+        if(stored.state==='error'&&!stored.receipt&&!stored.result&&stored.error===row.error){
+         stored.state='queued';
+         delete stored.error;
+        }
+       });
+       again=true;
+       continue;
+      }
+     }
+    }
     if(row.state==='accepted'){
      if(row.result)await persistResult(row).catch(error=>syncFailed(row,error));else follow(row);
      continue;

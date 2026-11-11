@@ -309,5 +309,53 @@ describe("persistentCache native orb-locald bridge", () => {
     expect(oldest?.activityCompacted).toBe(true);
     expect(oldest?.stream.map((e) => e.type)).toEqual(["user_message", "assistant_message"]);
     expect(oldest?.items.find((it) => it.kind === "work")?.entries?.[0]?.result?.length).toBe(256);
+
+    // Concurrent newer save while 33rd put is awaiting must never be overwritten by stale demotion!
+    await clearPersistentCache();
+    for (let i = 0; i < 32; i++) {
+      await savePersistedTranscript("scope-race", `r-${i}`, makeHotSnap(i));
+    }
+    let release33!: () => void;
+    const gate33 = new Promise<void>((resolve) => {
+      release33 = resolve;
+    });
+    win.__ORB_DESKTOP__ = {
+      core: {
+        invoke: async (cmd: string, args?: Record<string, unknown>) => {
+          if (cmd === "ui_cache_put") {
+            const kind = String(args?.kind ?? "");
+            const key = String(args?.key ?? "");
+            const savedAt = Number(args?.saved_at ?? 0);
+            const raw = String(args?.raw ?? "");
+            const tier = args?.tier === "warm" || raw === "{}" ? "warm" : "hot";
+            if (key === "scope-race::m:r-32") await gate33;
+            const prev = disk.get(`${kind}:${key}`);
+            if (!prev || prev.savedAt <= savedAt) {
+              disk.set(`${kind}:${key}`, { savedAt, tier, raw });
+            }
+            return null;
+          }
+          if (cmd === "ui_cache_get") return disk.get(`${args?.kind}:${args?.key}`)?.raw ?? null;
+          if (cmd === "ui_cache_clear") {
+            disk.clear();
+            return null;
+          }
+          throw new Error(`unexpected ${cmd}`);
+        },
+      },
+    };
+    const save33 = savePersistedTranscript("scope-race", "r-32", makeHotSnap(32));
+    // Update r-0 with a brand-new answer while r-32's initial put is still awaiting:
+    await savePersistedTranscript("scope-race", "r-0", makeHotSnap(999));
+    release33();
+    await save33;
+
+    resetPersistentCacheMemoryForTest();
+    const latestR0 = await loadPersistedTranscript<{
+      items: Array<{ kind: string; text?: string }>;
+      stream: Array<{ type: string }>;
+    }>("scope-race", "r-0");
+    expect(latestR0?.items.find((it) => it.kind === "text")?.text).toBe("Answer 999");
+    expect(latestR0?.stream.map((e) => e.type)).toEqual(["user_message", "tool_result", "assistant_message"]);
   });
 });

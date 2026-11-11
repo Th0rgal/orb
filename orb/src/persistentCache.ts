@@ -264,7 +264,7 @@ export async function savePersistedSidebar<TMission = unknown, TProject = unknow
   const prev = memSidebar.get(scope) as PersistedSidebarPayload<TMission, TProject> | undefined;
   const record: PersistedSidebarPayload<TMission, TProject> = {
     scope,
-    savedAt: Date.now(),
+    savedAt: nextSavedAt(),
     missions: payload.missions,
     completedMissions: payload.completedMissions ?? prev?.completedMissions ?? [],
     projects: payload.projects,
@@ -390,6 +390,8 @@ export async function savePersistedTranscript<TSnap = unknown>(
       if (gen !== nativeCacheGeneration) return;
       const handledKeys = new Set<string>();
       for (const warmRec of demoted) {
+        const curMem = memTranscripts.get(warmRec.id);
+        if (curMem && curMem.savedAt > warmRec.savedAt) continue;
         handledKeys.add(warmRec.id);
         await invoke("ui_cache_put", {
           kind: "transcript",
@@ -437,13 +439,16 @@ export async function savePersistedTranscript<TSnap = unknown>(
       if (isUnsupportedCacheCommandError(err)) {
         unsupportedInvoke = invoke;
       } else if (gen === nativeCacheGeneration) {
-        await invoke("ui_cache_put", {
-          kind: "transcript",
-          key: id,
-          saved_at: record.savedAt,
-          tier: "warm",
-          raw: "{}",
-        }).catch(() => undefined);
+        const curMem = memTranscripts.get(id);
+        if (!curMem || curMem.savedAt <= record.savedAt) {
+          await invoke("ui_cache_put", {
+            kind: "transcript",
+            key: id,
+            saved_at: record.savedAt,
+            tier: "warm",
+            raw: "{}",
+          }).catch(() => undefined);
+        }
       }
     }
   }

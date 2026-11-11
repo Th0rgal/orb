@@ -642,6 +642,13 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
       let ks2 := ((jv2.fieldArr? "demote_keys").getD #[]).filterMap (·.asStr?)
       ks1.contains "scope1::m:tx-2" && !(ks2.contains "scope1::m:tx-2")
     | _, _ => false
+  let stalePutRes ← dispatchRpcCommand stP1 "ui_cache_put" (.obj #[
+    ("kind", .str "transcript"),
+    ("key", .str "scope1::m:tx-251"),
+    ("saved_at", .nat 1999),
+    ("tier", .str "warm"),
+    ("raw", .str "{\"idx\":251,\"stale\":true}")
+  ])
   let oldestEvicted ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-0")])
   let secondEvicted ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-1")])
   let thirdKept ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-2")])
@@ -657,6 +664,7 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
     isOkStr sbGet "{\"missions\":[1],\"projects\":[]}" &&
     (match badKindRes with | .error _ => true | .ok _ => false) &&
     demoteListOk &&
+    isOkNull stalePutRes &&
     isOkNull oldestEvicted &&
     isOkNull secondEvicted &&
     isOkStr thirdKept "{\"idx\":2,\"tier\":\"warm\"}" &&

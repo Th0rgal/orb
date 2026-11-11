@@ -565,3 +565,38 @@ it('detaches foreground stream and transcript retention when a keep-alive slot g
   cacheReset();
  }
 });
+
+it('surfaces Remote job stopped notice even when a pending remote mission also has a queued follow-up (734c3bb7 replay)',async()=>{
+ const {getMission}=await import('../src/api');
+ const blockedMission:Mission={
+  id:'734c3bb7',
+  status:'pending',
+  backend:'opencode',
+  remote_node_id:'ashur',
+  remote_job:{
+   job_id:'job-failed',
+   node_id:'ashur',
+   phase:'finished',
+   lease_state:'terminal',
+   terminal_reason:'remote_dispatch_failed',
+   error:'remote node connection failed before the request was sent',
+  },
+  history:[],
+  created_at:'2026-11-10T15:15:49Z',
+  updated_at:'2026-11-11T18:46:19Z',
+ };
+ vi.mocked(getMission).mockResolvedValue(blockedMission);
+ vi.stubGlobal('fetch',vi.fn(async(url)=>{
+  if(String(url).includes('/queue?')){
+   return Response.json([{id:'queued-followup-1',mission_id:'734c3bb7',content:'summarize what you have done so far',source:'remote-queue'}]);
+  }
+  return Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0'}});
+ }));
+ const view=render(()=><NativeMissionView id="734c3bb7" initial={blockedMission}/>);
+ await waitFor(()=>expect(screen.getByText('summarize what you have done so far')).toBeDefined());
+ await waitFor(()=>expect(view.container.querySelector('.error-notice')).not.toBeNull());
+ expect(view.container.textContent).toContain('Remote job stopped');
+ expect(view.container.textContent).toContain('remote node connection failed before the request was sent');
+ expect(view.container.querySelector('.st-working')).toBeNull();
+ view.unmount();
+});

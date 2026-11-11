@@ -236,6 +236,17 @@ final class OrbContractTests: XCTestCase {
         let client = OrbRow(.object(["id": .string("local"), "placement_kind": .string("client"), "tags": .array([.string("placement:client")])]))
         XCTAssertTrue(client.mobile)
         XCTAssertTrue(client.isClientPlacement)
+        let legacyOrigin = OrbRow(.object(["id": .string("legacy-origin"), "origin": .string("orb-client")]))
+        XCTAssertTrue(legacyOrigin.isClientPlacement)
+        let legacyTag = OrbRow(.object(["id": .string("legacy-tag"), "tags": .array([.string("placement:client")])]))
+        XCTAssertTrue(legacyTag.isClientPlacement)
+        let adoptedToServer = OrbRow(.object([
+            "id": .string("adopted"),
+            "placement_kind": .string("server"),
+            "origin": .string("orb-client"),
+            "tags": .array([.string("placement:client")])
+        ]))
+        XCTAssertFalse(adoptedToServer.isClientPlacement)
         let btw = OrbRow(.object(["id": .string("side"), "tags": .array([.string("btw-parent:123")])]))
         XCTAssertFalse(btw.mobile)
         let cloud = OrbRow(.object(["id": .string("cloud"), "backend": .string("cloud_grok_bot")]))

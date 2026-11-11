@@ -4262,6 +4262,9 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         let dirSt ← OrbBin.PosixExt.statPath dir.toString
         if dirSt.isSymlink then return .error "UI cache directory must not be a symlink"
         let path := uiCacheEntryPath dir kind key
+        let (existingTs, _, _) ← readUiCacheMeta path
+        if existingTs > savedAt then
+          return .ok .null
         let keyHex := LeanSys.Auth.bytesToHexLower key.toUTF8
         let headerTs := if kind == "transcript" then s!"{savedAt}:{tier}" else s!"{savedAt}"
         let wire := (s!"{headerTs}\n{keyHex}\n" ++ rawJson).toUTF8
