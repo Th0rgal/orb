@@ -474,7 +474,7 @@ export function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
   return <Show when={canRenderBody()} fallback={<><ErrorToast error={error()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(""); return getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e))); } }} onDismiss={() => setError("")} /><ConversationSkeleton /></>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} onMission={handleMission} />}>{(() => { const mod = peekCloudAgentsModule(); return mod ? <mod.CloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /> : <Suspense fallback={<ConversationSkeleton />}><LazyCloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /></Suspense>; })()}</Show></Show>;
 }
 
-export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null, authoritative?: boolean) => void; onFork?: (mission: Mission) => void }) {
+export function NativeMissionView(p: { id: string; active?: boolean; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null, authoritative?: boolean) => void; onFork?: (mission: Mission) => void }) {
   const boundMissionId = p.id;
   const staleMission = () => disposed || Boolean(boundMissionId && p.id !== boundMissionId);
   const receipt = p.launch ?? recalledLaunch(p.id);
@@ -505,11 +505,12 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   });
   createEffect(() => {
     const m = mission();
+    if (p.active === false) return;
     const auth = authoritativeOnce;
     authoritativeOnce = false;
     p.onMission?.(m, auth);
   });
-  onCleanup(() => p.onMission?.(null));
+  onCleanup(() => { if (p.active !== false) p.onMission?.(null); });
   const [items, setItems] = createSignal<StreamItem[]>(cached?.items ?? []);
   const [awaiting, setAwaiting] = createSignal(!cached || !!cached.detailsPending);
   createEffect(on(transcriptVersion, () => {
@@ -695,7 +696,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   const pin = createPinnedScroll({ key: () => p.id, onResize: () => older(false), onUpwardAtTop: () => older(true) });
   const { landAtBottom, scrollIfPinned } = pin;
   let scroller: HTMLDivElement | undefined;
-  createEffect(()=>{if(p.id)cacheRemember(`m:${p.id}`);});
+  createEffect(()=>{if(p.id && p.active !== false)cacheRemember(`m:${p.id}`);});
   pin.observe();
   onMount(() => {
     if (!scroller) return;
@@ -852,7 +853,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     setRemoteLiveEdits([]);
     if(!id)return;
     const reload = async () => {
-      if (refreshing()) return;
+      if (p.active === false || refreshing()) return;
       setRefreshing(true);
       try { await Promise.all([refresh(), resync(true)]); }
       finally { setRefreshing(false); }
@@ -945,6 +946,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     // composer busy state shouldn't depend on it alone.
     let settledEmptyVerified = false;
     const stopPoll = pollWhileVisible(async () => {
+      if (p.active === false) return;
       const wasMoving = missionPhase(mission(), activity()).moving;
       await refresh();
       const nowMoving = missionPhase(mission(), activity()).moving;
@@ -990,7 +992,10 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     };
     const refreshLocal = () => reconcile().catch(console.error);
     refreshLocal();
-    const stopPoll = pollWhileVisible(reconcile, 2000, "mission.localReconcile");
+    const stopPoll = pollWhileVisible(() => {
+      if (p.active === false && !localRunActive(id)) return Promise.resolve();
+      return reconcile();
+    }, 2000, "mission.localReconcile");
     window.addEventListener('orb:queue-wake',refreshLocal);
     onCleanup(()=>{stopPoll();window.removeEventListener('orb:queue-wake',refreshLocal);});
   });
@@ -1200,10 +1205,22 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   );
   const visibleViewItems = createMemo(() => visibleTranscript(viewItems()));
   const planProgress = createPlanProgress({get mission(){return p.id;},get items(){return viewItems();},get active(){return clientPlaced()?localRunActive(p.id):busy();}});
-  createEffect(()=>p.onPlan?.(p.id,planProgress()));
+  createEffect(() => { if (p.active !== false) p.onPlan?.(p.id, planProgress()); });
   const estimatedTokens = createMemo(() => estimateTokens(viewItems()));
   const titleContext = createMemo(() => awaiting() ? null : contextPct(estimatedTokens(), contextWindow(mission()?.backend)));
-  createEffect(() => p.onContext?.(p.id, titleContext()));
+  createEffect(() => { if (p.active !== false) p.onContext?.(p.id, titleContext()); });
+  createEffect(on(() => p.active !== false, (isActive, wasActive) => {
+    if (!isActive || wasActive !== false) return;
+    queueMicrotask(() => {
+      if (disposed || p.active === false) return;
+      scroller?.dispatchEvent(new Event("orb:slot-shown"));
+      pin.restoreVisible();
+    });
+    if (p.id && isMissionDirtyWhileUnfocused(p.id)) {
+      void refresh();
+      void resync(true);
+    }
+  }, { defer: true }));
   let fulfillingTargetId = 0;
   createEffect(() => {
     const target = pendingSearchTarget();
@@ -1574,7 +1591,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   return (
     <>
       {/* Centred in the title-bar row, just left of its icons (Codex / ChatGPT desktop). */}
-      <Show when={document.getElementById("tb-tools")}>{slot => <Portal mount={slot()}>
+      <Show when={p.active !== false && document.getElementById("tb-tools")}>{slot => <Portal mount={slot()}>
         <div class="mission-tools"><Chapters items={viewItems()} scroller={() => scroller} /></div>
       </Portal>}</Show>
       <div
@@ -1640,7 +1657,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       <div class="dock" ref={floatingDock}>
         <JumpToLatest pinned={pin.pinned} onJump={pin.pin} />
         <div class="col">
-          <Show when={p.id}><SideQuestions mission={p.id} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})}/></Show>
+          <Show when={p.id}><SideQuestions mission={p.id} active={p.active !== false} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})}/></Show>
           <RemoteQueue mission={p.id}
             ref={handle => remoteQueue = handle}
             editing={editingQueued()}

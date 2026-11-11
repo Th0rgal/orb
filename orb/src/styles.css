@@ -217,7 +217,7 @@ input:not([type=checkbox], [type=radio], [type=range]):focus, textarea:focus, se
    textarea inside must never draw its own ring (Cursor does the same). */
 .composer textarea:focus-visible, .composer textarea:focus { outline: 0; box-shadow: none; }
 button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focus:not(:focus-visible), select:focus:not(:focus-visible) { outline: 0; }
-.sb-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 6px 12px; scroll-padding-block: 8px; scrollbar-width: none; }
+.sb-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 6px 12px; scroll-padding-block: 8px; scrollbar-width: none; contain: layout style paint; }
 .sb-scroll::-webkit-scrollbar { display: none; }
 .sb-scroll > .row + .row, .sb-main-nav > .row + .row { margin-top: 1px; }
 .sb-main-nav[hidden] { display: none; }
@@ -519,6 +519,9 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
 
 /* ---------- main ---------- */
 .main { grid-column: 2; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.mission-slot { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; position: relative; }
+.mission-slot[hidden] { display: none !important; content-visibility: hidden; }
+[data-turn-key] { contain: layout style; }
 .scroll { flex: 1; overflow-x: hidden; overflow-y: auto; overflow-anchor: none; padding: 0 24px; scrollbar-gutter: stable both-edges; }
 /* The transcript continues behind the floating composer: no full-width fade. */
 .scroll:has(+ .dock) .col { padding-bottom: calc(var(--dock-height, 110px) + 24px); }
@@ -643,7 +646,7 @@ html[data-window-focused="false"] :is(.shimmer, .spin, .mermaid-skeleton span, .
 .st-think-fold-head .chev.open { transform: rotate(90deg); }
 .st-think-fold-body { margin: 2px 0 6px 5px; padding-left: 12px; border-left: 1px solid var(--stroke-soft); }
 .st-think-fold-body .st-think { margin: 0; }
-.st-work { margin: 4px 10px; }
+.st-work { margin: 4px 10px; contain: layout style; }
 .st-work-head {
   display: flex; align-items: center; gap: 6px; height: 24px; width: 100%; text-align: left;
   color: var(--fg-3); font-size: 12.5px;
@@ -1939,8 +1942,8 @@ button.fork-trigger:hover { color: var(--fg); }
 .file-actions summary { cursor:pointer;padding:5px;list-style:none; }
 .file-actions>div { position:absolute;right:0;top:100%;background:var(--bg);border:1px solid var(--stroke);box-shadow:var(--shadow-lg);border-radius: var(--radius-sm);padding:5px;z-index:5;min-width:140px; }
 .file-actions button { display:block;width:100%;text-align:left; }
-@media(max-width:1150px) { .app[data-files-open="true"] { grid-template-columns:var(--sb-w) 1fr; } .app.sb-hidden[data-files-open="true"] { grid-template-columns:0 1fr; } .file-panel { position:fixed;right:0;top:var(--tb-h);bottom:0;width:min(95vw,780px);z-index:30;box-shadow:var(--shadow-lg); } .file-panel-resize { display:none; } }
-@media(max-width:720px) { .file-tree { width:160px; } .file-preview { padding:12px; } .file-panel.maximized { left:0; } }
+@media(max-width:1150px) { .app[data-files-open="true"] { grid-template-columns:var(--sb-w) 1fr; } .app.sb-hidden[data-files-open="true"] { grid-template-columns:0 1fr; } .file-panel { position:fixed;right:0;top:var(--tb-h);bottom:0;width:min(780px,calc(100vw - var(--sb-w)));background:var(--bg);z-index:30;box-shadow:var(--shadow-lg); } .app.sb-hidden > .file-panel { width:min(95vw,780px); } .file-panel-resize { display:none; } }
+@media(max-width:720px) { .file-tree { width:160px; } .file-preview { padding:12px; } .file-panel { width:100vw; } .file-panel.maximized { left:0; } }
 
 .file-source-code code { background:none;padding:0;border-radius:0;font:inherit; }
 
@@ -2041,7 +2044,7 @@ button.fork-trigger:hover { color: var(--fg); }
 .message-image > span { position:absolute;bottom:3px;right:3px;background:#141414d9;color:#eee;font-size:10px;line-height:16px;padding:0 4px;border-radius: var(--radius-xs); }
 .message-image:not(:disabled):hover { border-color:var(--fg-3); }
 
-.md-code-block { position: relative; min-width: 0; margin: 0 0 14px; border: 1px solid var(--stroke); border-radius: var(--radius-md); background: var(--bg-inset); }
+.md-code-block { position: relative; min-width: 0; margin: 0 0 14px; border: 1px solid var(--stroke); border-radius: var(--radius-md); background: var(--bg-inset); contain: layout style paint; }
 .md .md-code-block pre { margin: 0; padding: 12px 44px 12px 14px; background: transparent; }
 .md.md-compact .md-code-block pre { margin: 0; padding: 8px 40px 8px 10px; }
 /* Mermaid diagrams: one frame for both views, header with view toggle, copy and expand. */

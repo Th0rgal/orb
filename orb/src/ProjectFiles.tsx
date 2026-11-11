@@ -2586,7 +2586,7 @@ export function LiveProjectsSection(p: {
     hoverTranscriptTimer = setTimeout(() => {
       hoverTranscriptTimer = undefined;
       prefetchTranscript(missionId);
-    }, 120);
+    }, 35);
   };
   onCleanup(cancelHoverTranscript);
   const currentParents = createMemo(() => {
@@ -2694,6 +2694,7 @@ export function LiveProjectsSection(p: {
     return <><button disabled={deleting()} aria-busy={deleting() ? true : undefined} aria-current={isSelectedRow(row.id) ? "page" : undefined} aria-expanded={d.launched || d.versions ? row.expanded : undefined}
       onKeyDown={e => { if (deleting()) return; if ((d.launched || d.versions) && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
       aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(effectiveMissionStatus(), pendingMissionInteraction(d.mission.id)).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && pendingPlaceMoves().has(missionMoveKey(d.mission.id)) ? "mission-arriving" : ""} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && !LIVE.has(effectiveMissionStatus()) ? "done" : ""} ${isMissionCut() ? "mission-cut" : ""} ${rowDrag.isLifted(row.id) ? "drag-source" : ""} ${!deleting() && isRowActive(row.id) ? "active" : ""}`} {...tip}
+      onPointerDown={e => { if (e.button === 0 && !deleting()) { if (d.mission) { cancelHoverTranscript(); prefetchTranscript(d.mission.id); } else { cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); } } }}
       onPointerEnter={e => { if (deleting()) return; if (rowDrag.phase() === 0) rowTip.bind(tipDetail()).onPointerEnter(e); if (d.mission) scheduleHoverTranscript(d.mission.id); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }}
       onPointerLeave={() => { tip.onPointerLeave(); if (d.mission) cancelHoverTranscript(); }}
       onFocus={e => rowTip.bind(tipDetail()).onFocus(e)}

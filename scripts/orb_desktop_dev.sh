@@ -396,53 +396,7 @@ EOF
       if [[ -f "$ROOT_DIR/macos_shell/icons/icon.png" ]]; then
         install -m 0644 "$ROOT_DIR/macos_shell/icons/icon.png" "$XDG_DATA/icons/hicolor/256x256/apps/orb.png"
       fi
-      cat > "$LINUX_APP_DIR/bin/.orb-static-server" <<EOF
-#!${PY_BIN}
-import os, sys
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-
-ROOT = os.path.realpath(sys.argv[1])
-MIME = {
-    ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-    ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
-    ".wasm": "application/wasm", ".json": "application/json; charset=utf-8",
-    ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg", ".webp": "image/webp", ".ico": "image/x-icon",
-    ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf",
-}
-
-class Handler(SimpleHTTPRequestHandler):
-    def log_message(self, fmt, *args): return
-    def end_headers(self):
-        req_p = getattr(self, "path", "").split("?", 1)[0]
-        if req_p.startswith(("/assets/", "/provider-icons/")) or req_p.endswith((".woff2", ".woff", ".ttf", ".wasm")):
-            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
-        else:
-            self.send_header("Cache-Control", "no-cache")
-        super().end_headers()
-    def guess_type(self, path):
-        return MIME.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
-    def translate_path(self, path):
-        rel = path.split("?", 1)[0].split("#", 1)[0].lstrip("/") or "index.html"
-        cand = os.path.normpath(os.path.join(ROOT, rel))
-        if not (cand == ROOT or cand.startswith(ROOT + os.sep)):
-            return os.path.join(ROOT, "__missing__")
-        if os.path.isfile(cand):
-            return cand
-        return os.path.join(ROOT, "index.html") if not os.path.splitext(rel)[1] else os.path.join(ROOT, "__missing__")
-
-class ReusableServer(ThreadingHTTPServer):
-    allow_reuse_address = True
-
-try:
-    srv = ReusableServer(("127.0.0.1", 1431), Handler)
-except OSError:
-    srv = ReusableServer(("127.0.0.1", 0), Handler)
-sys.stdout.write(str(srv.server_address[1]) + "\n")
-sys.stdout.flush()
-srv.serve_forever()
-EOF
-      chmod 0755 "$LINUX_APP_DIR/bin/.orb-static-server"
+      rm -f "$LINUX_APP_DIR/bin/.orb-static-server"
       cat > "$LINUX_APP_DIR/bin/orb" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -468,38 +422,13 @@ fi
 if [[ " \$* " == *" --self-test "* ]]; then
   exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
 fi
-server_pid=""
-cleanup_orb() {
-  if [[ -n "\$server_pid" ]]; then
-    kill "\$server_pid" 2>/dev/null || true
-    wait "\$server_pid" 2>/dev/null || true
-  fi
-}
-if [[ -z "\${ORB_DEV_URL:-}" ]]; then
-  fifo="\$(mktemp -u)"
-  mkfifo "\$fifo"
-  "${PY_BIN}" "\$APP_DIR/bin/.orb-static-server" "\$APP_DIR/share/orb" >"\$fifo" &
-  server_pid=\$!
-  trap cleanup_orb EXIT HUP INT TERM
-  IFS= read -r port <"\$fifo" || true
-  rm -f "\$fifo"
-  if [[ -z "\${port:-}" ]]; then
-    echo "error: failed to start local static asset server" >&2
-    exit 1
-  fi
-  export ORB_DEV_URL="http://127.0.0.1:\$port/"
+if [[ -z "\${ORB_DEV_URL:-}" && -z "\${ORB_DIST_DIR:-}" ]]; then
+  export ORB_DIST_DIR="\$APP_DIR/share/orb"
 fi
 if [[ -z "\${ORB_LOCALD_PORT:-}" ]]; then
   export ORB_LOCALD_PORT=\$("${PY_BIN}" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 fi
-if [[ -z "\$server_pid" ]]; then
-  exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
-fi
-set +e
-"\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
-rc=\$?
-set -e
-exit "\$rc"
+exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
 EOF
       chmod 0755 "$LINUX_APP_DIR/bin/orb"
       cat > "$XDG_DATA/applications/orb.desktop" <<EOF

@@ -4,6 +4,7 @@ import {
   noteMissionPresentationHint,
   recordPresentationActivity,
   refreshPresentationPreview,
+  registerTranscriptWarmer,
 } from "./missionCache";
 import { markUnfocusedBtwDirty, noteBtwPresentationHint } from "./btwAgent";
 import { lookupMissionById, resetMissionLookup } from "./missionLookup";
@@ -104,7 +105,8 @@ const Lazy24hConfirmDialog = lazy(() => import("./MachineCloudMenu").then(module
 const Providers=lazy(()=>import("./Providers").then(module=>({default:module.Providers})));
 const Resources = lazy(() => import("./Resources"));
 import { PopupMenu, type MenuEntry } from "./Menu";
-import { mdSource, toggleMdSource } from "./Markdown";
+import { mdSource, toggleMdSource, warmTranscriptMarkdown } from "./Markdown";
+import { createMissionKeepAlivePool } from "./missionKeepAlive";
 import { applyPendingMoves } from "./missionMove";
 import { cachePut, cacheRecents } from "./pageCache";
 import { effortLabel, normalizeEffort } from "./effort";
@@ -240,8 +242,13 @@ export default function App() {
     const close = usageTelemetry.page(screen, "screen", previous ?? "launch");
     onCleanup(close);
   }));
+  onMount(() => {
+    registerTranscriptWarmer(warmTranscriptMarkdown);
+    onCleanup(() => registerTranscriptWarmer(null));
+  });
   const [sidebar, setSidebar] = createSignal(!window.matchMedia("(max-width: 720px)").matches);
   const [sbWidth, setSbWidth] = createSignal(220);
+  const keepAlivePool = createMissionKeepAlivePool();
   const [deleteMissionRequest, setDeleteMissionRequest] = createSignal<string | null>(null);
   const [newFolder, setNewFolder] = createSignal<{ project: string; path: string } | null>(null);
   const newFolderPath = (project: string | null | undefined) =>
@@ -401,8 +408,11 @@ export default function App() {
         a.execution === b.execution),
   });
   const syncOpenMission = (next: Mission | null, authoritative = false) => {
-    setOpenMission(next);
-    if (!next) return;
+    if (!next) {
+      if (!currentMissionId()) setOpenMission(null);
+      return;
+    }
+    if (next.id === currentMissionId()) setOpenMission(next);
     const syncRow = (row: Mission) => {
       if (row.id !== next.id) return row;
       const prevTs = Date.parse(row.updated_at || "");
@@ -634,6 +644,7 @@ export default function App() {
   };
   const [projectMissions, setProjectMissions] = createSignal<Record<string, Mission[]>>({});
   createEffect(on(connectionVersion, () => {
+    keepAlivePool.clear();
     setProjectMissions({});
     setCompletedMissions([]);
     resetMissionHierarchy();
@@ -717,6 +728,7 @@ export default function App() {
     const m = openMission();
     const parent = btwParentId(m);
     if (m && parent && selected() === `m:${m.id}`) {
+      keepAlivePool.evictMission(m.id);
       hintSideQuestionOpen(sideQuestionKey(parent));
       setOpenMission(null);
       open(`m:${parent}`, false);
@@ -909,6 +921,19 @@ export default function App() {
   });
 
   const onSettings = () => !!settingsSectionFor(selected());
+  const pendingLaunchSlotKey = createMemo(() =>
+    selected() === null && launchPreview() ? launchViewKey() : "",
+  );
+  createEffect(() => {
+    const mid = currentMissionId();
+    const pendingKey = pendingLaunchSlotKey();
+    keepAlivePool.reconcile({
+      activeMissionId: mid,
+      pendingLaunchKey: pendingKey,
+      launchedSlotKey: mid ? launchedViewKeys.get(mid) : undefined,
+      isDeleting: isMissionDeleting,
+    });
+  });
   const openSettings = () => {
     open("settings");
   };
@@ -1262,6 +1287,7 @@ export default function App() {
     const archivedBefore = new Map<string, Mission>();
     const onArchived = (e: Event) => {
       const { id } = (e as CustomEvent<{ id: string }>).detail;
+      keepAlivePool.evictMission(id);
       setMissions(prev => { const m = prev.find(x => x.id === id); if (m) archivedBefore.set(id, m); return prev.filter(x => x.id !== id); });
     };
     const onArchiveFailed = (e: Event) => {
@@ -1529,6 +1555,7 @@ export default function App() {
                       const idSet = new Set(ids);
                       const removed = new Set(ids.flatMap(id => [`m:${id}`, `ms:${id}`, `rm:${id}`]));
                       batch(() => {
+                        for (const id of ids) keepAlivePool.evictMission(id);
                         setMissions(rows => rows.filter(m => !idSet.has(m.id)));
                         setCompletedMissions(rows => rows.filter(m => !idSet.has(m.id)));
                         setProjectMissions(prev => {
@@ -2030,6 +2057,47 @@ export default function App() {
               </div>
             </div>
         </div></Show>
+        <For each={keepAlivePool.slots()}>{slot => {
+          const isActive = createMemo(() => {
+            const mid = currentMissionId();
+            if (mid) return slot.missionId() === mid;
+            const pendingKey = pendingLaunchSlotKey();
+            return Boolean(pendingKey && slot.slotKey === pendingKey);
+          });
+          return (
+            <div class="mission-slot" data-slot-key={slot.slotKey} hidden={!isActive()}>
+              <Show
+                when={slot.kind === "launch"}
+                fallback={
+                  <MissionLookupContext.Provider value={id => findKnownMission(id)}>
+                    <MissionView
+                      id={slot.missionId()}
+                      active={isActive()}
+                      initial={findKnownMission(slot.missionId())}
+                      onMission={syncOpenMission}
+                      onPlan={(id, data) => setPreviewPlan({ id, data })}
+                      onContext={(id, pct) => setPreviewContext({ id, pct })}
+                      onFork={commitFork}
+                    />
+                  </MissionLookupContext.Provider>
+                }
+              >
+                <NativeMissionView
+                  id={slot.missionId()}
+                  active={isActive()}
+                  initial={findKnownMission(slot.missionId())}
+                  launch={slot.missionId() ? undefined : (launchPreview() ?? undefined)}
+                  launchError={slot.missionId() ? undefined : (createError() ?? undefined)}
+                  onRetryLaunch={() => retryLaunch?.()}
+                  onMission={syncOpenMission}
+                  onContext={(id, pct) => setPreviewContext({ id, pct })}
+                  onPlan={(id, data) => setPreviewPlan({ id, data })}
+                  onFork={commitFork}
+                />
+              </Show>
+            </div>
+          );
+        }}</For>
         <Switch>
             <Match when={selected() === "inbox"}>
               <Suspense>
@@ -2103,13 +2171,6 @@ export default function App() {
             <Suspense>
               <Resources missionId={currentResourcesMissionId()} onOpen={open} />
             </Suspense>
-          </Match>
-          <Match when={currentMissionId() || (selected()===null && launchPreview())}>
-            <Show when={currentMissionId() ? launchedViewKeys.get(currentMissionId()!) || currentMissionId() : launchViewKey()} keyed>{viewKey =>
-              <Show when={viewKey===launchViewKey()} fallback={<MissionLookupContext.Provider value={id=>findKnownMission(id)}><MissionView id={currentMissionId()!} initial={findKnownMission(currentMissionId())} onMission={syncOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id,pct)=>setPreviewContext({id,pct})} onFork={commitFork}/></MissionLookupContext.Provider>}>
-                <NativeMissionView id={currentMissionId() || ''} initial={findKnownMission(currentMissionId())} launch={launchPreview()??undefined} launchError={createError()??undefined} onRetryLaunch={()=>retryLaunch?.()} onMission={syncOpenMission} onContext={(id,pct)=>setPreviewContext({id,pct})} onPlan={(id,data)=>setPreviewPlan({id,data})} onFork={commitFork}/>
-              </Show>
-            }</Show>
           </Match>
           <Match when={currentController()}>
             {(slug) => (

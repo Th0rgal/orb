@@ -120,7 +120,7 @@ export function FindBar() {
 
   const positionBar = () => {
     if (!scope) return;
-    if (!scope.isConnected) {
+    if (!scope.isConnected || scope.closest('[hidden]')) {
       close(false);
       return;
     }
@@ -513,14 +513,15 @@ export function FindBar() {
 
     if (mod && !e.shiftKey && !e.altKey && key === 'f') {
       if (document.getElementById('orb-sidebar')?.contains(document.activeElement)) return;
-      const origin = lastTarget?.isConnected
+      const rawOrigin = lastTarget?.isConnected
         ? lastTarget
         : (document.activeElement as HTMLElement | null);
+      const origin = rawOrigin && !rawOrigin.closest('[hidden]') ? rawOrigin : null;
       const nextScope =
         origin?.closest<HTMLElement>('.file-preview,.btw-thread,.scroll,[data-find-conversation]') ??
         origin?.closest('.btw-panel,.btw-sidebar')?.querySelector<HTMLElement>('.btw-thread') ??
         origin?.closest('.file-panel')?.querySelector<HTMLElement>('.file-preview') ??
-        document.querySelector<HTMLElement>('.scroll,[data-find-conversation]') ??
+        [...document.querySelectorAll<HTMLElement>('.scroll,[data-find-conversation]')].find(el => !el.closest('[hidden]')) ??
         undefined;
       if (!nextScope) return;
       e.preventDefault();

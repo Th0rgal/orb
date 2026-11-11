@@ -1,9 +1,12 @@
-// Persistent IndexedDB cache (`orb-cache-v1`) for instant (< 15 ms) cold-start and offline
-// sidebar + conversation transcript rendering on slow or lossy networks.
+// Persistent cache (`orb-locald` native `~/.orb/ui-cache` on Desktop, IndexedDB `orb-cache-v1`
+// on Web) for instant (< 5 ms) cold-start and offline sidebar + transcript rendering.
 // - Scoped strictly by normalized `apiUrl` + auth token hash (`historyScope()`).
 // - LRU-bounded at `MAX_PERSISTED_TRANSCRIPTS = 24` ready transcripts.
 // - Wiped immediately on `clearConnection()` so sign-out/disconnect leaves zero residual data.
-// - Degrades gracefully to a bounded in-memory mirror when `indexedDB` is unavailable (e.g. unit tests).
+// - Uses `orb-locald` (`ui_cache_*`) on Desktop to eliminate WebKit IndexedDB structured-clone stalls,
+//   falling back seamlessly to IndexedDB or bounded in-memory mirror on Web / unit tests.
+
+import { nativeInvoke, type NativeInvoke } from "./native";
 
 const DB_NAME = "orb-cache-v1";
 const DB_VERSION = 1;
@@ -31,6 +34,13 @@ const memSidebar = new Map<string, PersistedSidebarPayload>();
 const memTranscripts = new Map<string, PersistedTranscriptRecord>();
 let knownDbTranscriptIds: Set<string> | null = null;
 let dbPromise: Promise<IDBDatabase | null> | null = null;
+let unsupportedInvoke: NativeInvoke | null = null;
+
+function activeLocaldCache(): NativeInvoke | null {
+  const invoke = nativeInvoke();
+  if (!invoke || invoke === unsupportedInvoke) return null;
+  return invoke;
+}
 
 function openDb(): Promise<IDBDatabase | null> {
   if (typeof indexedDB === "undefined" || !indexedDB) {
@@ -79,6 +89,22 @@ export async function loadPersistedSidebar<TMission = unknown, TProject = unknow
   if (!scope) return null;
   const memHit = memSidebar.get(scope) as PersistedSidebarPayload<TMission, TProject> | undefined;
   if (memHit) return memHit;
+  const invoke = activeLocaldCache();
+  if (invoke) {
+    try {
+      const raw = await invoke<string | null>("ui_cache_get", { kind: "sidebar", key: scope });
+      if (typeof raw === "string" && raw) {
+        const row = JSON.parse(raw) as PersistedSidebarPayload<TMission, TProject>;
+        if (row && Array.isArray(row.missions) && Array.isArray(row.projects)) {
+          memSidebar.set(scope, row);
+          return row;
+        }
+      }
+      return null;
+    } catch {
+      unsupportedInvoke = invoke;
+    }
+  }
   const db = await openDb();
   if (!db) return null;
   return new Promise((resolve) => {
@@ -118,6 +144,20 @@ export async function savePersistedSidebar<TMission = unknown, TProject = unknow
     projects: payload.projects,
   };
   memSidebar.set(scope, record);
+  const invoke = activeLocaldCache();
+  if (invoke) {
+    try {
+      await invoke("ui_cache_put", {
+        kind: "sidebar",
+        key: scope,
+        saved_at: record.savedAt,
+        raw: JSON.stringify(record),
+      });
+      return;
+    } catch {
+      unsupportedInvoke = invoke;
+    }
+  }
   const db = await openDb();
   if (!db) return;
   await new Promise<void>((resolve) => {
@@ -143,6 +183,23 @@ export async function loadPersistedTranscript<TSnap = unknown>(
   if (memHit) {
     memHit.savedAt = Date.now();
     return memHit.snapshot as TSnap;
+  }
+  const invoke = activeLocaldCache();
+  if (invoke) {
+    try {
+      const raw = await invoke<string | null>("ui_cache_get", { kind: "transcript", key: id });
+      if (typeof raw === "string" && raw) {
+        const row = JSON.parse(raw) as PersistedTranscriptRecord<TSnap>;
+        if (row && row.snapshot) {
+          memTranscripts.set(id, row);
+          evictMemoryTranscripts();
+          return row.snapshot;
+        }
+      }
+      return null;
+    } catch {
+      unsupportedInvoke = invoke;
+    }
   }
   const db = await openDb();
   if (!db) return null;
@@ -183,6 +240,20 @@ export async function savePersistedTranscript<TSnap = unknown>(
   };
   memTranscripts.set(id, record);
   evictMemoryTranscripts();
+  const invoke = activeLocaldCache();
+  if (invoke) {
+    try {
+      await invoke("ui_cache_put", {
+        kind: "transcript",
+        key: id,
+        saved_at: record.savedAt,
+        raw: JSON.stringify(record),
+      });
+      return;
+    } catch {
+      unsupportedInvoke = invoke;
+    }
+  }
   const db = await openDb();
   if (!db) return;
   await new Promise<void>((resolve) => {
@@ -226,6 +297,14 @@ export async function clearPersistentCache(): Promise<void> {
   memSidebar.clear();
   memTranscripts.clear();
   knownDbTranscriptIds = null;
+  const invoke = activeLocaldCache();
+  if (invoke) {
+    try {
+      await invoke("ui_cache_clear", {});
+    } catch {
+      unsupportedInvoke = invoke;
+    }
+  }
   const db = await openDb();
   if (!db) return;
   await new Promise<void>((resolve) => {
@@ -240,4 +319,11 @@ export async function clearPersistentCache(): Promise<void> {
       resolve();
     }
   });
+}
+
+export function resetPersistentCacheMemoryForTest(): void {
+  memSidebar.clear();
+  memTranscripts.clear();
+  knownDbTranscriptIds = null;
+  unsupportedInvoke = null;
 }

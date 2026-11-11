@@ -1049,6 +1049,84 @@ it('shows SideQuestionSkeleton instead of premature empty-state copy while cold 
  expect(screen.queryByRole('status',{name:'Loading side questions'})).toBeNull();
 });
 
+it('binds Cmd/Ctrl+K and .btw-sidebar exclusively to the active slot in a multi-mission keep-alive pool',async()=>{
+ const {For}=await import('solid-js');
+ const {FilePanelProvider,FilePanelButton}=await import('../src/FilePanel');
+ const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ const fs=await import('node:fs');
+ const path=await import('node:path');
+
+ await writeSideQuestion(sideQuestionKey('mission-keep-a'),{
+  history:[{id:'a-1',question:'Question A',answer:'Mission A exclusive side answer.',at:'2026-11-11T10:00:00Z'}],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:false,
+  docked:true,
+  pending:null,
+ });
+ await writeSideQuestion(sideQuestionKey('mission-keep-b'),{
+  history:[{id:'b-1',question:'Question B',answer:'Mission B exclusive side answer.',at:'2026-11-11T10:05:00Z'}],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:null,
+ });
+
+ const missionRecord=(id:string)=>({id,project:'orb',status:'active' as const,title:id,history:[],created_at:'',updated_at:''});
+ const [slots]=createSignal(['mission-keep-a','mission-keep-b']);
+ const [missionOpen,setMissionOpen]=createSignal<string|null>('mission-keep-a');
+
+ const view=render(()=>(
+  <div class="app">
+   <FilePanelProvider missionOpen={missionOpen()} scope={{mission:missionOpen()?missionRecord(missionOpen()!):undefined}}>
+    <FilePanelButton/>
+    <For each={slots()}>{id=>(
+     <div class="mission-slot" hidden={missionOpen()!==id}>
+      <SideQuestions mission={id} active={missionOpen()===id} items={[]} ref={()=>{}} onTransfer={()=>{}}/>
+     </div>
+    )}</For>
+   </FilePanelProvider>
+  </div>
+ ));
+ const appEl=view.container.querySelector('.app') as HTMLElement;
+ const sideAside=()=>view.container.querySelector('.btw-sidebar') as HTMLElement;
+ const isMac=/mac|iphone|ipad|ipod/i.test(navigator.platform);
+ const pressBtwShortcut=()=>fireEvent.keyDown(window,{key:'k',code:'KeyK',metaKey:isMac,ctrlKey:!isMac});
+
+ // 1. mission-keep-a starts with open=false even though mission-keep-b (mounted in background!) has open=true:
+ await waitFor(()=>expect(appEl.dataset.filesOpen).toBe('false'));
+ expect(sideAside().style.display).toBe('none');
+ expect(screen.queryByText('Mission B exclusive side answer.')).toBeNull();
+
+ // 2. Switch to mission-keep-b -> mission-keep-b's open=true restores immediately:
+ setMissionOpen('mission-keep-b');
+ await waitFor(()=>expect(appEl.dataset.filesOpen).toBe('true'));
+ expect(await screen.findByText('Mission B exclusive side answer.')).toBeTruthy();
+ expect(screen.queryByText('Mission A exclusive side answer.')).toBeNull();
+
+ // 3. Switch BACK to kept-alive mission-keep-a -> mission-keep-b's panel hides, and shortcut opens mission-keep-a's own /btw!
+ setMissionOpen('mission-keep-a');
+ await waitFor(()=>expect(appEl.dataset.filesOpen).toBe('false'));
+ expect(screen.queryByText('Mission B exclusive side answer.')).toBeNull();
+
+ pressBtwShortcut();
+ await waitFor(()=>expect(appEl.dataset.filesOpen).toBe('true'));
+ expect(await screen.findByText('Mission A exclusive side answer.')).toBeTruthy();
+ expect(screen.queryByText('Mission B exclusive side answer.')).toBeNull();
+ expect(sideAside().querySelectorAll('.btw-panel').length).toBe(1);
+
+ // 4. Leave missions (Inbox / New Agent) -> unregisters side handle and hides .btw-sidebar:
+ setMissionOpen(null);
+ await waitFor(()=>expect(appEl.dataset.filesOpen).toBe('false'));
+ expect(sideAside().style.display).toBe('none');
+ expect(screen.queryByRole('button',{name:'Side question'})).toBeNull();
+
+ // 5. CSS invariant: half-screen (<1150px) floating .file-panel uses opaque var(--bg) and respects --sb-w:
+ const css=fs.readFileSync(path.resolve(__dirname,'../src/styles.css'),'utf8');
+ expect(css).toContain('width:min(780px,calc(100vw - var(--sb-w)));background:var(--bg)');
+});
+
 
 
 

@@ -606,6 +606,52 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
     (match corruptClearRes with | .ok _ => true | .error _ => false)
   if (← assertTrue "desktop_prefs_shared_across_daemons" (prefsShareOk && corruptOk)) then passed := passed + 1
 
+  -- D3. Native `ui-cache` (`ui_cache_put` / `ui_cache_get` / LRU eviction / `ui_cache_clear`)
+  let sbPut ← dispatchRpcCommand stP1 "ui_cache_put" (.obj #[
+    ("kind", .str "sidebar"),
+    ("key", .str "https://orbcore.thomas.md::scope1"),
+    ("saved_at", .nat 1000),
+    ("raw", .str "{\"missions\":[1],\"projects\":[]}")
+  ])
+  let sbGet ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[
+    ("kind", .str "sidebar"),
+    ("key", .str "https://orbcore.thomas.md::scope1")
+  ])
+  let badKindRes ← dispatchRpcCommand stP1 "ui_cache_put" (.obj #[
+    ("kind", .str "../escape"),
+    ("key", .str "k"),
+    ("saved_at", .nat 1),
+    ("raw", .str "{}")
+  ])
+  for idx in [0:26] do
+    let _ ← dispatchRpcCommand stP1 "ui_cache_put" (.obj #[
+      ("kind", .str "transcript"),
+      ("key", .str s!"scope1::m:tx-{idx}"),
+      ("saved_at", .nat (2000 + idx)),
+      ("raw", .str s!"\{\"idx\":{idx}}")
+    ])
+  let oldestEvicted ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-0")])
+  let secondEvicted ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-1")])
+  let thirdKept ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-2")])
+  let newestKept ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-25")])
+  let _ ← dispatchRpcCommand stP1 "ui_cache_clear" (.obj #[])
+  let afterClearSb ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "sidebar"), ("key", .str "https://orbcore.thomas.md::scope1")])
+  let afterClearTx ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-25")])
+  let isOkNull (r : Except String JVal) : Bool := match r with | .ok .null => true | _ => false
+  let isOkStr (r : Except String JVal) (s : String) : Bool := match r with | .ok (.str v) => v == s | _ => false
+  total := total + 1
+  let uiCacheOk :=
+    isOkNull sbPut &&
+    isOkStr sbGet "{\"missions\":[1],\"projects\":[]}" &&
+    (match badKindRes with | .error _ => true | .ok _ => false) &&
+    isOkNull oldestEvicted &&
+    isOkNull secondEvicted &&
+    isOkStr thirdKept "{\"idx\":2}" &&
+    isOkStr newestKept "{\"idx\":25}" &&
+    isOkNull afterClearSb &&
+    isOkNull afterClearTx
+  if (← assertTrue "native_ui_cache_roundtrip_lru_and_clear" uiCacheOk) then passed := passed + 1
+
   -- E. Token-scoped `__orb_poll_events` + per-SSE-subscriber broadcast (no multi-window event stealing)
   let stPub ← IO.mkRef ({ launchToken := validTok } : LocaldState)
   let sid1 ← stPub.modifyGet LocaldState.registerSseSubscriber
@@ -1005,9 +1051,9 @@ def main : IO UInt32 := do
   let mut passed := 0
   let mut total := 0
 
-  -- 1. Command table size (97 desktop commands + plugin:app|version = 98)
+  -- 1. Command table size (100 desktop commands + plugin:app|version = 101)
   total := total + 1
-  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 98) then passed := passed + 1
+  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 101) then passed := passed + 1
 
   -- 2. Loopback RPC auth gate (>= 32-byte non-placeholder secret + local Origin confinement)
   let validTok := "0123456789abcdef0123456789abcdef"
@@ -1021,6 +1067,10 @@ def main : IO UInt32 := do
   if (← assertTrue "rpc_auth_reject_short_24b_default_token" (!(checkRpcAuth "127.0.0.1" "orb-locald-default-token" "orb-locald-default-token"))) then passed := passed + 1
   total := total + 1
   if (← assertTrue "origin_allow_local_loopback" (isAllowedLocaldOrigin (some "http://127.0.0.1:19479"))) then passed := passed + 1
+  total := total + 1
+  if (← assertTrue "origin_allow_orb_localhost" (isAllowedLocaldOrigin (some "orb://localhost"))) then passed := passed + 1
+  total := total + 1
+  if (← assertTrue "origin_reject_orb_evil" (!(isAllowedLocaldOrigin (some "orb://evil.example")))) then passed := passed + 1
   total := total + 1
   if (← assertTrue "origin_reject_remote_evil" (!(isAllowedLocaldOrigin (some "https://evil.example")))) then passed := passed + 1
 

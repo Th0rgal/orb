@@ -280,8 +280,9 @@ export function VoiceButton(p: {
     }
   };
 
+  let rootEl: HTMLSpanElement | undefined;
   const onKey = (e: KeyboardEvent) => {
-    if (e.key !== "Escape" || e.defaultPrevented || e.isComposing || hasOverlay()) return;
+    if (e.key !== "Escape" || e.defaultPrevented || e.isComposing || hasOverlay() || rootEl?.closest("[hidden]")) return;
     if (langOpen()) {
       e.stopPropagation();
       setLangOpen(false);
@@ -318,7 +319,7 @@ export function VoiceButton(p: {
   };
 
   return (
-    <span class={`voice ${status()}`} onPointerDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+    <span ref={rootEl} class={`voice ${status()}`} onPointerDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
       <Show when={status() === "idle"}>
         <span class="voice-lang-wrap">
           <button

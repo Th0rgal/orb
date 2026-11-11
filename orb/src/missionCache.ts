@@ -254,6 +254,11 @@ function schedulePersistReadySnapshot(scope: string, snapshot: TranscriptSnap) {
   persistTimers.set(scope, timer);
 }
 
+let transcriptWarmer: ((items: StreamItem[]) => void) | null = null;
+export function registerTranscriptWarmer(fn: ((items: StreamItem[]) => void) | null): void {
+  transcriptWarmer = fn;
+}
+
 function saveSnapshot(scope: string, snapshot: TranscriptSnap, persist = true) {
   cachedScopes.add(scope);
   const entry = active.get(scope);
@@ -262,6 +267,9 @@ function saveSnapshot(scope: string, snapshot: TranscriptSnap, persist = true) {
   const liveId = liveMissionIds.get(scope);
   if (liveId && snapshot.fromLog && !snapshot.detailsPending) {
     rememberWarmRecent(scope, liveId);
+  }
+  if (snapshot.fromLog && !snapshot.detailsPending && snapshot.items.length > 0) {
+    transcriptWarmer?.(snapshot.items);
   }
   if (persist) schedulePersistReadySnapshot(scope, snapshot);
   bumpTranscriptVersion();

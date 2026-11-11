@@ -13,7 +13,7 @@ import { uploadToken, type UploadedFile } from "./uploads";
 import { Portal } from 'solid-js/web';
 import { useSidePanel } from './FilePanel';
 import { createPinnedScroll } from './mission/pinnedScroll';
-import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createSignal, For, on, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { connectionVersion, isTransientNetworkError, sendMissionMessage, type QueuedMessage } from './api';
 import { consumeSideQuestionOpenHint, peekSavedSideQuestion, readSideQuestion, peekSideQuestionOpen, rememberSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion, type SavedSideQuestion } from './sideQuestionStorage';
 import { RemoteQueue, type PendingRemoteQueueItem, type RemoteQueueHandle } from './RemoteQueue';
@@ -67,8 +67,11 @@ async function inheritSideQuestion(mission:string){
  }
  return undefined;
 }
-export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:SideQuestionsHandle)=>void;onTransfer:(text:string)=>void;onOpenSession?:(id:string)=>void|Promise<void>}) {
+export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem[];ref:(handle:SideQuestionsHandle)=>void;onTransfer:(text:string)=>void;onOpenSession?:(id:string)=>void|Promise<void>}) {
  const side=useSidePanel();
+ const isActive=()=>p.active!==false;
+ const showSide=(opts?:{focus?:boolean;restore?:boolean})=>{if(isActive())side?.show(opts);};
+ const hideSide=(opts?:{restore?:boolean})=>{if(isActive())side?.hide(opts);};
  const key=()=>{connectionVersion();return sideQuestionKey(p.mission);};
  const [history,setHistory]=createSignal<SideExchange[]>([]),[open,setOpen]=createSignal(false),[busy,setBusy]=createSignal(false);
  const [turnId,setTurnId]=createSignal(crypto.randomUUID());
@@ -94,7 +97,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setExpandedSteps(n=>n+1);
  };
  const pin=createPinnedScroll({
-  key:()=>(open()?loadedKey():''),
+  key:()=>(open()&&isActive()?loadedKey():''),
   onUpwardAtTop:()=>{if(hiddenCount()>0)loadEarlierTurns();},
  });
  // Sending explicitly returns to the latest turn, even after reading older replies.
@@ -105,7 +108,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  createEffect(()=>{
   const curLen=history().length;
   answer();busy();btwActivities(p.mission).length;
-  const now=open()?loadedKey():'';
+  const now=open()&&isActive()?loadedKey():'';
   const opened=now!==shown;
   shown=now;
   if(!now){prevHistoryLen=curLen;return;}
@@ -167,8 +170,31 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  const [loadedKey,setLoadedKey]=createSignal('');
  const markOpen=()=>{rememberSideQuestionOpen(key(),true);setOpen(true);};
  const markClosed=()=>{rememberSideQuestionOpen(key(),false);setOpen(false);};
- const unregisterSide=side?.register({open:markOpen,close:markClosed});
- onCleanup(()=>{abort?.abort();unregisterSide?.();});
+ let wasInactive=false;
+ createEffect(()=>{
+  if(!isActive()){
+   wasInactive=true;
+   return;
+  }
+  const unregister=side?.register({open:markOpen,close:markClosed});
+  if(wasInactive){
+   wasInactive=false;
+   const current=untrack(key);
+   const hinted=consumeSideQuestionOpenHint(current);
+   const shouldOpen=hinted||(peekSideQuestionOpen(current)??untrack(open));
+   if(shouldOpen){
+    if(hinted)rememberSideQuestionOpen(current,true);
+    setOpen(true);
+    if(hinted)side?.show();
+    else side?.show({restore:true});
+   }else{
+    setOpen(false);
+    side?.hide({restore:true});
+   }
+  }
+  onCleanup(()=>unregister?.());
+ });
+ onCleanup(()=>{abort?.abort();});
  let ready:Promise<void>=Promise.resolve();
  let reconnectSession:(sideId:string)=>Promise<void>=async sideId=>{await p.onOpenSession?.(sideId);};
  let watchActiveSession:((agent:NonNullable<ReturnType<typeof btwSession>>,initialAttachments?:SideAttachment[])=>void)|undefined;
@@ -180,8 +206,8 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setSideSessionId('');setSideSessionLocal(false);
   setPendingQueued([]);setConfirmedQueued([]);setSideLiveEdits([]);setDeliveredQueuedIds([]);setRemoteQueuedIds([]);setHandoffId(undefined);
   const knownOpen=peekSideQuestionOpen(current);
-  if(knownOpen){setOpen(true);side?.show({restore:true});}
-  else{setOpen(false);side?.hide({restore:true});}
+  if(knownOpen){setOpen(true);showSide({restore:true});}
+  else{setOpen(false);hideSide({restore:true});}
   let stale=false;onCleanup(()=>{stale=true;});
   const missionId=p.mission;
   const warmInitial='peekWarmBtwState' in btwMod && typeof btwMod.peekWarmBtwState==='function'?btwMod.peekWarmBtwState(missionId):undefined;
@@ -314,10 +340,10 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   if(warmAnsweredPending&&agent?.active)clearStaleActive();
   setHistory(initialHistory);setBusy(false);setOpen(shouldOpen);
   if(shouldOpen){
-   if(hinted)side?.show();
-   else side?.show({restore:true});
+   if(hinted)showSide();
+   else showSide({restore:true});
   }else{
-   side?.hide({restore:true});
+   hideSide({restore:true});
   }
   const interruptedError='Side question interrupted. Retry to request a complete answer.';
   const rawSavedError=saved?.pending?.error||'';
@@ -520,7 +546,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    const coldEmpty=!initialHistory.length&&!(warmNow&&warmNow.clean);
    const needsImmediateSync=Boolean(
     shouldOpen||
-    (side?.visible())||
+    (isActive()&&side?.visible())||
     launching||
     agent?.active||
     awaitingServerPending||
@@ -540,7 +566,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  }));
  createEffect(()=>{
   const missionId=p.mission;
-  const visible=side?side.visible()&&open():open();
+  const visible=isActive()&&(side?side.visible()&&open():open());
   if(!visible||!missionId)return;
   let stopOpen:(()=>void)|undefined;
   try{
@@ -573,7 +599,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   for(const file of files)text=text.replaceAll(uploadToken(file.path),`[File: ${file.source.name}]`);
   if(!hasQueueFollowUp()){
    setQueue(rows=>[...rows,{id:clientMessageId,question:text,attachments}].slice(0,20));
-   markOpen();side?.show();setDraft('');
+   markOpen();showSide();setDraft('');
    revealSentQuestion();
    return true;
   }
@@ -592,7 +618,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      : rows;
    });
   }
-  markOpen();side?.show();setDraft('');
+  markOpen();showSide();setDraft('');
   revealSentQuestion();
   try{
    const res=await queueFn(missionId,text,sideContext(p.items,true),history(),attachments,clientMessageId,replace);
@@ -663,7 +689,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   if(current===key()){
    pendingBaselineHistory=history();
    setPendingAttachments(attachments);
-   markOpen();side?.show();setBusy(true);setQuestion(text);setAnswer('');setNarration([]);setError('');setNotSent(false);setDraft('');
+   markOpen();showSide();setBusy(true);setQuestion(text);setAnswer('');setNarration([]);setError('');setNotSent(false);setDraft('');
    revealSentQuestion();
   }
   asking=true;
@@ -772,10 +798,10 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   }
   remoteQueue?.editFirst();
  };
- const reveal=()=>{markOpen();side?.show({focus:true});};
+ const reveal=()=>{markOpen();showSide({focus:true});};
  p.ref({ask,open:reveal});
  const escape=(event:KeyboardEvent)=>{
-  if(event.key==='Escape'&&!event.defaultPrevented&&open()&&!side){
+  if(event.key==='Escape'&&!event.defaultPrevented&&open()&&isActive()&&!side){
    event.preventDefault();markClosed();
   }
  };
@@ -803,7 +829,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   if(!draft){setPreparing(false);return;}
   if(busy()||editingQueued())return;
   setTurnId(crypto.randomUUID());setQuestion(draft.text);setAnswer('');setNarration([]);setError('');setPreparing(true);
-  markOpen();side?.show();revealSentQuestion();
+  markOpen();showSide();revealSentQuestion();
  };
  let inline!:HTMLDivElement;
  // Keep a live stage and elapsed time visible throughout an active turn, anchored to the turn's start timestamp.
@@ -816,9 +842,9 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  };
  return <>
   <div ref={inline}/>
-  <Show when={!side&&!open()&&(history().length||busy()||error())}><button class="btw-reopen" onClick={reveal}>Side questions {busy()?'· Answering…':`· ${history().length}`}</button></Show>
-  <Show when={open()}><Portal mount={side ? side.target() : inline}><section class="btw-panel" aria-label="Side questions">
-   <header data-orb-drag-region><div><strong>Side question</strong></div><div class="btw-actions"><Show when={canStartFreshSession()}><button class="icon-btn" aria-label="New side session" title={freshSession()?"Next question starts a new side session":"New side session"} disabled={busy()||!btwSession(p.mission)||freshSession()} onClick={startFreshSession}><Ic.PlusIcon size={15}/></button></Show><button class="icon-btn" aria-label="Close side questions" onClick={()=>{markClosed();side?.hide();}}><Ic.CloseIcon size={16}/></button></div></header>
+  <Show when={!side&&!open()&&isActive()&&(history().length||busy()||error())}><button class="btw-reopen" onClick={reveal}>Side questions {busy()?'· Answering…':`· ${history().length}`}</button></Show>
+  <Show when={open()&&isActive()}><Portal mount={side ? side.target() : inline}><section class="btw-panel" aria-label="Side questions">
+   <header data-orb-drag-region><div><strong>Side question</strong></div><div class="btw-actions"><Show when={canStartFreshSession()}><button class="icon-btn" aria-label="New side session" title={freshSession()?"Next question starts a new side session":"New side session"} disabled={busy()||!btwSession(p.mission)||freshSession()} onClick={startFreshSession}><Ic.PlusIcon size={15}/></button></Show><button class="icon-btn" aria-label="Close side questions" onClick={()=>{markClosed();hideSide();}}><Ic.CloseIcon size={16}/></button></div></header>
    <div class="btw-thread" ref={pin.ref} onScroll={pin.onScroll}>
     <Show when={hiddenCount()>0}><button type="button" class="btw-load-earlier" onClick={loadEarlierTurns}>Load earlier side questions ({hiddenCount()})</button></Show>
     <For each={turns}>{exchange=>{
