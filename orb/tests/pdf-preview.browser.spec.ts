@@ -78,3 +78,32 @@ for(const broken of [false,true]) test(`PDF preview ${broken?'reports damaged do
  await expect(page.getByRole('button',{name:'View PDF',exact:true})).toBeVisible();
  await expect(page.locator('.pdf-viewer')).toHaveCount(0);
 });
+
+test('PDF preview recovers via Retry when a dynamic chunk import fails during an update', async ({ page }) => {
+  const bytes = fixture();
+  await page.route('**/api/**', route => {
+    const q = route.request().postDataJSON() ?? {};
+    let json: unknown = {};
+    if (q.action === 'roots') json = { sources: [{ id: 'workspace', label: 'Workspace', available: true }] };
+    if (q.action === 'resolve') json = { results: q.paths.map((reference: string) => ({ reference, matches: reference.includes('IMPLEMENTATION') ? [{ name: 'sample.pdf', path: 'sample.pdf', kind: 'file' }] : [] })) };
+    if (q.action === 'list') json = { entries: [{ name: 'sample.pdf', path: 'sample.pdf', kind: 'file' }] };
+    if (q.action === 'read') json = { binary: true, size: bytes.length, truncated: false };
+    if (q.action === 'download') json = { bytes, size: bytes.length, next: bytes.length };
+    return route.fulfill({ json });
+  });
+  let failOnce = true;
+  await page.route('**/src/PdfPreview*', route => {
+    if (failOnce) {
+      failOnce = false;
+      return route.abort('failed');
+    }
+    return route.continue();
+  });
+  await page.goto('/tests/file-panel.html');
+  await page.getByRole('button', { name: 'IMPLEMENTATION-BRIEF.md', exact: true }).click();
+  await page.getByRole('button', { name: 'View PDF', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText(/updated in the background|Couldn’t load PDF viewer/);
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(page.locator('.pdf-pages')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('.pdf-pagination')).toContainText('1 / 2');
+});

@@ -4,6 +4,7 @@
 import OrbBin.Spec
 import OrbBin.MutantSuite
 import OrbBin.PosixExt
+import OrbBin.Sqlite
 import OrbBin.UnicodeAlnum
 import OrbBin.Json
 import OrbBin.HttpClient

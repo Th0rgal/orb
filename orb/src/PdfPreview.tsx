@@ -2,7 +2,34 @@ import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { getDocument, GlobalWorkerOptions, type PDFDocumentProxy, type RenderTask } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
-GlobalWorkerOptions.workerSrc = workerUrl;
+let workerInit: Promise<void> | undefined;
+function ensurePdfWorker(): Promise<void> {
+  if (workerInit) return workerInit;
+  const proto = typeof location !== "undefined" ? location.protocol : "";
+  if (proto === "http:" || proto === "https:") {
+    GlobalWorkerOptions.workerSrc = workerUrl;
+    workerInit = Promise.resolve();
+    return workerInit;
+  }
+  workerInit = (async () => {
+    try {
+      const resolved = new URL(workerUrl, location.href).href;
+      const code = await (await fetch(resolved)).text();
+      GlobalWorkerOptions.workerSrc = URL.createObjectURL(
+        new Blob([code], { type: "text/javascript" }),
+      );
+    } catch {
+      // @ts-expect-error pdf.worker.min.mjs ships without separate .d.ts
+      const mod: unknown = await import("pdfjs-dist/build/pdf.worker.min.mjs");
+      (globalThis as unknown as { pdfjsWorker?: unknown }).pdfjsWorker = mod;
+      GlobalWorkerOptions.workerSrc = workerUrl;
+    }
+  })().catch((err) => {
+    workerInit = undefined;
+    throw err;
+  });
+  return workerInit;
+}
 
 /** Render one page at a time; no browser PDF plugin required in the Tauri webview. */
 export default function PdfPreview(p: { name: string; load: (signal: AbortSignal) => Promise<Uint8Array>; close: () => void }) {
@@ -52,6 +79,7 @@ export default function PdfPreview(p: { name: string; load: (signal: AbortSignal
   let revision = 0, shownPage = 0, drag: { id: number; x: number; y: number } | undefined;
   onMount(() => {
     root.focus({preventScroll:true});
+    setWidth(Math.max(1, viewport.clientWidth));
     const observer = new ResizeObserver(([entry]) => setWidth(Math.max(1, entry.contentRect.width)));
     observer.observe(viewport);
     onCleanup(() => observer.disconnect());
@@ -75,7 +103,7 @@ export default function PdfPreview(p: { name: string; load: (signal: AbortSignal
     onCleanup(() => { viewport.removeEventListener("wheel", wheel); viewport.removeEventListener("gesturestart", gestureStart); viewport.removeEventListener("gesturechange", gestureChange); });
     void (async () => {
       try {
-        const bytes = await p.load(abort.signal);
+        const [, bytes] = await Promise.all([ensurePdfWorker(), p.load(abort.signal)]);
         if (abort.signal.aborted) return;
         loading = getDocument({ data: bytes });
         const document = await loading.promise;

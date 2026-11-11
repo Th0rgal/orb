@@ -375,7 +375,9 @@ EOF
     echo "==> Staged standalone bundle at $APP_BUNDLE"
 
     if [[ "$INSTALL_APP" == "1" ]]; then
-      rsync -a --delete "$APP_BUNDLE/" "/Applications/Orb.app/"
+      rsync -a "$APP_BUNDLE/" "/Applications/Orb.app/"
+      find "/Applications/Orb.app/Contents/Resources/dist/assets" -type f -mtime +7 -delete 2>/dev/null || true
+      codesign --force --deep --entitlements "$ROOT_DIR/macos_shell/Entitlements.plist" --sign - "/Applications/Orb.app" >/dev/null 2>&1 || true
       echo "==> Synced /Applications/Orb.app"
     fi
   else
@@ -391,8 +393,8 @@ EOF
       install -m 0755 "$STAGE_BIN_DIR/orb-locald" "$LINUX_APP_DIR/bin/orb-locald"
       install -m 0755 "$STAGE_BIN_DIR/orb-signer" "$LINUX_APP_DIR/bin/orb-signer"
       install -m 0755 "$STAGE_BIN_DIR/sandboxed-mcp" "$LINUX_APP_DIR/bin/sandboxed-mcp"
-      rm -rf "$LINUX_APP_DIR/share/orb"
-      cp -R "$ROOT_DIR/orb/dist" "$LINUX_APP_DIR/share/orb"
+      rsync -a "$ROOT_DIR/orb/dist/" "$LINUX_APP_DIR/share/orb/"
+      find "$LINUX_APP_DIR/share/orb/assets" -type f -mtime +7 -delete 2>/dev/null || true
       if [[ -f "$ROOT_DIR/macos_shell/icons/icon.png" ]]; then
         install -m 0644 "$ROOT_DIR/macos_shell/icons/icon.png" "$XDG_DATA/icons/hicolor/256x256/apps/orb.png"
       fi

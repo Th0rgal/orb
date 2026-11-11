@@ -1,12 +1,13 @@
-// Persistent cache (`orb-locald` native `~/.orb/ui-cache` on Desktop, IndexedDB `orb-cache-v1`
-// on Web) for instant (< 5 ms) cold-start and offline sidebar + transcript rendering.
+// Persistent cache (`orb-locald` native `~/.orb/ui-cache.sqlite3` on Desktop, IndexedDB `orb-cache-v1`
+// on Web) for instant (< 5 ms) cold-start and offline sidebar + tail-sliced transcript rendering.
 // - Scoped strictly by normalized `apiUrl` + auth token hash (`historyScope()`).
 // - Two-tier LRU-bounded at `MAX_PERSISTED_TRANSCRIPTS = 250` ready transcripts:
 //   - Hot tier (`HOT_PERSISTED_TRANSCRIPTS = 32`): full settled `StreamItem[]` + recent raw tail.
 //   - Warm tier (`33..250`): compact conversational spine (prompts + received answers + work counts).
 // - Wiped immediately on `clearConnection()` so sign-out/disconnect leaves zero residual data.
-// - Uses `orb-locald` (`ui_cache_*`) on Desktop to eliminate WebKit IndexedDB structured-clone stalls,
-//   falling back seamlessly to IndexedDB or bounded in-memory mirror on Web / unit tests.
+// - Uses `orb-locald` SQLite (`ui_cache_get_tail` / `ui_cache_get_slice` / `ui_cache_put_transcript` /
+//   `ui_cache_*`) on Desktop to eliminate WebKit IndexedDB structured-clone stalls and multi-MB
+//   cold-open JS parses, falling back seamlessly to IndexedDB or bounded in-memory mirror on Web.
 
 import { nativeInvoke, type NativeInvoke } from "./native";
 
@@ -16,6 +17,7 @@ const STORE_SIDEBAR = "sidebar";
 const STORE_TRANSCRIPTS = "transcripts";
 export const HOT_PERSISTED_TRANSCRIPTS = 32;
 export const MAX_PERSISTED_TRANSCRIPTS = 250;
+export const DEFAULT_TRANSCRIPT_TAIL_EVENTS = 120;
 
 export type PersistedSidebarPayload<TMission = unknown, TProject = unknown> = {
   scope: string;
@@ -121,6 +123,13 @@ export function compactWarmTranscriptSnapshot<TSnap>(snapshot: TSnap): TSnap {
   } as TSnap;
 }
 
+export type PersistedTranscriptSliceResult<TSnap = unknown, TEvent = unknown> = {
+  snapshot: TSnap;
+  startIdx: number;
+  totalEvents: number;
+  events?: TEvent[];
+};
+
 const memSidebar = new Map<string, PersistedSidebarPayload>();
 const memTranscripts = new Map<string, PersistedTranscriptRecord>();
 let knownDbTranscriptIds: Set<string> | null = null;
@@ -130,6 +139,7 @@ let dbSource: IDBFactory | null = null;
 let lastSavedStamp = 0;
 let nativeCacheGeneration = 0;
 let unsupportedInvoke: NativeInvoke | null = null;
+let unsupportedSlicedInvoke: NativeInvoke | null = null;
 
 function nextSavedAt(): number {
   const now = Date.now();
@@ -145,6 +155,12 @@ function isUnsupportedCacheCommandError(err: unknown): boolean {
 function activeLocaldCache(): NativeInvoke | null {
   const invoke = nativeInvoke();
   if (!invoke || invoke === unsupportedInvoke) return null;
+  return invoke;
+}
+
+function activeLocaldSlicedCache(): NativeInvoke | null {
+  const invoke = activeLocaldCache();
+  if (!invoke || invoke === unsupportedSlicedInvoke) return null;
   return invoke;
 }
 
@@ -309,6 +325,120 @@ export async function savePersistedSidebar<TMission = unknown, TProject = unknow
   });
 }
 
+export async function loadPersistedTranscriptTail<TSnap extends { stream?: unknown[]; items?: unknown[] }>(
+  scope: string,
+  missionId: string,
+  tailLimit = DEFAULT_TRANSCRIPT_TAIL_EVENTS,
+): Promise<{ snapshot: TSnap; startIdx: number; totalEvents: number } | null> {
+  if (!scope || !missionId) return null;
+  const id = transcriptRecordKey(scope, missionId);
+  const memHit = memTranscripts.get(id);
+  if (memHit) {
+    memHit.savedAt = Date.now();
+    const snap = memHit.snapshot as TSnap;
+    const total = Array.isArray(snap?.stream) ? snap.stream.length : 0;
+    return { snapshot: snap, startIdx: 0, totalEvents: total };
+  }
+  const slicedInvoke = activeLocaldSlicedCache();
+  if (slicedInvoke) {
+    try {
+      const res = await slicedInvoke<{
+        saved_at?: number;
+        total_events?: number;
+        start_idx?: number;
+        head_raw?: string;
+        events_raw?: string[];
+        legacy_raw?: string;
+      } | null>("ui_cache_get_tail", {
+        scope,
+        mission_id: missionId,
+        tail_limit: tailLimit,
+      });
+      if (res && typeof res === "object") {
+        if (typeof res.legacy_raw === "string" && res.legacy_raw) {
+          const row = JSON.parse(res.legacy_raw) as PersistedTranscriptRecord<TSnap>;
+          if (row && row.snapshot) {
+            memTranscripts.set(id, row);
+            evictMemoryTranscripts();
+            const total = Array.isArray(row.snapshot.stream) ? row.snapshot.stream.length : 0;
+            return { snapshot: row.snapshot, startIdx: 0, totalEvents: total };
+          }
+          return null;
+        }
+        if (typeof res.head_raw === "string" && Array.isArray(res.events_raw)) {
+          const head = JSON.parse(res.head_raw) as Record<string, unknown>;
+          const events: unknown[] = [];
+          for (const rawEv of res.events_raw) {
+            if (typeof rawEv === "string" && rawEv) events.push(JSON.parse(rawEv));
+          }
+          const startIdx = typeof res.start_idx === "number" ? res.start_idx : 0;
+          const totalEvents = typeof res.total_events === "number" ? res.total_events : events.length;
+          const snapshot = {
+            ...head,
+            items: Array.isArray(head.items) ? head.items : [],
+            stream: events,
+          } as unknown as TSnap;
+          if (startIdx === 0) {
+            memTranscripts.set(id, {
+              id,
+              scope,
+              missionId,
+              savedAt: typeof res.saved_at === "number" ? res.saved_at : Date.now(),
+              snapshot,
+            });
+            evictMemoryTranscripts();
+          }
+          return { snapshot, startIdx, totalEvents };
+        }
+      } else if (res === null) {
+        // Explicit SQLite miss: check legacy flat-file / IndexedDB fallback below.
+      }
+    } catch (err) {
+      if (isUnsupportedCacheCommandError(err)) {
+        unsupportedSlicedInvoke = slicedInvoke;
+      }
+    }
+  }
+  const full = await loadPersistedTranscript<TSnap>(scope, missionId);
+  if (!full) return null;
+  const total = Array.isArray(full.stream) ? full.stream.length : 0;
+  return { snapshot: full, startIdx: 0, totalEvents: total };
+}
+
+export async function loadPersistedTranscriptSlice<TEvent = unknown>(
+  scope: string,
+  missionId: string,
+  beforeIdx: number,
+  limit = DEFAULT_TRANSCRIPT_TAIL_EVENTS,
+): Promise<{ startIdx: number; events: TEvent[] } | null> {
+  if (!scope || !missionId || beforeIdx <= 0) return null;
+  const slicedInvoke = activeLocaldSlicedCache();
+  if (!slicedInvoke) return null;
+  try {
+    const res = await slicedInvoke<{
+      start_idx?: number;
+      events_raw?: string[];
+    } | null>("ui_cache_get_slice", {
+      scope,
+      mission_id: missionId,
+      before_idx: beforeIdx,
+      limit,
+    });
+    if (!res || !Array.isArray(res.events_raw)) return null;
+    const events: TEvent[] = [];
+    for (const rawEv of res.events_raw) {
+      if (typeof rawEv === "string" && rawEv) events.push(JSON.parse(rawEv) as TEvent);
+    }
+    return {
+      startIdx: typeof res.start_idx === "number" ? res.start_idx : 0,
+      events,
+    };
+  } catch (err) {
+    if (isUnsupportedCacheCommandError(err)) unsupportedSlicedInvoke = slicedInvoke;
+    return null;
+  }
+}
+
 export async function loadPersistedTranscript<TSnap = unknown>(
   scope: string,
   missionId: string,
@@ -363,21 +493,58 @@ export async function savePersistedTranscript<TSnap = unknown>(
   scope: string,
   missionId: string,
   snapshot: TSnap,
+  options?: { startIdx?: number },
 ): Promise<void> {
   if (!scope || !missionId) return;
   const id = transcriptRecordKey(scope, missionId);
+  const savedAt = nextSavedAt();
+  const startIdx = options?.startIdx ?? 0;
   const record: PersistedTranscriptRecord<TSnap> = {
     id,
     scope,
     missionId,
-    savedAt: nextSavedAt(),
+    savedAt,
     tier: "hot",
     snapshot,
   };
-  memTranscripts.set(id, record);
-  const demoted = evictMemoryTranscripts();
+  let demoted: PersistedTranscriptRecord[] = [];
+  if (startIdx === 0) {
+    memTranscripts.set(id, record);
+    demoted = evictMemoryTranscripts();
+  }
+  const snapObj =
+    snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      ? (snapshot as Record<string, unknown>)
+      : null;
+  const slicedInvoke = snapObj && Array.isArray(snapObj.stream) ? activeLocaldSlicedCache() : null;
+  if (slicedInvoke && snapObj && Array.isArray(snapObj.stream)) {
+    try {
+      const { stream, items: _items, ...headRest } = snapObj;
+      await slicedInvoke("ui_cache_put_transcript", {
+        scope,
+        mission_id: missionId,
+        saved_at: savedAt,
+        start_idx: startIdx,
+        head_raw: JSON.stringify(headRest),
+        events_raw: stream.map((ev) => JSON.stringify(ev)),
+      });
+      return;
+    } catch (err) {
+      if (isUnsupportedCacheCommandError(err)) {
+        unsupportedSlicedInvoke = slicedInvoke;
+      } else {
+        await slicedInvoke("ui_cache_put", {
+          kind: "transcript",
+          key: id,
+          saved_at: savedAt,
+          tier: "warm",
+          raw: "{}",
+        }).catch(() => undefined);
+      }
+    }
+  }
   const invoke = activeLocaldCache();
-  if (invoke) {
+  if (invoke && (invoke !== slicedInvoke || unsupportedSlicedInvoke === invoke)) {
     const gen = nativeCacheGeneration;
     try {
       const putRes = await invoke<{ demote_keys?: string[] } | null>("ui_cache_put", {
@@ -452,6 +619,7 @@ export async function savePersistedTranscript<TSnap = unknown>(
       }
     }
   }
+  if (startIdx > 0) return;
   const db = await openDb();
   if (!db) return;
   await new Promise<void>((resolve) => {
@@ -570,4 +738,5 @@ export function resetPersistentCacheMemoryForTest(): void {
   knownDbHotTranscriptIds = null;
   lastSavedStamp = 0;
   unsupportedInvoke = null;
+  unsupportedSlicedInvoke = null;
 }

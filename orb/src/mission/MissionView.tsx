@@ -891,7 +891,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   const needsPrepareSearch=()=>{
     if(!p.id||disposed)return false;
     const ready=peekReadyTranscript(p.id);
-    return Boolean(ready?.hasOlder&&!ready.spineComplete);
+    return Boolean((ready?.diskStartIdx&&ready.diskStartIdx>0)||(ready?.hasOlder&&!ready.spineComplete));
   };
   const prepareSearch=async(signal:AbortSignal)=>{
     if(!p.id||disposed||signal.aborted||!needsPrepareSearch())return;

@@ -4,6 +4,7 @@ import Orb.Kernel
 import OrbNetLeaf
 import OrbBin.Json
 import OrbBin.PosixExt
+import OrbBin.Sqlite
 import OrbBin.GitWorkspace
 import OrbBin.ClaudeControl
 import OrbLocald.Spec
@@ -1352,12 +1353,100 @@ private def uiPrefsFilePath? (st : LocaldState) : Option System.FilePath :=
 private def uiCacheDirPath? (st : LocaldState) : Option System.FilePath :=
   (resolveOrbStateDir st).map (· / "ui-cache")
 
+private def uiCacheSqlitePath? (st : LocaldState) : Option System.FilePath :=
+  (resolveOrbStateDir st).map (· / "ui-cache.sqlite3")
+
+private def uiDraftsSqlitePath? (st : LocaldState) : Option System.FilePath :=
+  (resolveOrbStateDir st).map (· / "ui-drafts.sqlite3")
+
 initialize uiPrefsMutex : Std.Mutex Unit ← Std.Mutex.new ()
 initialize uiCacheMutex : Std.Mutex Unit ← Std.Mutex.new ()
+initialize uiDraftsMutex : Std.Mutex Unit ← Std.Mutex.new ()
+initialize uiCacheDbPoolRef : IO.Ref (Array (String × OrbBin.Sqlite.SqliteDb)) ← IO.mkRef #[]
+initialize uiDraftsDbPoolRef : IO.Ref (Array (String × OrbBin.Sqlite.SqliteDb)) ← IO.mkRef #[]
 
 private def maxUiCacheRawBytes : Nat := 8388608
 private def hotUiCacheTranscripts : Nat := 32
 private def maxUiCacheTranscripts : Nat := 250
+private def maxUiDraftRawBytes : Nat := 16777216
+private def maxUiDraftEntries : Nat := 512
+
+private def uiCacheSchemaSql : String :=
+  "CREATE TABLE IF NOT EXISTS ui_sidebar (scope_key TEXT PRIMARY KEY, saved_at INTEGER NOT NULL, payload_json TEXT NOT NULL);" ++
+  "CREATE TABLE IF NOT EXISTS ui_transcript_raw (record_key TEXT PRIMARY KEY, saved_at INTEGER NOT NULL, tier TEXT NOT NULL DEFAULT 'hot', payload_json TEXT NOT NULL);" ++
+  "CREATE INDEX IF NOT EXISTS idx_ui_transcript_raw_saved_at ON ui_transcript_raw(saved_at);" ++
+  "CREATE TABLE IF NOT EXISTS ui_transcript_meta (record_key TEXT PRIMARY KEY, scope_key TEXT NOT NULL, mission_id TEXT NOT NULL, saved_at INTEGER NOT NULL, total_events INTEGER NOT NULL, head_json TEXT NOT NULL);" ++
+  "CREATE INDEX IF NOT EXISTS idx_ui_transcript_meta_saved_at ON ui_transcript_meta(saved_at);" ++
+  "CREATE TABLE IF NOT EXISTS ui_transcript_events (record_key TEXT NOT NULL, idx INTEGER NOT NULL, event_json TEXT NOT NULL, PRIMARY KEY(record_key, idx));"
+
+private def uiDraftsSchemaSql : String :=
+  "CREATE TABLE IF NOT EXISTS ui_drafts (scope_key TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, value_json TEXT NOT NULL);" ++
+  "CREATE INDEX IF NOT EXISTS idx_ui_drafts_updated_at ON ui_drafts(updated_at);"
+
+private def ensurePrivateSqliteHandle
+    (poolRef : IO.Ref (Array (String × OrbBin.Sqlite.SqliteDb)))
+    (stateDir dbPath : System.FilePath)
+    (ddl : String) : IO (Except String OrbBin.Sqlite.SqliteDb) := do
+  try
+    IO.FS.createDirAll stateDir
+    discard <| OrbBin.PosixExt.chmod stateDir.toString 0o700
+  catch _ => pure ()
+  let dirSt ← OrbBin.PosixExt.statPath stateDir.toString
+  if dirSt.isSymlink then
+    return .error "State directory must not be a symlink"
+  let dbPathStr := dbPath.toString
+  let fileSt ← OrbBin.PosixExt.statPath dbPathStr
+  if fileSt.exists_ && (fileSt.isSymlink || !fileSt.isReg) then
+    return .error "SQLite database path must be a regular non-symlink file"
+  for suf in #["-wal", "-shm"] do
+    let sideSt ← OrbBin.PosixExt.statPath (dbPathStr ++ suf)
+    if sideSt.exists_ && sideSt.isSymlink then
+      return .error "SQLite WAL/SHM sidecar must not be a symlink"
+  let pool ← poolRef.get
+  if let some (_, db) := pool.find? (fun (p, _) => p == dbPathStr) then
+    if fileSt.exists_ then
+      return .ok db
+    OrbBin.Sqlite.sqliteCloseRaw db.handle
+    poolRef.modify (fun xs => xs.filter (fun (p, _) => p != dbPathStr))
+  match ← OrbBin.Sqlite.openSqliteDb dbPathStr ddl with
+  | .error e => return .error e
+  | .ok db =>
+    let _ ← OrbBin.Sqlite.sqliteExecRaw db.handle
+      "ALTER TABLE ui_transcript_raw ADD COLUMN tier TEXT NOT NULL DEFAULT 'hot';"
+    discard <| OrbBin.PosixExt.chmod dbPathStr 0o600
+    for suf in #["-wal", "-shm"] do
+      let side := dbPathStr ++ suf
+      if (← System.FilePath.pathExists side) then
+        discard <| OrbBin.PosixExt.chmod side 0o600
+    poolRef.modify fun xs =>
+      let trimmed := if xs.size ≥ 8 then xs.extract 1 xs.size else xs
+      trimmed.push (dbPathStr, db)
+    return .ok db
+
+private def reconcileSqliteTranscripts (h : UInt64) : IO (Array String) := do
+  let _ ← OrbBin.Sqlite.sqliteQueryRowsRaw h
+    "DELETE FROM ui_transcript_raw WHERE record_key NOT IN (SELECT record_key FROM ui_transcript_raw ORDER BY saved_at DESC, record_key DESC LIMIT ?1);"
+    #[s!"{maxUiCacheTranscripts}"]
+  let _ ← OrbBin.Sqlite.sqliteQueryRowsRaw h
+    "DELETE FROM ui_transcript_meta WHERE record_key NOT IN (SELECT record_key FROM ui_transcript_meta ORDER BY saved_at DESC, record_key DESC LIMIT ?1);"
+    #[s!"{maxUiCacheTranscripts}"]
+  let _ ← OrbBin.Sqlite.sqliteExecRaw h
+    "DELETE FROM ui_transcript_events WHERE record_key NOT IN (SELECT record_key FROM ui_transcript_meta);"
+  match ← OrbBin.Sqlite.sqliteQueryRowsRaw h
+      "SELECT record_key FROM ui_transcript_raw WHERE tier = 'hot' AND record_key NOT IN (SELECT record_key FROM ui_transcript_raw ORDER BY saved_at DESC, record_key DESC LIMIT ?1) ORDER BY saved_at ASC;"
+      #[s!"{hotUiCacheTranscripts}"] with
+  | .ok rows =>
+    let mut keys : Array String := #[]
+    for idx in [1:rows.size] do
+      if rows[idx]!.size ≥ 1 then
+        keys := keys.push rows[idx]![0]!
+    return keys
+  | .error _ => return #[]
+
+private def evictExcessSqliteDrafts (h : UInt64) : IO Unit := do
+  let _ ← OrbBin.Sqlite.sqliteQueryRowsRaw h
+    "DELETE FROM ui_drafts WHERE scope_key NOT IN (SELECT scope_key FROM ui_drafts ORDER BY updated_at DESC, scope_key DESC LIMIT ?1);"
+    #[s!"{maxUiDraftEntries}"]
 
 private def isValidUiCacheKind (k : String) : Bool :=
   k == "sidebar" || k == "transcript"
@@ -4643,24 +4732,65 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let key := (args.fieldStr? "key").getD ""
     if !isValidUiCacheKind kind || key.isEmpty || key.utf8ByteSize > 512 then
       return .error "Invalid ui_cache_get arguments"
-    match uiCacheDirPath? st with
-    | none => return .ok .null
-    | some dir =>
+    match resolveOrbStateDir st, uiCacheSqlitePath? st with
+    | some stateDir, some dbPath =>
       uiCacheMutex.atomically do
-        let dirSt ← OrbBin.PosixExt.statPath dir.toString
-        if !dirSt.exists_ then return .ok .null
-        if dirSt.isSymlink then return .error "UI cache directory must not be a symlink"
-        let path := uiCacheEntryPath dir kind key
-        let fileSt ← OrbBin.PosixExt.statPath path.toString
-        if !fileSt.exists_ || fileSt.isSymlink || !fileSt.isReg then return .ok .null
-        try
-          let raw ← IO.FS.readFile path
-          let keyHex := LeanSys.Auth.bytesToHexLower key.toUTF8
-          match parseUiCacheFile? raw keyHex with
-          | some (_, payload) => return .ok (.str payload)
-          | none => return .ok .null
-        catch _ =>
-          return .ok .null
+        match ← ensurePrivateSqliteHandle uiCacheDbPoolRef stateDir dbPath uiCacheSchemaSql with
+        | .ok db =>
+          let sql :=
+            if kind == "sidebar" then
+              "SELECT payload_json FROM ui_sidebar WHERE scope_key = ?1;"
+            else
+              "SELECT payload_json FROM ui_transcript_raw WHERE record_key = ?1;"
+          if let .ok rows ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle sql #[key] then
+            if rows.size ≥ 2 && rows[1]!.size ≥ 1 then
+              return .ok (.str rows[1]![0]!)
+          if kind == "transcript" then
+            if let .ok mrows ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                "SELECT scope_key, mission_id, saved_at, head_json FROM ui_transcript_meta WHERE record_key = ?1;" #[key] then
+              if mrows.size ≥ 2 && mrows[1]!.size ≥ 4 then
+                let scopeKey := mrows[1]![0]!
+                let missionId := mrows[1]![1]!
+                let savedAt := mrows[1]![2]!.trimAscii.toString.toNat?.getD 0
+                let headRaw := mrows[1]![3]!
+                if let .ok headJv := OrbBin.Json.parse headRaw then
+                  if let .ok erows ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                      "SELECT event_json FROM ui_transcript_events WHERE record_key = ?1 ORDER BY idx ASC;" #[key] then
+                    let mut streamArr : Array JVal := #[]
+                    for rIdx in [1:erows.size] do
+                      if erows[rIdx]!.size ≥ 1 then
+                        if let .ok ej := OrbBin.Json.parse erows[rIdx]![0]! then
+                          streamArr := streamArr.push ej
+                    let baseFields := ((headJv.asObj?).getD #[]).filter (fun (fk, _) => fk != "stream" && fk != "items")
+                    let snapJv := JVal.obj (baseFields ++ #[("items", .arr #[]), ("stream", .arr streamArr)])
+                    let recJv := JVal.obj #[
+                      ("id", .str key),
+                      ("scope", .str scopeKey),
+                      ("missionId", .str missionId),
+                      ("savedAt", .nat savedAt),
+                      ("snapshot", snapJv)
+                    ]
+                    return .ok (.str (renderCompact recJv))
+        | .error _ => pure ()
+        -- Legacy flat-file fallback (`~/.orb/ui-cache/*.cache`)
+        match uiCacheDirPath? st with
+        | none => return .ok .null
+        | some dir =>
+          let dirSt ← OrbBin.PosixExt.statPath dir.toString
+          if !dirSt.exists_ then return .ok .null
+          if dirSt.isSymlink then return .error "UI cache directory must not be a symlink"
+          let path := uiCacheEntryPath dir kind key
+          let fileSt ← OrbBin.PosixExt.statPath path.toString
+          if !fileSt.exists_ || fileSt.isSymlink || !fileSt.isReg then return .ok .null
+          try
+            let raw ← IO.FS.readFile path
+            let keyHex := LeanSys.Auth.bytesToHexLower key.toUTF8
+            match parseUiCacheFile? raw keyHex with
+            | some (_, payload) => return .ok (.str payload)
+            | none => return .ok .null
+          catch _ =>
+            return .ok .null
+    | _, _ => return .ok .null
   | "ui_cache_put" =>
     let kind := (args.fieldStr? "kind").getD ""
     let key := (args.fieldStr? "key").getD ""
@@ -4673,43 +4803,299 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       return .error "Invalid ui_cache_put key"
     if rawJson.isEmpty || rawJson.utf8ByteSize > maxUiCacheRawBytes then
       return .error "Invalid ui_cache_put payload"
-    match uiCacheDirPath? st with
-    | none => return .ok .null
-    | some dir =>
+    match resolveOrbStateDir st, uiCacheSqlitePath? st with
+    | some stateDir, some dbPath =>
       uiCacheMutex.atomically do
-        try
-          IO.FS.createDirAll dir
-          discard <| OrbBin.PosixExt.chmod dir.toString 0o700
-        catch _ => pure ()
-        let dirSt ← OrbBin.PosixExt.statPath dir.toString
-        if dirSt.isSymlink then return .error "UI cache directory must not be a symlink"
-        let path := uiCacheEntryPath dir kind key
-        let (existingTs, _, _) ← readUiCacheMeta path
-        if existingTs > savedAt then
-          return .ok .null
-        let keyHex := LeanSys.Auth.bytesToHexLower key.toUTF8
-        let headerTs := if kind == "transcript" then s!"{savedAt}:{tier}" else s!"{savedAt}"
-        let wire := (s!"{headerTs}\n{keyHex}\n" ++ rawJson).toUTF8
-        if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path wire then
+        match ← ensurePrivateSqliteHandle uiCacheDbPoolRef stateDir dbPath uiCacheSchemaSql with
+        | .ok db =>
+          if kind == "sidebar" then
+            match ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                "INSERT INTO ui_sidebar (scope_key, saved_at, payload_json) VALUES (?1, ?2, ?3) ON CONFLICT(scope_key) DO UPDATE SET saved_at = excluded.saved_at, payload_json = excluded.payload_json WHERE excluded.saved_at >= ui_sidebar.saved_at;"
+                #[key, s!"{savedAt}", rawJson] with
+            | .ok _ => return .ok .null
+            | .error e => return .error e
+          else
+            if let .ok erows ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                "SELECT saved_at FROM ui_transcript_raw WHERE record_key = ?1;" #[key] then
+              if erows.size ≥ 2 && erows[1]!.size ≥ 1 then
+                let curTs := erows[1]![0]!.trimAscii.toString.toNat?.getD 0
+                if curTs > savedAt then
+                  return .ok .null
+            if let .ok mrows ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                "SELECT saved_at FROM ui_transcript_meta WHERE record_key = ?1;" #[key] then
+              if mrows.size ≥ 2 && mrows[1]!.size ≥ 1 then
+                let curTs := mrows[1]![0]!.trimAscii.toString.toNat?.getD 0
+                if curTs > savedAt then
+                  return .ok .null
+            -- Tombstone `{}` or raw transcript write also drops any shadowed sliced rows for `key`.
+            let _ ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle "DELETE FROM ui_transcript_events WHERE record_key = ?1;" #[key]
+            let _ ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle "DELETE FROM ui_transcript_meta WHERE record_key = ?1;" #[key]
+            match ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                "INSERT INTO ui_transcript_raw (record_key, saved_at, tier, payload_json) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(record_key) DO UPDATE SET saved_at = excluded.saved_at, tier = excluded.tier, payload_json = excluded.payload_json WHERE excluded.saved_at >= ui_transcript_raw.saved_at;"
+                #[key, s!"{savedAt}", tier, rawJson] with
+            | .ok _ =>
+              let demoteKeys ← reconcileSqliteTranscripts db.handle
+              if !demoteKeys.isEmpty then
+                return .ok (.obj #[("demote_keys", .arr (demoteKeys.map .str))])
+              return .ok .null
+            | .error e => return .error e
+        | .error _ =>
+          match uiCacheDirPath? st with
+          | none => return .ok .null
+          | some dir =>
+            try
+              IO.FS.createDirAll dir
+              discard <| OrbBin.PosixExt.chmod dir.toString 0o700
+            catch _ => pure ()
+            let dirSt ← OrbBin.PosixExt.statPath dir.toString
+            if dirSt.isSymlink then return .error "UI cache directory must not be a symlink"
+            let path := uiCacheEntryPath dir kind key
+            let (existingTs, _, _) ← readUiCacheMeta path
+            if existingTs > savedAt then
+              return .ok .null
+            let keyHex := LeanSys.Auth.bytesToHexLower key.toUTF8
+            let headerTs := if kind == "transcript" then s!"{savedAt}:{tier}" else s!"{savedAt}"
+            let wire := (s!"{headerTs}\n{keyHex}\n" ++ rawJson).toUTF8
+            if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path wire then
+              return .error e
+            if kind == "transcript" then
+              let demoteKeys ← reconcileUiCacheTranscripts dir
+              if !demoteKeys.isEmpty then
+                return .ok (.obj #[("demote_keys", .arr (demoteKeys.map .str))])
+            return .ok .null
+    | _, _ => return .ok .null
+  | "ui_cache_put_transcript" =>
+    let scopeKey := (args.fieldStr? "scope").getD ""
+    let missionId := (args.fieldStr? "mission_id").getD ""
+    let savedAt := (args.fieldNat? "saved_at").getD 0
+    let headRaw := (args.fieldStr? "head_raw").getD "{}"
+    let eventsRaw := ((args.fieldArr? "events_raw").getD #[]).filterMap (·.asStr?)
+    let startIdx := (args.fieldNat? "start_idx").getD 0
+    let recordKey := s!"{scopeKey}::m:{missionId}"
+    if scopeKey.isEmpty || missionId.isEmpty || recordKey.utf8ByteSize > 512 then
+      return .error "Invalid ui_cache_put_transcript key"
+    let mut totalBytes := headRaw.utf8ByteSize
+    for ev in eventsRaw do
+      totalBytes := totalBytes + ev.utf8ByteSize
+    if totalBytes > maxUiCacheRawBytes then
+      return .error "UI cache transcript exceeds 8 MiB limit"
+    match resolveOrbStateDir st, uiCacheSqlitePath? st with
+    | some stateDir, some dbPath =>
+      uiCacheMutex.atomically do
+        let db ← match ← ensurePrivateSqliteHandle uiCacheDbPoolRef stateDir dbPath uiCacheSchemaSql with
+          | .ok d => pure d
+          | .error e => return .error e
+        if let .error e ← OrbBin.Sqlite.sqliteExecRaw db.handle "BEGIN IMMEDIATE;" then
           return .error e
-        if kind == "transcript" then
-          let demoteKeys ← reconcileUiCacheTranscripts dir
-          if !demoteKeys.isEmpty then
-            return .ok (.obj #[("demote_keys", .arr (demoteKeys.map .str))])
-        return .ok .null
-  | "ui_cache_clear" =>
-    match uiCacheDirPath? st with
-    | none => return .ok .null
-    | some dir =>
+        let txRes : Except String Unit ← do
+          let _ ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle "DELETE FROM ui_transcript_raw WHERE record_key = ?1;" #[recordKey]
+          let totalEvents := startIdx + eventsRaw.size
+          if startIdx == 0 then
+            if let .error e ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                "DELETE FROM ui_transcript_events WHERE record_key = ?1;" #[recordKey] then
+              pure (.error e)
+            else
+              let mut err? : Option String := none
+              for i in [0:eventsRaw.size] do
+                if err?.isNone then
+                  if let .error e ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                      "INSERT INTO ui_transcript_events (record_key, idx, event_json) VALUES (?1, ?2, ?3);"
+                      #[recordKey, s!"{i}", eventsRaw[i]!] then
+                    err? := some e
+              match err? with
+              | some e => pure (.error e)
+              | none =>
+                match ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                    "INSERT INTO ui_transcript_meta (record_key, scope_key, mission_id, saved_at, total_events, head_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(record_key) DO UPDATE SET scope_key = excluded.scope_key, mission_id = excluded.mission_id, saved_at = excluded.saved_at, total_events = excluded.total_events, head_json = excluded.head_json;"
+                    #[recordKey, scopeKey, missionId, s!"{savedAt}", s!"{totalEvents}", headRaw] with
+                | .ok _ => pure (.ok ())
+                | .error e => pure (.error e)
+          else
+            if let .error e ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                "DELETE FROM ui_transcript_events WHERE record_key = ?1 AND idx >= ?2;"
+                #[recordKey, s!"{startIdx}"] then
+              pure (.error e)
+            else
+              let mut err? : Option String := none
+              for i in [0:eventsRaw.size] do
+                if err?.isNone then
+                  if let .error e ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                      "INSERT INTO ui_transcript_events (record_key, idx, event_json) VALUES (?1, ?2, ?3) ON CONFLICT(record_key, idx) DO UPDATE SET event_json = excluded.event_json;"
+                      #[recordKey, s!"{startIdx + i}", eventsRaw[i]!] then
+                    err? := some e
+              match err? with
+              | some e => pure (.error e)
+              | none =>
+                match ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                    "INSERT INTO ui_transcript_meta (record_key, scope_key, mission_id, saved_at, total_events, head_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(record_key) DO UPDATE SET scope_key = excluded.scope_key, mission_id = excluded.mission_id, saved_at = excluded.saved_at, total_events = excluded.total_events, head_json = excluded.head_json;"
+                    #[recordKey, scopeKey, missionId, s!"{savedAt}", s!"{totalEvents}", headRaw] with
+                | .ok _ => pure (.ok ())
+                | .error e => pure (.error e)
+        match txRes with
+        | .error e =>
+          let _ ← OrbBin.Sqlite.sqliteExecRaw db.handle "ROLLBACK;"
+          return .error e
+        | .ok () =>
+          if let .error e ← OrbBin.Sqlite.sqliteExecRaw db.handle "COMMIT;" then
+            let _ ← OrbBin.Sqlite.sqliteExecRaw db.handle "ROLLBACK;"
+            return .error e
+          let _ ← reconcileSqliteTranscripts db.handle
+          return .ok .null
+    | _, _ => return .ok .null
+  | "ui_cache_get_tail" =>
+    let scopeKey := (args.fieldStr? "scope").getD ""
+    let missionId := (args.fieldStr? "mission_id").getD ""
+    let tailLimit := max 1 (min ((args.fieldNat? "tail_limit").getD 80) 2000)
+    let recordKey := s!"{scopeKey}::m:{missionId}"
+    if scopeKey.isEmpty || missionId.isEmpty || recordKey.utf8ByteSize > 512 then
+      return .error "Invalid ui_cache_get_tail arguments"
+    match resolveOrbStateDir st, uiCacheSqlitePath? st with
+    | some stateDir, some dbPath =>
       uiCacheMutex.atomically do
+        match ← ensurePrivateSqliteHandle uiCacheDbPoolRef stateDir dbPath uiCacheSchemaSql with
+        | .error _ => return .ok .null
+        | .ok db =>
+          if let .ok mrows ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+              "SELECT saved_at, total_events, head_json FROM ui_transcript_meta WHERE record_key = ?1;" #[recordKey] then
+            if mrows.size ≥ 2 && mrows[1]!.size ≥ 3 then
+              let savedAt := mrows[1]![0]!.trimAscii.toString.toNat?.getD 0
+              let totalEvents := mrows[1]![1]!.trimAscii.toString.toNat?.getD 0
+              let headRaw := mrows[1]![2]!
+              let startIdx := if totalEvents > tailLimit then totalEvents - tailLimit else 0
+              if let .ok erows ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                  "SELECT idx, event_json FROM ui_transcript_events WHERE record_key = ?1 AND idx >= ?2 ORDER BY idx ASC;"
+                  #[recordKey, s!"{startIdx}"] then
+                let mut evArr : Array JVal := #[]
+                let mut actualStart := startIdx
+                if erows.size ≥ 2 && erows[1]!.size ≥ 1 then
+                  actualStart := erows[1]![0]!.trimAscii.toString.toNat?.getD startIdx
+                for rIdx in [1:erows.size] do
+                  if erows[rIdx]!.size ≥ 2 then
+                    evArr := evArr.push (.str erows[rIdx]![1]!)
+                return .ok (.obj #[
+                  ("saved_at", .nat savedAt),
+                  ("total_events", .nat totalEvents),
+                  ("start_idx", .nat actualStart),
+                  ("head_raw", .str headRaw),
+                  ("events_raw", .arr evArr)
+                ])
+          -- Fallback to whole raw transcript row if stored via legacy `ui_cache_put`
+          if let .ok rrows ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+              "SELECT payload_json FROM ui_transcript_raw WHERE record_key = ?1;" #[recordKey] then
+            if rrows.size ≥ 2 && rrows[1]!.size ≥ 1 then
+              return .ok (.obj #[("legacy_raw", .str rrows[1]![0]!)])
+          return .ok .null
+    | _, _ => return .ok .null
+  | "ui_cache_get_slice" =>
+    let scopeKey := (args.fieldStr? "scope").getD ""
+    let missionId := (args.fieldStr? "mission_id").getD ""
+    let beforeIdx := (args.fieldNat? "before_idx").getD 0
+    let limit := max 1 (min ((args.fieldNat? "limit").getD 80) 2000)
+    let recordKey := s!"{scopeKey}::m:{missionId}"
+    if scopeKey.isEmpty || missionId.isEmpty || recordKey.utf8ByteSize > 512 then
+      return .error "Invalid ui_cache_get_slice arguments"
+    if beforeIdx == 0 then
+      return .ok (.obj #[("start_idx", .nat 0), ("events_raw", .arr #[])])
+    let startIdx := if beforeIdx > limit then beforeIdx - limit else 0
+    match resolveOrbStateDir st, uiCacheSqlitePath? st with
+    | some stateDir, some dbPath =>
+      uiCacheMutex.atomically do
+        match ← ensurePrivateSqliteHandle uiCacheDbPoolRef stateDir dbPath uiCacheSchemaSql with
+        | .error _ => return .ok .null
+        | .ok db =>
+          if let .ok erows ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+              "SELECT idx, event_json FROM ui_transcript_events WHERE record_key = ?1 AND idx >= ?2 AND idx < ?3 ORDER BY idx ASC;"
+              #[recordKey, s!"{startIdx}", s!"{beforeIdx}"] then
+            let mut evArr : Array JVal := #[]
+            let mut actualStart := startIdx
+            if erows.size ≥ 2 && erows[1]!.size ≥ 1 then
+              actualStart := erows[1]![0]!.trimAscii.toString.toNat?.getD startIdx
+            for rIdx in [1:erows.size] do
+              if erows[rIdx]!.size ≥ 2 then
+                evArr := evArr.push (.str erows[rIdx]![1]!)
+            return .ok (.obj #[
+              ("start_idx", .nat actualStart),
+              ("events_raw", .arr evArr)
+            ])
+          return .ok .null
+    | _, _ => return .ok .null
+  | "ui_cache_clear" =>
+    uiCacheMutex.atomically do
+      if let some stateDir := resolveOrbStateDir st then
+        if let some dbPath := uiCacheSqlitePath? st then
+          let dbPathStr := dbPath.toString
+          let pool ← uiCacheDbPoolRef.get
+          for (p, db) in pool do
+            if p == dbPathStr then
+              OrbBin.Sqlite.sqliteCloseRaw db.handle
+          uiCacheDbPoolRef.modify (fun xs => xs.filter (fun (p, _) => p != dbPathStr))
+          for suf in #["", "-wal", "-shm"] do
+            let target := dbPathStr ++ suf
+            let fst ← OrbBin.PosixExt.statPath target
+            if fst.exists_ && !fst.isSymlink && fst.isReg then
+              try IO.FS.removeFile target catch _ => pure ()
+          let _ := stateDir
+      if let some dir := uiCacheDirPath? st then
         let dirSt ← OrbBin.PosixExt.statPath dir.toString
-        if !dirSt.exists_ || dirSt.isSymlink then return .ok .null
-        let entries ← try dir.readDir catch _ => pure #[]
-        for e in entries do
-          if (e.fileName.startsWith "sidebar-" || e.fileName.startsWith "transcript-") &&
-             e.fileName.endsWith ".cache" then
-            try IO.FS.removeFile e.path catch _ => pure ()
-        return .ok .null
+        if dirSt.exists_ && !dirSt.isSymlink then
+          let entries ← try dir.readDir catch _ => pure #[]
+          for e in entries do
+            if (e.fileName.startsWith "sidebar-" || e.fileName.startsWith "transcript-") &&
+               e.fileName.endsWith ".cache" then
+              try IO.FS.removeFile e.path catch _ => pure ()
+      return .ok .null
+  | "ui_draft_get" =>
+    let key := (args.fieldStr? "key").getD ""
+    if key.isEmpty || key.utf8ByteSize > 1024 then
+      return .error "Invalid ui_draft_get key"
+    match resolveOrbStateDir st, uiDraftsSqlitePath? st with
+    | some stateDir, some dbPath =>
+      uiDraftsMutex.atomically do
+        match ← ensurePrivateSqliteHandle uiDraftsDbPoolRef stateDir dbPath uiDraftsSchemaSql with
+        | .error _ => return .ok .null
+        | .ok db =>
+          if let .ok rows ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+              "SELECT value_json FROM ui_drafts WHERE scope_key = ?1;" #[key] then
+            if rows.size ≥ 2 && rows[1]!.size ≥ 1 then
+              return .ok (.str rows[1]![0]!)
+          return .ok .null
+    | _, _ => return .ok .null
+  | "ui_draft_put" =>
+    let key := (args.fieldStr? "key").getD ""
+    let rawVal := (args.fieldStr? "raw").getD ""
+    let updatedAt := (args.fieldNat? "updated_at").getD 0
+    if key.isEmpty || key.utf8ByteSize > 1024 then
+      return .error "Invalid ui_draft_put key"
+    if rawVal.isEmpty || rawVal.utf8ByteSize > maxUiDraftRawBytes then
+      return .error "Invalid ui_draft_put payload"
+    match resolveOrbStateDir st, uiDraftsSqlitePath? st with
+    | some stateDir, some dbPath =>
+      uiDraftsMutex.atomically do
+        let db ← match ← ensurePrivateSqliteHandle uiDraftsDbPoolRef stateDir dbPath uiDraftsSchemaSql with
+          | .ok d => pure d
+          | .error e => return .error e
+        match ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+            "INSERT INTO ui_drafts (scope_key, updated_at, value_json) VALUES (?1, ?2, ?3) ON CONFLICT(scope_key) DO UPDATE SET updated_at = excluded.updated_at, value_json = excluded.value_json;"
+            #[key, s!"{updatedAt}", rawVal] with
+        | .ok _ =>
+          evictExcessSqliteDrafts db.handle
+          return .ok .null
+        | .error e => return .error e
+    | _, _ => return .ok .null
+  | "ui_draft_delete" =>
+    let key := (args.fieldStr? "key").getD ""
+    if key.isEmpty || key.utf8ByteSize > 1024 then
+      return .error "Invalid ui_draft_delete key"
+    match resolveOrbStateDir st, uiDraftsSqlitePath? st with
+    | some stateDir, some dbPath =>
+      uiDraftsMutex.atomically do
+        match ← ensurePrivateSqliteHandle uiDraftsDbPoolRef stateDir dbPath uiDraftsSchemaSql with
+        | .error _ => return .ok .null
+        | .ok db =>
+          let _ ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+            "DELETE FROM ui_drafts WHERE scope_key = ?1;" #[key]
+          return .ok .null
+    | _, _ => return .ok .null
   | "diagnostics_append" =>
     let lines : Array String := match args.fieldArr? "lines" with
       | some xs => xs.filterMap (·.asStr?)

@@ -166,7 +166,7 @@ const UsageTelemetrySettings = lazy(() => import("./UsageTelemetrySettings").the
 const BitwardenSettings = lazy(() => import("./BitwardenSettings").then(module => ({ default: module.BitwardenSettings })));
 const InboxPage = lazy(() => import("./Inbox").then(module => ({ default: module.InboxPage })));
 import { requestInboxDigest } from "./inboxDigest";
-import { countUnreadInboxMissions, listUnreadInboxCandidates } from "./inboxModel";
+import { countUnreadInboxMissions, listUnreadInboxCandidates } from "./inboxUnread";
 import { inboxConfig } from "./inboxSettings";
 const InboxSettings = lazy(() => import("./InboxSettingsPanels").then(module => ({ default: module.InboxSettings })));
 const InboxSummariesSettings = lazy(() => import("./InboxSettingsPanels").then(module => ({ default: module.InboxSummariesSettings })));
