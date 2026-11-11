@@ -210,7 +210,30 @@ export default function App() {
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
   const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps|sk|rm):/.test(saved)) ? settingsPageId(saved) : null; })());
-  createEffect(() => { writeString("orb.selectedConversation", selected() ?? ""); });
+  createEffect(() => {
+    const next = selected() ?? "";
+    if (readString("orb.selectedConversation") !== next) {
+      writeString("orb.selectedConversation", next);
+    }
+  });
+  onMount(() => {
+    const syncWindowFocus = () => {
+      const focused = document.visibilityState !== "hidden" && document.hasFocus();
+      document.documentElement.dataset.windowFocused = focused ? "true" : "false";
+    };
+    if (!document.documentElement.dataset.windowFocused) syncWindowFocus();
+    const onFocus = () => { document.documentElement.dataset.windowFocused = "true"; };
+    const onBlur = () => { document.documentElement.dataset.windowFocused = "false"; };
+    const onVis = () => { if (document.visibilityState === "hidden") onBlur(); else syncWindowFocus(); };
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onVis);
+    onCleanup(() => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onVis);
+    });
+  });
   onMount(() => onCleanup(startUsageTelemetry()));
   // One page view per selected page; the previous page is the entry point.
   createEffect(on(() => screenName(selected()), (screen, previous) => {
@@ -358,7 +381,25 @@ export default function App() {
   const [missionsLoading, setMissionsLoading] = createSignal(true);
   const [previewContext, setPreviewContext] = createSignal<{id: string; pct: number | null} | null>(null);
   const [previewPlan, setPreviewPlan] = createSignal<{id:string; data:PlanProgressData | undefined}>();
-  const [openMission, setOpenMission] = createSignal<Mission | null>(null);
+  const [openMission, setOpenMission] = createSignal<Mission | null>(null, {
+    equals: (a, b) =>
+      a === b ||
+      (!!a &&
+        !!b &&
+        a.id === b.id &&
+        a.status === b.status &&
+        a.updated_at === b.updated_at &&
+        a.title === b.title &&
+        a.project === b.project &&
+        a.folder === b.folder &&
+        a.backend === b.backend &&
+        a.model_override === b.model_override &&
+        a.model_effort === b.model_effort &&
+        a.working_directory === b.working_directory &&
+        a.remote_job === b.remote_job &&
+        a.queue_wait === b.queue_wait &&
+        a.execution === b.execution),
+  });
   const syncOpenMission = (next: Mission | null, authoritative = false) => {
     setOpenMission(next);
     if (!next) return;
@@ -451,6 +492,47 @@ export default function App() {
     return rl.state === "error" ? `${summary} (last known)` : summary;
   };
   const [completedMissions, setCompletedMissions] = createSignal<Mission[]>([]);
+  let sidebarPersistTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingSidebarPersist: {
+    scope: string;
+    missions: Mission[];
+    completedMissions: Mission[];
+    projects: ProjectSummary[];
+  } | null = null;
+  const stripSidebarHistory = (rows: Mission[]) =>
+    rows.some(m => m.history?.length) ? rows.map(m => (m.history?.length ? { ...m, history: undefined } : m)) : rows;
+  const flushSavePersistedSidebar = () => {
+    if (sidebarPersistTimer !== undefined) {
+      clearTimeout(sidebarPersistTimer);
+      sidebarPersistTimer = undefined;
+    }
+    if (!pendingSidebarPersist) return;
+    const snap = pendingSidebarPersist;
+    pendingSidebarPersist = null;
+    void savePersistedSidebar(snap.scope, {
+      missions: stripSidebarHistory(snap.missions),
+      completedMissions: stripSidebarHistory(snap.completedMissions),
+      projects: snap.projects,
+    });
+  };
+  const scheduleSavePersistedSidebar = (
+    scope: string,
+    payload: { missions: Mission[]; completedMissions: Mission[]; projects: ProjectSummary[] },
+  ) => {
+    pendingSidebarPersist = { scope, ...payload };
+    if (sidebarPersistTimer !== undefined) return;
+    sidebarPersistTimer = setTimeout(flushSavePersistedSidebar, 2_500);
+  };
+  onMount(() => {
+    const onVis = () => { if (document.visibilityState === "hidden") flushSavePersistedSidebar(); };
+    window.addEventListener("pagehide", flushSavePersistedSidebar);
+    document.addEventListener("visibilitychange", onVis);
+    onCleanup(() => {
+      window.removeEventListener("pagehide", flushSavePersistedSidebar);
+      document.removeEventListener("visibilitychange", onVis);
+      flushSavePersistedSidebar();
+    });
+  });
   const listMisses: Misses = new Map();
   let missionRefreshRevision = 0, missionAppliedRevision = 0;
   let initialFullMissionSyncDone = false;
@@ -480,7 +562,7 @@ export default function App() {
       const liveIds = selectLivePrefetchIds(nextMissions, isLive);
       noteLiveMissionIds(liveIds);
       for (const id of liveIds) prefetchTranscript(id);
-      void savePersistedSidebar(historyScope(), {
+      scheduleSavePersistedSidebar(historyScope(), {
         missions: nextMissions,
         completedMissions: completedMissions(),
         projects: rawLiveProjects(),
@@ -769,7 +851,7 @@ export default function App() {
       listProjects()
         .then((projects) => {
           setLiveProjects(projects);
-          void savePersistedSidebar(historyScope(), {
+          scheduleSavePersistedSidebar(historyScope(), {
             missions: rawMissions(),
             completedMissions: completedMissions(),
             projects,

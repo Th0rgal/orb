@@ -21,7 +21,7 @@ import { readProjectFileVersion } from "./projectContext";
 import { makeCutMission, moveMissions, planMissionMoves, readCutMission } from "./missionMove";
 import { RunningWorkers, deleteDescendants, descendantsSentence, pausedMissionIds, requiresDescendantOptIn, runningWorkerIds } from "./deleteRunning";
 const ForkMission = lazy(() => import("./ForkMission").then(module => ({ default: module.ForkMission })));
-import { For, Show, Suspense, createMemo, createSignal, onCleanup, onMount, createEffect, on, batch, lazy } from "solid-js";
+import { For, Show, Suspense, createMemo, createSelector, createSignal, onCleanup, onMount, createEffect, on, batch, lazy } from "solid-js";
 import { mergeById, pollWhileVisible } from "./poll";
 import { createStore, reconcile } from "solid-js/store";
 import * as Ic from "./icons";
@@ -183,6 +183,11 @@ export function LiveProjectsSection(p: {
         !m.tags?.some(t => t.startsWith("btw:")),
     ),
   );
+  const isSelectedRow = createSelector(() => p.selected());
+  const isSelectedMissionId = createSelector(() => {
+    const sel = p.selected();
+    return sel?.startsWith("m:") ? sel.slice(2) : sel?.startsWith("ms:") ? sel.slice(3) : null;
+  });
   const visibleMissions = (slug: string) => {
     // Pending moves: rows leave their old project and appear in the new one at once.
     // The per-project fetch pages history and walks parents. Until it lands,
@@ -191,10 +196,10 @@ export function LiveProjectsSection(p: {
     const own = stored.filter(m => !isMissionParticipant(m) && !movingOutOf(m.id, slug) && (!m.project || m.project === slug));
     const arriving = pendingPlaceMoves().size ? missionsMovedInto(slug, [...Object.values(missions).flat(), ...(p.activityMissions ?? [])]).filter(m => !isMissionParticipant(m) && !own.some(o => o.id === m.id)) : [];
     const rows = withMovedMissions(mergeArrivingMissions(own, arriving)).map(withHierarchy);
-    const current = currentMission();
+    const current = isOpenLiveProject(slug) ? currentMission() : undefined;
     // A paginated project list may not contain an older open conversation, and
     // the open conversation's live status updates ahead of the project poll.
-    const withCurrent = current && !isMissionParticipant(current) && current.project === slug && !isArchived(current) && !isBtwMission(current)
+    const withCurrent = current
       ? (rows.some(m => m.id === current.id)
         ? rows.map(m => m.id === current.id ? { ...mergeMission(m, current, "partial"), status: archiving.get(m.id) ?? current.status } : m)
         : [withHierarchy(current), ...rows])
@@ -207,9 +212,7 @@ export function LiveProjectsSection(p: {
     const fetchedParents = withMovedMissions(resolvedParents<Mission>()).filter(m => (m.project ?? "") === slug && !shown.has(m.id) && !listedIds.has(m.id));
     const allRows = excludeBtwMissions([...withCurrent, ...extraArchived, ...fetchedParents]);
     const byId = new Map(allRows.map(m => [m.id, m]));
-    const sel = p.selected();
-    const selectedId = sel?.startsWith("m:") ? sel.slice(2) : sel?.startsWith("ms:") ? sel.slice(3) : undefined;
-    return missionTreeRows(allRows, m => !isArchived(m) && (m.id === selectedId || !isSupersededInTree(m, byId)));
+    return missionTreeRows(allRows, m => !isArchived(m) && (!isSupersededInTree(m, byId) || isSelectedMissionId(m.id)));
   };
   const allKnownMissions = (): Mission[] => {
     const byId = new Map<string, Mission>();
@@ -284,6 +287,30 @@ export function LiveProjectsSection(p: {
   const archiving = new Map<string, string>();
   const { archivesOpen, setArchivesOpen, archiveExpanded, setArchiveExpanded, archivedMissions, setArchivedMissions, archivesLoading, archivesError, archivesMore, archivesLoaded, archivesRequest, loadArchives, removeArchived, reset: resetArchives } =
     createArchivePager({ revision: () => missionRevision, archiving, deleted: deletedInSession, currentConnection: version => currentConnection(version) });
+  const currentMission = createMemo(() => {
+    const selected = p.selected();
+    if (!selected?.startsWith("m:")) return undefined;
+    const id = selected.slice(2);
+    const listed = Object.values(missions).flat().find(m => m.id === id);
+    const current = (p.currentMission?.id === id ? p.currentMission : undefined)
+      ?? p.activityMissions?.find(m => m.id === id)
+      ?? listed ?? archivedMissions().find(m => m.id === id);
+    if (!current) return undefined;
+    // Project listings own placement; the open detail owns live status/content.
+    // Its older project/folder must not reinsert a conversation we just moved.
+    return movedMission(listed ? {
+      ...current,
+      project: listed.project,
+      folder: listed.folder,
+      placement_revision: listed.placement_revision,
+    } : current);
+  });
+  const isCurrentMissionId = createSelector(() => currentMission()?.id ?? null);
+  const isCurrentProject = createSelector(() => currentMission()?.project ?? null);
+  const isOpenLiveProject = createSelector(() => {
+    const c = currentMission();
+    return c && !isMissionParticipant(c) && !isArchived(c) && !isBtwMission(c) ? (c.project ?? "") : null;
+  });
   const contextTreeId = () => {
     const mm = missionMenu();
     if (mm) return mm.treeId;
@@ -2495,24 +2522,6 @@ export function LiveProjectsSection(p: {
   // Navigation (fork, search, history) owns the current selection. An old
   // range selection must not keep highlighting a different conversation.
   createEffect(on(p.selected, selected => syncToCommitted(selected)));
-  const currentMission = createMemo(() => {
-    const selected = p.selected();
-    if (!selected?.startsWith("m:")) return undefined;
-    const id = selected.slice(2);
-    const listed = Object.values(missions).flat().find(m => m.id === id);
-    const current = (p.currentMission?.id === id ? p.currentMission : undefined)
-      ?? p.activityMissions?.find(m => m.id === id)
-      ?? listed ?? archivedMissions().find(m => m.id === id);
-    if (!current) return undefined;
-    // Project listings own placement; the open detail owns live status/content.
-    // Its older project/folder must not reinsert a conversation we just moved.
-    return movedMission(listed ? {
-      ...current,
-      project: listed.project,
-      folder: listed.folder,
-      placement_revision: listed.placement_revision,
-    } : current);
-  });
   const activityMissionsSource = (): Mission[] => {
     const byId = new Map<string, Mission>();
     for (const m of Object.values(missions).flat()) byId.set(m.id, m);
@@ -2554,15 +2563,15 @@ export function LiveProjectsSection(p: {
     for (let i = 1; i <= parts.length; i++) {
       const path = parts.slice(0, i).join("/");
       setExpanded(`${slug}:${path}`, true);
-      if (dirs[`${slug}:${path}`] === undefined || lastLoadedLocationKey !== folderKey) {
+      if (dirs[`${slug}:${path}`] === undefined) {
         void loadDir(slug, path);
       }
     }
-    const missionListed = (missions[slug] ?? []).some(m => m.id === id);
-    if (!missionListed || lastLoadedLocationKey !== folderKey) {
+    const missionListed = missions[slug] !== undefined && missions[slug].some(m => m.id === id);
+    if (!missionListed) {
       void loadMissions(slug);
     }
-    if (dirs[`${slug}:`] === undefined || lastLoadedLocationKey !== folderKey) {
+    if (dirs[`${slug}:`] === undefined) {
       void loadDir(slug, "");
     }
     lastLoadedLocationKey = folderKey;
@@ -2623,11 +2632,11 @@ export function LiveProjectsSection(p: {
       <span class="row-label">{d.label}</span>
       <SidebarIcon.ChevronRight size={12} class={`history-chevron ${row.expanded ? "open" : ""}`} />
     </button>;
-    if (d.kind === "project") return <div class={`row project ${currentMission()?.project === d.slug ? "contains-current" : ""}`} data-drop-project={d.slug} data-drop-folder={d.path ?? ""} onContextMenu={contextMenu}>
+    if (d.kind === "project") return <div class={`row project ${isCurrentProject(d.slug) ? "contains-current" : ""}`} data-drop-project={d.slug} data-drop-folder={d.path ?? ""} onContextMenu={contextMenu}>
       <button type="button" class="row-main" aria-label={d.label} aria-expanded={row.expanded} onPointerEnter={() => warmIntent(d.slug)} onPointerLeave={cancelIntent} onFocus={() => warmIntent(d.slug)} onBlur={cancelIntent} onClick={e => { const entry = e.currentTarget.closest<HTMLElement>(".tree-entry"); if (entry?.dataset.toggled) { delete entry.dataset.toggled; return; } toggleProject(d.slug); }}>
         <FolderActivityIcon expanded={row.expanded} color={projectColor(d.slug)} count={activity().get(d.slug)?.get(d.path ?? "") ?? 0} scheduled={scheduledActivity().get(d.slug)?.get(d.path ?? "") ?? 0} />
         <span class="row-label">{d.label}</span>
-        <Show when={!row.expanded && currentMission()?.project === d.slug}><span class="current-location-label">Open</span></Show>
+        <Show when={!row.expanded && isCurrentProject(d.slug)}><span class="current-location-label">Open</span></Show>
       </button>
       <Show when={row.expanded}><ContextBadge slug={d.slug} compact/></Show>
       <button class="row-action" aria-label={`Project actions for ${d.label}`} title="Project actions"
@@ -2682,7 +2691,7 @@ export function LiveProjectsSection(p: {
     const effectiveMissionStatus = () => d.mission ? rowEffectiveStatus(d.mission) : "";
     const tipDetail = () => rowDetail(d.label, [d.mission && isArchived(d.mission) ? [projects().find(project => project.slug === d.slug)?.title || d.slug, missionFolder(d.mission)].filter(Boolean).join(" / ") : undefined, d.mission ? missionMachine(d.mission) : undefined, d.mission?.backend, d.mission?.model_override, d.mission?.id, d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(effectiveMissionStatus(), pendingMissionInteraction(d.mission.id)).label) : undefined]);
     const tip = rowTip.bind(tipDetail());
-    return <><button disabled={deleting()} aria-busy={deleting() ? true : undefined} aria-current={p.selected() === row.id ? "page" : undefined} aria-expanded={d.launched || d.versions ? row.expanded : undefined}
+    return <><button disabled={deleting()} aria-busy={deleting() ? true : undefined} aria-current={isSelectedRow(row.id) ? "page" : undefined} aria-expanded={d.launched || d.versions ? row.expanded : undefined}
       onKeyDown={e => { if (deleting()) return; if ((d.launched || d.versions) && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
       aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(effectiveMissionStatus(), pendingMissionInteraction(d.mission.id)).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && pendingPlaceMoves().has(missionMoveKey(d.mission.id)) ? "mission-arriving" : ""} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && !LIVE.has(effectiveMissionStatus()) ? "done" : ""} ${isMissionCut() ? "mission-cut" : ""} ${rowDrag.isLifted(row.id) ? "drag-source" : ""} ${!deleting() && isRowActive(row.id) ? "active" : ""}`} {...tip}
       onPointerEnter={e => { if (deleting()) return; if (rowDrag.phase() === 0) rowTip.bind(tipDetail()).onPointerEnter(e); if (d.mission) scheduleHoverTranscript(d.mission.id); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }}
@@ -2697,7 +2706,7 @@ export function LiveProjectsSection(p: {
         }
         setFileMenu({ slug: d.slug, path: d.path!, x: e.clientX, y: e.clientY });
       } }} onClick={e => { if (d.mission) { if (deleting()) return; clickAgent(e, d.mission.id, row.id); } else { clickSelectableRow(e, row.id, () => p.open(row.id)); } }}>
-      <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={rowEffectiveStatus(m())} unread={isMissionUnread(m(), currentMission()?.id, Boolean(pendingMissionInteraction(m().id)))} continuation={m().continuation} identity={m().backend?.startsWith("cloud_") ? <ProviderLogo type={m().backend!} /> : undefined} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
+      <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={rowEffectiveStatus(m())} unread={isMissionUnread(m(), isCurrentMissionId(m().id) ? m().id : undefined, Boolean(pendingMissionInteraction(m().id)))} continuation={m().continuation} identity={m().backend?.startsWith("cloud_") ? <ProviderLogo type={m().backend!} /> : undefined} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
       <span class="row-label">{d.label}</span><Show when={d.version}><span class="row-version-tag">earlier</span></Show><Show when={!d.launched && !d.versions}><MachineBadge name={d.mission ? missionMachine(d.mission) : undefined} /></Show>
     </button>
     {launchedToggle(row, d)}</>;
@@ -2712,8 +2721,8 @@ export function LiveProjectsSection(p: {
             {m => (
               <button
                 type="button"
-                class={`row agent ${!LIVE.has(m.status) ? "done" : ""} ${p.selected() === `m:${m.id}` ? "active" : ""}`}
-                aria-current={p.selected() === `m:${m.id}` ? "page" : undefined}
+                class={`row agent ${!LIVE.has(m.status) ? "done" : ""} ${isSelectedRow(`m:${m.id}`) ? "active" : ""}`}
+                aria-current={isSelectedRow(`m:${m.id}`) ? "page" : undefined}
                 onClick={() => p.open(`m:${m.id}`)}
                 onContextMenu={e => onMissionContext(e, m, `m:${m.id}`, "", "")}
               >
@@ -2721,7 +2730,7 @@ export function LiveProjectsSection(p: {
                   <MissionGlyph
                     missionId={m.id}
                     status={presentedStatus(m)}
-                    unread={isMissionUnread(m, currentMission()?.id, Boolean(pendingMissionInteraction(m.id)))}
+                    unread={isMissionUnread(m, isCurrentMissionId(m.id) ? m.id : undefined, Boolean(pendingMissionInteraction(m.id)))}
                     continuation={m.continuation}
                     identity={m.backend?.startsWith("cloud_") ? <ProviderLogo type={m.backend!} /> : undefined}
                   />

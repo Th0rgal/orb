@@ -208,3 +208,39 @@ it('does not turn uploads quoted in a fork history into thumbnails',()=>{
  const {container}=render(()=><Transcript items={[{kind:'user',key:'u',text:prompt}]}/>);
  expect(container.querySelector('.message-images')).toBeNull();
 });
+
+it('mounts only the tail window on initial open when initialBottom is set in a bounded viewport',()=>{
+ const origClientHeight=Object.getOwnPropertyDescriptor(document.documentElement,'clientHeight');
+ Object.defineProperty(document.documentElement,'clientHeight',{configurable:true,get:()=>600});
+ try {
+  const events: StreamEvent[]=[];
+  for(let i=0;i<60;i++){
+   events.push(ev('user_message',{id:`u-${i}`,content:`Question ${i}\n\n`+'detail line\n'.repeat(6)}));
+   events.push(ev('text_delta',{content:`Answer ${i}\n\n`+'explanation line\n'.repeat(8)}));
+  }
+  const items=buildTranscript(events);
+  let scrollerEl!:HTMLDivElement;
+  const {container}=render(()=>(
+   <div
+    ref={el=>{
+     scrollerEl=el;
+     Object.defineProperty(el,'clientHeight',{configurable:true,get:()=>600});
+     Object.defineProperty(el,'scrollHeight',{configurable:true,get:()=>18000});
+    }}
+    class="scroll"
+    style="height:600px;overflow:auto"
+   >
+    <Transcript items={items} initialBottom />
+   </div>
+  ));
+  expect(scrollerEl.scrollTop).toBeGreaterThan(0);
+  const mountedTurns=container.querySelectorAll('[data-turn-key]');
+  expect(mountedTurns.length).toBeGreaterThan(0);
+  expect(mountedTurns.length).toBeLessThan(40);
+  expect(container.textContent).toContain('Answer 59');
+  expect(container.textContent).not.toContain('Question 0');
+ } finally {
+  if(origClientHeight) Object.defineProperty(document.documentElement,'clientHeight',origClientHeight);
+  else Reflect.deleteProperty(document.documentElement,'clientHeight');
+ }
+});

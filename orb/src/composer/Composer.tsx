@@ -319,6 +319,32 @@ export function Composer(p: {
   const [pendingSend, setPendingSend] = createSignal<{text:string; images:DraftImage[]} | null>(null);
   const [mode, setMode] = createSignal<ComposerMode | null>(null);
   const [draftReady, setDraftReady] = createSignal(false);
+  const draftSignature = (d: {
+    text: string;
+    images: DraftImage[];
+    mode?: ComposerMode | null;
+    uploads?: Array<{ path: string }>;
+  }) =>
+    `${d.mode ?? ""}\0${d.text}\0${d.images.map(img => `${img.reference ?? ""}:${img.dataUrl.length}`).join(",")}\0${(d.uploads ?? []).map(u => u.path).join(",")}`;
+  const EMPTY_DRAFT_SIG = draftSignature({ text: "", images: [], mode: null, uploads: [] });
+  let lastSavedScope: string | undefined = p.scope;
+  let lastSavedSig = EMPTY_DRAFT_SIG;
+  let draftTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingDraftSave: { scope: string; draft: Parameters<typeof saveComposerDraft>[1]; sig: string } | null = null;
+  const flushDraftSave = () => {
+    if (draftTimer !== undefined) {
+      clearTimeout(draftTimer);
+      draftTimer = undefined;
+    }
+    if (pendingDraftSave) {
+      const { scope, draft, sig } = pendingDraftSave;
+      pendingDraftSave = null;
+      lastSavedScope = scope;
+      lastSavedSig = sig;
+      void saveComposerDraft(scope, draft).catch(swallow("composer.saveDraft", { scope }));
+    }
+  };
+  onCleanup(flushDraftSave);
   createEffect(on(() => p.scope, (scope, previous) => {
     if (previous !== undefined && previous !== scope) {
       setText(""); setImages([]); setMode(null); setMultiline(false);
@@ -327,19 +353,44 @@ export function Composer(p: {
       setPendingFolder(null); setStaleFiles([]);
       if (ta?.isConnected) { ta.value = ""; resize(); }
     }
+    lastSavedScope = scope;
+    lastSavedSig = EMPTY_DRAFT_SIG;
     setDraftReady(false);
     if (!scope) { setDraftReady(true); return; }
     let current=true;
     onCleanup(() => {
       current=false;
+      if (draftTimer !== undefined) {
+        clearTimeout(draftTimer);
+        draftTimer = undefined;
+      }
+      pendingDraftSave = null;
       // A fast close can happen before hydration enables the persistence
-      // effect. Flush typed content without clearing an untouched disk draft.
-      if (draftReady() || text() || images().length || mode()) {
-        void saveComposerDraft(scope,{text:pendingSend()?.text ?? text(),images:pendingSend()?.images ?? images(),mode:mode(),uploads:uploaded.map(file => ({...file, source:file.source}))}).catch(swallow("composer.saveDraft", { scope, phase: "close" }));
+      // effect. Flush typed content without clearing an untouched disk draft,
+      // and skip redundant IndexedDB writes when switching untouched sessions.
+      const closeDraft = {
+        text: pendingSend()?.text ?? text(),
+        images: pendingSend()?.images ?? images(),
+        mode: mode(),
+        uploads: uploaded.map(file => ({ ...file, source: file.source })),
+      };
+      const closeSig = draftSignature(closeDraft);
+      if (
+        (draftReady() || closeDraft.text || closeDraft.images.length || closeDraft.mode || closeDraft.uploads.length) &&
+        (lastSavedScope !== scope || closeSig !== lastSavedSig)
+      ) {
+        lastSavedScope = scope;
+        lastSavedSig = closeSig;
+        void saveComposerDraft(scope, closeDraft).catch(swallow("composer.saveDraft", { scope, phase: "close" }));
       }
     });
     void readComposerDraft(scope).then(draft => {
-      if (current && draft && !text() && !images().length) {
+      if (!current) return;
+      lastSavedScope = scope;
+      lastSavedSig = draft
+        ? draftSignature({ text: draft.text, images: draft.images, mode: draft.mode ?? null, uploads: draft.uploads })
+        : EMPTY_DRAFT_SIG;
+      if (draft && !text() && !images().length) {
         uploaded = (draft.uploads ?? []).map(file => ({...file, connection: file.endpoint === getApiUrl() ? connectionVersion() : -1})); bumpUploads(n => n + 1);
         setText(draft.text);setImages(draft.images);
         if(draft.mode) setMode(draft.mode);
@@ -347,26 +398,13 @@ export function Composer(p: {
       }
     }).catch(swallow("composer.readDraft", { scope })).finally(() => { if (current) setDraftReady(true); });
   }));
-  let draftTimer: ReturnType<typeof setTimeout> | undefined;
-  let pendingDraftSave: { scope: string; draft: Parameters<typeof saveComposerDraft>[1] } | null = null;
-  const flushDraftSave = () => {
-    if (draftTimer !== undefined) {
-      clearTimeout(draftTimer);
-      draftTimer = undefined;
-    }
-    if (pendingDraftSave) {
-      const { scope, draft } = pendingDraftSave;
-      pendingDraftSave = null;
-      void saveComposerDraft(scope, draft).catch(swallow("composer.saveDraft", { scope }));
-    }
-  };
-  onCleanup(flushDraftSave);
   createEffect(() => {
     const scope = p.scope;
     const ready = draftReady();
     const curText = pendingSend()?.text ?? text();
     const curImages = pendingSend()?.images ?? images();
     const curMode = mode();
+    uploadTick();
     if (!ready || !scope) return;
     const draft = {
       text: curText,
@@ -374,12 +412,21 @@ export function Composer(p: {
       mode: curMode,
       uploads: uploaded.map((file) => ({ ...file, source: file.source })),
     };
-    if (!curText && !curImages.length && !curMode) {
-      pendingDraftSave = { scope, draft };
+    const sig = draftSignature(draft);
+    if (lastSavedScope === scope && sig === lastSavedSig) {
+      if (draftTimer !== undefined) {
+        clearTimeout(draftTimer);
+        draftTimer = undefined;
+      }
+      pendingDraftSave = null;
+      return;
+    }
+    if (!curText && !curImages.length && !curMode && !draft.uploads.length) {
+      pendingDraftSave = { scope, draft, sig };
       flushDraftSave();
       return;
     }
-    pendingDraftSave = { scope, draft };
+    pendingDraftSave = { scope, draft, sig };
     if (draftTimer !== undefined) clearTimeout(draftTimer);
     draftTimer = setTimeout(flushDraftSave, 180);
   });
@@ -451,7 +498,15 @@ export function Composer(p: {
     else if (target && target !== "side") void refreshNodeAntigravityModels(target);
   });
   const modes = createMemo(() => p.textOnly || p.imagesOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : !!p.uploadTarget && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
-  const skillCatalogKey = createMemo(() => JSON.stringify([p.scope, p.projectSlug, p.workspaceId, p.localCwd, p.missionId, backend(), p.uploadTarget]));
+  const resolvedLocalCwd = () =>
+    p.uploadTarget === "local"
+      ? p.localCwd?.trim() || (p.missionId ? localBinding(p.missionId)?.cwd : undefined) || ""
+      : "";
+  const skillCatalogKey = createMemo(() =>
+    p.uploadTarget === "local"
+      ? JSON.stringify(["local", p.projectSlug, resolvedLocalCwd(), backend()])
+      : JSON.stringify(["remote", p.projectSlug, p.workspaceId]),
+  );
   createEffect(() => {
     if (p.textOnly || p.imagesOnly || p.sideQuestion) { setSkillItems([]); setSkillCatalogError(null); return; }
     const key = skillCatalogKey();
@@ -463,8 +518,7 @@ export function Composer(p: {
     const fail = (error: unknown) => { if (current && key === skillCatalogKey()) { setSkillItems([]); setSkillCatalogError(error instanceof Error ? error.message : String(error)); } };
     if (p.uploadTarget === "local") {
       if (!harness) return;
-      const missionCwd = p.missionId ? localBinding(p.missionId)?.cwd : undefined;
-      const explicitCwd = p.localCwd?.trim() || missionCwd;
+      const explicitCwd = resolvedLocalCwd();
       const cwdPromise = explicitCwd ? Promise.resolve(explicitCwd) : (p.projectSlug ? localWorkspace(p.projectSlug).catch(() => "") : Promise.resolve(""));
       void cwdPromise.then(resolved => resolved ? localInvocableSkills(resolved, harness).then(apply) : undefined).catch(fail);
       return;
@@ -532,8 +586,8 @@ export function Composer(p: {
     let current = true;
     setAtItems([]);
     onCleanup(() => { current = false; });
-    const reloadAttachments=()=>{attachmentLoad = loadAttachItems(slug).then(items => { if (current) setAtItems(items); }).catch(() => { if (current) setAtItems([]); });};
-    const imported=(event:Event)=>{if((event as CustomEvent).detail?.slug===slug)reloadAttachments();};
+    const reloadAttachments=(force = false)=>{attachmentLoad = (force ? loadAttachItems(slug, true) : loadAttachItems(slug)).then(items => { if (current) setAtItems(items); }).catch(() => { if (current) setAtItems([]); });};
+    const imported=(event:Event)=>{if((event as CustomEvent).detail?.slug===slug)reloadAttachments(true);};
     reloadAttachments();window.addEventListener('orb:context-imported',imported);onCleanup(()=>window.removeEventListener('orb:context-imported',imported));
   });
   /** What the current draft refers to, resolved against this project's files. */
@@ -717,7 +771,10 @@ export function Composer(p: {
         }
         pendingDraftSave = null;
         if (sendingCount() <= 1) setPendingSend(null);
-        if (draftScope && !text() && !images().length) await saveComposerDraft(draftScope, {text:"",images:[]}).catch(swallow("composer.clearDraft", { scope: draftScope }));
+        if (draftScope && !text() && !images().length) {
+          if (lastSavedScope === draftScope) lastSavedSig = EMPTY_DRAFT_SIG;
+          await saveComposerDraft(draftScope, {text:"",images:[]}).catch(swallow("composer.clearDraft", { scope: draftScope }));
+        }
         if (!text()) setMode(null);
       }
     } catch (error) { const message=error instanceof Error ? error.message : String(error); if (p.onSendError) p.onSendError(message); else setUploadError(message); }

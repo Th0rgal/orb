@@ -177,6 +177,7 @@ export function mergeIncomingMission(prev: Mission | null, incoming: Mission): M
 function MissionDock(p: {
   mission: Mission | null;
   items: StreamItem[];
+  usedTokens?: number;
   destination: string;
   syncing?: boolean;
   onMission?: (mission: Mission, authoritative?: boolean) => void;
@@ -185,7 +186,7 @@ function MissionDock(p: {
 }) {
   const [machineOpen, setMachineOpen] = createSignal(false);
   const [forkOpen, setForkOpen] = createSignal(false);
-  const used = () => estimateTokens(p.items);
+  const used = createMemo(() => p.usedTokens ?? estimateTokens(p.items));
   const windowSize = () => contextWindow(p.mission?.backend);
   const pct = () => contextPct(used(), windowSize());
   const [open, setOpen] = createSignal(false);
@@ -543,10 +544,16 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       return;
     }
     let current = true;
-    onCleanup(() => { current = false; });
-    void listMissionCheckpoints(id, cwd)
-      .then((rows) => { if (current && status !== undefined) setCheckpoints(rows); })
-      .catch(() => { if (current) setCheckpoints([]); });
+    const timer = setTimeout(() => {
+      if (!current) return;
+      void listMissionCheckpoints(id, cwd)
+        .then((rows) => { if (current && status !== undefined) setCheckpoints(rows); })
+        .catch(() => { if (current) setCheckpoints([]); });
+    }, 80);
+    onCleanup(() => {
+      current = false;
+      clearTimeout(timer);
+    });
   });
   const confirmRevertCheckpoint = async () => {
     const target = pendingCheckpointRevert();
@@ -1194,7 +1201,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   const visibleViewItems = createMemo(() => visibleTranscript(viewItems()));
   const planProgress = createPlanProgress({get mission(){return p.id;},get items(){return viewItems();},get active(){return clientPlaced()?localRunActive(p.id):busy();}});
   createEffect(()=>p.onPlan?.(p.id,planProgress()));
-  const titleContext = createMemo(() => awaiting() ? null : contextPct(estimateTokens(viewItems()), contextWindow(mission()?.backend)));
+  const estimatedTokens = createMemo(() => estimateTokens(viewItems()));
+  const titleContext = createMemo(() => awaiting() ? null : contextPct(estimatedTokens(), contextWindow(mission()?.backend)));
   createEffect(() => p.onContext?.(p.id, titleContext()));
   let fulfillingTargetId = 0;
   createEffect(() => {
@@ -1601,7 +1609,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             <Show when={mission() && !(awaitingTurn() || optimisticList().some(item => !item.waiting && !item.failed)) && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
               <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} onResetRedeemed={() => void refresh()} recoveryPending={recoveryPending()} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} />
             </Show>
-            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.promoted ? handoff()?.id : undefined} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} prepareSearch={prepareSearch} needsPrepareSearch={needsPrepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id && !participant() ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && ((missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled") || visibleViewItems().some(item => item.kind === "error" && item.terminal)) ? resume : undefined} checkpoints={checkpoints()} onRestoreCheckpoint={!participant() ? setPendingCheckpointRevert : undefined} />
+            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} initialBottom={Boolean(p.id && !hasPendingSearchTarget(p.id))} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.promoted ? handoff()?.id : undefined} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} prepareSearch={prepareSearch} needsPrepareSearch={needsPrepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id && !participant() ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && ((missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled") || visibleViewItems().some(item => item.kind === "error" && item.terminal)) ? resume : undefined} checkpoints={checkpoints()} onRestoreCheckpoint={!participant() ? setPendingCheckpointRevert : undefined} />
             <Show when={awaiting() && items().length > 0}><ActivitySkeleton /></Show>
             <TurnRecap mission={mission() ?? undefined} items={viewItems()} busy={busy()} onDraft={text=>setSideRevision({text,append:false})} />
             <ErrorToast
@@ -1749,7 +1757,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           <ErrorToast error={sendError()} title="Couldn’t send your message" onDismiss={() => setSendError(null)}
             action={optimistic() ? { label: "Retry", run: () => { const draft = optimistic(); if (draft?.retry) draft.retry(); else if (draft) void sendMsg(draft.text, draft.images, followAttach(), draft.id); } } : undefined} />
           <ErrorToast error={error() || queueError()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(null); setQueueError(null); return Promise.all([refresh(true), resync(true)]); } }} onDismiss={() => { setError(null); setQueueError(null); }} />
-          <MissionDock mission={mission()} items={viewItems()} destination={missionDestination(mission(), receipt)} syncing={syncing()} onMission={applyDockMission} onError={setError} onFork={p.onFork} />
+          <MissionDock mission={mission()} items={viewItems()} usedTokens={estimatedTokens()} destination={missionDestination(mission(), receipt)} syncing={syncing()} onMission={applyDockMission} onError={setError} onFork={p.onFork} />
         </div>
       </div>
       <Show when={pendingCheckpointRevert()}>
