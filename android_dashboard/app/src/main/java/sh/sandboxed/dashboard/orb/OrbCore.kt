@@ -1543,10 +1543,21 @@ object OrbReadCache {
     }
     private val dictByKey = ConcurrentHashMap<String, OrbDict>()
     private val cachedProjectSlugs = ConcurrentHashMap.newKeySet<String>()
+    private val clearEpochCounter = java.util.concurrent.atomic.AtomicLong(0L)
+    private val missionMutationGens = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val writeJobs = ConcurrentHashMap<String, Job>()
     private val pendingRowPayloads = ConcurrentHashMap<String, Pair<String, List<OrbRow>>>()
     private val writeLocks = ConcurrentHashMap<String, Any>()
+
+    fun clearEpoch(): Long = clearEpochCounter.get()
+
+    fun noteMissionMutation(missionId: String) {
+        if (missionId.isEmpty()) return
+        missionMutationGens.computeIfAbsent(missionId) { java.util.concurrent.atomic.AtomicLong(0L) }.incrementAndGet()
+    }
+
+    fun missionMutationGeneration(missionId: String): Long = missionMutationGens[missionId]?.get() ?: 0L
 
     private fun trackProjectKey(key: String) {
         if (key.startsWith("project_missions_")) {
@@ -1556,6 +1567,8 @@ object OrbReadCache {
     }
 
     fun clearMemory() {
+        clearEpochCounter.incrementAndGet()
+        missionMutationGens.clear()
         OrbWarmSyncCoordinator.resetCaches()
         synchronized(rowsByKey) { rowsByKey.clear() }
         dictByKey.clear()
@@ -1640,11 +1653,7 @@ object OrbReadCache {
         synchronized(rowsByKey) { rowsByKey[key] = bounded(key, rows) }
     }
 
-    fun saveRows(key: String, rows: List<OrbRow>, debounceMs: Long = 0L) {
-        trackProjectKey(key)
-        val kept = bounded(key, rows)
-        synchronized(rowsByKey) { rowsByKey[key] = kept }
-        val account = OrbDisk.currentScope()
+    private fun scheduleRowDiskWrite(key: String, kept: List<OrbRow>, account: String, debounceMs: Long = 0L) {
         writeJobs.remove(key)?.cancel()
         if (debounceMs > 0L) {
             pendingRowPayloads[key] = account to kept
@@ -1663,6 +1672,79 @@ object OrbReadCache {
                 }
             }
         }
+    }
+
+    fun saveRows(key: String, rows: List<OrbRow>, debounceMs: Long = 0L) {
+        trackProjectKey(key)
+        val kept = bounded(key, rows)
+        synchronized(rowsByKey) { rowsByKey[key] = kept }
+        scheduleRowDiskWrite(key, kept, OrbDisk.currentScope(), debounceMs)
+    }
+
+    /** Atomically reconciles background-prefetched events against any newer live/warm-sync rows. */
+    fun reconcilePrefetchedEvents(
+        key: String,
+        incoming: List<OrbRow>,
+        expectedAccount: String = OrbDisk.currentScope(),
+        expectedClearEpoch: Long = clearEpoch()
+    ): List<OrbRow> {
+        if (incoming.isEmpty() || expectedAccount != OrbDisk.currentScope() || expectedClearEpoch != clearEpoch()) {
+            return emptyList()
+        }
+        val normalizedIncoming = OrbLiveEventReducer.mergeMissionEvents(emptyList(), incoming)
+        if (normalizedIncoming.isEmpty()) return emptyList()
+        trackProjectKey(key)
+        loadRows(key)
+        val kept = synchronized(rowsByKey) {
+            if (expectedAccount != OrbDisk.currentScope() || expectedClearEpoch != clearEpoch()) {
+                return emptyList()
+            }
+            val existing = rowsByKey[key].orEmpty()
+            val merged = bounded(
+                key,
+                if (existing.isEmpty()) normalizedIncoming
+                else OrbLiveEventReducer.mergeMissionEvents(normalizedIncoming, existing)
+            )
+            rowsByKey[key] = merged
+            merged
+        }
+        if (kept.isNotEmpty()) {
+            scheduleRowDiskWrite(key, kept, expectedAccount)
+        }
+        return kept
+    }
+
+    /** Atomically reconciles complete background-prefetched conversation history without dropping newer live rows. */
+    fun reconcilePrefetchedHistory(
+        key: String,
+        incomingEvents: List<OrbRow>,
+        expectedAccount: String = OrbDisk.currentScope(),
+        expectedClearEpoch: Long = clearEpoch()
+    ): List<OrbRow> {
+        val incomingHist = OrbConversationHistory.merge(emptyList(), incomingEvents)
+        if (incomingHist.isEmpty() || expectedAccount != OrbDisk.currentScope() || expectedClearEpoch != clearEpoch()) {
+            return emptyList()
+        }
+        trackProjectKey(key)
+        loadRows(key)
+        val kept = synchronized(rowsByKey) {
+            if (expectedAccount != OrbDisk.currentScope() || expectedClearEpoch != clearEpoch()) {
+                return emptyList()
+            }
+            val existing = rowsByKey[key].orEmpty().filter { it.raw["inbox_preview"] != true }
+            val merged = when {
+                existing.isEmpty() -> incomingHist
+                existing.all { it.int("sequence") != null } && incomingHist.all { it.int("sequence") != null } ->
+                    (incomingHist + existing).associateBy { it.int("sequence") }.values.sortedBy { it.int("sequence") }
+                else -> OrbConversationHistory.merge(existing, incomingEvents)
+            }
+            rowsByKey[key] = merged
+            merged
+        }
+        if (kept.isNotEmpty()) {
+            scheduleRowDiskWrite(key, kept, expectedAccount)
+        }
+        return kept
     }
 
     fun prewarmRecentConversations(rows: List<OrbRow>, maxCount: Int = 8) {
@@ -1717,6 +1799,9 @@ object OrbReadCache {
         persistToDisk: Boolean = true
     ) {
         if (accepted.isEmpty()) return
+        for (item in accepted) {
+            noteMissionMutation(item.missionId)
+        }
         val byId = accepted.associateBy { it.missionId }
         val touchedProjects = LinkedHashSet<String>(cachedProjectSlugs)
         for (item in accepted) {
@@ -2437,6 +2522,7 @@ class OrbCore private constructor(context: Context) {
     /** Reconciles an authoritative single-mission update into in-memory and project caches immediately. */
     fun upsertMissionInMemory(updated: OrbRow) {
         if (updated.id.isEmpty()) return
+        OrbReadCache.noteMissionMutation(updated.id)
         val current = _missions.value
         if (current.any { it.id == updated.id }) {
             _missions.value = current.map { if (it.id == updated.id) updated else it }
@@ -2454,6 +2540,7 @@ class OrbCore private constructor(context: Context) {
     /** Removes a mission from in-memory and delta caches (e.g. after leaving a shared mission). */
     fun removeMissionInMemory(missionId: String) {
         if (missionId.isEmpty()) return
+        OrbReadCache.noteMissionMutation(missionId)
         _missions.value = _missions.value.filterNot { it.id == missionId }
         missionDeltaCache = missionDeltaCache.filterNot { it.id == missionId }
     }
@@ -2534,21 +2621,23 @@ class OrbCore private constructor(context: Context) {
                     prefetchTargets.map { row ->
                         async {
                             if (OrbBackgroundSyncMonitor.linkBudget.p2Cap <= 0) return@async
-                            val evKey = "mission_events_${row.id}"
-                            if (OrbReadCache.loadRows(evKey).isEmpty()) {
-                                prefetchSem.acquire()
-                                val evs = try {
-                                    if (OrbBackgroundSyncMonitor.linkBudget.p2Cap <= 0) emptyList()
-                                    else orbTry(OrbLog.Category.Network, "/api/control/missions") {
-                                        fetchRows("/api/control/missions/${encodeComponent(row.id)}/events?limit=150&max_payload=${OrbReadCache.RESULT_KEEP_CHARS}", "events")
-                                    }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
-                                } finally {
-                                    prefetchSem.release()
+                                val evKey = "mission_events_${row.id}"
+                                val prefetchAccount = OrbDisk.currentScope()
+                                val prefetchEpoch = OrbReadCache.clearEpoch()
+                                if (OrbReadCache.loadRows(evKey).isEmpty()) {
+                                    prefetchSem.acquire()
+                                    val evs = try {
+                                        if (OrbBackgroundSyncMonitor.linkBudget.p2Cap <= 0) emptyList()
+                                        else orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                                            fetchRows("/api/control/missions/${encodeComponent(row.id)}/events?limit=150&max_payload=${OrbReadCache.RESULT_KEEP_CHARS}", "events")
+                                        }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
+                                    } finally {
+                                        prefetchSem.release()
+                                    }
+                                    if (evs.isNotEmpty()) {
+                                        OrbReadCache.reconcilePrefetchedEvents(evKey, evs, prefetchAccount, prefetchEpoch)
+                                    }
                                 }
-                                if (evs.isNotEmpty()) {
-                                    OrbReadCache.saveRows(evKey, evs)
-                                }
-                            }
                         }
                     }.awaitAll()
                 }
@@ -2596,12 +2685,14 @@ class OrbCore private constructor(context: Context) {
                         prefetchTargets.map { row ->
                             async {
                                 val evKey = "mission_events_${row.id}"
+                                val prefetchAccount = OrbDisk.currentScope()
+                                val prefetchEpoch = OrbReadCache.clearEpoch()
                                 if (OrbReadCache.loadRows(evKey).isEmpty()) {
                                     val evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
                                         fetchRows("/api/control/missions/${encodeComponent(row.id)}/events?limit=150&max_payload=${OrbReadCache.RESULT_KEEP_CHARS}", "events")
                                     }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
                                     if (evs.isNotEmpty()) {
-                                        OrbReadCache.saveRows(evKey, evs)
+                                        OrbReadCache.reconcilePrefetchedEvents(evKey, evs, prefetchAccount, prefetchEpoch)
                                     }
                                 }
                             }
@@ -2719,33 +2810,49 @@ class OrbCore private constructor(context: Context) {
         if (!inFlightSinglePrefetches.add(inflightKey)) return
         prefetchScope.launch {
             try {
+                val clearEp = OrbReadCache.clearEpoch()
+                val missionGenBefore = OrbReadCache.missionMutationGeneration(missionId)
                 if (account != OrbDisk.currentScope()) return@launch
                 if (OrbReadCache.loadRows("mission_events_$missionId").isNotEmpty()) return@launch
                 val bundle = fetchMissionOpenBundle(missionId) ?: return@launch
-                if (account != OrbDisk.currentScope()) return@launch
+                if (account != OrbDisk.currentScope() || clearEp != OrbReadCache.clearEpoch()) return@launch
                 val spineRows = OrbJSON.dictList(bundle["spine"]).map { OrbRow(it) }
                 val tailRows = OrbJSON.dictList(bundle["events"]).map { OrbRow(it) }
                 val spineHasMore = bundle["spine_has_more"] as? Boolean
                 val isColdSpineTruncated =
                     OrbJSON.bool(bundle, "has_more") == true &&
                         (spineHasMore == true || (spineHasMore == null && spineRows.size >= 80))
-                val combined = OrbLiveEventReducer.mergeMissionEvents(emptyList(), spineRows + tailRows)
-                if (combined.isNotEmpty()) {
-                    OrbReadCache.saveRows("mission_events_$missionId", combined)
-                }
-                val histCandidates = (spineRows + tailRows).filter {
+                val combined = OrbReadCache.reconcilePrefetchedEvents(
+                    "mission_events_$missionId",
+                    spineRows + tailRows,
+                    account,
+                    clearEp
+                )
+                val histSource = combined.ifEmpty { spineRows + tailRows }
+                val histCandidates = histSource.filter {
                     (it.str("event_type", "type") ?: "") in OrbConversationHistory.eventTypes
                 }
                 if (!isColdSpineTruncated && histCandidates.isNotEmpty()) {
-                    val mergedHist = OrbConversationHistory.merge(emptyList(), histCandidates)
-                    if (mergedHist.isNotEmpty()) {
-                        OrbReadCache.saveRows("mission_msgs_$missionId", mergedHist)
-                    }
+                    OrbReadCache.reconcilePrefetchedHistory(
+                        "mission_msgs_$missionId",
+                        histCandidates,
+                        account,
+                        clearEp
+                    )
                 }
                 OrbJSON.dict(bundle["mission"])?.let { detail ->
                     withContext(Dispatchers.Main) {
-                        if (account == OrbDisk.currentScope()) {
-                            upsertMissionInMemory(OrbRow(missionId, detail))
+                        if (account == OrbDisk.currentScope() &&
+                            clearEp == OrbReadCache.clearEpoch() &&
+                            missionGenBefore == OrbReadCache.missionMutationGeneration(missionId)
+                        ) {
+                            val existingRow = _missions.value.firstOrNull { it.id == missionId }
+                                ?: missionDeltaCache.firstOrNull { it.id == missionId }
+                            val fetchedMs = OrbJSON.dateEpochMs(OrbJSON.str(detail, "updated_at"))
+                            val existingMs = OrbJSON.dateEpochMs(existingRow?.str("updated_at"))
+                            if (fetchedMs == null || existingMs == null || fetchedMs >= existingMs) {
+                                upsertMissionInMemory(OrbRow(missionId, detail))
+                            }
                         }
                     }
                 }

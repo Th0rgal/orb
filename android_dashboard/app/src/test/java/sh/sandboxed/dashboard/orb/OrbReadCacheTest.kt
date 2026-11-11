@@ -116,4 +116,48 @@ class OrbReadCacheTest {
         assertEquals(1, OrbJSON.dictList(OrbDisk.read("mission_events_mid")).size)
         assertEquals(1, OrbJSON.dictList(OrbDisk.read("mission_events_new")).size)
     }
+
+    @Test
+    fun prefetchedEventsAndHistoryReconcileWithoutOverwritingNewerWrites() {
+        val mid = "m-prefetch-fence"
+        val evKey = "mission_events_$mid"
+        val msgKey = "mission_msgs_$mid"
+        val startAccount = OrbDisk.currentScope()
+        val startEpoch = OrbReadCache.clearEpoch()
+        val startGen = OrbReadCache.missionMutationGeneration(mid)
+
+        // Simulate live mutation + warm-stream event arriving while background `/open` is in flight.
+        OrbReadCache.noteMissionMutation(mid)
+        assertTrue(OrbReadCache.missionMutationGeneration(mid) > startGen)
+
+        val liveAnswer = OrbRow(
+            mapOf(
+                "id" to "e-11",
+                "mission_id" to mid,
+                "sequence" to 11,
+                "event_type" to "assistant_message",
+                "content" to "Live stream answer"
+            )
+        )
+        OrbReadCache.saveRows(evKey, listOf(liveAnswer))
+        OrbReadCache.saveRows(msgKey, OrbConversationHistory.merge(emptyList(), listOf(liveAnswer)))
+
+        val prefetchedBundleRows = listOf(
+            OrbRow(mapOf("id" to "e-1", "mission_id" to mid, "sequence" to 1, "event_type" to "user_message", "content" to "Prompt")),
+            OrbRow(mapOf("id" to "e-10", "mission_id" to mid, "sequence" to 10, "event_type" to "assistant_message", "content" to "Older reply"))
+        )
+        val reconciledEvents = OrbReadCache.reconcilePrefetchedEvents(evKey, prefetchedBundleRows, startAccount, startEpoch)
+        val reconciledHistory = OrbReadCache.reconcilePrefetchedHistory(msgKey, prefetchedBundleRows, startAccount, startEpoch)
+
+        assertEquals(listOf(1, 10, 11), reconciledEvents.map { it.int("sequence") })
+        assertEquals("Live stream answer", OrbReadCache.loadRows(evKey).last().str("content"))
+        assertEquals(listOf(1, 10, 11), reconciledHistory.map { it.int("sequence") })
+        assertEquals("Live stream answer", OrbReadCache.loadRows(msgKey).last().str("content"))
+
+        // If caches are cleared while `/open` was in flight, stale epoch writes are rejected.
+        OrbReadCache.clearMemory()
+        val staleWrite = OrbReadCache.reconcilePrefetchedEvents(evKey, prefetchedBundleRows, startAccount, startEpoch)
+        assertTrue(staleWrite.isEmpty())
+        assertFalse(OrbReadCache.hasRowsInMemory(evKey))
+    }
 }

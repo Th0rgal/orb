@@ -2167,13 +2167,29 @@ export async function listCompletedMissions(limit = 100): Promise<Mission[] | nu
 }
 
 const seededOpenMissions = new Map<string, { connVer: number; savedAt: number; mission: Mission }>();
+const lastMissionMutationAt = new Map<string, { connVer: number; at: number }>();
+
+/** Fence `seededOpenMissions` so any `/open` response started before a mission
+ * mutation (`PATCH /settings`, placement move, status/title change, send) cannot
+ * overwrite newer state. */
+export function noteMissionMutated(id: string): void {
+  if (!id) return;
+  seededOpenMissions.delete(id);
+  lastMissionMutationAt.set(id, { connVer: connectionVersion(), at: Date.now() });
+  while (lastMissionMutationAt.size > 256) {
+    lastMissionMutationAt.delete(lastMissionMutationAt.keys().next().value!);
+  }
+}
 
 /** Seed a fresh `Mission` returned inside a single-RTT `/open` bundle so a
  * concurrent `getMission(id)` resolves in `0 ms` with zero extra HTTP calls. */
-export function seedCachedMission(mission: Mission | null | undefined): void {
+export function seedCachedMission(mission: Mission | null | undefined, fetchedAt = Date.now()): void {
   if (!mission || typeof mission !== "object" || typeof mission.id !== "string" || !mission.id) return;
+  const ver = connectionVersion();
+  const mutated = lastMissionMutationAt.get(mission.id);
+  if (mutated && mutated.connVer === ver && fetchedAt <= mutated.at) return;
   seededOpenMissions.set(mission.id, {
-    connVer: connectionVersion(),
+    connVer: ver,
     savedAt: Date.now(),
     mission,
   });
@@ -2185,7 +2201,9 @@ export function seedCachedMission(mission: Mission | null | undefined): void {
 /** `coreOnly` skips the local-origin fallback: callers that need Core's
  * placement must not see a journal row that predates a machine transfer. */
 export async function getMission(id: string, options: { coreOnly?: boolean; fresh?: boolean; includeHistory?: boolean; priority?: RequestPriority } = {}): Promise<Mission> {
-  if (!options.fresh) {
+  if (options.fresh) {
+    seededOpenMissions.delete(id);
+  } else {
     const seeded = seededOpenMissions.get(id);
     if (seeded && seeded.connVer === connectionVersion() && Date.now() - seeded.savedAt <= 3000) {
       seededOpenMissions.delete(id);
@@ -2407,6 +2425,7 @@ export async function sendMissionMessage(
   clientMessageId: string = crypto.randomUUID(),
   knownMission?: Mission | null,
 ): Promise<MessageReceipt> {
+  noteMissionMutated(id);
   const version = connectionVersion();
   const replacementKey = `${version}:${id}:${clientMessageId}`;
   const createReplacement = async (body: CreateMissionBody): Promise<MessageReceipt> => {
@@ -2547,6 +2566,7 @@ export async function appendClientTranscript(id: string, role: "user" | "assista
 }
 
 export async function setClientMissionStatus(id: string, status: "completed" | "failed" | "interrupted" | "awaiting_user", receipt?: ClientRunReceipt, scheduledExecutionId?: string): Promise<void> {
+  noteMissionMutated(id);
   const resolvedReceipt = receipt ?? await import("./clientRuns").then(m => m.clientRunReceipt(id));
   const runPart = (resolvedReceipt as { run_id?: string } | undefined)?.run_id || scheduledExecutionId || crypto.randomUUID();
   await api(`/api/control/missions/${id}/client-status`, withIdempotencyKey({
@@ -2609,6 +2629,7 @@ export async function renameMission(id: string, title: string): Promise<void> {
 }
 /** Core accepted the change just now: any list requested earlier is older than this. */
 async function confirmCoreChange(change: { id: string; status?: string; title?: string }): Promise<void> {
+  noteMissionMutated(change.id);
   await import("./localOrigins").then(m => m.confirmLocalOrigins([{ ...change, observed_at: m.observe() }]));
 }
 
@@ -2668,12 +2689,16 @@ export interface MoveMissionsResponse {
 
 /** Atomically move one or more mission families between folders or projects. */
 export async function moveMissionsBatch(body: MoveMissionsRequest): Promise<MoveMissionsResponse> {
+  for (const mid of body.mission_ids ?? []) noteMissionMutated(mid);
+  for (const mid of body.descendant_ids ?? []) noteMissionMutated(mid);
   try {
-    return await api<MoveMissionsResponse>("/api/control/missions/move", withIdempotencyKey({
+    const res = await api<MoveMissionsResponse>("/api/control/missions/move", withIdempotencyKey({
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }));
+    for (const item of res.moved ?? []) noteMissionMutated(item.mission_id);
+    return res;
   } catch (error) {
     if (error instanceof ApiError && error.status === 409) {
       try {
@@ -2701,11 +2726,13 @@ export async function moveMissionsBatch(body: MoveMissionsRequest): Promise<Move
 }
 
 export async function cancelMission(id: string): Promise<void> {
+  noteMissionMutated(id);
   await api<void>(`/api/control/missions/${id}/cancel`, withIdempotencyKey({ method: "POST" }));
 }
 
 /** Force-start a slot-queued mission immediately using the bounded 1-extra operator bypass slot. */
 export async function forceMissionSlot(id: string): Promise<Mission> {
+  noteMissionMutated(id);
   return api<Mission>(`/api/control/missions/${encodeURIComponent(id)}/force-slot`, withIdempotencyKey({ method: "POST" }));
 }
 
@@ -2721,11 +2748,14 @@ export async function updateMissionSettings(
   id: string,
   body: { model_override?: string; backend?: string; model_effort?: string; service_tier?: CodexServiceTier; resume?: boolean },
 ): Promise<Mission> {
-  return api(`/api/control/missions/${id}/settings`, withIdempotencyKey({
+  noteMissionMutated(id);
+  const res = await api<Mission>(`/api/control/missions/${id}/settings`, withIdempotencyKey({
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ resume: false, ...body }),
   }));
+  noteMissionMutated(id);
+  return res;
 }
 
 /**

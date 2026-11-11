@@ -5,6 +5,8 @@ import {
   getApiUrl,
   getJwt,
   getMission,
+  noteMissionMutated,
+  seedCachedMission,
   setConnection,
   setTransportBridgeEnabled,
 } from "../src/api";
@@ -640,5 +642,45 @@ describe("Zero-Wait Conversation Loading & Two-Tier Answer Cache", () => {
     expect(warmRecords).toHaveLength(8);
     expect(txMap.get(`${scope}::m:m-0`)?.tier).toBe("hot");
     expect(txMap.get(`${scope}::m:m-8`)?.tier).toBe("warm");
+  });
+
+  it("fences seeded /open mission metadata against newer mission mutations", async () => {
+    setConnection("http://open-mission-fence.test", "jwt-fence");
+    const fetchCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        fetchCalls.push(url);
+        return new Response(
+          JSON.stringify({
+            id: "m-fence",
+            status: "active",
+            model_override: "fresh-from-server",
+            created_at: "2026-11-11T00:00:00Z",
+            updated_at: "2026-11-11T00:00:05Z",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+
+    const openStartedAt = Date.now() - 50;
+    noteMissionMutated("m-fence");
+    seedCachedMission(
+      {
+        id: "m-fence",
+        status: "active",
+        model_override: "stale-from-open",
+        created_at: "2026-11-11T00:00:00Z",
+        updated_at: "2026-11-11T00:00:01Z",
+      } as never,
+      openStartedAt,
+    );
+
+    const resolved = await getMission("m-fence", { coreOnly: true });
+    expect(resolved.model_override).toBe("fresh-from-server");
+    expect(fetchCalls).toHaveLength(1);
+    clearConnection({ persist: false });
   });
 });

@@ -1296,4 +1296,63 @@ final class OrbContractTests: XCTestCase {
         let complete = try JSONDecoder().decode(MissionOpenBundleResult.self, from: completeRaw)
         XCTAssertFalse(complete.isColdSpineTruncated)
     }
+
+    @MainActor func testOpenBundleFencesNewerMissionAndStreamMutations() async throws {
+        let missionId = "m-open-fence-" + UUID().uuidString
+        let savedFetcher = OrbReadCache.openBundleFetcher
+        defer {
+            OrbReadCache.openBundleFetcher = savedFetcher
+            OrbDisk.remove("mission:\(missionId)")
+            OrbDisk.remove("events:\(missionId)")
+        }
+
+        OrbReadCache.openBundleFetcher = { id in
+            try? await Task.sleep(for: .milliseconds(40))
+            let raw = """
+            {
+              "protocol": 1,
+              "mission": {"id": "\(id)", "status": "active", "model_override": "stale-model", "updated_at": "2026-11-11T00:00:01Z"},
+              "events": [{"id": 10, "mission_id": "\(id)", "sequence": 10, "event_type": "assistant_message", "timestamp": "2026-11-11T00:00:01Z", "content": "Older reply", "metadata": {}}],
+              "spine": [{"id": 1, "mission_id": "\(id)", "sequence": 1, "event_type": "user_message", "timestamp": "2026-11-11T00:00:00Z", "content": "Prompt", "metadata": {}}],
+              "queue": [],
+              "max_seq": 10,
+              "has_more": false,
+              "spine_has_more": false,
+              "spine_next_cursor": null,
+              "reset": false
+            }
+            """.data(using: .utf8)!
+            return try? JSONDecoder().decode(MissionOpenBundleResult.self, from: raw)
+        }
+
+        async let bundleEvents = OrbReadCache.openBundle(missionId)
+        try await Task.sleep(for: .milliseconds(10))
+
+        OrbReadCache.saveMission(missionId, value: .object([
+            "id": .string(missionId),
+            "status": .string("active"),
+            "model_override": .string("fresh-model"),
+            "updated_at": .string("2026-11-11T00:00:05Z")
+        ]))
+        OrbReadCache.saveEvents(missionId, events: [
+            StoredEvent(
+                id: 11,
+                missionId: missionId,
+                sequence: 11,
+                eventType: "assistant_message",
+                timestamp: "2026-11-11T00:00:05Z",
+                eventId: nil,
+                toolCallId: nil,
+                toolName: nil,
+                content: "Live stream answer",
+                metadata: [:]
+            )
+        ])
+
+        let resolved = await bundleEvents
+        XCTAssertEqual(OrbReadCache.read("mission:\(missionId)")?["model_override"].text, "fresh-model")
+        XCTAssertEqual(resolved?.map(\.sequence), [1, 10, 11])
+        XCTAssertEqual(OrbReadCache.readEvents(missionId).map(\.sequence), [1, 10, 11])
+        XCTAssertEqual(OrbReadCache.readEvents(missionId).last?.content, "Live stream answer")
+    }
 }

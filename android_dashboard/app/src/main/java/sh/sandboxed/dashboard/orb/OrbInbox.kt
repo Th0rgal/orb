@@ -1770,27 +1770,36 @@ fun OrbInboxView(
                 anyLoaded = true
             }
             if (evs.isEmpty() && idx < 12) {
+                val clearEp = OrbReadCache.clearEpoch()
                 val isCloudRow = row.str("backend")?.startsWith("cloud_") == true
                 val openBundle = if (!isCloudRow) core.fetchMissionOpenBundle(row.id, null, limit = 120) else null
-                if (accountScope != OrbDisk.currentScope()) return@LaunchedEffect
+                if (accountScope != OrbDisk.currentScope() || clearEp != OrbReadCache.clearEpoch()) return@LaunchedEffect
                 if (openBundle != null) {
                     val spineRows = OrbJSON.dictList(openBundle["spine"]).map { OrbRow(it) }
                     val tailRows = OrbJSON.dictList(openBundle["events"]).map { OrbRow(it) }
-                    evs = (spineRows + tailRows).distinctBy { it.int("sequence", "seq") ?: it.id }
-                    val msgTypes = setOf("user_message", "assistant_message", "assistant_message_canonical")
-                    val msgs = evs.filter { (it.str("event_type", "type") ?: "") in msgTypes }
-                    if (msgs.isNotEmpty()) {
-                        OrbReadCache.saveRows("mission_msgs_${row.id}", msgs)
+                    val spineHasMore = openBundle["spine_has_more"] as? Boolean
+                    val isColdSpineTruncated =
+                        OrbJSON.bool(openBundle, "has_more") == true &&
+                            (spineHasMore == true || (spineHasMore == null && spineRows.size >= 80))
+                    evs = OrbReadCache.reconcilePrefetchedEvents(cacheKey, spineRows + tailRows, accountScope, clearEp)
+                    val histCandidates = evs.filter { (it.str("event_type", "type") ?: "") in OrbConversationHistory.eventTypes }
+                    if (!isColdSpineTruncated && histCandidates.isNotEmpty()) {
+                        OrbReadCache.reconcilePrefetchedHistory("mission_msgs_${row.id}", histCandidates, accountScope, clearEp)
+                    }
+                    if (evs.isNotEmpty()) {
+                        anyLoaded = true
                     }
                 } else {
-                    evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                    val fetched = orbTry(OrbLog.Category.Network, "/api/control/missions") {
                         core.fetchRows("/api/control/missions/${core.encodeComponent(row.id)}/events?limit=120", "events")
                     }.getOrDefault(emptyList())
-                    if (accountScope != OrbDisk.currentScope()) return@LaunchedEffect
-                }
-                if (evs.isNotEmpty()) {
-                    OrbReadCache.saveRows(cacheKey, evs)
-                    anyLoaded = true
+                    if (accountScope != OrbDisk.currentScope() || clearEp != OrbReadCache.clearEpoch()) return@LaunchedEffect
+                    if (fetched.isNotEmpty()) {
+                        evs = OrbReadCache.reconcilePrefetchedEvents(cacheKey, fetched, accountScope, clearEp)
+                        if (evs.isNotEmpty()) {
+                            anyLoaded = true
+                        }
+                    }
                 }
             }
             val priority = if (OrbMissionUnreadStore.isUnread(row)) idx else idx + 20

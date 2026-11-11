@@ -1543,8 +1543,15 @@ enum OrbReadCache {
     static var eventsFetcher: @MainActor (_ missionID: String, _ limit: Int) async throws -> [StoredEvent] = { id, limit in
         try await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: limit, sinceSeq: nil).events
     }
+    /// Network source for `openBundle(_:)`; tests replace it.
+    static var openBundleFetcher: @MainActor (_ missionID: String) async -> MissionOpenBundleResult? = { id in
+        await OrbCore.shared.getMissionOpenBundle(id: id)
+    }
     private struct Pending { let id = UUID(); let task: Task<OrbJSON, Error> }
     private static var pending: [String: Pending] = [:]
+    private static var clearEpoch: UInt64 = 0
+    private static var valueWriteGen: [String: UInt64] = [:]
+    private static var eventWriteGen: [String: UInt64] = [:]
     private static var cachedProjectSlugs: Set<String> = []
     private static var currentAccountScope: String {
         OrbCore.shared.endpoint + ":" + (OrbCore.shared.authToken ?? "")
@@ -1591,6 +1598,7 @@ enum OrbReadCache {
         // trimming they must not mask the full conversation still saved on disk.
         if name.hasPrefix("mission:"), value["history"].items.isEmpty { return }
         if values.count >= 256, let oldest = values.min(by: { $0.value.date < $1.value.date })?.key { values[oldest] = nil }
+        valueWriteGen[scope, default: 0] &+= 1
         values[scope] = Entry(value: value, date: Date())
     }
     static func seed(_ name: String, value: OrbJSON) {
@@ -1605,6 +1613,7 @@ enum OrbReadCache {
         let name = "mission:\(id)"
         let scope = key(name)
         pending[scope] = nil
+        valueWriteGen[scope, default: 0] &+= 1
         var merged = value
         if merged["history"].items.isEmpty,
            let existing = values[scope]?.value ?? OrbDisk.read(name, as: OrbJSON.self),
@@ -1711,6 +1720,7 @@ enum OrbReadCache {
         let cacheName = "events:\(missionID)"
         let scope = key(cacheName)
         let acctScope = currentAccountScope
+        eventWriteGen[scope, default: 0] &+= 1
         if eventValues[scope] == nil && eventValues.count >= 64 {
             while let oldest = eventAccessOrder.first {
                 eventAccessOrder.removeFirst()
@@ -1744,15 +1754,23 @@ enum OrbReadCache {
             return cached
         }
         if let task = eventPending[scope] { return try await task.value }
+        let epochBefore = clearEpoch
+        let genBefore = eventWriteGen[scope] ?? 0
         let task = Task { @MainActor in try await eventsFetcher(missionID, limit) }
         eventPending[scope] = task
         defer { eventPending[scope] = nil }
         let events = try await task.value
-        // The account may have changed while the request was in flight.
-        guard scope == key("events:\(missionID)") else { throw CancellationError() }
-        saveEvents(missionID, events: events)
+        // The account or cache epoch may have changed while the request was in flight.
+        guard epochBefore == clearEpoch, scope == key("events:\(missionID)") else { throw CancellationError() }
+        let reconciled: [StoredEvent]
+        if (eventWriteGen[scope] ?? 0) == genBefore {
+            reconciled = events
+        } else {
+            reconciled = OrbConversation.mergeStoredEvents(existing: events, incoming: readEvents(missionID))
+        }
+        saveEvents(missionID, events: reconciled)
         eventFetchedAt[scope] = now()
-        return events.map(\.compacted)
+        return reconciled.map(\.compacted)
     }
     static func load(_ name: String, ttl: TimeInterval = 30, force: Bool = false, fetch: @escaping @MainActor () async throws -> OrbJSON) async throws -> OrbJSON {
         let scope = key(name)
@@ -1774,12 +1792,16 @@ enum OrbReadCache {
         // "Connection unavailable … cancelled" error after every send.
         guard pending[scope]?.id == item.id else { return value }
         if values.count >= 256, let oldest = values.min(by: { $0.value.date < $1.value.date })?.key { values[oldest] = nil }
+        valueWriteGen[scope, default: 0] &+= 1
         values[scope] = Entry(value: value, date: Date())
         OrbDisk.saveAsync(value, key: name)
         return value
     }
     /// Settings → Debug info → Clear caches: drops memory and disk copies for every account.
     static func clearAll() {
+        clearEpoch &+= 1
+        valueWriteGen.removeAll()
+        eventWriteGen.removeAll()
         for item in pendingEventDiskSaves.values { item.task.cancel() }
         pendingEventDiskSaves.removeAll()
         OrbHierarchy.reset()
@@ -1815,6 +1837,7 @@ enum OrbReadCache {
     static func invalidate(_ name: String) {
         let scope = key(name)
         pending[scope] = nil
+        valueWriteGen[scope, default: 0] &+= 1
         if let old = values[scope] { values[scope] = Entry(value: old.value, date: .distantPast) }
     }
     private static func jsonSortMs(_ raw: OrbJSON) -> Int64 {
@@ -1840,6 +1863,8 @@ enum OrbReadCache {
             if let p = item.project, !p.isEmpty { touchedProjects.insert(p) }
             let mKey = "mission:\(item.missionID)"
             let mScope = key(mKey)
+            pending[mScope] = nil
+            valueWriteGen[mScope, default: 0] &+= 1
             if let entry = values[mScope], case var .object(dict) = entry.value {
                 if let oldProj = dict["project"]?.text, !oldProj.isEmpty { touchedProjects.insert(oldProj) }
                 dict["project"] = item.project.map(OrbJSON.string) ?? .null
@@ -2044,28 +2069,74 @@ enum OrbReadCache {
         inFlightSinglePrefetches[eventScope] = task
     }
     /// Hydrates mission detail + conversational spine + recent tail via `/open`,
-    /// fenced to the originating account and disk-key scope before any cache write.
+    /// fenced to the originating account, cache epoch, and write generations so an
+    /// in-flight background prefetch never overwrites newer settings/placement mutations
+    /// or drops warm-stream/live events that arrived while `/open` was awaiting the network.
     static func openBundle(_ missionID: String) async -> [StoredEvent]? {
+        let epochBefore = clearEpoch
         let accountScope = currentAccountScope
-        let missionScope = key("mission:\(missionID)")
+        let missionName = "mission:\(missionID)"
+        let missionScope = key(missionName)
         let eventScope = key("events:\(missionID)")
+        let missionGenBefore = valueWriteGen[missionScope] ?? 0
+        let eventGenBefore = eventWriteGen[eventScope] ?? 0
         guard !missionID.isEmpty, !Task.isCancelled else { return nil }
-        guard let bundle = await OrbCore.shared.getMissionOpenBundle(id: missionID) else { return nil }
+        guard let bundle = await openBundleFetcher(missionID) else { return nil }
         guard !Task.isCancelled,
+              epochBefore == clearEpoch,
               accountScope == currentAccountScope,
-              missionScope == key("mission:\(missionID)"),
+              missionScope == key(missionName),
               eventScope == key("events:\(missionID)") else { return nil }
-        var missionValue = bundle.mission
-        let combined = OrbConversation.mergeStoredEvents(existing: [], incoming: bundle.spine + bundle.events)
-        let historyEvents = (bundle.spine + bundle.events).filter { OrbConversationHistory.eventTypes.contains($0.eventType) }
-        if !bundle.isColdSpineTruncated, !historyEvents.isEmpty, case var .object(fields) = missionValue {
-            fields["history"] = .array(OrbConversationHistory.merge(fields["history"]?.items ?? [], events: historyEvents))
-            missionValue = .object(fields)
+
+        let incomingEvents = OrbConversation.mergeStoredEvents(existing: [], incoming: bundle.spine + bundle.events)
+        let existingEvents = readEvents(missionID)
+        let combined = existingEvents.isEmpty
+            ? incomingEvents
+            : OrbConversation.mergeStoredEvents(existing: incomingEvents, incoming: existingEvents)
+
+        let missionUnmodified = (valueWriteGen[missionScope] ?? 0) == missionGenBefore
+            && pending[missionScope] == nil
+            && (OrbHierarchy.placement(of: missionID)?.pendingOpID ?? 0) == 0
+        if missionUnmodified {
+            var missionValue = bundle.mission
+            let existingMission = read(missionName)
+            let fetchedTs = OrbStyle.parseDate(missionValue["updated_at"].text)
+            let existingTs = existingMission.flatMap { OrbStyle.parseDate($0["updated_at"].text) }
+            let staleByTimestamp = fetchedTs != nil && existingTs != nil && fetchedTs! < existingTs!
+            if !staleByTimestamp {
+                let seedHist = (existingMission?["history"].items ?? []).filter { !$0["inbox_preview"].flag }
+                let historyEvents = combined.filter { OrbConversationHistory.eventTypes.contains($0.eventType) }
+                if !bundle.isColdSpineTruncated, (!historyEvents.isEmpty || !seedHist.isEmpty), case var .object(fields) = missionValue {
+                    let bundleHist = OrbConversationHistory.merge(fields["history"]?.items ?? [], events: historyEvents)
+                    if seedHist.isEmpty {
+                        fields["history"] = .array(bundleHist)
+                    } else if seedHist.allSatisfy({ $0["sequence"].doubleValue != nil }) && bundleHist.allSatisfy({ $0["sequence"].doubleValue != nil }) {
+                        let bySeq = Dictionary((bundleHist + seedHist).map { (Int64($0["sequence"].doubleValue ?? 0), $0) }, uniquingKeysWith: { _, newer in newer })
+                        fields["history"] = .array(bySeq.values.sorted { ($0["sequence"].doubleValue ?? 0) < ($1["sequence"].doubleValue ?? 0) })
+                    } else {
+                        fields["history"] = .array(OrbConversationHistory.merge(seedHist, events: historyEvents))
+                    }
+                    missionValue = .object(fields)
+                } else if !seedHist.isEmpty, missionValue["history"].items.isEmpty, case var .object(fields) = missionValue {
+                    fields["history"] = .array(seedHist)
+                    missionValue = .object(fields)
+                }
+                if values.count >= 256, values[missionScope] == nil,
+                   let oldest = values.min(by: { $0.value.date < $1.value.date })?.key {
+                    values[oldest] = nil
+                }
+                valueWriteGen[missionScope, default: 0] &+= 1
+                values[missionScope] = Entry(value: missionValue, date: Date())
+                OrbDisk.saveAsync(missionValue, key: missionName)
+            }
         }
-        saveMission(missionID, value: missionValue)
-        if !combined.isEmpty {
+
+        if !incomingEvents.isEmpty {
+            let eventsUnmodified = (eventWriteGen[eventScope] ?? 0) == eventGenBefore
             saveEvents(missionID, events: combined)
-            eventFetchedAt[eventScope] = Date()
+            if eventsUnmodified {
+                eventFetchedAt[eventScope] = Date()
+            }
         }
         return combined
     }

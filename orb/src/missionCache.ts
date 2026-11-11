@@ -1048,7 +1048,7 @@ async function fetchTranscript(
     check();
     if (bundle && bundle.protocol === 1 && !bundle.reset && !(previous?.cursor !== undefined && bundle.has_more)) {
       if ("seedCachedMission" in apiModule && typeof apiModule.seedCachedMission === "function") {
-        apiModule.seedCachedMission(bundle.mission);
+        apiModule.seedCachedMission(bundle.mission, openStartedAt);
       }
       const queuedRows = Array.isArray(bundle.queue) ? bundle.queue : [];
       seedMissionOpenQueue(id, queuedRows, openStartedAt);
@@ -1111,7 +1111,21 @@ async function fetchTranscript(
         eventId: row.id,
         data: { id: row.id, content: row.content, queued: row.inflight !== true },
       }));
-      const retainedLive = previous?.liveTail?.length ? heldAfterHistory(stream, previous.liveTail) : [];
+      const latest = peekReadyTranscript(id) ?? previous;
+      if (latest?.stream?.length) {
+        const concurrentNewer = latest.stream.filter(
+          (e) => e.sequence !== undefined && (cursor === undefined || e.sequence > cursor),
+        );
+        if (concurrentNewer.length > 0) {
+          stream = mergeStreamBySequence(stream, concurrentNewer);
+          for (const ev of concurrentNewer) {
+            if (ev.sequence !== undefined && (cursor === undefined || ev.sequence > cursor)) {
+              cursor = ev.sequence;
+            }
+          }
+        }
+      }
+      const retainedLive = latest?.liveTail?.length ? heldAfterHistory(stream, latest.liveTail) : [];
       lastNetworkFetchAt.set(key(id), Date.now());
       return {
         items: buildTranscript([...stream, ...retainedLive, ...queueEvents], sessionFor(id)),
@@ -1226,7 +1240,21 @@ async function fetchTranscript(
   const queued = await queuedPromise;
   check();
   const queueEvents: StreamEvent[] = queued.map(row => ({ type: "user_message", eventId: row.id, data: { id: row.id, content: row.content, queued: row.inflight !== true } }));
-  const retainedLive = previous?.liveTail?.length ? heldAfterHistory(stream, previous.liveTail) : [];
+  const latest = peekReadyTranscript(id) ?? previous;
+  if (latest?.stream?.length) {
+    const concurrentNewer = latest.stream.filter(
+      (e) => e.sequence !== undefined && (cursor === undefined || e.sequence > cursor),
+    );
+    if (concurrentNewer.length > 0) {
+      stream = mergeStreamBySequence(stream, concurrentNewer);
+      for (const ev of concurrentNewer) {
+        if (ev.sequence !== undefined && (cursor === undefined || ev.sequence > cursor)) {
+          cursor = ev.sequence;
+        }
+      }
+    }
+  }
+  const retainedLive = latest?.liveTail?.length ? heldAfterHistory(stream, latest.liveTail) : [];
   // History first puts accepted user turns at their actual transcript positions.
   lastNetworkFetchAt.set(key(id), Date.now());
   return { items: buildTranscript([...stream, ...retainedLive, ...queueEvents], sessionFor(id)), stream, ...(retainedLive.length ? { liveTail: retainedLive } : {}), fromLog: true, spineComplete, ...(spineBefore !== undefined ? { spineBefore } : {}), queueError, cursor, before, hasOlder };
