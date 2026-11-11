@@ -30,19 +30,41 @@ const RETIRED_DEFAULT_MODELS = new Set([
 export const [remoteHarnessChoices, setRemoteHarnessChoices] = createSignal<HarnessChoice[]>([]);
 export const [nodeAntigravityModels, setNodeAntigravityModels] = createSignal<Record<string, [string,string][]>>({});
 const nodeModelRequests = new Set<string>();
+const nodeModelRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const nodeModelFailures = new Map<string, number>();
+const NODE_MODEL_RETRY_MS = [15_000, 45_000, 120_000] as const;
+
 export async function refreshNodeAntigravityModels(machine: string) {
   if (!machine || machine === "local" || machine === "side" || isAutoManagedTarget(machine)) return;
   const version = connectionVersion(), key = `${version}:${machine}`;
   if (nodeModelRequests.has(key)) return;
+  const pendingTimer = nodeModelRetryTimers.get(key);
+  if (pendingTimer !== undefined) {
+    clearTimeout(pendingTimer);
+    nodeModelRetryTimers.delete(key);
+  }
   nodeModelRequests.add(key);
   try {
     const models = await listNodeAntigravityModels(machine);
-    if (version === connectionVersion()) setNodeAntigravityModels(old => ({...old, [key]:models}));
+    if (version === connectionVersion()) {
+      nodeModelFailures.delete(key);
+      setNodeAntigravityModels(old => ({...old, [key]:models}));
+    }
   } catch (error) {
     // A slow or failed lookup must not hide Antigravity on this machine for the whole
-    // session: keep whatever was known and retry shortly unless the node does not exist.
+    // session: keep whatever was known and retry with bounded backoff unless permanent.
     const permanent = error instanceof ApiError && (error.status === 404 || error.status === 409);
-    if (!permanent && version === connectionVersion()) setTimeout(() => void refreshNodeAntigravityModels(machine), 15_000);
+    const attempt = nodeModelFailures.get(key) ?? 0;
+    if (!permanent && version === connectionVersion() && attempt < NODE_MODEL_RETRY_MS.length) {
+      nodeModelFailures.set(key, attempt + 1);
+      const delay = NODE_MODEL_RETRY_MS[attempt];
+      const timer = setTimeout(() => {
+        nodeModelRetryTimers.delete(key);
+        if (typeof document !== "undefined" && document.hidden) return;
+        void refreshNodeAntigravityModels(machine);
+      }, delay);
+      nodeModelRetryTimers.set(key, timer);
+    }
   }
   finally { nodeModelRequests.delete(key); }
 }

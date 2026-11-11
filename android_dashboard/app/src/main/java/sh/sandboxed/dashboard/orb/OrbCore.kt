@@ -266,8 +266,12 @@ data class OrbRow(
         get() = str("owner_username")?.trim()?.takeIf { it.isNotEmpty() }
 
     fun isClientPlacement(): Boolean {
-        val pk = str("placement_kind") ?: ""
-        return pk == "client" || pk.startsWith("client:")
+        val pk = str("placement_kind")?.trim() ?: ""
+        if (pk.isNotEmpty()) {
+            return pk == "client" || pk.startsWith("client:")
+        }
+        return str("origin") == "orb-client" ||
+            OrbJSON.strings(raw, "tags").contains("placement:client")
     }
 
     fun supersededSuccessorId(): String? =

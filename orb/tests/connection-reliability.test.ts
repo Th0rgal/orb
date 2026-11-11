@@ -874,4 +874,38 @@ describe("connection reliability transport & prefetch bounds", () => {
     await expect(api("/api/bad-json", {})).rejects.toThrow("Couldn’t read the server response");
     expect(badJsonCalls).toBe(1);
   });
+
+  it("does not degrade Core networkHealth when a remote worker node proxy returns 502", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/providers/antigravity-models?node_id=ashur")) {
+          return new Response(JSON.stringify({ error: "node ashur unreachable" }), {
+            status: 502,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.includes("/api/providers/antigravity-models?node_id=core")) {
+          return new Response(JSON.stringify({ error: "core upstream down" }), {
+            status: 502,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return Response.json({ ok: true });
+      }),
+    );
+
+    await transportFetch("/api/health");
+    expect(networkHealth()).toBe("healthy");
+
+    const workerRes = await transportFetch("/api/providers/antigravity-models?node_id=ashur");
+    expect(workerRes.status).toBe(502);
+    expect(networkHealth()).toBe("healthy");
+    expect(networkHealthSnapshot().consecutiveFailures).toBe(0);
+
+    const coreRes = await transportFetch("/api/providers/antigravity-models?node_id=core");
+    expect(coreRes.status).toBe(502);
+    expect(networkHealth()).toBe("reconnecting");
+  });
 });

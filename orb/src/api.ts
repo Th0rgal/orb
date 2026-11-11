@@ -245,6 +245,17 @@ function shouldSampleTransportRtt(methodRaw: string | undefined, path: string): 
   return true;
 }
 
+function isWorkerNodeProxyPath(path: string): boolean {
+  const [cleanPath = path, query = ""] = path.split("?");
+  if (
+    cleanPath.startsWith("/api/providers/antigravity-models") ||
+    cleanPath.startsWith("/api/antigravity-models")
+  ) {
+    return /(?:^|&)node_id=(?!core(?:&|$))[^&]+/.test(query);
+  }
+  return false;
+}
+
 function recordFetchTelemetry(
   res: Response,
   startedMs: number,
@@ -265,7 +276,7 @@ function recordFetchTelemetry(
     } else {
       recordTransportRecovery(upstreamOrigin);
     }
-  } else if (res.status >= 500) {
+  } else if (res.status >= 500 && !isWorkerNodeProxyPath(path)) {
     recordTransportFailure();
   }
   return res;
@@ -314,7 +325,7 @@ export function transportFetch(
         return fetch(`${chosen}${path}`, bridgeInit).then(
           (res) => recordFetchTelemetry(res, startedMs, undefined, init?.method, path),
           (err) => {
-            if (!isAbortError(err)) recordTransportFailure();
+            if (!isAbortError(err) && !isWorkerNodeProxyPath(path)) recordTransportFailure();
             throw err;
           },
         );
@@ -325,7 +336,7 @@ export function transportFetch(
         return fetch(`${chosen}${path}`, bridgeInit).then(
           (res) => recordFetchTelemetry(res, startedMs, undefined, init?.method, path),
           (err) => {
-            if (!isAbortError(err)) recordTransportFailure();
+            if (!isAbortError(err) && !isWorkerNodeProxyPath(path)) recordTransportFailure();
             throw err;
           },
         );
@@ -381,9 +392,11 @@ async function transportFetchDirect(target: string, path: string, init?: Request
     try {
       const res = await fetch(`${base}${path}`, init);
       if ([502, 503, 504, 522, 524].includes(res.status)) {
-        endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
-        recordTransportFailure();
-        if (safeMethod && !isLast) continue;
+        if (!isWorkerNodeProxyPath(path)) {
+          endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
+          recordTransportFailure();
+          if (safeMethod && !isLast) continue;
+        }
       } else if (res.status < 500) {
         endpointCooldownUntil.delete(base);
         recordFetchTelemetry(res, startedMs, base, method, path);
@@ -391,11 +404,11 @@ async function transportFetchDirect(target: string, path: string, init?: Request
       return res;
     } catch (err) {
       lastError = err;
-      if (!isAbortError(err)) {
+      if (!isAbortError(err) && !isWorkerNodeProxyPath(path)) {
         endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
         recordTransportFailure();
       }
-      if (isAbortError(err) || !safeMethod || isLast) throw err;
+      if (isAbortError(err) || isWorkerNodeProxyPath(path) || !safeMethod || isLast) throw err;
     }
   }
   throw lastError ?? new TypeError("Load failed");

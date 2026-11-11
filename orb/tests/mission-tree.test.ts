@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { countNested, countVersions, forkTitle, missionParent, versionLabel, holds, nestMissions, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededMission, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "../src/missionTree";
+import { countNested, countVersions, forkTitle, missionParent, versionLabel, holds, nestMissions, missionSubtree, missionTreeRows, archiveOnlyRows, isClientPlacement, isSupersededMission, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "../src/missionTree";
 
 const m = (id: string, parent?: string, status = "completed", tags?: string[], superseded_by_mission_id?: string) => ({ id, parent_mission_id: parent, status, tags, superseded_by_mission_id });
 
@@ -199,4 +199,16 @@ test("F1: converting Codex to OpenCode builtin/smart never lets source stop/clea
   };
   expect(nestMissions([codexSource, opencodeFork]).map(r => r.mission.id)).toEqual(["opencode-fork"]);
   expect(nestMissions([opencodeFork, codexSource]).map(r => r.mission.id)).toEqual(["opencode-fork"]);
+});
+
+test("isClientPlacement honors authoritative placement_kind and falls back to legacy origin/tags only when placement_kind is absent", () => {
+  expect(isClientPlacement({ placement_kind: "client" })).toBe(true);
+  expect(isClientPlacement({ placement_kind: "client:macos" })).toBe(true);
+  expect(isClientPlacement({ origin: "orb-client", tags: ["placement:client"] })).toBe(true);
+  expect(isClientPlacement({ placement_kind: null, origin: "orb-client" })).toBe(true);
+  expect(isClientPlacement({ placement_kind: "", tags: ["placement:client"] })).toBe(true);
+  // Explicit non-client SM-02 placement_kind wins over stale legacy tags after machine transfer:
+  expect(isClientPlacement({ placement_kind: "managed", origin: "orb-client", tags: ["placement:client"] })).toBe(false);
+  expect(isClientPlacement({ placement_kind: "remote", tags: ["placement:client"] })).toBe(false);
+  expect(isClientPlacement({ origin: "web", tags: [] })).toBe(false);
 });

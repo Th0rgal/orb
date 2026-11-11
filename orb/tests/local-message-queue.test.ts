@@ -655,3 +655,24 @@ it('classifies typed 409 conflict codes deterministically without misclassifying
  expect(queuedLocalMessages('mission')[0].state).toBe('dispatching');
  expect(queuedLocalMessages('mission')[0].error).toBeTruthy();
 });
+
+it('automatically heals a pre-launch placement-mismatch error once client placement matches the bound cwd', async () => {
+ mocks.active = false;
+ const key = `followups:account:${mocks.version}`;
+ mocks.store.set(key, [
+  {
+   id: 'e929-queued',
+   mission: 'mission',
+   text: 'fix layout',
+   state: 'error',
+   error: 'Error: This conversation changed machines or folders. Remove this message and send it again.',
+   createdAt: 1,
+   request: { ...request, prompt: 'fix layout' },
+  },
+ ]);
+ stop = startLocalQueueWorker();
+ await vi.advanceTimersByTimeAsync(100);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(mocks.launch.mock.calls[0][0].prompt).toBe('fix layout');
+ expect(queuedLocalMessages('mission')).toEqual([]);
+});
