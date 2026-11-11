@@ -167,6 +167,8 @@ describe("Zero-Wait Conversation Loading & Two-Tier Answer Cache", () => {
               queue: [{ id: "q-1", content: "Queued next", source: "remote-queue" }],
               max_seq: 21,
               has_more: true,
+              spine_has_more: true,
+              spine_next_cursor: 1,
               next_cursor: 21,
               page_max_seq: 21,
               reset: false,
@@ -182,6 +184,8 @@ describe("Zero-Wait Conversation Loading & Two-Tier Answer Cache", () => {
     expect(fetchCalls).toHaveLength(1);
     expect(fetchCalls[0]).toContain("/api/control/missions/m-bundle/open?");
     expect(snap.cursor).toBe(21);
+    expect(snap.spineComplete).toBe(false);
+    expect(snap.spineBefore).toBe(1);
     expect(snap.items.some((i) => i.kind === "user" && i.text.includes("Initial prompt"))).toBe(true);
     expect(snap.items.some((i) => i.kind === "text" && i.text.includes("Single-RTT answer!"))).toBe(true);
 

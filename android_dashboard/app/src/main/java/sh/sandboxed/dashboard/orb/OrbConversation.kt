@@ -1103,6 +1103,9 @@ fun OrbConversationPage(
                             val spineRows = OrbJSON.dictList(openBundle["spine"]).map { OrbRow(it) }
                             val tailRows = OrbJSON.dictList(openBundle["events"]).map { OrbRow(it) }
                             val hasMore = OrbJSON.bool(openBundle, "has_more") == true
+                            val spineHasMore = openBundle["spine_has_more"] as? Boolean
+                            val coldSpineTruncated =
+                                hasMore && (spineHasMore == true || (spineHasMore == null && spineRows.size >= 80))
                             if (cid == targetId && openBundle.containsKey("queue")) {
                                 bundledQueuePresent = true
                                 bundledQueueForTarget = openBundle["queue"]
@@ -1110,7 +1113,10 @@ fun OrbConversationPage(
                             val bundledMsgs = (spineRows + tailRows).filter {
                                 (it.str("event_type", "type") ?: "") in OrbConversationHistory.eventTypes
                             }
-                            conversation = if (lastSeq != null && lastSeq > 0 && hasMore) {
+                            val needConversationBackfill =
+                                ((lastSeq != null && lastSeq > 0) && (hasMore || conversationCursor == null)) ||
+                                    ((lastSeq == null || lastSeq <= 0) && coldSpineTruncated)
+                            conversation = if (needConversationBackfill) {
                                 orbTry(OrbLog.Category.Network, "conversation messages") {
                                     core.fetchRows("/api/control/missions/${core.encodeComponent(cid)}/events?types=user_message,assistant_message,assistant_message_canonical&limit=400&max_payload=$maxPayload$conversationSuffix", "events")
                                 }.getOrNull() ?: bundledMsgs

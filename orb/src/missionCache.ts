@@ -1069,8 +1069,23 @@ async function fetchTranscript(
               ? previous.stream.filter((e) => e.sequence !== undefined && e.sequence < before!)
               : [];
           const serverSpine = Array.isArray(bundle.spine)
-            ? bundle.spine.map(storedToStream).filter((e): e is StreamEvent => e !== null)
+            ? bundle.spine
+                .map(storedToStream)
+                .filter(
+                  (e): e is StreamEvent =>
+                    e !== null && (before === undefined || (e.sequence !== undefined && e.sequence < before)),
+                )
             : [];
+          if (typeof bundle.spine_has_more === "boolean") {
+            spineComplete = !bundle.spine_has_more;
+            spineBefore =
+              bundle.spine_has_more && typeof bundle.spine_next_cursor === "number"
+                ? bundle.spine_next_cursor
+                : undefined;
+          } else {
+            spineComplete = false;
+            spineBefore = serverSpine[0]?.sequence ?? before;
+          }
           const combinedSpineSrc = mergeStreamBySequence(priorOlderSpine, serverSpine);
           if (combinedSpineSrc.length > 0) {
             const spine = spineAnswers(combinedSpineSrc, firstTailConv?.type === "assistant_message");

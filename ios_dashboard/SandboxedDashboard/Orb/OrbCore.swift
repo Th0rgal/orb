@@ -2058,7 +2058,7 @@ enum OrbReadCache {
         var missionValue = bundle.mission
         let combined = OrbConversation.mergeStoredEvents(existing: [], incoming: bundle.spine + bundle.events)
         let historyEvents = (bundle.spine + bundle.events).filter { OrbConversationHistory.eventTypes.contains($0.eventType) }
-        if !historyEvents.isEmpty, case var .object(fields) = missionValue {
+        if !bundle.isColdSpineTruncated, !historyEvents.isEmpty, case var .object(fields) = missionValue {
             fields["history"] = .array(OrbConversationHistory.merge(fields["history"]?.items ?? [], events: historyEvents))
             missionValue = .object(fields)
         }

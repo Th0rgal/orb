@@ -476,7 +476,7 @@ final class OrbCore {
         sinceSeq: Int64? = nil,
         limit: Int = 150,
         maxPayload: Int = StoredEvent.resultKeepUTF8,
-        spineLimit: Int = 80
+        spineLimit: Int = 400
     ) async -> MissionOpenBundleResult? {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-api_base_url") { return nil }
@@ -2144,13 +2144,19 @@ struct MissionOpenBundleResult: Decodable, Sendable {
     let queue: OrbJSON
     let maxSeq: Int64?
     let hasMore: Bool?
+    let spineHasMore: Bool?
     let reset: Bool?
+
+    var isColdSpineTruncated: Bool {
+        hasMore == true && (spineHasMore == true || (spineHasMore == nil && spine.count >= 80))
+    }
 
     enum CodingKeys: String, CodingKey {
         case protocolVersion = "protocol"
         case mission, events, spine, queue
         case maxSeq = "max_seq"
         case hasMore = "has_more"
+        case spineHasMore = "spine_has_more"
         case reset
     }
 }

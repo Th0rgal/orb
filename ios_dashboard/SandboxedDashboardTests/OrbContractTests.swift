@@ -1260,4 +1260,40 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(OrbHierarchy.placement(of: "stage-root")?.revision, 3)
         OrbHierarchy.reset()
     }
+
+    func testOpenBundleDetectsTruncatedSpineOnColdOpen() throws {
+        let truncatedRaw = """
+        {
+          "protocol": 1,
+          "mission": {"id": "m-spine-trunc", "status": "active"},
+          "events": [],
+          "spine": [{"sequence": 90, "event_type": "user_message", "content": "Newer turn"}],
+          "queue": [],
+          "max_seq": 250,
+          "has_more": true,
+          "spine_has_more": true,
+          "spine_next_cursor": 90,
+          "reset": false
+        }
+        """.data(using: .utf8)!
+        let truncated = try JSONDecoder().decode(MissionOpenBundleResult.self, from: truncatedRaw)
+        XCTAssertTrue(truncated.isColdSpineTruncated)
+
+        let completeRaw = """
+        {
+          "protocol": 1,
+          "mission": {"id": "m-spine-ok", "status": "completed"},
+          "events": [],
+          "spine": [{"sequence": 1, "event_type": "user_message", "content": "First turn"}],
+          "queue": [],
+          "max_seq": 250,
+          "has_more": true,
+          "spine_has_more": false,
+          "spine_next_cursor": null,
+          "reset": false
+        }
+        """.data(using: .utf8)!
+        let complete = try JSONDecoder().decode(MissionOpenBundleResult.self, from: completeRaw)
+        XCTAssertFalse(complete.isColdSpineTruncated)
+    }
 }

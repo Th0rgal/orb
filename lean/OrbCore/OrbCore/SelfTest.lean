@@ -4772,6 +4772,8 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
   let hasGzHdr := opHdrs.any (fun (k, v) => k.toLower == "content-encoding" && v == "gzip")
   let opPlainBytes := match gunzipBounded opGzBytes 1048576 with | .ok b => b | .error _ => ByteArray.empty
   let opStr := String.fromUTF8? opPlainBytes |>.getD ""
+  let (opTruncSt, opTruncBytes, _) ← sendReqHdr "GET" "/api/control/missions/m-zw-fast-new/open?limit=5&max_payload=512&spine_limit=1" adminTok ""
+  let opTruncStr := String.fromUTF8? opTruncBytes |>.getD ""
   let (bobOpSt, _, _) ← sendReqHdr "GET" "/api/control/missions/m-zw-fast-new/open" bobTok ""
   if tySt != 200 || (tyStr.splitOn "Explain zero-wait caching").length != 2 ||
      vwSt != 200 || (vwStr.splitOn "Explain zero-wait caching").length != 2 || (vwStr.splitOn "Settled answer from spine").length != 2 ||
@@ -4780,8 +4782,11 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
      opSt != 200 || !hasGzHdr || opGzBytes.size >= opPlainBytes.size ||
      (opStr.splitOn "\"protocol\":1").length != 2 || (opStr.splitOn "Settled answer from spine").length < 2 ||
      (opStr.splitOn "next follow-up").length != 2 || (opStr.splitOn "\"has_more\":true").length != 2 ||
+     (opStr.splitOn "\"spine_has_more\":false").length != 2 ||
+     opTruncSt != 200 || (opTruncStr.splitOn "\"spine_has_more\":true").length != 2 ||
+     (opTruncStr.splitOn "\"spine_next_cursor\":2").length != 2 ||
      bobOpSt != 404 then
-    return (← fail s!"events/snapshot/open/gzip check failed: ty={tyStr} vw={vwStr} trSize={trBytes.size} sn={snStr} hasGz={hasGzHdr} gz={opGzBytes.size}/{opPlainBytes.size} bobOp={bobOpSt}")
+    return (← fail s!"events/snapshot/open/gzip check failed: ty={tyStr} vw={vwStr} trSize={trBytes.size} sn={snStr} hasGz={hasGzHdr} gz={opGzBytes.size}/{opPlainBytes.size} opTrunc={opTruncStr} bobOp={bobOpSt}")
 
   -- 3. Live loopback TCP test: HTTP/1.1 keep-alive (2 requests on 1 socket) + `/api/control/sync` WebSocket (`orb-sync.v1`, `since_seq` replay, live push, cross-user confinement, and `inbox_answer_push`)
   let .ok (lfd, lport) ← tcpListen "127.0.0.1" 0 8

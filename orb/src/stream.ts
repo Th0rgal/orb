@@ -274,6 +274,8 @@ export type MissionOpenBundle = {
   queue?: import("./api").QueuedMessage[];
   max_seq?: number;
   has_more?: boolean;
+  spine_has_more?: boolean;
+  spine_next_cursor?: number | null;
   next_cursor?: number;
   page_max_seq?: number;
   reset?: boolean;

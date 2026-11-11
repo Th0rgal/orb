@@ -1440,16 +1440,18 @@ private def dispatchMissionControlAndGitRoutes?
           let queueJson ← match ← listRemoteQueueJson st.store "core" mid with
             | .ok qj => pure qj
             | .error _ => pure "[]"
-          let spineJson ←
+          let (spineJson, spineHasMore, spineNextCursor?) ←
             if sinceSeq?.isNone && pg.hasMore && spineLim > 0 then
-              match ← queryMissionEventsPage st.store mid none none spineLim #[] (some maxPayload) (some "transcript") with
-              | .ok spg => pure spg.eventsJson
-              | .error _ => pure "[]"
+              match ← queryMissionEventsPage st.store mid none pg.nextCursor spineLim #[] (some maxPayload) (some "transcript") with
+              | .ok spg => pure (spg.eventsJson, spg.hasMore, spg.nextCursor)
+              | .error _ => pure ("[]", false, none)
             else
-              pure "[]"
+              pure ("[]", false, none)
           let ncJson := match pg.nextCursor with | some v => s!"{v}" | none => "null"
           let pmJson := match pg.pageMaxSeq with | some v => s!"{v}" | none => "null"
           let hmJson := if pg.hasMore then "true" else "false"
+          let shmJson := if spineHasMore then "true" else "false"
+          let sncJson := match spineNextCursor? with | some v => s!"{v}" | none => "null"
           let resetJson :=
             match sinceSeq? with
             | some s => if s > pg.maxSeq then "true" else "false"
@@ -1457,6 +1459,7 @@ private def dispatchMissionControlAndGitRoutes?
           let bundle :=
             s!"\{\"protocol\":1,\"mission\":{mJson},\"events\":{pg.eventsJson},\"spine\":{spineJson}," ++
             s!"\"queue\":{queueJson},\"max_seq\":{pg.maxSeq},\"has_more\":{hmJson}," ++
+            s!"\"spine_has_more\":{shmJson},\"spine_next_cursor\":{sncJson}," ++
             s!"\"next_cursor\":{ncJson},\"page_max_seq\":{pmJson},\"reset\":{resetJson}}"
           return some (.ok (mkJson 200 bundle))
 

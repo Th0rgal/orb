@@ -264,10 +264,14 @@ extension OrbConversation {
                 value = openBundle.mission
                 let combinedIncoming = openBundle.spine + openBundle.events
                 batch = MissionEventsResult(events: combinedIncoming, maxSequence: openBundle.maxSeq)
-                if sinceSeq != nil && openBundle.hasMore == true {
-                    conversation = try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: OrbConversationHistory.eventTypes, limit: 400, sinceSeq: conversationCursor).events
+                let bundledMsgs = combinedIncoming.filter { OrbConversationHistory.eventTypes.contains($0.eventType) }
+                let needConversationBackfill =
+                    (sinceSeq != nil && (openBundle.hasMore == true || conversationCursor == nil)) ||
+                    (sinceSeq == nil && openBundle.isColdSpineTruncated)
+                if needConversationBackfill {
+                    conversation = (try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: OrbConversationHistory.eventTypes, limit: 400, sinceSeq: conversationCursor).events) ?? bundledMsgs
                 } else {
-                    conversation = combinedIncoming.filter { OrbConversationHistory.eventTypes.contains($0.eventType) }
+                    conversation = bundledMsgs
                 }
                 queueResp = openBundle.queue
             } else {

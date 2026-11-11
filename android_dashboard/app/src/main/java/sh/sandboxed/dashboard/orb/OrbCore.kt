@@ -2680,7 +2680,7 @@ class OrbCore private constructor(context: Context) {
         sinceSeq: Long? = null,
         limit: Int = 150,
         maxPayload: Int = OrbReadCache.RESULT_KEEP_CHARS,
-        spineLimit: Int = 80
+        spineLimit: Int = 400
     ): OrbDict? {
         val base = _baseURL.value.trim().trimEnd('/')
         if (base.isEmpty()) return null
@@ -2725,6 +2725,10 @@ class OrbCore private constructor(context: Context) {
                 if (account != OrbDisk.currentScope()) return@launch
                 val spineRows = OrbJSON.dictList(bundle["spine"]).map { OrbRow(it) }
                 val tailRows = OrbJSON.dictList(bundle["events"]).map { OrbRow(it) }
+                val spineHasMore = bundle["spine_has_more"] as? Boolean
+                val isColdSpineTruncated =
+                    OrbJSON.bool(bundle, "has_more") == true &&
+                        (spineHasMore == true || (spineHasMore == null && spineRows.size >= 80))
                 val combined = OrbLiveEventReducer.mergeMissionEvents(emptyList(), spineRows + tailRows)
                 if (combined.isNotEmpty()) {
                     OrbReadCache.saveRows("mission_events_$missionId", combined)
@@ -2732,7 +2736,7 @@ class OrbCore private constructor(context: Context) {
                 val histCandidates = (spineRows + tailRows).filter {
                     (it.str("event_type", "type") ?: "") in OrbConversationHistory.eventTypes
                 }
-                if (histCandidates.isNotEmpty()) {
+                if (!isColdSpineTruncated && histCandidates.isNotEmpty()) {
                     val mergedHist = OrbConversationHistory.merge(emptyList(), histCandidates)
                     if (mergedHist.isNotEmpty()) {
                         OrbReadCache.saveRows("mission_msgs_$missionId", mergedHist)
