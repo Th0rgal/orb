@@ -276,7 +276,10 @@ function recordFetchTelemetry(
     } else {
       recordTransportRecovery(upstreamOrigin);
     }
-  } else if (res.status >= 500 && !isWorkerNodeProxyPath(path)) {
+  } else if (
+    res.status >= 500 &&
+    !([502, 503, 504].includes(res.status) && isWorkerNodeProxyPath(path))
+  ) {
     recordTransportFailure();
   }
   return res;
@@ -325,7 +328,7 @@ export function transportFetch(
         return fetch(`${chosen}${path}`, bridgeInit).then(
           (res) => recordFetchTelemetry(res, startedMs, undefined, init?.method, path),
           (err) => {
-            if (!isAbortError(err) && !isWorkerNodeProxyPath(path)) recordTransportFailure();
+            if (!isAbortError(err)) recordTransportFailure();
             throw err;
           },
         );
@@ -336,7 +339,7 @@ export function transportFetch(
         return fetch(`${chosen}${path}`, bridgeInit).then(
           (res) => recordFetchTelemetry(res, startedMs, undefined, init?.method, path),
           (err) => {
-            if (!isAbortError(err) && !isWorkerNodeProxyPath(path)) recordTransportFailure();
+            if (!isAbortError(err)) recordTransportFailure();
             throw err;
           },
         );
@@ -391,12 +394,13 @@ async function transportFetchDirect(target: string, path: string, init?: Request
     const startedMs = performance.now();
     try {
       const res = await fetch(`${base}${path}`, init);
+      if ([502, 503, 504].includes(res.status) && isWorkerNodeProxyPath(path)) {
+        return res;
+      }
       if ([502, 503, 504, 522, 524].includes(res.status)) {
-        if (!isWorkerNodeProxyPath(path)) {
-          endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
-          recordTransportFailure();
-          if (safeMethod && !isLast) continue;
-        }
+        endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
+        recordTransportFailure();
+        if (safeMethod && !isLast) continue;
       } else if (res.status < 500) {
         endpointCooldownUntil.delete(base);
         recordFetchTelemetry(res, startedMs, base, method, path);
@@ -404,11 +408,11 @@ async function transportFetchDirect(target: string, path: string, init?: Request
       return res;
     } catch (err) {
       lastError = err;
-      if (!isAbortError(err) && !isWorkerNodeProxyPath(path)) {
+      if (!isAbortError(err)) {
         endpointCooldownUntil.set(base, Date.now() + ENDPOINT_COOLDOWN_MS);
         recordTransportFailure();
       }
-      if (isAbortError(err) || isWorkerNodeProxyPath(path) || !safeMethod || isLast) throw err;
+      if (isAbortError(err) || !safeMethod || isLast) throw err;
     }
   }
   throw lastError ?? new TypeError("Load failed");

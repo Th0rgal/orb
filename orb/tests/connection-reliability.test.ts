@@ -907,5 +907,29 @@ describe("connection reliability transport & prefetch bounds", () => {
     const coreRes = await transportFetch("/api/providers/antigravity-models?node_id=core");
     expect(coreRes.status).toBe(502);
     expect(networkHealth()).toBe("reconnecting");
+
+    // Pre-response Core transport failure (DNS/TCP/TLS Load failed) on a worker-model GET
+    // still cools down the broken Core origin and fails over to a healthy Core standby.
+    resetNetworkHealth();
+    setApiUrl("https://orbcore.thomas.md");
+    const seenWorkerFailover: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        seenWorkerFailover.push(url);
+        if (url.startsWith("https://orbcore.thomas.md")) {
+          throw new TypeError("Load failed");
+        }
+        return Response.json({ models: [{ id: "gemini-2.5-pro" }] });
+      }),
+    );
+
+    const failoverRes = await transportFetch("/api/providers/antigravity-models?node_id=ashur");
+    expect(failoverRes.status).toBe(200);
+    expect(seenWorkerFailover).toEqual([
+      "https://orbcore.thomas.md/api/providers/antigravity-models?node_id=ashur",
+      "https://agent-backend.thomas.md/api/providers/antigravity-models?node_id=ashur",
+    ]);
   });
 });
