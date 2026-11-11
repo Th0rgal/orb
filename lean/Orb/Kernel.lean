@@ -4302,7 +4302,7 @@ def multiuserRbacStep
     - `0 = core_local` (Core host or `systemd-nspawn` container on Core)
     - `1 = core_colocated_node` (node colocated with Core)
     - `2 = dedicated_fleet_node` (dedicated bare-metal worker node)
-    - `3 = managed_vm` (ephemeral cloud VM: Boat, Boost, Hetzner, Vast, Scaleway, Colab)
+    - `3 = managed_vm` (ephemeral cloud VM: Boat, lean.ci, Hetzner, Vast, Scaleway, Colab)
     - `4 = client_local` (`placement:client` on the user's own desktop via `orb-locald`)
   - Returns `1` iff admitted, `0` otherwise.
 -/

@@ -202,7 +202,7 @@ function ConfigureMachineProviderDialog(p: { provider: ManagedProviderInfo; onCl
       const patch: ManagedProviderPatch = patchOverride ?? {
         ...(apiKey().trim() ? { api_key: apiKey().trim(), enabled: true } : {}),
         ...(p.provider.provider === "hetzner" || p.provider.provider === "scaleway" || p.provider.provider === "colab" ? { region: region().trim() } : {}),
-        ...(p.provider.provider === "scaleway" || p.provider.provider === "boost" ? { project_id: projectId().trim() } : {}),
+        ...(p.provider.provider === "scaleway" || p.provider.provider === "leanci" || p.provider.provider === "boost" ? { project_id: projectId().trim() } : {}),
         ...maxPatch,
       };
       const updated = await updateManagedProvider(p.provider.provider, patch);
@@ -231,8 +231,8 @@ function ConfigureMachineProviderDialog(p: { provider: ManagedProviderInfo; onCl
       <Field label="Max concurrent VMs" description="Global ceiling on simultaneous live VMs for this provider. Leave blank for unlimited.">
         <input type="text" inputmode="numeric" class="s-input" aria-label="Max concurrent VMs" placeholder="Unlimited" value={maxConcurrent()} onInput={e => setMaxConcurrent(e.currentTarget.value)} />
       </Field>
-      <Show when={p.provider.provider === "boost"}>
-        <Field label="Workspace ID" description="Optional boost.ci workspace UUID override when the API token has access to multiple workspaces.">
+      <Show when={p.provider.provider === "leanci" || p.provider.provider === "boost"}>
+        <Field label="Workspace ID" description="Optional lean.ci workspace UUID override when the API token has access to multiple workspaces.">
           <input type="text" class="s-input" aria-label="Workspace ID" placeholder="Optional" value={projectId()} onInput={e => setProjectId(e.currentTarget.value)} />
         </Field>
       </Show>

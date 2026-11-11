@@ -188,7 +188,7 @@ describe("ownership and reaping", () => {
     expect(resp.enabled).toBe(true);
     expect(resp.providers?.map(p => [p.provider, p.display_name, p.configured, isProviderEnabled(p), isProviderUsable(p), p.supports_free_stop, p.supports_snapshots])).toEqual([
       ["boat", "boat.dev", true, true, true, true, true],
-      ["boost", "boost.ci", true, true, true, false, true],
+      ["leanci", "lean.ci", true, true, true, false, true],
       ["hetzner", "Hetzner Cloud", true, true, true, false, false],
       ["vastai", "Vast.ai", false, true, false, false, false],
       ["scaleway", "Scaleway", false, false, false, false, false],
@@ -294,7 +294,7 @@ describe("cloud VM submenus, on-demand targets, and agent-spawned VM collapsing"
     expect(compactSizeSpec({ size: "large", cpu: 8, ram_gb: 16, usd_per_hour: 0.288 })).toBe("8 vCPU · 16 GB");
     expect(compactSizeSpec({ size: "a100", cpu: 12, ram_gb: 85, gpu: "A100", usd_per_hour: 0.675 })).toBe("12 vCPU · 85 GB · A100");
     expect(compactSizeSpec({ size: "cax31", cpu: 8, ram_gb: 16, arch: "arm64", usd_per_hour: 0.03 })).toBe("8 vCPU · 16 GB · arm64");
-    expect(is24hCommitmentSize({ size: "boost-8", cpu: 8, ram_gb: 24, usd_per_hour: 0.2, min_billing_hours: 24 })).toBe(true);
+    expect(is24hCommitmentSize({ size: "lean-8", cpu: 8, ram_gb: 24, usd_per_hour: 0.2, min_billing_hours: 24 })).toBe(true);
     expect(is24hCommitmentSize({ size: "large", cpu: 8, ram_gb: 16, usd_per_hour: 0.288 })).toBe(false);
   });
 

@@ -428,7 +428,7 @@ object OrbManagedMachines {
     }
 
     fun nodeProvider(labels: List<String>?): String? {
-        val known = setOf("boat", "boost", "hetzner", "vastai", "scaleway", "colab")
+        val known = setOf("boat", "leanci", "boost", "hetzner", "vastai", "scaleway", "colab")
         for (raw in labels.orEmpty()) {
             val l = raw.trim().lowercase(Locale.US)
             if (l.startsWith("provider=")) return l.removePrefix("provider=")
@@ -519,7 +519,7 @@ object OrbManagedMachines {
 
     fun providerLabel(provider: String?): String = when ((provider ?: "boat").lowercase(Locale.US)) {
         "boat" -> "boat.dev"
-        "boost", "boost.ci" -> "boost.ci"
+        "leanci", "lean.ci", "boost", "boost.ci" -> "lean.ci"
         "hetzner" -> "Hetzner"
         "vastai" -> "Vast.ai"
         "scaleway" -> "Scaleway"
@@ -531,6 +531,7 @@ object OrbManagedMachines {
 
     fun machineProviderKey(provider: String?): String {
         val key = (provider ?: "").trim().lowercase(Locale.US)
+        if (key == "boost" || key == "boost.ci" || key == "lean.ci") return "leanci"
         return key.ifEmpty { "boat" }
     }
 
@@ -555,7 +556,7 @@ object OrbManagedMachines {
             if (key !in order) order.add(key)
         }
         for (p in providers) push(p.provider)
-        for (p in listOf("boat", "boost", "hetzner", "vastai", "scaleway", "colab")) push(p)
+        for (p in listOf("boat", "leanci", "hetzner", "vastai", "scaleway", "colab")) push(p)
         for (key in buckets.keys) push(key)
         return order.mapNotNull { key ->
             val list = buckets[key]?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null

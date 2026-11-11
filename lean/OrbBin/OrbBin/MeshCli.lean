@@ -397,7 +397,7 @@ def verifyEd25519 (m : MeshManifest) : IO Bool := do
   let some pk := hexDecode? m.coordinatorPubkeyHex | return false
   let some sig := hexDecode? m.signatureHex | return false
   if pk.size != 32 || sig.size != 64 then return false
-  ed25519Verify pk m.canonicalSigningDigest sig
+  ed25519Verify pk sig m.canonicalSigningDigest
 
 private def hasUnsafeChars (s : String) : Bool :=
   s.isEmpty || s.any (fun c =>

@@ -7,7 +7,7 @@ Orb supports first-class multi-user operation on a single Core + fleet deploymen
 Every account in `users` (`missions.db`) has one of two roles:
 
 - **`admin`**: Manages user accounts (`/api/admin/users/*`), global inference providers and API keys, global cloud-compute provider keys and fleet routing, node administration, backups, and deploys. May launch missions on any target (`core`, colocated nodes, dedicated fleet nodes, managed VMs, or local desktop).
-- **`member`**: Launches and collaborates on missions using dedicated fleet nodes, ephemeral managed VMs (`boat.dev`, Hetzner, Boost, Vast.ai, Scaleway, Colab), or their own desktop (`orb-locald`), with personal enable/disable toggles over globally configured providers and an optional daily spend cap.
+- **`member`**: Launches and collaborates on missions using dedicated fleet nodes, ephemeral managed VMs (`boat.dev`, Hetzner, `lean.ci`, Vast.ai, Scaleway, Colab), or their own desktop (`orb-locald`), with personal enable/disable toggles over globally configured providers and an optional daily spend cap.
 
 Passwords are stored solely as salted `PBKDF2-HMAC-SHA256` (`210,000` iterations, 16-byte CSPRNG salt, constant-time verification). Sessions use HMAC-SHA256 signed `orb-jwt-v2` tokens:
 

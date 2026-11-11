@@ -27,7 +27,7 @@ export type PoolUsage = {
 
 export const MANAGED_PROVIDERS = [
   { id: "boat", label: "boat.dev" },
-  { id: "boost", label: "boost.ci" },
+  { id: "leanci", label: "lean.ci" },
   { id: "hetzner", label: "Hetzner" },
   { id: "vastai", label: "Vast.ai" },
   { id: "scaleway", label: "Scaleway" },
@@ -187,8 +187,10 @@ export const formatDurationEta = (secs: number): string => {
   return remHours > 0 ? `~${days}d ${remHours}h` : `~${days}d`;
 };
 
-export const managedProviderLabel = (id: string) =>
-  MANAGED_PROVIDERS.find(p => p.id === id)?.label ?? id;
+export const managedProviderLabel = (id: string) => {
+  if (id === "boost" || id === "boost.ci" || id === "lean.ci") return "lean.ci";
+  return MANAGED_PROVIDERS.find(p => p.id === id)?.label ?? id;
+};
 
 /** Parse the amount field: a positive number of dollars, or an error. */
 export function parseAmount(raw: string): { value: number } | { error: string } {
@@ -350,7 +352,7 @@ export function parseBandwidthLimits(
 export function normalizeVmLimits(limits: VmConcurrencyLimits | null | undefined): string {
   if (!limits) return "null";
   const provEntries = MANAGED_PROVIDERS
-    .map(p => [p.id, limits.provider_max_concurrent?.[p.id]] as const)
+    .map(p => [p.id, limits.provider_max_concurrent?.[p.id] ?? (p.id === "leanci" ? limits.provider_max_concurrent?.boost : undefined)] as const)
     .filter(([, v]) => v != null);
   return JSON.stringify({ m: limits.max_concurrent ?? null, p: provEntries });
 }
@@ -622,8 +624,9 @@ export function providerLimitsSummary(limits: VmConcurrencyLimits | null | undef
   const map = limits?.provider_max_concurrent;
   if (!map) return "";
   return MANAGED_PROVIDERS
-    .filter(p => map[p.id] != null)
-    .map(p => `${p.label}: ${map[p.id] === 0 ? "off" : map[p.id]}`)
+    .map(p => [p, map[p.id] ?? (p.id === "leanci" ? map.boost : undefined)] as const)
+    .filter(([, v]) => v != null)
+    .map(([p, v]) => `${p.label}: ${v === 0 ? "off" : v}`)
     .join(" · ");
 }
 

@@ -3608,7 +3608,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
   -- Managed Compute Fleet (`/api/managed-machines*`, `/api/remote-nodes`)
   if let some params := matchRoutePattern? "/api/managed-machines/providers/:provider/preference" rawTarget then
     if req.method == "PUT" || req.method == "PATCH" then
-      let prov := ((params.find? (fun p => p.1 == "provider")).map Prod.snd |>.getD "").trimAscii.toString.toLower
+      let prov := canonicalizeProvider ((params.find? (fun p => p.1 == "provider")).map Prod.snd |>.getD "")
       if !isKnownProvider prov then
         return .ok (mkJson 400 "{\"error\":\"unknown_provider\"}")
       let some mst := st.managedStore?
@@ -3627,7 +3627,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     if req.method == "PUT" || req.method == "PATCH" || req.method == "DELETE" then
       if let some (cCode, cBody) := requireAdminPrincipal caller then
         return .ok (mkJson cCode cBody)
-      let prov := ((params.find? (fun p => p.1 == "provider")).map Prod.snd |>.getD "").trimAscii.toString.toLower
+      let prov := canonicalizeProvider ((params.find? (fun p => p.1 == "provider")).map Prod.snd |>.getD "")
       if !isKnownProvider prov then
         return .ok (mkJson 400 "{\"error\":\"unknown_provider\"}")
       let some mst := st.managedStore?
@@ -3700,18 +3700,19 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
       let rawProv := ((jv.fieldStr? "provider").getD "boat").trimAscii.toString.toLower
+      let canonProv := canonicalizeProvider rawProv
       let uPrefs ← if caller.userId.isEmpty then pure #[] else getUserManagedPrefs mst caller.userId
       let prov ←
         if rawProv == "auto" then
           match knownProviders.find? (fun p => isUserManagedProviderEnabled uPrefs p) with
           | some p => pure p
           | none => return .ok (mkJson 403 "{\"error\":\"provider_disabled_for_user\",\"message\":\"No cloud providers are enabled in your preferences.\"}")
-        else if !isKnownProvider rawProv then
+        else if !isKnownProvider canonProv then
           return .ok (mkJson 400 "{\"error\":\"unknown_provider\"}")
-        else if !isUserManagedProviderEnabled uPrefs rawProv then
+        else if !isUserManagedProviderEnabled uPrefs canonProv then
           return .ok (mkJson 403 "{\"error\":\"provider_disabled_for_user\",\"message\":\"This cloud provider is disabled in your preferences.\"}")
         else
-          pure rawProv
+          pure canonProv
       let mf0 ← st.managedRef.get
       let live ← match ← loadManagedFleet mst mf0.enabled mf0.boatEnabled mf0.dailyCapCents mf0.spentTodayCents mf0.maxConcurrent with
         | .ok l => pure l

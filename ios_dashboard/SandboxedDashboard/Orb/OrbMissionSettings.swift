@@ -35,7 +35,7 @@ struct OrbMissionBudget: Equatable {
 
     static let providers: [(id: String, label: String)] = [
         ("boat", "boat.dev"),
-        ("boost", "boost.ci"),
+        ("leanci", "lean.ci"),
         ("hetzner", "Hetzner"),
         ("vastai", "Vast.ai"),
         ("scaleway", "Scaleway"),

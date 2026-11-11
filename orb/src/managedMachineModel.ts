@@ -339,7 +339,7 @@ export const sizeSpec = (s: Pick<ManagedSize, "cpu" | "ram_gb"> & { disk_gb?: nu
 export const providerLabel = (provider?: string | null): string => {
   const key = (provider ?? "boat").toLowerCase();
   if (key === "boat") return "boat.dev";
-  if (key === "boost" || key === "boost.ci") return "boost.ci";
+  if (key === "leanci" || key === "lean.ci" || key === "boost" || key === "boost.ci") return "lean.ci";
   if (key === "hetzner") return "Hetzner";
   if (key === "vastai") return "Vast.ai";
   if (key === "scaleway") return "Scaleway";
@@ -357,6 +357,7 @@ export interface ManagedProviderGroup<M = ManagedMachine> {
 
 export const machineProviderKey = (provider?: string | null): string => {
   const key = (provider ?? "").trim().toLowerCase();
+  if (key === "boost" || key === "boost.ci" || key === "lean.ci") return "leanci";
   return key || "boat";
 };
 
@@ -387,7 +388,7 @@ export function groupMachinesByProvider<M extends Pick<ManagedMachine, "provider
     if (!order.includes(key)) order.push(key);
   };
   for (const p of providers ?? []) push(p.provider);
-  for (const p of ["boat", "boost", "hetzner", "vastai", "scaleway", "colab"]) push(p);
+  for (const p of ["boat", "leanci", "hetzner", "vastai", "scaleway", "colab"]) push(p);
   for (const key of buckets.keys()) push(key);
   return order
     .filter(key => (buckets.get(key)?.length ?? 0) > 0)

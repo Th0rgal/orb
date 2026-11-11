@@ -942,7 +942,7 @@ private fun ManagedConfigureProviderDialog(
                     if (provider.provider == "hetzner" || provider.provider == "scaleway" || provider.provider == "colab") {
                         put("region", region.trim())
                     }
-                    if (provider.provider == "scaleway" || provider.provider == "boost") {
+                    if (provider.provider == "scaleway" || provider.provider == "leanci" || provider.provider == "boost") {
                         put("project_id", projectId.trim())
                     }
                     if (includeMax) {
@@ -992,7 +992,7 @@ private fun ManagedConfigureProviderDialog(
                         onValueChange = { region = it }
                     )
                 }
-                if (provider.provider == "boost") {
+                if (provider.provider == "leanci" || provider.provider == "boost") {
                     OrbMiniField(
                         label = "Workspace ID (optional)",
                         value = projectId,

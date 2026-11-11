@@ -1442,6 +1442,10 @@ def runAllTests : IO UInt32 := do
   let wtRemovedRes ← removeMissionWorktree wtCreated.worktreePath true
   assertTrue "removeMissionWorktree cleans up sibling worktree" wtRemovedRes.toOption.isSome
 
+  let coordSeed ← OrbBin.MeshCli.generateCsprngSeed32
+  let initFleetRes ← OrbBin.MeshCli.initPalomaFleet 1700000000 coordSeed
+  assertTrue "initPalomaFleet signs and verifies Ed25519 manifest" initFleetRes.toOption.isSome
+
   try IO.FS.removeDirAll tmpDir catch _ => pure ()
   IO.println "=== ALL ORB-BIN WAVE 1 SELF-TESTS PASSED ==="
   return 0

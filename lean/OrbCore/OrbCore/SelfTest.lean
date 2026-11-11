@@ -1861,17 +1861,20 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
     return 1
   let adapterOk :=
     match observeProviderPayload "boat" "m1" 200 (.obj #[("state", .str "running"), ("spent_cents", .nat 12)]),
-          observeProviderPayload "boost" "m2" 200 (.obj #[("status", .str "halted")]),
+          observeProviderPayload "leanci" "m2" 200 (.obj #[("status", .str "halted")]),
+          observeProviderPayload "boost" "m2b" 200 (.obj #[("status", .str "reaped")]),
           observeProviderPayload "hetzner" "m3" 200 (.obj #[("status", .str "off")]),
           observeProviderPayload "vastai" "m4" 200 (.obj #[("state", .str "exited")]),
           observeProviderPayload "scaleway" "m5" 200 (.obj #[("state", .str "stopped_in_place")]),
           observeProviderPayload "colab" "m6" 404 (.obj #[]) with
-    | .ok o1, .ok o2, .ok o3, .ok o4, .ok o5, .ok o6 =>
+    | .ok o1, .ok o2, .ok o2b, .ok o3, .ok o4, .ok o5, .ok o6 =>
       o1.observedStatus == "ready" && !o1.orphaned && o1.spentCents == 12 &&
-      o2.observedStatus == "stopped" && o3.observedStatus == "stopped" &&
+      o2.provider == "leanci" && o2.observedStatus == "stopped" &&
+      o2b.provider == "leanci" && o2b.observedStatus == "destroyed" && o2b.orphaned &&
+      o3.observedStatus == "stopped" &&
       o4.observedStatus == "stopped" && o5.observedStatus == "stopped" &&
       o6.orphaned && (observeProviderPayload "aws" "m7" 200 (.obj #[])).isOk == false
-    | _, _, _, _, _, _ => false
+    | _, _, _, _, _, _, _ => false
   if !adapterOk then
     closeManagedComputeStore mst
     IO.eprintln "[orb-core-test] FAIL: pure ProviderObservation adapter check failed"
@@ -4410,7 +4413,7 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (alProxy3Body.splitOn "daily_spend_cap_exceeded").length < 2 then
     return (← fail s!"per-user proxy routing or spend cap failed: pref={alPrefSt} mpt={mptSt} p1={alProxy1St}:{alProxy1Body} adm={admProxy1St}:{admProxy1Body} p2={alProxy2St} p3={alProxy3St}:{alProxy3Body}")
 
-  -- Managed VMs: `alice` hitting daily spend cap gets `429` on `POST /api/managed-machines`, while `bob` (`no cap`, disables `boat`) spawns an auto VM (`boost`) owned by `bob`, invisible to `admin` (`404` on `DELETE`)!
+  -- Managed VMs: `alice` hitting daily spend cap gets `429` on `POST /api/managed-machines`, while `bob` (`no cap`, disables `boat`) spawns an auto VM (`leanci`) owned by `bob`, invisible to `admin` (`404` on `DELETE`)!
   let (alVmCapSt, _, _) ← sendReq "POST" "/api/managed-machines" aliceTok "{\"provider\":\"boat\",\"name\":\"alice-vm\"}"
   let (bobPrefBoatSt, _, _) ← sendReq "PUT" "/api/managed-machines/providers/boat/preference" bobTok "{\"enabled\":false}"
   let (bobVmAutoSt, bobVmAutoBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\"}"
@@ -4419,7 +4422,7 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let (admDelBobVmSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{bobVmId}" adminTok ""
   let (bobDelBobVmSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{bobVmId}" bobTok ""
   if alVmCapSt != 429 || bobPrefBoatSt != 200 || bobVmAutoSt != 201 || bobVmId.isEmpty ||
-     (bobVmAutoBody.splitOn "\"provider\":\"boost\"").length < 2 ||
+     (bobVmAutoBody.splitOn "\"provider\":\"leanci\"").length < 2 ||
      (admVmsBody.splitOn bobVmId).length != 1 ||
      admDelBobVmSt != 404 || bobDelBobVmSt != 200 then
     return (← fail s!"managed VM multi-user isolation/prefs/cap failed: alCap={alVmCapSt} bobVm={bobVmAutoSt}:{bobVmAutoBody} admVms={admVmsBody} admDel={admDelBobVmSt} bobDel={bobDelBobVmSt}")

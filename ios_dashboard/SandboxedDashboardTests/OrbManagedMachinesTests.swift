@@ -72,7 +72,7 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertFalse(OrbManaged.isUnsupported(OrbHTTPError(status: 500, detail: "")))
         XCTAssertEqual(OrbManaged.message(OrbHTTPError(status: 402, detail: #"{"error":"budget_exceeded","message":"cap $20"}"#)), "Daily budget reached: cap $20")
         XCTAssertEqual(OrbManaged.message(OrbHTTPError(status: 409, detail: #"{"error":"provider_disabled","message":"Hetzner Cloud is disabled"}"#)), "Provider disabled: Hetzner Cloud is disabled")
-        XCTAssertEqual(OrbManaged.message(OrbHTTPError(status: 503, detail: #"{"error":"provider_at_capacity","message":"boost.ci is saturated"}"#)), "Provider at capacity: boost.ci is saturated")
+        XCTAssertEqual(OrbManaged.message(OrbHTTPError(status: 503, detail: #"{"error":"provider_at_capacity","message":"lean.ci is saturated"}"#)), "Provider at capacity: lean.ci is saturated")
         XCTAssertEqual(OrbManaged.message(OrbHTTPError(status: 500, detail: #"{"error":"x","message":"boom"}"#)), "boom")
     }
 
@@ -175,7 +175,8 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertTrue(OrbManaged.isStopped(m))
         XCTAssertTrue(OrbManaged.canResume(m, busy: false))
         XCTAssertFalse(OrbManaged.canResume(m, busy: true))
-        XCTAssertEqual(OrbManaged.providerLabel("boost"), "boost.ci")
+        XCTAssertEqual(OrbManaged.providerLabel("leanci"), "lean.ci")
+        XCTAssertEqual(OrbManaged.providerLabel("boost"), "lean.ci")
         XCTAssertEqual(OrbManaged.providerLabel("hetzner"), "Hetzner")
         XCTAssertEqual(OrbManaged.providerLabel("vastai"), "Vast.ai")
         XCTAssertEqual(OrbManaged.providerLabel("scaleway"), "Scaleway")
@@ -190,8 +191,8 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertTrue(r.enabled)
         XCTAssertEqual(r.provider, "boat")
         let providers = try XCTUnwrap(r.providers)
-        XCTAssertEqual(providers.map(\.provider), ["boat", "boost", "hetzner", "vastai", "scaleway", "colab"])
-        XCTAssertEqual(providers.map(\.display_name), ["boat.dev", "boost.ci", "Hetzner Cloud", "Vast.ai", "Scaleway", "Google Colab"])
+        XCTAssertEqual(providers.map(\.provider), ["boat", "leanci", "hetzner", "vastai", "scaleway", "colab"])
+        XCTAssertEqual(providers.map(\.display_name), ["boat.dev", "lean.ci", "Hetzner Cloud", "Vast.ai", "Scaleway", "Google Colab"])
         XCTAssertEqual(providers.map(\.configured), [true, true, true, false, false, false])
         XCTAssertEqual(providers.map(OrbManaged.isProviderEnabled), [true, true, true, true, false, true])
         XCTAssertEqual(providers.map(OrbManaged.isProviderUsable), [true, true, true, false, false, false])
@@ -210,7 +211,7 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertEqual(OrbManaged.sectionTitle(providers: providers, machines: r.machines), "Managed cloud")
         XCTAssertEqual(providers.map(\.supports_free_stop), [true, false, false, false, false, false])
         XCTAssertEqual(providers.map(\.supports_snapshots), [true, true, false, false, false, false])
-        XCTAssertEqual(providers[1].sizes.first(where: { $0.size == "boost-32vcpu-96gb" })?.ram_gb, 96)
+        XCTAssertEqual(providers[1].sizes.first(where: { $0.size == "lean-32vcpu-96gb" })?.ram_gb, 96)
         XCTAssertEqual(providers[2].sizes.first(where: { $0.size == "cax31" })?.arch, "arm64")
         XCTAssertEqual(providers[3].sizes.first(where: { $0.size == "rtx4090" })?.gpu, "RTX 4090")
         XCTAssertEqual(providers[5].sizes.first(where: { $0.size == "a100" })?.usd_per_hour, 0.675)
@@ -270,7 +271,7 @@ final class OrbManagedMachinesTests: XCTestCase {
 
         let data = try Data(contentsOf: OrbSpec.url("fixtures/managed-machines-response.json"))
         let r = try OrbManaged.decode(data)
-        XCTAssertEqual(OrbManaged.usableProviders(r).map(\.provider), ["boat", "boost", "hetzner"])
+        XCTAssertEqual(OrbManaged.usableProviders(r).map(\.provider), ["boat", "leanci", "hetzner"])
 
         let missionNode: OrbJSON = .object(["id": .string("managed-m1"), "labels": .array([.string("managed")]), "owner_kind": .string("mission")])
         let userNode: OrbJSON = .object(["id": .string("managed-u1"), "labels": .array([.string("managed")]), "owner_kind": .string("user")])
