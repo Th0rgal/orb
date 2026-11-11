@@ -2128,10 +2128,12 @@ export function recordMissionSyncCursor(rows: readonly Mission[], fullSync: bool
 export async function listMissions(limit = 200, options?: { updatedSince?: string }): Promise<Mission[]> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const isDelta = Boolean(options?.updatedSince);
-  const params = new URLSearchParams({ limit: String(limit) });
+  const params = new URLSearchParams();
   if (options?.updatedSince) {
     params.set("updated_since", options.updatedSince);
     params.set("all", "true");
+  } else {
+    params.set("limit", String(limit));
   }
   const remotePromise = api<Mission[]>(`/api/control/missions?${params}`).then(rows => includeAncestors(rows));
   remotePromise.catch(() => {});

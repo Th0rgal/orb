@@ -1650,7 +1650,7 @@ final class OrbCore {
         }
 
         let cursor = missionDeltaCursor ?? ""
-        let delta = try await call("\(baseQuery)&updated_since=\(Self.escape(cursor))")
+        let delta = try await call("/api/control/missions?all=true&updated_since=\(Self.escape(cursor))")
         missionDeltaPolls += 1
         if !delta.items.isEmpty {
             var byId: [String: OrbJSON] = [:]
@@ -1662,7 +1662,12 @@ final class OrbCore {
                 let id = updated["id"].text
                 if !id.isEmpty {
                     _ = OrbRow(updated)
-                    byId[id] = updated
+                    let st = updated["status"].text
+                    if !includeAll && (st == "archived" || st == "acknowledged") {
+                        byId.removeValue(forKey: id)
+                    } else {
+                        byId[id] = updated
+                    }
                 }
             }
             let merged = byId.values.sorted { a, b in

@@ -2385,7 +2385,7 @@ class OrbCore private constructor(context: Context) {
         }
 
         val cursor = missionDeltaCursor.orEmpty()
-        val delta = fetchRows("/api/control/missions?limit=$limit&all=true&updated_since=${encodeComponent(cursor)}", null)
+        val delta = fetchRows("/api/control/missions?all=true&updated_since=${encodeComponent(cursor)}", null)
         missionDeltaPolls += 1
         if (delta.isNotEmpty()) {
             val byId = LinkedHashMap<String, OrbRow>()

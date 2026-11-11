@@ -182,12 +182,14 @@ describe("connection reliability transport & prefetch bounds", () => {
       const url = String(input);
       if (calls === 1) {
         expect(url).not.toContain("updated_since=");
+        expect(url).toContain("limit=200");
         return Response.json([
           { id: "m-1", title: "One", status: "active", updated_at: "2026-11-03T07:00:10.000Z" },
         ]);
       }
       expect(url).toContain("updated_since=2026-11-03T07%3A00%3A08.000Z");
       expect(url).toContain("all=true");
+      expect(url).not.toContain("limit=");
       return Response.json([]);
     });
     vi.stubGlobal("fetch", fetchMock);

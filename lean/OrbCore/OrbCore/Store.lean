@@ -1768,14 +1768,16 @@ def listMissionsJson
         params := params.push cleanProj
         let p1 := params.size
         conds := conds.push s!"m.project = ?{p1}"
+  let mut hasUpdatedSince := false
   if let some rawSince := updatedSince? then
     let cleanSince := rawSince.trimAscii.toString
     if !cleanSince.isEmpty then
+      hasUpdatedSince := true
       params := params.push cleanSince
       let p := params.size
       conds := conds.push (
         s!"(CASE WHEN m.updated_at != '' AND NOT (m.updated_at GLOB '*[^0-9]*') THEN CAST(m.updated_at AS INTEGER) ELSE COALESCE(CAST(strftime('%s', m.updated_at) AS INTEGER), 0) END) >= " ++
-        s!"(CASE WHEN ?{p} != '' AND NOT (?{p} GLOB '*[^0-9]*') THEN CAST(?{p} AS INTEGER) ELSE COALESCE(CAST(strftime('%s', ?{p}) AS INTEGER), 0) END)"
+        s!"(CASE WHEN ?{p} != '' AND NOT (?{p} GLOB '*[^0-9]*') THEN CAST(?{p} AS INTEGER) ELSE COALESCE(CAST(strftime('%s', ?{p}) AS INTEGER), 9223372036854775807) END)"
       )
   if !statusesFilter.isEmpty then
     let mut phs : Array String := Array.mkEmpty statusesFilter.size
@@ -1789,13 +1791,17 @@ def listMissionsJson
     if conds.isEmpty then ""
     else "WHERE " ++ String.intercalate " AND " conds.toList ++ " "
   let mut tailClause := "ORDER BY m.updated_at DESC, m.id ASC"
-  if let some lim := limit? then
-    let clampedLim := max 1 (min 1000 lim)
-    params := params.push s!"{clampedLim}"
-    tailClause := tailClause ++ s!" LIMIT ?{params.size}"
-    if offset > 0 then
-      params := params.push s!"{offset}"
-      tailClause := tailClause ++ s!" OFFSET ?{params.size}"
+  -- Preserve complete delta delivery when `updated_since` is set so watermark-based
+  -- callers (including already-deployed clients passing `limit=`) never drop older
+  -- changes before advancing their sync cursor.
+  if !hasUpdatedSince then
+    if let some lim := limit? then
+      let clampedLim := max 1 (min 1000 lim)
+      params := params.push s!"{clampedLim}"
+      tailClause := tailClause ++ s!" LIMIT ?{params.size}"
+      if offset > 0 then
+        params := params.push s!"{offset}"
+        tailClause := tailClause ++ s!" OFFSET ?{params.size}"
   tailClause := tailClause ++ ";"
   let sql :=
     "SELECT m.id,m.title,m.status,m.backend,COALESCE(m.model_override,'') AS model_override," ++
