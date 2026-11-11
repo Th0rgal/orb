@@ -882,6 +882,7 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         let tokLit = Self.jsonStringLiteral(token)
         return """
         (() => {
+          if (document.documentElement) document.documentElement.dataset.platform = "macos";
           const _fetch = window.fetch.bind(window);
           const _jsonStringify = JSON.stringify;
           const _postNative = window.webkit?.messageHandlers?.orbNative
