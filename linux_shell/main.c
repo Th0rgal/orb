@@ -48,7 +48,7 @@ static int is_confined_shell_uri(const char *u) {
 static char *build_init_script(unsigned port, const char *token) {
     char *tok_lit = json_escape_string(token); if (!tok_lit) return NULL;
     static const char tmpl[] =
-        "(() => { const _fetch = window.fetch.bind(window), _jsonStringify = JSON.stringify, _btoa = window.btoa.bind(window); const ORB_LOCALD_URL = \"http://127.0.0.1:%u/__orb_rpc\", ORB_EVENTS_URL = \"http://127.0.0.1:%u/__orb_events\", ORB_TOKEN = %s;\n"
+        "(() => { if (document.documentElement) document.documentElement.dataset.platform = 'linux'; const _fetch = window.fetch.bind(window), _jsonStringify = JSON.stringify, _btoa = window.btoa.bind(window); const ORB_LOCALD_URL = \"http://127.0.0.1:%u/__orb_rpc\", ORB_EVENTS_URL = \"http://127.0.0.1:%u/__orb_events\", ORB_TOKEN = %s;\n"
         "  class Channel { constructor() { this.onmessage = () => {}; } } const listeners = new Map(), channels = new Map(); let streamCtrl = null, ps = 10000;\n"
         "  const emit = (name, payload) => { const s = listeners.get(name); if (s) for (const h of Array.from(s)) { try { h({ event: name, payload }); } catch {} } }; const dispatch = (ev) => { if (ev && typeof ev === 'object') { if (typeof ev.event === 'string') emit(ev.event, ev.payload); else if (typeof ev.token === 'number') channels.get(ev.token)?.onmessage(ev.payload); } };\n"
         "  const b64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return _btoa(s); }; window.__ORB_EMIT__ = emit;\n"
@@ -107,7 +107,7 @@ int main(int argc, char **argv) {
     if (!token || strlen(token) < 32 || strcmp(token, "orb-locald-default-token") == 0) { if (gen_csprng_hex(eph_tok) != 0) return 1; token = eph_tok; }
     if (!(init_js = build_init_script(port, token))) return 1;
     if (argc > 1 && strcmp(argv[1], "--self-test") == 0) {
-        int ok = strstr(init_js, "__ORB_DESKTOP__") && strstr(init_js, "__ORB_EMIT__") && strstr(init_js, "__ORB_PINCH__") && strstr(init_js, "/__orb_events") && !strstr(init_js, "setInterval") && strstr(init_js, "const _fetch = window.fetch.bind(window)") && is_confined_shell_uri("orb://localhost/") && is_confined_shell_uri("tauri://localhost/") && !is_confined_shell_uri("orb://evil.example/") && is_confined_shell_uri("http://127.0.0.1:1430") && is_confined_shell_uri("http://localhost/") && !is_confined_shell_uri("http://127.0.0.1:80@evil.com/") && !is_confined_shell_uri("https://evil.example");
+        int ok = strstr(init_js, "__ORB_DESKTOP__") && strstr(init_js, "dataset.platform = 'linux'") && strstr(init_js, "__ORB_EMIT__") && strstr(init_js, "__ORB_PINCH__") && strstr(init_js, "/__orb_events") && !strstr(init_js, "setInterval") && strstr(init_js, "const _fetch = window.fetch.bind(window)") && is_confined_shell_uri("orb://localhost/") && is_confined_shell_uri("tauri://localhost/") && !is_confined_shell_uri("orb://evil.example/") && is_confined_shell_uri("http://127.0.0.1:1430") && is_confined_shell_uri("http://localhost/") && !is_confined_shell_uri("http://127.0.0.1:80@evil.com/") && !is_confined_shell_uri("https://evil.example");
         return free(init_js), ok ? (printf("orb-linux-shell self-test: ok\n"), 0) : 1;
     }
     pid_t parent_pid = getpid(), locald_pid = -1; const char *locald_bin = getenv("ORB_LOCALD_BIN");
@@ -119,7 +119,7 @@ int main(int argc, char **argv) {
         envp[n] = NULL; execle(locald_bin, locald_bin, (char *)NULL, envp); _exit(127);
     }
 #if defined(ORB_HAS_WEBKITGTK)
-    static char dist[PATH_MAX]; const char *dist_env = getenv("ORB_DIST_DIR"); if (!dist_env || !*dist_env || !realpath(dist_env, dist)) dist[0] = '\0';
+    static char dist[PATH_MAX]; const char *dist_env = getenv("ORB_DIST_DIR"); if (!dist_env || !*dist_env) dist_env = getenv("ORB_UI_ROOT"); if (!dist_env || !*dist_env || !realpath(dist_env, dist)) dist[0] = '\0';
     g_set_prgname("orb-desktop"); g_setenv("GTK_USE_PORTAL", "1", FALSE); gtk_init(&argc, &argv);
     GtkSettings *gs = gtk_settings_get_default(); gint xft_dpi = -1; if (gs && (g_object_get(gs, "gtk-xft-dpi", &xft_dpi, NULL), xft_dpi <= 0)) g_object_set(gs, "gtk-xft-dpi", 96 * 1024, NULL);
     GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL); GdkScreen *scr = gtk_widget_get_screen(win);

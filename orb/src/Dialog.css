@@ -58,7 +58,7 @@
 .dlg-back-fullscreen { padding: 0; }
 .dlg-fullscreen { width:100vw; height:100dvh; max-width:none; border:0; border-radius:0; }
 /* The full-window dialog sits under the macOS traffic lights: start the title after them, on their row. */
-.dlg-fullscreen > .dlg-head { min-height:var(--tb-h, 40px); align-items:center; padding:6px 12px 6px 84px; }
+.dlg-fullscreen > .dlg-head { min-height:var(--tb-h, 40px); align-items:center; padding:6px 12px 6px calc(14px + var(--tb-traffic-margin, 0px)); }
 .dlg-fullscreen > .dlg-head h3 { margin:0; min-width:0; flex:1; font-weight:600; color:var(--fg-strong); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; overflow-wrap:normal; }
 .dlg-lightbox .dlg-body { flex:1; overflow:hidden; }
 .lightbox-stage { position:relative; flex:1; min-height:0; display:flex; align-items:center; justify-content:center; }

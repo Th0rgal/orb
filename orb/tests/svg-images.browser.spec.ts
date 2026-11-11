@@ -41,9 +41,14 @@ test("workspace SVG images render as <img> and a hostile SVG neither runs nor fe
  expect(await page.locator('main script, main foreignObject, main iframe, main image').count()).toBe(0);
  await hostile.click();await expect(page.getByRole('dialog',{name:'Hostile'})).toBeVisible();
  await expect(page.locator('.lightbox-stage img')).toBeVisible();
- // The title starts past the macOS traffic lights (≈ 70px) on their row, and keeps a tooltip.
+ // The title is flush-left on Linux/non-macOS (≈ 14px) and starts past the macOS traffic lights (≈ 84px) on macOS.
  const title=page.locator('.dlg-lightbox .dlg-head h3');
+ await page.evaluate(()=>{document.documentElement.dataset.platform='linux';});
+ expect((await title.boundingBox())!.x).toBeGreaterThanOrEqual(14);
+ expect((await title.boundingBox())!.x).toBeLessThan(28);
+ await page.evaluate(()=>{document.documentElement.dataset.platform='macos';});
  expect((await title.boundingBox())!.x).toBeGreaterThanOrEqual(80);
+ await page.evaluate(()=>{delete document.documentElement.dataset.platform;});
  expect((await title.boundingBox())!.y).toBeLessThan(20);
  await expect(title).toHaveAttribute('title','Hostile');
  // The lightbox zooms like the Files image viewer.

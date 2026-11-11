@@ -72,9 +72,14 @@
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", sans-serif;
   --mono: "SF Mono", ui-monospace, Menlo, Monaco, monospace;
   --tb-h: 35px;
+  --tb-traffic-left: 8px;
+  --tb-traffic-margin: 0px;
+  --col: 748px;
+}
+
+:root[data-platform="macos"] {
   --tb-traffic-left: 82px;
   --tb-traffic-margin: 70px;
-  --col: 748px;
 }
 
 :root[data-theme="light"] {
