@@ -4,7 +4,7 @@ import { copyText } from "./clipboard";
 import { describeError } from "./ErrorNotice";
 import { CheckIcon, CloseIcon, CopyIcon } from "./icons";
 import { swallow } from "./log";
-import { hasInteractiveOverlay } from "./overlayLayer";
+import { hasInteractiveOverlay, SlotActiveContext } from "./overlayLayer";
 
 /**
  * Unified floating bottom notifications across all active workspace panels
@@ -122,12 +122,7 @@ type Owner = {
 };
 const owners = new Map<string, Map<symbol, Owner>>();
 
-/**
- * Scopes `ErrorToast` and `StatusToast` ownership to the currently visible
- * keep-alive slot so hidden missions suspend their global Toaster entries
- * without losing their local error signals across mission switches.
- */
-export const SlotActiveContext = createContext<Accessor<boolean>>(() => true);
+export { SlotActiveContext };
 
 /**
  * Shows `error` as a bottom notification while it is set. Closing the

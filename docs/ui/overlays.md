@@ -18,7 +18,11 @@ No additional UI library is needed. Native iOS and Android are separate clients.
 - Delayed, non-interactive row details: `useTooltip`, backed by `Popover`.
 - Image attachments: `Lightbox`, which uses a fullscreen `Dialog`.
 
-`overlayLayer.ts` owns parent/child order, dismissal, inert backgrounds and focus scopes.
+`overlayLayer.ts` owns parent/child order, dismissal, inert backgrounds, focus scopes,
+and `SlotActiveContext` suspension (so portalled `Dialog`, `Popover`, and `Toaster`
+surfaces inside hidden keep-alive mission slots detach from `document.body` and
+release `inert`/focus traps while preserving caller confirmation and draft state
+until that slot becomes active again).
 `overlayPosition.ts` owns placement, flipping, resizing and viewport margins.
 Do not add business-specific global Escape/outside-click listeners, fixed positions,
 z-index values, or new overlay backdrops. Put new behavior in the shared primitive.

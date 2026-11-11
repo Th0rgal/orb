@@ -4,6 +4,8 @@ import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { ConfirmDialog, Dialog, Field, NameDialog } from "../src/Dialog";
 import { SchedulePicker } from "../src/SchedulePicker";
 import { hasFocusScope } from "../src/focusScope";
+import { hasOverlay, SlotActiveContext } from "../src/overlayLayer";
+import { Popover } from "../src/Popover";
 import { useTooltip } from "../src/Tooltip";
 
 function NestedSchedule() {
@@ -220,4 +222,79 @@ it("does not let an inert opener's pending tooltip consume modal Escape", () => 
   fireEvent.click(opener);
   fireEvent.keyDown(screen.getByRole("dialog"),{key:"Escape"});
   expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("suspends portalled ConfirmDialog and Popover in inactive keep-alive slots without making the active slot inert or losing pending state", () => {
+  const [slotAActive, setSlotAActive] = createSignal(false);
+  const [pendingLargeUpload, setPendingLargeUpload] = createSignal(false);
+  const [popoverOpen, setPopoverOpen] = createSignal(false);
+  const onConfirm = vi.fn();
+  const onClose = vi.fn(() => setPendingLargeUpload(false));
+  render(() => (
+    <>
+      <div hidden={!slotAActive()} data-testid="slot-a">
+        <SlotActiveContext.Provider value={slotAActive}>
+          <button>Mission A composer</button>
+          <Show when={pendingLargeUpload()}>
+            <ConfirmDialog
+              title="Upload large file?"
+              description="bundle.tar.zst is 45 MB."
+              action="Upload"
+              destructive={false}
+              onConfirm={onConfirm}
+              onClose={onClose}
+            />
+          </Show>
+          <Show when={popoverOpen()}>
+            <Popover label="Attachment options" onClose={() => setPopoverOpen(false)}>
+              <button>Attach folder</button>
+            </Popover>
+          </Show>
+        </SlotActiveContext.Provider>
+      </div>
+      <div data-testid="slot-b">
+        <input aria-label="Mission B composer" />
+      </div>
+    </>
+  ));
+
+  const slotB = screen.getByTestId("slot-b");
+  const slotBInput = screen.getByLabelText("Mission B composer");
+  slotBInput.focus();
+
+  // Ordinary uploads finish in background slot A and queue a large-upload confirmation.
+  setPendingLargeUpload(true);
+  setPopoverOpen(true);
+
+  expect(screen.queryByRole("dialog", { name: "Upload large file?" })).toBeNull();
+  expect(screen.queryByRole("dialog", { name: "Attachment options" })).toBeNull();
+  expect(hasOverlay()).toBe(false);
+  expect(hasFocusScope()).toBe(false);
+  expect(Boolean(slotB.closest("[inert]"))).toBe(false);
+  expect(document.activeElement).toBe(slotBInput);
+
+  // Pressing Escape in Mission B must not cancel Mission A's suspended confirmation.
+  fireEvent.keyDown(slotBInput, { key: "Escape" });
+  expect(onClose).not.toHaveBeenCalled();
+  expect(pendingLargeUpload()).toBe(true);
+
+  // Returning to Mission A surfaces the pending confirmation and traps focus cleanly.
+  setPopoverOpen(false);
+  setSlotAActive(true);
+  const dlg = screen.getByRole("dialog", { name: "Upload large file?" });
+  expect(dlg).toBeTruthy();
+  expect(Boolean(slotB.closest("[inert]"))).toBe(true);
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }));
+
+  // Switching away again suspends the open modal and releases Mission B's inert lock.
+  setSlotAActive(false);
+  expect(screen.queryByRole("dialog", { name: "Upload large file?" })).toBeNull();
+  expect(Boolean(slotB.closest("[inert]"))).toBe(false);
+  expect(hasOverlay()).toBe(false);
+  expect(pendingLargeUpload()).toBe(true);
+
+  // Returning once more still allows confirming the preserved upload prompt.
+  setSlotAActive(true);
+  fireEvent.click(screen.getByRole("button", { name: "Upload" }));
+  expect(onConfirm).toHaveBeenCalledTimes(1);
 });
