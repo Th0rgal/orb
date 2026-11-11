@@ -728,10 +728,30 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
     ("mission_id", .str "m-big"),
     ("tail_limit", .nat 2)
   ])
+  -- Stale sliced write (`saved_at = 4999 < 5005`) must be ignored without deleting cached events!
+  let putStaleSlicedRes ← dispatchRpcCommand stP1 "ui_cache_put_transcript" (.obj #[
+    ("scope", .str "scope-sql"),
+    ("mission_id", .str "m-big"),
+    ("saved_at", .nat 4999),
+    ("start_idx", .nat 0),
+    ("head_raw", .str "{\"fromLog\":true,\"cursor\":1,\"hasOlder\":false}"),
+    ("events_raw", .arr #[.str "{\"type\":\"assistant_message\",\"sequence\":1,\"data\":{\"content\":\"stale\"}}"])
+  ])
+  let tailAfterStale ← dispatchRpcCommand stP2 "ui_cache_get_tail" (.obj #[
+    ("scope", .str "scope-sql"),
+    ("mission_id", .str "m-big"),
+    ("tail_limit", .nat 2)
+  ])
   let draftPut ← dispatchRpcCommand stP1 "ui_draft_put" (.obj #[
     ("key", .str "m:draft-1"),
     ("updated_at", .nat 9000),
     ("raw", .str "{\"text\":\"unsent prompt\",\"images\":[]}")
+  ])
+  let draftIfAbsent ← dispatchRpcCommand stP1 "ui_draft_put" (.obj #[
+    ("key", .str "m:draft-1"),
+    ("updated_at", .nat 9999),
+    ("if_absent", .bool true),
+    ("raw", .str "{\"text\":\"stale migration\",\"images\":[]}")
   ])
   let _ ← dispatchRpcCommand stP1 "ui_cache_clear" (.obj #[])
   let tailAfterClear ← dispatchRpcCommand stP2 "ui_cache_get_tail" (.obj #[
@@ -752,13 +772,19 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
   let appendTailOk := match tailAfterAppend with
     | .ok jv => jv.fieldNat? "start_idx" == some 9 && jv.fieldNat? "total_events" == some 11 && ((jv.fieldArr? "events_raw").map Array.size) == some 2
     | _ => false
+  let staleGuardOk := match tailAfterStale with
+    | .ok jv => jv.fieldNat? "start_idx" == some 9 && jv.fieldNat? "total_events" == some 11 && jv.fieldNat? "saved_at" == some 5005
+    | _ => false
   let sqlCacheAndDraftsOk :=
     isOkNull putSlicedRes &&
     tailStartOk &&
     isOkNull putPartialRes &&
     sliceOk &&
     appendTailOk &&
+    isOkNull putStaleSlicedRes &&
+    staleGuardOk &&
     isOkNull draftPut &&
+    isOkNull draftIfAbsent &&
     isOkNull tailAfterClear &&
     isOkStr draftAfterClear "{\"text\":\"unsent prompt\",\"images\":[]}" &&
     isOkNull draftAfterDelete

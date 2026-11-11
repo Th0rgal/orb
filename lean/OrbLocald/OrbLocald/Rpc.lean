@@ -4887,6 +4887,20 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           | .error e => return .error e
         if let .error e ← OrbBin.Sqlite.sqliteExecRaw db.handle "BEGIN IMMEDIATE;" then
           return .error e
+        if let .ok mrows ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+            "SELECT saved_at FROM ui_transcript_meta WHERE record_key = ?1;" #[recordKey] then
+          if mrows.size ≥ 2 && mrows[1]!.size ≥ 1 then
+            let curTs := mrows[1]![0]!.trimAscii.toString.toNat?.getD 0
+            if curTs > savedAt then
+              let _ ← OrbBin.Sqlite.sqliteExecRaw db.handle "ROLLBACK;"
+              return .ok .null
+        if let .ok rrows ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+            "SELECT saved_at FROM ui_transcript_raw WHERE record_key = ?1;" #[recordKey] then
+          if rrows.size ≥ 2 && rrows[1]!.size ≥ 1 then
+            let curTs := rrows[1]![0]!.trimAscii.toString.toNat?.getD 0
+            if curTs > savedAt then
+              let _ ← OrbBin.Sqlite.sqliteExecRaw db.handle "ROLLBACK;"
+              return .ok .null
         let txRes : Except String Unit ← do
           let _ ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle "DELETE FROM ui_transcript_raw WHERE record_key = ?1;" #[recordKey]
           let totalEvents := startIdx + eventsRaw.size
@@ -5064,6 +5078,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let key := (args.fieldStr? "key").getD ""
     let rawVal := (args.fieldStr? "raw").getD ""
     let updatedAt := (args.fieldNat? "updated_at").getD 0
+    let ifAbsent := args.fieldBool? "if_absent" == some true
     if key.isEmpty || key.utf8ByteSize > 1024 then
       return .error "Invalid ui_draft_put key"
     if rawVal.isEmpty || rawVal.utf8ByteSize > maxUiDraftRawBytes then
@@ -5074,9 +5089,12 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         let db ← match ← ensurePrivateSqliteHandle uiDraftsDbPoolRef stateDir dbPath uiDraftsSchemaSql with
           | .ok d => pure d
           | .error e => return .error e
-        match ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
-            "INSERT INTO ui_drafts (scope_key, updated_at, value_json) VALUES (?1, ?2, ?3) ON CONFLICT(scope_key) DO UPDATE SET updated_at = excluded.updated_at, value_json = excluded.value_json;"
-            #[key, s!"{updatedAt}", rawVal] with
+        let sql :=
+          if ifAbsent then
+            "INSERT INTO ui_drafts (scope_key, updated_at, value_json) VALUES (?1, ?2, ?3) ON CONFLICT(scope_key) DO NOTHING;"
+          else
+            "INSERT INTO ui_drafts (scope_key, updated_at, value_json) VALUES (?1, ?2, ?3) ON CONFLICT(scope_key) DO UPDATE SET updated_at = excluded.updated_at, value_json = excluded.value_json WHERE excluded.updated_at >= ui_drafts.updated_at;"
+        match ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle sql #[key, s!"{updatedAt}", rawVal] with
         | .ok _ =>
           evictExcessSqliteDrafts db.handle
           return .ok .null

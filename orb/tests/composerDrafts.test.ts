@@ -89,6 +89,9 @@ it("persists drafts and side threads in orb-locald SQLite and auto-migrates Inde
           if (raw.includes("OVERSIZED_ATTACHMENT")) {
             throw new Error("Draft exceeds 16 MiB limit");
           }
+          if (args?.if_absent && sqlDrafts.has(key)) {
+            return null;
+          }
           sqlDrafts.set(key, raw);
           return null;
         }
@@ -147,4 +150,69 @@ it("persists drafts and side threads in orb-locald SQLite and auto-migrates Inde
   expect(await readSideThread<{ items: string[] }>("side-a")).toEqual({
     items: ["one", "two", "three"],
   });
+});
+
+it("fences background IndexedDB draft migration when a newer write or delete happens in flight", async () => {
+  const sqlDrafts = new Map<string, string>();
+  let finishLegacyGet!: () => void;
+  vi.stubGlobal("indexedDB", {
+    open: () => {
+      const req = {
+        result: {
+          transaction: () => {
+            const tx = {
+              oncomplete: undefined as undefined | (() => void),
+              objectStore: () => ({
+                get: () => {
+                  const greq = {
+                    result: { text: "stale legacy draft", images: [] },
+                    onsuccess: undefined as undefined | (() => void),
+                  };
+                  finishLegacyGet = () => {
+                    greq.onsuccess?.();
+                    tx.oncomplete?.();
+                  };
+                  return greq;
+                },
+                put: vi.fn(),
+                delete: vi.fn(),
+              }),
+            };
+            return tx;
+          },
+        },
+        onsuccess: undefined as undefined | (() => void),
+      };
+      queueMicrotask(() => req.onsuccess?.());
+      return req;
+    },
+  });
+
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        const key = String(args?.key ?? "");
+        if (cmd === "ui_draft_get") return sqlDrafts.get(key) ?? null;
+        if (cmd === "ui_draft_put") {
+          if (args?.if_absent && sqlDrafts.has(key)) return null;
+          sqlDrafts.set(key, String(args?.raw ?? ""));
+          return null;
+        }
+        if (cmd === "ui_draft_delete") {
+          sqlDrafts.delete(key);
+          return null;
+        }
+        return null;
+      },
+    },
+  };
+
+  const pendingRead = readComposerDraft("m:race-mig");
+  await new Promise((r) => setTimeout(r, 0));
+  await saveComposerDraft("m:race-mig", { text: "NEWEST", images: [] });
+  finishLegacyGet();
+  await expect(pendingRead).resolves.toEqual({ text: "NEWEST", images: [] });
+  await new Promise((r) => setTimeout(r, 0));
+  resetComposerDraftsMemoryForTest();
+  await expect(readComposerDraft("m:race-mig")).resolves.toEqual({ text: "NEWEST", images: [] });
 });

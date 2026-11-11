@@ -15,6 +15,13 @@ let unsupportedDraftInvoke: NativeInvoke | null = null;
 // visible synchronously, including while an older disk read is in flight.
 const currentDrafts = new Map<string, ComposerDraft>();
 const sideThreadLocks = new Map<string, Promise<void>>();
+// Monotonic per-key write generation used to fence background IndexedDB -> SQLite
+// migrations so an older in-flight `idbGet` can never clobber a newer write/delete.
+const writeEpochs = new Map<string, number>();
+
+function bumpWriteEpoch(key: string): void {
+  writeEpochs.set(key, (writeEpochs.get(key) ?? 0) + 1);
+}
 
 function isUnsupportedDraftCommandError(err: unknown): boolean {
   const msg = String((err as Error)?.message ?? err ?? "");
@@ -84,6 +91,7 @@ async function idbDelete(key: string): Promise<void> {
 }
 
 async function readRecordWithMigration<T>(key: string): Promise<T | undefined> {
+  const epochAtStart = writeEpochs.get(key) ?? 0;
   const invoke = activeLocaldDrafts();
   if (invoke) {
     try {
@@ -96,17 +104,26 @@ async function readRecordWithMigration<T>(key: string): Promise<T | undefined> {
     }
   }
   const legacy = await idbGet<T>(key);
-  if (legacy !== undefined && invoke && invoke !== unsupportedDraftInvoke && !hasNonJsonBinaryInstance(legacy)) {
+  if (
+    legacy !== undefined &&
+    invoke &&
+    invoke !== unsupportedDraftInvoke &&
+    !hasNonJsonBinaryInstance(legacy) &&
+    (writeEpochs.get(key) ?? 0) === epochAtStart &&
+    !currentDrafts.has(key)
+  ) {
     void invoke("ui_draft_put", {
       key,
       updated_at: Date.now(),
       raw: JSON.stringify(legacy),
+      if_absent: true,
     }).catch(() => undefined);
   }
   return legacy;
 }
 
 async function writeRecord<T>(key: string, value: T): Promise<void> {
+  bumpWriteEpoch(key);
   const invoke = activeLocaldDrafts();
   if (invoke && !hasNonJsonBinaryInstance(value)) {
     try {
@@ -132,6 +149,7 @@ async function writeRecord<T>(key: string, value: T): Promise<void> {
 }
 
 async function deleteRecord(key: string): Promise<void> {
+  bumpWriteEpoch(key);
   const invoke = activeLocaldDrafts();
   if (invoke) {
     try {
@@ -156,6 +174,7 @@ export async function readComposerDraft(scope: string): Promise<ComposerDraft | 
 }
 
 export async function saveComposerDraft(scope: string, draft: ComposerDraft): Promise<void> {
+  bumpWriteEpoch(scope);
   currentDrafts.set(scope, draft);
   if (isEmptyComposerDraft(draft)) {
     await deleteRecord(scope);
@@ -235,6 +254,7 @@ export async function updateSideThread<T>(
 export function resetComposerDraftsMemoryForTest(): void {
   currentDrafts.clear();
   sideThreadLocks.clear();
+  writeEpochs.clear();
   unsupportedDraftInvoke = null;
   database = undefined;
 }
