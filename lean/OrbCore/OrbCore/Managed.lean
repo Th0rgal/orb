@@ -241,10 +241,15 @@ def managedAdditiveAlters : Array String := #[
 ]
 
 def knownProviders : Array String :=
-  #["boat", "boost", "hetzner", "vastai", "scaleway", "colab"]
+  #["boat", "leanci", "hetzner", "vastai", "scaleway", "colab"]
+
+def canonicalizeProvider (provider : String) : String :=
+  let key := provider.trimAscii.toString.toLower
+  if key == "boost" || key == "boost.ci" || key == "lean.ci" then "leanci" else key
 
 def isKnownProvider (provider : String) : Bool :=
-  knownProviders.any (· == provider)
+  let c := canonicalizeProvider provider
+  knownProviders.any (· == c)
 
 def statusOfPhase (phaseCode : UInt8) : String :=
   if phaseCode == 0 then "provisioning"
@@ -320,17 +325,19 @@ def getUserManagedPrefs (st : ManagedComputeStore) (userId : String) : IO (Array
     return out
 
 def isUserManagedProviderEnabled (prefs : Array (String × Bool)) (provider : String) : Bool :=
-  match prefs.find? (fun (p, _) => p == provider) with
+  let c := canonicalizeProvider provider
+  match prefs.find? (fun (p, _) => canonicalizeProvider p == c) with
   | some (_, en) => en
   | none => true
 
 def setUserManagedPref (st : ManagedComputeStore) (userId provider : String) (enabled : Bool) (nowAt : String) :
     IO (Except String Unit) := do
-  if !isKnownProvider provider then
+  let prov := canonicalizeProvider provider
+  if !isKnownProvider prov then
     return .error "unknown_provider"
   match ← execParamQuery st.db
       "INSERT INTO user_managed_provider_prefs(user_id,provider,enabled,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(user_id,provider) DO UPDATE SET enabled=excluded.enabled,updated_at=excluded.updated_at;"
-      #[userId, provider, if enabled then "1" else "0", nowAt] with
+      #[userId, prov, if enabled then "1" else "0", nowAt] with
   | .error e => return .error e
   | .ok _ => return .ok ()
 
@@ -414,37 +421,49 @@ private def loadOrCreateMasterKey (rootDir : String) : IO (Except String ByteArr
 def sealProviderSecret (rootDir provider plaintext : String) : IO (Except String Unit) := do
   if admitCoreReservedSecret false true != 257 then
     return .error "core_reserved_secret_rejected"
-  if !isKnownProvider provider || plaintext.isEmpty then
+  let prov := canonicalizeProvider provider
+  if !isKnownProvider prov || plaintext.isEmpty then
     return .error "invalid_provider_secret"
   match ← ensurePrivateDir0700 (managedSecretDir rootDir) with
   | .error e => return .error e
   | .ok () =>
     let .ok key ← loadOrCreateMasterKey rootDir | return .error "master_key_unavailable"
     let .ok nonce ← randBytes 12 | return .error "secret_nonce_rng_failed"
-    let aad := s!"orb-core-reserved:{provider}".toUTF8
+    let aad := s!"orb-core-reserved:{prov}".toUTF8
     match ← aeadSeal .aes256Gcm key nonce aad plaintext.toUTF8 with
     | .error e => return .error e
     | .ok sealed =>
-      writeAtomicPrivate0600 (managedSecretPath rootDir provider) (nonce ++ sealed)
+      writeAtomicPrivate0600 (managedSecretPath rootDir prov) (nonce ++ sealed)
 
 def openProviderSecret (rootDir provider : String)
     (callerOnManagedNode : Bool) (operatorBreakGlass : Bool := true) :
     IO (Except String String) := do
   if admitCoreReservedSecret callerOnManagedNode operatorBreakGlass != 257 then
     return .error "core_reserved_secret_rejected"
-  if !isKnownProvider provider then
+  let prov := canonicalizeProvider provider
+  if !isKnownProvider prov then
     return .error "invalid_provider_secret"
   let .ok key ← readPrivate0600 (managedMasterKeyPath rootDir)
     | return .error "master_key_unavailable"
   if key.size != 32 then
     return .error "master_key_invalid_length"
-  let .ok raw ← readPrivate0600 (managedSecretPath rootDir provider)
-    | return .error "sealed_secret_unavailable"
+  let mut usedProv := prov
+  let raw ← match ← readPrivate0600 (managedSecretPath rootDir prov) with
+    | .ok bytes => pure bytes
+    | .error _ =>
+      if prov == "leanci" then
+        match ← readPrivate0600 (managedSecretPath rootDir "boost") with
+        | .ok bytes =>
+          usedProv := "boost"
+          pure bytes
+        | .error _ => return .error "sealed_secret_unavailable"
+      else
+        return .error "sealed_secret_unavailable"
   if raw.size < 28 then
     return .error "sealed_secret_truncated"
   let nonce := raw.extract 0 12
   let sealed := raw.extract 12 raw.size
-  let aad := s!"orb-core-reserved:{provider}".toUTF8
+  let aad := s!"orb-core-reserved:{usedProv}".toUTF8
   match ← aeadOpen .aes256Gcm key nonce aad sealed with
   | .error e => return .error e
   | .ok pt => return .ok (String.fromUTF8? pt |>.getD "")
@@ -826,14 +845,15 @@ def pollRelayLease (st : ManagedComputeStore) (machineId : String) (presentedBoo
           | .error e => return .error e
           | .ok () => return .ok (some saved)
 
-/-- Pure adapter across the six providers (`boat`, `boost`, `hetzner`, `vastai`, `scaleway`, `colab`).
+/-- Pure adapter across the six providers (`boat`, `leanci`, `hetzner`, `vastai`, `scaleway`, `colab`).
     Never touches SQLite or ledgers; emits only a `ProviderObservation`. -/
 def observeProviderPayload (provider machineId : String) (httpStatus : Nat) (payload : JVal) :
     Except String ProviderObservation :=
-  if !isKnownProvider provider then
+  let prov := canonicalizeProvider provider
+  if !isKnownProvider prov then
     .error "unknown_provider"
   else if httpStatus == 404 || httpStatus == 410 then
-    .ok { provider, machineId, observedStatus := "destroyed", orphaned := true }
+    .ok { provider := prov, machineId, observedStatus := "destroyed", orphaned := true }
   else
     let rawState :=
       ((payload.fieldStr? "state").orElse (fun _ => payload.fieldStr? "status")).getD ""
@@ -845,20 +865,23 @@ def observeProviderPayload (provider machineId : String) (httpStatus : Nat) (pay
       else if rawState == "stopped" || rawState == "halted" || rawState == "off" ||
           rawState == "exited" || rawState == "stopped_in_place" || rawState == "disconnected" then
         ("stopped", false)
-      else if rawState == "destroyed" || rawState == "deleted" || rawState == "terminated" || rawState == "missing" then
+      else if rawState == "destroyed" || rawState == "deleted" || rawState == "terminated" ||
+          rawState == "missing" || rawState == "reaped" then
         ("destroyed", true)
       else
         ("provisioning", false)
-    .ok { provider, machineId, observedStatus := normStatus, spentCents, orphaned }
+    .ok { provider := prov, machineId, observedStatus := normStatus, spentCents, orphaned }
 
 /-- Apply one pure observation. Orphans and ledger closure happen only when `stepVmSlice` admits
     `destroy` and emits `closeCostLedger`. -/
 def applyProviderObservation (st : ManagedComputeStore) (obs : ProviderObservation)
     (nowEpoch : UInt64) (ownerLive idleElapsed : UInt8) : IO (Except String (List VmEffect)) := do
-  if !isKnownProvider obs.provider then
+  let prov := canonicalizeProvider obs.provider
+  if !isKnownProvider prov then
     return .error "unknown_provider"
+  let legacyProv := if prov == "leanci" then "boost" else prov
   match ← execParamQuery st.db
-      "SELECT node_boot_epoch FROM managed_machines WHERE id=?1 AND provider=?2;" #[obs.machineId, obs.provider] with
+      "SELECT node_boot_epoch FROM managed_machines WHERE id=?1 AND (provider=?2 OR provider=?3);" #[obs.machineId, prov, legacyProv] with
   | .error e => return .error e
   | .ok rows =>
     if rows.size ≤ 1 then return .error "managed_machine_missing"
@@ -879,15 +902,15 @@ def applyProviderObservation (st : ManagedComputeStore) (obs : ProviderObservati
       | .ok (_, effs) => return .ok effs
     else
       match ← execParamQuery st.db
-          "UPDATE managed_machines SET spent_cents=?2 WHERE id=?1 AND provider=?3;"
-          #[obs.machineId, s!"{obs.spentCents}", obs.provider] with
+          "UPDATE managed_machines SET spent_cents=?2 WHERE id=?1 AND (provider=?3 OR provider=?4);"
+          #[obs.machineId, s!"{obs.spentCents}", prov, legacyProv] with
       | .error e => return .error e
       | .ok _ => return .ok []
 
 private def providerDisplayName (p : String) : String :=
   match p with
   | "boat" => "boat.dev"
-  | "boost" => "boost.ci"
+  | "leanci" | "boost" => "lean.ci"
   | "hetzner" => "Hetzner"
   | "vastai" => "Vast.ai"
   | "scaleway" => "Scaleway"
@@ -900,7 +923,7 @@ def renderManagedProvidersJson
     (userPrefs : Array (String × Bool) := #[])
     (configuredProviders : Array String := #[]) : String :=
   let items := knownProviders.map fun p =>
-    let globallyConfigured := configuredProviders.any (· == p) || (p == "boat" && st.boatEnabled)
+    let globallyConfigured := configuredProviders.any (fun cp => canonicalizeProvider cp == p) || (p == "boat" && st.boatEnabled)
     let globallyEnabled := st.enabled && (if p == "boat" then st.boatEnabled else globallyConfigured)
     let userEnabled := isUserManagedProviderEnabled userPrefs p
     let effectiveEnabled := globallyEnabled && userEnabled
@@ -1059,7 +1082,7 @@ def validateVmLimitsPatch (v : JVal) : Except (String × String) String := do
       | .null => pure ()
       | .obj pkvs =>
         for (pkRaw, pval) in pkvs do
-          let pk := pkRaw.trimAscii.toString.toLower
+          let pk := canonicalizeProvider pkRaw
           if !isKnownProvider pk then
             throw ("invalid_vm_limits", s!"Unknown cloud provider `{pkRaw}` in provider_max_concurrent")
           match pval.asNat? with
@@ -1225,9 +1248,10 @@ def renderMissionBudgetJson
         match parsedVm.field? "provider_max_concurrent" with
         | some (.obj pkvs) =>
           pkvs.filterMap fun (pk, pv) =>
+            let pkCanon := canonicalizeProvider pk
             pv.asNat?.map fun capN =>
-              let actP := (liveMachines.filter (fun m => m.provider == pk)).size
-              s!"\{\"provider\":{jsonEscape pk},\"active\":{actP},\"max_concurrent\":{capN}}"
+              let actP := (liveMachines.filter (fun m => canonicalizeProvider m.provider == pkCanon)).size
+              s!"\{\"provider\":{jsonEscape pkCanon},\"active\":{actP},\"max_concurrent\":{capN}}"
         | _ => #[]
       let eff :=
         s!"\{\"source\":\"mission\",\"pool_id\":{jsonEscape cfg.missionId},\"active\":{liveMachines.size},\"max_concurrent\":{mcJson}," ++

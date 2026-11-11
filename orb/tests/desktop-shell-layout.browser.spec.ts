@@ -219,8 +219,9 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   for (const sel of ["#orb-sidebar.sidebar", ".app > .titlebar", ".app > .main"]) {
     expect(await page.locator(sel).evaluate((el) => getComputedStyle(el).isolation)).toBe("isolate");
   }
+  const initialPlatform = await page.evaluate(() => document.documentElement.dataset.platform);
   const tbLeftBox = (await page.locator(".titlebar .tb-left").boundingBox())!;
-  expect(tbLeftBox.x).toBeGreaterThanOrEqual(80);
+  expect(tbLeftBox.x).toBeGreaterThanOrEqual(initialPlatform === "linux" ? 8 : 80);
   expect(tbLeftBox.x + tbLeftBox.width).toBeLessThanOrEqual(sbBox.width);
 
   const scrollMask = await page.locator(".main > .scroll").evaluate((el) => {
@@ -287,4 +288,77 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
 
   await sideToggle.click();
   expect(await trackCount()).toBe(2);
+
+  // 6. Platform vibrancy & header parity: Linux uses subtle frosted translucency on both
+  // sidebar (78% / 72%) and main pane (94% / 95.5%), translucent active pills, and flush-left header icons.
+  const readSurfaceAlphas = () =>
+    page.evaluate(() => {
+      const parseAlpha = (bg: string): number => {
+        const m = bg.match(/rgba?\([^)]*[,/]\s*([0-9.]+)\s*\)/);
+        if (m) return Number(m[1]);
+        const srgb = bg.match(/color\(srgb [^/]+\/\s*([0-9.]+)\s*\)/);
+        if (srgb) return Number(srgb[1]);
+        return bg === "transparent" ? 0 : 1;
+      };
+      const activeRow = document.querySelector("#orb-sidebar .row.active");
+      return {
+        sidebar: parseAlpha(getComputedStyle(document.querySelector("#orb-sidebar")!).backgroundColor),
+        titlebar: parseAlpha(getComputedStyle(document.querySelector(".app > .titlebar")!).backgroundColor),
+        main: parseAlpha(getComputedStyle(document.querySelector(".app > .main")!).backgroundColor),
+        activeRow: activeRow ? parseAlpha(getComputedStyle(activeRow).backgroundColor) : null,
+      };
+    });
+
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--t", "0ms");
+    document.documentElement.dataset.platform = "macos";
+    document.documentElement.dataset.theme = "dark";
+  });
+  const macDark = await readSurfaceAlphas();
+  expect(macDark.sidebar).toBeCloseTo(0.76, 2);
+  expect(macDark.main).toBeCloseTo(0.9325, 2);
+  const macTbLeft = (await page.locator(".titlebar .tb-left").boundingBox())!;
+  expect(macTbLeft.x).toBeGreaterThanOrEqual(80);
+
+  await page.evaluate(() => {
+    document.documentElement.dataset.platform = "macos";
+    document.documentElement.dataset.theme = "light";
+  });
+  const macLight = await readSurfaceAlphas();
+  expect(macLight.sidebar).toBeCloseTo(0.6, 2);
+  expect(macLight.main).toBeCloseTo(0.9475, 2);
+
+  await page.evaluate(() => {
+    document.documentElement.dataset.platform = "linux";
+    document.documentElement.dataset.theme = "dark";
+  });
+  const linuxDark = await readSurfaceAlphas();
+  expect(linuxDark.sidebar).toBeCloseTo(0.78, 2);
+  expect(linuxDark.main).toBeCloseTo(0.94, 2);
+  expect(linuxDark.titlebar).toBeCloseTo(0.94, 2);
+  if (linuxDark.activeRow !== null) {
+    await expect.poll(async () => (await readSurfaceAlphas()).activeRow).toBeCloseTo(0.075, 2);
+  }
+  const linuxTbLeft = (await page.locator(".titlebar .tb-left").boundingBox())!;
+  expect(linuxTbLeft.x).toBe(8);
+  expect(linuxTbLeft.x + linuxTbLeft.width).toBeCloseTo(sbBox.width - 8, 0);
+
+  await page.evaluate(() => {
+    document.documentElement.dataset.platform = "linux";
+    document.documentElement.dataset.theme = "light";
+  });
+  const linuxLight = await readSurfaceAlphas();
+  expect(linuxLight.sidebar).toBeCloseTo(0.72, 2);
+  expect(linuxLight.main).toBeCloseTo(0.955, 2);
+
+  // Settings view keeps the sidebar and main surface subtly translucent on Linux.
+  await page.evaluate(() => {
+    document.documentElement.dataset.platform = "linux";
+    document.documentElement.dataset.theme = "dark";
+  });
+  await gearBtn.click();
+  await expect(page.locator(".app.settings-view")).toBeVisible();
+  const linuxSettings = await readSurfaceAlphas();
+  expect(linuxSettings.sidebar).toBeCloseTo(0.78, 2);
+  expect(linuxSettings.main).toBeCloseTo(0.94, 2);
 });

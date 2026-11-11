@@ -955,6 +955,36 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
   total := total + 1
   if (← assertTrue "live_sse_event_delivery_under_80ms_without_500ms_stall" sseLatOk) then passed := passed + 1
 
+  -- I. Linux `reveal_download` prefers `org.freedesktop.FileManager1.ShowItems` and RFC 8089 `filePathToUri` encodes `,`/spaces/UTF-8
+  let fmTestDir := pDir / "linux-reveal-test"
+  let fmBinDir := fmTestDir / "bin"
+  let fmHomeDir := fmTestDir / "home"
+  IO.FS.createDirAll fmBinDir
+  IO.FS.createDirAll (fmHomeDir / "Downloads")
+  IO.FS.writeFile (fmHomeDir / "Downloads" / "Guide, Révision 2026.pdf") "%PDF"
+  let dbusLogPath := fmTestDir / "dbus-args.log"
+  let mockDbusSend := fmBinDir / "dbus-send"
+  IO.FS.writeFile mockDbusSend s!"#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{dbusLogPath.toString}\"\nexit 0\n"
+  discard <| OrbBin.PosixExt.chmod mockDbusSend.toString 0o755
+  let prevPath := (← IO.getEnv "PATH").getD ""
+  let prevDbus := (← IO.getEnv "DBUS_SESSION_BUS_ADDRESS").getD ""
+  OrbBin.PosixExt.setenvVar "PATH" s!"{fmBinDir.toString}:{prevPath}"
+  OrbBin.PosixExt.setenvVar "DBUS_SESSION_BUS_ADDRESS" "unix:path=/tmp/mock-orb-dbus"
+  let stFmRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := fmTestDir.toString, homeDir := fmHomeDir.toString, hostOs := "linux" } : LocaldState)
+  let revealLinuxRes ← dispatchRpcCommand stFmRef "reveal_download" (.obj #[("name", .str "Guide, Révision 2026.pdf")])
+  OrbBin.PosixExt.setenvVar "PATH" prevPath
+  if prevDbus.isEmpty then OrbBin.PosixExt.unsetenvVar "DBUS_SESSION_BUS_ADDRESS"
+  else OrbBin.PosixExt.setenvVar "DBUS_SESSION_BUS_ADDRESS" prevDbus
+  let dbusLogged ← try IO.FS.readFile dbusLogPath catch _ => pure ""
+  let expectedUri := filePathToUri (fmHomeDir / "Downloads" / "Guide, Révision 2026.pdf").toString
+  let linuxRevealOk :=
+    revealLinuxRes.isOk &&
+    expectedUri.endsWith "/Downloads/Guide%2C%20R%C3%A9vision%202026.pdf" &&
+    (dbusLogged.splitOn "org.freedesktop.FileManager1.ShowItems").length == 2 &&
+    (dbusLogged.splitOn s!"array:string:{expectedUri}").length == 2
+  total := total + 1
+  if (← assertTrue "linux_reveal_download_uses_filemanager1_and_encodes_uri" linuxRevealOk) then passed := passed + 1
+
   return (passed, total)
 
 private def runWarmClaudeRpcE2eChecks (validTok tmpStateDir : String) : IO (Nat × Nat) := do

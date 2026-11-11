@@ -1530,8 +1530,20 @@ private def isSafeBasename (raw : String) : Bool :=
   !n.isEmpty && n != "." && n != ".." &&
   !(n.toList.any (fun c => c == '/' || c == '\\' || c.toNat < 0x20 || c.toNat == 0x7F))
 
-private def runDetachedOpen (hostOs : String) (args : Array String) : IO (Except String Unit) := do
-  let prog := if hostOs == "macos" then "/usr/bin/open" else "xdg-open"
+private def resolveExecutableInPath? (name : String) (fallbacks : Array String := #[]) : IO (Option String) := do
+  let pathEnv := (← IO.getEnv "PATH").getD ""
+  for dir in pathEnv.splitOn ":" do
+    let d := dir.trimAscii.toString
+    if !d.isEmpty then
+      let cand := (System.FilePath.mk d / name).toString
+      if (← System.FilePath.pathExists cand) then
+        return some cand
+  for fb in fallbacks do
+    if (← System.FilePath.pathExists fb) then
+      return some fb
+  return none
+
+private def runCommandUnit (prog : String) (args : Array String) : IO (Except String Unit) := do
   try
     let child ← IO.Process.spawn {
       cmd := prog
@@ -1549,18 +1561,52 @@ private def runDetachedOpen (hostOs : String) (args : Array String) : IO (Except
   catch e =>
     return .error (toString e)
 
-private def resolveExecutableInPath? (name : String) (fallbacks : Array String := #[]) : IO (Option String) := do
-  let pathEnv := (← IO.getEnv "PATH").getD ""
-  for dir in pathEnv.splitOn ":" do
-    let d := dir.trimAscii.toString
-    if !d.isEmpty then
-      let cand := (System.FilePath.mk d / name).toString
-      if (← System.FilePath.pathExists cand) then
-        return some cand
-  for fb in fallbacks do
-    if (← System.FilePath.pathExists fb) then
-      return some fb
-  return none
+/-- Encode an absolute POSIX path into an RFC 8089 `file://` URI (percent-encoding commas, spaces, and non-ASCII bytes so `dbus-send` `array:string:` never splits on `,`). -/
+def filePathToUri (absPath : String) : String := Id.run do
+  let hexDigit (n : UInt8) : Char :=
+    let v := (n &&& 0x0F).toNat
+    if v < 10 then Char.ofNat ('0'.toNat + v) else Char.ofNat ('A'.toNat + (v - 10))
+  let mut out := "file://"
+  for b in absPath.toUTF8 do
+    let isUnreservedOrSlash :=
+      (b ≥ 0x41 && b ≤ 0x5A) || (b ≥ 0x61 && b ≤ 0x7A) || (b ≥ 0x30 && b ≤ 0x39) ||
+      b == 0x2D || b == 0x2E || b == 0x5F || b == 0x7E || b == 0x2F
+    if isUnreservedOrSlash then
+      out := out.push (Char.ofNat b.toNat)
+    else
+      out := ((out.push '%').push (hexDigit (b >>> 4))).push (hexDigit b)
+  return out
+
+private def runDetachedOpen (hostOs : String) (args : Array String) : IO (Except String Unit) := do
+  let prog := if hostOs == "macos" then "/usr/bin/open" else "xdg-open"
+  runCommandUnit prog args
+
+private def runDetachedOpenDirectory (hostOs : String) (dirPath : String) : IO (Except String Unit) := do
+  if hostOs == "macos" then
+    return ← runDetachedOpen "macos" #[dirPath]
+  if let some gioBin ← resolveExecutableInPath? "gio" #["/run/current-system/sw/bin/gio", "/usr/bin/gio"] then
+    if let .ok () ← runCommandUnit gioBin #["open", dirPath] then
+      return .ok ()
+  runDetachedOpen hostOs #[dirPath]
+
+private def runDetachedRevealFile (hostOs : String) (filePath : String) (fallbackDir : String) : IO (Except String Unit) := do
+  if hostOs == "macos" then
+    return ← runDetachedOpen "macos" #["-R", filePath]
+  let dbusAddr := (← IO.getEnv "DBUS_SESSION_BUS_ADDRESS").getD ""
+  if !dbusAddr.trimAscii.toString.isEmpty then
+    if let some dbusSend ← resolveExecutableInPath? "dbus-send" #["/run/current-system/sw/bin/dbus-send", "/usr/bin/dbus-send"] then
+      let uri := filePathToUri filePath
+      let dbusArgs := #[
+        "--session", "--print-reply", "--reply-timeout=2500",
+        "--dest=org.freedesktop.FileManager1",
+        "/org/freedesktop/FileManager1",
+        "org.freedesktop.FileManager1.ShowItems",
+        s!"array:string:{uri}",
+        "string:"
+      ]
+      if let .ok () ← runCommandUnit dbusSend dbusArgs then
+        return .ok ()
+  runDetachedOpenDirectory hostOs fallbackDir
 
 private def readCommandStdout? (cmd : String) (args : Array String) : IO (Option String) := do
   try
@@ -3453,7 +3499,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     | none => return .error "Log folder unavailable"
     | some dir =>
       try IO.FS.createDirAll dir catch _ => pure ()
-      match ← runDetachedOpen st.hostOs #[dir.toString] with
+      match ← runDetachedOpenDirectory st.hostOs dir.toString with
       | .ok () => return .ok .null
       | .error e => return .error s!"Could not open the log folder: {e}"
   | "open_url" =>
@@ -3470,12 +3516,11 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let dlDir := System.FilePath.mk st.homeDir.trimAscii.toString / "Downloads"
     let dlPath := dlDir / name.trimAscii.toString
     if (← dlPath.pathExists) then
-      let openArgs := if st.hostOs == "macos" then #["-R", dlPath.toString] else #[dlDir.toString]
-      match ← runDetachedOpen st.hostOs openArgs with
+      match ← runDetachedRevealFile st.hostOs dlPath.toString dlDir.toString with
       | .ok () => return .ok .null
       | .error e => return .error s!"Could not reveal download: {e}"
     else if (← dlDir.pathExists) then
-      match ← runDetachedOpen st.hostOs #[dlDir.toString] with
+      match ← runDetachedOpenDirectory st.hostOs dlDir.toString with
       | .ok () => return .ok .null
       | .error e => return .error s!"Could not open Downloads folder: {e}"
     else
@@ -4289,8 +4334,8 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         | return .error "Could not reveal this file"
       if !isCanonicalWithinRoot targetReal rootReal then
         return .error "Refusing path outside browsed workspace"
-      let openArgs := if curSt.hostOs == "macos" then #["-R", targetReal] else #[(System.FilePath.mk targetReal |>.parent.getD rootFp).toString]
-      match ← runDetachedOpen curSt.hostOs openArgs with
+      let parentDir := (System.FilePath.mk targetReal |>.parent.getD rootFp).toString
+      match ← runDetachedRevealFile curSt.hostOs targetReal parentDir with
       | .ok () => return .ok (.obj #[])
       | .error _ => return .error "Could not reveal this file"
     else if action == "read" then

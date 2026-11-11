@@ -295,7 +295,7 @@ enum OrbManaged {
     static func providerLabel(_ provider: String?) -> String {
         switch (provider ?? "boat").lowercased() {
         case "boat": return "boat.dev"
-        case "boost", "boost.ci": return "boost.ci"
+        case "leanci", "lean.ci", "boost", "boost.ci": return "lean.ci"
         case "hetzner": return "Hetzner"
         case "vastai": return "Vast.ai"
         case "scaleway": return "Scaleway"
@@ -308,6 +308,7 @@ enum OrbManaged {
 
     static func machineProviderKey(_ provider: String?) -> String {
         let key = (provider ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if key == "boost" || key == "boost.ci" || key == "lean.ci" { return "leanci" }
         return key.isEmpty ? "boat" : key
     }
 
@@ -334,7 +335,7 @@ enum OrbManaged {
             if !order.contains(key) { order.append(key) }
         }
         for p in providers ?? [] { push(p.provider) }
-        for p in ["boat", "boost", "hetzner", "vastai", "scaleway", "colab"] { push(p) }
+        for p in ["boat", "leanci", "hetzner", "vastai", "scaleway", "colab"] { push(p) }
         for key in seenOrder { push(key) }
         return order.compactMap { key in
             guard let list = buckets[key], !list.isEmpty else { return nil }
@@ -358,7 +359,7 @@ enum OrbManaged {
     }
 
     static func nodeProvider(_ node: OrbJSON) -> String? {
-        let known: Set<String> = ["boat", "boost", "hetzner", "vastai", "scaleway", "colab"]
+        let known: Set<String> = ["boat", "leanci", "boost", "hetzner", "vastai", "scaleway", "colab"]
         for item in node["labels"].items {
             let l = item.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if l.hasPrefix("provider=") { return String(l.dropFirst("provider=".count)) }
@@ -1245,7 +1246,7 @@ struct OrbConfigureMachineProviderSheet: View {
                         Text("Preferred Hetzner Cloud location (falls back across fsn1, hel1, nbg1 if unavailable).")
                     }
                 }
-                if provider.provider == "boost" {
+                if provider.provider == "leanci" || provider.provider == "boost" {
                     Section {
                         TextField("Auto-detected from token", text: $projectID)
                             .textInputAutocapitalization(.never)
@@ -1253,7 +1254,7 @@ struct OrbConfigureMachineProviderSheet: View {
                     } header: {
                         Text("Workspace ID")
                     } footer: {
-                        Text("Optional boost.ci workspace identifier. Leave blank to use the token's default workspace.")
+                        Text("Optional lean.ci workspace identifier. Leave blank to use the token's default workspace.")
                     }
                 }
                 if provider.provider == "scaleway" {
@@ -1312,7 +1313,7 @@ struct OrbConfigureMachineProviderSheet: View {
             if provider.provider == "hetzner" || provider.provider == "scaleway" || provider.provider == "colab" {
                 patch["region"] = .string(region.trimmingCharacters(in: .whitespacesAndNewlines))
             }
-            if provider.provider == "scaleway" || provider.provider == "boost" {
+            if provider.provider == "scaleway" || provider.provider == "leanci" || provider.provider == "boost" {
                 patch["project_id"] = .string(projectID.trimmingCharacters(in: .whitespacesAndNewlines))
             }
             if maxChanged {

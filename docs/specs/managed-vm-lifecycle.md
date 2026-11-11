@@ -1,6 +1,6 @@
 # Managed VM lifecycle
 
-Goal: no managed VM (`boat`, `boost`, `hetzner`, `vastai`, `scaleway`, `colab`) keeps running in
+Goal: no managed VM (`boat`, `leanci`, `hetzner`, `vastai`, `scaleway`, `colab`) keeps running in
 the void, and no agent ever needs raw cloud API keys in shell. Every VM has an
 owner whose lifetime and activity govern it, and a reaper plus a per-provider
 reconciler enforce that.
@@ -14,13 +14,13 @@ Code: `src/managed/lifecycle.rs` (pure decision backed by
 | Provider (`provider`) | Workloads | Bootstrap | `supports_free_stop` | `supports_snapshots` | Minimum lease |
 | --- | --- | --- | --- | --- | --- |
 | `boat` (default) | Fast ephemeral Linux x86\_64 workers (`small`..`xlarge`) & raw sandboxes | Provider file/exec API | Yes (14d disk retention, \$0) | Yes (named + fork) | Per-second |
-| `boost` (`boost.ci`) | Warm Cloud Hypervisor Linux x86\_64 microVMs (`boost-2vcpu-ubuntu-2604`..`boost-32vcpu`, `boost-32vcpu-96gb`) with optional CoW `.olean` overlays (`repo`/`base_key`/`lean_mode`) & `turbo-lean` | Provider file/exec API -> reverse relay | No | Yes (named + fork, engine-pinned CoW) | Per-second (60s..24h fixed TTL; no live extend) |
+| `leanci` (`lean.ci`, legacy alias `boost`) | Warm Cloud Hypervisor Linux x86\_64 microVMs (`lean-2vcpu-ubuntu-2604`..`lean-32vcpu`, `lean-32vcpu-96gb`) with optional CoW `.olean` overlays (`repo`/`base_key`/`lean_mode`) & `turbo-lean` | Provider file/exec API -> reverse relay | No | Yes (named + fork, engine-pinned CoW) | Per-second (60s..24h fixed TTL; no live extend) |
 | `hetzner` | Larger x86\_64 / ARM64 CPU & RAM instances (`cpx22`..`ccx43`, `cax31`; legacy `cpx21`..`cpx51` aliases map to `cpx22`..`cpx62` with EU location fallback `fsn1` -> `hel1` -> `nbg1`) | Cloud-init `user_data` -> reverse relay | No (stopped servers still bill) | No | Hourly / per-minute |
 | `vastai` | Ephemeral CUDA GPUs (`rtx4090`, `a100`, `h100`, or explicit `gpu` filter) | Offer `onstart` -> reverse relay | No (stopped instances bill storage/GPU) | No | On-demand |
 | `scaleway` | EU Linux/GPU Instances (`DEV1-*`, `PRO2-*`, `L4-*`, `H100-*`) & Apple Silicon Mac minis (`M1-M`, `M2-M`, `M2-PRO`, `M4-M`) | Cloud-init / SSH -> reverse relay | No | No | Instances: per-minute; Apple Silicon: **24h (`deletable_at`)** |
 | `colab` (`Google Colab`) | Pooled Google Colab CUDA GPUs (`colab-auto`, `t4`, `l4`, `a100`, `h100`) & TPUs (`v5e1`, `v6e1`) via `colab-api`, shadow-priced at ½ Vast.ai | Worker file/exec API -> reverse relay | No | No | On-demand (shadow-metered at ½ Vast.ai; explicit-only) |
 
-Provider credentials (`BOAT_API_KEY`, `BOOST_API_KEY`/`BOOST_TOKEN`, `HETZNER_CLOUD_APIKEY`, `VASTAI_API_KEY`,
+Provider credentials (`BOAT_API_KEY`, `LEANCI_API_KEY`/`LEANCI_TOKEN` or legacy `BOOST_API_KEY`/`BOOST_TOKEN`, `HETZNER_CLOUD_APIKEY`, `VASTAI_API_KEY`,
 `SCALEWAY_SECRET_KEY`, `SCALEWAY_KEY_ID`, `COLAB_API_TOKEN`, etc.) are resolved inside Core from
 operator settings (`.sandboxed-sh/managed_providers.json`, `0600`, AES-256-GCM
 via `env_crypto`), environment variables, or Bitwarden Secrets Manager
@@ -52,7 +52,7 @@ Bitwarden vault cannot silently activate the reconciler and reap production's
    `resume`, and sibling reuse (`409 provider_disabled`) while keeping the
    reaper and reconciler active so any already-live VMs are still metered and
    destroyed cleanly.
-4. Providers with live pool/quota introspection (`boost` via `GET /v1/vms/capabilities`,
+4. Providers with live pool/quota introspection (`leanci` via `GET /v1/vms/capabilities`,
    `colab` via `GET /v1/accounts` + `GET /v1/notebooks`) surface non-persistent
    `availability` (`available`, `degraded`, `saturated`) on
    `ProviderCatalogEntry` without mutating operator `enabled`: unpinned
@@ -226,7 +226,7 @@ are rejected with `403`, and agents can only read via `get_budget` and
 set):
 
 - `max_concurrent`: optional subtree concurrent VM limit (`1..=128`);
-- `provider_max_concurrent`: optional map of canonical provider (`boat`, `boost`,
+- `provider_max_concurrent`: optional map of canonical provider (`boat`, `leanci`,
   `hetzner`, `vastai`, `scaleway`) to concurrent limit (`0..=128`; `0` blocks
   that provider for the subtree). At least one of `max_concurrent` or a
   provider entry must be present when `vm_limits` is enabled.
@@ -343,17 +343,17 @@ while pruning heavy
 toolchain/build/VCS trees (`caches/{elan,rustup,cargo,lake,xdg}`, `.git`,
 `.lake`, `target`, `node_modules`) and skipping global `sync` so lazy CoW
 snapshot hydration never times out (`SECRETS_WIPE` before snapshot/fork save
-retains `&& sync`). On `boost` microVMs, `orb-node-provision.sh` also extracts
-guest `BOOST_*` environment variables (including the VM-scoped `BOOST_CACHE_TOKEN`
+retains `&& sync`). On `leanci` microVMs, `orb-node-provision.sh` also extracts
+guest `LEANCI_*` / `BOOST_*` environment variables (including the VM-scoped `LEANCI_CACHE_TOKEN` / `BOOST_CACHE_TOKEN`
 for `turbo-lean`) into `/var/lib/orb-node/.boost-env` (`0600` `orbnode:orbnode`),
 makes `/workspace/repo` and `/workspace/boost-cvm/lean-overlay/merged` readable to
 `orbnode`, and installs `/usr/local/bin/orb-cow-worktree` so concurrent sub-agents
 can create isolated git worktrees seeded with `cp -al` hardlinked `.lake/build`
 artifacts without Lake lock contention. Post-create provisioning enforces an overall wall-clock
-deadline (`360s` for Boat, `480s` for cloud-init and `boost` reverse-relay providers) strictly below
+deadline (`360s` for Boat, `480s` for cloud-init and `leanci` reverse-relay providers) strictly below
 `AssistantMcp`'s `540s` HTTP timeout (and Hermes's `600s` MCP stdio timeout) so
 Core always destroys any partial VM and returns structured JSON before the
-caller's HTTP socket times out. For cloud-init/onstart providers (`hetzner`, `vastai`, `scaleway`) and `boost` (executed directly over `POST /v1/vms/:id/exec`), Core generates a
+caller's HTTP socket times out. For cloud-init/onstart providers (`hetzner`, `vastai`, `scaleway`) and `leanci` (executed directly over `POST /v1/vms/:id/exec`), Core generates a
 one-time `<4 KiB` enrollment script (fitting Vast.ai's `onstart` limit) that
 fetches `sandboxed-node`, `sandboxed-mcp`, and verified native harnesses
 (`opencode`, `claude`, `codex`) over streaming `GET /api/managed-machines/bootstrap-binary/:id`
@@ -373,12 +373,12 @@ from the worker size catalog (`raw`-only with `allow_24h_commitment: true`). The
 Code: `src/managed/snapshots.rs`. Agent guide: `skills/managed-compute/SKILL.md`.
 
 - **Named snapshots** (`snapshot_managed_machine`, `POST
-  /api/managed-machines/:id/snapshot`, `boat` and `boost`) are recorded in
+  /api/managed-machines/:id/snapshot`, `boat` and `leanci`) are recorded in
   `.sandboxed-sh/managed_snapshots.json` with `provider`, owner mission, tenant, project
   (the owner mission's), source machine and size. Delivered
   `.paloma-secrets` and `.boost-env` are deleted on the VM first; a VM holding a projected
   Antigravity sign-in cannot be saved or forked. Visible and usable only
-  within the same tenant, project, and provider (arbitrary `image` strings on `boost`
+  within the same tenant, project, and provider (arbitrary `image` strings on `leanci`
   cannot reference snapshot IDs directly). Boat pricing: 10 included, then \$1.70/month.
 - **From a snapshot**: `spawn_managed_machine(from_snapshot)` and
   `start_mission(auto-managed, managed_from_snapshot)` (explicit snapshot
