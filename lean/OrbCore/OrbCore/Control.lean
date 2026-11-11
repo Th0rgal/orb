@@ -4786,6 +4786,13 @@ private def runWebSocketSessionLoop (cfd : Fd) : IO Unit := do
     if let some cls := makeServerClose? 1000 "" then
       discard <| writeAll cfd cls false
 
+/-- Per-mission subscription entry on `/api/control/sync`, buffering concurrent live events
+    while `replaying == true` so replay frames always precede live frames in strict `seq` order. -/
+private structure SyncMissionSubState where
+  maxPayload : Nat
+  replaying  : Bool := false
+  queuedLive : Array (UInt64 × String) := #[]
+
 /-- Multiplexed `/api/control/sync` WebSocket session (`orb-sync.v1`):
     supports `ping`/`pong`, `set_presentation`, `subscribe` (`since_seq` replay + `sync_caught_up`),
     `unsubscribe`, `sync_resume`, live `appendMissionEvent` push, and compact `inbox_answer_push`. -/
@@ -4794,9 +4801,9 @@ def runSyncWebSocketSessionLoop
     (wsCaller : CallerPrincipal)
     (cfd : Fd)
     (maxSteps? : Option Nat := none) : IO Unit := do
+  let subMu ← Std.Mutex.new ({} : Std.HashMap String SyncMissionSubState)
   let writeMu ← Std.Mutex.new ()
   let aliveRef ← IO.mkRef true
-  let subsRef ← IO.mkRef ({} : Std.HashMap String Nat)
   let presRef ← IO.mkRef false
   let sendWsBytes (wire : ByteArray) : IO Bool := do
     writeMu.atomically do
@@ -4808,30 +4815,71 @@ def runSyncWebSocketSessionLoop
     match encodeFrame? { fin := true, opcode := .text, payload := txt.toUTF8 } none with
     | none => return false
     | some frm => sendWsBytes frm
+  let isAuthorizedForMission (mid : String) : IO Bool := do
+    if wsCaller.isLegacyUnscoped then pure true
+    else pure (← authorizeMissionOp st wsCaller mid false).isNone
   let unregister ← registerMissionEventListener st.store fun mid seq evType payloadJson createdAt => do
     if (← aliveRef.get) then
-      let subs ← subsRef.get
-      if let some maxP := subs[mid]? then
-        discard <| sendWsText (renderSyncWsEventJson mid seq evType payloadJson createdAt (some maxP) false)
+      let hasSub ← subMu.atomically do return (← get).contains mid
+      if hasSub then
+        let isAuth ← isAuthorizedForMission mid
+        if !isAuth then
+          let removed ← subMu.atomically do
+            let m ← get
+            if m.contains mid then
+              set (m.erase mid)
+              return true
+            else
+              return false
+          if removed then
+            discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid},\"error\":\"forbidden\"}"
+        else
+          subMu.atomically do
+            let m ← get
+            if let some sub := m[mid]? then
+              let frameJson := renderSyncWsEventJson mid seq evType payloadJson createdAt (some sub.maxPayload) false
+              if sub.replaying then
+                set (m.insert mid { sub with queuedLive := sub.queuedLive.push (seq, frameJson) })
+              else
+                discard <| sendWsText frameJson
       else if (evType == "assistant_message" || evType == "assistant_message_canonical") && payloadJson.utf8ByteSize ≤ 8192 then
-        let isAuth ← do
-          if wsCaller.isLegacyUnscoped then pure true
-          else pure (← authorizeMissionOp st wsCaller mid false).isNone
-        if isAuth then
+        if ← isAuthorizedForMission mid then
           discard <| sendWsText (renderSyncWsEventJson mid seq evType payloadJson createdAt (some 4096) true)
   try
     discard <| sendWsText "{\"type\":\"sync_ready\",\"server\":\"sandboxed-sh\",\"server_build\":\"orb-core-lean\"}"
     let replayForMission (mid : String) (sinceSeq? : Option UInt64) (maxP : Nat) : IO Unit := do
-      match ← queryMissionSyncReplayFrames st.store mid sinceSeq? (some maxP) 500 with
-      | .error _ =>
-        discard <| sendWsText s!"\{\"type\":\"stream_lagged\",\"mission_id\":{jsonEscape mid}}"
-      | .ok (frames, curSeq, lagged) =>
-        if lagged then
+      let repRes ← queryMissionSyncReplayFrames st.store mid sinceSeq? (some maxP) 500
+      let stillAuth ← isAuthorizedForMission mid
+      if !stillAuth then
+        subMu.atomically do modify (·.erase mid)
+        discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid},\"error\":\"forbidden\"}"
+      else
+        match repRes with
+        | .error _ =>
+          subMu.atomically do
+            let m ← get
+            if m.contains mid then
+              set (m.insert mid { maxPayload := maxP, replaying := false, queuedLive := #[] })
           discard <| sendWsText s!"\{\"type\":\"stream_lagged\",\"mission_id\":{jsonEscape mid}}"
-        else
-          for f in frames do
-            discard <| sendWsText f
-          discard <| sendWsText s!"\{\"type\":\"sync_caught_up\",\"mission_id\":{jsonEscape mid},\"cursor\":{curSeq},\"replayed\":{frames.size}}"
+        | .ok (frames, curSeq, lagged) =>
+          subMu.atomically do
+            let m ← get
+            if let some sub := m[mid]? then
+              if lagged then
+                set (m.insert mid { sub with replaying := false, queuedLive := #[] })
+                discard <| sendWsText s!"\{\"type\":\"stream_lagged\",\"mission_id\":{jsonEscape mid}}"
+              else
+                for f in frames do
+                  discard <| sendWsText f
+                let mut finalSeq := curSeq
+                let mut sentCount := frames.size
+                for (qSeq, qFrame) in sub.queuedLive do
+                  if qSeq == 0 || qSeq > finalSeq then
+                    if qSeq > finalSeq then finalSeq := qSeq
+                    sentCount := sentCount + 1
+                    discard <| sendWsText qFrame
+                set (m.insert mid { sub with replaying := false, queuedLive := #[] })
+                discard <| sendWsText s!"\{\"type\":\"sync_caught_up\",\"mission_id\":{jsonEscape mid},\"cursor\":{finalSeq},\"replayed\":{sentCount}}"
     let mut rxBuf := ByteArray.empty
     let mut steps : Nat := 0
     let pollMs : UInt32 := if maxSteps?.isSome then 2000 else 15000
@@ -4884,7 +4932,7 @@ def runSyncWebSocketSessionLoop
                     else if op == "unsubscribe" then
                       let mid := (jv.fieldStr? "mission_id").getD ""
                       if !mid.isEmpty then
-                        subsRef.modify (fun m => m.erase mid)
+                        subMu.atomically do modify (·.erase mid)
                         discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid}}"
                     else if op == "subscribe" then
                       let mid := (jv.fieldStr? "mission_id").getD ""
@@ -4892,20 +4940,25 @@ def runSyncWebSocketSessionLoop
                       let sinceSeq? := (jv.fieldNat? "since_seq").map Nat.toUInt64
                       if !isSafeMissionId mid then
                         discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid},\"error\":\"invalid_mission_id\"}"
-                      else if (← authorizeMissionOp st wsCaller mid false).isSome then
+                      else if !(← isAuthorizedForMission mid) then
                         discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid},\"error\":\"forbidden\"}"
                       else
-                        subsRef.modify (fun m => m.insert mid maxP)
+                        subMu.atomically do
+                          modify (fun m => m.insert mid { maxPayload := maxP, replaying := true, queuedLive := #[] })
                         replayForMission mid sinceSeq? maxP
                     else if op == "sync_resume" then
                       if let some (.obj pairs) := jv.field? "cursors" then
                         for (mid, curVal) in pairs do
-                          if isSafeMissionId mid && (← authorizeMissionOp st wsCaller mid false).isNone then
+                          if isSafeMissionId mid && (← isAuthorizedForMission mid) then
                             let sinceSeq? : Option UInt64 := curVal.asNat?.map Nat.toUInt64
-                            subsRef.modify (fun m => if m.contains mid then m else m.insert mid 4096)
-                            let curSubs ← subsRef.get
-                            let maxP := (curSubs[mid]?).getD 4096
+                            let maxP ← subMu.atomically do
+                              let m ← get
+                              let mp := (m[mid]?.map (·.maxPayload)).getD 4096
+                              set (m.insert mid { maxPayload := mp, replaying := true, queuedLive := #[] })
+                              return mp
                             replayForMission mid sinceSeq? maxP
+                          else if isSafeMissionId mid then
+                            subMu.atomically do modify (·.erase mid)
               | _ => pure ()
     if (← aliveRef.get) then
       if let some cls := makeServerClose? 1000 "" then

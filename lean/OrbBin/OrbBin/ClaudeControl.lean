@@ -1087,7 +1087,7 @@ private def launchOrReuseWarmClaude
                   let (delta, turnDone, err?) ← ingestClaudeStdoutEvent stRef ev nowMs skipZeroRef
                   let snap ← stRef.get
                   if !delta.isEmpty then
-                    cb.onStructuredEvent "text_delta" (.obj #[("content", .str delta)])
+                    cb.onStructuredEvent "text_delta" (.obj #[("content", .str snap.text)])
                   cb.onOutputEvent (.obj #[
                     ("text", .str delta),
                     ("reset", .bool false),
@@ -1354,8 +1354,9 @@ def startHarnessTurn
                 stRef.modify fun s => { s with sessionId? := some sid }
               if !delta.isEmpty then
                 stRef.modify fun s => { s with text := s.text ++ delta }
+                let curSnap ← stRef.get
                 let cb ← getCallbacksFor mgr id
-                cb.onStructuredEvent "text_delta" (.obj #[("content", .str delta)])
+                cb.onStructuredEvent "text_delta" (.obj #[("content", .str curSnap.text)])
                 cb.onOutputEvent (.obj #[("text", .str delta), ("reset", .bool false)])
       closeFdRaw spawned.stdoutFd
       let code ← waitpidBlock spawned.pid

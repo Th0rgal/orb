@@ -4823,11 +4823,20 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
       if let .ok () ← pollReadable wfd 300 then
         let ch ← readStreamChunk wfd 32768
         if !ch.isEmpty then wsRx := wsRx ++ ch
-    -- Append a live event on subscribed `m-zw-fast-new` AND a settled answer on unsubscribed `m-zw-other` (`inbox_answer_push`), plus Bob's mission (must NOT leak to admin)!
+    -- Append live events on subscribed `m-zw-fast-new`, unsubscribed `m-zw-other` (`inbox_answer_push`), and Bob's mission, then revoke access on `m-zw-fast-new` and verify immediate `forbidden` unsubscribe with zero leak!
+    let _ ← appendMissionEvent store "m-zw-fast-new" "text_delta" "{\"delta\":\"chunk-1\"}" "2026-11-11T07:00:59Z"
     let _ ← appendMissionEvent store "m-zw-fast-new" "assistant_message" "{\"id\":\"a-live\",\"content\":\"Live WS delta\"}" "2026-11-11T07:01:00Z"
     let _ ← appendMissionEvent store "m-zw-other" "assistant_message" "{\"id\":\"a-inbox\",\"content\":\"Background inbox answer\"}" "2026-11-11T07:01:01Z"
     let _ ← appendMissionEvent store "m-zw-bob" "assistant_message" "{\"id\":\"a-bob-secret\",\"content\":\"Bob secret answer\"}" "2026-11-11T07:01:02Z"
-    for _ in [0:4] do
+    for _ in [0:5] do
+      if let .ok () ← pollReadable wfd 250 then
+        let ch ← readStreamChunk wfd 32768
+        if !ch.isEmpty then wsRx := wsRx ++ ch
+    -- Revoke `bootAdminId`'s access to `m-zw-fast-new` while the WebSocket subscription is still open!
+    discard <| execParamQuery store.missionsDb
+      "UPDATE missions SET owner_user_id=?2 WHERE id=?1;" #["m-zw-fast-new", bobId]
+    let _ ← appendMissionEvent store "m-zw-fast-new" "assistant_message" "{\"id\":\"a-revoked\",\"content\":\"Revoked post-share secret\"}" "2026-11-11T07:01:03Z"
+    for _ in [0:3] do
       if let .ok () ← pollReadable wfd 250 then
         let ch ← readStreamChunk wfd 32768
         if !ch.isEmpty then wsRx := wsRx ++ ch
@@ -4850,12 +4859,14 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
       (allWs.splitOn "\"type\":\"sync_ready\"").length == 2 &&
       (allWs.splitOn "\"type\":\"sync_caught_up\"").length == 2 &&
       (allWs.splitOn "\"replayed\":1").length == 2 &&
-      (allWs.splitOn "\"error\":\"forbidden\"").length == 2 &&
+      (allWs.splitOn "\"error\":\"forbidden\"").length == 3 &&
       (allWs.splitOn "\"type\":\"pong\",\"ts\":1234567").length == 2 &&
+      (allWs.splitOn "\"mode\":\"delta\"").length == 2 &&
       (allWs.splitOn "Live WS delta").length == 2 &&
       (allWs.splitOn "\"type\":\"inbox_answer_push\"").length == 2 &&
       (allWs.splitOn "Background inbox answer").length == 2 &&
-      (allWs.splitOn "Bob secret answer").length == 1
+      (allWs.splitOn "Bob secret answer").length == 1 &&
+      (allWs.splitOn "Revoked post-share secret").length == 1
 
   let _ := srvTask.get
   if !keepAliveOk || !wsSyncOk then

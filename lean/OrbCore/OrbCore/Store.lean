@@ -3589,11 +3589,17 @@ def renderSyncWsEventJson
     let mut hasId := false
     let mut hasName := false
     let mut hasToolName := false
+    let mut hasContent := false
+    let mut hasMode := false
+    let mut deltaStr? : Option String := none
     for (k, v) in pairs do
       if k != "type" && k != "mission_id" && k != "sequence" && k != "timestamp" && k != "at" then
         if k == "id" || k == "event_id" then hasId := true
         if k == "name" then hasName := true
         if k == "tool_name" then hasToolName := true
+        if k == "content" then hasContent := true
+        if k == "mode" then hasMode := true
+        if k == "delta" then deltaStr? := v.asStr?
         if let some maxP := maxPayload? then
           if maxP > 0 && (evType == "tool_call" || evType == "tool_result") && (k == "args" || k == "result" || k == "content") then
             let asStr := match v with | .str s => s | other => renderCompact other
@@ -3608,6 +3614,12 @@ def renderSyncWsEventJson
           kvs := kvs.push (k, v)
     if !hasId then
       kvs := kvs.push ("id", .str s!"seq-{seq}")
+    if evType == "text_delta" then
+      if let some dChunk := deltaStr? then
+        if !hasContent then
+          kvs := kvs.push ("content", .str dChunk)
+        if !hasMode then
+          kvs := kvs.push ("mode", .str "delta")
     if hasToolName && !hasName then
       if let some (_, v) := pairs.find? (fun (k, _) => k == "tool_name") then
         kvs := kvs.push ("name", v)
