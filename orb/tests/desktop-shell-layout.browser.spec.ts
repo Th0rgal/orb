@@ -202,7 +202,8 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   const composerBox = (await composerInput.boundingBox())!;
   expect(composerBox.y + composerBox.height).toBeLessThanOrEqual(viewportHeight);
 
-  const mainScrollMetrics = await page.locator(".main > .scroll").evaluate((el) => {
+  const activeMainScroll = page.locator(".main > .mission-slot:not([hidden]) > .scroll");
+  const mainScrollMetrics = await activeMainScroll.evaluate((el) => {
     el.scrollTop = el.scrollHeight;
     return {
       scrollTop: el.scrollTop,
@@ -224,7 +225,7 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   expect(tbLeftBox.x).toBeGreaterThanOrEqual(initialPlatform === "linux" ? 8 : 80);
   expect(tbLeftBox.x + tbLeftBox.width).toBeLessThanOrEqual(sbBox.width);
 
-  const scrollMask = await page.locator(".main > .scroll").evaluate((el) => {
+  const scrollMask = await activeMainScroll.evaluate((el) => {
     const s = getComputedStyle(el);
     return s.maskImage || s.webkitMaskImage || "";
   });

@@ -727,6 +727,13 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             panel.canCreateDirectories = true
             panel.allowsMultipleSelection = false
             panel.prompt = "Choose"
+            if let initial = (args["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !initial.isEmpty {
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: initial, isDirectory: &isDir), isDir.boolValue {
+                    panel.directoryURL = URL(fileURLWithPath: initial, isDirectory: true)
+                }
+            }
             guard let win = window else { replyToWebView(id: reqId, result: nil); return }
             panel.beginSheetModal(for: win) { resp in
                 let chosen = (resp == .OK) ? panel.url?.path : nil

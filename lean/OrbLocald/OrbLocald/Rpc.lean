@@ -1577,6 +1577,683 @@ def filePathToUri (absPath : String) : String := Id.run do
       out := ((out.push '%').push (hexDigit (b >>> 4))).push (hexDigit b)
   return out
 
+private def hexNibbleVal? (b : UInt8) : Option UInt8 :=
+  if b ≥ 0x30 && b ≤ 0x39 then some (b - 0x30)
+  else if b ≥ 0x41 && b ≤ 0x46 then some (b - 0x41 + 10)
+  else if b ≥ 0x61 && b ≤ 0x66 then some (b - 0x61 + 10)
+  else none
+
+private def percentDecodeNoNul? (s : String) : Option ByteArray := Id.run do
+  let src := s.toUTF8
+  let mut out := ByteArray.emptyWithCapacity src.size
+  let mut i : Nat := 0
+  while i < src.size do
+    let b := src.get! i
+    if b == 0 then return none
+    if b == 0x25 then
+      if i + 2 ≥ src.size then return none
+      let some hi := hexNibbleVal? (src.get! (i + 1)) | return none
+      let some lo := hexNibbleVal? (src.get! (i + 2)) | return none
+      let dec := (hi <<< 4) ||| lo
+      if dec == 0 then return none
+      out := out.push dec
+      i := i + 3
+    else
+      out := out.push b
+      i := i + 1
+  return some out
+
+/-- Decode an RFC 8089 `file:///...` or `file://localhost/...` URI into an absolute POSIX path. -/
+def fileUriToPath? (uri : String) : Option String := do
+  let trimmed := uri.trimAscii.toString
+  if !trimmed.startsWith "file://" then none
+  let afterScheme := (trimmed.drop 7).toString
+  let rawPath ←
+    if afterScheme.startsWith "/" then some afterScheme
+    else if afterScheme.startsWith "localhost/" then some (afterScheme.drop 9).toString
+    else none
+  let bytes ← percentDecodeNoNul? rawPath
+  let decoded ← String.fromUTF8? bytes
+  if !decoded.startsWith "/" then none
+  let clean := OrbBin.PosixExt.stripTrailingSlash decoded
+  some (if clean.isEmpty then "/" else clean)
+
+/-! ### Minimal Session D-Bus Wire Client for `org.freedesktop.portal.FileChooser` -/
+
+def dbusAlignUp (n align : Nat) : Nat :=
+  if align ≤ 1 then n
+  else
+    let r := n % align
+    if r == 0 then n else n + (align - r)
+
+def dbusPadTo (b : ByteArray) (align : Nat) : ByteArray := Id.run do
+  let target := dbusAlignUp b.size align
+  let mut out := b
+  while out.size < target do
+    out := out.push 0
+  return out
+
+def dbusPushU32LE (b : ByteArray) (v : UInt32) : ByteArray :=
+  let b1 := b.push (v &&& 0xFF).toUInt8
+  let b2 := b1.push ((v >>> 8) &&& 0xFF).toUInt8
+  let b3 := b2.push ((v >>> 16) &&& 0xFF).toUInt8
+  b3.push ((v >>> 24) &&& 0xFF).toUInt8
+
+def dbusReadU32 (b : ByteArray) (isBE : Bool) (off : Nat) : UInt32 :=
+  if off + 4 > b.size then 0
+  else if isBE then
+    ((b.get! off).toUInt32 <<< 24) |||
+    ((b.get! (off + 1)).toUInt32 <<< 16) |||
+    ((b.get! (off + 2)).toUInt32 <<< 8) |||
+    (b.get! (off + 3)).toUInt32
+  else
+    (b.get! off).toUInt32 |||
+    ((b.get! (off + 1)).toUInt32 <<< 8) |||
+    ((b.get! (off + 2)).toUInt32 <<< 16) |||
+    ((b.get! (off + 3)).toUInt32 <<< 24)
+
+def dbusPushString (b : ByteArray) (s : String) : ByteArray :=
+  let bs := s.toUTF8
+  let b1 := dbusPushU32LE (dbusPadTo b 4) bs.size.toUInt32
+  (b1 ++ bs).push 0
+
+def dbusPushSig (b : ByteArray) (sig : String) : ByteArray :=
+  let bs := sig.toUTF8
+  ((b.push bs.size.toUInt8) ++ bs).push 0
+
+inductive DbusHdrVal where
+  | str (s : String)
+  | objPath (o : String)
+  | sig (g : String)
+  | u32 (v : UInt32)
+  deriving Repr, Inhabited
+
+inductive DbusOptVal where
+  | str (s : String)
+  | bool (v : Bool)
+  | cstrBytes (path : String)
+  deriving Repr, Inhabited
+
+def buildDbusMessage (msgType : UInt8) (serial : UInt32)
+    (fields : Array (UInt8 × DbusHdrVal)) (body : ByteArray := ByteArray.empty) : ByteArray := Id.run do
+  let mut fbuf := ByteArray.empty
+  let mut first := true
+  for (code, hv) in fields do
+    if !first then
+      fbuf := dbusPadTo fbuf 8
+    first := false
+    fbuf := fbuf.push code
+    match hv with
+    | DbusHdrVal.str s =>
+      fbuf := dbusPushSig fbuf "s"
+      fbuf := dbusPushString fbuf s
+    | DbusHdrVal.objPath o =>
+      fbuf := dbusPushSig fbuf "o"
+      fbuf := dbusPushString fbuf o
+    | DbusHdrVal.sig g =>
+      fbuf := dbusPushSig fbuf "g"
+      fbuf := dbusPushSig fbuf g
+    | DbusHdrVal.u32 v =>
+      fbuf := dbusPushSig fbuf "u"
+      fbuf := dbusPushU32LE (dbusPadTo fbuf 4) v
+  let hdr0 := ByteArray.mk #['l'.toUInt8, msgType, 0, 1]
+  let hdr1 := dbusPushU32LE hdr0 body.size.toUInt32
+  let hdr2 := dbusPushU32LE hdr1 serial
+  let hdr3 := dbusPushU32LE hdr2 fbuf.size.toUInt32
+  (dbusPadTo (hdr3 ++ fbuf) 8) ++ body
+
+def buildPortalOpenFileBody (title : String) (opts : Array (String × DbusOptVal)) : ByteArray := Id.run do
+  let head := dbusPushString (dbusPushString ByteArray.empty "") title
+  let mut elems := ByteArray.empty
+  let mut first := true
+  for (k, ov) in opts do
+    if !first then
+      elems := dbusPadTo elems 8
+    first := false
+    elems := dbusPushString elems k
+    match ov with
+    | DbusOptVal.str s =>
+      elems := dbusPushSig elems "s"
+      elems := dbusPushString elems s
+    | DbusOptVal.bool v =>
+      elems := dbusPushSig elems "b"
+      elems := dbusPushU32LE (dbusPadTo elems 4) (if v then 1 else 0)
+    | DbusOptVal.cstrBytes p =>
+      elems := dbusPushSig elems "ay"
+      let raw := p.toUTF8.push 0
+      elems := (dbusPushU32LE (dbusPadTo elems 4) raw.size.toUInt32) ++ raw
+  let withLen := dbusPushU32LE (dbusPadTo head 4) elems.size.toUInt32
+  (dbusPadTo withLen 8) ++ elems
+
+private partial def dbusSplitSingleType (sig : Array Char) (si : Nat) : Option Nat :=
+  if h : si < sig.size then
+    let c := sig[si]
+    if c == 'y' || c == 'b' || c == 'n' || c == 'q' || c == 'i' || c == 'u' ||
+       c == 'x' || c == 't' || c == 'd' || c == 'h' || c == 's' || c == 'o' ||
+       c == 'g' || c == 'v' then
+      some (si + 1)
+    else if c == 'a' then
+      dbusSplitSingleType sig (si + 1)
+    else if c == '(' then
+      Id.run do
+        let mut depth : Nat := 1
+        let mut j : Nat := si + 1
+        while j < sig.size && depth > 0 do
+          let cj := sig[j]!
+          if cj == '(' then depth := depth + 1
+          else if cj == ')' then depth := depth - 1
+          j := j + 1
+        return if depth == 0 then some j else none
+    else if c == '{' then
+      Id.run do
+        let mut depth : Nat := 1
+        let mut j : Nat := si + 1
+        while j < sig.size && depth > 0 do
+          let cj := sig[j]!
+          if cj == '{' then depth := depth + 1
+          else if cj == '}' then depth := depth - 1
+          j := j + 1
+        return if depth == 0 then some j else none
+    else none
+  else none
+
+private def dbusTypeAlign (sig : Array Char) (si : Nat) : Nat :=
+  if h : si < sig.size then
+    match sig[si] with
+    | 'n' | 'q' => 2
+    | 'b' | 'i' | 'u' | 'h' | 's' | 'o' | 'a' => 4
+    | 'x' | 't' | 'd' | '(' | '{' => 8
+    | _ => 1
+  else 1
+
+private def dbusSkipValue (fuel : Nat) (buf : ByteArray) (isBE : Bool) (limit : Nat)
+    (off : Nat) (sig : Array Char) (si se : Nat) : Option Nat :=
+  match fuel with
+  | 0 => none
+  | fuel' + 1 =>
+    if si ≥ se || se > sig.size || limit > buf.size then none
+    else
+      let p := dbusAlignUp off (dbusTypeAlign sig si)
+      if p > limit then none
+      else
+        match sig[si]! with
+        | 'y' => if p + 1 ≤ limit then some (p + 1) else none
+        | 'n' | 'q' => if p + 2 ≤ limit then some (p + 2) else none
+        | 'b' | 'i' | 'u' | 'h' => if p + 4 ≤ limit then some (p + 4) else none
+        | 'x' | 't' | 'd' => if p + 8 ≤ limit then some (p + 8) else none
+        | 's' | 'o' =>
+          if p + 4 > limit then none
+          else
+            let sLen := (dbusReadU32 buf isBE p).toNat
+            let after := p + 4 + sLen + 1
+            if after ≤ limit then some after else none
+        | 'g' =>
+          if p + 1 > limit then none
+          else
+            let gLen := (buf.get! p).toNat
+            let after := p + 1 + gLen + 1
+            if after ≤ limit then some after else none
+        | 'v' =>
+          if p + 1 > limit then none
+          else
+            let gLen := (buf.get! p).toNat
+            let valOff := p + 1 + gLen + 1
+            if valOff > limit then none
+            else
+              match String.fromUTF8? (buf.extract (p + 1) (p + 1 + gLen)) with
+              | none => none
+              | some vs =>
+                let vsig := vs.toList.toArray
+                match dbusSplitSingleType vsig 0 with
+                | some vse =>
+                  if vse == vsig.size then dbusSkipValue fuel' buf isBE limit valOff vsig 0 vse
+                  else none
+                | none => none
+        | 'a' =>
+          if si + 1 ≥ se || p + 4 > limit then none
+          else
+            let arrBytes := (dbusReadU32 buf isBE p).toNat
+            let elemStart := dbusAlignUp (p + 4) (dbusTypeAlign sig (si + 1))
+            let after := elemStart + arrBytes
+            if after ≤ limit then some after else none
+        | '(' | '{' => Id.run do
+          let mut curSi := si + 1
+          let mut curOff := p
+          while curSi + 1 < se do
+            let some nextSi := dbusSplitSingleType sig curSi | return none
+            let some nextOff := dbusSkipValue fuel' buf isBE limit curOff sig curSi nextSi | return none
+            curSi := nextSi
+            curOff := nextOff
+          return if curSi + 1 == se then some curOff else none
+        | _ => none
+
+private def dbusReadStringAt? (buf : ByteArray) (isBE : Bool) (limit off : Nat) : Option (String × Nat) :=
+  let p := dbusAlignUp off 4
+  if limit > buf.size || p + 4 > limit then none
+  else
+    let sLen := (dbusReadU32 buf isBE p).toNat
+    let after := p + 4 + sLen + 1
+    if after > limit then none
+    else
+      match String.fromUTF8? (buf.extract (p + 4) (p + 4 + sLen)) with
+      | some s => some (s, after)
+      | none => none
+
+private def dbusReadSigAt? (buf : ByteArray) (limit off : Nat) : Option (String × Nat) :=
+  if limit > buf.size || off + 1 > limit then none
+  else
+    let gLen := (buf.get! off).toNat
+    let after := off + 1 + gLen + 1
+    if after > limit then none
+    else
+      match String.fromUTF8? (buf.extract (off + 1) (off + 1 + gLen)) with
+      | some s => some (s, after)
+      | none => none
+
+structure DbusMessageFrame where
+  msgType      : UInt8
+  isBigEndian  : Bool
+  serial       : UInt32
+  replySerial? : Option UInt32 := none
+  path?        : Option String := none
+  interface?   : Option String := none
+  member?      : Option String := none
+  errorName?   : Option String := none
+  bodySig?     : Option String := none
+  rawMsg       : ByteArray
+  bodyStart    : Nat
+  bodyEnd      : Nat
+
+inductive DbusFrameParse where
+  | incomplete
+  | invalid (reason : String)
+  | ok (frame : DbusMessageFrame) (rest : ByteArray)
+
+def parseDbusMessageFrame (rxBuf : ByteArray) : DbusFrameParse := Id.run do
+  if rxBuf.size < 16 then return .incomplete
+  let endianByte := rxBuf.get! 0
+  if endianByte != 'l'.toUInt8 && endianByte != 'B'.toUInt8 then
+    return .invalid "bad_dbus_endian"
+  let isBE := endianByte == 'B'.toUInt8
+  let msgType := rxBuf.get! 1
+  let protoVer := rxBuf.get! 3
+  if protoVer != 1 then
+    return .invalid "bad_dbus_version"
+  let bodyLen := (dbusReadU32 rxBuf isBE 4).toNat
+  let serial := dbusReadU32 rxBuf isBE 8
+  let fieldsLen := (dbusReadU32 rxBuf isBE 12).toNat
+  if fieldsLen > 1048576 || bodyLen > 16777216 then
+    return .invalid "dbus_frame_too_large"
+  let fEnd := 16 + fieldsLen
+  let bodyStart := dbusAlignUp fEnd 8
+  let totalLen := bodyStart + bodyLen
+  if rxBuf.size < totalLen then
+    return .incomplete
+  let rawMsg := rxBuf.extract 0 totalLen
+  let rest := rxBuf.extract totalLen rxBuf.size
+  let mut replySerial? : Option UInt32 := none
+  let mut path? : Option String := none
+  let mut interface? : Option String := none
+  let mut member? : Option String := none
+  let mut errorName? : Option String := none
+  let mut bodySig? : Option String := none
+  let mut fCur : Nat := 16
+  while fCur < fEnd do
+    fCur := dbusAlignUp fCur 8
+    if fCur ≥ fEnd then break
+    if fCur + 2 > fEnd then return .invalid "truncated_dbus_header_field"
+    let code := rawMsg.get! fCur
+    let some (fSig, valOff) := dbusReadSigAt? rawMsg fEnd (fCur + 1)
+      | return .invalid "bad_dbus_header_sig"
+    if code == 1 && (fSig == "o" || fSig == "s") then
+      let some (v, nextOff) := dbusReadStringAt? rawMsg isBE fEnd valOff | return .invalid "bad_dbus_path"
+      path? := some v
+      fCur := nextOff
+    else if code == 2 && fSig == "s" then
+      let some (v, nextOff) := dbusReadStringAt? rawMsg isBE fEnd valOff | return .invalid "bad_dbus_iface"
+      interface? := some v
+      fCur := nextOff
+    else if code == 3 && fSig == "s" then
+      let some (v, nextOff) := dbusReadStringAt? rawMsg isBE fEnd valOff | return .invalid "bad_dbus_member"
+      member? := some v
+      fCur := nextOff
+    else if code == 4 && fSig == "s" then
+      let some (v, nextOff) := dbusReadStringAt? rawMsg isBE fEnd valOff | return .invalid "bad_dbus_error"
+      errorName? := some v
+      fCur := nextOff
+    else if code == 5 && fSig == "u" then
+      let up := dbusAlignUp valOff 4
+      if up + 4 > fEnd then return .invalid "bad_dbus_reply_serial"
+      replySerial? := some (dbusReadU32 rawMsg isBE up)
+      fCur := up + 4
+    else if code == 8 && fSig == "g" then
+      let some (v, nextOff) := dbusReadSigAt? rawMsg fEnd valOff | return .invalid "bad_dbus_body_sig"
+      bodySig? := some v
+      fCur := nextOff
+    else
+      let sigChars := fSig.toList.toArray
+      let some se := dbusSplitSingleType sigChars 0 | return .invalid "unknown_dbus_header_type"
+      let some nextOff := dbusSkipValue 64 rawMsg isBE fEnd valOff sigChars 0 se
+        | return .invalid "skip_dbus_header_failed"
+      fCur := nextOff
+  return .ok {
+    msgType, isBigEndian := isBE, serial, replySerial?, path?, interface?, member?, errorName?, bodySig?,
+    rawMsg, bodyStart, bodyEnd := totalLen
+  } rest
+
+def decodePortalResponseBody? (frame : DbusMessageFrame) : Option (UInt32 × Array String) := Id.run do
+  let buf := frame.rawMsg
+  let isBE := frame.isBigEndian
+  let bStart := frame.bodyStart
+  let bEnd := frame.bodyEnd
+  if bStart + 8 > bEnd then return none
+  let respCode := dbusReadU32 buf isBE bStart
+  if respCode != 0 then
+    return some (respCode, #[])
+  let arrBytes := (dbusReadU32 buf isBE (bStart + 4)).toNat
+  let elemStart := dbusAlignUp (bStart + 8) 8
+  let arrEnd := elemStart + arrBytes
+  if arrEnd > bEnd then return none
+  let mut cur := elemStart
+  while cur < arrEnd do
+    cur := dbusAlignUp cur 8
+    if cur ≥ arrEnd then break
+    let some (key, afterKey) := dbusReadStringAt? buf isBE arrEnd cur | return none
+    let some (vsigStr, valOff) := dbusReadSigAt? buf arrEnd afterKey | return none
+    if key == "uris" && vsigStr == "as" then
+      let ap := dbusAlignUp valOff 4
+      if ap + 4 > arrEnd then return none
+      let asBytes := (dbusReadU32 buf isBE ap).toNat
+      let mut sCur := ap + 4
+      let sEnd := sCur + asBytes
+      if sEnd > arrEnd then return none
+      let mut uris : Array String := #[]
+      while sCur < sEnd do
+        let some (u, nextS) := dbusReadStringAt? buf isBE sEnd sCur | return none
+        uris := uris.push u
+        sCur := nextS
+      return some (0, uris)
+    else
+      let vsig := vsigStr.toList.toArray
+      let some vse := dbusSplitSingleType vsig 0 | return none
+      let some nextCur := dbusSkipValue 64 buf isBE arrEnd valOff vsig 0 vse | return none
+      cur := nextCur
+  return some (0, #[])
+
+private def resolveDbusSessionSocketPath? : IO (Option String) := do
+  let rawAddr := (← IO.getEnv "DBUS_SESSION_BUS_ADDRESS").getD ""
+  for entry in rawAddr.splitOn ";" do
+    let t := entry.trimAscii.toString
+    if t.startsWith "unix:" then
+      for kv in (t.drop 5).toString.splitOn "," do
+        if kv.startsWith "path=" then
+          let rawP := (kv.drop 5).toString
+          if let some bs := percentDecodeNoNul? rawP then
+            if let some p := String.fromUTF8? bs then
+              if !p.isEmpty then
+                return some p
+  if let some xdg ← OrbBin.PosixExt.getEnvNonEmpty "XDG_RUNTIME_DIR" then
+    let cand := (System.FilePath.mk xdg.trimAscii.toString / "bus").toString
+    if (← System.FilePath.pathExists cand) then
+      return some cand
+  let euid ← OrbBin.PosixExt.geteuid
+  let fallback := s!"/run/user/{euid}/bus"
+  if (← System.FilePath.pathExists fallback) then
+    return some fallback
+  return none
+
+private def readDbusFrameTimeout (fd : LeanSys.Posix.Fd) (carry : ByteArray) (budgetMs : Nat) :
+    IO (Except String (DbusMessageFrame × ByteArray)) := do
+  let tStart ← IO.monoMsNow
+  let mut buf := carry
+  while true do
+    match parseDbusMessageFrame buf with
+    | .ok frame rest => return .ok (frame, rest)
+    | .invalid reason => return .error reason
+    | .incomplete =>
+      let elapsed := (← IO.monoMsNow) - tStart
+      if elapsed ≥ budgetMs then
+        return .error "dbus_timeout"
+      let sliceMs : UInt32 := (Nat.min (budgetMs - elapsed) 2500).toUInt32
+      match ← LeanSys.Posix.pollReadable fd sliceMs with
+      | .error .eagain => pure ()
+      | .error _ => return .error "dbus_poll_error"
+      | .ok () =>
+        let chunk ← LeanSys.Posix.readStreamChunk fd 16384
+        if chunk.isEmpty then
+          return .error "dbus_eof"
+        buf := if buf.isEmpty then chunk else buf ++ chunk
+  return .error "dbus_timeout"
+
+private def findAsciiCrlf? (b : ByteArray) : Option Nat := Id.run do
+  if b.size < 2 then return none
+  for i in [0:b.size - 1] do
+    if b.get! i == 0x0D && b.get! (i + 1) == 0x0A then
+      return some i
+  return none
+
+inductive PortalChooserOutcome where
+  | selected (paths : Array String)
+  | cancelled
+  | unavailable (reason : String)
+  deriving Repr
+
+private def runPortalFileChooser (title : String) (directory multiple : Bool)
+    (initialDir? : Option String := none) : IO PortalChooserOutcome := do
+  let some sockPath ← resolveDbusSessionSocketPath?
+    | return .unavailable "no_dbus_session_socket"
+  let fd ← match ← LeanSys.Posix.unixConnect sockPath with
+    | .ok f => pure f
+    | .error _ => return .unavailable "dbus_connect_failed"
+  try
+    let euid ← OrbBin.PosixExt.geteuid
+    let uidHex := LeanSys.Auth.bytesToHexLower (toString euid).toUTF8
+    let authWire := (ByteArray.mk #[0]) ++ s!"AUTH EXTERNAL {uidHex}\r\n".toUTF8
+    if (← LeanSys.Posix.writeAll fd authWire false).isOk.not then
+      return .unavailable "dbus_auth_write_failed"
+    let tAuthStart ← IO.monoMsNow
+    let mut authBuf := ByteArray.empty
+    while (findAsciiCrlf? authBuf).isNone do
+      if authBuf.size > 4096 || (← IO.monoMsNow) - tAuthStart ≥ 3000 then
+        return .unavailable "dbus_auth_timeout"
+      match ← LeanSys.Posix.pollReadable fd 1000 with
+      | .error .eagain => pure ()
+      | .error _ => return .unavailable "dbus_auth_poll_failed"
+      | .ok () =>
+        let chunk ← LeanSys.Posix.readStreamChunk fd 512
+        if chunk.isEmpty then return .unavailable "dbus_auth_eof"
+        authBuf := authBuf ++ chunk
+    let some crlfIdx := findAsciiCrlf? authBuf
+      | return .unavailable "dbus_auth_bad_line"
+    let authLine := String.fromUTF8? (authBuf.extract 0 crlfIdx) |>.getD ""
+    if !authLine.startsWith "OK " then
+      return .unavailable "dbus_auth_rejected"
+    let mut rxCarry := authBuf.extract (crlfIdx + 2) authBuf.size
+    if (← LeanSys.Posix.writeAll fd "BEGIN\r\n".toUTF8 false).isOk.not then
+      return .unavailable "dbus_begin_write_failed"
+
+    -- 1. Hello (serial 1)
+    let helloMsg := buildDbusMessage 1 1 #[
+      (1, .objPath "/org/freedesktop/DBus"),
+      (2, .str "org.freedesktop.DBus"),
+      (3, .str "Hello"),
+      (6, .str "org.freedesktop.DBus")
+    ]
+    if (← LeanSys.Posix.writeAll fd helloMsg false).isOk.not then
+      return .unavailable "dbus_hello_write_failed"
+    let mut helloDone := false
+    let mut guardSteps : Nat := 0
+    while !helloDone && guardSteps < 16 do
+      guardSteps := guardSteps + 1
+      match ← readDbusFrameTimeout fd rxCarry 5000 with
+      | .error e => return .unavailable e
+      | .ok (frm, rest) =>
+        rxCarry := rest
+        if frm.replySerial? == some 1 then
+          if frm.msgType == 2 then helloDone := true
+          else return .unavailable "dbus_hello_error"
+    if !helloDone then return .unavailable "dbus_hello_unanswered"
+
+    -- 2. AddMatch for org.freedesktop.portal.Request::Response (serial 2)
+    let matchRule := "type='signal',interface='org.freedesktop.portal.Request',member='Response'"
+    let addMatchMsg := buildDbusMessage 1 2 #[
+      (1, .objPath "/org/freedesktop/DBus"),
+      (2, .str "org.freedesktop.DBus"),
+      (3, .str "AddMatch"),
+      (6, .str "org.freedesktop.DBus"),
+      (8, .sig "s")
+    ] (dbusPushString ByteArray.empty matchRule)
+    if (← LeanSys.Posix.writeAll fd addMatchMsg false).isOk.not then
+      return .unavailable "dbus_addmatch_write_failed"
+    let mut matchDone := false
+    guardSteps := 0
+    while !matchDone && guardSteps < 16 do
+      guardSteps := guardSteps + 1
+      match ← readDbusFrameTimeout fd rxCarry 5000 with
+      | .error e => return .unavailable e
+      | .ok (frm, rest) =>
+        rxCarry := rest
+        if frm.replySerial? == some 2 then
+          if frm.msgType == 2 then matchDone := true
+          else return .unavailable "dbus_addmatch_error"
+    if !matchDone then return .unavailable "dbus_addmatch_unanswered"
+
+    -- 3. OpenFile on org.freedesktop.portal.FileChooser (serial 3)
+    let handleToken := "orb_" ++ (← randomHexBytes 8)
+    let mut opts : Array (String × DbusOptVal) := #[
+      ("handle_token", .str handleToken),
+      ("modal", .bool true),
+      ("directory", .bool directory),
+      ("multiple", .bool multiple)
+    ]
+    if let some dirHint := initialDir? then
+      let cleanHint := dirHint.trimAscii.toString
+      if !cleanHint.isEmpty && cleanHint.startsWith "/" && !(cleanHint.toList.contains '\x00') then
+        let stHint ← OrbBin.PosixExt.statPath cleanHint
+        if stHint.exists_ && stHint.isDir then
+          opts := opts.push ("current_folder", .cstrBytes cleanHint)
+    let openBody := buildPortalOpenFileBody title opts
+    let openMsg := buildDbusMessage 1 3 #[
+      (1, .objPath "/org/freedesktop/portal/desktop"),
+      (2, .str "org.freedesktop.portal.FileChooser"),
+      (3, .str "OpenFile"),
+      (6, .str "org.freedesktop.portal.Desktop"),
+      (8, .sig "ssa{sv}")
+    ] openBody
+    if (← LeanSys.Posix.writeAll fd openMsg false).isOk.not then
+      return .unavailable "portal_openfile_write_failed"
+
+    let mut reqHandlePath : Option String := none
+    let mut earlySignals : Array DbusMessageFrame := #[]
+    guardSteps := 0
+    while reqHandlePath.isNone && guardSteps < 32 do
+      guardSteps := guardSteps + 1
+      match ← readDbusFrameTimeout fd rxCarry 8000 with
+      | .error e => return .unavailable e
+      | .ok (frm, rest) =>
+        rxCarry := rest
+        if frm.replySerial? == some 3 then
+          if frm.msgType == 3 then
+            return .unavailable (frm.errorName?.getD "portal_openfile_error")
+          else if frm.msgType == 2 then
+            match dbusReadStringAt? frm.rawMsg frm.isBigEndian frm.bodyEnd frm.bodyStart with
+            | some (hPath, _) => reqHandlePath := some hPath
+            | none => return .unavailable "portal_bad_handle_reply"
+        else if frm.msgType == 4 && frm.interface? == some "org.freedesktop.portal.Request" && frm.member? == some "Response" then
+          earlySignals := earlySignals.push frm
+    let some expectedPath := reqHandlePath
+      | return .unavailable "portal_openfile_unanswered"
+
+    let matchesHandle (frm : DbusMessageFrame) : Bool :=
+      frm.path? == some expectedPath || (frm.path?.getD "").endsWith ("/" ++ handleToken)
+
+    for sigFrm in earlySignals do
+      if matchesHandle sigFrm then
+        match decodePortalResponseBody? sigFrm with
+        | some (0, uris) => return .selected (uris.filterMap fileUriToPath?)
+        | some (_, _)    => return .cancelled
+        | none           => return .unavailable "portal_bad_response_body"
+
+    -- 4. Wait up to 10 minutes for interactive user selection/cancel
+    let tWaitStart ← IO.monoMsNow
+    while (← IO.monoMsNow) - tWaitStart < 600000 do
+      let rem := 600000 - ((← IO.monoMsNow) - tWaitStart)
+      match ← readDbusFrameTimeout fd rxCarry rem with
+      | .error "dbus_timeout" =>
+        return .cancelled
+      | .error e =>
+        return .unavailable e
+      | .ok (frm, rest) =>
+        rxCarry := rest
+        if frm.msgType == 4 && frm.interface? == some "org.freedesktop.portal.Request" &&
+           frm.member? == some "Response" && matchesHandle frm then
+          match decodePortalResponseBody? frm with
+          | some (0, uris) => return .selected (uris.filterMap fileUriToPath?)
+          | some (_, _)    => return .cancelled
+          | none           => return .unavailable "portal_bad_response_body"
+    return .cancelled
+  finally
+    discard <| LeanSys.Posix.closeFd fd
+
+private def readCommandStdout? (cmd : String) (args : Array String) : IO (Option String) := do
+  try
+    let child ← IO.Process.spawn {
+      cmd := cmd
+      args := args
+      stdin := .null
+      stdout := .piped
+      stderr := .null
+    }
+    let out ← child.stdout.readToEnd
+    let code ← child.wait
+    if code == 0 then return some out.trimAscii.toString else return none
+  catch _ =>
+    return none
+
+private def runCliFilePickerFallback (title : String) (directory multiple : Bool)
+    (initialDir? : Option String := none) : IO (Array String) := do
+  let validInitialDir? ← do
+    match initialDir? with
+    | none => pure none
+    | some raw =>
+      let clean := raw.trimAscii.toString
+      if clean.isEmpty then pure none
+      else
+        let st ← OrbBin.PosixExt.statPath clean
+        pure (if st.exists_ && st.isDir then some clean else none)
+  if let some zenityBin ← resolveExecutableInPath? "zenity" #["/run/current-system/sw/bin/zenity", "/usr/bin/zenity"] then
+    let mut zArgs : Array String := #["--file-selection", s!"--title={title}"]
+    if directory then zArgs := zArgs.push "--directory"
+    if multiple then zArgs := zArgs ++ #["--multiple", "--separator=\n"]
+    if let some d := validInitialDir? then
+      zArgs := zArgs.push s!"--filename={OrbBin.PosixExt.stripTrailingSlash d}/"
+    match ← readCommandStdout? zenityBin zArgs with
+    | some out =>
+      return (out.splitOn "\n").toArray.filterMap fun ln =>
+        let p := ln.trimAscii.toString
+        if p.isEmpty then none else some p
+    | none => return #[]
+  if let some kdialogBin ← resolveExecutableInPath? "kdialog" #["/run/current-system/sw/bin/kdialog", "/usr/bin/kdialog"] then
+    let startDir := validInitialDir?.getD "."
+    let kArgs : Array String :=
+      if directory then #["--getexistingdirectory", startDir, "--title", title]
+      else if multiple then #["--getopenfilename", startDir, "--multiple", "--separate-output", "--title", title]
+      else #["--getopenfilename", startDir, "--title", title]
+    match ← readCommandStdout? kdialogBin kArgs with
+    | some out =>
+      return (out.splitOn "\n").toArray.filterMap fun ln =>
+        let p := ln.trimAscii.toString
+        if p.isEmpty then none else some p
+    | none => return #[]
+  return #[]
+
+private def pickLinuxPaths (title : String) (directory multiple : Bool)
+    (initialDir? : Option String := none) : IO (Array String) := do
+  match ← runPortalFileChooser title directory multiple initialDir? with
+  | .selected paths => return paths
+  | .cancelled => return #[]
+  | .unavailable _ => runCliFilePickerFallback title directory multiple initialDir?
+
 private def runDetachedOpen (hostOs : String) (args : Array String) : IO (Except String Unit) := do
   let prog := if hostOs == "macos" then "/usr/bin/open" else "xdg-open"
   runCommandUnit prog args
@@ -1607,21 +2284,6 @@ private def runDetachedRevealFile (hostOs : String) (filePath : String) (fallbac
       if let .ok () ← runCommandUnit dbusSend dbusArgs then
         return .ok ()
   runDetachedOpenDirectory hostOs fallbackDir
-
-private def readCommandStdout? (cmd : String) (args : Array String) : IO (Option String) := do
-  try
-    let child ← IO.Process.spawn {
-      cmd := cmd
-      args := args
-      stdin := .null
-      stdout := .piped
-      stderr := .null
-    }
-    let out ← child.stdout.readToEnd
-    let code ← child.wait
-    if code == 0 then return some out.trimAscii.toString else return none
-  catch _ =>
-    return none
 
 private def readSystemToolStdout? (name : String) (fallbacks : Array String) (args : Array String) : IO (Option String) := do
   match ← resolveExecutableInPath? name fallbacks with
@@ -1905,6 +2567,42 @@ private def canonicalizeExistingPath? (raw : String) : IO (Option String) := do
 private def isCanonicalWithinRoot (candReal rootReal : String) : Bool :=
   rootReal != "/" && !rootReal.isEmpty &&
   (candReal == rootReal || candReal.startsWith (if rootReal.endsWith "/" then rootReal else rootReal ++ "/"))
+
+private def skippedUploadFolderNames : Array String :=
+  #[".git", "node_modules", ".lake", "target", ".DS_Store", "__pycache__", ".venv", ".next", "dist"]
+
+private partial def walkFolderForUploadAux (rootCanon : String) (depth : Nat)
+    (dirFp : System.FilePath) (relPrefix : String)
+    (acc : Array (String × String × String × Nat)) : IO (Array (String × String × String × Nat)) := do
+  if depth > 64 || acc.size ≥ 4096 then
+    return acc
+  let rawEntries ← try dirFp.readDir catch _ => pure #[]
+  let entries := rawEntries.qsort (fun a b => a.fileName < b.fileName)
+  let mut out := acc
+  for entry in entries do
+    if out.size ≥ 4096 then break
+    let name := entry.fileName
+    if skippedUploadFolderNames.contains name then
+      continue
+    let st ← OrbBin.PosixExt.statPath entry.path.toString
+    if !st.exists_ || st.isSymlink then
+      continue
+    if st.isDir then
+      out ← walkFolderForUploadAux rootCanon (depth + 1) entry.path s!"{relPrefix}/{name}" out
+    else if st.isReg then
+      if let some fpReal ← canonicalizeExistingPath? entry.path.toString then
+        if isCanonicalWithinRoot fpReal rootCanon then
+          let idSt ← OrbBin.PosixExt.statIdentity fpReal false
+          out := out.push (name, fpReal, s!"{relPrefix}/{name}", idSt.size.toNat)
+  return out
+
+private def walkFolderForUpload (rootCanon : String) (displayName? : Option String := none) :
+    IO (Array (String × String × String × Nat)) := do
+  let baseName :=
+    match displayName? with
+    | some n => if n.isEmpty then ((System.FilePath.mk rootCanon).fileName.getD "Folder") else n
+    | none => (System.FilePath.mk rootCanon).fileName.getD "Folder"
+  walkFolderForUploadAux rootCanon 0 (System.FilePath.mk rootCanon) baseName #[]
 
 private def checkCanonicalUploadRead (st : LocaldState) (rawPath : String) : IO (Option System.FilePath) := do
   let p := rawPath.trimAscii.toString
@@ -3869,8 +4567,14 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let rawFiles := (args.fieldArr? "files").getD #[]
     let mut allowedPairs : Array (String × String) := #[]
     for item in rawFiles do
-      let rel := (item.fieldStr? "path").getD ""
-      let lp := ((item.fieldStr? "local_path").orElse (fun _ => item.fieldStr? "localPath")).getD ""
+      let explicitLocal? := (item.fieldStr? "local_path").orElse (fun _ => item.fieldStr? "localPath")
+      let explicitRel? := (item.fieldStr? "relative_path").orElse (fun _ => item.fieldStr? "relativePath")
+      let (rel, lp) :=
+        match explicitLocal?, explicitRel? with
+        | some l, some r => (r, l)
+        | some l, none   => ((item.fieldStr? "path").getD "", l)
+        | none, some r   => (r, (item.fieldStr? "path").getD "")
+        | none, none     => ("", "")
       if !rel.isEmpty && !lp.isEmpty then
         let lst ← OrbBin.PosixExt.statPath lp
         if lst.exists_ && lst.isReg && !lst.isSymlink then
@@ -4073,11 +4777,75 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       catch e =>
         return .error s!"Could not save file: {e}"
   | "pick_working_directory" =>
-    return .ok .null
+    if st.hostOs != "linux" then
+      return .ok .null
+    let rawHint := ((args.fieldStr? "path").getD "").trimAscii.toString
+    let initialDir? : Option String :=
+      if !rawHint.isEmpty then some rawHint
+      else if !st.homeDir.trimAscii.toString.isEmpty then some st.homeDir.trimAscii.toString
+      else none
+    let picked ← pickLinuxPaths "Choose Working Folder" true false initialDir?
+    let some firstRaw := picked[0]?
+      | return .ok .null
+    let some rp ← canonicalizeExistingPath? firstRaw
+      | return .ok .null
+    let lst ← OrbBin.PosixExt.statPath rp
+    if !lst.exists_ || !lst.isDir then
+      return .ok .null
+    if rp != "/" then
+      stRef.modify fun s =>
+        if s.grantedBrowseRoots.contains rp then s
+        else { s with grantedBrowseRoots := s.grantedBrowseRoots.push rp }
+    return .ok (.str rp)
   | "pick_upload_files" =>
-    return .ok (.arr #[])
+    if st.hostOs != "linux" then
+      return .ok (.arr #[])
+    let initialDir? : Option String :=
+      if !st.homeDir.trimAscii.toString.isEmpty then some st.homeDir.trimAscii.toString else none
+    let picked ← pickLinuxPaths "Attach Files" false true initialDir?
+    let mut items : Array JVal := #[]
+    let mut canonGrants : Array String := #[]
+    for rawPath in picked do
+      let lst ← OrbBin.PosixExt.statPath rawPath
+      if lst.exists_ && lst.isReg && !lst.isSymlink then
+        if let some fpReal ← canonicalizeExistingPath? rawPath then
+          if !canonGrants.contains fpReal then
+            canonGrants := canonGrants.push fpReal
+            let dispName := (System.FilePath.mk rawPath).fileName.getD ((System.FilePath.mk fpReal).fileName.getD "file")
+            items := items.push (.obj #[("name", .str dispName), ("path", .str fpReal)])
+    if !canonGrants.isEmpty then
+      stRef.modify fun s =>
+        let merged := canonGrants.foldl (fun acc f => if acc.contains f then acc else acc.push f) s.grantedUploadFiles
+        { s with grantedUploadFiles := merged }
+    return .ok (.arr items)
   | "pick_upload_folder" =>
-    return .ok (.obj #[("batch", .null), ("files", .arr #[])])
+    if st.hostOs != "linux" then
+      return .ok (.obj #[("batch", .null), ("files", .arr #[])])
+    let initialDir? : Option String :=
+      if !st.homeDir.trimAscii.toString.isEmpty then some st.homeDir.trimAscii.toString else none
+    let picked ← pickLinuxPaths "Attach Folder" true false initialDir?
+    let some firstRaw := picked[0]?
+      | return .ok (.obj #[("batch", .null), ("files", .arr #[])])
+    let some rootCanon ← canonicalizeExistingPath? firstRaw
+      | return .ok (.obj #[("batch", .null), ("files", .arr #[])])
+    let lst ← OrbBin.PosixExt.statPath rootCanon
+    if rootCanon == "/" || !lst.exists_ || !lst.isDir then
+      return .ok (.obj #[("batch", .null), ("files", .arr #[])])
+    let dispBase := (System.FilePath.mk firstRaw).fileName
+    let walked ← walkFolderForUpload rootCanon dispBase
+    let batchId ← randomUuidV4
+    let allowedPairs : Array (String × String) := walked.map fun (_, fpReal, relPath, _) => (relPath, fpReal)
+    stRef.modify fun s =>
+      let kept := s.offeredUploadBatches.filter (fun (b, _, _) => b != batchId)
+      { s with offeredUploadBatches := kept.push (batchId, #[rootCanon], allowedPairs) }
+    let filesJson : Array JVal := walked.map fun (name, fpReal, relPath, sz) =>
+      .obj #[
+        ("name", .str name),
+        ("path", .str fpReal),
+        ("relative_path", .str relPath),
+        ("size", JVal.nat sz)
+      ]
+    return .ok (.obj #[("batch", .str batchId), ("files", .arr filesJson)])
   | "voice_capability" =>
     let fakeMode := ((← OrbBin.PosixExt.getEnvNonEmpty "ORB_VOICE_FAKE").getD "") == "1"
     let arch ← detectHostArch

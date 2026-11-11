@@ -394,11 +394,9 @@ private def makeTestWav16kMono (sampleCount : Nat) (amp : UInt16) : ByteArray :=
     out := (out.push lo).push hi
   return out
 
-private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : String) : IO (Nat × Nat) := do
+private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (validTok : String) : IO (Nat × Nat) := do
   let mut passed := 0
   let mut total := 0
-  let pDir := System.FilePath.mk tmpBase / "parity-suite"
-  IO.FS.createDirAll pDir
 
   -- A. Symlink escape & `/` root confinement (`read_upload_file` + `browse_local_files`)
   let secretDir := pDir / "outside-secret"
@@ -954,6 +952,11 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
       discard <| LeanSys.Posix.closeFd lfd
   total := total + 1
   if (← assertTrue "live_sse_event_delivery_under_80ms_without_500ms_stall" sseLatOk) then passed := passed + 1
+  return (passed, total)
+
+private def runLinuxPortalAndRevealChecks (pDir : System.FilePath) (validTok : String) : IO (Nat × Nat) := do
+  let mut passed : Nat := 0
+  let mut total : Nat := 0
 
   -- I. Linux `reveal_download` prefers `org.freedesktop.FileManager1.ShowItems` and RFC 8089 `filePathToUri` encodes `,`/spaces/UTF-8
   let fmTestDir := pDir / "linux-reveal-test"
@@ -985,7 +988,246 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
   total := total + 1
   if (← assertTrue "linux_reveal_download_uses_filemanager1_and_encodes_uri" linuxRevealOk) then passed := passed + 1
 
+  -- J. Linux `fileUriToPath?` RFC 8089 decoding + XDG Desktop Portal `FileChooser` (`pick_working_directory`, `pick_upload_files`, `pick_upload_folder`) + CLI fallback
+  let uriSamplePath := "/tmp/Guide, Révision 100% 2026/sub dir"
+  let uriRoundTripOk :=
+    fileUriToPath? (filePathToUri uriSamplePath) == some uriSamplePath &&
+    fileUriToPath? "file://localhost/home/alice/my%20repo/" == some "/home/alice/my repo" &&
+    fileUriToPath? "file:///" == some "/" &&
+    (fileUriToPath? "file://remotehost/tmp/x").isNone &&
+    (fileUriToPath? "https://example.com/tmp/x").isNone &&
+    (fileUriToPath? "file:///bad%00nul").isNone
+  total := total + 1
+  if (← assertTrue "file_uri_to_path_rfc8089_roundtrip_and_validation" uriRoundTripOk) then passed := passed + 1
+
+  let portalRoot := pDir / "linux-portal-test"
+  let chosenWorkDir := portalRoot / "work repo, 2026"
+  let fallbackWorkDir := portalRoot / "zenity-dir"
+  let uploadDir := portalRoot / "bundle-folder"
+  IO.FS.createDirAll chosenWorkDir
+  IO.FS.writeFile (chosenWorkDir / "README.md") "# hello\n"
+  IO.FS.createDirAll fallbackWorkDir
+  IO.FS.createDirAll (uploadDir / "src")
+  IO.FS.createDirAll (uploadDir / ".git")
+  IO.FS.writeFile (uploadDir / "src" / "main.lean") "def x := 1\n"
+  IO.FS.writeFile (uploadDir / ".git" / "config") "[core]\n"
+  let pickSingleFile := portalRoot / "notes, draft.txt"
+  IO.FS.writeFile pickSingleFile "draft-payload"
+  let _ ← IO.Process.output { cmd := "ln", args := #["-s", pickSingleFile.toString, (uploadDir / "escape-link.txt").toString] }
+
+  let canonChosenWorkDir := (← IO.FS.realPath chosenWorkDir).toString
+  let canonFallbackWorkDir := (← IO.FS.realPath fallbackWorkDir).toString
+  let canonSingleFile := (← IO.FS.realPath pickSingleFile).toString
+  let canonUploadMain := (← IO.FS.realPath (uploadDir / "src" / "main.lean")).toString
+
+  let pidNum ← OrbBin.PosixExt.getpid
+  let portalSock := s!"/tmp/orb-portal-{pidNum}.sock"
+  try IO.FS.removeFile portalSock catch _ => pure ()
+
+  let servePortalOnce (lfd : LeanSys.Posix.Fd) (respCode : UInt32) (uris : Array String) (withExtraDict : Bool) : IO Bool := do
+    let cfd ← match ← LeanSys.Posix.tcpAcceptPoll lfd 5000 with
+      | .ok f => pure f
+      | .error _ => return false
+    try
+      -- Read SASL `\0AUTH EXTERNAL ...\r\n`
+      let mut sbuf := ByteArray.empty
+      while !(String.fromUTF8? sbuf |>.getD "" |>.endsWith "\r\n") && sbuf.size < 512 do
+        if let .ok () ← LeanSys.Posix.pollReadable cfd 2000 then
+          let ch ← LeanSys.Posix.readStreamChunk cfd 256
+          if ch.isEmpty then return false
+          sbuf := sbuf ++ ch
+        else return false
+      discard <| LeanSys.Posix.writeAll cfd "OK 0123456789abcdef0123456789abcdef\r\n".toUTF8 false
+      -- Read `BEGIN\r\n`
+      let mut bbuf := ByteArray.empty
+      let mut carry := ByteArray.empty
+      let mut gotBegin := false
+      while !gotBegin && bbuf.size < 2048 do
+        if let .ok () ← LeanSys.Posix.pollReadable cfd 2000 then
+          let ch ← LeanSys.Posix.readStreamChunk cfd 512
+          if ch.isEmpty then return false
+          bbuf := bbuf ++ ch
+          if bbuf.size ≥ 7 then
+            for idx in [0:bbuf.size - 6] do
+              if !gotBegin && String.fromUTF8? (bbuf.extract idx (idx + 7)) == some "BEGIN\r\n" then
+                gotBegin := true
+                carry := bbuf.extract (idx + 7) bbuf.size
+        else return false
+      if !gotBegin then return false
+
+      let readNextMsg (initBuf : ByteArray) : IO (Option (DbusMessageFrame × ByteArray)) := do
+        let mut rbuf := initBuf
+        for _ in [0:32] do
+          match parseDbusMessageFrame rbuf with
+          | .ok frm rem => return some (frm, rem)
+          | .invalid _ => return none
+          | .incomplete =>
+            if let .ok () ← LeanSys.Posix.pollReadable cfd 2000 then
+              let ch ← LeanSys.Posix.readStreamChunk cfd 4096
+              if ch.isEmpty then return none
+              rbuf := rbuf ++ ch
+            else return none
+        return none
+
+      -- 1. Hello
+      let some (m1, c1) ← readNextMsg carry | return false
+      let r1 := buildDbusMessage 2 10 #[(5, .u32 m1.serial), (8, .sig "s")] (dbusPushString ByteArray.empty ":1.77")
+      discard <| LeanSys.Posix.writeAll cfd r1 false
+      -- 2. AddMatch
+      let some (m2, c2) ← readNextMsg c1 | return false
+      let r2 := buildDbusMessage 2 11 #[(5, .u32 m2.serial)] ByteArray.empty
+      discard <| LeanSys.Posix.writeAll cfd r2 false
+      -- 3. OpenFile
+      let some (m3, _) ← readNextMsg c2 | return false
+      if m3.interface? != some "org.freedesktop.portal.FileChooser" || m3.member? != some "OpenFile" then
+        return false
+      let reqPath := "/org/freedesktop/portal/desktop/request/1_77/orb_mock"
+      let r3 := buildDbusMessage 2 12 #[(5, .u32 m3.serial), (8, .sig "o")] (dbusPushString ByteArray.empty reqPath)
+      discard <| LeanSys.Posix.writeAll cfd r3 false
+
+      -- Build Response(uint32, a{sv}) signal
+      let mut dictElems := ByteArray.empty
+      if withExtraDict then
+        -- Prepend `choices : a(ss)` = `[("encoding", "utf8")]` so generic D-Bus skipper is exercised
+        dictElems := dbusPushString dictElems "choices"
+        dictElems := dbusPushSig dictElems "a(ss)"
+        let pairElem := dbusPushString (dbusPushString ByteArray.empty "encoding") "utf8"
+        let withPairLen := dbusPushU32LE (dbusPadTo dictElems 4) pairElem.size.toUInt32
+        dictElems := (dbusPadTo withPairLen 8) ++ pairElem
+        dictElems := dbusPadTo dictElems 8
+      dictElems := dbusPushString dictElems "uris"
+      dictElems := dbusPushSig dictElems "as"
+      let mut uriArr := ByteArray.empty
+      for u in uris do
+        uriArr := dbusPushString uriArr u
+      dictElems := (dbusPushU32LE (dbusPadTo dictElems 4) uriArr.size.toUInt32) ++ uriArr
+
+      let sigHead := dbusPushU32LE (dbusPushU32LE ByteArray.empty respCode) dictElems.size.toUInt32
+      let sigBody := (dbusPadTo sigHead 8) ++ dictElems
+      let sigMsg := buildDbusMessage 4 13 #[
+        (1, .objPath reqPath),
+        (2, .str "org.freedesktop.portal.Request"),
+        (3, .str "Response"),
+        (8, .sig "ua{sv}")
+      ] sigBody
+      discard <| LeanSys.Posix.writeAll cfd sigMsg false
+      return true
+    finally
+      discard <| LeanSys.Posix.closeFd cfd
+
+  let mockPickerBinDir := portalRoot / "bin"
+  IO.FS.createDirAll mockPickerBinDir
+  let zenityHitFile := portalRoot / "zenity-called.flag"
+  let mockZenity := mockPickerBinDir / "zenity"
+  IO.FS.writeFile mockZenity s!"#!/bin/sh\necho 1 > \"{zenityHitFile.toString}\"\nprintf '%s\\n' \"{fallbackWorkDir.toString}\"\nexit 0\n"
+  discard <| OrbBin.PosixExt.chmod mockZenity.toString 0o755
+
+  let prevPathPortal := (← IO.getEnv "PATH").getD ""
+  let prevDbusPortal := (← IO.getEnv "DBUS_SESSION_BUS_ADDRESS").getD ""
+  let mut portalSuiteOk := false
+  if let .ok lfd ← LeanSys.Posix.unixListen portalSock 8 then
+    try
+      OrbBin.PosixExt.setenvVar "PATH" s!"{mockPickerBinDir.toString}:{prevPathPortal}"
+      OrbBin.PosixExt.setenvVar "DBUS_SESSION_BUS_ADDRESS" s!"unix:path={portalSock}"
+      let stPortalRef ← IO.mkRef ({
+        launchToken := validTok,
+        orbStateDir := (portalRoot / "state").toString,
+        homeDir := portalRoot.toString,
+        hostOs := "linux"
+      } : LocaldState)
+
+      -- 1) `pick_working_directory` accept -> returns canonical path & grants browse root
+      let t1 ← IO.asTask (prio := .dedicated) (servePortalOnce lfd 0 #[filePathToUri chosenWorkDir.toString] true)
+      let pickDirOkRes ← dispatchRpcCommand stPortalRef "pick_working_directory" (.obj #[("path", .str portalRoot.toString)])
+      let s1Ok := match t1.get with | .ok true => true | _ => false
+      let browsePickedRes ← dispatchRpcCommand stPortalRef "browse_local_files" (.obj #[
+        ("root", .str canonChosenWorkDir),
+        ("request", .obj #[("action", .str "list"), ("path", .str "")])
+      ])
+
+      -- 2) `pick_working_directory` cancel (`respCode = 1`) -> returns `.null` WITHOUT invoking `zenity`
+      let t2 ← IO.asTask (prio := .dedicated) (servePortalOnce lfd 1 #[] false)
+      let pickDirCancelRes ← dispatchRpcCommand stPortalRef "pick_working_directory" (.obj #[])
+      let s2Ok := match t2.get with | .ok true => true | _ => false
+      let zenityCalledDuringCancel ← zenityHitFile.pathExists
+
+      -- 3) `pick_upload_files` accept -> returns `[{name, path}]` & grants `read_upload_file`
+      let t3 ← IO.asTask (prio := .dedicated) (servePortalOnce lfd 0 #[filePathToUri pickSingleFile.toString] true)
+      let pickFilesRes ← dispatchRpcCommand stPortalRef "pick_upload_files" (.obj #[])
+      let s3Ok := match t3.get with | .ok true => true | _ => false
+      let readPickedFileRes ← dispatchRpcCommand stPortalRef "read_upload_file" (.obj #[("path", .str canonSingleFile)])
+
+      -- 4) `pick_upload_folder` accept -> skips `.git` & symlinks, offers batch so `grant_upload_folder` enables read
+      let t4 ← IO.asTask (prio := .dedicated) (servePortalOnce lfd 0 #[filePathToUri uploadDir.toString] false)
+      let pickFolderRes ← dispatchRpcCommand stPortalRef "pick_upload_folder" (.obj #[])
+      let s4Ok := match t4.get with | .ok true => true | _ => false
+      let batchIdPicked :=
+        match pickFolderRes with
+        | .ok jv => (jv.fieldStr? "batch").getD ""
+        | .error _ => ""
+      let folderFilesCount :=
+        match pickFolderRes with
+        | .ok jv => ((jv.fieldArr? "files").getD #[]).size
+        | .error _ => 0
+      let _ ← dispatchRpcCommand stPortalRef "grant_upload_folder" (.obj #[("batch", .str batchIdPicked)])
+      let readWalkedFileRes ← dispatchRpcCommand stPortalRef "read_upload_file" (.obj #[("path", .str canonUploadMain)])
+
+      -- 5) Portal unavailable -> falls back to `zenity` CLI
+      OrbBin.PosixExt.setenvVar "DBUS_SESSION_BUS_ADDRESS" "unix:path=/tmp/orb-nonexistent-portal.sock"
+      let prevXdg := (← IO.getEnv "XDG_RUNTIME_DIR").getD ""
+      OrbBin.PosixExt.setenvVar "XDG_RUNTIME_DIR" (portalRoot / "no-xdg").toString
+      let fallbackDirRes ← dispatchRpcCommand stPortalRef "pick_working_directory" (.obj #[])
+      if prevXdg.isEmpty then OrbBin.PosixExt.unsetenvVar "XDG_RUNTIME_DIR"
+      else OrbBin.PosixExt.setenvVar "XDG_RUNTIME_DIR" prevXdg
+
+      -- 6) `offer_upload_folder` also accepts `{name, path, relative_path, size}` shape from `macos_shell`
+      let macOfferRes ← dispatchRpcCommand stPortalRef "offer_upload_folder" (.obj #[
+        ("batch", .str "mac-shape-batch"),
+        ("roots", .arr #[.str uploadDir.toString]),
+        ("files", .arr #[.obj #[
+          ("name", .str "main.lean"),
+          ("path", .str canonUploadMain),
+          ("relative_path", .str "bundle-folder/src/main.lean"),
+          ("size", JVal.nat 10)
+        ]])
+      ])
+      let stAfterMacOffer ← stPortalRef.get
+      let macShapeOffered :=
+        stAfterMacOffer.offeredUploadBatches.any (fun (b, _, pairs) => b == "mac-shape-batch" && pairs.size == 1)
+
+      portalSuiteOk :=
+        s1Ok && s2Ok && s3Ok && s4Ok &&
+        (match pickDirOkRes with | .ok (.str p) => p == canonChosenWorkDir | _ => false) &&
+        browsePickedRes.isOk &&
+        (match pickDirCancelRes with | .ok .null => true | _ => false) &&
+        !zenityCalledDuringCancel &&
+        readPickedFileRes.isOk &&
+        (match pickFilesRes with
+         | .ok (.arr #[item]) => item.fieldStr? "name" == some "notes, draft.txt" && item.fieldStr? "path" == some canonSingleFile
+         | _ => false) &&
+        !batchIdPicked.isEmpty &&
+        folderFilesCount == 1 &&
+        readWalkedFileRes.isOk &&
+        (match fallbackDirRes with | .ok (.str p) => p == canonFallbackWorkDir | _ => false) &&
+        macOfferRes.isOk &&
+        macShapeOffered
+    finally
+      OrbBin.PosixExt.setenvVar "PATH" prevPathPortal
+      if prevDbusPortal.isEmpty then OrbBin.PosixExt.unsetenvVar "DBUS_SESSION_BUS_ADDRESS"
+      else OrbBin.PosixExt.setenvVar "DBUS_SESSION_BUS_ADDRESS" prevDbusPortal
+      discard <| LeanSys.Posix.closeFd lfd
+      try IO.FS.removeFile portalSock catch _ => pure ()
+  total := total + 1
+  if (← assertTrue "linux_portal_filechooser_working_dir_uploads_cancel_and_zenity_fallback" portalSuiteOk) then passed := passed + 1
+
   return (passed, total)
+
+private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : String) : IO (Nat × Nat) := do
+  let pDir := System.FilePath.mk tmpBase / "parity-suite"
+  IO.FS.createDirAll pDir
+  let (p1, t1) ← runDesktopReliabilityParityChecksPart1 pDir validTok
+  let (p2, t2) ← runLinuxPortalAndRevealChecks pDir validTok
+  return (p1 + p2, t1 + t2)
 
 private def runWarmClaudeRpcE2eChecks (validTok tmpStateDir : String) : IO (Nat × Nat) := do
   let warmRpcDir := System.FilePath.mk tmpStateDir / "warm-rpc-repo"
