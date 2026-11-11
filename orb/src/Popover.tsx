@@ -1,6 +1,6 @@
-import { onCleanup, onMount, type JSX } from "solid-js";
+import { Show, children, onCleanup, onMount, useContext, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
-import { mountOverlay, OverlayContext, overlayZIndex, overlayHasModalAbove, overlayTrigger, useOverlayParent, type OverlayLayer } from "./overlayLayer";
+import { mountOverlay, OverlayContext, overlayZIndex, overlayHasModalAbove, overlayTrigger, SlotActiveContext, useOverlayParent, type OverlayLayer } from "./overlayLayer";
 import { useOverlayPosition, type OverlayPlacement } from "./overlayPosition";
 import "./Dialog.css";
 export function Popover(p: {
@@ -12,14 +12,24 @@ export function Popover(p: {
   onPointerMove?: JSX.EventHandlerUnion<HTMLDivElement, PointerEvent>;
 }) {
   let root!: HTMLDivElement;
+  const slotActive = useContext(SlotActiveContext);
   const layer: OverlayLayer = {root: () => root, parent: useOverlayParent()};
   // If no explicit anchor is available, use the focused trigger captured before
   // the Portal mounts. Callers with pointer-only triggers must pass their anchor.
   const trigger = overlayTrigger();
   // Reactive: a submenu re-anchors when its parent row changes or is re-rendered.
   const anchor = () => p.anchor ?? (p.point ? undefined : trigger);
-  const position = useOverlayPosition(() => root, {anchor, point: () => p.point, placement: p.placement, width: () => p.width});
-  onMount(() => onCleanup(mountOverlay(layer, {close: p.onClose, escape: p.onEscape, busy: () => !!p.busy, trap: p.trap, restoreFocus: p.restoreFocus, initialFocus: p.initialFocus, returnFocus: p.returnFocus ?? p.anchor ?? trigger, contains: node => !!anchor()?.contains(node)})));
-  return <OverlayContext.Provider value={layer}><Portal><div ref={el => {root = el; p.ref?.(el);}} id={p.id} role={p.role ?? "dialog"} aria-label={p.label} aria-busy={p.busy || undefined} inert={overlayHasModalAbove(layer)} tabIndex={-1}
-    class={`overlay-popover ${p.class ?? ""}`} style={{...position(), "z-index": overlayZIndex(layer)}} onPointerDown={e => e.stopPropagation()} onPointerMove={p.onPointerMove} onKeyDown={p.onKeyDown} onMouseEnter={p.onMouseEnter} onMouseLeave={p.onMouseLeave}>{p.children}</div></Portal></OverlayContext.Provider>;
+  return <OverlayContext.Provider value={layer}>{(() => {
+    const body = children(() => p.children);
+    return <Show when={slotActive()}>{_ => {
+      const position = useOverlayPosition(() => root, {anchor, point: () => p.point, placement: p.placement, width: () => p.width});
+      let detachOverlay: (() => void) | undefined;
+      onMount(() => {
+        detachOverlay = mountOverlay(layer, {close: p.onClose, escape: p.onEscape, busy: () => !!p.busy, trap: p.trap, restoreFocus: p.restoreFocus, initialFocus: p.initialFocus, returnFocus: p.returnFocus ?? p.anchor ?? trigger, contains: node => !!anchor()?.contains(node)});
+      });
+      onCleanup(() => { detachOverlay?.(); detachOverlay = undefined; });
+      return <Portal><div ref={el => {root = el; p.ref?.(el);}} id={p.id} role={p.role ?? "dialog"} aria-label={p.label} aria-busy={p.busy || undefined} inert={overlayHasModalAbove(layer)} tabIndex={-1}
+        class={`overlay-popover ${p.class ?? ""}`} style={{...position(), "z-index": overlayZIndex(layer)}} onPointerDown={e => e.stopPropagation()} onPointerMove={p.onPointerMove} onKeyDown={p.onKeyDown} onMouseEnter={p.onMouseEnter} onMouseLeave={p.onMouseLeave}>{body()}</div></Portal>;
+    }}</Show>;
+  })()}</OverlayContext.Provider>;
 }

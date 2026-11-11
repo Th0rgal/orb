@@ -163,9 +163,10 @@ test("immediate OpenCode E2BIG launch failure keeps source unarchived, shows sin
   await page.getByRole("menu", { name: "Choose a model" }).getByRole("menuitem", { name: "Smart (Default)" }).click();
 
   // Destination opens with Starting OpenCode on host… and folded carried history; source is NOT archived.
-  await expect(page.locator(".under-harness")).toHaveText("OpenCode");
-  await expect(page.locator('.scroll [role="status"]').first()).toContainText("Starting OpenCode on host…");
-  await expect(page.locator(".fork-context summary")).toContainText("2 messages");
+  const activeMission = page.locator(".mission-slot:not([hidden])");
+  await expect(activeMission.locator(".under-harness")).toHaveText("OpenCode");
+  await expect(activeMission.locator('.scroll [role="status"]').first()).toContainText("Starting OpenCode on host…");
+  await expect(activeMission.locator(".fork-context summary")).toContainText("2 messages");
   expect(mutations.filter(m => m.path.endsWith("/status"))).toHaveLength(0);
 
   // Now replay the immediate process-launch failure (`Model error` + `opencode: Argument list too long`).
@@ -175,14 +176,14 @@ test("immediate OpenCode E2BIG launch failure keeps source unarchived, shows sin
   destination.updated_at = "2026-10-29T01:06:02Z";
   await page.evaluate(() => window.dispatchEvent(new Event("orb:refresh")));
 
-  const notices = page.locator(".scroll .error-notice");
+  const notices = activeMission.locator(".scroll .error-notice");
   await expect(notices).toHaveCount(1);
   await expect(notices.first()).toContainText("OpenCode could not start");
   await expect(notices.first()).toContainText("Update the backend");
   await expect(notices.first()).toContainText("without transferring again");
   await expect(notices.first()).not.toContainText("Model error");
-  await expect(page.locator(".turn-recap")).toHaveCount(0);
-  await expect(page.locator(".scroll")).not.toContainText("WAITING");
+  await expect(activeMission.locator(".turn-recap")).toHaveCount(0);
+  await expect(activeMission.locator(".scroll")).not.toContainText("WAITING");
   await expect(notices.first().getByRole("button", { name: "Resume" })).toHaveCount(0);
 
   // Source was NEVER archived.
@@ -193,14 +194,14 @@ test("immediate OpenCode E2BIG launch failure keeps source unarchived, shows sin
 
   // Navigate back to the retained original conversation from the recovery action; version disclosure expands cleanly.
   await notices.first().getByRole("button", { name: "Open original conversation" }).click();
-  await expect(page.locator(".under-harness")).toHaveText("Codex");
+  await expect(activeMission.locator(".under-harness")).toHaveText("Codex");
   await expect(page.locator(".row.agent", { hasText: /earlier/i })).toBeVisible();
 
   // Re-selecting the identical broken OpenCode target reuses the idempotent receipt rather than spawning a duplicate writer.
   await page.getByRole("button", { name: "Transfer to another agent", exact: true }).click();
   await page.getByRole("menu", { name: "Transfer to another agent", exact: true }).getByRole("menuitem", { name: "OpenCode" }).click();
   await page.getByRole("menu", { name: "Choose a model" }).getByRole("menuitem", { name: "Smart (Default)" }).click();
-  await expect(page.locator(".under-harness")).toHaveText("OpenCode");
+  await expect(activeMission.locator(".under-harness")).toHaveText("OpenCode");
   expect(mutations.filter(m => m.path.endsWith("/fork"))).toHaveLength(1);
   expect(mutations.filter(m => m.path.endsWith("/status"))).toHaveLength(0);
 
@@ -293,7 +294,8 @@ test("delayed out-of-order poll and SSE events transition Starting -> Working ->
   await page.getByRole("menu", { name: "Transfer to another agent", exact: true }).getByRole("menuitem", { name: "OpenCode" }).click();
   await page.getByRole("menu", { name: "Choose a model" }).getByRole("menuitem", { name: "Smart (Default)" }).click();
 
-  await expect(page.locator('.scroll [role="status"]').first()).toContainText("Starting OpenCode on host…");
+  const activeMission = page.locator(".mission-slot:not([hidden])");
+  await expect(activeMission.locator('.scroll [role="status"]').first()).toContainText("Starting OpenCode on host…");
   expect(archiveCalls).toHaveLength(0);
 
   // Out-of-order: events report a tool call while mission poll still reports `pending`.
@@ -306,7 +308,7 @@ test("delayed out-of-order poll and SSE events transition Starting -> Working ->
   phase = "done";
   destination.status = "awaiting_user";
   await page.evaluate(() => window.dispatchEvent(new Event("orb:refresh")));
-  await expect(page.locator(".st-text")).toContainText("All checks green.");
+  await expect(activeMission.locator(".st-text")).toContainText("All checks green.");
   expect(archiveCalls).toHaveLength(1);
   await expect(page.locator(".row.agent", { hasText: "Healthy transfer" })).toHaveCount(1);
 });

@@ -947,10 +947,10 @@ private def reasonPhrase : Nat → String
   | 503 => "Service Unavailable"
   | _   => "Internal Server Error"
 
-private def isAllowedCorsOrigin (devMode : Bool) (origin : String) : Bool :=
+def isAllowedCorsOrigin (devMode : Bool) (origin : String) : Bool :=
   let t := origin.trimAscii.toString
   if t.isEmpty then false
-  else if t == "null" || t == "tauri://localhost" then true
+  else if t == "null" || t == "orb://localhost" || t == "tauri://localhost" then true
   else if t.startsWith "http://127.0.0.1:" || t.startsWith "http://localhost:" ||
           t == "http://127.0.0.1" || t == "http://localhost" then true
   else if !devMode && t.startsWith "https://" then true

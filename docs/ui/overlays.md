@@ -18,7 +18,11 @@ No additional UI library is needed. Native iOS and Android are separate clients.
 - Delayed, non-interactive row details: `useTooltip`, backed by `Popover`.
 - Image attachments: `Lightbox`, which uses a fullscreen `Dialog`.
 
-`overlayLayer.ts` owns parent/child order, dismissal, inert backgrounds and focus scopes.
+`overlayLayer.ts` owns parent/child order, dismissal, inert backgrounds, focus scopes,
+and `SlotActiveContext` suspension (so portalled `Dialog`, `Popover`, and `Toaster`
+surfaces inside hidden keep-alive mission slots detach from `document.body` and
+release `inert`/focus traps while preserving caller confirmation and draft state
+until that slot becomes active again).
 `overlayPosition.ts` owns placement, flipping, resizing and viewport margins.
 Do not add business-specific global Escape/outside-click listeners, fixed positions,
 z-index values, or new overlay backdrops. Put new behavior in the shared primitive.
@@ -39,7 +43,10 @@ must use the primitives above.
 ## Visual contract
 
 Dark surface `#191919`, border `#333333`, one pixel. Light surfaces use the
-corresponding `--overlay-*` tokens. Modal radius 12px, menus 8px, controls 6px.
+corresponding `--overlay-*` tokens. Non-interactive tooltips (`.row-tip`, `.queue-tooltip`)
+mix `--overlay-surface` at `84%` opacity with `backdrop-filter: blur(14px)` so they do not
+stamp a 100% opaque cutout over the translucent sidebar or conversation pane; interactive
+menus, pickers and dialogs keep solid `--overlay-surface`. Modal radius 12px, menus 8px, controls 6px.
 Modal widths: compact 400px, standard 480px, wide 640px; fullscreen fills the window.
 Content padding 16px. Footers have a top separator and 12px/16px padding.
 Titles use 15px/500; body and controls use 13px. Inputs are 32px and buttons 28px.

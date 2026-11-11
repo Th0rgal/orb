@@ -924,7 +924,7 @@ def isAllowedLocaldOrigin (origin? : Option String) : Bool :=
     if raw.toList.any (fun c => c == '\r' || c == '\n' || c.toNat == 0) then false
     else
       let o := raw.trimAscii.toString
-      o.isEmpty || o == "null" || o == "file://" || o == "tauri://localhost" ||
+      o.isEmpty || o == "null" || o == "file://" || o == "orb://localhost" || o == "tauri://localhost" ||
       o.startsWith "http://127.0.0.1:" || o.startsWith "http://localhost:" ||
       o == "http://127.0.0.1" || o == "http://localhost"
 
@@ -934,7 +934,9 @@ def supportedDesktopCommands : Array String := #[
   "desktop_bootstrap",
   "transport_bridge_configure",
   "desktop_connection_load", "desktop_connection_save",
-  "desktop_prefs_load", "desktop_prefs_patch", "diagnostics_append",
+  "desktop_prefs_load", "desktop_prefs_patch",
+  "ui_cache_get", "ui_cache_put", "ui_cache_clear",
+  "diagnostics_append",
   "reveal_logs", "local_machine_metrics", "paloma_ssh_pubkey",
   "open_url", "reveal_download", "save_file_as", "set_window_theme", "mistral_usage_sign_in",
   "approval_key_status", "approval_key_create", "approval_sign",
@@ -1305,7 +1307,56 @@ private def originsFilePath? (st : LocaldState) : Option System.FilePath :=
 private def uiPrefsFilePath? (st : LocaldState) : Option System.FilePath :=
   (resolveOrbStateDir st).map (· / "ui-prefs.json")
 
+private def uiCacheDirPath? (st : LocaldState) : Option System.FilePath :=
+  (resolveOrbStateDir st).map (· / "ui-cache")
+
 initialize uiPrefsMutex : Std.Mutex Unit ← Std.Mutex.new ()
+initialize uiCacheMutex : Std.Mutex Unit ← Std.Mutex.new ()
+
+private def maxUiCacheRawBytes : Nat := 8388608
+private def maxUiCacheTranscripts : Nat := 250
+
+private def isValidUiCacheKind (k : String) : Bool :=
+  k == "sidebar" || k == "transcript"
+
+private def uiCacheEntryPath (dir : System.FilePath) (kind key : String) : System.FilePath :=
+  let digest := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes key.toUTF8)
+  dir / s!"{kind}-{digest}.cache"
+
+private def parseUiCacheFile? (raw : String) (expectedKeyHex : String) : Option (Nat × String) :=
+  match raw.splitOn "\n" with
+  | tsStr :: keyHex :: rest =>
+    if keyHex != expectedKeyHex then none
+    else
+      let savedAt := tsStr.trimAscii.toString.toNat?.getD 0
+      let payload := String.intercalate "\n" rest
+      if payload.isEmpty then none else some (savedAt, payload)
+  | _ => none
+
+private def readUiCacheSavedAt (path : System.FilePath) : IO Nat := do
+  let st ← OrbBin.PosixExt.statPath path.toString
+  if !st.exists_ || st.isSymlink || !st.isReg then return 0
+  try
+    let h ← IO.FS.Handle.mk path .read
+    let line ← h.getLine
+    return line.trimAscii.toString.toNat?.getD 0
+  catch _ =>
+    return 0
+
+private def evictExcessUiCacheTranscripts (dir : System.FilePath) : IO Unit := do
+  let entries ← try dir.readDir catch _ => pure #[]
+  let txEntries := entries.filter fun e =>
+    e.fileName.startsWith "transcript-" && e.fileName.endsWith ".cache"
+  if txEntries.size ≤ maxUiCacheTranscripts then return ()
+  let mut stamped : Array (Nat × System.FilePath) := Array.mkEmpty txEntries.size
+  for e in txEntries do
+    let ts ← readUiCacheSavedAt e.path
+    stamped := stamped.push (ts, e.path)
+  let sorted := stamped.qsort (fun a b => a.1 < b.1)
+  let dropCount := sorted.size - maxUiCacheTranscripts
+  for i in [0:dropCount] do
+    if h : i < sorted.size then
+      try IO.FS.removeFile sorted[i].2 catch _ => pure ()
 
 private def isAllowedUiPrefKey (k : String) : Bool :=
   !k.isEmpty && k.utf8ByteSize ≤ 512 &&
@@ -4122,6 +4173,69 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path payload then
           return .error e
       return .ok (.obj #[("rev", .str rev), ("prefs", nextObj)])
+  | "ui_cache_get" =>
+    let kind := (args.fieldStr? "kind").getD ""
+    let key := (args.fieldStr? "key").getD ""
+    if !isValidUiCacheKind kind || key.isEmpty || key.utf8ByteSize > 512 then
+      return .error "Invalid ui_cache_get arguments"
+    match uiCacheDirPath? st with
+    | none => return .ok .null
+    | some dir =>
+      uiCacheMutex.atomically do
+        let dirSt ← OrbBin.PosixExt.statPath dir.toString
+        if !dirSt.exists_ then return .ok .null
+        if dirSt.isSymlink then return .error "UI cache directory must not be a symlink"
+        let path := uiCacheEntryPath dir kind key
+        let fileSt ← OrbBin.PosixExt.statPath path.toString
+        if !fileSt.exists_ || fileSt.isSymlink || !fileSt.isReg then return .ok .null
+        try
+          let raw ← IO.FS.readFile path
+          let keyHex := LeanSys.Auth.bytesToHexLower key.toUTF8
+          match parseUiCacheFile? raw keyHex with
+          | some (_, payload) => return .ok (.str payload)
+          | none => return .ok .null
+        catch _ =>
+          return .ok .null
+  | "ui_cache_put" =>
+    let kind := (args.fieldStr? "kind").getD ""
+    let key := (args.fieldStr? "key").getD ""
+    let rawJson := (args.fieldStr? "raw").getD ""
+    let savedAt := (args.fieldNat? "saved_at").getD 0
+    if !isValidUiCacheKind kind || key.isEmpty || key.utf8ByteSize > 512 then
+      return .error "Invalid ui_cache_put key"
+    if rawJson.isEmpty || rawJson.utf8ByteSize > maxUiCacheRawBytes then
+      return .error "Invalid ui_cache_put payload"
+    match uiCacheDirPath? st with
+    | none => return .ok .null
+    | some dir =>
+      uiCacheMutex.atomically do
+        try
+          IO.FS.createDirAll dir
+          discard <| OrbBin.PosixExt.chmod dir.toString 0o700
+        catch _ => pure ()
+        let dirSt ← OrbBin.PosixExt.statPath dir.toString
+        if dirSt.isSymlink then return .error "UI cache directory must not be a symlink"
+        let path := uiCacheEntryPath dir kind key
+        let keyHex := LeanSys.Auth.bytesToHexLower key.toUTF8
+        let wire := (s!"{savedAt}\n{keyHex}\n" ++ rawJson).toUTF8
+        if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path wire then
+          return .error e
+        if kind == "transcript" then
+          evictExcessUiCacheTranscripts dir
+        return .ok .null
+  | "ui_cache_clear" =>
+    match uiCacheDirPath? st with
+    | none => return .ok .null
+    | some dir =>
+      uiCacheMutex.atomically do
+        let dirSt ← OrbBin.PosixExt.statPath dir.toString
+        if !dirSt.exists_ || dirSt.isSymlink then return .ok .null
+        let entries ← try dir.readDir catch _ => pure #[]
+        for e in entries do
+          if (e.fileName.startsWith "sidebar-" || e.fileName.startsWith "transcript-") &&
+             e.fileName.endsWith ".cache" then
+            try IO.FS.removeFile e.path catch _ => pure ()
+        return .ok .null
   | "diagnostics_append" =>
     let lines : Array String := match args.fieldArr? "lines" with
       | some xs => xs.filterMap (·.asStr?)

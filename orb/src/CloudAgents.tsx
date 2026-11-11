@@ -2,7 +2,7 @@ import { swallow } from "./log";
 import { pollWhileVisible } from "./poll";
 import { ErrorToast } from "./toast";
 import * as Ic from "./icons";
-import { For, Show, createSignal, createEffect, on, onMount, onCleanup } from 'solid-js';
+import { For, Show, createMemo, createSignal, createEffect, on, onMount, onCleanup } from 'solid-js';
 import { createPinnedScroll } from './mission/pinnedScroll';
 import { JumpToLatest } from './mission/JumpToLatest';
 import { api, getMission, getRemoteNodes, openExternalUrl, type Mission, type RemoteNodeView } from './api';
@@ -183,9 +183,10 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
     </div>
   </div></section></>;
 }
-export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onMission?: (m: Mission | null) => void; onOpenMission?: (m:Mission)=>void }) {
+export function CloudConversation(p: { id: string; active?: boolean; launch?: CloudLaunchSeed; onMission?: (m: Mission | null) => void; onOpenMission?: (m:Mission)=>void }) {
   // Between submit and the first server state, the prompt the user just sent
   // is the first bubble, so the view does not flash a loading line or jump.
+  const isSlotActive = createMemo(() => p.active !== false);
   const seed = () => p.launch ?? cloudLaunchSeeds.get(p.id);
   const [children,setChildren]=createSignal<{id:string;title:string;status:string}[]>([]);
   const [execution, setExecution] = createSignal<CloudExecution>(); const [accounts, setAccounts] = createSignal<CloudAccount[]>([]);
@@ -205,7 +206,7 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
       setModelParams(e.turns.at(-1)?.model_params ?? e.selection.model_params ?? []);
     }
   });
-  let attempt: {signature: string; text: string; key: string; model:string; params:ModelParam[]} | undefined; let stopPoll: (() => void) | undefined; let stopFastPoll: (() => void) | undefined; let disposed = false; let refreshing: Promise<void> | undefined; let queuedManual = false;
+  let attempt: {signature: string; text: string; key: string; model:string; params:ModelParam[]} | undefined; let disposed = false; let refreshing: Promise<void> | undefined; let queuedManual = false;
   const refresh = (manual = false): Promise<void> => {
     if (manual) setLoadError('');
     if (refreshing) { queuedManual ||= manual; return refreshing; }
@@ -225,12 +226,15 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
   const active = () => execution()?.turns.some(working) ?? false;
   onMount(() => {
     void cloudAccounts().then(value => { if (!disposed) setAccounts(value); }).catch(e => { if (!disposed) setLoadError(String(e)); });
-    if (!p.id) return;
-    void refresh();
-    stopPoll = pollWhileVisible(() => refresh(false), 2500);
-    stopFastPoll = pollWhileVisible(() => (active() || !execution() ? refresh(false) : undefined), 750);
   });
-  onCleanup(() => { disposed = true; stopPoll?.(); stopFastPoll?.(); if (p.id) p.onMission?.(null); });
+  createEffect(() => {
+    if (!p.id || !isSlotActive()) return;
+    void refresh();
+    const stopPoll = pollWhileVisible(() => refresh(false), 2500);
+    const stopFastPoll = pollWhileVisible(() => (active() || !execution() ? refresh(false) : undefined), 750);
+    onCleanup(() => { stopPoll(); stopFastPoll(); });
+  });
+  onCleanup(() => { disposed = true; if (p.id) p.onMission?.(null); });
   createEffect(() => { if (execution()?.turns.length) cloudLaunchSeeds.delete(p.id); });
   const selection = () => execution()?.selection ?? (seed() ? { provider: seed()!.provider, account: seed()!.account ?? '' } : undefined);
   const account = () => accounts().find(a => a.id === selection()?.account && a.provider === selection()?.provider);
@@ -388,11 +392,11 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
     </>}</Show>
   </div></div><div class="dock" ref={floatingDock}><JumpToLatest pinned={pin.pinned} onJump={pin.pin} /><div class="col">
     <Show when={!execution() && seed()}>{s => <>
-      <Composer picker={false} textOnly scope={`cloud:${p.id || 'launch'}`} placeholder="Send follow-up" busy disabled onPending={() => {}} onSend={() => false}/>
+      <Composer active={isSlotActive()} picker={false} textOnly scope={`cloud:${p.id || 'launch'}`} placeholder="Send follow-up" busy disabled onPending={() => {}} onSend={() => false}/>
       <div class="cloud-conversation-meta"><ProviderLogo type={s().provider}/><span>{cloudNames[s().provider]}</span><span role="status">{cloudPhase('submitting')}</span></div>
     </>}</Show>
     <Show when={execution()}>{e => <>
-      <Show when={account()?.capabilities.follow_up}><Composer allowConcurrentSend retainFailedMessage onPending={() => {}} onSendError={setSendError} textOnly={!account()?.capabilities.attachments} imagesOnly={Boolean(account()?.capabilities.attachments) && e().selection.provider !== 'hermes'} directFileUpload={e().selection.provider === 'hermes'} picker={false} scope={`cloud:${p.id}`} placeholder="Send follow-up" busy={active()} disabled={!cloudCanSend(e())} onSend={send}
+      <Show when={account()?.capabilities.follow_up}><Composer active={isSlotActive()} allowConcurrentSend retainFailedMessage onPending={() => {}} onSendError={setSendError} textOnly={!account()?.capabilities.attachments} imagesOnly={Boolean(account()?.capabilities.attachments) && e().selection.provider !== 'hermes'} directFileUpload={e().selection.provider === 'hermes'} picker={false} scope={`cloud:${p.id}`} placeholder="Send follow-up" busy={active()} disabled={!cloudCanSend(e())} onSend={send}
         onStop={account()?.capabilities.cancel && e().turns.some(t => t.external_id && ['running','submitting','waiting_user'].includes(t.phase)) ? () => void cancel() : undefined}/></Show>
       <ErrorToast error={sendError()} title="Couldn’t send your message" onDismiss={() => setSendError(null)} />
       <div class="cloud-conversation-meta"><ProviderLogo type={e().selection.provider}/><span title={account()?.label}>{cloudNames[e().selection.provider]}<Show when={!account() || cloudAccountLabel(account()!) !== cloudNames[e().selection.provider]}> · {account() ? cloudAccountLabel(account()!) : e().selection.account}</Show></span>

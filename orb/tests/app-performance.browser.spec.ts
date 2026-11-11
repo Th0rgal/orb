@@ -53,7 +53,7 @@ test('whole app: open, stream, switch, sidebar refresh and idle polls', async ({
   report.switch = await measure(page, core, async () => {
    for (let i = 0; i < 5; i++) {
     await row('Mission 21 doing').click();
-    await expect(page.locator('.st-text, .empty, .composer').first()).toBeVisible();
+    await expect(page.locator('.mission-slot:not([hidden]) :is(.st-text, .empty, .composer)').first()).toBeVisible();
     await row('Long mission').click();
     await expect(page.getByText('Step 59', {exact: true})).toBeVisible();
    }

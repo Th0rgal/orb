@@ -365,4 +365,103 @@ describe("poor-network resilience suite", () => {
     await p0Gate;
     forgetPrefetchPauses();
   });
+
+  it("promotes an already-started P2 prefetch to P1 when adopted after p2Cap drops to 0", async () => {
+    const { forgetPrefetchPauses, loadTranscript, prefetchTranscript, refreshTranscript } = await import("../src/missionCache");
+    setConnection("https://orbcore.thomas.md", "tok-promote");
+
+    // Fill all active P2 slots so the next prefetch enters `pumpPrefetch()` while `p2Cap > 0`
+    // and parks its HTTP requests inside `transportScheduler`'s `p2Queue`.
+    const budget = currentLinkBudget();
+    expect(budget.p2Cap).toBeGreaterThan(0);
+    const releaseBlockers: Array<() => void> = [];
+    const blockers = Array.from({ length: budget.p2Cap }, () =>
+      scheduleTransportRequest(
+        "p2",
+        null,
+        () => new Promise<void>((resolve) => { releaseBlockers.push(resolve); }),
+      ),
+    );
+
+    let eventPageCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/control/queue")) {
+          return Response.json({ items: [], revision: 1 });
+        }
+        if (url.includes("/snapshot")) {
+          return Response.json({ profile: "presentation", events: [] });
+        }
+        if (url.includes("/events")) {
+          eventPageCalls++;
+          if (eventPageCalls === 1) {
+            return new Response(
+              JSON.stringify([
+                { id: 1, sequence: 1, event_type: "tool_call", tool_call_id: "tc1", tool_name: "bash", timestamp: "2026-11-09T15:00:00Z", content: "{}" },
+              ]),
+              {
+                status: 200,
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Orb-Events-Protocol": "1",
+                  "X-Has-More": "true",
+                  "X-Next-Cursor": "0",
+                  "X-Page-Max-Sequence": "1",
+                  "X-Max-Sequence": "1",
+                },
+              },
+            );
+          }
+          return new Response(
+            JSON.stringify([
+              { id: 0, sequence: 0, event_type: "user_message", timestamp: "2026-11-09T14:59:59Z", content: "hello" },
+            ]),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orb-Events-Protocol": "1",
+                "X-Has-More": "false",
+                "X-Next-Cursor": "0",
+                "X-Page-Max-Sequence": "0",
+                "X-Max-Sequence": "1",
+              },
+            },
+          );
+        }
+        return Response.json({});
+      }),
+    );
+
+    prefetchTranscript("m-parked-p2");
+    await vi.waitFor(() => expect(transportSchedulerStats().p2Queued).toBeGreaterThanOrEqual(1));
+
+    // Now degrade the link (`p2Cap === 0`) via an active P0 request: unpromoted P2 work is frozen,
+    // yet adopting via `loadTranscript` / `refreshTranscript` must promote both queued requests and
+    // subsequent follow-up pages (`view=transcript` spine fetch) onto P1 and resolve immediately.
+    let releaseP0!: () => void;
+    const p0Gate = scheduleTransportRequest(
+      "p0",
+      null,
+      () => new Promise<void>((resolve) => { releaseP0 = resolve; }),
+    );
+    expect(currentLinkBudget().p2Cap).toBe(0);
+
+    const [loaded, refreshed] = await Promise.all([
+      loadTranscript("m-parked-p2"),
+      refreshTranscript("m-parked-p2"),
+    ]);
+    expect(loaded).toBe(refreshed);
+    expect(eventPageCalls).toBe(2);
+    expect(loaded.items.some((i) => i.kind === "user")).toBe(true);
+    expect(transportSchedulerStats().p2Queued).toBe(0);
+
+    releaseP0();
+    await p0Gate;
+    for (const r of releaseBlockers) r();
+    await Promise.all(blockers);
+    forgetPrefetchPauses();
+  });
 });

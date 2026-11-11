@@ -77,7 +77,7 @@ export function trapFocus(root: HTMLElement, onEscape: () => void, options: { pa
         if (scopes.at(-1) !== parentScope) return;
         const parent = parentScope?.root;
         const target = scope.previous;
-        if (target?.isConnected && (!parent || parent.contains(target))) target.focus({ preventScroll: true });
+        if (target?.isConnected && !target.closest('[hidden], [inert]') && (!parent || parent.contains(target))) target.focus({ preventScroll: true });
         else if (parent) (focusable(parent)[0] ?? parent).focus({preventScroll: true});
       };
       // Solid flushes the parent's inert binding after the child's cleanup.

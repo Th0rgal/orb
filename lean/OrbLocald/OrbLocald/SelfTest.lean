@@ -394,11 +394,9 @@ private def makeTestWav16kMono (sampleCount : Nat) (amp : UInt16) : ByteArray :=
     out := (out.push lo).push hi
   return out
 
-private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : String) : IO (Nat × Nat) := do
+private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (validTok : String) : IO (Nat × Nat) := do
   let mut passed := 0
   let mut total := 0
-  let pDir := System.FilePath.mk tmpBase / "parity-suite"
-  IO.FS.createDirAll pDir
 
   -- A. Symlink escape & `/` root confinement (`read_upload_file` + `browse_local_files`)
   let secretDir := pDir / "outside-secret"
@@ -605,6 +603,52 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
     (match corruptPatchRes with | .error _ => true | .ok _ => false) &&
     (match corruptClearRes with | .ok _ => true | .error _ => false)
   if (← assertTrue "desktop_prefs_shared_across_daemons" (prefsShareOk && corruptOk)) then passed := passed + 1
+
+  -- D3. Native `ui-cache` (`ui_cache_put` / `ui_cache_get` / LRU eviction / `ui_cache_clear`)
+  let sbPut ← dispatchRpcCommand stP1 "ui_cache_put" (.obj #[
+    ("kind", .str "sidebar"),
+    ("key", .str "https://orbcore.thomas.md::scope1"),
+    ("saved_at", .nat 1000),
+    ("raw", .str "{\"missions\":[1],\"projects\":[]}")
+  ])
+  let sbGet ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[
+    ("kind", .str "sidebar"),
+    ("key", .str "https://orbcore.thomas.md::scope1")
+  ])
+  let badKindRes ← dispatchRpcCommand stP1 "ui_cache_put" (.obj #[
+    ("kind", .str "../escape"),
+    ("key", .str "k"),
+    ("saved_at", .nat 1),
+    ("raw", .str "{}")
+  ])
+  for idx in [0:252] do
+    let _ ← dispatchRpcCommand stP1 "ui_cache_put" (.obj #[
+      ("kind", .str "transcript"),
+      ("key", .str s!"scope1::m:tx-{idx}"),
+      ("saved_at", .nat (2000 + idx)),
+      ("raw", .str s!"\{\"idx\":{idx}}")
+    ])
+  let oldestEvicted ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-0")])
+  let secondEvicted ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-1")])
+  let thirdKept ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-2")])
+  let newestKept ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-251")])
+  let _ ← dispatchRpcCommand stP1 "ui_cache_clear" (.obj #[])
+  let afterClearSb ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "sidebar"), ("key", .str "https://orbcore.thomas.md::scope1")])
+  let afterClearTx ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-251")])
+  let isOkNull (r : Except String JVal) : Bool := match r with | .ok .null => true | _ => false
+  let isOkStr (r : Except String JVal) (s : String) : Bool := match r with | .ok (.str v) => v == s | _ => false
+  total := total + 1
+  let uiCacheOk :=
+    isOkNull sbPut &&
+    isOkStr sbGet "{\"missions\":[1],\"projects\":[]}" &&
+    (match badKindRes with | .error _ => true | .ok _ => false) &&
+    isOkNull oldestEvicted &&
+    isOkNull secondEvicted &&
+    isOkStr thirdKept "{\"idx\":2}" &&
+    isOkStr newestKept "{\"idx\":251}" &&
+    isOkNull afterClearSb &&
+    isOkNull afterClearTx
+  if (← assertTrue "native_ui_cache_roundtrip_lru_and_clear" uiCacheOk) then passed := passed + 1
 
   -- E. Token-scoped `__orb_poll_events` + per-SSE-subscriber broadcast (no multi-window event stealing)
   let stPub ← IO.mkRef ({ launchToken := validTok } : LocaldState)
@@ -908,6 +952,11 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
       discard <| LeanSys.Posix.closeFd lfd
   total := total + 1
   if (← assertTrue "live_sse_event_delivery_under_80ms_without_500ms_stall" sseLatOk) then passed := passed + 1
+  return (passed, total)
+
+private def runLinuxPortalAndRevealChecks (pDir : System.FilePath) (validTok : String) : IO (Nat × Nat) := do
+  let mut passed : Nat := 0
+  let mut total : Nat := 0
 
   -- I. Linux `reveal_download` prefers `org.freedesktop.FileManager1.ShowItems` and RFC 8089 `filePathToUri` encodes `,`/spaces/UTF-8
   let fmTestDir := pDir / "linux-reveal-test"
@@ -1173,6 +1222,13 @@ private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : Str
 
   return (passed, total)
 
+private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : String) : IO (Nat × Nat) := do
+  let pDir := System.FilePath.mk tmpBase / "parity-suite"
+  IO.FS.createDirAll pDir
+  let (p1, t1) ← runDesktopReliabilityParityChecksPart1 pDir validTok
+  let (p2, t2) ← runLinuxPortalAndRevealChecks pDir validTok
+  return (p1 + p2, t1 + t2)
+
 private def runWarmClaudeRpcE2eChecks (validTok tmpStateDir : String) : IO (Nat × Nat) := do
   let warmRpcDir := System.FilePath.mk tmpStateDir / "warm-rpc-repo"
   IO.FS.createDirAll warmRpcDir
@@ -1298,13 +1354,114 @@ private def runDesktopBootstrapChecks (tmpStateDir validTok : String) : IO (Nat 
   let ok ← assertTrue "desktop_bootstrap_single_rpc_hydrates_connection_prefs_and_bridge" bootOk
   return (if ok then 1 else 0, 1)
 
+private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat × Nat) := do
+  let mut passed := 0
+  let mut total := 0
+
+  -- 16. R7-A (`SM-11`) run-scoped interactive tool slots, backpressure, `"native-"` parity, epoch dedup & reconnect retention
+  runR7aInteractiveToolSlotTests
+  passed := passed + 13
+  total := total + 13
+
+  -- 17. Edge-diverse failover ordering, priority classification, EWMA RTT + cooldown ranking, and transport_bridge_configure apiUrl
+  total := total + 1
+  let edgeDivOk :=
+    candidateFailoverOrigins "https://orbcore.thomas.md" ==
+      #["https://orbcore.thomas.md", "https://agent-backend.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"] &&
+    candidateFailoverOrigins "https://agent-backend.thomas.md/" ==
+      #["https://agent-backend.thomas.md", "https://orbcore.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"] &&
+    candidateFailoverOrigins "https://agent-backend.nico-best-pc-ever.ovh" ==
+      #["https://agent-backend.nico-best-pc-ever.ovh", "https://agent-backend.thomas.md", "https://orbcore.thomas.md"] &&
+    candidateFailoverOrigins "https://selfhosted.example:8443/" ==
+      #["https://selfhosted.example:8443"]
+  if (← assertTrue "edge_diverse_candidate_failover_origins" edgeDivOk) then passed := passed + 1
+
+  total := total + 1
+  let prioOk :=
+    classifyProxyRequestPriority "POST" "/api/control/missions/m1/message" none == 0 &&
+    classifyProxyRequestPriority "GET" "/api/auth/me" none == 0 &&
+    classifyProxyRequestPriority "GET" "/api/health" none == 0 &&
+    classifyProxyRequestPriority "GET" "/api/control/missions/m1/events" none == 1 &&
+    classifyProxyRequestPriority "GET" "/api/software" none == 2 &&
+    classifyProxyRequestPriority "GET" "/api/providers/antigravity-models" none == 2 &&
+    classifyProxyRequestPriority "GET" "/api/control/missions/m1/automations" none == 2 &&
+    classifyProxyRequestPriority "GET" "/api/control/missions/m1/machine-transfer" none == 2 &&
+    classifyProxyRequestPriority "GET" "/api/projects/orb/context/manifest" none == 2 &&
+    classifyProxyRequestPriority "POST" "/api/control/missions/m1/inbox-digest" none == 1 &&
+    classifyProxyRequestPriority "POST" "/api/file-resources" none == 1 &&
+    classifyProxyRequestPriority "POST" "/api/control/missions/m1/opened" none == 1 &&
+    classifyProxyRequestPriority "GET" "/api/control/missions/m1/events" (some "p2") == 2 &&
+    classifyProxyRequestPriority "GET" "/api/software" (some "p0") == 0 &&
+    isComputeBoundProxyRequest "GET" "/api/providers/antigravity-models" &&
+    isComputeBoundProxyRequest "GET" "/api/software?force=false" &&
+    isComputeBoundProxyRequest "GET" "/api/ai/providers/claude/usage?force=true" &&
+    !isComputeBoundProxyRequest "GET" "/api/projects" &&
+    !isComputeBoundProxyRequest "GET" "/api/ai/providers"
+  if (← assertTrue "proxy_request_priority_classification" prioOk) then passed := passed + 1
+
+  total := total + 1
+  if (← assertTrue "h2_pool_teardown_drains_active_and_queued_waiters"
+        (← OrbNetLeaf.H2Pool.H2ClientPool.testTeardownDrainsActiveAndQueuedWaiters)) then
+    passed := passed + 1
+
+  let stRankRef ← IO.mkRef ({ launchToken := validTok } : LocaldState)
+  let srtt1 ← recordOriginSuccess stRankRef "https://orbcore.thomas.md" 800
+  let srtt2 ← recordOriginSuccess stRankRef "https://orbcore.thomas.md" 400
+  recordOriginFailure stRankRef "https://orbcore.thomas.md" 10000 20000
+  let rankSt ← stRankRef.get
+  let rankedDuringCooldown := rankFailoverOrigins defaultFailoverOrigins rankSt.originHealth 15000
+  let rankedAfterCooldown := rankFailoverOrigins defaultFailoverOrigins rankSt.originHealth 35000
+  let txCustomRes2 ← dispatchRpcCommand stRankRef "transport_bridge_configure" (.obj #[("apiUrl", .str "https://custom.orb.internal:9443/")])
+  total := total + 1
+  let rankAndCfgOk :=
+    srtt1 == 800 && srtt2 == 750 &&
+    rankedDuringCooldown == #["https://agent-backend.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh", "https://orbcore.thomas.md"] &&
+    rankedAfterCooldown == defaultFailoverOrigins &&
+    (match txCustomRes2 with
+     | .ok jv =>
+       match jv.fieldArr? "failover_origins" with
+       | some #[.str "https://custom.orb.internal:9443"] => true
+       | _ => false
+     | _ => false)
+  if (← assertTrue "origin_ewma_cooldown_ranking_and_bridge_api_url" rankAndCfgOk) then passed := passed + 1
+
+  -- 18. R6-B (`SM-26` / `SM-23`) `(endpoint, server_build)` capability latch, 256-frame journal ring backpressure/resync, and typed 409 conflict disposition
+  runR6bClientLinkAndConflictTests
+  passed := passed + 3
+  total := total + 3
+
+  -- 19. Orphan parent-PID watchdog (`ORB_PARENT_PID`): exits when parent is gone & idle, stays alive while parent lives or local work is active/unsynced
+  let selfPid ← OrbBin.PosixExt.getpid
+  let orphanRef ← IO.mkRef ({ launchToken := validTok } : LocaldState)
+  let aliveParentRes ← shouldExitForDeadParent (some (Int64.ofNat selfPid.toNat)) orphanRef
+  let deadIdleRes ← shouldExitForDeadParent (some 2147483646) orphanRef
+  let _ ← dispatchRpcCommand orphanRef "local_origin_launch" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://orbcore.thomas.md")]),
+    ("prompt", .str "keep local run alive")
+  ])
+  let deadActiveRes ← shouldExitForDeadParent (some 2147483646) orphanRef
+  total := total + 1
+  if (← assertTrue "orphan_parent_watchdog_respects_liveness_and_active_local_origins"
+        (!aliveParentRes && deadIdleRes && !deadActiveRes)) then
+    passed := passed + 1
+
+  -- 20. Desktop reliability & Rust-parity security, persistence, voice, SSE latency & framing checks
+  let (pParity, tParity) ← runDesktopReliabilityParityChecks tmpStateDir validTok
+  passed := passed + pParity
+  total := total + tParity
+
+  -- 21. Warm Claude RPC integration + Single-RPC `desktop_bootstrap`
+  let (warmPassed, warmTotal) ← runWarmClaudeRpcE2eChecks validTok tmpStateDir
+  let (bootPassed, bootTotal) ← runDesktopBootstrapChecks tmpStateDir validTok
+  return (passed + warmPassed + bootPassed, total + warmTotal + bootTotal)
+
 def main : IO UInt32 := do
   let mut passed := 0
   let mut total := 0
 
-  -- 1. Command table size (98 desktop commands + plugin:app|version = 99)
+  -- 1. Command table size (101 desktop commands + plugin:app|version = 102)
   total := total + 1
-  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 99) then passed := passed + 1
+  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 102) then passed := passed + 1
 
   -- 2. Loopback RPC auth gate (>= 32-byte non-placeholder secret + local Origin confinement)
   let validTok := "0123456789abcdef0123456789abcdef"
@@ -1318,6 +1475,10 @@ def main : IO UInt32 := do
   if (← assertTrue "rpc_auth_reject_short_24b_default_token" (!(checkRpcAuth "127.0.0.1" "orb-locald-default-token" "orb-locald-default-token"))) then passed := passed + 1
   total := total + 1
   if (← assertTrue "origin_allow_local_loopback" (isAllowedLocaldOrigin (some "http://127.0.0.1:19479"))) then passed := passed + 1
+  total := total + 1
+  if (← assertTrue "origin_allow_orb_localhost" (isAllowedLocaldOrigin (some "orb://localhost"))) then passed := passed + 1
+  total := total + 1
+  if (← assertTrue "origin_reject_orb_evil" (!(isAllowedLocaldOrigin (some "orb://evil.example")))) then passed := passed + 1
   total := total + 1
   if (← assertTrue "origin_reject_remote_evil" (!(isAllowedLocaldOrigin (some "https://evil.example")))) then passed := passed + 1
 
@@ -1667,109 +1828,9 @@ def main : IO UInt32 := do
     spawnCount == 1
   if (← assertTrue "orb_signer_serve_reuses_persistent_helper_and_propagates_grace_and_cancel" signerServeOk) then passed := passed + 1
 
-  -- 16. R7-A (`SM-11`) run-scoped interactive tool slots, backpressure, `"native-"` parity, epoch dedup & reconnect retention
-  runR7aInteractiveToolSlotTests
-  passed := passed + 13
-  total := total + 13
-
-  -- 17. Edge-diverse failover ordering, priority classification, EWMA RTT + cooldown ranking, and transport_bridge_configure apiUrl
-  total := total + 1
-  let edgeDivOk :=
-    candidateFailoverOrigins "https://orbcore.thomas.md" ==
-      #["https://orbcore.thomas.md", "https://agent-backend.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"] &&
-    candidateFailoverOrigins "https://agent-backend.thomas.md/" ==
-      #["https://agent-backend.thomas.md", "https://orbcore.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"] &&
-    candidateFailoverOrigins "https://agent-backend.nico-best-pc-ever.ovh" ==
-      #["https://agent-backend.nico-best-pc-ever.ovh", "https://agent-backend.thomas.md", "https://orbcore.thomas.md"] &&
-    candidateFailoverOrigins "https://selfhosted.example:8443/" ==
-      #["https://selfhosted.example:8443"]
-  if (← assertTrue "edge_diverse_candidate_failover_origins" edgeDivOk) then passed := passed + 1
-
-  total := total + 1
-  let prioOk :=
-    classifyProxyRequestPriority "POST" "/api/control/missions/m1/message" none == 0 &&
-    classifyProxyRequestPriority "GET" "/api/auth/me" none == 0 &&
-    classifyProxyRequestPriority "GET" "/api/health" none == 0 &&
-    classifyProxyRequestPriority "GET" "/api/control/missions/m1/events" none == 1 &&
-    classifyProxyRequestPriority "GET" "/api/software" none == 2 &&
-    classifyProxyRequestPriority "GET" "/api/providers/antigravity-models" none == 2 &&
-    classifyProxyRequestPriority "GET" "/api/control/missions/m1/automations" none == 2 &&
-    classifyProxyRequestPriority "GET" "/api/control/missions/m1/machine-transfer" none == 2 &&
-    classifyProxyRequestPriority "GET" "/api/projects/orb/context/manifest" none == 2 &&
-    classifyProxyRequestPriority "POST" "/api/control/missions/m1/inbox-digest" none == 1 &&
-    classifyProxyRequestPriority "POST" "/api/file-resources" none == 1 &&
-    classifyProxyRequestPriority "POST" "/api/control/missions/m1/opened" none == 1 &&
-    classifyProxyRequestPriority "GET" "/api/control/missions/m1/events" (some "p2") == 2 &&
-    classifyProxyRequestPriority "GET" "/api/software" (some "p0") == 0 &&
-    isComputeBoundProxyRequest "GET" "/api/providers/antigravity-models" &&
-    isComputeBoundProxyRequest "GET" "/api/software?force=false" &&
-    isComputeBoundProxyRequest "GET" "/api/ai/providers/claude/usage?force=true" &&
-    !isComputeBoundProxyRequest "GET" "/api/projects" &&
-    !isComputeBoundProxyRequest "GET" "/api/ai/providers"
-  if (← assertTrue "proxy_request_priority_classification" prioOk) then passed := passed + 1
-
-  total := total + 1
-  if (← assertTrue "h2_pool_teardown_drains_active_and_queued_waiters"
-        (← OrbNetLeaf.H2Pool.H2ClientPool.testTeardownDrainsActiveAndQueuedWaiters)) then
-    passed := passed + 1
-
-  let stRankRef ← IO.mkRef ({ launchToken := validTok } : LocaldState)
-  let srtt1 ← recordOriginSuccess stRankRef "https://orbcore.thomas.md" 800
-  let srtt2 ← recordOriginSuccess stRankRef "https://orbcore.thomas.md" 400
-  recordOriginFailure stRankRef "https://orbcore.thomas.md" 10000 20000
-  let rankSt ← stRankRef.get
-  let rankedDuringCooldown := rankFailoverOrigins defaultFailoverOrigins rankSt.originHealth 15000
-  let rankedAfterCooldown := rankFailoverOrigins defaultFailoverOrigins rankSt.originHealth 35000
-  let txCustomRes2 ← dispatchRpcCommand stRankRef "transport_bridge_configure" (.obj #[("apiUrl", .str "https://custom.orb.internal:9443/")])
-  total := total + 1
-  let rankAndCfgOk :=
-    srtt1 == 800 && srtt2 == 750 &&
-    rankedDuringCooldown == #["https://agent-backend.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh", "https://orbcore.thomas.md"] &&
-    rankedAfterCooldown == defaultFailoverOrigins &&
-    (match txCustomRes2 with
-     | .ok jv =>
-       match jv.fieldArr? "failover_origins" with
-       | some #[.str "https://custom.orb.internal:9443"] => true
-       | _ => false
-     | _ => false)
-  if (← assertTrue "origin_ewma_cooldown_ranking_and_bridge_api_url" rankAndCfgOk) then passed := passed + 1
-
-  -- 18. R6-B (`SM-26` / `SM-23`) `(endpoint, server_build)` capability latch, 256-frame journal ring backpressure/resync, and typed 409 conflict disposition
-  runR6bClientLinkAndConflictTests
-  passed := passed + 3
-  total := total + 3
-
-  -- 19. Orphan parent-PID watchdog (`ORB_PARENT_PID`): exits when parent is gone & idle, stays alive while parent lives or local work is active/unsynced
-  let selfPid ← OrbBin.PosixExt.getpid
-  let orphanRef ← IO.mkRef ({ launchToken := validTok } : LocaldState)
-  let aliveParentRes ← shouldExitForDeadParent (some (Int64.ofNat selfPid.toNat)) orphanRef
-  let deadIdleRes ← shouldExitForDeadParent (some 2147483646) orphanRef
-  let _ ← dispatchRpcCommand orphanRef "local_origin_launch" (.obj #[
-    ("connection", .obj #[("api_url", .str "https://orbcore.thomas.md")]),
-    ("prompt", .str "keep local run alive")
-  ])
-  let deadActiveRes ← shouldExitForDeadParent (some 2147483646) orphanRef
-  total := total + 1
-  if (← assertTrue "orphan_parent_watchdog_respects_liveness_and_active_local_origins"
-        (!aliveParentRes && deadIdleRes && !deadActiveRes)) then
-    passed := passed + 1
-
-  -- 20. Desktop reliability & Rust-parity security, persistence, voice, SSE latency & framing checks
-  let (pParity, tParity) ← runDesktopReliabilityParityChecks tmpStateDir validTok
-  passed := passed + pParity
-  total := total + tParity
-
-  -- 21. Warm Claude RPC integration (`local_agents_scan`, `local_agents_workspace`, `local_agents_write`,
-  --     `local_run_launch`, `local_interaction_answer`, `local_checkpoints_list`, `local_checkpoint_diff`,
-  --     `local_checkpoint_restore`, `local_worktree_status`)
-  let (warmPassed, warmTotal) ← runWarmClaudeRpcE2eChecks validTok tmpStateDir
-  passed := passed + warmPassed
-  total := total + warmTotal
-
-  -- 22. Single-RPC `desktop_bootstrap` consolidates connection, UI prefs, and transport bridge config
-  let (bootPassed, bootTotal) ← runDesktopBootstrapChecks tmpStateDir validTok
-  passed := passed + bootPassed
-  total := total + bootTotal
+  let (tailPassed, tailTotal) ← runPostParityTailChecks validTok tmpStateDir
+  passed := passed + tailPassed
+  total := total + tailTotal
 
   try IO.FS.removeDirAll tmpStateDir catch _ => pure ()
 

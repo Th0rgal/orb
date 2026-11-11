@@ -27,6 +27,7 @@ import {
 import { cacheDelete, cachePeek, cachePut, cacheRecents, estimateCacheBytes, onCacheEvict } from "./pageCache";
 import { currentLinkBudget, onLinkBudgetChange } from "./networkHealth";
 import { loadPersistedTranscript, savePersistedTranscript } from "./persistentCache";
+import { promoteScheduledRequests, type RequestPriority } from "./transportScheduler";
 
 function transcriptPersistScope(): string {
   return "getJwt" in apiModule &&
@@ -320,6 +321,11 @@ function schedulePersistReadySnapshot(scope: string, snapshot: TranscriptSnap) {
   persistTimers.set(scope, timer);
 }
 
+let transcriptWarmer: ((items: StreamItem[]) => void) | null = null;
+export function registerTranscriptWarmer(fn: ((items: StreamItem[]) => void) | null): void {
+  transcriptWarmer = fn;
+}
+
 function saveSnapshot(scope: string, snapshot: TranscriptSnap, persist = true, syncBump = false) {
   cachedScopes.add(scope);
   const estBytes =
@@ -334,6 +340,9 @@ function saveSnapshot(scope: string, snapshot: TranscriptSnap, persist = true, s
   const liveId = liveMissionIds.get(scope);
   if (liveId && stamped.fromLog && !stamped.detailsPending) {
     rememberWarmRecent(scope, liveId);
+  }
+  if (stamped.fromLog && !stamped.detailsPending && stamped.items.length > 0) {
+    transcriptWarmer?.(stamped.items);
   }
   if (persist) schedulePersistReadySnapshot(scope, stamped);
   bumpTranscriptVersion(syncBump);
@@ -1025,9 +1034,21 @@ function mergeStreamBySequence(older: StreamEvent[], newer: StreamEvent[]): Stre
 
 async function fetchTranscript(
   id: string,
-  opts?: { priority?: import("./transportScheduler").RequestPriority; signal?: AbortSignal },
+  opts?: {
+    priority?: RequestPriority | (() => RequestPriority);
+    signal?: AbortSignal;
+    registerPromote?: (fn: () => void) => void;
+  },
 ): Promise<TranscriptSnap> {
   const version=connectionVersionSafe();const check=()=>{if(opts?.signal?.aborted)throw new DOMException("Aborted","AbortError");if(version!==connectionVersionSafe())throw Error("Connection changed during transcript load.");};
+  const currentPriority = (): RequestPriority | undefined =>
+    typeof opts?.priority === "function" ? opts.priority() : opts?.priority;
+  const requestOpts = () => {
+    const prio = currentPriority();
+    return prio || opts?.signal
+      ? { ...(prio ? { priority: prio } : {}), ...(opts?.signal ? { signal: opts.signal } : {}) }
+      : undefined;
+  };
   const previous = peekReadyTranscript(id) ?? (await hydrateTranscriptFromDisk(id));
   const baselineSnap = peekTranscript(id);
   const baselineSeqs = new Set<number>();
@@ -1068,6 +1089,35 @@ async function fetchTranscript(
     const retainedLive = liveSource?.length ? heldAfterHistory(nextStream, liveSource) : [];
     return { stream: nextStream, cursor: nextCursor, retainedLive };
   };
+  let preview: StreamEvent[] = [];
+  let tailSettled = false;
+  let previewStarted = false;
+  let previewPromise: Promise<void> = Promise.resolve();
+  const startPreview = () => {
+    if (previewStarted || previous || tailSettled || opts?.signal?.aborted) return;
+    previewStarted = true;
+    const pOpts = requestOpts();
+    previewPromise = (pOpts ? getMissionEventPreview(id, pOpts) : getMissionEventPreview(id))
+      .then((page) => {
+        if (!page?.events.length || version !== connectionVersionSafe() || opts?.signal?.aborted) return;
+        preview = spineAnswers(page.events.map(storedToStream).filter((e): e is StreamEvent => e !== null));
+        if (!tailSettled && !peekReadyTranscript(id)) {
+          const savedPreview: TranscriptSnap = {
+            activity: page.activity,
+            items: buildTranscript(preview, previewSessionFor(id)),
+            stream: preview,
+            fromLog: true,
+            detailsPending: true,
+          };
+          previewSnap = savedPreview;
+          saveSnapshot(key(id), savedPreview);
+        }
+      })
+      .catch(() => {});
+  };
+  if (currentPriority() === "p2") {
+    opts?.registerPromote?.(startPreview);
+  }
   check();
   // Fast single-roundtrip path (`GET /api/control/missions/:id/open`) returning
   // `{ protocol: 1, mission, events, spine, queue, max_seq, has_more, next_cursor, page_max_seq, reset }`.
@@ -1079,13 +1129,14 @@ async function fetchTranscript(
     typeof streamModule.getMissionOpenBundle === "function"
   ) {
     const openStartedAt = Date.now();
+    const openReqOpts = requestOpts();
     const bundle = await streamModule.getMissionOpenBundle(id, {
       ...(previous?.cursor !== undefined ? { since: previous.cursor } : {}),
-      ...(opts?.priority ? { priority: opts.priority } : {}),
-      ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(openReqOpts ?? {}),
     });
     check();
     if (bundle && bundle.protocol === 1 && !bundle.reset && !(previous?.cursor !== undefined && bundle.has_more)) {
+      tailSettled = true;
       if ("seedCachedMission" in apiModule && typeof apiModule.seedCachedMission === "function") {
         apiModule.seedCachedMission(bundle.mission, openStartedAt);
       }
@@ -1145,6 +1196,10 @@ async function fetchTranscript(
       } else if (bundle.max_seq !== undefined && (cursor === undefined || bundle.max_seq > cursor)) {
         cursor = bundle.max_seq;
       }
+      await previewPromise;
+      if (preview.length > 0) {
+        stream = mergeStreamBySequence(preview, stream);
+      }
       const queueEvents: StreamEvent[] = queuedRows.map((row) => ({
         type: "user_message",
         eventId: row.id,
@@ -1172,42 +1227,23 @@ async function fetchTranscript(
   // blocking the event log round-trip on /queue. Any delivery racing this read
   // wins by message identity in the reducer; held SSE fills the live boundary.
   let queueError: string | undefined;
-  const queuedPromise = (opts ? listQueuedMessages(id, opts) : listQueuedMessages(id)).catch(error => {
+  const initOpts = requestOpts();
+  const queuedPromise = (initOpts ? listQueuedMessages(id, initOpts) : listQueuedMessages(id)).catch(error => {
     if (opts?.signal?.aborted) return [];
     queueError = `Queued messages could not refresh: ${error instanceof Error ? error.message : String(error)}`;
     return [];
   });
   // Publish persisted messages before requesting activity, while racing the
   // full tail page in parallel so cold opens never pay an extra serial RTT.
-  let preview: StreamEvent[] = [];
-  let tailSettled = false;
-  const previewPromise = !previous && opts?.priority !== "p2"
-    ? (opts ? getMissionEventPreview(id, opts) : getMissionEventPreview(id))
-        .then(page => {
-          if (!page?.events.length || version !== connectionVersionSafe() || opts?.signal?.aborted) return;
-          preview = spineAnswers(page.events.map(storedToStream).filter((e): e is StreamEvent => e !== null));
-          if (!tailSettled && !peekReadyTranscript(id)) {
-            const savedPreview: TranscriptSnap = {
-              activity: page.activity,
-              items: buildTranscript(preview, previewSessionFor(id)),
-              stream: preview,
-              fromLog: true,
-              detailsPending: true,
-            };
-            previewSnap = savedPreview;
-            saveSnapshot(key(id), savedPreview);
-          }
-        })
-        .catch(() => {})
-    : Promise.resolve();
+  if (currentPriority() !== "p2") startPreview();
   let stream:StreamEvent[]=previous?.cursor===undefined?[]:[...(previous?.stream??[])];
   let retainedSpine:StreamEvent[]=previous?.cursor===undefined&&previous?.stream?.length?spineAnswers(previous.stream):[];
   let cursor=previous?.cursor, before=previous?.before, hasOlder=previous?.hasOlder;
   let spineComplete=previous?.spineComplete, spineBefore=previous?.spineBefore;
   let resets=0, forwardPages=0, jumpedForwardGap=false;
-  const pageExtra = opts ? { ...(opts.priority ? { priority: opts.priority } : {}), ...(opts.signal ? { signal: opts.signal } : {}) } : {};
   for(;;){
    check();
+   const pageExtra = requestOpts() ?? {};
    const page=await getMissionEventPage(id,cursor===undefined?{...pageExtra}:{since:cursor,...pageExtra});
    tailSettled = true;
    check();
@@ -1228,7 +1264,8 @@ async function fetchTranscript(
     const hasNonCanonicalReply = tailEvents.some(e => e.type === "assistant_message" && e.data.canonical !== true);
     const hasWorkActivity = tailEvents.some(e => e.type === "tool_call" || e.type === "tool_result" || e.type === "thinking");
     if(hasOlder && before !== undefined && (jumpedForwardGap || (!hasDeliveredUser && (!hasNonCanonicalReply || hasWorkActivity)))){
-     const spinePage = await getMissionEventPage(id, { before, view: "transcript", ...pageExtra }).catch(() => null);
+     const spineExtra = requestOpts() ?? {};
+     const spinePage = await getMissionEventPage(id, { before, view: "transcript", ...spineExtra }).catch(() => null);
      check();
      if(spinePage){
       spineBefore = spinePage.nextCursor;
@@ -1291,25 +1328,56 @@ function transcriptJob(id:string,kind:JobKind,load:()=>Promise<TranscriptSnap>):
  }).finally(()=>{owner.pending.delete(kind);if(!owner.pending.size)jobs.delete(scope);});
  owner.tail=result;owner.pending.set(kind,result);return result;
 }
+type PrefetchTask = {
+  ctl: AbortController;
+  priority: RequestPriority;
+  adopted: boolean;
+  countedInPrefetch: boolean;
+  onPromote?: () => void;
+  promise: Promise<TranscriptSnap | null>;
+};
 const prefetchQueue=new Map<string,string>();
-const prefetchControllers=new Map<string,AbortController>();
+const prefetchTasks=new Map<string,PrefetchTask>();
 let prefetchActive=0;
 function cancelPrefetch(scope:string){
  prefetchQueue.delete(scope);
- const ctl=prefetchControllers.get(scope);
- if(ctl){prefetchControllers.delete(scope);ctl.abort();}
+ const task=prefetchTasks.get(scope);
+ if(task){
+  prefetchTasks.delete(scope);
+  if(task.countedInPrefetch){task.countedInPrefetch=false;prefetchActive=Math.max(0,prefetchActive-1);}
+  task.ctl.abort();
+ }
+}
+function adoptPrefetch(scope:string):Promise<TranscriptSnap|null>|undefined{
+ prefetchQueue.delete(scope);
+ const task=prefetchTasks.get(scope);
+ if(!task)return undefined;
+ if(!task.adopted){
+  task.adopted=true;
+  task.priority="p1";
+  if(task.countedInPrefetch){
+   task.countedInPrefetch=false;
+   prefetchActive=Math.max(0,prefetchActive-1);
+  }
+  promoteScheduledRequests(task.ctl.signal);
+  task.onPromote?.();
+  pumpPrefetch();
+ }
+ return task.promise;
 }
 export function refreshTranscript(id:string):Promise<TranscriptSnap>{
  const scope=key(id),initial=jobs.get(scope)?.pending.get('initial');
- cancelPrefetch(scope);
  if(initial&&!peekReadyTranscript(id))return initial;
+ if(!peekReadyTranscript(id)&&prefetchTasks.has(scope))return loadTranscript(id);
+ cancelPrefetch(scope);
  return transcriptJob(id,'refresh',()=>fetchTranscript(id));
 }
 export function loadTranscript(id:string):Promise<TranscriptSnap>{
  const cached=peekReadyTranscript(id);
  if(cached)return Promise.resolve(cached);
- cancelPrefetch(key(id));
- return transcriptJob(id,'initial',async()=>await hydrateTranscriptFromDisk(id)??await fetchTranscript(id));
+ const scope=key(id);
+ const adopted=adoptPrefetch(scope);
+ return transcriptJob(id,'initial',async()=>(adopted?await adopted:null)??await hydrateTranscriptFromDisk(id)??await fetchTranscript(id));
 }
 // A transcript the cache cannot hold (too large), evicted under LRU pressure,
 // or that could not load is not speculatively fetched again at every list
@@ -1343,25 +1411,37 @@ function pumpPrefetch(){
  while(prefetchActive<maxConc&&prefetchQueue.size){
   const [scope,id]=prefetchQueue.entries().next().value!;
   prefetchQueue.delete(scope);
-  if(scope!==key(id)||peekReadyTranscript(id)||jobs.has(scope)||prefetchControllers.has(scope))continue;
+  if(scope!==key(id)||peekReadyTranscript(id)||jobs.has(scope)||prefetchTasks.has(scope))continue;
   const ctl=new AbortController();
   const version=connectionVersionSafe();
-  prefetchControllers.set(scope,ctl);
   prefetchActive++;
-  void (async()=>{
+  const task:PrefetchTask={ctl,priority:"p2",adopted:false,countedInPrefetch:true,promise:Promise.resolve(null)};
+  prefetchTasks.set(scope,task);
+  task.promise=(async():Promise<TranscriptSnap|null>=>{
    const hydrated=await hydrateTranscriptFromDisk(id);
-   if(ctl.signal.aborted||version!==connectionVersionSafe()||jobs.has(scope))return;
-   const snap=hydrated??await fetchTranscript(id,{priority:"p2",signal:ctl.signal});
-   if(ctl.signal.aborted||version!==connectionVersionSafe()||jobs.has(scope)||peekReadyTranscript(id))return;
-   saveSnapshot(scope,snap);
-   dirtyMissions.delete(scope);
-   reconcileWarmSubscriptions();
-   if(!active.has(scope)&&cachePeek(scope)===undefined)prefetchPaused.set(scope,Date.now()+PREFETCH_PAUSE_MS);
+   if(ctl.signal.aborted||version!==connectionVersionSafe())return null;
+   const snap=hydrated??await fetchTranscript(id,{
+    priority:()=>task.priority,
+    signal:ctl.signal,
+    registerPromote:fn=>{task.onPromote=fn;if(task.adopted)fn();},
+   });
+   if(ctl.signal.aborted||version!==connectionVersionSafe())return null;
+   if(!jobs.has(scope)&&!peekReadyTranscript(id)){
+    saveSnapshot(scope,snap);
+    dirtyMissions.delete(scope);
+    reconcileWarmSubscriptions();
+    if(!active.has(scope)&&cachePeek(scope)===undefined)prefetchPaused.set(scope,Date.now()+PREFETCH_PAUSE_MS);
+   }
+   return snap;
   })()
-   .catch(()=>{if(!ctl.signal.aborted)prefetchPaused.set(scope,Date.now()+PREFETCH_RETRY_MS);})
+   .catch(err=>{
+    if(!ctl.signal.aborted)prefetchPaused.set(scope,Date.now()+PREFETCH_RETRY_MS);
+    if(task.adopted&&!ctl.signal.aborted)throw err;
+    return null;
+   })
    .finally(()=>{
-    if(prefetchControllers.get(scope)===ctl)prefetchControllers.delete(scope);
-    prefetchActive--;
+    if(prefetchTasks.get(scope)===task)prefetchTasks.delete(scope);
+    if(task.countedInPrefetch){task.countedInPrefetch=false;prefetchActive=Math.max(0,prefetchActive-1);}
     pumpPrefetch();
    });
  }
@@ -1370,7 +1450,7 @@ onBackgroundSyncActiveChange(()=>pumpPrefetch());
 onLinkBudgetChange(()=>pumpPrefetch());
 export function prefetchTranscript(id:string){
  const scope=key(id);
- if(peekReadyTranscript(id)||jobs.has(scope)||prefetchControllers.has(scope))return;
+ if(peekReadyTranscript(id)||jobs.has(scope)||prefetchTasks.has(scope))return;
  const until=prefetchPaused.get(scope);if(until!==undefined&&until>Date.now())return;
  prefetchQueue.set(scope,id);
  pumpPrefetch();
@@ -1378,8 +1458,9 @@ export function prefetchTranscript(id:string){
 export function forgetPrefetchPauses(){
   prefetchPaused.clear();
   prefetchQueue.clear();
-  for (const [, ctl] of prefetchControllers) ctl.abort();
-  prefetchControllers.clear();
+  for (const [, task] of prefetchTasks) task.ctl.abort();
+  prefetchTasks.clear();
+  prefetchActive = 0;
   for (const [, timer] of persistTimers) clearTimeout(timer);
   persistTimers.clear();
   pendingPersistSnapshots.clear();
