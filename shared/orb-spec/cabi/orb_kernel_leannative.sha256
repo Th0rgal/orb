@@ -1,6 +1,6 @@
 {
   "kernel_abi_json_sha256": "3a44ff60e2b1525efc233afce6b78a4d5cda11df77a4206e9252100619d25f5e",
-  "kernel_lean_sha256": "940c832109809002a383f78ee320023d4965cd43ee1480ea6eb4014593a6bc2c",
+  "kernel_lean_sha256": "c0e6416d0f077c3694be20186ff3a3b98ed83ce778896435abf3bde40e26359a",
   "leannative_aarch64_ll_sha256": "1aa2fbe2b1e7d58f4d16058e72e28c921ae23f16e08e9e944676b3190c5050a6",
   "leannative_x86_64_ll_sha256": "70b47f712b433b8e61dd435ed4e0ff4d55a9407da774d15c75ce9b8c5fc15fb9",
   "schema": "orb.kernel.leannative.ll.v1",
