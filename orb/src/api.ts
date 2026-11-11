@@ -1055,6 +1055,7 @@ export interface AIProvider {
 }
 
 export interface MissionHistoryEntry {
+  id?: string;
   role: string;
   content: string;
 }

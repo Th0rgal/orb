@@ -473,6 +473,7 @@ export interface StartLocal {
   cwd: string;
   prompt: string;
   displayPrompt?: string;
+  messageId?: string;
   model?: string;
   effort?: string;
   sessionId?: string;
@@ -521,6 +522,7 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
         image_paths: req.imagePaths ?? [],
         shared_cwd_with: req.sharedCwdWith,
         ...(req.displayPrompt !== undefined ? { display_prompt: req.displayPrompt } : {}),
+        ...(req.messageId ? { message_id: req.messageId } : {}),
         ...(req.permissionMode ? { permission_mode: req.permissionMode } : {}),
         ...(req.worktreeMode ? { worktree_mode: req.worktreeMode } : {}),
       },

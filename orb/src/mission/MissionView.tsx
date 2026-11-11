@@ -145,6 +145,11 @@ export function mergeIncomingMission(prev: Mission | null, incoming: Mission): M
   if (!Number.isNaN(prevTs) && !Number.isNaN(nextTs) && nextTs < prevTs) {
     return prev.history === history ? prev : { ...prev, history };
   }
+  const reconciledSyncFlags: Pick<Mission, "local_sync_pending" | "local_sync_local_only" | "local_sync_error"> = {
+    local_sync_pending: incoming.local_sync_pending ?? false,
+    local_sync_local_only: incoming.local_sync_local_only ?? false,
+    local_sync_error: incoming.local_sync_error ?? null,
+  };
   const staleActiveEndedJob =
     !isLive(prev.status) &&
     isLive(incoming.status) &&
@@ -155,12 +160,13 @@ export function mergeIncomingMission(prev: Mission | null, incoming: Mission): M
     ? {
         ...prev,
         ...incoming,
+        ...reconciledSyncFlags,
         history,
         status: prev.status,
         terminal_reason: prev.terminal_reason ?? incoming.terminal_reason,
         status_message: prev.status_message ?? incoming.status_message,
       }
-    : { ...prev, ...incoming, history };
+    : { ...prev, ...incoming, ...reconciledSyncFlags, history };
   if (!inflightSettings.has(incoming.id)) return merged;
   return {
     ...merged,
@@ -172,6 +178,29 @@ export function mergeIncomingMission(prev: Mission | null, incoming: Mission): M
     service_tier: prev.service_tier,
     config_profile: prev.config_profile,
   };
+}
+
+export function localHistoryToStreamEvents(
+  missionId: string,
+  history: Mission["history"],
+  outstandingOutbox: ReadonlyArray<{ id: string; text: string }> = [],
+): StreamEvent[] {
+  const claimedIds = new Set<string>();
+  return history
+    .filter(row => row.content)
+    .map((row, index) => {
+      let id = typeof row.id === "string" && row.id ? row.id : "";
+      if (!id && row.role === "user") {
+        const clean = row.content.trim();
+        const match = outstandingOutbox.find(entry => !claimedIds.has(entry.id) && entry.text.trim() === clean);
+        if (match) id = match.id;
+      }
+      if (id) claimedIds.add(id);
+      return {
+        type: row.role === "user" ? "user_message" : "assistant_message",
+        data: { id: id || `local:${missionId}:${index}`, content: row.content },
+      };
+    });
 }
 
 function MissionDock(p: {
@@ -795,15 +824,14 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
         const localPendingRow = (await import("../localOrigins").then(m => m.localOrigins(p.id)).catch(() => [])).find(m => m.id === p.id);
         if (disposed) return;
         if (localPendingRow?.local_sync_pending) {
-          const events: StreamEvent[] = localPendingRow.history.filter(row => row.content).map((row, index) => ({
-            type: row.role === "user" ? "user_message" : "assistant_message",
-            data: { id: `local:${p.id}:${index}`, content: row.content },
-          }));
+          const outbox = [...acceptedLocalMessages(p.id), ...queuedLocalMessages(p.id).filter(row => !row.error && (!row.waiting || row.state === "accepted" || row.state === "dispatching"))];
+          const events = localHistoryToStreamEvents(p.id, localPendingRow.history, outbox);
           setItems(reuseUnchanged(items(), applyStreamEvents([], events)));
           setQueueError(null);
           setError(null);
           return;
         }
+        setMission(prev => (prev ? { ...prev, local_sync_pending: false, local_sync_error: null } : prev));
       }
       const snap = await (fresh ? refreshTranscript(p.id) : loadTranscript(p.id));
       if(disposed)return;
@@ -826,7 +854,8 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
       const local=(await import("../localOrigins").then(m=>m.localOrigins()).catch(()=>[])).find(m=>m.id===p.id);
       if(disposed)return;
       if(local){
-        const events:StreamEvent[]=local.history.filter(row=>row.content).map((row,index)=>({type:row.role==="user"?"user_message":"assistant_message",data:{id:`local:${p.id}:${index}`,content:row.content}}));
+        const outbox = [...acceptedLocalMessages(p.id), ...queuedLocalMessages(p.id).filter(row => !row.error && (!row.waiting || row.state === "accepted" || row.state === "dispatching"))];
+        const events = localHistoryToStreamEvents(p.id, local.history, outbox);
         setItems(applyStreamEvents([], events));setError(null);
       }else setError(e instanceof Error ? e.message : String(e));
     } finally {

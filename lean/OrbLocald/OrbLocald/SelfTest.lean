@@ -1410,6 +1410,7 @@ private def runLocalOpenCodeE2eChecks (validTok tmpStateDir : String) : IO (Nat 
       ("cwd", .str ocDir.toString),
       ("prompt", .str "Follow up turn 2"),
       ("display_prompt", .str "Follow up turn 2"),
+      ("message_id", .str "msg-followup-2"),
       ("model", .str "builtin/smart"),
       ("session_id", .str "ses_oc_e2e_99")
     ])
@@ -1451,7 +1452,9 @@ private def runLocalOpenCodeE2eChecks (validTok tmpStateDir : String) : IO (Nat 
         match rows.find? (fun r => r.fieldStr? "id" == some ocMid) with
         | some r =>
           r.fieldStr? "model_override" == some "orbrouter/builtin/smart" &&
-          ((r.fieldArr? "history").map (fun h => h.size == 4)).getD false
+          (match r.fieldArr? "history" with
+           | some h => h.size == 4 && (h[2]?).bind (·.fieldStr? "id") == some "msg-followup-2"
+           | none => false)
         | none => false
       | _ => false) &&
     (match ocEvPoll with

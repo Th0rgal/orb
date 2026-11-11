@@ -6184,6 +6184,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     else
       let resumeIso := formatUtcIso8601 (← OrbBin.PosixExt.nowEpoch)
       let displayPrompt := ((reqObj.fieldStr? "display_prompt").orElse (fun _ => reqObj.fieldStr? "displayPrompt")).getD prompt
+      let messageId? := ((reqObj.fieldStr? "message_id").orElse (fun _ => reqObj.fieldStr? "messageId")).map (·.trimAscii.toString) |>.filter (!·.isEmpty)
       let cleanDisplay := displayPrompt.trimAscii.toString
       let autoResumePrompt := "Your previous turn was interrupted before it finished. Check what is already done, then continue from there. Do not redo finished work."
       let (stResumed, originChanged) ← stRef.modifyGet fun s =>
@@ -6192,11 +6193,18 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           if r.id == targetMissionId then
             let lastUserMatch :=
               match r.history.back? with
-              | some lastJv => lastJv.fieldStr? "role" == some "user" && (lastJv.fieldStr? "content").map (·.trimAscii.toString) == some cleanDisplay
+              | some lastJv =>
+                lastJv.fieldStr? "role" == some "user" &&
+                ((match messageId? with | some mid => lastJv.fieldStr? "id" == some mid | none => false) ||
+                 (lastJv.fieldStr? "content").map (·.trimAscii.toString) == some cleanDisplay)
               | none => false
+            let userEntryFields : Array (String × JVal) :=
+              match messageId? with
+              | some mid => #[("id", .str mid), ("role", .str "user"), ("content", .str displayPrompt)]
+              | none => #[("role", .str "user"), ("content", .str displayPrompt)]
             let nextHist :=
               if !cleanDisplay.isEmpty && cleanDisplay != autoResumePrompt && !lastUserMatch then
-                r.history.push (.obj #[("role", .str "user"), ("content", .str displayPrompt)])
+                r.history.push (.obj userEntryFields)
               else
                 r.history
             { r with
