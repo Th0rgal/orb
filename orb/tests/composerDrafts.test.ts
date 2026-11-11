@@ -216,3 +216,50 @@ it("fences background IndexedDB draft migration when a newer write or delete hap
   resetComposerDraftsMemoryForTest();
   await expect(readComposerDraft("m:race-mig")).resolves.toEqual({ text: "NEWEST", images: [] });
 });
+
+it("serializes overlapping native draft autosaves, clears, and follow-ups per key", async () => {
+  const sqlDrafts = new Map<string, string>();
+  let releaseFirstPut!: () => void;
+  let firstPutSeen = false;
+
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        const key = String(args?.key ?? "");
+        if (cmd === "ui_draft_get") return sqlDrafts.get(key) ?? null;
+        if (cmd === "ui_draft_put") {
+          if (!firstPutSeen) {
+            firstPutSeen = true;
+            await new Promise<void>((r) => {
+              releaseFirstPut = r;
+            });
+          }
+          sqlDrafts.set(key, String(args?.raw ?? ""));
+          return null;
+        }
+        if (cmd === "ui_draft_delete") {
+          sqlDrafts.delete(key);
+          return null;
+        }
+        return null;
+      },
+    },
+  };
+
+  // Start slow autosave, then send-clear while autosave is still awaiting IPC.
+  const autosave = saveComposerDraft("m:overlap", { text: "sent prompt", images: [] });
+  await new Promise((r) => setTimeout(r, 0));
+  const clear = saveComposerDraft("m:overlap", { text: "", images: [] });
+  releaseFirstPut();
+  await Promise.all([autosave, clear]);
+
+  resetComposerDraftsMemoryForTest();
+  await expect(readComposerDraft("m:overlap")).resolves.toBeUndefined();
+
+  // Clear followed immediately by a follow-up draft keeps the follow-up.
+  const clear2 = saveComposerDraft("m:overlap", { text: "", images: [] });
+  const followUp = saveComposerDraft("m:overlap", { text: "follow up", images: [] });
+  await Promise.all([clear2, followUp]);
+  resetComposerDraftsMemoryForTest();
+  await expect(readComposerDraft("m:overlap")).resolves.toEqual({ text: "follow up", images: [] });
+});

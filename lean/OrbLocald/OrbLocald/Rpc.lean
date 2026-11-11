@@ -1444,8 +1444,11 @@ private def reconcileSqliteTranscripts (h : UInt64) : IO (Array String) := do
   | .error _ => return #[]
 
 private def evictExcessSqliteDrafts (h : UInt64) : IO Unit := do
+  -- Never evict `thread:*` records (durable local message queues, receipts, tombstones,
+  -- wake-stop fences, approved plans, and side-question transcripts); only bound
+  -- disposable composer draft scopes (`scope_key NOT LIKE 'thread:%'`).
   let _ ← OrbBin.Sqlite.sqliteQueryRowsRaw h
-    "DELETE FROM ui_drafts WHERE scope_key NOT IN (SELECT scope_key FROM ui_drafts ORDER BY updated_at DESC, scope_key DESC LIMIT ?1);"
+    "DELETE FROM ui_drafts WHERE scope_key NOT LIKE 'thread:%' AND scope_key NOT IN (SELECT scope_key FROM ui_drafts WHERE scope_key NOT LIKE 'thread:%' ORDER BY updated_at DESC, scope_key DESC LIMIT ?1);"
     #[s!"{maxUiDraftEntries}"]
 
 private def isValidUiCacheKind (k : String) : Bool :=

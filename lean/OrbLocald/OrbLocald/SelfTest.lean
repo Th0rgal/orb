@@ -753,15 +753,30 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
     ("if_absent", .bool true),
     ("raw", .str "{\"text\":\"stale migration\",\"images\":[]}")
   ])
+  -- Durable `thread:*` queue/receipt records must never be evicted when > 512 composer drafts arrive!
+  let _ ← dispatchRpcCommand stP1 "ui_draft_put" (.obj #[
+    ("key", .str "thread:orb-local-message-queue:v1:ep"),
+    ("updated_at", .nat 1),
+    ("raw", .str "[{\"id\":\"unsent-msg-1\"}]")
+  ])
+  for idx in [0:520] do
+    let _ ← dispatchRpcCommand stP1 "ui_draft_put" (.obj #[
+      ("key", .str s!"m:flood-{idx}"),
+      ("updated_at", .nat (10000 + idx)),
+      ("raw", .str "{\"text\":\"disposable\",\"images\":[]}")
+    ])
+  let durableQueueAfterFlood ← dispatchRpcCommand stP2 "ui_draft_get" (.obj #[("key", .str "thread:orb-local-message-queue:v1:ep")])
+  let evictedOldestDraft ← dispatchRpcCommand stP2 "ui_draft_get" (.obj #[("key", .str "m:draft-1")])
+  let newestFloodDraft ← dispatchRpcCommand stP2 "ui_draft_get" (.obj #[("key", .str "m:flood-519")])
   let _ ← dispatchRpcCommand stP1 "ui_cache_clear" (.obj #[])
   let tailAfterClear ← dispatchRpcCommand stP2 "ui_cache_get_tail" (.obj #[
     ("scope", .str "scope-sql"),
     ("mission_id", .str "m-big"),
     ("tail_limit", .nat 3)
   ])
-  let draftAfterClear ← dispatchRpcCommand stP2 "ui_draft_get" (.obj #[("key", .str "m:draft-1")])
-  let _ ← dispatchRpcCommand stP1 "ui_draft_delete" (.obj #[("key", .str "m:draft-1")])
-  let draftAfterDelete ← dispatchRpcCommand stP2 "ui_draft_get" (.obj #[("key", .str "m:draft-1")])
+  let draftAfterClear ← dispatchRpcCommand stP2 "ui_draft_get" (.obj #[("key", .str "m:flood-519")])
+  let _ ← dispatchRpcCommand stP1 "ui_draft_delete" (.obj #[("key", .str "m:flood-519")])
+  let draftAfterDelete ← dispatchRpcCommand stP2 "ui_draft_get" (.obj #[("key", .str "m:flood-519")])
   total := total + 1
   let tailStartOk := match tailRes with
     | .ok jv => jv.fieldNat? "start_idx" == some 7 && jv.fieldNat? "total_events" == some 10 && ((jv.fieldArr? "events_raw").map Array.size) == some 3
@@ -785,8 +800,11 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
     staleGuardOk &&
     isOkNull draftPut &&
     isOkNull draftIfAbsent &&
+    isOkStr durableQueueAfterFlood "[{\"id\":\"unsent-msg-1\"}]" &&
+    isOkNull evictedOldestDraft &&
+    isOkStr newestFloodDraft "{\"text\":\"disposable\",\"images\":[]}" &&
     isOkNull tailAfterClear &&
-    isOkStr draftAfterClear "{\"text\":\"unsent prompt\",\"images\":[]}" &&
+    isOkStr draftAfterClear "{\"text\":\"disposable\",\"images\":[]}" &&
     isOkNull draftAfterDelete
   if (← assertTrue "sqlite_tail_sliced_ui_cache_and_draft_persistence" sqlCacheAndDraftsOk) then passed := passed + 1
 

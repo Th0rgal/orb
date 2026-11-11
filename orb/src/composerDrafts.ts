@@ -14,13 +14,34 @@ let unsupportedDraftInvoke: NativeInvoke | null = null;
 // Closing and reopening a composer can beat disk writes. Keep the latest write
 // visible synchronously, including while an older disk read is in flight.
 const currentDrafts = new Map<string, ComposerDraft>();
-const sideThreadLocks = new Map<string, Promise<void>>();
+// Per-key serialization queue for all disk mutations (and `updateSideThread` read-modify-writes)
+// so overlapping autosaves, send-clears, and follow-up drafts never overtake one another.
+const keyLocks = new Map<string, Promise<void>>();
 // Monotonic per-key write generation used to fence background IndexedDB -> SQLite
-// migrations so an older in-flight `idbGet` can never clobber a newer write/delete.
+// migrations and drop superseded mutations before they touch storage.
 const writeEpochs = new Map<string, number>();
 
-function bumpWriteEpoch(key: string): void {
-  writeEpochs.set(key, (writeEpochs.get(key) ?? 0) + 1);
+function bumpWriteEpoch(key: string): number {
+  const next = (writeEpochs.get(key) ?? 0) + 1;
+  writeEpochs.set(key, next);
+  return next;
+}
+
+async function withKeyLock<R>(key: string, fn: () => Promise<R>): Promise<R> {
+  const prevLock = keyLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const chained = prevLock.then(() => gate, () => gate);
+  keyLocks.set(key, chained);
+  await prevLock.catch(() => undefined);
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (keyLocks.get(key) === chained) keyLocks.delete(key);
+  }
 }
 
 function isUnsupportedDraftCommandError(err: unknown): boolean {
@@ -112,18 +133,21 @@ async function readRecordWithMigration<T>(key: string): Promise<T | undefined> {
     (writeEpochs.get(key) ?? 0) === epochAtStart &&
     !currentDrafts.has(key)
   ) {
-    void invoke("ui_draft_put", {
-      key,
-      updated_at: Date.now(),
-      raw: JSON.stringify(legacy),
-      if_absent: true,
-    }).catch(() => undefined);
+    void withKeyLock(key, async () => {
+      if ((writeEpochs.get(key) ?? 0) !== epochAtStart || currentDrafts.has(key)) return;
+      await invoke("ui_draft_put", {
+        key,
+        updated_at: Date.now(),
+        raw: JSON.stringify(legacy),
+        if_absent: true,
+      }).catch(() => undefined);
+    });
   }
   return legacy;
 }
 
-async function writeRecord<T>(key: string, value: T): Promise<void> {
-  bumpWriteEpoch(key);
+async function writeRecordUnlocked<T>(key: string, value: T, expectedEpoch?: number): Promise<void> {
+  if (expectedEpoch !== undefined && (writeEpochs.get(key) ?? 0) !== expectedEpoch) return;
   const invoke = activeLocaldDrafts();
   if (invoke && !hasNonJsonBinaryInstance(value)) {
     try {
@@ -145,11 +169,17 @@ async function writeRecord<T>(key: string, value: T): Promise<void> {
   } else if (invoke) {
     await invoke("ui_draft_delete", { key }).catch(() => undefined);
   }
+  if (expectedEpoch !== undefined && (writeEpochs.get(key) ?? 0) !== expectedEpoch) return;
   await idbPut(key, value);
 }
 
-async function deleteRecord(key: string): Promise<void> {
-  bumpWriteEpoch(key);
+async function writeRecord<T>(key: string, value: T): Promise<void> {
+  const epoch = bumpWriteEpoch(key);
+  await withKeyLock(key, () => writeRecordUnlocked(key, value, epoch));
+}
+
+async function deleteRecordUnlocked(key: string, expectedEpoch?: number): Promise<void> {
+  if (expectedEpoch !== undefined && (writeEpochs.get(key) ?? 0) !== expectedEpoch) return;
   const invoke = activeLocaldDrafts();
   if (invoke) {
     try {
@@ -158,6 +188,7 @@ async function deleteRecord(key: string): Promise<void> {
       if (isUnsupportedDraftCommandError(err)) unsupportedDraftInvoke = invoke;
     }
   }
+  if (expectedEpoch !== undefined && (writeEpochs.get(key) ?? 0) !== expectedEpoch) return;
   if (typeof indexedDB !== "undefined" && indexedDB) {
     await idbDelete(key).catch(() => undefined);
   }
@@ -169,30 +200,42 @@ export function isEmptyComposerDraft(draft: ComposerDraft): boolean {
 
 export async function readComposerDraft(scope: string): Promise<ComposerDraft | undefined> {
   if (currentDrafts.has(scope)) return currentDrafts.get(scope);
+  const pendingWrite = keyLocks.get(scope);
+  if (pendingWrite) {
+    await pendingWrite.catch(() => undefined);
+    if (currentDrafts.has(scope)) return currentDrafts.get(scope);
+  }
   const stored = await readRecordWithMigration<ComposerDraft>(scope);
   return currentDrafts.get(scope) ?? stored;
 }
 
 export async function saveComposerDraft(scope: string, draft: ComposerDraft): Promise<void> {
-  bumpWriteEpoch(scope);
+  const epoch = bumpWriteEpoch(scope);
   currentDrafts.set(scope, draft);
-  if (isEmptyComposerDraft(draft)) {
-    await deleteRecord(scope);
-    return;
-  }
-  const invoke = activeLocaldDrafts();
-  if (invoke && hasNonJsonBinaryInstance(draft)) {
-    // Remove any older SQLite entry so IndexedDB's File-bearing draft isn't shadowed on read.
-    await invoke("ui_draft_delete", { key: scope }).catch(() => undefined);
-    await idbPut(scope, draft);
-    return;
-  }
-  await writeRecord(scope, draft);
+  await withKeyLock(scope, async () => {
+    if ((writeEpochs.get(scope) ?? 0) !== epoch) return;
+    if (isEmptyComposerDraft(draft)) {
+      await deleteRecordUnlocked(scope, epoch);
+      return;
+    }
+    const invoke = activeLocaldDrafts();
+    if (invoke && hasNonJsonBinaryInstance(draft)) {
+      // Remove any older SQLite entry so IndexedDB's File-bearing draft isn't shadowed on read.
+      await invoke("ui_draft_delete", { key: scope }).catch(() => undefined);
+      if ((writeEpochs.get(scope) ?? 0) !== epoch) return;
+      await idbPut(scope, draft);
+      return;
+    }
+    await writeRecordUnlocked(scope, draft, epoch);
+  });
 }
 
 /** Large side transcripts may include image bytes; keep them out of localStorage. */
 export async function readSideThread<T>(scope: string): Promise<T | undefined> {
-  return readRecordWithMigration<T>(`thread:${scope}`);
+  const key = `thread:${scope}`;
+  const pendingWrite = keyLocks.get(key);
+  if (pendingWrite) await pendingWrite.catch(() => undefined);
+  return readRecordWithMigration<T>(key);
 }
 
 export async function saveSideThread<T>(scope: string, value: T): Promise<void> {
@@ -206,25 +249,16 @@ export async function updateSideThread<T>(
   const key = `thread:${scope}`;
   const invoke = activeLocaldDrafts();
   if (invoke) {
-    const prevLock = sideThreadLocks.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>((r) => {
-      release = r;
-    });
-    sideThreadLocks.set(key, prevLock.then(() => gate, () => gate));
-    await prevLock.catch(() => undefined);
-    try {
+    return withKeyLock(key, async () => {
       const current = await readRecordWithMigration<T>(key);
       const next = updater(current);
       if (next !== undefined) {
-        await writeRecord(key, next);
+        const epoch = bumpWriteEpoch(key);
+        await writeRecordUnlocked(key, next, epoch);
         return { updated: true, value: next };
       }
       return { updated: false, value: next };
-    } finally {
-      release();
-      if (sideThreadLocks.get(key) === gate) sideThreadLocks.delete(key);
-    }
+    });
   }
   const d = await db();
   return new Promise((resolve, reject) => {
@@ -253,7 +287,7 @@ export async function updateSideThread<T>(
 
 export function resetComposerDraftsMemoryForTest(): void {
   currentDrafts.clear();
-  sideThreadLocks.clear();
+  keyLocks.clear();
   writeEpochs.clear();
   unsupportedDraftInvoke = null;
   database = undefined;
