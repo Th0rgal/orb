@@ -540,4 +540,105 @@ describe("Zero-Wait Conversation Loading & Two-Tier Answer Cache", () => {
     const restoredTool = refreshed.items.find((it) => it.kind === "tool" && it.callId === "c-0");
     expect(restoredTool && restoredTool.kind === "tool" ? restoredTool.result : undefined).toBe("FULL_RESTORED_OUTPUT");
   });
+
+  it("rebalances IndexedDB hot/warm tiers when revisiting warm transcripts", async () => {
+    const stores = new Map<string, Map<string, Record<string, unknown>>>();
+    const getStoreMap = (name: string) => {
+      let m = stores.get(name);
+      if (!m) {
+        m = new Map();
+        stores.set(name, m);
+      }
+      return m;
+    };
+    const fakeIdb = {
+      open: () => {
+        const req: Record<string, unknown> = {};
+        const db = {
+          objectStoreNames: { contains: (n: string) => stores.has(n) },
+          createObjectStore: (n: string) => {
+            getStoreMap(n);
+            return { createIndex: () => {} };
+          },
+          transaction: (_names: string | string[]) => {
+            const tx: Record<string, unknown> = {
+              objectStore: (name: string) => {
+                const map = getStoreMap(name);
+                return {
+                  put: (val: Record<string, unknown>) => {
+                    const k = String(val.id ?? val.scope);
+                    map.set(k, val);
+                  },
+                  get: (k: string) => {
+                    const r: Record<string, unknown> = { result: map.get(k) };
+                    queueMicrotask(() => (r.onsuccess as (() => void) | undefined)?.());
+                    return r;
+                  },
+                  delete: (k: string) => {
+                    map.delete(k);
+                  },
+                  clear: () => {
+                    map.clear();
+                  },
+                  index: () => ({
+                    getAll: () => {
+                      const rows = [...map.values()].sort(
+                        (a, b) => Number(a.savedAt ?? 0) - Number(b.savedAt ?? 0),
+                      );
+                      const r: Record<string, unknown> = { result: rows };
+                      queueMicrotask(() => (r.onsuccess as (() => void) | undefined)?.());
+                      return r;
+                    },
+                  }),
+                };
+              },
+            };
+            setTimeout(() => (tx.oncomplete as (() => void) | undefined)?.(), 0);
+            return tx;
+          },
+        };
+        req.result = db;
+        queueMicrotask(() => {
+          (req.onupgradeneeded as (() => void) | undefined)?.();
+          (req.onsuccess as (() => void) | undefined)?.();
+        });
+        return req;
+      },
+    };
+    vi.stubGlobal("indexedDB", fakeIdb);
+
+    const scope = "https://orbcore.thomas.md::idb-tier";
+    const big = "X".repeat(2048);
+    const makeSnap = (i: number) => ({
+      fromLog: true,
+      cursor: 3,
+      items: [
+        { kind: "user", key: `u-${i}`, text: `P ${i}` },
+        { kind: "work", key: `w-${i}`, entries: [{ kind: "tool", id: `c-${i}`, name: "bash", result: big }] },
+        { kind: "text", key: `a-${i}`, text: `A ${i}` },
+      ],
+      stream: [
+        { type: "user_message", sequence: 1, data: { id: `u-${i}`, content: `P ${i}` } },
+        { type: "tool_result", sequence: 2, data: { tool_call_id: `c-${i}`, result: big } },
+        { type: "assistant_message", sequence: 3, data: { id: `a-${i}`, content: `A ${i}`, success: true } },
+      ],
+    });
+
+    for (let i = 0; i < 40; i++) {
+      await savePersistedTranscript(scope, `m-${i}`, makeSnap(i));
+    }
+    const txMap = getStoreMap("transcripts");
+    expect([...txMap.values()].filter((r) => r.tier === "hot")).toHaveLength(HOT_PERSISTED_TRANSCRIPTS);
+
+    // Revisit warm transcripts `m-0`..`m-7` and rewrite them as hot — IndexedDB hot count must stay bounded at 32!
+    for (let i = 0; i < 8; i++) {
+      await savePersistedTranscript(scope, `m-${i}`, makeSnap(i));
+    }
+    const hotRecords = [...txMap.values()].filter((r) => r.tier === "hot");
+    const warmRecords = [...txMap.values()].filter((r) => r.tier === "warm");
+    expect(hotRecords).toHaveLength(HOT_PERSISTED_TRANSCRIPTS);
+    expect(warmRecords).toHaveLength(8);
+    expect(txMap.get(`${scope}::m:m-0`)?.tier).toBe("hot");
+    expect(txMap.get(`${scope}::m:m-8`)?.tier).toBe("warm");
+  });
 });

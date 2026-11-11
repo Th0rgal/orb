@@ -4880,6 +4880,7 @@ private structure SyncWsOutboundState where
   draining : Bool := false
   closed   : Bool := false
   overflow : Bool := false
+  revoked  : Bool := false
 
 /-- Multiplexed `/api/control/sync` WebSocket session (`orb-sync.v1`):
     supports `ping`/`pong`, `set_presentation`, `subscribe` (`since_seq` replay + `sync_caught_up`),
@@ -4891,7 +4892,8 @@ def runSyncWebSocketSessionLoop
     (st : CoreAppState)
     (wsCaller : CallerPrincipal)
     (cfd : Fd)
-    (maxSteps? : Option Nat := none) : IO Unit := do
+    (maxSteps? : Option Nat := none)
+    (reqHdrs : Array (String × String) := #[]) : IO Unit := do
   discard <| setNonBlocking cfd true
   let subMu ← Std.Mutex.new ({} : Std.HashMap String SyncMissionSubState)
   let outMu ← Std.Mutex.new ({} : SyncWsOutboundState)
@@ -4929,37 +4931,44 @@ def runSyncWebSocketSessionLoop
         aliveRef.set false
         return false
       return true
-  let popOutBatch : IO (Array ByteArray × Bool) :=
+  let popOutBatch : IO (Array ByteArray × Bool × Bool) :=
     outMu.atomically do
       let s ← get
-      if s.frames.isEmpty && !s.overflow then
+      if s.frames.isEmpty && !s.overflow && !s.revoked then
         set { s with draining := false }
-        return (#[], false)
+        return (#[], false, false)
       else
         let b := s.frames
         let ov := s.overflow
-        set { s with frames := #[], bytes := 0, overflow := false, draining := true }
-        return (b, ov)
+        let rv := s.revoked
+        set { s with frames := #[], bytes := 0, overflow := false, revoked := false, draining := true }
+        return (b, ov, rv)
   let markOutFinished (closeSession : Bool) : IO Unit :=
     outMu.atomically do
       modify fun s =>
         if closeSession then
-          { s with frames := #[], bytes := 0, draining := false, closed := true, overflow := false }
+          { s with frames := #[], bytes := 0, draining := false, closed := true, overflow := false, revoked := false }
         else
           { s with draining := false }
   let startDrainTask : IO Unit := do
     let t ← IO.asTask do
       let mut running := true
       while running do
-        let (batch, didOverflow) ← popOutBatch
-        if batch.isEmpty && !didOverflow then
+        let (batch, didOverflow, didRevoke) ← popOutBatch
+        if batch.isEmpty && !didOverflow && !didRevoke then
           running := false
         else
           let mut ok := true
           for wire in batch do
             if ok then
               ok ← writeWsBounded wire 40 false
-          if didOverflow then
+          if didRevoke then
+            if let some clsFrm := makeServerClose? 1008 "unauthorized" then
+              discard <| writeWsBounded clsFrm 2 true
+            aliveRef.set false
+            markOutFinished true
+            running := false
+          else if didOverflow then
             if ok then
               if let some lagFrm := encodeFrame? { fin := true, opcode := .text, payload := "{\"type\":\"stream_lagged\"}".toUTF8 } none then
                 discard <| writeWsBounded lagFrm 2 true
@@ -4972,6 +4981,17 @@ def runSyncWebSocketSessionLoop
             markOutFinished true
             running := false
     activeWriterRef.set (some t)
+  let revokeSession : IO Unit := do
+    aliveRef.set false
+    presRef.set false
+    subMu.atomically do set ({} : Std.HashMap String SyncMissionSubState)
+    let shouldSpawn ← outMu.atomically do
+      let s ← get
+      let sp := !s.draining
+      set { s with frames := #[], bytes := 0, draining := true, closed := true, revoked := true }
+      return sp
+    if shouldSpawn then
+      startDrainTask
   let sendWsBytes (wire : ByteArray) : IO Bool := do
     if !(← aliveRef.get) then
       return false
@@ -4999,9 +5019,33 @@ def runSyncWebSocketSessionLoop
     match encodeFrame? { fin := true, opcode := .text, payload := txt.toUTF8 } none with
     | none => return false
     | some frm => sendWsBytes frm
+  let liveSyncCaller? : IO (Option CallerPrincipal) := do
+    if !(← aliveRef.get) then return none
+    let resolved? ←
+      if !reqHdrs.isEmpty then
+        resolveCallerPrincipal? st reqHdrs (← coreEpochSec) (allowWsSubproto := true)
+      else if wsCaller.isLegacyUnscoped then
+        pure (some wsCaller)
+      else
+        match ← getUserById? st.store wsCaller.userId with
+        | none => pure none
+        | some u =>
+          let epochMatch : UInt8 := if u.sessionEpoch == wsCaller.sessionEpoch then 1 else 0
+          let disFlag : UInt8 := if u.disabled then 1 else 0
+          let roleCode : UInt8 := if u.role == "admin" then 1 else 0
+          let rbacWord := Orb.Kernel.multiuserRbacStep 1 disFlag epochMatch roleCode 0 1 0
+          if (rbacWord &&& 1) == 1 then
+            pure (some (CallerPrincipal.ofUserRecord u false))
+          else
+            pure none
+    if resolved?.isNone then
+      revokeSession
+    return resolved?
   let authorizeAndGetMissionBtwParent? (mid : String) : IO (Bool × Option String) := do
     if mid.isEmpty then return (false, none)
-    if wsCaller.isLegacyUnscoped then
+    let some liveCaller ← liveSyncCaller?
+      | return (false, none)
+    if liveCaller.isLegacyUnscoped then
       match ← execParamQuery st.store.missionsDb "SELECT COALESCE(tags,'[]') FROM missions WHERE id=?1;" #[mid] with
       | .ok rows =>
         let tagsJson := if rows.size > 1 then (rows[1]![0]?).getD "[]" else "[]"
@@ -5012,16 +5056,16 @@ def runSyncWebSocketSessionLoop
         ("SELECT COALESCE(m.owner_user_id,''), " ++
          "CASE WHEN EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id = m.id AND s.user_id = ?2) THEN '1' ELSE '0' END, " ++
          "COALESCE(m.tags,'[]') FROM missions m WHERE m.id = ?1;")
-        #[mid, wsCaller.userId] with
+        #[mid, liveCaller.userId] with
       | .error _ => return (false, none)
       | .ok rows =>
         if rows.size ≤ 1 then return (false, none)
         let ownerId := (rows[1]![0]?).getD ""
-        let isOwner := !wsCaller.userId.isEmpty && ownerId == wsCaller.userId
+        let isOwner := !liveCaller.userId.isEmpty && ownerId == liveCaller.userId
         let isPart := ((rows[1]![1]?).getD "0") == "1"
         let tagsJson := (rows[1]![2]?).getD "[]"
-        let disFlag : UInt8 := if wsCaller.disabled then 1 else 0
-        let roleCode : UInt8 := if wsCaller.role == "admin" then 1 else 0
+        let disFlag : UInt8 := if liveCaller.disabled then 1 else 0
+        let roleCode : UInt8 := if liveCaller.role == "admin" then 1 else 0
         let rbacWord := Orb.Kernel.multiuserRbacStep
           1 disFlag 1 roleCode 2 (if isOwner then 1 else 0) (if isPart then 1 else 0)
         if (rbacWord &&& 1) == 1 then
@@ -5056,7 +5100,7 @@ def runSyncWebSocketSessionLoop
                 return true
               else
                 return false
-            if removed then
+            if removed && (← aliveRef.get) then
               discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid},\"error\":\"forbidden\"}"
           else
             subMu.atomically do
@@ -5076,23 +5120,24 @@ def runSyncWebSocketSessionLoop
           let kind := (jv.fieldStr? "kind").getD "mission_updated"
           let hintBtw? := (jv.fieldStr? "btw_parent_id").filter (!·.isEmpty)
           if kind == "mission_deleted" then
-            let ownerUid := (jv.fieldStr? "owner_uid").getD ""
-            let sharedUids : Array String :=
-              match jv.fieldArr? "shared_uids" with
-              | some xs => xs.filterMap JVal.asStr?
-              | none => #[]
-            let allowed : Bool :=
-              if wsCaller.isLegacyUnscoped then true
-              else
-                let isOwner := !wsCaller.userId.isEmpty && ownerUid == wsCaller.userId
-                let isPart := !wsCaller.userId.isEmpty && sharedUids.contains wsCaller.userId
-                let disFlag : UInt8 := if wsCaller.disabled then 1 else 0
-                let roleCode : UInt8 := if wsCaller.role == "admin" then 1 else 0
-                let rbacWord := Orb.Kernel.multiuserRbacStep
-                  1 disFlag 1 roleCode 2 (if isOwner then 1 else 0) (if isPart then 1 else 0)
-                (rbacWord &&& 1) == 1
-            if allowed then
-              discard <| sendWsText (renderSyncPresentationJson mid kind none hintBtw?)
+            if let some liveCaller ← liveSyncCaller? then
+              let ownerUid := (jv.fieldStr? "owner_uid").getD ""
+              let sharedUids : Array String :=
+                match jv.fieldArr? "shared_uids" with
+                | some xs => xs.filterMap JVal.asStr?
+                | none => #[]
+              let allowed : Bool :=
+                if liveCaller.isLegacyUnscoped then true
+                else
+                  let isOwner := !liveCaller.userId.isEmpty && ownerUid == liveCaller.userId
+                  let isPart := !liveCaller.userId.isEmpty && sharedUids.contains liveCaller.userId
+                  let disFlag : UInt8 := if liveCaller.disabled then 1 else 0
+                  let roleCode : UInt8 := if liveCaller.role == "admin" then 1 else 0
+                  let rbacWord := Orb.Kernel.multiuserRbacStep
+                    1 disFlag 1 roleCode 2 (if isOwner then 1 else 0) (if isPart then 1 else 0)
+                  (rbacWord &&& 1) == 1
+              if allowed then
+                discard <| sendWsText (renderSyncPresentationJson mid kind none hintBtw?)
           else
             let (isAuth, dbBtw?) ← authorizeAndGetMissionBtwParent? mid
             if isAuth then
@@ -5116,7 +5161,8 @@ def runSyncWebSocketSessionLoop
       let stillAuth ← isAuthorizedForMission mid
       if !stillAuth then
         subMu.atomically do modify (·.erase mid)
-        discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid},\"error\":\"forbidden\"}"
+        if ← aliveRef.get then
+          discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid},\"error\":\"forbidden\"}"
       else
         match repRes with
         | .error _ =>
@@ -5154,8 +5200,10 @@ def runSyncWebSocketSessionLoop
       | .error .eagain =>
         if maxSteps?.isSome then
           loopOpen := false
-        else
+        else if (← liveSyncCaller?).isSome then
           discard <| sendWsText "{\"type\":\"heartbeat\"}"
+        else
+          loopOpen := false
       | .error _ =>
         aliveRef.set false
         loopOpen := false
@@ -5187,7 +5235,10 @@ def runSyncWebSocketSessionLoop
                 loopOpen := false
                 drainFrames := false
               | .text | .binary =>
-                if let some rawStr := String.fromUTF8? frame.payload then
+                if (← liveSyncCaller?).isNone then
+                  loopOpen := false
+                  drainFrames := false
+                else if let some rawStr := String.fromUTF8? frame.payload then
                   if let .ok jv := OrbBin.Json.parse rawStr then
                     let op := (jv.fieldStr? "op").getD ""
                     if op == "ping" then
@@ -5209,7 +5260,8 @@ def runSyncWebSocketSessionLoop
                       if !isSafeMissionId mid then
                         discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid},\"error\":\"invalid_mission_id\"}"
                       else if !(← isAuthorizedForMission mid) then
-                        discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid},\"error\":\"forbidden\"}"
+                        if ← aliveRef.get then
+                          discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid},\"error\":\"forbidden\"}"
                       else
                         subMu.atomically do
                           modify (fun m => m.insert mid { maxPayload := maxP, replaying := true, queuedLive := #[] })
@@ -5284,7 +5336,7 @@ def handleClientConn (st : CoreAppState) (cfd : Fd) (allowKeepAlive : Bool := fa
           let cleanP := (req.path.splitOn "?").headD req.path
           if cleanP == "/api/control/sync" then
             if let some wsCaller ← resolveCallerPrincipal? st req.headers nowSec (allowWsSubproto := true) then
-              runSyncWebSocketSessionLoop st wsCaller cfd (if allowKeepAlive then none else some 64)
+              runSyncWebSocketSessionLoop st wsCaller cfd (if allowKeepAlive then none else some 64) req.headers
           else
             runWebSocketSessionLoop cfd
         keepGoing := false

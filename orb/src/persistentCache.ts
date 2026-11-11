@@ -121,13 +121,27 @@ export function compactWarmTranscriptSnapshot<TSnap>(snapshot: TSnap): TSnap {
 const memSidebar = new Map<string, PersistedSidebarPayload>();
 const memTranscripts = new Map<string, PersistedTranscriptRecord>();
 let knownDbTranscriptIds: Set<string> | null = null;
+let knownDbHotTranscriptIds: Set<string> | null = null;
 let dbPromise: Promise<IDBDatabase | null> | null = null;
+let dbSource: IDBFactory | null = null;
+let lastSavedStamp = 0;
+
+function nextSavedAt(): number {
+  const now = Date.now();
+  lastSavedStamp = now > lastSavedStamp ? now : lastSavedStamp + 0.001;
+  return lastSavedStamp;
+}
 
 function openDb(): Promise<IDBDatabase | null> {
   if (typeof indexedDB === "undefined" || !indexedDB) {
+    dbPromise = null;
+    dbSource = null;
     return Promise.resolve(null);
   }
-  if (dbPromise) return dbPromise;
+  if (dbPromise && dbSource === indexedDB) return dbPromise;
+  dbSource = indexedDB;
+  knownDbTranscriptIds = null;
+  knownDbHotTranscriptIds = null;
   dbPromise = new Promise<IDBDatabase | null>((resolve) => {
     try {
       const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -246,7 +260,7 @@ export async function loadPersistedTranscript<TSnap = unknown>(
   const id = transcriptRecordKey(scope, missionId);
   const memHit = memTranscripts.get(id);
   if (memHit) {
-    memHit.savedAt = Date.now();
+    memHit.savedAt = nextSavedAt();
     return memHit.snapshot as TSnap;
   }
   const db = await openDb();
@@ -283,7 +297,7 @@ export async function savePersistedTranscript<TSnap = unknown>(
     id,
     scope,
     missionId,
-    savedAt: Date.now(),
+    savedAt: nextSavedAt(),
     tier: "hot",
     snapshot,
   };
@@ -298,14 +312,18 @@ export async function savePersistedTranscript<TSnap = unknown>(
       store.put(record);
       const needsSweep =
         knownDbTranscriptIds === null ||
-        (!knownDbTranscriptIds.has(id) && knownDbTranscriptIds.size >= HOT_PERSISTED_TRANSCRIPTS);
-      if (!needsSweep && knownDbTranscriptIds) {
+        knownDbHotTranscriptIds === null ||
+        (!knownDbHotTranscriptIds.has(id) && knownDbHotTranscriptIds.size >= HOT_PERSISTED_TRANSCRIPTS) ||
+        (!knownDbTranscriptIds.has(id) && knownDbTranscriptIds.size >= MAX_PERSISTED_TRANSCRIPTS);
+      if (!needsSweep && knownDbTranscriptIds && knownDbHotTranscriptIds) {
         knownDbTranscriptIds.add(id);
+        knownDbHotTranscriptIds.add(id);
       } else {
         const allReq = store.index("by_saved_at").getAll();
         allReq.onsuccess = () => {
-          const rows = allReq.result as PersistedTranscriptRecord[] | undefined;
-          if (!Array.isArray(rows)) return;
+          const rawRows = allReq.result as PersistedTranscriptRecord[] | undefined;
+          if (!Array.isArray(rawRows)) return;
+          const rows = [...rawRows].sort((a, b) => a.savedAt - b.savedAt);
           const nextIds = new Set(rows.map((r) => String(r.id)));
           nextIds.add(id);
           let remaining = rows;
@@ -317,9 +335,9 @@ export async function savePersistedTranscript<TSnap = unknown>(
             }
             remaining = rows.slice(dropCount);
           }
-          if (remaining.length > HOT_PERSISTED_TRANSCRIPTS) {
-            const warmCount = remaining.length - HOT_PERSISTED_TRANSCRIPTS;
-            for (let i = 0; i < warmCount; i++) {
+          const hotStart = Math.max(0, remaining.length - HOT_PERSISTED_TRANSCRIPTS);
+          if (hotStart > 0) {
+            for (let i = 0; i < hotStart; i++) {
               const r = remaining[i];
               if (r.tier !== "warm") {
                 store.put({
@@ -331,6 +349,9 @@ export async function savePersistedTranscript<TSnap = unknown>(
             }
           }
           knownDbTranscriptIds = nextIds;
+          knownDbHotTranscriptIds = new Set(
+            remaining.slice(hotStart).map((r) => String(r.id)),
+          );
         };
       }
       tx.oncomplete = () => resolve();
@@ -346,6 +367,8 @@ export async function clearPersistentCache(): Promise<void> {
   memSidebar.clear();
   memTranscripts.clear();
   knownDbTranscriptIds = null;
+  knownDbHotTranscriptIds = null;
+  lastSavedStamp = 0;
   const db = await openDb();
   if (!db) return;
   await new Promise<void>((resolve) => {

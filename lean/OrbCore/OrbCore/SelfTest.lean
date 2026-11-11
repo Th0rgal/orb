@@ -4874,10 +4874,18 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
       if let .ok () ← pollReadable wfd 250 then
         let ch ← readStreamChunk wfd 32768
         if !ch.isEmpty then wsRx := wsRx ++ ch
-    if let some clsFrm := encodeFrame? { fin := true, opcode := .close, payload := ByteArray.empty } (some mask4) then
-      discard <| writeAll wfd clsFrm false
+    -- Bump `bootAdminId`'s `session_epoch` while the socket is open -> must drop live delivery and close with 1008!
+    discard <| execParamQuery store.missionsDb
+      "UPDATE users SET session_epoch = session_epoch + 1 WHERE id=?1;" #[bootAdminId]
+    let _ ← appendMissionEvent store "m-zw-other" "assistant_message" "{\"id\":\"a-post-epoch\",\"content\":\"Post-epoch-bump secret\"}" "2026-11-11T07:01:04Z"
+    IO.sleep 35
+    for _ in [0:3] do
+      if let .ok () ← pollReadable wfd 250 then
+        let ch ← readStreamChunk wfd 32768
+        if !ch.isEmpty then wsRx := wsRx ++ ch
     discard <| closeFd wfd
     let mut decodedTexts : Array String := #[]
+    let mut sawAuthClose := false
     let mut parseMore := true
     while parseMore do
       match decodeFramePrefix wsRx false with
@@ -4885,9 +4893,12 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
         wsRx := wsRx.extract cons wsRx.size
         if frm.opcode == .text then
           decodedTexts := decodedTexts.push (String.fromUTF8? frm.payload |>.getD "")
+        else if frm.opcode == .close then
+          sawAuthClose := true
       | _ => parseMore := false
     let allWs := String.intercalate "\n" decodedTexts.toList
     wsSyncOk :=
+      sawAuthClose &&
       (hsHead.splitOn "101 Switching Protocols").length == 2 &&
       (hsHead.splitOn "Sec-WebSocket-Protocol: orb-sync.v1").length == 2 &&
       (allWs.splitOn "\"type\":\"sync_ready\"").length == 2 &&
@@ -4906,7 +4917,8 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
       (allWs.splitOn "\"m-zw-bob\"").length == 2 &&
       (allWs.splitOn "secret_tool").length == 1 &&
       (allWs.splitOn "Bob secret answer").length == 1 &&
-      (allWs.splitOn "Revoked post-share secret").length == 1
+      (allWs.splitOn "Revoked post-share secret").length == 1 &&
+      (allWs.splitOn "Post-epoch-bump secret").length == 1
 
   let _ := srvTask.get
   if !keepAliveOk || !wsSyncOk then
