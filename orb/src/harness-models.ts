@@ -11,6 +11,7 @@ export function destinationHarnessChoices(
   accountModels: [string, string][],
   localVibeInstalled = false,
   localClaudeModels: [string, string][] = [],
+  localOpenCodeModels: [string, string][] = [],
 ): HarnessChoice[] {
   const coreAntigravity = core.find(choice => choice.backend.id === "antigravity");
   const choices = core.filter(choice => choice.backend.id !== "antigravity" && choice.backend.id !== "gemini");
@@ -25,6 +26,16 @@ export function destinationHarnessChoices(
     const index = choices.findIndex(choice => choice.backend.id === "claudecode");
     if (index >= 0) choices[index] = { ...choices[index], models };
     else choices.unshift({ backend: { id: "claudecode", name: "Claude Code" }, models });
+  }
+  // This computer's OpenCode lists models from its own ~/.config/opencode/opencode.json + CLI.
+  if (machine === "local" && localOpenCodeModels.length) {
+    const models = localOpenCodeModels.map(([value, label]) => ({ value, label }));
+    const index = choices.findIndex(choice => choice.backend.id === "opencode");
+    if (index >= 0) choices[index] = { ...choices[index], models };
+    else {
+      choices.push({ backend: { id: "opencode", name: "OpenCode", native_plan: true }, models });
+      choices.sort((a, b) => harnessRank(a.backend.id) - harnessRank(b.backend.id));
+    }
   }
   if (machine === "local" && localVibeInstalled && !choices.some(choice => choice.backend.id === "vibe")) {
     choices.push({

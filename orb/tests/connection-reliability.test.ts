@@ -174,6 +174,24 @@ describe("connection reliability transport & prefetch bounds", () => {
     expect(invoke).toHaveBeenCalledTimes(1);
   });
 
+  it("bypasses the HTTPS-only loopback bridge when connected to a local http:// orb-server", async () => {
+    const invoke = vi.fn(async () => ({
+      proxy_base_url: "http://127.0.0.1:59123/__orb_tx/test-secret",
+      configured_target: "https://orbcore.thomas.md",
+    }));
+    (window as unknown as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    setTransportBridgeEnabled(true);
+    setApiUrl("http://127.0.0.1:3000");
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => Response.json({ url: String(input) }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await resolveTransportBase()).toBeNull();
+    const out = await api<{ url: string }>("/api/health", {});
+    expect(out.url).toBe("http://127.0.0.1:3000/api/health");
+    expect(invoke).not.toHaveBeenCalledWith("transport_bridge_configure", expect.anything());
+  });
+
   it("persists updated_since cursor with -2s overlap and marks delta responses as partialList", async () => {
     setConnection("http://cursor.test", "tok");
     let calls = 0;
@@ -931,5 +949,49 @@ describe("connection reliability transport & prefetch bounds", () => {
       "https://orbcore.thomas.md/api/providers/antigravity-models?node_id=ashur",
       "https://agent-backend.thomas.md/api/providers/antigravity-models?node_id=ashur",
     ]);
+  });
+
+  it("does not latch global reconnecting when SSE stream returns 404 for an unsynced local mission", async () => {
+    setConnection("https://orbcore.thomas.md", "tok-sse-404");
+
+    class FailingSocket {
+      static instances: FailingSocket[] = [];
+      url: string;
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((ev: { data: unknown }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: ((ev: { code?: number; reason?: string }) => void) | null = null;
+      constructor(url: string) {
+        this.url = url;
+        FailingSocket.instances.push(this);
+        queueMicrotask(() => {
+          if (this.readyState === 3) return;
+          this.readyState = 3;
+          this.onerror?.();
+          this.onclose?.({ code: 1006, reason: "" });
+        });
+      }
+      send() {}
+      close() {
+        this.readyState = 3;
+      }
+    }
+    vi.stubGlobal("WebSocket", FailingSocket as unknown as typeof WebSocket);
+
+    let sseCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        sseCalls++;
+        return new Response("Not found", { status: 404 });
+      }),
+    );
+
+    const stop = streamMission("m-unsynced-local", () => {}, () => {});
+    await vi.waitFor(() => expect(sseCalls).toBeGreaterThanOrEqual(1), { timeout: 2500 });
+    expect(networkHealth()).toBe("healthy");
+    expect(networkHealthSnapshot().wsConnected).toBeNull();
+    stop();
   });
 });
