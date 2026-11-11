@@ -915,6 +915,7 @@ structure ForkMissionOutcome where
   modelEffort         : String
   workingDirectory    : String
   project             : String := ""
+  folder              : String := ""
   remoteNodeId?       : Option String
   placementKind       : String := "managed"
   turnsCopied         : Nat
@@ -953,14 +954,19 @@ def loadCanonicalMissionTurns (st : CoreStore) (missionId : String) (preferCloud
             if (role == "user" || role == "assistant") && !content.trimAscii.toString.isEmpty then
               turns := turns.push (role, content)
   if turns.isEmpty then
+    let effSeqExpr := "(CASE WHEN COALESCE(seq,0)>0 THEN seq ELSE COALESCE(sequence,0) END)"
     if let .ok eRows ← execParamQuery st.missionsDb
-        "SELECT event_type, payload FROM mission_events WHERE mission_id=?1 ORDER BY seq ASC, id ASC;"
+        (s!"SELECT event_type, COALESCE(payload,''), COALESCE(content,''), COALESCE(content_file,'') " ++
+         s!"FROM mission_events WHERE mission_id=?1 ORDER BY {effSeqExpr} ASC, id ASC;")
         #[missionId] then
       if eRows.size > 1 then
         for i in [1:eRows.size] do
           let r := eRows[i]!
           let evType := (r[0]?).getD ""
-          let payload := (r[1]?).getD ""
+          let rawPayload := (r[1]?).getD ""
+          let legacyContent := (r[2]?).getD ""
+          let legacyFile := (r[3]?).getD ""
+          let payload ← hydrateMissionEventPayload st.rootDir rawPayload "" "" "" legacyContent legacyFile ""
           if let .ok jv := OrbBin.Json.parse payload then
             let content :=
               (jv.fieldStr? "content").orElse (fun _ => jv.fieldStr? "text")
@@ -987,7 +993,7 @@ def forkOrHandoffMission
     (defaultWorkDir : String)
     (req : ForkMissionRequest) : IO (Except (Nat × String) ForkMissionOutcome) := do
   let mRows ← execParamQuery st.missionsDb
-    "SELECT title,backend,COALESCE(model_override,''),COALESCE(model_effort,''),working_directory,project,authority_mode,placement_kind,tags,COALESCE(owner_user_id,'') FROM missions WHERE id=?1;"
+    "SELECT title,backend,COALESCE(model_override,''),COALESCE(model_effort,''),working_directory,COALESCE(project,''),authority_mode,placement_kind,tags,COALESCE(owner_user_id,''),COALESCE(folder,'') FROM missions WHERE id=?1;"
     #[req.sourceMissionId]
   let .ok rs := mRows | return .error (500, "source_mission_query_failed")
   if rs.size ≤ 1 then
@@ -1003,6 +1009,7 @@ def forkOrHandoffMission
   let srcPlacement := (row[7]?).getD "managed"
   let srcExtraTags := parseStringJsonArray ((row[8]?).getD "[]")
   let srcOwnerUserId := (row[9]?).getD ""
+  let srcFolder := normalizeMissionFolder ((row[10]?).getD "")
 
   let srcIsCloud := isCloudBackendName srcBackend
   let targetBackend :=
@@ -1059,9 +1066,12 @@ def forkOrHandoffMission
   let shareSourceWs := ((handoffWord >>> 16) &&& 1) == 1
   let freshWs := ((handoffWord >>> 24) &&& 1) == 1
 
-  let mut customTags := srcExtraTags.filter fun t =>
-    !(t.startsWith "fork-workspace:") && !(t.startsWith "forked-from:") && !(t.startsWith "remote-node:")
+  let mut customTags := (stripLegacyOrbFolderTags srcExtraTags).1.filter fun t =>
+    !(t.startsWith "fork-workspace:") && !(t.startsWith "forked-from:") &&
+    !(t.startsWith "fork-of:") && !(t.startsWith "remote-node:")
   customTags := customTags.push s!"forked-from:{req.sourceMissionId}"
+  if !req.sideQuestion then
+    customTags := customTags.push s!"fork-of:{req.sourceMissionId}"
   if shareSourceWs && !freshWs then
     customTags := customTags.push s!"fork-workspace:{req.sourceMissionId}"
   if req.sideQuestion then
@@ -1074,6 +1084,7 @@ def forkOrHandoffMission
     customTags := customTags.push s!"remote-node:{rn}"
 
   let nextAuthMode := if req.sideQuestion then "readonly" else srcAuthMode
+  let nextFolder := if req.sideQuestion then "" else srcFolder
   let nextPlacement :=
     match remoteNodeClean? with
     | some rn =>
@@ -1114,6 +1125,10 @@ def forkOrHandoffMission
     modelEffort := nextEffort
     workingDirectory := resolvedWorkDir
     project := srcProject
+    folder := nextFolder
+    placementRevision := 1
+    parentMissionId := req.sourceMissionId
+    createdAt := req.nowAt
     updatedAt := req.nowAt
     totalCostCents := 0
     authorityMode := nextAuthMode
@@ -1133,7 +1148,6 @@ def forkOrHandoffMission
     discard <| execParamQuery st.missionsDb
       "UPDATE missions SET history_json=?2 WHERE id=?1;"
       #[req.newMissionId, histJson]
-    let mut seq : Nat := 1
     for (role, content) in finalTurns do
       let evType := if role == "user" then "user_message" else "assistant_message"
       let evPayload := renderCompact (.obj #[
@@ -1142,10 +1156,7 @@ def forkOrHandoffMission
         ("content", .str content),
         ("mission_id", .str req.newMissionId)
       ])
-      discard <| execParamQuery st.missionsDb
-        "INSERT INTO mission_events(mission_id,seq,event_type,payload,created_at) VALUES(?1,?2,?3,?4,?5);"
-        #[req.newMissionId, s!"{seq}", evType, evPayload, req.nowAt]
-      seq := seq + 1
+      discard <| appendMissionEvent st req.newMissionId evType evPayload req.nowAt
     return .ok {
       missionId := req.newMissionId
       forkedFrom := req.sourceMissionId
@@ -1155,6 +1166,7 @@ def forkOrHandoffMission
       modelEffort := nextEffort
       workingDirectory := resolvedWorkDir
       project := srcProject
+      folder := nextFolder
       remoteNodeId? := remoteNodeClean?
       placementKind := nextPlacement
       turnsCopied := finalTurns.size

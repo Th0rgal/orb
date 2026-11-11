@@ -8,6 +8,7 @@
   and `Orb.Kernel.proxyStep` / `breakerStep` / `accountCooldownSecs`.
 -/
 import Std.Sync.Mutex
+import LeanSys.Posix
 import Orb.Kernel
 import Orb.HarnessCloud
 import OrbBin.Json
@@ -17,6 +18,7 @@ import OrbNetLeaf.TlsHttp
 
 namespace OrbCore.Proxy
 
+open LeanSys.Posix
 open Orb.HarnessCloud
 open OrbBin.Json
 open OrbCore.Spec
@@ -733,6 +735,37 @@ private def bodyIndicatesContextOverflow (body : ByteArray) : Bool :=
   (low.splitOn "context_length_exceeded").length > 1 ||
   (low.splitOn "maximum context length").length > 1
 
+private def loopbackHttpRequest
+    (method : String) (port : UInt16) (path : String)
+    (headers : Array (String × String)) (body : ByteArray) :
+    IO (Except String HttpsResponse) := do
+  let hostAuth := formatHostAuthority "127.0.0.1" port 80
+  let reqWire ← match buildOutboundHttp11Request method hostAuth path headers body with
+    | .ok w => pure w
+    | .error e => return .error e
+  let .ok fd ← tcpConnect "127.0.0.1" port
+    | return .error "loopback_connect_failed"
+  let mut rawBuf := ByteArray.empty
+  try
+    if let .error _ ← writeAll fd reqWire false then
+      return .error "loopback_write_failed"
+    let t0 ← IO.monoMsNow
+    let mut eof := false
+    while !eof && rawBuf.size ≤ 16777216 do
+      let nowMs ← IO.monoMsNow
+      if nowMs - t0 > 120000 then
+        eof := true
+      else
+        match ← pollReadable fd 5000 with
+        | .error _ => eof := true
+        | .ok () =>
+          let chunk ← readStreamChunk fd 65536
+          if chunk.isEmpty then eof := true
+          else rawBuf := rawBuf ++ chunk
+  finally
+    discard <| closeFd fd
+  return parseHttpResponseWire rawBuf 16777216 true method
+
 /-- Execute a bounded `/v1/*` proxy forward across `chain.targets` with proactive pacing spillover,
     sticky `firstByteCommitted` pin enforcement via `Orb.HarnessCloud.stepProviderAttemptSlice` /
     `classifyProviderAttempt` (`SM-21`), pre-header failover on `402`, `429`, and `5xx` via
@@ -1011,6 +1044,8 @@ def forwardProxyChain
             pure (.error "invalid_upstream_port")
           else if isTls then
             httpsRequest method host port fullPath reqHdrs outBody
+          else if host == "127.0.0.1" || host == "localhost" then
+            loopbackHttpRequest method port fullPath reqHdrs outBody
           else
             pure (.error "plaintext_upstream_disabled")
       finally

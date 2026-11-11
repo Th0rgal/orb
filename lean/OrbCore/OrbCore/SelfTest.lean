@@ -28,6 +28,11 @@ open OrbCore.Skills
 open OrbCore.QueueCont
 open OrbCore.R7Core
 open OrbCore.TelemetryAndVoice
+open OrbCore.LegacyHydrate
+open OrbCore.SecretAndApproval
+open OrbCore.RemoteFleetAndRelay
+open OrbCore.ProjectFilesAndController
+open OrbCore.McpGateway
 open OrbCore.Control
 open OrbCore.HostTests
 open OrbCore.HarnessSessionRegistry
@@ -4634,6 +4639,246 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   return 0
 
 set_option maxHeartbeats 800000 in
+private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32 := do
+  let ts ← IO.monoNanosNow
+  let workRoot := s!"/tmp/orb_prod_parity_{ts}"
+  let dataRoot := s!"{workRoot}/.sandboxed-sh"
+  let cleanup : IO Unit := do
+    discard <| (IO.FS.removeDirAll workRoot).toBaseIO
+  cleanup
+  IO.FS.createDirAll (System.FilePath.mk s!"{dataRoot}/missions")
+  IO.FS.createDirAll (System.FilePath.mk s!"{dataRoot}/project-files/verity-core/Audits")
+  IO.FS.writeFile (System.FilePath.mk s!"{dataRoot}/project-files/verity-core/Audits/report.md") "# Audit\n"
+
+  -- 1. Seed legacy 47-col `missions-prod.db` with `Pareto` + legacy `orb-folder:Audits` mission
+  let legMissionsPath := s!"{dataRoot}/missions/missions-prod.db"
+  let seedSql :=
+    "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', working_directory TEXT NOT NULL DEFAULT '', project TEXT, tags TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT '', parent_mission_id TEXT);" ++
+    "INSERT INTO missions(id,title,status,backend,working_directory,project,tags,updated_at) VALUES('8a349331-41cf-4223-a25f-459c00cd0d98','Pareto','awaiting_user','codex','/tmp','verity-core','[]','2026-11-10T10:00:00Z');" ++
+    "INSERT INTO missions(id,title,status,backend,working_directory,project,tags,updated_at) VALUES('c1665d11-0000-4000-8000-000000000001','Legacy Audit','completed','codex','/tmp','verity-core','[\"orb-folder:Audits\",\"audit\"]','2026-11-01T12:00:00Z');"
+  let .ok preDb ← openSqliteDb legMissionsPath seedSql #[]
+    | do cleanup; IO.eprintln "[orb-core-test] FAIL: seed legacy Pareto db failed"; return 1
+  sqliteCloseRaw preDb.handle
+
+  let .ok store ← openCoreStore dataRoot 0 "prod"
+    | do cleanup; IO.eprintln "[orb-core-test] FAIL: openCoreStore on Pareto db failed"; return 1
+  let .ok () ← ensureQueueContSchema store
+    | do closeCoreStore store; cleanup; IO.eprintln "[orb-core-test] FAIL: ensureQueueContSchema on Pareto db failed"; return 1
+  let .ok mStore ← openManagedComputeStore s!"{dataRoot}/managed_compute.db"
+    | do closeCoreStore store; cleanup; IO.eprintln "[orb-core-test] FAIL: openManagedComputeStore failed"; return 1
+
+  let fail (msg : String) : IO UInt32 := do
+    closeManagedComputeStore mStore
+    closeCoreStore store
+    cleanup
+    IO.eprintln s!"[orb-core-test] FAIL (prod-parity): {msg}"
+    return 1
+
+  -- Verify online `orb-folder:Audits` migration preserved `updated_at` and stripped `orb-folder:` tag
+  let migRows ← execParamQuery store.missionsDb
+    "SELECT folder, tags, updated_at FROM missions WHERE id='c1665d11-0000-4000-8000-000000000001';" #[]
+  let migFolder := match migRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let migTags := match migRows with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  let migUpd := match migRows with | .ok rs => (rs[1]?.bind (·[2]?)).getD "" | .error _ => ""
+  if migFolder != "Audits" || (migTags.splitOn "orb-folder:").length > 1 || migUpd != "2026-11-01T12:00:00Z" then
+    return (← fail s!"orb-folder online migration mismatch: folder={migFolder} tags={migTags} upd={migUpd}")
+
+  -- 2. Verify `<encrypted v=\"1\">` AES-256-GCM + `eyJ...` HS256 JWT + `pbkdf2:` legacy hash
+  let .ok key32 ← loadOrCreatePrivateKeyBytes workRoot dataRoot
+    | return (← fail "loadOrCreatePrivateKeyBytes failed")
+  let .ok encSecret ← encryptEnvValue key32 "super-secret-value-42"
+    | return (← fail "encryptEnvValue failed")
+  let .ok decSecret ← decryptEnvValue (some key32) encSecret
+    | return (← fail "decryptEnvValue failed")
+  if !isEncryptedValue encSecret || decSecret != "super-secret-value-42" then
+    return (← fail s!"encrypted v=1 roundtrip mismatch: enc={encSecret} dec={decSecret}")
+
+  let jwtSec := "prod-parity-jwt-secret-0123456789abcdef"
+  let nowSec : UInt64 := 1794400000
+  let hsJwt := issueHs256Jwt jwtSec "prod" "admin" nowSec (nowSec + 86400) "admin"
+  if !hsJwt.startsWith "eyJ" || (verifyHs256Jwt? jwtSec hsJwt nowSec).isNone then
+    return (← fail "HS256 JWT roundtrip failed")
+
+  let cfg : CoreConfig := {
+    host := "127.0.0.1"
+    port := 3000
+    workingDir := workRoot
+    devMode := false
+    dashboardPassword := "strong-prod-pass-1234"
+    jwtSecret := jwtSec
+  }
+  let _ ← bootstrapUsersAndBackfill store #[("admin", cfg.dashboardPassword)] s!"{nowSec}"
+  hydrateLegacyDataDir workRoot dataRoot store mStore "" false
+  let managedRef ← IO.mkRef ({ enabled := true, boatEnabled := true, dailyCapCents := 5000, maxConcurrent := 20 } : ManagedFleetState)
+  let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
+  let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
+  let seqRef ← IO.mkRef (0 : UInt64)
+  let bHub ← newBroadcastHub
+  let rHub ← newRelayHub 0
+  let appSt : CoreAppState := {
+    cfg := cfg
+    store := store
+    searchIdx? := none
+    managedRef := managedRef
+    chainsRef := chainsRef
+    proxyCooldownsRef := cooldownsRef
+    seqRef := seqRef
+    managedStore? := some mStore
+    broadcastHub? := some bHub
+    relayHub? := some rHub
+  }
+
+  let sendJson (method path tok body : String) : IO (Nat × String) := do
+    let bBytes := body.toUTF8
+    let authLine := if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n"
+    let rawWire :=
+      (s!"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authLine}" ++
+       s!"Content-Type: application/json\r\nContent-Length: {bBytes.size}\r\n\r\n").toUTF8 ++ bBytes
+    match parseRequest rawWire none with
+    | .error _ => return (599, "parse_err")
+    | .ok req =>
+      match ← dispatchCoreRequest appSt req nowSec with
+      | .error _ => return (101, "")
+      | .ok r => return (r.status, (String.fromUTF8? r.body).getD "")
+
+  -- Authenticate with `eyJ...` HS256 JWT and list `verity-core` missions
+  let (listSt, listBody) ← sendJson "GET" "/api/control/missions?project=verity-core" hsJwt ""
+  if listSt != 200 ||
+     (listBody.splitOn "8a349331-41cf-4223-a25f-459c00cd0d98").length < 2 ||
+     (listBody.splitOn "\"folder\":\"Audits\"").length < 2 then
+    return (← fail s!"GET /api/control/missions with eyJ JWT failed: {listSt} {listBody}")
+
+  -- 3. Move `Pareto` into `Audits` inside `verity-core` (`POST /api/control/missions/move`)
+  let (_, subQ) ← registerSseSubscriber bHub none
+  let (mvSt, mvBody) ← sendJson "POST" "/api/control/missions/move" hsJwt
+    "{\"mission_ids\":[\"8a349331-41cf-4223-a25f-459c00cd0d98\"],\"project\":\"verity-core\",\"folder\":\"Audits\",\"client_op_id\":101,\"client_id\":\"cli-1\"}"
+  let sseEvs ← subQ.get
+  let pRows ← execParamQuery store.missionsDb
+    "SELECT folder, placement_revision, updated_at FROM missions WHERE id='8a349331-41cf-4223-a25f-459c00cd0d98';" #[]
+  let pFolder := match pRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let pRev := match pRows with | .ok rs => ((rs[1]?.bind (·[1]?)).bind String.toNat?).getD 0 | .error _ => 0
+  let pUpd := match pRows with | .ok rs => (rs[1]?.bind (·[2]?)).getD "" | .error _ => ""
+  if mvSt != 200 || pFolder != "Audits" || pRev < 2 || pUpd != "2026-11-10T10:00:00Z" ||
+     sseEvs.isEmpty || (mvBody.splitOn "\"client_op_id\":101").length < 2 then
+    return (← fail s!"Pareto move failed: st={mvSt} body={mvBody} folder={pFolder} rev={pRev} upd={pUpd} sse={sseEvs.size}")
+
+  -- Fork group leader vs non-leader + `/btw` side child (`folder = ""`)
+  -- `f-lead` has the newer `updated_at` (`11:05`), so `f-lead` is the fork group leader and `f-child` (`11:01`) is a non-leader version.
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO missions(id,title,status,backend,working_directory,project,folder,tags,created_at,updated_at) VALUES" ++
+     "('f-lead','Leader','awaiting_user','codex','/tmp','verity-core','Specs','[]','2026-11-10T11:00:00Z','2026-11-10T11:05:00Z')," ++
+     "('f-child','Fork Child','awaiting_user','codex','/tmp','verity-core','Specs','[\"fork-of:f-lead\"]','2026-11-10T11:01:00Z','2026-11-10T11:01:00Z')," ++
+     "('f-btw','Side Question','awaiting_user','codex','/tmp','verity-core','','[\"btw-parent:f-lead\"]','2026-11-10T11:02:00Z','2026-11-10T11:02:00Z');") #[]
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE missions SET parent_mission_id='f-lead' WHERE id='f-child';" #[]
+  let (mvChildSt, _) ← sendJson "POST" "/api/control/missions/move" hsJwt
+    "{\"mission_ids\":[\"f-child\"],\"project\":\"verity-core\",\"folder\":\"Drafts\"}"
+  let leadAfterChild ← execParamQuery store.missionsDb "SELECT folder FROM missions WHERE id='f-lead';" #[]
+  let leadF1 := match leadAfterChild with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let _ ← sendJson "POST" "/api/control/missions/move" hsJwt
+    "{\"mission_ids\":[\"f-child\"],\"project\":\"verity-core\",\"folder\":\"Specs\"}"
+  let (mvLeadSt, _) ← sendJson "POST" "/api/control/missions/move" hsJwt
+    "{\"mission_ids\":[\"f-lead\"],\"project\":\"verity-core\",\"folder\":\"Reviews\"}"
+  let famRows ← execParamQuery store.missionsDb
+    "SELECT id, folder FROM missions WHERE id IN ('f-lead','f-child','f-btw') ORDER BY id ASC;" #[]
+  let famStr := match famRows with | .ok rs => rowsToJsonArray rs | .error _ => ""
+  if mvChildSt != 200 || leadF1 != "Specs" || mvLeadSt != 200 ||
+     (famStr.splitOn "\"id\":\"f-child\",\"folder\":\"Reviews\"").length < 2 ||
+     (famStr.splitOn "\"id\":\"f-btw\",\"folder\":\"\"").length < 2 then
+    return (← fail s!"fork/btw move family rules failed: leadF1={leadF1} fam={famStr}")
+
+  -- Cross-project `409 approval_transfer_confirmation_required` + `revoke` + `mcp_sessions_v1` live rebind
+  IO.FS.writeFile (System.FilePath.mk s!"{dataRoot}/secret_broker.json")
+    "{\"grants\":[{\"id\":\"g-1\",\"mission_id\":\"8a349331-41cf-4223-a25f-459c00cd0d98\",\"secret_name\":\"ETH_RPC\",\"project\":\"verity-core\"}],\"requests\":[]}"
+  let (mcpSessSt, mcpSessBody) ← sendJson "POST" "/api/mcp/session" hsJwt
+    "{\"mission_id\":\"8a349331-41cf-4223-a25f-459c00cd0d98\",\"role\":\"executor\",\"project\":\"verity-core\"}"
+  let (xpCheckSt, xpCheckBody) ← sendJson "POST" "/api/control/missions/move" hsJwt
+    "{\"mission_ids\":[\"8a349331-41cf-4223-a25f-459c00cd0d98\"],\"project\":\"paloma\",\"folder\":\"\",\"approval_policy\":\"check\"}"
+  let (xpRevSt, _) ← sendJson "POST" "/api/control/missions/move" hsJwt
+    "{\"mission_ids\":[\"8a349331-41cf-4223-a25f-459c00cd0d98\"],\"project\":\"paloma\",\"folder\":\"\",\"approval_policy\":\"revoke\"}"
+  let rebRows ← execParamQuery store.projectsDb
+    "SELECT project_scope FROM mcp_sessions_v1 WHERE mission_id='8a349331-41cf-4223-a25f-459c00cd0d98';" #[]
+  let rebScope := match rebRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  if mcpSessSt != 200 || xpCheckSt != 409 ||
+     (xpCheckBody.splitOn "approval_transfer_confirmation_required").length < 2 ||
+     xpRevSt != 200 || rebScope != "paloma" then
+    return (← fail s!"cross-project approval/MCP rebind failed: sess={mcpSessSt}:{mcpSessBody} chk={xpCheckSt}:{xpCheckBody} rev={xpRevSt} reb={rebScope}")
+
+  -- Move Pareto back into `verity-core` / `Audits`, then rename folder `Audits` -> `SecurityAudits` via `/file/transfer`
+  let _ ← sendJson "POST" "/api/control/missions/move" hsJwt
+    "{\"mission_ids\":[\"8a349331-41cf-4223-a25f-459c00cd0d98\"],\"project\":\"verity-core\",\"folder\":\"Audits\",\"approval_policy\":\"keep\"}"
+  let (tfSt, tfBody) ← sendJson "POST" "/api/projects/verity-core/file/transfer" hsJwt
+    "{\"path\":\"Audits\",\"destination\":\"SecurityAudits\",\"copy\":false}"
+  let cascRows ← execParamQuery store.missionsDb
+    "SELECT COUNT(*) FROM missions WHERE project='verity-core' AND folder='SecurityAudits';" #[]
+  let cascCnt := match cascRows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
+  if tfSt != 200 || cascCnt != 2 || (tfBody.splitOn "\"folder\":\"SecurityAudits\"").length < 3 then
+    return (← fail s!"project folder transfer cascade failed: st={tfSt} body={tfBody} cnt={cascCnt}")
+
+  -- 4. MCP tool call (`list_projects`, `get_compute_fleet`) + Managed Machine Relay HTTP Tunnel
+  let (mcpCallSt, mcpCallBody) ← sendJson "POST" "/api/mcp/call" hsJwt
+    "{\"name\":\"list_projects\",\"arguments\":{}}"
+  let (mcpFleetSt, mcpFleetBody) ← sendJson "POST" "/api/mcp/call" hsJwt
+    "{\"name\":\"get_compute_fleet\",\"arguments\":{}}"
+  if mcpCallSt != 200 || (mcpCallBody.splitOn "\"ok\":true").length < 2 ||
+     mcpFleetSt != 200 || (mcpFleetBody.splitOn "\"ok\":true").length < 2 then
+    return (← fail s!"MCP gateway call failed: proj={mcpCallSt}:{mcpCallBody} fleet={mcpFleetSt}:{mcpFleetBody}")
+
+  let fleetBoat : ManagedFleetState := { enabled := true, boatEnabled := true, dailyCapCents := 5000, maxConcurrent := 20 }
+  let vmBoat : ManagedMachine := {
+    id := "vm-boat-1", sandboxName := "orb-managed-vm-boat-1", provider := "boat",
+    size := "medium", status := "ready", spentCents := 0, nodeBootEpoch := 1, deletableAtSec := nowSec + 3600
+  }
+  let .ok _ ← provisionManagedMachine mStore fleetBoat vmBoat nowSec
+    | return (← fail "provisionManagedMachine vm-boat-1 failed")
+  let .ok () ← putEnrollmentToken mStore "vm-boat-1" "enroll-secret-1"
+    | return (← fail "putEnrollmentToken vm-boat-1 failed")
+  let (enrSt, enrBody) ← sendJson "POST" "/api/managed-machines/enroll" ""
+    "{\"machine_id\":\"vm-boat-1\",\"enroll_token\":\"enroll-secret-1\",\"node_boot_epoch\":1}"
+  let nodeTok := ((OrbBin.Json.parse enrBody).toOption.getD (.obj #[]) |>.fieldStr? "node_token").getD ""
+  if enrSt != 200 || nodeTok.isEmpty then
+    return (← fail s!"managed node enroll failed: {enrSt} {enrBody}")
+
+  let pollWorker ← IO.asTask (prio := .dedicated) do
+    for _ in [0:40] do
+      let pollWire :=
+        (s!"GET /api/managed-machines/relay/poll HTTP/1.1\r\nHost: 127.0.0.1\r\n" ++
+         s!"Authorization: Bearer {nodeTok}\r\nX-Orb-Machine-Id: vm-boat-1\r\nX-Orb-Boot-Epoch: 1\r\n\r\n").toUTF8
+      if let .ok pReq := parseRequest pollWire none then
+        if let .ok pResp ← dispatchCoreRequest appSt pReq nowSec then
+          let pStr := (String.fromUTF8? pResp.body).getD "[]"
+          if let .ok (.arr reqs) := OrbBin.Json.parse pStr then
+            if let some r0 := reqs[0]? then
+              let rid := (r0.fieldStr? "id").getD ""
+              if !rid.isEmpty then
+                let b64 := OrbBin.PosixExt.base64Encode "{\"healthy\":true}".toUTF8
+                let respBody := s!"\{\"id\":{jsonEscape rid},\"status\":200,\"headers\":[[\"Content-Type\",\"application/json\"]],\"body_b64\":{jsonEscape b64}}"
+                let rbBytes := respBody.toUTF8
+                let respWire :=
+                  (s!"POST /api/managed-machines/relay/respond HTTP/1.1\r\nHost: 127.0.0.1\r\n" ++
+                   s!"Authorization: Bearer {nodeTok}\r\nX-Orb-Machine-Id: vm-boat-1\r\nX-Orb-Boot-Epoch: 1\r\n" ++
+                   s!"Content-Type: application/json\r\nContent-Length: {rbBytes.size}\r\n\r\n").toUTF8 ++ rbBytes
+                if let .ok rReq := parseRequest respWire none then
+                  discard <| dispatchCoreRequest appSt rReq nowSec
+                return true
+      IO.sleep 20
+    return false
+
+  let tunRes ← tunnelHttpToManagedMachine rHub mStore "vm-boat-1" "GET" "/heartbeat" #[] ByteArray.empty 2000
+  let _ := pollWorker.get
+  match tunRes with
+  | .error e => return (← fail s!"tunnelHttpToManagedMachine failed: {e}")
+  | .ok tResp =>
+    let tStr := (String.fromUTF8? tResp.body).getD ""
+    if tResp.status != 200 || (tStr.splitOn "\"healthy\":true").length < 2 then
+      return (← fail s!"tunnelHttpToManagedMachine response mismatch: st={tResp.status} body={tStr}")
+
+  closeManagedComputeStore mStore
+  closeCoreStore store
+  cleanup
+  return 0
+
+set_option maxHeartbeats 800000 in
 set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
@@ -5794,6 +6039,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runR7CoreTests prodValid) != 0 then return 1
   if (← runMultiUserCoreTests prodValid) != 0 then return 1
   if (← runWarmClaudeControlAndCheckpointsCoreTests prodValid) != 0 then return 1
+  if (← runProdParityAndMissionMoveTests prodValid) != 0 then return 1
 
   IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":10,\"host_tests\":101}"
   return 0

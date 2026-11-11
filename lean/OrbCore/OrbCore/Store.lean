@@ -39,7 +39,7 @@ opaque sqliteQueryRowsRaw (handle : UInt64) (sql : @& String) (params : @& Array
 opaque coreEpochSec : IO UInt64
 
 @[extern "orb_pbkdf2_sha256"]
-opaque pbkdf2Sha256HexRaw (password : @& String) (salt : @& String) (iterations : UInt32) : IO String
+opaque pbkdf2Sha256HexRaw (password : @& String) (salt : @& ByteArray) (iterations : UInt32) : IO String
 
 @[extern "orb_sd_notify"]
 opaque sdNotifyRaw (socketPath : @& String) (payload : @& String) : IO UInt32
@@ -61,30 +61,37 @@ structure MissionHistoryEntry where
 
 /-- Persisted mission summary record (`history: Array MissionHistoryEntry` & `total_cost_cents`). -/
 structure MissionRecord where
-  id               : String
-  title            : String
-  status           : String
-  backend          : String
-  modelOverride    : String
-  modelEffort      : String := ""
-  workingDirectory : String
-  project          : String := ""
-  updatedAt        : String
-  totalCostCents   : UInt64 := 0
-  authorityMode    : String := "writer"
-  placementKind    : String := "managed"
-  supersededById   : String := ""
-  orphanedAt       : String := ""
-  reservedDiskGib  : UInt64 := 0
-  stateRevision    : UInt32 := 1
-  ownerEpoch       : UInt64 := 1
-  runGeneration    : UInt64 := 1
-  nodeBootEpoch    : UInt64 := 1
-  tagsJson         : String := "[]"
-  track            : String := ""
-  repo             : String := ""
-  ownerUserId      : String := ""
-  history          : Array MissionHistoryEntry := #[]
+  id                : String
+  title             : String
+  status            : String
+  backend           : String
+  modelOverride     : String
+  modelEffort       : String := ""
+  workingDirectory  : String
+  project           : String := ""
+  folder            : String := ""
+  placementRevision : UInt64 := 0
+  parentMissionId   : String := ""
+  createdAt         : String := ""
+  metadataUpdatedAt : String := ""
+  workspaceId       : String := "00000000-0000-0000-0000-000000000000"
+  shortDescription  : String := ""
+  updatedAt         : String
+  totalCostCents    : UInt64 := 0
+  authorityMode     : String := "writer"
+  placementKind     : String := "managed"
+  supersededById    : String := ""
+  orphanedAt        : String := ""
+  reservedDiskGib   : UInt64 := 0
+  stateRevision     : UInt32 := 1
+  ownerEpoch        : UInt64 := 1
+  runGeneration     : UInt64 := 1
+  nodeBootEpoch     : UInt64 := 1
+  tagsJson          : String := "[]"
+  track             : String := ""
+  repo              : String := ""
+  ownerUserId       : String := ""
+  history           : Array MissionHistoryEntry := #[]
   deriving Repr, DecidableEq
 
 /-- Authoritative terminal outcome receipt stored in `mission_terminal_evidence` (`SM-01`). -/
@@ -181,7 +188,7 @@ def transferCleanupSql : String :=
   "COMMIT;"
 
 def missionsSchemaSql : String :=
-  "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', model_override TEXT, model_effort TEXT, working_directory TEXT NOT NULL DEFAULT '', project TEXT NOT NULL DEFAULT '', requires_local_disk INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '[]', session_id TEXT, deferred_goal TEXT, workspace_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000', terminal_reason TEXT, updated_at TEXT NOT NULL DEFAULT '', opened_at TEXT, agent TEXT, config_profile TEXT, total_cost_cents INTEGER NOT NULL DEFAULT 0, history_json TEXT NOT NULL DEFAULT '[]', authority_mode TEXT NOT NULL DEFAULT 'writer' CHECK(authority_mode IN ('readonly','writer')), placement_kind TEXT NOT NULL DEFAULT 'managed', superseded_by_mission_id TEXT NOT NULL DEFAULT '', orphaned_at TEXT NOT NULL DEFAULT '', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, state_revision INTEGER NOT NULL DEFAULT 1, owner_epoch INTEGER NOT NULL DEFAULT 1, run_generation INTEGER NOT NULL DEFAULT 1, node_boot_epoch INTEGER NOT NULL DEFAULT 1, track TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', owner_user_id TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', model_override TEXT, model_effort TEXT, working_directory TEXT NOT NULL DEFAULT '', project TEXT NOT NULL DEFAULT '', folder TEXT NOT NULL DEFAULT '', placement_revision INTEGER NOT NULL DEFAULT 0, parent_mission_id TEXT, created_at TEXT NOT NULL DEFAULT '', metadata_updated_at TEXT, short_description TEXT, github_pr TEXT, origin TEXT, origin_session_id TEXT, workspace_name TEXT, resumable INTEGER NOT NULL DEFAULT 0, requires_local_disk INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '[]', session_id TEXT, deferred_goal TEXT, workspace_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000', terminal_reason TEXT, updated_at TEXT NOT NULL DEFAULT '', opened_at TEXT, agent TEXT, config_profile TEXT, total_cost_cents INTEGER NOT NULL DEFAULT 0, history_json TEXT NOT NULL DEFAULT '[]', authority_mode TEXT NOT NULL DEFAULT 'writer' CHECK(authority_mode IN ('readonly','writer')), placement_kind TEXT NOT NULL DEFAULT 'managed', superseded_by_mission_id TEXT NOT NULL DEFAULT '', orphaned_at TEXT NOT NULL DEFAULT '', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, state_revision INTEGER NOT NULL DEFAULT 1, owner_epoch INTEGER NOT NULL DEFAULT 1, run_generation INTEGER NOT NULL DEFAULT 1, node_boot_epoch INTEGER NOT NULL DEFAULT 1, track TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', owner_user_id TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','member')), unix_username TEXT UNIQUE, session_epoch INTEGER NOT NULL DEFAULT 1, disabled INTEGER NOT NULL DEFAULT 0, daily_spend_cap_cents INTEGER, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_shares (mission_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'participant' CHECK(role IN ('participant')), granted_by TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (mission_id, user_id));" ++
   "CREATE INDEX IF NOT EXISTS idx_mission_shares_user ON mission_shares(user_id);" ++
@@ -190,13 +197,13 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS mission_proxy_tokens (token_sha256 TEXT PRIMARY KEY, mission_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, expires_at_epoch INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE INDEX IF NOT EXISTS idx_mission_proxy_tokens_mission ON mission_proxy_tokens(mission_id);" ++
   "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'host', owner_user_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '');" ++
-  "CREATE TABLE IF NOT EXISTS mission_terminal_evidence (mission_id TEXT PRIMARY KEY, terminal_reason TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', artifact_ref TEXT NOT NULL DEFAULT '', verified INTEGER NOT NULL DEFAULT 1, recorded_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS mission_terminal_evidence (mission_id TEXT PRIMARY KEY, terminal_reason TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', artifact_ref TEXT NOT NULL DEFAULT '', verified INTEGER NOT NULL DEFAULT 1, evidence TEXT NOT NULL DEFAULT '{}', recorded_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS effect_outbox (effect_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, state_revision INTEGER NOT NULL, intent_kind TEXT NOT NULL, payload_json TEXT NOT NULL, phase INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0, attempt_epoch INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS dispatch_lease_intents (reservation_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, project_slug TEXT NOT NULL, track TEXT NOT NULL, repo TEXT NOT NULL DEFAULT '', authority_mode TEXT NOT NULL DEFAULT 'writer', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT 'preparing', boot_epoch INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_runs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1, execution_state TEXT NOT NULL DEFAULT 'terminal', terminal_reason TEXT NOT NULL DEFAULT '', remote_job_id TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_remote_waits (mission_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, failed_job_id TEXT NOT NULL, scheduled_origin_job_id TEXT NOT NULL DEFAULT '', retries INTEGER NOT NULL DEFAULT 0, max_retries INTEGER NOT NULL DEFAULT 10, replays INTEGER NOT NULL DEFAULT 0, deadline_epoch INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '');" ++
-  "CREATE TABLE IF NOT EXISTS mission_events (id INTEGER PRIMARY KEY AUTOINCREMENT, mission_id TEXT NOT NULL, seq INTEGER NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '');" ++
-  "CREATE TABLE IF NOT EXISTS cloud_executions (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'hermes', prompt TEXT NOT NULL DEFAULT '', response_text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS mission_events (id INTEGER PRIMARY KEY AUTOINCREMENT, mission_id TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0, sequence INTEGER NOT NULL DEFAULT 0, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', timestamp TEXT NOT NULL DEFAULT '', event_id TEXT, tool_call_id TEXT, tool_name TEXT, content TEXT, content_file TEXT, metadata TEXT);" ++
+  "CREATE TABLE IF NOT EXISTS cloud_executions (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'hermes', prompt TEXT NOT NULL DEFAULT '', response_text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', request_key TEXT, revision INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_automations (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, cron_expr TEXT NOT NULL, prompt TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, variables_used TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS model_routing_chains (id TEXT PRIMARY KEY, name TEXT NOT NULL, models_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS privilege_leases (grant_id TEXT PRIMARY KEY, lease_token TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, scope TEXT NOT NULL, allowed_units_json TEXT NOT NULL DEFAULT '[]', require_force_cmd INTEGER NOT NULL DEFAULT 0, biometric_signed INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0, expires_at_epoch INTEGER NOT NULL DEFAULT 0, lease_epoch INTEGER NOT NULL DEFAULT 0);" ++
@@ -204,7 +211,7 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS core_boot_state (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1), boot_epoch INTEGER NOT NULL DEFAULT 0, bunker_state INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS remote_message_queue (sequence INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, message_id TEXT NOT NULL, mission_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'waiting', UNIQUE(user_id,message_id));" ++
   "CREATE INDEX IF NOT EXISTS remote_message_pending ON remote_message_queue(state,sequence);" ++
-  "CREATE TABLE IF NOT EXISTS ai_providers (id TEXT PRIMARY KEY, provider_type TEXT NOT NULL, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, base_url TEXT NOT NULL DEFAULT '', api_key TEXT NOT NULL DEFAULT '', rpm_limit INTEGER, max_concurrency INTEGER, custom_models_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS ai_providers (id TEXT PRIMARY KEY, provider_type TEXT NOT NULL, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, base_url TEXT NOT NULL DEFAULT '', api_key TEXT NOT NULL DEFAULT '', rpm_limit INTEGER, max_concurrency INTEGER, custom_models_json TEXT NOT NULL DEFAULT '[]', sort_order INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS deferred_message_batches (mission_id TEXT NOT NULL, batch_seq INTEGER NOT NULL, message_id TEXT NOT NULL, content TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', unpacked INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(mission_id, batch_seq, message_id));" ++
   "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);" ++
   "CREATE TABLE IF NOT EXISTS queue_item_receipts (message_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, phase INTEGER NOT NULL DEFAULT 0, claimed_generation INTEGER NOT NULL DEFAULT 0, claim_boot_epoch INTEGER NOT NULL DEFAULT 0, delivered_seq INTEGER NOT NULL DEFAULT 0, edit_revision INTEGER NOT NULL DEFAULT 0, content TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
@@ -213,12 +220,16 @@ def missionsSchemaSql : String :=
   transferSchemaSql ++ "\n" ++ transferCleanupSql
 
 def projectsSchemaSql : String :=
-  "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS projects (slug TEXT PRIMARY KEY NOT NULL, id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '', title TEXT, root_path TEXT NOT NULL DEFAULT '', objective TEXT, status TEXT NOT NULL DEFAULT 'active', mode TEXT, wait_ticks INTEGER NOT NULL DEFAULT 0, next_action TEXT, blocker TEXT, controller_cron_id TEXT, repository TEXT, color TEXT, skills TEXT, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS project_owners (slug TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE INDEX IF NOT EXISTS idx_project_owners_user ON project_owners(owner_user_id);" ++
   "CREATE TABLE IF NOT EXISTS project_grant (slug TEXT PRIMARY KEY, merge_authority TEXT, budget_per_tick TEXT, parallel_missions INTEGER, pause_reason TEXT, resume_condition TEXT, material_bar TEXT, autonomy_level TEXT, updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS project_track_leases (project_slug TEXT NOT NULL, track TEXT NOT NULL, reservation_id TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, repo TEXT NOT NULL DEFAULT '', authority_mode TEXT NOT NULL DEFAULT 'writer', phase TEXT NOT NULL DEFAULT 'preparing', boot_epoch INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(project_slug, track, mission_id));" ++
-  "CREATE TABLE IF NOT EXISTS project_decisions (id TEXT PRIMARY KEY, project_slug TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', question TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');"
+  "CREATE TABLE IF NOT EXISTS project_decisions (id TEXT PRIMARY KEY, slug TEXT NOT NULL DEFAULT '', at TEXT NOT NULL DEFAULT '', project_slug TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', question TEXT NOT NULL DEFAULT '', rationale TEXT, answered INTEGER NOT NULL DEFAULT 0, kind TEXT, authority TEXT NOT NULL DEFAULT 'escalation', answer TEXT, answered_at TEXT, evidence TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS project_crons (slug TEXT NOT NULL, job_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', folder TEXT NOT NULL DEFAULT '', PRIMARY KEY(slug, job_id), UNIQUE(job_id));" ++
+  "CREATE TABLE IF NOT EXISTS project_steers (id TEXT PRIMARY KEY NOT NULL, slug TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', consumed_at TEXT, origin TEXT NOT NULL DEFAULT 'orb');" ++
+  "CREATE TABLE IF NOT EXISTS controller_archives (slug TEXT NOT NULL, job_id TEXT NOT NULL, PRIMARY KEY(slug, job_id));" ++
+  "CREATE TABLE IF NOT EXISTS project_bindings (slug TEXT PRIMARY KEY NOT NULL, control_session_id TEXT NOT NULL, bound_at TEXT NOT NULL DEFAULT '', bound_by TEXT);"
 
 def upsertProjectGrantSql : String :=
   "INSERT INTO project_grant (slug, merge_authority, budget_per_tick, parallel_missions, pause_reason, resume_condition, material_bar, autonomy_level, updated_at) " ++
@@ -253,17 +264,39 @@ def askSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS ask_requests (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, question TEXT NOT NULL, answer TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT '');"
 
 def askMidturnSchemaSql : String :=
-  "CREATE TABLE IF NOT EXISTS operator_notes (" ++
+  "CREATE TABLE IF NOT EXISTS main.operator_notes (" ++
   "note_id TEXT PRIMARY KEY, " ++
+  "id TEXT NOT NULL DEFAULT '', " ++
   "mission_id TEXT NOT NULL, " ++
-  "content TEXT NOT NULL, " ++
-  "created_at_seq INTEGER NOT NULL, " ++
+  "content TEXT NOT NULL DEFAULT '', " ++
+  "body TEXT NOT NULL DEFAULT '', " ++
+  "created_at_seq INTEGER NOT NULL DEFAULT 0, " ++
   "created_at_iso TEXT NOT NULL DEFAULT '', " ++
+  "created_at TEXT NOT NULL DEFAULT '', " ++
   "delivery_tries INTEGER NOT NULL DEFAULT 0, " ++
   "flushed_at TEXT DEFAULT NULL);"
 
+def askMidturnAdditiveAlters : Array String := #[
+  "ALTER TABLE main.operator_notes ADD COLUMN note_id TEXT;",
+  "ALTER TABLE main.operator_notes ADD COLUMN id TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE main.operator_notes ADD COLUMN content TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE main.operator_notes ADD COLUMN body TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE main.operator_notes ADD COLUMN created_at_seq INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE main.operator_notes ADD COLUMN created_at_iso TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE main.operator_notes ADD COLUMN created_at TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE main.operator_notes ADD COLUMN delivery_tries INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE main.operator_notes ADD COLUMN flushed_at TEXT DEFAULT NULL;",
+  "UPDATE main.operator_notes SET note_id = COALESCE(NULLIF(note_id,''), id) WHERE COALESCE(note_id,'') = '' AND COALESCE(id,'') <> '';",
+  "UPDATE main.operator_notes SET id = COALESCE(NULLIF(id,''), note_id) WHERE COALESCE(id,'') = '' AND COALESCE(note_id,'') <> '';",
+  "UPDATE main.operator_notes SET content = body WHERE COALESCE(content,'') = '' AND COALESCE(body,'') <> '';",
+  "UPDATE main.operator_notes SET body = content WHERE COALESCE(body,'') = '' AND COALESCE(content,'') <> '';",
+  "UPDATE main.operator_notes SET created_at_iso = created_at WHERE COALESCE(created_at_iso,'') = '' AND COALESCE(created_at,'') <> '';",
+  "UPDATE main.operator_notes SET created_at = created_at_iso WHERE COALESCE(created_at,'') = '' AND COALESCE(created_at_iso,'') <> '';",
+  "UPDATE main.operator_notes SET created_at_seq = rowid WHERE COALESCE(created_at_seq,0) = 0;"
+]
+
 def askMidturnPendingIndexSql : String :=
-  "CREATE INDEX IF NOT EXISTS idx_operator_notes_pending ON operator_notes(mission_id, flushed_at, created_at_seq);"
+  "CREATE INDEX IF NOT EXISTS main.idx_operator_notes_pending ON operator_notes(mission_id, flushed_at, created_at_seq);"
 
 def idempotencySchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS idempotency_keys (scope TEXT NOT NULL, request_key TEXT NOT NULL, response_json TEXT NOT NULL, status_code INTEGER NOT NULL DEFAULT 200, committed_oversize INTEGER NOT NULL DEFAULT 0, body_bytes INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT 'committed', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(scope, request_key));"
@@ -273,7 +306,7 @@ private def isIgnorableDuplicateColErr (msg : String) : Bool :=
 
 /-- Execute additive `ALTER TABLE ... ADD COLUMN` statements, tolerating already-present columns
     while failing closed on persistent schema, corruption, or read-only errors (`SM-01`). -/
-private def applyAdditiveAlters (h : UInt64) (alters : Array String) : IO (Except String Unit) := do
+def applyAdditiveAlters (h : UInt64) (alters : Array String) : IO (Except String Unit) := do
   for stmt in alters do
     match ← sqliteExecRaw h stmt with
     | .ok () => pure ()
@@ -284,6 +317,25 @@ private def applyAdditiveAlters (h : UInt64) (alters : Array String) : IO (Excep
 
 def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE missions ADD COLUMN project TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE missions ADD COLUMN folder TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE missions ADD COLUMN placement_revision INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE missions ADD COLUMN parent_mission_id TEXT;",
+  "ALTER TABLE missions ADD COLUMN created_at TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE missions ADD COLUMN metadata_updated_at TEXT;",
+  "ALTER TABLE missions ADD COLUMN short_description TEXT;",
+  "ALTER TABLE missions ADD COLUMN github_pr TEXT;",
+  "ALTER TABLE missions ADD COLUMN origin TEXT;",
+  "ALTER TABLE missions ADD COLUMN origin_session_id TEXT;",
+  "ALTER TABLE missions ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000';",
+  "ALTER TABLE missions ADD COLUMN workspace_name TEXT;",
+  "ALTER TABLE missions ADD COLUMN agent TEXT;",
+  "ALTER TABLE missions ADD COLUMN config_profile TEXT;",
+  "ALTER TABLE missions ADD COLUMN session_id TEXT;",
+  "ALTER TABLE missions ADD COLUMN requires_local_disk INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE missions ADD COLUMN resumable INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE missions ADD COLUMN opened_at TEXT;",
+  "ALTER TABLE missions ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE missions ADD COLUMN history_json TEXT NOT NULL DEFAULT '[]';",
   "ALTER TABLE missions ADD COLUMN authority_mode TEXT NOT NULL DEFAULT 'writer';",
   "ALTER TABLE missions ADD COLUMN placement_kind TEXT NOT NULL DEFAULT 'managed';",
   "ALTER TABLE missions ADD COLUMN deferred_goal TEXT;",
@@ -309,6 +361,33 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE mission_runs ADD COLUMN terminal_reason TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE mission_runs ADD COLUMN remote_job_id TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE mission_runs ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE mission_events ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE mission_events ADD COLUMN sequence INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE mission_events ADD COLUMN payload TEXT NOT NULL DEFAULT '{}';",
+  "ALTER TABLE mission_events ADD COLUMN created_at TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE mission_events ADD COLUMN timestamp TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE mission_events ADD COLUMN event_id TEXT;",
+  "ALTER TABLE mission_events ADD COLUMN tool_call_id TEXT;",
+  "ALTER TABLE mission_events ADD COLUMN tool_name TEXT;",
+  "ALTER TABLE mission_events ADD COLUMN content TEXT;",
+  "ALTER TABLE mission_events ADD COLUMN content_file TEXT;",
+  "ALTER TABLE mission_events ADD COLUMN metadata TEXT;",
+  "ALTER TABLE mission_terminal_evidence ADD COLUMN terminal_reason TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE mission_terminal_evidence ADD COLUMN summary TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE mission_terminal_evidence ADD COLUMN artifact_ref TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE mission_terminal_evidence ADD COLUMN verified INTEGER NOT NULL DEFAULT 1;",
+  "ALTER TABLE mission_terminal_evidence ADD COLUMN evidence TEXT NOT NULL DEFAULT '{}';",
+  "ALTER TABLE cloud_executions ADD COLUMN id TEXT;",
+  "ALTER TABLE cloud_executions ADD COLUMN provider TEXT NOT NULL DEFAULT 'hermes';",
+  "ALTER TABLE cloud_executions ADD COLUMN prompt TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE cloud_executions ADD COLUMN response_text TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE cloud_executions ADD COLUMN status TEXT NOT NULL DEFAULT 'completed';",
+  "ALTER TABLE cloud_executions ADD COLUMN created_at TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE cloud_executions ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE cloud_executions ADD COLUMN request_key TEXT;",
+  "ALTER TABLE cloud_executions ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE cloud_executions ADD COLUMN data TEXT NOT NULL DEFAULT '{}';",
+  "ALTER TABLE ai_providers ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE remote_message_queue ADD COLUMN phase INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE remote_message_queue ADD COLUMN claimed_generation INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE remote_message_queue ADD COLUMN claim_boot_epoch INTEGER NOT NULL DEFAULT 0;",
@@ -319,15 +398,58 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE privilege_leases ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE missions ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
   "CREATE INDEX IF NOT EXISTS idx_missions_owner ON missions(owner_user_id);",
+  "CREATE INDEX IF NOT EXISTS idx_missions_project_folder ON missions(project, folder);",
+  "CREATE INDEX IF NOT EXISTS idx_events_mission ON mission_events(mission_id, sequence);",
   "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);"
 ]
 
 def projectsAdditiveAlters : Array String := #[
+  "ALTER TABLE projects ADD COLUMN slug TEXT;",
+  "ALTER TABLE projects ADD COLUMN id TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE projects ADD COLUMN name TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE projects ADD COLUMN title TEXT;",
+  "ALTER TABLE projects ADD COLUMN root_path TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE projects ADD COLUMN objective TEXT;",
+  "ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
+  "ALTER TABLE projects ADD COLUMN mode TEXT;",
+  "ALTER TABLE projects ADD COLUMN wait_ticks INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE projects ADD COLUMN next_action TEXT;",
+  "ALTER TABLE projects ADD COLUMN blocker TEXT;",
+  "ALTER TABLE projects ADD COLUMN controller_cron_id TEXT;",
+  "ALTER TABLE projects ADD COLUMN repository TEXT;",
+  "ALTER TABLE projects ADD COLUMN color TEXT;",
+  "ALTER TABLE projects ADD COLUMN skills TEXT;",
+  "ALTER TABLE projects ADD COLUMN created_at TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE projects ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';",
+  "UPDATE projects SET slug = COALESCE(NULLIF(slug,''), id) WHERE COALESCE(slug,'') = '' AND COALESCE(id,'') <> '';",
+  "UPDATE projects SET id = COALESCE(NULLIF(id,''), slug) WHERE COALESCE(id,'') = '' AND COALESCE(slug,'') <> '';",
+  "UPDATE projects SET name = COALESCE(NULLIF(name,''), title, slug, id, '') WHERE COALESCE(name,'') = '';",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_id_compat ON projects(id) WHERE id IS NOT NULL AND id <> '';",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_slug_compat ON projects(slug) WHERE slug IS NOT NULL AND slug <> '';",
+  "ALTER TABLE project_grant ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE project_grant ADD COLUMN autonomy_level TEXT;",
+  "ALTER TABLE project_decisions ADD COLUMN id TEXT;",
+  "ALTER TABLE project_decisions ADD COLUMN slug TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE project_decisions ADD COLUMN at TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE project_decisions ADD COLUMN project_slug TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE project_decisions ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';",
   "ALTER TABLE project_decisions ADD COLUMN question TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE project_decisions ADD COLUMN rationale TEXT;",
+  "ALTER TABLE project_decisions ADD COLUMN answered INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE project_decisions ADD COLUMN kind TEXT;",
+  "ALTER TABLE project_decisions ADD COLUMN authority TEXT NOT NULL DEFAULT 'escalation';",
+  "ALTER TABLE project_decisions ADD COLUMN answer TEXT;",
+  "ALTER TABLE project_decisions ADD COLUMN answered_at TEXT;",
   "ALTER TABLE project_decisions ADD COLUMN evidence TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE project_decisions ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';",
+  "UPDATE project_decisions SET id = slug || ':' || at WHERE COALESCE(id,'') = '' AND COALESCE(slug,'') <> '';",
+  "UPDATE project_decisions SET project_slug = slug WHERE COALESCE(project_slug,'') = '' AND COALESCE(slug,'') <> '';",
+  "UPDATE project_decisions SET slug = project_slug WHERE COALESCE(slug,'') = '' AND COALESCE(project_slug,'') <> '';",
+  "UPDATE project_decisions SET updated_at = COALESCE(NULLIF(updated_at,''), answered_at, at, '') WHERE COALESCE(updated_at,'') = '';",
+  "UPDATE project_decisions SET at = COALESCE(NULLIF(at,''), updated_at, id) WHERE COALESCE(at,'') = '';",
+  "UPDATE project_decisions SET status = CASE WHEN answered <> 0 THEN 'answered' ELSE 'pending' END WHERE COALESCE(status,'') = '';",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_project_decisions_id ON project_decisions(id);",
+  "ALTER TABLE project_crons ADD COLUMN folder TEXT NOT NULL DEFAULT '';",
   "CREATE TABLE IF NOT EXISTS context_entries (project_slug TEXT NOT NULL, path TEXT NOT NULL, content_hash TEXT NOT NULL DEFAULT '', directory INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0, size INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT '', PRIMARY KEY(project_slug, path));",
   "CREATE TABLE IF NOT EXISTS context_conflicts (id TEXT PRIMARY KEY, project_slug TEXT NOT NULL, path TEXT NOT NULL, base_revision INTEGER NOT NULL DEFAULT 0, base_present INTEGER NOT NULL DEFAULT 0, content_hash TEXT NOT NULL DEFAULT '', directory INTEGER NOT NULL DEFAULT 0, delete_flag INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '');",
   "ALTER TABLE context_entries ADD COLUMN source TEXT NOT NULL DEFAULT '';",
@@ -623,9 +745,11 @@ def runStartupAndHealthReconcile (mDb : SqliteDb) (bootEpoch : UInt64) (nowAt : 
       let q ← sqliteQueryRowsRaw mDb.handle
         ("SELECT m.id,m.status,m.placement_kind,m.node_boot_epoch,m.orphaned_at," ++
          "(SELECT COUNT(*) FROM mission_runs r WHERE r.mission_id=m.id AND r.execution_state<>'terminal')," ++
-         "(SELECT COUNT(*) FROM mission_events ev WHERE ev.mission_id=m.id)," ++
+         "EXISTS(SELECT 1 FROM mission_events ev WHERE ev.mission_id=m.id LIMIT 1)," ++
          "(SELECT COUNT(*) FROM mission_continuations c WHERE c.mission_id=m.id AND c.phase=1)," ++
-         "COALESCE(m.deferred_goal,'') FROM missions m;") #[]
+         "COALESCE(m.deferred_goal,'') FROM missions m " ++
+         "WHERE m.status IN ('active','awaiting_user','interrupted','waiting_background') " ++
+         "   OR m.deferred_goal LIKE '%<!-- sandboxed:messages:v1:%';") #[]
       match q with
       | .error qe =>
         discard <| sqliteExecRaw mDb.handle "ROLLBACK;"
@@ -741,7 +865,59 @@ private def allocateNextBootEpoch (mDb : SqliteDb) : IO (Except String UInt64) :
         return .error s!"boot_epoch_commit_failed:{ce}"
       return .ok ep.toUInt64
 
-/-- Insert a `mission_runs` row compatibly across both fresh (`id PRIMARY KEY`) and legacy (`run_id PRIMARY KEY`) schemas. -/
+/-- Normalize a mission folder path (`"Audits/"`, `"\\Specs//Formal/"` -> `"Audits"`, `"Specs/Formal"`),
+    dropping empty/`.`/`..` segments and control characters. -/
+def normalizeMissionFolder (raw : String) : String := Id.run do
+  let cleaned := raw.replace "\\" "/" |>.trimAscii.toString
+  if cleaned.isEmpty then return ""
+  let mut segs : Array String := #[]
+  for part in cleaned.splitOn "/" do
+    let s := part.trimAscii.toString
+    if !s.isEmpty && s != "." && s != ".." && !s.any (fun c => c.toNat < 32 || c.toNat == 127) then
+      segs := segs.push s
+  let joined := String.intercalate "/" segs.toList
+  return if joined.length > 512 then (joined.take 512).toString else joined
+
+/-- Strictly validate and normalize a requested mission folder path, rejecting `..` traversal or control chars. -/
+def normalizeMissionFolderStrict (raw : String) : Except String String := do
+  if raw.any (fun c => c.toNat < 32 || c.toNat == 127) then
+    throw "folder path must not contain control characters"
+  let cleaned := raw.replace "\\" "/" |>.trimAscii.toString
+  if cleaned.isEmpty then return ""
+  let mut segs : Array String := #[]
+  for part in cleaned.splitOn "/" do
+    let s := part.trimAscii.toString
+    if s == ".." then
+      throw "folder path must not contain '..' segments"
+    if !s.isEmpty && s != "." then
+      segs := segs.push s
+  let joined := String.intercalate "/" segs.toList
+  if joined.length > 512 then
+    throw "folder path exceeds 512 characters"
+  return joined
+
+/-- True when `folder == pfx` or `folder` starts with `pfx ++ "/"`. -/
+def folderMatchesPrefix (folder pfx : String) : Bool :=
+  let nf := normalizeMissionFolder folder
+  let np := normalizeMissionFolder pfx
+  if np.isEmpty then true
+  else nf == np || nf.startsWith (np ++ "/")
+
+/-- Extract the last normalized non-empty `orb-folder:<path>` tag and return `(cleanedTags, extractedFolder?)`. -/
+def stripLegacyOrbFolderTags (tags : Array String) : Array String × Option String := Id.run do
+  let mut kept : Array String := #[]
+  let mut extracted : Option String := none
+  for t in tags do
+    if t.startsWith "orb-folder:" then
+      let f := normalizeMissionFolder (t.drop 11).toString
+      if !f.isEmpty then
+        extracted := some f
+    else
+      kept := kept.push t
+  return (kept, extracted)
+
+/-- Insert a `mission_runs` row compatibly across both fresh (`id PRIMARY KEY`) and legacy
+    (`run_id PRIMARY KEY`, `owner_actor_id NOT NULL`, `heartbeat_at NOT NULL`, `UNIQUE(mission_id, generation)`) schemas. -/
 def insertMissionRunUnlocked
     (db : SqliteDb)
     (runId missionId generation executionState terminalReason remoteJobId updatedAt : String)
@@ -749,24 +925,37 @@ def insertMissionRunUnlocked
   let colsRes ← sqliteQueryRowsRaw db.handle "PRAGMA table_info(mission_runs);" #[]
   let mut hasRunId := false
   let mut hasStartedAt := false
+  let mut hasOwnerActorId := false
+  let mut hasHeartbeatAt := false
   if let .ok cols := colsRes then
     for i in [1:cols.size] do
       let colName := ((cols[i]?.bind (·[1]?)).getD "").toLower
       if colName == "run_id" then hasRunId := true
       if colName == "started_at" then hasStartedAt := true
-  let verb := if orReplace then "INSERT OR REPLACE" else "INSERT"
-  if hasRunId && hasStartedAt then
+      if colName == "owner_actor_id" then hasOwnerActorId := true
+      if colName == "heartbeat_at" then hasHeartbeatAt := true
+  let effTs := if updatedAt.isEmpty then "1970-01-01T00:00:00Z" else updatedAt
+  if hasRunId && hasOwnerActorId && hasHeartbeatAt then
     sqliteQueryRowsRaw db.handle
-      s!"{verb} INTO mission_runs(run_id,id,mission_id,generation,execution_state,terminal_reason,remote_job_id,started_at,updated_at) VALUES(?1,?1,?2,?3,?4,?5,?6,?7,?7);"
-      #[runId, missionId, generation, executionState, terminalReason, remoteJobId, updatedAt]
-  else if hasRunId then
-    sqliteQueryRowsRaw db.handle
-      s!"{verb} INTO mission_runs(run_id,id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?1,?2,?3,?4,?5,?6,?7);"
-      #[runId, missionId, generation, executionState, terminalReason, remoteJobId, updatedAt]
+      ("INSERT INTO mission_runs(run_id,id,mission_id,generation,execution_state,owner_actor_id,terminal_reason,remote_job_id,started_at,heartbeat_at,updated_at) " ++
+       "VALUES(?1,?1,?2,CAST(?3 AS INTEGER),?4,'orb-core',?5,?6,?7,?7,?7) " ++
+       "ON CONFLICT(mission_id,generation) DO UPDATE SET execution_state=excluded.execution_state,terminal_reason=excluded.terminal_reason,remote_job_id=excluded.remote_job_id,heartbeat_at=excluded.heartbeat_at,updated_at=excluded.updated_at;")
+      #[runId, missionId, generation, executionState, terminalReason, remoteJobId, effTs]
   else
-    sqliteQueryRowsRaw db.handle
-      s!"{verb} INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7);"
-      #[runId, missionId, generation, executionState, terminalReason, remoteJobId, updatedAt]
+    let verb := if orReplace then "INSERT OR REPLACE" else "INSERT"
+    if hasRunId && hasStartedAt then
+      sqliteQueryRowsRaw db.handle
+        s!"{verb} INTO mission_runs(run_id,id,mission_id,generation,execution_state,terminal_reason,remote_job_id,started_at,updated_at) VALUES(?1,?1,?2,?3,?4,?5,?6,?7,?7);"
+        #[runId, missionId, generation, executionState, terminalReason, remoteJobId, effTs]
+    else if hasRunId then
+      sqliteQueryRowsRaw db.handle
+        s!"{verb} INTO mission_runs(run_id,id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?1,?2,?3,?4,?5,?6,?7);"
+        #[runId, missionId, generation, executionState, terminalReason, remoteJobId, effTs]
+    else
+      sqliteQueryRowsRaw db.handle
+        s!"{verb} INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7);"
+        #[runId, missionId, generation, executionState, terminalReason, remoteJobId, updatedAt]
+
 /-- Normalize a legacy single-tenant `mission_runs` table (`run_id TEXT PRIMARY KEY NOT NULL`)
     by backfilling `id` and `updated_at` from `run_id` and `started_at`. -/
 private def migrateLegacyMissionRunsUnlocked (h : UInt64) : IO (Except String Unit) := do
@@ -792,6 +981,74 @@ private def migrateLegacyMissionRunsUnlocked (h : UInt64) : IO (Except String Un
     "DROP TRIGGER IF EXISTS orb_mission_runs_legacy_fill_id;"
   sqliteExecRaw h ddl
 
+/-- Idempotent online migration (`#1545`): migrate legacy `orb-folder:*` tags into `missions.folder`,
+    strip `orb-folder:*` from `missions.tags`, keep non-fork child workers and `/btw` side sessions
+    at `folder = ''`, and preserve `updated_at`. -/
+def migrateLegacyOrbFolderTagsUnlocked (h : UInt64) : IO (Except String Nat) := do
+  let q ← sqliteQueryRowsRaw h
+    "SELECT id, COALESCE(parent_mission_id,''), COALESCE(title,''), COALESCE(folder,''), COALESCE(tags,'[]') FROM missions WHERE tags LIKE '%\"orb-folder:%';"
+    #[]
+  let .ok rows := q | return .error (match q with | .error e => e | .ok _ => "orb_folder_query_failed")
+  let mut migrated : Nat := 0
+  for i in [1:rows.size] do
+    let r := rows[i]!
+    let mid := (r[0]?).getD ""
+    let parentId := ((r[1]?).getD "").trimAscii.toString
+    let title := (r[2]?).getD ""
+    let curFolder := (r[3]?).getD ""
+    let rawTags := (r[4]?).getD "[]"
+    if let .ok (.arr arr) := OrbBin.Json.parse rawTags then
+      let strTags := arr.filterMap (fun v => match v with | .str s => some s | _ => none)
+      let (cleaned, extracted?) := stripLegacyOrbFolderTags strTags
+      let expectedForkTag := s!"fork-of:{parentId}"
+      let isFork :=
+        !parentId.isEmpty &&
+        (cleaned.any (· == expectedForkTag) || title.toLower.endsWith " · fork")
+      let isBtw := cleaned.any (fun t => t.startsWith "btw-parent:" || t == "btw-subagent")
+      let isNestedChild := (!parentId.isEmpty && !isFork) || isBtw
+      let nextFolder :=
+        if isNestedChild then ""
+        else if !curFolder.isEmpty then normalizeMissionFolder curFolder
+        else extracted?.getD ""
+      let nextTagsJson := "[" ++ String.intercalate "," (cleaned.toList.map jsonEscape) ++ "]"
+      let upd ← sqliteQueryRowsRaw h
+        "UPDATE missions SET folder=?2, tags=?3 WHERE id=?1;"
+        #[mid, nextFolder, nextTagsJson]
+      if upd.isOk then
+        migrated := migrated + 1
+  return .ok migrated
+
+/-- Backfill legacy `mission_terminal_evidence.evidence` JSON into typed `terminal_reason` / `summary` / `artifact_ref`
+    and legacy `cloud_executions.data` JSON into `prompt` / `response_text` / `status`. -/
+private def migrateLegacyJsonSideTablesUnlocked (h : UInt64) : IO Unit := do
+  if let .ok evRows ← sqliteQueryRowsRaw h
+      "SELECT mission_id, COALESCE(evidence,'') FROM mission_terminal_evidence WHERE COALESCE(terminal_reason,'')='' AND COALESCE(evidence,'')<>'' AND COALESCE(evidence,'')<>'{}';" #[] then
+    for i in [1:evRows.size] do
+      let r := evRows[i]!
+      let mid := (r[0]?).getD ""
+      let rawEv := (r[1]?).getD ""
+      if let .ok jv := OrbBin.Json.parse rawEv then
+        let tr := ((jv.fieldStr? "terminal_reason").orElse (fun _ => jv.fieldStr? "reason")).getD "completed"
+        let sm := (jv.fieldStr? "summary").getD ""
+        let ar := (jv.fieldStr? "artifact_ref").getD ""
+        let vf := if (jv.fieldBool? "verified").getD true then "1" else "0"
+        discard <| sqliteQueryRowsRaw h
+          "UPDATE mission_terminal_evidence SET terminal_reason=?2, summary=?3, artifact_ref=?4, verified=CAST(?5 AS INTEGER) WHERE mission_id=?1;"
+          #[mid, tr, sm, ar, vf]
+  if let .ok ceRows ← sqliteQueryRowsRaw h
+      "SELECT mission_id, COALESCE(data,'') FROM cloud_executions WHERE COALESCE(prompt,'')='' AND COALESCE(response_text,'')='' AND COALESCE(data,'')<>'' AND COALESCE(data,'')<>'{}';" #[] then
+    for i in [1:ceRows.size] do
+      let r := ceRows[i]!
+      let mid := (r[0]?).getD ""
+      let rawData := (r[1]?).getD ""
+      if let .ok jv := OrbBin.Json.parse rawData then
+        let pr := ((jv.fieldStr? "prompt").orElse (fun _ => jv.fieldStr? "goal")).getD ""
+        let rt := (((jv.fieldStr? "response_text").orElse (fun _ => jv.fieldStr? "output")).orElse (fun _ => jv.fieldStr? "response")).getD ""
+        let st := (jv.fieldStr? "status").getD "completed"
+        discard <| sqliteQueryRowsRaw h
+          "UPDATE cloud_executions SET id=COALESCE(NULLIF(id,''), mission_id), prompt=?2, response_text=?3, status=?4 WHERE mission_id=?1;"
+          #[mid, pr, rt, st]
+
 /-- Resolve `(missionsDbPath, askDbPath)` in `trimmedRoot`, honoring legacy `missions/missions-<singleTenantUserId>.db`
     and `missions/ask.db` layouts when the root `missions.db` / `ask.db` is missing or empty (`0` bytes). -/
 def resolveCoreStoreDbPaths (trimmedRoot : String) (singleTenantUserId : String := "") : IO (String × String) := do
@@ -805,6 +1062,8 @@ def resolveCoreStoreDbPaths (trimmedRoot : String) (singleTenantUserId : String 
     if !cleanTenant.isEmpty && (cleanTenant.splitOn "/").length == 1 && cleanTenant != "." && cleanTenant != ".." then
       candidates := candidates.push s!"{trimmedRoot}/missions/missions-{cleanTenant}.db"
     candidates := candidates.push s!"{trimmedRoot}/missions/missions-prod.db"
+    candidates := candidates.push s!"{trimmedRoot}/missions/missions-default.db"
+    candidates := candidates.push s!"{trimmedRoot}/missions/missions-dev.db"
     candidates := candidates.push s!"{trimmedRoot}/missions/missions.db"
     for cand in candidates do
       if missionsPath == defaultMissions then
@@ -831,10 +1090,12 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
   let createRes ← (IO.FS.createDirAll trimmedRoot).toBaseIO
   if let .error ioErr := createRes then
     return .error s!"core_store_mkdir_failed:{ioErr}"
-  let envFromOs ← IO.getEnv "SANDBOXED_SINGLE_TENANT_USER_ID"
+  let envSbx ← IO.getEnv "SANDBOXED_SINGLE_TENANT_USER_ID"
+  let envLegacy ← IO.getEnv "SINGLE_TENANT_USER_ID"
   let envTenant :=
     if !singleTenantUserId.trimAscii.isEmpty then singleTenantUserId
-    else envFromOs.getD ""
+    else if let some s := envSbx.filter (fun v => !v.trimAscii.isEmpty) then s
+    else envLegacy.getD ""
   let (missionsPath, askPath) ← resolveCoreStoreDbPaths trimmedRoot envTenant
   let mRes ← openSqliteDb missionsPath missionsSchemaSql missionsAdditiveAlters
   let .ok mDb := mRes | return .error (match mRes with | .error e => e | .ok _ => "err")
@@ -842,6 +1103,11 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
   if let .error legErr := legacyRunsRes then
     sqliteCloseRaw mDb.handle
     return .error s!"core_store_legacy_runs_migration_failed:{legErr}"
+  let legacyFoldersRes ← mDb.mu.atomically (migrateLegacyOrbFolderTagsUnlocked mDb.handle)
+  if let .error fErr := legacyFoldersRes then
+    sqliteCloseRaw mDb.handle
+    return .error s!"core_store_orb_folder_migration_failed:{fErr}"
+  mDb.mu.atomically (migrateLegacyJsonSideTablesUnlocked mDb.handle)
   let contInitRes : Except String Unit ← mDb.mu.atomically do
     if let .error e ← sqliteQueryRowsRaw mDb.handle harnessContinuitySchemaSql #[] then
       return .error e
@@ -863,6 +1129,8 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
   let askNotesInitRes : Except String Unit ← aDb.mu.atomically do
     if let .error e ← sqliteQueryRowsRaw aDb.handle askMidturnSchemaSql #[] then
       return .error e
+    if let .error ae ← applyAdditiveAlters aDb.handle askMidturnAdditiveAlters then
+      return .error ae
     match ← sqliteQueryRowsRaw aDb.handle askMidturnPendingIndexSql #[] with
     | .ok _ => return .ok ()
     | .error e => return .error e
@@ -888,7 +1156,8 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
     | .ok _ =>
       let r7Ask :=
         "CREATE TABLE IF NOT EXISTS inbox_state (" ++
-        "entry_key TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '', " ++
+        "entry_key TEXT PRIMARY KEY, user_id TEXT NOT NULL DEFAULT 'default', value_json TEXT NOT NULL DEFAULT '{}', " ++
+        "kind TEXT NOT NULL DEFAULT 'seen', payload_json TEXT NOT NULL DEFAULT '', " ++
         "stamp INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 0, " ++
         "client_id TEXT NOT NULL DEFAULT '', mutation_seq INTEGER NOT NULL DEFAULT 0);" ++
         "CREATE TABLE IF NOT EXISTS user_inbox_state (" ++
@@ -897,11 +1166,23 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
         "version INTEGER NOT NULL DEFAULT 0, client_id TEXT NOT NULL DEFAULT '', " ++
         "mutation_seq INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0, " ++
         "read_at TEXT, updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(user_id, entry_key));"
+      let r7AskAlters : Array String := #[
+        "ALTER TABLE inbox_state ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default';",
+        "ALTER TABLE inbox_state ADD COLUMN value_json TEXT NOT NULL DEFAULT '{}';",
+        "ALTER TABLE inbox_state ADD COLUMN kind TEXT NOT NULL DEFAULT 'seen';",
+        "ALTER TABLE inbox_state ADD COLUMN payload_json TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE inbox_state ADD COLUMN stamp INTEGER NOT NULL DEFAULT 0;",
+        "ALTER TABLE inbox_state ADD COLUMN version INTEGER NOT NULL DEFAULT 0;",
+        "ALTER TABLE inbox_state ADD COLUMN client_id TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE inbox_state ADD COLUMN mutation_seq INTEGER NOT NULL DEFAULT 0;",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_state_user_entry ON inbox_state(user_id, entry_key);"
+      ]
       let r7Proj :=
         "CREATE TABLE IF NOT EXISTS project_tracks (" ++
-        "project_slug TEXT NOT NULL, track TEXT NOT NULL, desired_condition TEXT NOT NULL DEFAULT '', " ++
-        "status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','satisfied','blocked','cancelled')), " ++
-        "updated_at TEXT NOT NULL DEFAULT '', state_revision INTEGER NOT NULL DEFAULT 1, " ++
+        "project_slug TEXT NOT NULL, track TEXT NOT NULL, id TEXT NOT NULL DEFAULT '', slug TEXT NOT NULL DEFAULT '', " ++
+        "title TEXT NOT NULL DEFAULT '', desired_condition TEXT NOT NULL DEFAULT '', desired_state TEXT, " ++
+        "lifecycle TEXT NOT NULL DEFAULT 'active', status TEXT NOT NULL DEFAULT 'open', " ++
+        "created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', state_revision INTEGER NOT NULL DEFAULT 1, " ++
         "PRIMARY KEY(project_slug, track));" ++
         "CREATE TABLE IF NOT EXISTS context_entries (" ++
         "project_slug TEXT NOT NULL, path TEXT NOT NULL, content_hash TEXT NOT NULL DEFAULT '', " ++
@@ -931,8 +1212,27 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
         "expires_at INTEGER NOT NULL DEFAULT 0, revoked INTEGER NOT NULL DEFAULT 0, " ++
         "subject_kind TEXT NOT NULL DEFAULT 'mission', client_label TEXT NOT NULL DEFAULT '', " ++
         "host_hint TEXT NOT NULL DEFAULT '', project_scope TEXT NOT NULL DEFAULT '', " ++
-        "hard_expires_at INTEGER NOT NULL DEFAULT 0);"
+        "project_scoped INTEGER NOT NULL DEFAULT 0, hard_expires_at INTEGER NOT NULL DEFAULT 0);"
       let r7ProjAlters : Array String := #[
+        "ALTER TABLE project_tracks ADD COLUMN project_slug TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE project_tracks ADD COLUMN id TEXT;",
+        "ALTER TABLE project_tracks ADD COLUMN slug TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE project_tracks ADD COLUMN title TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE project_tracks ADD COLUMN desired_condition TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE project_tracks ADD COLUMN desired_state TEXT;",
+        "ALTER TABLE project_tracks ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active';",
+        "ALTER TABLE project_tracks ADD COLUMN status TEXT NOT NULL DEFAULT 'open';",
+        "ALTER TABLE project_tracks ADD COLUMN created_at TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE project_tracks ADD COLUMN state_revision INTEGER NOT NULL DEFAULT 1;",
+        "UPDATE project_tracks SET project_slug = slug WHERE COALESCE(project_slug,'') = '' AND COALESCE(slug,'') <> '';",
+        "UPDATE project_tracks SET slug = project_slug WHERE COALESCE(slug,'') = '' AND COALESCE(project_slug,'') <> '';",
+        "UPDATE project_tracks SET id = project_slug || ':' || track WHERE COALESCE(id,'') = '' AND COALESCE(project_slug,'') <> '';",
+        "UPDATE project_tracks SET title = track WHERE COALESCE(title,'') = '';",
+        "UPDATE project_tracks SET desired_condition = COALESCE(desired_state, '') WHERE COALESCE(desired_condition,'') = '' AND COALESCE(desired_state,'') <> '';",
+        "UPDATE project_tracks SET status = CASE WHEN lifecycle = 'cancelled' THEN 'cancelled' ELSE 'open' END WHERE COALESCE(status,'') = '';",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_project_tracks_pslug_track ON project_tracks(project_slug, track);",
+        "ALTER TABLE mcp_sessions_v1 ADD COLUMN project_scoped INTEGER NOT NULL DEFAULT 0;",
+        "UPDATE mcp_sessions_v1 SET project_scoped = 1 WHERE project_scope IS NOT NULL AND project_scope <> '' AND project_scoped = 0;",
         "ALTER TABLE context_entries ADD COLUMN source TEXT NOT NULL DEFAULT '';",
         "ALTER TABLE context_conflicts ADD COLUMN base_present INTEGER NOT NULL DEFAULT 0;",
         "ALTER TABLE context_conflicts ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';",
@@ -950,7 +1250,10 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
         "observed_digest TEXT NOT NULL, exec_digest TEXT NOT NULL, " ++
         "verdict TEXT NOT NULL, dry_run INTEGER NOT NULL DEFAULT 0, " ++
         "created_at TEXT NOT NULL DEFAULT '');"
-      let r7AskRes ← aDb.mu.atomically (sqliteExecRaw aDb.handle r7Ask)
+      let r7AskRes ← aDb.mu.atomically do
+        match ← sqliteExecRaw aDb.handle r7Ask with
+        | .error e => return .error e
+        | .ok () => applyAdditiveAlters aDb.handle r7AskAlters
       let r7ProjRes ← pDb.mu.atomically do
         match ← sqliteExecRaw pDb.handle r7Proj with
         | .error e => return .error e
@@ -1103,26 +1406,37 @@ def withImmediateTx {α : Type} (db : SqliteDb) (act : IO (Except String α)) : 
         return .error err
 
 /-- Upsert a mission record into `missions.db`, persisting typed R2-B columns alongside the
-    read-compatibility `tags` projection (`SM-02`). -/
+    read-compatibility `tags` projection (`SM-02`) and `#1545` folder/placement columns. -/
 def upsertMission (st : CoreStore) (m : MissionRecord) : IO (Except String Unit) := do
   if m.authorityMode != "readonly" && m.authorityMode != "writer" then
     return .error s!"invalid_authority_mode:{m.authorityMode}"
   if m.reservedDiskGib > maxReservedDiskGib then
     return .error s!"invalid_reserved_disk_gib:{m.reservedDiskGib}"
+  let cleanedTags := (stripLegacyOrbFolderTags (parseStringJsonArray m.tagsJson)).1
   let compatTags :=
     projectCompatibilityTagsJson m.authorityMode m.placementKind m.supersededById m.orphanedAt m.reservedDiskGib
-      (parseStringJsonArray m.tagsJson)
+      cleanedTags
+  let normFolder := normalizeMissionFolder m.folder
+  let effCreated := if m.createdAt.isEmpty then m.updatedAt else m.createdAt
+  let effWsId := if m.workspaceId.isEmpty then "00000000-0000-0000-0000-000000000000" else m.workspaceId
   let rev := if m.stateRevision == 0 then 1 else m.stateRevision
   let ownEp := if m.ownerEpoch == 0 then 1 else m.ownerEpoch
   let runGen := if m.runGeneration == 0 then 1 else m.runGeneration
   let bootEp := if m.nodeBootEpoch == 0 then 1 else m.nodeBootEpoch
   let sql :=
-    "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,updated_at,total_cost_cents,authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,reserved_disk_gib,state_revision,owner_epoch,run_generation,node_boot_epoch,tags,track,repo,owner_user_id) " ++
-    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23) " ++
-    "ON CONFLICT(id) DO UPDATE SET title=excluded.title,status=excluded.status,backend=excluded.backend,model_override=excluded.model_override,model_effort=excluded.model_effort,working_directory=excluded.working_directory,project=excluded.project,updated_at=excluded.updated_at,total_cost_cents=excluded.total_cost_cents," ++
+    "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,folder,placement_revision,parent_mission_id,created_at,metadata_updated_at,workspace_id,short_description,updated_at,total_cost_cents,authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,reserved_disk_gib,state_revision,owner_epoch,run_generation,node_boot_epoch,tags,track,repo,owner_user_id) " ++
+    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULLIF(?11,''),?12,NULLIF(?13,''),?14,NULLIF(?15,''),?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30) " ++
+    "ON CONFLICT(id) DO UPDATE SET title=excluded.title,status=excluded.status,backend=excluded.backend,model_override=excluded.model_override,model_effort=excluded.model_effort,working_directory=excluded.working_directory,project=excluded.project," ++
+    "folder=CASE WHEN excluded.folder<>'' THEN excluded.folder ELSE missions.folder END," ++
+    "placement_revision=CASE WHEN excluded.placement_revision>missions.placement_revision THEN excluded.placement_revision ELSE missions.placement_revision END," ++
+    "parent_mission_id=COALESCE(excluded.parent_mission_id,missions.parent_mission_id)," ++
+    "metadata_updated_at=COALESCE(excluded.metadata_updated_at,missions.metadata_updated_at)," ++
+    "short_description=COALESCE(excluded.short_description,missions.short_description)," ++
+    "updated_at=excluded.updated_at,total_cost_cents=excluded.total_cost_cents," ++
     "track=excluded.track,repo=excluded.repo,owner_user_id=CASE WHEN excluded.owner_user_id<>'' THEN excluded.owner_user_id ELSE missions.owner_user_id END;"
   let res ← execParamQuery st.missionsDb sql #[
     m.id, m.title, m.status, m.backend, m.modelOverride, m.modelEffort, m.workingDirectory, m.project,
+    normFolder, s!"{m.placementRevision}", m.parentMissionId, effCreated, m.metadataUpdatedAt, effWsId, m.shortDescription,
     m.updatedAt, s!"{m.totalCostCents}", m.authorityMode, m.placementKind, m.supersededById, m.orphanedAt,
     s!"{m.reservedDiskGib}", s!"{rev}", s!"{ownEp}", s!"{runGen}", s!"{bootEp}", compatTags, m.track, m.repo, m.ownerUserId
   ]
@@ -1135,9 +1449,13 @@ def insertNewMission (st : CoreStore) (m : MissionRecord) : IO (Except String Un
     return .error s!"invalid_authority_mode:{m.authorityMode}"
   if m.reservedDiskGib > maxReservedDiskGib then
     return .error s!"invalid_reserved_disk_gib:{m.reservedDiskGib}"
+  let cleanedTags := (stripLegacyOrbFolderTags (parseStringJsonArray m.tagsJson)).1
   let compatTags :=
     projectCompatibilityTagsJson m.authorityMode m.placementKind m.supersededById m.orphanedAt m.reservedDiskGib
-      (parseStringJsonArray m.tagsJson)
+      cleanedTags
+  let normFolder := normalizeMissionFolder m.folder
+  let effCreated := if m.createdAt.isEmpty then m.updatedAt else m.createdAt
+  let effWsId := if m.workspaceId.isEmpty then "00000000-0000-0000-0000-000000000000" else m.workspaceId
   let rev := if m.stateRevision == 0 then 1 else m.stateRevision
   let ownEp := if m.ownerEpoch == 0 then 1 else m.ownerEpoch
   let runGen := if m.runGeneration == 0 then 1 else m.runGeneration
@@ -1148,10 +1466,11 @@ def insertNewMission (st : CoreStore) (m : MissionRecord) : IO (Except String Un
     if ers.size > 1 then
       return .error "mission_already_exists"
     let sql :=
-      "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,updated_at,total_cost_cents,authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,reserved_disk_gib,state_revision,owner_epoch,run_generation,node_boot_epoch,tags,track,repo,owner_user_id) " ++
-      "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23);"
+      "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,folder,placement_revision,parent_mission_id,created_at,metadata_updated_at,workspace_id,short_description,updated_at,total_cost_cents,authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,reserved_disk_gib,state_revision,owner_epoch,run_generation,node_boot_epoch,tags,track,repo,owner_user_id) " ++
+      "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULLIF(?11,''),?12,NULLIF(?13,''),?14,NULLIF(?15,''),?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30);"
     let res ← execParamQueryUnlocked st.missionsDb sql #[
       m.id, m.title, m.status, m.backend, m.modelOverride, m.modelEffort, m.workingDirectory, m.project,
+      normFolder, s!"{m.placementRevision}", m.parentMissionId, effCreated, m.metadataUpdatedAt, effWsId, m.shortDescription,
       m.updatedAt, s!"{m.totalCostCents}", m.authorityMode, m.placementKind, m.supersededById, m.orphanedAt,
       s!"{m.reservedDiskGib}", s!"{rev}", s!"{ownEp}", s!"{runGen}", s!"{bootEp}", compatTags, m.track, m.repo, m.ownerUserId
     ]
@@ -1159,9 +1478,11 @@ def insertNewMission (st : CoreStore) (m : MissionRecord) : IO (Except String Un
 
 /-- Record authoritative terminal evidence in `mission_terminal_evidence` (`SM-01`). -/
 def upsertTerminalEvidence (st : CoreStore) (ev : TerminalEvidenceRecord) : IO (Except String Unit) := do
+  let evJson :=
+    s!"\{\"terminal_reason\":{jsonEscape ev.terminalReason},\"summary\":{jsonEscape ev.summary},\"artifact_ref\":{jsonEscape ev.artifactRef},\"verified\":{if ev.verified then "true" else "false"},\"recorded_at\":{jsonEscape ev.recordedAt}}"
   let res ← execParamQuery st.missionsDb
-    "INSERT INTO mission_terminal_evidence(mission_id,terminal_reason,summary,artifact_ref,verified,recorded_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(mission_id) DO UPDATE SET terminal_reason=excluded.terminal_reason,summary=excluded.summary,artifact_ref=excluded.artifact_ref,verified=excluded.verified,recorded_at=excluded.recorded_at;"
-    #[ev.missionId, ev.terminalReason, ev.summary, ev.artifactRef, if ev.verified then "1" else "0", ev.recordedAt]
+    "INSERT INTO mission_terminal_evidence(mission_id,terminal_reason,summary,artifact_ref,verified,evidence,recorded_at) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(mission_id) DO UPDATE SET terminal_reason=excluded.terminal_reason,summary=excluded.summary,artifact_ref=excluded.artifact_ref,verified=excluded.verified,evidence=excluded.evidence,recorded_at=excluded.recorded_at;"
+    #[ev.missionId, ev.terminalReason, ev.summary, ev.artifactRef, if ev.verified then "1" else "0", evJson, ev.recordedAt]
   return res.map (fun _ => ())
 
 /-- Reusable transactional CAS state transition + durable outbox intent commit (`R2-C`, `SM-02`).
@@ -1408,27 +1729,41 @@ def mark_mission_opened (st : CoreStore) (missionId openedAt : String) : IO (Exc
 def getMission? (st : CoreStore) (missionId : String) : IO (Option MissionRecord) := do
   if missionId.isEmpty then return none
   match ← execParamQuery st.missionsDb
-    "SELECT id,title,status,backend,COALESCE(model_override,''),COALESCE(model_effort,''),working_directory,COALESCE(project,''),updated_at,total_cost_cents,COALESCE(owner_user_id,''),COALESCE(placement_kind,'managed'),COALESCE(authority_mode,'writer'),COALESCE(state_revision,1),COALESCE(tags,'[]') FROM missions WHERE id=?1;" #[missionId] with
+    ("SELECT id,title,status,backend,COALESCE(model_override,''),COALESCE(model_effort,''),working_directory," ++
+     "COALESCE(project,''),updated_at,total_cost_cents,COALESCE(owner_user_id,''),COALESCE(placement_kind,'managed')," ++
+     "COALESCE(authority_mode,'writer'),COALESCE(state_revision,1),COALESCE(tags,'[]'),COALESCE(folder,'')," ++
+     "COALESCE(placement_revision,0),COALESCE(parent_mission_id,''),COALESCE(NULLIF(created_at,''),updated_at)," ++
+     "COALESCE(metadata_updated_at,''),COALESCE(workspace_id,'00000000-0000-0000-0000-000000000000')," ++
+     "COALESCE(short_description,''),COALESCE(track,''),COALESCE(NULLIF(github_pr,''),repo,'') FROM missions WHERE id=?1;") #[missionId] with
   | .error _ => return none
   | .ok rows =>
     if rows.size ≤ 1 then return none
     let r := rows[1]!
     return some {
-      id               := (r[0]?).getD ""
-      title            := (r[1]?).getD ""
-      status           := (r[2]?).getD ""
-      backend          := (r[3]?).getD ""
-      modelOverride    := (r[4]?).getD ""
-      modelEffort      := (r[5]?).getD ""
-      workingDirectory := (r[6]?).getD ""
-      project          := (r[7]?).getD ""
-      updatedAt        := (r[8]?).getD ""
-      totalCostCents   := (((r[9]?).bind String.toNat?).getD 0).toUInt64
-      ownerUserId      := (r[10]?).getD ""
-      placementKind    := (r[11]?).getD "managed"
-      authorityMode    := (r[12]?).getD "writer"
-      stateRevision    := (((r[13]?).bind String.toNat?).getD 1).toUInt32
-      tagsJson         := (r[14]?).getD "[]"
+      id                := (r[0]?).getD ""
+      title             := (r[1]?).getD ""
+      status            := (r[2]?).getD ""
+      backend           := (r[3]?).getD ""
+      modelOverride     := (r[4]?).getD ""
+      modelEffort       := (r[5]?).getD ""
+      workingDirectory  := (r[6]?).getD ""
+      project           := (r[7]?).getD ""
+      updatedAt         := (r[8]?).getD ""
+      totalCostCents    := (((r[9]?).bind String.toNat?).getD 0).toUInt64
+      ownerUserId       := (r[10]?).getD ""
+      placementKind     := (r[11]?).getD "managed"
+      authorityMode     := (r[12]?).getD "writer"
+      stateRevision     := (((r[13]?).bind String.toNat?).getD 1).toUInt32
+      tagsJson          := (r[14]?).getD "[]"
+      folder            := (r[15]?).getD ""
+      placementRevision := (((r[16]?).bind String.toNat?).getD 0).toUInt64
+      parentMissionId   := (r[17]?).getD ""
+      createdAt         := (r[18]?).getD ""
+      metadataUpdatedAt := (r[19]?).getD ""
+      workspaceId       := (r[20]?).getD "00000000-0000-0000-0000-000000000000"
+      shortDescription  := (r[21]?).getD ""
+      track             := (r[22]?).getD ""
+      repo              := (r[23]?).getD ""
     }
 
 /-- List all mission status strings currently persisted in `missions.db`. -/
@@ -1588,23 +1923,91 @@ def renderContinuationNextAtJson (triggerKind : String) (dueEpoch : UInt64) : St
   if triggerKind == "job" || dueEpoch == 0 then "null"
   else jsonEscape (formatEpochIso8601Utc dueEpoch)
 
+/-- Query filter options for `GET /api/control/missions` (`listMissionsJson`). -/
+structure MissionListFilter where
+  limit?           : Option Nat := none
+  offset?          : Option Nat := none
+  updatedSince?    : Option String := none
+  status?          : Option String := none
+  project?         : Option String := none
+  unassignedOnly   : Bool := false
+  projectPrefix?   : Option String := none
+  folder?          : Option String := none
+  folderPrefix?    : Option String := none
+  track?           : Option String := none
+  tag?             : Option String := none
+  originSessionId? : Option String := none
+  workspaceId?     : Option String := none
+  deriving Repr, DecidableEq, Inhabited
+
 /-- List missions from `missions.db` joined with `mission_terminal_evidence` as JSON (`SM-01`, `SM-02`),
-    preserving `total_cost_cents` telemetry, typed authority/placement/revision columns, and unified `health_verdict`.
+    preserving `total_cost_cents` telemetry, typed authority/placement/revision columns, `#1545` folder/placement
+    metadata, and unified `health_verdict`.
     When `callerUserId?` is `some uid`, strictly filters to `m.owner_user_id = uid` or `mission_shares` participation
     (never disclosing unowned/unshared missions even when the caller is `admin`!). -/
 def listMissionsJson
     (st : CoreStore)
     (nodeBootEpoch? : Option UInt64 := none)
-    (callerUserId? : Option String := none) : IO (Except String String) := do
+    (callerUserId? : Option String := none)
+    (filter : MissionListFilter := {}) : IO (Except String String) := do
   let nodeBootEpoch := nodeBootEpoch?.getD st.bootEpoch
+  let mut conds : Array String := #[]
+  let mut params : Array String := #[]
+  if let some uid := callerUserId? then
+    params := params.push uid
+    let pIdx := params.size
+    conds := conds.push s!"(m.owner_user_id = ?{pIdx} OR EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id = m.id AND s.user_id = ?{pIdx}))"
+  if let some since := filter.updatedSince? then
+    if !since.isEmpty then
+      params := params.push since
+      let pIdx := params.size
+      conds := conds.push s!"(m.updated_at >= ?{pIdx} OR COALESCE(m.metadata_updated_at,'') >= ?{pIdx})"
+  if let some stVal := filter.status? then
+    if !stVal.isEmpty then
+      params := params.push stVal
+      conds := conds.push s!"m.status = ?{params.size}"
+  if filter.unassignedOnly then
+    conds := conds.push "COALESCE(m.project,'') = ''"
+  else if let some proj := filter.project? then
+    params := params.push proj
+    conds := conds.push s!"COALESCE(m.project,'') = ?{params.size}"
+  if let some pfx := filter.projectPrefix? then
+    if !pfx.isEmpty then
+      params := params.push pfx
+      let pIdx := params.size
+      conds := conds.push s!"(COALESCE(m.project,'') = ?{pIdx} OR COALESCE(m.project,'') LIKE (?{pIdx} || '/%'))"
+  if let some fld := filter.folder? then
+    params := params.push (normalizeMissionFolder fld)
+    conds := conds.push s!"COALESCE(m.folder,'') = ?{params.size}"
+  if let some fpfx := filter.folderPrefix? then
+    let normPfx := normalizeMissionFolder fpfx
+    if !normPfx.isEmpty then
+      params := params.push normPfx
+      let pIdx := params.size
+      conds := conds.push s!"(COALESCE(m.folder,'') = ?{pIdx} OR COALESCE(m.folder,'') LIKE (?{pIdx} || '/%'))"
+  if let some trk := filter.track? then
+    if !trk.isEmpty then
+      params := params.push trk
+      conds := conds.push s!"COALESCE(m.track,'') = ?{params.size}"
+  if let some osid := filter.originSessionId? then
+    if !osid.isEmpty then
+      params := params.push osid
+      conds := conds.push s!"COALESCE(m.origin_session_id,'') = ?{params.size}"
+  if let some wsid := filter.workspaceId? then
+    if !wsid.isEmpty then
+      params := params.push wsid
+      conds := conds.push s!"COALESCE(m.workspace_id,'') = ?{params.size}"
   let whereClause :=
-    match callerUserId? with
-    | some _ => "WHERE (m.owner_user_id = ?1 OR EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id = m.id AND s.user_id = ?1)) "
-    | none => ""
-  let params : Array String :=
-    match callerUserId? with
-    | some uid => #[uid]
-    | none => #[]
+    if conds.isEmpty then ""
+    else "WHERE " ++ String.intercalate " AND " conds.toList ++ " "
+  let sqlLimitClause :=
+    if filter.tag?.isSome then ""
+    else
+      match filter.limit?, filter.offset? with
+      | some lim, some off => s!" LIMIT {lim} OFFSET {off}"
+      | some lim, none => s!" LIMIT {lim}"
+      | none, some off => s!" LIMIT -1 OFFSET {off}"
+      | none, none => ""
   let sql :=
     "SELECT m.id,m.title,m.status,m.backend,COALESCE(m.model_override,'') AS model_override," ++
     "COALESCE(m.model_effort,'') AS model_effort,m.working_directory,m.updated_at,m.total_cost_cents," ++
@@ -1618,10 +2021,25 @@ def listMissionsJson
     "(SELECT COUNT(*) FROM mission_continuations c WHERE c.mission_id=m.id AND c.phase=1) AS armed_wakeups," ++
     "COALESCE(e.verified,1) AS ev_verified," ++
     "COALESCE(m.owner_user_id,'') AS owner_user_id," ++
-    "COALESCE((SELECT u.username FROM users u WHERE u.id = m.owner_user_id),'') AS owner_username " ++
+    "COALESCE((SELECT u.username FROM users u WHERE u.id = m.owner_user_id),'') AS owner_username," ++
+    "COALESCE(m.project,'') AS project_slug," ++
+    "COALESCE(m.folder,'') AS folder," ++
+    "COALESCE(m.placement_revision,0) AS placement_revision," ++
+    "COALESCE(m.parent_mission_id,'') AS parent_mission_id," ++
+    "COALESCE(NULLIF(m.created_at,''),m.updated_at) AS created_at," ++
+    "COALESCE(m.metadata_updated_at,'') AS metadata_updated_at," ++
+    "COALESCE(m.short_description,'') AS short_description," ++
+    "COALESCE(NULLIF(m.github_pr,''),m.repo,'') AS github_pr," ++
+    "COALESCE(m.workspace_id,'00000000-0000-0000-0000-000000000000') AS workspace_id," ++
+    "COALESCE(m.workspace_name,'') AS workspace_name," ++
+    "COALESCE(m.track,'') AS track," ++
+    "COALESCE(m.origin,'') AS origin," ++
+    "COALESCE(m.origin_session_id,'') AS origin_session_id," ++
+    "COALESCE(m.agent,'') AS agent," ++
+    "COALESCE(m.resumable,0) AS resumable " ++
     "FROM missions m LEFT JOIN mission_terminal_evidence e ON e.mission_id = m.id " ++
     whereClause ++
-    "ORDER BY m.updated_at DESC, m.id ASC;"
+    "ORDER BY m.updated_at DESC, m.id ASC" ++ sqlLimitClause ++ ";"
   let rows ← execParamQuery st.missionsDb sql params
   let shareRows ← execParamQuery st.missionsDb
     ("SELECT s.mission_id, s.user_id, COALESCE(u.username,''), s.created_at " ++
@@ -1677,66 +2095,112 @@ def listMissionsJson
     if rs.size ≤ 1 then "[]"
     else Id.run do
       let mut items : Array String := #[]
+      let mut seenTagMatched : Nat := 0
+      let tagSkip := if filter.tag?.isSome then filter.offset?.getD 0 else 0
       for i in [1:rs.size] do
         let r := rs[i]!
-        let c0 := r[0]?.getD ""
-        let c1 := r[1]?.getD ""
-        let c2 := r[2]?.getD ""
-        let c3 := r[3]?.getD ""
-        let c4 := r[4]?.getD ""
-        let c5 := r[5]?.getD ""
-        let c6 := r[6]?.getD ""
-        let c7 := r[7]?.getD ""
-        let total_cost_cents := (r[8]?.bind String.toNat?).getD 0
-        let authMode := r[9]?.getD "writer"
-        let placeKind := r[10]?.getD "managed"
-        let superBy := r[11]?.getD ""
-        let orphAt := r[12]?.getD ""
-        let diskGib := (r[13]?.bind String.toNat?).getD 0
-        let stateRev := (r[14]?.bind String.toNat?).getD 1
-        let rowBoot := ((r[15]?.bind String.toNat?).getD 1).toUInt64
-        let mTermReason := r[16]?.getD ""
-        let evReason := r[17]?.getD ""
-        let evSummary := r[18]?.getD ""
-        let evArtifact := r[19]?.getD ""
-        let evRecorded := r[20]?.getD ""
-        let liveRuns := (r[21]?.bind String.toNat?).getD 0
-        let evCnt := (r[22]?.bind String.toNat?).getD 0
         let rawTags := r[23]?.getD "[]"
-        let armedWakeups := (r[24]?.bind String.toNat?).getD 0
-        let evVerified := ((r[25]?.bind String.toNat?).getD 1) != 0
-        let ownerUid := r[26]?.getD ""
-        let ownerUname := r[27]?.getD ""
-        let viewerRole :=
-          match callerUserId? with
-          | some uid => if ownerUid == uid then "owner" else "participant"
-          | none => "owner"
-        let shItems := sharesByMission c0
-        let sharedWithJson := "[" ++ String.intercalate "," shItems.toList ++ "]"
-        let effReason := if !evReason.isEmpty then evReason else mTermReason
-        let hasEv := !evRecorded.isEmpty || !evReason.isEmpty
-        let verdict := deriveMissionHealthVerdict
-          c2 effReason orphAt superBy placeKind
-          (rowBoot == nodeBootEpoch) false (liveRuns > 0) (evCnt > 0) (armedWakeups > 0) hasEv
-        let evJson :=
-          if hasEv then
-            s!"\{\"terminal_reason\":{jsonEscape evReason},\"summary\":{jsonEscape evSummary},\"artifact_ref\":{jsonEscape evArtifact},\"verified\":{if evVerified then "true" else "false"},\"recorded_at\":{jsonEscape evRecorded}}"
-          else "null"
-        let cItems := contItemsByMission c0
-        let contJson := s!"\{\"count\":{cItems.size},\"items\":[{String.intercalate "," cItems.toList}]}"
-        let tagsOut :=
-          if rawTags.startsWith "[" then rawTags
-          else projectCompatibilityTagsJson authMode placeKind superBy orphAt diskGib.toUInt64
-        items := items.push (
-          s!"\{\"id\":{jsonEscape c0},\"title\":{jsonEscape c1},\"status\":{jsonEscape c2},\"backend\":{jsonEscape c3}," ++
-          s!"\"model_override\":{jsonEscape c4},\"model_effort\":{jsonEscape c5},\"working_directory\":{jsonEscape c6}," ++
-          s!"\"updated_at\":{jsonEscape c7},\"total_cost_cents\":{total_cost_cents}," ++
-          s!"\"authority_mode\":{jsonEscape authMode},\"placement_kind\":{jsonEscape placeKind}," ++
-          s!"\"superseded_by_mission_id\":{jsonEscape superBy},\"orphaned_at\":{jsonEscape orphAt}," ++
-          s!"\"reserved_disk_gib\":{diskGib},\"state_revision\":{stateRev}," ++
-          s!"\"viewer_role\":{jsonEscape viewerRole},\"owner_username\":{jsonEscape ownerUname},\"shared_with\":{sharedWithJson}," ++
-          s!"\"health_verdict\":{jsonEscape verdict},\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut}}"
-        )
+        let tagOk :=
+          match filter.tag? with
+          | none => true
+          | some wantTag => (parseStringJsonArray rawTags).contains wantTag
+        if tagOk then
+          let withinWindow :=
+            if filter.tag?.isNone then true
+            else
+              let afterOffset := seenTagMatched ≥ tagSkip
+              let beforeLimit :=
+                match filter.limit? with
+                | none => true
+                | some lim => items.size < lim
+              afterOffset && beforeLimit
+          seenTagMatched := seenTagMatched + 1
+          if withinWindow then
+            let c0 := r[0]?.getD ""
+            let c1 := r[1]?.getD ""
+            let c2 := r[2]?.getD ""
+            let c3 := r[3]?.getD ""
+            let c4 := r[4]?.getD ""
+            let c5 := r[5]?.getD ""
+            let c6 := r[6]?.getD ""
+            let c7 := r[7]?.getD ""
+            let total_cost_cents := (r[8]?.bind String.toNat?).getD 0
+            let authMode := r[9]?.getD "writer"
+            let placeKind := r[10]?.getD "managed"
+            let superBy := r[11]?.getD ""
+            let orphAt := r[12]?.getD ""
+            let diskGib := (r[13]?.bind String.toNat?).getD 0
+            let stateRev := (r[14]?.bind String.toNat?).getD 1
+            let rowBoot := ((r[15]?.bind String.toNat?).getD 1).toUInt64
+            let mTermReason := r[16]?.getD ""
+            let evReason := r[17]?.getD ""
+            let evSummary := r[18]?.getD ""
+            let evArtifact := r[19]?.getD ""
+            let evRecorded := r[20]?.getD ""
+            let liveRuns := (r[21]?.bind String.toNat?).getD 0
+            let evCnt := (r[22]?.bind String.toNat?).getD 0
+            let armedWakeups := (r[24]?.bind String.toNat?).getD 0
+            let evVerified := ((r[25]?.bind String.toNat?).getD 1) != 0
+            let ownerUid := r[26]?.getD ""
+            let ownerUname := r[27]?.getD ""
+            let projSlug := r[28]?.getD ""
+            let folderVal := normalizeMissionFolder (r[29]?.getD "")
+            let placeRev := (r[30]?.bind String.toNat?).getD 0
+            let parentMid := r[31]?.getD ""
+            let createdAtVal := r[32]?.getD c7
+            let metaUpdVal := r[33]?.getD ""
+            let shortDescVal := r[34]?.getD ""
+            let ghPrVal := r[35]?.getD ""
+            let wsIdVal := r[36]?.getD "00000000-0000-0000-0000-000000000000"
+            let wsNameVal := r[37]?.getD ""
+            let trackVal := r[38]?.getD ""
+            let originVal := r[39]?.getD ""
+            let originSessVal := r[40]?.getD ""
+            let agentVal := r[41]?.getD ""
+            let resumableBool := ((r[42]?.bind String.toNat?).getD 0) != 0
+            let projJson := if projSlug.isEmpty then "null" else jsonEscape projSlug
+            let parentJson := if parentMid.isEmpty then "null" else jsonEscape parentMid
+            let metaUpdJson := if metaUpdVal.isEmpty then "null" else jsonEscape metaUpdVal
+            let shortDescJson := if shortDescVal.isEmpty then "null" else jsonEscape shortDescVal
+            let wsNameJson := if wsNameVal.isEmpty then "null" else jsonEscape wsNameVal
+            let originJson := if originVal.isEmpty then "null" else jsonEscape originVal
+            let originSessJson := if originSessVal.isEmpty then "null" else jsonEscape originSessVal
+            let agentJson := if agentVal.isEmpty then "null" else jsonEscape agentVal
+            let viewerRole :=
+              match callerUserId? with
+              | some uid => if ownerUid == uid then "owner" else "participant"
+              | none => "owner"
+            let shItems := sharesByMission c0
+            let sharedWithJson := "[" ++ String.intercalate "," shItems.toList ++ "]"
+            let effReason := if !evReason.isEmpty then evReason else mTermReason
+            let hasEv := !evRecorded.isEmpty || !evReason.isEmpty
+            let verdict := deriveMissionHealthVerdict
+              c2 effReason orphAt superBy placeKind
+              (rowBoot == nodeBootEpoch) false (liveRuns > 0) (evCnt > 0) (armedWakeups > 0) hasEv
+            let evJson :=
+              if hasEv then
+                s!"\{\"terminal_reason\":{jsonEscape evReason},\"summary\":{jsonEscape evSummary},\"artifact_ref\":{jsonEscape evArtifact},\"verified\":{if evVerified then "true" else "false"},\"recorded_at\":{jsonEscape evRecorded}}"
+              else "null"
+            let cItems := contItemsByMission c0
+            let contJson := s!"\{\"count\":{cItems.size},\"items\":[{String.intercalate "," cItems.toList}]}"
+            let tagsOut :=
+              if rawTags.startsWith "[" then rawTags
+              else projectCompatibilityTagsJson authMode placeKind superBy orphAt diskGib.toUInt64
+            items := items.push (
+              s!"\{\"id\":{jsonEscape c0},\"title\":{jsonEscape c1},\"status\":{jsonEscape c2},\"backend\":{jsonEscape c3}," ++
+              s!"\"model_override\":{jsonEscape c4},\"model_effort\":{jsonEscape c5},\"working_directory\":{jsonEscape c6}," ++
+              s!"\"project\":{projJson},\"folder\":{jsonEscape folderVal},\"placement_revision\":{placeRev}," ++
+              s!"\"parent_mission_id\":{parentJson},\"created_at\":{jsonEscape createdAtVal},\"updated_at\":{jsonEscape c7}," ++
+              s!"\"metadata_updated_at\":{metaUpdJson},\"short_description\":{shortDescJson},\"github_pr\":{jsonEscape ghPrVal}," ++
+              s!"\"workspace_id\":{jsonEscape wsIdVal},\"workspace_name\":{wsNameJson},\"track\":{jsonEscape trackVal}," ++
+              s!"\"origin\":{originJson},\"origin_session_id\":{originSessJson},\"agent\":{agentJson}," ++
+              s!"\"resumable\":{if resumableBool then "true" else "false"},\"total_cost_cents\":{total_cost_cents}," ++
+              s!"\"authority_mode\":{jsonEscape authMode},\"placement_kind\":{jsonEscape placeKind}," ++
+              s!"\"superseded_by_mission_id\":{jsonEscape superBy},\"orphaned_at\":{jsonEscape orphAt}," ++
+              s!"\"reserved_disk_gib\":{diskGib},\"state_revision\":{stateRev}," ++
+              s!"\"viewer_role\":{jsonEscape viewerRole},\"owner_username\":{jsonEscape ownerUname},\"shared_with\":{sharedWithJson}," ++
+              s!"\"health_verdict\":{jsonEscape verdict},\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut}}"
+            )
       return "[" ++ String.intercalate "," items.toList ++ "]")
 
 /-- Check whether `status` permits starting a machine transfer. -/
@@ -2771,11 +3235,13 @@ def stepRemoteMissionReplay
       let .ok failCrs := failChg | return .error "remote_replay_changes_failed"
       if ((failCrs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 != 1 then
         return .error "remote_replay_cas_lost"
+      let evJson :=
+        s!"\{\"terminal_reason\":{jsonEscape termReason},\"summary\":\"Remote wait recovery exhausted or expired\",\"artifact_ref\":\"\",\"verified\":true,\"recorded_at\":{jsonEscape updatedAt}}"
       let insEv ← execParamQueryUnlocked st.missionsDb
-        ("INSERT INTO mission_terminal_evidence(mission_id,terminal_reason,summary,artifact_ref,verified,recorded_at) " ++
-         "VALUES(?1,?2,'Remote wait recovery exhausted or expired','',1,?3) " ++
-         "ON CONFLICT(mission_id) DO UPDATE SET terminal_reason=excluded.terminal_reason,summary=excluded.summary,recorded_at=excluded.recorded_at;")
-        #[missionId, termReason, updatedAt]
+        ("INSERT INTO mission_terminal_evidence(mission_id,terminal_reason,summary,artifact_ref,verified,evidence,recorded_at) " ++
+         "VALUES(?1,?2,'Remote wait recovery exhausted or expired','',1,?3,?4) " ++
+         "ON CONFLICT(mission_id) DO UPDATE SET terminal_reason=excluded.terminal_reason,summary=excluded.summary,evidence=excluded.evidence,recorded_at=excluded.recorded_at;")
+        #[missionId, termReason, evJson, updatedAt]
       if let .error ee := insEv then return .error ee
       let delW ← execParamQueryUnlocked st.missionsDb
         "DELETE FROM mission_remote_waits WHERE mission_id=?1;" #[missionId]
@@ -2817,12 +3283,31 @@ structure MissionShareInfo where
 
 def pbkdf2IterationsDefault : UInt32 := 210000
 
+/-- Decode an even-length hexadecimal string into a `ByteArray` (`none` on malformed chars or odd length). -/
+def hexDecodeBytes? (hex : String) : Option ByteArray := Id.run do
+  let cs := hex.trimAscii.toString.toList
+  if cs.length % 2 != 0 then return none
+  let hexNibble? (c : Char) : Option UInt8 :=
+    if '0' ≤ c && c ≤ '9' then some (c.toNat - '0'.toNat).toUInt8
+    else if 'a' ≤ c && c ≤ 'f' then some (c.toNat - 'a'.toNat + 10).toUInt8
+    else if 'A' ≤ c && c ≤ 'F' then some (c.toNat - 'A'.toNat + 10).toUInt8
+    else none
+  let mut out := ByteArray.emptyWithCapacity (cs.length / 2)
+  let arr := cs.toArray
+  let mut i : Nat := 0
+  while i + 1 < arr.size do
+    match hexNibble? arr[i]!, hexNibble? arr[i + 1]! with
+    | some hi, some lo => out := out.push ((hi <<< 4) ||| lo)
+    | _, _ => return none
+    i := i + 2
+  return some out
+
 /-- Pure-Lean PBKDF2-HMAC-SHA256 fallback (`dkLen = 32` bytes -> 64 lowercase hex chars) using `LeanSys.Auth.hmacSha256Bytes`
     when `libcrypto` is unavailable to `dlopen`. -/
-private def pbkdf2Sha256FallbackHex (password salt : String) (iterations : UInt32) : String := Id.run do
+private def pbkdf2Sha256FallbackBytesHex (password : String) (saltBytes : ByteArray) (iterations : UInt32) : String := Id.run do
   let iters := Nat.max 1 iterations.toNat
   let keyBytes := password.toUTF8
-  let block1 := salt.toUTF8 ++ ByteArray.mk #[0, 0, 0, 1]
+  let block1 := saltBytes ++ ByteArray.mk #[0, 0, 0, 1]
   let mut u := hmacSha256Bytes keyBytes block1
   let mut acc := u.data
   for _ in [1:iters] do
@@ -2833,11 +3318,14 @@ private def pbkdf2Sha256FallbackHex (password salt : String) (iterations : UInt3
     acc := next
   return bytesToHexLower (ByteArray.mk acc)
 
-def derivePbkdf2Sha256Hex (password salt : String) (iterations : UInt32 := pbkdf2IterationsDefault) : IO String := do
-  let raw ← pbkdf2Sha256HexRaw password salt iterations
+def derivePbkdf2Sha256BytesHex (password : String) (saltBytes : ByteArray) (iterations : UInt32 := pbkdf2IterationsDefault) : IO String := do
+  let raw ← pbkdf2Sha256HexRaw password saltBytes iterations
   if raw.length == 64 then
     return raw
-  return pbkdf2Sha256FallbackHex password salt iterations
+  return pbkdf2Sha256FallbackBytesHex password saltBytes iterations
+
+def derivePbkdf2Sha256Hex (password salt : String) (iterations : UInt32 := pbkdf2IterationsDefault) : IO String :=
+  derivePbkdf2Sha256BytesHex password salt.toUTF8 iterations
 
 def hashPasswordPbkdf2 (password : String) (iterations : UInt32 := pbkdf2IterationsDefault) : IO String := do
   let saltBytes ← match (← OrbNetLeaf.Crypto.randBytes 16) with
@@ -2848,8 +3336,7 @@ def hashPasswordPbkdf2 (password : String) (iterations : UInt32 := pbkdf2Iterati
   return s!"pbkdf2-sha256${iterations}${saltHex}${dkHex}"
 
 def verifyPasswordPbkdf2 (password storedHash : String) : IO Bool := do
-  let parts := storedHash.splitOn "$"
-  match parts with
+  match storedHash.splitOn "$" with
   | ["pbkdf2-sha256", iterStr, saltHex, expectedHex] =>
     let some iterNat := iterStr.toNat? | return false
     if iterNat == 0 || iterNat > 2000000 || saltHex.isEmpty || expectedHex.length != 64 then
@@ -2857,7 +3344,16 @@ def verifyPasswordPbkdf2 (password storedHash : String) : IO Bool := do
     let actualHex ← derivePbkdf2Sha256Hex password saltHex iterNat.toUInt32
     return ctEqSlice (ByteSlice.ofString actualHex) (ByteSlice.ofString expectedHex.toLower)
   | _ =>
-    return false
+    match storedHash.splitOn ":" with
+    | ["pbkdf2", iterStr, saltHex, expectedHex] =>
+      let some iterNat := iterStr.toNat? | return false
+      let some saltBytes := hexDecodeBytes? saltHex | return false
+      if iterNat == 0 || iterNat > 2000000 || saltBytes.isEmpty || expectedHex.length != 64 then
+        return false
+      let actualHex ← derivePbkdf2Sha256BytesHex password saltBytes iterNat.toUInt32
+      return ctEqSlice (ByteSlice.ofString actualHex) (ByteSlice.ofString expectedHex.toLower)
+    | _ =>
+      return false
 
 def currentUtcDay (nowEpoch : UInt64) : String :=
   (formatEpochIso8601Utc nowEpoch).take 10 |>.toString
@@ -2985,7 +3481,7 @@ def bootstrapUsersAndBackfill
     #[bootstrapAdminId]
   let pSlugs ← execParamQuery st.projectsDb
     ("SELECT DISTINCT slug FROM (" ++
-     "SELECT id AS slug FROM projects UNION " ++
+     "SELECT COALESCE(NULLIF(slug,''), id) AS slug FROM projects UNION " ++
      "SELECT slug FROM project_grant UNION " ++
      "SELECT project_slug AS slug FROM project_tracks UNION " ++
      "SELECT project_slug AS slug FROM context_heads) WHERE slug<>'';") #[]
@@ -2997,15 +3493,36 @@ def bootstrapUsersAndBackfill
           "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
           #[sl, bootstrapAdminId, nowAt]
   let ibRows ← execParamQuery st.askDb
-    "SELECT entry_key,kind,payload_json,stamp,version,client_id,mutation_seq FROM inbox_state;" #[]
+    "SELECT entry_key,COALESCE(kind,''),COALESCE(payload_json,''),COALESCE(stamp,0),COALESCE(version,0),COALESCE(client_id,''),COALESCE(mutation_seq,0),COALESCE(value_json,'') FROM inbox_state;" #[]
   if let .ok irs := ibRows then
     for i in [1:irs.size] do
       let ir := irs[i]!
-      discard <| execParamQuery st.askDb
-        ("INSERT OR IGNORE INTO user_inbox_state(user_id,entry_key,kind,payload_json,stamp,version,client_id,mutation_seq,updated_at) " ++
-         "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9);")
-        #[bootstrapAdminId, (ir[0]?).getD "", (ir[1]?).getD "seen", (ir[2]?).getD "",
-          (ir[3]?).getD "0", (ir[4]?).getD "0", (ir[5]?).getD "", (ir[6]?).getD "0", nowAt]
+      let eKey := (ir[0]?).getD ""
+      let rawKind := (ir[1]?).getD ""
+      let rawPayload := (ir[2]?).getD ""
+      let rawStamp := (ir[3]?).getD "0"
+      let rawVer := (ir[4]?).getD "0"
+      let rawClient := (ir[5]?).getD ""
+      let rawMutSeq := (ir[6]?).getD "0"
+      let valJson := (ir[7]?).getD ""
+      let (effKind, effPayload, effStamp, effVer, effClient, effMutSeq) :=
+        if rawPayload.isEmpty && !valJson.isEmpty then
+          match OrbBin.Json.parse valJson with
+          | .ok jv =>
+            let k := (jv.fieldStr? "kind").getD (if rawKind.isEmpty then "seen" else rawKind)
+            let st := match jv.fieldNat? "stamp" with | some n => s!"{n}" | none => rawStamp
+            let vr := match jv.fieldNat? "version" with | some n => s!"{n}" | none => rawVer
+            let cl := (jv.fieldStr? "client_id").getD rawClient
+            let ms := match jv.fieldNat? "mutation_seq" with | some n => s!"{n}" | none => rawMutSeq
+            (k, valJson, st, vr, cl, ms)
+          | .error _ => (if rawKind.isEmpty then "seen" else rawKind, valJson, rawStamp, rawVer, rawClient, rawMutSeq)
+        else
+          (if rawKind.isEmpty then "seen" else rawKind, rawPayload, rawStamp, rawVer, rawClient, rawMutSeq)
+      if !eKey.isEmpty then
+        discard <| execParamQuery st.askDb
+          ("INSERT OR IGNORE INTO user_inbox_state(user_id,entry_key,kind,payload_json,stamp,version,client_id,mutation_seq,updated_at) " ++
+           "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9);")
+          #[bootstrapAdminId, eKey, effKind, effPayload, effStamp, effVer, effClient, effMutSeq, nowAt]
   return .ok bootstrapAdminId
 
 /-- Admin user list (`GET /api/admin/users`): strictly omits any mission/project counts, titles, or workspaces! -/
@@ -3387,20 +3904,52 @@ def renderAIProviderForCallerJson
     kvs := kvs.push s!"\"custom_models\":{renderCustomModelsJson p.customModels}"
   return "{" ++ String.intercalate "," kvs.toList ++ "}"
 
-/-- Append one event row to `mission_events` with monotonically increasing `seq` per mission. -/
+/-- Append one event row to `mission_events` with monotonically increasing `seq` & `sequence` per mission. -/
 def appendMissionEvent
     (st : CoreStore) (missionId eventType payloadJson createdAt : String) : IO (Except String UInt64) :=
   withImmediateTx st.missionsDb do
     let seqRes ← execParamQueryUnlocked st.missionsDb
-      "SELECT COALESCE(MAX(seq), 0) + 1 FROM mission_events WHERE mission_id=?1;" #[missionId]
+      "SELECT COALESCE(MAX(CASE WHEN COALESCE(seq,0)>=COALESCE(sequence,0) THEN COALESCE(seq,0) ELSE COALESCE(sequence,0) END), 0) + 1 FROM mission_events WHERE mission_id=?1;" #[missionId]
     let .ok srs := seqRes | return .error "mission_events_seq_failed"
     let nextSeq : UInt64 := (((srs[1]?.bind (·[0]?)).bind String.toNat?).getD 1).toUInt64
     let ins ← execParamQueryUnlocked st.missionsDb
-      "INSERT INTO mission_events(mission_id,seq,event_type,payload,created_at) VALUES(?1,?2,?3,?4,?5);"
+      "INSERT INTO mission_events(mission_id,seq,sequence,event_type,payload,created_at,timestamp) VALUES(?1,?2,?2,?3,?4,?5,?5);"
       #[missionId, s!"{nextSeq}", eventType, payloadJson, createdAt]
     match ins with
     | .error e => return .error e
     | .ok _ => return .ok nextSeq
+
+/-- Synthesize canonical `payload` JSON when reading legacy `mission_events` rows whose `payload`
+    is `'{}'` or `''` and whose structured fields live in `event_id`, `tool_call_id`, `tool_name`,
+    `content` (or `content_file`), and `metadata`. -/
+def hydrateMissionEventPayload
+    (rootDir rawPayload legacyEventId legacyCallId legacyToolName legacyContent legacyContentFile legacyMeta : String) : IO String := do
+  let trimmed := rawPayload.trimAscii.toString
+  if !trimmed.isEmpty && trimmed != "{}" then
+    return rawPayload
+  if legacyEventId.isEmpty && legacyCallId.isEmpty && legacyToolName.isEmpty &&
+     legacyContent.isEmpty && legacyContentFile.isEmpty && (legacyMeta.isEmpty || legacyMeta == "{}") then
+    return rawPayload
+  let effContent ←
+    if !legacyContent.isEmpty || legacyContentFile.isEmpty then
+      pure legacyContent
+    else
+      let candPath :=
+        if legacyContentFile.startsWith "/" then legacyContentFile
+        else s!"{rootDir}/{legacyContentFile}"
+      try IO.FS.readFile candPath catch _ => pure ""
+  let mut pairs : Array (String × JVal) := #[]
+  if !legacyEventId.isEmpty then
+    pairs := pairs.push ("event_id", .str legacyEventId)
+  if !legacyCallId.isEmpty then
+    pairs := pairs.push ("tool_call_id", .str legacyCallId)
+  if !legacyToolName.isEmpty then
+    pairs := pairs.push ("tool_name", .str legacyToolName)
+  pairs := pairs.push ("content", .str effContent)
+  if !legacyMeta.isEmpty && legacyMeta != "{}" then
+    if let .ok (.obj mp) := OrbBin.Json.parse legacyMeta then
+      pairs := pairs.push ("metadata", .obj mp)
+  return renderCompact (.obj pairs)
 
 /-- Render one `mission_events` row (`id`, `mission_id`, `seq`, `event_type`, `payload`, `created_at`)
     as the `StoredEvent` JSON object expected by Desktop, iOS, and Android clients. -/
@@ -3468,7 +4017,8 @@ structure MissionEventsPage where
   pageMaxSeq : Option UInt64
   maxSeq     : UInt64
 
-/-- Query a cursor-paginated slice of `mission_events` matching `X-Orb-Events-Protocol: 1` semantics. -/
+/-- Query a cursor-paginated slice of `mission_events` matching `X-Orb-Events-Protocol: 1` semantics
+    across both native `seq`/`payload` rows and legacy `sequence`/`content` rows. -/
 def queryMissionEventsPage
     (st : CoreStore) (missionId : String)
     (sinceSeq? beforeSeq? : Option UInt64)
@@ -3477,20 +4027,24 @@ def queryMissionEventsPage
     (maxPayload? : Option Nat := none) : IO (Except String MissionEventsPage) := do
   let clampedLim := max 1 (min 500 limit)
   let fetchLim := clampedLim + 1
+  let effSeqExpr := "(CASE WHEN COALESCE(seq,0)>0 THEN seq ELSE COALESCE(sequence,0) END)"
   let maxRes ← execParamQuery st.missionsDb
-    "SELECT COALESCE(MAX(seq), 0) FROM mission_events WHERE mission_id=?1;" #[missionId]
+    s!"SELECT COALESCE(MAX({effSeqExpr}), 0) FROM mission_events WHERE mission_id=?1;" #[missionId]
   let .ok maxRs := maxRes | return .error "mission_events_max_failed"
   let maxSeq : UInt64 := (((maxRs[1]?.bind (·[0]?)).bind String.toNat?).getD 0).toUInt64
+  let cols :=
+    s!"id,{effSeqExpr} AS eff_seq,event_type,COALESCE(payload,''),COALESCE(NULLIF(created_at,''),timestamp,'')," ++
+    "COALESCE(event_id,''),COALESCE(tool_call_id,''),COALESCE(tool_name,''),COALESCE(content,''),COALESCE(content_file,''),COALESCE(metadata,'')"
   let (sql, params, forwardOrder) :=
     match sinceSeq?, beforeSeq? with
     | some s, _ =>
-      ("SELECT id,seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 AND seq>?2 ORDER BY seq ASC LIMIT ?3;",
+      (s!"SELECT {cols} FROM mission_events WHERE mission_id=?1 AND {effSeqExpr}>CAST(?2 AS INTEGER) ORDER BY eff_seq ASC, id ASC LIMIT CAST(?3 AS INTEGER);",
        #[missionId, s!"{s}", s!"{fetchLim}"], true)
     | none, some b =>
-      ("SELECT id,seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3;",
+      (s!"SELECT {cols} FROM mission_events WHERE mission_id=?1 AND {effSeqExpr}<CAST(?2 AS INTEGER) ORDER BY eff_seq DESC, id DESC LIMIT CAST(?3 AS INTEGER);",
        #[missionId, s!"{b}", s!"{fetchLim}"], false)
     | none, none =>
-      ("SELECT id,seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 ORDER BY seq DESC LIMIT ?2;",
+      (s!"SELECT {cols} FROM mission_events WHERE mission_id=?1 ORDER BY eff_seq DESC, id DESC LIMIT CAST(?2 AS INTEGER);",
        #[missionId, s!"{fetchLim}"], false)
   let rowsRes ← execParamQuery st.missionsDb sql params
   let .ok rs := rowsRes | return .error "mission_events_query_failed"
@@ -3500,9 +4054,11 @@ def queryMissionEventsPage
     let rid := (((r[0]?).bind String.toNat?).getD 0).toUInt64
     let seq := (((r[1]?).bind String.toNat?).getD 0).toUInt64
     let et := (r[2]?).getD ""
-    let pl := (r[3]?).getD ""
-    let ts := (r[4]?).getD ""
     if typesFilter.isEmpty || typesFilter.contains et then
+      let pl ← hydrateMissionEventPayload st.rootDir
+        ((r[3]?).getD "") ((r[5]?).getD "") ((r[6]?).getD "") ((r[7]?).getD "")
+        ((r[8]?).getD "") ((r[9]?).getD "") ((r[10]?).getD "")
+      let ts := (r[4]?).getD ""
       rawItems := rawItems.push (rid, seq, et, pl, ts)
   let hasMore := rawItems.size > clampedLim
   let pageSlice := if hasMore then rawItems.extract 0 clampedLim else rawItems
@@ -3534,9 +4090,12 @@ def queryMissionEventsPage
 /-- Fetch full untruncated `tool_call` + `tool_result` event rows for `GET /api/control/missions/:id/tool-calls/:callId`. -/
 def queryMissionToolCallEventsJson (st : CoreStore) (missionId callId : String) : IO (Except String String) := do
   let needle := s!"%{callId}%"
+  let effSeqExpr := "(CASE WHEN COALESCE(seq,0)>0 THEN seq ELSE COALESCE(sequence,0) END)"
   let res ← execParamQuery st.missionsDb
-    "SELECT id,seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 AND event_type IN ('tool_call','tool_result') AND payload LIKE ?2 ORDER BY seq ASC;"
-    #[missionId, needle]
+    (s!"SELECT id,{effSeqExpr} AS eff_seq,event_type,COALESCE(payload,''),COALESCE(NULLIF(created_at,''),timestamp,'')," ++
+     "COALESCE(event_id,''),COALESCE(tool_call_id,''),COALESCE(tool_name,''),COALESCE(content,''),COALESCE(content_file,''),COALESCE(metadata,'') " ++
+     "FROM mission_events WHERE mission_id=?1 AND event_type IN ('tool_call','tool_result') AND (payload LIKE ?2 OR COALESCE(tool_call_id,'')=?3) ORDER BY eff_seq ASC, id ASC;")
+    #[missionId, needle, callId]
   let .ok rs := res | return .error "tool_call_events_query_failed"
   let mut out : Array String := #[]
   for i in [1:rs.size] do
@@ -3544,12 +4103,491 @@ def queryMissionToolCallEventsJson (st : CoreStore) (missionId callId : String) 
     let rid := (((r[0]?).bind String.toNat?).getD 0).toUInt64
     let seq := (((r[1]?).bind String.toNat?).getD 0).toUInt64
     let et := (r[2]?).getD ""
-    let pl := (r[3]?).getD ""
     let ts := (r[4]?).getD ""
-    if let .ok jv := OrbBin.Json.parse pl then
-      let cid := (jv.fieldStr? "tool_call_id").orElse (fun _ => jv.fieldStr? "call_id") |>.getD ""
-      if cid == callId then
-        out := out.push (renderStoredMissionEventJson rid missionId seq et pl ts none)
+    let legacyCid := (r[6]?).getD ""
+    let pl ← hydrateMissionEventPayload st.rootDir
+      ((r[3]?).getD "") ((r[5]?).getD "") legacyCid ((r[7]?).getD "")
+      ((r[8]?).getD "") ((r[9]?).getD "") ((r[10]?).getD "")
+    let matched :=
+      if legacyCid == callId then true
+      else match OrbBin.Json.parse pl with
+        | .ok jv => ((jv.fieldStr? "tool_call_id").orElse (fun _ => jv.fieldStr? "call_id") |>.getD "") == callId
+        | .error _ => false
+    if matched then
+      out := out.push (renderStoredMissionEventJson rid missionId seq et pl ts none)
   return .ok ("[" ++ String.intercalate "," out.toList ++ "]")
+
+/-! ## `#1545` Revisioned Mission Moves, Fork-Leader Closure & Folder Cascades -/
+
+/-- Wire item emitted in `POST /api/control/missions/move` (`moved`) and `mission_placement_changed` (`moves`). -/
+structure MissionPlacementItem where
+  missionId         : String
+  project?          : Option String
+  folder            : String
+  placementRevision : UInt64
+  deriving Repr, DecidableEq, Inhabited
+
+def renderMissionPlacementItemJson (it : MissionPlacementItem) : String :=
+  let projJson := match it.project? with | some p => if p.isEmpty then "null" else jsonEscape p | none => "null"
+  s!"\{\"mission_id\":{jsonEscape it.missionId},\"project\":{projJson},\"folder\":{jsonEscape it.folder},\"placement_revision\":{it.placementRevision}}"
+
+def renderMissionPlacementChangedEventJson
+    (moves : Array MissionPlacementItem)
+    (clientOpId? : Option UInt32 := none)
+    (clientId? : Option String := none) : String := Id.run do
+  let movesJson := "[" ++ String.intercalate "," (moves.map renderMissionPlacementItemJson).toList ++ "]"
+  let mut kvs : Array String := #[
+    "\"type\":\"mission_placement_changed\"",
+    s!"\"moves\":{movesJson}"
+  ]
+  if let some opId := clientOpId? then
+    kvs := kvs.push s!"\"client_op_id\":{opId}"
+  if let some cid := clientId? then
+    let clean := cid.trimAscii.toString
+    if !clean.isEmpty && clean.length ≤ 128 then
+      kvs := kvs.push s!"\"client_id\":{jsonEscape clean}"
+  return "{" ++ String.intercalate "," kvs.toList ++ "}"
+
+structure CheckedPlacementUpdate where
+  missionId       : String
+  expectedProject : String
+  nextProject     : String
+  nextFolder      : String
+  deriving Repr, DecidableEq, Inhabited
+
+structure ExpandedMoveMember where
+  missionId      : String
+  currentProject : String
+  targetFolder   : String
+  ownerUserId    : String
+  deriving Repr, DecidableEq, Inhabited
+
+private structure MoveCandidateRow where
+  id             : String
+  title          : String
+  status         : String
+  project        : String
+  folder         : String
+  parentId       : String
+  createdAt      : String
+  updatedAt      : String
+  supersededById : String
+  ownerUserId    : String
+  tags           : Array String
+  deriving Repr, Inhabited
+
+private def forkSourceIdOfRow (m : MoveCandidateRow) : Option String := Id.run do
+  for t in m.tags do
+    if t.startsWith "fork-of:" then
+      let s := (t.drop 8).trimAscii.toString
+      if !s.isEmpty then return some s
+  if !m.parentId.isEmpty && m.title.toLower.endsWith " · fork" then
+    return some m.parentId
+  return none
+
+private def isForkOfParentRow (m : MoveCandidateRow) (parentId : String) : Bool :=
+  !parentId.isEmpty && (
+    m.tags.contains s!"fork-of:{parentId}" ||
+    (m.parentId == parentId && m.title.toLower.endsWith " · fork"))
+
+private def isBtwSideRow (m : MoveCandidateRow) : Bool :=
+  m.tags.any (fun t => t.startsWith "btw-parent:" || t == "btw-subagent")
+
+private def isNestedChildRow (m : MoveCandidateRow) : Bool :=
+  let hasNonForkParent := !m.parentId.isEmpty && !isForkOfParentRow m m.parentId
+  hasNonForkParent || isBtwSideRow m
+
+private def isRetiredForkRow (m : MoveCandidateRow) : Bool :=
+  m.status == "acknowledged" || !m.supersededById.isEmpty ||
+  m.tags.any (fun t => t == "superseded" || t.startsWith "superseded-by:")
+
+private def isWorkingForkRow (m : MoveCandidateRow) : Bool :=
+  m.status == "active" || m.status == "pending" || m.status == "waiting_background"
+
+/-- Parse ISO-8601 UTC timestamp to milliseconds (`epochSec * 1000 + millis`, or `0` on unparsable). -/
+def parseIso8601Millis (s : String) : UInt64 :=
+  match parseIso8601EpochU64? s with
+  | none => 0
+  | some sec =>
+    let fracMs : UInt64 := Id.run do
+      let parts := s.splitOn "."
+      if parts.length < 2 then return 0
+      let rhs := parts[1]!
+      let digits := (rhs.takeWhile Char.isDigit).toString
+      if digits.isEmpty then return 0
+      let d3 := ((digits ++ "000").take 3).toString
+      return (d3.toNat?.getD 0).toUInt64
+    sec * 1000 + fracMs
+
+private def loadAllMoveCandidateRows (st : CoreStore) : IO (Except String (Array MoveCandidateRow)) := do
+  let q ← execParamQuery st.missionsDb
+    ("SELECT id,COALESCE(title,''),status,COALESCE(project,''),COALESCE(folder,'')," ++
+     "COALESCE(parent_mission_id,''),COALESCE(NULLIF(created_at,''),updated_at),updated_at," ++
+     "COALESCE(superseded_by_mission_id,''),COALESCE(owner_user_id,''),COALESCE(tags,'[]') FROM missions;") #[]
+  match q with
+  | .error e => return .error e
+  | .ok rs =>
+    if rs.size ≤ 1 then return .ok #[]
+    let mut out : Array MoveCandidateRow := Array.mkEmpty (rs.size - 1)
+    for i in [1:rs.size] do
+      let r := rs[i]!
+      out := out.push {
+        id             := (r[0]?).getD ""
+        title          := (r[1]?).getD ""
+        status         := (r[2]?).getD ""
+        project        := (r[3]?).getD ""
+        folder         := (r[4]?).getD ""
+        parentId       := (r[5]?).getD ""
+        createdAt      := (r[6]?).getD ""
+        updatedAt      := (r[7]?).getD ""
+        supersededById := (r[8]?).getD ""
+        ownerUserId    := (r[9]?).getD ""
+        tags           := parseStringJsonArray ((r[10]?).getD "[]")
+      }
+    return .ok out
+
+private def expandColocatedForkGroupIfLeader
+    (allRows : Array MoveCandidateRow)
+    (findById : String → Option MoveCandidateRow)
+    (selected : MoveCandidateRow) : Array MoveCandidateRow := Id.run do
+  let targetProj := selected.project
+  let mut root := selected
+  let mut climbSeen : Array String := #[selected.id]
+  let mut climbing := true
+  while climbing do
+    match forkSourceIdOfRow root with
+    | none => climbing := false
+    | some srcId =>
+      if climbSeen.contains srcId then
+        climbing := false
+      else
+        climbSeen := climbSeen.push srcId
+        match findById srcId with
+        | none => climbing := false
+        | some src =>
+          if src.project != targetProj then
+            climbing := false
+          else
+            root := src
+  let mut group : Array MoveCandidateRow := #[root]
+  let mut bfsSeen : Array String := #[root.id]
+  let mut qIdx : Nat := 0
+  while qIdx < group.size do
+    let cur := group[qIdx]!
+    qIdx := qIdx + 1
+    for cand in allRows do
+      if cand.project == targetProj && !bfsSeen.contains cand.id && isForkOfParentRow cand cur.id then
+        bfsSeen := bfsSeen.push cand.id
+        group := group.push cand
+  if group.size < 2 then
+    return #[selected]
+  let sortedGroup := group.qsort (fun a b => a.id < b.id)
+  let inGroup (id : String) : Bool := sortedGroup.any (fun x => x.id == id)
+  let ancestorsOf (m : MoveCandidateRow) : Array String := Id.run do
+    let mut seen : Array String := #[m.id]
+    let mut ancs : Array String := #[]
+    let mut cur := m
+    let mut keepGoing := true
+    while keepGoing do
+      match forkSourceIdOfRow cur with
+      | none => keepGoing := false
+      | some sid =>
+        if !inGroup sid || seen.contains sid then
+          keepGoing := false
+        else
+          seen := seen.push sid
+          match findById sid with
+          | none => keepGoing := false
+          | some anc =>
+            ancs := ancs.push anc.id
+            cur := anc
+    return ancs
+  let mut effAct : Array (String × UInt64) := sortedGroup.map (fun m =>
+    let u := parseIso8601Millis m.updatedAt
+    let c := parseIso8601Millis m.createdAt
+    (m.id, if u ≥ c then u else c))
+  for m in sortedGroup do
+    let created := parseIso8601Millis m.createdAt
+    if created > 0 then
+      let ancs := ancestorsOf m
+      effAct := effAct.map (fun (aid, act) =>
+        if ancs.contains aid && act ≤ created + 15000 then
+          (aid, if act ≤ created then act else created)
+        else
+          (aid, act))
+  let getEffAct (id : String) : UInt64 :=
+    match effAct.find? (fun (k, _) => k == id) with
+    | some (_, v) => v
+    | none => 0
+  let rankBetter (a b : MoveCandidateRow) : Bool :=
+    let ar0 : Nat := if isRetiredForkRow a then 0 else 1
+    let br0 : Nat := if isRetiredForkRow b then 0 else 1
+    if ar0 != br0 then br0 < ar0
+    else
+      let aw : Nat := if isWorkingForkRow a then 1 else 0
+      let bw : Nat := if isWorkingForkRow b then 1 else 0
+      if aw != bw then bw < aw
+      else
+        let aa : Nat := (getEffAct a.id).toNat
+        let ba : Nat := (getEffAct b.id).toNat
+        if aa != ba then ba < aa
+        else (ancestorsOf b).size < (ancestorsOf a).size
+  let mut leader := sortedGroup[0]!
+  for i in [1:sortedGroup.size] do
+    let cand := sortedGroup[i]!
+    if rankBetter cand leader then
+      leader := cand
+  if leader.id == selected.id then sortedGroup else #[selected]
+
+/-- Compute the `#1545` move family closure (`fork-of:` leader co-located versions + launched subagent
+    descendants + `/btw` side sessions + `descendant_ids` callback children), assigning `targetFolder`
+    to top-level roots/forks and `""` to nested children and `/btw` sessions. -/
+def planExpandedMoveFamily
+    (st : CoreStore)
+    (selectedIds descendantIds : Array String)
+    (targetFolder : String)
+    (callerUserId? : Option String := none) : IO (Except (Nat × String) (Array ExpandedMoveMember)) := do
+  if selectedIds.isEmpty then
+    return .error (400, "mission_ids must not be empty")
+  let normFolder ←
+    match normalizeMissionFolderStrict targetFolder with
+    | .ok f => pure f
+    | .error e => return .error (400, e)
+  let allRows ←
+    match ← loadAllMoveCandidateRows st with
+    | .ok rs => pure rs
+    | .error e => return .error (500, e)
+  let findById (mid : String) : Option MoveCandidateRow :=
+    allRows.find? (fun r => r.id == mid)
+  let mut rootIds : Array String := #[]
+  for rawMid in selectedIds do
+    let mid := rawMid.trimAscii.toString
+    let some sel := findById mid
+      | return .error (404, s!"Mission {mid} not found")
+    if let some uid := callerUserId? then
+      if !sel.ownerUserId.isEmpty && sel.ownerUserId != uid then
+        return .error (403, s!"Only the mission owner may move mission {mid}")
+    let expanded := expandColocatedForkGroupIfLeader allRows findById sel
+    for member in expanded do
+      if !rootIds.contains member.id then
+        rootIds := rootIds.push member.id
+  -- BFS/DFS over launched non-fork `parent_mission_id` children, `btw-parent:<cur>`, and explicit `descendantIds`
+  let mut visited : Array String := rootIds
+  let mut stack : Array String := rootIds
+  let mut launchedIds : Array String := #[]
+  while !stack.isEmpty do
+    let cur := stack.back!
+    stack := stack.pop
+    for cand in allRows do
+      if !visited.contains cand.id then
+        let isLaunchedChild := cand.parentId == cur && !isForkOfParentRow cand cur
+        let isBtwChild := cand.tags.contains s!"btw-parent:{cur}"
+        if isLaunchedChild || isBtwChild then
+          visited := visited.push cand.id
+          launchedIds := launchedIds.push cand.id
+          stack := stack.push cand.id
+  for rawDid in descendantIds do
+    let did := rawDid.trimAscii.toString
+    if !did.isEmpty && !visited.contains did then
+      if (findById did).isSome then
+        visited := visited.push did
+        launchedIds := launchedIds.push did
+        let mut cbStack : Array String := #[did]
+        while !cbStack.isEmpty do
+          let cur := cbStack.back!
+          cbStack := cbStack.pop
+          for cand in allRows do
+            if !visited.contains cand.id then
+              let isLaunchedChild := cand.parentId == cur && !isForkOfParentRow cand cur
+              let isBtwChild := cand.tags.contains s!"btw-parent:{cur}"
+              if isLaunchedChild || isBtwChild then
+                visited := visited.push cand.id
+                launchedIds := launchedIds.push cand.id
+                cbStack := cbStack.push cand.id
+  let topRoots := rootIds.filter (fun id =>
+    !launchedIds.contains id &&
+    match findById id with
+    | some m => !isNestedChildRow m
+    | none => false)
+  let mut out : Array ExpandedMoveMember := #[]
+  let mut emitted : Array String := #[]
+  for rid in topRoots do
+    if !emitted.contains rid then
+      if let some m := findById rid then
+        emitted := emitted.push rid
+        out := out.push { missionId := rid, currentProject := m.project, targetFolder := normFolder, ownerUserId := m.ownerUserId }
+  for rawMid in selectedIds do
+    let mid := rawMid.trimAscii.toString
+    if !topRoots.contains mid && !emitted.contains mid then
+      if let some m := findById mid then
+        emitted := emitted.push mid
+        out := out.push { missionId := mid, currentProject := m.project, targetFolder := "", ownerUserId := m.ownerUserId }
+  for did in launchedIds do
+    if !emitted.contains did then
+      if let some m := findById did then
+        emitted := emitted.push did
+        out := out.push { missionId := did, currentProject := m.project, targetFolder := "", ownerUserId := m.ownerUserId }
+  return .ok out
+
+/-- Atomically apply checked `(project, folder)` updates inside `BEGIN IMMEDIATE`:
+    - Verifies every mission still has `COALESCE(project,'') == expectedProject` (`409` on concurrent drift).
+    - Preserves `updated_at` so sidebar recency order never jumps.
+    - Advances `placement_revision = COALESCE(placement_revision,0) + 1` and sets `metadata_updated_at = nowIso`
+      ONLY on rows whose `(project, folder)` actually changed, returning all touched `MissionPlacementItem`s
+      (including idempotent current state when already at destination so client pending ops settle cleanly!). -/
+def batchSetMissionPlacementChecked
+    (st : CoreStore)
+    (updates : Array CheckedPlacementUpdate)
+    (nowIso : String) : IO (Except (Nat × String) (Array MissionPlacementItem × Array MissionPlacementItem)) := do
+  let txRes ← withImmediateTx st.missionsDb do
+    let mut allItems : Array MissionPlacementItem := Array.mkEmpty updates.size
+    let mut changedItems : Array MissionPlacementItem := #[]
+    for u in updates do
+      let q ← execParamQueryUnlocked st.missionsDb
+        "SELECT COALESCE(project,''), COALESCE(folder,''), COALESCE(placement_revision,0), COALESCE(tags,'[]') FROM missions WHERE id=?1;"
+        #[u.missionId]
+      let .ok rs := q | return .error "internal:placement_select_failed"
+      if rs.size ≤ 1 then
+        return .error s!"notfound:Mission {u.missionId} not found"
+      let r := rs[1]!
+      let curProj := (r[0]?).getD ""
+      let curFolder := normalizeMissionFolder ((r[1]?).getD "")
+      let curRev := (((r[2]?).bind String.toNat?).getD 0).toUInt64
+      let rawTags := (r[3]?).getD "[]"
+      if curProj != u.expectedProject then
+        return .error "conflict:Mission placement changed concurrently; retry move"
+      let nextFolder := normalizeMissionFolder u.nextFolder
+      let nextProj := u.nextProject.trimAscii.toString
+      let (cleanTagsArr, hadLegacyTag?) := stripLegacyOrbFolderTags (parseStringJsonArray rawTags)
+      if curProj == nextProj && curFolder == nextFolder && hadLegacyTag?.isNone then
+        let effRev := if curRev == 0 then 1 else curRev
+        allItems := allItems.push {
+          missionId := u.missionId
+          project? := if nextProj.isEmpty then none else some nextProj
+          folder := nextFolder
+          placementRevision := effRev
+        }
+      else
+        let nextRev := (if curRev == 0 then 1 else curRev) + 1
+        let nextTagsJson :=
+          if hadLegacyTag?.isSome then
+            "[" ++ String.intercalate "," (cleanTagsArr.map jsonEscape).toList ++ "]"
+          else rawTags
+        let upd ← execParamQueryUnlocked st.missionsDb
+          ("UPDATE missions SET project=?2, folder=?3, placement_revision=?4, metadata_updated_at=?5, tags=?6 " ++
+           "WHERE id=?1;")
+          #[u.missionId, nextProj, nextFolder, s!"{nextRev}", nowIso, nextTagsJson]
+        if let .error e := upd then
+          return .error s!"internal:{e}"
+        let item : MissionPlacementItem := {
+          missionId := u.missionId
+          project? := if nextProj.isEmpty then none else some nextProj
+          folder := nextFolder
+          placementRevision := nextRev
+        }
+        allItems := allItems.push item
+        changedItems := changedItems.push item
+    return .ok (allItems, changedItems)
+  match txRes with
+  | .ok pair => return .ok pair
+  | .error e =>
+    if e.startsWith "notfound:" then return .error (404, (e.drop 9).toString)
+    else if e.startsWith "conflict:" then return .error (409, (e.drop 9).toString)
+    else return .error (500, e)
+
+/-- Rebind `mcp_sessions_v1.project_scope` in `projects.db` (and legacy `ask.db`) when project-scoped
+    missions move across projects (preserving sticky `project_scoped != 0` confinement even when moved to unassigned `""`). -/
+def rebindMovedMissionMcpSessions (st : CoreStore) (moved : Array MissionPlacementItem) : IO Unit := do
+  for it in moved do
+    let scope := it.project?.getD ""
+    discard <| execParamQuery st.projectsDb
+      "UPDATE mcp_sessions_v1 SET project_scope=?2 WHERE mission_id=?1 AND COALESCE(project_scoped,0)<>0;"
+      #[it.missionId, scope]
+    discard <| execParamQuery st.askDb
+      "UPDATE mcp_sessions_v1 SET project_scope=?2 WHERE mission_id=?1 AND COALESCE(project_scoped,0)<>0;"
+      #[it.missionId, scope]
+
+/-- Cascade a project directory rename/move (`fromPrefix -> toPrefix`) across `missions.folder` +
+    `missions.placement_revision`, preserving `updated_at` and returning changed `MissionPlacementItem`s. -/
+def cascadeRenameMissionFolder
+    (st : CoreStore) (projectSlug fromPrefix toPrefix nowIso : String) : IO (Except String (Array MissionPlacementItem)) := do
+  let normFrom := normalizeMissionFolder fromPrefix
+  let normTo := normalizeMissionFolder toPrefix
+  if projectSlug.isEmpty || normFrom.isEmpty || normFrom == normTo then
+    return .ok #[]
+  withImmediateTx st.missionsDb do
+    let q ← execParamQueryUnlocked st.missionsDb
+      ("SELECT id, COALESCE(folder,''), COALESCE(placement_revision,0) FROM missions " ++
+       "WHERE COALESCE(project,'')=?1 AND (COALESCE(folder,'')=?2 OR COALESCE(folder,'') LIKE (?2 || '/%'));")
+      #[projectSlug, normFrom]
+    let .ok rs := q | return .error "cascade_folder_select_failed"
+    if rs.size ≤ 1 then return .ok #[]
+    let mut changed : Array MissionPlacementItem := #[]
+    for i in [1:rs.size] do
+      let r := rs[i]!
+      let mid := (r[0]?).getD ""
+      let curFolder := normalizeMissionFolder ((r[1]?).getD "")
+      let curRev := (((r[2]?).bind String.toNat?).getD 0).toUInt64
+      if folderMatchesPrefix curFolder normFrom then
+        let suffix := (curFolder.drop normFrom.length).toString
+        let nextFolder :=
+          if normTo.isEmpty then normalizeMissionFolder suffix
+          else normalizeMissionFolder (normTo ++ suffix)
+        if nextFolder != curFolder then
+          let nextRev := (if curRev == 0 then 1 else curRev) + 1
+          let u ← execParamQueryUnlocked st.missionsDb
+            "UPDATE missions SET folder=?2, placement_revision=?3, metadata_updated_at=?4 WHERE id=?1;"
+            #[mid, nextFolder, s!"{nextRev}", nowIso]
+          if let .error e := u then return .error e
+          changed := changed.push {
+            missionId := mid
+            project? := some projectSlug
+            folder := nextFolder
+            placementRevision := nextRev
+          }
+    return .ok changed
+
+/-- Cascade a project directory rename/move (`fromPrefix -> toPrefix`) across `project_crons.folder`,
+    returning `(job_id, previous_folder)` snapshots of ONLY mutated rows for rollback safety. -/
+def cascadeRenameCronFolder
+    (st : CoreStore) (projectSlug fromPrefix toPrefix : String) : IO (Except String (Array (String × String))) := do
+  let normFrom := normalizeMissionFolder fromPrefix
+  let normTo := normalizeMissionFolder toPrefix
+  if projectSlug.isEmpty || normFrom.isEmpty || normFrom == normTo then
+    return .ok #[]
+  withImmediateTx st.projectsDb do
+    let q ← execParamQueryUnlocked st.projectsDb
+      ("SELECT job_id, COALESCE(folder,'') FROM project_crons " ++
+       "WHERE slug=?1 AND (COALESCE(folder,'')=?2 OR COALESCE(folder,'') LIKE (?2 || '/%'));")
+      #[projectSlug, normFrom]
+    let .ok rs := q | return .error "cascade_cron_select_failed"
+    if rs.size ≤ 1 then return .ok #[]
+    let mut mutated : Array (String × String) := #[]
+    for i in [1:rs.size] do
+      let r := rs[i]!
+      let jid := (r[0]?).getD ""
+      let curFolder := normalizeMissionFolder ((r[1]?).getD "")
+      if folderMatchesPrefix curFolder normFrom then
+        let suffix := (curFolder.drop normFrom.length).toString
+        let nextFolder :=
+          if normTo.isEmpty then normalizeMissionFolder suffix
+          else normalizeMissionFolder (normTo ++ suffix)
+        if nextFolder != curFolder then
+          let u ← execParamQueryUnlocked st.projectsDb
+            "UPDATE project_crons SET folder=?3 WHERE slug=?1 AND job_id=?2;"
+            #[projectSlug, jid, nextFolder]
+          if let .error e := u then return .error e
+          mutated := mutated.push (jid, curFolder)
+    return .ok mutated
+
+/-- Restore mutated `project_crons.folder` rows if a subsequent filesystem or mission cascade step fails. -/
+def restoreCronFolders (st : CoreStore) (projectSlug : String) (snap : Array (String × String)) : IO Unit := do
+  if snap.isEmpty then return ()
+  discard <| withImmediateTx st.projectsDb do
+    for (jid, prevFolder) in snap do
+      discard <| execParamQueryUnlocked st.projectsDb
+        "UPDATE project_crons SET folder=?3 WHERE slug=?1 AND job_id=?2;"
+        #[projectSlug, jid, prevFolder]
+    return .ok ()
 
 end OrbCore.Store

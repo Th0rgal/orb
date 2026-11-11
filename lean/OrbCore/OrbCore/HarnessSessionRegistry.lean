@@ -1479,6 +1479,12 @@ def askMidturnPendingIndexSql : String :=
 def ensureAskMidturnSchemaUnlocked (askDb : SqliteDb) : IO (Except String Unit) := do
   if let .error e ← execParamQueryUnlocked askDb askMidturnSchemaSql #[] then
     return .error e
+  for stmt in OrbCore.Store.askMidturnAdditiveAlters do
+    match ← sqliteExecRaw askDb.handle stmt with
+    | .ok () => pure ()
+    | .error e =>
+      if (e.toLower.splitOn "duplicate column name").length ≤ 1 then
+        return .error e
   let idxRes ← execParamQueryUnlocked askDb askMidturnPendingIndexSql #[]
   return idxRes.map (fun _ => ())
 
@@ -1526,7 +1532,7 @@ def enqueueOperatorNote
     if let .error e ← ensureAskMidturnSchemaUnlocked askDb then
       return .error e
     let q ← execParamQueryUnlocked askDb
-      "SELECT note_id, mission_id, content, created_at_seq, created_at_iso, delivery_tries, COALESCE(flushed_at, '') FROM operator_notes WHERE note_id=?1;"
+      "SELECT COALESCE(NULLIF(note_id,''),id), mission_id, COALESCE(NULLIF(content,''),body,''), COALESCE(created_at_seq,0), COALESCE(NULLIF(created_at_iso,''),created_at,''), COALESCE(delivery_tries,0), COALESCE(flushed_at, '') FROM operator_notes WHERE note_id=?1 OR id=?1;"
       #[canonicalId]
     match q with
     | .error e => return .error e
@@ -1534,7 +1540,7 @@ def enqueueOperatorNote
       if rows.size > 1 then
         return decodeOperatorNoteRow rows[1]!
       let ins ← execParamQueryUnlocked askDb
-        "INSERT INTO operator_notes(note_id, mission_id, content, created_at_seq, created_at_iso, delivery_tries, flushed_at) VALUES(?1,?2,?3,?4,?5,0,NULL);"
+        "INSERT INTO operator_notes(note_id, id, mission_id, content, body, created_at_seq, created_at_iso, created_at, delivery_tries, flushed_at) VALUES(?1,?1,?2,?3,?3,?4,?5,?5,0,NULL);"
         #[canonicalId, missionId, content, s!"{createdAtSeq}", createdAtIso]
       match ins with
       | .error e => return .error e
@@ -1555,7 +1561,7 @@ def listPendingOperatorNotes (askDb : SqliteDb) (missionId : String) : IO (Excep
     if let .error e ← ensureAskMidturnSchemaUnlocked askDb then
       return .error e
     let q ← execParamQueryUnlocked askDb
-      "SELECT note_id, mission_id, content, created_at_seq, created_at_iso, delivery_tries, COALESCE(flushed_at, '') FROM operator_notes WHERE mission_id=?1 AND (flushed_at IS NULL OR flushed_at = '') ORDER BY created_at_seq ASC, note_id ASC;"
+      "SELECT COALESCE(NULLIF(note_id,''),id), mission_id, COALESCE(NULLIF(content,''),body,''), COALESCE(created_at_seq,0), COALESCE(NULLIF(created_at_iso,''),created_at,''), COALESCE(delivery_tries,0), COALESCE(flushed_at, '') FROM operator_notes WHERE mission_id=?1 AND (flushed_at IS NULL OR flushed_at = '') ORDER BY created_at_seq ASC, COALESCE(NULLIF(note_id,''),id) ASC;"
       #[missionId]
     match q with
     | .error e => return .error e
@@ -1574,7 +1580,7 @@ def listAllOperatorNotes (askDb : SqliteDb) (missionId : String) : IO (Except St
     if let .error e ← ensureAskMidturnSchemaUnlocked askDb then
       return .error e
     let q ← execParamQueryUnlocked askDb
-      "SELECT note_id, mission_id, content, created_at_seq, created_at_iso, delivery_tries, COALESCE(flushed_at, '') FROM operator_notes WHERE mission_id=?1 ORDER BY created_at_seq ASC, note_id ASC;"
+      "SELECT COALESCE(NULLIF(note_id,''),id), mission_id, COALESCE(NULLIF(content,''),body,''), COALESCE(created_at_seq,0), COALESCE(NULLIF(created_at_iso,''),created_at,''), COALESCE(delivery_tries,0), COALESCE(flushed_at, '') FROM operator_notes WHERE mission_id=?1 ORDER BY created_at_seq ASC, COALESCE(NULLIF(note_id,''),id) ASC;"
       #[missionId]
     match q with
     | .error e => return .error e
@@ -1663,14 +1669,14 @@ def flushPendingOperatorNotesBetweenTools
         if receipt.receiptId.trimAscii.toString.isEmpty then
           discard <| withImmediateTx askDb do
             execCasUpdateOneRowUnlocked askDb
-              "UPDATE operator_notes SET delivery_tries=delivery_tries+1 WHERE note_id=?1 AND (flushed_at IS NULL OR flushed_at = '');"
+              "UPDATE operator_notes SET delivery_tries=COALESCE(delivery_tries,0)+1 WHERE COALESCE(NULLIF(note_id,''),id)=?1 AND (flushed_at IS NULL OR flushed_at = '');"
               #[note.noteId]
               s!"operator_note_tries:{note.noteId}"
           failedErr? := some s!"missing_delivery_receipt:{note.noteId}"
         else
           let markRes ← withImmediateTx askDb do
             execCasUpdateOneRowUnlocked askDb
-              "UPDATE operator_notes SET flushed_at=?2, delivery_tries=delivery_tries+1 WHERE note_id=?1 AND (flushed_at IS NULL OR flushed_at = '');"
+              "UPDATE operator_notes SET flushed_at=?2, delivery_tries=COALESCE(delivery_tries,0)+1 WHERE COALESCE(NULLIF(note_id,''),id)=?1 AND (flushed_at IS NULL OR flushed_at = '');"
               #[note.noteId, flushedAtIso]
               s!"operator_note_flush:{note.noteId}"
           match markRes with
@@ -1685,7 +1691,7 @@ def flushPendingOperatorNotesBetweenTools
       | .error rpcErr =>
         discard <| withImmediateTx askDb do
           execCasUpdateOneRowUnlocked askDb
-            "UPDATE operator_notes SET delivery_tries=delivery_tries+1 WHERE note_id=?1 AND (flushed_at IS NULL OR flushed_at = '');"
+            "UPDATE operator_notes SET delivery_tries=COALESCE(delivery_tries,0)+1 WHERE COALESCE(NULLIF(note_id,''),id)=?1 AND (flushed_at IS NULL OR flushed_at = '');"
             #[note.noteId]
             s!"operator_note_tries:{note.noteId}"
         failedErr? := some rpcErr

@@ -426,23 +426,29 @@ def putInboxState (st : CoreStore) (p : InboxPut) (userId? : Option String := no
         return (409, s!"\{\"_versions\":\{{vers}}}")
       else
         let next := stored + 1
+        let valJson :=
+          if !p.payload.isEmpty then p.payload
+          else s!"\{\"kind\":{jsonEscape p.kind},\"stamp\":{p.stamp},\"version\":{next},\"client_id\":{jsonEscape p.clientId},\"mutation_seq\":{p.mutationSeq}}"
         let wr ←
           match userId? with
           | none =>
-            sqliteQueryRowsRaw st.askDb.handle
-              ("INSERT INTO inbox_state(entry_key,kind,payload_json,stamp,version,client_id,mutation_seq) " ++
-               "VALUES(?1,?2,?3,?4,?5,?6,?7) " ++
-               "ON CONFLICT(entry_key) DO UPDATE SET kind=excluded.kind,payload_json=excluded.payload_json," ++
-               "stamp=excluded.stamp,version=excluded.version,client_id=excluded.client_id,mutation_seq=excluded.mutation_seq " ++
-               "WHERE inbox_state.version=?8;")
-              #[p.key, p.kind, p.payload, s!"{p.stamp}", s!"{next}", p.clientId, s!"{p.mutationSeq}", s!"{stored}"]
+            if rs.size > 1 then
+              sqliteQueryRowsRaw st.askDb.handle
+                ("UPDATE inbox_state SET kind=?2,payload_json=?3,value_json=?4,stamp=CAST(?5 AS INTEGER),version=CAST(?6 AS INTEGER),client_id=?7,mutation_seq=CAST(?8 AS INTEGER) " ++
+                 "WHERE entry_key=?1 AND COALESCE(version,0)=CAST(?9 AS INTEGER);")
+                #[p.key, p.kind, p.payload, valJson, s!"{p.stamp}", s!"{next}", p.clientId, s!"{p.mutationSeq}", s!"{stored}"]
+            else
+              sqliteQueryRowsRaw st.askDb.handle
+                ("INSERT INTO inbox_state(user_id,entry_key,value_json,kind,payload_json,stamp,version,client_id,mutation_seq) " ++
+                 "VALUES('default',?1,?2,?3,?4,CAST(?5 AS INTEGER),CAST(?6 AS INTEGER),?7,CAST(?8 AS INTEGER));")
+                #[p.key, valJson, p.kind, p.payload, s!"{p.stamp}", s!"{next}", p.clientId, s!"{p.mutationSeq}"]
           | some uid =>
             sqliteQueryRowsRaw st.askDb.handle
               ("INSERT INTO user_inbox_state(user_id,entry_key,kind,payload_json,stamp,version,client_id,mutation_seq,updated_at) " ++
-               "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'') " ++
+               "VALUES(?1,?2,?3,?4,CAST(?5 AS INTEGER),CAST(?6 AS INTEGER),?7,CAST(?8 AS INTEGER),'') " ++
                "ON CONFLICT(user_id,entry_key) DO UPDATE SET kind=excluded.kind,payload_json=excluded.payload_json," ++
                "stamp=excluded.stamp,version=excluded.version,client_id=excluded.client_id,mutation_seq=excluded.mutation_seq " ++
-               "WHERE user_inbox_state.version=?9;")
+               "WHERE COALESCE(user_inbox_state.version,0)=CAST(?9 AS INTEGER);")
               #[uid, p.key, p.kind, p.payload, s!"{p.stamp}", s!"{next}", p.clientId, s!"{p.mutationSeq}", s!"{stored}"]
         match wr with
         | .error e =>
@@ -488,7 +494,9 @@ def putContextBlob (root project : String) (bytes : ByteArray) (confirmedLarge :
 
 def readContextBlob (root project hash : String) : IO (Except String ByteArray) := do
   if !isSha256Hex hash.toLower then return .error "invalid content hash"
-  let p := contextBlobDir root project / hash.toLower
+  let p1 := contextBlobDir root project / hash.toLower
+  let p2 := System.FilePath.mk root / "project-context-state" / project / "blobs" / hash.toLower
+  let p ← if ← p1.pathExists then pure p1 else pure p2
   if !(← p.pathExists) then return .error "blob not found"
   let .ok bytes ← IO.FS.readBinFile p |>.toBaseIO | return .error "failed reading context blob"
   if bytesToHexLower (sha256Bytes bytes) != hash.toLower then return .error "checksum"
@@ -715,11 +723,16 @@ def putProjectTrack (st : CoreStore) (slug track desired status nowAt : String) 
     return (400, "{\"error\":\"invalid_track\"}")
   if let .error e := validContextPath track then
     return (400, s!"\{\"error\":{jsonEscape e}}")
+  let effNow := if nowAt.isEmpty then "1970-01-01T00:00:00Z" else nowAt
   st.projectsDb.mu.atomically do
     if let .error e ← sqliteExecRaw st.projectsDb.handle "BEGIN IMMEDIATE;" then
       return (500, s!"\{\"error\":{jsonEscape e}}")
+    discard <| sqliteQueryRowsRaw st.projectsDb.handle
+      ("INSERT OR IGNORE INTO projects(slug, id, name, title, root_path, status, created_at, updated_at) " ++
+       "VALUES(?1, ?1, ?1, ?1, '', 'active', ?2, ?2);")
+      #[slug, effNow]
     let q ← sqliteQueryRowsRaw st.projectsDb.handle
-      "SELECT state_revision,status FROM project_tracks WHERE project_slug=?1 AND track=?2;" #[slug, track]
+      "SELECT COALESCE(state_revision,0),status FROM project_tracks WHERE project_slug=?1 AND track=?2;" #[slug, track]
     match q with
     | .error e =>
       discard <| sqliteExecRaw st.projectsDb.handle "ROLLBACK;"
@@ -731,11 +744,17 @@ def putProjectTrack (st : CoreStore) (slug track desired status nowAt : String) 
           discard <| sqliteExecRaw st.projectsDb.handle "ROLLBACK;"
           return (409, s!"\{\"error\":\"stale_track\",\"state_revision\":{cur}}")
       let next := if cur == 0 then 1 else cur + 1
-      let wr ← sqliteQueryRowsRaw st.projectsDb.handle
-        ("INSERT INTO project_tracks(project_slug,track,desired_condition,status,updated_at,state_revision) VALUES(?1,?2,?3,?4,?5,?6) " ++
-         "ON CONFLICT(project_slug,track) DO UPDATE SET desired_condition=excluded.desired_condition,status=excluded.status," ++
-         "updated_at=excluded.updated_at,state_revision=excluded.state_revision WHERE project_tracks.state_revision=?7;")
-        #[slug, track, desired, status, nowAt, s!"{next}", s!"{cur}"]
+      let wr ←
+        if rs.size > 1 then
+          sqliteQueryRowsRaw st.projectsDb.handle
+            ("UPDATE project_tracks SET desired_condition=?3,status=?4,updated_at=?5,state_revision=CAST(?6 AS INTEGER) " ++
+             "WHERE project_slug=?1 AND track=?2 AND COALESCE(state_revision,0)=CAST(?7 AS INTEGER);")
+            #[slug, track, desired, status, effNow, s!"{next}", s!"{cur}"]
+        else
+          sqliteQueryRowsRaw st.projectsDb.handle
+            ("INSERT INTO project_tracks(id,slug,project_slug,track,title,desired_condition,status,created_at,updated_at,state_revision) " ++
+             "VALUES(?1,?2,?2,?3,?3,?4,?5,?6,?6,CAST(?7 AS INTEGER));")
+            #[s!"{slug}:{track}", slug, track, desired, status, effNow, s!"{next}"]
       match wr with
       | .error e =>
         discard <| sqliteExecRaw st.projectsDb.handle "ROLLBACK;"
@@ -986,6 +1005,21 @@ def isContextBlobPostPath (rawTarget : String) : Bool :=
   let clean := ((rawTarget.splitOn "?").headD "").trimAscii.toString
   clean.startsWith "/api/projects/" && clean.endsWith "/context/blobs"
 
+def maxCoreHeaderCount : Nat := 96
+
+def coreMaxBodyForRoute (method rawTarget : String) (confirmedLarge : Bool := false) : Nat :=
+  let clean := ((rawTarget.splitOn "?").headD "").trimAscii.toString
+  if method == "POST" && isContextBlobPostPath rawTarget then
+    if confirmedLarge then contextConfirmedFileLimit.toNat else contextFileLimit
+  else if clean.startsWith "/api/managed-machines/relay/" || clean.startsWith "/api/uploads" ||
+          (method == "PUT" && clean.startsWith "/api/projects/" && clean.endsWith "/file") ||
+          clean.startsWith "/api/fs/" then
+    67108864 -- 64 MiB
+  else if clean.startsWith "/v1/" || clean.startsWith "/api/mcp/" then
+    33554432 -- 32 MiB
+  else
+    LeanSys.Http.maxHttpBodyBytes
+
 private def validateCoreHeaders (hdrLines : List String) (maxBody : Nat) :
     Except String (Array (String × String) × Option Nat × Option String) := Id.run do
   let mut headers : Array (String × String) := #[]
@@ -1009,7 +1043,7 @@ private def validateCoreHeaders (hdrLines : List String) (maxBody : Nat) :
         let kTrim := k.trimAscii.toString
         let vTrim := (String.intercalate ":" rest).trimAscii.toString
         headers := headers.push (kTrim, vTrim)
-        if headers.size > 32 then
+        if headers.size > maxCoreHeaderCount then
           return .error "too_many_headers"
         if LeanSys.Http.asciiEqIgnoreCase kTrim "transfer-encoding" then
           return .error "unsupported_transfer_encoding"
@@ -1054,14 +1088,19 @@ def parseCoreHttpRequest (raw : ByteArray) : Except String LeanSys.Http.HttpRequ
     let (method, path, proto) ← match parts with
       | [m, p, v] => .ok (m.trimAscii.toString, p.trimAscii.toString, v.trimAscii.toString)
       | _ => .error "malformed_request_line"
-    if method != "POST" || !isContextBlobPostPath path then
-      LeanSys.Http.parseRequest raw none
+    if proto != "HTTP/1.1" && proto != "HTTP/1.0" then
+      .error "unsupported_http_version"
+    else if path.isEmpty || !path.startsWith "/" then
+      .error "malformed_request_target"
+    else if method != "GET" && method != "POST" && method != "HEAD" && method != "PUT" &&
+            method != "DELETE" && method != "PATCH" && method != "OPTIONS" then
+      .error s!"unsupported_method:{method}"
     else
-      if proto != "HTTP/1.1" && proto != "HTTP/1.0" then
-        .error "unsupported_http_version"
-      let (headers, cl?, authBearer) ← validateCoreHeaders hdrLines contextConfirmedFileLimit.toNat
-      let confirmed := isConfirmedLargeBlob path headers
-      let limit := if confirmed then contextConfirmedFileLimit.toNat else contextFileLimit
+      let isBlobPost := method == "POST" && isContextBlobPostPath path
+      let outerMax := coreMaxBodyForRoute method path true
+      let (headers, cl?, authBearer) ← validateCoreHeaders hdrLines outerMax
+      let confirmed := isBlobPost && isConfirmedLargeBlob path headers
+      let limit := coreMaxBodyForRoute method path confirmed
       let declContentLen := cl?.getD 0
       if declContentLen > limit then
         .error "payload_too_large"
@@ -1110,18 +1149,18 @@ def readCoreHttpRequestFromFd (fd : Fd) (timeoutMs : UInt32 := 5000) : IO (Excep
     | return .error "invalid_utf8_headers"
   let lines := headStr.splitOn "\r\n"
   let reqParts := ((lines.headD "").trimAscii.toString).splitOn " "
-  let isBlobPost := match reqParts with
-    | ["POST", p, _] => isContextBlobPostPath p
-    | _ => false
-  let rawPath := match reqParts with | [_, p, _] => p | _ => ""
-  let maxCap := if isBlobPost then contextConfirmedFileLimit.toNat else LeanSys.Http.maxHttpBodyBytes
+  let (reqMethod, rawPath) := match reqParts with
+    | [m, p, _] => (m.trimAscii.toString, p.trimAscii.toString)
+    | _ => ("", "")
+  let isBlobPost := reqMethod == "POST" && isContextBlobPostPath rawPath
+  let maxCap := coreMaxBodyForRoute reqMethod rawPath true
   let expectedBody ← match validateCoreHeaders (lines.drop 1) maxCap with
     | .error e => return .error e
     | .ok (hdrs, cl?, _) =>
       let cl := cl?.getD 0
-      if isBlobPost then
-        let limit := if isConfirmedLargeBlob rawPath hdrs then contextConfirmedFileLimit.toNat else contextFileLimit
-        if cl > limit then return .error "payload_too_large"
+      let confirmed := isBlobPost && isConfirmedLargeBlob rawPath hdrs
+      let limit := coreMaxBodyForRoute reqMethod rawPath confirmed
+      if cl > limit then return .error "payload_too_large"
       pure cl
   while buf.size - bodyStart < expectedBody do
     let now ← IO.monoNanosNow
