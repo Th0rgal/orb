@@ -1185,6 +1185,21 @@ export function streamMission(
         stopped = true;
         return;
       }
+      const nonTransientHttp =
+        (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) ||
+        res.status === 501;
+      if (nonTransientHttp) {
+        // Core answered HTTP cleanly (e.g. 404 while a local mission is still syncing
+        // or when a server does not mount SSE); do not latch global Reconnecting.
+        if (syncHub && syncListenerRef) {
+          syncHub.notifyFallbackState(syncListenerRef, true);
+        } else if (networkHealthSnapshot().wsConnected === false) {
+          recordSyncWsState(null);
+        }
+        onDisconnected?.();
+        timer = setTimeout(() => void connect(), missionId ? 15000 : 60000);
+        return;
+      }
       if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
       if (profile === "presentation" && !res.headers.get("Content-Type")?.includes("text/event-stream")) throw new Error("Presentation stream unavailable");
       if (syncHub && syncListenerRef) {

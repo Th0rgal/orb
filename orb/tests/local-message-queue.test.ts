@@ -1,7 +1,7 @@
 import {createRoot,createComputed} from 'solid-js';
 import {afterEach,beforeEach,expect,it,vi} from 'vitest';
 const mocks=vi.hoisted(()=>({store:new Map<string,unknown>(),active:true,effort:undefined as string|null|undefined,acknowledged:false,reopen:vi.fn(),launch:vi.fn(),follow:vi.fn(),save:vi.fn(),status:vi.fn(),append:vi.fn(),version:1,recover:vi.fn(),failure:vi.fn(),poll:vi.fn(),stopNative:vi.fn()}));
-vi.mock('../src/api',()=>({connectionVersion:()=>mocks.version,reopenMission:mocks.reopen,isClientPlacement:(m:any)=>m?.placement_kind==='client'||Boolean(m?.placement_kind?.startsWith('client:')),getMission:async()=>({status:mocks.acknowledged?'acknowledged':mocks.active?'active':'awaiting_user',placement_kind:'client',tags:['placement:client'],model_effort:mocks.effort}),appendClientTranscript:mocks.append,setClientMissionStatus:mocks.status}));
+vi.mock('../src/api',()=>({connectionVersion:()=>mocks.version,getApiUrl:()=>'http://core.test',getJwt:()=>'token',currentCapabilityEpochKey:()=>`epoch:${mocks.version}`,reopenMission:mocks.reopen,isClientPlacement:(m:any)=>m?.placement_kind==='client'||Boolean(m?.placement_kind?.startsWith('client:')),getMission:async()=>({status:mocks.acknowledged?'acknowledged':mocks.active?'active':'awaiting_user',placement_kind:'client',tags:['placement:client'],model_effort:mocks.effort}),appendClientTranscript:mocks.append,setClientMissionStatus:mocks.status}));
 vi.mock('../src/sideQuestionStorage',()=>({sideQuestionKey:()=>`account:${mocks.version}`}));
 vi.mock('../src/composerDrafts',()=>({readSideThread:async(k:string)=>structuredClone(mocks.store.get(k)),saveSideThread:async(k:string,v:unknown)=>{mocks.save();mocks.store.set(k,structuredClone(v));}}));
 vi.mock('../src/localAgents',()=>({recoverLocalLaunch:mocks.recover,recordLocalFailure:mocks.failure,restoreLocalBindings:async()=>{},localBinding:()=>({cwd:'/work',sessionId:'latest',planMode:false}),pollLocal:mocks.poll,reconcileLocalRun:async()=>{},startLocal:mocks.launch,followLocal:mocks.follow,stopLocal:mocks.stopNative}));
@@ -675,4 +675,49 @@ it('automatically heals a pre-launch placement-mismatch error once client placem
  expect(mocks.launch).toHaveBeenCalledTimes(1);
  expect(mocks.launch.mock.calls[0][0].prompt).toBe('fix layout');
  expect(queuedLocalMessages('mission')).toEqual([]);
+});
+
+it('settles local-only and unsynced local-origin follow-ups cleanly when Core lacks local-origin endpoints', async () => {
+ mocks.active = false;
+ const missingErr = Object.assign(new Error('404 Mission not found'), { status: 404 });
+ mocks.append.mockRejectedValue(missingErr);
+ mocks.status.mockRejectedValue(missingErr);
+ let localOnly = true;
+ (window as any).__TAURI_INTERNALS__ = {
+  invoke: vi.fn(async (command: string) => {
+   if (command === 'local_origin_list') {
+    return [{
+     id: 'mission',
+     status: 'failed',
+     placement_kind: 'client',
+     tags: ['placement:client'],
+     local_sync_pending: true,
+     local_sync_local_only: localOnly,
+    }];
+   }
+   return null;
+  }),
+ };
+ try {
+  stop = startLocalQueueWorker();
+  await enqueueLocalMessage({ ...request, harness: 'opencode', bin: 'opencode', prompt: 'Continue in ~/work/folio' }, 'Resume');
+  await vi.advanceTimersByTimeAsync(100);
+  expect(mocks.launch).toHaveBeenCalledTimes(1);
+  expect(mocks.launch.mock.calls[0][0]).toMatchObject({
+   harness: 'opencode',
+   prompt: 'Continue in ~/work/folio',
+   displayPrompt: 'Resume',
+  });
+  expect(mocks.append).not.toHaveBeenCalled();
+  expect(mocks.status).not.toHaveBeenCalled();
+  expect(queuedLocalMessages('mission')).toHaveLength(0);
+
+  localOnly = false;
+  await enqueueLocalMessage({ ...request, harness: 'opencode', bin: 'opencode', prompt: 'Follow-up turn' }, 'Follow-up turn');
+  await vi.advanceTimersByTimeAsync(100);
+  expect(mocks.launch).toHaveBeenCalledTimes(2);
+  expect(queuedLocalMessages('mission')).toHaveLength(0);
+ } finally {
+  delete (window as any).__TAURI_INTERNALS__;
+ }
 });

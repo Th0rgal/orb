@@ -56,3 +56,14 @@ it('keeps delivery pending when binding persistence fails',async()=>{
  expect(mocks.enqueue).not.toHaveBeenCalled();
  expect(mocks.api.mock.calls.some(c=>JSON.parse(c[1].body).op==='received')).toBe(false);
 });
+it('skips unsynced local-origin missions and stops polling anchors that 404 on Core',async()=>{
+ mocks.api.mockRejectedValueOnce(Object.assign(new Error('404 Mission not found'),{status:404}));
+ stop=startClientDelegations(()=>[
+  {...mission,id:'unsynced',local_sync_pending:true},
+  {...mission,id:'local-only',local_sync_local_only:true},
+  {...mission,id:'missing-on-core'},
+ ] as never);
+ await vi.advanceTimersByTimeAsync(25000);
+ expect(mocks.api).toHaveBeenCalledTimes(1);
+ expect(mocks.api.mock.calls[0][0]).toBe('/api/control/missions/missing-on-core/client-run');
+});

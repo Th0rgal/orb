@@ -185,3 +185,28 @@ it('still loads Core missions and queued messages when local_origin_list fails w
  expect(await listQueuedMessages('m-core')).toEqual([{id:'q1',content:'Follow up',mission_id:'m-core'}]);
  expect(await listMissions()).toMatchObject([{id:'m-core',title:'Core conversation'}]);
 });
+
+it('normalizes Core-scoped OpenCode models and records settled local turn errors',async()=>{
+ const {matchLocalOpenCodeModel,reconcileLocalRun,localFailure}=await import('../src/localAgents');
+ const {missionPhase}=await import('../src/missionLaunch');
+ const models:[string,string][]=[['orbrouter/builtin/smart','OrbRouter · Smart'],['orbrouter/builtin/fast','OrbRouter · Fast']];
+ expect(matchLocalOpenCodeModel('builtin/fast',models)).toBe('orbrouter/builtin/fast');
+ expect(matchLocalOpenCodeModel('sandboxed-sh/builtin/smart',models)).toBe('orbrouter/builtin/smart');
+ expect(matchLocalOpenCodeModel('orbrouter/builtin/fast',models)).toBe('orbrouter/builtin/fast');
+
+ (window as any).__TAURI_INTERNALS__={
+  invoke:vi.fn(async(command:string)=>{
+   if(command==='local_agents_poll'){
+    return {text:'',done:true,exit_code:1,error:'Model unavailable: builtin/fast',resumed:false};
+   }
+   return null;
+  }),
+ };
+ await reconcileLocalRun('m-local-err');
+ expect(localFailure('m-local-err')).toBe('Model unavailable: builtin/fast');
+ expect(missionPhase({...done,status:'failed',status_message:'Model unavailable: builtin/fast'},false)).toMatchObject({
+  label:'Failed',
+  failed:true,
+  detail:'Model unavailable: builtin/fast',
+ });
+});

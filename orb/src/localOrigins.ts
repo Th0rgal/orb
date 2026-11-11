@@ -6,8 +6,19 @@ import {note} from './diagnostics';
 // Never cache settled rows: launches and synchronization can change them immediately.
 const reads=new Map<string,Promise<Mission[]>>();
 let unsupportedLocalOriginsEpoch:string|null=null;
+let subscribedOriginEvents=false;
+function ensureOriginSyncSubscription():void{
+ if(subscribedOriginEvents||typeof window==="undefined")return;
+ const listen=(window as {__ORB_DESKTOP__?:{event?:{listen?:(name:string,handler:()=>void)=>Promise<()=>void>}}}).__ORB_DESKTOP__?.event?.listen;
+ if(!listen)return;
+ subscribedOriginEvents=true;
+ void listen("orb-local-origins-changed",()=>{
+  window.dispatchEvent(new Event("orb:refresh"));
+ }).catch(()=>{subscribedOriginEvents=false;});
+}
 export async function localOrigins(missionId?:string):Promise<Mission[]>{
  const invoke=nativeInvoke();if(!invoke||!getJwt())return [];
+ ensureOriginSyncSubscription();
  const epoch=currentCapabilityEpochKey();
  if(unsupportedLocalOriginsEpoch===epoch)return [];
  const version=connectionVersion();

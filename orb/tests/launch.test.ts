@@ -190,7 +190,7 @@ it("refuses launches onto a node quarantined for the selected harness while allo
 
 import { missionActivity, presentedStatus, remoteJobFailed } from "../src/missionStatus";
 import { destinationStartupOutcome } from "../src/ForkMission";
-import { mergeIncomingMission } from "../src/mission/MissionView";
+import { localHistoryToStreamEvents, mergeIncomingMission } from "../src/mission/MissionView";
 
 describe("neutral remote_job completion tags and stale poll reconciliation", () => {
   it.each(["remote_node_job", "remote_job_succeeded", "superseded", "idle_wait_exhausted"])(
@@ -262,5 +262,46 @@ describe("neutral remote_job completion tags and stale poll reconciliation", () 
       },
     });
     expect(mergeIncomingMission(settled, nextTurnActive).status).toBe("active");
+  });
+
+  it("clears stale local_sync_pending and local_sync_error flags when Core returns the synchronized mission", () => {
+    const pendingLocal = mission({
+      id: "6b4ff957-2d94-4fcf-bc89-59e07557a186",
+      status: "active",
+      updated_at: "2026-11-11T20:00:00.000Z",
+      local_sync_pending: true,
+      local_sync_error: "Core synchronization returned HTTP 503",
+    });
+    const syncedRemote = mission({
+      id: pendingLocal.id,
+      status: "awaiting_user",
+      updated_at: "2026-11-11T20:00:05.000Z",
+    });
+    const merged = mergeIncomingMission(pendingLocal, syncedRemote);
+    expect(merged.local_sync_pending).toBe(false);
+    expect(merged.local_sync_local_only).toBe(false);
+    expect(merged.local_sync_error).toBeNull();
+  });
+
+  it("preserves queued message identities in local history replay to prevent duplicate user bubbles", () => {
+    const events = localHistoryToStreamEvents(
+      "m-local",
+      [
+        { role: "user", content: "Initial prompt" },
+        { role: "assistant", content: "First answer" },
+        { id: "msg-2", role: "user", content: "Follow-up with stored id" },
+        { role: "user", content: "Legacy journal entry without id" },
+      ],
+      [
+        { id: "msg-2", text: "Follow-up with stored id" },
+        { id: "msg-3", text: "Legacy journal entry without id" },
+      ],
+    );
+    expect(events).toEqual([
+      { type: "user_message", data: { id: "local:m-local:0", content: "Initial prompt" } },
+      { type: "assistant_message", data: { id: "local:m-local:1", content: "First answer" } },
+      { type: "user_message", data: { id: "msg-2", content: "Follow-up with stored id" } },
+      { type: "user_message", data: { id: "msg-3", content: "Legacy journal entry without id" } },
+    ]);
   });
 });
