@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { clearConnection, setConnection } from "../src/api";
 import { CloudConversation } from "../src/CloudAgents";
 import { CloudProviders } from "../src/CloudProviders";
-import { ErrorToast, StatusToast, notify } from "../src/toast";
+import { ErrorToast, SlotActiveContext, StatusToast, notify } from "../src/toast";
 
 const rect = (left: number, top: number, right: number, bottom: number): DOMRect => ({
   x: left,
@@ -414,5 +414,53 @@ describe("unified workspace ErrorToast & Toaster", () => {
     expect(corner).not.toBeNull();
     const btns = Array.from(corner!.querySelectorAll("button"));
     expect(btns.map((b) => b.getAttribute("aria-label"))).toEqual(["Dismiss", "Copy error"]);
+  });
+
+  it("suspends ErrorToast registration while its keep-alive SlotActiveContext is inactive and restores it on return", async () => {
+    const retryA = vi.fn();
+    const retryB = vi.fn();
+    const [activeSlot, setActiveSlot] = createSignal<"a" | "b">("a");
+    const [errA] = createSignal<string | null>("Network unavailable");
+    const [errB, setErrB] = createSignal<string | null>(null);
+
+    render(() => (
+      <>
+        <SlotActiveContext.Provider value={() => activeSlot() === "a"}>
+          <ErrorToast
+            error={errA()}
+            title="Couldn’t send your message"
+            action={{ label: "Retry", run: retryA }}
+          />
+        </SlotActiveContext.Provider>
+        <SlotActiveContext.Provider value={() => activeSlot() === "b"}>
+          <ErrorToast
+            error={errB()}
+            title="Couldn’t send your message"
+            action={{ label: "Retry", run: retryB }}
+          />
+        </SlotActiveContext.Provider>
+      </>
+    ));
+
+    // Mission A shows its send error toast while active.
+    expect(screen.getByRole("alert").textContent).toContain("Couldn’t send your message");
+
+    // Switching to Mission B hides Mission A's toast without clearing Mission A's error signal.
+    setActiveSlot("b");
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+
+    // If Mission B now gets an identical error, clicking Retry runs ONLY Mission B's retry action, never hidden Mission A's!
+    setErrB("Network unavailable");
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retryB).toHaveBeenCalledOnce();
+    expect(retryA).not.toHaveBeenCalled();
+
+    // Clear Mission B's error and return to Mission A -> Mission A's preserved error toast reappears!
+    setErrB(null);
+    setActiveSlot("a");
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retryA).toHaveBeenCalledOnce();
   });
 });

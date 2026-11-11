@@ -56,7 +56,7 @@ import { startLocalOrigin, localAgentForLaunch } from "./localAgents";
 import { MachineLoadBadge, byLeastLoaded, firstAvailableNodeId, recordFleet, recordMissions } from "./machineLoad";
 import { imagePrompt, stageLocalImages, stageRemoteImages, type DraftImage } from "./imageAttachments";
 import { FilePanelProvider, FilePanelButton } from "./FilePanel";
-import { ErrorToast } from "./toast";
+import { ErrorToast, SlotActiveContext } from "./toast";
 import { rememberLaunch, recalledLaunch, missionDestination, launchRefusal, isAdministrationNode, remoteLaunchPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
 import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR } from "./goal";
 import { chipToAttachment, type AttachChip } from "./attach";
@@ -644,7 +644,6 @@ export default function App() {
   };
   const [projectMissions, setProjectMissions] = createSignal<Record<string, Mission[]>>({});
   createEffect(on(connectionVersion, () => {
-    keepAlivePool.clear();
     setProjectMissions({});
     setCompletedMissions([]);
     resetMissionHierarchy();
@@ -924,7 +923,14 @@ export default function App() {
   const pendingLaunchSlotKey = createMemo(() =>
     selected() === null && launchPreview() ? launchViewKey() : "",
   );
+  let prevPoolConnEpoch = connectionVersion();
   createEffect(() => {
+    const epoch = connectionVersion();
+    if (epoch !== prevPoolConnEpoch) {
+      prevPoolConnEpoch = epoch;
+      launchedViewKeys.clear();
+      keepAlivePool.clear();
+    }
     const mid = currentMissionId();
     const pendingKey = pendingLaunchSlotKey();
     keepAlivePool.reconcile({
@@ -2066,35 +2072,37 @@ export default function App() {
           });
           return (
             <div class="mission-slot" data-slot-key={slot.slotKey} hidden={!isActive()}>
-              <Show
-                when={slot.kind === "launch"}
-                fallback={
-                  <MissionLookupContext.Provider value={id => findKnownMission(id)}>
-                    <MissionView
-                      id={slot.missionId()}
-                      active={isActive()}
-                      initial={findKnownMission(slot.missionId())}
-                      onMission={syncOpenMission}
-                      onPlan={(id, data) => setPreviewPlan({ id, data })}
-                      onContext={(id, pct) => setPreviewContext({ id, pct })}
-                      onFork={commitFork}
-                    />
-                  </MissionLookupContext.Provider>
-                }
-              >
-                <NativeMissionView
-                  id={slot.missionId()}
-                  active={isActive()}
-                  initial={findKnownMission(slot.missionId())}
-                  launch={slot.missionId() ? undefined : (launchPreview() ?? undefined)}
-                  launchError={slot.missionId() ? undefined : (createError() ?? undefined)}
-                  onRetryLaunch={() => retryLaunch?.()}
-                  onMission={syncOpenMission}
-                  onContext={(id, pct) => setPreviewContext({ id, pct })}
-                  onPlan={(id, data) => setPreviewPlan({ id, data })}
-                  onFork={commitFork}
-                />
-              </Show>
+              <SlotActiveContext.Provider value={isActive}>
+                <Show
+                  when={slot.kind === "launch"}
+                  fallback={
+                    <MissionLookupContext.Provider value={id => findKnownMission(id)}>
+                      <MissionView
+                        id={slot.missionId()}
+                        active={isActive()}
+                        initial={findKnownMission(slot.missionId())}
+                        onMission={syncOpenMission}
+                        onPlan={(id, data) => setPreviewPlan({ id, data })}
+                        onContext={(id, pct) => setPreviewContext({ id, pct })}
+                        onFork={commitFork}
+                      />
+                    </MissionLookupContext.Provider>
+                  }
+                >
+                  <NativeMissionView
+                    id={slot.missionId()}
+                    active={isActive()}
+                    initial={findKnownMission(slot.missionId())}
+                    launch={slot.missionId() ? undefined : (launchPreview() ?? undefined)}
+                    launchError={slot.missionId() ? undefined : (createError() ?? undefined)}
+                    onRetryLaunch={() => retryLaunch?.()}
+                    onMission={syncOpenMission}
+                    onContext={(id, pct) => setPreviewContext({ id, pct })}
+                    onPlan={(id, data) => setPreviewPlan({ id, data })}
+                    onFork={commitFork}
+                  />
+                </Show>
+              </SlotActiveContext.Provider>
             </div>
           );
         }}</For>

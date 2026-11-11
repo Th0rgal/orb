@@ -68,4 +68,38 @@ describe("createMissionKeepAlivePool", () => {
     pool.clear();
     expect(pool.slots()).toHaveLength(0);
   });
+
+  it("allocates a fresh slot instance when connection epoch clears and immediately reconciles the same active mission", async () => {
+    const { createEffect, createRoot, createSignal } = await import("solid-js");
+    const pool = createMissionKeepAlivePool(4);
+    const [connVer, setConnVer] = createSignal(1);
+    const [activeMissionId] = createSignal<string | null>("m-open");
+
+    const dispose = createRoot((d) => {
+      let prevEpoch = connVer();
+      createEffect(() => {
+        const epoch = connVer();
+        if (epoch !== prevEpoch) {
+          prevEpoch = epoch;
+          pool.clear();
+        }
+        pool.reconcile({ activeMissionId: activeMissionId(), pendingLaunchKey: "" });
+      });
+      return d;
+    });
+
+    try {
+      expect(pool.slots()).toHaveLength(1);
+      const slotBefore = pool.slots()[0];
+      expect(slotBefore.missionId()).toBe("m-open");
+
+      // Bump connection epoch without changing activeMissionId -> pool clears and re-creates a new slot!
+      setConnVer(2);
+      expect(pool.slots()).toHaveLength(1);
+      expect(pool.slots()[0].missionId()).toBe("m-open");
+      expect(pool.slots()[0]).not.toBe(slotBefore);
+    } finally {
+      dispose();
+    }
+  });
 });

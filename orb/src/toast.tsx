@@ -1,5 +1,5 @@
 import { render } from "solid-js/web";
-import { For, Show, createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js";
+import { For, Show, createContext, createEffect, createSignal, onCleanup, onMount, useContext, type Accessor, type JSX } from "solid-js";
 import { copyText } from "./clipboard";
 import { describeError } from "./ErrorNotice";
 import { CheckIcon, CloseIcon, CopyIcon } from "./icons";
@@ -123,6 +123,13 @@ type Owner = {
 const owners = new Map<string, Map<symbol, Owner>>();
 
 /**
+ * Scopes `ErrorToast` and `StatusToast` ownership to the currently visible
+ * keep-alive slot so hidden missions suspend their global Toaster entries
+ * without losing their local error signals across mission switches.
+ */
+export const SlotActiveContext = createContext<Accessor<boolean>>(() => true);
+
+/**
  * Shows `error` as a bottom notification while it is set. Closing the
  * notification calls onDismiss, which should clear the error. Identical
  * errors from different places merge into one notification.
@@ -133,6 +140,7 @@ const owners = new Map<string, Map<symbol, Owner>>();
  */
 export function ErrorToast(p: {
   error?: string | null | false;
+  active?: boolean;
   title?: string;
   backend?: string | null;
   background?: boolean;
@@ -140,24 +148,39 @@ export function ErrorToast(p: {
   action?: ToastAction;
   actions?: ToastAction[];
 }) {
+  const slotActive = useContext(SlotActiveContext);
   const me = Symbol();
   const [suppressed, setSuppressed] = createSignal<string | null>(null);
   const [bump, setBump] = createSignal(0);
   let key: string | undefined;
+  let releasing = false;
   const release = () => {
     if (key === undefined) return;
-    const map = owners.get(key);
-    map?.delete(me);
-    if (map && !map.size) { owners.delete(key); dismissToast(key); }
+    const prevKey = key;
     key = undefined;
+    const map = owners.get(prevKey);
+    map?.delete(me);
+    if (map && !map.size) {
+      owners.delete(prevKey);
+      dismissToast(prevKey);
+    } else if (map && map.size && !releasing) {
+      releasing = true;
+      try {
+        [...map.values()][0]?.rebump();
+      } finally {
+        releasing = false;
+      }
+    }
   };
   createEffect(() => {
     bump();
+    const visible = slotActive() && p.active !== false;
     const raw = p.error;
     if (!raw) {
       setSuppressed(null);
       return release();
     }
+    if (!visible) return release();
     const info = describeError(raw, p.title, p.backend);
     const next = `error:${info.title}:${info.message}`;
     if (p.background && suppressed() === next) return release();
@@ -224,6 +247,7 @@ export function ErrorToast(p: {
  */
 export function StatusToast(p: {
   message?: string | null | false;
+  active?: boolean;
   detail?: string;
   tone?: "warning";
   icon?: JSX.Element;
@@ -232,17 +256,20 @@ export function StatusToast(p: {
   action?: ToastAction;
   actions?: ToastAction[];
 }) {
+  const slotActive = useContext(SlotActiveContext);
   const instance = nextId++;
   let key: string | undefined;
   const release = () => {
     if (key !== undefined) {
-      dismissToast(key);
+      const prevKey = key;
       key = undefined;
+      dismissToast(prevKey);
     }
   };
   createEffect(() => {
+    const visible = slotActive() && p.active !== false;
     const msg = p.message;
-    if (!msg) return release();
+    if (!msg || !visible) return release();
     const next = `status:${instance}:${p.tone ?? "info"}:${msg}`;
     if (next !== key) release();
     key = next;
