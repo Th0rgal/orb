@@ -74,19 +74,19 @@ class OrbMissionTreeTest {
 
     @Test
     fun clientPlacementHonorsCanonicalFieldWithLegacyFallback() {
-        assertTrue(m("canonical", "placement_kind" to "client").isClientPlacement)
-        assertTrue(m("scoped-client", "placement_kind" to "client:m2air").isClientPlacement)
-        assertTrue(m("legacy-origin", "origin" to "orb-client").isClientPlacement)
-        assertTrue(m("legacy-tag", "tags" to listOf("placement:client")).isClientPlacement)
+        assertTrue(m("canonical", "placement_kind" to "client").isClientPlacement())
+        assertTrue(m("scoped-client", "placement_kind" to "client:m2air").isClientPlacement())
+        assertTrue(m("legacy-origin", "origin" to "orb-client").isClientPlacement())
+        assertTrue(m("legacy-tag", "tags" to listOf("placement:client")).isClientPlacement())
         assertFalse(
             m(
                 "adopted-server",
                 "placement_kind" to "server",
                 "origin" to "orb-client",
                 "tags" to listOf("placement:client"),
-            ).isClientPlacement
+            ).isClientPlacement()
         )
-        assertFalse(m("remote", "placement_kind" to "remote_node:ashur", "origin" to "orb-client").isClientPlacement)
+        assertFalse(m("remote", "placement_kind" to "remote_node:ashur", "origin" to "orb-client").isClientPlacement())
     }
 
     @Test
