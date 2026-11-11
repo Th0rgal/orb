@@ -13,9 +13,9 @@ vi.mock('../src/composerDrafts',()=>({
 vi.mock('../src/btwContext',()=>({prepareBtwContext:vi.fn(async(_s:any,context:string)=>({context,cursor:{sequence:10,visibleHash:'hash'}}))}));
 import {it,expect,vi,afterEach} from 'vitest';
 import {askBtwAgent,btwSession,resetBtwThreadCache,stopBtw,btwTurnEvents} from '../src/btwAgent';
-import {startLocal,localBinding} from '../src/localAgents';
+import {startLocal,localBinding,resolveLocalHarnessModel,rememberBinding} from '../src/localAgents';
 import {sideQuestionKey} from '../src/sideQuestionStorage';
-vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLocalBindings:async()=>{},localAgentForLaunch:async()=>({id:'opencode',installed:true,path:'/bin/opencode'}),refreshLocalAgents:async()=>[{id:'opencode',installed:true,path:'/bin/opencode'}],rememberBinding:vi.fn(),startLocal:vi.fn(async()=>({run_id:'run',generation:1})),followLocal:vi.fn(async()=>({text:'Read fixture',done:true,exit_code:0})),stopLocal:vi.fn(),localActivities:()=>[],reconcileLocalRun:vi.fn(async()=>{}),recoverLocalLaunch:vi.fn(async()=>{}),localLiveText:()=> 'Read fixture'}));
+vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLocalBindings:async()=>{},localAgentForLaunch:async()=>({id:'opencode',installed:true,path:'/bin/opencode'}),resolveLocalHarnessModel:vi.fn(async(_h:string,_b:string,m?:string)=>m),refreshLocalAgents:async()=>[{id:'opencode',installed:true,path:'/bin/opencode'}],rememberBinding:vi.fn(),startLocal:vi.fn(async()=>({run_id:'run',generation:1})),followLocal:vi.fn(async()=>({text:'Read fixture',done:true,exit_code:0})),stopLocal:vi.fn(),localActivities:()=>[],reconcileLocalRun:vi.fn(async()=>{}),recoverLocalLaunch:vi.fn(async()=>{}),localLiveText:()=> 'Read fixture'}));
 import {ApiError,api,getMission,sendMissionMessage,cancelMission} from '../src/api';
 vi.mock('../src/api',async original=>({...await original<typeof import('../src/api')>(),api:vi.fn(),getMission:vi.fn(),sendMissionMessage:vi.fn(),cancelMission:vi.fn(),appendClientTranscript:vi.fn(),setClientMissionStatus:vi.fn()}));
 vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),streamMission:vi.fn(()=>vi.fn()),getMissionEvents:vi.fn(async()=>[{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}])}));
@@ -1428,4 +1428,20 @@ it('freezes the continuation prompt per clientMessageId across retries while rot
   expect(btwSession('idem-parent')?.conversationCursor).toEqual({sequence:110,visibleHash:'h110'});
  }finally{vi.useRealTimers();}
 });
+
+it('normalizes local OpenCode routing-chain models for client-placed /btw side threads',async()=>{
+ vi.mocked(resolveLocalHarnessModel).mockImplementationOnce(async(_h,_b,m)=>m==='builtin/smart'?'orbrouter/builtin/smart':m);
+ vi.mocked(localBinding).mockImplementation((id:string)=>id==='local-parent'?{cwd:'/work/folio',harness:'opencode'}:undefined);
+ vi.mocked(getMission).mockImplementation(async(id)=>({id,status:id==='local-parent'?'active':'awaiting_user',placement_kind:'client',tags:['placement:client'],history:[],title:'Folio',created_at:'',updated_at:''} as any));
+ vi.mocked(api).mockResolvedValue({id:'local-side',placement_kind:'client',tags:['placement:client']});
+ const events:any[]=[];
+ await askBtwAgent('local-parent','Inspect folio','Main context',[],new AbortController().signal,e=>events.push(e));
+ expect(resolveLocalHarnessModel).toHaveBeenCalledWith('opencode','/bin/opencode','builtin/smart');
+ expect(api).toHaveBeenCalledWith('/api/control/missions/local-parent/btw/agent',expect.objectContaining({body:expect.stringContaining('orbrouter/builtin/smart')}));
+ expect(btwSession('local-parent')).toMatchObject({id:'local-side',local:true,model:'orbrouter/builtin/smart'});
+ expect(rememberBinding).toHaveBeenCalledWith('local-side',expect.objectContaining({cwd:'/work/folio',harness:'opencode',model:'orbrouter/builtin/smart'}));
+ expect(startLocal).toHaveBeenCalledWith(expect.objectContaining({id:'local-side',harness:'opencode',model:'orbrouter/builtin/smart'}));
+ expect(events.at(-1)).toEqual({type:'done',answer:'Read fixture'});
+});
+
 

@@ -696,11 +696,13 @@ private def stripJsoncLineComments (s : String) : String := Id.run do
   return out
 
 /-- Read non-secret model & provider metadata from `~/.config/opencode/opencode.json` (or `opencode.jsonc`). -/
-def readLocalOpenCodeConfigInfo : IO (Option String × Array (String × String) × Array String) := do
+def readLocalOpenCodeConfigInfo (homeOverride? : Option String := none) : IO (Option String × Array (String × String) × Array String) := do
   let xdg := ((← IO.getEnv "XDG_CONFIG_HOME").getD "").trimAscii.toString
-  let home := ((← IO.getEnv "HOME").getD "").trimAscii.toString
+  let home ← match homeOverride?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) with
+    | some h => pure h
+    | none => pure (((← IO.getEnv "HOME").getD "").trimAscii.toString)
   let cfgDir :=
-    if !xdg.isEmpty then System.FilePath.mk xdg / "opencode"
+    if homeOverride?.isNone && !xdg.isEmpty then System.FilePath.mk xdg / "opencode"
     else if !home.isEmpty then System.FilePath.mk home / ".config" / "opencode"
     else System.FilePath.mk "/nonexistent"
   let jsonPath := cfgDir / "opencode.json"
@@ -799,11 +801,16 @@ def orderOpenCodeModelIds (ids : Array String) (defaultModel? : Option String) :
       out := out.push m
   return out
 
-/-- Discover OpenCode (`opencode`) models via `opencode models` combined with `~/.config/opencode/opencode.json`. -/
-def probeOpenCodeModels (binPath : String) : IO (Except String (Array (String × String))) := do
+/-- Discover OpenCode (`opencode`) models via `~/.config/opencode/opencode.json` (instant when configured)
+    with fallback to `opencode models` CLI discovery. -/
+def probeOpenCodeModels (binPath : String) (homeOverride? : Option String := none) : IO (Except String (Array (String × String))) := do
   if binPath.trimAscii.toString.isEmpty || !(← System.FilePath.pathExists binPath) then
     return .error "OpenCode CLI is not installed"
-  let (defModel?, provNames, cfgModels) ← readLocalOpenCodeConfigInfo
+  let (defModel?, provNames, cfgModels) ← readLocalOpenCodeConfigInfo homeOverride?
+  if !cfgModels.isEmpty then
+    let orderedCfg := orderOpenCodeModelIds cfgModels defModel?
+    if !orderedCfg.isEmpty then
+      return .ok (orderedCfg.map fun id => (id, formatOpenCodeModelLabel id provNames))
   let cliIds ← match ← (IO.Process.output {
     cmd := binPath
     args := #["models"]
@@ -827,7 +834,7 @@ def probeOpenCodeModels (binPath : String) : IO (Except String (Array (String ×
   return .ok (ordered.map fun id => (id, formatOpenCodeModelLabel id provNames))
 
 /-- Scan local agent CLIs (`claudecode`, `codex`, `opencode`, `antigravity`, `grok`, `vibe`) matching `ScanRow[]` in `orb/src/localAgents.ts`. -/
-def scanInstalledHarnesses (overrides : JVal := .obj #[]) : IO JVal := do
+def scanInstalledHarnesses (overrides : JVal := .obj #[]) (homeOverride? : Option String := none) : IO JVal := do
   let specs : Array (String × String × Bool) := #[
     ("claudecode",  "claude",   true),
     ("codex",       "codex",    true),
@@ -852,6 +859,11 @@ def scanInstalledHarnesses (overrides : JVal := .obj #[]) : IO JVal := do
         match ← probeAntigravityModels p with
         | .ok ms => modelsJv := ms.map fun (mId, mLbl) => .arr #[.str mId, .str mLbl]
         | .error e => authErr? := some e
+    else if id == "opencode" && installed then
+      let (defModel?, provNames, cfgModels) ← readLocalOpenCodeConfigInfo homeOverride?
+      if !cfgModels.isEmpty then
+        let orderedCfg := orderOpenCodeModelIds cfgModels defModel?
+        modelsJv := orderedCfg.map fun mId => .arr #[.str mId, .str (formatOpenCodeModelLabel mId provNames)]
     rows := rows.push (.obj #[
       ("id", .str id),
       ("bin", .str defaultBin),

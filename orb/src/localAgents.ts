@@ -227,7 +227,7 @@ export function matchLocalOpenCodeModel(raw: string | undefined, models: Readonl
   return matched ?? clean;
 }
 
-async function resolveLocalHarnessModel(harness: string, bin: string, model?: string): Promise<string | undefined> {
+export async function resolveLocalHarnessModel(harness: string, bin: string, model?: string): Promise<string | undefined> {
   if (harness !== "opencode") return model;
   let known = installed().find(row => row.id === "opencode")?.models ?? [];
   if (!known.length && bin) {

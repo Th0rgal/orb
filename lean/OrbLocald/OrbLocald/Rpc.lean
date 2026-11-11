@@ -1549,21 +1549,44 @@ def ensurePersistedBindingsLoaded (stRef : IO.Ref LocaldState) : IO Unit := do
         let raw ← IO.FS.readFile path
         match OrbBin.Json.parse raw.trimAscii.toString with
         | .ok jv =>
+          let homeOv? := if st.homeDir.trimAscii.toString.isEmpty then none else some st.homeDir.trimAscii.toString
+          let (defModel?, provNames, cfgModels) ← OrbBin.ClaudeControl.readLocalOpenCodeConfigInfo homeOv?
+          let provIds := provNames.map Prod.fst
           let diskRev := (jv.fieldNat? "revision").getD 0
-          let diskEntries : Array (String × JVal) :=
+          let rawEntries : Array (String × JVal) :=
             match jv.field? "bindings" with
             | some (.obj kvs) => kvs
             | _ =>
               match jv with
               | .obj kvs => kvs.filter (fun (k, _) => k != "revision" && k != "bindings")
               | _ => #[]
-          stRef.modify fun s =>
-            if s.bindingsLoaded then s
+          let mut repairedAny := false
+          let mut diskEntries : Array (String × JVal) := Array.mkEmpty rawEntries.size
+          for (k, v) in rawEntries do
+            if v.fieldStr? "harness" == some "opencode" then
+              if let some m := v.fieldStr? "model" then
+                let resolved := (OrbBin.ClaudeControl.resolveOpenCodeModelForLocal (some m) defModel? provIds cfgModels).getD m
+                if resolved != m then
+                  repairedAny := true
+                  diskEntries := diskEntries.push (k, JVal.setField v "model" (.str resolved))
+                else
+                  diskEntries := diskEntries.push (k, v)
+              else
+                diskEntries := diskEntries.push (k, v)
+            else
+              diskEntries := diskEntries.push (k, v)
+          let stLoaded ← stRef.modifyGet fun s =>
+            if s.bindingsLoaded then (none, s)
             else
               let merged := diskEntries.foldl (fun acc (k, v) =>
                 if acc.any (fun (ek, _) => ek == k) then acc else acc.push (k, v)) s.bindingsEntries
-              let rev := max s.bindingsRevision (max diskRev merged.size)
-              { s with bindingsLoaded := true, bindingsRevision := rev, bindingsEntries := merged }
+              let baseRev := max s.bindingsRevision (max diskRev merged.size)
+              let rev := if repairedAny then baseRev + 1 else baseRev
+              let s' := { s with bindingsLoaded := true, bindingsRevision := rev, bindingsEntries := merged }
+              (if repairedAny then some s' else none, s')
+          if let some stToSave := stLoaded then
+            let payload := (renderCompact stToSave.bindingsSnapshotJson ++ "\n").toUTF8
+            discard <| OrbBin.PosixExt.writeAtomicPrivate0600 path payload
         | .error _ =>
           stRef.modify fun s => { s with bindingsLoaded := true }
       catch _ =>
@@ -1588,13 +1611,37 @@ def ensurePersistedOriginsLoaded (stRef : IO.Ref LocaldState) : IO Unit := do
         let raw ← IO.FS.readFile path
         match OrbBin.Json.parse raw.trimAscii.toString with
         | .ok (.arr xs) =>
-          let parsed := xs.filterMap LocalOriginEntry.fromMissionJson?
-          stRef.modify fun s =>
-            if s.originsLoaded then s
+          let homeOv? := if st.homeDir.trimAscii.toString.isEmpty then none else some st.homeDir.trimAscii.toString
+          let (defModel?, provNames, cfgModels) ← OrbBin.ClaudeControl.readLocalOpenCodeConfigInfo homeOv?
+          let provIds := provNames.map Prod.fst
+          let mut repairedAny := false
+          let rawParsed := xs.filterMap LocalOriginEntry.fromMissionJson?
+          let mut parsed : Array LocalOriginEntry := Array.mkEmpty rawParsed.size
+          for row in rawParsed do
+            if row.backend == "opencode" then
+              match row.modelOverride with
+              | some m =>
+                let resolved := (OrbBin.ClaudeControl.resolveOpenCodeModelForLocal (some m) defModel? provIds cfgModels).getD m
+                if resolved != m then
+                  repairedAny := true
+                  parsed := parsed.push { row with modelOverride := some resolved }
+                else
+                  parsed := parsed.push row
+              | none =>
+                parsed := parsed.push row
+            else
+              parsed := parsed.push row
+          let stLoaded ← stRef.modifyGet fun s =>
+            if s.originsLoaded then (none, s)
             else
               let merged := parsed.foldl (fun acc row =>
                 if acc.any (fun r => r.id == row.id) then acc else acc.push row) s.localOrigins
-              { s with originsLoaded := true, localOrigins := merged }
+              let s' := { s with originsLoaded := true, localOrigins := merged }
+              (if repairedAny then some s' else none, s')
+          if let some stToSave := stLoaded then
+            let arr := stToSave.localOrigins.map LocalOriginEntry.toMissionJson
+            let payload := (renderCompact (.arr arr) ++ "\n").toUTF8
+            discard <| OrbBin.PosixExt.writeAtomicPrivate0600 path payload
         | _ =>
           stRef.modify fun s => { s with originsLoaded := true }
       catch _ =>
@@ -5440,9 +5487,11 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
             syncLocalOriginToCore stRef mid epRaw tokRaw 2
     return .ok (.arr (filtered.map LocalOriginEntry.toMissionJson))
   | "local_agents_scan" =>
+    let cur ← stRef.get
+    let homeOv? := if cur.homeDir.trimAscii.toString.isEmpty then none else some cur.homeDir.trimAscii.toString
     let reqObj := (args.field? "request").getD args
     let ov := (reqObj.field? "overrides").getD (.obj #[])
-    let rows ← OrbBin.ClaudeControl.scanInstalledHarnesses ov
+    let rows ← OrbBin.ClaudeControl.scanInstalledHarnesses ov homeOv?
     return .ok rows
   | "local_claude_models" =>
     let p := (args.fieldStr? "path").getD ""
@@ -5450,8 +5499,10 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     | .ok models => return .ok (.arr (models.map fun (id, lbl) => .arr #[.str id, .str lbl]))
     | .error e => return .error e
   | "local_opencode_models" =>
+    let cur ← stRef.get
+    let homeOv? := if cur.homeDir.trimAscii.toString.isEmpty then none else some cur.homeDir.trimAscii.toString
     let p := (args.fieldStr? "path").getD ""
-    match ← OrbBin.ClaudeControl.probeOpenCodeModels p with
+    match ← OrbBin.ClaudeControl.probeOpenCodeModels p homeOv? with
     | .ok models => return .ok (.arr (models.map fun (id, lbl) => .arr #[.str id, .str lbl]))
     | .error e => return .error e
   | "local_antigravity_models" =>
@@ -6161,8 +6212,9 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let rawModel := (reqObj.fieldStr? "model").getD ""
     let model ←
       if harness == "opencode" then
+        let homeOv? := if curSt.homeDir.trimAscii.toString.isEmpty then none else some curSt.homeDir.trimAscii.toString
         let reqMdl? := if rawModel.trimAscii.toString.isEmpty then none else some rawModel
-        let (defModel?, provNames, cfgModels) ← OrbBin.ClaudeControl.readLocalOpenCodeConfigInfo
+        let (defModel?, provNames, cfgModels) ← OrbBin.ClaudeControl.readLocalOpenCodeConfigInfo homeOv?
         let firstChoice := (OrbBin.ClaudeControl.resolveOpenCodeModelForLocal
           reqMdl? defModel? (provNames.map Prod.fst) cfgModels).getD rawModel
         let needsCliProbe :=
@@ -6170,7 +6222,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           (let t := rawModel.trimAscii.toString
            t.isEmpty || t.startsWith "builtin/" || t.startsWith "sandboxed-sh/" || !(t.contains '/'))
         if needsCliProbe then
-          match ← OrbBin.ClaudeControl.probeOpenCodeModels binPath with
+          match ← OrbBin.ClaudeControl.probeOpenCodeModels binPath homeOv? with
           | .ok probed =>
             let probedIds := probed.map Prod.fst
             pure ((OrbBin.ClaudeControl.resolveOpenCodeModelForLocal reqMdl? probedIds[0]? #[] probedIds).getD firstChoice)
