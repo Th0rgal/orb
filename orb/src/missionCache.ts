@@ -24,7 +24,7 @@ import {
   type StoredEvent,
   type StreamEvent,
 } from "./stream";
-import { cacheDelete, cachePeek, cachePut, cacheRecents, onCacheEvict } from "./pageCache";
+import { cacheDelete, cachePeek, cachePut, cacheRecents, estimateCacheBytes, onCacheEvict } from "./pageCache";
 import { currentLinkBudget, onLinkBudgetChange } from "./networkHealth";
 import { loadPersistedTranscript, savePersistedTranscript } from "./persistentCache";
 
@@ -42,6 +42,10 @@ export type TranscriptSnap = {
   items: StreamItem[];
   stream: StreamEvent[];
   liveTail?: StreamEvent[];
+  settledItems?: StreamItem[];
+  settledSeq?: number;
+  openTailEvents?: StreamEvent[];
+  estimatedBytes?: number;
   fromLog?: boolean;
   detailsPending?: boolean;
   spineComplete?: boolean;
@@ -64,7 +68,15 @@ const [transcriptVersion, setTranscriptVersion] = createSignal(0);
 export { transcriptVersion };
 
 let bumpTimer: ReturnType<typeof setTimeout> | undefined;
-function bumpTranscriptVersion() {
+function bumpTranscriptVersion(sync = false) {
+  if (sync) {
+    if (bumpTimer !== undefined) {
+      clearTimeout(bumpTimer);
+      bumpTimer = undefined;
+    }
+    setTranscriptVersion((v) => v + 1);
+    return;
+  }
   if (bumpTimer !== undefined) return;
   bumpTimer = setTimeout(() => {
     bumpTimer = undefined;
@@ -202,6 +214,51 @@ function missionIdFromScope(scope: string): string | null {
   return m ? m[1] : null;
 }
 
+function estimateStreamEventsBytes(evs: readonly StreamEvent[]): number {
+  let acc = 0;
+  for (const ev of evs) {
+    acc += 64 + ev.type.length * 2;
+    const d = ev.data;
+    if (d) {
+      for (const k in d) {
+        const v = d[k];
+        acc += k.length * 2 + (typeof v === "string" ? v.length * 2 : 24);
+      }
+    }
+  }
+  return acc;
+}
+
+function buildSettledDigestSnapshot(snapshot: TranscriptSnap): TranscriptSnap {
+  const stream = snapshot.stream ?? [];
+  if (!stream.length || !snapshot.items.length) return snapshot;
+  // Find the highest sequence of a finalized assistant reply or terminal error so settled turns
+  // hydrate in O(1) on cold restart without re-running `buildTranscript` across raw tool events.
+  let settledSeq = 0;
+  for (let i = stream.length - 1; i >= 0; i--) {
+    const ev = stream[i];
+    if (
+      typeof ev.sequence === "number" &&
+      ((ev.type === "assistant_message" && ev.data?.partial !== true && ev.data?.success !== false) ||
+        ev.type === "error")
+    ) {
+      settledSeq = ev.sequence;
+      break;
+    }
+  }
+  if (settledSeq <= 0) return snapshot;
+  const maxStreamSeq = stream.reduce((m, e) => (typeof e.sequence === "number" && e.sequence > m ? e.sequence : m), 0);
+  if (settledSeq >= maxStreamSeq && (!snapshot.liveTail || snapshot.liveTail.length === 0)) {
+    return {
+      ...snapshot,
+      settledItems: snapshot.items,
+      settledSeq,
+      openTailEvents: [],
+    };
+  }
+  return snapshot;
+}
+
 function flushPersistScope(scope: string) {
   const timer = persistTimers.get(scope);
   if (timer !== undefined) {
@@ -212,11 +269,11 @@ function flushPersistScope(scope: string) {
   if (!pending) return;
   pendingPersistSnapshots.delete(scope);
   if (pending.ver !== connectionVersionSafe()) return;
-  // Strip derived `items` before structured-cloning into IndexedDB: cold-start
-  // hydration always rebuilds `items` from `stream` + `liveTail` so reducer
-  // session indexes are restored, avoiding ~2x payload duplication on disk.
+  // Store `settledItems` once (pre-digested for O(1) cold-start hydration) while
+  // stripping duplicate `items: []` on disk to avoid ~2x payload duplication.
+  const digested = buildSettledDigestSnapshot(pending.snapshot);
   void savePersistedTranscript(pending.persistScope, pending.missionId, {
-    ...pending.snapshot,
+    ...digested,
     items: [],
   });
 }
@@ -254,17 +311,23 @@ function schedulePersistReadySnapshot(scope: string, snapshot: TranscriptSnap) {
   persistTimers.set(scope, timer);
 }
 
-function saveSnapshot(scope: string, snapshot: TranscriptSnap, persist = true) {
+function saveSnapshot(scope: string, snapshot: TranscriptSnap, persist = true, syncBump = false) {
   cachedScopes.add(scope);
+  const estBytes =
+    typeof snapshot.estimatedBytes === "number" && snapshot.estimatedBytes > 0
+      ? snapshot.estimatedBytes
+      : estimateCacheBytes(snapshot);
+  const stamped: TranscriptSnap =
+    snapshot.estimatedBytes === estBytes ? snapshot : { ...snapshot, estimatedBytes: estBytes };
   const entry = active.get(scope);
-  if (entry) entry.snapshot = snapshot;
-  else cachePut(scope, snapshot);
+  if (entry) entry.snapshot = stamped;
+  else cachePut(scope, stamped, estBytes);
   const liveId = liveMissionIds.get(scope);
-  if (liveId && snapshot.fromLog && !snapshot.detailsPending) {
+  if (liveId && stamped.fromLog && !stamped.detailsPending) {
     rememberWarmRecent(scope, liveId);
   }
-  if (persist) schedulePersistReadySnapshot(scope, snapshot);
-  bumpTranscriptVersion();
+  if (persist) schedulePersistReadySnapshot(scope, stamped);
+  bumpTranscriptVersion(syncBump);
 }
 
 const lastNetworkFetchAt = new Map<string, number>();
@@ -320,6 +383,9 @@ function cleanupStaleConnectionState(nextVer: number) {
   for (const scope of [...prefetchQueue.keys()]) {
     if (!scope.startsWith(prefix)) prefetchQueue.delete(scope);
   }
+  for (const [mid, q] of [...seededOpenQueues]) {
+    if (q.connVer !== nextVer) seededOpenQueues.delete(mid);
+  }
   const sessionPrefix = `c:${nextVer}:m:`;
   dropTranscriptSessionsByPrefixIfNot(sessionPrefix);
   observedConnectionVersion = nextVer;
@@ -341,7 +407,10 @@ createRoot(() => {
   });
 });
 
-export function hydrateTranscriptFromDisk(id: string): Promise<TranscriptSnap | undefined> {
+export function hydrateTranscriptFromDisk(
+  id: string,
+  options?: { syncBump?: boolean },
+): Promise<TranscriptSnap | undefined> {
   syncConnectionChange();
   const existingReady = peekReadyTranscript(id);
   if (existingReady) return Promise.resolve(existingReady);
@@ -357,12 +426,29 @@ export function hydrateTranscriptFromDisk(id: string): Promise<TranscriptSnap | 
       }
       if (!peekReadyTranscript(id)) {
         const session = sessionFor(id);
-        const rebuiltItems = buildTranscript(
-          [...(persisted.stream ?? []), ...(persisted.liveTail ?? [])],
-          session,
-        );
+        let rebuiltItems: StreamItem[];
+        const prebuiltBase =
+          Array.isArray(persisted.settledItems) && persisted.settledItems.length > 0
+            ? persisted.settledItems
+            : typeof persisted.settledSeq === "number" &&
+                persisted.settledSeq > 0 &&
+                Array.isArray(persisted.items) &&
+                persisted.items.length > 0
+              ? persisted.items
+              : undefined;
+        if (prebuiltBase) {
+          const tail = [...(persisted.openTailEvents ?? []), ...(persisted.liveTail ?? [])];
+          rebuiltItems = tail.length > 0
+            ? applyStreamEvents(prebuiltBase, tail, session)
+            : prebuiltBase;
+        } else {
+          rebuiltItems = buildTranscript(
+            [...(persisted.stream ?? []), ...(persisted.liveTail ?? [])],
+            session,
+          );
+        }
         const hydrated: TranscriptSnap = { ...persisted, items: rebuiltItems };
-        saveSnapshot(scope, hydrated, false);
+        saveSnapshot(scope, hydrated, false, options?.syncBump === true);
         dirtyMissions.add(scope);
       }
       return peekReadyTranscript(id);
@@ -393,7 +479,7 @@ export function retainTranscript(id: string): () => void {
     const cur = active.get(scope);
     if (cur && --cur.refs === 0) {
       active.delete(scope);
-      if (cur.snapshot) cachePut(scope, cur.snapshot);
+      if (cur.snapshot) cachePut(scope, cur.snapshot, cur.snapshot.estimatedBytes);
       reconcileWarmSubscriptions();
     }
   };
@@ -451,12 +537,15 @@ export function applyLiveEventsToTranscriptCache(
   const priorTail = prev?.liveTail ?? [];
   const combinedTail = unsequenced.length ? [...priorTail, ...unsequenced] : priorTail;
   const liveTail = combinedTail.length > 256 ? combinedTail.slice(-256) : combinedTail;
+  const prevEst = prev?.estimatedBytes ?? 0;
+  const deltaBytes = estimateStreamEventsBytes(evs) * 2;
   saveSnapshot(scope, {
     ...(prev ?? {}),
     items,
     stream,
     ...(liveTail.length ? { liveTail } : {}),
     ...(cursor !== undefined ? { cursor } : {}),
+    ...(prevEst > 0 ? { estimatedBytes: prevEst + deltaBytes } : {}),
     fromLog: prev?.fromLog === true,
   });
 }
@@ -758,7 +847,7 @@ export function warmRecentMissionIds(includeBtw = false): string[] {
     }
   }
   const bgActive =
-    Boolean(streamModule.isMultiplexSyncActive?.()) &&
+    Boolean("isMultiplexSyncActive" in streamModule && streamModule.isMultiplexSyncActive?.()) &&
     isBackgroundSyncActive() &&
     (typeof document === "undefined" || document.visibilityState !== "hidden");
   const btwTargets = includeBtw ? warmBtwProvider?.() : undefined;
@@ -816,6 +905,61 @@ if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => reconcileWarmSubscriptions());
 }
 
+const seededOpenQueues = new Map<
+  string,
+  { connVer: number; savedAt: number; rows: import("./api").QueuedMessage[] }
+>();
+
+function seedMissionOpenQueue(id: string, rows: import("./api").QueuedMessage[] | undefined): void {
+  if (!Array.isArray(rows)) return;
+  seededOpenQueues.set(id, {
+    connVer: connectionVersionSafe(),
+    savedAt: Date.now(),
+    rows,
+  });
+  while (seededOpenQueues.size > 64) {
+    seededOpenQueues.delete(seededOpenQueues.keys().next().value!);
+  }
+}
+
+export function consumeMissionOpenQueue(id: string): import("./api").QueuedMessage[] | undefined {
+  const hit = seededOpenQueues.get(id);
+  if (!hit) return undefined;
+  seededOpenQueues.delete(id);
+  if (hit.connVer !== connectionVersionSafe() || Date.now() - hit.savedAt > 3500) {
+    return undefined;
+  }
+  return hit.rows;
+}
+
+if ("onInboxAnswerPush" in streamModule && typeof streamModule.onInboxAnswerPush === "function") {
+  streamModule.onInboxAnswerPush((missionId, ev) => {
+    const scope = key(missionId);
+    if (active.has(scope)) return;
+    const prior = peekTranscript(missionId);
+    if (prior?.fromLog && !prior.detailsPending) {
+      const prevCursor = prior.cursor ?? 0;
+      const evSeq = typeof ev.sequence === "number" ? ev.sequence : undefined;
+      applyLiveEventsToTranscriptCache(missionId, [ev]);
+      // Mark dirty if intermediate tool events occurred between `prevCursor` and `evSeq`
+      // so opening the Inbox item renders the received answer in 0 ms and backfills tools silently.
+      if (evSeq !== undefined && evSeq > prevCursor + 1) {
+        dirtyMissions.add(scope);
+      }
+      return;
+    }
+    const merged = mergeStreamBySequence(prior?.stream ?? [], [ev]);
+    saveSnapshot(scope, {
+      ...(prior ?? {}),
+      items: buildTranscript(merged, previewSessionFor(missionId)),
+      stream: merged,
+      fromLog: true,
+      detailsPending: true,
+      ...(typeof ev.sequence === "number" ? { cursor: ev.sequence } : {}),
+    }, false);
+  });
+}
+
 export function putTranscriptHeight(id: string, height: number) {
   if (height > 0) cachePut(heightKey(id), Math.round(height));
 }
@@ -840,6 +984,78 @@ async function fetchTranscript(
   opts?: { priority?: import("./transportScheduler").RequestPriority; signal?: AbortSignal },
 ): Promise<TranscriptSnap> {
   const version=connectionVersionSafe();const check=()=>{if(opts?.signal?.aborted)throw new DOMException("Aborted","AbortError");if(version!==connectionVersionSafe())throw Error("Connection changed during transcript load.");};
+  const previous = peekReadyTranscript(id) ?? (await hydrateTranscriptFromDisk(id));
+  check();
+  // Fast single-roundtrip path (`GET /api/control/missions/:id/open`) returning
+  // `{ protocol: 1, mission, events, spine, queue, max_seq, has_more, next_cursor, page_max_seq, reset }`.
+  // Falls back cleanly to `/events` + `/queue` when `getMissionOpenBundle` returns `null`.
+  if (
+    "getApiUrl" in apiModule &&
+    typeof apiModule.getApiUrl === "function" &&
+    "getMissionOpenBundle" in streamModule &&
+    typeof streamModule.getMissionOpenBundle === "function"
+  ) {
+    const bundle = await streamModule.getMissionOpenBundle(id, {
+      ...(previous?.cursor !== undefined ? { since: previous.cursor } : {}),
+      ...(opts?.priority ? { priority: opts.priority } : {}),
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+    });
+    check();
+    if (bundle && bundle.protocol === 1 && !bundle.reset && !(previous?.cursor !== undefined && bundle.has_more)) {
+      if ("seedCachedMission" in apiModule && typeof apiModule.seedCachedMission === "function") {
+        apiModule.seedCachedMission(bundle.mission);
+      }
+      const queuedRows = Array.isArray(bundle.queue) ? bundle.queue : [];
+      seedMissionOpenQueue(id, queuedRows);
+      const tailEvents = bundle.events.map(storedToStream).filter((e): e is StreamEvent => e !== null);
+      let stream = mergeStreamBySequence(previous?.stream ?? [], tailEvents);
+      let cursor = previous?.cursor;
+      let before = previous?.before;
+      let hasOlder = previous?.hasOlder;
+      let spineComplete = previous?.spineComplete;
+      let spineBefore = previous?.spineBefore;
+      if (previous?.cursor === undefined) {
+        before = bundle.next_cursor;
+        hasOlder = Boolean(bundle.has_more);
+        cursor = bundle.page_max_seq ?? bundle.max_seq ?? 0;
+        if (!hasOlder) {
+          spineComplete = true;
+          spineBefore = undefined;
+        } else if (Array.isArray(bundle.spine) && bundle.spine.length > 0) {
+          const firstTailConv = tailEvents.find(
+            (e) => e.type === "user_message" || (e.type === "assistant_message" && e.data.success !== false),
+          );
+          const spine = spineAnswers(
+            bundle.spine.map(storedToStream).filter((e): e is StreamEvent => e !== null),
+            firstTailConv?.type === "assistant_message",
+          );
+          stream = mergeStreamBySequence(spine, stream);
+        }
+      } else if (bundle.next_cursor !== undefined && bundle.next_cursor > cursor!) {
+        cursor = bundle.next_cursor;
+      } else if (bundle.max_seq !== undefined && (cursor === undefined || bundle.max_seq > cursor)) {
+        cursor = bundle.max_seq;
+      }
+      const queueEvents: StreamEvent[] = queuedRows.map((row) => ({
+        type: "user_message",
+        eventId: row.id,
+        data: { id: row.id, content: row.content, queued: row.inflight !== true },
+      }));
+      const retainedLive = previous?.liveTail?.length ? heldAfterHistory(stream, previous.liveTail) : [];
+      lastNetworkFetchAt.set(key(id), Date.now());
+      return {
+        items: buildTranscript([...stream, ...retainedLive, ...queueEvents], sessionFor(id)),
+        stream,
+        ...(retainedLive.length ? { liveTail: retainedLive } : {}),
+        fromLog: true,
+        spineComplete,
+        ...(spineBefore !== undefined ? { spineBefore } : {}),
+        cursor,
+        before,
+        hasOlder,
+      };
+    }
+  }
   // Start pending queue read in parallel with the event page read rather than
   // blocking the event log round-trip on /queue. Any delivery racing this read
   // wins by message identity in the reducer; held SSE fills the live boundary.
@@ -849,7 +1065,6 @@ async function fetchTranscript(
     queueError = `Queued messages could not refresh: ${error instanceof Error ? error.message : String(error)}`;
     return [];
   });
-  const previous = peekReadyTranscript(id) ?? (await hydrateTranscriptFromDisk(id));
   // Publish persisted messages before requesting activity, while racing the
   // full tail page in parallel so cold opens never pay an extra serial RTT.
   let preview: StreamEvent[] = [];
@@ -1058,6 +1273,7 @@ export function forgetPrefetchPauses(){
   recentlyOpened.clear();
   liveMissionIds.clear();
   cachedScopes.clear();
+  seededOpenQueues.clear();
   clearTranscriptSessions();
 }
 export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{

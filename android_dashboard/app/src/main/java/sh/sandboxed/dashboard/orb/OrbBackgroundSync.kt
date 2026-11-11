@@ -704,6 +704,7 @@ object OrbWarmSyncCoordinator {
     private val recentlyOpened = LinkedHashSet<String>()
     private val focusedBtwParents = LinkedHashSet<String>()
     private val warmSubs = LinkedHashMap<String, WarmMissionSub>()
+    private val savedCursors = HashMap<String, Long>()
     private val warmBtwSubs = LinkedHashMap<String, WarmBtwSub>()
     private val btwSnapshots = ConcurrentHashMap<String, OrbWarmBtwSnapshot>()
     private val btwListeners = ConcurrentHashMap<String, ConcurrentHashMap<String, OrbBtwViewListener>>()
@@ -732,6 +733,7 @@ object OrbWarmSyncCoordinator {
             }
             for (sub in warmBtwSubs.values) sub.cancel()
             warmBtwSubs.clear()
+            savedCursors.clear()
             liveIds.clear()
             recentlyOpened.clear()
             btwSnapshots.clear()
@@ -748,6 +750,7 @@ object OrbWarmSyncCoordinator {
         activeScopeKey = scopeKey
         for (sub in warmSubs.values) sub.cancel()
         warmSubs.clear()
+        savedCursors.clear()
         for (sub in warmBtwSubs.values) sub.cancel()
         warmBtwSubs.clear()
         focusedCounts.clear()
@@ -850,6 +853,7 @@ object OrbWarmSyncCoordinator {
             ensureScopeLocked(core)
             dirtyMissions.remove(missionId)
             if (lastSeq != null) {
+                savedCursors[missionId] = maxOf(savedCursors[missionId] ?: lastSeq, lastSeq)
                 warmSubs[missionId]?.let { sub ->
                     val prev = sub.cursor
                     sub.cursor = if (prev != null) maxOf(prev, lastSeq) else lastSeq
@@ -997,7 +1001,9 @@ object OrbWarmSyncCoordinator {
         synchronized(lock) {
             ensureScopeLocked(core)
             if (!appForegrounded) {
+                OrbReadCache.flushPendingWrites()
                 for ((mid, sub) in warmSubs) {
+                    sub.cursor?.let { cur -> savedCursors[mid] = maxOf(savedCursors[mid] ?: cur, cur) }
                     if (!sub.isCaughtUpHealthy || mid in liveIds) dirtyMissions.add(mid)
                     sub.cancel()
                 }
@@ -1080,8 +1086,11 @@ object OrbWarmSyncCoordinator {
             if (existing.job == null) startMissionSubJob(core, existing)
             return existing
         }
-        val initialSeq = sinceSeq
-            ?: OrbReadCache.readMemoryRows("mission_events_$missionId").lastOrNull()?.int("sequence", "seq")?.toLong()
+        val initialSeq = listOfNotNull(
+            sinceSeq,
+            savedCursors[missionId],
+            OrbReadCache.readMemoryRows("mission_events_$missionId").lastOrNull()?.int("sequence", "seq")?.toLong()
+        ).maxOrNull()
         val created = WarmMissionSub(missionId = missionId, cursor = initialSeq)
         warmSubs[missionId] = created
         startMissionSubJob(core, created)
@@ -1151,7 +1160,11 @@ object OrbWarmSyncCoordinator {
                 sub.healthy = true
                 sub.caughtUp = true
                 val cur = (parsed["cursor"] as? Number)?.toLong()?.takeIf { it > 0L }
-                if (cur != null) sub.cursor = maxOf(sub.cursor ?: cur, cur)
+                if (cur != null) {
+                    val next = maxOf(sub.cursor ?: cur, cur)
+                    sub.cursor = next
+                    savedCursors[missionId] = maxOf(savedCursors[missionId] ?: next, next)
+                }
                 dirtyMissions.remove(missionId)
             } else if (evType == "stream_lagged" || evType == "error") {
                 sub.healthy = false
@@ -1159,7 +1172,11 @@ object OrbWarmSyncCoordinator {
                 dirtyMissions.add(missionId)
             } else {
                 val seq = (parsed["sequence"] as? Number)?.toLong()?.takeIf { it > 0L }
-                if (seq != null) sub.cursor = maxOf(sub.cursor ?: seq, seq)
+                if (seq != null) {
+                    val next = maxOf(sub.cursor ?: seq, seq)
+                    sub.cursor = next
+                    savedCursors[missionId] = maxOf(savedCursors[missionId] ?: next, next)
+                }
             }
         }
 
@@ -1199,12 +1216,13 @@ object OrbWarmSyncCoordinator {
 
         val storedRow = OrbLiveEventReducer.streamFrameToStoredRow(missionId, evType, parsed)
         if (storedRow != null) {
+            val storedType = storedRow.str("event_type", "type") ?: ""
+            val isConversationTurn = storedType in OrbConversationHistory.eventTypes
             val evKey = "mission_events_$missionId"
             val existingEvs = OrbReadCache.readMemoryRows(evKey).ifEmpty { OrbReadCache.loadRows(evKey) }
             val mergedEvs = OrbLiveEventReducer.mergeMissionEvents(existingEvs, listOf(storedRow))
-            OrbReadCache.saveRows(evKey, mergedEvs)
-            val storedType = storedRow.str("event_type", "type") ?: ""
-            if (storedType in OrbConversationHistory.eventTypes) {
+            OrbReadCache.saveRows(evKey, mergedEvs, debounceMs = if (isConversationTurn) 0L else 1500L)
+            if (isConversationTurn) {
                 val msgKey = "mission_msgs_$missionId"
                 val existingMsgs = OrbReadCache.readMemoryRows(msgKey).ifEmpty { OrbReadCache.loadRows(msgKey) }
                 val mergedMsgs = OrbConversationHistory.merge(existingMsgs, listOf(storedRow))
@@ -1370,6 +1388,41 @@ object OrbWarmSyncCoordinator {
         val snap = notifySnapshot ?: return
         coordinatorScope.launch {
             btwListeners[parentId]?.values?.forEach { it(snap) }
+        }
+    }
+
+    fun ingestInboxAnswerPush(core: OrbCore, parsed: OrbDict) {
+        val missionId = OrbJSON.str(parsed, "mission_id")?.trim().orEmpty()
+        if (missionId.isEmpty()) return
+        val alreadyWarmHealthy = synchronized(lock) {
+            ensureScopeLocked(core)
+            warmSubs[missionId]?.isCaughtUpHealthy == true
+        }
+        if (alreadyWarmHealthy) return
+        val storedRow = OrbLiveEventReducer.streamFrameToStoredRow(missionId, "assistant_message", parsed) ?: return
+        val incomingSeq = storedRow.int("sequence", "seq")?.toLong() ?: 0L
+        coordinatorScope.launch(Dispatchers.IO) {
+            val evKey = "mission_events_$missionId"
+            val existingEvs = OrbReadCache.readMemoryRows(evKey).ifEmpty { OrbReadCache.loadRows(evKey) }
+            val prevLastSeq = existingEvs.lastOrNull()?.int("sequence", "seq")?.toLong() ?: 0L
+            val mergedEvs = OrbLiveEventReducer.mergeMissionEvents(existingEvs, listOf(storedRow))
+            OrbReadCache.saveRows(evKey, mergedEvs)
+
+            val msgKey = "mission_msgs_$missionId"
+            val existingMsgs = OrbReadCache.readMemoryRows(msgKey).ifEmpty { OrbReadCache.loadRows(msgKey) }
+            val mergedMsgs = OrbConversationHistory.merge(existingMsgs, listOf(storedRow))
+            if (mergedMsgs.isNotEmpty()) {
+                OrbReadCache.saveRows(msgKey, mergedMsgs)
+            }
+
+            synchronized(lock) {
+                if (incomingSeq > 0L) {
+                    savedCursors[missionId] = maxOf(savedCursors[missionId] ?: incomingSeq, incomingSeq)
+                }
+                if (prevLastSeq > 0L && incomingSeq > prevLastSeq + 1L) {
+                    dirtyMissions.add(missionId)
+                }
+            }
         }
     }
 }

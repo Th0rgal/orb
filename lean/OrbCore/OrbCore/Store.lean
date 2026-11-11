@@ -5,6 +5,7 @@
   in-place with WAL journaling and positional `?1..?N` bindings.
 -/
 import Std.Sync.Mutex
+import Std.Data.HashMap
 import LeanSys
 import Orb.Kernel
 import Orb.Lifecycle
@@ -150,13 +151,14 @@ structure PrivilegeLeaseRecord where
 
 /-- Core SQLite database bundle across `missions.db`, `projects.db`, `ask.db`, and `idempotency_keys.db`. -/
 structure CoreStore where
-  rootDir       : String
-  bootEpoch     : UInt64 := 1
-  missionsDb    : SqliteDb
-  projectsDb    : SqliteDb
-  askDb         : SqliteDb
-  idempotencyDb : SqliteDb
-  closedRef     : IO.Ref Bool
+  rootDir            : String
+  bootEpoch          : UInt64 := 1
+  missionsDb         : SqliteDb
+  projectsDb         : SqliteDb
+  askDb              : SqliteDb
+  idempotencyDb      : SqliteDb
+  closedRef          : IO.Ref Bool
+  eventListenersRef? : Option (IO.Ref (Array (UInt64 × (String → UInt64 → String → String → String → IO Unit)))) := none
 
 def transferSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS machine_transfers (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, request_key TEXT NOT NULL, revision INTEGER NOT NULL, phase TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(mission_id,request_key)); CREATE UNIQUE INDEX IF NOT EXISTS one_machine_transfer ON machine_transfers(mission_id) WHERE phase NOT IN ('activated','cancelled');"
@@ -196,6 +198,9 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS mission_runs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1, execution_state TEXT NOT NULL DEFAULT 'terminal', terminal_reason TEXT NOT NULL DEFAULT '', remote_job_id TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_remote_waits (mission_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, failed_job_id TEXT NOT NULL, scheduled_origin_job_id TEXT NOT NULL DEFAULT '', retries INTEGER NOT NULL DEFAULT 0, max_retries INTEGER NOT NULL DEFAULT 10, replays INTEGER NOT NULL DEFAULT 0, deadline_epoch INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_events (id INTEGER PRIMARY KEY AUTOINCREMENT, mission_id TEXT NOT NULL, seq INTEGER NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_seq ON mission_events(mission_id, seq);" ++
+  "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_type_seq ON mission_events(mission_id, event_type, seq);" ++
+  "CREATE INDEX IF NOT EXISTS idx_missions_updated_at ON missions(updated_at DESC);" ++
   "CREATE TABLE IF NOT EXISTS cloud_executions (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'hermes', prompt TEXT NOT NULL DEFAULT '', response_text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_automations (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, cron_expr TEXT NOT NULL, prompt TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, variables_used TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS model_routing_chains (id TEXT PRIMARY KEY, name TEXT NOT NULL, models_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT '');" ++
@@ -319,6 +324,10 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE privilege_leases ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE missions ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
   "CREATE INDEX IF NOT EXISTS idx_missions_owner ON missions(owner_user_id);",
+  "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_seq ON mission_events(mission_id, seq);",
+  "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_type_seq ON mission_events(mission_id, event_type, seq);",
+  "CREATE INDEX IF NOT EXISTS idx_missions_updated_at ON missions(updated_at DESC);",
+  "CREATE INDEX IF NOT EXISTS idx_missions_project_updated ON missions(project, updated_at DESC);",
   "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);"
 ]
 
@@ -966,7 +975,8 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
         sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
         return .error s!"core_store_r7_schema_failed:{r7Err}"
       let closedRef ← IO.mkRef false
-      return .ok { rootDir := trimmedRoot, bootEpoch := effBoot, missionsDb := mDb, projectsDb := pDb, askDb := aDb, idempotencyDb := iDb, closedRef := closedRef }
+      let evListenersRef ← IO.mkRef (#[] : Array (UInt64 × (String → UInt64 → String → String → String → IO Unit)))
+      return .ok { rootDir := trimmedRoot, bootEpoch := effBoot, missionsDb := mDb, projectsDb := pDb, askDb := aDb, idempotencyDb := iDb, closedRef := closedRef, eventListenersRef? := some evListenersRef }
 
 /-- Idempotently close all SQLite handles in `CoreStore` (prevents double-close). -/
 def closeCoreStore (st : CoreStore) : IO Unit := do
@@ -1595,16 +1605,69 @@ def renderContinuationNextAtJson (triggerKind : String) (dueEpoch : UInt64) : St
 def listMissionsJson
     (st : CoreStore)
     (nodeBootEpoch? : Option UInt64 := none)
-    (callerUserId? : Option String := none) : IO (Except String String) := do
+    (callerUserId? : Option String := none)
+    (bootstrapAdminId : String := "")
+    (project? : Option String := none)
+    (updatedSince? : Option String := none)
+    (statusesFilter : Array String := #[])
+    (includeArchived : Bool := true)
+    (limit? : Option Nat := none)
+    (offset : Nat := 0) : IO (Except String String) := do
   let nodeBootEpoch := nodeBootEpoch?.getD st.bootEpoch
+  let mut conds : Array String := #[]
+  let mut params : Array String := #[]
+  if let some uid := callerUserId? then
+    params := params.push uid
+    let p := params.size
+    conds := conds.push s!"(m.owner_user_id = ?{p} OR EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id = m.id AND s.user_id = ?{p}))"
+  if let some rawProj := project? then
+    let cleanProj := rawProj.trimAscii.toString
+    if !cleanProj.isEmpty then
+      match callerUserId? with
+      | some uid =>
+        let scopedProj :=
+          if !bootstrapAdminId.isEmpty && uid == bootstrapAdminId then cleanProj
+          else s!"{uid}:{cleanProj}"
+        params := params.push cleanProj
+        let p1 := params.size
+        params := params.push scopedProj
+        let p2 := params.size
+        params := params.push s!"%:{cleanProj}"
+        let p3 := params.size
+        conds := conds.push s!"(m.project = ?{p1} OR m.project = ?{p2} OR m.project LIKE ?{p3})"
+      | none =>
+        params := params.push cleanProj
+        let p1 := params.size
+        conds := conds.push s!"m.project = ?{p1}"
+  if let some rawSince := updatedSince? then
+    let cleanSince := rawSince.trimAscii.toString
+    if !cleanSince.isEmpty then
+      params := params.push cleanSince
+      let p := params.size
+      conds := conds.push (
+        s!"(CASE WHEN m.updated_at != '' AND NOT (m.updated_at GLOB '*[^0-9]*') THEN CAST(m.updated_at AS INTEGER) ELSE COALESCE(CAST(strftime('%s', m.updated_at) AS INTEGER), 0) END) >= " ++
+        s!"(CASE WHEN ?{p} != '' AND NOT (?{p} GLOB '*[^0-9]*') THEN CAST(?{p} AS INTEGER) ELSE COALESCE(CAST(strftime('%s', ?{p}) AS INTEGER), 0) END)"
+      )
+  if !statusesFilter.isEmpty then
+    let mut phs : Array String := Array.mkEmpty statusesFilter.size
+    for stVal in statusesFilter do
+      params := params.push stVal
+      phs := phs.push s!"?{params.size}"
+    conds := conds.push s!"m.status IN ({String.intercalate "," phs.toList})"
+  if !includeArchived then
+    conds := conds.push "m.status NOT IN ('acknowledged','archived')"
   let whereClause :=
-    match callerUserId? with
-    | some _ => "WHERE (m.owner_user_id = ?1 OR EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id = m.id AND s.user_id = ?1)) "
-    | none => ""
-  let params : Array String :=
-    match callerUserId? with
-    | some uid => #[uid]
-    | none => #[]
+    if conds.isEmpty then ""
+    else "WHERE " ++ String.intercalate " AND " conds.toList ++ " "
+  let mut tailClause := "ORDER BY m.updated_at DESC, m.id ASC"
+  if let some lim := limit? then
+    let clampedLim := max 1 (min 1000 lim)
+    params := params.push s!"{clampedLim}"
+    tailClause := tailClause ++ s!" LIMIT ?{params.size}"
+    if offset > 0 then
+      params := params.push s!"{offset}"
+      tailClause := tailClause ++ s!" OFFSET ?{params.size}"
+  tailClause := tailClause ++ ";"
   let sql :=
     "SELECT m.id,m.title,m.status,m.backend,COALESCE(m.model_override,'') AS model_override," ++
     "COALESCE(m.model_effort,'') AS model_effort,m.working_directory,m.updated_at,m.total_cost_cents," ++
@@ -1618,126 +1681,152 @@ def listMissionsJson
     "(SELECT COUNT(*) FROM mission_continuations c WHERE c.mission_id=m.id AND c.phase=1) AS armed_wakeups," ++
     "COALESCE(e.verified,1) AS ev_verified," ++
     "COALESCE(m.owner_user_id,'') AS owner_user_id," ++
-    "COALESCE((SELECT u.username FROM users u WHERE u.id = m.owner_user_id),'') AS owner_username " ++
+    "COALESCE((SELECT u.username FROM users u WHERE u.id = m.owner_user_id),'') AS owner_username," ++
+    "COALESCE(m.project,'') AS mission_project " ++
     "FROM missions m LEFT JOIN mission_terminal_evidence e ON e.mission_id = m.id " ++
     whereClause ++
-    "ORDER BY m.updated_at DESC, m.id ASC;"
+    tailClause
   let rows ← execParamQuery st.missionsDb sql params
-  let shareRows ← execParamQuery st.missionsDb
-    ("SELECT s.mission_id, s.user_id, COALESCE(u.username,''), s.created_at " ++
-     "FROM mission_shares s LEFT JOIN users u ON u.id = s.user_id ORDER BY s.created_at ASC, s.user_id ASC;") #[]
-  let sharesByMission : String → Array String := fun mid =>
-    match shareRows with
-    | .error _ => #[]
-    | .ok srs =>
-      if srs.size ≤ 1 then #[]
-      else Id.run do
-        let mut acc : Array String := #[]
-        for si in [1:srs.size] do
-          let sr := srs[si]!
-          if (sr[0]?).getD "" == mid then
-            let suid := (sr[1]?).getD ""
-            let suname := (sr[2]?).getD ""
-            let scat := (sr[3]?).getD ""
-            acc := acc.push s!"\{\"user_id\":{jsonEscape suid},\"username\":{jsonEscape suname},\"created_at\":{jsonEscape scat}}"
-        return acc
-  let contRows ← execParamQuery st.missionsDb
-    ("SELECT mission_id,id,phase,due_epoch,trigger_kind,reason,source,error,recurrence " ++
-     "FROM mission_continuations WHERE phase IN (1,2,3) ORDER BY due_epoch ASC, id ASC;") #[]
-  let contItemsByMission : String → Array String := fun mid =>
-    match contRows with
-    | .error _ => #[]
-    | .ok crs =>
-      if crs.size ≤ 1 then #[]
-      else Id.run do
-        let mut acc : Array String := #[]
-        for ci in [1:crs.size] do
-          let cr := crs[ci]!
-          if (cr[0]?).getD "" == mid then
-            let cid := (cr[1]?).getD ""
-            let cphase := ((cr[2]?.bind String.toNat?).getD 1).toUInt8
-            let cdue := (cr[3]?.bind String.toNat?).getD 0
-            let ctrig := (cr[4]?).getD "time"
-            let creason := (cr[5]?).getD ""
-            let csrc := (cr[6]?).getD ""
-            let cerr := (cr[7]?).getD ""
-            let crec := (cr[8]?).getD ""
-            let cstate :=
-              if cphase == 2 then (if ctrig == "delivery" then "waiting_for_client" else "queued")
-              else if cphase == 3 then "error"
-              else "scheduled"
-            let srcJson := if csrc.isEmpty then "" else s!",\"source\":{jsonEscape csrc}"
-            let errJson := if cerr.isEmpty then "" else s!",\"error\":{jsonEscape cerr}"
-            let recJson := if crec.isEmpty then "" else s!",\"recurrence\":{jsonEscape crec}"
-            acc := acc.push (
-              s!"\{\"id\":{jsonEscape cid},\"state\":{jsonEscape cstate}," ++
-              s!"\"next_at\":{renderContinuationNextAtJson ctrig cdue.toUInt64},\"trigger\":{jsonEscape ctrig},\"reason\":{jsonEscape creason}{srcJson}{errJson}{recJson}}")
-        return acc
-  return rows.map (fun rs =>
-    if rs.size ≤ 1 then "[]"
-    else Id.run do
-      let mut items : Array String := #[]
-      for i in [1:rs.size] do
-        let r := rs[i]!
-        let c0 := r[0]?.getD ""
-        let c1 := r[1]?.getD ""
-        let c2 := r[2]?.getD ""
-        let c3 := r[3]?.getD ""
-        let c4 := r[4]?.getD ""
-        let c5 := r[5]?.getD ""
-        let c6 := r[6]?.getD ""
-        let c7 := r[7]?.getD ""
-        let total_cost_cents := (r[8]?.bind String.toNat?).getD 0
-        let authMode := r[9]?.getD "writer"
-        let placeKind := r[10]?.getD "managed"
-        let superBy := r[11]?.getD ""
-        let orphAt := r[12]?.getD ""
-        let diskGib := (r[13]?.bind String.toNat?).getD 0
-        let stateRev := (r[14]?.bind String.toNat?).getD 1
-        let rowBoot := ((r[15]?.bind String.toNat?).getD 1).toUInt64
-        let mTermReason := r[16]?.getD ""
-        let evReason := r[17]?.getD ""
-        let evSummary := r[18]?.getD ""
-        let evArtifact := r[19]?.getD ""
-        let evRecorded := r[20]?.getD ""
-        let liveRuns := (r[21]?.bind String.toNat?).getD 0
-        let evCnt := (r[22]?.bind String.toNat?).getD 0
-        let rawTags := r[23]?.getD "[]"
-        let armedWakeups := (r[24]?.bind String.toNat?).getD 0
-        let evVerified := ((r[25]?.bind String.toNat?).getD 1) != 0
-        let ownerUid := r[26]?.getD ""
-        let ownerUname := r[27]?.getD ""
-        let viewerRole :=
-          match callerUserId? with
-          | some uid => if ownerUid == uid then "owner" else "participant"
-          | none => "owner"
-        let shItems := sharesByMission c0
-        let sharedWithJson := "[" ++ String.intercalate "," shItems.toList ++ "]"
-        let effReason := if !evReason.isEmpty then evReason else mTermReason
-        let hasEv := !evRecorded.isEmpty || !evReason.isEmpty
-        let verdict := deriveMissionHealthVerdict
-          c2 effReason orphAt superBy placeKind
-          (rowBoot == nodeBootEpoch) false (liveRuns > 0) (evCnt > 0) (armedWakeups > 0) hasEv
-        let evJson :=
-          if hasEv then
-            s!"\{\"terminal_reason\":{jsonEscape evReason},\"summary\":{jsonEscape evSummary},\"artifact_ref\":{jsonEscape evArtifact},\"verified\":{if evVerified then "true" else "false"},\"recorded_at\":{jsonEscape evRecorded}}"
-          else "null"
-        let cItems := contItemsByMission c0
-        let contJson := s!"\{\"count\":{cItems.size},\"items\":[{String.intercalate "," cItems.toList}]}"
-        let tagsOut :=
-          if rawTags.startsWith "[" then rawTags
-          else projectCompatibilityTagsJson authMode placeKind superBy orphAt diskGib.toUInt64
-        items := items.push (
-          s!"\{\"id\":{jsonEscape c0},\"title\":{jsonEscape c1},\"status\":{jsonEscape c2},\"backend\":{jsonEscape c3}," ++
-          s!"\"model_override\":{jsonEscape c4},\"model_effort\":{jsonEscape c5},\"working_directory\":{jsonEscape c6}," ++
-          s!"\"updated_at\":{jsonEscape c7},\"total_cost_cents\":{total_cost_cents}," ++
-          s!"\"authority_mode\":{jsonEscape authMode},\"placement_kind\":{jsonEscape placeKind}," ++
-          s!"\"superseded_by_mission_id\":{jsonEscape superBy},\"orphaned_at\":{jsonEscape orphAt}," ++
-          s!"\"reserved_disk_gib\":{diskGib},\"state_revision\":{stateRev}," ++
-          s!"\"viewer_role\":{jsonEscape viewerRole},\"owner_username\":{jsonEscape ownerUname},\"shared_with\":{sharedWithJson}," ++
-          s!"\"health_verdict\":{jsonEscape verdict},\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut}}"
-        )
-      return "[" ++ String.intercalate "," items.toList ++ "]")
+  let .ok rs := rows | return .error (match rows with | .error e => e | .ok _ => "missions_query_failed")
+  if rs.size ≤ 1 then
+    return .ok "[]"
+  let mut returnedMids : Array String := Array.mkEmpty (rs.size - 1)
+  for i in [1:rs.size] do
+    returnedMids := returnedMids.push (rs[i]![0]?.getD "")
+  let useScopedIn := returnedMids.size ≤ 200
+  let inPlaceholders :=
+    if useScopedIn then
+      String.intercalate "," ((List.range returnedMids.size).map (fun k => s!"?{k + 1}"))
+    else ""
+  let inParams := if useScopedIn then returnedMids else #[]
+  let shareSql :=
+    if useScopedIn then
+      s!"SELECT s.mission_id, s.user_id, COALESCE(u.username,''), s.created_at FROM mission_shares s LEFT JOIN users u ON u.id = s.user_id WHERE s.mission_id IN ({inPlaceholders}) ORDER BY s.created_at ASC, s.user_id ASC;"
+    else
+      "SELECT s.mission_id, s.user_id, COALESCE(u.username,''), s.created_at FROM mission_shares s LEFT JOIN users u ON u.id = s.user_id ORDER BY s.created_at ASC, s.user_id ASC;"
+  let shareRows ← execParamQuery st.missionsDb shareSql inParams
+  let sharesMap : Std.HashMap String (Array String) := Id.run do
+    let mut m : Std.HashMap String (Array String) := {}
+    if let .ok srs := shareRows then
+      for si in [1:srs.size] do
+        let sr := srs[si]!
+        let mid := (sr[0]?).getD ""
+        let suid := (sr[1]?).getD ""
+        let suname := (sr[2]?).getD ""
+        let scat := (sr[3]?).getD ""
+        let entry := s!"\{\"user_id\":{jsonEscape suid},\"username\":{jsonEscape suname},\"created_at\":{jsonEscape scat}}"
+        m := m.insert mid (((m[mid]?).getD #[]).push entry)
+    return m
+  let contSql :=
+    if useScopedIn then
+      s!"SELECT mission_id,id,phase,due_epoch,trigger_kind,reason,source,error,recurrence FROM mission_continuations WHERE mission_id IN ({inPlaceholders}) AND phase IN (1,2,3) ORDER BY due_epoch ASC, id ASC;"
+    else
+      "SELECT mission_id,id,phase,due_epoch,trigger_kind,reason,source,error,recurrence FROM mission_continuations WHERE phase IN (1,2,3) ORDER BY due_epoch ASC, id ASC;"
+  let contRows ← execParamQuery st.missionsDb contSql inParams
+  let contMap : Std.HashMap String (Array String) := Id.run do
+    let mut m : Std.HashMap String (Array String) := {}
+    if let .ok crs := contRows then
+      for ci in [1:crs.size] do
+        let cr := crs[ci]!
+        let mid := (cr[0]?).getD ""
+        let cid := (cr[1]?).getD ""
+        let cphase := ((cr[2]?.bind String.toNat?).getD 1).toUInt8
+        let cdue := (cr[3]?.bind String.toNat?).getD 0
+        let ctrig := (cr[4]?).getD "time"
+        let creason := (cr[5]?).getD ""
+        let csrc := (cr[6]?).getD ""
+        let cerr := (cr[7]?).getD ""
+        let crec := (cr[8]?).getD ""
+        let cstate :=
+          if cphase == 2 then (if ctrig == "delivery" then "waiting_for_client" else "queued")
+          else if cphase == 3 then "error"
+          else "scheduled"
+        let srcJson := if csrc.isEmpty then "" else s!",\"source\":{jsonEscape csrc}"
+        let errJson := if cerr.isEmpty then "" else s!",\"error\":{jsonEscape cerr}"
+        let recJson := if crec.isEmpty then "" else s!",\"recurrence\":{jsonEscape crec}"
+        let entry :=
+          s!"\{\"id\":{jsonEscape cid},\"state\":{jsonEscape cstate}," ++
+          s!"\"next_at\":{renderContinuationNextAtJson ctrig cdue.toUInt64},\"trigger\":{jsonEscape ctrig},\"reason\":{jsonEscape creason}{srcJson}{errJson}{recJson}}"
+        m := m.insert mid (((m[mid]?).getD #[]).push entry)
+    return m
+  let outStr : String := Id.run do
+    let mut items : Array String := Array.mkEmpty (rs.size - 1)
+    for i in [1:rs.size] do
+      let r := rs[i]!
+      let c0 := r[0]?.getD ""
+      let c1 := r[1]?.getD ""
+      let c2 := r[2]?.getD ""
+      let c3 := r[3]?.getD ""
+      let c4 := r[4]?.getD ""
+      let c5 := r[5]?.getD ""
+      let c6 := r[6]?.getD ""
+      let c7 := r[7]?.getD ""
+      let total_cost_cents := (r[8]?.bind String.toNat?).getD 0
+      let authMode := r[9]?.getD "writer"
+      let placeKind := r[10]?.getD "managed"
+      let superBy := r[11]?.getD ""
+      let orphAt := r[12]?.getD ""
+      let diskGib := (r[13]?.bind String.toNat?).getD 0
+      let stateRev := (r[14]?.bind String.toNat?).getD 1
+      let rowBoot := ((r[15]?.bind String.toNat?).getD 1).toUInt64
+      let mTermReason := r[16]?.getD ""
+      let evReason := r[17]?.getD ""
+      let evSummary := r[18]?.getD ""
+      let evArtifact := r[19]?.getD ""
+      let evRecorded := r[20]?.getD ""
+      let liveRuns := (r[21]?.bind String.toNat?).getD 0
+      let evCnt := (r[22]?.bind String.toNat?).getD 0
+      let rawTags := r[23]?.getD "[]"
+      let armedWakeups := (r[24]?.bind String.toNat?).getD 0
+      let evVerified := ((r[25]?.bind String.toNat?).getD 1) != 0
+      let ownerUid := r[26]?.getD ""
+      let ownerUname := r[27]?.getD ""
+      let rawProj := r[28]?.getD ""
+      let proj :=
+        match callerUserId? with
+        | some uid =>
+          if !rawProj.isEmpty && rawProj.startsWith (uid ++ ":") then
+            (rawProj.drop (uid.length + 1)).toString
+          else if !bootstrapAdminId.isEmpty && uid == bootstrapAdminId then
+            rawProj
+          else
+            match rawProj.splitOn ":" with
+            | [_, rest] => rest
+            | _ => rawProj
+        | none => rawProj
+      let projField := if proj.isEmpty then "" else s!",\"project\":{jsonEscape proj}"
+      let viewerRole :=
+        match callerUserId? with
+        | some uid => if ownerUid == uid then "owner" else "participant"
+        | none => "owner"
+      let shItems := (sharesMap[c0]?).getD #[]
+      let sharedWithJson := "[" ++ String.intercalate "," shItems.toList ++ "]"
+      let effReason := if !evReason.isEmpty then evReason else mTermReason
+      let hasEv := !evRecorded.isEmpty || !evReason.isEmpty
+      let verdict := deriveMissionHealthVerdict
+        c2 effReason orphAt superBy placeKind
+        (rowBoot == nodeBootEpoch) false (liveRuns > 0) (evCnt > 0) (armedWakeups > 0) hasEv
+      let evJson :=
+        if hasEv then
+          s!"\{\"terminal_reason\":{jsonEscape evReason},\"summary\":{jsonEscape evSummary},\"artifact_ref\":{jsonEscape evArtifact},\"verified\":{if evVerified then "true" else "false"},\"recorded_at\":{jsonEscape evRecorded}}"
+        else "null"
+      let cItems := (contMap[c0]?).getD #[]
+      let contJson := s!"\{\"count\":{cItems.size},\"items\":[{String.intercalate "," cItems.toList}]}"
+      let tagsOut :=
+        if rawTags.startsWith "[" then rawTags
+        else projectCompatibilityTagsJson authMode placeKind superBy orphAt diskGib.toUInt64
+      items := items.push (
+        s!"\{\"id\":{jsonEscape c0},\"title\":{jsonEscape c1},\"status\":{jsonEscape c2},\"backend\":{jsonEscape c3}," ++
+        s!"\"model_override\":{jsonEscape c4},\"model_effort\":{jsonEscape c5}{projField},\"working_directory\":{jsonEscape c6}," ++
+        s!"\"updated_at\":{jsonEscape c7},\"total_cost_cents\":{total_cost_cents}," ++
+        s!"\"authority_mode\":{jsonEscape authMode},\"placement_kind\":{jsonEscape placeKind}," ++
+        s!"\"superseded_by_mission_id\":{jsonEscape superBy},\"orphaned_at\":{jsonEscape orphAt}," ++
+        s!"\"reserved_disk_gib\":{diskGib},\"state_revision\":{stateRev}," ++
+        s!"\"viewer_role\":{jsonEscape viewerRole},\"owner_username\":{jsonEscape ownerUname},\"shared_with\":{sharedWithJson}," ++
+        s!"\"health_verdict\":{jsonEscape verdict},\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut}}"
+      )
+    return "[" ++ String.intercalate "," items.toList ++ "]"
+  return .ok outStr
 
 /-- Check whether `status` permits starting a machine transfer. -/
 def isStatusMovable (status : String) : Bool :=
@@ -3387,10 +3476,24 @@ def renderAIProviderForCallerJson
     kvs := kvs.push s!"\"custom_models\":{renderCustomModelsJson p.customModels}"
   return "{" ++ String.intercalate "," kvs.toList ++ "}"
 
-/-- Append one event row to `mission_events` with monotonically increasing `seq` per mission. -/
+/-- Register a live `appendMissionEvent` listener on `st` and return an idempotent unregister action. -/
+def registerMissionEventListener
+    (st : CoreStore)
+    (cb : String → UInt64 → String → String → String → IO Unit) : IO (IO Unit) := do
+  match st.eventListenersRef? with
+  | none => return (pure ())
+  | some ref =>
+    let tok ← IO.monoNanosNow
+    let uid := tok.toUInt64
+    ref.modify fun xs => xs.push (uid, cb)
+    return do
+      ref.modify fun xs => xs.filter (fun (k, _) => k != uid)
+
+/-- Append one event row to `mission_events` with monotonically increasing `seq` per mission,
+    then broadcast outside the SQLite write mutex to active `/api/control/sync` listeners. -/
 def appendMissionEvent
-    (st : CoreStore) (missionId eventType payloadJson createdAt : String) : IO (Except String UInt64) :=
-  withImmediateTx st.missionsDb do
+    (st : CoreStore) (missionId eventType payloadJson createdAt : String) : IO (Except String UInt64) := do
+  let txRes ← withImmediateTx st.missionsDb do
     let seqRes ← execParamQueryUnlocked st.missionsDb
       "SELECT COALESCE(MAX(seq), 0) + 1 FROM mission_events WHERE mission_id=?1;" #[missionId]
     let .ok srs := seqRes | return .error "mission_events_seq_failed"
@@ -3401,6 +3504,12 @@ def appendMissionEvent
     match ins with
     | .error e => return .error e
     | .ok _ => return .ok nextSeq
+  if let .ok committedSeq := txRes then
+    if let some ref := st.eventListenersRef? then
+      let listeners ← ref.get
+      for (_, cb) in listeners do
+        try cb missionId committedSeq eventType payloadJson createdAt catch _ => pure ()
+  return txRes
 
 /-- Render one `mission_events` row (`id`, `mission_id`, `seq`, `event_type`, `payload`, `created_at`)
     as the `StoredEvent` JSON object expected by Desktop, iOS, and Android clients. -/
@@ -3450,15 +3559,70 @@ def renderStoredMissionEventJson
       extraMetaPairs := extraMetaPairs.push ("success", .bool succ)
     if let some (.obj mPairs) := jv.field? "metadata" then
       extraMetaPairs := extraMetaPairs ++ mPairs
-  let mut truncated := false
   if let some maxP := maxPayload? then
     if maxP > 0 && (evType == "tool_call" || evType == "tool_result") && content.utf8ByteSize > maxP then
       content := (content.take maxP).toString
-      truncated := true
-      extraMetaPairs := extraMetaPairs.push ("truncated", .bool true)
-  let _ := truncated
+      if !extraMetaPairs.any (fun (k, _) => k == "truncated") then
+        extraMetaPairs := extraMetaPairs.push ("truncated", .bool true)
   let metaJson := renderCompact (.obj extraMetaPairs)
   return s!"\{\"id\":{rowId},\"event_id\":{eventIdJson},\"mission_id\":{jsonEscape missionId},\"sequence\":{seq},\"event_type\":{jsonEscape evType},\"timestamp\":{jsonEscape createdAt},\"tool_call_id\":{callIdJson},\"tool_name\":{toolNameJson},\"content\":{jsonEscape content},\"metadata\":{metaJson}}"
+
+/-- Render one `mission_events` item as a `/api/control/sync` WebSocket frame compatible across
+    Desktop (`stream.ts`), iOS (`StoredEvent.fromStreamFrame`), and Android (`OrbLiveEventReducer`). -/
+def renderSyncWsEventJson
+    (missionId : String) (seq : UInt64)
+    (evType rawPayload createdAt : String)
+    (maxPayload? : Option Nat := none)
+    (inboxPush : Bool := false) : String := Id.run do
+  let wireType := if inboxPush then "inbox_answer_push" else evType
+  let mut kvs : Array (String × JVal) := #[
+    ("type", .str wireType),
+    ("event_type", .str evType),
+    ("mission_id", .str missionId),
+    ("sequence", .nat seq.toNat),
+    ("timestamp", .str createdAt),
+    ("at", .str createdAt)
+  ]
+  if inboxPush then
+    kvs := kvs.push ("inbox_push", .bool true)
+  if let .ok (.obj pairs) := OrbBin.Json.parse rawPayload then
+    let mut hasId := false
+    let mut hasName := false
+    let mut hasToolName := false
+    for (k, v) in pairs do
+      if k != "type" && k != "mission_id" && k != "sequence" && k != "timestamp" && k != "at" then
+        if k == "id" || k == "event_id" then hasId := true
+        if k == "name" then hasName := true
+        if k == "tool_name" then hasToolName := true
+        if let some maxP := maxPayload? then
+          if maxP > 0 && (evType == "tool_call" || evType == "tool_result") && (k == "args" || k == "result" || k == "content") then
+            let asStr := match v with | .str s => s | other => renderCompact other
+            if asStr.utf8ByteSize > maxP then
+              kvs := kvs.push (k, .str (asStr.take maxP).toString)
+              kvs := kvs.push ("truncated", .bool true)
+            else
+              kvs := kvs.push (k, v)
+          else
+            kvs := kvs.push (k, v)
+        else
+          kvs := kvs.push (k, v)
+    if !hasId then
+      kvs := kvs.push ("id", .str s!"seq-{seq}")
+    if hasToolName && !hasName then
+      if let some (_, v) := pairs.find? (fun (k, _) => k == "tool_name") then
+        kvs := kvs.push ("name", v)
+    else if hasName && !hasToolName then
+      if let some (_, v) := pairs.find? (fun (k, _) => k == "name") then
+        kvs := kvs.push ("tool_name", v)
+  else
+    let mut text := rawPayload
+    if let some maxP := maxPayload? then
+      if maxP > 0 && (evType == "tool_call" || evType == "tool_result") && text.utf8ByteSize > maxP then
+        text := (text.take maxP).toString
+        kvs := kvs.push ("truncated", .bool true)
+    kvs := kvs.push ("id", .str s!"seq-{seq}")
+    kvs := kvs.push ("content", .str text)
+  return renderCompact (.obj kvs)
 
 /-- Page result for `GET /api/control/missions/:id/events`. -/
 structure MissionEventsPage where
@@ -3468,33 +3632,77 @@ structure MissionEventsPage where
   pageMaxSeq : Option UInt64
   maxSeq     : UInt64
 
-/-- Query a cursor-paginated slice of `mission_events` matching `X-Orb-Events-Protocol: 1` semantics. -/
+/-- Default spine event types when `?view=transcript` is requested without explicit `types`. -/
+def transcriptSpineEventTypes : Array String :=
+  #["user_message", "assistant_message", "assistant_message_canonical", "todo", "error"]
+
+/-- Query a cursor-paginated slice of `mission_events` matching `X-Orb-Events-Protocol: 1` semantics.
+    Pushes `typesFilter` / `view=transcript` into SQL `WHERE` *before* `LIMIT` and projects oversized
+    `tool_call`/`tool_result` payloads via SQLite `SUBSTR` when `maxPayload?` is set. -/
 def queryMissionEventsPage
     (st : CoreStore) (missionId : String)
     (sinceSeq? beforeSeq? : Option UInt64)
     (limit : Nat := 200)
     (typesFilter : Array String := #[])
-    (maxPayload? : Option Nat := none) : IO (Except String MissionEventsPage) := do
+    (maxPayload? : Option Nat := none)
+    (view? : Option String := none) : IO (Except String MissionEventsPage) := do
   let clampedLim := max 1 (min 500 limit)
   let fetchLim := clampedLim + 1
   let maxRes ← execParamQuery st.missionsDb
     "SELECT COALESCE(MAX(seq), 0) FROM mission_events WHERE mission_id=?1;" #[missionId]
   let .ok maxRs := maxRes | return .error "mission_events_max_failed"
   let maxSeq : UInt64 := (((maxRs[1]?.bind (·[0]?)).bind String.toNat?).getD 0).toUInt64
-  let (sql, params, forwardOrder) :=
+  let effTypes :=
+    if !typesFilter.isEmpty then typesFilter
+    else if view? == some "transcript" then transcriptSpineEventTypes
+    else #[]
+  let mut params : Array String := #[missionId]
+  let payloadExpr ← do
+    match maxPayload? with
+    | some maxP =>
+      if maxP > 0 then
+        let cut := maxP + 1024
+        params := params.push s!"{cut}"
+        let pCut := params.size
+        params := params.push s!"{maxP}"
+        let pMax := params.size
+        pure (
+          s!"CASE WHEN event_type IN ('tool_call','tool_result') AND LENGTH(payload) > ?{pCut} AND json_valid(payload) THEN " ++
+          "json_object('id',COALESCE(json_extract(payload,'$.id'),json_extract(payload,'$.event_id'))," ++
+          "'tool_call_id',COALESCE(json_extract(payload,'$.tool_call_id'),json_extract(payload,'$.call_id'))," ++
+          "'tool_name',COALESCE(json_extract(payload,'$.tool_name'),json_extract(payload,'$.name'))," ++
+          "'success',json_extract(payload,'$.success')," ++
+          s!"'content',SUBSTR(COALESCE(json_extract(payload,'$.result'),json_extract(payload,'$.args'),json_extract(payload,'$.content'),''),1,?{pMax})," ++
+          "'metadata',json_object('truncated',json('true'))) " ++
+          s!"WHEN event_type IN ('tool_call','tool_result') AND LENGTH(payload) > ?{pCut} THEN SUBSTR(payload,1,?{pMax}) ELSE payload END"
+        )
+      else pure "payload"
+    | none => pure "payload"
+  let mut whereSql := "WHERE mission_id=?1"
+  let forwardOrder ← do
     match sinceSeq?, beforeSeq? with
     | some s, _ =>
-      ("SELECT id,seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 AND seq>?2 ORDER BY seq ASC LIMIT ?3;",
-       #[missionId, s!"{s}", s!"{fetchLim}"], true)
+      params := params.push s!"{s}"
+      whereSql := whereSql ++ s!" AND seq>?{params.size}"
+      pure true
     | none, some b =>
-      ("SELECT id,seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3;",
-       #[missionId, s!"{b}", s!"{fetchLim}"], false)
+      params := params.push s!"{b}"
+      whereSql := whereSql ++ s!" AND seq<?{params.size}"
+      pure false
     | none, none =>
-      ("SELECT id,seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 ORDER BY seq DESC LIMIT ?2;",
-       #[missionId, s!"{fetchLim}"], false)
+      pure false
+  if !effTypes.isEmpty then
+    let mut tPhs : Array String := Array.mkEmpty effTypes.size
+    for t in effTypes do
+      params := params.push t
+      tPhs := tPhs.push s!"?{params.size}"
+    whereSql := whereSql ++ s!" AND event_type IN ({String.intercalate "," tPhs.toList})"
+  params := params.push s!"{fetchLim}"
+  let orderDir := if forwardOrder then "ASC" else "DESC"
+  let sql := s!"SELECT id,seq,event_type,{payloadExpr},created_at FROM mission_events {whereSql} ORDER BY seq {orderDir} LIMIT ?{params.size};"
   let rowsRes ← execParamQuery st.missionsDb sql params
   let .ok rs := rowsRes | return .error "mission_events_query_failed"
-  let mut rawItems : Array (UInt64 × UInt64 × String × String × String) := #[]
+  let mut rawItems : Array (UInt64 × UInt64 × String × String × String) := Array.mkEmpty (if rs.size > 0 then rs.size - 1 else 0)
   for i in [1:rs.size] do
     let r := rs[i]!
     let rid := (((r[0]?).bind String.toNat?).getD 0).toUInt64
@@ -3502,8 +3710,7 @@ def queryMissionEventsPage
     let et := (r[2]?).getD ""
     let pl := (r[3]?).getD ""
     let ts := (r[4]?).getD ""
-    if typesFilter.isEmpty || typesFilter.contains et then
-      rawItems := rawItems.push (rid, seq, et, pl, ts)
+    rawItems := rawItems.push (rid, seq, et, pl, ts)
   let hasMore := rawItems.size > clampedLim
   let pageSlice := if hasMore then rawItems.extract 0 clampedLim else rawItems
   let ordered := if forwardOrder then pageSlice else pageSlice.reverse
@@ -3530,6 +3737,42 @@ def queryMissionEventsPage
       pageMaxSeq := some lastSeq
       maxSeq := maxSeq
     }
+
+/-- Replay `mission_events` rows strictly after `sinceSeq` (`seq > sinceSeq`) as `/api/control/sync`
+    WebSocket frames (`(frames, cursorSeq, lagged)` where `lagged == true` if `> maxReplay` events were missed). -/
+def queryMissionSyncReplayFrames
+    (st : CoreStore) (missionId : String)
+    (sinceSeq? : Option UInt64)
+    (maxPayload? : Option Nat := some 4096)
+    (maxReplay : Nat := 500) : IO (Except String (Array String × UInt64 × Bool)) := do
+  let maxRes ← execParamQuery st.missionsDb
+    "SELECT COALESCE(MAX(seq), 0) FROM mission_events WHERE mission_id=?1;" #[missionId]
+  let .ok maxRs := maxRes | return .error "mission_events_max_failed"
+  let maxSeq : UInt64 := (((maxRs[1]?.bind (·[0]?)).bind String.toNat?).getD 0).toUInt64
+  match sinceSeq? with
+  | none => return .ok (#[], maxSeq, false)
+  | some s =>
+    if s ≥ maxSeq then
+      return .ok (#[], maxSeq, false)
+    let fetchLim := maxReplay + 1
+    let res ← execParamQuery st.missionsDb
+      "SELECT seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 AND seq>?2 ORDER BY seq ASC LIMIT ?3;"
+      #[missionId, s!"{s}", s!"{fetchLim}"]
+    let .ok rs := res | return .error "mission_events_replay_failed"
+    let cnt := if rs.size > 0 then rs.size - 1 else 0
+    if cnt > maxReplay then
+      return .ok (#[], maxSeq, true)
+    let mut frames : Array String := Array.mkEmpty cnt
+    let mut lastSeq := s
+    for i in [1:rs.size] do
+      let r := rs[i]!
+      let seq := (((r[0]?).bind String.toNat?).getD 0).toUInt64
+      let et := (r[1]?).getD ""
+      let pl := (r[2]?).getD ""
+      let ts := (r[3]?).getD ""
+      lastSeq := seq
+      frames := frames.push (renderSyncWsEventJson missionId seq et pl ts maxPayload? false)
+    return .ok (frames, max maxSeq lastSeq, false)
 
 /-- Fetch full untruncated `tool_call` + `tool_result` event rows for `GET /api/control/missions/:id/tool-calls/:callId`. -/
 def queryMissionToolCallEventsJson (st : CoreStore) (missionId callId : String) : IO (Except String String) := do

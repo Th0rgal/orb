@@ -1263,13 +1263,48 @@ private def runWarmClaudeRpcE2eChecks (validTok tmpStateDir : String) : IO (Nat 
   let ok ← assertTrue "warm_claude_rpc_checkpoints_diff_and_worktree_e2e" rpcE2eOk
   return (if ok then 1 else 0, 1)
 
+private def runDesktopBootstrapChecks (tmpStateDir validTok : String) : IO (Nat × Nat) := do
+  let bootDir := s!"{tmpStateDir}/bootstrap-test"
+  IO.FS.createDirAll (System.FilePath.mk bootDir)
+  let bootRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := bootDir, homeDir := bootDir, hostOs := "macos" } : LocaldState)
+  let _ ← dispatchRpcCommand bootRef "desktop_connection_save" (.obj #[
+    ("api_url", .str "https://agent-backend-dev.thomas.md/"),
+    ("token", .str "boot-tok-123")
+  ])
+  let _ ← dispatchRpcCommand bootRef "desktop_prefs_patch" (.obj #[
+    ("set", .obj #[("orb.theme", .str "dark")])
+  ])
+  let bootReloadRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := bootDir, homeDir := bootDir, hostOs := "macos" } : LocaldState)
+  let bootRes ← dispatchRpcCommand bootReloadRef "desktop_bootstrap" (.obj #[])
+  let bootOk :=
+    match bootRes with
+    | .ok jv =>
+      let connOk :=
+        match jv.field? "connection" with
+        | some cj => cj.fieldStr? "api_url" == some "https://agent-backend-dev.thomas.md/" && cj.fieldStr? "token" == some "boot-tok-123"
+        | none => false
+      let prefsOk :=
+        match jv.field? "prefs" with
+        | some pj =>
+          pj.fieldBool? "exists" == some true &&
+          (match pj.field? "prefs" with | some inner => inner.fieldStr? "orb.theme" == some "dark" | none => false)
+        | none => false
+      let txOk :=
+        match jv.field? "transport" with
+        | some tj => tj.fieldStr? "configured_target" == some "https://agent-backend-dev.thomas.md"
+        | none => false
+      connOk && prefsOk && txOk
+    | .error _ => false
+  let ok ← assertTrue "desktop_bootstrap_single_rpc_hydrates_connection_prefs_and_bridge" bootOk
+  return (if ok then 1 else 0, 1)
+
 def main : IO UInt32 := do
   let mut passed := 0
   let mut total := 0
 
-  -- 1. Command table size (97 desktop commands + plugin:app|version = 98)
+  -- 1. Command table size (98 desktop commands + plugin:app|version = 99)
   total := total + 1
-  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 98) then passed := passed + 1
+  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 99) then passed := passed + 1
 
   -- 2. Loopback RPC auth gate (>= 32-byte non-placeholder secret + local Origin confinement)
   let validTok := "0123456789abcdef0123456789abcdef"
@@ -1730,6 +1765,11 @@ def main : IO UInt32 := do
   let (warmPassed, warmTotal) ← runWarmClaudeRpcE2eChecks validTok tmpStateDir
   passed := passed + warmPassed
   total := total + warmTotal
+
+  -- 22. Single-RPC `desktop_bootstrap` consolidates connection, UI prefs, and transport bridge config
+  let (bootPassed, bootTotal) ← runDesktopBootstrapChecks tmpStateDir validTok
+  passed := passed + bootPassed
+  total := total + bootTotal
 
   try IO.FS.removeDirAll tmpStateDir catch _ => pure ()
 

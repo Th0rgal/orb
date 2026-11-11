@@ -85,6 +85,7 @@ final class OrbCore {
     @ObservationIgnored private var cachedTokenEndpoint: String?
     @ObservationIgnored private var cachedJwtToken: String?
     @ObservationIgnored private var endpointCooldowns: [String: Date] = [:]
+    @ObservationIgnored private var openBundleUnsupportedScopes: Set<String> = []
     @ObservationIgnored private var missionDeltaScope: String = ""
     @ObservationIgnored private var missionDeltaCursor: String?
     @ObservationIgnored private var missionDeltaPolls: Int = 0
@@ -468,6 +469,51 @@ final class OrbCore {
         let maxSequence = (response.value(forHTTPHeaderField: "X-Max-Sequence") ?? response.value(forHTTPHeaderField: "x-max-sequence"))
             .flatMap { Int64($0) }
         return MissionEventsResult(events: events, maxSequence: maxSequence)
+    }
+
+    func getMissionOpenBundle(
+        id: String,
+        sinceSeq: Int64? = nil,
+        limit: Int = 150,
+        maxPayload: Int = StoredEvent.resultKeepUTF8,
+        spineLimit: Int = 80
+    ) async -> MissionOpenBundleResult? {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-api_base_url") { return nil }
+        #endif
+        guard !endpoint.isEmpty else { return nil }
+        let scopeKey = "\(endpoint)|\(backendVersion ?? "")"
+        guard !openBundleUnsupportedScopes.contains(scopeKey) else { return nil }
+
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "limit", value: String(limit)),
+            URLQueryItem(name: "max_payload", value: String(maxPayload)),
+            URLQueryItem(name: "spine_limit", value: String(spineLimit)),
+        ]
+        if let sinceSeq {
+            queryItems.append(URLQueryItem(name: "since_seq", value: String(sinceSeq)))
+        }
+        var urlString = "/api/control/missions/\(Self.escape(id))/open"
+        var components = URLComponents(string: urlString)
+        components?.queryItems = queryItems
+        if let fullPath = components?.string {
+            urlString = fullPath
+        }
+        do {
+            let (bundle, _): (MissionOpenBundleResult, HTTPURLResponse) = try await getWithResponse(urlString)
+            guard bundle.protocolVersion == 1 else {
+                openBundleUnsupportedScopes.insert(scopeKey)
+                return nil
+            }
+            return bundle
+        } catch let http as OrbHTTPError {
+            if http.status == 404 || http.status == 405 || http.status == 501 {
+                openBundleUnsupportedScopes.insert(scopeKey)
+            }
+            return nil
+        } catch {
+            return nil
+        }
     }
 
     // MARK: - FIDO Signing
@@ -1108,6 +1154,10 @@ final class OrbCore {
                             for sub in subscribers.values where sub.kinds == ["presentation"] {
                                 sub.onEvent(eventType, obj)
                             }
+                            continue
+                        }
+                        if eventType == "inbox_answer_push" {
+                            OrbWarmSyncCoordinator.shared.ingestInboxAnswerPush(obj)
                             continue
                         }
                         if eventType == "mission_placement_changed" {
@@ -2079,6 +2129,25 @@ struct OrbTransportEpochState: Equatable, Sendable {
 struct MissionEventsResult: Sendable {
     let events: [StoredEvent]
     let maxSequence: Int64?
+}
+
+struct MissionOpenBundleResult: Decodable, Sendable {
+    let protocolVersion: Int?
+    let mission: OrbJSON
+    let events: [StoredEvent]
+    let spine: [StoredEvent]
+    let queue: OrbJSON
+    let maxSeq: Int64?
+    let hasMore: Bool?
+    let reset: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case protocolVersion = "protocol"
+        case mission, events, spine, queue
+        case maxSeq = "max_seq"
+        case hasMore = "has_more"
+        case reset
+    }
 }
 
 

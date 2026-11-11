@@ -931,6 +931,7 @@ def isAllowedLocaldOrigin (origin? : Option String) : Bool :=
 /-- Canonical list of all desktop IPC commands (`plugin:app|version` + native RPCs). -/
 def supportedDesktopCommands : Array String := #[
   "plugin:app|version",
+  "desktop_bootstrap",
   "transport_bridge_configure",
   "desktop_connection_load", "desktop_connection_save",
   "desktop_prefs_load", "desktop_prefs_patch", "diagnostics_append",
@@ -3978,6 +3979,55 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "plugin:app|version" =>
     let ver := (← OrbBin.PosixExt.getEnvNonEmpty "ORB_APP_VERSION").getD "0.13.0"
     return .ok (.str ver)
+  | "desktop_bootstrap" =>
+    let shardCountU8 : UInt8 := UInt8.ofNat st.bridge.shardPorts.size
+    if verifySseShardConfig shardCountU8 st.bridge.proxyPort != 1 ||
+       !allShardPortsValid st.rpcPort st.bridge.proxyPort st.bridge.shardPorts then
+      return .error "invalid SSE shard configuration"
+    let connVal : JVal ← do
+      match connectionFilePath? st with
+      | none => pure st.connectionJson
+      | some path =>
+        if !(← path.pathExists) then pure st.connectionJson
+        else
+          try
+            let raw ← IO.FS.readFile path
+            match OrbBin.Json.parse raw.trimAscii.toString with
+            | .ok jv =>
+              stRef.modify fun s => { s with connectionJson := jv }
+              pure jv
+            | .error _ => pure st.connectionJson
+          catch _ => pure st.connectionJson
+    let sinceRev? := args.fieldStr? "since_rev"
+    let prefsRes ← uiPrefsMutex.atomically do
+      readUiPrefsFromDisk (uiPrefsFilePath? st)
+    let prefsVal : JVal :=
+      match prefsRes with
+      | .error _ => .obj #[("unchanged", .bool false), ("rev", .str ""), ("exists", .bool false), ("prefs", .obj #[])]
+      | .ok (prefsObj, rev, existed) =>
+        if existed && sinceRev? == some rev then
+          .obj #[("unchanged", .bool true), ("rev", .str rev), ("exists", .bool true)]
+        else
+          .obj #[("unchanged", .bool false), ("rev", .str rev), ("exists", .bool existed), ("prefs", prefsObj)]
+    let explicitUrl := ((args.fieldStr? "apiUrl").orElse (fun _ => args.fieldStr? "api_url")).getD ""
+    let savedUrl := ((connVal.fieldStr? "api_url").orElse (fun _ => connVal.fieldStr? "apiUrl")).getD ""
+    let rawUrl := if !explicitUrl.trimAscii.toString.isEmpty then explicitUrl else savedUrl
+    let cleanUrl := OrbBin.PosixExt.stripTrailingSlash rawUrl.trimAscii.toString
+    let nextBridge ← stRef.modifyGet fun s =>
+      if cleanUrl.startsWith "https://" && !(cleanUrl.toList.any (fun c => c.toNat ≤ 0x20 || c.toNat == 0x7F)) then
+        let b := { s.bridge with configuredTarget := cleanUrl, failoverOrigins := candidateOriginsFor cleanUrl }
+        (b, { s with bridge := b })
+      else
+        (s.bridge, s)
+    if let some pool := st.h2Pool? then
+      if let some primaryOrig := nextBridge.failoverOrigins[0]? then
+        if let some (true, host, port, _) := parseOriginHostPort primaryOrig then
+          pool.prewarm host port true 6000
+    return .ok (.obj #[
+      ("connection", connVal),
+      ("prefs", prefsVal),
+      ("transport", nextBridge.toJson)
+    ])
   | "transport_bridge_configure" =>
     let shardCountU8 : UInt8 := UInt8.ofNat st.bridge.shardPorts.size
     if verifySseShardConfig shardCountU8 st.bridge.proxyPort != 1 ||

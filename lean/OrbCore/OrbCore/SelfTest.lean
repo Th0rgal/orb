@@ -32,6 +32,8 @@ open OrbCore.Control
 open OrbCore.HostTests
 open OrbCore.HarnessSessionRegistry
 open OrbNetLeaf.TlsHttp
+open OrbNetLeaf.Gzip
+open LeanSys.WebSocket
 
 private def findFlag? (args : List String) (flag : String) : Option String :=
   match args with
@@ -4633,6 +4635,236 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
 
   return 0
 
+private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := do
+  let ts ← IO.monoNanosNow
+  let zwRoot := s!"/tmp/orb-core-zerowait-{ts}"
+  let cleanup : IO Unit := do discard <| (IO.FS.removeDirAll zwRoot).toBaseIO
+  let .ok store ← openCoreStore zwRoot
+    | do cleanup; IO.eprintln "[orb-core-test] FAIL: openCoreStore in runZeroWaitPerfAndSyncTests"; return 1
+  let .ok () ← ensureQueueContSchema store
+    | do closeCoreStore store; cleanup; IO.eprintln "[orb-core-test] FAIL: ensureQueueContSchema in runZeroWaitPerfAndSyncTests"; return 1
+  let nowSec ← coreEpochSec
+  let seedAdmins := #[("admin", prodValid.dashboardPassword), ("alice", "alice-zw-pass-1234")]
+  let bootAdminId ← match ← bootstrapUsersAndBackfill store seedAdmins s!"{nowSec}" with
+    | .ok aid => pure aid
+    | .error _ => pure ""
+  let managedRef ← IO.mkRef ({} : ManagedFleetState)
+  let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
+  let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
+  let seqRef ← IO.mkRef (1 : UInt64)
+  let app : CoreAppState := {
+    cfg := { prodValid with workingDir := zwRoot, usersJson := "" }
+    store := store
+    searchIdx? := none
+    managedRef := managedRef
+    chainsRef := chainsRef
+    proxyCooldownsRef := cooldownsRef
+    seqRef := seqRef
+    bootstrapAdminId := bootAdminId
+  }
+  let fail (msg : String) : IO UInt32 := do
+    closeCoreStore store
+    cleanup
+    IO.eprintln s!"[orb-core-test] FAIL (zero-wait): {msg}"
+    return 1
+
+  let sendReqHdr (method target tok body : String) (extraHdrLines : String := "") : IO (Nat × ByteArray × Array (String × String)) := do
+    let authHdr := if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n"
+    let raw :=
+      if body.isEmpty then
+        s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}{extraHdrLines}\r\n"
+      else
+        s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}{extraHdrLines}Content-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+    match parseRequest raw.toUTF8 none with
+    | .error e => return (0, s!"parse_err:{e}".toUTF8, #[])
+    | .ok req =>
+      match ← dispatchCoreRequest app req nowSec with
+      | .error _ => return (0, "dispatch_err".toUTF8, #[])
+      | .ok resp => return (resp.status, resp.body, resp.extraHdrs)
+
+  let (_, admBody, _) ← sendReqHdr "POST" "/api/auth/login" "" s!"\{\"username\":\"admin\",\"password\":{jsonEscape prodValid.dashboardPassword}}"
+  let adminTok := (((OrbBin.Json.parse (String.fromUTF8? admBody |>.getD "")).toOption.getD (.obj #[])) |>.fieldStr? "token").getD ""
+  let (_, cBobBody, _) ← sendReqHdr "POST" "/api/admin/users" adminTok "{\"username\":\"bob\",\"password\":\"bob-zw-pass-987654\",\"role\":\"member\"}"
+  let bobId := (((OrbBin.Json.parse (String.fromUTF8? cBobBody |>.getD "")).toOption.getD (.obj #[])) |>.fieldStr? "id").getD ""
+  let (_, bobLogBody, _) ← sendReqHdr "POST" "/api/auth/login" "" "{\"username\":\"bob\",\"password\":\"bob-zw-pass-987654\"}"
+  let bobTok := (((OrbBin.Json.parse (String.fromUTF8? bobLogBody |>.getD "")).toOption.getD (.obj #[])) |>.fieldStr? "token").getD ""
+  if adminTok.isEmpty || bobId.isEmpty || bobTok.isEmpty then
+    return (← fail "login setup failed")
+
+  -- 1. Seed missions across projects & timestamps + archived mission, and verify SQL filtering on `/api/control/missions`
+  let .ok () ← upsertMission store {
+    id := "m-zw-fast-old", title := "Fast Old", status := "completed", backend := "codex",
+    modelOverride := "", modelEffort := "", workingDirectory := zwRoot, project := "proj-fast",
+    updatedAt := "1700000100", totalCostCents := 5, ownerUserId := bootAdminId
+  } | return (← fail "upsert m-zw-fast-old")
+  let .ok () ← upsertMission store {
+    id := "m-zw-fast-new", title := "Fast New", status := "active", backend := "codex",
+    modelOverride := "", modelEffort := "", workingDirectory := zwRoot, project := "proj-fast",
+    updatedAt := "1700000500", totalCostCents := 10, ownerUserId := bootAdminId
+  } | return (← fail "upsert m-zw-fast-new")
+  let .ok () ← upsertMission store {
+    id := "m-zw-fast-ack", title := "Fast Archived", status := "acknowledged", backend := "codex",
+    modelOverride := "", modelEffort := "", workingDirectory := zwRoot, project := "proj-fast",
+    updatedAt := "1700000600", totalCostCents := 1, ownerUserId := bootAdminId
+  } | return (← fail "upsert m-zw-fast-ack")
+  let .ok () ← upsertMission store {
+    id := "m-zw-other", title := "Other Project", status := "awaiting_user", backend := "codex",
+    modelOverride := "", modelEffort := "", workingDirectory := zwRoot, project := "proj-other",
+    updatedAt := "2026-11-11T08:00:00Z", totalCostCents := 2, ownerUserId := bootAdminId
+  } | return (← fail "upsert m-zw-other")
+  let .ok () ← upsertMission store {
+    id := "m-zw-bob", title := "Bob Private", status := "awaiting_user", backend := "opencode",
+    modelOverride := "", modelEffort := "", workingDirectory := zwRoot, project := s!"{bobId}:proj-fast",
+    updatedAt := "1700000700", totalCostCents := 0, ownerUserId := bobId
+  } | return (← fail "upsert m-zw-bob")
+
+  let (pSt, pBytes, _) ← sendReqHdr "GET" "/api/control/missions?project=proj-fast&all=false" adminTok ""
+  let pStr := String.fromUTF8? pBytes |>.getD ""
+  let (dSt, dBytes, _) ← sendReqHdr "GET" "/api/control/missions?updated_since=1700000400" adminTok ""
+  let dStr := String.fromUTF8? dBytes |>.getD ""
+  let (bSt, bBytes, _) ← sendReqHdr "GET" "/api/control/missions?project=proj-fast" bobTok ""
+  let bStr := String.fromUTF8? bBytes |>.getD ""
+  if pSt != 200 || (pStr.splitOn "\"m-zw-fast-new\"").length != 2 || (pStr.splitOn "\"m-zw-fast-old\"").length != 2 ||
+     (pStr.splitOn "\"m-zw-fast-ack\"").length != 1 || (pStr.splitOn "\"m-zw-other\"").length != 1 ||
+     (pStr.splitOn "\"project\":\"proj-fast\"").length < 3 ||
+     dSt != 200 || (dStr.splitOn "\"m-zw-fast-old\"").length != 1 || (dStr.splitOn "\"m-zw-fast-new\"").length != 2 ||
+     (dStr.splitOn "\"m-zw-other\"").length != 2 ||
+     bSt != 200 || (bStr.splitOn "\"m-zw-bob\"").length != 2 || (bStr.splitOn "\"m-zw-fast-new\"").length != 1 ||
+     (bStr.splitOn "\"project\":\"proj-fast\"").length != 2 then
+    return (← fail s!"missions SQL filter regression: p={pStr} d={dStr} b={bStr}")
+
+  -- 2. Seed spine messages + 25 tool events (with 10 KB tool_result) & verify SQL pre-LIMIT `types`, `view=transcript`, `max_payload`, `/snapshot`, `/open`, and `gzip`!
+  let _ ← appendMissionEvent store "m-zw-fast-new" "user_message" "{\"id\":\"u-1\",\"content\":\"Explain zero-wait caching\"}" "2026-11-11T07:00:01Z"
+  let _ ← appendMissionEvent store "m-zw-fast-new" "assistant_message" "{\"id\":\"a-1\",\"content\":\"Settled answer from spine\",\"success\":true}" "2026-11-11T07:00:02Z"
+  let bigOut := String.ofList (List.replicate 10000 'Z')
+  for k in [0:25] do
+    let _ ← appendMissionEvent store "m-zw-fast-new" "tool_result"
+      s!"\{\"id\":\"tr-{k}\",\"tool_call_id\":\"call-{k}\",\"tool_name\":\"bash\",\"result\":{jsonEscape (if k == 24 then bigOut else s!"out-{k}")},\"success\":true}"
+      "2026-11-11T07:00:03Z"
+  let _ ← enqueueStructuredFollowup store "core" "q-zw-1" "m-zw-fast-new" "next follow-up" "desktop" s!"{nowSec}"
+
+  let (tySt, tyBytes, _) ← sendReqHdr "GET" "/api/control/missions/m-zw-fast-new/events?types=user_message&limit=5" adminTok ""
+  let tyStr := String.fromUTF8? tyBytes |>.getD ""
+  let (vwSt, vwBytes, _) ← sendReqHdr "GET" "/api/control/missions/m-zw-fast-new/events?view=transcript&limit=5" adminTok ""
+  let vwStr := String.fromUTF8? vwBytes |>.getD ""
+  let (trSt, trBytes, _) ← sendReqHdr "GET" "/api/control/missions/m-zw-fast-new/events?limit=2&max_payload=256" adminTok ""
+  let trStr := String.fromUTF8? trBytes |>.getD ""
+  let (snSt, snBytes, _) ← sendReqHdr "GET" "/api/control/missions/m-zw-fast-new/snapshot?profile=presentation" adminTok ""
+  let snStr := String.fromUTF8? snBytes |>.getD ""
+  let (opSt, opGzBytes, opHdrs) ← sendReqHdr "GET" "/api/control/missions/m-zw-fast-new/open?limit=5&max_payload=512&spine_limit=10" adminTok "" "Accept-Encoding: gzip\r\n"
+  let hasGzHdr := opHdrs.any (fun (k, v) => k.toLower == "content-encoding" && v == "gzip")
+  let opPlainBytes := match gunzipBounded opGzBytes 1048576 with | .ok b => b | .error _ => ByteArray.empty
+  let opStr := String.fromUTF8? opPlainBytes |>.getD ""
+  let (bobOpSt, _, _) ← sendReqHdr "GET" "/api/control/missions/m-zw-fast-new/open" bobTok ""
+  if tySt != 200 || (tyStr.splitOn "Explain zero-wait caching").length != 2 ||
+     vwSt != 200 || (vwStr.splitOn "Explain zero-wait caching").length != 2 || (vwStr.splitOn "Settled answer from spine").length != 2 ||
+     trSt != 200 || trBytes.size > 2500 || (trStr.splitOn "\"truncated\":true").length != 2 || (trStr.splitOn "\"tool_call_id\":\"call-24\"").length != 2 ||
+     snSt != 200 || (snStr.splitOn "\"profile\":\"presentation\"").length != 2 || (snStr.splitOn "Settled answer from spine").length != 2 ||
+     opSt != 200 || !hasGzHdr || opGzBytes.size >= opPlainBytes.size ||
+     (opStr.splitOn "\"protocol\":1").length != 2 || (opStr.splitOn "Settled answer from spine").length < 2 ||
+     (opStr.splitOn "next follow-up").length != 2 || (opStr.splitOn "\"has_more\":true").length != 2 ||
+     bobOpSt != 404 then
+    return (← fail s!"events/snapshot/open/gzip check failed: ty={tyStr} vw={vwStr} trSize={trBytes.size} sn={snStr} hasGz={hasGzHdr} gz={opGzBytes.size}/{opPlainBytes.size} bobOp={bobOpSt}")
+
+  -- 3. Live loopback TCP test: HTTP/1.1 keep-alive (2 requests on 1 socket) + `/api/control/sync` WebSocket (`orb-sync.v1`, `since_seq` replay, live push, cross-user confinement, and `inbox_answer_push`)
+  let .ok (lfd, lport) ← tcpListen "127.0.0.1" 0 8
+    | return (← fail "tcpListen for keep-alive & sync WS failed")
+  let srvTask ← IO.asTask (prio := .dedicated) do
+    for _ in [0:2] do
+      if let .ok sfd ← tcpAcceptPoll lfd 5000 then
+        handleClientConn app sfd true
+    discard <| closeFd lfd
+
+  -- (a) HTTP/1.1 Keep-Alive: 2 requests over 1 connected socket!
+  let mut keepAliveOk := false
+  if let .ok kfd ← tcpConnect "127.0.0.1" lport then
+    let req1 := "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".toUTF8
+    let req2 := s!"GET /api/control/missions/m-zw-fast-new/snapshot?profile=presentation HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {adminTok}\r\nConnection: close\r\n\r\n".toUTF8
+    discard <| writeAll kfd (req1 ++ req2) false
+    let mut rxAll := ByteArray.empty
+    for _ in [0:8] do
+      if let .ok () ← pollReadable kfd 1000 then
+        let ch ← readStreamChunk kfd 16384
+        if ch.isEmpty then break else rxAll := rxAll ++ ch
+      else break
+    discard <| closeFd kfd
+    let rxStr := String.fromUTF8? rxAll |>.getD ""
+    keepAliveOk :=
+      (rxStr.splitOn "Connection: keep-alive").length == 2 &&
+      (rxStr.splitOn "HTTP/1.1 200 OK").length == 3 &&
+      (rxStr.splitOn "\"profile\":\"presentation\"").length == 2
+
+  -- (b) `/api/control/sync` WebSocket: `Sec-WebSocket-Protocol: orb-sync.v1, jwt.<adminTok>`
+  let mut wsSyncOk := false
+  if let .ok wfd ← tcpConnect "127.0.0.1" lport then
+    let upgReq :=
+      s!"GET /api/control/sync HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: orb-sync.v1, jwt.{adminTok}\r\n\r\n".toUTF8
+    discard <| writeAll wfd upgReq false
+    let mut hsBuf := ByteArray.empty
+    while (LeanSys.Http.findHeaderEnd? hsBuf).isNone do
+      if let .ok () ← pollReadable wfd 2000 then
+        let ch ← readStreamChunk wfd 4096
+        if ch.isEmpty then break
+        hsBuf := hsBuf ++ ch
+      else break
+    let some hsEnd := LeanSys.Http.findHeaderEnd? hsBuf | do discard <| closeFd wfd; let _ := srvTask.get; return (← fail "WS handshake missing header end")
+    let hsHead := String.fromUTF8? (hsBuf.extract 0 hsEnd) |>.getD ""
+    let mut wsRx := hsBuf.extract hsEnd hsBuf.size
+    let mask4 := ByteArray.mk #[0x37, 0xFA, 0x21, 0x3D]
+    -- Subscribe to `m-zw-fast-new` with `since_seq: 26` (replaying seq 27 + `sync_caught_up`), AND attempt cross-user subscribe to `m-zw-bob` (must be `forbidden`)!
+    let subMsg1 := "{\"op\":\"subscribe\",\"mission_id\":\"m-zw-fast-new\",\"since_seq\":26,\"max_payload\":512}"
+    let subMsgBob := "{\"op\":\"subscribe\",\"mission_id\":\"m-zw-bob\"}"
+    let pingMsg := "{\"op\":\"ping\",\"ts\":1234567}"
+    for m in [subMsg1, subMsgBob, pingMsg] do
+      if let some frm := encodeFrame? { fin := true, opcode := .text, payload := m.toUTF8 } (some mask4) then
+        discard <| writeAll wfd frm false
+    -- Read initial `sync_ready`, replay, `sync_caught_up`, `forbidden`, and `pong` before triggering live events!
+    for _ in [0:5] do
+      if let .ok () ← pollReadable wfd 300 then
+        let ch ← readStreamChunk wfd 32768
+        if !ch.isEmpty then wsRx := wsRx ++ ch
+    -- Append a live event on subscribed `m-zw-fast-new` AND a settled answer on unsubscribed `m-zw-other` (`inbox_answer_push`), plus Bob's mission (must NOT leak to admin)!
+    let _ ← appendMissionEvent store "m-zw-fast-new" "assistant_message" "{\"id\":\"a-live\",\"content\":\"Live WS delta\"}" "2026-11-11T07:01:00Z"
+    let _ ← appendMissionEvent store "m-zw-other" "assistant_message" "{\"id\":\"a-inbox\",\"content\":\"Background inbox answer\"}" "2026-11-11T07:01:01Z"
+    let _ ← appendMissionEvent store "m-zw-bob" "assistant_message" "{\"id\":\"a-bob-secret\",\"content\":\"Bob secret answer\"}" "2026-11-11T07:01:02Z"
+    for _ in [0:4] do
+      if let .ok () ← pollReadable wfd 250 then
+        let ch ← readStreamChunk wfd 32768
+        if !ch.isEmpty then wsRx := wsRx ++ ch
+    if let some clsFrm := encodeFrame? { fin := true, opcode := .close, payload := ByteArray.empty } (some mask4) then
+      discard <| writeAll wfd clsFrm false
+    discard <| closeFd wfd
+    let mut decodedTexts : Array String := #[]
+    let mut parseMore := true
+    while parseMore do
+      match decodeFramePrefix wsRx false with
+      | .ok (some (frm, cons)) =>
+        wsRx := wsRx.extract cons wsRx.size
+        if frm.opcode == .text then
+          decodedTexts := decodedTexts.push (String.fromUTF8? frm.payload |>.getD "")
+      | _ => parseMore := false
+    let allWs := String.intercalate "\n" decodedTexts.toList
+    wsSyncOk :=
+      (hsHead.splitOn "101 Switching Protocols").length == 2 &&
+      (hsHead.splitOn "Sec-WebSocket-Protocol: orb-sync.v1").length == 2 &&
+      (allWs.splitOn "\"type\":\"sync_ready\"").length == 2 &&
+      (allWs.splitOn "\"type\":\"sync_caught_up\"").length == 2 &&
+      (allWs.splitOn "\"replayed\":1").length == 2 &&
+      (allWs.splitOn "\"error\":\"forbidden\"").length == 2 &&
+      (allWs.splitOn "\"type\":\"pong\",\"ts\":1234567").length == 2 &&
+      (allWs.splitOn "Live WS delta").length == 2 &&
+      (allWs.splitOn "\"type\":\"inbox_answer_push\"").length == 2 &&
+      (allWs.splitOn "Background inbox answer").length == 2 &&
+      (allWs.splitOn "Bob secret answer").length == 1
+
+  let _ := srvTask.get
+  if !keepAliveOk || !wsSyncOk then
+    return (← fail s!"keepAliveOk={keepAliveOk} wsSyncOk={wsSyncOk}")
+
+  closeCoreStore store
+  cleanup
+  return 0
+
 set_option maxHeartbeats 800000 in
 set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
@@ -5794,6 +6026,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runR7CoreTests prodValid) != 0 then return 1
   if (← runMultiUserCoreTests prodValid) != 0 then return 1
   if (← runWarmClaudeControlAndCheckpointsCoreTests prodValid) != 0 then return 1
+  if (← runZeroWaitPerfAndSyncTests prodValid) != 0 then return 1
 
   IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":10,\"host_tests\":101}"
   return 0

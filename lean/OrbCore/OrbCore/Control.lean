@@ -3,6 +3,8 @@
   JWT Subprotocol Auth (`:80/api/console/ws`), Privilege Lease Verification, Mission Control,
   Automations & Model-Routing Dispatcher (`0 import Lean`, `0 sorryAx`).
 -/
+import Std.Sync.Mutex
+import Std.Data.HashMap
 import LeanSys
 import Orb.Kernel
 import OrbBin.Json
@@ -25,6 +27,7 @@ import OrbCore.QueueCont
 import OrbCore.R7Core
 import OrbCore.TelemetryAndVoice
 import OrbNetLeaf.TlsHttp
+import OrbNetLeaf.Gzip
 
 namespace OrbCore.Control
 
@@ -960,7 +963,7 @@ private def safeHeaderLine? (k v : String) : Option String :=
   else
     some s!"{k}: {v}\r\n"
 
-def encodeCoreHttpResponse (r : CoreHttpResponse) : ByteArray := Id.run do
+def encodeCoreHttpResponse (r : CoreHttpResponse) (keepAlive : Bool := false) : ByteArray := Id.run do
   let corsHdr :=
     match r.corsOrigin? with
     | some orig =>
@@ -972,17 +975,50 @@ def encodeCoreHttpResponse (r : CoreHttpResponse) : ByteArray := Id.run do
         "Access-Control-Expose-Headers: X-Orb-Events-Protocol, X-Has-More, X-Next-Cursor, X-Page-Max-Sequence, X-Max-Sequence, Content-Disposition, Retry-After, X-Request-Id\r\n" ++
         "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
     | none => ""
+  let connHdr :=
+    if keepAlive then "Connection: keep-alive\r\nKeep-Alive: timeout=15, max=64\r\n"
+    else "Connection: close\r\n"
   let mut head :=
     s!"HTTP/1.1 {r.status} {reasonPhrase r.status}\r\n" ++
     s!"Content-Type: {r.contentType}\r\n" ++
     s!"Content-Length: {r.body.size}\r\n" ++
     corsHdr ++
-    "Connection: close\r\n"
+    connHdr
   for (k, v) in r.extraHdrs do
     if let some ln := safeHeaderLine? k v then
       head := head ++ ln
   head := head ++ "\r\n"
   return head.toUTF8 ++ r.body
+
+private def acceptsGzipEncoding (hdrs : Array (String × String)) : Bool :=
+  match lookupHeaderCI hdrs "accept-encoding" with
+  | none => false
+  | some raw =>
+    (raw.splitOn ",").any fun item =>
+      let tok := item.trimAscii.toString.toLower
+      (tok == "gzip" || tok.startsWith "gzip;") && !(tok.splitOn "q=0").any (fun s => s == "" || s.startsWith ",")
+
+private def headerRequestsClose (hdrs : Array (String × String)) : Bool :=
+  match lookupHeaderCI hdrs "connection" with
+  | none => false
+  | some raw => (raw.splitOn ",").any (fun t => t.trimAscii.toString.toLower == "close")
+
+def maybeGzipHttpResponse (req : HttpRequest) (r : CoreHttpResponse) : CoreHttpResponse :=
+  if req.method == "HEAD" || (r.status != 200 && r.status != 201) || r.body.size < 1024 then
+    r
+  else if !acceptsGzipEncoding req.headers then
+    r
+  else if r.extraHdrs.any (fun (k, _) => k.toLower == "content-encoding") then
+    r
+  else
+    let gz := OrbNetLeaf.Gzip.gzipCompress r.body
+    if gz.size < r.body.size then
+      { r with
+        body := gz
+        extraHdrs := r.extraHdrs ++ #[("Content-Encoding", "gzip"), ("Vary", "Accept-Encoding")]
+      }
+    else
+      r
 
 def jsonResponse (status : Nat) (bodyStr : String) (extraHdrs : Array (String × String) := #[])
     (corsOrigin? : Option String := none) : CoreHttpResponse :=
@@ -991,8 +1027,19 @@ def jsonResponse (status : Nat) (bodyStr : String) (extraHdrs : Array (String ×
 private def isWsUpgradePath (cleanPath rawTarget : String) : Bool :=
   cleanPath == "/api/console/ws" ||
   cleanPath == "/api/monitoring/ws" ||
+  cleanPath == "/api/control/sync" ||
   cleanPath == "/api/desktop/stream" ||
   (matchRoutePattern? "/api/workspaces/:id/shell" rawTarget).isSome
+
+private def negotiateWsSubprotocol? (hdrs : Array (String × String)) : Option String :=
+  match lookupHeaderCI hdrs "sec-websocket-protocol" with
+  | none => none
+  | some raw =>
+    let parts := (raw.splitOn ",").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+    if parts.contains "orb-sync.v1" then
+      some "orb-sync.v1"
+    else
+      parts.find? (·.startsWith "jwt.")
 
 private def nextUniqueId (st : CoreAppState) (prefixStr : String) (nowEpochSec : UInt64) : IO String := do
   let seq ← st.seqRef.modifyGet fun n => (n + 1, n + 1)
@@ -1336,11 +1383,12 @@ private def dispatchMissionControlAndGitRoutes?
       let sinceSeq? := ((qParams.find? (fun p => p.1 == "since_seq")).bind (fun p => p.2.toNat?)).map Nat.toUInt64
       let beforeSeq? := ((qParams.find? (fun p => p.1 == "before_seq")).bind (fun p => p.2.toNat?)).map Nat.toUInt64
       let maxPayload? := ((qParams.find? (fun p => p.1 == "max_payload")).bind (fun p => p.2.toNat?))
+      let view? := ((qParams.find? (fun p => p.1 == "view")).map Prod.snd) |>.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
       let typesRaw := ((qParams.find? (fun p => p.1 == "types")).map Prod.snd).getD ""
       let typesArr :=
         if typesRaw.trimAscii.toString.isEmpty then #[]
         else (typesRaw.splitOn ",").toArray.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
-      match ← queryMissionEventsPage st.store mid sinceSeq? beforeSeq? limNat typesArr maxPayload? with
+      match ← queryMissionEventsPage st.store mid sinceSeq? beforeSeq? limNat typesArr maxPayload? view? with
       | .error e => return some (.ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}"))
       | .ok pg =>
         let mut hdrs : Array (String × String) := #[
@@ -1353,6 +1401,64 @@ private def dispatchMissionControlAndGitRoutes?
         if let some pm := pg.pageMaxSeq then
           hdrs := hdrs.push ("X-Page-Max-Sequence", s!"{pm}")
         return some (.ok (mkJsonHdr 200 pg.eventsJson hdrs))
+
+  if let some params := matchRoutePattern? "/api/control/missions/:id/snapshot" rawTarget then
+    if req.method == "GET" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if !isSafeMissionId mid then
+        return some (.ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}"))
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
+        return some (.ok (mkJson cCode cBody))
+      let qParams := parseQueryParams rawTarget
+      let prof := ((qParams.find? (fun p => p.1 == "profile")).map Prod.snd |>.getD "presentation").trimAscii.toString
+      match ← queryMissionEventsPage st.store mid none none 2 #[] (some 4096) (some "transcript") with
+      | .error e => return some (.ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}"))
+      | .ok pg =>
+        let body := s!"\{\"profile\":{jsonEscape prof},\"revision\":{pg.maxSeq},\"activity\":\"\",\"events\":{pg.eventsJson}}"
+        return some (.ok (mkJson 200 body))
+
+  if let some params := matchRoutePattern? "/api/control/missions/:id/open" rawTarget then
+    if req.method == "GET" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if !isSafeMissionId mid then
+        return some (.ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}"))
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
+        return some (.ok (mkJson cCode cBody))
+      let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
+      match ← missionDetailJson st.store mid callerOpt st.bootstrapAdminId with
+      | .error e => return some (.ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}"))
+      | .ok none => return some (.ok (mkJson 404 "{\"error\":\"mission_not_found\"}"))
+      | .ok (some mJson) =>
+        let qParams := parseQueryParams rawTarget
+        let limNat := ((qParams.find? (fun p => p.1 == "limit")).bind (fun p => p.2.toNat?)).getD 200
+        let sinceSeq? := ((qParams.find? (fun p => p.1 == "since_seq")).bind (fun p => p.2.toNat?)).map Nat.toUInt64
+        let maxPayload := ((qParams.find? (fun p => p.1 == "max_payload")).bind (fun p => p.2.toNat?)).getD 4096
+        let spineLim := ((qParams.find? (fun p => p.1 == "spine_limit")).bind (fun p => p.2.toNat?)).getD 80
+        match ← queryMissionEventsPage st.store mid sinceSeq? none limNat #[] (some maxPayload) none with
+        | .error e => return some (.ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}"))
+        | .ok pg =>
+          let queueJson ← match ← listRemoteQueueJson st.store "core" mid with
+            | .ok qj => pure qj
+            | .error _ => pure "[]"
+          let spineJson ←
+            if sinceSeq?.isNone && pg.hasMore && spineLim > 0 then
+              match ← queryMissionEventsPage st.store mid none none spineLim #[] (some maxPayload) (some "transcript") with
+              | .ok spg => pure spg.eventsJson
+              | .error _ => pure "[]"
+            else
+              pure "[]"
+          let ncJson := match pg.nextCursor with | some v => s!"{v}" | none => "null"
+          let pmJson := match pg.pageMaxSeq with | some v => s!"{v}" | none => "null"
+          let hmJson := if pg.hasMore then "true" else "false"
+          let resetJson :=
+            match sinceSeq? with
+            | some s => if s > pg.maxSeq then "true" else "false"
+            | none => "false"
+          let bundle :=
+            s!"\{\"protocol\":1,\"mission\":{mJson},\"events\":{pg.eventsJson},\"spine\":{spineJson}," ++
+            s!"\"queue\":{queueJson},\"max_seq\":{pg.maxSeq},\"has_more\":{hmJson}," ++
+            s!"\"next_cursor\":{ncJson},\"page_max_seq\":{pmJson},\"reset\":{resetJson}}"
+          return some (.ok (mkJson 200 bundle))
 
   if let some params := matchRoutePattern? "/api/control/missions/:id/tool-calls/:callId" rawTarget then
     if req.method == "GET" then
@@ -1523,9 +1629,7 @@ private def dispatchMissionControlAndGitRoutes?
   return none
 
 set_option maxHeartbeats 800000 in
-/-- Dispatch a parsed `HttpRequest` against `CoreAppState` (`routes` capability parity:
-    `"/api/control/missions/:id/automations"`, `"/api/model-routing"`). -/
-def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : UInt64) : IO (Except ByteArray CoreHttpResponse) := do
+private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowEpochSec : UInt64) : IO (Except ByteArray CoreHttpResponse) := do
   let rawTarget := req.path
   let cleanPath :=
     match rawTarget.splitOn "?" with
@@ -1592,7 +1696,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
         (matchRoutePattern? "/api/workspaces/:id/shell" rawTarget).isSome) &&
        !wsCaller.isLegacyUnscoped && wsCaller.role != "admin" then
       return .ok (mkJson 403 "{\"error\":\"admin_required\"}")
-    let negProto? := (extractWsJwtSubproto? req.headers).map (fun t => s!"jwt.{t}")
+    let negProto? := negotiateWsSubprotocol? req.headers
     match buildWebSocketUpgradeResponse? req negProto? with
     | some raw101 => return .error raw101
     | none => return .ok (mkJson 400 "{\"error\":\"invalid_websocket_upgrade\"}")
@@ -2936,7 +3040,18 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
   if cleanPath == "/api/control/missions" then
     if req.method == "GET" then
       let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
-      match ← listMissionsJson st.store none callerOpt with
+      let qParams := parseQueryParams rawTarget
+      let proj? := ((qParams.find? (fun p => p.1 == "project")).map Prod.snd) >>= percentDecodeStrict
+      let updatedSince? := ((qParams.find? (fun p => p.1 == "updated_since")).map Prod.snd) >>= percentDecodeStrict
+      let statusRaw := (((qParams.find? (fun p => p.1 == "status")).map Prod.snd) >>= percentDecodeStrict).getD ""
+      let statusesArr :=
+        if statusRaw.trimAscii.toString.isEmpty then #[]
+        else (statusRaw.splitOn ",").toArray.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+      let allParam? := ((qParams.find? (fun p => p.1 == "all")).map Prod.snd).map (·.trimAscii.toString.toLower)
+      let includeArchived := allParam? != some "false"
+      let limit? := ((qParams.find? (fun p => p.1 == "limit")).bind (fun p => p.2.toNat?))
+      let offset := ((qParams.find? (fun p => p.1 == "offset")).bind (fun p => p.2.toNat?)).getD 0
+      match ← listMissionsJson st.store none callerOpt st.bootstrapAdminId proj? updatedSince? statusesArr includeArchived limit? offset with
       | .ok j => return .ok (mkJson 200 j)
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
     else if req.method == "POST" then
@@ -4622,6 +4737,14 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
 
   return .ok (mkJson 404 s!"\{\"error\":\"not_found\",\"path\":{jsonEscape cleanPath}}")
 
+/-- Dispatch a parsed `HttpRequest` against `CoreAppState` (`routes` capability parity:
+    `"/api/control/missions/:id/automations"`, `"/api/model-routing"`), applying RFC 1952 `gzip`
+    content encoding when requested via `Accept-Encoding: gzip` on bodies `>= 1 KiB`. -/
+def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : UInt64) : IO (Except ByteArray CoreHttpResponse) := do
+  match ← dispatchCoreRequestRaw st req nowEpochSec with
+  | .ok resp => return .ok (maybeGzipHttpResponse req resp)
+  | .error raw101 => return .error raw101
+
 /-- Bounded RFC 6455 WebSocket session loop after `101 Switching Protocols`:
     handles client `ping` (`pong` reply), `close` (echo `1000` close), and JSON messages cleanly. -/
 private def runWebSocketSessionLoop (cfd : Fd) : IO Unit := do
@@ -4663,24 +4786,175 @@ private def runWebSocketSessionLoop (cfd : Fd) : IO Unit := do
     if let some cls := makeServerClose? 1000 "" then
       discard <| writeAll cfd cls false
 
-/-- Serve one accepted TCP connection on `cfd` using full multi-packet `readCoreHttpRequestFromFd`. -/
-def handleClientConn (st : CoreAppState) (cfd : Fd) : IO Unit := do
-  match ← readCoreHttpRequestFromFd cfd 5000 with
-  | .error errMsg =>
-    let code := statusForParseError errMsg
-    let resp := encodeCoreHttpResponse (jsonResponse code s!"\{\"error\":{jsonEscape errMsg}}")
-    discard <| writeAll cfd resp false
-    discard <| closeFd cfd
-  | .ok req =>
-    let nowSec ← coreEpochSec
-    match ← dispatchCoreRequest st req nowSec with
-    | .ok httpResp =>
-      discard <| writeAll cfd (encodeCoreHttpResponse httpResp) false
-      discard <| closeFd cfd
-    | .error rawUpgrade101 =>
-      discard <| writeAll cfd rawUpgrade101 false
-      runWebSocketSessionLoop cfd
-      discard <| closeFd cfd
+/-- Multiplexed `/api/control/sync` WebSocket session (`orb-sync.v1`):
+    supports `ping`/`pong`, `set_presentation`, `subscribe` (`since_seq` replay + `sync_caught_up`),
+    `unsubscribe`, `sync_resume`, live `appendMissionEvent` push, and compact `inbox_answer_push`. -/
+def runSyncWebSocketSessionLoop
+    (st : CoreAppState)
+    (wsCaller : CallerPrincipal)
+    (cfd : Fd)
+    (maxSteps? : Option Nat := none) : IO Unit := do
+  let writeMu ← Std.Mutex.new ()
+  let aliveRef ← IO.mkRef true
+  let subsRef ← IO.mkRef ({} : Std.HashMap String Nat)
+  let presRef ← IO.mkRef false
+  let sendWsBytes (wire : ByteArray) : IO Bool := do
+    writeMu.atomically do
+      let ok := (← writeAll cfd wire false).isOk
+      if !ok then
+        aliveRef.set false
+      return ok
+  let sendWsText (txt : String) : IO Bool := do
+    match encodeFrame? { fin := true, opcode := .text, payload := txt.toUTF8 } none with
+    | none => return false
+    | some frm => sendWsBytes frm
+  let unregister ← registerMissionEventListener st.store fun mid seq evType payloadJson createdAt => do
+    if (← aliveRef.get) then
+      let subs ← subsRef.get
+      if let some maxP := subs[mid]? then
+        discard <| sendWsText (renderSyncWsEventJson mid seq evType payloadJson createdAt (some maxP) false)
+      else if (evType == "assistant_message" || evType == "assistant_message_canonical") && payloadJson.utf8ByteSize ≤ 8192 then
+        let isAuth ← do
+          if wsCaller.isLegacyUnscoped then pure true
+          else pure (← authorizeMissionOp st wsCaller mid false).isNone
+        if isAuth then
+          discard <| sendWsText (renderSyncWsEventJson mid seq evType payloadJson createdAt (some 4096) true)
+  try
+    discard <| sendWsText "{\"type\":\"sync_ready\",\"server\":\"sandboxed-sh\",\"server_build\":\"orb-core-lean\"}"
+    let replayForMission (mid : String) (sinceSeq? : Option UInt64) (maxP : Nat) : IO Unit := do
+      match ← queryMissionSyncReplayFrames st.store mid sinceSeq? (some maxP) 500 with
+      | .error _ =>
+        discard <| sendWsText s!"\{\"type\":\"stream_lagged\",\"mission_id\":{jsonEscape mid}}"
+      | .ok (frames, curSeq, lagged) =>
+        if lagged then
+          discard <| sendWsText s!"\{\"type\":\"stream_lagged\",\"mission_id\":{jsonEscape mid}}"
+        else
+          for f in frames do
+            discard <| sendWsText f
+          discard <| sendWsText s!"\{\"type\":\"sync_caught_up\",\"mission_id\":{jsonEscape mid},\"cursor\":{curSeq},\"replayed\":{frames.size}}"
+    let mut rxBuf := ByteArray.empty
+    let mut steps : Nat := 0
+    let pollMs : UInt32 := if maxSteps?.isSome then 2000 else 15000
+    while (← aliveRef.get) && (match maxSteps? with | some lim => decide (steps < lim) | none => true) do
+      steps := steps + 1
+      match ← pollReadable cfd pollMs with
+      | .error .eagain =>
+        if maxSteps?.isSome then
+          aliveRef.set false
+        else
+          discard <| sendWsText "{\"type\":\"heartbeat\"}"
+      | .error _ =>
+        aliveRef.set false
+      | .ok () =>
+        let chunk ← readStreamChunk cfd 65536
+        if chunk.isEmpty then
+          aliveRef.set false
+        else
+          rxBuf := rxBuf ++ chunk
+          let mut drainFrames := true
+          while drainFrames && (← aliveRef.get) do
+            match decodeFramePrefix rxBuf true with
+            | .error _ =>
+              aliveRef.set false
+              drainFrames := false
+            | .ok none =>
+              drainFrames := false
+            | .ok (some (frame, consumed)) =>
+              rxBuf := rxBuf.extract consumed rxBuf.size
+              match frame.opcode with
+              | .ping =>
+                if let some pong := makeServerPong? frame.payload then
+                  discard <| sendWsBytes pong
+              | .close =>
+                if let some cls := makeServerClose? 1000 "" then
+                  discard <| sendWsBytes cls
+                aliveRef.set false
+                drainFrames := false
+              | .text | .binary =>
+                if let some rawStr := String.fromUTF8? frame.payload then
+                  if let .ok jv := OrbBin.Json.parse rawStr then
+                    let op := (jv.fieldStr? "op").getD ""
+                    if op == "ping" then
+                      let tsVal := (jv.fieldNat? "ts").getD 0
+                      discard <| sendWsText s!"\{\"type\":\"pong\",\"ts\":{tsVal}}"
+                    else if op == "set_presentation" then
+                      let en := (jv.fieldBool? "enabled").getD false
+                      presRef.set en
+                      discard <| sendWsText s!"\{\"type\":\"subscribed\",\"presentation\":{if en then "true" else "false"}}"
+                    else if op == "unsubscribe" then
+                      let mid := (jv.fieldStr? "mission_id").getD ""
+                      if !mid.isEmpty then
+                        subsRef.modify (fun m => m.erase mid)
+                        discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid}}"
+                    else if op == "subscribe" then
+                      let mid := (jv.fieldStr? "mission_id").getD ""
+                      let maxP := max 256 (min 65536 ((jv.fieldNat? "max_payload").getD 4096))
+                      let sinceSeq? := (jv.fieldNat? "since_seq").map Nat.toUInt64
+                      if !isSafeMissionId mid then
+                        discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid},\"error\":\"invalid_mission_id\"}"
+                      else if (← authorizeMissionOp st wsCaller mid false).isSome then
+                        discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid},\"error\":\"forbidden\"}"
+                      else
+                        subsRef.modify (fun m => m.insert mid maxP)
+                        replayForMission mid sinceSeq? maxP
+                    else if op == "sync_resume" then
+                      if let some (.obj pairs) := jv.field? "cursors" then
+                        for (mid, curVal) in pairs do
+                          if isSafeMissionId mid && (← authorizeMissionOp st wsCaller mid false).isNone then
+                            let sinceSeq? : Option UInt64 := curVal.asNat?.map Nat.toUInt64
+                            subsRef.modify (fun m => if m.contains mid then m else m.insert mid 4096)
+                            let curSubs ← subsRef.get
+                            let maxP := (curSubs[mid]?).getD 4096
+                            replayForMission mid sinceSeq? maxP
+              | _ => pure ()
+    if (← aliveRef.get) then
+      if let some cls := makeServerClose? 1000 "" then
+        discard <| sendWsBytes cls
+  finally
+    aliveRef.set false
+    unregister
+
+/-- Serve an accepted TCP connection on `cfd`, supporting bounded HTTP/1.1 keep-alive reuse
+    when `allowKeepAlive == true` and RFC 6455 WebSocket upgrade (`/api/control/sync` et al.). -/
+def handleClientConn (st : CoreAppState) (cfd : Fd) (allowKeepAlive : Bool := false) : IO Unit := do
+  let maxReqs : Nat := if allowKeepAlive then 64 else 1
+  let mut reqCount : Nat := 0
+  let mut carryBuf := ByteArray.empty
+  let mut keepGoing := true
+  while keepGoing && reqCount < maxReqs do
+    let timeoutMs : UInt32 := if reqCount == 0 then 5000 else 15000
+    match ← readCoreHttpRequestBuffered cfd carryBuf timeoutMs with
+    | .error errMsg =>
+      if reqCount == 0 || errMsg != "empty_socket_read" then
+        let code := statusForParseError errMsg
+        let resp := encodeCoreHttpResponse (jsonResponse code s!"\{\"error\":{jsonEscape errMsg}}") false
+        discard <| writeAll cfd resp false
+      keepGoing := false
+    | .ok (req, leftover) =>
+      carryBuf := leftover
+      reqCount := reqCount + 1
+      let nowSec ← coreEpochSec
+      match ← dispatchCoreRequest st req nowSec with
+      | .ok httpResp =>
+        let wantKeep :=
+          allowKeepAlive &&
+          reqCount < maxReqs &&
+          req.version == "HTTP/1.1" &&
+          !headerRequestsClose req.headers
+        let wrote := (← writeAll cfd (encodeCoreHttpResponse httpResp wantKeep) false).isOk
+        if !wrote || !wantKeep then
+          keepGoing := false
+      | .error rawUpgrade101 =>
+        let wrote := (← writeAll cfd rawUpgrade101 false).isOk
+        if wrote then
+          let cleanP := (req.path.splitOn "?").headD req.path
+          if cleanP == "/api/control/sync" then
+            if let some wsCaller ← resolveCallerPrincipal? st req.headers nowSec (allowWsSubproto := true) then
+              runSyncWebSocketSessionLoop st wsCaller cfd (if allowKeepAlive then none else some 64)
+          else
+            runWebSocketSessionLoop cfd
+        keepGoing := false
+  discard <| closeFd cfd
 
 /-- Run the blocking HTTP/1.1 + WebSocket listener loop on `cfg.host:cfg.port`. -/
 def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UInt32 := do
@@ -4804,9 +5078,9 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
             discard <| IO.asTask (prio := .dedicated) (do discard <| flushTelemetryOnce telemetrySink curSec)
       | .ok cfd =>
         if maxRequests?.isSome then
-          handleClientConn appState cfd
+          handleClientConn appState cfd false
         else
-          discard <| IO.asTask (prio := .dedicated) (handleClientConn appState cfd)
+          discard <| IO.asTask (prio := .dedicated) (handleClientConn appState cfd true)
           if !notifySock.isEmpty then
             let curSec ← coreEpochSec
             if curSec ≥ lastWatchdogSec + wdIntervalSec then

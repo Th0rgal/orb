@@ -1767,9 +1767,22 @@ fun OrbInboxView(
                 anyLoaded = true
             }
             if (evs.isEmpty() && idx < 12) {
-                evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
-                    core.fetchRows("/api/control/missions/${core.encodeComponent(row.id)}/events?limit=120", "events")
-                }.getOrDefault(emptyList())
+                val isCloudRow = row.str("backend")?.startsWith("cloud_") == true
+                val openBundle = if (!isCloudRow) core.fetchMissionOpenBundle(row.id, null, limit = 120) else null
+                if (openBundle != null) {
+                    val spineRows = OrbJSON.dictList(openBundle["spine"]).map { OrbRow(it) }
+                    val tailRows = OrbJSON.dictList(openBundle["events"]).map { OrbRow(it) }
+                    evs = (spineRows + tailRows).distinctBy { it.int("sequence", "seq") ?: it.id }
+                    val msgTypes = setOf("user_message", "assistant_message", "assistant_message_canonical")
+                    val msgs = evs.filter { (it.str("event_type", "type") ?: "") in msgTypes }
+                    if (msgs.isNotEmpty()) {
+                        OrbReadCache.saveRows("mission_msgs_${row.id}", msgs)
+                    }
+                } else {
+                    evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                        core.fetchRows("/api/control/missions/${core.encodeComponent(row.id)}/events?limit=120", "events")
+                    }.getOrDefault(emptyList())
+                }
                 if (evs.isNotEmpty()) {
                     OrbReadCache.saveRows(cacheKey, evs)
                     anyLoaded = true
@@ -2273,7 +2286,14 @@ fun OrbInboxView(
                                         .fillMaxWidth()
                                         .drawBehind { drawLine(OrbStyle.border, Offset.Zero, Offset(size.width, 0f), 1.dp.toPx()) }
                                         .heightIn(min = 48.dp)
-                                        .orbPressClickable { onSelectMission(mission, project) }
+                                        .orbPressClickable(
+                                            onPressDown = {
+                                                core.prefetchMissionSingle(
+                                                    mission.id,
+                                                    isCloud = mission.str("backend")?.startsWith("cloud_") == true
+                                                )
+                                            }
+                                        ) { onSelectMission(mission, project) }
                                         .padding(horizontal = 12.dp, vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)

@@ -58,6 +58,17 @@ from full hydration and report actual payload sizes and foreground bandwidth.
 
 ## Implementation and budgets
 
+`GET /api/control/missions/:id/open?limit=150&max_payload=8192[&since_seq=N]` is
+the single-roundtrip cold/catch-up conversation open bundle across Desktop, iOS,
+and Android. In one response (`protocol = 1`, `Accept-Encoding: gzip` over
+HTTP/1.1 keep-alive) it returns `mission`, the `events` raw tail (or `since_seq`
+delta), `spine` (`user_message` / `assistant_message` conversational spine when
+`since_seq` is omitted and `has_more` is `true`, eliminating separate
+`view=transcript` and `before_seq` roundtrips), and `queue` (seeded directly into
+follow-up queue state with zero extra `/api/control/queue` poll on open). Older
+servers returning `404` transparently fall back to the split endpoints per
+`(endpoint, backendVersion)`.
+
 `GET /api/control/missions/:id/snapshot?profile=presentation` explicitly selects
 one latest durable assistant message plus a three-event conversational tail,
 with a raw event watermark. No tool payloads or aggregate history counts are

@@ -133,6 +133,27 @@ export function orderedApiCandidates(primary = getApiUrl()): string[] {
   return [...healthy, ...cooling];
 }
 
+type TransportBridgeInfo = {
+  proxy_base_url?: string;
+  stream_proxy_base_urls?: string[];
+  configured_target?: string;
+};
+
+function applyTransportBridgeInfo(cleanTarget: string, info: TransportBridgeInfo | null | undefined): string | null {
+  const proxy = typeof info?.proxy_base_url === "string" && info.proxy_base_url.startsWith("http://127.0.0.1:")
+    ? info.proxy_base_url.replace(/\/+$/, "")
+    : null;
+  const streams = Array.isArray(info?.stream_proxy_base_urls)
+    ? info.stream_proxy_base_urls
+        .filter((u): u is string => typeof u === "string" && u.startsWith("http://127.0.0.1:"))
+        .map((u) => u.replace(/\/+$/, ""))
+    : [];
+  bridgeTarget = cleanTarget;
+  bridgeBaseUrl = proxy;
+  bridgeStreamUrls = streams;
+  return proxy;
+}
+
 /** Resolve the native loopback transport URL (`http://127.0.0.1:<port>/__orb_tx/<token>`)
  * when running inside Tauri desktop; returns `null` in web/test environments. */
 export async function resolveTransportBase(apiUrl = getApiUrl()): Promise<string | null> {
@@ -143,26 +164,8 @@ export async function resolveTransportBase(apiUrl = getApiUrl()): Promise<string
   if (bridgeTarget === clean && bridgeBaseUrl) return bridgeBaseUrl;
   if (bridgePending && bridgeTarget === clean) return bridgePending;
   bridgeTarget = clean;
-  const pending = invoke<{
-    proxy_base_url?: string;
-    stream_proxy_base_urls?: string[];
-    configured_target?: string;
-  }>("transport_bridge_configure", { apiUrl: clean })
-    .then((info) => {
-      const proxy = typeof info?.proxy_base_url === "string" && info.proxy_base_url.startsWith("http://127.0.0.1:")
-        ? info.proxy_base_url.replace(/\/+$/, "")
-        : null;
-      const streams = Array.isArray(info?.stream_proxy_base_urls)
-        ? info.stream_proxy_base_urls
-            .filter((u): u is string => typeof u === "string" && u.startsWith("http://127.0.0.1:"))
-            .map((u) => u.replace(/\/+$/, ""))
-        : [];
-      if (bridgeTarget === clean) {
-        bridgeBaseUrl = proxy;
-        bridgeStreamUrls = streams;
-      }
-      return proxy;
-    })
+  const pending = invoke<TransportBridgeInfo>("transport_bridge_configure", { apiUrl: clean })
+    .then((info) => (bridgeTarget === clean ? applyTransportBridgeInfo(clean, info) : null))
     .catch((error) => {
       note(`transport.bridge.error: ${error instanceof Error ? error.message : String(error)}`);
       if (bridgeTarget === clean) {
@@ -431,6 +434,48 @@ export async function restoreDesktopConnection() {
   if(getJwt()){persistDesktopConnection({api_url:getApiUrl(),token:getJwt()!});return;}
   const saved=await invoke('desktop_connection_load').catch(()=>null);
   if(saved?.api_url&&saved?.token)setConnection(saved.api_url,saved.token,{persist:false});
+}
+
+/** Single-IPC desktop cold-start bootstrap (`desktop_bootstrap`) consolidating
+ * `desktop_connection_load`, `desktop_prefs_load`, and `transport_bridge_configure`,
+ * with automatic fallback to individual RPCs on older daemons or test mocks. */
+export async function bootstrapDesktopRuntime(): Promise<void> {
+  const invoke = nativeInvoke();
+  const { applyBootstrappedDesktopPrefs, initDesktopPrefs } = await import("./desktopPrefs");
+  if (!invoke) {
+    await initDesktopPrefs().catch(() => null);
+    return;
+  }
+  try {
+    const boot = await invoke<{
+      connection?: { api_url?: string; token?: string } | null;
+      prefs?: unknown;
+      transport?: TransportBridgeInfo;
+    }>("desktop_bootstrap", getJwt() ? { apiUrl: getApiUrl() } : {});
+    if (boot && typeof boot === "object" && ("connection" in boot || "prefs" in boot || "transport" in boot)) {
+      if (getJwt()) {
+        persistDesktopConnection({ api_url: getApiUrl(), token: getJwt()! });
+      } else if (boot.connection?.api_url && boot.connection?.token) {
+        setConnection(boot.connection.api_url, boot.connection.token, { persist: false });
+      }
+      const prefsApplied = await applyBootstrappedDesktopPrefs(boot.prefs).catch(() => false);
+      if (!prefsApplied) await initDesktopPrefs().catch(() => null);
+      const cleanUrl = getApiUrl().trim().replace(/\/+$/, "");
+      if (boot.transport && (!cleanUrl.startsWith("https://") || boot.transport.configured_target === cleanUrl)) {
+        applyTransportBridgeInfo(cleanUrl, boot.transport);
+      } else {
+        await resolveTransportBase(cleanUrl).catch(() => null);
+      }
+      return;
+    }
+  } catch {
+    // Fall back cleanly when `desktop_bootstrap` is unimplemented or mocked per-command.
+  }
+  await restoreDesktopConnection().catch(() => {
+    console.warn("Orb could not restore the saved desktop connection");
+  });
+  await initDesktopPrefs().catch(() => null);
+  await resolveTransportBase().catch(() => null);
 }
 
 function disconnectNativeSync(){
@@ -1884,10 +1929,11 @@ async function includeAncestors(rows: Mission[], project?: string): Promise<Miss
  * history alone drops live missions that newer (often archived) ones pushed off. */
 async function projectRows(slug: string, priority?: RequestPriority): Promise<Mission[]> {
   const project = encodeURIComponent(slug);
-  const [history, ...live] = await Promise.all([
-    api<Mission[]>(`/api/control/missions?project=${project}&limit=100&all=true`, undefined, undefined, priority),
+  const [history, firstLive] = await Promise.all([
+    api<Mission[]>(`/api/control/missions?project=${project}&limit=200&all=true`, undefined, undefined, priority),
     api<Mission[]>(`/api/control/missions?project=${project}&limit=200`, undefined, undefined, priority),
   ]);
+  const live: Mission[][] = [firstLive];
   for (let offset = 200; live[live.length - 1].length === 200 && offset < 1000; offset += 200)
     live.push(await api<Mission[]>(`/api/control/missions?project=${project}&limit=200&offset=${offset}`, undefined, undefined, priority));
   const byId = new Map<string, Mission>();
@@ -2115,9 +2161,36 @@ export async function listCompletedMissions(limit = 100): Promise<Mission[] | nu
   }
 }
 
+const seededOpenMissions = new Map<string, { connVer: number; savedAt: number; mission: Mission }>();
+
+/** Seed a fresh `Mission` returned inside a single-RTT `/open` bundle so a
+ * concurrent `getMission(id)` resolves in `0 ms` with zero extra HTTP calls. */
+export function seedCachedMission(mission: Mission | null | undefined): void {
+  if (!mission || typeof mission !== "object" || typeof mission.id !== "string" || !mission.id) return;
+  seededOpenMissions.set(mission.id, {
+    connVer: connectionVersion(),
+    savedAt: Date.now(),
+    mission,
+  });
+  while (seededOpenMissions.size > 64) {
+    seededOpenMissions.delete(seededOpenMissions.keys().next().value!);
+  }
+}
+
 /** `coreOnly` skips the local-origin fallback: callers that need Core's
  * placement must not see a journal row that predates a machine transfer. */
 export async function getMission(id: string, options: { coreOnly?: boolean; fresh?: boolean; includeHistory?: boolean; priority?: RequestPriority } = {}): Promise<Mission> {
+  if (!options.fresh) {
+    const seeded = seededOpenMissions.get(id);
+    if (seeded && seeded.connVer === connectionVersion() && Date.now() - seeded.savedAt <= 3000) {
+      seededOpenMissions.delete(id);
+      if (options.coreOnly) return seeded.mission;
+      const origins = await import("./localOrigins");
+      const local = (await origins.localOrigins(id)).find((row) => row.id === id);
+      if (local && origins.localPending(local)) return origins.withCoreEffort(local, seeded.mission);
+      return seeded.mission;
+    }
+  }
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const path = options.includeHistory === false
     ? `/api/control/missions/${id}?include_history=false`

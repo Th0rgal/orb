@@ -1431,6 +1431,7 @@ private actor OrbDiskWriter {
 @MainActor
 enum OrbDisk {
     private static var urlCache: [String: URL] = [:]
+    private static var writesSincePrune = 0
     static func url(_ key: String, accountScope: String? = nil) -> URL {
         let scope = (accountScope ?? (OrbCore.shared.endpoint + ":" + (OrbCore.shared.authToken ?? ""))) + ":" + key
         if let cached = urlCache[scope] { return cached }
@@ -1458,9 +1459,32 @@ enum OrbDisk {
     }
     static func saveAsync<T: Encodable & Sendable>(_ value: T, key: String, accountScope: String? = nil) {
         let target = url(key, accountScope: accountScope)
+        writesSincePrune &+= 1
+        let shouldPrune = (writesSincePrune & 63) == 0
         Task.detached(priority: .utility) {
-            guard let data = try? JSONEncoder().encode(value) else { return }
-            try? await OrbDiskWriter.shared.write(data, to: target)
+            if let data = try? JSONEncoder().encode(value) {
+                try? await OrbDiskWriter.shared.write(data, to: target)
+            }
+            if shouldPrune {
+                Self.pruneOldestFiles(in: target.deletingLastPathComponent(), maxFiles: 550)
+            }
+        }
+    }
+    nonisolated private static func pruneOldestFiles(in root: URL, maxFiles: Int) {
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        let jsonFiles = urls.filter { $0.pathExtension == "json" }
+        guard jsonFiles.count > maxFiles else { return }
+        let dated: [(url: URL, date: Date)] = jsonFiles.map { file in
+            let mod = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return (file, mod)
+        }.sorted { $0.date < $1.date }
+        let excess = dated.count - maxFiles
+        for item in dated.prefix(excess) {
+            try? FileManager.default.removeItem(at: item.url)
         }
     }
     static func remove(_ key: String) { try? FileManager.default.removeItem(at: url(key)) }
@@ -1472,6 +1496,8 @@ enum OrbReadCache {
     private struct Entry { let value: OrbJSON; let date: Date }
     private static var values: [String: Entry] = [:]
     private static var eventValues: [String: [StoredEvent]] = [:]
+    private static var eventAccessOrder: [String] = []
+    private static var pendingEventDiskSaves: [String: (name: String, accountScope: String, events: [StoredEvent], task: Task<Void, Never>)] = [:]
     private static var eventFetchedAt: [String: Date] = [:]
     private static var eventPending: [String: Task<[StoredEvent], Error>] = [:]
     /// Network source for `events(_:)`; tests replace it.
@@ -1481,6 +1507,14 @@ enum OrbReadCache {
     private struct Pending { let id = UUID(); let task: Task<OrbJSON, Error> }
     private static var pending: [String: Pending] = [:]
     private static var cachedProjectSlugs: Set<String> = []
+    private static var currentAccountScope: String {
+        OrbCore.shared.endpoint + ":" + (OrbCore.shared.authToken ?? "")
+    }
+    private static func touchEventScope(_ scope: String) {
+        if eventAccessOrder.last == scope { return }
+        eventAccessOrder.removeAll { $0 == scope }
+        eventAccessOrder.append(scope)
+    }
     private static func key(_ name: String) -> String {
         if name.hasPrefix("project:") {
             let rest = String(name.dropFirst("project:".count))
@@ -1488,6 +1522,9 @@ enum OrbReadCache {
             if !slug.isEmpty { cachedProjectSlugs.insert(slug) }
         }
         return OrbDisk.url(name).absoluteString
+    }
+    static func peekMemory(_ name: String) -> OrbJSON? {
+        values[key(name)]?.value
     }
     static func read(_ name: String) -> OrbJSON? {
         let scope = key(name)
@@ -1573,14 +1610,27 @@ enum OrbReadCache {
     static func readMemoryEvents(_ missionID: String) -> [StoredEvent] {
         let cacheName = "events:\(missionID)"
         let scope = key(cacheName)
-        return eventValues[scope] ?? []
+        if let cached = eventValues[scope] {
+            touchEventScope(scope)
+            return cached
+        }
+        return []
     }
     static func readEvents(_ missionID: String) -> [StoredEvent] {
         let cacheName = "events:\(missionID)"
         let scope = key(cacheName)
-        if let cached = eventValues[scope] { return cached }
+        if let cached = eventValues[scope] {
+            touchEventScope(scope)
+            return cached
+        }
+        if let pendingSave = pendingEventDiskSaves[scope]?.events {
+            eventValues[scope] = pendingSave
+            touchEventScope(scope)
+            return pendingSave
+        }
         if let disk = OrbDisk.read(cacheName, as: [StoredEvent].self)?.map(\.compacted) {
             eventValues[scope] = disk
+            touchEventScope(scope)
             return disk
         }
         return []
@@ -1588,23 +1638,64 @@ enum OrbReadCache {
     static func readEventsAsync(_ missionID: String) async -> [StoredEvent] {
         let cacheName = "events:\(missionID)"
         let scope = key(cacheName)
-        if let cached = eventValues[scope] { return cached }
+        if let cached = eventValues[scope] {
+            touchEventScope(scope)
+            return cached
+        }
+        if let pendingSave = pendingEventDiskSaves[scope]?.events {
+            eventValues[scope] = pendingSave
+            touchEventScope(scope)
+            return pendingSave
+        }
         let disk = await OrbDisk.readAsync(cacheName, as: [StoredEvent].self)
         guard scope == key(cacheName), !Task.isCancelled else { return [] }
-        if let cached = eventValues[scope] { return cached }
+        if let cached = eventValues[scope] {
+            touchEventScope(scope)
+            return cached
+        }
         let events = (disk ?? []).map(\.compacted)
-        if !events.isEmpty { eventValues[scope] = events }
+        if !events.isEmpty {
+            eventValues[scope] = events
+            touchEventScope(scope)
+        }
         return events
     }
-    static func saveEvents(_ missionID: String, events: [StoredEvent]) {
+    static func flushPendingEventWrites() {
+        let pendingItems = pendingEventDiskSaves.values
+        pendingEventDiskSaves.removeAll()
+        for item in pendingItems {
+            item.task.cancel()
+            OrbDisk.saveAsync(item.events, key: item.name, accountScope: item.accountScope)
+        }
+    }
+    static func saveEvents(_ missionID: String, events: [StoredEvent], persistImmediately: Bool = true) {
         let cacheName = "events:\(missionID)"
         let scope = key(cacheName)
-        if eventValues.count >= 48, let firstKey = eventValues.keys.first {
-            eventValues.removeValue(forKey: firstKey)
+        let acctScope = currentAccountScope
+        if eventValues[scope] == nil && eventValues.count >= 64 {
+            while let oldest = eventAccessOrder.first {
+                eventAccessOrder.removeFirst()
+                if eventValues.removeValue(forKey: oldest) != nil { break }
+            }
+            if eventValues.count >= 64, let fallback = eventValues.keys.first {
+                eventValues.removeValue(forKey: fallback)
+            }
         }
         let capped = (events.count > 250 ? events.suffix(250) : events[...]).map(\.compacted)
         eventValues[scope] = capped
-        OrbDisk.saveAsync(capped, key: cacheName)
+        touchEventScope(scope)
+        pendingEventDiskSaves[scope]?.task.cancel()
+        if persistImmediately {
+            pendingEventDiskSaves.removeValue(forKey: scope)
+            OrbDisk.saveAsync(capped, key: cacheName, accountScope: acctScope)
+        } else {
+            let task = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(1500))
+                guard !Task.isCancelled, let entry = pendingEventDiskSaves.removeValue(forKey: scope) else { return }
+                OrbDisk.saveAsync(entry.events, key: entry.name, accountScope: entry.accountScope)
+            }
+            pendingEventDiskSaves[scope] = (name: cacheName, accountScope: acctScope, events: capped, task: task)
+        }
     }
     /// The one way to fetch a mission's recent events: account-scoped, TTL-bounded, and
     /// concurrent callers share one request. Results also land in the disk cache.
@@ -1650,6 +1741,8 @@ enum OrbReadCache {
     }
     /// Settings → Debug info → Clear caches: drops memory and disk copies for every account.
     static func clearAll() {
+        for item in pendingEventDiskSaves.values { item.task.cancel() }
+        pendingEventDiskSaves.removeAll()
         OrbHierarchy.reset()
         OrbWarmSyncCoordinator.shared.resetCaches()
         OrbBtwStore.resetAll()
@@ -1657,6 +1750,7 @@ enum OrbReadCache {
         pending.removeAll()
         values.removeAll()
         eventValues.removeAll()
+        eventAccessOrder.removeAll()
         eventFetchedAt.removeAll()
         for task in eventPending.values { task.cancel() }
         eventPending.removeAll()
@@ -1669,10 +1763,12 @@ enum OrbReadCache {
     }
     /// Drops memory copies (disk copies stay) so a suspended app is a small jetsam target.
     static func trimMemory() {
+        flushPendingEventWrites()
         OrbWarmSyncCoordinator.shared.resetCaches()
         OrbBtwStore.trimMemory()
         values.removeAll()
         eventValues.removeAll()
+        eventAccessOrder.removeAll()
         eventFetchedAt.removeAll()
     }
     static func invalidate(_ name: String) {
@@ -1880,17 +1976,61 @@ enum OrbReadCache {
         }
         OrbWarmSyncCoordinator.shared.reconcile()
     }
+    private static var inFlightSinglePrefetches: Set<String> = []
+    static func prefetchSingle(_ missionID: String, row: OrbRow? = nil) {
+        guard !missionID.isEmpty,
+              OrbBackgroundSyncMonitor.shared.linkBudget.p2Cap > 0,
+              readMemoryEvents(missionID).isEmpty,
+              !inFlightSinglePrefetches.contains(missionID) else { return }
+        inFlightSinglePrefetches.insert(missionID)
+        Task { @MainActor in
+            defer { inFlightSinglePrefetches.remove(missionID) }
+            if let row {
+                await prefetchRow(row)
+            } else {
+                await prefetchByID(missionID)
+            }
+        }
+    }
+    private static func prefetchByID(_ missionID: String) async {
+        guard !Task.isCancelled, readEvents(missionID).isEmpty else { return }
+        if let bundle = await OrbCore.shared.getMissionOpenBundle(id: missionID) {
+            var missionValue = bundle.mission
+            let combined = OrbConversation.mergeStoredEvents(existing: [], incoming: bundle.spine + bundle.events)
+            let historyEvents = (bundle.spine + bundle.events).filter { OrbConversationHistory.eventTypes.contains($0.eventType) }
+            if !historyEvents.isEmpty, case var .object(fields) = missionValue {
+                fields["history"] = .array(OrbConversationHistory.merge(fields["history"]?.items ?? [], events: historyEvents))
+                missionValue = .object(fields)
+            }
+            saveMission(missionID, value: missionValue)
+            if !combined.isEmpty {
+                saveEvents(missionID, events: combined)
+                eventFetchedAt[key("events:\(missionID)")] = Date()
+            }
+            return
+        }
+        _ = try? await conversation(missionID)
+        _ = await Log.attempt(.cache, "events prefetch", path: missionID) { try await events(missionID, limit: 150) }
+    }
     private static func prefetchRow(_ row: OrbRow) async {
         guard !Task.isCancelled else { return }
+        if row.cloud {
+            if row.raw != .null && !row.raw["history"].items.isEmpty {
+                seedMemory("mission:\(row.id)", value: row.raw)
+            } else {
+                _ = try? await conversation(row.id)
+            }
+            _ = try? await cloud(row.id)
+            return
+        }
+        if readEvents(row.id).isEmpty {
+            await prefetchByID(row.id)
+            return
+        }
         if row.raw != .null && !row.raw["history"].items.isEmpty {
             seedMemory("mission:\(row.id)", value: row.raw)
-        } else {
+        } else if peekMemory("mission:\(row.id)") == nil {
             _ = try? await conversation(row.id)
-        }
-        if row.cloud {
-            _ = try? await cloud(row.id)
-        } else if readEvents(row.id).isEmpty {
-            _ = await Log.attempt(.cache, "events prefetch", path: row.id) { try await events(row.id, limit: 150) }
         }
     }
 }

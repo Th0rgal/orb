@@ -2998,7 +2998,21 @@ struct OrbInboxView: View {
                     eventsByMission[row.id] = diskCached
                     events = diskCached
                 } else if idx < 10 {
-                    if let fetched = await Log.attempt(.network, "inbox events", path: row.id, { try await OrbReadCache.events(row.id) }) {
+                    if !row.cloud, let bundle = await OrbCore.shared.getMissionOpenBundle(id: row.id) {
+                        var missionValue = bundle.mission
+                        let combined = OrbConversation.mergeStoredEvents(existing: [], incoming: bundle.spine + bundle.events)
+                        let historyEvents = (bundle.spine + bundle.events).filter { OrbConversationHistory.eventTypes.contains($0.eventType) }
+                        if !historyEvents.isEmpty, case var .object(fields) = missionValue {
+                            fields["history"] = .array(OrbConversationHistory.merge(fields["history"]?.items ?? [], events: historyEvents))
+                            missionValue = .object(fields)
+                        }
+                        OrbReadCache.saveMission(row.id, value: missionValue)
+                        if !combined.isEmpty {
+                            OrbReadCache.saveEvents(row.id, events: combined)
+                            eventsByMission[row.id] = combined
+                            events = combined
+                        }
+                    } else if let fetched = await Log.attempt(.network, "inbox events", path: row.id, { try await OrbReadCache.events(row.id) }) {
                         eventsByMission[row.id] = fetched
                         events = fetched
                     }

@@ -4,6 +4,7 @@ import { For, Show, batch, createEffect, createMemo, createSignal, onCleanup, un
 import { ErrorToast } from "./toast";
 import { isBtwWrappedPrompt, messagePresentation, replaceMessageUserText } from "./messagePresentation";
 import { api, ApiError, connectionVersion, editQueuedMessage, listQueuedMessages, type QueuedMessage } from "./api";
+import { consumeMissionOpenQueue, isMissionWarmLive } from "./missionCache";
 import {
   clearObservedMissionQueueRevision,
   noteObservedMissionQueueRevision,
@@ -148,6 +149,33 @@ export function RemoteQueue(p: {
     clearObservedMissionQueueRevision(scopeKey);
     untrack(() => { setSettledPollEpoch(0); setRows([]); setLiveEdits(new Map()); setError(""); p.onRows([]); });
     let disposed = false, loading = false;
+    const applyFetchedRows = (fetched: QueuedMessage[], pollEpoch: number, started: number) => {
+      const pending = fetched.filter(row => !row.inflight && !deletedIds.has(row.id) && (row.source === "remote-queue" || row.source?.startsWith("host-queue:api:")));
+      if (disposed || started !== revision || version !== connectionVersion()) return;
+      let explicitMaxRev = peekObservedMissionQueueRevision(scopeKey);
+      for (const row of fetched) {
+        if (typeof row.revision === "number" && Number.isFinite(row.revision) && row.revision > 0) {
+          const revInt = Math.trunc(row.revision) >>> 0;
+          if (explicitMaxRev === undefined || revInt > explicitMaxRev) explicitMaxRev = revInt;
+        }
+      }
+      if (explicitMaxRev !== undefined && explicitMaxRev > 0) {
+        const pollStep = stepFollowupPollReconcile({
+          serverRev: serverQueueRev,
+          incomingServerRev: explicitMaxRev,
+        });
+        if (!pollStep.admitted) return;
+        serverQueueRev = pollStep.nextServerRev;
+        hasExplicitServerRev = true;
+        noteObservedMissionQueueRevision(scopeKey, serverQueueRev);
+      }
+      const sent = untrack(delivered);
+      batch(() => {
+        setSettledPollEpoch(pollEpoch);
+        setRows(pending);
+      });
+      p.onRows(pending.filter(row => !isRowRetiredByTurn(row.id, sent)).map(row => row.id));
+    };
     const refresh = async () => {
       if (loading || !mission) return;
       loading = true;
@@ -155,37 +183,27 @@ export function RemoteQueue(p: {
       const started = revision;
       try {
         const fetched = await listQueuedMessages(mission);
-        const pending = fetched.filter(row => !row.inflight && !deletedIds.has(row.id) && (row.source === "remote-queue" || row.source?.startsWith("host-queue:api:")));
-        if (disposed || started !== revision || version !== connectionVersion()) return;
-        let explicitMaxRev = peekObservedMissionQueueRevision(scopeKey);
-        for (const row of fetched) {
-          if (typeof row.revision === "number" && Number.isFinite(row.revision) && row.revision > 0) {
-            const revInt = Math.trunc(row.revision) >>> 0;
-            if (explicitMaxRev === undefined || revInt > explicitMaxRev) explicitMaxRev = revInt;
-          }
-        }
-        if (explicitMaxRev !== undefined && explicitMaxRev > 0) {
-          const pollStep = stepFollowupPollReconcile({
-            serverRev: serverQueueRev,
-            incomingServerRev: explicitMaxRev,
-          });
-          if (!pollStep.admitted) return;
-          serverQueueRev = pollStep.nextServerRev;
-          hasExplicitServerRev = true;
-          noteObservedMissionQueueRevision(scopeKey, serverQueueRev);
-        }
-        const sent = untrack(delivered);
-        batch(() => {
-          setSettledPollEpoch(pollEpoch);
-          setRows(pending);
-        });
-        p.onRows(pending.filter(row => !isRowRetiredByTurn(row.id, sent)).map(row => row.id));
+        applyFetchedRows(fetched, pollEpoch, started);
       } catch { /* Keep the last confirmed inbox during a network interruption. */ }
       finally { loading = false; }
     };
     refreshInbox = refresh;
-    void refresh();
-    const stop = pollWhileVisible(refresh, 3000, "remoteQueue.refresh");
+    const seeded = mission ? consumeMissionOpenQueue(mission) : undefined;
+    if (seeded) {
+      applyFetchedRows(seeded, ++inboxClock, revision);
+    } else {
+      void refresh();
+    }
+    const stop = pollWhileVisible(
+      () => {
+        // When multiplex WebSocket sync is healthy & caught up for this mission and no items sit
+        // in the queue, skip redundant 3 s HTTP `/api/control/queue` polls.
+        if (mission && isMissionWarmLive(mission) && untrack(rows).length === 0) return;
+        return refresh();
+      },
+      3000,
+      "remoteQueue.refresh",
+    );
     onCleanup(() => { disposed = true; if (refreshInbox === refresh) refreshInbox = undefined; stop(); });
   });
   const cancel = async (id: string) => {

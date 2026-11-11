@@ -1316,6 +1316,8 @@ export function InboxPage(p: {
                       tabIndex={isFocused() ? 0 : -1}
                       aria-keyshortcuts="ArrowDown ArrowUp Home End Space r t"
                       title={currentItem().mission.title || effectiveHeadline()}
+                      onPointerDown={() => prefetchTranscript(currentItem().id)}
+                      onFocus={() => prefetchTranscript(currentItem().id)}
                       onClick={() => {
                         const it = currentItem();
                         markItemAndChildrenRead(it);
@@ -1575,6 +1577,8 @@ export function InboxPage(p: {
                     <button
                       type="button"
                       class="inbox-peek-open"
+                      onPointerDown={() => prefetchTranscript(currentItem().id)}
+                      onFocus={() => prefetchTranscript(currentItem().id)}
                       onClick={() => {
                         const it = currentItem();
                         markItemAndChildrenRead(it);

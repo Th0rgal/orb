@@ -1080,10 +1080,13 @@ def parseCoreHttpRequest (raw : ByteArray) : Except String LeanSys.Http.HttpRequ
           bodySlice := bodySlice
         }
 
-def readCoreHttpRequestFromFd (fd : Fd) (timeoutMs : UInt32 := 5000) : IO (Except String LeanSys.Http.HttpRequest) := do
+def readCoreHttpRequestBuffered
+    (fd : Fd)
+    (initialBuf : ByteArray := ByteArray.empty)
+    (timeoutMs : UInt32 := 5000) : IO (Except String (LeanSys.Http.HttpRequest × ByteArray)) := do
   let tStart ← IO.monoNanosNow
   let budgetMs : Nat := Nat.max 50 timeoutMs.toNat
-  let mut buf := ByteArray.empty
+  let mut buf := initialBuf
   while (LeanSys.Http.findHeaderEnd? buf).isNone do
     if buf.size > LeanSys.Http.maxHttpHeaderBytes + 4 then
       return .error "headers_too_large"
@@ -1140,8 +1143,17 @@ def readCoreHttpRequestFromFd (fd : Fd) (timeoutMs : UInt32 := 5000) : IO (Excep
       if chunk.isEmpty then
         return .error "content_length_mismatch"
       buf := buf ++ chunk
-  let exact := if bodyStart + expectedBody < buf.size then buf.extract 0 (bodyStart + expectedBody) else buf
-  return parseCoreHttpRequest exact
+  let totalReqBytes := bodyStart + expectedBody
+  let exact := if totalReqBytes < buf.size then buf.extract 0 totalReqBytes else buf
+  let leftover := if totalReqBytes < buf.size then buf.extract totalReqBytes buf.size else ByteArray.empty
+  match parseCoreHttpRequest exact with
+  | .error e => return .error e
+  | .ok req => return .ok (req, leftover)
+
+def readCoreHttpRequestFromFd (fd : Fd) (timeoutMs : UInt32 := 5000) : IO (Except String LeanSys.Http.HttpRequest) := do
+  match ← readCoreHttpRequestBuffered fd ByteArray.empty timeoutMs with
+  | .error e => return .error e
+  | .ok (req, _) => return .ok req
 
 def splitContextSuffix (rest : String) : String × String :=
   if rest == "manifest" || rest == "blobs" || rest == "operations" || rest == "conflicts" ||
