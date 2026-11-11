@@ -1127,6 +1127,54 @@ it('binds Cmd/Ctrl+K and .btw-sidebar exclusively to the active slot in a multi-
  expect(css).toContain('width:min(780px,calc(100vw - var(--sb-w)));background:var(--bg)');
 });
 
+it('suspends side-question stream retention and 15s reconciliation polling while slot is inactive',async()=>{
+ const missionCache=await import('../src/missionCache');
+ const attachSpy=vi.spyOn(missionCache,'attachMissionStream');
+ let activeStops=0;
+ attachSpy.mockImplementation(()=>()=>{activeStops+=1;});
+
+ let reconcileCalls=0;
+ serverReconcile.fn=async(_parent:string,local:any[])=>{
+  reconcileCalls+=1;
+  return {
+   history:local.length?local:[{id:'s-1',question:'Q1',answer:`Ans-${reconcileCalls}`,at:'2026-11-11T10:00:00Z'}],
+   latest:'side-child-1',
+   authoritative:true,
+  };
+ };
+
+ vi.useFakeTimers();
+ try{
+  const [active,setActive]=createSignal(true);
+  render(()=><SideQuestions mission="mission-sub-a" active={active()} items={[]} ref={()=>{}} onTransfer={()=>{}}/>);
+
+  await vi.waitFor(()=>{
+   expect(reconcileCalls).toBe(1);
+   expect(attachSpy).toHaveBeenCalledTimes(1);
+  });
+  expect(activeStops).toBe(0);
+
+  // Deactivate the slot -> immediately releases attachMissionStream and stops 15s timer!
+  setActive(false);
+  expect(activeStops).toBe(1);
+
+  const callsBeforeIdle=reconcileCalls;
+  await vi.advanceTimersByTimeAsync(45_000);
+  expect(reconcileCalls).toBe(callsBeforeIdle);
+  expect(attachSpy).toHaveBeenCalledTimes(1);
+
+  // Reactivate the slot -> re-attaches stream and reconciles missed side-question updates!
+  setActive(true);
+  await vi.waitFor(()=>{
+   expect(attachSpy).toHaveBeenCalledTimes(2);
+   expect(reconcileCalls).toBeGreaterThan(callsBeforeIdle);
+  });
+ }finally{
+  attachSpy.mockRestore();
+  vi.useRealTimers();
+ }
+});
+
 
 
 

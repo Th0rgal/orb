@@ -814,6 +814,7 @@ export function Composer(p: {
     if (e.defaultPrevented || e.isComposing || hasOverlay() || ta?.closest("[hidden]")) return;
     // Dismiss a pending mention query too: its file catalog can arrive
     // after Escape and must not reopen the picker over the next Enter.
+    if (p.active === false) return;
     if (e.key === "Escape" && (menu() || ctx() || which() || slash() || atQuery(text(), caret()).open)) {
       e.stopPropagation();
       close();

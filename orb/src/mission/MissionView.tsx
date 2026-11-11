@@ -176,6 +176,7 @@ export function mergeIncomingMission(prev: Mission | null, incoming: Mission): M
 
 function MissionDock(p: {
   mission: Mission | null;
+  active?: boolean;
   items: StreamItem[];
   usedTokens?: number;
   destination: string;
@@ -394,7 +395,7 @@ function MissionDock(p: {
             void trackMissionSettings(mission.id, updateMissionSettings(mission.id,{service_tier:tier})).then(updated=>{if(missionSpeed(updated)!==tier)throw new Error('The backend did not save the selected speed. Update it before retrying.');const latest=p.mission&&p.mission.id===mission.id?p.mission:mission;p.onMission?.({...latest,service_tier:updated.service_tier,fast_mode:updated.fast_mode??latest.fast_mode,session_id:updated.session_id??latest.session_id,updated_at:updated.updated_at??latest.updated_at}, true);}).catch(e=>p.onError?.(launchError(e))).finally(()=>setSaving(false));
           }}/>
         </Show>
-        <Show when={p.mission?.backend === "codex" && !participant()}><MissionCyber mission={p.mission!} onError={p.onError}/></Show>
+        <Show when={p.mission?.backend === "codex" && !participant()}><MissionCyber mission={p.mission!} active={p.active} onError={p.onError}/></Show>
         <Show when={p.mission?.backend === "claudecode" && !participant() ? p.mission : undefined}>{m => <MissionClaudePermission mission={m()} onMission={p.onMission} onError={p.onError} />}</Show>
       </Show>
       <Show when={isConnected() && (networkHealth() === "reconnecting" || (networkHealth() === "slow" && (p.syncing || isWorking(p.mission?.status))))}>
@@ -471,7 +472,7 @@ export function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
     if (!resolved()) void getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e)));
   });
   const canRenderBody = () => Boolean(resolved()) || (!error() && (transcriptVersion(), Boolean(peekTranscript(p.id)?.items.length)));
-  return <Show when={canRenderBody()} fallback={<><ErrorToast error={error()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(""); return getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e))); } }} onDismiss={() => setError("")} /><ConversationSkeleton /></>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} onMission={handleMission} />}>{(() => { const mod = peekCloudAgentsModule(); return mod ? <mod.CloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /> : <Suspense fallback={<ConversationSkeleton />}><LazyCloudConversation id={p.id} onMission={handleMission} onOpenMission={p.onFork} /></Suspense>; })()}</Show></Show>;
+  return <Show when={canRenderBody()} fallback={<><ErrorToast error={error()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(""); return getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e))); } }} onDismiss={() => setError("")} /><ConversationSkeleton /></>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} onMission={handleMission} />}>{(() => { const mod = peekCloudAgentsModule(); return mod ? <mod.CloudConversation id={p.id} active={p.active} onMission={handleMission} onOpenMission={p.onFork} /> : <Suspense fallback={<ConversationSkeleton />}><LazyCloudConversation id={p.id} active={p.active} onMission={handleMission} onOpenMission={p.onFork} /></Suspense>; })()}</Show></Show>;
 }
 
 export function NativeMissionView(p: { id: string; active?: boolean; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null, authoritative?: boolean) => void; onFork?: (mission: Mission) => void }) {
@@ -1660,7 +1661,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
             </Show>
           </Show>
 
-          <NextReminder mission={p.id} busy={busy()} archived={isArchived(mission()?.status)} />
+          <NextReminder mission={p.id} active={isSlotActive()} busy={busy()} archived={isArchived(mission()?.status)} />
           <Show when={refreshing()}><div class="agent-wait-status" role="status">Refreshing conversation…</div></Show>
         </div>
       </div>
@@ -1785,7 +1786,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
           <ErrorToast error={sendError()} title="Couldn’t send your message" onDismiss={() => setSendError(null)}
             action={optimistic() ? { label: "Retry", run: () => { const draft = optimistic(); if (draft?.retry) draft.retry(); else if (draft) void sendMsg(draft.text, draft.images, followAttach(), draft.id); } } : undefined} />
           <ErrorToast error={error() || queueError()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(null); setQueueError(null); return Promise.all([refresh(true), resync(true)]); } }} onDismiss={() => { setError(null); setQueueError(null); }} />
-          <MissionDock mission={mission()} items={viewItems()} usedTokens={estimatedTokens()} destination={missionDestination(mission(), receipt)} syncing={syncing()} onMission={applyDockMission} onError={setError} onFork={p.onFork} />
+          <MissionDock mission={mission()} active={isSlotActive()} items={viewItems()} usedTokens={estimatedTokens()} destination={missionDestination(mission(), receipt)} syncing={syncing()} onMission={applyDockMission} onError={setError} onFork={p.onFork} />
         </div>
       </div>
       <Show when={pendingCheckpointRevert()}>

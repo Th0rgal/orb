@@ -13,7 +13,7 @@ import { uploadToken, type UploadedFile } from "./uploads";
 import { Portal } from 'solid-js/web';
 import { useSidePanel } from './FilePanel';
 import { createPinnedScroll } from './mission/pinnedScroll';
-import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, untrack } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, getOwner, on, onCleanup, onMount, runWithOwner, Show, untrack } from 'solid-js';
 import { connectionVersion, isTransientNetworkError, sendMissionMessage, type QueuedMessage } from './api';
 import { consumeSideQuestionOpenHint, peekSavedSideQuestion, readSideQuestion, peekSideQuestionOpen, rememberSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion, type SavedSideQuestion } from './sideQuestionStorage';
 import { RemoteQueue, type PendingRemoteQueueItem, type RemoteQueueHandle } from './RemoteQueue';
@@ -199,6 +199,9 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
  let reconnectSession:(sideId:string)=>Promise<void>=async sideId=>{await p.onOpenSession?.(sideId);};
  let watchActiveSession:((agent:NonNullable<ReturnType<typeof btwSession>>,initialAttachments?:SideAttachment[])=>void)|undefined;
  createEffect(on(key,current=>{
+  const effectOwner=getOwner();
+  const registerCleanup=(fn:()=>void)=>{if(effectOwner)runWithOwner(effectOwner,()=>onCleanup(fn));};
+  const registerEffect=(fn:()=>void)=>{if(effectOwner)runWithOwner(effectOwner,()=>createEffect(fn));else fn();};
   abort?.abort();queuedEdit.finish(true);
   pendingBaselineHistory=[];
   setExpandedSteps(0);setPinnedExtraTurns(0);setInitialSyncPending(false);
@@ -404,7 +407,12 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
     }
    });
   }else if(agent&&(agent.active||emptyReply)){
-   watchActive(agent);
+   if(untrack(isActive)){
+    watchActive(agent);
+   }else if(hasReconcile){
+    awaitingServerPending=true;
+    setBusy(true);setRunStatus('Reconnecting…');
+   }
   }else if(!warmAnsweredPending&&saved?.pending&&(!normalizedSavedError||recoverableInterrupted)&&hasReconcile){
    // An in-flight side turn runs on Core across panel unmounts and mission switches;
    // reconcile with Core before claiming the answer was interrupted.
@@ -416,23 +424,35 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
   if(!saved)void inheritSideQuestion(missionId).then(earlier=>{if(!stale&&key()===current&&earlier&&!history().length&&!busy())setHistory(earlier.history.filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()})));});
   // Restoring saved.open used to bring back an empty right column. The
   // side-question button still opens it.
+  if(!hasReconcile){
+   registerEffect(()=>{
+    if(!isActive()&&abort){abort.abort();abort=undefined;}
+   });
+  }
   if(hasReconcile){
    const reconcile=reconcileServer!;
    // The newest thread stays live while the tab is open: a question asked on
    // a completed thread (another device, a restart) re-dispatches a job on
    // that same mission, and its answer must show without reopening the tab.
+   let latestId:string|undefined=warmNow?.latest;
    let following='',stopFollow:(()=>void)|undefined,again:ReturnType<typeof setTimeout>|undefined;
+   let poll:ReturnType<typeof setInterval>|undefined;
    let inFlight=0;
-   // The live stream can sit on a dead cursor (sleep, proxy, reconnect):
-   // re-read Core periodically when SSE is used or a turn is busy; skip idle HTTP
-   // polling when the heartbeat-monitored multiplex WebSocket is active.
-   const poll=setInterval(()=>{if(!stale&&inFlight===0&&document.visibilityState!=='hidden'&&(!isMultiplexSyncActive()||busy()||awaitingServerPending))sync(history(),true);},15000);
-   onCleanup(()=>{stopFollow?.();clearTimeout(again);clearInterval(poll);});
+   const stopForeground=()=>{
+    stopFollow?.();stopFollow=undefined;following='';
+    clearTimeout(again);again=undefined;
+    if(poll!==undefined){clearInterval(poll);poll=undefined;}
+    if(abort){
+     if(untrack(busy))awaitingServerPending=true;
+     abort.abort();abort=undefined;
+    }
+   };
+   registerCleanup(stopForeground);
    const applyReconciled=(reconciled:Awaited<ReturnType<typeof reconcile>>)=>{
-    if(reconciled.latest)setSideSessionId(prev=>prev||reconciled.latest!);
+    if(reconciled.latest){latestId=reconciled.latest;setSideSessionId(prev=>prev||reconciled.latest!);}
     refreshSideSession(missionId,reconciled.activeSession);
     if(reconciled.activeSession?.startedAt)setStartedAt(reconciled.activeSession.startedAt);
-    follow(reconciled.latest);
+    if(untrack(isActive))follow(reconciled.latest);
     const changed=reconciled.history.length!==history().length||reconciled.history.some((row,i)=>row.question!==history()[i]?.question||row.answer!==history()[i]?.answer);
     if(changed)setHistory(reconciled.history);
     if(!migratingLegacyQueue&&unmigratedLegacyQueue.length&&hasQueueFollowUp()){
@@ -475,9 +495,13 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
      queueMicrotask(sendNext);
     }
     if(reconciled.activeSession&&(!busy()||(awaitingServerPending&&!asking)||handoffId())){
-     awaitingServerPending=false;
-     setHandoffId(undefined);
-     watchActive(reconciled.activeSession);
+     if(untrack(isActive)){
+      awaitingServerPending=false;
+      setHandoffId(undefined);
+      watchActive(reconciled.activeSession);
+     }else{
+      awaitingServerPending=true;
+     }
     }else if(awaitingServerPending&&!asking&&!reconciled.activeSession){
      if(reconciled.authoritative===false){
       setBusy(true);setRunStatus('Connection interrupted — reconnecting…');
@@ -488,9 +512,10 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
     }
    };
     const follow=(id:string|undefined)=>{
-     if(!id||id===following||stale)return;
+     if(!id||id===following||stale||!untrack(isActive))return;
      stopFollow?.();following=id;
      const onFollowEvent=(event:StreamEvent)=>{
+      if(stale||!untrack(isActive))return;
       if(event.type==='user_message'&&event.data?.queued&&typeof event.data.id==='string'&&typeof event.data.content==='string'){
        const qid=event.data.id,qcontent=event.data.content;
        setSideLiveEdits(rows=>[...rows,{id:qid,content:qcontent,at:++sideLiveClock}]);
@@ -498,22 +523,22 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
       if(!['user_message','assistant_message','assistant_message_canonical','mission_status_changed'].includes(event.type))return;
       if(isMultiplexSyncActive()&&'peekWarmBtwState' in btwMod&&typeof btwMod.peekWarmBtwState==='function'){
        queueMicrotask(()=>{
-        if(stale||key()!==current)return;
+        if(stale||key()!==current||!untrack(isActive))return;
         const warmCurrent=btwMod.peekWarmBtwState(missionId);
         if(warmCurrent&&warmCurrent.clean){
          applyReconciled({...warmCurrent,authoritative:true});
          return;
         }
-        clearTimeout(again);again=setTimeout(()=>{if(!stale)sync(history(),true);},300);
+        clearTimeout(again);again=setTimeout(()=>{if(!stale&&untrack(isActive))sync(history(),true);},300);
        });
        return;
       }
-      clearTimeout(again);again=setTimeout(()=>{if(!stale)sync(history(),true);},300);
+      clearTimeout(again);again=setTimeout(()=>{if(!stale&&untrack(isActive))sync(history(),true);},300);
      };
      stopFollow=attachMissionStream(id,{
       onEvent:onFollowEvent,
       onBatch:evs=>{for(const ev of evs)onFollowEvent(ev);},
-      onLagged:()=>{if(!stale)sync(history(),true);},
+      onLagged:()=>{if(!stale&&untrack(isActive))sync(history(),true);},
       onReady:()=>{},
       onDisconnected:()=>{},
      });
@@ -542,11 +567,11 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
      if(initialCold&&!stale&&key()===current&&mine===generation)setInitialSyncPending(false);
     });
    };
-   resync=()=>{if(!stale)sync(history(),true);};
+   resync=()=>{if(!stale&&untrack(isActive))sync(history(),true);};
    const coldEmpty=!initialHistory.length&&!(warmNow&&warmNow.clean);
    const needsImmediateSync=Boolean(
     shouldOpen||
-    (isActive()&&side?.visible())||
+    (untrack(isActive)&&side?.visible())||
     launching||
     agent?.active||
     awaitingServerPending||
@@ -554,7 +579,33 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
     (saved?.pending&&!warmAnsweredPending)||
     (warmNow&&(!warmNow.clean||Boolean(warmNow.activeSession))),
    );
-   sync(initialHistory,Boolean((saved?.pending&&!warmAnsweredPending)||(warmNow&&(!warmNow.clean||Boolean(warmNow.activeSession)))),!needsImmediateSync,coldEmpty);
+   let syncedInitially=false;
+   let wasDeactivated=false;
+   registerEffect(()=>{
+    if(!isActive()){
+     wasDeactivated=true;
+     stopForeground();
+     return;
+    }
+    if(latestId)follow(latestId);
+    // The live stream can sit on a dead cursor (sleep, proxy, reconnect):
+    // re-read Core periodically when SSE is used or a turn is busy; skip idle HTTP
+    // polling when the heartbeat-monitored multiplex WebSocket is active.
+    poll=setInterval(()=>{if(!stale&&untrack(isActive)&&inFlight===0&&document.visibilityState!=='hidden'&&(!isMultiplexSyncActive()||busy()||awaitingServerPending))sync(history(),true);},15000);
+    onCleanup(()=>{
+     stopFollow?.();stopFollow=undefined;following='';
+     clearTimeout(again);again=undefined;
+     if(poll!==undefined){clearInterval(poll);poll=undefined;}
+    });
+    if(!syncedInitially){
+     syncedInitially=true;
+     wasDeactivated=false;
+     sync(initialHistory,Boolean((saved?.pending&&!warmAnsweredPending)||(warmNow&&(!warmNow.clean||Boolean(warmNow.activeSession)))),!needsImmediateSync,coldEmpty);
+    }else if(wasDeactivated){
+     wasDeactivated=false;
+     sync(untrack(history),Boolean(untrack(busy)||awaitingServerPending||!isMultiplexSyncActive()),!untrack(open));
+    }
+   });
   }
   };
   if(cachedSaved){

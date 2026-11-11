@@ -105,7 +105,6 @@ export async function loadPersistedSidebar<TMission = unknown, TProject = unknow
           return row;
         }
       }
-      return null;
     } catch (err) {
       if (isUnsupportedCacheCommandError(err)) unsupportedInvoke = invoke;
     }
@@ -160,7 +159,16 @@ export async function savePersistedSidebar<TMission = unknown, TProject = unknow
       });
       return;
     } catch (err) {
-      if (isUnsupportedCacheCommandError(err)) unsupportedInvoke = invoke;
+      if (isUnsupportedCacheCommandError(err)) {
+        unsupportedInvoke = invoke;
+      } else {
+        await invoke("ui_cache_put", {
+          kind: "sidebar",
+          key: scope,
+          saved_at: record.savedAt,
+          raw: "{}",
+        }).catch(() => undefined);
+      }
     }
   }
   const db = await openDb();
@@ -201,7 +209,6 @@ export async function loadPersistedTranscript<TSnap = unknown>(
           return row.snapshot;
         }
       }
-      return null;
     } catch (err) {
       if (isUnsupportedCacheCommandError(err)) unsupportedInvoke = invoke;
     }
@@ -256,7 +263,16 @@ export async function savePersistedTranscript<TSnap = unknown>(
       });
       return;
     } catch (err) {
-      if (isUnsupportedCacheCommandError(err)) unsupportedInvoke = invoke;
+      if (isUnsupportedCacheCommandError(err)) {
+        unsupportedInvoke = invoke;
+      } else {
+        await invoke("ui_cache_put", {
+          kind: "transcript",
+          key: id,
+          saved_at: record.savedAt,
+          raw: "{}",
+        }).catch(() => undefined);
+      }
     }
   }
   const db = await openDb();
