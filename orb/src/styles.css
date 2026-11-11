@@ -20,7 +20,7 @@
   --bg: #141414;
   --bg-sidebar: #121313;
   --sidebar-opacity: 76%;
-  --surface-opacity: 91%;
+  --surface-opacity: 93.25%;
   --composer-shadow: 0 3px 16px rgb(0 0 0 / 12%);
   --bg-elev: #212121;
   --bg-hover: #1e1e1e;
@@ -72,6 +72,8 @@
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", sans-serif;
   --mono: "SF Mono", ui-monospace, Menlo, Monaco, monospace;
   --tb-h: 35px;
+  --tb-traffic-left: 82px;
+  --tb-traffic-margin: 70px;
   --col: 748px;
 }
 
@@ -80,7 +82,7 @@
   --bg: #ffffff;
   --bg-sidebar: #f6f6f4;
   --sidebar-opacity: 60%;
-  --surface-opacity: 93%;
+  --surface-opacity: 94.75%;
   --composer-shadow: 0 3px 16px rgb(0 0 0 / 6%);
   --bg-elev: #f1f0ed;
   --bg-hover: #efeee9;
@@ -128,6 +130,26 @@
   --md-p: #63625c;
   --md-h: #333230;
   --md-fence: #7b7a76;
+}
+
+/* On macOS, WKWebView sits above an AppKit NSVisualEffectView(.sidebar) layer
+   that diffuses the desktop over a wide Gaussian radius with a lifted material
+   tint. On Linux, WebKitGTK composites directly onto an RGBA(0,0,0,0) surface
+   over compositor Kawase blur, so tune sidebar/main translucency and make hover
+   and active pills translucent rather than solid hex cutouts. */
+:root[data-platform="linux"] {
+  --sidebar-opacity: 78%;
+  --surface-opacity: 94%;
+  --bg-hover: color-mix(in srgb, var(--fg) 4.5%, transparent);
+  --bg-active: color-mix(in srgb, var(--fg) 7.5%, transparent);
+  --tb-traffic-left: 8px;
+  --tb-traffic-margin: 0px;
+}
+:root[data-platform="linux"][data-theme="light"] {
+  --sidebar-opacity: 72%;
+  --surface-opacity: 95.5%;
+  --bg-hover: color-mix(in srgb, var(--fg) 4%, transparent);
+  --bg-active: color-mix(in srgb, var(--fg) 6.5%, transparent);
 }
 
 * { box-sizing: border-box; }
@@ -492,12 +514,12 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
 }
 .main { grid-row: 2; }
 .app:not(.sb-hidden) .tb-left {
-  position: absolute; left: 82px; top: 0; height: var(--tb-h);
-  width: calc(var(--sb-w) - 90px); z-index: 6;
+  position: absolute; left: var(--tb-traffic-left); top: 0; height: var(--tb-h);
+  width: calc(var(--sb-w) - var(--tb-traffic-left) - 8px); z-index: 6;
 }
-.app.sb-hidden .tb-left { margin-left: 70px; }
+.app.sb-hidden .tb-left { margin-left: var(--tb-traffic-margin); }
 @media (max-width: 720px) {
-  .app:not(.sb-hidden) .titlebar .tb-left { position: static; width: auto; margin-left: 0; padding-left: 70px; height: auto; }
+  .app:not(.sb-hidden) .titlebar .tb-left { position: static; width: auto; margin-left: 0; padding-left: var(--tb-traffic-margin); height: auto; }
 }
 .tb-left svg, .tb-title > svg { width: 15px; height: 15px; }
 .tb-left { padding-bottom: 1px; display: flex; align-items: center; gap: 2px; }
@@ -2268,7 +2290,6 @@ button.fork-trigger:hover { color: var(--fg); }
 .transfer-marker { color: var(--muted); font-size: 11px; text-align: center; margin: 12px 0; }
 
 /* Settings share Cursor's compact, centered column and quiet navigation. */
-.settings-view .sidebar { background: var(--bg-sidebar); }
 .settings-view .sb-top { height: 39px; }
 .settings-view .sb-scroll { padding: 0 8px 12px; }
 .settings-view .row { height: 30px; padding: 0 9px; gap: 8px; margin-bottom: 1px; border-radius: var(--radius-md); }
@@ -2854,8 +2875,8 @@ select.orb-select-native:disabled { cursor: default; }
 .file-tree-node { padding-bottom:1px; }
 
 /* Expanded files can reach the native titlebar when the main sidebar is hidden. */
-.app.sb-hidden .file-panel.maximized .file-header { padding-left:82px; }
-@media(max-width:720px) { .file-panel.maximized .file-header { padding-left:82px; } }
+.app.sb-hidden .file-panel.maximized .file-header { padding-left:max(10px, var(--tb-traffic-left)); }
+@media(max-width:720px) { .file-panel.maximized .file-header { padding-left:max(10px, var(--tb-traffic-left)); } }
 
 .agent-history-toggle.has-current { display: flex; align-items: center; gap: 8px; max-width: 100%; }
 .agent-history-toggle.has-current .agent-task-name { min-width: 0; }
@@ -4238,7 +4259,7 @@ select.orb-select-native:disabled { cursor: default; }
 .spend-col.today .spend-day, .spend-col.active .spend-day { color: var(--fg-2); }
 .spend-bar.skel { height: 40%; }
 .spend-col:nth-child(2n) .spend-bar.skel { height: 65%; }
-.spend-skel, .spend-bar.skel { display: inline-block; border-radius: var(--radius-xs); background: linear-gradient(90deg, var(--bg-code), var(--bg-active), var(--bg-code)); background-size: 200% 100%; animation: mermaid-shimmer 1.4s ease-in-out infinite; }
+.spend-skel, .spend-bar.skel { display: inline-block; border-radius: var(--radius-xs); background: linear-gradient(90deg, var(--bg-code), var(--hover-1), var(--bg-code)); background-size: 200% 100%; animation: mermaid-shimmer 1.4s ease-in-out infinite; }
 .spend-skel { height: 10px; vertical-align: middle; }
 .spend-skel.w1 { width: 110px; } .spend-skel.w2 { width: 70px; } .spend-skel.w4 { width: 150px; } .spend-skel.w3 { width: 22px; height: 8px; }
 .spend-chart.loading .spend-col { cursor: default; }
@@ -4277,7 +4298,7 @@ select.orb-select-native:disabled { cursor: default; }
 .app[data-files-split="true"], .app.sb-hidden[data-files-split="true"] { grid-template-columns:0 minmax(0,1fr) minmax(0,1fr); }
 .app[data-files-split="true"] > .sidebar, .app[data-files-split="true"] > .sidebar-backdrop, .app[data-files-split="true"] .sb-resize { display:none; }
 .app[data-files-split="true"] > .titlebar { grid-column: 2; padding-left: 14px; background: color-mix(in srgb, var(--bg) var(--surface-opacity), transparent); }
-.app[data-files-split="true"] .tb-left { position:static; width:auto; margin-left:70px; height:auto; }
+.app[data-files-split="true"] .tb-left { position:static; width:auto; margin-left:var(--tb-traffic-margin); height:auto; }
 .app[data-files-split="true"] > .file-panel:not(.maximized) { grid-row:1 / 3; position:relative; inset:auto; width:auto; box-shadow:none; }
 .app[data-files-split="true"] > .file-panel > .file-panel-resize { display:none; }
 @media(max-width:1150px) { .app[data-files-split="true"], .app.sb-hidden[data-files-split="true"] { grid-template-columns:0 minmax(0,1fr) minmax(0,1fr); } }
