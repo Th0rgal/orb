@@ -1485,8 +1485,47 @@ private def runLocalOpenCodeE2eChecks (validTok tmpStateDir : String) : IO (Nat 
     ("connection", .obj #[("api_url", .str "https://core-oc.example")])
   ])
   let ocEvPoll ← dispatchRpcCommand ocRef "__orb_poll_events" (.obj #[("tokens", .arr #[JVal.nat ocSubTok])])
+  -- Verify instant `~/.config/opencode/opencode.json` model loading (without spawning slow `opencode models`)
+  -- and automatic migration of persisted unprefixed `builtin/*` OpenCode models on reload.
+  let ocRepairDir := ocDir / "repair-state"
+  let ocCfgDir := ocRepairDir / ".config" / "opencode"
+  IO.FS.createDirAll ocCfgDir
+  IO.FS.writeFile (ocCfgDir / "opencode.json")
+    "{\"model\":\"orbrouter/builtin/smart\",\"provider\":{\"orbrouter\":{\"name\":\"OrbRouter\",\"models\":{\"builtin/smart\":{},\"builtin/fast\":{}}}}}"
+  let slowOcBin := ocRepairDir / "slow-opencode.sh"
+  IO.FS.writeFile slowOcBin
+    "#!/bin/sh\nif [ \"$1\" = \"models\" ]; then\n  exit 99\nfi\nexit 0\n"
+  let _ ← OrbBin.PosixExt.chmod slowOcBin.toString 0o755
+  IO.FS.writeFile (ocRepairDir / "local-bindings.json")
+    ("{\"revision\":1,\"bindings\":{\"m-legacy-oc\":{\"harness\":\"opencode\",\"bin\":\"" ++ slowOcBin.toString ++ "\",\"cwd\":\"" ++ ocRepairDir.toString ++ "\",\"model\":\"builtin/smart\",\"sessionId\":\"ses_leg\"}}}")
+  IO.FS.writeFile (ocRepairDir / "local-origins.json")
+    ("[{\"id\":\"m-legacy-oc\",\"endpoint\":\"https://core-oc.example\",\"title\":\"Legacy OC\",\"status\":\"failed\",\"backend\":\"opencode\",\"working_directory\":\"" ++ ocRepairDir.toString ++ "\",\"delivered_prompt\":\"hi\",\"local_sync_pending\":true,\"local_run_active\":false,\"project\":\"orb\",\"model_override\":\"builtin/smart\",\"history\":[{\"role\":\"user\",\"content\":\"hi\"}]}]")
+  let ocRepairRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := ocRepairDir.toString, homeDir := ocRepairDir.toString } : LocaldState)
+  let fastProbeRes ← dispatchRpcCommand ocRepairRef "local_opencode_models" (.obj #[("path", .str slowOcBin.toString)])
+  let fastScanRes ← dispatchRpcCommand ocRepairRef "local_agents_scan" (.obj #[("request", .obj #[("overrides", .obj #[("opencode", .str slowOcBin.toString)])])])
+  let repairedBindsRes ← dispatchRpcCommand ocRepairRef "local_bindings_refresh" (.obj #[])
+  let repairedOriginsRes ← dispatchRpcCommand ocRepairRef "local_origin_list" (.obj #[("connection", .obj #[("api_url", .str "https://core-oc.example")])])
+  let ocInstantAndRepairOk :=
+    (match fastProbeRes with
+     | .ok (.arr ms) => hasModelPair ms "orbrouter/builtin/smart" "Routing — Smart" && hasModelPair ms "orbrouter/builtin/fast" "Routing — Fast"
+     | _ => false) &&
+    (match fastScanRes with
+     | .ok (.arr rows) =>
+       match rows.find? (fun r => r.fieldStr? "id" == some "opencode") with
+       | some r => ((r.fieldArr? "models").map (fun ms => hasModelPair ms "orbrouter/builtin/smart" "Routing — Smart")).getD false
+       | none => false
+     | _ => false) &&
+    (match repairedBindsRes with
+     | .ok bJv => ((bJv.fieldOrNull "bindings").fieldOrNull "m-legacy-oc").fieldStr? "model" == some "orbrouter/builtin/smart"
+     | _ => false) &&
+    (match repairedOriginsRes with
+     | .ok (.arr rows) =>
+       match rows.find? (fun r => r.fieldStr? "id" == some "m-legacy-oc") with
+       | some r => r.fieldStr? "model_override" == some "orbrouter/builtin/smart"
+       | none => false
+     | _ => false)
   let ocRunOk :=
-    ocDone && ocDone2 &&
+    ocInstantAndRepairOk && ocDone && ocDone2 &&
     (match ocPollFinal with
       | .ok pJv =>
         pJv.fieldStr? "text" == some "OPENCODE_LOCAL_READY" &&

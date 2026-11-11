@@ -9,7 +9,7 @@ import {note} from './diagnostics';
 import {btwConfig} from './btwSettings';
 import {reconcileSavedSideQuestion,resetSideQuestionStorageForTest,sideQuestionKey,BTW_HISTORY_LIMIT} from './sideQuestionStorage';
 import {forkSource} from './missionTree';
-import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,recoverLocalLaunch} from './localAgents';
+import {localBinding,restoreLocalBindings,localAgentForLaunch,resolveLocalHarnessModel,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,recoverLocalLaunch} from './localAgents';
 import {enqueueLocalMessage,queuedLocalMessages} from './localMessageQueue';
 import {extractBtwAttachmentPaths,extractBtwUserQuestion as extractBtwQuestion,isAutomaticUserEvent,replaceBtwUserQuestion as replaceBtwQuestion} from './messagePresentation';
 import {getMissionEvents,isMultiplexSyncActive,storedToStream,type StoredEvent,type StreamEvent} from './stream';
@@ -491,9 +491,10 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   const binding=local?localBinding(parent):undefined;
   const bin=local?(launchAgent?.path??''):'';
   if(local){if(!binding)throw new Error('Open this conversation on the computer that owns its workspace.');if(!bin)throw new Error(`${config.harness} is not installed. Configure it in Settings → Agents → Local agents.`);}
+  const effectiveModel=(local?(await resolveLocalHarnessModel(config.harness,bin,config.model))??config.model:config.model);
   if(launchSignal.aborted||connectionVersion()!==version)throw new Error('Side question launch cancelled or connection changed.');
   const createSide=async()=>{
-   const attemptKey=key+':attempt:'+config.harness+':'+config.model+':'+placement;
+   const attemptKey=key+':attempt:'+config.harness+':'+effectiveModel+':'+placement;
    const stored=localStorage.getItem(attemptKey);
    let cached:{id:string;logical:string;prompt:string;snapshot:typeof snapshot}|undefined;
    try{const parsed=JSON.parse(stored||'null');if(parsed?.id)cached=parsed;}catch{/* Legacy UUID-only attempt. */}
@@ -502,19 +503,19 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
    if(cached?.logical===logical){prompt=cached.prompt;snapshot=cached.snapshot;}
    const retained=cached?.logical===logical?cached:{id:attempt,logical,prompt,snapshot};
    localStorage.setItem(attemptKey,JSON.stringify(retained));
-   const m=await api<Mission>(`/api/control/missions/${parent}/btw/agent`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({backend:config.harness,model_override:config.model,model_effort:null,idempotency_key:attempt,side_question:prompt,side_context_mode:"incremental"})}).catch(error=>{
+   const m=await api<Mission>(`/api/control/missions/${parent}/btw/agent`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({backend:config.harness,model_override:effectiveModel,model_effort:null,idempotency_key:attempt,side_question:prompt,side_context_mode:"incremental"})}).catch(error=>{
     if(error instanceof ApiError&&error.status===409&&(error.detail.startsWith('This side request key was already used for different launch content;')||isIdempotencyConflictError(error))&&localStorage.getItem(attemptKey)===JSON.stringify(retained))localStorage.removeItem(attemptKey);
     throw error;
    });
    // Core owns placement. A stale local view must not launch a native run for
    // a side session Core already started elsewhere.
    if(local&&!isClientPlacement(m))local=false;
-   s={id:m.id,question,harness:config.harness,model:config.model,local,placement,active:!local,baseline:0,turnCount:1,startedAt:m.created_at||new Date().toISOString()};save(parent,s);localStorage.removeItem(attemptKey);accepted=true;
+   s={id:m.id,question,harness:config.harness,model:effectiveModel,local,placement,active:!local,baseline:0,turnCount:1,startedAt:m.created_at||new Date().toISOString()};save(parent,s);localStorage.removeItem(attemptKey);accepted=true;
   };
   if(!reuse)await createSide();
   else{
    if(!cachedMsg)localStorage.setItem(msgAttemptKey,JSON.stringify({logical:msgLogical,prompt,snapshot}));
-   const next:BtwSession={...s!,question,active:!local,baseline:0,afterSequence:headSeq,turnCount:(s!.turnCount??1)+1,lastSequence:headSeq,startedAt:new Date().toISOString()};
+   const next:BtwSession={...s!,model:local?effectiveModel:s!.model,question,active:!local,baseline:0,afterSequence:headSeq,turnCount:(s!.turnCount??1)+1,lastSequence:headSeq,startedAt:new Date().toISOString()};
    delete next.brokenSession;delete next.freshSession;
    try{
     if(!local)await sendMissionMessage(next.id,prompt,undefined,clientMessageId);
@@ -533,7 +534,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
     await createSide();
    }
   }
-  if(local&&binding){const old=localBinding(s!.id);await rememberBinding(s!.id,{harness:config.harness,bin,cwd:binding.cwd,model:config.model,sessionId:old?.sessionId});s!.launchPending=true;save(parent,s!);const receipt=await startLocal({id:s!.id,harness:config.harness,bin,cwd:binding.cwd,model:config.model,prompt,sessionId:old?.sessionId,sharedCwdWith:parent,imagePaths:paths.filter((_,i)=>attachments[i].media_type.startsWith('image/'))});s!.launchPending=false;s!.active=true;save(parent,s!);follow(s!.id,receipt);await appendClientTranscript(s!.id,'user',question,undefined,receipt);}
+  if(local&&binding){const old=localBinding(s!.id);await rememberBinding(s!.id,{harness:config.harness,bin,cwd:binding.cwd,model:effectiveModel,sessionId:old?.sessionId});s!.launchPending=true;save(parent,s!);const receipt=await startLocal({id:s!.id,harness:config.harness,bin,cwd:binding.cwd,model:effectiveModel,prompt,sessionId:old?.sessionId,sharedCwdWith:parent,imagePaths:paths.filter((_,i)=>attachments[i].media_type.startsWith('image/'))});s!.launchPending=false;s!.active=true;save(parent,s!);follow(s!.id,receipt);await appendClientTranscript(s!.id,'user',question,undefined,receipt);}
   s!.contextVersion=2;
   if(!reuse||!s!.conversationCursor)s!.conversationCursor=snapshot.cursor;
   else s!.pendingCursor=snapshot.cursor;
@@ -658,14 +659,16 @@ export async function queueBtwFollowUp(
   const bin=launchAgent?.path??'';
   if(!binding)throw new Error('Open this conversation on the computer that owns its workspace.');
   if(!bin)throw new Error(`${s.harness||config.harness} is not installed. Configure it in Settings → Agents → Local agents.`);
+  const sideHarness=s.harness||config.harness;
+  const sideModel=(await resolveLocalHarnessModel(sideHarness,bin,s.model||config.model))??(s.model||config.model);
   const newImagePaths=uploadedPaths.filter((_,i)=>attachments[i]?.media_type.startsWith('image/'));
   const imagePaths=[...new Set([...(existingLocal?.request.imagePaths??[]),...newImagePaths])];
   await enqueueLocalMessage(
-   {id:s.id,harness:s.harness||config.harness,bin,cwd:binding.cwd,model:s.model||config.model,prompt,sessionId:sideBinding?.sessionId,sharedCwdWith:parent,imagePaths},
+   {id:s.id,harness:sideHarness,bin,cwd:binding.cwd,model:sideModel,prompt,sessionId:sideBinding?.sessionId,sharedCwdWith:parent,imagePaths},
    question,
    {id:clientMessageId,waiting:true,replace},
   );
-  s=recordQueuedCursor(s,clientMessageId);save(parent,s);
+  s=recordQueuedCursor({...s,model:sideModel},clientMessageId);save(parent,s);
   return {id:clientMessageId,missionId:s.id,prompt,queued:true,local:true};
  }
  let lastError:unknown;
