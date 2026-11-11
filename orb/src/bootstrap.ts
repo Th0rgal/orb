@@ -1,5 +1,12 @@
 // Keep startup failures visible even when the application's module graph fails.
-void import('./index').catch(error => {
+const boot = async () => {
+  if (typeof location !== 'undefined' && location.search.includes('migrate_1431=')) {
+    const { migrateLinux1431Drafts } = await import('./linuxDraftMigration');
+    await migrateLinux1431Drafts();
+  }
+  await import('./index');
+};
+void boot().catch(error => {
   console.error('Orb failed to start', error);
   const root = document.getElementById('root');
   if (!root) return;

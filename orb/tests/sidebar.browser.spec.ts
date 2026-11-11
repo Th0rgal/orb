@@ -92,7 +92,12 @@ test("sidebar rows stay compact with distinct hover/selected and delayed real me
   await expect(tip).toBeVisible();
   await expect(tip.locator(".row-tip-title")).toHaveText("Orb DGX launch without losing this draft");
   await expect(tip.locator(".row-tip-meta").first()).toHaveText("DGX Spark");
-  expect(await tip.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe("rgb(25, 25, 25)");
+  const tipAlpha = await tip.evaluate((el) => {
+    const bg = getComputedStyle(el).backgroundColor;
+    const m = bg.match(/rgba?\([^)]*[,/]\s*([0-9.]+)\s*\)/) ?? bg.match(/color\(srgb [^/]+\/\s*([0-9.]+)\s*\)/);
+    return m ? Number(m[1]) : 1;
+  });
+  expect(tipAlpha).toBeCloseTo(0.84, 2);
   await expect(tip).not.toContainText("host");
   await expect(live).toHaveAttribute("aria-describedby", "orb-row-tip");
   await expect(live).toHaveAccessibleName(/Orb DGX launch without losing this draft/);

@@ -80,6 +80,8 @@ export function Composer(p: {
   picker?: boolean;
   /** Conversation identity; dictation results for another scope are dropped. */
   scope?: string;
+  /** False when the enclosing keep-alive conversation slot is hidden. */
+  active?: boolean;
   /** Server-confirmed remote support for a harness on the selected machine (new agents only). */
   remoteSupport?: (backend: string) => { state: RemoteSupport; note: string };
   /** When set, the harness menu only lists these ids (This computer). */
@@ -809,9 +811,10 @@ export function Composer(p: {
     if (atQuery(text(), caret()).open) setAtOff(true);
   };
   const onEsc = (e: KeyboardEvent) => {
-    if (e.defaultPrevented || e.isComposing || hasOverlay()) return;
+    if (e.defaultPrevented || e.isComposing || hasOverlay() || ta?.closest("[hidden]")) return;
     // Dismiss a pending mention query too: its file catalog can arrive
     // after Escape and must not reopen the picker over the next Enter.
+    if (p.active === false) return;
     if (e.key === "Escape" && (menu() || ctx() || which() || slash() || atQuery(text(), caret()).open)) {
       e.stopPropagation();
       close();
@@ -1022,7 +1025,7 @@ export function Composer(p: {
   const voice = (
     <Show when={voiceAvailable()}>
       <div class="voice-slot" onPointerDown={(e) => e.stopPropagation()}>
-        <VoiceButton scope={p.scope} onText={insertDictation} onActive={setVoiceActive} />
+        <VoiceButton scope={p.scope} active={p.active} onText={insertDictation} onActive={setVoiceActive} />
       </div>
     </Show>
   );
@@ -1245,6 +1248,7 @@ export function floatingDock(el: HTMLDivElement) {
   let prop = "--dock-height";
   let lastHeight = -1;
   const update = (entries?: ResizeObserverEntry[]) => {
+    if (el.closest("[hidden]")) return;
     const entry = entries?.[0];
     const height = entry?.borderBoxSize?.[0]?.blockSize ?? el.getBoundingClientRect().height;
     if (height <= 0 || height === lastHeight) return;

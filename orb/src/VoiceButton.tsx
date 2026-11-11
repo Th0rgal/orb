@@ -6,7 +6,7 @@ import { ErrorToast } from "./toast";
  * is available; everywhere else `voiceAvailable()` stays false and the
  * composer shows no microphone.
  */
-import { For, Index, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Index, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
 import { hasOverlay } from "./overlayLayer";
 import {
@@ -88,6 +88,8 @@ export function VoiceButton(p: {
   onText: (text: string) => void;
   /** Identity of the conversation this button belongs to; a result for another scope is dropped. */
   scope?: string;
+  /** False when the enclosing keep-alive conversation slot is hidden. */
+  active?: boolean;
   /** Recording/transcribing state, so the composer can keep the button mounted while text is typed. */
   onActive?: (active: boolean) => void;
   disabled?: boolean;
@@ -102,6 +104,7 @@ export function VoiceButton(p: {
   const [bars, setBars] = createSignal<number[]>(silentWave());
   const [error, setError] = createSignal<string | null>(null);
   const [langOpen, setLangOpen] = createSignal(false);
+  const isSlotActive = createMemo(() => p.active !== false);
   let rec: Recorder | null = null;
   let tick: number | undefined;
   let errTimer: number | undefined;
@@ -144,7 +147,7 @@ export function VoiceButton(p: {
       warmFailure = toVoiceError(e);
     });
     // Still the recording the UI is showing, in the conversation it was started for.
-    const live = () => my === token && !disposed && p.scope === scope;
+    const live = () => my === token && !disposed && p.scope === scope && p.active !== false;
     // The recorder stays local until it has been validated: the permission
     // prompt can outlive a cancel + restart, and a late result must never
     // replace or tear down the recording that now owns the button.
@@ -207,7 +210,7 @@ export function VoiceButton(p: {
       if (my !== token || disposed) return;
       if (wav.length === 0) throw new VoiceError("empty", "Nothing was recorded.");
       const result = await b.transcribe(wav, voiceLanguage());
-      if (my !== token || disposed) return; // cancelled or navigated away meanwhile
+      if (my !== token || disposed || p.active === false) return; // cancelled or navigated away meanwhile
       if (scope !== p.scope) return; // composer now belongs to another conversation
       const text = result.text.trim();
       if (my === token && !disposed) setState("idle");
@@ -217,7 +220,7 @@ export function VoiceButton(p: {
         // Insert after the composer field is shown again — WKWebView paints
         // a ghosted double glyph if we write into a `display:none` textarea.
         queueMicrotask(() => {
-          if (my !== token || disposed || scope !== p.scope) return;
+          if (my !== token || disposed || scope !== p.scope || p.active === false) return;
           p.onText(text);
         });
       }
@@ -261,6 +264,12 @@ export function VoiceButton(p: {
       { defer: true },
     ),
   );
+  createEffect(() => {
+    if (!isSlotActive()) {
+      if (langOpen()) setLangOpen(false);
+      if (status() !== "idle") cancel();
+    }
+  });
 
   const toggle = () => {
     if (p.disabled) return;
@@ -280,8 +289,9 @@ export function VoiceButton(p: {
     }
   };
 
+  let rootEl: HTMLSpanElement | undefined;
   const onKey = (e: KeyboardEvent) => {
-    if (e.key !== "Escape" || e.defaultPrevented || e.isComposing || hasOverlay()) return;
+    if (e.key !== "Escape" || e.defaultPrevented || e.isComposing || hasOverlay() || rootEl?.closest("[hidden]")) return;
     if (langOpen()) {
       e.stopPropagation();
       setLangOpen(false);
@@ -318,7 +328,7 @@ export function VoiceButton(p: {
   };
 
   return (
-    <span class={`voice ${status()}`} onPointerDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+    <span ref={rootEl} class={`voice ${status()}`} onPointerDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
       <Show when={status() === "idle"}>
         <span class="voice-lang-wrap">
           <button

@@ -118,3 +118,29 @@ it('keeps an optimistic "yes" follow-up across historical "yes" turns and unrela
   await screen.findByText('Working on yes…');
   expect(screen.getAllByText('yes')).toHaveLength(2);
 });
+
+it('suspends CloudConversation background polling while its keep-alive slot is hidden and reconciles on return', async () => {
+  const { createSignal } = await import('solid-js');
+  vi.useFakeTimers();
+  try {
+    let state = execution(turn('running', { result: 'Initial cloud stream' }));
+    fakes.execution.mockImplementation(async () => state);
+    const [slotActive, setSlotActive] = createSignal(true);
+
+    render(() => <CloudConversation id="m" active={slotActive()} />);
+    await vi.waitFor(() => expect(fakes.execution).toHaveBeenCalledTimes(1));
+
+    // Hide the slot -> both the 750ms fast poll and 2.5s poll are torn down immediately.
+    setSlotActive(false);
+    fakes.execution.mockClear();
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(fakes.execution).not.toHaveBeenCalled();
+
+    // Reactivate the slot -> immediately refreshes and resumes polling.
+    state = execution(turn('response_complete', { result: 'Updated cloud answer' }));
+    setSlotActive(true);
+    await vi.waitFor(() => expect(fakes.execution).toHaveBeenCalledTimes(1));
+  } finally {
+    vi.useRealTimers();
+  }
+});

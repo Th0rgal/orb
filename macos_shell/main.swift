@@ -5,8 +5,8 @@
 // into the main frame only (`forMainFrameOnly: true`) with captured `_fetch` and zero-idle-poll
 // SSE event streaming (`/__orb_events`), handles native macOS window drag / theme / file panels /
 // Finder file+folder drag-and-drop / ephemeral Mistral usage sign-in / WKUIDelegate alerts & mic,
-// confines top-frame navigation to loopback/`file://`/`tauri://localhost` (routing external links
-// to the default browser), and positions traffic lights + vibrancy.
+// confines top-frame navigation to loopback/`file://`/`orb://localhost`/`tauri://localhost`
+// (routing external links to the default browser), and positions traffic lights + vibrancy.
 import AppKit
 import Darwin
 import Security
@@ -44,6 +44,8 @@ final class OrbBundleSchemeHandler: NSObject, WKURLSchemeHandler {
             urlSchemeTask.didFailWithError(URLError(.badURL))
             return
         }
+        let reqScheme = (reqURL.scheme?.lowercased() == "orb") ? "orb" : "tauri"
+        let allowOrigin = "\(reqScheme)://localhost"
         var relPath = reqURL.path
         while relPath.hasPrefix("/") { relPath.removeFirst() }
         if relPath.isEmpty { relPath = "index.html" }
@@ -60,7 +62,7 @@ final class OrbBundleSchemeHandler: NSObject, WKURLSchemeHandler {
             } else {
                 let resp = HTTPURLResponse(url: reqURL, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: [
                     "Content-Type": "text/plain; charset=utf-8",
-                    "Access-Control-Allow-Origin": "tauri://localhost"
+                    "Access-Control-Allow-Origin": allowOrigin
                 ])!
                 urlSchemeTask.didReceive(resp)
                 urlSchemeTask.didFinish()
@@ -72,12 +74,17 @@ final class OrbBundleSchemeHandler: NSObject, WKURLSchemeHandler {
             urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist))
             return
         }
-        let mime = Self.mimeType(for: target.pathExtension)
+        let extLower = target.pathExtension.lowercased()
+        let mime = Self.mimeType(for: extLower)
+        let cacheControl = (relPath.hasPrefix("assets/") || relPath.hasPrefix("provider-icons/") ||
+                            extLower == "woff2" || extLower == "woff" || extLower == "ttf" || extLower == "wasm")
+            ? "public, max-age=31536000, immutable"
+            : "no-cache"
         let resp = HTTPURLResponse(url: reqURL, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [
             "Content-Type": mime,
             "Content-Length": String(data.count),
-            "Access-Control-Allow-Origin": "tauri://localhost",
-            "Cache-Control": "no-cache"
+            "Access-Control-Allow-Origin": allowOrigin,
+            "Cache-Control": cacheControl
         ])!
         urlSchemeTask.didReceive(resp)
         urlSchemeTask.didReceive(data)
@@ -409,8 +416,10 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
 
     static func isConfinedShellURL(_ u: URL) -> Bool {
         if u.isFileURL || u.absoluteString == "about:blank" { return true }
-        if u.scheme == "tauri" && u.host == "localhost" { return true }
-        guard u.scheme == "http", let h = u.host else { return false }
+        let scheme = u.scheme?.lowercased()
+        let host = u.host?.lowercased()
+        if (scheme == "tauri" || scheme == "orb") && host == "localhost" { return true }
+        guard scheme == "http", let h = host else { return false }
         return h == "127.0.0.1" || h == "localhost"
     }
 
@@ -858,7 +867,7 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
                  decisionHandler: @escaping (WKPermissionDecision) -> Void) {
         let proto = origin.protocol.lowercased()
         let host = origin.host.lowercased()
-        let isConfinedOrigin = (proto == "tauri" && host == "localhost") ||
+        let isConfinedOrigin = ((proto == "tauri" || proto == "orb") && host == "localhost") ||
                                (proto == "http" && (host == "127.0.0.1" || host == "localhost"))
         if isConfinedOrigin && type == .microphone {
             decisionHandler(.grant)
@@ -1175,6 +1184,7 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             let handler = OrbBundleSchemeHandler(rootURL: distRoot)
             self.schemeHandler = handler
             cfg.setURLSchemeHandler(handler, forURLScheme: "tauri")
+            cfg.setURLSchemeHandler(handler, forURLScheme: "orb")
         }
         cfg.userContentController.add(self, name: "orbNative")
         cfg.userContentController.addUserScript(
@@ -1231,9 +1241,10 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         layoutTrafficLights()
         window.makeFirstResponder(webView)
         NSApp.activate(ignoringOtherApps: true)
+        let preferredScheme = (env["ORB_URI_SCHEME"]?.lowercased() == "orb") ? "orb" : "tauri"
         if let devUrl = env["ORB_DEV_URL"], let u = URL(string: devUrl), Self.isConfinedShellURL(u) {
             webView.load(URLRequest(url: u))
-        } else if let u = URL(string: "tauri://localhost/") {
+        } else if let u = URL(string: "\(preferredScheme)://localhost/") {
             webView.load(URLRequest(url: u))
         } else if let html = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "dist") {
             webView.loadFileURL(html, allowingReadAccessTo: html.deletingLastPathComponent())
@@ -1252,14 +1263,14 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
     }
 
     fileprivate func runSelfTest() {
-        let allowed = ["tauri://localhost/", "tauri://localhost/index.html", "http://127.0.0.1:19479/", "http://localhost:1430/", "file:///tmp/index.html", "about:blank"]
+        let allowed = ["orb://localhost/", "orb://localhost/index.html", "tauri://localhost/", "tauri://localhost/index.html", "http://127.0.0.1:19479/", "http://localhost:1430/", "file:///tmp/index.html", "about:blank"]
         for raw in allowed {
             guard let u = URL(string: raw), Self.isConfinedShellURL(u) else {
                 fputs("self-test failed: expected confined URL to be allowed: \(raw)\n", stderr)
                 exit(1)
             }
         }
-        let denied = ["https://example.com/", "http://example.com/", "tauri://evil.example/", "javascript:alert(1)"]
+        let denied = ["https://example.com/", "http://example.com/", "orb://evil.example/", "tauri://evil.example/", "javascript:alert(1)"]
         for raw in denied {
             if let u = URL(string: raw), Self.isConfinedShellURL(u) {
                 fputs("self-test failed: expected external URL to be rejected: \(raw)\n", stderr)

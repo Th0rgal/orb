@@ -1,4 +1,4 @@
-import {requestHighlight} from "./codeHighlightClient";
+import {requestHighlight, warmHighlight} from "./codeHighlightClient";
 import { CodeBlock } from "./CodeBlock";
 import { isMermaidLang, MermaidBlock } from "./MermaidBlock";
 import { FileReference, FileReferenceText } from "./fileReferenceContext";
@@ -1142,16 +1142,61 @@ function renderBlockSlot(block: () => Block, compact?: boolean): JSX.Element {
 // Parsed blocks of recently shown messages: rows that remount while a long
 // transcript scrolls skip re-parsing. Blocks are immutable data.
 const parsedMessages = new Map<string, Block[]>();
+const MAX_PARSED_MESSAGES = 500;
+function rememberParsedMessage(text: string, blocks: Block[]) {
+  if (!text || text.length >= 50_000) return;
+  if (blocks.some((b) => b.t === "pre" && b.open)) return;
+  parsedMessages.delete(text);
+  parsedMessages.set(text, blocks);
+  while (parsedMessages.size > MAX_PARSED_MESSAGES) {
+    parsedMessages.delete(parsedMessages.keys().next().value!);
+  }
+}
+
+export function warmMarkdownText(text: string): void {
+  if (!text || text.length >= 50_000) return;
+  let blocks = parsedMessages.get(text);
+  if (blocks) {
+    parsedMessages.delete(text);
+    parsedMessages.set(text, blocks);
+  } else {
+    blocks = incrementalMarkdown()(text);
+    rememberParsedMessage(text, blocks);
+  }
+  for (const b of blocks) {
+    if (b.t === "pre" && !b.open && b.lang && !isMermaidLang(b.lang)) {
+      warmHighlight(b.text, b.lang);
+    }
+  }
+}
+
+export function warmTranscriptMarkdown(items: ReadonlyArray<{ kind: string; text?: string; live?: boolean }>): void {
+  if (!items.length || typeof window === "undefined") return;
+  const texts: string[] = [];
+  for (let i = items.length - 1; i >= 0 && texts.length < 6; i--) {
+    const item = items[i];
+    if (item.kind === "text" && !item.live && item.text && item.text.length < 50_000) {
+      texts.push(item.text);
+    }
+  }
+  if (!texts.length) return;
+  const run = () => {
+    for (const text of texts) warmMarkdownText(text);
+  };
+  const ric = (window as Window & { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback;
+  if (typeof ric === "function") ric(run, { timeout: 120 });
+  else setTimeout(run, 16);
+}
+
 export function MdView(p: { text: string; compact?: boolean; searchable?: boolean }) {
   const parse = incrementalMarkdown();
   let parsedOnce = false;
   const blocks = createMemo(() => {
-    // Only a mount consults or fills the cache; streamed updates stay incremental.
-    const text = p.text, mount = !parsedOnce, hit = mount ? parsedMessages.get(text) : undefined;
+    const text = p.text, mount = !parsedOnce, hit = parsedMessages.get(text);
     parsedOnce = true;
     if (hit) { parsedMessages.delete(text); parsedMessages.set(text, hit); return hit; }
     const out = parse(text);
-    if (mount && text.length < 50_000) { parsedMessages.set(text, out); if (parsedMessages.size > 400) parsedMessages.delete(parsedMessages.keys().next().value!); }
+    if (mount || !parsedMessages.has(text)) rememberParsedMessage(text, out);
     return out;
   });
   return (

@@ -725,7 +725,9 @@ export function FilePanelProvider(p: {
         220)
       : (activePanel?.getBoundingClientRect().width ?? 480);
     const app = activePanel?.closest<HTMLElement>(".app");
-    const conversation = !inside ? app?.querySelector<HTMLElement>(".scroll") : undefined;
+    const conversation = !inside
+      ? [...(app?.querySelectorAll<HTMLElement>(".scroll") ?? [])].find(el => !el.closest("[hidden]"))
+      : undefined;
     const sideThread = !inside ? activePanel?.querySelector<HTMLElement>(".btw-thread") : undefined;
     const viewportTop = conversation?.getBoundingClientRect().top ?? 0;
     const anchor = conversation && !scrollKeeper(conversation)

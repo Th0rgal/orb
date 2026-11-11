@@ -4,10 +4,10 @@ import {createSignal} from 'solid-js';
 import {NativeMissionView} from '../src/mission/MissionView';
 import type {Mission} from '../src/api';
 beforeEach(()=>{Object.defineProperty(HTMLElement.prototype,'scrollTo',{configurable:true,value:vi.fn()});});
-const state=vi.hoisted(()=>({event:undefined as undefined|((event:any)=>void)}));
-vi.mock('../src/stream',async()=>({...await vi.importActual('../src/stream'),streamMission:(_id:string,receive:(event:any)=>void)=>{state.event=receive;return ()=>{};}}));
+const state=vi.hoisted(()=>({event:undefined as undefined|((event:any)=>void),starts:0,stops:0}));
+vi.mock('../src/stream',async()=>({...await vi.importActual('../src/stream'),streamMission:(_id:string,receive:(event:any)=>void)=>{state.starts++;state.event=receive;return ()=>{state.stops++;};}}));
 vi.mock('../src/api',async()=>({...await vi.importActual('../src/api'),sendMissionMessage:vi.fn(),getMission:vi.fn(async()=>({id:'accepted',status:'active',history:[],created_at:'',updated_at:''}))}));
-afterEach(()=>{vi.unstubAllGlobals();state.event=undefined;});
+afterEach(()=>{vi.unstubAllGlobals();state.event=undefined;state.starts=0;state.stops=0;});
 it('keeps the initial bubble mounted across native identity allocation and canonical receipt',async()=>{
  vi.stubGlobal('fetch',vi.fn(async()=>Response.json([])));
  const [id,setId]=createSignal('');
@@ -510,6 +510,58 @@ it('reconciles missing final output on mount and status poll when reopening a se
   }
  }finally{
   setMultiplexSyncEnabledForTest(false);
+  cacheReset();
+ }
+});
+
+it('detaches foreground stream and transcript retention when a keep-alive slot goes inactive and reconciles on return',async()=>{
+ const {getMission}=await import('../src/api');
+ const {cacheReset}=await import('../src/pageCache');
+ const {setBackgroundSyncMode}=await import('../src/backgroundSync');
+ const {applyLiveEventsToTranscriptCache,putTranscript,warmRecentMissionIds}=await import('../src/missionCache');
+ const {buildTranscript}=await import('../src/transcriptModel');
+ cacheReset();
+ setBackgroundSyncMode('off');
+ state.starts=0;
+ state.stops=0;
+ try{
+  const id='keepalive-slot-m1';
+  const mission:Mission={id,status:'completed',history:[],created_at:'',updated_at:'2026-11-11T10:00:00Z'};
+  const seed=[
+   {type:'user_message' as const,sequence:1,eventId:'u1',data:{id:'u1',content:'Initial prompt'}},
+   {type:'assistant_message' as const,sequence:2,eventId:'a1',data:{id:'a1',content:'Initial reply',success:true}},
+  ];
+  putTranscript(id,{items:buildTranscript(seed),stream:seed,fromLog:true,cursor:2,hasOlder:false,spineComplete:true});
+  vi.mocked(getMission).mockResolvedValue(mission);
+  vi.stubGlobal('fetch',vi.fn(async()=>Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'2'}})));
+
+  const [current,setCurrent]=createSignal(id);
+  const view=render(()=><NativeMissionView id={id} active={current()===id} initial={mission}/>);
+  await waitFor(()=>expect(screen.getByText('Initial reply')).toBeDefined());
+  expect(state.starts).toBe(1);
+  expect(state.stops).toBe(0);
+  expect(warmRecentMissionIds()).toContain(id);
+
+  // Hiding the keep-alive slot with Background sync = Off releases foreground retention and stops the stream.
+  setCurrent('other-m2');
+  await waitFor(()=>expect(state.stops).toBe(1));
+  expect(warmRecentMissionIds()).not.toContain(id);
+
+  // Switching between two other missions keeps the hidden slot completely inert.
+  setCurrent('other-m3');
+  expect(state.starts).toBe(1);
+  expect(state.stops).toBe(1);
+
+  // If the transcript cache advances while hidden, reactivating the slot reconciles items and reattaches the stream.
+  applyLiveEventsToTranscriptCache(id,[
+   {type:'assistant_message',sequence:3,eventId:'a2',data:{id:'a2',content:'Updated while hidden',success:true}},
+  ]);
+  setCurrent(id);
+  await waitFor(()=>expect(screen.getByText('Updated while hidden')).toBeDefined());
+  expect(state.starts).toBe(2);
+  view.unmount();
+ }finally{
+  setBackgroundSyncMode('warm');
   cacheReset();
  }
 });

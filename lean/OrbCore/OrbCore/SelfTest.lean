@@ -3124,6 +3124,16 @@ private def runR4dProxyAuthTests (prodValid : CoreConfig) : IO UInt32 := do
   IO.FS.removeDirAll r4dRoot
   return 0
 
+private def runOrbUriCorsTests : IO UInt32 := do
+  if !OrbCore.Control.isAllowedCorsOrigin true "orb://localhost" ||
+     !OrbCore.Control.isAllowedCorsOrigin false "orb://localhost" ||
+     !OrbCore.Control.isAllowedCorsOrigin true "tauri://localhost" ||
+     OrbCore.Control.isAllowedCorsOrigin true "orb://evil.example" ||
+     OrbCore.Control.isAllowedCorsOrigin false "orb://evil.example" then
+    IO.eprintln "[orb-core-test] FAIL: orb://localhost CORS origin confinement mismatch"
+    return 1
+  return 0
+
 private def runWarmClaudeControlAndCheckpointsCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let ts ← IO.monoNanosNow
   let rawRoot := s!"/tmp/orb-core-warm-claude-{ts}"
@@ -5794,6 +5804,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runR7CoreTests prodValid) != 0 then return 1
   if (← runMultiUserCoreTests prodValid) != 0 then return 1
   if (← runWarmClaudeControlAndCheckpointsCoreTests prodValid) != 0 then return 1
+  if (← runOrbUriCorsTests) != 0 then return 1
 
   IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":10,\"host_tests\":101}"
   return 0

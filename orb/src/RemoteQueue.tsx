@@ -33,6 +33,7 @@ export type PendingRemoteQueueItem = { id: string; content: string; attached?: b
 /** The server inbox remains authoritative across a stop, reconnect or restart. */
 export function RemoteQueue(p: {
   mission: string;
+  active?: boolean;
   confirmed?: (QueuedMessage & {attached?:boolean})[];
   /** Ids already shown as sent in the transcript. Core keeps a remote follow-up in
    * its inbox until the node accepts the job, which can be long when the node is
@@ -138,6 +139,7 @@ export function RemoteQueue(p: {
   const [working, setWorking] = createSignal(false);
   const [collapsed, setCollapsed] = createSignal(false);
   let refreshInbox: (() => Promise<void>) | undefined;
+  const isSlotActive = createMemo(() => p.active !== false);
   createEffect(() => {
     const mission = p.mission, version = connectionVersion();
     const scopeKey = `${version}:${mission}`;
@@ -184,9 +186,13 @@ export function RemoteQueue(p: {
       finally { loading = false; }
     };
     refreshInbox = refresh;
-    void refresh();
-    const stop = pollWhileVisible(refresh, 3000, "remoteQueue.refresh");
-    onCleanup(() => { disposed = true; if (refreshInbox === refresh) refreshInbox = undefined; stop(); });
+    createEffect(() => {
+      if (!isSlotActive()) return;
+      void refresh();
+      const stop = pollWhileVisible(refresh, 3000, "remoteQueue.refresh");
+      onCleanup(stop);
+    });
+    onCleanup(() => { disposed = true; if (refreshInbox === refresh) refreshInbox = undefined; });
   });
   const cancel = async (id: string) => {
     setError("");

@@ -41,14 +41,17 @@ export function nextReminder(rows: Wakeup[]): number | undefined {
   return dates.length ? Math.min(...dates) : undefined;
 }
 /** Archiving cancels a mission's reminders in Core, so an archived mission shows none. */
-export function NextReminder(p: {mission: string; busy: boolean; archived?: boolean}) {
+export function NextReminder(p: {mission: string; active?: boolean; busy: boolean; archived?: boolean}) {
   const [due, setDue] = createSignal<number>(); const now = useNow(10000);
   // Refetch only when the mission or the connection changes: the mission
   // object refreshes often, and clearing on each refresh made the line blink.
   const archived = createMemo(() => !!p.archived);
-  createEffect(on([() => p.mission, connectionVersion, archived], ([mission]) => {
+  const isSlotActive = createMemo(() => p.active !== false);
+  createEffect(on([() => p.mission, connectionVersion, archived], () => {
     setDue(undefined);
-    if (!mission || archived() || !isConnected()) return;
+  }));
+  createEffect(on([() => p.mission, connectionVersion, archived, isSlotActive], ([mission, , isArch, slotActive]) => {
+    if (!mission || isArch || !slotActive || !isConnected()) return;
     let alive = true, timer: ReturnType<typeof setTimeout>;
     const refresh = async () => {
       // A failed poll keeps the last known reminder instead of hiding it.
