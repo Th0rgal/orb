@@ -145,8 +145,15 @@ data class OrbFollowUpQueue(
     val seenAfter: Map<String, Long> = emptyMap(),
     val consumedSequences: Set<Long> = emptySet(),
     val serverRev: Long = 1L,
-    val hasServerRevision: Boolean = false
+    val hasServerRevision: Boolean = false,
+    val lastFetchedAtMs: Long = Long.MIN_VALUE
 ) {
+    fun isStaleFetch(fetchedAtMs: Long, incomingServerRev: Long? = null): Boolean {
+        val normalizedIncoming = incomingServerRev?.takeIf { it > 0L }?.coerceAtMost(0xFFFF_FFFFL)
+        if (normalizedIncoming != null) return hasServerRevision && normalizedIncoming < serverRev
+        return fetchedAtMs != Long.MIN_VALUE && lastFetchedAtMs != Long.MIN_VALUE && fetchedAtMs < lastFetchedAtMs
+    }
+
     fun expectedRevision(id: String): Long? {
         if (hasServerRevision) return serverRev
         val rowRev = server.firstOrNull { it.id == id }?.revision
@@ -175,6 +182,7 @@ data class OrbFollowUpQueue(
         turnSeq: Long? = null
     ): OrbFollowUpQueue {
         val normalizedIncoming = incomingServerRev?.takeIf { it > 0L }?.coerceAtMost(0xFFFF_FFFFL)
+        if (isStaleFetch(fetchedAtMs, normalizedIncoming)) return this
         val effectiveRev = normalizedIncoming ?: serverRev
         val gate = OrbKernel.followupQueueStep(
             op = 0,
@@ -242,7 +250,8 @@ data class OrbFollowUpQueue(
             seenAfter = baselines.filterKeys { it in live },
             delivered = nextDelivered,
             serverRev = gate.nextServerRev.toLong() and 0xFFFF_FFFFL,
-            hasServerRevision = hasServerRevision || normalizedIncoming != null
+            hasServerRevision = hasServerRevision || normalizedIncoming != null,
+            lastFetchedAtMs = if (fetchedAtMs != Long.MIN_VALUE) maxOf(lastFetchedAtMs, fetchedAtMs) else lastFetchedAtMs
         )
     }
 
@@ -380,7 +389,8 @@ data class OrbFollowUpQueue(
         id: String,
         content: String,
         expectedServerRev: Long? = null,
-        confirmedServerRev: Long? = null
+        confirmedServerRev: Long? = null,
+        confirmedAtMs: Long = Long.MIN_VALUE
     ): OrbFollowUpQueue {
         if (id in delivered) return this
         val expected = (expectedServerRev ?: serverRev).coerceAtMost(0xFFFF_FFFFL)
@@ -420,7 +430,8 @@ data class OrbFollowUpQueue(
                 }
             },
             pending = pending.map { if (it.id == id) it.copy(content = content) else it },
-            edits = edits - id
+            edits = edits - id,
+            lastFetchedAtMs = if (confirmedAtMs != Long.MIN_VALUE) maxOf(lastFetchedAtMs, confirmedAtMs) else lastFetchedAtMs
         )
     }
 

@@ -1246,6 +1246,7 @@ struct OrbSideQuestionSheet: View {
             return
         }
         let parsedQueue = OrbFollowUpQueue.parseResponse(response, missionID: id)
+        guard !followUps.isStaleFetch(fetchedAt, incomingServerRev: parsedQueue.revision) else { return }
         var rawMap = rawQueuedByID
         let displayRows = parsedQueue.rows.map { row -> OrbQueuedRow in
             rawMap[row.id] = row.content
@@ -1261,7 +1262,13 @@ struct OrbSideQuestionSheet: View {
             lastSequence: lastSeq,
             incomingServerRev: parsedQueue.revision
         ).reconciled(with: store.boundDeliveredMessages)
-        if next != followUps { withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next } }
+        if next != followUps {
+            if next.rows != followUps.rows {
+                withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next }
+            } else {
+                followUps = next
+            }
+        }
     }
 
     private func follow() async {
@@ -1468,7 +1475,7 @@ struct OrbSideQuestionSheet: View {
         switch OrbSendFlow.editOutcome(status: status) {
         case .edited:
             rawQueuedByID[queueID] = wireContent
-            followUps = followUps.editConfirmed(queueID, content, expectedServerRev: expectedRev)
+            followUps = followUps.editConfirmed(queueID, content, expectedServerRev: expectedRev, confirmedAt: Date())
             OrbUsageTelemetry.shared.trackAction(.messageEdit, surface: "btw-queue")
         case .unsupported:
             followUps = followUps.editReverted(queueID)

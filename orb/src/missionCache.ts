@@ -924,11 +924,19 @@ const seededOpenQueues = new Map<
   { connVer: number; savedAt: number; rows: import("./api").QueuedMessage[] }
 >();
 
-function seedMissionOpenQueue(id: string, rows: import("./api").QueuedMessage[] | undefined): void {
+function seedMissionOpenQueue(
+  id: string,
+  rows: import("./api").QueuedMessage[] | undefined,
+  startedAt: number = Date.now(),
+): void {
   if (!Array.isArray(rows)) return;
+  const existing = seededOpenQueues.get(id);
+  if (existing && existing.connVer === connectionVersionSafe() && startedAt < existing.savedAt) {
+    return;
+  }
   seededOpenQueues.set(id, {
     connVer: connectionVersionSafe(),
-    savedAt: Date.now(),
+    savedAt: startedAt,
     rows,
   });
   while (seededOpenQueues.size > 64) {
@@ -1031,6 +1039,7 @@ async function fetchTranscript(
     "getMissionOpenBundle" in streamModule &&
     typeof streamModule.getMissionOpenBundle === "function"
   ) {
+    const openStartedAt = Date.now();
     const bundle = await streamModule.getMissionOpenBundle(id, {
       ...(previous?.cursor !== undefined ? { since: previous.cursor } : {}),
       ...(opts?.priority ? { priority: opts.priority } : {}),
@@ -1042,7 +1051,7 @@ async function fetchTranscript(
         apiModule.seedCachedMission(bundle.mission);
       }
       const queuedRows = Array.isArray(bundle.queue) ? bundle.queue : [];
-      seedMissionOpenQueue(id, queuedRows);
+      seedMissionOpenQueue(id, queuedRows, openStartedAt);
       const tailEvents = bundle.events.map(storedToStream).filter((e): e is StreamEvent => e !== null);
       let stream =
         previous?.cursor === undefined

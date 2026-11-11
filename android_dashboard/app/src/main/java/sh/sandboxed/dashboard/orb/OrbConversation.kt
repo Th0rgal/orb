@@ -1071,6 +1071,7 @@ fun OrbConversationPage(
         var latestDetailForTarget: OrbRow? = null
         var bundledQueuePresent = false
         var bundledQueueForTarget: Any? = null
+        var bundledQueueFetchedAtMs = Long.MIN_VALUE
         try {
             val idsToLoad = if (chainIds.size > 1) chainIds.takeLast(3) else listOf(targetId)
             val allMsgs = mutableListOf<OrbRow>()
@@ -1088,6 +1089,7 @@ fun OrbConversationPage(
                         val conversationSuffix = conversationCursor?.let { "&since_seq=$it" } ?: ""
                         val knownCloudHint = allMissions.firstOrNull { it.id == cid }?.str("backend")?.startsWith("cloud_") == true ||
                             (cid == targetId && isCloudMission)
+                        val queueFetchStartMs = System.currentTimeMillis()
                         val openBundle = if (!knownCloudHint) {
                             core.fetchMissionOpenBundle(cid, lastSeq?.toLong(), limit = 150, maxPayload = maxPayload)
                         } else null
@@ -1109,6 +1111,7 @@ fun OrbConversationPage(
                             if (cid == targetId && openBundle.containsKey("queue")) {
                                 bundledQueuePresent = true
                                 bundledQueueForTarget = openBundle["queue"]
+                                bundledQueueFetchedAtMs = queueFetchStartMs
                             }
                             val bundledMsgs = (spineRows + tailRows).filter {
                                 (it.str("event_type", "type") ?: "") in OrbConversationHistory.eventTypes
@@ -1324,7 +1327,7 @@ fun OrbConversationPage(
                     val parsedQueue = OrbFollowUpQueue.parseResponse(bundledQueueForTarget, targetId)
                     followUps = followUps.withServer(
                         parsedQueue.rows,
-                        fetchedAtMs = System.currentTimeMillis(),
+                        fetchedAtMs = bundledQueueFetchedAtMs,
                         lastSequence = lastSequence,
                         incomingServerRev = parsedQueue.revision
                     )
@@ -1712,7 +1715,12 @@ fun OrbConversationPage(
             }
             when (OrbSendFlow.editOutcome(status.takeIf { it >= 0 })) {
                 OrbEditOutcome.Edited -> {
-                    followUps = followUps.editConfirmed(queueId, wireContent, expectedServerRev = expectedRev)
+                    followUps = followUps.editConfirmed(
+                        queueId,
+                        wireContent,
+                        expectedServerRev = expectedRev,
+                        confirmedAtMs = System.currentTimeMillis()
+                    )
                     UsageTelemetry.trackAction(UsageTelemetry.Action.MessageEdit, "followup_queue")
                 }
                 OrbEditOutcome.Unsupported -> {

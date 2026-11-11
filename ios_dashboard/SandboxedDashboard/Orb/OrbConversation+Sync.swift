@@ -353,19 +353,27 @@ extension OrbConversation {
                 live.reconcileStored(events, working: working, streamAdvanced: live.streamEpoch != streamEpochBefore)
                 attachLiveStreamIfNeeded()
                 if queueResp != .null {
-                    let rawItems: [OrbJSON] = {
-                        if case .object = queueResp { return queueResp["items"].items }
-                        return queueResp.items
-                    }()
-                    queued = rawItems.filter { $0["mission_id"].text == id }
                     let parsedQueue = OrbFollowUpQueue.parseResponse(queueResp, missionID: id)
+                    if !followUps.isStaleFetch(queueFetchedAt, incomingServerRev: parsedQueue.revision) {
+                        let rawItems: [OrbJSON] = {
+                            if case .object = queueResp { return queueResp["items"].items }
+                            return queueResp.items
+                        }()
+                        queued = rawItems.filter { $0["mission_id"].text == id }
+                    }
                     let next = followUps.withServer(
                         parsedQueue.rows,
                         fetchedAt: queueFetchedAt,
                         lastSequence: sinceSeq,
                         incomingServerRev: parsedQueue.revision
                     ).reconciled(with: deliveredUserMessages)
-                    if next != followUps { withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next } }
+                    if next != followUps {
+                        if next.rows != followUps.rows {
+                            withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next }
+                        } else {
+                            followUps = next
+                        }
+                    }
                 }
                 else {
                     let next = followUps.reconciled(with: deliveredUserMessages)
@@ -865,7 +873,7 @@ extension OrbConversation {
         }
         switch OrbSendFlow.editOutcome(status: status) {
         case .edited:
-            followUps = followUps.editConfirmed(queueID, wireContent, expectedServerRev: expectedRev)
+            followUps = followUps.editConfirmed(queueID, wireContent, expectedServerRev: expectedRev, confirmedAt: Date())
             OrbUsageTelemetry.shared.trackAction(.messageEdit, surface: "queue")
         case .unsupported:
             followUps = followUps.editReverted(queueID)
