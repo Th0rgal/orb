@@ -527,20 +527,32 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
     ("draft", .obj #[("title", .str "Durable Local Chat"), ("project", .str "orb"), ("prompt", .str "hello durable"), ("tags", .arr #[.str "placement:client"])])
   ])
   let origMid := match origLaunchRes with | .ok jv => (jv.fieldStr? "id").getD "" | _ => ""
+  let _ ← dispatchRpcCommand stP1 "local_agents_stop" (.obj #[("id", .str origMid)])
   let stP2 ← IO.mkRef ({ launchToken := validTok, orbStateDir := persistDir, homeDir := (pDir / "home").toString, hostOs := "macos" } : LocaldState)
   let reloadedBinds ← dispatchRpcCommand stP2 "local_bindings_refresh" (.obj #[])
   let reloadedOrigins ← dispatchRpcCommand stP2 "local_origin_list" (.obj #[
     ("connection", .obj #[("api_url", .str "https://orbcore.example")])
   ])
+  let sampleFailedEntry : LocalOriginEntry := {
+    id := "m-failed-origin", endpoint := "https://orbcore.example", title := "Failed Local",
+    status := "failed", statusMessage := some "Model unavailable: builtin/fast",
+    syncError := some "Core synchronization failed (502): upstream", localSyncPending := true, localRunActive := false
+  }
+  let roundtrippedFailed? := LocalOriginEntry.fromMissionJson? sampleFailedEntry.toMissionJson
   total := total + 1
   let persistOk :=
     !origMid.isEmpty &&
+    (match roundtrippedFailed? with
+     | some rf => rf.statusMessage == some "Model unavailable: builtin/fast" && rf.syncError == some "Core synchronization failed (502): upstream"
+     | none => false) &&
     (match reloadedBinds with
      | .ok jv => ((jv.field? "bindings").bind (·.field? "m-persist-1")).isSome
      | _ => false) &&
     (match reloadedOrigins with
      | .ok (.arr #[m]) =>
        m.fieldStr? "id" == some origMid &&
+       m.fieldStr? "status" == some "interrupted" &&
+       m.fieldBool? "local_run_active" == some false &&
        m.fieldStr? "project" == some "orb" &&
        (m.fieldArr? "history").map (·.size) == some 1 &&
        (m.fieldStr? "created_at").isSome
@@ -958,7 +970,7 @@ private def runLinuxPortalAndRevealChecks (pDir : System.FilePath) (validTok : S
   let mut passed : Nat := 0
   let mut total : Nat := 0
 
-  -- I. Linux `reveal_download` prefers `org.freedesktop.FileManager1.ShowItems` and RFC 8089 `filePathToUri` encodes `,`/spaces/UTF-8
+  -- J. Linux `reveal_download` prefers `org.freedesktop.FileManager1.ShowItems` and RFC 8089 `filePathToUri` encodes `,`/spaces/UTF-8
   let fmTestDir := pDir / "linux-reveal-test"
   let fmBinDir := fmTestDir / "bin"
   let fmHomeDir := fmTestDir / "home"
@@ -988,7 +1000,15 @@ private def runLinuxPortalAndRevealChecks (pDir : System.FilePath) (validTok : S
   total := total + 1
   if (← assertTrue "linux_reveal_download_uses_filemanager1_and_encodes_uri" linuxRevealOk) then passed := passed + 1
 
-  -- J. Linux `fileUriToPath?` RFC 8089 decoding + XDG Desktop Portal `FileChooser` (`pick_working_directory`, `pick_upload_files`, `pick_upload_folder`) + CLI fallback
+  return (passed, total)
+
+private def runLinuxPortalFileChooserChecks (tmpStateDir validTok : String) : IO (Nat × Nat) := do
+  let pDir := System.FilePath.mk tmpStateDir / "desktop-parity"
+  IO.FS.createDirAll pDir
+  let mut passed := 0
+  let mut total := 0
+
+  -- K. Linux `fileUriToPath?` RFC 8089 decoding + XDG Desktop Portal `FileChooser` (`pick_working_directory`, `pick_upload_files`, `pick_upload_folder`) + CLI fallback
   let uriSamplePath := "/tmp/Guide, Révision 100% 2026/sub dir"
   let uriRoundTripOk :=
     fileUriToPath? (filePathToUri uriSamplePath) == some uriSamplePath &&
@@ -1319,6 +1339,135 @@ private def runWarmClaudeRpcE2eChecks (validTok tmpStateDir : String) : IO (Nat 
   let ok ← assertTrue "warm_claude_rpc_checkpoints_diff_and_worktree_e2e" rpcE2eOk
   return (if ok then 1 else 0, 1)
 
+private def runLocalOpenCodeE2eChecks (validTok tmpStateDir : String) : IO (Nat × Nat) := do
+  let ocDir := System.FilePath.mk tmpStateDir / "opencode-e2e"
+  IO.FS.createDirAll ocDir
+  let fakeOcBin := ocDir / "fake-opencode.sh"
+  let fakeOcScript :=
+    "#!/bin/sh\n" ++
+    "if [ \"$1\" = \"models\" ]; then\n" ++
+    "  printf 'opencode/glm-5.3-flash-free\\norbrouter/anthropic/claude-opus-5-5\\norbrouter/builtin/fast\\norbrouter/builtin/smart\\n'\n" ++
+    "  exit 0\n" ++
+    "fi\n" ++
+    "printf '{\"type\":\"step_start\",\"sessionID\":\"ses_oc_e2e_99\"}\\n'\n" ++
+    "printf '{\"type\":\"tool_use\",\"sessionID\":\"ses_oc_e2e_99\",\"part\":{\"id\":\"call_1\",\"tool\":\"shell\",\"state\":{\"status\":\"completed\",\"input\":{\"command\":\"echo hi\"},\"title\":\"shell\"}}}\\n'\n" ++
+    "printf '{\"type\":\"text\",\"sessionID\":\"ses_oc_e2e_99\",\"part\":{\"type\":\"text\",\"text\":\"## Objective\\nGoal\\n## Work State\\nDone\\n## Next Move\\nNone\\n## Relevant Files\\na.lean\"}}\\n'\n" ++
+    "printf '{\"type\":\"text\",\"sessionID\":\"ses_oc_e2e_99\",\"part\":{\"type\":\"text\",\"text\":\"OPENCODE_LOCAL_READY\"}}\\n'\n" ++
+    "printf '{\"type\":\"step_finish\",\"sessionID\":\"ses_oc_e2e_99\"}\\n'\n"
+  IO.FS.writeFile fakeOcBin fakeOcScript
+  let _ ← OrbBin.PosixExt.chmod fakeOcBin.toString 0o755
+  let ocRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := ocDir.toString, homeDir := ocDir.toString } : LocaldState)
+  let ocModelsRes ← dispatchRpcCommand ocRef "local_opencode_models" (.obj #[("path", .str fakeOcBin.toString)])
+  let hasModelPair (ms : Array JVal) (mid mlbl : String) : Bool :=
+    ms.any fun m =>
+      match m with
+      | .arr #[.str a, .str b] => a == mid && b == mlbl
+      | _ => false
+  let ocModelsOk :=
+    match ocModelsRes with
+    | .ok (.arr ms) =>
+      ms.size >= 4 &&
+      hasModelPair ms "orbrouter/builtin/smart" "Routing — Smart" &&
+      hasModelPair ms "orbrouter/builtin/fast" "Routing — Fast"
+    | _ => false
+  let ocResolveOk :=
+    OrbBin.ClaudeControl.resolveOpenCodeModelForLocal (some "builtin/fast") (some "orbrouter/builtin/smart") #["orbrouter"] #["orbrouter/builtin/smart", "orbrouter/builtin/fast"] == some "orbrouter/builtin/fast" &&
+    OrbBin.ClaudeControl.resolveOpenCodeModelForLocal (some "sandboxed-sh/builtin/smart") (some "orbrouter/builtin/smart") #["orbrouter"] #["orbrouter/builtin/smart"] == some "orbrouter/builtin/smart"
+  let ocArgs := OrbBin.ClaudeControl.buildOneShotHarnessArgs "opencode" "/plan - check flags" (some "orbrouter/builtin/fast") none (some "ses_prev") .bypassPermissions #["/tmp/a.png"]
+  let ocArgsOk :=
+    ocArgs == #["run", "--format", "json", "--auto", "--agent", "plan", "--model", "orbrouter/builtin/fast", "--session", "ses_prev", "--file", "/tmp/a.png", "--", "- check flags"]
+  let ocErrParsed := OrbBin.ClaudeControl.parseOneShotHarnessEvent "opencode" "{\"type\":\"error\",\"sessionID\":\"ses_err\",\"error\":{\"type\":\"provider.no-route\",\"message\":\"Model unavailable: builtin/fast\"}}"
+  let ocErrOk := ocErrParsed.errorMsg? == some "Model unavailable: builtin/fast" && ocErrParsed.sessionId? == some "ses_err"
+  let ocSubRes ← dispatchRpcCommand ocRef "local_bindings_subscribe" (.obj #[])
+  let ocSubTok := match ocSubRes with | .ok (.num s) => s.toNat?.getD 0 | _ => 0
+  let ocLaunchRes ← dispatchRpcCommand ocRef "local_origin_launch" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-oc.example")]),
+    ("request", .obj #[
+      ("harness", .str "opencode"),
+      ("bin", .str fakeOcBin.toString),
+      ("cwd", .str ocDir.toString),
+      ("prompt", .str "Reply OPENCODE_LOCAL_READY"),
+      ("model", .str "builtin/fast")
+    ]),
+    ("draft", .obj #[("title", .str "OC Local"), ("project", .str "orb"), ("prompt", .str "Reply OPENCODE_LOCAL_READY")])
+  ])
+  let ocMid := match ocLaunchRes with | .ok jv => (jv.fieldStr? "id").getD "" | _ => ""
+  let mut ocDone := false
+  for _ in [0:40] do
+    if !ocDone then
+      let pRes ← dispatchRpcCommand ocRef "local_agents_poll" (.obj #[("id", .str ocMid)])
+      if let .ok pJv := pRes then
+        if pJv.fieldBool? "done" == some true then ocDone := true
+      if !ocDone then IO.sleep 50
+  let ocPollFinal ← dispatchRpcCommand ocRef "local_agents_poll" (.obj #[("id", .str ocMid)])
+  let ocBindRefresh1 ← dispatchRpcCommand ocRef "local_bindings_refresh" (.obj #[])
+  let _ ← dispatchRpcCommand ocRef "local_run_launch" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-oc.example")]),
+    ("request", .obj #[
+      ("id", .str ocMid),
+      ("harness", .str "opencode"),
+      ("bin", .str fakeOcBin.toString),
+      ("cwd", .str ocDir.toString),
+      ("prompt", .str "Follow up turn 2"),
+      ("display_prompt", .str "Follow up turn 2"),
+      ("model", .str "builtin/smart"),
+      ("session_id", .str "ses_oc_e2e_99")
+    ])
+  ])
+  let mut ocDone2 := false
+  for _ in [0:40] do
+    if !ocDone2 then
+      let pRes2 ← dispatchRpcCommand ocRef "local_agents_poll" (.obj #[("id", .str ocMid)])
+      if let .ok pJv2 := pRes2 then
+        if pJv2.fieldBool? "done" == some true then ocDone2 := true
+      if !ocDone2 then IO.sleep 50
+  let ocBindRefresh ← dispatchRpcCommand ocRef "local_bindings_refresh" (.obj #[])
+  let ocOriginsList ← dispatchRpcCommand ocRef "local_origin_list" (.obj #[
+    ("connection", .obj #[("api_url", .str "https://core-oc.example")])
+  ])
+  let ocEvPoll ← dispatchRpcCommand ocRef "__orb_poll_events" (.obj #[("tokens", .arr #[JVal.nat ocSubTok])])
+  let ocRunOk :=
+    ocDone && ocDone2 &&
+    (match ocPollFinal with
+      | .ok pJv =>
+        pJv.fieldStr? "text" == some "OPENCODE_LOCAL_READY" &&
+        pJv.fieldStr? "session_id" == some "ses_oc_e2e_99" &&
+        ((pJv.fieldArr? "activities").map (fun acts => acts.size == 1)).getD false
+      | _ => false) &&
+    (match ocBindRefresh1 with
+      | .ok bJv =>
+        let bRow := (bJv.fieldOrNull "bindings").fieldOrNull ocMid
+        bRow.fieldStr? "sessionId" == some "ses_oc_e2e_99" &&
+        bRow.fieldStr? "model" == some "orbrouter/builtin/fast"
+      | _ => false) &&
+    (match ocBindRefresh with
+      | .ok bJv =>
+        let bRow := (bJv.fieldOrNull "bindings").fieldOrNull ocMid
+        bRow.fieldStr? "sessionId" == some "ses_oc_e2e_99" &&
+        bRow.fieldStr? "model" == some "orbrouter/builtin/smart"
+      | _ => false) &&
+    (match ocOriginsList with
+      | .ok (.arr rows) =>
+        match rows.find? (fun r => r.fieldStr? "id" == some ocMid) with
+        | some r =>
+          r.fieldStr? "model_override" == some "orbrouter/builtin/smart" &&
+          ((r.fieldArr? "history").map (fun h => h.size == 4)).getD false
+        | none => false
+      | _ => false) &&
+    (match ocEvPoll with
+      | .ok (.arr evs) => evs.size >= 2
+      | _ => false)
+  let ok ← assertTrue "local_opencode_models_resolution_activities_errors_and_session_binding_e2e"
+    (ocModelsOk && ocResolveOk && ocArgsOk && ocErrOk && ocRunOk)
+  return (if ok then 1 else 0, 1)
+
+private def runEndToEndSuites (tmpStateDir validTok : String) : IO (Nat × Nat) := do
+  let (pParity, tParity) ← runDesktopReliabilityParityChecks tmpStateDir validTok
+  let (pPortal, tPortal) ← runLinuxPortalFileChooserChecks tmpStateDir validTok
+  let (warmPassed, warmTotal) ← runWarmClaudeRpcE2eChecks validTok tmpStateDir
+  let (ocPassed, ocTotal) ← runLocalOpenCodeE2eChecks validTok tmpStateDir
+  return (pParity + pPortal + warmPassed + ocPassed, tParity + tPortal + warmTotal + ocTotal)
+
 def main : IO UInt32 := do
   let mut passed := 0
   let mut total := 0
@@ -1562,7 +1711,7 @@ def main : IO UInt32 := do
   let idRes1 ← dispatchRpcCommand stDiskRef "local_machine_identity" (.obj #[])
   let idRes2 ← dispatchRpcCommand stReloadRef "local_machine_identity" (.obj #[])
   let metricsRes ← dispatchRpcCommand stDiskRef "local_machine_metrics" (.obj #[])
-  let stHostRef ← IO.mkRef ({ launchToken := validTok, hostOs := if System.Platform.isOSX then "macos" else "linux" } : LocaldState)
+  let stHostRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := tmpStateDir, homeDir := tmpStateDir, hostOs := if System.Platform.isOSX then "macos" else "linux" } : LocaldState)
   let hostMetricsRes ← dispatchRpcCommand stHostRef "local_machine_metrics" (.obj #[("details", .bool true)])
   total := total + 1
   let idAndMetricsOk :=
@@ -1779,17 +1928,10 @@ def main : IO UInt32 := do
         (!aliveParentRes && deadIdleRes && !deadActiveRes)) then
     passed := passed + 1
 
-  -- 20. Desktop reliability & Rust-parity security, persistence, voice, SSE latency & framing checks
-  let (pParity, tParity) ← runDesktopReliabilityParityChecks tmpStateDir validTok
-  passed := passed + pParity
-  total := total + tParity
-
-  -- 21. Warm Claude RPC integration (`local_agents_scan`, `local_agents_workspace`, `local_agents_write`,
-  --     `local_run_launch`, `local_interaction_answer`, `local_checkpoints_list`, `local_checkpoint_diff`,
-  --     `local_checkpoint_restore`, `local_worktree_status`)
-  let (warmPassed, warmTotal) ← runWarmClaudeRpcE2eChecks validTok tmpStateDir
-  passed := passed + warmPassed
-  total := total + warmTotal
+  -- 20–22. Desktop reliability, Linux XDG portal FileChooser, warm Claude RPC, and local OpenCode E2E suites
+  let (e2ePassed, e2eTotal) ← runEndToEndSuites tmpStateDir validTok
+  passed := passed + e2ePassed
+  total := total + e2eTotal
 
   try IO.FS.removeDirAll tmpStateDir catch _ => pure ()
 

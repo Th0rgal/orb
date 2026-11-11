@@ -176,22 +176,67 @@ export async function localAgentForLaunch(id:string):Promise<ScanRow|undefined>{
  return (await refreshLocalAgents(false)).find(row=>row.id===id&&row.installed&&row.path);
 }
 
-const localModelRequests = new Set<string>();
-const LOCAL_MODEL_COMMANDS: Record<string, string> = {antigravity: "local_antigravity_models", claudecode: "local_claude_models"};
+const localModelRequests = new Map<string, Promise<[string, string][]>>();
+const LOCAL_MODEL_COMMANDS: Record<string, string> = {
+  antigravity: "local_antigravity_models",
+  claudecode: "local_claude_models",
+  opencode: "local_opencode_models",
+};
+function probeLocalHarnessModels(id: string, path: string): Promise<[string, string][]> {
+  const command = LOCAL_MODEL_COMMANDS[id];
+  const invoke = desktopInvoke();
+  if (!command || !path || !invoke) return Promise.resolve([]);
+  const key = `${id}:${path}`;
+  const existing = localModelRequests.get(key);
+  if (existing) return existing;
+  const req = invoke(command, { path })
+    .then(models => {
+      const list = Array.isArray(models) ? (models as [string, string][]) : [];
+      setInstalled(rows => rows.map(row => row.id === id && row.path === path ? { ...row, models: list, auth_error: null } : row));
+      return list;
+    })
+    .catch(error => {
+      // A failed Claude/OpenCode probe keeps Core's list; only Antigravity requires account models.
+      setInstalled(rows => rows.map(row => row.id === id && row.path === path ? { ...row, models: [], auth_error: id === "antigravity" ? String(error) : null } : row));
+      return [] as [string, string][];
+    })
+    .finally(() => localModelRequests.delete(key));
+  localModelRequests.set(key, req);
+  return req;
+}
 function refreshLocalModels() {
-  for (const [id, command] of Object.entries(LOCAL_MODEL_COMMANDS)) {
+  for (const id of Object.keys(LOCAL_MODEL_COMMANDS)) {
     const path = installed().find(row => row.id === id)?.path;
-    const invoke = desktopInvoke();
-    const key = `${id}:${path}`;
-    if (!path || !invoke || localModelRequests.has(key)) continue;
-    localModelRequests.add(key);
-    void invoke(command, {path}).then(models => {
-      setInstalled(rows => rows.map(row => row.id === id && row.path === path ? {...row,models:models as [string,string][],auth_error:null} : row));
-    }).catch(error => {
-      // A failed Claude probe keeps Core's list; only Antigravity requires account models.
-      setInstalled(rows => rows.map(row => row.id === id && row.path === path ? {...row,models:[],auth_error:id === "antigravity" ? String(error) : null} : row));
-    }).finally(() => localModelRequests.delete(key));
+    if (path) void probeLocalHarnessModels(id, path);
   }
+}
+
+/** Map Core-scoped OpenCode IDs (`builtin/fast`, `sandboxed-sh/builtin/smart`) to the user's
+ * local OpenCode provider namespace (`orbrouter/builtin/fast`) before spawning locally. */
+export function matchLocalOpenCodeModel(raw: string | undefined, models: ReadonlyArray<readonly [string, string]>): string | undefined {
+  const clean = raw?.trim();
+  if (!clean) return models[0]?.[0];
+  if (!models.length) return clean;
+  const bare = clean.replace(/^sandboxed-sh\//, "");
+  if (models.some(([v]) => v === clean)) return clean;
+  if (models.some(([v]) => v === bare)) return bare;
+  const matched =
+    models.find(([v]) => v === `orbrouter/${bare}`)?.[0] ??
+    models.find(([v]) => v.endsWith(`/${bare}`))?.[0] ??
+    (bare.startsWith("builtin/") ? models[0]?.[0] : undefined);
+  return matched ?? clean;
+}
+
+async function resolveLocalHarnessModel(harness: string, bin: string, model?: string): Promise<string | undefined> {
+  if (harness !== "opencode") return model;
+  let known = installed().find(row => row.id === "opencode")?.models ?? [];
+  if (!known.length && bin) {
+    known = await Promise.race([
+      probeLocalHarnessModels("opencode", bin),
+      new Promise<[string, string][]>(resolve => setTimeout(() => resolve([]), 2000)),
+    ]);
+  }
+  return matchLocalOpenCodeModel(model, known);
 }
 
 export function refreshLocalAgents(force = false): Promise<ScanRow[]> {
@@ -427,6 +472,7 @@ export interface StartLocal {
   bin: string;
   cwd: string;
   prompt: string;
+  displayPrompt?: string;
   model?: string;
   effort?: string;
   sessionId?: string;
@@ -453,6 +499,14 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
     // Let this window's in-flight reconciliation release its native lock first.
     await nativeRecoveries.get(req.id);
     await import("./localWakeups").then(m=>m.replayLocalWakeupStops());
+    const normalizedModel = await resolveLocalHarnessModel(req.harness, req.bin, req.model);
+    if (normalizedModel && normalizedModel !== req.model) {
+      req = { ...req, model: normalizedModel };
+      const existingBinding = localBinding(req.id);
+      if (existingBinding && existingBinding.model !== normalizedModel) {
+        await rememberBinding(req.id, { ...existingBinding, model: normalizedModel });
+      }
+    }
     if(runVersions.get(req.id)!==version)throw new Error("Local launch rejected: stopped before launch");
     if(req.harness === "codex") {
       const [, selection] = await Promise.all([requireLocalCyber(invoke), getCyber(req.id)]);
@@ -466,6 +520,7 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
         session_id: req.sessionId,
         image_paths: req.imagePaths ?? [],
         shared_cwd_with: req.sharedCwdWith,
+        ...(req.displayPrompt !== undefined ? { display_prompt: req.displayPrompt } : {}),
         ...(req.permissionMode ? { permission_mode: req.permissionMode } : {}),
         ...(req.worktreeMode ? { worktree_mode: req.worktreeMode } : {}),
       },
@@ -523,7 +578,11 @@ async function reconcileRun(id: string): Promise<void> {
   try {
     const state = await pollLocal(id);
     if (runVersions.get(id)!==version) return;
-    if (!state.done) recordLocalFailure(id, null);
+    if (!state.done) {
+      recordLocalFailure(id, null);
+    } else if (state.error || (state.exit_code != null && state.exit_code !== 0)) {
+      recordLocalFailure(id, state.error || `Local process exited with code ${state.exit_code}`);
+    }
     setRunning(prev => ({ ...prev, [id]: !state.done }));
     if(!state.done&&!followers.has(id))void followLocal(id,()=>{}).catch(console.error);
     setLiveText(prev => ({ ...prev, [id]: state.text }));
@@ -607,8 +666,13 @@ export function followLocal(id:string,onText:(text:string)=>void):Promise<PollLo
  }).then(async state=>{
   setActivities(prev=>({...prev,[id]:state.activities??[]}));
   if(state.session_id){const binding=localBinding(id);if(binding)await rememberBinding(id,{...binding,sessionId:state.session_id});}
+  if(state.error||(state.exit_code!=null&&state.exit_code!==0)){
+   recordLocalFailure(id,state.error||`Local process exited with code ${state.exit_code}`);
+  }else{
+   recordLocalFailure(id,null);
+  }
   setRunning(prev=>({...prev,[id]:false}));return state;
- }).catch(error=>{recordLocalFailure(id,error);throw error;}).finally(()=>{followers.delete(id);window.dispatchEvent(new Event('orb:queue-wake'));});
+ }).catch(error=>{recordLocalFailure(id,error);throw error;}).finally(()=>{followers.delete(id);window.dispatchEvent(new Event('orb:refresh'));window.dispatchEvent(new Event('orb:queue-wake'));});
  followers.set(id,{promise,listeners});return promise;
 }
 
@@ -620,6 +684,8 @@ export async function localSessionGit(cwd: string): Promise<{ repository: string
 /** Initial runs have a native-generated identity and a durable synchronization journal. */
 export async function startLocalOrigin(request: Omit<StartLocal,"id">, draft: {key:string;title:string;project:string;folder?:string;prompt:string;tags:string[]}): Promise<import("./api").Mission> {
  const invoke=desktopInvoke();if(!invoke)throw new Error("Open Orb desktop to start on this computer.");
+ const normalizedModel = await resolveLocalHarnessModel(request.harness, request.bin, request.model);
+ if (normalizedModel && normalizedModel !== request.model) request = { ...request, model: normalizedModel };
  if(request.harness==='codex'){await Promise.all([requireCyberSupport(),requireLocalCyber(invoke)]);}
  await import("./localWakeups").then(m=>m.replayLocalWakeupStops());
  let mission:import("./api").Mission;

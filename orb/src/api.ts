@@ -140,6 +140,7 @@ export async function resolveTransportBase(apiUrl = getApiUrl()): Promise<string
   const invoke = nativeInvoke();
   if (!invoke) return null;
   const clean = apiUrl.trim().replace(/\/+$/, "");
+  if (!clean.toLowerCase().startsWith("https://")) return null;
   if (bridgeTarget === clean && bridgeBaseUrl) return bridgeBaseUrl;
   if (bridgePending && bridgeTarget === clean) return bridgePending;
   bridgeTarget = clean;
@@ -1096,6 +1097,7 @@ export interface Mission {
   /** The desktop journal itself is still running this mission (not a status Core confirmed). */
   local_run_active?: boolean;
   local_sync_error?: string | null;
+  local_sync_local_only?: boolean;
   machine_transfer?: import("./machineTransfer").TransferAction;
   working_directory?: string | null;
   id: string;
