@@ -123,13 +123,12 @@ export function compactWarmTranscriptSnapshot<TSnap>(snapshot: TSnap): TSnap {
 
 const memSidebar = new Map<string, PersistedSidebarPayload>();
 const memTranscripts = new Map<string, PersistedTranscriptRecord>();
-const nativeHotTranscriptIds = new Set<string>();
-let nativeHotSeeded = false;
 let knownDbTranscriptIds: Set<string> | null = null;
 let knownDbHotTranscriptIds: Set<string> | null = null;
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 let dbSource: IDBFactory | null = null;
 let lastSavedStamp = 0;
+let nativeCacheGeneration = 0;
 let unsupportedInvoke: NativeInvoke | null = null;
 
 function nextSavedAt(): number {
@@ -329,7 +328,6 @@ export async function loadPersistedTranscript<TSnap = unknown>(
         const row = JSON.parse(raw) as PersistedTranscriptRecord<TSnap>;
         if (row && row.snapshot) {
           memTranscripts.set(id, row);
-          if (row.tier !== "warm") nativeHotTranscriptIds.add(id);
           evictMemoryTranscripts();
           return row.snapshot;
         }
@@ -380,34 +378,70 @@ export async function savePersistedTranscript<TSnap = unknown>(
   const demoted = evictMemoryTranscripts();
   const invoke = activeLocaldCache();
   if (invoke) {
+    const gen = nativeCacheGeneration;
     try {
-      await invoke("ui_cache_put", {
+      const putRes = await invoke<{ demote_keys?: string[] } | null>("ui_cache_put", {
         kind: "transcript",
         key: id,
         saved_at: record.savedAt,
+        tier: record.tier ?? "hot",
         raw: JSON.stringify(record),
       });
-      nativeHotTranscriptIds.add(id);
+      if (gen !== nativeCacheGeneration) return;
+      const handledKeys = new Set<string>();
       for (const warmRec of demoted) {
-        if (nativeHotTranscriptIds.delete(warmRec.id) || !nativeHotSeeded) {
+        handledKeys.add(warmRec.id);
+        await invoke("ui_cache_put", {
+          kind: "transcript",
+          key: warmRec.id,
+          saved_at: warmRec.savedAt,
+          tier: "warm",
+          raw: JSON.stringify(warmRec),
+        }).catch(() => undefined);
+        if (gen !== nativeCacheGeneration) return;
+      }
+      const diskDemoteKeys = Array.isArray(putRes?.demote_keys) ? putRes.demote_keys : [];
+      for (const dKey of diskDemoteKeys) {
+        if (!dKey || handledKeys.has(dKey) || dKey === id) continue;
+        if (gen !== nativeCacheGeneration) return;
+        const memRow = memTranscripts.get(dKey);
+        if (memRow && memRow.savedAt > record.savedAt) continue;
+        const diskRaw = await invoke<string | null>("ui_cache_get", { kind: "transcript", key: dKey }).catch(() => null);
+        if (gen !== nativeCacheGeneration || typeof diskRaw !== "string" || !diskRaw) continue;
+        try {
+          const parsed = JSON.parse(diskRaw) as PersistedTranscriptRecord;
+          if (!parsed || !parsed.snapshot) continue;
+          const liveMem = memTranscripts.get(dKey);
+          if (liveMem && liveMem.savedAt > (parsed.savedAt ?? 0)) continue;
+          const warmRec: PersistedTranscriptRecord = {
+            ...parsed,
+            tier: "warm",
+            snapshot: compactWarmTranscriptSnapshot(parsed.snapshot),
+          };
+          if (liveMem && liveMem.savedAt === parsed.savedAt) {
+            memTranscripts.set(dKey, warmRec);
+          }
           await invoke("ui_cache_put", {
             kind: "transcript",
-            key: warmRec.id,
+            key: dKey,
             saved_at: warmRec.savedAt,
+            tier: "warm",
             raw: JSON.stringify(warmRec),
           }).catch(() => undefined);
+        } catch {
+          /* ignore malformed disk cache entry */
         }
       }
-      nativeHotSeeded = true;
       return;
     } catch (err) {
       if (isUnsupportedCacheCommandError(err)) {
         unsupportedInvoke = invoke;
-      } else {
+      } else if (gen === nativeCacheGeneration) {
         await invoke("ui_cache_put", {
           kind: "transcript",
           key: id,
           saved_at: record.savedAt,
+          tier: "warm",
           raw: "{}",
         }).catch(() => undefined);
       }
@@ -493,10 +527,9 @@ export async function savePersistedTranscript<TSnap = unknown>(
 }
 
 export async function clearPersistentCache(): Promise<void> {
+  nativeCacheGeneration += 1;
   memSidebar.clear();
   memTranscripts.clear();
-  nativeHotTranscriptIds.clear();
-  nativeHotSeeded = false;
   knownDbTranscriptIds = null;
   knownDbHotTranscriptIds = null;
   lastSavedStamp = 0;
@@ -525,10 +558,9 @@ export async function clearPersistentCache(): Promise<void> {
 }
 
 export function resetPersistentCacheMemoryForTest(): void {
+  nativeCacheGeneration += 1;
   memSidebar.clear();
   memTranscripts.clear();
-  nativeHotTranscriptIds.clear();
-  nativeHotSeeded = false;
   knownDbTranscriptIds = null;
   knownDbHotTranscriptIds = null;
   lastSavedStamp = 0;

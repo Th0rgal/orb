@@ -1314,6 +1314,7 @@ initialize uiPrefsMutex : Std.Mutex Unit ← Std.Mutex.new ()
 initialize uiCacheMutex : Std.Mutex Unit ← Std.Mutex.new ()
 
 private def maxUiCacheRawBytes : Nat := 8388608
+private def hotUiCacheTranscripts : Nat := 32
 private def maxUiCacheTranscripts : Nat := 250
 
 private def isValidUiCacheKind (k : String) : Bool :=
@@ -1325,38 +1326,80 @@ private def uiCacheEntryPath (dir : System.FilePath) (kind key : String) : Syste
 
 private def parseUiCacheFile? (raw : String) (expectedKeyHex : String) : Option (Nat × String) :=
   match raw.splitOn "\n" with
-  | tsStr :: keyHex :: rest =>
-    if keyHex != expectedKeyHex then none
-    else
-      let savedAt := tsStr.trimAscii.toString.toNat?.getD 0
-      let payload := String.intercalate "\n" rest
-      if payload.isEmpty then none else some (savedAt, payload)
+  | tsStr :: rest0 =>
+    let tsParts := tsStr.trimAscii.toString.splitOn ":"
+    let savedAt := (tsParts[0]?.bind (·.toNat?)).getD 0
+    match rest0 with
+    | keyHex :: rest =>
+      if keyHex != expectedKeyHex then none
+      else
+        let payload := String.intercalate "\n" rest
+        if payload.isEmpty then none else some (savedAt, payload)
+    | _ => none
   | _ => none
 
-private def readUiCacheSavedAt (path : System.FilePath) : IO Nat := do
+private def hexNibble? (c : Char) : Option UInt8 :=
+  let n := c.toNat
+  if '0'.toNat ≤ n && n ≤ '9'.toNat then some (UInt8.ofNat (n - '0'.toNat))
+  else if 'a'.toNat ≤ n && n ≤ 'f'.toNat then some (UInt8.ofNat (10 + n - 'a'.toNat))
+  else if 'A'.toNat ≤ n && n ≤ 'F'.toNat then some (UInt8.ofNat (10 + n - 'A'.toNat))
+  else none
+
+private def decodeHexUtf8? (hex : String) : Option String := Id.run do
+  let cs := hex.trimAscii.toString.toList.toArray
+  if cs.size == 0 || cs.size % 2 != 0 then return none
+  let mut out := ByteArray.emptyWithCapacity (cs.size / 2)
+  let mut i := 0
+  while i + 1 < cs.size do
+    match hexNibble? cs[i]!, hexNibble? cs[i + 1]! with
+    | some hi, some lo =>
+      out := out.push ((hi <<< 4) ||| lo)
+      i := i + 2
+    | _, _ => return none
+  String.fromUTF8? out
+
+private def readUiCacheMeta (path : System.FilePath) : IO (Nat × String × String) := do
   let st ← OrbBin.PosixExt.statPath path.toString
-  if !st.exists_ || st.isSymlink || !st.isReg then return 0
+  if !st.exists_ || st.isSymlink || !st.isReg then return (0, "warm", "")
   try
     let h ← IO.FS.Handle.mk path .read
-    let line ← h.getLine
-    return line.trimAscii.toString.toNat?.getD 0
+    let line1 ← h.getLine
+    let line2 ← h.getLine
+    let tsParts := line1.trimAscii.toString.splitOn ":"
+    let ts := (tsParts[0]?.bind (·.toNat?)).getD 0
+    let tier := match tsParts[1]? with
+      | some "warm" => "warm"
+      | _ => "hot"
+    let key := (decodeHexUtf8? line2).getD ""
+    return (ts, tier, key)
   catch _ =>
-    return 0
+    return (0, "warm", "")
 
-private def evictExcessUiCacheTranscripts (dir : System.FilePath) : IO Unit := do
+/-- Evict transcripts beyond `maxUiCacheTranscripts` (`250`) and return keys of any
+    persisted hot records outside the newest `hotUiCacheTranscripts` (`32`) so the
+    renderer can compact and write back their warm-tier spine digests across restarts. -/
+private def reconcileUiCacheTranscripts (dir : System.FilePath) : IO (Array String) := do
   let entries ← try dir.readDir catch _ => pure #[]
   let txEntries := entries.filter fun e =>
     e.fileName.startsWith "transcript-" && e.fileName.endsWith ".cache"
-  if txEntries.size ≤ maxUiCacheTranscripts then return ()
-  let mut stamped : Array (Nat × System.FilePath) := Array.mkEmpty txEntries.size
+  if txEntries.size ≤ hotUiCacheTranscripts then return #[]
+  let mut stamped : Array (Nat × String × String × System.FilePath) := Array.mkEmpty txEntries.size
   for e in txEntries do
-    let ts ← readUiCacheSavedAt e.path
-    stamped := stamped.push (ts, e.path)
+    let (ts, tier, key) ← readUiCacheMeta e.path
+    stamped := stamped.push (ts, tier, key, e.path)
   let sorted := stamped.qsort (fun a b => a.1 < b.1)
-  let dropCount := sorted.size - maxUiCacheTranscripts
+  let dropCount := if sorted.size > maxUiCacheTranscripts then sorted.size - maxUiCacheTranscripts else 0
   for i in [0:dropCount] do
     if h : i < sorted.size then
-      try IO.FS.removeFile sorted[i].2 catch _ => pure ()
+      try IO.FS.removeFile sorted[i].2.2.2 catch _ => pure ()
+  let warmEnd := if sorted.size > hotUiCacheTranscripts then sorted.size - hotUiCacheTranscripts else 0
+  let mut demoteKeys : Array String := #[]
+  for i in [dropCount:warmEnd] do
+    if h : i < sorted.size then
+      let (_, tier, key, _) := sorted[i]
+      if tier == "hot" && !key.isEmpty then
+        demoteKeys := demoteKeys.push key
+  return demoteKeys
 
 private def isAllowedUiPrefKey (k : String) : Bool :=
   !k.isEmpty && k.utf8ByteSize ≤ 512 &&
@@ -4201,6 +4244,9 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let key := (args.fieldStr? "key").getD ""
     let rawJson := (args.fieldStr? "raw").getD ""
     let savedAt := (args.fieldNat? "saved_at").getD 0
+    let tier := match args.fieldStr? "tier" with
+      | some "warm" => "warm"
+      | _ => if rawJson == "{}" then "warm" else "hot"
     if !isValidUiCacheKind kind || key.isEmpty || key.utf8ByteSize > 512 then
       return .error "Invalid ui_cache_put key"
     if rawJson.isEmpty || rawJson.utf8ByteSize > maxUiCacheRawBytes then
@@ -4217,11 +4263,14 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         if dirSt.isSymlink then return .error "UI cache directory must not be a symlink"
         let path := uiCacheEntryPath dir kind key
         let keyHex := LeanSys.Auth.bytesToHexLower key.toUTF8
-        let wire := (s!"{savedAt}\n{keyHex}\n" ++ rawJson).toUTF8
+        let headerTs := if kind == "transcript" then s!"{savedAt}:{tier}" else s!"{savedAt}"
+        let wire := (s!"{headerTs}\n{keyHex}\n" ++ rawJson).toUTF8
         if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path wire then
           return .error e
         if kind == "transcript" then
-          evictExcessUiCacheTranscripts dir
+          let demoteKeys ← reconcileUiCacheTranscripts dir
+          if !demoteKeys.isEmpty then
+            return .ok (.obj #[("demote_keys", .arr (demoteKeys.map .str))])
         return .ok .null
   | "ui_cache_clear" =>
     match uiCacheDirPath? st with

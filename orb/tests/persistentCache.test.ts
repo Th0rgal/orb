@@ -228,4 +228,86 @@ describe("persistentCache native orb-locald bridge", () => {
       Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: origIndexedDB });
     }
   });
+
+  it("reconciles and compacts hot native disk transcripts across simulated app restarts", async () => {
+    const disk = new Map<string, { savedAt: number; tier: string; raw: string }>();
+    win.__ORB_DESKTOP__ = {
+      core: {
+        invoke: async (cmd: string, args?: Record<string, unknown>) => {
+          if (cmd === "ui_cache_put") {
+            const kind = String(args?.kind ?? "");
+            const key = String(args?.key ?? "");
+            const savedAt = Number(args?.saved_at ?? 0);
+            const raw = String(args?.raw ?? "");
+            const tier = args?.tier === "warm" || raw === "{}" ? "warm" : "hot";
+            disk.set(`${kind}:${key}`, { savedAt, tier, raw });
+            if (kind === "transcript") {
+              const txEntries = [...disk.entries()]
+                .filter(([k]) => k.startsWith("transcript:"))
+                .map(([k, v]) => ({ key: k.slice("transcript:".length), ...v }))
+                .sort((a, b) => a.savedAt - b.savedAt);
+              const warmEnd = Math.max(0, txEntries.length - 32);
+              const demoteKeys = txEntries
+                .slice(0, warmEnd)
+                .filter((e) => e.tier === "hot")
+                .map((e) => e.key);
+              if (demoteKeys.length > 0) return { demote_keys: demoteKeys };
+            }
+            return null;
+          }
+          if (cmd === "ui_cache_get") {
+            return disk.get(`${args?.kind}:${args?.key}`)?.raw ?? null;
+          }
+          if (cmd === "ui_cache_clear") {
+            disk.clear();
+            return null;
+          }
+          throw new Error(`unexpected ${cmd}`);
+        },
+      },
+    };
+
+    const bigToolOutput = "X".repeat(2048);
+    const makeHotSnap = (idx: number) => ({
+      fromLog: true,
+      cursor: 2,
+      items: [
+        { kind: "user", key: `u-${idx}`, text: `Prompt ${idx}` },
+        { kind: "work", key: `w-${idx}`, entries: [{ kind: "tool", id: `tc-${idx}`, name: "bash", result: bigToolOutput }] },
+        { kind: "text", key: `a-${idx}`, text: `Answer ${idx}` },
+      ],
+      stream: [
+        { type: "user_message", sequence: 1, data: { id: `u-${idx}`, content: `Prompt ${idx}` } },
+        { type: "tool_result", sequence: 2, data: { tool_call_id: `tc-${idx}`, result: bigToolOutput } },
+        { type: "assistant_message", sequence: 3, data: { id: `a-${idx}`, content: `Answer ${idx}`, success: true } },
+      ],
+    });
+
+    // Session 1: persist 20 hot conversations, then restart the app (clearing RAM).
+    for (let i = 0; i < 20; i++) {
+      await savePersistedTranscript("scope-restart", `s1-${i}`, makeHotSnap(i));
+    }
+    resetPersistentCacheMemoryForTest();
+
+    // Session 2: persist another 20 hot conversations without touching Session 1's RAM records.
+    for (let i = 0; i < 20; i++) {
+      await savePersistedTranscript("scope-restart", `s2-${i}`, makeHotSnap(100 + i));
+    }
+
+    // Total on disk = 40: oldest 8 (`s1-0`..`s1-7`) MUST be compacted to `warm`, newest 32 remain `hot`!
+    const hotEntries = [...disk.values()].filter((v) => v.tier === "hot");
+    const warmEntries = [...disk.values()].filter((v) => v.tier === "warm");
+    expect(hotEntries).toHaveLength(32);
+    expect(warmEntries).toHaveLength(8);
+
+    resetPersistentCacheMemoryForTest();
+    const oldest = await loadPersistedTranscript<{
+      activityCompacted?: boolean;
+      stream: Array<{ type: string }>;
+      items: Array<{ kind: string; entries?: Array<{ result?: string }> }>;
+    }>("scope-restart", "s1-0");
+    expect(oldest?.activityCompacted).toBe(true);
+    expect(oldest?.stream.map((e) => e.type)).toEqual(["user_message", "assistant_message"]);
+    expect(oldest?.items.find((it) => it.kind === "work")?.entries?.[0]?.result?.length).toBe(256);
+  });
 });

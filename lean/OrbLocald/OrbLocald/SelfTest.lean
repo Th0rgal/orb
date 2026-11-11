@@ -621,13 +621,27 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
     ("saved_at", .nat 1),
     ("raw", .str "{}")
   ])
+  let mut lastPutRes : Except String JVal := .ok .null
   for idx in [0:252] do
-    let _ ← dispatchRpcCommand stP1 "ui_cache_put" (.obj #[
+    lastPutRes ← dispatchRpcCommand stP1 "ui_cache_put" (.obj #[
       ("kind", .str "transcript"),
       ("key", .str s!"scope1::m:tx-{idx}"),
       ("saved_at", .nat (2000 + idx)),
       ("raw", .str s!"\{\"idx\":{idx}}")
     ])
+  let warmRewriteRes ← dispatchRpcCommand stP1 "ui_cache_put" (.obj #[
+    ("kind", .str "transcript"),
+    ("key", .str "scope1::m:tx-2"),
+    ("saved_at", .nat 2002),
+    ("tier", .str "warm"),
+    ("raw", .str "{\"idx\":2,\"tier\":\"warm\"}")
+  ])
+  let demoteListOk := match lastPutRes, warmRewriteRes with
+    | .ok jv1, .ok jv2 =>
+      let ks1 := ((jv1.fieldArr? "demote_keys").getD #[]).filterMap (·.asStr?)
+      let ks2 := ((jv2.fieldArr? "demote_keys").getD #[]).filterMap (·.asStr?)
+      ks1.contains "scope1::m:tx-2" && !(ks2.contains "scope1::m:tx-2")
+    | _, _ => false
   let oldestEvicted ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-0")])
   let secondEvicted ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-1")])
   let thirdKept ← dispatchRpcCommand stP2 "ui_cache_get" (.obj #[("kind", .str "transcript"), ("key", .str "scope1::m:tx-2")])
@@ -642,9 +656,10 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
     isOkNull sbPut &&
     isOkStr sbGet "{\"missions\":[1],\"projects\":[]}" &&
     (match badKindRes with | .error _ => true | .ok _ => false) &&
+    demoteListOk &&
     isOkNull oldestEvicted &&
     isOkNull secondEvicted &&
-    isOkStr thirdKept "{\"idx\":2}" &&
+    isOkStr thirdKept "{\"idx\":2,\"tier\":\"warm\"}" &&
     isOkStr newestKept "{\"idx\":251}" &&
     isOkNull afterClearSb &&
     isOkNull afterClearTx
