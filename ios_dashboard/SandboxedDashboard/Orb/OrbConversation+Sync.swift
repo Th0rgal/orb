@@ -250,7 +250,7 @@ extension OrbConversation {
             let streamEpochBefore = live.streamEpoch
             let settingsGenBefore = settingsSaveGeneration
             let settingsRemoteRevBefore = settingsRemoteRevision
-            let savedHistory = mission["history"].items
+            let savedHistory = mission["history"].items.filter { !$0["inbox_preview"].flag }
             let conversationCursor = savedHistory.allSatisfy { $0["sequence"].doubleValue != nil }
                 ? savedHistory.compactMap { $0["sequence"].doubleValue }.max().map { Int64($0) } : nil
             let queueFetchedAt = Date()

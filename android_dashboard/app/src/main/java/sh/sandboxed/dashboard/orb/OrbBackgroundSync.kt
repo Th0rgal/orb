@@ -1405,21 +1405,45 @@ object OrbWarmSyncCoordinator {
             val evKey = "mission_events_$missionId"
             val existingEvs = OrbReadCache.readMemoryRows(evKey).ifEmpty { OrbReadCache.loadRows(evKey) }
             val prevLastSeq = existingEvs.lastOrNull()?.int("sequence", "seq")?.toLong() ?: 0L
-            val mergedEvs = OrbLiveEventReducer.mergeMissionEvents(existingEvs, listOf(storedRow))
-            OrbReadCache.saveRows(evKey, mergedEvs)
+            if (prevLastSeq > 0L && incomingSeq in 1L..prevLastSeq) return@launch
+            val isContiguous = prevLastSeq > 0L && incomingSeq == prevLastSeq + 1L
+            if (isContiguous) {
+                val mergedEvs = OrbLiveEventReducer.mergeMissionEvents(existingEvs, listOf(storedRow))
+                OrbReadCache.saveRows(evKey, mergedEvs)
+            }
 
             val msgKey = "mission_msgs_$missionId"
-            val existingMsgs = OrbReadCache.readMemoryRows(msgKey).ifEmpty { OrbReadCache.loadRows(msgKey) }
-            val mergedMsgs = OrbConversationHistory.merge(existingMsgs, listOf(storedRow))
+            val existingMsgs = OrbReadCache.readMemoryRows(msgKey)
+                .ifEmpty { OrbReadCache.loadRows(msgKey) }
+                .filter { it.raw["inbox_preview"] != true }
+            val mergedMsgs = if (isContiguous) {
+                OrbConversationHistory.merge(existingMsgs, listOf(storedRow))
+            } else {
+                val content = storedRow.str("content")?.trim().orEmpty()
+                if (content.isNotEmpty()) {
+                    val metadata = storedRow.dict("metadata") ?: emptyMap()
+                    val previewRaw = (storedRow.raw - "sequence" - "seq") + mapOf(
+                        "role" to "assistant",
+                        "content" to content,
+                        "mission_id" to missionId,
+                        "canonical" to false,
+                        "bubble_id" to (metadata["bubble_id"] ?: "text_delta_latest"),
+                        "revision" to (metadata["revision"] ?: 0),
+                        "inbox_preview" to true,
+                    )
+                    existingMsgs + OrbRow(storedRow.id, previewRaw)
+                } else {
+                    existingMsgs
+                }
+            }
             if (mergedMsgs.isNotEmpty()) {
                 OrbReadCache.saveRows(msgKey, mergedMsgs)
             }
 
             synchronized(lock) {
-                if (incomingSeq > 0L) {
+                if (isContiguous) {
                     savedCursors[missionId] = maxOf(savedCursors[missionId] ?: incomingSeq, incomingSeq)
-                }
-                if (prevLastSeq > 0L && incomingSeq > prevLastSeq + 1L) {
+                } else {
                     dirtyMissions.add(missionId)
                 }
             }

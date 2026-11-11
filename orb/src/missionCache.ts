@@ -14,7 +14,7 @@ import {
   onBackgroundSyncActiveChange,
   selectWarmMissionIds,
 } from "./backgroundSync";
-import { applyStreamEvent, applyStreamEvents, buildTranscript, clearTranscriptSessions, dropTranscriptSession, dropTranscriptSessionsByPrefixIfNot, transcriptSessionKey, type StreamItem } from "./transcriptModel";
+import { applyStreamEvent, applyStreamEvents, buildTranscript, clearTranscriptSessions, dropTranscriptSession, dropTranscriptSessionsByPrefixIfNot, rehydrateTranscript, transcriptSessionKey, type StreamItem } from "./transcriptModel";
 import * as streamModule from "./stream";
 import {
   getMissionEventPage,
@@ -230,8 +230,14 @@ function estimateStreamEventsBytes(evs: readonly StreamEvent[]): number {
 }
 
 function buildSettledDigestSnapshot(snapshot: TranscriptSnap): TranscriptSnap {
+  const cleared: TranscriptSnap = {
+    ...snapshot,
+    settledItems: undefined,
+    settledSeq: undefined,
+    openTailEvents: undefined,
+  };
   const stream = snapshot.stream ?? [];
-  if (!stream.length || !snapshot.items.length) return snapshot;
+  if (!stream.length || !snapshot.items.length) return cleared;
   // Find the highest sequence of a finalized assistant reply or terminal error so settled turns
   // hydrate in O(1) on cold restart without re-running `buildTranscript` across raw tool events.
   let settledSeq = 0;
@@ -246,7 +252,7 @@ function buildSettledDigestSnapshot(snapshot: TranscriptSnap): TranscriptSnap {
       break;
     }
   }
-  if (settledSeq <= 0) return snapshot;
+  if (settledSeq <= 0) return cleared;
   const maxStreamSeq = stream.reduce((m, e) => (typeof e.sequence === "number" && e.sequence > m ? e.sequence : m), 0);
   if (settledSeq >= maxStreamSeq && (!snapshot.liveTail || snapshot.liveTail.length === 0)) {
     return {
@@ -256,7 +262,7 @@ function buildSettledDigestSnapshot(snapshot: TranscriptSnap): TranscriptSnap {
       openTailEvents: [],
     };
   }
-  return snapshot;
+  return cleared;
 }
 
 function flushPersistScope(scope: string) {
@@ -437,10 +443,11 @@ export function hydrateTranscriptFromDisk(
               ? persisted.items
               : undefined;
         if (prebuiltBase) {
+          const boundBase = rehydrateTranscript(prebuiltBase, session);
           const tail = [...(persisted.openTailEvents ?? []), ...(persisted.liveTail ?? [])];
           rebuiltItems = tail.length > 0
-            ? applyStreamEvents(prebuiltBase, tail, session)
-            : prebuiltBase;
+            ? applyStreamEvents(boundBase, tail, session)
+            : boundBase;
         } else {
           rebuiltItems = buildTranscript(
             [...(persisted.stream ?? []), ...(persisted.liveTail ?? [])],
@@ -543,7 +550,10 @@ export function applyLiveEventsToTranscriptCache(
     ...(prev ?? {}),
     items,
     stream,
-    ...(liveTail.length ? { liveTail } : {}),
+    liveTail: liveTail.length ? liveTail : undefined,
+    settledItems: undefined,
+    settledSeq: undefined,
+    openTailEvents: undefined,
     ...(cursor !== undefined ? { cursor } : {}),
     ...(prevEst > 0 ? { estimatedBytes: prevEst + deltaBytes } : {}),
     fromLog: prev?.fromLog === true,
@@ -939,13 +949,32 @@ if ("onInboxAnswerPush" in streamModule && typeof streamModule.onInboxAnswerPush
     const prior = peekTranscript(missionId);
     if (prior?.fromLog && !prior.detailsPending) {
       const prevCursor = prior.cursor ?? 0;
-      const evSeq = typeof ev.sequence === "number" ? ev.sequence : undefined;
-      applyLiveEventsToTranscriptCache(missionId, [ev]);
-      // Mark dirty if intermediate tool events occurred between `prevCursor` and `evSeq`
-      // so opening the Inbox item renders the received answer in 0 ms and backfills tools silently.
-      if (evSeq !== undefined && evSeq > prevCursor + 1) {
-        dirtyMissions.add(scope);
+      const evSeq = typeof ev.sequence === "number" && Number.isSafeInteger(ev.sequence) ? ev.sequence : undefined;
+      if (prevCursor > 0 && evSeq !== undefined && evSeq <= prevCursor) return;
+      if (prevCursor > 0 && evSeq === prevCursor + 1) {
+        applyLiveEventsToTranscriptCache(missionId, [ev]);
+        return;
       }
+      // Gapped push (`evSeq > prevCursor + 1` or unknown cursor): render the pushed answer
+      // immediately via `liveTail` while keeping `prior.cursor` at the contiguous watermark
+      // so reopening calls `/open?since_seq=<prevCursor>` and backfills skipped user/tool turns.
+      const session = sessionFor(missionId);
+      const nextItems = applyStreamEvents(prior.items, [ev], session);
+      const combinedTail = [...(prior.liveTail ?? []), ev];
+      const liveTail = combinedTail.length > 256 ? combinedTail.slice(-256) : combinedTail;
+      saveSnapshot(
+        scope,
+        {
+          ...prior,
+          items: nextItems,
+          liveTail,
+          settledItems: undefined,
+          settledSeq: undefined,
+          openTailEvents: undefined,
+        },
+        false,
+      );
+      dirtyMissions.add(scope);
       return;
     }
     const merged = mergeStreamBySequence(prior?.stream ?? [], [ev]);
@@ -953,9 +982,12 @@ if ("onInboxAnswerPush" in streamModule && typeof streamModule.onInboxAnswerPush
       ...(prior ?? {}),
       items: buildTranscript(merged, previewSessionFor(missionId)),
       stream: merged,
+      settledItems: undefined,
+      settledSeq: undefined,
+      openTailEvents: undefined,
       fromLog: true,
       detailsPending: true,
-      ...(typeof ev.sequence === "number" ? { cursor: ev.sequence } : {}),
+      ...(prior?.cursor !== undefined ? { cursor: prior.cursor } : {}),
     }, false);
   });
 }

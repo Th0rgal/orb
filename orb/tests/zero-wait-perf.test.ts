@@ -10,14 +10,19 @@ import {
 } from "../src/api";
 import { resetDesktopPrefsForTest } from "../src/desktopPrefs";
 import {
+  applyLiveEventsToTranscriptCache,
   consumeMissionOpenQueue,
+  flushPendingPersistedTranscripts,
   forgetPrefetchPauses,
   hydrateTranscriptFromDisk,
+  isMissionDirtyWhileUnfocused,
   loadTranscript,
   peekTranscript,
   putTranscript,
+  refreshTranscript,
   transcriptVersion,
 } from "../src/missionCache";
+import { buildTranscript } from "../src/transcriptModel";
 import { cacheReset } from "../src/pageCache";
 import {
   clearPersistentCache,
@@ -315,6 +320,141 @@ describe("Zero-Wait Conversation Loading & Two-Tier Answer Cache", () => {
     }
     await vi.waitFor(() => expect(batches.length).toBe(1));
     expect(batches[0]).toHaveLength(12);
+    stop();
+  });
+
+  it("rehydrates settledItems with bound TranscriptReducer, invalidates stale settled digests on mid-turn persistence, and preserves contiguous cursor across gapped inbox_answer_push", async () => {
+    class MockWs {
+      static instances: MockWs[] = [];
+      readyState = 1;
+      onopen: (() => void) | null = null;
+      onmessage: ((ev: { data: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor(public url: string, public protocols?: string | string[]) {
+        MockWs.instances.push(this);
+        queueMicrotask(() => this.onopen?.());
+      }
+      send(_data: string) {}
+      close() {
+        this.readyState = 3;
+      }
+    }
+    vi.stubGlobal("WebSocket", MockWs as unknown as typeof WebSocket);
+    setConnection("http://rehydrate-gap.test", "jwt-rehydrate");
+    setMultiplexSyncEnabledForTest(true);
+
+    const stop = streamMission("m-keep-ws-open", () => {}, () => {});
+    await vi.waitFor(() => expect(MockWs.instances).toHaveLength(1));
+    const ws = MockWs.instances[0];
+
+    // 1. Seed a settled conversation at cursor = 2 and flush to IndexedDB (`settledItems` populated).
+    const initialStream: StreamEvent[] = [
+      { type: "user_message", sequence: 1, eventId: "u-1", data: { id: "u-1", content: "Turn 1 prompt" } },
+      { type: "assistant_message", sequence: 2, eventId: "a-2", data: { id: "a-2", content: "Turn 1 reply", success: true } },
+    ];
+    putTranscript("m-gap", {
+      fromLog: true,
+      cursor: 2,
+      items: buildTranscript(initialStream),
+      stream: initialStream,
+    });
+    flushPendingPersistedTranscripts();
+    // Wait for IndexedDB write
+    await new Promise((r) => setTimeout(r, 25));
+
+    // Evict RAM cache and cold-hydrate from IndexedDB `settledItems`
+    forgetPrefetchPauses();
+    cacheReset();
+    const hydrated = await hydrateTranscriptFromDisk("m-gap");
+    expect(hydrated?.settledItems).toHaveLength(2);
+    expect(hydrated?.cursor).toBe(2);
+
+    // 2. Receive a gapped `inbox_answer_push` (`sequence: 10`, skipping `3..9` user + tools).
+    // Must NOT throw ("Transcript must originate from buildTranscript") AND must keep `cursor === 2`!
+    ws.onmessage?.({
+      data: JSON.stringify({
+        type: "inbox_answer_push",
+        event_type: "assistant_message",
+        mission_id: "m-gap",
+        sequence: 10,
+        id: "a-10",
+        content: "Turn 2 pushed answer",
+      }),
+    });
+    const afterPush = peekTranscript("m-gap");
+    expect(afterPush?.cursor).toBe(2);
+    expect(isMissionDirtyWhileUnfocused("m-gap")).toBe(true);
+    expect(afterPush?.items.some((i) => i.kind === "text" && i.text.includes("Turn 2 pushed answer"))).toBe(true);
+
+    // Reopening / refreshing calls `/open?since_seq=2` (NOT `since_seq=10`) and backfills `3..10` without duplication!
+    const fetchUrls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        fetchUrls.push(url);
+        return new Response(
+          JSON.stringify({
+            protocol: 1,
+            mission: {
+              id: "m-gap",
+              title: "Gap Mission",
+              status: "awaiting_user",
+              backend: "claudecode",
+              history: [],
+              created_at: "2026-11-11T07:00:00Z",
+              updated_at: "2026-11-11T07:06:00Z",
+            },
+            events: [
+              { id: 3, sequence: 3, event_id: "u-3", event_type: "user_message", content: "Turn 2 prompt", timestamp: "2026-11-11T07:05:10Z" },
+              { id: 4, sequence: 4, event_id: "tc-4", event_type: "tool_call", tool_call_id: "c-4", name: "Bash", args: { command: "pwd" }, timestamp: "2026-11-11T07:05:11Z" },
+              { id: 5, sequence: 5, event_id: "tr-5", event_type: "tool_result", tool_call_id: "c-4", name: "Bash", result: "/work", timestamp: "2026-11-11T07:05:12Z" },
+              { id: 10, sequence: 10, event_id: "a-10", event_type: "assistant_message", content: "Turn 2 pushed answer", timestamp: "2026-11-11T07:05:20Z" },
+            ],
+            spine: [],
+            queue: [],
+            max_seq: 10,
+            has_more: false,
+            next_cursor: 10,
+            page_max_seq: 10,
+            reset: false,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+
+    const reconciled = await refreshTranscript("m-gap");
+    expect(fetchUrls).toHaveLength(1);
+    expect(fetchUrls[0]).toContain("since_seq=2");
+    expect(reconciled.cursor).toBe(10);
+    expect(reconciled.items.some((i) => i.kind === "user" && i.text === "Turn 2 prompt")).toBe(true);
+    expect(reconciled.items.some((i) => i.kind === "tool" && i.callId === "c-4")).toBe(true);
+    expect(reconciled.items.filter((i) => i.kind === "text" && i.text === "Turn 2 pushed answer")).toHaveLength(1);
+
+    // 3. Persist reconciled settled turn (`settledSeq = 10`), cold-hydrate again, then append a new mid-turn `user_message` (`sequence: 11`) + live `text_delta`.
+    flushPendingPersistedTranscripts();
+    await new Promise((r) => setTimeout(r, 25));
+    forgetPrefetchPauses();
+    cacheReset();
+    const rehydrated2 = await hydrateTranscriptFromDisk("m-gap");
+    expect(rehydrated2?.settledSeq).toBe(10);
+
+    // Live mid-turn events apply cleanly on top of hydrated `settledItems` AND invalidate stale `settledItems` on disk!
+    applyLiveEventsToTranscriptCache("m-gap", [
+      { type: "user_message", sequence: 11, eventId: "u-11", data: { id: "u-11", content: "Turn 3 mid-flight prompt" } },
+      { type: "text_delta", data: { mode: "delta", content: "Streaming turn 3..." } },
+    ]);
+    flushPendingPersistedTranscripts();
+    await new Promise((r) => setTimeout(r, 25));
+
+    forgetPrefetchPauses();
+    cacheReset();
+    const rehydratedMidTurn = await hydrateTranscriptFromDisk("m-gap");
+    expect(rehydratedMidTurn?.settledItems).toBeUndefined();
+    expect(rehydratedMidTurn?.items.some((i) => i.kind === "user" && i.text === "Turn 3 mid-flight prompt")).toBe(true);
+    expect(rehydratedMidTurn?.items.some((i) => i.kind === "text" && i.text.includes("Streaming turn 3..."))).toBe(true);
     stop();
   });
 });

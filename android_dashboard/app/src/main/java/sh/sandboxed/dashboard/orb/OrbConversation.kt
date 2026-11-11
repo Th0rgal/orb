@@ -1083,6 +1083,7 @@ fun OrbConversationPage(
                         val lastSeq = existingForCid.lastOrNull()?.int("sequence", "seq")
                         val maxPayload = OrbReadCache.RESULT_KEEP_CHARS
                         val savedHistory = OrbConversationHistory.forMission(OrbReadCache.loadRowsAsync("mission_msgs_$cid"), cid)
+                            .filter { it.raw["inbox_preview"] != true }
                         val conversationCursor = savedHistory.takeIf { it.isNotEmpty() && it.all { row -> row.int("sequence") != null } }?.maxOf { it.int("sequence")!! }
                         val conversationSuffix = conversationCursor?.let { "&since_seq=$it" } ?: ""
                         val knownCloudHint = allMissions.firstOrNull { it.id == cid }?.str("backend")?.startsWith("cloud_") == true ||

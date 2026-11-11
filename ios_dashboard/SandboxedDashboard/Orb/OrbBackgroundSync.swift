@@ -1032,18 +1032,35 @@ final class OrbWarmSyncCoordinator {
         guard let stored = StoredEvent.fromStreamFrame(missionId: missionId, type: "assistant_message", data: data) else { return }
         let existing = OrbReadCache.readEvents(missionId)
         let prevLastSeq = existing.last?.sequence ?? 0
-        let merged = OrbConversation.mergeStoredEvents(existing: existing, incoming: [stored])
-        OrbReadCache.saveEvents(missionId, events: merged, persistImmediately: true)
-        if stored.sequence > 0 {
+        if prevLastSeq > 0 && stored.sequence > 0 && stored.sequence <= prevLastSeq { return }
+        let isContiguous = prevLastSeq > 0 && stored.sequence == prevLastSeq + 1
+        if isContiguous {
+            let merged = OrbConversation.mergeStoredEvents(existing: existing, incoming: [stored])
+            OrbReadCache.saveEvents(missionId, events: merged, persistImmediately: true)
             savedCursors[missionId] = max(savedCursors[missionId] ?? stored.sequence, stored.sequence)
-        }
-        if prevLastSeq > 0 && stored.sequence > prevLastSeq + 1 {
+        } else {
             dirtyMissions.insert(missionId)
         }
         if let cachedMission = OrbReadCache.read("mission:\(missionId)"),
            case var .object(fields) = cachedMission {
-            let updatedHistory = OrbConversationHistory.merge(fields["history"]?.items ?? [], events: [stored])
-            fields["history"] = .array(updatedHistory)
+            if isContiguous {
+                let updatedHistory = OrbConversationHistory.merge(
+                    fields["history"]?.items.filter { !$0["inbox_preview"].flag } ?? [],
+                    events: [stored]
+                )
+                fields["history"] = .array(updatedHistory)
+            } else if !stored.content.isEmpty {
+                let baseHistory = (fields["history"]?.items ?? []).filter { !$0["inbox_preview"].flag }
+                let previewRow: OrbJSON = .object([
+                    "role": .string("assistant"),
+                    "content": .string(stored.content),
+                    "canonical": .bool(false),
+                    "bubble_id": .string(stored.metadata["bubble_id"]?.value as? String ?? "text_delta_latest"),
+                    "revision": .number((stored.metadata["revision"]?.value as? NSNumber)?.doubleValue ?? 0),
+                    "inbox_preview": .bool(true),
+                ])
+                fields["history"] = .array(baseHistory + [previewRow])
+            }
             if let status = data["status"] as? String, !status.isEmpty {
                 fields["status"] = .string(status)
             }
