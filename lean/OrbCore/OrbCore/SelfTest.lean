@@ -4817,25 +4817,35 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
     let hsHead := String.fromUTF8? (hsBuf.extract 0 hsEnd) |>.getD ""
     let mut wsRx := hsBuf.extract hsEnd hsBuf.size
     let mask4 := ByteArray.mk #[0x37, 0xFA, 0x21, 0x3D]
-    -- Subscribe to `m-zw-fast-new` with `since_seq: 26` (replaying seq 27 + `sync_caught_up`), AND attempt cross-user subscribe to `m-zw-bob` (must be `forbidden`)!
+    -- Subscribe to `m-zw-fast-new` with `since_seq: 26` (replaying seq 27 + `sync_caught_up`), enable `set_presentation`, AND attempt cross-user subscribe to `m-zw-bob` (must be `forbidden`)!
+    let presMsg := "{\"op\":\"set_presentation\",\"enabled\":true}"
     let subMsg1 := "{\"op\":\"subscribe\",\"mission_id\":\"m-zw-fast-new\",\"since_seq\":26,\"max_payload\":512}"
     let subMsgBob := "{\"op\":\"subscribe\",\"mission_id\":\"m-zw-bob\"}"
     let pingMsg := "{\"op\":\"ping\",\"ts\":1234567}"
-    for m in [subMsg1, subMsgBob, pingMsg] do
+    for m in [presMsg, subMsg1, subMsgBob, pingMsg] do
       if let some frm := encodeFrame? { fin := true, opcode := .text, payload := m.toUTF8 } (some mask4) then
         discard <| writeAll wfd frm false
-    -- Read initial `sync_ready`, replay, `sync_caught_up`, `forbidden`, and `pong` before triggering live events!
+    -- Read initial `sync_ready`, `subscribed` (`presentation:true`), replay, `sync_caught_up`, `forbidden`, and `pong` before triggering live events!
     for _ in [0:5] do
       if let .ok () ← pollReadable wfd 300 then
         let ch ← readStreamChunk wfd 32768
         if !ch.isEmpty then wsRx := wsRx ++ ch
-    -- Append live events on subscribed `m-zw-fast-new`, unsubscribed `m-zw-other` (`inbox_answer_push`), and Bob's mission, then revoke access on `m-zw-fast-new` and verify immediate `forbidden` unsubscribe with zero leak!
+    -- Append live events on subscribed `m-zw-fast-new`, unsubscribed `m-zw-other` (`tool_call` -> `mission_activity` + `assistant_message` -> `inbox_answer_push` + `mission_presentation`), HTTP mutations (`archive` + `DELETE`), and Bob's mission (`tool_call`, `assistant_message`, `DELETE`), then revoke access on `m-zw-fast-new` and verify immediate `forbidden` unsubscribe with zero cross-user leak!
     let _ ← appendMissionEvent store "m-zw-fast-new" "text_delta" "{\"delta\":\"chunk-1\"}" "2026-11-11T07:00:59Z"
     let _ ← appendMissionEvent store "m-zw-fast-new" "assistant_message" "{\"id\":\"a-live\",\"content\":\"Live WS delta\"}" "2026-11-11T07:01:00Z"
+    let _ ← appendMissionEvent store "m-zw-other" "tool_call" "{\"tool_call_id\":\"tc-pres-1\",\"tool_name\":\"bash\",\"args\":{\"cmd\":\"ls\"}}" "2026-11-11T07:01:00Z"
     let _ ← appendMissionEvent store "m-zw-other" "assistant_message" "{\"id\":\"a-inbox\",\"content\":\"Background inbox answer\"}" "2026-11-11T07:01:01Z"
+    let (archCode, _, _) ← sendReqHdr "POST" "/api/control/missions/m-zw-other/archive" adminTok "{\"archived\":true}"
+    let (delOwnCode, _, _) ← sendReqHdr "DELETE" "/api/control/missions/m-zw-fast-ack" adminTok ""
+    let _ ← appendMissionEvent store "m-zw-bob" "tool_call" "{\"tool_call_id\":\"tc-bob\",\"tool_name\":\"secret_tool\",\"args\":{}}" "2026-11-11T07:01:02Z"
     let _ ← appendMissionEvent store "m-zw-bob" "assistant_message" "{\"id\":\"a-bob-secret\",\"content\":\"Bob secret answer\"}" "2026-11-11T07:01:02Z"
-    IO.sleep 25
-    for _ in [0:5] do
+    let (delBobCode, _, _) ← sendReqHdr "DELETE" "/api/control/missions/m-zw-bob" bobTok ""
+    if archCode != 200 || delOwnCode != 200 || delBobCode != 200 then
+      discard <| closeFd wfd
+      let _ := srvTask.get
+      return (← fail s!"HTTP mutation codes failed: arch={archCode} delOwn={delOwnCode} delBob={delBobCode}")
+    IO.sleep 35
+    for _ in [0:6] do
       if let .ok () ← pollReadable wfd 250 then
         let ch ← readStreamChunk wfd 32768
         if !ch.isEmpty then wsRx := wsRx ++ ch
@@ -4865,6 +4875,7 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
       (hsHead.splitOn "101 Switching Protocols").length == 2 &&
       (hsHead.splitOn "Sec-WebSocket-Protocol: orb-sync.v1").length == 2 &&
       (allWs.splitOn "\"type\":\"sync_ready\"").length == 2 &&
+      (allWs.splitOn "\"type\":\"subscribed\",\"presentation\":true").length == 2 &&
       (allWs.splitOn "\"type\":\"sync_caught_up\"").length == 2 &&
       (allWs.splitOn "\"replayed\":1").length == 2 &&
       (allWs.splitOn "\"error\":\"forbidden\"").length == 3 &&
@@ -4873,6 +4884,11 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
       (allWs.splitOn "Live WS delta").length == 2 &&
       (allWs.splitOn "\"type\":\"inbox_answer_push\"").length == 2 &&
       (allWs.splitOn "Background inbox answer").length == 2 &&
+      (allWs.splitOn "\"type\":\"mission_presentation\",\"mission_id\":\"m-zw-other\",\"kind\":\"mission_activity\",\"label\":\"Running bash\"").length == 2 &&
+      (allWs.splitOn "\"type\":\"mission_presentation\",\"mission_id\":\"m-zw-other\",\"kind\":\"mission_updated\"").length == 2 &&
+      (allWs.splitOn "\"type\":\"mission_presentation\",\"mission_id\":\"m-zw-fast-ack\",\"kind\":\"mission_deleted\"").length == 2 &&
+      (allWs.splitOn "\"m-zw-bob\"").length == 2 &&
+      (allWs.splitOn "secret_tool").length == 1 &&
       (allWs.splitOn "Bob secret answer").length == 1 &&
       (allWs.splitOn "Revoked post-share secret").length == 1
 

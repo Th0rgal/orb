@@ -794,7 +794,7 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
       syncSubscriptions();
       for (const l of listeners) {
         if (l.onReady) l.onReady();
-        else if (hadFailures) l.onLagged();
+        if (hadFailures && (!l.onReady || l.getSinceSeq() === undefined)) l.onLagged();
       }
       pingTimer = setInterval(() => {
         if (socket !== ws || ws.readyState !== WebSocket.OPEN) return;

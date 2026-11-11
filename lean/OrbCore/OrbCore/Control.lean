@@ -4738,11 +4738,89 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   return .ok (mkJson 404 s!"\{\"error\":\"not_found\",\"path\":{jsonEscape cleanPath}}")
 
 /-- Dispatch a parsed `HttpRequest` against `CoreAppState` (`routes` capability parity:
-    `"/api/control/missions/:id/automations"`, `"/api/model-routing"`), applying RFC 1952 `gzip`
+    `"/api/control/missions/:id/automations"`, `"/api/model-routing"`), emitting authorized
+    `mission_presentation` notices on `2xx` control mutations and applying RFC 1952 `gzip`
     content encoding when requested via `Accept-Encoding: gzip` on bodies `>= 1 KiB`. -/
 def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : UInt64) : IO (Except ByteArray CoreHttpResponse) := do
+  let hasListeners ← match st.store.eventListenersRef? with
+    | some ref => pure (!(← ref.get).isEmpty)
+    | none => pure false
+  let mut preDeleteMeta? : Option (String × String × Array String × Option String) := none
+  if hasListeners && req.method == "DELETE" then
+    if let some params := matchRoutePattern? "/api/control/missions/:id" req.path then
+      let rawMid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let mid := (percentDecodeStrict rawMid).getD rawMid
+      if !mid.isEmpty then
+        let mut ownerUid := ""
+        let mut btwParent? : Option String := none
+        if let .ok mRs ← execParamQuery st.store.missionsDb
+            "SELECT COALESCE(owner_user_id,''), COALESCE(tags,'[]') FROM missions WHERE id=?1;" #[mid] then
+          if mRs.size > 1 then
+            ownerUid := (mRs[1]![0]?).getD ""
+            btwParent? := extractBtwParentIdFromTagsJson? ((mRs[1]![1]?).getD "[]")
+        let mut sharedUids : Array String := #[]
+        if let .ok sRs ← execParamQuery st.store.missionsDb
+            "SELECT user_id FROM mission_shares WHERE mission_id=?1;" #[mid] then
+          for i in [1:sRs.size] do
+            let uid := (sRs[i]![0]?).getD ""
+            if !uid.isEmpty then sharedUids := sharedUids.push uid
+        preDeleteMeta? := some (mid, ownerUid, sharedUids, btwParent?)
   match ← dispatchCoreRequestRaw st req nowEpochSec with
-  | .ok resp => return .ok (maybeGzipHttpResponse req resp)
+  | .ok resp =>
+    if hasListeners && req.method != "GET" && req.method != "HEAD" && req.method != "OPTIONS" &&
+       resp.status ≥ 200 && resp.status < 300 then
+      let cleanPath := (req.path.splitOn "?").headD req.path
+      if let some (delMid, ownerUid, sharedUids, btwParent?) := preDeleteMeta? then
+        emitMissionPresentationNotice st.store delMid "mission_deleted"
+          (if ownerUid.isEmpty then none else some ownerUid) sharedUids btwParent?
+      else if cleanPath == "/api/control/missions" then
+        if let .ok jv := OrbBin.Json.parseBytes resp.body then
+          if let some mid := (jv.fieldStr? "id").filter (!·.isEmpty) then
+            emitMissionPresentationNotice st.store mid "mission_created"
+      else if cleanPath == "/api/control/message" then
+        if let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray then
+          if let some mid := (jv.fieldStr? "mission_id").filter (!·.isEmpty) then
+            emitMissionPresentationNotice st.store mid "user_message"
+      else if cleanPath.startsWith "/api/control/missions/" then
+        let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
+        if segs.length ≥ 4 then
+          let rawMid := segs[3]!
+          let mid := (percentDecodeStrict rawMid).getD rawMid
+          let sub := segs.drop 4
+          let isCollectionAction :=
+            segs.length == 4 && (mid == "reconcile" || mid == "reconcile-pending" || mid == "search")
+          let isBtwContextOnly := sub == ["btw", "context"]
+          if !mid.isEmpty && !isCollectionAction && !isBtwContextOnly then
+            let kind :=
+              if sub == ["settings"] || sub == ["cyber"] || sub == ["permission-mode"] || sub == ["budget"] then
+                "mission_settings_updated"
+              else if sub == ["stop"] || sub == ["cancel"] || sub == ["interrupt"] || sub == ["resume"] ||
+                      sub == ["rate-limit", "park"] || sub == ["rate-limit", "resume"] then
+                "mission_status_changed"
+              else
+                "mission_updated"
+            emitMissionPresentationNotice st.store mid kind
+            if sub == ["btw", "agent"] || sub == ["fork"] then
+              if let .ok jv := OrbBin.Json.parseBytes resp.body then
+                if let some childId := (jv.fieldStr? "id").filter (fun s => !s.isEmpty && s != mid) then
+                  emitMissionPresentationNotice st.store childId "mission_created" none #[] (some mid)
+      else if cleanPath.startsWith "/api/control/automations/" ||
+              cleanPath == "/api/control/queue" ||
+              cleanPath.startsWith "/api/control/queue/" then
+        let respMid? : Option String :=
+          match OrbBin.Json.parseBytes resp.body with
+          | .ok jv => (jv.fieldStr? "mission_id").filter (fun (s : String) => !s.isEmpty)
+          | .error _ => none
+        let effMid? : Option String :=
+          match respMid? with
+          | some m => some m
+          | none =>
+            match OrbBin.Json.parseBytes req.bodySlice.toByteArray with
+            | .ok jv => (jv.fieldStr? "mission_id").filter (fun (s : String) => !s.isEmpty)
+            | .error _ => none
+        if let some mid := effMid? then
+          emitMissionPresentationNotice st.store mid "mission_updated"
+    return .ok (maybeGzipHttpResponse req resp)
   | .error raw101 => return .error raw101
 
 /-- Bounded RFC 6455 WebSocket session loop after `101 Switching Protocols`:
@@ -4918,36 +4996,116 @@ def runSyncWebSocketSessionLoop
     match encodeFrame? { fin := true, opcode := .text, payload := txt.toUTF8 } none with
     | none => return false
     | some frm => sendWsBytes frm
+  let authorizeAndGetMissionBtwParent? (mid : String) : IO (Bool × Option String) := do
+    if mid.isEmpty then return (false, none)
+    if wsCaller.isLegacyUnscoped then
+      match ← execParamQuery st.store.missionsDb "SELECT COALESCE(tags,'[]') FROM missions WHERE id=?1;" #[mid] with
+      | .ok rows =>
+        let tagsJson := if rows.size > 1 then (rows[1]![0]?).getD "[]" else "[]"
+        return (true, extractBtwParentIdFromTagsJson? tagsJson)
+      | .error _ => return (true, none)
+    else
+      match ← execParamQuery st.store.missionsDb
+        ("SELECT COALESCE(m.owner_user_id,''), " ++
+         "CASE WHEN EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id = m.id AND s.user_id = ?2) THEN '1' ELSE '0' END, " ++
+         "COALESCE(m.tags,'[]') FROM missions m WHERE m.id = ?1;")
+        #[mid, wsCaller.userId] with
+      | .error _ => return (false, none)
+      | .ok rows =>
+        if rows.size ≤ 1 then return (false, none)
+        let ownerId := (rows[1]![0]?).getD ""
+        let isOwner := !wsCaller.userId.isEmpty && ownerId == wsCaller.userId
+        let isPart := ((rows[1]![1]?).getD "0") == "1"
+        let tagsJson := (rows[1]![2]?).getD "[]"
+        let disFlag : UInt8 := if wsCaller.disabled then 1 else 0
+        let roleCode : UInt8 := if wsCaller.role == "admin" then 1 else 0
+        let rbacWord := Orb.Kernel.multiuserRbacStep
+          1 disFlag 1 roleCode 2 (if isOwner then 1 else 0) (if isPart then 1 else 0)
+        if (rbacWord &&& 1) == 1 then
+          return (true, extractBtwParentIdFromTagsJson? tagsJson)
+        else
+          return (false, none)
   let isAuthorizedForMission (mid : String) : IO Bool := do
-    if wsCaller.isLegacyUnscoped then pure true
-    else pure (← authorizeMissionOp st wsCaller mid false).isNone
+    return (← authorizeAndGetMissionBtwParent? mid).1
+  let renderSyncPresentationJson (mid kind : String) (label? btwParent? : Option String) : String := Id.run do
+    let mut fields : Array String := #[
+      "\"type\":\"mission_presentation\"",
+      s!"\"mission_id\":{jsonEscape mid}",
+      s!"\"kind\":{jsonEscape kind}"
+    ]
+    if let some lbl := label? then
+      fields := fields.push s!"\"label\":{jsonEscape lbl}"
+    if let some bp := btwParent? then
+      if !bp.isEmpty then
+        fields := fields.push s!"\"btw_parent_id\":{jsonEscape bp}"
+    return "{" ++ String.intercalate "," fields.toList ++ "}"
   let unregister ← registerMissionEventListener st.store fun mid seq evType payloadJson createdAt => do
     if (← aliveRef.get) then
-      let hasSub ← subMu.atomically do return (← get).contains mid
-      if hasSub then
-        let isAuth ← isAuthorizedForMission mid
-        if !isAuth then
-          let removed ← subMu.atomically do
-            let m ← get
-            if m.contains mid then
-              set (m.erase mid)
-              return true
-            else
-              return false
-          if removed then
-            discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid},\"error\":\"forbidden\"}"
-        else
-          subMu.atomically do
-            let m ← get
-            if let some sub := m[mid]? then
-              let frameJson := renderSyncWsEventJson mid seq evType payloadJson createdAt (some sub.maxPayload) false
-              if sub.replaying then
-                set (m.insert mid { sub with queuedLive := sub.queuedLive.push (seq, frameJson) })
+      if evType != "__presentation__" then
+        let hasSub ← subMu.atomically do return (← get).contains mid
+        if hasSub then
+          let isAuth ← isAuthorizedForMission mid
+          if !isAuth then
+            let removed ← subMu.atomically do
+              let m ← get
+              if m.contains mid then
+                set (m.erase mid)
+                return true
               else
-                discard <| sendWsText frameJson
-      else if (evType == "assistant_message" || evType == "assistant_message_canonical") && payloadJson.utf8ByteSize ≤ 8192 then
-        if ← isAuthorizedForMission mid then
-          discard <| sendWsText (renderSyncWsEventJson mid seq evType payloadJson createdAt (some 4096) true)
+                return false
+            if removed then
+              discard <| sendWsText s!"\{\"type\":\"unsubscribed\",\"mission_id\":{jsonEscape mid},\"error\":\"forbidden\"}"
+          else
+            subMu.atomically do
+              let m ← get
+              if let some sub := m[mid]? then
+                let frameJson := renderSyncWsEventJson mid seq evType payloadJson createdAt (some sub.maxPayload) false
+                if sub.replaying then
+                  set (m.insert mid { sub with queuedLive := sub.queuedLive.push (seq, frameJson) })
+                else
+                  discard <| sendWsText frameJson
+        else if (evType == "assistant_message" || evType == "assistant_message_canonical") && payloadJson.utf8ByteSize ≤ 8192 then
+          if ← isAuthorizedForMission mid then
+            discard <| sendWsText (renderSyncWsEventJson mid seq evType payloadJson createdAt (some 4096) true)
+      if ← presRef.get then
+        if evType == "__presentation__" then
+          let jv := (OrbBin.Json.parse payloadJson).toOption.getD (.obj #[])
+          let kind := (jv.fieldStr? "kind").getD "mission_updated"
+          let hintBtw? := (jv.fieldStr? "btw_parent_id").filter (!·.isEmpty)
+          if kind == "mission_deleted" then
+            let ownerUid := (jv.fieldStr? "owner_uid").getD ""
+            let sharedUids : Array String :=
+              match jv.fieldArr? "shared_uids" with
+              | some xs => xs.filterMap JVal.asStr?
+              | none => #[]
+            let allowed : Bool :=
+              if wsCaller.isLegacyUnscoped then true
+              else
+                let isOwner := !wsCaller.userId.isEmpty && ownerUid == wsCaller.userId
+                let isPart := !wsCaller.userId.isEmpty && sharedUids.contains wsCaller.userId
+                let disFlag : UInt8 := if wsCaller.disabled then 1 else 0
+                let roleCode : UInt8 := if wsCaller.role == "admin" then 1 else 0
+                let rbacWord := Orb.Kernel.multiuserRbacStep
+                  1 disFlag 1 roleCode 2 (if isOwner then 1 else 0) (if isPart then 1 else 0)
+                (rbacWord &&& 1) == 1
+            if allowed then
+              discard <| sendWsText (renderSyncPresentationJson mid kind none hintBtw?)
+          else
+            let (isAuth, dbBtw?) ← authorizeAndGetMissionBtwParent? mid
+            if isAuth then
+              let effBtw? : Option String := match hintBtw? with | some b => some b | none => dbBtw?
+              discard <| sendWsText (renderSyncPresentationJson mid kind none effBtw?)
+        else if evType == "tool_call" || evType == "thinking" then
+          let (isAuth, dbBtw?) ← authorizeAndGetMissionBtwParent? mid
+          if isAuth then
+            let lbl := (deriveEventActivityLabel? evType payloadJson).getD (if evType == "thinking" then "Thinking…" else "Working…")
+            discard <| sendWsText (renderSyncPresentationJson mid "mission_activity" (some lbl) dbBtw?)
+        else if evType == "user_message" || evType == "assistant_message" ||
+                evType == "assistant_message_canonical" || evType == "mission_status_changed" ||
+                evType == "mission_settings_updated" || evType == "error" then
+          let (isAuth, dbBtw?) ← authorizeAndGetMissionBtwParent? mid
+          if isAuth then
+            discard <| sendWsText (renderSyncPresentationJson mid evType none dbBtw?)
   try
     discard <| sendWsText "{\"type\":\"sync_ready\",\"server\":\"sandboxed-sh\",\"server_build\":\"orb-core-lean\"}"
     let replayForMission (mid : String) (sinceSeq? : Option UInt64) (maxP : Nat) : IO Unit := do

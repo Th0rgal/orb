@@ -428,6 +428,14 @@ def parseStringJsonArray (raw : String) : Array String :=
   | .ok (.arr xs) => xs.filterMap (fun v => match v with | .str s => some s | _ => none)
   | _ => #[]
 
+/-- Extract parent mission ID from a `"btw-parent:<id>"` tag in `missions.tags` JSON. -/
+def extractBtwParentIdFromTagsJson? (tagsJson : String) : Option String :=
+  (parseStringJsonArray tagsJson).findSome? fun t =>
+    if t.startsWith "btw-parent:" then
+      let pid := (t.drop 11).toString.trimAscii.toString
+      if pid.isEmpty then none else some pid
+    else none
+
 /-- Read-compatibility `tags` JSON array projection from typed `missions` columns (`SM-02`, `R2-B`). -/
 def projectCompatibilityTagsJson
     (authorityMode placementKind supersededById orphanedAt : String)
@@ -1136,6 +1144,98 @@ def withImmediateTx {α : Type} (db : SqliteDb) (act : IO (Except String α)) : 
         discard <| sqliteExecRaw db.handle "ROLLBACK;"
         return .error err
 
+/-- Spawn the single ordered FIFO drainer task for `st.eventDispatchState?`. -/
+private def spawnMissionEventDrainer
+    (ref : IO.Ref (Array (UInt64 × (String → UInt64 → String → String → String → IO Unit))))
+    (dMu : Std.Mutex MissionEventDispatchState) : IO Unit := do
+  let popBatch : IO (Array PendingMissionEventNotice) :=
+    dMu.atomically do
+      let s ← get
+      if s.queue.isEmpty then
+        set { s with queue := #[], draining := false }
+        return #[]
+      else
+        set { s with queue := #[], draining := true }
+        return s.queue
+  discard <| IO.asTask do
+    let mut keepDraining := true
+    while keepDraining do
+      let batch ← popBatch
+      if batch.isEmpty then
+        keepDraining := false
+      else
+        let listeners ← ref.get
+        for n in batch do
+          for (_, cb) in listeners do
+            try cb n.missionId n.seq n.eventType n.payloadJson n.createdAt catch _ => pure ()
+
+/-- Derive a bounded (`<= 160` char) transient `mission_activity` label from `thinking` / `tool_call` events. -/
+def deriveEventActivityLabel? (evType rawPayload : String) : Option String :=
+  if evType == "thinking" then
+    some "Thinking…"
+  else if evType == "tool_call" then
+    let tName :=
+      match OrbBin.Json.parse rawPayload with
+      | .ok jv =>
+        let rawOpt : Option String :=
+          match jv.fieldStr? "tool_name" with
+          | some s => some s
+          | none => jv.fieldStr? "name"
+        match rawOpt with
+        | some s =>
+          let clean := s.trimAscii.toString
+          if clean.isEmpty then "tool" else clean
+        | none => "tool"
+      | .error _ => "tool"
+    let lbl := s!"Running {tName}"
+    some (if lbl.length > 160 then (lbl.take 160).toString else lbl)
+  else
+    none
+
+/-- Enqueue a synthetic `"__presentation__"` hint (`seq = 0`) onto the ordered live event
+    dispatcher when at least one listener is registered, so `/api/control/sync` sessions with
+    `set_presentation: true` receive `mission_presentation` updates on store/HTTP mutations. -/
+def emitMissionPresentationNotice
+    (st : CoreStore)
+    (missionId kind : String)
+    (ownerHint? : Option String := none)
+    (sharedUids : Array String := #[])
+    (btwParentId? : Option String := none) : IO Unit := do
+  if missionId.isEmpty then return
+  match st.eventListenersRef?, st.eventDispatchState? with
+  | some ref, some dMu =>
+    if !(← ref.get).isEmpty then
+      let mut fields : Array String := #[s!"\"kind\":{jsonEscape kind}"]
+      if let some ou := ownerHint? then
+        if !ou.isEmpty then
+          fields := fields.push s!"\"owner_uid\":{jsonEscape ou}"
+      if !sharedUids.isEmpty then
+        let arrStr := "[" ++ String.intercalate "," (sharedUids.toList.map jsonEscape) ++ "]"
+        fields := fields.push s!"\"shared_uids\":{arrStr}"
+      if let some bp := btwParentId? then
+        if !bp.isEmpty then
+          fields := fields.push s!"\"btw_parent_id\":{jsonEscape bp}"
+      let payload := "{" ++ String.intercalate "," fields.toList ++ "}"
+      let notice : PendingMissionEventNotice := {
+        missionId := missionId
+        seq := 0
+        eventType := "__presentation__"
+        payloadJson := payload
+        createdAt := ""
+      }
+      let shouldSpawn : Bool ← dMu.atomically do
+        let s ← get
+        let nextQ := s.queue.push notice
+        if s.draining then
+          set { s with queue := nextQ, draining := true }
+          return false
+        else
+          set { s with queue := nextQ, draining := true }
+          return true
+      if shouldSpawn then
+        spawnMissionEventDrainer ref dMu
+  | _, _ => pure ()
+
 /-- Upsert a mission record into `missions.db`, persisting typed R2-B columns alongside the
     read-compatibility `tags` projection (`SM-02`). -/
 def upsertMission (st : CoreStore) (m : MissionRecord) : IO (Except String Unit) := do
@@ -1160,6 +1260,11 @@ def upsertMission (st : CoreStore) (m : MissionRecord) : IO (Except String Unit)
     m.updatedAt, s!"{m.totalCostCents}", m.authorityMode, m.placementKind, m.supersededById, m.orphanedAt,
     s!"{m.reservedDiskGib}", s!"{rev}", s!"{ownEp}", s!"{runGen}", s!"{bootEp}", compatTags, m.track, m.repo, m.ownerUserId
   ]
+  if res.isOk then
+    emitMissionPresentationNotice st m.id "mission_updated"
+      (if m.ownerUserId.isEmpty then none else some m.ownerUserId)
+      #[]
+      (extractBtwParentIdFromTagsJson? compatTags)
   return res.map (fun _ => ())
 
 /-- Insert a brand-new mission row (`POST /api/control/missions`), failing with `mission_already_exists`
@@ -3569,26 +3674,7 @@ def appendMissionEvent
     match st.eventListenersRef?, st.eventDispatchState? with
     | some ref, some dMu =>
       if shouldSpawn then
-        let popBatch : IO (Array PendingMissionEventNotice) :=
-          dMu.atomically do
-            let s ← get
-            if s.queue.isEmpty then
-              set { s with queue := #[], draining := false }
-              return #[]
-            else
-              set { s with queue := #[], draining := true }
-              return s.queue
-        discard <| IO.asTask do
-          let mut keepDraining := true
-          while keepDraining do
-            let batch ← popBatch
-            if batch.isEmpty then
-              keepDraining := false
-            else
-              let listeners ← ref.get
-              for n in batch do
-                for (_, cb) in listeners do
-                  try cb n.missionId n.seq n.eventType n.payloadJson n.createdAt catch _ => pure ()
+        spawnMissionEventDrainer ref dMu
     | some ref, none =>
       let listeners ← ref.get
       for (_, cb) in listeners do
