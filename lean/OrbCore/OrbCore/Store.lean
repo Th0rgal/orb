@@ -1654,7 +1654,7 @@ def listMissionsJson
       params := params.push stVal
       phs := phs.push s!"?{params.size}"
     conds := conds.push s!"m.status IN ({String.intercalate "," phs.toList})"
-  if !includeArchived then
+  else if !includeArchived then
     conds := conds.push "m.status NOT IN ('acknowledged','archived')"
   let whereClause :=
     if conds.isEmpty then ""

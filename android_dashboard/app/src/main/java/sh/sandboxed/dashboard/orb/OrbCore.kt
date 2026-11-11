@@ -2691,10 +2691,12 @@ class OrbCore private constructor(context: Context) {
         if (missionId.isEmpty() || isCloud) return
         if (OrbBackgroundSyncMonitor.linkBudget.p2Cap <= 0) return
         if (OrbReadCache.hasRowsInMemory("mission_events_$missionId")) return
-        if (!inFlightSinglePrefetches.add(missionId)) return
         val account = OrbDisk.currentScope()
+        val inflightKey = "$account|$missionId"
+        if (!inFlightSinglePrefetches.add(inflightKey)) return
         prefetchScope.launch {
             try {
+                if (account != OrbDisk.currentScope()) return@launch
                 if (OrbReadCache.loadRows("mission_events_$missionId").isNotEmpty()) return@launch
                 val bundle = fetchMissionOpenBundle(missionId) ?: return@launch
                 if (account != OrbDisk.currentScope()) return@launch
@@ -2721,7 +2723,7 @@ class OrbCore private constructor(context: Context) {
                     }
                 }
             } finally {
-                inFlightSinglePrefetches.remove(missionId)
+                inFlightSinglePrefetches.remove(inflightKey)
             }
         }
     }

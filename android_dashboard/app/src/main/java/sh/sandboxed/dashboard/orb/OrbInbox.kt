@@ -1752,6 +1752,7 @@ fun OrbInboxView(
         }
     }
     LaunchedEffect(missions, filterMode, OrbInboxSettings.inboxEnabled, OrbInboxSettings.aiSummary, OrbInboxSettings.summaryMode, OrbInboxSettings.model, OrbInboxSettings.includeAutonomous) {
+        val accountScope = OrbDisk.currentScope()
         val candidates = missions.filter { m ->
             val st = (m.str("status", "state") ?: "").lowercase()
             MissionState.of(st)?.unreadResponse == true && !OrbInboxModel.isSubagent(m)
@@ -1760,15 +1761,18 @@ fun OrbInboxView(
 
         var anyLoaded = false
         for ((idx, row) in candidates.withIndex()) {
+            if (accountScope != OrbDisk.currentScope()) return@LaunchedEffect
             val cacheKey = "mission_events_${row.id}"
             val wasInMemory = OrbReadCache.hasRowsInMemory(cacheKey)
             var evs = OrbReadCache.loadRowsAsync(cacheKey)
+            if (accountScope != OrbDisk.currentScope()) return@LaunchedEffect
             if (!wasInMemory && evs.isNotEmpty()) {
                 anyLoaded = true
             }
             if (evs.isEmpty() && idx < 12) {
                 val isCloudRow = row.str("backend")?.startsWith("cloud_") == true
                 val openBundle = if (!isCloudRow) core.fetchMissionOpenBundle(row.id, null, limit = 120) else null
+                if (accountScope != OrbDisk.currentScope()) return@LaunchedEffect
                 if (openBundle != null) {
                     val spineRows = OrbJSON.dictList(openBundle["spine"]).map { OrbRow(it) }
                     val tailRows = OrbJSON.dictList(openBundle["events"]).map { OrbRow(it) }
@@ -1782,6 +1786,7 @@ fun OrbInboxView(
                     evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
                         core.fetchRows("/api/control/missions/${core.encodeComponent(row.id)}/events?limit=120", "events")
                     }.getOrDefault(emptyList())
+                    if (accountScope != OrbDisk.currentScope()) return@LaunchedEffect
                 }
                 if (evs.isNotEmpty()) {
                     OrbReadCache.saveRows(cacheKey, evs)
@@ -1791,7 +1796,7 @@ fun OrbInboxView(
             val priority = if (OrbMissionUnreadStore.isUnread(row)) idx else idx + 20
             OrbInboxDigestStore.request(core, row, evs, priority = priority)
         }
-        if (anyLoaded) {
+        if (anyLoaded && accountScope == OrbDisk.currentScope()) {
             eventsVersion += 1
         }
     }

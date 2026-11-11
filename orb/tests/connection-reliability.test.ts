@@ -187,6 +187,7 @@ describe("connection reliability transport & prefetch bounds", () => {
         ]);
       }
       expect(url).toContain("updated_since=2026-11-03T07%3A00%3A08.000Z");
+      expect(url).toContain("all=true");
       return Response.json([]);
     });
     vi.stubGlobal("fetch", fetchMock);

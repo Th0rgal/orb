@@ -3048,7 +3048,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         if statusRaw.trimAscii.toString.isEmpty then #[]
         else (statusRaw.splitOn ",").toArray.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
       let allParam? := ((qParams.find? (fun p => p.1 == "all")).map Prod.snd).map (·.trimAscii.toString.toLower)
-      let includeArchived := allParam? != some "false"
+      let includeArchived := allParam? == some "true" || allParam? == some "1"
       let limit? := ((qParams.find? (fun p => p.1 == "limit")).bind (fun p => p.2.toNat?))
       let offset := ((qParams.find? (fun p => p.1 == "offset")).bind (fun p => p.2.toNat?)).getD 0
       match ← listMissionsJson st.store none callerOpt st.bootstrapAdminId proj? updatedSince? statusesArr includeArchived limit? offset with

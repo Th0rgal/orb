@@ -2983,6 +2983,7 @@ struct OrbInboxView: View {
     }
 
     private func prefetchActiveEvents(for rows: [OrbRow]) async {
+        let accountScope = api.endpoint + ":" + (api.authToken ?? "")
         let candidates = rows.filter {
             ($0.missionState?.awaitsReview ?? false) && !OrbInboxModel.isSubagent(row: $0, includeAutonomous: OrbInboxSettings.shared.includeAutonomous)
         }
@@ -2990,7 +2991,7 @@ struct OrbInboxView: View {
         .prefix(16)
 
         for (idx, row) in candidates.enumerated() {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, accountScope == api.endpoint + ":" + (api.authToken ?? "") else { return }
             var events = eventsByMission[row.id] ?? []
             if events.isEmpty {
                 let diskCached = OrbReadCache.readEvents(row.id)
@@ -2998,21 +2999,14 @@ struct OrbInboxView: View {
                     eventsByMission[row.id] = diskCached
                     events = diskCached
                 } else if idx < 10 {
-                    if !row.cloud, let bundle = await OrbCore.shared.getMissionOpenBundle(id: row.id) {
-                        var missionValue = bundle.mission
-                        let combined = OrbConversation.mergeStoredEvents(existing: [], incoming: bundle.spine + bundle.events)
-                        let historyEvents = (bundle.spine + bundle.events).filter { OrbConversationHistory.eventTypes.contains($0.eventType) }
-                        if !historyEvents.isEmpty, case var .object(fields) = missionValue {
-                            fields["history"] = .array(OrbConversationHistory.merge(fields["history"]?.items ?? [], events: historyEvents))
-                            missionValue = .object(fields)
-                        }
-                        OrbReadCache.saveMission(row.id, value: missionValue)
+                    if !row.cloud, let combined = await OrbReadCache.openBundle(row.id) {
+                        guard !Task.isCancelled, accountScope == api.endpoint + ":" + (api.authToken ?? "") else { return }
                         if !combined.isEmpty {
-                            OrbReadCache.saveEvents(row.id, events: combined)
                             eventsByMission[row.id] = combined
                             events = combined
                         }
                     } else if let fetched = await Log.attempt(.network, "inbox events", path: row.id, { try await OrbReadCache.events(row.id) }) {
+                        guard !Task.isCancelled, accountScope == api.endpoint + ":" + (api.authToken ?? "") else { return }
                         eventsByMission[row.id] = fetched
                         events = fetched
                     }
@@ -3021,6 +3015,7 @@ struct OrbInboxView: View {
             let priority = unreadStore.isUnread(row: row) ? idx : idx + 20
             digestStore.request(row: row, events: events, priority: priority)
         }
+        guard !Task.isCancelled, accountScope == api.endpoint + ":" + (api.authToken ?? "") else { return }
         recomputeSections()
     }
 

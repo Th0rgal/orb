@@ -1754,6 +1754,8 @@ enum OrbReadCache {
         eventFetchedAt.removeAll()
         for task in eventPending.values { task.cancel() }
         eventPending.removeAll()
+        for task in inFlightSinglePrefetches.values { task.cancel() }
+        inFlightSinglePrefetches.removeAll()
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Orb")
         let files = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
         for file in files where file.pathExtension == "json" {
@@ -1941,9 +1943,12 @@ enum OrbReadCache {
         }
     }
     static func prefetch(_ rows: [OrbRow]) async {
+        let accountScope = currentAccountScope
         let p2Cap = OrbBackgroundSyncMonitor.shared.linkBudget.p2Cap
         guard p2Cap > 0 else {
-            OrbWarmSyncCoordinator.shared.reconcile()
+            if accountScope == currentAccountScope {
+                OrbWarmSyncCoordinator.shared.reconcile()
+            }
             return
         }
         let liveTargets = rows.filter { $0.active && !$0.cloud && $0.mobile }.prefix(8)
@@ -1959,8 +1964,8 @@ enum OrbReadCache {
         let workers: [Task<Void, Never>] = (0..<workerCount).map { lane in
             Task { @MainActor in
                 var idx = lane
-                while !Task.isCancelled, idx < combined.count {
-                    await prefetchRow(combined[idx])
+                while !Task.isCancelled, accountScope == currentAccountScope, idx < combined.count {
+                    await prefetchRow(combined[idx], expectedAccountScope: accountScope)
                     idx += workerCount
                 }
             }
@@ -1974,57 +1979,83 @@ enum OrbReadCache {
                 worker.cancel()
             }
         }
-        OrbWarmSyncCoordinator.shared.reconcile()
+        if accountScope == currentAccountScope {
+            OrbWarmSyncCoordinator.shared.reconcile()
+        }
     }
-    private static var inFlightSinglePrefetches: Set<String> = []
+    private static var inFlightSinglePrefetches: [String: Task<Void, Never>] = [:]
     static func prefetchSingle(_ missionID: String, row: OrbRow? = nil) {
+        let accountScope = currentAccountScope
+        let eventScope = key("events:\(missionID)")
         guard !missionID.isEmpty,
               OrbBackgroundSyncMonitor.shared.linkBudget.p2Cap > 0,
               readMemoryEvents(missionID).isEmpty,
-              !inFlightSinglePrefetches.contains(missionID) else { return }
-        inFlightSinglePrefetches.insert(missionID)
-        Task { @MainActor in
-            defer { inFlightSinglePrefetches.remove(missionID) }
+              inFlightSinglePrefetches[eventScope] == nil else { return }
+        let task = Task { @MainActor in
+            defer { inFlightSinglePrefetches.removeValue(forKey: eventScope) }
+            guard !Task.isCancelled,
+                  accountScope == currentAccountScope,
+                  eventScope == key("events:\(missionID)") else { return }
             if let row {
-                await prefetchRow(row)
+                await prefetchRow(row, expectedAccountScope: accountScope)
             } else {
-                await prefetchByID(missionID)
+                await prefetchByID(missionID, expectedAccountScope: accountScope)
             }
         }
+        inFlightSinglePrefetches[eventScope] = task
     }
-    private static func prefetchByID(_ missionID: String) async {
-        guard !Task.isCancelled, readEvents(missionID).isEmpty else { return }
-        if let bundle = await OrbCore.shared.getMissionOpenBundle(id: missionID) {
-            var missionValue = bundle.mission
-            let combined = OrbConversation.mergeStoredEvents(existing: [], incoming: bundle.spine + bundle.events)
-            let historyEvents = (bundle.spine + bundle.events).filter { OrbConversationHistory.eventTypes.contains($0.eventType) }
-            if !historyEvents.isEmpty, case var .object(fields) = missionValue {
-                fields["history"] = .array(OrbConversationHistory.merge(fields["history"]?.items ?? [], events: historyEvents))
-                missionValue = .object(fields)
-            }
-            saveMission(missionID, value: missionValue)
-            if !combined.isEmpty {
-                saveEvents(missionID, events: combined)
-                eventFetchedAt[key("events:\(missionID)")] = Date()
-            }
+    /// Hydrates mission detail + conversational spine + recent tail via `/open`,
+    /// fenced to the originating account and disk-key scope before any cache write.
+    static func openBundle(_ missionID: String) async -> [StoredEvent]? {
+        let accountScope = currentAccountScope
+        let missionScope = key("mission:\(missionID)")
+        let eventScope = key("events:\(missionID)")
+        guard !missionID.isEmpty, !Task.isCancelled else { return nil }
+        guard let bundle = await OrbCore.shared.getMissionOpenBundle(id: missionID) else { return nil }
+        guard !Task.isCancelled,
+              accountScope == currentAccountScope,
+              missionScope == key("mission:\(missionID)"),
+              eventScope == key("events:\(missionID)") else { return nil }
+        var missionValue = bundle.mission
+        let combined = OrbConversation.mergeStoredEvents(existing: [], incoming: bundle.spine + bundle.events)
+        let historyEvents = (bundle.spine + bundle.events).filter { OrbConversationHistory.eventTypes.contains($0.eventType) }
+        if !historyEvents.isEmpty, case var .object(fields) = missionValue {
+            fields["history"] = .array(OrbConversationHistory.merge(fields["history"]?.items ?? [], events: historyEvents))
+            missionValue = .object(fields)
+        }
+        saveMission(missionID, value: missionValue)
+        if !combined.isEmpty {
+            saveEvents(missionID, events: combined)
+            eventFetchedAt[eventScope] = Date()
+        }
+        return combined
+    }
+    private static func prefetchByID(_ missionID: String, expectedAccountScope: String) async {
+        guard !Task.isCancelled,
+              expectedAccountScope == currentAccountScope,
+              readEvents(missionID).isEmpty else { return }
+        if await openBundle(missionID) != nil {
             return
         }
+        guard !Task.isCancelled, expectedAccountScope == currentAccountScope else { return }
         _ = try? await conversation(missionID)
+        guard !Task.isCancelled, expectedAccountScope == currentAccountScope else { return }
         _ = await Log.attempt(.cache, "events prefetch", path: missionID) { try await events(missionID, limit: 150) }
     }
-    private static func prefetchRow(_ row: OrbRow) async {
-        guard !Task.isCancelled else { return }
+    private static func prefetchRow(_ row: OrbRow, expectedAccountScope: String) async {
+        guard !Task.isCancelled, expectedAccountScope == currentAccountScope else { return }
         if row.cloud {
             if row.raw != .null && !row.raw["history"].items.isEmpty {
                 seedMemory("mission:\(row.id)", value: row.raw)
             } else {
                 _ = try? await conversation(row.id)
             }
+            guard !Task.isCancelled, expectedAccountScope == currentAccountScope else { return }
             _ = try? await cloud(row.id)
             return
         }
         if readEvents(row.id).isEmpty {
-            await prefetchByID(row.id)
+            await prefetchByID(row.id, expectedAccountScope: expectedAccountScope)
             return
         }
         if row.raw != .null && !row.raw["history"].items.isEmpty {

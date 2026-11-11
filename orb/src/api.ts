@@ -2129,7 +2129,10 @@ export async function listMissions(limit = 200, options?: { updatedSince?: strin
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const isDelta = Boolean(options?.updatedSince);
   const params = new URLSearchParams({ limit: String(limit) });
-  if (options?.updatedSince) params.set("updated_since", options.updatedSince);
+  if (options?.updatedSince) {
+    params.set("updated_since", options.updatedSince);
+    params.set("all", "true");
+  }
   const remotePromise = api<Mission[]>(`/api/control/missions?${params}`).then(rows => includeAncestors(rows));
   remotePromise.catch(() => {});
   const local = excludeBtwMissions(await origins.localOrigins());

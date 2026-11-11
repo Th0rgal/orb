@@ -4718,8 +4718,12 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
     updatedAt := "1700000700", totalCostCents := 0, ownerUserId := bobId
   } | return (← fail "upsert m-zw-bob")
 
-  let (pSt, pBytes, _) ← sendReqHdr "GET" "/api/control/missions?project=proj-fast&all=false" adminTok ""
+  let (pSt, pBytes, _) ← sendReqHdr "GET" "/api/control/missions?project=proj-fast" adminTok ""
   let pStr := String.fromUTF8? pBytes |>.getD ""
+  let (paSt, paBytes, _) ← sendReqHdr "GET" "/api/control/missions?project=proj-fast&all=true" adminTok ""
+  let paStr := String.fromUTF8? paBytes |>.getD ""
+  let (akSt, akBytes, _) ← sendReqHdr "GET" "/api/control/missions?status=acknowledged" adminTok ""
+  let akStr := String.fromUTF8? akBytes |>.getD ""
   let (dSt, dBytes, _) ← sendReqHdr "GET" "/api/control/missions?updated_since=1700000400" adminTok ""
   let dStr := String.fromUTF8? dBytes |>.getD ""
   let (bSt, bBytes, _) ← sendReqHdr "GET" "/api/control/missions?project=proj-fast" bobTok ""
@@ -4727,11 +4731,13 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
   if pSt != 200 || (pStr.splitOn "\"m-zw-fast-new\"").length != 2 || (pStr.splitOn "\"m-zw-fast-old\"").length != 2 ||
      (pStr.splitOn "\"m-zw-fast-ack\"").length != 1 || (pStr.splitOn "\"m-zw-other\"").length != 1 ||
      (pStr.splitOn "\"project\":\"proj-fast\"").length < 3 ||
+     paSt != 200 || (paStr.splitOn "\"m-zw-fast-ack\"").length != 2 || (paStr.splitOn "\"m-zw-fast-new\"").length != 2 ||
+     akSt != 200 || (akStr.splitOn "\"m-zw-fast-ack\"").length != 2 || (akStr.splitOn "\"m-zw-fast-new\"").length != 1 ||
      dSt != 200 || (dStr.splitOn "\"m-zw-fast-old\"").length != 1 || (dStr.splitOn "\"m-zw-fast-new\"").length != 2 ||
-     (dStr.splitOn "\"m-zw-other\"").length != 2 ||
+     (dStr.splitOn "\"m-zw-fast-ack\"").length != 1 || (dStr.splitOn "\"m-zw-other\"").length != 2 ||
      bSt != 200 || (bStr.splitOn "\"m-zw-bob\"").length != 2 || (bStr.splitOn "\"m-zw-fast-new\"").length != 1 ||
      (bStr.splitOn "\"project\":\"proj-fast\"").length != 2 then
-    return (← fail s!"missions SQL filter regression: p={pStr} d={dStr} b={bStr}")
+    return (← fail s!"missions SQL filter regression: p={pStr} pa={paStr} ak={akStr} d={dStr} b={bStr}")
 
   -- 2. Seed spine messages + 25 tool events (with 10 KB tool_result) & verify SQL pre-LIMIT `types`, `view=transcript`, `max_payload`, `/snapshot`, `/open`, and `gzip`!
   let _ ← appendMissionEvent store "m-zw-fast-new" "user_message" "{\"id\":\"u-1\",\"content\":\"Explain zero-wait caching\"}" "2026-11-11T07:00:01Z"
