@@ -73,9 +73,6 @@ RUN curl -fsSL https://bun.sh/install | bash \
 # Caddy uses Ubuntu's signed security/update archives. The separate Cloudsmith
 # index is signed by an expired key; signature verification must stay enabled.
 
-# -- Copy native Lean 4 binaries from builder --------------------------------
-COPY --from=lean-builder /out/ /usr/local/bin/
-
 # -- Pre-install AI harness CLIs (optional — agents still work if these fail) -
 # Uses bun for global installs (faster than npm, and our preferred package manager)
 ENV PATH="/root/.bun/bin:/root/.cache/.bun/bin:${PATH}"
@@ -97,6 +94,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3-venv \
     && /opt/mistral-vibe/bin/pip install --no-cache-dir mistral-vibe==2.19.1 \
     && ln -s /opt/mistral-vibe/bin/vibe /usr/local/bin/vibe \
     && ln -s /opt/mistral-vibe/bin/vibe-acp /usr/local/bin/vibe-acp
+
+# -- Copy native Lean 4 binaries from builder --------------------------------
+COPY --from=lean-builder /out/ /usr/local/bin/
 
 # -- Caddy config + entrypoint -----------------------------------------------
 COPY docker/Caddyfile /etc/caddy/Caddyfile
