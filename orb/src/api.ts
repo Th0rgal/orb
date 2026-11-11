@@ -290,7 +290,7 @@ export function transportFetch(
     explicitPriority ??
     (rawPrio === "p0" || rawPrio === "p1" || rawPrio === "p2" ? rawPrio : undefined);
   const priority = classifyClientRequestPriority(init?.method, path, validExplicit);
-  const runOnce = (): Promise<Response> => {
+  const runOnce = (effectivePriority: RequestPriority = priority): Promise<Response> => {
     const startedMs = performance.now();
     // Attach the default request deadline on wire dispatch rather than before
     // scheduler queueing so P2 requests paused behind a degraded link never
@@ -308,7 +308,7 @@ export function transportFetch(
         : init;
     if (transportBridgeEnabled && nativeInvoke()) {
       const targetInit = withTargetHeader(wireInit, target);
-      const bridgeInit = streaming ? targetInit : withPriorityHeader(targetInit, priority);
+      const bridgeInit = streaming ? targetInit : withPriorityHeader(targetInit, effectivePriority);
       if (bridgeTarget === target && bridgeBaseUrl) {
         const chosen = pickBridgeUrl(streaming, bridgeBaseUrl)!;
         return fetch(`${chosen}${path}`, bridgeInit).then(

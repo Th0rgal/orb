@@ -112,13 +112,26 @@ it("sequence-merges raw backfill after a newer offscreen preview", async () => {
   expect(snap.items.some(item=>"text" in item && item.text.includes("Answer 20"))).toBe(true);
 });
 
-it("adopts an in-flight prefetch on loadTranscript instead of aborting and fetching twice", async () => {
+it("adopts an in-flight prefetch on loadTranscript instead of aborting and fetching twice, while immediately firing foreground preview", async () => {
+  const { peekTranscript } = await import("../src/missionCache");
   cacheReset(); forgetPrefetchPauses();
   let releaseEvents!: () => void;
   const gate = new Promise<void>(resolve => { releaseEvents = resolve; });
   let eventFetches = 0;
+  let snapshotFetches = 0;
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
     if (url.includes("/queue")) return new Response("[]", { headers: { "Content-Type": "application/json" } });
+    if (url.includes("/snapshot")) {
+      snapshotFetches++;
+      return new Response(
+        JSON.stringify({
+          profile: "presentation",
+          events: [{ id: 1, event_id: "e1", sequence: 1, event_type: "assistant_message", content: "Adopted!", timestamp: "" }],
+          revision: 1,
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    }
     eventFetches++;
     await gate;
     return new Response(
@@ -128,9 +141,13 @@ it("adopts an in-flight prefetch on loadTranscript instead of aborting and fetch
   }));
   prefetchTranscript("m-adopt");
   await vi.waitFor(() => expect(eventFetches).toBe(1));
+  expect(snapshotFetches).toBe(0);
   const pendingLoad = loadTranscript("m-adopt");
+  await vi.waitFor(() => expect(peekTranscript("m-adopt")?.detailsPending).toBe(true));
+  expect(snapshotFetches).toBe(1);
   releaseEvents();
   const snap = await pendingLoad;
   expect(eventFetches).toBe(1);
+  expect(snap.detailsPending).toBeUndefined();
   expect(snap.items.some(item => "text" in item && item.text.includes("Adopted!"))).toBe(true);
 });

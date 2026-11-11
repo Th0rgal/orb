@@ -107,7 +107,7 @@ function makeAbortError(signal: AbortSignal): unknown {
 export function scheduleTransportRequest<T>(
   priority: RequestPriority,
   signal: AbortSignal | null | undefined,
-  execute: () => Promise<T>,
+  execute: (effectivePriority: RequestPriority) => Promise<T>,
 ): Promise<T> {
   if (signal?.aborted) {
     return Promise.reject(makeAbortError(signal));
@@ -116,7 +116,7 @@ export function scheduleTransportRequest<T>(
     adjustP0InFlight(1);
     let p: Promise<T>;
     try {
-      p = execute();
+      p = execute("p0");
     } catch (err) {
       adjustP0InFlight(-1);
       return Promise.reject(err);
@@ -137,7 +137,7 @@ export function scheduleTransportRequest<T>(
     else p2Active++;
     let runPromise: Promise<T>;
     try {
-      runPromise = execute();
+      runPromise = execute(priority);
     } catch (err) {
       if (priority === "p1") p1Active = Math.max(0, p1Active - 1);
       else p2Active = Math.max(0, p2Active - 1);
@@ -164,11 +164,12 @@ export function scheduleTransportRequest<T>(
       priority,
       signal,
       start: () => {
+        const lane = task.priority;
         let runPromise: Promise<T>;
         try {
-          runPromise = execute();
+          runPromise = execute(lane);
         } catch (err) {
-          if (priority === "p1") p1Active = Math.max(0, p1Active - 1);
+          if (lane === "p1") p1Active = Math.max(0, p1Active - 1);
           else p2Active = Math.max(0, p2Active - 1);
           pumpQueues();
           reject(err);
@@ -176,13 +177,13 @@ export function scheduleTransportRequest<T>(
         }
         runPromise.then(
           (val) => {
-            if (priority === "p1") p1Active = Math.max(0, p1Active - 1);
+            if (lane === "p1") p1Active = Math.max(0, p1Active - 1);
             else p2Active = Math.max(0, p2Active - 1);
             pumpQueues();
             resolve(val);
           },
           (err) => {
-            if (priority === "p1") p1Active = Math.max(0, p1Active - 1);
+            if (lane === "p1") p1Active = Math.max(0, p1Active - 1);
             else p2Active = Math.max(0, p2Active - 1);
             pumpQueues();
             reject(err);
@@ -192,9 +193,10 @@ export function scheduleTransportRequest<T>(
     };
     if (signal) {
       const onAbort = () => {
-        const idx = targetQueue.indexOf(task);
+        const queue = task.priority === "p1" ? p1Queue : p2Queue;
+        const idx = queue.indexOf(task);
         if (idx >= 0) {
-          targetQueue.splice(idx, 1);
+          queue.splice(idx, 1);
           reject(makeAbortError(signal));
         }
       };
@@ -204,6 +206,22 @@ export function scheduleTransportRequest<T>(
     targetQueue.push(task);
     pumpQueues();
   });
+}
+
+export function promoteScheduledRequests(signal: AbortSignal): void {
+  let moved = false;
+  for (let i = 0; i < p2Queue.length; ) {
+    const task = p2Queue[i]!;
+    if (task.signal === signal) {
+      p2Queue.splice(i, 1);
+      task.priority = "p1";
+      p1Queue.push(task);
+      moved = true;
+    } else {
+      i++;
+    }
+  }
+  if (moved) pumpQueues();
 }
 
 export function transportSchedulerStats(): {
