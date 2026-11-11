@@ -910,6 +910,15 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
   const ms=raw?Date.parse(raw):NaN;
   return Number.isFinite(ms)?Math.max(0,now()-ms):0;
  };
+ const activeSideInteraction=createMemo(
+  ()=>{
+   if(!busy())return undefined;
+   const s=btwSession(p.mission);
+   return s?{id:s.id,local:Boolean(s.local)}:undefined;
+  },
+  undefined,
+  {equals:(a,b)=>a?.id===b?.id&&a?.local===b?.local},
+ );
  return <>
   <div ref={inline}/>
   <Show when={!side&&!open()&&isActive()&&(history().length||busy()||error())}><button class="btw-reopen" onClick={reveal}>Side questions {busy()?'· Answering…':`· ${history().length}`}</button></Show>
@@ -922,11 +931,11 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
      return <article data-side-turn={exchange.id}>
      <UserTurn text={exchange.question} pending={exchange.pending&&!exchange.answer} onSend={text=>ask(text,[],[],exchange.attachments??[])}/>
      <Show when={exchange.pending}><ThoughtSequence items={btwThoughts(p.mission)}/></Show>
-     <Show when={exchange.narration?.length}><details class="btw-narration"><summary>{exchange.narration!.length===1?'1 progress update':`${exchange.narration!.length} progress updates`}</summary><For each={exchange.narration}>{note=><MdView compact text={note}/>}</For></details></Show>
+     <Show when={exchange.narration?.length}><details class="btw-narration"><summary>{(exchange.narration?.length??0)===1?'1 progress update':`${exchange.narration?.length??0} progress updates`}</summary><For each={exchange.narration}>{note=><MdView compact text={note}/>}</For></details></Show>
      <Show when={content().text}><MdView compact searchable text={content().text}/></Show>
      <Show when={content().details}><details class="legacy-log"><summary>Original execution log</summary><pre>{content().details}</pre></details></Show>
      <Show when={exchange.pending}><p class="sr-only" role="status">{preparing()?'Sending…':'Side agent is working…'}</p></Show>
-     <Show when={exchange.error}><ErrorNotice error={exchange.error!} title={notSent()?"Question not sent":"Couldn’t complete side question"}><button type="button" class="error-notice-link" onClick={retry} disabled={busy()}>Retry</button><button type="button" class="error-notice-link" onClick={dismiss} disabled={busy()}>Dismiss</button><Show when={exchange.error?.match(/A side agent is already queued or running for this conversation \(([0-9a-f-]{36})\)/)?.[1]}>{id=><button type="button" class="error-notice-link" onClick={()=>{void Promise.resolve(reconnectSession(id())).catch(e=>setError(String(e)));}}>Open existing side agent</button>}</Show></ErrorNotice></Show>
+     <Show when={exchange.error}><ErrorNotice error={exchange.error??''} title={notSent()?"Question not sent":"Couldn’t complete side question"}><button type="button" class="error-notice-link" onClick={retry} disabled={busy()}>Retry</button><button type="button" class="error-notice-link" onClick={dismiss} disabled={busy()}>Dismiss</button><Show when={exchange.error?.match(/A side agent is already queued or running for this conversation \(([0-9a-f-]{36})\)/)?.[1]}>{id=><button type="button" class="error-notice-link" onClick={()=>{void Promise.resolve(reconnectSession(id())).catch(e=>setError(String(e)));}}>Open existing side agent</button>}</Show></ErrorNotice></Show>
      <Show when={!exchange.pending&&!exchange.error}><button class="btw-transfer" onClick={()=>p.onTransfer(`About this side question: ${exchange.question}\n\n${content().text||exchange.answer}`)}>Use in agent draft ↗</button></Show>
     </article>;}}</For>
     <Show when={queue().length&&!hasQueueFollowUp()}><section class="followup-queue btw-queue" aria-label="Queued side questions" aria-live="polite">
@@ -943,7 +952,7 @@ export function SideQuestions(p:{mission:string;active?:boolean;items:StreamItem
       btwActivities(p.mission).some(a => a.kind !== "status" && a.id !== "antigravity:status") || answer() || narration().length ? "Working…" : runStatus() || "Thinking…"
     }<Show when={elapsedMs() >= 3000}> · {formatElapsed(elapsedMs())}</Show></p></Show>
     <AgentActivity items={btwActivities(p.mission)} running={busy()} completed={!busy() && !error()}/>
-    <Show when={btwSession(p.mission) && busy()}><NativeInteraction mission={btwSession(p.mission)!.id} active={busy()} remote={!btwSession(p.mission)!.local} items={btwItems(p.mission)}/></Show>
+    <Show when={activeSideInteraction()} keyed>{session=><NativeInteraction mission={session.id} active={busy()} remote={!session.local} items={btwItems(p.mission)}/>}</Show>
    </div>
    <div class="btw-composer-dock" ref={floatingDock}>
     <Show when={storageError()}><p class="dim" role="status">Local storage is unavailable. This side conversation may be lost on refresh.</p></Show>
