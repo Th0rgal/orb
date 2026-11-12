@@ -1182,6 +1182,9 @@ partial def submitRemoteMissionTurn
         store.missionsDb runId spec.missionId s!"{nextGen}" "running" "" jobId nowIso true
         s!"remote-job:{jobId}" s!"remote-node:{effTarget}"
       if let .error e := insRun then return .error e
+      discard <| execParamQueryUnlocked store.missionsDb
+        "UPDATE mission_continuations SET phase=3, error='stale_run_generation', updated_at=?3 WHERE mission_id=?1 AND phase=1 AND run_generation<CAST(?2 AS INTEGER);"
+        #[spec.missionId, s!"{nextGen}", nowIso]
       execParamQueryUnlocked store.missionsDb
         ("UPDATE missions SET status='active', terminal_reason='remote_node_job', placement_job_id=?2, " ++
          "run_generation=CAST(?3 AS INTEGER), state_revision=state_revision+1, updated_at=?4 WHERE id=?1;")
@@ -1497,9 +1500,15 @@ def tickContinuationScheduler
                 let _ := warmMgr?
                 pure ()
 
+            let isRecurringInterval := !stopFirst && recurrence.startsWith "interval:"
+            if launchedOk || isRecurringInterval then
+              discard <| execParamQuery store.missionsDb
+                "UPDATE mission_continuations SET phase=4, updated_at=?2 WHERE id=?1 AND phase=2;"
+                #[cid, nowIso]
+
             -- Re-arm next interval using the exact post-launch `missions.run_generation`
             -- (if `launchedOk == false` due to a transient remote/node hiccup, still re-arm in 60s so a recurring wakeup is never permanently dropped!)
-            if !stopFirst && recurrence.startsWith "interval:" then
+            if isRecurringInterval then
               let ivSecs :=
                 if launchedOk then Nat.max 60 (((recurrence.drop 9).trimAscii.toString.toNat?).getD 300)
                 else 60

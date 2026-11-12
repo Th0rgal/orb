@@ -1141,6 +1141,21 @@ private def runR3cdReviewFixTests
   let baPh := match beginAfter with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
   if beginOk.generation != 2 || baPh != "3" then
     return (← failWith s!"review beginMissionRun supersede: gen={beginOk.generation} phase={baPh}")
+  -- Superseded (`phase=3`) and prior-generation fired (`phase=2, run_generation < missions.run_generation`) rows
+  -- MUST NOT leak into `GET /missions/:id` or `GET /missions` `continuation.items` as `"error"` / `"queued"`!
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,created_at,updated_at) " ++
+     "VALUES('cont-r5-old-fired','m-r5-fix',1,2,1,'time','old-fired','stay','req-r5-old-fired','t','t');") #[]
+  let .ok (sSupDet, bSupDet) ← sendTestHttp appSt validJwt "GET" "/api/control/missions/m-r5-fix" "" nowSec
+    | return (← failWith "superseded continuation detail")
+  let .ok (sSupList, bSupList) ← sendTestHttp appSt validJwt "GET" "/api/control/missions?limit=50" "" nowSec
+    | return (← failWith "superseded continuation list")
+  if sSupDet != 200 || sSupList != 200 ||
+     (bSupDet.splitOn "\"state\":\"error\"").length != 1 ||
+     (bSupDet.splitOn "\"id\":\"cont-r5-old-fired\"").length != 1 ||
+     (bSupList.splitOn "stale_run_generation").length != 1 ||
+     (bSupList.splitOn "\"id\":\"cont-r5-old-fired\"").length != 1 then
+    return (← failWith s!"superseded/stale-fired continuation leaked into mission projection:\ndet={bSupDet}\nlist={bSupList}")
 
   let preAuto ← execParamQuery store.missionsDb
     "SELECT (SELECT COUNT(*) FROM mission_automations),(SELECT COUNT(*) FROM mission_continuations);" #[]
@@ -6062,6 +6077,15 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
         IO.sleep 30
   if !legParked then
     return (← fail "m-legacy-auto with armed recurring interval did not park in awaiting_user after turn completion")
+  let legFiredStuckRes ← execParamQuery store.missionsDb
+    "SELECT COUNT(*) FROM mission_continuations WHERE mission_id='m-legacy-auto' AND phase IN (2,3);" #[]
+  let legFiredStuck := match legFiredStuckRes with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 99 | .error _ => 99
+  let (legDetSt, legDetBody) ← sendJson "GET" "/api/control/missions/m-legacy-auto" hsJwt ""
+  if legFiredStuck != 0 || legDetSt != 200 ||
+     (legDetBody.splitOn "\"state\":\"error\"").length != 1 ||
+     (legDetBody.splitOn "\"state\":\"queued\"").length != 1 ||
+     (legDetBody.splitOn "\"state\":\"scheduled\"").length != 2 then
+    return (← fail s!"recurring wakeup left ghost queued/error continuation on m-legacy-auto: stuck={legFiredStuck} st={legDetSt} body={legDetBody}")
 
   -- 5. Admin-owned mission (`owner_user_id` set, `role='admin'`, empty `unix_username`) signs `job:submit` lease with `caller_role='admin'`,
   --    and `"model":"smart"` resolves chain `"builtin/smart"` instead of forwarding `"smart"` raw!

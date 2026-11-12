@@ -1574,7 +1574,13 @@ private def launchLocalCoreMissionTurn
   if let .ok gRows ← execParamQuery st.store.missionsDb
       "SELECT COALESCE(run_generation,1) FROM missions WHERE id=?1;" #[missionId] then
     if gRows.size > 1 then dbGen := (Nat.max 1 (((gRows[1]?.bind (·[0]?)).bind String.toNat?).getD 1)).toUInt64
-  let nextGen := max dbGen ((prevSt?.map (fun s => s.generation + 1)).getD 1)
+  let nextGen :=
+    match prevSt? with
+    | some s => max (dbGen + 1) (s.generation + 1)
+    | none => if sessionId?.isSome then dbGen + 1 else dbGen
+  discard <| execParamQuery st.store.missionsDb
+    "UPDATE mission_continuations SET phase=3, error='stale_run_generation', updated_at=?3 WHERE mission_id=?1 AND phase=1 AND run_generation<CAST(?2 AS INTEGER);"
+    #[missionId, s!"{nextGen}", ts]
   discard <| execParamQuery st.store.missionsDb
     "UPDATE missions SET status='active', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 WHERE id=?1;"
     #[missionId, s!"{nextGen}", ts]
