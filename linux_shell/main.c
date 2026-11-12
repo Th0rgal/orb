@@ -99,6 +99,7 @@ static gboolean on_wv_event(GtkWidget *wv, GdkEvent *ev, gpointer ud) {
     }
     return TRUE;
 }
+static gboolean on_context_menu(void) { return TRUE; } /* Orb draws its own menus; suppress WebKit Back/Forward/Reload. */
 static gboolean on_decide_policy(WebKitWebView *wv, WebKitPolicyDecision *dec, WebKitPolicyDecisionType dtype, gpointer ud) {
     (void)ud;
     if (dtype == WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION || dtype == WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION) {
@@ -152,7 +153,7 @@ int main(int argc, char **argv) {
     const GdkRGBA bg = rgba ? (GdkRGBA){ 0, 0, 0, 0 } : (GdkRGBA){ 0.078, 0.078, 0.078, 1 }; webkit_web_view_set_background_color(WEBKIT_WEB_VIEW(wv), &bg);
     GtkGesture *zg = gtk_gesture_zoom_new(wv); gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(zg), GTK_PHASE_CAPTURE);
     g_signal_connect(zg, "begin", G_CALLBACK(on_zoom_begin), wv); g_signal_connect(zg, "scale-changed", G_CALLBACK(on_zoom_scale), wv); g_object_set_data_full(G_OBJECT(wv), "orb-zg", zg, g_object_unref);
-    g_signal_connect(wv, "event", G_CALLBACK(on_wv_event), NULL); g_signal_connect(wv, "decide-policy", G_CALLBACK(on_decide_policy), NULL);
+    g_signal_connect(wv, "event", G_CALLBACK(on_wv_event), NULL); g_signal_connect(wv, "decide-policy", G_CALLBACK(on_decide_policy), NULL); g_signal_connect(wv, "context-menu", G_CALLBACK(on_context_menu), NULL);
     gtk_container_add(GTK_CONTAINER(win), native_chrome ? orb_gtk_chrome_wrap(win, wv, ucm, port, token) : wv); g_object_unref(ucm);
     const char *url = getenv("ORB_DEV_URL"), *scheme = getenv("ORB_URI_SCHEME");
     const char *start_uri = (url && is_confined_shell_uri(url)) ? url : (dist[0] ? ((scheme && strcmp(scheme, "orb") == 0) ? "orb://localhost/" : "tauri://localhost/") : "http://127.0.0.1:1430");
