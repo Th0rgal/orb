@@ -1839,10 +1839,11 @@ def releaseDispatchTrackLease (st : CoreStore) (reservationId nowAt : String) : 
       if let .error e := u2 then return .error e
     return .ok ()
 
-/-- Record mission opened timestamp (`mark_mission_opened` capability parity). -/
+/-- Record mission opened timestamp (`mark_mission_opened` capability parity).
+Opening is a read: it must not move `updated_at`, which orders the mission list. -/
 def mark_mission_opened (st : CoreStore) (missionId openedAt : String) : IO (Except String Unit) := do
   let res ← execParamQuery st.missionsDb
-    "UPDATE missions SET opened_at=?2, updated_at=?2 WHERE id=?1;" #[missionId, openedAt]
+    "UPDATE missions SET opened_at=?2 WHERE id=?1;" #[missionId, openedAt]
   return res.map (fun _ => ())
 
 /-- Fetch one mission row, or `none` when it does not exist. -/

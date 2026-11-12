@@ -2856,7 +2856,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
         return .ok (mkJson cCode cBody)
-      match ← mark_mission_opened st.store mid s!"{nowEpochSec}" with
+      match ← mark_mission_opened st.store mid (formatEpochIso8601Utc nowEpochSec) with
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok () => return .ok (mkJson 200 "{\"ok\":true}")
 
