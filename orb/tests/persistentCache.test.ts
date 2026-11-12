@@ -429,8 +429,14 @@ describe("persistentCache native orb-locald bridge", () => {
       cursor: 10,
       hasOlder: false,
       items: [],
+      settledItems: [{ kind: "text", key: "huge-digest", text: "x".repeat(4096) }],
+      settledSeq: 10,
+      openTailEvents: [],
       stream: fullStream,
     });
+
+    expect(meta.get("scope-tail::m:m-tail")?.headRaw).not.toContain("huge-digest");
+    expect(meta.get("scope-tail::m:m-tail")?.headRaw).not.toContain("settledItems");
 
     resetPersistentCacheMemoryForTest();
 

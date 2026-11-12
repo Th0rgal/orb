@@ -519,7 +519,14 @@ export async function savePersistedTranscript<TSnap = unknown>(
   const slicedInvoke = snapObj && Array.isArray(snapObj.stream) ? activeLocaldSlicedCache() : null;
   if (slicedInvoke && snapObj && Array.isArray(snapObj.stream)) {
     try {
-      const { stream, items: _items, ...headRest } = snapObj;
+      const {
+        stream,
+        items: _items,
+        settledItems: _settledItems,
+        settledSeq: _settledSeq,
+        openTailEvents: _openTailEvents,
+        ...headRest
+      } = snapObj;
       await slicedInvoke("ui_cache_put_transcript", {
         scope,
         mission_id: missionId,
