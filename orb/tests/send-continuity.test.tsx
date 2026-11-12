@@ -104,6 +104,38 @@ it('recovers a stored Antigravity answer on completion when live text was missed
  expect(view.container.querySelector('.agent-wait-status')).toBeNull();
 });
 
+it.each(['job end', 'mission status'] as const)('clears startup progress on %s without waiting for transcript output',async ending=>{
+ const polling=await import('../src/poll');
+ let poll:undefined|(()=>void|Promise<unknown>);
+ const pollSpy=vi.spyOn(polling,'pollWhileVisible').mockImplementation((run,ms)=>{if(ms===10000)poll=run;return ()=>{};});
+ try {
+  const id=`startup-progress-${ending}`;
+  let mission:Mission={id,backend:'opencode',status:'starting',remote_node_id:'ashur',history:[],created_at:'',updated_at:''};
+  const {getMission}=await import('../src/api');
+  vi.mocked(getMission).mockImplementation(async()=>({...mission}));
+  vi.stubGlobal('fetch',vi.fn(async()=>Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0'}})));
+  const view=render(()=><NativeMissionView id={id} initial={mission}/>);
+  await waitFor(()=>expect(state.event).toBeTypeOf('function'));
+  // HTTP accepted the prompt, but its canonical user_message and every output
+  // event were missed. Replaying that receipt must not keep a settled run alive.
+  state.event!({type:'user_message',data:{id:'accepted-prompt',content:'Inspect the workspace',receipt:true,at:new Date(Date.now()-26_400_000).toISOString()}});
+  await waitFor(()=>expect(view.container.querySelector('.st-working')?.textContent).toContain('Starting OpenCode on ashur'));
+  expect(view.container.querySelector('.st-working-time')?.textContent).toBe('7 h 20');
+  const bubble=view.container.querySelector('.user');
+  if(ending==='job end'){
+   mission={...mission,remote_job:{phase:'finished',node_state:'succeeded',finished_at:new Date().toISOString()}};
+   await poll!();
+  }else{
+   mission={...mission,status:'awaiting_user'};
+   state.event!({type:'mission_status_changed',data:{status:'awaiting_user'}});
+  }
+  await waitFor(()=>expect(view.container.querySelector('.st-working')).toBeNull());
+  expect(view.container.querySelector('.agent-wait-status')).toBeNull();
+  expect(view.container.querySelector('.user')).toBe(bubble);
+  expect(screen.getAllByText('Inspect the workspace')).toHaveLength(1);
+ } finally {pollSpy.mockRestore();}
+});
+
 it.each([['edits in place on a current Core',false],['preserves the original queue when an older Core rejects atomic editing',true]] as const)('%s, without leaving a duplicate Sending… row',async(_name,oldCore)=>{
  const {getMission,sendMissionMessage}=await import('../src/api');
  vi.mocked(sendMissionMessage).mockClear();

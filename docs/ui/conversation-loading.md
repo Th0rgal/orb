@@ -15,6 +15,11 @@ Desktop, iOS and Android share these invariants:
 - Show cached content while refreshing; loading is distinct from execution.
 - One activity area owns the current turn. A known action replaces the generic
   working label in place; historical work counts do not add a second status row.
+  HTTP message receipts establish message identity, not execution liveness.
+  Shared bounded send-handoff state bridges dispatch; after that, job completion
+  or a settled mission status clears startup progress and its elapsed timer even
+  if the canonical user-message echo and all transcript output were missed.
+  Keep the accepted prompt mounted when removing that progress row.
 - Latest durable answers load before detailed tool history. Partial previews
   never become pagination cursors or complete inputs to Inbox summaries, and
   merging an offscreen presentation preview ahead of a stale raw `cursor` marks
