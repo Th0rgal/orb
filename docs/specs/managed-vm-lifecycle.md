@@ -566,6 +566,34 @@ the real `dph_total` rate rather than catalog placeholders. Scaleway Apple Silic
 from the worker size catalog (`raw`-only with `allow_24h_commitment: true`). The
 `online` ledger event records `ready_ms`, `provision_ms`, `enroll_ms` and `total_ms`.
 
+## Harvesting a file from a VM
+
+Code: `lean/OrbCore/OrbCore/ManagedHarvest.lean`, tool `harvest_managed_file(machine_id, path)`.
+
+A mission brings a result back from a managed VM without the VM holding any
+credential and without the content entering a transcript. Authorization is the
+same lineage rule as the lifecycle tools; a caller outside it gets `not_found`.
+
+- The path must be inside the VM work directory (`/var/lib/orb-node/work`;
+  relative paths start there). `..` and control characters are refused before any
+  command is built, and the guest resolves symlinks and refuses a target outside
+  the work directory, so a link to the enrollment file cannot be read.
+- Only regular files up to 20 MiB (`max_bytes` can lower this). The limit is the
+  node's single-upload limit.
+- Core reads the size and SHA-256 on the guest, then the content through the
+  provider command API in 72 000-byte chunks (96 000 base64 characters), re-hashes
+  what it received, and fails closed on any size, chunk or digest disagreement
+  (`harvest_file_changed`, `harvest_checksum_mismatch`). The provider's own file
+  API is not used: Boat's serves only `/home/user` and `/tmp` as UTF-8.
+- Delivery goes to the node the calling mission runs on, as an ordinary upload
+  (`uploads/<uuid>/<name>` under the node work directory), and the node's receipt
+  digest must match. A mission on the Core host gets
+  `<working_directory>/harvest/<uuid>/<name>`; an operator session with no mission
+  gets it under the Core data directory. External sessions without a mission are
+  refused.
+- The reply is `machine_id`, `source_path`, `node`, `path`, `bytes`, `sha256`,
+  `chunks`.
+
 ## Snapshots, forks, stop
 
 Code: `src/managed/snapshots.rs`. Agent guide: `skills/managed-compute/SKILL.md`.

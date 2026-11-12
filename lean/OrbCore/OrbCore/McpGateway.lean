@@ -8,6 +8,7 @@ import OrbBin.PosixExt
 import OrbBin.McpCatalog
 import OrbCore.Store
 import OrbCore.Managed
+import OrbCore.ManagedHarvest
 import OrbCore.MemoryAndCloud
 import OrbCore.QueueCont
 import OrbCore.R7Core
@@ -964,6 +965,61 @@ def dispatchMcpToolCall
         m.id action nowEpochSec args with
     | .error e => return mcpErr "lifecycle_rejected" e
     | .ok result => return mcpOk result
+
+  | "harvest_managed_file" =>
+    -- Copy one file out of a managed VM into the caller's own workspace. The
+    -- content travels provider -> Core -> the caller's node; the reply carries
+    -- only where it landed and its digest, never the bytes.
+    let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"
+    let mid := (args.fieldStr? "machine_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
+    let some canonicalId ← resolveManagedMachineId? mc mid
+      | return mcpErr "not_found" "Managed machine not found"
+    let some (m, slice) ← getManagedMachine? mc canonicalId
+      | return mcpErr "not_found" "Managed machine not found"
+    if !(← canManageMachine m) then return mcpErr "not_found" "Managed machine not found"
+    -- An external session has no workspace of its own to receive the file.
+    if claims.isExternal && callerMid.isEmpty then
+      return mcpErr "harvest_rejected" "harvest_needs_mission_workspace"
+    if slice.phaseCode != 1 then return mcpErr "harvest_rejected" "managed_machine_not_running" true
+    let provider ← match ← snapshotProvider m.provider with
+      | .ok p => pure p
+      | .error e => return mcpErr "unavailable" e true
+    -- The caller may lower the cap, never raise it.
+    let cap := match args.fieldNat? "max_bytes" with
+      | some n => if n == 0 then ManagedHarvest.defaultMaxBytes else min n ManagedHarvest.defaultMaxBytes
+      | none => ManagedHarvest.defaultMaxBytes
+    let harvested ← match ← ManagedHarvest.fetch provider m.effectiveProviderId
+        ((args.fieldStr? "path").getD "") { maxBytes := cap } with
+      | .ok h => pure h
+      | .error e => return mcpErr "harvest_rejected" e
+    let name := ManagedHarvest.deliveryName harvested.sourcePath
+    let callerNode? ← if callerMid.isEmpty then pure none else resolveMissionRemoteNode? store mc? callerMid
+    let delivered : Except String (String × String) ← match callerNode? with
+      | some node => do
+        let body := JVal.obj #[("name", .str name),
+          ("data_base64", .str (OrbBin.PosixExt.base64Encode harvested.bytes))]
+        match ← callRemoteNodeHttp relayHub? mc node "POST" "/uploads" (some body) #[] 180000 with
+        | .error _ => pure (.error "harvest_delivery_failed")
+        | .ok (status, _, receipt?, _, _) =>
+          match receipt?.bind (·.fieldStr? "path"), receipt?.bind (·.fieldStr? "sha256") with
+          | some path, some digest =>
+            if 200 ≤ status && status < 300 && digest == harvested.sha256 then pure (.ok (node, path))
+            else pure (.error "harvest_delivery_failed")
+          | _, _ => pure (.error "harvest_delivery_failed")
+      | none => do
+        -- A mission on the Core host, or an operator session with no mission.
+        let base := if callerMid.isEmpty then store.rootDir else callerWorkDir
+        let dir := System.FilePath.mk base / "harvest" / (← newUuidV4)
+        let dest := dir / name
+        match ← (do IO.FS.createDirAll dir; IO.FS.writeBinFile dest harvested.bytes : IO Unit).toBaseIO with
+        | .ok () => pure (.ok ("local", dest.toString))
+        | .error _ => pure (.error "harvest_delivery_failed")
+    match delivered with
+    | .error e => return mcpErr "harvest_rejected" e true
+    | .ok (node, path) =>
+      return mcpOk (.obj #[("machine_id", .str m.id), ("source_path", .str harvested.sourcePath),
+        ("node", .str node), ("path", .str path), ("bytes", JVal.nat harvested.bytes.size),
+        ("sha256", .str harvested.sha256), ("chunks", JVal.nat harvested.chunks)])
 
   | "snapshot_managed_machine" =>
     let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"
