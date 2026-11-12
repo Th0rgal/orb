@@ -10,6 +10,7 @@
 -/
 import OrbCore
 import OrbCore.ManagedProviderTests
+import OrbCore.ManagedProviderLeanciTests
 import OrbCore.ManagedProviderSealingTests
 import OrbCore.ManagedProviderAvailabilityTests
 import OrbCore.ManagedProvisioningTests
@@ -6235,6 +6236,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- Provider contracts use a mock transport: no live machines or provider credentials.
   try
     OrbCore.ManagedProviderTests.run
+    OrbCore.ManagedProviderLeanciTests.run
   catch e =>
     IO.eprintln s!"[orb-core-test] FAIL: {e}"
     return 1

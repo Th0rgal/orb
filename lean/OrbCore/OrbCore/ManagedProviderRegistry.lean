@@ -4,12 +4,13 @@ quotes and catalog capabilities all consume the same entry. A known provider nam
 without an entry remains unimplemented, never a synthetic successful machine.
 -/
 import OrbCore.ManagedProviderBoat
+import OrbCore.ManagedProviderLeanci
 
 namespace OrbCore.ManagedProvider
 
 open OrbBin.Json
 
-def registry : Array Declaration := #[boatDeclaration]
+def registry : Array Declaration := #[boatDeclaration, leanciDeclaration]
 
 def declaration? (name : String) : Option Declaration :=
   registry.find? (·.name == name)

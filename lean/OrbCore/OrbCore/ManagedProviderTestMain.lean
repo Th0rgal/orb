@@ -3,6 +3,7 @@ Fast inner-loop entry point for the same managed-provider contract tests used by
 Core's full self-test. No live provider/vault calls. Full Core CI remains required.
 -/
 import OrbCore.ManagedProviderTests
+import OrbCore.ManagedProviderLeanciTests
 import OrbCore.ManagedProvisioningTests
 import OrbCore.ManagedProviderSealingTests
 import OrbCore.ManagedProviderAvailabilityTests
@@ -16,6 +17,7 @@ def main : IO UInt32 := do
     | do IO.eprintln "managed provider test store unavailable"; return 1
   try
     OrbCore.ManagedProviderTests.run
+    OrbCore.ManagedProviderLeanciTests.run
     OrbCore.ManagedProvisioningTests.run root
     OrbCore.ManagedProviderSealingTests.run root
     OrbCore.ManagedProviderAvailabilityTests.run root

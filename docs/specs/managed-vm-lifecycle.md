@@ -119,6 +119,37 @@ A successful preflight does not promise the subsequent provider create succeeds.
 Transport failures keep a bounded, credential-redacted, single-line cause in the
 Core log while the returned provider error remains a stable uncertain-outcome code.
 
+### lean.ci adapter
+
+`ManagedProviderLeanci.lean` is the `leanci` client for `https://api.lean.ci/v1`
+(`LEANCI_API_URL` overrides the base, `LEANCI_API_KEY` is sealed in Core). Its wire
+contract was read from the server source (`lfglabs-dev/lean.ci`,
+`crates/leanci-ctrl/src/vms.rs`), not from the retired client:
+
+- Create is `POST /vms` (202, `{vm}`) with `name`, `runner_label`, `ttl_secs` and
+  optional `memory_mib`, `repo`, `snapshot_id`. Sizes map to
+  `lean-<n>vcpu-ubuntu-2604`; both 32-vCPU sizes send explicit memory because the
+  label's default is 96 GiB. Orb caps the lease at 720 minutes.
+- Only `running` is ready. `stopped`, `failed` and `reaped` are terminal. There is
+  no stop/resume and no live TTL extension; those calls fail, they are not faked.
+- Guest commands are `POST /vms/:id/exec` with an argv array, run as root; files
+  are `PUT /vms/:id/files` with base64 content, mode 0600. A reply that is not
+  `ok` and has no exit code is a failure. The client waits longer than the
+  server's own guest wait so an answer is not reported as uncertain.
+- Snapshots are identified by ID and labelled; labels are not unique and failed
+  saves stay listed. Lookup prefers a `ready` entry, delete removes every entry
+  with the label, and a spawn from a label resolves it to a ready snapshot's ID
+  or rents nothing.
+- Availability is `GET /vms/capabilities` (`?repo=` / `?snapshot_id=`), cached
+  20 s. No online engine, no schedulable vCPU, a profile above
+  `largest_bootable_vm` or `max_launchable_now == 0` is `saturated`; a reply the
+  client cannot interpret is `unknown`. Both reject before any reservation.
+
+Its mock transport uses UUID identifiers and the server's status codes, and
+rejects what the server rejects (POST uploads, string commands, unknown labels).
+Not yet verified against the live service: which labels production accepts,
+the real disk sizes, and the guest's `LEANCI_*` cache variables.
+
 ## Lean provider transport contract
 
 `lean/OrbCore/OrbCore/ManagedProvider.lean` defines the shared provider I/O
