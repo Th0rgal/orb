@@ -1155,11 +1155,20 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
 
   -- An archived root that still holds a live descendant stays in its project (no duplicate row).
   let retainedIds : Std.HashMap String Bool := retainedMissions.foldl (fun acc m => acc.insert m.id true) {}
+  -- A root of the archived hierarchy: its parent (if any) is not itself listed under Archived,
+  -- e.g. an archived worker of a live parent or an archived version of a live fork leader.
+  let hasArchivedParent := fun (m : ChromeMissionInput) =>
+    match safeParentMap[m.id]? with
+    | none => false
+    | some pid =>
+      match placedById[pid]? with
+      | some p => p.acknowledged && !retainedIds.contains p.id
+      | none => false
   -- Archived conversations (`archive-section-toggle` in `ProjectFiles.tsx`): collapsed by default,
   -- newest first, roots only (archived descendants stay with their root).
   let archivedRoots :=
     (placedMerged.filter fun m =>
-      m.acknowledged && (safeParentMap[m.id]?).isNone && !retainedIds.contains m.id &&
+      m.acknowledged && !retainedIds.contains m.id && !hasArchivedParent m &&
       (!filterActive || matchesFilterNeedle m needleLower)).qsort fun a b =>
         if a.updatedAtMs != b.updatedAtMs then a.updatedAtMs > b.updatedAtMs else a.id < b.id
   if !filterActive || !archivedRoots.isEmpty then

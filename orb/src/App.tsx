@@ -58,6 +58,8 @@ import { FilePanelProvider, FilePanelButton } from "./FilePanel";
 import { ErrorToast, SlotActiveContext, notify } from "./toast";
 import { copyText } from "./clipboard";
 import { applyArchiveState, archiveStateTargets } from "./archiveState";
+import type { ApprovalConfirmationPrompt } from "./tree/moves";
+const ApprovalTransferDialog = lazy(() => import("./ApprovalTransferDialog"));
 import { rememberLaunch, recalledLaunch, missionDestination, launchRefusal, isAdministrationNode, remoteLaunchPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
 import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR } from "./goal";
 import { chipToAttachment, type AttachChip } from "./attach";
@@ -145,6 +147,8 @@ import {
   isConnected,
   isMissionParticipant,
   listArchivedMissions,
+  ApprovalTransferConfirmationRequiredError,
+  type ApprovalTransferPolicy,
   listCompletedMissions,
   listMissions,
   renameMission,
@@ -1048,6 +1052,7 @@ export default function App() {
   // The HTML sidebar (and its archive pager) is not mounted under native chrome, so the
   // native Archived section is fed from here.
   const [nativeArchived, setNativeArchived] = createSignal<Mission[]>([]);
+  const [nativeApprovalPrompt, setNativeApprovalPrompt] = createSignal<ApprovalConfirmationPrompt | null>(null);
   const loadNativeArchived = () => {
     const version = connectionVersion();
     void listArchivedMissions()
@@ -1073,10 +1078,18 @@ export default function App() {
         if (!arg || arg === mission.title) return false;
         void renameOptimistically("mission", id, arg, mission.title ?? null, () => renameMission(id, arg)).then(settle, swallow("app.nativeRename", { mission: id }));
         return true;
-      case "move":
+      case "move": {
         if (!arg || arg === (mission.project ?? "")) return false;
-        void moveMission(id, arg, "", mission.project ?? null).then(settle, fail("Couldn’t move the conversation"));
+        // Same confirmation as the HTML sidebar (`tree/moves.ts`): a conversation holding secret
+        // grants or requests asks whether to revoke or keep them before it changes project.
+        const move = (policy: ApprovalTransferPolicy) => moveMission(id, arg, "", mission.project ?? null, false, policy).then(settle, error => {
+          if (error instanceof ApprovalTransferConfirmationRequiredError) {
+            setNativeApprovalPrompt({ error, confirm: chosen => void move(chosen), cancel: () => {} });
+          } else fail("Couldn’t move the conversation")(error);
+        });
+        void move("check");
         return true;
+      }
       case "archive":
       case "restore": {
         // Same subtree targeting as the HTML sidebar (`changeArchiveState`).
@@ -1812,6 +1825,9 @@ export default function App() {
       </Show>
       <Show when={nativeChromeActive && isConnected() ? connectionVersion() + 1 : 0} keyed>
         {(_ver) => renderLiveProjectsSection(true)}
+      </Show>
+      <Show when={nativeApprovalPrompt()}>
+        {(prompt) => <Suspense><ApprovalTransferDialog prompt={prompt()} onDismiss={() => setNativeApprovalPrompt(null)} /></Suspense>}
       </Show>
 
       <header class="titlebar" data-orb-drag-region>
