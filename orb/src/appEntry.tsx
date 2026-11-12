@@ -17,9 +17,12 @@ function guardViewportPinchZoom() {
   viewportZoomGuarded = true;
   // Keep unhandled trackpad pinch gestures from magnifying the app's visual viewport;
   // interactive diagram/image/PDF stages handle ctrl+wheel and GestureEvents first.
+  const preventZoom = (e: Event) => e.preventDefault();
   window.addEventListener("wheel", (e) => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
-  window.addEventListener("gesturestart", (e) => e.preventDefault());
-  window.addEventListener("gesturechange", (e) => e.preventDefault());
+  window.addEventListener("gesturestart", preventZoom, { passive: false });
+  window.addEventListener("gesturechange", preventZoom, { passive: false });
+  window.addEventListener("gestureend", preventZoom, { passive: false });
+  window.addEventListener("touchmove", (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
 }
 
 async function preloadFrameZeroCache(): Promise<void> {

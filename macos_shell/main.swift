@@ -388,6 +388,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         case "gear": return "gearshape"
         case "folder": return "folder"
         case "folder-open": return "folder.fill"
+        case "file": return "doc.text"
         case "arrow-left": return "arrow.left"
         case "skills": return "square.3.layers.3d"
         case "key": return "key"
@@ -841,6 +842,10 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     }
 
     private func toggleExpand(rowId: String) {
+        if rowId.hasPrefix("proj:") || rowId.hasPrefix("folder:") {
+            let lit = OrbAppDelegate.jsonStringLiteral(rowId)
+            webView?.evaluateJavaScript("window.__ORB_NATIVE_EXPAND__&&window.__ORB_NATIVE_EXPAND__(\(lit));", completionHandler: nil)
+        }
         sidebarReqGeneration &+= 1
         let gen = sidebarReqGeneration
         callLocald(command: "native_chrome_toggle_expand", args: ["row_id": rowId]) { [weak self] res in

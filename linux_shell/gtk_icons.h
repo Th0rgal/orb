@@ -10,6 +10,7 @@ int orb_gtk_icons_self_test(void);
 typedef struct { GPtrArray *spinning; guint src; int step; } OrbIconSpinner;
 void orb_spinner_stop(OrbIconSpinner *sp);
 GtkWidget *orb_make_icon_widget(OrbIconSpinner *sp, const char *icon, const char *color, const char *status);
+void orb_gtk_bind_pointer_cursor(GtkWidget *w);
 #endif
 
 #endif

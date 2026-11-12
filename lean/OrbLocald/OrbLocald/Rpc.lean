@@ -5166,29 +5166,28 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           | .error e => return .error e
     | _, _ => return .ok .null
   | "native_chrome_sync_state" =>
-    let res ← stRef.modifyGet fun s =>
-      match s.nativeChrome.syncFromJson args with
-      | .error e => (.error e, s)
-      | .ok (applied, scopeSt, nextHub) =>
-        let rows := OrbLocald.NativeChrome.projectSidebarRows scopeSt
-        let s1 := { s with nativeChrome := nextHub }
-        let s2 :=
-          if applied then
-            s1.enqueueNamedEvent "native_chrome_rows_changed" (.obj #[
-              ("scope", .str scopeSt.scope),
-              ("revision", JVal.uint64 scopeSt.viewRevision),
-              ("sync_revision", JVal.uint64 scopeSt.syncRevision),
-              ("row_count", .nat rows.size)
-            ])
-          else s1
-        (.ok (.obj #[
-          ("scope", .str scopeSt.scope),
-          ("revision", JVal.uint64 scopeSt.viewRevision),
-          ("sync_revision", JVal.uint64 scopeSt.syncRevision),
-          ("applied", .bool applied),
-          ("row_count", .nat rows.size)
-        ]), s2)
-    return res
+    match OrbLocald.NativeChrome.parseChromeSyncPayload args with
+    | .error e => return .error e
+    | .ok parsed =>
+      let (applied, scopeSt) ← stRef.modifyGet fun s =>
+        let (applied, scopeSt, nextHub) := s.nativeChrome.applyParsedSync parsed
+        ((applied, scopeSt), { s with nativeChrome := nextHub })
+      let rows := OrbLocald.NativeChrome.projectSidebarRows scopeSt
+      if applied then
+        stRef.modify fun s =>
+          s.enqueueNamedEvent "native_chrome_rows_changed" (.obj #[
+            ("scope", .str scopeSt.scope),
+            ("revision", JVal.uint64 scopeSt.viewRevision),
+            ("sync_revision", JVal.uint64 scopeSt.syncRevision),
+            ("row_count", .nat rows.size)
+          ])
+      return .ok (.obj #[
+        ("scope", .str scopeSt.scope),
+        ("revision", JVal.uint64 scopeSt.viewRevision),
+        ("sync_revision", JVal.uint64 scopeSt.syncRevision),
+        ("applied", .bool applied),
+        ("row_count", .nat rows.size)
+      ])
   | "native_chrome_get_rows" =>
     let reqScope := (args.fieldStr? "scope").getD ""
     let filterQ := (args.fieldStr? "filter_query").getD ""
@@ -5210,32 +5209,41 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let reqScope := (args.fieldStr? "scope").getD ""
     let rowId := (args.fieldStr? "row_id").getD ""
     let explicitExp? := args.fieldBool? "expanded"
-    if rowId.trimAscii.toString.isEmpty then
+    let cleanRow := rowId.trimAscii.toString
+    if cleanRow.isEmpty then
       return .error "Invalid native_chrome_toggle_expand row_id"
-    let _ ← resolveNativeChromeScope stRef reqScope
-    let res ← stRef.modifyGet fun s =>
-      match s.nativeChrome.toggleExpand reqScope rowId explicitExp? with
-      | none => (.error "Unknown native chrome scope", s)
+    let preScope ← resolveNativeChromeScope stRef reqScope
+    let fallbackExp :=
+      if explicitExp?.isSome || preScope.expandedIds.contains cleanRow || preScope.collapsedIds.contains cleanRow then
+        false
+      else
+        ((OrbLocald.NativeChrome.projectSidebarRows preScope).find? (·.rowId == cleanRow)).map (·.expanded) |>.getD false
+    let toggled? ← stRef.modifyGet fun s =>
+      match s.nativeChrome.toggleExpand reqScope cleanRow explicitExp? (some fallbackExp) with
+      | none => (none, s)
       | some (expandedNow, scopeSt, nextHub) =>
-        let rows := OrbLocald.NativeChrome.projectSidebarRows scopeSt
-        let footer := OrbLocald.NativeChrome.projectSidebarFooter scopeSt
-        let s1 := { s with nativeChrome := nextHub }
-        let s2 := s1.enqueueNamedEvent "native_chrome_rows_changed" (.obj #[
+        (some (expandedNow, scopeSt), { s with nativeChrome := nextHub })
+    match toggled? with
+    | none => return .error "Unknown native chrome scope"
+    | some (expandedNow, scopeSt) =>
+      let rows := OrbLocald.NativeChrome.projectSidebarRows scopeSt
+      let footer := OrbLocald.NativeChrome.projectSidebarFooter scopeSt
+      stRef.modify fun s =>
+        s.enqueueNamedEvent "native_chrome_rows_changed" (.obj #[
           ("scope", .str scopeSt.scope),
           ("revision", JVal.uint64 scopeSt.viewRevision),
           ("sync_revision", JVal.uint64 scopeSt.syncRevision),
           ("row_count", .nat rows.size)
         ])
-        (.ok (.obj #[
-          ("scope", .str scopeSt.scope),
-          ("revision", JVal.uint64 scopeSt.viewRevision),
-          ("sync_revision", JVal.uint64 scopeSt.syncRevision),
-          ("row_id", .str rowId.trimAscii.toString),
-          ("expanded", .bool expandedNow),
-          ("footer", footer.toJson),
-          ("rows", .arr (rows.map OrbLocald.NativeChrome.SidebarRow.toJson))
-        ]), s2)
-    return res
+      return .ok (.obj #[
+        ("scope", .str scopeSt.scope),
+        ("revision", JVal.uint64 scopeSt.viewRevision),
+        ("sync_revision", JVal.uint64 scopeSt.syncRevision),
+        ("row_id", .str cleanRow),
+        ("expanded", .bool expandedNow),
+        ("footer", footer.toJson),
+        ("rows", .arr (rows.map OrbLocald.NativeChrome.SidebarRow.toJson))
+      ])
   | "native_chrome_move_admit" =>
     let itemKind := (args.fieldStr? "item_kind").getD ""
     let srcProj := (args.fieldStr? "src_project").getD ""

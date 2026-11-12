@@ -93,15 +93,76 @@ private def optStrJVal (s : String) : JVal :=
 
 /-! ## Project Roster, Grants, Steers, Decisions, Situation & Tasks Helpers -/
 
+private structure RosterEntry where
+  slug      : String
+  title     : String
+  objective : String
+  status    : String
+  updatedAt : String
+  color     : String
+  deriving Inhabited
+
+private def readJsonStringMapFile (path : System.FilePath) : IO (Array (String × String)) := do
+  let raw ← try IO.FS.readFile path catch _ => pure ""
+  if raw.isEmpty then return #[]
+  match OrbBin.Json.parse raw with
+  | .ok (.obj kvs) =>
+    let mut out : Array (String × String) := #[]
+    for (k, v) in kvs do
+      if let some s := v.asStr? then
+        out := out.push (k, s)
+    return out
+  | _ => return #[]
+
+private def writeJsonStringMapAtomic (dir : System.FilePath) (fileName : String) (kvs : Array (String × String)) : IO Unit := do
+  let obj : JVal := .obj (kvs.map (fun (k, v) => (k, .str v)))
+  let pretty := renderPrettyAux 0 obj ++ "\n"
+  let tmp := dir / s!".{fileName}.tmp"
+  let dst := dir / fileName
+  try
+    IO.FS.writeFile tmp pretty
+    IO.FS.rename tmp dst
+  catch _ =>
+    pure ()
+
+private def resolveHermesProjectsDir? (overrideDir? : Option String := none) : IO (Option System.FilePath) := do
+  let raw :=
+    match overrideDir? with
+    | some d => d.trimAscii.toString
+    | none => ""
+  let dirStr ←
+    if !raw.isEmpty then pure raw
+    else pure (((← IO.getEnv "HERMES_PROJECTS_DIR").getD "").trimAscii.toString)
+  if dirStr.isEmpty then return none
+  let fp := System.FilePath.mk dirStr
+  if ← fp.isDir then return some fp else return none
+
+private def lookupStrMap? (m : Array (String × String)) (k : String) : Option String :=
+  (m.find? (fun (mk, _) => mk == k)).map Prod.snd
+
+def canonicalizeProjectSlugWith (aliases : Array (String × String)) (raw : String) : String :=
+  let t := raw.trimAscii.toString
+  if t.isEmpty then ""
+  else
+    match lookupStrMap? aliases t with
+    | some c => c
+    | none =>
+      let lo := t.toLower
+      if lo != t then (lookupStrMap? aliases lo).getD t else t
+
 def listProjectsJVal
     (store : CoreStore)
     (callerUserId : String)
     (bootstrapAdminId : String)
     (isLegacyUnscoped : Bool)
-    (includeArchived : Bool := false) : IO (Array JVal) := do
-  let mut bySlug : Array (String × JVal) := #[]
+    (includeArchived : Bool := false)
+    (hermesProjectsDir? : Option String := none) : IO (Array JVal) := do
+  let hDir? ← resolveHermesProjectsDir? hermesProjectsDir?
+  let aliases ← match hDir? with | some d => readJsonStringMapFile (d / "routes.json") | none => pure #[]
+  let overrides ← match hDir? with | some d => readJsonStringMapFile (d / "board-overrides.json") | none => pure #[]
+  let mut byCanonical : Array RosterEntry := #[]
   if let .ok rows ← execParamQuery store.projectsDb
-      ("SELECT p.slug, COALESCE(NULLIF(p.title,''), NULLIF(p.name,''), p.slug), COALESCE(p.objective,''), " ++
+      ("SELECT p.slug, COALESCE(NULLIF(p.title,''), NULLIF(p.name,''), ''), COALESCE(p.objective,''), " ++
        "COALESCE(NULLIF(p.status,''),'active'), COALESCE(p.updated_at,''), COALESCE(p.color,''), " ++
        "COALESCE(o.owner_user_id,'') " ++
        "FROM projects p LEFT JOIN project_owners o ON o.slug = p.slug " ++
@@ -118,38 +179,58 @@ def listProjectsJVal
       let visible :=
         isLegacyUnscoped || ownerUid.isEmpty || ownerUid == callerUserId ||
         (callerUserId == bootstrapAdminId && !rawSlug.contains ':')
-      if visible && (includeArchived || (status != "archived" && status != "deleted")) then
-        let clientSlug := unscopeProjectSlug callerUserId rawSlug
-        if !bySlug.any (fun (s, _) => s == clientSlug) then
-          bySlug := bySlug.push (clientSlug, .obj #[
-            ("slug", .str clientSlug),
-            ("title", .str (if title.isEmpty then clientSlug else title)),
-            ("objective", optStrJVal obj),
-            ("status", .str status),
-            ("updated_at", .str updAt),
-            ("color", optStrJVal color)
-          ])
-  -- Discover inferred projects from `missions.project` that do not yet have a `projects` row
-  if let .ok mRows ← execParamQuery store.missionsDb
-      "SELECT COALESCE(project,''), MAX(COALESCE(metadata_updated_at, created_at, '')), COALESCE(owner_user_id,'') FROM missions WHERE COALESCE(project,'') <> '' GROUP BY project, owner_user_id;" #[] then
-    for i in [1:mRows.size] do
-      let r := mRows[i]!
-      let rawProj := cell r 0
-      let updAt := cell r 1
-      let ownerUid := cell r 2
-      let visible := isLegacyUnscoped || ownerUid.isEmpty || ownerUid == callerUserId
-      if visible && validProjectSlug (unscopeProjectSlug callerUserId rawProj) then
-        let clientSlug := unscopeProjectSlug callerUserId rawProj
-        if !bySlug.any (fun (s, _) => s == clientSlug) then
-          bySlug := bySlug.push (clientSlug, .obj #[
-            ("slug", .str clientSlug),
-            ("title", .str clientSlug),
-            ("objective", .null),
-            ("status", .str "active"),
-            ("updated_at", .str updAt),
-            ("color", .null)
-          ])
-  return bySlug.map Prod.snd
+      if visible then
+        let rawClientSlug := unscopeProjectSlug callerUserId rawSlug
+        let canon := canonicalizeProjectSlugWith aliases rawClientSlug
+        let canonical := if canon.isEmpty then rawClientSlug else canon
+        let isCanonicalRow := rawClientSlug == canonical
+        match byCanonical.findIdx? (fun e => e.slug == canonical) with
+        | none =>
+          byCanonical := byCanonical.push {
+            slug := canonical
+            title := title
+            objective := obj
+            status := status
+            updatedAt := updAt
+            color := color
+          }
+        | some idx =>
+          let ex := byCanonical[idx]!
+          let nextTitle :=
+            if isCanonicalRow then (if !title.isEmpty then title else ex.title)
+            else (if ex.title.isEmpty then title else ex.title)
+          let nextObj :=
+            if isCanonicalRow then (if !obj.isEmpty then obj else ex.objective)
+            else (if ex.objective.isEmpty then obj else ex.objective)
+          let nextStatus :=
+            if isCanonicalRow then (if !status.isEmpty then status else ex.status)
+            else (if ex.status.isEmpty then status else ex.status)
+          let nextColor :=
+            if isCanonicalRow then (if !color.isEmpty then color else ex.color)
+            else (if ex.color.isEmpty then color else ex.color)
+          let nextUpd := if updAt > ex.updatedAt then updAt else ex.updatedAt
+          byCanonical := byCanonical.set! idx {
+            slug := canonical
+            title := nextTitle
+            objective := nextObj
+            status := nextStatus
+            updatedAt := nextUpd
+            color := nextColor
+          }
+  let mut out : Array JVal := #[]
+  for entry in byCanonical do
+    let effStatus := (lookupStrMap? overrides entry.slug).getD entry.status
+    if includeArchived || (effStatus != "archived" && effStatus != "deleted") then
+      let dispTitle := if entry.title.isEmpty then entry.slug else entry.title
+      out := out.push (.obj #[
+        ("slug", .str entry.slug),
+        ("title", .str dispTitle),
+        ("objective", optStrJVal entry.objective),
+        ("status", .str effStatus),
+        ("updated_at", .str entry.updatedAt),
+        ("color", optStrJVal entry.color)
+      ])
+  return out
 
 def upsertProjectRecord
     (store : CoreStore)
@@ -1101,18 +1182,26 @@ def dispatchProjectAndControllerRoutes?
     if method == "POST" && tail == ["reconcile", "ack"] then
       return some (jsonResp 200 (.obj #[("ok", .bool true)]))
 
-    -- `POST /api/projects/:slug/action` (`archive`, `restore`, `unarchive`)
+    -- `POST /api/projects/:slug/action` (`archive`, `restore`, `unarchive`, `pause`, `resume`, `delete`)
     if method == "POST" && tail == ["action"] then
       let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
       let act := ((jv.fieldStr? "action").getD "").trimAscii.toString.toLower
       let nextStatus :=
         if act == "archive" then "archived"
         else if act == "delete" then "deleted"
+        else if act == "pause" then "paused"
         else "active"
       discard <| upsertProjectRecord store scopedSlug clientSlug clientSlug "" nextStatus "" nowIso
         (if isLegacyUnscoped then none else some callerUserId)
       discard <| execParamQuery store.projectsDb
         "UPDATE projects SET status=?2, updated_at=?3 WHERE slug=?1;" #[scopedSlug, nextStatus, nowIso]
+      if let some hDir ← resolveHermesProjectsDir? then
+        let curOv ← readJsonStringMapFile (hDir / "board-overrides.json")
+        let filtered := curOv.filter (fun (k, _) => k != clientSlug)
+        let nextOv :=
+          if act == "resume" || act == "unarchive" || act == "restore" then filtered
+          else filtered.push (clientSlug, nextStatus)
+        writeJsonStringMapAtomic hDir "board-overrides.json" nextOv
       return some (jsonResp 200 (.obj #[("ok", .bool true), ("slug", .str clientSlug), ("status", .str nextStatus)]))
 
     -- `POST /api/projects/:slug/rename`

@@ -2110,6 +2110,75 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
       if (← assertTrue "native_chrome_iso_epoch_ms_and_empty_placement_clear" mvAndTsOk) then
         ncPassed := ncPassed + 1
 
+      -- Folder/file expansion + empty project/folder notes + 1,500-mission O(N log N) latency bound
+      let mut bigMissions : Array JVal := #[]
+      for i in [0:1500] do
+        let pid := if i % 5 == 0 then "" else s!"m-big-{(i / 5) * 5}"
+        let forkTag : Array JVal := if i % 17 == 16 then #[.str s!"fork-of:m-big-{i - 1}"] else #[]
+        bigMissions := bigMissions.push (.obj #[
+          ("id", .str s!"m-big-{i}"),
+          ("title", .str s!"Scale mission {i}"),
+          ("status", .str (if i % 11 == 0 then "active" else "completed")),
+          ("project", .str "core"),
+          ("parent_mission_id", .str pid),
+          ("tags", .arr forkTag),
+          ("updated_at_ms", .nat (10000 + i))
+        ])
+      let folderAndScaleSync := .obj #[
+        ("scope", .str "scope:folder-scale:1"),
+        ("revision", .nat 1),
+        ("projects", .arr #[
+          .obj #[
+            ("slug", .str "core"),
+            ("name", .str "Core"),
+            ("folders", .arr #[.str "Audits", .str "EmptyDir"]),
+            ("files", .arr #[.str "Audits/report.md", .str "README.md"])
+          ],
+          .obj #[
+            ("slug", .str "empty-proj"),
+            ("name", .str "Empty"),
+            ("folders", .arr #[])
+          ]
+        ]),
+        ("missions", .arr bigMissions)
+      ]
+      let tScale0 ← IO.monoMsNow
+      let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" folderAndScaleSync
+      let initFolderRows ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:folder-scale:1")])
+      let openProjRows ← dispatchRpcCommand ncRef "native_chrome_toggle_expand" (.obj #[("scope", .str "scope:folder-scale:1"), ("row_id", .str "proj:core"), ("expanded", .bool true)])
+      let openAuditsRows ← dispatchRpcCommand ncRef "native_chrome_toggle_expand" (.obj #[("scope", .str "scope:folder-scale:1"), ("row_id", .str "folder:core:Audits")])
+      let openEmptyDirRows ← dispatchRpcCommand ncRef "native_chrome_toggle_expand" (.obj #[("scope", .str "scope:folder-scale:1"), ("row_id", .str "folder:core:EmptyDir")])
+      let openEmptyProjRows ← dispatchRpcCommand ncRef "native_chrome_toggle_expand" (.obj #[("scope", .str "scope:folder-scale:1"), ("row_id", .str "proj:empty-proj")])
+      let tScaleMs := (← IO.monoMsNow) - tScale0
+      ncTotal := ncTotal + 1
+      let folderScaleOk : Bool :=
+        tScaleMs < 500 &&
+        match initFolderRows, openProjRows, openAuditsRows, openEmptyDirRows, openEmptyProjRows with
+        | .ok rInit, .ok rProj, .ok rAud, .ok rEmpD, .ok rEmpP =>
+          let idsInit := ((rInit.fieldArr? "rows").getD #[]).filterMap (·.fieldStr? "row_id")
+          let rowsProj := (rProj.fieldArr? "rows").getD #[]
+          let audClosed? := rowsProj.find? (fun r => r.fieldStr? "row_id" == some "folder:core:Audits")
+          let rowsAud := (rAud.fieldArr? "rows").getD #[]
+          let audOpen? := rowsAud.find? (fun r => r.fieldStr? "row_id" == some "folder:core:Audits")
+          let repFile? := rowsAud.find? (fun r => r.fieldStr? "row_id" == some "pf:core:Audits/report.md")
+          let idsEmpD := ((rEmpD.fieldArr? "rows").getD #[]).filterMap (·.fieldStr? "row_id")
+          let rowsEmpP := (rEmpP.fieldArr? "rows").getD #[]
+          let empProjOpen? := rowsEmpP.find? (fun r => r.fieldStr? "row_id" == some "proj:empty-proj")
+          let idsEmpP := rowsEmpP.filterMap (·.fieldStr? "row_id")
+          !idsInit.contains "folder:core:Audits" &&
+          (audClosed?.bind (·.fieldBool? "expanded")) == some false &&
+          (audClosed?.bind (·.fieldStr? "icon")) == some "folder" &&
+          (audOpen?.bind (·.fieldBool? "expanded")) == some true &&
+          (audOpen?.bind (·.fieldStr? "icon")) == some "folder-open" &&
+          (repFile?.bind (·.fieldStr? "kind")) == some "file" &&
+          idsEmpD.contains "empty:core:EmptyDir" &&
+          (empProjOpen?.bind (·.fieldBool? "expanded")) == some true &&
+          (empProjOpen?.bind (·.fieldStr? "icon")) == some "folder-open" &&
+          idsEmpP.contains "empty:empty-proj"
+        | _, _, _, _, _ => false
+      if (← assertTrue "native_chrome_folder_file_expand_and_1500_mission_scale" folderScaleOk) then
+        ncPassed := ncPassed + 1
+
   return (passed + e2ePassed + ncPassed, total + e2eTotal + ncTotal)
 
 def main : IO UInt32 := do

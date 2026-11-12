@@ -74,6 +74,20 @@ static void on_uri_scheme(WebKitURISchemeRequest *req, gpointer ud) {
     webkit_uri_scheme_request_finish(req, G_INPUT_STREAM(st), fi ? g_file_info_get_size(fi) : -1, mime ? mime : (guess ? guess : "application/octet-stream"));
     g_free(guess); if (fi) g_object_unref(fi); g_object_unref(st); g_object_unref(gf);
 }
+static void on_zoom_begin(GtkGesture *g, GdkEventSequence *seq, gpointer ud) {
+    gtk_gesture_set_state(g, GTK_EVENT_SEQUENCE_CLAIMED);
+    if (!seq) return;
+    double x = 0, y = 0; gtk_gesture_get_bounding_box_center(g, &x, &y);
+    char js[160]; snprintf(js, sizeof(js), "window.__ORB_PINCH__&&window.__ORB_PINCH__(0,%ld,%ld,10000,0,0)", (long)(x * 16.0), (long)(y * 16.0));
+    webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(ud), js, -1, NULL, NULL, NULL, NULL, NULL);
+}
+static void on_zoom_scale(GtkGestureZoom *z, gdouble scale, gpointer ud) {
+    GtkGesture *g = GTK_GESTURE(z); gtk_gesture_set_state(g, GTK_EVENT_SEQUENCE_CLAIMED);
+    if (!gtk_gesture_get_last_updated_sequence(g)) return;
+    double x = 0, y = 0; gtk_gesture_get_bounding_box_center(g, &x, &y);
+    char js[160]; snprintf(js, sizeof(js), "window.__ORB_PINCH__&&window.__ORB_PINCH__(1,%ld,%ld,%ld,0,0)", (long)(x * 16.0), (long)(y * 16.0), (long)(scale * 10000.0));
+    webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(ud), js, -1, NULL, NULL, NULL, NULL, NULL);
+}
 static gboolean on_wv_event(GtkWidget *wv, GdkEvent *ev, gpointer ud) {
     (void)ud; guint *st = (ev->type == GDK_KEY_PRESS || ev->type == GDK_KEY_RELEASE) ? &ev->key.state : (ev->type == GDK_BUTTON_PRESS || ev->type == GDK_BUTTON_RELEASE) ? &ev->button.state : (ev->type == GDK_SCROLL) ? &ev->scroll.state : NULL;
     if (st && (*st & (GDK_SUPER_MASK | GDK_MOD4_MASK)) && !(*st & GDK_CONTROL_MASK)) *st |= GDK_META_MASK;
@@ -136,6 +150,8 @@ int main(int argc, char **argv) {
     GtkWidget *wv = g_object_new(WEBKIT_TYPE_WEB_VIEW, "web-context", ctx, "user-content-manager", ucm, NULL); g_object_unref(ctx);
     WebKitSettings *wks = webkit_web_view_get_settings(WEBKIT_WEB_VIEW(wv)); webkit_settings_set_hardware_acceleration_policy(wks, WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS); g_object_set(wks, "enable-media-stream", TRUE, "enable-webaudio", TRUE, "media-playback-requires-user-gesture", FALSE, NULL);
     const GdkRGBA bg = rgba ? (GdkRGBA){ 0, 0, 0, 0 } : (GdkRGBA){ 0.078, 0.078, 0.078, 1 }; webkit_web_view_set_background_color(WEBKIT_WEB_VIEW(wv), &bg);
+    GtkGesture *zg = gtk_gesture_zoom_new(wv); gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(zg), GTK_PHASE_CAPTURE);
+    g_signal_connect(zg, "begin", G_CALLBACK(on_zoom_begin), wv); g_signal_connect(zg, "scale-changed", G_CALLBACK(on_zoom_scale), wv); g_object_set_data_full(G_OBJECT(wv), "orb-zg", zg, g_object_unref);
     g_signal_connect(wv, "event", G_CALLBACK(on_wv_event), NULL); g_signal_connect(wv, "decide-policy", G_CALLBACK(on_decide_policy), NULL);
     gtk_container_add(GTK_CONTAINER(win), native_chrome ? orb_gtk_chrome_wrap(win, wv, ucm, port, token) : wv); g_object_unref(ucm);
     const char *url = getenv("ORB_DEV_URL"), *scheme = getenv("ORB_URI_SCHEME");

@@ -41,6 +41,7 @@ export type NativeChromeProjectWire = {
   name: string;
   color?: string;
   folders: string[];
+  files?: string[];
 };
 
 export type NativeChromeSyncSnapshot = {
@@ -55,6 +56,7 @@ export type NativeChromeSyncSnapshot = {
   projects: readonly ProjectSummary[];
   projectColors?: Readonly<Record<string, string | undefined>>;
   projectFolders?: Readonly<Record<string, readonly string[]>>;
+  projectFiles?: Readonly<Record<string, readonly string[]>>;
   missions: readonly Mission[];
   completedMissions: readonly Mission[];
   projectMissions: Readonly<Record<string, readonly Mission[]>>;
@@ -64,6 +66,7 @@ type NativeChromeWindow = Window & {
   __ORB_NATIVE_CHROME__?: boolean;
   __ORB_SELECT_MISSION__?: (missionId: string) => boolean;
   __ORB_NATIVE_NAV__?: (target: string) => boolean;
+  __ORB_NATIVE_EXPAND__?: (rowId: string) => boolean;
   __ORB_TOGGLE_NATIVE_SIDEBAR__?: (open?: boolean) => boolean;
   webkit?: {
     messageHandlers?: {
@@ -109,11 +112,13 @@ export function buildNativeChromeSyncArgs(
 ): Record<string, unknown> {
   const projects: NativeChromeProjectWire[] = snap.projects.map((p) => {
     const col = snap.projectColors?.[p.slug] ?? p.color ?? "";
+    const files = snap.projectFiles?.[p.slug];
     return {
       slug: p.slug,
       name: (p.title ?? "").trim() || p.slug,
       ...(col ? { color: col } : {}),
       folders: [...(snap.projectFolders?.[p.slug] ?? [])],
+      ...(files && files.length > 0 ? { files: [...files] } : {}),
     };
   });
   const projectMissionsWire: Record<string, NativeChromeMissionWire[]> = {};
@@ -215,6 +220,16 @@ export function installNativeChromeWindowHandlers(
     }
     return handlers.open(clean);
   };
+  const nativeExpand = (rowId: string): boolean => {
+    const clean = (rowId ?? "").trim();
+    if (!clean) return false;
+    try {
+      win.dispatchEvent(new CustomEvent("orb:native-expand", { detail: { rowId: clean } }));
+    } catch {
+      // Ignore in synthetic environments.
+    }
+    return true;
+  };
   const toggleSidebar = (open?: boolean): boolean => {
     const next = typeof open === "boolean" ? open : !handlers.getSidebarOpen();
     handlers.setSidebarOpen(next);
@@ -222,10 +237,12 @@ export function installNativeChromeWindowHandlers(
   };
   nw.__ORB_SELECT_MISSION__ = selectMission;
   nw.__ORB_NATIVE_NAV__ = nativeNav;
+  nw.__ORB_NATIVE_EXPAND__ = nativeExpand;
   nw.__ORB_TOGGLE_NATIVE_SIDEBAR__ = toggleSidebar;
   return () => {
     if (nw.__ORB_SELECT_MISSION__ === selectMission) delete nw.__ORB_SELECT_MISSION__;
     if (nw.__ORB_NATIVE_NAV__ === nativeNav) delete nw.__ORB_NATIVE_NAV__;
+    if (nw.__ORB_NATIVE_EXPAND__ === nativeExpand) delete nw.__ORB_NATIVE_EXPAND__;
     if (nw.__ORB_TOGGLE_NATIVE_SIDEBAR__ === toggleSidebar) delete nw.__ORB_TOGGLE_NATIVE_SIDEBAR__;
   };
 }

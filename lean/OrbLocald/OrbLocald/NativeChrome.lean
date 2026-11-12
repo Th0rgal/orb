@@ -1,6 +1,7 @@
 import LeanSys
 import Orb.Kernel
 import OrbBin.Json
+import Std.Data.HashMap
 
 /-
   OrbLocald.NativeChrome — Canonical single-owner sidebar row projection & `Cmd+K` palette
@@ -22,6 +23,7 @@ structure ChromeProjectInput where
   name    : String
   color   : String := ""
   folders : Array String := #[]
+  files   : Array String := #[]
   deriving Repr, Inhabited, BEq
 
 structure ChromeMissionInput where
@@ -305,8 +307,14 @@ def parseProjectInput? (jv : JVal) : Option ChromeProjectInput := do
     let p := match f.asStr? with
       | some s => normalizeFolderPath s
       | none => normalizeFolderPath ((f.fieldStr? "path").getD "")
-    if p.isEmpty then none else some p
-  some { slug := slug, name := if name.isEmpty then slug else name, color := color, folders := folders }
+    if p.isEmpty || p == "attachments" then none else some p
+  let rawFiles := (jv.fieldArr? "files").getD #[]
+  let files := rawFiles.filterMap fun f =>
+    let p := match f.asStr? with
+      | some s => normalizeFolderPath s
+      | none => normalizeFolderPath ((f.fieldStr? "path").getD "")
+    if p.isEmpty || p.startsWith "attachments/" then none else some p
+  some { slug := slug, name := if name.isEmpty then slug else name, color := color, folders := folders, files := files }
 
 def parseMissionInput? (jv : JVal) (fallbackProject : String := "") : Option ChromeMissionInput := do
   let id := (jv.fieldStr? "id").getD "" |>.trimAscii.toString
@@ -394,20 +402,25 @@ def parseMissionInput? (jv : JVal) (fallbackProject : String := "") : Option Chr
     Superseded inputs remain in the merged set (`incomingSupersededOrArchived = 0`) so projection can
     preserve running and currently-selected superseded conversations (`isSupersededInTree` in `orb/src/missionTree.ts`). -/
 def mergeMissionInputs (inputs : Array ChromeMissionInput) : Array ChromeMissionInput := Id.run do
-  let mut idTable : Array String := #[]
-  let internOrd := fun (tbl : Array String) (mid : String) =>
-    match tbl.findIdx? (· == mid) with
-    | some idx => (tbl, (idx + 1).toUInt32)
-    | none => (tbl.push mid, (tbl.size + 1).toUInt32)
+  let mut ordById : Std.HashMap String UInt32 := {}
+  let mut nextOrd : UInt32 := 1
+  let mut idxById : Std.HashMap String Nat := {}
   let mut acc : Array ChromeMissionInput := #[]
   for inc in inputs do
-    let (tbl1, incOrd) := internOrd idTable inc.id
-    idTable := tbl1
-    match acc.findIdx? (fun ex => ex.id == inc.id) with
+    let incOrd ←
+      match ordById[inc.id]? with
+      | some ord => pure ord
+      | none =>
+        let ord := nextOrd
+        ordById := ordById.insert inc.id ord
+        nextOrd := nextOrd + 1
+        pure ord
+    match idxById[inc.id]? with
     | none =>
       let verdict := Orb.Kernel.sidebarMergeStep 0 incOrd 0 inc.updatedAtMs 0 0
       let hi32 : UInt32 := ((verdict >>> 32) &&& 0xFFFFFFFF).toUInt32
       if hi32 == 1 then
+        idxById := idxById.insert inc.id acc.size
         acc := acc.push inc
     | some idx =>
       let ex := acc[idx]!
@@ -466,15 +479,20 @@ private def isSupersededStoppedMission (m : ChromeMissionInput) : Bool :=
   !isWorkingMissionStatus m.status && m.superseded
 
 /-- True when `m` or any ancestor along `parentOf` is a stopped superseded mission (`isSupersededInTree` in `orb/src/missionTree.ts`). -/
-private def isSupersededInTree (m : ChromeMissionInput) (byId : Array ChromeMissionInput) (parentOf : String → Option String) : Bool := Id.run do
+private def isSupersededInTree
+    (m : ChromeMissionInput)
+    (byId : Std.HashMap String ChromeMissionInput)
+    (maxHops : Nat)
+    (parentOf : String → Option String) : Bool := Id.run do
   if isWorkingMissionStatus m.status then return false
   if isSupersededStoppedMission m then return true
-  let mut seen : Array String := #[m.id]
   let mut curParent := (parentOf m.id).getD ""
+  if curParent.isEmpty then return false
+  let mut seen : Array String := #[m.id]
   let mut steps := 0
-  while !curParent.isEmpty && !seen.contains curParent && steps < byId.size do
+  while !curParent.isEmpty && !seen.contains curParent && steps < maxHops do
     seen := seen.push curParent
-    match byId.find? (·.id == curParent) with
+    match byId[curParent]? with
     | none => break
     | some row =>
       if isSupersededStoppedMission row then return true
@@ -483,16 +501,22 @@ private def isSupersededInTree (m : ChromeMissionInput) (byId : Array ChromeMiss
   return false
 
 /-- Exclude `/btw` side sessions and every worker/descendant in their subtree (`excludeBtwMissions` in `orb/src/missionHierarchy.ts`). -/
-def excludeBtwMissionInputs (rows : Array ChromeMissionInput) : Array ChromeMissionInput :=
-  rows.filter fun m => Id.run do
+def excludeBtwMissionInputs (rows : Array ChromeMissionInput) : Array ChromeMissionInput := Id.run do
+  if !rows.any (·.isBtwDirect) then return rows
+  let mut byId : Std.HashMap String ChromeMissionInput := {}
+  for r in rows do
+    byId := byId.insert r.id r
+  let maxHops := rows.size
+  return rows.filter fun m => Id.run do
     if m.isBtwDirect then return false
-    let mut seen : Array String := #[m.id]
     let mut cur :=
       if !m.parentMissionId.isEmpty then m.parentMissionId else m.forkSourceId
+    if cur.isEmpty then return true
+    let mut seen : Array String := #[m.id]
     let mut steps := 0
-    while !cur.isEmpty && !seen.contains cur && steps < rows.size do
+    while !cur.isEmpty && !seen.contains cur && steps < maxHops do
       seen := seen.push cur
-      match rows.find? (·.id == cur) with
+      match byId[cur]? with
       | none => break
       | some anc =>
         if anc.isBtwDirect then return false
@@ -509,9 +533,16 @@ private structure ForkLineageInfo where
 
 /-- Elect fork-group leaders (`forkLeaders` in `orb/src/missionTree.ts`) using the normative
     `(unretired, working, effectiveActivity, forkDepth)` rank with the 15s `FORK_SETTLE_MS` grace window.
-    Returns `(missionId, leaderId)` pairs for every member of a multi-version fork group. -/
-private def electForkGroupLeaders (missions : Array ChromeMissionInput) : Array (String × String) := Id.run do
-  let traceLineage := fun (m : ChromeMissionInput) => Id.run do
+    Returns `missionId -> leaderId` for every member of a multi-version fork group in O(N). -/
+private def electForkGroupLeaders (missions : Array ChromeMissionInput) : Std.HashMap String String := Id.run do
+  if !missions.any (fun m => !m.forkSourceId.isEmpty) then return {}
+  let mut byId : Std.HashMap String ChromeMissionInput := {}
+  for m in missions do
+    byId := byId.insert m.id m
+  let mut infoById : Std.HashMap String ForkLineageInfo := {}
+  let mut groupsByRoot : Std.HashMap String (Array ChromeMissionInput) := {}
+  let mut rootIds : Array String := #[]
+  for m in missions do
     let mut seen : Array String := #[]
     let mut ancestors : Array String := #[]
     let mut cur := m
@@ -519,38 +550,35 @@ private def electForkGroupLeaders (missions : Array ChromeMissionInput) : Array 
     while !cur.forkSourceId.isEmpty && steps < missions.size do
       let src := cur.forkSourceId
       if seen.contains src || src == cur.id then break
-      match missions.find? (·.id == src) with
+      match byId[src]? with
       | none => break
       | some target =>
         seen := seen.push cur.id
         cur := target
         ancestors := ancestors.push cur.id
         steps := steps + 1
-    { missionId := m.id, rootId := cur.id, depth := ancestors.size, ancestors := ancestors : ForkLineageInfo }
-  let infos := missions.map traceLineage
-  let mut rootIds : Array String := #[]
-  for inf in infos do
-    if !rootIds.contains inf.rootId then
-      rootIds := rootIds.push inf.rootId
-  let mut leaders : Array (String × String) := #[]
+    let inf : ForkLineageInfo := { missionId := m.id, rootId := cur.id, depth := ancestors.size, ancestors := ancestors }
+    infoById := infoById.insert m.id inf
+    let prevGrp := (groupsByRoot[cur.id]?).getD #[]
+    if prevGrp.isEmpty then rootIds := rootIds.push cur.id
+    groupsByRoot := groupsByRoot.insert cur.id (prevGrp.push m)
+  let mut leaders : Std.HashMap String String := {}
   for rid in rootIds do
-    let group := missions.filter fun m =>
-      (infos.find? (·.missionId == m.id)).map (·.rootId) == some rid
+    let group := (groupsByRoot[rid]?).getD #[]
     if group.size ≥ 2 then
-      let mut effective : Array (String × UInt64) := group.map (fun m => (m.id, m.updatedAtMs))
+      let mut effective : Std.HashMap String UInt64 := {}
+      for m in group do
+        effective := effective.insert m.id m.updatedAtMs
       for m in group do
         if m.createdAtMs > 0 then
-          let ancs := ((infos.find? (·.missionId == m.id)).map (·.ancestors)).getD #[]
+          let ancs := ((infoById[m.id]?).map (·.ancestors)).getD #[]
           for ancId in ancs do
-            if let some eIdx := effective.findIdx? (fun (k, _) => k == ancId) then
-              let ancAct := effective[eIdx]!.2
+            if let some ancAct := effective[ancId]? then
               if ancAct ≤ m.createdAtMs + forkSettleGraceMs then
                 let clamped := if ancAct < m.createdAtMs then ancAct else m.createdAtMs
-                effective := effective.set! eIdx (ancId, clamped)
-      let getEff := fun (mid : String) =>
-        ((effective.find? (fun (k, _) => k == mid)).map (·.2)).getD 0
-      let getDepth := fun (mid : String) =>
-        ((infos.find? (·.missionId == mid)).map (·.depth)).getD 0
+                effective := effective.insert ancId clamped
+      let getEff := fun (mid : String) => (effective[mid]?).getD 0
+      let getDepth := fun (mid : String) => ((infoById[mid]?).map (·.depth)).getD 0
       let beats := fun (a b : ChromeMissionInput) =>
         let unretA : Nat := if a.acknowledged || isSupersededStoppedMission a then 0 else 1
         let unretB : Nat := if b.acknowledged || isSupersededStoppedMission b then 0 else 1
@@ -569,7 +597,7 @@ private def electForkGroupLeaders (missions : Array ChromeMissionInput) : Array 
         let cand := group[idx]!
         if beats cand best then best := cand
       for m in group do
-        leaders := leaders.push (m.id, best.id)
+        leaders := leaders.insert m.id best.id
   return leaders
 
 private def sortMissions (xs : Array ChromeMissionInput) : Array ChromeMissionInput :=
@@ -581,16 +609,18 @@ private def sortMissions (xs : Array ChromeMissionInput) : Array ChromeMissionIn
     else a.id < b.id
 
 /-- Bounded parent-chain cycle check (`parentReachesSelf == 1` iff following `parentMissionId`
-    from `m.parentMissionId` reaches `m.id` or exceeds `byId.size` hops). -/
-private def parentChainReachesSelf (m : ChromeMissionInput) (byId : Array ChromeMissionInput) : Bool := Id.run do
+    from `m.parentMissionId` reaches `m.id` or exceeds `maxSteps` hops). -/
+private def parentChainReachesSelf
+    (m : ChromeMissionInput)
+    (byId : Std.HashMap String ChromeMissionInput)
+    (maxSteps : Nat) : Bool := Id.run do
   if m.parentMissionId.isEmpty then return false
   if m.parentMissionId == m.id then return true
-  let maxSteps := byId.size + 1
   let mut cur := m.parentMissionId
   let mut steps := 0
   while !cur.isEmpty && steps < maxSteps do
     if cur == m.id then return true
-    match byId.find? (·.id == cur) with
+    match byId[cur]? with
     | none => return false
     | some p =>
       cur := p.parentMissionId
@@ -764,78 +794,79 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
     }
   ]
 
+  -- Note: `st.missions` is already deduplicated on sync/hydration; run `excludeBtwMissionInputs` + `sortMissions` in O(N log N).
   let rawMerged := sortMissions (excludeBtwMissionInputs (mergeMissionInputs st.missions))
-  -- Group fork lineages (`forkLeaders` / `nestMissions` in `orb/src/missionTree.ts`):
-  -- A leading fork takes the place (launched `parentMissionId`, `project`, `folder`) of the conversation it continues,
-  -- while earlier versions fold inside their group's leader.
+  let mut rawById : Std.HashMap String ChromeMissionInput := {}
+  for m in rawMerged do
+    rawById := rawById.insert m.id m
+
+  -- Group fork lineages (`forkLeaders` / `nestMissions` in `orb/src/missionTree.ts`) in O(N):
   let forkLeaderMap := electForkGroupLeaders rawMerged
-  let findLeaderId := fun (mid : String) =>
-    (forkLeaderMap.find? (fun (k, _) => k == mid)).map (·.2)
   let isNonLeaderVersion := fun (mid : String) =>
-    match findLeaderId mid with
+    match forkLeaderMap[mid]? with
     | some lid => lid != mid
     | none => false
-  let merged : Array ChromeMissionInput := rawMerged.map fun m =>
-    match findLeaderId m.id with
-    | none => m
-    | some lid =>
-      if lid != m.id then m
-      else
-        let placeOf :=
-          (rawMerged.find? fun c =>
-            findLeaderId c.id == some lid &&
-            (c.forkSourceId.isEmpty || !rawMerged.any (·.id == c.forkSourceId))).getD m
-        let effParent := if !placeOf.parentMissionId.isEmpty then placeOf.parentMissionId else m.parentMissionId
-        let effProj := if !m.project.isEmpty then m.project else placeOf.project
-        let effFolder := if !m.folder.isEmpty then m.folder else placeOf.folder
-        { m with parentMissionId := effParent, project := effProj, folder := effFolder }
 
-  -- Determine cycle-safe parent links:
-  -- 1. Non-leader fork versions nest directly under their group's leader (`version: true` in `nestMissions`).
-  -- 2. Launched children route through `Orb.Kernel.sidebarVisibility` bit 16 (`65536`), with `isForkBit == 0`
-  --    since `parseMissionInput?` already strips fork-of-parent links (`missionParent` in `orb/src/missionTree.ts`).
-  let mut safeParentOf : Array (String × String) := #[]
+  let mut placeOfByLeader : Std.HashMap String ChromeMissionInput := {}
+  if !forkLeaderMap.isEmpty then
+    for c in rawMerged do
+      if let some lid := forkLeaderMap[c.id]? then
+        if !placeOfByLeader.contains lid && (c.forkSourceId.isEmpty || !rawById.contains c.forkSourceId) then
+          placeOfByLeader := placeOfByLeader.insert lid c
+
+  let merged : Array ChromeMissionInput :=
+    if forkLeaderMap.isEmpty then rawMerged
+    else rawMerged.map fun m =>
+      match forkLeaderMap[m.id]? with
+      | none => m
+      | some lid =>
+        if lid != m.id then m
+        else
+          let placeOf := (placeOfByLeader[lid]?).getD m
+          let effParent := if !placeOf.parentMissionId.isEmpty then placeOf.parentMissionId else m.parentMissionId
+          let effProj := if !m.project.isEmpty then m.project else placeOf.project
+          let effFolder := if !m.folder.isEmpty then m.folder else placeOf.folder
+          { m with parentMissionId := effParent, project := effProj, folder := effFolder }
+
+  let mut mergedById : Std.HashMap String ChromeMissionInput := {}
   for m in merged do
-    match findLeaderId m.id with
+    mergedById := mergedById.insert m.id m
+  let maxHops := merged.size + 1
+
+  -- Determine cycle-safe parent links in O(N):
+  let mut safeParentMap : Std.HashMap String String := {}
+  for m in merged do
+    let checkLaunchedParent := Id.run do
+      if m.parentMissionId.isEmpty then return false
+      match mergedById[m.parentMissionId]? with
+      | none => return false
+      | some p =>
+        let sameProj := m.project.isEmpty || p.project.isEmpty || p.project == m.project
+        if !sameProj then return false
+        let reachesSelfBit : UInt8 := if parentChainReachesSelf m mergedById maxHops then 1 else 0
+        let visWord := Orb.Kernel.sidebarVisibility 1 0 0 1 0 reachesSelfBit
+        return (visWord &&& 65536) != 0
+    match forkLeaderMap[m.id]? with
     | some lid =>
       if lid != m.id then
-        safeParentOf := safeParentOf.push (m.id, lid)
-      else
-        let hasParentObj :=
-          !m.parentMissionId.isEmpty &&
-          merged.any (fun p =>
-            p.id == m.parentMissionId &&
-            (m.project.isEmpty || p.project.isEmpty || p.project == m.project))
-        let hasParentBit : UInt8 := if hasParentObj then 1 else 0
-        let reachesSelfBit : UInt8 := if hasParentObj && parentChainReachesSelf m merged then 1 else 0
-        let visWord := Orb.Kernel.sidebarVisibility 1 0 0 hasParentBit 0 reachesSelfBit
-        if (visWord &&& 65536) != 0 then
-          safeParentOf := safeParentOf.push (m.id, m.parentMissionId)
+        safeParentMap := safeParentMap.insert m.id lid
+      else if checkLaunchedParent then
+        safeParentMap := safeParentMap.insert m.id m.parentMissionId
     | none =>
-      let hasParentObj :=
-        !m.parentMissionId.isEmpty &&
-        merged.any (fun p =>
-          p.id == m.parentMissionId &&
-          (m.project.isEmpty || p.project.isEmpty || p.project == m.project))
-      let hasParentBit : UInt8 := if hasParentObj then 1 else 0
-      let reachesSelfBit : UInt8 := if hasParentObj && parentChainReachesSelf m merged then 1 else 0
-      let visWord := Orb.Kernel.sidebarVisibility 1 0 0 hasParentBit 0 reachesSelfBit
-      if (visWord &&& 65536) != 0 then
-        safeParentOf := safeParentOf.push (m.id, m.parentMissionId)
+      if checkLaunchedParent then
+        safeParentMap := safeParentMap.insert m.id m.parentMissionId
 
-  let getSafeParent := fun (mid : String) =>
-    (safeParentOf.find? (fun (k, _) => k == mid)).map (·.2)
+  let getSafeParent := fun (mid : String) => safeParentMap[mid]?
 
-  -- Resolve effective `(project, folder)` along cycle-safe parent links so children with `folder == ""`
-  -- inherit their root ancestor's project & folder placement.
+  -- Resolve effective `(project, folder)` along cycle-safe parent links in O(N):
   let resolveEffectivePlacement := fun (start : ChromeMissionInput) => Id.run do
     let mut cur := start
     let mut steps := 0
-    while steps < merged.size do
-      match getSafeParent cur.id with
+    while steps < maxHops do
+      match safeParentMap[cur.id]? with
       | none => break
       | some pid =>
-        match merged.find? (·.id == pid) with
+        match mergedById[pid]? with
         | none => break
         | some p =>
           cur := p
@@ -848,43 +879,71 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
     let (ep, ef) := resolveEffectivePlacement m
     { m with project := ep, folder := ef }
 
+  let mut placedById : Std.HashMap String ChromeMissionInput := {}
+  for m in placedMerged do
+    placedById := placedById.insert m.id m
+
   -- Discover any implicit projects referenced by missions that aren't in `st.projects`
   let mut projects := st.projects
+  let mut projSeen : Std.HashMap String Bool := {}
+  for p in projects do
+    projSeen := projSeen.insert p.slug true
   for m in placedMerged do
-    if !m.project.isEmpty && !projects.any (·.slug == m.project) then
+    if !m.project.isEmpty && !projSeen.contains m.project then
+      projSeen := projSeen.insert m.project true
       projects := projects.push { slug := m.project, name := m.project }
 
-  -- Compute `hasVisibleDescendant` bottom-up (`placedMerged.size` passes suffices for any DAG)
-  -- Matching `ProjectFiles.tsx`: `!isArchived(m) && (!isSupersededInTree(m, byId) || isSelectedMissionId(m.id))`
+  -- Compute `directMatchSet` and bottom-up `visDescSet` in O(N):
+  let mut directMatchSet : Std.HashMap String Bool := {}
   let mut directMatchIds : Array String := #[]
   for m in placedMerged do
     let isSel := isSelectedMissionTarget sel m.id
-    let supHidden := isSupersededInTree m placedMerged getSafeParent && !isSel
+    let supHidden := isSupersededInTree m placedById maxHops getSafeParent && !isSel
     let directMatch :=
       if supHidden then false
       else if filterActive then matchesFilterNeedle m needleLower
       else !m.acknowledged || isSel
     if directMatch then
+      directMatchSet := directMatchSet.insert m.id true
       directMatchIds := directMatchIds.push m.id
 
-  let mut visDescIds : Array String := #[]
-  for _ in [0:placedMerged.size] do
-    for m in placedMerged do
-      if let some pid := getSafeParent m.id then
-        let childVisible := directMatchIds.contains m.id || visDescIds.contains m.id
-        if childVisible && !visDescIds.contains pid then
-          visDescIds := visDescIds.push pid
+  let mut visDescSet : Std.HashMap String Bool := {}
+  for mid in directMatchIds do
+    let mut cur := mid
+    let mut steps := 0
+    while steps < maxHops do
+      match safeParentMap[cur]? with
+      | none => break
+      | some pid =>
+        if visDescSet.contains pid then break
+        visDescSet := visDescSet.insert pid true
+        cur := pid
+        steps := steps + 1
 
-  let mut retainedIds : Array String := #[]
+  let mut retainedMissions : Array ChromeMissionInput := #[]
   for m in placedMerged do
-    let mf : UInt8 := if directMatchIds.contains m.id then 1 else 0
-    let hvd : UInt8 := if visDescIds.contains m.id then 1 else 0
+    let mf : UInt8 := if directMatchSet.contains m.id then 1 else 0
+    let hvd : UInt8 := if visDescSet.contains m.id then 1 else 0
     let ack : UInt8 := if m.acknowledged then 1 else 0
     let visWord := Orb.Kernel.sidebarVisibility mf hvd ack 0 0 0
     if (visWord &&& 1) != 0 then
-      retainedIds := retainedIds.push m.id
+      retainedMissions := retainedMissions.push m
 
-  let retainedMissions := placedMerged.filter (fun m => retainedIds.contains m.id)
+  -- Index retained children by parent id and root/project missions by project slug in O(N):
+  let mut childrenByParent : Std.HashMap String (Array ChromeMissionInput) := {}
+  let mut missionsByProject : Std.HashMap String (Array ChromeMissionInput) := {}
+  let mut unassigned : Array ChromeMissionInput := #[]
+  for m in retainedMissions do
+    if let some pid := safeParentMap[m.id]? then
+      let prev := (childrenByParent[pid]?).getD #[]
+      childrenByParent := childrenByParent.insert pid (prev.push m)
+    else if m.project.isEmpty then
+      unassigned := unassigned.push m
+    if !m.project.isEmpty then
+      let pprev := (missionsByProject[m.project]?).getD #[]
+      missionsByProject := missionsByProject.insert m.project (pprev.push m)
+
+  let subtreeFuel := retainedMissions.size + 1
 
   -- Matching `TreeView.ts` (`holdsSelected`, `countNested`, `countVersions`):
   -- Mission subtrees (`m:<id>`) default to COLLAPSED unless a descendant inside the subtree is currently selected.
@@ -892,14 +951,14 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
     match fuel with
     | 0 => false
     | fuel' + 1 =>
-      let kids := retainedMissions.filter (fun c => getSafeParent c.id == some mid)
+      let kids := (childrenByParent[mid]?).getD #[]
       kids.any (fun c => isSelectedMissionTarget sel c.id || missionHoldsSelectedDesc fuel' c.id)
 
   let rec countMissionDescendants (fuel : Nat) (mid : String) : Nat × Nat × Nat :=
     match fuel with
     | 0 => (0, 0, 0)
     | fuel' + 1 =>
-      let kids := retainedMissions.filter (fun c => getSafeParent c.id == some mid)
+      let kids := (childrenByParent[mid]?).getD #[]
       kids.foldl (init := (0, 0, 0)) fun (totL, liveL, totV) c =>
         let (subL, subLive, subV) := countMissionDescendants fuel' c.id
         if isNonLeaderVersion c.id then
@@ -908,23 +967,19 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
           let selfLive := if isWorkingMissionStatus c.status then 1 else 0
           (totL + 1 + subL, liveL + selfLive + subLive, totV + subV)
 
-  -- Helper to emit mission + cycle-safe descendants recursively up to bounded depth `retainedMissions.size`
+  -- Helper to emit mission + cycle-safe descendants recursively up to bounded depth `subtreeFuel`
   -- Launched children come first in list order, followed by earlier fork versions sorted by `updatedAtMs` descending (`nestMissions`).
   let rec emitMissionSubtree (fuel : Nat) (m : ChromeMissionInput) (depth : Nat) (acc : Array SidebarRow) : Array SidebarRow :=
     match fuel with
     | 0 => acc
     | fuel' + 1 =>
-      let launchedChildren := retainedMissions.filter (fun c => getSafeParent c.id == some m.id && !isNonLeaderVersion c.id)
-      let versionChildren :=
-        (retainedMissions.filter (fun c => getSafeParent c.id == some m.id && isNonLeaderVersion c.id)).qsort fun a b =>
-          if a.updatedAtMs != b.updatedAtMs then a.updatedAtMs > b.updatedAtMs else a.id < b.id
-      let children := launchedChildren ++ versionChildren
+      let rawKids := (childrenByParent[m.id]?).getD #[]
+      let hasChildren := !rawKids.isEmpty
+      let defaultOpen := hasChildren && missionHoldsSelectedDesc subtreeFuel m.id
       let rowId := s!"m:{m.id}"
-      let hasChildren := !children.isEmpty
-      let defaultOpen := hasChildren && missionHoldsSelectedDesc (retainedMissions.size + 1) m.id
       let exp := resolveExpanded rowId defaultOpen
       let (totL, liveL, totV) :=
-        if hasChildren then countMissionDescendants (retainedMissions.size + 1) m.id else (0, 0, 0)
+        if hasChildren then countMissionDescendants subtreeFuel m.id else (0, 0, 0)
       let totalCount := if totL > 0 then totL else totV
       let liveCount := if totL > 0 then liveL else 0
       let row : SidebarRow := {
@@ -947,23 +1002,48 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
       }
       let nextAcc := acc.push row
       if !hasChildren || !exp then nextAcc
-      else children.foldl (fun a c => emitMissionSubtree fuel' c (depth + 1) a) nextAcc
-
-  let unassigned := retainedMissions.filter (fun m => m.project.isEmpty && (getSafeParent m.id).isNone)
+      else
+        let launchedChildren := rawKids.filter (fun c => !isNonLeaderVersion c.id)
+        let versionChildren :=
+          (rawKids.filter (fun c => isNonLeaderVersion c.id)).qsort fun a b =>
+            if a.updatedAtMs != b.updatedAtMs then a.updatedAtMs > b.updatedAtMs else a.id < b.id
+        let children := launchedChildren ++ versionChildren
+        children.foldl (fun a c => emitMissionSubtree fuel' c (depth + 1) a) nextAcc
 
   for proj in projects do
-    let projMissions := retainedMissions.filter (·.project == proj.slug)
+    let projMissions := (missionsByProject[proj.slug]?).getD #[]
+    let mut folderSeen : Std.HashMap String Bool := {}
     let mut folderSet : Array String := #[]
+    let addAncestors := fun (seen : Std.HashMap String Bool) (arr : Array String) (p : String) => Id.run do
+      let mut s := seen
+      let mut out := arr
+      for anc in ancestorFolderPaths p do
+        if !s.contains anc then
+          s := s.insert anc true
+          out := out.push anc
+      (s, out)
     for rawF in proj.folders do
-      for anc in ancestorFolderPaths rawF do
-        if !folderSet.contains anc then folderSet := folderSet.push anc
+      let (s1, o1) := addAncestors folderSeen folderSet rawF
+      folderSeen := s1
+      folderSet := o1
+    for rawFile in proj.files do
+      let fp := parentFolderPath rawFile
+      if !fp.isEmpty then
+        let (s1, o1) := addAncestors folderSeen folderSet fp
+        folderSeen := s1
+        folderSet := o1
     for m in projMissions do
-      for anc in ancestorFolderPaths m.folder do
-        if !folderSet.contains anc then folderSet := folderSet.push anc
+      let (s1, o1) := addAncestors folderSeen folderSet m.folder
+      folderSeen := s1
+      folderSet := o1
     let sortedFolders := folderSet.qsort (· < ·)
-    if !filterActive || !projMissions.isEmpty then
+    let sortedFiles :=
+      if filterActive then
+        (proj.files.filter fun fp => LeanSys.Search.containsBytesLower fp.toUTF8 needleLower).qsort (· < ·)
+      else
+        proj.files.qsort (· < ·)
+    if !filterActive || !projMissions.isEmpty || !sortedFiles.isEmpty then
       let projRowId := s!"proj:{proj.slug}"
-      let projExpandable := !sortedFolders.isEmpty || !projMissions.isEmpty
       let projHoldsSelected :=
         sel == s!"c:{proj.slug}" ||
         sel == s!"ps:{proj.slug}" ||
@@ -972,7 +1052,6 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
         projMissions.any (fun m => isSelectedMissionTarget sel m.id)
       let projDefaultOpen := projHoldsSelected || projects.size == 1
       let projExpanded := resolveExpanded projRowId projDefaultOpen
-      let projShowOpen := projExpandable && projExpanded
       let projIconColor := if proj.color.isEmpty then "#8a8a8a" else proj.color
       rows := rows.push {
         rowId := projRowId
@@ -981,33 +1060,31 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
         title := proj.name
         target := s!"project:{proj.slug}"
         project := proj.slug
-        icon := if projShowOpen then "folder-open" else "folder"
+        icon := if projExpanded then "folder-open" else "folder"
         color := projIconColor
-        expandable := projExpandable
-        expanded := projShowOpen
+        expandable := true
+        expanded := projExpanded
         selected := sel == s!"c:{proj.slug}"
       }
       if projExpanded then
+        let beforeProjChildren := rows.size
         let rec emitFolderSubtree (fuel : Nat) (parentPath : String) (depth : Nat) (acc : Array SidebarRow) : Array SidebarRow :=
           match fuel with
           | 0 => acc
           | fuel' + 1 =>
             let childFolders := sortedFolders.filter (fun fp => parentFolderPath fp == parentPath)
             let afterFolders := childFolders.foldl (init := acc) fun a fp =>
-              let hasSubfolders := sortedFolders.any (fun sub => parentFolderPath sub == fp)
-              let folderMissions := projMissions.filter (fun m => m.folder == fp && (getSafeParent m.id).isNone)
               let hasAnyDescMission := projMissions.any (fun m => m.folder == fp || m.folder.startsWith (fp ++ "/"))
-              if filterActive && !hasAnyDescMission then a
+              let hasAnyDescFile := sortedFiles.any (fun fileP => parentFolderPath fileP == fp || fileP.startsWith (fp ++ "/"))
+              if filterActive && !hasAnyDescMission && !hasAnyDescFile then a
               else
                 let fRowId := s!"folder:{proj.slug}:{fp}"
-                let fExpandable := hasSubfolders || !folderMissions.isEmpty
                 let fHoldsSelected :=
                   sel == s!"pf:{proj.slug}:{fp}" ||
                   sel.startsWith s!"pf:{proj.slug}:{fp}/" ||
                   projMissions.any (fun m =>
                     (m.folder == fp || m.folder.startsWith (fp ++ "/")) && isSelectedMissionTarget sel m.id)
                 let fExpanded := resolveExpanded fRowId (fHoldsSelected || hasAnyDescMission)
-                let fShowOpen := fExpandable && fExpanded
                 let fRow : SidebarRow := {
                   rowId := fRowId
                   kind := "folder"
@@ -1017,22 +1094,55 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
                   target := fRowId
                   project := proj.slug
                   folder := fp
-                  icon := if fShowOpen then "folder-open" else "folder"
+                  icon := if fExpanded then "folder-open" else "folder"
                   color := projIconColor
-                  expandable := fExpandable
-                  expanded := fShowOpen
+                  expandable := true
+                  expanded := fExpanded
                 }
                 let a1 := a.push fRow
                 if fExpanded then
-                  emitFolderSubtree fuel' fp (depth + 1) a1
+                  let a2 := emitFolderSubtree fuel' fp (depth + 1) a1
+                  if a2.size == a1.size && !filterActive then
+                    a2.push {
+                      rowId := s!"empty:{proj.slug}:{fp}"
+                      kind := "note"
+                      depth := depth + 1
+                      title := "Empty folder"
+                      project := proj.slug
+                      folder := fp
+                    }
+                  else a2
                 else a1
-            let directMissions := projMissions.filter (fun m => m.folder == parentPath && (getSafeParent m.id).isNone)
-            directMissions.foldl (fun a m => emitMissionSubtree (retainedMissions.size + 1) m depth a) afterFolders
+            let directMissions := projMissions.filter (fun m => m.folder == parentPath && (safeParentMap[m.id]?).isNone)
+            let afterMissions := directMissions.foldl (fun a m => emitMissionSubtree subtreeFuel m depth a) afterFolders
+            let directFiles := sortedFiles.filter (fun fileP => parentFolderPath fileP == parentPath)
+            directFiles.foldl (init := afterMissions) fun a fileP =>
+              let fileTarget := s!"pf:{proj.slug}:{fileP}"
+              a.push {
+                rowId := fileTarget
+                kind := "file"
+                depth := depth
+                title := basenameFolderPath fileP
+                subtitle := fileP
+                target := fileTarget
+                project := proj.slug
+                folder := parentPath
+                icon := "file"
+                selected := sel == fileTarget
+              }
         rows := emitFolderSubtree (sortedFolders.size + 2) "" 1 rows
+        if rows.size == beforeProjChildren && !filterActive then
+          rows := rows.push {
+            rowId := s!"empty:{proj.slug}"
+            kind := "note"
+            depth := 1
+            title := "No missions or files yet."
+            project := proj.slug
+          }
 
   -- Unassigned missions (`project == ""`)
   for m in unassigned do
-    rows := emitMissionSubtree (retainedMissions.size + 1) m 0 rows
+    rows := emitMissionSubtree subtreeFuel m 0 rows
 
   if projects.isEmpty && unassigned.isEmpty then
     rows := rows.push {
@@ -1152,12 +1262,16 @@ def queryPaletteItems (st : ChromeScopeState) (rawQuery : String) (limit : Nat :
       }, scVal)
 
   let merged := sortMissions (excludeBtwMissionInputs (mergeMissionInputs st.missions))
+  let mut mergedById : Std.HashMap String ChromeMissionInput := {}
+  for m in merged do
+    mergedById := mergedById.insert m.id m
+  let maxHops := merged.size + 1
   let directParent := fun (mid : String) =>
-    (merged.find? (·.id == mid)).bind fun r =>
+    (mergedById[mid]?).bind fun r =>
       if r.parentMissionId.isEmpty then none else some r.parentMissionId
   let mut rankIdx : Nat := 0
   for m in merged do
-    if !isSupersededInTree m merged directParent then
+    if !isSupersededInTree m mergedById maxHops directParent then
       let recencyBoost := if rankIdx < 40 then 40 - rankIdx else 0
       let activeBoost := if missionActivePriority m.status == 0 then 15 else 0
       let sub :=
@@ -1202,21 +1316,26 @@ def parsePersistedSidebarPayload? (fallbackScope : String) (rawJson : String) : 
     hydratedOnly := true
   }
 
-/-- Upsert a live `native_chrome_sync_state` payload into `NativeChromeHub` with monotonic `syncRevision` fencing.
-    Returns `(applied, updatedScopeState, nextHub)`. -/
-def NativeChromeHub.syncFromJson
-    (hub : NativeChromeHub)
-    (args : JVal) : Except String (Bool × ChromeScopeState × NativeChromeHub) := do
+/-- Pre-parsed `native_chrome_sync_state` payload computed outside any `IO.Ref` CAS loop. -/
+structure ParsedChromeSync where
+  scope         : String
+  syncRevision  : UInt64
+  selected      : String
+  onSettings    : Bool
+  isAdmin       : Bool
+  inboxEnabled  : Bool
+  inboxUnread   : Nat
+  settingsBadge : Nat
+  settingsDots  : Array String
+  projects      : Array ChromeProjectInput
+  missions      : Array ChromeMissionInput
+  deriving Repr, Inhabited
+
+def parseChromeSyncPayload (args : JVal) : Except String ParsedChromeSync := do
   let scope := (args.fieldStr? "scope").getD "" |>.trimAscii.toString
   if scope.isEmpty || scope.utf8ByteSize > 512 then
     throw "Invalid native_chrome_sync_state scope"
   let rev := (args.fieldUInt64? "revision").getD 1
-  let existing? := hub.scopes.find? (·.scope == scope)
-  if let some ex := existing? then
-    if !ex.hydratedOnly && rev < ex.syncRevision then
-      let nextHub := { hub with activeScope := scope }
-      return (false, ex, nextHub)
-
   let selected := (args.fieldStr? "selected").getD "" |>.trimAscii.toString
   let onSettings := (args.fieldBool? "on_settings").getD false
   let isAdmin := (args.fieldBool? "is_admin").getD true
@@ -1237,16 +1356,9 @@ def NativeChromeHub.syncFromJson
       for m in (arrJv.asArr?).getD #[] do
         if let some pm := parseMissionInput? m slug then
           missions := missions.push pm
-
-  let prevExpanded := (existing?.map (·.expandedIds)).getD #[]
-  let prevCollapsed := (existing?.map (·.collapsedIds)).getD #[]
-  let prevViewRev := (existing?.map (·.viewRevision)).getD 0
-  let bumpedView := if prevViewRev < 0xFFFFFFFFFFFFFFFF then prevViewRev + 1 else prevViewRev
-  let nextViewRev := if rev > bumpedView then rev else bumpedView
-  let nextScope : ChromeScopeState := {
+  return {
     scope := scope
     syncRevision := rev
-    viewRevision := nextViewRev
     selected := selected
     onSettings := onSettings
     isAdmin := isAdmin
@@ -1256,20 +1368,57 @@ def NativeChromeHub.syncFromJson
     settingsDots := settingsDots
     projects := projects
     missions := mergeMissionInputs missions
+  }
+
+/-- Apply a pre-parsed `ParsedChromeSync` in O(scopes) with monotonic `syncRevision` fencing. -/
+def NativeChromeHub.applyParsedSync
+    (hub : NativeChromeHub)
+    (p : ParsedChromeSync) : Bool × ChromeScopeState × NativeChromeHub := Id.run do
+  let existing? := hub.scopes.find? (·.scope == p.scope)
+  if let some ex := existing? then
+    if !ex.hydratedOnly && p.syncRevision < ex.syncRevision then
+      let nextHub := { hub with activeScope := p.scope }
+      return (false, ex, nextHub)
+  let prevExpanded := (existing?.map (·.expandedIds)).getD #[]
+  let prevCollapsed := (existing?.map (·.collapsedIds)).getD #[]
+  let prevViewRev := (existing?.map (·.viewRevision)).getD 0
+  let bumpedView := if prevViewRev < 0xFFFFFFFFFFFFFFFF then prevViewRev + 1 else prevViewRev
+  let nextViewRev := if p.syncRevision > bumpedView then p.syncRevision else bumpedView
+  let nextScope : ChromeScopeState := {
+    scope := p.scope
+    syncRevision := p.syncRevision
+    viewRevision := nextViewRev
+    selected := p.selected
+    onSettings := p.onSettings
+    isAdmin := p.isAdmin
+    inboxEnabled := p.inboxEnabled
+    inboxUnread := p.inboxUnread
+    settingsBadge := p.settingsBadge
+    settingsDots := p.settingsDots
+    projects := p.projects
+    missions := p.missions
     expandedIds := prevExpanded
     collapsedIds := prevCollapsed
     hydratedOnly := false
   }
-  let others := hub.scopes.filter (·.scope != scope)
+  let others := hub.scopes.filter (·.scope != p.scope)
   let trimmed :=
     if others.size + 1 > maxNativeChromeScopes then
       others.extract (others.size + 1 - maxNativeChromeScopes) others.size
     else others
   let nextHub : NativeChromeHub := {
-    activeScope := scope
+    activeScope := p.scope
     scopes := trimmed.push nextScope
   }
   return (true, nextScope, nextHub)
+
+/-- Upsert a live `native_chrome_sync_state` payload into `NativeChromeHub` with monotonic `syncRevision` fencing.
+    Returns `(applied, updatedScopeState, nextHub)`. -/
+def NativeChromeHub.syncFromJson
+    (hub : NativeChromeHub)
+    (args : JVal) : Except String (Bool × ChromeScopeState × NativeChromeHub) := do
+  let parsed ← parseChromeSyncPayload args
+  return hub.applyParsedSync parsed
 
 /-- Install a cold-hydrated `ChromeScopeState` if `scope` is not yet resident in `hub`. -/
 def NativeChromeHub.installHydratedScope
@@ -1293,7 +1442,8 @@ def NativeChromeHub.toggleExpand
     (hub : NativeChromeHub)
     (scope : String)
     (rowId : String)
-    (explicitExpanded? : Option Bool := none) : Option (Bool × ChromeScopeState × NativeChromeHub) := do
+    (explicitExpanded? : Option Bool := none)
+    (fallbackExpanded? : Option Bool := none) : Option (Bool × ChromeScopeState × NativeChromeHub) := do
   let targetScope := if scope.trimAscii.toString.isEmpty then hub.activeScope else scope.trimAscii.toString
   let cleanRow := rowId.trimAscii.toString
   if cleanRow.isEmpty then none
@@ -1302,7 +1452,10 @@ def NativeChromeHub.toggleExpand
   let curExpanded :=
     if cur.expandedIds.contains cleanRow then true
     else if cur.collapsedIds.contains cleanRow then false
-    else ((projectSidebarRows cur).find? (·.rowId == cleanRow)).map (·.expanded) |>.getD false
+    else
+      match fallbackExpanded? with
+      | some fb => fb
+      | none => ((projectSidebarRows cur).find? (·.rowId == cleanRow)).map (·.expanded) |>.getD false
   let nextExpanded := explicitExpanded?.getD (!curExpanded)
   let nextExpandedIds :=
     if nextExpanded then

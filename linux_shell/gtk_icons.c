@@ -76,6 +76,7 @@ static gboolean on_draw_icon(GtkWidget *w, cairo_t *cr, gpointer ud) {
     else if (strcmp(ic, "resources") == 0) { cairo_move_to(cr, 2.4, 4.4); cairo_line_to(cr, 5.2, 4.4); cairo_line_to(cr, 9.2, 8.0); cairo_line_to(cr, 13.6, 8.0); cairo_move_to(cr, 2.4, 11.6); cairo_line_to(cr, 5.2, 11.6); cairo_line_to(cr, 9.2, 8.0); cairo_move_to(cr, 11.4, 5.8); cairo_line_to(cr, 13.8, 8.0); cairo_line_to(cr, 11.4, 10.2); }
     else if (strcmp(ic, "gear") == 0) { cairo_arc(cr, 8.0, 8.0, 2.1, 0, 6.29); cairo_new_sub_path(cr); cairo_arc(cr, 8.0, 8.0, 4.7, 0, 6.29); for (int a = 0; a < 8; ++a) { static const double dx[8] = {1,.71,0,-.71,-1,-.71,0,.71}, dy[8] = {0,.71,1,.71,0,-.71,-1,-.71}; cairo_move_to(cr, 8.0 + dx[a] * 4.7, 8.0 + dy[a] * 4.7); cairo_line_to(cr, 8.0 + dx[a] * 6.1, 8.0 + dy[a] * 6.1); } }
     else if (strcmp(ic, "folder") == 0 || strcmp(ic, "folder-open") == 0) { cairo_move_to(cr, 2.0, 4.2); cairo_line_to(cr, 2.0, 12.6); cairo_line_to(cr, 13.8, 12.6); cairo_line_to(cr, 13.8, 5.2); cairo_line_to(cr, 7.6, 5.2); cairo_line_to(cr, 6.1, 3.4); cairo_line_to(cr, 2.6, 3.4); cairo_close_path(cr); if (ic[6] == '-') { cairo_move_to(cr, 2.2, 8.2); cairo_line_to(cr, 13.8, 8.2); } }
+    else if (strcmp(ic, "file") == 0) { cairo_move_to(cr, 3.5, 2.0); cairo_line_to(cr, 9.2, 2.0); cairo_line_to(cr, 12.2, 5.0); cairo_line_to(cr, 12.2, 13.8); cairo_line_to(cr, 3.5, 13.8); cairo_close_path(cr); cairo_move_to(cr, 9.0, 2.0); cairo_line_to(cr, 9.0, 5.2); cairo_line_to(cr, 12.2, 5.2); }
     else if (strcmp(ic, "skills") == 0) { cairo_move_to(cr, 2.5, 5.2); cairo_line_to(cr, 8.0, 2.4); cairo_line_to(cr, 13.5, 5.2); cairo_line_to(cr, 8.0, 8.0); cairo_close_path(cr); cairo_move_to(cr, 2.5, 8.2); cairo_line_to(cr, 8.0, 11.0); cairo_line_to(cr, 13.5, 8.2); cairo_move_to(cr, 2.5, 11.2); cairo_line_to(cr, 8.0, 14.0); cairo_line_to(cr, 13.5, 11.2); }
     else if (strcmp(ic, "key") == 0) { cairo_arc(cr, 5.8, 8.0, 2.4, 0, 6.29); cairo_move_to(cr, 8.2, 8.0); cairo_line_to(cr, 13.4, 8.0); cairo_line_to(cr, 12.1, 9.4); cairo_move_to(cr, 11.0, 8.0); cairo_line_to(cr, 11.0, 9.7); }
     else if (strcmp(ic, "bell") == 0) { cairo_arc(cr, 8.0, 5.8, 3.2, 3.14, 6.28); cairo_line_to(cr, 11.2, 8.2); cairo_line_to(cr, 12.8, 10.6); cairo_line_to(cr, 3.2, 10.6); cairo_line_to(cr, 4.8, 8.2); cairo_close_path(cr); cairo_new_sub_path(cr); cairo_arc(cr, 8.0, 12.2, 1.5, 0, 3.14); }
@@ -98,6 +99,28 @@ GtkWidget *orb_make_icon_widget(OrbIconSpinner *sp, const char *icon, const char
         g_signal_connect(da, "destroy", G_CALLBACK(on_spin_widget_destroy), sp);
     }
     return g_signal_connect(da, "draw", G_CALLBACK(on_draw_icon), sp), da;
+}
+static gboolean on_ptr_enter(GtkWidget *w, GdkEventCrossing *ev, gpointer ud) {
+    (void)ud;
+    GdkWindow *gw = ev ? ev->window : gtk_widget_get_window(w);
+    if (gw && gtk_widget_get_sensitive(w)) {
+        GdkCursor *cur = gdk_cursor_new_from_name(gdk_window_get_display(gw), "pointer");
+        gdk_window_set_cursor(gw, cur);
+        if (cur) { g_object_unref(cur); }
+    }
+    return FALSE;
+}
+static gboolean on_ptr_leave(GtkWidget *w, GdkEventCrossing *ev, gpointer ud) {
+    (void)ud;
+    GdkWindow *gw = ev ? ev->window : gtk_widget_get_window(w);
+    if (gw) { gdk_window_set_cursor(gw, NULL); }
+    return FALSE;
+}
+void orb_gtk_bind_pointer_cursor(GtkWidget *w) {
+    if (!w) { return; }
+    gtk_widget_add_events(w, GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
+    g_signal_connect(w, "enter-notify-event", G_CALLBACK(on_ptr_enter), NULL);
+    g_signal_connect(w, "leave-notify-event", G_CALLBACK(on_ptr_leave), NULL);
 }
 #endif
 

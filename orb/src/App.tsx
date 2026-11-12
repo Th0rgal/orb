@@ -662,8 +662,12 @@ export default function App() {
     }
   };
   const [projectMissions, setProjectMissions] = createSignal<Record<string, Mission[]>>({});
+  const [projectFolders, setProjectFolders] = createSignal<Record<string, string[]>>({});
+  const [projectFiles, setProjectFiles] = createSignal<Record<string, string[]>>({});
   createEffect(on(connectionVersion, () => {
     setProjectMissions({});
+    setProjectFolders({});
+    setProjectFiles({});
     setCompletedMissions([]);
     resetMissionHierarchy();
     resetMissionLookup();
@@ -1078,6 +1082,8 @@ export default function App() {
       const liveMissions = missions();
       const compMissions = completedMissions();
       const projMissions = projectMissions();
+      const projFolders = projectFolders();
+      const projFiles = projectFiles();
       nativeChromeSyncer.schedule({
         scope,
         selected: sel,
@@ -1089,6 +1095,8 @@ export default function App() {
         settingsDots: dots,
         projects: projs,
         projectColors: projColors,
+        projectFolders: projFolders,
+        projectFiles: projFiles,
         missions: liveMissions,
         completedMissions: compMissions,
         projectMissions: projMissions,
@@ -1607,6 +1615,10 @@ export default function App() {
       onProjectMissions={(slug, rows) => {
         const clean = rows.filter(m => !isMissionDeleting(m.id));
         setProjectMissions(prev => ({ ...prev, [slug]: clean }));
+      }}
+      onProjectEntries={(slug, folders, files) => {
+        setProjectFolders(prev => ({ ...prev, [slug]: folders }));
+        setProjectFiles(prev => ({ ...prev, [slug]: files }));
       }}
       open={open}
       onNewCloudAgent={(project, path) => { setNewProject(project); setNewFolder(path ? {project, path} : null); open("cloud-agent"); }}
