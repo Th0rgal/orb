@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "description": "Frozen Rust/client wire expectations for PROV01 and PROV05. Connected means configured credentials, not a live authentication or quota verdict. Fixture credentials are inert and must never be sent to a vendor.",
+  "providers": [
+    {"provider":{"id":"10000000-0000-4000-8000-000000000001","name":"Anthropic fixture","provider_type":"anthropic","enabled":true,"oauth":{"access_token":"fixture-only-no-live-access"}},"expected_status":"connected"},
+    {"provider":{"id":"10000000-0000-4000-8000-000000000002","name":"OpenAI fixture","provider_type":"openai","enabled":true,"api_key":"fixture-only-no-live-access"},"expected_status":"connected"},
+    {"provider":{"id":"10000000-0000-4000-8000-000000000003","name":"Antigravity fixture","provider_type":"antigravity","enabled":true,"oauth":{"access_token":"fixture-only-no-live-access"}},"expected_status":"connected"},
+    {"provider":{"id":"10000000-0000-4000-8000-000000000004","name":"Muse fixture","provider_type":"muse-code","enabled":true,"api_key":"fixture-only-no-live-access"},"expected_status":"connected"},
+    {"provider":{"id":"10000000-0000-4000-8000-000000000005","name":"Kimi fixture","provider_type":"kimi","enabled":true,"api_key":"fixture-only-no-live-access"},"expected_status":"connected"},
+    {"provider":{"id":"10000000-0000-4000-8000-000000000006","name":"No credentials fixture","provider_type":"anthropic","enabled":true},"expected_status":"needs_auth"},
+    {"provider":{"id":"10000000-0000-4000-8000-000000000007","name":"Disabled fixture","provider_type":"anthropic","enabled":false,"api_key":"fixture-only-no-live-access"},"expected_status":"connected"}
+  ],
+  "codex": [
+    {"name":"both windows retain numeric epoch seconds","upstream":{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":35,"reset_at":1740001800,"limit_window_seconds":18000},"secondary_window":{"used_percent":62,"reset_at":1740604800,"limit_window_seconds":604800}}},"expected":{"codex_primary_reset_at":1740001800,"codex_secondary_reset_at":1740604800,"codex_primary_used_percent":35,"codex_secondary_used_percent":62},"expected_optimize_resets":["2025-02-19T21:50:00Z","2025-02-26T21:20:00Z"],"absent_fields":[]},
+    {"name":"explicit zero is not an absent epoch","upstream":{"rate_limit":{"primary_window":{"used_percent":0,"reset_at":0}}},"expected":{"codex_primary_reset_at":0},"absent_fields":["codex_secondary_reset_at"]},
+    {"name":"missing epochs remain absent","upstream":{"rate_limit":{"primary_window":{"used_percent":5},"secondary_window":{"used_percent":9}}},"expected":{},"absent_fields":["codex_primary_reset_at","codex_secondary_reset_at"]},
+    {"name":"signed epochs preserve the Rust i64 contract","upstream":{"rate_limit":{"primary_window":{"reset_at":-1}}},"expected":{"codex_primary_reset_at":-1},"absent_fields":["codex_secondary_reset_at"]},
+    {"name":"epochs outside signed i64 are unavailable","upstream":{"rate_limit":{"primary_window":{"reset_at":9223372036854775808}}},"expected":{},"absent_fields":["codex_primary_reset_at","codex_secondary_reset_at"]},
+    {"name":"string epochs are not coerced into numeric fields","upstream":{"rate_limit":{"primary_window":{"reset_at":"1740001800"}}},"expected":{},"absent_fields":["codex_primary_reset_at","codex_secondary_reset_at"]}
+  ]
+}

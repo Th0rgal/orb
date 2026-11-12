@@ -13,6 +13,7 @@ import OrbCore.ManagedProviderTests
 import OrbCore.ManagedProviderSealingTests
 import OrbCore.ManagedProvisioningTests
 import OrbCore.ManagedResumeTests
+import OrbCore.ProviderContractTests
 
 namespace OrbCore.SelfTest
 
@@ -6137,6 +6138,12 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
 set_option maxHeartbeats 800000 in
 set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
+  -- Wire compatibility regressions run before the broader integration suite.
+  try
+    OrbCore.ProviderContractTests.run
+  catch e =>
+    IO.eprintln s!"[orb-core-test] FAIL: {e}"
+    return 1
   -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
   let prodNoSecrets : CoreConfig := { devMode := false, host := "127.0.0.1" }
   let prodPlaceholder : CoreConfig := {

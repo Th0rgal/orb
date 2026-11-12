@@ -576,6 +576,36 @@ private def buildOptimizeWindow
     ("reset_in_seconds", .null)
   ]
 
+/-- The production wham projection, kept pure so wire fixtures need no vendor calls.
+    Scalar Codex fields and optimize-window fields have separate client contracts. -/
+def projectCodexUsage (wham : JVal) : Array (String × JVal) × Array JVal × JVal := Id.run do
+  let mut fields : Array (String × JVal) := #[
+    ("codex_plan_type", .str ((wham.fieldStr? "plan_type").getD "pro")),
+    ("codex_source", .str "usage")]
+  let mut windows : Array JVal := #[]
+  let mut primary : JVal := .null
+  if let some rl := wham.field? "rate_limit" then
+    if let some pw := rl.field? "primary_window" then
+      let usedPct := match pw.field? "used_percent" with | some (.num n) => n | _ => "0"
+      let resetSec := (pw.fieldUInt64? "reset_at").getD 0
+      let resetIso := if resetSec > 0 then formatEpochIso8601Utc resetSec else ""
+      let winSecs := (pw.fieldNat? "limit_window_seconds").getD 18000
+      fields := fields.push ("codex_primary_used_percent", .num usedPct)
+      fields := fields.push ("codex_primary_window_minutes", JVal.nat (winSecs / 60))
+      if !resetIso.isEmpty then fields := fields.push ("codex_primary_reset_at", .str resetIso)
+      windows := windows.push (buildOptimizeWindow "5h" "5-hour" "used_pct" "codex_wham" usedPct winSecs (some resetIso))
+      primary := .str "5h"
+    if let some sw := rl.field? "secondary_window" then
+      let usedPct := match sw.field? "used_percent" with | some (.num n) => n | _ => "0"
+      let resetSec := (sw.fieldUInt64? "reset_at").getD 0
+      let resetIso := if resetSec > 0 then formatEpochIso8601Utc resetSec else ""
+      let winSecs := (sw.fieldNat? "limit_window_seconds").getD 604800
+      fields := fields.push ("codex_secondary_used_percent", .num usedPct)
+      fields := fields.push ("codex_secondary_window_minutes", JVal.nat (winSecs / 60))
+      if !resetIso.isEmpty then fields := fields.push ("codex_secondary_reset_at", .str resetIso)
+      windows := windows.push (buildOptimizeWindow "7d" "7-day" "used_pct" "codex_wham" usedPct winSecs (some resetIso))
+  return (fields, windows, primary)
+
 def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
   let nowSec ← nowEpoch
   let nowIso := formatEpochIso8601Utc nowSec
@@ -601,29 +631,10 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
   if pType == "openai" && hp.hasOAuth && !hp.oauthToken.isEmpty then
     if let .ok (code, _, some wham) ← sendJsonRequest "GET" "https://chatgpt.com/backend-api/wham/usage" (some hp.oauthToken) none #[] 6000 262144 then
       if 200 ≤ code && code < 300 then
-        let plan := (wham.fieldStr? "plan_type").getD "pro"
-        extraFields := extraFields.push ("codex_plan_type", .str plan)
-        extraFields := extraFields.push ("codex_source", .str "usage")
-        if let some rl := wham.field? "rate_limit" then
-          if let some pw := rl.field? "primary_window" then
-            let usedPct := match pw.field? "used_percent" with | some (.num n) => n | _ => "0"
-            let resetSec := (pw.fieldUInt64? "reset_at").getD 0
-            let resetIso := if resetSec > 0 then formatEpochIso8601Utc resetSec else ""
-            let winSecs := (pw.fieldNat? "limit_window_seconds").getD 18000
-            extraFields := extraFields.push ("codex_primary_used_percent", .num usedPct)
-            extraFields := extraFields.push ("codex_primary_window_minutes", JVal.nat (winSecs / 60))
-            if !resetIso.isEmpty then extraFields := extraFields.push ("codex_primary_reset_at", .str resetIso)
-            optWindows := optWindows.push (buildOptimizeWindow "5h" "5-hour" "used_pct" "codex_wham" usedPct winSecs (some resetIso))
-            primaryWin := .str "5h"
-          if let some sw := rl.field? "secondary_window" then
-            let usedPct2 := match sw.field? "used_percent" with | some (.num n) => n | _ => "0"
-            let resetSec2 := (sw.fieldUInt64? "reset_at").getD 0
-            let resetIso2 := if resetSec2 > 0 then formatEpochIso8601Utc resetSec2 else ""
-            let winSecs2 := (sw.fieldNat? "limit_window_seconds").getD 604800
-            extraFields := extraFields.push ("codex_secondary_used_percent", .num usedPct2)
-            extraFields := extraFields.push ("codex_secondary_window_minutes", JVal.nat (winSecs2 / 60))
-            if !resetIso2.isEmpty then extraFields := extraFields.push ("codex_secondary_reset_at", .str resetIso2)
-            optWindows := optWindows.push (buildOptimizeWindow "7d" "7-day" "used_pct" "codex_wham" usedPct2 winSecs2 (some resetIso2))
+        let (fields, windows, primary) := projectCodexUsage wham
+        extraFields := fields
+        optWindows := windows
+        primaryWin := primary
       else if code == 401 || code == 403 then
         statusStr := "needs_reauth"
 
