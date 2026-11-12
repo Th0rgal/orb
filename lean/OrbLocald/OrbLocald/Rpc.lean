@@ -5113,11 +5113,12 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     | some stateDir, some dbPath =>
       uiDraftsMutex.atomically do
         match ← ensurePrivateSqliteHandle uiDraftsDbPoolRef stateDir dbPath uiDraftsSchemaSql with
-        | .error _ => return .ok .null
+        | .error e => return .error e
         | .ok db =>
-          let _ ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
-            "DELETE FROM ui_drafts WHERE scope_key = ?1;" #[key]
-          return .ok .null
+          match ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+              "DELETE FROM ui_drafts WHERE scope_key = ?1;" #[key] with
+          | .ok _ => return .ok .null
+          | .error e => return .error e
     | _, _ => return .ok .null
   | "diagnostics_append" =>
     let lines : Array String := match args.fieldArr? "lines" with

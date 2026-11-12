@@ -297,3 +297,21 @@ it("propagates transient native read errors for durable side-thread records inst
     { id: "m-1", text: "queued" },
   ]);
 });
+
+it("propagates native draft deletion failures instead of acknowledging an unpersisted clear", async () => {
+  let failDelete = true;
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string) => {
+        if (cmd === "ui_draft_delete" && failDelete) {
+          throw new Error("SQLITE_BUSY: database is locked");
+        }
+        return null;
+      },
+    },
+  };
+
+  await expect(saveComposerDraft("m:del-err", { text: "", images: [] })).rejects.toThrow("SQLITE_BUSY");
+  failDelete = false;
+  await expect(saveComposerDraft("m:del-err", { text: "", images: [] })).resolves.toBeUndefined();
+});

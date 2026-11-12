@@ -185,16 +185,26 @@ async function writeRecord<T>(key: string, value: T): Promise<void> {
 async function deleteRecordUnlocked(key: string, expectedEpoch?: number): Promise<void> {
   if (expectedEpoch !== undefined && (writeEpochs.get(key) ?? 0) !== expectedEpoch) return;
   const invoke = activeLocaldDrafts();
+  let usedNative = false;
   if (invoke) {
     try {
       await invoke("ui_draft_delete", { key });
+      usedNative = true;
     } catch (err) {
-      if (isUnsupportedDraftCommandError(err)) unsupportedDraftInvoke = invoke;
+      if (isUnsupportedDraftCommandError(err)) {
+        unsupportedDraftInvoke = invoke;
+      } else {
+        throw err;
+      }
     }
   }
   if (expectedEpoch !== undefined && (writeEpochs.get(key) ?? 0) !== expectedEpoch) return;
   if (typeof indexedDB !== "undefined" && indexedDB) {
-    await idbDelete(key).catch(() => undefined);
+    if (usedNative) {
+      await idbDelete(key).catch(() => undefined);
+    } else {
+      await idbDelete(key);
+    }
   }
 }
 
