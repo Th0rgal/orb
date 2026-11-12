@@ -490,6 +490,10 @@ def dispatchMcpToolCall
       if explicitRn?.isSome then pure explicitRn?
       else if !parentMid.isEmpty then resolveMissionRemoteNode? store mc? parentMid
       else pure none
+    -- Core has no local harness execution: a mission created through MCP with no
+    -- node of its own and none to inherit would sit `active` forever without a
+    -- job. Let the fleet scheduler place it.
+    let inheritedRn? := inheritedRn?.orElse (fun _ => some "auto")
     let effWorkDir :=
       match (args.fieldStr? "working_directory").map (·.trimAscii.toString) |>.filter (!·.isEmpty) with
       | some wd => wd
