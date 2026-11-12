@@ -4762,7 +4762,27 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         ownerUserId := caller.userId
       }
       let providerRetryKey := (lookupHeaderCI req.headers "idempotency-key").getD ""
-      match ← spawnConfiguredManagedWorker mst st.store.rootDir live vmRec jv providerRetryKey st.managedProvisioningOverride? userAdmission? with
+      -- A saved snapshot is restored only inside one project: the owning mission's,
+      -- when the caller owns that mission; an admin may name the project directly.
+      let requestedSnapshot := ((jv.fieldStr? "from_snapshot").orElse
+        (fun _ => jv.fieldStr? "managed_from_snapshot") |>.getD "").trimAscii.toString
+      let resolvedSnapshot ← if requestedSnapshot.isEmpty then pure "" else do
+        let privileged := caller.role == "admin" || caller.isLegacyUnscoped
+        let ownerMission? ← getMission? st.store vmRec.ownerMission
+        let missionProject := match ownerMission? with
+          | some mission => if privileged || mission.ownerUserId == caller.userId then mission.project else ""
+          | none => ""
+        let askedProject := ((jv.fieldStr? "project").getD "").trimAscii.toString
+        let snapshotProject := if privileged && !askedProject.isEmpty then askedProject else missionProject
+        let snapshotProvider ← match st.managedProvisioningOverride? with
+          | some pair => pure pair.1
+          | none => match ← resolveManagedProvider st.store.rootDir prov with
+            | .ok p => pure p
+            | .error e => return .ok (mkJson 409 (renderCompact (.obj #[("error", .str e)])))
+        match ← resolveProjectSnapshot st.store snapshotProvider snapshotProject requestedSnapshot with
+        | .ok name => pure name
+        | .error e => return .ok (mkJson 409 (renderCompact (.obj #[("error", .str e)])))
+      match ← spawnConfiguredManagedWorker mst st.store.rootDir live vmRec jv providerRetryKey st.managedProvisioningOverride? userAdmission? resolvedSnapshot with
       | .error e => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
       | .ok spawned =>
         let createdVm := spawned.machine

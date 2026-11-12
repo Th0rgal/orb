@@ -1,4 +1,5 @@
 import OrbCore.RemoteFleetAndRelay
+import OrbCore.McpGateway
 import OrbCore.ManagedProvisioningTests
 
 namespace OrbCore.ManagedSnapshotCatalogTests
@@ -95,6 +96,36 @@ def run (root : String) : IO Unit := do
     check ((← spawnedFrom.get) == "orb-snap-health-manager-ledger-hub-warm-v1-eevr" &&
       spawned.machine.image == "orb-snap-health-manager-ledger-hub-warm-v1-eevr" && spawned.machine.status == "ready")
       "spawn restores the resolved project snapshot"
+    -- start_mission(auto-managed) rents through the same path and hands the machine to the child.
+    let claims : OrbCore.MemoryAndCloud.McpSessionClaims := {
+      sessionId := "snapshot-session", missionId := "snap-owner", role := "executor", expiresAt := 99999999999
+    }
+    let now ← coreEpochSec
+    let call (args : JVal) : IO JVal := do
+      let raw ← OrbCore.McpGateway.dispatchMcpToolCall core (some mc) none none fleet root claims
+        "start_mission" args now none (some (provider, cfg))
+      return (OrbBin.Json.parse raw).toOption.getD .null
+    let countMachines : IO String := do
+      let .ok rows ← execParamQuery mc.db "SELECT COUNT(*) FROM managed_machines;" #[] | throw (IO.userError "count failed")
+      return cell rows[1]! 0
+    let before ← countMachines
+    let foreign ← call (.obj #[("title", .str "t"), ("remote_node_id", .str "auto-managed:small"),
+      ("managed_from_snapshot", .str "wave8-r32-chainc-warm"), ("managed_ttl_minutes", .nat 5), ("idempotency_key", .str "sm-foreign")])
+    let misplaced ← call (.obj #[("title", .str "t"), ("remote_node_id", .str "auto"),
+      ("managed_from_snapshot", .str "ledger-hub-warm-v1"), ("idempotency_key", .str "sm-misplaced")])
+    check (foreign.fieldBool? "ok" == some false && misplaced.fieldBool? "ok" == some false && (← countMachines) == before)
+      "another project's snapshot, or a snapshot without auto-managed, rents nothing"
+    spawnedFrom.set ""
+    let started ← call (.obj #[("title", .str "warm child"), ("remote_node_id", .str "auto-managed:small"),
+      ("managed_from_snapshot", .str "ledger-hub-warm-v1"), ("managed_ttl_minutes", .nat 5), ("idempotency_key", .str "sm-warm")])
+    let result := (started.field? "result").getD .null
+    let child := (result.fieldStr? "mission_id").getD ""
+    let node := (result.fieldStr? "remote_node_id").getD ""
+    check (started.fieldBool? "ok" == some true && !child.isEmpty && node.startsWith "managed-" &&
+      (← spawnedFrom.get) == "orb-snap-health-manager-ledger-hub-warm-v1-eevr") "start_mission restores the project snapshot"
+    let some (rented, _) ← getManagedMachine? mc (node.drop 8).toString | throw (IO.userError "rented machine missing")
+    check (rented.ownerMission == child && rented.requestedByMissionId == "snap-owner" && rented.status == "ready" &&
+      rented.ttlMinutes == 5 && rented.size == "small") "the child owns the machine rented for it"
   finally
     closeManagedComputeStore mc
     closeCoreStore core

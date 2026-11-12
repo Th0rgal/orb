@@ -806,6 +806,18 @@ def finishManagedExtension (st : ManagedComputeStore) (key : String) (succeeded 
     | .error e => return .error e
     | .ok _ => return .ok ()
 
+/-- No live machine runs without a deadline. A row written before deadlines existed
+    gets one: its creation time plus its TTL, or one TTL from now when even the creation
+    time is unknown. Stopped and destroyed rows are untouched. -/
+def assignMissingDeadlines (st : ManagedComputeStore) (nowEpoch : UInt64) : IO (Except String Unit) := do
+  match ← execParamQuery st.db
+      ("UPDATE managed_machines SET " ++
+       "expires_at_sec=(CASE WHEN created_at_sec>0 THEN created_at_sec ELSE ?1 END)+MAX(5,MIN(ttl_minutes,720))*60," ++
+       "created_at_sec=CASE WHEN created_at_sec>0 THEN created_at_sec ELSE ?1 END " ++
+       "WHERE expires_at_sec=0 AND phase_code IN (0,1);") #[s!"{nowEpoch}"] with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
+
 def claimManagedExpiry (st : ManagedComputeStore) (machineId : String) (nowEpoch : UInt64) : IO (Except String ManagedMachine) := do
   withImmediateTx st.db do
     let .ok (some (m, vm)) ← selectMachineTx st.db machineId | return .error "managed_machine_missing"

@@ -131,8 +131,10 @@ def tick (mc : ManagedComputeStore) (store : CoreStore) (defaults : ManagedFleet
   for intent in extensions do
     if let some (m, _) ← getManagedMachine? mc intent.machineId then
       if let .ok provider ← resolve m.provider then discard <| applyExtension mc provider intent nowEpoch
+  let .ok () ← assignMissingDeadlines mc nowEpoch | return .error "managed_deadline_repair_failed"
   let .ok fleet ← loadManagedFleet mc defaults.enabled defaults.boatEnabled defaults.dailyCapCents
       defaults.spentTodayCents defaults.maxConcurrent | return .error "managed_fleet_read_failed"
+  let servicePrefix := sandboxNamePrefixFor (← IO.appPath).toString
   let mut reaped : Array JVal := #[]
   let mut pending : Array JVal := #[]
   for m in fleet.machines do
@@ -157,10 +159,33 @@ def tick (mc : ManagedComputeStore) (store : CoreStore) (defaults : ManagedFleet
     if m.status == "ready" || m.status == "provisioning" then
       discard <| eventOnce store claimed "managed_machine_expired"
         s!"Managed VM {m.sandboxName} reached its TTL. Running work can no longer continue on this lease; provider cleanup is being verified." nowEpoch
-    if claimed.providerId.isEmpty then
-      pending := pending.push (.str m.id)
-      continue
     let .ok provider ← resolve claimed.provider | do pending := pending.push (.str m.id); continue
+    if claimed.providerId.isEmpty then
+      -- Never bound to a provider id: look for it by exact name in the complete
+      -- inventory. Found once, bind it and finish next tick; absent, close locally.
+      let .ok inventory ← provider.list | do pending := pending.push (.str m.id); continue
+      let hits := inventory.filter (fun r => r.name == claimed.sandboxName || r.name == servicePrefix ++ claimed.id)
+      if inventory.any (·.name.isEmpty) || hits.size > 1 then
+        pending := pending.push (.str m.id)
+        continue
+      if let some remote := hits[0]? then
+        discard <| backfillManagedProviderIdentity mc m.id claimed.provider remote.providerId
+        discard <| execParamQuery mc.db
+          "UPDATE managed_expirations SET provider_id=?3 WHERE machine_id=?1 AND boot_epoch=?2 AND provider_id='';"
+          #[m.id, s!"{claimed.nodeBootEpoch}", remote.providerId]
+        pending := pending.push (.str m.id)
+        continue
+      let some (_, vm) ← getManagedMachine? mc m.id | continue
+      if vm.phaseCode != 2 then
+        let .ok _ ← applyVmLifecycle mc m.id {
+          opCode := Orb.ManagedNode.VmOp.encode .destroy, ownerLive := 0, idleElapsed := 1,
+          presentedBootEpoch := claimed.nodeBootEpoch, nowEpoch
+        } (some "") | do pending := pending.push (.str m.id); continue
+      let .ok () ← recordManagedExpiry mc claimed "absent" true | do pending := pending.push (.str m.id); continue
+      discard <| eventOnce store claimed "managed_machine_expiry_cleaned"
+        s!"Expired VM {m.sandboxName} has no sandbox at the provider; its lease is closed." nowEpoch "absent"
+      reaped := reaped.push (.obj #[("id",.str m.id),("provider_state",.str "absent"),("was_billable",.bool false)])
+      continue
     let observed ← provider.get claimed.providerId
     let state ← match observed with
       | .ok remote => pure (safeState remote.state)

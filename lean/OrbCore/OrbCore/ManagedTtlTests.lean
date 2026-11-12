@@ -338,11 +338,56 @@ private def reaperTests (root : String) : IO Unit := do
     closeManagedComputeStore mc
     closeCoreStore core
 
+/-- Live rows without a deadline get one; an expired row with no sandbox closes; a row
+    never bound to a provider id is bound by exact name before anything is destroyed. -/
+private def deadlineTests (root : String) : IO Unit := do
+  let mc ← requireOk (← openManagedComputeStore s!"{root}/ttl-deadline.db") "open deadline"
+  let core ← requireOk (← openCoreStore s!"{root}/ttl-deadline-core") "open deadline core"
+  try
+    let legacy (id status phase : String) : IO Unit := do
+      discard <| requireOk (← execParamQuery mc.db
+        ("INSERT INTO managed_machines(id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id) " ++
+         "VALUES(?1,?2,'boat','xlarge',?3,'',60,0,0,1,0,'user','',?4,1,'');")
+        #[id, s!"orb-managed-{id}", status, phase]) "legacy fixture"
+    legacy "no-deadline-gone" "ready" "1"
+    legacy "no-deadline-live" "ready" "1"
+    legacy "no-deadline-stopped" "stopped" "2"
+    let destroys ← IO.mkRef (#[] : Array String)
+    let template := OrbCore.ManagedProvisioningTests.mockPolicyProvider mc "boat"
+    let provider : Provider := { template with
+      list := pure (.ok #[{ providerId := "bx-live", name := "orb-managed-no-deadline-live", state := "idle" }])
+      get := fun id => pure (.ok { providerId := id, state := "idle" })
+      destroy := fun id => do destroys.modify (·.push id); return .ok ()
+    }
+    let resolve : Resolver := fun _ => pure (.ok provider)
+    discard <| requireOk (← tick mc core fleet resolve 5000) "deadline assignment tick"
+    check ((← machine mc "no-deadline-gone").expiresAtSec == 5000 + 3600 &&
+      (← machine mc "no-deadline-live").expiresAtSec == 5000 + 3600 &&
+      (← machine mc "no-deadline-stopped").expiresAtSec == 0 && (← destroys.get).isEmpty)
+      "live rows get one TTL from discovery; stopped rows and the provider are untouched"
+    discard <| requireOk (← tick mc core fleet resolve 8599) "before deadline"
+    check ((← machine mc "no-deadline-gone").status == "ready" && (← destroys.get).isEmpty) "nothing is reaped before the deadline"
+    discard <| requireOk (← tick mc core fleet resolve 8600) "deadline tick"
+    check ((← machine mc "no-deadline-gone").status == "destroyed" && (← destroys.get).isEmpty)
+      "an expired row with no sandbox closes without a provider delete"
+    check ((← machine mc "no-deadline-live").providerId == "bx-live" && (← destroys.get).isEmpty)
+      "an unbound live row is bound by exact name first"
+    discard <| requireOk (← tick mc core fleet resolve 8630) "cleanup tick"
+    check ((← destroys.get) == #["bx-live"] && (← machine mc "no-deadline-live").status == "destroyed" &&
+      (← machine mc "no-deadline-live").expiryCleanupState == "completed")
+      "the bound billable guest is destroyed at the provider and its lease closed"
+    discard <| requireOk (← tick mc core fleet resolve 8660) "repeat"
+    check ((← destroys.get).size == 1) "cleanup is not repeated"
+  finally
+    closeManagedComputeStore mc
+    closeCoreStore core
+
 /-- Self-test entry point. All clocks, provider observations, usage and failures
     are injected; only isolated SQLite fixtures under the supplied root are used. -/
 def run (root : String) : IO Unit := do
   extensionTests root
   fencingTests root
   reaperTests root
+  deadlineTests root
 
 end OrbCore.ManagedTtlTests

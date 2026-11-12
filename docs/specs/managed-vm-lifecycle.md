@@ -147,8 +147,17 @@ name starts with. `list_managed_snapshots` returns the caller's project's snapsh
 `spawn_managed_machine(from_snapshot=...)` accepts a provider name or label, resolves it
 inside that project, and refuses a missing, still-saving or ambiguous one. An unresolved
 label never reaches the provider. Only an admin's operator session may name another
-project. A failed provider list is an error, not an empty list. The REST create route and
-`start_mission(managed_from_snapshot)` are not wired to this yet.
+project. A failed provider list is an error, not an empty list.
+
+The same resolution serves `start_mission(remote_node_id="auto-managed[:size]",
+managed_from_snapshot=..., managed_ttl_minutes=...)` and the REST create route. For
+`start_mission`, Core rents one Boat machine through the shared spawn path before creating
+the child, then makes the child its owner and records the caller as requester; if the child
+cannot be created or dispatched the machine is destroyed. `managed_from_snapshot` without
+`auto-managed` is refused. On REST the project is the owning mission's when the caller
+owns that mission; an admin may pass `project`. The call is synchronous: it returns once
+the machine has made its first relay poll. Reuse of an idle sibling machine and the
+fleet-wide `auto` scheduler are not implemented here.
 Stop and destroy require provider success before committing local state. Resume
 uses an archived Boat sandbox as a fork source, bootstraps a successor, and keeps
 the same Core machine/node ID.
@@ -182,6 +191,12 @@ tool text says so. A busy machine still stops at its TTL.
   `pending` (row shown as `destroying`) and it is retried; nothing is marked done on
   silence. Spend is the provider's metered figure when it reports one, otherwise the lease
   reservation, labelled `lease_reservation_estimate`. Events are deduplicated per boot.
+- **No live machine without a deadline:** a `ready` or `provisioning` row with
+  `expires_at_sec = 0` (written before deadlines existed) gets creation time plus TTL,
+  or one TTL from discovery when the creation time is unknown, and then follows the
+  normal expiry path. An expired row never bound to a provider id is matched by exact
+  sandbox name in the complete inventory: found once, it is bound and cleaned up on the
+  next pass; absent, the row is closed without a provider call.
 - **Operator authority:** a non-external session with role `operator` acts with the
   authority of the user who minted it (`mcp_sessions_v1.owner`, or the Core-authenticated
   caller): an admin's operator session manages any machine, another user's only that

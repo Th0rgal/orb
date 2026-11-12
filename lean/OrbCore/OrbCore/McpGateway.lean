@@ -274,6 +274,63 @@ def dispatchMcpToolCall
     | some pair => return .ok pair.1
     | none => resolveManagedProvider store.rootDir name
 
+  -- One spawn path for `spawn_managed_machine` and `start_mission(auto-managed)`:
+  -- same admission, pricing, project-scoped snapshot resolution and bootstrap.
+  let spawnForCaller (spawnArgs : JVal) : IO (Except (String × String) ManagedMachine) := do
+    let some mc := mc? | return .error ("unavailable", "managed compute store not configured")
+    let fleet ← match ← loadManagedFleet mc defaultFleet.enabled defaultFleet.boatEnabled
+        defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
+      | .ok f => pure f
+      | .error _ => pure defaultFleet
+    let prov := canonicalizeProvider ((spawnArgs.fieldStr? "provider").getD "boat")
+    let sz := (spawnArgs.fieldStr? "size").getD "small"
+    let ttl := (spawnArgs.fieldUInt64? "ttl_minutes").getD 60
+    let sName ← newManagedSandboxName ((spawnArgs.fieldStr? "name").getD "")
+    let mid ← newUuidV4
+    let prefs ← if callerUserId.isEmpty then pure #[] else getUserManagedPrefs mc callerUserId
+    if !isUserManagedProviderEnabled prefs prov then
+      return .error ("provider_disabled_for_user", "This cloud provider is disabled in your preferences.")
+    let quote ← match quoteManagedSpawnCents prov sz ttl (managedProvisioningOverride?.map Prod.fst) with
+      | .ok cents => pure cents
+      | .error e => return .error ("invalid_arguments", e)
+    let callerUser? ← getUserById? store callerUserId
+    if !callerUserId.isEmpty && (callerUser?.isNone || (callerUser?.map (·.disabled)).getD true) then
+      return .error ("user_unavailable", "The owning user is unavailable.")
+    let (infSpent, cmpSpent) ← if callerUserId.isEmpty then pure (0, 0)
+      else getUserSpentTodayCents store callerUserId (nowIso.take 10).toString
+    let userCap? := callerUser?.bind (·.dailySpendCapCents?)
+    let userAdmission? : Option ManagedUserAdmission := userCap?.map fun cap => {
+      capCents := cap, inferenceCents := infSpent, computeCents := cmpSpent
+    }
+    let m : ManagedMachine := {
+      id := mid
+      sandboxName := sName
+      provider := prov
+      size := sz
+      status := "provisioning"
+      ownerMission := callerMid
+      ttlMinutes := ttl
+      spentCents := quote
+      nodeBootEpoch := 1
+      deletableAtSec := nowEpochSec
+      expiresAtSec := nowEpochSec + ttl * 60
+      ownerKind := if callerMid.isEmpty then "user" else "mission"
+      requestedByMissionId := callerMid
+      ownerUserId := callerUserId
+    }
+    let requestedSnapshot := ((spawnArgs.fieldStr? "from_snapshot").orElse
+      (fun _ => spawnArgs.fieldStr? "managed_from_snapshot") |>.getD "").trimAscii.toString
+    let resolvedSnapshot ← if requestedSnapshot.isEmpty then pure "" else do
+      let provider ← match ← snapshotProvider prov with
+        | .ok p => pure p
+        | .error e => return .error ("spawn_rejected", e)
+      match ← resolveProjectSnapshot store provider (← snapshotProject) requestedSnapshot with
+      | .ok name => pure name
+      | .error e => return .error ("spawn_rejected", e)
+    match ← spawnConfiguredManagedWorker mc store.rootDir fleet m spawnArgs "" managedProvisioningOverride? userAdmission? resolvedSnapshot with
+    | .error e => return .error ("spawn_rejected", e)
+    | .ok spawned => return .ok spawned.machine
+
   -- Idempotent replay for retried mutating MCP calls carrying `idempotency_key`
   let idemKeyTop := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
   if !idemKeyTop.isEmpty && toolName != "get_action" && toolName != "wait_actions" &&
@@ -570,7 +627,32 @@ def dispatchMcpToolCall
     let modelOv := (args.fieldStr? "model_override").orElse (fun _ => args.fieldStr? "model") |>.getD ""
     let effort := (args.fieldStr? "model_effort").orElse (fun _ => args.fieldStr? "reasoning_effort") |>.getD ""
     let parentMid := ((args.fieldStr? "parent_mission_id").filter (!·.isEmpty)).getD callerMid
-    let explicitRn? := (args.fieldStr? "remote_node_id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+    let requestedRn? := (args.fieldStr? "remote_node_id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+    let wantsSnapshot := !((args.fieldStr? "managed_from_snapshot").getD "").trimAscii.toString.isEmpty
+    let autoManaged := match requestedRn? with
+      | some rn => rn.toLower == "auto-managed" || rn.toLower.startsWith "auto-managed:"
+      | none => false
+    if wantsSnapshot && !autoManaged then
+      return mcpErr "invalid_arguments" "managed_from_snapshot requires remote_node_id auto-managed[:size]"
+    -- `auto-managed[:size]` rents one machine for this child through the shared spawn
+    -- path. Nothing is rented when validation, admission or the snapshot lookup fails.
+    let (explicitRn?, rentedMachineId) ← if !autoManaged then pure (requestedRn?, "") else do
+      let parts := (((requestedRn?.getD "").toLower.splitOn ":").drop 1).filter (fun part => part != "boat" && !part.isEmpty)
+      let retryKey ← match (args.fieldStr? "idempotency_key").filter (!·.isEmpty) with
+        | some key => pure key
+        | none => newUuidV4
+      let spawnArgs := JVal.obj #[
+        ("provider", .str "boat"), ("size", .str (parts.head?.getD "small")),
+        ("ttl_minutes", JVal.uint64 ((args.fieldUInt64? "managed_ttl_minutes").getD 60)),
+        ("from_snapshot", .str ((args.fieldStr? "managed_from_snapshot").getD "")),
+        ("idempotency_key", .str ("start-mission:" ++ retryKey))]
+      match ← spawnForCaller spawnArgs with
+      | .error (_, message) => return mcpErr "managed_placement_failed" message
+      | .ok rented => pure (some s!"managed-{rented.id}", rented.id)
+    let releaseRented : IO Unit := do
+      if let (some mc, false) := (mc?, rentedMachineId.isEmpty) then
+        discard <| runConfiguredManagedLifecycle mc
+          { store, fleet := defaultFleet, override? := managedProvisioningOverride? } rentedMachineId "destroy" nowEpochSec
     let inheritedRn? ←
       if explicitRn?.isSome then pure explicitRn?
       else if !parentMid.isEmpty then resolveMissionRemoteNode? store mc? parentMid
@@ -594,11 +676,17 @@ def dispatchMcpToolCall
     let initRev : UInt64 := if effProj.isEmpty && folder.isEmpty then 0 else 1
     let initStatus := if !prompt.isEmpty then "active" else "awaiting_user"
     let insSql :=
-      "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,workspace_id,project,folder,placement_revision,parent_mission_id,authority_mode,tags,created_at,updated_at,metadata_updated_at,node_boot_epoch) " ++
-      "VALUES(?1,?2,?3,?4,?5,?6,?7,'00000000-0000-0000-0000-000000000000',?8,?9,CAST(?10 AS INTEGER),NULLIF(?11,''),?12,?13,?14,?14,?14,CAST(?15 AS INTEGER));"
+      "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,workspace_id,project,folder,placement_revision,parent_mission_id,authority_mode,tags,created_at,updated_at,metadata_updated_at,node_boot_epoch,owner_user_id) " ++
+      "VALUES(?1,?2,?3,?4,?5,?6,?7,'00000000-0000-0000-0000-000000000000',?8,?9,CAST(?10 AS INTEGER),NULLIF(?11,''),?12,?13,?14,?14,?14,CAST(?15 AS INTEGER),?16);"
     if let .error e ← execParamQuery store.missionsDb insSql
-        #[mid, title, initStatus, backend, modelOv, effort, effWorkDir, effProj, folder, s!"{initRev}", parentMid, authMode, tagsJson, nowIso, s!"{store.bootEpoch}"] then
+        #[mid, title, initStatus, backend, modelOv, effort, effWorkDir, effProj, folder, s!"{initRev}", parentMid, authMode, tagsJson, nowIso, s!"{store.bootEpoch}", callerUserId] then
+      releaseRented
       return mcpErr "db_error" e
+    -- The child owns the machine it was rented for; the caller is recorded as requester.
+    if let (some mc, false) := (mc?, rentedMachineId.isEmpty) then
+      discard <| execParamQuery mc.db
+        "UPDATE managed_machines SET owner_mission=?2,owner_kind='mission',requested_by_mission_id=?3 WHERE id=?1;"
+        #[rentedMachineId, mid, callerMid]
     if !prompt.isEmpty then
       discard <| appendMissionEvent store mid "user_message" (renderCompact (.obj #[("content", .str prompt)])) nowIso
       if let (some sup, some targetNode) := (remoteSup?, inheritedRn?) then
@@ -619,6 +707,7 @@ def dispatchMcpToolCall
         if let .error dispErr ← submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup workingDir spec nowEpochSec then
           discard <| execParamQuery store.missionsDb "DELETE FROM mission_events WHERE mission_id=?1;" #[mid]
           discard <| execParamQuery store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
+          releaseRented
           return mcpErr "remote_dispatch_failed" dispErr true
     publishControlEvent broadcastHub? "mission_created" (renderCompact (.obj #[
       ("mission_id", .str mid),
@@ -839,62 +928,10 @@ def dispatchMcpToolCall
       return mcpOk ((OrbBin.Json.parse raw).toOption.getD (.obj #[]))
 
   | "spawn_managed_machine" =>
-    let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"
-    let fleet ← match ← loadManagedFleet mc defaultFleet.enabled defaultFleet.boatEnabled
-        defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
-      | .ok f => pure f
-      | .error _ => pure defaultFleet
-    let prov := canonicalizeProvider ((args.fieldStr? "provider").getD "boat")
-    let sz := (args.fieldStr? "size").getD "small"
-    let ttl := (args.fieldUInt64? "ttl_minutes").getD 60
-    let sName ← newManagedSandboxName ((args.fieldStr? "name").getD "")
-    let mid ← newUuidV4
-    let prefs ← if callerUserId.isEmpty then pure #[] else getUserManagedPrefs mc callerUserId
-    if !isUserManagedProviderEnabled prefs prov then
-      return mcpErr "provider_disabled_for_user" "This cloud provider is disabled in your preferences."
-    let quote ← match quoteManagedSpawnCents prov sz ttl (managedProvisioningOverride?.map Prod.fst) with
-      | .ok cents => pure cents
-      | .error e => return mcpErr "invalid_arguments" e
-    let callerUser? ← getUserById? store callerUserId
-    if !callerUserId.isEmpty && (callerUser?.isNone || (callerUser?.map (·.disabled)).getD true) then
-      return mcpErr "user_unavailable" "The owning user is unavailable."
-    let (infSpent, cmpSpent) ← if callerUserId.isEmpty then pure (0, 0)
-      else getUserSpentTodayCents store callerUserId (nowIso.take 10).toString
-    let userCap? := callerUser?.bind (·.dailySpendCapCents?)
-    let userAdmission? : Option ManagedUserAdmission := userCap?.map fun cap => {
-      capCents := cap, inferenceCents := infSpent, computeCents := cmpSpent
-    }
-    let m : ManagedMachine := {
-      id := mid
-      sandboxName := sName
-      provider := prov
-      size := sz
-      status := "provisioning"
-      ownerMission := callerMid
-      ttlMinutes := ttl
-      spentCents := quote
-      nodeBootEpoch := 1
-      deletableAtSec := nowEpochSec
-      expiresAtSec := nowEpochSec + ttl * 60
-      ownerKind := if callerMid.isEmpty then "user" else "mission"
-      requestedByMissionId := callerMid
-      ownerUserId := callerUserId
-    }
-    let requestedSnapshot := ((args.fieldStr? "from_snapshot").orElse
-      (fun _ => args.fieldStr? "managed_from_snapshot") |>.getD "").trimAscii.toString
-    let resolvedSnapshot ← if requestedSnapshot.isEmpty then pure "" else do
-      let provider ← match ← snapshotProvider prov with
-        | .ok p => pure p
-        | .error e => return mcpErr "spawn_rejected" e
-      match ← resolveProjectSnapshot store provider (← snapshotProject) requestedSnapshot with
-      | .ok name => pure name
-      | .error e => return mcpErr "spawn_rejected" e
-    match ← spawnConfiguredManagedWorker mc store.rootDir fleet m args "" managedProvisioningOverride? userAdmission? resolvedSnapshot with
-    | .error e => return mcpErr "spawn_rejected" e
-    | .ok spawned =>
-      let saved := spawned.machine
-      let itemJson := (OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[])
-      return mcpOk itemJson
+    match ← spawnForCaller args with
+    | .error (code, message) => return mcpErr code message
+    | .ok saved =>
+      return mcpOk ((OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[]))
 
   | "exec_raw_managed_machine" =>
     let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"
