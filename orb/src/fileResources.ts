@@ -444,21 +444,9 @@ export function contextReferencePath(
   }
   return null;
 }
+import { normalizeMarkdownFileUrl } from "./markdownAst";
 /** File URLs go through Orb's scoped file resolver, never webview navigation. */
-export function normalizeFileUrl(raw: string): string {
-  const trimmed = raw.trim();
-  if (!/^file:/i.test(trimmed)) return trimmed;
-  try {
-    const url = new URL(trimmed);
-    if (url.hostname && url.hostname !== "localhost") return trimmed;
-    return (
-      decodeURIComponent(url.pathname).replace(/^\/([a-z]:\/)/i, "$1") +
-      url.hash
-    );
-  } catch {
-    return trimmed;
-  }
-}
+export const normalizeFileUrl = normalizeMarkdownFileUrl;
 export function parseFileTarget(
   raw: string,
 ): { path: string; line?: number } | null {
