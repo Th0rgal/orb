@@ -329,7 +329,7 @@ def dispatchMcpToolCall
       | .ok name => pure name
       | .error e => return .error ("spawn_rejected", e)
     match ← spawnConfiguredManagedWorker mc store.rootDir fleet m spawnArgs "" managedProvisioningOverride? userAdmission? resolvedSnapshot with
-    | .error e => return .error ("spawn_rejected", e)
+    | .error e => return .error (if e == "provider_at_capacity" then e else "spawn_rejected", e)
     | .ok spawned => return .ok spawned.machine
 
   -- Idempotent replay for retried mutating MCP calls carrying `idempotency_key`
@@ -909,8 +909,12 @@ def dispatchMcpToolCall
         defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
       | .ok f => pure f
       | .error _ => pure defaultFleet
+    let prefs ← if callerUserId.isEmpty then pure #[] else getUserManagedPrefs mc callerUserId
+    let .ok catalog ← loadManagedProviderCatalog mc store.rootDir fleet
+        (normalizeMcpRole claims.role == "operator") prefs (managedProvisioningOverride?.map Prod.fst)
+      | return mcpErr "unavailable" "managed_provider_catalog_unavailable"
     let raw := renderManagedMachinesJson fleet
-    return mcpOk ((OrbBin.Json.parse raw).toOption.getD (.obj #[]))
+    return mcpOk (((OrbBin.Json.parse raw).toOption.getD (.obj #[])).setField "providers" catalog)
 
   | "get_budget" =>
     let some mc := mc?

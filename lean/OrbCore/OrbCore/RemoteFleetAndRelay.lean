@@ -773,6 +773,31 @@ def resolveManagedProvider (dataRoot provider : String) : IO (Except String Mana
   let base := trimTrailingSlashes (((← IO.getEnv entry.apiBaseEnv).getD entry.defaultApiBase).trimAscii.toString)
   return .ok (entry.create (ManagedProvider.httpTransport base key))
 
+/-- One live catalog projection for REST and MCP. Availability never writes a toggle. -/
+def loadManagedProviderCatalog (mc : ManagedComputeStore) (dataRoot : String)
+    (fleet : ManagedFleetState) (isAdmin : Bool) (prefs : Array (String × Bool))
+    (override? : Option ManagedProvider.Provider := none) : IO (Except String JVal) := do
+  let .ok disabled ← ManagedProviderSettings.disabled mc
+    | return .error "managed_provider_settings_unavailable"
+  let mut configured : Array String := #[]
+  let mut observations : Array (String × JVal) := #[]
+  for name in knownProviders do
+    if let .ok _ ← openProviderSecret dataRoot name false true then
+      configured := configured.push name
+    let resolved : Except String ManagedProvider.Provider ← match override? with
+      | some provider => pure (if provider.name == name then .ok provider else .error "mock_provider_unconfigured")
+      | none => resolveManagedProvider dataRoot name
+    let observed : ManagedProvider.Availability ← match resolved with
+      | .error _ => pure { status := .unknown, reason := "provider_unconfigured_or_unimplemented" }
+      | .ok provider => do
+        match ← provider.availability { name := "", size := "", ttlSeconds := 300, idempotencyKey := "" } with
+        | .ok value => pure value
+        | .error _ => pure { status := .unknown, reason := "provider_availability_unavailable" }
+    observations := observations.push (name, ManagedProvider.availabilityJson observed)
+  match OrbBin.Json.parse (renderManagedProvidersJson fleet isAdmin prefs configured disabled observations) with
+  | .ok value => return .ok value
+  | .error _ => return .error "managed_provider_catalog_invalid"
+
 def loadManagedBootstrapConfig : IO (Except String ManagedProvisioning.BootstrapConfig) := do
   let coreUrl := (← IO.getEnv "SANDBOXED_MANAGED_CORE_URL").getD
     ((← IO.getEnv "SANDBOXED_PUBLIC_URL").getD "")
@@ -856,6 +881,8 @@ def spawnConfiguredManagedWorker (mc : ManagedComputeStore) (dataRoot : String)
     ttlSeconds := machine.ttlMinutes * 60
     idempotencyKey := scopedKey
     fromSnapshot := fromImage
+    repo := (args.fieldStr? "repo").getD ""
+    memoryMiB := args.fieldUInt64? "memory_mib"
   }
   ManagedProvisioning.spawnManagedWorker mc fleet machine provider spec bootstrap {} userAdmission?
 
@@ -1288,11 +1315,9 @@ def dispatchRemoteFleetAndRelayRoutes?
 
     if method == "GET" && segs == ["api", "managed-machines", "providers"] then
       let prefs ← getUserManagedPrefs mc callerUserId
-      let mut cfgProvs : Array String := #[]
-      for p in knownProviders do
-        if let .ok _ ← openProviderSecret store.rootDir p false true then
-          cfgProvs := cfgProvs.push p
-      return some (jsonRawResp 200 (renderManagedProvidersJson fleet isAdmin prefs cfgProvs))
+      match ← loadManagedProviderCatalog mc store.rootDir fleet isAdmin prefs (providerOverride?.map Prod.fst) with
+      | .error error => return some (jsonErr 503 error)
+      | .ok catalog => return some (jsonResp 200 catalog)
 
     if method == "PUT" && segs.length == 4 && segs[2]? == some "providers" then
       if !isAdmin then return some (jsonErr 403 "admin_required")
@@ -1301,9 +1326,14 @@ def dispatchRemoteFleetAndRelayRoutes?
       if let some apiKey := (jv.fieldStr? "api_key").filter (!·.trimAscii.toString.isEmpty) then
         if let .error e ← sealProviderSecret store.rootDir prov apiKey.trimAscii.toString then
           return some (jsonErr 400 e)
+      if let some enabled := (jv.fieldBool? "enabled").filter (fun _ => prov != "boat") then
+        if let .error error ← ManagedProviderSettings.setEnabled mc prov enabled nowIso then
+          return some (jsonErr 400 error)
       if prov == "boat" then
-        let nextBoat := (jv.fieldBool? "enabled").getD true
-        discard <| saveManagedFleetConfig mc (fleet.enabled || nextBoat) nextBoat fleet.dailyCapCents fleet.spentTodayCents fleet.maxConcurrent
+        let nextBoat := (jv.fieldBool? "enabled").getD fleet.boatEnabled
+        discard <| saveManagedFleetConfig mc
+          (Orb.ManagedProviderAvailability.fleetAfterProviderUpdate fleet.enabled (jv.fieldBool? "enabled"))
+          nextBoat fleet.dailyCapCents fleet.spentTodayCents fleet.maxConcurrent
       return some (jsonResp 200 (.obj #[("ok", .bool true), ("provider", .str prov)]))
 
     if method == "PUT" && segs.length == 4 && segs[2]? == some "user-providers" then

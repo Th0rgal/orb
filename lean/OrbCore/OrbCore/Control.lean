@@ -4641,14 +4641,21 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let some mst := st.managedStore?
         | return .ok (mkJson 503 "{\"error\":\"managed_store_unavailable\"}")
       let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD (.obj #[])
-      let mf ← st.managedRef.get
-      let nextBoatEn := if prov == "boat" then (jv.fieldBool? "enabled").getD (req.method != "DELETE") else mf.boatEnabled
-      let nextFleetEn := (jv.fieldBool? "enabled").getD mf.enabled || nextBoatEn
+      let cachedFleet ← st.managedRef.get
+      let .ok mf ← loadManagedFleet mst cachedFleet.enabled cachedFleet.boatEnabled
+          cachedFleet.dailyCapCents cachedFleet.spentTodayCents cachedFleet.maxConcurrent
+        | return .ok (mkJson 503 "{\"error\":\"managed_fleet_unavailable\"}")
+      let nextBoatEn := if prov == "boat" then (jv.fieldBool? "enabled").getD (if req.method == "DELETE" then false else mf.boatEnabled) else mf.boatEnabled
+      let nextFleetEn := Orb.ManagedProviderAvailability.fleetAfterProviderUpdate mf.enabled (jv.fieldBool? "enabled")
+      let providerEnabled? := if req.method == "DELETE" then some false else jv.fieldBool? "enabled"
       let nextMaxConc := (jv.fieldUInt64? "max_concurrent").getD mf.maxConcurrent
       if let some apiKey := (jv.fieldStr? "api_key").map (·.trimAscii.toString) |>.filter (!·.isEmpty) then
         if let .error error ← sealProviderSecret st.store.rootDir prov apiKey then
           return .ok (mkJson (if error == "managed_secret_seal_busy" then 409 else 500)
             (renderCompact (.obj #[("error", .str "managed_provider_secret_seal_failed")])))
+      if let some enabled := providerEnabled?.filter (fun _ => prov != "boat") then
+        if let .error error ← ManagedProviderSettings.setEnabled mst prov enabled (formatEpochIso8601Utc nowEpochSec) then
+          return .ok (mkJson 500 (renderCompact (.obj #[("error", .str error)])))
       if let .error e ← saveManagedFleetConfig mst nextFleetEn nextBoatEn mf.dailyCapCents mf.spentTodayCents nextMaxConc then
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       if let .ok live ← loadManagedFleet mst nextFleetEn nextBoatEn mf.dailyCapCents mf.spentTodayCents nextMaxConc then
@@ -4662,7 +4669,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | return .ok (mkJson 503 "{\"error\":\"managed_store_unavailable\"}")
     let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
       | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
-    let mf ← st.managedRef.get
+    let cachedFleet ← st.managedRef.get
+    let .ok mf ← loadManagedFleet mst cachedFleet.enabled cachedFleet.boatEnabled
+        cachedFleet.dailyCapCents cachedFleet.spentTodayCents cachedFleet.maxConcurrent
+      | return .ok (mkJson 503 "{\"error\":\"managed_fleet_unavailable\"}")
     let nextEn := (jv.fieldBool? "enabled").getD mf.enabled
     let nextBoat := (jv.fieldBool? "boat_enabled").getD mf.boatEnabled
     let nextCap := (jv.fieldUInt64? "daily_cap_cents").getD mf.dailyCapCents
@@ -4701,7 +4711,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         | .ok live =>
           st.managedRef.set live
-          return .ok (mkJson 200 (renderManagedMachinesJson live callerUidOpt (caller.role == "admin") uPrefs (infS + cmpS) caller.dailySpendCapCents?))
+          let .ok catalog ← loadManagedProviderCatalog mst st.store.rootDir live (caller.role == "admin") uPrefs
+              (st.managedProvisioningOverride?.map Prod.fst)
+            | return .ok (mkJson 503 "{\"error\":\"managed_provider_catalog_unavailable\"}")
+          let machines := (OrbBin.Json.parse (renderManagedMachinesJson live callerUidOpt
+            (caller.role == "admin") uPrefs (infS + cmpS) caller.dailySpendCapCents?)).toOption.getD (.obj #[])
+          return .ok (mkJson 200 (renderCompact (machines.setField "providers" catalog)))
     else if req.method == "POST" then
       if let some (cCode, cBody) := checkPlacementForCaller caller 3 0 then
         return .ok (mkJson cCode cBody)
@@ -4783,7 +4798,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .ok name => pure name
         | .error e => return .ok (mkJson 409 (renderCompact (.obj #[("error", .str e)])))
       match ← spawnConfiguredManagedWorker mst st.store.rootDir live vmRec jv providerRetryKey st.managedProvisioningOverride? userAdmission? resolvedSnapshot with
-      | .error e => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
+      | .error e =>
+        let status := if e == "provider_at_capacity" || e == "managed_provider_availability_unavailable" then 503 else 409
+        return .ok (mkJson status s!"\{\"error\":{jsonEscape e}}")
       | .ok spawned =>
         let createdVm := spawned.machine
         if spawned.created && !caller.userId.isEmpty && estCents > 0 then
@@ -4819,8 +4836,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         return .ok (mkJson 200 (renderCompact result))
 
   if let some params := matchRoutePattern? "/api/managed-machines/:id" rawTarget then
-    if req.method == "DELETE" || req.method == "GET" then
-      let vmId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+    let vmId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+    -- Keep the provider settings/catalog routes out of the machine-ID matcher.
+    let reserved := #["settings", "providers"]
+    if (req.method == "DELETE" || req.method == "GET") && !reserved.contains vmId then
       let some mst := st.managedStore?
         | return .ok (mkJson 503 "{\"error\":\"managed_store_unavailable\"}")
       let some (mRec, _) ← getManagedMachine? mst vmId

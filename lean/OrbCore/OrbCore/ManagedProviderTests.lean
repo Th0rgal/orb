@@ -9,6 +9,10 @@ private def check (condition : Bool) (label : String) : IO Unit := do
 
 /-- Deterministic provider contract replay; never opens sockets or rents machines. -/
 def run : IO Unit := do
+  let diagnostic := transportDiagnostic "private-test-key" "TLS refused private-test-key\nforged log\rline"
+  check (diagnostic == "TLS refused [redacted]\\nforged log\\rline" &&
+    (transportDiagnostic "key" (String.ofList (List.replicate 2000 'x'))).length == 1024)
+    "bounded redacted transport cause without log injection"
   let some entry := declaration? "boat" | throw (IO.userError "Boat missing from registry")
   check (entry.name == "boat" && entry.secretName == "BOAT_API_KEY" &&
     entry.readinessDeadlineSecs == 360 && entry.bootstrapMode == .execSystemd &&

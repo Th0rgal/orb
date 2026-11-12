@@ -5,6 +5,7 @@
 -/
 import OrbCore.Managed
 import OrbCore.ManagedProvider
+import OrbCore.ManagedProviderSettings
 
 namespace OrbCore.ManagedProvisioning
 
@@ -119,6 +120,20 @@ def bootstrapAndWait (mc : ManagedComputeStore) (provider : ManagedProvider.Prov
     if slice.phaseCode == 1 && live.nodeBootEpoch == readyBoot && live.lastPollSec > 0 then return .ok live
   return .error "managed_bootstrap_timeout"
 
+/-- Availability is advisory and read-only; final toggle/budget/cap checks occur
+    again under the reservation transaction. A saturated request rents nothing. -/
+def preflightAvailability (mc : ManagedComputeStore) (fleet : ManagedFleetState)
+    (provider : ManagedProvider.Provider) (spec : ManagedProvider.SpawnSpec) : IO (Except String Unit) := do
+  let .ok enabled ← ManagedProviderSettings.isEnabled mc provider.name
+    | return .error "managed_provider_settings_unavailable"
+  let permitted := enabled && fleet.enabled && (provider.name != "boat" || fleet.boatEnabled)
+  if !permitted then return .error "provider_disabled"
+  let .ok observed ← provider.availability spec
+    | return .error "managed_provider_availability_unavailable"
+  if !Orb.ManagedProviderAvailability.maySpawn permitted observed.status then
+    return .error (if observed.status == .saturated then "provider_at_capacity" else "managed_provider_availability_unavailable")
+  return .ok ()
+
 /-- Shared create path. A failed provider call cannot manufacture a local ready
     machine. Uncertain creation leaves its reservation/name for reconciliation. -/
 def spawnManagedWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState)
@@ -137,6 +152,7 @@ def spawnManagedWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState)
     return .error ("managed_spawn_existing_" ++ prior.status ++ ":" ++ prior.id)
   let .ok quote := provider.quoteCents machine.size machine.ttlMinutes
     | return .error "managed_spawn_quote_invalid"
+  if let .error error ← preflightAvailability mc fleet provider spec then return .error error
   let now ← runtime.nowEpoch
   let .ok reserved ← provisionManagedMachine mc fleet {
       machine with requestKey := spec.idempotencyKey, image := spec.fromSnapshot, spentCents := quote
@@ -173,6 +189,15 @@ def resumeManagedWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState)
   let some (m, _) ← getManagedMachine? mc machineId | return .error "managed_machine_missing"
   if m.provider != provider.name then return .error "managed_provider_mismatch"
   let .ok cost := provider.quoteCents m.size ttl | return .error "managed_resume_quote_invalid"
+  let servicePrefix := sandboxNamePrefixFor (← IO.appPath).toString
+  let providerName := if m.sandboxName.startsWith servicePrefix then m.sandboxName else servicePrefix ++ m.id
+  let spec : ManagedProvider.SpawnSpec := {
+    name := providerName, size := m.size, ttlSeconds := ttl * 60, idempotencyKey := requestKey
+  }
+  let .ok priorIntent ← getManagedResumeIntent? mc requestKey
+    | return .error "managed_resume_intent_read_failed"
+  if priorIntent.isNone then
+    if let .error error ← preflightAvailability mc fleet provider spec then return .error error
   let now ← runtime.nowEpoch
   let started ← runtime.monotonicMs
   let enrollment ← newUuidV4
@@ -186,11 +211,6 @@ def resumeManagedWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState)
       let some (current, _) ← getManagedMachine? mc machineId | return .error "managed_machine_missing"
       return .ok current
     return .error ("managed_resume_" ++ intent.state ++ ":" ++ requestKey)
-  let servicePrefix := sandboxNamePrefixFor (← IO.appPath).toString
-  let providerName := if m.sandboxName.startsWith servicePrefix then m.sandboxName else servicePrefix ++ m.id
-  let spec : ManagedProvider.SpawnSpec := {
-    name := providerName, size := m.size, ttlSeconds := ttl * 60, idempotencyKey := requestKey
-  }
   let child ← match ← provider.resume intent.oldProviderId spec with
     | .ok value => pure value
     | .error e =>

@@ -4,6 +4,7 @@
   Transport and sleeping are injectable so lifecycle tests never rent a machine.
 -/
 import OrbBin.HttpClient
+import Orb.ManagedProviderAvailability
 
 namespace OrbCore.ManagedProvider
 
@@ -15,6 +16,8 @@ structure SpawnSpec where
   ttlSeconds : UInt64
   idempotencyKey : String
   fromSnapshot : String := ""
+  repo : String := ""
+  memoryMiB : Option UInt64 := none
 
 structure Machine where
   providerId : String
@@ -46,6 +49,17 @@ structure Request where
 
 abbrev Transport := Request → IO (Result (Nat × JVal))
 
+structure Availability where
+  status : Orb.ManagedProviderAvailability.Status := .available
+  reason : String := ""
+
+def availabilityJson (value : Availability) : JVal := .obj #[
+  ("status", .str (match value.status with
+    | .available => "available" | .degraded => "degraded"
+    | .saturated => "saturated" | .unknown => "unknown")),
+  ("reason", if value.reason.isEmpty then .null else .str value.reason)
+]
+
 /-- The sole provider I/O interface, shared by REST, MCP and automatic placement. -/
 structure Provider where
   name : String
@@ -67,6 +81,8 @@ structure Provider where
   deleteSnapshot : String → IO (Result Unit)
   writeFile : String → String → String → IO (Result Unit)
   exec : String → String → UInt32 → IO (Result JVal)
+  /-- Read-only observation; never changes a persisted operator enable toggle. -/
+  availability : SpawnSpec → IO (Result Availability) := fun _ => pure (.ok { status := .unknown })
   usageCents : String → IO (Result (Option UInt64)) := fun _ => pure (.ok none)
 
 /-- Parse nonnegative provider USD decimals (including bounded exponent form)
@@ -122,12 +138,19 @@ structure Declaration where
   quoteCents : String → UInt64 → Result UInt64
   create : Transport → Provider
 
+/-- Retain transport diagnostics privately, without a credential or log injection. -/
+def transportDiagnostic (apiKey cause : String) : String :=
+  let redacted := if apiKey.isEmpty then cause else cause.replace apiKey "[redacted]"
+  (redacted.replace "\r" "\\r" |>.replace "\n" "\\n" |>.take 1024).toString
+
 def httpTransport (baseUrl apiKey : String) : Transport := fun req => do
   if apiKey.trimAscii.toString.isEmpty then return .error { code := "provider_credential_missing" }
   let headers := if req.idempotencyKey.isEmpty then #[]
     else #[("Idempotency-Key", req.idempotencyKey)]
   match ← sendJsonRequest req.method (baseUrl ++ req.path) (some apiKey) req.body headers req.timeoutMs with
-  | .error _ => return .error { code := "provider_transport_failed_outcome_uncertain" }
+  | .error cause =>
+    IO.eprintln ("[managed-provider] transport failed: " ++ transportDiagnostic apiKey cause)
+    return .error { code := "provider_transport_failed_outcome_uncertain" }
   | .ok (status, text, parsed) =>
     if let some body := parsed then return .ok (status, body)
     if text.trimAscii.toString.isEmpty then return .ok (status, .null)

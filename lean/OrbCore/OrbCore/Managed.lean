@@ -278,6 +278,7 @@ def managedComputeDdl : String :=
   "created_at_sec INTEGER NOT NULL DEFAULT 0,expires_at_sec INTEGER NOT NULL DEFAULT 0," ++
   "last_poll_sec INTEGER NOT NULL DEFAULT 0,request_key TEXT NOT NULL DEFAULT '',image TEXT NOT NULL DEFAULT '');" ++
   "CREATE INDEX IF NOT EXISTS idx_managed_machines_owner ON managed_machines(owner_user_id);" ++
+  "CREATE TABLE IF NOT EXISTS managed_provider_settings(provider TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS user_managed_provider_prefs(" ++
   "user_id TEXT NOT NULL,provider TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1," ++
   "updated_at TEXT NOT NULL DEFAULT '',PRIMARY KEY(user_id,provider));" ++
@@ -671,6 +672,11 @@ private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetS
   if !admitManagedSpawnCount current chargedActive cost ttlMinutes.toUInt32 then
     return .error "managed_spawn_rejected"
   if provider == "boat" && !current.boatEnabled then return .error "provider_disabled"
+  if provider != "boat" then
+    let .ok providerRows ← execParamQueryUnlocked st.db
+        "SELECT enabled FROM managed_provider_settings WHERE provider=?1;" #[provider]
+      | return .error "managed_provider_settings_unavailable"
+    if providerRows.size > 1 && cell providerRows[1]! 0 != "1" then return .error "provider_disabled"
   if let some budget := userAdmission? then
     if ownerUserId.isEmpty then return .error "managed_user_missing"
     let dayStart := (nowEpoch / 86400) * 86400
@@ -1455,17 +1461,22 @@ def renderManagedProvidersJson
     (st : ManagedFleetState)
     (isAdmin : Bool := true)
     (userPrefs : Array (String × Bool) := #[])
-    (configuredProviders : Array String := #[]) : String :=
+    (configuredProviders : Array String := #[])
+    (disabledProviders : Array String := #[])
+    (observations : Array (String × JVal) := #[]) : String :=
   let items := knownProviders.map fun p =>
     let globallyConfigured := configuredProviders.any (fun cp => canonicalizeProvider cp == p) || (p == "boat" && st.boatEnabled)
-    let globallyEnabled := st.enabled && (if p == "boat" then st.boatEnabled else globallyConfigured)
+    let globallyEnabled := st.enabled && !disabledProviders.contains p &&
+      (if p == "boat" then st.boatEnabled else globallyConfigured)
+    let observation := ((observations.find? (·.1 == p)).map Prod.snd).getD
+      (ManagedProvider.availabilityJson { status := .unknown, reason := "not_observed" })
     let userEnabled := isUserManagedProviderEnabled userPrefs p
     let effectiveEnabled := globallyEnabled && userEnabled
     OrbBin.Json.renderCompact (.obj (#[
       ("provider", .str p), ("display_name", .str (providerDisplayName p)),
       ("configured", .bool globallyConfigured), ("enabled", .bool effectiveEnabled),
       ("globally_enabled", .bool globallyEnabled), ("user_enabled", .bool userEnabled),
-      ("effective_enabled", .bool effectiveEnabled),
+      ("effective_enabled", .bool effectiveEnabled), ("availability", observation),
       ("credential_source", if isAdmin && globallyConfigured then .str "settings" else .null),
       ("key_hint", if isAdmin && globallyConfigured then .str "••••" else .null)
     ] ++ ManagedProvider.catalogFields p))
@@ -1481,7 +1492,8 @@ def renderManagedMachinesJson
     (userPrefs : Array (String × Bool) := #[])
     (userSpentTodayCents : UInt64 := 0)
     (userDailyCapCents? : Option UInt64 := none)
-    (configuredProviders : Array String := #[]) : String :=
+    (configuredProviders : Array String := #[])
+    (disabledProviders : Array String := #[]) : String :=
   match callerUserId? with
   | none =>
     let active := (st.machines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
@@ -1496,7 +1508,7 @@ def renderManagedMachinesJson
     let boatStr := if st.boatEnabled then "true" else "false"
     let items := visible.map renderManagedMachineItemJson
     let budgetJson := renderManagedBudgetJson st (some uid) userSpentTodayCents userDailyCapCents?
-    let provsJson := renderManagedProvidersJson st isAdmin userPrefs configuredProviders
+    let provsJson := renderManagedProvidersJson st isAdmin userPrefs configuredProviders disabledProviders
     s!"\{\"enabled\":{enStr},\"boat_enabled\":{boatStr},\"active_machines\":{active},\"max_concurrent\":{st.maxConcurrent},\"spent_today_cents\":{userSpentTodayCents},\"daily_cap_cents\":{st.dailyCapCents},\"machines\":[{String.intercalate "," items.toList}],\"sizes\":[],\"providers\":{provsJson},\"budget\":{budgetJson},\"daily_spend\":[]}"
 
 def renderRemoteNodesJson

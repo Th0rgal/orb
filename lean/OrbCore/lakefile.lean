@@ -40,6 +40,11 @@ lean_exe «orb-core-test» where
   root := `OrbCore.SelfTest
   supportInterpreter := false
 
+/-- Focused inner loop; reuses the tests in orb-core-test without compiling Control. -/
+lean_exe «orb-managed-provider-test» where
+  root := `OrbCore.ManagedProviderTestMain
+  supportInterpreter := false
+
 @[default_target]
 lean_exe «orb-spec-runner» where
   root := `OrbCore.SpecRunnerMain

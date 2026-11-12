@@ -190,6 +190,7 @@ def run (root : String) : IO Unit := do
     provider protocol (in particular, it is not a lean.ci client). -/
 def mockPolicyProvider (mc : ManagedComputeStore) (providerName : String) : Provider := {
   name := providerName
+  availability := fun _ => pure (.ok { status := .available, reason := "synthetic_policy_fixture" })
   readinessDeadlineSecs := 360
   isReady := fun state => state == "ready"
   isStopped := fun state => state == "stopped"

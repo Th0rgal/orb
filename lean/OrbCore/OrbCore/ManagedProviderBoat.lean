@@ -118,6 +118,9 @@ def boatQuoteCents (size : String) (ttlMinutes : UInt64) : Result UInt64 := do
     Core's durable managed ID and boot epoch must not be replaced with this ID. -/
 def boat (transport : Transport) (sleep : UInt32 → IO Unit := fun ms => do IO.sleep ms) : Provider := {
   name := "boat"
+  -- Boat has no pool-capacity introspection in its supported API. Preserve its
+  -- explicit create-admission behavior; provider rejection still cannot imply ready.
+  availability := fun _ => pure (.ok { status := .available, reason := "capacity_not_exposed" })
   readinessDeadlineSecs := 360
   isReady := fun s => #["ready", "idle", "running", "busy"].contains s
   isStopped := fun s => #["archived", "stopped", "deleted", "error", "archiving"].contains s

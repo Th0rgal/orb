@@ -77,6 +77,14 @@ operator enabled toggle is changed. Lookup failures return a stable 503 without
 vault output. An advisory file lock fences concurrent master-key creation;
 contention fails closed without replacing an existing key.
 
+The same sealing is available without HTTP as `orb-core[-dev] seal-provider
+<boat|leanci|colab>`, run on the Core host in the service's environment. Its
+authority is ownership of Core's data root by the invoking user; it has no login,
+so dev-mode sessions and fallback signing keys cannot reach it, and a process
+carrying a mission identity (`SANDBOXED_MISSION_ID`, `SANDBOXED_JOB_ID`) is
+refused. It prints only `{provider, sealed}`. The running service picks the key
+up on its next provider call; no restart is needed.
+
 **Spec Card** (`Th0rgal/orb@31f24317b`, `Orb.ManagedProviderPolicy`,
 `ManagedProviderSealing.lean`, the Control seal route): `seal_authority_iff`
 connects the pure gate to authenticated operator / non-mission / non-managed
@@ -84,6 +92,32 @@ flags. Positive trace: operator seals a synthetic lean.ci key, and only Core can
 open it. The pure theorem does not verify HTTP credential classification,
 Bitwarden, filesystem primitives or AEAD; route and synthetic-vault tests cover
 those integrations. No live vault result is evidence from the self-test.
+
+### Availability and persisted operator intent
+
+Each adapter exposes read-only `Provider.availability`. `available` and `degraded`
+may pass admission; `saturated` returns `provider_at_capacity` (REST 503) and
+`unknown`/observation failures fail closed before a VM reservation or rental.
+Availability is independent of the operator toggle in `managed_provider_settings`.
+Only explicit operator configuration writes that table; Boat retains its existing
+`managed_fleet_state.boat_enabled` as its sole toggle owner. Adapter availability
+defaults to unknown. Boat explicitly admits attempts with `capacity_not_exposed`,
+since its supported API offers no pool preflight; it makes no capacity guarantee.
+Admission rechecks the
+toggle in the reservation transaction, including resume and extend cost admission.
+Catalog responses expose `availability` separately and never change `enabled`
+because a provider is full or unreachable. Existing idempotent completed creates
+replay before capacity preflight; an observation does not revoke a prior receipt.
+
+**Spec Card** (`Th0rgal/orb@1349b797f`, `Orb.ManagedProviderAvailability`,
+`ManagedProvisioning.preflightAvailability`): `admission_iff` captures the enabled
+and usable-status conjunction; positive available/degraded traces and saturated /
+disabled rejection theorems are kernel checked. Deliberate capacity mutants live
+separately. HTTP decoding, caches, database transactions and capacity races remain
+the I/O TCB, covered by mock-transport and persistence regressions, not this theorem.
+A successful preflight does not promise the subsequent provider create succeeds.
+Transport failures keep a bounded, credential-redacted, single-line cause in the
+Core log while the returned provider error remains a stable uncertain-outcome code.
 
 ## Lean provider transport contract
 

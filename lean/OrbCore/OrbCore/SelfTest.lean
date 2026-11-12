@@ -11,6 +11,7 @@
 import OrbCore
 import OrbCore.ManagedProviderTests
 import OrbCore.ManagedProviderSealingTests
+import OrbCore.ManagedProviderAvailabilityTests
 import OrbCore.ManagedProvisioningTests
 import OrbCore.ManagedResumeTests
 import OrbCore.ManagedAccessTests
@@ -4381,6 +4382,29 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
       pure status
     finally OrbBin.PosixExt.closeFdRaw sealLock.toInt32
   if sealConflict != 409 then return (← fail "provider update silently ignored seal lock contention")
+  -- A credential edit must not turn the global fleet back on merely because
+  -- Boat's independent switch was left on when the global switch was disabled.
+  let priorFleet ← app.managedRef.get
+  let (disableFleetStatus, _, _) ← sendReq "PUT" "/api/managed-machines/settings" adminTok
+    "{\"enabled\":false,\"boat_enabled\":true}"
+  let (credentialStatus, _, _) ← sendReq "PATCH" "/api/managed-machines/providers/leanci" adminTok
+    "{\"api_key\":\"synthetic-credential-only-fixture\"}"
+  let (readFleetStatus, readFleetBody, _) ← sendReq "GET" "/api/managed-machines/settings" adminTok ""
+  let observedFleet := (OrbBin.Json.parse readFleetBody).toOption.getD .null
+  let restoreBody := OrbBin.Json.renderCompact (.obj #[("enabled", .bool priorFleet.enabled), ("boat_enabled", .bool priorFleet.boatEnabled)])
+  let (restoreStatus, _, _) ← sendReq "PUT" "/api/managed-machines/budget" adminTok restoreBody
+  if disableFleetStatus != 200 || credentialStatus != 200 || readFleetStatus != 200 || restoreStatus != 200 ||
+      observedFleet.fieldBool? "enabled" != some false || observedFleet.fieldBool? "boat_enabled" != some true then
+    return (← fail s!"credential-only edit changed independent fleet enablement: {disableFleetStatus}/{credentialStatus}/{readFleetStatus}/{restoreStatus}: {readFleetBody}")
+  let (providersStatus, providersBody, _) ← sendReq "GET" "/api/managed-machines/providers" adminTok ""
+  let (machinesStatus, machinesBody, _) ← sendReq "GET" "/api/managed-machines" adminTok ""
+  let dedicatedProviders := (OrbBin.Json.parse providersBody).toOption.bind (·.asArr?) |>.getD #[]
+  let embeddedProviders := ((OrbBin.Json.parse machinesBody).toOption.getD .null).fieldArr? "providers" |>.getD #[]
+  let dedicatedLean := dedicatedProviders.find? (fun p => p.fieldStr? "provider" == some "leanci")
+  let embeddedLean := embeddedProviders.find? (fun p => p.fieldStr? "provider" == some "leanci")
+  if providersStatus != 200 || machinesStatus != 200 || dedicatedProviders.size != knownProviders.size ||
+      (dedicatedLean.bind (·.fieldBool? "configured")) != some true || dedicatedLean != embeddedLean then
+    return (← fail "reserved provider route or embedded catalog projection diverged")
 
   -- Session epoch revocation: password reset bumps `session_epoch`, immediately invalidating `aliceTok0`!
   let (rstSt, _, _) ← sendReq "POST" s!"/api/admin/users/{aliceId}/reset-password" adminTok "{\"password\":\"alice-newpass-123456\"}"
@@ -6250,6 +6274,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.ManagedHarvestTests.run tmpRoot
     OrbCore.ManagedSnapshotCatalogTests.run tmpRoot
     OrbCore.ManagedProviderSealingTests.run tmpRoot
+    OrbCore.ManagedProviderAvailabilityTests.run tmpRoot
   catch e =>
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: {e}"
