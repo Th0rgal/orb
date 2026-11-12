@@ -186,8 +186,10 @@ def resumeManagedWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState)
       let some (current, _) ← getManagedMachine? mc machineId | return .error "managed_machine_missing"
       return .ok current
     return .error ("managed_resume_" ++ intent.state ++ ":" ++ requestKey)
+  let servicePrefix := sandboxNamePrefixFor (← IO.appPath).toString
+  let providerName := if m.sandboxName.startsWith servicePrefix then m.sandboxName else servicePrefix ++ m.id
   let spec : ManagedProvider.SpawnSpec := {
-    name := m.sandboxName, size := m.size, ttlSeconds := ttl * 60, idempotencyKey := requestKey
+    name := providerName, size := m.size, ttlSeconds := ttl * 60, idempotencyKey := requestKey
   }
   let child ← match ← provider.resume intent.oldProviderId spec with
     | .ok value => pure value
