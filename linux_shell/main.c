@@ -98,15 +98,15 @@ static gboolean on_decide_policy(WebKitWebView *wv, WebKitPolicyDecision *dec, W
 #endif
 int main(int argc, char **argv) {
     unsigned port = 19479; const char *port_env = getenv("ORB_LOCALD_PORT"), *nc_env = getenv("ORB_NATIVE_CHROME");
-    const int native_chrome = nc_env && strcmp(nc_env, "1") == 0;
+    const int native_chrome = !nc_env || (strcmp(nc_env, "0") != 0 && strcmp(nc_env, "false") != 0);
     if (port_env && *port_env && !parse_valid_port(port_env, &port)) return fprintf(stderr, "orb-linux-shell: invalid ORB_LOCALD_PORT\n"), 1;
     char eph_tok[65], *init_js = NULL; const char *token = getenv("ORB_LOCALD_TOKEN");
     if (!token || strlen(token) < 32 || strcmp(token, "orb-locald-default-token") == 0) { if (gen_csprng_hex(eph_tok) != 0) return 1; token = eph_tok; }
     if (!(init_js = build_init_script(port, token, native_chrome))) return 1;
     if (argc > 1 && strcmp(argv[1], "--self-test") == 0) {
-        char *nc_js = build_init_script(port, token, 1);
-        int ok = nc_js && strstr(nc_js, "__ORB_NATIVE_CHROME__ = true") && orb_gtk_chrome_self_test() && strstr(init_js, "__ORB_DESKTOP__") && strstr(init_js, "dataset.platform = 'linux'") && strstr(init_js, "__ORB_EMIT__") && strstr(init_js, "__ORB_PINCH__") && strstr(init_js, "/__orb_events") && !strstr(init_js, "setInterval") && strstr(init_js, "const _fetch = window.fetch.bind(window)") && is_confined_shell_uri("orb://localhost/") && is_confined_shell_uri("tauri://localhost/") && !is_confined_shell_uri("orb://evil.example/") && is_confined_shell_uri("http://127.0.0.1:1430") && is_confined_shell_uri("http://localhost/") && !is_confined_shell_uri("http://127.0.0.1:80@evil.com/") && !is_confined_shell_uri("https://evil.example");
-        return free(nc_js), free(init_js), ok ? (printf("orb-linux-shell self-test: ok\n"), 0) : 1;
+        char *nc_js = build_init_script(port, token, 1), *legacy_js = build_init_script(port, token, 0);
+        int ok = nc_js && legacy_js && strstr(nc_js, "__ORB_NATIVE_CHROME__ = true") && !strstr(legacy_js, "__ORB_NATIVE_CHROME__ = true") && orb_gtk_chrome_self_test() && strstr(init_js, "__ORB_DESKTOP__") && strstr(init_js, "dataset.platform = 'linux'") && strstr(init_js, "__ORB_EMIT__") && strstr(init_js, "__ORB_PINCH__") && strstr(init_js, "/__orb_events") && !strstr(init_js, "setInterval") && strstr(init_js, "const _fetch = window.fetch.bind(window)") && is_confined_shell_uri("orb://localhost/") && is_confined_shell_uri("tauri://localhost/") && !is_confined_shell_uri("orb://evil.example/") && is_confined_shell_uri("http://127.0.0.1:1430") && is_confined_shell_uri("http://localhost/") && !is_confined_shell_uri("http://127.0.0.1:80@evil.com/") && !is_confined_shell_uri("https://evil.example");
+        return free(legacy_js), free(nc_js), free(init_js), ok ? (printf("orb-linux-shell self-test: ok\n"), 0) : 1;
     }
     pid_t parent_pid = getpid(), locald_pid = -1; const char *locald_bin = getenv("ORB_LOCALD_BIN");
     if (locald_bin && *locald_bin && (locald_pid = fork()) == 0) {

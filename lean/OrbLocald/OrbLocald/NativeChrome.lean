@@ -43,23 +43,25 @@ structure ChromeMissionInput where
   deriving Repr, Inhabited, BEq
 
 structure SidebarRow where
-  rowId      : String
-  kind       : String
-  depth      : Nat := 0
-  title      : String
-  subtitle   : String := ""
-  target     : String := ""
-  project    : String := ""
-  folder     : String := ""
-  status     : String := ""
-  shortcut   : String := ""
-  icon       : String := ""
-  color      : String := ""
-  badge      : Nat := 0
-  expandable : Bool := false
-  expanded   : Bool := false
-  selected   : Bool := false
-  attention  : Bool := false
+  rowId          : String
+  kind           : String
+  depth          : Nat := 0
+  title          : String
+  subtitle       : String := ""
+  target         : String := ""
+  project        : String := ""
+  folder         : String := ""
+  status         : String := ""
+  shortcut       : String := ""
+  icon           : String := ""
+  color          : String := ""
+  badge          : Nat := 0
+  childCount     : Nat := 0
+  liveChildCount : Nat := 0
+  expandable     : Bool := false
+  expanded       : Bool := false
+  selected       : Bool := false
+  attention      : Bool := false
   deriving Repr, Inhabited, BEq
 
 def SidebarRow.toJson (r : SidebarRow) : JVal :=
@@ -77,6 +79,8 @@ def SidebarRow.toJson (r : SidebarRow) : JVal :=
     ("icon", .str r.icon),
     ("color", .str r.color),
     ("badge", .nat r.badge),
+    ("child_count", .nat r.childCount),
+    ("live_child_count", .nat r.liveChildCount),
     ("expandable", .bool r.expandable),
     ("expanded", .bool r.expanded),
     ("selected", .bool r.selected),
@@ -89,6 +93,7 @@ structure PaletteItem where
   title    : String
   subtitle : String := ""
   target   : String
+  status   : String := ""
   shortcut : String := ""
   icon     : String := ""
   color    : String := ""
@@ -102,6 +107,7 @@ def PaletteItem.toJson (p : PaletteItem) : JVal :=
     ("title", .str p.title),
     ("subtitle", .str p.subtitle),
     ("target", .str p.target),
+    ("status", .str p.status),
     ("shortcut", .str p.shortcut),
     ("icon", .str p.icon),
     ("color", .str p.color),
@@ -121,6 +127,7 @@ structure ChromeScopeState where
   settingsDots  : Array String := #[]
   projects      : Array ChromeProjectInput := #[]
   missions      : Array ChromeMissionInput := #[]
+  expandedIds   : Array String := #[]
   collapsedIds  : Array String := #[]
   hydratedOnly  : Bool := false
   deriving Repr, Inhabited
@@ -624,13 +631,6 @@ private def settingsSectionIcon (secId : String) : String :=
   else if secId == "notifications" then "bell"
   else "gear"
 
-private def missionStatusColor (status : String) : String :=
-  let s := status.trimAscii.toString.toLower
-  if isWorkingMissionStatus s then "#86aee4"
-  else if s == "completed" || s == "succeeded" then "#80b28d"
-  else if s == "blocked" || s == "failed" || s == "error" || s == "errored" || s == "timed_out" || s == "not_feasible" || s == "waiting_for_approval" || s == "awaiting_approval" then "#c9a227"
-  else "#8a8a8a"
-
 private def isSelectedMissionTarget (sel : String) (mid : String) : Bool :=
   sel == s!"m:{mid}" || sel == s!"ms:{mid}" || sel == s!"rm:{mid}"
 
@@ -685,7 +685,11 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
 
   let needleLower := LeanSys.Search.asciiLowerBytes filterQuery.trimAscii.toString.toUTF8
   let filterActive := !needleLower.isEmpty
-  let isCollapsed := fun (rid : String) => !filterActive && st.collapsedIds.contains rid
+  let resolveExpanded := fun (rid : String) (defaultOpen : Bool) =>
+    if filterActive then true
+    else if st.expandedIds.contains rid then true
+    else if st.collapsedIds.contains rid then false
+    else defaultOpen
 
   let mut rows : Array SidebarRow := #[
     {
@@ -882,6 +886,28 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
 
   let retainedMissions := placedMerged.filter (fun m => retainedIds.contains m.id)
 
+  -- Matching `TreeView.ts` (`holdsSelected`, `countNested`, `countVersions`):
+  -- Mission subtrees (`m:<id>`) default to COLLAPSED unless a descendant inside the subtree is currently selected.
+  let rec missionHoldsSelectedDesc (fuel : Nat) (mid : String) : Bool :=
+    match fuel with
+    | 0 => false
+    | fuel' + 1 =>
+      let kids := retainedMissions.filter (fun c => getSafeParent c.id == some mid)
+      kids.any (fun c => isSelectedMissionTarget sel c.id || missionHoldsSelectedDesc fuel' c.id)
+
+  let rec countMissionDescendants (fuel : Nat) (mid : String) : Nat × Nat × Nat :=
+    match fuel with
+    | 0 => (0, 0, 0)
+    | fuel' + 1 =>
+      let kids := retainedMissions.filter (fun c => getSafeParent c.id == some mid)
+      kids.foldl (init := (0, 0, 0)) fun (totL, liveL, totV) c =>
+        let (subL, subLive, subV) := countMissionDescendants fuel' c.id
+        if isNonLeaderVersion c.id then
+          (totL + subL, liveL + subLive, totV + 1 + subV)
+        else
+          let selfLive := if isWorkingMissionStatus c.status then 1 else 0
+          (totL + 1 + subL, liveL + selfLive + subLive, totV + subV)
+
   -- Helper to emit mission + cycle-safe descendants recursively up to bounded depth `retainedMissions.size`
   -- Launched children come first in list order, followed by earlier fork versions sorted by `updatedAtMs` descending (`nestMissions`).
   let rec emitMissionSubtree (fuel : Nat) (m : ChromeMissionInput) (depth : Nat) (acc : Array SidebarRow) : Array SidebarRow :=
@@ -895,7 +921,12 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
       let children := launchedChildren ++ versionChildren
       let rowId := s!"m:{m.id}"
       let hasChildren := !children.isEmpty
-      let exp := !isCollapsed rowId
+      let defaultOpen := hasChildren && missionHoldsSelectedDesc (retainedMissions.size + 1) m.id
+      let exp := resolveExpanded rowId defaultOpen
+      let (totL, liveL, totV) :=
+        if hasChildren then countMissionDescendants (retainedMissions.size + 1) m.id else (0, 0, 0)
+      let totalCount := if totL > 0 then totL else totV
+      let liveCount := if totL > 0 then liveL else 0
       let row : SidebarRow := {
         rowId := rowId
         kind := "mission"
@@ -907,7 +938,9 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
         folder := m.folder
         status := m.status
         icon := "bot"
-        color := missionStatusColor m.status
+        color := ""
+        childCount := totalCount
+        liveChildCount := liveCount
         expandable := hasChildren
         expanded := if hasChildren then exp else false
         selected := isSelectedMissionTarget sel m.id
@@ -915,6 +948,8 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
       let nextAcc := acc.push row
       if !hasChildren || !exp then nextAcc
       else children.foldl (fun a c => emitMissionSubtree fuel' c (depth + 1) a) nextAcc
+
+  let unassigned := retainedMissions.filter (fun m => m.project.isEmpty && (getSafeParent m.id).isNone)
 
   for proj in projects do
     let projMissions := retainedMissions.filter (·.project == proj.slug)
@@ -929,7 +964,14 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
     if !filterActive || !projMissions.isEmpty then
       let projRowId := s!"proj:{proj.slug}"
       let projExpandable := !sortedFolders.isEmpty || !projMissions.isEmpty
-      let projExpanded := !isCollapsed projRowId
+      let projHoldsSelected :=
+        sel == s!"c:{proj.slug}" ||
+        sel == s!"ps:{proj.slug}" ||
+        sel.startsWith s!"pf:{proj.slug}:" ||
+        sel.startsWith s!"pc:{proj.slug}:" ||
+        projMissions.any (fun m => isSelectedMissionTarget sel m.id)
+      let projDefaultOpen := projHoldsSelected || projects.size == 1
+      let projExpanded := resolveExpanded projRowId projDefaultOpen
       let projShowOpen := projExpandable && projExpanded
       let projIconColor := if proj.color.isEmpty then "#8a8a8a" else proj.color
       rows := rows.push {
@@ -959,7 +1001,12 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
               else
                 let fRowId := s!"folder:{proj.slug}:{fp}"
                 let fExpandable := hasSubfolders || !folderMissions.isEmpty
-                let fExpanded := !isCollapsed fRowId
+                let fHoldsSelected :=
+                  sel == s!"pf:{proj.slug}:{fp}" ||
+                  sel.startsWith s!"pf:{proj.slug}:{fp}/" ||
+                  projMissions.any (fun m =>
+                    (m.folder == fp || m.folder.startsWith (fp ++ "/")) && isSelectedMissionTarget sel m.id)
+                let fExpanded := resolveExpanded fRowId (fHoldsSelected || hasAnyDescMission)
                 let fShowOpen := fExpandable && fExpanded
                 let fRow : SidebarRow := {
                   rowId := fRowId
@@ -984,7 +1031,6 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
         rows := emitFolderSubtree (sortedFolders.size + 2) "" 1 rows
 
   -- Unassigned missions (`project == ""`)
-  let unassigned := retainedMissions.filter (fun m => m.project.isEmpty && (getSafeParent m.id).isNone)
   for m in unassigned do
     rows := emitMissionSubtree (retainedMissions.size + 1) m 0 rows
 
@@ -1120,7 +1166,7 @@ def queryPaletteItems (st : ChromeScopeState) (rawQuery : String) (limit : Nat :
         else s!"{m.project}/{m.folder} · {m.status}"
       if let some scVal := scorePaletteCandidate qLower qTris m.title (sub ++ " " ++ m.id) (recencyBoost + activeBoost) then
         candidates := candidates.push ({
-          itemId := s!"m:{m.id}", kind := "mission", title := m.title, subtitle := sub, target := s!"m:{m.id}", icon := "bot", color := missionStatusColor m.status, score := scVal
+          itemId := s!"m:{m.id}", kind := "mission", title := m.title, subtitle := sub, target := s!"m:{m.id}", status := m.status, icon := "bot", color := "", score := scVal
         }, scVal)
       rankIdx := rankIdx + 1
 
@@ -1192,6 +1238,7 @@ def NativeChromeHub.syncFromJson
         if let some pm := parseMissionInput? m slug then
           missions := missions.push pm
 
+  let prevExpanded := (existing?.map (·.expandedIds)).getD #[]
   let prevCollapsed := (existing?.map (·.collapsedIds)).getD #[]
   let prevViewRev := (existing?.map (·.viewRevision)).getD 0
   let bumpedView := if prevViewRev < 0xFFFFFFFFFFFFFFFF then prevViewRev + 1 else prevViewRev
@@ -1209,6 +1256,7 @@ def NativeChromeHub.syncFromJson
     settingsDots := settingsDots
     projects := projects
     missions := mergeMissionInputs missions
+    expandedIds := prevExpanded
     collapsedIds := prevCollapsed
     hydratedOnly := false
   }
@@ -1251,14 +1299,23 @@ def NativeChromeHub.toggleExpand
   if cleanRow.isEmpty then none
   let idx ← hub.scopes.findIdx? (·.scope == targetScope)
   let cur := hub.scopes[idx]!
-  let wasCollapsed := cur.collapsedIds.contains cleanRow
-  let nextExpanded := explicitExpanded?.getD wasCollapsed
-  let nextCollapsed :=
-    if nextExpanded then cur.collapsedIds.filter (· != cleanRow)
-    else if wasCollapsed then cur.collapsedIds
-    else cur.collapsedIds.push cleanRow
+  let curExpanded :=
+    if cur.expandedIds.contains cleanRow then true
+    else if cur.collapsedIds.contains cleanRow then false
+    else ((projectSidebarRows cur).find? (·.rowId == cleanRow)).map (·.expanded) |>.getD false
+  let nextExpanded := explicitExpanded?.getD (!curExpanded)
+  let nextExpandedIds :=
+    if nextExpanded then
+      if cur.expandedIds.contains cleanRow then cur.expandedIds else cur.expandedIds.push cleanRow
+    else
+      cur.expandedIds.filter (· != cleanRow)
+  let nextCollapsedIds :=
+    if nextExpanded then
+      cur.collapsedIds.filter (· != cleanRow)
+    else
+      if cur.collapsedIds.contains cleanRow then cur.collapsedIds else cur.collapsedIds.push cleanRow
   let nextViewRev := if cur.viewRevision < 0xFFFFFFFFFFFFFFFF then cur.viewRevision + 1 else cur.viewRevision
-  let updated := { cur with collapsedIds := nextCollapsed, viewRevision := nextViewRev }
+  let updated := { cur with expandedIds := nextExpandedIds, collapsedIds := nextCollapsedIds, viewRevision := nextViewRev }
   let nextHub := { hub with scopes := hub.scopes.set! idx updated }
   some (nextExpanded, updated, nextHub)
 

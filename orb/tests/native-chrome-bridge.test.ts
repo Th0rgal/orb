@@ -119,6 +119,7 @@ describe("nativeChromeBridge", () => {
     const opened: Array<string | null> = [];
     const projects: string[] = [];
     const toggledFolders: string[] = [];
+    const historySteps: Array<-1 | 1> = [];
     let leftSettings = 0;
     let sbOpen = true;
     const fakeWin = {} as Window & {
@@ -135,6 +136,7 @@ describe("nativeChromeBridge", () => {
         leaveSettings: () => {
           leftSettings += 1;
         },
+        navHistory: (d) => historySteps.push(d),
         getSidebarOpen: () => sbOpen,
         setSidebarOpen: (next) => {
           sbOpen = next;
@@ -152,6 +154,8 @@ describe("nativeChromeBridge", () => {
     expect(fakeWin.__ORB_NATIVE_NAV__?.("project:orb")).toBe(true);
     expect(fakeWin.__ORB_NATIVE_NAV__?.("folder:orb:audits/2026")).toBe(true);
     expect(fakeWin.__ORB_NATIVE_NAV__?.("settings-back")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_NAV__?.("history-back")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_NAV__?.("history-forward")).toBe(true);
     expect(fakeWin.__ORB_TOGGLE_NATIVE_SIDEBAR__?.()).toBe(false);
     expect(sbOpen).toBe(false);
 
@@ -159,6 +163,7 @@ describe("nativeChromeBridge", () => {
     expect(projects).toEqual(["orb"]);
     expect(toggledFolders).toEqual(["folder:orb:audits/2026"]);
     expect(leftSettings).toBe(1);
+    expect(historySteps).toEqual([-1, 1]);
 
     cleanup();
     expect(fakeWin.__ORB_SELECT_MISSION__).toBeUndefined();

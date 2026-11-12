@@ -529,6 +529,7 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
   width: calc(var(--sb-w) - var(--tb-traffic-left) - 8px); z-index: 6;
 }
 .app.sb-hidden .tb-left { margin-left: var(--tb-traffic-margin); }
+.app[data-native-chrome="true"][data-native-sb-open="true"] .tb-left { display: none; }
 @media (max-width: 720px) {
   .app:not(.sb-hidden) .titlebar .tb-left { position: static; width: auto; margin-left: 0; padding-left: var(--tb-traffic-margin); height: auto; }
 }

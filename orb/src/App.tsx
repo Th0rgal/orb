@@ -1040,6 +1040,7 @@ export default function App() {
     const disposeHandlers = installNativeChromeWindowHandlers({
       open: (target) => open(target),
       leaveSettings,
+      navHistory: (delta) => nav(delta),
       getSidebarOpen: () => sidebar(),
       setSidebarOpen: setSidebarWithNative,
       selectProject: (slug) => {
@@ -1054,6 +1055,11 @@ export default function App() {
     });
   });
   if (nativeChromeSyncer) {
+    createEffect(() => {
+      const canBack = hIdx() > 0;
+      const canForward = hIdx() < history().length - 1;
+      notifyNativeChromeShell("set_native_history", { can_back: canBack, can_forward: canForward });
+    });
     createEffect(() => {
       const scope = historyScope();
       const sel = selected();
@@ -1617,7 +1623,7 @@ export default function App() {
   );
 
   return (
-    <div class={`app ${onSettings() ? "settings-view" : ""} ${(nativeChromeActive || !sidebar()) ? "sb-hidden" : ""}`} data-native-chrome={nativeChromeActive ? "true" : undefined} data-pane={currentMissionId() ? "mission" : (currentController() || currentProjectFile() || currentProjectSettings()) ? "project" : "page"} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
+    <div class={`app ${onSettings() ? "settings-view" : ""} ${(nativeChromeActive || !sidebar()) ? "sb-hidden" : ""}`} data-native-chrome={nativeChromeActive ? "true" : undefined} data-native-sb-open={nativeChromeActive ? (sidebar() ? "true" : "false") : undefined} data-pane={currentMissionId() ? "mission" : (currentController() || currentProjectFile() || currentProjectSettings()) ? "project" : "page"} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
       <MentionProjectContext.Provider value={()=>openMission()?.project??currentController()?.slug??effectiveNewProject()}>
       <FilePanelProvider missionOpen={currentMissionId()} scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }} sidebar={sidebar} onSetSidebar={setSidebarWithNative}>
       <Show when={!nativeChromeActive}>

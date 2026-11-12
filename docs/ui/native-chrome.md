@@ -1,7 +1,8 @@
 # Hybrid Native Chrome (`OrbLocald` Sidebar & `Cmd+K` Palette Projection)
 
-When Orb runs in Hybrid Native Chrome mode (`ORB_NATIVE_CHROME=1` on desktop shells,
-exposed to the WebView as `window.__ORB_NATIVE_CHROME__ === true`), the native shell
+By default on desktop shells (`ORB_NATIVE_CHROME` unset or `1`; pass `ORB_NATIVE_CHROME=0`
+to fall back to the WebView-rendered sidebar, exposed to the WebView as
+`window.__ORB_NATIVE_CHROME__ === true`), the native shell
 (`macos_shell/main.swift` via `NSSplitView` + `NSTableView` + `NSPanel`, and
 `linux_shell/` via `GtkPaned` + `GtkListBox` + `GtkPopover`) renders the sidebar
 navigation tree and `Cmd+K` / `Ctrl+K` quick-switcher natively, while the WebView
@@ -59,10 +60,19 @@ All commands run over `127.0.0.1:<rpcPort>/__orb_rpc` gated by the 32-byte launc
 | `native_chrome_move_admit` | `{ item_kind, src_project, src_path?, dst_project, dst_path? }` | `{ admitted: Bool }` |
 | `native_chrome_palette_query` | `{ scope?, query, limit? }` | `{ scope, query, items: PaletteItem[] }` |
 
-Each `SidebarRow` and `PaletteItem` includes `icon` and `color` metadata so native shells
-(`macos_shell/` SF Symbols and `linux_shell/` Cairo vector glyphs) render crisp HiDPI icons,
-per-project folder colors, mission status tints, non-selectable `section` / `note` rows, and
-the pinned bottom `Settings` `footer` button identically to the standard WebView sidebar.
+Each `SidebarRow` and `PaletteItem` includes `icon`, `color`, and `status` metadata (plus
+`child_count` and `live_child_count` on expandable mission rows) so native shells
+(`macos_shell/` SF Symbols and `linux_shell/` Cairo vector glyphs) render:
+- the `35 px` top header toolbar (`[Sidebar toggle] [Search] ··· [Back] [Forward]`, synced via
+  `set_native_history` / `set_native_sidebar` and hidden in the WebView `.titlebar` while the
+  native sidebar is open),
+- per-project folder colors, neutral robot (`bot`) glyphs with bottom-right status cutout badges
+  (including a 12-step spinner active only while visible rows are running),
+- collapsed-by-default subagent/version trees (`expandedIds` / `collapsedIds` overrides, auto-opening
+  only along the selected mission's ancestor chain) with a right-aligned `[live/total ▸]` toggle
+  button separate from mission row selection,
+- non-selectable `section` / `note` rows, and the pinned bottom `Settings` `footer` button
+  identically to the standard WebView sidebar.
 
 Whenever `native_chrome_sync_state` applies a state change or `native_chrome_toggle_expand`
 flips a container's expansion state, `orb-locald` broadcasts SSE event

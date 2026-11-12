@@ -140,6 +140,7 @@ export function buildNativeChromeSyncArgs(
 export type NativeChromeBridgeHandlers = {
   open: (id: string | null) => boolean;
   leaveSettings: () => void;
+  navHistory?: (delta: -1 | 1) => void;
   getSidebarOpen: () => boolean;
   setSidebarOpen: (open: boolean) => void;
   selectProject?: (slug: string) => void;
@@ -147,8 +148,11 @@ export type NativeChromeBridgeHandlers = {
   toggleFolderExpand?: (rowId: string) => void;
 };
 
-/** Notify native macOS/Linux shell when the titlebar sidebar toggle or Cmd+K shortcut fires inside WebView. */
-export function notifyNativeChromeShell(command: "set_native_sidebar" | "open_native_palette", args: Record<string, unknown> = {}): void {
+/** Notify native macOS/Linux shell when the titlebar sidebar toggle, history state, or Cmd+K shortcut fires inside WebView. */
+export function notifyNativeChromeShell(
+  command: "set_native_sidebar" | "open_native_palette" | "set_native_history",
+  args: Record<string, unknown> = {},
+): void {
   if (typeof window === "undefined") return;
   const nw = window as NativeChromeWindow;
   try {
@@ -180,6 +184,14 @@ export function installNativeChromeWindowHandlers(
     if (!clean || clean === "new-agent") return handlers.open(null);
     if (clean === "settings-back") {
       handlers.leaveSettings();
+      return true;
+    }
+    if (clean === "history-back") {
+      handlers.navHistory?.(-1);
+      return true;
+    }
+    if (clean === "history-forward") {
+      handlers.navHistory?.(1);
       return true;
     }
     if (clean.startsWith("m:")) return handlers.open(clean);
