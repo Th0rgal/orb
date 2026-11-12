@@ -315,3 +315,44 @@ it("propagates native draft deletion failures instead of acknowledging an unpers
   failDelete = false;
   await expect(saveComposerDraft("m:del-err", { text: "", images: [] })).resolves.toBeUndefined();
 });
+
+it("preserves a saveSideThread queued while an earlier updateSideThread is reading", async () => {
+  const sqlDrafts = new Map<string, string>([
+    ["thread:race-upd", JSON.stringify({ state: "OLD" })],
+  ]);
+  let releaseGet!: () => void;
+  let blockGet = true;
+
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        const key = String(args?.key ?? "");
+        if (cmd === "ui_draft_get") {
+          if (blockGet) {
+            blockGet = false;
+            await new Promise<void>((r) => {
+              releaseGet = r;
+            });
+          }
+          return sqlDrafts.get(key) ?? null;
+        }
+        if (cmd === "ui_draft_put") {
+          sqlDrafts.set(key, String(args?.raw ?? ""));
+          return null;
+        }
+        return null;
+      },
+    },
+  };
+
+  const upd = updateSideThread<{ state: string }>("race-upd", (cur) => ({
+    state: `${cur?.state ?? "NONE"}+RECONCILED`,
+  }));
+  await new Promise((r) => setTimeout(r, 0));
+  const save = saveSideThread("race-upd", { state: "NEW" });
+  releaseGet();
+  await Promise.all([upd, save]);
+
+  resetComposerDraftsMemoryForTest();
+  await expect(readSideThread("race-upd")).resolves.toEqual({ state: "NEW" });
+});

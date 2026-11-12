@@ -263,39 +263,44 @@ export async function updateSideThread<T>(
   const key = `thread:${scope}`;
   const invoke = activeLocaldDrafts();
   if (invoke) {
+    // Fence any concurrent background IndexedDB migration at invocation time without
+    // invalidating later `saveSideThread` calls already queued behind `withKeyLock`.
+    bumpWriteEpoch(key);
     return withKeyLock(key, async () => {
       const current = await readRecordWithMigration<T>(key);
       const next = updater(current);
       if (next !== undefined) {
-        const epoch = bumpWriteEpoch(key);
-        await writeRecordUnlocked(key, next, epoch);
+        await writeRecordUnlocked(key, next);
         return { updated: true, value: next };
       }
       return { updated: false, value: next };
     });
   }
-  const d = await db();
-  return new Promise((resolve, reject) => {
-    const tx = d.transaction("drafts", "readwrite");
-    const store = tx.objectStore("drafts");
-    const req = store.get(key);
-    let updated = false;
-    let next: T | undefined;
-    req.onsuccess = () => {
-      try {
-        next = updater(req.result as T | undefined);
-        if (next !== undefined) {
-          updated = true;
-          store.put(next, key);
+  bumpWriteEpoch(key);
+  return withKeyLock(key, async () => {
+    const d = await db();
+    return new Promise((resolve, reject) => {
+      const tx = d.transaction("drafts", "readwrite");
+      const store = tx.objectStore("drafts");
+      const req = store.get(key);
+      let updated = false;
+      let next: T | undefined;
+      req.onsuccess = () => {
+        try {
+          next = updater(req.result as T | undefined);
+          if (next !== undefined) {
+            updated = true;
+            store.put(next, key);
+          }
+        } catch (err) {
+          tx.abort();
+          reject(err);
         }
-      } catch (err) {
-        tx.abort();
-        reject(err);
-      }
-    };
-    req.onerror = () => reject(req.error);
-    tx.oncomplete = () => resolve({ updated, value: next });
-    tx.onerror = () => reject(tx.error);
+      };
+      req.onerror = () => reject(req.error);
+      tx.oncomplete = () => resolve({ updated, value: next });
+      tx.onerror = () => reject(tx.error);
+    });
   });
 }
 
