@@ -842,6 +842,49 @@ def resolveProjectSnapshot (store : CoreStore) (provider : ManagedProvider.Provi
   | .error e => return .error e
   | .ok entries => return ManagedSnapshotCatalog.resolve entries requested
 
+/-- Save a running machine as a snapshot of `project`. The provider name carries
+    the project, so the snapshot is listed, restored and deleted only inside it. -/
+def saveProjectSnapshot (store : CoreStore) (provider : ManagedProvider.Provider)
+    (project : String) (machine : ManagedMachine) (label : String) :
+    IO (Except String ManagedSnapshotCatalog.Entry) := do
+  let suffix := ((← newUuidV4).take 4).toString
+  let name ← match ManagedSnapshotCatalog.newName project label suffix with
+    | .ok n => pure n
+    | .error e => return .error e
+  let existing ← match ← projectSnapshotEntries store provider project with
+    | .ok entries => pure entries
+    | .error e => return .error e
+  if ManagedSnapshotCatalog.labelTaken existing label then return .error "managed_snapshot_label_exists"
+  -- Flush what the guest has written; a failure here does not block the save.
+  discard <| provider.exec machine.effectiveProviderId "sync" 30
+  if let .error e ← provider.saveSnapshot machine.effectiveProviderId name then
+    return .error s!"managed_snapshot_save_failed:{e.code}:{e.status}"
+  let (status, sizeBytes) ← match ← provider.getSnapshot name with
+    | .ok snap => pure (snap.status, snap.sizeBytes)
+    | .error _ => pure ("saving", none)
+  return .ok {
+    name
+    label := ManagedSnapshotCatalog.slug label 32
+    project := ManagedSnapshotCatalog.slug project
+    status
+    sizeBytes
+  }
+
+/-- Delete one snapshot of `project`, named by provider name or label. A name
+    outside the project is not found, whatever the provider holds. -/
+def deleteProjectSnapshot (store : CoreStore) (provider : ManagedProvider.Provider)
+    (project requested : String) : IO (Except String String) := do
+  if project.trimAscii.toString.isEmpty then return .error "managed_snapshot_requires_project"
+  let entries ← match ← projectSnapshotEntries store provider project with
+    | .ok entries => pure entries
+    | .error e => return .error e
+  let name ← match ManagedSnapshotCatalog.resolveForDelete entries requested with
+    | .ok n => pure n
+    | .error e => return .error e
+  match ← provider.deleteSnapshot name with
+  | .ok () => return .ok name
+  | .error e => return .error s!"managed_snapshot_delete_failed:{e.code}:{e.status}"
+
 /-- Everything a configured spawn decides before it reserves or rents: the
     provider and bootstrap configuration, the image or resolved snapshot, and the
     provider request. Shared by the spawn itself and its synchronous preflight. -/
@@ -902,11 +945,16 @@ def spawnConfiguredManagedWorker (mc : ManagedComputeStore) (dataRoot : String)
     (idempotencyKey : String := "")
     (override? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none)
     (userAdmission? : Option ManagedUserAdmission := none)
-    (resolvedSnapshot : String := "") :
+    (resolvedSnapshot : String := "")
+    (forkOfProviderId : String := "") :
     IO (Except String ManagedProvisioning.SpawnResult) := do
   match ← prepareConfiguredManagedSpawn dataRoot machine args idempotencyKey override? resolvedSnapshot with
   | .error e => return .error e
   | .ok (provider, bootstrap, spec) =>
+    -- A fork is a spawn whose disk comes from a running machine: the same
+    -- reservation, admission, bootstrap and readiness rules apply to it.
+    let provider := if forkOfProviderId.isEmpty then provider else
+      { provider with spawn := fun forkSpec => provider.fork forkOfProviderId forkSpec }
     ManagedProvisioning.spawnManagedWorker mc fleet machine provider spec bootstrap {} userAdmission?
 
 /-- Reconcile only Core-owned records against a complete provider list. Exact

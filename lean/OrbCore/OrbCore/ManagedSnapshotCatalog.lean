@@ -2,7 +2,7 @@
   Project-scoped view of provider saved snapshots (`orb-snap-<project>-<label>-<suffix>`).
   The provider's list is the only evidence that a snapshot exists; the pre-cutover
   registry (`managed_snapshots.json`) only supplies the project and label where present.
-  Nothing here writes to the provider or to Core state.
+  The functions here are pure; the provider is the only store.
 -/
 import OrbCore.ManagedProvider
 
@@ -98,6 +98,35 @@ def resolve (entries : Array Entry) (requested : String) : Except String String 
   if usable.size > 1 then
     throw ("managed_snapshot_ambiguous:" ++ String.intercalate "," (usable.map (·.name)).toList)
   return usable[0]!.name
+
+/-- The provider name for a new snapshot of `project`. The label is the caller's
+    own short name; the suffix keeps two saves of one label distinct at the provider. -/
+def newName (project label suffix : String) : Except String String := do
+  let projectSlug := slug project
+  if projectSlug.isEmpty then throw "managed_snapshot_requires_project"
+  let labelSlug := slug label 32
+  if labelSlug.isEmpty then throw "managed_snapshot_name_required"
+  let tail := slug suffix 8
+  if tail.isEmpty || tail.contains '-' then throw "managed_snapshot_suffix_invalid"
+  return snapshotPrefix ++ projectSlug ++ "-" ++ labelSlug ++ "-" ++ tail
+
+/-- A label is taken while any snapshot of the project that is not failed or
+    being deleted carries it, including one still being saved. -/
+def labelTaken (entries : Array Entry) (label : String) : Bool :=
+  entries.any fun e =>
+    slug e.label 32 == slug label 32 && !#["failed", "error", "deleting", "deleted"].contains e.status.toLower
+
+/-- Which of the project's snapshots a delete request names. Unlike `resolve`,
+    any status qualifies: a failed or stuck snapshot must be removable. -/
+def resolveForDelete (entries : Array Entry) (requested : String) : Except String String := do
+  let wanted := requested.trimAscii.toString
+  if wanted.isEmpty then throw "managed_snapshot_name_required"
+  let byName := entries.filter (·.name == wanted)
+  let hits := if byName.isEmpty then entries.filter (fun e => e.label == wanted || slug e.label == slug wanted) else byName
+  if hits.isEmpty then throw "managed_snapshot_not_found_in_project"
+  if hits.size > 1 then
+    throw ("managed_snapshot_ambiguous:" ++ String.intercalate "," (hits.map (·.name)).toList)
+  return hits[0]!.name
 
 def entryJson (e : Entry) : JVal :=
   .obj #[("name", .str e.name), ("label", .str e.label), ("project", .str e.project),

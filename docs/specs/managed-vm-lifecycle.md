@@ -806,25 +806,35 @@ same lineage rule as the lifecycle tools; a caller outside it gets `not_found`.
 
 ## Snapshots, forks, stop
 
-Code: `src/managed/snapshots.rs`. Agent guide: `skills/managed-compute/SKILL.md`.
+Code: `lean/OrbCore/OrbCore/ManagedSnapshotCatalog.lean` (naming and scope, pure),
+`saveProjectSnapshot` / `deleteProjectSnapshot` / `projectSnapshotEntries` in
+`RemoteFleetAndRelay.lean`.
 
-- **Named snapshots** (`snapshot_managed_machine`, `POST
-  /api/managed-machines/:id/snapshot`, `boat` and `leanci`) are recorded in
-  `.sandboxed-sh/managed_snapshots.json` with `provider`, owner mission, tenant, project
-  (the owner mission's), source machine and size. Delivered
-  `.paloma-secrets` and `.boost-env` are deleted on the VM first; a VM holding a projected
-  Antigravity sign-in cannot be saved or forked. Visible and usable only
-  within the same tenant, project, and provider (arbitrary `image` strings on `leanci`
-  cannot reference snapshot IDs directly). Boat pricing: 10 included, then \$1.70/month.
+The provider's saved-snapshot list is the only store. A snapshot's provider name
+is `orb-snap-<project>-<label>-<suffix>`, and that name is what places it in a
+project; the pre-cutover `managed_snapshots.json` only supplies project and
+label for older names.
+
+- **Save** (`snapshot_managed_machine`): the caller must manage the machine, have
+  a project, and the machine must be running. The label is slugged; a label is
+  taken until its snapshot is deleted or failed. The guest is `sync`ed, then the
+  provider saves it. Nothing is removed from the VM first.
+- **List** (`list_managed_snapshots`): the caller's project only.
+- **Delete** (`delete_managed_snapshot`): by label or provider name, resolved
+  inside the caller's project; a name from another project is `not_found` and
+  never reaches the provider. An ambiguous label deletes nothing.
 - **From a snapshot**: `spawn_managed_machine(from_snapshot)` and
-  `start_mission(auto-managed, managed_from_snapshot)` (explicit snapshot
-  name/label or `"latest"`; omitted or `"light"`/`"none"`/`"base"` boots the
-  clean base image); `last_used_at` is
-  recorded. Budget and caps apply as for any rent.
-- **Fork** (`fork_managed_machine`, `POST /:id/fork`): new machine from the
-  source's latest background snapshot (up to ~1 min stale), owner = caller,
-  `forked_from` recorded. Provisioning deletes the copied `node.cred` and
-  `managed-auth` before enrolling.
+  `start_mission(auto-managed, managed_from_snapshot)` resolve the label inside
+  the caller's project before anything is rented.
+- **Fork** (`fork_managed_machine`): the source must be running and managed by
+  the caller. The fork goes through the same path as a spawn (reservation, user
+  cap, bootstrap, readiness on its own authenticated poll) with the provider's
+  fork call in place of create; it has the source's size and the caller owns it.
+  The bootstrap script stops the copied node service and deletes the copied
+  `node.cred` before enrolling. Until it runs, a forked or restored guest may
+  briefly start the copied node service with the source's identity.
+- The REST routes under `/api/managed-machines/.../snapshot` still use the
+  pre-cutover code and are not project-scoped.
 - **Stop / resume** (`supports_free_stop == true`, `boat`): stop keeps the disk
   (`Stopped`, unregistered, no billing). Resume forks the stopped sandbox and
   keeps the machine's id, node id, owner and pool; cost of earlier runs is kept

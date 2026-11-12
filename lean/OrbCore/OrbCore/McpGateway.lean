@@ -280,7 +280,7 @@ def dispatchMcpToolCall
 
   -- One spawn path for `spawn_managed_machine` and `start_mission(auto-managed)`:
   -- same admission, pricing, project-scoped snapshot resolution and bootstrap.
-  let spawnForCaller (spawnArgs : JVal) : IO (Except (String × String) ManagedMachine) := do
+  let spawnForCaller (spawnArgs : JVal) (forkOfProviderId : String) : IO (Except (String × String) ManagedMachine) := do
     let some mc := mc? | return .error ("unavailable", "managed compute store not configured")
     let fleet ← match ← loadManagedFleet mc defaultFleet.enabled defaultFleet.boatEnabled
         defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
@@ -331,7 +331,7 @@ def dispatchMcpToolCall
       match ← resolveProjectSnapshot store provider (← snapshotProject) requestedSnapshot with
       | .ok name => pure name
       | .error e => return .error ("spawn_rejected", e)
-    match ← spawnConfiguredManagedWorker mc store.rootDir fleet m spawnArgs "" managedProvisioningOverride? userAdmission? resolvedSnapshot with
+    match ← spawnConfiguredManagedWorker mc store.rootDir fleet m spawnArgs "" managedProvisioningOverride? userAdmission? resolvedSnapshot forkOfProviderId with
     | .error e => return .error (if e == "provider_at_capacity" then e else "spawn_rejected", e)
     | .ok spawned => return .ok spawned.machine
 
@@ -687,7 +687,7 @@ def dispatchMcpToolCall
           ("ttl_minutes", JVal.uint64 ((args.fieldUInt64? "managed_ttl_minutes").getD 60)),
           ("from_snapshot", .str ((args.fieldStr? "managed_from_snapshot").getD "")),
           ("idempotency_key", .str ("start-mission:" ++ retryKey))]
-        match ← spawnForCaller spawnArgs with
+        match ← spawnForCaller spawnArgs "" with
         | .error (_, message) => return mcpErr "managed_placement_failed" message
         | .ok rented => pure (some s!"managed-{rented.id}", rented.id, none)
     -- A failed start destroys what it rented, and hands back what it took over.
@@ -1018,12 +1018,12 @@ def dispatchMcpToolCall
     -- returns the machine once it is ready, or the failure.
     -- Without a key, or without any owner to scope a receipt to, stay blocking.
     if idemKeyTop.isEmpty || (callerUserId.isEmpty && callerMid.isEmpty) then
-      match ← spawnForCaller args with
+      match ← spawnForCaller args "" with
       | .error (code, message) => return mcpErr code message
       | .ok saved =>
         return mcpOk ((OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[]))
     let work : IO (Except String JVal) := do
-      match ← spawnForCaller args with
+      match ← spawnForCaller args "" with
       | .error (_, message) => return .error message
       | .ok saved => return .ok ((OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[]))
     -- Arguments that can never be admitted are refused now, not in a receipt.
@@ -1127,12 +1127,19 @@ def dispatchMcpToolCall
   | "snapshot_managed_machine" =>
     let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"
     let mid := (args.fieldStr? "machine_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
-    let sName := (args.fieldStr? "name").getD ""
-    let some (machine, _) ← getManagedMachine? mc mid
+    let some canonicalId ← resolveManagedMachineId? mc mid
+      | return mcpErr "not_found" "Managed machine not found"
+    let some (machine, slice) ← getManagedMachine? mc canonicalId
       | return mcpErr "not_found" "Managed machine not found"
     if !(← canManageMachine machine) then return mcpErr "not_found" "Managed machine not found"
-    match ← createManagedSnapshot mc store.rootDir mid sName nowIso with
-    | .ok sv => return mcpOk sv
+    let project ← snapshotProject
+    if project.isEmpty then return mcpErr "snapshot_failed" "managed_snapshot_requires_project"
+    if slice.phaseCode != 1 then return mcpErr "snapshot_failed" "managed_machine_not_running" true
+    let provider ← match ← snapshotProvider machine.provider with
+      | .ok p => pure p
+      | .error e => return mcpErr "unavailable" e true
+    match ← saveProjectSnapshot store provider project machine ((args.fieldStr? "name").getD "") with
+    | .ok entry => return mcpOk (ManagedSnapshotCatalog.entryJson entry)
     | .error e => return mcpErr "snapshot_failed" e
 
   | "list_managed_snapshots" =>
@@ -1150,37 +1157,40 @@ def dispatchMcpToolCall
         ("snapshots", .arr (entries.map ManagedSnapshotCatalog.entryJson))])
 
   | "delete_managed_snapshot" =>
-    let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"
-    let sid := (args.fieldStr? "snapshot_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
-    let ok ← deleteManagedSnapshot mc store.rootDir sid
-    return mcpOk (.obj #[("ok", .bool ok)])
+    if mc?.isNone then return mcpErr "unavailable" "managed compute store not configured"
+    let requested := (args.fieldStr? "name").orElse (fun _ => args.fieldStr? "snapshot_id")
+      |>.orElse (fun _ => args.fieldStr? "id") |>.getD ""
+    let provider ← match ← snapshotProvider "boat" with
+      | .ok p => pure p
+      | .error e => return mcpErr "unavailable" e true
+    match ← deleteProjectSnapshot store provider (← snapshotProject) requested with
+    | .ok name => return mcpOk (.obj #[("ok", .bool true), ("deleted", .str name)])
+    | .error e =>
+      return mcpErr (if e.startsWith "managed_snapshot_not_found" then "not_found" else "snapshot_delete_failed") e
 
   | "fork_managed_machine" =>
+    -- A fork is rented through the shared spawn path from the source's disk: the
+    -- caller owns it, pays for it and waits for its own node to enrol.
     let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"
-    let fleet ← match ← loadManagedFleet mc defaultFleet.enabled defaultFleet.boatEnabled
-        defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
-      | .ok f => pure f
-      | .error _ => pure defaultFleet
     let srcId := (args.fieldStr? "machine_id").orElse (fun _ => args.fieldStr? "source_machine_id") |>.getD ""
-    let some (m, _) ← getManagedMachine? mc srcId
+    let some canonicalId ← resolveManagedMachineId? mc srcId
       | return mcpErr "not_found" "Managed machine not found"
-    if !(← canManageMachine m) then return mcpErr "not_found" "Managed machine not found"
-    let forkId ← newUuidV4
-    let forkName := ((args.fieldStr? "name").filter (!·.isEmpty)).getD s!"{m.sandboxName}-fork"
-    let forked : ManagedMachine := {
-      m with
-      id := forkId
-      sandboxName := forkName
-      status := "provisioning"
-      nodeBootEpoch := 1
-      deletableAtSec := nowEpochSec + m.ttlMinutes * 60
-    }
-    match ← provisionManagedMachine mc fleet forked nowEpochSec with
-    | .error e => return mcpErr "fork_rejected" e
-    | .ok saved =>
-      let enrollTok ← newUuidV4
-      discard <| putEnrollmentToken mc saved.id enrollTok
-      return mcpOk ((OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[]))
+    let some (source, slice) ← getManagedMachine? mc canonicalId
+      | return mcpErr "not_found" "Managed machine not found"
+    if !(← canManageMachine source) then return mcpErr "not_found" "Managed machine not found"
+    if slice.phaseCode != 1 then return mcpErr "fork_rejected" "managed_machine_not_running" true
+    let spawnArgs := JVal.obj #[
+      ("provider", .str source.provider), ("size", .str source.size),
+      ("ttl_minutes", JVal.uint64 ((args.fieldUInt64? "ttl_minutes").getD source.ttlMinutes)),
+      ("name", .str ((args.fieldStr? "name").getD "")),
+      ("idempotency_key", .str idemKeyTop)]
+    match ← spawnForCaller spawnArgs source.effectiveProviderId with
+    | .error (code, message) => return mcpErr (if code == "spawn_rejected" then "fork_rejected" else code) message
+    | .ok forked =>
+      let item := (OrbBin.Json.parse (renderManagedMachineItemJson forked)).toOption.getD (.obj #[])
+      return mcpOk (match item with
+        | .obj fields => .obj (fields.push ("forked_from", .str source.id))
+        | other => other)
 
   -- Projects, Controller & Board
   | "list_projects" =>
