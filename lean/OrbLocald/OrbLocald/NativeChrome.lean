@@ -32,9 +32,11 @@ structure ChromeMissionInput where
   hasProjectField : Bool := true
   hasFolderField  : Bool := true
   parentMissionId : String := ""
+  forkSourceId    : String := ""
   isFork          : Bool := false
   acknowledged    : Bool := false
   superseded      : Bool := false
+  createdAtMs     : UInt64 := 0
   updatedAtMs     : UInt64 := 0
   deriving Repr, Inhabited, BEq
 
@@ -233,6 +235,23 @@ def parseIso8601EpochMs? (raw : String) : Option UInt64 := do
 private def normalizeEpochScale (n : UInt64) : UInt64 :=
   if n > 0 && n < 100000000000 then n * 1000 else n
 
+/-- Normalize explicit `created_at_ms` / `createdAtMs` or ISO-8601 `created_at` / `createdAt` to UTC epoch milliseconds. -/
+def parseCreatedAtMs (jv : JVal) : UInt64 := Id.run do
+  if let some n := jv.fieldUInt64? "created_at_ms" then
+    return normalizeEpochScale n
+  if let some n := jv.fieldUInt64? "createdAtMs" then
+    return normalizeEpochScale n
+  for key in #["created_at", "createdAt"] do
+    if let some n := jv.fieldUInt64? key then
+      return normalizeEpochScale n
+    if let some s := jv.fieldStr? key then
+      let clean := s.trimAscii.toString
+      if let some ms := parseIso8601EpochMs? clean then
+        return ms
+      if let some dec := clean.toNat? then
+        return normalizeEpochScale dec.toUInt64
+  return 0
+
 /-- Normalize explicit `updated_at_ms` / `updatedAtMs` or ISO-8601 `updated_at` / `created_at` to UTC epoch milliseconds. -/
 def parseUpdatedAtMs (jv : JVal) : UInt64 := Id.run do
   if let some n := jv.fieldUInt64? "updated_at_ms" then
@@ -282,18 +301,38 @@ def parseMissionInput? (jv : JVal) (fallbackProject : String := "") : Option Chr
     | some .null => ""
     | some v => normalizeFolderPath (v.asStr?.getD "")
     | none => ""
-  let parentId :=
+  let rawParentId :=
     ((jv.fieldStr? "parent_mission_id")
-      |>.orElse (fun _ => jv.fieldStr? "parentMissionId")
-      |>.orElse (fun _ => jv.fieldStr? "callback_parent_mission_id")).getD ""
+      |>.orElse (fun _ => jv.fieldStr? "parentMissionId")).getD ""
+      |>.trimAscii.toString
+  let callbackParentId :=
+    ((jv.fieldStr? "callback_parent_mission_id")
+      |>.orElse (fun _ => jv.fieldStr? "callbackParentMissionId")).getD ""
       |>.trimAscii.toString
   let relKind :=
     ((jv.fieldStr? "parent_kind").orElse (fun _ => jv.fieldStr? "relation_kind")).getD ""
       |>.trimAscii.toString.toLower
   let tags := ((jv.fieldArr? "tags").getD #[]).filterMap (·.asStr?)
-  let hasForkTag := tags.any (fun t => t.startsWith "fork-of:")
+  let forkTagSource :=
+    (tags.findSome? fun t =>
+      if t.startsWith "fork-of:" then
+        let src := (t.drop 8).trimAscii.toString
+        if src.isEmpty then none else some src
+      else none).getD ""
+  let explicitForkOf :=
+    ((jv.fieldStr? "fork_of").orElse (fun _ => jv.fieldStr? "forkOf")).getD ""
+      |>.trimAscii.toString
   let legacyForkTitle := title.toLower.endsWith " · fork"
-  let isFork := (jv.fieldBool? "is_fork").getD (relKind == "fork" || hasForkTag || legacyForkTitle)
+  let forkSrc :=
+    if !explicitForkOf.isEmpty then explicitForkOf
+    else if !forkTagSource.isEmpty then forkTagSource
+    else if !rawParentId.isEmpty && (legacyForkTitle || relKind == "fork") then rawParentId
+    else ""
+  let isFork := (jv.fieldBool? "is_fork").getD (!forkSrc.isEmpty || relKind == "fork" || legacyForkTitle)
+  -- Matching `missionParent` in `orb/src/missionTree.ts`: a fork is never launched work of its fork source.
+  let launchedParentId :=
+    let direct := if !forkSrc.isEmpty && forkSrc == rawParentId then "" else rawParentId
+    if !direct.isEmpty then direct else callbackParentId
   let statusArchived := statusLower == "acknowledged" || statusLower == "archived"
   let ack :=
     (jv.fieldBool? "acknowledged").getD
@@ -312,10 +351,12 @@ def parseMissionInput? (jv : JVal) (fallbackProject : String := "") : Option Chr
     folder := folder
     hasProjectField := hasProjField
     hasFolderField := hasFolderField
-    parentMissionId := parentId
+    parentMissionId := launchedParentId
+    forkSourceId := forkSrc
     isFork := isFork
     acknowledged := ack
     superseded := sup
+    createdAtMs := parseCreatedAtMs jv
     updatedAtMs := parseUpdatedAtMs jv
   }
 
@@ -346,20 +387,107 @@ def mergeMissionInputs (inputs : Array ChromeMissionInput) : Array ChromeMission
       else if (lo32 &&& 1) != 0 then
         let mergedProj := if inc.hasProjectField then inc.project else ex.project
         let mergedFolder := if inc.hasFolderField then inc.folder else ex.folder
+        let mergedParent := if inc.parentMissionId.isEmpty then ex.parentMissionId else inc.parentMissionId
+        let mergedForkSrc := if inc.forkSourceId.isEmpty then ex.forkSourceId else inc.forkSourceId
+        let mergedCreated := if inc.createdAtMs > 0 then inc.createdAtMs else ex.createdAtMs
         acc := acc.set! idx {
           inc with
           project := mergedProj
           folder := mergedFolder
           hasProjectField := inc.hasProjectField || ex.hasProjectField
           hasFolderField := inc.hasFolderField || ex.hasFolderField
+          parentMissionId := mergedParent
+          forkSourceId := mergedForkSrc
+          isFork := inc.isFork || ex.isFork || !mergedForkSrc.isEmpty
+          createdAtMs := mergedCreated
         }
   return acc
 
-/-- Sort rank for mission status (`active`/`running` first, then `updatedAtMs` descending, then `id`). -/
+/-- Sort rank for mission status (`WORKING_STATUSES` in `orb/src/missionStatus.ts` first, then `updatedAtMs` descending, then `id`). -/
+private def isWorkingMissionStatus (status : String) : Bool :=
+  let s := status.toLower
+  s == "active" || s == "running" || s == "starting" || s == "resuming" ||
+  s == "working" || s == "in_progress" || s == "processing" || s == "streaming" ||
+  s == "pending" || s == "queued" || s == "waiting_background"
+
 private def missionActivePriority (status : String) : Nat :=
   let s := status.toLower
-  if s == "active" || s == "running" || s == "pending" || s == "waiting_for_approval" || s == "blocked" then 0
+  if isWorkingMissionStatus s || s == "waiting_for_approval" || s == "blocked" then 0
   else 1
+
+private def forkSettleGraceMs : UInt64 := 15000
+
+private structure ForkLineageInfo where
+  missionId : String
+  rootId    : String
+  depth     : Nat
+  ancestors : Array String
+  deriving Repr, Inhabited
+
+/-- Elect fork-group leaders (`forkLeaders` in `orb/src/missionTree.ts`) using the normative
+    `(unretired, working, effectiveActivity, forkDepth)` rank with the 15s `FORK_SETTLE_MS` grace window.
+    Returns `(missionId, leaderId)` pairs for every member of a multi-version fork group. -/
+private def electForkGroupLeaders (missions : Array ChromeMissionInput) : Array (String × String) := Id.run do
+  let traceLineage := fun (m : ChromeMissionInput) => Id.run do
+    let mut seen : Array String := #[]
+    let mut ancestors : Array String := #[]
+    let mut cur := m
+    let mut steps := 0
+    while !cur.forkSourceId.isEmpty && steps < missions.size do
+      let src := cur.forkSourceId
+      if seen.contains src || src == cur.id then break
+      match missions.find? (·.id == src) with
+      | none => break
+      | some target =>
+        seen := seen.push cur.id
+        cur := target
+        ancestors := ancestors.push cur.id
+        steps := steps + 1
+    { missionId := m.id, rootId := cur.id, depth := ancestors.size, ancestors := ancestors : ForkLineageInfo }
+  let infos := missions.map traceLineage
+  let mut rootIds : Array String := #[]
+  for inf in infos do
+    if !rootIds.contains inf.rootId then
+      rootIds := rootIds.push inf.rootId
+  let mut leaders : Array (String × String) := #[]
+  for rid in rootIds do
+    let group := missions.filter fun m =>
+      (infos.find? (·.missionId == m.id)).map (·.rootId) == some rid
+    if group.size ≥ 2 then
+      let mut effective : Array (String × UInt64) := group.map (fun m => (m.id, m.updatedAtMs))
+      for m in group do
+        if m.createdAtMs > 0 then
+          let ancs := ((infos.find? (·.missionId == m.id)).map (·.ancestors)).getD #[]
+          for ancId in ancs do
+            if let some eIdx := effective.findIdx? (fun (k, _) => k == ancId) then
+              let ancAct := effective[eIdx]!.2
+              if ancAct ≤ m.createdAtMs + forkSettleGraceMs then
+                let clamped := if ancAct < m.createdAtMs then ancAct else m.createdAtMs
+                effective := effective.set! eIdx (ancId, clamped)
+      let getEff := fun (mid : String) =>
+        ((effective.find? (fun (k, _) => k == mid)).map (·.2)).getD 0
+      let getDepth := fun (mid : String) =>
+        ((infos.find? (·.missionId == mid)).map (·.depth)).getD 0
+      let beats := fun (a b : ChromeMissionInput) =>
+        let unretA : Nat := if a.acknowledged || a.superseded then 0 else 1
+        let unretB : Nat := if b.acknowledged || b.superseded then 0 else 1
+        if unretA != unretB then unretA > unretB
+        else
+          let workA : Nat := if isWorkingMissionStatus a.status then 1 else 0
+          let workB : Nat := if isWorkingMissionStatus b.status then 1 else 0
+          if workA != workB then workA > workB
+          else
+            let actA := getEff a.id
+            let actB := getEff b.id
+            if actA != actB then actA > actB
+            else getDepth a.id > getDepth b.id
+      let mut best := group[0]!
+      for idx in [1:group.size] do
+        let cand := group[idx]!
+        if beats cand best then best := cand
+      for m in group do
+        leaders := leaders.push (m.id, best.id)
+  return leaders
 
 private def sortMissions (xs : Array ChromeMissionInput) : Array ChromeMissionInput :=
   xs.qsort fun a b =>
@@ -394,11 +522,12 @@ private def matchesFilterNeedle (m : ChromeMissionInput) (needleLower : ByteArra
     LeanSys.Search.containsBytesLower m.project.toUTF8 needleLower ||
     LeanSys.Search.containsBytesLower m.folder.toUTF8 needleLower
 
-/-- Map a selected page id to its owning Settings section id (matching `shared/orb-spec/fixtures/settings-nav.json`). -/
+/-- Map a selected page id to its owning Settings section id (matching `orb/src/settingsNav.ts` and `shared/orb-spec/fixtures/settings-nav.json`). -/
 def settingsSectionIdForSelected (sel : String) : Option String :=
   if sel == "settings" || sel == "users-settings" || sel == "usage-telemetry" then some "account"
   else if sel == "routing" || sel == "routing-providers" || sel == "usage-settings" || sel == "routing-keys" then some "models"
   else if sel == "skills-settings" || sel == "hermes-settings" || sel == "btw-settings" || sel == "inbox-summaries" || sel == "local-agents" || sel == "execution" then some "agents"
+  else if sel.startsWith "sk:" then some "agents"
   else if sel == "security-settings" || sel == "bitwarden-settings" then some "security"
   else if sel == "inbox-settings" then some "notifications"
   else none
@@ -514,22 +643,64 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
     }
   ]
 
-  let merged := sortMissions (mergeMissionInputs st.missions)
-  -- Determine cycle-safe parent links (`Orb.Kernel.sidebarVisibility` bit 16 = `65536`).
-  -- Launched children inherit their parent's folder when `m.folder` is empty (matching `missionHierarchy.ts`).
+  let rawMerged := sortMissions (mergeMissionInputs st.missions)
+  -- Group fork lineages (`forkLeaders` / `nestMissions` in `orb/src/missionTree.ts`):
+  -- A leading fork takes the place (launched `parentMissionId`, `project`, `folder`) of the conversation it continues,
+  -- while earlier versions fold inside their group's leader.
+  let forkLeaderMap := electForkGroupLeaders rawMerged
+  let findLeaderId := fun (mid : String) =>
+    (forkLeaderMap.find? (fun (k, _) => k == mid)).map (·.2)
+  let isNonLeaderVersion := fun (mid : String) =>
+    match findLeaderId mid with
+    | some lid => lid != mid
+    | none => false
+  let merged : Array ChromeMissionInput := rawMerged.map fun m =>
+    match findLeaderId m.id with
+    | none => m
+    | some lid =>
+      if lid != m.id then m
+      else
+        let placeOf :=
+          (rawMerged.find? fun c =>
+            findLeaderId c.id == some lid &&
+            (c.forkSourceId.isEmpty || !rawMerged.any (·.id == c.forkSourceId))).getD m
+        let effParent := if !placeOf.parentMissionId.isEmpty then placeOf.parentMissionId else m.parentMissionId
+        let effProj := if !m.project.isEmpty then m.project else placeOf.project
+        let effFolder := if !m.folder.isEmpty then m.folder else placeOf.folder
+        { m with parentMissionId := effParent, project := effProj, folder := effFolder }
+
+  -- Determine cycle-safe parent links:
+  -- 1. Non-leader fork versions nest directly under their group's leader (`version: true` in `nestMissions`).
+  -- 2. Launched children route through `Orb.Kernel.sidebarVisibility` bit 16 (`65536`), with `isForkBit == 0`
+  --    since `parseMissionInput?` already strips fork-of-parent links (`missionParent` in `orb/src/missionTree.ts`).
   let mut safeParentOf : Array (String × String) := #[]
   for m in merged do
-    let hasParentObj :=
-      !m.parentMissionId.isEmpty &&
-      merged.any (fun p =>
-        p.id == m.parentMissionId &&
-        (m.project.isEmpty || p.project.isEmpty || p.project == m.project))
-    let hasParentBit : UInt8 := if hasParentObj then 1 else 0
-    let isForkBit : UInt8 := if m.isFork then 1 else 0
-    let reachesSelfBit : UInt8 := if hasParentObj && parentChainReachesSelf m merged then 1 else 0
-    let visWord := Orb.Kernel.sidebarVisibility 1 0 0 hasParentBit isForkBit reachesSelfBit
-    if (visWord &&& 65536) != 0 then
-      safeParentOf := safeParentOf.push (m.id, m.parentMissionId)
+    match findLeaderId m.id with
+    | some lid =>
+      if lid != m.id then
+        safeParentOf := safeParentOf.push (m.id, lid)
+      else
+        let hasParentObj :=
+          !m.parentMissionId.isEmpty &&
+          merged.any (fun p =>
+            p.id == m.parentMissionId &&
+            (m.project.isEmpty || p.project.isEmpty || p.project == m.project))
+        let hasParentBit : UInt8 := if hasParentObj then 1 else 0
+        let reachesSelfBit : UInt8 := if hasParentObj && parentChainReachesSelf m merged then 1 else 0
+        let visWord := Orb.Kernel.sidebarVisibility 1 0 0 hasParentBit 0 reachesSelfBit
+        if (visWord &&& 65536) != 0 then
+          safeParentOf := safeParentOf.push (m.id, m.parentMissionId)
+    | none =>
+      let hasParentObj :=
+        !m.parentMissionId.isEmpty &&
+        merged.any (fun p =>
+          p.id == m.parentMissionId &&
+          (m.project.isEmpty || p.project.isEmpty || p.project == m.project))
+      let hasParentBit : UInt8 := if hasParentObj then 1 else 0
+      let reachesSelfBit : UInt8 := if hasParentObj && parentChainReachesSelf m merged then 1 else 0
+      let visWord := Orb.Kernel.sidebarVisibility 1 0 0 hasParentBit 0 reachesSelfBit
+      if (visWord &&& 65536) != 0 then
+        safeParentOf := safeParentOf.push (m.id, m.parentMissionId)
 
   let getSafeParent := fun (mid : String) =>
     (safeParentOf.find? (fun (k, _) => k == mid)).map (·.2)
@@ -591,11 +762,16 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
   let retainedMissions := placedMerged.filter (fun m => retainedIds.contains m.id)
 
   -- Helper to emit mission + cycle-safe descendants recursively up to bounded depth `retainedMissions.size`
+  -- Launched children come first in list order, followed by earlier fork versions sorted by `updatedAtMs` descending (`nestMissions`).
   let rec emitMissionSubtree (fuel : Nat) (m : ChromeMissionInput) (depth : Nat) (acc : Array SidebarRow) : Array SidebarRow :=
     match fuel with
     | 0 => acc
     | fuel' + 1 =>
-      let children := retainedMissions.filter (fun c => getSafeParent c.id == some m.id)
+      let launchedChildren := retainedMissions.filter (fun c => getSafeParent c.id == some m.id && !isNonLeaderVersion c.id)
+      let versionChildren :=
+        (retainedMissions.filter (fun c => getSafeParent c.id == some m.id && isNonLeaderVersion c.id)).qsort fun a b =>
+          if a.updatedAtMs != b.updatedAtMs then a.updatedAtMs > b.updatedAtMs else a.id < b.id
+      let children := launchedChildren ++ versionChildren
       let rowId := s!"m:{m.id}"
       let hasChildren := !children.isEmpty
       let exp := !isCollapsed rowId

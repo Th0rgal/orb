@@ -1942,6 +1942,53 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
       if (← assertTrue "native_chrome_settings_mode_projection" setModeOk) then
         ncPassed := ncPassed + 1
 
+      -- Skill detail pages (`sk:<name>` and `sk:<name>#history`) map to `settings:agents` even with `on_settings: false`
+      let skillCases := (setMode.fieldArr? "skill_detail_pages").getD #[]
+      ncTotal := ncTotal + 1
+      let mut allSkillNavOk := !skillCases.isEmpty
+      let mut nextRev : Nat := 12
+      for sc in skillCases do
+        let selPage := (sc.fieldStr? "selected").getD ""
+        let onSet := (sc.fieldBool? "on_settings").getD false
+        let expRow := (sc.fieldStr? "expected_selected_row_id").getD ""
+        let skSync := JVal.setField (JVal.setField (JVal.setField syncCase "revision" (.nat nextRev))
+          "on_settings" (.bool onSet))
+          "selected" (.str selPage)
+        nextRev := nextRev + 1
+        let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" skSync
+        let skRowsRes ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[])
+        match skRowsRes with
+        | .ok sr =>
+          let srows := (sr.fieldArr? "rows").getD #[]
+          let selRows := srows.filter (fun r => (r.fieldBool? "selected").getD false)
+          let gotSel := if selRows.size == 1 then (selRows[0]!.fieldStr? "row_id").getD "" else ""
+          if gotSel != expRow || !srows.any (fun r => r.fieldStr? "row_id" == some "nav:settings-back") then
+            allSkillNavOk := false
+        | .error _ => allSkillNavOk := false
+      if (← assertTrue "native_chrome_skill_detail_pages_map_to_agents_section" allSkillNavOk) then
+        ncPassed := ncPassed + 1
+
+      -- Fork-group leader & worker-fork parent inheritance (`boss` -> `w2` -> `w`)
+      let wfCase := (fixJv.field? "worker_fork_case").getD (.obj #[])
+      let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" wfCase
+      let wfRowsRes ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:worker-fork:1")])
+      ncTotal := ncTotal + 1
+      let wfOk : Bool :=
+        match wfRowsRes with
+        | .ok wfr =>
+          let mrows := ((wfr.fieldArr? "rows").getD #[]).filter (fun r => r.fieldStr? "kind" == some "mission")
+          let expMrows := (wfCase.fieldArr? "expected_mission_rows").getD #[]
+          mrows.size == expMrows.size && mrows.size > 0 &&
+          (List.range mrows.size).all fun i =>
+            let got := mrows[i]!
+            let exp := expMrows[i]!
+            got.fieldStr? "row_id" == exp.fieldStr? "row_id" &&
+            got.fieldNat? "depth" == exp.fieldNat? "depth" &&
+            got.fieldStr? "folder" == exp.fieldStr? "folder"
+        | .error _ => false
+      if (← assertTrue "native_chrome_worker_fork_leader_inherits_parent_and_placement" wfOk) then
+        ncPassed := ncPassed + 1
+
       -- Cold-start SQLite hydration from `ui_sidebar` before WebView boots
       let coldDir := tmpStateDir ++ "/native-chrome-cold"
       try IO.FS.createDirAll coldDir catch _ => pure ()

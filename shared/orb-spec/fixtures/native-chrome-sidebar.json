@@ -134,7 +134,28 @@
     ],
     "expected_selected_row_id": "settings:security",
     "expected_security_attention": true,
-    "expected_security_badge": 2
+    "expected_security_badge": 2,
+    "skill_detail_pages": [
+      { "selected": "sk:maxwell", "on_settings": true, "expected_selected_row_id": "settings:agents" },
+      { "selected": "sk:maxwell#history", "on_settings": false, "expected_selected_row_id": "settings:agents" }
+    ]
+  },
+  "worker_fork_case": {
+    "scope": "scope:worker-fork:1",
+    "revision": 1,
+    "projects": [
+      { "slug": "core", "name": "Orb Core", "folders": ["ui"] }
+    ],
+    "missions": [
+      { "id": "boss", "title": "Boss controller", "status": "active", "project": "core", "folder": "ui", "updated_at": "2026-10-14T09:00:00Z" },
+      { "id": "w", "title": "Worker v1", "status": "completed", "parent_mission_id": "boss", "updated_at": "2026-10-14T10:00:00Z" },
+      { "id": "w2", "title": "Worker v2", "status": "completed", "tags": ["fork-of:w"], "updated_at": "2026-10-14T11:00:00Z" }
+    ],
+    "expected_mission_rows": [
+      { "row_id": "m:boss", "depth": 2, "folder": "ui" },
+      { "row_id": "m:w2", "depth": 3, "folder": "ui" },
+      { "row_id": "m:w", "depth": 4, "folder": "ui" }
+    ]
   },
   "move_admit_cases": [
     {
