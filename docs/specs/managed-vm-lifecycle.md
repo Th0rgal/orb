@@ -135,10 +135,20 @@ lease; `estimated_cents` is not trusted. User-cap admission includes pending
 reservations under the same transaction, and replaying a completed request does
 not add another user spend charge.
 
-During recovery, configured entry points accept only the allowlisted base images
-(`orb-node-base`, `provider-default`). Named restore labels and arbitrary images
-fail before reservation until project/tenant snapshot lookup is connected.
-The trusted provider adapter's saved-snapshot wire contract is tested separately.
+Configured entry points accept the allowlisted base images (`orb-node-base`,
+`provider-default`) or a saved snapshot of the caller's own project. Arbitrary image
+names fail before reservation.
+
+**Saved snapshots are project-scoped** (`ManagedSnapshotCatalog`). The provider's
+`/saved-snapshots` list is the only evidence that one exists. A snapshot named
+`orb-snap-<project>-<label>-<suffix>` belongs to the project its pre-cutover registry
+record (`managed_snapshots.json`) names, otherwise to the longest known project slug its
+name starts with. `list_managed_snapshots` returns the caller's project's snapshots;
+`spawn_managed_machine(from_snapshot=...)` accepts a provider name or label, resolves it
+inside that project, and refuses a missing, still-saving or ambiguous one. An unresolved
+label never reaches the provider. Only an admin's operator session may name another
+project. A failed provider list is an error, not an empty list. The REST create route and
+`start_mission(managed_from_snapshot)` are not wired to this yet.
 Stop and destroy require provider success before committing local state. Resume
 uses an archived Boat sandbox as a fork source, bootstraps a successor, and keeps
 the same Core machine/node ID.
@@ -172,6 +182,15 @@ tool text says so. A busy machine still stops at its TTL.
   `pending` (row shown as `destroying`) and it is retried; nothing is marked done on
   silence. Spend is the provider's metered figure when it reports one, otherwise the lease
   reservation, labelled `lease_reservation_estimate`. Events are deduplicated per boot.
+- **Operator authority:** a non-external session with role `operator` acts with the
+  authority of the user who minted it (`mcp_sessions_v1.owner`, or the Core-authenticated
+  caller): an admin's operator session manages any machine, another user's only that
+  user's. The role label alone grants nothing, and external sessions cannot hold it.
+- **Legacy owners:** pre-cutover rows may carry a tenant label (`prod`) in
+  `owner_user_id`. At startup `repairManagedMachineOwners` replaces it with the owning
+  mission's user when that user exists; other rows are left alone. For a mission-owned
+  machine the owning mission's user decides lineage access. A missing owner is reported as
+  `managed_user_missing:<id>`.
 - **Operator probe:** `orb-core managed-inspect <id|managed-<id>|unique-prefix>...` prints,
   per machine, Core's row beside the provider's state (`provider_exists`, `provider_state`,
   `provider_billable`, `provider_usage_cents`). It is read-only.

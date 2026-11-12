@@ -6456,6 +6456,9 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       | .error _ => pure ""
     discard <| backfillManagedMachineOwner managedStore bootAdminId
     hydrateLegacyDataDir cfg.workingDir dataRoot store managedStore bootAdminId cfg.devMode
+    let repairedOwners ← repairManagedMachineOwners store managedStore
+    if repairedOwners > 0 then
+      IO.eprintln s!"[orb-core] repaired the owner of {repairedOwners} pre-cutover managed machine row(s)"
     let effAskTmpRoot : System.FilePath :=
       let fromCfg := cfg.askSandboxTmpRoot.trimAscii.toString
       if !fromCfg.isEmpty then System.FilePath.mk fromCfg else System.FilePath.mk "/tmp"

@@ -15,6 +15,7 @@ import OrbCore.ManagedProvisioningTests
 import OrbCore.ManagedResumeTests
 import OrbCore.ManagedAccessTests
 import OrbCore.ManagedTtlTests
+import OrbCore.ManagedSnapshotCatalogTests
 
 namespace OrbCore.SelfTest
 
@@ -6238,6 +6239,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.ManagedResumeTests.run tmpRoot
     OrbCore.ManagedAccessTests.run tmpRoot
     OrbCore.ManagedTtlTests.run tmpRoot
+    OrbCore.ManagedSnapshotCatalogTests.run tmpRoot
     OrbCore.ManagedProviderSealingTests.run tmpRoot
   catch e =>
     closeCoreStore store

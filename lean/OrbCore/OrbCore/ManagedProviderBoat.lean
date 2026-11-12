@@ -88,7 +88,8 @@ private def boatSnapshotList (transport : Transport) : IO (Result (Array Snapsho
   match ← call transport { method := "GET", path := "/saved-snapshots" } with
   | .error e => return .error e
   | .ok body =>
-    let some items := (body.fieldArr? "snapshots").orElse (fun _ => body.asArr?)
+    let some items := (body.fieldArr? "snapshots").orElse (fun _ => body.fieldArr? "savedSnapshots")
+        |>.orElse (fun _ => body.fieldArr? "items") |>.orElse (fun _ => body.asArr?)
       | return .error { code := "provider_invalid_snapshot_list" }
     let mut out := #[]
     for item in items do

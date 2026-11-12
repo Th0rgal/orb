@@ -226,11 +226,34 @@ def dispatchMcpToolCall
   else if directOperator then
     callerUserId := authenticatedUserId
 
+  -- Operator authority comes from who minted the session, never from the role label
+  -- alone: `/api/mcp/session` requires a Core-authenticated user and records it. An
+  -- admin's operator session manages any machine; another user's manages that user's.
+  let operatorPrincipal? : Option String ←
+    if claims.isExternal || claims.role != "operator" then pure none
+    else if directOperator then pure (some authenticatedUserId)
+    else do
+      match ← execParamQuery store.projectsDb
+          ("SELECT owner FROM mcp_sessions_v1 WHERE id=?1 AND revoked=0 AND subject_kind<>'external_session' " ++
+           "AND (hard_expires_at=0 OR hard_expires_at>?2);") #[claims.sessionId, toString nowEpochSec] with
+      | .ok rows => pure (if rows.size > 1 then some (cell rows[1]! 0) else none)
+      | .error _ => pure none
+  let operatorIsAdmin ← match operatorPrincipal? with
+    | none => pure false
+    -- An empty recorded owner is the unscoped single-tenant principal.
+    | some "" => pure true
+    | some uid => do pure (((← getUserById? store uid).map (fun u => u.role == "admin" && !u.disabled)).getD false)
+
   let canManageMachine (machine : ManagedMachine) : IO Bool := do
+    if operatorIsAdmin then return true
+    if let some uid := operatorPrincipal? then
+      if !uid.isEmpty && machine.ownerUserId == uid then return true
     -- An empty identity is only the unscoped single-tenant case: a mission whose
     -- row has no owner may manage a machine that has none either, through lineage.
     if callerUserId.isEmpty && (claims.isExternal || directOperator || !machine.ownerUserId.isEmpty) then return false
-    if !machine.ownerUserId.isEmpty && machine.ownerUserId != callerUserId then return false
+    -- For a mission-owned machine the owning mission's user is authoritative (checked
+    -- below); the row's own owner id can be a pre-cutover tenant label.
+    if machine.ownerMission.isEmpty && !machine.ownerUserId.isEmpty && machine.ownerUserId != callerUserId then return false
     if machine.ownerMission.isEmpty then
       -- User-owned machines have no project/lineage to delegate to a mission.
       return (claims.isExternal || directOperator) && machine.ownerUserId == callerUserId && callerProj.isEmpty
@@ -241,6 +264,15 @@ def dispatchMcpToolCall
     if callerMid.isEmpty then return false
     if ← managedMissionAncestor store callerMid machine.ownerMission callerUserId owner.project then return true
     return ← managedMissionAncestor store machine.ownerMission callerMid callerUserId owner.project
+
+  -- Snapshots are project-scoped. Only an admin's operator session may name another project.
+  let snapshotProject : IO String := do
+    let asked := ((args.fieldStr? "project").getD "").trimAscii.toString
+    return if operatorIsAdmin && !asked.isEmpty then asked else callerProj
+  let snapshotProvider (name : String) : IO (Except String ManagedProvider.Provider) := do
+    match managedProvisioningOverride? with
+    | some pair => return .ok pair.1
+    | none => resolveManagedProvider store.rootDir name
 
   -- Idempotent replay for retried mutating MCP calls carrying `idempotency_key`
   let idemKeyTop := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
@@ -848,7 +880,16 @@ def dispatchMcpToolCall
       requestedByMissionId := callerMid
       ownerUserId := callerUserId
     }
-    match ← spawnConfiguredManagedWorker mc store.rootDir fleet m args "" managedProvisioningOverride? userAdmission? with
+    let requestedSnapshot := ((args.fieldStr? "from_snapshot").orElse
+      (fun _ => args.fieldStr? "managed_from_snapshot") |>.getD "").trimAscii.toString
+    let resolvedSnapshot ← if requestedSnapshot.isEmpty then pure "" else do
+      let provider ← match ← snapshotProvider prov with
+        | .ok p => pure p
+        | .error e => return mcpErr "spawn_rejected" e
+      match ← resolveProjectSnapshot store provider (← snapshotProject) requestedSnapshot with
+      | .ok name => pure name
+      | .error e => return mcpErr "spawn_rejected" e
+    match ← spawnConfiguredManagedWorker mc store.rootDir fleet m args "" managedProvisioningOverride? userAdmission? resolvedSnapshot with
     | .error e => return mcpErr "spawn_rejected" e
     | .ok spawned =>
       let saved := spawned.machine
@@ -899,8 +940,18 @@ def dispatchMcpToolCall
     | .error e => return mcpErr "snapshot_failed" e
 
   | "list_managed_snapshots" =>
-    let some mc := mc? | return mcpOk (.obj #[("snapshots", .arr #[])])
-    return mcpOk (← listManagedSnapshotsJson mc store.rootDir)
+    if mc?.isNone then return mcpOk (.obj #[("snapshots", .arr #[])])
+    let project ← snapshotProject
+    if project.isEmpty then
+      return mcpOk (.obj #[("snapshots", .arr #[]), ("note", .str "This mission has no project; snapshots are project-scoped.")])
+    let provider ← match ← snapshotProvider "boat" with
+      | .ok p => pure p
+      | .error e => return mcpErr "unavailable" e true
+    match ← projectSnapshotEntries store provider project with
+    | .error e => return mcpErr "unavailable" e true
+    | .ok entries =>
+      return mcpOk (.obj #[("project", .str project),
+        ("snapshots", .arr (entries.map ManagedSnapshotCatalog.entryJson))])
 
   | "delete_managed_snapshot" =>
     let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"

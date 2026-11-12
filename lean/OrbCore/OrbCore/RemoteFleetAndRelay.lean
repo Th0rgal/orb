@@ -22,6 +22,7 @@ import OrbCore.Store
 import OrbCore.Managed
 import OrbCore.ManagedProvisioning
 import OrbCore.ManagedTtl
+import OrbCore.ManagedSnapshotCatalog
 import OrbCore.R7Core
 import OrbCore.LegacyHydrate
 
@@ -794,13 +795,36 @@ def quoteManagedSpawnCents (provider size : String) (ttlMinutes : UInt64)
   | .ok cents => return cents
   | .error e => throw e.code
 
+/-- Saved snapshots of one project, from the provider's own list. -/
+def projectSnapshotEntries (store : CoreStore) (provider : ManagedProvider.Provider) (project : String) :
+    IO (Except String (Array ManagedSnapshotCatalog.Entry)) := do
+  let inventory ← match ← provider.listSnapshots with
+    | .ok items => pure items
+    | .error e => return .error s!"managed_snapshot_list_failed:{e.code}:{e.status}"
+  let registry ← match ← (IO.FS.readFile s!"{store.rootDir}/managed_snapshots.json").toBaseIO with
+    | .ok raw => pure (ManagedSnapshotCatalog.parseLegacyRegistry raw)
+    | .error _ => pure #[]
+  let known ← match ← execParamQuery store.missionsDb
+      "SELECT DISTINCT project FROM missions WHERE COALESCE(project,'')<>'';" #[] with
+    | .ok rows => pure ((rows.extract 1 rows.size).map (cell · 0))
+    | .error _ => pure #[]
+  return .ok (ManagedSnapshotCatalog.visible inventory registry (known ++ registry.map (·.project)) project)
+
+def resolveProjectSnapshot (store : CoreStore) (provider : ManagedProvider.Provider)
+    (project requested : String) : IO (Except String String) := do
+  if project.trimAscii.toString.isEmpty then return .error "managed_snapshot_requires_project"
+  match ← projectSnapshotEntries store provider project with
+  | .error e => return .error e
+  | .ok entries => return ManagedSnapshotCatalog.resolve entries requested
+
 /-- REST, MCP and automatic placement share admission, provider create, guest
     installation, enrollment, relay readiness, and failure cleanup. -/
 def spawnConfiguredManagedWorker (mc : ManagedComputeStore) (dataRoot : String)
     (fleet : ManagedFleetState) (machine : ManagedMachine) (args : JVal)
     (idempotencyKey : String := "")
     (override? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none)
-    (userAdmission? : Option ManagedUserAdmission := none) :
+    (userAdmission? : Option ManagedUserAdmission := none)
+    (resolvedSnapshot : String := "") :
     IO (Except String ManagedProvisioning.SpawnResult) := do
   let (provider, bootstrap) ← match override? with
     | some pair => pure pair
@@ -812,12 +836,14 @@ def spawnConfiguredManagedWorker (mc : ManagedComputeStore) (dataRoot : String)
       pure (provider, bootstrap)
   let requestedSnapshot := (args.fieldStr? "from_snapshot").orElse (fun _ => args.fieldStr? "managed_from_snapshot")
     |>.getD ""
-  -- Until snapshot ownership/project lookup is wired, never let an untrusted
-  -- label restore arbitrary private disks from the shared provider account.
-  if !requestedSnapshot.trimAscii.toString.isEmpty then return .error "managed_snapshot_scope_not_implemented"
-  let fromImage := (args.fieldStr? "image").getD "orb-node-base"
-  if fromImage != "orb-node-base" && fromImage != "provider-default" then
+  -- A caller-supplied label never reaches the provider. Only a name the entry point
+  -- resolved inside the caller's own project (`resolveProjectSnapshot`) is restored.
+  if !requestedSnapshot.trimAscii.toString.isEmpty && resolvedSnapshot.isEmpty then
+    return .error "managed_snapshot_scope_unresolved"
+  let baseImage := (args.fieldStr? "image").getD "orb-node-base"
+  if resolvedSnapshot.isEmpty && baseImage != "orb-node-base" && baseImage != "provider-default" then
     return .error "managed_image_not_allowlisted"
+  let fromImage := if resolvedSnapshot.isEmpty then baseImage else resolvedSnapshot
   let key := if idempotencyKey.isEmpty then
     ((args.fieldStr? "idempotency_key").filter (!·.isEmpty)).getD machine.id
     else idempotencyKey
@@ -905,11 +931,38 @@ structure ManagedLifecycleContext where
 def loadManagedUserAdmission (store : CoreStore) (userId : String) (nowEpoch : UInt64) :
     IO (Except String (Option ManagedUserAdmission)) := do
   if userId.isEmpty then return .ok none
-  let some user ← getUserById? store userId | return .error "managed_user_missing"
-  if user.disabled then return .error "managed_user_disabled"
+  -- User ids are not secrets; naming the missing one makes a stale owner diagnosable.
+  let some user ← getUserById? store userId | return .error s!"managed_user_missing:{userId}"
+  if user.disabled then return .error s!"managed_user_disabled:{userId}"
   let some cap := user.dailySpendCapCents? | return .ok none
   let (inf, cmp) ← getUserSpentTodayCents store userId (formatEpochIso8601Utc nowEpoch |>.take 10 |>.toString)
   return .ok (some { capCents := cap, inferenceCents := inf, computeCents := cmp })
+
+/-- Pre-cutover rows carry a tenant label (for example `prod`) instead of a user id.
+    Where the owning mission names a real user, adopt it. Rows whose mission has no
+    such owner are left as they are; nothing is guessed. Idempotent. -/
+def repairManagedMachineOwners (store : CoreStore) (mc : ManagedComputeStore) : IO Nat := do
+  let .ok owners ← execParamQuery mc.db
+      "SELECT DISTINCT owner_user_id FROM managed_machines WHERE owner_user_id<>'';" #[] | return 0
+  let mut repaired := 0
+  for i in [1:owners.size] do
+    let stale := cell owners[i]! 0
+    if (← getUserById? store stale).isSome then continue
+    let .ok machines ← execParamQuery mc.db
+        "SELECT id,owner_mission FROM managed_machines WHERE owner_user_id=?1 AND owner_mission<>'';" #[stale] | continue
+    for j in [1:machines.size] do
+      let machineId := cell machines[j]! 0
+      let .ok missionRows ← execParamQuery store.missionsDb
+          "SELECT COALESCE(owner_user_id,'') FROM missions WHERE id=?1;" #[cell machines[j]! 1] | continue
+      if missionRows.size < 2 then continue
+      let owner := cell missionRows[1]! 0
+      if owner.isEmpty || owner == stale || (← getUserById? store owner).isNone then continue
+      if let .ok _ ← execParamQuery mc.db
+          "UPDATE managed_machines SET owner_user_id=?2 WHERE id=?1 AND owner_user_id=?3;" #[machineId, owner, stale] then
+        discard <| execParamQuery mc.db
+          "UPDATE managed_cost_reservations SET owner_user_id=?2 WHERE machine_id=?1 AND owner_user_id=?3;" #[machineId, owner, stale]
+        repaired := repaired + 1
+  return repaired
 
 private def managedLifecycleResult (m : ManagedMachine) : JVal :=
   .obj #[("ok", .bool true), ("id", .str m.id), ("state", .str m.status),
@@ -931,7 +984,9 @@ def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (ctx : ManagedLifec
     if ctx.override?.isNone then
       let some entry := ManagedProvider.declaration? m.provider | return .error "managed_provider_unavailable"
       if !entry.supportsExtend then return .error "managed_provider_extend_unsupported"
-    let .ok budget ← loadManagedUserAdmission ctx.store m.ownerUserId nowEpoch | return .error "managed_user_unavailable"
+    let budget ← match ← loadManagedUserAdmission ctx.store m.ownerUserId nowEpoch with
+      | .ok value => pure value
+      | .error e => return .error e
     let .ok fleet ← loadManagedFleet mc ctx.fleet.enabled ctx.fleet.boatEnabled ctx.fleet.dailyCapCents
         ctx.fleet.spentTodayCents ctx.fleet.maxConcurrent | return .error "managed_fleet_read_failed"
     let rawKey ← if !retryKey.isEmpty then pure retryKey else
@@ -953,7 +1008,9 @@ def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (ctx : ManagedLifec
       | none => do
         let .ok cfg ← loadManagedBootstrapConfig | return .error "managed_bootstrap_configuration_unavailable"
         pure cfg
-    let .ok budget ← loadManagedUserAdmission ctx.store m.ownerUserId nowEpoch | return .error "managed_user_unavailable"
+    let budget ← match ← loadManagedUserAdmission ctx.store m.ownerUserId nowEpoch with
+      | .ok value => pure value
+      | .error e => return .error e
     let fleet ← match ← loadManagedFleet mc ctx.fleet.enabled ctx.fleet.boatEnabled
         ctx.fleet.dailyCapCents ctx.fleet.spentTodayCents ctx.fleet.maxConcurrent with
       | .ok f => pure f

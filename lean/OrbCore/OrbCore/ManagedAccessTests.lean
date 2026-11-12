@@ -142,6 +142,50 @@ def run (root : String) : IO Unit := do
       probe external "extend_managed_machine" "machine_id" "user-core-id" false
       probe base "extend_managed_machine" "machine_id" "user-core-id" false
       probe base "extend_managed_machine" "machine_id" "managed-missing" false
+      -- Operator authority follows the user who minted the session, not the label.
+      let admin ← match ← createUserRecord store "ops-admin" "ops-admin-passphrase-1234" "admin" none none "t" with
+        | .ok user => pure user
+        | .error _ => throw (IO.userError "admin fixture failed")
+      seedSession "op-admin" admin.id "mission" "unrelated" "" "2000" "0" "0"
+      seedSession "op-member" "bob" "mission" "unrelated" "" "2000" "0" "0"
+      seedSession "op-revoked" admin.id "mission" "unrelated" "" "2000" "0" "1"
+      let .ok _ ← provisionManagedMachine mc fleet {
+          machine with id := "tenant-label-id", ownerUserId := "prod"
+        } now | throw (IO.userError "tenant label fixture failed")
+      for id in #[machine.id, "managed-" ++ machine.id, "user-core-id", "unowned-core-id", "tenant-label-id"] do
+        for tool in #["extend_managed_machine", "resume_managed_machine"] do
+          probe { base with sessionId := "op-admin", missionId := "unrelated", role := "operator" } tool "machine_id" id true
+          probe { base with sessionId := "op-admin", missionId := "unrelated", role := "executor" } tool "machine_id" id false
+          probe { base with sessionId := "op-member", missionId := "unrelated", role := "operator" } tool "machine_id" id false
+          probe { base with sessionId := "op-revoked", missionId := "unrelated", role := "operator" } tool "machine_id" id false
+      -- A pre-cutover tenant label on the row does not lock out the owning lineage.
+      for mid in #["root", "owner", "grandchild"] do
+        probe { base with missionId := mid } "extend_managed_machine" "machine_id" "tenant-label-id" true
+      probe { base with missionId := "sibling" } "extend_managed_machine" "machine_id" "tenant-label-id" false
+      probe { base with missionId := "foreign" } "extend_managed_machine" "machine_id" "tenant-label-id" false
+      -- Owner repair: a tenant label is replaced only by the owning mission's real user.
+      seedMission "repair-mission" "" admin.id "p"
+      seedMission "ghost-mission" "" "ghost" "p"
+      for (id, mission, owner) in #[("repair-a", "repair-mission", "prod"), ("repair-ghost", "ghost-mission", "prod"),
+          ("repair-nomission", "", "prod"), ("repair-valid", "ghost-mission", admin.id)] do
+        let .ok _ ← provisionManagedMachine mc fleet {
+            machine with id, ownerMission := mission, ownerUserId := owner, spentCents := 1
+          } now | throw (IO.userError "repair fixture failed")
+      check ((← OrbCore.RemoteFleetAndRelay.loadManagedUserAdmission store "prod" now) matches .error "managed_user_missing:prod")
+        "a missing owner is named in the error"
+      check ((← OrbCore.RemoteFleetAndRelay.repairManagedMachineOwners store mc) == 1) "exactly the recoverable row is repaired"
+      let ownerOf (id : String) : IO String := do
+        let some (m, _) ← getManagedMachine? mc id | throw (IO.userError "repair row vanished")
+        return m.ownerUserId
+      check ((← ownerOf "repair-a") == admin.id && (← ownerOf "repair-ghost") == "prod" &&
+        (← ownerOf "repair-nomission") == "prod" && (← ownerOf "repair-valid") == admin.id &&
+        (← ownerOf "tenant-label-id") == "prod") "unverifiable owners are left alone"
+      let .ok reservations ← execParamQuery mc.db
+          "SELECT owner_user_id FROM managed_cost_reservations WHERE machine_id='repair-a';" #[]
+        | throw (IO.userError "reservation read failed")
+      check (reservations.size == 2 && cell reservations[1]! 0 == admin.id) "the cost reservation follows the repaired owner"
+      check ((← OrbCore.RemoteFleetAndRelay.repairManagedMachineOwners store mc) == 0) "repair is idempotent"
+      check ((← OrbCore.RemoteFleetAndRelay.loadManagedUserAdmission store admin.id now).isOk) "the repaired owner resolves"
       let some (unchanged, _) ← getManagedMachine? mc machine.id
         | throw (IO.userError "machine vanished")
       check (unchanged.ownerUserId == "alice" && unchanged.ownerMission == "owner" &&
