@@ -1046,7 +1046,8 @@ export default function App() {
   });
   if (nativeChromeSyncer) {
     let hydratedConnectionVersion = -1;
-    const hydratedProjectSlugs = new Set<string>();
+    const authoritativeSlugs = new Set<string>();
+    const inFlightSlugs = new Set<string>();
     const retryCounts = new Map<string, number>();
     const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
     const [hydrateRetryTick, setHydrateRetryTick] = createSignal(0);
@@ -1055,46 +1056,67 @@ export default function App() {
       retryTimers.clear();
       retryCounts.clear();
     };
+    const scheduleHydrateRetry = (slug: string, connVer: number) => {
+      if (retryTimers.has(slug)) return;
+      const attempt = (retryCounts.get(slug) ?? 0) + 1;
+      retryCounts.set(slug, attempt);
+      const delayMs = Math.min(30_000, 1_500 * 2 ** Math.min(5, attempt - 1));
+      retryTimers.set(
+        slug,
+        setTimeout(() => {
+          retryTimers.delete(slug);
+          if (connectionVersion() === connVer) setHydrateRetryTick((n) => n + 1);
+        }, delayMs),
+      );
+    };
     onCleanup(clearHydrateRetries);
     createEffect(() => {
       hydrateRetryTick();
       const connVer = connectionVersion();
       if (connVer !== hydratedConnectionVersion) {
         hydratedConnectionVersion = connVer;
-        hydratedProjectSlugs.clear();
+        authoritativeSlugs.clear();
+        inFlightSlugs.clear();
         clearHydrateRetries();
       }
       if (!isConnected()) {
-        hydratedProjectSlugs.clear();
+        authoritativeSlugs.clear();
+        inFlightSlugs.clear();
         clearHydrateRetries();
         return;
       }
       for (const p of liveProjects()) {
         const slug = p.slug.trim();
-        if (!slug || hydratedProjectSlugs.has(slug) || projectMissions()[slug] !== undefined) continue;
-        hydratedProjectSlugs.add(slug);
+        if (!slug || authoritativeSlugs.has(slug) || inFlightSlugs.has(slug)) continue;
+        inFlightSlugs.add(slug);
         void listProjectMissions(slug, { background: true })
           .then((rows) => {
             if (connectionVersion() !== connVer) return;
-            retryCounts.delete(slug);
+            inFlightSlugs.delete(slug);
+            const partial = isPartialList(rows);
             const clean = rows.filter((m) => !isMissionDeleting(m.id));
-            setProjectMissions((cur) => ({ ...cur, [slug]: clean }));
+            setProjectMissions((cur) => {
+              const existing = cur[slug] ?? [];
+              if (partial) return { ...cur, [slug]: mergeById(existing, clean) };
+              const cleanIds = new Set(clean.map((m) => m.id));
+              return { ...cur, [slug]: mergeById(existing.filter((m) => cleanIds.has(m.id)), clean) };
+            });
+            if (partial) {
+              scheduleHydrateRetry(slug, connVer);
+            } else {
+              authoritativeSlugs.add(slug);
+              retryCounts.delete(slug);
+              const timer = retryTimers.get(slug);
+              if (timer) {
+                clearTimeout(timer);
+                retryTimers.delete(slug);
+              }
+            }
           })
           .catch((err) => {
             if (connectionVersion() === connVer) {
-              hydratedProjectSlugs.delete(slug);
-              const attempt = (retryCounts.get(slug) ?? 0) + 1;
-              if (attempt <= 5 && !retryTimers.has(slug)) {
-                retryCounts.set(slug, attempt);
-                const delayMs = Math.min(20_000, 1_500 * 2 ** (attempt - 1));
-                retryTimers.set(
-                  slug,
-                  setTimeout(() => {
-                    retryTimers.delete(slug);
-                    if (connectionVersion() === connVer) setHydrateRetryTick((n) => n + 1);
-                  }, delayMs),
-                );
-              }
+              inFlightSlugs.delete(slug);
+              scheduleHydrateRetry(slug, connVer);
             }
             swallow("app.nativeChromeProjectMissions", { slug })(err);
           });
