@@ -636,43 +636,72 @@ Hierarchical inheritance & pace/delay enforcement:
 
 ## Provisioning
 
-`provision` runs `src/managed/orb-node-provision.sh` as root before
-starting `orb-node` (best effort, logged): `/tmp/opencode` writable by
-`orbnode`, a git credential helper answering only `https://github.com` with
-the mission's GitHub token (the `paloma-secrets` file Core delivered, else
-`GITHUB_TOKEN`/`GH_TOKEN`; never written by the script), ssh GitHub URLs
-rewritten to https, and the orbnode rustup env when the image has it (skipping
-recursive `chown -R` when `$CACHES/{rustup,cargo}` is already owned by
-`orbnode`). Boot-time state preparation wipes `node.cred`, `managed-auth`,
-`/run/user/*/paloma-secrets`, `.paloma-secrets`, and `/var/lib/orb-node/.boost-env`
-while pruning heavy
-toolchain/build/VCS trees (`caches/{elan,rustup,cargo,lake,xdg}`, `.git`,
-`.lake`, `target`, `node_modules`) and skipping global `sync` so lazy CoW
-snapshot hydration never times out (`SECRETS_WIPE` before snapshot/fork save
-retains `&& sync`). On `leanci` microVMs, `orb-node-provision.sh` also extracts
-guest `LEANCI_*` / `BOOST_*` environment variables (including the VM-scoped `LEANCI_CACHE_TOKEN` / `BOOST_CACHE_TOKEN`
-for `turbo-lean`) into `/var/lib/orb-node/.boost-env` (`0600` `orbnode:orbnode`),
-makes `/workspace/repo` and `/workspace/boost-cvm/lean-overlay/merged` readable to
-`orbnode`, and installs `/usr/local/bin/orb-cow-worktree` so concurrent sub-agents
-can create isolated git worktrees seeded with `cp -al` hardlinked `.lake/build`
-artifacts without Lake lock contention. Post-create provisioning enforces an overall wall-clock
-deadline (`360s` for Boat, `480s` for cloud-init and `leanci` reverse-relay providers) strictly below
-`AssistantMcp`'s `540s` HTTP timeout (and Hermes's `600s` MCP stdio timeout) so
-Core always destroys any partial VM and returns structured JSON before the
-caller's HTTP socket times out. For cloud-init/onstart providers (`hetzner`, `vastai`, `scaleway`) and `leanci` (executed directly over `POST /v1/vms/:id/exec`), Core generates a
-one-time `<4 KiB` enrollment script (fitting Vast.ai's `onstart` limit) that
-fetches `sandboxed-node`, `sandboxed-mcp`, and verified native harnesses
-(`opencode`, `claude`, `codex`) over streaming `GET /api/managed-machines/bootstrap-binary/:id`
-(which verifies ELF `e_machine` matches the machine's `arch`), keeps
-`/home/user/.orb/enroll.env` `0600` unprivileged-unreadable, enables `orbnode`'s
-lingering user D-Bus session (`XDG_RUNTIME_DIR` + `DBUS_SESSION_BUS_ADDRESS`), and
-dials back over the reverse relay (`SANDBOXED_NODE_DIAL_CORE_URL`). Marketplace
-providers (`vastai`) quote a verified offer (`quote_spawn`) enforcing CPU/RAM floors
-before budget admission so daily caps, pool reservations, and machine ledger rows use
-the real `dph_total` rate rather than catalog placeholders. Scaleway Apple Silicon
-(`M2-*`, 24h minimum lease) is rejected for Linux `worker` provisioning and omitted
-from the worker size catalog (`raw`-only with `allow_24h_commitment: true`). The
-`online` ledger event records `ready_ms`, `provision_ms`, `enroll_ms` and `total_ms`.
+`scripts/orb-node-provision.sh` is the one guest script for every provider. Core
+delivers it with a private `enroll.env` through the provider's file call and runs
+it as root; Core serves the installed copy
+(`/usr/local/lib/orb/orb-node-provision.sh`, or `ORB_NODE_PROVISION_SCRIPT`, which
+lets a dev instance use its own copy without touching the one prod serves).
+
+In order, the script:
+
+- creates the `orbnode` user and its work directory, and installs `enroll.env` as
+  `/etc/orb/enroll.env` (root, 0600);
+- removes a cached node identity and delivered mission secrets, so a fork or a
+  restored snapshot never reuses its parent's;
+- downloads the node from `GET /api/managed-machines/bootstrap-binary/:id` and
+  refuses anything that is not an x86_64 ELF (checked with `od`, so a minimal
+  image without Python can still enrol);
+- on a lean.ci guest, copies the provider's `LEANCI_*` settings, including the
+  VM-scoped cache token, to `/etc/orb/leanci-env` (root:orbnode, 0640), sourced by
+  `orbnode` login shells. lean.ci writes them only for its own `runner` user, in
+  `/etc/profile.d/boost-vm.sh` and `/home/runner/.boost-env` (its file names).
+  The token exists only when the VM was created with a `repo`, and expires an
+  hour after the VM's TTL. lean.ci blanks its own files before a snapshot but not
+  this copy, so a snapshot taken through Core must remove `/etc/orb/leanci-env`
+  first;
+- starts the node. With systemd it writes the `orb-node` unit and its enrolment
+  drop-in (including `SSL_CERT_FILE`, without which the node's static OpenSSL
+  cannot verify Core), enables the user bus for remote jobs and starts the unit.
+  **Without systemd** (a Colab runtime) it starts
+  `/opt/orb/bin/orb-node-supervise` in its own session, detached from the
+  provider's exec call: a restart loop that runs the node as `orbnode` with a
+  minimal environment (the enrolment values, `SSL_CERT_FILE`, and only the
+  accelerator variables `NVIDIA_*`, `CUDA_*`, `TPU_*`, `PJRT_*`,
+  `LD_LIBRARY_PATH`, `COLAB_GPU` from the runtime). The enrolment file is read
+  without being evaluated by a shell. A second run stops the previous loop first.
+
+Starting the node is not readiness: only the first authenticated relay poll,
+inside the provider's deadline (360 s Boat, 480 s lean.ci, 600 s Colab), marks
+the machine ready; otherwise Core destroys it.
+
+### Google Colab adapter
+
+`ManagedProviderColab.lean` is the `colab` client for the `colab-api` service on
+the Core host (`http://127.0.0.1:8790/v1`, `COLAB_API_URL`, token
+`COLAB_API_TOKEN` sealed in Core). Its wire contract was read from the service
+source (`Th0rgal/colab-api`):
+
+- The control API speaks GET and POST only. Create is `POST /notebooks` with the
+  machine name (the service is idempotent on the name), the accelerator
+  candidates for the size and `worker: true`. Delete is
+  `POST /notebooks/:id/delete`. IDs contain `~` and `@` and are percent-encoded.
+- A runtime is ready for commands only once its worker tunnel URL is published.
+  The worker is called at that URL with a per-runtime token from the notebook
+  record; a URL that is not HTTPS is refused.
+- Commands are `POST /exec` on the worker (`bash -lc`, working directory
+  `/content`). A timed-out command has no exit code and is a failure. The worker's
+  upload route cannot leave `/content`, so files are written through `exec` as
+  base64, mode 0600.
+- Sizes `colab-auto`, `t4`, `l4`, `a100`, `h100`, `v5e1`, `v6e1`, shadow-priced
+  at half the Vast.ai rate. `colab-auto` asks for H100, A100, L4, T4 in that order.
+- No snapshots and no stop/resume. A runtime has no lease at the provider, so
+  extending changes nothing there and Core's TTL is the only one.
+- Availability: no usable account, every usable account already running a
+  notebook, or the requested accelerator not eligible is `saturated`; an unusable
+  account is `degraded`. Cached 30 s.
+
+Not yet verified against the live service: the runtime's user, the time a T4
+takes to publish its tunnel, and that the supervised node survives the exec call.
 
 ## Automatic placement on the static fleet
 

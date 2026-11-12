@@ -11,6 +11,7 @@
 import OrbCore
 import OrbCore.ManagedProviderTests
 import OrbCore.ManagedProviderLeanciTests
+import OrbCore.ManagedProviderColabTests
 import OrbCore.ManagedProviderSealingTests
 import OrbCore.ManagedProviderAvailabilityTests
 import OrbCore.ManagedSpawnActionsTests
@@ -6291,6 +6292,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   try
     OrbCore.ManagedProviderTests.run
     OrbCore.ManagedProviderLeanciTests.run
+    OrbCore.ManagedProviderColabTests.run
   catch e =>
     IO.eprintln s!"[orb-core-test] FAIL: {e}"
     return 1

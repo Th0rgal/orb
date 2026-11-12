@@ -5,12 +5,13 @@ without an entry remains unimplemented, never a synthetic successful machine.
 -/
 import OrbCore.ManagedProviderBoat
 import OrbCore.ManagedProviderLeanci
+import OrbCore.ManagedProviderColab
 
 namespace OrbCore.ManagedProvider
 
 open OrbBin.Json
 
-def registry : Array Declaration := #[boatDeclaration, leanciDeclaration]
+def registry : Array Declaration := #[boatDeclaration, leanciDeclaration, colabDeclaration]
 
 def declaration? (name : String) : Option Declaration :=
   registry.find? (·.name == name)

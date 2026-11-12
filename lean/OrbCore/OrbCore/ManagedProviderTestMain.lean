@@ -4,6 +4,7 @@ Core's full self-test. No live provider/vault calls. Full Core CI remains requir
 -/
 import OrbCore.ManagedProviderTests
 import OrbCore.ManagedProviderLeanciTests
+import OrbCore.ManagedProviderColabTests
 import OrbCore.ManagedProvisioningTests
 import OrbCore.ManagedProviderSealingTests
 import OrbCore.ManagedProviderAvailabilityTests
@@ -19,6 +20,7 @@ def main : IO UInt32 := do
   try
     OrbCore.ManagedProviderTests.run
     OrbCore.ManagedProviderLeanciTests.run
+    OrbCore.ManagedProviderColabTests.run
     OrbCore.ManagedProvisioningTests.run root
     OrbCore.ManagedProviderSealingTests.run root
     OrbCore.ManagedProviderAvailabilityTests.run root
