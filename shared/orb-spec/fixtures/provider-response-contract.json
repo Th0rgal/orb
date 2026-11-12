@@ -15,6 +15,8 @@
     {"name":"explicit zero is not an absent epoch","upstream":{"rate_limit":{"primary_window":{"used_percent":0,"reset_at":0}}},"expected":{"codex_primary_reset_at":0},"absent_fields":["codex_secondary_reset_at"]},
     {"name":"missing epochs remain absent","upstream":{"rate_limit":{"primary_window":{"used_percent":5},"secondary_window":{"used_percent":9}}},"expected":{},"absent_fields":["codex_primary_reset_at","codex_secondary_reset_at"]},
     {"name":"signed epochs preserve the Rust i64 contract","upstream":{"rate_limit":{"primary_window":{"reset_at":-1}}},"expected":{"codex_primary_reset_at":-1},"absent_fields":["codex_secondary_reset_at"]},
+    {"name":"minimum signed i64 is preserved","upstream":{"rate_limit":{"primary_window":{"reset_at":-9223372036854775808}}},"expected":{"codex_primary_reset_at":-9223372036854775808},"absent_fields":["codex_secondary_reset_at"]},
+    {"name":"epochs below signed i64 are unavailable","upstream":{"rate_limit":{"primary_window":{"reset_at":-9223372036854775809}}},"expected":{},"absent_fields":["codex_primary_reset_at","codex_secondary_reset_at"]},
     {"name":"epochs outside signed i64 are unavailable","upstream":{"rate_limit":{"primary_window":{"reset_at":9223372036854775808}}},"expected":{},"absent_fields":["codex_primary_reset_at","codex_secondary_reset_at"]},
     {"name":"string epochs are not coerced into numeric fields","upstream":{"rate_limit":{"primary_window":{"reset_at":"1740001800"}}},"expected":{},"absent_fields":["codex_primary_reset_at","codex_secondary_reset_at"]}
   ]

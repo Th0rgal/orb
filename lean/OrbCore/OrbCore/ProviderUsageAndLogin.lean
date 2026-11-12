@@ -504,7 +504,7 @@ def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool
   let statusObj : JVal :=
     if hasCreds then
       .obj #[
-        ("type", .str "ready"),
+        ("type", .str "connected"),
         ("auth_methods", .arr authMethods),
         ("auth_type", .str (if hp.hasOAuth then "oauth" else "api_key")),
         ("account", if hp.accountEmail.isEmpty then .null else .str hp.accountEmail),
@@ -576,6 +576,14 @@ private def buildOptimizeWindow
     ("reset_in_seconds", .null)
   ]
 
+/-- Match the historical serde `as_i64` reset contract: integer JSON only,
+    including zero/negative values, without wrapping values outside signed i64. -/
+private def codexResetEpoch? (window : JVal) : Option Int := do
+  let epoch ← window.fieldInt? "reset_at"
+  if epoch < (-9223372036854775808 : Int) then none
+  else if epoch > (9223372036854775807 : Int) then none
+  else some epoch
+
 /-- The production wham projection, kept pure so wire fixtures need no vendor calls.
     Scalar Codex fields and optimize-window fields have separate client contracts. -/
 def projectCodexUsage (wham : JVal) : Array (String × JVal) × Array JVal × JVal := Id.run do
@@ -587,22 +595,26 @@ def projectCodexUsage (wham : JVal) : Array (String × JVal) × Array JVal × JV
   if let some rl := wham.field? "rate_limit" then
     if let some pw := rl.field? "primary_window" then
       let usedPct := match pw.field? "used_percent" with | some (.num n) => n | _ => "0"
-      let resetSec := (pw.fieldUInt64? "reset_at").getD 0
+      let resetEpoch? := codexResetEpoch? pw
+      let resetSec := (resetEpoch?.map (fun epoch => epoch.toNat.toUInt64)).getD 0
       let resetIso := if resetSec > 0 then formatEpochIso8601Utc resetSec else ""
       let winSecs := (pw.fieldNat? "limit_window_seconds").getD 18000
       fields := fields.push ("codex_primary_used_percent", .num usedPct)
       fields := fields.push ("codex_primary_window_minutes", JVal.nat (winSecs / 60))
-      if !resetIso.isEmpty then fields := fields.push ("codex_primary_reset_at", .str resetIso)
+      if let some epoch := resetEpoch? then
+        fields := fields.push ("codex_primary_reset_at", JVal.int epoch)
       windows := windows.push (buildOptimizeWindow "5h" "5-hour" "used_pct" "codex_wham" usedPct winSecs (some resetIso))
       primary := .str "5h"
     if let some sw := rl.field? "secondary_window" then
       let usedPct := match sw.field? "used_percent" with | some (.num n) => n | _ => "0"
-      let resetSec := (sw.fieldUInt64? "reset_at").getD 0
+      let resetEpoch? := codexResetEpoch? sw
+      let resetSec := (resetEpoch?.map (fun epoch => epoch.toNat.toUInt64)).getD 0
       let resetIso := if resetSec > 0 then formatEpochIso8601Utc resetSec else ""
       let winSecs := (sw.fieldNat? "limit_window_seconds").getD 604800
       fields := fields.push ("codex_secondary_used_percent", .num usedPct)
       fields := fields.push ("codex_secondary_window_minutes", JVal.nat (winSecs / 60))
-      if !resetIso.isEmpty then fields := fields.push ("codex_secondary_reset_at", .str resetIso)
+      if let some epoch := resetEpoch? then
+        fields := fields.push ("codex_secondary_reset_at", JVal.int epoch)
       windows := windows.push (buildOptimizeWindow "7d" "7-day" "used_pct" "codex_wham" usedPct winSecs (some resetIso))
   return (fields, windows, primary)
 
