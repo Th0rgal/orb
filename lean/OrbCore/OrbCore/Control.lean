@@ -1911,7 +1911,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   -- 1. Public Health Endpoint (`GET /api/health`)
   if req.method == "GET" && cleanPath == "/api/health" then
     let multiDb ← hasMultipleActiveUsers st.store
-    return .ok (mkJsonHdr 200 (renderHealthJson st.cfg multiDb) #[("Cache-Control", "private, max-age=5")])
+    -- `ORB_BUILD_SHA` is set by the deploy step, so a caller can tell which commit a service runs.
+    let buildSha := ((← IO.getEnv "ORB_BUILD_SHA").getD "").trimAscii.toString
+    let health := renderHealthJson st.cfg multiDb
+    let body :=
+      if buildSha.isEmpty || !health.endsWith "}" then health
+      else (health.dropEnd 1).toString ++ s!",\"build\":{jsonEscape buildSha}}"
+    return .ok (mkJsonHdr 200 body #[("Cache-Control", "private, max-age=5")])
 
   -- 2. Public Auth Login (`POST /api/auth/login`)
   if req.method == "POST" && cleanPath == "/api/auth/login" then
