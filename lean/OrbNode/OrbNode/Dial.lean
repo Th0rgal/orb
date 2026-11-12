@@ -133,7 +133,9 @@ def spawnRelay (cred : DialCredential) (localPort : UInt16) (goneRef : IO.Ref Bo
     let extraHdrs := #[("x-orb-machine-id", cred.machineId)]
     let mut backoffMs : UInt32 := 1000
     while !(← goneRef.get) do
-      match ← sendJsonRequest "GET" pollUrl (some cred.nodeToken) none extraHdrs 60000 134217728 with
+      -- 64 MiB is the largest response `verifyOutboundRequest` admits; asking for more is refused
+      -- before any connection is opened, which left enrolled nodes silent.
+      match ← sendJsonRequest "GET" pollUrl (some cred.nodeToken) none extraHdrs 60000 67108864 with
       | .ok (410, _, _) =>
         let cp ← credentialPath
         try IO.FS.removeFile cp catch _ => pure ()

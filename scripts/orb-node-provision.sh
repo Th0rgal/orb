@@ -86,6 +86,10 @@ Environment=SANDBOXED_NODE_CREDENTIAL_FILE=/var/lib/orb-node/node.cred
 Environment=SANDBOXED_NODE_BIND=127.0.0.1:3088
 Environment=OPENCODE_TMPDIR=/tmp/opencode
 Environment=GIT_TERMINAL_PROMPT=0
+# The node links a static OpenSSL whose built-in CA directory does not exist in the
+# guest; without the system bundle it cannot verify Core and never enrols.
+Environment=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+Environment=SSL_CERT_DIR=/etc/ssl/certs
 ExecStart=
 ExecStart=/opt/orb/bin/sandboxed-node
 UNIT

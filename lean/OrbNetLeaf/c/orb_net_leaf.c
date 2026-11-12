@@ -164,7 +164,7 @@ LEAN_EXPORT lean_obj_res orb_net_leaf_tls_open(b_lean_obj_arg host, uint16_t por
     onl_tls_t *s = (onl_tls_t *)calloc(1, sizeof(onl_tls_t));
     if (!s || pthread_mutex_init(&s->mu, NULL) != 0) return free(s), lean_io_result_mk_ok(lean_box(0));
     int ok = (s->fd = onl_connect_sock(h, port, SOCK_STREAM, timeout_ms)) >= 0 && (s->ctx = SSL_CTX_new(TLS_client_method())) != NULL;
-    if (ok && verify_peer) { SSL_CTX_set_verify(s->ctx, SSL_VERIFY_PEER, NULL); ok = SSL_CTX_set_default_verify_paths(s->ctx) == 1; }
+    if (ok && verify_peer) { SSL_CTX_set_verify(s->ctx, SSL_VERIFY_PEER, NULL); ok = SSL_CTX_set_default_verify_paths(s->ctx) == 1; /* static OpenSSL may carry a build-host CA dir: add the system bundle */ if (ok && access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) SSL_CTX_load_verify_locations(s->ctx, "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs"); }
     static const unsigned char h2_alpn[] = { 2, 'h', '2' }, h1_alpn[] = { 8, 'h', 't', 't', 'p', '/', '1', '.', '1' };
     if (ok) ok = SSL_CTX_set_alpn_protos(s->ctx, alpn_mode == 1 ? h2_alpn : h1_alpn, alpn_mode == 1 ? 3 : 9) == 0;
     if (ok && (s->ssl = SSL_new(s->ctx)) != NULL) {
