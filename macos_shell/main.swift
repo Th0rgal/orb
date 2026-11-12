@@ -249,7 +249,7 @@ final class OrbMistralSignInController: NSObject, NSWindowDelegate, WKNavigation
     }
 }
 
-struct OrbSidebarRowItem {
+struct OrbSidebarRowItem: Equatable {
     let rowId: String
     let kind: String
     let depth: Int
@@ -262,6 +262,20 @@ struct OrbSidebarRowItem {
     let expanded: Bool
     let selected: Bool
     let attention: Bool
+
+    func hasSameCellContent(as other: OrbSidebarRowItem) -> Bool {
+        return rowId == other.rowId &&
+            kind == other.kind &&
+            depth == other.depth &&
+            title == other.title &&
+            subtitle == other.subtitle &&
+            target == other.target &&
+            shortcut == other.shortcut &&
+            badge == other.badge &&
+            expandable == other.expandable &&
+            expanded == other.expanded &&
+            attention == other.attention
+    }
 
     static func parse(_ d: [String: Any], isPalette: Bool = false) -> OrbSidebarRowItem? {
         let rid = (d[isPalette ? "id" : "row_id"] as? String) ?? ""
@@ -308,6 +322,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     private var sseBuffer = Data()
     private var sseRetryWork: DispatchWorkItem?
     private var isProgrammaticSelect = false
+    private var lastSelectionDispatchedRowId: String?
 
     init(port: Int, token: String, webView: OrbWebView, hostWindow: NSWindow, frame: NSRect) {
         self.port = port
@@ -480,15 +495,60 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     }
 
     func applyRowsPayload(_ rawRows: [[String: Any]]) {
-        rows = rawRows.compactMap { OrbSidebarRowItem.parse($0, isPalette: false) }
+        let nextRows = rawRows.compactMap { OrbSidebarRowItem.parse($0, isPalette: false) }
+        let prevRows = rows
+        rows = nextRows
         isProgrammaticSelect = true
-        sidebarTable.reloadData()
-        if let selIdx = rows.firstIndex(where: { $0.selected }) {
-            sidebarTable.selectRowIndexes(IndexSet(integer: selIdx), byExtendingSelection: false)
+        defer { isProgrammaticSelect = false }
+
+        let uniqueIds = Set(prevRows.map(\.rowId)).count == prevRows.count
+            && Set(nextRows.map(\.rowId)).count == nextRows.count
+        let diff = nextRows.map(\.rowId).difference(from: prevRows.map(\.rowId))
+        if uniqueIds && diff.isEmpty {
+            var dirty = IndexSet()
+            for idx in 0..<nextRows.count where !prevRows[idx].hasSameCellContent(as: nextRows[idx]) {
+                dirty.insert(idx)
+            }
+            if !dirty.isEmpty {
+                sidebarTable.reloadData(forRowIndexes: dirty, columnIndexes: IndexSet(integer: 0))
+            }
+        } else if uniqueIds && !prevRows.isEmpty {
+            var removals = IndexSet()
+            for change in diff {
+                if case let .remove(offset, _, _) = change { removals.insert(offset) }
+            }
+            sidebarTable.beginUpdates()
+            if !removals.isEmpty {
+                sidebarTable.removeRows(at: removals, withAnimation: [])
+            }
+            for change in diff {
+                if case let .insert(offset, _, _) = change {
+                    sidebarTable.insertRows(at: IndexSet(integer: offset), withAnimation: [])
+                }
+            }
+            sidebarTable.endUpdates()
+            var prevById: [String: OrbSidebarRowItem] = [:]
+            for item in prevRows { prevById[item.rowId] = item }
+            var dirty = IndexSet()
+            for (idx, item) in nextRows.enumerated() {
+                if let old = prevById[item.rowId], !old.hasSameCellContent(as: item) {
+                    dirty.insert(idx)
+                }
+            }
+            if !dirty.isEmpty {
+                sidebarTable.reloadData(forRowIndexes: dirty, columnIndexes: IndexSet(integer: 0))
+            }
         } else {
+            sidebarTable.reloadData()
+        }
+
+        if let selIdx = nextRows.firstIndex(where: { $0.selected }) {
+            if sidebarTable.selectedRow != selIdx {
+                sidebarTable.selectRowIndexes(IndexSet(integer: selIdx), byExtendingSelection: false)
+            }
+        } else if sidebarTable.selectedRow >= 0 {
             sidebarTable.deselectAll(nil)
         }
-        isProgrammaticSelect = false
     }
 
     func refreshSidebar() {
@@ -575,7 +635,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     }
 
     @objc private func onChevronButton(_ sender: NSButton) {
-        let idx = sender.tag
+        let idx = sidebarTable.row(for: sender)
         guard idx >= 0, idx < rows.count else { return }
         toggleExpand(rowId: rows[idx].rowId)
     }
@@ -583,7 +643,12 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     @objc private func onSidebarTableClick(_ sender: Any?) {
         let idx = sidebarTable.clickedRow
         guard idx >= 0, idx < rows.count else { return }
-        dispatchItem(rows[idx])
+        let item = rows[idx]
+        if lastSelectionDispatchedRowId == item.rowId {
+            lastSelectionDispatchedRowId = nil
+            return
+        }
+        dispatchItem(item)
     }
 
     @objc private func onPaletteTableClick(_ sender: Any?) {
@@ -645,7 +710,6 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
             let btn = NSButton(title: item.expanded ? "▾" : "▸", target: self, action: #selector(onChevronButton(_:)))
             btn.isBordered = false
             btn.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-            btn.tag = row
             btn.frame = NSRect(x: cursorX, y: 4, width: 16, height: 20)
             cell.addSubview(btn)
             cursorX += 18
@@ -693,6 +757,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         guard idx >= 0, idx < rows.count else { return }
         let item = rows[idx]
         if !item.target.isEmpty {
+            lastSelectionDispatchedRowId = (sidebarTable.clickedRow == idx) ? item.rowId : nil
             dispatchItem(item)
         }
     }
@@ -1873,8 +1938,33 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             ["row_id": "nav:new-agent", "kind": "nav", "depth": 0, "title": "New agent", "target": "new-agent", "selected": false],
             ["row_id": "mission:m-1", "kind": "mission", "depth": 1, "title": "Verify native chrome", "target": "m:m-1", "selected": true]
         ])
-        guard testChrome.rows.count == 2, testChrome.sidebarTable.selectedRow == 1 else {
+        guard testChrome.rows.count == 2, testChrome.sidebarTable.numberOfRows == 2, testChrome.sidebarTable.selectedRow == 1 else {
             fputs("self-test failed: OrbNativeChromeController applyRowsPayload mismatch\n", stderr)
+            exit(1)
+        }
+        testChrome.applyRowsPayload([
+            ["row_id": "nav:new-agent", "kind": "nav", "depth": 0, "title": "New agent", "target": "new-agent", "selected": true],
+            ["row_id": "mission:m-1", "kind": "mission", "depth": 1, "title": "Verify native chrome", "target": "m:m-1", "selected": false]
+        ])
+        guard testChrome.sidebarTable.numberOfRows == 2, testChrome.sidebarTable.selectedRow == 0 else {
+            fputs("self-test failed: OrbNativeChromeController selection-only diff mismatch\n", stderr)
+            exit(1)
+        }
+        testChrome.applyRowsPayload([
+            ["row_id": "nav:new-agent", "kind": "nav", "depth": 0, "title": "New agent", "target": "new-agent", "selected": false],
+            ["row_id": "mission:m-0", "kind": "mission", "depth": 1, "title": "Inserted row", "target": "m:m-0", "selected": false],
+            ["row_id": "mission:m-1", "kind": "mission", "depth": 1, "title": "Verify native chrome", "target": "m:m-1", "selected": true]
+        ])
+        guard testChrome.sidebarTable.numberOfRows == 3, testChrome.sidebarTable.selectedRow == 2 else {
+            fputs("self-test failed: OrbNativeChromeController incremental insert mismatch\n", stderr)
+            exit(1)
+        }
+        testChrome.applyRowsPayload([
+            ["row_id": "nav:new-agent", "kind": "nav", "depth": 0, "title": "New agent", "target": "new-agent", "selected": false],
+            ["row_id": "mission:m-1", "kind": "mission", "depth": 1, "title": "Verify native chrome", "target": "m:m-1", "selected": true]
+        ])
+        guard testChrome.sidebarTable.numberOfRows == 2, testChrome.sidebarTable.selectedRow == 1 else {
+            fputs("self-test failed: OrbNativeChromeController incremental remove mismatch\n", stderr)
             exit(1)
         }
         testChrome.setSidebarOpen(false)

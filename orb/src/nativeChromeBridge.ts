@@ -1,10 +1,11 @@
 /**
  * Hybrid Native Chrome bridge (`window.__ORB_NATIVE_CHROME__ === true`).
  *
- * When a desktop shell opts into Hybrid Native Chrome (`ORB_NATIVE_CHROME=1` or `?chrome=native`),
- * the native shell (AppKit `NSSplitView` + `NSTableView` + `NSPanel` on macOS, GTK3 `GtkPaned` +
- * `GtkListBox` + `GtkPopover` on Linux) renders the sidebar navigation tree and `Cmd+K` / `Ctrl+K`
- * quick-switcher natively, backed by `OrbLocald.NativeChrome` (`docs/ui/native-chrome.md`).
+ * When a desktop shell opts into Hybrid Native Chrome (`ORB_NATIVE_CHROME=1` injecting
+ * `window.__ORB_NATIVE_CHROME__ = true`), the native shell (AppKit `NSSplitView` + `NSTableView` +
+ * `NSPanel` on macOS, GTK3 `GtkPaned` + `GtkListBox` + `GtkPopover` on Linux) renders the sidebar
+ * navigation tree and `Cmd+K` / `Ctrl+K` quick-switcher natively, backed by
+ * `OrbLocald.NativeChrome` (`docs/ui/native-chrome.md`).
  *
  * WebView responsibilities in Native Chrome mode:
  * - Omit mounting the HTML `<aside id="orb-sidebar">` subtree to save DOM/style/layout cost.
@@ -71,18 +72,10 @@ type NativeChromeWindow = Window & {
   };
 };
 
-/** True when the desktop shell or URL query (`?chrome=native`) enabled Hybrid Native Chrome. */
+/** True when the native desktop shell installed Hybrid Native Chrome (`window.__ORB_NATIVE_CHROME__ === true`). */
 export function isNativeChromeEnabled(win: Window | undefined = typeof window === "undefined" ? undefined : window): boolean {
   if (!win) return false;
-  const nw = win as NativeChromeWindow;
-  if (nw.__ORB_NATIVE_CHROME__ === true) return true;
-  if (nw.__ORB_NATIVE_CHROME__ === false) return false;
-  try {
-    const params = new URLSearchParams(win.location?.search ?? "");
-    return params.get("chrome") === "native";
-  } catch {
-    return false;
-  }
+  return (win as NativeChromeWindow).__ORB_NATIVE_CHROME__ === true;
 }
 
 export function serializeNativeChromeMission(m: Mission): NativeChromeMissionWire {
@@ -205,9 +198,17 @@ export function installNativeChromeWindowHandlers(
   };
 }
 
-/** Monotonic microtask/timer-coalesced `native_chrome_sync_state` dispatcher. */
-export function createNativeChromeSyncer(invokeOverride?: ReturnType<typeof nativeInvoke>) {
-  let revision = 0;
+/** Monotonic microtask/timer-coalesced `native_chrome_sync_state` dispatcher.
+ *  Seeds `revision` from `Date.now() * 1024` so WebView reloads (`Cmd+R` or process crash recovery)
+ *  always outrank revisions retained in `orb-locald` from an earlier page lifetime. */
+export function createNativeChromeSyncer(
+  invokeOverride?: ReturnType<typeof nativeInvoke>,
+  initialBaseRevision?: number,
+) {
+  let revision =
+    typeof initialBaseRevision === "number" && Number.isFinite(initialBaseRevision) && initialBaseRevision >= 0
+      ? Math.floor(initialBaseRevision)
+      : Math.max(1, Date.now()) * 1024;
   let pendingSnap: NativeChromeSyncSnapshot | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let unsupported = false;

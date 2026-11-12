@@ -24,7 +24,7 @@ function makeMission(overrides: Partial<Mission> = {}): Mission {
 }
 
 describe("nativeChromeBridge", () => {
-  it("detects explicit window.__ORB_NATIVE_CHROME__ and ?chrome=native query opt-in", () => {
+  it("enables native chrome only when the desktop shell sets window.__ORB_NATIVE_CHROME__ = true", () => {
     expect(isNativeChromeEnabled({ location: { search: "" } } as unknown as Window)).toBe(false);
     expect(
       isNativeChromeEnabled({
@@ -36,7 +36,7 @@ describe("nativeChromeBridge", () => {
       isNativeChromeEnabled({
         location: { search: "?chrome=native" },
       } as unknown as Window),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       isNativeChromeEnabled({
         __ORB_NATIVE_CHROME__: false,
@@ -167,7 +167,7 @@ describe("nativeChromeBridge", () => {
         calls.push({ cmd, args: args ?? {} });
         return { applied: true };
       });
-      const syncer = createNativeChromeSyncer(invoke);
+      const syncer = createNativeChromeSyncer(invoke, 0);
       const baseSnap: NativeChromeSyncSnapshot = {
         scope: "scope:1",
         selected: null,
@@ -196,6 +196,23 @@ describe("nativeChromeBridge", () => {
       expect(calls[1]?.args.revision).toBe(2);
       expect(calls[1]?.args.inbox_unread).toBe(5);
       syncer.dispose();
+
+      // A fresh syncer created after a WebView reload starts strictly above prior wall-clock revisions.
+      vi.setSystemTime(new Date("2026-11-12T04:30:00Z"));
+      const reloadedA = createNativeChromeSyncer(invoke);
+      reloadedA.schedule(baseSnap, true);
+      await Promise.resolve();
+      const revBeforeReload = calls[2]?.args.revision as number;
+      expect(revBeforeReload).toBeGreaterThan(1_000_000_000_000);
+      reloadedA.dispose();
+
+      vi.setSystemTime(new Date("2026-11-12T04:30:01Z"));
+      const reloadedB = createNativeChromeSyncer(invoke);
+      reloadedB.schedule(baseSnap, true);
+      await Promise.resolve();
+      const revAfterReload = calls[3]?.args.revision as number;
+      expect(revAfterReload).toBeGreaterThan(revBeforeReload);
+      reloadedB.dispose();
     } finally {
       vi.useRealTimers();
     }
