@@ -942,7 +942,7 @@ def loadCanonicalMissionTurns (st : CoreStore) (missionId : String) (preferCloud
   let mut turns : Array (String × String) := #[]
   if preferCloudExecutions then
     if let .ok cRows ← execParamQuery st.missionsDb
-        "SELECT prompt, response_text FROM cloud_executions WHERE mission_id=?1 ORDER BY created_at ASC, rowid ASC;"
+        "SELECT COALESCE(prompt,''), COALESCE(response_text,''), COALESCE(data,'{}') FROM cloud_executions WHERE mission_id=?1 ORDER BY revision DESC, created_at ASC, rowid ASC;"
         #[missionId] then
       if cRows.size > 1 then
         for i in [1:cRows.size] do
@@ -953,6 +953,17 @@ def loadCanonicalMissionTurns (st : CoreStore) (missionId : String) (preferCloud
             turns := turns.push ("user", p)
           if !resp.trimAscii.toString.isEmpty then
             turns := turns.push ("assistant", resp)
+        if turns.isEmpty then
+          let dataStr := (cRows[1]?.bind (·[2]?)).getD "{}"
+          if let .ok dataJv := OrbBin.Json.parse dataStr then
+            if let some arr := dataJv.fieldArr? "turns" then
+              for t in arr do
+                let tp := (t.fieldStr? "prompt").getD ""
+                if !tp.trimAscii.toString.isEmpty then
+                  turns := turns.push ("user", tp)
+                if let some tres := t.fieldStr? "result" then
+                  if !tres.trimAscii.toString.isEmpty then
+                    turns := turns.push ("assistant", tres)
   if turns.isEmpty then
     if let .ok hRows ← execParamQuery st.missionsDb
         "SELECT history_json FROM missions WHERE id=?1;" #[missionId] then

@@ -1027,47 +1027,10 @@ def dispatchProjectAndControllerRoutes?
     (method cleanPath rawTarget : String)
     (bodyBytes : ByteArray)
     (callerUserId bootstrapAdminId : String)
-    (isAdmin isLegacyUnscoped : Bool)
+    (_isAdmin isLegacyUnscoped : Bool)
     (nowIso : String) : IO (Option (Nat × String × ByteArray)) := do
   let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
   let qMap := parseQueryMap rawTarget
-
-  -- Admin Host FS Endpoints (`/api/file-resources`, `/api/fs/{list,read,download}`)
-  if method == "GET" && segs == ["api", "file-resources"] then
-    return some (jsonResp 200 (.obj #[("resources", .arr #[])]))
-
-  if segs.length == 3 && segs[0]? == some "api" && segs[1]? == some "fs" then
-    if !isAdmin then return some (jsonErr 403 "admin_required")
-    let sub := segs[2]!
-    let rawPath := (qParam? qMap "path").getD workingDir
-    let targetPath := if rawPath.trimAscii.toString.isEmpty then workingDir else rawPath.trimAscii.toString
-    if targetPath.contains '\x00' || (targetPath.splitOn "..").length > 1 then
-      return some (jsonErr 400 "invalid_path")
-    let fp := System.FilePath.mk targetPath
-    if method == "GET" && sub == "list" then
-      if !(← fp.pathExists) || !(← fp.isDir) then
-        return some (jsonErr 404 "directory_not_found")
-      let mut items : Array JVal := #[]
-      if let .ok es ← fp.readDir.toBaseIO then
-        for e in es do
-          let isDir ← e.path.isDir
-          let st ← statIdentity e.path.toString false
-          items := items.push (.obj #[
-            ("name", .str e.fileName),
-            ("path", .str e.path.toString),
-            ("kind", .str (if isDir then "dir" else "file")),
-            ("is_dir", .bool isDir),
-            ("size", JVal.uint64 st.size)
-          ])
-      return some (jsonResp 200 (.obj #[("path", .str targetPath), ("entries", .arr items)]))
-    else if method == "GET" && sub == "read" then
-      match ← (IO.FS.readFile fp).toBaseIO with
-      | .ok content => return some (jsonResp 200 (.obj #[("path", .str targetPath), ("content", .str content)]))
-      | .error _ => return some (jsonErr 404 "file_not_found")
-    else if method == "GET" && sub == "download" then
-      match ← (IO.FS.readBinFile fp).toBaseIO with
-      | .ok bytes => return some (200, "application/octet-stream", bytes)
-      | .error _ => return some (jsonErr 404 "file_not_found")
 
   -- Project Roster Root (`/api/projects`, `/api/projects/overview`, `/api/projects/by-session/:sid`)
   if segs == ["api", "projects"] then

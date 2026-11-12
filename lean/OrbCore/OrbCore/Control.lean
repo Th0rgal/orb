@@ -30,6 +30,9 @@ import OrbCore.LegacyHydrate
 import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.ProjectFilesAndController
+import OrbCore.CloudHttpAndWorker
+import OrbCore.ProviderUsageAndLogin
+import OrbCore.ResourcesAndSystem
 import OrbCore.McpGateway
 import OrbNetLeaf.TlsHttp
 import OrbNetLeaf.Gzip
@@ -62,6 +65,9 @@ open OrbCore.LegacyHydrate
 open OrbCore.SecretAndApproval
 open OrbCore.RemoteFleetAndRelay
 open OrbCore.ProjectFilesAndController
+open OrbCore.CloudHttpAndWorker
+open OrbCore.ProviderUsageAndLogin
+open OrbCore.ResourcesAndSystem
 open OrbCore.McpGateway
 open OrbNetLeaf.TlsHttp
 
@@ -111,6 +117,9 @@ structure CoreAppState where
   pendingControlCallsRef? : Option (IO.Ref (Array (String × String))) := none
   broadcastHub?   : Option BroadcastHub := none
   relayHub?       : Option RelayHub := none
+  cloudHub?       : Option CloudRuntimeHub := none
+  providerHub?    : Option ProviderRuntimeHub := none
+  systemHub?      : Option SystemRuntimeHub := none
 
 /-- Authenticated multi-user request principal resolved by `resolveCallerPrincipal?`. -/
 structure CallerPrincipal where
@@ -936,7 +945,7 @@ private def classifyMissionPlacementTarget
       (3, 0)
     else if effNode.isEmpty || effNode == "local" || effNode == "core" || effNode == "self" then
       (0, 1)
-    else if effNode == "agent-core" || effNode == "sepolia" || effNode.endsWith "-core" ||
+    else if effNode == "orb-core" || effNode == "agent-core" || effNode == "sepolia" || effNode.endsWith "-core" ||
             tags.any (fun t => t == "admin_only") then
       (1, 1)
     else
@@ -2394,7 +2403,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       else mf.machines.filter (fun m => m.ownerUserId == caller.userId)
     let mut items : Array String := #[]
     if caller.role == "admin" then
-      items := items.push "{\"id\":\"core\",\"name\":\"Core\",\"status\":\"online\",\"admin_only\":true,\"core_colocated\":true}"
+      items := items.push "{\"id\":\"core\",\"name\":\"orb-core\",\"status\":\"online\",\"admin_only\":true,\"core_colocated\":true}"
     for vm in visibleVms do
       if vm.status != "destroyed" then
         items := items.push s!"\{\"id\":{jsonEscape s!"managed-{vm.id}"},\"name\":{jsonEscape vm.sandboxName},\"provider\":{jsonEscape vm.provider},\"status\":{jsonEscape vm.status},\"admin_only\":false}"
@@ -3192,6 +3201,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
     else if req.method == "POST" then
       let bodyVal? := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption
+      if let some bJv := bodyVal? then
+        if let some cloudSel := bJv.field? "cloud" then
+          if !cloudSel.isNull then
+            let cHub ← match st.cloudHub? with | some h => pure h | none => newCloudRuntimeHub
+            let (cCode, cCtype, cBody) ← handleCloudMissionCreate
+              cHub st.store st.broadcastHub? st.cfg.port
+              caller.userId caller.username st.bootstrapAdminId
+              (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped
+              bJv cloudSel
+            return .ok { status := cCode, contentType := cCtype, corsOrigin? := reqOrigin?, body := cBody }
       let hdrIdemKey := (lookupHeaderCI req.headers "idempotency-key").map (·.trimAscii.toString) |>.getD ""
       let bodyIdemKey := (bodyVal?.bind (·.fieldStr? "idempotency_key")).map (·.trimAscii.toString) |>.getD ""
       let idemKey := if !hdrIdemKey.isEmpty then hdrIdemKey else bodyIdemKey
@@ -3748,6 +3767,33 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           #[mid, nowIso]
       return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}}")
 
+  -- Cloud Agent & Parity Sub-Routes before `/api/control/missions/:id`
+  if cleanPath.startsWith "/api/cloud/" ||
+     (cleanPath.startsWith "/api/control/missions/" && (
+       (cleanPath.splitOn "/cloud").length > 1 ||
+       cleanPath.endsWith "/inbox-digest" ||
+       cleanPath.endsWith "/stats" ||
+       cleanPath.endsWith "/messages/context" ||
+       cleanPath.endsWith "/client-run" ||
+       cleanPath.endsWith "/client-status" ||
+       cleanPath.endsWith "/client-transcript" ||
+       cleanPath.startsWith "/api/control/missions/search/")) then
+    let cHub ← match st.cloudHub? with | some h => pure h | none => newCloudRuntimeHub
+    if let some (cCode, cCtype, cBody) ← dispatchCloudHttpRoute
+        cHub st.store st.broadcastHub? st.cfg.port
+        req.method cleanPath rawTarget req.bodySlice.toByteArray
+        caller.userId caller.username st.bootstrapAdminId
+        (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped then
+      return .ok { status := cCode, contentType := cCtype, corsOrigin? := reqOrigin?, body := cBody }
+    let sHub ← match st.systemHub? with | some h => pure h | none => newSystemRuntimeHub
+    if let some (sCode, sCtype, sBody) ← dispatchResourcesAndSystemRoute
+        sHub st.store st.cfg.workingDir st.cfg.libraryRemote st.cfg.githubClientId
+        st.bunkerStateRef? st.managedStore? st.relayHub? st.broadcastHub?
+        req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
+        caller.userId caller.username st.bootstrapAdminId
+        (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped then
+      return .ok { status := sCode, contentType := sCtype, corsOrigin? := reqOrigin?, body := sBody }
+
   -- Mission Detail & Delete (`GET|DELETE /api/control/missions/:id`, `SM-01`, `SM-07`)
   if let some params := matchRoutePattern? "/api/control/missions/:id" rawTarget then
     let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
@@ -3816,7 +3862,15 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | .error e =>
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
 
-  -- AI Providers CRUD, Per-User Preference & Rate-Limit Metadata (`/api/ai/providers`, `/api/ai/providers/:id`, `/api/ai/providers/:id/preference`)
+  -- AI Providers CRUD, Usage, CLIProxy Login, Summary & Rate-Limit Metadata (`/api/ai/providers*`, `/api/ai/usage/*`, `/api/ai/proxy/*`)
+  if cleanPath.startsWith "/api/ai/usage/" || cleanPath.startsWith "/api/ai/proxy/" then
+    let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
+    if let some (pCode, pCtype, pBody) ← dispatchProviderAndAiRoute
+        pHub st.store st.cfg.workingDir st.cfg.port st.pacingTracker? st.proxyCooldownsRef
+        req.method cleanPath rawTarget req.bodySlice.toByteArray
+        caller.userId (caller.role == "admin") caller.isLegacyUnscoped then
+      return .ok { status := pCode, contentType := pCtype, corsOrigin? := reqOrigin?, body := pBody }
+
   if cleanPath == "/api/ai/providers" || cleanPath.startsWith "/api/ai/providers/" then
     if let some params := matchRoutePattern? "/api/ai/providers/:id/preference" rawTarget then
       if req.method == "PUT" || req.method == "PATCH" then
@@ -3835,6 +3889,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             | some tr => lookupObservedKeyRpm? tr existing.id
             | none => pure none
           return .ok (mkJson 200 (renderAIProviderForCallerJson existing (caller.role == "admin") userEn obs?))
+    -- Delegate rich GET list/detail, `/usage`, `/types`, `/reorder`, `/for-backend/*`, `/cli-proxy-login*`, `/:id/{usage,default,health,reset-usage,antigravity/recheck,auth/methods}` BEFORE `:id` PUT/DELETE
+    let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
+    if let some (pCode, pCtype, pBody) ← dispatchProviderAndAiRoute
+        pHub st.store st.cfg.workingDir st.cfg.port st.pacingTracker? st.proxyCooldownsRef
+        req.method cleanPath rawTarget req.bodySlice.toByteArray
+        caller.userId (caller.role == "admin") caller.isLegacyUnscoped then
+      return .ok { status := pCode, contentType := pCtype, corsOrigin? := reqOrigin?, body := pBody }
     if req.method == "GET" && cleanPath == "/api/ai/providers" then
       let providers ← listAIProviders st.store
       if caller.isLegacyUnscoped then
@@ -3977,19 +4038,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   if req.method == "GET" && cleanPath == "/api/providers" then
     return .ok (mkJson 200 (← renderProviderCatalogJson st.store caller))
 
-  if req.method == "GET" && (cleanPath == "/api/providers/antigravity-models" || cleanPath == "/api/antigravity-models") then
-    let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
-    if !isAdm then
-      return .ok (mkJson 200 "[]")
-    let agyBin? ← OrbBin.ClaudeControl.resolveHarnessBinary? "agy" none
-    match agyBin? with
-    | none => return .ok (mkJson 200 "[]")
-    | some binPath =>
-      match ← OrbBin.ClaudeControl.probeAntigravityModels binPath with
-      | .ok pairs =>
-        let rendered := pairs.map fun (mId, mLbl) => s!"[{jsonEscape mId},{jsonEscape mLbl}]"
-        return .ok (mkJson 200 ("[" ++ String.intercalate "," rendered.toList ++ "]"))
-      | .error _ => return .ok (mkJson 200 "[]")
+  if cleanPath.startsWith "/api/providers/" || cleanPath == "/api/antigravity-models" then
+    if cleanPath != "/api/providers/backend-models" then
+      let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
+      if let some (pCode, pCtype, pBody) ← dispatchProviderAndAiRoute
+          pHub st.store st.cfg.workingDir st.cfg.port st.pacingTracker? st.proxyCooldownsRef
+          req.method cleanPath rawTarget req.bodySlice.toByteArray
+          caller.userId (caller.role == "admin") caller.isLegacyUnscoped then
+        return .ok { status := pCode, contentType := pCtype, corsOrigin? := reqOrigin?, body := pBody }
 
   if req.method == "GET" && cleanPath == "/api/providers/backend-models" then
     let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
@@ -4050,10 +4106,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             opencodeModels := opencodeModels.push (mkOpt s!"{p.id}/{mid}" s!"{p.name} — {mlbl}" "")
     let mut agyModels : Array String := #[]
     if isAdm then
-      if let some binPath ← OrbBin.ClaudeControl.resolveHarnessBinary? "agy" none then
-        if let .ok pairs ← OrbBin.ClaudeControl.probeAntigravityModels binPath then
-          for (mId, mLbl) in pairs do
-            agyModels := agyModels.push (mkOpt mId mLbl "")
+      let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
+      let pairs ← getCachedAntigravityModels pHub false
+      for (mId, mLbl) in pairs do
+        agyModels := agyModels.push (mkOpt mId mLbl "")
     let vibeModels : Array String := #[
       mkOpt "mistral/mistral-vibe-cli-latest" "Mistral Vibe" "Native Mistral Vibe CLI"
     ]
@@ -4071,6 +4127,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
 
   -- Model Routing Controls (`"/api/model-routing"` / `/api/model-routing/chains`)
   if cleanPath.startsWith "/api/model-routing" then
+    let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
+    if let some (mCode, mCtype, mBody) ← dispatchProviderAndAiRoute
+        pHub st.store st.cfg.workingDir st.cfg.port st.pacingTracker? st.proxyCooldownsRef
+        req.method cleanPath rawTarget req.bodySlice.toByteArray
+        caller.userId (caller.role == "admin") caller.isLegacyUnscoped then
+      return .ok { status := mCode, contentType := mCtype, corsOrigin? := reqOrigin?, body := mBody }
     if req.method != "GET" && !caller.isLegacyUnscoped then
       if let some (cCode, cBody) := requireAdminPrincipal caller then
         return .ok (mkJson cCode cBody)
@@ -4433,6 +4495,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | .ok (.ok rec) =>
         return .ok (mkJson 200 s!"\{\"ok\":true,\"id\":{jsonEscape rec.messageId},\"phase\":{rec.phase.toNat}}")
 
+  if cleanPath.startsWith "/api/control/queue/" && cleanPath.endsWith "/send-now" then
+    let sHub ← match st.systemHub? with | some h => pure h | none => newSystemRuntimeHub
+    if let some (sCode, sCtype, sBody) ← dispatchResourcesAndSystemRoute
+        sHub st.store st.cfg.workingDir st.cfg.libraryRemote st.cfg.githubClientId
+        st.bunkerStateRef? st.managedStore? st.relayHub? st.broadcastHub?
+        req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
+        caller.userId caller.username st.bootstrapAdminId
+        (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped then
+      return .ok { status := sCode, contentType := sCtype, corsOrigin? := reqOrigin?, body := sBody }
+
   if let some params := matchRoutePattern? "/api/control/queue/:id" rawTarget then
     if req.method == "PATCH" then
       let messageId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
@@ -4532,6 +4604,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         return .ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}")
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
         return .ok (mkJson cCode cBody)
+      if (← isCloudMission st.store mid) then
+        let cHub ← match st.cloudHub? with | some h => pure h | none => newCloudRuntimeHub
+        let (fCode, fCtype, fBody) ← handleCloudFollowUp cHub st.store st.broadcastHub? st.cfg.port mid bodyJv
+        return .ok { status := fCode, contentType := fCtype, corsOrigin? := reqOrigin?, body := fBody }
     let defMsgId ← nextUniqueId st "msg" nowEpochSec
     let msgId := (bodyJv.fieldStr? "client_message_id").getD defMsgId
     let mission? ← match mid? with
@@ -5227,6 +5303,21 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       caller.userId st.bootstrapAdminId isAdmCaller caller.isLegacyUnscoped nowIsoDisp then
     return .ok { status := pCode, contentType := pCtype, corsOrigin? := reqOrigin?, body := pBody }
 
+  let cHubFallback ← match st.cloudHub? with | some h => pure h | none => newCloudRuntimeHub
+  if let some (cCode, cCtype, cBody) ← dispatchCloudHttpRoute
+      cHubFallback st.store st.broadcastHub? st.cfg.port
+      req.method cleanPath rawTarget req.bodySlice.toByteArray
+      caller.userId caller.username st.bootstrapAdminId isAdmCaller caller.isLegacyUnscoped then
+    return .ok { status := cCode, contentType := cCtype, corsOrigin? := reqOrigin?, body := cBody }
+
+  let sHubFallback ← match st.systemHub? with | some h => pure h | none => newSystemRuntimeHub
+  if let some (sysCode, sysCtype, sysBody) ← dispatchResourcesAndSystemRoute
+      sHubFallback st.store st.cfg.workingDir st.cfg.libraryRemote st.cfg.githubClientId
+      st.bunkerStateRef? st.managedStore? st.relayHub? st.broadcastHub?
+      req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
+      caller.userId caller.username st.bootstrapAdminId isAdmCaller caller.isLegacyUnscoped then
+    return .ok { status := sysCode, contentType := sysCtype, corsOrigin? := reqOrigin?, body := sysBody }
+
   return .ok (mkJson 404 s!"\{\"error\":\"not_found\",\"path\":{jsonEscape cleanPath}}")
 
 /-- Dispatch a parsed `HttpRequest` against `CoreAppState` (`routes` capability parity:
@@ -5911,6 +6002,9 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let pendingControlCallsRef ← IO.mkRef (#[] : Array (String × String))
     let broadcastHub ← newBroadcastHub
     let relayHub ← newRelayHub (if maxRequests?.isSome then 0 else 25000)
+    let cloudHub ← newCloudRuntimeHub
+    let providerHub ← newProviderRuntimeHub
+    let systemHub ← newSystemRuntimeHub
     let appState : CoreAppState := {
       cfg := cfg
       store := store
@@ -5935,7 +6029,12 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       pendingControlCallsRef? := some pendingControlCallsRef
       broadcastHub? := some broadcastHub
       relayHub? := some relayHub
+      cloudHub? := some cloudHub
+      providerHub? := some providerHub
+      systemHub? := some systemHub
     }
+    if maxRequests?.isNone then
+      startCloudSupervisorLoop cloudHub store (some broadcastHub) cfg.port
     let bindHost := if cfg.host == "localhost" then "127.0.0.1" else cfg.host
     let .ok (listenFd, boundPort) ← tcpListen bindHost cfg.port 128
       | do
