@@ -121,7 +121,11 @@ async function readRecordWithMigration<T>(key: string): Promise<T | undefined> {
         return JSON.parse(raw) as T;
       }
     } catch (err) {
-      if (isUnsupportedDraftCommandError(err)) unsupportedDraftInvoke = invoke;
+      if (isUnsupportedDraftCommandError(err)) {
+        unsupportedDraftInvoke = invoke;
+      } else if (key.startsWith("thread:")) {
+        throw err;
+      }
     }
   }
   const legacy = await idbGet<T>(key);

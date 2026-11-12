@@ -263,3 +263,37 @@ it("serializes overlapping native draft autosaves, clears, and follow-ups per ke
   resetComposerDraftsMemoryForTest();
   await expect(readComposerDraft("m:overlap")).resolves.toEqual({ text: "follow up", images: [] });
 });
+
+it("propagates transient native read errors for durable side-thread records instead of returning undefined", async () => {
+  const sqlDrafts = new Map<string, string>();
+  let failNextGet = false;
+
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        const key = String(args?.key ?? "");
+        if (cmd === "ui_draft_get") {
+          if (failNextGet) {
+            failNextGet = false;
+            throw new Error("Transient IPC timeout");
+          }
+          return sqlDrafts.get(key) ?? null;
+        }
+        if (cmd === "ui_draft_put") {
+          sqlDrafts.set(key, String(args?.raw ?? ""));
+          return null;
+        }
+        return null;
+      },
+    },
+  };
+
+  await saveSideThread("orb-local-message-queue:v1:ep", [{ id: "m-1", text: "queued" }]);
+  resetComposerDraftsMemoryForTest();
+
+  failNextGet = true;
+  await expect(readSideThread("orb-local-message-queue:v1:ep")).rejects.toThrow("Transient IPC timeout");
+  await expect(readSideThread("orb-local-message-queue:v1:ep")).resolves.toEqual([
+    { id: "m-1", text: "queued" },
+  ]);
+});

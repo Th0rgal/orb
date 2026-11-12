@@ -5069,13 +5069,15 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     | some stateDir, some dbPath =>
       uiDraftsMutex.atomically do
         match ← ensurePrivateSqliteHandle uiDraftsDbPoolRef stateDir dbPath uiDraftsSchemaSql with
-        | .error _ => return .ok .null
+        | .error e => return .error e
         | .ok db =>
-          if let .ok rows ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
-              "SELECT value_json FROM ui_drafts WHERE scope_key = ?1;" #[key] then
+          match ← OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+              "SELECT value_json FROM ui_drafts WHERE scope_key = ?1;" #[key] with
+          | .error e => return .error e
+          | .ok rows =>
             if rows.size ≥ 2 && rows[1]!.size ≥ 1 then
               return .ok (.str rows[1]![0]!)
-          return .ok .null
+            return .ok .null
     | _, _ => return .ok .null
   | "ui_draft_put" =>
     let key := (args.fieldStr? "key").getD ""
