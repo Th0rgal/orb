@@ -5,7 +5,7 @@ import * as btwMod from "./btwAgent";
 import {askBtwAgent,watchBtw,stopBtw,btwSession,btwActivities,btwItems,btwThoughts,isSyntheticRemoteAssistantNote,dropBtwQueuedCursor} from "./btwAgent";
 import {isMultiplexSyncActive, type StreamEvent} from "./stream";
 import {attachMissionStream} from "./missionCache";
-import {btwConfig} from "./btwSettings";
+import {btwConfig} from "./sideQuestionStorage";
 import {AgentActivity} from "./AgentActivity";
 import { Composer, floatingDock } from "./composer/Composer";
 import type { DraftImage } from "./imageAttachments";
