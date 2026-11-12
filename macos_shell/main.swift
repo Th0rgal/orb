@@ -324,6 +324,10 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     private var isProgrammaticSelect = false
     private var lastSelectionDispatchedRowId: String?
     private var paletteQueryGeneration: UInt64 = 0
+    private var sidebarReqGeneration: UInt64 = 0
+    private var minScopeSwitchGeneration: UInt64 = 0
+    private var activeSidebarScope: String = ""
+    private var activeSidebarScopeGeneration: UInt64 = 0
     private var lastAppliedViewRevision: UInt64 = 0
 
     init(port: Int, token: String, webView: OrbWebView, hostWindow: NSWindow, frame: NSRect) {
@@ -553,13 +557,32 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         }
     }
 
+    func acceptSidebarResponse(reqGen: UInt64, scope: String, revision: UInt64?) -> Bool {
+        if scope != activeSidebarScope {
+            guard reqGen >= max(activeSidebarScopeGeneration, minScopeSwitchGeneration) else { return false }
+            activeSidebarScope = scope
+            activeSidebarScopeGeneration = reqGen
+            lastAppliedViewRevision = revision ?? 0
+            return true
+        }
+        if let rev = revision {
+            guard rev >= lastAppliedViewRevision else { return false }
+            lastAppliedViewRevision = rev
+        }
+        if reqGen > activeSidebarScopeGeneration {
+            activeSidebarScopeGeneration = reqGen
+        }
+        return true
+    }
+
     func refreshSidebar() {
+        sidebarReqGeneration &+= 1
+        let gen = sidebarReqGeneration
         callLocald(command: "native_chrome_get_rows", args: [:]) { [weak self] res in
             guard let self, let raw = res?["rows"] as? [[String: Any]] else { return }
-            if let rev = (res?["revision"] as? NSNumber)?.uint64Value {
-                guard rev >= self.lastAppliedViewRevision else { return }
-                self.lastAppliedViewRevision = rev
-            }
+            let scope = (res?["scope"] as? String) ?? ""
+            let rev = (res?["revision"] as? NSNumber)?.uint64Value
+            guard self.acceptSidebarResponse(reqGen: gen, scope: scope, revision: rev) else { return }
             self.applyRowsPayload(raw)
         }
     }
@@ -606,7 +629,10 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
                 shouldRefresh = true
             }
         }
-        if shouldRefresh { refreshSidebar() }
+        if shouldRefresh {
+            minScopeSwitchGeneration = sidebarReqGeneration &+ 1
+            refreshSidebar()
+        }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
@@ -634,13 +660,14 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     }
 
     private func toggleExpand(rowId: String) {
+        sidebarReqGeneration &+= 1
+        let gen = sidebarReqGeneration
         callLocald(command: "native_chrome_toggle_expand", args: ["row_id": rowId]) { [weak self] res in
             guard let self else { return }
             if let raw = res?["rows"] as? [[String: Any]] {
-                if let rev = (res?["revision"] as? NSNumber)?.uint64Value {
-                    guard rev >= self.lastAppliedViewRevision else { return }
-                    self.lastAppliedViewRevision = rev
-                }
+                let scope = (res?["scope"] as? String) ?? ""
+                let rev = (res?["revision"] as? NSNumber)?.uint64Value
+                guard self.acceptSidebarResponse(reqGen: gen, scope: scope, revision: rev) else { return }
                 self.applyRowsPayload(raw)
             } else {
                 self.refreshSidebar()
@@ -1989,6 +2016,13 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         ])
         guard testChrome.sidebarTable.numberOfRows == 2, testChrome.sidebarTable.selectedRow == 1 else {
             fputs("self-test failed: OrbNativeChromeController incremental remove mismatch\n", stderr)
+            exit(1)
+        }
+        guard testChrome.acceptSidebarResponse(reqGen: 1, scope: "scope:a", revision: 50),
+              !testChrome.acceptSidebarResponse(reqGen: 2, scope: "scope:a", revision: 49),
+              testChrome.acceptSidebarResponse(reqGen: 3, scope: "scope:b", revision: 2),
+              !testChrome.acceptSidebarResponse(reqGen: 2, scope: "scope:a", revision: 99) else {
+            fputs("self-test failed: OrbNativeChromeController per-scope revision fencing mismatch\n", stderr)
             exit(1)
         }
         testChrome.setSidebarOpen(false)

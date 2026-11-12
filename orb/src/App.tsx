@@ -1097,9 +1097,15 @@ export default function App() {
             const clean = rows.filter((m) => !isMissionDeleting(m.id));
             setProjectMissions((cur) => {
               const existing = cur[slug] ?? [];
-              if (partial) return { ...cur, [slug]: mergeById(existing, clean) };
-              const cleanIds = new Set(clean.map((m) => m.id));
-              return { ...cur, [slug]: mergeById(existing.filter((m) => cleanIds.has(m.id)), clean) };
+              if (partial) {
+                const freshIds = new Set(clean.map((m) => m.id));
+                const union = [
+                  ...clean,
+                  ...existing.filter((m) => !freshIds.has(m.id) && !isMissionDeleting(m.id)),
+                ];
+                return { ...cur, [slug]: mergeById(existing, union) };
+              }
+              return { ...cur, [slug]: mergeById(existing, clean) };
             });
             if (partial) {
               scheduleHydrateRetry(slug, connVer);

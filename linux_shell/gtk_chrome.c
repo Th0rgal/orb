@@ -23,13 +23,17 @@ char *orb_json_escape_string(const char *s) {
 typedef struct {
     GtkWidget *win, *wv, *paned, *sb_box, *sb_list, *pal_pop, *pal_entry, *pal_list;
     JSCContext *jsc; GIOChannel *sse_ch; guint sse_src, retry_src; GString *sse_buf;
-    unsigned port; char token[128]; guint64 pal_gen, sb_rev; int sb_inflight, sb_dirty, closed;
+    unsigned port; char token[128], *sb_scope; guint64 pal_gen, sb_req_gen, sb_scope_gen, sb_min_gen, sb_rev; int sb_inflight, sb_dirty, closed;
 } OrbGtkChrome;
 typedef struct { OrbGtkChrome *c; unsigned port; char token[128], *body, *resp; int kind; guint64 gen; } RpcJob;
+static int accept_sb_resp(char **cur_sc, guint64 *sc_gen, guint64 min_gen, guint64 *cur_rv, guint64 rg, const char *sc, double rv) {
+    const char *cs = *cur_sc ? *cur_sc : ""; guint64 gate = *sc_gen > min_gen ? *sc_gen : min_gen;
+    if (strcmp(sc, cs) != 0) { if (rg < gate) { return 0; } g_free(*cur_sc); *cur_sc = g_strdup(sc); *sc_gen = rg; *cur_rv = rv >= 0.0 ? (guint64)rv : 0; return 1; }
+    if (rv >= 0.0) { if ((guint64)rv < *cur_rv) { return 0; } *cur_rv = (guint64)rv; } if (rg > *sc_gen) { *sc_gen = rg; } return 1;
+}
 static int connect_loopback(unsigned port, int nonblock) {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | (nonblock ? SOCK_NONBLOCK : 0), 0); if (fd < 0) { return -1; }
-    struct timeval tv = { .tv_sec = 0, .tv_usec = 350000 };
-    if (!nonblock) { setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)); }
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 350000 }; if (!nonblock) { setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)); }
     struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) }; sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     return (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0 && (!nonblock || errno != EINPROGRESS)) ? (close(fd), -1) : fd;
 }
@@ -47,11 +51,9 @@ static void eval_wv_target(OrbGtkChrome *c, const char *kind, const char *target
     if (!c->wv || !target || !*target) { return; }
     char *lit = orb_json_escape_string(target); if (!lit) { return; }
     const char *fn = (kind && strcmp(kind, "mission") == 0) ? "__ORB_SELECT_MISSION__" : "__ORB_NATIVE_NAV__";
-    char js[4600]; snprintf(js, sizeof(js), "window.%s&&window.%s(%s);", fn, fn, lit); free(lit);
-    webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(c->wv), js, -1, NULL, NULL, NULL, NULL, NULL);
+    char js[4600]; snprintf(js, sizeof(js), "window.%s&&window.%s(%s);", fn, fn, lit); free(lit); webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(c->wv), js, -1, NULL, NULL, NULL, NULL, NULL);
 }
-static void refresh_sidebar_rows(OrbGtkChrome *c);
-static void populate_from_array(OrbGtkChrome *c, GtkWidget *lb, JSCValue *arr, int pal);
+static void refresh_sidebar_rows(OrbGtkChrome *c); static void populate_from_array(OrbGtkChrome *c, GtkWidget *lb, JSCValue *arr, int pal);
 static gboolean rpc_done(gpointer p) {
     RpcJob *j = (RpcJob *)p; OrbGtkChrome *c = j->c;
     if (!c->closed) {
@@ -64,10 +66,10 @@ static gboolean rpc_done(gpointer p) {
                 GtkListBoxRow *first = gtk_list_box_get_row_at_index(GTK_LIST_BOX(c->pal_list), 0); if (first) { gtk_list_box_select_row(GTK_LIST_BOX(c->pal_list), first); }
                 if (items) { g_object_unref(items); }
             } else if (j->kind != 1) {
-                JSCValue *rows = jsc_value_object_get_property(res, "rows"); double rv = jv_num(res, "revision");
-                if (rows && jsc_value_is_array(rows)) { if (rv < 0.0 || (guint64)rv >= c->sb_rev) { if (rv >= 0.0) { c->sb_rev = (guint64)rv; } populate_from_array(c, c->sb_list, rows, 0); } }
+                JSCValue *rows = jsc_value_object_get_property(res, "rows"); char *sc = jv_str(res, "scope"); double rv = jv_num(res, "revision");
+                if (rows && jsc_value_is_array(rows)) { if (accept_sb_resp(&c->sb_scope, &c->sb_scope_gen, c->sb_min_gen, &c->sb_rev, j->gen, sc, rv)) { populate_from_array(c, c->sb_list, rows, 0); } }
                 else if (j->kind == 2) { refresh_sidebar_rows(c); }
-                if (rows) { g_object_unref(rows); }
+                g_free(sc); if (rows) { g_object_unref(rows); }
             }
         } else if (j->kind == 2) { refresh_sidebar_rows(c); }
         if (res) { g_object_unref(res); }
@@ -95,7 +97,7 @@ static void rpc_call_async(OrbGtkChrome *c, const char *body, int kind, guint64 
     RpcJob *j = g_new0(RpcJob, 1); j->c = c; j->port = c->port; snprintf(j->token, sizeof(j->token), "%s", c->token); j->body = g_strdup(body); j->kind = kind; j->gen = gen;
     g_thread_unref(g_thread_new("orb-rpc", rpc_worker, j));
 }
-static void toggle_row_expand(OrbGtkChrome *c, const char *rid) { char *lit = rid ? orb_json_escape_string(rid) : NULL; if (!lit) { return; } char req[1024]; snprintf(req, sizeof(req), "{\"command\":\"native_chrome_toggle_expand\",\"args\":{\"row_id\":%s}}", lit); free(lit); rpc_call_async(c, req, 2, 0); }
+static void toggle_row_expand(OrbGtkChrome *c, const char *rid) { char *lit = rid ? orb_json_escape_string(rid) : NULL; if (!lit) { return; } char req[1024]; snprintf(req, sizeof(req), "{\"command\":\"native_chrome_toggle_expand\",\"args\":{\"row_id\":%s}}", lit); free(lit); rpc_call_async(c, req, 2, ++c->sb_req_gen); }
 static void on_chevron_clicked(GtkButton *b, gpointer ud) { toggle_row_expand((OrbGtkChrome *)ud, g_object_get_data(G_OBJECT(b), "orb-row-id")); }
 static GtkWidget *make_row_widget(OrbGtkChrome *c, JSCValue *it, int pal, char *sig) {
     char *rid = jv_str(it, pal ? "id" : "row_id"), *kind = jv_str(it, "kind"), *title = jv_str(it, "title"), *sub = jv_str(it, "subtitle"), *target = jv_str(it, "target"), *sc = jv_str(it, "shortcut");
@@ -143,7 +145,7 @@ static void populate_from_array(OrbGtkChrome *c, GtkWidget *lb, JSCValue *arr, i
     }
     GtkListBoxRow *tail; while ((tail = gtk_list_box_get_row_at_index(GTK_LIST_BOX(lb), out)) != NULL) { gtk_widget_destroy(GTK_WIDGET(tail)); }
 }
-static void refresh_sidebar_rows(OrbGtkChrome *c) { if (c->sb_inflight) { c->sb_dirty = 1; return; } c->sb_inflight = 1; rpc_call_async(c, "{\"command\":\"native_chrome_get_rows\",\"args\":{}}", 0, 0); }
+static void refresh_sidebar_rows(OrbGtkChrome *c) { if (c->sb_inflight) { c->sb_dirty = 1; return; } c->sb_inflight = 1; rpc_call_async(c, "{\"command\":\"native_chrome_get_rows\",\"args\":{}}", 0, ++c->sb_req_gen); }
 static void refresh_palette_items(OrbGtkChrome *c, const char *q) { char *lit = orb_json_escape_string(q ? q : ""); if (!lit) { return; } char req[1200]; snprintf(req, sizeof(req), "{\"command\":\"native_chrome_palette_query\",\"args\":{\"query\":%s,\"limit\":24}}", lit); free(lit); rpc_call_async(c, req, 1, ++c->pal_gen); }
 static void on_sb_row_activated(GtkListBox *lb, GtkListBoxRow *r, gpointer ud) {
     (void)lb; OrbGtkChrome *c = (OrbGtkChrome *)ud; if (!r) { return; }
@@ -173,7 +175,7 @@ static gboolean on_sse_io(GIOChannel *ch, GIOCondition cond, gpointer ud) {
     char buf[4096]; ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0); if (n <= 0) { if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { return TRUE; } goto drop; }
     g_string_append_len(c->sse_buf, buf, n); char *p; int hit = 0;
     while ((p = strstr(c->sse_buf->str, "\n\n")) != NULL) { size_t fl = (size_t)(p - c->sse_buf->str); if (g_strstr_len(c->sse_buf->str, (gssize)fl, "native_chrome_rows_changed")) { hit = 1; } g_string_erase(c->sse_buf, 0, (gssize)(fl + 2)); }
-    if (hit) { refresh_sidebar_rows(c); } return TRUE;
+    if (hit) { c->sb_min_gen = c->sb_req_gen + 1; refresh_sidebar_rows(c); } return TRUE;
 drop: c->sse_src = 0; g_io_channel_unref(c->sse_ch); c->sse_ch = NULL; close(fd); if (!c->retry_src) { c->retry_src = g_timeout_add(900, start_sse_watch, c); } return FALSE;
 }
 static gboolean start_sse_watch(gpointer ud) {
@@ -206,13 +208,13 @@ GtkWidget *orb_gtk_chrome_wrap(GtkWidget *win, GtkWidget *wv, WebKitUserContentM
 int orb_gtk_chrome_self_test(void) {
     char *esc = orb_json_escape_string("m:\"1\""); int ok = esc && strcmp(esc, "\"m:\\\"1\\\"\"") == 0; free(esc);
 #if defined(ORB_HAS_WEBKITGTK)
-    JSCContext *ctx = jsc_context_new();
+    JSCContext *ctx = jsc_context_new(); char *sc = NULL; guint64 sg = 0, rv = 0;
     JSCValue *a = jsc_value_new_from_json(ctx, "{\"row_id\":\"nav:inbox\",\"kind\":\"nav\",\"title\":\"Inbox\",\"selected\":false,\"badge\":1}");
     JSCValue *b = jsc_value_new_from_json(ctx, "{\"row_id\":\"nav:inbox\",\"kind\":\"nav\",\"title\":\"Inbox\",\"selected\":true,\"badge\":1}");
     JSCValue *d = jsc_value_new_from_json(ctx, "{\"row_id\":\"nav:inbox\",\"kind\":\"nav\",\"title\":\"Inbox\",\"selected\":true,\"badge\":2}");
     char *sa = a ? row_item_sig(a, 0) : NULL, *sb = b ? row_item_sig(b, 0) : NULL, *sd = d ? row_item_sig(d, 0) : NULL;
-    ok = ok && sa && sb && sd && strcmp(sa, sb) == 0 && strcmp(sa, sd) != 0;
-    g_free(sa); g_free(sb); g_free(sd); if (a) { g_object_unref(a); } if (b) { g_object_unref(b); } if (d) { g_object_unref(d); } g_object_unref(ctx);
+    ok = ok && sa && sb && sd && strcmp(sa, sb) == 0 && strcmp(sa, sd) != 0 && accept_sb_resp(&sc, &sg, 0, &rv, 1, "s:a", 50) && !accept_sb_resp(&sc, &sg, 0, &rv, 2, "s:a", 49) && accept_sb_resp(&sc, &sg, 3, &rv, 3, "s:b", 2) && !accept_sb_resp(&sc, &sg, 3, &rv, 2, "s:a", 99);
+    g_free(sc); g_free(sa); g_free(sb); g_free(sd); if (a) { g_object_unref(a); } if (b) { g_object_unref(b); } if (d) { g_object_unref(d); } g_object_unref(ctx);
 #endif
     return ok;
 }
