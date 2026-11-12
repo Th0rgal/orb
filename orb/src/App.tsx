@@ -9,7 +9,7 @@ import {
 import { markUnfocusedBtwDirty, noteBtwPresentationHint } from "./btwAgent";
 import { lookupMissionById, resetMissionLookup } from "./missionLookup";
 import { movedMission, withMovedMissions } from "./moves";
-import { applyServerPlacementEvent, moveMission } from "./missionMove";
+import { applyServerPlacementEvent, moveMissions, planMissionMoves } from "./missionMove";
 import { MissionLookupContext } from "./orchestrationModel";
 import { renamedTitle, renameOptimistically, withRenamedTitles } from "./renames";
 import { readString, writeString } from "./storage";
@@ -1082,11 +1082,14 @@ export default function App() {
         if (!arg || arg === (mission.project ?? "")) return false;
         // Same confirmation as the HTML sidebar (`tree/moves.ts`): a conversation holding secret
         // grants or requests asks whether to revoke or keep them before it changes project.
-        const move = (policy: ApprovalTransferPolicy) => moveMission(id, arg, "", mission.project ?? null, false, policy).then(settle, error => {
-          if (error instanceof ApprovalTransferConfirmationRequiredError) {
-            setNativeApprovalPrompt({ error, confirm: chosen => void move(chosen), cancel: () => {} });
-          } else fail("Couldn’t move the conversation")(error);
-        });
+        // The shared family planner (as `tree/moves.ts`) also carries callback-only children.
+        const move = async (policy: ApprovalTransferPolicy) => {
+          const known = [...missions(), ...completedMissions(), ...Object.values(projectMissions()).flat(), ...nativeArchived()];
+          const failures = await moveMissions(planMissionMoves([id], arg, "", known), arg, { approvalPolicy: policy });
+          const approval = failures.find(f => f.error instanceof ApprovalTransferConfirmationRequiredError)?.error as ApprovalTransferConfirmationRequiredError | undefined;
+          if (approval) setNativeApprovalPrompt({ error: approval, confirm: chosen => void move(chosen), cancel: () => {} });
+          else settle(); // other failures were already returned to place with a toast (moves.ts)
+        };
         void move("check");
         return true;
       }
@@ -1688,6 +1691,7 @@ export default function App() {
         const removed = new Set(ids.flatMap(id => [`m:${id}`, `ms:${id}`, `rm:${id}`]));
         batch(() => {
           for (const id of ids) keepAlivePool.evictMission(id);
+          setNativeArchived(rows => rows.some(m => idSet.has(m.id)) ? rows.filter(m => !idSet.has(m.id)) : rows);
           setMissions(rows => rows.filter(m => !idSet.has(m.id)));
           setCompletedMissions(rows => rows.filter(m => !idSet.has(m.id)));
           setProjectMissions(prev => {
