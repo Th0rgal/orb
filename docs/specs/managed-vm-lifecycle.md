@@ -67,6 +67,14 @@ Bitwarden vault cannot silently activate the reconciler and reap production's
 boundary. Its Boat adapter is checked with injected transport and sleep functions
 by `ManagedProviderTests.run` in the Core self-test; these tests rent no machines.
 This boundary is separate from admission, persistence, bootstrap and relay readiness.
+`ManagedProviderRegistry.lean` owns the table of implemented providers; each adapter
+and its declaration live in a separate file (`ManagedProviderBoat.lean`, etc.).
+Declarations own sizes, integer milli-cent hourly prices, bootstrap mode, readiness
+deadline and stop/resume, snapshot and extend capabilities. Resolution and quoting
+use that same table. A known but unimplemented provider is not usable and must not
+advertise capabilities. Catalog metadata is not evidence of live availability or
+relay readiness. The registry refactor preserves Boat's size, quote and wire contracts;
+provider contract tests check both registry lookup and adapter requests.
 
 - Creation and fork require a stable idempotency key before any provider call.
   Boat receives `type`, `name`, `ttlSeconds`, `noEnv: true` and optional `from`

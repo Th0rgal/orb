@@ -1,4 +1,4 @@
-import OrbCore.ManagedProvider
+import OrbCore.ManagedProviderRegistry
 
 namespace OrbCore.ManagedProviderTests
 
@@ -9,6 +9,26 @@ private def check (condition : Bool) (label : String) : IO Unit := do
 
 /-- Deterministic provider contract replay; never opens sockets or rents machines. -/
 def run : IO Unit := do
+  let some entry := declaration? "boat" | throw (IO.userError "Boat missing from registry")
+  check (entry.name == "boat" && entry.secretName == "BOAT_API_KEY" &&
+    entry.readinessDeadlineSecs == 360 && entry.bootstrapMode == .execSystemd &&
+    entry.supportsSnapshots && entry.supportsStopResume && entry.supportsExtend &&
+    entry.sizes.size == 4) "provider-owned capabilities and sizes"
+  check ((declaration? "unknown").isNone && (declaration? "colab").isNone &&
+    !(quote "colab" "small" 60).isOk) "unimplemented registry entries fail closed"
+  for profile in entry.sizes do
+    for ttl in [5:721] do
+      let actual := (quote "boat" profile.name ttl.toUInt64).toOption
+      let expected := (profile.milliCentsPerHour.toNat * ttl + 59999) / 60000
+      check (actual == some expected.toUInt64) "registry lease quote matches catalog price"
+  let unsupported := JVal.obj (catalogFields "colab")
+  check (unsupported.fieldBool? "implemented" == some false &&
+    unsupported.fieldBool? "supports_snapshots" == some false &&
+    unsupported.fieldBool? "supports_free_stop" == some false) "no synthetic capabilities"
+  let catalog := JVal.obj (catalogFields "boat")
+  let some sizes := catalog.fieldArr? "sizes" | throw (IO.userError "missing size catalog")
+  check (sizes.size == 4 && sizes[0]!.fieldNat? "cpu" == some 2 &&
+    (sizes[0]!.field? "usd_per_hour").map renderCompact == some "0.01800") "catalog resources and exact hourly USD"
   let requests ← IO.mkRef (#[] : Array Request)
   let replies ← IO.mkRef (#[] : Array (Nat × JVal))
   let transport : Transport := fun req => do

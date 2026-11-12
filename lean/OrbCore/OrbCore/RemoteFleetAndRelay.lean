@@ -759,10 +759,17 @@ def boatApiBaseUrl : IO String := do
 
 /-- Resolve credentials only inside Core; unsupported providers never create fake rows. -/
 def resolveManagedProvider (dataRoot provider : String) : IO (Except String ManagedProvider.Provider) := do
-  if canonicalizeProvider provider != "boat" then return .error "managed_provider_not_implemented"
-  let some key ← getBoatApiKey? dataRoot dataRoot
-    | return .error "boat_api_key_not_configured"
-  return .ok (ManagedProvider.boat (ManagedProvider.httpTransport (← boatApiBaseUrl) key))
+  let prov := canonicalizeProvider provider
+  let some entry := ManagedProvider.declaration? prov
+    | return .error "managed_provider_not_implemented"
+  let key? ← if prov == "boat" then getBoatApiKey? dataRoot dataRoot
+    else do
+      match ← openProviderSecret dataRoot prov false true with
+      | .ok key => pure (some key)
+      | .error _ => pure none
+  let some key := key? | return .error (prov ++ "_api_key_not_configured")
+  let base := trimTrailingSlashes (((← IO.getEnv entry.apiBaseEnv).getD entry.defaultApiBase).trimAscii.toString)
+  return .ok (entry.create (ManagedProvider.httpTransport base key))
 
 def loadManagedBootstrapConfig : IO (Except String ManagedProvisioning.BootstrapConfig) := do
   let coreUrl := (← IO.getEnv "SANDBOXED_MANAGED_CORE_URL").getD
@@ -776,10 +783,12 @@ def loadManagedBootstrapConfig : IO (Except String ManagedProvisioning.Bootstrap
 
 def quoteManagedSpawnCents (provider size : String) (ttlMinutes : UInt64)
     (override? : Option ManagedProvider.Provider := none) : Except String UInt64 := do
-  let quote ← if provider == "boat" then pure (ManagedProvider.boatQuoteCents size ttlMinutes)
-    else match override? with
-      | some p => if p.name == provider then pure (p.quoteCents size ttlMinutes) else throw "managed_provider_unavailable"
-      | none => throw "managed_provider_not_implemented"
+  let quote := match ManagedProvider.declaration? provider with
+    | some entry => entry.quoteCents size ttlMinutes
+    | none => match override? with
+      | some p => if p.name == provider then p.quoteCents size ttlMinutes
+        else .error { code := "managed_provider_unavailable" }
+      | none => .error { code := "managed_provider_not_implemented" }
   match quote with
   | .ok cents => return cents
   | .error e => throw e.code

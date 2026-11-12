@@ -9,6 +9,7 @@ import OrbBin.PosixExt
 import OrbNetLeaf.Crypto
 import OrbCore.Spec
 import OrbCore.Store
+import OrbCore.ManagedProviderRegistry
 
 namespace OrbCore.Managed
 
@@ -1046,16 +1047,14 @@ def renderManagedProvidersJson
     let globallyEnabled := st.enabled && (if p == "boat" then st.boatEnabled else globallyConfigured)
     let userEnabled := isUserManagedProviderEnabled userPrefs p
     let effectiveEnabled := globallyEnabled && userEnabled
-    let cfgStr := if globallyConfigured then "true" else "false"
-    let globStr := if globallyEnabled then "true" else "false"
-    let usrStr := if userEnabled then "true" else "false"
-    let effStr := if effectiveEnabled then "true" else "false"
-    let credFields :=
-      if isAdmin && globallyConfigured then
-        ",\"credential_source\":\"settings\",\"key_hint\":\"••••\""
-      else
-        ",\"credential_source\":null,\"key_hint\":null"
-    s!"\{\"provider\":{jsonEscape p},\"display_name\":{jsonEscape (providerDisplayName p)},\"configured\":{cfgStr},\"enabled\":{effStr},\"globally_enabled\":{globStr},\"user_enabled\":{usrStr},\"effective_enabled\":{effStr}{credFields},\"supports_snapshots\":true,\"supports_free_stop\":true,\"sizes\":[]}"
+    OrbBin.Json.renderCompact (.obj (#[
+      ("provider", .str p), ("display_name", .str (providerDisplayName p)),
+      ("configured", .bool globallyConfigured), ("enabled", .bool effectiveEnabled),
+      ("globally_enabled", .bool globallyEnabled), ("user_enabled", .bool userEnabled),
+      ("effective_enabled", .bool effectiveEnabled),
+      ("credential_source", if isAdmin && globallyConfigured then .str "settings" else .null),
+      ("key_hint", if isAdmin && globallyConfigured then .str "••••" else .null)
+    ] ++ ManagedProvider.catalogFields p))
   "[" ++ String.intercalate "," items.toList ++ "]"
 
 def renderManagedMachineItemJson (m : ManagedMachine) : String :=

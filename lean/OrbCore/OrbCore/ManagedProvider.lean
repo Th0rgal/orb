@@ -68,6 +68,36 @@ structure Provider where
   writeFile : String → String → String → IO (Result Unit)
   exec : String → String → UInt32 → IO (Result JVal)
 
+/-- Integer milli-cents avoid floating point and conservatively reserve full leases. -/
+structure Size where
+  name : String
+  cpu : Nat
+  ramGb : Nat
+  diskGb : Nat
+  milliCentsPerHour : UInt64
+  deriving Repr, BEq
+
+inductive BootstrapMode where
+  | execSystemd
+  | execSupervised
+  deriving Repr, BEq
+
+/-- Provider-owned catalog data. Usability is resolved separately, never persisted here. -/
+structure Declaration where
+  name : String
+  displayName : String
+  secretName : String
+  apiBaseEnv : String
+  defaultApiBase : String
+  sizes : Array Size
+  readinessDeadlineSecs : UInt64
+  bootstrapMode : BootstrapMode
+  supportsStopResume : Bool
+  supportsSnapshots : Bool
+  supportsExtend : Bool
+  quoteCents : String → UInt64 → Result UInt64
+  create : Transport → Provider
+
 def httpTransport (baseUrl apiKey : String) : Transport := fun req => do
   if apiKey.trimAscii.toString.isEmpty then return .error { code := "provider_credential_missing" }
   let headers := if req.idempotencyKey.isEmpty then #[]
@@ -79,7 +109,7 @@ def httpTransport (baseUrl apiKey : String) : Transport := fun req => do
     if text.trimAscii.toString.isEmpty then return .ok (status, .null)
     return .error { status, code := "provider_invalid_json_outcome_uncertain" }
 
-private def call (transport : Transport) (req : Request) : IO (Result JVal) := do
+def call (transport : Transport) (req : Request) : IO (Result JVal) := do
   match ← transport req with
   | .error e => return .error e
   | .ok (status, body) =>
@@ -89,167 +119,8 @@ private def call (transport : Transport) (req : Request) : IO (Result JVal) := d
     let code := if raw == "stop_failed" then raw else "provider_http_error"
     return .error { status, code }
 
-private def callUnit (transport : Transport) (req : Request) : IO (Result Unit) := do
+def callUnit (transport : Transport) (req : Request) : IO (Result Unit) := do
   return (← call transport req).map (fun _ => ())
 
-private def machineFrom (body : JVal) : Result Machine := do
-  let sb := (body.field? "sandbox").getD body
-  let id := (sb.fieldStr? "id").getD ""
-  if id.trimAscii.toString.isEmpty then throw { code := "provider_missing_machine_id" }
-  return {
-    providerId := id
-    name := (sb.fieldStr? "name").getD ""
-    state := (sb.fieldStr? "state").getD "unknown"
-  }
-
-private def snapshotFrom (fallbackName : String) (body : JVal) : Result Snapshot := do
-  let snap := (body.field? "snapshot").getD body
-  let name := (snap.fieldStr? "name").getD fallbackName
-  if name.isEmpty then throw { code := "provider_missing_snapshot_name" }
-  return {
-    name
-    status := (snap.fieldStr? "status").getD "unknown"
-    sizeBytes := snap.fieldUInt64? "sizeBytes"
-  }
-
-def boatSpawnBody (spec : SpawnSpec) : JVal :=
-  let fields := #[("type", .str spec.size), ("name", .str spec.name),
-    ("ttlSeconds", JVal.uint64 spec.ttlSeconds), ("noEnv", .bool true)]
-  .obj (if spec.fromSnapshot.isEmpty || spec.fromSnapshot == "provider-default" then fields
-    else fields.push ("from", .str spec.fromSnapshot))
-
-private def boatCreate (transport : Transport) (path : String) (spec : SpawnSpec) : IO (Result Machine) := do
-  if spec.idempotencyKey.isEmpty then return .error { code := "provider_idempotency_key_required" }
-  match ← call transport {
-      method := "POST"
-      path
-      body := some (boatSpawnBody spec)
-      idempotencyKey := spec.idempotencyKey
-      timeoutMs := 120000
-    } with
-  | .error e => return .error e
-  | .ok body => return machineFrom body
-
-private def boatList (transport : Transport) : IO (Result (Array Machine)) := do
-  let mut out := #[]
-  let mut cursor := ""
-  let mut seen : Array String := #[]
-  for _ in [0:100] do
-    let path := "/sandboxes?limit=200" ++
-      (if cursor.isEmpty then "" else "&cursor=" ++ urlEncodeComponent cursor)
-    let body ← match ← call transport { method := "GET", path } with
-      | .error e => return .error e
-      | .ok v => pure v
-    let some items := body.fieldArr? "sandboxes"
-      | return .error { code := "provider_invalid_machine_list" }
-    for item in items do
-      match machineFrom item with
-      | .error e => return .error e
-      | .ok m => out := out.push m
-    cursor := (body.fieldStr? "nextCursor").orElse (fun _ => body.fieldStr? "cursor") |>.getD ""
-    if cursor.isEmpty then return .ok out
-    if seen.contains cursor then return .error { code := "provider_repeated_cursor" }
-    seen := seen.push cursor
-  -- Never return a partial fleet: reconciliation could destroy unseen machines.
-  return .error { code := "provider_pagination_limit" }
-
-private def sandboxPath (id : String) : String := "/sandboxes/" ++ urlEncodeComponent id
-
-private def boatStop (transport : Transport) (sleep : UInt32 → IO Unit) (id : String) : IO (Result Unit) := do
-  for attempt in [0:5] do
-    if attempt > 0 then sleep ((attempt * 3000).toUInt32)
-    match ← callUnit transport { method := "POST", path := sandboxPath id ++ "/stop", body := some (.obj #[]) } with
-    | .ok _ => return .ok ()
-    | .error e =>
-      if e.status == 404 || e.status == 409 then return .ok ()
-      if e.code != "stop_failed" || attempt == 4 then return .error e
-  return .error { code := "provider_stop_retry_exhausted" }
-
-private def boatDestroy (transport : Transport) (sleep : UInt32 → IO Unit) (id : String) : IO (Result Unit) := do
-  match ← callUnit transport { method := "DELETE", path := sandboxPath id } with
-  | .ok _ => return .ok ()
-  | .error e =>
-    if e.status == 404 then return .ok ()
-    return ← boatStop transport sleep id
-
-private def boatSnapshotList (transport : Transport) : IO (Result (Array Snapshot)) := do
-  match ← call transport { method := "GET", path := "/saved-snapshots" } with
-  | .error e => return .error e
-  | .ok body =>
-    let some items := (body.fieldArr? "snapshots").orElse (fun _ => body.asArr?)
-      | return .error { code := "provider_invalid_snapshot_list" }
-    let mut out := #[]
-    for item in items do
-      match snapshotFrom "" item with
-      | .error e => return .error e
-      | .ok snap => out := out.push snap
-    return .ok out
-
-/-- Conservative whole-cent reservation for the entire requested lease. Rates
-    are milli-cents/hour ($0.018, $0.036, $0.072, $0.20); never trust a caller's
-    estimated_cents. TTL is bounded before multiplication. -/
-def boatQuoteCents (size : String) (ttlMinutes : UInt64) : Result UInt64 := do
-  if ttlMinutes < 5 || ttlMinutes > 720 then throw { code := "provider_invalid_ttl" }
-  let rate ← match size with
-    | "small" => pure (1800 : UInt64)
-    | "default" => pure 3600
-    | "large" => pure 7200
-    | "xlarge" => pure 20000
-    | _ => throw { code := "provider_invalid_size" }
-  return (rate * ttlMinutes + 59999) / 60000
-
-/-- Boat resumes archived guests by forking, so the provider ID may change.
-    Core's durable managed ID and boot epoch must not be replaced with this ID. -/
-def boat (transport : Transport) (sleep : UInt32 → IO Unit := fun ms => do IO.sleep ms) : Provider := {
-  name := "boat"
-  readinessDeadlineSecs := 360
-  isReady := fun s => #["ready", "idle", "running", "busy"].contains s
-  isStopped := fun s => #["archived", "stopped", "deleted", "error", "archiving"].contains s
-  quoteCents := boatQuoteCents
-  spawn := boatCreate transport "/sandboxes"
-  get := fun id => do
-    match ← call transport { method := "GET", path := sandboxPath id } with
-    | .error e => return .error e
-    | .ok body => return machineFrom body
-  list := boatList transport
-  destroy := boatDestroy transport sleep
-  stop := boatStop transport sleep
-  resume := fun id spec => boatCreate transport (sandboxPath id ++ "/fork") { spec with fromSnapshot := "" }
-  fork := fun id spec => boatCreate transport (sandboxPath id ++ "/fork") { spec with fromSnapshot := "" }
-  extend := fun id ttl => callUnit transport {
-    method := "PATCH"
-    path := sandboxPath id
-    body := some (.obj #[("ttlSeconds", JVal.uint64 ttl)])
-  }
-  saveSnapshot := fun id name => callUnit transport {
-    method := "POST"
-    path := "/saved-snapshots"
-    body := some (.obj #[("sandboxId", .str id), ("name", .str name)])
-    timeoutMs := 60000
-  }
-  getSnapshot := fun name => do
-    match ← call transport { method := "GET", path := "/saved-snapshots/" ++ urlEncodeComponent name } with
-    | .error e => return .error e
-    | .ok body => return snapshotFrom name body
-  listSnapshots := boatSnapshotList transport
-  deleteSnapshot := fun name => do
-    match ← callUnit transport { method := "DELETE", path := "/saved-snapshots/" ++ urlEncodeComponent name } with
-    | .error e => if e.status == 404 then return .ok () else return .error e
-    | .ok _ => return .ok ()
-  -- Boat's file API is `PUT /sandboxes/:id/files`; a POST is rejected.
-  writeFile := fun id path content => callUnit transport {
-    method := "PUT"
-    path := sandboxPath id ++ "/files"
-    body := some (.obj #[("path", .str path), ("content", .str content)])
-  }
-  exec := fun id command timeoutSecs =>
-    let timeout := max 1 (min timeoutSecs 600)
-    call transport {
-      method := "POST"
-      path := sandboxPath id ++ "/commands"
-      body := some (.obj #[("command", .str command), ("timeoutSeconds", .nat timeout.toNat)])
-      timeoutMs := timeout * 1000 + 5000
-    }
-}
 
 end OrbCore.ManagedProvider
