@@ -13,6 +13,7 @@ import { Menu, MenuList, type MenuEntry } from "./Menu";
 import { ProviderLogo } from "./ProviderLogo";
 import { ErrorNotice } from "./ErrorNotice";
 import { SubscriptionResetDialog } from "./SubscriptionResetDialog";
+import { SettingsCard, SettingsRow } from "./SettingsCard";
 import { Toggle } from "./Toggle";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
@@ -182,7 +183,7 @@ export function Providers() {
       void cacheLoad("settings:cloud-accounts", () => cloudAccounts()).catch(() => {});
     }
     try {
-      const providers = await listProviders(controller.signal);
+      const providers = await listProviders(controller.signal, "p0");
       if (active()) {
         cachePut("providers:list", providers);
         setRemote(providers);
@@ -223,6 +224,13 @@ export function Providers() {
         <div class="page-head"><h2>Inference</h2></div>
         <Show when={loading()}>
           <ProvidersLoadingCard />
+        </Show>
+        <Show when={!loading() && loadError()}>
+          <SettingsCard>
+            <SettingsRow title="Could not load providers" desc={loadError()}>
+              <button type="button" class="s-btn" onClick={() => void reloadRemote()}>Retry</button>
+            </SettingsRow>
+          </SettingsCard>
         </Show>
         <ErrorToast title="Could not load providers" error={loadError()} background action={{ label: "Try again", run: () => reloadRemote() }} />
       </div>}>

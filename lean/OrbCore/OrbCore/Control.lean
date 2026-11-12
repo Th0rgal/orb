@@ -2902,7 +2902,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match ← confineWorkingDirectory st.cfg.workingDir st.cfg.workingDir with
         | .ok b => pure b
         | .error _ => pure st.cfg.workingDir
-      let defNewId ← nextUniqueId st "m" nowEpochSec
+      let defNewId ← newUuidV4
       let newMid := (jv.fieldStr? "id").getD defNewId
       if !isSafeMissionId newMid then
         abortBtwIdem
@@ -3014,7 +3014,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           | .error _ => .null
       if jv == .null then
         return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
-      let defNewId ← nextUniqueId st "m" nowEpochSec
+      let defNewId ← newUuidV4
       let newMid := (jv.fieldStr? "id").getD defNewId
       let reqBackend? := jv.fieldStr? "backend"
       let reqModelOv? := jv.fieldStr? "model_override"
@@ -3341,7 +3341,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let abortIdem : IO Unit :=
         if !idemKey.isEmpty then discard <| abortIdempotencySlot st.store "missions_create" idemKey else pure ()
       let tape := JsonTape.indexJsonObject req.bodySlice
-      let defMid ← nextUniqueId st "m" nowEpochSec
+      let defMid ← newUuidV4
       let mid := (JsonTape.lookupString? tape "id").getD defMid
       if !isSafeMissionId mid then
         abortIdem
@@ -3593,13 +3593,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         if isCloudBackendName backend then
           if let some cw := st.cloudWakeup? then
             discard <| notifyCloudWorker cw
-        let spawnWanted := (bodyJv.fieldBool? "spawn_harness").getD false
+        let spawnWanted :=
+          (bodyJv.fieldBool? "spawn_harness").getD
+            (!clientPlaced && remoteNodeId?.isNone && !isCloudBackendName backend)
         if spawnWanted then
           if let some p := prompt? then
-            let deliv := if selectedSkills.isEmpty then p else withDirective p selectedSkills
-            let permMode := (bodyJv.fieldStr? "permission_mode").getD "supervised"
-            let wtMode := (bodyJv.fieldStr? "worktree_mode").getD ""
-            discard <| maybeSpawnWarmHarnessTurn st caller placeKind mid backend safeWorkDir deliv modelOverride normEffort permMode wtMode true
+            if !p.trimAscii.toString.isEmpty then
+              let deliv := if selectedSkills.isEmpty then p else withDirective p selectedSkills
+              let permMode := (bodyJv.fieldStr? "permission_mode").getD "supervised"
+              let wtMode := (bodyJv.fieldStr? "worktree_mode").getD ""
+              discard <| maybeSpawnWarmHarnessTurn st caller placeKind mid backend safeWorkDir deliv modelOverride normEffort permMode wtMode true
         if let some sIdx := st.searchIdx? then
           discard <| indexConversation sIdx mid title
         return .ok (mkJson 201 respBody)
@@ -4600,14 +4603,18 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let mf ← st.managedRef.get
     let callerUidOpt := if caller.isLegacyUnscoped then none else some caller.userId
     let (infS, cmpS) ← if caller.userId.isEmpty then pure (0, 0) else getUserSpentTodayCents st.store caller.userId utcDay
+    let nowIsoRn := formatEpochIso8601Utc nowEpochSec
     match st.managedStore? with
-    | none => return .ok (mkJson 200 s!"\{\"nodes\":[],\"managed_compute\":{renderManagedBudgetJson mf callerUidOpt (infS + cmpS) caller.dailySpendCapCents?}}")
+    | none =>
+      let fv ← buildComputeFleetJVal st.relayHub? none mf callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn
+      return .ok (mkJson 200 (renderCompact fv))
     | some mst =>
       match ← loadManagedFleet mst mf.enabled mf.boatEnabled mf.dailyCapCents mf.spentTodayCents mf.maxConcurrent with
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok live =>
         st.managedRef.set live
-        return .ok (mkJson 200 (renderRemoteNodesJson live callerUidOpt (infS + cmpS) caller.dailySpendCapCents?))
+        let fv ← buildComputeFleetJVal st.relayHub? (some mst) live callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn
+        return .ok (mkJson 200 (renderCompact fv))
 
   -- Durable follow-up queue (`GET|POST /api/control/queue`, `PATCH /api/control/queue/:id`, `POST /api/control/queue/:id/step`, `POST /api/control/queue/:id/requeue`)
   if cleanPath == "/api/control/queue" then
@@ -4909,10 +4916,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let deliveredField :=
       if selectedSkills.isEmpty then ""
       else s!",\"delivered_prompt\":{jsonEscape delivContent}"
-    let spawnWanted := (bodyJv.fieldBool? "spawn_harness").getD false
     if !dispatchedRemote then
       if let (some mid, some m) := (mid?, mission?) then
         let isSide := (OrbBin.Json.parse m.tagsJson).toOption.bind JVal.asArr? |>.getD #[] |>.any (fun v => v.asStr? == some "side-question")
+        let spawnWanted :=
+          (bodyJv.fieldBool? "spawn_harness").getD
+            (m.placementKind == "managed" && !isCloudBackendName m.backend && !content.trimAscii.toString.isEmpty)
         if spawnWanted || (isSide && m.placementKind != "client" && st.warmMgr?.isSome) then
           let permMode := (bodyJv.fieldStr? "permission_mode").getD (if isSide then "bypassPermissions" else "supervised")
           if isSide then

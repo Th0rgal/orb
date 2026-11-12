@@ -110,6 +110,24 @@ export const effectivePick = (machine = "core"): HarnessPick | null => {
         choice.models[0];
       return { ...stored, model: matched.value, effort: effort ?? undefined };
     }
+    // Conversely, on Core or fleet/cloud nodes (`machine !== "local"`), local
+    // OpenCode provider-prefixed IDs (e.g. `orbrouter/builtin/smart`) map back
+    // to Core's canonical chain/model IDs (e.g. `builtin/smart`).
+    if (
+      machine !== "local" &&
+      stored.backend === "opencode" &&
+      choice?.models.length &&
+      !choice.models.some((m) => m.value === stored.model) &&
+      (stored.model.startsWith("orbrouter/") || stored.model.startsWith("sandboxed-sh/"))
+    ) {
+      const bare = stored.model.replace(/^(?:orbrouter|sandboxed-sh)\//, "");
+      const matched =
+        choice.models.find((m) => m.value === bare) ??
+        choice.models.find((m) => m.value === `builtin/${bare}`) ??
+        choice.models.find((m) => m.value.endsWith(`/${bare}`)) ??
+        choice.models[0];
+      return { ...stored, model: matched.value, effort: effort ?? undefined };
+    }
     return { ...stored, effort: effort ?? undefined };
   }
   const first = choices.find((c) => c.backend.id === "claudecode") ?? choices[0];

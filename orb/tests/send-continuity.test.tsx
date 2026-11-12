@@ -561,7 +561,7 @@ it('detaches foreground stream and transcript retention when a keep-alive slot g
   expect(state.starts).toBe(2);
   view.unmount();
  }finally{
-  setBackgroundSyncMode('warm');
+  setBackgroundSyncMode('auto');
   cacheReset();
  }
 });

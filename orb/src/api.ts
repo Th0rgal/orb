@@ -1450,10 +1450,18 @@ export function peekCachedProviders(): AIProvider[] | null {
   }
 }
 
-export async function listProviders(signal?: AbortSignal): Promise<AIProvider[]> {
+export async function listProviders(
+  signal?: AbortSignal,
+  priority?: RequestPriority,
+): Promise<AIProvider[]> {
   const version = connectionVersion();
   const token = getJwt();
-  const data = await api<AIProvider[] | { providers?: AIProvider[] }>("/api/ai/providers", signal ? { signal } : undefined);
+  const data = await api<AIProvider[] | { providers?: AIProvider[] }>(
+    "/api/ai/providers",
+    signal ? { signal } : undefined,
+    undefined,
+    priority,
+  );
   const list = Array.isArray(data) ? data : Array.isArray(data.providers) ? data.providers : [];
   if (version === connectionVersion() && token === getJwt() && isConnected() && isAIProviderArray(list)) {
     const key = catalogStorageKey("/api/ai/providers", token);

@@ -267,7 +267,7 @@ jobs:
           echo "$ax_out" | grep -qF "depends on axioms: [propext, Classical.choice, Quot.sound]"
           out=$(LEAN_PATH="lean/OrbClient/.lake/build/lib/lean:$(lean --print-prefix)/lib/lean" lean --run scripts/gen_client_core_fixtures.lean)
           diff <(printf '%s\n' "$out") shared/orb-spec/fixtures/client-core.json
-          for bin in fido-agent-proxy orb-privd orb-sudo lean-mesh palomactl sandboxed-mcp workspace-mcp desktop-mcp automation-manager-mcp sandboxed-node sandboxed-sh orb-locald; do
+          for bin in fido-agent-proxy orb-privd orb-sudo lean-mesh palomactl sandboxed-mcp workspace-mcp desktop-mcp automation-manager-mcp sandboxed-node orb-core orb-locald; do
             test -x "target/debug/$bin"
             elab_syms=$(nm -u "target/debug/$bin" | grep -c lean_elab || true)
             test "$elab_syms" -eq 0

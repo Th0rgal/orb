@@ -22,13 +22,15 @@
   in {
     overlays.default = final: prev: rec {
       turbo-lean = prev.turbo-lean or (final.callPackage ./nix/turbo-lean.nix {});
-      sandboxed-sh = final.callPackage ./nix/package.nix {inherit turbo-lean;};
+      orb-core = final.callPackage ./nix/package.nix {inherit turbo-lean;};
+      sandboxed-sh = orb-core;
     };
 
     packages = forAllSystems (pkgs: rec {
       turbo-lean = pkgs.callPackage ./nix/turbo-lean.nix {};
-      sandboxed-sh = pkgs.callPackage ./nix/package.nix {inherit turbo-lean;};
-      default = sandboxed-sh;
+      orb-core = pkgs.callPackage ./nix/package.nix {inherit turbo-lean;};
+      sandboxed-sh = orb-core;
+      default = orb-core;
     });
 
     devShells = forAllSystems (pkgs: let
@@ -122,7 +124,7 @@ SHIM
       '';
     in {
       default = pkgs.mkShell {
-        inputsFrom = [self.packages.${pkgs.stdenv.hostPlatform.system}.sandboxed-sh];
+        inputsFrom = [self.packages.${pkgs.stdenv.hostPlatform.system}.orb-core];
         CC = "${pkgs.clang}/bin/clang";
         LEAN_CC = "${pkgs.clang}/bin/clang";
         TURBO_LEAN_EMIT_C = "1";

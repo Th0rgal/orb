@@ -212,7 +212,7 @@ if [[ "$UI_ONLY" == "1" ]]; then
   exit 0
 fi
 
-SERVER_BIN="sandboxed-sh"
+SERVER_BIN="orb-core"
 if grep -q '"orb-server"' "$ROOT_DIR/scripts/build_orb_bins.sh" 2>/dev/null; then
   SERVER_BIN="orb-server"
 fi

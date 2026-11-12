@@ -7690,27 +7690,30 @@ def streamLocalEventsSse (stRef : IO.Ref LocaldState) (clientFd : LeanSys.Posix.
       let mut alive := true
       let mut idleTicks : Nat := 0
       while alive do
-        let evs ← stRef.modifyGet (·.drainSseSubscriber sid)
-        if !evs.isEmpty then
-          idleTicks := 0
-          let frame := "data: " ++ renderCompact (.arr evs) ++ "\n\n"
-          match ← LeanSys.Posix.writeAll clientFd frame.toUTF8 false with
-          | .ok _ => pure ()
-          | .error _ => alive := false
+        if (← OrbBin.PosixExt.pollTermTrap) != 0 then
+          alive := false
         else
-          match ← LeanSys.Posix.pollReadable clientFd 20 with
-          | .ok () =>
-            let chunk ← LeanSys.Posix.readStreamChunk clientFd 64
-            if chunk.isEmpty then alive := false
-          | .error .eagain =>
-            idleTicks := idleTicks + 1
-            if idleTicks ≥ 750 then
-              idleTicks := 0
-              match ← LeanSys.Posix.writeAll clientFd ": keepalive\n\n".toUTF8 false with
-              | .ok _ => pure ()
-              | .error _ => alive := false
-          | .error _ =>
-            alive := false
+          let evs ← stRef.modifyGet (·.drainSseSubscriber sid)
+          if !evs.isEmpty then
+            idleTicks := 0
+            let frame := "data: " ++ renderCompact (.arr evs) ++ "\n\n"
+            match ← LeanSys.Posix.writeAll clientFd frame.toUTF8 false with
+            | .ok _ => pure ()
+            | .error _ => alive := false
+          else
+            match ← LeanSys.Posix.pollReadable clientFd 20 with
+            | .ok () =>
+              let chunk ← LeanSys.Posix.readStreamChunk clientFd 64
+              if chunk.isEmpty then alive := false
+            | .error .eagain =>
+              idleTicks := idleTicks + 1
+              if idleTicks ≥ 750 then
+                idleTicks := 0
+                match ← LeanSys.Posix.writeAll clientFd ": keepalive\n\n".toUTF8 false with
+                | .ok _ => pure ()
+                | .error _ => alive := false
+            | .error _ =>
+              alive := false
   finally
     stRef.modify (·.unregisterSseSubscriber sid)
 

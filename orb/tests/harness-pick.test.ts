@@ -121,5 +121,12 @@ it("maps Core-scoped OpenCode model picks (e.g. builtin/fast) to local provider 
   await pick.refreshHarnessChoices();
   expect(pick.effectivePick("local")).toEqual({ backend: "opencode", model: "orbrouter/builtin/fast", effort: undefined });
   expect(pick.effectivePick("core")).toEqual({ backend: "opencode", model: "builtin/fast", effort: undefined });
+
+  // Reverse direction: a local OpenCode pick (`orbrouter/builtin/smart`) maps back to
+  // Core/fleet `builtin/smart` instead of stranding mission launch validation.
+  pick.setHarnessPick({ backend: "opencode", model: "orbrouter/builtin/smart" });
+  expect(pick.effectivePick("local")).toEqual({ backend: "opencode", model: "orbrouter/builtin/smart", effort: undefined });
+  expect(pick.effectivePick("core")).toEqual({ backend: "opencode", model: "builtin/smart", effort: undefined });
+  expect(pick.effectivePick("ashur")).toEqual({ backend: "opencode", model: "builtin/smart", effort: undefined });
   delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 });

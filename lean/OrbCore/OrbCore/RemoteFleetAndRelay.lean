@@ -389,78 +389,251 @@ def execOnRemoteNode
     else
       return .error s!"node HTTP {st}: {txt}"
 
-/-! ## `GET /api/compute/fleet` & Enriched `GET /api/remote-nodes` -/
+/-! ## `GET /api/compute/fleet`, Enriched `GET /api/remote-nodes`, & Persisted Static Node Cordons -/
 
-def probeStaticNodeHeartbeat (sn : StaticRemoteNode) : IO JVal := do
-  let cordonedFlag := false
-  match ← resolveStaticNodeToken? sn with
-  | none =>
-    return .obj #[
+/-- Read persisted static-node cordons from `<dataRoot>/node_state.json` (matching Rust `node_state.json`). -/
+def loadPersistedNodeCordons (dataRoot : String) : IO (Array String) := do
+  let trimmed := dataRoot.trimAscii.toString
+  if trimmed.isEmpty then return #[]
+  let path := System.FilePath.mk s!"{trimmed}/node_state.json"
+  if !(← path.pathExists) then return #[]
+  match ← (IO.FS.readFile path).toBaseIO with
+  | .error _ => return #[]
+  | .ok raw =>
+    match OrbBin.Json.parse raw with
+    | .ok jv =>
+      return ((jv.fieldArr? "cordoned").getD #[]).filterMap JVal.asStr? |>.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+    | .error _ => return #[]
+
+/-- Update persisted static-node cordons in `<dataRoot>/node_state.json`, returning `changed`. -/
+def setPersistedNodeCordoned (dataRoot nodeName : String) (cordoned : Bool) : IO Bool := do
+  let trimmed := dataRoot.trimAscii.toString
+  let cleanNode := nodeName.trimAscii.toString
+  if trimmed.isEmpty || cleanNode.isEmpty then return false
+  let path := System.FilePath.mk s!"{trimmed}/node_state.json"
+  let mut existingObj : Array (String × JVal) := #[]
+  if ← path.pathExists then
+    if let .ok raw ← (IO.FS.readFile path).toBaseIO then
+      if let .ok (.obj fields) := OrbBin.Json.parse raw then
+        existingObj := fields.filter (fun (k, _) => k != "cordoned")
+  let prev := ← loadPersistedNodeCordons trimmed
+  let wasCordoned := prev.contains cleanNode
+  if wasCordoned == cordoned then
+    return false
+  let next :=
+    if cordoned then (prev.filter (· != cleanNode)).push cleanNode
+    else prev.filter (· != cleanNode)
+  let sortedNext := next.qsort (· < ·)
+  let outObj := JVal.obj (existingObj.push ("cordoned", .arr (sortedNext.map .str)))
+  discard <| (IO.FS.createDirAll (System.FilePath.mk trimmed)).toBaseIO
+  discard <| (IO.FS.writeFile path ((renderCompact outObj) ++ "\n")).toBaseIO
+  return true
+
+/-- Build server-advertised typed remote launch capabilities (`RemoteLaunchCapabilities`). -/
+def buildRemoteLaunchCapabilitiesJVal : IO JVal := do
+  let p1 := ((← IO.getEnv "SANDBOXED_PROXY_PUBLIC_URL").getD "").trimAscii.toString
+  let p2 := ((← IO.getEnv "SANDBOXED_PUBLIC_URL").getD "").trimAscii.toString
+  let proxyConfigured := !p1.isEmpty || !p2.isEmpty
+  return .obj #[
+    ("typed", .bool true),
+    ("harnesses", .arr #[.str "claudecode", .str "opencode", .str "grok", .str "codex", .str "antigravity", .str "vibe"]),
+    ("requires_proxy_harnesses", .arr #[.str "claudecode", .str "opencode", .str "codex", .str "vibe"]),
+    ("raw_command", .bool true),
+    ("proxy_url_configured", .bool proxyConfigured),
+    ("error_prefixes", .arr #[
+      .str "REMOTE_HARNESS_UNSUPPORTED",
+      .str "REMOTE_PROMPT_REQUIRED",
+      .str "REMOTE_MODEL_REQUIRED",
+      .str "REMOTE_GOAL_UNSUPPORTED",
+      .str "REMOTE_AUTH_REQUIRED"
+    ])
+  ]
+
+private def optNatJVal (v? : Option Nat) : JVal :=
+  match v? with
+  | some n => JVal.nat n
+  | none => .null
+
+private def optUInt64JVal (v? : Option UInt64) : JVal :=
+  match v? with
+  | some n => JVal.uint64 n
+  | none => .null
+
+private def optStrJVal (v? : Option String) : JVal :=
+  match v? with
+  | some s => .str s
+  | none => .null
+
+private def optBoolJVal (v? : Option Bool) : JVal :=
+  match v? with
+  | some b => .bool b
+  | none => .null
+
+def probeStaticNodeHeartbeat
+    (sn : StaticRemoteNode)
+    (persistedCordons : Array String := #[])
+    (nowIso : String := "") : IO JVal := do
+  let persistedCordoned := persistedCordons.contains sn.id
+  let baseColocated :=
+    sn.id == "sepolia" || sn.id == "agent-core" || sn.id == "orb-core" ||
+    sn.baseUrl.contains "10.88.0.1:" || sn.baseUrl.endsWith "10.88.0.1" ||
+    sn.baseUrl.contains "127.0.0.1" || sn.labels.contains "control-plane"
+  let baseAdminOnly :=
+    baseColocated || sn.id == "dgx-spark-admin" ||
+    sn.labels.contains "administration" || sn.labels.contains "admin-only"
+  let mkOfflineOrDegraded (statusStr errMsg : String) : JVal :=
+    .obj #[
+      ("resource_history", .arr #[]),
       ("id", .str sn.id),
       ("name", .str sn.id),
       ("kind", .str "static"),
       ("base_url", .str sn.baseUrl),
-      ("status", .str "degraded"),
-      ("cordoned", .bool cordonedFlag),
+      ("token_env", .str sn.tokenEnv),
+      ("status", .str statusStr),
       ("labels", .arr (sn.labels.map .str)),
-      ("error", .str s!"missing token env {sn.tokenEnv}")
+      ("version", .null),
+      ("protocol_version", .null),
+      ("capacity_total", .null),
+      ("capacity_available", .null),
+      ("active_leases", .null),
+      ("active_jobs", .null),
+      ("queued_jobs", .null),
+      ("available_slots", JVal.nat 0),
+      ("cpu_total", .null),
+      ("mem_total_bytes", .null),
+      ("mem_available_bytes", .null),
+      ("disk_total_bytes", .null),
+      ("disk_available_bytes", .null),
+      ("disk_pressure_pinned", .bool false),
+      ("cached_toolchains", .arr #[]),
+      ("lean_runtime_ready", .null),
+      ("source_bundle_capacity", .null),
+      ("last_seen", .null),
+      ("error", .str errMsg),
+      ("cordoned", .bool persistedCordoned),
+      ("quarantined_harnesses", .arr #[]),
+      ("admin_only", .bool baseAdminOnly),
+      ("core_colocated", .bool baseColocated)
     ]
+  match ← resolveStaticNodeToken? sn with
+  | none =>
+    return mkOfflineOrDegraded "degraded" s!"missing token env {sn.tokenEnv}"
   | some tok =>
     match ← sendJsonRequest "GET" (sn.baseUrl ++ "/heartbeat") (some tok) none #[] 2500 with
     | .ok (200, _, some hb) =>
       let cap := (hb.fieldNat? "capacity_total").orElse (fun _ => hb.fieldNat? "capacity") |>.getD 4
       let act := (hb.fieldNat? "active_jobs").orElse (fun _ => hb.fieldNat? "running_jobs") |>.getD 0
       let qd := (hb.fieldNat? "queued_jobs").getD 0
-      let availSlots := if cap > act then cap - act else 0
-      return .obj #[
+      let availSlots :=
+        match hb.fieldNat? "capacity_available" with
+        | some av => av
+        | none => if cap > act then cap - act else 0
+      let actLeases := (hb.fieldNat? "active_leases").getD act
+      let hbLabels := ((hb.fieldArr? "labels").getD #[]).filterMap JVal.asStr?
+      let rawLabels := if hbLabels.isEmpty then sn.labels else hbLabels
+      let leanReady? := hb.fieldBool? "lean_runtime_ready"
+      let effLabels :=
+        if leanReady? == some false then rawLabels.filter (· != "lean") else rawLabels
+      let effColocated := baseColocated || effLabels.contains "control-plane"
+      let effAdminOnly :=
+        (hb.fieldBool? "admin_only").getD
+          (baseAdminOnly || effColocated || effLabels.contains "administration" || effLabels.contains "admin-only")
+      let effCordoned := persistedCordoned || ((hb.fieldBool? "cordoned").getD false)
+      let toolchains := ((hb.fieldArr? "cached_toolchains").getD #[]).filterMap JVal.asStr?
+      let resHist := (hb.fieldArr? "resource_history").getD #[]
+      let lastSeenVal :=
+        if !nowIso.isEmpty then JVal.str nowIso
+        else optStrJVal (hb.fieldStr? "timestamp")
+      let mut fields : Array (String × JVal) := #[
+        ("resource_history", .arr resHist),
         ("id", .str sn.id),
         ("name", .str sn.id),
         ("kind", .str "static"),
         ("base_url", .str sn.baseUrl),
+        ("token_env", .str sn.tokenEnv),
         ("status", .str "online"),
-        ("cordoned", .bool ((hb.fieldBool? "cordoned").getD false)),
+        ("labels", .arr (effLabels.map .str)),
+        ("version", optStrJVal (hb.fieldStr? "version")),
+        ("protocol_version", optNatJVal (hb.fieldNat? "protocol_version")),
         ("capacity_total", JVal.nat cap),
+        ("capacity_available", JVal.nat availSlots),
+        ("available_slots", JVal.nat availSlots),
+        ("active_leases", JVal.nat actLeases),
         ("active_jobs", JVal.nat act),
         ("queued_jobs", JVal.nat qd),
-        ("available_slots", JVal.nat availSlots),
-        ("labels", .arr (sn.labels.map .str)),
+        ("coordinator_capacity", optNatJVal (hb.fieldNat? "coordinator_capacity")),
+        ("cpu_total", optNatJVal (hb.fieldNat? "cpu_total")),
+        ("mem_total_bytes", optUInt64JVal (hb.fieldUInt64? "mem_total_bytes")),
+        ("mem_available_bytes", optUInt64JVal (hb.fieldUInt64? "mem_available_bytes")),
+        ("disk_total_bytes", optUInt64JVal (hb.fieldUInt64? "disk_total_bytes")),
+        ("disk_available_bytes", optUInt64JVal (hb.fieldUInt64? "disk_available_bytes")),
+        ("disk_pressure_pinned", .bool ((hb.fieldBool? "disk_pressure_pinned").getD false)),
+        ("cached_toolchains", .arr (toolchains.map .str)),
+        ("lean_runtime_ready", optBoolJVal leanReady?),
+        ("source_bundle_capacity", (hb.field? "source_bundle_capacity").getD .null),
+        ("last_seen", lastSeenVal),
+        ("error", .null),
+        ("cordoned", .bool effCordoned),
+        ("quarantined_harnesses", .arr #[]),
+        ("admin_only", .bool effAdminOnly),
+        ("core_colocated", .bool effColocated),
         ("heartbeat", hb)
       ]
+      if let some fj := hb.fieldNat? "forced_jobs" then
+        if fj > 0 then fields := fields.push ("forced_jobs", JVal.nat fj)
+      if let some pj := hb.fieldNat? "priority_jobs" then
+        if pj > 0 then fields := fields.push ("priority_jobs", JVal.nat pj)
+      if let some mf := hb.fieldUInt64? "min_free_disk_bytes" then
+        fields := fields.push ("min_free_disk_bytes", JVal.uint64 mf)
+      return .obj fields
     | .ok (code, txt, _) =>
-      return .obj #[
-        ("id", .str sn.id),
-        ("name", .str sn.id),
-        ("kind", .str "static"),
-        ("base_url", .str sn.baseUrl),
-        ("status", .str "degraded"),
-        ("cordoned", .bool false),
-        ("labels", .arr (sn.labels.map .str)),
-        ("error", .str s!"HTTP {code}: {(txt.take 120).toString}")
-      ]
+      return mkOfflineOrDegraded "degraded" s!"HTTP {code}: {(txt.take 120).toString}"
     | .error err =>
-      return .obj #[
+      return mkOfflineOrDegraded "offline" err
+
+/-- Probe all configured static nodes concurrently so 9 nodes complete in a single ~15ms RTT. -/
+def probeAllStaticNodesParallel
+    (staticNodes : Array StaticRemoteNode)
+    (persistedCordons : Array String)
+    (nowIso : String) : IO (Array JVal) := do
+  if staticNodes.isEmpty then return #[]
+  let mut tasks : Array (Task (Except IO.Error JVal)) := Array.mkEmpty staticNodes.size
+  for sn in staticNodes do
+    let t ← IO.asTask (prio := .dedicated) (probeStaticNodeHeartbeat sn persistedCordons nowIso)
+    tasks := tasks.push t
+  let mut out : Array JVal := Array.mkEmpty tasks.size
+  for i in [0:tasks.size] do
+    match tasks[i]!.get with
+    | .ok jv => out := out.push jv
+    | .error e =>
+      let sn := staticNodes[i]!
+      out := out.push (.obj #[
         ("id", .str sn.id),
         ("name", .str sn.id),
         ("kind", .str "static"),
         ("base_url", .str sn.baseUrl),
+        ("token_env", .str sn.tokenEnv),
         ("status", .str "offline"),
-        ("cordoned", .bool false),
         ("labels", .arr (sn.labels.map .str)),
-        ("error", .str err)
-      ]
+        ("cordoned", .bool (persistedCordons.contains sn.id)),
+        ("error", .str (toString e))
+      ])
+  return out
 
 def buildComputeFleetJVal
     (hub? : Option RelayHub)
-    (_mc : ManagedComputeStore)
+    (_mc? : Option ManagedComputeStore)
     (fleet : ManagedFleetState)
     (callerUserId? : Option String := none)
     (userSpentTodayCents : UInt64 := 0)
-    (userDailyCapCents? : Option UInt64 := none) : IO JVal := do
+    (userDailyCapCents? : Option UInt64 := none)
+    (dataRoot : String := "")
+    (nowIso : String := "") : IO JVal := do
   let (rnEnabled, staticNodes) ← loadStaticRemoteNodes
   let nowSec ← nowEpoch
-  let mut staticItems : Array JVal := #[]
-  for sn in staticNodes do
-    staticItems := staticItems.push (← probeStaticNodeHeartbeat sn)
+  let effIso := if nowIso.isEmpty then formatEpochIso8601Utc nowSec else nowIso
+  let persistedCordons ← loadPersistedNodeCordons dataRoot
+  let staticItems ← probeAllStaticNodesParallel staticNodes persistedCordons effIso
   let visibleMachines :=
     match callerUserId? with
     | none => fleet.machines
@@ -475,32 +648,82 @@ def buildComputeFleetJVal
         match seenSec? with
         | some s => nowSec ≤ s + 90
         | none => m.status == "ready"
+      let nodeStatus :=
+        if m.status == "ready" then (if relayConnected then "online" else "offline")
+        else if m.status == "provisioning" then "provisioning"
+        else "offline"
+      let ownerKind :=
+        if !m.ownerMission.isEmpty then "mission"
+        else if m.ownerKind.isEmpty then "user"
+        else m.ownerKind
+      let lastSeenVal :=
+        match seenSec? with
+        | some s => JVal.str (formatEpochIso8601Utc s)
+        | none => if nodeStatus == "online" then JVal.str effIso else .null
       managedItems := managedItems.push (.obj #[
+        ("resource_history", .arr #[]),
         ("id", .str s!"managed-{m.id}"),
+        ("display_name", .str m.sandboxName),
         ("machine_id", .str m.id),
         ("name", .str m.sandboxName),
         ("sandbox_name", .str m.sandboxName),
         ("kind", .str "managed"),
         ("provider", .str m.provider),
         ("size", .str m.size),
-        ("status", .str m.status),
+        ("owner_kind", .str ownerKind),
+        ("base_url", .str ""),
+        ("token_env", .str ""),
+        ("status", .str nodeStatus),
+        ("state", .str m.status),
         ("relay_connected", .bool relayConnected),
         ("cordoned", .bool m.cordoned),
         ("owner_mission", .str m.ownerMission),
         ("node_boot_epoch", JVal.uint64 m.nodeBootEpoch),
         ("deletable_at", JVal.uint64 m.deletableAtSec),
         ("spent_cents", JVal.uint64 m.spentCents),
-        ("labels", .arr #[.str "managed", .str s!"provider={m.provider}"])
+        ("version", .null),
+        ("capacity_total", JVal.nat 2),
+        ("capacity_available", JVal.nat (if nodeStatus == "online" then 2 else 0)),
+        ("active_jobs", JVal.nat 0),
+        ("queued_jobs", JVal.nat 0),
+        ("cpu_total", JVal.nat 4),
+        ("mem_total_bytes", JVal.uint64 (8 * 1024 * 1024 * 1024)),
+        ("mem_available_bytes", .null),
+        ("disk_total_bytes", .null),
+        ("disk_available_bytes", .null),
+        ("last_seen", lastSeenVal),
+        ("error", .null),
+        ("labels", .arr #[.str "managed", .str s!"provider={m.provider}", .str s!"owner={ownerKind}"])
       ])
-  let budgetVal :=
+  let rawBudget :=
     (OrbBin.Json.parse (renderManagedBudgetJson fleet callerUserId? userSpentTodayCents userDailyCapCents?)).toOption.getD (.obj #[])
+  let activeManagedCount := (visibleMachines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
+  let defaultSubTarget := if fleet.boatEnabled then "auto-managed:boat" else "auto"
+  let budgetFields :=
+    match rawBudget with
+    | .obj fs =>
+      let filtered := fs.filter (fun (k, _) => k != "default_subagent_target" && k != "active_machines")
+      filtered ++ #[("default_subagent_target", .str defaultSubTarget), ("active_machines", JVal.nat activeManagedCount)]
+    | _ => #[
+        ("enabled", .bool fleet.enabled),
+        ("boat_enabled", .bool fleet.boatEnabled),
+        ("default_subagent_target", .str defaultSubTarget),
+        ("active_machines", JVal.nat activeManagedCount),
+        ("max_concurrent", JVal.uint64 fleet.maxConcurrent)
+      ]
+  let remoteLaunch ← buildRemoteLaunchCapabilitiesJVal
   let allNodes := staticItems ++ managedItems
+  let sparkConfigured := staticNodes.any (fun n => n.id == "dgx-spark")
   return .obj #[
+    ("enabled", .bool (rnEnabled || fleet.enabled)),
     ("remote_nodes_enabled", .bool rnEnabled),
     ("nodes", .arr allNodes),
     ("static_nodes", .arr staticItems),
     ("managed_nodes", .arr managedItems),
-    ("managed_compute", budgetVal)
+    ("recent_jobs", .arr #[]),
+    ("spark_offload", .obj #[("configured", .bool sparkConfigured), ("enabled_workspaces", .arr #[])]),
+    ("remote_launch", remoteLaunch),
+    ("managed_compute", .obj budgetFields)
   ]
 
 /-! ## Boat (`boat.dev`) Provider API Helper & Managed Snapshots Store -/
@@ -733,7 +956,7 @@ def dispatchRemoteFleetAndRelayRoutes?
         let (_, cmp) ← getUserSpentTodayCents store callerUserId (nowIso.take 10).toString
         pure cmp
       else pure 0
-    let fv ← buildComputeFleetJVal hub? mc fleet scopedUid? uSpent none
+    let fv ← buildComputeFleetJVal hub? (some mc) fleet scopedUid? uSpent none store.rootDir nowIso
     return some (jsonResp 200 fv)
 
   -- 4. `/api/managed-machines/{settings,providers*,snapshots*,:id*}`
@@ -916,17 +1139,34 @@ def dispatchRemoteFleetAndRelayRoutes?
     let nodeName := segs[2]!
     let action := segs[3]!
     if action == "cordon" || action == "uncordon" then
-      let cordVal := if action == "cordon" then "1" else "0"
+      let wantCordoned := action == "cordon"
+      let cordVal := if wantCordoned then "1" else "0"
+      let mut changed := false
       if let some mid ← resolveManagedMachineId? mc nodeName then
+        if let some (mPrev, _) ← getManagedMachine? mc mid then
+          changed := mPrev.cordoned != wantCordoned
         discard <| execParamQuery mc.db "UPDATE managed_machines SET cordoned=?2 WHERE id=?1;" #[mid, cordVal]
-      return some (jsonResp 200 (.obj #[("ok", .bool true), ("node", .str nodeName), ("cordoned", .bool (action == "cordon"))]))
+      else
+        let (_, staticNodes) ← loadStaticRemoteNodes
+        if !staticNodes.any (fun n => n.id == nodeName) then
+          return some (jsonErr 404 "unknown_node")
+        changed ← setPersistedNodeCordoned store.rootDir nodeName wantCordoned
+      return some (jsonResp 200 (.obj #[
+        ("ok", .bool true),
+        ("node", .str nodeName),
+        ("cordoned", .bool wantCordoned),
+        ("changed", .bool changed)
+      ]))
     else if action == "capacity" then
       let jv := (OrbBin.Json.parse ((String.fromUTF8? bodyBytes).getD "{}")).toOption.getD (.obj #[])
       let some cap := jv.fieldNat? "capacity"
         | return some (jsonErr 400 "missing_capacity")
+      if cap < 1 || cap > 256 then
+        return some (jsonErr 400 "invalid_capacity")
       let (_, staticNodes) ← loadStaticRemoteNodes
+      let staticMatch? := staticNodes.find? (fun n => n.id == nodeName)
       let (effNodeId, secret) ← do
-        if let some sn := staticNodes.find? (fun n => n.id == nodeName) then
+        if let some sn := staticMatch? then
           match ← resolveStaticNodeToken? sn with
           | some tok => pure (sn.id, tok)
           | none => return some (jsonErr 400 "node_token_missing")
@@ -944,6 +1184,11 @@ def dispatchRemoteFleetAndRelayRoutes?
       match ← callRemoteNodeHttp hub? mc nodeName "POST" "/capacity" (some (.obj bodyFields)) #[] 10000 with
       | .error e => return some (jsonErr 502 e)
       | .ok (st, txt, jv?, _, _) =>
+        if 200 ≤ st && st < 300 then
+          if let some sn := staticMatch? then
+            let persistedCordons ← loadPersistedNodeCordons store.rootDir
+            let refreshed ← probeStaticNodeHeartbeat sn persistedCordons nowIso
+            return some (jsonResp 200 refreshed)
         return some (jsonResp st (jv?.getD (.obj #[("raw", .str txt)])))
 
   -- 6. `/api/durable-jobs*`

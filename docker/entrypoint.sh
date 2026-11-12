@@ -3,7 +3,7 @@ set -e
 
 # =============================================================================
 # Orb Core — Docker Entrypoint
-# Starts: Lean 4 Core backend (sandboxed-sh), Caddy (PID 1)
+# Starts: Lean 4 Core backend (orb-core), Caddy (PID 1)
 # =============================================================================
 
 cleanup() {
@@ -51,15 +51,15 @@ case "$(printf '%s' "${DEV_MODE:-false}" | tr '[:upper:]' '[:lower:]')" in
         ;;
 esac
 
-echo "[entrypoint] starting sandboxed-sh backend on ${HOST:-127.0.0.1}:${PORT:-3000}"
-sandboxed-sh &
+echo "[entrypoint] starting orb-core backend on ${HOST:-127.0.0.1}:${PORT:-3000}"
+orb-core &
 BACKEND_PID=$!
 
 # Wait for backend to become healthy before starting Caddy
 echo "[entrypoint] waiting for backend health..."
 for i in $(seq 1 30); do
     if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-        echo "[entrypoint] ERROR: sandboxed-sh backend exited during startup (check DASHBOARD_PASSWORD / JWT_SECRET / DEV_MODE configuration)" >&2
+        echo "[entrypoint] ERROR: orb-core backend exited during startup (check DASHBOARD_PASSWORD / JWT_SECRET / DEV_MODE configuration)" >&2
         wait "$BACKEND_PID" || exit $?
         exit 1
     fi
