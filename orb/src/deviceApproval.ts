@@ -226,7 +226,7 @@ async function signedApiInner<T>(method: string, path: string, body: unknown, su
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
     };
     if (devId && call) {
-      const challenge = await api<{ challenge_id: string; payload: string }>(
+      const challenge = await api<{ challenge_id?: string; challenge?: string; payload?: string; expires_at?: number }>(
         "/api/approvals/challenge",
         {
           method: "POST",
@@ -239,9 +239,19 @@ async function signedApiInner<T>(method: string, path: string, body: unknown, su
         origin.targetBase,
       );
       origin.ensureUnchanged();
-      const signature = await signChallengePayload(call, challenge.payload, summary);
+      const challengeId = challenge.challenge_id || challenge.challenge || "";
+      const cleanSummary = summary.replace(/\n/g, " ").trim() || "Approve";
+      const expAt = Number(challenge.expires_at) || Math.floor(Date.now() / 1000) + 120;
+      const bodySha = typeof challenge.payload === "string" && challenge.payload.length > 0
+        ? ""
+        : await sha256Hex(new TextEncoder().encode(text));
+      const challengePayload =
+        typeof challenge.payload === "string" && challenge.payload.length > 0
+          ? challenge.payload
+          : `paloma-approval-v1\n${challengeId}\n${method} ${path}\n${bodySha}\n${expAt}\n${cleanSummary}`;
+      const signature = await signChallengePayload(call, challengePayload, summary);
       origin.ensureUnchanged();
-      headers["X-Paloma-Approval"] = `${challenge.challenge_id}.${devId}.${signature}`;
+      headers["X-Paloma-Approval"] = `${challengeId}.${devId}.${signature}`;
     }
     origin.ensureUnchanged();
     return api<T>(path, { method, headers, ...(body === undefined ? {} : { body: text }) }, origin.targetBase);
@@ -296,7 +306,7 @@ export async function signedRawRequest(
       ...(options?.contentType ? { "Content-Type": options.contentType } : {}),
     };
     if (devId && call) {
-      const challenge = await api<{ challenge_id: string; payload: string }>(
+      const challenge = await api<{ challenge_id?: string; challenge?: string; payload?: string; expires_at?: number }>(
         "/api/approvals/challenge",
         {
           method: "POST",
@@ -314,9 +324,16 @@ export async function signedRawRequest(
         origin.targetBase,
       );
       origin.ensureUnchanged();
-      const signature = await signChallengePayload(call, challenge.payload, summary);
+      const challengeId = challenge.challenge_id || challenge.challenge || "";
+      const cleanSummary = summary.replace(/\n/g, " ").trim() || "Approve";
+      const expAt = Number(challenge.expires_at) || Math.floor(Date.now() / 1000) + 120;
+      const challengePayload =
+        typeof challenge.payload === "string" && challenge.payload.length > 0
+          ? challenge.payload
+          : `paloma-approval-v1\n${challengeId}\n${method} ${path}\n${bodyHash ?? ""}\n${expAt}\n${cleanSummary}`;
+      const signature = await signChallengePayload(call, challengePayload, summary);
       origin.ensureUnchanged();
-      headers["X-Paloma-Approval"] = `${challenge.challenge_id}.${devId}.${signature}`;
+      headers["X-Paloma-Approval"] = `${challengeId}.${devId}.${signature}`;
     }
 
     let bodyInit: BodyInit | undefined;

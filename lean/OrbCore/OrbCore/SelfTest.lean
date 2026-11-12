@@ -5437,6 +5437,84 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
      !afterCordons.contains "ashur" || afterCordons.contains "sepolia" then
     return (← fail s!"GET /api/remote-nodes or static cordon persistence failed: rn={rnSt}:{rnBody} cordon={cordonSt}:{cordonBody} after={afterCordons}")
 
+  -- 6. Privilege Access & Unified Approval Queue Cross-Client Parity (`shared/orb-spec/fixtures/{privilege-access,approvals}.json`)
+  let d1 := computeApprovalDigest "privilege" "a1b2c3d4-0000-4000-8000-000000000010"
+    (.obj #[("kind", .str "mission"), ("mission_id", .str "7c1d2e3f-0000-4000-8000-000000000001")])
+    #["service_deploy", "agent-core", "", "240", "session"]
+  let d2 := computeApprovalDigest "secret" "b2c3d4e5-0000-4000-8000-000000000011"
+    (.obj #[
+      ("kind", .str "external_session"),
+      ("session_id", .str "c4d5e6f7-0000-4000-8000-000000000099"),
+      ("client_kind", .str "local_mcp"),
+      ("client_label", .str "claude-code"),
+      ("host_hint", .str "macbook-air")
+    ])
+    #["read", "OPENAI_API_KEY", "", "", "", ""]
+  let d3 := computeApprovalDigest "privilege" "e6f7a8b9-0000-4000-8000-000000000012"
+    (.obj #[
+      ("kind", .str "external_session"),
+      ("session_id", .str "d5e6f7a8-0000-4000-8000-000000000088"),
+      ("client_kind", .str "cli"),
+      ("client_label", .str "sandboxed-mcp")
+    ])
+    #["ops_read", "dgx-spark", "", "60", "session"]
+  if d1 != "db33f6a77e11349420b2bdea048047d3526d28a332d222062722ad1f49946db7" ||
+     d2 != "2ec3bf5abecf82806835e4f60b07d65a4b1531b9e1b75ec7ce31abd4255477e6" ||
+     d3 != "617ec6d41152351f09f86f601ad879216bc5b0bf94e33356e816b009e7a9579e" then
+    return (← fail s!"computeApprovalDigest fixture mismatch: d1={d1} d2={d2} d3={d3}")
+
+  let (chalSt, chalBody) ← sendJson "POST" "/api/approvals/challenge" hsJwt
+    "{\"method\":\"POST\",\"path\":\"/api/privilege-access/p1/approve\",\"body\":\"{}\",\"summary\":\"grant deploy\"}"
+  if chalSt != 200 || (chalBody.splitOn "\"challenge_id\":").length < 2 || (chalBody.splitOn "\"payload\":\"paloma-approval-v1\\n").length < 2 then
+    return (← fail s!"POST /api/approvals/challenge failed: {chalSt} {chalBody}")
+
+  let (paReqSt, paReqBody) ← sendJson "POST" "/api/mcp/call" hsJwt
+    "{\"name\":\"request_privileged_access\",\"arguments\":{\"scope\":\"service_deploy\",\"target_host\":\"self\",\"allowed_unit\":\"sandboxed-sh-dev.service\",\"ttl_minutes\":60,\"session_scoped\":true,\"reason\":\"Deploy parity fix\"}}"
+  let paReqRes := ((OrbBin.Json.parse paReqBody).toOption.getD (.obj #[])).field? "result" |>.getD (.obj #[])
+  let paReqId := (paReqRes.fieldStr? "request_id").getD ""
+  if paReqSt != 200 || paReqId.isEmpty || (paReqRes.fieldStr? "state") != some "pending" ||
+     (paReqRes.fieldStr? "allowed_unit") != some "sandboxed-sh-dev.service" then
+    return (← fail s!"MCP request_privileged_access failed: {paReqSt} {paReqBody}")
+
+  let (paGetSt, paGetBody) ← sendJson "GET" "/api/privilege-access" hsJwt ""
+  let (aqGetSt, aqGetBody) ← sendJson "GET" "/api/approvals/queue" hsJwt ""
+  if paGetSt != 200 || (paGetBody.splitOn "\"state\":\"pending\"").length < 2 ||
+     (paGetBody.splitOn "\"allowed_unit\":\"sandboxed-sh-dev.service\"").length < 2 ||
+     (paGetBody.splitOn "\"audit\":[").length < 2 || (paGetBody.splitOn "\"command_audit\":[").length < 2 ||
+     aqGetSt != 200 || (aqGetBody.splitOn "\"kind\":\"privilege\"").length < 2 ||
+     (aqGetBody.splitOn "\"risk\":\"elevated\"").length < 2 then
+    return (← fail s!"GET /api/privilege-access or /api/approvals/queue mismatch: pa={paGetSt}:{paGetBody} aq={aqGetSt}:{aqGetBody}")
+
+  let (paAppSt, paAppBody) ← sendJson "POST" s!"/api/privilege-access/{paReqId}/approve" hsJwt
+    "{\"ttl_minutes\":60,\"session_scoped\":true}"
+  if paAppSt != 200 || (paAppBody.splitOn "\"state\":\"approved\"").length < 2 ||
+     (paAppBody.splitOn "\"expires_at\":\"20").length < 2 ||
+     (paAppBody.splitOn "\"lease_token\":").length > 1 then
+    return (← fail s!"POST /api/privilege-access/:id/approve failed or leaked lease_token: {paAppSt} {paAppBody}")
+
+  let (mcpListPaSt, mcpListPaBody) ← sendJson "POST" "/api/mcp/call" hsJwt
+    "{\"name\":\"list_privileged_access\",\"arguments\":{}}"
+  if mcpListPaSt != 200 || (mcpListPaBody.splitOn "\"lease_token\":\"orb-pl-").length < 2 then
+    return (← fail s!"MCP list_privileged_access did not return owner lease_token: {mcpListPaSt} {mcpListPaBody}")
+
+  let (paRevSt, paRevBody) ← sendJson "DELETE" s!"/api/privilege-access/{paReqId}" hsJwt ""
+  if paRevSt != 200 || (paRevBody.splitOn "\"state\":\"revoked\"").length < 2 then
+    return (← fail s!"DELETE /api/privilege-access/:id failed: {paRevSt} {paRevBody}")
+
+  -- Batch `/api/approvals/approve-all` with critical confirmation check
+  let (_, rootReqBody) ← sendJson "POST" "/api/privilege-access/request" hsJwt
+    "{\"scope\":\"root_exec\",\"target_host\":\"self\",\"ttl_minutes\":30,\"reason\":\"Root check\"}"
+  let rootReqId := (((OrbBin.Json.parse rootReqBody).toOption.getD (.obj #[])).fieldStr? "request_id").getD ""
+  let (critNoConfirmSt, _) ← sendJson "POST" "/api/approvals/approve-all" hsJwt
+    s!"\{\"items\":[\{\"kind\":\"privilege\",\"id\":\"{rootReqId}\",\"digest\":\"\"}],\"confirm_critical\":false}"
+  let (critConfirmSt, critConfirmBody) ← sendJson "POST" "/api/approvals/approve-all" hsJwt
+    s!"\{\"items\":[\{\"kind\":\"privilege\",\"id\":\"{rootReqId}\",\"digest\":\"\"}],\"confirm_critical\":true}"
+  let (bunkSt, _) ← sendJson "POST" "/api/privilege-access/bunker" hsJwt "{\"level\":2,\"reason\":\"test\"}"
+  let (unbunkSt, unbunkBody) ← sendJson "POST" "/api/privilege-access/unbunker" hsJwt ""
+  if critNoConfirmSt != 400 || critConfirmSt != 200 || (critConfirmBody.splitOn "\"approved\":1").length < 2 ||
+     bunkSt != 200 || unbunkSt != 200 || (unbunkBody.splitOn "\"bunker_state\":0").length < 2 then
+    return (← fail s!"approve-all / bunker / unbunker failed: noConf={critNoConfirmSt} conf={critConfirmSt}:{critConfirmBody} bunk={bunkSt} unbunk={unbunkSt}:{unbunkBody}")
+
   closeManagedComputeStore mStore
   closeCoreStore store
   cleanup
@@ -6988,5 +7066,6 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
 
 end OrbCore.SelfTest
 
-def main (args : List String) : IO UInt32 :=
+def main (args : List String) : IO UInt32 := do
+  discard <| LeanSys.Posix.setenv "ORB_HERMETIC_TEST" "1" true
   OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")

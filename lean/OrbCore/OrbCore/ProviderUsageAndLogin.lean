@@ -136,10 +136,19 @@ private def parseEnvFile (raw : String) : Array (String × String) := Id.run do
         if !key.isEmpty then out := out.push (key, val)
   return out
 
+private def isHermeticTestMode : IO Bool := do
+  match ← IO.getEnv "ORB_HERMETIC_TEST" with
+  | some v =>
+    let tv := v.trimAscii.toString.toLower
+    return tv == "1" || tv == "true" || tv == "yes"
+  | none => return false
+
 def lookupEnvWithFiles? (key : String) : IO (Option String) := do
   if let some v ← IO.getEnv key then
     let tv := v.trimAscii.toString
     if !tv.isEmpty then return some tv
+  if ← isHermeticTestMode then
+    return none
   for p in #["/etc/sandboxed-sh/cli-proxy-management.env", "/etc/open_agent/open_agent.env", "/etc/sandboxed-sh/cloud-agents-prod.env"] do
     let fp := System.FilePath.mk p
     if (← fp.pathExists) then
@@ -190,6 +199,8 @@ def candidateCliProxyAuthDirs : IO (Array String) := do
   let mut dirs : Array String := #[]
   if let some envDir ← lookupEnvWithFiles? "CLI_PROXY_AUTH_DIR" then
     if !envDir.isEmpty then dirs := dirs.push envDir
+  if ← isHermeticTestMode then
+    return dirs
   if !dirs.contains "/var/lib/cli-proxy-api" then
     dirs := dirs.push "/var/lib/cli-proxy-api"
   let homeDir := (← IO.getEnv "HOME").getD "/root"

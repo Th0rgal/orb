@@ -1,11 +1,19 @@
-import {render,screen,fireEvent,cleanup,waitFor} from '@solidjs/testing-library';
-import {afterEach,describe,it,expect,vi} from 'vitest';
-vi.mock('../src/api',()=>({api:vi.fn(),connectionVersion:()=>0}));
+import { render, screen, fireEvent, cleanup, waitFor } from '@solidjs/testing-library';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+vi.mock('../src/api', () => ({
+  api: vi.fn(),
+  connectionVersion: () => 0,
+  ApiError: class extends Error {
+    constructor(public status: number, public detail: string) {
+      super(`${status} ${detail}`);
+    }
+  },
+}));
 vi.mock('../src/deviceApproval',()=>({signedApi:vi.fn(),ApprovalCancelled:class extends Error{},approvalGraceSecs:()=>300,graceUntil:()=>0,setApprovalGraceSecs:vi.fn()}));
-import {api} from '../src/api';
-import {signedApi} from '../src/deviceApproval';
+import { api, ApiError } from '../src/api';
+import { signedApi } from '../src/deviceApproval';
 import fixture from '../../shared/orb-spec/fixtures/privilege-access.json';
-import {requestTitle,requesterLabel,approvePrivilegeAccess,bunkerStateLabel,denyPrivilegeAccess,lifetimeLabel,livePrivilegeGrant,revokePrivilegeAccess,scopeUnlocks,triggerBunker,unbunkerFleet,type PrivilegeRequest} from '../src/privilegeAccessApi';
+import {requestTitle,requesterLabel,approvePrivilegeAccess,bunkerStateLabel,denyPrivilegeAccess,getPrivilegeAccess,lifetimeLabel,livePrivilegeGrant,revokePrivilegeAccess,scopeUnlocks,triggerBunker,unbunkerFleet,type PrivilegeRequest} from '../src/privilegeAccessApi';
 import {PrivilegeAccessPanel} from '../src/PrivilegeAccessPanel';
 import {MissionAccessPanel} from '../src/MissionAccessPanel';
 import {SecretAccessPanel} from '../src/SecretAccessPanel';
@@ -73,5 +81,36 @@ describe('privilege access',()=>{
    vi.mocked(api).mockResolvedValue({requests:[{id:'sx',kind:'read',status:'pending',mission_id:null,requester:extSubject,all_projects:false,key:'OPENAI_API_KEY',reason:'local cli',created_at:iso(-20_000)}],grants:[{id:'sg1',mission_id:null,requester:extSubject,scope:{kind:'secret',key:'OPENAI_API_KEY'},created_at:iso(-60_000),expires_at:iso(3_600_000)}],audit:[{at:iso(-10_000),mission_id:null,requester:extSubject,key:'OPENAI_API_KEY',via:'grant'}]});
    render(()=><SecretAccessPanel projects={[]} requireBiometric={async()=>true} onError={()=>{}} onSecretsChanged={()=>{}}/>);
    await waitFor(()=>expect(screen.getByText(/External · macbook-air \(claude-code\)/)).toBeTruthy());
+  });
+  it('normalizes transitional status/allowed_units payloads and falls back on 404 approve/deny/revoke routes', async () => {
+   vi.mocked(api).mockResolvedValueOnce({
+     bunker_state: 0,
+     requests: [
+       {
+         id: '70d723dd-1eaa-411e-83f9-1350e448c4d7',
+         mission_id: '',
+         scope: 'service_deploy',
+         target_host: 'agent-core',
+         allowed_units: ['sandboxed-sh-prod.service'],
+         ttl_minutes: 30,
+         reason: 'Deploy PR #1694',
+         status: 'pending',
+         created_at: iso(-120_000),
+       },
+     ],
+     grants: [],
+   });
+   const snap = await getPrivilegeAccess();
+   expect(snap.requests[0].state).toBe('pending');
+   expect(snap.requests[0].allowed_unit).toBe('sandboxed-sh-prod.service');
+   expect(snap.requests[0].session_scoped).toBe(true);
+   expect(requesterLabel(snap.requests[0])).toBe('External · sandboxed-mcp');
+
+   vi.mocked(signedApi)
+     .mockRejectedValueOnce(new (ApiError as any)(404, 'Not Found'))
+     .mockResolvedValueOnce(req({ state: 'approved' }));
+   await approvePrivilegeAccess(snap.requests[0]);
+   expect(vi.mocked(signedApi).mock.calls[0][1]).toBe('/api/privilege-access/70d723dd-1eaa-411e-83f9-1350e448c4d7/approve');
+   expect(vi.mocked(signedApi).mock.calls[1][1]).toBe('/api/privilege-access/requests/70d723dd-1eaa-411e-83f9-1350e448c4d7/approve');
   });
 });
