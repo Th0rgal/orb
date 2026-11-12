@@ -15,7 +15,26 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Same planner as ci.yml: skip the kernel audit when no kernel input changed.
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.plan.outputs.run_wf_kernel_abi }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: plan
+        run: |
+          python3 scripts/ci_plan.py \
+            --event "${{ github.event_name }}" --ref "${{ github.ref }}" \
+            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --head "${{ github.sha }}" --github-output "$GITHUB_OUTPUT"
+
   kernel-abi:
+    needs: plan
+    if: needs.plan.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

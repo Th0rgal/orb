@@ -26,11 +26,41 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # Selects the jobs this change needs from ci/domains.toml. Unknown paths,
+  # CI changes, master pushes and the nightly select everything.
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    outputs:
+      run_test: ${{ steps.plan.outputs.run_test }}
+      run_harness_contract: ${{ steps.plan.outputs.run_harness_contract }}
+      run_capability_matrix: ${{ steps.plan.outputs.run_capability_matrix }}
+      run_policy_lint: ${{ steps.plan.outputs.run_policy_lint }}
+      run_orb_unit: ${{ steps.plan.outputs.run_orb_unit }}
+      run_orb_browser: ${{ steps.plan.outputs.run_orb_browser }}
+      run_orb_performance: ${{ steps.plan.outputs.run_orb_performance }}
+      run_orb_desktop_shell: ${{ steps.plan.outputs.run_orb_desktop_shell }}
+      run_orb_macos_shell: ${{ steps.plan.outputs.run_orb_macos_shell }}
+      run_docker: ${{ steps.plan.outputs.run_docker }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: plan
+        run: |
+          python3 scripts/ci_plan.py \
+            --event "${{ github.event_name }}" --ref "${{ github.ref }}" \
+            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --head "${{ github.sha }}" \
+            --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+
   test:
     name: Test
     runs-on: ubuntu-latest
     # Skip CI on draft PRs unless explicitly requested
-    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    needs: plan
+    if: (needs.plan.outputs.run_test == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     steps:
       - uses: actions/checkout@v6
 
@@ -83,7 +113,8 @@ jobs:
     name: Harness Contract Tests
     runs-on: ubuntu-latest
     # Skip CI on draft PRs unless explicitly requested
-    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    needs: plan
+    if: (needs.plan.outputs.run_harness_contract == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     steps:
       - uses: actions/checkout@v6
 
@@ -99,7 +130,8 @@ jobs:
     name: Capability Matrix Contract Check
     runs-on: ubuntu-latest
     # Skip CI on draft PRs unless explicitly requested
-    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    needs: plan
+    if: (needs.plan.outputs.run_capability_matrix == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     steps:
       - uses: actions/checkout@v6
 
@@ -110,7 +142,8 @@ jobs:
     name: Policy Lint
     runs-on: ubuntu-latest
     # Skip CI on draft PRs unless explicitly requested
-    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    needs: plan
+    if: (needs.plan.outputs.run_policy_lint == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     steps:
       - uses: actions/checkout@v6
 
@@ -136,7 +169,8 @@ jobs:
   orb-unit:
     name: Orb unit
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    needs: plan
+    if: (needs.plan.outputs.run_orb_unit == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     defaults:
       run:
         working-directory: orb
@@ -159,7 +193,8 @@ jobs:
   orb-browser:
     name: Orb browser (${{ matrix.shard }}/2)
     runs-on: ubuntu-24.04
-    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    needs: plan
+    if: (needs.plan.outputs.run_orb_browser == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     strategy:
       fail-fast: false
       matrix:
@@ -211,7 +246,8 @@ jobs:
   orb-performance:
     name: Orb performance
     runs-on: ubuntu-24.04
-    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    needs: plan
+    if: (needs.plan.outputs.run_orb_performance == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     continue-on-error: ${{ github.event_name == 'pull_request' }}
     defaults:
       run:
@@ -247,7 +283,8 @@ jobs:
   orb-desktop-shell:
     name: Orb Desktop Shell (Lean + C)
     runs-on: ubuntu-24.04
-    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    needs: plan
+    if: (needs.plan.outputs.run_orb_desktop_shell == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     steps:
       - uses: actions/checkout@v6
       - name: Install WebKitGTK and Lean build deps
@@ -267,7 +304,8 @@ jobs:
   orb-macos-shell:
     name: Orb macOS Shell & Signer (Swift)
     runs-on: macos-26
-    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    needs: plan
+    if: (needs.plan.outputs.run_orb_macos_shell == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
@@ -289,7 +327,8 @@ jobs:
   docker:
     name: Docker image
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    needs: plan
+    if: (needs.plan.outputs.run_docker == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     steps:
       - uses: actions/checkout@v6
       - name: Verify Docker entrypoint with Windows line-ending settings
@@ -357,3 +396,18 @@ jobs:
             fi
             docker rm -f -v "$name" >/dev/null
           done
+
+  # Aggregate of the ci.yml jobs: skipped jobs pass, failed or cancelled ones
+  # fail. It does not cover kernel-abi.yml, ios-build.yml or android-apk.yml,
+  # so those keep their own required checks until they move into this file.
+  ci-ok:
+    name: CI OK
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [plan, test, fmt, harness-contract, capability-matrix, policy-lint, orb-unit, orb-browser, orb-performance, orb-desktop-shell, orb-macos-shell, docker]
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS"
+          if echo "$RESULTS" | grep -qE '"(failure|cancelled)"'; then exit 1; fi
