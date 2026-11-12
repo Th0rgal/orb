@@ -9,7 +9,9 @@ when Core itself is unhealthy.
 
 Config comes from the environment (see deploy/systemd/orb-monitor.service):
   ORB_MONITOR_STATE         state file (default /var/lib/orb-monitor/state.json)
-  ORB_MONITOR_SIGNAL_URL    POST endpoint taking {"recipient","message"}; unset = journal only
+  ORB_MONITOR_INBOX_MISSION mission id whose transcript receives reports (shows in the Orb Inbox)
+  ORB_MONITOR_SIGNAL_URL    fallback when the Inbox post fails (Core down): POST endpoint
+                            taking {"recipient","message"}; unset = journal only
   ORB_MONITOR_SIGNAL_RECIPIENT, ORB_MONITOR_SIGNAL_TOKEN
   ORB_MONITOR_MISSIONS_DB, ORB_MONITOR_COMPUTE_DB, ORB_MONITOR_NGINX_LOG
 """
@@ -136,8 +138,50 @@ def check_builds(problems):
         problems["build:long"] = f"a lake build has been running for {longest // 60} min"
 
 
+def core_token():
+    """Short-lived Core session token, minted from the secret Core itself uses.
+
+    Nothing is stored: the secret is read from Core's own env file on this host
+    and the token expires in ten minutes.
+    """
+    import hashlib, hmac
+    secret = ""
+    try:
+        for line in open(ENV("ORB_MONITOR_CORE_ENV", "/etc/open_agent/open_agent.env")):
+            if line.startswith("JWT_SECRET="):
+                secret = line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        return ""
+    if not secret:
+        return ""
+    exp = int(NOW) + 600
+    return f"{exp}." + hmac.new(secret.encode(), f"orb-jwt-v1:{exp}".encode(), hashlib.sha256).hexdigest()
+
+
+def post_inbox(text):
+    """Append the report to the monitor's own mission and mark it as waiting on
+    the user, which is what puts a mission in the Orb Inbox."""
+    mission = ENV("ORB_MONITOR_INBOX_MISSION", "").strip()
+    token = core_token()
+    if not mission or not token:
+        return False
+    base = f"http://127.0.0.1:{SERVICES['prod']}/api/control/missions/{mission}"
+    headers = {"Content-Type": "application/json", "Authorization": "Bearer " + token}
+    try:
+        for path, body in (("client-transcript", {"role": "assistant", "content": text}),
+                           ("client-status", {"status": "awaiting_user"})):
+            req = urllib.request.Request(f"{base}/{path}", data=json.dumps(body).encode(), headers=headers, method="POST")
+            urllib.request.urlopen(req, timeout=8).read()
+        return True
+    except Exception as exc:
+        print(f"inbox post failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return False
+
+
 def notify(text):
     print(text)
+    if post_inbox(text):
+        return
     url = ENV("ORB_MONITOR_SIGNAL_URL", "").strip()
     if not url:
         return
