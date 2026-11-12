@@ -1060,20 +1060,25 @@ def dispatchMcpToolCall
     return mcpOk (← mcpListMissionAccess store.rootDir callerMid nowEpochSec)
 
   | "request_privileged_access" =>
-    let scope := (args.fieldStr? "scope").getD "systemctl"
+    let scope := (args.fieldStr? "scope").getD "service_deploy"
     let host := (args.fieldStr? "target_host").getD "self"
     let reason := (args.fieldStr? "reason").getD ""
-    let units := ((args.fieldArr? "allowed_units").getD #[]).filterMap JVal.asStr?
+    let singleUnit? := (args.fieldStr? "allowed_unit").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+    let arrUnits := ((args.fieldArr? "allowed_units").getD #[]).filterMap JVal.asStr?
+    let units := match singleUnit? with
+      | some u => if arrUnits.contains u then arrUnits else #[u] ++ arrUnits
+      | none => arrUnits
     let ttlMins := (args.fieldNat? "ttl_minutes").getD 30
-    return mcpOk (← mcpRequestPrivilegedAccess store.rootDir callerMid scope host reason units ttlMins nowEpochSec)
+    let sessScoped := (args.fieldBool? "session_scoped").getD true
+    return mcpOk (← mcpRequestPrivilegedAccess (some store) store.rootDir callerMid claims.sessionId scope host reason units ttlMins nowEpochSec sessScoped)
 
   | "list_privileged_access" =>
-    return mcpOk (← mcpListPrivilegedAccess store store.rootDir callerMid nowEpochSec)
+    return mcpOk (← mcpListPrivilegedAccess store store.rootDir callerMid nowEpochSec claims.sessionId true)
 
   | "revoke_privileged_access" =>
     let gid := (args.fieldStr? "grant_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
-    let ok ← mcpRevokePrivilegedAccess store gid callerMid
-    return mcpOk (.obj #[("ok", .bool ok), ("grant_id", .str gid)])
+    let rev? ← mcpRevokePrivilegedAccess store store.rootDir gid callerMid nowEpochSec
+    return mcpOk (.obj #[("ok", .bool rev?.isSome), ("grant_id", .str gid)])
 
   | "execute_privileged_command" =>
     return mcpErr "privilege_requires_lease" "Use POST /api/privilege/exec with an active biometric-approved grant_id"

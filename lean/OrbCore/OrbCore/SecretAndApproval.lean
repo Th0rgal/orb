@@ -376,39 +376,427 @@ def mcpSecretQueueAction
 
 /-! ## MCP Privilege Broker Helpers (`request_privileged_access`, `list_privileged_access`, `revoke_privileged_access`) -/
 
+private def lookupMissionTitleOpt (st : CoreStore) (missionId : String) : IO (Option String) := do
+  let mid := missionId.trimAscii.toString
+  if mid.isEmpty then return none
+  if let .ok rs ← execParamQuery st.missionsDb "SELECT COALESCE(title,'') FROM missions WHERE id=?1 LIMIT 1;" #[mid] then
+    if rs.size > 1 then
+      let t := ((rs[1]?).bind (·[0]?)).getD "" |>.trimAscii.toString
+      if !t.isEmpty then return some t
+  return none
+
+private def buildExternalRequesterJVal (sessionId : String) (clientKind : String := "cli")
+    (clientLabel : String := "sandboxed-mcp") (hostHint : String := "") : JVal :=
+  let sid := if sessionId.trimAscii.toString.isEmpty then "external" else sessionId.trimAscii.toString
+  let base : Array (String × JVal) := #[
+    ("kind", .str "external_session"),
+    ("session_id", .str sid),
+    ("client_kind", .str (if clientKind.isEmpty then "cli" else clientKind)),
+    ("client_label", .str (if clientLabel.isEmpty then "sandboxed-mcp" else clientLabel))
+  ]
+  if hostHint.trimAscii.toString.isEmpty then .obj base
+  else .obj (base.push ("host_hint", .str hostHint.trimAscii.toString))
+
+private def canonicalSubjectIdForApproval (subject : JVal) : String :=
+  let kind := (subject.fieldStr? "kind").getD "mission"
+  if kind == "external_session" then
+    let sid := (subject.fieldStr? "session_id").getD "external"
+    let ckind := (subject.fieldStr? "client_kind").getD "local_mcp"
+    let clabel := ((subject.fieldStr? "client_label").getD "").trimAscii.toString
+    let hhint := ((subject.fieldStr? "host_hint").getD "").trimAscii.toString
+    let fullHex := bytesToHexLower (sha256Bytes s!"{clabel}\n{hhint}".toUTF8)
+    let shortHex := (fullHex.take 16).toString
+    s!"session:{sid}:{ckind}:{shortHex}"
+  else
+    let mid := (subject.fieldStr? "mission_id").getD ""
+    s!"mission:{mid}"
+
+def computeApprovalDigest (kind id : String) (subject : JVal) (fields : Array String) : String :=
+  let subjKind := (subject.fieldStr? "kind").getD "mission"
+  let head :=
+    if subjKind == "external_session" then
+      s!"orb-approval-v2\n{kind}\n{id}\n{canonicalSubjectIdForApproval subject}"
+    else
+      let mid := (subject.fieldStr? "mission_id").getD ""
+      s!"orb-approval-v1\n{kind}\n{id}\n{mid}"
+  let payload := String.intercalate "\n" (head :: fields.toList)
+  bytesToHexLower (sha256Bytes payload.toUTF8)
+
+private def extractAllowedUnitsFromRequest (r : JVal) : Array String := Id.run do
+  let mut out : Array String := #[]
+  if let some u := (r.fieldStr? "allowed_unit").map (·.trimAscii.toString) then
+    if !u.isEmpty then out := out.push u
+  if let some xs := r.fieldArr? "allowed_units" then
+    for x in xs do
+      if let some s := x.asStr? then
+        let ts := s.trimAscii.toString
+        if !ts.isEmpty && !out.contains ts then out := out.push ts
+  return out
+
+private def normalizePrivilegeRequestJVal
+    (r : JVal)
+    (leaseLookup : Array (String × Bool × UInt64))
+    (nowEpochSec : UInt64)
+    (nowIso : String) : JVal := Id.run do
+  let rawState := ((r.fieldStr? "state").orElse (fun _ => r.fieldStr? "status") |>.getD "pending").trimAscii.toString
+  let mappedState :=
+    if rawState == "rejected" then "denied"
+    else if rawState.isEmpty then "pending"
+    else rawState
+  let gid := (r.fieldStr? "grant_id").getD ""
+  let revAt0 := (r.fieldStr? "revoked_at").getD ""
+  let expAt0 := (r.fieldStr? "expires_at").getD ""
+  let mut effState := mappedState
+  let mut effRevAt := revAt0
+  let mut effExpAt := expAt0
+  if let some (_, dbRev, dbExp) :=
+      if gid.isEmpty then none else leaseLookup.find? (fun (lgid, _, _) => lgid == gid) then
+    if effExpAt.isEmpty && dbExp > 0 then
+      effExpAt := formatEpochIso8601Utc dbExp
+    if dbRev && effRevAt.isEmpty then
+      effRevAt := nowIso
+    if dbRev then
+      effState := "revoked"
+    else if effState == "approved" && dbExp > 0 && nowEpochSec ≥ dbExp then
+      effState := "expired"
+  if !effRevAt.isEmpty then
+    effState := "revoked"
+  else if effState == "approved" && !effExpAt.isEmpty && decide (effExpAt ≤ nowIso) then
+    effState := "expired"
+  let mid := ((r.fieldStr? "requester_mission_id").orElse (fun _ => r.fieldStr? "mission_id") |>.getD "").trimAscii.toString
+  let units := extractAllowedUnitsFromRequest r
+  let allowedUnitField : JVal :=
+    match units[0]? with
+    | some u => .str u
+    | none => .null
+  let sessScoped := (r.fieldBool? "session_scoped").getD true
+  let ttlMins := (r.fieldNat? "ttl_minutes").getD 30
+  let targetHost :=
+    let th := ((r.fieldStr? "target_host").getD "self").trimAscii.toString
+    if th.isEmpty then "self" else th
+  let scope :=
+    let sc := ((r.fieldStr? "scope").getD "ops_read").trimAscii.toString
+    if sc == "systemctl" || sc.isEmpty then "service_deploy" else sc
+  let reqSubj : JVal :=
+    match r.field? "requester" with
+    | some v@(.obj _) => v
+    | _ =>
+      if mid.isEmpty then buildExternalRequesterJVal ((r.fieldStr? "session_id").getD "external")
+      else .obj #[("kind", .str "mission"), ("mission_id", .str mid)]
+  let base := r
+    |>.removeField "lease_token"
+    |>.setField "state" (.str effState)
+    |>.setField "status" (.str effState)
+    |>.setField "scope" (.str scope)
+    |>.setField "target_host" (.str targetHost)
+    |>.setField "allowed_unit" allowedUnitField
+    |>.setField "allowed_units" (.arr (units.map JVal.str))
+    |>.setField "session_scoped" (.bool sessScoped)
+    |>.setField "ttl_minutes" (JVal.nat ttlMins)
+    |>.setField "requester_mission_id" (if mid.isEmpty then .null else .str mid)
+    |>.setField "mission_id" (if mid.isEmpty then .null else .str mid)
+    |>.setField "requester" reqSubj
+    |>.setField "expires_at" (if effExpAt.isEmpty then .null else .str effExpAt)
+    |>.setField "revoked_at" (if effRevAt.isEmpty then .null else .str effRevAt)
+  return base
+
+private def normalizeMissionAccessRequestJVal (r : JVal) (nowIso : String) : JVal :=
+  let rawState := ((r.fieldStr? "state").orElse (fun _ => r.fieldStr? "status") |>.getD "pending").trimAscii.toString
+  let mapped := if rawState == "rejected" then "denied" else if rawState.isEmpty then "pending" else rawState
+  let revAt := (r.fieldStr? "revoked_at").getD ""
+  let expAt := (r.fieldStr? "expires_at").getD ""
+  let effState :=
+    if !revAt.isEmpty then "revoked"
+    else if mapped == "approved" && !expAt.isEmpty && decide (expAt ≤ nowIso) then "expired"
+    else mapped
+  r.setField "state" (.str effState) |>.setField "status" (.str effState)
+
+private def riskOfApprovalKindTier (kind tier : String) (allProjects : Bool := false) : String :=
+  if kind == "privilege" then
+    if tier == "root_exec" || tier == "host_admin" then "critical"
+    else if tier == "service_deploy" then "elevated"
+    else "routine"
+  else if kind == "mission_access" then
+    "elevated"
+  else if tier == "delete" || tier == "move" then
+    "critical"
+  else if tier == "write" || allProjects then
+    "elevated"
+  else
+    "routine"
+
+private def normalizeSecretTier (rawKind : String) : String :=
+  if rawKind == "secret_put" || rawKind == "write" then "write"
+  else if rawKind == "secret_delete" || rawKind == "delete" then "delete"
+  else if rawKind == "secret_move" || rawKind == "move" then "move"
+  else "read"
+
+private def buildPrivilegeApprovalItem (rNorm : JVal) : JVal :=
+  let rid := (rNorm.fieldStr? "id").getD ""
+  let scope := (rNorm.fieldStr? "scope").getD "ops_read"
+  let targetHost := (rNorm.fieldStr? "target_host").getD "self"
+  let allowedUnit := (rNorm.fieldStr? "allowed_unit").getD ""
+  let ttlMins := (rNorm.fieldNat? "ttl_minutes").getD 30
+  let sessScoped := (rNorm.fieldBool? "session_scoped").getD true
+  let mid := (rNorm.fieldStr? "requester_mission_id").getD ""
+  let subj : JVal :=
+    match rNorm.field? "requester" with
+    | some v@(.obj _) => v
+    | _ =>
+      if mid.isEmpty then buildExternalRequesterJVal "external"
+      else .obj #[("kind", .str "mission"), ("mission_id", .str mid)]
+  let digest := computeApprovalDigest "privilege" rid subj
+    #[scope, targetHost, allowedUnit, s!"{ttlMins}", if sessScoped then "session" else "ttl"]
+  let risk := riskOfApprovalKindTier "privilege" scope false
+  JVal.obj #[
+    ("kind", .str "privilege"),
+    ("id", .str rid),
+    ("requester_mission_id", if mid.isEmpty then .null else .str mid),
+    ("requester_title", rNorm.fieldOrNull "requester_title"),
+    ("requester_subject", subj),
+    ("requester_label", rNorm.fieldOrNull "requester_label"),
+    ("tier", .str scope),
+    ("target", .str targetHost),
+    ("risk", .str risk),
+    ("reason", .str ((rNorm.fieldStr? "reason").getD "")),
+    ("created_at", .str ((rNorm.fieldStr? "created_at").getD "")),
+    ("digest", .str digest),
+    ("request", rNorm)
+  ]
+
+private def buildSecretApprovalItem (rRaw : JVal) : JVal :=
+  let rSafe := (rRaw.removeField "encrypted_value").removeField "value"
+  let rid := (rSafe.fieldStr? "id").getD ""
+  let tier := normalizeSecretTier ((rSafe.fieldStr? "kind").getD "read")
+  let secKey := ((rSafe.fieldStr? "key").orElse (fun _ => rSafe.fieldStr? "secret_name") |>.getD "")
+  let projId := ((rSafe.fieldStr? "project_id").orElse (fun _ => rSafe.fieldStr? "bitwarden_project") |>.getD "")
+  let targetProjId := (rSafe.fieldStr? "target_project_id").getD ""
+  let allProjs := (rSafe.fieldBool? "all_projects").getD (projId == "all")
+  let reqEnriched := rSafe
+    |>.setField "kind" (.str tier)
+    |>.setField "key" (if secKey.isEmpty then .null else .str secKey)
+    |>.setField "project_id" (if projId.isEmpty || projId == "all" then .null else .str projId)
+    |>.setField "all_projects" (.bool allProjs)
+  let target :=
+    if !secKey.isEmpty then secKey
+    else if allProjs || projId.isEmpty then "*"
+    else projId
+  let mid := ((rSafe.fieldStr? "requester_mission_id").orElse (fun _ => rSafe.fieldStr? "mission_id") |>.getD "")
+  let subj : JVal :=
+    match rSafe.field? "requester" with
+    | some v@(.obj _) => v
+    | _ =>
+      if mid.isEmpty then buildExternalRequesterJVal "external"
+      else .obj #[("kind", .str "mission"), ("mission_id", .str mid)]
+  let digest := computeApprovalDigest "secret" rid subj
+    #[tier, secKey, if allProjs then "" else projId, targetProjId, if allProjs then "all" else "", ""]
+  let risk := riskOfApprovalKindTier "secret" tier allProjs
+  JVal.obj #[
+    ("kind", .str "secret"),
+    ("id", .str rid),
+    ("requester_mission_id", if mid.isEmpty then .null else .str mid),
+    ("requester_title", rSafe.fieldOrNull "requester_title"),
+    ("requester_subject", subj),
+    ("requester_label", rSafe.fieldOrNull "requester_label"),
+    ("tier", .str tier),
+    ("target", .str target),
+    ("risk", .str risk),
+    ("reason", .str ((rSafe.fieldStr? "reason").getD "")),
+    ("created_at", .str ((rSafe.fieldStr? "created_at").getD "")),
+    ("digest", .str digest),
+    ("request", reqEnriched)
+  ]
+
+private def buildMissionAccessApprovalItem (rRaw : JVal) (nowIso : String) : JVal :=
+  let rNorm := normalizeMissionAccessRequestJVal rRaw nowIso
+  let rid := (rNorm.fieldStr? "id").getD ""
+  let scope := (rNorm.fieldStr? "scope").getD "read"
+  let tier := if scope == "control" then "control_mission" else "read_mission"
+  let targetMid := (rNorm.fieldStr? "target_mission_id").getD ""
+  let ttlH := (rNorm.fieldNat? "ttl_hours").getD 24
+  let mid := ((rNorm.fieldStr? "requester_mission_id").orElse (fun _ => rNorm.fieldStr? "mission_id") |>.getD "")
+  let subj : JVal :=
+    match rNorm.field? "requester" with
+    | some v@(.obj _) => v
+    | _ =>
+      if mid.isEmpty then buildExternalRequesterJVal "external"
+      else .obj #[("kind", .str "mission"), ("mission_id", .str mid)]
+  let digest := computeApprovalDigest "mission_access" rid subj #[scope, targetMid, s!"{ttlH}"]
+  let risk := riskOfApprovalKindTier "mission_access" tier false
+  JVal.obj #[
+    ("kind", .str "mission_access"),
+    ("id", .str rid),
+    ("requester_mission_id", if mid.isEmpty then .null else .str mid),
+    ("requester_title", rNorm.fieldOrNull "requester_title"),
+    ("requester_subject", subj),
+    ("requester_label", rNorm.fieldOrNull "requester_label"),
+    ("tier", .str tier),
+    ("target", .str targetMid),
+    ("risk", .str risk),
+    ("reason", .str ((rNorm.fieldStr? "reason").getD "")),
+    ("created_at", .str ((rNorm.fieldStr? "created_at").getD "")),
+    ("digest", .str digest),
+    ("request", rNorm)
+  ]
+
+private def approveSinglePrivilegeRequest
+    (st : CoreStore)
+    (dataRoot reqId : String)
+    (ttlOverride? : Option Nat)
+    (sessScopedOverride? : Option Bool)
+    (nowEpochSec : UInt64)
+    (nowIso : String) : IO (Except (Nat × String) (JVal × String × String × UInt64)) := do
+  let doc ← readDataJsonObj dataRoot "privilege_access.json"
+  let reqs := (doc.fieldArr? "requests").getD #[]
+  let some r := reqs.find? (fun x => (x.fieldStr? "id").getD "" == reqId)
+    | return .error (404, "{\"error\":\"request_not_found\"}")
+  let gid ← newUuidV4
+  let .ok rnd ← OrbNetLeaf.Crypto.randBytes 24
+    | return .error (500, "{\"error\":\"csprng_failed\"}")
+  let leaseTok := "orb-pl-" ++ bytesToHexLower rnd
+  let baseTtl := (r.fieldNat? "ttl_minutes").getD 30
+  let ttlMins := Nat.min 240 (Nat.max 1 (ttlOverride?.getD baseTtl))
+  let sessScoped := sessScopedOverride?.getD ((r.fieldBool? "session_scoped").getD true)
+  let expEpoch := nowEpochSec + (ttlMins * 60).toUInt64
+  let expIso := formatEpochIso8601Utc expEpoch
+  let units := extractAllowedUnitsFromRequest r
+  let unitsJson := renderCompact (.arr (units.map JVal.str))
+  let mid := ((r.fieldStr? "requester_mission_id").orElse (fun _ => r.fieldStr? "mission_id") |>.getD "").trimAscii.toString
+  let targetHost :=
+    let th := ((r.fieldStr? "target_host").getD "self").trimAscii.toString
+    if th.isEmpty then "self" else th
+  let scope :=
+    let sc := ((r.fieldStr? "scope").getD "ops_read").trimAscii.toString
+    if sc == "systemctl" || sc.isEmpty then "service_deploy" else sc
+  let lease : PrivilegeLeaseRecord := {
+    grantId := gid
+    leaseToken := leaseTok
+    missionId := mid
+    targetHost := targetHost
+    scope := scope
+    allowedUnitsJson := unitsJson
+    requireForceCmd := false
+    biometricSigned := true
+    revoked := false
+    expiresAtEpoch := expEpoch
+    leaseEpoch := expEpoch
+  }
+  if let .error e ← upsertPrivilegeLease st lease then
+    return .error (500, s!"\{\"error\":{jsonEscape e}}")
+  let mut approvedNorm : JVal := .obj #[]
+  let nextReqs := reqs.map fun x =>
+    if (x.fieldStr? "id").getD "" == reqId then
+      let upd := x
+        |>.setField "state" (.str "approved")
+        |>.setField "status" (.str "approved")
+        |>.setField "grant_id" (.str gid)
+        |>.setField "ttl_minutes" (JVal.nat ttlMins)
+        |>.setField "session_scoped" (.bool sessScoped)
+        |>.setField "decided_at" (.str nowIso)
+        |>.setField "expires_at" (.str expIso)
+        |>.removeField "revoked_at"
+      let norm := normalizePrivilegeRequestJVal upd #[(gid, false, expEpoch)] nowEpochSec nowIso
+      approvedNorm := norm
+      norm
+    else x
+  let audits := (doc.fieldArr? "audit").getD #[]
+  let auditEntry := JVal.obj #[
+    ("at", .str nowIso),
+    ("request_id", .str reqId),
+    ("requester_mission_id", if mid.isEmpty then .null else .str mid),
+    ("requester", approvedNorm.fieldOrNull "requester"),
+    ("target_host", .str targetHost),
+    ("scope", .str scope),
+    ("action", .str "approved"),
+    ("detail", match units[0]? with | some u => .str u | none => .null)
+  ]
+  let nextDoc := (doc.setField "requests" (.arr nextReqs)).setField "audit" (.arr (#[auditEntry] ++ audits))
+  discard <| writeDataJsonObj dataRoot "privilege_access.json" nextDoc
+  return .ok (approvedNorm, gid, leaseTok, expEpoch)
+
 def mcpRequestPrivilegedAccess
-    (dataRoot missionId scope targetHost reason : String)
-    (allowedUnits : Array String) (ttlMinutes : Nat) (nowEpochSec : UInt64) : IO JVal := do
+    (st? : Option CoreStore)
+    (dataRoot missionId sessionId scope targetHost reason : String)
+    (allowedUnits : Array String) (ttlMinutes : Nat) (nowEpochSec : UInt64)
+    (sessionScoped : Bool := true) : IO JVal := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let doc ← readDataJsonObj dataRoot "privilege_access.json"
   let reqs := (doc.fieldArr? "requests").getD #[]
   let reqId ← newUuidV4
   let clampedTtl := Nat.min 240 (Nat.max 1 ttlMinutes)
+  let cleanMid := missionId.trimAscii.toString
+  let cleanHost := if targetHost.trimAscii.toString.isEmpty then "self" else targetHost.trimAscii.toString
+  let cleanScope :=
+    let sc := scope.trimAscii.toString
+    if sc == "systemctl" || sc.isEmpty then "service_deploy" else sc
+  let cleanUnits := allowedUnits.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  let allowedUnitField : JVal := match cleanUnits[0]? with | some u => .str u | none => .null
+  let titleOpt ← match st? with
+    | some st => lookupMissionTitleOpt st cleanMid
+    | none => pure none
+  let reqSubj : JVal :=
+    if cleanMid.isEmpty then
+      buildExternalRequesterJVal sessionId "cli" "sandboxed-mcp"
+    else
+      .obj #[("kind", .str "mission"), ("mission_id", .str cleanMid)]
   let newReq := JVal.obj #[
     ("id", .str reqId),
-    ("mission_id", .str missionId),
-    ("scope", .str scope),
-    ("target_host", .str (if targetHost.isEmpty then "self" else targetHost)),
-    ("allowed_units", .arr (allowedUnits.map JVal.str)),
+    ("requester_mission_id", if cleanMid.isEmpty then .null else .str cleanMid),
+    ("mission_id", if cleanMid.isEmpty then .null else .str cleanMid),
+    ("requester_title", match titleOpt with | some t => .str t | none => .null),
+    ("requester", reqSubj),
+    ("session_id", if sessionId.trimAscii.toString.isEmpty then .null else .str sessionId.trimAscii.toString),
+    ("scope", .str cleanScope),
+    ("target_host", .str cleanHost),
+    ("allowed_unit", allowedUnitField),
+    ("allowed_units", .arr (cleanUnits.map JVal.str)),
+    ("session_scoped", .bool sessionScoped),
     ("ttl_minutes", JVal.nat clampedTtl),
     ("reason", .str reason),
+    ("state", .str "pending"),
     ("status", .str "pending"),
-    ("created_at", .str nowIso)
+    ("created_at", .str nowIso),
+    ("decided_at", .null),
+    ("expires_at", .null),
+    ("revoked_at", .null)
   ]
-  discard <| writeDataJsonObj dataRoot "privilege_access.json" (doc.setField "requests" (.arr (reqs.push newReq)))
-  return .obj #[("status", .str "pending"), ("request_id", .str reqId), ("scope", .str scope)]
+  let audits := (doc.fieldArr? "audit").getD #[]
+  let auditEntry := JVal.obj #[
+    ("at", .str nowIso),
+    ("request_id", .str reqId),
+    ("requester_mission_id", if cleanMid.isEmpty then .null else .str cleanMid),
+    ("requester", reqSubj),
+    ("target_host", .str cleanHost),
+    ("scope", .str cleanScope),
+    ("action", .str "requested"),
+    ("detail", if reason.isEmpty then .null else .str reason)
+  ]
+  let nextDoc := (doc.setField "requests" (.arr (reqs.push newReq))).setField "audit" (.arr (#[auditEntry] ++ audits))
+  discard <| writeDataJsonObj dataRoot "privilege_access.json" nextDoc
+  return .obj #[
+    ("status", .str "pending"),
+    ("state", .str "pending"),
+    ("request_id", .str reqId),
+    ("id", .str reqId),
+    ("scope", .str cleanScope),
+    ("target_host", .str cleanHost),
+    ("allowed_unit", allowedUnitField),
+    ("session_scoped", .bool sessionScoped),
+    ("ttl_minutes", JVal.nat clampedTtl)
+  ]
 
-def mcpListPrivilegedAccess (st : CoreStore) (dataRoot missionId : String) (nowEpochSec : UInt64) : IO JVal := do
+def mcpListPrivilegedAccess (st : CoreStore) (dataRoot missionId : String) (nowEpochSec : UInt64)
+    (sessionId : String := "") (includeLeaseTokensForOwner : Bool := false) : IO JVal := do
+  let nowIso := formatEpochIso8601Utc nowEpochSec
   let doc ← readDataJsonObj dataRoot "privilege_access.json"
-  let reqs := ((doc.fieldArr? "requests").getD #[]).filter (fun r =>
-    missionId.isEmpty || (r.fieldStr? "mission_id").getD "" == missionId)
   let sql :=
     if missionId.isEmpty then
-      "SELECT grant_id, mission_id, target_host, scope, allowed_units_json, revoked, expires_at_epoch FROM privilege_leases ORDER BY expires_at_epoch DESC LIMIT 100;"
+      "SELECT grant_id, mission_id, target_host, scope, allowed_units_json, revoked, expires_at_epoch, lease_token FROM privilege_leases ORDER BY expires_at_epoch DESC LIMIT 100;"
     else
-      "SELECT grant_id, mission_id, target_host, scope, allowed_units_json, revoked, expires_at_epoch FROM privilege_leases WHERE mission_id=?1 ORDER BY expires_at_epoch DESC LIMIT 100;"
+      "SELECT grant_id, mission_id, target_host, scope, allowed_units_json, revoked, expires_at_epoch, lease_token FROM privilege_leases WHERE mission_id=?1 ORDER BY expires_at_epoch DESC LIMIT 100;"
   let args := if missionId.isEmpty then #[] else #[missionId]
   let mut grants : Array JVal := #[]
+  let mut leaseLookup : Array (String × Bool × UInt64) := #[]
   if let .ok rs ← execParamQuery st.missionsDb sql args then
     for i in [1:rs.size] do
       let r := rs[i]!
@@ -419,7 +807,9 @@ def mcpListPrivilegedAccess (st : CoreStore) (dataRoot missionId : String) (nowE
       let units := (OrbBin.Json.parse ((r[4]?).getD "[]")).toOption.getD (.arr #[])
       let rev := ((r[5]?).getD "0") != "0"
       let exp := (((r[6]?).bind String.toNat?).getD 0).toUInt64
-      grants := grants.push (.obj #[
+      let ltok := (r[7]?).getD ""
+      leaseLookup := leaseLookup.push (gid, rev, exp)
+      let baseFields : Array (String × JVal) := #[
         ("id", .str gid),
         ("grant_id", .str gid),
         ("mission_id", .str mid),
@@ -428,17 +818,66 @@ def mcpListPrivilegedAccess (st : CoreStore) (dataRoot missionId : String) (nowE
         ("allowed_units", units),
         ("revoked", .bool rev),
         ("active", .bool (!rev && nowEpochSec < exp)),
+        ("expires_at", .str (formatEpochIso8601Utc exp)),
         ("expires_at_epoch", JVal.uint64 exp)
-      ])
-  return .obj #[("requests", .arr reqs), ("grants", .arr grants)]
-
-def mcpRevokePrivilegedAccess (st : CoreStore) (grantId missionId : String) : IO Bool := do
-  let res ←
-    if missionId.isEmpty then
-      execParamQuery st.missionsDb "UPDATE privilege_leases SET revoked=1 WHERE grant_id=?1;" #[grantId]
+      ]
+      let grantFields :=
+        if includeLeaseTokensForOwner && !rev && nowEpochSec < exp && !ltok.isEmpty then
+          baseFields.push ("lease_token", .str ltok)
+        else
+          baseFields
+      grants := grants.push (.obj grantFields)
+  let rawReqs := ((doc.fieldArr? "requests").getD #[]).filter (fun r =>
+    if !missionId.isEmpty then
+      ((r.fieldStr? "requester_mission_id").orElse (fun _ => r.fieldStr? "mission_id") |>.getD "") == missionId
+    else if includeLeaseTokensForOwner && !sessionId.isEmpty then
+      let rMid := (r.fieldStr? "requester_mission_id").orElse (fun _ => r.fieldStr? "mission_id") |>.getD ""
+      let rSid := (r.fieldStr? "session_id").getD ""
+      rMid.isEmpty && (rSid.isEmpty || rSid == sessionId)
     else
-      execParamQuery st.missionsDb "UPDATE privilege_leases SET revoked=1 WHERE grant_id=?1 AND mission_id=?2;" #[grantId, missionId]
-  return res.isOk
+      true)
+  let normReqs := (rawReqs.map (fun r => normalizePrivilegeRequestJVal r leaseLookup nowEpochSec nowIso)).reverse
+  let auditArr := (doc.fieldArr? "audit").getD #[]
+  let cmdAuditArr := (doc.fieldArr? "command_audit").getD #[]
+  let incidentsArr := (doc.fieldArr? "bunker_incidents").getD #[]
+  return .obj #[
+    ("requests", .arr normReqs),
+    ("grants", .arr grants),
+    ("audit", .arr auditArr),
+    ("command_audit", .arr cmdAuditArr),
+    ("bunker_incidents", .arr incidentsArr)
+  ]
+
+def mcpRevokePrivilegedAccess (st : CoreStore) (dataRoot : String) (idOrGrantId missionId : String)
+    (nowEpochSec : UInt64 := 0) : IO (Option JVal) := do
+  let nowIso := if nowEpochSec == 0 then "revoked" else formatEpochIso8601Utc nowEpochSec
+  let doc ← readDataJsonObj dataRoot "privilege_access.json"
+  let reqs := (doc.fieldArr? "requests").getD #[]
+  let matchedReq? := reqs.find? (fun r =>
+    (r.fieldStr? "id").getD "" == idOrGrantId || (r.fieldStr? "grant_id").getD "" == idOrGrantId)
+  let gid :=
+    match matchedReq?.bind (·.fieldStr? "grant_id") with
+    | some g => if g.isEmpty then idOrGrantId else g
+    | none => idOrGrantId
+  let _ ←
+    if missionId.isEmpty then
+      execParamQuery st.missionsDb "UPDATE privilege_leases SET revoked=1 WHERE grant_id=?1;" #[gid]
+    else
+      execParamQuery st.missionsDb "UPDATE privilege_leases SET revoked=1 WHERE grant_id=?1 AND mission_id=?2;" #[gid, missionId]
+  let mut revokedOut? : Option JVal := none
+  let nextReqs := reqs.map fun r =>
+    if (r.fieldStr? "id").getD "" == idOrGrantId || (!gid.isEmpty && (r.fieldStr? "grant_id").getD "" == gid) then
+      let upd := r
+        |>.setField "state" (.str "revoked")
+        |>.setField "status" (.str "revoked")
+        |>.setField "revoked_at" (.str nowIso)
+      let norm := normalizePrivilegeRequestJVal upd #[(gid, true, 0)] nowEpochSec nowIso
+      revokedOut? := some norm
+      norm
+    else r
+  if revokedOut?.isSome then
+    discard <| writeDataJsonObj dataRoot "privilege_access.json" (doc.setField "requests" (.arr nextReqs))
+  return revokedOut?
 
 /-! ## HTTP Route Dispatcher (`/api/approvals*`, `/api/secrets*`, `/api/bitwarden*`, `/api/mission-access*`, `/api/privilege-access*`) -/
 
@@ -484,9 +923,22 @@ def dispatchSecretAndApprovalRoutes?
       return okJson 200 "{\"ok\":true}"
     if method == "POST" && cleanPath == "/api/approvals/challenge" then
       let nonce ← newUuidV4
+      let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
+      let cMethod := (jv.fieldStr? "method").getD "POST"
+      let cPath := (jv.fieldStr? "path").getD ""
+      let rawSummary := ((jv.fieldStr? "summary").getD "Approve").replace "\n" " " |>.trimAscii.toString
+      let cSummary := if rawSummary.isEmpty then "Approve" else rawSummary
+      let cBodyHash :=
+        match jv.fieldStr? "body_sha256" with
+        | some h => h
+        | none => bytesToHexLower (sha256Bytes ((jv.fieldStr? "body").getD "").toUTF8)
+      let expAt := nowEpochSec + 120
+      let payloadStr := s!"paloma-approval-v1\n{nonce}\n{cMethod} {cPath}\n{cBodyHash}\n{expAt}\n{cSummary}"
       return okJson 200 (renderCompact (.obj #[
         ("challenge", .str nonce),
-        ("expires_at", JVal.uint64 (nowEpochSec + 120))
+        ("challenge_id", .str nonce),
+        ("payload", .str payloadStr),
+        ("expires_at", JVal.uint64 expAt)
       ]))
     if method == "GET" && cleanPath == "/api/approvals/mode" then
       return okJson 200 (renderCompact (.obj #[("mode", .str mode)]))
@@ -498,23 +950,110 @@ def dispatchSecretAndApprovalRoutes?
     if method == "GET" && cleanPath == "/api/approvals/queue" then
       let broker ← readDataJsonObj dataRoot "secret_broker.json"
       let mAcc ← readDataJsonObj dataRoot "mission_access.json"
-      let pAcc ← readDataJsonObj dataRoot "privilege_access.json"
-      let secPending := (((broker.fieldArr? "requests").getD #[]).filter (fun r => (r.fieldStr? "status").getD "" == "pending")).map
-        (fun r => ((r.removeField "encrypted_value").removeField "value").setField "category" (.str "secret"))
-      let maPending := (((mAcc.fieldArr? "requests").getD #[]).filter (fun r => (r.fieldStr? "status").getD "" == "pending")).map
-        (fun r => r.setField "category" (.str "mission_access"))
-      let paPending := (((pAcc.fieldArr? "requests").getD #[]).filter (fun r => (r.fieldStr? "status").getD "" == "pending")).map
-        (fun r => r.setField "category" (.str "privilege"))
-      let items := secPending ++ maPending ++ paPending
+      let pSummary ← mcpListPrivilegedAccess st dataRoot "" nowEpochSec
+      let secPendingRaw := ((broker.fieldArr? "requests").getD #[]).filter (fun r =>
+        ((r.fieldStr? "status").orElse (fun _ => r.fieldStr? "state") |>.getD "") == "pending")
+      let maPendingRaw := ((mAcc.fieldArr? "requests").getD #[]).filter (fun r =>
+        ((r.fieldStr? "state").orElse (fun _ => r.fieldStr? "status") |>.getD "") == "pending")
+      let paPendingNorm := ((pSummary.fieldArr? "requests").getD #[]).filter (fun r =>
+        (r.fieldStr? "state").getD "" == "pending")
+      let secItems := secPendingRaw.map buildSecretApprovalItem
+      let maItems := maPendingRaw.map (fun r => buildMissionAccessApprovalItem r nowIso)
+      let paItems := paPendingNorm.map buildPrivilegeApprovalItem
+      let items := paItems ++ secItems ++ maItems
       return okJson 200 (renderCompact (.obj #[
         ("items", .arr items),
-        ("secret_requests", .arr secPending),
-        ("mission_access_requests", .arr maPending),
-        ("privilege_requests", .arr paPending),
         ("mode", .str mode)
       ]))
     if method == "POST" && cleanPath == "/api/approvals/approve-all" then
-      return okJson 200 "{\"ok\":true,\"approved\":0}"
+      let .ok jv := OrbBin.Json.parseBytes bodyBytes
+        | return okJson 400 "{\"error\":\"invalid_json\"}"
+      let batchItems := (jv.fieldArr? "items").getD #[]
+      let confirmCrit := (jv.fieldBool? "confirm_critical").getD false
+      if batchItems.size > 20 then
+        return okJson 400 "{\"error\":\"batch_too_large\"}"
+      -- Validate every item in the batch before mutating (`orb_verify_approval` atomic batch rule)
+      let broker ← readDataJsonObj dataRoot "secret_broker.json"
+      let mAcc ← readDataJsonObj dataRoot "mission_access.json"
+      let pSummary ← mcpListPrivilegedAccess st dataRoot "" nowEpochSec
+      let secPending := ((broker.fieldArr? "requests").getD #[]).filter (fun r =>
+        ((r.fieldStr? "status").orElse (fun _ => r.fieldStr? "state") |>.getD "") == "pending") |>.map buildSecretApprovalItem
+      let maPending := ((mAcc.fieldArr? "requests").getD #[]).filter (fun r =>
+        ((r.fieldStr? "state").orElse (fun _ => r.fieldStr? "status") |>.getD "") == "pending") |>.map (fun r => buildMissionAccessApprovalItem r nowIso)
+      let paPending := ((pSummary.fieldArr? "requests").getD #[]).filter (fun r =>
+        (r.fieldStr? "state").getD "" == "pending") |>.map buildPrivilegeApprovalItem
+      let allLive := paPending ++ secPending ++ maPending
+      for bi in batchItems do
+        let bKind := (bi.fieldStr? "kind").getD ""
+        let bId := (bi.fieldStr? "id").getD ""
+        let bDigest := (bi.fieldStr? "digest").getD ""
+        let some liveItem := allLive.find? (fun x => (x.fieldStr? "kind").getD "" == bKind && (x.fieldStr? "id").getD "" == bId)
+          | return okJson 409 s!"\{\"error\":\"approval_not_pending\",\"id\":{jsonEscape bId}}"
+        let liveDigest := (liveItem.fieldStr? "digest").getD ""
+        if !bDigest.isEmpty && bDigest != liveDigest then
+          return okJson 409 s!"\{\"error\":\"approval_digest_mismatch\",\"id\":{jsonEscape bId}}"
+        let liveRisk := (liveItem.fieldStr? "risk").getD "routine"
+        if liveRisk == "critical" && !confirmCrit then
+          return okJson 400 s!"\{\"error\":\"critical_confirmation_required\",\"id\":{jsonEscape bId}}"
+      let mut approvedCnt : Nat := 0
+      for bi in batchItems do
+        let bKind := (bi.fieldStr? "kind").getD ""
+        let bId := (bi.fieldStr? "id").getD ""
+        if bKind == "privilege" then
+          if let .ok _ ← approveSinglePrivilegeRequest st dataRoot bId none none nowEpochSec nowIso then
+            approvedCnt := approvedCnt + 1
+        else if bKind == "secret" then
+          let curBroker ← readDataJsonObj dataRoot "secret_broker.json"
+          let curReqs := (curBroker.fieldArr? "requests").getD #[]
+          if let some targetReq := curReqs.find? (fun r => (r.fieldStr? "id").getD "" == bId) then
+            let curGrants := (curBroker.fieldArr? "grants").getD #[]
+            let gid ← newUuidV4
+            let newGrant := JVal.obj #[
+              ("id", .str gid),
+              ("mission_id", targetReq.fieldOrNull "mission_id"),
+              ("project", targetReq.fieldOrNull "project"),
+              ("bitwarden_project", targetReq.fieldOrNull "bitwarden_project"),
+              ("secret_name", targetReq.fieldOrNull "secret_name"),
+              ("created_at", .str nowIso),
+              ("expires_at_epoch", JVal.uint64 (nowEpochSec + 86400))
+            ]
+            let nextReqs := curReqs.map fun r =>
+              if (r.fieldStr? "id").getD "" == bId then
+                ((r.removeField "encrypted_value").setField "status" (.str "approved")).setField "decided_at" (.str nowIso)
+              else r
+            discard <| writeDataJsonObj dataRoot "secret_broker.json"
+              ((curBroker.setField "requests" (.arr nextReqs)).setField "grants" (.arr (curGrants.push newGrant)))
+            approvedCnt := approvedCnt + 1
+        else if bKind == "mission_access" then
+          let curDoc ← readDataJsonObj dataRoot "mission_access.json"
+          let curReqs := (curDoc.fieldArr? "requests").getD #[]
+          let curGrants := (curDoc.fieldArr? "grants").getD #[]
+          if let some r := curReqs.find? (fun x => (x.fieldStr? "id").getD "" == bId) then
+            let ttlH := (r.fieldNat? "ttl_hours").getD 24
+            let expEp := nowEpochSec + (ttlH * 3600).toUInt64
+            let expIso := formatEpochIso8601Utc expEp
+            let gid ← newUuidV4
+            let grant := JVal.obj #[
+              ("id", .str gid),
+              ("requester_mission_id", r.fieldOrNull "requester_mission_id"),
+              ("target_mission_id", r.fieldOrNull "target_mission_id"),
+              ("scope", .str ((r.fieldStr? "scope").getD "read")),
+              ("created_at", .str nowIso),
+              ("expires_at", .str expIso),
+              ("expires_at_epoch", JVal.uint64 expEp)
+            ]
+            let nextReqs := curReqs.map fun x =>
+              if (x.fieldStr? "id").getD "" == bId then
+                x
+                  |>.setField "state" (.str "approved")
+                  |>.setField "status" (.str "approved")
+                  |>.setField "decided_at" (.str nowIso)
+                  |>.setField "expires_at" (.str expIso)
+              else x
+            discard <| writeDataJsonObj dataRoot "mission_access.json"
+              ((curDoc.setField "requests" (.arr nextReqs)).setField "grants" (.arr (curGrants.push grant)))
+            approvedCnt := approvedCnt + 1
+      return okJson 200 (renderCompact (.obj #[("ok", .bool true), ("approved", JVal.nat approvedCnt)]))
     if method == "GET" && cleanPath == "/api/approvals/stream" then
       return some (200, "text/event-stream", formatSseFrame "snapshot" "{\"items\":[]}" (some 1))
 
@@ -641,38 +1180,80 @@ def dispatchSecretAndApprovalRoutes?
     let doc ← readDataJsonObj dataRoot "mission_access.json"
     let reqs := (doc.fieldArr? "requests").getD #[]
     let grants := (doc.fieldArr? "grants").getD #[]
+    let audit := (doc.fieldArr? "audit").getD #[]
     if method == "GET" && cleanPath == "/api/mission-access" then
-      return okJson 200 (renderCompact (.obj #[("requests", .arr reqs), ("grants", .arr grants)]))
-    if method == "POST" && cleanPath.startsWith "/api/mission-access/requests/" && cleanPath.endsWith "/approve" then
-      let reqId := ((cleanPath.drop 29).dropEnd 8).toString
+      let normReqs := (reqs.map (fun r => normalizeMissionAccessRequestJVal r nowIso)).reverse
+      return okJson 200 (renderCompact (.obj #[
+        ("requests", .arr normReqs),
+        ("grants", .arr grants),
+        ("audit", .arr audit)
+      ]))
+    if method == "POST" && cleanPath.startsWith "/api/mission-access/" && cleanPath.endsWith "/approve" then
+      let rawMid := ((cleanPath.drop 20).dropEnd 8).toString
+      let reqId := if rawMid.startsWith "requests/" then (rawMid.drop 9).toString else rawMid
+      let bodyJv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
       let some r := reqs.find? (fun x => (x.fieldStr? "id").getD "" == reqId)
         | return okJson 404 "{\"error\":\"request_not_found\"}"
-      let ttlH := (r.fieldNat? "ttl_hours").getD 24
+      let ttlH := (bodyJv.fieldNat? "ttl_hours").getD ((r.fieldNat? "ttl_hours").getD 24)
+      let expEp := nowEpochSec + (ttlH * 3600).toUInt64
+      let expIso := formatEpochIso8601Utc expEp
       let gid ← newUuidV4
       let grant := JVal.obj #[
         ("id", .str gid),
         ("requester_mission_id", r.fieldOrNull "requester_mission_id"),
         ("target_mission_id", r.fieldOrNull "target_mission_id"),
-        ("scope", .str "read"),
+        ("scope", .str ((r.fieldStr? "scope").getD "read")),
         ("created_at", .str nowIso),
-        ("expires_at_epoch", JVal.uint64 (nowEpochSec + (ttlH * 3600).toUInt64))
+        ("expires_at", .str expIso),
+        ("expires_at_epoch", JVal.uint64 expEp)
       ]
+      let mut approvedReq : JVal := .obj #[]
       let nextReqs := reqs.map fun x =>
-        if (x.fieldStr? "id").getD "" == reqId then (x.setField "status" (.str "approved")).setField "decided_at" (.str nowIso) else x
+        if (x.fieldStr? "id").getD "" == reqId then
+          let upd := x
+            |>.setField "state" (.str "approved")
+            |>.setField "status" (.str "approved")
+            |>.setField "ttl_hours" (JVal.nat ttlH)
+            |>.setField "decided_at" (.str nowIso)
+            |>.setField "expires_at" (.str expIso)
+          approvedReq := upd
+          upd
+        else x
       discard <| writeDataJsonObj dataRoot "mission_access.json"
         ((doc.setField "requests" (.arr nextReqs)).setField "grants" (.arr (grants.push grant)))
-      return okJson 200 (renderCompact (.obj #[("ok", .bool true), ("grant", grant)]))
-    if method == "POST" && cleanPath.startsWith "/api/mission-access/requests/" && cleanPath.endsWith "/reject" then
-      let reqId := ((cleanPath.drop 29).dropEnd 7).toString
+      return okJson 200 (renderCompact ((approvedReq.setField "ok" (.bool true)).setField "grant" grant))
+    if method == "POST" && cleanPath.startsWith "/api/mission-access/" &&
+       (cleanPath.endsWith "/deny" || cleanPath.endsWith "/reject") then
+      let stripped :=
+        if cleanPath.endsWith "/deny" then ((cleanPath.drop 20).dropEnd 5).toString
+        else ((cleanPath.drop 20).dropEnd 7).toString
+      let reqId := if stripped.startsWith "requests/" then (stripped.drop 9).toString else stripped
+      let mut deniedReq? : Option JVal := none
       let nextReqs := reqs.map fun x =>
-        if (x.fieldStr? "id").getD "" == reqId then (x.setField "status" (.str "denied")).setField "decided_at" (.str nowIso) else x
+        if (x.fieldStr? "id").getD "" == reqId then
+          let upd := x
+            |>.setField "state" (.str "denied")
+            |>.setField "status" (.str "denied")
+            |>.setField "decided_at" (.str nowIso)
+          deniedReq? := some upd
+          upd
+        else x
       discard <| writeDataJsonObj dataRoot "mission_access.json" (doc.setField "requests" (.arr nextReqs))
-      return okJson 200 "{\"ok\":true}"
-    if method == "DELETE" && cleanPath.startsWith "/api/mission-access/grants/" then
-      let gid := (cleanPath.drop 27).toString
+      return okJson 200 (renderCompact ((deniedReq?.getD (.obj #[])).setField "ok" (.bool true)))
+    if method == "DELETE" && cleanPath.startsWith "/api/mission-access/" then
+      let rawId := (cleanPath.drop 20).toString
+      let gid := if rawId.startsWith "grants/" then (rawId.drop 7).toString else rawId
       let nextGrants := grants.map fun g =>
         if (g.fieldStr? "id").getD "" == gid then g.setField "revoked_at" (.str nowIso) else g
-      discard <| writeDataJsonObj dataRoot "mission_access.json" (doc.setField "grants" (.arr nextGrants))
+      let nextReqs := reqs.map fun x =>
+        if (x.fieldStr? "id").getD "" == gid then
+          x
+            |>.setField "state" (.str "revoked")
+            |>.setField "status" (.str "revoked")
+            |>.setField "revoked_at" (.str nowIso)
+        else x
+      discard <| writeDataJsonObj dataRoot "mission_access.json"
+        ((doc.setField "grants" (.arr nextGrants)).setField "requests" (.arr nextReqs))
       return okJson 200 "{\"ok\":true}"
 
   -- 5. `/api/privilege-access*` (excluding `/api/privilege-access/verify-and-log` which is handled earlier in `Control.lean`)
@@ -681,78 +1262,113 @@ def dispatchSecretAndApprovalRoutes?
       return okJson 403 "{\"error\":\"admin_required\"}"
     if method == "GET" && cleanPath == "/api/privilege-access" then
       let summary ← mcpListPrivilegedAccess st dataRoot "" nowEpochSec
-      let bState ← match bunkerRef? with | some r => r.get | none => pure (0 : UInt8)
+      let memBunker ← match bunkerRef? with | some r => r.get | none => pure (0 : UInt8)
+      let diskBunker ← readPersistedBunkerState st
+      let bState := if memBunker > diskBunker then memBunker else diskBunker
       return okJson 200 (renderCompact (summary.setField "bunker_state" (JVal.nat bState.toNat)))
     if method == "POST" && cleanPath == "/api/privilege-access/request" then
       let .ok jv := OrbBin.Json.parseBytes bodyBytes
         | return okJson 400 "{\"error\":\"invalid_json\"}"
-      let mid := (jv.fieldStr? "mission_id").getD ""
+      let mid := ((jv.fieldStr? "requester_mission_id").orElse (fun _ => jv.fieldStr? "mission_id") |>.getD "")
       let sc := (jv.fieldStr? "scope").getD "ops_read"
       let th := (jv.fieldStr? "target_host").getD "self"
       let rsn := (jv.fieldStr? "reason").getD ""
-      let units := ((jv.fieldArr? "allowed_units").getD #[]).filterMap JVal.asStr?
+      let units := extractAllowedUnitsFromRequest jv
       let ttl := (jv.fieldNat? "ttl_minutes").getD 30
-      let res ← mcpRequestPrivilegedAccess dataRoot mid sc th rsn units ttl nowEpochSec
+      let sessScoped := (jv.fieldBool? "session_scoped").getD true
+      let res ← mcpRequestPrivilegedAccess (some st) dataRoot mid "" sc th rsn units ttl nowEpochSec sessScoped
       return okJson 200 (renderCompact res)
-    if method == "POST" && cleanPath.startsWith "/api/privilege-access/requests/" && cleanPath.endsWith "/approve" then
-      let reqId := ((cleanPath.drop 31).dropEnd 8).toString
-      let doc ← readDataJsonObj dataRoot "privilege_access.json"
-      let reqs := (doc.fieldArr? "requests").getD #[]
-      let some r := reqs.find? (fun x => (x.fieldStr? "id").getD "" == reqId)
-        | return okJson 404 "{\"error\":\"request_not_found\"}"
-      let gid ← newUuidV4
-      let .ok rnd ← OrbNetLeaf.Crypto.randBytes 24
-        | return okJson 500 "{\"error\":\"csprng_failed\"}"
-      let leaseTok := "orb-pl-" ++ bytesToHexLower rnd
-      let ttlMins := (r.fieldNat? "ttl_minutes").getD 30
-      let expEpoch := nowEpochSec + (ttlMins * 60).toUInt64
-      let unitsJson := renderCompact ((r.field? "allowed_units").getD (.arr #[]))
-      let lease : PrivilegeLeaseRecord := {
-        grantId := gid
-        leaseToken := leaseTok
-        missionId := (r.fieldStr? "mission_id").getD ""
-        targetHost := (r.fieldStr? "target_host").getD "self"
-        scope := (r.fieldStr? "scope").getD "ops_read"
-        allowedUnitsJson := unitsJson
-        requireForceCmd := false
-        biometricSigned := true
-        revoked := false
-        expiresAtEpoch := expEpoch
-        leaseEpoch := expEpoch
-      }
-      if let .error e ← upsertPrivilegeLease st lease then
-        return okJson 500 s!"\{\"error\":{jsonEscape e}}"
-      let nextReqs := reqs.map fun x =>
-        if (x.fieldStr? "id").getD "" == reqId then (x.setField "status" (.str "approved")).setField "decided_at" (.str nowIso) else x
-      discard <| writeDataJsonObj dataRoot "privilege_access.json" (doc.setField "requests" (.arr nextReqs))
-      return okJson 200 (renderCompact (.obj #[
-        ("ok", .bool true),
-        ("grant_id", .str gid),
-        ("lease_token", .str leaseTok),
-        ("expires_at_epoch", JVal.uint64 expEpoch)
-      ]))
-    if method == "POST" && cleanPath.startsWith "/api/privilege-access/requests/" && cleanPath.endsWith "/reject" then
-      let reqId := ((cleanPath.drop 31).dropEnd 7).toString
-      let doc ← readDataJsonObj dataRoot "privilege_access.json"
-      let reqs := (doc.fieldArr? "requests").getD #[]
-      let nextReqs := reqs.map fun x =>
-        if (x.fieldStr? "id").getD "" == reqId then (x.setField "status" (.str "denied")).setField "decided_at" (.str nowIso) else x
-      discard <| writeDataJsonObj dataRoot "privilege_access.json" (doc.setField "requests" (.arr nextReqs))
-      return okJson 200 "{\"ok\":true}"
-    if method == "DELETE" && cleanPath.startsWith "/api/privilege-access/grants/" then
-      let gid := (cleanPath.drop 29).toString
-      discard <| mcpRevokePrivilegedAccess st gid ""
-      return okJson 200 "{\"ok\":true}"
     if method == "POST" && cleanPath == "/api/privilege-access/revoke-all" then
       discard <| execParamQuery st.missionsDb "UPDATE privilege_leases SET revoked=1;" #[]
+      let doc ← readDataJsonObj dataRoot "privilege_access.json"
+      let reqs := ((doc.fieldArr? "requests").getD #[]).map fun x =>
+        let curSt := ((x.fieldStr? "state").orElse (fun _ => x.fieldStr? "status") |>.getD "")
+        if curSt == "approved" then
+          x.setField "state" (.str "revoked") |>.setField "status" (.str "revoked") |>.setField "revoked_at" (.str nowIso)
+        else x
+      discard <| writeDataJsonObj dataRoot "privilege_access.json" (doc.setField "requests" (.arr reqs))
       return okJson 200 "{\"ok\":true}"
     if method == "POST" && cleanPath == "/api/privilege-access/bunker" then
       let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
-      let nextSt : UInt8 := ((jv.fieldNat? "state").getD 0).toUInt8
+      let nextSt : UInt8 := ((jv.fieldNat? "level").orElse (fun _ => jv.fieldNat? "state") |>.getD 2).toUInt8
+      if nextSt > 0 then
+        discard <| execParamQuery st.missionsDb "UPDATE privilege_leases SET revoked=1;" #[]
       if let some r := bunkerRef? then
         r.set nextSt
       discard <| writePersistedBunkerState st nextSt
-      return okJson 200 (renderCompact (.obj #[("ok", .bool true), ("bunker_state", JVal.nat nextSt.toNat)]))
+      return okJson 200 (renderCompact (.obj #[
+        ("ok", .bool true),
+        ("status", .str (if nextSt > 0 then "bunkered" else "ok")),
+        ("bunker_state", JVal.nat nextSt.toNat)
+      ]))
+    if method == "POST" && cleanPath == "/api/privilege-access/unbunker" then
+      if let some r := bunkerRef? then
+        r.set 0
+      discard <| writePersistedBunkerState st 0
+      return okJson 200 (renderCompact (.obj #[
+        ("ok", .bool true),
+        ("status", .str "ok"),
+        ("bunker_state", JVal.nat 0)
+      ]))
+    if method == "POST" && cleanPath.startsWith "/api/privilege-access/" && cleanPath.endsWith "/approve" then
+      let rawMid := ((cleanPath.drop 22).dropEnd 8).toString
+      let reqId := if rawMid.startsWith "requests/" then (rawMid.drop 9).toString else rawMid
+      let isLegacyRoute := rawMid.startsWith "requests/"
+      let bodyJv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
+      let ttlOver := bodyJv.fieldNat? "ttl_minutes"
+      let sessOver := bodyJv.fieldBool? "session_scoped"
+      match ← approveSinglePrivilegeRequest st dataRoot reqId ttlOver sessOver nowEpochSec nowIso with
+      | .error (errCode, errJson) => return okJson errCode errJson
+      | .ok (approvedNorm, gid, leaseTok, expEpoch) =>
+        let respObj := approvedNorm
+          |>.setField "ok" (.bool true)
+          |>.setField "grant_id" (.str gid)
+          |>.setField "expires_at_epoch" (JVal.uint64 expEpoch)
+        let finalObj :=
+          if isLegacyRoute then respObj.setField "lease_token" (.str leaseTok) else respObj
+        return okJson 200 (renderCompact finalObj)
+    if method == "POST" && cleanPath.startsWith "/api/privilege-access/" &&
+       (cleanPath.endsWith "/deny" || cleanPath.endsWith "/reject") then
+      let stripped :=
+        if cleanPath.endsWith "/deny" then ((cleanPath.drop 22).dropEnd 5).toString
+        else ((cleanPath.drop 22).dropEnd 7).toString
+      let reqId := if stripped.startsWith "requests/" then (stripped.drop 9).toString else stripped
+      let doc ← readDataJsonObj dataRoot "privilege_access.json"
+      let reqs := (doc.fieldArr? "requests").getD #[]
+      if !(reqs.any (fun x => (x.fieldStr? "id").getD "" == reqId)) then
+        return okJson 404 "{\"error\":\"request_not_found\"}"
+      let mut deniedOut : JVal := .obj #[]
+      let nextReqs := reqs.map fun x =>
+        if (x.fieldStr? "id").getD "" == reqId then
+          let upd := x
+            |>.setField "state" (.str "denied")
+            |>.setField "status" (.str "denied")
+            |>.setField "decided_at" (.str nowIso)
+          let norm := normalizePrivilegeRequestJVal upd #[] nowEpochSec nowIso
+          deniedOut := norm
+          norm
+        else x
+      let audits := (doc.fieldArr? "audit").getD #[]
+      let mid := (deniedOut.fieldStr? "requester_mission_id").getD ""
+      let auditEntry := JVal.obj #[
+        ("at", .str nowIso),
+        ("request_id", .str reqId),
+        ("requester_mission_id", if mid.isEmpty then .null else .str mid),
+        ("requester", deniedOut.fieldOrNull "requester"),
+        ("target_host", .str ((deniedOut.fieldStr? "target_host").getD "self")),
+        ("scope", .str ((deniedOut.fieldStr? "scope").getD "ops_read")),
+        ("action", .str "denied"),
+        ("detail", .null)
+      ]
+      discard <| writeDataJsonObj dataRoot "privilege_access.json"
+        ((doc.setField "requests" (.arr nextReqs)).setField "audit" (.arr (#[auditEntry] ++ audits)))
+      return okJson 200 (renderCompact (deniedOut.setField "ok" (.bool true)))
+    if method == "DELETE" && cleanPath.startsWith "/api/privilege-access/" then
+      let rawId := (cleanPath.drop 22).toString
+      let targetId := if rawId.startsWith "grants/" then (rawId.drop 7).toString else rawId
+      match ← mcpRevokePrivilegedAccess st dataRoot targetId "" nowEpochSec with
+      | some revObj => return okJson 200 (renderCompact (revObj.setField "ok" (.bool true)))
+      | none => return okJson 200 "{\"ok\":true}"
 
   return none
 

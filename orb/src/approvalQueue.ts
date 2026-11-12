@@ -80,7 +80,32 @@ export function legacyItem(kind: ApprovalKind, r: PrivilegeRequest | SecretAcces
  */
 export async function getApprovalQueue(): Promise<{ items: ApprovalItem[] }> {
   try {
-    return await api<{ items: ApprovalItem[] }>("/api/approvals/queue");
+    const res = await api<{
+      items: ApprovalItem[];
+      privilege_requests?: unknown[];
+      secret_requests?: unknown[];
+      mission_access_requests?: unknown[];
+    }>("/api/approvals/queue");
+    const rawItems = Array.isArray(res?.items) ? res.items : [];
+    const isTransitionalStub =
+      rawItems.length === 0 &&
+      (Array.isArray(res?.privilege_requests) ||
+        Array.isArray(res?.secret_requests) ||
+        Array.isArray(res?.mission_access_requests));
+    // If every item carries canonical `kind`, `tier`, `risk`, and `request` (and not an empty
+    // transitional stub from a pre-parity Core), use the queue directly; otherwise fall back.
+    if (
+      !isTransitionalStub &&
+      rawItems.every(
+        (i) =>
+          (i.kind === "privilege" || i.kind === "secret" || i.kind === "mission_access") &&
+          typeof i.tier === "string" &&
+          typeof i.risk === "string" &&
+          !!i.request,
+      )
+    ) {
+      return { items: rawItems };
+    }
   } catch (e) {
     if (!(e instanceof ApiError) || (e.status !== 404 && e.status !== 405)) throw e;
   }

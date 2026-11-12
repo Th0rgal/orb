@@ -1,4 +1,4 @@
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { signedApi } from "./deviceApproval";
 import type { AccessState, RequesterSubject } from "./missionAccessApi";
 import { actorLabel } from "./missionAccessApi";
@@ -102,7 +102,99 @@ export const emptyPrivilegeSnapshot = (): PrivilegeSnapshot => ({
   bunker_incidents: [],
 });
 
-export const getPrivilegeAccess = () => api<PrivilegeSnapshot>("/api/privilege-access");
+type RawPrivilegeRequest = Partial<PrivilegeRequest> & {
+  status?: string;
+  mission_id?: string | null;
+  allowed_units?: unknown;
+  expires_at_epoch?: number | null;
+};
+
+type RawPrivilegeGrant = {
+  id?: string;
+  grant_id?: string;
+  mission_id?: string | null;
+  revoked?: boolean;
+  expires_at?: string | null;
+  expires_at_epoch?: number | null;
+};
+
+export function normalizePrivilegeRequest(
+  raw: RawPrivilegeRequest,
+  grants: RawPrivilegeGrant[] = [],
+): PrivilegeRequest {
+  const rawState = String(raw.state ?? raw.status ?? "pending").trim();
+  let state: AccessState =
+    rawState === "approved" || rawState === "denied" || rawState === "expired" || rawState === "revoked"
+      ? rawState
+      : rawState === "rejected"
+        ? "denied"
+        : "pending";
+  const units = Array.isArray(raw.allowed_units)
+    ? raw.allowed_units.filter((u): u is string => typeof u === "string" && u.trim().length > 0)
+    : [];
+  const allowedUnit =
+    typeof raw.allowed_unit === "string" && raw.allowed_unit.trim().length > 0
+      ? raw.allowed_unit.trim()
+      : units[0] ?? null;
+  const missionId =
+    (typeof raw.requester_mission_id === "string" && raw.requester_mission_id) ||
+    (typeof raw.mission_id === "string" && raw.mission_id) ||
+    null;
+  let expiresAt = typeof raw.expires_at === "string" && raw.expires_at ? raw.expires_at : null;
+  if (!expiresAt && typeof raw.expires_at_epoch === "number" && raw.expires_at_epoch > 0) {
+    expiresAt = new Date(raw.expires_at_epoch * 1000).toISOString();
+  }
+  const grantId = (raw as { grant_id?: string }).grant_id;
+  const matchedGrant = grantId
+    ? grants.find((g) => (g.grant_id || g.id) === grantId)
+    : undefined;
+  if (!expiresAt && matchedGrant) {
+    if (typeof matchedGrant.expires_at === "string" && matchedGrant.expires_at) {
+      expiresAt = matchedGrant.expires_at;
+    } else if (typeof matchedGrant.expires_at_epoch === "number" && matchedGrant.expires_at_epoch > 0) {
+      expiresAt = new Date(matchedGrant.expires_at_epoch * 1000).toISOString();
+    }
+  }
+  let revokedAt = typeof raw.revoked_at === "string" && raw.revoked_at ? raw.revoked_at : null;
+  if (matchedGrant?.revoked) {
+    state = "revoked";
+    if (!revokedAt) revokedAt = raw.decided_at ?? raw.created_at ?? new Date().toISOString();
+  }
+  const rawScope = String(raw.scope ?? "ops_read");
+  const scope: PrivilegeScope =
+    rawScope === "systemctl" ? "service_deploy" : (rawScope as PrivilegeScope);
+  return {
+    id: String(raw.id ?? ""),
+    requester_mission_id: missionId,
+    requester: raw.requester ?? (missionId ? null : { kind: "external_session", session_id: "external", client_kind: "cli", client_label: "sandboxed-mcp" }),
+    requester_label: raw.requester_label ?? null,
+    requester_title: raw.requester_title ?? null,
+    target_host: String(raw.target_host || "self"),
+    scope,
+    allowed_unit: allowedUnit,
+    reason: String(raw.reason ?? ""),
+    session_scoped: typeof raw.session_scoped === "boolean" ? raw.session_scoped : true,
+    ttl_minutes: Number(raw.ttl_minutes) || 30,
+    state,
+    created_at: String(raw.created_at ?? ""),
+    decided_at: raw.decided_at ?? null,
+    expires_at: expiresAt,
+    revoked_at: revokedAt,
+  };
+}
+
+export const getPrivilegeAccess = async (): Promise<PrivilegeSnapshot> => {
+  const snap = await api<Partial<PrivilegeSnapshot> & { grants?: RawPrivilegeGrant[] }>("/api/privilege-access");
+  const grants = Array.isArray(snap?.grants) ? snap.grants : [];
+  const rawReqs = Array.isArray(snap?.requests) ? (snap.requests as RawPrivilegeRequest[]) : [];
+  return {
+    bunker_state: Number(snap?.bunker_state ?? 0),
+    requests: rawReqs.map((r) => normalizePrivilegeRequest(r, grants)),
+    audit: Array.isArray(snap?.audit) ? snap.audit : [],
+    command_audit: Array.isArray(snap?.command_audit) ? snap.command_audit : [],
+    bunker_incidents: Array.isArray(snap?.bunker_incidents) ? snap.bunker_incidents : [],
+  };
+};
 export const getMeshStatus = () => api<MeshStatusSnapshot>("/api/mesh/status");
 
 const BUNKER_LABELS: Record<number, string> = {
@@ -142,24 +234,47 @@ export function lifetimeLabel(r: Pick<PrivilegeRequest, "session_scoped" | "ttl_
   return r.session_scoped ? `for this session (max ${span})` : `for ${span}`;
 }
 
-export const approvePrivilegeAccess = (r: PrivilegeRequest) =>
-  answered(r.id, signedApi<PrivilegeRequest>(
-    "POST",
-    `/api/privilege-access/${encodeURIComponent(r.id)}/approve`,
-    { ttl_minutes: r.ttl_minutes, session_scoped: r.session_scoped },
-    `grant ${scopeLabel(r.scope)} on ${hostLabel(r.target_host)} to ${requesterLabel(r)}`,
-  ));
+const isMissingRoute = (e: unknown): boolean =>
+  e instanceof ApiError && (e.status === 404 || e.status === 405);
 
-export const denyPrivilegeAccess = (r: PrivilegeRequest) =>
-  answered(r.id, signedApi<PrivilegeRequest>(
-    "POST",
-    `/api/privilege-access/${encodeURIComponent(r.id)}/deny`,
-    undefined,
-    "decline a privileged access request",
-  ));
+export const approvePrivilegeAccess = (r: PrivilegeRequest) => {
+  const id = encodeURIComponent(r.id);
+  const body = { ttl_minutes: r.ttl_minutes, session_scoped: r.session_scoped };
+  const summary = `grant ${scopeLabel(r.scope)} on ${hostLabel(r.target_host)} to ${requesterLabel(r)}`;
+  return answered(
+    r.id,
+    signedApi<PrivilegeRequest>("POST", `/api/privilege-access/${id}/approve`, body, summary).catch((e) =>
+      isMissingRoute(e)
+        ? signedApi<PrivilegeRequest>("POST", `/api/privilege-access/requests/${id}/approve`, body, summary)
+        : Promise.reject(e),
+    ),
+  );
+};
 
-export const revokePrivilegeAccess = (id: string) =>
-  answered(id, api<PrivilegeRequest>(`/api/privilege-access/${encodeURIComponent(id)}`, { method: "DELETE" }));
+export const denyPrivilegeAccess = (r: PrivilegeRequest) => {
+  const id = encodeURIComponent(r.id);
+  const summary = "decline a privileged access request";
+  return answered(
+    r.id,
+    signedApi<PrivilegeRequest>("POST", `/api/privilege-access/${id}/deny`, undefined, summary).catch((e) =>
+      isMissingRoute(e)
+        ? signedApi<PrivilegeRequest>("POST", `/api/privilege-access/requests/${id}/reject`, undefined, summary)
+        : Promise.reject(e),
+    ),
+  );
+};
+
+export const revokePrivilegeAccess = (id: string) => {
+  const enc = encodeURIComponent(id);
+  return answered(
+    id,
+    api<PrivilegeRequest>(`/api/privilege-access/${enc}`, { method: "DELETE" }).catch((e) =>
+      isMissingRoute(e)
+        ? api<PrivilegeRequest>(`/api/privilege-access/grants/${enc}`, { method: "DELETE" })
+        : Promise.reject(e),
+    ),
+  );
+};
 
 export const triggerBunker = (
   level: 1 | 2 = 2,
