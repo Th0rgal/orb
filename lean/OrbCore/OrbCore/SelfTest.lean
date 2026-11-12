@@ -13,6 +13,7 @@ import OrbCore.ManagedProviderTests
 import OrbCore.ManagedProviderLeanciTests
 import OrbCore.ManagedProviderSealingTests
 import OrbCore.ManagedProviderAvailabilityTests
+import OrbCore.ManagedSpawnActionsTests
 import OrbCore.ManagedProvisioningTests
 import OrbCore.ManagedResumeTests
 import OrbCore.ManagedAccessTests
@@ -4650,9 +4651,9 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   -- Managed VMs: `alice` hitting daily spend cap gets `429` on `POST /api/managed-machines`, while `bob` (`no cap`, disables `boat`) spawns an auto VM (`leanci`) owned by `bob`, invisible to `admin` (`404` on `DELETE`)!
   let (alVmCapSt, _, _) ← sendReq "POST" "/api/managed-machines" aliceTok "{\"provider\":\"boat\",\"name\":\"alice-vm\"}"
   let (bobPrefBoatSt, _, _) ← sendReq "PUT" "/api/managed-machines/providers/boat/preference" bobTok "{\"enabled\":false}"
-  let (bobVmAutoSt, bobVmAutoBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\"}" "bob-managed-create"
+  let (bobVmAutoSt, bobVmAutoBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\",\"wait\":true}" "bob-managed-create"
   let beforeRetrySpend ← getUserSpentTodayCents store bobId (formatEpochIso8601Utc nowSec |>.take 10 |>.toString)
-  let (bobRetrySt, bobRetryBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\"}" "bob-managed-create"
+  let (bobRetrySt, bobRetryBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\",\"wait\":true}" "bob-managed-create"
   let afterRetrySpend ← getUserSpentTodayCents store bobId (formatEpochIso8601Utc nowSec |>.take 10 |>.toString)
   if bobRetrySt != 201 || bobRetryBody != bobVmAutoBody || beforeRetrySpend != afterRetrySpend then
     return (← fail "managed REST retry must not create another VM or charge spend twice")
@@ -4685,6 +4686,33 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      admDelBobVmSt != 404 || bobDelBobVmSt != 200 then
     return (← fail s!"managed VM multi-user isolation/prefs/cap failed: alCap={alVmCapSt} bobVm={bobVmAutoSt}:{bobVmAutoBody} admVms={admVmsBody} admDel={admDelBobVmSt} bobDel={bobDelBobVmSt}")
 
+  -- REST create without `wait` answers 202 at once with the provisioning machine
+  -- and an action to poll; a retry with the same key returns the same machine.
+  let (asyncSt, asyncBody, _) ← sendReq "POST" "/api/managed-machines" bobTok
+    "{\"provider\":\"leanci\",\"name\":\"bob-async\",\"ttl_minutes\":5}" "bob-async-create"
+  let (asyncRetrySt, asyncRetryBody, _) ← sendReq "POST" "/api/managed-machines" bobTok
+    "{\"provider\":\"leanci\",\"name\":\"bob-async\",\"ttl_minutes\":5}" "bob-async-create"
+  let asyncJson := (OrbBin.Json.parse asyncBody).toOption.getD .null
+  let asyncRetry := (OrbBin.Json.parse asyncRetryBody).toOption.getD .null
+  let asyncAction := (asyncJson.fieldStr? "action_id").getD ""
+  let asyncId := (asyncJson.fieldStr? "id").getD ""
+  if asyncSt != 202 || asyncRetrySt != 202 || asyncAction.isEmpty || asyncId.isEmpty ||
+      asyncRetry.fieldStr? "action_id" != some asyncAction || asyncRetry.fieldStr? "id" != some asyncId then
+    return (← fail s!"managed REST create must return one prompt receipt: {asyncSt}:{asyncBody} / {asyncRetrySt}:{asyncRetryBody}")
+  let mut asyncState := ""
+  let mut asyncFinal := OrbBin.Json.JVal.null
+  for _ in [0:2000] do
+    let (_, pollBody, _) ← sendReq "GET" s!"/api/managed-machines/actions/{asyncAction}" bobTok ""
+    asyncFinal := (OrbBin.Json.parse pollBody).toOption.getD .null
+    asyncState := (asyncFinal.fieldStr? "state").getD ""
+    if asyncState != "accepted" && asyncState != "running" then break
+    IO.sleep 5
+  let (alicePollSt, _, _) ← sendReq "GET" s!"/api/managed-machines/actions/{asyncAction}" aliceTok ""
+  let (asyncDelSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{asyncId}" bobTok ""
+  if asyncState != "succeeded" || ((asyncFinal.field? "result").getD .null).fieldStr? "state" != some "ready" ||
+      ((asyncFinal.field? "result").getD .null).fieldStr? "id" != some asyncId || alicePollSt != 404 || asyncDelSt != 200 then
+    return (← fail s!"managed REST action must settle on the real machine and stay owner-scoped: {OrbBin.Json.renderCompact asyncFinal} alice={alicePollSt} del={asyncDelSt}")
+
   -- MCP uses exactly the same mock provider/bootstrap pipeline as REST, with
   -- ownership derived from its authenticated mission rather than tool arguments.
   let .ok () ← upsertMission store {
@@ -4702,12 +4730,33 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
     "spawn_managed_machine" parityArgs nowSec none app.managedProvisioningOverride?
   let mcpReplay ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
     "spawn_managed_machine" parityArgs nowSec none app.managedProvisioningOverride?
-  let createdJson := (OrbBin.Json.parse mcpCreated).toOption.getD .null
-  let createdItem := (createdJson.field? "result").getD .null
+  -- The spawn tool answers at once with an action; the machine arrives through get_action.
+  let acceptedJson := (OrbBin.Json.parse mcpCreated).toOption.getD .null
+  let acceptedAction := ((acceptedJson.field? "result").getD .null).fieldStr? "action_id" |>.getD ""
+  let replayAction := (((OrbBin.Json.parse mcpReplay).toOption.getD .null).field? "result").getD .null
+  if acceptedAction.isEmpty || replayAction.fieldStr? "action_id" != some acceptedAction then
+    return (← fail s!"managed MCP spawn must return one action receipt for a retried key: {mcpCreated} / {mcpReplay}")
+  let mut createdJson := OrbBin.Json.JVal.null
+  let mut actionState := ""
+  for _ in [0:2000] do
+    let polled ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+      "get_action" (.obj #[("action_id", .str acceptedAction)]) nowSec none app.managedProvisioningOverride?
+    createdJson := (OrbBin.Json.parse polled).toOption.getD .null
+    actionState := (((createdJson.field? "result").getD .null).fieldStr? "state").getD ""
+    if actionState != "accepted" && actionState != "running" then break
+    IO.sleep 5
+  if actionState != "succeeded" then
+    return (← fail s!"managed MCP spawn action did not succeed: {OrbBin.Json.renderCompact createdJson}")
+  let foreignPoll ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot
+    { parityClaims with sessionId := "foreign-action-session", missionId := "m-not-the-owner" }
+    "get_action" (.obj #[("action_id", .str acceptedAction)]) nowSec none app.managedProvisioningOverride?
+  if (((OrbBin.Json.parse foreignPoll).toOption.getD .null).fieldBool? "ok") == some true then
+    return (← fail "another mission read a managed spawn receipt")
+  let createdItem := (((createdJson.field? "result").getD .null).field? "result").getD .null
   let parityId := (createdItem.fieldStr? "id").getD ""
   let some (parityVm, _) ← getManagedMachine? mStore parityId
     | return (← fail "managed MCP parity VM missing")
-  if createdJson.fieldBool? "ok" != some true || mcpReplay != mcpCreated ||
+  if createdJson.fieldBool? "ok" != some true ||
       parityVm.ownerUserId != bobId || parityVm.ownerMission != "m-managed-parity" ||
       parityVm.status != "ready" || parityVm.lastPollSec == 0 || parityVm.providerId == parityVm.id then
     return (← fail "REST/MCP provisioning parity or retry identity failed")
@@ -6279,6 +6328,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.ManagedSnapshotCatalogTests.run tmpRoot
     OrbCore.ManagedProviderSealingTests.run tmpRoot
     OrbCore.ManagedProviderAvailabilityTests.run tmpRoot
+    OrbCore.ManagedSpawnActionsTests.run store
   catch e =>
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: {e}"

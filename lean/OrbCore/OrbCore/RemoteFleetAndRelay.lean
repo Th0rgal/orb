@@ -842,15 +842,14 @@ def resolveProjectSnapshot (store : CoreStore) (provider : ManagedProvider.Provi
   | .error e => return .error e
   | .ok entries => return ManagedSnapshotCatalog.resolve entries requested
 
-/-- REST, MCP and automatic placement share admission, provider create, guest
-    installation, enrollment, relay readiness, and failure cleanup. -/
-def spawnConfiguredManagedWorker (mc : ManagedComputeStore) (dataRoot : String)
-    (fleet : ManagedFleetState) (machine : ManagedMachine) (args : JVal)
+/-- Everything a configured spawn decides before it reserves or rents: the
+    provider and bootstrap configuration, the image or resolved snapshot, and the
+    provider request. Shared by the spawn itself and its synchronous preflight. -/
+def prepareConfiguredManagedSpawn (dataRoot : String) (machine : ManagedMachine) (args : JVal)
     (idempotencyKey : String := "")
     (override? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none)
-    (userAdmission? : Option ManagedUserAdmission := none)
     (resolvedSnapshot : String := "") :
-    IO (Except String ManagedProvisioning.SpawnResult) := do
+    IO (Except String (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig × ManagedProvider.SpawnSpec)) := do
   let (provider, bootstrap) ← match override? with
     | some pair => pure pair
     | none => do
@@ -884,7 +883,31 @@ def spawnConfiguredManagedWorker (mc : ManagedComputeStore) (dataRoot : String)
     repo := (args.fieldStr? "repo").getD ""
     memoryMiB := args.fieldUInt64? "memory_mib"
   }
-  ManagedProvisioning.spawnManagedWorker mc fleet machine provider spec bootstrap {} userAdmission?
+  return .ok (provider, bootstrap, spec)
+
+/-- Refuse, before a receipt is accepted, what the spawn would refuse without
+    renting: bad configuration, an unlisted image, a disabled provider, no capacity. -/
+def preflightConfiguredManagedSpawn (mc : ManagedComputeStore) (dataRoot : String)
+    (fleet : ManagedFleetState) (machine : ManagedMachine) (args : JVal)
+    (override? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none)
+    (resolvedSnapshot : String := "") : IO (Except String Unit) := do
+  match ← prepareConfiguredManagedSpawn dataRoot machine args "" override? resolvedSnapshot with
+  | .error e => return .error e
+  | .ok (provider, _, spec) => ManagedProvisioning.preflightAvailability mc fleet provider spec
+
+/-- REST, MCP and automatic placement share admission, provider create, guest
+    installation, enrollment, relay readiness, and failure cleanup. -/
+def spawnConfiguredManagedWorker (mc : ManagedComputeStore) (dataRoot : String)
+    (fleet : ManagedFleetState) (machine : ManagedMachine) (args : JVal)
+    (idempotencyKey : String := "")
+    (override? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none)
+    (userAdmission? : Option ManagedUserAdmission := none)
+    (resolvedSnapshot : String := "") :
+    IO (Except String ManagedProvisioning.SpawnResult) := do
+  match ← prepareConfiguredManagedSpawn dataRoot machine args idempotencyKey override? resolvedSnapshot with
+  | .error e => return .error e
+  | .ok (provider, bootstrap, spec) =>
+    ManagedProvisioning.spawnManagedWorker mc fleet machine provider spec bootstrap {} userAdmission?
 
 /-- Reconcile only Core-owned records against a complete provider list. Exact
     names repair pre-cutover bindings; known IDs and boot epochs fence stale lists.

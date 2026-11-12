@@ -4738,6 +4738,29 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           return .ok (mkJson 403 "{\"error\":\"provider_disabled_for_user\",\"message\":\"This cloud provider is disabled in your preferences.\"}")
         else
           pure canonProv
+      -- A retry gets its receipt back before any admission is re-run.
+      let waitReady := (jv.fieldBool? "wait").getD false
+      let providerRetryKey := (lookupHeaderCI req.headers "idempotency-key").getD ""
+      let actionArgs := jv.setField "provider" (.str prov)
+      let actionOwner : ManagedSpawnActions.Owner := {
+        userId := caller.userId, missionId := (jv.fieldStr? "owner_mission_id").getD "" }
+      let actionReply (accepted preview : JVal) : CoreHttpResponse :=
+        let stored := (accepted.field? "result").getD (.obj #[])
+        let state := (accepted.fieldStr? "state").getD ""
+        if (state == "failed" || state == "uncertain") && (stored.fieldStr? "error").isSome then
+          mkJson ((stored.fieldNat? "http_status").getD 409) (renderCompact
+            (stored.setField "action_id" ((accepted.field? "action_id").getD .null) |>.setField "action_state" (.str state)))
+        else
+          -- A replay returns the first request's machine, not this request's fresh ID.
+          let machine := if (stored.fieldStr? "id").isSome then stored else preview
+          mkJson 202 (renderCompact (machine.setField "action_id" ((accepted.field? "action_id").getD .null)
+            |>.setField "action_state" (.str state)
+            |>.setField "poll_url" ((accepted.field? "poll_url").getD .null)))
+      if !waitReady then
+        match ← ManagedSpawnActions.replay? st.store actionOwner providerRetryKey actionArgs with
+        | .error e => return .ok (mkJson 409 (renderCompact (.obj #[("error", .str e)])))
+        | .ok (some prior) => return .ok (actionReply prior (.obj #[]))
+        | .ok none => pure ()
       let mf0 ← st.managedRef.get
       let live ← match ← loadManagedFleet mst mf0.enabled mf0.boatEnabled mf0.dailyCapCents mf0.spentTodayCents mf0.maxConcurrent with
         | .ok l => pure l
@@ -4776,7 +4799,6 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         requestedByMissionId := (jv.fieldStr? "owner_mission_id").getD ""
         ownerUserId := caller.userId
       }
-      let providerRetryKey := (lookupHeaderCI req.headers "idempotency-key").getD ""
       -- A saved snapshot is restored only inside one project: the owning mission's,
       -- when the caller owns that mission; an admin may name the project directly.
       let requestedSnapshot := ((jv.fieldStr? "from_snapshot").orElse
@@ -4797,17 +4819,35 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match ← resolveProjectSnapshot st.store snapshotProvider snapshotProject requestedSnapshot with
         | .ok name => pure name
         | .error e => return .ok (mkJson 409 (renderCompact (.obj #[("error", .str e)])))
-      match ← spawnConfiguredManagedWorker mst st.store.rootDir live vmRec jv providerRetryKey st.managedProvisioningOverride? userAdmission? resolvedSnapshot with
+      let work : IO (Except String JVal) := do
+        match ← spawnConfiguredManagedWorker mst st.store.rootDir live vmRec jv providerRetryKey st.managedProvisioningOverride? userAdmission? resolvedSnapshot with
+        | .error e => return .error e
+        | .ok spawned =>
+          if spawned.created && !caller.userId.isEmpty && estCents > 0 then
+            discard <| addUserSpendCents st.store caller.userId utcDay 0 estCents s!"{nowEpochSec}"
+          if let .ok refreshed ← loadManagedFleet mst live.enabled live.boatEnabled live.dailyCapCents (live.spentTodayCents + estCents) live.maxConcurrent then
+            st.managedRef.set refreshed
+          return .ok ((OrbBin.Json.parse (renderManagedMachineItemJson spawned.machine)).toOption.getD (.obj #[]))
+      -- `wait: true` keeps the blocking contract (Change machine needs a ready
+      -- node). Otherwise answer at once with the provisioning machine and an
+      -- action to poll; readiness takes minutes.
+      if waitReady then
+        match ← work with
+        | .error e =>
+          let status := if e == "provider_at_capacity" || e == "managed_provider_availability_unavailable" then 503 else 409
+          return .ok (mkJson status s!"\{\"error\":{jsonEscape e}}")
+        | .ok item => return .ok (mkJson 201 (renderCompact item))
+      let actionKey ← if providerRetryKey.trimAscii.toString.isEmpty then newUuidV4 else pure providerRetryKey
+      let preview := (OrbBin.Json.parse (renderManagedMachineItemJson vmRec)).toOption.getD (.obj #[])
+      -- What the spawn would refuse without renting is refused now, with the
+      -- same status as before, so a client never sees a machine that vanishes.
+      let admit := preflightConfiguredManagedSpawn mst st.store.rootDir live vmRec jv
+        st.managedProvisioningOverride? resolvedSnapshot
+      match ← ManagedSpawnActions.submit st.store actionOwner actionKey actionArgs work admit preview with
       | .error e =>
         let status := if e == "provider_at_capacity" || e == "managed_provider_availability_unavailable" then 503 else 409
-        return .ok (mkJson status s!"\{\"error\":{jsonEscape e}}")
-      | .ok spawned =>
-        let createdVm := spawned.machine
-        if spawned.created && !caller.userId.isEmpty && estCents > 0 then
-          discard <| addUserSpendCents st.store caller.userId utcDay 0 estCents s!"{nowEpochSec}"
-        if let .ok refreshed ← loadManagedFleet mst live.enabled live.boatEnabled live.dailyCapCents (live.spentTodayCents + estCents) live.maxConcurrent then
-          st.managedRef.set refreshed
-        return .ok (mkJson 201 (renderManagedMachineItemJson createdVm))
+        return .ok (mkJson status (renderCompact (.obj #[("error", .str e)])))
+      | .ok accepted => return .ok (actionReply accepted preview)
 
   if let some params := (matchRoutePattern? "/api/managed-machines/:id/stop" rawTarget).orElse
        (fun _ => matchRoutePattern? "/api/managed-machines/:id/resume" rawTarget) then
@@ -4834,6 +4874,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         if let .ok live ← loadManagedFleet mst mf.enabled mf.boatEnabled mf.dailyCapCents mf.spentTodayCents mf.maxConcurrent then
           st.managedRef.set live
         return .ok (mkJson 200 (renderCompact result))
+
+  if let some params := matchRoutePattern? "/api/managed-machines/actions/:id" rawTarget then
+    if req.method == "GET" then
+      let actionId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      match ← ManagedSpawnActions.read? st.store actionId { userId := caller.userId, missionId := "" }
+          (caller.isLegacyUnscoped || caller.role == "admin") false with
+      | .ok (some action) => return .ok (mkJson 200 (renderCompact action))
+      | _ => return .ok (mkJson 404 "{\"error\":\"managed_action_not_found\"}")
 
   if let some params := matchRoutePattern? "/api/managed-machines/:id" rawTarget then
     let vmId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
@@ -6586,6 +6634,10 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to bind {bindHost}:{cfg.port}"
         return 1
     remoteSup.boundPortRef.set boundPort
+    -- Only the process that owns the port fences receipts a previous process left
+    -- open: such a spawn cannot be resumed or safely replayed.
+    if let .error e ← ManagedSpawnActions.fenceInterrupted store then
+      IO.eprintln s!"[sandboxed-sh] managed spawn action recovery failed: {e}"
     IO.eprintln s!"[sandboxed-sh] listening on http://{bindHost}:{boundPort} (dev_mode={cfg.devMode})"
     if maxRequests?.isNone then
       let localWakeupLaunch : MissionRecord → String → Option String → IO Bool :=

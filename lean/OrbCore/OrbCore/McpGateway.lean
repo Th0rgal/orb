@@ -7,6 +7,7 @@ import OrbBin.Json
 import OrbBin.PosixExt
 import OrbBin.McpCatalog
 import OrbCore.Store
+import OrbCore.ManagedSpawnActions
 import OrbCore.Managed
 import OrbCore.ManagedHarvest
 import OrbCore.AutoPlacement
@@ -350,6 +351,11 @@ def dispatchMcpToolCall
     let aid := (args.fieldStr? "action_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
     if aid.trimAscii.toString.isEmpty then
       return mcpErr "invalid_arguments" "missing action_id"
+    -- Spawn receipts are owner-scoped and report their real state.
+    match ← ManagedSpawnActions.read? store aid { userId := callerUserId, missionId := callerMid } operatorIsAdmin with
+    | .ok (some spawnAction) => return mcpOk spawnAction
+    | .error _ => return mcpErr "not_found" "Action not found"
+    | .ok none => pure ()
     if let some rec ← lookupMcpActionById? store aid then
       return mcpOk rec
     return mcpOk (.obj #[
@@ -367,8 +373,10 @@ def dispatchMcpToolCall
       return mcpErr "invalid_arguments" "missing action_id"
     let resolution := ((args.fieldStr? "resolution").getD "completed").trimAscii.toString
     let nextState := if resolution == "rejected" then "rejected" else "succeeded"
+    -- A spawn receipt is reconciled only from `uncertain`: a running one still
+    -- owes its real outcome, and a settled one is not rewritten.
     discard <| execParamQuery store.projectsDb
-      "UPDATE mcp_actions_v1 SET state=?2, updated_at=?3 WHERE id=?1;"
+      "UPDATE mcp_actions_v1 SET state=?2, updated_at=?3 WHERE id=?1 AND (tool<>'spawn_managed_machine' OR state='uncertain');"
       #[aid, nextState, nowIso]
     if let some rec ← lookupMcpActionById? store aid then
       return mcpOk rec
@@ -389,6 +397,12 @@ def dispatchMcpToolCall
         | none => #[]
     let mut receipts : Array JVal := Array.mkEmpty idsArr.size
     for aid in idsArr do
+      -- Spawn receipts stay owner-scoped and report their real state here too.
+      if ← ManagedSpawnActions.isSpawnAction store aid then
+        match ← ManagedSpawnActions.read? store aid { userId := callerUserId, missionId := callerMid } operatorIsAdmin with
+        | .ok (some spawnAction) => receipts := receipts.push spawnAction
+        | _ => receipts := receipts.push (.obj #[("action_id", .str aid), ("state", .str "not_found"), ("status", .str "not_found")])
+        continue
       match ← lookupMcpActionById? store aid with
       | some rec => receipts := receipts.push rec
       | none =>
@@ -401,14 +415,20 @@ def dispatchMcpToolCall
     return mcpOk (.obj #[
       ("receipts", .arr receipts),
       ("actions", .arr receipts),
-      ("all_succeeded", .bool true),
-      ("pending_action_ids", .arr #[])
+      ("all_succeeded", .bool (receipts.all (fun r => r.fieldStr? "state" == some "succeeded"))),
+      ("pending_action_ids", .arr (receipts.filterMap fun r =>
+        if #["accepted", "running", "queued", "pending"].contains ((r.fieldStr? "state").getD "")
+        then (r.fieldStr? "action_id").map JVal.str else none))
     ])
 
   | "cancel_action" =>
     let aid := (args.fieldStr? "action_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
     if aid.trimAscii.toString.isEmpty then
       return mcpErr "invalid_arguments" "missing action_id"
+    if ← ManagedSpawnActions.isSpawnAction store aid then
+      match ← ManagedSpawnActions.cancel store aid { userId := callerUserId, missionId := callerMid } operatorIsAdmin with
+      | .ok cancelled => return mcpOk cancelled
+      | .error _ => return mcpErr "not_found" "Action not found"
     if let some rec ← lookupMcpActionById? store aid then
       let curSt := (rec.fieldStr? "state").getD "succeeded"
       let cancelled := curSt == "queued" || curSt == "pending"
@@ -966,10 +986,29 @@ def dispatchMcpToolCall
       return mcpOk ((OrbBin.Json.parse raw).toOption.getD (.obj #[]))
 
   | "spawn_managed_machine" =>
-    match ← spawnForCaller args with
-    | .error (code, message) => return mcpErr code message
-    | .ok saved =>
-      return mcpOk ((OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[]))
+    -- Accept at once and provision in the background: readiness takes minutes
+    -- and callers used to time out with the outcome unknown. `get_action`
+    -- returns the machine once it is ready, or the failure.
+    -- Without a key, or without any owner to scope a receipt to, stay blocking.
+    if idemKeyTop.isEmpty || (callerUserId.isEmpty && callerMid.isEmpty) then
+      match ← spawnForCaller args with
+      | .error (code, message) => return mcpErr code message
+      | .ok saved =>
+        return mcpOk ((OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[]))
+    let work : IO (Except String JVal) := do
+      match ← spawnForCaller args with
+      | .error (_, message) => return .error message
+      | .ok saved => return .ok ((OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[]))
+    -- Arguments that can never be admitted are refused now, not in a receipt.
+    let admit : IO (Except String Unit) := do
+      match quoteManagedSpawnCents (canonicalizeProvider ((args.fieldStr? "provider").getD "boat"))
+          ((args.fieldStr? "size").getD "small") ((args.fieldUInt64? "ttl_minutes").getD 60)
+          (managedProvisioningOverride?.map Prod.fst) with
+      | .ok _ => return .ok ()
+      | .error e => return .error e
+    match ← ManagedSpawnActions.submit store { userId := callerUserId, missionId := callerMid } idemKeyTop args work admit with
+    | .error e => return mcpErr (if e == "managed_idempotency_conflict" then "conflict" else "invalid_arguments") e
+    | .ok accepted => return mcpOk accepted
 
   | "exec_raw_managed_machine" =>
     let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"

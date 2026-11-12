@@ -119,6 +119,40 @@ A successful preflight does not promise the subsequent provider create succeeds.
 Transport failures keep a bounded, credential-redacted, single-line cause in the
 Core log while the returned provider error remains a stable uncertain-outcome code.
 
+### Prompt spawn receipt
+
+Readiness takes minutes, so creation no longer holds the caller's connection.
+
+- `spawn_managed_machine` (MCP) with an `idempotency_key` returns an action
+  receipt at once (`state: accepted`). `get_action` returns `running`, then
+  `succeeded` with the machine, or `failed` / `uncertain` with the error.
+- `POST /api/managed-machines` returns 202 with the provisioning machine plus
+  `action_id`, `action_state` and `poll_url`
+  (`GET /api/managed-machines/actions/:id`). `"wait": true` keeps the blocking
+  201 contract for callers that need a ready node (Change machine).
+- The receipt lives in `mcp_actions_v1`, keyed by the caller (user and owning
+  mission) and the idempotency key. One insert wins; a retry with the same key
+  and arguments returns the same receipt and never provisions again, and
+  different arguments under the same key are a conflict.
+- A receipt is readable only by its owner (user, and for MCP the same mission)
+  or an operator. Others get not-found.
+- Arguments that can never be admitted (unknown size, bad TTL) are refused
+  before a receipt exists.
+- A transport failure or an unfinished cleanup settles as `uncertain`, which is
+  never retried automatically. On start, Core marks receipts left `accepted` or
+  `running` by a previous process as `uncertain`
+  (`core_restarted_during_managed_spawn`); the reservation row stays for
+  reconciliation.
+
+**Spec Card** (`Orb.ManagedSpawnPolicy`, `ManagedSpawnActions.lean`):
+`receipt_execute_iff` proves only the request whose fresh ID equals the stored
+winner with the same digest may provision; `receipt_retry_replays` and
+`receipt_missing_never_executes` cover retries and a missing row, and a mutant
+that drops the inserter identity is shown to dispatch twice. SQLite uniqueness,
+UUID freshness and the authenticated scope are the I/O boundary, covered by the
+native tests (concurrent submit, changed arguments, tenant and mission
+isolation, uncertain replay), not by the theorem.
+
 ### lean.ci adapter
 
 `ManagedProviderLeanci.lean` is the `leanci` client for `https://api.lean.ci/v1`

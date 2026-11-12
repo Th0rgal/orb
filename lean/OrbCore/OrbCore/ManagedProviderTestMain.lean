@@ -7,6 +7,7 @@ import OrbCore.ManagedProviderLeanciTests
 import OrbCore.ManagedProvisioningTests
 import OrbCore.ManagedProviderSealingTests
 import OrbCore.ManagedProviderAvailabilityTests
+import OrbCore.ManagedSpawnActionsTests
 
 open OrbCore.Store
 
@@ -21,6 +22,7 @@ def main : IO UInt32 := do
     OrbCore.ManagedProvisioningTests.run root
     OrbCore.ManagedProviderSealingTests.run root
     OrbCore.ManagedProviderAvailabilityTests.run root
+    OrbCore.ManagedSpawnActionsTests.run store
     IO.println "{\"ok\":true,\"suite\":\"managed-providers\",\"live_provider_calls\":0}"
     return 0
   catch error =>
