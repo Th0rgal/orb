@@ -3,6 +3,8 @@ import {
   clearPersistentCache,
   loadPersistedSidebar,
   loadPersistedTranscript,
+  loadPersistedTranscriptSlice,
+  loadPersistedTranscriptTail,
   resetPersistentCacheMemoryForTest,
   savePersistedSidebar,
   savePersistedTranscript,
@@ -23,10 +25,13 @@ describe("persistentCache native orb-locald bridge", () => {
       core: {
         invoke: async (cmd: string, args?: Record<string, unknown>) => {
           calls.push(cmd);
-          if (cmd === "ui_cache_put") {
-            disk.set(`${args?.kind}:${args?.key}`, String(args?.raw ?? ""));
-            return null;
-          }
+            if (cmd === "ui_cache_put_transcript" || cmd === "ui_cache_get_tail" || cmd === "ui_cache_get_slice") {
+              throw new Error("unknown desktop command");
+            }
+            if (cmd === "ui_cache_put") {
+              disk.set(`${args?.kind}:${args?.key}`, String(args?.raw ?? ""));
+              return null;
+            }
           if (cmd === "ui_cache_get") {
             return disk.get(`${args?.kind}:${args?.key}`) ?? null;
           }
@@ -234,6 +239,9 @@ describe("persistentCache native orb-locald bridge", () => {
     win.__ORB_DESKTOP__ = {
       core: {
         invoke: async (cmd: string, args?: Record<string, unknown>) => {
+          if (cmd === "ui_cache_put_transcript" || cmd === "ui_cache_get_tail") {
+            throw new Error("unknown desktop command");
+          }
           if (cmd === "ui_cache_put") {
             const kind = String(args?.kind ?? "");
             const key = String(args?.key ?? "");
@@ -283,18 +291,13 @@ describe("persistentCache native orb-locald bridge", () => {
       ],
     });
 
-    // Session 1: persist 20 hot conversations, then restart the app (clearing RAM).
     for (let i = 0; i < 20; i++) {
       await savePersistedTranscript("scope-restart", `s1-${i}`, makeHotSnap(i));
     }
     resetPersistentCacheMemoryForTest();
-
-    // Session 2: persist another 20 hot conversations without touching Session 1's RAM records.
     for (let i = 0; i < 20; i++) {
       await savePersistedTranscript("scope-restart", `s2-${i}`, makeHotSnap(100 + i));
     }
-
-    // Total on disk = 40: oldest 8 (`s1-0`..`s1-7`) MUST be compacted to `warm`, newest 32 remain `hot`!
     const hotEntries = [...disk.values()].filter((v) => v.tier === "hot");
     const warmEntries = [...disk.values()].filter((v) => v.tier === "warm");
     expect(hotEntries).toHaveLength(32);
@@ -310,8 +313,8 @@ describe("persistentCache native orb-locald bridge", () => {
     expect(oldest?.stream.map((e) => e.type)).toEqual(["user_message", "assistant_message"]);
     expect(oldest?.items.find((it) => it.kind === "work")?.entries?.[0]?.result?.length).toBe(256);
 
-    // Concurrent newer save while 33rd put is awaiting must never be overwritten by stale demotion!
     await clearPersistentCache();
+    resetPersistentCacheMemoryForTest();
     for (let i = 0; i < 32; i++) {
       await savePersistedTranscript("scope-race", `r-${i}`, makeHotSnap(i));
     }
@@ -322,6 +325,9 @@ describe("persistentCache native orb-locald bridge", () => {
     win.__ORB_DESKTOP__ = {
       core: {
         invoke: async (cmd: string, args?: Record<string, unknown>) => {
+          if (cmd === "ui_cache_put_transcript" || cmd === "ui_cache_get_tail") {
+            throw new Error("unknown desktop command");
+          }
           if (cmd === "ui_cache_put") {
             const kind = String(args?.kind ?? "");
             const key = String(args?.key ?? "");
@@ -345,7 +351,6 @@ describe("persistentCache native orb-locald bridge", () => {
       },
     };
     const save33 = savePersistedTranscript("scope-race", "r-32", makeHotSnap(32));
-    // Update r-0 with a brand-new answer while r-32's initial put is still awaiting:
     await savePersistedTranscript("scope-race", "r-0", makeHotSnap(999));
     release33();
     await save33;
@@ -357,5 +362,117 @@ describe("persistentCache native orb-locald bridge", () => {
     }>("scope-race", "r-0");
     expect(latestR0?.items.find((it) => it.kind === "text")?.text).toBe("Answer 999");
     expect(latestR0?.stream.map((e) => e.type)).toEqual(["user_message", "tool_result", "assistant_message"]);
+  });
+
+  it("loads only the tail slice on cold open and pages older slices upward from orb-locald SQLite", async () => {
+    const meta = new Map<string, { savedAt: number; totalEvents: number; headRaw: string }>();
+    const eventsByKey = new Map<string, string[]>();
+    win.__ORB_DESKTOP__ = {
+      core: {
+        invoke: async (cmd: string, args?: Record<string, unknown>) => {
+          const rk = `${args?.scope}::m:${args?.mission_id}`;
+          if (cmd === "ui_cache_put_transcript") {
+            const startIdx = Number(args?.start_idx ?? 0);
+            const evs = (args?.events_raw as string[]) ?? [];
+            const prev = startIdx > 0 ? (eventsByKey.get(rk) ?? []).slice(0, startIdx) : [];
+            const merged = [...prev, ...evs];
+            eventsByKey.set(rk, merged);
+            meta.set(rk, {
+              savedAt: Number(args?.saved_at ?? 0),
+              totalEvents: merged.length,
+              headRaw: String(args?.head_raw ?? "{}"),
+            });
+            return null;
+          }
+          if (cmd === "ui_cache_get_tail") {
+            const m = meta.get(rk);
+            if (!m) return null;
+            const limit = Number(args?.tail_limit ?? 3);
+            const all = eventsByKey.get(rk) ?? [];
+            const startIdx = Math.max(0, all.length - limit);
+            return {
+              saved_at: m.savedAt,
+              total_events: all.length,
+              start_idx: startIdx,
+              head_raw: m.headRaw,
+              events_raw: all.slice(startIdx),
+            };
+          }
+          if (cmd === "ui_cache_get_slice") {
+            const all = eventsByKey.get(rk);
+            if (!all) return null;
+            const beforeIdx = Number(args?.before_idx ?? 0);
+            const limit = Number(args?.limit ?? 3);
+            const startIdx = Math.max(0, beforeIdx - limit);
+            return {
+              start_idx: startIdx,
+              events_raw: all.slice(startIdx, beforeIdx),
+            };
+          }
+          if (cmd === "ui_cache_clear") {
+            meta.clear();
+            eventsByKey.clear();
+            return null;
+          }
+          throw new Error(`unexpected ${cmd}`);
+        },
+      },
+    };
+
+    const fullStream = Array.from({ length: 10 }, (_, i) => ({
+      type: "assistant_message",
+      sequence: i + 1,
+      data: { content: `msg-${i}` },
+    }));
+    await savePersistedTranscript("scope-tail", "m-tail", {
+      fromLog: true,
+      cursor: 10,
+      hasOlder: false,
+      items: [],
+      settledItems: [{ kind: "text", key: "huge-digest", text: "x".repeat(4096) }],
+      settledSeq: 10,
+      openTailEvents: [],
+      stream: fullStream,
+    });
+
+    expect(meta.get("scope-tail::m:m-tail")?.headRaw).not.toContain("huge-digest");
+    expect(meta.get("scope-tail::m:m-tail")?.headRaw).not.toContain("settledItems");
+
+    resetPersistentCacheMemoryForTest();
+
+    const tail = await loadPersistedTranscriptTail<{
+      fromLog: boolean;
+      cursor: number;
+      stream: Array<{ sequence: number }>;
+    }>("scope-tail", "m-tail", 3);
+    expect(tail?.startIdx).toBe(7);
+    expect(tail?.totalEvents).toBe(10);
+    expect(tail?.snapshot.stream.map((e) => e.sequence)).toEqual([8, 9, 10]);
+
+    // Appending a new live event on top of a tail-hydrated snapshot preserves `0..6`!
+    await savePersistedTranscript(
+      "scope-tail",
+      "m-tail",
+      {
+        fromLog: true,
+        cursor: 11,
+        hasOlder: false,
+        items: [],
+        stream: [
+          ...tail!.snapshot.stream,
+          { type: "assistant_message", sequence: 11, data: { content: "msg-10" } },
+        ],
+      },
+      { startIdx: tail!.startIdx },
+    );
+
+    const older = await loadPersistedTranscriptSlice<{ sequence: number }>(
+      "scope-tail",
+      "m-tail",
+      7,
+      4,
+    );
+    expect(older?.startIdx).toBe(3);
+    expect(older?.events.map((e) => e.sequence)).toEqual([4, 5, 6, 7]);
   });
 });

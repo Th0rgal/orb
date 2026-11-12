@@ -11,7 +11,7 @@ function digestFetch(path: string, init?: RequestInit): Promise<Response> {
   return fetch(`${getApiUrl().trim().replace(/\/+$/, "")}${path}`, init);
 }
 import { backgroundWake as parseBackgroundWake } from "./backgroundWake";
-import { formatToolDetail, isSyntheticUserMessage } from "./inboxModel";
+import { formatToolDetail, isSyntheticUserMessage } from "./inboxUnread";
 import { inboxConfig, saveInboxConfig } from "./inboxSettings";
 import { shouldRequestInboxDigest, type InboxSummarySurface } from "./inboxPolicy";
 import { isLive } from "./missionStatus";

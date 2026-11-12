@@ -685,6 +685,129 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
     isOkNull afterClearTx
   if (← assertTrue "native_ui_cache_roundtrip_lru_and_clear" uiCacheOk) then passed := passed + 1
 
+  -- D2. SQLite tail-sliced UI transcript cache (`ui_cache_put_transcript`, `ui_cache_get_tail`, `ui_cache_get_slice`)
+  --     and origin-independent `ui_draft_*` persistence surviving `ui_cache_clear`
+  let slicedEvents : Array JVal := (List.range 10).toArray.map fun i =>
+    JVal.str s!"\{\"type\":\"assistant_message\",\"sequence\":{i + 1},\"data\":\{\"content\":\"turn-{i}\"}}"
+  let putSlicedRes ← dispatchRpcCommand stP1 "ui_cache_put_transcript" (.obj #[
+    ("scope", .str "scope-sql"),
+    ("mission_id", .str "m-big"),
+    ("saved_at", .nat 5000),
+    ("start_idx", .nat 0),
+    ("head_raw", .str "{\"fromLog\":true,\"cursor\":10,\"hasOlder\":true}"),
+    ("events_raw", .arr slicedEvents)
+  ])
+  let tailRes ← dispatchRpcCommand stP2 "ui_cache_get_tail" (.obj #[
+    ("scope", .str "scope-sql"),
+    ("mission_id", .str "m-big"),
+    ("tail_limit", .nat 3)
+  ])
+  -- Partial tail append (`start_idx = 7`) preserves `0..6` while updating `7..10`!
+  let appendedTail : Array JVal := #[
+    .str "{\"type\":\"assistant_message\",\"sequence\":8,\"data\":{\"content\":\"turn-7\"}}",
+    .str "{\"type\":\"assistant_message\",\"sequence\":9,\"data\":{\"content\":\"turn-8\"}}",
+    .str "{\"type\":\"assistant_message\",\"sequence\":10,\"data\":{\"content\":\"turn-9\"}}",
+    .str "{\"type\":\"assistant_message\",\"sequence\":11,\"data\":{\"content\":\"turn-10\"}}"
+  ]
+  let putPartialRes ← dispatchRpcCommand stP1 "ui_cache_put_transcript" (.obj #[
+    ("scope", .str "scope-sql"),
+    ("mission_id", .str "m-big"),
+    ("saved_at", .nat 5005),
+    ("start_idx", .nat 7),
+    ("head_raw", .str "{\"fromLog\":true,\"cursor\":11,\"hasOlder\":true}"),
+    ("events_raw", .arr appendedTail)
+  ])
+  let sliceBefore7 ← dispatchRpcCommand stP2 "ui_cache_get_slice" (.obj #[
+    ("scope", .str "scope-sql"),
+    ("mission_id", .str "m-big"),
+    ("before_idx", .nat 7),
+    ("limit", .nat 4)
+  ])
+  let tailAfterAppend ← dispatchRpcCommand stP2 "ui_cache_get_tail" (.obj #[
+    ("scope", .str "scope-sql"),
+    ("mission_id", .str "m-big"),
+    ("tail_limit", .nat 2)
+  ])
+  -- Stale sliced write (`saved_at = 4999 < 5005`) must be ignored without deleting cached events!
+  let putStaleSlicedRes ← dispatchRpcCommand stP1 "ui_cache_put_transcript" (.obj #[
+    ("scope", .str "scope-sql"),
+    ("mission_id", .str "m-big"),
+    ("saved_at", .nat 4999),
+    ("start_idx", .nat 0),
+    ("head_raw", .str "{\"fromLog\":true,\"cursor\":1,\"hasOlder\":false}"),
+    ("events_raw", .arr #[.str "{\"type\":\"assistant_message\",\"sequence\":1,\"data\":{\"content\":\"stale\"}}"])
+  ])
+  let tailAfterStale ← dispatchRpcCommand stP2 "ui_cache_get_tail" (.obj #[
+    ("scope", .str "scope-sql"),
+    ("mission_id", .str "m-big"),
+    ("tail_limit", .nat 2)
+  ])
+  let draftPut ← dispatchRpcCommand stP1 "ui_draft_put" (.obj #[
+    ("key", .str "m:draft-1"),
+    ("updated_at", .nat 9000),
+    ("raw", .str "{\"text\":\"unsent prompt\",\"images\":[]}")
+  ])
+  let draftIfAbsent ← dispatchRpcCommand stP1 "ui_draft_put" (.obj #[
+    ("key", .str "m:draft-1"),
+    ("updated_at", .nat 9999),
+    ("if_absent", .bool true),
+    ("raw", .str "{\"text\":\"stale migration\",\"images\":[]}")
+  ])
+  -- Durable `thread:*` queue/receipt records must never be evicted when > 512 composer drafts arrive!
+  let _ ← dispatchRpcCommand stP1 "ui_draft_put" (.obj #[
+    ("key", .str "thread:orb-local-message-queue:v1:ep"),
+    ("updated_at", .nat 1),
+    ("raw", .str "[{\"id\":\"unsent-msg-1\"}]")
+  ])
+  for idx in [0:520] do
+    let _ ← dispatchRpcCommand stP1 "ui_draft_put" (.obj #[
+      ("key", .str s!"m:flood-{idx}"),
+      ("updated_at", .nat (10000 + idx)),
+      ("raw", .str "{\"text\":\"disposable\",\"images\":[]}")
+    ])
+  let durableQueueAfterFlood ← dispatchRpcCommand stP2 "ui_draft_get" (.obj #[("key", .str "thread:orb-local-message-queue:v1:ep")])
+  let evictedOldestDraft ← dispatchRpcCommand stP2 "ui_draft_get" (.obj #[("key", .str "m:draft-1")])
+  let newestFloodDraft ← dispatchRpcCommand stP2 "ui_draft_get" (.obj #[("key", .str "m:flood-519")])
+  let _ ← dispatchRpcCommand stP1 "ui_cache_clear" (.obj #[])
+  let tailAfterClear ← dispatchRpcCommand stP2 "ui_cache_get_tail" (.obj #[
+    ("scope", .str "scope-sql"),
+    ("mission_id", .str "m-big"),
+    ("tail_limit", .nat 3)
+  ])
+  let draftAfterClear ← dispatchRpcCommand stP2 "ui_draft_get" (.obj #[("key", .str "m:flood-519")])
+  let _ ← dispatchRpcCommand stP1 "ui_draft_delete" (.obj #[("key", .str "m:flood-519")])
+  let draftAfterDelete ← dispatchRpcCommand stP2 "ui_draft_get" (.obj #[("key", .str "m:flood-519")])
+  total := total + 1
+  let tailStartOk := match tailRes with
+    | .ok jv => jv.fieldNat? "start_idx" == some 7 && jv.fieldNat? "total_events" == some 10 && ((jv.fieldArr? "events_raw").map Array.size) == some 3
+    | _ => false
+  let sliceOk := match sliceBefore7 with
+    | .ok jv => jv.fieldNat? "start_idx" == some 3 && ((jv.fieldArr? "events_raw").map Array.size) == some 4
+    | _ => false
+  let appendTailOk := match tailAfterAppend with
+    | .ok jv => jv.fieldNat? "start_idx" == some 9 && jv.fieldNat? "total_events" == some 11 && ((jv.fieldArr? "events_raw").map Array.size) == some 2
+    | _ => false
+  let staleGuardOk := match tailAfterStale with
+    | .ok jv => jv.fieldNat? "start_idx" == some 9 && jv.fieldNat? "total_events" == some 11 && jv.fieldNat? "saved_at" == some 5005
+    | _ => false
+  let sqlCacheAndDraftsOk :=
+    isOkNull putSlicedRes &&
+    tailStartOk &&
+    isOkNull putPartialRes &&
+    sliceOk &&
+    appendTailOk &&
+    isOkNull putStaleSlicedRes &&
+    staleGuardOk &&
+    isOkNull draftPut &&
+    isOkNull draftIfAbsent &&
+    isOkStr durableQueueAfterFlood "[{\"id\":\"unsent-msg-1\"}]" &&
+    isOkNull evictedOldestDraft &&
+    isOkStr newestFloodDraft "{\"text\":\"disposable\",\"images\":[]}" &&
+    isOkNull tailAfterClear &&
+    isOkStr draftAfterClear "{\"text\":\"disposable\",\"images\":[]}" &&
+    isOkNull draftAfterDelete
+  if (← assertTrue "sqlite_tail_sliced_ui_cache_and_draft_persistence" sqlCacheAndDraftsOk) then passed := passed + 1
+
   -- E. Token-scoped `__orb_poll_events` + per-SSE-subscriber broadcast (no multi-window event stealing)
   let stPub ← IO.mkRef ({ launchToken := validTok } : LocaldState)
   let sid1 ← stPub.modifyGet LocaldState.registerSseSubscriber

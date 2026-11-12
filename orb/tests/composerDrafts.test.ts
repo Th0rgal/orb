@@ -1,5 +1,20 @@
-import { expect, it, vi } from "vitest";
-import { readComposerDraft, saveComposerDraft } from "../src/composerDrafts";
+import { afterEach, expect, it, vi } from "vitest";
+import {
+  readComposerDraft,
+  readSideThread,
+  resetComposerDraftsMemoryForTest,
+  saveComposerDraft,
+  saveSideThread,
+  updateSideThread,
+} from "../src/composerDrafts";
+
+const win = window as unknown as { __ORB_DESKTOP__?: unknown };
+
+afterEach(() => {
+  delete win.__ORB_DESKTOP__;
+  resetComposerDraftsMemoryForTest();
+  vi.unstubAllGlobals();
+});
 
 it("reopens the newest draft before its IndexedDB write has completed", async () => {
   const open = { result: undefined, onsuccess: undefined as undefined | (() => void) };
@@ -11,19 +26,477 @@ it("reopens the newest draft before its IndexedDB write has completed", async ()
     transactions.push(tx);
     return tx;
   } } as any;
-  try {
-    const oldRead = readComposerDraft("m:race");
-    open.onsuccess!();
-    await Promise.resolve();
-    const write = saveComposerDraft("m:race", { text: "Newest reply", images: [] });
-    await expect(readComposerDraft("m:race")).resolves.toMatchObject({ text: "Newest reply" });
-    get.onsuccess!();
-    await expect(oldRead).resolves.toMatchObject({ text: "Newest reply" });
-    transactions[1].oncomplete!();
-    await write;
-    const clear = saveComposerDraft("m:race", { text: "", images: [] });
-    await expect(readComposerDraft("m:race")).resolves.toMatchObject({ text: "" });
-    transactions[2].oncomplete!();
-    await clear;
-  } finally { vi.unstubAllGlobals(); }
+  const oldRead = readComposerDraft("m:race");
+  open.onsuccess!();
+  await Promise.resolve();
+  const write = saveComposerDraft("m:race", { text: "Newest reply", images: [] });
+  await expect(readComposerDraft("m:race")).resolves.toMatchObject({ text: "Newest reply" });
+  get.onsuccess!();
+  await expect(oldRead).resolves.toMatchObject({ text: "Newest reply" });
+  transactions[1].oncomplete!();
+  await write;
+  const clear = saveComposerDraft("m:race", { text: "", images: [] });
+  await expect(readComposerDraft("m:race")).resolves.toMatchObject({ text: "" });
+  transactions[2].oncomplete!();
+  await clear;
+});
+
+it("persists drafts and side threads in orb-locald SQLite and auto-migrates IndexedDB misses", async () => {
+  const sqlDrafts = new Map<string, string>();
+  const idbDrafts = new Map<string, unknown>([
+    ["m:legacy-idb", { text: "from indexeddb", images: [] }],
+    ["thread:q-1", { count: 2 }],
+  ]);
+  vi.stubGlobal("indexedDB", {
+    open: () => {
+      const req = {
+        result: {
+          transaction: () => {
+            const tx = {
+              oncomplete: undefined as undefined | (() => void),
+              objectStore: () => ({
+                get: (k: string) => {
+                  const greq = { result: idbDrafts.get(k), onsuccess: undefined as undefined | (() => void) };
+                  queueMicrotask(() => greq.onsuccess?.());
+                  return greq;
+                },
+                put: (v: unknown, k: string) => {
+                  idbDrafts.set(k, v);
+                },
+                delete: (k: string) => {
+                  idbDrafts.delete(k);
+                },
+              }),
+            };
+            queueMicrotask(() => tx.oncomplete?.());
+            return tx;
+          },
+        },
+        onsuccess: undefined as undefined | (() => void),
+      };
+      queueMicrotask(() => req.onsuccess?.());
+      return req;
+    },
+  });
+
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        const key = String(args?.key ?? "");
+        if (cmd === "ui_draft_get") return sqlDrafts.get(key) ?? null;
+        if (cmd === "ui_draft_put") {
+          const raw = String(args?.raw ?? "");
+          if (raw.includes("OVERSIZED_ATTACHMENT")) {
+            throw new Error("Draft exceeds 16 MiB limit");
+          }
+          if (args?.if_absent && sqlDrafts.has(key)) {
+            return null;
+          }
+          sqlDrafts.set(key, raw);
+          return null;
+        }
+        if (cmd === "ui_draft_delete") {
+          sqlDrafts.delete(key);
+          return null;
+        }
+        throw new Error(`unexpected ${cmd}`);
+      },
+    },
+  };
+
+  // Legacy IndexedDB draft is returned on SQLite miss and migrated to SQLite in background.
+  const migrated = await readComposerDraft("m:legacy-idb");
+  expect(migrated).toEqual({ text: "from indexeddb", images: [] });
+  await Promise.resolve();
+  expect(JSON.parse(sqlDrafts.get("m:legacy-idb") ?? "null")).toEqual({
+    text: "from indexeddb",
+    images: [],
+  });
+
+  // New draft writes go directly to orb-locald SQLite and survive cold reload.
+  await saveComposerDraft("m:native", { mode: "plan", text: "build phase a2", images: [] });
+  resetComposerDraftsMemoryForTest();
+  expect(await readComposerDraft("m:native")).toEqual({
+    mode: "plan",
+    text: "build phase a2",
+    images: [],
+  });
+
+  // Oversized draft fallback deletes any stale SQLite entry so cold read returns the IndexedDB draft.
+  await saveComposerDraft("m:native", {
+    mode: "plan",
+    text: "updated with OVERSIZED_ATTACHMENT",
+    images: [],
+  });
+  expect(sqlDrafts.has("m:native")).toBe(false);
+  resetComposerDraftsMemoryForTest();
+  expect(await readComposerDraft("m:native")).toEqual({
+    mode: "plan",
+    text: "updated with OVERSIZED_ATTACHMENT",
+    images: [],
+  });
+
+  // Atomic side-thread update serializes concurrent updates over SQLite.
+  await saveSideThread("side-a", { items: ["one"] });
+  const [u1, u2] = await Promise.all([
+    updateSideThread<{ items: string[] }>("side-a", (cur) => ({
+      items: [...(cur?.items ?? []), "two"],
+    })),
+    updateSideThread<{ items: string[] }>("side-a", (cur) => ({
+      items: [...(cur?.items ?? []), "three"],
+    })),
+  ]);
+  expect(u1.updated && u2.updated).toBe(true);
+  expect(await readSideThread<{ items: string[] }>("side-a")).toEqual({
+    items: ["one", "two", "three"],
+  });
+});
+
+it("fences background IndexedDB draft migration when a newer write or delete happens in flight", async () => {
+  const sqlDrafts = new Map<string, string>();
+  let finishLegacyGet!: () => void;
+  vi.stubGlobal("indexedDB", {
+    open: () => {
+      const req = {
+        result: {
+          transaction: () => {
+            const tx = {
+              oncomplete: undefined as undefined | (() => void),
+              objectStore: () => ({
+                get: () => {
+                  const greq = {
+                    result: { text: "stale legacy draft", images: [] },
+                    onsuccess: undefined as undefined | (() => void),
+                  };
+                  finishLegacyGet = () => {
+                    greq.onsuccess?.();
+                    tx.oncomplete?.();
+                  };
+                  return greq;
+                },
+                put: vi.fn(),
+                delete: vi.fn(),
+              }),
+            };
+            return tx;
+          },
+        },
+        onsuccess: undefined as undefined | (() => void),
+      };
+      queueMicrotask(() => req.onsuccess?.());
+      return req;
+    },
+  });
+
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        const key = String(args?.key ?? "");
+        if (cmd === "ui_draft_get") return sqlDrafts.get(key) ?? null;
+        if (cmd === "ui_draft_put") {
+          if (args?.if_absent && sqlDrafts.has(key)) return null;
+          sqlDrafts.set(key, String(args?.raw ?? ""));
+          return null;
+        }
+        if (cmd === "ui_draft_delete") {
+          sqlDrafts.delete(key);
+          return null;
+        }
+        return null;
+      },
+    },
+  };
+
+  const pendingRead = readComposerDraft("m:race-mig");
+  await new Promise((r) => setTimeout(r, 0));
+  await saveComposerDraft("m:race-mig", { text: "NEWEST", images: [] });
+  finishLegacyGet();
+  await expect(pendingRead).resolves.toEqual({ text: "NEWEST", images: [] });
+  await new Promise((r) => setTimeout(r, 0));
+  resetComposerDraftsMemoryForTest();
+  await expect(readComposerDraft("m:race-mig")).resolves.toEqual({ text: "NEWEST", images: [] });
+});
+
+it("serializes overlapping native draft autosaves, clears, and follow-ups per key", async () => {
+  const sqlDrafts = new Map<string, string>();
+  let releaseFirstPut!: () => void;
+  let firstPutSeen = false;
+
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        const key = String(args?.key ?? "");
+        if (cmd === "ui_draft_get") return sqlDrafts.get(key) ?? null;
+        if (cmd === "ui_draft_put") {
+          if (!firstPutSeen) {
+            firstPutSeen = true;
+            await new Promise<void>((r) => {
+              releaseFirstPut = r;
+            });
+          }
+          sqlDrafts.set(key, String(args?.raw ?? ""));
+          return null;
+        }
+        if (cmd === "ui_draft_delete") {
+          sqlDrafts.delete(key);
+          return null;
+        }
+        return null;
+      },
+    },
+  };
+
+  // Start slow autosave, then send-clear while autosave is still awaiting IPC.
+  const autosave = saveComposerDraft("m:overlap", { text: "sent prompt", images: [] });
+  await new Promise((r) => setTimeout(r, 0));
+  const clear = saveComposerDraft("m:overlap", { text: "", images: [] });
+  releaseFirstPut();
+  await Promise.all([autosave, clear]);
+
+  resetComposerDraftsMemoryForTest();
+  await expect(readComposerDraft("m:overlap")).resolves.toBeUndefined();
+
+  // Clear followed immediately by a follow-up draft keeps the follow-up.
+  const clear2 = saveComposerDraft("m:overlap", { text: "", images: [] });
+  const followUp = saveComposerDraft("m:overlap", { text: "follow up", images: [] });
+  await Promise.all([clear2, followUp]);
+  resetComposerDraftsMemoryForTest();
+  await expect(readComposerDraft("m:overlap")).resolves.toEqual({ text: "follow up", images: [] });
+});
+
+it("propagates transient native read errors for durable side-thread records instead of returning undefined", async () => {
+  const sqlDrafts = new Map<string, string>();
+  let failNextGet = false;
+
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        const key = String(args?.key ?? "");
+        if (cmd === "ui_draft_get") {
+          if (failNextGet) {
+            failNextGet = false;
+            throw new Error("Transient IPC timeout");
+          }
+          return sqlDrafts.get(key) ?? null;
+        }
+        if (cmd === "ui_draft_put") {
+          sqlDrafts.set(key, String(args?.raw ?? ""));
+          return null;
+        }
+        return null;
+      },
+    },
+  };
+
+  await saveSideThread("orb-local-message-queue:v1:ep", [{ id: "m-1", text: "queued" }]);
+  resetComposerDraftsMemoryForTest();
+
+  failNextGet = true;
+  await expect(readSideThread("orb-local-message-queue:v1:ep")).rejects.toThrow("Transient IPC timeout");
+  await expect(readSideThread("orb-local-message-queue:v1:ep")).resolves.toEqual([
+    { id: "m-1", text: "queued" },
+  ]);
+});
+
+it("propagates native draft deletion failures instead of acknowledging an unpersisted clear", async () => {
+  let failDelete = true;
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string) => {
+        if (cmd === "ui_draft_delete" && failDelete) {
+          throw new Error("SQLITE_BUSY: database is locked");
+        }
+        return null;
+      },
+    },
+  };
+
+  await expect(saveComposerDraft("m:del-err", { text: "", images: [] })).rejects.toThrow("SQLITE_BUSY");
+  failDelete = false;
+  await expect(saveComposerDraft("m:del-err", { text: "", images: [] })).resolves.toBeUndefined();
+});
+
+it("preserves a saveSideThread queued while an earlier updateSideThread is reading", async () => {
+  const sqlDrafts = new Map<string, string>([
+    ["thread:race-upd", JSON.stringify({ state: "OLD" })],
+  ]);
+  let releaseGet!: () => void;
+  let blockGet = true;
+
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        const key = String(args?.key ?? "");
+        if (cmd === "ui_draft_get") {
+          if (blockGet) {
+            blockGet = false;
+            await new Promise<void>((r) => {
+              releaseGet = r;
+            });
+          }
+          return sqlDrafts.get(key) ?? null;
+        }
+        if (cmd === "ui_draft_put") {
+          sqlDrafts.set(key, String(args?.raw ?? ""));
+          return null;
+        }
+        return null;
+      },
+    },
+  };
+
+  const upd = updateSideThread<{ state: string }>("race-upd", (cur) => ({
+    state: `${cur?.state ?? "NONE"}+RECONCILED`,
+  }));
+  await new Promise((r) => setTimeout(r, 0));
+  const save = saveSideThread("race-upd", { state: "NEW" });
+  releaseGet();
+  await Promise.all([upd, save]);
+
+  resetComposerDraftsMemoryForTest();
+  await expect(readSideThread("race-upd")).resolves.toEqual({ state: "NEW" });
+});
+
+it("commits IndexedDB fallback before removing the previous native SQLite record", async () => {
+  const sqlDrafts = new Map<string, string>();
+  vi.stubGlobal("indexedDB", {
+    open: () => {
+      const req = {
+        result: {
+          transaction: () => ({
+            oncomplete: undefined as undefined | (() => void),
+            onerror: undefined as undefined | (() => void),
+            error: new Error("QuotaExceededError"),
+            objectStore: () => ({
+              get: () => {
+                const greq = { result: undefined, onsuccess: undefined as undefined | (() => void) };
+                queueMicrotask(() => greq.onsuccess?.());
+                return greq;
+              },
+              put: function () {
+                queueMicrotask(() => (this as any).__tx?.onerror?.());
+              },
+              delete: () => {},
+            }),
+          }),
+        },
+        onsuccess: undefined as undefined | (() => void),
+      };
+      const origTx = req.result.transaction;
+      req.result.transaction = () => {
+        const tx = origTx();
+        const origStore = tx.objectStore;
+        tx.objectStore = () => {
+          const st = origStore() as any;
+          st.__tx = tx;
+          return st;
+        };
+        return tx;
+      };
+      queueMicrotask(() => req.onsuccess?.());
+      return req;
+    },
+  });
+
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        const key = String(args?.key ?? "");
+        if (cmd === "ui_draft_get") return sqlDrafts.get(key) ?? null;
+        if (cmd === "ui_draft_put") {
+          const raw = String(args?.raw ?? "");
+          if (raw.includes("OVERSIZED_PAYLOAD")) {
+            throw new Error("Invalid ui_draft_put payload");
+          }
+          sqlDrafts.set(key, raw);
+          return null;
+        }
+        if (cmd === "ui_draft_delete") {
+          sqlDrafts.delete(key);
+          return null;
+        }
+        return null;
+      },
+    },
+  };
+
+  await saveSideThread("durable-q", [{ id: "keep-me" }]);
+  await expect(
+    saveSideThread("durable-q", [{ id: "keep-me" }, { id: "OVERSIZED_PAYLOAD" }]),
+  ).rejects.toThrow("QuotaExceededError");
+
+  resetComposerDraftsMemoryForTest();
+  await expect(readSideThread("durable-q")).resolves.toEqual([{ id: "keep-me" }]);
+});
+
+it("does not queue a stale migration during updateSideThread when the updated value falls back to IndexedDB", async () => {
+  const sqlDrafts = new Map<string, string>();
+  const idbDrafts = new Map<string, unknown>([
+    ["thread:upd-oversized", { state: "OLD_LEGACY" }],
+  ]);
+  vi.stubGlobal("indexedDB", {
+    open: () => {
+      const req = {
+        result: {
+          transaction: () => {
+            const tx = {
+              oncomplete: undefined as undefined | (() => void),
+              objectStore: () => ({
+                get: (k: string) => {
+                  const greq = { result: idbDrafts.get(k), onsuccess: undefined as undefined | (() => void) };
+                  queueMicrotask(() => greq.onsuccess?.());
+                  return greq;
+                },
+                put: (v: unknown, k: string) => {
+                  idbDrafts.set(k, v);
+                },
+                delete: (k: string) => {
+                  idbDrafts.delete(k);
+                },
+              }),
+            };
+            queueMicrotask(() => tx.oncomplete?.());
+            return tx;
+          },
+        },
+        onsuccess: undefined as undefined | (() => void),
+      };
+      queueMicrotask(() => req.onsuccess?.());
+      return req;
+    },
+  });
+
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        const key = String(args?.key ?? "");
+        if (cmd === "ui_draft_get") return sqlDrafts.get(key) ?? null;
+        if (cmd === "ui_draft_put") {
+          const raw = String(args?.raw ?? "");
+          if (raw.includes("OVERSIZED_NEW")) {
+            throw new Error("Invalid ui_draft_put payload");
+          }
+          if (args?.if_absent && sqlDrafts.has(key)) return null;
+          sqlDrafts.set(key, raw);
+          return null;
+        }
+        if (cmd === "ui_draft_delete") {
+          sqlDrafts.delete(key);
+          return null;
+        }
+        return null;
+      },
+    },
+  };
+
+  const res = await updateSideThread<{ state: string }>("upd-oversized", (cur) => ({
+    state: `${cur?.state}->OVERSIZED_NEW`,
+  }));
+  expect(res.updated).toBe(true);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(sqlDrafts.has("thread:upd-oversized")).toBe(false);
+  resetComposerDraftsMemoryForTest();
+  await expect(readSideThread("upd-oversized")).resolves.toEqual({
+    state: "OLD_LEGACY->OVERSIZED_NEW",
+  });
 });

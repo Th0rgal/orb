@@ -290,6 +290,9 @@ for out_dir in "${OUT_DIRS[@]}"; do
       exit 1
     fi
     install -m 0755 "$src" "$out_dir/$bin"
+    if [[ "$(uname -s)" == "Linux" && -n "${LD_LIBRARY_PATH:-}" ]] && command -v patchelf >/dev/null 2>&1; then
+      patchelf --add-rpath "${LD_LIBRARY_PATH}" "$out_dir/$bin" 2>/dev/null || true
+    fi
   done
 done
 

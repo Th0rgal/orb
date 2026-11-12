@@ -11,6 +11,7 @@ import Orb.Kernel
 import Orb.Lifecycle
 import OrbBin.Json
 import OrbBin.PosixExt
+import OrbBin.Sqlite
 import OrbNetLeaf.Crypto
 import OrbCore.Spec
 
@@ -22,19 +23,10 @@ open Orb.Kernel
 open Orb.Lifecycle
 open OrbBin.Json
 open OrbBin.PosixExt
+open OrbBin.Sqlite
 open OrbCore.Spec
 
-@[extern "orb_sqlite_open"]
-opaque sqliteOpenRaw (path : @& String) : IO UInt64
-
-@[extern "orb_sqlite_close"]
-opaque sqliteCloseRaw (handle : UInt64) : IO Unit
-
-@[extern "orb_sqlite_exec"]
-opaque sqliteExecRaw (handle : UInt64) (sql : @& String) : IO (Except String Unit)
-
-@[extern "orb_sqlite_query_rows"]
-opaque sqliteQueryRowsRaw (handle : UInt64) (sql : @& String) (params : @& Array String) : IO (Except String (Array (Array String)))
+export OrbBin.Sqlite (SqliteDb sqliteOpenRaw sqliteCloseRaw sqliteExecRaw sqliteQueryRowsRaw applyAdditiveAlters openSqliteDb)
 
 @[extern "orb_core_epoch_sec"]
 opaque coreEpochSec : IO UInt64
@@ -44,12 +36,6 @@ opaque pbkdf2Sha256HexRaw (password : @& String) (salt : @& ByteArray) (iteratio
 
 @[extern "orb_sd_notify"]
 opaque sdNotifyRaw (socketPath : @& String) (payload : @& String) : IO UInt32
-
-/-- Typed SQLite handle opened in WAL mode with an exclusive `Std.Mutex` serializing C `sqlite3*` access. -/
-structure SqliteDb where
-  handle : UInt64
-  path   : String
-  mu     : Std.Mutex Unit
 
 /-- Conversation turn history entry (`pub history: Vec<MissionHistoryEntry>,` capability parity). -/
 structure MissionHistoryEntry where
@@ -318,20 +304,6 @@ def askMidturnPendingIndexSql : String :=
 def idempotencySchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS idempotency_keys (scope TEXT NOT NULL, request_key TEXT NOT NULL, response_json TEXT NOT NULL, status_code INTEGER NOT NULL DEFAULT 200, committed_oversize INTEGER NOT NULL DEFAULT 0, body_bytes INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT 'committed', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(scope, request_key));"
 
-private def isIgnorableDuplicateColErr (msg : String) : Bool :=
-  (msg.toLower.splitOn "duplicate column name").length > 1
-
-/-- Execute additive `ALTER TABLE ... ADD COLUMN` statements, tolerating already-present columns
-    while failing closed on persistent schema, corruption, or read-only errors (`SM-01`). -/
-def applyAdditiveAlters (h : UInt64) (alters : Array String) : IO (Except String Unit) := do
-  for stmt in alters do
-    match ← sqliteExecRaw h stmt with
-    | .ok () => pure ()
-    | .error e =>
-      if !isIgnorableDuplicateColErr e then
-        return .error e
-  return .ok ()
-
 def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE missions ADD COLUMN project TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN folder TEXT NOT NULL DEFAULT '';",
@@ -487,36 +459,6 @@ def idempotencyAdditiveAlters : Array String := #[
   "ALTER TABLE idempotency_keys ADD COLUMN body_bytes INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE idempotency_keys ADD COLUMN phase TEXT NOT NULL DEFAULT 'committed';"
 ]
-
-/-- Open a persistent SQLite database file and verify write durability (`BEGIN IMMEDIATE; ROLLBACK;`).
-    Never accepts `:memory:` or `mode=memory` URIs unless `allowMemory == true`, and never falls back
-    to an in-memory store on persistent open/migration failure (`SM-01`). -/
-def openSqliteDb (path : String) (ddl : String) (alters : Array String := #[]) (allowMemory : Bool := false) : IO (Except String SqliteDb) := do
-  let norm := path.trimAscii.toString
-  if norm.isEmpty then
-    return .error "sqlite_empty_path_rejected"
-  if !allowMemory && (norm == ":memory:" || (norm.toLower.splitOn "mode=memory").length > 1) then
-    return .error s!"sqlite_memory_fallback_forbidden:{path}"
-  let h ← sqliteOpenRaw path
-  if h == 0 then
-    return .error s!"sqlite_open_failed:{path}"
-  match ← sqliteExecRaw h ddl with
-  | .error e =>
-    sqliteCloseRaw h
-    return .error e
-  | .ok () =>
-    match ← applyAdditiveAlters h alters with
-    | .error ae =>
-      sqliteCloseRaw h
-      return .error ae
-    | .ok () =>
-      match ← sqliteExecRaw h "BEGIN IMMEDIATE; ROLLBACK;" with
-      | .error we =>
-        sqliteCloseRaw h
-        return .error s!"sqlite_write_probe_failed:{we}"
-      | .ok () =>
-        let mu ← Std.Mutex.new ()
-        return .ok { handle := h, path := path, mu := mu }
 
 private def hexNibble (n : Nat) : Char :=
   let v := n % 16

@@ -14,6 +14,7 @@ import * as TreeIcon from "./sidebarIcons";
 import {
   lazy,
   Suspense,
+  ErrorBoundary,
   createContext,
   useContext,
   createSignal,
@@ -25,6 +26,7 @@ import {
   onMount,
   Show,
   For,
+  type Component,
   type JSX,
 } from "solid-js";
 import { usageTelemetry } from "./usageTelemetry";
@@ -54,8 +56,28 @@ import ImagePreview from "./ImagePreview";
 import { imageByteLimit, imageMime } from "./imageTypes";
 import { scrollKeeper } from "./mission/scrollPolicy";
 
-const PdfPreview = lazy(() => import("./PdfPreview"));
+export function lazyRetry<P extends Record<string, unknown>>(loader: () => Promise<{ default: Component<P> }>) {
+  const [Current, setCurrent] = createSignal<Component<P>>(lazy(loader));
+  return {
+    Component: () => Current(),
+    reset() {
+      setCurrent(() => lazy(loader));
+    },
+  };
+}
+let pdfRetryNonce = 0;
+const pdfPreviewLazy = lazyRetry(() => {
+  if (import.meta.env.DEV && pdfRetryNonce > 0) {
+    const retryUrl = new URL(`./PdfPreview.tsx?retry=${pdfRetryNonce}`, import.meta.url).href;
+    return import(/* @vite-ignore */ retryUrl).catch(() => import("./PdfPreview"));
+  }
+  return import("./PdfPreview");
+});
 const DiffViewer = lazy(() => import("./DiffViewer"));
+function isStaleChunkError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /Importing a module script failed|Failed to fetch dynamically imported module|error loading dynamically imported module/i.test(msg);
+}
 
 type Tab = FileRef & { pinned: boolean; scroll?: number };
 type Saved = {
@@ -1365,7 +1387,27 @@ export function FilePanelProvider(p: {
                             </button>
                             <Show when={data().modified}><small>Modified {new Date(data().modified! * 1000).toLocaleDateString(undefined, {day:"numeric", month:"short", year:"numeric"})}</small></Show>
                           </div>}>
-                            <Suspense fallback={<p class="file-muted">Loading PDF viewer…</p>}><PdfPreview name={selected()?.name ?? "PDF"} load={loadPreviewBytes} close={() => setShowPdf(false)} /></Suspense>
+                            <ErrorBoundary fallback={(err, reset) => (
+                              <div class="file-binary" role="alert">
+                                <p class="file-muted">
+                                  {isStaleChunkError(err)
+                                    ? "Orb was updated in the background — reload to load the PDF viewer."
+                                    : `Couldn’t load PDF viewer. ${err instanceof Error ? err.message : String(err)}`}
+                                </p>
+                                <div style={{ display: "flex", gap: "8px", "justify-content": "center" }}>
+                                  <button class="s-btn file-binary-action" onClick={() => { pdfRetryNonce += 1; pdfPreviewLazy.reset(); reset(); }}>Retry</button>
+                                  <Show when={isStaleChunkError(err)}>
+                                    <button class="s-btn file-binary-action" onClick={() => location.reload()}>Reload Orb</button>
+                                  </Show>
+                                </div>
+                              </div>
+                            )}>
+                              <Suspense fallback={<p class="file-muted">Loading PDF viewer…</p>}>
+                                <Show when={pdfPreviewLazy.Component()} keyed>
+                                  {(PdfComp) => <PdfComp name={selected()?.name ?? "PDF"} load={loadPreviewBytes} close={() => setShowPdf(false)} />}
+                                </Show>
+                              </Suspense>
+                            </ErrorBoundary>
                           </Show>}>
                             <ImagePreview name={selected()?.name ?? "Image"} path={selected()?.path} load={loadPreviewBytes} close={() => setShowImage(false)} />
                           </Show>

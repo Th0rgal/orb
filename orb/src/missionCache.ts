@@ -26,7 +26,12 @@ import {
 } from "./stream";
 import { cacheDelete, cachePeek, cachePut, cacheRecents, estimateCacheBytes, onCacheEvict } from "./pageCache";
 import { currentLinkBudget, onLinkBudgetChange } from "./networkHealth";
-import { loadPersistedTranscript, savePersistedTranscript } from "./persistentCache";
+import {
+  DEFAULT_TRANSCRIPT_TAIL_EVENTS,
+  loadPersistedTranscriptSlice,
+  loadPersistedTranscriptTail,
+  savePersistedTranscript,
+} from "./persistentCache";
 import { promoteScheduledRequests, type RequestPriority } from "./transportScheduler";
 
 function transcriptPersistScope(): string {
@@ -58,6 +63,11 @@ export type TranscriptSnap = {
   cursor?: number;
   before?: number;
   hasOlder?: boolean;
+  /** Non-zero when cold-hydrated from a SQLite tail slice (`ui_cache_get_tail`),
+   *  marking how many earlier cached events remain in `orb-locald` SQLite (`0..diskStartIdx-1`). */
+  diskStartIdx?: number;
+  /** Original server `hasOlder` flag before `diskStartIdx > 0` forced `hasOlder: true`. */
+  serverHasOlder?: boolean;
 };
 
 const key = (id: string) => {
@@ -297,15 +307,31 @@ function flushPersistScope(scope: string) {
   if (!pending) return;
   pendingPersistSnapshots.delete(scope);
   if (pending.ver !== connectionVersionSafe()) return;
-  // Store `settledItems` once (pre-digested for O(1) cold-start hydration) while
-  // stripping duplicate `items: []` on disk when settledItems is present; retain
-  // `items` when mid-turn so warm-tier compaction never loses historical work items.
-  const digested = buildSettledDigestSnapshot(pending.snapshot);
-  const hasSettled = Array.isArray(digested.settledItems) && digested.settledItems.length > 0;
-  void savePersistedTranscript(pending.persistScope, pending.missionId, {
-    ...digested,
-    items: hasSettled ? [] : digested.items,
+  const {
+    diskStartIdx,
+    serverHasOlder,
+    ...restSnap
+  } = pending.snapshot;
+  const startIdx = typeof diskStartIdx === "number" && diskStartIdx > 0 ? diskStartIdx : 0;
+  const persistedHasOlder = startIdx > 0 ? serverHasOlder : restSnap.hasOlder;
+  const digested = buildSettledDigestSnapshot({
+    ...restSnap,
+    hasOlder: persistedHasOlder,
   });
+  const hasSettled = Array.isArray(digested.settledItems) && digested.settledItems.length > 0;
+  void savePersistedTranscript(
+    pending.persistScope,
+    pending.missionId,
+    {
+      ...digested,
+      // When tail-sliced (`startIdx > 0`), `settledItems` is cleared below on tail-slice
+      // load so rebuilding from the SQLite tail window never duplicates full-history items.
+      settledItems: startIdx > 0 ? undefined : digested.settledItems,
+      openTailEvents: startIdx > 0 ? undefined : digested.openTailEvents,
+      items: hasSettled ? [] : digested.items,
+    },
+    startIdx > 0 ? { startIdx } : undefined,
+  );
 }
 
 export function flushPendingPersistedTranscripts(): void {
@@ -457,18 +483,25 @@ export function hydrateTranscriptFromDisk(
   if (inflightHydrate) return inflightHydrate;
   const ver = connectionVersionSafe();
   const persistScope = transcriptPersistScope();
-  const p = loadPersistedTranscript<TranscriptSnap>(persistScope, id)
-    .then((persisted) => {
+  const p = loadPersistedTranscriptTail<TranscriptSnap>(
+    persistScope,
+    id,
+    DEFAULT_TRANSCRIPT_TAIL_EVENTS,
+  )
+    .then((sliced) => {
+      const persisted = sliced?.snapshot;
       if (ver !== connectionVersionSafe() || !persisted?.fromLog || persisted.detailsPending) {
         return undefined;
       }
       if (!peekReadyTranscript(id)) {
         const session = sessionFor(id);
+        const startIdx = sliced && sliced.startIdx > 0 ? sliced.startIdx : 0;
         let rebuiltItems: StreamItem[];
         const prebuiltBase =
-          Array.isArray(persisted.settledItems) && persisted.settledItems.length > 0
+          startIdx === 0 && Array.isArray(persisted.settledItems) && persisted.settledItems.length > 0
             ? persisted.settledItems
-            : typeof persisted.settledSeq === "number" &&
+            : startIdx === 0 &&
+                typeof persisted.settledSeq === "number" &&
                 persisted.settledSeq > 0 &&
                 Array.isArray(persisted.items) &&
                 persisted.items.length > 0
@@ -486,7 +519,24 @@ export function hydrateTranscriptFromDisk(
             session,
           );
         }
-        const hydrated: TranscriptSnap = { ...persisted, items: rebuiltItems };
+        const origHasOlder = persisted.serverHasOlder ?? persisted.hasOlder;
+        const hydrated: TranscriptSnap = {
+          ...persisted,
+          items: rebuiltItems,
+          ...(startIdx > 0
+            ? {
+                settledItems: undefined,
+                openTailEvents: undefined,
+                settledSeq: undefined,
+                diskStartIdx: startIdx,
+                serverHasOlder: origHasOlder,
+                hasOlder: true,
+              }
+            : {
+                diskStartIdx: undefined,
+                serverHasOlder: undefined,
+              }),
+        };
         saveSnapshot(scope, hydrated, false, options?.syncBump === true);
         dirtyMissions.add(scope);
       }
@@ -1169,7 +1219,9 @@ async function fetchTranscript(
           : mergeStreamBySequence(previous.stream ?? [], tailEvents);
       let cursor = previous?.cursor;
       let before = previous?.before;
-      let hasOlder = previous?.hasOlder;
+      let diskStartIdx = previous?.cursor === undefined ? undefined : previous?.diskStartIdx;
+      let serverHasOlder = previous?.cursor === undefined ? undefined : previous?.serverHasOlder;
+      let hasOlder = diskStartIdx && diskStartIdx > 0 ? true : previous?.hasOlder;
       let spineComplete = previous?.spineComplete;
       let spineBefore = previous?.spineBefore;
       if (previous?.cursor === undefined) {
@@ -1239,7 +1291,8 @@ async function fetchTranscript(
         ...(spineBefore !== undefined ? { spineBefore } : {}),
         cursor,
         before,
-        hasOlder,
+        hasOlder: diskStartIdx && diskStartIdx > 0 ? true : hasOlder,
+        ...(diskStartIdx && diskStartIdx > 0 ? { diskStartIdx, serverHasOlder } : {}),
       };
     }
   }
@@ -1256,9 +1309,12 @@ async function fetchTranscript(
   // Publish persisted messages before requesting activity, while racing the
   // full tail page in parallel so cold opens never pay an extra serial RTT.
   if (currentPriority() !== "p2") startPreview();
+  else opts?.registerPromote?.(startPreview);
   let stream:StreamEvent[]=previous?.cursor===undefined?[]:[...(previous?.stream??[])];
   let retainedSpine:StreamEvent[]=previous?.cursor===undefined&&previous?.stream?.length?spineAnswers(previous.stream):[];
-  let cursor=previous?.cursor, before=previous?.before, hasOlder=previous?.hasOlder;
+  let cursor=previous?.cursor, before=previous?.before;
+  let diskStartIdx=previous?.diskStartIdx, serverHasOlder=previous?.serverHasOlder;
+  let hasOlder=diskStartIdx&&diskStartIdx>0?true:previous?.hasOlder;
   let spineComplete=previous?.spineComplete, spineBefore=previous?.spineBefore;
   let resets=0, forwardPages=0, jumpedForwardGap=false;
   for(;;){
@@ -1267,11 +1323,11 @@ async function fetchTranscript(
    const page=await getMissionEventPage(id,cursor===undefined?{...pageExtra}:{since:cursor,...pageExtra});
    tailSettled = true;
    check();
-   if(page.reset){if(resets++)throw Error('Event history changed repeatedly during recovery.');stream.length=0;retainedSpine=[];cursor=undefined;before=undefined;hasOlder=undefined;spineComplete=undefined;spineBefore=undefined;forwardPages=0;jumpedForwardGap=false;continue;}
+   if(page.reset){if(resets++)throw Error('Event history changed repeatedly during recovery.');stream.length=0;retainedSpine=[];cursor=undefined;before=undefined;hasOlder=undefined;diskStartIdx=undefined;serverHasOlder=undefined;spineComplete=undefined;spineBefore=undefined;forwardPages=0;jumpedForwardGap=false;continue;}
    const tailEvents:StreamEvent[]=[];
    for(const row of page.events){const event=storedToStream(row);if(event){stream.push(event);tailEvents.push(event);}}
    if(cursor===undefined){
-    before=page.nextCursor;hasOlder=page.hasMore;cursor=page.pageMax??0;
+    before=page.nextCursor;hasOlder=page.hasMore;cursor=page.pageMax??0;diskStartIdx=undefined;serverHasOlder=undefined;
     if(!hasOlder){spineComplete=true;spineBefore=undefined;}
     // When a tool-heavy turn exceeds the 200-event tail window (e.g. hundreds
     // or thousands of consecutive tool_call/tool_result events since the last
@@ -1317,6 +1373,8 @@ async function fetchTranscript(
     cursor=undefined;
     before=undefined;
     hasOlder=undefined;
+    diskStartIdx=undefined;
+    serverHasOlder=undefined;
     spineComplete=false;
     spineBefore=undefined;
     jumpedForwardGap=true;
@@ -1333,7 +1391,19 @@ async function fetchTranscript(
   const retainedLive = mergedLive.retainedLive;
   // History first puts accepted user turns at their actual transcript positions.
   lastNetworkFetchAt.set(key(id), Date.now());
-  return { items: buildTranscript([...stream, ...retainedLive, ...queueEvents], sessionFor(id)), stream, ...(retainedLive.length ? { liveTail: retainedLive } : {}), fromLog: true, spineComplete, ...(spineBefore !== undefined ? { spineBefore } : {}), queueError, cursor, before, hasOlder };
+  return {
+    items: buildTranscript([...stream, ...retainedLive, ...queueEvents], sessionFor(id)),
+    stream,
+    ...(retainedLive.length ? { liveTail: retainedLive } : {}),
+    fromLog: true,
+    spineComplete,
+    ...(spineBefore !== undefined ? { spineBefore } : {}),
+    queueError,
+    cursor,
+    before,
+    hasOlder: diskStartIdx && diskStartIdx > 0 ? true : hasOlder,
+    ...(diskStartIdx && diskStartIdx > 0 ? { diskStartIdx, serverHasOlder } : {}),
+  };
 }
 
 type JobKind='initial'|'refresh'|'older';
@@ -1497,7 +1567,48 @@ export function forgetPrefetchPauses(){
 }
 export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{
  return transcriptJob(id,'older',async()=>{
-  const previous=peekReadyTranscript(id);if(!previous)return fetchTranscript(id);
+  let previous=peekReadyTranscript(id);if(!previous)return fetchTranscript(id);
+  if(previous.diskStartIdx&&previous.diskStartIdx>0){
+   const sliced=await loadPersistedTranscriptSlice<StreamEvent>(
+    transcriptPersistScope(),
+    id,
+    previous.diskStartIdx,
+    DEFAULT_TRANSCRIPT_TAIL_EVENTS,
+   );
+   if(sliced&&sliced.events.length>0){
+    const stream=mergeStreamBySequence(sliced.events,previous.stream);
+    const session=sessionFor(id);
+    let items=buildTranscript([...stream,...(previous.liveTail??[])],session);
+    const preservedUsers:StreamEvent[]=[];
+    for(const item of previous.items)if(item.kind==='user'&&item.messageId)preservedUsers.push({type:'user_message',data:{id:item.messageId,content:item.text,queued:item.queued,receipt:item.receipt,attached:item.attached}});
+    items=applyStreamEvents(items,preservedUsers,session);
+    const nextStart=sliced.startIdx>0?sliced.startIdx:undefined;
+    const nextHasOlder=nextStart?true:Boolean(previous.serverHasOlder);
+    return {
+     ...previous,
+     stream,
+     items,
+     diskStartIdx:nextStart,
+     serverHasOlder:nextStart?previous.serverHasOlder:undefined,
+     hasOlder:nextHasOlder,
+    };
+   }
+   // SQLite prefix was evicted or unavailable: recover missing history from the server
+   // starting at the earliest visible event's sequence (`firstVisibleSeq`)!
+   const firstVisibleSeq=previous.stream.find((e):e is StreamEvent&{sequence:number}=>typeof e.sequence==='number'&&e.sequence>0)?.sequence;
+   const recoveryBefore=firstVisibleSeq??previous.before;
+   if(recoveryBefore===undefined||recoveryBefore<=1){
+    return {...previous,diskStartIdx:undefined,serverHasOlder:undefined,hasOlder:false};
+   }
+   previous={
+    ...previous,
+    diskStartIdx:undefined,
+    serverHasOlder:undefined,
+    before:recoveryBefore,
+    hasOlder:true,
+    spineComplete:false,
+   };
+  }
   if(!previous.hasOlder||previous.before===undefined)return previous;
   const page=await getMissionEventPage(id,{before:previous.before});
   if(page.hasMore&&(page.nextCursor===undefined||page.nextCursor>=previous.before))throw Error('Older event cursor did not advance.');
@@ -1554,11 +1665,93 @@ export function spineAnswers(spine: StreamEvent[], tailAnswered = false): Stream
  * while preserving `before`/`hasOlder` for on-demand raw-event scrollback. */
 export function prepareTranscriptSearch(id: string, signal?: AbortSignal): Promise<TranscriptSnap> {
   const ready = peekReadyTranscript(id);
-  if (ready && (!ready.hasOlder || ready.before === undefined || ready.spineComplete)) {
+  if (
+    ready &&
+    !(ready.diskStartIdx && ready.diskStartIdx > 0) &&
+    (!ready.hasOlder || ready.before === undefined || ready.spineComplete)
+  ) {
     return Promise.resolve(ready);
   }
   return transcriptJob(id, "older", async () => {
-    const current = peekReadyTranscript(id) ?? (await fetchTranscript(id));
+    let current = peekReadyTranscript(id) ?? (await fetchTranscript(id));
+    if (current.diskStartIdx && current.diskStartIdx > 0) {
+      let remBefore = current.diskStartIdx;
+      const localSlices: StreamEvent[][] = [];
+      let reachedStart = false;
+      while (remBefore > 0 && !signal?.aborted) {
+        const page = await loadPersistedTranscriptSlice<StreamEvent>(
+          transcriptPersistScope(),
+          id,
+          remBefore,
+          Math.min(remBefore, 2000),
+        );
+        if (!page || page.events.length === 0 || page.startIdx >= remBefore) break;
+        localSlices.unshift(page.events);
+        remBefore = page.startIdx;
+        if (remBefore === 0) reachedStart = true;
+      }
+      if (localSlices.length > 0 && !signal?.aborted) {
+        let mergedLocal = current.stream;
+        for (let s = localSlices.length - 1; s >= 0; s--) {
+          mergedLocal = mergeStreamBySequence(localSlices[s], mergedLocal);
+        }
+        const session = sessionFor(id);
+        let items = buildTranscript([...mergedLocal, ...(current.liveTail ?? [])], session);
+        for (const item of current.items) {
+          if (item.kind === "user" && item.messageId) {
+            items = applyStreamEvent(
+              items,
+              {
+                type: "user_message",
+                data: {
+                  id: item.messageId,
+                  content: item.text,
+                  queued: item.queued,
+                  receipt: item.receipt,
+                  attached: item.attached,
+                },
+              },
+              session,
+            );
+          }
+        }
+        current = {
+          ...current,
+          stream: mergedLocal,
+          items,
+          ...(reachedStart
+            ? {
+                diskStartIdx: undefined,
+                hasOlder: Boolean(current.serverHasOlder),
+                serverHasOlder: undefined,
+              }
+            : (() => {
+                const firstSeq = mergedLocal.find(
+                  (e): e is StreamEvent & { sequence: number } => typeof e.sequence === "number" && e.sequence > 0,
+                )?.sequence;
+                return {
+                  diskStartIdx: undefined,
+                  serverHasOlder: undefined,
+                  before: firstSeq ?? current.before,
+                  hasOlder: (firstSeq ?? current.before ?? 0) > 1 || Boolean(current.serverHasOlder),
+                  spineComplete: false,
+                };
+              })()),
+        };
+      } else if (!signal?.aborted) {
+        const firstSeq = current.stream.find(
+          (e): e is StreamEvent & { sequence: number } => typeof e.sequence === "number" && e.sequence > 0,
+        )?.sequence;
+        current = {
+          ...current,
+          diskStartIdx: undefined,
+          serverHasOlder: undefined,
+          before: firstSeq ?? current.before,
+          hasOlder: (firstSeq ?? current.before ?? 0) > 1 || Boolean(current.serverHasOlder),
+          spineComplete: false,
+        };
+      }
+    }
     if (!current.hasOlder || current.before === undefined || current.spineComplete) {
       return { ...current, spineComplete: true };
     }
