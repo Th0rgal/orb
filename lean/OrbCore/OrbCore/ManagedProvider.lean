@@ -236,8 +236,9 @@ def boat (transport : Transport) (sleep : UInt32 → IO Unit := fun ms => do IO.
     match ← callUnit transport { method := "DELETE", path := "/saved-snapshots/" ++ urlEncodeComponent name } with
     | .error e => if e.status == 404 then return .ok () else return .error e
     | .ok _ => return .ok ()
+  -- Boat's file API is `PUT /sandboxes/:id/files`; a POST is rejected.
   writeFile := fun id path content => callUnit transport {
-    method := "POST"
+    method := "PUT"
     path := sandboxPath id ++ "/files"
     body := some (.obj #[("path", .str path), ("content", .str content)])
   }

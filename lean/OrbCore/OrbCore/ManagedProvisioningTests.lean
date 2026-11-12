@@ -45,7 +45,7 @@ def run (root : String) : IO Unit := do
           let .ok () ← recordAuthenticatedManagedPoll mc mid boot (← runtime.nowEpoch)
             | return .error { code := "mock_poll_failed" }
         return .ok (200, .obj #[("exitCode", .nat 0)])
-      if req.method == "POST" && req.path == providerPath ++ "/files" then return .ok (200, .null)
+      if req.method == "PUT" && req.path == providerPath ++ "/files" then return .ok (200, .null)
       if req.method == "DELETE" && req.path == providerPath then return .ok (204, .null)
       return .error { code := "mock_unexpected_request" }
     let provider := boat transport runtime.sleepMs
