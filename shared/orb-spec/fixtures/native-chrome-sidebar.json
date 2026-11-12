@@ -87,9 +87,9 @@
       "m:m-child",
       "m:m-cycle-b",
       "m:m-cycle-a",
-      "proj:empty-proj",
-      "nav:settings"
+      "proj:empty-proj"
     ],
+    "expected_footer_row_id": "nav:settings",
     "expected_selected_row_id": "m:m-child",
     "expected_inbox_badge": 3,
     "expected_settings_badge": 2,
