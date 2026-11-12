@@ -50,7 +50,7 @@ import {
 import { localInstalled, pathOverrides, refreshLocalAgents, setPathOverride } from "./localAgents";
 import { nativeInvoke } from "./native";
 import { pollWhileVisible } from "./poll";
-import { DebugInfoPanel } from "./DebugInfo";
+import { AboutCard, DebugInfoPanel } from "./DebugInfo";
 import { SettingsCard as Card, SettingsRow as Row } from "./SettingsCard";
 import { Toggle } from "./Toggle";
 export { Toggle };
@@ -1015,6 +1015,7 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
             ><option>Auto</option><option>On</option><option>Off</option></Select>
           </Row>
         </Card>
+        <AboutCard />
         <details class="settings-advanced" onToggle={e => { if (e.currentTarget.open) setAdvancedMounted(true); }}>
           <summary>Advanced <Ic.ChevronDown size={14} /></summary>
           <Show when={advancedMounted()}>
