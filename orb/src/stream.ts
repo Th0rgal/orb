@@ -16,10 +16,14 @@ import {
   recordTransportRttSample,
 } from "./networkHealth";
 import {
-  orbKernelScratchSliceStep,
   orbTransportEpochStep,
-  orbWireStreamSliceStep,
 } from "./orbKernel";
+import {
+  STREAM_MAX_OPEN_TAIL_BYTES,
+  stepMarkdownTailCommit as advanceStreamBoundedCommit,
+  type StreamTailCommitState,
+} from "./markdownAst";
+export { STREAM_MAX_OPEN_TAIL_BYTES, advanceStreamBoundedCommit, type StreamTailCommitState };
 import {
   ORB_PATCH_MAGIC_0,
   ORB_PATCH_MAGIC_1,
@@ -32,68 +36,8 @@ import {
 
 import type { RequestPriority } from "./transportScheduler";
 
-export const STREAM_MAX_OPEN_TAIL_BYTES = 16_384;
-
-export type StreamTailCommitState = {
-  totalBytes: number;
-  committedBytes: number;
-  checkpointBytes: number;
-};
-
 const EMPTY_STREAM_TAIL: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
 const UTF8_ENCODER = new TextEncoder();
-
-export function advanceStreamBoundedCommit(
-  state: StreamTailCommitState,
-  chunkBytes: number,
-  rawCommitBytes: number,
-  maxOpenTailBytes = STREAM_MAX_OPEN_TAIL_BYTES,
-  inTailOrByteLen: Uint8Array | number = EMPTY_STREAM_TAIL,
-): StreamTailCommitState & { admitted: boolean; checkpointForced: boolean } {
-  if (
-    !Number.isInteger(chunkBytes) ||
-    chunkBytes < 0 ||
-    !Number.isInteger(rawCommitBytes) ||
-    !Number.isInteger(maxOpenTailBytes) ||
-    !Number.isInteger(state.totalBytes) ||
-    !Number.isInteger(state.committedBytes) ||
-    !Number.isInteger(state.checkpointBytes) ||
-    (typeof inTailOrByteLen === "number" && (!Number.isInteger(inTailOrByteLen) || inTailOrByteLen < 0))
-  ) {
-    return { ...state, admitted: false, checkpointForced: false };
-  }
-  const newLen = state.totalBytes + chunkBytes;
-  const tailByteLen = typeof inTailOrByteLen === "number" ? inTailOrByteLen : inTailOrByteLen.byteLength;
-  const scratchInBytes = typeof inTailOrByteLen === "number" ? 0 : Math.min(tailByteLen, STREAM_MAX_OPEN_TAIL_BYTES);
-  const scratch = orbKernelScratchSliceStep(scratchInBytes);
-  if (typeof inTailOrByteLen !== "number" && scratch.inView.byteLength > 0) {
-    scratch.inView.set(inTailOrByteLen.subarray(0, scratch.inView.byteLength));
-  }
-  const sliceRes = orbWireStreamSliceStep({
-    inTail: typeof inTailOrByteLen !== "number" && scratch.inView.byteLength > 0 ? scratch.inView : EMPTY_STREAM_TAIL,
-    outBuf: scratch.outView,
-    inPtr: tailByteLen === 0 ? 0 : scratch.inOffset,
-    outPtr: scratch.outOffset,
-    inTailBytesLen: tailByteLen,
-    prevLen: state.totalBytes,
-    prevCommit: state.committedBytes,
-    prevCheckpoint: state.checkpointBytes,
-    newLen,
-    rawCommit: rawCommitBytes,
-    maxOpenTailBytes,
-  });
-  if (sliceRes.status !== 0 || !sliceRes.verdict || !sliceRes.verdict.admitted) {
-    return { ...state, admitted: false, checkpointForced: false };
-  }
-  const nextCommitted = Math.max(state.committedBytes, Math.min(newLen, rawCommitBytes));
-  return {
-    totalBytes: newLen,
-    committedBytes: nextCommitted,
-    checkpointBytes: sliceRes.verdict.nextCheckpoint,
-    admitted: true,
-    checkpointForced: sliceRes.verdict.checkpointForced,
-  };
-}
 
 export interface StoredEvent {
   id: number;

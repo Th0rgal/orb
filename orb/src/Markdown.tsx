@@ -1,4 +1,10 @@
-import {requestHighlight, warmHighlight} from "./codeHighlightClient";
+import {
+  requestHighlight,
+  requestMarkdownParse,
+  warmHighlight,
+  type WorkerMarkdownFormula,
+  type WorkerMarkdownResult,
+} from "./codeHighlightClient";
 import { CodeBlock } from "./CodeBlock";
 import { isMermaidLang, MermaidBlock } from "./MermaidBlock";
 import { FileReference, FileReferenceText } from "./fileReferenceContext";
@@ -6,12 +12,21 @@ import { For, Index, Show, createEffect, onCleanup, createMemo, createSignal, ty
 import { openExternalUrl } from "./api";
 import { timed } from "./diagnostics";
 import { swallow } from "./log";
-import { RICH_TAG, expandMediaLines, hasRichTagSyntax, mediaLineTag, parseRichTag, richTagSpan } from "./richTags";
 import { WorkspaceImage } from "./WorkspaceImage";
 import * as Ic from "./icons";
-import { normalizeGluedFences, splitGluedFence } from "./codeFences";
-import { normalizeLoosePipeTables } from "./pipeTables";
-import { advanceStreamBoundedCommit, STREAM_MAX_OPEN_TAIL_BYTES, type StreamTailCommitState } from "./stream";
+import {
+  createIncrementalMarkdown,
+  markdownText as markdownTextAst,
+  parseInlineAst,
+  parseMarkdownRaw,
+  safeHref,
+  type Block,
+  type IncrementalMarkdownParser,
+  type InlineNode,
+  type ListItem,
+} from "./markdownAst";
+
+export { safeHref, type Block, type IncrementalMarkdownParser, type InlineNode, type ListItem };
 
 /**
  * Source-vs-preview for Markdown file views, shared by every one of them so ⌘/
@@ -24,1094 +39,199 @@ const [mdSource, setMdSource] = createSignal(false);
 export { mdSource, setMdSource };
 export const toggleMdSource = () => setMdSource((on) => !on);
 
-/** Only http(s)/mailto links are rendered as real links; anything else
- * (javascript:, data:, file:) is neutralised so markdown from a mission
- * transcript cannot run script in the webview. */
-export function safeHref(raw: string): string | null {
-  return /^(https?:|mailto:)/i.test(raw.trim()) ? raw.trim() : null;
-}
-
-import { normalizeFileUrl } from "./fileResources";
-
-/** File URLs go through Orb's scoped file resolver, never webview navigation. */
-function fileLinkTarget(raw: string): string {
-  const unwrapped =
-    raw.startsWith("<") && raw.endsWith(">") ? raw.slice(1, -1) : raw;
-  return normalizeFileUrl(unwrapped);
-}
-
-function plainInline(text: string, links: boolean): JSX.Element[] {
-  text = text.replace(/\\([\\`*_[\]{}()#+.!|>$-])/g, "$1");
-  if (!links) return [text];
-  const result: JSX.Element[] = [];
-  const pattern = /https?:\/\/[^\s<>"`]+/gi;
-  let last = 0;
-  for (const match of text.matchAll(pattern)) {
-    let href = match[0].replace(/[.,;:!?\u2026'’»]+$/, "");
-    for (const [open, close] of [["(", ")"], ["[", "]"], ["{", "}"]]) {
-      while (href.endsWith(close) && href.split(close).length > href.split(open).length) href = href.slice(0, -1);
-    }
-    href = href.replace(/[.,;:!?\u2026'’»]+$/, "");
-    try { if (!new URL(href).hostname) continue; } catch { continue; }
-    const start = match.index!;
-    if (start > last) result.push(<FileReferenceText text={text.slice(last, start)}/>);
-    const target = href;
-    result.push(<a href={target} onClick={event => {event.preventDefault();void openExternalUrl(target);}}>{target}</a>);
-    last = start + href.length;
-  }
-  if (last < text.length) result.push(<FileReferenceText text={text.slice(last)}/>);
-  return result;
-}
-
 // Rendered formulas by source: a transcript row that remounts while scrolling
 // reuses the markup instead of running KaTeX again in that frame.
 const formulas = new Map<string, string>();
+const [formulaVersion, setFormulaVersion] = createSignal(0);
+
 // KaTeX (~255 kB) loads on the first formula instead of at startup; until then
-// a formula shows its source.
+// a formula shows its source (or worker-precomputed KaTeX HTML once seeded).
 type Katex = typeof import("./katexRender");
 const [katex, setKatex] = createSignal<Katex>();
 let katexLoad: Promise<void> | undefined;
-export function loadKatex(): Promise<void> { return katexLoad ??= import("./katexRender").then(m => { setKatex(() => m); }, swallow("markdown.katex")); }
+export function loadKatex(): Promise<void> {
+  return (katexLoad ??= import("./katexRender").then((m) => {
+    setKatex(() => m);
+  }, swallow("markdown.katex")));
+}
+
+export function seedRenderedFormulas(items: ReadonlyArray<WorkerMarkdownFormula>): void {
+  if (!items.length) return;
+  let added = false;
+  for (const { key, html } of items) {
+    if (!formulas.has(key)) added = true;
+    formulas.delete(key);
+    formulas.set(key, html);
+    if (formulas.size > 1500) formulas.delete(formulas.keys().next().value!);
+  }
+  // Ensure KaTeX stylesheet + copy-tex copy handler are active on the document.
+  void loadKatex();
+  if (added) setFormulaVersion((v) => v + 1);
+}
+
 function renderFormula(text: string, display: boolean): string | undefined {
+  formulaVersion();
   const key = `${display ? "D" : "I"}${text}`;
   let html = formulas.get(key);
-  if (html !== undefined) { formulas.delete(key); formulas.set(key, html); return html; }
+  if (html !== undefined) {
+    formulas.delete(key);
+    formulas.set(key, html);
+    return html;
+  }
   const k = katex();
-  if (!k) { void loadKatex(); return undefined; }
+  if (!k) {
+    void loadKatex();
+    return undefined;
+  }
   html = k.renderKatex(text, display);
-  if (text.length < 4000) { formulas.set(key, html); if (formulas.size > 1500) formulas.delete(formulas.keys().next().value!); }
+  if (text.length < 4000) {
+    formulas.set(key, html);
+    if (formulas.size > 1500) formulas.delete(formulas.keys().next().value!);
+  }
   return html;
 }
-function MathFormula(p: {text: string; display?: boolean}) {
+
+function MathFormula(p: { text: string; display?: boolean }) {
   const html = createMemo(() => renderFormula(p.text, !!p.display));
-  return <Show when={html()} fallback={<span class={p.display ? "md-math-block md-math-pending" : "md-math-inline md-math-pending"}>{p.text}</span>}>
-    {markup => <span class={p.display ? "md-math-block" : "md-math-inline"} innerHTML={markup()} />}
-  </Show>;
+  return (
+    <Show
+      when={html()}
+      fallback={
+        <span class={p.display ? "md-math-block md-math-pending" : "md-math-inline md-math-pending"}>{p.text}</span>
+      }
+    >
+      {(markup) => <span class={p.display ? "md-math-block" : "md-math-inline"} innerHTML={markup()} />}
+    </Show>
+  );
 }
+
 /** A share Core could not copy (the agent's file was gone or refused). */
 function UnavailableFile(p: { label: string; path: string }) {
-  return <span class="md-file-unavailable" title={p.path} role="note">
-    <Ic.FileIcon size={14} /><span>{p.label}</span><small>File no longer available</small>
-  </span>;
+  return (
+    <span class="md-file-unavailable" title={p.path} role="note">
+      <Ic.FileIcon size={14} />
+      <span>{p.label}</span>
+      <small>File no longer available</small>
+    </span>
+  );
 }
-/** `<image>`/`<file>` tags are taken before any other inline syntax so their
- * quoted paths are never read as emphasis, code or links. */
-function inline(text: string, links = true): JSX.Element[] {
-  if (!links || !hasRichTagSyntax(text)) return inlineMarkdown(text, links);
-  const out: JSX.Element[] = [];
-  let last = 0;
-  for (const m of text.matchAll(new RegExp(RICH_TAG.source, "gi"))) {
-    const tag = parseRichTag(m[1], m[2], m[3], richTagSpan(m[0], m[1], m[2], m.index!, text.length));
-    if (!tag) continue;
-    if (m.index! > last) out.push(...inlineMarkdown(text.slice(last, m.index), links));
-    out.push(tag.unavailable ? <UnavailableFile label={tag.label} path={tag.path} />
-      : tag.type === "image" ? <WorkspaceImage path={tag.path} alt={tag.label} /> : <FileReference raw={tag.path}>{tag.label}</FileReference>);
-    last = m.index! + m[0].length;
-  }
-  if (last < text.length) out.push(...inlineMarkdown(text.slice(last), links));
-  return out;
-}
-function inlineMarkdown(text: string, links = true): JSX.Element[] {
-  const out: JSX.Element[] = [];
-  // Keep code spans opaque. Numeric math is valid; currency such as "$15 and
-  // $20" stays text because a closing delimiter cannot precede a digit/word.
-  // Emphasis that wraps a code span is taken whole first, or the span would
-  // split it and leave its asterisks as text. Links likewise stay whole so
-  // code-formatted labels do not expose their brackets and destination.
-  const pattern = /(?<![\\*])\*\*(?=\S)(?:\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`\n]*`|[^`*\n]|\*(?!\*))*?(?<=\S)\*\*|(?<![\\*])\*(?!\*)(?=\S)(?:\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`\n]*`|[^`*\n])+?(?<=\S)\*(?!\*)|!\[([^\]]*)\]\(([^)\s]+)\)|(?<![\\!])\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`]*`|\\\((.+?)\\\)|(?<![\\$])\$\$([^\n]+?)\$\$(?!\$)|(?<![\w\\$])\$(?![\s$])([^$\n]+?)(?<!\s)\$(?![\w$])/g;
-  let last = 0;
-  for (const match of text.matchAll(pattern)) {
-    if (match.index! > last) out.push(...inlineText(text.slice(last, match.index), links));
-    if (match[0].startsWith('**')) out.push(<strong>{inline(match[0].slice(2, -2), links)}</strong>);
-    else if (match[0].startsWith('*')) out.push(<em>{inline(match[0].slice(1, -1), links)}</em>);
-    else if (match[0].startsWith('![')) out.push(/^https?:\/\//i.test(match[2])
-      ? <img class="md-image" src={match[2]} alt={match[1]} loading="lazy" referrerPolicy="no-referrer"/>
-      : links && !/^(?!file:)[a-z][a-z0-9+.-]*:/i.test(match[2]) ? <WorkspaceImage path={fileLinkTarget(match[2])} alt={match[1] || match[2].split("/").pop() || match[2]}/> : match[0]);
-    else if (match[0].startsWith('[')) out.push(...inlineText(match[0], links));
-    else if (match[0].startsWith('`')) out.push(...inlineText(match[0], links));
-    else out.push(<MathFormula text={match[3] ?? match[4] ?? match[5]} display={match[4] !== undefined}/>);
-    last = match.index! + match[0].length;
-  }
-  if (last < text.length) out.push(...inlineText(text.slice(last), links));
-  return out;
-}
-function inlineText(text: string, links = true): JSX.Element[] {
-  const out: JSX.Element[] = [];
-  const re = /(?<!\\)(?:\*\*(.+?)\*\*|`([^`]+)`|\[((?:`[^`\n]*`|[^\]`\n])+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|(:codex-file-citation\{(?:[^"{}]|"(?:\\.|[^"\\])*")*\})|\*([^*\n]+)\*)/g;
-  let last = 0;
-  for (let m = re.exec(text); m; m = re.exec(text)) {
-    if (m.index > last) out.push(...plainInline(text.slice(last, m.index), links));
-    if (m[5] !== undefined) {
-      const attributes = [...m[5].matchAll(/([a-z_]+)\s*=\s*("(?:\\.|[^"\\])*")/g)];
-      const quoted = attributes.find(attribute => attribute[1] === "path")?.[2];
-      let path: string | undefined;
-      try { path = quoted ? JSON.parse(quoted) : undefined; } catch { /* malformed citation remains readable */ }
-      if (path) out.push(<FileReference raw={path}>{path.split("/").pop() || path}</FileReference>);
-      else out.push(m[5]);
+
+export function renderInlineAst(nodes: InlineNode[]): JSX.Element[] {
+  return nodes.map((n): JSX.Element => {
+    switch (n.t) {
+      case "text":
+        return n.text;
+      case "ref_text":
+        return <FileReferenceText text={n.text} />;
+      case "autolink": {
+        const target = n.href;
+        return (
+          <a
+            href={target}
+            onClick={(event) => {
+              event.preventDefault();
+              void openExternalUrl(target);
+            }}
+          >
+            {target}
+          </a>
+        );
+      }
+      case "strong":
+        return <strong>{renderInlineAst(n.children)}</strong>;
+      case "em":
+        return <em>{renderInlineAst(n.children)}</em>;
+      case "code":
+        return n.linkRef ? (
+          <FileReference raw={n.text}>
+            <code>{n.text}</code>
+          </FileReference>
+        ) : (
+          <code>{n.text}</code>
+        );
+      case "link": {
+        const href = n.href;
+        return (
+          <a
+            href={href}
+            onClick={(e) => {
+              e.preventDefault();
+              void openExternalUrl(href);
+            }}
+          >
+            {renderInlineAst(n.children)}
+          </a>
+        );
+      }
+      case "file_link":
+        return <FileReference raw={n.raw}>{renderInlineAst(n.children)}</FileReference>;
+      case "file_ref":
+        return <FileReference raw={n.raw}>{n.label}</FileReference>;
+      case "unavailable_file":
+        return <UnavailableFile label={n.label} path={n.path} />;
+      case "workspace_img":
+        return <WorkspaceImage path={n.path} alt={n.alt} />;
+      case "ext_img":
+        return <img class="md-image" src={n.src} alt={n.alt} loading="lazy" referrerPolicy="no-referrer" />;
+      case "math":
+        return <MathFormula text={n.text} display={n.display} />;
     }
-    else if (m[6] !== undefined) out.push(<em>{inline(m[6], links)}</em>);
-    else if (m[1] !== undefined) out.push(<strong>{inline(m[1], links)}</strong>);
-    else if (m[2] !== undefined) out.push(links ? <FileReference raw={m[2]}><code>{m[2]}</code></FileReference> : <code>{m[2]}</code>);
-    else if (!safeHref(m[4])) out.push(<FileReference raw={fileLinkTarget(m[4])}>{inline(m[3], false)}</FileReference>);
-    else
-      out.push(
-        <a
-          href={safeHref(m[4]) ?? "#"}
-          onClick={(e) => {
-            e.preventDefault();
-            const href = safeHref(m[4]);
-            if (href) void openExternalUrl(href);
-          }}
-        >
-          {inline(m[3], false)}
-        </a>,
-      );
-    last = m.index + m[0].length;
-  }
-  if (last < text.length) out.push(...plainInline(text.slice(last), links));
-  return out;
+  });
 }
 
-type Align = "left" | "center" | "right";
-export type ListItem = { text: string; sub?: Block[] };
-type Block =
-  | { t: "hr" }
-  | { t: "math"; text: string }
-  | { t: "h"; n: number; text: string }
-  | { t: "p"; text: string }
-  | { t: "ul"; items: (string | ListItem)[] }
-  | { t: "ol"; items: (string | ListItem)[]; start: number }
-  | { t: "pre"; lang: string; text: string; open?: true }
-  | { t: "quote"; text: string }
-  | { t: "table"; heads: string[]; rows: string[][]; aligns: Align[] };
-
-function tableCells(line: string): string[] {
-  let t = line.trim();
-  if (t.startsWith("|")) t = t.slice(1);
-  if (t.endsWith("|")) t = t.slice(0, -1);
-  return t.split("|").map((c) => c.trim());
-}
-function sepAlign(cell: string): Align | null {
-  const n = cell.replace(/\s/g, "").replace(/[−–—]/g, "-");
-  if (!/^:?-+:?$/.test(n)) return null;
-  const left = n.startsWith(":");
-  const right = n.endsWith(":");
-  if (left && right) return "center";
-  if (right) return "right";
-  return "left";
-}
-function isTableSep(line: string): boolean {
-  const cells = tableCells(line);
-  return cells.length > 0 && cells.every((c) => sepAlign(c) != null);
-}
-function isPipeRow(line: string): boolean {
-  const t = line.trim();
-  return t.startsWith("|") && tableCells(t).length >= 2;
-}
-function readTable(lines: string[], start: number): { block: Extract<Block, { t: "table" }>; next: number } | null {
-  const header = lines[start];
-  if (!isPipeRow(header) || start + 1 >= lines.length) return null;
-  const sep = lines[start + 1];
-  const hasSep = isTableSep(sep);
-  if (!hasSep && !isPipeRow(sep)) return null;
-  const heads = tableCells(header);
-  const aligns = hasSep ? tableCells(sep).map((c) => sepAlign(c) ?? "left") : heads.map(() => "left" as Align);
-  let i = start + (hasSep ? 2 : 1);
-  const rows: string[][] = [];
-  while (i < lines.length && isPipeRow(lines[i]) && !isTableSep(lines[i])) {
-    rows.push(tableCells(lines[i++]));
-  }
-  if (!hasSep && rows.length === 0) return null;
-  return { block: { t: "table", heads, rows, aligns }, next: i };
+function inline(text: string, preParsed?: InlineNode[], pendingWorker?: boolean): JSX.Element[] {
+  if (preParsed) return renderInlineAst(preParsed);
+  if (pendingWorker) return [text];
+  return renderInlineAst(parseInlineAst(text, true));
 }
 
 export function parseMarkdown(src: string): Block[] {
-  return timed("markdown", () => parseBlocks(expandMediaLines(normalizeGluedFences(src.replace(/\r\n/g, "\n")))));
-}
-function isHrLine(line: string): boolean {
-  const t = line.trim();
-  return /^(?:-[ \t]*){3,}$|^(?:\*[ \t]*){3,}$|^(?:_[ \t]*){3,}$/.test(t);
-}
-function listMarker(line: string): { kind: "ul" | "ol"; indent: number; start?: number; rest: string } | null {
-  if (isHrLine(line)) return null;
-  const ul = /^( *)[-*+]\s+(.*)$/.exec(line);
-  if (ul) return { kind: "ul", indent: ul[1].length, rest: ul[2] };
-  const ol = /^( *)(\d+)\.\s+(.*)$/.exec(line);
-  if (ol) return { kind: "ol", indent: ol[1].length, start: Number(ol[2]), rest: ol[3] };
-  return null;
-}
-function readList(lines: string[], startIdx: number, baseIndent: number, kind: "ul" | "ol"): { block: Extract<Block, { t: "ul" | "ol" }>; next: number } {
-  const items: (string | ListItem)[] = [];
-  let i = startIdx;
-  let startNum = 1;
-  const firstMarker = listMarker(lines[i]);
-  if (firstMarker?.start !== undefined) startNum = firstMarker.start;
-  while (i < lines.length) {
-    const m = listMarker(lines[i]);
-    if (!m || m.kind !== kind || m.indent !== baseIndent) break;
-    const headLines: string[] = [m.rest];
-    const subLines: string[] = [];
-    i++;
-    while (i < lines.length) {
-      const nextLine = lines[i];
-      if (!nextLine.trim()) {
-        // A blank line ends the list unless the next non-empty line is indented
-        // continuation/sub-list or another sibling item at the same indent.
-        let look = i + 1;
-        while (look < lines.length && !lines[look].trim()) look++;
-        if (look >= lines.length) break;
-        const afterBlank = lines[look];
-        const nextM = listMarker(afterBlank);
-        if (nextM && nextM.indent === baseIndent && nextM.kind === kind) {
-          i = look;
-          break;
-        }
-        const lead = /^ */.exec(afterBlank)?.[0].length ?? 0;
-        if (lead > baseIndent) {
-          subLines.push("");
-          i++;
-          continue;
-        }
-        break;
-      }
-      if (isHrLine(nextLine) || /^ {0,3}#{1,6}\s/.test(nextLine) || readTable(lines, i)) break;
-      const nextM = listMarker(nextLine);
-      if (nextM) {
-        if (nextM.indent < baseIndent) break;
-        if (nextM.indent === baseIndent) break;
-        subLines.push(nextLine);
-        i++;
-        continue;
-      }
-      const lead = /^ */.exec(nextLine)?.[0].length ?? 0;
-      if (subLines.length > 0) {
-        if (lead <= baseIndent && (nextLine.trimStart().startsWith("```") || /^ {0,3}>/.test(nextLine))) break;
-        subLines.push(nextLine);
-        i++;
-        continue;
-      }
-      if (nextLine.trimStart().startsWith("```") || /^ {0,3}>/.test(nextLine)) {
-        if (lead > baseIndent) {
-          subLines.push(nextLine);
-          i++;
-          continue;
-        }
-        break;
-      }
-      headLines.push(nextLine.trim());
-      i++;
-    }
-    const text = headLines.join(" ");
-    if (subLines.length > 0) {
-      const nonEmptyIndents = subLines.filter((l) => l.trim()).map((l) => /^ */.exec(l)?.[0].length ?? 0);
-      const strip = nonEmptyIndents.length ? Math.min(...nonEmptyIndents) : 0;
-      const dedented = subLines.map((l) => (l.length >= strip ? l.slice(strip) : l.trimStart())).join("\n");
-      const sub = parseBlocks(dedented);
-      items.push(sub.length ? { text, sub } : text);
-    } else {
-      items.push(text);
-    }
-  }
-  return {
-    block: kind === "ol" ? { t: "ol", items, start: startNum } : { t: "ul", items },
-    next: i,
-  };
-}
-function parseBlocks(src: string): Block[] {
-  const lines = normalizeLoosePipeTables(normalizeGluedFences(src.replace(/\r\n/g, "\n"))).split("\n");
-  const out: Block[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    const singleLineMath = /^\s*(?:\$\$(.+?)\$\$|\\\[(.+?)\\\])\s*$/.exec(line);
-    if (singleLineMath) {
-      out.push({t: 'math', text: singleLineMath[1] ?? singleLineMath[2]});
-      i++;
-      continue;
-    }
-    if (line.trim() === '$$' || line.trim() === '\\[') {
-      const end = line.trim() === '$$' ? '$$' : '\\]';
-      const start = i++;
-      const content: string[] = [];
-      while (i < lines.length && lines[i].trim() !== end) content.push(lines[i++]);
-      if (i < lines.length) { i++; out.push({t: 'math', text: content.join('\n')}); }
-      else out.push({t: 'p', text: lines.slice(start).join('\n')});
-      continue;
-    }
-    if (line.trimStart().startsWith("```")) {
-      const fenceIndent = /^ */.exec(line)?.[0].length ?? 0;
-      const lang = line.trimStart().slice(3).trim();
-      const buf: string[] = [];
-      i++;
-      while (i < lines.length && !lines[i].trimStart().startsWith("```")) {
-        const raw = lines[i++];
-        buf.push(fenceIndent > 0 && raw.startsWith(" ".repeat(fenceIndent)) ? raw.slice(fenceIndent) : raw);
-      }
-      // An unterminated fence is a block still streaming in.
-      const closed = i < lines.length;
-      if (closed) i++;
-      out.push(closed ? { t: "pre", lang, text: buf.join("\n") } : { t: "pre", lang, text: buf.join("\n"), open: true });
-      continue;
-    }
-    if (isHrLine(line)) {
-      out.push({ t: "hr" });
-      i++;
-      continue;
-    }
-    const hm = /^ {0,3}(#{1,6})\s+(.*)$/.exec(line);
-    if (hm) {
-      out.push({ t: "h", n: hm[1].length, text: hm[2] });
-      i++;
-      continue;
-    }
-    const marker = listMarker(line);
-    if (marker) {
-      const parsed = readList(lines, i, marker.indent, marker.kind);
-      out.push(parsed.block);
-      i = parsed.next;
-      continue;
-    }
-    if (/^ {0,3}>/.test(line)) {
-      const quoted: string[] = [];
-      while (i < lines.length && /^ {0,3}>/.test(lines[i])) {
-        quoted.push(lines[i++].replace(/^ {0,3}>[ \t]?/, ""));
-      }
-      out.push({ t: "quote", text: quoted.join("\n") });
-      continue;
-    }
-    if (!line.trim()) {
-      i++;
-      continue;
-    }
-    const table = readTable(lines, i);
-    if (table) {
-      out.push(table.block);
-      i = table.next;
-      continue;
-    }
-    const buf = [line];
-    i++;
-    while (
-      i < lines.length &&
-      lines[i].trim() &&
-      !isHrLine(lines[i]) &&
-      !/^ {0,3}#{1,6}\s/.test(lines[i]) &&
-      !listMarker(lines[i]) &&
-      !/^\s*(?:\$\$|\\\[)/.test(lines[i]) &&
-      !lines[i].trimStart().startsWith("```") &&
-      !/^ {0,3}>/.test(lines[i]) &&
-      !readTable(lines, i)
-    ) {
-      buf.push(lines[i++]);
-    }
-    out.push({ t: "p", text: buf.join(" ") });
-  }
-  return out;
+  return timed("markdown", () => parseMarkdownRaw(src));
 }
 
-/** Freeze only completed blocks; fences keep blank lines inside the active tail. */
-/** Search the same block content without mounting historical Markdown. */
-export function markdownText(source:string):string{
- const plain=(text:string):string=>text.replace(new RegExp(RICH_TAG.source,"gi"),(tag,type:string,attrs:string,inner:string|undefined,off:number)=>parseRichTag(type,attrs,inner,richTagSpan(tag,type,attrs,off,text.length))?.label??tag).replace(/(?<!\\)(?:\*\*(.+?)\*\*|`([^`]+)`|!\[([^\]]*)\]\(([^)\s]+)\)|\[((?:`[^`\n]*`|[^\]`\n])+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|(:codex-file-citation\{(?:[^"{}]|"(?:\\.|[^"\\])*")*\})|\*([^*\n]+)\*)/g,(match,bold,code,_alt,imgSrc,label,_href,citation,italic)=>{
-  if(citation!==undefined){
-   const quoted=[...citation.matchAll(/([a-z_]+)\s*=\s*("(?:\\.|[^"\\])*")/g)].find(a=>a[1]==='path')?.[2];
-   try{const path=quoted?JSON.parse(quoted):undefined;if(path)return path.split('/').pop()||path;}catch{}
-   return citation;
-  }
-  if(imgSrc!==undefined)return /^https?:\/\//i.test(imgSrc)||!/^(?!file:)[a-z][a-z0-9+.-]*:/i.test(imgSrc)?'':match;
-  if(bold!==undefined)return plain(bold);
-  if(italic!==undefined)return plain(italic);
-  if(code!==undefined)return code;
-  return plain(label);
- }).replace(/\\([\\`*_[\]{}()#+.!|>$-])/g,'$1');
- const blockText=(block:Block):string=>block.t==='hr'?'':block.t==='pre'?(isMermaidLang(block.lang)&&!block.open?'':block.text):block.t==='quote'?markdownText(block.text):(block.t==='ul'||block.t==='ol')?block.items.map(it=>typeof it==='string'?plain(it):[plain(it.text),...(it.sub?.map(blockText)??[])].filter(Boolean).join('\n')).join('\n'):block.t==='table'?[...(block.heads.some(h=>h!=='')?[block.heads]:[]),...block.rows].flatMap(row=>row.map(plain)).filter(Boolean).join('\n'):plain(block.text);
- return parseMarkdown(source).map(blockText).filter(Boolean).join('\n');
+export function markdownText(source: string): string {
+  return markdownTextAst(source, parseMarkdown);
 }
-
-function listItemEqual(a: string | ListItem, b: string | ListItem): boolean {
-  if (typeof a === "string" || typeof b === "string") return a === b;
-  if (a.text !== b.text) return false;
-  const sa = a.sub, sb = b.sub;
-  if (!sa && !sb) return true;
-  if (!sa || !sb || sa.length !== sb.length) return false;
-  for (let i = 0; i < sa.length; i++) if (!blockEqual(sa[i], sb[i])) return false;
-  return true;
-}
-
-function blockEqual(a: Block, b: Block): boolean {
-  if (a === b) return true;
-  if (a.t !== b.t) return false;
-  switch (a.t) {
-    case "hr":
-      return true;
-    case "math":
-    case "p":
-    case "quote":
-      return a.text === (b as typeof a).text;
-    case "h":
-      return a.n === (b as typeof a).n && a.text === (b as typeof a).text;
-    case "pre":
-      return a.lang === (b as typeof a).lang && a.open === (b as typeof a).open && a.text === (b as typeof a).text;
-    case "ul":
-    case "ol": {
-      const bo = b as typeof a;
-      if (a.t === "ol" && a.start !== (bo as Extract<Block, { t: "ol" }>).start) return false;
-      if (a.items.length !== bo.items.length) return false;
-      for (let i = 0; i < a.items.length; i++) if (!listItemEqual(a.items[i], bo.items[i])) return false;
-      return true;
-    }
-    case "table": {
-      const bt = b as typeof a;
-      if (a.heads.length !== bt.heads.length || a.rows.length !== bt.rows.length || a.aligns.length !== bt.aligns.length) return false;
-      for (let i = 0; i < a.heads.length; i++) if (a.heads[i] !== bt.heads[i]) return false;
-      for (let i = 0; i < a.aligns.length; i++) if (a.aligns[i] !== bt.aligns[i]) return false;
-      for (let r = 0; r < a.rows.length; r++) {
-        if (a.rows[r].length !== bt.rows[r].length) return false;
-        for (let c = 0; c < a.rows[r].length; c++) if (a.rows[r][c] !== bt.rows[r][c]) return false;
-      }
-      return true;
-    }
-  }
-}
-
-/** The same block again keeps its object, so the list keeps its DOM. */
-function reuseBlocks(previous: Block[], next: Block[]): Block[] {
-  return next.map((block, index) => {
-    const old = previous[index];
-    return old && blockEqual(old, block) ? old : block;
-  });
-}
-
-function utf8LenSlice(s: string, start: number, end: number): number {
-  let bytes = 0;
-  for (let i = start; i < end; i++) {
-    const c = s.charCodeAt(i);
-    if (c < 0x80) bytes += 1;
-    else if (c < 0x800) bytes += 2;
-    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < end && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
-      bytes += 4;
-      i++;
-    } else bytes += 3;
-  }
-  return bytes;
-}
-
-export type IncrementalMarkdownParser = ((text: string) => Block[]) & {
-  readonly scannedBytes: number;
-  readonly parsedBytes: number;
-};
 
 export function incrementalMarkdown(): IncrementalMarkdownParser {
-  let previous = "", boundary = 0, scanCursor = 0;
-  let fenced = false, math = false, inList = false, listBaseIndent = 0, listAfterBlank = false, listKind: "ul" | "ol" = "ul", inQuote = false;
-  let fenceStart = -1, fenceBodyStart = 0, fenceIndent = 0, fenceIndentPad = "", fenceLang = "";
-  let fencePrefixBlocks: Block[] | null = null, fenceAccText = "", fenceBodyCursor = 0, fenceHasLines = false, fenceCleanRaw = false;
-  let stable: Block[] = [], unstable: Block[] = [];
-  let scannedBytes = 0, parsedBytes = 0;
-  let commitState: StreamTailCommitState = { totalBytes: 0, committedBytes: 0, checkpointBytes: 0 };
-  let lastUtf8Cursor = 0;
-  let checkpointCursor = 0, checkpointUtf8Offset = 0, checkpointParaPrefix = "";
-  let checkpointPrefixBlocks: Block[] | null = null;
-
-  const samePrefix = (next: string): boolean => {
-    const plen = previous.length;
-    if (plen === 0) return true;
-    return next.length >= plen && next.startsWith(previous);
-  };
-
-  const dedentLine = (raw: string): string => {
-    const clean = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-    return fenceIndent > 0 && clean.startsWith(fenceIndentPad) ? clean.slice(fenceIndent) : clean;
-  };
-
-  const resetFenceState = () => {
-    fenceStart = -1;
-    fencePrefixBlocks = null;
-    fenceAccText = "";
-    fenceBodyCursor = 0;
-    fenceHasLines = false;
-    fenceCleanRaw = false;
-  };
-
-  const resetCheckpointState = (nextBoundary: number, nextCommittedUtf8: number) => {
-    checkpointCursor = nextBoundary;
-    checkpointUtf8Offset = nextCommittedUtf8;
-    checkpointParaPrefix = "";
-    checkpointPrefixBlocks = null;
-  };
-
-  const fn = ((text: string): Block[] => {
-    if (!samePrefix(text)) {
-      boundary = 0;
-      scanCursor = 0;
-      fenced = false;
-      math = false;
-      inList = false;
-      listBaseIndent = 0;
-      listAfterBlank = false;
-      inQuote = false;
-      resetFenceState();
-      resetCheckpointState(0, 0);
-      stable = [];
-      unstable = [];
-      commitState = { totalBytes: 0, committedBytes: 0, checkpointBytes: 0 };
-      lastUtf8Cursor = 0;
-    }
-    previous = text;
-
-    let newCommitBoundary = boundary;
-    while (true) {
-      const nl = text.indexOf("\n", scanCursor);
-      if (nl === -1) break;
-      const rawLine = text.slice(scanCursor, nl);
-      const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-      const lineStart = scanCursor;
-      scanCursor = nl + 1;
-      scannedBytes += utf8LenSlice(text, lineStart, nl) + 1;
-
-      if (!fenced && !math && /^ {0,3}>/.test(line)) {
-        const qLead = /^ */.exec(line)?.[0].length ?? 0;
-        if (!(inList && qLead > listBaseIndent)) {
-          inQuote = true;
-          inList = false;
-          listAfterBlank = false;
-          continue;
-        }
-      }
-      if (!fenced && !math && inQuote) {
-        if (!line.trim()) {
-          newCommitBoundary = scanCursor;
-        }
-        inQuote = false;
-      }
-
-      if (!math && line.trimStart().startsWith("```")) {
-        const fLead = /^ */.exec(line)?.[0].length ?? 0;
-        if (!fenced && inList && listAfterBlank && fLead <= listBaseIndent) {
-          inList = false;
-          listAfterBlank = false;
-        }
-        fenced = !fenced;
-        if (fenced && !inList) {
-          fenceStart = lineStart;
-          fenceBodyStart = scanCursor;
-          fenceBodyCursor = scanCursor;
-          fenceIndent = fLead;
-          fenceIndentPad = fenceIndent > 0 ? " ".repeat(fenceIndent) : "";
-          fenceLang = line.trimStart().slice(3).trim();
-          fencePrefixBlocks = null;
-          fenceAccText = "";
-          fenceHasLines = false;
-          fenceCleanRaw = fenceIndent === 0;
-        } else {
-          resetFenceState();
-        }
-        continue;
-      }
-      if (!fenced && !math) {
-        const glued = splitGluedFence(line);
-        if (glued) {
-          inList = false;
-          listAfterBlank = false;
-          fenced = true;
-          fenceStart = lineStart + glued.offset;
-          fenceBodyStart = scanCursor;
-          fenceBodyCursor = scanCursor;
-          fenceIndent = 0;
-          fenceIndentPad = "";
-          fenceLang = glued.lang;
-          fencePrefixBlocks = null;
-          fenceAccText = "";
-          fenceHasLines = false;
-          fenceCleanRaw = true;
-          continue;
-        }
-      }
-      if (!fenced && ["$$", "\\[", "\\]"].includes(line.trim())) math = !math;
-      if (!fenced && !math) {
-        const lm = listMarker(line);
-        if (lm) {
-          if (!inList) {
-            inList = true;
-            listBaseIndent = lm.indent;
-            listKind = lm.kind;
-            listAfterBlank = false;
-          } else if (listAfterBlank) {
-            if (lm.indent > listBaseIndent || (lm.indent === listBaseIndent && lm.kind === listKind)) {
-              listAfterBlank = false;
-            } else {
-              inList = true;
-              listBaseIndent = lm.indent;
-              listKind = lm.kind;
-              listAfterBlank = false;
-            }
-          } else if (lm.indent < listBaseIndent || (lm.indent === listBaseIndent && lm.kind !== listKind)) {
-            listBaseIndent = lm.indent;
-            listKind = lm.kind;
-          }
-        } else if (!line.trim()) {
-          if (!inList) newCommitBoundary = scanCursor;
-          else listAfterBlank = true;
-        } else {
-          const lead = /^ */.exec(line)?.[0].length ?? 0;
-          if (inList && listAfterBlank) {
-            if (lead > listBaseIndent) listAfterBlank = false;
-            else {
-              inList = false;
-              listAfterBlank = false;
-            }
-          } else if (inList && (isHrLine(line) || /^ {0,3}#{1,6}\s/.test(line))) {
-            inList = false;
-            listAfterBlank = false;
-          }
-        }
-      }
-    }
-
-    const deltaUtf8 = text.length > lastUtf8Cursor ? utf8LenSlice(text, lastUtf8Cursor, text.length) : 0;
-    lastUtf8Cursor = text.length;
-    let newlyCommittedBytes = commitState.committedBytes;
-    if (newCommitBoundary > boundary) {
-      const newlyCommitted = text.slice(boundary, newCommitBoundary);
-      const commitDelta = utf8LenSlice(text, boundary, newCommitBoundary);
-      parsedBytes += commitDelta;
-      newlyCommittedBytes += commitDelta;
-      stable = [...stable, ...parseMarkdown(newlyCommitted)];
-      boundary = newCommitBoundary;
-      unstable = [];
-      resetCheckpointState(boundary, newlyCommittedBytes);
-    }
-    const totalUtf8Now = commitState.totalBytes + deltaUtf8;
-    const openTailBytesLen = Math.max(
-      0,
-      totalUtf8Now - (fenced && fenceStart >= boundary ? Math.max(newlyCommittedBytes, totalUtf8Now - STREAM_MAX_OPEN_TAIL_BYTES) : Math.max(newlyCommittedBytes, checkpointUtf8Offset)),
-    );
-    const steppedCommit = advanceStreamBoundedCommit(
-      commitState,
-      deltaUtf8,
-      newlyCommittedBytes,
-      STREAM_MAX_OPEN_TAIL_BYTES,
-      openTailBytesLen,
-    );
-    if (steppedCommit.admitted) {
-      commitState = {
-        totalBytes: steppedCommit.totalBytes,
-        committedBytes: steppedCommit.committedBytes,
-        checkpointBytes: steppedCommit.checkpointBytes,
-      };
-    }
-
-    if (fenced && fenceStart >= boundary) {
-      const trailingRaw = text.slice(scanCursor);
-      const trailingClean = trailingRaw.endsWith("\r") ? trailingRaw.slice(0, -1) : trailingRaw;
-      if (!trailingClean.trimStart().startsWith("```")) {
-        if (fencePrefixBlocks === null) {
-          const prefixSlice = text.slice(boundary, fenceStart);
-          parsedBytes += utf8LenSlice(text, boundary, fenceStart);
-          fencePrefixBlocks = prefixSlice ? reuseBlocks(unstable, parseMarkdown(prefixSlice)) : [];
-        }
-        if (fenceCleanRaw) {
-          if (text.indexOf("\r", fenceBodyCursor) !== -1) {
-            fenceCleanRaw = false;
-            if (fenceHasLines) fenceAccText = text.slice(fenceBodyStart, fenceBodyCursor - 1);
-          } else {
-            const lastNl = text.lastIndexOf("\n");
-            if (lastNl >= fenceBodyCursor) {
-              parsedBytes += utf8LenSlice(text, fenceBodyCursor, lastNl + 1);
-              fenceBodyCursor = lastNl + 1;
-              fenceHasLines = true;
-            }
-            if (fenceBodyCursor < text.length) parsedBytes += utf8LenSlice(text, fenceBodyCursor, text.length);
-            const openText = text.slice(fenceBodyStart);
-            const openBlock: Block = { t: "pre", lang: fenceLang, text: openText, open: true };
-            const prevOpen = unstable[fencePrefixBlocks.length];
-            if (prevOpen && prevOpen.t === "pre" && prevOpen.lang === fenceLang && prevOpen.open === true && prevOpen.text === openText) {
-              return [...stable, ...unstable];
-            }
-            unstable = [...fencePrefixBlocks, openBlock];
-            return [...stable, ...unstable];
-          }
-        }
-        while (true) {
-          const nl = text.indexOf("\n", fenceBodyCursor);
-          if (nl === -1) break;
-          const rawLine = text.slice(fenceBodyCursor, nl);
-          parsedBytes += utf8LenSlice(text, fenceBodyCursor, nl) + 1;
-          fenceBodyCursor = nl + 1;
-          const dedented = dedentLine(rawLine);
-          fenceAccText = fenceHasLines ? `${fenceAccText}\n${dedented}` : dedented;
-          fenceHasLines = true;
-        }
-        let openText: string;
-        if (fenceBodyCursor === text.length && fenceBodyCursor > fenceBodyStart) {
-          openText = `${fenceAccText}\n`;
-        } else if (fenceBodyCursor < text.length) {
-          parsedBytes += utf8LenSlice(text, fenceBodyCursor, text.length);
-          const dedentedTrail = dedentLine(trailingRaw);
-          openText = fenceHasLines ? `${fenceAccText}\n${dedentedTrail}` : dedentedTrail;
-        } else {
-          openText = "";
-        }
-        const openBlock: Block = { t: "pre", lang: fenceLang, text: openText, open: true };
-        const prevOpen = unstable[fencePrefixBlocks.length];
-        if (prevOpen && prevOpen.t === "pre" && prevOpen.lang === fenceLang && prevOpen.open === true && prevOpen.text === openText) {
-          return [...stable, ...unstable];
-        }
-        unstable = [...fencePrefixBlocks, openBlock];
-        return [...stable, ...unstable];
-      }
-    }
-
-    if (!fenced && !math && !inList && !inQuote && steppedCommit.checkpointForced) {
-      let advanced = false;
-      const flushParaPrefix = () => {
-        if (!checkpointParaPrefix) return;
-        if (checkpointPrefixBlocks === null) {
-          const prefixSlice = text.slice(boundary, checkpointCursor);
-          parsedBytes += utf8LenSlice(text, boundary, checkpointCursor);
-          checkpointPrefixBlocks = prefixSlice ? reuseBlocks(unstable, parseMarkdown(prefixSlice)) : [];
-        }
-        checkpointPrefixBlocks = [...checkpointPrefixBlocks, { t: "p", text: checkpointParaPrefix }];
-        checkpointParaPrefix = "";
-      };
-      const ensurePrefixBlocks = () => {
-        if (checkpointPrefixBlocks !== null) return;
-        const prefixSlice = text.slice(boundary, checkpointCursor);
-        parsedBytes += utf8LenSlice(text, boundary, checkpointCursor);
-        checkpointPrefixBlocks = prefixSlice ? reuseBlocks(unstable, parseMarkdown(prefixSlice)) : [];
-      };
-      while (checkpointUtf8Offset < commitState.checkpointBytes) {
-        const nl = text.indexOf("\n", checkpointCursor);
-        if (nl === -1 || nl >= scanCursor) break;
-        const rawLine = text.slice(checkpointCursor, nl);
-        const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-        const expandedLine = mediaLineTag(line) ?? line;
-        const lineUtf8 = utf8LenSlice(text, checkpointCursor, nl) + 1;
-        if (!expandedLine.trim()) {
-          flushParaPrefix();
-          ensurePrefixBlocks();
-          parsedBytes += lineUtf8;
-          checkpointCursor = nl + 1;
-          checkpointUtf8Offset += lineUtf8;
-          advanced = true;
-          continue;
-        }
-        const singleLineSelfDelimited =
-          isHrLine(expandedLine) ||
-          /^ {0,3}#{1,6}\s/.test(expandedLine) ||
-          /^\s*(?:\$\$(.+?)\$\$|\\\[(.+?)\\\])\s*$/.test(expandedLine);
-        if (singleLineSelfDelimited) {
-          flushParaPrefix();
-          ensurePrefixBlocks();
-          parsedBytes += lineUtf8;
-          checkpointPrefixBlocks = [...checkpointPrefixBlocks!, ...parseMarkdown(expandedLine)];
-          checkpointCursor = nl + 1;
-          checkpointUtf8Offset += lineUtf8;
-          advanced = true;
-          continue;
-        }
-        const trimFence = expandedLine.trimStart();
-        const gluedFence = !trimFence.startsWith("```") ? splitGluedFence(expandedLine) : null;
-        if (trimFence.startsWith("```") || gluedFence !== null) {
-          let closeStart = nl + 1;
-          let closeEnd = -1;
-          while (closeStart < scanCursor) {
-            const cnl = text.indexOf("\n", closeStart);
-            if (cnl === -1 || cnl >= scanCursor) break;
-            const cline = text.slice(closeStart, cnl).replace(/\r$/, "");
-            if (cline.trimStart().startsWith("```")) {
-              closeEnd = cnl + 1;
-              break;
-            }
-            closeStart = cnl + 1;
-          }
-          if (closeEnd !== -1) {
-            flushParaPrefix();
-            ensurePrefixBlocks();
-            const spanUtf8 = utf8LenSlice(text, checkpointCursor, closeEnd);
-            parsedBytes += spanUtf8;
-            checkpointPrefixBlocks = [...checkpointPrefixBlocks!, ...parseMarkdown(text.slice(checkpointCursor, closeEnd - 1))];
-            checkpointCursor = closeEnd;
-            checkpointUtf8Offset += spanUtf8;
-            advanced = true;
-            continue;
-          }
-          flushParaPrefix();
-          break;
-        }
-        if (expandedLine.trim() === "$$" || expandedLine.trim() === "\\[") {
-          const endTok = expandedLine.trim() === "$$" ? "$$" : "\\]";
-          let closeStart = nl + 1;
-          let closeEnd = -1;
-          while (closeStart < scanCursor) {
-            const cnl = text.indexOf("\n", closeStart);
-            if (cnl === -1 || cnl >= scanCursor) break;
-            if (text.slice(closeStart, cnl).replace(/\r$/, "").trim() === endTok) {
-              closeEnd = cnl + 1;
-              break;
-            }
-            closeStart = cnl + 1;
-          }
-          if (closeEnd !== -1) {
-            flushParaPrefix();
-            ensurePrefixBlocks();
-            const spanUtf8 = utf8LenSlice(text, checkpointCursor, closeEnd);
-            parsedBytes += spanUtf8;
-            checkpointPrefixBlocks = [...checkpointPrefixBlocks!, ...parseMarkdown(text.slice(checkpointCursor, closeEnd - 1))];
-            checkpointCursor = closeEnd;
-            checkpointUtf8Offset += spanUtf8;
-            advanced = true;
-            continue;
-          }
-          flushParaPrefix();
-          break;
-        }
-        if (/^ {0,3}>/.test(expandedLine)) {
-          let qPos = nl + 1;
-          let ended = false;
-          while (qPos < scanCursor) {
-            const qnl = text.indexOf("\n", qPos);
-            if (qnl === -1 || qnl >= scanCursor) break;
-            const qline = text.slice(qPos, qnl).replace(/\r$/, "");
-            if (!/^ {0,3}>/.test(qline)) {
-              ended = true;
-              break;
-            }
-            qPos = qnl + 1;
-          }
-          if (ended) {
-            flushParaPrefix();
-            ensurePrefixBlocks();
-            const spanUtf8 = utf8LenSlice(text, checkpointCursor, qPos);
-            parsedBytes += spanUtf8;
-            checkpointPrefixBlocks = [...checkpointPrefixBlocks!, ...parseMarkdown(text.slice(checkpointCursor, qPos - 1))];
-            checkpointCursor = qPos;
-            checkpointUtf8Offset += spanUtf8;
-            advanced = true;
-            continue;
-          }
-          flushParaPrefix();
-          break;
-        }
-        const nextNl = text.indexOf("\n", nl + 1);
-        const nextLine = text.slice(nl + 1, nextNl === -1 ? text.length : nextNl).replace(/\r$/, "");
-        if (expandedLine.includes("|") || nextLine.includes("|")) {
-          if (nextNl !== -1 && nextNl < scanCursor && (expandedLine.includes("|") || isTableSep(nextLine))) {
-            let tPos = nl + 1;
-            let ended = false;
-            while (tPos < scanCursor) {
-              const tnl = text.indexOf("\n", tPos);
-              if (tnl === -1 || tnl >= scanCursor) break;
-              const tline = text.slice(tPos, tnl).replace(/\r$/, "");
-              if (!tline.includes("|") && !isTableSep(tline)) {
-                ended = true;
-                break;
-              }
-              tPos = tnl + 1;
-            }
-            if (ended) {
-              flushParaPrefix();
-              ensurePrefixBlocks();
-              const spanUtf8 = utf8LenSlice(text, checkpointCursor, tPos);
-              parsedBytes += spanUtf8;
-              checkpointPrefixBlocks = [...checkpointPrefixBlocks!, ...parseMarkdown(text.slice(checkpointCursor, tPos - 1))];
-              checkpointCursor = tPos;
-              checkpointUtf8Offset += spanUtf8;
-              advanced = true;
-              continue;
-            }
-          }
-          flushParaPrefix();
-          break;
-        }
-        if (listMarker(expandedLine) !== null) {
-          const lm = listMarker(expandedLine)!;
-          let lPos = nl + 1;
-          let ended = false;
-          while (lPos < scanCursor) {
-            const lnl = text.indexOf("\n", lPos);
-            if (lnl === -1 || lnl >= scanCursor) break;
-            const lline = text.slice(lPos, lnl).replace(/\r$/, "");
-            if (!lline.trim()) {
-              let lookPos = lnl + 1;
-              let nextNonEmptyStart = -1;
-              let nextNonEmptyEnd = -1;
-              while (lookPos < scanCursor) {
-                const knl = text.indexOf("\n", lookPos);
-                if (knl === -1 || knl >= scanCursor) break;
-                if (text.slice(lookPos, knl).trim()) {
-                  nextNonEmptyStart = lookPos;
-                  nextNonEmptyEnd = knl;
-                  break;
-                }
-                lookPos = knl + 1;
-              }
-              if (nextNonEmptyStart === -1) break;
-              const afterBlank = text.slice(nextNonEmptyStart, nextNonEmptyEnd).replace(/\r$/, "");
-              const nextM = listMarker(afterBlank);
-              const lead = /^ */.exec(afterBlank)?.[0].length ?? 0;
-              if ((nextM && nextM.indent === lm.indent && nextM.kind === lm.kind) || lead > lm.indent) {
-                lPos = nextNonEmptyEnd + 1;
-                continue;
-              }
-              ended = true;
-              lPos = nextNonEmptyStart;
-              break;
-            }
-            if (isHrLine(lline) || /^ {0,3}#{1,6}\s/.test(lline)) {
-              ended = true;
-              break;
-            }
-            const nextM = listMarker(lline);
-            if (nextM && (nextM.indent < lm.indent || (nextM.indent === lm.indent && nextM.kind !== lm.kind))) {
-              ended = true;
-              break;
-            }
-            const lead = /^ */.exec(lline)?.[0].length ?? 0;
-            if (lead <= lm.indent && (lline.trimStart().startsWith("```") || /^ {0,3}>/.test(lline))) {
-              ended = true;
-              break;
-            }
-            lPos = lnl + 1;
-          }
-          if (ended) {
-            flushParaPrefix();
-            ensurePrefixBlocks();
-            const spanUtf8 = utf8LenSlice(text, checkpointCursor, lPos);
-            parsedBytes += spanUtf8;
-            checkpointPrefixBlocks = [...checkpointPrefixBlocks!, ...parseMarkdown(text.slice(checkpointCursor, lPos - 1))];
-            checkpointCursor = lPos;
-            checkpointUtf8Offset += spanUtf8;
-            advanced = true;
-            continue;
-          }
-          flushParaPrefix();
-          break;
-        }
-        if (/^\s*(?:\$\$|\\\[)/.test(expandedLine)) {
-          flushParaPrefix();
-          break;
-        }
-        ensurePrefixBlocks();
-        parsedBytes += lineUtf8;
-        checkpointParaPrefix = checkpointParaPrefix ? `${checkpointParaPrefix} ${expandedLine}` : expandedLine;
-        checkpointCursor = nl + 1;
-        checkpointUtf8Offset += lineUtf8;
-        advanced = true;
-      }
-      if ((checkpointParaPrefix || checkpointCursor > boundary) && (checkpointPrefixBlocks !== null || checkpointCursor > boundary)) {
-        if (checkpointPrefixBlocks === null) {
-          const prefixSlice = text.slice(boundary, checkpointCursor);
-          parsedBytes += utf8LenSlice(text, boundary, checkpointCursor);
-          checkpointPrefixBlocks = reuseBlocks(unstable, parseMarkdown(prefixSlice));
-        }
-        const remSlice = text.slice(checkpointCursor);
-        parsedBytes += utf8LenSlice(text, checkpointCursor, text.length);
-        const remBlocks = remSlice ? parseMarkdown(remSlice) : [];
-        let mergedTail: Block[];
-        if (checkpointParaPrefix) {
-          if (remBlocks.length > 0 && remBlocks[0].t === "p") {
-            mergedTail = [
-              { t: "p", text: `${checkpointParaPrefix} ${remBlocks[0].text}` },
-              ...remBlocks.slice(1),
-            ];
-          } else {
-            mergedTail = [{ t: "p", text: checkpointParaPrefix }, ...remBlocks];
-          }
-        } else {
-          mergedTail = remBlocks;
-        }
-        if (!advanced && unstable.length === checkpointPrefixBlocks.length + mergedTail.length) {
-          const firstAfter = unstable[checkpointPrefixBlocks.length];
-          if (mergedTail.length === 1 && firstAfter?.t === "p" && firstAfter.text === (mergedTail[0] as Extract<Block, { t: "p" }>).text) {
-            return [...stable, ...unstable];
-          }
-        }
-        unstable = reuseBlocks(unstable, [...checkpointPrefixBlocks, ...mergedTail]);
-        return [...stable, ...unstable];
-      }
-    } else if ((fenced || math || inList || inQuote) && (checkpointParaPrefix || checkpointPrefixBlocks !== null)) {
-      resetCheckpointState(boundary, commitState.committedBytes);
-    }
-
-    // The unstable tail is re-parsed each time; blocks that did not change
-    // (everything but the last one, usually) keep their identity.
-    const tailSlice = text.slice(boundary);
-    parsedBytes += utf8LenSlice(text, boundary, text.length);
-    unstable = reuseBlocks(unstable, parseMarkdown(tailSlice));
-    return [...stable, ...unstable];
-  }) as IncrementalMarkdownParser;
-
-  Object.defineProperties(fn, {
-    scannedBytes: { get: () => scannedBytes },
-    parsedBytes: { get: () => parsedBytes },
-  });
-  return fn;
+  return createIncrementalMarkdown(parseMarkdown);
 }
 
-function renderListItem(it: string | ListItem, compact?: boolean): JSX.Element {
-  if (typeof it === "string") return <li>{inline(it)}</li>;
-  return (
-    <li>
-      {inline(it.text)}
-      <Show when={it.sub?.length}>
-        <For each={it.sub}>{(sub) => renderBlock(sub, compact)}</For>
-      </Show>
-    </li>
-  );
-}
-
-function renderBlock(b: Block, compact?: boolean): JSX.Element {
-  return b.t === "hr" ? (
-    <hr />
-  ) : b.t === "math" ? (
-    <MathFormula text={b.text} display />
-  ) : b.t === "h" && b.n === 1 ? (
-    <h1>{inline(b.text)}</h1>
-  ) : b.t === "h" && b.n === 2 ? (
-    <h2>{inline(b.text)}</h2>
-  ) : b.t === "h" ? (
-    <h3>{inline(b.text)}</h3>
-  ) : b.t === "ol" ? (
-    <ol start={b.start}>{b.items.map((item) => renderListItem(item, compact))}</ol>
-  ) : b.t === "ul" ? (
-    <ul>{b.items.map((it) => renderListItem(it, compact))}</ul>
-  ) : b.t === "pre" ? (
-    isMermaidLang(b.lang) ? <MermaidBlock text={b.text} complete={!b.open} /> : <CodeBlock text={b.text} lang={b.lang} streaming={Boolean(b.open)} />
-  ) : b.t === "quote" ? (
-    <blockquote>
-      <MdView text={b.text} compact={compact} />
-    </blockquote>
-  ) : b.t === "table" ? (
-    <div class="md-table-wrap">
-      <table>
-        {/* A loose pipe table without a header row has an all-empty one. */}
-        {b.heads.some((h) => h !== "") && (
-          <thead>
-            <tr>
-              {b.heads.map((h, i) => (
-                <th style={{ "text-align": b.aligns[i] ?? "left" }}>{inline(h)}</th>
-              ))}
-            </tr>
-          </thead>
-        )}
-        <tbody>
-          {b.rows.map((row) => (
-            <tr>
-              {row.map((c, i) => (
-                <td style={{ "text-align": b.aligns[i] ?? "left" }}>{inline(c)}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+function renderReactiveListItems(
+  kind: "ul" | "ol",
+  block: () => Extract<Block, { t: "ul" | "ol" }>,
+  compact?: boolean,
+  pendingWorker: () => boolean = () => false,
+): JSX.Element {
+  const renderItem = (it: () => string | ListItem, idx: number): JSX.Element => {
+    const content = createMemo(() => {
+      const cur = it();
+      const preInl = block().inl?.[idx];
+      return typeof cur === "string" ? inline(cur, preInl, pendingWorker()) : inline(cur.text, cur.inl ?? preInl, pendingWorker());
+    });
+    return (
+      <li>
+        {content()}
+        <Show when={(typeof it() === "string" ? undefined : (it() as ListItem).sub)?.length}>
+          <Index each={typeof it() === "string" ? [] : ((it() as ListItem).sub ?? [])}>
+            {(sub) => renderBlockSlot(sub, compact, pendingWorker)}
+          </Index>
+        </Show>
+      </li>
+    );
+  };
+  return kind === "ol" ? (
+    <ol start={(block() as Extract<Block, { t: "ol" }>).start}>
+      <Index each={block().items}>{(item, idx) => renderItem(item, idx)}</Index>
+    </ol>
   ) : (
-    <p>{inline(b.text)}</p>
+    <ul>
+      <Index each={block().items}>{(item, idx) => renderItem(item, idx)}</Index>
+    </ul>
   );
 }
 
-function renderBlockSlot(block: () => Block, compact?: boolean): JSX.Element {
+function renderBlockSlot(block: () => Block, compact?: boolean, pendingWorker: () => boolean = () => false): JSX.Element {
   const kind = createMemo(() => {
     const b = block();
     if (b.t === "pre") return isMermaidLang(b.lang) ? "pre:mermaid" : "pre:code";
@@ -1121,6 +241,11 @@ function renderBlockSlot(block: () => Block, compact?: boolean): JSX.Element {
   return (
     <Show when={kind()} keyed>
       {(k) => {
+        if (k === "hr") return <hr />;
+        if (k === "math") {
+          const m = () => block() as Extract<Block, { t: "math" }>;
+          return <MathFormula text={m().text} display />;
+        }
         if (k === "pre:code") {
           const pre = () => block() as Extract<Block, { t: "pre" }>;
           return <CodeBlock text={pre().text} lang={pre().lang} streaming={Boolean(pre().open)} />;
@@ -1131,84 +256,228 @@ function renderBlockSlot(block: () => Block, compact?: boolean): JSX.Element {
         }
         if (k === "p") {
           const p = () => block() as Extract<Block, { t: "p" }>;
-          return <p>{inline(p().text)}</p>;
+          return <p>{inline(p().text, p().inl, pendingWorker())}</p>;
         }
-        return <>{() => renderBlock(block(), compact)}</>;
+        if (k === "h:1") {
+          const h = () => block() as Extract<Block, { t: "h" }>;
+          return <h1>{inline(h().text, h().inl, pendingWorker())}</h1>;
+        }
+        if (k === "h:2") {
+          const h = () => block() as Extract<Block, { t: "h" }>;
+          return <h2>{inline(h().text, h().inl, pendingWorker())}</h2>;
+        }
+        if (k.startsWith("h:")) {
+          const h = () => block() as Extract<Block, { t: "h" }>;
+          return <h3>{inline(h().text, h().inl, pendingWorker())}</h3>;
+        }
+        if (k === "ul" || k === "ol") {
+          return renderReactiveListItems(k, () => block() as Extract<Block, { t: "ul" | "ol" }>, compact, pendingWorker);
+        }
+        if (k === "table") {
+          const tbl = () => block() as Extract<Block, { t: "table" }>;
+          return (
+            <div class="md-table-wrap">
+              <table>
+                <Show when={tbl().heads.some((h) => h !== "")}>
+                  <thead>
+                    <tr>
+                      <Index each={tbl().heads}>
+                        {(h, i) => (
+                          <th style={{ "text-align": tbl().aligns[i] ?? "left" }}>
+                            {inline(h(), tbl().headInl?.[i], pendingWorker())}
+                          </th>
+                        )}
+                      </Index>
+                    </tr>
+                  </thead>
+                </Show>
+                <tbody>
+                  <Index each={tbl().rows}>
+                    {(row, rIdx) => (
+                      <tr>
+                        <Index each={row()}>
+                          {(c, i) => (
+                            <td style={{ "text-align": tbl().aligns[i] ?? "left" }}>
+                              {inline(c(), tbl().rowInl?.[rIdx]?.[i], pendingWorker())}
+                            </td>
+                          )}
+                        </Index>
+                      </tr>
+                    )}
+                  </Index>
+                </tbody>
+              </table>
+            </div>
+          );
+        }
+        const q = () => block() as Extract<Block, { t: "quote" }>;
+        const subBlocks = createMemo(() => q().sub ?? parseMarkdown(q().text));
+        return (
+          <blockquote>
+            <div class={`md ${compact ? "md-compact" : ""}`}>
+              <Index each={subBlocks()}>{(sub) => renderBlockSlot(sub, compact, pendingWorker)}</Index>
+            </div>
+          </blockquote>
+        );
       }}
     </Show>
   );
 }
 
 // Parsed blocks of recently shown messages: rows that remount while a long
-// transcript scrolls skip re-parsing. Blocks are immutable data.
+// transcript scrolls skip re-parsing. Bounded by both entry count and source chars.
 const parsedMessages = new Map<string, Block[]>();
+let parsedMessageChars = 0;
 const MAX_PARSED_MESSAGES = 500;
+const MAX_PARSED_MESSAGE_CHARS = 4_000_000;
+const WORKER_DEFER_THRESHOLD_CHARS = 4_096;
+
+export function seedParsedMarkdown(text: string, blocks: Block[], renderedFormulas?: ReadonlyArray<WorkerMarkdownFormula>): void {
+  if (renderedFormulas?.length) seedRenderedFormulas(renderedFormulas);
+  rememberParsedMessage(text, blocks);
+}
+
 function rememberParsedMessage(text: string, blocks: Block[]) {
   if (!text || text.length >= 50_000) return;
   if (blocks.some((b) => b.t === "pre" && b.open)) return;
-  parsedMessages.delete(text);
-  parsedMessages.set(text, blocks);
-  while (parsedMessages.size > MAX_PARSED_MESSAGES) {
-    parsedMessages.delete(parsedMessages.keys().next().value!);
+  if (parsedMessages.has(text)) {
+    parsedMessages.delete(text);
+  } else {
+    parsedMessageChars += text.length;
   }
+  parsedMessages.set(text, blocks);
+  while (parsedMessages.size > MAX_PARSED_MESSAGES || (parsedMessages.size > 1 && parsedMessageChars > MAX_PARSED_MESSAGE_CHARS)) {
+    const oldest = parsedMessages.keys().next().value!;
+    parsedMessages.delete(oldest);
+    parsedMessageChars = Math.max(0, parsedMessageChars - oldest.length);
+  }
+}
+
+export function applyWorkerMarkdownResult(text: string, res: WorkerMarkdownResult): Block[] | null {
+  if (res.formulas.length > 0) seedRenderedFormulas(res.formulas);
+  if (res.blocks) {
+    rememberParsedMessage(text, res.blocks);
+    return res.blocks;
+  }
+  return null;
 }
 
 export function warmMarkdownText(text: string): void {
   if (!text || text.length >= 50_000) return;
-  let blocks = parsedMessages.get(text);
-  if (blocks) {
+  const hit = parsedMessages.get(text);
+  if (hit) {
     parsedMessages.delete(text);
-    parsedMessages.set(text, blocks);
-  } else {
-    blocks = incrementalMarkdown()(text);
-    rememberParsedMessage(text, blocks);
-  }
-  for (const b of blocks) {
-    if (b.t === "pre" && !b.open && b.lang && !isMermaidLang(b.lang)) {
-      warmHighlight(b.text, b.lang);
+    parsedMessages.set(text, hit);
+    for (const b of hit) {
+      if (b.t === "pre" && !b.open && b.lang && !isMermaidLang(b.lang)) {
+        warmHighlight(b.text, b.lang);
+      }
     }
+    return;
   }
+  if (typeof Worker !== "undefined") {
+    requestMarkdownParse(text, (res) => {
+      applyWorkerMarkdownResult(text, res);
+    });
+    return;
+  }
+  const blocks = incrementalMarkdown()(text);
+  rememberParsedMessage(text, blocks);
 }
 
 export function warmTranscriptMarkdown(items: ReadonlyArray<{ kind: string; text?: string; live?: boolean }>): void {
   if (!items.length || typeof window === "undefined") return;
   const texts: string[] = [];
-  for (let i = items.length - 1; i >= 0 && texts.length < 6; i--) {
+  const seen = new Set<string>();
+  const limit = typeof Worker !== "undefined" ? 30 : 6;
+  for (let i = items.length - 1; i >= 0 && texts.length < limit; i--) {
     const item = items[i];
-    if (item.kind === "text" && !item.live && item.text && item.text.length < 50_000) {
+    if (item.kind === "text" && !item.live && item.text && item.text.length < 50_000 && !seen.has(item.text)) {
+      seen.add(item.text);
       texts.push(item.text);
     }
   }
   if (!texts.length) return;
+  if (typeof Worker !== "undefined") {
+    // Dispatch immediately to the worker so AST, Prism, and KaTeX caches are warm before mount/scroll.
+    for (const text of texts) warmMarkdownText(text);
+    return;
+  }
   const run = () => {
     for (const text of texts) warmMarkdownText(text);
   };
-  const ric = (window as Window & { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback;
+  const ric = (window as Window & { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number })
+    .requestIdleCallback;
   if (typeof ric === "function") ric(run, { timeout: 120 });
   else setTimeout(run, 16);
 }
 
 export function MdView(p: { text: string; compact?: boolean; searchable?: boolean }) {
   const parse = incrementalMarkdown();
-  let parsedOnce = false;
-  const blocks = createMemo(() => {
-    const text = p.text, mount = !parsedOnce, hit = parsedMessages.get(text);
-    parsedOnce = true;
-    if (hit) { parsedMessages.delete(text); parsedMessages.set(text, hit); return hit; }
-    const out = parse(text);
-    if (mount || !parsedMessages.has(text)) rememberParsedMessage(text, out);
-    return out;
+  let mountText: string | undefined;
+  let sawMultipleTexts = false;
+  const [workerParsed, setWorkerParsed] = createSignal<{ text: string; blocks: Block[]; settled: boolean } | null>(null);
+
+  const shouldDeferInlineToWorker = (text: string): boolean => {
+    if (typeof Worker === "undefined") return false;
+    if (text.length < WORKER_DEFER_THRESHOLD_CHARS || text.length >= 50_000) return false;
+    const cached = parsedMessages.get(text);
+    if (cached && cached.every((b) => b.hydrated === true)) return false;
+    if (workerParsed()?.text === text) return false;
+    // Live streaming updates mutate `p.text` incrementally; keep the incremental O(tail) scanner for streams.
+    if (sawMultipleTexts) return false;
+    return true;
+  };
+
+  createEffect(() => {
+    const text = p.text;
+    if (!shouldDeferInlineToWorker(text)) return;
+    const cancel = requestMarkdownParse(text, (res) => {
+      const resolved = applyWorkerMarkdownResult(text, res) ?? parse(text);
+      rememberParsedMessage(text, resolved);
+      setWorkerParsed({ text, blocks: resolved, settled: true });
+    });
+    onCleanup(cancel);
   });
+
+  const resolvedState = createMemo<{ blocks: Block[]; pendingInline: boolean }>(() => {
+    const text = p.text;
+    if (mountText === undefined) mountText = text;
+    else if (text !== mountText) sawMultipleTexts = true;
+
+    const asyncHit = workerParsed();
+    if (asyncHit && asyncHit.text === text) {
+      return { blocks: asyncHit.blocks, pendingInline: false };
+    }
+    const hit = parsedMessages.get(text);
+    if (hit) {
+      parsedMessages.delete(text);
+      parsedMessages.set(text, hit);
+      return { blocks: hit, pendingInline: shouldDeferInlineToWorker(text) };
+    }
+
+    const out = parse(text);
+    const pendingInline = shouldDeferInlineToWorker(text);
+    if (!pendingInline && (!sawMultipleTexts || !parsedMessages.has(text))) {
+      rememberParsedMessage(text, out);
+    }
+    return { blocks: out, pendingInline };
+  });
+
+  const blocks = () => resolvedState().blocks;
+  const pendingInline = () => resolvedState().pendingInline;
+
   return (
     <div class={`md ${p.compact ? "md-compact" : ""}`} data-find-message={p.searchable ? "" : undefined}>
-      <Index each={blocks()}>{(b) => renderBlockSlot(b, p.compact)}</Index>
+      <Index each={blocks()}>{(b) => renderBlockSlot(b, p.compact, pendingInline)}</Index>
     </div>
   );
 }
 
 function hlInline(text: string): JSX.Element[] {
   const out: JSX.Element[] = [];
-  const re = /(\*\*)(.+?)(\*\*)|(\[)((?:`[^`\n]*`|[^\]`\n])+)(\]\()(<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)(\))|(`)([^`]+)(`)/g;
+  const re =
+    /(\*\*)(.+?)(\*\*)|(\[)((?:`[^`\n]*`|[^\]`\n])+)(\]\()(<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)(\))|(`)([^`]+)(`)/g;
   let last = 0;
   for (let m = re.exec(text); m; m = re.exec(text)) {
     if (m.index > last) out.push(text.slice(last, m.index));
@@ -1249,7 +518,10 @@ function hlLine(line: string): JSX.Element {
   if (h)
     return (
       <>
-        <span class="md-p">{h[1]}{h[2]}</span>
+        <span class="md-p">
+          {h[1]}
+          {h[2]}
+        </span>
         <span class="md-h">{h[3]}</span>
       </>
     );
@@ -1329,23 +601,46 @@ export function MdSource(p: { text: string; onInput: (t: string) => void; readOn
 
 /** The same syntax presentation as the editor, without a writable textarea. */
 export function ReadOnlySource(p: { text: string; line?: number; language?: string }) {
-  const [highlighted,setHighlighted]=createSignal<string[]|null>(null);
-  createEffect(()=>{
-    const text=p.text,language=p.language;setHighlighted(null);
-    if(!language||typeof Worker==='undefined')return;
-    const cancel=requestHighlight(text,language,html=>setHighlighted(html?highlightedLines(html):null));
+  const [highlighted, setHighlighted] = createSignal<string[] | null>(null);
+  createEffect(() => {
+    const text = p.text,
+      language = p.language;
+    setHighlighted(null);
+    if (!language || typeof Worker === "undefined") return;
+    const cancel = requestHighlight(text, language, (html) => setHighlighted(html ? highlightedLines(html) : null));
     onCleanup(cancel);
   });
-  return <div class="file-source-code"><For each={p.text.split("\n")}>{(line,i)=><div data-line={i()+1} class={p.line===i()+1?"highlight":""}><span class="file-line-number">{i()+1}</span><Show when={highlighted()?.[i()]} fallback={<code>{p.language?line||" ":hlLine(line)||" "}</code>}>{html=><code innerHTML={html()}/>}</Show></div>}</For></div>;
+  return (
+    <div class="file-source-code">
+      <For each={p.text.split("\n")}>
+        {(line, i) => (
+          <div data-line={i() + 1} class={p.line === i() + 1 ? "highlight" : ""}>
+            <span class="file-line-number">{i() + 1}</span>
+            <Show when={highlighted()?.[i()]} fallback={<code>{p.language ? line || " " : hlLine(line) || " "}</code>}>
+              {(html) => <code innerHTML={html()} />}
+            </Show>
+          </div>
+        )}
+      </For>
+    </div>
+  );
 }
 
 /** Reopen multiline token spans on each row without losing their lexical context. */
-export function highlightedLines(html:string):string[]{
- const lines:string[]=[],stack:string[]=[];let current='';
- for(const token of html.match(/<\/?span\b[^>]*>|\n|[^<\n]+|</g)??[]){
-  if(token==='\n'){lines.push(current+'</span>'.repeat(stack.length));current=stack.join('');continue;}
-  if(token.startsWith('<span'))stack.push(token);else if(token==='</span>')stack.pop();
-  current+=token;
- }
- lines.push(current+'</span>'.repeat(stack.length));return lines;
+export function highlightedLines(html: string): string[] {
+  const lines: string[] = [],
+    stack: string[] = [];
+  let current = "";
+  for (const token of html.match(/<\/?span\b[^>]*>|\n|[^<\n]+|</g) ?? []) {
+    if (token === "\n") {
+      lines.push(current + "</span>".repeat(stack.length));
+      current = stack.join("");
+      continue;
+    }
+    if (token.startsWith("<span")) stack.push(token);
+    else if (token === "</span>") stack.pop();
+    current += token;
+  }
+  lines.push(current + "</span>".repeat(stack.length));
+  return lines;
 }
