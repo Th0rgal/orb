@@ -1,4 +1,5 @@
-import { api, ApiError, createMission, type Mission } from './api';
+import { api, ApiError, connectionVersion, createMission, isConnected, type Mission } from './api';
+import { cachePut } from './pageCache';
 import { readString } from './storage';
 export type CloudProvider = 'grok_bot' | 'cursor_cloud' | 'hermes';
 export const cloudNames: Record<CloudProvider, string> = { grok_bot: 'Grok Bot', cursor_cloud: 'Cursor Cloud', hermes: 'Hermes' };
@@ -68,7 +69,7 @@ export interface HermesSettingsPatch {
   soul_markdown?: string;
   restart_service?: boolean;
 }
-export async function cloudAccounts(): Promise<CloudAccount[]> { try { return await api<CloudAccount[]>('/api/cloud/accounts'); } catch (error) { if (error instanceof ApiError && error.status === 404) throw new Error('Cloud agents are not available on this Core yet. Core needs the cloud agent update.'); throw error; } }
+export async function cloudAccounts(): Promise<CloudAccount[]> { try { const version = connectionVersion(); const next = await api<CloudAccount[]>('/api/cloud/accounts'); if (Array.isArray(next) && isConnected() && version === connectionVersion()) cachePut('settings:cloud-accounts', next); return next; } catch (error) { if (error instanceof ApiError && error.status === 404) throw new Error('Cloud agents are not available on this Core yet. Core needs the cloud agent update.'); throw error; } }
 export const cloudExecution = (id: string) => api<CloudExecution>(`/api/control/missions/${encodeURIComponent(id)}/cloud`);
 export const getHermesSettings = () => api<HermesSettingsState>('/api/cloud/hermes/settings');
 export const updateHermesSettings = (patch: HermesSettingsPatch) => api<HermesSettingsState>('/api/cloud/hermes/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });

@@ -32,6 +32,9 @@ export function classifyClientRequestPriority(
   if (explicit) return explicit;
   const method = (methodRaw ?? "GET").trim().toUpperCase();
   const cleanPath = path.split("?")[0] ?? path;
+  if (cleanPath.startsWith("/api/usage-telemetry")) {
+    return "p2";
+  }
   if (
     cleanPath === "/api/file-resources" ||
     cleanPath.endsWith("/inbox-digest") ||
@@ -59,12 +62,13 @@ export function classifyClientRequestPriority(
     cleanPath.startsWith("/api/crons") ||
     cleanPath.startsWith("/api/library/skill-delivery") ||
     cleanPath.startsWith("/api/ai/providers/usage") ||
-    cleanPath.startsWith("/api/usage-telemetry") ||
+    cleanPath === "/api/privilege-access" ||
     cleanPath.startsWith("/api/remote-nodes") ||
     cleanPath.endsWith("/context/conflicts") ||
     cleanPath.endsWith("/context/manifest") ||
     cleanPath.endsWith("/automations") ||
     path.includes("exclude_content=true") ||
+    (cleanPath === "/api/control/missions" && /[?&]offset=[1-9]/.test(path)) ||
     cleanPath.endsWith("/files") ||
     cleanPath.includes("/files/")
   ) {
