@@ -181,6 +181,32 @@ missions.
 - For routine UI-only desktop updates, use `./scripts/orb_desktop_dev.sh` (HMR) or `./scripts/orb_desktop_dev.sh --ui-only --install` (`~10 s`) instead of rebuilding Lean binaries.
 - Reuse the checkout's existing `.lake/build` cache. Avoid deleting `.lake` or spawning parallel builds across worktrees on the same package. If memory pressure/swapping is high, defer new heavy builds and report which task is holding resources. Keep build ownership and command visible in updates.
 
+## Building for the aarch64 Linux desktop on dgx-spark
+
+The NixOS laptop (`m2air`, aarch64, 16 GB) is too small for a cold Lean build of Orb. `dgx-spark`
+(aarch64, 20 cores, 119 GB) is the same architecture and needs no emulation; a Boat or lean.ci VM is
+x86_64 and cannot produce these binaries. Build there instead of locally.
+
+- **Reach it over the personal mesh:** `ssh spark` (aliases `dgx-spark`, `spark-de79`; user `th0rgal`).
+  The SSH config generated from `nixos-config/inventory/fleet.nix` supplies the address and the
+  YubiKey-agent key. Do not add other keys to its `authorized_keys`.
+- **It is a shared inference host.** Check `free -g` and `pgrep -lx "lean|lake|turbo-lean"` first; it
+  often has under 10 GB free. One heavy build at a time, `--jobs 2` and a memory cap, as on any host.
+- **Lean binaries (tests, `orb-locald`, an aarch64 Ubuntu host):** work in the dedicated checkout
+  `~/work/orb` on spark and build with `turbo-lean` through `scripts/build_orb_bins.sh --only <bin>`.
+  These link against Ubuntu's loader and do not run on NixOS as they are.
+- **The NixOS desktop package (`orb-desktop` in `~/work/nixos/omarchnix`, what Alt+O launches):**
+  build it in spark's Nix store, which patches the binaries for NixOS:
+  ```bash
+  cd ~/work/nixos/omarchnix
+  nix build .#orb-desktop --eval-store auto --store ssh-ng://spark --no-link --print-out-paths
+  ```
+  Building this way was verified from the laptop on 2026-11-12. Copying the result back
+  (`nix copy --from ssh-ng://spark <path>`) is refused for an unprivileged user because the path is
+  unsigned: either run the copy as root, or add the laptop user to `nix.settings.trusted-users` in
+  `nixos-config`. `--builders ssh-ng://spark` is ignored for the same reason.
+- To pick up a new Orb commit, bump the `orb` input first: `nix flake update orb` in `omarchnix`.
+
 ## High-level flow
 
 1. User creates a mission with a workspace + agent (backend).
