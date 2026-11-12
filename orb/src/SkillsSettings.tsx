@@ -194,6 +194,12 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     return librarySkills().flatMap((s) => (full[s.name] ? [payloadFor(full[s.name], s)] : []));
   };
 
+  const libraryComplete = (): boolean => {
+    if (!libraryLoaded()) return false;
+    const full = libraryFull();
+    return librarySkills().every((s) => Boolean(full[s.name]));
+  };
+
   /** Fetch every Library skill body; the Library is the canonical source for local sync. */
   // Rows render from the Library index at once; bodies (needed for drift and
   // divergence) arrive in the background and land in one update.
@@ -214,7 +220,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   };
 
   const refreshReport = async () => {
-    const rep = await localSkillsStatus(libraryPayloads(), libraryLoaded());
+    const rep = await localSkillsStatus(libraryPayloads(), libraryComplete());
     if (rep) {
       rememberSkillsReport(rep);
       setLocalReport(rep);
@@ -458,17 +464,28 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     setSyncError(null);
     try {
       const base = libraryPayloads() ?? [];
+      let refsComplete = true;
       // Non-markdown reference files are not inlined in the skill body; fetch them for install.
-      const payloads = await Promise.all(base.map(async (pl) => {
-        const refs = (libraryFull()[pl.name]?.references ?? []).filter((r) => !pl.files?.some((f) => f.rel === r));
-        if (!refs.length) return pl;
-        const extra = await Promise.all(refs.map(async (rel) => ({ rel, content: await readSkillFile(pl.name, rel).catch(() => "") })));
-        return { ...pl, files: [...(pl.files ?? []), ...extra] };
-      }));
+      const payloads = (
+        await Promise.all(
+          base.map(async (pl): Promise<SyncSkillPayload | null> => {
+            const refs = (libraryFull()[pl.name]?.references ?? []).filter((r) => !pl.files?.some((f) => f.rel === r));
+            if (!refs.length) return pl;
+            try {
+              const extra = await Promise.all(refs.map(async (rel) => ({ rel, content: await readSkillFile(pl.name, rel) })));
+              return { ...pl, files: [...(pl.files ?? []), ...extra] };
+            } catch {
+              refsComplete = false;
+              return null;
+            }
+          }),
+        )
+      ).filter((pl): pl is SyncSkillPayload => pl !== null);
+      const complete = libraryComplete() && refsComplete;
       const result = await localSkillsSync({
         librarySkills: payloads,
-        libraryLoaded: libraryLoaded(),
-        pruneRemoved: prune && libraryLoaded(),
+        libraryLoaded: complete,
+        pruneRemoved: prune && complete,
         replaceUnmanaged,
         forceMcpPrompt,
       });

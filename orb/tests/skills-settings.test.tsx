@@ -678,4 +678,76 @@ describe("SkillsSettings", () => {
     expect(res2).toBeNull();
     expect(syncCalls).toHaveLength(1);
   });
+
+  it("disables pruning and marks snapshot incomplete when any skill or companion file fetch fails", async () => {
+    setConnection("https://orbcore.thomas.md", "test-jwt");
+    const statusCalls: any[] = [];
+    const syncCalls: any[] = [];
+
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string, args?: any) => {
+          if (cmd === "local_skills_status") {
+            statusCalls.push(args.request);
+            return sampleLocalReport(false);
+          }
+          if (cmd === "local_skills_sync") {
+            syncCalls.push(args.request);
+            return {
+              synced_skills: 1,
+              harnesses_updated: 2,
+              skipped_unmanaged: [],
+              pruned: [],
+              report: sampleLocalReport(true),
+            };
+          }
+          return null;
+        },
+      },
+    };
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.endsWith("/api/library/skill?include=bundle") || url.endsWith("/api/library/skill")) {
+        return ok([
+          { name: "orb-basics", path: "skill/orb-basics" },
+          { name: "ops", path: "skill/ops" },
+        ]);
+      }
+      if (url.endsWith("/api/library/skill/orb-basics")) {
+        return ok({
+          name: "orb-basics",
+          path: "skill/orb-basics",
+          audience: ["mission", "local"],
+          scope: "global",
+          content: "---\nname: orb-basics\n---\n# Basics\n",
+          files: [],
+          references: [],
+        });
+      }
+      if (url.endsWith("/api/library/skill/ops")) {
+        return new Response("upstream timeout", { status: 502 });
+      }
+      return ok({});
+    });
+
+    const res = await syncConnectedLibraryToLocalHarnesses({
+      onlyIfNeeded: true,
+      pruneRemoved: true,
+      skipMcpMint: true,
+    });
+    expect(res?.harnesses_updated).toBe(2);
+    expect(statusCalls).toHaveLength(1);
+    expect(statusCalls[0]).toMatchObject({
+      library_loaded: false,
+      library_skills: [{ name: "orb-basics" }],
+    });
+    expect(syncCalls).toHaveLength(1);
+    expect(syncCalls[0]).toMatchObject({
+      library_loaded: false,
+      prune_removed: false,
+      library_skills: [{ name: "orb-basics" }],
+    });
+  });
 });

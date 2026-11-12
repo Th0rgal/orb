@@ -3927,7 +3927,7 @@ private def buildLocalSkillsReport
     (st : LocaldState)
     (libSkills : Array JVal)
     (requestedApiUrl? : Option String := none)
-    (libraryLoadedFlag : Bool := false) : IO JVal := do
+    (libraryLoadedFlag? : Option Bool := none) : IO JVal := do
   let checkedAt := (← OrbBin.PosixExt.nowEpoch).toNat * 1000
   let envHome := (← IO.getEnv "HOME").getD "/tmp"
   let homeStr := if st.homeDir.trimAscii.toString.isEmpty then envHome else st.homeDir
@@ -3955,7 +3955,7 @@ private def buildLocalSkillsReport
     ("identity_fingerprint", match idFingerprint? with | some fp => .str fp | none => .null),
     ("identity_updated_at", match idUpdatedAt? with | some ts => JVal.nat ts | none => .null)
   ]
-  let libraryKnown := libraryLoadedFlag || !libSkills.isEmpty
+  let libraryKnown := libraryLoadedFlag?.getD (!libSkills.isEmpty)
   let desiredEntries := catalog.filter (·.desiredLocal)
   let idDir := homeFp / ".config" / "sandboxed-sh" / "development-identity" / "current" / "skill"
   let sourcesJson : Array JVal := #[
@@ -6439,14 +6439,14 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "local_skills_status" =>
     let reqObj := (args.field? "request").getD args
     let libSkills := (reqObj.fieldArr? "library_skills").getD #[]
-    let libraryLoadedFlag := (reqObj.fieldBool? "library_loaded").getD false
+    let libraryLoadedFlag? := reqObj.fieldBool? "library_loaded"
     let requestedApiUrl? := (reqObj.fieldStr? "api_url").orElse (fun _ => reqObj.fieldStr? "apiUrl")
-    let report ← buildLocalSkillsReport st libSkills requestedApiUrl? libraryLoadedFlag
+    let report ← buildLocalSkillsReport st libSkills requestedApiUrl? libraryLoadedFlag?
     return .ok report
   | "local_skills_sync" =>
     let reqObj := (args.field? "request").getD args
     let libSkills := (reqObj.fieldArr? "library_skills").getD #[]
-    let libraryLoadedFlag := (reqObj.fieldBool? "library_loaded").getD false
+    let libraryLoadedFlag? := reqObj.fieldBool? "library_loaded"
     let pruneRemoved := (reqObj.fieldBool? "prune_removed").getD false
     let replaceUnmanaged := ((reqObj.fieldArr? "replace_unmanaged").getD #[]).filterMap (·.asStr?)
     let mcpSess? := (reqObj.field? "mcp_session").filter (!·.isNull)
@@ -6458,7 +6458,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let (catalog, _) ← buildCanonicalSkillCatalog homeFp libSkills
     let desiredEntries := catalog.filter (·.desiredLocal)
     let desiredNames := desiredEntries.map (·.name)
-    let prune := pruneRemoved && (libraryLoadedFlag || !libSkills.isEmpty)
+    let prune := pruneRemoved && (libraryLoadedFlag?.getD (!libSkills.isEmpty))
     let mut harnessesUpdated : Nat := 0
     let mut skippedUnmanaged : Array String := #[]
     let mut skippedNames : Array String := #[]
@@ -6576,7 +6576,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       if let some binPath ← resolveSandboxedMcpBin? st homeFp then
         mcpSyncedNow ← syncLocalHarnessesMcp homeFp binPath credSt.targetApiUrl credSt.role (replaceUnmanaged.contains "sandboxed")
     let syncedSkills := desiredNames.filter (fun n => !(skippedNames.contains n)) |>.size
-    let report ← buildLocalSkillsReport st libSkills requestedApiUrl? libraryLoadedFlag
+    let report ← buildLocalSkillsReport st libSkills requestedApiUrl? libraryLoadedFlag?
     return .ok (.obj #[
       ("synced_skills", JVal.nat syncedSkills),
       ("harnesses_updated", JVal.nat harnessesUpdated),

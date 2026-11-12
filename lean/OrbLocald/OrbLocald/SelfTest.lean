@@ -970,6 +970,30 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
   let claudeToolSt ← OrbBin.PosixExt.statPath (invHome / ".claude" / "skills" / "demo-skill" / "tools" / "helper.py").toString
   let retiredAgentsGone := !(← (invHome / ".agents" / "skills" / "retired-agents-skill").pathExists)
   let activeAgentsKept ← (invHome / ".agents" / "skills" / "demo-skill").pathExists
+  -- Partial Library snapshot (`library_loaded: false`) must NEVER prune or flag missing managed skills even with non-empty `library_skills`
+  let partialSyncRes ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[
+      ("library_skills", .arr #[
+        .obj #[
+          ("name", .str "other-skill"),
+          ("content", .str "---\nname: other-skill\ndescription: \"Other\"\n---\nOther.\n")
+        ]
+      ]),
+      ("library_loaded", .bool false),
+      ("prune_removed", .bool true)
+    ])
+  ])
+  let agyDemoKeptOnPartial ← (invHome / ".gemini" / "config" / "skills" / "demo-skill" / "SKILL.md").pathExists
+  let partialNotRemovedOk :=
+    match partialSyncRes with
+    | .ok pJv =>
+      let prunedPartial := ((pJv.fieldArr? "pruned").getD #[]).filterMap (·.asStr?)
+      let repP := (pJv.field? "report").getD (.obj #[])
+      let sksP := (repP.fieldArr? "skills").getD #[]
+      let demoP? := sksP.find? (fun s => s.fieldStr? "name" == some "demo-skill")
+      prunedPartial.isEmpty &&
+      demoP?.bind (·.fieldBool? "removed_from_library") != some true
+    | _ => false
   let emptyPruneRes ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
     ("request", .obj #[
       ("library_skills", .arr #[]),
@@ -979,9 +1003,9 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
   ])
   let agyDemoPruned := !(← (invHome / ".gemini" / "config" / "skills" / "demo-skill").pathExists)
   let userEditedPreserved ← (invHome / ".claude" / "skills" / "user-edited" / "SKILL.md").pathExists
-  -- Restore `libPayloads` state before F2
+  -- Restore `libPayloads` state before F2 (`prune_removed: true` cleans up `other-skill` from `partialSyncRes`)
   let _ ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
-    ("request", .obj #[("library_skills", .arr libPayloads)])
+    ("request", .obj #[("library_skills", .arr libPayloads), ("library_loaded", .bool true), ("prune_removed", .bool true)])
   ])
   total := total + 1
   let bundleDriftDetected :=
@@ -1009,6 +1033,7 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
       agy1?.bind (·.fieldNat? "skill_count") == some 2 &&
       retiredAgentsGone && activeAgentsKept &&
       pruned1.contains "~/.agents/skills/retired-agents-skill" &&
+      agyDemoKeptOnPartial && partialNotRemovedOk &&
       agyDemoPruned && userEditedPreserved &&
       pruned2.contains "~/.gemini/config/skills/demo-skill"
     | _, _ => false

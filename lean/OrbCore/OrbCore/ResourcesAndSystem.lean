@@ -1072,7 +1072,17 @@ private def resolveRemoteTrackingRef (libDir branch : String) : IO (Option Strin
     if rcC == 0 then return some cand
   return none
 
-/-- Ensure `libDir` is initialized/updated for `effRemote` (`clone` when absent, `remote set-url` + `fetch` when changed). -/
+private def gitOriginUrl? (libDir : String) : IO (Option String) := do
+  let (rc, out) ← runGitCapture #["remote", "get-url", "origin"] (some libDir)
+  let u := out.trimAscii.toString
+  if rc == 0 && !u.isEmpty then return some u else return none
+
+private def gitCurrentBranch (libDir : String) : IO String := do
+  let (rc, out) ← runGitCapture #["rev-parse", "--abbrev-ref", "HEAD"] (some libDir)
+  let b := out.trimAscii.toString
+  if rc == 0 && !b.isEmpty && b != "HEAD" then return b else return "main"
+
+/-- Ensure `libDir` is initialized/updated for `effRemote` (`clone` when absent, `remote add`/`set-url` + `fetch` when changed). -/
 def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) : IO (Except String Bool) := do
   let rem := effRemote.trimAscii.toString
   if rem.isEmpty then return .ok false
@@ -1098,15 +1108,13 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
     return .ok true
   if !(← gitFp.pathExists) then
     return .ok false
-  let (_, curRemOut) ← runGitCapture #["remote", "get-url", "origin"] (some libDir)
-  let curRem := curRemOut.trimAscii.toString
-  if !forceReinit && curRem == rem then
+  let curRem? ← gitOriginUrl? libDir
+  if !forceReinit && curRem? == some rem then
     return .ok false
   let (rcRem, outRem) ←
-    if curRem.isEmpty then
-      runGitCapture #["remote", "add", "origin", "--", rem] (some libDir)
-    else
-      runGitCapture #["remote", "set-url", "origin", "--", rem] (some libDir)
+    match curRem? with
+    | none => runGitCapture #["remote", "add", "origin", "--", rem] (some libDir)
+    | some _ => runGitCapture #["remote", "set-url", "origin", "--", rem] (some libDir)
   if rcRem != 0 then
     let msg := outRem.trimAscii.toString
     return .error (if msg.isEmpty then "git remote configuration failed" else msg)
@@ -1115,13 +1123,12 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
     let msg := outFetch.trimAscii.toString
     return .error (if msg.isEmpty then "git fetch failed" else msg)
   if forceReinit then
-    let (_, stOut) ← runGitCapture #["status", "--porcelain"] (some libDir)
-    if stOut.trimAscii.isEmpty then
-      let (_, brOut) ← runGitCapture #["rev-parse", "--abbrev-ref", "HEAD"] (some libDir)
-      let br := let b := brOut.trimAscii.toString; if b.isEmpty || b == "HEAD" then "main" else b
+    let (rcSt, stOut) ← runGitCapture #["status", "--porcelain"] (some libDir)
+    if rcSt == 0 && stOut.trimAscii.isEmpty then
+      let br ← gitCurrentBranch libDir
       if let some ref ← resolveRemoteTrackingRef libDir br then
         let targetBr := if ref.startsWith "origin/" then (ref.drop 7).toString else br
-        let _ ← runGitCapture #["checkout", "-B", targetBr, ref] (some libDir)
+        let _ ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
   return .ok true
 
 def buildLibraryStatusJson (libDir : String) (defaultRemote : String) : IO JVal := do
@@ -1136,10 +1143,8 @@ def buildLibraryStatusJson (libDir : String) (defaultRemote : String) : IO JVal 
       ("behind", JVal.nat 0),
       ("modified_files", .arr #[])
     ]
-  let (_, brOut) ← runGitCapture #["rev-parse", "--abbrev-ref", "HEAD"] (some libDir)
-  let branch := let b := brOut.trimAscii.toString; if b.isEmpty || b.startsWith "fatal:" then "main" else b
-  let (rcRem, remOut) ← runGitCapture #["remote", "get-url", "origin"] (some libDir)
-  let rem := let r := remOut.trimAscii.toString; if rcRem == 0 && !r.isEmpty then r else defaultRemote
+  let branch ← gitCurrentBranch libDir
+  let rem := (← gitOriginUrl? libDir).getD defaultRemote
   let (rcSt, stOut) ← runGitCapture #["status", "--porcelain"] (some libDir)
   let modLines :=
     if rcSt == 0 then
@@ -1338,26 +1343,24 @@ def handleLibraryRoute
         if let .error e ← ensureLibraryRepo libDir effRemote false then
           return some (500, "text/plain; charset=utf-8", e.toUTF8)
     else
-      let (_, remOut) ← runGitCapture #["remote", "get-url", "origin"] (some libDir)
-      if remOut.trimAscii.isEmpty && !effRemote.isEmpty && isValidGitRemote effRemote then
+      if (← gitOriginUrl? libDir).isNone && !effRemote.isEmpty && isValidGitRemote effRemote then
         let _ ← runGitCapture #["remote", "add", "origin", "--", effRemote] (some libDir)
-      let (_, hasOriginOut) ← runGitCapture #["remote", "get-url", "origin"] (some libDir)
-      if !hasOriginOut.trimAscii.isEmpty then
+      if (← gitOriginUrl? libDir).isSome then
         let (rcF, outF) ← runGitCapture #["fetch", "--prune", "origin"] (some libDir)
         if rcF != 0 then
           return some (500, "text/plain; charset=utf-8", outF.trimAscii.toString.toUTF8)
-        let (_, brOut) ← runGitCapture #["rev-parse", "--abbrev-ref", "HEAD"] (some libDir)
-        let branch := let b := brOut.trimAscii.toString; if b.isEmpty || b == "HEAD" then "main" else b
+        let branch ← gitCurrentBranch libDir
         if let some upRef ← resolveRemoteTrackingRef libDir branch then
           let (rcM, outM) ← runGitCapture #["merge", "--ff-only", upRef] (some libDir)
           if rcM != 0 then
             let cleanErr := outM.trimAscii.toString
             if isDivergedGitOutput cleanErr then
               return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
-            let (_, cntOut) ← runGitCapture #["rev-list", "--left-right", "--count", s!"HEAD...{upRef}"] (some libDir)
-            let nums := (cntOut.trimAscii.toString.split (fun c => c == '\t' || c == ' ')).toArray.filterMap (fun s => s.toString.toNat?)
-            if nums.size ≥ 2 && nums[0]! > 0 && nums[1]! > 0 then
-              return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
+            let (rcCnt, cntOut) ← runGitCapture #["rev-list", "--left-right", "--count", s!"HEAD...{upRef}"] (some libDir)
+            if rcCnt == 0 then
+              let nums := (cntOut.trimAscii.toString.split (fun c => c == '\t' || c == ' ')).toArray.filterMap (fun s => s.toString.toNat?)
+              if nums.size ≥ 2 && nums[0]! > 0 && nums[1]! > 0 then
+                return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
             return some (500, "text/plain; charset=utf-8", cleanErr.toUTF8)
     return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
 
@@ -1370,14 +1373,14 @@ def handleLibraryRoute
         return some (500, "text/plain; charset=utf-8", e.toUTF8)
     else
       if !effRemote.isEmpty && isValidGitRemote effRemote then
-        let (_, remOut) ← runGitCapture #["remote", "get-url", "origin"] (some libDir)
-        if remOut.trimAscii.isEmpty then
+        if (← gitOriginUrl? libDir).isNone then
           let _ ← runGitCapture #["remote", "add", "origin", "--", effRemote] (some libDir)
+      if (← gitOriginUrl? libDir).isNone then
+        return some (jsonErr 400 "Library remote is not configured")
       let (rcF, outF) ← runGitCapture #["fetch", "--prune", "origin"] (some libDir)
       if rcF != 0 then
         return some (500, "text/plain; charset=utf-8", outF.trimAscii.toString.toUTF8)
-      let (_, brOut) ← runGitCapture #["rev-parse", "--abbrev-ref", "HEAD"] (some libDir)
-      let branch := let b := brOut.trimAscii.toString; if b.isEmpty || b == "HEAD" then "main" else b
+      let branch ← gitCurrentBranch libDir
       let targetRef := (← resolveRemoteTrackingRef libDir branch).getD "FETCH_HEAD"
       let (rcR, outR) ← runGitCapture #["reset", "--hard", targetRef] (some libDir)
       if rcR != 0 then
@@ -1401,21 +1404,23 @@ def handleLibraryRoute
     let (rcAdd, outAdd) ← runGitCapture #["add", "-A"] (some libDir)
     if rcAdd != 0 then
       return some (500, "text/plain; charset=utf-8", s!"git add failed: {outAdd.trimAscii.toString}".toUTF8)
-    let (_, stOut) ← runGitCapture #["status", "--porcelain"] (some libDir)
+    let (rcSt, stOut) ← runGitCapture #["status", "--porcelain"] (some libDir)
+    if rcSt != 0 then
+      return some (500, "text/plain; charset=utf-8", s!"git status failed: {stOut.trimAscii.toString}".toUTF8)
     if stOut.trimAscii.isEmpty then
       return some (200, "text/plain; charset=utf-8", "Nothing to commit".toUTF8)
     let hdrName := sanitizeGitAuthorField ((findHeaderCI? headers "x-sandboxed-git-author-name").getD "")
     let hdrEmail := sanitizeGitAuthorField ((findHeaderCI? headers "x-sandboxed-git-author-email").getD "")
-    let (_, cfgNameOut) ← runGitCapture #["config", "user.name"] (some libDir)
-    let (_, cfgEmailOut) ← runGitCapture #["config", "user.email"] (some libDir)
+    let (rcCfgName, cfgNameOut) ← runGitCapture #["config", "user.name"] (some libDir)
+    let (rcCfgEmail, cfgEmailOut) ← runGitCapture #["config", "user.email"] (some libDir)
     let mut commitArgs : Array String := #[]
     if !hdrName.isEmpty then
       commitArgs := commitArgs ++ #["-c", s!"user.name={hdrName}"]
-    else if cfgNameOut.trimAscii.isEmpty then
+    else if rcCfgName != 0 || cfgNameOut.trimAscii.isEmpty then
       commitArgs := commitArgs ++ #["-c", "user.name=Orb"]
     if !hdrEmail.isEmpty then
       commitArgs := commitArgs ++ #["-c", s!"user.email={hdrEmail}"]
-    else if cfgEmailOut.trimAscii.isEmpty then
+    else if rcCfgEmail != 0 || cfgEmailOut.trimAscii.isEmpty then
       commitArgs := commitArgs ++ #["-c", "user.email=orb@localhost"]
     commitArgs := commitArgs ++ #["commit", "-m", message]
     let (rcC, outC) ← runGitCapture commitArgs (some libDir)
@@ -1428,11 +1433,9 @@ def handleLibraryRoute
     let isForce := segs == ["api", "library", "force-push"]
     if !(← gitFp.pathExists) then
       return some (400, "text/plain; charset=utf-8", "Library repository is not initialized".toUTF8)
-    let (_, remOut) ← runGitCapture #["remote", "get-url", "origin"] (some libDir)
-    if remOut.trimAscii.isEmpty && !effRemote.isEmpty && isValidGitRemote effRemote then
+    if (← gitOriginUrl? libDir).isNone && !effRemote.isEmpty && isValidGitRemote effRemote then
       let _ ← runGitCapture #["remote", "add", "origin", "--", effRemote] (some libDir)
-    let (_, remCheck) ← runGitCapture #["remote", "get-url", "origin"] (some libDir)
-    if remCheck.trimAscii.isEmpty then
+    if (← gitOriginUrl? libDir).isNone then
       -- When no remote is configured locally, treat push as a clean local-only no-op unless explicitly requested.
       if effRemote.isEmpty then
         return some (200, "text/plain; charset=utf-8", "No remote configured; saved locally".toUTF8)

@@ -6255,7 +6255,27 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
       | .error _ => return (101, "", "")
       | .ok resp => return (resp.status, resp.contentType, (String.fromUTF8? resp.body).getD "")
 
-  -- 1. Reject option-injection git remote URLs; initialize from valid bare repo via `PUT /api/settings/library-remote`
+  -- 1. Local-first Library (`commit` + local no-op `push` without `origin`), attaching a new remote via `remote add`,
+  --    rejecting option-injection git remote URLs, and switching to `bareRepo` via `force_reinitialize: true`
+  let freshBareRepo := s!"{workRoot}/fresh-bare.git"
+  IO.FS.createDirAll (System.FilePath.mk freshBareRepo)
+  let freshRc ← shRun s!"git init --bare '{freshBareRepo}'"
+  if freshRc != 0 then
+    return (← fail s!"failed to init freshBareRepo (rc={freshRc})")
+  let (putLocalSt, _, _) ← sendReq "PUT" "/api/library/skill/local-first" hsJwt
+    "{\"content\":\"---\\nname: local-first\\ndescription: \\\"Local first\\\"\\n---\\n# Local\\n\"}"
+  let (cmtLocalSt, _, _) ← sendReq "POST" "/api/library/commit" hsJwt "{\"message\":\"skill: local-first\"}"
+  let (pushNoRemSt, _, pushNoRemBody) ← sendReq "POST" "/api/library/push" hsJwt ""
+  let (attachRemSt, _, attachRemBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
+    s!"\{\"library_remote\":{jsonEscape freshBareRepo}}"
+  let (pushFreshSt, _, pushFreshBody) ← sendReq "POST" "/api/library/push" hsJwt ""
+  if putLocalSt != 200 || cmtLocalSt != 200 ||
+     pushNoRemSt != 200 || (pushNoRemBody.splitOn "No remote configured").length != 2 ||
+     attachRemSt != 200 || (attachRemBody.splitOn "\"library_reinitialized\":true").length != 2 ||
+     (attachRemBody.splitOn "\"library_error\"").length != 1 ||
+     pushFreshSt != 200 || (pushFreshBody.splitOn "Pushed successfully").length != 2 then
+    return (← fail s!"local-first library -> attach remote -> push failed: put={putLocalSt} cmt={cmtLocalSt} noRem=({pushNoRemSt},{pushNoRemBody}) attach=({attachRemSt},{attachRemBody}) pushFresh=({pushFreshSt},{pushFreshBody})")
+
   let (badRemSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":\"--upload-pack=/bin/false\"}"
   let (setRemSt, _, setRemBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
     s!"\{\"library_remote\":{jsonEscape bareRepo},\"force_reinitialize\":true}"

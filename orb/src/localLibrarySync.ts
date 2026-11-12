@@ -95,16 +95,18 @@ async function mintLocalMcpSessionIfNeeded(
 /** Inspect local harnesses against the given Library snapshot (canonical source). */
 export async function localSkillsStatus(
   librarySkills?: SyncSkillPayload[],
-  libraryLoaded = false,
+  libraryLoaded?: boolean,
 ): Promise<LocalSkillsReport | null> {
   const invoke = desktopInvoke();
   if (!invoke) return null;
   const apiUrl = normalizedConnectedApiUrl();
   const hasSkills = Boolean(librarySkills && librarySkills.length > 0);
+  const loadedFlag =
+    typeof libraryLoaded === "boolean" ? libraryLoaded : hasSkills ? true : undefined;
   return (await invoke("local_skills_status", {
     request: {
       library_skills: librarySkills ?? [],
-      ...(libraryLoaded || hasSkills ? { library_loaded: true } : {}),
+      ...(loadedFlag !== undefined ? { library_loaded: loadedFlag } : {}),
       ...(apiUrl ? { api_url: apiUrl } : {}),
     },
   })) as LocalSkillsReport;
@@ -132,11 +134,18 @@ export async function localSkillsSync(
     mintError = minted.error;
   }
   const hasSkills = Boolean(options.librarySkills && options.librarySkills.length > 0);
+  const loadedFlag =
+    typeof options.libraryLoaded === "boolean"
+      ? options.libraryLoaded
+      : hasSkills
+        ? true
+        : undefined;
+  const pruneAllowed = loadedFlag ?? hasSkills;
   const result = (await invoke("local_skills_sync", {
     request: {
       library_skills: options.librarySkills ?? [],
-      ...(options.libraryLoaded || hasSkills ? { library_loaded: true } : {}),
-      prune_removed: options.pruneRemoved ?? false,
+      ...(loadedFlag !== undefined ? { library_loaded: loadedFlag } : {}),
+      prune_removed: Boolean(options.pruneRemoved && pruneAllowed),
       replace_unmanaged: options.replaceUnmanaged ?? [],
       ...(apiUrl ? { api_url: apiUrl } : {}),
       ...(mcpSession ? { mcp_session: mcpSession } : {}),
@@ -162,7 +171,7 @@ export async function skillToSyncPayload(
   const extraFiles = await Promise.all(
     missingRefs.map(async (rel) => ({
       rel,
-      content: await readSkillFile(skill.name, rel).catch(() => ""),
+      content: await readSkillFile(skill.name, rel),
     })),
   );
   return {
@@ -178,27 +187,39 @@ export async function skillToSyncPayload(
 export async function fetchLibrarySyncPayloads(): Promise<{
   payloads: SyncSkillPayload[];
   loaded: boolean;
+  complete: boolean;
 }> {
-  if (!isConnected()) return { payloads: [], loaded: false };
+  if (!isConnected()) return { payloads: [], loaded: false, complete: false };
   const raw = await api<Array<LibrarySkillSummary & Partial<LibrarySkill>>>(
     "/api/library/skill?include=bundle",
   ).catch(() => api<Array<LibrarySkillSummary & Partial<LibrarySkill>>>("/api/library/skill"));
-  if (!Array.isArray(raw)) return { payloads: [], loaded: false };
-  rememberKnownSkillNames(raw.map((s) => s.name));
+  if (!Array.isArray(raw)) return { payloads: [], loaded: false, complete: false };
+  rememberKnownSkillNames(raw.map((s) => s.name).filter((n): n is string => Boolean(n)));
   const payloads: SyncSkillPayload[] = [];
+  let complete = true;
   await Promise.all(
     raw.map(async (item) => {
-      if (!item?.name) return;
-      const full: LibrarySkill | null =
-        typeof item.content === "string"
-          ? ({ ...item, content: item.content } as LibrarySkill)
-          : await fetchLibrarySkill(item.name).catch(() => null);
-      if (!full) return;
-      payloads.push(await skillToSyncPayload(full, item));
+      if (!item?.name) {
+        complete = false;
+        return;
+      }
+      try {
+        const full: LibrarySkill | null =
+          typeof item.content === "string"
+            ? ({ ...item, content: item.content } as LibrarySkill)
+            : await fetchLibrarySkill(item.name);
+        if (!full) {
+          complete = false;
+          return;
+        }
+        payloads.push(await skillToSyncPayload(full, item));
+      } catch {
+        complete = false;
+      }
     }),
   );
   payloads.sort((a, b) => a.name.localeCompare(b.name));
-  return { payloads, loaded: true };
+  return { payloads, loaded: true, complete };
 }
 
 /** Sync the connected Core Library (and MCP wiring) to local harnesses (`antigravity`, `opencode`, `claudecode`, etc.). */
@@ -212,33 +233,45 @@ export async function syncConnectedLibraryToLocalHarnesses(options: {
   if (!desktopInvoke()) return null;
   let payloads: SyncSkillPayload[] = [];
   let loaded = false;
+  let complete = false;
   if (isConnected()) {
     try {
       const fetched = await fetchLibrarySyncPayloads();
       payloads = fetched.payloads;
       loaded = fetched.loaded;
+      complete = fetched.complete;
     } catch {
       loaded = false;
+      complete = false;
     }
   }
   if (!loaded && options.fallbackSkill) {
-    payloads = [await skillToSyncPayload(options.fallbackSkill)];
+    try {
+      payloads = [await skillToSyncPayload(options.fallbackSkill)];
+    } catch {
+      payloads = [];
+    }
   } else if (loaded && options.fallbackSkill) {
-    const updated = await skillToSyncPayload(options.fallbackSkill);
-    const idx = payloads.findIndex((p) => p.name === updated.name);
-    if (idx >= 0) payloads[idx] = updated;
-    else payloads.push(updated);
+    try {
+      const updated = await skillToSyncPayload(options.fallbackSkill);
+      const idx = payloads.findIndex((p) => p.name === updated.name);
+      if (idx >= 0) payloads[idx] = updated;
+      else payloads.push(updated);
+    } catch {
+      complete = false;
+    }
   }
-  const prune = Boolean(options.pruneRemoved && loaded);
+  const snapshotComplete = loaded && complete;
+  const prune = Boolean(options.pruneRemoved && snapshotComplete);
   if (options.onlyIfNeeded) {
-    const rep = await localSkillsStatus(payloads, loaded);
+    const rep = await localSkillsStatus(payloads, snapshotComplete);
     if (!rep) return null;
-    if (loaded) {
+    if (snapshotComplete) {
       rememberSkillsReport(rep);
       rememberKnownSkillNames(rep.skills.map((s) => s.name));
     }
     const hasSkillDrift =
-      loaded &&
+      (snapshotComplete || payloads.length > 0) &&
       rep.harnesses.some(
         (h) =>
           (h.canonical_total > 0 && h.synced_count < h.canonical_total) ||
@@ -249,12 +282,12 @@ export async function syncConnectedLibraryToLocalHarnesses(options: {
   }
   const res = await localSkillsSync({
     librarySkills: payloads,
-    libraryLoaded: loaded,
+    libraryLoaded: snapshotComplete,
     pruneRemoved: prune,
     replaceUnmanaged: options.replaceUnmanaged,
     skipMcpMint: options.skipMcpMint,
   });
-  if (loaded && res?.report) {
+  if (snapshotComplete && res?.report) {
     rememberSkillsReport(res.report);
     rememberKnownSkillNames(res.report.skills.map((s) => s.name));
   }
