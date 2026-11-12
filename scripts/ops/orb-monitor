@@ -10,9 +10,7 @@ when Core itself is unhealthy.
 Config comes from the environment (see deploy/systemd/orb-monitor.service):
   ORB_MONITOR_STATE         state file (default /var/lib/orb-monitor/state.json)
   ORB_MONITOR_INBOX_MISSION mission id whose transcript receives reports (shows in the Orb Inbox)
-  ORB_MONITOR_SIGNAL_URL    fallback when the Inbox post fails (Core down): POST endpoint
-                            taking {"recipient","message"}; unset = journal only
-  ORB_MONITOR_SIGNAL_RECIPIENT, ORB_MONITOR_SIGNAL_TOKEN
+  ORB_MONITOR_PALOMA_URL    Paloma webhook (signed with PALOMA_WEBHOOK_SECRET from Core's env file)
   ORB_MONITOR_MISSIONS_DB, ORB_MONITOR_COMPUTE_DB, ORB_MONITOR_NGINX_LOG
 """
 import datetime, json, os, re, sqlite3, subprocess, sys, time, urllib.request
@@ -138,6 +136,47 @@ def check_builds(problems):
         problems["build:long"] = f"a lake build has been running for {longest // 60} min"
 
 
+def core_env(key):
+    """One value from Core's own env file on this host ('' when absent)."""
+    try:
+        for line in open(ENV("ORB_MONITOR_CORE_ENV", "/etc/open_agent/open_agent.env")):
+            if line.startswith(key + "="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def warn_paloma(text, opened, cleared):
+    """POST the report to Paloma's webhook, signed like Core's own forwarder
+    (GitHub-style X-Hub-Signature-256 over the raw body)."""
+    import hashlib, hmac, uuid
+    url = ENV("ORB_MONITOR_PALOMA_URL", "").strip()
+    if not url:
+        return False
+    body = json.dumps({
+        "type": "orb_monitor_alert",
+        "event_id": str(uuid.uuid4()),
+        "message": text,
+        "opened": opened,
+        "cleared": cleared,
+        "occurred_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }).encode()
+    headers = {"Content-Type": "application/json"}
+    secret = core_env("PALOMA_WEBHOOK_SECRET")
+    if secret:
+        headers["X-Hub-Signature-256"] = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, data=body, headers=headers, method="POST"), timeout=8) as r:
+                if 200 <= r.status < 300:
+                    return True
+        except Exception as exc:
+            print(f"paloma webhook attempt {attempt + 1} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        time.sleep(0.25 * (attempt + 1))
+    return False
+
+
 def core_token():
     """Short-lived Core session token, minted from the secret Core itself uses.
 
@@ -145,13 +184,7 @@ def core_token():
     and the token expires in ten minutes.
     """
     import hashlib, hmac
-    secret = ""
-    try:
-        for line in open(ENV("ORB_MONITOR_CORE_ENV", "/etc/open_agent/open_agent.env")):
-            if line.startswith("JWT_SECRET="):
-                secret = line.split("=", 1)[1].strip().strip('"').strip("'")
-    except OSError:
-        return ""
+    secret = core_env("JWT_SECRET")
     if not secret:
         return ""
     exp = int(NOW) + 600
@@ -178,21 +211,13 @@ def post_inbox(text):
         return False
 
 
-def notify(text):
+def notify(text, opened=(), cleared=()):
+    """Paloma is the alert; the Inbox mission is the record. Both are tried."""
     print(text)
-    if post_inbox(text):
-        return
-    url = ENV("ORB_MONITOR_SIGNAL_URL", "").strip()
-    if not url:
-        return
-    headers = {"Content-Type": "application/json"}
-    if ENV("ORB_MONITOR_SIGNAL_TOKEN"):
-        headers["Authorization"] = "Bearer " + ENV("ORB_MONITOR_SIGNAL_TOKEN").strip()
-    body = json.dumps({"recipient": ENV("ORB_MONITOR_SIGNAL_RECIPIENT", "").strip(), "message": text}).encode()
-    try:
-        urllib.request.urlopen(urllib.request.Request(url, data=body, headers=headers, method="POST"), timeout=8).read()
-    except Exception as exc:
-        print(f"notify failed: {type(exc).__name__}", file=sys.stderr)
+    sent = warn_paloma(text, list(opened), list(cleared))
+    logged = post_inbox(text)
+    if not (sent or logged):
+        print("report reached neither Paloma nor the Inbox", file=sys.stderr)
 
 
 def main():
@@ -227,7 +252,7 @@ def main():
             if (prev.get("info") or {}).get(k) not in (None, info.get(k)) and info.get(k):
                 lines.append(f"[orb-monitor] {k.split(':')[1]} now runs build {info[k]}")
     if lines:
-        notify("\n".join(lines)[:1800])
+        notify("\n".join(lines)[:1800], opened if prev is not None else list(problems.values()), cleared if prev is not None else [])
     return 0
 
 
