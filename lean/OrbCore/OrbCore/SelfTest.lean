@@ -2409,7 +2409,7 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
    let nReceipts := match rows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
    closeCoreStore store
    let cliNoLease ← IO.Process.output {
-     cmd := "./lean/OrbCore/.lake/build/bin/sandboxed-sh"
+     cmd := "./lean/OrbCore/.lake/build/bin/orb-core"
      args := #["deploy", "--service", "sandboxed-sh-dev.service", "--dry-run"]
      env := #[("WORKING_DIR", some r7Root), ("DEV_MODE", some "true")]
    }
@@ -2422,7 +2422,7 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
    } | do closeCoreStore cliStore; IO.FS.removeDirAll r7Root; return 1
    closeCoreStore cliStore
    let cliWithLease ← IO.Process.output {
-     cmd := "./lean/OrbCore/.lake/build/bin/sandboxed-sh"
+     cmd := "./lean/OrbCore/.lake/build/bin/orb-core"
      args := #["deploy", "--service", "sandboxed-sh-dev.service", "--dry-run", "--lease", "lease-r7-cli-01", "--force"]
      env := #[("WORKING_DIR", some cliSubRoot), ("DEV_MODE", some "true")]
    }
@@ -5389,6 +5389,54 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
      ndSt != 200 || (ndBody.splitOn "\"name\":\"orb-core\"").length < 2 then
     return (← fail s!"inbox-digest / nodes failed: id={idSt}:{idBody} nd={ndSt}:{ndBody}")
 
+  -- Verify `GET /api/remote-nodes` includes static fleet nodes, flattened heartbeat fields,
+  -- `enabled: true`, `remote_launch.typed: true`, and persisted `node_state.json` cordons.
+  let .ok (mockHbFd, mockHbPort) ← tcpListen "127.0.0.1" 0 8
+    | return (← fail "tcpListen mockHbFd failed")
+  let hbTask ← IO.asTask (prio := .dedicated) do
+    for _ in [0:2] do
+      if let .ok cfd ← tcpAcceptPoll mockHbFd 3000 then
+        discard <| readCoreHttpRequestFromFd cfd 1000
+        let hbJson :=
+          "{\"version\":\"1.3.0-lean4\",\"protocol_version\":2,\"capacity_total\":10,\"capacity_available\":9," ++
+          "\"active_leases\":1,\"active_jobs\":1,\"queued_jobs\":0,\"cpu_total\":8," ++
+          "\"mem_total_bytes\":68719476736,\"mem_available_bytes\":51539607552," ++
+          "\"disk_total_bytes\":500000000000,\"disk_available_bytes\":400000000000," ++
+          "\"lean_runtime_ready\":true,\"labels\":[\"lean\",\"docker\",\"high-memory\"],\"cordoned\":false}"
+        let respBytes := encodeCoreHttpResponse (jsonResponse 200 hbJson)
+        discard <| writeAll cfd respBytes false
+        discard <| closeFd cfd
+    discard <| closeFd mockHbFd
+  IO.FS.writeFile (System.FilePath.mk s!"{dataRoot}/node_state.json") "{\"cordoned\":[\"sepolia\"]}\n"
+  OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES_ENABLED" "true"
+  OrbBin.PosixExt.setenvVar "SANDBOXED_PROXY_PUBLIC_URL" "https://orbrouter.thomas.md"
+  OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES"
+    s!"ashur=http://127.0.0.1:{mockHbPort}|ORB_TEST_ASHUR_TOK,sepolia=http://127.0.0.1:{mockHbPort}|ORB_TEST_SEPOLIA_TOK"
+  OrbBin.PosixExt.setenvVar "ORB_TEST_ASHUR_TOK" "tok-ashur-1"
+  OrbBin.PosixExt.setenvVar "ORB_TEST_SEPOLIA_TOK" "tok-sepolia-1"
+  let (rnSt, rnBody) ← sendJson "GET" "/api/remote-nodes" hsJwt ""
+  let (cordonSt, cordonBody) ← sendJson "POST" "/api/nodes/ashur/cordon" hsJwt "{}"
+  let (uncordonSt, uncordonBody) ← sendJson "POST" "/api/nodes/sepolia/uncordon" hsJwt "{}"
+  OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES_ENABLED"
+  OrbBin.PosixExt.unsetenvVar "SANDBOXED_PROXY_PUBLIC_URL"
+  OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES"
+  OrbBin.PosixExt.unsetenvVar "ORB_TEST_ASHUR_TOK"
+  OrbBin.PosixExt.unsetenvVar "ORB_TEST_SEPOLIA_TOK"
+  let _ := hbTask.get
+  let afterCordons ← OrbCore.RemoteFleetAndRelay.loadPersistedNodeCordons dataRoot
+  if rnSt != 200 ||
+     (rnBody.splitOn "\"enabled\":true").length < 2 ||
+     (rnBody.splitOn "\"typed\":true").length < 2 ||
+     (rnBody.splitOn "\"proxy_url_configured\":true").length < 2 ||
+     (rnBody.splitOn "\"id\":\"ashur\"").length < 2 ||
+     (rnBody.splitOn "\"high-memory\"").length < 2 ||
+     (rnBody.splitOn "\"cpu_total\":8").length < 2 ||
+     (rnBody.splitOn "\"core_colocated\":true").length < 2 ||
+     cordonSt != 200 || (cordonBody.splitOn "\"changed\":true").length < 2 ||
+     uncordonSt != 200 || (uncordonBody.splitOn "\"changed\":true").length < 2 ||
+     !afterCordons.contains "ashur" || afterCordons.contains "sepolia" then
+    return (← fail s!"GET /api/remote-nodes or static cordon persistence failed: rn={rnSt}:{rnBody} cordon={cordonSt}:{cordonBody} after={afterCordons}")
+
   closeManagedComputeStore mStore
   closeCoreStore store
   cleanup
@@ -5751,9 +5799,15 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     return 1
 
   -- 2. Service-scoped VM prefix & deploy unit confinement (including path traversal rejection)
-  if sandboxNamePrefixFor "/usr/local/bin/sandboxed-sh" != "orb-managed-" ||
+  if sandboxNamePrefixFor "/usr/local/bin/orb-core" != "orb-managed-" ||
+     sandboxNamePrefixFor "/usr/local/bin/orb-core-prod" != "orb-managed-" ||
+     sandboxNamePrefixFor "/usr/local/bin/orb-core-dev" != "orb-managed-dev-" ||
+     sandboxNamePrefixFor "/usr/local/bin/sandboxed-sh" != "orb-managed-" ||
      sandboxNamePrefixFor "/usr/local/bin/sandboxed-sh-prod" != "orb-managed-" ||
      sandboxNamePrefixFor "/usr/local/bin/sandboxed-sh-dev" != "orb-managed-dev-" ||
+     !exceptStrEq (validateDeployServiceUnit "orb-core") (.ok "sandboxed-sh.service") ||
+     !exceptStrEq (validateDeployServiceUnit "orb-core-prod") (.ok "sandboxed-sh-prod.service") ||
+     !exceptStrEq (validateDeployServiceUnit "orb-core-dev") (.ok "sandboxed-sh-dev.service") ||
      !exceptStrEq (validateDeployServiceUnit "sandboxed-sh-prod") (.ok "sandboxed-sh-prod.service") ||
      !exceptStrEq (validateDeployServiceUnit "sandboxed-sh-dev") (.ok "sandboxed-sh-dev.service") ||
      deployUnitIsProd "sandboxed-sh-prod.service" != true ||

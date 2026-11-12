@@ -40,8 +40,12 @@ def mint_hs256_jwt(secret, subject="admin", ttl_secs=300):
     return f"{hdr}.{pay}.{sig}"
 
 
-def discover_local_core_auth(service_binary="/usr/local/bin/sandboxed-sh-prod", default_port="3000"):
-    pid = subprocess.check_output(["pgrep", "-f", service_binary], text=True).split()[0]
+def discover_local_core_auth(service_binary="/usr/local/bin/orb-core", default_port="3000"):
+    out = subprocess.run(["pgrep", "-f", service_binary], text=True, capture_output=True)
+    pids = out.stdout.split()
+    if not pids and service_binary == "/usr/local/bin/orb-core":
+        pids = subprocess.check_output(["pgrep", "-f", "/usr/local/bin/sandboxed-sh-prod"], text=True).split()
+    pid = pids[0]
     jwt_secret = None
     port = default_port
     for raw in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):

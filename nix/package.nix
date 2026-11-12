@@ -102,7 +102,7 @@
     else callPackage ./turbo-lean.nix {inherit leanToolchain;};
 in
   stdenv.mkDerivation {
-    pname = "sandboxed-sh";
+    pname = "orb-core";
     inherit (orbPackageJson) version;
 
     src = lib.fileset.toSource {
@@ -211,10 +211,14 @@ in
 
       mkdir -p "$out/bin"
       for f in "$TMPDIR/orb-bins"/*; do
-        install -m 0755 "$f" "$out/bin/"
-        ${lib.optionalString stdenv.hostPlatform.isLinux ''
-          patchelf --add-rpath "${lib.makeLibraryPath [openssl sqlite]}" "$out/bin/$(basename "$f")"
-        ''}
+        if [ -L "$f" ]; then
+          cp -P "$f" "$out/bin/$(basename "$f")"
+        else
+          install -m 0755 "$f" "$out/bin/"
+          ${lib.optionalString stdenv.hostPlatform.isLinux ''
+            patchelf --add-rpath "${lib.makeLibraryPath [openssl sqlite]}" "$out/bin/$(basename "$f")"
+          ''}
+        fi
       done
 
       runHook postInstall
@@ -228,7 +232,7 @@ in
     meta = {
       description = "Self-hosted orchestrator for AI coding agents";
       homepage = "https://orb.thomas.md";
-      mainProgram = "sandboxed-sh";
+      mainProgram = "orb-core";
       platforms = lib.platforms.linux ++ lib.platforms.darwin;
     };
   }

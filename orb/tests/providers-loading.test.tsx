@@ -4,8 +4,17 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { Providers } from '../src/Providers';
 import { ProvidersPageSkeleton } from '../src/ProvidersSkeleton';
 import { clearConnection, peekCachedProviders, setConnection } from '../src/api';
+import { resetNetworkHealth } from '../src/networkHealth';
 import { cachePut, cacheReset } from '../src/pageCache';
-afterEach(() => { clearConnection(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+import { resetTransportSchedulerForTest, scheduleTransportRequest, transportSchedulerStats } from '../src/transportScheduler';
+afterEach(() => {
+  clearConnection();
+  cacheReset();
+  resetTransportSchedulerForTest();
+  resetNetworkHealth();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 const ok = (body: unknown) => new Response(JSON.stringify(body));
 it('replaces a failed initial load with a retry that can recover', async () => {
   setConnection('http://core.test', 'test');
@@ -156,4 +165,37 @@ it('hydrates persisted provider catalog on cold launch and wipes it on clearConn
   expect(peekCachedProviders()).toBeNull();
   setConnection('http://core.test', 'tok-a');
   expect(peekCachedProviders()).toBeNull();
+});
+it('bypasses a saturated P1 project-mission queue and keeps an inline Retry card if the toast is dismissed', async () => {
+  setConnection('http://core.test', 'tok-b');
+  const releaseP1: Array<() => void> = [];
+  // Saturate all P1 slots + backlog (simulating 20+ queued /api/control/missions?project=... reads).
+  for (let i = 0; i < 12; i++) {
+    void scheduleTransportRequest(
+      'p1',
+      null,
+      () => new Promise<void>((resolve) => releaseP1.push(resolve)),
+    );
+  }
+  expect(transportSchedulerStats().p1Queued).toBeGreaterThan(0);
+
+  let failFirst = true;
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/api/ai/providers')) {
+      if (failFirst) return new Response('Proxy busy', { status: 503 });
+      return ok([{ id: 'fast-p0', name: 'Foreground Claude', provider_type: 'anthropic', uses_oauth: true, status: { type: 'connected' } }]);
+    }
+    return ok([]);
+  }));
+
+  const ui = render(() => <Providers />);
+  // Even with P1 completely wedged, P0 `/api/ai/providers` dispatches immediately and surfaces an inline Retry card.
+  await waitFor(() => expect(ui.getByRole('button', { name: 'Retry' })).toBeTruthy());
+  failFirst = false;
+  fireEvent.click(ui.getByRole('button', { name: 'Retry' }));
+  await waitFor(() => expect(ui.getByText('Foreground Claude')).toBeTruthy());
+
+  for (const r of releaseP1) r();
+  ui.unmount();
 });

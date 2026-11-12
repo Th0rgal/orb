@@ -216,8 +216,8 @@ def observeDeploy (o : DeployObservation) : DeployObservation := o
 
 private def coreUnitAliasSameTier (a b : String) : Bool :=
   a == b ||
-  ((a == "sandboxed-sh.service" || a == "sandboxed-sh-prod.service" || a == "orb-core.service") &&
-   (b == "sandboxed-sh.service" || b == "sandboxed-sh-prod.service" || b == "orb-core.service")) ||
+  ((a == "sandboxed-sh.service" || a == "sandboxed-sh-prod.service" || a == "orb-core.service" || a == "orb-core-prod.service") &&
+   (b == "sandboxed-sh.service" || b == "sandboxed-sh-prod.service" || b == "orb-core.service" || b == "orb-core-prod.service")) ||
   ((a == "sandboxed-sh-dev.service" || a == "orb-core-dev.service") &&
    (b == "sandboxed-sh-dev.service" || b == "orb-core-dev.service"))
 

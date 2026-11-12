@@ -443,12 +443,12 @@ partial def acceptMuxLoop (stRef : IO.Ref LocaldState) (rpcFd : Fd) (proxyFds : 
   if (← OrbBin.PosixExt.pollTermTrap) != 0 then
     discard <| closeFd rpcFd
     for pfd in proxyFds do discard <| closeFd pfd
-    return 0
+    IO.Process.exit 0
   if tick ≥ 8 then
     if (← shouldExitForDeadParent parentPid? stRef) then
       discard <| closeFd rpcFd
       for pfd in proxyFds do discard <| closeFd pfd
-      return 0
+      IO.Process.exit 0
   let nextTick := if tick ≥ 8 then 0 else tick + 1
   let allFds := #[rpcFd] ++ proxyFds
   match ← pollFdSet allFds 250 0 with

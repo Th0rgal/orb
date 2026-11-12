@@ -21,10 +21,14 @@ open OrbCore.Spec
 open OrbCore.Store
 
 /-- Service-scoped VM name prefix (`"orb-managed-"` on production or unsuffixed binaries,
-    `"orb-managed-<suffix>-"` on `sandboxed-sh-<suffix>` so non-prod instances never reap prod VMs). -/
+    `"orb-managed-<suffix>-"` on `orb-core-<suffix>` / `sandboxed-sh-<suffix>` so non-prod instances never reap prod VMs). -/
 def sandboxNamePrefixFor (exeName : String) : String :=
   let base := ((exeName.splitOn "/").getLast?).getD exeName
-  if base.startsWith "sandboxed-sh-" then
+  if base.startsWith "orb-core-" then
+    let suffix := (base.drop 9).toString
+    if suffix.isEmpty || suffix == "prod" then "orb-managed-"
+    else s!"orb-managed-{suffix}-"
+  else if base.startsWith "sandboxed-sh-" then
     let suffix := (base.drop 13).toString
     if suffix.isEmpty || suffix == "prod" then "orb-managed-"
     else s!"orb-managed-{suffix}-"
@@ -149,7 +153,7 @@ def validateDeployServiceUnit (rawUnit : String) : Except String String :=
   let canonical := if leaf.endsWith ".service" then (leaf.dropEnd 8).toString else leaf
   let (unitCode, systemdUnit) : UInt8 × String :=
     if canonical == "sandboxed-sh" || canonical == "orb-core" then (1, "sandboxed-sh.service")
-    else if canonical == "sandboxed-sh-prod" then (1, "sandboxed-sh-prod.service")
+    else if canonical == "sandboxed-sh-prod" || canonical == "orb-core-prod" then (1, "sandboxed-sh-prod.service")
     else if canonical == "sandboxed-sh-dev" || canonical == "orb-core-dev" then (1, "sandboxed-sh-dev.service")
     else if canonical == "sandboxed-node" || canonical == "orb-node" then (2, "sandboxed-node.service")
     else if canonical == "orb-privd" then (3, "orb-privd.service")

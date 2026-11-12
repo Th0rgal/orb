@@ -600,7 +600,7 @@ export default function App() {
       if (vanished.length) {
         const slugs = [...new Set(vanished.map(m => m.project?.trim()).filter((s): s is string => !!s))];
         for (const slug of slugs) {
-          void listProjectMissions(slug)
+          void listProjectMissions(slug, { background: true })
             .then(rows => {
               const clean = rows.filter(m => !isMissionDeleting(m.id));
               setProjectMissions(cur => ({ ...cur, [slug]: clean }));

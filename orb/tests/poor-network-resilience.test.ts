@@ -7,6 +7,15 @@ import {
   setConnection,
 } from "../src/api";
 import {
+  forgetPrefetchPauses,
+  loadTranscript,
+  prefetchTranscript,
+  refreshTranscript,
+} from "../src/missionCache";
+import {
+  resetBackgroundSyncMonitorForTest,
+} from "../src/backgroundSync";
+import {
   currentLinkBudget,
   networkHealthSnapshot,
   recordTransportFailure,
@@ -34,6 +43,8 @@ describe("poor-network resilience suite", () => {
   beforeEach(async () => {
     resetTransportState();
     resetTransportSchedulerForTest();
+    resetBackgroundSyncMonitorForTest();
+    forgetPrefetchPauses();
     resetNetworkHealth();
     await clearPersistentCache();
     setMultiplexSyncEnabledForTest(false);
@@ -43,7 +54,9 @@ describe("poor-network resilience suite", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     setMultiplexSyncEnabledForTest(false);
+    forgetPrefetchPauses();
     resetTransportSchedulerForTest();
+    resetBackgroundSyncMonitorForTest();
     resetNetworkHealth();
     await clearPersistentCache();
   });
@@ -299,7 +312,6 @@ describe("poor-network resilience suite", () => {
 
   it("hydrates cached projects synchronously via peekCachedProjects and isolates P2 transcript prefetches from foreground P1 opens", async () => {
     const { listProjects, peekCachedProjects } = await import("../src/api");
-    const { forgetPrefetchPauses, loadTranscript, prefetchTranscript } = await import("../src/missionCache");
     setConnection("https://orbcore.thomas.md", "tok-prefetch");
     expect(peekCachedProjects()).toBeNull();
 
@@ -372,7 +384,6 @@ describe("poor-network resilience suite", () => {
   });
 
   it("promotes an already-started P2 prefetch to P1 when adopted after p2Cap drops to 0", async () => {
-    const { forgetPrefetchPauses, loadTranscript, prefetchTranscript, refreshTranscript } = await import("../src/missionCache");
     setConnection("https://orbcore.thomas.md", "tok-promote");
 
     // Fill all active P2 slots so the next prefetch enters `pumpPrefetch()` while `p2Cap > 0`

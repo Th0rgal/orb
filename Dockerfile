@@ -34,7 +34,7 @@ COPY shared/ shared/
 COPY catalog/ catalog/
 COPY scripts/ scripts/
 
-ARG LEAN_BINARIES="sandboxed-sh desktop-mcp workspace-mcp automation-manager-mcp sandboxed-mcp"
+ARG LEAN_BINARIES="orb-core desktop-mcp workspace-mcp automation-manager-mcp sandboxed-mcp"
 RUN mkdir -p /out \
     && ./scripts/build_orb_bins.sh --out-dir /out $(printf -- '--only %s ' $LEAN_BINARIES)
 

@@ -3,6 +3,8 @@ import { cleanup } from "@solidjs/testing-library";
 import { render } from "solid-js/web";
 import { Toaster, clearToasts } from "../src/toast";
 import { clearPersistentCache } from "../src/persistentCache";
+import { resetBackgroundSyncMonitorForTest } from "../src/backgroundSync";
+import { resetStorageCache } from "../src/storage";
 import { resetTransportSchedulerForTest } from "../src/transportScheduler";
 import { readFileSync } from "node:fs";
 import { webcrypto } from "node:crypto";
@@ -16,7 +18,7 @@ await initializeKernel(new Uint8Array(readFileSync("src/assets/orb_kernel.wasm")
 const toasterHost = document.createElement("div");
 document.body.append(toasterHost);
 render(() => Toaster(), toasterHost);
-afterEach(() => { cleanup(); clearToasts(); resetTransportSchedulerForTest(); void clearPersistentCache(); sessionStorage.clear(); localStorage.clear(); });
+afterEach(() => { cleanup(); clearToasts(); resetTransportSchedulerForTest(); void clearPersistentCache(); sessionStorage.clear(); localStorage.clear(); resetStorageCache(); resetBackgroundSyncMonitorForTest(); });
 
 // jsdom has no layout engine; geometry is exercised in browser tests.
 globalThis.ResizeObserver ??= class {observe(){} unobserve(){} disconnect(){}};

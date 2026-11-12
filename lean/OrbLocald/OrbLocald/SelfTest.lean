@@ -2179,6 +2179,70 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
       if (← assertTrue "native_chrome_folder_file_expand_and_1500_mission_scale" folderScaleOk) then
         ncPassed := ncPassed + 1
 
+      -- High-fanout regression (80 projects, 2,400 missions, parent chains & fork lineages) completes in <1500ms
+      let mut scaleProjects : Array JVal := #[]
+      let mut scaleProjMissions : Array (String × JVal) := #[]
+      for pIdx in [0:80] do
+        let slug := s!"proj-{pIdx}"
+        scaleProjects := scaleProjects.push (.obj #[
+          ("slug", .str slug),
+          ("name", .str s!"Project {pIdx}"),
+          ("folders", .arr #[.str "tracks/alpha", .str "tracks/beta"])
+        ])
+        let mut pMissions : Array JVal := #[]
+        for mIdx in [0:30] do
+          let mid := s!"m-{pIdx}-{mIdx}"
+          let parentJv : JVal :=
+            if mIdx == 0 then .null
+            else if mIdx % 5 != 0 then .str s!"m-{pIdx}-{mIdx - 1}"
+            else .null
+          let forkNotes : Array JVal :=
+            if mIdx % 7 == 3 && mIdx > 0 then #[.str s!"fork-of:m-{pIdx}-{mIdx - 1}"]
+            else #[]
+          let statusStr := if mIdx % 10 == 0 then "running" else "completed"
+          let ackBool := mIdx % 10 != 0 && mIdx % 3 == 1
+          let folderStr := if mIdx % 2 == 0 then "tracks/alpha" else ""
+          pMissions := pMissions.push (.obj #[
+            ("id", .str mid),
+            ("title", .str s!"Mission {pIdx}/{mIdx}"),
+            ("status", .str statusStr),
+            ("project", .str slug),
+            ("folder", .str folderStr),
+            ("parent_mission_id", parentJv),
+            ("notes", .arr forkNotes),
+            ("acknowledged", .bool ackBool),
+            ("updated_at", .str "2026-11-12T07:00:00Z")
+          ])
+        scaleProjMissions := scaleProjMissions.push (slug, .arr pMissions)
+      let scaleSync := .obj #[
+        ("scope", .str "scope:scale:80p-2400m"),
+        ("revision", .nat 1),
+        ("projects", .arr scaleProjects),
+        ("missions", .arr #[]),
+        ("completed_missions", .arr #[]),
+        ("project_missions", .obj scaleProjMissions)
+      ]
+      let tScale0 ← IO.monoMsNow
+      let scaleSyncRes ← dispatchRpcCommand ncRef "native_chrome_sync_state" scaleSync
+      let scaleRowsRes ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:scale:80p-2400m")])
+      let scaleFilterRes ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:scale:80p-2400m"), ("filter_query", .str "Mission 79/29")])
+      let scaleElapsedMs := (← IO.monoMsNow) - tScale0
+      ncTotal := ncTotal + 1
+      let scaleOk : Bool :=
+        scaleElapsedMs < 1500 &&
+        match scaleSyncRes, scaleRowsRes, scaleFilterRes with
+        | .ok sres, .ok rres, .ok fres =>
+          let rc := (sres.fieldNat? "row_count").getD 0
+          let rowsArr := (rres.fieldArr? "rows").getD #[]
+          let frowsArr := (fres.fieldArr? "rows").getD #[]
+          (sres.fieldBool? "applied") == some true &&
+          rc > 1000 &&
+          rowsArr.size == rc &&
+          frowsArr.any (fun r => r.fieldStr? "row_id" == some "m:m-79-29")
+        | _, _, _ => false
+      if (← assertTrue s!"native_chrome_80_projects_2400_missions_under_1500ms ({scaleElapsedMs}ms)" scaleOk) then
+        ncPassed := ncPassed + 1
+
   return (passed + e2ePassed + ncPassed, total + e2eTotal + ncTotal)
 
 def main : IO UInt32 := do

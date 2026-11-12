@@ -145,12 +145,19 @@ ALL_BINS=(
   "desktop-mcp"
   "automation-manager-mcp"
   "sandboxed-node"
-  "sandboxed-sh"
+  "orb-core"
   "orb-locald"
 )
 
 if [[ ${#ONLY_BINS[@]} -gt 0 ]]; then
-  BINS_TO_STAGE=("${ONLY_BINS[@]}")
+  BINS_TO_STAGE=()
+  for req_bin in "${ONLY_BINS[@]}"; do
+    if [[ "$req_bin" == "sandboxed-sh" ]]; then
+      BINS_TO_STAGE+=("orb-core")
+    else
+      BINS_TO_STAGE+=("$req_bin")
+    fi
+  done
 else
   BINS_TO_STAGE=("${ALL_BINS[@]}")
 fi
@@ -164,7 +171,7 @@ for bin in "${BINS_TO_STAGE[@]}"; do
     ORB_NODE_TARGETS+=("orb-node")
   elif [[ "$bin" == "orb-node-test" ]]; then
     ORB_NODE_TARGETS+=("orb-node-test")
-  elif [[ "$bin" == "sandboxed-sh" || "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" ]]; then
+  elif [[ "$bin" == "orb-core" || "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" ]]; then
     ORB_CORE_TARGETS+=("$bin")
   elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
     ORB_LOCALD_TARGETS+=("$bin")
@@ -273,7 +280,7 @@ for out_dir in "${OUT_DIRS[@]}"; do
   for bin in "${BINS_TO_STAGE[@]}"; do
     if [[ "$bin" == "sandboxed-node" || "$bin" == "orb-node-test" ]]; then
       src="$LAKE_NODE_BIN_DIR/$bin"
-    elif [[ "$bin" == "sandboxed-sh" || "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" ]]; then
+    elif [[ "$bin" == "orb-core" || "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" ]]; then
       src="$LAKE_CORE_BIN_DIR/$bin"
     elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
       src="$LAKE_LOCALD_BIN_DIR/$bin"
@@ -292,6 +299,9 @@ for out_dir in "${OUT_DIRS[@]}"; do
     install -m 0755 "$src" "$out_dir/$bin"
     if [[ "$(uname -s)" == "Linux" && -n "${LD_LIBRARY_PATH:-}" ]] && command -v patchelf >/dev/null 2>&1; then
       patchelf --add-rpath "${LD_LIBRARY_PATH}" "$out_dir/$bin" 2>/dev/null || true
+    fi
+    if [[ "$bin" == "orb-core" ]]; then
+      ln -sfn orb-core "$out_dir/sandboxed-sh"
     fi
   done
 done

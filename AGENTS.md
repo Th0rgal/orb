@@ -102,7 +102,7 @@ ships to testers:
 
 | Path | What it is |
 | --- | --- |
-| `lean/OrbCore/`, `lean/OrbNode/`, `lean/OrbLocald/`, `lean/OrbBin/` | Native Lean 4 (`v4.35.0`) backend (`sandboxed-sh` API server, `sandboxed-node` remote runner, `orb-locald` desktop RPC/transport daemon, MCP & CLI binaries; zero Rust files remain in the repo) |
+| `lean/OrbCore/`, `lean/OrbNode/`, `lean/OrbLocald/`, `lean/OrbBin/` | Native Lean 4 (`v4.35.0`) backend (`orb-core` API server, `sandboxed-node` remote runner, `orb-locald` desktop RPC/transport daemon, MCP & CLI binaries; zero Rust files remain in the repo) |
 | `lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean`, `lean/LeanSys/` | Formal Lean 4 (`v4.35.0`) orchestration, proxy, mission lifecycle & cross-client projection kernel (`0 import Lean`, `0 sorryAx`, exports recorded in `shared/orb-spec/kernel_abi.json`, extracted to `shared/orb-spec/cabi/orb_kernel_unboxed.c` and `orb/src/assets/orb_kernel.wasm`) |
 | `orb/`, `macos_shell/`, `linux_shell/` | Orb desktop client: SolidJS + Vite in `orb/src`, native AppKit + `WKWebView` shell in `macos_shell/main.swift` (serving bundled `dist/` via `tauri://localhost` `WKURLSchemeHandler`), native GTK3 + WebKitGTK shell in `linux_shell/main.c`, and Lean 4 `orb-locald` |
 | `ios_dashboard/` | iOS app (SwiftUI, generated with XcodeGen from `project.yml`); the Orb UI lives in `SandboxedDashboard/Orb` |
