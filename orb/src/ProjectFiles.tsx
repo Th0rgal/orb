@@ -1,6 +1,6 @@
 import { deleteFileOptimistically, fileMoveKey, filesMovedAway, filesMovedInto, isFilePathPending, mergeArrivingMissions, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, upsertMissionPreservingOrder, waitForFilePathSettled, withMovedMissions } from "./moves";
 import { renameOptimistically } from "./renames";
-import { isArchivable, isReopenable, isRunning, isLive, isWorking, missionActivity, presentedStatus } from "./missionStatus";
+import { isArchivable, isReopenable, isRunning, isLive, isWorking, isSettledStatus, missionActivity, presentedStatus } from "./missionStatus";
 import { localRunActive } from "./localAgents";
 import { swallow } from "./log";
 import { useTooltip } from "./Tooltip";
@@ -179,7 +179,6 @@ export function LiveProjectsSection(p: {
   const [archiveMenu, setArchiveMenu] = createSignal<{ x: number; y: number; slug?: string } | null>(null);
   const [shareDialogMission, setShareDialogMission] = createSignal<Mission | null>(null);
   const isArchived = (mission: Mission) => mission.status === "acknowledged";
-  const LIVE = new Set(["active", "pending", "queued", "awaiting_user", "resuming", "running", "starting", "blocked", "paused", "waiting_background"]);
   const sharedWithMeMissions = createMemo(() =>
     (p.activityMissions ?? []).filter(
       m =>
@@ -2795,11 +2794,11 @@ export function LiveProjectsSection(p: {
     const deleting = () => d.mission ? deletingIds().has(d.mission.id) : false;
     const isMissionCut = () => !!d.mission && (!d.placeholder || !expanded[d.mission.project ?? ""]) && (d.mission.id === cutId() || pendingMoves().includes(d.mission.id) || isItemCut(row.id));
     const effectiveMissionStatus = () => d.mission ? rowEffectiveStatus(d.mission) : "";
-    const tipDetail = () => rowDetail(d.label, [d.mission && isArchived(d.mission) ? [projects().find(project => project.slug === d.slug)?.title || d.slug, missionFolder(d.mission)].filter(Boolean).join(" / ") : undefined, d.mission ? missionMachine(d.mission) : undefined, d.mission?.backend, d.mission?.model_override, d.mission?.id, d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(effectiveMissionStatus(), pendingMissionInteraction(d.mission.id)).label) : undefined]);
+    const tipDetail = () => rowDetail(d.label, [d.mission && isArchived(d.mission) ? [projects().find(project => project.slug === d.slug)?.title || d.slug, missionFolder(d.mission)].filter(Boolean).join(" / ") : undefined, d.mission ? missionMachine(d.mission) : undefined, d.mission?.backend, d.mission?.model_override, d.mission?.id, d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(effectiveMissionStatus(), pendingMissionInteraction(d.mission.id), d.mission.continuation).label) : undefined]);
     const tip = rowTip.bind(tipDetail());
     return <><button disabled={deleting()} aria-busy={deleting() ? true : undefined} aria-current={isSelectedRow(row.id) ? "page" : undefined} aria-expanded={d.launched || d.versions ? row.expanded : undefined}
       onKeyDown={e => { if (deleting()) return; if ((d.launched || d.versions) && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
-      aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(effectiveMissionStatus(), pendingMissionInteraction(d.mission.id)).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && pendingPlaceMoves().has(missionMoveKey(d.mission.id)) ? "mission-arriving" : ""} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && !LIVE.has(effectiveMissionStatus()) ? "done" : ""} ${isMissionCut() ? "mission-cut" : ""} ${rowDrag.isLifted(row.id) ? "drag-source" : ""} ${!deleting() && isRowActive(row.id) ? "active" : ""}`} {...tip}
+      aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(effectiveMissionStatus(), pendingMissionInteraction(d.mission.id), d.mission.continuation).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && pendingPlaceMoves().has(missionMoveKey(d.mission.id)) ? "mission-arriving" : ""} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && isSettledStatus(effectiveMissionStatus()) ? "done" : ""} ${isMissionCut() ? "mission-cut" : ""} ${rowDrag.isLifted(row.id) ? "drag-source" : ""} ${!deleting() && isRowActive(row.id) ? "active" : ""}`} {...tip}
       onPointerDown={e => { if (e.button === 0 && !deleting()) { if (d.mission) { cancelHoverTranscript(); prefetchTranscript(d.mission.id); } else { cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); } } }}
       onPointerEnter={e => { if (deleting()) return; if (rowDrag.phase() === 0) rowTip.bind(tipDetail()).onPointerEnter(e); if (d.mission) scheduleHoverTranscript(d.mission.id); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }}
       onPointerLeave={() => { tip.onPointerLeave(); if (d.mission) cancelHoverTranscript(); }}
@@ -2830,7 +2829,7 @@ export function LiveProjectsSection(p: {
             {m => (
               <button
                 type="button"
-                class={`row agent ${!LIVE.has(m.status) ? "done" : ""} ${isSelectedRow(`m:${m.id}`) ? "active" : ""}`}
+                class={`row agent ${isSettledStatus(presentedStatus(m)) ? "done" : ""} ${isSelectedRow(`m:${m.id}`) ? "active" : ""}`}
                 aria-current={isSelectedRow(`m:${m.id}`) ? "page" : undefined}
                 onPointerEnter={() => scheduleHoverTranscript(m.id)}
                 onPointerLeave={cancelHoverTranscript}

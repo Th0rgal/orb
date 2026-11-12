@@ -1,5 +1,3 @@
-import { api } from "./api";
-
 export interface Continuation {
   id: string;
   state: "scheduled" | "queued" | "error" | "waiting_for_client" | "pending_sync";
@@ -31,7 +29,9 @@ export function continuationLabel(summary: ContinuationSummary): string {
   return time ? `Wake-up scheduled for ${time}` : "Scheduled wake-up";
 }
 
-export function actOnContinuation(id: string, action: "resume" | "cancel") {
+export async function actOnContinuation(id: string, action: "resume" | "cancel") {
+  // Keep the presentation model usable by api.ts without an initialization cycle.
+  const { api } = await import("./api");
   return api(`/api/control/automations/${encodeURIComponent(id)}/action`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }),
   });

@@ -322,6 +322,7 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE missions ADD COLUMN folder TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN placement_revision INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE missions ADD COLUMN parent_mission_id TEXT;",
+  "CREATE INDEX IF NOT EXISTS idx_missions_parent ON missions(parent_mission_id);",
   "ALTER TABLE missions ADD COLUMN created_at TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN metadata_updated_at TEXT;",
   "ALTER TABLE missions ADD COLUMN short_description TEXT;",
@@ -2049,6 +2050,13 @@ def renderContinuationNextAtJson (triggerKind : String) (dueEpoch : UInt64) : St
   if triggerKind == "job" || dueEpoch == 0 then "null"
   else jsonEscape (formatEpochIso8601Utc dueEpoch)
 
+/-- Direct children executing, queued, waiting for background work, or holding an armed
+    continuation, independent of the list response's filters and pagination. Uses parent alias `m`. -/
+def liveChildrenCountSql : String :=
+  "(SELECT COUNT(*) FROM missions child WHERE child.parent_mission_id=m.id AND (" ++
+  "child.status IN ('active','running','starting','resuming','working','in_progress','processing','streaming','pending','queued','waiting_background') " ++
+  "OR EXISTS (SELECT 1 FROM mission_continuations cc WHERE cc.mission_id=child.id AND cc.phase=1)))"
+
 /-- Query filter options for `GET /api/control/missions` (`listMissionsJson`). -/
 structure MissionListFilter where
   limit?           : Option Nat := none
@@ -2205,7 +2213,8 @@ def listMissionsJson
     "COALESCE(m.origin,'') AS origin," ++
     "COALESCE(m.origin_session_id,'') AS origin_session_id," ++
     "COALESCE(m.agent,'') AS agent," ++
-    "COALESCE(m.resumable,0) AS resumable " ++
+    "COALESCE(m.resumable,0) AS resumable," ++
+    liveChildrenCountSql ++ " AS live_children_count " ++
     "FROM missions m LEFT JOIN mission_terminal_evidence e ON e.mission_id = m.id " ++
     whereClause ++
     tailClause
@@ -2354,6 +2363,7 @@ def listMissionsJson
           let originSessVal := r[40]?.getD ""
           let agentVal := r[41]?.getD ""
           let resumableBool := ((r[42]?.bind String.toNat?).getD 0) != 0
+          let liveChildrenCount := (r[43]?.bind String.toNat?).getD 0
           let projJson := if projSlug.isEmpty then "null" else jsonEscape projSlug
           let parentJson := if parentMid.isEmpty then "null" else jsonEscape parentMid
           let metaUpdJson := if metaUpdVal.isEmpty then "null" else jsonEscape metaUpdVal
@@ -2386,7 +2396,7 @@ def listMissionsJson
             s!"\{\"id\":{jsonEscape c0},\"title\":{jsonEscape c1},\"status\":{jsonEscape c2},\"backend\":{jsonEscape c3}," ++
             s!"\"model_override\":{jsonEscape c4},\"model_effort\":{jsonEscape c5},\"working_directory\":{jsonEscape c6}," ++
             s!"\"project\":{projJson},\"folder\":{jsonEscape folderVal},\"placement_revision\":{placeRev}," ++
-            s!"\"parent_mission_id\":{parentJson},\"created_at\":{jsonEscape createdAtVal},\"updated_at\":{jsonEscape c7}," ++
+            s!"\"parent_mission_id\":{parentJson},\"live_children_count\":{liveChildrenCount},\"created_at\":{jsonEscape createdAtVal},\"updated_at\":{jsonEscape c7}," ++
             s!"\"metadata_updated_at\":{metaUpdJson},\"short_description\":{shortDescJson},\"github_pr\":{jsonEscape ghPrVal}," ++
             s!"\"workspace_id\":{jsonEscape wsIdVal},\"workspace_name\":{wsNameJson},\"track\":{jsonEscape trackVal}," ++
             s!"\"origin\":{originJson},\"origin_session_id\":{originSessJson},\"agent\":{agentJson}," ++

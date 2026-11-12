@@ -74,6 +74,38 @@ const settle = (page: Page) => page.waitForTimeout(400);
 
 const P = "11111111-1111-4111-8111-111111111111";
 const parent = mission(P, "Orchestrator", 0);
+
+for (const theme of ["light", "dark"]) test(`ldgr status replay never shows done with pending work (${theme})`, async ({ page }) => {
+  const core = new Core();
+  let row = mission(P, "ldgr", 0, { status: "active" });
+  core.list = () => [row]; core.get = () => row;
+  await core.install(page);
+  await page.addInitScript(theme => localStorage.setItem("orb-theme", theme), theme);
+  await openProject(page);
+  const glyph = page.locator(`[data-tree-id="m:${P}"] .mission-glyph`).first();
+  await expect(glyph).toHaveAttribute("data-mission-status", "active");
+  const continuation = { count: 1, items: [{ id: "wake", state: "scheduled", trigger: "time", next_at: "2026-11-12T23:30:00Z" }] };
+  const replay: [Partial<Row>, string][] = [
+    [{ status: "completed", continuation, live_children_count: 1, remote_job: { phase: "finished", node_state: "succeeded", exit_code: 0 } }, "waiting_background"],
+    [{ live_children_count: 0 }, "awaiting_wakeup"],
+    [{ status: "awaiting_user", terminal_reason: "awaiting_wakeup" }, "awaiting_wakeup"],
+    [{ status: "completed", terminal_reason: "completed" }, "awaiting_wakeup"],
+  ];
+  for (const [event, expected] of replay) {
+    row = { ...row, ...event, updated_at: at(Number(row.updated_at === at(0) ? 1 : 2)) };
+    await poll(page);
+    await expect(glyph).toHaveAttribute("data-mission-status", expected);
+    await expect(glyph).not.toHaveClass(/success/);
+    await expect(page.locator(`[data-tree-id="m:${P}"]`).first()).not.toHaveClass(/\bdone\b/);
+  }
+  await glyph.focus(); await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog", { name: "Scheduled wake-ups" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  row = { ...row, continuation: null, updated_at: at(3) };
+  await poll(page);
+  await expect(glyph).toHaveAttribute("data-mission-status", "completed");
+  await expect(glyph).toHaveClass(/success/);
+});
 const kids = [1, 2, 3].map(i => mission(`c${i}`, `Worker ${i}`, 100 - i, { parent_mission_id: P }));
 
 test("a parent paged out of the list whose first fetch fails never lets its children reach the root", async ({ page }) => {

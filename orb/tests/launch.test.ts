@@ -23,6 +23,17 @@ describe("mission launch projection",()=>{
  it.each(["pending","resuming","interrupted","failed","completed"])("renders honest %s status without text",status=>{
   const phase=missionPhase(mission({status}),false);expect(phase.label).toBeTruthy();expect(phase.detail).toBeTruthy();expect(phase.moving).toBe(["pending","resuming"].includes(status));
  });
+ it.each(["completed","awaiting_user"])("presents pending wake-up instead of %s completion",status=>{
+  const m=mission({status,continuation:{count:1,items:[{id:"wake",state:"scheduled",trigger:"time",next_at:"2026-11-13T08:00:00Z"}]}});
+  const phase=missionPhase(m,true);
+  expect(phase.label).toContain("Wake-up scheduled for");
+  expect(phase).toMatchObject({moving:false});
+  expect(phase.detail).toContain("will resume");
+ });
+ it.each(["completed","awaiting_user","active"])("presents background work without startup animation after %s turn ends",status=>{
+  const m=mission({status,live_children_count:2,remote_job:{phase:"finished",node_state:"succeeded",exit_code:0}});
+  expect(missionPhase(m,true)).toMatchObject({label:"Background work running",moving:false});
+ });
  it("explains an older server that requires a remote command",()=>{
   expect(launchError(new ApiError(400,"remote_command is required when remote_node_id is set"))).toContain("does not support structured remote launches");
  });

@@ -6247,10 +6247,51 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let .ok () ← upsertMission store m1 | do closeCoreStore store; return 1
   let .ok missionsJson ← listMissionsJson store | do closeCoreStore store; return 1
   if (missionsJson.splitOn "\"total_cost_cents\":42").length != 2 ||
-     (missionsJson.splitOn "\"model_effort\":\"high\"").length != 2 then
+     (missionsJson.splitOn "\"model_effort\":\"high\"").length != 2 ||
+     (missionsJson.splitOn "\"live_children_count\":0").length != 2 then
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: listMissionsJson mismatch: {missionsJson}"
     return 1
+  -- Child evidence must survive list filtering/pagination and agree with detail.
+  let childStatuses := #["active", "running", "starting", "resuming", "working", "in_progress",
+    "processing", "streaming", "pending", "queued", "waiting_background", "awaiting_user",
+    "interrupted", "completed", "failed", "cancelled", "archived"]
+  for idx in [0:childStatuses.size] do
+    let .ok () ← upsertMission store { m1 with
+        id := s!"count-child-{idx}", status := childStatuses[idx]!, parentMissionId := "m-alpha",
+        updatedAt := "2020-01-01T00:00:00Z" }
+      | do closeCoreStore store; return 1
+  let .ok () ← upsertMission store { m1 with
+      id := "count-grandchild", status := "active", parentMissionId := "count-child-0",
+      updatedAt := "2020-01-01T00:00:00Z" }
+    | do closeCoreStore store; return 1
+  let .ok _ ← execParamQuery store.missionsDb
+      ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,request_id) VALUES " ++
+       "('count-armed','count-child-11',1,1,'first'),('count-armed-again','count-child-11',1,1,'second')," ++
+       "('count-cancelled','count-child-12',1,4,'cancelled');") #[]
+    | do closeCoreStore store; return 1
+  let .ok childCountList ← listMissionsJson store none none { status? := some "awaiting_user", limit? := some 1 }
+    | do closeCoreStore store; return 1
+  let .ok (some childCountDetail) ← missionDetailJson store "m-alpha"
+    | do closeCoreStore store; return 1
+  let .ok childCountListJ ← OrbBin.Json.parse childCountList
+    | do closeCoreStore store; return 1
+  let .ok childCountDetailJ ← OrbBin.Json.parse childCountDetail
+    | do closeCoreStore store; return 1
+  let countListOk := match childCountListJ with
+    | .arr rows => rows.size == 1 && rows[0]!.fieldStr? "id" == some "m-alpha" &&
+        rows[0]!.fieldNat? "live_children_count" == some 12
+    | _ => false
+  if !countListOk || childCountDetailJ.fieldNat? "live_children_count" != some 12 then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: authoritative live_children_count list/detail mismatch"
+    return 1
+  let .ok _ ← execParamQuery store.missionsDb
+      "DELETE FROM mission_continuations WHERE id LIKE 'count-%';" #[]
+    | do closeCoreStore store; return 1
+  let .ok _ ← execParamQuery store.missionsDb
+      "DELETE FROM missions WHERE id LIKE 'count-%';" #[]
+    | do closeCoreStore store; return 1
   let txReq : TransferRecord := {
     id := "tx-1", missionId := "m-alpha", requestKey := "rk-1", revision := 0,
     phase := "preparing", destination := "ashur",

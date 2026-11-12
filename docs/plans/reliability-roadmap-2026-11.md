@@ -45,7 +45,7 @@ Shipped today in this class: `resume_mission` honours `content` and `title`
 
 | # | Item | Owner | State | Done when |
 | --- | --- | --- | --- | --- |
-| C1 | Status colour: a mission that finished a turn but has a scheduled wakeup or live workers shows "waiting", not green "done" (seen on ldgr). Core already records `terminal_reason='awaiting_wakeup'`; the client ignores it | client mission | todo | Browser test: awaiting_wakeup row is not rendered as completed |
+| C1 | Status colour: turn end is not mission completion while a wakeup or child remains | client mission | done (client; Core field deployment pending) | Shared derivation/spec in `docs/ui/mission-status.md`; ldgr light/dark keyboard browser replay passes. One Core response field, `live_children_count`, added to list/detail for hidden children; Lean SelfTest added but not run |
 | C2 | Stale progress line ("Starting OpenCode on ashur… 7 h 20") clears when the job ends or the mission changes state | client mission | todo | Replay test of the event order |
 | C3 | Subscriptions panel shows "Unknown" | parity mission (server) + client mission | wip | Panel shows real status on dev |
 | C4 | Sidebar: missions vanish or revert title after open/rename/move | fixed in Core (0ff162c2b, #1704, #1705) | done | Client replay test added |
