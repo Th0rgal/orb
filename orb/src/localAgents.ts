@@ -846,7 +846,7 @@ export interface LocalSkillsReport {
 export interface SyncSkillPayload {
   name: string;
   content: string;
-  files?: Array<{ rel: string; content: string }>;
+  files?: Array<{ rel: string; content: string; content_base64?: string }>;
   audience?: string[] | null;
   scope?: string | null;
 }

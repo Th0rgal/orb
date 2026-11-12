@@ -3336,7 +3336,7 @@ private def normalizeSkillBody (s : String) : String :=
 private structure CanonicalSkillEntry where
   name          : String
   content       : String
-  files         : Array (String × String)
+  files         : Array (String × ByteArray × Bool)
   copyDir?      : Option System.FilePath
   inLibrary     : Bool
   isIdentity    : Bool
@@ -3345,24 +3345,24 @@ private structure CanonicalSkillEntry where
   desiredLocal  : Bool
   deriving Inhabited
 
-private def sanitizedDesiredSkillFiles (entry : CanonicalSkillEntry) : Array (String × String) := Id.run do
-  let mut out : Array (String × String) := #[]
-  for (rawRel, rfContent) in entry.files do
+private def sanitizedDesiredSkillFiles (entry : CanonicalSkillEntry) : Array (String × ByteArray × Bool) := Id.run do
+  let mut out : Array (String × ByteArray × Bool) := #[]
+  for (rawRel, rfBytes, isBin) in entry.files do
     if let some cleanRel := isSafeRelSubpath rawRel then
       if !isSecretRelPath cleanRel && cleanRel != "SKILL.md" &&
          cleanRel != ".managed-by-orb-skills" && cleanRel != ".managed-by-agent-skills-repo" then
-        if let some idx := out.findIdx? (fun (r, _) => r == cleanRel) then
-          out := out.set! idx (cleanRel, rfContent)
+        if let some idx := out.findIdx? (fun (r, _, _) => r == cleanRel) then
+          out := out.set! idx (cleanRel, rfBytes, isBin)
         else
-          out := out.push (cleanRel, rfContent)
+          out := out.push (cleanRel, rfBytes, isBin)
   return out.qsort (fun a b => a.1 < b.1)
 
-private def shouldSetExecutableSkillFile (cleanRel content : String) : Bool :=
+private def shouldSetExecutableSkillFile (cleanRel : String) (rfBytes : ByteArray) : Bool :=
   cleanRel.startsWith "scripts/" ||
   cleanRel.startsWith "tools/" ||
   cleanRel.startsWith "bin/" ||
   cleanRel.endsWith ".sh" ||
-  content.startsWith "#!"
+  (rfBytes.size ≥ 2 && rfBytes.get! 0 == 0x23 && rfBytes.get! 1 == 0x21)
 
 private partial def collectInstalledRegularSkillRels
     (curDir : System.FilePath)
@@ -3399,18 +3399,24 @@ private def isInstalledSkillBundleSynced
   if entry.copyDir?.isSome then
     return true
   let wantFiles := sanitizedDesiredSkillFiles entry
-  for (cleanRel, rfContent) in wantFiles do
+  for (cleanRel, rfBytes, isBin) in wantFiles do
     let rfp := sdir / cleanRel
     let rst ← OrbBin.PosixExt.statPath rfp.toString
     if !rst.exists_ || !rst.isReg || rst.isSymlink then
       return false
-    let diskTxt ← try IO.FS.readFile rfp catch _ => pure ""
-    if normalizeSkillBody diskTxt != normalizeSkillBody rfContent then
-      return false
+    let .ok diskBytes ← (IO.FS.readBinFile rfp).toBaseIO
+      | return false
+    if diskBytes != rfBytes then
+      if isBin then
+        return false
+      match String.fromUTF8? diskBytes, String.fromUTF8? rfBytes with
+      | some dt, some wt =>
+        if normalizeSkillBody dt != normalizeSkillBody wt then return false
+      | _, _ => return false
   if isManaged then
     let installedRels ← collectInstalledRegularSkillRels sdir "" 0
     for rel in installedRels do
-      if !(wantFiles.any (fun (wRel, _) => wRel == rel)) then
+      if !(wantFiles.any (fun (wRel, _, _) => wRel == rel)) then
         return false
   return true
 
@@ -3452,11 +3458,11 @@ private def installSkillEntryAtomic (gdir : System.FilePath) (entry : CanonicalS
               discard <| OrbBin.PosixExt.chmod dstFp.toString 0o755
     else
       IO.FS.writeFile (stageDir / "SKILL.md") entry.content
-      for (cleanRel, rfContent) in sanitizedDesiredSkillFiles entry do
+      for (cleanRel, rfBytes, _) in sanitizedDesiredSkillFiles entry do
         let rfp := stageDir / cleanRel
         if let some rp := rfp.parent then IO.FS.createDirAll rp
-        IO.FS.writeFile rfp rfContent
-        if shouldSetExecutableSkillFile cleanRel rfContent then
+        IO.FS.writeBinFile rfp rfBytes
+        if shouldSetExecutableSkillFile cleanRel rfBytes then
           discard <| OrbBin.PosixExt.chmod rfp.toString 0o755
     IO.FS.writeFile (stageDir / ".managed-by-orb-skills") "managed-by-orb-skills\n"
     let sdirSt ← OrbBin.PosixExt.statPath sdir.toString
@@ -3496,7 +3502,13 @@ private def buildCanonicalSkillCatalog (homeFp : System.FilePath) (libSkills : A
         let aud := effectiveSkillAudience explicitAud? content
         let files := ((item.fieldArr? "files").getD #[]).filterMap fun rf => do
           let rel ← rf.fieldStr? "rel"
-          return (rel, (rf.fieldStr? "content").getD "")
+          match rf.fieldStr? "content_base64" with
+          | some b64 =>
+            let raw ← OrbBin.PosixExt.base64Decode? b64.trimAscii.toString
+            return (rel, raw, true)
+          | none =>
+            let txt := (rf.fieldStr? "content").getD ""
+            return (rel, txt.toUTF8, false)
         let entry : CanonicalSkillEntry := {
           name := name
           content := content
@@ -3981,6 +3993,32 @@ private def buildLocalSkillsReport
     let desc? := extractSkillDescription entry.content
     let prev := (entry.content.take 4000).toString
     discoveredMap := discoveredMap.push (entry.name, desc?, #[], false, some prev, #[], none, false)
+  let mut staleAgentsManaged : Array String := #[]
+  if libraryKnown then
+    let agentsDir := homeFp / ".agents" / "skills"
+    let agentsSt ← OrbBin.PosixExt.statPath agentsDir.toString
+    if agentsSt.exists_ && agentsSt.isDir && !agentsSt.isSymlink then
+      let agentsEntries ← try agentsDir.readDir catch _ => pure #[]
+      for ent in agentsEntries do
+        let sname := ent.fileName
+        if !sname.startsWith "." && validSkillIdentifier sname && !(desiredEntries.any (·.name == sname)) then
+          let entSt ← OrbBin.PosixExt.statPath ent.path.toString
+          if entSt.exists_ && entSt.isDir && !entSt.isSymlink then
+            if (← isManagedSkillDir ent.path) then
+              if !(staleAgentsManaged.contains sname) then
+                staleAgentsManaged := staleAgentsManaged.push sname
+              let md := ent.path / "SKILL.md"
+              let mst ← OrbBin.PosixExt.statPath md.toString
+              let content ← if mst.exists_ && mst.isReg && !mst.isSymlink then (try IO.FS.readFile md catch _ => pure "") else pure ""
+              let desc? := extractSkillDescription content
+              let preview? := if content.isEmpty then none else some (content.take 4000).toString
+              let catEntry? := catalog.find? (fun e => e.name == sname)
+              let removedHere := !(catEntry?.map (·.inLibrary) |>.getD false) && sname != "development-identity"
+              if let some idx := discoveredMap.findIdx? (fun (dn, _, _, _, _, _, _, _) => dn == sname) then
+                let (dn, dd, dhs, _dm, dp, dstale, dedit, drem) := discoveredMap[idx]!
+                discoveredMap := discoveredMap.set! idx (dn, dd.orElse (fun _ => desc?), dhs, true, dp.orElse (fun _ => preview?), dstale, dedit, drem || removedHere)
+              else
+                discoveredMap := discoveredMap.push (sname, desc?, #[], true, preview?, #[], none, removedHere)
   for (hid, hname) in skillHarnessDisplayNames do
     if let some (globalRel, projectRel) := harnessSkillTargets hid then
       let gdir := homeFp / globalRel
@@ -3991,6 +4029,10 @@ private def buildLocalSkillsReport
       let mut presentNames : Array String := #[]
       let mut outdated : Array String := #[]
       let mut staleManaged : Array String := #[]
+      if libraryKnown && projectRel == ".agents/skills" then
+        for sn in staleAgentsManaged do
+          if !(staleManaged.contains sn) then
+            staleManaged := staleManaged.push sn
       for ent in entries do
         let sname := ent.fileName
         if !sname.startsWith "." && validSkillIdentifier sname then

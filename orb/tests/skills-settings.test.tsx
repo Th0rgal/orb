@@ -750,4 +750,74 @@ describe("SkillsSettings", () => {
       library_skills: [{ name: "orb-basics" }],
     });
   });
+
+  it("transfers binary companion files as base64 without UTF-8 corruption and keeps out-of-line references in status payloads", async () => {
+    setConnection("https://orbcore.thomas.md", "test-jwt");
+    const statusCalls: any[] = [];
+    const syncCalls: any[] = [];
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
+
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string, args?: any) => {
+          if (cmd === "local_skills_status") {
+            statusCalls.push(args.request);
+            return sampleLocalReport(false);
+          }
+          if (cmd === "local_skills_sync") {
+            syncCalls.push(args.request);
+            return {
+              synced_skills: 1,
+              harnesses_updated: 2,
+              skipped_unmanaged: [],
+              pruned: [],
+              report: sampleLocalReport(true),
+            };
+          }
+          return null;
+        },
+      },
+    };
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.endsWith("/api/library/skill?include=bundle")) {
+        return ok([
+          {
+            name: "visual-skill",
+            path: "skill/visual-skill",
+            audience: ["mission", "local"],
+            scope: "on-demand",
+            content: "---\nname: visual-skill\n---\n# Visual\n",
+            files: [],
+            references: ["assets/logo.png", "references/large-guide.md"],
+          },
+        ]);
+      }
+      if (url.endsWith("/api/library/skill/visual-skill/files/assets/logo.png")) {
+        return new Response(pngBytes, { status: 200, headers: { "Content-Type": "application/octet-stream" } });
+      }
+      if (url.endsWith("/api/library/skill/visual-skill/files/references/large-guide.md")) {
+        return new Response("# Large Guide\n", { status: 200, headers: { "Content-Type": "text/plain" } });
+      }
+      return ok({});
+    });
+
+    const res = await syncConnectedLibraryToLocalHarnesses({
+      onlyIfNeeded: true,
+      pruneRemoved: true,
+      skipMcpMint: true,
+    });
+    expect(res?.harnesses_updated).toBe(2);
+    const expectedBase64 = btoa(String.fromCharCode(...pngBytes));
+    expect(statusCalls[0].library_skills[0].files).toEqual([
+      { rel: "assets/logo.png", content: "", content_base64: expectedBase64 },
+      { rel: "references/large-guide.md", content: "# Large Guide\n" },
+    ]);
+    expect(syncCalls[0].library_skills[0].files).toEqual([
+      { rel: "assets/logo.png", content: "", content_base64: expectedBase64 },
+      { rel: "references/large-guide.md", content: "# Large Guide\n" },
+    ]);
+  });
 });

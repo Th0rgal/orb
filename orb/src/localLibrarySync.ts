@@ -1,5 +1,6 @@
 import {
   api,
+  apiBytes,
   getApiUrl,
   isConnected,
   type LibrarySkill,
@@ -16,9 +17,36 @@ import {
 import { rememberSkillsReport } from "./skillCache";
 import {
   fetchLibrarySkill,
-  readSkillFile,
   rememberKnownSkillNames,
 } from "./skillsApi";
+
+const utf8Strict = new TextDecoder("utf-8", { fatal: true });
+
+function encodeBytesBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+async function readSkillCompanionFile(
+  skillName: string,
+  rel: string,
+): Promise<{ rel: string; content: string; content_base64?: string }> {
+  const enc = encodeURIComponent;
+  const bytes = await apiBytes(
+    `/api/library/skill/${enc(skillName)}/files/${rel.split("/").map(enc).join("/")}`,
+  );
+  if (!bytes.includes(0)) {
+    try {
+      return { rel, content: utf8Strict.decode(bytes) };
+    } catch {
+      /* Binary / non-UTF-8 companion file — transfer raw bytes as base64. */
+    }
+  }
+  return { rel, content: "", content_base64: encodeBytesBase64(bytes) };
+}
 
 const mcpMintDismissedFor = new Set<string>();
 const mcpMintFailedFor = new Map<string, string>();
@@ -169,10 +197,7 @@ export async function skillToSyncPayload(
     (r) => r && r !== "SKILL.md" && !inlineFiles.some((f) => f.rel === r),
   );
   const extraFiles = await Promise.all(
-    missingRefs.map(async (rel) => ({
-      rel,
-      content: await readSkillFile(skill.name, rel),
-    })),
+    missingRefs.map((rel) => readSkillCompanionFile(skill.name, rel)),
   );
   return {
     name: skill.name,

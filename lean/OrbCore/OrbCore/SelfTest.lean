@@ -6191,6 +6191,8 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
   IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/SKILL.md")
     "---\nname: orb-basics\ndescription: \"Orient an Orb agent to its environment.\"\nmetadata:\n  sandboxed:\n    audience: [mission, local]\n    scope: global\n---\n\n# Orb Basics\n\nFollow Core contracts.\n"
   IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/references/guide.md") "# Guide\nRead carefully.\n"
+  let hugeMd := "# Huge\n" ++ String.ofList (List.replicate 270000 'a') ++ "\n"
+  IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/references/huge.md") hugeMd
   IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/tools/helper.py") "#!/usr/bin/env python3\nprint('ok')\n"
   IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/proton-mail/SKILL.md")
     "---\nname: proton-mail\ndescription: \"Coordinator mail helper.\"\nmetadata:\n  sandboxed:\n    audience: [coordinator]\n    scope: on-demand\n---\n\n# Proton Mail\n"
@@ -6257,8 +6259,23 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
       | .error _ => return (101, "", "")
       | .ok resp => return (resp.status, resp.contentType, (String.fromUTF8? resp.body).getD "")
 
-  -- 1. Local-first Library (`commit` + local no-op `push` without `origin`), attaching a new remote via `remote add`,
-  --    rejecting option-injection git remote URLs, and switching to `bareRepo` via `force_reinitialize: true`
+  -- 1. Unreachable initial clone fails closed (`502`, never `200 []`), loopback host boundary rejects evil URLs,
+  --    existing non-git `library/` directory attaches remote cleanly BEFORE first `commit`, local no-op `push`,
+  --    and switching to `bareRepo` via `force_reinitialize: true`
+  let missingCloneRepo := s!"{workRoot}/nonexistent-remote.git"
+  let (setMissingSt, _, setMissingBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
+    s!"\{\"library_remote\":{jsonEscape missingCloneRepo}}"
+  let (failListSt, _, _) ← sendReq "GET" "/api/library/skill" hsJwt ""
+  let (failStatSt, _, _) ← sendReq "GET" "/api/library/status" hsJwt ""
+  let (clrRemSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":null}"
+  let (evilAtSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":\"http://localhost@evil.com/repo.git\"}"
+  let (evilSubSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":\"http://localhost.evil.com/repo.git\"}"
+  let (evilIpSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":\"http://127.0.0.1.evil.com/repo.git\"}"
+  if setMissingSt != 200 || (setMissingBody.splitOn "\"library_error\"").length < 2 ||
+     failListSt != 502 || failStatSt != 502 || clrRemSt != 200 ||
+     evilAtSt != 400 || evilSubSt != 400 || evilIpSt != 400 then
+    return (← fail s!"fail-closed clone or loopback host-boundary check failed: setMissing=({setMissingSt},{setMissingBody}) failList={failListSt} failStat={failStatSt} evil=({evilAtSt},{evilSubSt},{evilIpSt})")
+
   let freshBareRepo := s!"{workRoot}/fresh-bare.git"
   IO.FS.createDirAll (System.FilePath.mk freshBareRepo)
   let freshRc ← shRun s!"git init --bare '{freshBareRepo}'"
@@ -6266,17 +6283,25 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
     return (← fail s!"failed to init freshBareRepo (rc={freshRc})")
   let (putLocalSt, _, _) ← sendReq "PUT" "/api/library/skill/local-first" hsJwt
     "{\"content\":\"---\\nname: local-first\\ndescription: \\\"Local first\\\"\\n---\\n# Local\\n\"}"
+  -- Attach `freshBareRepo` while `library/` already exists on disk WITHOUT `.git` (before first `commit`)
+  let (attachPreGitSt, _, attachPreGitBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
+    s!"\{\"library_remote\":{jsonEscape freshBareRepo}}"
+  let (clrForNoopSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":null}"
+  let _ ← shRun s!"cd '{dataRoot}/library' && git remote remove origin"
   let (cmtLocalSt, _, _) ← sendReq "POST" "/api/library/commit" hsJwt "{\"message\":\"skill: local-first\"}"
   let (pushNoRemSt, _, pushNoRemBody) ← sendReq "POST" "/api/library/push" hsJwt ""
   let (attachRemSt, _, attachRemBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
     s!"\{\"library_remote\":{jsonEscape freshBareRepo}}"
   let (pushFreshSt, _, pushFreshBody) ← sendReq "POST" "/api/library/push" hsJwt ""
-  if putLocalSt != 200 || cmtLocalSt != 200 ||
+  if putLocalSt != 200 ||
+     attachPreGitSt != 200 || (attachPreGitBody.splitOn "\"library_reinitialized\":true").length != 2 ||
+     (attachPreGitBody.splitOn "\"library_error\"").length != 1 || clrForNoopSt != 200 ||
+     cmtLocalSt != 200 ||
      pushNoRemSt != 200 || (pushNoRemBody.splitOn "No remote configured").length != 2 ||
      attachRemSt != 200 || (attachRemBody.splitOn "\"library_reinitialized\":true").length != 2 ||
      (attachRemBody.splitOn "\"library_error\"").length != 1 ||
      pushFreshSt != 200 || (pushFreshBody.splitOn "Pushed successfully").length != 2 then
-    return (← fail s!"local-first library -> attach remote -> push failed: put={putLocalSt} cmt={cmtLocalSt} noRem=({pushNoRemSt},{pushNoRemBody}) attach=({attachRemSt},{attachRemBody}) pushFresh=({pushFreshSt},{pushFreshBody})")
+    return (← fail s!"local-first library -> attach remote -> push failed: put={putLocalSt} preGit=({attachPreGitSt},{attachPreGitBody}) cmt={cmtLocalSt} noRem=({pushNoRemSt},{pushNoRemBody}) attach=({attachRemSt},{attachRemBody}) pushFresh=({pushFreshSt},{pushFreshBody})")
 
   let (badRemSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":\"--upload-pack=/bin/false\"}"
   let (setRemSt, _, setRemBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
@@ -6289,11 +6314,12 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
      stCode != 200 || (stBody.splitOn "\"clean\":true").length != 2 then
     return (← fail s!"library-remote init/health/status mismatch: bad={badRemSt} set={setRemSt}:{setRemBody} hlth={hlthBody} st={stBody}")
 
-  -- 2. Canonical `skill/` catalog listing (`?include=bundle`), single-skill bundle, raw text reference read, and `SKILL.md` delete guard
+  -- 2. Canonical `skill/` catalog listing (`?include=bundle`), single-skill bundle, oversized `.md` in `references`, raw text reference read, and `SKILL.md` delete guard
   let (listSt, _, listBody) ← sendReq "GET" "/api/library/skill" hsJwt ""
   let (bundleSt, _, bundleBody) ← sendReq "GET" "/api/library/skill?include=bundle" hsJwt ""
   let (oneSt, _, oneBody) ← sendReq "GET" "/api/library/skill/orb-basics" hsJwt ""
   let (refSt, refCtype, refBody) ← sendReq "GET" "/api/library/skill/orb-basics/files/references/guide.md" hsJwt ""
+  let (hugeRefSt, _, hugeRefBody) ← sendReq "GET" "/api/library/skill/orb-basics/files/references/huge.md" hsJwt ""
   let (delMdSt, _, _) ← sendReq "DELETE" "/api/library/skill/orb-basics/files/SKILL.md" hsJwt ""
   let (delivSt, _, delivBody) ← sendReq "GET" "/api/library/skill-delivery" hsJwt ""
   if listSt != 200 ||
@@ -6301,15 +6327,17 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
      (listBody.splitOn "\"scope\":\"global\"").length != 2 ||
      bundleSt != 200 ||
      (bundleBody.splitOn "\"references/guide.md\"").length < 2 ||
+     (bundleBody.splitOn "\"references/huge.md\"").length < 2 ||
      (bundleBody.splitOn "\"tools/helper.py\"").length < 2 ||
      oneSt != 200 ||
-     (oneBody.splitOn "\"references\":[\"tools/helper.py\"]").length != 2 ||
+     (oneBody.splitOn "\"references\":[\"references/huge.md\",\"tools/helper.py\"]").length != 2 ||
      refSt != 200 || !(refCtype.startsWith "text/plain") || refBody != "# Guide\nRead carefully.\n" ||
+     hugeRefSt != 200 || hugeRefBody.length != hugeMd.length ||
      delMdSt != 400 ||
      delivSt != 200 ||
      (delivBody.splitOn "\"orb-basics\"").length != 2 ||
      (delivBody.splitOn "\"proton-mail\"").length != 1 then
-    return (← fail s!"skill catalog/files/delivery mismatch: list={listBody} one={oneBody} ref=({refSt},{refCtype},{refBody}) delMd={delMdSt} deliv={delivBody}")
+    return (← fail s!"skill catalog/files/delivery mismatch: list={listBody} one={oneBody} ref=({refSt},{refCtype},{refBody}) huge={hugeRefSt} delMd={delMdSt} deliv={delivBody}")
 
   -- 3. Update skill, commit, push, and inspect git history + revision content
   let updatedContent := "---\nname: orb-basics\ndescription: \"Updated description.\"\nmetadata:\n  sandboxed:\n    audience: [mission, local]\n    scope: global\n---\n\n# Orb Basics v2\n"

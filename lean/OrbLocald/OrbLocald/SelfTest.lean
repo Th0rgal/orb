@@ -939,6 +939,7 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
   IO.FS.createDirAll (invHome / ".agents" / "skills" / "demo-skill")
   IO.FS.writeFile (invHome / ".agents" / "skills" / "demo-skill" / "SKILL.md") "---\nname: demo-skill\n---\nKeep active.\n"
   IO.FS.writeFile (invHome / ".agents" / "skills" / "demo-skill" / ".managed-by-orb-skills") "managed-by-orb-skills\n"
+  let binLogoExpected := ByteArray.mk #[0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF]
   let libPayloadsWithBundle : Array JVal := #[
     .obj #[
       ("name", .str "demo-skill"),
@@ -947,7 +948,8 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
       ("scope", .str "on-demand"),
       ("files", .arr #[
         .obj #[("rel", .str "references/guide.md"), ("content", .str "# Guide\n")],
-        .obj #[("rel", .str "tools/helper.py"), ("content", .str "#!/usr/bin/env python3\nprint(1)\n")]
+        .obj #[("rel", .str "tools/helper.py"), ("content", .str "#!/usr/bin/env python3\nprint(1)\n")],
+        .obj #[("rel", .str "assets/logo.bin"), ("content", .str ""), ("content_base64", .str (OrbBin.PosixExt.base64Encode binLogoExpected))]
       ])
     ],
     .obj #[
@@ -956,7 +958,7 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
     ]
   ]
   let bundleDriftStatus ← dispatchRpcCommand stInv "local_skills_status" (.obj #[
-    ("request", .obj #[("library_skills", .arr libPayloadsWithBundle)])
+    ("request", .obj #[("library_skills", .arr libPayloadsWithBundle), ("library_loaded", .bool true)])
   ])
   let bundleSyncRes ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
     ("request", .obj #[
@@ -967,6 +969,8 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
   ])
   let agyGuideExists ← (invHome / ".gemini" / "config" / "skills" / "demo-skill" / "references" / "guide.md").pathExists
   let ocGuideExists ← (invHome / ".config" / "opencode" / "skills" / "demo-skill" / "references" / "guide.md").pathExists
+  let agyLogoBytes ← try IO.FS.readBinFile (invHome / ".gemini" / "config" / "skills" / "demo-skill" / "assets" / "logo.bin") catch _ => pure ByteArray.empty
+  let claudeLogoBytes ← try IO.FS.readBinFile (invHome / ".claude" / "skills" / "demo-skill" / "assets" / "logo.bin") catch _ => pure ByteArray.empty
   let claudeToolSt ← OrbBin.PosixExt.statPath (invHome / ".claude" / "skills" / "demo-skill" / "tools" / "helper.py").toString
   let retiredAgentsGone := !(← (invHome / ".agents" / "skills" / "retired-agents-skill").pathExists)
   let activeAgentsKept ← (invHome / ".agents" / "skills" / "demo-skill").pathExists
@@ -1016,7 +1020,12 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
       let oc? := hs.find? (fun h => h.fieldStr? "id" == some "opencode")
       let outdatedAgy := ((agy?.bind (·.fieldArr? "outdated_skills")).getD #[]).filterMap (·.asStr?)
       let outdatedOc := ((oc?.bind (·.fieldArr? "outdated_skills")).getD #[]).filterMap (·.asStr?)
-      outdatedAgy.contains "demo-skill" && outdatedOc.contains "demo-skill"
+      let staleAgy := ((agy?.bind (·.fieldArr? "stale_managed")).getD #[]).filterMap (·.asStr?)
+      let sks := (rep.fieldArr? "skills").getD #[]
+      let retiredDisc? := sks.find? (fun s => s.fieldStr? "name" == some "retired-agents-skill")
+      outdatedAgy.contains "demo-skill" && outdatedOc.contains "demo-skill" &&
+      staleAgy.contains "retired-agents-skill" &&
+      retiredDisc?.bind (·.fieldBool? "removed_from_library") == some true
     | _ => false
   let bundleSyncOk :=
     match bundleSyncRes, emptyPruneRes with
@@ -1028,6 +1037,7 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
       let agy1? := hs1.find? (fun h => h.fieldStr? "id" == some "antigravity")
       bundleDriftDetected &&
       agyGuideExists && ocGuideExists &&
+      agyLogoBytes == binLogoExpected && claudeLogoBytes == binLogoExpected &&
       claudeToolSt.exists_ && (claudeToolSt.mode &&& 0o111) != 0 &&
       agy1?.bind (·.fieldNat? "synced_count") == some 2 &&
       agy1?.bind (·.fieldNat? "skill_count") == some 2 &&

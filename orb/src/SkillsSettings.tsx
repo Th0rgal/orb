@@ -33,11 +33,11 @@ import {
   type SkillSourceRef,
   type SyncSkillPayload,
 } from "./localAgents";
-import { localSkillsStatus, localSkillsSync } from "./localLibrarySync";
+import { localSkillsStatus, localSkillsSync, skillToSyncPayload } from "./localLibrarySync";
 import { refreshSoftware, softwareMachines } from "./softwareInventory";
 import { effectiveAudience, newSkillTemplate, normalizeSkillName, parseSkillMeta, setSandboxedMeta } from "./skillModel";
 import { SKILL_BADGE_LABEL, buildSkillRows, isOldCopy, needsAttention, skillBadge, type ProjectContextSkill, type SkillRow } from "./skillRows";
-import { commitAndPush, deleteLibrarySkill, fetchLibrarySkill, forcePushLibrary, forceSyncLibrary, getLibraryStatus, isDivergedLibraryError, needsLibraryRemoteInit, putLibrarySkill, putSkillFile, readSkillFile, repoLabel, sameLibraryRemote, syncLibrary, updateLibraryRemote, type LibraryStatus } from "./skillsApi";
+import { commitAndPush, deleteLibrarySkill, fetchLibrarySkill, forcePushLibrary, forceSyncLibrary, getLibraryStatus, isDivergedLibraryError, needsLibraryRemoteInit, putLibrarySkill, putSkillFile, repoLabel, sameLibraryRemote, syncLibrary, updateLibraryRemote, type LibraryStatus } from "./skillsApi";
 import { orbRelativeTimeString } from "./orbKernel";
 import { cachedSkillsReport, rememberSkillsReport } from "./skillCache";
 import { deleteMessage, dropsSandboxedMetadata, middleTruncate } from "./SkillPage";
@@ -177,30 +177,21 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const [createError, setCreateError] = createSignal<string | null>(null);
 
 
-  const payloadFor = (skill: LibrarySkill, summary?: LibrarySkillSummary, extra: SyncSkillPayload["files"] = []): SyncSkillPayload => ({
-    name: skill.name,
-    content: skill.content,
-    files: [
-      ...(skill.files ?? []).filter((f) => (f.path || f.name) !== "SKILL.md").map((f) => ({ rel: f.path || f.name, content: f.content })),
-      ...(extra ?? []),
-    ],
-    audience: summary?.audience ?? null,
-    scope: summary?.scope ?? null,
-  });
+  const [libraryBundles, setLibraryBundles] = createSignal<Record<string, SyncSkillPayload>>({});
 
   const libraryPayloads = (): SyncSkillPayload[] | undefined => {
     if (!libraryLoaded()) return undefined;
-    const full = libraryFull();
-    return librarySkills().flatMap((s) => (full[s.name] ? [payloadFor(full[s.name], s)] : []));
+    const bundles = libraryBundles();
+    return librarySkills().flatMap((s) => (bundles[s.name] ? [bundles[s.name]] : []));
   };
 
   const libraryComplete = (): boolean => {
     if (!libraryLoaded()) return false;
-    const full = libraryFull();
-    return librarySkills().every((s) => Boolean(full[s.name]));
+    const bundles = libraryBundles();
+    return librarySkills().every((s) => Boolean(bundles[s.name]));
   };
 
-  /** Fetch every Library skill body; the Library is the canonical source for local sync. */
+  /** Fetch every Library skill body and companion bundle; the Library is the canonical source for local sync. */
   // Rows render from the Library index at once; bodies (needed for drift and
   // divergence) arrive in the background and land in one update.
   const loadLibrary = async (): Promise<{ bodies: Promise<void> }> => {
@@ -209,10 +200,27 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     setLibraryError(null);
     rememberKnownSkillNames(items.map((s) => s.name));
     const bodies = (async () => {
-      const fetched = await Promise.all(items.map((s) => fetchLibrarySkill(s.name).catch(() => null)));
+      const fetched = await Promise.all(
+        items.map(async (s) => {
+          try {
+            const skill = await fetchLibrarySkill(s.name);
+            const payload = await skillToSyncPayload(skill, s);
+            return { skill, payload };
+          } catch {
+            return null;
+          }
+        }),
+      );
       const map: Record<string, LibrarySkill> = {};
-      for (const skill of fetched) if (skill) map[skill.name] = skill;
+      const bundles: Record<string, SyncSkillPayload> = {};
+      for (const row of fetched) {
+        if (row) {
+          map[row.skill.name] = row.skill;
+          bundles[row.skill.name] = row.payload;
+        }
+      }
       setLibraryFull(map);
+      setLibraryBundles(bundles);
       setLibraryLoaded(true);
     })();
     // Wrapped: an async function returning a bare promise would wait for it.
@@ -248,6 +256,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
       } else {
         setLibrarySkills([]);
         setLibraryFull({});
+        setLibraryBundles({});
         setLibraryLoaded(false);
         setProjects([]);
         setProjectSkills([]);
@@ -463,27 +472,9 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     setSyncNotice(null);
     setSyncError(null);
     try {
-      const base = libraryPayloads() ?? [];
-      let refsComplete = true;
-      // Non-markdown reference files are not inlined in the skill body; fetch them for install.
-      const payloads = (
-        await Promise.all(
-          base.map(async (pl): Promise<SyncSkillPayload | null> => {
-            const refs = (libraryFull()[pl.name]?.references ?? []).filter((r) => !pl.files?.some((f) => f.rel === r));
-            if (!refs.length) return pl;
-            try {
-              const extra = await Promise.all(refs.map(async (rel) => ({ rel, content: await readSkillFile(pl.name, rel) })));
-              return { ...pl, files: [...(pl.files ?? []), ...extra] };
-            } catch {
-              refsComplete = false;
-              return null;
-            }
-          }),
-        )
-      ).filter((pl): pl is SyncSkillPayload => pl !== null);
-      const complete = libraryComplete() && refsComplete;
+      const complete = libraryComplete();
       const result = await localSkillsSync({
-        librarySkills: payloads,
+        librarySkills: libraryPayloads() ?? [],
         libraryLoaded: complete,
         pruneRemoved: prune && complete,
         replaceUnmanaged,
@@ -618,7 +609,10 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
       fetchLibrarySkill(name),
       needList ? listLibrarySkills() : Promise.resolve(null),
     ]);
+    const summary = (list ?? librarySkills()).find((s) => s.name === name);
+    const payload = await skillToSyncPayload(skill, summary);
     setLibraryFull((prev) => ({ ...prev, [name]: skill }));
+    setLibraryBundles((prev) => ({ ...prev, [name]: payload }));
     if (list) setLibrarySkills(list);
   };
 
@@ -639,8 +633,10 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     for (const f of files) await putSkillFile(name, f.rel, f.content);
     await commitAndPush(`skill: import ${name}`);
     const [list, skill] = await Promise.all([listLibrarySkills(), fetchLibrarySkill(name)]);
+    const payload = await skillToSyncPayload(skill, list.find((s) => s.name === name));
     setLibrarySkills(list);
     setLibraryFull((prev) => ({ ...prev, [name]: skill }));
+    setLibraryBundles((prev) => ({ ...prev, [name]: payload }));
     await syncNow(false, `Imported "${name}" from ${src.label} and saved it to the repo.`);
   };
 
@@ -658,6 +654,11 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     }
     setLibrarySkills((list) => list.filter((s) => s.name !== name));
     setLibraryFull((prev) => {
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
+    setLibraryBundles((prev) => {
       const next = { ...prev };
       delete next[name];
       return next;

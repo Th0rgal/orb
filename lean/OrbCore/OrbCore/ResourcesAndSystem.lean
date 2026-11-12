@@ -1024,6 +1024,18 @@ def buildSoftwareInventoryJson (hub : SystemRuntimeHub) (force : Bool) : IO JVal
 def resolveLibraryDir (workingDir storeRoot : String) : IO String :=
   OrbCore.Skills.resolveLibraryRoot workingDir storeRoot
 
+private def hasLoopbackHttpPrefix (u pfx : String) : Bool :=
+  if !u.startsWith pfx then false
+  else
+    let rest := (u.drop pfx.length).toString
+    if rest.startsWith "/" then true
+    else if rest.startsWith ":" then
+      let afterColon := (rest.drop 1).toString
+      let portDigits := String.ofList (afterColon.toList.takeWhile Char.isDigit)
+      let afterPort := (afterColon.drop portDigits.length).toString
+      !portDigits.isEmpty && afterPort.startsWith "/"
+    else false
+
 def isValidGitRemote (raw : String) : Bool := Id.run do
   let u := raw.trimAscii.toString
   if u.isEmpty || u.length > 1024 || u.startsWith "-" then
@@ -1032,8 +1044,8 @@ def isValidGitRemote (raw : String) : Bool := Id.run do
     if ch.toNat ≤ 0x20 || ch.toNat == 0x7F then
       return false
   return u.startsWith "https://" ||
-         u.startsWith "http://127.0.0.1" ||
-         u.startsWith "http://localhost" ||
+         hasLoopbackHttpPrefix u "http://127.0.0.1" ||
+         hasLoopbackHttpPrefix u "http://localhost" ||
          u.startsWith "ssh://" ||
          u.startsWith "git@" ||
          u.startsWith "file://" ||
@@ -1089,8 +1101,17 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
   if !isValidGitRemote rem then return .error "Invalid Library repository URL"
   let fp := System.FilePath.mk libDir
   let gitFp := fp / ".git"
-  if forceReinit && (← fp.pathExists) && !(← gitFp.pathExists) then
-    let _ ← runCmdCapture "rm" #["-rf", "--", libDir]
+  if (← fp.pathExists) && !(← gitFp.pathExists) then
+    let entries ← try fp.readDir catch _ => pure #[]
+    if forceReinit || entries.isEmpty then
+      let _ ← runCmdCapture "rm" #["-rf", "--", libDir]
+    else
+      let (rcInit, outInit) ← runGitCapture #["init", "-b", "main"] (some libDir)
+      if rcInit != 0 then
+        let (rcInit2, outInit2) ← runGitCapture #["init"] (some libDir)
+        if rcInit2 != 0 then
+          let msg := (if outInit2.trimAscii.isEmpty then outInit else outInit2).trimAscii.toString
+          return .error (if msg.isEmpty then "git init failed" else msg)
   if !(← fp.pathExists) then
     if let some parent := fp.parent then
       IO.FS.createDirAll parent
@@ -1107,7 +1128,7 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
         let _ ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
     return .ok true
   if !(← gitFp.pathExists) then
-    return .ok false
+    return .error "Library directory exists without a Git repository"
   let curRem? ← gitOriginUrl? libDir
   if !forceReinit && curRem? == some rem then
     return .ok false
@@ -1122,7 +1143,18 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
   if rcFetch != 0 then
     let msg := outFetch.trimAscii.toString
     return .error (if msg.isEmpty then "git fetch failed" else msg)
-  if forceReinit then
+  let (rcHead, _) ← runGitCapture #["rev-parse", "--verify", "--quiet", "HEAD"] (some libDir)
+  if rcHead != 0 then
+    if let some ref ← resolveRemoteTrackingRef libDir "main" then
+      let targetBr := if ref.startsWith "origin/" then (ref.drop 7).toString else "main"
+      let coArgs :=
+        if forceReinit then #["checkout", "-f", "-B", targetBr, "--track", ref]
+        else #["checkout", "-B", targetBr, "--track", ref]
+      let (rcCo, outCo) ← runGitCapture coArgs (some libDir)
+      if rcCo != 0 then
+        let msg := outCo.trimAscii.toString
+        return .error (if msg.isEmpty then "git checkout failed" else msg)
+  else if forceReinit then
     let (rcSt, stOut) ← runGitCapture #["status", "--porcelain"] (some libDir)
     if rcSt == 0 && stOut.trimAscii.isEmpty then
       let br ← gitCurrentBranch libDir
@@ -1213,17 +1245,19 @@ private partial def collectSkillCompanionFiles
             inlineFiles := inlineFiles ++ subInline
             refPaths := refPaths ++ subRefs
           else if st.isReg then
-            if !fname.toLower.endsWith ".md" then
-              refPaths := refPaths.push rel
+            let mut inlined := false
             let idSt ← statIdentity e.path.toString
             if idSt.size ≤ 262144 then
               if let .ok bytes ← (IO.FS.readBinFile e.path).toBaseIO then
                 let mut hasNul := false
-                for i in [0:Nat.min 4096 bytes.size] do
+                for i in [0:bytes.size] do
                   if bytes.get! i == 0 then hasNul := true
                 if !hasNul then
                   if let some txt := String.fromUTF8? bytes then
                     inlineFiles := inlineFiles.push (fname, rel, txt)
+                    inlined := true
+            if !inlined || !fname.toLower.endsWith ".md" then
+              refPaths := refPaths.push rel
   return (inlineFiles, refPaths)
 
 private def buildSkillSummaryJson (name prefixDir content : String) (includeBundle : Bool)
@@ -1332,8 +1366,9 @@ def handleLibraryRoute
   let gitFp := libFp / ".git"
 
   if method == "GET" && segs == ["api", "library", "status"] then
-    if !(← libFp.pathExists) && !effRemote.isEmpty then
-      discard <| ensureLibraryRepo libDir effRemote false
+    if !(← gitFp.pathExists) && !effRemote.isEmpty then
+      if let .error e ← ensureLibraryRepo libDir effRemote false then
+        return some (jsonErr 502 s!"Failed to initialize Library repository: {e}")
     return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
 
   if method == "POST" && segs == ["api", "library", "sync"] then
@@ -1450,8 +1485,9 @@ def handleLibraryRoute
     return some (200, "text/plain; charset=utf-8", "Pushed successfully".toUTF8)
 
   if method == "GET" && segs == ["api", "library", "skill"] then
-    if !(← libFp.pathExists) && !effRemote.isEmpty then
-      discard <| ensureLibraryRepo libDir effRemote false
+    if !(← gitFp.pathExists) && !effRemote.isEmpty then
+      if let .error e ← ensureLibraryRepo libDir effRemote false then
+        return some (jsonErr 502 s!"Failed to initialize Library repository: {e}")
     let includeBundle :=
       ((qParam? qMap "include").getD "") == "bundle" ||
       ((qParam? qMap "bundle").getD "") == "1"
