@@ -684,7 +684,8 @@ private def approveSinglePrivilegeRequest
   if let .error e ← upsertPrivilegeLease st lease then
     return .error (500, s!"\{\"error\":{jsonEscape e}}")
   let mut approvedNorm : JVal := .obj #[]
-  let nextReqs := reqs.map fun x =>
+  let mut nextReqs : Array JVal := #[]
+  for x in reqs do
     if (x.fieldStr? "id").getD "" == reqId then
       let upd := x
         |>.setField "state" (.str "approved")
@@ -697,8 +698,8 @@ private def approveSinglePrivilegeRequest
         |>.removeField "revoked_at"
       let norm := normalizePrivilegeRequestJVal upd #[(gid, false, expEpoch)] nowEpochSec nowIso
       approvedNorm := norm
-      norm
-    else x
+      nextReqs := nextReqs.push norm
+    else nextReqs := nextReqs.push x
   let audits := (doc.fieldArr? "audit").getD #[]
   let auditEntry := JVal.obj #[
     ("at", .str nowIso),
@@ -865,7 +866,8 @@ def mcpRevokePrivilegedAccess (st : CoreStore) (dataRoot : String) (idOrGrantId 
     else
       execParamQuery st.missionsDb "UPDATE privilege_leases SET revoked=1 WHERE grant_id=?1 AND mission_id=?2;" #[gid, missionId]
   let mut revokedOut? : Option JVal := none
-  let nextReqs := reqs.map fun r =>
+  let mut nextReqs : Array JVal := #[]
+  for r in reqs do
     if (r.fieldStr? "id").getD "" == idOrGrantId || (!gid.isEmpty && (r.fieldStr? "grant_id").getD "" == gid) then
       let upd := r
         |>.setField "state" (.str "revoked")
@@ -873,8 +875,8 @@ def mcpRevokePrivilegedAccess (st : CoreStore) (dataRoot : String) (idOrGrantId 
         |>.setField "revoked_at" (.str nowIso)
       let norm := normalizePrivilegeRequestJVal upd #[(gid, true, 0)] nowEpochSec nowIso
       revokedOut? := some norm
-      norm
-    else r
+      nextReqs := nextReqs.push norm
+    else nextReqs := nextReqs.push r
   if revokedOut?.isSome then
     discard <| writeDataJsonObj dataRoot "privilege_access.json" (doc.setField "requests" (.arr nextReqs))
   return revokedOut?
@@ -1208,7 +1210,8 @@ def dispatchSecretAndApprovalRoutes?
         ("expires_at_epoch", JVal.uint64 expEp)
       ]
       let mut approvedReq : JVal := .obj #[]
-      let nextReqs := reqs.map fun x =>
+      let mut nextReqs : Array JVal := #[]
+      for x in reqs do
         if (x.fieldStr? "id").getD "" == reqId then
           let upd := x
             |>.setField "state" (.str "approved")
@@ -1217,8 +1220,8 @@ def dispatchSecretAndApprovalRoutes?
             |>.setField "decided_at" (.str nowIso)
             |>.setField "expires_at" (.str expIso)
           approvedReq := upd
-          upd
-        else x
+          nextReqs := nextReqs.push upd
+        else nextReqs := nextReqs.push x
       discard <| writeDataJsonObj dataRoot "mission_access.json"
         ((doc.setField "requests" (.arr nextReqs)).setField "grants" (.arr (grants.push grant)))
       return okJson 200 (renderCompact ((approvedReq.setField "ok" (.bool true)).setField "grant" grant))
@@ -1229,15 +1232,16 @@ def dispatchSecretAndApprovalRoutes?
         else ((cleanPath.drop 20).dropEnd 7).toString
       let reqId := if stripped.startsWith "requests/" then (stripped.drop 9).toString else stripped
       let mut deniedReq? : Option JVal := none
-      let nextReqs := reqs.map fun x =>
+      let mut nextReqs : Array JVal := #[]
+      for x in reqs do
         if (x.fieldStr? "id").getD "" == reqId then
           let upd := x
             |>.setField "state" (.str "denied")
             |>.setField "status" (.str "denied")
             |>.setField "decided_at" (.str nowIso)
           deniedReq? := some upd
-          upd
-        else x
+          nextReqs := nextReqs.push upd
+        else nextReqs := nextReqs.push x
       discard <| writeDataJsonObj dataRoot "mission_access.json" (doc.setField "requests" (.arr nextReqs))
       return okJson 200 (renderCompact ((deniedReq?.getD (.obj #[])).setField "ok" (.bool true)))
     if method == "DELETE" && cleanPath.startsWith "/api/mission-access/" then
@@ -1338,7 +1342,8 @@ def dispatchSecretAndApprovalRoutes?
       if !(reqs.any (fun x => (x.fieldStr? "id").getD "" == reqId)) then
         return okJson 404 "{\"error\":\"request_not_found\"}"
       let mut deniedOut : JVal := .obj #[]
-      let nextReqs := reqs.map fun x =>
+      let mut nextReqs : Array JVal := #[]
+      for x in reqs do
         if (x.fieldStr? "id").getD "" == reqId then
           let upd := x
             |>.setField "state" (.str "denied")
@@ -1346,8 +1351,8 @@ def dispatchSecretAndApprovalRoutes?
             |>.setField "decided_at" (.str nowIso)
           let norm := normalizePrivilegeRequestJVal upd #[] nowEpochSec nowIso
           deniedOut := norm
-          norm
-        else x
+          nextReqs := nextReqs.push norm
+        else nextReqs := nextReqs.push x
       let audits := (doc.fieldArr? "audit").getD #[]
       let mid := (deniedOut.fieldStr? "requester_mission_id").getD ""
       let auditEntry := JVal.obj #[

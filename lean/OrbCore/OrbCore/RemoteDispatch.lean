@@ -1112,8 +1112,7 @@ partial def submitRemoteMissionTurn
     | none   => "admin"
   let unixUser? :=
     ownerUser?.bind fun u =>
-      let ux := u.unixUsername.trimAscii.toString
-      if ux.isEmpty then none else some ux
+      (u.unixUsername?.map (·.trimAscii.toString)).filter (!·.isEmpty)
   let leaseTok := signRemoteNodeLeaseToken nodeSecret spec.missionId leaseNodeId "job:submit" (nowSec + 900) (some jobId) spec.ownerUserId callerRole unixUser?
   let envObj : JVal := .obj (prep.envPairs.map fun (k, v) => (k, .str v))
   let authArr : JVal := .arr (prep.managedAuth.map JVal.str)
