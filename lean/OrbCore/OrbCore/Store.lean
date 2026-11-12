@@ -2301,7 +2301,12 @@ def listMissionsJson
           let c4 := r[4]?.getD ""
           let c5 := r[5]?.getD ""
           let c6 := r[6]?.getD ""
-          let c7 := r[7]?.getD ""
+          -- Some writers store `updated_at` as epoch seconds; clients order rows by
+          -- parsing it as ISO-8601, so an epoch reads as the oldest copy and a stale
+          -- one (e.g. with the pre-rename title) wins. Always emit ISO-8601.
+          let c7 := match (r[7]?.getD "").trimAscii.toString.toNat? with
+            | some ep => formatEpochIso8601Utc ep.toUInt64
+            | none => r[7]?.getD ""
           let total_cost_cents := (r[8]?.bind String.toNat?).getD 0
           let authMode := r[9]?.getD "writer"
           let placeKind := r[10]?.getD "managed"
