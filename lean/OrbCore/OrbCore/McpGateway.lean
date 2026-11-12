@@ -1049,7 +1049,13 @@ def dispatchMcpToolCall
     let secName := (args.fieldStr? "name").orElse (fun _ => args.fieldStr? "secret_name") |>.getD ""
     let reason := (args.fieldStr? "reason").getD ""
     if secName.isEmpty then return mcpErr "invalid_arguments" "missing secret name"
-    return mcpOk (← mcpSecretGet workingDir store.rootDir callerMid callerWorkDir callerProj secName reason nowEpochSec)
+    -- A caller whose mission runs on a managed machine is untrusted: allowlisted secrets only.
+    let callerOnManagedNode ←
+      if callerMid.isEmpty then pure false
+      else do
+        let node? ← resolveMissionRemoteNode? store mc? callerMid
+        pure ((node?.map (·.startsWith "managed-")).getD false)
+    return mcpOk (← mcpSecretGet workingDir store.rootDir callerMid callerProj secName reason callerOnManagedNode nowEpochSec)
 
   | "secret_request" | "secret_put" | "secret_delete" | "secret_move" =>
     let bwProj := (args.fieldStr? "bitwarden_project").orElse (fun _ => args.fieldStr? "project") |>.getD "unassigned"

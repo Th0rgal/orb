@@ -250,6 +250,27 @@ def mcpListMissionAccess (dataRoot callerMissionId : String) (nowEpochSec : UInt
 
 /-! ## MCP Secret Broker Tools (`secret_list`, `secret_get`, `secret_request`, `secret_put`, `secret_delete`, `secret_move`) -/
 
+/-- Cloud-compute provider credentials reserved for Core's managed-machine control plane. A mission
+    holding one could rent machines outside Core's ownership tracking, spend caps and reaper. -/
+def isCoreReservedComputeSecret (key : String) : Bool :=
+  #["BOAT_API_KEY", "LEANCI_API_KEY", "LEANCI_TOKEN", "BOOST_API_KEY", "BOOST_TOKEN",
+    "HETZNER_CLOUD_APIKEY", "HCLOUD_TOKEN", "SCALEWAY_SECRET_KEY", "SCALEWAY_KEY_ID",
+    "SCW_SECRET_KEY", "SCW_ACCESS_KEY", "VASTAI_API_KEY", "VAST_API_KEY", "RUNPOD_API_KEY",
+    "COLAB_API_TOKEN", "COLAB_API_DOTENV_PRIVATE_KEY"].contains key.trimAscii.toString.toUpper
+
+/-- The only secrets an untrusted managed machine may receive. -/
+def isAllowlistedManagedSecret (key : String) : Bool :=
+  #["GITHUB_TOKEN", "GH_TOKEN"].contains key.trimAscii.toString.toUpper
+
+/-- `Orb.Kernel.computeSecretGate` applied to `secret_get`: reserved compute keys are never delivered,
+    and a caller on a managed machine receives allowlisted secrets only. -/
+def admitsSecretDelivery (key : String) (callerOnManagedNode : Bool) : Bool :=
+  Orb.Kernel.computeSecretGate
+    (if isCoreReservedComputeSecret key then 1 else 0)
+    (if callerOnManagedNode then 1 else 0)
+    (if isAllowlistedManagedSecret key then 1 else 0)
+    0 == 257
+
 private def defaultBwProjectsForSlug (broker : JVal) (projectSlug : String) : Array String :=
   if projectSlug.isEmpty then #[]
   else
@@ -289,7 +310,8 @@ def mcpSecretList
       let key := (s.fieldStr? "key").getD ""
       let pid := (s.fieldStr? "projectId").getD ""
       let pname := ((projMap.find? (fun (k, _) => k == pid)).map Prod.snd).getD "unassigned"
-      let readable := missionHasBwProjectAccess broker missionId projectSlug pname pid nowEpochSec nowIso
+      let readable := !isCoreReservedComputeSecret key &&
+        missionHasBwProjectAccess broker missionId projectSlug pname pid nowEpochSec nowIso
       JVal.obj #[
         ("name", .str key),
         ("bitwarden_project", .str pname),
@@ -298,9 +320,15 @@ def mcpSecretList
     return .obj #[("configured", .bool true), ("secrets", .arr items)]
 
 def mcpSecretGet
-    (workingDir dataRoot missionId missionWorkDir projectSlug secretName reason : String)
+    (workingDir dataRoot missionId projectSlug secretName reason : String)
+    (callerOnManagedNode : Bool)
     (nowEpochSec : UInt64) : IO JVal := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
+  if !admitsSecretDelivery secretName callerOnManagedNode then
+    return .obj #[("status", .str "refused"), ("name", .str secretName),
+      ("error", .str (if isCoreReservedComputeSecret secretName
+        then "This credential is reserved to Core's managed-machine control plane; rent machines through spawn_managed_machine or start_mission instead."
+        else "This secret is not delivered to managed machines."))]
   let broker ← readSecretBrokerWithDefaults dataRoot
   let some bwsTok ← resolveBwsToken? workingDir dataRoot
     | return .obj #[("status", .str "error"), ("error", .str "Bitwarden Secrets Manager is not configured")]
@@ -337,23 +365,15 @@ def mcpSecretGet
   | .error e => return .obj #[("status", .str "error"), ("error", .str e)]
   | .ok fullJv =>
     let val := (fullJv.fieldStr? "value").getD ""
-    let baseDir := if missionWorkDir.trimAscii.isEmpty then s!"{dataRoot}/mission-secrets/{missionId}" else s!"{missionWorkDir}/.paloma/secrets"
-    discard <| ensurePrivateDir0700 (System.FilePath.mk baseDir)
-    let safeFile := String.ofList (secretName.toList.filter (fun c => c.isAlphanum || c == '_' || c == '-'))
-    let fileLeaf := if safeFile.isEmpty then "secret" else safeFile
-    let secretFile := System.FilePath.mk s!"{baseDir}/{fileLeaf}"
-    if let .error e ← writeAtomicPrivate0600 secretFile val.toUTF8 then
-      return .obj #[("status", .str "error"), ("error", .str e)]
-    let exportLine :=
-      if isSafeEnvIdent secretName then
-        s!"export {secretName}=\"$(cat {shellSingleQuote secretFile.toString})\""
-      else
-        s!"cat {shellSingleQuote secretFile.toString}"
+    let safeName := String.ofList (secretName.toList.filter (fun c => c.isAlphanum || c == '_' || c == '-'))
+    -- The value travels to the caller's MCP companion, which writes it to a private `0600` file beside
+    -- the harness and replaces `secret_delivery` with `path` / `export` before the model sees the
+    -- result. Core must not write the file itself: a remote mission cannot read Core's disk.
     return .obj #[
-      ("status", .str "ready"),
+      ("status", .str "granted"),
       ("name", .str secretName),
-      ("path", .str secretFile.toString),
-      ("export", .str exportLine)
+      ("project", if projectSlug.isEmpty then .null else .str projectSlug),
+      ("secret_delivery", .obj #[("name", .str (if safeName.isEmpty then "secret" else safeName)), ("value", .str val)])
     ]
 
 def mcpSecretQueueAction
