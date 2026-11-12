@@ -150,9 +150,15 @@ async function readRecordWithMigration<T>(key: string): Promise<T | undefined> {
   return legacy;
 }
 
+function isOversizedDraftError(err: unknown): boolean {
+  const msg = String((err as Error)?.message ?? err ?? "");
+  return /invalid ui_draft_put payload|exceeds.*limit|too large/i.test(msg);
+}
+
 async function writeRecordUnlocked<T>(key: string, value: T, expectedEpoch?: number): Promise<void> {
   if (expectedEpoch !== undefined && (writeEpochs.get(key) ?? 0) !== expectedEpoch) return;
   const invoke = activeLocaldDrafts();
+  let clearNativeAfterIdb = false;
   if (invoke && !hasNonJsonBinaryInstance(value)) {
     try {
       await invoke("ui_draft_put", {
@@ -164,17 +170,24 @@ async function writeRecordUnlocked<T>(key: string, value: T, expectedEpoch?: num
     } catch (err) {
       if (isUnsupportedDraftCommandError(err)) {
         unsupportedDraftInvoke = invoke;
+      } else if (isOversizedDraftError(err) && typeof indexedDB !== "undefined" && indexedDB) {
+        clearNativeAfterIdb = true;
       } else {
-        // Remove any older SQLite entry so the IndexedDB fallback cannot be shadowed on cold read.
-        await invoke("ui_draft_delete", { key }).catch(() => undefined);
+        throw err;
       }
-      // Fall through to IndexedDB on binary/oversized payload or older daemon.
     }
   } else if (invoke) {
-    await invoke("ui_draft_delete", { key }).catch(() => undefined);
+    if (typeof indexedDB === "undefined" || !indexedDB) {
+      throw new Error("IndexedDB unavailable for binary draft payload");
+    }
+    clearNativeAfterIdb = true;
   }
   if (expectedEpoch !== undefined && (writeEpochs.get(key) ?? 0) !== expectedEpoch) return;
   await idbPut(key, value);
+  if (clearNativeAfterIdb && invoke && invoke !== unsupportedDraftInvoke) {
+    if (expectedEpoch !== undefined && (writeEpochs.get(key) ?? 0) !== expectedEpoch) return;
+    await invoke("ui_draft_delete", { key });
+  }
 }
 
 async function writeRecord<T>(key: string, value: T): Promise<void> {
@@ -230,14 +243,6 @@ export async function saveComposerDraft(scope: string, draft: ComposerDraft): Pr
     if ((writeEpochs.get(scope) ?? 0) !== epoch) return;
     if (isEmptyComposerDraft(draft)) {
       await deleteRecordUnlocked(scope, epoch);
-      return;
-    }
-    const invoke = activeLocaldDrafts();
-    if (invoke && hasNonJsonBinaryInstance(draft)) {
-      // Remove any older SQLite entry so IndexedDB's File-bearing draft isn't shadowed on read.
-      await invoke("ui_draft_delete", { key: scope }).catch(() => undefined);
-      if ((writeEpochs.get(scope) ?? 0) !== epoch) return;
-      await idbPut(scope, draft);
       return;
     }
     await writeRecordUnlocked(scope, draft, epoch);

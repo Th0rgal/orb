@@ -356,3 +356,75 @@ it("preserves a saveSideThread queued while an earlier updateSideThread is readi
   resetComposerDraftsMemoryForTest();
   await expect(readSideThread("race-upd")).resolves.toEqual({ state: "NEW" });
 });
+
+it("commits IndexedDB fallback before removing the previous native SQLite record", async () => {
+  const sqlDrafts = new Map<string, string>();
+  vi.stubGlobal("indexedDB", {
+    open: () => {
+      const req = {
+        result: {
+          transaction: () => ({
+            oncomplete: undefined as undefined | (() => void),
+            onerror: undefined as undefined | (() => void),
+            error: new Error("QuotaExceededError"),
+            objectStore: () => ({
+              get: () => {
+                const greq = { result: undefined, onsuccess: undefined as undefined | (() => void) };
+                queueMicrotask(() => greq.onsuccess?.());
+                return greq;
+              },
+              put: function () {
+                queueMicrotask(() => (this as any).__tx?.onerror?.());
+              },
+              delete: () => {},
+            }),
+          }),
+        },
+        onsuccess: undefined as undefined | (() => void),
+      };
+      const origTx = req.result.transaction;
+      req.result.transaction = () => {
+        const tx = origTx();
+        const origStore = tx.objectStore;
+        tx.objectStore = () => {
+          const st = origStore() as any;
+          st.__tx = tx;
+          return st;
+        };
+        return tx;
+      };
+      queueMicrotask(() => req.onsuccess?.());
+      return req;
+    },
+  });
+
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        const key = String(args?.key ?? "");
+        if (cmd === "ui_draft_get") return sqlDrafts.get(key) ?? null;
+        if (cmd === "ui_draft_put") {
+          const raw = String(args?.raw ?? "");
+          if (raw.includes("OVERSIZED_PAYLOAD")) {
+            throw new Error("Invalid ui_draft_put payload");
+          }
+          sqlDrafts.set(key, raw);
+          return null;
+        }
+        if (cmd === "ui_draft_delete") {
+          sqlDrafts.delete(key);
+          return null;
+        }
+        return null;
+      },
+    },
+  };
+
+  await saveSideThread("durable-q", [{ id: "keep-me" }]);
+  await expect(
+    saveSideThread("durable-q", [{ id: "keep-me" }, { id: "OVERSIZED_PAYLOAD" }]),
+  ).rejects.toThrow("QuotaExceededError");
+
+  resetComposerDraftsMemoryForTest();
+  await expect(readSideThread("durable-q")).resolves.toEqual([{ id: "keep-me" }]);
+});
