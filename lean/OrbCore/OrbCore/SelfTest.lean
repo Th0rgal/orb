@@ -5754,6 +5754,58 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
   if !legParked then
     return (← fail "m-legacy-auto with armed recurring interval did not park in awaiting_user after turn completion")
 
+  -- 5. Admin-owned mission (`owner_user_id` set, `role='admin'`, empty `unix_username`) signs `job:submit` lease with `caller_role='admin'`,
+  --    and `"model":"smart"` resolves chain `"builtin/smart"` instead of forwarding `"smart"` raw!
+  let bootAdm? ← getUserByUsername? store "admin"
+  let admUid := (bootAdm?.map (·.id)).getD ""
+  if admUid.isEmpty then
+    return (← fail "missing bootstrap admin user in runRemoteDispatchWakeupAndBtwTests")
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO missions(id,title,status,backend,model_override,working_directory,project,placement_kind,owner_user_id,tags,run_generation,created_at,updated_at) " ++
+     "VALUES('m-admin-owned','admin remote','failed','opencode','builtin/smart','','leanvm','managed',?1,'[\"remote-node:mocknode\"]',1,?2,?2);")
+    #[admUid, legPastIso]
+  let (resAdmSt, resAdmBody) ← sendJson "POST" "/api/control/missions/m-admin-owned/resume" hsJwt "{}"
+  if resAdmSt != 200 then
+    return (← fail s!"resume m-admin-owned failed: {resAdmSt} {resAdmBody}")
+  let admJob := (← submittedJobsRef.get).back?.getD (.obj #[])
+  let admLeaseTok := (admJob.fieldStr? "lease_token").getD ""
+  let admLeaseB64 := (admLeaseTok.splitOn ".").headD ""
+  let admLeaseJson :=
+    match OrbBin.PosixExt.base64Decode? admLeaseB64 with
+    | some bs => (String.fromUTF8? bs).getD ""
+    | none => ""
+  if (admLeaseJson.splitOn "\"caller_role\":\"admin\"").length < 2 ||
+     (admLeaseJson.splitOn s!"\"owner_user_id\":{jsonEscape admUid}").length < 2 then
+    return (← fail s!"admin-owned remote lease did not carry caller_role=admin: {admLeaseJson}")
+
+  let _ ← execParamQuery store.missionsDb
+    "INSERT OR REPLACE INTO model_routing_chains(id,name,models_json,updated_at) VALUES('builtin/smart','Smart (Default)','[{\"provider_id\":\"antigravity\",\"model_id\":\"gemini-4-argon-low\"}]','t1');" #[]
+  setEnvVar "CLI_PROXY_API_KEY" "test-cli-proxy-key"
+  setEnvVar "CLI_PROXY_API_BASE_URL" "http://127.0.0.1:18317"
+  let loadedChains ← loadRoutingChainsFromStore store workRoot
+  setEnvVar "CLI_PROXY_API_KEY" ""
+  setEnvVar "CLI_PROXY_API_BASE_URL" ""
+  appSt.chainsRef.set loadedChains
+  let forwardedModelRef ← IO.mkRef ""
+  let appWithMockProxy : CoreAppState := {
+    appSt with
+    proxyMockTransport? := some (fun tgt => do
+      forwardedModelRef.set tgt.modelId
+      return .ok { status := 200, headers := #[], body := "{\"id\":\"chatcmpl-1\",\"choices\":[]}".toUTF8 })
+  }
+  let smartReqRaw :=
+    (s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {hsJwt}\r\n" ++
+     "Content-Type: application/json\r\nContent-Length: 38\r\n\r\n{\"model\":\"smart\",\"messages\":[]}").toUTF8
+  match parseRequest smartReqRaw none with
+  | .error _ => return (← fail "parse smartReqRaw failed")
+  | .ok sReq =>
+    match ← dispatchCoreRequest appWithMockProxy sReq nowSec with
+    | .error _ => return (← fail "dispatch smartReqRaw returned 101")
+    | .ok sResp =>
+      let fwdMdl ← forwardedModelRef.get
+      if sResp.status != 200 || fwdMdl != "gemini-4-argon-low" then
+        return (← fail s!"model='smart' did not resolve builtin/smart target: status={sResp.status} fwd={fwdMdl}")
+
   closeManagedComputeStore mStore
   closeCoreStore store
   stopEnvAndMock
