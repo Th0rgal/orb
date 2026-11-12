@@ -1336,6 +1336,8 @@ def missionDetailJson
       else "null"
     let cont ← continuationJsonForMission st missionId
     let .ok contJson := cont | return .error "continuation_json_failed"
+    let jobMap := remoteJobsJsonMap (← execParamQuery st.projectsDb
+      s!"{remoteJobColumnsSql} WHERE mission_id=?1 ORDER BY updated_at ASC;" #[missionId])
     let tags := cell r 26
     let tagsOut :=
       if tags.startsWith "[" then tags
@@ -1354,7 +1356,8 @@ def missionDetailJson
       s!"\"viewer_role\":{jsonEscape viewerRole},\"owner_username\":{jsonEscape ownerUname},\"shared_with\":{sharedWithJson}," ++
       s!"\"state_revision\":{cellNat r 14},\"not_before\":{cellNat r 17},\"resume_intent\":{cellNat r 18}," ++
       s!"\"run_generation\":{cellNat r 19},\"health_verdict\":{jsonEscape verdict}," ++
-      s!"\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut},\"history\":{histOut}}"))
+      s!"\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut}," ++
+      s!"\"remote_job\":{(jobMap[missionId]?).getD "null"},\"history\":{histOut}}"))
 
 def ensureQueueContSchema (st : CoreStore) : IO (Except String Unit) := do
   match ← st.missionsDb.mu.atomically (sqliteExecRaw st.missionsDb.handle queueContSchemaSql) with

@@ -2069,6 +2069,33 @@ structure MissionListFilter where
   workspaceId?     : Option String := none
   deriving Repr, DecidableEq, Inhabited
 
+/-- Columns selected for `remoteJobJson`, newest last so a fold keeps each mission's latest job. -/
+def remoteJobColumnsSql : String :=
+  "SELECT mission_id, job_id, node_id, state, COALESCE(exit_status,''), COALESCE(started_at,''), " ++
+  "COALESCE(accepted_at,''), COALESCE(heartbeat_at,''), COALESCE(finished_at,'') FROM remote_jobs"
+
+/-- One `remote_jobs` ledger row as the desktop `RemoteJob` (`orb/src/api.ts`). Clients read
+    `node_state == "running"` as confirmed remote execution; without it they show "Starting". -/
+def remoteJobJson (r : Array String) : String :=
+  let c (i : Nat) := (r[i]?).getD ""
+  let state := c 3
+  let ended := state == "succeeded" || state == "failed" || state == "cancelled" || state == "lost" || !(c 8).isEmpty
+  let optStr (v : String) := if v.isEmpty then "null" else jsonEscape v
+  let exitJson := match (c 4).toInt? with | some n => toString n | none => "null"
+  s!"\{\"job_id\":{jsonEscape (c 1)},\"node_id\":{jsonEscape (c 2)},\"phase\":{jsonEscape (if ended then "finished" else "running")}," ++
+  s!"\"node_state\":{jsonEscape state},\"exit_code\":{exitJson},\"started_at\":{optStr (c 5)}," ++
+  s!"\"accepted_at\":{optStr (c 6)},\"heartbeat_at\":{optStr (c 7)},\"finished_at\":{optStr (c 8)}}"
+
+/-- Latest remote job JSON per mission from rows of `remoteJobColumnsSql` ordered by `updated_at`.
+    A missing ledger table or failed query yields no entries (rendered as `null`), never an error. -/
+def remoteJobsJsonMap (rows : Except String (Array (Array String))) : Std.HashMap String String := Id.run do
+  let mut m : Std.HashMap String String := {}
+  if let .ok rs := rows then
+    for i in [1:rs.size] do
+      let r := rs[i]!
+      m := m.insert ((r[0]?).getD "") (remoteJobJson r)
+  return m
+
 /-- List missions from `missions.db` joined with `mission_terminal_evidence` as JSON (`SM-01`, `SM-02`),
     preserving `total_cost_cents` telemetry, typed authority/placement/revision columns, `#1545` folder/placement
     metadata, and unified `health_verdict`.
@@ -2246,6 +2273,10 @@ def listMissionsJson
     else
       "SELECT mission_id,id,phase,due_epoch,trigger_kind,reason,source,error,recurrence FROM mission_continuations WHERE phase IN (1,2,3) ORDER BY due_epoch ASC, id ASC;"
   let contRows ← execParamQuery st.missionsDb contSql inParams
+  let jobSql :=
+    if useScopedIn then s!"{remoteJobColumnsSql} WHERE mission_id IN ({inPlaceholders}) ORDER BY updated_at ASC;"
+    else s!"{remoteJobColumnsSql} ORDER BY updated_at ASC;"
+  let jobMap := remoteJobsJsonMap (← execParamQuery st.projectsDb jobSql inParams)
   let contMap : Std.HashMap String (Array String) := Id.run do
     let mut m : Std.HashMap String (Array String) := {}
     if let .ok crs := contRows then
@@ -2395,7 +2426,8 @@ def listMissionsJson
             s!"\"superseded_by_mission_id\":{jsonEscape superBy},\"orphaned_at\":{jsonEscape orphAt}," ++
             s!"\"reserved_disk_gib\":{diskGib},\"state_revision\":{stateRev}," ++
             s!"\"viewer_role\":{jsonEscape viewerRole},\"owner_username\":{jsonEscape ownerUname},\"shared_with\":{sharedWithJson}," ++
-            s!"\"health_verdict\":{jsonEscape verdict},\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut}}"
+            s!"\"health_verdict\":{jsonEscape verdict},\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut}," ++
+            s!"\"remote_job\":{(jobMap[c0]?).getD "null"}}"
           )
     return "[" ++ String.intercalate "," items.toList ++ "]"
   return .ok outStr

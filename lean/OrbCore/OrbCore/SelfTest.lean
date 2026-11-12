@@ -6125,6 +6125,19 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln "[orb-core-test] FAIL: validateRuntimeSecurity or verifyConsoleWsAuth checks failed"
     return 1
 
+  -- Mission responses carry the latest remote job so clients see confirmed remote execution.
+  let runningJob := remoteJobsJsonMap (.ok #[#["h"], #["m1", "j0", "uruk", "succeeded", "0", "t0", "t0", "t1", "t1"],
+    #["m1", "j1", "ashur", "running", "", "t2", "t2", "t3", ""]])
+  let jobJson := (runningJob["m1"]?).getD ""
+  if (jobJson.splitOn "\"node_state\":\"running\"").length != 2 ||
+     (jobJson.splitOn "\"node_id\":\"ashur\"").length != 2 ||
+     (jobJson.splitOn "\"phase\":\"running\"").length != 2 ||
+     (jobJson.splitOn "\"exit_code\":null").length != 2 ||
+     (remoteJobJson #["m", "j", "n", "failed", "2", "", "", "", "t"]).splitOn "\"phase\":\"finished\"" |>.length != 2 ||
+     (remoteJobsJsonMap (.error "no such table: remote_jobs")).size != 0 then
+    IO.eprintln s!"[orb-core-test] FAIL: remote_job mission JSON: {jobJson}"
+    return 1
+
   -- Provider contracts use a mock transport: no live machines or provider credentials.
   try
     OrbCore.ManagedProviderTests.run
