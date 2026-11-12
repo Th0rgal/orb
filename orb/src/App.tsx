@@ -2343,7 +2343,7 @@ export default function App() {
               <Suspense>
                 <InboxPage
                   onFocusContent={() => { if (window.matchMedia("(max-width: 720px)").matches) setSidebar(false); }}
-                  onDeleteMission={setDeleteMissionRequest}
+                  onDeleteMission={(id) => setDeleteMissionRequest([id])}
                   missions={inboxMissions()}
                   projects={liveProjects()}
                   loading={missionsLoading()}
