@@ -62,6 +62,7 @@ paths = [
   "scripts/*coverage_registry*",
   "scripts/*leannative*",
   "scripts/*wasm*",
+  "scripts/*spec_audit*",
 ]
 jobs = [
   "test", "harness-contract", "policy-lint", "capability-matrix",

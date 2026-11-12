@@ -57,6 +57,14 @@ class PlanTest(unittest.TestCase):
             self.assertTrue({"wf:kernel-abi", "wf:android-apk"} <= jobs([p]), p)
         self.assertNotIn("wf:kernel-abi", jobs(["android_dashboard/app/build.gradle.kts"]))
 
+    def test_kernel_workflow_scripts_select_kernel_abi(self):
+        wf = (ROOT / ".github/workflows/kernel-abi.yml").read_text()
+        refs = set(re.findall(r"scripts/[A-Za-z0-9_./-]+\.(?:py|sh|lean|mjs)", wf))
+        self.assertTrue(refs)
+        for r in sorted(refs):
+            d = ci_plan.claim(r, DOMAINS)
+            self.assertTrue(d and (d.get("full") or "wf:kernel-abi" in d["jobs"]), r)
+
     def test_wakeup_mcp_runs_desktop_shell(self):
         for p in ("scripts/wakeup_mcp.py", "orb/tests/wakeup_mcp_test.py"):
             self.assertIn("orb-desktop-shell", jobs([p]), p)
