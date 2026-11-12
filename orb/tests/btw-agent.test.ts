@@ -1493,3 +1493,24 @@ it('tracks connectionVersion in btwSession and clears unsaved fallback sessions 
   resetStorageCache();
  }
 });
+
+it('reports an unstarted Core turn instead of an empty model completion when a side session is stuck in awaiting_user',async()=>{
+ const {getMissionEvents}=await import('../src/stream');
+ vi.mocked(getMission).mockImplementation(async id=>({
+  id,
+  status:id==='unborn-parent'?'active':'awaiting_user',
+  tags:id==='unborn-parent'?[]:['btw-parent:unborn-parent','side-question'],
+  history:[],
+  title:'leanvm faster · btw',
+  created_at:'2026-11-12T05:37:56Z',
+  updated_at:'2026-11-12T05:37:56Z',
+ }));
+ vi.mocked(api).mockResolvedValueOnce({id:'side-unborn-1',status:'awaiting_user'});
+ vi.mocked(getMissionEvents).mockResolvedValueOnce([
+  {event_type:'user_message',content:'où en est le run ?',sequence:1,id:1,timestamp:'2026-11-12T05:37:56Z'},
+ ]);
+ await expect(askBtwAgent('unborn-parent','où en est le run ?','ctx',[],new AbortController().signal,()=>{})).rejects.toThrow(
+  'No response was captured from the side agent (awaiting_user). The side agent turn did not start on Core; retry to start a clean side session.'
+ );
+ expect(btwSession('unborn-parent')?.brokenSession).toBe(true);
+});

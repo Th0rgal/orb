@@ -29,6 +29,7 @@ import OrbCore.TelemetryAndVoice
 import OrbCore.LegacyHydrate
 import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
+import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController
 import OrbCore.CloudHttpAndWorker
 import OrbCore.ProviderUsageAndLogin
@@ -64,6 +65,7 @@ open OrbCore.TelemetryAndVoice
 open OrbCore.LegacyHydrate
 open OrbCore.SecretAndApproval
 open OrbCore.RemoteFleetAndRelay
+open OrbCore.RemoteDispatch
 open OrbCore.ProjectFilesAndController
 open OrbCore.CloudHttpAndWorker
 open OrbCore.ProviderUsageAndLogin
@@ -120,6 +122,7 @@ structure CoreAppState where
   cloudHub?       : Option CloudRuntimeHub := none
   providerHub?    : Option ProviderRuntimeHub := none
   systemHub?      : Option SystemRuntimeHub := none
+  remoteSup?      : Option RemoteJobSupervisor := none
 
 /-- Authenticated multi-user request principal resolved by `resolveCallerPrincipal?`. -/
 structure CallerPrincipal where
@@ -1185,7 +1188,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   if let some pTok := extractProxyToken? req.headers nowEpochSec then
     if pTok.startsWith "orb-mpt-v1_" then
       if let some (mptMid, mptOwnerUid) ← resolveMissionProxyToken? st.store pTok nowEpochSec then
-        proxyOwnerUserId? := some mptOwnerUid
+        if !mptOwnerUid.isEmpty then proxyOwnerUserId? := some mptOwnerUid
         if boundMid?.isNone then boundMid? := some mptMid
     else if pTok.startsWith "orb-jwt-v2:" then
       if let some (uid, _, tokEp, _) := verifySessionTokenV2 (effectiveJwtSecret st.cfg) pTok nowEpochSec then
@@ -1379,13 +1382,31 @@ private def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) :
   onTurnFinished := fun finalSnap => do
     let nowSec ← coreEpochSec
     let ts := formatEpochIso8601Utc nowSec
+    if let some sid := finalSnap.sessionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) then
+      discard <| execParamQuery st.store.missionsDb
+        "UPDATE missions SET session_id=?2, resumable=1 WHERE id=?1;" #[missionId, sid]
     let isErr := finalSnap.error?.isSome || (finalSnap.exitCode?.getD 0) != 0
-    let nextStatus := if isErr then "failed" else "awaiting_user"
+    let mut armedWakeups : Nat := 0
+    let mut isSideQ := false
+    if !isErr then
+      if let .ok cRows ← execParamQuery st.store.missionsDb
+          "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1 AND phase=1;" #[missionId] then
+        if cRows.size > 1 then armedWakeups := ((cRows[1]?.bind (·[0]?)).bind String.toNat?).getD 0
+      if let .ok tRows ← execParamQuery st.store.missionsDb
+          "SELECT COALESCE(tags,'[]') FROM missions WHERE id=?1;" #[missionId] then
+        let tRaw := (tRows[1]?.bind (·[0]?)).getD "[]"
+        isSideQ := (tRaw.splitOn "\"side-question\"").length > 1
+    let nextStatus :=
+      if isErr then "failed"
+      else if armedWakeups > 0 then "awaiting_user"
+      else if isSideQ then "completed"
+      else "awaiting_user"
     discard <| execParamQuery st.store.missionsDb
       "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1 AND status IN ('active','pending');"
-      #[missionId, nextStatus, s!"{nowSec}"]
+      #[missionId, nextStatus, ts]
     let stPl := renderCompact (.obj #[("status", .str nextStatus), ("content", .str finalSnap.text)])
     discard <| appendMissionEvent st.store missionId "mission_status_changed" stPl ts
+    publishControlEvent st.broadcastHub? "mission_status_changed" stPl (some missionId)
 }
 
 /-- Resolve a confined git workspace directory for a non-client mission under `st.cfg.workingDir`. -/
@@ -1396,6 +1417,54 @@ private def resolveConfinedCoreMissionGitDir (st : CoreAppState) (m : MissionRec
   | .ok safeDir => return .ok safeDir
   | .error err => return .error (400, s!"\{\"error\":{jsonEscape err}}")
 
+/-- Launch a local harness turn under `st.warmMgr?` (for `/btw/agent`, wakeup continuations, and `spawn_harness` turns). -/
+private def launchLocalCoreMissionTurn
+    (st : CoreAppState)
+    (missionId harness cwd prompt model effort permMode : String)
+    (sessionId? : Option String := none)
+    (worktreeMode : String := "")
+    (appendUserEvent : Bool := false) : IO (Except String String) := do
+  let some mgr := st.warmMgr? | return .error "warm_harness_manager_unavailable"
+  let effRawCwd := if cwd.trimAscii.toString.isEmpty then st.cfg.workingDir else cwd
+  let safeCwd ← match ← confineWorkingDirectory st.cfg.workingDir effRawCwd with
+    | .ok d => pure d
+    | .error e => return .error s!"invalid_working_directory:{e}"
+  let safeRoot ← match ← confineWorkingDirectory st.cfg.workingDir st.cfg.workingDir with
+    | .ok d => pure d
+    | .error e => return .error s!"invalid_working_directory:{e}"
+  let binOverride := st.warmHarnessBinOverride?.getD ""
+  let nowSec ← coreEpochSec
+  let ts := formatEpochIso8601Utc nowSec
+  if appendUserEvent then
+    let userPl := renderCompact (.obj #[("content", .str prompt)])
+    discard <| appendMissionEvent st.store missionId "user_message" userPl ts
+  let prevSt? ← OrbBin.ClaudeControl.getRunState? mgr missionId
+  let mut dbGen : UInt64 := 1
+  if let .ok gRows ← execParamQuery st.store.missionsDb
+      "SELECT COALESCE(run_generation,1) FROM missions WHERE id=?1;" #[missionId] then
+    if gRows.size > 1 then dbGen := (Nat.max 1 (((gRows[1]?.bind (·[0]?)).bind String.toNat?).getD 1)).toUInt64
+  let nextGen := max dbGen ((prevSt?.map (fun s => s.generation + 1)).getD 1)
+  discard <| execParamQuery st.store.missionsDb
+    "UPDATE missions SET status='active', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 WHERE id=?1;"
+    #[missionId, s!"{nextGen}", ts]
+  let model? := if model.trimAscii.toString.isEmpty then none else some model.trimAscii.toString
+  let effort? := if effort.trimAscii.toString.isEmpty then none else some effort.trimAscii.toString
+  let parsedPerm := OrbBin.ClaudeControl.parsePermissionMode permMode
+  let wtArg := if worktreeMode.trimAscii.toString.isEmpty then "local" else worktreeMode.trimAscii.toString
+  let cbs := buildCoreHarnessCallbacks st missionId
+  let normHarness := if harness.trimAscii.toString.toLower == "claude" then "claudecode" else harness.trimAscii.toString
+  match ← OrbBin.ClaudeControl.startHarnessTurn
+      mgr missionId normHarness binOverride safeCwd prompt nextGen model? effort? sessionId? parsedPerm wtArg #[] cbs (some safeRoot) with
+  | .ok runSt =>
+    if runSt.cwd != safeCwd && !runSt.cwd.isEmpty then
+      if let .ok safeWt ← confineWorkingDirectory st.cfg.workingDir runSt.cwd then
+        discard <| execParamQuery st.store.missionsDb
+          "UPDATE missions SET working_directory=?2 WHERE id=?1;" #[missionId, safeWt]
+        return .ok safeWt
+    return .ok safeCwd
+  | .error err =>
+    return .error err
+
 /-- Launch a live warm harness turn when `spawn_harness: true` is supplied by an authorized admin/legacy caller on a managed mission. -/
 private def maybeSpawnWarmHarnessTurn
     (st : CoreAppState)
@@ -1404,39 +1473,20 @@ private def maybeSpawnWarmHarnessTurn
     (missionId harness cwd prompt model effort permMode : String)
     (worktreeMode : String := "")
     (appendUserEvent : Bool := true) : IO (Option String) := do
-  let some mgr := st.warmMgr? | return none
   if !(caller.isLegacyUnscoped || caller.role == "admin") then return none
-  if placementKind != "managed" then return none
-  let .ok safeCwd ← confineWorkingDirectory st.cfg.workingDir cwd | return none
-  let .ok safeRoot ← confineWorkingDirectory st.cfg.workingDir st.cfg.workingDir | return none
-  let binOverride := st.warmHarnessBinOverride?.getD ""
-  let nowSec ← coreEpochSec
-  let ts := formatEpochIso8601Utc nowSec
-  if appendUserEvent then
-    let userPl := renderCompact (.obj #[("content", .str prompt)])
-    discard <| appendMissionEvent st.store missionId "user_message" userPl ts
-  discard <| execParamQuery st.store.missionsDb
-    "UPDATE missions SET status='active',state_revision=state_revision+1,updated_at=?2 WHERE id=?1;"
-    #[missionId, s!"{nowSec}"]
-  let prevSt? ← OrbBin.ClaudeControl.getRunState? mgr missionId
-  let nextGen := (prevSt?.map (fun s => s.generation + 1)).getD 1
-  let model? := if model.trimAscii.toString.isEmpty then none else some model.trimAscii.toString
-  let effort? := if effort.trimAscii.toString.isEmpty then none else some effort.trimAscii.toString
-  let parsedPerm := OrbBin.ClaudeControl.parsePermissionMode permMode
-  let wtArg := if worktreeMode.trimAscii.toString.isEmpty then "local" else worktreeMode.trimAscii.toString
-  let cbs := buildCoreHarnessCallbacks st missionId
-  match ← OrbBin.ClaudeControl.startHarnessTurn
-      mgr missionId harness binOverride safeCwd prompt nextGen model? effort? none parsedPerm wtArg #[] cbs (some safeRoot) with
-  | .ok runSt =>
-    if runSt.cwd != safeCwd && !runSt.cwd.isEmpty then
-      if let .ok safeWt ← confineWorkingDirectory st.cfg.workingDir runSt.cwd then
-        discard <| execParamQuery st.store.missionsDb
-          "UPDATE missions SET working_directory=?2 WHERE id=?1;" #[missionId, safeWt]
-        return some safeWt
-    return some safeCwd
+  if placementKind != "managed" && placementKind != "local" then return none
+  let mut sid? : Option String := none
+  if let .ok sRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[missionId] then
+    if sRows.size > 1 then
+      let s := (cell sRows[1]! 0).trimAscii.toString
+      if !s.isEmpty then sid? := some s
+  match ← launchLocalCoreMissionTurn st missionId harness cwd prompt model effort permMode sid? worktreeMode appendUserEvent with
+  | .ok dir => return some dir
   | .error err =>
-    let errPl := renderCompact (.obj #[("message", .str err)])
-    discard <| appendMissionEvent st.store missionId "error" errPl ts
+    if st.warmMgr?.isSome then
+      let ts := formatEpochIso8601Utc (← coreEpochSec)
+      let errPl := renderCompact (.obj #[("message", .str err)])
+      discard <| appendMissionEvent st.store missionId "error" errPl ts
     return none
 
 /-- Handle warm harness control, events, checkpoints, worktree, and permission routes. -/
@@ -2143,7 +2193,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       else
         let outJson ← dispatchMcpToolCall
           st.store st.managedStore? st.relayHub? st.broadcastHub? (← st.managedRef.get)
-          st.cfg.workingDir activeClaims toolName args nowEpochSec
+          st.cfg.workingDir activeClaims toolName args nowEpochSec st.remoteSup?
         return .ok (mkJson 200 outJson)
 
   -- 5c. Managed Node Dial-Out Enrollment & Leased Relay
@@ -2534,7 +2584,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
         return .ok (mkJson cCode cBody)
-      match ← hostedStop st.store mid s!"{nowEpochSec}" with
+      let nowIso := formatEpochIso8601Utc nowEpochSec
+      discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid "Mission stopped on Core"
+      match ← hostedStop st.store mid nowIso with
       | .ok gen => return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"run_generation\":{gen}}")
       | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
       | .error e =>
@@ -2855,37 +2907,98 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if !isSafeMissionId newMid then
         abortBtwIdem
         return .ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}")
+      let nowIso := formatEpochIso8601Utc nowEpochSec
+      let explicitBtwRn? := (jv.fieldStr? "remote_node_id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+      let inheritedBtwRn? ←
+        if explicitBtwRn?.isSome then pure explicitBtwRn?
+        else resolveMissionRemoteNode? st.store st.managedStore? srcMid
       let forkReq : ForkMissionRequest := {
         sourceMissionId := srcMid
         newMissionId := newMid
         targetBackend? := reqBackend?
         modelOverride? := reqModelOv?
         modelEffort? := rawEffort?.map (fun s => s.trimAscii.toString.toLower) |>.filter (!·.isEmpty)
+        remoteNodeId? := inheritedBtwRn?
         sideQuestion := true
         sidePrompt? := sidePrompt?
         incrementalSide := ctxMode == "incremental"
         ownerUserId := caller.userId
-        nowAt := s!"{nowEpochSec}"
+        nowAt := nowIso
       }
       match ← forkOrHandoffMission st.store defaultSafeBase forkReq with
       | .error (code, msg) =>
         abortBtwIdem
         return .ok (mkJson code s!"\{\"error\":{jsonEscape msg}}")
       | .ok out =>
+        let cleanupUnbornBtw : IO Unit := do
+          discard <| execParamQuery st.store.missionsDb "DELETE FROM mission_events WHERE mission_id=?1;" #[out.missionId]
+          discard <| execParamQuery st.store.missionsDb "DELETE FROM mission_runs WHERE mission_id=?1;" #[out.missionId]
+          discard <| execParamQuery st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[out.missionId]
+          abortBtwIdem
+        let sideQuestionText := (sidePrompt?.getD "").trimAscii.toString
+        let mut effStatus := "awaiting_user"
+        if !sideQuestionText.isEmpty && out.placementKind != "client" then
+          -- When full transcript turns were copied (`turnsCopied > 1`), include parent history in initial turn prompt
+          let mut turnPrompt := sideQuestionText
+          if out.turnsCopied > 1 then
+            let pTurns ← loadCanonicalMissionTurns st.store srcMid false
+            if !pTurns.isEmpty then
+              let lines := pTurns.map fun (r, c) =>
+                s!"[{(if r == "user" then "User" else "Assistant")}]\n{c}"
+              turnPrompt :=
+                "Parent mission conversation context:\n\n" ++
+                String.intercalate "\n\n---\n\n" lines.toList ++
+                "\n\n---\n\nSide question (read-only `/btw`):\n" ++ sideQuestionText
+          match out.remoteNodeId? with
+          | some targetNode =>
+            if let some sup := st.remoteSup? then
+              let effModel :=
+                if out.backend == "opencode" && out.modelOverride.trimAscii.toString.isEmpty then "builtin/smart"
+                else out.modelOverride
+              let spec : RemoteTurnSpec := {
+                missionId        := out.missionId
+                targetNodeId     := targetNode
+                backend          := out.backend
+                modelOverride    := effModel
+                modelEffort      := out.modelEffort
+                workingDirectory := out.workingDirectory
+                project          := out.project
+                ownerUserId      := caller.userId
+                authorityMode    := "readonly"
+                placementKind    := out.placementKind
+                tagsJson         := out.tagsJson
+                prompt           := turnPrompt
+                sideQuestion     := true
+                companionOf?     := some srcMid
+              }
+              match ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec with
+              | .ok _ => effStatus := "active"
+              | .error dispErr =>
+                cleanupUnbornBtw
+                return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
+          | none =>
+            if st.warmMgr?.isSome then
+              let effModel :=
+                if out.backend == "opencode" && out.modelOverride.trimAscii.toString.isEmpty then "builtin/smart"
+                else out.modelOverride
+              match ← launchLocalCoreMissionTurn st out.missionId out.backend out.workingDirectory turnPrompt effModel out.modelEffort "bypassPermissions" none "local" false with
+              | .ok _ => effStatus := "active"
+              | .error launchErr =>
+                cleanupUnbornBtw
+                return .ok (mkJson 502 s!"\{\"error\":{jsonEscape launchErr}}")
         let rnJson := match out.remoteNodeId? with | some rn => jsonEscape rn | none => "null"
         let modOvJson := if out.modelOverride.isEmpty then "null" else jsonEscape out.modelOverride
         let effJson := if out.modelEffort.isEmpty then "null" else jsonEscape out.modelEffort
         let projField := if out.project.isEmpty then "" else s!",\"project\":{jsonEscape out.project}"
         let body :=
-          s!"\{\"id\":{jsonEscape out.missionId},\"title\":{jsonEscape out.title},\"status\":\"awaiting_user\"," ++
+          s!"\{\"id\":{jsonEscape out.missionId},\"title\":{jsonEscape out.title},\"status\":{jsonEscape effStatus}," ++
           s!"\"backend\":{jsonEscape out.backend},\"model_override\":{modOvJson},\"model_effort\":{effJson}," ++
           s!"\"authority_mode\":\"readonly\",\"working_directory\":{jsonEscape out.workingDirectory},\"remote_node_id\":{rnJson}," ++
-          s!"\"placement_kind\":{jsonEscape out.placementKind}{projField},\"state_revision\":1,\"tags\":{out.tagsJson}}"
-        match ← recordOrReplayIdempotency st.store idemScope idemKey 201 body s!"{nowEpochSec}" with
+          s!"\"placement_kind\":{jsonEscape out.placementKind}{projField},\"created_at\":{jsonEscape nowIso},\"updated_at\":{jsonEscape nowIso},\"state_revision\":1,\"tags\":{out.tagsJson}}"
+        match ← recordOrReplayIdempotency st.store idemScope idemKey 201 body nowIso with
         | .ok rec => return .ok (mkJson rec.statusCode rec.bodyJson)
         | .error e =>
-          discard <| execParamQuery st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[out.missionId]
-          abortBtwIdem
+          cleanupUnbornBtw
           return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
 
   -- Mission Fork & Cloud-to-Workspace Handoff (`POST /api/control/missions/:id/fork`)
@@ -2912,7 +3025,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           let checkBack := reqBackend?.orElse (fun _ => some "codex")
           if (normalizeModelEffortForBackend checkBack trimmedRe).isNone then
             return .ok (mkJson 400 s!"\{\"error\":\"unsupported_model_effort\",\"effort\":{jsonEscape trimmedRe}}")
-      let remoteNodeId? := jv.fieldStr? "remote_node_id"
+      let explicitForkRn? := (jv.fieldStr? "remote_node_id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+      let rawWd? := jv.fieldStr? "working_directory"
+      let remoteNodeId? ←
+        if explicitForkRn?.isSome then pure explicitForkRn?
+        else if rawWd?.isNone then resolveMissionRemoteNode? st.store st.managedStore? srcMid
+        else pure none
       let isRemoteTarget :=
         match remoteNodeId? with
         | some rn =>
@@ -2923,7 +3041,6 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         classifyMissionPlacementTarget false (if isRemoteTarget then "remote" else "local") remoteNodeId?
       if let some (cCode, cBody) := checkPlacementForCaller caller forkTKind forkNAdmin then
         return .ok (mkJson cCode cBody)
-      let rawWd? := jv.fieldStr? "working_directory"
       let confinedWdRes : Except String (Option String) ← do
         match rawWd? with
         | none => pure (.ok none)
@@ -2947,6 +3064,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .error _ => pure st.cfg.workingDir
       let sideQ := (jv.fieldBool? "side_question").getD false
       let sidePrompt? := jv.fieldStr? "prompt"
+      let nowIso := formatEpochIso8601Utc nowEpochSec
       let forkReq : ForkMissionRequest := {
         sourceMissionId := srcMid
         newMissionId := newMid
@@ -2959,7 +3077,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         sideQuestion := sideQ
         sidePrompt? := sidePrompt?
         ownerUserId := caller.userId
-        nowAt := s!"{nowEpochSec}"
+        nowAt := nowIso
       }
       match ← forkOrHandoffMission st.store defaultSafeBase forkReq with
       | .error (code, msg) =>
@@ -3286,9 +3404,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match rawPlaceKind? with
         | some _ => if tKind == 3 then "managed_vm" else prelimPlaceKind
         | none => if clientPlaced then "client" else if tKind == 3 then "managed_vm" else "managed"
-      let rawWorkDir := (JsonTape.lookupString? tape "working_directory").getD st.cfg.workingDir
+      let explicitWorkDir? := JsonTape.lookupString? tape "working_directory"
+      let rawWorkDir := explicitWorkDir?.getD st.cfg.workingDir
       let safeWorkDirRes : Except String String ← do
-        if tKind != 0 && (JsonTape.lookupString? tape "working_directory").isSome then
+        if tKind != 0 && explicitWorkDir?.isNone && !clientPlaced then
+          pure (.ok "")
+        else if tKind != 0 && explicitWorkDir?.isSome then
           let t := rawWorkDir.trimAscii.toString
           if t.isEmpty || t.toList.any (fun c => c.toNat == 0) || (t.splitOn "/").any (· == "..") then
             pure (.error "invalid_working_directory")
@@ -3365,10 +3486,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let (strippedReqTags, _) := stripLegacyOrbFolderTags reqTags
       let initTagsJson := projectCompatibilityTagsJson authMode placeKind "" "" diskGib strippedReqTags
       let effTrack := if isBtwReq then "" else track
+      let nowIso := formatEpochIso8601Utc nowEpochSec
       let mRec : MissionRecord := {
         id := mid, title := title, status := "awaiting_user", backend := backend,
         modelOverride := modelOverride, modelEffort := normEffort, workingDirectory := safeWorkDir,
-        project := projSlug, folder := normCreateFolder, updatedAt := s!"{nowEpochSec}", totalCostCents := 0,
+        project := projSlug, folder := normCreateFolder, createdAt := nowIso, updatedAt := nowIso, totalCostCents := 0,
         authorityMode := authMode, placementKind := placeKind, reservedDiskGib := diskGib,
         nodeBootEpoch := st.store.bootEpoch, tagsJson := initTagsJson, track := effTrack, repo := repo,
         ownerUserId := caller.userId
@@ -3388,13 +3510,46 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           let leaseReq : DispatchLeaseRequest := {
             reservationId := resId, missionId := mid, projectSlug := projSlug,
             track := effTrack, repo := repo, authorityMode := authMode,
-            reservedDiskGib := diskGib, bootEpoch := st.store.bootEpoch, nowAt := s!"{nowEpochSec}"
+            reservedDiskGib := diskGib, bootEpoch := st.store.bootEpoch, nowAt := nowIso
           }
           if let .error leaseErr ← acquireDispatchTrackLease st.store leaseReq then
             discard <| execParamQuery st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
             discard <| recoverDispatchLeases st.store.missionsDb st.store.projectsDb st.store.bootEpoch
             abortIdem
             return .ok (mkJson 409 s!"\{\"error\":{jsonEscape leaseErr}}")
+        let mut initStatus := "awaiting_user"
+        if !clientPlaced && !isCloudBackendName backend then
+          if let (some sup, some targetNode, some rawPrompt) := (st.remoteSup?, remoteNodeId?, prompt?) then
+            if !rawPrompt.trimAscii.toString.isEmpty then
+              let deliv := if selectedSkills.isEmpty then rawPrompt else withDirective rawPrompt selectedSkills
+              discard <| appendMissionEvent st.store mid "user_message"
+                (renderCompact (.obj #[("type", .str "user_message"), ("content", .str deliv), ("mission_id", .str mid)])) nowIso
+              let spec : RemoteTurnSpec := {
+                missionId        := mid
+                targetNodeId     := targetNode
+                backend          := backend
+                modelOverride    := if backend == "opencode" && modelOverride.isEmpty then "builtin/smart" else modelOverride
+                modelEffort      := normEffort
+                workingDirectory := safeWorkDir
+                project          := projSlug
+                ownerUserId      := caller.userId
+                authorityMode    := authMode
+                placementKind    := placeKind
+                reservedDiskGib  := diskGib
+                tagsJson         := initTagsJson
+                prompt           := deliv
+                sideQuestion     := isBtwReq
+              }
+              match ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec with
+              | .ok _ => initStatus := "active"
+              | .error dispErr =>
+                if !leaseReservationId.isEmpty then
+                  discard <| releaseDispatchTrackLease st.store leaseReservationId nowIso
+                discard <| execParamQuery st.store.missionsDb "DELETE FROM mission_events WHERE mission_id=?1;" #[mid]
+                discard <| execParamQuery st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
+                discard <| recoverDispatchLeases st.store.missionsDb st.store.projectsDb st.store.bootEpoch
+                abortIdem
+                return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
         let deliveredPromptField :=
           match prompt? with
           | some p =>
@@ -3402,12 +3557,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             else s!",\"delivered_prompt\":{jsonEscape (withDirective p selectedSkills)}"
           | none => ""
         let projField := if rawProjSlug.isEmpty then "" else s!",\"project\":{jsonEscape rawProjSlug}"
+        let rnField := match remoteNodeId? with | some rn => s!",\"remote_node_id\":{jsonEscape rn}" | none => ""
         let respBody :=
-          s!"\{\"id\":{jsonEscape mid},\"status\":\"awaiting_user\",\"backend\":{jsonEscape backend}," ++
+          s!"\{\"id\":{jsonEscape mid},\"status\":{jsonEscape initStatus},\"backend\":{jsonEscape backend}," ++
           s!"\"model_override\":{jsonEscape modelOverride},\"model_effort\":{jsonEscape normEffort}," ++
-          s!"\"authority_mode\":{jsonEscape authMode},\"placement_kind\":{jsonEscape placeKind}," ++
+          s!"\"authority_mode\":{jsonEscape authMode},\"placement_kind\":{jsonEscape placeKind}{rnField}," ++
           s!"\"viewer_role\":\"owner\",\"owner_username\":{jsonEscape caller.username}{projField}," ++
           s!"\"folder\":{jsonEscape normCreateFolder},\"placement_revision\":1," ++
+          s!"\"created_at\":{jsonEscape nowIso},\"updated_at\":{jsonEscape nowIso}," ++
           s!"\"state_revision\":1,\"total_cost_cents\":0{deliveredPromptField}}"
         let persistInitialCyber : IO Unit := do
           if backend == "codex" && cyberMode != .automatic then
@@ -3749,23 +3906,60 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         discard <| mark_mission_opened st.store mid nowIso
         return .ok (mkJson 200 "{\"ok\":true}")
       let content := ((jv.fieldStr? "content").orElse (fun _ => jv.fieldStr? "message")).getD ""
+      let mut queued := false
       if !content.trimAscii.toString.isEmpty then
+        let defMsgId ← nextUniqueId st "msg" nowEpochSec
+        let msgId := (jv.fieldStr? "client_message_id").getD defMsgId
         let pl := renderCompact (.obj #[
           ("type", .str "user_message"),
+          ("id", .str msgId),
           ("content", .str content),
           ("mission_id", .str mid),
           ("sender_user_id", .str caller.userId),
           ("sender_username", .str caller.username)
         ])
-        discard <| appendMissionEvent st.store mid "user_message" pl nowIso
-        discard <| maybeSpawnWarmHarnessTurn
-          st caller mRec.placementKind mid mRec.backend mRec.workingDirectory
-          content mRec.modelOverride mRec.modelEffort "supervised" "" false
+        match st.remoteSup?, (← resolveMissionRemoteNode? st.store st.managedStore? mid) with
+        | some sup, some targetNode =>
+          if mRec.status == "active" || mRec.status == "pending" then
+            discard <| enqueueStructuredFollowup st.store "core" msgId mid content "control" nowIso
+            queued := true
+          else
+            discard <| appendMissionEvent st.store mid "user_message" pl nowIso
+            let mut resumeSid? : Option String := none
+            if let .ok sRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
+              if sRows.size > 1 then
+                let s := (cell sRows[1]! 0).trimAscii.toString
+                if !s.isEmpty then resumeSid? := some s
+            let isSide := (OrbBin.Json.parse mRec.tagsJson).toOption.bind JVal.asArr? |>.getD #[] |>.any (fun v => v.asStr? == some "side-question")
+            let spec : RemoteTurnSpec := {
+              missionId        := mid
+              targetNodeId     := targetNode
+              backend          := mRec.backend
+              modelOverride    := if mRec.backend == "opencode" && mRec.modelOverride.isEmpty then "builtin/smart" else mRec.modelOverride
+              modelEffort      := mRec.modelEffort
+              workingDirectory := mRec.workingDirectory
+              project          := mRec.project
+              ownerUserId      := mRec.ownerUserId
+              authorityMode    := mRec.authorityMode
+              placementKind    := mRec.placementKind
+              reservedDiskGib  := mRec.reservedDiskGib
+              tagsJson         := mRec.tagsJson
+              prompt           := content
+              resumeSessionId? := resumeSid?
+              sideQuestion     := isSide
+            }
+            if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
+              return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
+        | _, _ =>
+          discard <| appendMissionEvent st.store mid "user_message" pl nowIso
+          discard <| maybeSpawnWarmHarnessTurn
+            st caller mRec.placementKind mid mRec.backend mRec.workingDirectory
+            content mRec.modelOverride mRec.modelEffort "supervised" "" false
       else if cleanPath.endsWith "/adopt" then
         discard <| execParamQuery st.store.missionsDb
           "UPDATE missions SET status='awaiting_user', orphaned_at='', state_revision=state_revision+1, updated_at=?2 WHERE id=?1;"
           #[mid, nowIso]
-      return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}}")
+      return .ok (mkJson 200 s!"\{\"ok\":true,\"queued\":{if queued then "true" else "false"},\"mission_id\":{jsonEscape mid},\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}}")
 
   -- Cloud Agent & Parity Sub-Routes before `/api/control/missions/:id`
   if cleanPath.startsWith "/api/cloud/" ||
@@ -4666,26 +4860,72 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           discard <| writeBinding st.cfg.workingDir mid {
             revision := promoted.revision, key := s!"remote-launch:{mid}", model := effectiveModel
           }
+    let nowIso := formatEpochIso8601Utc nowEpochSec
+    let delivContent := if selectedSkills.isEmpty then content else withDirective content selectedSkills
+    let mut queued := false
+    let mut dispatchedRemote := false
     if let some mid := mid? then
       let evPayload :=
         s!"\{\"type\":\"user_message\",\"id\":{jsonEscape msgId},\"content\":{jsonEscape content}," ++
         s!"\"mission_id\":{jsonEscape mid},\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}}"
-      let _ ← appendMissionEvent st.store mid "user_message" evPayload s!"{nowEpochSec}"
+      if let (some sup, some m, some targetNode) := (st.remoteSup?, mission?, ← resolveMissionRemoteNode? st.store st.managedStore? mid) then
+        dispatchedRemote := true
+        if m.status == "active" || m.status == "pending" then
+          discard <| enqueueStructuredFollowup st.store "core" msgId mid delivContent "control" nowIso
+          queued := true
+        else
+          let _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso
+          let mut resumeSid? : Option String := none
+          if let .ok sRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
+            if sRows.size > 1 then
+              let s := (cell sRows[1]! 0).trimAscii.toString
+              if !s.isEmpty then resumeSid? := some s
+          let isSide := (OrbBin.Json.parse m.tagsJson).toOption.bind JVal.asArr? |>.getD #[] |>.any (fun v => v.asStr? == some "side-question")
+          let spec : RemoteTurnSpec := {
+            missionId        := mid
+            targetNodeId     := targetNode
+            backend          := m.backend
+            modelOverride    := if m.backend == "opencode" && m.modelOverride.isEmpty then "builtin/smart" else m.modelOverride
+            modelEffort      := m.modelEffort
+            workingDirectory := m.workingDirectory
+            project          := m.project
+            ownerUserId      := m.ownerUserId
+            authorityMode    := m.authorityMode
+            placementKind    := m.placementKind
+            reservedDiskGib  := m.reservedDiskGib
+            tagsJson         := m.tagsJson
+            prompt           := delivContent
+            resumeSessionId? := resumeSid?
+            sideQuestion     := isSide
+          }
+          if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
+            return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
+      else
+        let _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso
       if let some tSink := st.telemetrySink? then
         let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
         let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
         observeControlUserPrompt tSink (caller.role == "admin") actorUid? actorUname? mid content nowEpochSec
     let deliveredField :=
       if selectedSkills.isEmpty then ""
-      else s!",\"delivered_prompt\":{jsonEscape (withDirective content selectedSkills)}"
+      else s!",\"delivered_prompt\":{jsonEscape delivContent}"
     let spawnWanted := (bodyJv.fieldBool? "spawn_harness").getD false
-    if spawnWanted then
+    if !dispatchedRemote then
       if let (some mid, some m) := (mid?, mission?) then
-        let deliv := if selectedSkills.isEmpty then content else withDirective content selectedSkills
-        let permMode := (bodyJv.fieldStr? "permission_mode").getD "supervised"
-        discard <| maybeSpawnWarmHarnessTurn st caller m.placementKind mid m.backend m.workingDirectory deliv m.modelOverride m.modelEffort permMode "" false
+        let isSide := (OrbBin.Json.parse m.tagsJson).toOption.bind JVal.asArr? |>.getD #[] |>.any (fun v => v.asStr? == some "side-question")
+        if spawnWanted || (isSide && m.placementKind != "client" && st.warmMgr?.isSome) then
+          let permMode := (bodyJv.fieldStr? "permission_mode").getD (if isSide then "bypassPermissions" else "supervised")
+          if isSide then
+            let mut sid? : Option String := none
+            if let .ok sRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
+              if sRows.size > 1 then
+                let s := (cell sRows[1]! 0).trimAscii.toString
+                if !s.isEmpty then sid? := some s
+            discard <| launchLocalCoreMissionTurn st mid m.backend m.workingDirectory delivContent m.modelOverride m.modelEffort permMode sid? "local" false
+          else
+            discard <| maybeSpawnWarmHarnessTurn st caller m.placementKind mid m.backend m.workingDirectory delivContent m.modelOverride m.modelEffort permMode "" false
     return .ok (mkJson 200 (
-      s!"\{\"id\":{jsonEscape msgId},\"queued\":false,\"message_accepted\":true," ++
+      s!"\{\"id\":{jsonEscape msgId},\"queued\":{if queued then "true" else "false"},\"message_accepted\":true," ++
       s!"\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}{deliveredField}}"))
 
   -- Mission Resume (`POST /api/control/missions/:id/resume`)
@@ -4751,12 +4991,41 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           if selectedSkills.isEmpty then ""
           else s!",\"delivered_prompt\":{jsonEscape (withDirective c selectedSkills)}"
         | none => ""
-      let spawnWanted := (bodyJv.fieldBool? "spawn_harness").getD false
-      if spawnWanted then
-        let rawPrompt := content?.getD "Continue."
-        let deliv := if selectedSkills.isEmpty then rawPrompt else withDirective rawPrompt selectedSkills
-        let permMode := (bodyJv.fieldStr? "permission_mode").getD "supervised"
-        discard <| maybeSpawnWarmHarnessTurn st caller m.placementKind mid m.backend m.workingDirectory deliv m.modelOverride m.modelEffort permMode "" true
+      let rawPrompt := content?.getD "Continue."
+      let deliv := if selectedSkills.isEmpty then rawPrompt else withDirective rawPrompt selectedSkills
+      let nowIso := formatEpochIso8601Utc nowEpochSec
+      if let (some sup, some targetNode) := (st.remoteSup?, ← resolveMissionRemoteNode? st.store st.managedStore? mid) then
+        if m.status != "active" && m.status != "pending" then
+          discard <| appendMissionEvent st.store mid "user_message"
+            (renderCompact (.obj #[("type", .str "user_message"), ("content", .str rawPrompt), ("mission_id", .str mid)])) nowIso
+          let mut resumeSid? : Option String := none
+          if let .ok sRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
+            if sRows.size > 1 then
+              let s := (cell sRows[1]! 0).trimAscii.toString
+              if !s.isEmpty then resumeSid? := some s
+          let spec : RemoteTurnSpec := {
+            missionId        := mid
+            targetNodeId     := targetNode
+            backend          := m.backend
+            modelOverride    := if m.backend == "opencode" && m.modelOverride.isEmpty then "builtin/smart" else m.modelOverride
+            modelEffort      := m.modelEffort
+            workingDirectory := m.workingDirectory
+            project          := m.project
+            ownerUserId      := m.ownerUserId
+            authorityMode    := m.authorityMode
+            placementKind    := m.placementKind
+            reservedDiskGib  := m.reservedDiskGib
+            tagsJson         := m.tagsJson
+            prompt           := deliv
+            resumeSessionId? := resumeSid?
+          }
+          if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
+            return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
+      else
+        let spawnWanted := (bodyJv.fieldBool? "spawn_harness").getD false
+        if spawnWanted then
+          let permMode := (bodyJv.fieldStr? "permission_mode").getD "supervised"
+          discard <| maybeSpawnWarmHarnessTurn st caller m.placementKind mid m.backend m.workingDirectory deliv m.modelOverride m.modelEffort permMode "" true
       return .ok (mkJson 200 s!"\{\"id\":{jsonEscape mid},\"status\":\"active\"{deliveredField}}")
 
   -- Delivered skill catalog (`GET /api/library/skill-delivery`)
@@ -6005,6 +6274,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let cloudHub ← newCloudRuntimeHub
     let providerHub ← newProviderRuntimeHub
     let systemHub ← newSystemRuntimeHub
+    let remoteSup ← newRemoteJobSupervisor (effectiveJwtSecret cfg) cfg.devMode
     let appState : CoreAppState := {
       cfg := cfg
       store := store
@@ -6032,6 +6302,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       cloudHub? := some cloudHub
       providerHub? := some providerHub
       systemHub? := some systemHub
+      remoteSup? := some remoteSup
     }
     if maxRequests?.isNone then
       startCloudSupervisorLoop cloudHub store (some broadcastHub) cfg.port
@@ -6042,7 +6313,21 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         closeCoreStore store
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to bind {bindHost}:{cfg.port}"
         return 1
+    remoteSup.boundPortRef.set boundPort
     IO.eprintln s!"[sandboxed-sh] listening on http://{bindHost}:{boundPort} (dev_mode={cfg.devMode})"
+    if maxRequests?.isNone then
+      let localWakeupLaunch : MissionRecord → String → Option String → IO Bool :=
+        fun mr prompt sid? => do
+          match ← launchLocalCoreMissionTurn appState mr.id mr.backend mr.workingDirectory prompt mr.modelOverride mr.modelEffort "bypassPermissions" sid? "local" false with
+          | .ok _ => return true
+          | .error _ => return false
+      discard <| IO.asTask (prio := .dedicated) do
+        let reattached ← reattachActiveRemoteJobsOnStartup store (some managedStore) (some relayHub) (some broadcastHub) remoteSup cfg.workingDir
+        if reattached > 0 then
+          IO.eprintln s!"[sandboxed-sh] re-attached {reattached} active remote-node job(s)"
+        while true do
+          discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
+          IO.sleep 2000
     let notifySock := ((← IO.getEnv "NOTIFY_SOCKET").getD "").trimAscii.toString
     let simulateWedge := ((← IO.getEnv "SANDBOXED_SH_SIMULATE_WEDGE").getD "") == "1"
     let watchdogUsec := ((← IO.getEnv "WATCHDOG_USEC").bind String.toNat?).getD 0

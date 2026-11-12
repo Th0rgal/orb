@@ -28,6 +28,7 @@ import OrbCore.TelemetryAndVoice
 import OrbCore.LegacyHydrate
 import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
+import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController
 import OrbCore.CloudHttpAndWorker
 import OrbCore.ProviderUsageAndLogin

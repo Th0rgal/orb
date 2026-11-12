@@ -202,7 +202,7 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS mission_terminal_evidence (mission_id TEXT PRIMARY KEY, terminal_reason TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', artifact_ref TEXT NOT NULL DEFAULT '', verified INTEGER NOT NULL DEFAULT 1, evidence TEXT NOT NULL DEFAULT '{}', recorded_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS effect_outbox (effect_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, state_revision INTEGER NOT NULL, intent_kind TEXT NOT NULL, payload_json TEXT NOT NULL, phase INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0, attempt_epoch INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS dispatch_lease_intents (reservation_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, project_slug TEXT NOT NULL, track TEXT NOT NULL, repo TEXT NOT NULL DEFAULT '', authority_mode TEXT NOT NULL DEFAULT 'writer', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT 'preparing', boot_epoch INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
-  "CREATE TABLE IF NOT EXISTS mission_runs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1, execution_state TEXT NOT NULL DEFAULT 'terminal', terminal_reason TEXT NOT NULL DEFAULT '', remote_job_id TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS mission_runs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1, execution_state TEXT NOT NULL DEFAULT 'terminal', owner_actor_id TEXT NOT NULL DEFAULT '', scope_unit TEXT, terminal_reason TEXT NOT NULL DEFAULT '', remote_job_id TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_remote_waits (mission_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, failed_job_id TEXT NOT NULL, scheduled_origin_job_id TEXT NOT NULL DEFAULT '', retries INTEGER NOT NULL DEFAULT 0, max_retries INTEGER NOT NULL DEFAULT 10, replays INTEGER NOT NULL DEFAULT 0, deadline_epoch INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_events (id INTEGER PRIMARY KEY AUTOINCREMENT, mission_id TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0, sequence INTEGER NOT NULL DEFAULT 0, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', timestamp TEXT NOT NULL DEFAULT '', event_id TEXT, tool_call_id TEXT, tool_name TEXT, content TEXT, content_file TEXT, metadata TEXT);" ++
   "CREATE INDEX IF NOT EXISTS idx_missions_updated_at ON missions(updated_at DESC);" ++
@@ -241,7 +241,8 @@ def projectsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS project_crons (slug TEXT NOT NULL, job_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', folder TEXT NOT NULL DEFAULT '', PRIMARY KEY(slug, job_id), UNIQUE(job_id));" ++
   "CREATE TABLE IF NOT EXISTS project_steers (id TEXT PRIMARY KEY NOT NULL, slug TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', consumed_at TEXT, origin TEXT NOT NULL DEFAULT 'orb');" ++
   "CREATE TABLE IF NOT EXISTS controller_archives (slug TEXT NOT NULL, job_id TEXT NOT NULL, PRIMARY KEY(slug, job_id));" ++
-  "CREATE TABLE IF NOT EXISTS project_bindings (slug TEXT PRIMARY KEY NOT NULL, control_session_id TEXT NOT NULL, bound_at TEXT NOT NULL DEFAULT '', bound_by TEXT);"
+  "CREATE TABLE IF NOT EXISTS project_bindings (slug TEXT PRIMARY KEY NOT NULL, control_session_id TEXT NOT NULL, bound_at TEXT NOT NULL DEFAULT '', bound_by TEXT);" ++
+  "CREATE TABLE IF NOT EXISTS mcp_actions_v1 (id TEXT PRIMARY KEY, owner TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL, retry_key TEXT NOT NULL, fingerprint TEXT NOT NULL DEFAULT '', principal TEXT NOT NULL DEFAULT '', tool TEXT NOT NULL, arguments TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL DEFAULT 'succeeded', result TEXT, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', UNIQUE(scope, retry_key));"
 
 def upsertProjectGrantSql : String :=
   "INSERT INTO project_grant (slug, merge_authority, budget_per_tick, parallel_missions, pause_reason, resume_condition, material_bar, autonomy_level, updated_at) " ++
@@ -359,6 +360,8 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE missions ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE missions ADD COLUMN resume_intent INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE mission_runs ADD COLUMN id TEXT;",
+  "ALTER TABLE mission_runs ADD COLUMN owner_actor_id TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE mission_runs ADD COLUMN scope_unit TEXT;",
   "ALTER TABLE mission_runs ADD COLUMN terminal_reason TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE mission_runs ADD COLUMN remote_job_id TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE mission_runs ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';",
@@ -468,7 +471,8 @@ def projectsAdditiveAlters : Array String := #[
   "ALTER TABLE context_conflicts ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE context_conflicts ADD COLUMN directory INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE context_conflicts ADD COLUMN delete_flag INTEGER NOT NULL DEFAULT 0;",
-  "ALTER TABLE context_conflicts ADD COLUMN source TEXT NOT NULL DEFAULT '';"
+  "ALTER TABLE context_conflicts ADD COLUMN source TEXT NOT NULL DEFAULT '';",
+  "CREATE TABLE IF NOT EXISTS mcp_actions_v1 (id TEXT PRIMARY KEY, owner TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL, retry_key TEXT NOT NULL, fingerprint TEXT NOT NULL DEFAULT '', principal TEXT NOT NULL DEFAULT '', tool TEXT NOT NULL, arguments TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL DEFAULT 'succeeded', result TEXT, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', UNIQUE(scope, retry_key));"
 ]
 
 def idempotencyAdditiveAlters : Array String := #[
@@ -910,12 +914,15 @@ def stripLegacyOrbFolderTags (tags : Array String) : Array String × Option Stri
 def insertMissionRunUnlocked
     (db : SqliteDb)
     (runId missionId generation executionState terminalReason remoteJobId updatedAt : String)
-    (orReplace : Bool := false) : IO (Except String (Array (Array String))) := do
+    (orReplace : Bool := false)
+    (ownerActorId : String := "orb-core")
+    (scopeUnit : String := "") : IO (Except String (Array (Array String))) := do
   let colsRes ← sqliteQueryRowsRaw db.handle "PRAGMA table_info(mission_runs);" #[]
   let mut hasRunId := false
   let mut hasStartedAt := false
   let mut hasOwnerActorId := false
   let mut hasHeartbeatAt := false
+  let mut hasScopeUnit := false
   if let .ok cols := colsRes then
     for i in [1:cols.size] do
       let colName := ((cols[i]?.bind (·[1]?)).getD "").toLower
@@ -923,13 +930,25 @@ def insertMissionRunUnlocked
       if colName == "started_at" then hasStartedAt := true
       if colName == "owner_actor_id" then hasOwnerActorId := true
       if colName == "heartbeat_at" then hasHeartbeatAt := true
+      if colName == "scope_unit" then hasScopeUnit := true
   let effTs := if updatedAt.isEmpty then "1970-01-01T00:00:00Z" else updatedAt
-  if hasRunId && hasOwnerActorId && hasHeartbeatAt then
+  let effActor := if ownerActorId.isEmpty then "orb-core" else ownerActorId
+  if executionState != "terminal" && executionState != "completed" && executionState != "failed" && executionState != "aborted" then
+    discard <| sqliteQueryRowsRaw db.handle
+      "UPDATE mission_runs SET execution_state='terminal', updated_at=?2 WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
+      #[missionId, effTs]
+  if hasRunId && hasOwnerActorId && hasHeartbeatAt && hasScopeUnit then
+    sqliteQueryRowsRaw db.handle
+      ("INSERT INTO mission_runs(run_id,id,mission_id,generation,execution_state,owner_actor_id,scope_unit,terminal_reason,remote_job_id,started_at,heartbeat_at,updated_at) " ++
+       "VALUES(?1,?1,?2,CAST(?3 AS INTEGER),?4,?8,NULLIF(?9,''),?5,?6,?7,?7,?7) " ++
+       "ON CONFLICT(mission_id,generation) DO UPDATE SET execution_state=excluded.execution_state,owner_actor_id=excluded.owner_actor_id,scope_unit=COALESCE(excluded.scope_unit,mission_runs.scope_unit),terminal_reason=excluded.terminal_reason,remote_job_id=excluded.remote_job_id,heartbeat_at=excluded.heartbeat_at,updated_at=excluded.updated_at;")
+      #[runId, missionId, generation, executionState, terminalReason, remoteJobId, effTs, effActor, scopeUnit]
+  else if hasRunId && hasOwnerActorId && hasHeartbeatAt then
     sqliteQueryRowsRaw db.handle
       ("INSERT INTO mission_runs(run_id,id,mission_id,generation,execution_state,owner_actor_id,terminal_reason,remote_job_id,started_at,heartbeat_at,updated_at) " ++
-       "VALUES(?1,?1,?2,CAST(?3 AS INTEGER),?4,'orb-core',?5,?6,?7,?7,?7) " ++
-       "ON CONFLICT(mission_id,generation) DO UPDATE SET execution_state=excluded.execution_state,terminal_reason=excluded.terminal_reason,remote_job_id=excluded.remote_job_id,heartbeat_at=excluded.heartbeat_at,updated_at=excluded.updated_at;")
-      #[runId, missionId, generation, executionState, terminalReason, remoteJobId, effTs]
+       "VALUES(?1,?1,?2,CAST(?3 AS INTEGER),?4,?8,?5,?6,?7,?7,?7) " ++
+       "ON CONFLICT(mission_id,generation) DO UPDATE SET execution_state=excluded.execution_state,owner_actor_id=excluded.owner_actor_id,terminal_reason=excluded.terminal_reason,remote_job_id=excluded.remote_job_id,heartbeat_at=excluded.heartbeat_at,updated_at=excluded.updated_at;")
+      #[runId, missionId, generation, executionState, terminalReason, remoteJobId, effTs, effActor]
   else
     let verb := if orReplace then "INSERT OR REPLACE" else "INSERT"
     if hasRunId && hasStartedAt then
@@ -940,6 +959,10 @@ def insertMissionRunUnlocked
       sqliteQueryRowsRaw db.handle
         s!"{verb} INTO mission_runs(run_id,id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?1,?2,?3,?4,?5,?6,?7);"
         #[runId, missionId, generation, executionState, terminalReason, remoteJobId, effTs]
+    else if hasOwnerActorId && hasScopeUnit then
+      sqliteQueryRowsRaw db.handle
+        s!"{verb} INTO mission_runs(id,mission_id,generation,execution_state,owner_actor_id,scope_unit,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,?4,?8,NULLIF(?9,''),?5,?6,?7);"
+        #[runId, missionId, generation, executionState, terminalReason, remoteJobId, updatedAt, effActor, scopeUnit]
     else
       sqliteQueryRowsRaw db.handle
         s!"{verb} INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7);"
@@ -1831,7 +1854,8 @@ def getMission? (st : CoreStore) (missionId : String) : IO (Option MissionRecord
      "COALESCE(authority_mode,'writer'),COALESCE(state_revision,1),COALESCE(tags,'[]'),COALESCE(folder,'')," ++
      "COALESCE(placement_revision,0),COALESCE(parent_mission_id,''),COALESCE(NULLIF(created_at,''),updated_at)," ++
      "COALESCE(metadata_updated_at,''),COALESCE(workspace_id,'00000000-0000-0000-0000-000000000000')," ++
-     "COALESCE(short_description,''),COALESCE(track,''),COALESCE(NULLIF(github_pr,''),repo,'') FROM missions WHERE id=?1;") #[missionId] with
+     "COALESCE(short_description,''),COALESCE(track,''),COALESCE(NULLIF(github_pr,''),repo,'')," ++
+     "COALESCE(run_generation,1),COALESCE(reserved_disk_gib,0),COALESCE(owner_epoch,1),COALESCE(node_boot_epoch,1) FROM missions WHERE id=?1;") #[missionId] with
   | .error _ => return none
   | .ok rows =>
     if rows.size ≤ 1 then return none
@@ -1861,6 +1885,10 @@ def getMission? (st : CoreStore) (missionId : String) : IO (Option MissionRecord
       shortDescription  := (r[21]?).getD ""
       track             := (r[22]?).getD ""
       repo              := (r[23]?).getD ""
+      runGeneration     := (((r[24]?).bind String.toNat?).getD 1).toUInt64
+      reservedDiskGib   := (((r[25]?).bind String.toNat?).getD 0).toUInt64
+      ownerEpoch        := (((r[26]?).bind String.toNat?).getD 1).toUInt64
+      nodeBootEpoch     := (((r[27]?).bind String.toNat?).getD 1).toUInt64
     }
 
 /-- List all mission status strings currently persisted in `missions.db`. -/
@@ -4020,8 +4048,15 @@ def resolveMissionProxyToken?
     let uid := (r[1]?).getD ""
     let exp := (((r[2]?).bind String.toNat?).getD 0).toUInt64
     let rev := ((r[3]?).getD "0") != "0"
-    if rev || nowEpoch >= exp || mid.isEmpty || uid.isEmpty then return none
+    if rev || nowEpoch >= exp || mid.isEmpty then return none
     return some (mid, uid)
+
+def revokeSingleMissionProxyToken (st : CoreStore) (rawTok : String) : IO Unit := do
+  let clean := rawTok.trimAscii.toString
+  if clean.startsWith "orb-mpt-v1_" then
+    let tokSha := bytesToHexLower (sha256Bytes clean.toUTF8)
+    discard <| execParamQuery st.missionsDb
+      "UPDATE mission_proxy_tokens SET revoked=1 WHERE token_sha256=?1;" #[tokSha]
 
 def revokeMissionProxyTokensForMission (st : CoreStore) (missionId : String) : IO Unit := do
   discard <| execParamQuery st.missionsDb

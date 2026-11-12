@@ -366,7 +366,9 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
     const reason=mission.remote_job?.error||mission.status_message;
     const hint=toolItems.length>0
      ?'Check its activity for tool errors, then retry.'
-     :'The model returned an empty completion without running any tools; retry to start a clean side session.';
+     :mission.status==='awaiting_user'
+      ?'The side agent turn did not start on Core; retry to start a clean side session.'
+      :'The model returned an empty completion without running any tools; retry to start a clean side session.';
     throw new Error(`No response was captured from the side agent (${mission.status}${reason?`: ${reason}`:''}). ${hint}`);
    }
    if(s.pendingCursor){s.conversationCursor=s.pendingCursor;delete s.pendingCursor;}
@@ -581,7 +583,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   await watchBtw(parent,signal,receive);
  }catch(error){
   const msg=error instanceof Error?error.message:String(error);
-  if(allowCleanRetry&&reusedExisting&&!signal.aborted&&connectionVersion()===version&&msg.includes('The model returned an empty completion without running any tools')){
+  if(allowCleanRetry&&reusedExisting&&!signal.aborted&&connectionVersion()===version&&(msg.includes('The model returned an empty completion without running any tools')||msg.includes('The side agent turn did not start on Core'))){
    receive({type:'status',text:'Starting clean side session…'});
    await askBtwAgent(parent,question,context,history,signal,receive,attachments,launchSignal,crypto.randomUUID(),false);
    return;

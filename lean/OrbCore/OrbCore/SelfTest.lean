@@ -32,6 +32,7 @@ open OrbCore.LegacyHydrate
 open OrbCore.SecretAndApproval
 open OrbCore.RemoteFleetAndRelay
 open OrbCore.ProjectFilesAndController
+open OrbCore.RemoteDispatch
 open OrbCore.McpGateway
 open OrbCore.CloudHttpAndWorker
 open OrbCore.ProviderUsageAndLogin
@@ -5393,6 +5394,323 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   cleanup
   return 0
 
+set_option maxHeartbeats 1200000 in
+private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt32 := do
+  let ts ← IO.monoNanosNow
+  let workRoot := s!"/tmp/orb_remote_btw_wakeup_{ts}"
+  let dataRoot := s!"{workRoot}/.sandboxed-sh"
+  discard <| (IO.FS.removeDirAll workRoot).toBaseIO
+  IO.FS.createDirAll (System.FilePath.mk s!"{dataRoot}/missions")
+
+  let .ok (nodeListenFd, nodePort) ← tcpListen "127.0.0.1" 0 32
+    | do IO.eprintln "[orb-core-test] FAIL: mock OrbNode listen failed"; return 1
+
+  let stopMockRef ← IO.mkRef false
+  let submittedJobsRef ← IO.mkRef (#[] : Array OrbBin.Json.JVal)
+  let cancelledJobsRef ← IO.mkRef (#[] : Array String)
+  let jobSeqRef ← IO.mkRef (0 : Nat)
+  let ndjsonLines :=
+    "{\"type\":\"tool_use\",\"sessionID\":\"ses_mock1\",\"part\":{\"id\":\"call_1\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"input\":{\"command\":\"ls\"}}}}\n" ++
+    "{\"type\":\"text\",\"sessionID\":\"ses_mock1\",\"part\":{\"text\":\"Babylon progress is 94%.\"}}\n"
+  let ndjsonLen := ndjsonLines.utf8ByteSize
+
+  let mockTask ← IO.asTask (prio := .dedicated) do
+    while !(← stopMockRef.get) do
+      match ← tcpAcceptPoll nodeListenFd 80 with
+      | .error _ => pure ()
+      | .ok cfd =>
+        match ← readHttpRequestFromFd cfd none 2000 with
+        | .error _ => discard <| closeFd cfd
+        | .ok req =>
+          let authOk := req.headers.any (fun (k, v) =>
+            k.toLower == "authorization" && v.trimAscii.toString == "Bearer mock-node-secret-token")
+          let (statusLine, respBody) ←
+            if !authOk then
+              pure ("401 Unauthorized", "{\"error\":\"unauthorized\"}")
+            else if req.method == "POST" && req.path == "/jobs" then do
+              let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD (.obj #[])
+              submittedJobsRef.modify (·.push jv)
+              let ltok := (jv.fieldStr? "lease_token").getD ""
+              let pl := (jv.field? "payload").getD (.obj #[])
+              let mid := (jv.fieldStr? "mission_id").getD ((pl.fieldStr? "mission_id").getD "")
+              if ltok.isEmpty then
+                pure ("400 Bad Request", "{\"error\":\"missing_lease_token\"}")
+              else if mid == "m-btw-fail" then
+                pure ("503 Service Unavailable", "{\"error\":\"node_overloaded\"}")
+              else do
+                let n ← jobSeqRef.modifyGet (fun c => (c + 1, c + 1))
+                let jid := s!"job-mock-{n}"
+                pure ("200 OK", s!"\{\"job_id\":{jsonEscape jid},\"state\":\"running\"}")
+            else if req.method == "GET" && req.path.startsWith "/jobs/" && (req.path.splitOn "/log").length > 1 then do
+              let qParts := req.path.splitOn "offset="
+              let off := match qParts[1]? with
+                | some tail => ((tail.splitOn "&")[0]?.bind String.toNat?).getD 0
+                | none => 0
+              let chunk := if off ≥ ndjsonLen then "" else ndjsonLines
+              let bodyJson := OrbBin.Json.renderCompact (.obj #[
+                ("job_id", .str "job-mock"),
+                ("offset", .nat off),
+                ("next_offset", .nat ndjsonLen),
+                ("log_len", .nat ndjsonLen),
+                ("data", .str chunk),
+                ("state", .str "succeeded")
+              ])
+              pure ("200 OK", bodyJson)
+            else if req.method == "POST" && req.path.startsWith "/jobs/" && req.path.endsWith "/cancel" then do
+              let p0 := (req.path.drop 6).toString
+              let jid := (p0.splitOn "/cancel")[0]?.getD ""
+              cancelledJobsRef.modify (·.push jid)
+              pure ("200 OK", s!"\{\"job_id\":{jsonEscape jid},\"state\":\"cancelled\",\"cancel_requested\":true}")
+            else if req.method == "GET" && req.path.startsWith "/jobs/" then do
+              let jid := ((req.path.drop 6).toString.splitOn "?")[0]?.getD ""
+              pure ("200 OK", s!"\{\"job_id\":{jsonEscape jid},\"state\":\"succeeded\",\"exit_code\":0}")
+            else
+              pure ("404 Not Found", "{\"error\":\"not_found\"}")
+          let bBytes := respBody.toUTF8
+          let wire :=
+            (s!"HTTP/1.1 {statusLine}\r\nContent-Type: application/json\r\n" ++
+             s!"Content-Length: {bBytes.size}\r\nConnection: close\r\n\r\n").toUTF8 ++ bBytes
+          discard <| writeAll cfd wire false
+          discard <| closeFd cfd
+    discard <| closeFd nodeListenFd
+
+  OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES" s!"mocknode=http://127.0.0.1:{nodePort}|SANDBOXED_REMOTE_NODE_MOCKNODE_TOKEN"
+  OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODE_MOCKNODE_TOKEN" "mock-node-secret-token"
+  OrbBin.PosixExt.setenvVar "SANDBOXED_PUBLIC_URL" "http://127.0.0.1:13000"
+
+  let stopEnvAndMock : IO Unit := do
+    stopMockRef.set true
+    let _ := mockTask.get
+    OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES"
+    OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODE_MOCKNODE_TOKEN"
+    OrbBin.PosixExt.unsetenvVar "SANDBOXED_PUBLIC_URL"
+    discard <| (IO.FS.removeDirAll workRoot).toBaseIO
+
+  let store ← match ← openCoreStore dataRoot 0 "prod" with
+    | .ok s => pure s
+    | .error e => stopEnvAndMock; IO.eprintln s!"[orb-core-test] FAIL: openCoreStore remote test failed: {e}"; return 1
+  let .ok () ← ensureQueueContSchema store
+    | do closeCoreStore store; stopEnvAndMock; IO.eprintln "[orb-core-test] FAIL: ensureQueueContSchema remote test failed"; return 1
+  let .ok mStore ← openManagedComputeStore s!"{dataRoot}/managed_compute.db"
+    | do closeCoreStore store; stopEnvAndMock; IO.eprintln "[orb-core-test] FAIL: openManagedComputeStore remote test failed"; return 1
+
+  let fail (msg : String) : IO UInt32 := do
+    closeManagedComputeStore mStore
+    closeCoreStore store
+    stopEnvAndMock
+    IO.eprintln s!"[orb-core-test] FAIL (remote-dispatch-wakeup-btw): {msg}"
+    return 1
+
+  let jwtSec := "remote-btw-wakeup-jwt-secret-0123456789abcdef"
+  let nowSec : UInt64 := 1794400000
+  let hsJwt := issueHs256Jwt jwtSec "prod" "admin" nowSec (nowSec + 86400) "admin"
+  let cfg : CoreConfig := {
+    host := "127.0.0.1"
+    port := 13000
+    workingDir := workRoot
+    devMode := false
+    dashboardPassword := "strong-prod-pass-1234"
+    jwtSecret := jwtSec
+  }
+  let _ ← bootstrapUsersAndBackfill store #[("admin", cfg.dashboardPassword)] (formatEpochIso8601Utc nowSec)
+  let managedRef ← IO.mkRef ({ enabled := true, boatEnabled := true, dailyCapCents := 5000, maxConcurrent := 20 } : ManagedFleetState)
+  let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
+  let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
+  let seqRef ← IO.mkRef (0 : UInt64)
+  let bHub ← newBroadcastHub
+  let rHub ← newRelayHub 0
+  let remSup ← newRemoteJobSupervisor jwtSec false
+  remSup.boundPortRef.set 13000
+  let appSt : CoreAppState := {
+    cfg := cfg
+    store := store
+    searchIdx? := none
+    managedRef := managedRef
+    chainsRef := chainsRef
+    proxyCooldownsRef := cooldownsRef
+    seqRef := seqRef
+    managedStore? := some mStore
+    broadcastHub? := some bHub
+    relayHub? := some rHub
+    remoteSup? := some remSup
+  }
+
+  let sendJson (method path tok body : String) : IO (Nat × String) := do
+    let bBytes := body.toUTF8
+    let authLine := if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n"
+    let rawWire :=
+      (s!"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authLine}" ++
+       s!"Content-Type: application/json\r\nContent-Length: {bBytes.size}\r\n\r\n").toUTF8 ++ bBytes
+    match parseRequest rawWire none with
+    | .error _ => return (599, "parse_err")
+    | .ok req =>
+      match ← dispatchCoreRequest appSt req nowSec with
+      | .error _ => return (101, "")
+      | .ok r => return (r.status, (String.fromUTF8? r.body).getD "")
+
+  -- Seed remote parent mission `m-parent-rem` placed on `mocknode` via `mission_runs.scope_unit = 'remote-node:mocknode'`
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO missions(id,title,status,backend,working_directory,project,placement_kind,tags,run_generation,created_at,updated_at) " ++
+     "VALUES('m-parent-rem','leanvm faster','active','opencode','','leanvm','managed','[]',1,'2026-11-12T06:00:00Z','2026-11-12T06:05:00Z');") #[]
+  let _ ← store.missionsDb.mu.atomically do
+    insertMissionRunUnlocked store.missionsDb
+      "r-parent-1" "m-parent-rem" "1" "running" "" "" "2026-11-12T06:05:00Z" false "orb-core" "remote-node:mocknode"
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO mission_events(mission_id,seq,sequence,event_type,timestamp,content) VALUES" ++
+     "('m-parent-rem',1,1,'user_message','2026-11-12T06:00:01Z','Benchmark leanvm on babylon')," ++
+     "('m-parent-rem',2,2,'assistant_message','2026-11-12T06:04:00Z','Wave 3 running on babylon.');") #[]
+
+  -- 1. Live `/btw/agent` inherits `mocknode`, keeps `working_directory=''` + `fork-workspace:m-parent-rem`, launches turn, streams NDJSON
+  let (btwSt, btwBody) ← sendJson "POST" "/api/control/missions/m-parent-rem/btw/agent" hsJwt
+    "{\"id\":\"m-btw-ok\",\"idempotency_key\":\"btw-idem-ok\",\"side_question\":\"où en est le run ?\",\"side_context_mode\":\"incremental\"}"
+  if btwSt != 201 ||
+     (btwBody.splitOn "\"status\":\"active\"").length < 2 ||
+     (btwBody.splitOn "\"remote_node_id\":\"mocknode\"").length < 2 then
+    return (← fail s!"/btw/agent expected 201 active on mocknode, got {btwSt}: {btwBody}")
+
+  let mut btwCompleted := false
+  for _ in [0:80] do
+    if !btwCompleted then
+      if let .ok rs ← execParamQuery store.missionsDb "SELECT status FROM missions WHERE id='m-btw-ok';" #[] then
+        if ((rs[1]?.bind (·[0]?)).getD "") == "completed" then
+          btwCompleted := true
+      if !btwCompleted then
+        IO.sleep 30
+  if !btwCompleted then
+    return (← fail "m-btw-ok did not complete within 2.4s")
+
+  let jobs1 ← submittedJobsRef.get
+  let j0 := jobs1[0]?.getD (.obj #[])
+  let j0Pl := (j0.field? "payload").getD (.obj #[])
+  let j0Cmd := (j0Pl.fieldStr? "command").getD ""
+  let j0Env := (j0Pl.field? "env").getD (.obj #[])
+  let j0ProxyKey := (j0Env.fieldStr? "SANDBOXED_PROXY_API_KEY").getD ""
+  let j0McpTok := (j0Env.fieldStr? "SANDBOXED_MCP_TOKEN").getD ""
+  if (j0Pl.fieldBool? "side_question") != some true ||
+     (j0Cmd.splitOn "fork_dir=\"$fork_root/m-parent-rem\"").length < 2 ||
+     (j0Cmd.splitOn "opencode run --format json").length < 2 ||
+     !j0ProxyKey.startsWith "orb-mpt-v1_" ||
+     !j0McpTok.startsWith "mcp1." then
+    return (← fail s!"m-btw-ok job payload mismatch: cmd={j0Cmd} proxyKey={j0ProxyKey.take 12} mcpTok={j0McpTok.take 8}")
+
+  let btwRowRes ← execParamQuery store.missionsDb
+    "SELECT working_directory, session_id, updated_at FROM missions WHERE id='m-btw-ok';" #[]
+  let btwWd := match btwRowRes with | .ok rs => (rs[1]?.bind (·[0]?)).getD "x" | .error _ => "x"
+  let btwSid := match btwRowRes with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  let btwUpd := match btwRowRes with | .ok rs => (rs[1]?.bind (·[2]?)).getD "" | .error _ => ""
+  let btwEvRes ← execParamQuery store.missionsDb
+    "SELECT event_type, COALESCE(content, payload, '') FROM mission_events WHERE mission_id='m-btw-ok' ORDER BY id ASC;" #[]
+  let btwEvStr := match btwEvRes with | .ok rs => rowsToJsonArray rs | .error _ => ""
+  if btwWd != "" || btwSid != "ses_mock1" || !btwUpd.endsWith "Z" || (btwUpd.splitOn "T").length < 2 ||
+     (btwEvStr.splitOn "tool_result").length < 2 ||
+     (btwEvStr.splitOn "Babylon progress is 94%.").length < 2 then
+    return (← fail s!"m-btw-ok post-run DB mismatch: wd={btwWd} sid={btwSid} upd={btwUpd} evs={btwEvStr}")
+
+  -- 2. Fail-closed `/btw/agent`: when remote node returns 503, returns HTTP 502 and leaves zero orphan `awaiting_user` rows
+  let (failBtwSt, failBtwBody) ← sendJson "POST" "/api/control/missions/m-parent-rem/btw/agent" hsJwt
+    "{\"id\":\"m-btw-fail\",\"idempotency_key\":\"btw-idem-fail\",\"side_question\":\"test fail\",\"side_context_mode\":\"clean\"}"
+  let orphanRes ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM missions WHERE id='m-btw-fail';" #[]
+  let orphanCnt := match orphanRes with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 99 | .error _ => 99
+  if failBtwSt != 502 || orphanCnt != 0 then
+    return (← fail s!"fail-closed /btw/agent expected 502 and 0 orphans, got st={failBtwSt} cnt={orphanCnt} body={failBtwBody}")
+
+  -- 3. MCP `schedule_wakeup` + `get_action` + `wait_actions` + idempotent replay + executor self-confinement + firing due wakeup
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE missions SET status='awaiting_user', session_id='ses_parent_prev', updated_at='2026-11-12T06:10:00Z' WHERE id='m-parent-rem';" #[]
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE mission_runs SET execution_state='terminal', updated_at='2026-11-12T06:10:00Z' WHERE mission_id='m-parent-rem';" #[]
+  let (wSessSt, wSessBody) ← sendJson "POST" "/api/mcp/session" hsJwt
+    "{\"mission_id\":\"m-parent-rem\",\"role\":\"worker\",\"project\":\"leanvm\"}"
+  let wMcpTok := ((OrbBin.Json.parse wSessBody).toOption.getD (.obj #[]) |>.fieldStr? "token").getD ""
+  if wSessSt != 200 || !wMcpTok.startsWith "mcp1." then
+    return (← fail s!"mint worker MCP session failed: {wSessSt} {wSessBody}")
+
+  let (_, crossWakeBody) ← sendJson "POST" "/api/mcp/call" wMcpTok
+    "{\"name\":\"schedule_wakeup\",\"arguments\":{\"mission_id\":\"other-mission\",\"delay_seconds\":60,\"prompt\":\"nope\",\"reason\":\"test\",\"idempotency_key\":\"wk-cross\"}}"
+  if (crossWakeBody.splitOn "\"forbidden\"").length < 2 then
+    return (← fail s!"worker session should forbid cross-mission schedule_wakeup: {crossWakeBody}")
+
+  let wakeCallPayload :=
+    "{\"name\":\"schedule_wakeup\",\"arguments\":{\"delay_seconds\":60,\"prompt\":\"Check wave 4\",\"reason\":\"poll\",\"idempotency_key\":\"wk-idem-1\"}}"
+  let (wkSt1, wkBody1) ← sendJson "POST" "/api/mcp/call" wMcpTok wakeCallPayload
+  let (wkSt2, wkBody2) ← sendJson "POST" "/api/mcp/call" wMcpTok wakeCallPayload
+  let wkRes1 := ((OrbBin.Json.parse wkBody1).toOption.getD (.obj #[]) |>.field? "result").getD (.obj #[])
+  let wkRes2 := ((OrbBin.Json.parse wkBody2).toOption.getD (.obj #[]) |>.field? "result").getD (.obj #[])
+  let wkActId1 := (wkRes1.fieldStr? "action_id").getD ""
+  let wkActId2 := (wkRes2.fieldStr? "action_id").getD ""
+  let wkContId1 := (wkRes1.fieldStr? "continuation_id").getD ""
+  if wkSt1 != 200 || wkSt2 != 200 || wkActId1.isEmpty || wkContId1.isEmpty || wkActId1 != wkActId2 then
+    return (← fail s!"schedule_wakeup / idempotent replay failed: b1={wkBody1} b2={wkBody2}")
+
+  let (gaSt, gaBody) ← sendJson "POST" "/api/mcp/call" wMcpTok
+    s!"\{\"name\":\"get_action\",\"arguments\":\{\"action_id\":{jsonEscape wkActId1}}}"
+  let (waSt, waBody) ← sendJson "POST" "/api/mcp/call" wMcpTok
+    s!"\{\"name\":\"wait_actions\",\"arguments\":\{\"action_ids\":[{jsonEscape wkActId1}]}}"
+  if gaSt != 200 || (gaBody.splitOn "\"state\":\"succeeded\"").length < 2 ||
+     waSt != 200 || (waBody.splitOn "\"all_succeeded\":true").length < 2 then
+    return (← fail s!"get_action / wait_actions failed: ga={gaBody} wa={waBody}")
+
+  let preJobsCnt := (← submittedJobsRef.get).size
+  discard <| tickContinuationScheduler store (some mStore) (some rHub) (some bHub) remSup none workRoot none (some (nowSec + 61))
+  let postJobs ← submittedJobsRef.get
+  if postJobs.size != preJobsCnt + 1 then
+    return (← fail s!"tickContinuationScheduler did not dispatch due wakeup job: pre={preJobsCnt} post={postJobs.size}")
+  let wkJobCmd := (((postJobs.back?.getD (.obj #[])).field? "payload").getD (.obj #[]) |>.fieldStr? "command").getD ""
+  if (wkJobCmd.splitOn "--session 'ses_parent_prev'").length < 2 then
+    return (← fail s!"woken remote turn did not resume ses_parent_prev: cmd={wkJobCmd}")
+  let mut parentDone := false
+  for _ in [0:80] do
+    if !parentDone then
+      if let .ok rs ← execParamQuery store.missionsDb "SELECT status FROM missions WHERE id='m-parent-rem';" #[] then
+        if ((rs[1]?.bind (·[0]?)).getD "") == "completed" then
+          parentDone := true
+      if !parentDone then
+        IO.sleep 30
+  if !parentDone then
+    return (← fail "woken m-parent-rem did not reach completed")
+
+  -- 4. Legacy `automations` migration + recurring `interval:<secs>` re-arm + parking in `awaiting_user` while armed
+  let legPastIso := formatEpochIso8601Utc (nowSec - 600)
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO missions(id,title,status,backend,working_directory,project,placement_kind,tags,session_id,run_generation,created_at,updated_at) " ++
+     "VALUES('m-legacy-auto','ldgr','completed','opencode','','ldgr','managed','[\"remote-node:mocknode\"]','ses_ldgr1',2,?1,?1);") #[legPastIso]
+  let _ ← execParamQuery store.missionsDb
+    ("CREATE TABLE IF NOT EXISTS automations (" ++
+     "id TEXT PRIMARY KEY NOT NULL, mission_id TEXT NOT NULL, command_source_type TEXT NOT NULL DEFAULT 'inline', " ++
+     "command_source_data TEXT NOT NULL, trigger_type TEXT NOT NULL, trigger_data TEXT NOT NULL, " ++
+     "active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, last_triggered_at TEXT, " ++
+     "stop_policy TEXT NOT NULL DEFAULT 'never', fresh_session TEXT NOT NULL DEFAULT 'keep', retry_config TEXT NOT NULL DEFAULT '{}');") #[]
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO automations(id,mission_id,command_source_data,trigger_type,trigger_data,active,created_at,last_triggered_at) " ++
+     "VALUES('auto-ldgr-1','m-legacy-auto','{\"content\":\"Check Ashur wave\"}','interval','{\"seconds\":120}',1,?1,?1);") #[legPastIso]
+
+  let preLegJobs := (← submittedJobsRef.get).size
+  discard <| tickContinuationScheduler store (some mStore) (some rHub) (some bHub) remSup none workRoot none (some (nowSec + 300))
+  let postLegJobs := (← submittedJobsRef.get).size
+  let autoActiveRes ← execParamQuery store.missionsDb "SELECT active FROM automations WHERE id='auto-ldgr-1';" #[]
+  let autoActive := match autoActiveRes with | .ok rs => (rs[1]?.bind (·[0]?)).getD "1" | .error _ => "1"
+  let rearmedRes ← execParamQuery store.missionsDb
+    "SELECT COUNT(*) FROM mission_continuations WHERE mission_id='m-legacy-auto' AND phase=1 AND recurrence='interval:120';" #[]
+  let rearmedCnt := match rearmedRes with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
+  if postLegJobs != preLegJobs + 1 || autoActive != "0" || rearmedCnt != 1 then
+    return (← fail s!"legacy automations migration / interval re-arm failed: jobs={preLegJobs}->{postLegJobs} active={autoActive} rearmed={rearmedCnt}")
+
+  let mut legParked := false
+  for _ in [0:80] do
+    if !legParked then
+      if let .ok rs ← execParamQuery store.missionsDb "SELECT status FROM missions WHERE id='m-legacy-auto';" #[] then
+        if ((rs[1]?.bind (·[0]?)).getD "") == "awaiting_user" then
+          legParked := true
+      if !legParked then
+        IO.sleep 30
+  if !legParked then
+    return (← fail "m-legacy-auto with armed recurring interval did not park in awaiting_user after turn completion")
+
+  closeManagedComputeStore mStore
+  closeCoreStore store
+  stopEnvAndMock
+  return 0
+
 set_option maxHeartbeats 800000 in
 set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
@@ -6557,6 +6875,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runZeroWaitPerfAndSyncTests prodValid) != 0 then return 1
   if (← runOrbUriCorsTests) != 0 then return 1
   if (← runProdParityAndMissionMoveTests prodValid) != 0 then return 1
+  if (← runRemoteDispatchWakeupAndBtwTests prodValid) != 0 then return 1
 
   IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":10,\"host_tests\":101}"
   return 0
