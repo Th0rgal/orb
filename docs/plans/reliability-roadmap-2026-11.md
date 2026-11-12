@@ -33,9 +33,9 @@ Shipped today in this class: `resume_mission` honours `content` and `title`
 | # | Item | Owner | State | Done when |
 | --- | --- | --- | --- | --- |
 | B1 | Restore archived Boat machines | Boat mission | done, unverified live | One archived machine comes back with its files |
-| B2 | `extend_managed_machine` works for the owner lineage and the operator, accepts `<id>` and `managed-<id>` | Boat mission | wip | A dev machine is extended through MCP |
-| B3 | Expired machines are destroyed at the provider; the owner gets a warning event before expiry | Boat mission | wip | A dev machine is destroyed at expiry with an event; no `ready` row past expiry |
-| B4 | Auto-extension while busy, or correct the tool text that promises it | Boat mission | wip | Behaviour and description agree |
+| B2 | `extend_managed_machine` works for the owner lineage and the operator, accepts `<id>` and `managed-<id>` | Boat mission | merged, unverified live | A dev machine is extended through MCP |
+| B3 | Expired machines are destroyed at the provider; the owner gets a warning event before expiry | Boat mission | merged, unverified live | A dev machine is destroyed at expiry with an event; no `ready` row past expiry |
+| B4 | Auto-extension while busy, or correct the tool text that promises it | Boat mission | merged: text corrected, no auto-extension | Behaviour and description agree |
 | B5 | Harvest: pull a git bundle from a VM to a trusted node through Core, no token on the VM | Boat mission | todo | A worker's commits reach a trusted node without base64 in transcripts |
 | B6 | lean.ci provider, then Colab | providers mission | wip (groundwork merged) | A lean.ci machine is rented, used and destroyed on dev, then prod |
 | B7 | Sealing authority requires a real operator identity regardless of dev mode | providers mission | wip | Dev-mode login token is refused by the sealing gate |
