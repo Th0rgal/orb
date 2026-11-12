@@ -14,10 +14,18 @@ account or an installed native bundle was checked.
 - The original screenshot files were not included in this mission. Items below
   record the reported symptom and executable reproduction, not invented details
   about those screenshots.
-- Chromium is available using isolated userspace libraries. WebKit was downloaded
-  but cannot launch with the host's missing WPE/media dependencies; package sources
-  do not provide all of them. No system/root changes were made. macOS visual
-  references, native shell installation, iOS and Android were not verified.
+- Chromium is available using isolated userspace libraries. The full browser gate
+  finished with **377 passed, 1 skipped, 122 failed**. All 122 failure sections
+  were `browserType.launch` errors reporting missing WebKit GTK/media libraries;
+  none was a client assertion failure. Further userspace dependency setup did
+  not yield a working WebKit smoke session (it hung and was stopped). No system/
+  root changes were made; a temporary browser-cache wrapper change was reverted.
+  macOS visual references, native installation, iOS and Android were not verified.
+- Full gate: `pnpm build` and `pnpm check:bundle` passed; `pnpm test` finished
+  **2,174 passed, 3 skipped**. Node 22 needed `NODE_OPTIONS=--experimental-strip-types`
+  for the bundle script's TypeScript import. Targeted status tests and production
+  build/bundle were rerun after the last status-owner cleanup. Generated browser
+  screenshots were inspected and removed/restored rather than committed.
 
 ## 1. Turn end incorrectly looks like mission completion (C1)
 
