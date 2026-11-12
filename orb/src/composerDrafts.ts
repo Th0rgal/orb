@@ -111,7 +111,7 @@ async function idbDelete(key: string): Promise<void> {
   });
 }
 
-async function readRecordWithMigration<T>(key: string): Promise<T | undefined> {
+async function readRecordWithMigration<T>(key: string, migrate = true): Promise<T | undefined> {
   const epochAtStart = writeEpochs.get(key) ?? 0;
   const invoke = activeLocaldDrafts();
   if (invoke) {
@@ -130,6 +130,7 @@ async function readRecordWithMigration<T>(key: string): Promise<T | undefined> {
   }
   const legacy = await idbGet<T>(key);
   if (
+    migrate &&
     legacy !== undefined &&
     invoke &&
     invoke !== unsupportedDraftInvoke &&
@@ -272,7 +273,7 @@ export async function updateSideThread<T>(
     // invalidating later `saveSideThread` calls already queued behind `withKeyLock`.
     bumpWriteEpoch(key);
     return withKeyLock(key, async () => {
-      const current = await readRecordWithMigration<T>(key);
+      const current = await readRecordWithMigration<T>(key, false);
       const next = updater(current);
       if (next !== undefined) {
         await writeRecordUnlocked(key, next);

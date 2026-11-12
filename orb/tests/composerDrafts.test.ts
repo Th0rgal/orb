@@ -428,3 +428,75 @@ it("commits IndexedDB fallback before removing the previous native SQLite record
   resetComposerDraftsMemoryForTest();
   await expect(readSideThread("durable-q")).resolves.toEqual([{ id: "keep-me" }]);
 });
+
+it("does not queue a stale migration during updateSideThread when the updated value falls back to IndexedDB", async () => {
+  const sqlDrafts = new Map<string, string>();
+  const idbDrafts = new Map<string, unknown>([
+    ["thread:upd-oversized", { state: "OLD_LEGACY" }],
+  ]);
+  vi.stubGlobal("indexedDB", {
+    open: () => {
+      const req = {
+        result: {
+          transaction: () => {
+            const tx = {
+              oncomplete: undefined as undefined | (() => void),
+              objectStore: () => ({
+                get: (k: string) => {
+                  const greq = { result: idbDrafts.get(k), onsuccess: undefined as undefined | (() => void) };
+                  queueMicrotask(() => greq.onsuccess?.());
+                  return greq;
+                },
+                put: (v: unknown, k: string) => {
+                  idbDrafts.set(k, v);
+                },
+                delete: (k: string) => {
+                  idbDrafts.delete(k);
+                },
+              }),
+            };
+            queueMicrotask(() => tx.oncomplete?.());
+            return tx;
+          },
+        },
+        onsuccess: undefined as undefined | (() => void),
+      };
+      queueMicrotask(() => req.onsuccess?.());
+      return req;
+    },
+  });
+
+  win.__ORB_DESKTOP__ = {
+    core: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        const key = String(args?.key ?? "");
+        if (cmd === "ui_draft_get") return sqlDrafts.get(key) ?? null;
+        if (cmd === "ui_draft_put") {
+          const raw = String(args?.raw ?? "");
+          if (raw.includes("OVERSIZED_NEW")) {
+            throw new Error("Invalid ui_draft_put payload");
+          }
+          if (args?.if_absent && sqlDrafts.has(key)) return null;
+          sqlDrafts.set(key, raw);
+          return null;
+        }
+        if (cmd === "ui_draft_delete") {
+          sqlDrafts.delete(key);
+          return null;
+        }
+        return null;
+      },
+    },
+  };
+
+  const res = await updateSideThread<{ state: string }>("upd-oversized", (cur) => ({
+    state: `${cur?.state}->OVERSIZED_NEW`,
+  }));
+  expect(res.updated).toBe(true);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(sqlDrafts.has("thread:upd-oversized")).toBe(false);
+  resetComposerDraftsMemoryForTest();
+  await expect(readSideThread("upd-oversized")).resolves.toEqual({
+    state: "OLD_LEGACY->OVERSIZED_NEW",
+  });
+});
