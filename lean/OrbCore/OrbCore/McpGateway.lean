@@ -14,6 +14,7 @@ import OrbCore.R7Core
 import OrbCore.LegacyHydrate
 import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
+import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController
 
 namespace OrbCore.McpGateway
@@ -28,10 +29,14 @@ open OrbCore.R7Core
 open OrbCore.LegacyHydrate
 open OrbCore.SecretAndApproval
 open OrbCore.RemoteFleetAndRelay
+open OrbCore.RemoteDispatch
 open OrbCore.ProjectFilesAndController
 
 private def mcpOk (res : JVal) : String :=
   renderCompact (.obj #[("ok", .bool true), ("result", res)])
+
+private def cellNat (r : Array String) (i : Nat) : Nat :=
+  ((r[i]?).bind String.toNat?).getD 0
 
 private def mcpErr (code message : String) (retryable : Bool := false) : String :=
   renderCompact (.obj #[
@@ -83,7 +88,71 @@ private def checkMissionReadAccess
       return .ok ()
   return .error s!"read access to mission `{targetMissionId}` requires operator role or `request_mission_access` approval"
 
-set_option maxHeartbeats 800000 in
+/-- Look up a persisted MCP action receipt by `id` from `mcp_actions_v1`. -/
+private def lookupMcpActionById? (store : CoreStore) (actionId : String) : IO (Option JVal) := do
+  if actionId.trimAscii.toString.isEmpty then return none
+  let .ok rows ← execParamQuery store.projectsDb
+      "SELECT id, tool, state, COALESCE(result,'{}'), COALESCE(owner,''), created_at, updated_at FROM mcp_actions_v1 WHERE id=?1 LIMIT 1;"
+      #[actionId]
+    | return none
+  if rows.size ≤ 1 then return none
+  let r := rows[1]!
+  let aid := cell r 0
+  let tname := cell r 1
+  let stStr := cell r 2
+  let resJv := (OrbBin.Json.parse (cell r 3)).toOption.getD (.obj #[])
+  let tmid := cell r 4
+  let baseObj := resJv.setField "action_id" (.str aid)
+    |>.setField "tool_name" (.str tname)
+    |>.setField "state" (.str stStr)
+    |>.setField "status" (.str (if stStr == "succeeded" then "completed" else stStr))
+    |>.setField "accepted" (.str "yes")
+    |>.setField "result" resJv
+  let withMid := if tmid.isEmpty then baseObj else baseObj.setField "target_mission_id" (.str tmid)
+  return some withMid
+
+/-- Look up a previously settled MCP action receipt by `(scope, retry_key)`. -/
+private def lookupMcpActionByRetryKey? (store : CoreStore) (scope retryKey : String) : IO (Option JVal) := do
+  if retryKey.trimAscii.toString.isEmpty then return none
+  let .ok rows ← execParamQuery store.projectsDb
+      "SELECT COALESCE(result,'') FROM mcp_actions_v1 WHERE scope=?1 AND retry_key=?2 AND state='succeeded' ORDER BY updated_at DESC LIMIT 1;"
+      #[scope, retryKey]
+    | return none
+  if rows.size ≤ 1 then return none
+  let raw := cell rows[1]! 0
+  if raw.isEmpty then return none
+  return (OrbBin.Json.parse raw).toOption
+
+/-- Persist a settled MCP action receipt in `mcp_actions_v1` and enrich `resObj` with `action_id`/`state`/`accepted`. -/
+private def recordSettledMcpAction
+    (store : CoreStore)
+    (claims : McpSessionClaims)
+    (toolName : String)
+    (args : JVal)
+    (resObj : JVal)
+    (nowIso : String)
+    (targetMissionId : String := "") : IO JVal := do
+  let actId ← newUuidV4
+  let retryKey := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
+  let effRetryKey := if retryKey.isEmpty then s!"auto:{actId}" else retryKey
+  let scope := s!"{claims.sessionId}:{claims.missionId}:{toolName}"
+  let enriched :=
+    resObj
+      |>.setField "action_id" (.str actId)
+      |>.setField "state" (.str "succeeded")
+      |>.setField "accepted" (.str "yes")
+  let resJson := renderCompact enriched
+  let reqJson := renderCompact args
+  let ownerVal := if targetMissionId.isEmpty then claims.missionId else targetMissionId
+  let principalVal := s!"{claims.role}:{claims.missionId}"
+  discard <| execParamQuery store.projectsDb
+    ("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result,created_at,updated_at) " ++
+     "VALUES(?1,?2,?3,?4,?4,?5,?6,?7,'succeeded',?8,?9,?9) " ++
+     "ON CONFLICT(scope,retry_key) DO UPDATE SET result=excluded.result, updated_at=excluded.updated_at;")
+    #[actId, ownerVal, scope, effRetryKey, principalVal, toolName, reqJson, resJson, nowIso]
+  return enriched
+
+set_option maxHeartbeats 1200000 in
 /-- Execute a non-memory MCP tool call from `POST /api/mcp/call` and return the serialized JSON response body. -/
 def dispatchMcpToolCall
     (store : CoreStore)
@@ -95,7 +164,8 @@ def dispatchMcpToolCall
     (claims : McpSessionClaims)
     (toolName : String)
     (args : JVal)
-    (nowEpochSec : UInt64) : IO String := do
+    (nowEpochSec : UInt64)
+    (remoteSup? : Option RemoteJobSupervisor := none) : IO String := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let callerMid := claims.missionId
   let mut callerWorkDir := workingDir
@@ -109,6 +179,14 @@ def dispatchMcpToolCall
         if !wd.isEmpty then callerWorkDir := wd
         if callerProj.isEmpty && !pj.isEmpty then callerProj := pj
 
+  -- Idempotent replay for retried mutating MCP calls carrying `idempotency_key`
+  let idemKeyTop := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
+  if !idemKeyTop.isEmpty && toolName != "get_action" && toolName != "wait_actions" &&
+     toolName != "reconcile_action" && toolName != "cancel_action" then
+    let scope := s!"{claims.sessionId}:{claims.missionId}:{toolName}"
+    if let some prevRes ← lookupMcpActionByRetryKey? store scope idemKeyTop then
+      return mcpOk prevRes
+
   match toolName with
   | "get_capabilities" =>
     let caps := (OrbBin.Json.parse (buildMcpCapabilitiesJson claims)).toOption.getD (.obj #[])
@@ -116,11 +194,200 @@ def dispatchMcpToolCall
 
   | "get_action" =>
     let aid := (args.fieldStr? "action_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
-    return mcpOk (.obj #[("action_id", .str aid), ("status", .str "completed")])
+    if aid.trimAscii.toString.isEmpty then
+      return mcpErr "invalid_arguments" "missing action_id"
+    if let some rec ← lookupMcpActionById? store aid then
+      return mcpOk rec
+    return mcpOk (.obj #[
+      ("action_id", .str aid),
+      ("status", .str "completed"),
+      ("state", .str "succeeded"),
+      ("accepted", .str "yes")
+    ])
+
+  | "reconcile_action" =>
+    if normalizeMcpRole claims.role != "operator" then
+      return mcpErr "forbidden" "reconcile_action requires operator role"
+    let aid := (args.fieldStr? "action_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
+    if aid.trimAscii.toString.isEmpty then
+      return mcpErr "invalid_arguments" "missing action_id"
+    let resolution := ((args.fieldStr? "resolution").getD "completed").trimAscii.toString
+    let nextState := if resolution == "rejected" then "rejected" else "succeeded"
+    discard <| execParamQuery store.projectsDb
+      "UPDATE mcp_actions_v1 SET state=?2, updated_at=?3 WHERE id=?1;"
+      #[aid, nextState, nowIso]
+    if let some rec ← lookupMcpActionById? store aid then
+      return mcpOk rec
+    return mcpOk (.obj #[
+      ("action_id", .str aid),
+      ("status", .str (if nextState == "succeeded" then "completed" else nextState)),
+      ("state", .str nextState),
+      ("accepted", .str "yes")
+    ])
+
+  | "wait_actions" =>
+    let idsArr : Array String :=
+      match args.fieldArr? "action_ids" with
+      | some xs => xs.filterMap JVal.asStr? |>.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+      | none =>
+        match (args.fieldStr? "action_id").filter (fun s => !s.trimAscii.toString.isEmpty) with
+        | some s => #[s.trimAscii.toString]
+        | none => #[]
+    let mut receipts : Array JVal := Array.mkEmpty idsArr.size
+    for aid in idsArr do
+      match ← lookupMcpActionById? store aid with
+      | some rec => receipts := receipts.push rec
+      | none =>
+        receipts := receipts.push (.obj #[
+          ("action_id", .str aid),
+          ("status", .str "completed"),
+          ("state", .str "succeeded"),
+          ("accepted", .str "yes")
+        ])
+    return mcpOk (.obj #[
+      ("receipts", .arr receipts),
+      ("actions", .arr receipts),
+      ("all_succeeded", .bool true),
+      ("pending_action_ids", .arr #[])
+    ])
 
   | "cancel_action" =>
     let aid := (args.fieldStr? "action_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
-    return mcpOk (.obj #[("action_id", .str aid), ("cancelled", .bool true)])
+    if aid.trimAscii.toString.isEmpty then
+      return mcpErr "invalid_arguments" "missing action_id"
+    if let some rec ← lookupMcpActionById? store aid then
+      let curSt := (rec.fieldStr? "state").getD "succeeded"
+      let cancelled := curSt == "queued" || curSt == "pending"
+      if cancelled then
+        discard <| execParamQuery store.projectsDb
+          "UPDATE mcp_actions_v1 SET state='cancelled', updated_at=?2 WHERE id=?1;" #[aid, nowIso]
+      return mcpOk (.obj #[
+        ("action_id", .str aid),
+        ("cancelled", .bool cancelled),
+        ("state", .str (if cancelled then "cancelled" else curSt)),
+        ("accepted", .str "yes")
+      ])
+    return mcpOk (.obj #[("action_id", .str aid), ("cancelled", .bool false), ("state", .str "not_found")])
+
+  | "get_fleet_sweep" =>
+    let mut activeCnt : Nat := 0
+    let mut armedCnt : Nat := 0
+    if let .ok r1 ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM missions WHERE status='active';" #[] then
+      if r1.size > 1 then activeCnt := cellNat r1[1]! 0
+    if let .ok r2 ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM mission_continuations WHERE phase=1;" #[] then
+      if r2.size > 1 then armedCnt := cellNat r2[1]! 0
+    let fleetVal ← match mc? with
+      | some mc =>
+        let fl ← match ← loadManagedFleet mc defaultFleet.enabled defaultFleet.boatEnabled
+            defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
+          | .ok f => pure f
+          | .error _ => pure defaultFleet
+        buildComputeFleetJVal relayHub? mc fl none 0 none
+      | none => pure (.obj #[("nodes", .arr #[])])
+    return mcpOk (.obj #[
+      ("active_missions", JVal.nat activeCnt),
+      ("armed_continuations", JVal.nat armedCnt),
+      ("fleet", fleetVal)
+    ])
+
+  | "schedule_wakeup" =>
+    let reqMid := ((args.fieldStr? "mission_id").getD callerMid).trimAscii.toString
+    if reqMid.isEmpty then
+      return mcpErr "invalid_arguments" "schedule_wakeup requires a mission_id (or a mission-scoped MCP session)"
+    if normalizeMcpRole claims.role == "executor" && !callerMid.isEmpty && reqMid != callerMid then
+      return mcpErr "forbidden" "executor sessions may only schedule wakeups for their own mission"
+    let prompt := ((args.fieldStr? "prompt").getD "").trimAscii.toString
+    if prompt.isEmpty then
+      return mcpErr "invalid_arguments" "prompt is required"
+    let reason := ((args.fieldStr? "reason").getD "scheduled_wakeup").trimAscii.toString
+    let delayOpt := (args.fieldNat? "delay_seconds").orElse (fun _ => args.fieldNat? "delaySeconds")
+    let nextAtOpt := ((args.fieldStr? "next_at").orElse (fun _ => args.fieldStr? "nextAt")).bind parseIso8601EpochU64?
+    let dueEpoch ← match delayOpt, nextAtOpt with
+      | some d, _ =>
+        if d < 60 || d > 3600 then
+          return mcpErr "invalid_arguments" "delay_seconds must be between 60 and 3600"
+        pure (nowEpochSec + d.toUInt64)
+      | none, some ep =>
+        if ep ≤ nowEpochSec then pure (nowEpochSec + 60) else pure ep
+      | none, none =>
+        return mcpErr "invalid_arguments" "delay_seconds (60..=3600) is required"
+    -- Ensure a legacy mission parked in `completed` can arm its wakeup (`ownerTerminal == 0`)
+    discard <| execParamQuery store.missionsDb
+      "UPDATE missions SET status='awaiting_user', terminal_reason='awaiting_wakeup', state_revision=state_revision+1, updated_at=?2 WHERE id=?1 AND status='completed';"
+      #[reqMid, nowIso]
+    let cid ← newUuidV4
+    let reqId := if idemKeyTop.isEmpty then cid else idemKeyTop
+    let draft : ContinuationDraft := {
+      id             := cid
+      missionId      := reqMid
+      requestId      := reqId
+      prompt         := prompt
+      reason         := if reason.isEmpty then "scheduled_wakeup" else reason
+      source         := "automation-manager"
+      triggerKind    := "time"
+      dueEpoch       := dueEpoch
+      stopAfterFirst := true
+    }
+    match ← registerContinuation store draft nowEpochSec nowIso none with
+    | .error "mission_not_found" => return mcpErr "not_found" s!"Mission `{reqMid}` not found"
+    | .error e => return mcpErr "continuation_rejected" e
+    | .ok savedCid =>
+      let nextIso := formatEpochIso8601Utc dueEpoch
+      let resObj := JVal.obj #[
+        ("id", .str savedCid),
+        ("continuation_id", .str savedCid),
+        ("mission_id", .str reqMid),
+        ("trigger_kind", .str "time"),
+        ("due_epoch", JVal.uint64 dueEpoch),
+        ("next_at", .str nextIso)
+      ]
+      let settled ← recordSettledMcpAction store claims toolName args resObj nowIso reqMid
+      return mcpOk settled
+
+  | "schedule_job_wakeup" =>
+    let reqMid := ((args.fieldStr? "mission_id").getD callerMid).trimAscii.toString
+    if reqMid.isEmpty then
+      return mcpErr "invalid_arguments" "schedule_job_wakeup requires a mission_id (or a mission-scoped MCP session)"
+    if normalizeMcpRole claims.role == "executor" && !callerMid.isEmpty && reqMid != callerMid then
+      return mcpErr "forbidden" "executor sessions may only schedule job wakeups for their own mission"
+    let jobId := ((args.fieldStr? "job_id").orElse (fun _ => args.fieldStr? "jobId") |>.getD "").trimAscii.toString
+    if jobId.isEmpty then
+      return mcpErr "invalid_arguments" "job_id is required"
+    let prompt := ((args.fieldStr? "prompt").getD "").trimAscii.toString
+    if prompt.isEmpty then
+      return mcpErr "invalid_arguments" "prompt is required"
+    let reason := ((args.fieldStr? "reason").getD "durable_job_terminal").trimAscii.toString
+    discard <| execParamQuery store.missionsDb
+      "UPDATE missions SET status='awaiting_user', terminal_reason='awaiting_wakeup', state_revision=state_revision+1, updated_at=?2 WHERE id=?1 AND status='completed';"
+      #[reqMid, nowIso]
+    let cid ← newUuidV4
+    let reqId := if idemKeyTop.isEmpty then cid else idemKeyTop
+    let dueEpoch := nowEpochSec + 86400
+    let draft : ContinuationDraft := {
+      id             := cid
+      missionId      := reqMid
+      requestId      := reqId
+      prompt         := prompt
+      reason         := if reason.isEmpty then "durable_job_terminal" else reason
+      source         := "durable-job-terminal"
+      triggerKind    := "durable_job_terminal"
+      jobId          := jobId
+      dueEpoch       := dueEpoch
+      stopAfterFirst := true
+    }
+    match ← registerContinuation store draft nowEpochSec nowIso none with
+    | .error "mission_not_found" => return mcpErr "not_found" s!"Mission `{reqMid}` not found"
+    | .error e => return mcpErr "continuation_rejected" e
+    | .ok savedCid =>
+      let resObj := JVal.obj #[
+        ("id", .str savedCid),
+        ("continuation_id", .str savedCid),
+        ("mission_id", .str reqMid),
+        ("job_id", .str jobId),
+        ("trigger_kind", .str "durable_job_terminal")
+      ]
+      let settled ← recordSettledMcpAction store claims toolName args resObj nowIso reqMid
+      return mcpOk settled
 
   -- Mission Discovery & Inspection
   | "list_missions" | "list_active_missions" =>
@@ -201,37 +468,77 @@ def dispatchMcpToolCall
       | .ok p => pure p
       | .error e => return mcpErr "project_scope_violation" e
     let folder := normalizeMissionFolder ((args.fieldStr? "folder").getD "")
-    let backend :=
+    let rawBackend :=
       if toolName == "consult_model" then ((args.fieldStr? "backend").getD "opencode")
-      else ((args.fieldStr? "backend").getD "claude")
+      else ((args.fieldStr? "backend").getD "claudecode")
+    let backend := if rawBackend == "claude" then "claudecode" else rawBackend
     let modelOv := (args.fieldStr? "model_override").orElse (fun _ => args.fieldStr? "model") |>.getD ""
     let effort := (args.fieldStr? "model_effort").orElse (fun _ => args.fieldStr? "reasoning_effort") |>.getD ""
     let parentMid := ((args.fieldStr? "parent_mission_id").filter (!·.isEmpty)).getD callerMid
+    let explicitRn? := (args.fieldStr? "remote_node_id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+    let inheritedRn? ←
+      if explicitRn?.isSome then pure explicitRn?
+      else if !parentMid.isEmpty then resolveMissionRemoteNode? store mc? parentMid
+      else pure none
+    let effWorkDir :=
+      match (args.fieldStr? "working_directory").map (·.trimAscii.toString) |>.filter (!·.isEmpty) with
+      | some wd => wd
+      | none => if inheritedRn?.isSome then "" else callerWorkDir
+    let mut tagsArr : Array String := #[]
+    if let some rn := inheritedRn? then
+      tagsArr := tagsArr.push s!"remote-node:{rn}"
+      if effWorkDir.isEmpty && !parentMid.isEmpty && explicitRn?.isNone then
+        tagsArr := tagsArr.push s!"fork-workspace:{parentMid}"
+    let tagsJson := renderCompact (.arr (tagsArr.map JVal.str))
+    let authMode := if toolName == "consult_model" then "readonly" else "writer"
     let mid ← newUuidV4
     let initRev : UInt64 := if effProj.isEmpty && folder.isEmpty then 0 else 1
+    let initStatus := if !prompt.isEmpty then "active" else "awaiting_user"
     let insSql :=
-      "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,workspace_id,project,folder,placement_revision,parent_mission_id,created_at,updated_at,metadata_updated_at,node_boot_epoch) " ++
-      "VALUES(?1,?2,'active',?3,?4,?5,?6,'00000000-0000-0000-0000-000000000000',?7,?8,CAST(?9 AS INTEGER),NULLIF(?10,''),?11,?11,?11,CAST(?12 AS INTEGER));"
+      "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,workspace_id,project,folder,placement_revision,parent_mission_id,authority_mode,tags,created_at,updated_at,metadata_updated_at,node_boot_epoch) " ++
+      "VALUES(?1,?2,?3,?4,?5,?6,?7,'00000000-0000-0000-0000-000000000000',?8,?9,CAST(?10 AS INTEGER),NULLIF(?11,''),?12,?13,?14,?14,?14,CAST(?15 AS INTEGER));"
     if let .error e ← execParamQuery store.missionsDb insSql
-        #[mid, title, backend, modelOv, effort, workingDir, effProj, folder, s!"{initRev}", parentMid, nowIso, s!"{store.bootEpoch}"] then
+        #[mid, title, initStatus, backend, modelOv, effort, effWorkDir, effProj, folder, s!"{initRev}", parentMid, authMode, tagsJson, nowIso, s!"{store.bootEpoch}"] then
       return mcpErr "db_error" e
     if !prompt.isEmpty then
       discard <| appendMissionEvent store mid "user_message" (renderCompact (.obj #[("content", .str prompt)])) nowIso
+      if let (some sup, some targetNode) := (remoteSup?, inheritedRn?) then
+        let spec : RemoteTurnSpec := {
+          missionId        := mid
+          targetNodeId     := targetNode
+          backend          := backend
+          modelOverride    := if backend == "opencode" && modelOv.isEmpty then "builtin/smart" else modelOv
+          modelEffort      := effort
+          workingDirectory := effWorkDir
+          project          := effProj
+          authorityMode    := authMode
+          tagsJson         := tagsJson
+          prompt           := prompt
+          sideQuestion     := toolName == "consult_model"
+          companionOf?     := if toolName == "consult_model" && !parentMid.isEmpty then some parentMid else none
+        }
+        if let .error dispErr ← submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup workingDir spec nowEpochSec then
+          discard <| execParamQuery store.missionsDb "DELETE FROM mission_events WHERE mission_id=?1;" #[mid]
+          discard <| execParamQuery store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
+          return mcpErr "remote_dispatch_failed" dispErr true
     publishControlEvent broadcastHub? "mission_created" (renderCompact (.obj #[
       ("mission_id", .str mid),
       ("project", if effProj.isEmpty then .null else .str effProj),
       ("folder", .str folder)
     ])) (some mid)
-    return mcpOk (.obj #[
+    let resObj := JVal.obj #[
       ("mission_id", .str mid),
       ("id", .str mid),
-      ("status", .str "active"),
+      ("status", .str initStatus),
       ("backend", .str backend),
       ("model_override", if modelOv.isEmpty then .null else .str modelOv),
+      ("remote_node_id", match inheritedRn? with | some rn => .str rn | none => .null),
       ("project", if effProj.isEmpty then .null else .str effProj),
       ("folder", .str folder),
       ("placement_revision", JVal.uint64 initRev)
-    ])
+    ]
+    let settled ← recordSettledMcpAction store claims toolName args resObj nowIso mid
+    return mcpOk settled
 
   | "get_consult_result" =>
     let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
@@ -251,19 +558,109 @@ def dispatchMcpToolCall
       "INSERT INTO main.operator_notes(note_id,id,mission_id,content,body,created_at_iso,created_at) VALUES(?1,?1,?2,?3,?3,?4,?4);"
       #[noteId, mid, content, nowIso]
     discard <| appendMissionEvent store mid "operator_note" (renderCompact (.obj #[("id", .str noteId), ("content", .str content)])) nowIso
-    return mcpOk (.obj #[("ok", .bool true), ("mission_id", .str mid), ("note_id", .str noteId)])
+    let mut queued := false
+    if toolName == "send_message_to_mission" then
+      if let (some sup, some mr) := (remoteSup?, ← getMission? store mid) then
+        if let some targetNode ← resolveMissionRemoteNode? store mc? mid then
+          if mr.status == "active" || mr.status == "pending" then
+            discard <| enqueueStructuredFollowup store "core" noteId mid content "mcp" nowIso
+            queued := true
+          else
+            let mut resumeSid? : Option String := none
+            if let .ok sRows ← execParamQuery store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
+              if sRows.size > 1 then
+                let s := (cell sRows[1]! 0).trimAscii.toString
+                if !s.isEmpty then resumeSid? := some s
+            discard <| appendMissionEvent store mid "user_message"
+              (renderCompact (.obj #[("id", .str noteId), ("content", .str content), ("source", .str "mcp")])) nowIso
+            let spec : RemoteTurnSpec := {
+              missionId        := mid
+              targetNodeId     := targetNode
+              backend          := mr.backend
+              modelOverride    := mr.modelOverride
+              modelEffort      := mr.modelEffort
+              workingDirectory := mr.workingDirectory
+              project          := mr.project
+              ownerUserId      := mr.ownerUserId
+              authorityMode    := mr.authorityMode
+              placementKind    := mr.placementKind
+              reservedDiskGib  := mr.reservedDiskGib
+              tagsJson         := mr.tagsJson
+              prompt           := content
+              resumeSessionId? := resumeSid?
+            }
+            discard <| submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup workingDir spec nowEpochSec
+    let resObj := JVal.obj #[
+      ("ok", .bool true),
+      ("mission_id", .str mid),
+      ("note_id", .str noteId),
+      ("queued", .bool queued)
+    ]
+    let settled ← recordSettledMcpAction store claims toolName args resObj nowIso mid
+    return mcpOk settled
 
   | "cancel_mission" | "acknowledge_mission" | "adopt_mission" | "resume_mission" =>
     let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id") |>.getD callerMid
     if mid.isEmpty then return mcpErr "invalid_arguments" "missing mission_id"
-    let nextSt :=
-      if toolName == "cancel_mission" then "cancelled"
-      else if toolName == "resume_mission" || toolName == "adopt_mission" then "active"
-      else "completed"
-    discard <| execParamQuery store.missionsDb
-      "UPDATE missions SET status=?2, updated_at=?3, state_revision=state_revision+1 WHERE id=?1;"
-      #[mid, nextSt, nowIso]
-    return mcpOk (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str nextSt)])
+    if toolName == "cancel_mission" then
+      discard <| revokeContinuations store mid nowIso true
+      discard <| cancelActiveRemoteJobForMission store mc? relayHub? mid "Cancelled via MCP"
+      discard <| execParamQuery store.missionsDb
+        "UPDATE mission_runs SET execution_state='terminal', terminal_reason='cancelled', updated_at=?2 WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
+        #[mid, nowIso]
+      discard <| execParamQuery store.missionsDb
+        "UPDATE missions SET status='cancelled', terminal_reason='cancelled', updated_at=?2, state_revision=state_revision+1 WHERE id=?1;"
+        #[mid, nowIso]
+      let settled ← recordSettledMcpAction store claims toolName args
+        (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str "cancelled")]) nowIso mid
+      return mcpOk settled
+    else if toolName == "resume_mission" then
+      if let (some sup, some mr) := (remoteSup?, ← getMission? store mid) then
+        if let some targetNode ← resolveMissionRemoteNode? store mc? mid then
+          let prompt := ((args.fieldStr? "prompt").orElse (fun _ => args.fieldStr? "message") |>.getD "Continue.").trimAscii.toString
+          let effPrompt := if prompt.isEmpty then "Continue." else prompt
+          let mut resumeSid? : Option String := none
+          if let .ok sRows ← execParamQuery store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
+            if sRows.size > 1 then
+              let s := (cell sRows[1]! 0).trimAscii.toString
+              if !s.isEmpty then resumeSid? := some s
+          discard <| appendMissionEvent store mid "user_message"
+            (renderCompact (.obj #[("content", .str effPrompt), ("source", .str "mcp_resume")])) nowIso
+          let spec : RemoteTurnSpec := {
+            missionId        := mid
+            targetNodeId     := targetNode
+            backend          := mr.backend
+            modelOverride    := mr.modelOverride
+            modelEffort      := mr.modelEffort
+            workingDirectory := mr.workingDirectory
+            project          := mr.project
+            ownerUserId      := mr.ownerUserId
+            authorityMode    := mr.authorityMode
+            placementKind    := mr.placementKind
+            reservedDiskGib  := mr.reservedDiskGib
+            tagsJson         := mr.tagsJson
+            prompt           := effPrompt
+            resumeSessionId? := resumeSid?
+          }
+          if let .error dispErr ← submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup workingDir spec nowEpochSec then
+            return mcpErr "remote_dispatch_failed" dispErr true
+          let settled ← recordSettledMcpAction store claims toolName args
+            (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str "active")]) nowIso mid
+          return mcpOk settled
+      discard <| execParamQuery store.missionsDb
+        "UPDATE missions SET status='active', updated_at=?2, state_revision=state_revision+1 WHERE id=?1;"
+        #[mid, nowIso]
+      let settled ← recordSettledMcpAction store claims toolName args
+        (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str "active")]) nowIso mid
+      return mcpOk settled
+    else
+      let nextSt := if toolName == "adopt_mission" then "awaiting_user" else "completed"
+      discard <| execParamQuery store.missionsDb
+        "UPDATE missions SET status=?2, updated_at=?3, state_revision=state_revision+1 WHERE id=?1;"
+        #[mid, nextSt, nowIso]
+      let settled ← recordSettledMcpAction store claims toolName args
+        (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str nextSt)]) nowIso mid
+      return mcpOk settled
 
   | "update_mission_settings" =>
     let mid := (args.fieldStr? "mission_id").getD callerMid

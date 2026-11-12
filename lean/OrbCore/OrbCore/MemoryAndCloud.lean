@@ -1045,22 +1045,27 @@ def forkOrHandoffMission
   let turns ← loadCanonicalMissionTurns st req.sourceMissionId srcIsCloud
   let hasHistoryTurns := !turns.isEmpty
 
-  let resolvedWorkDir :=
-    match req.workingDir? with
-    | some wd =>
-      let t := wd.trimAscii.toString
-      if !t.isEmpty then t
-      else if srcIsCloud || srcWorkDir.trimAscii.toString.isEmpty then defaultWorkDir else srcWorkDir
-    | none =>
-      if srcIsCloud || srcWorkDir.trimAscii.toString.isEmpty then defaultWorkDir else srcWorkDir
-
   let remoteNodeClean? :=
     req.remoteNodeId?.bind fun rn =>
       let t := rn.trimAscii.toString
       if t.isEmpty || t == "local" then none else some t
 
+  let resolvedWorkDir :=
+    match req.workingDir? with
+    | some wd =>
+      let t := wd.trimAscii.toString
+      if !t.isEmpty then t
+      else if !srcWorkDir.trimAscii.toString.isEmpty then srcWorkDir
+      else if remoteNodeClean?.isSome && !srcIsCloud then ""
+      else defaultWorkDir
+    | none =>
+      if srcIsCloud then defaultWorkDir
+      else if !srcWorkDir.trimAscii.toString.isEmpty then srcWorkDir
+      else if remoteNodeClean?.isSome then ""
+      else defaultWorkDir
+
   let placementValid : Bool :=
-    !resolvedWorkDir.trimAscii.toString.isEmpty &&
+    (!resolvedWorkDir.trimAscii.toString.isEmpty || remoteNodeClean?.isSome) &&
     !(resolvedWorkDir.splitOn "/").any (· == "..") &&
     (match remoteNodeClean? with | some rn => !rn.contains '/' && !rn.contains ' ' | none => true)
 
