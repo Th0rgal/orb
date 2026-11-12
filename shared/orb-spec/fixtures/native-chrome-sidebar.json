@@ -157,6 +157,25 @@
       { "row_id": "m:w", "depth": 4, "folder": "ui" }
     ]
   },
+  "superseded_and_btw_case": {
+    "scope": "scope:sup-btw:1",
+    "revision": 1,
+    "projects": [
+      { "slug": "core", "name": "Orb Core", "folders": [] }
+    ],
+    "missions": [
+      { "id": "main", "title": "Main controller", "status": "active", "project": "core", "updated_at_ms": 5000 },
+      { "id": "sup-stopped", "title": "Stopped superseded attempt", "status": "interrupted", "project": "core", "parent_mission_id": "main", "superseded_by_mission_id": "main", "updated_at_ms": 4500 },
+      { "id": "sup-grandchild", "title": "Stopped descendant of superseded", "status": "failed", "project": "core", "parent_mission_id": "sup-stopped", "updated_at_ms": 4600 },
+      { "id": "sup-running", "title": "Still running superseded attempt", "status": "running", "project": "core", "parent_mission_id": "main", "superseded_by_mission_id": "main", "updated_at_ms": 4700 },
+      { "id": "btw-root", "title": "Main · btw", "status": "completed", "project": "core", "tags": ["btw-parent:main"], "updated_at_ms": 4800 },
+      { "id": "btw-worker", "title": "Btw worker consult", "status": "completed", "project": "core", "parent_mission_id": "btw-root", "updated_at_ms": 4900 },
+      { "id": "btw-sub", "title": "Direct btw subagent", "status": "completed", "project": "core", "tags": ["btw-subagent"], "updated_at_ms": 4950 }
+    ],
+    "expected_unselected_mission_ids": ["m:main", "m:sup-running"],
+    "selected_for_superseded": "m:sup-stopped",
+    "expected_selected_mission_ids": ["m:main", "m:sup-running", "m:sup-stopped"]
+  },
   "move_admit_cases": [
     {
       "name": "mission_move_to_different_folder_admitted",

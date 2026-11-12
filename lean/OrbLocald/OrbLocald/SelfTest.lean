@@ -1989,6 +1989,33 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
       if (← assertTrue "native_chrome_worker_fork_leader_inherits_parent_and_placement" wfOk) then
         ncPassed := ncPassed + 1
 
+      -- Superseded retention (running & selected kept; stopped & stopped descendants excluded) + `/btw` subtree exclusion
+      let sbCase := (fixJv.field? "superseded_and_btw_case").getD (.obj #[])
+      let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" sbCase
+      let sbRows1 ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:sup-btw:1")])
+      let sbSelSync := JVal.setField (JVal.setField sbCase "revision" (.nat 2))
+        "selected" (.str ((sbCase.fieldStr? "selected_for_superseded").getD "m:sup-stopped"))
+      let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" sbSelSync
+      let sbRows2 ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:sup-btw:1")])
+      let sbPal ← dispatchRpcCommand ncRef "native_chrome_palette_query" (.obj #[("scope", .str "scope:sup-btw:1"), ("query", .str "btw")])
+      ncTotal := ncTotal + 1
+      let sbOk : Bool :=
+        match sbRows1, sbRows2, sbPal with
+        | .ok r1, .ok r2, .ok pj =>
+          let mids1 := (((r1.fieldArr? "rows").getD #[]).filter (fun r => r.fieldStr? "kind" == some "mission")).filterMap (·.fieldStr? "row_id")
+          let mids2 := (((r2.fieldArr? "rows").getD #[]).filter (fun r => r.fieldStr? "kind" == some "mission")).filterMap (·.fieldStr? "row_id")
+          let exp1 := ((sbCase.fieldArr? "expected_unselected_mission_ids").getD #[]).filterMap (·.asStr?)
+          let exp2 := ((sbCase.fieldArr? "expected_selected_mission_ids").getD #[]).filterMap (·.asStr?)
+          let palIds := ((pj.fieldArr? "items").getD #[]).filterMap (·.fieldStr? "id")
+          mids1 == exp1 &&
+          mids2 == exp2 &&
+          !palIds.contains "m:btw-root" &&
+          !palIds.contains "m:btw-worker" &&
+          !palIds.contains "m:btw-sub"
+        | _, _, _ => false
+      if (← assertTrue "native_chrome_superseded_running_selected_and_btw_exclusion" sbOk) then
+        ncPassed := ncPassed + 1
+
       -- Cold-start SQLite hydration from `ui_sidebar` before WebView boots
       let coldDir := tmpStateDir ++ "/native-chrome-cold"
       try IO.FS.createDirAll coldDir catch _ => pure ()

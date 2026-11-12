@@ -34,6 +34,7 @@ structure ChromeMissionInput where
   parentMissionId : String := ""
   forkSourceId    : String := ""
   isFork          : Bool := false
+  isBtwDirect     : Bool := false
   acknowledged    : Bool := false
   superseded      : Bool := false
   createdAtMs     : UInt64 := 0
@@ -313,6 +314,8 @@ def parseMissionInput? (jv : JVal) (fallbackProject : String := "") : Option Chr
     ((jv.fieldStr? "parent_kind").orElse (fun _ => jv.fieldStr? "relation_kind")).getD ""
       |>.trimAscii.toString.toLower
   let tags := ((jv.fieldArr? "tags").getD #[]).filterMap (·.asStr?)
+  let hasBtwTag := tags.any (fun t => t.startsWith "btw-parent:" || t == "btw-subagent")
+  let isBtwDirect := (jv.fieldBool? "is_btw").getD hasBtwTag
   let forkTagSource :=
     (tags.findSome? fun t =>
       if t.startsWith "fork-of:" then
@@ -354,13 +357,16 @@ def parseMissionInput? (jv : JVal) (fallbackProject : String := "") : Option Chr
     parentMissionId := launchedParentId
     forkSourceId := forkSrc
     isFork := isFork
+    isBtwDirect := isBtwDirect
     acknowledged := ack
     superseded := sup
     createdAtMs := parseCreatedAtMs jv
     updatedAtMs := parseUpdatedAtMs jv
   }
 
-/-- Deduplicate and merge mission inputs via `Orb.Kernel.sidebarMergeStep` (`orb_sidebar_merge_step`). -/
+/-- Deduplicate and merge mission inputs via `Orb.Kernel.sidebarMergeStep` (`orb_sidebar_merge_step`).
+    Superseded inputs remain in the merged set (`incomingSupersededOrArchived = 0`) so projection can
+    preserve running and currently-selected superseded conversations (`isSupersededInTree` in `orb/src/missionTree.ts`). -/
 def mergeMissionInputs (inputs : Array ChromeMissionInput) : Array ChromeMissionInput := Id.run do
   let mut idTable : Array String := #[]
   let internOrd := fun (tbl : Array String) (mid : String) =>
@@ -371,20 +377,17 @@ def mergeMissionInputs (inputs : Array ChromeMissionInput) : Array ChromeMission
   for inc in inputs do
     let (tbl1, incOrd) := internOrd idTable inc.id
     idTable := tbl1
-    let supFlag : UInt8 := if inc.superseded then 1 else 0
     match acc.findIdx? (fun ex => ex.id == inc.id) with
     | none =>
-      let verdict := Orb.Kernel.sidebarMergeStep 0 incOrd 0 inc.updatedAtMs supFlag 0
+      let verdict := Orb.Kernel.sidebarMergeStep 0 incOrd 0 inc.updatedAtMs 0 0
       let hi32 : UInt32 := ((verdict >>> 32) &&& 0xFFFFFFFF).toUInt32
       if hi32 == 1 then
         acc := acc.push inc
     | some idx =>
       let ex := acc[idx]!
-      let verdict := Orb.Kernel.sidebarMergeStep incOrd incOrd ex.updatedAtMs inc.updatedAtMs supFlag 0
+      let verdict := Orb.Kernel.sidebarMergeStep incOrd incOrd ex.updatedAtMs inc.updatedAtMs 0 0
       let lo32 : UInt32 := (verdict &&& 0xFFFFFFFF).toUInt32
-      if supFlag == 1 && (lo32 &&& 4) != 0 then
-        acc := acc.eraseIdx! idx
-      else if (lo32 &&& 1) != 0 then
+      if (lo32 &&& 1) != 0 then
         let mergedProj := if inc.hasProjectField then inc.project else ex.project
         let mergedFolder := if inc.hasFolderField then inc.folder else ex.folder
         let mergedParent := if inc.parentMissionId.isEmpty then ex.parentMissionId else inc.parentMissionId
@@ -399,7 +402,21 @@ def mergeMissionInputs (inputs : Array ChromeMissionInput) : Array ChromeMission
           parentMissionId := mergedParent
           forkSourceId := mergedForkSrc
           isFork := inc.isFork || ex.isFork || !mergedForkSrc.isEmpty
+          isBtwDirect := inc.isBtwDirect || ex.isBtwDirect
+          superseded := inc.superseded || ex.superseded
           createdAtMs := mergedCreated
+        }
+      else
+        -- Even when an older duplicate is ignored, sticky lineage/btw markers are preserved (`withHierarchy`).
+        let mergedParent := if ex.parentMissionId.isEmpty then inc.parentMissionId else ex.parentMissionId
+        let mergedForkSrc := if ex.forkSourceId.isEmpty then inc.forkSourceId else ex.forkSourceId
+        acc := acc.set! idx {
+          ex with
+          parentMissionId := mergedParent
+          forkSourceId := mergedForkSrc
+          isFork := ex.isFork || inc.isFork || !mergedForkSrc.isEmpty
+          isBtwDirect := ex.isBtwDirect || inc.isBtwDirect
+          superseded := ex.superseded || inc.superseded
         }
   return acc
 
@@ -416,6 +433,46 @@ private def missionActivePriority (status : String) : Nat :=
   else 1
 
 private def forkSettleGraceMs : UInt64 := 15000
+
+/-- True when `m` was explicitly superseded and is no longer actively running (`isSupersededMission` in `orb/src/missionTree.ts`).
+    Note: `orb/src/missionTree.ts` uses `hasTypedSuperseded` (`status == "superseded" || superseded_by_mission_id != ""`). -/
+private def isSupersededStoppedMission (m : ChromeMissionInput) : Bool :=
+  !isWorkingMissionStatus m.status && m.superseded
+
+/-- True when `m` or any ancestor along `parentOf` is a stopped superseded mission (`isSupersededInTree` in `orb/src/missionTree.ts`). -/
+private def isSupersededInTree (m : ChromeMissionInput) (byId : Array ChromeMissionInput) (parentOf : String → Option String) : Bool := Id.run do
+  if isWorkingMissionStatus m.status then return false
+  if isSupersededStoppedMission m then return true
+  let mut seen : Array String := #[m.id]
+  let mut curParent := (parentOf m.id).getD ""
+  let mut steps := 0
+  while !curParent.isEmpty && !seen.contains curParent && steps < byId.size do
+    seen := seen.push curParent
+    match byId.find? (·.id == curParent) with
+    | none => break
+    | some row =>
+      if isSupersededStoppedMission row then return true
+      curParent := (parentOf row.id).getD ""
+      steps := steps + 1
+  return false
+
+/-- Exclude `/btw` side sessions and every worker/descendant in their subtree (`excludeBtwMissions` in `orb/src/missionHierarchy.ts`). -/
+def excludeBtwMissionInputs (rows : Array ChromeMissionInput) : Array ChromeMissionInput :=
+  rows.filter fun m => Id.run do
+    if m.isBtwDirect then return false
+    let mut seen : Array String := #[m.id]
+    let mut cur :=
+      if !m.parentMissionId.isEmpty then m.parentMissionId else m.forkSourceId
+    let mut steps := 0
+    while !cur.isEmpty && !seen.contains cur && steps < rows.size do
+      seen := seen.push cur
+      match rows.find? (·.id == cur) with
+      | none => break
+      | some anc =>
+        if anc.isBtwDirect then return false
+        cur := if !anc.parentMissionId.isEmpty then anc.parentMissionId else anc.forkSourceId
+        steps := steps + 1
+    return true
 
 private structure ForkLineageInfo where
   missionId : String
@@ -469,8 +526,8 @@ private def electForkGroupLeaders (missions : Array ChromeMissionInput) : Array 
       let getDepth := fun (mid : String) =>
         ((infos.find? (·.missionId == mid)).map (·.depth)).getD 0
       let beats := fun (a b : ChromeMissionInput) =>
-        let unretA : Nat := if a.acknowledged || a.superseded then 0 else 1
-        let unretB : Nat := if b.acknowledged || b.superseded then 0 else 1
+        let unretA : Nat := if a.acknowledged || isSupersededStoppedMission a then 0 else 1
+        let unretB : Nat := if b.acknowledged || isSupersededStoppedMission b then 0 else 1
         if unretA != unretB then unretA > unretB
         else
           let workA : Nat := if isWorkingMissionStatus a.status then 1 else 0
@@ -643,7 +700,7 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
     }
   ]
 
-  let rawMerged := sortMissions (mergeMissionInputs st.missions)
+  let rawMerged := sortMissions (excludeBtwMissionInputs (mergeMissionInputs st.missions))
   -- Group fork lineages (`forkLeaders` / `nestMissions` in `orb/src/missionTree.ts`):
   -- A leading fork takes the place (launched `parentMissionId`, `project`, `folder`) of the conversation it continues,
   -- while earlier versions fold inside their group's leader.
@@ -734,11 +791,15 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
       projects := projects.push { slug := m.project, name := m.project }
 
   -- Compute `hasVisibleDescendant` bottom-up (`placedMerged.size` passes suffices for any DAG)
+  -- Matching `ProjectFiles.tsx`: `!isArchived(m) && (!isSupersededInTree(m, byId) || isSelectedMissionId(m.id))`
   let mut directMatchIds : Array String := #[]
   for m in placedMerged do
+    let isSel := isSelectedMissionTarget sel m.id
+    let supHidden := isSupersededInTree m placedMerged getSafeParent && !isSel
     let directMatch :=
-      if filterActive then matchesFilterNeedle m needleLower
-      else !m.acknowledged || isSelectedMissionTarget sel m.id
+      if supHidden then false
+      else if filterActive then matchesFilterNeedle m needleLower
+      else !m.acknowledged || isSel
     if directMatch then
       directMatchIds := directMatchIds.push m.id
 
@@ -976,10 +1037,13 @@ def queryPaletteItems (st : ChromeScopeState) (rawQuery : String) (limit : Nat :
         itemId := s!"proj:{proj.slug}", kind := "project", title := proj.name, subtitle := s!"Project · {proj.slug}", target := s!"project:{proj.slug}", score := scVal
       }, scVal)
 
-  let merged := sortMissions (mergeMissionInputs st.missions)
+  let merged := sortMissions (excludeBtwMissionInputs (mergeMissionInputs st.missions))
+  let directParent := fun (mid : String) =>
+    (merged.find? (·.id == mid)).bind fun r =>
+      if r.parentMissionId.isEmpty then none else some r.parentMissionId
   let mut rankIdx : Nat := 0
   for m in merged do
-    if !m.superseded then
+    if !isSupersededInTree m merged directParent then
       let recencyBoost := if rankIdx < 40 then 40 - rankIdx else 0
       let activeBoost := if missionActivePriority m.status == 0 then 15 else 0
       let sub :=
