@@ -134,6 +134,17 @@ name = "ios"
 paths = ["ios_dashboard/*"]
 jobs = ["wf:ios-build"]
 
+# JNI sources and committed kernel libraries are only checked by kernel-abi
+# (scripts/build_android_kernel_so.sh --check).
+[[domain]]
+name = "android_jni"
+paths = [
+  "android_dashboard/app/src/main/jni/*",
+  "android_dashboard/app/src/main/jniLibs/*",
+  "android_dashboard/app/src/test/resources/jni/*",
+]
+jobs = ["wf:android-apk", "wf:kernel-abi"]
+
 [[domain]]
 name = "android"
 paths = ["android_dashboard/*"]

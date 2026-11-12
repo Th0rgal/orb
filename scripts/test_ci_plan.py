@@ -51,6 +51,12 @@ class PlanTest(unittest.TestCase):
         for p in ("lean/OrbCore/OrbCore/Spec.lean", "lean/OrbClient/OrbClient/Reducers.lean"):
             self.assertIn("wf:kernel-abi", jobs([p]), p)
 
+    def test_android_jni_runs_kernel_abi(self):
+        for p in ("android_dashboard/app/src/main/jni/orb_kernel_jni.c",
+                  "android_dashboard/app/src/main/jni/liborb_kernel.so.sha256"):
+            self.assertTrue({"wf:kernel-abi", "wf:android-apk"} <= jobs([p]), p)
+        self.assertNotIn("wf:kernel-abi", jobs(["android_dashboard/app/build.gradle.kts"]))
+
     def test_wakeup_mcp_runs_desktop_shell(self):
         for p in ("scripts/wakeup_mcp.py", "orb/tests/wakeup_mcp_test.py"):
             self.assertIn("orb-desktop-shell", jobs([p]), p)
