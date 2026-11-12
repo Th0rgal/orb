@@ -197,75 +197,37 @@ export function incrementalMarkdown(): IncrementalMarkdownParser {
   return createIncrementalMarkdown(parseMarkdown);
 }
 
-function renderListItem(it: string | ListItem, preInl?: InlineNode[], compact?: boolean, pendingWorker?: boolean): JSX.Element {
-  if (typeof it === "string") return <li>{inline(it, preInl, pendingWorker)}</li>;
-  return (
-    <li>
-      {inline(it.text, it.inl ?? preInl, pendingWorker)}
-      <Show when={it.sub?.length}>
-        <For each={it.sub}>{(sub) => renderBlock(sub, compact, pendingWorker)}</For>
-      </Show>
-    </li>
-  );
-}
-
-function renderBlock(b: Block, compact?: boolean, pendingWorker?: boolean): JSX.Element {
-  return b.t === "hr" ? (
-    <hr />
-  ) : b.t === "math" ? (
-    <MathFormula text={b.text} display />
-  ) : b.t === "h" && b.n === 1 ? (
-    <h1>{inline(b.text, b.inl, pendingWorker)}</h1>
-  ) : b.t === "h" && b.n === 2 ? (
-    <h2>{inline(b.text, b.inl, pendingWorker)}</h2>
-  ) : b.t === "h" ? (
-    <h3>{inline(b.text, b.inl, pendingWorker)}</h3>
-  ) : b.t === "ol" ? (
-    <ol start={b.start}>{b.items.map((item, idx) => renderListItem(item, b.inl?.[idx], compact, pendingWorker))}</ol>
-  ) : b.t === "ul" ? (
-    <ul>{b.items.map((it, idx) => renderListItem(it, b.inl?.[idx], compact, pendingWorker))}</ul>
-  ) : b.t === "pre" ? (
-    isMermaidLang(b.lang) ? (
-      <MermaidBlock text={b.text} complete={!b.open} />
-    ) : (
-      <CodeBlock text={b.text} lang={b.lang} streaming={Boolean(b.open)} />
-    )
-  ) : b.t === "quote" ? (
-    <blockquote>
-      {b.sub ? (
-        <div class={`md ${compact ? "md-compact" : ""}`}>
-          <Index each={b.sub}>{(sub) => renderBlockSlot(sub, compact, () => Boolean(pendingWorker))}</Index>
-        </div>
-      ) : (
-        <MdView text={b.text} compact={compact} />
-      )}
-    </blockquote>
-  ) : b.t === "table" ? (
-    <div class="md-table-wrap">
-      <table>
-        {/* A loose pipe table without a header row has an all-empty one. */}
-        {b.heads.some((h) => h !== "") && (
-          <thead>
-            <tr>
-              {b.heads.map((h, i) => (
-                <th style={{ "text-align": b.aligns[i] ?? "left" }}>{inline(h, b.headInl?.[i], pendingWorker)}</th>
-              ))}
-            </tr>
-          </thead>
-        )}
-        <tbody>
-          {b.rows.map((row, rIdx) => (
-            <tr>
-              {row.map((c, i) => (
-                <td style={{ "text-align": b.aligns[i] ?? "left" }}>{inline(c, b.rowInl?.[rIdx]?.[i], pendingWorker)}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+function renderReactiveListItems(
+  kind: "ul" | "ol",
+  block: () => Extract<Block, { t: "ul" | "ol" }>,
+  compact?: boolean,
+  pendingWorker: () => boolean = () => false,
+): JSX.Element {
+  const renderItem = (it: () => string | ListItem, idx: number): JSX.Element => {
+    const content = createMemo(() => {
+      const cur = it();
+      const preInl = block().inl?.[idx];
+      return typeof cur === "string" ? inline(cur, preInl, pendingWorker()) : inline(cur.text, cur.inl ?? preInl, pendingWorker());
+    });
+    return (
+      <li>
+        {content()}
+        <Show when={(typeof it() === "string" ? undefined : (it() as ListItem).sub)?.length}>
+          <Index each={typeof it() === "string" ? [] : ((it() as ListItem).sub ?? [])}>
+            {(sub) => renderBlockSlot(sub, compact, pendingWorker)}
+          </Index>
+        </Show>
+      </li>
+    );
+  };
+  return kind === "ol" ? (
+    <ol start={(block() as Extract<Block, { t: "ol" }>).start}>
+      <Index each={block().items}>{(item, idx) => renderItem(item, idx)}</Index>
+    </ol>
   ) : (
-    <p>{inline(b.text, b.inl, pendingWorker)}</p>
+    <ul>
+      <Index each={block().items}>{(item, idx) => renderItem(item, idx)}</Index>
+    </ul>
   );
 }
 
@@ -279,6 +241,11 @@ function renderBlockSlot(block: () => Block, compact?: boolean, pendingWorker: (
   return (
     <Show when={kind()} keyed>
       {(k) => {
+        if (k === "hr") return <hr />;
+        if (k === "math") {
+          const m = () => block() as Extract<Block, { t: "math" }>;
+          return <MathFormula text={m().text} display />;
+        }
         if (k === "pre:code") {
           const pre = () => block() as Extract<Block, { t: "pre" }>;
           return <CodeBlock text={pre().text} lang={pre().lang} streaming={Boolean(pre().open)} />;
@@ -291,7 +258,67 @@ function renderBlockSlot(block: () => Block, compact?: boolean, pendingWorker: (
           const p = () => block() as Extract<Block, { t: "p" }>;
           return <p>{inline(p().text, p().inl, pendingWorker())}</p>;
         }
-        return <>{() => renderBlock(block(), compact, pendingWorker())}</>;
+        if (k === "h:1") {
+          const h = () => block() as Extract<Block, { t: "h" }>;
+          return <h1>{inline(h().text, h().inl, pendingWorker())}</h1>;
+        }
+        if (k === "h:2") {
+          const h = () => block() as Extract<Block, { t: "h" }>;
+          return <h2>{inline(h().text, h().inl, pendingWorker())}</h2>;
+        }
+        if (k.startsWith("h:")) {
+          const h = () => block() as Extract<Block, { t: "h" }>;
+          return <h3>{inline(h().text, h().inl, pendingWorker())}</h3>;
+        }
+        if (k === "ul" || k === "ol") {
+          return renderReactiveListItems(k, () => block() as Extract<Block, { t: "ul" | "ol" }>, compact, pendingWorker);
+        }
+        if (k === "table") {
+          const tbl = () => block() as Extract<Block, { t: "table" }>;
+          return (
+            <div class="md-table-wrap">
+              <table>
+                <Show when={tbl().heads.some((h) => h !== "")}>
+                  <thead>
+                    <tr>
+                      <Index each={tbl().heads}>
+                        {(h, i) => (
+                          <th style={{ "text-align": tbl().aligns[i] ?? "left" }}>
+                            {inline(h(), tbl().headInl?.[i], pendingWorker())}
+                          </th>
+                        )}
+                      </Index>
+                    </tr>
+                  </thead>
+                </Show>
+                <tbody>
+                  <Index each={tbl().rows}>
+                    {(row, rIdx) => (
+                      <tr>
+                        <Index each={row()}>
+                          {(c, i) => (
+                            <td style={{ "text-align": tbl().aligns[i] ?? "left" }}>
+                              {inline(c(), tbl().rowInl?.[rIdx]?.[i], pendingWorker())}
+                            </td>
+                          )}
+                        </Index>
+                      </tr>
+                    )}
+                  </Index>
+                </tbody>
+              </table>
+            </div>
+          );
+        }
+        const q = () => block() as Extract<Block, { t: "quote" }>;
+        const subBlocks = createMemo(() => q().sub ?? parseMarkdown(q().text));
+        return (
+          <blockquote>
+            <div class={`md ${compact ? "md-compact" : ""}`}>
+              <Index each={subBlocks()}>{(sub) => renderBlockSlot(sub, compact, pendingWorker)}</Index>
+            </div>
+          </blockquote>
+        );
       }}
     </Show>
   );

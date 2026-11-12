@@ -137,15 +137,19 @@ describe("off-main-thread Markdown AST + KaTeX + Prism parity", () => {
       // Frame 0 already renders the real <h1>, <table>, and .md-code-block (<pre>) geometry
       // while deferring expensive inline regex/AST parsing to the worker!
       expect(container.querySelector("h1")?.textContent).toBe("Large Turn");
-      expect(container.querySelectorAll("table")).toHaveLength(1);
+      const tableWrapBefore = container.querySelector(".md-table-wrap") as HTMLDivElement | null;
+      expect(tableWrapBefore).toBeTruthy();
+      tableWrapBefore!.scrollLeft = 42;
       expect(container.querySelectorAll(".md-code-block")).toHaveLength(1);
       expect(container.querySelectorAll("strong")).toHaveLength(0);
       expect(createdWorkers).toBe(1);
 
-      // Worker error triggers synchronous inline AST fallback so inline formatting still resolves
+      // Worker hydration / fallback keeps the exact .md-table-wrap node and scrollLeft intact!
       await waitFor(() => {
         expect(container.querySelectorAll("strong").length).toBeGreaterThan(10);
       });
+      expect(container.querySelector(".md-table-wrap")).toBe(tableWrapBefore);
+      expect(tableWrapBefore!.scrollLeft).toBe(42);
     } finally {
       (globalThis as unknown as { Worker: unknown }).Worker = originalWorker;
     }
