@@ -1047,14 +1047,26 @@ export default function App() {
   if (nativeChromeSyncer) {
     let hydratedConnectionVersion = -1;
     const hydratedProjectSlugs = new Set<string>();
+    const retryCounts = new Map<string, number>();
+    const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    const [hydrateRetryTick, setHydrateRetryTick] = createSignal(0);
+    const clearHydrateRetries = () => {
+      for (const timer of retryTimers.values()) clearTimeout(timer);
+      retryTimers.clear();
+      retryCounts.clear();
+    };
+    onCleanup(clearHydrateRetries);
     createEffect(() => {
+      hydrateRetryTick();
       const connVer = connectionVersion();
       if (connVer !== hydratedConnectionVersion) {
         hydratedConnectionVersion = connVer;
         hydratedProjectSlugs.clear();
+        clearHydrateRetries();
       }
       if (!isConnected()) {
         hydratedProjectSlugs.clear();
+        clearHydrateRetries();
         return;
       }
       for (const p of liveProjects()) {
@@ -1064,11 +1076,26 @@ export default function App() {
         void listProjectMissions(slug, { background: true })
           .then((rows) => {
             if (connectionVersion() !== connVer) return;
+            retryCounts.delete(slug);
             const clean = rows.filter((m) => !isMissionDeleting(m.id));
             setProjectMissions((cur) => ({ ...cur, [slug]: clean }));
           })
           .catch((err) => {
-            if (connectionVersion() === connVer) hydratedProjectSlugs.delete(slug);
+            if (connectionVersion() === connVer) {
+              hydratedProjectSlugs.delete(slug);
+              const attempt = (retryCounts.get(slug) ?? 0) + 1;
+              if (attempt <= 5 && !retryTimers.has(slug)) {
+                retryCounts.set(slug, attempt);
+                const delayMs = Math.min(20_000, 1_500 * 2 ** (attempt - 1));
+                retryTimers.set(
+                  slug,
+                  setTimeout(() => {
+                    retryTimers.delete(slug);
+                    if (connectionVersion() === connVer) setHydrateRetryTick((n) => n + 1);
+                  }, delayMs),
+                );
+              }
+            }
             swallow("app.nativeChromeProjectMissions", { slug })(err);
           });
       }
