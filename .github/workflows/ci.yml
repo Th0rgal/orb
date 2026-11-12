@@ -71,7 +71,7 @@ jobs:
           set -euo pipefail
           rs_count=$(git ls-files '*.rs' | wc -l)
           test "$rs_count" -eq 0
-          for cfile in lean/OrbNetLeaf/c/orb_net_leaf.c lean/OrbBin/c/orb_bin_posix.c lean/OrbBin/c/orb_bin_sqlite.c lean/OrbNode/c/orb_node_posix.c lean/OrbCore/c/orb_core_sqlite.c linux_shell/main.c linux_shell/gtk_chrome.c linux_shell/gtk_icons.c; do
+          for cfile in lean/OrbNetLeaf/c/orb_net_leaf.c lean/OrbBin/c/orb_bin_posix.c lean/OrbBin/c/orb_bin_sqlite.c lean/OrbNode/c/orb_node_posix.c lean/OrbCore/c/orb_core_sqlite.c linux_shell/main.c linux_shell/gtk_chrome.c linux_shell/gtk_icons.c linux_shell/gtk_menu.c; do
             lines=$(wc -l < "$cfile")
             echo "$cfile: $lines LOC"
             test "$lines" -le 220

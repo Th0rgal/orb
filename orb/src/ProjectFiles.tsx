@@ -47,8 +47,6 @@ import {
   peekCachedProjects,
   updateProject,
   renameMission,
-  archiveMission,
-  reopenMission,
   archiveProject,
   bumpProjects,
   createProjectCron,
@@ -96,6 +94,7 @@ import { type TreeRow } from "./treeModel";
 const ShareMissionDialog = lazy(() => import("./ShareMissionDialog").then(module => ({ default: module.ShareMissionDialog })));
 import { deletingIds, setDeletingIds, createTreeSelection } from "./tree/selection";
 import { createArchivePager } from "./tree/archivePager";
+import { applyArchiveState, archiveStateTargets } from "./archiveState";
 import { createMissionMoves, type ApprovalConfirmationPrompt } from "./tree/moves";
 const ApprovalTransferDialog = lazy(() => import("./ApprovalTransferDialog"));
 import { createProjectTree, missionFolder, missionIdFromTreeId, type Node, type RowData } from "./tree/TreeView";
@@ -140,7 +139,12 @@ export function newFilePath(dir: string, raw: string): { path: string; name: str
 
 export function LiveProjectsSection(p: {
   /** Reuse the same confirmation and deletion pipeline from other views. */
-  deleteRequest?: string | null;
+  deleteRequest?: readonly string[] | null;
+  /** Archive/restore requests from the native sidebar, run through `changeArchiveState`
+   *  (optimistic status, in-flight guard, rollback). Consumed then acknowledged. */
+  archiveRequests?: readonly { mission: Mission; restore: boolean }[];
+  onArchiveRequestsHandled?: (count: number) => void;
+  onArchiveSettled?: (id: string, ok: boolean) => void;
   onDeleteRequestHandled?: () => void;
   activityMissions?: Mission[];
   /** Details from the open conversation, including restored/local sessions. */
@@ -865,12 +869,32 @@ export function LiveProjectsSection(p: {
   const [renameValue, setRenameValue] = createSignal("");
   const [renameError, setRenameError] = createSignal<string | null>(null);
   const [actionError, setActionError] = createSignal<string | null>(null);
-  createEffect(on(() => p.deleteRequest, id => {
-    if (!id) return;
+  createEffect(on(() => p.deleteRequest, ids => {
+    if (!ids?.length) return;
     setActionError(null);
-    setDeleteTargets([id]);
+    setDeleteTargets([...ids]);
     p.onDeleteRequestHandled?.();
   }));
+  // Ctrl/Cmd+Delete (and Cmd+Backspace on macOS) deletes the selected agents, or the open one,
+  // through the same confirmation as the menu. Never while typing.
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((p.active && !p.active()) || e.defaultPrevented || e.altKey || e.shiftKey) return;
+      const mac = document.documentElement.dataset.platform === "macos" || /Mac/.test(navigator.platform);
+      if (!((e.key === "Delete" && (e.ctrlKey || e.metaKey)) || (mac && e.key === "Backspace" && e.metaKey))) return;
+      const t = e.target as HTMLElement | null;
+      if (t?.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])")) return;
+      const selected = [...(selectedRowIds() ?? [])].map(missionIdFromTreeId).filter((x): x is string => !!x);
+      const current = p.selected()?.startsWith("m:") ? p.selected()!.slice(2) : null;
+      const ids = selectionActive() && selected.length ? selected : current ? [current] : [];
+      if (!ids.length || deleteTargets().length) return;
+      e.preventDefault();
+      setActionError(null);
+      setDeleteTargets(ids);
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
   const rowTip = useTooltip<RowTipContent>(ROW_TIP_ID, tip => <><div class="row-tip-title">{tip.title}</div><For each={tip.meta}>{line => <div class="row-tip-meta">{line}</div>}</For></>);
   const currentConnection = (version: number) => isConnected() && connectionVersion() === version;
   const requests = createSidebarRequests();
@@ -1976,16 +2000,11 @@ export function LiveProjectsSection(p: {
   };
   const changeArchiveState = async (mission: Mission, restore: boolean) => {
     if (archiving.has(mission.id) || deletingIds().has(mission.id)) return false;
-    const subtree = missionSubtree(allKnownMissions(), [mission.id]);
-    const fullSubtree = subtree.some(m => m.id === mission.id) ? subtree : [mission, ...subtree];
-    if (fullSubtree.some(m => deletingIds().has(m.id))) return false;
-    if (!restore && fullSubtree.some(m => isWorking(m.status))) {
-      setActionError("Stop or finish this agent before archiving it.");
-      return false;
-    }
-    const targets = restore
-      ? [mission, ...fullSubtree.filter(m => m.id !== mission.id && isArchived(m))]
-      : fullSubtree.filter(m => !isArchived(m) && !archiving.has(m.id));
+    const known = allKnownMissions();
+    if (missionSubtree(known, [mission.id]).some(m => deletingIds().has(m.id))) return false;
+    let targets: Mission[];
+    try { targets = archiveStateTargets(mission, known, restore, id => archiving.has(id)); }
+    catch (e) { setActionError(e instanceof Error ? e.message : String(e)); return false; }
     if (!targets.length) return true;
     const id = mission.id, version = connectionVersion();
     const status = restore ? "paused" : "acknowledged";
@@ -2018,15 +2037,7 @@ export function LiveProjectsSection(p: {
     });
     updateStatus(() => status);
     try {
-      if (!restore && targets.length > 1 && targets.some(t => t.id === mission.id)) {
-        // Core cascades status=acknowledged to parent_mission_id descendants;
-        // archiving the root first avoids N redundant POSTs while still
-        // archiving callback-only children and confirming local origins.
-        await archiveMission(mission.id);
-        await Promise.all(targets.filter(t => t.id !== mission.id).map(t => archiveMission(t.id)));
-      } else {
-        await Promise.all(targets.map(t => restore ? reopenMission(t.id) : archiveMission(t.id)));
-      }
+      await applyArchiveState(mission, targets, restore);
       if (!currentConnection(version)) return;
       if (restore) {
         for (const t of targets) archivedInSession.delete(t.id);
@@ -2056,6 +2067,11 @@ export function LiveProjectsSection(p: {
     } finally { for (const t of targets) archiving.delete(t.id); missionRevision++; }
   };
   const archiveConversation = (mission: Mission) => changeArchiveState(mission, false);
+  createEffect(on(() => p.archiveRequests, reqs => {
+    if (!reqs?.length) return;
+    p.onArchiveRequestsHandled?.(reqs.length);
+    for (const r of reqs) void changeArchiveState(r.mission, r.restore).then(ok => p.onArchiveSettled?.(r.mission.id, ok !== false));
+  }));
   const reopenConversation = (mission: Mission) => changeArchiveState(mission, true);
   const archiveSelection = async (id: string) => {
     if (batchBusy()) return;

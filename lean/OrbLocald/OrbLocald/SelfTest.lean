@@ -1923,6 +1923,32 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
       if (← assertTrue "native_chrome_palette_query_ranking_fixtures" allPalOk) then
         ncPassed := ncPassed + 1
 
+      -- Project-less missions file under Default; archived ones only under the Archived section.
+      let daCase := (fixJv.field? "default_and_archive_case").getD (.obj #[])
+      try IO.FS.createDirAll (chromeDir ++ "/archive") catch _ => pure ()
+      let daRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := chromeDir ++ "/archive" } : LocaldState)
+      let daSync ← dispatchRpcCommand daRef "native_chrome_sync_state" ((daCase.field? "sync").getD (.obj #[]))
+      let daRows ← dispatchRpcCommand daRef "native_chrome_get_rows" (.obj #[])
+      let daTog ← dispatchRpcCommand daRef "native_chrome_toggle_expand"
+        (.obj #[("row_id", .str ((daCase.fieldStr? "toggle_row_id").getD ""))])
+      ncTotal := ncTotal + 1
+      let daOk : Bool :=
+        match daSync, daRows, daTog with
+        | .ok sj, .ok rj, .ok tj =>
+          let rows := (rj.fieldArr? "rows").getD #[]
+          let ids := rows.filterMap (·.fieldStr? "row_id")
+          let tIds := ((tj.fieldArr? "rows").getD #[]).filterMap (·.fieldStr? "row_id")
+          let expIds := ((daCase.fieldArr? "expected_collapsed_row_ids").getD #[]).filterMap (·.asStr?)
+          let tail := ((daCase.fieldArr? "expected_expanded_tail").getD #[]).filterMap (·.asStr?)
+          let defRow? := rows.find? (fun r => r.fieldStr? "row_id" == some "proj:default")
+          (sj.fieldBool? "applied") == some true && ids == expIds &&
+          (defRow?.bind (·.fieldStr? "title")) == daCase.fieldStr? "expected_default_project_title" &&
+          (tj.fieldBool? "expanded") == some true &&
+          tIds.extract (tIds.size - tail.size) tIds.size == tail
+        | _, _, _ => false
+      if (← assertTrue "native_chrome_projectless_in_default_and_archived_section" daOk) then
+        ncPassed := ncPassed + 1
+
       -- Settings mode projection (at producer revision 11 right after 2 local expansion toggles,
       -- verifying `toggleExpand` advances `viewRevision` without blocking `syncRevision == 11`)
       let setMode := (fixJv.field? "settings_mode_case").getD (.obj #[])
@@ -2091,6 +2117,10 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
         ])
       ]
       let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" moveRootSync
+      -- A cleared project files the mission under Default (a second project, so expand both).
+      for rid in #["proj:orb", "proj:default"] do
+        let _ ← dispatchRpcCommand ncRef "native_chrome_toggle_expand"
+          (.obj #[("scope", .str "scope:move-root:1"), ("row_id", .str rid), ("expanded", .bool true)])
       let mvRowsRes ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:move-root:1")])
       ncTotal := ncTotal + 1
       let mvAndTsOk : Bool :=
@@ -2105,7 +2135,8 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
           (mvRow?.bind (·.fieldStr? "folder")) == some "" &&
           (mvRow?.bind (·.fieldNat? "depth")) == some 1 &&
           (unprojRow?.bind (·.fieldStr? "title")) == some "Unassigned project" &&
-          (unprojRow?.bind (·.fieldStr? "project")) == some ""
+          (unprojRow?.bind (·.fieldStr? "project")) == some "default" &&
+          (unprojRow?.bind (·.fieldNat? "depth")) == some 1
         | .error _ => false
       if (← assertTrue "native_chrome_iso_epoch_ms_and_empty_placement_clear" mvAndTsOk) then
         ncPassed := ncPassed + 1

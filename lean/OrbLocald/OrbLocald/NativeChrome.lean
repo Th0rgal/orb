@@ -680,6 +680,12 @@ def projectSidebarFooter (st : ChromeScopeState) : SidebarRow :=
     attention := !st.settingsDots.isEmpty
   }
 
+/-- Slug of the catch-all project (`DEFAULT_PROJECT` in `orb/src/defaultProject.ts`). -/
+def defaultProjectSlug : String := "default"
+
+/-- Row id of the sidebar's Archived section toggle. -/
+def archiveRowId : String := "archive"
+
 /-- Project canonical flat `Array SidebarRow` from `ChromeScopeState` + optional `filterQuery`. -/
 def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Array SidebarRow := Id.run do
   let sel := st.selected.trimAscii.toString
@@ -875,9 +881,11 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
     let effFolder := if !cur.folder.isEmpty then cur.folder else start.folder
     (effProj, effFolder)
 
+  -- A mission Core filed under no project belongs to the catch-all Default project
+  -- (`DEFAULT_PROJECT` in `orb/src/defaultProject.ts`), never at the sidebar root.
   let placedMerged := merged.map fun m =>
     let (ep, ef) := resolveEffectivePlacement m
-    { m with project := ep, folder := ef }
+    { m with project := if ep.isEmpty then defaultProjectSlug else ep, folder := ef }
 
   let mut placedById : Std.HashMap String ChromeMissionInput := {}
   for m in placedMerged do
@@ -891,7 +899,7 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
   for m in placedMerged do
     if !m.project.isEmpty && !projSeen.contains m.project then
       projSeen := projSeen.insert m.project true
-      projects := projects.push { slug := m.project, name := m.project }
+      projects := projects.push { slug := m.project, name := if m.project == defaultProjectSlug then "Default" else m.project }
 
   -- Compute `directMatchSet` and bottom-up `visDescSet` in O(N):
   let mut directMatchSet : Std.HashMap String Bool := {}
@@ -902,7 +910,8 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
     let directMatch :=
       if supHidden then false
       else if filterActive then matchesFilterNeedle m needleLower
-      else !m.acknowledged || isSel
+      -- Archived conversations live only under the Archived section (which opens for a selected one).
+      else !m.acknowledged
     if directMatch then
       directMatchSet := directMatchSet.insert m.id true
       directMatchIds := directMatchIds.push m.id
@@ -1144,6 +1153,68 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
   for m in unassigned do
     rows := emitMissionSubtree subtreeFuel m 0 rows
 
+  -- An archived root that still holds a live descendant stays in its project (no duplicate row).
+  let retainedIds : Std.HashMap String Bool := retainedMissions.foldl (fun acc m => acc.insert m.id true) {}
+  -- A root of the archived hierarchy: its parent (if any) is not itself listed under Archived,
+  -- e.g. an archived worker of a live parent or an archived version of a live fork leader.
+  let hasArchivedParent := fun (m : ChromeMissionInput) =>
+    match safeParentMap[m.id]? with
+    | none => false
+    | some pid =>
+      match placedById[pid]? with
+      | some p => p.acknowledged && !retainedIds.contains p.id
+      | none => false
+  -- Archived conversations (`archive-section-toggle` in `ProjectFiles.tsx`): collapsed by default,
+  -- newest first, roots only (archived descendants stay with their root).
+  let archivedRoots :=
+    (placedMerged.filter fun m =>
+      m.acknowledged && !retainedIds.contains m.id && !hasArchivedParent m &&
+      (!filterActive || matchesFilterNeedle m needleLower)).qsort fun a b =>
+        if a.updatedAtMs != b.updatedAtMs then a.updatedAtMs > b.updatedAtMs else a.id < b.id
+  if !filterActive || !archivedRoots.isEmpty then
+    let selArchived := placedMerged.any fun m => m.acknowledged && !retainedIds.contains m.id && isSelectedMissionTarget sel m.id
+    let archExpanded := resolveExpanded archiveRowId selArchived
+    rows := rows.push {
+      rowId := archiveRowId
+      kind := "archive"
+      depth := 0
+      title := "Archived"
+      expandable := true
+      expanded := archExpanded
+    }
+    if archExpanded then
+      if archivedRoots.isEmpty then
+        rows := rows.push { rowId := "note:archive-empty", kind := "note", depth := 1, title := "No archived conversations." }
+      -- Archived children and earlier fork versions stay under their archived root
+      -- (newest first), so every archived conversation remains reachable.
+      let mut archivedKids : Std.HashMap String (Array ChromeMissionInput) := {}
+      for m in placedMerged do
+        if m.acknowledged && !retainedIds.contains m.id then
+          if let some pid := safeParentMap[m.id]? then
+            archivedKids := archivedKids.insert pid (((archivedKids[pid]?).getD #[]).push m)
+      let rec emitArchived (fuel : Nat) (m : ChromeMissionInput) (depth : Nat) (acc : Array SidebarRow) : Array SidebarRow :=
+        match fuel with
+        | 0 => acc
+        | fuel' + 1 =>
+          let row : SidebarRow := {
+            rowId := s!"m:{m.id}"
+            kind := "mission"
+            depth := depth
+            title := m.title
+            subtitle := m.status
+            target := s!"m:{m.id}"
+            project := m.project
+            folder := m.folder
+            status := m.status
+            icon := "bot"
+            selected := isSelectedMissionTarget sel m.id
+          }
+          let kids := ((archivedKids[m.id]?).getD #[]).qsort fun a b =>
+            if a.updatedAtMs != b.updatedAtMs then a.updatedAtMs > b.updatedAtMs else a.id < b.id
+          kids.foldl (fun a c => emitArchived fuel' c (depth + 1) a) (acc.push row)
+      for m in archivedRoots do
+        rows := emitArchived (placedMerged.size + 1) m 1 rows
+
   if projects.isEmpty && unassigned.isEmpty then
     rows := rows.push {
       rowId := "note:projects-empty"
@@ -1349,6 +1420,10 @@ def parseChromeSyncPayload (args : JVal) : Except String ParsedChromeSync := do
     if let some pm := parseMissionInput? m then
       missions := missions.push pm
   for m in (args.fieldArr? "completed_missions").getD #[] do
+    if let some pm := parseMissionInput? m then
+      missions := missions.push pm
+  -- Explicitly archived conversations (`listArchivedMissions`), shown under the Archived section.
+  for m in (args.fieldArr? "archived_missions").getD #[] do
     if let some pm := parseMissionInput? m then
       missions := missions.push pm
   if let some pmObj := (args.field? "project_missions").bind (·.asObj?) then

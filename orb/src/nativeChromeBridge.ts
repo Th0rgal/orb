@@ -59,6 +59,8 @@ export type NativeChromeSyncSnapshot = {
   projectFiles?: Readonly<Record<string, readonly string[]>>;
   missions: readonly Mission[];
   completedMissions: readonly Mission[];
+  /** Explicitly archived conversations (`listArchivedMissions`), listed under the native Archived section. */
+  archivedMissions?: readonly Mission[];
   projectMissions: Readonly<Record<string, readonly Mission[]>>;
 };
 
@@ -68,6 +70,7 @@ type NativeChromeWindow = Window & {
   __ORB_NATIVE_NAV__?: (target: string) => boolean;
   __ORB_NATIVE_EXPAND__?: (rowId: string) => boolean;
   __ORB_TOGGLE_NATIVE_SIDEBAR__?: (open?: boolean) => boolean;
+  __ORB_NATIVE_MISSION_ACTION__?: (action: string, missionId: string, arg?: string) => boolean;
   webkit?: {
     messageHandlers?: {
       orbNative?: {
@@ -106,6 +109,17 @@ export function serializeNativeChromeMission(m: Mission): NativeChromeMissionWir
   };
 }
 
+/** Execution state of each row comes from its live-list copy, the single owner that
+ *  `syncOpenMission` patches (an optimistic send changes status without a newer `updated_at`).
+ *  Stale per-project or completed copies would otherwise win `orb-locald`'s timestamp-tie merge. */
+export function withLiveExecution(rows: readonly Mission[], live: ReadonlyMap<string, Mission>): Mission[] {
+  return rows.map((row) => {
+    const owner = live.get(row.id);
+    if (!owner || owner === row) return row;
+    return { ...row, status: owner.status, updated_at: owner.updated_at, remote_job: owner.remote_job, execution: owner.execution, queue_wait: owner.queue_wait };
+  });
+}
+
 export function buildNativeChromeSyncArgs(
   snap: NativeChromeSyncSnapshot,
   revision: number,
@@ -138,6 +152,7 @@ export function buildNativeChromeSyncArgs(
     projects,
     missions: snap.missions.map(serializeNativeChromeMission),
     completed_missions: snap.completedMissions.map(serializeNativeChromeMission),
+    archived_missions: (snap.archivedMissions ?? []).map(serializeNativeChromeMission),
     project_missions: projectMissionsWire,
   };
 }
@@ -151,7 +166,21 @@ export type NativeChromeBridgeHandlers = {
   selectProject?: (slug: string) => void;
   getScope?: () => string;
   toggleFolderExpand?: (rowId: string) => void;
+  /** Native sidebar context menu: `rename` (arg = new title), `move` (arg = project slug),
+   *  `archive`, `restore`, `copy-id`, `settings`, `delete` (arg = space-separated ids or "current"). */
+  missionAction?: (action: NativeMissionAction, missionId: string, arg: string) => boolean;
 };
+
+/** Mission ids a native action applies to: `delete` lists them in `arg` ("current" = the open
+ *  conversation), a bulk `move` lists them in `id`; every other action targets `id` alone. */
+export function nativeActionTargets(action: NativeMissionAction, id: string, arg: string, current: string | null): string[] {
+  const split = (s: string) => s.split(/\s+/).filter(Boolean);
+  if (action === "delete") return arg === "current" ? (current ? [current] : []) : split(arg);
+  return action === "move" ? split(id) : id ? [id] : [];
+}
+
+export type NativeMissionAction = "rename" | "move" | "archive" | "restore" | "copy-id" | "settings" | "delete";
+const NATIVE_MISSION_ACTIONS: readonly string[] = ["rename", "move", "archive", "restore", "copy-id", "settings", "delete"];
 
 /** Notify native macOS/Linux shell when the titlebar sidebar toggle, history state, or Cmd+K shortcut fires inside WebView. */
 export function notifyNativeChromeShell(
@@ -239,7 +268,14 @@ export function installNativeChromeWindowHandlers(
   nw.__ORB_NATIVE_NAV__ = nativeNav;
   nw.__ORB_NATIVE_EXPAND__ = nativeExpand;
   nw.__ORB_TOGGLE_NATIVE_SIDEBAR__ = toggleSidebar;
+  const missionAction = (action: string, missionId: string, arg?: string): boolean => {
+    const id = (missionId ?? "").trim().replace(/^m:/, "");
+    if (!id || !NATIVE_MISSION_ACTIONS.includes(action) || !handlers.missionAction) return false;
+    return handlers.missionAction(action as NativeMissionAction, id, (arg ?? "").trim());
+  };
+  nw.__ORB_NATIVE_MISSION_ACTION__ = missionAction;
   return () => {
+    if (nw.__ORB_NATIVE_MISSION_ACTION__ === missionAction) delete nw.__ORB_NATIVE_MISSION_ACTION__;
     if (nw.__ORB_SELECT_MISSION__ === selectMission) delete nw.__ORB_SELECT_MISSION__;
     if (nw.__ORB_NATIVE_NAV__ === nativeNav) delete nw.__ORB_NATIVE_NAV__;
     if (nw.__ORB_NATIVE_EXPAND__ === nativeExpand) delete nw.__ORB_NATIVE_EXPAND__;

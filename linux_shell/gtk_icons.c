@@ -116,6 +116,21 @@ static gboolean on_ptr_leave(GtkWidget *w, GdkEventCrossing *ev, gpointer ud) {
     if (gw) { gdk_window_set_cursor(gw, NULL); }
     return FALSE;
 }
+void orb_gtk_begin_window_drag(GtkWidget *w) {
+    GtkWidget *top = w ? gtk_widget_get_toplevel(w) : NULL; GdkSeat *seat = gdk_display_get_default_seat(gdk_display_get_default()); gint x = 0, y = 0;
+    if (!GTK_IS_WINDOW(top) || !seat) { return; }
+    gdk_device_get_position(gdk_seat_get_pointer(seat), NULL, &x, &y); gtk_window_begin_move_drag(GTK_WINDOW(top), GDK_BUTTON_PRIMARY, x, y, gtk_get_current_event_time());
+}
+static gboolean on_drag_press(GtkWidget *w, GdkEventButton *ev, gpointer ud) {
+    (void)ud; if (ev->type != GDK_BUTTON_PRESS || ev->button != GDK_BUTTON_PRIMARY) { return FALSE; }
+    GtkWidget *top = gtk_widget_get_toplevel(w); if (GTK_IS_WINDOW(top)) { gtk_window_begin_move_drag(GTK_WINDOW(top), ev->button, (gint)ev->x_root, (gint)ev->y_root, ev->time); }
+    return TRUE;
+}
+GtkWidget *orb_gtk_drag_area(GtkWidget *child) {
+    GtkWidget *eb = gtk_event_box_new(); gtk_event_box_set_visible_window(GTK_EVENT_BOX(eb), FALSE);
+    gtk_widget_add_events(eb, GDK_BUTTON_PRESS_MASK); g_signal_connect(eb, "button-press-event", G_CALLBACK(on_drag_press), NULL);
+    return gtk_container_add(GTK_CONTAINER(eb), child), eb;
+}
 void orb_gtk_bind_pointer_cursor(GtkWidget *w) {
     if (!w) { return; }
     gtk_widget_add_events(w, GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);

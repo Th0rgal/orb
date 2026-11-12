@@ -250,6 +250,9 @@ jobs:
           gtk_ic_lines=$(wc -l < linux_shell/gtk_icons.c)
           echo "linux_shell/gtk_icons.c LOC: $gtk_ic_lines"
           test "$gtk_ic_lines" -le 220
+          gtk_menu_lines=$(wc -l < linux_shell/gtk_menu.c)
+          echo "linux_shell/gtk_menu.c LOC: $gtk_menu_lines"
+          test "$gtk_menu_lines" -le 220
           ./scripts/build_orb_bins.sh --out-dir target/debug
           (cd lean/OrbBin && lake build orb-bin-test -- -DwarningAsError=true && ./.lake/build/bin/orb-bin-test)
           (cd lean/OrbNode && lake build orb-node-test -- -DwarningAsError=true && ./.lake/build/bin/orb-node-test)

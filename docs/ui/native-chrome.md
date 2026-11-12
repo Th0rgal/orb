@@ -48,6 +48,29 @@ routes through the verified unboxed kernel functions in `Orb.Kernel`:
   Governs press-and-hold (`260 ms`), drag threshold (`6 px`), and spring-loaded folder
   expansion (`450 ms`) consistently across WebView and native chrome surfaces.
 
+## Default Project, Archived Section & Context Menu
+
+- A mission Core files under no project (`project: null` or `""`) is projected into the
+  catch-all `default` project (shown as "Default"), never at the sidebar root.
+- Archived (`acknowledged`) conversations never appear inside projects. The WebView syncs
+  `archived_missions` (first page of `listArchivedMissions`, reloaded on
+  `orb:mission-archived` and after native actions) and `OrbLocald` lists their roots,
+  newest first, under the `archive` row, collapsed unless a selected conversation is in it.
+  An archived root that still has a live descendant stays in its project.
+- Right-clicking a mission row opens a native menu (`linux_shell/gtk_menu.c`): Rename…,
+  Move to ▸ project, Archive/Restore, Copy mission ID, Mission settings. Each item calls
+  `window.__ORB_NATIVE_MISSION_ACTION__(action, id, arg)`, which reuses the HTML sidebar's
+  API calls (`renameOptimistically`, `moveMission`, `archiveMission`, `reopenMission`), so
+  optimistic updates and error toasts have one implementation. macOS (`NSTableView`) does
+  not have this menu yet.
+- Multi-selection: Ctrl/Super-click toggles a mission, project, folder or file row, Shift-click
+  extends from the anchor, a plain click or Escape clears it. Right-click inside a selection of
+  more than one shows only bulk actions: for missions Move N to ▸, Archive/Restore N and Delete N…
+  (the HTML sidebar's selection menu); other selections show the count and Clear selection.
+- Ctrl/Super+Delete deletes the selected missions, or the open one, through the headless
+  `ProjectFiles` confirmation (running workers and descendants included). With WebView focus the
+  same shortcut (Cmd+Backspace too on macOS) is handled by `ProjectFiles`, never while typing.
+
 ## Loopback JSON-RPC & SSE Contract
 
 All commands run over `127.0.0.1:<rpcPort>/__orb_rpc` gated by the 32-byte launch token:
