@@ -1785,15 +1785,202 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
 
   -- 20–23. Desktop reliability, Linux XDG portal FileChooser, warm Claude RPC, local OpenCode E2E, and `desktop_bootstrap` suites
   let (e2ePassed, e2eTotal) ← runEndToEndSuites tmpStateDir validTok
-  return (passed + e2ePassed, total + e2eTotal)
+
+  -- 24. Native Chrome (`OrbLocald.NativeChrome`) canonical sidebar row projection, cycle-safe hierarchy,
+  --     monotonic revision fencing, SQLite cold-start hydration, move-target admission, and Cmd+K palette
+  let mut ncPassed := 0
+  let mut ncTotal := 0
+  let fixCandidates : Array System.FilePath := #[
+    "shared/orb-spec/fixtures/native-chrome-sidebar.json",
+    "../../shared/orb-spec/fixtures/native-chrome-sidebar.json"
+  ]
+  let mut fixPath? : Option System.FilePath := none
+  for cand in fixCandidates do
+    if fixPath?.isNone && (← cand.pathExists) then
+      fixPath? := some cand
+  ncTotal := ncTotal + 1
+  match fixPath? with
+  | none =>
+    let _ ← assertTrue "native_chrome_fixture_found" false
+  | some fixPath =>
+    let rawFix ← IO.FS.readFile fixPath
+    match OrbBin.Json.parse rawFix with
+    | .error _ =>
+      let _ ← assertTrue "native_chrome_fixture_parse" false
+    | .ok fixJv =>
+      if (← assertTrue "native_chrome_fixture_parse" true) then ncPassed := ncPassed + 1
+      let chromeDir := tmpStateDir ++ "/native-chrome-test"
+      try IO.FS.createDirAll chromeDir catch _ => pure ()
+      let ncRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := chromeDir } : LocaldState)
+      let (_, sseSubId) ← ncRef.modifyGet fun s =>
+        let (sid, s') := s.registerSseSubscriber
+        (((), sid), s')
+      let syncCase := (fixJv.field? "sync_case").getD (.obj #[])
+      let syncRes ← dispatchRpcCommand ncRef "native_chrome_sync_state" syncCase
+      let staleCase := JVal.setField syncCase "revision" (.nat 5)
+      let staleRes ← dispatchRpcCommand ncRef "native_chrome_sync_state" staleCase
+      let rowsRes ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[])
+      let sseEvs ← ncRef.modifyGet (·.drainSseSubscriber sseSubId)
+      ncTotal := ncTotal + 1
+      let syncOk : Bool :=
+        match syncRes, staleRes, rowsRes with
+        | .ok sjv, .ok stjv, .ok rjv =>
+          let applied1 := (sjv.fieldBool? "applied").getD false
+          let applied2 := (stjv.fieldBool? "applied").getD true
+          let gotRows := (rjv.fieldArr? "rows").getD #[]
+          let gotIds := gotRows.filterMap (·.fieldStr? "row_id")
+          let expIds := ((syncCase.fieldArr? "expected_row_ids").getD #[]).filterMap (·.asStr?)
+          let selRows := gotRows.filter (fun r => (r.fieldBool? "selected").getD false)
+          let selId := if selRows.size == 1 then (selRows[0]!.fieldStr? "row_id").getD "" else ""
+          let expSel := (syncCase.fieldStr? "expected_selected_row_id").getD ""
+          let inboxRow? := gotRows.find? (fun r => r.fieldStr? "row_id" == some "nav:inbox")
+          let settingsRow? := gotRows.find? (fun r => r.fieldStr? "row_id" == some "nav:settings")
+          let rootRow? := gotRows.find? (fun r => r.fieldStr? "row_id" == some "m:m-root")
+          let childRow? := gotRows.find? (fun r => r.fieldStr? "row_id" == some "m:m-child")
+          let sseFired := sseEvs.size == 1 && (sseEvs[0]!.fieldStr? "event") == some "native_chrome_rows_changed"
+          applied1 && !applied2 && sseFired &&
+          gotIds == expIds &&
+          selId == expSel &&
+          (inboxRow?.bind (·.fieldNat? "badge")) == syncCase.fieldNat? "expected_inbox_badge" &&
+          (settingsRow?.bind (·.fieldNat? "badge")) == syncCase.fieldNat? "expected_settings_badge" &&
+          (rootRow?.bind (·.fieldStr? "title")) == syncCase.fieldStr? "expected_m_root_title" &&
+          (childRow?.bind (·.fieldNat? "depth")) == syncCase.fieldNat? "expected_m_child_depth"
+        | _, _, _ => false
+      if (← assertTrue "native_chrome_sync_dedup_cycle_hierarchy_and_sse_fence" syncOk) then
+        ncPassed := ncPassed + 1
+
+      -- Filter retention (`m-root` retained via visible child `m-child` matching `"busy timeout"`)
+      let filterCase := (fixJv.field? "filter_case").getD (.obj #[])
+      let filtQ := (filterCase.fieldStr? "filter_query").getD ""
+      let filtRes ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("filter_query", .str filtQ)])
+      ncTotal := ncTotal + 1
+      let filtOk : Bool :=
+        match filtRes with
+        | .ok fjv =>
+          let fIds := ((fjv.fieldArr? "rows").getD #[]).filterMap (·.fieldStr? "row_id")
+          let reqIn := ((filterCase.fieldArr? "expected_retained_missions").getD #[]).filterMap (·.asStr?)
+          let reqOut := ((filterCase.fieldArr? "expected_excluded_missions").getD #[]).filterMap (·.asStr?)
+          reqIn.all (fun id => fIds.contains id) && reqOut.all (fun id => !fIds.contains id)
+        | .error _ => false
+      if (← assertTrue "native_chrome_filter_retains_ancestor_of_matching_child" filtOk) then
+        ncPassed := ncPassed + 1
+
+      -- Collapse / expand toggle
+      let colCase := (fixJv.field? "collapse_case").getD (.obj #[])
+      let togRow := (colCase.fieldStr? "toggle_row_id").getD ""
+      let togRes1 ← dispatchRpcCommand ncRef "native_chrome_toggle_expand" (.obj #[("row_id", .str togRow)])
+      let togRes2 ← dispatchRpcCommand ncRef "native_chrome_toggle_expand" (.obj #[("row_id", .str togRow)])
+      ncTotal := ncTotal + 1
+      let togOk : Bool :=
+        match togRes1, togRes2 with
+        | .ok t1, .ok t2 =>
+          let ids1 := ((t1.fieldArr? "rows").getD #[]).filterMap (·.fieldStr? "row_id")
+          let ids2 := ((t2.fieldArr? "rows").getD #[]).filterMap (·.fieldStr? "row_id")
+          let hidden := ((colCase.fieldArr? "expected_hidden_ids").getD #[]).filterMap (·.asStr?)
+          let visible := ((colCase.fieldArr? "expected_visible_ids").getD #[]).filterMap (·.asStr?)
+          (t1.fieldBool? "expanded") == some false &&
+          (t2.fieldBool? "expanded") == some true &&
+          hidden.all (fun id => !ids1.contains id && ids2.contains id) &&
+          visible.all (fun id => ids1.contains id)
+        | _, _ => false
+      if (← assertTrue "native_chrome_toggle_expand_hides_and_restores_subtree" togOk) then
+        ncPassed := ncPassed + 1
+
+      -- Move target admission (`orb_sidebar_move_target_admit`)
+      let moveCases := (fixJv.fieldArr? "move_admit_cases").getD #[]
+      ncTotal := ncTotal + 1
+      let mut allMovesOk := !moveCases.isEmpty
+      for mc in moveCases do
+        let mRes ← dispatchRpcCommand ncRef "native_chrome_move_admit" mc
+        let exp := (mc.fieldBool? "expected").getD false
+        match mRes with
+        | .ok mjv =>
+          if (mjv.fieldBool? "admitted") != some exp then allMovesOk := false
+        | .error _ => allMovesOk := false
+      if (← assertTrue "native_chrome_move_target_admit_fixtures" allMovesOk) then
+        ncPassed := ncPassed + 1
+
+      -- Palette query (`LeanSys.Search` + deterministic score order)
+      let palCases := (fixJv.fieldArr? "palette_cases").getD #[]
+      ncTotal := ncTotal + 1
+      let mut allPalOk := !palCases.isEmpty
+      for pc in palCases do
+        let q := (pc.fieldStr? "query").getD ""
+        let expTop := (pc.fieldStr? "expected_top_id").getD ""
+        let pRes ← dispatchRpcCommand ncRef "native_chrome_palette_query" (.obj #[("query", .str q)])
+        match pRes with
+        | .ok pjv =>
+          let items := (pjv.fieldArr? "items").getD #[]
+          let gotTop := if items.size > 0 then (items[0]!.fieldStr? "id").getD "" else ""
+          if gotTop != expTop then allPalOk := false
+        | .error _ => allPalOk := false
+      if (← assertTrue "native_chrome_palette_query_ranking_fixtures" allPalOk) then
+        ncPassed := ncPassed + 1
+
+      -- Settings mode projection
+      let setMode := (fixJv.field? "settings_mode_case").getD (.obj #[])
+      let setSync := JVal.setField (JVal.setField (JVal.setField syncCase "revision" (.nat 20))
+        "on_settings" (.bool true))
+        "selected" (.str ((setMode.fieldStr? "selected").getD "security-settings"))
+      let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" setSync
+      let setRowsRes ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[])
+      ncTotal := ncTotal + 1
+      let setModeOk : Bool :=
+        match setRowsRes with
+        | .ok srjv =>
+          let srows := (srjv.fieldArr? "rows").getD #[]
+          let sids := srows.filterMap (·.fieldStr? "row_id")
+          let expSids := ((setMode.fieldArr? "expected_row_ids").getD #[]).filterMap (·.asStr?)
+          let secRow? := srows.find? (fun r => r.fieldStr? "row_id" == some "settings:security")
+          sids == expSids &&
+          (secRow?.bind (·.fieldBool? "selected")) == some true &&
+          (secRow?.bind (·.fieldBool? "attention")) == setMode.fieldBool? "expected_security_attention" &&
+          (secRow?.bind (·.fieldNat? "badge")) == setMode.fieldNat? "expected_security_badge"
+        | .error _ => false
+      if (← assertTrue "native_chrome_settings_mode_projection" setModeOk) then
+        ncPassed := ncPassed + 1
+
+      -- Cold-start SQLite hydration from `ui_sidebar` before WebView boots
+      let coldDir := tmpStateDir ++ "/native-chrome-cold"
+      try IO.FS.createDirAll coldDir catch _ => pure ()
+      let seedRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := coldDir } : LocaldState)
+      let persistedPayload := renderCompact (.obj #[
+        ("scope", .str "scope:cold:1"),
+        ("savedAt", .nat 1700000000000),
+        ("projects", .arr #[.obj #[("slug", .str "orb"), ("name", .str "Orb"), ("folders", .arr #[.str "lean"])]]),
+        ("missions", .arr #[.obj #[("id", .str "m-cold"), ("title", .str "Cold SQLite mission"), ("status", .str "active"), ("project", .str "orb"), ("folder", .str "lean")]]),
+        ("completedMissions", .arr #[])
+      ])
+      let _ ← dispatchRpcCommand seedRef "ui_cache_put" (.obj #[
+        ("kind", .str "sidebar"),
+        ("key", .str "scope:cold:1"),
+        ("saved_at", .nat 1700000000000),
+        ("raw", .str persistedPayload)
+      ])
+      let coldFreshRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := coldDir } : LocaldState)
+      let coldRowsRes ← dispatchRpcCommand coldFreshRef "native_chrome_get_rows" (.obj #[])
+      ncTotal := ncTotal + 1
+      let coldOk : Bool :=
+        match coldRowsRes with
+        | .ok crjv =>
+          let cids := ((crjv.fieldArr? "rows").getD #[]).filterMap (·.fieldStr? "row_id")
+          (crjv.fieldStr? "scope") == some "scope:cold:1" &&
+          cids.contains "proj:orb" &&
+          cids.contains "folder:orb:lean" &&
+          cids.contains "m:m-cold"
+        | .error _ => false
+      if (← assertTrue "native_chrome_cold_sqlite_ui_sidebar_hydration" coldOk) then
+        ncPassed := ncPassed + 1
+
+  return (passed + e2ePassed + ncPassed, total + e2eTotal + ncTotal)
 
 def main : IO UInt32 := do
   let mut passed := 0
   let mut total := 0
 
-  -- 1. Command table size (102 desktop commands + plugin:app|version = 103)
+  -- 1. Command table size (107 desktop commands + plugin:app|version = 108)
   total := total + 1
-  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 103) then passed := passed + 1
+  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 108) then passed := passed + 1
 
   -- 2. Loopback RPC auth gate (>= 32-byte non-placeholder secret + local Origin confinement)
   let validTok := "0123456789abcdef0123456789abcdef"

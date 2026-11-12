@@ -1,0 +1,72 @@
+# Hybrid Native Chrome (`OrbLocald` Sidebar & `Cmd+K` Palette Projection)
+
+When Orb runs in Hybrid Native Chrome mode (`ORB_NATIVE_CHROME=1` on desktop shells,
+exposed to the WebView as `window.__ORB_NATIVE_CHROME__ === true`), the native shell
+(`macos_shell/main.swift` via `NSSplitView` + `NSTableView` + `NSPanel`, and
+`linux_shell/` via `GtkPaned` + `GtkListBox` + `GtkPopover`) renders the sidebar
+navigation tree and `Cmd+K` / `Ctrl+K` quick-switcher natively, while the WebView
+renders transcripts, Markdown, diffs, KaTeX, Mermaid, PDFs, and the composer.
+
+## Single Owner & Cold-Start Hydration (`AGENTS.md` Principle 3)
+
+`OrbLocald.NativeChrome` (`lean/OrbLocald/OrbLocald/NativeChrome.lean`, `0 import Lean`,
+`0 sorryAx`) is the single canonical owner of the flattened native chrome row model:
+
+1. **Monotonic revision fencing**: `native_chrome_sync_state` accepts state snapshots
+   scoped by `scope` (`historyScope()`) and `revision : UInt64`. Any payload whose
+   `revision` is strictly older than the last applied revision for the same `scope` is
+   ignored without erasing newer state. Switching `scope` resets the active scope view
+   cleanly while preserving per-scope expand/collapse sets (`maxScopes = 8`).
+2. **`0 ms` cold-start hydration from `~/.orb/ui-cache.sqlite3`**: When `native_chrome_get_rows`
+   or `native_chrome_palette_query` is called before the WebView has pushed its first live
+   `native_chrome_sync_state` (or with `scope` omitted, defaulting to the most recently saved
+   `ui_sidebar` scope), `OrbLocald` hydrates projects and missions directly from the existing
+   `ui_sidebar` table in `~/.orb/ui-cache.sqlite3` so native sidebar rows paint on frame 0
+   before WebKit finishes booting JavaScript.
+
+## Formal Kernel Gate Wiring (`lean/Orb/Kernel.lean`)
+
+Every hierarchy, deduplication, and move-admission decision in `OrbLocald.NativeChrome`
+routes through the verified unboxed kernel functions in `Orb.Kernel`:
+
+- **Mission deduplication & monotonic merge (`Orb.Kernel.sidebarMergeStep`)**:
+  Merges `missions`, `completedMissions`, and `projectMissions` by mission ID ordinal and
+  `updatedAtMs`, dropping superseded/archived duplicates and keeping the newer snapshot
+  (`uniqueSidebarBit = 1024`).
+- **Cycle-safe hierarchy & filter retention (`Orb.Kernel.sidebarVisibility`)**:
+  Computes `retainInMainTree` (`bit 0`), `showInArchiveOnly` (`bit 8`), and
+  `isCycleSafeChild` (`bit 16`, blocking `isFork == 1` and `parentReachesSelf == 1`
+  parent cycles) before flattening launched child missions beneath their parent.
+- **Move target admission (`Orb.Kernel.sidebarMoveTargetAdmit`)**:
+  Validates project/folder move targets (`itemKind` `0..3`), rejecting folder
+  self/subtree cycles (`dstIsSelfOrSubtree == 1`) and same-container no-op moves while
+  admitting cross-project moves to identical relative folder paths.
+- **Gesture state machine (`Orb.Kernel.sidebarDragStep`)**:
+  Governs press-and-hold (`260 ms`), drag threshold (`6 px`), and spring-loaded folder
+  expansion (`450 ms`) consistently across WebView and native chrome surfaces.
+
+## Loopback JSON-RPC & SSE Contract
+
+All commands run over `127.0.0.1:<rpcPort>/__orb_rpc` gated by the 32-byte launch token:
+
+| Command | Arguments | Response |
+| --- | --- | --- |
+| `native_chrome_sync_state` | `{ scope, revision, selected, on_settings?, is_admin?, inbox_enabled?, inbox_unread?, settings_badge?, settings_dots?, filter_query?, projects, missions, completed_missions?, project_missions? }` | `{ revision, scope, applied, row_count }` |
+| `native_chrome_get_rows` | `{ scope?, filter_query? }` | `{ scope, revision, on_settings, selected, rows: SidebarRow[] }` |
+| `native_chrome_toggle_expand` | `{ scope?, row_id, expanded? }` | `{ scope, revision, row_id, expanded, rows: SidebarRow[] }` |
+| `native_chrome_move_admit` | `{ item_kind, src_project, src_path?, dst_project, dst_path? }` | `{ admitted: Bool }` |
+| `native_chrome_palette_query` | `{ scope?, query, limit? }` | `{ scope, query, items: PaletteItem[] }` |
+
+Whenever `native_chrome_sync_state` applies a state change or `native_chrome_toggle_expand`
+flips a container's expansion state, `orb-locald` broadcasts SSE event
+`native_chrome_rows_changed` (`{ scope, revision, row_count }`) on `/__orb_events` so
+attached native shells update in place without polling.
+
+## Cross-Client Fixture & Self-Test Coverage
+
+- `shared/orb-spec/fixtures/native-chrome-sidebar.json` defines deterministic test vectors
+  for top-level navigation rows, project/folder/child-mission flattening, parent-cycle
+  rejection, monotonic merge deduplication, folder move cycle rejection, and `Cmd+K`
+  trigram/prefix/substring palette ranking (`LeanSys.Search`).
+- `lean/OrbLocald/OrbLocald/SelfTest.lean` replays the fixture end-to-end against
+  `dispatchRpcCommand` and verifies cold-start SQLite hydration from `ui_sidebar`.
