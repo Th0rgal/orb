@@ -220,7 +220,9 @@ def signRemoteNodeLeaseToken
     (expiresAt : UInt64)
     (jobId? : Option String := none)
     (ownerUserId : String := "")
-    (callerRole : String := "admin") : String :=
+    (callerRole : String := "admin")
+    (unixUsername? : Option String := none) : String :=
+  let cleanUnix? := unixUsername?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
   let fields : Array (String × JVal) :=
     #[ ("mission_id", .str missionId)
      , ("node_id", .str nodeId)
@@ -228,7 +230,8 @@ def signRemoteNodeLeaseToken
      , ("expires_at", JVal.uint64 expiresAt) ] ++
     (match jobId? with | some j => #[("job_id", .str j)] | none => #[]) ++
     (if ownerUserId.isEmpty then #[] else #[("owner_user_id", .str ownerUserId)]) ++
-    (if callerRole == "admin" && ownerUserId.isEmpty then #[] else #[("caller_role", .str callerRole)])
+    (if callerRole == "admin" && ownerUserId.isEmpty && cleanUnix?.isNone then #[] else #[("caller_role", .str callerRole)]) ++
+    (match cleanUnix? with | some u => #[("unix_username", .str u)] | none => #[])
   let b64 := OrbBin.PosixExt.base64Encode (renderCompact (.obj fields)).toUTF8 true false
   let sigHex := hmacSha256Hex nodeSecret b64
   s!"{b64}.{sigHex}"

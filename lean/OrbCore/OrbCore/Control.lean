@@ -620,10 +620,19 @@ def confineWorkingDirectory (baseDir rawDir : String) : IO (Except String String
         return .error "working_directory_outside_workspace_root"
       resolveConfinedTargetPath realBase cand
 
+private def providerSlugOf (s : String) : String :=
+  String.ofList (s.toLower.toList.filter (·.isAlphanum))
+
 private def matchProviderForChainTarget? (providers : Array AIProviderRecord) (acctId provId : String) : Option AIProviderRecord :=
   let stripped := if provId.startsWith "custom:" then (provId.drop 7).toString else provId
+  let slug := providerSlugOf stripped
   providers.find? fun p =>
-    p.enabled && (p.id == acctId || p.id == stripped || (!provId.startsWith "custom:" && p.providerType == provId))
+    p.enabled && (
+      p.id == acctId ||
+      p.id == stripped ||
+      (!provId.startsWith "custom:" && p.providerType == provId) ||
+      (!slug.isEmpty && providerSlugOf p.name == slug)
+    )
 
 private def defaultProviderBaseUrl (provType : String) : String :=
   match provType with
@@ -635,6 +644,9 @@ private def defaultProviderBaseUrl (provType : String) : String :=
   | "groq"        => "https://api.groq.com/openai"
   | "mistral"     => "https://api.mistral.ai"
   | "minimax"     => "https://api.minimax.io"
+  | "zai"         => "https://api.z.ai/api/paas/v4"
+  | "kimi"        => "https://api.kimi.com/coding"
+  | "google"      => "https://generativelanguage.googleapis.com/v1beta/openai"
   | _             => "https://api.openai.com"
 
 private def loadSnapshotModelsForProvider (pid : String) : IO (Array (String × String × String)) := do
@@ -748,57 +760,139 @@ private def renderProviderCatalogJson (st : CoreStore) (caller : CallerPrincipal
   ])
 
 /-- Parse `models_json` array into `ProviderTarget` list for `RoutingChain` hydration,
-    enriching targets with account & per-model pacing limits from `ai_providers`. -/
-def parseChainTargetsJson (rawJson : String) (providers : Array AIProviderRecord := #[]) : Array ProviderTarget := Id.run do
+    enriching targets with account & per-model pacing limits from `ai_providers` (and routing
+    OAuth/CLIProxy-backed targets through `cliProxyUrl` when `cliProxyKey` is present). -/
+def parseChainTargetsJson
+    (rawJson : String)
+    (providers : Array AIProviderRecord := #[])
+    (hydratedProvs : Array HydratedProvider := #[])
+    (cliProxyUrl : String := "")
+    (cliProxyKey : String := "") : Array ProviderTarget := Id.run do
   match OrbBin.Json.parse rawJson with
   | .ok (.arr items) =>
     let mut out : Array ProviderTarget := #[]
     for it in items do
       let provRaw := (it.fieldStr? "provider_id").orElse (fun _ => it.fieldStr? "provider") |>.getD "openai"
+      let strippedProv := if provRaw.startsWith "custom:" then (provRaw.drop 7).toString else provRaw
+      let provSlug := providerSlugOf strippedProv
       let defaultAcct :=
-        if provRaw.startsWith "custom:" then (provRaw.drop 7).toString else "default"
+        if provRaw.startsWith "custom:" then strippedProv else "default"
       let acctRaw := (it.fieldStr? "account_id").orElse (fun _ => it.fieldStr? "accountId") |>.getD defaultAcct
+      let hasExplicitAcct := (it.fieldStr? "account_id").isSome || (it.fieldStr? "accountId").isSome
       let mdlRaw := (it.fieldStr? "model_id").orElse (fun _ => it.fieldStr? "modelId") |>.getD ""
+      let inlineUrl? := (it.fieldStr? "base_url").orElse (fun _ => it.fieldStr? "baseUrl") |>.filter (!·.isEmpty)
+      let inlineKey? := (it.fieldStr? "api_key").orElse (fun _ => it.fieldStr? "apiKey") |>.filter (!·.isEmpty)
+      let matchedHydrated? := hydratedProvs.find? fun hp =>
+        hp.enabled && (hp.hasApiKey || hp.hasOAuth) && (
+          hp.id == acctRaw ||
+          hp.id == strippedProv ||
+          (!provRaw.startsWith "custom:" && hp.providerType == provRaw) ||
+          (!provSlug.isEmpty && providerSlugOf hp.name == provSlug)
+        )
       let matchedProv? := matchProviderForChainTarget? providers acctRaw provRaw
-      let acct := match matchedProv? with | some p => p.id | none => acctRaw
-      let effProvType := match matchedProv? with | some p => p.providerType | none => provRaw
-      let mdl :=
-        if effProvType == "antigravity" || provRaw == "antigravity" || provRaw.startsWith "antigravity:" then
-          canonicalAntigravityProxyModelId mdlRaw
-        else
-          mdlRaw
+      let anyCfgProv? := providers.find? fun p =>
+        p.id == acctRaw || p.id == strippedProv ||
+        (!provRaw.startsWith "custom:" && p.providerType == provRaw) ||
+        (!provSlug.isEmpty && providerSlugOf p.name == provSlug)
+      let effProvType :=
+        match matchedHydrated? with
+        | some hp => hp.providerType
+        | none => match matchedProv? with | some p => p.providerType | none => provRaw
+      let isAg := effProvType == "antigravity" || provRaw == "antigravity" || provRaw.startsWith "antigravity:"
+      let mdl := if isAg then canonicalAntigravityProxyModelId mdlRaw else mdlRaw
       let matchedModel? := matchedProv?.bind (fun p => p.customModels.find? (fun cm => cm.id == mdl || cm.id == mdlRaw))
-      let url :=
-        (it.fieldStr? "base_url").orElse (fun _ => it.fieldStr? "baseUrl")
-        |>.orElse (fun _ => matchedProv?.bind (fun p => if p.baseUrl.isEmpty then none else some p.baseUrl))
-        |>.getD (defaultProviderBaseUrl effProvType)
-      let key :=
-        (it.fieldStr? "api_key").orElse (fun _ => it.fieldStr? "apiKey")
-        |>.orElse (fun _ => matchedProv?.map (·.apiKey))
-        |>.getD ""
       let inlineAcctRpm? := (parseOptionalBoundedU32 it "rpm_limit" 1 100000).toOption.join
       let inlineAcctConc? := (parseOptionalBoundedU32 it "max_concurrency" 1 1024).toOption.join
       let inlineMdlRpm? := (parseOptionalBoundedU32 it "model_rpm_limit" 1 100000).toOption.join
       let inlineMdlTpm? := (parseOptionalBoundedU64 it "model_tpm_limit" 1 1000000000).toOption.join
       let inlineMdlConc? := (parseOptionalBoundedU32 it "model_max_concurrency" 1 1024).toOption.join
-      out := out.push {
-        accountId              := acct
-        provider               := provRaw
-        baseUrl                := url
-        apiKey                 := key
-        modelId                := mdl
-        accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedProv?.bind (·.rpmLimit?))
-        accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))
-        modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
-        modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
-        modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
-      }
+
+      -- When `providers`/`hydratedProvs` are populated (live store hydration) and every matching account is disabled
+      -- with no inline credentials, skip this unconfigured/disabled entry instead of emitting an unauthenticated dead target!
+      let explicitlyDisabledInStore :=
+        (!providers.isEmpty || !hydratedProvs.isEmpty) &&
+        inlineKey?.isNone && inlineUrl?.isNone &&
+        matchedHydrated?.isNone && matchedProv?.isNone &&
+        (anyCfgProv?.map (!·.enabled) |>.getD false) &&
+        !isAg
+      if !explicitlyDisabledInStore then
+        let useCliProxy :=
+          !cliProxyKey.isEmpty && !cliProxyUrl.isEmpty && inlineKey?.isNone && inlineUrl?.isNone && (
+            isAg ||
+            (match matchedHydrated? with
+             | some hp => !hp.hasApiKey && hp.hasOAuth
+             | none => false)
+          )
+        if useCliProxy then
+          let acct :=
+            if hasExplicitAcct then acctRaw
+            else match matchedHydrated? with
+              | some hp => if isAg then "cliproxyapi:antigravity" else s!"cliproxyapi:{hp.providerType}"
+              | none => if isAg then "cliproxyapi:antigravity" else "cliproxyapi"
+          out := out.push {
+            accountId              := acct
+            provider               := provRaw
+            baseUrl                := cliProxyUrl
+            apiKey                 := cliProxyKey
+            modelId                := mdl
+            accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedHydrated?.bind (·.rpmLimit?))
+            accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedHydrated?.bind (·.maxConcurrency?))
+            modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
+            modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
+            modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+          }
+        else
+          let acct :=
+            match matchedHydrated? with
+            | some hp => hp.id
+            | none => match matchedProv? with | some p => p.id | none => acctRaw
+          let url :=
+            inlineUrl?
+            |>.orElse (fun _ => matchedHydrated?.bind (fun hp => if hp.baseUrl.isEmpty then none else some hp.baseUrl))
+            |>.orElse (fun _ => matchedProv?.bind (fun p => if p.baseUrl.isEmpty then none else some p.baseUrl))
+            |>.getD (defaultProviderBaseUrl effProvType)
+          let key :=
+            inlineKey?
+            |>.orElse (fun _ => matchedHydrated?.bind (fun hp => if hp.apiKey.isEmpty then none else some hp.apiKey))
+            |>.orElse (fun _ => matchedProv?.map (·.apiKey))
+            |>.getD ""
+          if (!providers.isEmpty || !hydratedProvs.isEmpty) && key.isEmpty && inlineUrl?.isNone && !cliProxyKey.isEmpty && !cliProxyUrl.isEmpty then
+            -- Fallback to CLIProxyAPI if provider has no direct API key on disk
+            out := out.push {
+              accountId              := s!"cliproxyapi:{provRaw}"
+              provider               := provRaw
+              baseUrl                := cliProxyUrl
+              apiKey                 := cliProxyKey
+              modelId                := mdl
+              accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedProv?.bind (·.rpmLimit?))
+              accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))
+              modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
+              modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
+              modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+            }
+          else
+            out := out.push {
+              accountId              := acct
+              provider               := provRaw
+              baseUrl                := url
+              apiKey                 := key
+              modelId                := mdl
+              accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedProv?.bind (·.rpmLimit?))
+              accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))
+              modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
+              modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
+              modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+            }
     return out
   | _ => return #[]
 
-/-- Hydrate `RoutingChain` table from `missions.db` (`model_routing_chains` + `ai_providers`). -/
-def loadRoutingChainsFromStore (st : CoreStore) : IO (Array RoutingChain) := do
+/-- Hydrate `RoutingChain` table from `missions.db` (`model_routing_chains` + `ai_providers` + decrypted `.sandboxed-sh/ai_providers.json` + CLIProxyAPI). -/
+def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO (Array RoutingChain) := do
   let providers ← listAIProviders st
+  let effWorkDir := if workingDir.isEmpty then st.rootDir else workingDir
+  let hydratedProvs ← loadHydratedProviders st effWorkDir
+  let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
+  let cliUrl ← resolveCliProxyBaseUrl
   match ← execParamQuery st.missionsDb "SELECT id,name,models_json FROM model_routing_chains ORDER BY id ASC;" #[] with
   | .error _ => return #[]
   | .ok rows =>
@@ -809,7 +903,7 @@ def loadRoutingChainsFromStore (st : CoreStore) : IO (Array RoutingChain) := do
       let cid := (r[0]?).getD ""
       let nm := (r[1]?).getD cid
       let mj := (r[2]?).getD "[]"
-      out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers }
+      out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey }
     return out
 
 private def optU32Json (v? : Option UInt32) : String :=
@@ -841,15 +935,29 @@ def renderResolvedChainJson (chain : RoutingChain) (pacingTracker? : Option Prox
     items := items.push entryJson
   return "[" ++ String.intercalate "," items.toList ++ "]"
 
+private def chainMatchesRequestedModel (c : RoutingChain) (m : String) : Bool :=
+  let clean := m.trimAscii.toString
+  if clean.isEmpty then false
+  else
+    let bare := bareModel clean
+    c.id == clean || c.name == clean ||
+    c.id == bare || c.id == s!"builtin/{bare}" ||
+    (c.id.startsWith "builtin/" && (c.id.drop 8).toString == bare)
+
+private def findMatchingRoutingChain? (chains : Array RoutingChain) (m : String) : Option RoutingChain :=
+  chains.find? (fun c => chainMatchesRequestedModel c m)
+
 private def selectRoutingChainForBody (chains : Array RoutingChain) (body : ByteArray) : RoutingChain :=
   let reqModel? :=
     (String.fromUTF8? body).bind fun raw =>
       match OrbBin.Json.parse raw with
       | .ok jv => jv.fieldStr? "model"
       | .error _ => none
-  match reqModel?.bind (fun m => chains.find? (fun c => c.id == m || c.name == m)) with
+  match reqModel?.bind (findMatchingRoutingChain? chains) with
   | some matched => matched
-  | none => chains[0]?.getD { id := "default", name := "default", targets := #[] }
+  | none =>
+    (chains.find? (fun c => c.id == "default" || c.id == "builtin/smart")).getD
+      (chains[0]?.getD { id := "default", name := "default", targets := #[] })
 
 private def scopeRankOf? : String → Option UInt8
   | "ops_read"       => some 0
@@ -1218,30 +1326,34 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
         let denyReason := ((capWord >>> 1) &&& 0x7).toNat
         let scopeStr := if denyReason == 2 then "user" else "global"
         return mkJson 429 s!"\{\"error\":\{\"type\":\"spend_cap_exceeded\",\"code\":\"daily_spend_cap_exceeded\",\"scope\":{jsonEscape scopeStr},\"message\":\"Daily spend cap reached\"}}"
+  let rawRequestedModel := ((bodyJv.fieldStr? "model").getD defaultCodexModel).trimAscii.toString
   let chains ← st.chainsRef.get
+  let exactChainMatch? :=
+    (findMatchingRoutingChain? chains rawRequestedModel).orElse
+      (fun _ => findMatchingRoutingChain? chains requestedModel)
   let rawActiveChain0 := selectRoutingChainForBody chains req.bodySlice.toByteArray
   let rawActiveChain ← do
     if st.proxyMockTransport?.isSome then
       pure rawActiveChain0
     else
-      let cliKey := ((← IO.getEnv "CLI_PROXY_API_KEY").getD "").trimAscii.toString
-      let cliUrl := ((← IO.getEnv "CLI_PROXY_API_BASE_URL").getD "http://127.0.0.1:8317").trimAscii.toString
+      let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
+      let cliUrl ← resolveCliProxyBaseUrl
       if cliKey.isEmpty then
         pure rawActiveChain0
       else
-        let cliTgt : ProviderTarget := {
-          accountId := "cliproxyapi"
-          provider := "openai"
-          baseUrl := cliUrl
-          apiKey := cliKey
-          modelId := canonicalAntigravityProxyModelId requestedModel
-        }
-        let exactMatch? := chains.find? (fun c =>
-          c.id == requestedModel || c.name == requestedModel || c.id == "default")
-        match exactMatch? with
-        | some mc => pure { mc with targets := mc.targets.push cliTgt }
+        match exactChainMatch? with
+        | some mc => pure mc
         | none =>
-          if rawActiveChain0.targets.isEmpty then
+          let cliTgt : ProviderTarget := {
+            accountId := "cliproxyapi"
+            provider := "openai"
+            baseUrl := cliUrl
+            apiKey := cliKey
+            modelId := canonicalAntigravityProxyModelId requestedModel
+          }
+          if let some defChain := chains.find? (fun c => c.id == "default") then
+            pure { defChain with targets := defChain.targets.push cliTgt }
+          else if rawActiveChain0.targets.isEmpty then
             pure { id := "cliproxyapi", name := "CLIProxyAPI", targets := #[cliTgt] }
           else
             pure { id := requestedModel, name := requestedModel, targets := #[cliTgt] ++ rawActiveChain0.targets }
@@ -4145,7 +4257,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       match ← upsertAIProvider st.store provRec with
       | .error e => return .ok (mkJson 400 s!"\{\"error\":\"invalid_provider_limits\",\"detail\":{jsonEscape e}}")
       | .ok () =>
-        let refreshed ← loadRoutingChainsFromStore st.store
+        let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
         discard <| publishRoutingChainsUpdate st refreshed
         return .ok (mkJson 201 (renderAIProviderJson provRec none))
     else if let some params := matchRoutePattern? "/api/ai/providers/:id" rawTarget then
@@ -4202,7 +4314,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match ← upsertAIProvider st.store updated with
         | .error e => return .ok (mkJson 400 s!"\{\"error\":\"invalid_provider_limits\",\"detail\":{jsonEscape e}}")
         | .ok () =>
-          let refreshed ← loadRoutingChainsFromStore st.store
+          let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
           discard <| publishRoutingChainsUpdate st refreshed
           let obs? ← match st.pacingTracker? with
             | some tr => lookupObservedKeyRpm? tr updated.id
@@ -4212,7 +4324,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match ← deleteAIProvider st.store pid with
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         | .ok () =>
-          let refreshed ← loadRoutingChainsFromStore st.store
+          let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
           discard <| publishRoutingChainsUpdate st refreshed
           return .ok (mkJson 200 "{\"ok\":true}")
 
@@ -4336,7 +4448,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           if let some (cCode, cBody) := requireAdminPrincipal caller then
             return .ok (mkJson cCode cBody)
         let cid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
-        let chains ← loadRoutingChainsFromStore st.store
+        let chains ← loadRoutingChainsFromStore st.store st.cfg.workingDir
         discard <| publishRoutingChainsUpdate st chains (forceBump := false)
         match chains.find? (fun c => c.id == cid) with
         | none => return .ok (mkJson 404 "{\"error\":\"chain_not_found\"}")
@@ -4394,7 +4506,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         #[cid, nm, modelsJson, s!"{nowEpochSec}"] with
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok _ =>
-        let refreshed ← loadRoutingChainsFromStore st.store
+        let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
         discard <| publishRoutingChainsUpdate st refreshed
         return .ok (mkJson (if req.method == "POST" then 201 else 200) s!"\{\"id\":{jsonEscape cid},\"name\":{jsonEscape nm}}")
     else
@@ -6244,7 +6356,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       | .ok mf => mf
       | .error _ => ({} : ManagedFleetState)
     let managedRef ← IO.mkRef initialManaged
-    let initialChains ← loadRoutingChainsFromStore store
+    let initialChains ← loadRoutingChainsFromStore store cfg.workingDir
     let chainsRef ← IO.mkRef initialChains
     let proxyCooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
     let seqRef ← IO.mkRef (0 : UInt64)

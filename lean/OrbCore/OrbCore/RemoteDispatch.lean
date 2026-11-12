@@ -13,6 +13,7 @@ import OrbCore.MemoryAndCloud
 import OrbCore.QueueCont
 import OrbCore.R7Core
 import OrbCore.LegacyHydrate
+import OrbCore.ProviderUsageAndLogin
 import OrbCore.RemoteFleetAndRelay
 
 namespace OrbCore.RemoteDispatch
@@ -26,6 +27,7 @@ open OrbCore.MemoryAndCloud
 open OrbCore.QueueCont
 open OrbCore.R7Core
 open OrbCore.LegacyHydrate
+open OrbCore.ProviderUsageAndLogin
 open OrbCore.RemoteFleetAndRelay
 
 /-! ## Remote Job Supervisor Handle -/
@@ -395,7 +397,7 @@ structure PreparedRemoteCommand where
   proxyToken  : String
 
 private def resolveRemoteCallbackUrls (sup : RemoteJobSupervisor) (targetNodeId : String) : IO (String × String) := do
-  let pubApiRaw := trimTrailingSlashes ((← IO.getEnv "SANDBOXED_PUBLIC_URL").getD "")
+  let pubApiRaw := trimTrailingSlashes ((← lookupEnvWithFiles? "SANDBOXED_PUBLIC_URL").getD "")
   let apiBase ←
     if !pubApiRaw.isEmpty then
       pure pubApiRaw
@@ -406,7 +408,7 @@ private def resolveRemoteCallbackUrls (sup : RemoteJobSupervisor) (targetNodeId 
         pure s!"http://127.0.0.1:{bPort}"
       else
         pure ""
-  let pubProxyRaw := trimTrailingSlashes ((← IO.getEnv "SANDBOXED_PROXY_PUBLIC_URL").getD "")
+  let pubProxyRaw := trimTrailingSlashes ((← lookupEnvWithFiles? "SANDBOXED_PROXY_PUBLIC_URL").getD "")
   let proxyBase := if !pubProxyRaw.isEmpty then pubProxyRaw else apiBase
   return (apiBase, proxyBase)
 
@@ -1103,8 +1105,16 @@ partial def submitRemoteMissionTurn
     | .error e => return .error e
 
   let jobId ← newUuidV4
-  let callerRole := if spec.ownerUserId.isEmpty then "admin" else "member"
-  let leaseTok := signRemoteNodeLeaseToken nodeSecret spec.missionId leaseNodeId "job:submit" (nowSec + 900) (some jobId) spec.ownerUserId callerRole
+  let ownerUser? ← if spec.ownerUserId.isEmpty then pure none else getUserById? store spec.ownerUserId
+  let callerRole :=
+    match ownerUser? with
+    | some u => if u.role == "member" then "member" else "admin"
+    | none   => "admin"
+  let unixUser? :=
+    ownerUser?.bind fun u =>
+      let ux := u.unixUsername.trimAscii.toString
+      if ux.isEmpty then none else some ux
+  let leaseTok := signRemoteNodeLeaseToken nodeSecret spec.missionId leaseNodeId "job:submit" (nowSec + 900) (some jobId) spec.ownerUserId callerRole unixUser?
   let envObj : JVal := .obj (prep.envPairs.map fun (k, v) => (k, .str v))
   let authArr : JVal := .arr (prep.managedAuth.map JVal.str)
   let compVal : JVal := match spec.companionOf? with | some c => .str c | none => .null
@@ -1489,8 +1499,11 @@ def tickContinuationScheduler
                 pure ()
 
             -- Re-arm next interval using the exact post-launch `missions.run_generation`
-            if launchedOk && !stopFirst && recurrence.startsWith "interval:" then
-              let ivSecs := Nat.max 60 (((recurrence.drop 9).trimAscii.toString.toNat?).getD 300)
+            -- (if `launchedOk == false` due to a transient remote/node hiccup, still re-arm in 60s so a recurring wakeup is never permanently dropped!)
+            if !stopFirst && recurrence.startsWith "interval:" then
+              let ivSecs :=
+                if launchedOk then Nat.max 60 (((recurrence.drop 9).trimAscii.toString.toNat?).getD 300)
+                else 60
               let mut updatedGen : Nat := mr.runGeneration.toNat
               if let .ok gRows ← execParamQuery store.missionsDb
                   "SELECT COALESCE(run_generation,1) FROM missions WHERE id=?1;" #[mid] then

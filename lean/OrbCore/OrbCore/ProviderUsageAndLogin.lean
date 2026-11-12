@@ -136,7 +136,7 @@ private def parseEnvFile (raw : String) : Array (String × String) := Id.run do
         if !key.isEmpty then out := out.push (key, val)
   return out
 
-private def lookupEnvWithFiles? (key : String) : IO (Option String) := do
+def lookupEnvWithFiles? (key : String) : IO (Option String) := do
   if let some v ← IO.getEnv key then
     let tv := v.trimAscii.toString
     if !tv.isEmpty then return some tv
@@ -184,6 +184,9 @@ def resolveCliProxyMgmtKey? : IO (Option String) :=
   lookupEnvWithFiles? "CLI_PROXY_MANAGEMENT_KEY"
 
 def candidateCliProxyAuthDirs : IO (Array String) := do
+  if let some explicitEnvDir ← IO.getEnv "CLI_PROXY_AUTH_DIR" then
+    let clean := explicitEnvDir.trimAscii.toString
+    if !clean.isEmpty then return #[clean]
   let mut dirs : Array String := #[]
   if let some envDir ← lookupEnvWithFiles? "CLI_PROXY_AUTH_DIR" then
     if !envDir.isEmpty then dirs := dirs.push envDir

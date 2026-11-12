@@ -735,15 +735,23 @@ private def bodyIndicatesContextOverflow (body : ByteArray) : Bool :=
   (low.splitOn "context_length_exceeded").length > 1 ||
   (low.splitOn "maximum context length").length > 1
 
+private def isPrivatePlaintextHost (host : String) : Bool :=
+  host == "127.0.0.1" || host == "localhost" ||
+  host.startsWith "10." || host.startsWith "100." || host.startsWith "192.168." ||
+  host.startsWith "172.16." || host.startsWith "172.17." || host.startsWith "172.18." ||
+  host.startsWith "172.19." || host.startsWith "172.2" || host.startsWith "172.30." ||
+  host.startsWith "172.31."
+
 private def loopbackHttpRequest
-    (method : String) (port : UInt16) (path : String)
+    (method host : String) (port : UInt16) (path : String)
     (headers : Array (String × String)) (body : ByteArray) :
     IO (Except String HttpsResponse) := do
-  let hostAuth := formatHostAuthority "127.0.0.1" port 80
+  let connectHost := if host == "localhost" then "127.0.0.1" else host
+  let hostAuth := formatHostAuthority host port 80
   let reqWire ← match buildOutboundHttp11Request method hostAuth path headers body with
     | .ok w => pure w
     | .error e => return .error e
-  let .ok fd ← tcpConnect "127.0.0.1" port
+  let .ok fd ← tcpConnect connectHost port
     | return .error "loopback_connect_failed"
   let mut rawBuf := ByteArray.empty
   try
@@ -1033,7 +1041,12 @@ def forwardProxyChain
         }
     else
       let (isTls, host, port, pfx) := splitUpstreamBaseUrl tgt.baseUrl
-      let fullPath := if pfx.isEmpty then relPath else pfx ++ relPath
+      let cleanPfx :=
+        if pfx.endsWith "/v1" && (relPath == "/v1" || relPath.startsWith "/v1/") then
+          (pfx.dropEnd 3).toString
+        else
+          pfx
+      let fullPath := if cleanPfx.isEmpty then relPath else cleanPfx ++ relPath
       let reqHdrs := extraHeaders.push ("Authorization", s!"Bearer {tgt.apiKey}")
       let outBody := rewriteTargetModelBody tgt body
       let respRes ← try
@@ -1044,8 +1057,8 @@ def forwardProxyChain
             pure (.error "invalid_upstream_port")
           else if isTls then
             httpsRequest method host port fullPath reqHdrs outBody
-          else if host == "127.0.0.1" || host == "localhost" then
-            loopbackHttpRequest method port fullPath reqHdrs outBody
+          else if isPrivatePlaintextHost host then
+            loopbackHttpRequest method host port fullPath reqHdrs outBody
           else
             pure (.error "plaintext_upstream_disabled")
       finally
