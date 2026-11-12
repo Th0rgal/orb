@@ -1849,6 +1849,9 @@ button.fork-trigger:hover { color: var(--fg); }
 /* Timeline/modal error cards share the exact card grammar of floating toasts (toast.tsx). */
 .error-notice { display: flex; align-items: flex-start; gap: 10px; min-width: 0; margin-top: 10px; padding: 10px 8px 10px 14px; border: 1px solid var(--overlay-border, var(--stroke)); border-radius: 8px; background: var(--overlay-surface, var(--bg-elev)); color: var(--fg-2); text-align: left; font-size: 12px; line-height: 1.4; }
 .error-notice-icon { flex: none; color: var(--red); margin-top: 2px; }
+/* Each virtual-transcript item is its own flow-root box and a following user bubble drops its
+   top margin (`.user:first-child`), so a transcript error card supplies the gap below itself. */
+[data-turn-key] > .error-notice { margin-bottom: 22px; }
 /* Provider limits are a wait, not a failure: amber instead of red. */
 .error-notice.warning .error-notice-icon { color: var(--amber); }
 .error-notice-link { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 9px; border: 0; border-radius: 6px; background: var(--bg-active); color: var(--fg); font: 500 11.5px/1 var(--sans); cursor: pointer; }
