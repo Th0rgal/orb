@@ -222,9 +222,10 @@ describe("nativeChromeBridge", () => {
     }, fakeWin);
     expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("rename", "m:m-1", "  New title ")).toBe(true);
     expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("move", "m-1", "default")).toBe(true);
-    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("delete", "m-1")).toBe(false);
+    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("purge", "m-1")).toBe(false);
     expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("archive", "  ")).toBe(false);
-    expect(calls).toEqual([["rename", "m-1", "New title"], ["move", "m-1", "default"]]);
+    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("delete", "m-1", "m-1 m-2")).toBe(true);
+    expect(calls).toEqual([["rename", "m-1", "New title"], ["move", "m-1", "default"], ["delete", "m-1", "m-1 m-2"]]);
     cleanup();
     expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__).toBeUndefined();
   });

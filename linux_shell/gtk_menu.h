@@ -10,6 +10,12 @@ int orb_gtk_menu_self_test(void);
 #include <gtk/gtk.h>
 /* Pops up the menu for `row` when it is a mission row; returns TRUE when it did. */
 gboolean orb_gtk_row_context_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *row, const GdkEvent *ev);
+/* Multi-selection: re-apply after the list is rebuilt, toggle/extend on a modified click, clear,
+ * and delete the selected missions (or `fallback`, a `m:<id>` target) with one confirmation. */
+void orb_sel_sync(GtkWidget *list);
+gboolean orb_sel_click(GtkWidget *list, GtkWidget *row, gboolean extend);
+gboolean orb_sel_clear(GtkWidget *list);
+gboolean orb_sel_delete(GtkWidget *wv, GtkWidget *list, const char *fallback);
 #endif
 
 #endif

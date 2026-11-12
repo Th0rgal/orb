@@ -63,6 +63,13 @@ routes through the verified unboxed kernel functions in `Orb.Kernel`:
   API calls (`renameOptimistically`, `moveMission`, `archiveMission`, `reopenMission`), so
   optimistic updates and error toasts have one implementation. macOS (`NSTableView`) does
   not have this menu yet.
+- Multi-selection: Ctrl/Super-click toggles a mission, project, folder or file row, Shift-click
+  extends from the anchor, a plain click or Escape clears it. Right-click inside a selection of
+  more than one shows only bulk actions: for missions Move N to ▸, Archive/Restore N and Delete N…
+  (the HTML sidebar's selection menu); other selections show the count and Clear selection.
+- Ctrl/Super+Delete deletes the selected missions, or the open one, through the headless
+  `ProjectFiles` confirmation (running workers and descendants included). With WebView focus the
+  same shortcut (Cmd+Backspace too on macOS) is handled by `ProjectFiles`, never while typing.
 
 ## Loopback JSON-RPC & SSE Contract
 

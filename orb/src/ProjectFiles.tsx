@@ -139,7 +139,7 @@ export function newFilePath(dir: string, raw: string): { path: string; name: str
 
 export function LiveProjectsSection(p: {
   /** Reuse the same confirmation and deletion pipeline from other views. */
-  deleteRequest?: string | null;
+  deleteRequest?: readonly string[] | null;
   onDeleteRequestHandled?: () => void;
   activityMissions?: Mission[];
   /** Details from the open conversation, including restored/local sessions. */
@@ -864,12 +864,32 @@ export function LiveProjectsSection(p: {
   const [renameValue, setRenameValue] = createSignal("");
   const [renameError, setRenameError] = createSignal<string | null>(null);
   const [actionError, setActionError] = createSignal<string | null>(null);
-  createEffect(on(() => p.deleteRequest, id => {
-    if (!id) return;
+  createEffect(on(() => p.deleteRequest, ids => {
+    if (!ids?.length) return;
     setActionError(null);
-    setDeleteTargets([id]);
+    setDeleteTargets([...ids]);
     p.onDeleteRequestHandled?.();
   }));
+  // Ctrl/Cmd+Delete (and Cmd+Backspace on macOS) deletes the selected agents, or the open one,
+  // through the same confirmation as the menu. Never while typing.
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((p.active && !p.active()) || e.defaultPrevented || e.altKey || e.shiftKey) return;
+      const mac = document.documentElement.dataset.platform === "macos" || /Mac/.test(navigator.platform);
+      if (!((e.key === "Delete" && (e.ctrlKey || e.metaKey)) || (mac && e.key === "Backspace" && e.metaKey))) return;
+      const t = e.target as HTMLElement | null;
+      if (t?.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])")) return;
+      const selected = [...(selectedRowIds() ?? [])].map(missionIdFromTreeId).filter((x): x is string => !!x);
+      const current = p.selected()?.startsWith("m:") ? p.selected()!.slice(2) : null;
+      const ids = selectionActive() && selected.length ? selected : current ? [current] : [];
+      if (!ids.length || deleteTargets().length) return;
+      e.preventDefault();
+      setActionError(null);
+      setDeleteTargets(ids);
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
   const rowTip = useTooltip<RowTipContent>(ROW_TIP_ID, tip => <><div class="row-tip-title">{tip.title}</div><For each={tip.meta}>{line => <div class="row-tip-meta">{line}</div>}</For></>);
   const currentConnection = (version: number) => isConnected() && connectionVersion() === version;
   const requests = createSidebarRequests();

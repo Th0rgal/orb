@@ -277,7 +277,7 @@ export default function App() {
   };
   const [sbWidth, setSbWidth] = createSignal(220);
   const keepAlivePool = createMissionKeepAlivePool();
-  const [deleteMissionRequest, setDeleteMissionRequest] = createSignal<string | null>(null);
+  const [deleteMissionRequest, setDeleteMissionRequest] = createSignal<string[] | null>(null);
   const [newFolder, setNewFolder] = createSignal<{ project: string; path: string } | null>(null);
   const newFolderPath = (project: string | null | undefined) =>
     newFolder()?.project === project && newFolder()?.path ? normalizeMissionFolder(newFolder()!.path) : "";
@@ -1094,6 +1094,7 @@ export default function App() {
       case "restore": {
         // Same subtree targeting as the HTML sidebar (`changeArchiveState`).
         const restore = action === "restore";
+        if (restore !== (mission.status === "acknowledged")) return false; // bulk: skip rows already in that state
         const known = [...missions(), ...completedMissions(), ...Object.values(projectMissions()).flat(), ...nativeArchived()];
         void Promise.resolve()
           .then(() => applyArchiveState(mission, archiveStateTargets(mission, known, restore), restore))
@@ -1105,6 +1106,14 @@ export default function App() {
         return true;
       case "settings":
         return open(`ms:${id}`);
+      case "delete": {
+        // One confirmation for the whole selection, through the headless sidebar's delete flow
+        // (running workers, descendants). `arg` lists the selected ids; "current" is the open one.
+        const ids = arg === "current" ? [currentMissionId()].filter((x): x is string => !!x) : arg.split(/\s+/).filter(Boolean);
+        if (!ids.length) return false;
+        setDeleteMissionRequest(ids);
+        return true;
+      }
     }
   };
   onMount(() => {

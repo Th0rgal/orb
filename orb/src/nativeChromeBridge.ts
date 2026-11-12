@@ -167,12 +167,12 @@ export type NativeChromeBridgeHandlers = {
   getScope?: () => string;
   toggleFolderExpand?: (rowId: string) => void;
   /** Native sidebar context menu: `rename` (arg = new title), `move` (arg = project slug),
-   *  `archive`, `restore`, `copy-id`, `settings`. */
+   *  `archive`, `restore`, `copy-id`, `settings`, `delete` (arg = space-separated ids or "current"). */
   missionAction?: (action: NativeMissionAction, missionId: string, arg: string) => boolean;
 };
 
-export type NativeMissionAction = "rename" | "move" | "archive" | "restore" | "copy-id" | "settings";
-const NATIVE_MISSION_ACTIONS: readonly string[] = ["rename", "move", "archive", "restore", "copy-id", "settings"];
+export type NativeMissionAction = "rename" | "move" | "archive" | "restore" | "copy-id" | "settings" | "delete";
+const NATIVE_MISSION_ACTIONS: readonly string[] = ["rename", "move", "archive", "restore", "copy-id", "settings", "delete"];
 
 /** Notify native macOS/Linux shell when the titlebar sidebar toggle, history state, or Cmd+K shortcut fires inside WebView. */
 export function notifyNativeChromeShell(
