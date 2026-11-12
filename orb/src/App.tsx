@@ -177,6 +177,12 @@ import { markMissionRead, unreadVersion } from "./missionUnread";
 import { harnessChoices, harnessPick, effectivePick, refreshHarnessChoices, refreshNodeAntigravityModels, type HarnessPick } from "./harnessPick";
 import { Composer } from "./composer/Composer";
 import { MissionView, NativeMissionView } from "./mission/MissionView";
+import {
+  createNativeChromeSyncer,
+  installNativeChromeWindowHandlers,
+  isNativeChromeEnabled,
+  notifyNativeChromeShell,
+} from "./nativeChromeBridge";
 
 
 const SETTINGS_ICONS: Record<string, () => JSX.Element> = {
@@ -194,7 +200,12 @@ export default function App() {
   const [searchQuery, setSearchQuery] = createSignal("");
   const [searchReturnFocus, setSearchReturnFocus] = createSignal<HTMLElement | null>(null);
   let searchInputEl: HTMLInputElement | undefined;
+  const nativeChromeActive = isNativeChromeEnabled();
   const openSearch = () => {
+    if (nativeChromeActive) {
+      notifyNativeChromeShell("open_native_palette");
+      return;
+    }
     if (searchOpen()) {
       searchInputEl?.focus({ preventScroll: true });
       return;
@@ -247,6 +258,10 @@ export default function App() {
     onCleanup(() => registerTranscriptWarmer(null));
   });
   const [sidebar, setSidebar] = createSignal(!window.matchMedia("(max-width: 720px)").matches);
+  const setSidebarWithNative = (next: boolean) => {
+    setSidebar(next);
+    if (nativeChromeActive) notifyNativeChromeShell("set_native_sidebar", { open: next });
+  };
   const [sbWidth, setSbWidth] = createSignal(220);
   const keepAlivePool = createMissionKeepAlivePool();
   const [deleteMissionRequest, setDeleteMissionRequest] = createSignal<string | null>(null);
@@ -1011,6 +1026,55 @@ export default function App() {
     if (open(history()[i], false)) setHIdx(i);
   };
 
+  const nativeChromeSyncer = nativeChromeActive ? createNativeChromeSyncer() : null;
+  onMount(() => {
+    const disposeHandlers = installNativeChromeWindowHandlers({
+      open: (target) => open(target),
+      leaveSettings,
+      getSidebarOpen: () => sidebar(),
+      setSidebarOpen: setSidebarWithNative,
+      selectProject: (slug) => {
+        setNewFolder(null);
+        setNewProject(slug);
+      },
+      getScope: historyScope,
+    });
+    onCleanup(() => {
+      disposeHandlers();
+      nativeChromeSyncer?.dispose();
+    });
+  });
+  if (nativeChromeSyncer) {
+    createEffect(() => {
+      const scope = historyScope();
+      const sel = selected();
+      const inSet = onSettings();
+      const admin = isAdminUser();
+      const inboxOn = inboxConfig().inboxEnabled;
+      const unread = inboxCount();
+      const badge = secretRequests() + accessRequests() + privilegeRequests();
+      const dots = Array.from(settingsDots());
+      const projs = liveProjects();
+      const liveMissions = missions();
+      const compMissions = completedMissions();
+      const projMissions = projectMissions();
+      nativeChromeSyncer.schedule({
+        scope,
+        selected: sel,
+        onSettings: inSet,
+        isAdmin: admin,
+        inboxEnabled: inboxOn,
+        inboxUnread: unread,
+        settingsBadge: badge,
+        settingsDots: dots,
+        projects: projs,
+        missions: liveMissions,
+        completedMissions: compMissions,
+        projectMissions: projMissions,
+      });
+    });
+  }
+
   /** `remote`: a start requested from another device over the client link.
    * It never reads or clears this window's draft and never navigates. */
   const launchLocal = async (typed: string, prompt: string, title: string, projectSlug: string | undefined, pick: HarnessPick, images: DraftImage[], launchNavigation: number, remote?: { key: string; cwd?: string | null }) => {
@@ -1204,7 +1268,7 @@ export default function App() {
       e.preventDefault();
       if (destination.id === 'projects') {
         if (onSettings()) leaveSettings();
-        setSidebar(true);
+        setSidebarWithNative(true);
         requestAnimationFrame(() => {
           const region = document.querySelector<HTMLElement>('[data-project-navigation]');
           (region?.querySelector<HTMLElement>('button.row-main, button.row.agent:not(:disabled)') ?? region)?.focus();
@@ -1238,7 +1302,7 @@ export default function App() {
     if (!hasPrimaryModifier(e) || e.altKey || e.shiftKey) return;
     const key = e.key.toLowerCase();
     if (key === "n") (e.preventDefault(), open(null));
-    else if (key === "b") (e.preventDefault(), setSidebar(!sidebar()));
+    else if (key === "b") (e.preventDefault(), setSidebarWithNative(!sidebar()));
     else if (e.key === ",") (e.preventDefault(), onSettings() ? leaveSettings() : openSettings());
     else if (e.key === "[") (e.preventDefault(), nav(-1));
     else if (e.key === "]") (e.preventDefault(), nav(1));
@@ -1487,10 +1551,61 @@ export default function App() {
     window.addEventListener("pointerup", up);
   };
 
+  const renderLiveProjectsSection = (headless: boolean) => (
+    <LiveProjectsSection
+      headless={headless}
+      active={() => !onSettings()}
+      deleteRequest={deleteMissionRequest()}
+      onDeleteRequestHandled={() => setDeleteMissionRequest(null)}
+      activityMissions={missions()}
+      currentMission={(() => { const m = findKnownMission(currentMissionId()); return m ? movedMission(m) : undefined; })()}
+      harnessChoices={harnessChoices()}
+      forkChoices={mission => harnessChoices(mission.remote_node_id ?? "core")}
+      onForkOpen={mission => void refreshNodeAntigravityModels(mission.remote_node_id ?? "core")}
+      onFork={commitFork}
+      selected={selected}
+      onDeleted={ids => {
+        const idSet = new Set(ids);
+        const removed = new Set(ids.flatMap(id => [`m:${id}`, `ms:${id}`, `rm:${id}`]));
+        batch(() => {
+          for (const id of ids) keepAlivePool.evictMission(id);
+          setMissions(rows => rows.filter(m => !idSet.has(m.id)));
+          setCompletedMissions(rows => rows.filter(m => !idSet.has(m.id)));
+          setProjectMissions(prev => {
+            const next: Record<string, Mission[]> = {};
+            for (const [k, rows] of Object.entries(prev)) {
+              next[k] = rows.filter(m => !idSet.has(m.id));
+            }
+            return next;
+          });
+          if (removed.has(selected() ?? "")) setSelected(null);
+          // Back/forward must not reopen conversations that no longer exist.
+          setHistory(entries => entries.map(id => id && removed.has(id) ? null : id));
+        });
+      }}
+      onProjectMissions={(slug, rows) => {
+        const clean = rows.filter(m => !isMissionDeleting(m.id));
+        setProjectMissions(prev => ({ ...prev, [slug]: clean }));
+      }}
+      open={open}
+      onNewCloudAgent={(project, path) => { setNewProject(project); setNewFolder(path ? {project, path} : null); open("cloud-agent"); }}
+      onNewAgent={(slug, path) => {
+        setNewFolder(path ? { project: slug, path } : null);
+        setNewProject(slug);
+        open(null);
+      }}
+      onNewProject={anchor => {
+        setProjectCreationAnchor(anchor);
+        setNewProjectDraft(true);
+      }}
+    />
+  );
+
   return (
-    <div class={`app ${onSettings() ? "settings-view" : ""} ${sidebar() ? "" : "sb-hidden"}`} data-pane={currentMissionId() ? "mission" : (currentController() || currentProjectFile() || currentProjectSettings()) ? "project" : "page"} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
+    <div class={`app ${onSettings() ? "settings-view" : ""} ${(nativeChromeActive || !sidebar()) ? "sb-hidden" : ""}`} data-native-chrome={nativeChromeActive ? "true" : undefined} data-pane={currentMissionId() ? "mission" : (currentController() || currentProjectFile() || currentProjectSettings()) ? "project" : "page"} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
       <MentionProjectContext.Provider value={()=>openMission()?.project??currentController()?.slug??effectiveNewProject()}>
-      <FilePanelProvider missionOpen={currentMissionId()} scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }} sidebar={sidebar} onSetSidebar={setSidebar}>
+      <FilePanelProvider missionOpen={currentMissionId()} scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }} sidebar={sidebar} onSetSidebar={setSidebarWithNative}>
+      <Show when={!nativeChromeActive}>
       <button class="sidebar-backdrop" aria-label="Close sidebar" onClick={() => setSidebar(false)} tabIndex={-1} />
       <aside id="orb-sidebar" class="sidebar">
         <div class="sb-top" data-orb-drag-region />
@@ -1550,52 +1665,7 @@ export default function App() {
                   const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
                   rows[next].focus();
                 }}>
-                  <LiveProjectsSection
-                    active={() => !onSettings()}
-                    deleteRequest={deleteMissionRequest()}
-                    onDeleteRequestHandled={() => setDeleteMissionRequest(null)}
-                    activityMissions={missions()}
-                    currentMission={(() => { const m = findKnownMission(currentMissionId()); return m ? movedMission(m) : undefined; })()}
-                    harnessChoices={harnessChoices()}
-                    forkChoices={mission => harnessChoices(mission.remote_node_id ?? "core")}
-                    onForkOpen={mission => void refreshNodeAntigravityModels(mission.remote_node_id ?? "core")}
-                    onFork={commitFork}
-                    selected={selected}
-                    onDeleted={ids => {
-                      const idSet = new Set(ids);
-                      const removed = new Set(ids.flatMap(id => [`m:${id}`, `ms:${id}`, `rm:${id}`]));
-                      batch(() => {
-                        for (const id of ids) keepAlivePool.evictMission(id);
-                        setMissions(rows => rows.filter(m => !idSet.has(m.id)));
-                        setCompletedMissions(rows => rows.filter(m => !idSet.has(m.id)));
-                        setProjectMissions(prev => {
-                          const next: Record<string, Mission[]> = {};
-                          for (const [k, rows] of Object.entries(prev)) {
-                            next[k] = rows.filter(m => !idSet.has(m.id));
-                          }
-                          return next;
-                        });
-                        if (removed.has(selected() ?? "")) setSelected(null);
-                        // Back/forward must not reopen conversations that no longer exist.
-                        setHistory(entries => entries.map(id => id && removed.has(id) ? null : id));
-                      });
-                    }}
-                    onProjectMissions={(slug, rows) => {
-                      const clean = rows.filter(m => !isMissionDeleting(m.id));
-                      setProjectMissions(prev => ({ ...prev, [slug]: clean }));
-                    }}
-                    open={open}
-                    onNewCloudAgent={(project, path) => { setNewProject(project); setNewFolder(path ? {project, path} : null); open("cloud-agent"); }}
-                    onNewAgent={(slug, path) => {
-                      setNewFolder(path ? { project: slug, path } : null);
-                      setNewProject(slug);
-                      open(null);
-                    }}
-                    onNewProject={anchor => {
-                      setProjectCreationAnchor(anchor);
-                      setNewProjectDraft(true);
-                    }}
-                  />
+                  {renderLiveProjectsSection(false)}
                 </div>
               )}
             </Show>
@@ -1633,10 +1703,14 @@ export default function App() {
         </div>
         <div class="sb-resize" onPointerDown={startResize} />
       </aside>
+      </Show>
+      <Show when={nativeChromeActive && isConnected() ? connectionVersion() + 1 : 0} keyed>
+        {(_ver) => renderLiveProjectsSection(true)}
+      </Show>
 
       <header class="titlebar" data-orb-drag-region>
         <div class="tb-left">
-          <button class="icon-btn" aria-label="Toggle sidebar" aria-expanded={sidebar()} aria-controls="orb-sidebar" title={`Toggle sidebar (${sidebarShortcutLabel()})`} onClick={() => setSidebar(!sidebar())}>
+          <button class="icon-btn" aria-label="Toggle sidebar" aria-expanded={sidebar()} aria-controls="orb-sidebar" title={`Toggle sidebar (${sidebarShortcutLabel()})`} onClick={() => setSidebarWithNative(!sidebar())}>
             <Ic.SidebarIcon />
           </button>
           <button class="icon-btn" aria-label="Search conversations" title={`Search (${searchShortcutLabel()})`} onClick={openSearch}>

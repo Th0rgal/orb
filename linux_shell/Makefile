@@ -16,8 +16,8 @@ ifeq ($(HAS_WEBKIT),1)
   LDFLAGS += $(shell $(PKG_CONFIG) --libs $(WEBKIT_PKGS))
 endif
 
-orb-desktop: main.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+orb-desktop: main.c gtk_chrome.c gtk_chrome.h
+	$(CC) $(CFLAGS) -o $@ main.c gtk_chrome.c $(LDFLAGS)
 
 test: orb-desktop
 	./orb-desktop --self-test

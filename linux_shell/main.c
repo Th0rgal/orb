@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "gtk_chrome.h"
 #if defined(ORB_HAS_WEBKITGTK)
 #include <gtk/gtk.h>
 #include <webkit2/webkit2.h>
@@ -26,12 +27,6 @@ static int gen_csprng_hex(char out_hex[65]) {
     for (size_t i = 0; i < 32; ++i) { out_hex[i * 2] = hex[(raw[i] >> 4) & 0x0F]; out_hex[i * 2 + 1] = hex[raw[i] & 0x0F]; }
     return out_hex[64] = '\0', 0;
 }
-static char *json_escape_string(const char *s) {
-    size_t len = strlen(s), j = 0; char *out = len <= 4096 ? malloc(len * 6 + 4) : NULL; if (!out) return NULL;
-    out[j++] = '"';
-    for (size_t i = 0; i < len; ++i) { unsigned char c = (unsigned char)s[i]; if (c == '"' || c == '\\') { out[j++] = '\\'; out[j++] = (char)c; } else if (c < 0x20 || c == 0x7F) j += (size_t)snprintf(out + j, 8, "\\u%04x", c); else out[j++] = (char)c; }
-    return out[j++] = '"', out[j] = '\0', out;
-}
 static int is_confined_shell_uri(const char *u) {
     if (!u || !*u) return 0;
     if (strncmp(u, "file:///", 8) == 0 || strcmp(u, "about:blank") == 0) return 1;
@@ -45,10 +40,10 @@ static int is_confined_shell_uri(const char *u) {
     }
     return *rest == '\0' || *rest == '/' || *rest == '?' || *rest == '#';
 }
-static char *build_init_script(unsigned port, const char *token) {
-    char *tok_lit = json_escape_string(token); if (!tok_lit) return NULL;
+static char *build_init_script(unsigned port, const char *token, int native_chrome) {
+    char *tok_lit = orb_json_escape_string(token); if (!tok_lit) return NULL;
     static const char tmpl[] =
-        "(() => { if (document.documentElement) document.documentElement.dataset.platform = 'linux'; const _fetch = window.fetch.bind(window), _jsonStringify = JSON.stringify, _btoa = window.btoa.bind(window); const ORB_LOCALD_URL = \"http://127.0.0.1:%u/__orb_rpc\", ORB_EVENTS_URL = \"http://127.0.0.1:%u/__orb_events\", ORB_TOKEN = %s;\n"
+        "(() => { if (document.documentElement) document.documentElement.dataset.platform = 'linux'; %sconst _fetch = window.fetch.bind(window), _jsonStringify = JSON.stringify, _btoa = window.btoa.bind(window); const ORB_LOCALD_URL = \"http://127.0.0.1:%u/__orb_rpc\", ORB_EVENTS_URL = \"http://127.0.0.1:%u/__orb_events\", ORB_TOKEN = %s;\n"
         "  class Channel { constructor() { this.onmessage = () => {}; } } const listeners = new Map(), channels = new Map(); let streamCtrl = null, ps = 10000;\n"
         "  const emit = (name, payload) => { const s = listeners.get(name); if (s) for (const h of Array.from(s)) { try { h({ event: name, payload }); } catch {} } }; const dispatch = (ev) => { if (ev && typeof ev === 'object') { if (typeof ev.event === 'string') emit(ev.event, ev.payload); else if (typeof ev.token === 'number') channels.get(ev.token)?.onmessage(ev.payload); } };\n"
         "  const b64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return _btoa(s); }; window.__ORB_EMIT__ = emit;\n"
@@ -58,8 +53,9 @@ static char *build_init_script(unsigned port, const char *token) {
         "  async function invoke(command, args = {}, options = {}) { const isBin = args instanceof Uint8Array || args instanceof ArrayBuffer, clean = isBin ? { __binaryBase64: b64(args instanceof Uint8Array ? args : new Uint8Array(args)), __headers: options?.headers || {} } : { ...(args || {}) }; let bound = null; if (!isBin && clean.onEvent instanceof Channel) { bound = clean.onEvent; delete clean.onEvent; } if (!isBin && options?.headers && typeof options.headers === 'object') clean.__headers = { ...options.headers }; if (command.endsWith('_unsubscribe') && typeof clean.token === 'number') { channels.delete(clean.token); if (!channels.size && !listeners.size) stopStream(); } let r; for (let i = 0; ; i++) { try { r = await _fetch(ORB_LOCALD_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Orb-Token': ORB_TOKEN }, body: _jsonStringify({ command, args: clean }) }); break; } catch (e) { if (i >= 8) throw e; await new Promise(w => setTimeout(w, 75)); } } const b = await r.json(); if (!r.ok || b.error) throw new Error(b.error || command); if (bound && typeof b.result === 'number') { channels.set(b.result, bound); void drain(); ensureStream(); } return b.result; }\n"
         "  async function listen(n, h) { if (!listeners.has(n)) listeners.set(n, new Set()); listeners.get(n).add(h); ensureStream(); return () => { listeners.get(n)?.delete(h); if (!listeners.get(n)?.size) listeners.delete(n); if (!channels.size && !listeners.size) stopStream(); }; }\n"
         "  window.__TAURI_INTERNALS__ = { invoke }; window.__ORB_DESKTOP__ = window.__TAURI__ = { core: { invoke, Channel }, event: { listen }, window: { getCurrentWindow: () => ({ innerSize: async () => { const s = window.devicePixelRatio || 1; return { width: Math.round(window.innerWidth * s), height: Math.round(window.innerHeight * s) }; }, scaleFactor: async () => window.devicePixelRatio || 1 }) }, webview: { getCurrentWebview: () => ({ label: 'main' }) } }; })();\n";
-    size_t need = sizeof(tmpl) + strlen(tok_lit) + 64; char *buf = malloc(need);
-    if (buf) snprintf(buf, need, tmpl, port, port, tok_lit);
+    const char *nc_js = native_chrome ? "window.__ORB_NATIVE_CHROME__ = true; " : "";
+    size_t need = sizeof(tmpl) + strlen(tok_lit) + strlen(nc_js) + 64; char *buf = malloc(need);
+    if (buf) snprintf(buf, need, tmpl, nc_js, port, port, tok_lit);
     return free(tok_lit), buf;
 }
 #if defined(ORB_HAS_WEBKITGTK)
@@ -101,14 +97,16 @@ static gboolean on_decide_policy(WebKitWebView *wv, WebKitPolicyDecision *dec, W
 }
 #endif
 int main(int argc, char **argv) {
-    unsigned port = 19479; const char *port_env = getenv("ORB_LOCALD_PORT");
+    unsigned port = 19479; const char *port_env = getenv("ORB_LOCALD_PORT"), *nc_env = getenv("ORB_NATIVE_CHROME");
+    const int native_chrome = nc_env && strcmp(nc_env, "1") == 0;
     if (port_env && *port_env && !parse_valid_port(port_env, &port)) return fprintf(stderr, "orb-linux-shell: invalid ORB_LOCALD_PORT\n"), 1;
     char eph_tok[65], *init_js = NULL; const char *token = getenv("ORB_LOCALD_TOKEN");
     if (!token || strlen(token) < 32 || strcmp(token, "orb-locald-default-token") == 0) { if (gen_csprng_hex(eph_tok) != 0) return 1; token = eph_tok; }
-    if (!(init_js = build_init_script(port, token))) return 1;
+    if (!(init_js = build_init_script(port, token, native_chrome))) return 1;
     if (argc > 1 && strcmp(argv[1], "--self-test") == 0) {
-        int ok = strstr(init_js, "__ORB_DESKTOP__") && strstr(init_js, "dataset.platform = 'linux'") && strstr(init_js, "__ORB_EMIT__") && strstr(init_js, "__ORB_PINCH__") && strstr(init_js, "/__orb_events") && !strstr(init_js, "setInterval") && strstr(init_js, "const _fetch = window.fetch.bind(window)") && is_confined_shell_uri("orb://localhost/") && is_confined_shell_uri("tauri://localhost/") && !is_confined_shell_uri("orb://evil.example/") && is_confined_shell_uri("http://127.0.0.1:1430") && is_confined_shell_uri("http://localhost/") && !is_confined_shell_uri("http://127.0.0.1:80@evil.com/") && !is_confined_shell_uri("https://evil.example");
-        return free(init_js), ok ? (printf("orb-linux-shell self-test: ok\n"), 0) : 1;
+        char *nc_js = build_init_script(port, token, 1);
+        int ok = nc_js && strstr(nc_js, "__ORB_NATIVE_CHROME__ = true") && orb_gtk_chrome_self_test() && strstr(init_js, "__ORB_DESKTOP__") && strstr(init_js, "dataset.platform = 'linux'") && strstr(init_js, "__ORB_EMIT__") && strstr(init_js, "__ORB_PINCH__") && strstr(init_js, "/__orb_events") && !strstr(init_js, "setInterval") && strstr(init_js, "const _fetch = window.fetch.bind(window)") && is_confined_shell_uri("orb://localhost/") && is_confined_shell_uri("tauri://localhost/") && !is_confined_shell_uri("orb://evil.example/") && is_confined_shell_uri("http://127.0.0.1:1430") && is_confined_shell_uri("http://localhost/") && !is_confined_shell_uri("http://127.0.0.1:80@evil.com/") && !is_confined_shell_uri("https://evil.example");
+        return free(nc_js), free(init_js), ok ? (printf("orb-linux-shell self-test: ok\n"), 0) : 1;
     }
     pid_t parent_pid = getpid(), locald_pid = -1; const char *locald_bin = getenv("ORB_LOCALD_BIN");
     if (locald_bin && *locald_bin && (locald_pid = fork()) == 0) {
@@ -135,11 +133,11 @@ int main(int argc, char **argv) {
     static const gchar *const allow_list[] = { "http://127.0.0.1/*", "http://localhost/*", "orb://localhost/*", "tauri://localhost/*", "file:///*", NULL };
     WebKitUserContentManager *ucm = webkit_user_content_manager_new();
     WebKitUserScript *script = webkit_user_script_new(init_js, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, allow_list, NULL); webkit_user_content_manager_add_script(ucm, script); webkit_user_script_unref(script);
-    GtkWidget *wv = g_object_new(WEBKIT_TYPE_WEB_VIEW, "web-context", ctx, "user-content-manager", ucm, NULL); g_object_unref(ctx); g_object_unref(ucm);
+    GtkWidget *wv = g_object_new(WEBKIT_TYPE_WEB_VIEW, "web-context", ctx, "user-content-manager", ucm, NULL); g_object_unref(ctx);
     WebKitSettings *wks = webkit_web_view_get_settings(WEBKIT_WEB_VIEW(wv)); webkit_settings_set_hardware_acceleration_policy(wks, WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS); g_object_set(wks, "enable-media-stream", TRUE, "enable-webaudio", TRUE, "media-playback-requires-user-gesture", FALSE, NULL);
     const GdkRGBA bg = rgba ? (GdkRGBA){ 0, 0, 0, 0 } : (GdkRGBA){ 0.078, 0.078, 0.078, 1 }; webkit_web_view_set_background_color(WEBKIT_WEB_VIEW(wv), &bg);
     g_signal_connect(wv, "event", G_CALLBACK(on_wv_event), NULL); g_signal_connect(wv, "decide-policy", G_CALLBACK(on_decide_policy), NULL);
-    gtk_container_add(GTK_CONTAINER(win), wv);
+    gtk_container_add(GTK_CONTAINER(win), native_chrome ? orb_gtk_chrome_wrap(win, wv, ucm, port, token) : wv); g_object_unref(ucm);
     const char *url = getenv("ORB_DEV_URL"), *scheme = getenv("ORB_URI_SCHEME");
     const char *start_uri = (url && is_confined_shell_uri(url)) ? url : (dist[0] ? ((scheme && strcmp(scheme, "orb") == 0) ? "orb://localhost/" : "tauri://localhost/") : "http://127.0.0.1:1430");
     webkit_web_view_load_uri(WEBKIT_WEB_VIEW(wv), start_uri); gtk_widget_show_all(win); gtk_main();

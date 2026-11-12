@@ -249,6 +249,583 @@ final class OrbMistralSignInController: NSObject, NSWindowDelegate, WKNavigation
     }
 }
 
+struct OrbSidebarRowItem: Equatable {
+    let rowId: String
+    let kind: String
+    let depth: Int
+    let title: String
+    let subtitle: String
+    let target: String
+    let shortcut: String
+    let badge: Int
+    let expandable: Bool
+    let expanded: Bool
+    let selected: Bool
+    let attention: Bool
+
+    func hasSameCellContent(as other: OrbSidebarRowItem) -> Bool {
+        return rowId == other.rowId &&
+            kind == other.kind &&
+            depth == other.depth &&
+            title == other.title &&
+            subtitle == other.subtitle &&
+            target == other.target &&
+            shortcut == other.shortcut &&
+            badge == other.badge &&
+            expandable == other.expandable &&
+            expanded == other.expanded &&
+            attention == other.attention
+    }
+
+    static func parse(_ d: [String: Any], isPalette: Bool = false) -> OrbSidebarRowItem? {
+        let rid = (d[isPalette ? "id" : "row_id"] as? String) ?? ""
+        let title = (d["title"] as? String) ?? ""
+        guard !rid.isEmpty, !title.isEmpty else { return nil }
+        return OrbSidebarRowItem(
+            rowId: rid,
+            kind: (d["kind"] as? String) ?? "item",
+            depth: isPalette ? 0 : ((d["depth"] as? Int) ?? 0),
+            title: title,
+            subtitle: (d["subtitle"] as? String) ?? "",
+            target: (d["target"] as? String) ?? "",
+            shortcut: (d["shortcut"] as? String) ?? "",
+            badge: isPalette ? 0 : ((d["badge"] as? Int) ?? 0),
+            expandable: !isPalette && ((d["expandable"] as? Bool) ?? false),
+            expanded: !isPalette && ((d["expanded"] as? Bool) ?? false),
+            selected: !isPalette && ((d["selected"] as? Bool) ?? false),
+            attention: !isPalette && ((d["attention"] as? Bool) ?? false)
+        )
+    }
+}
+
+final class OrbNativePalettePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+    override func cancelOperation(_ sender: Any?) { orderOut(nil) }
+}
+
+final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, URLSessionDataDelegate {
+    let splitView = NSSplitView()
+    let sidebarPane = NSView()
+    let sidebarTable = NSTableView()
+    private let palettePanel: OrbNativePalettePanel
+    private let paletteSearch = NSSearchField()
+    private let paletteTable = NSTableView()
+    private let port: Int
+    private let token: String
+    private weak var webView: OrbWebView?
+    private weak var hostWindow: NSWindow?
+    private(set) var rows: [OrbSidebarRowItem] = []
+    private(set) var paletteItems: [OrbSidebarRowItem] = []
+    private var sseSession: URLSession?
+    private var sseTask: URLSessionDataTask?
+    private var sseBuffer = Data()
+    private var sseRetryWork: DispatchWorkItem?
+    private var isProgrammaticSelect = false
+    private var lastSelectionDispatchedRowId: String?
+    private var paletteQueryGeneration: UInt64 = 0
+    private var sidebarReqGeneration: UInt64 = 0
+    private var minScopeSwitchGeneration: UInt64 = 0
+    private var activeSidebarScope: String = ""
+    private var activeSidebarScopeGeneration: UInt64 = 0
+    private var lastAppliedViewRevision: UInt64 = 0
+
+    init(port: Int, token: String, webView: OrbWebView, hostWindow: NSWindow, frame: NSRect) {
+        self.port = port
+        self.token = token
+        self.webView = webView
+        self.hostWindow = hostWindow
+        self.palettePanel = OrbNativePalettePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 340),
+            styleMask: [.titled, .fullSizeContentView, .utilityWindow],
+            backing: .buffered,
+            defer: true
+        )
+        super.init()
+        setupSplitView(frame: frame, webView: webView)
+        setupPalettePanel()
+    }
+
+    private func setupSplitView(frame: NSRect, webView: OrbWebView) {
+        splitView.frame = frame
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        splitView.autoresizingMask = [.width, .height]
+        splitView.delegate = self
+
+        sidebarPane.frame = NSRect(x: 0, y: 0, width: 220, height: frame.height)
+        sidebarPane.autoresizingMask = [.height]
+
+        let searchBtn = NSButton(title: "Search  ⌘K", target: self, action: #selector(onOpenPaletteButton(_:)))
+        searchBtn.bezelStyle = .recessed
+        searchBtn.showsBorderOnlyWhileMouseInside = true
+        searchBtn.alignment = .left
+        searchBtn.font = NSFont.systemFont(ofSize: 12, weight: .regular)
+        searchBtn.frame = NSRect(x: 10, y: max(0, frame.height - 68), width: 200, height: 26)
+        searchBtn.autoresizingMask = [.width, .minYMargin]
+        sidebarPane.addSubview(searchBtn)
+
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("orbSidebarCol"))
+        col.resizingMask = .autoresizingMask
+        sidebarTable.addTableColumn(col)
+        sidebarTable.headerView = nil
+        sidebarTable.rowHeight = 28
+        sidebarTable.intercellSpacing = NSSize(width: 0, height: 2)
+        sidebarTable.backgroundColor = .clear
+        sidebarTable.focusRingType = .none
+        sidebarTable.selectionHighlightStyle = .regular
+        if #available(macOS 11.0, *) { sidebarTable.style = .sourceList }
+        sidebarTable.dataSource = self
+        sidebarTable.delegate = self
+        sidebarTable.target = self
+        sidebarTable.action = #selector(onSidebarTableClick(_:))
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 220, height: max(0, frame.height - 74)))
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.autoresizingMask = [.width, .height]
+        scroll.documentView = sidebarTable
+        sidebarPane.addSubview(scroll)
+
+        webView.frame = NSRect(x: 221, y: 0, width: max(200, frame.width - 221), height: frame.height)
+        splitView.addSubview(sidebarPane)
+        splitView.addSubview(webView)
+        splitView.adjustSubviews()
+        splitView.setPosition(220, ofDividerAt: 0)
+    }
+
+    private func setupPalettePanel() {
+        palettePanel.isFloatingPanel = true
+        palettePanel.hidesOnDeactivate = true
+        palettePanel.isReleasedWhenClosed = false
+        palettePanel.titleVisibility = .hidden
+        palettePanel.titlebarAppearsTransparent = true
+        palettePanel.isMovableByWindowBackground = true
+
+        let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 480, height: 340))
+        root.material = .hudWindow
+        root.blendingMode = .behindWindow
+        root.state = .active
+        root.autoresizingMask = [.width, .height]
+
+        paletteSearch.frame = NSRect(x: 12, y: 298, width: 456, height: 28)
+        paletteSearch.placeholderString = "Jump to mission, project, or page…"
+        paletteSearch.focusRingType = .none
+        paletteSearch.autoresizingMask = [.width, .minYMargin]
+        paletteSearch.delegate = self
+        root.addSubview(paletteSearch)
+
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("orbPaletteCol"))
+        col.resizingMask = .autoresizingMask
+        paletteTable.addTableColumn(col)
+        paletteTable.headerView = nil
+        paletteTable.rowHeight = 30
+        paletteTable.backgroundColor = .clear
+        paletteTable.focusRingType = .none
+        paletteTable.dataSource = self
+        paletteTable.delegate = self
+        paletteTable.target = self
+        paletteTable.action = #selector(onPaletteTableClick(_:))
+
+        let scroll = NSScrollView(frame: NSRect(x: 8, y: 8, width: 464, height: 282))
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.autoresizingMask = [.width, .height]
+        scroll.documentView = paletteTable
+        root.addSubview(scroll)
+        palettePanel.contentView = root
+    }
+
+    func startStreaming() {
+        refreshSidebar()
+        connectSse()
+    }
+
+    func stopStreaming() {
+        sseRetryWork?.cancel()
+        sseRetryWork = nil
+        sseTask?.cancel()
+        sseTask = nil
+        sseSession?.invalidateAndCancel()
+        sseSession = nil
+    }
+
+    func setSidebarOpen(_ open: Bool) {
+        sidebarPane.isHidden = !open
+        splitView.adjustSubviews()
+        if open && sidebarPane.frame.width < 140 {
+            splitView.setPosition(220, ofDividerAt: 0)
+        }
+    }
+
+    @objc func openPalette() {
+        guard let win = hostWindow else { return }
+        paletteSearch.stringValue = ""
+        refreshPalette(query: "")
+        let wf = win.frame
+        let pf = palettePanel.frame
+        let origin = NSPoint(x: wf.midX - pf.width / 2.0, y: wf.maxY - pf.height - 90)
+        palettePanel.setFrameOrigin(origin)
+        palettePanel.makeKeyAndOrderFront(nil)
+        palettePanel.makeFirstResponder(paletteSearch)
+    }
+
+    @objc private func onOpenPaletteButton(_ sender: Any?) {
+        openPalette()
+    }
+
+    private func callLocald(command: String, args: [String: Any], completion: @escaping ([String: Any]?) -> Void) {
+        guard let u = URL(string: "http://127.0.0.1:\(port)/__orb_rpc"),
+              let body = try? JSONSerialization.data(withJSONObject: ["command": command, "args": args]) else {
+            completion(nil)
+            return
+        }
+        var req = URLRequest(url: u)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 1.5
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(token, forHTTPHeaderField: "X-Orb-Token")
+        req.httpBody = body
+        URLSession.shared.dataTask(with: req) { data, resp, _ in
+            guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                  let data,
+                  let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let res = root["result"] as? [String: Any] else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            DispatchQueue.main.async { completion(res) }
+        }.resume()
+    }
+
+    func applyRowsPayload(_ rawRows: [[String: Any]]) {
+        let nextRows = rawRows.compactMap { OrbSidebarRowItem.parse($0, isPalette: false) }
+        let prevRows = rows
+        rows = nextRows
+        isProgrammaticSelect = true
+        defer { isProgrammaticSelect = false }
+
+        let uniqueIds = Set(prevRows.map(\.rowId)).count == prevRows.count
+            && Set(nextRows.map(\.rowId)).count == nextRows.count
+        let diff = nextRows.map(\.rowId).difference(from: prevRows.map(\.rowId))
+        if uniqueIds && diff.isEmpty {
+            var dirty = IndexSet()
+            for idx in 0..<nextRows.count where !prevRows[idx].hasSameCellContent(as: nextRows[idx]) {
+                dirty.insert(idx)
+            }
+            if !dirty.isEmpty {
+                sidebarTable.reloadData(forRowIndexes: dirty, columnIndexes: IndexSet(integer: 0))
+            }
+        } else if uniqueIds && !prevRows.isEmpty {
+            var removals = IndexSet()
+            for change in diff {
+                if case let .remove(offset, _, _) = change { removals.insert(offset) }
+            }
+            sidebarTable.beginUpdates()
+            if !removals.isEmpty {
+                sidebarTable.removeRows(at: removals, withAnimation: [])
+            }
+            for change in diff {
+                if case let .insert(offset, _, _) = change {
+                    sidebarTable.insertRows(at: IndexSet(integer: offset), withAnimation: [])
+                }
+            }
+            sidebarTable.endUpdates()
+            var prevById: [String: OrbSidebarRowItem] = [:]
+            for item in prevRows { prevById[item.rowId] = item }
+            var dirty = IndexSet()
+            for (idx, item) in nextRows.enumerated() {
+                if let old = prevById[item.rowId], !old.hasSameCellContent(as: item) {
+                    dirty.insert(idx)
+                }
+            }
+            if !dirty.isEmpty {
+                sidebarTable.reloadData(forRowIndexes: dirty, columnIndexes: IndexSet(integer: 0))
+            }
+        } else {
+            sidebarTable.reloadData()
+        }
+
+        if let selIdx = nextRows.firstIndex(where: { $0.selected }) {
+            if sidebarTable.selectedRow != selIdx {
+                sidebarTable.selectRowIndexes(IndexSet(integer: selIdx), byExtendingSelection: false)
+            }
+        } else if sidebarTable.selectedRow >= 0 {
+            sidebarTable.deselectAll(nil)
+        }
+    }
+
+    func acceptSidebarResponse(reqGen: UInt64, scope: String, revision: UInt64?) -> Bool {
+        if scope != activeSidebarScope {
+            guard reqGen >= max(activeSidebarScopeGeneration, minScopeSwitchGeneration) else { return false }
+            activeSidebarScope = scope
+            activeSidebarScopeGeneration = reqGen
+            lastAppliedViewRevision = revision ?? 0
+            return true
+        }
+        if let rev = revision {
+            guard rev >= lastAppliedViewRevision else { return false }
+            lastAppliedViewRevision = rev
+        }
+        if reqGen > activeSidebarScopeGeneration {
+            activeSidebarScopeGeneration = reqGen
+        }
+        return true
+    }
+
+    func refreshSidebar() {
+        sidebarReqGeneration &+= 1
+        let gen = sidebarReqGeneration
+        callLocald(command: "native_chrome_get_rows", args: [:]) { [weak self] res in
+            guard let self, let raw = res?["rows"] as? [[String: Any]] else { return }
+            let scope = (res?["scope"] as? String) ?? ""
+            let rev = (res?["revision"] as? NSNumber)?.uint64Value
+            guard self.acceptSidebarResponse(reqGen: gen, scope: scope, revision: rev) else { return }
+            self.applyRowsPayload(raw)
+        }
+    }
+
+    private func refreshPalette(query: String) {
+        paletteQueryGeneration &+= 1
+        let gen = paletteQueryGeneration
+        callLocald(command: "native_chrome_palette_query", args: ["query": query, "limit": 24]) { [weak self] res in
+            guard let self, self.paletteQueryGeneration == gen, let raw = res?["items"] as? [[String: Any]] else { return }
+            self.paletteItems = raw.compactMap { OrbSidebarRowItem.parse($0, isPalette: true) }
+            self.paletteTable.reloadData()
+            if !self.paletteItems.isEmpty {
+                self.paletteTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            }
+        }
+    }
+
+    private func connectSse() {
+        sseTask?.cancel()
+        sseBuffer.removeAll(keepingCapacity: true)
+        guard let u = URL(string: "http://127.0.0.1:\(port)/__orb_events") else { return }
+        if sseSession == nil {
+            let cfg = URLSessionConfiguration.ephemeral
+            cfg.timeoutIntervalForRequest = 3600
+            cfg.timeoutIntervalForResource = 86400
+            sseSession = URLSession(configuration: cfg, delegate: self, delegateQueue: .main)
+        }
+        var req = URLRequest(url: u)
+        req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        req.setValue(token, forHTTPHeaderField: "X-Orb-Token")
+        let t = sseSession?.dataTask(with: req)
+        sseTask = t
+        t?.resume()
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        sseBuffer.append(data)
+        let delim = Data([0x0A, 0x0A])
+        var shouldRefresh = false
+        while let range = sseBuffer.range(of: delim) {
+            let frame = sseBuffer.subdata(in: 0..<range.lowerBound)
+            sseBuffer.removeSubrange(0..<range.upperBound)
+            if let s = String(data: frame, encoding: .utf8), s.contains("native_chrome_rows_changed") {
+                shouldRefresh = true
+            }
+        }
+        if shouldRefresh {
+            minScopeSwitchGeneration = sidebarReqGeneration &+ 1
+            refreshSidebar()
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard sseSession != nil else { return }
+        sseRetryWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.refreshSidebar()
+            self?.connectSse()
+        }
+        sseRetryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+    }
+
+    private func dispatchItem(_ item: OrbSidebarRowItem) {
+        if item.kind == "folder" || item.target.hasPrefix("folder:") {
+            toggleExpand(rowId: item.rowId)
+        } else if !item.target.isEmpty {
+            let lit = OrbAppDelegate.jsonStringLiteral(item.target)
+            let fn = (item.kind == "mission") ? "__ORB_SELECT_MISSION__" : "__ORB_NATIVE_NAV__"
+            webView?.evaluateJavaScript("window.\(fn)&&window.\(fn)(\(lit));", completionHandler: nil)
+            if let win = hostWindow, let wv = webView { win.makeFirstResponder(wv) }
+        } else if item.expandable {
+            toggleExpand(rowId: item.rowId)
+        }
+    }
+
+    private func toggleExpand(rowId: String) {
+        sidebarReqGeneration &+= 1
+        let gen = sidebarReqGeneration
+        callLocald(command: "native_chrome_toggle_expand", args: ["row_id": rowId]) { [weak self] res in
+            guard let self else { return }
+            if let raw = res?["rows"] as? [[String: Any]] {
+                let scope = (res?["scope"] as? String) ?? ""
+                let rev = (res?["revision"] as? NSNumber)?.uint64Value
+                guard self.acceptSidebarResponse(reqGen: gen, scope: scope, revision: rev) else { return }
+                self.applyRowsPayload(raw)
+            } else {
+                self.refreshSidebar()
+            }
+        }
+    }
+
+    @objc private func onChevronButton(_ sender: NSButton) {
+        let idx = sidebarTable.row(for: sender)
+        guard idx >= 0, idx < rows.count else { return }
+        toggleExpand(rowId: rows[idx].rowId)
+    }
+
+    @objc private func onSidebarTableClick(_ sender: Any?) {
+        let idx = sidebarTable.clickedRow
+        guard idx >= 0, idx < rows.count else { return }
+        let item = rows[idx]
+        if lastSelectionDispatchedRowId == item.rowId {
+            lastSelectionDispatchedRowId = nil
+            return
+        }
+        dispatchItem(item)
+    }
+
+    @objc private func onPaletteTableClick(_ sender: Any?) {
+        let idx = paletteTable.clickedRow >= 0 ? paletteTable.clickedRow : paletteTable.selectedRow
+        guard idx >= 0, idx < paletteItems.count else { return }
+        let chosen = paletteItems[idx]
+        paletteQueryGeneration &+= 1
+        palettePanel.orderOut(nil)
+        dispatchItem(chosen)
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard (obj.object as? NSSearchField) === paletteSearch else { return }
+        refreshPalette(query: paletteSearch.stringValue)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === paletteSearch else { return false }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            let idx = paletteTable.selectedRow >= 0 ? paletteTable.selectedRow : 0
+            if idx < paletteItems.count {
+                let chosen = paletteItems[idx]
+                paletteQueryGeneration &+= 1
+                palettePanel.orderOut(nil)
+                dispatchItem(chosen)
+            }
+            return true
+        }
+        if commandSelector == #selector(NSResponder.moveDown(_:)) {
+            let next = min(max(0, paletteItems.count - 1), paletteTable.selectedRow + 1)
+            if !paletteItems.isEmpty { paletteTable.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false) }
+            return true
+        }
+        if commandSelector == #selector(NSResponder.moveUp(_:)) {
+            let prev = max(0, paletteTable.selectedRow - 1)
+            if !paletteItems.isEmpty { paletteTable.selectRowIndexes(IndexSet(integer: prev), byExtendingSelection: false) }
+            return true
+        }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            paletteQueryGeneration &+= 1
+            palettePanel.orderOut(nil)
+            return true
+        }
+        return false
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        return (tableView === paletteTable) ? paletteItems.count : rows.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let isPal = (tableView === paletteTable)
+        let list = isPal ? paletteItems : rows
+        guard row >= 0, row < list.count else { return nil }
+        let item = list[row]
+
+        let cell = NSTableCellView()
+        let indent = CGFloat(min(8, item.depth) * 12)
+        var cursorX: CGFloat = 8 + indent
+
+        if item.expandable {
+            let btn = NSButton(title: item.expanded ? "▾" : "▸", target: self, action: #selector(onChevronButton(_:)))
+            btn.isBordered = false
+            btn.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+            btn.frame = NSRect(x: cursorX, y: 4, width: 16, height: 20)
+            cell.addSubview(btn)
+            cursorX += 18
+        }
+
+        let metaText: String = {
+            if item.badge > 0 { return "\(item.badge)" }
+            if !item.shortcut.isEmpty { return item.shortcut }
+            if isPal && !item.subtitle.isEmpty { return item.subtitle }
+            if item.attention { return "•" }
+            return ""
+        }()
+
+        let width = max(120, tableView.bounds.width)
+        let rightReserve: CGFloat = metaText.isEmpty ? 8 : 72
+        let lbl = NSTextField(labelWithString: item.title)
+        lbl.lineBreakMode = .byTruncatingTail
+        lbl.font = (item.kind == "project")
+            ? NSFont.systemFont(ofSize: 12, weight: .semibold)
+            : NSFont.systemFont(ofSize: 13, weight: .regular)
+        lbl.textColor = (item.kind == "project") ? .secondaryLabelColor : .labelColor
+        lbl.frame = NSRect(x: cursorX, y: 5, width: max(40, width - cursorX - rightReserve), height: 18)
+        lbl.autoresizingMask = [.width]
+        cell.addSubview(lbl)
+        cell.textField = lbl
+
+        if !metaText.isEmpty {
+            let meta = NSTextField(labelWithString: metaText)
+            meta.alignment = .right
+            meta.lineBreakMode = .byTruncatingTail
+            meta.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+            meta.textColor = .tertiaryLabelColor
+            meta.frame = NSRect(x: width - 68, y: 6, width: 60, height: 16)
+            meta.autoresizingMask = [.minXMargin]
+            cell.addSubview(meta)
+        }
+        return cell
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        if tableView === paletteTable { return row >= 0 && row < paletteItems.count }
+        guard row >= 0, row < rows.count else { return false }
+        let item = rows[row]
+        return !item.target.isEmpty && item.kind != "folder" && !item.target.hasPrefix("folder:")
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !isProgrammaticSelect,
+              let tv = notification.object as? NSTableView,
+              tv === sidebarTable else { return }
+        let idx = sidebarTable.selectedRow
+        guard idx >= 0, idx < rows.count else { return }
+        let item = rows[idx]
+        if !item.target.isEmpty && item.kind != "folder" && !item.target.hasPrefix("folder:") {
+            lastSelectionDispatchedRowId = (sidebarTable.clickedRow == idx) ? item.rowId : nil
+            dispatchItem(item)
+        }
+    }
+
+    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        return 160
+    }
+
+    func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        return min(420, max(220, splitView.bounds.width - 360))
+    }
+
+    func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview view: NSView) -> Bool {
+        return view !== sidebarPane
+    }
+}
+
 final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     private static let titlebarHeight: CGFloat = 35
     private static let trafficLightInsetX: CGFloat = 12
@@ -262,6 +839,7 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
     var signalSources: [DispatchSourceSignal] = []
     var schemeHandler: OrbBundleSchemeHandler?
     private var mistralSignIn: OrbMistralSignInController?
+    private var nativeChrome: OrbNativeChromeController?
 
     static func canBindLoopbackPort(_ port: Int) -> Bool {
         guard (1024...65535).contains(port) else { return false }
@@ -548,6 +1126,9 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
 
     @discardableResult
     private func sendWebViewEditAction(_ action: Selector, from sender: Any?) -> Bool {
+        if let keyWin = NSApp.keyWindow, keyWin !== window {
+            return NSApp.sendAction(action, to: nil, from: sender)
+        }
         if let win = window, win.attachedSheet == nil, let wv = webView {
             if win.firstResponder === win || win.firstResponder === win.contentView || win.firstResponder === vibrancyView {
                 win.makeFirstResponder(wv)
@@ -704,8 +1285,20 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             }
             return
         }
+        let rawArgs = (dict["args"] as? [String: Any]) ?? [:]
+        if cmd == "open_native_palette" {
+            nativeChrome?.openPalette()
+            if let reqId = dict["id"] as? Int { replyToWebView(id: reqId, result: nil) }
+            return
+        }
+        if cmd == "set_native_sidebar" {
+            let open = (rawArgs["open"] as? Bool) ?? true
+            nativeChrome?.setSidebarOpen(open)
+            if let reqId = dict["id"] as? Int { replyToWebView(id: reqId, result: open) }
+            return
+        }
         guard let reqId = dict["id"] as? Int else { return }
-        let args = (dict["args"] as? [String: Any]) ?? [:]
+        let args = rawArgs
         switch cmd {
         case "set_window_theme":
             let theme = (args["theme"] as? String) ?? "auto"
@@ -876,13 +1469,15 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         }
     }
 
-    static func buildInitScript(port: Int, token: String) -> String {
+    static func buildInitScript(port: Int, token: String, nativeChrome: Bool = false) -> String {
         let urlLit = Self.jsonStringLiteral("http://127.0.0.1:\(port)/__orb_rpc")
         let sseLit = Self.jsonStringLiteral("http://127.0.0.1:\(port)/__orb_events")
         let tokLit = Self.jsonStringLiteral(token)
+        let ncLine = nativeChrome ? "window.__ORB_NATIVE_CHROME__ = true;" : ""
         return """
         (() => {
           if (document.documentElement) document.documentElement.dataset.platform = "macos";
+          \(ncLine)
           const _fetch = window.fetch.bind(window);
           const _jsonStringify = JSON.stringify;
           const _postNative = window.webkit?.messageHandlers?.orbNative
@@ -1173,7 +1768,8 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             self.localdProc = p
         }
 
-        let initJs = Self.buildInitScript(port: port, token: token)
+        let nativeChromeEnabled = (env["ORB_NATIVE_CHROME"] == "1")
+        let initJs = Self.buildInitScript(port: port, token: token, nativeChrome: nativeChromeEnabled)
 
         let cfg = WKWebViewConfiguration()
         // Keep the desktop shell's layer backing store and live sync active when occluded:
@@ -1230,7 +1826,18 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         webView.setValue(false, forKey: "drawsBackground")
         webView.autoresizingMask = [.width, .height]
         container.addSubview(vibrancy)
-        container.addSubview(webView, positioned: .above, relativeTo: vibrancy)
+        if nativeChromeEnabled {
+            let chrome = OrbNativeChromeController(port: port, token: token, webView: webView, hostWindow: window, frame: rect)
+            self.nativeChrome = chrome
+            container.addSubview(chrome.splitView, positioned: .above, relativeTo: vibrancy)
+            let quickSwitchItem = NSMenuItem(title: "Quick Switcher…", action: #selector(OrbNativeChromeController.openPalette), keyEquivalent: "k")
+            quickSwitchItem.target = chrome
+            NSApp.mainMenu?.item(withTitle: "View")?.submenu?.addItem(.separator())
+            NSApp.mainMenu?.item(withTitle: "View")?.submenu?.addItem(quickSwitchItem)
+            chrome.startStreaming()
+        } else {
+            container.addSubview(webView, positioned: .above, relativeTo: vibrancy)
+        }
         window.contentView = container
         window.initialFirstResponder = webView
         if !window.setFrameUsingName(Self.frameAutosaveName) {
@@ -1260,6 +1867,7 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        nativeChrome?.stopStreaming()
         localdProc?.terminate()
     }
 
@@ -1291,6 +1899,15 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
                 fputs("self-test failed: init script missing \(needle)\n", stderr)
                 exit(1)
             }
+        }
+        guard !initJs.contains("__ORB_NATIVE_CHROME__ = true") else {
+            fputs("self-test failed: default init script should not force native chrome\n", stderr)
+            exit(1)
+        }
+        let ncInitJs = Self.buildInitScript(port: 19479, token: "0123456789abcdef0123456789abcdef", nativeChrome: true)
+        guard ncInitJs.contains("window.__ORB_NATIVE_CHROME__ = true;") else {
+            fputs("self-test failed: nativeChrome init script missing __ORB_NATIVE_CHROME__\n", stderr)
+            exit(1)
         }
 
         installMainMenu()
@@ -1367,6 +1984,59 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
                 fputs("self-test failed: sendWebViewEditAction(\(sel)) returned false\n", stderr)
                 exit(1)
             }
+        }
+
+        // Verify Hybrid Native Chrome controller row hydration & sidebar toggle headless-safely.
+        let testChrome = OrbNativeChromeController(port: 19479, token: "0123456789abcdef0123456789abcdef", webView: OrbWebView(frame: rect), hostWindow: window, frame: rect)
+        testChrome.applyRowsPayload([
+            ["row_id": "nav:new-agent", "kind": "nav", "depth": 0, "title": "New agent", "target": "new-agent", "selected": false],
+            ["row_id": "mission:m-1", "kind": "mission", "depth": 1, "title": "Verify native chrome", "target": "m:m-1", "selected": true]
+        ])
+        guard testChrome.rows.count == 2, testChrome.sidebarTable.numberOfRows == 2, testChrome.sidebarTable.selectedRow == 1 else {
+            fputs("self-test failed: OrbNativeChromeController applyRowsPayload mismatch\n", stderr)
+            exit(1)
+        }
+        testChrome.applyRowsPayload([
+            ["row_id": "nav:new-agent", "kind": "nav", "depth": 0, "title": "New agent", "target": "new-agent", "selected": true],
+            ["row_id": "mission:m-1", "kind": "mission", "depth": 1, "title": "Verify native chrome", "target": "m:m-1", "selected": false]
+        ])
+        guard testChrome.sidebarTable.numberOfRows == 2, testChrome.sidebarTable.selectedRow == 0 else {
+            fputs("self-test failed: OrbNativeChromeController selection-only diff mismatch\n", stderr)
+            exit(1)
+        }
+        testChrome.applyRowsPayload([
+            ["row_id": "nav:new-agent", "kind": "nav", "depth": 0, "title": "New agent", "target": "new-agent", "selected": false],
+            ["row_id": "mission:m-0", "kind": "mission", "depth": 1, "title": "Inserted row", "target": "m:m-0", "selected": false],
+            ["row_id": "mission:m-1", "kind": "mission", "depth": 1, "title": "Verify native chrome", "target": "m:m-1", "selected": true]
+        ])
+        guard testChrome.sidebarTable.numberOfRows == 3, testChrome.sidebarTable.selectedRow == 2 else {
+            fputs("self-test failed: OrbNativeChromeController incremental insert mismatch\n", stderr)
+            exit(1)
+        }
+        testChrome.applyRowsPayload([
+            ["row_id": "nav:new-agent", "kind": "nav", "depth": 0, "title": "New agent", "target": "new-agent", "selected": false],
+            ["row_id": "mission:m-1", "kind": "mission", "depth": 1, "title": "Verify native chrome", "target": "m:m-1", "selected": true]
+        ])
+        guard testChrome.sidebarTable.numberOfRows == 2, testChrome.sidebarTable.selectedRow == 1 else {
+            fputs("self-test failed: OrbNativeChromeController incremental remove mismatch\n", stderr)
+            exit(1)
+        }
+        guard testChrome.acceptSidebarResponse(reqGen: 1, scope: "scope:a", revision: 50),
+              !testChrome.acceptSidebarResponse(reqGen: 2, scope: "scope:a", revision: 49),
+              testChrome.acceptSidebarResponse(reqGen: 3, scope: "scope:b", revision: 2),
+              !testChrome.acceptSidebarResponse(reqGen: 2, scope: "scope:a", revision: 99) else {
+            fputs("self-test failed: OrbNativeChromeController per-scope revision fencing mismatch\n", stderr)
+            exit(1)
+        }
+        testChrome.setSidebarOpen(false)
+        guard testChrome.sidebarPane.isHidden else {
+            fputs("self-test failed: OrbNativeChromeController setSidebarOpen(false) did not hide sidebar\n", stderr)
+            exit(1)
+        }
+        testChrome.setSidebarOpen(true)
+        guard !testChrome.sidebarPane.isHidden else {
+            fputs("self-test failed: OrbNativeChromeController setSidebarOpen(true) did not unhide sidebar\n", stderr)
+            exit(1)
         }
 
         // Verify loopback port conflict fallback when another process already holds the preferred port.
