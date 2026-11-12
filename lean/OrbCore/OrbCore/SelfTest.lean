@@ -5499,6 +5499,29 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
      (setBody2.splitOn "\"proj-1\"").length < 2 then
     return (← fail s!"Bitwarden disconnect should drop only the token: status={bwSt2Body} settings={setBody2}")
 
+  -- `POST /api/control/missions/:id/status`: archive and reopen a stopped mission; refuse unknown
+  -- statuses, unknown missions and missions with a live run.
+  discard <| execParamQuery store.missionsDb
+    "INSERT INTO missions(id,title,status,backend,working_directory,updated_at) VALUES('m-status-route','Status route','completed','opencode','/tmp','2026-11-12T00:00:00Z');" #[]
+  let (ackSt, ackBody) ← sendJson "POST" "/api/control/missions/m-status-route/status" hsJwt "{\"status\":\"acknowledged\"}"
+  let ackRows ← execParamQuery store.missionsDb "SELECT status FROM missions WHERE id='m-status-route';" #[]
+  let (reopenSt, _) ← sendJson "POST" "/api/control/missions/m-status-route/status" hsJwt "{\"status\":\"paused\"}"
+  let (badSt, _) ← sendJson "POST" "/api/control/missions/m-status-route/status" hsJwt "{\"status\":\"banana\"}"
+  let (missingSt, _) ← sendJson "POST" "/api/control/missions/m-no-such-mission/status" hsJwt "{\"status\":\"acknowledged\"}"
+  let ackStored := match ackRows with
+    | .ok rows => rows.size > 1 && rows[1]! == #["acknowledged"]
+    | .error _ => false
+  if ackSt != 200 || !ackStored || reopenSt != 200 || badSt != 400 || (missingSt != 404 && missingSt != 403) then
+    return (← fail s!"mission status route failed: ack={ackSt}:{ackBody} stored={ackStored} reopen={reopenSt} bad={badSt} missing={missingSt}")
+  -- This store may carry the current `mission_runs` shape or the legacy one; exactly one insert applies.
+  discard <| execParamQuery store.missionsDb
+    "INSERT INTO mission_runs(id,mission_id,generation,execution_state) VALUES('run-status-route','m-status-route',1,'running');" #[]
+  discard <| execParamQuery store.missionsDb
+    "INSERT INTO mission_runs(run_id,mission_id,generation,execution_state,started_at) VALUES('run-status-route','m-status-route',1,'running','2026-11-12T00:00:00Z');" #[]
+  let (liveSt, _) ← sendJson "POST" "/api/control/missions/m-status-route/status" hsJwt "{\"status\":\"acknowledged\"}"
+  if liveSt != 409 then
+    return (← fail s!"status change over a live run must be refused, got {liveSt}")
+
   let (puSt, puBody) ← sendJson "GET" "/api/ai/providers/usage" hsJwt ""
   if puSt != 200 || (puBody.splitOn "\"entries\"").length < 2 || (puBody.splitOn "\"refresh_after_seconds\"").length < 2 then
     return (← fail s!"GET /api/ai/providers/usage failed: {puSt} {puBody}")

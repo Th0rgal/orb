@@ -2726,6 +2726,34 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
 
+  -- Client status change (`POST /api/control/missions/:id/status`): archive (`acknowledged`),
+  -- reopen (`paused`, `awaiting_user`) or mark a stopped mission. Never applied over a live run.
+  if let some params := matchRoutePattern? "/api/control/missions/:id/status" rawTarget then
+    if req.method == "POST" then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid true) then
+        return .ok (mkJson cCode cBody)
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let nextStatus := ((jv.fieldStr? "status").getD "").trimAscii.toString
+      if encodeRollbackStatus nextStatus == 255 then
+        return .ok (mkJson 400 "{\"error\":\"unsupported_status\"}")
+      let nowIso := formatEpochIso8601Utc nowEpochSec
+      match ← setMissionStatusFromClient st.store mid nextStatus nowIso with
+      | .ok changed =>
+        if changed then
+          -- An archived mission must not be woken again by its own reminders.
+          if nextStatus == "acknowledged" then
+            discard <| revokeContinuations st.store mid nowIso true
+          let payload := renderCompact (.obj #[("status", .str nextStatus), ("mission_id", .str mid)])
+          discard <| appendMissionEvent st.store mid "mission_status_changed" payload nowIso
+          publishControlEvent st.broadcastHub? "mission_status_changed" payload (some mid)
+        return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"status\":{jsonEscape nextStatus}}")
+      | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      | .error "mission_running" =>
+        return .ok (mkJson 409 "{\"error\":\"mission_running\",\"message\":\"Stop the mission before changing its status.\"}")
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+
   if let some params := matchRoutePattern? "/api/control/missions/:id/interrupt" rawTarget then
     if req.method == "POST" then
       let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""

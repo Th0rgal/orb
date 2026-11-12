@@ -3102,6 +3102,30 @@ def restoreMissionStatus
       | .error ue => return .error ue
       | .ok _ => return .ok true
 
+/-- Apply a status chosen by a client (archive, reopen, mark finished) to a mission that is not running.
+    Returns `false` when the mission already has that status. A mission with a live run is refused:
+    stopping it is the job of cancel/interrupt, and writing a status over a live run would leave the
+    run without an owner. -/
+def setMissionStatusFromClient
+    (st : CoreStore) (missionId nextStatus updatedAt : String) : IO (Except String Bool) :=
+  withImmediateTx st.missionsDb do
+    let q ← execParamQueryUnlocked st.missionsDb
+      ("SELECT m.status, (SELECT COUNT(*) FROM mission_runs r WHERE r.mission_id=m.id AND " ++
+       "r.execution_state NOT IN ('terminal','completed','failed','aborted')) FROM missions m WHERE m.id=?1;")
+      #[missionId]
+    match q with
+    | .error e => return .error e
+    | .ok rows =>
+      if rows.size ≤ 1 then return .error "mission_not_found"
+      let curStatus := (rows[1]?.bind (·[0]?)).getD ""
+      let liveRuns := ((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0
+      if liveRuns > 0 then return .error "mission_running"
+      if curStatus == nextStatus then return .ok false
+      let upd ← execParamQueryUnlocked st.missionsDb
+        "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1;"
+        #[missionId, nextStatus, updatedAt]
+      return upd.map (fun _ => true)
+
 /-- Arm a `RemoteWait` recovery record (`mission_remote_waits`) when a remote node pauses on
     `usage_limit_wait` or `node_maintenance_wait`, persisting the failed remote job ID and optional
     scheduled-wakeup origin job ID. -/
