@@ -1250,6 +1250,13 @@ private def targetSupportsExplicitCyber (tgt : ProviderTarget) (requestedModel c
   let preservesModel := tgt.modelId.isEmpty || bareModel tgt.modelId == requestedModel
   preservesModel && cyberEntrySupported tgt.provider requestedModel fullUrl tgt.apiKey false false
 
+/-- Settings as returned to clients: no password hash and no Bitwarden token in any of its spellings. -/
+private def redactSettingsSecrets (settings : JVal) : JVal :=
+  let base := (settings.removeField "password_hash").removeField "bws_access_token"
+  match base.field? "bitwarden" with
+  | some bw => base.setField "bitwarden" ((bw.removeField "encrypted_access_token").removeField "access_token")
+  | none => base
+
 /-- Gate `/v1/*` proxy requests against execution-bound mission Cyber selections (`#1497`)
     and per-account cooldowns (`#1612`). -/
 private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPath : String)
@@ -5635,8 +5642,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       return .ok (mkJson 403 "{\"error\":\"admin_required\"}")
     if req.method == "GET" then
       let rawSettings ← readSettingsJson st.store.rootDir
-      let safeSettings := (rawSettings.removeField "password_hash").removeField "bws_access_token"
-      return .ok (mkJson 200 (renderCompact safeSettings))
+      return .ok (mkJson 200 (renderCompact (redactSettingsSecrets rawSettings)))
     else
       let .ok patchJv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
@@ -5647,13 +5653,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           Id.run do
             let mut acc := JVal.obj basePairs
             for (k, v) in patchPairs do
-              if k != "password_hash" then
+              -- `bitwarden` is owned by `/api/bitwarden/*`; a redacted copy sent back here must not erase the token.
+              if k != "password_hash" && k != "bitwarden" && k != "bws_access_token" then
                 acc := acc.setField k v
             return acc
         | _, _ => curSettings
       if let .error e ← writeSettingsJson st.store.rootDir merged then
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
-      return .ok (mkJson 200 (renderCompact ((merged.removeField "password_hash").removeField "bws_access_token")))
+      return .ok (mkJson 200 (renderCompact (redactSettingsSecrets merged)))
 
   if cleanPath == "/api/proxy-keys" || cleanPath.startsWith "/api/proxy-keys/" then
     let isAdm := caller.isLegacyUnscoped || caller.role == "admin"

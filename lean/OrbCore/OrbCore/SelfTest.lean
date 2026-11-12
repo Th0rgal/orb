@@ -5364,6 +5364,24 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
      (roBody.splitOn "\"pools\"").length < 2 || (roBody.splitOn "\"links\"").length < 2 then
     return (← fail s!"GET /api/resources/overview failed: {roSt} {roBody}")
 
+  -- The Bitwarden token lives in `settings.bitwarden.encrypted_access_token`, is never returned by
+  -- `/api/settings`, and is not erased when a client writes its redacted settings copy back.
+  let (bwPutSt, _) ← sendJson "PUT" "/api/bitwarden/config" hsJwt "{\"access_token\":\"0.test-token\"}"
+  let (bwDaSt, _) ← sendJson "PUT" "/api/bitwarden/default-access/misc" hsJwt "{\"bitwarden_projects\":[\"proj-1\"]}"
+  let (setSt, setBody) ← sendJson "GET" "/api/settings" hsJwt ""
+  let (setPutSt, _) ← sendJson "PUT" "/api/settings" hsJwt "{\"bitwarden\":{},\"auto_cleanup_days\":7}"
+  let (bwStSt, bwStBody) ← sendJson "GET" "/api/bitwarden/status" hsJwt ""
+  if bwPutSt != 200 || bwDaSt != 200 || setSt != 200 || setPutSt != 200 || bwStSt != 200 ||
+     (setBody.splitOn "access_token").length != 1 || (setBody.splitOn "\"default_access\"").length < 2 ||
+     (bwStBody.splitOn "\"configured\":true").length < 2 then
+    return (← fail s!"Bitwarden settings contract failed: put={bwPutSt} da={bwDaSt} settings={setSt}:{setBody} status={bwStSt}:{bwStBody}")
+  let (bwDelSt, _) ← sendJson "DELETE" "/api/bitwarden/config" hsJwt ""
+  let (bwSt2St, bwSt2Body) ← sendJson "GET" "/api/bitwarden/status" hsJwt ""
+  let (_, setBody2) ← sendJson "GET" "/api/settings" hsJwt ""
+  if bwDelSt != 200 || bwSt2St != 200 || (bwSt2Body.splitOn "\"configured\":false").length < 2 ||
+     (setBody2.splitOn "\"proj-1\"").length < 2 then
+    return (← fail s!"Bitwarden disconnect should drop only the token: status={bwSt2Body} settings={setBody2}")
+
   let (puSt, puBody) ← sendJson "GET" "/api/ai/providers/usage" hsJwt ""
   if puSt != 200 || (puBody.splitOn "\"entries\"").length < 2 || (puBody.splitOn "\"refresh_after_seconds\"").length < 2 then
     return (← fail s!"GET /api/ai/providers/usage failed: {puSt} {puBody}")

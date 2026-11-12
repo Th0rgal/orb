@@ -129,7 +129,9 @@ private def resolveBwsToken? (workingDir dataRoot : String) : IO (Option String)
   let key32? ← loadPrivateKeyBytes? workingDir dataRoot
   let settings ← readSettingsJson dataRoot
   let bwObj := (settings.field? "bitwarden").getD (.obj #[])
-  if let some rawTok := (bwObj.fieldStr? "access_token").orElse (fun _ => settings.fieldStr? "bws_access_token") then
+  -- `encrypted_access_token` is the stored field; the other two names are read for older settings files.
+  if let some rawTok := ((bwObj.fieldStr? "encrypted_access_token").orElse (fun _ => bwObj.fieldStr? "access_token")).orElse
+      (fun _ => settings.fieldStr? "bws_access_token") then
     if let .ok dec ← decryptEnvValue key32? rawTok then
       let clean := dec.trimAscii.toString
       if !clean.isEmpty then return some clean
@@ -167,6 +169,18 @@ def listBitwardenProjectsAndSecrets (workingDir dataRoot : String) : IO (Except 
   -- Redact `value` from metadata listing!
   let redactedSecs := secsJv.map (fun s => s.removeField "value")
   return .ok (projsJv, redactedSecs)
+
+/-- The broker document with `default_access` taken from `settings.bitwarden.default_access`, where the
+    Bitwarden settings page stores it. Entries only present in `secret_broker.json` are kept. -/
+def readSecretBrokerWithDefaults (dataRoot : String) : IO JVal := do
+  let broker ← readDataJsonObj dataRoot "secret_broker.json"
+  let settings ← readSettingsJson dataRoot
+  match (settings.field? "bitwarden").bind (·.field? "default_access") with
+  | some (.obj pairs) =>
+    let merged := pairs.foldl (fun acc (slug, projs) => acc.setField slug projs)
+      ((broker.field? "default_access").getD (.obj #[]))
+    return broker.setField "default_access" merged
+  | _ => return broker
 
 /-! ## Cross-Mission Read Access Grants (`.sandboxed-sh/mission_access.json`) -/
 
@@ -264,7 +278,7 @@ private def missionHasBwProjectAccess
 def mcpSecretList
     (workingDir dataRoot missionId projectSlug : String) (nowEpochSec : UInt64) : IO JVal := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
-  let broker ← readDataJsonObj dataRoot "secret_broker.json"
+  let broker ← readSecretBrokerWithDefaults dataRoot
   match ← listBitwardenProjectsAndSecrets workingDir dataRoot with
   | .error e =>
     return .obj #[("configured", .bool false), ("error", .str e), ("projects", .arr #[]), ("secrets", .arr #[])]
@@ -287,7 +301,7 @@ def mcpSecretGet
     (workingDir dataRoot missionId missionWorkDir projectSlug secretName reason : String)
     (nowEpochSec : UInt64) : IO JVal := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
-  let broker ← readDataJsonObj dataRoot "secret_broker.json"
+  let broker ← readSecretBrokerWithDefaults dataRoot
   let some bwsTok ← resolveBwsToken? workingDir dataRoot
     | return .obj #[("status", .str "error"), ("error", .str "Bitwarden Secrets Manager is not configured")]
   let (projs, secs) ← match ← listBitwardenProjectsAndSecrets workingDir dataRoot with
@@ -1080,13 +1094,17 @@ def dispatchSecretAndApprovalRoutes?
       let .ok enc ← encryptEnvValue k32 rawTok
         | return okJson 500 "{\"error\":\"encrypt_failed\"}"
       let settings ← readSettingsJson dataRoot
-      let bwObj := ((settings.field? "bitwarden").getD (.obj #[])).setField "access_token" (.str enc)
+      let bwObj := (((settings.field? "bitwarden").getD (.obj #[])).removeField "access_token").setField
+        "encrypted_access_token" (.str enc)
       if let .error e ← writeSettingsJson dataRoot (settings.setField "bitwarden" bwObj) then
         return okJson 500 s!"\{\"error\":{jsonEscape e}}"
       return okJson 200 "{\"ok\":true,\"configured\":true}"
     if method == "DELETE" && cleanPath == "/api/bitwarden/config" then
+      -- Disconnecting removes the token only; default project access stays for the next token.
       let settings ← readSettingsJson dataRoot
-      discard <| writeSettingsJson dataRoot (settings.removeField "bitwarden")
+      let bwObj := (((settings.field? "bitwarden").getD (.obj #[])).removeField "access_token").removeField
+        "encrypted_access_token"
+      discard <| writeSettingsJson dataRoot ((settings.setField "bitwarden" bwObj).removeField "bws_access_token")
       return okJson 200 "{\"ok\":true,\"configured\":false}"
     if method == "GET" && cleanPath == "/api/bitwarden/projects" then
       match ← listBitwardenProjectsAndSecrets workingDir dataRoot with
@@ -1150,9 +1168,11 @@ def dispatchSecretAndApprovalRoutes?
       let .ok jv := OrbBin.Json.parseBytes bodyBytes
         | return okJson 400 "{\"error\":\"invalid_json\"}"
       let bwProjs := ((jv.fieldArr? "bitwarden_projects").orElse (fun _ => jv.fieldArr? "projects")).getD #[]
-      let broker ← readDataJsonObj dataRoot "secret_broker.json"
-      let da := ((broker.field? "default_access").getD (.obj #[])).setField slug (.arr bwProjs)
-      discard <| writeDataJsonObj dataRoot "secret_broker.json" (broker.setField "default_access" da)
+      let settings ← readSettingsJson dataRoot
+      let bwObj := (settings.field? "bitwarden").getD (.obj #[])
+      let da := ((bwObj.field? "default_access").getD (.obj #[])).setField slug (.arr bwProjs)
+      if let .error e ← writeSettingsJson dataRoot (settings.setField "bitwarden" (bwObj.setField "default_access" da)) then
+        return okJson 500 s!"\{\"error\":{jsonEscape e}}"
       return okJson 200 (renderCompact (.obj #[("ok", .bool true), ("project", .str slug), ("bitwarden_projects", .arr bwProjs)]))
 
   -- 3. Legacy `/api/secrets*`
