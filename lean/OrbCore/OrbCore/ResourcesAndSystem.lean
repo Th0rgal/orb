@@ -205,235 +205,518 @@ private def readHostCpuAndRam : IO (Nat × String × String × String) := do
     s!"{tenths / 10}.{tenths % 10}"
   return (vcpuTotal, load1, fmtGb usedKb, fmtGb memTotalKb)
 
+/-- Fixed-point JSON number: renders `scaled / 10^decimals` (`decimals ≥ 1`). -/
+private def numFixed (scaled decimals : Nat) : JVal :=
+  let base := 10 ^ decimals
+  let frac := toString (scaled % base)
+  .num s!"{scaled / base}.{String.ofList (List.replicate (decimals - frac.length) '0')}{frac}"
+
+/-- Parses a non-negative decimal such as `"4.08"` into thousandths (`4080`). -/
+private def parseDecimalMilli (raw : String) : Nat :=
+  match raw.trimAscii.toString.splitOn "." with
+  | [whole] => (whole.toNat?.getD 0) * 1000
+  | whole :: frac :: _ =>
+    let f3 := ((frac ++ "000").take 3).toString
+    (whole.toNat?.getD 0) * 1000 + (f3.toNat?.getD 0)
+  | [] => 0
+
+/-- Per-id token and cost totals, one slot per time bucket. -/
+private structure ResSeries where
+  id    : String
+  tok   : Array Nat
+  cents : Array Nat
+
+private def bumpSeries (accs : Array ResSeries) (id : String) (nb bi tok cents : Nat) : Array ResSeries :=
+  match accs.findIdx? (·.id == id) with
+  | some i =>
+    accs.modify i fun a => { a with tok := a.tok.modify bi (· + tok), cents := a.cents.modify bi (· + cents) }
+  | none =>
+    let z : Array Nat := Array.replicate nb 0
+    accs.push { id, tok := z.modify bi (· + tok), cents := z.modify bi (· + cents) }
+
+private def sumNat (xs : Array Nat) : Nat := xs.foldl (· + ·) 0
+
+/-- Billions of tokens per hour, 9 decimals. -/
+private def bTokPerHour (tok secs : Nat) : JVal := numFixed (tok * 3600 / Nat.max 1 secs) 9
+
+/-- US dollars per hour from cents, 6 decimals. -/
+private def usdPerHour (cents secs : Nat) : JVal := numFixed (cents * 36000000 / Nat.max 1 secs) 6
+
+/-- Per-bucket rates; the last bucket is still filling, so it is divided by its elapsed time. -/
+private def rateSeries (vals : Array Nat) (bucketSecs lastSecs : Nat) (rate : Nat → Nat → JVal) : JVal :=
+  .arr ((Array.range vals.size).map fun i =>
+    rate vals[i]! (if i + 1 == vals.size then lastSecs else bucketSecs))
+
+private def zeroSeries (nb : Nat) : JVal := .arr (Array.replicate nb (.num "0.0"))
+
+/-- `(range id, window minutes, bucket minutes)`; unknown ranges fall back to `6h`. -/
+private def resourcesRangeSpec (raw : String) : String × Nat × Nat :=
+  match raw with
+  | "30m" => ("30m", 30, 1)
+  | "1h" => ("1h", 60, 1)
+  | "24h" => ("24h", 1440, 20)
+  | "7d" => ("7d", 10080, 120)
+  | _ => ("6h", 360, 5)
+
+private def inferencePoolLabel (id : String) : String :=
+  match id with
+  | "anthropic" => "Anthropic"
+  | "openai" => "OpenAI"
+  | "google" => "Google"
+  | "gemini" => "Google Gemini"
+  | "xai" => "xAI"
+  | "zai" => "Z.AI"
+  | "openrouter" => "OpenRouter"
+  | "unknown" => "Unattributed"
+  | other => other
+
+private def managedClassLabel (provider size : String) : String :=
+  let prov := match provider with
+    | "boat" => "Boat"
+    | "boost" => "boost.ci"
+    | "hetzner" => "Hetzner"
+    | "vastai" => "Vast.ai"
+    | "scaleway" => "Scaleway"
+    | "colab" => "Google Colab"
+    | "" => "Cloud"
+    | other => other
+  s!"{prov} · {if size.isEmpty then "vm" else size}"
+
+/-- Nominal vCPU count for a managed VM size, in thousandths. -/
+private def managedSizeVcpuMilli (size : String) : Nat :=
+  match size with
+  | "small" => 2000
+  | "medium" => 4000
+  | "large" => 8000
+  | "xlarge" => 16000
+  | _ => 4000
+
+/-- vCPU assumed for a static node whose capacity Core has not sampled, in thousandths. -/
+private def staticNodeVcpuMilli : Nat := 8000
+
+private def externalTrafficId : String := "__external__"
+
+private def tokenSumSql : String := "input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens"
+
+/-- Epoch seconds of a mission timestamp column that may hold ISO-8601 text or a bare epoch. -/
+private def epochOfColumnSql (col : String) : String :=
+  s!"CASE WHEN {col} GLOB '[0-9]*' AND {col} NOT LIKE '%-%' THEN CAST({col} AS INTEGER) ELSE CAST(strftime('%s',{col}) AS INTEGER) END"
+
+/-- Walks `parent_mission_id` to the root mission; `none` when the mission row does not exist. -/
+private def resolveRootMission (store : CoreStore) (mid : String) : IO (Option String) := do
+  let mut cur := mid
+  for hop in [0:8] do
+    match ← execParamQuery store.missionsDb
+        "SELECT COALESCE(parent_mission_id,'') FROM missions WHERE id=?1 LIMIT 1;" #[cur] with
+    | .ok rs =>
+      if rs.size ≤ 1 then return (if hop == 0 then none else some cur)
+      let parent := (rs[1]![0]?).getD ""
+      if parent.isEmpty || parent == cur then return some cur
+      cur := parent
+    | .error _ => return none
+  return some cur
+
+private def resourceBarState (status : String) : String :=
+  match status with
+  | "blocked" | "failed" => "capped"
+  | "completed" | "acknowledged" | "done" => "done"
+  | "active" | "waiting_background" | "running" => "active"
+  | "cancelled" | "interrupted" => "cancelled"
+  | _ => "pending"
+
+private def missionStatusIsLive (status : String) : Bool :=
+  status == "active" || status == "running" || status == "pending" || status == "queued" ||
+  status == "waiting_background" || status == "blocked"
+
+/-- `GET /api/resources/overview`: the `ResourcesOverviewResponse` contract shared by desktop, iOS and Android.
+    Inference figures are aggregated from `proxy_usage`. Core keeps no compute history, so compute series
+    carry only the live sample in their last bucket. -/
 def buildResourcesOverviewJson
     (store : CoreStore)
     (managedStore? : Option ManagedComputeStore)
     (qMap : Array (String × String)) : IO JVal := do
-  let nowSec ← nowEpoch
-  let nowIso := formatEpochIso8601Utc nowSec
-  let range := ((qParam? qMap "range").getD "6h").trimAscii.toString
-  let (winSecs, bucketSecs) : UInt64 × Nat :=
-    match range with
-    | "1h" => (3600, 60)
-    | "24h" => (86400, 900)
-    | "7d" => (604800, 3600)
-    | _ => (21600, 300)
-  let sinceSec := if nowSec > winSecs then nowSec - winSecs else 0
-  let sinceIso := formatEpochIso8601Utc sinceSec
-  let (vcpuTotal, load1Str, ramUsedGb, ramTotalGb) ← readHostCpuAndRam
+  let nowSec := (← nowEpoch).toNat
+  let (rangeId, minutes, step) := resourcesRangeSpec ((qParam? qMap "range").getD "6h").trimAscii.toString
+  let nb := Nat.max 2 (minutes / step)
+  let firstMin := nowSec / 60 - (nb - 1) * step
+  let bucketSecs := step * 60
+  let lastStartSec := (firstMin + (nb - 1) * step) * 60
+  let lastSecs := Nat.min bucketSecs (Nat.max 60 (nowSec - lastStartSec))
+  let windowSecs := Nat.max 1800 (minutes * 60)
+  let sinceIso := formatEpochIso8601Utc (firstMin * 60).toUInt64
 
-  -- Active / queued / stalled missions
-  let mut activeCnt : Nat := 0
-  let mut queuedCnt : Nat := 0
-  let mut stalledCnt : Nat := 0
-  let mut activeIds : Array JVal := #[]
-  let mut missionCards : Array JVal := #[]
-  if let .ok mrs ← execParamQuery store.missionsDb
-      "SELECT id, title, status, COALESCE(total_cost_cents,0), COALESCE(created_at,updated_at) FROM missions WHERE status IN ('active','running','queued','blocked') ORDER BY updated_at DESC LIMIT 50;"
-      #[] then
-    for i in [1:mrs.size] do
-      let r := mrs[i]!
-      let mid := (r[0]?).getD ""
-      let title := (r[1]?).getD ""
-      let st := (r[2]?).getD "active"
-      let costCents := ((r[3]?).bind String.toNat?).getD 0
-      if st == "queued" then queuedCnt := queuedCnt + 1
-      else if st == "blocked" then stalledCnt := stalledCnt + 1
-      else
-        activeCnt := activeCnt + 1
-        activeIds := activeIds.push (.str mid)
-      missionCards := missionCards.push (.obj #[
-        ("root_mission_id", .str mid),
-        ("title", .str title),
-        ("status", .str st),
-        ("workers_running", JVal.nat (if st == "active" || st == "running" then 1 else 0)),
-        ("workers_queued", JVal.nat (if st == "queued" then 1 else 0)),
-        ("workers_completed", JVal.nat 0),
-        ("workers_failed", JVal.nat 0),
-        ("subagents_running", JVal.nat 0),
-        ("wall_elapsed_secs", JVal.nat 0),
-        ("critical_path_secs", JVal.nat 0),
-        ("eta_remaining_secs", .null),
-        ("vcpu_allocated", .num (if st == "active" || st == "running" then "2.0" else "0.0")),
-        ("total_tokens", JVal.nat 0),
-        ("inference_cents", JVal.nat costCents),
-        ("compute_cents", JVal.nat 0),
-        ("bottleneck", .null)
-      ])
+  -- Inference: tokens and cost per (bucket, provider, mission).
+  let mut pools : Array ResSeries := #[]
+  let mut missionSeries : Array ResSeries := #[]
+  let mut infLinks : Array (String × String × Nat × Nat) := #[]
+  let mut rootCache : Array (String × Option String) := #[]
+  if let .ok rows ← execParamQuery store.missionsDb
+      (s!"SELECT (CAST(strftime('%s',timestamp) AS INTEGER)/60 - CAST(?1 AS INTEGER))/CAST(?2 AS INTEGER), " ++
+       s!"COALESCE(NULLIF(provider,''),'unknown'), COALESCE(mission_id,''), SUM({tokenSumSql}), SUM(cost_cents) " ++
+       "FROM proxy_usage WHERE timestamp >= ?3 GROUP BY 1,2,3;")
+      #[toString firstMin, toString step, sinceIso] then
+    for i in [1:rows.size] do
+      let r := rows[i]!
+      let some biRaw := (r[0]?).bind String.toNat? | continue
+      let bi := Nat.min (nb - 1) biRaw
+      let pool := (r[1]?).getD "unknown"
+      let mid := (r[2]?).getD ""
+      let tok := ((r[3]?).bind String.toNat?).getD 0
+      let cents := ((r[4]?).bind String.toNat?).getD 0
+      if tok == 0 && cents == 0 then continue
+      let mut target := externalTrafficId
+      if !mid.isEmpty then
+        match rootCache.find? (·.1 == mid) with
+        | some hit => target := hit.2.getD externalTrafficId
+        | none =>
+          let root? ← resolveRootMission store mid
+          rootCache := rootCache.push (mid, root?)
+          target := root?.getD externalTrafficId
+      pools := bumpSeries pools pool nb bi tok cents
+      missionSeries := bumpSeries missionSeries target nb bi tok cents
+      match infLinks.findIdx? (fun l => l.1 == pool && l.2.1 == target) with
+      | some li => infLinks := infLinks.modify li fun (p, m, t, c) => (p, m, t + tok, c + cents)
+      | none => infLinks := infLinks.push (pool, target, tok, cents)
 
-  -- Window inference stats from `proxy_usage` (indexed on `timestamp`)
-  let mut winReqs : Nat := 0
-  let mut winToks : Nat := 0
-  let mut winCostCents : Nat := 0
-  if let .ok urs ← execParamQuery store.missionsDb
-      "SELECT COUNT(*), COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens),0), COALESCE(SUM(cost_cents),0) FROM proxy_usage WHERE timestamp >= ?1;"
-      #[sinceIso] then
-    if urs.size > 1 then
-      winReqs := ((urs[1]![0]?).bind String.toNat?).getD 0
-      winToks := ((urs[1]![1]?).bind String.toNat?).getD 0
-      winCostCents := ((urs[1]![2]?).bind String.toNat?).getD 0
-
-  let winMins := Nat.max 1 (winSecs.toNat / 60)
-  let tokPerMin := winToks / winMins
-  let reqPerMin := winReqs / winMins
-  let winHours := Nat.max 1 (winSecs.toNat / 3600)
-  let infBurnPerHr := winCostCents / winHours
-
-  -- Machines array (`orb-core` host + static remote nodes + managed VMs)
-  let mut machines : Array JVal := #[
-    .obj #[
-      ("id", .str "orb-core"),
-      ("name", .str "orb-core"),
-      ("machine_class", .str "host"),
-      ("provider", .str "local"),
-      ("status", .str "online"),
-      ("busy_slots", JVal.nat activeCnt),
-      ("max_slots", JVal.nat 8),
-      ("vcpu_total", JVal.nat vcpuTotal),
-      ("cpu_pct", .num "10.0"),
-      ("ram_used_gb", .num ramUsedGb),
-      ("ram_total_gb", .num ramTotalGb),
-      ("hourly_cents", JVal.nat 0),
-      ("idle_or_ttl_secs", .null),
-      ("active_missions", .arr activeIds)
-    ]
-  ]
+  -- Compute: live capacity per machine class as `(id, label, sublabel, totalMilli, activeMilli)`.
+  let (hostVcpu, load1Str, _, _) ← readHostCpuAndRam
+  let hostTotalMilli := hostVcpu * 1000
+  let mut sources : Array (String × String × String × Nat × Nat) :=
+    #[("core:host", "Local host", "local", hostTotalMilli, Nat.min hostTotalMilli (parseDecimalMilli load1Str))]
   let (_, staticNodes) ← loadStaticRemoteNodes
-  for sn in staticNodes do
-    machines := machines.push (.obj #[
-      ("id", .str sn.id),
-      ("name", .str sn.id),
-      ("machine_class", .str "worker_node"),
-      ("provider", .str "static"),
-      ("status", .str "online"),
-      ("busy_slots", JVal.nat 0),
-      ("max_slots", JVal.nat 4),
-      ("vcpu_total", JVal.nat 16),
-      ("cpu_pct", .num "0.0"),
-      ("ram_used_gb", .num "0.0"),
-      ("ram_total_gb", .num "32.0"),
-      ("hourly_cents", JVal.nat 0),
-      ("idle_or_ttl_secs", .null),
-      ("active_missions", .arr #[])
-    ])
+  if !staticNodes.isEmpty then
+    let n := staticNodes.size
+    sources := sources.push ("static:fleet", "Static fleet", s!"{n} host{if n == 1 then "" else "s"}", n * staticNodeVcpuMilli, 0)
+  let mut classCounts : Array (String × Nat) := #[]
+  let mut compLinks : Array (String × String × Nat) := #[]
   if let some mc := managedStore? then
     if let .ok mf ← loadManagedFleet mc true true 0 0 8 then
       for vm in mf.machines do
-        if vm.status != "destroyed" then
-          machines := machines.push (.obj #[
-            ("id", .str vm.id),
-            ("name", .str (if vm.sandboxName.isEmpty then vm.id else vm.sandboxName)),
-            ("machine_class", .str "managed_vm"),
-            ("provider", .str vm.provider),
-            ("status", .str (if vm.status == "ready" then "online" else "provisioning")),
-            ("busy_slots", JVal.nat 0),
-            ("max_slots", JVal.nat 4),
-            ("vcpu_total", JVal.nat 8),
-            ("cpu_pct", .num "0.0"),
-            ("ram_used_gb", .num "0.0"),
-            ("ram_total_gb", .num "16.0"),
-            ("hourly_cents", JVal.uint64 vm.spentCents),
-            ("idle_or_ttl_secs", .null),
-            ("active_missions", .arr (if vm.ownerMission.isEmpty then #[] else #[.str vm.ownerMission]))
-          ])
+        if vm.status == "destroyed" then continue
+        let classId := s!"{vm.provider}:{if vm.size.isEmpty then "vm" else vm.size}"
+        let vcpu := managedSizeVcpuMilli vm.size
+        let mut leased := 0
+        if !vm.ownerMission.isEmpty then
+          if let some root ← resolveRootMission store vm.ownerMission then
+            leased := vcpu
+            match compLinks.findIdx? (fun l => l.1 == classId && l.2.1 == root) with
+            | some li => compLinks := compLinks.modify li fun (c, m, v) => (c, m, v + vcpu)
+            | none => compLinks := compLinks.push (classId, root, vcpu)
+        match classCounts.findIdx? (·.1 == classId) with
+        | some ci => classCounts := classCounts.modify ci fun (c, k) => (c, k + 1)
+        | none => classCounts := classCounts.push (classId, 1)
+        match sources.findIdx? (·.1 == classId) with
+        | some si => sources := sources.modify si fun (i, l, s, t, a) => (i, l, s, t + vcpu, a + leased)
+        | none => sources := sources.push (classId, managedClassLabel vm.provider vm.size, "", vcpu, leased)
+  let mut sourceVals : Array JVal := #[]
+  let mut totalMilli := 0
+  let mut activeMilli := 0
+  for (id, label, sub, total, active) in sources do
+    let sublabel := match classCounts.find? (·.1 == id) with
+      | some (_, k) => s!"{k} VM{if k == 1 then "" else "s"}"
+      | none => sub
+    totalMilli := totalMilli + total
+    activeMilli := activeMilli + active
+    sourceVals := sourceVals.push (.obj #[
+      ("id", .str id), ("label", .str label), ("sublabel", .str sublabel),
+      ("total_vcpu", numFixed total 3), ("active_vcpu", numFixed active 3),
+      ("idle_leased_vcpu", .num "0.0"), ("est_usd_per_h", .num "0.0"), ("health", .str "ok"),
+      ("series_vcpu", .arr ((Array.replicate (nb - 1) (.num "0.0")).push (numFixed active 3))),
+      ("series_usd_per_h", zeroSeries nb)
+    ])
 
-  let vcpuAllocStr := s!"{activeCnt * 2}.0"
+  -- Inference pools, busiest first.
+  let poolsSorted := pools.qsort fun a b => sumNat a.tok > sumNat b.tok
+  let poolVals := poolsSorted.map fun p =>
+    .obj #[
+      ("id", .str p.id), ("label", .str (inferencePoolLabel p.id)), ("sublabel", .str "metered"),
+      ("provider", .str ((p.id.splitOn ":").headD p.id)),
+      ("quota_pct_remaining", .null), ("reset_at", .null),
+      ("current_b_tok_per_h", bTokPerHour (sumNat p.tok) windowSecs),
+      ("est_usd_per_h", usdPerHour (sumNat p.cents) windowSecs),
+      ("health", .str "ok"),
+      ("series_b_tok_per_h", rateSeries p.tok bucketSecs lastSecs bTokPerHour),
+      ("series_usd_per_h", rateSeries p.cents bucketSecs lastSecs usdPerHour)
+    ]
+  let winTok := pools.foldl (fun acc p => acc + sumNat p.tok) 0
+  let winCents := pools.foldl (fun acc p => acc + sumNat p.cents) 0
+
+  -- Missions: every root with usage or a leased VM in the window, plus live roots.
+  let mut rootIds : Array String := #[]
+  for s in missionSeries do
+    if s.id != externalTrafficId && !rootIds.contains s.id then rootIds := rootIds.push s.id
+  for (_, root, _) in compLinks do
+    if !rootIds.contains root then rootIds := rootIds.push root
+  if let .ok lrs ← execParamQuery store.missionsDb
+      ("SELECT id FROM missions WHERE status IN ('active','running','pending','queued','waiting_background','blocked') " ++
+       "AND COALESCE(parent_mission_id,'')='' ORDER BY updated_at DESC LIMIT 50;") #[] then
+    for i in [1:lrs.size] do
+      let id := (lrs[i]![0]?).getD ""
+      if !id.isEmpty && !rootIds.contains id then rootIds := rootIds.push id
+  let mut cards : Array (Nat × JVal) := #[]
+  for rootId in rootIds do
+    let .ok mrs ← execParamQuery store.missionsDb
+        "SELECT title, COALESCE(project,''), status FROM missions WHERE id=?1 LIMIT 1;" #[rootId] | continue
+    if mrs.size ≤ 1 then continue
+    let title := (mrs[1]![0]?).getD ""
+    let project := (mrs[1]![1]?).getD ""
+    let status := (mrs[1]![2]?).getD ""
+    let mut subTotal := 0
+    let mut subRunning := 0
+    if let .ok srs ← execParamQuery store.missionsDb
+        ("SELECT COUNT(*), COALESCE(SUM(CASE WHEN status IN ('active','running','waiting_background') THEN 1 ELSE 0 END),0) " ++
+         "FROM missions WHERE parent_mission_id=?1;") #[rootId] then
+      if srs.size > 1 then
+        subTotal := ((srs[1]![0]?).bind String.toNat?).getD 0
+        subRunning := ((srs[1]![1]?).bind String.toNat?).getD 0
+    let series := (missionSeries.find? (·.id == rootId)).getD
+      { id := rootId, tok := Array.replicate nb 0, cents := Array.replicate nb 0 }
+    let vcpuMilli := compLinks.foldl (fun acc (_, m, v) => if m == rootId then acc + v else acc) 0
+    let tok := sumNat series.tok
+    if tok == 0 && sumNat series.cents == 0 && vcpuMilli == 0 && !missionStatusIsLive status then continue
+    cards := cards.push (tok + vcpuMilli, .obj #[
+      ("id", .str rootId), ("title", .str title),
+      ("project", if project.isEmpty then .null else .str project),
+      ("status", .str status), ("stall_kind", .null),
+      ("subagent_running", JVal.nat subRunning), ("subagent_total", JVal.nat subTotal),
+      ("vcpu", numFixed vcpuMilli 3), ("idle_vcpu", .num "0.0"), ("compute_usd_per_h", .num "0.0"),
+      ("b_tok_per_h", bTokPerHour tok windowSecs),
+      ("inference_usd_per_h", usdPerHour (sumNat series.cents) windowSecs),
+      ("eta_remaining_secs", .null),
+      ("series_vcpu", .arr ((Array.replicate (nb - 1) (.num "0.0")).push (numFixed vcpuMilli 3))),
+      ("series_compute_usd_per_h", zeroSeries nb),
+      ("series_b_tok_per_h", rateSeries series.tok bucketSecs lastSecs bTokPerHour),
+      ("series_inference_usd_per_h", rateSeries series.cents bucketSecs lastSecs usdPerHour)
+    ])
+  if let some ext := missionSeries.find? (·.id == externalTrafficId) then
+    cards := cards.push (sumNat ext.tok, .obj #[
+      ("id", .str externalTrafficId), ("title", .str "API & external tools"),
+      ("project", .null), ("status", .str "active"), ("stall_kind", .null),
+      ("subagent_running", JVal.nat 0), ("subagent_total", JVal.nat 0),
+      ("vcpu", .num "0.0"), ("idle_vcpu", .num "0.0"), ("compute_usd_per_h", .num "0.0"),
+      ("b_tok_per_h", bTokPerHour (sumNat ext.tok) windowSecs),
+      ("inference_usd_per_h", usdPerHour (sumNat ext.cents) windowSecs),
+      ("eta_remaining_secs", .null),
+      ("series_vcpu", zeroSeries nb), ("series_compute_usd_per_h", zeroSeries nb),
+      ("series_b_tok_per_h", rateSeries ext.tok bucketSecs lastSecs bTokPerHour),
+      ("series_inference_usd_per_h", rateSeries ext.cents bucketSecs lastSecs usdPerHour)
+    ])
+  let shownIds := cards.map fun (_, c) => (c.fieldStr? "id").getD ""
+  let missionVals := (cards.qsort fun a b => a.1 > b.1).map (·.2)
+
+  -- Links only reference missions that are listed.
+  let mut linkVals : Array JVal := #[]
+  for (classId, root, vcpu) in compLinks do
+    if shownIds.contains root then
+      linkVals := linkVals.push (.obj #[
+        ("kind", .str "compute"), ("source_id", .str classId), ("mission_id", .str root),
+        ("value", numFixed vcpu 3), ("est_usd_per_h", .num "0.0"), ("degraded", .bool false)])
+  for (pool, target, tok, cents) in infLinks do
+    if shownIds.contains target then
+      linkVals := linkVals.push (.obj #[
+        ("kind", .str "inference"), ("source_id", .str pool), ("mission_id", .str target),
+        ("value", bTokPerHour tok windowSecs), ("est_usd_per_h", usdPerHour cents windowSecs),
+        ("degraded", .bool false)])
+
   return .obj #[
-    ("generated_at", .str nowIso),
-    ("range", .str range),
+    ("as_of", .str (formatEpochIso8601Utc nowSec.toUInt64)),
+    ("range", .str rangeId),
     ("bucket_seconds", JVal.nat bucketSecs),
-    ("summary", .obj #[
-      ("active_missions", JVal.nat activeCnt),
-      ("running_workers", JVal.nat activeCnt),
-      ("queued_missions", JVal.nat queuedCnt),
-      ("stalled_missions", JVal.nat stalledCnt),
-      ("vcpu_busy", .num load1Str),
-      ("vcpu_allocated", .num vcpuAllocStr),
-      ("vcpu_total", JVal.nat vcpuTotal),
-      ("ram_used_gb", .num ramUsedGb),
-      ("ram_total_gb", .num ramTotalGb),
-      ("gpu_busy_pct", .null),
-      ("tokens_per_min", JVal.nat tokPerMin),
-      ("requests_per_min", JVal.nat reqPerMin),
-      ("rate_limit_429_count", JVal.nat 0),
-      ("tightest_pool", .null),
-      ("compute_burn_cents_per_hour", JVal.nat 0),
-      ("inference_burn_cents_per_hour", JVal.nat infBurnPerHr),
-      ("window_compute_cents", JVal.nat 0),
-      ("window_inference_cents", JVal.nat winCostCents)
-    ]),
-    ("compute_series", .arr #[.obj #[
-      ("ts", JVal.uint64 nowSec),
-      ("vcpu_busy", .num load1Str),
-      ("vcpu_allocated", .num vcpuAllocStr),
-      ("ram_gb_allocated", .num ramUsedGb),
-      ("by_class", .obj #[("local", .num load1Str)])
-    ]]),
-    ("inference_series", .arr #[.obj #[
-      ("ts", JVal.uint64 nowSec),
-      ("total_tokens", JVal.nat winToks),
-      ("billable_tokens", JVal.nat winToks),
-      ("requests", JVal.nat winReqs),
-      ("rate_limit_429s", JVal.nat 0),
-      ("by_pool", .obj #[])
-    ]]),
-    ("pools", .arr #[]),
-    ("machines", .arr machines),
-    ("missions", .arr missionCards),
-    ("bottlenecks", .arr #[])
+    ("timestamps_ms", .arr ((Array.range nb).map fun i => JVal.nat ((firstMin + i * step) * 60000))),
+    ("compute", .obj #[
+      ("total_vcpu", numFixed totalMilli 3), ("active_vcpu", numFixed activeMilli 3),
+      ("idle_leased_vcpu", .num "0.0"), ("hourly_burn_usd", .num "0.0"),
+      ("sources", .arr sourceVals)]),
+    ("inference", .obj #[
+      ("current_b_tok_per_h", bTokPerHour winTok windowSecs),
+      ("est_usd_per_h", usdPerHour winCents windowSecs),
+      ("window_total_tokens", JVal.nat winTok),
+      ("window_est_usd", numFixed (winCents * 10000) 6),
+      ("throttled_429_count", JVal.nat 0),
+      ("pools", .arr poolVals)]),
+    ("missions", .arr missionVals),
+    ("links", .arr linkVals)
   ]
 
-def buildMissionResourceDetailJson (store : CoreStore) (missionId : String) : IO (Option JVal) := do
-  let mrs ← execParamQuery store.missionsDb
-    "SELECT id, title, status, COALESCE(total_cost_cents,0), COALESCE(parent_mission_id,'') FROM missions WHERE id=?1 LIMIT 1;"
-    #[missionId]
-  let .ok rs := mrs | return none
+/-- Missions in the lineage of `?1`: the root itself plus every descendant. -/
+private def lineageIdsSql : String :=
+  "WITH RECURSIVE lineage(id) AS (SELECT ?1 UNION SELECT m.id FROM missions m JOIN lineage l ON m.parent_mission_id = l.id) "
+
+/-- `GET /api/resources/missions/:id`: the `MissionResourcesResponse` contract. Inference figures come from
+    `proxy_usage`; compute and projected series are `null` because Core keeps no compute history. -/
+def buildMissionResourceDetailJson (store : CoreStore) (missionId : String)
+    (qMap : Array (String × String)) : IO (Option JVal) := do
+  let nowSec := (← nowEpoch).toNat
+  let .ok rs ← execParamQuery store.missionsDb
+      (s!"SELECT title, COALESCE(project,''), status, COALESCE({epochOfColumnSql "created_at"},0), " ++
+       s!"COALESCE({epochOfColumnSql "updated_at"},0) FROM missions WHERE id=?1 LIMIT 1;")
+      #[missionId] | return none
   if rs.size ≤ 1 then return none
   let r := rs[1]!
-  let title := (r[1]?).getD ""
-  let st := (r[2]?).getD "completed"
-  let costCents := ((r[3]?).bind String.toNat?).getD 0
-  let parentId := (r[4]?).getD ""
-  let rootId := if parentId.isEmpty then missionId else parentId
-  let mut totToks : Nat := 0
+  let title := (r[0]?).getD ""
+  let project := (r[1]?).getD ""
+  let status := (r[2]?).getD ""
+  let createdSec := ((r[3]?).bind String.toNat?).getD 0
+  let updatedSec := ((r[4]?).bind String.toNat?).getD 0
+  let live := missionStatusIsLive status
+  let startSec := if createdSec == 0 || createdSec > nowSec then nowSec - Nat.min nowSec 300 else createdSec
+  let endSec? : Option Nat := if live || updatedSec < startSec then none else some (Nat.min nowSec updatedSec)
+  let anchorSec := endSec?.getD nowSec
+  let fullElapsed := Nat.max 60 (anchorSec - startSec)
+
+  -- Horizons: the active wave, plus the whole history once it outgrows six hours.
+  let waveSpan := if fullElapsed ≤ 3600 then 3600 else 21600
+  let allSpan := Nat.max 3600 (fullElapsed * 112 / 100)
+  let mut horizons : Array JVal := #[.obj #[
+    ("id", .str "6h"),
+    ("label", .str (if fullElapsed ≤ 3600 then "Active wave (1h)" else "Fast-DAG (6h)")),
+    ("span_secs", JVal.nat waveSpan)]]
+  if fullElapsed > 21600 then
+    let label :=
+      if fullElapsed ≥ 86400 then s!"{fullElapsed / 86400}.{(fullElapsed % 86400) * 10 / 86400}d history"
+      else s!"{(fullElapsed + 3599) / 3600}h history"
+    horizons := horizons.push (.obj #[("id", .str "all"), ("label", .str label), ("span_secs", JVal.nat allSpan)])
+  let activeHorizon :=
+    if (qParam? qMap "horizon") == some "all" && fullElapsed > 21600 then "all" else "6h"
+  let (originSec, horizonSecs) :=
+    if activeHorizon == "all" then (startSec, allSpan)
+    else if fullElapsed > waveSpan then (Nat.max startSec (anchorSec - waveSpan * 3 / 4), waveSpan)
+    else (startSec, waveSpan)
+  let originIso := formatEpochIso8601Utc originSec.toUInt64
+
+  -- Lineage rows as `(id, title, status, model, startSec, endSec)`; the root comes first.
+  let mut members : Array (String × String × String × String × Nat × Nat) := #[]
+  if let .ok lrs ← execParamQuery store.missionsDb
+      (lineageIdsSql ++
+       s!"SELECT m.id, m.title, m.status, COALESCE(m.model_override,''), COALESCE({epochOfColumnSql "m.created_at"},0), " ++
+       s!"COALESCE({epochOfColumnSql "m.updated_at"},0) FROM missions m JOIN lineage l ON m.id = l.id " ++
+       "ORDER BY (m.id = ?1) DESC, m.created_at ASC LIMIT 400;") #[missionId] then
+    for i in [1:lrs.size] do
+      let lr := lrs[i]!
+      members := members.push ((lr[0]?).getD "", (lr[1]?).getD "", (lr[2]?).getD "", (lr[3]?).getD "",
+        ((lr[4]?).bind String.toNat?).getD 0, ((lr[5]?).bind String.toNat?).getD 0)
+
+  -- Usage inside the horizon per (mission, provider).
+  let mut usage : Array (String × String × Nat × Nat) := #[]
+  if let .ok urs ← execParamQuery store.missionsDb
+      (lineageIdsSql ++
+       s!"SELECT u.mission_id, COALESCE(NULLIF(u.provider,''),'unknown'), SUM({tokenSumSql}), SUM(u.cost_cents) " ++
+       "FROM proxy_usage u JOIN lineage l ON u.mission_id = l.id WHERE u.timestamp >= ?2 GROUP BY 1,2;")
+      #[missionId, originIso] then
+    for i in [1:urs.size] do
+      let ur := urs[i]!
+      usage := usage.push ((ur[0]?).getD "", (ur[1]?).getD "unknown",
+        ((ur[2]?).bind String.toNat?).getD 0, ((ur[3]?).bind String.toNat?).getD 0)
+  let rateSecs := Nat.max 1800 (Nat.min horizonSecs (Nat.max 60 (anchorSec - originSec)))
+  let missionTok (id : String) : Nat := usage.foldl (fun acc (m, _, t, _) => if m == id then acc + t else acc) 0
+  let missionCents (id : String) : Nat := usage.foldl (fun acc (m, _, _, c) => if m == id then acc + c else acc) 0
+  let mut poolIds : Array String := #[]
+  for (_, p, _, _) in usage do
+    if !poolIds.contains p then poolIds := poolIds.push p
+  let poolTok (p : String) : Nat := usage.foldl (fun acc (_, q, t, _) => if q == p then acc + t else acc) 0
+  let poolCents (p : String) : Nat := usage.foldl (fun acc (_, q, _, c) => if q == p then acc + c else acc) 0
+
+  let trackId := "main"
+  let mut subagents : Array JVal := #[]
+  let mut trackEdges : Array JVal := #[]
+  let mut bars : Array JVal := #[]
+  for (id, mTitle, mStatus, model, mCreated, mUpdated) in members do
+    let isRoot := id == missionId
+    let role := if isRoot then "coordinator" else "worker"
+    let state := resourceBarState mStatus
+    let tok := missionTok id
+    let cents := missionCents id
+    subagents := subagents.push (.obj #[
+      ("id", .str id), ("mission_id", .str id), ("native", .bool false), ("track_id", .str trackId),
+      ("role", .str role), ("label", .str mTitle),
+      ("model", if model.isEmpty then .null else .str model), ("node_id", .null),
+      ("vcpu", .num "0.0"), ("compute_usd_per_h", .num "0.0"),
+      ("b_tok_per_h", bTokPerHour tok rateSecs), ("inference_usd_per_h", usdPerHour cents rateSecs),
+      ("state", .str state)])
+    if tok > 0 || cents > 0 then
+      trackEdges := trackEdges.push (.obj #[
+        ("kind", .str "inference"), ("source_id", .str trackId), ("target_id", .str id),
+        ("weight", bTokPerHour tok rateSecs), ("est_usd_per_h", usdPerHour cents rateSecs),
+        ("degraded", .bool false)])
+    let mStart := if mCreated == 0 then startSec else mCreated
+    let mEnd := if missionStatusIsLive mStatus || mUpdated < mStart then nowSec else Nat.min nowSec mUpdated
+    if mEnd ≥ originSec && mStart ≤ originSec + horizonSecs then
+      let clippedStart := Nat.max originSec mStart
+      bars := bars.push (.obj #[
+        ("id", .str id), ("mission_id", .str id), ("label", .str mTitle),
+        ("section", .str (if isRoot then "Coordinator" else "Subagents")), ("role", .str role),
+        ("model", if model.isEmpty then .null else .str model), ("node_id", .null),
+        ("vcpu", .num "0.0"), ("compute_usd_per_h", .num "0.0"),
+        ("b_tok_per_h", bTokPerHour tok rateSecs), ("inference_usd_per_h", usdPerHour cents rateSecs),
+        ("start_offset_secs", JVal.nat (clippedStart - originSec)),
+        ("duration_secs", JVal.nat (Nat.max 1 (mEnd - clippedStart))),
+        ("eta_remaining_secs", .null), ("eta_basis", .null),
+        ("state", .str state), ("after_ids", .arr #[])])
+  let inputs := poolIds.map fun p =>
+    .obj #[("id", .str p), ("kind", .str "inference"), ("label", .str (inferencePoolLabel p)),
+      ("sub", .str "metered"), ("weight", bTokPerHour (poolTok p) rateSecs),
+      ("est_usd_per_h", usdPerHour (poolCents p) rateSecs)]
+  let inputEdges := poolIds.map fun p =>
+    .obj #[("kind", .str "inference"), ("source_id", .str p), ("target_id", .str trackId),
+      ("weight", bTokPerHour (poolTok p) rateSecs), ("est_usd_per_h", usdPerHour (poolCents p) rateSecs),
+      ("degraded", .bool false)]
+  let subCount := members.size - 1
+
+  -- Timeline: observed inference per bucket up to now; nothing is projected.
+  let tlBuckets := 60
+  let tlSecs := Nat.max 60 (horizonSecs / tlBuckets)
+  let mut tlTok : Array Nat := Array.replicate tlBuckets 0
+  let mut tlCents : Array Nat := Array.replicate tlBuckets 0
   if let .ok trs ← execParamQuery store.missionsDb
-      "SELECT COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens),0) FROM proxy_usage WHERE mission_id=?1;"
-      #[missionId] then
-    if trs.size > 1 then
-      totToks := ((trs[1]![0]?).bind String.toNat?).getD 0
+      (lineageIdsSql ++
+       s!"SELECT (CAST(strftime('%s',u.timestamp) AS INTEGER) - CAST(?3 AS INTEGER))/CAST(?4 AS INTEGER), SUM({tokenSumSql}), SUM(u.cost_cents) " ++
+       "FROM proxy_usage u JOIN lineage l ON u.mission_id = l.id WHERE u.timestamp >= ?2 GROUP BY 1;")
+      #[missionId, originIso, toString originSec, toString tlSecs] then
+    for i in [1:trs.size] do
+      let tr := trs[i]!
+      let some bi := (tr[0]?).bind String.toNat? | continue
+      if bi < tlBuckets then
+        tlTok := tlTok.modify bi (· + ((tr[1]?).bind String.toNat?).getD 0)
+        tlCents := tlCents.modify bi (· + ((tr[2]?).bind String.toNat?).getD 0)
+  let observed (vals : Array Nat) (rate : Nat → Nat → JVal) : JVal :=
+    .arr ((Array.range tlBuckets).map fun i =>
+      if originSec + i * tlSecs > anchorSec then .null else rate vals[i]! tlSecs)
+  let nulls : JVal := .arr (Array.replicate tlBuckets .null)
+
   return some (.obj #[
-    ("root_mission_id", .str rootId),
-    ("title", .str title),
-    ("status", .str st),
-    ("summary", .obj #[
-      ("wall_elapsed_secs", JVal.nat 0),
-      ("active_compute_secs", JVal.nat 0),
-      ("parallelism_factor", .num "1.0"),
-      ("critical_path_secs", JVal.nat 0),
+    ("as_of", .str (formatEpochIso8601Utc nowSec.toUInt64)),
+    ("mission", .obj #[
+      ("id", .str missionId), ("title", .str title),
+      ("project", if project.isEmpty then .null else .str project),
+      ("status", .str status),
+      ("started_at", .str (formatEpochIso8601Utc startSec.toUInt64)),
+      ("completed_at", match endSec? with | some e => .str (formatEpochIso8601Utc e.toUInt64) | none => .null),
+      ("elapsed_secs", JVal.nat fullElapsed),
       ("eta_remaining_secs", .null),
-      ("eta_confidence", .null),
-      ("total_tokens", JVal.nat totToks),
-      ("billable_tokens", JVal.nat totToks),
-      ("inference_cents", JVal.nat costCents),
-      ("compute_cents", JVal.nat 0),
-      ("rate_limit_wait_secs", JVal.nat 0),
-      ("queue_wait_secs", JVal.nat 0)
-    ]),
-    ("nodes", .arr #[.obj #[
-      ("mission_id", .str missionId),
-      ("title", .str title),
-      ("status", .str st),
-      ("depends_on", .arr #[]),
-      ("is_critical_path", .bool true),
-      ("intervals", .arr #[]),
-      ("tokens", JVal.nat totToks),
-      ("cost_cents", JVal.nat costCents),
-      ("placement_node_id", .str "orb-core")
-    ]]),
-    ("subagent_spans", .arr #[]),
-    ("compute_series", .arr #[]),
-    ("inference_series", .arr #[]),
-    ("bottlenecks", .arr #[])
+      ("subagent_count", JVal.nat subCount),
+      ("track_count", JVal.nat 1)]),
+    ("available_horizons", .arr horizons),
+    ("active_horizon", .str activeHorizon),
+    ("flow", .obj #[
+      ("inputs", .arr inputs),
+      ("tracks", .arr #[.obj #[
+        ("id", .str trackId), ("label", .str "Main"),
+        ("sub", .str s!"{subCount} subagent{if subCount == 1 then "" else "s"}"),
+        ("state", .str (resourceBarState status))]]),
+      ("subagents", .arr subagents),
+      ("input_to_track", .arr inputEdges),
+      ("track_to_subagent", .arr trackEdges)]),
+    ("dag", .obj #[
+      ("origin_unix_secs", JVal.nat originSec),
+      ("horizon_secs", JVal.nat horizonSecs),
+      ("now_offset_secs", JVal.nat (Nat.min horizonSecs (nowSec - originSec))),
+      ("bars", .arr bars)]),
+    ("timeline", .obj #[
+      ("offsets_secs", .arr ((Array.range tlBuckets).map fun i => JVal.nat (i * tlSecs))),
+      ("observed_vcpu", nulls), ("projected_vcpu", nulls),
+      ("observed_compute_usd_per_h", nulls), ("projected_compute_usd_per_h", nulls),
+      ("observed_b_tok_per_h", observed tlTok bTokPerHour), ("projected_b_tok_per_h", nulls),
+      ("observed_inference_usd_per_h", observed tlCents usdPerHour), ("projected_inference_usd_per_h", nulls)])
   ])
 
 /-! ## 2. `POST /api/file-resources` & `/api/fs/*` & `/api/remote-nodes/:id/fs/*` -/
@@ -972,7 +1255,7 @@ def dispatchResourcesAndSystemRoute
     let mid := segs[3]!
     let allowed ← canAccessMission store mid callerUserId bootstrapAdminId isLegacyUnscoped false
     if !allowed then return some (jsonErr 404 "Mission not found")
-    match ← buildMissionResourceDetailJson store mid with
+    match ← buildMissionResourceDetailJson store mid qMap with
     | some jv => return some (jsonResp 200 jv)
     | none => return some (jsonErr 404 "Mission not found")
 

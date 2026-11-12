@@ -5357,8 +5357,9 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
     return (← fail s!"GET /api/cloud/usage failed: {cuSt} {cuBody}")
 
   let (roSt, roBody) ← sendJson "GET" "/api/resources/overview?range=6h&scope=all" hsJwt ""
-  if roSt != 200 || (roBody.splitOn "\"orb-core\"").length < 2 ||
-     (roBody.splitOn "\"summary\"").length < 2 || (roBody.splitOn "\"compute_series\"").length < 2 then
+  if roSt != 200 || (roBody.splitOn "\"core:host\"").length < 2 ||
+     (roBody.splitOn "\"timestamps_ms\"").length < 2 || (roBody.splitOn "\"bucket_seconds\":300").length < 2 ||
+     (roBody.splitOn "\"pools\"").length < 2 || (roBody.splitOn "\"links\"").length < 2 then
     return (← fail s!"GET /api/resources/overview failed: {roSt} {roBody}")
 
   let (puSt, puBody) ← sendJson "GET" "/api/ai/providers/usage" hsJwt ""
