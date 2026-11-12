@@ -5058,6 +5058,7 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
   return 0
 
 set_option maxHeartbeats 800000 in
+set_option maxRecDepth 8000 in
 private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32 := do
   let ts ← IO.monoNanosNow
   let workRoot := s!"/tmp/orb_prod_parity_{ts}"
@@ -5357,8 +5358,9 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
     return (← fail s!"GET /api/cloud/usage failed: {cuSt} {cuBody}")
 
   let (roSt, roBody) ← sendJson "GET" "/api/resources/overview?range=6h&scope=all" hsJwt ""
-  if roSt != 200 || (roBody.splitOn "\"orb-core\"").length < 2 ||
-     (roBody.splitOn "\"summary\"").length < 2 || (roBody.splitOn "\"compute_series\"").length < 2 then
+  if roSt != 200 || (roBody.splitOn "\"core:host\"").length < 2 ||
+     (roBody.splitOn "\"timestamps_ms\"").length < 2 || (roBody.splitOn "\"bucket_seconds\":300").length < 2 ||
+     (roBody.splitOn "\"pools\"").length < 2 || (roBody.splitOn "\"links\"").length < 2 then
     return (← fail s!"GET /api/resources/overview failed: {roSt} {roBody}")
 
   let (puSt, puBody) ← sendJson "GET" "/api/ai/providers/usage" hsJwt ""
@@ -5858,22 +5860,24 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
 
   let _ ← execParamQuery store.missionsDb
     "INSERT OR REPLACE INTO model_routing_chains(id,name,models_json,updated_at) VALUES('builtin/smart','Smart (Default)','[{\"provider_id\":\"antigravity\",\"model_id\":\"gemini-4-argon-low\"}]','t1');" #[]
-  setEnvVar "CLI_PROXY_API_KEY" "test-cli-proxy-key"
-  setEnvVar "CLI_PROXY_API_BASE_URL" "http://127.0.0.1:18317"
+  OrbBin.PosixExt.setenvVar "CLI_PROXY_API_KEY" "test-cli-proxy-key"
+  OrbBin.PosixExt.setenvVar "CLI_PROXY_API_BASE_URL" "http://127.0.0.1:18317"
   let loadedChains ← loadRoutingChainsFromStore store workRoot
-  setEnvVar "CLI_PROXY_API_KEY" ""
-  setEnvVar "CLI_PROXY_API_BASE_URL" ""
+  OrbBin.PosixExt.setenvVar "CLI_PROXY_API_KEY" ""
+  OrbBin.PosixExt.setenvVar "CLI_PROXY_API_BASE_URL" ""
   appSt.chainsRef.set loadedChains
   let forwardedModelRef ← IO.mkRef ""
   let appWithMockProxy : CoreAppState := {
     appSt with
     proxyMockTransport? := some (fun tgt => do
       forwardedModelRef.set tgt.modelId
-      return .ok { status := 200, headers := #[], body := "{\"id\":\"chatcmpl-1\",\"choices\":[]}".toUTF8 })
+      return .ok { status := 200, headers := #[], body :=
+        "{\"id\":\"chatcmpl-1\",\"choices\":[],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":300,\"prompt_tokens_details\":{\"cached_tokens\":200}}}".toUTF8 })
   }
+  let smartBody := "{\"model\":\"smart\",\"messages\":[]}".toUTF8
   let smartReqRaw :=
     (s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {hsJwt}\r\n" ++
-     "Content-Type: application/json\r\nContent-Length: 38\r\n\r\n{\"model\":\"smart\",\"messages\":[]}").toUTF8
+     s!"Content-Type: application/json\r\nContent-Length: {smartBody.size}\r\n\r\n").toUTF8 ++ smartBody
   match parseRequest smartReqRaw none with
   | .error _ => return (← fail "parse smartReqRaw failed")
   | .ok sReq =>
@@ -5883,6 +5887,18 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
       let fwdMdl ← forwardedModelRef.get
       if sResp.status != 200 || fwdMdl != "gemini-4-argon-low" then
         return (← fail s!"model='smart' did not resolve builtin/smart target: status={sResp.status} fwd={fwdMdl}")
+      let usageRows ← execParamQuery store.missionsDb
+        "SELECT input_tokens,output_tokens,cache_read_tokens,cost_cents FROM proxy_usage WHERE model='gemini-4-argon-low' ORDER BY id DESC LIMIT 1;" #[]
+      match usageRows with
+      | .ok rows =>
+        if rows.size < 2 || rows[1]! != #["1000", "300", "200", "1"] then
+          return (← fail s!"proxied call did not record its usage: {rows}")
+      | .error e => return (← fail s!"proxy_usage query failed: {e}")
+  let sseUsage := extractProxyUsage
+    ("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":40,\"cache_read_input_tokens\":900,\"cache_creation_input_tokens\":60}}}\n\n" ++
+     "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":25}}\n\ndata: [DONE]\n").toUTF8
+  if sseUsage != { input := 40, output := 25, cacheCreate := 60, cacheRead := 900 } then
+    return (← fail s!"SSE usage was not merged across events: {repr sseUsage}")
 
   closeManagedComputeStore mStore
   closeCoreStore store
@@ -7067,5 +7083,5 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
 end OrbCore.SelfTest
 
 def main (args : List String) : IO UInt32 := do
-  discard <| LeanSys.Posix.setenv "ORB_HERMETIC_TEST" "1" true
+  OrbBin.PosixExt.setenvVar "ORB_HERMETIC_TEST" "1"
   OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")
