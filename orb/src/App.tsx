@@ -36,7 +36,6 @@ import { startLocalWakeups } from "./localWakeups";
 import { startClientDelegations } from "./clientDelegations";
 import {
   hasPrimaryModifier,
-  isBtwShortcut,
   isFindShortcut,
   isSearchShortcut,
   navigationShortcut,
@@ -1268,7 +1267,7 @@ export default function App() {
     const sidebarFocused =
       isFindShortcut(e) &&
       !!document.getElementById("orb-sidebar")?.contains(document.activeElement);
-    if (isSearchShortcut(e) || (!e.shiftKey && isBtwShortcut(e)) || sidebarFocused) {
+    if (isSearchShortcut(e) || sidebarFocused) {
       if (searchOpen()) {
         e.preventDefault();
         searchInputEl?.focus({ preventScroll: true });
@@ -2370,8 +2369,17 @@ export default function App() {
           fallback={
             <Portal>
               <div
-                class="dlg-back dlg-back-dim"
-                style={{ "z-index": 1300 }}
+                style={{
+                  position: "fixed",
+                  inset: 0,
+                  display: "flex",
+                  "align-items": "flex-start",
+                  "justify-content": "center",
+                  padding: "clamp(28px, 8vh, 76px) 16px 24px",
+                  "box-sizing": "border-box",
+                  background: "color-mix(in srgb, var(--overlay) 78%, transparent)",
+                  "z-index": 1300,
+                }}
                 onPointerDown={e => {
                   if (e.target === e.currentTarget) {
                     setSearchOpen(false);
@@ -2393,8 +2401,8 @@ export default function App() {
                     }
                   }}
                   style={{
-                    width: "min(920px, calc(100vw - 32px))",
-                    height: "min(620px, calc(100dvh - 56px))",
+                    width: "min(880px, calc(100vw - 32px))",
+                    height: "min(580px, calc(100dvh - 64px))",
                     background: "var(--bg-elev)",
                     border: "1px solid var(--stroke)",
                     "border-radius": "var(--radius-xl)",
