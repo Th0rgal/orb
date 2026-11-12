@@ -1,0 +1,157 @@
+# CI impact domains, read by scripts/ci_plan.py.
+#
+# Each changed path is matched against the domains in order: the first domain
+# with a matching `paths` glob claims it (fnmatch, `*` also matches `/`).
+# A path that no domain claims selects every job (fail closed). A domain with
+# `full = true` also selects every job.
+#
+# The jobs a run selects are the union of `jobs` across all claimed domains.
+# Job ids are the GitHub job ids in .github/workflows/ci.yml. Entries
+# prefixed `wf:` stand for jobs that still live in their own workflow
+# (kernel-abi.yml, ios-build.yml, android-apk.yml) until those are merged in.
+
+# Changes to CI itself, the toolchain pins or this planner re-run everything.
+[[domain]]
+name = "ci"
+full = true
+paths = [
+  ".github/*",
+  "ci/*",
+  "scripts/ci_plan.py",
+  "scripts/test_ci_plan.py",
+  "lean/lean-toolchain",
+  "lean/turbo-lean-revision",
+  "lean/lakefile.lean",
+  "flake.nix",
+  "flake.lock",
+  "nix/*",
+]
+
+# Prose-only changes. docs-site and screenshots have no CI job of their own yet.
+[[domain]]
+name = "docs"
+paths = [
+  "README.md",
+  "INSTALL.md",
+  "DEBUGGING.md",
+  "AGENTS.md",
+  "plan.md",
+  "docs/*.md",
+  "docs/*.png",
+  "docs/*.svg",
+  "docs/*.webp",
+  "docs-site/*",
+  "screenshots/*",
+]
+jobs = []
+
+# The formal kernel and everything generated from it: affects every client.
+[[domain]]
+name = "kernel"
+paths = [
+  "lean/Orb/*",
+  "lean/audit/*",
+  "lean/LeanMesh/*",
+  "shared/orb-spec/cabi/*",
+  "shared/orb-spec/kernel_abi.json",
+  "orb/src/assets/orb_kernel.wasm",
+  "scripts/gen_*",
+  "scripts/build_orb_kernel_wasm.py",
+  "scripts/*kernel*",
+  "scripts/*p3_*",
+  "scripts/*coverage_registry*",
+  "scripts/*leannative*",
+  "scripts/*wasm*",
+]
+jobs = [
+  "test", "harness-contract", "policy-lint", "capability-matrix",
+  "orb-unit", "orb-browser", "orb-performance", "orb-desktop-shell", "docker",
+  "wf:kernel-abi", "wf:ios-build", "wf:android-apk",
+]
+
+# Cross-client fixtures: every implementation replays them.
+[[domain]]
+name = "fixtures"
+paths = ["shared/*"]
+jobs = ["test", "orb-unit", "orb-browser", "wf:kernel-abi", "wf:ios-build", "wf:android-apk"]
+
+# Native Lean backend packages and their build driver.
+[[domain]]
+name = "lean_bins"
+paths = [
+  "lean/OrbCore/*",
+  "lean/OrbNode/*",
+  "lean/OrbBin/*",
+  "lean/OrbClient/*",
+  "lean/OrbLocald/*",
+  "lean/OrbNetLeaf/*",
+  "scripts/build_orb_bins.sh",
+  "scripts/ci_harden_ubuntu_apt.sh",
+  "lean/.gitignore",
+]
+jobs = ["test", "harness-contract", "policy-lint", "capability-matrix", "orb-desktop-shell", "docker"]
+
+[[domain]]
+name = "desktop_linux"
+paths = ["linux_shell/*"]
+jobs = ["orb-desktop-shell"]
+
+[[domain]]
+name = "desktop_macos"
+paths = ["macos_shell/*", "orb/scripts/build-signer.py", "orb/scripts/build-macos-icon.mjs"]
+jobs = ["orb-macos-shell", "orb-desktop-shell"]
+
+# Performance budgets: only paths that can move frame timings or startup.
+[[domain]]
+name = "orb_perf"
+paths = [
+  "orb/playwright.performance.config.ts",
+  "orb/tests/performance/*",
+  "orb/src/mission/*",
+  "orb/src/main.tsx",
+  "orb/src/App.tsx",
+  "orb/package.json",
+  "orb/pnpm-lock.yaml",
+  "orb/vite.config.ts",
+]
+jobs = ["orb-unit", "orb-browser", "orb-performance"]
+
+[[domain]]
+name = "orb_web"
+paths = ["orb/*"]
+jobs = ["orb-unit", "orb-browser"]
+
+[[domain]]
+name = "ios"
+paths = ["ios_dashboard/*"]
+jobs = ["wf:ios-build"]
+
+[[domain]]
+name = "android"
+paths = ["android_dashboard/*"]
+jobs = ["wf:android-apk"]
+
+# Everything that Python/shell policy tests and the image cover.
+[[domain]]
+name = "policy"
+paths = [
+  "scripts/*",
+  "tests/*",
+  "docs/*",
+  "skills/*",
+  "capabilities/*",
+  "catalog/*",
+  "deploy/*",
+  "docker/*",
+  "patches/*",
+  "third_party/*",
+  ".sandboxed/*",
+  "Dockerfile",
+  ".dockerignore",
+  "docker-compose.yml",
+  ".env.example",
+  ".gitmodules",
+  ".gitignore",
+  ".gitattributes",
+]
+jobs = ["harness-contract", "policy-lint", "capability-matrix", "docker"]
