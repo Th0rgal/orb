@@ -1454,6 +1454,16 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
       let estCents := estimateProxyUsageCostCents out.headers out.body
       if estCents > 0 then
         discard <| addUserSpendCents st.store ownerUid utcDay estCents 0 s!"{nowEpochSec}"
+    let usedTarget? := dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)
+    let usedMissionId := boundMid?.getD ""
+    let callerKind ←
+      if usedMissionId.isEmpty then pure "api"
+      else do
+        let parent := ((← getMission? st.store usedMissionId).map (·.parentMissionId)).getD ""
+        pure (if parent.isEmpty then "mission" else "subagent")
+    recordProxyUsage st.store nowEpochSec
+      ((usedTarget?.map (·.modelId)).getD requestedModel) ((usedTarget?.map (·.provider)).getD "")
+      out.selectedAccount (execKey?.getD "") usedMissionId callerKind (extractProxyUsage out.body)
   if let (some program, some mid, some sel) := (expected?, boundMid?, selection?) then
     let text := String.fromUTF8? out.body |>.getD ""
     for line in text.splitOn "\n" do

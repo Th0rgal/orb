@@ -5871,7 +5871,8 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
     appSt with
     proxyMockTransport? := some (fun tgt => do
       forwardedModelRef.set tgt.modelId
-      return .ok { status := 200, headers := #[], body := "{\"id\":\"chatcmpl-1\",\"choices\":[]}".toUTF8 })
+      return .ok { status := 200, headers := #[], body :=
+        "{\"id\":\"chatcmpl-1\",\"choices\":[],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":300,\"prompt_tokens_details\":{\"cached_tokens\":200}}}".toUTF8 })
   }
   let smartBody := "{\"model\":\"smart\",\"messages\":[]}".toUTF8
   let smartReqRaw :=
@@ -5886,6 +5887,18 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
       let fwdMdl ← forwardedModelRef.get
       if sResp.status != 200 || fwdMdl != "gemini-4-argon-low" then
         return (← fail s!"model='smart' did not resolve builtin/smart target: status={sResp.status} fwd={fwdMdl}")
+      let usageRows ← execParamQuery store.missionsDb
+        "SELECT input_tokens,output_tokens,cache_read_tokens,cost_cents FROM proxy_usage WHERE model='gemini-4-argon-low' ORDER BY id DESC LIMIT 1;" #[]
+      match usageRows with
+      | .ok rows =>
+        if rows.size < 2 || rows[1]! != #["1000", "300", "200", "1"] then
+          return (← fail s!"proxied call did not record its usage: {rows}")
+      | .error e => return (← fail s!"proxy_usage query failed: {e}")
+  let sseUsage := extractProxyUsage
+    ("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":40,\"cache_read_input_tokens\":900,\"cache_creation_input_tokens\":60}}}\n\n" ++
+     "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":25}}\n\ndata: [DONE]\n").toUTF8
+  if sseUsage != { input := 40, output := 25, cacheCreate := 60, cacheRead := 900 } then
+    return (← fail s!"SSE usage was not merged across events: {repr sseUsage}")
 
   closeManagedComputeStore mStore
   closeCoreStore store

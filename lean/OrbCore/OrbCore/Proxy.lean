@@ -1350,4 +1350,70 @@ def estimateProxyUsageCostCents (respHdrs : Array (String × String)) (respBody 
   | .error _ =>
     return 0
 
+/-- Token counts of one inference call. `input` excludes cached tokens, so the four counts add up
+    to the tokens the provider processed. -/
+structure ProxyUsage where
+  input       : Nat := 0
+  output      : Nat := 0
+  cacheCreate : Nat := 0
+  cacheRead   : Nat := 0
+  reasoning   : Nat := 0
+  deriving Repr, DecidableEq, Inhabited
+
+def ProxyUsage.total (u : ProxyUsage) : Nat := u.input + u.output + u.cacheCreate + u.cacheRead
+
+/-- Reads a `usage` object in Chat Completions, Responses or Anthropic Messages spelling. -/
+def proxyUsageOfObject (u : JVal) : ProxyUsage :=
+  let detail (obj key : String) : Nat := ((u.field? obj).bind (·.fieldNat? key)).getD 0
+  let cachedInPrompt := Nat.max (detail "prompt_tokens_details" "cached_tokens") (detail "input_tokens_details" "cached_tokens")
+  let anthropicCacheRead := (u.fieldNat? "cache_read_input_tokens").getD 0
+  let rawInput := ((u.fieldNat? "input_tokens").orElse (fun _ => u.fieldNat? "prompt_tokens")).getD 0
+  { input := rawInput - Nat.min rawInput cachedInPrompt
+    output := ((u.fieldNat? "output_tokens").orElse (fun _ => u.fieldNat? "completion_tokens")).getD 0
+    cacheCreate := (u.fieldNat? "cache_creation_input_tokens").getD 0
+    cacheRead := Nat.max cachedInPrompt anthropicCacheRead
+    reasoning := Nat.max (detail "completion_tokens_details" "reasoning_tokens") (detail "output_tokens_details" "reasoning_tokens") }
+
+private def proxyUsageOfEvent (jv : JVal) : ProxyUsage :=
+  let fromField (holder : JVal) : ProxyUsage := ((holder.field? "usage").map proxyUsageOfObject).getD {}
+  let merge (a b : ProxyUsage) : ProxyUsage :=
+    { input := Nat.max a.input b.input, output := Nat.max a.output b.output
+      cacheCreate := Nat.max a.cacheCreate b.cacheCreate, cacheRead := Nat.max a.cacheRead b.cacheRead
+      reasoning := Nat.max a.reasoning b.reasoning }
+  #["message", "response"].foldl (fun acc key => merge acc (((jv.field? key).map fromField).getD {})) (fromField jv)
+
+/-- Token usage of a buffered upstream response: a JSON body, or an SSE stream whose events report
+    usage piecemeal (Anthropic sends input counts first and output counts last), merged per field. -/
+def extractProxyUsage (body : ByteArray) : ProxyUsage := Id.run do
+  let text := (String.fromUTF8? body).getD ""
+  if let .ok jv := OrbBin.Json.parse text then
+    return proxyUsageOfEvent jv
+  let mut acc : ProxyUsage := {}
+  for line in text.splitOn "\n" do
+    let t := line.trimAscii.toString
+    if t.startsWith "data:" then
+      if let .ok jv := OrbBin.Json.parse ((t.drop 5).toString.trimAscii.toString) then
+        let u := proxyUsageOfEvent jv
+        acc := { input := Nat.max acc.input u.input, output := Nat.max acc.output u.output
+                 cacheCreate := Nat.max acc.cacheCreate u.cacheCreate, cacheRead := Nat.max acc.cacheRead u.cacheRead
+                 reasoning := Nat.max acc.reasoning u.reasoning }
+  return acc
+
+/-- Estimated cost in cents at the blended list price `estimateProxyUsageCostCents` assumes
+    ($3 / $15 per million input / output tokens, cache writes at 1.25x and cache reads at 0.1x of input),
+    rounded to the nearest cent. Core has no per-model price table. -/
+def estimateUsageCostCents (u : ProxyUsage) : UInt64 :=
+  Orb.Kernel.costCentsStep (u.input + u.cacheCreate).toUInt64 u.output.toUInt64 u.cacheCreate.toUInt64 u.cacheRead.toUInt64
+    3000 15000 3750 300
+
+/-- Appends one `proxy_usage` row; calls that report no tokens are not recorded. -/
+def recordProxyUsage (store : CoreStore) (nowEpochSec : UInt64) (model provider accountId apiKeyName missionId callerKind : String)
+    (u : ProxyUsage) : IO Unit := do
+  if u.total == 0 then return
+  discard <| execParamQuery store.missionsDb
+    ("INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cost_cents," ++
+     "provider,account_id,api_key_name,mission_id,caller_kind,reasoning_tokens) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULLIF(?11,''),?12,?13);")
+    #[formatEpochIso8601Utc nowEpochSec, model, toString u.input, toString u.output, toString u.cacheCreate, toString u.cacheRead,
+      toString (estimateUsageCostCents u), provider, accountId, apiKeyName, missionId, callerKind, toString u.reasoning]
+
 end OrbCore.Proxy
