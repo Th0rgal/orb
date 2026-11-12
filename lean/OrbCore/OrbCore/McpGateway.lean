@@ -715,7 +715,7 @@ def dispatchMcpToolCall
     let parentRn? ← match explicitRn?, parentRn? with
       | none, some rn =>
         if rn.toLower == "auto" || rn.toLower.startsWith "auto:" then
-          match ← resolveConcreteRemoteTargetNode mc? rn with
+          match ← resolveConcreteRemoteTargetNode mc? rn (some (store, parentMid)) with
           | .ok concrete => pure (some concrete)
           | .error _ => pure none
         else pure parentRn?

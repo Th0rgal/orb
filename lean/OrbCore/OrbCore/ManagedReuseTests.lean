@@ -120,6 +120,30 @@ def run (root : String) : IO Unit := do
     let before ← rented.get
     let (fifth, vmFifth, reusedFifth) ← start "lead"
     check (reusedFifth && vmFifth == vmB && (← rented.get) == before && (← ownerOf vmB) == fifth) "an eligible machine is reused"
+    -- An unnamed managed target resolves only inside the mission's own lineage.
+    discard <| sqlCore "INSERT INTO missions(id,parent_mission_id,owner_user_id,project) VALUES('grandchild',?1,'','p');" #[fifth]
+    let resolve (target : String) (mission? : Option String) : IO (Except String String) :=
+      OrbCore.RemoteDispatch.resolveConcreteRemoteTargetNode (some mc) target (mission?.map fun m => (core, m))
+    let resolvesTo (result : Except String String) (expected : Except String String) : Bool :=
+      match result, expected with
+      | .ok a, .ok b => a == b
+      | .error a, .error b => a == b
+      | _, _ => false
+    check (resolvesTo (← resolve "auto-managed" (some fifth)) (.ok s!"managed-{vmB}")) "a mission resolves to its own machine"
+    check (resolvesTo (← resolve "auto-managed:small" (some "grandchild")) (.ok s!"managed-{vmB}"))
+      "a descendant resolves to an ancestor's machine"
+    check (resolvesTo (← resolve "auto-managed" (some "rival")) (.error "no_managed_machines_available"))
+      "another mission's ready machine is never a fallback"
+    check (resolvesTo (← resolve "auto-managed" none) (.error "no_managed_machines_available") &&
+      resolvesTo (← resolve "auto-managed" (some "missing")) (.error "no_managed_machines_available"))
+      "no mission, no machine"
+    check (resolvesTo (← resolve "auto" (some "rival")) (.error "no_remote_nodes_available") &&
+      resolvesTo (← resolve "auto" (some fifth)) (.ok s!"managed-{vmB}")) "`auto` without a static fleet follows the same rule"
+    -- A sandbox name works for the lineage that owns the machine and for nobody else.
+    let some (named, _) ← getManagedMachine? mc vmB | throw (IO.userError "managed reuse: machine missing")
+    check (resolvesTo (← resolve named.sandboxName (some "grandchild")) (.ok s!"managed-{vmB}")) "a sandbox name resolves in scope"
+    check (resolvesTo (← resolve named.sandboxName (some "rival")) (.ok named.sandboxName) &&
+      resolvesTo (← resolve named.sandboxName none) (.ok named.sandboxName)) "a sandbox name is not resolved for an outsider"
   finally
     closeManagedComputeStore mc
     closeCoreStore core

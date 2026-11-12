@@ -163,10 +163,45 @@ private def isLoopbackStaticNode (targetNodeId : String) : IO Bool := do
     let u := sn.baseUrl.toLower
     return u.startsWith "http://127.0.0.1" || u.startsWith "http://localhost" || u.startsWith "http://[::1]"
 
+/-- The ready managed machine an unnamed managed target (`auto-managed`, or `auto`
+    with no static fleet), or a sandbox name, may resolve to for `missionId`: one owned by that
+    mission or an ancestor, or a user-owned one of the mission's own user. Never
+    another mission's or another user's machine; with no mission, none. -/
+def scopedReadyManagedMachine?
+    (mc : ManagedComputeStore)
+    (scope? : Option (CoreStore × String))
+    (sandboxName : String := "") : IO (Option String) := do
+  let some (store, missionId) := scope? | return none
+  let mut lineage : Array String := #[]
+  let mut current := missionId.trimAscii.toString
+  let mut ownerUser := ""
+  for depth in [0:8] do
+    if current.isEmpty || lineage.contains current then break
+    let .ok rows ← execParamQuery store.missionsDb
+        "SELECT COALESCE(parent_mission_id,''), COALESCE(owner_user_id,'') FROM missions WHERE id=?1;" #[current]
+      | break
+    if rows.size < 2 then break
+    lineage := lineage.push current
+    if depth == 0 then ownerUser := (cell rows[1]! 1).trimAscii.toString
+    current := (cell rows[1]! 0).trimAscii.toString
+  if lineage.isEmpty then return none
+  let .ok rows ← execParamQuery mc.db
+      ("SELECT id, owner_mission, owner_kind, owner_user_id FROM managed_machines " ++
+       "WHERE phase_code=1 AND cordoned=0 AND (?1='' OR sandbox_name=?1) ORDER BY last_poll_sec DESC, id;") #[sandboxName]
+    | return none
+  for row in rows.extract 1 rows.size do
+    let ownerMission := cell row 1
+    let allowed :=
+      if ownerMission.isEmpty then cell row 2 != "mission" && cell row 3 == ownerUser
+      else lineage.contains ownerMission
+    if allowed && !(cell row 0).isEmpty then return some s!"managed-{cell row 0}"
+  return none
+
 /-- Resolve `"auto"`, `"auto-managed"`, or sandbox names into a concrete `targetNodeId` accepted by `callRemoteNodeHttpOpt`. -/
 def resolveConcreteRemoteTargetNode
     (mc? : Option ManagedComputeStore)
-    (rawTarget : String) : IO (Except String String) := do
+    (rawTarget : String)
+    (scope? : Option (CoreStore × String) := none) : IO (Except String String) := do
   let clean := rawTarget.trimAscii.toString
   if clean.isEmpty || clean == "local" || clean == "client" then
     return .error "not_a_remote_target"
@@ -177,30 +212,19 @@ def resolveConcreteRemoteTargetNode
     if let some sn := staticNodes[0]? then
       return .ok sn.id
     if let some mc := mc? then
-      if let .ok rows ← execParamQuery mc.db
-          "SELECT id FROM managed_machines WHERE status IN ('ready','running') ORDER BY updated_at DESC LIMIT 1;" #[] then
-        if rows.size > 1 then
-          let mid := cell rows[1]! 0
-          if !mid.isEmpty then return .ok s!"managed-{mid}"
+      if let some node ← scopedReadyManagedMachine? mc scope? then return .ok node
     return .error "no_remote_nodes_available"
   if clean == "auto-managed" || clean.startsWith "auto-managed:" then
     let some mc := mc?
       | return .error "no_managed_machines_available"
-    if let .ok rows ← execParamQuery mc.db
-        "SELECT id FROM managed_machines WHERE status IN ('ready','running') ORDER BY updated_at DESC LIMIT 1;" #[] then
-      if rows.size > 1 then
-        let mid := cell rows[1]! 0
-        if !mid.isEmpty then return .ok s!"managed-{mid}"
+    if let some node ← scopedReadyManagedMachine? mc scope? then return .ok node
     return .error "no_managed_machines_available"
   if let some mc := mc? then
     let cand := if clean.startsWith "managed-" then (clean.drop 8).toString else clean
     if let some _ ← getManagedMachine? mc cand then
       return .ok (if clean.startsWith "managed-" then clean else s!"managed-{cand}")
-    if let .ok rows ← execParamQuery mc.db
-        "SELECT id FROM managed_machines WHERE sandbox_name=?1 AND status<>'destroyed' ORDER BY updated_at DESC LIMIT 1;" #[clean] then
-      if rows.size > 1 then
-        let mid := cell rows[1]! 0
-        if !mid.isEmpty then return .ok s!"managed-{mid}"
+    -- A sandbox name is guessable, so it only names a machine the mission may use.
+    if let some node ← scopedReadyManagedMachine? mc scope? clean then return .ok node
   return .ok clean
 
 /-- Authoritatively resolve the remote node ID for an existing mission across `machine_transfers`,
@@ -274,7 +298,7 @@ def resolveMissionRemoteNode?
   if placeKind == "managed_vm" then
     if let some mc := mc? then
       if let .ok vmRows ← execParamQuery mc.db
-          "SELECT id FROM managed_machines WHERE owner_mission=?1 AND status NOT IN ('destroyed','failed') ORDER BY updated_at DESC LIMIT 1;"
+          "SELECT id FROM managed_machines WHERE owner_mission=?1 AND phase_code<>3 ORDER BY created_at_sec DESC, id LIMIT 1;"
           #[mid] then
         if vmRows.size > 1 then
           let vmid := (cell vmRows[1]! 0).trimAscii.toString
@@ -797,7 +821,7 @@ def cancelActiveRemoteJobForMission
       nodeId := rn
   if jobId.isEmpty || nodeId.isEmpty then
     return false
-  let effNode ← match ← resolveConcreteRemoteTargetNode mc? nodeId with
+  let effNode ← match ← resolveConcreteRemoteTargetNode mc? nodeId (some (store, missionId)) with
     | .ok n => pure n
     | .error _ => pure nodeId
   let hdrs := #[
@@ -1080,7 +1104,7 @@ partial def submitRemoteMissionTurn
     (coreWorkDir : String)
     (spec : RemoteTurnSpec)
     (nowSec : UInt64) : IO (Except String String) := do
-  let effTarget ← match ← resolveConcreteRemoteTargetNode mc? spec.targetNodeId with
+  let effTarget ← match ← resolveConcreteRemoteTargetNode mc? spec.targetNodeId (some (store, spec.missionId)) with
     | .ok n => pure n
     | .error e => return .error e
 
@@ -1238,7 +1262,7 @@ def reattachActiveRemoteJobsOnStartup
         | some n => pure (some n)
         | none => resolveMissionRemoteNode? store mc? mid
       if let some rawNode := resolvedNode? then
-        let effNode ← match ← resolveConcreteRemoteTargetNode mc? rawNode with
+        let effNode ← match ← resolveConcreteRemoteTargetNode mc? rawNode (some (store, mid)) with
           | .ok n => pure n
           | .error _ => pure rawNode
         -- Determine safe resume byte offset (`remote_log_offsets` first, then remote `log_len` fallback)

@@ -726,6 +726,18 @@ the start then fails, the previous owner is restored and the VM is not destroyed
 An auto-managed VM is not released when its child ends. It runs until its TTL or
 until `destroy_managed_machine`.
 
+## Unnamed managed targets
+
+A mission whose stored target is `auto-managed[:size]` (or `auto` when no static
+fleet is configured) is dispatched to a ready managed machine chosen at dispatch
+time. The choice is confined to the mission: a machine owned by that mission or
+one of its ancestors, or a user-owned machine of the mission's own user. A ready
+machine of any other mission or user is never used; with none in scope the
+dispatch fails with `no_managed_machines_available`. A machine's sandbox name
+resolves under the same rule; a `managed-<id>` node id is used as given. `start_mission` does not
+rely on this: it rents or reuses a machine and records its concrete node id.
+Mission creation over REST with `auto-managed` does not rent a machine.
+
 ## Harvesting a file from a VM
 
 Code: `lean/OrbCore/OrbCore/ManagedHarvest.lean`, tool `harvest_managed_file(machine_id, path)`.
