@@ -4641,16 +4641,20 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (admProvsBody.splitOn "internal-a.example").length < 2 then
     return (← fail s!"provider secret/baseUrl redaction mismatch: al={alProvsBody} adm={admProvsBody}")
 
-  -- `alice` disables `prov-a` for her missions; mints `mission_proxy_token`; `/v1/responses` routes `alice` to `prov-b` while `admin` still uses `prov-a`!
+  -- `alice` disables `prov-a` (OpenAI). A model is never served by another model family: her `gpt-5`
+  -- request is refused (403), it is NOT rerouted to the Anthropic account as the old expectation
+  -- encoded. Her Claude requests use `prov-b`; `admin` still reaches `prov-a` for `gpt-5`.
   let (alPrefSt, _, _) ← sendReq "PUT" "/api/ai/providers/prov-a/preference" aliceTok "{\"enabled\":false}"
   let (mptSt, mptBody, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/proxy-token" aliceTok "{}"
   let mptTok := ((OrbBin.Json.parse mptBody).toOption.getD (.obj #[]) |>.fieldStr? "token").getD ""
-  let (alProxy1St, alProxy1Body, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi\"}"
+  let (alGptSt, alGptBody, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi\"}"
+  let (alProxy1St, alProxy1Body, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"claude-fable-5-2\",\"input\":\"hi\"}"
   let (admProxy1St, admProxy1Body, _) ← sendReq "POST" "/v1/responses" adminTok "{\"model\":\"gpt-5\",\"input\":\"hi\"}"
   -- Second call (`30` cents each -> `30 < 50` admitted, becomes `60 >= 50`), third call hits `alice`'s 50-cent daily cap -> `429`!
-  let (alProxy2St, _, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi2\"}"
-  let (alProxy3St, alProxy3Body, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi3\"}"
+  let (alProxy2St, _, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"claude-fable-5-2\",\"input\":\"hi2\"}"
+  let (alProxy3St, alProxy3Body, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"claude-fable-5-2\",\"input\":\"hi3\"}"
   if alPrefSt != 200 || (mptSt != 200 && mptSt != 201) || !mptTok.startsWith "orb-mpt-v1_" ||
+     alGptSt != 403 || (alGptBody.splitOn "no_user_enabled_providers").length < 2 ||
      alProxy1St != 200 || (alProxy1Body.splitOn "\"acct\":\"prov-b\"").length < 2 ||
      admProxy1St != 200 || (admProxy1Body.splitOn "\"acct\":\"prov-a\"").length < 2 ||
      alProxy2St != 200 || alProxy3St != 429 ||

@@ -1421,12 +1421,13 @@ def estimateUsageCostCents (u : ProxyUsage) : UInt64 :=
 
 /-- Appends one `proxy_usage` row; calls that report no tokens are not recorded. -/
 def recordProxyUsage (store : CoreStore) (nowEpochSec : UInt64) (model provider accountId apiKeyName missionId callerKind : String)
-    (u : ProxyUsage) : IO Unit := do
+    (u : ProxyUsage) (requestedModel : String := "") : IO Unit := do
   if u.total == 0 then return
   discard <| execParamQuery store.missionsDb
     ("INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cost_cents," ++
-     "provider,account_id,api_key_name,mission_id,caller_kind,reasoning_tokens) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULLIF(?11,''),?12,?13);")
+     "provider,account_id,api_key_name,mission_id,caller_kind,reasoning_tokens,requested_model) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULLIF(?11,''),?12,?13,NULLIF(?14,''));")
     #[formatEpochIso8601Utc nowEpochSec, model, toString u.input, toString u.output, toString u.cacheCreate, toString u.cacheRead,
-      toString (estimateUsageCostCents u), provider, accountId, apiKeyName, missionId, callerKind, toString u.reasoning]
+      toString (estimateUsageCostCents u), provider, accountId, apiKeyName, missionId, callerKind, toString u.reasoning,
+      requestedModel]
 
 end OrbCore.Proxy

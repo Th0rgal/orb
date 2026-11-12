@@ -17,6 +17,7 @@ import OrbCore.Store
 import OrbCore.Search
 import OrbCore.Harness
 import OrbCore.Proxy
+import OrbCore.ProxyModelRouting
 import OrbCore.Cyber
 import OrbCore.Skills
 import OrbCore.AuthSidecar
@@ -649,7 +650,9 @@ private def defaultProviderBaseUrl (provType : String) : String :=
   | "zai"         => "https://api.z.ai/api/paas/v4"
   | "kimi"        => "https://api.kimi.com/coding"
   | "google"      => "https://generativelanguage.googleapis.com/v1beta/openai"
-  | _             => "https://api.openai.com"
+  | "openai"      => "https://api.openai.com"
+  -- Unsupported/explicit-only providers must never leak their key to OpenAI.
+  | _             => ""
 
 private def loadSnapshotModelsForProvider (pid : String) : IO (Array (String × String × String)) := do
   let mut out : Array (String × String × String) := #[]
@@ -895,18 +898,21 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
   let hydratedProvs ← loadHydratedProviders st effWorkDir
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
-  match ← execParamQuery st.missionsDb "SELECT id,name,models_json FROM model_routing_chains ORDER BY id ASC;" #[] with
-  | .error _ => return #[]
-  | .ok rows =>
-    if rows.size ≤ 1 then return #[]
-    let mut out : Array RoutingChain := #[]
-    for i in [1:rows.size] do
-      let r := rows[i]!
-      let cid := (r[0]?).getD ""
-      let nm := (r[1]?).getD cid
-      let mj := (r[2]?).getD "[]"
-      out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey }
-    return out
+  let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json FROM model_routing_chains ORDER BY id ASC;" #[]
+    | throw (IO.userError "routing_chain_store_unavailable")
+  let mut out : Array RoutingChain := #[]
+  for i in [1:rows.size] do
+    let r := rows[i]!
+    let cid := (r[0]?).getD ""
+    let nm := (r[1]?).getD cid
+    let mj := (r[2]?).getD "[]"
+    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey }
+  -- Immutable defaults are a derived view, not a second mutable config store.
+  -- Persisted ids (even empty/unavailable chains) always win over stock entries.
+  for (id, name, entries) in OrbCore.ProxyModelRouting.stockChains do
+    if !out.any (fun c => c.id == id) then
+      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey }
+  return out
 
 private def optU32Json (v? : Option UInt32) : String :=
   match v? with | some v => s!"{v}" | none => "null"
@@ -937,17 +943,55 @@ def renderResolvedChainJson (chain : RoutingChain) (pacingTracker? : Option Prox
     items := items.push entryJson
   return "[" ++ String.intercalate "," items.toList ++ "]"
 
-private def chainMatchesRequestedModel (c : RoutingChain) (m : String) : Bool :=
-  let clean := m.trimAscii.toString
-  if clean.isEmpty then false
-  else
-    let bare := bareModel clean
-    c.id == clean || c.name == clean ||
-    c.id == bare || c.id == s!"builtin/{bare}" ||
-    (c.id.startsWith "builtin/" && (c.id.drop 8).toString == bare)
-
 private def findMatchingRoutingChain? (chains : Array RoutingChain) (m : String) : Option RoutingChain :=
-  chains.find? (fun c => chainMatchesRequestedModel c m)
+  OrbCore.ProxyModelRouting.storedChain? chains m
+
+/-- Resolve direct model ids through the same account/limit hydration as saved
+    chains. Unknown bare names do not become CLIProxy model ids or default routes. -/
+private def directRoutingChain? (st : CoreAppState) (chains : Array RoutingChain)
+    (requested path : String) : IO (Option RoutingChain) := do
+  let providers ← listAIProviders st.store
+  let mut customModels : Array (String × String) := #[]
+  for p in providers do
+    if p.providerType == "custom" then
+      let name := OrbCore.ProxyModelRouting.customProviderName p.name
+      for model in p.customModels do customModels := customModels.push (name, model.id)
+  -- Preserve successful discovery membership without contacting an upstream.
+  for fp in #[s!"{st.store.rootDir}/model-discovery.json", s!"{st.cfg.workingDir}/.sandboxed-sh/model-discovery.json"] do
+    if let some raw ← (try some <$> IO.FS.readFile fp catch _ => pure none) then
+      if let .ok discovery := OrbBin.Json.parse raw then
+        if discovery.fieldNat? "schema_version" == some 1 then
+          for observation in (discovery.fieldArr? "connections").getD #[] do
+            let pid := (observation.fieldStr? "provider_id").getD ""
+            for p in providers do
+              let name := OrbCore.ProxyModelRouting.customProviderName p.name
+              if p.providerType == "custom" && (pid == name || pid == p.id || pid == s!"custom:{p.id}") then
+                let success := observation.fieldOrNull "last_success"
+                let models := (success.fieldArr? "models").getD #[]
+                let fallback := if success.isNull || success.fieldStr? "completeness" == some "partial" then
+                    (observation.fieldArr? "fallback_models").getD #[] else #[]
+                for model in models ++ fallback do
+                  if let some id := model.fieldStr? "id" then customModels := customModels.push (name, id)
+  let some (provider, model) := OrbCore.ProxyModelRouting.directEntry? requested path customModels
+    | return none
+  let hydrated ← loadHydratedProviders st.store st.cfg.workingDir
+  let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
+  let cliUrl ← resolveCliProxyBaseUrl
+  let targets := (parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson #[(provider, model)])
+    providers hydrated cliUrl cliKey).filter (fun t => !t.apiKey.isEmpty)
+  -- Explicit in-memory chain snapshots can be the configured standard accounts
+  -- (including hermetic transports). Do not resurrect them over disabled store rows.
+  let hasConfiguredOwner := providers.any (fun p => p.providerType == provider || p.id == provider ||
+      (p.providerType == "custom" && OrbCore.ProxyModelRouting.customProviderName p.name == provider)) ||
+    hydrated.any (fun p => p.providerType == provider || p.id == provider)
+  let targets := if targets.isEmpty && !hasConfiguredOwner then
+      (chains.flatMap (·.targets)).filter (fun t =>
+        t.provider == provider && t.modelId == model && !t.apiKey.isEmpty)
+    else targets
+  -- Structural guarantee: a direct route can only carry the requested model.
+  let keep := fun (t : ProviderTarget) =>
+    t.modelId == model || t.modelId == canonicalAntigravityProxyModelId model
+  return some { id := requested, name := requested, targets := targets.filter keep }
 
 private def selectRoutingChainForBody (chains : Array RoutingChain) (body : ByteArray) : RoutingChain :=
   let reqModel? :=
@@ -1335,37 +1379,27 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
         let denyReason := ((capWord >>> 1) &&& 0x7).toNat
         let scopeStr := if denyReason == 2 then "user" else "global"
         return mkJson 429 s!"\{\"error\":\{\"type\":\"spend_cap_exceeded\",\"code\":\"daily_spend_cap_exceeded\",\"scope\":{jsonEscape scopeStr},\"message\":\"Daily spend cap reached\"}}"
-  let rawRequestedModel := ((bodyJv.fieldStr? "model").getD defaultCodexModel).trimAscii.toString
+  let rawRequestedModel := (bodyJv.fieldStr? "model").getD defaultCodexModel
   let chains ← st.chainsRef.get
-  let exactChainMatch? :=
-    (findMatchingRoutingChain? chains rawRequestedModel).orElse
-      (fun _ => findMatchingRoutingChain? chains requestedModel)
-  let rawActiveChain0 := selectRoutingChainForBody chains req.bodySlice.toByteArray
-  let rawActiveChain ← do
-    if st.proxyMockTransport?.isSome then
-      pure rawActiveChain0
-    else
-      let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
-      let cliUrl ← resolveCliProxyBaseUrl
-      if cliKey.isEmpty then
-        pure rawActiveChain0
-      else
-        match exactChainMatch? with
-        | some mc => pure mc
-        | none =>
-          let cliTgt : ProviderTarget := {
-            accountId := "cliproxyapi"
-            provider := "openai"
-            baseUrl := cliUrl
-            apiKey := cliKey
-            modelId := canonicalAntigravityProxyModelId requestedModel
-          }
-          if let some defChain := chains.find? (fun c => c.id == "default") then
-            pure { defChain with targets := defChain.targets.push cliTgt }
-          else if rawActiveChain0.targets.isEmpty then
-            pure { id := "cliproxyapi", name := "CLIProxyAPI", targets := #[cliTgt] }
-          else
-            pure { id := requestedModel, name := requestedModel, targets := #[cliTgt] ++ rawActiveChain0.targets }
+  -- A named model is served by its saved chain or by the provider owning that
+  -- exact model. It is NEVER rewritten to another model: only a chain the caller
+  -- named may fall back across models. Only a request with no `model` field
+  -- keeps the default chain.
+  let mut routed? : Option RoutingChain := none
+  let mut routeKind := "chain"
+  if (bodyJv.fieldStr? "model").isNone then
+    routed? := some (selectRoutingChainForBody chains req.bodySlice.toByteArray)
+    routeKind := "default"
+  else
+    match findMatchingRoutingChain? chains rawRequestedModel with
+    | some matched => routed? := some matched
+    | none =>
+      routed? ← directRoutingChain? st chains rawRequestedModel cleanPath
+      routeKind := "direct"
+  let some rawActiveChain := routed?
+    | return mkJson 400 (OrbCore.ProxyModelRouting.unknownModelBody rawRequestedModel)
+  if routeKind == "direct" && rawActiveChain.targets.isEmpty then
+    return mkJson 503 (OrbCore.ProxyModelRouting.noProviderBody rawRequestedModel)
   let activeChain := filterChainTargetsForUserPrefs rawActiveChain userPrefs
   if proxyOwnerUserId?.isSome && !rawActiveChain.targets.isEmpty && activeChain.targets.isEmpty then
     return mkJson 403 "{\"error\":\"no_user_enabled_providers\",\"message\":\"All configured inference providers for this model are disabled in your preferences.\"}"
@@ -1473,6 +1507,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     recordProxyUsage st.store nowEpochSec
       ((usedTarget?.map (·.modelId)).getD requestedModel) ((usedTarget?.map (·.provider)).getD "")
       out.selectedAccount (execKey?.getD "") usedMissionId callerKind (extractProxyUsage out.body)
+      (requestedModel := rawRequestedModel)
   if let (some program, some mid, some sel) := (expected?, boundMid?, selection?) then
     let text := String.fromUTF8? out.body |>.getD ""
     for line in text.splitOn "\n" do
@@ -1483,7 +1518,19 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
           discard <| writeReceipt st.cfg.workingDir mid {
             revision := sel.revision, requestedModel := requestedModel, program := confirmed, model := model
           }
+  let servedTarget? := dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)
+  let effectiveModel := (servedTarget?.map (·.modelId)).filter (!·.isEmpty) |>.getD rawRequestedModel
+  discard <| execParamQuery st.store.missionsDb
+    ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,requested_model,status,http_status,retries) " ++
+     "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9);")
+    #[formatEpochIso8601Utc nowEpochSec, (if routeKind == "chain" then dispatchChain.id else routeKind),
+      (servedTarget?.map (·.provider)).getD "", out.selectedAccount, effectiveModel, rawRequestedModel,
+      (if out.status ≥ 200 && out.status < 300 then "ok" else "error"), toString out.status,
+      toString (out.attemptsUsed - 1)]
   let diagHdrs := out.headers ++ #[
+    ("X-Orb-Requested-Model", rawRequestedModel),
+    ("X-Orb-Effective-Model", effectiveModel),
+    ("X-Orb-Route", if routeKind == "chain" then s!"chain:{dispatchChain.id}" else routeKind),
     ("X-Orb-Selected-Account", out.selectedAccount),
     ("X-Orb-Attempts-Used", s!"{out.attemptsUsed}"),
     ("X-Orb-Verdict-Code", s!"{out.verdictCode}"),

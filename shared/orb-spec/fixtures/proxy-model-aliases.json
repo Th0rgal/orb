@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "reference": "4199fc06e^:src/api/proxy.rs and src/ai_providers.rs; configured aliases remain open-ended",
+  "provider_prefixes": [
+    ["anthropic","anthropic"],["openai","openai"],["codex","openai"],["google","google"],["gemini","google"],["antigravity","antigravity"],
+    ["amazon-bedrock","amazon-bedrock"],["azure","azure"],["open-router","open-router"],["mistral","mistral"],["groq","groq"],["xai","xai"],
+    ["deep-infra","deep-infra"],["cerebras","cerebras"],["cohere","cohere"],["together-ai","together-ai"],["perplexity","perplexity"],
+    ["github-copilot","github-copilot"],["zai","zai"],["minimax","minimax"],["muse","muse"],["meta","muse"],["muse-code","muse-code"],["kimi","kimi"],["custom","custom"]
+  ],
+  "bare_cases": [
+    {"model":"gpt-example","path":"/v1/responses","expected":["openai","gpt-example"]},
+    {"model":"gpt-example","path":"/v1/chat/completions","expected":["openai","gpt-example"]},
+    {"model":"claude-example","path":"/v1/messages","expected":["anthropic","claude-example"]},
+    {"model":"claude-fable-5-2","path":"/v1/chat/completions","expected":["anthropic","claude-fable-5-2"]},
+    {"model":"k3-1m","path":"/v1/chat/completions","expected":["kimi","k3-1m"]},
+    {"model":"k3","path":"/v1/chat/completions","expected":["kimi","k3"]},
+    {"model":"kimi-for-coding-highspeed","path":"/v1/chat/completions","expected":["kimi","kimi-for-coding-highspeed"]},
+    {"model":"agy-demo","path":"/v1/chat/completions","expected":["google","gemini-4-argon"]},
+    {"model":"gemini-4-argon-eap","path":"/v1/chat/completions","expected":["google","gemini-4-argon"]},
+    {"model":"MiniMax-M3","path":"/v1/chat/completions","expected":["minimax","MiniMax-M3"]},
+    {"model":"fable-5.2","path":"/v1/chat/completions","expected":null},
+    {"model":"reviewer","path":"/v1/chat/completions","expected":null}
+  ],
+  "stock_entries": [
+    {"id":"builtin/smart","entries":[["minimax","MiniMax-M3"],["zai","glm-5.3"],["muse","muse-spark-1.3-contributor"]]},
+    {"id":"builtin/cheap","entries":[["zai","glm-4.7"]]},
+    {"id":"builtin/fast","entries":[["zai","glm-5-turbo"]]},
+    {"id":"builtin/assistant","entries":[["google","gemini-4-carbon-eap"],["minimax","MiniMax-M3"],["cerebras","zai-glm-4.7"]]},
+    {"id":"google-opus","entries":[["antigravity","claude-opus-5-5-high"],["antigravity","claude-opus-5-5-medium"],["antigravity","claude-opus-4-6-thinking"],["antigravity","agy-model-high"],["google","gemini-4-carbon-eap"]]},
+    {"id":"google-sonnet","entries":[["antigravity","claude-sonnet-5-5-high"],["antigravity","claude-sonnet-5-5-medium"],["antigravity","claude-sonnet-4-6"],["antigravity","agy-model-high"],["google","gemini-4-carbon-eap"]]}
+  ]
+}

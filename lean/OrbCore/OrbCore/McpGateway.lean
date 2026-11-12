@@ -19,6 +19,7 @@ import OrbCore.LegacyHydrate
 import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.RemoteDispatch
+import OrbCore.ProxyModelRouting
 import OrbCore.ProjectFilesAndController
 
 namespace OrbCore.McpGateway
@@ -637,7 +638,18 @@ def dispatchMcpToolCall
 
   | "start_mission" | "consult_model" =>
     let title := ((args.fieldStr? "title").orElse (fun _ => args.fieldStr? "summary") |>.getD "Delegated Mission").trimAscii.toString
-    let prompt := ((args.fieldStr? "prompt").orElse (fun _ => args.fieldStr? "goal") |>.getD "").trimAscii.toString
+    let isConsult := toolName == "consult_model"
+    -- The published consult contract carries `question` (+ optional `files`).
+    let consultFiles := ((args.fieldArr? "files").getD #[]).filterMap JVal.asStr?
+    let consultPrompt :=
+      let q := ((args.fieldStr? "question").getD "").trimAscii.toString
+      if q.isEmpty || consultFiles.isEmpty then q
+      else q ++ "\n\nRead these files first:\n" ++ String.intercalate "\n" (consultFiles.toList.map (fun f => s!"- {f}"))
+    let prompt :=
+      if isConsult && !consultPrompt.isEmpty then consultPrompt
+      else ((args.fieldStr? "prompt").orElse (fun _ => args.fieldStr? "goal") |>.getD "").trimAscii.toString
+    if isConsult && prompt.isEmpty then
+      return mcpErr "invalid_request" "consult_model requires a non-empty `question`"
     let rawProj := (args.fieldStr? "project").getD callerProj
     let effProj ← match checkProjectScope claims rawProj with
       | .ok p => pure p
@@ -647,7 +659,13 @@ def dispatchMcpToolCall
       if toolName == "consult_model" then ((args.fieldStr? "backend").getD "opencode")
       else ((args.fieldStr? "backend").getD "claudecode")
     let backend := if rawBackend == "claude" then "claudecode" else rawBackend
-    let modelOv := (args.fieldStr? "model_override").orElse (fun _ => args.fieldStr? "model") |>.getD ""
+    let rawModelOv := (args.fieldStr? "model_override").orElse (fun _ => args.fieldStr? "model") |>.getD ""
+    let modelOv ←
+      if isConsult then
+        match OrbCore.ProxyModelRouting.consultModel? rawModelOv with
+        | some routed => pure routed
+        | none => return mcpErr "unknown_model" s!"consult_model cannot route model `{rawModelOv}`. Use <provider>/<model> (e.g. anthropic/claude-fable-5-2, openai/gpt-6-astra) or a short alias (fable-5.2, opus-5.5, gpt-6-astra)."
+      else pure rawModelOv
     let effort := (args.fieldStr? "model_effort").orElse (fun _ => args.fieldStr? "reasoning_effort") |>.getD ""
     let parentMid := ((args.fieldStr? "parent_mission_id").filter (!·.isEmpty)).getD callerMid
     let requestedRn? := (args.fieldStr? "remote_node_id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
@@ -749,6 +767,9 @@ def dispatchMcpToolCall
       tagsArr := tagsArr.push (AutoPlacement.exclusionTagPrefix ++ nodeId)
     let tagsJson := renderCompact (.arr (tagsArr.map JVal.str))
     let authMode := if toolName == "consult_model" then "readonly" else "writer"
+    -- A consultation with nowhere to run must fail, not sit at awaiting_user/active.
+    if isConsult && (remoteSup?.isNone || inheritedRn?.isNone) then
+      return mcpErr "no_execution_placement" s!"consult_model `{modelOv}` was not started: no execution node is available for this session. Pass remote_node_id or run from a placed mission." true
     let mid ← newUuidV4
     let initRev : UInt64 := if effProj.isEmpty && folder.isEmpty then 0 else 1
     let initStatus := if !prompt.isEmpty then "active" else "awaiting_user"
