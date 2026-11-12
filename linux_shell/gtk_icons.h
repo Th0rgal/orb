@@ -11,6 +11,10 @@ typedef struct { GPtrArray *spinning; guint src; int step; } OrbIconSpinner;
 void orb_spinner_stop(OrbIconSpinner *sp);
 GtkWidget *orb_make_icon_widget(OrbIconSpinner *sp, const char *icon, const char *color, const char *status);
 void orb_gtk_bind_pointer_cursor(GtkWidget *w);
+/* Starts a compositor-driven move of `w`'s toplevel with the primary button held. */
+void orb_gtk_begin_window_drag(GtkWidget *w);
+/* Wraps `child` so pressing on its empty space moves the window. */
+GtkWidget *orb_gtk_drag_area(GtkWidget *child);
 #endif
 
 #endif

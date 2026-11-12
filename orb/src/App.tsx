@@ -9,12 +9,12 @@ import {
 import { markUnfocusedBtwDirty, noteBtwPresentationHint } from "./btwAgent";
 import { lookupMissionById, resetMissionLookup } from "./missionLookup";
 import { movedMission, withMovedMissions } from "./moves";
-import { applyServerPlacementEvent } from "./missionMove";
+import { applyServerPlacementEvent, moveMission } from "./missionMove";
 import { MissionLookupContext } from "./orchestrationModel";
-import { renamedTitle, withRenamedTitles } from "./renames";
+import { renamedTitle, renameOptimistically, withRenamedTitles } from "./renames";
 import { readString, writeString } from "./storage";
 import { nodeLabel } from "./machines/nodes";
-import { isLive, isWorking } from "./missionStatus";
+import { isLive, isWorking, missionActivity, presentedStatus } from "./missionStatus";
 import { swallow } from "./log";
 import { connectClientLink, reportClientHarnesses, type RemoteStart } from "./clientLink";
 import {requireSpeedSupport} from './CodexSpeedPicker';
@@ -51,11 +51,12 @@ import {startLocalQueueWorker} from "./localMessageQueue";
 const BtwSettings = lazy(() => import("./btwSettings").then(module => ({ default: module.BtwSettings })));
 import { screenName, startUsageTelemetry, usageTelemetry } from "./usageTelemetry";
 import {type PlanProgressData} from "./PlanProgress";
-import { startLocalOrigin, localAgentForLaunch } from "./localAgents";
+import { startLocalOrigin, localAgentForLaunch, localRunActive } from "./localAgents";
 import { MachineLoadBadge, byLeastLoaded, firstAvailableNodeId, recordFleet, recordMissions } from "./machineLoad";
 import { imagePrompt, stageLocalImages, stageRemoteImages, type DraftImage } from "./imageAttachments";
 import { FilePanelProvider, FilePanelButton } from "./FilePanel";
-import { ErrorToast, SlotActiveContext } from "./toast";
+import { ErrorToast, SlotActiveContext, notify } from "./toast";
+import { copyText } from "./clipboard";
 import { rememberLaunch, recalledLaunch, missionDestination, launchRefusal, isAdministrationNode, remoteLaunchPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
 import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR } from "./goal";
 import { chipToAttachment, type AttachChip } from "./attach";
@@ -116,7 +117,7 @@ import { loadTranscript, noteLiveMissionIds, peekReadyTranscript, prefetchTransc
 import { loadPersistedSidebar, savePersistedSidebar } from "./persistentCache";
 import { historyScope } from "./resourceCache";
 import { mergeById, pollWhileVisible } from "./poll";
-import { LiveProjectsSection, ProjectFileView, isMissionDeleting } from "./ProjectFiles";
+import { LiveProjectsSection, ProjectFileView, isMissionDeleting, missionCopyId } from "./ProjectFiles";
 const ProjectSettings=lazy(()=>import("./ProjectSettings").then(module=>({default:module.ProjectSettings})));
 const MissionSettings=lazy(()=>import("./MissionSettings").then(module=>({default:module.MissionSettings})));
 import {
@@ -142,8 +143,12 @@ import {
   isClientPlacement,
   isConnected,
   isMissionParticipant,
+  archiveMission,
+  listArchivedMissions,
   listCompletedMissions,
   listMissions,
+  renameMission,
+  reopenMission,
   listProjectMissions,
   listProjects,
   listProviders,
@@ -183,6 +188,8 @@ import { MissionView, NativeMissionView } from "./mission/MissionView";
 import {
   createNativeChromeSyncer,
   installNativeChromeWindowHandlers,
+  type NativeMissionAction,
+  withLiveExecution,
   isNativeChromeEnabled,
   notifyNativeChromeShell,
 } from "./nativeChromeBridge";
@@ -1039,6 +1046,51 @@ export default function App() {
   };
 
   const nativeChromeSyncer = nativeChromeActive ? createNativeChromeSyncer() : null;
+  // The HTML sidebar (and its archive pager) is not mounted under native chrome, so the
+  // native Archived section is fed from here.
+  const [nativeArchived, setNativeArchived] = createSignal<Mission[]>([]);
+  const loadNativeArchived = () => {
+    const version = connectionVersion();
+    void listArchivedMissions()
+      .then(rows => { if (version === connectionVersion()) setNativeArchived(rows.filter(m => !isMissionDeleting(m.id))); })
+      .catch(swallow("app.nativeArchived"));
+  };
+  if (nativeChromeActive) {
+    createEffect(on(connectionVersion, () => { setNativeArchived([]); if (isConnected()) loadNativeArchived(); }));
+    onMount(() => {
+      const reload = () => loadNativeArchived();
+      window.addEventListener("orb:mission-archived", reload);
+      onCleanup(() => window.removeEventListener("orb:mission-archived", reload));
+    });
+  }
+  /** Native sidebar context-menu actions, sharing the HTML sidebar's API calls. */
+  const nativeMissionAction = (action: NativeMissionAction, id: string, arg: string): boolean => {
+    const mission = findKnownMission(id) ?? nativeArchived().find(m => m.id === id);
+    if (!mission) return false;
+    const fail = (title: string) => (error: unknown) => notify({ kind: "error", key: `native-action:${id}`, title, message: error instanceof Error ? error.message : String(error) });
+    const settle = () => { void refreshMissions(); loadNativeArchived(); };
+    switch (action) {
+      case "rename":
+        if (!arg || arg === mission.title) return false;
+        void renameOptimistically("mission", id, arg, mission.title ?? null, () => renameMission(id, arg)).then(settle, swallow("app.nativeRename", { mission: id }));
+        return true;
+      case "move":
+        if (!arg || arg === (mission.project ?? "")) return false;
+        void moveMission(id, arg, "", mission.project ?? null).then(settle, fail("Couldn’t move the conversation"));
+        return true;
+      case "archive":
+        void archiveMission(id).then(settle, fail("Couldn’t archive the conversation"));
+        return true;
+      case "restore":
+        void reopenMission(id).then(settle, fail("Couldn’t restore the conversation"));
+        return true;
+      case "copy-id":
+        void copyText(missionCopyId(mission)).catch(fail("Couldn’t copy the mission ID"));
+        return true;
+      case "settings":
+        return open(`ms:${id}`);
+    }
+  };
   onMount(() => {
     const disposeHandlers = installNativeChromeWindowHandlers({
       open: (target) => open(target),
@@ -1051,6 +1103,7 @@ export default function App() {
         setNewProject(slug);
       },
       getScope: historyScope,
+      missionAction: nativeMissionAction,
     });
     onCleanup(() => {
       disposeHandlers();
@@ -1078,9 +1131,21 @@ export default function App() {
         const c = projectColor(proj.slug);
         if (c) projColors[proj.slug] = c;
       }
-      const liveMissions = missions();
-      const compMissions = completedMissions();
-      const projMissions = projectMissions();
+      // Present the same effective status as the HTML sidebar row (`rowEffectiveStatus` in
+      // ProjectFiles.tsx): a just-sent turn, a "send now" handoff or a local run reads as working
+      // even before Core's mission list catches up, so switching away never shows a stale glyph.
+      // The live list is the single owner of execution state: `syncOpenMission` patches only it
+      // (an optimistic send keeps `updated_at`), so per-project and completed copies take their
+      // status from it instead of overriding it on a timestamp tie in `orb-locald`'s merge.
+      const live = new Map(missions().map(m => [m.id, m]));
+      const shown = (rows: readonly Mission[]) => withLiveExecution(rows, live).map(m => {
+        const status = presentedStatus(m, missionActivity(m, [], { localRun: localRunActive(m.id) }));
+        return status === m.status ? m : { ...m, status };
+      });
+      const liveMissions = shown(withRenamedTitles("mission", missions(), m => m.id));
+      const archived = withRenamedTitles("mission", nativeArchived(), m => m.id);
+      const compMissions = shown(completedMissions());
+      const projMissions = Object.fromEntries(Object.entries(projectMissions()).map(([slug, rows]) => [slug, shown(rows)]));
       const projFolders = projectFolders();
       const projFiles = projectFiles();
       nativeChromeSyncer.schedule({
@@ -1098,6 +1163,7 @@ export default function App() {
         projectFiles: projFiles,
         missions: liveMissions,
         completedMissions: compMissions,
+        archivedMissions: archived,
         projectMissions: projMissions,
       });
     });
