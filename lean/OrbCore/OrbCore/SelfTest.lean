@@ -10,6 +10,7 @@
 -/
 import OrbCore
 import OrbCore.ManagedProviderTests
+import OrbCore.ManagedProvisioningTests
 
 namespace OrbCore.SelfTest
 
@@ -56,6 +57,15 @@ private def exceptStrEq (a b : Except String String) : Bool :=
   | .ok x, .ok y => x == y
   | .error x, .error y => x == y
   | _, _ => false
+
+/-- Fixtures which need a live VM must explicitly replay its first relay poll. -/
+private def provisionReadyFixture (st : ManagedComputeStore) (fleet : ManagedFleetState)
+    (machine : ManagedMachine) (nowEpoch : UInt64) : IO (Except String ManagedMachine) := do
+  let .ok m ← provisionManagedMachine st fleet machine nowEpoch
+    | return .error "fixture_reservation_failed"
+  let .ok () ← recordAuthenticatedManagedPoll st m.id m.nodeBootEpoch nowEpoch
+    | return .error "fixture_poll_failed"
+  return .ok { m with status := "ready", lastPollSec := nowEpoch }
 
 private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
   -- Same-boot orphan mission cleanup: if a mission row is deleted while an intent/lease exists at the current boot,
@@ -1896,8 +1906,20 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
     id := "mm-r5b-1", sandboxName := "orb-managed-mm-r5b-1", provider := "boat",
     size := "small", spentCents := 25, nodeBootEpoch := 1, deletableAtSec := 100
   }
-  let .ok _ ← provisionManagedMachine mst fleet0 vm0 50
+  let .ok reservedVm ← provisionManagedMachine mst fleet0 vm0 50
     | do closeManagedComputeStore mst; IO.eprintln "[orb-core-test] FAIL: provisionManagedMachine failed"; return 1
+  if reservedVm.status != "provisioning" || reservedVm.lastPollSec != 0 ||
+      reservedVm.createdAtSec != 50 || reservedVm.expiresAtSec != 3650 then
+    closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: a reservation must not manufacture readiness"
+    return 1
+  let .ok () ← bindManagedProviderId mst vm0.id "boat-boot-1" 1
+    | do closeManagedComputeStore mst; return 1
+  let some (boundVm, _) ← getManagedMachine? mst vm0.id
+    | do closeManagedComputeStore mst; return 1
+  if boundVm.id != vm0.id || boundVm.providerId != "boat-boot-1" || boundVm.status != "provisioning" then
+    closeManagedComputeStore mst
+    return 1
   let .ok () ← putEnrollmentToken mst "mm-r5b-1" "enroll-boot-1"
     | do closeManagedComputeStore mst; return 1
   let .ok r5Store ← openCoreStore s!"{r5Root}/core"
@@ -1912,6 +1934,12 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
     proxyCooldownsRef := r5CooldownsRef, seqRef := r5SeqRef,
     managedStore? := some mst
   }
+  let .ok badPollReq := parseRequest "GET /api/managed-machines/relay/poll HTTP/1.1\r\nHost: 127.0.0.1\r\nx-orb-machine-id: mm-r5b-1\r\n\r\n".toUTF8 none
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok badPollResp ← dispatchCoreRequest r5App badPollReq 64
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  if badPollResp.status != 401 then
+    closeCoreStore r5Store; closeManagedComputeStore mst; return 1
   let enrollBody := "{\"machine_id\":\"mm-r5b-1\",\"enroll_token\":\"enroll-boot-1\"}"
   let enrollRaw := s!"POST /api/managed-machines/enroll HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {enrollBody.utf8ByteSize}\r\n\r\n{enrollBody}".toUTF8
   let .ok enrollReq := parseRequest enrollRaw none | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
@@ -1923,6 +1951,24 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
     closeCoreStore r5Store
     closeManagedComputeStore mst
     IO.eprintln "[orb-core-test] FAIL: HTTP enroll or replay rejection failed"
+    return 1
+  let some (enrolledVm, _) ← getManagedMachine? mst vm0.id
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  if enrolledVm.status != "provisioning" || enrolledVm.lastPollSec != 0 then
+    closeCoreStore r5Store; closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: enrollment alone must not mark ready"
+    return 1
+  let readyPollRaw := s!"GET /api/managed-machines/relay/poll HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {nodeTok1}\r\nx-orb-machine-id: mm-r5b-1\r\nx-orb-boot-epoch: 1\r\n\r\n".toUTF8
+  let .ok readyPollReq := parseRequest readyPollRaw none
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok readyPollResp ← dispatchCoreRequest r5App readyPollReq 66
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let some (polledVm, polledSlice) ← getManagedMachine? mst vm0.id
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  if readyPollResp.status != 200 || polledVm.status != "ready" || polledVm.lastPollSec != 66 ||
+      polledSlice.activeComputeEligible != 1 || polledVm.providerId != "boat-boot-1" then
+    closeCoreStore r5Store; closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: authenticated poll must commit readiness and provider identity"
     return 1
   let .ok claim1 ← applyVmClaim mst "mm-r5b-1" "m-owner-1" {
     opCode := Orb.ManagedNode.ClaimOp.encode .claim, ownerInLineage := 1, ownerSuperseded := 0,
@@ -4150,7 +4196,7 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
 
   discard <| saveManagedFleetConfig mStore true true 50000 0 10
   let initFleet : ManagedFleetState := { enabled := true, boatEnabled := true, dailyCapCents := 50000, spentTodayCents := 0, maxConcurrent := 10 }
-  let .ok _ ← provisionManagedMachine mStore initFleet {
+  let .ok _ ← provisionReadyFixture mStore initFleet {
     id := "vm-legacy-1", sandboxName := "orb-managed-leg", provider := "boat", size := "small",
     status := "ready", nodeBootEpoch := store.bootEpoch, deletableAtSec := nowSec, ownerUserId := ""
   } nowSec | return (← fail "seed legacy managed VM failed")
@@ -4199,6 +4245,8 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
     seqRef := seqRef
     bunkerStateRef? := some bunkerRef
     managedStore? := some mStore
+    managedProvisioningOverride? := some (ManagedProvisioningTests.mockPolicyProvider mStore "leanci",
+      { coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n" })
     bootstrapAdminId := bootAdminId
     telemetrySink? := some telSink
     voiceSlots? := some voiceSlots
@@ -4211,8 +4259,9 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
       })
   }
 
-  let sendReq (method target tok body : String) : IO (Nat × String × Array (String × String)) := do
-    let authHdr := if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n"
+  let sendReq (method target tok body : String) (retryKey : String := "") : IO (Nat × String × Array (String × String)) := do
+    let authHdr := (if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n") ++
+      (if retryKey.isEmpty then "" else s!"Idempotency-Key: {retryKey}\r\n")
     let raw :=
       if body.isEmpty then
         s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}\r\n"
@@ -4506,7 +4555,22 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   -- Managed VMs: `alice` hitting daily spend cap gets `429` on `POST /api/managed-machines`, while `bob` (`no cap`, disables `boat`) spawns an auto VM (`leanci`) owned by `bob`, invisible to `admin` (`404` on `DELETE`)!
   let (alVmCapSt, _, _) ← sendReq "POST" "/api/managed-machines" aliceTok "{\"provider\":\"boat\",\"name\":\"alice-vm\"}"
   let (bobPrefBoatSt, _, _) ← sendReq "PUT" "/api/managed-machines/providers/boat/preference" bobTok "{\"enabled\":false}"
-  let (bobVmAutoSt, bobVmAutoBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\"}"
+  let (bobVmAutoSt, bobVmAutoBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\"}" "bob-managed-create"
+  let beforeRetrySpend ← getUserSpentTodayCents store bobId (formatEpochIso8601Utc nowSec |>.take 10 |>.toString)
+  let (bobRetrySt, bobRetryBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\"}" "bob-managed-create"
+  let afterRetrySpend ← getUserSpentTodayCents store bobId (formatEpochIso8601Utc nowSec |>.take 10 |>.toString)
+  if bobRetrySt != 201 || bobRetryBody != bobVmAutoBody || beforeRetrySpend != afterRetrySpend then
+    return (← fail "managed REST retry must not create another VM or charge spend twice")
+  let .ok beforeImageGuard ← execParamQuery mStore.db "SELECT COUNT(*) FROM managed_machines;" #[]
+    | return (← fail "managed image guard count failed")
+  let (privateImageSt, _, _) ← sendReq "POST" "/api/managed-machines" bobTok
+    "{\"provider\":\"leanci\",\"image\":\"unrelated-private-disk\"}"
+  let (privateSnapshotSt, _, _) ← sendReq "POST" "/api/managed-machines" bobTok
+    "{\"provider\":\"leanci\",\"from_snapshot\":\"unrelated-private-snapshot\"}"
+  let .ok afterImageGuard ← execParamQuery mStore.db "SELECT COUNT(*) FROM managed_machines;" #[]
+    | return (← fail "managed image guard count failed")
+  if privateImageSt != 409 || privateSnapshotSt != 409 || beforeImageGuard != afterImageGuard then
+    return (← fail "unscoped image/snapshot labels must rent nothing")
   let bobVmId := ((OrbBin.Json.parse bobVmAutoBody).toOption.getD (.obj #[]) |>.fieldStr? "id").getD ""
   let (_, admVmsBody, _) ← sendReq "GET" "/api/managed-machines" adminTok ""
   let (admDelBobVmSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{bobVmId}" adminTok ""
@@ -4516,6 +4580,37 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (admVmsBody.splitOn bobVmId).length != 1 ||
      admDelBobVmSt != 404 || bobDelBobVmSt != 200 then
     return (← fail s!"managed VM multi-user isolation/prefs/cap failed: alCap={alVmCapSt} bobVm={bobVmAutoSt}:{bobVmAutoBody} admVms={admVmsBody} admDel={admDelBobVmSt} bobDel={bobDelBobVmSt}")
+
+  -- MCP uses exactly the same mock provider/bootstrap pipeline as REST, with
+  -- ownership derived from its authenticated mission rather than tool arguments.
+  let .ok () ← upsertMission store {
+    id := "m-managed-parity", title := "Managed entry-point parity", status := "awaiting_user",
+    backend := "opencode", modelOverride := "", updatedAt := formatEpochIso8601Utc nowSec,
+    workingDirectory := muRoot, ownerUserId := bobId
+  } | return (← fail "managed parity mission fixture failed")
+  let parityClaims : McpSessionClaims := {
+    sessionId := "managed-parity-session", missionId := "m-managed-parity",
+    role := "executor", expiresAt := nowSec + 600
+  }
+  let parityArgs := OrbBin.Json.JVal.obj #[("provider", .str "leanci"), ("size", .str "small"),
+    ("ttl_minutes", .nat 5), ("idempotency_key", .str "mcp-managed-parity")]
+  let mcpCreated ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+    "spawn_managed_machine" parityArgs nowSec none app.managedProvisioningOverride?
+  let mcpReplay ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+    "spawn_managed_machine" parityArgs nowSec none app.managedProvisioningOverride?
+  let createdJson := (OrbBin.Json.parse mcpCreated).toOption.getD .null
+  let createdItem := (createdJson.field? "result").getD .null
+  let parityId := (createdItem.fieldStr? "id").getD ""
+  let some (parityVm, _) ← getManagedMachine? mStore parityId
+    | return (← fail "managed MCP parity VM missing")
+  if createdJson.fieldBool? "ok" != some true || mcpReplay != mcpCreated ||
+      parityVm.ownerUserId != bobId || parityVm.ownerMission != "m-managed-parity" ||
+      parityVm.status != "ready" || parityVm.lastPollSec == 0 || parityVm.providerId == parityVm.id then
+    return (← fail "REST/MCP provisioning parity or retry identity failed")
+  let mcpDestroyed ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+    "destroy_managed_machine" (.obj #[("machine_id", .str parityId)]) nowSec none app.managedProvisioningOverride?
+  if ((OrbBin.Json.parse mcpDestroyed).toOption.getD .null).fieldBool? "ok" != some true then
+    return (← fail "MCP provider-backed destroy failed")
 
   -- 7. Multi-user Opt-In Usage Telemetry & Speaker-Attributed Voice Relay (`/api/usage-telemetry/*`, `/api/voice/transcribe`)
   -- 7a. `scrubSecrets` covers API keys, hub tokens, GitHub tokens, Bearer headers, and password pairs without mangling prose
@@ -5300,11 +5395,13 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
     return (← fail s!"listProjectsJVal alias/override/phantom parity failed: {dedupedJson}")
 
   let fleetBoat : ManagedFleetState := { enabled := true, boatEnabled := true, dailyCapCents := 5000, maxConcurrent := 20 }
+  let .ok () ← saveManagedFleetConfig mStore true true 5000 0 20
+    | return (← fail "enable managed provider fixture failed")
   let vmBoat : ManagedMachine := {
     id := "vm-boat-1", sandboxName := "orb-managed-vm-boat-1", provider := "boat",
     size := "medium", status := "ready", spentCents := 0, nodeBootEpoch := 1, deletableAtSec := nowSec + 3600
   }
-  let .ok _ ← provisionManagedMachine mStore fleetBoat vmBoat nowSec
+  let .ok _ ← provisionReadyFixture mStore fleetBoat vmBoat nowSec
     | return (← fail "provisionManagedMachine vm-boat-1 failed")
   let .ok () ← putEnrollmentToken mStore "vm-boat-1" "enroll-secret-1"
     | return (← fail "putEnrollmentToken vm-boat-1 failed")
@@ -5997,6 +6094,12 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let tmpRoot := s!"/tmp/orb-core-selftest-{ts}"
   let .ok store ← openCoreStore tmpRoot
     | do IO.eprintln "[orb-core-test] FAIL: openCoreStore failed"; return 1
+  try
+    OrbCore.ManagedProvisioningTests.run tmpRoot
+  catch e =>
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: {e}"
+    return 1
   let m1 : MissionRecord := {
     id := "m-alpha", title := "Verify Lean 4 Core", status := "awaiting_user",
     backend := "codex", modelOverride := "", modelEffort := "high", workingDirectory := tmpRoot,

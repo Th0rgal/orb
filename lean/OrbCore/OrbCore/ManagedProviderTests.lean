@@ -21,6 +21,12 @@ def run : IO Unit := do
       return .ok response
   let sleeps ← IO.mkRef (#[] : Array UInt32)
   let provider := boat transport (fun ms => sleeps.modify (·.push ms))
+  check ((provider.quoteCents "small" 60).toOption == some 2 &&
+    (provider.quoteCents "default" 60).toOption == some 4 &&
+    (provider.quoteCents "large" 60).toOption == some 8 &&
+    (provider.quoteCents "xlarge" 720).toOption == some 240 &&
+    !(provider.quoteCents "xlarge" 0xffffffffffffffff).isOk &&
+    !(provider.quoteCents "unknown" 60).isOk) "provider-owned bounded lease quotes"
   let spec : SpawnSpec := {
     name := "orb-managed-test"
     size := "small"
@@ -61,7 +67,8 @@ def run : IO Unit := do
   requests.set #[]
   replies.set #[(200, machine)]
   check (← provider.resume "old/id" spec).isOk "resume succeeded"
-  check ((← requests.get)[0]!.path == "/sandboxes/old%2Fid/fork") "resume forks archived sandbox"
+  check ((← requests.get)[0]!.path == "/sandboxes/old%2Fid/fork" &&
+    ((← requests.get)[0]!.body.getD .null |>.field? "from").isNone) "resume forks archived sandbox without a snapshot override"
   replies.set #[(200, machine)]
   check (← provider.fork "sb-1" spec).isOk "fork succeeded"
   replies.set #[(200, .null)]

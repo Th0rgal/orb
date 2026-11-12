@@ -35,6 +35,14 @@ def sandboxNamePrefixFor (exeName : String) : String :=
   else
     "orb-managed-"
 
+def newManagedSandboxName (requested : String := "") : IO String := do
+  let namePrefix := sandboxNamePrefixFor (← IO.appPath).toString
+  let suffix ← if requested.trimAscii.toString.isEmpty then do
+    let id ← newUuidV4
+    pure (id.take 12).toString
+    else pure requested.trimAscii.toString
+  return if suffix.startsWith namePrefix then suffix else namePrefix ++ suffix
+
 /-- Managed machine record persisted in Core's fleet state. -/
 structure ManagedMachine where
   id           : String
@@ -51,7 +59,17 @@ structure ManagedMachine where
   ownerKind : String := ""
   requestedByMissionId : String := ""
   ownerUserId : String := ""
+  providerId : String := ""
+  createdAtSec : UInt64 := 0
+  expiresAtSec : UInt64 := 0
+  lastPollSec : UInt64 := 0
+  requestKey : String := ""
+  image : String := ""
   deriving Repr, DecidableEq
+
+/-- Legacy rows used the provider ID as Core's ID. New boots keep these identities separate. -/
+def ManagedMachine.effectiveProviderId (m : ManagedMachine) : String :=
+  if m.providerId.isEmpty then m.id else m.providerId
 
 /-- Managed fleet budget & concurrency state. -/
 structure ManagedFleetState where
@@ -63,17 +81,28 @@ structure ManagedFleetState where
   machines        : Array ManagedMachine := #[]
   deriving Repr, DecidableEq
 
+/-- Trusted caller spend snapshot. Pending VM reservations are added under the
+    managed store transaction, so concurrent requests cannot bypass a user cap. -/
+structure ManagedUserAdmission where
+  capCents : UInt64
+  inferenceCents : UInt64
+  computeCents : UInt64
+
 /-- Overflow-safe managed VM spawn admission through `Orb.Kernel.vmStep` (`orb_vm_step`). -/
-def admitManagedSpawn (st : ManagedFleetState) (reqCents : UInt64) (ttlMins : UInt32 := 60) : Bool :=
+def admitManagedSpawnCount (st : ManagedFleetState) (activeNat : Nat)
+    (reqCents : UInt64) (ttlMins : UInt32 := 60) : Bool :=
   if !st.enabled then false
   else if reqCents > st.dailyCapCents || st.spentTodayCents > st.dailyCapCents - reqCents then
     false
   else
-    let activeNat := (st.machines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
     let active : UInt32 := (Nat.min activeNat 0xFFFFFFFF).toUInt32
     let cap : UInt32 := (Nat.min st.maxConcurrent.toNat 0xFFFFFFFF).toUInt32
     let totalSpent : UInt64 := st.spentTodayCents + reqCents
     vmStep 0 1 3 0 0 0 0 0 active cap ttlMins 720 20 totalSpent st.dailyCapCents == 1
+
+def admitManagedSpawn (st : ManagedFleetState) (reqCents : UInt64) (ttlMins : UInt32 := 60) : Bool :=
+  admitManagedSpawnCount st
+    (st.machines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size reqCents ttlMins
 
 private def clampSpendU32 (v : UInt64) : UInt32 :=
   if v > 0xFFFFFFFF then 0xFFFFFFFF else v.toUInt32
@@ -212,7 +241,9 @@ def managedComputeDdl : String :=
   "spent_cents INTEGER NOT NULL,cordoned INTEGER NOT NULL,node_boot_epoch INTEGER NOT NULL," ++
   "deletable_at_sec INTEGER NOT NULL,owner_kind TEXT NOT NULL,requested_by_mission_id TEXT NOT NULL," ++
   "phase_code INTEGER NOT NULL,active_compute_eligible INTEGER NOT NULL," ++
-  "owner_user_id TEXT NOT NULL DEFAULT '');" ++
+  "owner_user_id TEXT NOT NULL DEFAULT '',provider_id TEXT NOT NULL DEFAULT ''," ++
+  "created_at_sec INTEGER NOT NULL DEFAULT 0,expires_at_sec INTEGER NOT NULL DEFAULT 0," ++
+  "last_poll_sec INTEGER NOT NULL DEFAULT 0,request_key TEXT NOT NULL DEFAULT '',image TEXT NOT NULL DEFAULT '');" ++
   "CREATE INDEX IF NOT EXISTS idx_managed_machines_owner ON managed_machines(owner_user_id);" ++
   "CREATE TABLE IF NOT EXISTS user_managed_provider_prefs(" ++
   "user_id TEXT NOT NULL,provider TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1," ++
@@ -239,6 +270,14 @@ def managedComputeDdl : String :=
   "updated_at INTEGER NOT NULL DEFAULT 0);"
 
 def managedAdditiveAlters : Array String := #[
+  "ALTER TABLE managed_machines ADD COLUMN provider_id TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE managed_machines ADD COLUMN created_at_sec INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE managed_machines ADD COLUMN expires_at_sec INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE managed_machines ADD COLUMN last_poll_sec INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE managed_machines ADD COLUMN request_key TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE managed_machines ADD COLUMN image TEXT NOT NULL DEFAULT '';",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_managed_provider_identity ON managed_machines(provider,provider_id) WHERE provider_id<>'';",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_managed_request ON managed_machines(provider,request_key) WHERE request_key<>'';",
   "ALTER TABLE managed_machines ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
   "CREATE INDEX IF NOT EXISTS idx_managed_machines_owner ON managed_machines(owner_user_id);",
   "CREATE TABLE IF NOT EXISTS mission_budgets(mission_id TEXT PRIMARY KEY,budget_deci_milli_usd INTEGER,reset_period TEXT NOT NULL DEFAULT 'total',vm_limits_json TEXT NOT NULL DEFAULT '',bandwidth_limits_json TEXT NOT NULL DEFAULT '',updated_at INTEGER NOT NULL DEFAULT 0);"
@@ -292,6 +331,12 @@ private def machineFromRow (row : Array String) : ManagedMachine :=
     ownerKind := cell row 11
     requestedByMissionId := cell row 12
     ownerUserId := cell row 15
+    providerId := cell row 16
+    createdAtSec := cellU64 row 17
+    expiresAtSec := cellU64 row 18
+    lastPollSec := cellU64 row 19
+    requestKey := cell row 20
+    image := cell row 21
   }
 
 private def vmSliceOf (row : Array String) : VmSliceState :=
@@ -347,7 +392,7 @@ def setUserManagedPref (st : ManagedComputeStore) (userId provider : String) (en
 
 private def loadMachineRows (db : SqliteDb) : IO (Except String (Array (Array String))) :=
   execParamQuery db
-    "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id FROM managed_machines ORDER BY id ASC;" #[]
+    "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id,provider_id,created_at_sec,expires_at_sec,last_poll_sec,request_key,image FROM managed_machines ORDER BY id ASC;" #[]
 
 def saveManagedFleetConfig (st : ManagedComputeStore) (enabled boatEnabled : Bool)
     (dailyCapCents spentTodayCents maxConcurrent : UInt64) : IO (Except String Unit) := do
@@ -477,15 +522,16 @@ private def machineParams (m : ManagedMachine) (slice : VmSliceState) : Array St
     m.id, m.sandboxName, m.provider, m.size, statusOfPhase slice.phaseCode, m.ownerMission,
     s!"{m.ttlMinutes}", s!"{m.spentCents}", if m.cordoned then "1" else "0",
     s!"{slice.nodeBootEpoch}", s!"{slice.deletableAt}", m.ownerKind, m.requestedByMissionId,
-    s!"{slice.phaseCode}", s!"{slice.activeComputeEligible}", m.ownerUserId
+    s!"{slice.phaseCode}", s!"{slice.activeComputeEligible}", m.ownerUserId, m.providerId,
+    s!"{m.createdAtSec}", s!"{m.expiresAtSec}", s!"{m.lastPollSec}", m.requestKey, m.image
   ]
 
 private def upsertMachineTx (db : SqliteDb) (m : ManagedMachine) (slice : VmSliceState) :
     IO (Except String Unit) := do
   let sql :=
-    "INSERT INTO managed_machines(id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id) " ++
-    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) " ++
-    "ON CONFLICT(id) DO UPDATE SET sandbox_name=excluded.sandbox_name,provider=excluded.provider,size=excluded.size,status=excluded.status,owner_mission=excluded.owner_mission,ttl_minutes=excluded.ttl_minutes,spent_cents=excluded.spent_cents,cordoned=excluded.cordoned,node_boot_epoch=excluded.node_boot_epoch,deletable_at_sec=excluded.deletable_at_sec,owner_kind=excluded.owner_kind,requested_by_mission_id=excluded.requested_by_mission_id,phase_code=excluded.phase_code,active_compute_eligible=excluded.active_compute_eligible,owner_user_id=excluded.owner_user_id;"
+    "INSERT INTO managed_machines(id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id,provider_id,created_at_sec,expires_at_sec,last_poll_sec,request_key,image) " ++
+    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22) " ++
+    "ON CONFLICT(id) DO UPDATE SET sandbox_name=excluded.sandbox_name,provider=excluded.provider,size=excluded.size,status=excluded.status,owner_mission=excluded.owner_mission,ttl_minutes=excluded.ttl_minutes,spent_cents=excluded.spent_cents,cordoned=excluded.cordoned,node_boot_epoch=excluded.node_boot_epoch,deletable_at_sec=excluded.deletable_at_sec,owner_kind=excluded.owner_kind,requested_by_mission_id=excluded.requested_by_mission_id,phase_code=excluded.phase_code,active_compute_eligible=excluded.active_compute_eligible,owner_user_id=excluded.owner_user_id,provider_id=excluded.provider_id,created_at_sec=excluded.created_at_sec,expires_at_sec=excluded.expires_at_sec,last_poll_sec=excluded.last_poll_sec,request_key=excluded.request_key,image=excluded.image;"
   match ← execParamQueryUnlocked db sql (machineParams m slice) with
   | .error e => return .error e
   | .ok _ => return .ok ()
@@ -493,7 +539,7 @@ private def upsertMachineTx (db : SqliteDb) (m : ManagedMachine) (slice : VmSlic
 private def selectMachineTx (db : SqliteDb) (machineId : String) :
     IO (Except String (Option (ManagedMachine × VmSliceState))) := do
   match ← execParamQueryUnlocked db
-      "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id FROM managed_machines WHERE id=?1;"
+      "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id,provider_id,created_at_sec,expires_at_sec,last_poll_sec,request_key,image FROM managed_machines WHERE id=?1;"
       #[machineId] with
   | .error e => return .error e
   | .ok rows =>
@@ -506,6 +552,15 @@ def getManagedMachine? (st : ManagedComputeStore) (machineId : String) :
   match ← st.db.mu.atomically (selectMachineTx st.db machineId) with
   | .ok v => return v
   | .error _ => return none
+
+def getManagedMachineByRequestKey? (st : ManagedComputeStore) (provider requestKey : String) :
+    IO (Option ManagedMachine) := do
+  if requestKey.isEmpty then return none
+  let .ok rows ← execParamQuery st.db
+      "SELECT id FROM managed_machines WHERE provider=?1 AND request_key=?2;" #[provider, requestKey]
+    | return none
+  if rows.size < 2 then return none
+  return (← getManagedMachine? st (cell rows[1]! 0)).map Prod.fst
 
 /-- Apply one lifecycle event through `verifyVmLifecycleAdmit` / `stepVmSlice` and persist it in one
     immediate transaction. `resume` and `replace` store the successor boot epoch the reducer returns.
@@ -528,7 +583,9 @@ def applyVmLifecycle (st : ManagedComputeStore) (machineId : String) (ev : VmSli
       | .ok () => return .ok (next, effs)
 
 def provisionManagedMachine (st : ManagedComputeStore) (fleet : ManagedFleetState)
-    (machine : ManagedMachine) (nowEpoch : UInt64) : IO (Except String ManagedMachine) := do
+    (machine : ManagedMachine) (nowEpoch : UInt64)
+    (userAdmission? : Option ManagedUserAdmission := none) : IO (Except String ManagedMachine) := do
+  if machine.ttlMinutes < 5 || machine.ttlMinutes > 720 then return .error "managed_ttl_invalid"
   if !admitManagedSpawn fleet machine.spentCents machine.ttlMinutes.toUInt32 then
     return .error "managed_spawn_rejected"
   if !isKnownProvider machine.provider || machine.id.isEmpty || machine.nodeBootEpoch == 0 then
@@ -539,39 +596,97 @@ def provisionManagedMachine (st : ManagedComputeStore) (fleet : ManagedFleetStat
     nodeBootEpoch := machine.nodeBootEpoch
     deletableAt := machine.deletableAtSec
   }
-  let ev : VmSliceEvent := {
-    opCode := VmOp.encode .provision
-    ownerLive := 0
-    idleElapsed := 0
-    presentedBootEpoch := machine.nodeBootEpoch
-    nowEpoch := nowEpoch
+  -- Reserving provider capacity is not evidence of node readiness. Only an
+  -- authenticated relay poll may emit the verified `provision` event.
+  let reserved := { machine with
+    status := "provisioning", lastPollSec := 0,
+    createdAtSec := if machine.createdAtSec == 0 then nowEpoch else machine.createdAtSec,
+    expiresAtSec := if machine.expiresAtSec == 0 then nowEpoch + machine.ttlMinutes * 60 else machine.expiresAtSec
   }
-  let (next, _) := stepVmSlice slice ev
-  if next.phaseCode != 1 then
-    return .error "vm_provision_rejected"
   withImmediateTx st.db do
+    let .ok counts ← execParamQueryUnlocked st.db
+        "SELECT COUNT(*) FROM managed_machines WHERE phase_code IN (0,1);" #[]
+      | return .error "managed_admission_read_failed"
+    let .ok configRows ← execParamQueryUnlocked st.db
+        "SELECT enabled,boat_enabled,daily_cap_cents,spent_today_cents,max_concurrent FROM managed_fleet_state WHERE singleton_id=1;" #[]
+      | return .error "managed_admission_read_failed"
+    let current := if configRows.size > 1 then
+      { fleet with
+        enabled := cell configRows[1]! 0 == "1"
+        boatEnabled := cell configRows[1]! 1 == "1"
+        dailyCapCents := cellU64 configRows[1]! 2
+        spentTodayCents := cellU64 configRows[1]! 3
+        maxConcurrent := cellU64 configRows[1]! 4
+      }
+      else fleet
+    if counts.size < 2 || !admitManagedSpawnCount current (cellU64 counts[1]! 0).toNat machine.spentCents machine.ttlMinutes.toUInt32 then
+      return .error "managed_spawn_rejected"
+    if machine.provider == "boat" && !current.boatEnabled then return .error "provider_disabled"
+    if let some budget := userAdmission? then
+      if machine.ownerUserId.isEmpty then return .error "managed_user_missing"
+      let dayStart := (nowEpoch / 86400) * 86400
+      let .ok reservedRows ← execParamQueryUnlocked st.db
+          "SELECT COALESCE(SUM(spent_cents),0) FROM managed_machines WHERE owner_user_id=?1 AND created_at_sec>=?2;"
+          #[machine.ownerUserId, s!"{dayStart}"]
+        | return .error "managed_user_admission_read_failed"
+      if reservedRows.size < 2 then return .error "managed_user_admission_read_failed"
+      let compute := max budget.computeCents (cellU64 reservedRows[1]! 0)
+      if budget.inferenceCents > budget.capCents || compute > budget.capCents - budget.inferenceCents then
+        return .error "managed_user_spend_cap_exceeded"
+      let spent := budget.inferenceCents + compute
+      if machine.spentCents > budget.capCents - spent ||
+          admitManagedSpawnMultiUser { current with machines := #[] } machine.spentCents spent
+            (some budget.capCents) machine.ttlMinutes.toUInt32 != 0 then
+        return .error "managed_user_spend_cap_exceeded"
     match ← selectMachineTx st.db machine.id with
     | .error e => return .error e
     | .ok (some _) => return .error "managed_machine_exists"
     | .ok none =>
-      match ← upsertMachineTx st.db machine next with
+      match ← upsertMachineTx st.db reserved slice with
       | .error e => return .error e
       | .ok () =>
-        let newSpent := fleet.spentTodayCents + machine.spentCents
+        let newSpent := current.spentTodayCents + machine.spentCents
         let fleetSql :=
           "INSERT INTO managed_fleet_state(singleton_id,enabled,boat_enabled,daily_cap_cents,spent_today_cents,max_concurrent) " ++
           "VALUES(1,?1,?2,?3,?4,?5) ON CONFLICT(singleton_id) DO UPDATE SET " ++
           "enabled=excluded.enabled,boat_enabled=excluded.boat_enabled,daily_cap_cents=excluded.daily_cap_cents," ++
           "spent_today_cents=spent_today_cents+?6,max_concurrent=excluded.max_concurrent;"
-        discard <| execParamQueryUnlocked st.db fleetSql #[
-          if fleet.enabled then "1" else "0", if fleet.boatEnabled then "1" else "0",
-          s!"{fleet.dailyCapCents}", s!"{newSpent}", s!"{fleet.maxConcurrent}", s!"{machine.spentCents}"
-        ]
-        return .ok { machine with
-          status := statusOfPhase next.phaseCode
-          nodeBootEpoch := next.nodeBootEpoch
-          deletableAtSec := next.deletableAt
-        }
+        match ← execParamQueryUnlocked st.db fleetSql #[
+          if current.enabled then "1" else "0", if current.boatEnabled then "1" else "0",
+          s!"{current.dailyCapCents}", s!"{newSpent}", s!"{current.maxConcurrent}", s!"{machine.spentCents}"
+        ] with
+        | .error e => return .error e
+        | .ok _ => return .ok reserved
+
+/-- Bind the provider's mutable boot identity without replacing Core's durable ID. -/
+def bindManagedProviderId (st : ManagedComputeStore) (machineId providerId : String)
+    (bootEpoch : UInt64) : IO (Except String Unit) := do
+  if providerId.trimAscii.toString.isEmpty then return .error "provider_machine_id_missing"
+  withImmediateTx st.db do
+    let .ok (some (m, slice)) ← selectMachineTx st.db machineId
+      | return .error "managed_machine_missing"
+    if slice.nodeBootEpoch != bootEpoch || slice.phaseCode != 0 then return .error "stale_boot_epoch"
+    upsertMachineTx st.db { m with providerId } slice
+
+/-- Called only after authenticating a real relay poll. Enrollment and provider
+    readiness do not make a worker eligible. The poll and readiness commit together. -/
+def recordAuthenticatedManagedPoll (st : ManagedComputeStore) (machineId : String)
+    (bootEpoch nowEpoch : UInt64) : IO (Except String Unit) := do
+  withImmediateTx st.db do
+    let .ok (some (m, slice)) ← selectMachineTx st.db machineId
+      | return .error "managed_machine_missing"
+    if slice.nodeBootEpoch != bootEpoch || slice.phaseCode > 1 then return .error "stale_boot_epoch"
+    let next ← if slice.phaseCode == 0 then do
+      let ev : VmSliceEvent := {
+        opCode := VmOp.encode .provision, ownerLive := 0, idleElapsed := 0,
+        presentedBootEpoch := bootEpoch, nowEpoch
+      }
+      if verifyVmLifecycleAdmit slice.phaseCode ev.opCode ev.ownerLive ev.idleElapsed
+          slice.nodeBootEpoch ev.presentedBootEpoch ev.nowEpoch slice.deletableAt != 1 then
+        return .error "vm_provision_rejected"
+      pure (stepVmSlice slice ev).1
+      else pure slice
+    upsertMachineTx st.db { m with lastPollSec := max m.lastPollSec nowEpoch } next
 
 private def claimFromRow (row : Array String) : ManagedClaim :=
   {
@@ -944,7 +1059,7 @@ def renderManagedProvidersJson
   "[" ++ String.intercalate "," items.toList ++ "]"
 
 def renderManagedMachineItemJson (m : ManagedMachine) : String :=
-  s!"\{\"id\":{jsonEscape m.id},\"name\":{jsonEscape m.sandboxName},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"provider_id\":{jsonEscape m.id},\"node_id\":{jsonEscape s!"managed-{m.id}"},\"image\":\"ubuntu-24.04\",\"size\":{jsonEscape m.size},\"cpu\":4,\"ram_gb\":8,\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"owner_mission_id\":{if m.ownerMission.isEmpty then "null" else jsonEscape m.ownerMission},\"owner_kind\":{if m.ownerKind.isEmpty then "\"user\"" else jsonEscape m.ownerKind},\"node_boot_epoch\":{m.nodeBootEpoch},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cost_usd\":{formatCentsUsd2 m.spentCents},\"usd_per_hour\":0.10,\"ledger_closed\":{if m.status == "destroyed" then "true" else "false"},\"cordoned\":{if m.cordoned then "true" else "false"}}"
+  s!"\{\"id\":{jsonEscape m.id},\"name\":{jsonEscape m.sandboxName},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"provider_id\":{jsonEscape m.effectiveProviderId},\"node_id\":{jsonEscape s!"managed-{m.id}"},\"image\":{jsonEscape m.image},\"size\":{jsonEscape m.size},\"cpu\":4,\"ram_gb\":8,\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"owner_mission_id\":{if m.ownerMission.isEmpty then "null" else jsonEscape m.ownerMission},\"owner_kind\":{if m.ownerKind.isEmpty then "\"user\"" else jsonEscape m.ownerKind},\"node_boot_epoch\":{m.nodeBootEpoch},\"last_poll_sec\":{m.lastPollSec},\"created_at_sec\":{m.createdAtSec},\"expires_at_sec\":{m.expiresAtSec},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cost_usd\":{formatCentsUsd2 m.spentCents},\"usd_per_hour\":0.10,\"ledger_closed\":{if m.status == "destroyed" then "true" else "false"},\"cordoned\":{if m.cordoned then "true" else "false"}}"
 
 def renderManagedMachinesJson
     (st : ManagedFleetState)
@@ -960,7 +1075,7 @@ def renderManagedMachinesJson
     let enStr := if st.enabled then "true" else "false"
     let boatStr := if st.boatEnabled then "true" else "false"
     let items := st.machines.map fun m =>
-      s!"\{\"id\":{jsonEscape m.id},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"size\":{jsonEscape m.size},\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"node_boot_epoch\":{m.nodeBootEpoch},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cordoned\":{if m.cordoned then "true" else "false"}}"
+      s!"\{\"id\":{jsonEscape m.id},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"size\":{jsonEscape m.size},\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"node_boot_epoch\":{m.nodeBootEpoch},\"last_poll_sec\":{m.lastPollSec},\"created_at_sec\":{m.createdAtSec},\"expires_at_sec\":{m.expiresAtSec},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cordoned\":{if m.cordoned then "true" else "false"}}"
     s!"\{\"enabled\":{enStr},\"boat_enabled\":{boatStr},\"active_machines\":{active},\"max_concurrent\":{st.maxConcurrent},\"spent_today_cents\":{st.spentTodayCents},\"daily_cap_cents\":{st.dailyCapCents},\"machines\":[{String.intercalate "," items.toList}],\"budget\":{renderManagedBudgetJson st}}"
   | some uid =>
     let visible := st.machines.filter (fun m => m.ownerUserId == uid)

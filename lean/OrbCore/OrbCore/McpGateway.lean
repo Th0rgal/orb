@@ -165,19 +165,22 @@ def dispatchMcpToolCall
     (toolName : String)
     (args : JVal)
     (nowEpochSec : UInt64)
-    (remoteSup? : Option RemoteJobSupervisor := none) : IO String := do
+    (remoteSup? : Option RemoteJobSupervisor := none)
+    (managedProvisioningOverride? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none) : IO String := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let callerMid := claims.missionId
   let mut callerWorkDir := workingDir
   let mut callerProj := claims.project
+  let mut callerUserId := ""
   if !callerMid.isEmpty then
     if let .ok mRows ← execParamQuery store.missionsDb
-        "SELECT COALESCE(working_directory,''), COALESCE(project,'') FROM missions WHERE id=?1;" #[callerMid] then
+        "SELECT COALESCE(working_directory,''), COALESCE(project,''), COALESCE(owner_user_id,'') FROM missions WHERE id=?1;" #[callerMid] then
       if mRows.size > 1 then
         let wd := cell mRows[1]! 0
         let pj := cell mRows[1]! 1
         if !wd.isEmpty then callerWorkDir := wd
         if callerProj.isEmpty && !pj.isEmpty then callerProj := pj
+        callerUserId := cell mRows[1]! 2
 
   -- Idempotent replay for retried mutating MCP calls carrying `idempotency_key`
   let idemKeyTop := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
@@ -741,18 +744,23 @@ def dispatchMcpToolCall
     let prov := canonicalizeProvider ((args.fieldStr? "provider").getD "boat")
     let sz := (args.fieldStr? "size").getD "small"
     let ttl := (args.fieldUInt64? "ttl_minutes").getD 60
-    let sName ← match (args.fieldStr? "name").filter (!·.isEmpty) with
-      | some n => pure n
-      | none => do
-        let u ← newUuidV4
-        pure s!"orb-managed-{(u.take 8).toString}"
-    let mut mid ← newUuidV4
-    if prov == "boat" then
-      if let .ok (st, bJv) ← callBoatApi store.rootDir "POST" "/sandboxes"
-          (some (.obj #[("name", .str sName), ("size", .str sz), ("ttl_minutes", JVal.uint64 ttl)])) 20000 then
-        if 200 ≤ st && st < 300 then
-          if let some bid := bJv.fieldStr? "id" then
-            if !bid.isEmpty then mid := bid
+    let sName ← newManagedSandboxName ((args.fieldStr? "name").getD "")
+    let mid ← newUuidV4
+    let prefs ← if callerUserId.isEmpty then pure #[] else getUserManagedPrefs mc callerUserId
+    if !isUserManagedProviderEnabled prefs prov then
+      return mcpErr "provider_disabled_for_user" "This cloud provider is disabled in your preferences."
+    let quote ← match quoteManagedSpawnCents prov sz ttl (managedProvisioningOverride?.map Prod.fst) with
+      | .ok cents => pure cents
+      | .error e => return mcpErr "invalid_arguments" e
+    let callerUser? ← getUserById? store callerUserId
+    if !callerUserId.isEmpty && (callerUser?.isNone || (callerUser?.map (·.disabled)).getD true) then
+      return mcpErr "user_unavailable" "The owning user is unavailable."
+    let (infSpent, cmpSpent) ← if callerUserId.isEmpty then pure (0, 0)
+      else getUserSpentTodayCents store callerUserId (nowIso.take 10).toString
+    let userCap? := callerUser?.bind (·.dailySpendCapCents?)
+    let userAdmission? : Option ManagedUserAdmission := userCap?.map fun cap => {
+      capCents := cap, inferenceCents := infSpent, computeCents := cmpSpent
+    }
     let m : ManagedMachine := {
       id := mid
       sandboxName := sName
@@ -761,17 +769,18 @@ def dispatchMcpToolCall
       status := "provisioning"
       ownerMission := callerMid
       ttlMinutes := ttl
-      spentCents := 10
+      spentCents := quote
       nodeBootEpoch := 1
-      deletableAtSec := nowEpochSec + ttl * 60
+      deletableAtSec := nowEpochSec
+      expiresAtSec := nowEpochSec + ttl * 60
       ownerKind := if callerMid.isEmpty then "user" else "mission"
       requestedByMissionId := callerMid
+      ownerUserId := callerUserId
     }
-    match ← provisionManagedMachine mc fleet m nowEpochSec with
+    match ← spawnConfiguredManagedWorker mc store.rootDir fleet m args "" managedProvisioningOverride? userAdmission? with
     | .error e => return mcpErr "spawn_rejected" e
-    | .ok saved =>
-      let enrollTok ← newUuidV4
-      discard <| putEnrollmentToken mc saved.id enrollTok
+    | .ok spawned =>
+      let saved := spawned.machine
       let itemJson := (OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[])
       return mcpOk itemJson
 
@@ -791,28 +800,12 @@ def dispatchMcpToolCall
     let mid := (args.fieldStr? "machine_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
     let some (m, _) ← getManagedMachine? mc mid
       | return mcpErr "not_found" s!"Managed machine `{mid}` not found"
-    if toolName == "extend_managed_machine" then
-      let mins := (args.fieldUInt64? "minutes").orElse (fun _ => args.fieldUInt64? "ttl_minutes") |>.getD 60
-      let newDel := (if m.deletableAtSec > nowEpochSec then m.deletableAtSec else nowEpochSec) + mins * 60
-      discard <| execParamQuery mc.db
-        "UPDATE managed_machines SET ttl_minutes=ttl_minutes+?2,deletable_at_sec=?3 WHERE id=?1;"
-        #[m.id, s!"{mins}", s!"{newDel}"]
-      return mcpOk (.obj #[("ok", .bool true), ("id", .str m.id), ("deletable_at", JVal.uint64 newDel)])
-    else
-      let op :=
-        if toolName == "stop_managed_machine" then Orb.ManagedNode.VmOp.encode .stop
-        else if toolName == "resume_managed_machine" then Orb.ManagedNode.VmOp.encode .resume
-        else Orb.ManagedNode.VmOp.encode .destroy
-      if m.provider == "boat" then
-        if toolName == "stop_managed_machine" then discard <| callBoatApi store.rootDir "POST" s!"/sandboxes/{m.id}/stop" none 12000
-        else if toolName == "resume_managed_machine" then discard <| callBoatApi store.rootDir "POST" s!"/sandboxes/{m.id}/start" none 12000
-        else discard <| callBoatApi store.rootDir "DELETE" s!"/sandboxes/{m.id}" none 12000
-      match ← applyVmLifecycle mc m.id {
-        opCode := op, ownerLive := 0, idleElapsed := if toolName == "destroy_managed_machine" then 1 else 0,
-        presentedBootEpoch := m.nodeBootEpoch, nowEpoch := nowEpochSec
-      } with
-      | .error e => return mcpErr "lifecycle_rejected" e
-      | .ok _ => return mcpOk (.obj #[("ok", .bool true), ("id", .str m.id)])
+    let action := if toolName == "stop_managed_machine" then "stop"
+      else if toolName == "destroy_managed_machine" then "destroy"
+      else if toolName == "extend_managed_machine" then "extend" else "resume"
+    match ← runConfiguredManagedLifecycle mc store.rootDir m.id action nowEpochSec (managedProvisioningOverride?.map Prod.fst) with
+    | .error e => return mcpErr "lifecycle_rejected" e
+    | .ok result => return mcpOk result
 
   | "snapshot_managed_machine" =>
     let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"

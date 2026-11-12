@@ -20,6 +20,7 @@ import OrbBin.PosixExt
 import OrbBin.HttpClient
 import OrbCore.Store
 import OrbCore.Managed
+import OrbCore.ManagedProvisioning
 import OrbCore.R7Core
 import OrbCore.LegacyHydrate
 
@@ -756,6 +757,104 @@ def boatApiBaseUrl : IO String := do
   let raw := ((← IO.getEnv "BOAT_API_URL").getD "https://boat.dev/api/v1").trimAscii.toString
   return trimTrailingSlashes raw
 
+/-- Resolve credentials only inside Core; unsupported providers never create fake rows. -/
+def resolveManagedProvider (dataRoot provider : String) : IO (Except String ManagedProvider.Provider) := do
+  if canonicalizeProvider provider != "boat" then return .error "managed_provider_not_implemented"
+  let some key ← getBoatApiKey? dataRoot dataRoot
+    | return .error "boat_api_key_not_configured"
+  return .ok (ManagedProvider.boat (ManagedProvider.httpTransport (← boatApiBaseUrl) key))
+
+def loadManagedBootstrapConfig : IO (Except String ManagedProvisioning.BootstrapConfig) := do
+  let coreUrl := (← IO.getEnv "SANDBOXED_MANAGED_CORE_URL").getD
+    ((← IO.getEnv "SANDBOXED_PUBLIC_URL").getD "")
+  let configuredPath := (← IO.getEnv "ORB_NODE_PROVISION_SCRIPT").getD "/usr/local/lib/orb/orb-node-provision.sh"
+  for path in #[configuredPath, "scripts/orb-node-provision.sh"] do
+    if let .ok script ← (IO.FS.readFile path).toBaseIO then
+      if !script.trimAscii.toString.isEmpty then
+        return .ok { coreUrl := coreUrl.trimAscii.toString, script }
+  return .error "managed_bootstrap_script_missing"
+
+def quoteManagedSpawnCents (provider size : String) (ttlMinutes : UInt64)
+    (override? : Option ManagedProvider.Provider := none) : Except String UInt64 := do
+  let quote ← if provider == "boat" then pure (ManagedProvider.boatQuoteCents size ttlMinutes)
+    else match override? with
+      | some p => if p.name == provider then pure (p.quoteCents size ttlMinutes) else throw "managed_provider_unavailable"
+      | none => throw "managed_provider_not_implemented"
+  match quote with
+  | .ok cents => return cents
+  | .error e => throw e.code
+
+/-- REST, MCP and automatic placement share admission, provider create, guest
+    installation, enrollment, relay readiness, and failure cleanup. -/
+def spawnConfiguredManagedWorker (mc : ManagedComputeStore) (dataRoot : String)
+    (fleet : ManagedFleetState) (machine : ManagedMachine) (args : JVal)
+    (idempotencyKey : String := "")
+    (override? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none)
+    (userAdmission? : Option ManagedUserAdmission := none) :
+    IO (Except String ManagedProvisioning.SpawnResult) := do
+  let (provider, bootstrap) ← match override? with
+    | some pair => pure pair
+    | none => do
+      let .ok provider ← resolveManagedProvider dataRoot machine.provider
+        | return .error "managed_provider_unavailable"
+      let .ok bootstrap ← loadManagedBootstrapConfig
+        | return .error "managed_bootstrap_configuration_unavailable"
+      pure (provider, bootstrap)
+  let requestedSnapshot := (args.fieldStr? "from_snapshot").orElse (fun _ => args.fieldStr? "managed_from_snapshot")
+    |>.getD ""
+  -- Until snapshot ownership/project lookup is wired, never let an untrusted
+  -- label restore arbitrary private disks from the shared provider account.
+  if !requestedSnapshot.trimAscii.toString.isEmpty then return .error "managed_snapshot_scope_not_implemented"
+  let fromImage := (args.fieldStr? "image").getD "orb-node-base"
+  if fromImage != "orb-node-base" && fromImage != "provider-default" then
+    return .error "managed_image_not_allowlisted"
+  let key := if idempotencyKey.isEmpty then
+    ((args.fieldStr? "idempotency_key").filter (!·.isEmpty)).getD machine.id
+    else idempotencyKey
+  let scopedKey := bytesToHexLower (sha256Bytes (renderCompact (.arr #[
+    .str machine.ownerUserId, .str machine.ownerMission, .str key
+  ])).toUTF8)
+  let spec : ManagedProvider.SpawnSpec := {
+    name := machine.sandboxName
+    size := machine.size
+    ttlSeconds := machine.ttlMinutes * 60
+    idempotencyKey := scopedKey
+    fromSnapshot := fromImage
+  }
+  ManagedProvisioning.spawnManagedWorker mc fleet machine provider spec bootstrap {} userAdmission?
+
+/-- Explicit lifecycle calls must succeed at the provider before committing the
+    verified local transition. Unsupported operations fail without mutating state. -/
+def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (dataRoot machineId action : String)
+    (nowEpoch : UInt64) (providerOverride? : Option ManagedProvider.Provider := none) : IO (Except String JVal) := do
+  let some (m, slice) ← getManagedMachine? mc machineId
+    | return .error "managed_machine_missing"
+  let op ← if action == "stop" then pure (Orb.ManagedNode.VmOp.encode .stop)
+    else if action == "destroy" then pure (Orb.ManagedNode.VmOp.encode .destroy)
+    else return .error "managed_lifecycle_bootstrap_not_implemented"
+  if Orb.ManagedNode.verifyVmLifecycleAdmit slice.phaseCode op 0 1
+      slice.nodeBootEpoch slice.nodeBootEpoch nowEpoch slice.deletableAt != 1 then
+    return .error "vm_lifecycle_rejected"
+  if slice.phaseCode == 0 && m.providerId.isEmpty then return .error "managed_provider_identity_pending"
+  let provider ← match providerOverride? with
+    | some p => pure p
+    | none => do
+      let .ok p ← resolveManagedProvider dataRoot m.provider
+        | return .error "managed_provider_unavailable"
+      pure p
+  if provider.name != m.provider then return .error "managed_provider_mismatch"
+  let outcome ← if action == "stop" then provider.stop m.effectiveProviderId else provider.destroy m.effectiveProviderId
+  if let .error e := outcome then return .error e.code
+  let .ok _ ← applyVmLifecycle mc m.id {
+      opCode := op, ownerLive := 0, idleElapsed := 1,
+      presentedBootEpoch := m.nodeBootEpoch, nowEpoch
+    }
+    | return .error "managed_lifecycle_commit_failed"
+  let some (saved, _) ← getManagedMachine? mc m.id
+    | return .error "managed_machine_missing"
+  return .ok (.obj #[("ok", .bool true), ("id", .str saved.id), ("state", .str saved.status),
+    ("machine", (OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD .null)])
+
 def callBoatApi
     (dataRoot method relPath : String)
     (jsonBody? : Option JVal := none)
@@ -1059,12 +1158,7 @@ def dispatchRemoteFleetAndRelayRoutes?
           return some (jsonErr 404 "managed_machine_not_found")
         let jv := (OrbBin.Json.parse ((String.fromUTF8? bodyBytes).getD "{}")).toOption.getD (.obj #[])
         if action == "extend" then
-          let addMins := (jv.fieldUInt64? "minutes").orElse (fun _ => jv.fieldUInt64? "ttl_minutes") |>.getD 60
-          let newDel := (if m.deletableAtSec > nowEpochSec then m.deletableAtSec else nowEpochSec) + addMins * 60
-          discard <| execParamQuery mc.db
-            "UPDATE managed_machines SET ttl_minutes=ttl_minutes+?2,deletable_at_sec=?3 WHERE id=?1;"
-            #[m.id, s!"{addMins}", s!"{newDel}"]
-          return some (jsonResp 200 (.obj #[("ok", .bool true), ("id", .str m.id), ("deletable_at", JVal.uint64 newDel)]))
+          return some (jsonErr 409 "managed_lifecycle_bootstrap_not_implemented")
         else if action == "snapshot" then
           let sName := (jv.fieldStr? "name").getD ""
           match ← createManagedSnapshot mc store.rootDir m.id sName nowIso with
@@ -1094,47 +1188,18 @@ def dispatchRemoteFleetAndRelayRoutes?
             let enrollTok ← newUuidV4
             discard <| putEnrollmentToken mc saved.id enrollTok
             return some (jsonRawResp 201 (renderManagedMachineItemJson saved))
-        else if action == "stop" then
-          if m.provider == "boat" then
-            discard <| callBoatApi store.rootDir "POST" s!"/sandboxes/{m.id}/stop" none 12000
-          match ← applyVmLifecycle mc m.id {
-            opCode := Orb.ManagedNode.VmOp.encode .stop, ownerLive := 0, idleElapsed := 0,
-            presentedBootEpoch := m.nodeBootEpoch, nowEpoch := nowEpochSec
-          } with
+        else if action == "stop" || action == "resume" || action == "destroy" then
+          match ← runConfiguredManagedLifecycle mc store.rootDir m.id action nowEpochSec with
           | .error e => return some (jsonErr 409 e)
-          | .ok _ => return some (jsonResp 200 (.obj #[("ok", .bool true), ("id", .str m.id), ("state", .str "stopped")]))
-        else if action == "resume" then
-          if m.provider == "boat" then
-            discard <| callBoatApi store.rootDir "POST" s!"/sandboxes/{m.id}/start" none 12000
-          match ← applyVmLifecycle mc m.id {
-            opCode := Orb.ManagedNode.VmOp.encode .resume, ownerLive := 0, idleElapsed := 0,
-            presentedBootEpoch := m.nodeBootEpoch, nowEpoch := nowEpochSec
-          } with
-          | .error e => return some (jsonErr 409 e)
-          | .ok (next, _) =>
-            return some (jsonResp 200 (.obj #[("ok", .bool true), ("id", .str m.id), ("state", .str "provisioning"), ("node_boot_epoch", JVal.uint64 next.nodeBootEpoch)]))
-        else if action == "destroy" then
-          if m.provider == "boat" then
-            discard <| callBoatApi store.rootDir "DELETE" s!"/sandboxes/{m.id}" none 12000
-          match ← applyVmLifecycle mc m.id {
-            opCode := Orb.ManagedNode.VmOp.encode .destroy, ownerLive := 0, idleElapsed := 1,
-            presentedBootEpoch := m.nodeBootEpoch, nowEpoch := nowEpochSec
-          } with
-          | .error e => return some (jsonErr 409 e)
-          | .ok _ => return some (jsonResp 200 (.obj #[("ok", .bool true), ("id", .str m.id), ("state", .str "destroyed")]))
+          | .ok result => return some (jsonResp 200 result)
       else if method == "DELETE" && segs.length == 3 then
         let some (m, _) ← getManagedMachine? mc sub2
           | return some (jsonErr 404 "managed_machine_not_found")
         if !isAdmin && !isLegacyUnscoped && !m.ownerUserId.isEmpty && m.ownerUserId != callerUserId then
           return some (jsonErr 404 "managed_machine_not_found")
-        if m.provider == "boat" then
-          discard <| callBoatApi store.rootDir "DELETE" s!"/sandboxes/{m.id}" none 12000
-        match ← applyVmLifecycle mc m.id {
-          opCode := Orb.ManagedNode.VmOp.encode .destroy, ownerLive := 0, idleElapsed := 1,
-          presentedBootEpoch := m.nodeBootEpoch, nowEpoch := nowEpochSec
-        } with
+        match ← runConfiguredManagedLifecycle mc store.rootDir m.id "destroy" nowEpochSec with
         | .error e => return some (jsonErr 409 e)
-        | .ok _ => return some (jsonResp 200 (.obj #[("ok", .bool true), ("id", .str m.id), ("state", .str "destroyed")]))
+        | .ok result => return some (jsonResp 200 result)
 
   -- 5. `/api/nodes/:name/{cordon,uncordon,capacity}`
   if method == "POST" && segs.length == 4 && segs[0]? == some "api" && segs[1]? == some "nodes" then

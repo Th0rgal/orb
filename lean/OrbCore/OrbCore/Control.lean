@@ -110,6 +110,7 @@ structure CoreAppState where
   cloudWakeup?    : Option CloudWorkerWakeup := none
   bunkerStateRef? : Option (IO.Ref UInt8) := none
   managedStore?   : Option ManagedComputeStore := none
+  managedProvisioningOverride? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none
   bootstrapAdminId : String := ""
   telemetrySink?  : Option TelemetrySink := none
   voiceSlots?     : Option VoiceRelaySlots := none
@@ -2322,7 +2323,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       else
         let outJson ← dispatchMcpToolCall
           st.store st.managedStore? st.relayHub? st.broadcastHub? (← st.managedRef.get)
-          st.cfg.workingDir activeClaims toolName args nowEpochSec st.remoteSup?
+          st.cfg.workingDir activeClaims toolName args nowEpochSec st.remoteSup? st.managedProvisioningOverride?
         return .ok (mkJson 200 outJson)
 
   -- 5c. Managed Node Dial-Out Enrollment & Leased Relay
@@ -2350,6 +2351,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     | .error "stale_boot_epoch" => return .ok (mkJson 410 "{\"error\":\"stale_boot_epoch\"}")
     | .error _ => return .ok (mkJson 401 "{\"error\":\"node_unauthorized\"}")
     | .ok vmBoot =>
+      if let .error _ ← recordAuthenticatedManagedPoll mst mid vmBoot nowEpochSec then
+        return .ok (mkJson 410 "{\"error\":\"stale_boot_epoch\"}")
       if let some rHub := st.relayHub? then
         recordMachinePollSeen rHub mid nowEpochSec
         let httpReqs ← drainRelayHttpReqs rHub mid
@@ -4644,11 +4647,15 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let live ← match ← loadManagedFleet mst mf0.enabled mf0.boatEnabled mf0.dailyCapCents mf0.spentTodayCents mf0.maxConcurrent with
         | .ok l => pure l
         | .error _ => pure mf0
-      let estCents := (jv.fieldUInt64? "estimated_cents").getD 10
       let ttlMins := (jv.fieldUInt64? "ttl_minutes").getD 60
-      if ttlMins == 0 || ttlMins > 1440 then
-        return .ok (mkJson 400 "{\"error\":\"invalid_ttl_minutes\"}")
+      let sz := (jv.fieldStr? "size").getD "small"
+      let estCents ← match quoteManagedSpawnCents prov sz ttlMins (st.managedProvisioningOverride?.map Prod.fst) with
+        | .ok cents => pure cents
+        | .error e => return .ok (mkJson 400 (renderCompact (.obj #[("error", .str e)])))
       let (infS, cmpS) ← if caller.userId.isEmpty then pure (0, 0) else getUserSpentTodayCents st.store caller.userId utcDay
+      let userAdmission? : Option ManagedUserAdmission := caller.dailySpendCapCents?.map fun cap => {
+        capCents := cap, inferenceCents := infS, computeCents := cmpS
+      }
       let denyCode :=
         admitManagedSpawnMultiUser live estCents (infS + cmpS) caller.dailySpendCapCents? ttlMins.toUInt32
       if denyCode != 0 then
@@ -4656,28 +4663,30 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         return .ok (mkJson 429 s!"\{\"error\":\"daily_spend_cap_exceeded\",\"scope\":{jsonEscape scopeStr}}")
       let defVmId ← nextUniqueId st "vm" nowEpochSec
       let vmId := (jv.fieldStr? "id").getD defVmId
-      let sbName := (jv.fieldStr? "name").orElse (fun _ => jv.fieldStr? "sandbox_name") |>.getD vmId
-      let sz := (jv.fieldStr? "size").getD "standard"
+      let sbName ← newManagedSandboxName ((jv.fieldStr? "name").orElse (fun _ => jv.fieldStr? "sandbox_name") |>.getD "")
       let vmRec : ManagedMachine := {
         id := vmId
         sandboxName := sbName
         provider := prov
         size := sz
-        status := "ready"
+        status := "provisioning"
         ownerMission := (jv.fieldStr? "owner_mission_id").getD ""
         ttlMinutes := ttlMins
         spentCents := estCents
         cordoned := false
-        nodeBootEpoch := st.store.bootEpoch
+        nodeBootEpoch := 1
         deletableAtSec := nowEpochSec
+        expiresAtSec := nowEpochSec + ttlMins * 60
         ownerKind := "user"
         requestedByMissionId := (jv.fieldStr? "owner_mission_id").getD ""
         ownerUserId := caller.userId
       }
-      match ← provisionManagedMachine mst live vmRec nowEpochSec with
+      let providerRetryKey := (lookupHeaderCI req.headers "idempotency-key").getD ""
+      match ← spawnConfiguredManagedWorker mst st.store.rootDir live vmRec jv providerRetryKey st.managedProvisioningOverride? userAdmission? with
       | .error e => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
-      | .ok createdVm =>
-        if !caller.userId.isEmpty && estCents > 0 then
+      | .ok spawned =>
+        let createdVm := spawned.machine
+        if spawned.created && !caller.userId.isEmpty && estCents > 0 then
           discard <| addUserSpendCents st.store caller.userId utcDay 0 estCents s!"{nowEpochSec}"
         if let .ok refreshed ← loadManagedFleet mst live.enabled live.boatEnabled live.dailyCapCents (live.spentTodayCents + estCents) live.maxConcurrent then
           st.managedRef.set refreshed
@@ -4689,38 +4698,31 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let vmId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
       let some mst := st.managedStore?
         | return .ok (mkJson 503 "{\"error\":\"managed_store_unavailable\"}")
-      let some (mRec, vmSlice) ← getManagedMachine? mst vmId
+      let some (mRec, _) ← getManagedMachine? mst vmId
         | return .ok (mkJson 404 "{\"error\":\"managed_machine_not_found\"}")
       if !caller.isLegacyUnscoped && mRec.ownerUserId != caller.userId then
         return .ok (mkJson 404 "{\"error\":\"managed_machine_not_found\"}")
-      let isStop := cleanPath.endsWith "/stop"
-      let op := if isStop then Orb.ManagedNode.VmOp.encode .stop else Orb.ManagedNode.VmOp.encode .resume
-      match ← applyVmLifecycle mst vmId {
-        opCode := op, ownerLive := 0, idleElapsed := 0,
-        presentedBootEpoch := vmSlice.nodeBootEpoch, nowEpoch := nowEpochSec
-      } with
+      let action := if cleanPath.endsWith "/stop" then "stop" else "resume"
+      match ← runConfiguredManagedLifecycle mst st.store.rootDir vmId action nowEpochSec (st.managedProvisioningOverride?.map Prod.fst) with
       | .error e => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
-      | .ok (nextSlice, _) =>
+      | .ok result =>
         let mf ← st.managedRef.get
         if let .ok live ← loadManagedFleet mst mf.enabled mf.boatEnabled mf.dailyCapCents mf.spentTodayCents mf.maxConcurrent then
           st.managedRef.set live
-        return .ok (mkJson 200 s!"\{\"ok\":true,\"id\":{jsonEscape vmId},\"state\":{jsonEscape (statusOfPhase nextSlice.phaseCode)}}")
+        return .ok (mkJson 200 (renderCompact result))
 
   if let some params := matchRoutePattern? "/api/managed-machines/:id" rawTarget then
     if req.method == "DELETE" || req.method == "GET" then
       let vmId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
       let some mst := st.managedStore?
         | return .ok (mkJson 503 "{\"error\":\"managed_store_unavailable\"}")
-      let some (mRec, vmSlice) ← getManagedMachine? mst vmId
+      let some (mRec, _) ← getManagedMachine? mst vmId
         | return .ok (mkJson 404 "{\"error\":\"managed_machine_not_found\"}")
       if !caller.isLegacyUnscoped && mRec.ownerUserId != caller.userId then
         return .ok (mkJson 404 "{\"error\":\"managed_machine_not_found\"}")
       if req.method == "GET" then
         return .ok (mkJson 200 (renderManagedMachineItemJson mRec))
-      match ← applyVmLifecycle mst vmId {
-        opCode := Orb.ManagedNode.VmOp.encode .destroy, ownerLive := 0, idleElapsed := 1,
-        presentedBootEpoch := vmSlice.nodeBootEpoch, nowEpoch := nowEpochSec
-      } with
+      match ← runConfiguredManagedLifecycle mst st.store.rootDir vmId "destroy" nowEpochSec (st.managedProvisioningOverride?.map Prod.fst) with
       | .error e => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
       | .ok _ =>
         let mf ← st.managedRef.get

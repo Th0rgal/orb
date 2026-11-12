@@ -89,6 +89,51 @@ This boundary is separate from admission, persistence, bootstrap and relay readi
 - Named snapshots use `/saved-snapshots` and encoded names. Saving is distinct
   from observing `ready`. Errors omit upstream bodies and credentials.
 
+### Reservation, guest bootstrap and observed readiness
+
+`ManagedProvisioning.spawnManagedWorker` is the shared REST/MCP create pipeline.
+It validates bootstrap configuration before renting, then atomically rechecks
+capacity and spend and inserts a `provisioning` reservation before provider I/O.
+The immutable Core ID is separate from `provider_id`; boot-specific credentials
+and relay routing always use the Core ID. Request keys are scoped to the owning
+user/mission and persisted uniquely, so retries cannot rent or claim a second VM.
+A changed size, TTL, owner or image under an existing key is a conflict.
+Creation uses the provider's size/TTL quote, rounded up to reserve the entire
+lease; `estimated_cents` is not trusted. User-cap admission includes pending
+reservations under the same transaction, and replaying a completed request does
+not add another user spend charge.
+
+During recovery, configured entry points accept only the allowlisted base images
+(`orb-node-base`, `provider-default`). Named restore labels and arbitrary images
+fail before reservation until project/tenant snapshot lookup is connected.
+The trusted provider adapter's saved-snapshot wire contract is tested separately.
+Stop and destroy require provider success before committing local state; resume
+and extend fail explicitly until their remaining orchestration is connected.
+
+The guest receives a one-use enrollment token through a private file, not a
+command argument. `scripts/orb-node-provision.sh` installs the current node,
+clears inherited node credentials and projected mission secrets, starts its
+unprivileged systemd service, and enables its user bus for remote jobs.
+Enrollment alone never changes readiness: the first authenticated relay poll
+atomically commits the verified provision transition and `last_poll_sec`.
+Unauthenticated and stale-boot polls cannot do so. Per-machine poll timestamps
+survive Core restarts.
+
+Bootstrap timeout destroys the provider VM before applying the ordinary verified
+destroy transition, including cost-ledger closure. Phase-0 reservations are
+eligible for destroy under the same boot, owner, idle and minimum-lease guards
+as other live phases. Uncertain provider creation or cleanup remains visible as
+a reservation for reconciliation; it is never reported ready or silently lost.
+
+Before enabling managed creates, install `scripts/orb-node-provision.sh` as a
+root-owned, non-writable asset at `/usr/local/lib/orb/orb-node-provision.sh`
+(or set `ORB_NODE_PROVISION_SCRIPT`). Configure `SANDBOXED_MANAGED_CORE_URL`
+(or `SANDBOXED_PUBLIC_URL`) to the public HTTPS Core origin reachable by guests.
+Missing configuration rents nothing. Tests run from the repository root may use
+the repository script as a fallback. The virtual-time Core self-test replays
+successful enrollment/poll, the 360-second timeout, cleanup, provider rejection,
+uncertain creation, retry conflicts, and admission before provider I/O.
+
 ## Ownership & Lineage
 
 | Field | Meaning |

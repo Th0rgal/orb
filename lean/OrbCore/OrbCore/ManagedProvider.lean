@@ -52,6 +52,7 @@ structure Provider where
   readinessDeadlineSecs : UInt64
   isReady : String → Bool
   isStopped : String → Bool
+  quoteCents : String → UInt64 → Result UInt64
   spawn : SpawnSpec → IO (Result Machine)
   get : String → IO (Result Machine)
   list : IO (Result (Array Machine))
@@ -184,6 +185,19 @@ private def boatSnapshotList (transport : Transport) : IO (Result (Array Snapsho
       | .ok snap => out := out.push snap
     return .ok out
 
+/-- Conservative whole-cent reservation for the entire requested lease. Rates
+    are milli-cents/hour ($0.018, $0.036, $0.072, $0.20); never trust a caller's
+    estimated_cents. TTL is bounded before multiplication. -/
+def boatQuoteCents (size : String) (ttlMinutes : UInt64) : Result UInt64 := do
+  if ttlMinutes < 5 || ttlMinutes > 720 then throw { code := "provider_invalid_ttl" }
+  let rate ← match size with
+    | "small" => pure (1800 : UInt64)
+    | "default" => pure 3600
+    | "large" => pure 7200
+    | "xlarge" => pure 20000
+    | _ => throw { code := "provider_invalid_size" }
+  return (rate * ttlMinutes + 59999) / 60000
+
 /-- Boat resumes archived guests by forking, so the provider ID may change.
     Core's durable managed ID and boot epoch must not be replaced with this ID. -/
 def boat (transport : Transport) (sleep : UInt32 → IO Unit := fun ms => do IO.sleep ms) : Provider := {
@@ -191,6 +205,7 @@ def boat (transport : Transport) (sleep : UInt32 → IO Unit := fun ms => do IO.
   readinessDeadlineSecs := 360
   isReady := fun s => #["ready", "idle", "running", "busy"].contains s
   isStopped := fun s => #["archived", "stopped", "deleted", "error", "archiving"].contains s
+  quoteCents := boatQuoteCents
   spawn := boatCreate transport "/sandboxes"
   get := fun id => do
     match ← call transport { method := "GET", path := sandboxPath id } with
@@ -199,8 +214,8 @@ def boat (transport : Transport) (sleep : UInt32 → IO Unit := fun ms => do IO.
   list := boatList transport
   destroy := boatDestroy transport sleep
   stop := boatStop transport sleep
-  resume := fun id spec => boatCreate transport (sandboxPath id ++ "/fork") spec
-  fork := fun id spec => boatCreate transport (sandboxPath id ++ "/fork") spec
+  resume := fun id spec => boatCreate transport (sandboxPath id ++ "/fork") { spec with fromSnapshot := "" }
+  fork := fun id spec => boatCreate transport (sandboxPath id ++ "/fork") { spec with fromSnapshot := "" }
   extend := fun id ttl => callUnit transport {
     method := "PATCH"
     path := sandboxPath id
