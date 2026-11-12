@@ -742,6 +742,12 @@ private def isPrivatePlaintextHost (host : String) : Bool :=
   host.startsWith "172.19." || host.startsWith "172.2" || host.startsWith "172.30." ||
   host.startsWith "172.31."
 
+/-- Longest silence tolerated from a plaintext upstream before the response is abandoned. -/
+def upstreamIdleLimitMs : Nat := 600000
+
+/-- Longest total duration of one plaintext upstream call. -/
+def upstreamTotalLimitMs : Nat := 3600000
+
 private def loopbackHttpRequest
     (method host : String) (port : UInt16) (path : String)
     (headers : Array (String × String)) (body : ByteArray) :
@@ -757,19 +763,26 @@ private def loopbackHttpRequest
   try
     if let .error _ ← writeAll fd reqWire false then
       return .error "loopback_write_failed"
+    -- A model can think for minutes before its first byte and pause between stream chunks, so a
+    -- quiet socket is not the end of the response: only EOF, a socket error, `upstreamIdleLimitMs`
+    -- without a byte, or `upstreamTotalLimitMs` overall end the read.
     let t0 ← IO.monoMsNow
+    let mut lastByteMs := t0
     let mut eof := false
     while !eof && rawBuf.size ≤ 16777216 do
       let nowMs ← IO.monoMsNow
-      if nowMs - t0 > 120000 then
+      if nowMs - t0 > upstreamTotalLimitMs || nowMs - lastByteMs > upstreamIdleLimitMs then
         eof := true
       else
         match ← pollReadable fd 5000 with
+        | .error .eagain => pure ()
         | .error _ => eof := true
         | .ok () =>
           let chunk ← readStreamChunk fd 65536
           if chunk.isEmpty then eof := true
-          else rawBuf := rawBuf ++ chunk
+          else
+            rawBuf := rawBuf ++ chunk
+            lastByteMs ← IO.monoMsNow
   finally
     discard <| closeFd fd
   return parseHttpResponseWire rawBuf 16777216 true method
