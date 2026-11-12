@@ -280,7 +280,7 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
     python3 "$ROOT_DIR/orb/scripts/build-signer.py"
   fi
 elif [[ "$OS_NAME" == "Linux" ]]; then
-  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/main.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/Makefile" -nt "$STAGE_BIN_DIR/orb" ]]; then
+  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/main.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/gtk_chrome.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/gtk_chrome.h" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/Makefile" -nt "$STAGE_BIN_DIR/orb" ]]; then
     notify_gui_build
     echo "==> Compiling native linux_shell..."
     make -C "$ROOT_DIR/linux_shell"

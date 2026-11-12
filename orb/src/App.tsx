@@ -177,6 +177,12 @@ import { markMissionRead, unreadVersion } from "./missionUnread";
 import { harnessChoices, harnessPick, effectivePick, refreshHarnessChoices, refreshNodeAntigravityModels, type HarnessPick } from "./harnessPick";
 import { Composer } from "./composer/Composer";
 import { MissionView, NativeMissionView } from "./mission/MissionView";
+import {
+  createNativeChromeSyncer,
+  installNativeChromeWindowHandlers,
+  isNativeChromeEnabled,
+  notifyNativeChromeShell,
+} from "./nativeChromeBridge";
 
 
 const SETTINGS_ICONS: Record<string, () => JSX.Element> = {
@@ -194,7 +200,12 @@ export default function App() {
   const [searchQuery, setSearchQuery] = createSignal("");
   const [searchReturnFocus, setSearchReturnFocus] = createSignal<HTMLElement | null>(null);
   let searchInputEl: HTMLInputElement | undefined;
+  const nativeChromeActive = isNativeChromeEnabled();
   const openSearch = () => {
+    if (nativeChromeActive) {
+      notifyNativeChromeShell("open_native_palette");
+      return;
+    }
     if (searchOpen()) {
       searchInputEl?.focus({ preventScroll: true });
       return;
@@ -247,6 +258,10 @@ export default function App() {
     onCleanup(() => registerTranscriptWarmer(null));
   });
   const [sidebar, setSidebar] = createSignal(!window.matchMedia("(max-width: 720px)").matches);
+  const setSidebarWithNative = (next: boolean) => {
+    setSidebar(next);
+    if (nativeChromeActive) notifyNativeChromeShell("set_native_sidebar", { open: next });
+  };
   const [sbWidth, setSbWidth] = createSignal(220);
   const keepAlivePool = createMissionKeepAlivePool();
   const [deleteMissionRequest, setDeleteMissionRequest] = createSignal<string | null>(null);
@@ -1011,6 +1026,72 @@ export default function App() {
     if (open(history()[i], false)) setHIdx(i);
   };
 
+  const nativeChromeSyncer = nativeChromeActive ? createNativeChromeSyncer() : null;
+  onMount(() => {
+    const disposeHandlers = installNativeChromeWindowHandlers({
+      open: (target) => open(target),
+      leaveSettings,
+      getSidebarOpen: () => sidebar(),
+      setSidebarOpen: setSidebarWithNative,
+      selectProject: (slug) => {
+        setNewFolder(null);
+        setNewProject(slug);
+      },
+    });
+    onCleanup(() => {
+      disposeHandlers();
+      nativeChromeSyncer?.dispose();
+    });
+  });
+  if (nativeChromeSyncer) {
+    const hydratedProjectSlugs = new Set<string>();
+    createEffect(() => {
+      if (!isConnected()) {
+        hydratedProjectSlugs.clear();
+        return;
+      }
+      for (const p of liveProjects()) {
+        const slug = p.slug.trim();
+        if (!slug || hydratedProjectSlugs.has(slug) || projectMissions()[slug] !== undefined) continue;
+        hydratedProjectSlugs.add(slug);
+        void listProjectMissions(slug, { background: true })
+          .then((rows) => {
+            const clean = rows.filter((m) => !isMissionDeleting(m.id));
+            setProjectMissions((cur) => ({ ...cur, [slug]: clean }));
+          })
+          .catch(swallow("app.nativeChromeProjectMissions", { slug }));
+      }
+    });
+    createEffect(() => {
+      const scope = historyScope();
+      const sel = selected();
+      const inSet = onSettings();
+      const admin = isAdminUser();
+      const inboxOn = inboxConfig().inboxEnabled;
+      const unread = inboxCount();
+      const badge = secretRequests() + accessRequests() + privilegeRequests();
+      const dots = Array.from(settingsDots());
+      const projs = liveProjects();
+      const liveMissions = missions();
+      const compMissions = completedMissions();
+      const projMissions = projectMissions();
+      nativeChromeSyncer.schedule({
+        scope,
+        selected: sel,
+        onSettings: inSet,
+        isAdmin: admin,
+        inboxEnabled: inboxOn,
+        inboxUnread: unread,
+        settingsBadge: badge,
+        settingsDots: dots,
+        projects: projs,
+        missions: liveMissions,
+        completedMissions: compMissions,
+        projectMissions: projMissions,
+      });
+    });
+  }
+
   /** `remote`: a start requested from another device over the client link.
    * It never reads or clears this window's draft and never navigates. */
   const launchLocal = async (typed: string, prompt: string, title: string, projectSlug: string | undefined, pick: HarnessPick, images: DraftImage[], launchNavigation: number, remote?: { key: string; cwd?: string | null }) => {
@@ -1204,7 +1285,7 @@ export default function App() {
       e.preventDefault();
       if (destination.id === 'projects') {
         if (onSettings()) leaveSettings();
-        setSidebar(true);
+        setSidebarWithNative(true);
         requestAnimationFrame(() => {
           const region = document.querySelector<HTMLElement>('[data-project-navigation]');
           (region?.querySelector<HTMLElement>('button.row-main, button.row.agent:not(:disabled)') ?? region)?.focus();
@@ -1238,7 +1319,7 @@ export default function App() {
     if (!hasPrimaryModifier(e) || e.altKey || e.shiftKey) return;
     const key = e.key.toLowerCase();
     if (key === "n") (e.preventDefault(), open(null));
-    else if (key === "b") (e.preventDefault(), setSidebar(!sidebar()));
+    else if (key === "b") (e.preventDefault(), setSidebarWithNative(!sidebar()));
     else if (e.key === ",") (e.preventDefault(), onSettings() ? leaveSettings() : openSettings());
     else if (e.key === "[") (e.preventDefault(), nav(-1));
     else if (e.key === "]") (e.preventDefault(), nav(1));
@@ -1488,9 +1569,10 @@ export default function App() {
   };
 
   return (
-    <div class={`app ${onSettings() ? "settings-view" : ""} ${sidebar() ? "" : "sb-hidden"}`} data-pane={currentMissionId() ? "mission" : (currentController() || currentProjectFile() || currentProjectSettings()) ? "project" : "page"} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
+    <div class={`app ${onSettings() ? "settings-view" : ""} ${(nativeChromeActive || !sidebar()) ? "sb-hidden" : ""}`} data-native-chrome={nativeChromeActive ? "true" : undefined} data-pane={currentMissionId() ? "mission" : (currentController() || currentProjectFile() || currentProjectSettings()) ? "project" : "page"} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
       <MentionProjectContext.Provider value={()=>openMission()?.project??currentController()?.slug??effectiveNewProject()}>
-      <FilePanelProvider missionOpen={currentMissionId()} scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }} sidebar={sidebar} onSetSidebar={setSidebar}>
+      <FilePanelProvider missionOpen={currentMissionId()} scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }} sidebar={sidebar} onSetSidebar={setSidebarWithNative}>
+      <Show when={!nativeChromeActive}>
       <button class="sidebar-backdrop" aria-label="Close sidebar" onClick={() => setSidebar(false)} tabIndex={-1} />
       <aside id="orb-sidebar" class="sidebar">
         <div class="sb-top" data-orb-drag-region />
@@ -1633,10 +1715,11 @@ export default function App() {
         </div>
         <div class="sb-resize" onPointerDown={startResize} />
       </aside>
+      </Show>
 
       <header class="titlebar" data-orb-drag-region>
         <div class="tb-left">
-          <button class="icon-btn" aria-label="Toggle sidebar" aria-expanded={sidebar()} aria-controls="orb-sidebar" title={`Toggle sidebar (${sidebarShortcutLabel()})`} onClick={() => setSidebar(!sidebar())}>
+          <button class="icon-btn" aria-label="Toggle sidebar" aria-expanded={sidebar()} aria-controls="orb-sidebar" title={`Toggle sidebar (${sidebarShortcutLabel()})`} onClick={() => setSidebarWithNative(!sidebar())}>
             <Ic.SidebarIcon />
           </button>
           <button class="icon-btn" aria-label="Search conversations" title={`Search (${searchShortcutLabel()})`} onClick={openSearch}>
