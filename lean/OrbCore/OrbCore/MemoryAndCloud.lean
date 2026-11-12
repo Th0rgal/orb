@@ -339,10 +339,18 @@ private def verifyScopedMcpTokenCore? (secret token : String) (nowEpochSec : UIn
   let effSec := if secret.isEmpty then "dev-mode-ephemeral-mcp-secret-012345" else secret
   let rest := (token.drop 5).toString
   match rest.splitOn "." with
-  | [hdrB64, payB64, sigHex] =>
-    let signingInput := s!"mcp1.{hdrB64}.{payB64}"
-    let expectedSig := hmacSha256Hex effSec signingInput
-    if !ctEqString sigHex expectedSig then
+  | [hdrB64, payB64, sigStr] =>
+    let nativeInput := s!"mcp1.{hdrB64}.{payB64}"
+    let nativeSig := hmacSha256Hex effSec nativeInput
+    let nativeOk := ctEqString sigStr nativeSig
+    let legacyOk :=
+      if nativeOk || secret.isEmpty then false
+      else
+        let derivedHex := bytesToHexLower (sha256Bytes s!"sandboxed-mcp-v1:{secret}".toUTF8)
+        let legacyMac := hmacSha256Bytes derivedHex.toUTF8 s!"{hdrB64}.{payB64}".toUTF8
+        let legacySig := base64Encode legacyMac (urlSafe := true) (pad := false)
+        ctEqString sigStr legacySig
+    if !nativeOk && !legacyOk then
       none
     else do
       let payBytes ← base64Decode? payB64
@@ -350,12 +358,15 @@ private def verifyScopedMcpTokenCore? (secret token : String) (nowEpochSec : UIn
       let expNat ← jv.fieldNat? "exp"
       let exp := expNat.toUInt64
       let hardExp := ((jv.fieldNat? "hard_exp").getD 0).toUInt64
+      let role := normalizeMcpRole ((jv.fieldStr? "role").getD "executor")
+      let mid := (jv.fieldStr? "mission_id").getD ""
+      let renewGrace : UInt64 :=
+        if role == "coordinator" && mid.isEmpty then 90 * 24 * 3600 else 24 * 3600
       if hardExp > 0 && nowEpochSec ≥ hardExp then none
       else if !forRenew && nowEpochSec ≥ exp then none
+      else if forRenew && hardExp == 0 && nowEpochSec > exp + renewGrace then none
       else
         let sid := (jv.fieldStr? "session_id").getD "00000000-0000-0000-0000-000000000001"
-        let mid := (jv.fieldStr? "mission_id").getD ""
-        let role := normalizeMcpRole ((jv.fieldStr? "role").getD "executor")
         let proj := (jv.fieldStr? "project").getD ""
         let ext := (jv.fieldBool? "external").getD false
         some {

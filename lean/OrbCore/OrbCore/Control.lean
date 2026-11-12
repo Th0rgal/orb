@@ -2052,10 +2052,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             return .ok (mkJson 401 "{\"error\":\"mcp_session_revoked_or_expired\"}")
       let rawNextExp := nowEpochSec + 3600
       let nextExp := if effHardExp > 0 then min rawNextExp effHardExp else rawNextExp
-      if prev.isExternal then
-        let _ ← execParamQuery st.store.projectsDb
-          "UPDATE mcp_sessions_v1 SET expires_at=?2 WHERE id=?1 AND revoked=0;"
-          #[prev.sessionId, toString nextExp]
+      let _ ← execParamQuery st.store.projectsDb
+        "UPDATE mcp_sessions_v1 SET expires_at=?2 WHERE id=?1 AND revoked=0;"
+        #[prev.sessionId, toString nextExp]
       let renewed : McpSessionClaims := { prev with expiresAt := nextExp, hardExpiresAt := effHardExp }
       let nextTok := mintScopedMcpToken st.cfg.jwtSecret renewed
       return .ok (mkJson 200 s!"\{\"token\":{jsonEscape nextTok},\"session_id\":{jsonEscape renewed.sessionId},\"expires_at\":{nextExp}}")

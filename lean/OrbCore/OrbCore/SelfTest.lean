@@ -5245,7 +5245,20 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   if tfSt != 200 || cascCnt != 2 || (tfBody.splitOn "\"folder\":\"SecurityAudits\"").length < 3 then
     return (← fail s!"project folder transfer cascade failed: st={tfSt} body={tfBody} cnt={cascCnt}")
 
-  -- 4. MCP tool call (`list_projects`, `get_compute_fleet`) + Managed Machine Relay HTTP Tunnel
+  -- 4. MCP tool call (`list_projects`, `get_compute_fleet`) + Legacy Hermes `mcp1.*` coordinator token compatibility
+  let legMcpDerivedKey := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes s!"sandboxed-mcp-v1:{jwtSec}".toUTF8)
+  let legMcpHdr := OrbBin.PosixExt.base64Encode "{\"typ\":\"JWT\",\"alg\":\"HS256\"}".toUTF8 true false
+  let legMcpPay := OrbBin.PosixExt.base64Encode s!"\{\"sub\":\"prod\",\"username\":\"prod\",\"role\":\"coordinator\",\"mission_id\":null,\"project\":null,\"session_id\":\"f3f30e30-a193-464c-bd71-28cda258ef64\",\"exp\":{nowSec + 3600}}".toUTF8 true false
+  let legMcpSig := OrbBin.PosixExt.base64Encode (LeanSys.Auth.hmacSha256Bytes legMcpDerivedKey.toUTF8 s!"{legMcpHdr}.{legMcpPay}".toUTF8) true false
+  let legHermesTok := s!"mcp1.{legMcpHdr}.{legMcpPay}.{legMcpSig}"
+  let _ ← execParamQuery store.projectsDb
+    "INSERT INTO mcp_sessions_v1(id,owner,mission_id,expires_at,revoked,subject_kind) VALUES('f3f30e30-a193-464c-bd71-28cda258ef64','prod','',?1,0,'mission');"
+    #[s!"{nowSec + 3600}"]
+  let (legCapSt, legCapBody) ← sendJson "GET" "/api/mcp/capabilities" legHermesTok ""
+  let (legRenewSt, legRenewBody) ← sendJson "POST" "/api/mcp/renew" legHermesTok "{}"
+  if legCapSt != 200 || (legCapBody.splitOn "\"role\":\"coordinator\"").length < 2 || legRenewSt != 200 then
+    return (← fail s!"legacy Hermes mcp1 token failed: cap={legCapSt}:{legCapBody} renew={legRenewSt}:{legRenewBody}")
+
   let (mcpCallSt, mcpCallBody) ← sendJson "POST" "/api/mcp/call" hsJwt
     "{\"name\":\"list_projects\",\"arguments\":{}}"
   let (mcpFleetSt, mcpFleetBody) ← sendJson "POST" "/api/mcp/call" hsJwt
