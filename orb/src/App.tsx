@@ -1054,6 +1054,7 @@ export default function App() {
   const [nativeArchived, setNativeArchived] = createSignal<Mission[]>([]);
   const [archiveRequests, setArchiveRequests] = createSignal<{ mission: Mission; restore: boolean }[]>([]);
   const [nativeApprovalPrompt, setNativeApprovalPrompt] = createSignal<ApprovalConfirmationPrompt | null>(null);
+  createEffect(on(connectionVersion, () => setNativeApprovalPrompt(null), { defer: true }));
   const loadNativeArchived = () => {
     const version = connectionVersion();
     void listArchivedMissions()
@@ -1084,9 +1085,12 @@ export default function App() {
       // so callback-only children follow and one secret-transfer confirmation covers every id.
       const ids = nativeActionTargets(action, id, arg, null);
       if (!ids.length || !arg) return false;
+      const version = connectionVersion(); // fence the response and the confirmation (as tree/moves.ts)
       const move = async (policy: ApprovalTransferPolicy) => {
+        if (version !== connectionVersion()) return;
         const known = [...missions(), ...completedMissions(), ...Object.values(projectMissions()).flat(), ...nativeArchived()];
         const failures = await moveMissions(planMissionMoves(ids, arg, "", known), arg, { approvalPolicy: policy });
+        if (version !== connectionVersion()) return;
         const approval = failures.find(f => f.error instanceof ApprovalTransferConfirmationRequiredError)?.error as ApprovalTransferConfirmationRequiredError | undefined;
         if (approval) setNativeApprovalPrompt({ error: approval, confirm: chosen => void move(chosen), cancel: () => {} });
         else settle(); // other failures were already returned to place with a toast (moves.ts)
