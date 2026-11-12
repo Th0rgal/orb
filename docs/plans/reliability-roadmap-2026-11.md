@@ -81,7 +81,7 @@ maintenance units failed on every run and nobody was told.
 | # | Item | Owner | State | Done when |
 | --- | --- | --- | --- | --- |
 | F1 | `orb-monitor` every 5 min: Core health and build, proxy error rate, stalled missions, expired/orphan/expiring VMs, failed units, long builds; reports only on change | operator session | done (`scripts/ops/orb-monitor`) | — |
-| F2 | Alert channel. The Signal endpoint the audit shipper uses answers 404, so neither its break-glass alerts nor the monitor's reach anyone | Thomas to choose channel | blocked | A test alert arrives |
+| F2 | Alert channel: the monitor posts to the Orb Inbox through its own mission "Orb monitor" (3e18a8a5). The Signal endpoint the audit shipper uses for break-glass alerts still answers 404 | operator session | Inbox done; Signal todo | First report visible in the Inbox; a break-glass test alert arrives |
 | F3 | Audit shipper: retry B2 503s instead of failing the run | operator session | done on the host | No failed runs for a day |
 | F4 | `sandboxed-worker-rolling-upgrade` (points at the Rust tree) and `sandboxed-harness-update`: fix or delete | operator session | todo | No failed Orb unit |
 | F6 | `sandboxed-development-identity` unit fails (found by the monitor); missions use it to sign commits | operator session | todo | Unit active; a mission signs a commit |
