@@ -66,6 +66,8 @@ structure ManagedMachine where
   lastPollSec : UInt64 := 0
   requestKey : String := ""
   image : String := ""
+  expiryProviderState : String := ""
+  expiryCleanupState : String := ""
   deriving Repr, DecidableEq
 
 /-- Legacy rows used the provider ID as Core's ID. New boots keep these identities separate. -/
@@ -215,6 +217,19 @@ structure ProviderObservation where
   expectedBootEpoch? : Option UInt64 := none
   deriving Repr, DecidableEq
 
+structure ManagedExtensionIntent where
+  id : String
+  machineId : String
+  bootEpoch : UInt64
+  providerId : String
+  minutes : UInt64
+  oldExpiry : UInt64
+  newExpiry : UInt64
+  newTtl : UInt64
+  cost : UInt64
+  state : String
+  deriving Repr, DecidableEq
+
 structure ManagedResumeIntent where
   id : String
   machineId : String
@@ -293,7 +308,10 @@ def managedComputeDdl : String :=
   "old_provider_id TEXT NOT NULL,new_provider_id TEXT NOT NULL DEFAULT ''," ++
   "old_ttl INTEGER NOT NULL,old_expiry INTEGER NOT NULL,new_ttl INTEGER NOT NULL,new_expiry INTEGER NOT NULL," ++
   "deadline_sec INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending');" ++
-  "CREATE UNIQUE INDEX IF NOT EXISTS one_active_managed_resume ON managed_resume_intents(machine_id) WHERE state IN ('pending','aborting');"
+  "CREATE UNIQUE INDEX IF NOT EXISTS one_active_managed_resume ON managed_resume_intents(machine_id) WHERE state IN ('pending','aborting');" ++
+  "CREATE TABLE IF NOT EXISTS managed_extension_intents(id TEXT PRIMARY KEY,machine_id TEXT NOT NULL,boot_epoch INTEGER NOT NULL,provider_id TEXT NOT NULL,minutes INTEGER NOT NULL,old_expiry INTEGER NOT NULL,new_expiry INTEGER NOT NULL,new_ttl INTEGER NOT NULL,cost INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending');" ++
+  "CREATE UNIQUE INDEX IF NOT EXISTS one_pending_managed_extension ON managed_extension_intents(machine_id) WHERE state='pending';" ++
+  "CREATE TABLE IF NOT EXISTS managed_expirations(machine_id TEXT NOT NULL,boot_epoch INTEGER NOT NULL,provider_id TEXT NOT NULL,expires_at_sec INTEGER NOT NULL,observed_state TEXT NOT NULL DEFAULT 'unknown',spend_cents INTEGER NOT NULL DEFAULT 0,spend_source TEXT NOT NULL DEFAULT 'lease_reservation_estimate',state TEXT NOT NULL DEFAULT 'pending',PRIMARY KEY(machine_id,boot_epoch));"
 
 def managedAdditiveAlters : Array String := #[
   "ALTER TABLE managed_machines ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
@@ -350,7 +368,7 @@ private def machineFromRow (row : Array String) : ManagedMachine :=
     sandboxName := cell row 1
     provider := cell row 2
     size := cell row 3
-    status := if cell row 22 == "1" then "provisioning" else cell row 4
+    status := if cell row 22 == "1" then "provisioning" else if cell row 24 == "pending" then "destroying" else cell row 4
     ownerMission := cell row 5
     ttlMinutes := cellU64 row 6
     spentCents := cellU64 row 7
@@ -366,6 +384,8 @@ private def machineFromRow (row : Array String) : ManagedMachine :=
     lastPollSec := cellU64 row 19
     requestKey := cell row 20
     image := cell row 21
+    expiryProviderState := cell row 23
+    expiryCleanupState := cell row 24
   }
 
 private def vmSliceOf (row : Array String) : VmSliceState :=
@@ -425,7 +445,7 @@ def setUserManagedPref (st : ManagedComputeStore) (userId provider : String) (en
 
 private def loadMachineRows (db : SqliteDb) : IO (Except String (Array (Array String))) :=
   execParamQuery db
-    "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id,provider_id,created_at_sec,expires_at_sec,last_poll_sec,request_key,image,EXISTS(SELECT 1 FROM managed_resume_intents r WHERE r.machine_id=managed_machines.id AND r.state IN ('pending','aborting')) FROM managed_machines ORDER BY id ASC;" #[]
+    "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id,provider_id,created_at_sec,expires_at_sec,last_poll_sec,request_key,image,EXISTS(SELECT 1 FROM managed_resume_intents r WHERE r.machine_id=managed_machines.id AND r.state IN ('pending','aborting')),(SELECT observed_state FROM managed_expirations e WHERE e.machine_id=managed_machines.id AND e.boot_epoch=managed_machines.node_boot_epoch),(SELECT state FROM managed_expirations e WHERE e.machine_id=managed_machines.id AND e.boot_epoch=managed_machines.node_boot_epoch) FROM managed_machines ORDER BY id ASC;" #[]
 
 def saveManagedFleetConfig (st : ManagedComputeStore) (enabled boatEnabled : Bool)
     (dailyCapCents spentTodayCents maxConcurrent : UInt64) : IO (Except String Unit) := do
@@ -579,7 +599,7 @@ private def upsertMachineTx (db : SqliteDb) (m : ManagedMachine) (slice : VmSlic
 private def selectMachineTx (db : SqliteDb) (machineId : String) :
     IO (Except String (Option (ManagedMachine × VmSliceState))) := do
   match ← execParamQueryUnlocked db
-      "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id,provider_id,created_at_sec,expires_at_sec,last_poll_sec,request_key,image,EXISTS(SELECT 1 FROM managed_resume_intents r WHERE r.machine_id=managed_machines.id AND r.state IN ('pending','aborting')) FROM managed_machines WHERE id=?1;"
+      "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id,provider_id,created_at_sec,expires_at_sec,last_poll_sec,request_key,image,EXISTS(SELECT 1 FROM managed_resume_intents r WHERE r.machine_id=managed_machines.id AND r.state IN ('pending','aborting')),(SELECT observed_state FROM managed_expirations e WHERE e.machine_id=managed_machines.id AND e.boot_epoch=managed_machines.node_boot_epoch),(SELECT state FROM managed_expirations e WHERE e.machine_id=managed_machines.id AND e.boot_epoch=managed_machines.node_boot_epoch) FROM managed_machines WHERE id=?1;"
       #[machineId] with
   | .error e => return .error e
   | .ok rows =>
@@ -683,6 +703,138 @@ private def chargeManagedCostTx (st : ManagedComputeStore) (current : ManagedFle
   | .error e => return .error e
   | .ok _ => return .ok ()
 
+private def extensionFromRow (r : Array String) : ManagedExtensionIntent := {
+  id := cell r 0, machineId := cell r 1, bootEpoch := cellU64 r 2, providerId := cell r 3,
+  minutes := cellU64 r 4, oldExpiry := cellU64 r 5, newExpiry := cellU64 r 6,
+  newTtl := cellU64 r 7, cost := cellU64 r 8, state := cell r 9
+}
+
+private def extensionTx (st : ManagedComputeStore) (key : String) : IO (Except String (Option ManagedExtensionIntent)) := do
+  match ← execParamQueryUnlocked st.db
+      "SELECT id,machine_id,boot_epoch,provider_id,minutes,old_expiry,new_expiry,new_ttl,cost,state FROM managed_extension_intents WHERE id=?1;" #[key] with
+  | .error e => return .error e
+  | .ok rows => return .ok (if rows.size > 1 then some (extensionFromRow rows[1]!) else none)
+
+def pendingManagedExtensions (st : ManagedComputeStore) : IO (Except String (Array ManagedExtensionIntent)) := do
+  let .ok rows ← execParamQuery st.db
+      "SELECT id,machine_id,boot_epoch,provider_id,minutes,old_expiry,new_expiry,new_ttl,cost,state FROM managed_extension_intents WHERE state='pending';" #[]
+    | return .error "managed_extension_read_failed"
+  return .ok ((rows.extract 1 rows.size).map extensionFromRow)
+
+private def bootStartedTx (st : ManagedComputeStore) (m : ManagedMachine) : IO (Except String UInt64) := do
+  if m.nodeBootEpoch > 1 then
+    let .ok rows ← execParamQueryUnlocked st.db
+        "SELECT new_expiry,new_ttl FROM managed_resume_intents WHERE machine_id=?1 AND expected_boot=?2 AND state='completed' LIMIT 1;"
+        #[m.id, s!"{m.nodeBootEpoch}"] | return .error "managed_boot_read_failed"
+    if rows.size > 1 then return .ok (cellU64 rows[1]! 0 - cellU64 rows[1]! 1 * 60)
+  if m.createdAtSec == 0 then return .error "managed_lease_start_unknown"
+  return .ok m.createdAtSec
+
+/-- Reserve a fixed extension target and its cost before provider I/O. Replays
+    keep that target rather than adding another duration. Expiry claims exclude
+    extensions, and pending extensions exclude premature expiry cleanup. -/
+def prepareManagedExtension (st : ManagedComputeStore) (fleet : ManagedFleetState)
+    (machineId key : String) (minutes nowEpoch : UInt64)
+    (quote : String → UInt64 → Except String UInt64)
+    (budget? : Option ManagedUserAdmission := none) : IO (Except String ManagedExtensionIntent) := do
+  if key.isEmpty || minutes < 5 || minutes > 720 then return .error "managed_extension_invalid"
+  withImmediateTx st.db do
+    let prior ← match ← extensionTx st key with
+      | .ok value => pure value
+      | .error e => return .error e
+    if let some p := prior then
+      if p.machineId != machineId || p.minutes != minutes then return .error "managed_idempotency_conflict"
+      return .ok p
+    let .ok (some (m, vm)) ← selectMachineTx st.db machineId | return .error "managed_machine_missing"
+    if vm.phaseCode != 1 || m.providerId.isEmpty || m.expiresAtSec ≤ nowEpoch then return .error "managed_machine_not_live"
+    let .ok claims ← execParamQueryUnlocked st.db
+        "SELECT 1 FROM managed_expirations WHERE machine_id=?1 AND boot_epoch=?2;" #[m.id, s!"{vm.nodeBootEpoch}"]
+      | return .error "managed_expiry_read_failed"
+    if claims.size > 1 then return .error "managed_expiry_already_claimed"
+    let .ok started ← bootStartedTx st m | return .error "managed_lease_start_unknown"
+    let hardEnd := started + 720 * 60
+    let newExpiry := min (m.expiresAtSec + minutes * 60) hardEnd
+    if newExpiry ≤ m.expiresAtSec then return .error "managed_max_lifetime_reached"
+    let ttl := (newExpiry - started + 59) / 60
+    let .ok oldQuote := quote m.size m.ttlMinutes | return .error "managed_extension_quote_invalid"
+    let .ok newQuote := quote m.size ttl | return .error "managed_extension_quote_invalid"
+    let cost := newQuote - oldQuote
+    let current ← match ← admitManagedCostTx st fleet m.provider m.ownerUserId cost ttl nowEpoch false budget? with
+      | .ok value => pure value
+      | .error e => return .error e
+    let intent : ManagedExtensionIntent := {
+      id := key, machineId, bootEpoch := vm.nodeBootEpoch, providerId := m.providerId,
+      minutes, oldExpiry := m.expiresAtSec, newExpiry, newTtl := ttl, cost, state := "pending"
+    }
+    let .ok _ ← execParamQueryUnlocked st.db
+        "INSERT INTO managed_extension_intents(id,machine_id,boot_epoch,provider_id,minutes,old_expiry,new_expiry,new_ttl,cost) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9);"
+        #[key,m.id,s!"{vm.nodeBootEpoch}",m.providerId,s!"{minutes}",s!"{m.expiresAtSec}",s!"{newExpiry}",s!"{ttl}",s!"{cost}"]
+      | return .error "managed_extension_already_pending"
+    let .ok () ← chargeManagedCostTx st current s!"extend:{key}" m.id m.ownerUserId cost nowEpoch
+      | return .error "managed_extension_cost_failed"
+    return .ok intent
+
+def finishManagedExtension (st : ManagedComputeStore) (key : String) (succeeded : Bool)
+    (refund : Bool := false) : IO (Except String Unit) := do
+  withImmediateTx st.db do
+    let .ok (some intent) ← extensionTx st key | return .error "managed_extension_missing"
+    if intent.state == "completed" && succeeded then return .ok ()
+    if intent.state != "pending" then return .error "managed_extension_not_pending"
+    let .ok (some (m, vm)) ← selectMachineTx st.db intent.machineId | return .error "managed_machine_missing"
+    if vm.nodeBootEpoch != intent.bootEpoch || m.providerId != intent.providerId || (succeeded && vm.phaseCode != 1) then
+      return .error "stale_boot_epoch"
+    if !succeeded && refund then
+      let .ok _ ← execParamQueryUnlocked st.db "DELETE FROM managed_cost_reservations WHERE id=?1;" #[s!"extend:{key}"]
+        | return .error "managed_extension_refund_failed"
+      let .ok _ ← execParamQueryUnlocked st.db
+          "UPDATE managed_fleet_state SET spent_today_cents=MAX(0,spent_today_cents-?1) WHERE singleton_id=1;" #[s!"{intent.cost}"]
+        | return .error "managed_extension_refund_failed"
+    if succeeded then
+      let .ok claims ← execParamQueryUnlocked st.db
+          "SELECT 1 FROM managed_expirations WHERE machine_id=?1 AND boot_epoch=?2;" #[m.id,s!"{vm.nodeBootEpoch}"]
+        | return .error "managed_expiry_read_failed"
+      if claims.size > 1 then return .error "managed_expiry_already_claimed"
+      if m.expiresAtSec != intent.oldExpiry then return .error "managed_extension_concurrent_change"
+      let .ok () ← upsertMachineTx st.db {
+          m with
+          expiresAtSec := intent.newExpiry
+          ttlMinutes := intent.newTtl
+          spentCents := m.spentCents + intent.cost
+        } vm | return .error "managed_extension_commit_failed"
+    match ← execParamQueryUnlocked st.db "UPDATE managed_extension_intents SET state=?2 WHERE id=?1;"
+        #[key, if succeeded then "completed" else "failed"] with
+    | .error e => return .error e
+    | .ok _ => return .ok ()
+
+def claimManagedExpiry (st : ManagedComputeStore) (machineId : String) (nowEpoch : UInt64) : IO (Except String ManagedMachine) := do
+  withImmediateTx st.db do
+    let .ok (some (m, vm)) ← selectMachineTx st.db machineId | return .error "managed_machine_missing"
+    if vm.phaseCode == 3 || (vm.phaseCode == 2 && m.status == "provisioning") ||
+        m.expiresAtSec == 0 || m.expiresAtSec > nowEpoch then return .error "managed_machine_not_expired"
+    if vm.deletableAt > nowEpoch then return .error "managed_minimum_lease_pending"
+    let .ok pending ← execParamQueryUnlocked st.db
+        "SELECT 1 FROM managed_extension_intents WHERE machine_id=?1 AND boot_epoch=?2 AND state='pending' AND new_expiry>?3;"
+        #[m.id,s!"{vm.nodeBootEpoch}",s!"{nowEpoch}"] | return .error "managed_extension_read_failed"
+    if pending.size > 1 then return .error "managed_extension_pending"
+    let .ok _ ← execParamQueryUnlocked st.db
+        "INSERT OR IGNORE INTO managed_expirations(machine_id,boot_epoch,provider_id,expires_at_sec,spend_cents) VALUES(?1,?2,?3,?4,?5);"
+        #[m.id,s!"{vm.nodeBootEpoch}",m.providerId,s!"{m.expiresAtSec}",s!"{m.spentCents}"]
+      | return .error "managed_expiry_claim_failed"
+    -- The pending claim row is the fence: readers derive `destroying` from it, so a
+    -- completed cleanup never leaves a stale status behind.
+    return .ok m
+
+def recordManagedExpiry (st : ManagedComputeStore) (m : ManagedMachine) (providerState : String)
+    (completed : Bool) (usageCents? : Option UInt64 := none) : IO (Except String Unit) := do
+  match ← execParamQuery st.db
+      ("UPDATE managed_expirations SET observed_state=?3,state=?4," ++
+       "spend_cents=CASE WHEN ?6='1' THEN ?7 ELSE spend_cents END,spend_source=CASE WHEN ?6='1' THEN 'provider_usage' ELSE spend_source END " ++
+       "WHERE machine_id=?1 AND boot_epoch=?2 AND provider_id=?5;")
+      #[m.id,s!"{m.nodeBootEpoch}",providerState,if completed then "completed" else "pending",m.providerId,
+        if usageCents?.isSome then "1" else "0",s!"{usageCents?.getD 0}"] with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
+
 def provisionManagedMachine (st : ManagedComputeStore) (fleet : ManagedFleetState)
     (machine : ManagedMachine) (nowEpoch : UInt64)
     (userAdmission? : Option ManagedUserAdmission := none) : IO (Except String ManagedMachine) := do
@@ -778,6 +930,10 @@ def prepareManagedResume (st : ManagedComputeStore) (fleet : ManagedFleetState)
       return .ok (p, false)
     let .ok (some (m, slice)) ← selectMachineTx st.db machineId
       | return .error "managed_machine_missing"
+    let .ok expiryClaims ← execParamQueryUnlocked st.db
+        "SELECT 1 FROM managed_expirations WHERE machine_id=?1 AND boot_epoch=?2 AND state='pending';" #[m.id,s!"{slice.nodeBootEpoch}"]
+      | return .error "managed_expiry_read_failed"
+    if expiryClaims.size > 1 then return .error "managed_expiry_cleanup_pending"
     let successor := slice.nodeBootEpoch + 1
     if verifyVmLifecycleAdmit slice.phaseCode (VmOp.encode .resume) 0 0
         slice.nodeBootEpoch successor nowEpoch slice.deletableAt != 1 then
@@ -892,7 +1048,12 @@ private def recordManagedPollTx (st : ManagedComputeStore) (machineId : String)
   let .ok expected ← expectedManagedBootTx st machineId slice | return .error "stale_boot_epoch"
   if expected != bootEpoch || (slice.phaseCode == 2 && expected == slice.nodeBootEpoch) then
     return .error "stale_boot_epoch"
-  if m.expiresAtSec != 0 && nowEpoch ≥ m.expiresAtSec then return .error "managed_machine_expired"
+  let .ok pendingExtension ← execParamQueryUnlocked st.db
+      "SELECT COALESCE(MAX(new_expiry),0) FROM managed_extension_intents WHERE machine_id=?1 AND boot_epoch=?2 AND provider_id=?3 AND state='pending';"
+      #[m.id,s!"{slice.nodeBootEpoch}",m.providerId] | return .error "managed_extension_read_failed"
+  let pendingExpiry := if pendingExtension.size > 1 then cellU64 pendingExtension[1]! 0 else 0
+  let effectiveExpiry := max m.expiresAtSec pendingExpiry
+  if effectiveExpiry != 0 && nowEpoch ≥ effectiveExpiry then return .error "managed_machine_expired"
   if slice.phaseCode != 1 then
     let .ok rows ← execParamQueryUnlocked st.db
         "SELECT readiness_deadline_sec FROM managed_node_tokens WHERE machine_id=?1;" #[machineId]
@@ -1299,7 +1460,7 @@ def renderManagedProvidersJson
   "[" ++ String.intercalate "," items.toList ++ "]"
 
 def renderManagedMachineItemJson (m : ManagedMachine) : String :=
-  s!"\{\"id\":{jsonEscape m.id},\"name\":{jsonEscape m.sandboxName},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"provider_id\":{jsonEscape m.effectiveProviderId},\"node_id\":{jsonEscape s!"managed-{m.id}"},\"image\":{jsonEscape m.image},\"size\":{jsonEscape m.size},\"cpu\":4,\"ram_gb\":8,\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"owner_mission_id\":{if m.ownerMission.isEmpty then "null" else jsonEscape m.ownerMission},\"owner_kind\":{if m.ownerKind.isEmpty then "\"user\"" else jsonEscape m.ownerKind},\"node_boot_epoch\":{m.nodeBootEpoch},\"last_poll_sec\":{m.lastPollSec},\"created_at_sec\":{m.createdAtSec},\"expires_at_sec\":{m.expiresAtSec},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cost_usd\":{formatCentsUsd2 m.spentCents},\"usd_per_hour\":0.10,\"ledger_closed\":{if m.status == "destroyed" then "true" else "false"},\"cordoned\":{if m.cordoned then "true" else "false"}}"
+  s!"\{\"id\":{jsonEscape m.id},\"name\":{jsonEscape m.sandboxName},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"provider_id\":{jsonEscape m.effectiveProviderId},\"node_id\":{jsonEscape s!"managed-{m.id}"},\"image\":{jsonEscape m.image},\"size\":{jsonEscape m.size},\"cpu\":4,\"ram_gb\":8,\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"owner_mission_id\":{if m.ownerMission.isEmpty then "null" else jsonEscape m.ownerMission},\"owner_kind\":{if m.ownerKind.isEmpty then "\"user\"" else jsonEscape m.ownerKind},\"node_boot_epoch\":{m.nodeBootEpoch},\"last_poll_sec\":{m.lastPollSec},\"created_at_sec\":{m.createdAtSec},\"expires_at_sec\":{m.expiresAtSec},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cost_usd\":{formatCentsUsd2 m.spentCents},\"usd_per_hour\":0.10,\"expiry_provider_state\":{jsonEscape m.expiryProviderState},\"expiry_cleanup_state\":{jsonEscape m.expiryCleanupState},\"ledger_closed\":{if m.status == "destroyed" || m.expiryCleanupState == "completed" then "true" else "false"},\"cordoned\":{if m.cordoned then "true" else "false"}}"
 
 def renderManagedMachinesJson
     (st : ManagedFleetState)
@@ -1314,8 +1475,7 @@ def renderManagedMachinesJson
     let active := (st.machines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
     let enStr := if st.enabled then "true" else "false"
     let boatStr := if st.boatEnabled then "true" else "false"
-    let items := st.machines.map fun m =>
-      s!"\{\"id\":{jsonEscape m.id},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"size\":{jsonEscape m.size},\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"node_boot_epoch\":{m.nodeBootEpoch},\"last_poll_sec\":{m.lastPollSec},\"created_at_sec\":{m.createdAtSec},\"expires_at_sec\":{m.expiresAtSec},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cordoned\":{if m.cordoned then "true" else "false"}}"
+    let items := st.machines.map renderManagedMachineItemJson
     s!"\{\"enabled\":{enStr},\"boat_enabled\":{boatStr},\"active_machines\":{active},\"max_concurrent\":{st.maxConcurrent},\"spent_today_cents\":{st.spentTodayCents},\"daily_cap_cents\":{st.dailyCapCents},\"machines\":[{String.intercalate "," items.toList}],\"budget\":{renderManagedBudgetJson st}}"
   | some uid =>
     let visible := st.machines.filter (fun m => m.ownerUserId == uid)

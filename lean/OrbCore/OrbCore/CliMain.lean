@@ -3,6 +3,7 @@
   Supports:
   - `orb-core` (default HTTP/WS Core server on `$HOST:$PORT`)
   - `orb-core deploy --service <unit>` (validated systemd unit deployment)
+  - `orb-core managed-inspect <id>...` (read-only: Core row beside provider-side state)
   - `orb-core --harness-contract-tests` (9 CLI/SSE/ACP parser contract tests)
   - `orb-core --version` / `-V`
 -/
@@ -77,6 +78,31 @@ def runDeploySubcommand (args : List String) : IO UInt32 := do
         IO.println s!"\{\"ok\":true,{drStr}\"unit\":\"{unitName}\",\"verdict\":\"{rcpt.verdict}\"}"
         return 0
 
+/-- `orb-core managed-inspect <id|managed-<id>|unique-prefix>...`: read-only. Prints one JSON
+    line per machine with Core's row and the provider's own state. Run it as the service user
+    with the service environment so the same data root and sealed provider key are used. -/
+def runManagedInspectSubcommand (ids : List String) : IO UInt32 := do
+  if ids.isEmpty then
+    IO.eprintln "usage: orb-core managed-inspect <machine-id>..."
+    return 2
+  let cfg ← loadConfigFromEnv
+  let normWork := cfg.workingDir.trimAscii.toString
+  let dataRoot :=
+    if normWork.endsWith "/.sandboxed-sh" || normWork == ".sandboxed-sh" then normWork
+    else s!"{normWork}/.sandboxed-sh"
+  if !(← (System.FilePath.mk s!"{dataRoot}/managed_compute.db").pathExists) then
+    IO.eprintln "[orb-core managed-inspect] managed_compute.db not found under the configured WORKING_DIR"
+    return 1
+  let .ok mc ← openManagedComputeStore s!"{dataRoot}/managed_compute.db"
+    | do IO.eprintln "[orb-core managed-inspect] managed store open failed"; return 1
+  let now ← coreEpochSec
+  for id in ids do
+    let row ← OrbCore.ManagedTtl.inspectMachine mc
+      (OrbCore.RemoteFleetAndRelay.resolveManagedProvider dataRoot) id now
+    IO.println (OrbBin.Json.renderCompact row)
+  closeManagedComputeStore mc
+  return 0
+
 end OrbCore.CliMain
 
 def main (args : List String) : IO UInt32 := do
@@ -93,6 +119,8 @@ def main (args : List String) : IO UInt32 := do
       return 1
   | "deploy" :: rest =>
     OrbCore.CliMain.runDeploySubcommand rest
+  | "managed-inspect" :: rest =>
+    OrbCore.CliMain.runManagedInspectSubcommand rest
   | _ =>
     let cfg ← OrbCore.Control.loadConfigFromEnv
     OrbCore.Control.runCoreServer cfg none

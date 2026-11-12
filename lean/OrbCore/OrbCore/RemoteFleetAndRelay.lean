@@ -21,6 +21,7 @@ import OrbBin.HttpClient
 import OrbCore.Store
 import OrbCore.Managed
 import OrbCore.ManagedProvisioning
+import OrbCore.ManagedTtl
 import OrbCore.R7Core
 import OrbCore.LegacyHydrate
 
@@ -926,6 +927,22 @@ def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (ctx : ManagedLifec
       let .ok p ← resolveManagedProvider ctx.store.rootDir m.provider | return .error "managed_provider_unavailable"
       pure p
   if provider.name != m.provider then return .error "managed_provider_mismatch"
+  if action == "extend" then
+    if ctx.override?.isNone then
+      let some entry := ManagedProvider.declaration? m.provider | return .error "managed_provider_unavailable"
+      if !entry.supportsExtend then return .error "managed_provider_extend_unsupported"
+    let .ok budget ← loadManagedUserAdmission ctx.store m.ownerUserId nowEpoch | return .error "managed_user_unavailable"
+    let .ok fleet ← loadManagedFleet mc ctx.fleet.enabled ctx.fleet.boatEnabled ctx.fleet.dailyCapCents
+        ctx.fleet.spentTodayCents ctx.fleet.maxConcurrent | return .error "managed_fleet_read_failed"
+    let rawKey ← if !retryKey.isEmpty then pure retryKey else
+      match (args.fieldStr? "idempotency_key").filter (!·.isEmpty) with
+      | some key => pure key
+      | none => newUuidV4
+    let key := bytesToHexLower (sha256Bytes (renderCompact (.arr #[.str "managed-extend",.str m.id,.str m.ownerUserId,.str rawKey])).toUTF8)
+    let .ok minutes := ManagedTtl.extensionMinutes args | return .error "managed_extension_invalid"
+    match ← ManagedTtl.extendWorker mc fleet provider m.id key minutes nowEpoch budget with
+    | .ok updated => return .ok (managedLifecycleResult updated)
+    | .error e => return .error e
   if action == "resume" then
     if provider.name == "boat" && (m.providerId.isEmpty || (m.status == "ready" && m.lastPollSec == 0)) then
       let .ok _ ← reconcileConfiguredBoatInventory mc ctx.store.rootDir nowEpoch (some provider)
@@ -1120,7 +1137,8 @@ def dispatchRemoteFleetAndRelayRoutes?
     (isAdmin : Bool)
     (isLegacyUnscoped : Bool)
     (nowEpochSec : UInt64)
-    (nowIso : String) : IO (Option (Nat × String × ByteArray)) := do
+    (nowIso : String) (providerOverride? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none) :
+    IO (Option (Nat × String × ByteArray)) := do
   let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
   let scopedUid? : Option String := if isLegacyUnscoped then none else some callerUserId
 
@@ -1274,7 +1292,10 @@ def dispatchRemoteFleetAndRelayRoutes?
           return some (jsonErr 404 "managed_machine_not_found")
         let jv := (OrbBin.Json.parse ((String.fromUTF8? bodyBytes).getD "{}")).toOption.getD (.obj #[])
         if action == "extend" then
-          return some (jsonErr 409 "managed_lifecycle_bootstrap_not_implemented")
+          match ← runConfiguredManagedLifecycle mc { store, fleet := defaultFleet, override? := providerOverride? } m.id action nowEpochSec jv
+              (((headers.find? (fun h => h.1.toLower == "idempotency-key")).map Prod.snd).getD "") with
+          | .ok updated => return some (jsonResp 200 updated)
+          | .error e => return some (jsonErr 409 e)
         else if action == "snapshot" then
           let sName := (jv.fieldStr? "name").getD ""
           match ← createManagedSnapshot mc store.rootDir m.id sName nowIso with
@@ -1305,7 +1326,7 @@ def dispatchRemoteFleetAndRelayRoutes?
             discard <| putEnrollmentToken mc saved.id enrollTok
             return some (jsonRawResp 201 (renderManagedMachineItemJson saved))
         else if action == "stop" || action == "resume" || action == "destroy" then
-          match ← runConfiguredManagedLifecycle mc { store, fleet := defaultFleet } m.id action nowEpochSec jv with
+          match ← runConfiguredManagedLifecycle mc { store, fleet := defaultFleet, override? := providerOverride? } m.id action nowEpochSec jv with
           | .error e => return some (jsonErr 409 e)
           | .ok result => return some (jsonResp 200 result)
       else if method == "DELETE" && segs.length == 3 then
@@ -1313,7 +1334,7 @@ def dispatchRemoteFleetAndRelayRoutes?
           | return some (jsonErr 404 "managed_machine_not_found")
         if !isAdmin && !isLegacyUnscoped && !m.ownerUserId.isEmpty && m.ownerUserId != callerUserId then
           return some (jsonErr 404 "managed_machine_not_found")
-        match ← runConfiguredManagedLifecycle mc { store, fleet := defaultFleet } m.id "destroy" nowEpochSec with
+        match ← runConfiguredManagedLifecycle mc { store, fleet := defaultFleet, override? := providerOverride? } m.id "destroy" nowEpochSec with
         | .error e => return some (jsonErr 409 e)
         | .ok result => return some (jsonResp 200 result)
 

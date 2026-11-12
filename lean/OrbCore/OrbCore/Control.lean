@@ -1901,7 +1901,10 @@ private def dispatchMissionControlAndGitRoutes?
 
 set_option maxHeartbeats 1600000 in
 private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowEpochSec : UInt64) : IO (Except ByteArray CoreHttpResponse) := do
-  let rawTarget := req.path
+  let legacyManagedPrefix := "/api/managed/machines"
+  let rawTarget := if req.path == legacyManagedPrefix || req.path.startsWith (legacyManagedPrefix ++ "/") || req.path.startsWith (legacyManagedPrefix ++ "?") then
+      "/api/managed-machines" ++ (req.path.drop legacyManagedPrefix.length).toString
+    else req.path
   let cleanPath :=
     match rawTarget.splitOn "?" with
     | p :: _ => p
@@ -2337,6 +2340,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let outJson ← dispatchMcpToolCall
           st.store st.managedStore? st.relayHub? st.broadcastHub? (← st.managedRef.get)
           st.cfg.workingDir activeClaims toolName args nowEpochSec st.remoteSup? st.managedProvisioningOverride?
+          (if scopedClaims?.isNone then (mcpCaller?.map (·.userId)).getD "" else "")
         return .ok (mkJson 200 outJson)
 
   -- 5c. Managed Node Dial-Out Enrollment & Leased Relay
@@ -2421,7 +2425,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if let some mst := st.managedStore? then
       if let some (bStatus, bCtype, bBody) ← dispatchRemoteFleetAndRelayRoutes?
           st.store mst st.relayHub? (← st.managedRef.get) req.method cleanPath rawTarget
-          req.headers req.bodySlice.toByteArray "" true true nowEpochSec (formatEpochIso8601Utc nowEpochSec) then
+          req.headers req.bodySlice.toByteArray "" true true nowEpochSec (formatEpochIso8601Utc nowEpochSec) st.managedProvisioningOverride? then
         return .ok { status := bStatus, contentType := bCtype, corsOrigin? := reqOrigin?, body := bBody }
 
   -- 6. Protected Routes (`require_auth` + `resolveCallerPrincipal?`)
@@ -5789,7 +5793,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if let some (rCode, rCtype, rBody) ← dispatchRemoteFleetAndRelayRoutes?
         st.store mst st.relayHub? (← st.managedRef.get)
         req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
-        caller.userId isAdmCaller caller.isLegacyUnscoped nowEpochSec nowIsoDisp then
+        caller.userId isAdmCaller caller.isLegacyUnscoped nowEpochSec nowIsoDisp st.managedProvisioningOverride? then
       return .ok { status := rCode, contentType := rCtype, corsOrigin? := reqOrigin?, body := rBody }
 
   if let some (pCode, pCtype, pBody) ← dispatchProjectAndControllerRoutes?
@@ -6555,10 +6559,19 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
           IO.sleep 2000
       discard <| IO.asTask (prio := .dedicated) do
+        let mut lastInventory : UInt64 := 0
         while true do
           let cached ← managedRef.get
-          if cached.boatEnabled || cached.machines.any (fun m => canonicalizeProvider m.provider == "boat" && m.status != "destroyed") then
-            let observedAt ← coreEpochSec
+          let observedAt ← coreEpochSec
+          if cached.enabled || cached.machines.any (fun m => m.status != "destroyed") then
+            match ← ManagedTtl.tick managedStore store cached (resolveManagedProvider store.rootDir) observedAt with
+            | .error e => IO.eprintln s!"[orb-core] managed TTL maintenance deferred: {e}"
+            | .ok report =>
+              let reaped := ((report.fieldArr? "reaped").getD #[]).size
+              if reaped > 0 then IO.eprintln s!"[orb-core] verified expiry cleanup for {reaped} managed lease(s)"
+          if observedAt ≥ lastInventory + 120 &&
+              (cached.boatEnabled || cached.machines.any (fun m => canonicalizeProvider m.provider == "boat" && m.status != "destroyed")) then
+            lastInventory := observedAt
             match ← reconcileConfiguredBoatInventory managedStore store.rootDir observedAt with
             | .error e => IO.eprintln s!"[orb-core] Boat inventory reconciliation deferred: {e}"
             | .ok report =>
@@ -6570,7 +6583,10 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
               if let .ok fresh ← loadManagedFleet managedStore cached.enabled cached.boatEnabled
                   cached.dailyCapCents cached.spentTodayCents cached.maxConcurrent then
                 managedRef.set fresh
-          IO.sleep 120000
+          if let .ok fresh ← loadManagedFleet managedStore cached.enabled cached.boatEnabled
+              cached.dailyCapCents cached.spentTodayCents cached.maxConcurrent then
+            managedRef.set fresh
+          IO.sleep 30000
     let notifySock := ((← IO.getEnv "NOTIFY_SOCKET").getD "").trimAscii.toString
     let simulateWedge := ((← IO.getEnv "SANDBOXED_SH_SIMULATE_WEDGE").getD "") == "1"
     let watchdogUsec := ((← IO.getEnv "WATCHDOG_USEC").bind String.toNat?).getD 0
