@@ -1,0 +1,240 @@
+{
+  "description": "Canonical OrbLocald native chrome sidebar row projection, cycle-safe mission hierarchy, monotonic merge deduplication, move-target admission, and Cmd+K palette ranking fixtures.",
+  "sync_case": {
+    "scope": "scope:prod:acct1",
+    "revision": 10,
+    "selected": "m:m-child",
+    "on_settings": false,
+    "is_admin": true,
+    "inbox_enabled": true,
+    "inbox_unread": 3,
+    "settings_badge": 2,
+    "settings_dots": ["security"],
+    "projects": [
+      {
+        "slug": "core",
+        "name": "Orb Core",
+        "folders": ["ui/desktop", "ui"]
+      },
+      {
+        "slug": "empty-proj",
+        "name": "Empty Project",
+        "folders": []
+      }
+    ],
+    "missions": [
+      {
+        "id": "m-root",
+        "title": "Implement SQLite UI cache",
+        "status": "active",
+        "project": "core",
+        "folder": "ui/desktop",
+        "updated_at_ms": 2000
+      },
+      {
+        "id": "m-child",
+        "title": "Add WAL busy timeout",
+        "status": "completed",
+        "project": "core",
+        "folder": "",
+        "parent_mission_id": "m-root",
+        "updated_at_ms": 3000
+      },
+      {
+        "id": "m-root",
+        "title": "Stale duplicate title",
+        "status": "pending",
+        "project": "core",
+        "folder": "ui/desktop",
+        "updated_at_ms": 1000
+      },
+      {
+        "id": "m-cycle-a",
+        "title": "Cycle mission A",
+        "status": "active",
+        "project": "core",
+        "parent_mission_id": "m-cycle-b",
+        "updated_at_ms": 1500
+      },
+      {
+        "id": "m-cycle-b",
+        "title": "Cycle mission B",
+        "status": "active",
+        "project": "core",
+        "parent_mission_id": "m-cycle-a",
+        "updated_at_ms": 1600
+      },
+      {
+        "id": "m-archived",
+        "title": "Old archived session",
+        "status": "acknowledged",
+        "project": "core",
+        "updated_at_ms": 500
+      }
+    ],
+    "expected_row_ids": [
+      "nav:new-agent",
+      "nav:inbox",
+      "nav:cloud-agent",
+      "nav:machines",
+      "nav:providers",
+      "nav:resources",
+      "section:projects",
+      "proj:core",
+      "folder:core:ui",
+      "folder:core:ui/desktop",
+      "m:m-root",
+      "m:m-child",
+      "m:m-cycle-b",
+      "m:m-cycle-a",
+      "proj:empty-proj",
+      "nav:settings"
+    ],
+    "expected_selected_row_id": "m:m-child",
+    "expected_inbox_badge": 3,
+    "expected_settings_badge": 2,
+    "expected_m_root_title": "Implement SQLite UI cache",
+    "expected_m_child_depth": 4
+  },
+  "collapse_case": {
+    "toggle_row_id": "folder:core:ui",
+    "expected_hidden_ids": [
+      "folder:core:ui/desktop",
+      "m:m-root",
+      "m:m-child"
+    ],
+    "expected_visible_ids": [
+      "proj:core",
+      "folder:core:ui",
+      "m:m-cycle-b",
+      "m:m-cycle-a"
+    ]
+  },
+  "filter_case": {
+    "filter_query": "busy timeout",
+    "expected_retained_missions": [
+      "m:m-root",
+      "m:m-child"
+    ],
+    "expected_excluded_missions": [
+      "m:m-cycle-a",
+      "m:m-cycle-b"
+    ]
+  },
+  "settings_mode_case": {
+    "on_settings": true,
+    "selected": "security-settings",
+    "expected_row_ids": [
+      "nav:settings-back",
+      "settings:account",
+      "settings:models",
+      "settings:agents",
+      "settings:security",
+      "settings:notifications"
+    ],
+    "expected_selected_row_id": "settings:security",
+    "expected_security_attention": true,
+    "expected_security_badge": 2,
+    "skill_detail_pages": [
+      { "selected": "sk:maxwell", "on_settings": true, "expected_selected_row_id": "settings:agents" },
+      { "selected": "sk:maxwell#history", "on_settings": false, "expected_selected_row_id": "settings:agents" }
+    ]
+  },
+  "worker_fork_case": {
+    "scope": "scope:worker-fork:1",
+    "revision": 1,
+    "projects": [
+      { "slug": "core", "name": "Orb Core", "folders": ["ui"] }
+    ],
+    "missions": [
+      { "id": "boss", "title": "Boss controller", "status": "active", "project": "core", "folder": "ui", "updated_at": "2026-10-14T09:00:00Z" },
+      { "id": "w", "title": "Worker v1", "status": "completed", "parent_mission_id": "boss", "updated_at": "2026-10-14T10:00:00Z" },
+      { "id": "w2", "title": "Worker v2", "status": "completed", "tags": ["fork-of:w"], "updated_at": "2026-10-14T11:00:00Z" }
+    ],
+    "expected_mission_rows": [
+      { "row_id": "m:boss", "depth": 2, "folder": "ui" },
+      { "row_id": "m:w2", "depth": 3, "folder": "ui" },
+      { "row_id": "m:w", "depth": 4, "folder": "ui" }
+    ]
+  },
+  "superseded_and_btw_case": {
+    "scope": "scope:sup-btw:1",
+    "revision": 1,
+    "projects": [
+      { "slug": "core", "name": "Orb Core", "folders": [] }
+    ],
+    "missions": [
+      { "id": "main", "title": "Main controller", "status": "active", "project": "core", "updated_at_ms": 5000 },
+      { "id": "sup-stopped", "title": "Stopped superseded attempt", "status": "interrupted", "project": "core", "parent_mission_id": "main", "superseded_by_mission_id": "main", "updated_at_ms": 4500 },
+      { "id": "sup-grandchild", "title": "Stopped descendant of superseded", "status": "failed", "project": "core", "parent_mission_id": "sup-stopped", "updated_at_ms": 4600 },
+      { "id": "sup-running", "title": "Still running superseded attempt", "status": "running", "project": "core", "parent_mission_id": "main", "superseded_by_mission_id": "main", "updated_at_ms": 4700 },
+      { "id": "btw-root", "title": "Main · btw", "status": "completed", "project": "core", "tags": ["btw-parent:main"], "updated_at_ms": 4800 },
+      { "id": "btw-worker", "title": "Btw worker consult", "status": "completed", "project": "core", "parent_mission_id": "btw-root", "updated_at_ms": 4900 },
+      { "id": "btw-sub", "title": "Direct btw subagent", "status": "completed", "project": "core", "tags": ["btw-subagent"], "updated_at_ms": 4950 }
+    ],
+    "expected_unselected_mission_ids": ["m:main", "m:sup-running"],
+    "selected_for_superseded": "m:sup-stopped",
+    "expected_selected_mission_ids": ["m:main", "m:sup-running", "m:sup-stopped"]
+  },
+  "move_admit_cases": [
+    {
+      "name": "mission_move_to_different_folder_admitted",
+      "item_kind": "mission",
+      "src_project": "core",
+      "src_path": "ui/desktop",
+      "dst_project": "core",
+      "dst_path": "ui",
+      "expected": true
+    },
+    {
+      "name": "mission_move_to_same_folder_rejected",
+      "item_kind": "mission",
+      "src_project": "core",
+      "src_path": "ui/desktop",
+      "dst_project": "core",
+      "dst_path": "ui/desktop",
+      "expected": false
+    },
+    {
+      "name": "folder_move_into_own_subtree_rejected",
+      "item_kind": "folder",
+      "src_project": "core",
+      "src_path": "ui",
+      "dst_project": "core",
+      "dst_path": "ui/desktop",
+      "expected": false
+    },
+    {
+      "name": "folder_move_into_self_rejected",
+      "item_kind": "folder",
+      "src_project": "core",
+      "src_path": "ui",
+      "dst_project": "core",
+      "dst_path": "ui",
+      "expected": false
+    },
+    {
+      "name": "folder_move_across_project_same_rel_path_admitted",
+      "item_kind": "folder",
+      "src_project": "core",
+      "src_path": "ui",
+      "dst_project": "empty-proj",
+      "dst_path": "ui",
+      "expected": true
+    }
+  ],
+  "palette_cases": [
+    {
+      "query": "sqlite",
+      "expected_top_id": "m:m-root"
+    },
+    {
+      "query": "inbox",
+      "expected_top_id": "nav:inbox"
+    },
+    {
+      "query": "security",
+      "expected_top_id": "settings:security"
+    }
+  ]
+}

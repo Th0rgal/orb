@@ -8,6 +8,7 @@ import OrbBin.Sqlite
 import OrbBin.GitWorkspace
 import OrbBin.ClaudeControl
 import OrbLocald.Spec
+import OrbLocald.NativeChrome
 
 /-
   OrbLocald.Rpc — Loopback JSON-RPC & transport proxy bridge for Orb desktop:
@@ -812,6 +813,7 @@ structure LocaldState where
   runGenerations       : Array (String × UInt64) := #[]
   syncingOriginIds     : Array String := #[]
   unsupportedOriginSyncEndpoints : Array String := #[]
+  nativeChrome         : OrbLocald.NativeChrome.NativeChromeHub := {}
   deriving Inhabited
 
 /-- Record an upstream RTT sample (`orb_rtt_ewma_step`) and clear cooldown on `origin`, returning updated `srttMs`. -/
@@ -979,6 +981,8 @@ def supportedDesktopCommands : Array String := #[
   "desktop_connection_load", "desktop_connection_save",
   "desktop_prefs_load", "desktop_prefs_patch",
   "ui_cache_get", "ui_cache_put", "ui_cache_clear",
+  "native_chrome_sync_state", "native_chrome_get_rows", "native_chrome_toggle_expand",
+  "native_chrome_move_admit", "native_chrome_palette_query",
   "diagnostics_append",
   "reveal_logs", "local_machine_metrics", "paloma_ssh_pubkey",
   "open_url", "reveal_download", "save_file_as", "set_window_theme", "mistral_usage_sign_in",
@@ -1453,6 +1457,46 @@ private def evictExcessSqliteDrafts (h : UInt64) : IO Unit := do
 
 private def isValidUiCacheKind (k : String) : Bool :=
   k == "sidebar" || k == "transcript"
+
+/-- Resolve the active or requested `ChromeScopeState`, hydrating from `~/.orb/ui-cache.sqlite3`
+    (`ui_sidebar`) when in-memory `nativeChrome` does not yet hold `requestedScope`. -/
+private def resolveNativeChromeScope (stRef : IO.Ref LocaldState) (requestedScope : String) :
+    IO OrbLocald.NativeChrome.ChromeScopeState := do
+  let req := requestedScope.trimAscii.toString
+  let st ← stRef.get
+  let target := if req.isEmpty then st.nativeChrome.activeScope else req
+  if !target.isEmpty then
+    if let some existing := st.nativeChrome.scopes.find? (·.scope == target) then
+      return existing
+  let hydrated? : Option OrbLocald.NativeChrome.ChromeScopeState ← do
+    match resolveOrbStateDir st, uiCacheSqlitePath? st with
+    | some stateDir, some dbPath =>
+      uiCacheMutex.atomically do
+        match ← ensurePrivateSqliteHandle uiCacheDbPoolRef stateDir dbPath uiCacheSchemaSql with
+        | .error _ => pure none
+        | .ok db =>
+          let queryRes ←
+            if !target.isEmpty then
+              OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                "SELECT scope_key, payload_json FROM ui_sidebar WHERE scope_key = ?1;" #[target]
+            else
+              OrbBin.Sqlite.sqliteQueryRowsRaw db.handle
+                "SELECT scope_key, payload_json FROM ui_sidebar ORDER BY saved_at DESC LIMIT 1;" #[]
+          match queryRes with
+          | .ok rows =>
+            if rows.size ≥ 2 && rows[1]!.size ≥ 2 then
+              pure (OrbLocald.NativeChrome.parsePersistedSidebarPayload? rows[1]![0]! rows[1]![1]!)
+            else
+              pure none
+          | .error _ => pure none
+    | _, _ => pure none
+  match hydrated? with
+  | some hyd =>
+    stRef.modifyGet fun s =>
+      let (resolved, nextHub) := s.nativeChrome.installHydratedScope hyd
+      (resolved, { s with nativeChrome := nextHub })
+  | none =>
+    return { scope := target }
 
 private def uiCacheEntryPath (dir : System.FilePath) (kind key : String) : System.FilePath :=
   let digest := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes key.toUTF8)
@@ -5037,6 +5081,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           return .ok .null
     | _, _ => return .ok .null
   | "ui_cache_clear" =>
+    stRef.modify fun s => { s with nativeChrome := {} }
     uiCacheMutex.atomically do
       if let some stateDir := resolveOrbStateDir st then
         if let some dbPath := uiCacheSqlitePath? st then
@@ -5120,6 +5165,92 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           | .ok _ => return .ok .null
           | .error e => return .error e
     | _, _ => return .ok .null
+  | "native_chrome_sync_state" =>
+    let res ← stRef.modifyGet fun s =>
+      match s.nativeChrome.syncFromJson args with
+      | .error e => (.error e, s)
+      | .ok (applied, scopeSt, nextHub) =>
+        let rows := OrbLocald.NativeChrome.projectSidebarRows scopeSt
+        let s1 := { s with nativeChrome := nextHub }
+        let s2 :=
+          if applied then
+            s1.enqueueNamedEvent "native_chrome_rows_changed" (.obj #[
+              ("scope", .str scopeSt.scope),
+              ("revision", JVal.uint64 scopeSt.viewRevision),
+              ("sync_revision", JVal.uint64 scopeSt.syncRevision),
+              ("row_count", .nat rows.size)
+            ])
+          else s1
+        (.ok (.obj #[
+          ("scope", .str scopeSt.scope),
+          ("revision", JVal.uint64 scopeSt.viewRevision),
+          ("sync_revision", JVal.uint64 scopeSt.syncRevision),
+          ("applied", .bool applied),
+          ("row_count", .nat rows.size)
+        ]), s2)
+    return res
+  | "native_chrome_get_rows" =>
+    let reqScope := (args.fieldStr? "scope").getD ""
+    let filterQ := (args.fieldStr? "filter_query").getD ""
+    let scopeSt ← resolveNativeChromeScope stRef reqScope
+    let rows := OrbLocald.NativeChrome.projectSidebarRows scopeSt filterQ
+    let inSettings :=
+      scopeSt.onSettings || (OrbLocald.NativeChrome.settingsSectionIdForSelected scopeSt.selected).isSome
+    return .ok (.obj #[
+      ("scope", .str scopeSt.scope),
+      ("revision", JVal.uint64 scopeSt.viewRevision),
+      ("sync_revision", JVal.uint64 scopeSt.syncRevision),
+      ("on_settings", .bool inSettings),
+      ("selected", .str scopeSt.selected),
+      ("rows", .arr (rows.map OrbLocald.NativeChrome.SidebarRow.toJson))
+    ])
+  | "native_chrome_toggle_expand" =>
+    let reqScope := (args.fieldStr? "scope").getD ""
+    let rowId := (args.fieldStr? "row_id").getD ""
+    let explicitExp? := args.fieldBool? "expanded"
+    if rowId.trimAscii.toString.isEmpty then
+      return .error "Invalid native_chrome_toggle_expand row_id"
+    let _ ← resolveNativeChromeScope stRef reqScope
+    let res ← stRef.modifyGet fun s =>
+      match s.nativeChrome.toggleExpand reqScope rowId explicitExp? with
+      | none => (.error "Unknown native chrome scope", s)
+      | some (expandedNow, scopeSt, nextHub) =>
+        let rows := OrbLocald.NativeChrome.projectSidebarRows scopeSt
+        let s1 := { s with nativeChrome := nextHub }
+        let s2 := s1.enqueueNamedEvent "native_chrome_rows_changed" (.obj #[
+          ("scope", .str scopeSt.scope),
+          ("revision", JVal.uint64 scopeSt.viewRevision),
+          ("sync_revision", JVal.uint64 scopeSt.syncRevision),
+          ("row_count", .nat rows.size)
+        ])
+        (.ok (.obj #[
+          ("scope", .str scopeSt.scope),
+          ("revision", JVal.uint64 scopeSt.viewRevision),
+          ("sync_revision", JVal.uint64 scopeSt.syncRevision),
+          ("row_id", .str rowId.trimAscii.toString),
+          ("expanded", .bool expandedNow),
+          ("rows", .arr (rows.map OrbLocald.NativeChrome.SidebarRow.toJson))
+        ]), s2)
+    return res
+  | "native_chrome_move_admit" =>
+    let itemKind := (args.fieldStr? "item_kind").getD ""
+    let srcProj := (args.fieldStr? "src_project").getD ""
+    let srcPath := (args.fieldStr? "src_path").getD ""
+    let dstProj := (args.fieldStr? "dst_project").getD ""
+    let dstPath := (args.fieldStr? "dst_path").getD ""
+    let admitted := OrbLocald.NativeChrome.admitSidebarMove itemKind srcProj srcPath dstProj dstPath
+    return .ok (.obj #[("admitted", .bool admitted)])
+  | "native_chrome_palette_query" =>
+    let reqScope := (args.fieldStr? "scope").getD ""
+    let query := (args.fieldStr? "query").getD ""
+    let limit := (args.fieldNat? "limit").getD 24
+    let scopeSt ← resolveNativeChromeScope stRef reqScope
+    let items := OrbLocald.NativeChrome.queryPaletteItems scopeSt query limit
+    return .ok (.obj #[
+      ("scope", .str scopeSt.scope),
+      ("query", .str query),
+      ("items", .arr (items.map OrbLocald.NativeChrome.PaletteItem.toJson))
+    ])
   | "diagnostics_append" =>
     let lines : Array String := match args.fieldArr? "lines" with
       | some xs => xs.filterMap (·.asStr?)
