@@ -16,11 +16,13 @@ something had gone wrong, and nothing noticed. Items are ordered so that the
 
 | # | Item | Owner | State | Done when |
 | --- | --- | --- | --- | --- |
-| A1 | One alias table for the model proxy (`smart`, `reviewer`, `MiniMax-M3`, …), tested at build time; a 400 names the unknown model | parity mission | wip | Verity's OCR review check passes; self-test covers every alias |
+| A1 | **Top priority.** One alias table for the model proxy (`smart`, `reviewer`, `MiniMax-M3`, `fable-5.2`, `github-copilot/claude-fable-5.2`, …), tested at build time; a 400 names the unknown model. Blocks verity's OCR check and blocked ldgr's Fable consultations (workaround in use: backend `claudecode`, model `claude-fable-5-2`) | parity mission | wip | Verity's OCR review check passes; `consult_model` with Fable 5.2 runs; self-test covers every alias |
 | A2 | A turn with zero assistant output is retried, then `failed` with a reason; never `completed` | parity mission | wip | A forced empty reply on dev retries and does not end the mission |
 | A3 | Stall watchdog in Core: a mission marked finished or active with live workers/VMs and no wakeup is woken once and flagged | operator session | todo | A deliberately stalled test mission is woken and reported |
 | A4 | Honest tool receipts (`action_outcome` matches the result); tool schema and handler generated from one definition | parity mission | todo | Receipts say `succeeded`; a schema/handler mismatch fails the build |
 | A5 | A mission whose first turn was never dispatched does not show `active` | parity mission | todo | Start with an unreachable node yields `failed`, not `active` |
+| A7 | Missions started through MCP with no node are placed by the fleet scheduler instead of sitting `active` with no job (hit lean-ui for five hours and the client mission) | operator session | done (6670669e6) | — |
+| A8 | Library skills load in opencode missions on fleet nodes (lean-ui reported its required skills "aren't exposed by this session's skill loader") | parity mission | todo | A mission on a node lists the library skills |
 | A6 | Deploys do not kill running turns (drain, or client retry on 502) | parity mission | todo | A deploy during a running turn produces no 502 in the nginx log |
 
 Shipped today in this class: `resume_mission` honours `content` and `title`
@@ -82,6 +84,7 @@ maintenance units failed on every run and nobody was told.
 | F2 | Alert channel. The Signal endpoint the audit shipper uses answers 404, so neither its break-glass alerts nor the monitor's reach anyone | Thomas to choose channel | blocked | A test alert arrives |
 | F3 | Audit shipper: retry B2 503s instead of failing the run | operator session | done on the host | No failed runs for a day |
 | F4 | `sandboxed-worker-rolling-upgrade` (points at the Rust tree) and `sandboxed-harness-update`: fix or delete | operator session | todo | No failed Orb unit |
+| F6 | `sandboxed-development-identity` unit fails (found by the monitor); missions use it to sign commits | operator session | todo | Unit active; a mission signs a commit |
 | F5 | Retire `fleet-watcher` once F1+F2 cover it; move stalled-mission and VM checks into Core (A3, B3) | operator session | todo | Monitor keeps only what Core cannot see about itself |
 
 ## G. Steering
