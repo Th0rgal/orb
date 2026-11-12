@@ -58,8 +58,8 @@ static void on_item(GtkMenuItem *mi, gpointer ud) {
         g_free(title);
     } else if (strcmp(a->action, "clear") == 0) {
         if (sel_list) { orb_sel_clear(sel_list); }
-    } else if (strcmp(a->action, "delete") == 0) {
-        run_action(a->wv, a->action, a->id, a->arg); /* one confirmation for the whole selection */
+    } else if (strcmp(a->action, "delete") == 0 || strcmp(a->action, "move") == 0) {
+        run_action(a->wv, a->action, a->id, a->arg); /* the whole selection in one call: one confirmation */
         if (sel_list) { orb_sel_clear(sel_list); }
     } else { /* bulk ids are space-separated; each runs the single-mission action */
         char **ids = g_strsplit(a->id, " ", -1);

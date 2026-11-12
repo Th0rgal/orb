@@ -171,6 +171,14 @@ export type NativeChromeBridgeHandlers = {
   missionAction?: (action: NativeMissionAction, missionId: string, arg: string) => boolean;
 };
 
+/** Mission ids a native action applies to: `delete` lists them in `arg` ("current" = the open
+ *  conversation), a bulk `move` lists them in `id`; every other action targets `id` alone. */
+export function nativeActionTargets(action: NativeMissionAction, id: string, arg: string, current: string | null): string[] {
+  const split = (s: string) => s.split(/\s+/).filter(Boolean);
+  if (action === "delete") return arg === "current" ? (current ? [current] : []) : split(arg);
+  return action === "move" ? split(id) : id ? [id] : [];
+}
+
 export type NativeMissionAction = "rename" | "move" | "archive" | "restore" | "copy-id" | "settings" | "delete";
 const NATIVE_MISSION_ACTIONS: readonly string[] = ["rename", "move", "archive", "restore", "copy-id", "settings", "delete"];
 

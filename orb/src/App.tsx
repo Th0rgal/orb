@@ -193,6 +193,7 @@ import {
   installNativeChromeWindowHandlers,
   type NativeMissionAction,
   withLiveExecution,
+  nativeActionTargets,
   isNativeChromeEnabled,
   notifyNativeChromeShell,
 } from "./nativeChromeBridge";
@@ -1069,30 +1070,38 @@ export default function App() {
   }
   /** Native sidebar context-menu actions, sharing the HTML sidebar's API calls. */
   const nativeMissionAction = (action: NativeMissionAction, id: string, arg: string): boolean => {
+    const settle = () => { void refreshMissions(); loadNativeArchived(); };
+    if (action === "delete") {
+      // One confirmation for the whole selection, through the headless sidebar's delete flow
+      // (running workers, descendants). `arg` lists the selected ids; "current" is the open one.
+      const ids = nativeActionTargets(action, id, arg, currentMissionId() ?? null);
+      if (!ids.length) return false;
+      setDeleteMissionRequest(ids);
+      return true;
+    }
+    if (action === "move") {
+      // A selection moves as one batch through the shared family planner (as `tree/moves.ts`),
+      // so callback-only children follow and one secret-transfer confirmation covers every id.
+      const ids = nativeActionTargets(action, id, arg, null);
+      if (!ids.length || !arg) return false;
+      const move = async (policy: ApprovalTransferPolicy) => {
+        const known = [...missions(), ...completedMissions(), ...Object.values(projectMissions()).flat(), ...nativeArchived()];
+        const failures = await moveMissions(planMissionMoves(ids, arg, "", known), arg, { approvalPolicy: policy });
+        const approval = failures.find(f => f.error instanceof ApprovalTransferConfirmationRequiredError)?.error as ApprovalTransferConfirmationRequiredError | undefined;
+        if (approval) setNativeApprovalPrompt({ error: approval, confirm: chosen => void move(chosen), cancel: () => {} });
+        else settle(); // other failures were already returned to place with a toast (moves.ts)
+      };
+      void move("check");
+      return true;
+    }
     const mission = findKnownMission(id) ?? nativeArchived().find(m => m.id === id);
     if (!mission) return false;
     const fail = (title: string) => (error: unknown) => notify({ kind: "error", key: `native-action:${id}`, title, message: error instanceof Error ? error.message : String(error) });
-    const settle = () => { void refreshMissions(); loadNativeArchived(); };
     switch (action) {
       case "rename":
         if (!arg || arg === mission.title) return false;
         void renameOptimistically("mission", id, arg, mission.title ?? null, () => renameMission(id, arg)).then(settle, swallow("app.nativeRename", { mission: id }));
         return true;
-      case "move": {
-        if (!arg || arg === (mission.project ?? "")) return false;
-        // Same confirmation as the HTML sidebar (`tree/moves.ts`): a conversation holding secret
-        // grants or requests asks whether to revoke or keep them before it changes project.
-        // The shared family planner (as `tree/moves.ts`) also carries callback-only children.
-        const move = async (policy: ApprovalTransferPolicy) => {
-          const known = [...missions(), ...completedMissions(), ...Object.values(projectMissions()).flat(), ...nativeArchived()];
-          const failures = await moveMissions(planMissionMoves([id], arg, "", known), arg, { approvalPolicy: policy });
-          const approval = failures.find(f => f.error instanceof ApprovalTransferConfirmationRequiredError)?.error as ApprovalTransferConfirmationRequiredError | undefined;
-          if (approval) setNativeApprovalPrompt({ error: approval, confirm: chosen => void move(chosen), cancel: () => {} });
-          else settle(); // other failures were already returned to place with a toast (moves.ts)
-        };
-        void move("check");
-        return true;
-      }
       case "archive":
       case "restore": {
         // Same subtree targeting as the HTML sidebar (`changeArchiveState`).
@@ -1109,14 +1118,6 @@ export default function App() {
         return true;
       case "settings":
         return open(`ms:${id}`);
-      case "delete": {
-        // One confirmation for the whole selection, through the headless sidebar's delete flow
-        // (running workers, descendants). `arg` lists the selected ids; "current" is the open one.
-        const ids = arg === "current" ? [currentMissionId()].filter((x): x is string => !!x) : arg.split(/\s+/).filter(Boolean);
-        if (!ids.length) return false;
-        setDeleteMissionRequest(ids);
-        return true;
-      }
     }
   };
   onMount(() => {

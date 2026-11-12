@@ -6,6 +6,7 @@ import {
   isNativeChromeEnabled,
   serializeNativeChromeMission,
   withLiveExecution,
+  nativeActionTargets,
   type NativeChromeSyncSnapshot,
 } from "../src/nativeChromeBridge";
 import type { Mission, ProjectSummary } from "../src/api";
@@ -198,6 +199,14 @@ describe("nativeChromeBridge", () => {
     expect(fixed.status).toBe("running");
     expect(fixed.folder).toBe("lean");
     expect(untouched).toBe(other);
+  });
+
+  it("resolves bulk and keyboard native targets before any single-mission lookup", () => {
+    expect(nativeActionTargets("delete", "m-1", "m-1 m-2", "m-9")).toEqual(["m-1", "m-2"]);
+    expect(nativeActionTargets("delete", "current", "current", "m-9")).toEqual(["m-9"]);
+    expect(nativeActionTargets("delete", "current", "current", null)).toEqual([]);
+    expect(nativeActionTargets("move", "m-1 m-2", "default", null)).toEqual(["m-1", "m-2"]);
+    expect(nativeActionTargets("archive", "m-1", "", null)).toEqual(["m-1"]);
   });
 
   it("syncs archived conversations for the native Archived section", () => {
