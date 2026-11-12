@@ -11,10 +11,12 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Lean 4 builder (zero Rust / Cargo)
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS lean-builder
+FROM ubuntu:24.04 AS lean-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential git libssl-dev libsqlite3-dev zstd ca-certificates curl \
+    build-essential git libssl-dev libsqlite3-dev zstd ca-certificates curl python3 \
     && rm -rf /var/lib/apt/lists/* \
     && LEAN_ARCHIVE="/tmp/lean-4.35.0-linux.tar.zst" \
     && LEAN_SHA256="7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d" \
@@ -22,21 +24,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        "https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-linux.tar.zst" \
        -o "$LEAN_ARCHIVE" \
     && echo "${LEAN_SHA256}  ${LEAN_ARCHIVE}" | sha256sum -c - \
-    && mkdir -p /opt/lean-4.35.0 \
-    && tar --zstd -xf "$LEAN_ARCHIVE" --strip-components=1 -C /opt/lean-4.35.0 \
+    && mkdir -p /root/.elan/toolchains/leanprover--lean4---v4.35.0 \
+    && tar --zstd -xf "$LEAN_ARCHIVE" --strip-components=1 -C /root/.elan/toolchains/leanprover--lean4---v4.35.0 \
+    && ln -sfn /root/.elan/toolchains/leanprover--lean4---v4.35.0 /opt/lean-4.35.0 \
     && rm -f "$LEAN_ARCHIVE"
-ENV PATH="/opt/lean-4.35.0/bin:${PATH}"
+ENV PATH="/root/.elan/toolchains/leanprover--lean4---v4.35.0/bin:${PATH}"
 
 WORKDIR /build
 
+COPY docker/ docker/
 COPY lean/ lean/
 COPY shared/ shared/
 COPY catalog/ catalog/
 COPY scripts/ scripts/
 
 ARG LEAN_BINARIES="orb-core desktop-mcp workspace-mcp automation-manager-mcp sandboxed-mcp"
-RUN mkdir -p /out \
-    && ./scripts/build_orb_bins.sh --out-dir /out $(printf -- '--only %s ' $LEAN_BINARIES)
+RUN set -eu; \
+    mkdir -p /out; \
+    have_all=1; \
+    for bin in $LEAN_BINARIES; do \
+      if [ ! -x "docker/prebuilt/$bin" ]; then have_all=0; break; fi; \
+    done; \
+    if [ "$have_all" = "1" ]; then \
+      for bin in $LEAN_BINARIES; do install -m 0755 "docker/prebuilt/$bin" "/out/$bin"; done; \
+      ln -sfn orb-core /out/sandboxed-sh; \
+    else \
+      if [ -x "docker/prebuilt/turbo-lean" ]; then \
+        install -m 0755 docker/prebuilt/turbo-lean /usr/local/bin/turbo-lean; \
+      fi; \
+      ./scripts/build_orb_bins.sh --out-dir /out $(printf -- '--only %s ' $LEAN_BINARIES); \
+    fi
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime (Ubuntu 24.04 for native debootstrap support)

@@ -24,7 +24,7 @@ runs:
         set -euo pipefail
         os_name="$(uname -s)"
         arch_name="$(uname -m)"
-        lean_dest="$HOME/.local/lean-4.35.0"
+        lean_dest="$HOME/.elan/toolchains/leanprover--lean4---v4.35.0"
         if [[ ! -x "$lean_dest/bin/lean" ]]; then
           if [[ "$os_name" == "Linux" && "$arch_name" == "x86_64" ]]; then
             lean_url="https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-linux.tar.zst"
@@ -53,6 +53,8 @@ runs:
           tar --zstd -xf "$lean_archive" --strip-components=1 -C "$lean_dest"
           rm -f "$lean_archive"
         fi
+        mkdir -p "$HOME/.local"
+        ln -sfn "$lean_dest" "$HOME/.local/lean-4.35.0"
         if [[ "$os_name" == "Linux" ]]; then
           if ! command -v bwrap >/dev/null 2>&1 || ! command -v zstd >/dev/null 2>&1; then
             ./scripts/ci_harden_ubuntu_apt.sh
@@ -66,21 +68,23 @@ runs:
         echo "$lean_dest/bin" >> "$GITHUB_PATH"
         "$lean_dest/bin/lean" --version
 
-    - name: Cache pinned turbo-lean release binary
-      uses: actions/cache@v5
+    - name: Restore cached turbo-lean release binary
+      id: cache-bin
+      uses: actions/cache/restore@v5
       with:
         path: |
           ~/.cache/turbo-lean/bin
           ~/.cache/turbo-lean/provenance.json
         key: turbo-lean-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/turbo-lean-revision') }}
 
-    - name: Restore or build pinned turbo-lean release binary
+    - name: Verify or build pinned turbo-lean release binary
+      id: build-bin
       shell: bash
       env:
         INPUT_PROVENANCE_PATH: ${{ inputs.provenance-path }}
       run: |
         set -euo pipefail
-        export PATH="$HOME/.local/lean-4.35.0/bin:$HOME/.cargo/bin:$PATH"
+        export PATH="$HOME/.elan/toolchains/leanprover--lean4---v4.35.0/bin:$HOME/.cargo/bin:$PATH"
         revision="$(tr -d '[:space:]' < lean/turbo-lean-revision)"
         [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
         cache_root="$HOME/.cache/turbo-lean"
@@ -140,6 +144,9 @@ runs:
         }
         prov.write_text(json.dumps(receipt, indent=2) + "\n")
         PY
+          echo "need-save=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "need-save=false" >> "$GITHUB_OUTPUT"
         fi
 
         if [[ -n "$INPUT_PROVENANCE_PATH" ]]; then
@@ -148,6 +155,16 @@ runs:
         fi
         echo "$bin_dir" >> "$GITHUB_PATH"
         "$bin_path" --version
+
+    - name: Save cached turbo-lean release binary
+      if: steps.build-bin.outputs.need-save == 'true' && steps.cache-bin.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          ~/.cache/turbo-lean/bin
+          ~/.cache/turbo-lean/provenance.json
+        key: turbo-lean-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/turbo-lean-revision') }}
 
     - name: Restore portable turbo-lean CAS bundle (.tlpack)
       if: ${{ inputs.restore-cas == 'true' }}
@@ -166,7 +183,7 @@ runs:
         GH_EVENT_NAME: ${{ github.event_name }}
       run: |
         set -euo pipefail
-        export PATH="$HOME/.cache/turbo-lean/bin:$HOME/.local/lean-4.35.0/bin:$PATH"
+        export PATH="$HOME/.cache/turbo-lean/bin:$HOME/.elan/toolchains/leanprover--lean4---v4.35.0/bin:$PATH"
         pack_file="${RUNNER_TEMP}/.turbo-pack/cache.tlpack"
         if [[ -f "$pack_file" ]]; then
           if [[ "$GH_EVENT_NAME" == "pull_request" ]]; then

@@ -325,6 +325,7 @@ jobs:
     if: (needs.plan.outputs.run_docker == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     steps:
       - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-turbo-lean
       - name: Verify Docker entrypoint with Windows line-ending settings
         run: |
           mkdir -p "$RUNNER_TEMP/orb-crlf-check"
@@ -334,6 +335,14 @@ jobs:
             echo "Docker entrypoint contains CRLF line endings" >&2
             exit 1
           fi
+      - name: Build native Lean binaries for Docker image via turbo-lean
+        run: |
+          ./scripts/ci_harden_ubuntu_apt.sh
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev libsqlite3-dev
+          mkdir -p docker/prebuilt
+          ./scripts/build_orb_bins.sh --out-dir docker/prebuilt \
+            --only orb-core --only desktop-mcp --only workspace-mcp \
+            --only automation-manager-mcp --only sandboxed-mcp
       - uses: docker/setup-buildx-action@v3
         with:
           config-inline: |

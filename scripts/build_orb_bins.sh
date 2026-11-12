@@ -89,7 +89,7 @@ if ! command -v lean >/dev/null 2>&1; then
   if [[ "$ENSURE_LEAN" == "1" ]]; then
     os_name="$(uname -s)"
     arch_name="$(uname -m)"
-    lean_dest="${HOME:-/tmp}/.local/lean-4.35.0"
+    lean_dest="${HOME:-/tmp}/.elan/toolchains/leanprover--lean4---v4.35.0"
     if [[ ! -x "$lean_dest/bin/lean" ]]; then
       if [[ "$os_name" == "Linux" && "$arch_name" == "x86_64" ]]; then
         lean_url="https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-linux.tar.zst"
@@ -127,6 +127,8 @@ if ! command -v lean >/dev/null 2>&1; then
       rm -f "$lean_archive"
       trap - EXIT
     fi
+    mkdir -p "${HOME:-/tmp}/.local"
+    ln -sfn "$lean_dest" "${HOME:-/tmp}/.local/lean-4.35.0"
     export PATH="$lean_dest/bin:$PATH"
   else
     echo "error: Lean 4 'lean' not found on PATH (pass --ensure-lean to bootstrap v4.35.0)" >&2
