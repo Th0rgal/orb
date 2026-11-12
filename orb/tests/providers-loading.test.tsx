@@ -1,8 +1,10 @@
+import { Suspense, lazy } from 'solid-js';
 import { render, fireEvent, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
 import { Providers } from '../src/Providers';
-import { clearConnection, setConnection } from '../src/api';
-import { cachePut } from '../src/pageCache';
+import { ProvidersPageSkeleton } from '../src/ProvidersSkeleton';
+import { clearConnection, peekCachedProviders, setConnection } from '../src/api';
+import { cachePut, cacheReset } from '../src/pageCache';
 afterEach(() => { clearConnection(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 const ok = (body: unknown) => new Response(JSON.stringify(body));
 it('replaces a failed initial load with a retry that can recover', async () => {
@@ -93,4 +95,65 @@ it('survives non-array cloud-accounts payloads without wedging on the loading sk
   await waitFor(() => expect(ui.getByRole('button', { name: 'Usage history' })).toBeTruthy());
   expect(ui.getByText(/Claude/)).toBeTruthy();
   ui.unmount();
+});
+it('paints the Inference heading and skeleton synchronously while the lazy Providers chunk loads', async () => {
+  setConnection('http://core.test', 'test');
+  vi.stubGlobal('fetch', vi.fn(async (url: string) =>
+    ok(url.endsWith('/api/ai/providers')
+      ? [{ id: 'lazy-acc', name: 'Lazy OpenAI', provider_type: 'openai', uses_oauth: true, status: { type: 'connected' } }]
+      : []),
+  ));
+  let resolveChunk!: (mod: { default: typeof Providers }) => void;
+  const LazyProviders = lazy(() => new Promise<{ default: typeof Providers }>((resolve) => {
+    resolveChunk = resolve;
+  }));
+  const ui = render(() => (
+    <Suspense fallback={<ProvidersPageSkeleton />}>
+      <LazyProviders />
+    </Suspense>
+  ));
+  expect(ui.getByRole('heading', { name: 'Inference' })).toBeTruthy();
+  expect(ui.getByRole('status', { name: 'Loading inference accounts' })).toBeTruthy();
+
+  resolveChunk({ default: Providers });
+  await waitFor(() => expect(ui.getByText('Lazy OpenAI')).toBeTruthy());
+  expect(ui.queryByRole('status', { name: 'Loading inference accounts' })).toBeNull();
+  ui.unmount();
+});
+it('hydrates persisted provider catalog on cold launch and wipes it on clearConnection', async () => {
+  setConnection('http://core.test', 'tok-a');
+  const requestedPaths: string[] = [];
+  let holdReload = false;
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    requestedPaths.push(new URL(url).pathname);
+    if (holdReload) return new Promise<Response>(() => {});
+    if (url.endsWith('/api/ai/providers')) {
+      return Promise.resolve(ok([{ id: 'persisted', name: 'Persisted Anthropic', provider_type: 'anthropic', uses_oauth: true, status: { type: 'connected' } }]));
+    }
+    if (url.endsWith('/api/ai/providers/usage')) {
+      return Promise.resolve(ok({ entries: {} }));
+    }
+    return Promise.resolve(ok([]));
+  }));
+
+  const first = render(() => <Providers />);
+  await waitFor(() => expect(first.getByText('Persisted Anthropic')).toBeTruthy());
+  expect(requestedPaths).toContain('/api/ai/providers');
+  expect(requestedPaths).toContain('/api/model-routing/health');
+  expect(requestedPaths).toContain('/api/ai/providers/usage');
+  first.unmount();
+
+  cacheReset();
+  expect(peekCachedProviders()?.map((p) => p.name)).toEqual(['Persisted Anthropic']);
+  holdReload = true;
+  const cold = render(() => <Providers />);
+  expect(cold.getByText('Persisted Anthropic')).toBeTruthy();
+  expect(cold.queryByRole('status', { name: 'Loading inference accounts' })).toBeNull();
+  cold.unmount();
+
+  clearConnection();
+  expect(peekCachedProviders()).toBeNull();
+  setConnection('http://core.test', 'tok-a');
+  expect(peekCachedProviders()).toBeNull();
 });

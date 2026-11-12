@@ -527,6 +527,12 @@ export function clearConnection(options?: { persist?: boolean }) {
   void clearPersistentCache();
   const hadConnection = connected() || !!getJwt();
   localStorage.removeItem(JWT_KEY);
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("orb.catalog:")) localStorage.removeItem(k);
+    }
+  } catch { /* ignore storage errors */ }
   if(options?.persist!==false)persistDesktopConnection(null);
   setConnected(false);
   catalogMemory.clear();
@@ -1410,10 +1416,51 @@ export async function reorderProviders(ids: string[]): Promise<AIProvider[]> {
   });
 }
 
+function isAIProviderArray(value: unknown): value is AIProvider[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        !!item &&
+        typeof item === "object" &&
+        typeof (item as { id?: unknown }).id === "string" &&
+        typeof (item as { provider_type?: unknown }).provider_type === "string",
+    )
+  );
+}
+
+export function peekCachedProviders(): AIProvider[] | null {
+  if (!isConnected()) return null;
+  try {
+    const key = catalogStorageKey("/api/ai/providers");
+    let parsed: unknown = null;
+    if (catalogMemory.has(key)) {
+      parsed = catalogMemory.get(key);
+    } else {
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      parsed = JSON.parse(raw);
+      if (isAIProviderArray(parsed)) {
+        catalogMemory.set(key, parsed);
+      }
+    }
+    return isAIProviderArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function listProviders(signal?: AbortSignal): Promise<AIProvider[]> {
+  const version = connectionVersion();
+  const token = getJwt();
   const data = await api<AIProvider[] | { providers?: AIProvider[] }>("/api/ai/providers", signal ? { signal } : undefined);
-  if (Array.isArray(data)) return data;
-  return Array.isArray(data.providers) ? data.providers : [];
+  const list = Array.isArray(data) ? data : Array.isArray(data.providers) ? data.providers : [];
+  if (version === connectionVersion() && token === getJwt() && isConnected() && isAIProviderArray(list)) {
+    const key = catalogStorageKey("/api/ai/providers", token);
+    catalogMemory.set(key, list);
+    try { localStorage.setItem(key, JSON.stringify(list)); } catch { /* ignore storage errors */ }
+  }
+  return list;
 }
 
 export interface SubscriptionResetGrant {

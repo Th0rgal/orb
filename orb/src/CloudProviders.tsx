@@ -2,7 +2,7 @@ import {For,Show,createSignal,createEffect,on,onCleanup,onMount} from 'solid-js'
 import {cloudAccounts,cloudAccountLabel,cloudNames,type CloudAccount,type CloudProvider} from './cloudAgentApi';
 import {api,connectionVersion,openExternalUrl} from './api';
 import * as Api from './api';
-import {cachePeek,cachePeekArray,cachePut} from './pageCache';
+import {cacheLoad,cachePeek,cachePeekArray,cachePut} from './pageCache';
 import {ProviderUsageMeter} from './ProviderUsageMeter';
 import {ChevronRight,FlaskIcon} from './icons';
 import {ProviderLogo} from './ProviderLogo';
@@ -31,7 +31,7 @@ export function CloudProviders() {
   if(manual)setError('');
   if(busy){queuedManual||=manual;return;}
   busy=true;const version=connectionVersion();void refreshUsage();
-  try {const next=await cloudAccounts();if(!Array.isArray(next))throw new Error('Cloud accounts could not be read. Refresh to retry.');if(!disposed&&version===connectionVersion()){setAccounts(previous=>{const merged=mergeById(previous,next);if(canUseCache())cachePut('settings:cloud-accounts',merged);return merged;});setError('');setLoaded(true);}}
+  try {const next=await (manual?cloudAccounts():cacheLoad('settings:cloud-accounts',()=>cloudAccounts()));if(!Array.isArray(next))throw new Error('Cloud accounts could not be read. Refresh to retry.');if(!disposed&&version===connectionVersion()){setAccounts(previous=>{const merged=mergeById(previous,next);if(canUseCache())cachePut('settings:cloud-accounts',merged);return merged;});setError('');setLoaded(true);}}
   catch(e){if(!disposed&&version===connectionVersion()){setError(e instanceof Error?e.message:String(e));setLoaded(true);}}
   finally{busy=false;if(!disposed&&(version!==connectionVersion()||queuedManual)){const m=queuedManual;queuedManual=false;void refresh(m);}}
  };
