@@ -1301,7 +1301,26 @@ def missionDetailJson
     let cfgProfJson := if cfgProfVal.isEmpty then "null" else jsonEscape cfgProfVal
     let resumableBool := (cellNat r 46) != 0
     let rawHist := cell r 47
-    let histOut := if rawHist.startsWith "[" then rawHist else "[]"
+    let mut histOut := if rawHist.startsWith "[" then rawHist else "[]"
+    if (cell r 3).startsWith "cloud_" && histOut == "[]" then
+      if let .ok cRows ← execParamQuery st.missionsDb
+          "SELECT COALESCE(data,'{}') FROM cloud_executions WHERE mission_id=?1 ORDER BY revision DESC, rowid DESC LIMIT 1;"
+          #[missionId] then
+        if cRows.size > 1 then
+          let dataStr := (cRows[1]?.bind (·[0]?)).getD "{}"
+          if let .ok dataJv := OrbBin.Json.parse dataStr then
+            if let some turns := dataJv.fieldArr? "turns" then
+              let startIdx := if turns.size > 100 then turns.size - 100 else 0
+              let mut items : Array JVal := #[]
+              for idx in [startIdx:turns.size] do
+                let t := turns[idx]!
+                let p := (t.fieldStr? "prompt").getD ""
+                if !p.trimAscii.toString.isEmpty then
+                  items := items.push (.obj #[("role", .str "user"), ("content", .str p)])
+                if let some res := t.fieldStr? "result" then
+                  if !res.trimAscii.toString.isEmpty then
+                    items := items.push (.obj #[("role", .str "assistant"), ("content", .str res)])
+              histOut := renderCompact (.arr items)
     let viewerRole :=
       match callerUserId? with
       | some uid => if ownerUid == uid then "owner" else "participant"

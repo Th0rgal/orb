@@ -33,6 +33,9 @@ open OrbCore.SecretAndApproval
 open OrbCore.RemoteFleetAndRelay
 open OrbCore.ProjectFilesAndController
 open OrbCore.McpGateway
+open OrbCore.CloudHttpAndWorker
+open OrbCore.ProviderUsageAndLogin
+open OrbCore.ResourcesAndSystem
 open OrbCore.Control
 open OrbCore.HostTests
 open OrbCore.HarnessSessionRegistry
@@ -5134,8 +5137,11 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   let seqRef ← IO.mkRef (0 : UInt64)
   let bHub ← newBroadcastHub
   let rHub ← newRelayHub 0
+  let cHub ← newCloudRuntimeHub
+  let pHub ← newProviderRuntimeHub
+  let sHub ← newSystemRuntimeHub
   let appSt : CoreAppState := {
-    cfg := cfg
+    cfg := { cfg with githubClientId := "Ov23liTestClientId" }
     store := store
     searchIdx? := none
     managedRef := managedRef
@@ -5145,6 +5151,9 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
     managedStore? := some mStore
     broadcastHub? := some bHub
     relayHub? := some rHub
+    cloudHub? := some cHub
+    providerHub? := some pHub
+    systemHub? := some sHub
   }
 
   let sendJson (method path tok body : String) : IO (Nat × String) := do
@@ -5315,6 +5324,49 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
     let tStr := (String.fromUTF8? tResp.body).getD ""
     if tResp.status != 200 || (tStr.splitOn "\"healthy\":true").length < 2 then
       return (← fail s!"tunnelHttpToManagedMachine response mismatch: st={tResp.status} body={tStr}")
+
+  -- 5. Client/Cloud/Resources/System/Providers Parity Surface (`orb-core` cutover)
+  let (caSt, caBody) ← sendJson "GET" "/api/cloud/accounts" hsJwt ""
+  if caSt != 200 || (caBody.splitOn "\"grok-default\"").length < 2 ||
+     (caBody.splitOn "\"cursor-default\"").length < 2 || (caBody.splitOn "\"paloma\"").length < 2 then
+    return (← fail s!"GET /api/cloud/accounts failed: {caSt} {caBody}")
+
+  let (cuSt, cuBody) ← sendJson "GET" "/api/cloud/usage" hsJwt ""
+  if cuSt != 200 || (cuBody.splitOn "\"accounts\"").length < 2 then
+    return (← fail s!"GET /api/cloud/usage failed: {cuSt} {cuBody}")
+
+  let (roSt, roBody) ← sendJson "GET" "/api/resources/overview?range=6h&scope=all" hsJwt ""
+  if roSt != 200 || (roBody.splitOn "\"orb-core\"").length < 2 ||
+     (roBody.splitOn "\"summary\"").length < 2 || (roBody.splitOn "\"compute_series\"").length < 2 then
+    return (← fail s!"GET /api/resources/overview failed: {roSt} {roBody}")
+
+  let (puSt, puBody) ← sendJson "GET" "/api/ai/providers/usage" hsJwt ""
+  if puSt != 200 || (puBody.splitOn "\"entries\"").length < 2 || (puBody.splitOn "\"refresh_after_seconds\"").length < 2 then
+    return (← fail s!"GET /api/ai/providers/usage failed: {puSt} {puBody}")
+
+  let (usSt, usBody) ← sendJson "GET" "/api/ai/usage/summary?window=24h" hsJwt ""
+  let (mrhSt, mrhBody) ← sendJson "GET" "/api/model-routing/health" hsJwt ""
+  if usSt != 200 || (usBody.splitOn "\"totals\"").length < 2 || mrhSt != 200 then
+    return (← fail s!"AI usage summary / model-routing health failed: us={usSt}:{usBody} mrh={mrhSt}:{mrhBody}")
+
+  let (frSt, frBody) ← sendJson "POST" "/api/file-resources" hsJwt "{\"action\":\"roots\"}"
+  let (fsSt, fsBody) ← sendJson "GET" "/api/fs/list" hsJwt ""
+  if frSt != 200 || (frBody.splitOn "\"sources\"").length < 2 || fsSt != 200 || !fsBody.trimAscii.toString.startsWith "[" then
+    return (← fail s!"file-resources / fs/list failed: fr={frSt}:{frBody} fs={fsSt}:{fsBody}")
+
+  let (swSt, swBody) ← sendJson "GET" "/api/software" hsJwt ""
+  let (msSt, msBody) ← sendJson "GET" "/api/mesh/status" hsJwt ""
+  let (ghSt, ghBody) ← sendJson "GET" "/api/integrations/github/status" hsJwt ""
+  if swSt != 200 || (swBody.splitOn "\"node_name\":\"orb-core\"").length < 2 ||
+     msSt != 200 || (msBody.splitOn "\"formal_verified\":true").length < 2 ||
+     ghSt != 200 || (ghBody.splitOn "\"configured\":true").length < 2 then
+    return (← fail s!"software/mesh/github status failed: sw={swSt}:{swBody} ms={msSt}:{msBody} gh={ghSt}:{ghBody}")
+
+  let (idSt, idBody) ← sendJson "POST" "/api/control/missions/8a349331-41cf-4223-a25f-459c00cd0d98/inbox-digest" hsJwt "{}"
+  let (ndSt, ndBody) ← sendJson "GET" "/api/nodes" hsJwt ""
+  if idSt != 200 || (idBody.splitOn "\"schemaVersion\":7").length < 2 ||
+     ndSt != 200 || (ndBody.splitOn "\"name\":\"orb-core\"").length < 2 then
+    return (← fail s!"inbox-digest / nodes failed: id={idSt}:{idBody} nd={ndSt}:{ndBody}")
 
   closeManagedComputeStore mStore
   closeCoreStore store

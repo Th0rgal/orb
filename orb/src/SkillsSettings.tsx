@@ -301,7 +301,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const machineOptions = createMemo(() => {
     const opts = [{ id: "local", label: "This Mac (Local Harnesses)" }];
     if (isConnected()) {
-      opts.push({ id: "core", label: "Core (agent-core)" });
+      opts.push({ id: "core", label: "Core (orb-core)" });
       for (const node of remoteNodes()) opts.push({ id: node.id, label: `${node.id} (${node.status})` });
     }
     return opts;

@@ -207,6 +207,15 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS mission_events (id INTEGER PRIMARY KEY AUTOINCREMENT, mission_id TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0, sequence INTEGER NOT NULL DEFAULT 0, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', timestamp TEXT NOT NULL DEFAULT '', event_id TEXT, tool_call_id TEXT, tool_name TEXT, content TEXT, content_file TEXT, metadata TEXT);" ++
   "CREATE INDEX IF NOT EXISTS idx_missions_updated_at ON missions(updated_at DESC);" ++
   "CREATE TABLE IF NOT EXISTS cloud_executions (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'hermes', prompt TEXT NOT NULL DEFAULT '', response_text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', request_key TEXT, revision INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS cloud_events (mission_id TEXT NOT NULL, run_id TEXT NOT NULL, event_id TEXT NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(mission_id, run_id, event_id, kind));" ++
+  "CREATE TABLE IF NOT EXISTS local_origins (mission_id TEXT PRIMARY KEY, origin TEXT NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, terminal INTEGER NOT NULL DEFAULT 0);" ++
+  "CREATE TABLE IF NOT EXISTS proxy_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cost_cents INTEGER NOT NULL DEFAULT 0, provider TEXT, account_id TEXT, api_key_id TEXT, api_key_name TEXT, mission_id TEXT, caller_kind TEXT, purpose TEXT, reasoning_tokens INTEGER NOT NULL DEFAULT 0, account_bound INTEGER NOT NULL DEFAULT 0);" ++
+  "CREATE TABLE IF NOT EXISTS proxy_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, chain_id TEXT NOT NULL, provider TEXT, account_id TEXT, model TEXT, status TEXT NOT NULL, http_status INTEGER, retries INTEGER NOT NULL DEFAULT 0, ttft_ms INTEGER, total_ms INTEGER NOT NULL DEFAULT 0, fallback_depth INTEGER NOT NULL DEFAULT 0, stream INTEGER NOT NULL DEFAULT 0, superseded INTEGER NOT NULL DEFAULT 0);" ++
+  "CREATE TABLE IF NOT EXISTS usage_rollup_1m (bucket_unix_min INTEGER NOT NULL, pool_id TEXT NOT NULL, root_mission_id TEXT NOT NULL DEFAULT '', mission_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', total_tokens INTEGER NOT NULL DEFAULT 0, billable_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, request_count INTEGER NOT NULL DEFAULT 0, rate_limit_429_count INTEGER NOT NULL DEFAULT 0, est_cost_millicents INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(bucket_unix_min, pool_id, root_mission_id, mission_id, model));" ++
+  "CREATE TABLE IF NOT EXISTS compute_rollup_1m (bucket_unix_min INTEGER NOT NULL, machine_class TEXT NOT NULL, node_id TEXT NOT NULL DEFAULT '', root_mission_id TEXT NOT NULL DEFAULT '', mission_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT '', vcpu_allocated REAL NOT NULL DEFAULT 0, vcpu_busy REAL NOT NULL DEFAULT 0, ram_gb_allocated REAL NOT NULL DEFAULT 0, cost_millicents INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(bucket_unix_min, machine_class, node_id, root_mission_id, mission_id, state));" ++
+  "CREATE TABLE IF NOT EXISTS mission_orchestration_meta (mission_id TEXT PRIMARY KEY, root_mission_id TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '', wave_label TEXT NOT NULL DEFAULT '', depends_on_json TEXT NOT NULL DEFAULT '[]', queued_at TEXT NOT NULL DEFAULT '', first_started_at TEXT NOT NULL DEFAULT '', completed_at TEXT NOT NULL DEFAULT '', active_run_ms INTEGER NOT NULL DEFAULT 0, estimated_duration_ms INTEGER NOT NULL DEFAULT 0, placement_node_id TEXT NOT NULL DEFAULT '', allocated_vcpu REAL NOT NULL DEFAULT 0, stall_kind TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS mission_subagent_spans (mission_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, root_mission_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT '', started_at TEXT NOT NULL DEFAULT '', completed_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(mission_id, tool_call_id));" ++
+  "CREATE TABLE IF NOT EXISTS mission_search_docs (doc_id INTEGER PRIMARY KEY AUTOINCREMENT, doc_key TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, locator TEXT NOT NULL, role TEXT NOT NULL, sequence INTEGER, event_id TEXT, timestamp TEXT NOT NULL, title_text TEXT NOT NULL DEFAULT '', body_text TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_automations (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, cron_expr TEXT NOT NULL, prompt TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, variables_used TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS model_routing_chains (id TEXT PRIMARY KEY, name TEXT NOT NULL, models_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS privilege_leases (grant_id TEXT PRIMARY KEY, lease_token TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, scope TEXT NOT NULL, allowed_units_json TEXT NOT NULL DEFAULT '[]', require_force_cmd INTEGER NOT NULL DEFAULT 0, biometric_signed INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0, expires_at_epoch INTEGER NOT NULL DEFAULT 0, lease_epoch INTEGER NOT NULL DEFAULT 0);" ++
@@ -264,7 +273,10 @@ def harnessContinuityIndexSql : String :=
   "CREATE INDEX IF NOT EXISTS idx_harness_continuity_reconcile ON harness_continuity(reconcile_required, updated_at);"
 
 def askSchemaSql : String :=
-  "CREATE TABLE IF NOT EXISTS ask_requests (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, question TEXT NOT NULL, answer TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT '');"
+  "CREATE TABLE IF NOT EXISTS ask_requests (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, question TEXT NOT NULL, answer TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS inbox_state (user_id TEXT NOT NULL, entry_key TEXT NOT NULL, value_json TEXT NOT NULL, PRIMARY KEY(user_id, entry_key));" ++
+  "CREATE TABLE IF NOT EXISTS inbox_state_revisions (user_id TEXT NOT NULL, entry_key TEXT NOT NULL, revision INTEGER NOT NULL, client_id TEXT NOT NULL, mutation_seq INTEGER NOT NULL, PRIMARY KEY(user_id, entry_key));" ++
+  "CREATE TABLE IF NOT EXISTS inbox_digests (cache_key TEXT PRIMARY KEY, source_revision TEXT NOT NULL, digest_json TEXT NOT NULL);"
 
 def askMidturnSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS main.operator_notes (" ++
@@ -393,6 +405,12 @@ def missionsAdditiveAlters : Array String := #[
   "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_type_seq ON mission_events(mission_id, event_type, seq) WHERE seq > 0;",
   "CREATE INDEX IF NOT EXISTS idx_missions_updated_at ON missions(updated_at DESC);",
   "CREATE INDEX IF NOT EXISTS idx_missions_project_updated ON missions(project, updated_at DESC);",
+  "CREATE INDEX IF NOT EXISTS idx_cloud_executions_mission_id ON cloud_executions(mission_id);",
+  "CREATE INDEX IF NOT EXISTS idx_cloud_executions_request_key ON cloud_executions(request_key);",
+  "CREATE INDEX IF NOT EXISTS idx_proxy_usage_timestamp ON proxy_usage(timestamp);",
+  "CREATE INDEX IF NOT EXISTS idx_proxy_usage_mission ON proxy_usage(mission_id);",
+  "CREATE INDEX IF NOT EXISTS idx_proxy_outcomes_timestamp ON proxy_outcomes(timestamp);",
+  "CREATE INDEX IF NOT EXISTS idx_mission_search_docs_mission ON mission_search_docs(mission_id);",
   "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);"
 ]
 
