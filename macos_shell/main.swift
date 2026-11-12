@@ -1126,6 +1126,9 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
 
     @discardableResult
     private func sendWebViewEditAction(_ action: Selector, from sender: Any?) -> Bool {
+        if let keyWin = NSApp.keyWindow, keyWin !== window {
+            return NSApp.sendAction(action, to: nil, from: sender)
+        }
         if let win = window, win.attachedSheet == nil, let wv = webView {
             if win.firstResponder === win || win.firstResponder === win.contentView || win.firstResponder === vibrancyView {
                 win.makeFirstResponder(wv)

@@ -160,12 +160,10 @@ export function LiveProjectsSection(p: {
   onNewProject: (anchor: HTMLButtonElement) => void;
   /** False while Settings hides the main sidebar so background sweeps pause without unmounting state. */
   active?: () => boolean;
-  /** True when Hybrid Native Chrome renders the sidebar natively: omits sidebar DOM rows while keeping the shared deletion confirmation pipeline mounted. */
+  /** True when Hybrid Native Chrome renders the sidebar natively: omits sidebar DOM rows while keeping per-project mission reconciliation and the shared deletion confirmation pipeline mounted. */
   headless?: boolean;
-  /** Project mission listings already hydrated by `App.tsx` when `headless` is true. */
-  extraMissions?: Record<string, Mission[]>;
 }) {
-  const isSidebarActive = () => !p.headless && (p.active ? p.active() : true);
+  const isSidebarActive = () => (p.active ? p.active() : true);
   const rowEffectiveStatus = (m: Mission) =>
     presentedStatus(m, missionActivity(m, [], { localRun: localRunActive(m.id) }));
   const initialCachedProjects = isConnected() ? peekCachedProjects() : null;
@@ -221,7 +219,6 @@ export function LiveProjectsSection(p: {
   const allKnownMissions = (): Mission[] => {
     const byId = new Map<string, Mission>();
     for (const m of p.activityMissions ?? []) byId.set(m.id, m);
-    for (const rows of Object.values(p.extraMissions ?? {})) for (const m of rows) byId.set(m.id, m);
     for (const m of archivedMissions()) byId.set(m.id, m);
     for (const m of resolvedParents<Mission>()) byId.set(m.id, m);
     for (const m of Object.values(missions).flat()) byId.set(m.id, m);
@@ -368,7 +365,11 @@ export function LiveProjectsSection(p: {
     for (const slug of Object.keys(missions)) {
       if (slug !== keep) {
         listMisses.get(slug)?.delete(id);
-        if (missions[slug]?.some(m => m.id === id)) setMissions(slug, rows => rows.filter(m => m.id !== id));
+        if (missions[slug]?.some(m => m.id === id)) {
+          const next = (missions[slug] ?? []).filter(m => m.id !== id);
+          setMissions(slug, next);
+          p.onProjectMissions?.(slug, next);
+        }
       }
     }
   });
@@ -926,9 +927,9 @@ export function LiveProjectsSection(p: {
     setDirErrors(reconcile({})); setCronErrors(reconcile({}));
     warmed.clear();
     warmupQueue.length = 0;
-    if (!isConnected() || p.headless) return;
+    if (!isConnected()) return;
     refresh();
-    for (const slug of Object.keys(expanded)) if (expanded[slug] && !slug.includes(":")) void loadCrons(slug);
+    if (!p.headless) for (const slug of Object.keys(expanded)) if (expanded[slug] && !slug.includes(":")) void loadCrons(slug);
   }, { defer: true }));
   const beginCron = async (slug: string, path = "") => {
     setCronFolder(path);
@@ -983,15 +984,20 @@ export function LiveProjectsSection(p: {
   };
   createEffect(on(projectsVersion, () => {
     refresh(true);
-    for (const slug of Object.keys(expanded)) {
-      if (expanded[slug] && !slug.includes(":")) {
-        void loadController(slug, true);
-        void loadCrons(slug, true);
+    for (const slug of Object.keys(missions)) {
+      if (p.headless) void loadMissions(slug, { transcripts: false, background: true });
+    }
+    if (!p.headless) {
+      for (const slug of Object.keys(expanded)) {
+        if (expanded[slug] && !slug.includes(":")) {
+          void loadController(slug, true);
+          void loadCrons(slug, true);
+        }
       }
     }
   }, { defer: true }));
   onMount(() => {
-    if (!p.headless) refresh();
+    refresh();
     const onProjectCreated = (event: Event) => {
       const detail = (event as CustomEvent<ProjectSummary>).detail;
       if (!detail?.slug) return;
@@ -1000,8 +1006,8 @@ export function LiveProjectsSection(p: {
         : [...current, detail]);
       setError(null);
       setExpanded(detail.slug, true);
-      void loadMissions(detail.slug);
-      void loadDir(detail.slug, "");
+      void loadMissions(detail.slug, p.headless ? { transcripts: false } : undefined);
+      if (!p.headless) void loadDir(detail.slug, "");
     };
     window.addEventListener("orb:project-created", onProjectCreated);
     const onPlacementChanged = (event: Event) => {
@@ -1022,12 +1028,16 @@ export function LiveProjectsSection(p: {
               placement_revision: item.placement_revision,
             }, "partial");
             if (!isArchived(updated) || (missions[targetSlug] ?? []).some(m => m.id === item.mission_id)) {
-              setMissions(targetSlug, rows => upsertMissionPreservingOrder(rows ?? [], updated));
+              const next = upsertMissionPreservingOrder(missions[targetSlug] ?? [], updated);
+              setMissions(targetSlug, next);
+              p.onProjectMissions?.(targetSlug, next);
             }
           } else if ((missions[targetSlug] ?? []).some(m => m.id === item.mission_id)) {
-            setMissions(targetSlug, rows => (rows ?? []).map(m => m.id === item.mission_id
+            const next = (missions[targetSlug] ?? []).map(m => m.id === item.mission_id
               ? mergeMission(m, { id: item.mission_id, project: item.project, folder: item.folder, placement_revision: item.placement_revision }, "partial")
-              : m));
+              : m);
+            setMissions(targetSlug, next);
+            p.onProjectMissions?.(targetSlug, next);
           }
         }
         const moveById = new Map(moves.map(item => [item.mission_id, item]));
@@ -1055,7 +1065,9 @@ export function LiveProjectsSection(p: {
       missionRevision++;
       const clean = withHierarchy(mission);
       batch(() => {
-        setMissions(slug, rows => [clean, ...(rows ?? []).filter(m => m.id !== clean.id)]);
+        const next = [clean, ...(missions[slug] ?? []).filter(m => m.id !== clean.id)];
+        setMissions(slug, next);
+        p.onProjectMissions?.(slug, next);
       });
     };
     window.addEventListener("orb:mission-forked", onMissionForked);
@@ -1068,7 +1080,7 @@ export function LiveProjectsSection(p: {
     const onArchiveFailed = (event: Event) => {
       const { id } = (event as CustomEvent<{ id: string }>).detail;
       archivedInSession.delete(id);
-      for (const project of projects()) if (expanded[project.slug]) void loadMissions(project.slug);
+      for (const project of projects()) if (p.headless || expanded[project.slug]) void loadMissions(project.slug, p.headless ? { transcripts: false, background: true } : undefined);
     };
     window.addEventListener("orb:mission-archived", onArchived);
     window.addEventListener("orb:mission-archive-failed", onArchiveFailed);
@@ -1116,10 +1128,14 @@ export function LiveProjectsSection(p: {
       projectSweepBusy = true;
       try {
         if (error()) refresh();
-        const slugs = projects().map(proj => proj.slug).filter(slug => expanded[slug]);
+        const slugs = projects().map(proj => proj.slug).filter(slug => p.headless ? Boolean(slug) : expanded[slug]);
         for (let i = 0; i < slugs.length; i += 2) {
           if (!isConnected()) break;
           await Promise.all(slugs.slice(i, i + 2).map(async (slug) => {
+            if (p.headless) {
+              await loadMissions(slug, { transcripts: false, background: true });
+              return;
+            }
             if (!expanded[slug]) return;
             const subdirs = Object.keys(expanded)
               .filter(key => expanded[key] && key.startsWith(`${slug}:`))
@@ -1166,8 +1182,11 @@ export function LiveProjectsSection(p: {
           // an agent, a rename-and-move) leaves the copy that the other project's
           // reconciled listing still holds, unless that copy is newer.
           const listed = new Map(visibleList.filter(m => !m.project || m.project === slug).map(m => [m.id, m]));
-          for (const other of Object.keys(missions)) if (other !== slug && missions[other]?.some(m => listed.has(m.id) && !newerThan(m, listed.get(m.id)!)))
-            setMissions(other, rows => rows.filter(m => !listed.has(m.id) || newerThan(m, listed.get(m.id)!)));
+          for (const other of Object.keys(missions)) if (other !== slug && missions[other]?.some(m => listed.has(m.id) && !newerThan(m, listed.get(m.id)!))) {
+            const nextOther = (missions[other] ?? []).filter(m => !listed.has(m.id) || newerThan(m, listed.get(m.id)!));
+            setMissions(other, nextOther);
+            p.onProjectMissions?.(other, nextOther);
+          }
         });
         p.onProjectMissions?.(slug, merged);
         if (opts?.transcripts === false) return;
@@ -1220,10 +1239,13 @@ export function LiveProjectsSection(p: {
               if (withArch !== row) changed = true;
               return withArch;
             });
-            if (changed) setMissions(slug, patched);
+            if (changed) {
+              setMissions(slug, patched);
+              p.onProjectMissions?.(slug, patched);
+            }
           }
           if (warmed.has(slug)) {
-            void loadMissions(slug);
+            void loadMissions(slug, p.headless ? { transcripts: false, background: true } : undefined);
           }
         }
       });
@@ -1245,6 +1267,10 @@ export function LiveProjectsSection(p: {
   };
 
   const warmupOne = async (slug: string) => {
+    if (p.headless) {
+      await loadMissions(slug, { transcripts: false, cached: true, background: true });
+      return;
+    }
     const isOpen = !!expanded[slug];
     await Promise.all([
       loadMissions(slug, { transcripts: false, cached: true, background: !isOpen }),
@@ -2568,15 +2594,15 @@ export function LiveProjectsSection(p: {
     for (let i = 1; i <= parts.length; i++) {
       const path = parts.slice(0, i).join("/");
       setExpanded(`${slug}:${path}`, true);
-      if (dirs[`${slug}:${path}`] === undefined) {
+      if (!p.headless && dirs[`${slug}:${path}`] === undefined) {
         void loadDir(slug, path);
       }
     }
     const missionListed = missions[slug] !== undefined && missions[slug].some(m => m.id === id);
     if (!missionListed) {
-      void loadMissions(slug);
+      void loadMissions(slug, p.headless ? { transcripts: false } : undefined);
     }
-    if (dirs[`${slug}:`] === undefined) {
+    if (!p.headless && dirs[`${slug}:`] === undefined) {
       void loadDir(slug, "");
     }
     lastLoadedLocationKey = folderKey;

@@ -1045,89 +1045,6 @@ export default function App() {
     });
   });
   if (nativeChromeSyncer) {
-    let hydratedConnectionVersion = -1;
-    const authoritativeSlugs = new Set<string>();
-    const inFlightSlugs = new Set<string>();
-    const retryCounts = new Map<string, number>();
-    const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-    const [hydrateRetryTick, setHydrateRetryTick] = createSignal(0);
-    const clearHydrateRetries = () => {
-      for (const timer of retryTimers.values()) clearTimeout(timer);
-      retryTimers.clear();
-      retryCounts.clear();
-    };
-    const scheduleHydrateRetry = (slug: string, connVer: number) => {
-      if (retryTimers.has(slug)) return;
-      const attempt = (retryCounts.get(slug) ?? 0) + 1;
-      retryCounts.set(slug, attempt);
-      const delayMs = Math.min(30_000, 1_500 * 2 ** Math.min(5, attempt - 1));
-      retryTimers.set(
-        slug,
-        setTimeout(() => {
-          retryTimers.delete(slug);
-          if (connectionVersion() === connVer) setHydrateRetryTick((n) => n + 1);
-        }, delayMs),
-      );
-    };
-    onCleanup(clearHydrateRetries);
-    createEffect(() => {
-      hydrateRetryTick();
-      const connVer = connectionVersion();
-      if (connVer !== hydratedConnectionVersion) {
-        hydratedConnectionVersion = connVer;
-        authoritativeSlugs.clear();
-        inFlightSlugs.clear();
-        clearHydrateRetries();
-      }
-      if (!isConnected()) {
-        authoritativeSlugs.clear();
-        inFlightSlugs.clear();
-        clearHydrateRetries();
-        return;
-      }
-      for (const p of liveProjects()) {
-        const slug = p.slug.trim();
-        if (!slug || authoritativeSlugs.has(slug) || inFlightSlugs.has(slug)) continue;
-        inFlightSlugs.add(slug);
-        void listProjectMissions(slug, { background: true })
-          .then((rows) => {
-            if (connectionVersion() !== connVer) return;
-            inFlightSlugs.delete(slug);
-            const partial = isPartialList(rows);
-            const clean = rows.filter((m) => !isMissionDeleting(m.id));
-            setProjectMissions((cur) => {
-              const existing = cur[slug] ?? [];
-              if (partial) {
-                const freshIds = new Set(clean.map((m) => m.id));
-                const union = [
-                  ...clean,
-                  ...existing.filter((m) => !freshIds.has(m.id) && !isMissionDeleting(m.id)),
-                ];
-                return { ...cur, [slug]: mergeById(existing, union) };
-              }
-              return { ...cur, [slug]: mergeById(existing, clean) };
-            });
-            if (partial) {
-              scheduleHydrateRetry(slug, connVer);
-            } else {
-              authoritativeSlugs.add(slug);
-              retryCounts.delete(slug);
-              const timer = retryTimers.get(slug);
-              if (timer) {
-                clearTimeout(timer);
-                retryTimers.delete(slug);
-              }
-            }
-          })
-          .catch((err) => {
-            if (connectionVersion() === connVer) {
-              inFlightSlugs.delete(slug);
-              scheduleHydrateRetry(slug, connVer);
-            }
-            swallow("app.nativeChromeProjectMissions", { slug })(err);
-          });
-      }
-    });
     createEffect(() => {
       const scope = historyScope();
       const sel = selected();
@@ -1637,8 +1554,7 @@ export default function App() {
   const renderLiveProjectsSection = (headless: boolean) => (
     <LiveProjectsSection
       headless={headless}
-      extraMissions={headless ? projectMissions() : undefined}
-      active={() => !headless && !onSettings()}
+      active={() => !onSettings()}
       deleteRequest={deleteMissionRequest()}
       onDeleteRequestHandled={() => setDeleteMissionRequest(null)}
       activityMissions={missions()}
