@@ -18,8 +18,8 @@
   turboLeanSrc ? fetchFromGitHub {
     owner = "Th0rgal";
     repo = "turbo-lean";
-    rev = "f240450af444a302a0e02d5a5f8af00351089386";
-    hash = "sha256-Ovtl0aJsBASBuEk2eZjEF/uVfsDgOW+B3p7XI6DPWs0=";
+    rev = "bca79f34ac249d0ea7dfb9b0fd9a9c04b54a2ece";
+    hash = "sha256-Bdf6ZpFtmWmJyhiw/ExiqNEwB7qj1rYqgGvmkghtsKU=";
   },
   leanToolchain ? null,
 }:

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Regenerate (or --check) shared/orb-spec/fixtures/transcript-gates.json from lean/Orb/Transcript.lean.
 
-Builds the Lean project with turbo-lean (falls back to lake), then runs
+Builds the Lean project with turbo-lean, then runs
 scripts/gen_transcript_fixtures.lean against the built Orb.Transcript olean."""
 import os
 import pathlib
-import shutil
 import subprocess
 import sys
 
@@ -103,10 +102,7 @@ def _render_python_reference() -> str:
 
 def _render_lean() -> str:
     lean_dir = ROOT / "lean"
-    if shutil.which("turbo-lean"):
-        subprocess.run(["turbo-lean", "build", "--project-dir", str(lean_dir)], check=True, stdout=subprocess.DEVNULL)
-    else:
-        subprocess.run(["lake", "build"], cwd=lean_dir, check=True)
+    subprocess.run(["turbo-lean", "build", "--project-dir", str(lean_dir)], check=True, stdout=subprocess.DEVNULL)
     lib = lean_dir / ".lake/build/lib/lean"
     prefix = subprocess.run(["lean", "--print-prefix"], capture_output=True, text=True, check=True).stdout.strip()
     env = dict(os.environ, LEAN_PATH=os.pathsep.join([str(lib), str(pathlib.Path(prefix) / "lib/lean")]))

@@ -50,7 +50,7 @@ elif [[ -n "${LEAN_CC:-}" && "${LEAN_CC}" != /* ]] && command -v "${LEAN_CC}" >/
   export LEAN_CC="$(command -v "${LEAN_CC}")"
 fi
 
-# Discover `lake` on common toolchain paths before optionally bootstrapping.
+# Discover `lean` on common toolchain paths before optionally bootstrapping.
 for candidate_dir in \
   "${LEAN_BIN_DIR:-}" \
   "$HOME/.local/lean-4.35.0/bin" \
@@ -59,7 +59,7 @@ for candidate_dir in \
   "/root/.local/lean-4.35.0/bin" \
   "/root/.elan/bin"
 do
-  if [[ -n "$candidate_dir" && -x "$candidate_dir/lake" ]]; then
+  if [[ -n "$candidate_dir" && -x "$candidate_dir/lean" ]]; then
     export PATH="$candidate_dir:$PATH"
     break
   fi
@@ -85,12 +85,12 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   done
 fi
 
-if ! command -v lake >/dev/null 2>&1; then
+if ! command -v lean >/dev/null 2>&1; then
   if [[ "$ENSURE_LEAN" == "1" ]]; then
     os_name="$(uname -s)"
     arch_name="$(uname -m)"
     lean_dest="${HOME:-/tmp}/.local/lean-4.35.0"
-    if [[ ! -x "$lean_dest/bin/lake" ]]; then
+    if [[ ! -x "$lean_dest/bin/lean" ]]; then
       if [[ "$os_name" == "Linux" && "$arch_name" == "x86_64" ]]; then
         lean_url="https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-linux.tar.zst"
         lean_sha256="7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d"
@@ -129,7 +129,7 @@ if ! command -v lake >/dev/null 2>&1; then
     fi
     export PATH="$lean_dest/bin:$PATH"
   else
-    echo "error: Lean 4 'lake' not found on PATH (pass --ensure-lean to bootstrap v4.35.0)" >&2
+    echo "error: Lean 4 'lean' not found on PATH (pass --ensure-lean to bootstrap v4.35.0)" >&2
     exit 1
   fi
 fi
@@ -162,15 +162,21 @@ else
   BINS_TO_STAGE=("${ALL_BINS[@]}")
 fi
 
+ORB_NET_LEAF_TARGETS=()
 ORB_BIN_TARGETS=()
 ORB_NODE_TARGETS=()
+ORB_CLIENT_TARGETS=()
 ORB_CORE_TARGETS=()
 ORB_LOCALD_TARGETS=()
 for bin in "${BINS_TO_STAGE[@]}"; do
-  if [[ "$bin" == "sandboxed-node" ]]; then
+  if [[ "$bin" == "orb-net-leaf-test" ]]; then
+    ORB_NET_LEAF_TARGETS+=("$bin")
+  elif [[ "$bin" == "sandboxed-node" ]]; then
     ORB_NODE_TARGETS+=("orb-node")
   elif [[ "$bin" == "orb-node-test" ]]; then
     ORB_NODE_TARGETS+=("orb-node-test")
+  elif [[ "$bin" == "orb-client-test" ]]; then
+    ORB_CLIENT_TARGETS+=("$bin")
   elif [[ "$bin" == "orb-core" || "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" ]]; then
     ORB_CORE_TARGETS+=("$bin")
   elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
@@ -233,22 +239,25 @@ run_lean_pkg_build() {
   ensure_lean_sys_pkg "$pkg_dir"
   (
     cd "$pkg_dir"
-    if [[ "${ORB_SKIP_TURBO_LEAN:-0}" != "1" ]] && command -v turbo-lean >/dev/null 2>&1; then
-      local -a tl_flags=(--no-telemetry --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}")
-      if [[ "${TURBO_LEAN_NO_DAEMON:-0}" == "1" ]]; then
-        tl_flags+=(--no-daemon)
-      fi
-      if [[ -n "${TURBO_LEAN_HOME:-}" ]]; then
-        tl_flags+=(--cache-dir "${TURBO_LEAN_HOME}")
-      fi
-      RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
-        turbo-lean "${tl_flags[@]}" build "$@" \
-        || SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
-    else
-      SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
+    if [[ "${ORB_SKIP_TURBO_LEAN:-0}" == "1" ]] || ! command -v turbo-lean >/dev/null 2>&1; then
+      echo "error: turbo-lean is required to build native Orb binaries" >&2
+      exit 1
     fi
+    local -a tl_flags=(--no-telemetry --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}")
+    if [[ "${TURBO_LEAN_NO_DAEMON:-0}" == "1" ]]; then
+      tl_flags+=(--no-daemon)
+    fi
+    if [[ -n "${TURBO_LEAN_HOME:-}" ]]; then
+      tl_flags+=(--cache-dir "${TURBO_LEAN_HOME}")
+    fi
+    RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
+      turbo-lean "${tl_flags[@]}" build "$@"
   )
 }
+
+if [[ ${#ORB_NET_LEAF_TARGETS[@]} -gt 0 ]]; then
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbNetLeaf" "${ORB_NET_LEAF_TARGETS[@]}"
+fi
 
 if [[ ${#ORB_BIN_TARGETS[@]} -gt 0 ]]; then
   run_lean_pkg_build "$ROOT_DIR/lean/OrbBin" "${ORB_BIN_TARGETS[@]}"
@@ -256,6 +265,10 @@ fi
 
 if [[ ${#ORB_NODE_TARGETS[@]} -gt 0 ]]; then
   run_lean_pkg_build "$ROOT_DIR/lean/OrbNode" "${ORB_NODE_TARGETS[@]}"
+fi
+
+if [[ ${#ORB_CLIENT_TARGETS[@]} -gt 0 ]]; then
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbClient" "${ORB_CLIENT_TARGETS[@]}"
 fi
 
 if [[ ${#ORB_CORE_TARGETS[@]} -gt 0 ]]; then
@@ -271,15 +284,21 @@ if [[ ${#OUT_DIRS[@]} -eq 0 ]]; then
   OUT_DIRS=("$target_base/debug" "$target_base/release")
 fi
 
+LAKE_NET_LEAF_BIN_DIR="$ROOT_DIR/lean/OrbNetLeaf/.lake/build/bin"
 LAKE_BIN_DIR="$ROOT_DIR/lean/OrbBin/.lake/build/bin"
 LAKE_NODE_BIN_DIR="$ROOT_DIR/lean/OrbNode/.lake/build/bin"
+LAKE_CLIENT_BIN_DIR="$ROOT_DIR/lean/OrbClient/.lake/build/bin"
 LAKE_CORE_BIN_DIR="$ROOT_DIR/lean/OrbCore/.lake/build/bin"
 LAKE_LOCALD_BIN_DIR="$ROOT_DIR/lean/OrbLocald/.lake/build/bin"
 for out_dir in "${OUT_DIRS[@]}"; do
   mkdir -p "$out_dir"
   for bin in "${BINS_TO_STAGE[@]}"; do
-    if [[ "$bin" == "sandboxed-node" || "$bin" == "orb-node-test" ]]; then
+    if [[ "$bin" == "orb-net-leaf-test" ]]; then
+      src="$LAKE_NET_LEAF_BIN_DIR/$bin"
+    elif [[ "$bin" == "sandboxed-node" || "$bin" == "orb-node-test" ]]; then
       src="$LAKE_NODE_BIN_DIR/$bin"
+    elif [[ "$bin" == "orb-client-test" ]]; then
+      src="$LAKE_CLIENT_BIN_DIR/$bin"
     elif [[ "$bin" == "orb-core" || "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" ]]; then
       src="$LAKE_CORE_BIN_DIR/$bin"
     elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
@@ -320,4 +339,19 @@ if [[ "$WITH_TESTS" == "1" ]]; then
   "$ROOT_DIR/lean/OrbCore/.lake/build/bin/orb-spec-runner" --fixtures "$ROOT_DIR/shared/orb-spec/fixtures"
   run_lean_pkg_build "$ROOT_DIR/lean/OrbLocald" orb-locald-test
   "$ROOT_DIR/lean/OrbLocald/.lake/build/bin/orb-locald-test"
+  for test_bin in \
+    "$ROOT_DIR/lean/OrbNetLeaf/.lake/build/bin/orb-net-leaf-test" \
+    "$ROOT_DIR/lean/OrbBin/.lake/build/bin/orb-bin-test" \
+    "$ROOT_DIR/lean/OrbNode/.lake/build/bin/orb-node-test" \
+    "$ROOT_DIR/lean/OrbClient/.lake/build/bin/orb-client-test" \
+    "$ROOT_DIR/lean/OrbCore/.lake/build/bin/orb-core-test" \
+    "$ROOT_DIR/lean/OrbCore/.lake/build/bin/orb-spec-runner" \
+    "$ROOT_DIR/lean/OrbLocald/.lake/build/bin/orb-locald-test"
+  do
+    elab_syms="$(nm -u "$test_bin" 2>/dev/null | grep -c lean_elab || true)"
+    if [[ "$elab_syms" -ne 0 ]]; then
+      echo "error: test binary $test_bin links lean_elab ($elab_syms symbols)" >&2
+      exit 1
+    fi
+  done
 fi
